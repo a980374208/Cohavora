@@ -1,0 +1,12 @@
+{
+  "name": "livekit-signaling-cpp",
+  "version": "0.1.0",
+  "dependencies": [
+    "asio",
+    "openssl",
+    "protobuf",
+    "spdlog",
+    "zlib",
+    "nlohmann-json"
+  ]
+}
