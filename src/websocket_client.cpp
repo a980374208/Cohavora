@@ -1,4 +1,5 @@
 #include "websocket_client.h"
+#include "safe_spawn.h"
 #include <random>
 #include <iostream>
 #include <sstream>
@@ -119,6 +120,10 @@ WebSocketClient::WebSocketClient(asio::io_context& io_ctx, asio::ssl::context& s
 }
 
 WebSocketClient::~WebSocketClient() {
+    message_cb_ = nullptr;
+    text_message_cb_ = nullptr;
+    close_cb_ = nullptr;
+    error_cb_ = nullptr;
     shutdown_stream();
 }
 
@@ -205,7 +210,7 @@ void WebSocketClient::StartRead() {
     std::cout << "WebSocketClient::StartRead: posting ReadLoop spawn" << std::endl;
     asio::post(io_ctx_, [self = this->shared_from_this()]() {
         std::cout << "WebSocketClient::StartRead: spawning ReadLoop via post" << std::endl;
-        asio::co_spawn(self->io_ctx_, [self]() -> asio::awaitable<void> {
+        livekit::safe_co_spawn(self->io_ctx_, [self]() -> asio::awaitable<void> {
             std::cout << "WebSocketClient::ReadLoop: coroutine started" << std::endl;
             try {
                 co_await self->ReadLoop();
@@ -215,7 +220,7 @@ void WebSocketClient::StartRead() {
             } catch (...) {
                 std::cout << "WebSocketClient::ReadLoop: coroutine exited with unknown exception" << std::endl;
             }
-        }, asio::detached);
+        });
     });
 }
 
@@ -382,9 +387,9 @@ asio::awaitable<void> WebSocketClient::SendRawFrame(uint8_t opcode, const std::v
     
     if (should_spawn) {
         std::cout << "WebSocketClient::SendRawFrame: spawning WriteLoop" << std::endl;
-        asio::co_spawn(io_ctx_, [self = shared_from_this()]() -> asio::awaitable<void> {
+        livekit::safe_co_spawn(io_ctx_, [self = shared_from_this()]() -> asio::awaitable<void> {
             co_await self->WriteLoop();
-        }, asio::detached);
+        });
     }
     co_return;
 }

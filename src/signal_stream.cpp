@@ -1,14 +1,19 @@
 #include "signal_stream.h"
 #include "livekit_rtc.pb.h"
+#include <iostream>
 
 namespace livekit {
 
 SignalStream::SignalStream(std::shared_ptr<WebSocketClient> ws_client)
     : ws_client_(ws_client) {
-    SetupCallbacks();
 }
 
 SignalStream::~SignalStream() {
+    if (ws_client_) {
+        ws_client_->SetOnMessage(nullptr);
+        ws_client_->SetOnClose(nullptr);
+        ws_client_->SetOnError(nullptr);
+    }
 }
 
 asio::awaitable<SignalStream::ConnectResult> SignalStream::Connect(
@@ -31,7 +36,9 @@ asio::awaitable<SignalStream::ConnectResult> SignalStream::Connect(
         co_return ConnectResult{nullptr, ec};
     }
     
-    co_return ConnectResult{std::make_shared<SignalStream>(ws_client), {}};
+    auto stream = std::make_shared<SignalStream>(ws_client);
+    stream->SetupCallbacks();
+    co_return ConnectResult{stream, {}};
 }
 
 asio::awaitable<void> SignalStream::Send(const livekit::proto::SignalRequest& req) {
@@ -57,14 +64,21 @@ void SignalStream::StartRead() {
 }
 
 void SignalStream::SetupCallbacks() {
-    ws_client_->SetOnMessage([this](const std::vector<uint8_t>& payload) {
+    if (!ws_client_) return;
+
+    auto weak_self = weak_from_this();
+
+    ws_client_->SetOnMessage([weak_self](const std::vector<uint8_t>& payload) {
+        auto self = weak_self.lock();
+        if (!self) return;
+
         std::cout << "SignalStream::SetupCallbacks: Got payload of size=" << payload.size() << std::endl;
         auto resp = std::make_shared<livekit::proto::SignalResponse>();
         if (resp->ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
             std::cout << "SignalStream::SetupCallbacks: Parsed SignalResponse successfully, has_join=" << resp->has_join() << std::endl;
-            if (message_cb_) {
+            if (self->message_cb_) {
                 std::cout << "SignalStream::SetupCallbacks: Dispatching message_cb_" << std::endl;
-                message_cb_(resp);
+                self->message_cb_(resp);
             } else {
                 std::cout << "SignalStream::SetupCallbacks: message_cb_ is null!" << std::endl;
             }
@@ -73,15 +87,21 @@ void SignalStream::SetupCallbacks() {
         }
     });
 
-    ws_client_->SetOnClose([this](uint16_t, const std::string& reason) {
-        if (close_cb_) {
-            close_cb_(reason);
+    ws_client_->SetOnClose([weak_self](uint16_t, const std::string& reason) {
+        auto self = weak_self.lock();
+        if (!self) return;
+
+        if (self->close_cb_) {
+            self->close_cb_(reason);
         }
     });
 
-    ws_client_->SetOnError([this](const std::error_code& ec) {
-        if (close_cb_) {
-            close_cb_("WebSocket Error: " + ec.message());
+    ws_client_->SetOnError([weak_self](const std::error_code& ec) {
+        auto self = weak_self.lock();
+        if (!self) return;
+
+        if (self->close_cb_) {
+            self->close_cb_("WebSocket Error: " + ec.message());
         }
     });
 }

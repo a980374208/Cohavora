@@ -70,6 +70,7 @@ add_library(livekit_signaling STATIC
     src/participant.cpp
     src/room.cpp
     src/webrtc_manager.cpp
+    src/crash_handler.cpp
 )
 
 set(WEBRTC_ROOT "E:/vsSource/WebRTC/client-sdk-cpp/client-sdk-rust/target/debug/build/scratch-f4ffd3e87af6f636/out/livekit_webrtc/livekit/win-x64-release-webrtc-51ef663/win-x64-release")
@@ -118,6 +119,18 @@ target_link_options(livekit_signaling_tests_run_v4 PRIVATE
     "/FORCE:MULTIPLE"
 )
 
+# Panic Guard Test
+add_executable(test_panic_guard
+    tests/test_panic_guard.cpp
+)
+target_link_libraries(test_panic_guard PRIVATE
+    livekit_signaling
+)
+target_link_options(test_panic_guard PRIVATE
+    "/FORCE:MULTIPLE"
+)
 
 enable_testing()
-add_test(NAME signaling_tests COMMAND livekit_signaling_tests_run)
+add_test(NAME signaling_tests COMMAND livekit_signaling_tests_run_v4)
+add_test(NAME panic_guard_test COMMAND test_panic_guard)
+

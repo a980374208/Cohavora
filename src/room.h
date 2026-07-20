@@ -9,6 +9,8 @@
 #include <asio.hpp>
 #include "signal_client.h"
 #include "participant.h"
+#include "crash_handler.h"
+#include "safe_spawn.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include "api/peer_connection_interface.h"
