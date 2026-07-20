@@ -70,6 +70,7 @@ add_library(livekit_signaling STATIC
     src/participant.cpp
     src/room.cpp
     src/webrtc_manager.cpp
+    src/crash_handler.cpp
 )
 
 set(WEBRTC_ROOT "E:/vsSource/WebRTC/client-sdk-cpp/client-sdk-rust/target/debug/build/scratch-f4ffd3e87af6f636/out/livekit_webrtc/livekit/win-x64-release-webrtc-51ef663/win-x64-release")
@@ -105,3 +106,4 @@ target_link_libraries(livekit_signaling PUBLIC
     amstrmid
     wmcodecdspuuid
 )
+

@@ -63,7 +63,9 @@ private:
 } // namespace
 
 Room::Room(asio::any_io_executor executor)
-    : executor_(executor) {}
+    : executor_(executor) {
+    CrashHandler::InstallSignalHandlers();
+}
 
 Room::~Room() {
     Disconnect();
@@ -297,9 +299,9 @@ void Room::HandleSignalEvent(const SignalEvent& event) {
             for (const auto& listener : listeners_snapshot) {
                 listener->OnReconnecting();
             }
-            asio::co_spawn(executor_, [self = shared_from_this()]() -> asio::awaitable<void> {
+            livekit::safe_co_spawn(executor_, [self = shared_from_this()]() -> asio::awaitable<void> {
                 co_await self->AttemptReconnect();
-            }, asio::detached);
+            });
         } else {
             bool notify_disconnect = false;
             {

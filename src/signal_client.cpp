@@ -1,5 +1,6 @@
 #include "signal_client.h"
 #include "region_provider.h"
+#include "safe_spawn.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include "logger/options.pb.h"
@@ -337,7 +338,7 @@ void SignalClient::Send(const proto::SignalRequest& req) {
 
     if (stream && stream->IsConnected()) {
         auto self = shared_from_this();
-        asio::co_spawn(executor_, [self, this, stream, req, pass]() -> asio::awaitable<void> {
+        livekit::safe_co_spawn(executor_, [self, this, stream, req, pass]() -> asio::awaitable<void> {
             try {
                 co_await stream->Send(req);
             } catch (...) {
@@ -346,7 +347,7 @@ void SignalClient::Send(const proto::SignalRequest& req) {
                     queued_requests_.push_back(req);
                 }
             }
-        }, asio::detached);
+        });
     } else if (!pass) {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         queued_requests_.push_back(req);
@@ -365,11 +366,11 @@ void SignalClient::FlushQueue() {
 
     if (stream && stream->IsConnected()) {
         for (const auto& req : queued_requests_) {
-            asio::co_spawn(executor_, [stream, req]() -> asio::awaitable<void> {
+            livekit::safe_co_spawn(executor_, [stream, req]() -> asio::awaitable<void> {
                 try {
                     co_await stream->Send(req);
                 } catch(...) {}
-            }, asio::detached);
+            });
         }
         queued_requests_.clear();
     }
@@ -409,9 +410,9 @@ void SignalClient::StartHeartbeat() {
     if (timeout_sec == 0) timeout_sec = 29;
 
     auto self = shared_from_this();
-    asio::co_spawn(executor_, [self, this, interval_sec, timeout_sec]() -> asio::awaitable<void> {
+    livekit::safe_co_spawn(executor_, [self, this, interval_sec, timeout_sec]() -> asio::awaitable<void> {
         co_await HeartbeatLoop(interval_sec, timeout_sec);
-    }, asio::detached);
+    });
 }
 
 void SignalClient::StopHeartbeat() {
