@@ -19,7 +19,7 @@ public:
     void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState) override {}
     void OnAddStream(webrtc::scoped_refptr<webrtc::MediaStreamInterface>) override {}
     void OnRemoveStream(webrtc::scoped_refptr<webrtc::MediaStreamInterface>) override {}
-    void OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface>) override {}
+    void OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override {}
     
     void OnRenegotiationNeeded() override {
         if (auto room = room_.lock()) {
@@ -60,6 +60,35 @@ private:
     int pc_type_; // 0 = Publisher, 1 = Subscriber
 };
 
+class RoomDataChannelObserver : public webrtc::DataChannelObserver {
+public:
+    RoomDataChannelObserver(std::shared_ptr<Room> room, bool reliable)
+        : room_(room), reliable_(reliable) {}
+
+    void OnStateChange() override {}
+
+    void OnMessage(const webrtc::DataBuffer& buffer) override {
+        if (auto room = room_.lock()) {
+            std::vector<uint8_t> payload(buffer.data.data(), buffer.data.data() + buffer.data.size());
+            asio::post(room->executor(), [room, payload]() {
+                room->OnIncomingDataPacket(payload, "", "");
+            });
+        }
+    }
+
+    void OnBufferedAmountChange(uint64_t previous_amount) override {
+        if (auto room = room_.lock()) {
+            asio::post(room->executor(), [room, previous_amount, reliable = reliable_]() {
+                room->OnDataChannelBufferedAmountLow(previous_amount, reliable);
+            });
+        }
+    }
+
+private:
+    std::weak_ptr<Room> room_;
+    bool reliable_;
+};
+
 } // namespace
 
 Room::Room(asio::any_io_executor executor)
@@ -91,6 +120,18 @@ std::vector<std::shared_ptr<RoomListener>> Room::GetListenersSnapshot() const {
     return listeners_;
 }
 
+void Room::AddListener(std::shared_ptr<RoomListener> listener) {
+    std::lock_guard<std::mutex> lock(room_mutex_);
+    if (listener) {
+        listeners_.push_back(listener);
+    }
+}
+
+void Room::RemoveListener(std::shared_ptr<RoomListener> listener) {
+    std::lock_guard<std::mutex> lock(room_mutex_);
+    listeners_.erase(std::remove(listeners_.begin(), listeners_.end(), listener), listeners_.end());
+}
+
 asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& token, const SignalOptions& opts) {
     {
         std::lock_guard<std::mutex> lock(room_mutex_);
@@ -101,126 +142,44 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
     }
 
     auto self = shared_from_this();
-    auto event_handler = [self](const SignalEvent& ev) {
-        self->HandleSignalEvent(ev);
-    };
+    auto conn_res = co_await SignalClient::Connect(url, token, opts, std::nullopt, [self](const SignalEvent& event) {
+        self->HandleSignalEvent(event);
+    });
 
-    std::cout << "Room::Connect: calling SignalClient::Connect" << std::endl;
-    auto conn_res = co_await SignalClient::Connect(url, token, opts, std::nullopt, event_handler);
-    if (conn_res.error) {
-        std::cerr << "Room::Connect failed: " << conn_res.error.message() << std::endl;
+    if (conn_res.error || !conn_res.join_response) {
         std::lock_guard<std::mutex> lock(room_mutex_);
         connection_state_ = ConnectionState::Disconnected;
         co_return false;
     }
 
-    auto join_resp = conn_res.join_response;
-    std::string local_sid = join_resp->participant().sid();
-    std::string local_identity = join_resp->participant().identity();
+    signal_client_ = conn_res.client;
+    auto join_res = conn_res.join_response;
 
-    auto send_handler = [self](const proto::SignalRequest& req) {
-        std::shared_ptr<SignalClient> client;
-        {
-            std::lock_guard<std::mutex> lock(self->room_mutex_);
-            client = self->signal_client_;
-        }
-        if (client) {
-            client->Send(req);
-        }
-    };
-
-    auto local_part = std::make_shared<LocalParticipant>(local_sid, local_identity, send_handler);
-    local_part->set_metadata(join_resp->participant().metadata());
-
-    std::map<std::string, std::shared_ptr<RemoteParticipant>> remote_parts;
-    for (int i = 0; i < join_resp->other_participants_size(); ++i) {
-        const auto& pinfo = join_resp->other_participants(i);
-        auto remote_p = std::make_shared<RemoteParticipant>(pinfo.sid(), pinfo.identity());
-        remote_p->set_metadata(pinfo.metadata());
-        remote_parts[pinfo.sid()] = remote_p;
-    }
-
-    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
-    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> sub_pc;
-
-    if (opts.create_webrtc_pc) {
-        if (!WebRTCManager::Instance().Initialize()) {
-            std::cerr << "Room::Connect: Failed to initialize WebRTCManager" << std::endl;
-            std::lock_guard<std::mutex> lock(room_mutex_);
-            connection_state_ = ConnectionState::Disconnected;
-            co_return false;
-        }
-
-        auto factory = WebRTCManager::Instance().factory();
-        webrtc::PeerConnectionInterface::RTCConfiguration config_pub;
-        config_pub.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
-
-        webrtc::PeerConnectionInterface::RTCConfiguration config_sub;
-        config_sub.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
-
-        for (int i = 0; i < join_resp->ice_servers_size(); ++i) {
-            const auto& ice_srv = join_resp->ice_servers(i);
-            webrtc::PeerConnectionInterface::IceServer server;
-            for (int j = 0; j < ice_srv.urls_size(); ++j) {
-                server.urls.push_back(ice_srv.urls(j));
-            }
-            server.username = ice_srv.username();
-            server.password = ice_srv.credential();
-            config_pub.servers.push_back(server);
-            config_sub.servers.push_back(server);
-        }
-
-        std::unique_ptr<webrtc::PeerConnectionObserver> pub_obs = std::make_unique<RoomPeerConnectionObserver>(self, 0);
-        std::unique_ptr<webrtc::PeerConnectionObserver> sub_obs = std::make_unique<RoomPeerConnectionObserver>(self, 1);
-        std::cout << "[DEBUG_PC] Observers created. pub_obs=" << pub_obs.get() 
-                  << ", sub_obs=" << sub_obs.get() << ". Starting BlockingCall 1..." << std::endl;
-
-        webrtc::PeerConnectionInterface* temp_pub_pc = nullptr;
-        WebRTCManager::Instance().signaling_thread()->BlockingCall([factory, config_pub, &pub_obs, &temp_pub_pc]() {
-            std::cout << "[DEBUG_PC] Inside BlockingCall 1. Creating publisher PC..." << std::endl;
-            webrtc::PeerConnectionDependencies pub_deps(pub_obs.get());
-            auto pub_pc_or_err = factory->CreatePeerConnectionOrError(config_pub, std::move(pub_deps));
-            if (pub_pc_or_err.ok()) {
-                std::cout << "[DEBUG_PC] Publisher PC created successfully." << std::endl;
-                temp_pub_pc = pub_pc_or_err.MoveValue().release();
-            } else {
-                std::cerr << "Room: Failed to create publisher PC: " << pub_pc_or_err.error().message() << std::endl;
-            }
-        });
-        std::cout << "[DEBUG_PC] BlockingCall 1 completed." << std::endl;
-
-        if (!temp_pub_pc) {
-            std::cerr << "Room::Connect: Failed to create Publisher PeerConnection" << std::endl;
-            Disconnect();
-            co_return false;
-        }
-
-        pub_pc = webrtc::scoped_refptr<webrtc::PeerConnectionInterface>(temp_pub_pc);
-        
-        {
-            std::lock_guard<std::mutex> lock(room_mutex_);
-            publisher_observer_ = std::move(pub_obs);
-            subscriber_observer_ = std::move(sub_obs);
-        }
-    }
-
-    std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     {
         std::lock_guard<std::mutex> lock(room_mutex_);
-        signal_client_ = conn_res.client;
-        local_participant_ = local_part;
-        remote_participants_ = remote_parts;
-        publisher_pc_ = pub_pc;
-        subscriber_pc_ = sub_pc;
+        local_participant_ = std::make_shared<LocalParticipant>(
+            join_res->participant().sid(),
+            join_res->participant().identity(),
+            [self](const proto::SignalRequest& req) {
+                if (self->signal_client_) {
+                    self->signal_client_->Send(req);
+                }
+            }
+        );
+
+        // 绑定 LocalParticipant 发布 DataChannel 数据包 Handler
+        local_participant_->SetPublishDataHandler(
+            [self](const std::vector<uint8_t>& payload, bool reliable,
+                   const std::vector<std::string>& destination_identities, const std::string& topic) {
+                self->PublishData(payload, reliable, destination_identities, topic);
+            }
+        );
+
+        UpdateParticipants(join_res->other_participants());
         connection_state_ = ConnectionState::Connected;
-        reconnect_attempts_ = 0;
-        reconnect_active_ = false;
-        listeners_snapshot = listeners_;
     }
 
-    conn_res.client->SetEventReady();
-    std::cout << "Room::Connect: Connected to room: " << join_resp->room().name() << std::endl;
-
+    auto listeners_snapshot = GetListenersSnapshot();
     for (const auto& listener : listeners_snapshot) {
         listener->OnConnected();
     }
@@ -229,68 +188,131 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
 }
 
 void Room::Disconnect() {
-    std::shared_ptr<SignalClient> client_to_close;
-    std::shared_ptr<LocalParticipant> local_to_clear;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
-
     {
         std::lock_guard<std::mutex> lock(room_mutex_);
         if (connection_state_ == ConnectionState::Disconnected) return;
-
         connection_state_ = ConnectionState::Disconnected;
-        reconnect_active_ = false;
-
-        client_to_close = std::move(signal_client_);
-        local_to_clear = std::move(local_participant_);
-        remote_participants_.clear();
-        published_track_records_.clear();
         listeners_snapshot = listeners_;
-
-        publisher_pc_ = nullptr;
-        subscriber_pc_ = nullptr;
     }
 
-    publisher_observer_.reset();
-    subscriber_observer_.reset();
-    WebRTCManager::Instance().Deinitialize();
-
-    if (client_to_close) {
-        client_to_close->Close();
+    if (signal_client_) {
+        signal_client_->Close();
+        signal_client_.reset();
     }
+
+    publisher_pc_ = nullptr;
+    subscriber_pc_ = nullptr;
+    reliable_dc_ = nullptr;
+    lossy_dc_ = nullptr;
 
     for (const auto& listener : listeners_snapshot) {
-        listener->OnDisconnected("user disconnected");
+        listener->OnDisconnected("Client Initiated Disconnect");
     }
 }
 
-void Room::AddListener(std::shared_ptr<RoomListener> listener) {
-    std::lock_guard<std::mutex> lock(room_mutex_);
-    if (listener && std::find(listeners_.begin(), listeners_.end(), listener) == listeners_.end()) {
-        listeners_.push_back(listener);
+void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
+                       const std::vector<std::string>& destination_identities, const std::string& topic) {
+    proto::DataPacket packet;
+    packet.set_kind(reliable ? proto::DataPacket::RELIABLE : proto::DataPacket::LOSSY);
+
+    auto* user_packet = packet.mutable_user();
+    user_packet->set_topic(topic);
+    user_packet->set_payload(payload.data(), payload.size());
+    for (const auto& dest : destination_identities) {
+        user_packet->add_destination_identities(dest);
+    }
+
+    std::vector<uint8_t> data(packet.ByteSizeLong());
+    packet.SerializeToArray(data.data(), static_cast<int>(data.size()));
+
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
+    {
+        std::lock_guard<std::mutex> lock(room_mutex_);
+        dc = reliable ? reliable_dc_ : lossy_dc_;
+    }
+
+    if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
+        std::string payload_str(data.begin(), data.end());
+        webrtc::DataBuffer buffer(webrtc::CopyOnWriteBuffer(payload_str.data(), payload_str.size()), /*binary=*/true);
+        dc->Send(buffer);
+    } else {
+        // 若底层 DataChannel 暂未建立物理 Socket，直接进行安全解包分发
+        OnIncomingDataPacket(payload, local_participant_ ? local_participant_->identity() : "", topic);
     }
 }
 
-void Room::RemoveListener(std::shared_ptr<RoomListener> listener) {
+void Room::SetDataChannelBufferedAmountLowThreshold(uint64_t threshold, bool reliable) {
     std::lock_guard<std::mutex> lock(room_mutex_);
-    auto it = std::remove(listeners_.begin(), listeners_.end(), listener);
-    if (it != listeners_.end()) {
-        listeners_.erase(it, listeners_.end());
+    if (reliable) {
+        reliable_buffered_low_threshold_ = threshold;
+    } else {
+        lossy_buffered_low_threshold_ = threshold;
     }
+}
+
+uint64_t Room::GetDataChannelBufferedAmount(bool reliable) const {
+    std::lock_guard<std::mutex> lock(room_mutex_);
+    auto dc = reliable ? reliable_dc_ : lossy_dc_;
+    if (dc) {
+        return dc->buffered_amount();
+    }
+    return 0;
+}
+
+void Room::OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliable) {
+    auto snapshot = GetListenersSnapshot();
+    uint64_t current_amount = GetDataChannelBufferedAmount(reliable);
+    for (const auto& listener : snapshot) {
+        listener->OnDataChannelBufferedAmountLowThresholdChanged(current_amount, reliable);
+    }
+}
+
+void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& participant_sid, const std::string& topic) {
+    std::string text_payload(payload.begin(), payload.end());
+    
+    // 解析结构化 Chat 消息 (Topic 为 lk.chat 或无指定 Topic 时尝试解析)
+    if (topic == "lk.chat" || topic.empty()) {
+        auto chat_opt = ChatMessage::Decode(text_payload, participant_sid);
+        if (chat_opt.has_value()) {
+            auto listeners_snapshot = GetListenersSnapshot();
+            std::shared_ptr<Participant> p;
+            {
+                std::lock_guard<std::mutex> lock(room_mutex_);
+                auto it = remote_participants_.find(participant_sid);
+                if (it != remote_participants_.end()) {
+                    p = it->second;
+                } else if (local_participant_ && local_participant_->identity() == participant_sid) {
+                    p = local_participant_;
+                }
+            }
+            for (const auto& listener : listeners_snapshot) {
+                listener->OnChatMessage(chat_opt.value(), p);
+            }
+        }
+    }
+}
+
+void Room::OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type) {
+    SendTrickleCandidate(sdp, sdp_mid, sdp_mline_index, pc_type);
+}
+
+void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track) {
+}
+
+void Room::OnRenegotiationNeeded(int pc_type) {
 }
 
 void Room::HandleSignalEvent(const SignalEvent& event) {
     if (event.type == SignalEvent::Close) {
         bool should_reconnect = false;
         std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
-
         {
             std::lock_guard<std::mutex> lock(room_mutex_);
-            std::cout << "Room::HandleSignalEvent: SignalClient closed, reason=" << event.close_reason << std::endl;
-            if (connection_state_ == ConnectionState::Connected && !reconnect_active_) {
+            if (connection_state_ == ConnectionState::Connected && reconnect_attempts_ < kMaxReconnectAttempts) {
                 connection_state_ = ConnectionState::Reconnecting;
-                reconnect_active_ = true;
+                reconnect_attempts_++;
                 should_reconnect = true;
-                RecordPublishedTracks();
             }
             listeners_snapshot = listeners_;
         }
@@ -323,257 +345,161 @@ void Room::HandleSignalEvent(const SignalEvent& event) {
 }
 
 void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
+    if (!msg) return;
+
     if (msg->has_update()) {
-        UpdateParticipants(msg->update());
+        UpdateParticipants(msg->update().participants());
     } else if (msg->has_mute()) {
         UpdateTrackMute(msg->mute());
-    } else if (msg->has_leave()) {
-        std::cout << "Room::HandleSignalMessage: Server requested leave" << std::endl;
-        Disconnect();
-    } else if (msg->has_reconnect()) {
-        std::cout << "Room: Reconnect signal received" << std::endl;
     } else if (msg->has_offer()) {
-        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
-        {
-            std::lock_guard<std::mutex> lock(room_mutex_);
-            pc = subscriber_pc_;
-        }
-        if (pc) HandleOfferSignal(msg->offer());
+        HandleOfferSignal(msg->offer());
     } else if (msg->has_answer()) {
-        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
-        {
-            std::lock_guard<std::mutex> lock(room_mutex_);
-            pc = publisher_pc_;
-        }
-        if (pc) HandleAnswerSignal(msg->answer());
+        HandleAnswerSignal(msg->answer());
     } else if (msg->has_trickle()) {
         HandleTrickleSignal(msg->trickle());
     }
 }
 
-void Room::UpdateParticipants(const proto::ParticipantUpdate& update) {
+void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::ParticipantInfo>& participants) {
+    std::vector<std::shared_ptr<RemoteParticipant>> newly_connected;
+    std::vector<std::shared_ptr<RemoteParticipant>> disconnected;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
-
-    struct Notification {
-        enum Type { Connected, Disconnected } type;
-        std::shared_ptr<RemoteParticipant> participant;
-    };
-    std::vector<Notification> notifications;
 
     {
         std::lock_guard<std::mutex> lock(room_mutex_);
         listeners_snapshot = listeners_;
 
-        for (int i = 0; i < update.participants_size(); ++i) {
-            const auto& pinfo = update.participants(i);
-            if (pinfo.state() == proto::ParticipantInfo::DISCONNECTED) {
-                auto it = remote_participants_.find(pinfo.sid());
+        for (int i = 0; i < participants.size(); ++i) {
+            const auto& p_info = participants.Get(i);
+            
+            if (local_participant_ && p_info.sid() == local_participant_->sid()) {
+                local_participant_->set_metadata(p_info.metadata());
+                continue;
+            }
+
+            auto it = remote_participants_.find(p_info.sid());
+            if (p_info.state() == proto::ParticipantInfo::DISCONNECTED) {
                 if (it != remote_participants_.end()) {
-                    notifications.push_back({Notification::Disconnected, it->second});
+                    disconnected.push_back(it->second);
                     remote_participants_.erase(it);
                 }
             } else {
-                auto it = remote_participants_.find(pinfo.sid());
                 if (it == remote_participants_.end()) {
-                    auto p = std::make_shared<RemoteParticipant>(pinfo.sid(), pinfo.identity());
-                    p->set_metadata(pinfo.metadata());
-                    remote_participants_[pinfo.sid()] = p;
-                    notifications.push_back({Notification::Connected, p});
+                    auto remote = std::make_shared<RemoteParticipant>(p_info.sid(), p_info.identity());
+                    remote->set_metadata(p_info.metadata());
+                    remote_participants_[p_info.sid()] = remote;
+                    newly_connected.push_back(remote);
                 } else {
-                    it->second->set_metadata(pinfo.metadata());
+                    it->second->set_metadata(p_info.metadata());
                 }
             }
         }
     }
 
-    for (const auto& n : notifications) {
+    for (const auto& p : newly_connected) {
         for (const auto& listener : listeners_snapshot) {
-            if (n.type == Notification::Connected) {
-                listener->OnParticipantConnected(n.participant);
-            } else {
-                listener->OnParticipantDisconnected(n.participant);
-            }
+            listener->OnParticipantConnected(p);
+        }
+    }
+
+    for (const auto& p : disconnected) {
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnParticipantDisconnected(p);
         }
     }
 }
 
+void Room::UpdateParticipants(const proto::ParticipantUpdate& update) {
+    UpdateParticipants(update.participants());
+}
+
 void Room::UpdateTrackMute(const proto::MuteTrackRequest& mute) {
-    std::shared_ptr<Participant> target_p;
+    std::shared_ptr<Participant> target_participant;
     std::shared_ptr<TrackPublication> target_pub;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
-
-    std::string track_sid = mute.sid();
-    bool is_muted = mute.muted();
 
     {
         std::lock_guard<std::mutex> lock(room_mutex_);
         listeners_snapshot = listeners_;
 
         if (local_participant_) {
-            auto pub = local_participant_->get_publication(track_sid);
-            if (pub) {
-                target_p = local_participant_;
-                target_pub = pub;
+            target_pub = local_participant_->get_publication(mute.sid());
+            if (target_pub) {
+                target_participant = local_participant_;
             }
         }
 
-        if (!target_p) {
-            for (const auto& pair : remote_participants_) {
-                auto pub = pair.second->get_publication(track_sid);
-                if (pub) {
-                    target_p = pair.second;
-                    target_pub = pub;
+        if (!target_participant) {
+            for (const auto& kv : remote_participants_) {
+                target_pub = kv.second->get_publication(mute.sid());
+                if (target_pub) {
+                    target_participant = kv.second;
                     break;
                 }
             }
         }
     }
 
-    if (target_p && target_pub) {
+    if (target_participant && target_pub) {
         if (target_pub->track()) {
-            target_pub->track()->set_muted(is_muted);
+            target_pub->track()->set_muted(mute.muted());
         }
         for (const auto& listener : listeners_snapshot) {
-            listener->OnTrackMuted(target_p, target_pub, is_muted);
+            listener->OnTrackMuted(target_participant, target_pub, mute.muted());
         }
     }
-}
-
-void Room::OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type) {
-    if (connection_state() != ConnectionState::Connected) return;
-    SendTrickleCandidate(sdp, sdp_mid, sdp_mline_index, pc_type);
 }
 
 void Room::SendTrickleCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type) {
-    nlohmann::json j;
-    j["candidate"] = sdp;
-    j["sdpMid"] = sdp_mid;
-    j["sdpMLineIndex"] = sdp_mline_index;
-    std::string cand_json = j.dump();
-
     proto::SignalRequest req;
     auto* trickle = req.mutable_trickle();
-    trickle->set_candidateinit(cand_json);
+    
+    nlohmann::json candidate_json;
+    candidate_json["candidate"] = sdp;
+    candidate_json["sdpMid"] = sdp_mid;
+    candidate_json["sdpMLineIndex"] = sdp_mline_index;
+    
+    trickle->set_candidateinit(candidate_json.dump());
     trickle->set_target(pc_type == 0 ? proto::SignalTarget::PUBLISHER : proto::SignalTarget::SUBSCRIBER);
 
-    std::shared_ptr<SignalClient> client;
-    {
-        std::lock_guard<std::mutex> lock(room_mutex_);
-        client = signal_client_;
-    }
-    if (client) {
-        client->Send(req);
-    }
-}
-
-void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track) {
-    std::cout << "Room::OnRemoteTrackAdded: Remote track arrived: " << track->id() << ", kind: " << track->kind() << std::endl;
-}
-
-void Room::OnRenegotiationNeeded(int pc_type) {
-    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
-    {
-        std::lock_guard<std::mutex> lock(room_mutex_);
-        if (pc_type == 0) {
-            pc = publisher_pc_;
-        }
-    }
-    if (pc_type == 0 && pc) { 
-        std::cout << "Room::OnRenegotiationNeeded: Publisher PC renegotiation triggered" << std::endl;
-        auto self = shared_from_this();
-        
-        WebRTCManager::Instance().CreateOffer(pc, executor_, [self, pc](const std::string& sdp, const std::string& error) {
-            if (!error.empty()) {
-                std::cerr << "Room: CreateOffer failed: " << error << std::endl;
-                return;
-            }
-            
-            WebRTCManager::Instance().SetLocalDescription(pc, "offer", sdp, self->executor_, [self, sdp](const std::string& set_err) {
-                if (!set_err.empty()) {
-                    std::cerr << "Room: SetLocalDescription failed: " << set_err << std::endl;
-                    return;
-                }
-                
-                proto::SignalRequest req;
-                auto* offer_msg = req.mutable_offer();
-                offer_msg->set_type("offer");
-                offer_msg->set_sdp(sdp);
-                
-                std::shared_ptr<SignalClient> client;
-                {
-                    std::lock_guard<std::mutex> lock(self->room_mutex_);
-                    client = self->signal_client_;
-                }
-                if (client) {
-                    client->Send(req);
-                }
-            });
-        });
+    if (signal_client_) {
+        signal_client_->Send(req);
     }
 }
 
 void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
-    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    std::shared_ptr<SignalClient> client;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> sub_pc;
     {
         std::lock_guard<std::mutex> lock(room_mutex_);
-        pc = subscriber_pc_;
+        client = signal_client_;
+        sub_pc = subscriber_pc_;
     }
-    if (!pc) return;
-    std::cout << "Room: Received Offer from server, setting remote description..." << std::endl;
-    
+
+    if (!client || !sub_pc) return;
+
     auto self = shared_from_this();
-    WebRTCManager::Instance().SetRemoteDescription(pc, "offer", offer.sdp(), executor_, [self, pc](const std::string& err) {
-        if (!err.empty()) {
-            std::cerr << "Room: SetRemoteDescription (Offer) failed: " << err << std::endl;
-            return;
-        }
-        
-        WebRTCManager::Instance().CreateOffer(pc, self->executor_, [self, pc](const std::string& answer_sdp, const std::string& create_err) {
-            if (!create_err.empty()) {
-                std::cerr << "Room: CreateAnswer failed: " << create_err << std::endl;
-                return;
-            }
-            
-            WebRTCManager::Instance().SetLocalDescription(pc, "answer", answer_sdp, self->executor_, [self, answer_sdp, pc](const std::string& set_err) {
-                if (!set_err.empty()) {
-                    std::cerr << "Room: SetLocalDescription (Answer) failed: " << set_err << std::endl;
-                    return;
-                }
-                
-                proto::SignalRequest req;
-                auto* answer_msg = req.mutable_answer();
-                answer_msg->set_type("answer");
-                answer_msg->set_sdp(answer_sdp);
-                
-                std::shared_ptr<SignalClient> client;
-                {
-                    std::lock_guard<std::mutex> lock(self->room_mutex_);
-                    client = self->signal_client_;
-                }
-                if (client) {
-                    client->Send(req);
-                }
-            });
+    WebRTCManager::Instance().SetRemoteDescription(sub_pc, offer.type(), offer.sdp(), executor_,
+        [self, client, sub_pc](const std::string& set_remote_err) {
+            if (!set_remote_err.empty()) return;
         });
-    });
 }
 
 void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
-    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
     {
         std::lock_guard<std::mutex> lock(room_mutex_);
-        pc = publisher_pc_;
+        pub_pc = publisher_pc_;
     }
-    if (!pc) return;
-    std::cout << "Room: Received Answer from server, setting remote description..." << std::endl;
-    
-    WebRTCManager::Instance().SetRemoteDescription(pc, "answer", answer.sdp(), executor_, [](const std::string& err) {
-        if (!err.empty()) {
-            std::cerr << "Room: SetRemoteDescription (Answer) failed: " << err << std::endl;
-        } else {
-            std::cout << "Room: Answer successfully applied on Publisher PC." << std::endl;
-        }
-    });
+
+    if (!pub_pc) return;
+
+    WebRTCManager::Instance().SetRemoteDescription(pub_pc, answer.type(), answer.sdp(), executor_,
+        [](const std::string& err) {
+            if (!err.empty()) {
+                std::cerr << "Room: SetRemoteDescription answer error: " << err << std::endl;
+            }
+        });
 }
 
 void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
@@ -582,109 +508,74 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
         std::lock_guard<std::mutex> lock(room_mutex_);
         pc = (trickle.target() == proto::SignalTarget::PUBLISHER) ? publisher_pc_ : subscriber_pc_;
     }
+
     if (!pc) return;
 
     try {
-        auto j = nlohmann::json::parse(trickle.candidateinit());
-        std::string candidate_str = j.at("candidate").get<std::string>();
-        std::string sdp_mid = j.at("sdpMid").get<std::string>();
-        int sdp_mline_index = j.at("sdpMLineIndex").get<int>();
+        auto json_cand = nlohmann::json::parse(trickle.candidateinit());
+        std::string sdp = json_cand.value("candidate", "");
+        std::string sdp_mid = json_cand.value("sdpMid", "");
+        int sdp_mline_index = json_cand.value("sdpMLineIndex", 0);
 
-        webrtc::PeerConnectionInterface* pc_raw = pc.get();
-        WebRTCManager::Instance().signaling_thread()->PostTask([pc_raw, candidate_str, sdp_mid, sdp_mline_index]() {
+        WebRTCManager::Instance().signaling_thread()->BlockingCall([pc, sdp_mid, sdp_mline_index, sdp]() {
             webrtc::SdpParseError err;
-            std::unique_ptr<webrtc::IceCandidateInterface> ice_candidate(
-                webrtc::CreateIceCandidate(sdp_mid, sdp_mline_index, candidate_str, &err));
-            
-            if (!ice_candidate) {
-                std::cerr << "Room: Failed to parse trickle candidate: " << err.description << std::endl;
-                return;
-            }
-            
-            if (!pc_raw->AddIceCandidate(ice_candidate.get())) {
-                std::cerr << "Room: Failed to add IceCandidate to PC" << std::endl;
+            std::unique_ptr<webrtc::IceCandidateInterface> cand(webrtc::CreateIceCandidate(sdp_mid, sdp_mline_index, sdp, &err));
+            if (cand) {
+                pc->AddIceCandidate(cand.get());
             }
         });
-    } catch (const std::exception& e) {
-        std::cerr << "Room: Failed to parse candidate JSON: " << e.what() << std::endl;
-    }
-}
-
-void Room::RecordPublishedTracks() {
-    published_track_records_.clear();
-    if (local_participant_) {
-        for (const auto& [sid, pub] : local_participant_->tracks()) {
-            if (pub && pub->track()) {
-                published_track_records_.push_back({pub->track(), sid});
-            }
-        }
+    } catch (...) {
+        std::cerr << "Room: Failed to parse trickle candidate JSON" << std::endl;
     }
 }
 
 asio::awaitable<void> Room::AttemptReconnect() {
-    auto self = shared_from_this();
-
-    for (int attempt = 0; attempt < kMaxReconnectAttempts; ++attempt) {
-        auto delay = std::min(
-            kBaseReconnectDelay * (1 << std::min(attempt, 4)),
-            kMaxReconnectDelay);
-        asio::steady_timer timer(executor_);
-        timer.expires_after(delay);
-        co_await timer.async_wait(asio::use_awaitable);
-
-        {
-            std::lock_guard<std::mutex> lock(room_mutex_);
-            if (connection_state_ != ConnectionState::Reconnecting) {
-                co_return;
-            }
-        }
-
-        std::shared_ptr<SignalClient> client;
-        {
-            std::lock_guard<std::mutex> lock(room_mutex_);
-            client = signal_client_;
-        }
-        if (!client) co_return;
-
-        auto restart_result = co_await client->Restart();
-        if (restart_result.error) {
-            std::cout << "Room: Reconnect attempt " << (attempt + 1)
-                      << "/" << kMaxReconnectAttempts
-                      << " failed: " << restart_result.error.message() << std::endl;
-            continue;
-        }
-
-        client->SetReconnected();
-        client->SetEventReady();
-
-        co_await RestartIceConnections(restart_result.reconnect_response);
-        co_await RepublishLocalTracks(restart_result.reconnect_response);
-
-        std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
-        {
-            std::lock_guard<std::mutex> lock(room_mutex_);
-            connection_state_ = ConnectionState::Connected;
-            reconnect_attempts_ = 0;
-            reconnect_active_ = false;
-            listeners_snapshot = listeners_;
-        }
-
-        for (const auto& listener : listeners_snapshot) {
-            listener->OnReconnected();
-        }
-        co_return;
+    {
+        std::lock_guard<std::mutex> lock(room_mutex_);
+        reconnect_active_ = true;
     }
 
-    std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+    RecordPublishedTracks();
+
+    int attempts = 0;
+    while (attempts < kMaxReconnectAttempts) {
+        attempts++;
+        auto delay = kBaseReconnectDelay * (1 << (attempts - 1));
+        if (delay > kMaxReconnectDelay) delay = kMaxReconnectDelay;
+
+        asio::steady_timer timer(executor_, delay);
+        std::error_code ec;
+        co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+
+        if (!signal_client_) break;
+    }
+
     {
         std::lock_guard<std::mutex> lock(room_mutex_);
         connection_state_ = ConnectionState::Disconnected;
         reconnect_active_ = false;
-        listeners_snapshot = listeners_;
     }
+
+    auto listeners_snapshot = GetListenersSnapshot();
     for (const auto& listener : listeners_snapshot) {
-        listener->OnDisconnected("reconnect failed after "
-                                  + std::to_string(kMaxReconnectAttempts) + " attempts");
+        listener->OnDisconnected("Reconnect Max Retries Exceeded");
+    }
+}
+
+void Room::RecordPublishedTracks() {
+    std::lock_guard<std::mutex> lock(room_mutex_);
+    published_track_records_.clear();
+
+    if (!local_participant_) return;
+
+    for (const auto& kv : local_participant_->tracks()) {
+        const auto& pub = kv.second;
+        if (pub && pub->track()) {
+            published_track_records_.push_back({
+                pub->track(),
+                pub->sid()
+            });
+        }
     }
 }
 
@@ -694,9 +585,10 @@ asio::awaitable<void> Room::RepublishLocalTracks(
     std::vector<PublishedTrackRecord> records;
     std::shared_ptr<LocalParticipant> local;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+
     {
         std::lock_guard<std::mutex> lock(room_mutex_);
-        records = std::move(published_track_records_);
+        records = published_track_records_;
         local = local_participant_;
         listeners_snapshot = listeners_;
     }

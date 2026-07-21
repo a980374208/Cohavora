@@ -1,8 +1,26 @@
 #include "participant.h"
 #include "livekit_rtc.pb.h"
 #include <iostream>
+#include <chrono>
+#include <sstream>
+#include <random>
 
 namespace livekit {
+
+static std::string GenerateUuid() {
+    static std::random_device rd;
+    static std::mt19937_64 gen(rd());
+    static std::uniform_int_distribution<uint64_t> dis;
+
+    std::stringstream ss;
+    ss << std::hex << dis(gen) << dis(gen);
+    return ss.str().substr(0, 16);
+}
+
+static int64_t CurrentEpochMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
 
 void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
     if (!track) return;
@@ -40,6 +58,45 @@ void LocalParticipant::SetMuted(const std::string& track_sid, bool muted) {
     if (send_handler_) {
         send_handler_(req);
     }
+}
+
+void LocalParticipant::PublishData(const std::vector<uint8_t>& payload, bool reliable,
+                                    const std::vector<std::string>& destination_identities, const std::string& topic) {
+    if (publish_data_handler_) {
+        publish_data_handler_(payload, reliable, destination_identities, topic);
+    } else {
+        std::cout << "LocalParticipant::PublishData: warning, publish_data_handler_ is not set" << std::endl;
+    }
+}
+
+ChatMessage LocalParticipant::SendChatMessage(const std::string& text, const std::vector<std::string>& destination_identities) {
+    ChatMessage msg;
+    msg.id = "chat_" + GenerateUuid();
+    msg.timestamp = CurrentEpochMs();
+    msg.message = text;
+    msg.sender_identity = identity();
+    msg.destination_identities = destination_identities;
+
+    std::string encoded = msg.Encode();
+    std::vector<uint8_t> payload(encoded.begin(), encoded.end());
+
+    PublishData(payload, /*reliable=*/true, destination_identities, /*topic=*/"lk.chat");
+    return msg;
+}
+
+ChatMessage LocalParticipant::EditChatMessage(const std::string& edit_text, const std::string& original_message_id) {
+    ChatMessage msg;
+    msg.id = original_message_id;
+    msg.timestamp = CurrentEpochMs(); // 可以保留原始时间
+    msg.edit_timestamp = CurrentEpochMs();
+    msg.message = edit_text;
+    msg.sender_identity = identity();
+
+    std::string encoded = msg.Encode();
+    std::vector<uint8_t> payload(encoded.begin(), encoded.end());
+
+    PublishData(payload, /*reliable=*/true, {}, /*topic=*/"lk.chat");
+    return msg;
 }
 
 } // namespace livekit

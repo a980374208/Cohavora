@@ -130,7 +130,20 @@ target_link_options(test_panic_guard PRIVATE
     "/FORCE:MULTIPLE"
 )
 
+# Advanced Communication Test
+add_executable(test_advanced_communication
+    tests/test_advanced_communication.cpp
+)
+target_link_libraries(test_advanced_communication PRIVATE
+    livekit_signaling
+)
+target_link_options(test_advanced_communication PRIVATE
+    "/FORCE:MULTIPLE"
+)
+
 enable_testing()
 add_test(NAME signaling_tests COMMAND livekit_signaling_tests_run_v4)
 add_test(NAME panic_guard_test COMMAND test_panic_guard)
+add_test(NAME advanced_communication_test COMMAND test_advanced_communication)
+
 
