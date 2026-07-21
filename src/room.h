@@ -11,9 +11,11 @@
 #include "participant.h"
 #include "crash_handler.h"
 #include "safe_spawn.h"
+#include "chat_message.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include "api/peer_connection_interface.h"
+#include "api/data_channel_interface.h"
 
 namespace livekit {
 
@@ -35,6 +37,10 @@ public:
     virtual void OnReconnecting() {}
     virtual void OnReconnected() {}
     virtual void OnLocalTrackRepublished(const std::string& previous_sid, std::shared_ptr<TrackPublication> publication) {}
+    
+    // === 新增：高级通信回调 ===
+    virtual void OnChatMessage(const ChatMessage& message, std::shared_ptr<Participant> participant) {}
+    virtual void OnDataChannelBufferedAmountLowThresholdChanged(uint64_t amount, bool reliable) {}
 };
 
 class Room : public std::enable_shared_from_this<Room> {
@@ -58,14 +64,23 @@ public:
 
     asio::any_io_executor executor() const { return executor_; }
 
+    // === 高级通信与 DataChannel 背压流控 ===
+    void PublishData(const std::vector<uint8_t>& payload, bool reliable = true,
+                     const std::vector<std::string>& destination_identities = {}, const std::string& topic = "");
+    void SetDataChannelBufferedAmountLowThreshold(uint64_t threshold, bool reliable = true);
+    uint64_t GetDataChannelBufferedAmount(bool reliable = true) const;
+
     // 内部 WebRTC 观察者回调接口
     void OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type);
     void OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track);
     void OnRenegotiationNeeded(int pc_type);
+    void OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliable);
+    void OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& participant_sid, const std::string& topic);
 
 private:
     void HandleSignalEvent(const SignalEvent& event);
     void HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg);
+    void UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::ParticipantInfo>& participants);
     void UpdateParticipants(const proto::ParticipantUpdate& update);
     void UpdateTrackMute(const proto::MuteTrackRequest& mute);
 
@@ -89,24 +104,30 @@ private:
     std::unique_ptr<webrtc::PeerConnectionObserver> publisher_observer_;
     std::unique_ptr<webrtc::PeerConnectionObserver> subscriber_observer_;
 
-    // === 新增：线程安全锁 ===
+    // DataChannel 句柄与背压控制水线
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> reliable_dc_;
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> lossy_dc_;
+    uint64_t reliable_buffered_low_threshold_ = 16384;
+    uint64_t lossy_buffered_low_threshold_ = 16384;
+
+    // 线程安全锁
     mutable std::mutex room_mutex_;
 
-    // === 新增：重连控制 ===
+    // 重连控制
     int reconnect_attempts_ = 0;
     static constexpr int kMaxReconnectAttempts = 5;
     static constexpr std::chrono::milliseconds kBaseReconnectDelay{100};
     static constexpr std::chrono::milliseconds kMaxReconnectDelay{1000};
     bool reconnect_active_ = false;
 
-    // === 新增：Track 恢复记录 ===
+    // Track 恢复记录
     struct PublishedTrackRecord {
         std::shared_ptr<Track> track;
         std::string previous_sid;
     };
     std::vector<PublishedTrackRecord> published_track_records_;
 
-    // === 新增私有方法 ===
+    // 内部私有方法
     asio::awaitable<void> AttemptReconnect();
     asio::awaitable<void> RepublishLocalTracks(
         std::shared_ptr<proto::ReconnectResponse> reconnect_response);
