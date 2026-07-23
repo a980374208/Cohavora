@@ -3,10 +3,14 @@
 #include <string>
 #include <memory>
 #include <map>
+#include <unordered_map>
 #include <vector>
 #include <functional>
+#include <mutex>
+#include <asio.hpp>
 #include "track.h"
 #include "chat_message.h"
+#include "rpc_types.h"
 
 // Forward declare generated protobuf messages
 namespace livekit {
@@ -55,12 +59,17 @@ class LocalParticipant : public Participant {
 public:
     using SendSignalHandler = std::function<void(const proto::SignalRequest&)>;
     using PublishDataHandler = std::function<void(const std::vector<uint8_t>& payload, bool reliable, const std::vector<std::string>& destination_identities, const std::string& topic)>;
+    using SendRpcHandler = std::function<asio::awaitable<std::string>(const RpcPacket& packet)>;
 
     LocalParticipant(const std::string& sid, const std::string& identity, SendSignalHandler send_handler)
         : Participant(sid, identity), send_handler_(send_handler) {}
 
     void SetPublishDataHandler(PublishDataHandler handler) {
         publish_data_handler_ = std::move(handler);
+    }
+
+    void SetSendRpcHandler(SendRpcHandler handler) {
+        send_rpc_handler_ = std::move(handler);
     }
 
     // 模拟发布本地 Track 逻辑
@@ -79,9 +88,23 @@ public:
     // 编辑已有 Chat 消息 (对齐 client-sdk-cpp / Rust SDK)
     ChatMessage EditChatMessage(const std::string& edit_text, const std::string& original_message_id);
 
+    // === 新增：LiveKit RPC 远程过程调用 ===
+    void registerRpcMethod(const std::string& method_name, RpcHandler handler);
+    void unregisterRpcMethod(const std::string& method_name);
+    RpcHandler getRpcHandler(const std::string& method_name);
+
+    asio::awaitable<std::string> performRpc(const std::string& destination_identity,
+                                            const std::string& method,
+                                            const std::string& payload,
+                                            double response_timeout_sec = 15.0);
+
 private:
     SendSignalHandler send_handler_;
     PublishDataHandler publish_data_handler_;
+    SendRpcHandler send_rpc_handler_;
+
+    mutable std::mutex rpc_mutex_;
+    std::unordered_map<std::string, RpcHandler> rpc_handlers_;
 };
 
 class RemoteParticipant : public Participant {

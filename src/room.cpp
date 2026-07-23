@@ -175,6 +175,13 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
             }
         );
 
+        // 绑定 LocalParticipant 发送 RPC 请求 Handler
+        local_participant_->SetSendRpcHandler(
+            [self](const RpcPacket& packet) -> asio::awaitable<std::string> {
+                co_return co_await self->SendRpcRequest(packet);
+            }
+        );
+
         UpdateParticipants(join_res->other_participants());
         connection_state_ = ConnectionState::Connected;
     }
@@ -242,6 +249,161 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
     }
 }
 
+asio::awaitable<std::string> Room::SendRpcRequest(const RpcPacket& packet) {
+    auto self = shared_from_this();
+    auto pending = std::make_shared<PendingRpcCall>();
+    pending->timer = std::make_shared<asio::steady_timer>(
+        executor_,
+        std::chrono::milliseconds(static_cast<int64_t>(packet.timeout_sec * 1000.0))
+    );
+
+    {
+        std::lock_guard<std::mutex> lock(pending_rpc_mutex_);
+        pending_rpc_calls_[packet.request_id] = pending;
+    }
+
+    std::string encoded = packet.Encode();
+    std::vector<uint8_t> data(encoded.begin(), encoded.end());
+
+    RpcPacket response_packet = co_await asio::async_initiate<decltype(asio::use_awaitable), void(RpcPacket)>(
+        [self, pending, packet, data](auto handler) mutable {
+            auto handler_ptr = std::make_shared<decltype(handler)>(std::move(handler));
+            
+            pending->completion_cb = [self, pending, request_id = packet.request_id, handler_ptr](const RpcPacket& resp) {
+                bool should_call = false;
+                {
+                    std::lock_guard<std::mutex> lock(self->pending_rpc_mutex_);
+                    if (!pending->finished) {
+                        pending->finished = true;
+                        should_call = true;
+                    }
+                }
+                if (should_call) {
+                    std::error_code ec;
+                    pending->timer->cancel(ec);
+                    (*handler_ptr)(resp);
+                }
+            };
+
+            pending->timer->async_wait([self, pending, request_id = packet.request_id, handler_ptr](const std::error_code& ec) {
+                bool should_call = false;
+                {
+                    std::lock_guard<std::mutex> lock(self->pending_rpc_mutex_);
+                    if (!pending->finished) {
+                        pending->finished = true;
+                        should_call = true;
+                    }
+                }
+                if (should_call && !ec) {
+                    RpcPacket timeout_resp;
+                    timeout_resp.has_error = true;
+                    timeout_resp.error_code = static_cast<int>(RpcErrorCode::TIMEOUT);
+                    timeout_resp.error_message = "RPC call timed out";
+                    (*handler_ptr)(timeout_resp);
+                }
+            });
+
+            // 在 completion_cb 与定时器就绪后，再执行网络发包
+            self->PublishData(data, /*reliable=*/true, {packet.destination_identity}, /*topic=*/"lk.rpc");
+        },
+        asio::use_awaitable
+    );
+
+    {
+        std::lock_guard<std::mutex> lock(pending_rpc_mutex_);
+        pending_rpc_calls_.erase(packet.request_id);
+    }
+
+    if (response_packet.has_error) {
+        throw RpcError(static_cast<RpcErrorCode>(response_packet.error_code), response_packet.error_message);
+    }
+
+    co_return response_packet.payload;
+}
+
+void Room::OnIncomingRpcPacket(const RpcPacket& packet) {
+    if (packet.type == RpcPacketType::Response) {
+        std::shared_ptr<PendingRpcCall> pending;
+        {
+            std::lock_guard<std::mutex> lock(pending_rpc_mutex_);
+            auto it = pending_rpc_calls_.find(packet.request_id);
+            if (it != pending_rpc_calls_.end()) {
+                pending = it->second;
+                pending_rpc_calls_.erase(it);
+            }
+        }
+        if (pending) {
+            std::error_code ec;
+            pending->timer->cancel(ec);
+            if (pending->completion_cb) {
+                pending->completion_cb(packet);
+            }
+        }
+    } else if (packet.type == RpcPacketType::Request) {
+        std::shared_ptr<LocalParticipant> local;
+        {
+            std::lock_guard<std::mutex> lock(room_mutex_);
+            local = local_participant_;
+        }
+        if (!local) return;
+
+        auto handler = local->getRpcHandler(packet.method);
+        auto self = shared_from_this();
+
+        if (!handler) {
+            RpcPacket err_resp;
+            err_resp.type = RpcPacketType::Response;
+            err_resp.request_id = packet.request_id;
+            err_resp.method = packet.method;
+            err_resp.caller_identity = local->identity();
+            err_resp.destination_identity = packet.caller_identity;
+            err_resp.has_error = true;
+            err_resp.error_code = static_cast<int>(RpcErrorCode::UNSUPPORTED_METHOD);
+            err_resp.error_message = "Method '" + packet.method + "' is not supported by " + local->identity();
+
+            std::string encoded = err_resp.Encode();
+            std::vector<uint8_t> data(encoded.begin(), encoded.end());
+            PublishData(data, /*reliable=*/true, {packet.caller_identity}, "lk.rpc");
+            return;
+        }
+
+        RpcInvocationData inv_data;
+        inv_data.request_id = packet.request_id;
+        inv_data.caller_identity = packet.caller_identity;
+        inv_data.payload = packet.payload;
+        inv_data.response_timeout_sec = packet.timeout_sec;
+
+        livekit::safe_co_spawn(executor_, [self, local, handler, inv_data, packet]() -> asio::awaitable<void> {
+            RpcPacket resp;
+            resp.type = RpcPacketType::Response;
+            resp.request_id = packet.request_id;
+            resp.method = packet.method;
+            resp.caller_identity = local->identity();
+            resp.destination_identity = packet.caller_identity;
+
+            try {
+                resp.payload = co_await handler(inv_data);
+            } catch (const RpcError& e) {
+                resp.has_error = true;
+                resp.error_code = static_cast<int>(e.code());
+                resp.error_message = e.message();
+            } catch (const std::exception& e) {
+                resp.has_error = true;
+                resp.error_code = static_cast<int>(RpcErrorCode::APPLICATION_ERROR);
+                resp.error_message = e.what();
+            } catch (...) {
+                resp.has_error = true;
+                resp.error_code = static_cast<int>(RpcErrorCode::APPLICATION_ERROR);
+                resp.error_message = "Unknown exception in RPC handler";
+            }
+
+            std::string encoded = resp.Encode();
+            std::vector<uint8_t> data(encoded.begin(), encoded.end());
+            self->PublishData(data, /*reliable=*/true, {packet.caller_identity}, "lk.rpc");
+        });
+    }
+}
+
 void Room::SetDataChannelBufferedAmountLowThreshold(uint64_t threshold, bool reliable) {
     std::lock_guard<std::mutex> lock(room_mutex_);
     if (reliable) {
@@ -271,7 +433,16 @@ void Room::OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliabl
 void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& participant_sid, const std::string& topic) {
     std::string text_payload(payload.begin(), payload.end());
     
-    // 解析结构化 Chat 消息 (Topic 为 lk.chat 或无指定 Topic 时尝试解析)
+    // 1. 优先校验解包 LiveKit RPC 报文 (Topic 为 lk.rpc)
+    if (topic == "lk.rpc") {
+        auto rpc_pkt_opt = RpcPacket::Decode(text_payload);
+        if (rpc_pkt_opt.has_value()) {
+            OnIncomingRpcPacket(rpc_pkt_opt.value());
+            return;
+        }
+    }
+
+    // 2. 解析结构化 Chat 消息 (Topic 为 lk.chat 或无指定 Topic 时尝试解析)
     if (topic == "lk.chat" || topic.empty()) {
         auto chat_opt = ChatMessage::Decode(text_payload, participant_sid);
         if (chat_opt.has_value()) {

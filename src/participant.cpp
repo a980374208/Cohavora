@@ -99,4 +99,43 @@ ChatMessage LocalParticipant::EditChatMessage(const std::string& edit_text, cons
     return msg;
 }
 
+void LocalParticipant::registerRpcMethod(const std::string& method_name, RpcHandler handler) {
+    std::lock_guard<std::mutex> lock(rpc_mutex_);
+    rpc_handlers_[method_name] = std::move(handler);
+}
+
+void LocalParticipant::unregisterRpcMethod(const std::string& method_name) {
+    std::lock_guard<std::mutex> lock(rpc_mutex_);
+    rpc_handlers_.erase(method_name);
+}
+
+RpcHandler LocalParticipant::getRpcHandler(const std::string& method_name) {
+    std::lock_guard<std::mutex> lock(rpc_mutex_);
+    auto it = rpc_handlers_.find(method_name);
+    if (it != rpc_handlers_.end()) {
+        return it->second;
+    }
+    return nullptr;
+}
+
+asio::awaitable<std::string> LocalParticipant::performRpc(const std::string& destination_identity,
+                                                        const std::string& method,
+                                                        const std::string& payload,
+                                                        double response_timeout_sec) {
+    if (!send_rpc_handler_) {
+        throw RpcError(RpcErrorCode::NETWORK_ERROR, "RPC send handler is not configured");
+    }
+
+    RpcPacket packet;
+    packet.type = RpcPacketType::Request;
+    packet.request_id = "rpc_" + GenerateUuid();
+    packet.method = method;
+    packet.payload = payload;
+    packet.caller_identity = identity();
+    packet.destination_identity = destination_identity;
+    packet.timeout_sec = response_timeout_sec;
+
+    co_return co_await send_rpc_handler_(packet);
+}
+
 } // namespace livekit

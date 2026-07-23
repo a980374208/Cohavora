@@ -141,9 +141,21 @@ target_link_options(test_advanced_communication PRIVATE
     "/FORCE:MULTIPLE"
 )
 
+# RPC System Test
+add_executable(test_rpc_system
+    tests/test_rpc_system.cpp
+)
+target_link_libraries(test_rpc_system PRIVATE
+    livekit_signaling
+)
+target_link_options(test_rpc_system PRIVATE
+    "/FORCE:MULTIPLE"
+)
+
 enable_testing()
 add_test(NAME signaling_tests COMMAND livekit_signaling_tests_run_v4)
 add_test(NAME panic_guard_test COMMAND test_panic_guard)
 add_test(NAME advanced_communication_test COMMAND test_advanced_communication)
+add_test(NAME rpc_system_test COMMAND test_rpc_system)
 
 

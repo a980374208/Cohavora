@@ -3,6 +3,7 @@
 #include <string>
 #include <memory>
 #include <map>
+#include <unordered_map>
 #include <vector>
 #include <mutex>
 #include <chrono>
@@ -12,6 +13,7 @@
 #include "crash_handler.h"
 #include "safe_spawn.h"
 #include "chat_message.h"
+#include "rpc_types.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include "api/peer_connection_interface.h"
@@ -38,7 +40,7 @@ public:
     virtual void OnReconnected() {}
     virtual void OnLocalTrackRepublished(const std::string& previous_sid, std::shared_ptr<TrackPublication> publication) {}
     
-    // === 新增：高级通信回调 ===
+    // === 高级通信回调 ===
     virtual void OnChatMessage(const ChatMessage& message, std::shared_ptr<Participant> participant) {}
     virtual void OnDataChannelBufferedAmountLowThresholdChanged(uint64_t amount, bool reliable) {}
 };
@@ -58,6 +60,10 @@ public:
     ConnectionState connection_state() const;
     std::shared_ptr<LocalParticipant> local_participant() const;
     std::map<std::string, std::shared_ptr<RemoteParticipant>> remote_participants() const;
+    void SetLocalParticipantForTesting(std::shared_ptr<LocalParticipant> local) {
+        std::lock_guard<std::mutex> lock(room_mutex_);
+        local_participant_ = local;
+    }
 
     void AddListener(std::shared_ptr<RoomListener> listener);
     void RemoveListener(std::shared_ptr<RoomListener> listener);
@@ -69,6 +75,10 @@ public:
                      const std::vector<std::string>& destination_identities = {}, const std::string& topic = "");
     void SetDataChannelBufferedAmountLowThreshold(uint64_t threshold, bool reliable = true);
     uint64_t GetDataChannelBufferedAmount(bool reliable = true) const;
+
+    // === 新增：RPC 消息解包与发包管理 ===
+    asio::awaitable<std::string> SendRpcRequest(const RpcPacket& packet);
+    void OnIncomingRpcPacket(const RpcPacket& packet);
 
     // 内部 WebRTC 观察者回调接口
     void OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type);
@@ -109,6 +119,15 @@ private:
     webrtc::scoped_refptr<webrtc::DataChannelInterface> lossy_dc_;
     uint64_t reliable_buffered_low_threshold_ = 16384;
     uint64_t lossy_buffered_low_threshold_ = 16384;
+
+    // === RPC Pending 跟踪数据结构 ===
+    struct PendingRpcCall {
+        std::shared_ptr<asio::steady_timer> timer;
+        std::function<void(const RpcPacket&)> completion_cb;
+        bool finished = false;
+    };
+    mutable std::mutex pending_rpc_mutex_;
+    std::unordered_map<std::string, std::shared_ptr<PendingRpcCall>> pending_rpc_calls_;
 
     // 线程安全锁
     mutable std::mutex room_mutex_;
