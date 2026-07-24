@@ -71,6 +71,14 @@ add_library(livekit_signaling STATIC
     src/room.cpp
     src/webrtc_manager.cpp
     src/crash_handler.cpp
+    src/audio_frame.cpp
+    src/video_frame.cpp
+    src/audio_source.cpp
+    src/video_source.cpp
+    src/audio_stream.cpp
+    src/video_stream.cpp
+    src/local_audio_track.cpp
+    src/local_video_track.cpp
 )
 
 set(WEBRTC_ROOT "E:/vsSource/WebRTC/client-sdk-cpp/client-sdk-rust/target/debug/build/scratch-f4ffd3e87af6f636/out/livekit_webrtc/livekit/win-x64-release-webrtc-51ef663/win-x64-release")
@@ -152,10 +160,22 @@ target_link_options(test_rpc_system PRIVATE
     "/FORCE:MULTIPLE"
 )
 
+# Media Streaming Test
+add_executable(test_media_streaming
+    tests/test_media_streaming.cpp
+)
+target_link_libraries(test_media_streaming PRIVATE
+    livekit_signaling
+)
+target_link_options(test_media_streaming PRIVATE
+    "/FORCE:MULTIPLE"
+)
+
 enable_testing()
 add_test(NAME signaling_tests COMMAND livekit_signaling_tests_run_v4)
 add_test(NAME panic_guard_test COMMAND test_panic_guard)
 add_test(NAME advanced_communication_test COMMAND test_advanced_communication)
 add_test(NAME rpc_system_test COMMAND test_rpc_system)
+add_test(NAME media_streaming_test COMMAND test_media_streaming)
 
 
