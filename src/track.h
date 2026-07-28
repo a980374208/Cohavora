@@ -5,6 +5,7 @@
 #include <vector>
 #include <functional>
 #include <mutex>
+#include "api/media_stream_interface.h"
 #include "audio_frame.h"
 #include "video_frame.h"
 #include "video_source.h"
@@ -31,8 +32,21 @@ public:
     TrackKind kind() const { return kind_; }
     bool muted() const { return muted_; }
 
-    void set_muted(bool muted) { muted_ = muted; }
+    void set_muted(bool muted) {
+        muted_ = muted;
+        if (rtc_track_) {
+            rtc_track_->set_enabled(!muted);
+        }
+    }
     void set_sid(const std::string& sid) { sid_ = sid; }
+
+    webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track() const { return rtc_track_; }
+    void set_rtc_track(webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track) {
+        rtc_track_ = rtc_track;
+        if (rtc_track_) {
+            rtc_track_->set_enabled(!muted_);
+        }
+    }
 
     void addAudioSink(AudioFrameSink sink) {
         std::lock_guard<std::mutex> lock(sink_mutex_);
@@ -67,6 +81,8 @@ private:
     std::string name_;
     TrackKind kind_;
     bool muted_;
+
+    webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track_;
 
     std::mutex sink_mutex_;
     std::vector<AudioFrameSink> audio_sinks_;

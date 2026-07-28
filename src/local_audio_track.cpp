@@ -1,4 +1,6 @@
 #include "local_audio_track.h"
+#include "webrtc_manager.h"
+#include "rtc_audio_source.h"
 
 namespace livekit {
 
@@ -15,6 +17,13 @@ std::shared_ptr<LocalAudioTrack> LocalAudioTrack::createLocalAudioTrack(const st
                 track->notifyAudioFrame(frame);
             }
         });
+
+        auto factory = WebRTCManager::Instance().factory();
+        if (factory) {
+            auto rtc_src = RtcAudioSource::Create(source);
+            auto rtc_audio_track = factory->CreateAudioTrack(name, rtc_src.get());
+            track->set_rtc_track(rtc_audio_track);
+        }
     }
     return track;
 }

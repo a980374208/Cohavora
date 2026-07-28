@@ -79,6 +79,8 @@ add_library(livekit_signaling STATIC
     src/video_stream.cpp
     src/local_audio_track.cpp
     src/local_video_track.cpp
+    src/rtc_audio_source.cpp
+    src/rtc_video_source.cpp
 )
 
 set(WEBRTC_ROOT "E:/vsSource/WebRTC/client-sdk-cpp/client-sdk-rust/target/debug/build/scratch-f4ffd3e87af6f636/out/livekit_webrtc/livekit/win-x64-release-webrtc-51ef663/win-x64-release")
@@ -92,6 +94,10 @@ target_include_directories(livekit_signaling PUBLIC
 target_compile_definitions(livekit_signaling PUBLIC
     WEBRTC_WIN
     NOMINMAX
+    NDEBUG
+    DCHECK_ALWAYS_ON=0
+    RTC_DISABLE_CHECK_MSG=1
+    RTC_DISABLE_CHECKING=1
     $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>
 )
 

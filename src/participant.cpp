@@ -39,6 +39,10 @@ void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
     auto pub = std::make_shared<TrackPublication>(track, track->name(), track->name());
     add_publication(pub);
 
+    if (publish_track_handler_) {
+        publish_track_handler_(track);
+    }
+
     if (send_handler_) {
         send_handler_(req);
     }
