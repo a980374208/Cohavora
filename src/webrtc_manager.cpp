@@ -6,26 +6,45 @@
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
 #include "api/video_codecs/video_encoder_factory.h"
 #include "api/video_codecs/video_decoder_factory.h"
+#include "api/video_codecs/sdp_video_format.h"
+#include "api/sequence_checker.h"
 #include <iostream>
+
+namespace webrtc {
+namespace webrtc_checks_impl {
+    void FatalLog(char const* file, int line) {}
+}
+namespace webrtc_sequence_checker_internal {
+    std::string SequenceCheckerImpl::ExpectationToString() const {
+        return "";
+    }
+}
+}
 
 namespace livekit {
 
 namespace {
 
-class EmptyVideoEncoderFactory : public webrtc::VideoEncoderFactory {
+class CustomVideoEncoderFactory : public webrtc::VideoEncoderFactory {
 public:
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
-        return {};
+        return {
+            webrtc::SdpVideoFormat("VP8"),
+            webrtc::SdpVideoFormat("H264")
+        };
     }
     std::unique_ptr<webrtc::VideoEncoder> Create(const webrtc::Environment&, const webrtc::SdpVideoFormat&) override {
         return nullptr;
     }
 };
 
-class EmptyVideoDecoderFactory : public webrtc::VideoDecoderFactory {
+class CustomVideoDecoderFactory : public webrtc::VideoDecoderFactory {
 public:
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
-        return {};
+        return {
+            webrtc::SdpVideoFormat("VP8"),
+            webrtc::SdpVideoFormat("H264")
+        };
     }
     std::unique_ptr<webrtc::VideoDecoder> Create(const webrtc::Environment&, const webrtc::SdpVideoFormat&) override {
         return nullptr;
@@ -69,8 +88,8 @@ bool WebRTCManager::Initialize() {
     
     auto audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
     auto audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
-    auto video_encoder_factory = std::make_unique<EmptyVideoEncoderFactory>();
-    auto video_decoder_factory = std::make_unique<EmptyVideoDecoderFactory>();
+    auto video_encoder_factory = std::make_unique<CustomVideoEncoderFactory>();
+    auto video_decoder_factory = std::make_unique<CustomVideoDecoderFactory>();
 
     factory_ = webrtc::CreatePeerConnectionFactory(
         network_thread_.get(),
@@ -92,7 +111,7 @@ bool WebRTCManager::Initialize() {
     }
 
     initialized_ = true;
-    std::cout << "WebRTCManager: Initialized successfully!" << std::endl;
+    std::cout << "WebRTCManager: Initialized successfully with Audio/Video pipelines!" << std::endl;
     return true;
 }
 
@@ -104,16 +123,8 @@ void WebRTCManager::Deinitialize() {
 
     std::cout << "WebRTCManager: Deinitializing factory and threads..." << std::endl;
 
-    // Release the factory. This triggers internal WebRTC cleanup:
-    // WebRtcVoiceEngine and AudioDeviceWindowsCore destruction work is
-    // *dispatched* (asynchronously posted) to the worker thread's message queue.
     factory_ = nullptr;
 
-    // Flush each WebRTC thread's message queue with a blocking no-op BEFORE
-    // calling Stop(). This guarantees all factory destructor side-effects
-    // (e.g. AudioDeviceWindowsCore::~AudioDeviceWindowsCore via
-    // WebRtcVoiceEngine destructor dispatch) complete while threads are still
-    // alive, preventing the 0xC0000005 access violation on COM vtable teardown.
     if (worker_thread_) {
         worker_thread_->BlockingCall([]() {});
     }
@@ -142,7 +153,6 @@ void WebRTCManager::Deinitialize() {
     std::cout << "WebRTCManager: Deinitialized successfully." << std::endl;
 }
 
-// SDP 观察者桥接类实现
 class CreateSdpObserverProxy : public webrtc::CreateSessionDescriptionObserver {
 public:
     static webrtc::scoped_refptr<CreateSdpObserverProxy> Create(

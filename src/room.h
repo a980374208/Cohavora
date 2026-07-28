@@ -80,6 +80,8 @@ public:
     asio::awaitable<std::string> SendRpcRequest(const RpcPacket& packet);
     void OnIncomingRpcPacket(const RpcPacket& packet);
 
+    void AddTrackToPublisher(std::shared_ptr<Track> track);
+
     // 内部 WebRTC 观察者回调接口
     void OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type);
     void OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track);

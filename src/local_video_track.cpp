@@ -1,4 +1,6 @@
 #include "local_video_track.h"
+#include "webrtc_manager.h"
+#include "rtc_video_source.h"
 
 namespace livekit {
 
@@ -15,6 +17,13 @@ std::shared_ptr<LocalVideoTrack> LocalVideoTrack::createLocalVideoTrack(const st
                 track->notifyVideoFrame(frame, options);
             }
         });
+
+        auto factory = WebRTCManager::Instance().factory();
+        if (factory) {
+            auto rtc_src = RtcVideoSource::Create(source);
+            auto rtc_video_track = factory->CreateVideoTrack(rtc_src, name);
+            track->set_rtc_track(rtc_video_track);
+        }
     }
     return track;
 }

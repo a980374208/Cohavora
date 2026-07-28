@@ -64,6 +64,11 @@ public:
     LocalParticipant(const std::string& sid, const std::string& identity, SendSignalHandler send_handler)
         : Participant(sid, identity), send_handler_(send_handler) {}
 
+    using PublishTrackHandler = std::function<void(std::shared_ptr<Track>)>;
+    void SetPublishTrackHandler(PublishTrackHandler handler) {
+        publish_track_handler_ = std::move(handler);
+    }
+
     void SetPublishDataHandler(PublishDataHandler handler) {
         publish_data_handler_ = std::move(handler);
     }
@@ -100,6 +105,7 @@ public:
 
 private:
     SendSignalHandler send_handler_;
+    PublishTrackHandler publish_track_handler_;
     PublishDataHandler publish_data_handler_;
     SendRpcHandler send_rpc_handler_;
 

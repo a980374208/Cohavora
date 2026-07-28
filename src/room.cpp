@@ -6,6 +6,7 @@
 #include <iostream>
 #include <algorithm>
 #include "api/jsep.h"
+#include "api/video/video_sink_interface.h"
 
 namespace livekit {
 
@@ -172,6 +173,13 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
             [self](const std::vector<uint8_t>& payload, bool reliable,
                    const std::vector<std::string>& destination_identities, const std::string& topic) {
                 self->PublishData(payload, reliable, destination_identities, topic);
+            }
+        );
+
+        // 绑定 LocalParticipant 发布 Native Track Handler
+        local_participant_->SetPublishTrackHandler(
+            [self](std::shared_ptr<Track> track) {
+                self->AddTrackToPublisher(track);
             }
         );
 
@@ -468,7 +476,127 @@ void Room::OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mi
     SendTrickleCandidate(sdp, sdp_mid, sdp_mline_index, pc_type);
 }
 
+namespace {
+
+class NativeAudioTrackSink : public webrtc::AudioTrackSinkInterface {
+public:
+    explicit NativeAudioTrackSink(std::function<void(const AudioFrame&)> callback)
+        : callback_(std::move(callback)) {}
+
+    void OnData(const void* audio_data,
+                int bits_per_sample,
+                int sample_rate,
+                size_t number_of_channels,
+                size_t number_of_frames) override {
+        if (!callback_) return;
+
+        int num_samples = static_cast<int>(number_of_frames * number_of_channels);
+        AudioFrame frame = AudioFrame::create(sample_rate, static_cast<int>(number_of_channels), static_cast<int>(number_of_frames));
+        const int16_t* pcm_data = static_cast<const int16_t*>(audio_data);
+        if (!frame.data().empty()) {
+            std::copy(pcm_data, pcm_data + num_samples, frame.data().begin());
+        }
+
+        callback_(frame);
+    }
+
+private:
+    std::function<void(const AudioFrame&)> callback_;
+};
+
+class NativeVideoTrackSink : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
+public:
+    explicit NativeVideoTrackSink(std::function<void(const VideoFrame&, const VideoCaptureOptions&)> callback)
+        : callback_(std::move(callback)) {}
+
+    void OnFrame(const webrtc::VideoFrame& rtc_frame) override {
+        if (!callback_) return;
+
+        int width = rtc_frame.width();
+        int height = rtc_frame.height();
+        auto buffer = rtc_frame.video_frame_buffer();
+        if (!buffer) return;
+
+        auto i420_buffer = buffer->ToI420();
+        VideoFrame frame = VideoFrame::create(width, height, VideoBufferType::I420);
+
+        auto planes = frame.planeInfos();
+        if (planes.size() >= 3) {
+            uint8_t* y_dst = reinterpret_cast<uint8_t*>(planes[0].data_ptr);
+            uint8_t* u_dst = reinterpret_cast<uint8_t*>(planes[1].data_ptr);
+            uint8_t* v_dst = reinterpret_cast<uint8_t*>(planes[2].data_ptr);
+
+            for (int r = 0; r < height; ++r) {
+                std::memcpy(y_dst + r * planes[0].stride,
+                            i420_buffer->DataY() + r * i420_buffer->StrideY(),
+                            width);
+            }
+            int chroma_h = (height + 1) / 2;
+            int chroma_w = (width + 1) / 2;
+            for (int r = 0; r < chroma_h; ++r) {
+                std::memcpy(u_dst + r * planes[1].stride,
+                            i420_buffer->DataU() + r * i420_buffer->StrideU(),
+                            chroma_w);
+                std::memcpy(v_dst + r * planes[2].stride,
+                            i420_buffer->DataV() + r * i420_buffer->StrideV(),
+                            chroma_w);
+            }
+        }
+
+        VideoCaptureOptions options;
+        options.timestamp_us = rtc_frame.timestamp_us();
+        if (rtc_frame.rotation() == webrtc::kVideoRotation_90) options.rotation = VideoRotation::VIDEO_ROTATION_90;
+        else if (rtc_frame.rotation() == webrtc::kVideoRotation_180) options.rotation = VideoRotation::VIDEO_ROTATION_180;
+        else if (rtc_frame.rotation() == webrtc::kVideoRotation_270) options.rotation = VideoRotation::VIDEO_ROTATION_270;
+
+        callback_(frame, options);
+    }
+
+private:
+    std::function<void(const VideoFrame&, const VideoCaptureOptions&)> callback_;
+};
+
+} // namespace
+
+void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
+    if (!track || !publisher_pc_) return;
+    auto rtc_track = track->rtc_track();
+    if (rtc_track) {
+        std::string stream_id = "livekit_stream_" + (local_participant_ ? local_participant_->identity() : "local");
+        publisher_pc_->AddTrack(rtc_track, { stream_id });
+    }
+}
+
 void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track) {
+    if (!track) return;
+
+    if (track->kind() == "audio") {
+        auto audio_track = static_cast<webrtc::AudioTrackInterface*>(track.get());
+        auto sink = std::make_shared<NativeAudioTrackSink>([this, track_id = track->id()](const AudioFrame& frame) {
+            std::lock_guard<std::mutex> lock(room_mutex_);
+            for (const auto& kv : remote_participants_) {
+                for (const auto& pub_kv : kv.second->tracks()) {
+                    if (pub_kv.second && pub_kv.second->track()) {
+                        pub_kv.second->track()->notifyAudioFrame(frame);
+                    }
+                }
+            }
+        });
+        audio_track->AddSink(sink.get());
+    } else if (track->kind() == "video") {
+        auto video_track = static_cast<webrtc::VideoTrackInterface*>(track.get());
+        auto sink = std::make_shared<NativeVideoTrackSink>([this, track_id = track->id()](const VideoFrame& frame, const VideoCaptureOptions& options) {
+            std::lock_guard<std::mutex> lock(room_mutex_);
+            for (const auto& kv : remote_participants_) {
+                for (const auto& pub_kv : kv.second->tracks()) {
+                    if (pub_kv.second && pub_kv.second->track()) {
+                        pub_kv.second->track()->notifyVideoFrame(frame, options);
+                    }
+                }
+            }
+        });
+        video_track->AddOrUpdateSink(sink.get(), webrtc::VideoSinkWants());
+    }
 }
 
 void Room::OnRenegotiationNeeded(int pc_type) {
