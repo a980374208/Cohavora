@@ -21,6 +21,8 @@
 
 namespace livekit {
 
+struct RoomStatsReport;
+
 enum class ConnectionState {
     Disconnected,
     Connecting,
@@ -31,18 +33,29 @@ enum class ConnectionState {
 class RoomListener {
 public:
     virtual ~RoomListener() = default;
+
     virtual void OnConnected() {}
     virtual void OnDisconnected(const std::string& reason) {}
-    virtual void OnParticipantConnected(std::shared_ptr<RemoteParticipant> participant) {}
-    virtual void OnParticipantDisconnected(std::shared_ptr<RemoteParticipant> participant) {}
-    virtual void OnTrackMuted(std::shared_ptr<Participant> participant, std::shared_ptr<TrackPublication> publication, bool muted) {}
     virtual void OnReconnecting() {}
     virtual void OnReconnected() {}
+
+    virtual void OnParticipantConnected(std::shared_ptr<RemoteParticipant> participant) {}
+    virtual void OnParticipantDisconnected(std::shared_ptr<RemoteParticipant> participant) {}
+
+    virtual void OnTrackPublished(std::shared_ptr<RemoteParticipant> participant, std::shared_ptr<TrackPublication> publication) {}
+    virtual void OnTrackUnpublished(std::shared_ptr<RemoteParticipant> participant, std::shared_ptr<TrackPublication> publication) {}
+    virtual void OnTrackSubscribed(std::shared_ptr<Track> track, std::shared_ptr<TrackPublication> publication, std::shared_ptr<RemoteParticipant> participant) {}
+    virtual void OnTrackUnsubscribed(std::shared_ptr<Track> track, std::shared_ptr<TrackPublication> publication, std::shared_ptr<RemoteParticipant> participant) {}
+    virtual void OnTrackMuted(std::shared_ptr<Participant> participant, std::shared_ptr<TrackPublication> publication, bool muted) {}
+
     virtual void OnLocalTrackRepublished(const std::string& previous_sid, std::shared_ptr<TrackPublication> publication) {}
-    
-    // === 高级通信回调 ===
+
+    virtual void OnDataReceived(const std::vector<uint8_t>& payload, std::shared_ptr<RemoteParticipant> participant, const std::string& topic) {}
     virtual void OnChatMessage(const ChatMessage& message, std::shared_ptr<Participant> participant) {}
+
     virtual void OnDataChannelBufferedAmountLowThresholdChanged(uint64_t amount, bool reliable) {}
+
+    virtual void OnRoomStats(const RoomStatsReport& report) {}
 };
 
 class Room : public std::enable_shared_from_this<Room> {
@@ -79,6 +92,9 @@ public:
     // === 新增：RPC 消息解包与发包管理 ===
     asio::awaitable<std::string> SendRpcRequest(const RpcPacket& packet);
     void OnIncomingRpcPacket(const RpcPacket& packet);
+
+    // === 新增：RTCStats 实时质量与统计报表采集 ===
+    asio::awaitable<RoomStatsReport> GetStats();
 
     void AddTrackToPublisher(std::shared_ptr<Track> track);
 

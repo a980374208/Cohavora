@@ -1,5 +1,6 @@
 #include "room.h"
 #include "webrtc_manager.h"
+#include "stats_collector.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include <nlohmann/json.hpp>
@@ -957,6 +958,62 @@ asio::awaitable<void> Room::RestartIceConnections(
                     client->Send(req);
                 });
         });
+}
+
+asio::awaitable<RoomStatsReport> Room::GetStats() {
+    RoomStatsReport room_report;
+    room_report.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> sub_pc;
+
+    {
+        std::lock_guard<std::mutex> lock(room_mutex_);
+        pub_pc = publisher_pc_;
+        sub_pc = subscriber_pc_;
+    }
+
+    if (pub_pc) {
+        auto pub_cb = RtcStatsCollectorBridge::Create();
+        auto pub_future = pub_cb->get_future();
+        pub_pc->GetStats(pub_cb.get());
+
+        if (pub_future.wait_for(std::chrono::milliseconds(300)) == std::future_status::ready) {
+            auto r = pub_future.get();
+            for (const auto& cp : r.candidate_pairs) {
+                if (cp.current_pair) {
+                    room_report.publisher_rtt_ms = cp.current_round_trip_time * 1000.0;
+                    room_report.available_outgoing_bitrate = cp.available_outgoing_bitrate;
+                }
+            }
+            for (const auto& out : r.outbound_rtp) {
+                room_report.total_bytes_sent += out.bytes_sent;
+            }
+            room_report.reports.push_back(r);
+        }
+    }
+
+    if (sub_pc) {
+        auto sub_cb = RtcStatsCollectorBridge::Create();
+        auto sub_future = sub_cb->get_future();
+        sub_pc->GetStats(sub_cb.get());
+
+        if (sub_future.wait_for(std::chrono::milliseconds(300)) == std::future_status::ready) {
+            auto r = sub_future.get();
+            for (const auto& cp : r.candidate_pairs) {
+                if (cp.current_pair) {
+                    room_report.subscriber_rtt_ms = cp.current_round_trip_time * 1000.0;
+                }
+            }
+            for (const auto& in : r.inbound_rtp) {
+                room_report.total_bytes_received += in.bytes_received;
+            }
+            room_report.reports.push_back(r);
+        }
+    }
+
+    co_return room_report;
 }
 
 } // namespace livekit

@@ -81,6 +81,7 @@ add_library(livekit_signaling STATIC
     src/local_video_track.cpp
     src/rtc_audio_source.cpp
     src/rtc_video_source.cpp
+    src/stats_collector.cpp
 )
 
 set(WEBRTC_ROOT "E:/vsSource/WebRTC/client-sdk-cpp/client-sdk-rust/target/debug/build/scratch-f4ffd3e87af6f636/out/livekit_webrtc/livekit/win-x64-release-webrtc-51ef663/win-x64-release")
