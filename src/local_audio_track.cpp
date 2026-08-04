@@ -20,9 +20,11 @@ std::shared_ptr<LocalAudioTrack> LocalAudioTrack::createLocalAudioTrack(const st
 
         auto factory = WebRTCManager::Instance().factory();
         if (factory) {
-            auto rtc_src = RtcAudioSource::Create(source);
-            auto rtc_audio_track = factory->CreateAudioTrack(name, rtc_src.get());
-            track->set_rtc_track(rtc_audio_track);
+            WebRTCManager::Instance().worker_thread()->BlockingCall([&]() {
+                auto rtc_src = RtcAudioSource::Create(source);
+                auto rtc_audio_track = factory->CreateAudioTrack(name, rtc_src.get());
+                track->set_rtc_track(rtc_audio_track);
+            });
         }
     }
     return track;

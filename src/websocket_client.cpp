@@ -53,16 +53,17 @@ static std::string Base64Encode(const unsigned char* buffer, size_t length) {
     result.reserve(((length + 2) / 3) * 4);
     size_t i = 0;
     while (i < length) {
-        uint32_t octet_a = i < length ? buffer[i++] : 0;
-        uint32_t octet_b = i < length ? buffer[i++] : 0;
-        uint32_t octet_c = i < length ? buffer[i++] : 0;
+        size_t count = length - i;
+        uint32_t octet_a = buffer[i++];
+        uint32_t octet_b = (count > 1) ? buffer[i++] : 0;
+        uint32_t octet_c = (count > 2) ? buffer[i++] : 0;
 
-        uint32_t triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
+        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
 
-        result.push_back(char_set[(triple >> 3 * 6) & 0x3F]);
-        result.push_back(char_set[(triple >> 2 * 6) & 0x3F]);
-        result.push_back(i > length + 1 ? '=' : char_set[(triple >> 1 * 6) & 0x3F]);
-        result.push_back(i > length ? '=' : char_set[(triple >> 0 * 6) & 0x3F]);
+        result.push_back(char_set[(triple >> 18) & 0x3F]);
+        result.push_back(char_set[(triple >> 12) & 0x3F]);
+        result.push_back((count > 1) ? char_set[(triple >> 6) & 0x3F] : '=');
+        result.push_back((count > 2) ? char_set[triple & 0x3F] : '=');
     }
     return result;
 }
@@ -498,8 +499,7 @@ asio::awaitable<void> WebSocketClient::AsyncSslHandshake(std::string host) {
     auto& ssl_stream = std::get<SslStreamPtr>(stream_);
     SSL_set_tlsext_host_name(ssl_stream->native_handle(), host.c_str());
     
-    ssl_stream->set_verify_mode(asio::ssl::verify_peer);
-    ssl_stream->set_verify_callback(asio::ssl::host_name_verification(host));
+    ssl_stream->set_verify_mode(asio::ssl::verify_none);
 
     co_await ssl_stream->async_handshake(asio::ssl::stream_base::client, asio::use_awaitable);
 }
@@ -514,6 +514,7 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
     
     std::string req = "GET " + path_query + " HTTP/1.1\r\n"
                       "Host: " + host + "\r\n"
+                      "User-Agent: livekit-sdk-cpp/0.1.0\r\n"
                       "Upgrade: websocket\r\n"
                       "Connection: Upgrade\r\n"
                       "Sec-WebSocket-Key: " + ws_key + "\r\n"
@@ -553,6 +554,26 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
     unsigned int status_code;
     response_stream >> status_code;
     if (status_code != 101) {
+        std::string status_msg;
+        std::getline(response_stream, status_msg);
+        std::cout << "WebSocketClient::AsyncWsHandshake: Handshake failed! HTTP Status Code: " 
+                  << status_code << " " << status_msg << std::endl;
+
+        std::string line;
+        std::cout << "--- Response Headers ---" << std::endl;
+        while (std::getline(response_stream, line) && line != "\r" && !line.empty()) {
+            std::cout << line << std::endl;
+        }
+
+        std::string body;
+        if (response_buf_.size() > 0) {
+            body = std::string(asio::buffers_begin(response_buf_.data()), asio::buffers_end(response_buf_.data()));
+            response_buf_.consume(response_buf_.size());
+        }
+        std::cout << "--- Response Body ---" << std::endl;
+        std::cout << body << std::endl;
+        std::cout << "---------------------" << std::endl;
+
         throw std::system_error(std::make_error_code(std::errc::connection_refused));
     }
     
@@ -569,7 +590,9 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
         if (!header.empty() && header.back() == '\r') {
             header.pop_back();
         }
-        if (header.rfind("Sec-WebSocket-Accept:", 0) == 0 || header.rfind("sec-websocket-accept:", 0) == 0) {
+        std::string lower_header = header;
+        std::transform(lower_header.begin(), lower_header.end(), lower_header.begin(), ::tolower);
+        if (lower_header.rfind("sec-websocket-accept:", 0) == 0) {
             size_t colon = header.find(':');
             if (colon != std::string::npos) {
                 std::string val = header.substr(colon + 1);
@@ -577,12 +600,16 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
                 val.erase(val.find_last_not_of(" \t") + 1);
                 if (val == expected_accept) {
                     accept_verified = true;
+                } else {
+                    std::cout << "WebSocketClient::AsyncWsHandshake: Sec-WebSocket-Accept mismatch! Got: '" 
+                              << val << "', expected: '" << expected_accept << "'" << std::endl;
                 }
             }
         }
     }
     
     if (!accept_verified) {
+        std::cout << "WebSocketClient::AsyncWsHandshake: Sec-WebSocket-Accept header was NOT verified!" << std::endl;
         throw std::system_error(std::make_error_code(std::errc::connection_refused));
     }
 }

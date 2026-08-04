@@ -20,9 +20,11 @@ std::shared_ptr<LocalVideoTrack> LocalVideoTrack::createLocalVideoTrack(const st
 
         auto factory = WebRTCManager::Instance().factory();
         if (factory) {
-            auto rtc_src = RtcVideoSource::Create(source);
-            auto rtc_video_track = factory->CreateVideoTrack(rtc_src, name);
-            track->set_rtc_track(rtc_video_track);
+            WebRTCManager::Instance().worker_thread()->BlockingCall([&]() {
+                auto rtc_src = RtcVideoSource::Create(source);
+                auto rtc_video_track = factory->CreateVideoTrack(rtc_src, name);
+                track->set_rtc_track(rtc_video_track);
+            });
         }
     }
     return track;

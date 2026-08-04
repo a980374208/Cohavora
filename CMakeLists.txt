@@ -9,7 +9,6 @@ set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG "Release;None")
 
 # Find Packages via CMake / Vcpkg
 find_package(asio CONFIG REQUIRED)
-find_package(OpenSSL REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
@@ -86,31 +85,30 @@ add_library(livekit_signaling STATIC
 
 set(WEBRTC_ROOT "E:/vsSource/WebRTC/client-sdk-cpp/client-sdk-rust/target/debug/build/scratch-f4ffd3e87af6f636/out/livekit_webrtc/livekit/win-x64-release-webrtc-51ef663/win-x64-release")
 
-target_include_directories(livekit_signaling PUBLIC
+target_include_directories(livekit_signaling BEFORE PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${GEN_DIR}
+    ${WEBRTC_ROOT}/include/third_party/boringssl/src/include
     ${WEBRTC_ROOT}/include
 )
 
-target_compile_definitions(livekit_signaling PUBLIC
+add_compile_definitions(
     WEBRTC_WIN
     NOMINMAX
     NDEBUG
-    DCHECK_ALWAYS_ON=0
     RTC_DISABLE_CHECK_MSG=1
     RTC_DISABLE_CHECKING=1
+    RTC_NO_UNIQUE_ADDRESS=
     $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>
 )
 
 target_link_libraries(livekit_signaling PUBLIC
+    ${WEBRTC_ROOT}/lib/webrtc.lib
     asio::asio
-    OpenSSL::SSL
-    OpenSSL::Crypto
     protobuf::libprotobuf
     spdlog::spdlog
     ZLIB::ZLIB
     nlohmann_json::nlohmann_json
-    ${WEBRTC_ROOT}/lib/webrtc.lib
     ws2_32
     winmm
     secur32
