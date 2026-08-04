@@ -18,18 +18,34 @@ static std::string Base64Encode(const unsigned char* buffer, size_t length) {
     result.reserve(((length + 2) / 3) * 4);
     size_t i = 0;
     while (i < length) {
-        uint32_t octet_a = i < length ? buffer[i++] : 0;
-        uint32_t octet_b = i < length ? buffer[i++] : 0;
-        uint32_t octet_c = i < length ? buffer[i++] : 0;
+        size_t count = length - i;
+        uint32_t octet_a = buffer[i++];
+        uint32_t octet_b = (count > 1) ? buffer[i++] : 0;
+        uint32_t octet_c = (count > 2) ? buffer[i++] : 0;
 
-        uint32_t triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
+        uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
 
-        result.push_back(char_set[(triple >> 3 * 6) & 0x3F]);
-        result.push_back(char_set[(triple >> 2 * 6) & 0x3F]);
-        result.push_back(i > length + 1 ? '=' : char_set[(triple >> 1 * 6) & 0x3F]);
-        result.push_back(i > length ? '=' : char_set[(triple >> 0 * 6) & 0x3F]);
+        result.push_back(char_set[(triple >> 18) & 0x3F]);
+        result.push_back(char_set[(triple >> 12) & 0x3F]);
+        result.push_back((count > 1) ? char_set[(triple >> 6) & 0x3F] : '=');
+        result.push_back((count > 2) ? char_set[triple & 0x3F] : '=');
     }
     return result;
+}
+
+static std::string UrlEncode(const std::string& value) {
+    std::ostringstream escaped;
+    escaped.fill('0');
+    escaped << std::hex;
+
+    for (char c : value) {
+        if (isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' || c == '.' || c == '~') {
+            escaped << c;
+        } else {
+            escaped << '%' << std::setw(2) << std::uppercase << (static_cast<int>(static_cast<unsigned char>(c)) & 0xFF);
+        }
+    }
+    return escaped.str();
 }
 
 static std::string Base64UrlEncode(const std::vector<uint8_t>& data) {
@@ -38,7 +54,6 @@ static std::string Base64UrlEncode(const std::vector<uint8_t>& data) {
         if (c == '+') c = '-';
         else if (c == '/') c = '_';
     }
-    s.erase(std::remove(s.begin(), s.end(), '='), s.end());
     return s;
 }
 
@@ -99,7 +114,7 @@ static std::string CreateJoinRequestParam(const SignalOptions& options,
     if (options.sdk_options.sdk_version) {
         client_info->set_version(*options.sdk_options.sdk_version);
     }
-    client_info->set_protocol(17); 
+    client_info->set_protocol(14); 
     client_info->set_client_protocol(1); 
     client_info->add_capabilities(livekit::proto::ClientInfo::CAP_PACKET_TRAILER); 
     
@@ -142,6 +157,7 @@ static std::string CreateJoinRequestParam(const SignalOptions& options,
 }
 
 static std::string GetLivekitUrl(const std::string& base_url,
+                                 const std::string& token,
                                  const SignalOptions& options,
                                  bool use_v1_path,
                                  bool reconnect,
@@ -162,16 +178,22 @@ static std::string GetLivekitUrl(const std::string& base_url,
     }
 
     std::string query;
+    if (!token.empty()) {
+        query = "access_token=" + UrlEncode(token);
+    }
+
     if (use_v1_path) {
         std::string join_req = CreateJoinRequestParam(options, reconnect, participant_sid, publisher_offer_sdp);
-        query = "join_request=" + join_req;
+        if (!query.empty()) query += "&";
+        query += "join_request=" + UrlEncode(join_req);
     } else {
         std::stringstream ss;
+        if (!query.empty()) ss << "&";
         ss << "sdk=cpp"
            << "&os=windows"
            << "&os_version=10.0"
            << "&device_model=PC"
-           << "&protocol=17"
+           << "&protocol=14"
            << "&client_protocol=1"
            << "&auto_subscribe=" << (options.auto_subscribe ? "1" : "0")
            << "&adaptive_stream=" << (options.adaptive_stream ? "1" : "0")
@@ -183,7 +205,7 @@ static std::string GetLivekitUrl(const std::string& base_url,
             ss << "&reconnect=1"
                << "&sid=" << participant_sid;
         }
-        query = ss.str();
+        query += ss.str();
     }
 
     std::string result = scheme + "://" + url.host;
@@ -204,7 +226,9 @@ asio::awaitable<ConnectResult> SignalClient::Connect(
     auto executor = co_await asio::this_coro::executor;
     auto client = std::make_shared<SignalClient>(url_str, token, options, options.single_peer_connection, nullptr, event_handler, executor);
     
-    client->ssl_ctx_ = std::make_unique<asio::ssl::context>(asio::ssl::context::tlsv12_client);
+    client->ssl_ctx_ = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_client);
+    client->ssl_ctx_->set_default_verify_paths();
+    client->ssl_ctx_->set_verify_mode(asio::ssl::verify_none);
     
     try {
         std::cout << "SignalClient::Connect: executing ConnectInternal" << std::endl;
@@ -467,7 +491,7 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectInter
     const std::optional<std::vector<uint8_t>>& publisher_offer_sdp) {
     bool try_v1 = options_.single_peer_connection;
     single_pc_mode_active_ = try_v1;
-    std::string lk_url = GetLivekitUrl(url_, options_, try_v1, false, "", publisher_offer_sdp);
+    std::string lk_url = GetLivekitUrl(url_, token_, options_, try_v1, false, "", publisher_offer_sdp);
     
     std::shared_ptr<proto::JoinResponse> join_res = nullptr;
     std::optional<std::error_code> first_err;
@@ -485,7 +509,7 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectInter
     if (first_err) {
         if (try_v1) {
             single_pc_mode_active_ = false;
-            std::string validate_url = GetLivekitUrl(url_, options_, true, false, "", publisher_offer_sdp);
+            std::string validate_url = GetLivekitUrl(url_, token_, options_, true, false, "", publisher_offer_sdp);
             
             // Validate (we can swallow exception)
             try {
@@ -493,7 +517,7 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectInter
             } catch(...) {
             }
             
-            std::string lk_url_v0 = GetLivekitUrl(url_, options_, false, false, "", std::nullopt);
+            std::string lk_url_v0 = GetLivekitUrl(url_, token_, options_, false, false, "", std::nullopt);
             std::optional<std::error_code> v0_err;
             try {
                 join_res = co_await TryConnectInternal(lk_url_v0);
@@ -519,7 +543,7 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectInter
 asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::ReconnectInternal() {
     std::string sid = join_response_->participant().sid();
     std::string tok = this->token();
-    std::string reconnect_url = GetLivekitUrl(url_, options_, single_pc_mode_active_, true, sid, std::nullopt);
+    std::string reconnect_url = GetLivekitUrl(url_, tok, options_, single_pc_mode_active_, true, sid, std::nullopt);
     
     auto connect_res = co_await SignalStream::Connect(*ssl_ctx_, reconnect_url, tok, options_.connect_timeout);
     if (connect_res.error) {
@@ -681,7 +705,7 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::FallbackRegi
     }
     
     for (size_t i = 0; i < fallback_urls.size(); ++i) {
-        std::string lk_url = GetLivekitUrl(fallback_urls[i], options_, options_.single_peer_connection, false, "", publisher_offer_sdp);
+        std::string lk_url = GetLivekitUrl(fallback_urls[i], token_, options_, options_.single_peer_connection, false, "", publisher_offer_sdp);
         try {
             co_return co_await TryConnectInternal(lk_url);
         } catch (...) {

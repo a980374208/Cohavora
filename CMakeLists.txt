@@ -9,7 +9,6 @@ set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG "Release;None")
 
 # Find Packages via CMake / Vcpkg
 find_package(asio CONFIG REQUIRED)
-find_package(OpenSSL REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
@@ -86,31 +85,30 @@ add_library(livekit_signaling STATIC
 
 set(WEBRTC_ROOT "E:/vsSource/WebRTC/client-sdk-cpp/client-sdk-rust/target/debug/build/scratch-f4ffd3e87af6f636/out/livekit_webrtc/livekit/win-x64-release-webrtc-51ef663/win-x64-release")
 
-target_include_directories(livekit_signaling PUBLIC
+target_include_directories(livekit_signaling BEFORE PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${GEN_DIR}
+    ${WEBRTC_ROOT}/include/third_party/boringssl/src/include
     ${WEBRTC_ROOT}/include
 )
 
-target_compile_definitions(livekit_signaling PUBLIC
+add_compile_definitions(
     WEBRTC_WIN
     NOMINMAX
     NDEBUG
-    DCHECK_ALWAYS_ON=0
     RTC_DISABLE_CHECK_MSG=1
     RTC_DISABLE_CHECKING=1
+    RTC_NO_UNIQUE_ADDRESS=
     $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>
 )
 
 target_link_libraries(livekit_signaling PUBLIC
+    ${WEBRTC_ROOT}/lib/webrtc.lib
     asio::asio
-    OpenSSL::SSL
-    OpenSSL::Crypto
     protobuf::libprotobuf
     spdlog::spdlog
     ZLIB::ZLIB
     nlohmann_json::nlohmann_json
-    ${WEBRTC_ROOT}/lib/webrtc.lib
     ws2_32
     winmm
     secur32
@@ -130,9 +128,6 @@ add_executable(livekit_signaling_tests_run_v4
 target_link_libraries(livekit_signaling_tests_run_v4 PRIVATE
     livekit_signaling
 )
-target_link_options(livekit_signaling_tests_run_v4 PRIVATE
-    "/FORCE:MULTIPLE"
-)
 
 # Panic Guard Test
 add_executable(test_panic_guard
@@ -140,9 +135,6 @@ add_executable(test_panic_guard
 )
 target_link_libraries(test_panic_guard PRIVATE
     livekit_signaling
-)
-target_link_options(test_panic_guard PRIVATE
-    "/FORCE:MULTIPLE"
 )
 
 # Advanced Communication Test
@@ -152,9 +144,6 @@ add_executable(test_advanced_communication
 target_link_libraries(test_advanced_communication PRIVATE
     livekit_signaling
 )
-target_link_options(test_advanced_communication PRIVATE
-    "/FORCE:MULTIPLE"
-)
 
 # RPC System Test
 add_executable(test_rpc_system
@@ -162,9 +151,6 @@ add_executable(test_rpc_system
 )
 target_link_libraries(test_rpc_system PRIVATE
     livekit_signaling
-)
-target_link_options(test_rpc_system PRIVATE
-    "/FORCE:MULTIPLE"
 )
 
 # Media Streaming Test
@@ -174,9 +160,6 @@ add_executable(test_media_streaming
 target_link_libraries(test_media_streaming PRIVATE
     livekit_signaling
 )
-target_link_options(test_media_streaming PRIVATE
-    "/FORCE:MULTIPLE"
-)
 
 # Stats System Test
 add_executable(test_stats_system
@@ -185,8 +168,13 @@ add_executable(test_stats_system
 target_link_libraries(test_stats_system PRIVATE
     livekit_signaling
 )
-target_link_options(test_stats_system PRIVATE
-    "/FORCE:MULTIPLE"
+
+# Official Server Connect Test
+add_executable(test_livekit_official_connect
+    tests/test_livekit_official_connect.cpp
+)
+target_link_libraries(test_livekit_official_connect PRIVATE
+    livekit_signaling
 )
 
 enable_testing()
@@ -196,5 +184,7 @@ add_test(NAME advanced_communication_test COMMAND test_advanced_communication)
 add_test(NAME rpc_system_test COMMAND test_rpc_system)
 add_test(NAME media_streaming_test COMMAND test_media_streaming)
 add_test(NAME stats_system_test COMMAND test_stats_system)
+add_test(NAME livekit_official_connect_test COMMAND test_livekit_official_connect)
+
 
 

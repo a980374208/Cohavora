@@ -19,13 +19,18 @@ public:
     void Deinitialize();
 
     webrtc::Thread* network_thread() const { return network_thread_.get(); }
-    webrtc::Thread* worker_thread() const { return worker_thread_.get(); }
+    webrtc::Thread* worker_thread() const { return signaling_thread_.get(); }
     webrtc::Thread* signaling_thread() const { return signaling_thread_.get(); }
 
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory() const { return factory_; }
 
     // 跨线程安全 SDP 协商辅助函数
     void CreateOffer(
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
+        asio::any_io_executor executor,
+        std::function<void(const std::string& sdp, const std::string& error)> callback);
+
+    void CreateAnswer(
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
         asio::any_io_executor executor,
         std::function<void(const std::string& sdp, const std::string& error)> callback);

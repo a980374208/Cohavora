@@ -74,7 +74,7 @@ public:
     std::shared_ptr<LocalParticipant> local_participant() const;
     std::map<std::string, std::shared_ptr<RemoteParticipant>> remote_participants() const;
     void SetLocalParticipantForTesting(std::shared_ptr<LocalParticipant> local) {
-        std::lock_guard<std::mutex> lock(room_mutex_);
+        std::lock_guard lock(room_mutex_);
         local_participant_ = local;
     }
 
@@ -148,7 +148,7 @@ private:
     std::unordered_map<std::string, std::shared_ptr<PendingRpcCall>> pending_rpc_calls_;
 
     // 线程安全锁
-    mutable std::mutex room_mutex_;
+    mutable std::recursive_mutex room_mutex_;
 
     // 重连控制
     int reconnect_attempts_ = 0;

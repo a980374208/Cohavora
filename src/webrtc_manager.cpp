@@ -10,14 +10,10 @@
 #include "api/sequence_checker.h"
 #include <iostream>
 
+
 namespace webrtc {
 namespace webrtc_checks_impl {
     void FatalLog(char const* file, int line) {}
-}
-namespace webrtc_sequence_checker_internal {
-    std::string SequenceCheckerImpl::ExpectationToString() const {
-        return "";
-    }
 }
 }
 
@@ -75,10 +71,9 @@ bool WebRTCManager::Initialize() {
     }
 
     network_thread_ = webrtc::Thread::CreateWithSocketServer();
-    worker_thread_ = webrtc::Thread::Create();
     signaling_thread_ = webrtc::Thread::Create();
 
-    if (!network_thread_->Start() || !worker_thread_->Start() || !signaling_thread_->Start()) {
+    if (!network_thread_->Start() || !signaling_thread_->Start()) {
         std::cerr << "WebRTCManager: Failed to start WebRTC helper threads" << std::endl;
         webrtc::CleanupSSL();
         return false;
@@ -93,7 +88,7 @@ bool WebRTCManager::Initialize() {
 
     factory_ = webrtc::CreatePeerConnectionFactory(
         network_thread_.get(),
-        worker_thread_.get(),
+        signaling_thread_.get(),
         signaling_thread_.get(),
         webrtc::scoped_refptr<webrtc::AudioDeviceModule>(), 
         audio_encoder_factory,
@@ -222,10 +217,36 @@ void WebRTCManager::CreateOffer(
     asio::any_io_executor executor,
     std::function<void(const std::string& sdp, const std::string& error)> callback) {
     
-    signaling_thread_->PostTask([pc, executor, callback]() {
-        auto observer = CreateSdpObserverProxy::Create(executor, callback);
+    struct TaskParams {
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+        asio::any_io_executor executor;
+        std::function<void(const std::string& sdp, const std::string& error)> callback;
+    };
+    auto* p = new TaskParams{pc, executor, callback};
+    signaling_thread_->PostTask([p]() {
+        auto observer = CreateSdpObserverProxy::Create(p->executor, p->callback);
         webrtc::PeerConnectionInterface::RTCOfferAnswerOptions options;
-        pc->CreateOffer(observer.get(), options);
+        p->pc->CreateOffer(observer.get(), options);
+        delete p;
+    });
+}
+
+void WebRTCManager::CreateAnswer(
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
+    asio::any_io_executor executor,
+    std::function<void(const std::string& sdp, const std::string& error)> callback) {
+    
+    struct TaskParams {
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+        asio::any_io_executor executor;
+        std::function<void(const std::string& sdp, const std::string& error)> callback;
+    };
+    auto* p = new TaskParams{pc, executor, callback};
+    signaling_thread_->PostTask([p]() {
+        auto observer = CreateSdpObserverProxy::Create(p->executor, p->callback);
+        webrtc::PeerConnectionInterface::RTCOfferAnswerOptions options;
+        p->pc->CreateAnswer(observer.get(), options);
+        delete p;
     });
 }
 
@@ -236,22 +257,34 @@ void WebRTCManager::SetRemoteDescription(
     asio::any_io_executor executor,
     std::function<void(const std::string& error)> callback) {
     
-    signaling_thread_->PostTask([pc, type, sdp, executor, callback]() {
+    struct TaskParams {
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+        std::string type;
+        std::string sdp;
+        asio::any_io_executor executor;
+        std::function<void(const std::string& error)> callback;
+    };
+    auto* p = new TaskParams{pc, type, sdp, executor, callback};
+    signaling_thread_->PostTask([p]() {
         webrtc::SdpParseError err;
-        webrtc::SdpType sdp_type = (type == "answer") ? webrtc::SdpType::kAnswer : webrtc::SdpType::kOffer;
+        webrtc::SdpType sdp_type = (p->type == "answer") ? webrtc::SdpType::kAnswer : webrtc::SdpType::kOffer;
         std::unique_ptr<webrtc::SessionDescriptionInterface> session_desc =
-            webrtc::CreateSessionDescription(sdp_type, sdp, &err);
+            webrtc::CreateSessionDescription(sdp_type, p->sdp, &err);
         
         if (!session_desc) {
             std::string err_msg = err.description;
-            asio::post(executor, [callback, err_msg]() {
-                callback(err_msg);
+            auto cb = p->callback;
+            auto ex = p->executor;
+            delete p;
+            asio::post(ex, [cb, err_msg]() {
+                cb(err_msg);
             });
             return;
         }
 
-        auto observer = SetSdpObserverProxy::Create(executor, callback);
-        pc->SetRemoteDescription(observer.get(), session_desc.release());
+        auto observer = SetSdpObserverProxy::Create(p->executor, p->callback);
+        p->pc->SetRemoteDescription(observer.get(), session_desc.release());
+        delete p;
     });
 }
 
@@ -262,22 +295,34 @@ void WebRTCManager::SetLocalDescription(
     asio::any_io_executor executor,
     std::function<void(const std::string& error)> callback) {
     
-    signaling_thread_->PostTask([pc, type, sdp, executor, callback]() {
+    struct TaskParams {
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+        std::string type;
+        std::string sdp;
+        asio::any_io_executor executor;
+        std::function<void(const std::string& error)> callback;
+    };
+    auto* p = new TaskParams{pc, type, sdp, executor, callback};
+    signaling_thread_->PostTask([p]() {
         webrtc::SdpParseError err;
-        webrtc::SdpType sdp_type = (type == "answer") ? webrtc::SdpType::kAnswer : webrtc::SdpType::kOffer;
+        webrtc::SdpType sdp_type = (p->type == "answer") ? webrtc::SdpType::kAnswer : webrtc::SdpType::kOffer;
         std::unique_ptr<webrtc::SessionDescriptionInterface> session_desc =
-            webrtc::CreateSessionDescription(sdp_type, sdp, &err);
+            webrtc::CreateSessionDescription(sdp_type, p->sdp, &err);
         
         if (!session_desc) {
             std::string err_msg = err.description;
-            asio::post(executor, [callback, err_msg]() {
-                callback(err_msg);
+            auto cb = p->callback;
+            auto ex = p->executor;
+            delete p;
+            asio::post(ex, [cb, err_msg]() {
+                cb(err_msg);
             });
             return;
         }
 
-        auto observer = SetSdpObserverProxy::Create(executor, callback);
-        pc->SetLocalDescription(observer.get(), session_desc.release());
+        auto observer = SetSdpObserverProxy::Create(p->executor, p->callback);
+        p->pc->SetLocalDescription(observer.get(), session_desc.release());
+        delete p;
     });
 }
 
