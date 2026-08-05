@@ -337,7 +337,6 @@ asio::awaitable<void> WebSocketClient::HandleFrame(uint8_t opcode, bool fin, std
 }
 
 asio::awaitable<void> WebSocketClient::SendRawFrame(uint8_t opcode, const std::vector<uint8_t>& payload) {
-    std::cout << "WebSocketClient::SendRawFrame: opcode=" << (int)opcode << " len=" << payload.size() << std::endl;
     std::vector<uint8_t> frame;
     frame.reserve(10 + payload.size());
     
@@ -387,7 +386,6 @@ asio::awaitable<void> WebSocketClient::SendRawFrame(uint8_t opcode, const std::v
     }
     
     if (should_spawn) {
-        std::cout << "WebSocketClient::SendRawFrame: spawning WriteLoop" << std::endl;
         livekit::safe_co_spawn(io_ctx_, [self = shared_from_this()]() -> asio::awaitable<void> {
             co_await self->WriteLoop();
         });
@@ -401,20 +399,15 @@ asio::awaitable<void> WebSocketClient::WriteLoop() {
         while (true) {
             auto msg = PopWriteQueue();
             if (!msg) {
-                std::cout << "WebSocketClient::WriteLoop: queue empty or disconnected, exiting loop" << std::endl;
                 break;
             }
             
-            std::cout << "WebSocketClient::WriteLoop: writing " << msg->data.size() << " bytes to stream" << std::endl;
             co_await async_write_stream(asio::buffer(msg->data));
-            std::cout << "WebSocketClient::WriteLoop: successfully wrote " << msg->data.size() << " bytes" << std::endl;
         }
     } catch (const std::system_error& e) {
-        std::cout << "WebSocketClient::WriteLoop: system_error: " << e.what() << std::endl;
         ResetWritingState();
         handle_error(e.code());
     } catch (...) {
-        std::cout << "WebSocketClient::WriteLoop: unknown exception" << std::endl;
         ResetWritingState();
         std::error_code ec = asio::error::operation_aborted;
         handle_error(ec);
@@ -615,12 +608,10 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
 }
 
 asio::awaitable<size_t> WebSocketClient::async_read_stream(asio::mutable_buffer buf) {
-    std::cout << "WebSocketClient::async_read_stream: requested bytes=" << buf.size() << " cached=" << response_buf_.size() << std::endl;
     if (response_buf_.size() > 0) {
         size_t bytes_to_copy = std::min(response_buf_.size(), buf.size());
         std::memcpy(buf.data(), asio::buffer_cast<const void*>(response_buf_.data()), bytes_to_copy);
         response_buf_.consume(bytes_to_copy);
-        std::cout << "WebSocketClient::async_read_stream: consumed " << bytes_to_copy << " bytes from cache" << std::endl;
         
         if (bytes_to_copy < buf.size()) {
             asio::mutable_buffer remaining_buf = buf + bytes_to_copy;
@@ -630,7 +621,6 @@ asio::awaitable<size_t> WebSocketClient::async_read_stream(asio::mutable_buffer 
         co_return bytes_to_copy;
     }
 
-    std::cout << "WebSocketClient::async_read_stream: reading from socket" << std::endl;
     size_t read_bytes = 0;
     if (std::holds_alternative<SocketPtr>(stream_)) {
         read_bytes = co_await asio::async_read(*std::get<SocketPtr>(stream_), buf, asio::use_awaitable);
@@ -639,7 +629,6 @@ asio::awaitable<size_t> WebSocketClient::async_read_stream(asio::mutable_buffer 
     } else {
         throw std::system_error(asio::error::not_connected);
     }
-    std::cout << "WebSocketClient::async_read_stream: read " << read_bytes << " bytes from socket" << std::endl;
     co_return read_bytes;
 }
 
@@ -667,7 +656,6 @@ void WebSocketClient::shutdown_stream() {
             s->lowest_layer().close(ec);
         }
     }, stream_);
-    stream_ = std::monostate{};
 }
 
 void WebSocketClient::handle_error(const std::error_code& ec) {

@@ -21,16 +21,11 @@ asio::awaitable<SignalStream::ConnectResult> SignalStream::Connect(
                     std::string url_str,
                     std::string token,
                     std::chrono::milliseconds timeout) {
-    std::cout << "SignalStream::Connect: 1" << std::endl;
     auto executor = co_await asio::this_coro::executor;
-    std::cout << "SignalStream::Connect: 2" << std::endl;
     auto& io_ctx = static_cast<asio::io_context&>(executor.context());
-    std::cout << "SignalStream::Connect: 3" << std::endl;
     
     auto ws_client = std::make_shared<WebSocketClient>(io_ctx, ssl_ctx);
-    std::cout << "SignalStream::Connect: 4" << std::endl;
     auto ec = co_await ws_client->Connect(url_str, token, timeout);
-    std::cout << "SignalStream::Connect: 5, ec=" << ec.message() << std::endl;
     
     if (ec) {
         co_return ConnectResult{nullptr, ec};
@@ -72,15 +67,10 @@ void SignalStream::SetupCallbacks() {
         auto self = weak_self.lock();
         if (!self) return;
 
-        std::cout << "SignalStream::SetupCallbacks: Got payload of size=" << payload.size() << std::endl;
         auto resp = std::make_shared<livekit::proto::SignalResponse>();
         if (resp->ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
-            std::cout << "SignalStream::SetupCallbacks: Parsed SignalResponse successfully, has_join=" << resp->has_join() << std::endl;
             if (self->message_cb_) {
-                std::cout << "SignalStream::SetupCallbacks: Dispatching message_cb_" << std::endl;
                 self->message_cb_(resp);
-            } else {
-                std::cout << "SignalStream::SetupCallbacks: message_cb_ is null!" << std::endl;
             }
         } else {
             std::cout << "SignalStream::SetupCallbacks: Failed to parse SignalResponse!" << std::endl;

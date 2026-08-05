@@ -59,7 +59,7 @@ public:
         void* ptr = ::operator new(aligned_size);
         pool.active_allocations++;
         pool.count_sys++;
-        std::cout << "[CoroArena WARNING] Arena exhausted! Fallback to system allocation, size=" << aligned_size << std::endl;
+        // std::cout << "[CoroArena WARNING] Arena exhausted! Fallback to system allocation, size=" << aligned_size << std::endl;
         return ptr;
     }
 

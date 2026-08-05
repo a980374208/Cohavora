@@ -253,6 +253,7 @@ asio::awaitable<ConnectResult> SignalClient::Connect(
         
         client->join_response_ = join_res;
         client->StartHeartbeat();
+        client->SetEventReady();
         co_return ConnectResult{client, join_res, {}};
     } catch (...) {
         std::cout << "SignalClient::Connect: Unknown exception" << std::endl;
