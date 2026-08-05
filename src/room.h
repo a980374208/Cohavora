@@ -58,6 +58,8 @@ public:
     virtual void OnRoomStats(const RoomStatsReport& report) {}
 };
 
+class RoomDataChannelObserver;
+
 class Room : public std::enable_shared_from_this<Room> {
 public:
     static std::shared_ptr<Room> Create(asio::any_io_executor executor) {
@@ -104,6 +106,7 @@ public:
     void OnRenegotiationNeeded(int pc_type);
     void OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliable);
     void OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& participant_sid, const std::string& topic);
+    void OnRemoteDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel);
 
 private:
     void HandleSignalEvent(const SignalEvent& event);
@@ -135,6 +138,8 @@ private:
     // DataChannel 句柄与背压控制水线
     webrtc::scoped_refptr<webrtc::DataChannelInterface> reliable_dc_;
     webrtc::scoped_refptr<webrtc::DataChannelInterface> lossy_dc_;
+    std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> remote_data_channels_;
+    std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers_;
     uint64_t reliable_buffered_low_threshold_ = 16384;
     uint64_t lossy_buffered_low_threshold_ = 16384;
 

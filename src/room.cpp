@@ -21,7 +21,14 @@ public:
     void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState) override {}
     void OnAddStream(webrtc::scoped_refptr<webrtc::MediaStreamInterface>) override {}
     void OnRemoveStream(webrtc::scoped_refptr<webrtc::MediaStreamInterface>) override {}
-    void OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override {}
+    void OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override {
+        if (!data_channel) return;
+        if (auto room = room_.lock()) {
+            asio::post(room->executor(), [room, data_channel]() {
+                room->OnRemoteDataChannel(data_channel);
+            });
+        }
+    }
     
     void OnRenegotiationNeeded() override {
         if (auto room = room_.lock()) {
@@ -62,6 +69,8 @@ private:
     int pc_type_; // 0 = Publisher, 1 = Subscriber
 };
 
+} // namespace
+
 class RoomDataChannelObserver : public webrtc::DataChannelObserver {
 public:
     RoomDataChannelObserver(std::shared_ptr<Room> room, bool reliable)
@@ -90,8 +99,6 @@ private:
     std::weak_ptr<Room> room_;
     bool reliable_;
 };
-
-} // namespace
 
 Room::Room(asio::any_io_executor executor)
     : executor_(executor) {
@@ -213,6 +220,25 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
                 auto pub_res = WebRTCManager::Instance().factory()->CreatePeerConnectionOrError(config, std::move(pub_deps));
                 if (pub_res.ok()) {
                     publisher_pc_ = pub_res.MoveValue();
+
+                    webrtc::DataChannelInit rel_init;
+                    rel_init.ordered = true;
+                    reliable_dc_ = publisher_pc_->CreateDataChannel("_reliable", &rel_init);
+                    if (reliable_dc_) {
+                        auto obs = std::make_shared<RoomDataChannelObserver>(shared_from_this(), true);
+                        reliable_dc_->RegisterObserver(obs.get());
+                        data_channel_observers_.push_back(obs);
+                    }
+
+                    webrtc::DataChannelInit lossy_init;
+                    lossy_init.ordered = false;
+                    lossy_init.maxRetransmits = 0;
+                    lossy_dc_ = publisher_pc_->CreateDataChannel("_lossy", &lossy_init);
+                    if (lossy_dc_) {
+                        auto obs = std::make_shared<RoomDataChannelObserver>(shared_from_this(), false);
+                        lossy_dc_->RegisterObserver(obs.get());
+                        data_channel_observers_.push_back(obs);
+                    }
                 }
 
                 webrtc::PeerConnectionDependencies sub_deps(subscriber_observer_.get());
@@ -472,10 +498,28 @@ void Room::OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliabl
 }
 
 void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& participant_sid, const std::string& topic) {
-    std::string text_payload(payload.begin(), payload.end());
-    
+    std::vector<uint8_t> real_payload = payload;
+    std::string real_topic = topic;
+    std::string real_sender_sid = participant_sid;
+
+    // 尝试反序列化 Protobuf DataPacket
+    proto::DataPacket data_pkt;
+    if (data_pkt.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        if (data_pkt.has_user()) {
+            const auto& user_pkt = data_pkt.user();
+            const std::string& p_bytes = user_pkt.payload();
+            real_payload.assign(p_bytes.begin(), p_bytes.end());
+            real_topic = user_pkt.topic();
+            if (!data_pkt.participant_sid().empty()) {
+                real_sender_sid = data_pkt.participant_sid();
+            }
+        }
+    }
+
+    std::string text_payload(real_payload.begin(), real_payload.end());
+
     // 1. 优先校验解包 LiveKit RPC 报文 (Topic 为 lk.rpc)
-    if (topic == "lk.rpc") {
+    if (real_topic == "lk.rpc") {
         auto rpc_pkt_opt = RpcPacket::Decode(text_payload);
         if (rpc_pkt_opt.has_value()) {
             OnIncomingRpcPacket(rpc_pkt_opt.value());
@@ -483,30 +527,46 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
         }
     }
 
+    auto listeners_snapshot = GetListenersSnapshot();
+    std::shared_ptr<RemoteParticipant> remote_p;
+    {
+        std::lock_guard lock(room_mutex_);
+        auto it = remote_participants_.find(real_sender_sid);
+        if (it != remote_participants_.end()) {
+            remote_p = it->second;
+        }
+    }
+
     // 2. 解析结构化 Chat 消息 (Topic 为 lk.chat 或无指定 Topic 时尝试解析)
-    if (topic == "lk.chat" || topic.empty()) {
-        auto chat_opt = ChatMessage::Decode(text_payload, participant_sid);
+    if (real_topic == "lk.chat" || real_topic.empty()) {
+        auto chat_opt = ChatMessage::Decode(text_payload, real_sender_sid);
         if (chat_opt.has_value()) {
-            auto listeners_snapshot = GetListenersSnapshot();
-            std::shared_ptr<Participant> p;
-            {
-                std::lock_guard lock(room_mutex_);
-                auto it = remote_participants_.find(participant_sid);
-                if (it != remote_participants_.end()) {
-                    p = it->second;
-                } else if (local_participant_ && local_participant_->identity() == participant_sid) {
-                    p = local_participant_;
-                }
-            }
+            std::shared_ptr<Participant> p = remote_p ? remote_p : (local_participant_ && (local_participant_->sid() == real_sender_sid || local_participant_->identity() == real_sender_sid) ? std::static_pointer_cast<Participant>(local_participant_) : nullptr);
             for (const auto& listener : listeners_snapshot) {
                 listener->OnChatMessage(chat_opt.value(), p);
             }
         }
     }
+
+    // 3. 派发原始 OnDataReceived 事件给 RoomListener
+    for (const auto& listener : listeners_snapshot) {
+        listener->OnDataReceived(real_payload, remote_p, real_topic);
+    }
 }
 
 void Room::OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type) {
     SendTrickleCandidate(sdp, sdp_mid, sdp_mline_index, pc_type);
+}
+
+void Room::OnRemoteDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) {
+    if (!data_channel) return;
+    bool reliable = (data_channel->label() == "_reliable" || data_channel->label() == "reliable");
+    auto obs = std::make_shared<RoomDataChannelObserver>(shared_from_this(), reliable);
+    data_channel->RegisterObserver(obs.get());
+    std::cout << "[WebRTC DataChannel] Registered observer on remote DataChannel: " << data_channel->label() << std::endl;
+    std::lock_guard lock(room_mutex_);
+    data_channel_observers_.push_back(obs);
+    remote_data_channels_.push_back(data_channel);
 }
 
 namespace {
@@ -652,6 +712,41 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
 }
 
 void Room::OnRenegotiationNeeded(int pc_type) {
+    if (pc_type != 0) return; // 只有 Publisher PC 需要发送 Offer
+
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
+    std::shared_ptr<SignalClient> client;
+    {
+        std::lock_guard lock(room_mutex_);
+        pub_pc = publisher_pc_;
+        client = signal_client_;
+    }
+
+    if (!pub_pc || !client) return;
+
+    auto self = shared_from_this();
+    WebRTCManager::Instance().CreateOffer(pub_pc, executor_,
+        [self, client, pub_pc](const std::string& sdp, const std::string& err) {
+            if (!err.empty()) {
+                std::cerr << "[WebRTC] CreateOffer error: " << err << std::endl;
+                return;
+            }
+
+            WebRTCManager::Instance().SetLocalDescription(pub_pc, "offer", sdp, self->executor_,
+                [client, sdp](const std::string& set_local_err) {
+                    if (!set_local_err.empty()) {
+                        std::cerr << "[WebRTC] SetLocalDescription offer error: " << set_local_err << std::endl;
+                        return;
+                    }
+
+                    proto::SignalRequest req;
+                    auto* offer_msg = req.mutable_offer();
+                    offer_msg->set_type("offer");
+                    offer_msg->set_sdp(sdp);
+                    client->Send(req);
+                    std::cout << "[WebRTC] -> Sent publisher SDP Offer to LiveKit server!" << std::endl;
+                });
+        });
 }
 
 void Room::HandleSignalEvent(const SignalEvent& event) {
