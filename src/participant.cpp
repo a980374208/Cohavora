@@ -32,8 +32,17 @@ void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
     
     if (track->kind() == TrackKind::Audio) {
         add_track->set_type(proto::TrackType::AUDIO);
+        add_track->set_source(proto::TrackSource::MICROPHONE);
     } else if (track->kind() == TrackKind::Video) {
         add_track->set_type(proto::TrackType::VIDEO);
+        add_track->set_source(proto::TrackSource::CAMERA);
+        add_track->set_width(1280);
+        add_track->set_height(720);
+        auto* layer = add_track->add_layers();
+        layer->set_quality(proto::VideoQuality::HIGH);
+        layer->set_width(1280);
+        layer->set_height(720);
+        layer->set_bitrate(1700000);
     }
 
     auto pub = std::make_shared<TrackPublication>(track, track->name(), track->name());

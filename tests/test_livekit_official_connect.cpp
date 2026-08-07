@@ -32,25 +32,53 @@ void RunNoiseCaptureLoop(std::shared_ptr<livekit::AudioSource> source, std::atom
     }
 }
 
-// 仿照 basic_room 产生模拟动态 RGBA 视频帧 (1280x720 ~30FPS)
+// 产生全屏 红/绿/蓝/黑 轮播色块的 RGBA 视频帧 (1280x720 @ 30FPS)
 void RunFakeVideoCaptureLoop(std::shared_ptr<livekit::VideoSource> source, std::atomic<bool>& running) {
-    auto frame = livekit::VideoFrame::create(1280, 720, livekit::VideoBufferType::RGBA);
-    uint8_t color = 0;
+    const int width = 1280;
+    const int height = 720;
+    auto frame = livekit::VideoFrame::create(width, height, livekit::VideoBufferType::RGBA);
+    
+    struct ColorRGBA { uint8_t r, g, b, a; const char* name; };
+    const ColorRGBA color_palette[] = {
+        {255, 0, 0, 255, "RED (红色)"},
+        {0, 255, 0, 255, "GREEN (绿色)"},
+        {0, 0, 255, 255, "BLUE (蓝色)"},
+        {0, 0, 0, 255, "BLACK (黑色)"}
+    };
+    const size_t num_colors = sizeof(color_palette) / sizeof(color_palette[0]);
+
+    int frame_count = 0;
+    size_t color_idx = 0;
+
+    std::cout << "[Video Stream] Starting RGBA color carousel (Red -> Green -> Blue -> Black @ 30FPS)..." << std::endl;
+
     while (running.load()) {
-        color = static_cast<uint8_t>((color + 5) % 256);
-        uint8_t* pdata = frame.data();
-        if (pdata && frame.dataSize() >= 4) {
-            pdata[0] = color;       // R
-            pdata[1] = 255 - color; // G
-            pdata[2] = 128;         // B
-            pdata[3] = 255;         // A
+        // 每 30 帧 (约 1 秒) 切换一次色块
+        if (frame_count % 30 == 0) {
+            color_idx = (frame_count / 30) % num_colors;
         }
+
+        const auto& cur_color = color_palette[color_idx];
+        uint8_t* pdata = frame.data();
+        if (pdata) {
+            uint32_t pixel_val = (static_cast<uint32_t>(cur_color.a) << 24) |
+                                 (static_cast<uint32_t>(cur_color.b) << 16) |
+                                 (static_cast<uint32_t>(cur_color.g) << 8)  |
+                                 static_cast<uint32_t>(cur_color.r);
+            uint32_t* p32 = reinterpret_cast<uint32_t*>(pdata);
+            const size_t total_pixels = static_cast<size_t>(width * height);
+            for (size_t i = 0; i < total_pixels; ++i) {
+                p32[i] = pixel_val;
+            }
+        }
+
         livekit::VideoCaptureOptions vopts;
         vopts.timestamp_us = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
         vopts.rotation = livekit::VideoRotation::VIDEO_ROTATION_0;
 
         source->captureFrame(frame, vopts);
+        frame_count++;
         std::this_thread::sleep_for(std::chrono::milliseconds(33));
     }
 }
@@ -92,22 +120,43 @@ public:
 
     void OnTrackPublished(std::shared_ptr<livekit::RemoteParticipant> participant, std::shared_ptr<livekit::TrackPublication> publication) override {
         if (participant && publication) {
-            std::cout << "[EVENT] Track Published by " << participant->identity()
-                      << ": track_sid=" << publication->sid() << std::endl;
+            std::string kind_str = (publication->track() && publication->track()->kind() == livekit::TrackKind::Audio) ? "AUDIO" : "VIDEO";
+            std::cout << "[TRACK PUBLISHED] Remote user [" << participant->identity()
+                      << "] published " << kind_str << " track: name='" << publication->name()
+                      << "', sid=" << publication->sid() << std::endl;
+        }
+    }
+
+    void OnTrackSubscribed(std::shared_ptr<livekit::Track> track, std::shared_ptr<livekit::TrackPublication> publication, std::shared_ptr<livekit::RemoteParticipant> participant) override {
+        if (participant && publication) {
+            std::string kind_str = (track && track->kind() == livekit::TrackKind::Audio) ? "AUDIO" : "VIDEO";
+            std::cout << "[TRACK SUBSCRIBED] Successfully subscribed to " << kind_str << " track from user ["
+                      << participant->identity() << "]: name='" << publication->name()
+                      << "', track_sid=" << publication->sid() << std::endl;
+        }
+    }
+
+    void OnTrackMuted(std::shared_ptr<livekit::Participant> participant, std::shared_ptr<livekit::TrackPublication> publication, bool muted) override {
+        if (participant && publication) {
+            std::cout << "[TRACK MUTE EVENT] User [" << participant->identity() << "] track '"
+                      << publication->name() << "' is now " << (muted ? "MUTED (静音/禁用)" : "UNMUTED (恢复播放)") << std::endl;
         }
     }
 
     void OnDataReceived(const std::vector<uint8_t>& payload, std::shared_ptr<livekit::RemoteParticipant> participant, const std::string& topic) override {
+        if (topic == "lk.chat" || topic == "lk-chat-topic") {
+            return; // 聊天内容由 OnChatMessage 格式化高亮打印
+        }
         std::string sender = participant ? participant->identity() : "System/Unknown";
         std::string text(payload.begin(), payload.end());
-        std::cout << "[DATA] Received Data from [" << sender << "] on topic '" << topic
+        std::cout << "[RECV DATA] Received custom data packet from user [" << sender << "] on topic '" << topic
                   << "', size=" << payload.size() << " bytes: " << text << std::endl;
     }
 
     void OnChatMessage(const livekit::ChatMessage& message, std::shared_ptr<livekit::Participant> participant) override {
         std::string sender = participant ? participant->identity() : message.sender_identity;
-        std::cout << "[CHAT] Chat Message from [" << sender << "]: " << message.message
-                  << " (id: " << message.id << ")" << std::endl;
+        std::cout << "[RECV CHAT] Chat message from user [" << sender << "]: " << message.message
+                  << " (message_id: " << message.id << ")" << std::endl;
     }
 };
 

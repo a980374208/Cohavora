@@ -11,6 +11,10 @@
 #include <iostream>
 
 
+#include "api/environment/environment_factory.h"
+#include "api/audio/audio_device.h"
+#include "modules/video_coding/codecs/vp8/include/vp8.h"
+
 namespace webrtc {
 namespace webrtc_checks_impl {
     void FatalLog(char const* file, int line) {}
@@ -25,12 +29,14 @@ class CustomVideoEncoderFactory : public webrtc::VideoEncoderFactory {
 public:
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
         return {
-            webrtc::SdpVideoFormat("VP8"),
-            webrtc::SdpVideoFormat("H264")
+            webrtc::SdpVideoFormat("VP8")
         };
     }
-    std::unique_ptr<webrtc::VideoEncoder> Create(const webrtc::Environment&, const webrtc::SdpVideoFormat&) override {
-        return nullptr;
+
+    std::unique_ptr<webrtc::VideoEncoder> Create(
+        const webrtc::Environment& env,
+        const webrtc::SdpVideoFormat& format) override {
+        return webrtc::CreateVp8Encoder(env);
     }
 };
 
@@ -38,13 +44,125 @@ class CustomVideoDecoderFactory : public webrtc::VideoDecoderFactory {
 public:
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
         return {
-            webrtc::SdpVideoFormat("VP8"),
-            webrtc::SdpVideoFormat("H264")
+            webrtc::SdpVideoFormat("VP8")
         };
     }
-    std::unique_ptr<webrtc::VideoDecoder> Create(const webrtc::Environment&, const webrtc::SdpVideoFormat&) override {
-        return nullptr;
+
+    std::unique_ptr<webrtc::VideoDecoder> Create(
+        const webrtc::Environment& env,
+        const webrtc::SdpVideoFormat& format) override {
+        return webrtc::CreateVp8Decoder(env);
     }
+};
+
+class DummyAudioDeviceModule : public webrtc::AudioDeviceModule {
+public:
+    DummyAudioDeviceModule() : playing_(false), recording_(false), audio_transport_(nullptr) {}
+
+    ~DummyAudioDeviceModule() override {
+        StopPlayout();
+        StopRecording();
+    }
+
+    int32_t ActiveAudioLayer(AudioLayer* audioLayer) const override { *audioLayer = kDummyAudio; return 0; }
+    int32_t RegisterAudioCallback(webrtc::AudioTransport* audioCallback) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        audio_transport_ = audioCallback;
+        return 0;
+    }
+    int32_t Init() override { return 0; }
+    int32_t Terminate() override { 
+        StopPlayout();
+        return 0; 
+    }
+    bool Initialized() const override { return true; }
+    int16_t PlayoutDevices() override { return 1; }
+    int16_t RecordingDevices() override { return 0; }
+    int32_t PlayoutDeviceName(uint16_t, char[webrtc::kAdmMaxDeviceNameSize], char[webrtc::kAdmMaxGuidSize]) override { return 0; }
+    int32_t RecordingDeviceName(uint16_t, char[webrtc::kAdmMaxDeviceNameSize], char[webrtc::kAdmMaxGuidSize]) override { return 0; }
+    int32_t SetPlayoutDevice(uint16_t) override { return 0; }
+    int32_t SetPlayoutDevice(WindowsDeviceType) override { return 0; }
+    int32_t SetRecordingDevice(uint16_t) override { return 0; }
+    int32_t SetRecordingDevice(WindowsDeviceType) override { return 0; }
+    int32_t PlayoutIsAvailable(bool* available) override { *available = true; return 0; }
+    int32_t InitPlayout() override { return 0; }
+    bool PlayoutIsInitialized() const override { return true; }
+    int32_t RecordingIsAvailable(bool* available) override { *available = false; return 0; }
+    int32_t InitRecording() override { return 0; }
+    bool RecordingIsInitialized() const override { return true; }
+
+    int32_t StartPlayout() override {
+        if (playing_.exchange(true)) return 0;
+        playout_thread_ = std::thread([this]() {
+            int64_t elapsed_time_ms = 0;
+            int64_t ntp_time_ms = 0;
+            int16_t audio_buffer[480 * 2]; // 10ms at 48kHz stereo
+            while (playing_.load()) {
+                {
+                    std::lock_guard<std::mutex> lock(mutex_);
+                    if (audio_transport_) {
+                        size_t samples_out = 0;
+                        audio_transport_->NeedMorePlayData(480, sizeof(int16_t), 2, 48000, audio_buffer, samples_out, &elapsed_time_ms, &ntp_time_ms);
+                    }
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        });
+        return 0;
+    }
+
+    int32_t StopPlayout() override {
+        if (!playing_.exchange(false)) return 0;
+        if (playout_thread_.joinable()) {
+            playout_thread_.join();
+        }
+        return 0;
+    }
+
+    bool Playing() const override { return playing_.load(); }
+    int32_t StartRecording() override { return 0; }
+    int32_t StopRecording() override { return 0; }
+    bool Recording() const override { return false; }
+    int32_t InitSpeaker() override { return 0; }
+    bool SpeakerIsInitialized() const override { return true; }
+    int32_t InitMicrophone() override { return 0; }
+    bool MicrophoneIsInitialized() const override { return true; }
+    int32_t SpeakerVolumeIsAvailable(bool* available) override { *available = false; return 0; }
+    int32_t SetSpeakerVolume(uint32_t) override { return 0; }
+    int32_t SpeakerVolume(uint32_t*) const override { return 0; }
+    int32_t MaxSpeakerVolume(uint32_t*) const override { return 0; }
+    int32_t MinSpeakerVolume(uint32_t*) const override { return 0; }
+    int32_t MicrophoneVolumeIsAvailable(bool* available) override { *available = false; return 0; }
+    int32_t SetMicrophoneVolume(uint32_t) override { return 0; }
+    int32_t MicrophoneVolume(uint32_t*) const override { return 0; }
+    int32_t MaxMicrophoneVolume(uint32_t*) const override { return 0; }
+    int32_t MinMicrophoneVolume(uint32_t*) const override { return 0; }
+    int32_t SpeakerMuteIsAvailable(bool* available) override { *available = false; return 0; }
+    int32_t SetSpeakerMute(bool) override { return 0; }
+    int32_t SpeakerMute(bool*) const override { return 0; }
+    int32_t MicrophoneMuteIsAvailable(bool* available) override { *available = false; return 0; }
+    int32_t SetMicrophoneMute(bool) override { return 0; }
+    int32_t MicrophoneMute(bool*) const override { return 0; }
+    int32_t StereoPlayoutIsAvailable(bool* available) const override { *available = true; return 0; }
+    int32_t SetStereoPlayout(bool) override { return 0; }
+    int32_t StereoPlayout(bool* enabled) const override { *enabled = true; return 0; }
+    int32_t StereoRecordingIsAvailable(bool* available) const override { *available = false; return 0; }
+    int32_t SetStereoRecording(bool) override { return 0; }
+    int32_t StereoRecording(bool*) const override { return 0; }
+    int32_t PlayoutDelay(uint16_t* delayMS) const override { *delayMS = 0; return 0; }
+    bool BuiltInAECIsAvailable() const override { return false; }
+    bool BuiltInAGCIsAvailable() const override { return false; }
+    bool BuiltInNSIsAvailable() const override { return false; }
+    int32_t EnableBuiltInAEC(bool) override { return 0; }
+    int32_t EnableBuiltInAGC(bool) override { return 0; }
+    int32_t EnableBuiltInNS(bool) override { return 0; }
+
+private:
+    std::atomic<bool> playing_;
+    std::atomic<bool> recording_;
+    mutable std::mutex mutex_;
+    webrtc::AudioTransport* audio_transport_;
+    std::thread playout_thread_;
 };
 
 } // namespace
@@ -86,11 +204,13 @@ bool WebRTCManager::Initialize() {
     auto video_encoder_factory = std::make_unique<CustomVideoEncoderFactory>();
     auto video_decoder_factory = std::make_unique<CustomVideoDecoderFactory>();
 
+    auto adm = webrtc::make_ref_counted<DummyAudioDeviceModule>();
+
     factory_ = webrtc::CreatePeerConnectionFactory(
         network_thread_.get(),
         signaling_thread_.get(),
         signaling_thread_.get(),
-        webrtc::scoped_refptr<webrtc::AudioDeviceModule>(), 
+        adm,
         audio_encoder_factory,
         audio_decoder_factory,
         std::move(video_encoder_factory),

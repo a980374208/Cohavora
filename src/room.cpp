@@ -279,6 +279,9 @@ void Room::Disconnect() {
     subscriber_pc_ = nullptr;
     reliable_dc_ = nullptr;
     lossy_dc_ = nullptr;
+    remote_data_channels_.clear();
+    data_channel_observers_.clear();
+    remote_track_sinks_.clear();
 
     for (const auto& listener : listeners_snapshot) {
         listener->OnDisconnected("Client Initiated Disconnect");
@@ -501,18 +504,29 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
     std::vector<uint8_t> real_payload = payload;
     std::string real_topic = topic;
     std::string real_sender_sid = participant_sid;
+    std::string sender_identity;
+    bool is_protobuf_packet = false;
 
     // 尝试反序列化 Protobuf DataPacket
     proto::DataPacket data_pkt;
     if (data_pkt.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        is_protobuf_packet = true;
+        if (!data_pkt.participant_identity().empty()) {
+            sender_identity = data_pkt.participant_identity();
+        }
+        if (!data_pkt.participant_sid().empty()) {
+            real_sender_sid = data_pkt.participant_sid();
+        }
+
         if (data_pkt.has_user()) {
             const auto& user_pkt = data_pkt.user();
             const std::string& p_bytes = user_pkt.payload();
             real_payload.assign(p_bytes.begin(), p_bytes.end());
             real_topic = user_pkt.topic();
-            if (!data_pkt.participant_sid().empty()) {
-                real_sender_sid = data_pkt.participant_sid();
-            }
+        } else if (data_pkt.has_chat_message()) {
+            const auto& pb_chat = data_pkt.chat_message();
+            real_payload.assign(pb_chat.message().begin(), pb_chat.message().end());
+            real_topic = "lk.chat";
         }
     }
 
@@ -531,26 +545,54 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
     std::shared_ptr<RemoteParticipant> remote_p;
     {
         std::lock_guard lock(room_mutex_);
-        auto it = remote_participants_.find(real_sender_sid);
-        if (it != remote_participants_.end()) {
-            remote_p = it->second;
+        if (!real_sender_sid.empty()) {
+            auto it = remote_participants_.find(real_sender_sid);
+            if (it != remote_participants_.end()) {
+                remote_p = it->second;
+            }
         }
-    }
-
-    // 2. 解析结构化 Chat 消息 (Topic 为 lk.chat 或无指定 Topic 时尝试解析)
-    if (real_topic == "lk.chat" || real_topic.empty()) {
-        auto chat_opt = ChatMessage::Decode(text_payload, real_sender_sid);
-        if (chat_opt.has_value()) {
-            std::shared_ptr<Participant> p = remote_p ? remote_p : (local_participant_ && (local_participant_->sid() == real_sender_sid || local_participant_->identity() == real_sender_sid) ? std::static_pointer_cast<Participant>(local_participant_) : nullptr);
-            for (const auto& listener : listeners_snapshot) {
-                listener->OnChatMessage(chat_opt.value(), p);
+        if (!remote_p && !sender_identity.empty()) {
+            for (const auto& kv : remote_participants_) {
+                if (kv.second && (kv.second->identity() == sender_identity || kv.second->sid() == sender_identity)) {
+                    remote_p = kv.second;
+                    break;
+                }
             }
         }
     }
 
+    // 2. 解析并派发结构化 Chat 消息
+    bool chat_dispatched = false;
+    if (is_protobuf_packet && data_pkt.has_chat_message()) {
+        const auto& pb_chat = data_pkt.chat_message();
+        ChatMessage chat;
+        chat.id = pb_chat.id();
+        chat.timestamp = pb_chat.timestamp();
+        chat.edit_timestamp = pb_chat.edit_timestamp();
+        chat.message = pb_chat.message();
+        chat.sender_identity = !sender_identity.empty() ? sender_identity : (remote_p ? remote_p->identity() : real_sender_sid);
+        std::shared_ptr<Participant> p = remote_p ? remote_p : (local_participant_ && (local_participant_->sid() == real_sender_sid || local_participant_->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_participant_) : nullptr);
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnChatMessage(chat, p);
+        }
+        chat_dispatched = true;
+    } else if (real_topic == "lk.chat" || real_topic == "lk-chat-topic" || real_topic.empty()) {
+        auto chat_opt = ChatMessage::Decode(text_payload, !sender_identity.empty() ? sender_identity : real_sender_sid);
+        if (chat_opt.has_value()) {
+            std::shared_ptr<Participant> p = remote_p ? remote_p : (local_participant_ && (local_participant_->sid() == real_sender_sid || local_participant_->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_participant_) : nullptr);
+            for (const auto& listener : listeners_snapshot) {
+                listener->OnChatMessage(chat_opt.value(), p);
+            }
+            chat_dispatched = true;
+        }
+    }
+
     // 3. 派发原始 OnDataReceived 事件给 RoomListener
-    for (const auto& listener : listeners_snapshot) {
-        listener->OnDataReceived(real_payload, remote_p, real_topic);
+    // 如果是 LiveKit 原生 Protobuf 包装包（如 DataPacket / ChatMessage / RPC），已在前面派发给对应结构化回调，避免在基础通道中重复输出乱码
+    if (!is_protobuf_packet && !chat_dispatched && real_topic != "lk.chat" && real_topic != "lk-chat-topic" && real_topic != "lk.rpc") {
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnDataReceived(real_payload, remote_p, real_topic);
+        }
     }
 }
 
@@ -681,33 +723,60 @@ void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
 
 void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track) {
     if (!track) return;
+    std::cout << "[TRACK ATTACHED] Attached sink to remote WebRTC " << track->kind() << " track (id: " << track->id() << ")" << std::endl;
 
     if (track->kind() == "audio") {
         auto audio_track = static_cast<webrtc::AudioTrackInterface*>(track.get());
-        auto sink = std::make_shared<NativeAudioTrackSink>([this, track_id = track->id()](const AudioFrame& frame) {
-            std::lock_guard lock(room_mutex_);
-            for (const auto& kv : remote_participants_) {
-                for (const auto& pub_kv : kv.second->tracks()) {
-                    if (pub_kv.second && pub_kv.second->track()) {
-                        pub_kv.second->track()->notifyAudioFrame(frame);
+        auto has_logged = std::make_shared<std::atomic<bool>>(false);
+        auto sink = std::make_shared<NativeAudioTrackSink>([this, track_id = track->id(), has_logged](const AudioFrame& frame) {
+            std::string user_info = "Remote Participant";
+            {
+                std::lock_guard lock(room_mutex_);
+                for (const auto& kv : remote_participants_) {
+                    if (kv.second) {
+                        user_info = kv.second->identity() + " (sid: " + kv.first + ")";
+                        for (const auto& pub_kv : kv.second->tracks()) {
+                            if (pub_kv.second && pub_kv.second->track()) {
+                                pub_kv.second->track()->notifyAudioFrame(frame);
+                            }
+                        }
                     }
                 }
+            }
+            if (!has_logged->exchange(true)) {
+                std::cout << "[RECV AUDIO] Started receiving audio PCM stream from user: [" << user_info
+                          << "], sample_rate=" << frame.sampleRate() << "Hz, channels=" << frame.numChannels() << std::endl;
             }
         });
         audio_track->AddSink(sink.get());
+        std::lock_guard lock(room_mutex_);
+        remote_track_sinks_.push_back(sink);
     } else if (track->kind() == "video") {
         auto video_track = static_cast<webrtc::VideoTrackInterface*>(track.get());
-        auto sink = std::make_shared<NativeVideoTrackSink>([this, track_id = track->id()](const VideoFrame& frame, const VideoCaptureOptions& options) {
-            std::lock_guard lock(room_mutex_);
-            for (const auto& kv : remote_participants_) {
-                for (const auto& pub_kv : kv.second->tracks()) {
-                    if (pub_kv.second && pub_kv.second->track()) {
-                        pub_kv.second->track()->notifyVideoFrame(frame, options);
+        auto has_logged = std::make_shared<std::atomic<bool>>(false);
+        auto sink = std::make_shared<NativeVideoTrackSink>([this, track_id = track->id(), has_logged](const VideoFrame& frame, const VideoCaptureOptions& options) {
+            std::string user_info = "Remote Participant";
+            {
+                std::lock_guard lock(room_mutex_);
+                for (const auto& kv : remote_participants_) {
+                    if (kv.second) {
+                        user_info = kv.second->identity() + " (sid: " + kv.first + ")";
+                        for (const auto& pub_kv : kv.second->tracks()) {
+                            if (pub_kv.second && pub_kv.second->track()) {
+                                pub_kv.second->track()->notifyVideoFrame(frame, options);
+                            }
+                        }
                     }
                 }
             }
+            if (!has_logged->exchange(true)) {
+                std::cout << "[RECV VIDEO] Started receiving video stream from user: [" << user_info
+                          << "], resolution=" << frame.width() << "x" << frame.height() << std::endl;
+            }
         });
         video_track->AddOrUpdateSink(sink.get(), webrtc::VideoSinkWants());
+        std::lock_guard lock(room_mutex_);
+        remote_track_sinks_.push_back(sink);
     }
 }
 

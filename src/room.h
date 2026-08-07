@@ -140,6 +140,7 @@ private:
     webrtc::scoped_refptr<webrtc::DataChannelInterface> lossy_dc_;
     std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> remote_data_channels_;
     std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers_;
+    std::vector<std::shared_ptr<void>> remote_track_sinks_;
     uint64_t reliable_buffered_low_threshold_ = 16384;
     uint64_t lossy_buffered_low_threshold_ = 16384;
 
