@@ -81,6 +81,11 @@ add_library(livekit_signaling STATIC
     src/rtc_audio_source.cpp
     src/rtc_video_source.cpp
     src/stats_collector.cpp
+    src/media_converters.cpp
+    src/wasapi_enumerator.cpp
+    src/wasapi_capture.cpp
+    src/dshow_enumerator.cpp
+    src/dshow_capture.cpp
 )
 
 set(WEBRTC_ROOT "E:/vsSource/WebRTC/client-sdk-cpp/client-sdk-rust/target/debug/build/scratch-f4ffd3e87af6f636/out/livekit_webrtc/livekit/win-x64-release-webrtc-51ef663/win-x64-release")
@@ -118,6 +123,19 @@ target_link_libraries(livekit_signaling PUBLIC
     msdmo
     amstrmid
     wmcodecdspuuid
+    avrt
+    strmiids
+    ole32
+    oleaut32
+    propsys
+)
+
+# Live Media Broadcaster Application
+add_executable(livekit_media_broadcaster
+    src/livekit_media_broadcaster.cpp
+)
+target_link_libraries(livekit_media_broadcaster PRIVATE
+    livekit_signaling
 )
 
 

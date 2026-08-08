@@ -13,6 +13,11 @@ void VideoSource::addSink(FrameSink sink) {
 }
 
 void VideoSource::captureFrame(const VideoFrame& frame, const VideoCaptureOptions& options) {
+    if (frame.width() > 0 && frame.height() > 0) {
+        width_ = frame.width();
+        height_ = frame.height();
+    }
+
     std::vector<FrameSink> sinks_copy;
     {
         std::lock_guard<std::mutex> lock(sink_mutex_);

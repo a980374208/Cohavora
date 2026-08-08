@@ -1,6 +1,10 @@
 #include "room.h"
 #include "webrtc_manager.h"
 #include "stats_collector.h"
+#include "local_audio_track.h"
+#include "local_video_track.h"
+#include "rtc_audio_source.h"
+#include "rtc_video_source.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include <nlohmann/json.hpp>
@@ -704,21 +708,149 @@ void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
     }
 
     if (!pub_pc) return;
-    auto rtc_track = track->rtc_track();
+    webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track = track->rtc_track();
+    if (!rtc_track && WebRTCManager::Instance().factory()) {
+        if (track->kind() == TrackKind::Audio) {
+            auto audio_track = std::dynamic_pointer_cast<LocalAudioTrack>(track);
+            if (audio_track && audio_track->source()) {
+                auto rtc_src = RtcAudioSource::Create(audio_track->source());
+                auto rtc_audio_track = WebRTCManager::Instance().factory()->CreateAudioTrack(track->name(), rtc_src.get());
+                track->set_rtc_track(rtc_audio_track);
+                rtc_track = rtc_audio_track;
+            }
+        } else if (track->kind() == TrackKind::Video) {
+            auto video_track = std::dynamic_pointer_cast<LocalVideoTrack>(track);
+            if (video_track && video_track->source()) {
+                auto rtc_src = RtcVideoSource::Create(video_track->source());
+                auto rtc_video_track = WebRTCManager::Instance().factory()->CreateVideoTrack(rtc_src, track->name());
+                track->set_rtc_track(rtc_video_track);
+                rtc_track = rtc_video_track;
+            }
+        }
+    }
+
     if (rtc_track) {
         struct AddTrackParams {
             webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
             webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track;
             std::string stream_id;
+            std::shared_ptr<Room> room;
         };
-        auto* p = new AddTrackParams{pub_pc, rtc_track, stream_id};
+        auto* p = new AddTrackParams{pub_pc, rtc_track, stream_id, shared_from_this()};
         WebRTCManager::Instance().signaling_thread()->PostTask([p]() {
             if (p->pc && p->track) {
                 p->pc->AddTrack(p->track, { p->stream_id });
+                std::cout << "[WebRTC] Added " << p->track->kind() << " track '" << p->track->id()
+                          << "' to PeerConnection! Triggering renegotiation..." << std::endl;
+                p->room->NegotiatePublisher();
             }
             delete p;
         });
     }
+}
+
+void Room::NegotiatePublisher() {
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
+    std::shared_ptr<SignalClient> client;
+    {
+        std::lock_guard lock(room_mutex_);
+        pub_pc = publisher_pc_;
+        client = signal_client_;
+        if (!pub_pc || !client) return;
+
+        if (publisher_negotiating_) {
+            publisher_renegotiation_pending_ = true;
+            return;
+        }
+
+        if (pub_pc->signaling_state() != webrtc::PeerConnectionInterface::SignalingState::kStable) {
+            publisher_renegotiation_pending_ = true;
+            return;
+        }
+
+        publisher_negotiating_ = true;
+        publisher_renegotiation_pending_ = false;
+    }
+
+    auto self = shared_from_this();
+    WebRTCManager::Instance().CreateOffer(pub_pc, executor_,
+        [self, client, pub_pc](const std::string& sdp, const std::string& err) {
+            if (!err.empty()) {
+                std::cerr << "[WebRTC] CreateOffer error: " << err << std::endl;
+                bool need_retry = false;
+                {
+                    std::lock_guard lock(self->room_mutex_);
+                    self->publisher_negotiating_ = false;
+                    if (self->publisher_renegotiation_pending_) {
+                        self->publisher_renegotiation_pending_ = false;
+                        need_retry = true;
+                    }
+                }
+                if (need_retry) {
+                    self->NegotiatePublisher();
+                }
+                return;
+            }
+
+            WebRTCManager::Instance().SetLocalDescription(pub_pc, "offer", sdp, self->executor_,
+                [self, client, pub_pc, sdp](const std::string& set_local_err) {
+                    if (!set_local_err.empty()) {
+                        std::cerr << "[WebRTC] SetLocalDescription offer error: " << set_local_err << std::endl;
+                        bool need_retry = false;
+                        {
+                            std::lock_guard lock(self->room_mutex_);
+                            self->publisher_negotiating_ = false;
+                            if (self->publisher_renegotiation_pending_) {
+                                self->publisher_renegotiation_pending_ = false;
+                                need_retry = true;
+                            }
+                        }
+                        if (need_retry) {
+                            self->NegotiatePublisher();
+                        }
+                        return;
+                    }
+
+                    proto::SignalRequest req;
+                    auto* offer_msg = req.mutable_offer();
+                    offer_msg->set_type("offer");
+                    offer_msg->set_sdp(sdp);
+
+                    // 1. 从 WebRTC Transceivers 读取 MID -> Track ID 映射
+                    for (const auto& transceiver : pub_pc->GetTransceivers()) {
+                        if (transceiver && transceiver->mid().has_value() && transceiver->sender() && transceiver->sender()->track()) {
+                            std::string mid = *transceiver->mid();
+                            std::string track_id = transceiver->sender()->track()->id();
+                            (*offer_msg->mutable_mid_to_track_id())[mid] = track_id;
+                            std::cout << "[WebRTC] Transceiver MID '" << mid << "' mapped to Track '" << track_id << "'" << std::endl;
+                        }
+                    }
+
+                    // 2. 从 SDP 解析 a=mid: 和 a=msid: 双重绑定映射
+                    std::istringstream sdp_stream(sdp);
+                    std::string line;
+                    std::string cur_mid = "";
+                    while (std::getline(sdp_stream, line)) {
+                        if (!line.empty() && line.back() == '\r') line.pop_back();
+                        if (line.rfind("a=mid:", 0) == 0) {
+                            cur_mid = line.substr(6);
+                        } else if (line.rfind("a=msid:", 0) == 0 && !cur_mid.empty()) {
+                            auto space_pos = line.find(' ');
+                            if (space_pos != std::string::npos) {
+                                std::string track_id = line.substr(space_pos + 1);
+                                (*offer_msg->mutable_mid_to_track_id())[cur_mid] = track_id;
+                            }
+                        }
+                    }
+
+                    client->Send(req);
+                    std::cout << "[WebRTC] -> Sent publisher SDP Offer to LiveKit server with mid_to_track_id mapping!" << std::endl;
+                });
+        });
+}
+
+void Room::SendPublishOffer() {
+    NegotiatePublisher();
 }
 
 void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track) {
@@ -781,41 +913,8 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
 }
 
 void Room::OnRenegotiationNeeded(int pc_type) {
-    if (pc_type != 0) return; // 只有 Publisher PC 需要发送 Offer
-
-    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
-    std::shared_ptr<SignalClient> client;
-    {
-        std::lock_guard lock(room_mutex_);
-        pub_pc = publisher_pc_;
-        client = signal_client_;
-    }
-
-    if (!pub_pc || !client) return;
-
-    auto self = shared_from_this();
-    WebRTCManager::Instance().CreateOffer(pub_pc, executor_,
-        [self, client, pub_pc](const std::string& sdp, const std::string& err) {
-            if (!err.empty()) {
-                std::cerr << "[WebRTC] CreateOffer error: " << err << std::endl;
-                return;
-            }
-
-            WebRTCManager::Instance().SetLocalDescription(pub_pc, "offer", sdp, self->executor_,
-                [client, sdp](const std::string& set_local_err) {
-                    if (!set_local_err.empty()) {
-                        std::cerr << "[WebRTC] SetLocalDescription offer error: " << set_local_err << std::endl;
-                        return;
-                    }
-
-                    proto::SignalRequest req;
-                    auto* offer_msg = req.mutable_offer();
-                    offer_msg->set_type("offer");
-                    offer_msg->set_sdp(sdp);
-                    client->Send(req);
-                    std::cout << "[WebRTC] -> Sent publisher SDP Offer to LiveKit server!" << std::endl;
-                });
-        });
+    if (pc_type != 0) return; // 只有 Publisher PC 需要由 Client 发送 Offer
+    NegotiatePublisher();
 }
 
 void Room::HandleSignalEvent(const SignalEvent& event) {
@@ -1042,10 +1141,26 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
 
     if (!pub_pc) return;
 
+    auto self = shared_from_this();
     WebRTCManager::Instance().SetRemoteDescription(pub_pc, answer.type(), answer.sdp(), executor_,
-        [](const std::string& err) {
-            if (!err.empty()) {
-                std::cerr << "Room: SetRemoteDescription answer error: " << err << std::endl;
+        [self](const std::string& err) {
+            bool need_retry = false;
+            {
+                std::lock_guard lock(self->room_mutex_);
+                if (!err.empty()) {
+                    std::cerr << "Room: SetRemoteDescription answer error: " << err << std::endl;
+                } else {
+                    std::cout << "[WebRTC] Publisher remote description applied successfully! PC signaling state is STABLE." << std::endl;
+                }
+                self->publisher_negotiating_ = false;
+                if (self->publisher_renegotiation_pending_) {
+                    self->publisher_renegotiation_pending_ = false;
+                    need_retry = true;
+                }
+            }
+            if (need_retry) {
+                std::cout << "[WebRTC] Triggering queued renegotiation Offer..." << std::endl;
+                self->NegotiatePublisher();
             }
         });
 }
