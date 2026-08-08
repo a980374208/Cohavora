@@ -10,7 +10,6 @@
 #include "api/sequence_checker.h"
 #include <iostream>
 
-
 #include "api/environment/environment_factory.h"
 #include "api/audio/audio_device.h"
 #include "modules/video_coding/codecs/vp8/include/vp8.h"

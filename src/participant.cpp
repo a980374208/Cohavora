@@ -1,4 +1,6 @@
 #include "participant.h"
+#include "local_video_track.h"
+#include "video_source.h"
 #include "livekit_rtc.pb.h"
 #include <iostream>
 #include <chrono>
@@ -29,6 +31,8 @@ void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
     auto* add_track = req.mutable_add_track();
     add_track->set_cid(track->name()); 
     add_track->set_name(track->name());
+    std::string stream_id = "livekit_stream_" + (identity().empty() ? "local" : identity());
+    add_track->set_stream(stream_id);
     
     if (track->kind() == TrackKind::Audio) {
         add_track->set_type(proto::TrackType::AUDIO);
@@ -36,13 +40,20 @@ void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
     } else if (track->kind() == TrackKind::Video) {
         add_track->set_type(proto::TrackType::VIDEO);
         add_track->set_source(proto::TrackSource::CAMERA);
-        add_track->set_width(1280);
-        add_track->set_height(720);
+        int w = 1280;
+        int h = 720;
+        auto vid_track = std::dynamic_pointer_cast<LocalVideoTrack>(track);
+        if (vid_track && vid_track->source()) {
+            if (vid_track->source()->width() > 0) w = vid_track->source()->width();
+            if (vid_track->source()->height() > 0) h = vid_track->source()->height();
+        }
+        add_track->set_width(w);
+        add_track->set_height(h);
         auto* layer = add_track->add_layers();
         layer->set_quality(proto::VideoQuality::HIGH);
-        layer->set_width(1280);
-        layer->set_height(720);
-        layer->set_bitrate(1700000);
+        layer->set_width(w);
+        layer->set_height(h);
+        layer->set_bitrate(2500000);
     }
 
     auto pub = std::make_shared<TrackPublication>(track, track->name(), track->name());

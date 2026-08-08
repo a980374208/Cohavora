@@ -40,16 +40,19 @@ static std::string Base64Encode(const unsigned char* buffer, size_t length) {
     result.reserve(((length + 2) / 3) * 4);
     size_t i = 0;
     while (i < length) {
-        uint32_t octet_a = i < length ? buffer[i++] : 0;
-        uint32_t octet_b = i < length ? buffer[i++] : 0;
-        uint32_t octet_c = i < length ? buffer[i++] : 0;
+        bool has_a = (i < length);
+        uint32_t octet_a = has_a ? buffer[i++] : 0;
+        bool has_b = (i < length);
+        uint32_t octet_b = has_b ? buffer[i++] : 0;
+        bool has_c = (i < length);
+        uint32_t octet_c = has_c ? buffer[i++] : 0;
 
         uint32_t triple = (octet_a << 0x10) + (octet_b << 0x08) + octet_c;
 
         result.push_back(char_set[(triple >> 3 * 6) & 0x3F]);
         result.push_back(char_set[(triple >> 2 * 6) & 0x3F]);
-        result.push_back(i > length + 1 ? '=' : char_set[(triple >> 1 * 6) & 0x3F]);
-        result.push_back(i > length ? '=' : char_set[(triple >> 0 * 6) & 0x3F]);
+        result.push_back(has_b ? char_set[(triple >> 1 * 6) & 0x3F] : '=');
+        result.push_back(has_c ? char_set[(triple >> 0 * 6) & 0x3F] : '=');
     }
     return result;
 }

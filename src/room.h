@@ -99,6 +99,8 @@ public:
     asio::awaitable<RoomStatsReport> GetStats();
 
     void AddTrackToPublisher(std::shared_ptr<Track> track);
+    void SendPublishOffer();
+    void NegotiatePublisher();
 
     // 内部 WebRTC 观察者回调接口
     void OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type);
@@ -134,6 +136,8 @@ private:
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> subscriber_pc_;
     std::unique_ptr<webrtc::PeerConnectionObserver> publisher_observer_;
     std::unique_ptr<webrtc::PeerConnectionObserver> subscriber_observer_;
+    bool publisher_negotiating_ = false;
+    bool publisher_renegotiation_pending_ = false;
 
     // DataChannel 句柄与背压控制水线
     webrtc::scoped_refptr<webrtc::DataChannelInterface> reliable_dc_;

@@ -81,6 +81,11 @@ add_library(livekit_signaling STATIC
     src/rtc_audio_source.cpp
     src/rtc_video_source.cpp
     src/stats_collector.cpp
+    src/media_converters.cpp
+    src/wasapi_enumerator.cpp
+    src/wasapi_capture.cpp
+    src/dshow_enumerator.cpp
+    src/dshow_capture.cpp
 )
 
 set(WEBRTC_ROOT "E:/vsSource/WebRTC/client-sdk-cpp/client-sdk-rust/target/debug/build/scratch-f4ffd3e87af6f636/out/livekit_webrtc/livekit/win-x64-release-webrtc-51ef663/win-x64-release")
@@ -118,6 +123,11 @@ target_link_libraries(livekit_signaling PUBLIC
     msdmo
     amstrmid
     wmcodecdspuuid
+    avrt
+    strmiids
+    ole32
+    oleaut32
+    propsys
 )
 
 # Unit/Integration Tests
@@ -177,6 +187,38 @@ target_link_libraries(test_livekit_official_connect PRIVATE
     livekit_signaling
 )
 
+# WASAPI Audio Capture Test
+add_executable(test_wasapi_capture
+    tests/test_wasapi_capture.cpp
+)
+target_link_libraries(test_wasapi_capture PRIVATE
+    livekit_signaling
+)
+
+# DirectShow Video Capture Test
+add_executable(test_dshow_capture
+    tests/test_dshow_capture.cpp
+)
+target_link_libraries(test_dshow_capture PRIVATE
+    livekit_signaling
+)
+
+# Media Pipeline E2E Test
+add_executable(test_media_pipeline_e2e
+    tests/test_media_pipeline_e2e.cpp
+)
+target_link_libraries(test_media_pipeline_e2e PRIVATE
+    livekit_signaling
+)
+
+# Live Media Broadcaster Application
+add_executable(livekit_media_broadcaster
+    src/livekit_media_broadcaster.cpp
+)
+target_link_libraries(livekit_media_broadcaster PRIVATE
+    livekit_signaling
+)
+
 enable_testing()
 add_test(NAME signaling_tests COMMAND livekit_signaling_tests_run_v4)
 add_test(NAME panic_guard_test COMMAND test_panic_guard)
@@ -185,6 +227,9 @@ add_test(NAME rpc_system_test COMMAND test_rpc_system)
 add_test(NAME media_streaming_test COMMAND test_media_streaming)
 add_test(NAME stats_system_test COMMAND test_stats_system)
 add_test(NAME livekit_official_connect_test COMMAND test_livekit_official_connect)
+add_test(NAME wasapi_capture_test COMMAND test_wasapi_capture)
+add_test(NAME dshow_capture_test COMMAND test_dshow_capture)
+add_test(NAME media_pipeline_e2e_test COMMAND test_media_pipeline_e2e)
 
 
 

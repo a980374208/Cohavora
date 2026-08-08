@@ -5,6 +5,8 @@
 #include "api/video/video_rotation.h"
 #include <cstring>
 #include <chrono>
+#include <iostream>
+#include <atomic>
 
 namespace livekit {
 
@@ -50,6 +52,27 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
                 std::memcpy(i420_buffer->MutableDataV() + r * i420_buffer->StrideV(),
                             v_data + r * planes[2].stride,
                             chroma_w);
+            }
+        }
+    } else if (frame.type() == VideoBufferType::NV12) {
+        const uint8_t* y_src = frame.data();
+        const uint8_t* uv_src = frame.data() + (width * height);
+        uint8_t* y_dst = i420_buffer->MutableDataY();
+        uint8_t* u_dst = i420_buffer->MutableDataU();
+        uint8_t* v_dst = i420_buffer->MutableDataV();
+        int y_stride = i420_buffer->StrideY();
+        int u_stride = i420_buffer->StrideU();
+        int v_stride = i420_buffer->StrideV();
+
+        for (int r = 0; r < height; ++r) {
+            std::memcpy(y_dst + r * y_stride, y_src + r * width, width);
+        }
+        int chroma_h = (height + 1) / 2;
+        int chroma_w = (width + 1) / 2;
+        for (int r = 0; r < chroma_h; ++r) {
+            for (int c = 0; c < chroma_w; ++c) {
+                u_dst[r * u_stride + c] = uv_src[r * width + c * 2];
+                v_dst[r * v_stride + c] = uv_src[r * width + c * 2 + 1];
             }
         }
     } else {
