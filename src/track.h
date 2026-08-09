@@ -18,6 +18,29 @@ enum class TrackKind {
     Unknown
 };
 
+struct VideoPreset {
+    int width = 0;
+    int height = 0;
+    int max_bitrate_bps = 0;
+    double max_fps = 30.0;
+};
+
+struct VideoLayerSetting {
+    int width = 0;
+    int height = 0;
+    int max_bitrate_bps = 0;
+    int max_fps = 30;
+    std::string rid; // "f", "h", "q"
+    double scale_resolution_down_by = 1.0;
+};
+
+struct VideoPublishOptions {
+    bool simulcast = true;
+    std::string video_codec = "vp8"; // "vp8", "h264", "vp9", "av1"
+    std::string scalability_mode = ""; // e.g. "L3T3_KEY"
+    std::vector<VideoLayerSetting> layers;
+};
+
 class Track {
 public:
     using AudioFrameSink = std::function<void(const AudioFrame&)>;

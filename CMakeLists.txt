@@ -211,6 +211,14 @@ target_link_libraries(test_media_pipeline_e2e PRIVATE
     livekit_signaling
 )
 
+# VP8 Simulcast Test
+add_executable(test_simulcast
+    tests/test_simulcast.cpp
+)
+target_link_libraries(test_simulcast PRIVATE
+    livekit_signaling
+)
+
 # Live Media Broadcaster Application
 add_executable(livekit_media_broadcaster
     src/livekit_media_broadcaster.cpp
@@ -337,6 +345,7 @@ add_test(NAME livekit_official_connect_test COMMAND test_livekit_official_connec
 add_test(NAME wasapi_capture_test COMMAND test_wasapi_capture)
 add_test(NAME dshow_capture_test COMMAND test_dshow_capture)
 add_test(NAME media_pipeline_e2e_test COMMAND test_media_pipeline_e2e)
+add_test(NAME simulcast_test COMMAND test_simulcast)
 
 
 

@@ -730,18 +730,63 @@ void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
     }
 
     if (rtc_track) {
+        VideoPublishOptions publish_opts;
+        if (track->kind() == TrackKind::Video) {
+            auto video_track = std::dynamic_pointer_cast<LocalVideoTrack>(track);
+            if (video_track) {
+                publish_opts = video_track->publish_options();
+            }
+        }
+
         struct AddTrackParams {
             webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
             webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track;
             std::string stream_id;
+            VideoPublishOptions publish_opts;
             std::shared_ptr<Room> room;
         };
-        auto* p = new AddTrackParams{pub_pc, rtc_track, stream_id, shared_from_this()};
+        auto* p = new AddTrackParams{pub_pc, rtc_track, stream_id, publish_opts, shared_from_this()};
         WebRTCManager::Instance().signaling_thread()->PostTask([p]() {
             if (p->pc && p->track) {
-                p->pc->AddTrack(p->track, { p->stream_id });
-                std::cout << "[WebRTC] Added " << p->track->kind() << " track '" << p->track->id()
-                          << "' to PeerConnection! Triggering renegotiation..." << std::endl;
+                if (p->track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind && p->publish_opts.simulcast && !p->publish_opts.layers.empty()) {
+                    webrtc::RtpTransceiverInit init;
+                    init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
+                    init.stream_ids = { p->stream_id };
+
+                    for (const auto& layer : p->publish_opts.layers) {
+                        webrtc::RtpEncodingParameters encoding;
+                        encoding.active = true;
+                        encoding.rid = layer.rid;
+                        encoding.scale_resolution_down_by = layer.scale_resolution_down_by;
+                        encoding.max_bitrate_bps = layer.max_bitrate_bps;
+                        encoding.max_framerate = layer.max_fps;
+                        if (!p->publish_opts.scalability_mode.empty()) {
+                            encoding.scalability_mode = p->publish_opts.scalability_mode;
+                        }
+                        init.send_encodings.push_back(encoding);
+                    }
+                    std::cout << "[SIMULCAST WEBRTC] Configured AddTransceiver with " << init.send_encodings.size() << " send encodings:\n";
+                    for (size_t idx = 0; idx < init.send_encodings.size(); ++idx) {
+                        const auto& enc = init.send_encodings[idx];
+                        std::cout << "  Encoding [" << idx << "]: rid='" << enc.rid
+                                  << "', active=" << (enc.active ? "true" : "false")
+                                  << ", scale_down=" << enc.scale_resolution_down_by.value_or(1.0)
+                                  << ", max_bitrate=" << enc.max_bitrate_bps.value_or(0) << "bps\n";
+                    }
+                    auto result = p->pc->AddTransceiver(p->track, init);
+                    if (result.ok()) {
+                        std::cout << "[WebRTC] Successfully added video track '" << p->track->id()
+                                  << "' with VP8 Simulcast (" << p->publish_opts.layers.size() << " layers)!" << std::endl;
+                    } else {
+                        std::cerr << "[WebRTC] AddTransceiver failed: " << result.error().message()
+                                  << ", falling back to AddTrack..." << std::endl;
+                        p->pc->AddTrack(p->track, { p->stream_id });
+                    }
+                } else {
+                    p->pc->AddTrack(p->track, { p->stream_id });
+                    std::cout << "[WebRTC] Added " << p->track->kind() << " track '" << p->track->id()
+                              << "' to PeerConnection!" << std::endl;
+                }
                 p->room->NegotiatePublisher();
             }
             delete p;
@@ -840,6 +885,18 @@ void Room::NegotiatePublisher() {
                                 std::string track_id = line.substr(space_pos + 1);
                                 (*offer_msg->mutable_mid_to_track_id())[cur_mid] = track_id;
                             }
+                        }
+                    }
+
+                    std::cout << "[SDP OFFER KEY ATTRIBUTES]:\n";
+                    std::istringstream sdp_diag(sdp);
+                    std::string diag_line;
+                    while (std::getline(sdp_diag, diag_line)) {
+                        if (diag_line.find("a=simulcast") != std::string::npos ||
+                            diag_line.find("a=rid") != std::string::npos ||
+                            diag_line.find("rtp-stream-id") != std::string::npos ||
+                            diag_line.find("m=video") != std::string::npos) {
+                            std::cout << "  " << diag_line << "\n";
                         }
                     }
 
@@ -971,6 +1028,12 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
         HandleAnswerSignal(msg->answer());
     } else if (msg->has_trickle()) {
         HandleTrickleSignal(msg->trickle());
+    } else if (msg->has_track_published()) {
+        const auto& tp = msg->track_published();
+        std::cout << "[SIGNAL RECV] TrackPublished ACK: cid='" << tp.cid()
+                  << "', track_sid='" << tp.track().sid()
+                  << "', type=" << tp.track().type()
+                  << ", name='" << tp.track().name() << "'" << std::endl;
     }
 }
 
@@ -1139,8 +1202,19 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
         pub_pc = publisher_pc_;
     }
 
-    if (!pub_pc) return;
-
+    std::cout << "[SDP ANSWER] Received remote SDP Answer (length: " << answer.sdp().length() << " bytes):\n";
+    std::istringstream answer_stream(answer.sdp());
+    std::string ans_line;
+    while (std::getline(answer_stream, ans_line)) {
+        if (ans_line.find("m=video") != std::string::npos ||
+            ans_line.find("a=simulcast") != std::string::npos ||
+            ans_line.find("a=rid") != std::string::npos ||
+            ans_line.find("a=recvonly") != std::string::npos ||
+            ans_line.find("a=sendrecv") != std::string::npos ||
+            ans_line.find("a=inactive") != std::string::npos) {
+            std::cout << "  [SDP ANS] " << ans_line << "\n";
+        }
+    }
     auto self = shared_from_this();
     WebRTCManager::Instance().SetRemoteDescription(pub_pc, answer.type(), answer.sdp(), executor_,
         [self](const std::string& err) {
