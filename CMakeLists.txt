@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(livekit_signaling_cpp LANGUAGES CXX)
+project(livekit_signaling_cpp LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -217,6 +217,113 @@ add_executable(livekit_media_broadcaster
 )
 target_link_libraries(livekit_media_broadcaster PRIVATE
     livekit_signaling
+)
+
+# Meeting App with Telegram libui
+set(TDESKTOP_DIR "E:/vsSource/TDeskTop/tdesktop")
+set(TDESKTOP_OUT_DIR "E:/vsSource/TDeskTop/tdesktop/out")
+set(TDESKTOP_LIBS_DIR "E:/vsSource/TDeskTop/Libraries/win64")
+
+set(Qt5_DIR "${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/cmake/Qt5")
+find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Svg)
+
+set(CMAKE_AUTOMOC ON)
+
+add_executable(livekit_meeting_app
+    src/main_meeting_app.cpp
+    src/ui/sidebar_widget.cpp
+    src/ui/sidebar_widget.h
+    src/ui/action_card_widget.cpp
+    src/ui/action_card_widget.h
+    src/ui/schedule_widget.cpp
+    src/ui/schedule_widget.h
+    src/ui/meeting_main_window.cpp
+    src/ui/meeting_main_window.h
+    src/ui/meeting_ui_integration.h
+)
+
+target_include_directories(livekit_meeting_app BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${TDESKTOP_DIR}/Telegram/lib_ui
+    ${TDESKTOP_DIR}/Telegram/lib_base
+    ${TDESKTOP_DIR}/Telegram/lib_rpl
+    ${TDESKTOP_DIR}/Telegram/lib_crl
+    ${TDESKTOP_OUT_DIR}/Telegram/lib_ui/gen
+    ${TDESKTOP_DIR}/Telegram/ThirdParty/GSL/include
+    ${TDESKTOP_DIR}/Telegram/ThirdParty/range-v3/include
+    ${TDESKTOP_DIR}/Telegram/ThirdParty/expected/include
+    ${TDESKTOP_DIR}/Telegram/ThirdParty/xxHash
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtWidgets
+    ${TDESKTOP_LIBS_DIR}/zlib/include
+    ${TDESKTOP_LIBS_DIR}/openssl3/include
+    ${TDESKTOP_LIBS_DIR}/lzma/include
+)
+
+target_link_libraries(livekit_meeting_app PRIVATE
+    ${TDESKTOP_OUT_DIR}/Telegram/lib_ui/Release/lib_ui.lib
+    ${TDESKTOP_OUT_DIR}/Telegram/lib_base/Release/lib_base.lib
+    ${TDESKTOP_OUT_DIR}/Telegram/lib_crl/lib_crl.dir/Release/lib_crl.lib
+    ${TDESKTOP_OUT_DIR}/cmake/external/lz4/Release/external_lz4_bundled.lib
+    ${TDESKTOP_LIBS_DIR}/tg_angle/out/Release/tg_angle.lib
+    ${TDESKTOP_LIBS_DIR}/zlib/Release/zlibstatic.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Widgets.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Svg.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5FontDatabaseSupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5EventDispatcherSupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5ThemeSupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5WindowsUIAutomationSupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5AccessibilitySupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5DeviceDiscoverySupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5EdidSupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtfreetype.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtharfbuzz.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtlibpng.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/platforms/qwindows.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/styles/qwindowsvistastyle.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qsvg.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qico.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qjpeg.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qgif.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qtga.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qtiff.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qwbmp.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qwebp.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/iconengines/qsvgicon.lib
+    ${TDESKTOP_LIBS_DIR}/mozjpeg/release/jpeg-static.lib
+    livekit_signaling
+    Dwmapi
+    UxTheme
+    d3d9
+    dxgi
+    d3d11
+    dxguid
+    netapi32
+    userenv
+    imm32
+    winmm
+    wtsapi32
+    version
+)
+
+set_target_properties(livekit_meeting_app PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+
+target_compile_definitions(livekit_meeting_app PRIVATE
+    $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>
+    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
+    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
+)
+
+target_link_options(livekit_meeting_app PRIVATE
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
 )
 
 enable_testing()
