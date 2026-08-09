@@ -7,21 +7,30 @@
 #include "api/peer_connection_interface.h"
 #include "stats.h"
 
+#include <mutex>
+#include <condition_variable>
+
 namespace livekit {
+
+struct RtcStatsState {
+    std::mutex mutex;
+    std::condition_variable cv;
+    bool done{false};
+    StatsReport report;
+};
 
 class RtcStatsCollectorBridge : public webrtc::RTCStatsCollectorCallback {
 public:
-    static webrtc::scoped_refptr<RtcStatsCollectorBridge> Create();
+    static webrtc::scoped_refptr<RtcStatsCollectorBridge> Create(std::shared_ptr<RtcStatsState> state);
 
-    RtcStatsCollectorBridge() = default;
+    explicit RtcStatsCollectorBridge(std::shared_ptr<RtcStatsState> state)
+        : state_(std::move(state)) {}
     ~RtcStatsCollectorBridge() override = default;
 
     void OnStatsDelivered(const webrtc::scoped_refptr<const webrtc::RTCStatsReport>& report) override;
 
-    std::future<StatsReport> get_future() { return promise_.get_future(); }
-
 private:
-    std::promise<StatsReport> promise_;
+    std::shared_ptr<RtcStatsState> state_;
 };
 
 StatsReport ParseRtcStatsReport(const webrtc::RTCStatsReport& report);

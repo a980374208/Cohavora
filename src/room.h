@@ -97,6 +97,7 @@ public:
 
     // === 新增：RTCStats 实时质量与统计报表采集 ===
     asio::awaitable<RoomStatsReport> GetStats();
+    RoomStatsReport GetStatsSync();
 
     void AddTrackToPublisher(std::shared_ptr<Track> track);
     void SendPublishOffer();

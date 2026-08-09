@@ -28,6 +28,7 @@
 #include "dshow_capture.h"
 #include "media_converters.h"
 #include "stats.h"
+#include "telemetry.h"
 
 // 房间事件监听器
 class BroadcasterRoomListener : public livekit::RoomListener {
@@ -371,6 +372,10 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    std::atomic<bool> broadcaster_running{true};
+    std::mutex telemetry_mutex;
+    std::condition_variable telemetry_cv;
+
     // ------------------------------------------------------------------
     // Step 2: 监听 Ctrl+C 信号以优雅退出
     // ------------------------------------------------------------------
@@ -378,7 +383,9 @@ int main(int argc, char* argv[]) {
     signals.async_wait([&](const std::error_code& error, int signal_number) {
         if (!error) {
             std::cout << "\n[SIGNAL] Received termination signal (" << signal_number << "), stopping broadcaster...\n";
+            broadcaster_running.store(false);
             pattern_running.store(false);
+            telemetry_cv.notify_all();
             if (wasapi_cap) wasapi_cap->Stop();
             if (dshow_cap) dshow_cap->Stop();
             room->Disconnect();
@@ -425,10 +432,48 @@ int main(int argc, char* argv[]) {
         }
     }, asio::detached);
 
+    // 启动 3 分钟全量媒体遥测与质量监控线程
+    std::thread telemetry_thread([&, room]() {
+        uint64_t last_bytes_sent = 0;
+        auto last_time = std::chrono::steady_clock::now();
+
+        std::unique_lock<std::mutex> lock(telemetry_mutex);
+        // 首次推流成功后等待 5 秒建立连接基线
+        telemetry_cv.wait_for(lock, std::chrono::seconds(5), [&]() { return !broadcaster_running.load(); });
+
+        while (broadcaster_running.load()) {
+            try {
+                livekit::RoomStatsReport stats = room->GetStatsSync();
+                auto now = std::chrono::steady_clock::now();
+                double elapsed_sec = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_time).count() / 1000.0;
+                if (elapsed_sec <= 0.01) elapsed_sec = 1.0;
+
+                uint64_t current_bytes = stats.total_bytes_sent;
+                double send_bitrate_mbps = 0.0;
+                if (last_bytes_sent > 0 && current_bytes >= last_bytes_sent) {
+                    send_bitrate_mbps = ((current_bytes - last_bytes_sent) * 8.0) / (elapsed_sec * 1000000.0);
+                }
+                last_bytes_sent = current_bytes;
+                last_time = now;
+
+                livekit::Telemetry::Instance().PrintMetricsReport(stats, send_bitrate_mbps);
+            } catch (const std::exception& e) {
+                std::cout << "[TELEMETRY ERROR] " << e.what() << std::endl;
+            } catch (...) {}
+
+            // 每 3 分钟自动刷新打印一次遥测面板
+            telemetry_cv.wait_for(lock, std::chrono::minutes(3), [&]() { return !broadcaster_running.load(); });
+        }
+    });
+
     // 运行主事件循环
     io_ctx.run();
 
+    broadcaster_running.store(false);
     pattern_running.store(false);
+    if (telemetry_thread.joinable()) {
+        telemetry_thread.join();
+    }
     if (pattern_thread.joinable()) {
         pattern_thread.join();
     }

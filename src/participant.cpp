@@ -1,4 +1,5 @@
 #include "participant.h"
+#include "telemetry.h"
 #include "local_video_track.h"
 #include "video_source.h"
 #include "livekit_rtc.pb.h"
@@ -26,6 +27,7 @@ static int64_t CurrentEpochMs() {
 
 void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
     if (!track) return;
+    Telemetry::Instance().RecordPublishStart();
 
     proto::SignalRequest req;
     auto* add_track = req.mutable_add_track();
