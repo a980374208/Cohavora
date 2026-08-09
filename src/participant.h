@@ -30,9 +30,13 @@ public:
     std::string sid() const { return sid_; }
     std::string identity() const { return identity_; }
     std::string metadata() const { return metadata_; }
+    bool is_speaking() const { return speaking_; }
+    float audio_level() const { return audio_level_; }
 
     void set_metadata(const std::string& metadata) { metadata_ = metadata; }
     void set_sid(const std::string& sid) { sid_ = sid; }
+    void set_speaking(bool speaking) { speaking_ = speaking; }
+    void set_audio_level(float level) { audio_level_ = level; }
 
     std::map<std::string, std::shared_ptr<TrackPublication>> tracks() const { return tracks_; }
 
@@ -52,6 +56,8 @@ protected:
     std::string sid_;
     std::string identity_;
     std::string metadata_;
+    bool speaking_{false};
+    float audio_level_{0.0f};
     std::map<std::string, std::shared_ptr<TrackPublication>> tracks_;
 };
 

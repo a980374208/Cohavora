@@ -29,6 +29,7 @@
 #include "media_converters.h"
 #include "stats.h"
 #include "telemetry.h"
+#include "audio_vad.h"
 
 // 房间事件监听器
 class BroadcasterRoomListener : public livekit::RoomListener {
@@ -83,6 +84,20 @@ public:
                   << report.subscriber_rtt_ms << "ms, Total Sent: "
                   << (report.total_bytes_sent / 1024) << " KB, Bitrate: "
                   << (report.available_outgoing_bitrate / 1000.0) << " kbps" << std::endl;
+    }
+
+    void OnActiveSpeakersChanged(const std::vector<std::shared_ptr<livekit::Participant>>& speakers) override {
+        if (speakers.empty()) return;
+        std::cout << "\n-------------------------------------------------------------------" << std::endl;
+        std::cout << " [SPEAKER DETECT] Active Speakers (" << speakers.size() << " active):" << std::endl;
+        for (size_t i = 0; i < speakers.size(); ++i) {
+            float pct = speakers[i]->audio_level() * 100.0f;
+            std::cout << "  * [" << (i + 1) << "] " << speakers[i]->identity()
+                      << " (SID: " << speakers[i]->sid() << ")"
+                      << " | Audio Level: " << std::fixed << std::setprecision(1) << pct << "%"
+                      << (speakers[i]->is_speaking() ? " [SPEAKING]" : "") << std::endl;
+        }
+        std::cout << "-------------------------------------------------------------------\n" << std::endl;
     }
 };
 
