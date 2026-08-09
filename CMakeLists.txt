@@ -58,45 +58,107 @@ add_custom_command(
     VERBATIM
 )
 
+# 源文件列表
+set(LIVEKIT_SOURCES
+    src/signal/websocket_client.cpp
+    src/signal/region_provider.cpp
+    src/signal/signal_stream.cpp
+    src/signal/signal_client.cpp
+    src/core/participant.cpp
+    src/core/room.cpp
+    src/core/local_audio_track.cpp
+    src/core/local_video_track.cpp
+    src/core/remote_track_publication.cpp
+    src/core/adaptive_stream_manager.cpp
+    src/rtc/webrtc_manager.cpp
+    src/rtc/audio_frame.cpp
+    src/rtc/video_frame.cpp
+    src/rtc/audio_source.cpp
+    src/rtc/video_source.cpp
+    src/rtc/audio_stream.cpp
+    src/rtc/video_stream.cpp
+    src/rtc/rtc_audio_source.cpp
+    src/rtc/rtc_video_source.cpp
+    src/media/media_converters.cpp
+    src/media/wasapi_enumerator.cpp
+    src/media/wasapi_capture.cpp
+    src/media/dshow_enumerator.cpp
+    src/media/dshow_capture.cpp
+    src/media/audio_vad.cpp
+    src/e2ee/key_provider.cpp
+    src/e2ee/frame_cryptor.cpp
+    src/telemetry/crash_handler.cpp
+    src/telemetry/stats_collector.cpp
+)
+
+# 头文件列表
+set(LIVEKIT_HEADERS
+    src/signal/websocket_client.h
+    src/signal/region_provider.h
+    src/signal/signal_stream.h
+    src/signal/signal_client.h
+    src/core/room.h
+    src/core/participant.h
+    src/core/track.h
+    src/core/local_audio_track.h
+    src/core/local_video_track.h
+    src/core/remote_track_publication.h
+    src/core/adaptive_stream_manager.h
+    src/rtc/webrtc_manager.h
+    src/rtc/audio_frame.h
+    src/rtc/video_frame.h
+    src/rtc/audio_source.h
+    src/rtc/video_source.h
+    src/rtc/audio_stream.h
+    src/rtc/video_stream.h
+    src/rtc/rtc_audio_source.h
+    src/rtc/rtc_video_source.h
+    src/media/media_converters.h
+    src/media/wasapi_types.h
+    src/media/wasapi_enumerator.h
+    src/media/wasapi_capture.h
+    src/media/dshow_types.h
+    src/media/dshow_enumerator.h
+    src/media/dshow_capture.h
+    src/media/audio_vad.h
+    src/e2ee/key_provider.h
+    src/e2ee/frame_cryptor.h
+    src/rpc/rpc_types.h
+    src/rpc/chat_message.h
+    src/telemetry/stats.h
+    src/telemetry/stats_collector.h
+    src/telemetry/telemetry.h
+    src/telemetry/crash_handler.h
+    src/telemetry/safe_spawn.h
+    src/telemetry/coro_allocator.h
+)
+
+# 源文件分组
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Source Files" FILES ${LIVEKIT_SOURCES})
+
+# 头文件分组
+source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Header Files" FILES ${LIVEKIT_HEADERS})
+
 # Main Signaling Library
 add_library(livekit_signaling STATIC
     ${PROTO_SRCS}
     ${PROTO_HDRS}
-    src/websocket_client.cpp
-    src/region_provider.cpp
-    src/signal_stream.cpp
-    src/signal_client.cpp
-    src/participant.cpp
-    src/room.cpp
-    src/webrtc_manager.cpp
-    src/crash_handler.cpp
-    src/audio_frame.cpp
-    src/video_frame.cpp
-    src/audio_source.cpp
-    src/video_source.cpp
-    src/audio_stream.cpp
-    src/video_stream.cpp
-    src/local_audio_track.cpp
-    src/local_video_track.cpp
-    src/rtc_audio_source.cpp
-    src/rtc_video_source.cpp
-    src/stats_collector.cpp
-    src/media_converters.cpp
-    src/wasapi_enumerator.cpp
-    src/wasapi_capture.cpp
-    src/dshow_enumerator.cpp
-    src/dshow_capture.cpp
-    src/remote_track_publication.cpp
-    src/adaptive_stream_manager.cpp
-    src/audio_vad.cpp
-    src/key_provider.cpp
-    src/frame_cryptor.cpp
+    ${LIVEKIT_SOURCES}
+    ${LIVEKIT_HEADERS}
 )
 
 set(WEBRTC_ROOT "E:/vsSource/WebRTC/client-sdk-cpp/client-sdk-rust/target/debug/build/scratch-f4ffd3e87af6f636/out/livekit_webrtc/livekit/win-x64-release-webrtc-51ef663/win-x64-release")
 
 target_include_directories(livekit_signaling BEFORE PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/core
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/signal
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/rtc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/media
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/e2ee
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/rpc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/telemetry
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/app
     ${GEN_DIR}
     ${WEBRTC_ROOT}/include/third_party/boringssl/src/include
     ${WEBRTC_ROOT}/include
@@ -251,7 +313,7 @@ target_link_libraries(test_e2ee PRIVATE
 
 # Live Media Broadcaster Application
 add_executable(livekit_media_broadcaster
-    src/livekit_media_broadcaster.cpp
+    src/media/livekit_media_broadcaster.cpp
 )
 target_link_libraries(livekit_media_broadcaster PRIVATE
     livekit_signaling
@@ -268,7 +330,7 @@ find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Svg)
 set(CMAKE_AUTOMOC ON)
 
 add_executable(livekit_meeting_app
-    src/main_meeting_app.cpp
+    src/app/main_meeting_app.cpp
     src/ui/sidebar_widget.cpp
     src/ui/sidebar_widget.h
     src/ui/action_card_widget.cpp
