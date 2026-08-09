@@ -15,6 +15,7 @@
 #include <optional>
 #include "websocket_client.h"
 #include "signal_stream.h"
+#include "livekit_models.pb.h"
 
 // Forward declare generated protobuf messages
 namespace livekit {
@@ -96,6 +97,18 @@ public:
 
     // Send a message
     void Send(const proto::SignalRequest& req);
+
+    // Send update track settings request to server for Adaptive Stream
+    void SendUpdateTrackSettings(const std::string& track_sid,
+                                 bool disabled,
+                                 proto::VideoQuality quality = proto::VideoQuality::HIGH,
+                                 uint32_t width = 0,
+                                 uint32_t height = 0,
+                                 uint32_t fps = 0,
+                                 uint32_t priority = 0);
+
+    // Send update subscription request to server for subscribing / unsubscribing tracks
+    void SendUpdateSubscription(const std::vector<std::string>& track_sids, bool subscribe);
 
     // Close signaling connection
     void Close();

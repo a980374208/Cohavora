@@ -379,6 +379,43 @@ void SignalClient::Send(const proto::SignalRequest& req) {
     }
 }
 
+void SignalClient::SendUpdateTrackSettings(const std::string& track_sid,
+                                             bool disabled,
+                                             proto::VideoQuality quality,
+                                             uint32_t width,
+                                             uint32_t height,
+                                             uint32_t fps,
+                                             uint32_t priority) {
+    proto::SignalRequest req;
+    auto* settings = req.mutable_track_setting();
+    settings->add_track_sids(track_sid);
+    settings->set_disabled(disabled);
+    settings->set_quality(quality);
+    if (width > 0) settings->set_width(width);
+    if (height > 0) settings->set_height(height);
+    if (fps > 0) settings->set_fps(fps);
+    if (priority > 0) settings->set_priority(priority);
+
+    std::cout << "[ADAPTIVE STREAM] Sent UpdateTrackSettings: sid=" << track_sid
+              << ", disabled=" << (disabled ? "true" : "false")
+              << ", quality=" << quality
+              << ", dim=" << width << "x" << height << std::endl;
+    Send(req);
+}
+
+void SignalClient::SendUpdateSubscription(const std::vector<std::string>& track_sids, bool subscribe) {
+    proto::SignalRequest req;
+    auto* sub = req.mutable_subscription();
+    sub->set_subscribe(subscribe);
+    for (const auto& sid : track_sids) {
+        sub->add_track_sids(sid);
+    }
+
+    std::cout << "[ADAPTIVE STREAM] Sent UpdateSubscription: subscribe=" << (subscribe ? "true" : "false")
+              << ", count=" << track_sids.size() << std::endl;
+    Send(req);
+}
+
 void SignalClient::FlushQueue() {
     std::lock_guard<std::mutex> lock(queue_mutex_);
     if (queued_requests_.empty()) return;
