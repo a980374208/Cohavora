@@ -4,18 +4,18 @@
 
 namespace livekit {
 
-webrtc::scoped_refptr<RtcStatsCollectorBridge> RtcStatsCollectorBridge::Create() {
-    return webrtc::make_ref_counted<RtcStatsCollectorBridge>();
+webrtc::scoped_refptr<RtcStatsCollectorBridge> RtcStatsCollectorBridge::Create(std::shared_ptr<RtcStatsState> state) {
+    return webrtc::make_ref_counted<RtcStatsCollectorBridge>(std::move(state));
 }
 
 void RtcStatsCollectorBridge::OnStatsDelivered(const webrtc::scoped_refptr<const webrtc::RTCStatsReport>& report) {
-    if (!report) {
-        promise_.set_value(StatsReport{});
-        return;
+    if (!state_) return;
+    std::lock_guard<std::mutex> lock(state_->mutex);
+    if (report) {
+        state_->report = ParseRtcStatsReport(*report);
     }
-
-    StatsReport parsed = ParseRtcStatsReport(*report);
-    promise_.set_value(parsed);
+    state_->done = true;
+    state_->cv.notify_all();
 }
 
 StatsReport ParseRtcStatsReport(const webrtc::RTCStatsReport& report) {

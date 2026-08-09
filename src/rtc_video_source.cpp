@@ -1,4 +1,5 @@
 #include "rtc_video_source.h"
+#include "telemetry.h"
 #include "api/scoped_refptr.h"
 #include "api/video/i420_buffer.h"
 #include "api/video/video_frame.h"
@@ -127,6 +128,7 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
                                        .set_timestamp_us(timestamp_us)
                                        .build();
 
+    Telemetry::Instance().OnFirstVideoFrameInjected();
     OnFrame(rtc_frame);
 }
 

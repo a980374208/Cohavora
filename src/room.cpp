@@ -5,6 +5,7 @@
 #include "local_video_track.h"
 #include "rtc_audio_source.h"
 #include "rtc_video_source.h"
+#include "telemetry.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include <nlohmann/json.hpp>
@@ -1422,7 +1423,7 @@ asio::awaitable<void> Room::RestartIceConnections(
         });
 }
 
-asio::awaitable<RoomStatsReport> Room::GetStats() {
+RoomStatsReport Room::GetStatsSync() {
     RoomStatsReport room_report;
     room_report.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -1437,12 +1438,18 @@ asio::awaitable<RoomStatsReport> Room::GetStats() {
     }
 
     if (pub_pc) {
-        auto pub_cb = RtcStatsCollectorBridge::Create();
-        auto pub_future = pub_cb->get_future();
-        pub_pc->GetStats(pub_cb.get());
+        webrtc::PeerConnectionInterface* pub_ptr = pub_pc.get();
+        auto state = std::make_shared<RtcStatsState>();
+        auto pub_cb = RtcStatsCollectorBridge::Create(state);
+        webrtc::RTCStatsCollectorCallback* raw_cb = pub_cb.get();
 
-        if (pub_future.wait_for(std::chrono::milliseconds(300)) == std::future_status::ready) {
-            auto r = pub_future.get();
+        WebRTCManager::Instance().signaling_thread()->PostTask([pub_ptr, raw_cb]() {
+            pub_ptr->GetStats(raw_cb);
+        });
+
+        std::unique_lock<std::mutex> lock(state->mutex);
+        if (state->cv.wait_for(lock, std::chrono::milliseconds(1500), [&]() { return state->done; })) {
+            const auto& r = state->report;
             for (const auto& cp : r.candidate_pairs) {
                 if (cp.current_pair) {
                     room_report.publisher_rtt_ms = cp.current_round_trip_time * 1000.0;
@@ -1457,12 +1464,18 @@ asio::awaitable<RoomStatsReport> Room::GetStats() {
     }
 
     if (sub_pc) {
-        auto sub_cb = RtcStatsCollectorBridge::Create();
-        auto sub_future = sub_cb->get_future();
-        sub_pc->GetStats(sub_cb.get());
+        webrtc::PeerConnectionInterface* sub_ptr = sub_pc.get();
+        auto state = std::make_shared<RtcStatsState>();
+        auto sub_cb = RtcStatsCollectorBridge::Create(state);
+        webrtc::RTCStatsCollectorCallback* raw_cb = sub_cb.get();
 
-        if (sub_future.wait_for(std::chrono::milliseconds(300)) == std::future_status::ready) {
-            auto r = sub_future.get();
+        WebRTCManager::Instance().signaling_thread()->PostTask([sub_ptr, raw_cb]() {
+            sub_ptr->GetStats(raw_cb);
+        });
+
+        std::unique_lock<std::mutex> lock(state->mutex);
+        if (state->cv.wait_for(lock, std::chrono::milliseconds(1500), [&]() { return state->done; })) {
+            const auto& r = state->report;
             for (const auto& cp : r.candidate_pairs) {
                 if (cp.current_pair) {
                     room_report.subscriber_rtt_ms = cp.current_round_trip_time * 1000.0;
@@ -1475,7 +1488,11 @@ asio::awaitable<RoomStatsReport> Room::GetStats() {
         }
     }
 
-    co_return room_report;
+    return room_report;
+}
+
+asio::awaitable<RoomStatsReport> Room::GetStats() {
+    co_return GetStatsSync();
 }
 
 } // namespace livekit
