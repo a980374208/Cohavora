@@ -1023,6 +1023,8 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
         UpdateParticipants(msg->update().participants());
     } else if (msg->has_mute()) {
         UpdateTrackMute(msg->mute());
+    } else if (msg->has_speakers_changed()) {
+        HandleActiveSpeakerUpdate(msg->speakers_changed());
     } else if (msg->has_offer()) {
         HandleOfferSignal(msg->offer());
     } else if (msg->has_answer()) {
@@ -1125,6 +1127,67 @@ void Room::UpdateTrackMute(const proto::MuteTrackRequest& mute) {
         for (const auto& listener : listeners_snapshot) {
             listener->OnTrackMuted(target_participant, target_pub, mute.muted());
         }
+    }
+}
+
+void Room::UpdateParticipantsForTesting(const proto::ParticipantUpdate& update) {
+    UpdateParticipants(update.participants());
+}
+
+void Room::EnableE2ee(const E2eeOptions& options) {
+    std::lock_guard lock(room_mutex_);
+    e2ee_manager_ = std::make_shared<E2eeManager>(options);
+    auto self = shared_from_this();
+    e2ee_manager_->SetStateChangedHandler([self](const std::string& identity, EncryptionState state) {
+        auto snapshot = self->GetListenersSnapshot();
+        for (const auto& listener : snapshot) {
+            listener->OnE2eeStateChanged(identity, "", state);
+        }
+    });
+}
+
+void Room::HandleActiveSpeakerUpdateForTesting(const proto::SpeakersChanged& update) {
+    HandleActiveSpeakerUpdate(update);
+}
+
+void Room::HandleActiveSpeakerUpdate(const proto::SpeakersChanged& update) {
+    std::vector<std::shared_ptr<Participant>> active_speakers;
+    std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+
+    {
+        std::lock_guard lock(room_mutex_);
+        listeners_snapshot = listeners_;
+
+        for (int i = 0; i < update.speakers_size(); ++i) {
+            const auto& speaker = update.speakers(i);
+            std::shared_ptr<Participant> target_p;
+
+            if (local_participant_ && local_participant_->sid() == speaker.sid()) {
+                target_p = local_participant_;
+            } else {
+                auto it = remote_participants_.find(speaker.sid());
+                if (it != remote_participants_.end()) {
+                    target_p = it->second;
+                }
+            }
+
+            if (target_p) {
+                target_p->set_speaking(speaker.active());
+                target_p->set_audio_level(speaker.level());
+
+                if (speaker.active()) {
+                    active_speakers.push_back(target_p);
+                }
+            }
+        }
+    }
+
+    std::sort(active_speakers.begin(), active_speakers.end(), [](const std::shared_ptr<Participant>& a, const std::shared_ptr<Participant>& b) {
+        return a->audio_level() > b->audio_level();
+    });
+
+    for (const auto& listener : listeners_snapshot) {
+        listener->OnActiveSpeakersChanged(active_speakers);
     }
 }
 

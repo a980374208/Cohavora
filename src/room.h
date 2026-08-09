@@ -14,6 +14,7 @@
 #include "safe_spawn.h"
 #include "chat_message.h"
 #include "rpc_types.h"
+#include "frame_cryptor.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include "api/peer_connection_interface.h"
@@ -52,8 +53,11 @@ public:
 
     virtual void OnDataReceived(const std::vector<uint8_t>& payload, std::shared_ptr<RemoteParticipant> participant, const std::string& topic) {}
     virtual void OnChatMessage(const ChatMessage& message, std::shared_ptr<Participant> participant) {}
-
     virtual void OnDataChannelBufferedAmountLowThresholdChanged(uint64_t amount, bool reliable) {}
+
+    virtual void OnActiveSpeakersChanged(const std::vector<std::shared_ptr<Participant>>& speakers) {}
+
+    virtual void OnE2eeStateChanged(const std::string& participant_identity, const std::string& track_sid, EncryptionState state) {}
 
     virtual void OnRoomStats(const RoomStatsReport& report) {}
 };
@@ -79,6 +83,8 @@ public:
         std::lock_guard lock(room_mutex_);
         local_participant_ = local;
     }
+    void UpdateParticipantsForTesting(const proto::ParticipantUpdate& update);
+    void HandleActiveSpeakerUpdateForTesting(const proto::SpeakersChanged& update);
 
     void AddListener(std::shared_ptr<RoomListener> listener);
     void RemoveListener(std::shared_ptr<RoomListener> listener);
@@ -99,6 +105,10 @@ public:
     asio::awaitable<RoomStatsReport> GetStats();
     RoomStatsReport GetStatsSync();
 
+    // === 新增：E2EE 端到端加密管理器 ===
+    void EnableE2ee(const E2eeOptions& options);
+    std::shared_ptr<E2eeManager> e2ee_manager() const { return e2ee_manager_; }
+
     void AddTrackToPublisher(std::shared_ptr<Track> track);
     void SendPublishOffer();
     void NegotiatePublisher();
@@ -117,6 +127,7 @@ private:
     void UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::ParticipantInfo>& participants);
     void UpdateParticipants(const proto::ParticipantUpdate& update);
     void UpdateTrackMute(const proto::MuteTrackRequest& mute);
+    void HandleActiveSpeakerUpdate(const proto::SpeakersChanged& speakers_changed);
 
     // 协商和 Trickle 信令分发
     void SendTrickleCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type);
@@ -131,6 +142,7 @@ private:
     std::shared_ptr<LocalParticipant> local_participant_;
     std::map<std::string, std::shared_ptr<RemoteParticipant>> remote_participants_;
     std::vector<std::shared_ptr<RoomListener>> listeners_;
+    std::shared_ptr<E2eeManager> e2ee_manager_;
 
     // WebRTC PeerConnection 资源
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher_pc_;
