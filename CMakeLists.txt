@@ -86,6 +86,8 @@ add_library(livekit_signaling STATIC
     src/wasapi_capture.cpp
     src/dshow_enumerator.cpp
     src/dshow_capture.cpp
+    src/remote_track_publication.cpp
+    src/adaptive_stream_manager.cpp
 )
 
 set(WEBRTC_ROOT "E:/vsSource/WebRTC/client-sdk-cpp/client-sdk-rust/target/debug/build/scratch-f4ffd3e87af6f636/out/livekit_webrtc/livekit/win-x64-release-webrtc-51ef663/win-x64-release")
@@ -216,6 +218,14 @@ add_executable(test_simulcast
     tests/test_simulcast.cpp
 )
 target_link_libraries(test_simulcast PRIVATE
+    livekit_signaling
+)
+
+# Adaptive Stream Test
+add_executable(test_adaptive_stream
+    tests/test_adaptive_stream.cpp
+)
+target_link_libraries(test_adaptive_stream PRIVATE
     livekit_signaling
 )
 
