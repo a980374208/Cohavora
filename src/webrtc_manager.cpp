@@ -6,6 +6,8 @@
 #include "api/audio_codecs/builtin_audio_encoder_factory.h"
 #include "api/video_codecs/video_encoder_factory.h"
 #include "api/video_codecs/video_decoder_factory.h"
+#include "api/video_codecs/builtin_video_encoder_factory.h"
+#include "api/video_codecs/builtin_video_decoder_factory.h"
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/sequence_checker.h"
 #include <iostream>
@@ -13,6 +15,7 @@
 #include "api/environment/environment_factory.h"
 #include "api/audio/audio_device.h"
 #include "modules/video_coding/codecs/vp8/include/vp8.h"
+#include "media/engine/simulcast_encoder_adapter.h"
 
 namespace webrtc {
 namespace webrtc_checks_impl {
@@ -24,12 +27,18 @@ namespace livekit {
 
 namespace {
 
-class CustomVideoEncoderFactory : public webrtc::VideoEncoderFactory {
+class SingleStreamVp8EncoderFactory : public webrtc::VideoEncoderFactory {
 public:
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
-        return {
-            webrtc::SdpVideoFormat("VP8")
-        };
+        return { webrtc::SdpVideoFormat("VP8") };
+    }
+
+    CodecSupport QueryCodecSupport(
+        const webrtc::SdpVideoFormat& format,
+        std::optional<std::string> scalability_mode) const override {
+        CodecSupport support;
+        support.is_supported = true;
+        return support;
     }
 
     std::unique_ptr<webrtc::VideoEncoder> Create(
@@ -37,6 +46,31 @@ public:
         const webrtc::SdpVideoFormat& format) override {
         return webrtc::CreateVp8Encoder(env);
     }
+};
+
+class CustomVideoEncoderFactory : public webrtc::VideoEncoderFactory {
+public:
+    CustomVideoEncoderFactory()
+        : internal_factory_(std::make_unique<SingleStreamVp8EncoderFactory>()) {}
+
+    std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
+        return internal_factory_->GetSupportedFormats();
+    }
+
+    CodecSupport QueryCodecSupport(
+        const webrtc::SdpVideoFormat& format,
+        std::optional<std::string> scalability_mode) const override {
+        return internal_factory_->QueryCodecSupport(format, scalability_mode);
+    }
+
+    std::unique_ptr<webrtc::VideoEncoder> Create(
+        const webrtc::Environment& env,
+        const webrtc::SdpVideoFormat& format) override {
+        return std::make_unique<webrtc::SimulcastEncoderAdapter>(env, internal_factory_.get(), nullptr, format);
+    }
+
+private:
+    std::unique_ptr<SingleStreamVp8EncoderFactory> internal_factory_;
 };
 
 class CustomVideoDecoderFactory : public webrtc::VideoDecoderFactory {
@@ -196,8 +230,6 @@ bool WebRTCManager::Initialize() {
         return false;
     }
 
-    std::cout << "WebRTCManager: Creating PeerConnectionFactory..." << std::endl;
-    
     auto audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
     auto audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
     auto video_encoder_factory = std::make_unique<CustomVideoEncoderFactory>();

@@ -105,6 +105,14 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
         }
     }
 
+    if (width > 1280) {
+        int target_w = 1280;
+        int target_h = (height * 1280) / width;
+        webrtc::scoped_refptr<webrtc::I420Buffer> scaled_buffer = webrtc::I420Buffer::Create(target_w, target_h);
+        scaled_buffer->ScaleFrom(*i420_buffer);
+        i420_buffer = scaled_buffer;
+    }
+
     webrtc::VideoRotation rtc_rotation = webrtc::kVideoRotation_0;
     if (options.rotation == VideoRotation::VIDEO_ROTATION_90) rtc_rotation = webrtc::kVideoRotation_90;
     else if (options.rotation == VideoRotation::VIDEO_ROTATION_180) rtc_rotation = webrtc::kVideoRotation_180;
