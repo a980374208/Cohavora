@@ -95,6 +95,9 @@ bool WasapiAudioCapture::Init(const WasapiCaptureConfig& config, std::shared_ptr
 
     config_ = config;
     audio_source_ = audio_source;
+    if (!apm_processor_) {
+        apm_processor_ = AudioApmProcessor::Create();
+    }
     return true;
 }
 
@@ -336,6 +339,9 @@ void WasapiAudioCapture::CaptureThreadLoop() {
                 if (!pcm_out.empty() && audio_source_) {
                     int samples_per_channel = static_cast<int>(pcm_out.size()) / config_.target_channels;
                     AudioFrame frame(std::move(pcm_out), config_.target_sample_rate, config_.target_channels, samples_per_channel);
+                    if (apm_processor_) {
+                        frame = apm_processor_->ProcessCaptureFrame(frame);
+                    }
                     audio_source_->captureFrame(frame);
                 }
 

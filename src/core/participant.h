@@ -21,6 +21,14 @@ class SignalRequest;
 
 namespace livekit {
 
+struct ParticipantPermission {
+    bool can_subscribe = true;
+    bool can_publish = true;
+    bool can_publish_data = true;
+    bool can_update_metadata = true;
+    bool hidden = false;
+};
+
 class Participant {
 public:
     Participant(const std::string& sid, const std::string& identity)
@@ -37,6 +45,18 @@ public:
     void set_sid(const std::string& sid) { sid_ = sid; }
     void set_speaking(bool speaking) { speaking_ = speaking; }
     void set_audio_level(float level) { audio_level_ = level; }
+
+    std::map<std::string, std::string> attributes() const { return attributes_; }
+    std::string get_attribute(const std::string& key) const {
+        auto it = attributes_.find(key);
+        if (it != attributes_.end()) return it->second;
+        return "";
+    }
+    void set_attributes(const std::map<std::string, std::string>& attrs) { attributes_ = attrs; }
+    void set_attribute(const std::string& key, const std::string& val) { attributes_[key] = val; }
+
+    ParticipantPermission permission() const { return permission_; }
+    void set_permission(const ParticipantPermission& perm) { permission_ = perm; }
 
     std::map<std::string, std::shared_ptr<TrackPublication>> tracks() const { return tracks_; }
 
@@ -59,6 +79,8 @@ protected:
     bool speaking_{false};
     float audio_level_{0.0f};
     std::map<std::string, std::shared_ptr<TrackPublication>> tracks_;
+    std::map<std::string, std::string> attributes_;
+    ParticipantPermission permission_;
 };
 
 class LocalParticipant : public Participant {
@@ -98,6 +120,10 @@ public:
 
     // 编辑已有 Chat 消息 (对齐 client-sdk-cpp / Rust SDK)
     ChatMessage EditChatMessage(const std::string& edit_text, const std::string& original_message_id);
+
+    // === 新增：设置与动态更新 Participant Attributes ===
+    void SetAttributes(const std::map<std::string, std::string>& attributes);
+    void SetAttribute(const std::string& key, const std::string& value);
 
     // === 新增：LiveKit RPC 远程过程调用 ===
     void registerRpcMethod(const std::string& method_name, RpcHandler handler);

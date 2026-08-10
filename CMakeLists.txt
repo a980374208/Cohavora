@@ -85,6 +85,7 @@ set(LIVEKIT_SOURCES
     src/media/dshow_enumerator.cpp
     src/media/dshow_capture.cpp
     src/media/audio_vad.cpp
+    src/media/audio_apm.cpp
     src/e2ee/key_provider.cpp
     src/e2ee/frame_cryptor.cpp
     src/telemetry/crash_handler.cpp
@@ -93,6 +94,7 @@ set(LIVEKIT_SOURCES
 
 # 头文件列表
 set(LIVEKIT_HEADERS
+    src/media/audio_apm.h
     src/signal/websocket_client.h
     src/signal/region_provider.h
     src/signal/signal_stream.h
@@ -219,6 +221,30 @@ add_executable(test_advanced_communication
     tests/test_advanced_communication.cpp
 )
 target_link_libraries(test_advanced_communication PRIVATE
+    livekit_signaling
+)
+
+# Chunking & Simulcast Test
+add_executable(test_chunking_simulcast
+    tests/test_chunking_simulcast.cpp
+)
+target_link_libraries(test_chunking_simulcast PRIVATE
+    livekit_signaling
+)
+
+# APM 3A Audio Processor Test
+add_executable(test_apm_3a
+    tests/test_apm_3a.cpp
+)
+target_link_libraries(test_apm_3a PRIVATE
+    livekit_signaling
+)
+
+# Participant Attributes, Permissions & Track Quality Control Test
+add_executable(test_attributes_permissions_quality
+    tests/test_attributes_permissions_quality.cpp
+)
+target_link_libraries(test_attributes_permissions_quality PRIVATE
     livekit_signaling
 )
 

@@ -66,6 +66,23 @@ public:
         }
     }
 
+    void OnParticipantAttributesChanged(const std::map<std::string, std::string>& changed_attributes, std::shared_ptr<livekit::Participant> participant) override {
+        std::string identity = participant ? participant->identity() : "Unknown";
+        std::cout << "\n[ATTRIBUTES] Participant '" << identity << "' attributes updated:\n";
+        for (const auto& kv : changed_attributes) {
+            std::cout << "  * " << kv.first << " = '" << kv.second << "'\n";
+        }
+        std::cout << std::endl;
+    }
+
+    void OnParticipantPermissionsChanged(const livekit::ParticipantPermission& old_perm, const livekit::ParticipantPermission& new_perm, std::shared_ptr<livekit::Participant> participant) override {
+        std::string identity = participant ? participant->identity() : "Unknown";
+        std::cout << "[PERMISSION] Participant '" << identity << "' permissions updated: "
+                  << "canPublish=" << (new_perm.can_publish ? "true" : "false")
+                  << ", canPublishData=" << (new_perm.can_publish_data ? "true" : "false")
+                  << ", canSubscribe=" << (new_perm.can_subscribe ? "true" : "false") << std::endl;
+    }
+
     void OnTrackPublished(std::shared_ptr<livekit::RemoteParticipant> participant,
                           std::shared_ptr<livekit::TrackPublication> publication) override {
         if (participant && publication) {
@@ -428,6 +445,11 @@ int main(int argc, char* argv[]) {
 
             auto local = room->local_participant();
             if (local) {
+                // 设置并测试 Participant Attributes (自定义属性下发)
+                local->SetAttribute("broadcaster_version", "v2.0_cpp");
+                local->SetAttribute("device_os", "Windows_Native");
+                std::cout << "[ATTRIBUTES] Set Local Participant Attributes: broadcaster_version='v2.0_cpp', device_os='Windows_Native'" << std::endl;
+
                 if (local_audio_track) {
                     local->PublishTrack(local_audio_track);
                     std::cout << "[PUBLISH] Published Local Audio Track (" << local_audio_track->name() << ")" << std::endl;

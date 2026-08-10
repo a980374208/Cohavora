@@ -27,6 +27,10 @@ static int64_t CurrentEpochMs() {
 
 void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
     if (!track) return;
+    if (!permission_.can_publish) {
+        std::cerr << "[LocalParticipant] Permission denied: cannot publish track (can_publish is false).\n";
+        return;
+    }
     Telemetry::Instance().RecordPublishStart();
 
     proto::SignalRequest req;
@@ -157,11 +161,42 @@ void LocalParticipant::SetMuted(const std::string& track_sid, bool muted) {
 
 void LocalParticipant::PublishData(const std::vector<uint8_t>& payload, bool reliable,
                                     const std::vector<std::string>& destination_identities, const std::string& topic) {
+    if (!permission_.can_publish_data) {
+        std::cerr << "[LocalParticipant] Permission denied: cannot publish data (can_publish_data is false).\n";
+        return;
+    }
     if (publish_data_handler_) {
         publish_data_handler_(payload, reliable, destination_identities, topic);
     } else {
         std::cout << "LocalParticipant::PublishData: warning, publish_data_handler_ is not set" << std::endl;
     }
+}
+
+void LocalParticipant::SetAttributes(const std::map<std::string, std::string>& attributes) {
+    if (!permission_.can_update_metadata) {
+        std::cerr << "[LocalParticipant] Permission denied: cannot update metadata/attributes (can_update_metadata is false).\n";
+        return;
+    }
+
+    for (const auto& kv : attributes) {
+        attributes_[kv.first] = kv.second;
+    }
+
+    if (send_handler_) {
+        proto::SignalRequest req;
+        auto* update_meta = req.mutable_update_metadata();
+        update_meta->set_metadata(metadata_);
+        update_meta->set_name(identity_);
+        auto* pb_attrs = update_meta->mutable_attributes();
+        for (const auto& kv : attributes_) {
+            (*pb_attrs)[kv.first] = kv.second;
+        }
+        send_handler_(req);
+    }
+}
+
+void LocalParticipant::SetAttribute(const std::string& key, const std::string& value) {
+    SetAttributes({{key, value}});
 }
 
 ChatMessage LocalParticipant::SendChatMessage(const std::string& text, const std::vector<std::string>& destination_identities) {
