@@ -42,6 +42,8 @@ public:
 
     virtual void OnParticipantConnected(std::shared_ptr<RemoteParticipant> participant) {}
     virtual void OnParticipantDisconnected(std::shared_ptr<RemoteParticipant> participant) {}
+    virtual void OnParticipantAttributesChanged(const std::map<std::string, std::string>& changed_attributes, std::shared_ptr<Participant> participant) {}
+    virtual void OnParticipantPermissionsChanged(const ParticipantPermission& old_permission, const ParticipantPermission& new_permission, std::shared_ptr<Participant> participant) {}
 
     virtual void OnTrackPublished(std::shared_ptr<RemoteParticipant> participant, std::shared_ptr<TrackPublication> publication) {}
     virtual void OnTrackUnpublished(std::shared_ptr<RemoteParticipant> participant, std::shared_ptr<TrackPublication> publication) {}
@@ -187,6 +189,9 @@ private:
     };
     std::vector<PublishedTrackRecord> published_track_records_;
 
+    // Simulcast 参数下发同步
+    static void ApplySimulcastParameters(webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender, const VideoPublishOptions& opts);
+
     // 内部私有方法
     asio::awaitable<void> AttemptReconnect();
     asio::awaitable<void> RepublishLocalTracks(
@@ -195,6 +200,22 @@ private:
         std::shared_ptr<proto::ReconnectResponse> reconnect_response);
     void RecordPublishedTracks();
     std::vector<std::shared_ptr<RoomListener>> GetListenersSnapshot() const;
+
+private:
+    // === DataStream 大包切片重组数据结构 ===
+    struct IncomingDataStreamTracker {
+        std::string stream_id;
+        std::string topic;
+        uint64_t total_length = 0;
+        std::string sender_identity;
+        std::string sender_sid;
+        std::chrono::steady_clock::time_point start_time;
+        std::map<uint64_t, std::vector<uint8_t>> chunks;
+        uint64_t current_received_bytes = 0;
+    };
+    mutable std::mutex incoming_streams_mutex_;
+    std::unordered_map<std::string, std::shared_ptr<IncomingDataStreamTracker>> incoming_streams_;
+    void CleanupStaleDataStreams();
 };
 
 } // namespace livekit

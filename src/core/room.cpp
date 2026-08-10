@@ -295,6 +295,95 @@ void Room::Disconnect() {
 
 void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
                        const std::vector<std::string>& destination_identities, const std::string& topic) {
+    static constexpr size_t kMaxChunkSize = 15000;
+
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
+    {
+        std::lock_guard lock(room_mutex_);
+        dc = reliable ? reliable_dc_ : lossy_dc_;
+    }
+
+    if (payload.size() > kMaxChunkSize) {
+        // === DataStream Chunking 大包切片分发逻辑 ===
+        std::string stream_id = "ds_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+
+        // 1. 发送 Header 帧
+        proto::DataPacket header_pkt;
+        header_pkt.set_kind(reliable ? proto::DataPacket::RELIABLE : proto::DataPacket::LOSSY);
+        if (local_participant_) {
+            header_pkt.set_participant_identity(local_participant_->identity());
+            header_pkt.set_participant_sid(local_participant_->sid());
+        }
+        auto* header = header_pkt.mutable_stream_header();
+        header->set_stream_id(stream_id);
+        header->set_timestamp(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        header->set_topic(topic);
+        header->set_total_length(payload.size());
+
+        std::vector<uint8_t> header_bytes(header_pkt.ByteSizeLong());
+        header_pkt.SerializeToArray(header_bytes.data(), static_cast<int>(header_bytes.size()));
+
+        if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
+            webrtc::DataBuffer buf(webrtc::CopyOnWriteBuffer(header_bytes.data(), header_bytes.size()), true);
+            dc->Send(buf);
+        } else {
+            OnIncomingDataPacket(header_bytes, local_participant_ ? local_participant_->identity() : "", topic);
+        }
+
+        // 2. 切片发送 Chunks
+        size_t total_chunks = (payload.size() + kMaxChunkSize - 1) / kMaxChunkSize;
+        for (size_t i = 0; i < total_chunks; ++i) {
+            size_t offset = i * kMaxChunkSize;
+            size_t chunk_len = std::min(kMaxChunkSize, payload.size() - offset);
+
+            proto::DataPacket chunk_pkt;
+            chunk_pkt.set_kind(reliable ? proto::DataPacket::RELIABLE : proto::DataPacket::LOSSY);
+            if (local_participant_) {
+                chunk_pkt.set_participant_identity(local_participant_->identity());
+                chunk_pkt.set_participant_sid(local_participant_->sid());
+            }
+            auto* chunk = chunk_pkt.mutable_stream_chunk();
+            chunk->set_stream_id(stream_id);
+            chunk->set_chunk_index(i);
+            chunk->set_content(payload.data() + offset, chunk_len);
+
+            std::vector<uint8_t> chunk_bytes(chunk_pkt.ByteSizeLong());
+            chunk_pkt.SerializeToArray(chunk_bytes.data(), static_cast<int>(chunk_bytes.size()));
+
+            if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
+                while (dc->buffered_amount() > 256 * 1024) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                }
+                webrtc::DataBuffer buf(webrtc::CopyOnWriteBuffer(chunk_bytes.data(), chunk_bytes.size()), true);
+                dc->Send(buf);
+            } else {
+                OnIncomingDataPacket(chunk_bytes, local_participant_ ? local_participant_->identity() : "", topic);
+            }
+        }
+
+        // 3. 发送 Trailer 结束帧
+        proto::DataPacket trailer_pkt;
+        trailer_pkt.set_kind(reliable ? proto::DataPacket::RELIABLE : proto::DataPacket::LOSSY);
+        if (local_participant_) {
+            trailer_pkt.set_participant_identity(local_participant_->identity());
+            trailer_pkt.set_participant_sid(local_participant_->sid());
+        }
+        auto* trailer = trailer_pkt.mutable_stream_trailer();
+        trailer->set_stream_id(stream_id);
+
+        std::vector<uint8_t> trailer_bytes(trailer_pkt.ByteSizeLong());
+        trailer_pkt.SerializeToArray(trailer_bytes.data(), static_cast<int>(trailer_bytes.size()));
+
+        if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
+            webrtc::DataBuffer buf(webrtc::CopyOnWriteBuffer(trailer_bytes.data(), trailer_bytes.size()), true);
+            dc->Send(buf);
+        } else {
+            OnIncomingDataPacket(trailer_bytes, local_participant_ ? local_participant_->identity() : "", topic);
+        }
+        return;
+    }
+
     proto::DataPacket packet;
     packet.set_kind(reliable ? proto::DataPacket::RELIABLE : proto::DataPacket::LOSSY);
 
@@ -308,19 +397,13 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
     std::vector<uint8_t> data(packet.ByteSizeLong());
     packet.SerializeToArray(data.data(), static_cast<int>(data.size()));
 
-    webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
-    {
-        std::lock_guard lock(room_mutex_);
-        dc = reliable ? reliable_dc_ : lossy_dc_;
-    }
-
     if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
         std::string payload_str(data.begin(), data.end());
         webrtc::DataBuffer buffer(webrtc::CopyOnWriteBuffer(payload_str.data(), payload_str.size()), /*binary=*/true);
         dc->Send(buffer);
     } else {
         // 若底层 DataChannel 暂未建立物理 Socket，直接进行安全解包分发
-        OnIncomingDataPacket(payload, local_participant_ ? local_participant_->identity() : "", topic);
+        OnIncomingDataPacket(data, local_participant_ ? local_participant_->identity() : "", topic);
     }
 }
 
@@ -505,7 +588,22 @@ void Room::OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliabl
     }
 }
 
+void Room::CleanupStaleDataStreams() {
+    std::lock_guard lock(incoming_streams_mutex_);
+    auto now = std::chrono::steady_clock::now();
+    for (auto it = incoming_streams_.begin(); it != incoming_streams_.end(); ) {
+        if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second->start_time).count() > 30) {
+            std::cout << "[DATA_STREAM] Cleaned up stale un-assembled stream '" << it->first << "'\n";
+            it = incoming_streams_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
 void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& participant_sid, const std::string& topic) {
+    CleanupStaleDataStreams();
+
     std::vector<uint8_t> real_payload = payload;
     std::string real_topic = topic;
     std::string real_sender_sid = participant_sid;
@@ -523,7 +621,85 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
             real_sender_sid = data_pkt.participant_sid();
         }
 
-        if (data_pkt.has_user()) {
+        if (data_pkt.has_stream_header()) {
+            const auto& header = data_pkt.stream_header();
+            auto tracker = std::make_shared<IncomingDataStreamTracker>();
+            tracker->stream_id = header.stream_id();
+            tracker->topic = header.topic();
+            tracker->total_length = header.total_length();
+            tracker->sender_identity = sender_identity;
+            tracker->sender_sid = real_sender_sid;
+            tracker->start_time = std::chrono::steady_clock::now();
+
+            std::lock_guard lock(incoming_streams_mutex_);
+            incoming_streams_[header.stream_id()] = tracker;
+            return;
+        } else if (data_pkt.has_stream_chunk()) {
+            const auto& chunk = data_pkt.stream_chunk();
+            std::shared_ptr<IncomingDataStreamTracker> tracker;
+            {
+                std::lock_guard lock(incoming_streams_mutex_);
+                auto it = incoming_streams_.find(chunk.stream_id());
+                if (it != incoming_streams_.end()) {
+                    tracker = it->second;
+                }
+            }
+
+            if (tracker) {
+                const std::string& content = chunk.content();
+                std::vector<uint8_t> chunk_vec(content.begin(), content.end());
+
+                std::lock_guard lock(incoming_streams_mutex_);
+                if (tracker->chunks.find(chunk.chunk_index()) == tracker->chunks.end()) {
+                    tracker->chunks[chunk.chunk_index()] = chunk_vec;
+                    tracker->current_received_bytes += chunk_vec.size();
+                }
+
+                bool is_complete = (tracker->total_length > 0 && tracker->current_received_bytes >= tracker->total_length);
+                if (is_complete) {
+                    std::vector<uint8_t> assembled_payload;
+                    assembled_payload.reserve(tracker->total_length);
+                    for (const auto& kv : tracker->chunks) {
+                        assembled_payload.insert(assembled_payload.end(), kv.second.begin(), kv.second.end());
+                    }
+
+                    real_payload = assembled_payload;
+                    real_topic = tracker->topic;
+                    if (!tracker->sender_identity.empty()) sender_identity = tracker->sender_identity;
+                    if (!tracker->sender_sid.empty()) real_sender_sid = tracker->sender_sid;
+
+                    incoming_streams_.erase(chunk.stream_id());
+                    // 接收完成，无缝还原 real_payload 并下发到业务层！
+                } else {
+                    return; // 暂未接收完毕，等待后续分片
+                }
+            } else {
+                return;
+            }
+        } else if (data_pkt.has_stream_trailer()) {
+            const auto& trailer = data_pkt.stream_trailer();
+            std::shared_ptr<IncomingDataStreamTracker> tracker;
+            {
+                std::lock_guard lock(incoming_streams_mutex_);
+                auto it = incoming_streams_.find(trailer.stream_id());
+                if (it != incoming_streams_.end()) {
+                    tracker = it->second;
+                    incoming_streams_.erase(it);
+                }
+            }
+            if (tracker && tracker->current_received_bytes > 0) {
+                std::vector<uint8_t> assembled_payload;
+                for (const auto& kv : tracker->chunks) {
+                    assembled_payload.insert(assembled_payload.end(), kv.second.begin(), kv.second.end());
+                }
+                real_payload = assembled_payload;
+                real_topic = tracker->topic;
+                if (!tracker->sender_identity.empty()) sender_identity = tracker->sender_identity;
+                if (!tracker->sender_sid.empty()) real_sender_sid = tracker->sender_sid;
+            } else {
+                return;
+            }
+        } else if (data_pkt.has_user()) {
             const auto& user_pkt = data_pkt.user();
             const std::string& p_bytes = user_pkt.payload();
             real_payload.assign(p_bytes.begin(), p_bytes.end());
@@ -778,6 +954,9 @@ void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
                     if (result.ok()) {
                         std::cout << "[WebRTC] Successfully added video track '" << p->track->id()
                                   << "' with VP8 Simulcast (" << p->publish_opts.layers.size() << " layers)!" << std::endl;
+                        if (result.value() && result.value()->sender()) {
+                            ApplySimulcastParameters(result.value()->sender(), p->publish_opts);
+                        }
                     } else {
                         std::cerr << "[WebRTC] AddTransceiver failed: " << result.error().message()
                                   << ", falling back to AddTrack..." << std::endl;
@@ -792,6 +971,47 @@ void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
             }
             delete p;
         });
+    }
+}
+
+void Room::ApplySimulcastParameters(webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender, const VideoPublishOptions& opts) {
+    if (!sender) return;
+    webrtc::RtpParameters parameters = sender->GetParameters();
+    if (parameters.encodings.empty()) {
+        std::cout << "[SIMULCAST SET_PARAMS] Warning: RtpSender has no encodings to configure.\n";
+        return;
+    }
+
+    bool updated = false;
+    for (const auto& layer : opts.layers) {
+        for (auto& enc : parameters.encodings) {
+            if (enc.rid == layer.rid || (parameters.encodings.size() == 1 && layer.rid == "f")) {
+                enc.active = true;
+                if (layer.scale_resolution_down_by > 0) {
+                    enc.scale_resolution_down_by = layer.scale_resolution_down_by;
+                }
+                if (layer.max_bitrate_bps > 0) {
+                    enc.max_bitrate_bps = layer.max_bitrate_bps;
+                }
+                if (layer.max_fps > 0) {
+                    enc.max_framerate = layer.max_fps;
+                }
+                if (!opts.scalability_mode.empty()) {
+                    enc.scalability_mode = opts.scalability_mode;
+                }
+                updated = true;
+            }
+        }
+    }
+
+    if (updated) {
+        auto status = sender->SetParameters(parameters);
+        if (status.ok()) {
+            std::cout << "[SIMULCAST SET_PARAMS] Successfully applied RtpParameters for " 
+                      << parameters.encodings.size() << " encodings!\n";
+        } else {
+            std::cerr << "[SIMULCAST SET_PARAMS] SetParameters failed: " << status.message() << "\n";
+        }
     }
 }
 
@@ -1037,12 +1257,40 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
                   << "', track_sid='" << tp.track().sid()
                   << "', type=" << tp.track().type()
                   << ", name='" << tp.track().name() << "'" << std::endl;
+    } else if (msg->has_subscribed_quality_update()) {
+        const auto& squ = msg->subscribed_quality_update();
+        std::cout << "\n===============================================================" << std::endl;
+        std::cout << " [SIGNAL RECV] SubscribedQualityUpdate (SFU Subscriber Layer Demand):" << std::endl;
+        std::cout << "  Track SID: " << squ.track_sid() << std::endl;
+        for (const auto& sc : squ.subscribed_codecs()) {
+            std::cout << "  Codec: " << sc.codec() << std::endl;
+            for (const auto& q : sc.qualities()) {
+                std::cout << "  * Layer Quality: " << q.quality() << ", Enabled: " << (q.enabled() ? "YES" : "NO") << std::endl;
+            }
+        }
+        for (const auto& q : squ.subscribed_qualities()) {
+            std::cout << "  * Layer Quality: " << q.quality() << ", Enabled: " << (q.enabled() ? "YES" : "NO") << std::endl;
+        }
+        std::cout << "===============================================================\n" << std::endl;
     }
 }
 
 void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::ParticipantInfo>& participants) {
     std::vector<std::shared_ptr<RemoteParticipant>> newly_connected;
     std::vector<std::shared_ptr<RemoteParticipant>> disconnected;
+    
+    struct AttrEvent {
+        std::shared_ptr<Participant> participant;
+        std::map<std::string, std::string> attrs;
+    };
+    struct PermEvent {
+        std::shared_ptr<Participant> participant;
+        ParticipantPermission old_perm;
+        ParticipantPermission new_perm;
+    };
+    std::vector<AttrEvent> changed_attributes_events;
+    std::vector<PermEvent> changed_permissions_events;
+
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
 
     {
@@ -1051,9 +1299,39 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
 
         for (int i = 0; i < participants.size(); ++i) {
             const auto& p_info = participants.Get(i);
-            
+
+            std::map<std::string, std::string> new_attrs;
+            for (const auto& kv : p_info.attributes()) {
+                new_attrs[kv.first] = kv.second;
+            }
+
+            ParticipantPermission new_perm;
+            if (p_info.has_permission()) {
+                const auto& pb_perm = p_info.permission();
+                new_perm.can_subscribe = pb_perm.can_subscribe();
+                new_perm.can_publish = pb_perm.can_publish();
+                new_perm.can_publish_data = pb_perm.can_publish_data();
+                new_perm.can_update_metadata = pb_perm.can_update_metadata();
+                new_perm.hidden = pb_perm.hidden();
+            }
+
             if (local_participant_ && p_info.sid() == local_participant_->sid()) {
                 local_participant_->set_metadata(p_info.metadata());
+
+                auto old_attrs = local_participant_->attributes();
+                if (old_attrs != new_attrs) {
+                    local_participant_->set_attributes(new_attrs);
+                    changed_attributes_events.push_back({local_participant_, new_attrs});
+                }
+                auto old_perm = local_participant_->permission();
+                if (old_perm.can_publish != new_perm.can_publish ||
+                    old_perm.can_subscribe != new_perm.can_subscribe ||
+                    old_perm.can_publish_data != new_perm.can_publish_data ||
+                    old_perm.can_update_metadata != new_perm.can_update_metadata ||
+                    old_perm.hidden != new_perm.hidden) {
+                    local_participant_->set_permission(new_perm);
+                    changed_permissions_events.push_back({local_participant_, old_perm, new_perm});
+                }
                 continue;
             }
 
@@ -1064,13 +1342,32 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
                     remote_participants_.erase(it);
                 }
             } else {
+                std::shared_ptr<RemoteParticipant> remote;
                 if (it == remote_participants_.end()) {
-                    auto remote = std::make_shared<RemoteParticipant>(p_info.sid(), p_info.identity());
+                    remote = std::make_shared<RemoteParticipant>(p_info.sid(), p_info.identity());
                     remote->set_metadata(p_info.metadata());
+                    remote->set_attributes(new_attrs);
+                    remote->set_permission(new_perm);
                     remote_participants_[p_info.sid()] = remote;
                     newly_connected.push_back(remote);
                 } else {
-                    it->second->set_metadata(p_info.metadata());
+                    remote = it->second;
+                    remote->set_metadata(p_info.metadata());
+
+                    auto old_attrs = remote->attributes();
+                    if (old_attrs != new_attrs) {
+                        remote->set_attributes(new_attrs);
+                        changed_attributes_events.push_back({remote, new_attrs});
+                    }
+                    auto old_perm = remote->permission();
+                    if (old_perm.can_publish != new_perm.can_publish ||
+                        old_perm.can_subscribe != new_perm.can_subscribe ||
+                        old_perm.can_publish_data != new_perm.can_publish_data ||
+                        old_perm.can_update_metadata != new_perm.can_update_metadata ||
+                        old_perm.hidden != new_perm.hidden) {
+                        remote->set_permission(new_perm);
+                        changed_permissions_events.push_back({remote, old_perm, new_perm});
+                    }
                 }
             }
         }
@@ -1079,6 +1376,18 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
     for (const auto& p : newly_connected) {
         for (const auto& listener : listeners_snapshot) {
             listener->OnParticipantConnected(p);
+        }
+    }
+
+    for (const auto& evt : changed_attributes_events) {
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnParticipantAttributesChanged(evt.attrs, evt.participant);
+        }
+    }
+
+    for (const auto& evt : changed_permissions_events) {
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnParticipantPermissionsChanged(evt.old_perm, evt.new_perm, evt.participant);
         }
     }
 

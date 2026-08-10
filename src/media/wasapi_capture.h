@@ -12,6 +12,7 @@
 #include <wrl/client.h>
 #include "wasapi_types.h"
 #include "audio_source.h"
+#include "audio_apm.h"
 
 namespace livekit {
 
@@ -45,6 +46,11 @@ public:
 
     void SetVolume(float volume) noexcept;
     float GetVolume() const noexcept { return volume_.load(); }
+
+    // APM 3A (AEC/ANS/AGC) 音频处理控制
+    void EnableApm(const ApmConfig& config = {}) { apm_processor_ = AudioApmProcessor::Create(config); }
+    void DisableApm() { apm_processor_ = nullptr; }
+    std::shared_ptr<AudioApmProcessor> apm_processor() const { return apm_processor_; }
 
     // 获取当前捕获配置
     WasapiCaptureConfig GetConfig() const;
@@ -80,6 +86,9 @@ private:
 
     // 热插拔监听
     Microsoft::WRL::ComPtr<WasapiNotificationClient> notify_client_;
+
+    // WebRTC APM 3A 处理模块
+    std::shared_ptr<AudioApmProcessor> apm_processor_;
 };
 
 } // namespace livekit
