@@ -320,6 +320,14 @@ target_link_libraries(test_adaptive_stream PRIVATE
     livekit_signaling
 )
 
+# Network Emulation Benchmark Test
+add_executable(test_network_emulation_benchmark
+    tests/test_network_emulation_benchmark.cpp
+)
+target_link_libraries(test_network_emulation_benchmark PRIVATE
+    livekit_signaling
+)
+
 # Speaker VAD Test
 add_executable(test_speaker_vad
     tests/test_speaker_vad.cpp
@@ -345,6 +353,24 @@ target_link_libraries(livekit_media_broadcaster PRIVATE
     livekit_signaling
 )
 
+# LiveKit SimpleRoom Standalone Executable
+add_executable(simple_room
+    src/app/simple_room.cpp
+)
+target_link_libraries(simple_room PRIVATE
+    livekit_signaling
+)
+
+# LiveKit SimpleRpc Standalone Executable
+add_executable(simple_rpc
+    src/app/simple_rpc.cpp
+)
+target_link_libraries(simple_rpc PRIVATE
+    livekit_signaling
+)
+
+
+
 # Meeting App with Telegram libui
 set(TDESKTOP_DIR "E:/vsSource/TDeskTop/tdesktop")
 set(TDESKTOP_OUT_DIR "E:/vsSource/TDeskTop/tdesktop/out")
@@ -366,6 +392,8 @@ add_executable(livekit_meeting_app
     src/ui/meeting_main_window.cpp
     src/ui/meeting_main_window.h
     src/ui/meeting_ui_integration.h
+    src/ui/video_test_widget.cpp
+    src/ui/video_test_widget.h
 )
 
 target_include_directories(livekit_meeting_app BEFORE PRIVATE
@@ -464,6 +492,7 @@ add_test(NAME wasapi_capture_test COMMAND test_wasapi_capture)
 add_test(NAME dshow_capture_test COMMAND test_dshow_capture)
 add_test(NAME media_pipeline_e2e_test COMMAND test_media_pipeline_e2e)
 add_test(NAME simulcast_test COMMAND test_simulcast)
+add_test(NAME network_emulation_benchmark COMMAND test_network_emulation_benchmark)
 
 
 

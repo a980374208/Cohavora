@@ -1260,18 +1260,70 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
     } else if (msg->has_subscribed_quality_update()) {
         const auto& squ = msg->subscribed_quality_update();
         std::cout << "\n===============================================================" << std::endl;
-        std::cout << " [SIGNAL RECV] SubscribedQualityUpdate (SFU Subscriber Layer Demand):" << std::endl;
+        std::cout << " [SIGNAL RECV] SubscribedQualityUpdate (Dynacast Demand from SFU):" << std::endl;
         std::cout << "  Track SID: " << squ.track_sid() << std::endl;
+
+        std::map<livekit::proto::VideoQuality, bool> quality_states;
+
         for (const auto& sc : squ.subscribed_codecs()) {
             std::cout << "  Codec: " << sc.codec() << std::endl;
             for (const auto& q : sc.qualities()) {
                 std::cout << "  * Layer Quality: " << q.quality() << ", Enabled: " << (q.enabled() ? "YES" : "NO") << std::endl;
+                quality_states[q.quality()] = q.enabled();
             }
         }
         for (const auto& q : squ.subscribed_qualities()) {
             std::cout << "  * Layer Quality: " << q.quality() << ", Enabled: " << (q.enabled() ? "YES" : "NO") << std::endl;
+            quality_states[q.quality()] = q.enabled();
         }
         std::cout << "===============================================================\n" << std::endl;
+
+        // 【Dynacast 闭环】根据 SFU 按需订阅需求，自动动态调控推流端 WebRTC 编码器的 enc.active 开关
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
+        {
+            std::lock_guard lock(room_mutex_);
+            pub_pc = publisher_pc_;
+        }
+
+        if (pub_pc) {
+            auto senders = pub_pc->GetSenders();
+            for (auto& sender : senders) {
+                if (!sender || !sender->track() || sender->track()->kind() != webrtc::MediaStreamTrackInterface::kVideoKind) {
+                    continue;
+                }
+
+                webrtc::RtpParameters parameters = sender->GetParameters();
+                if (parameters.encodings.empty()) continue;
+
+                bool params_changed = false;
+                for (const auto& [quality, enabled] : quality_states) {
+                    std::string target_rid;
+                    if (quality == livekit::proto::VideoQuality::HIGH) target_rid = "f";
+                    else if (quality == livekit::proto::VideoQuality::MEDIUM) target_rid = "h";
+                    else if (quality == livekit::proto::VideoQuality::LOW) target_rid = "q";
+
+                    for (auto& enc : parameters.encodings) {
+                        if (enc.rid == target_rid || (parameters.encodings.size() == 1 && target_rid == "f")) {
+                            if (enc.active != enabled) {
+                                enc.active = enabled;
+                                params_changed = true;
+                                std::cout << "[DYNACAST] Adjusting Simulcast Layer RID '" << enc.rid 
+                                          << "' active status -> " << (enabled ? "TRUE (Resume Encoding)" : "FALSE (Pause Encoding)") << std::endl;
+                            }
+                        }
+                    }
+                }
+
+                if (params_changed) {
+                    auto status = sender->SetParameters(parameters);
+                    if (status.ok()) {
+                        std::cout << "[DYNACAST SUCCESS] Successfully updated RtpSender encodings active states for Dynacast!" << std::endl;
+                    } else {
+                        std::cerr << "[DYNACAST ERROR] Failed to set RtpSender parameters: " << status.message() << std::endl;
+                    }
+                }
+            }
+        }
     }
 }
 

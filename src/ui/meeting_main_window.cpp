@@ -1,5 +1,6 @@
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/shadow_helper.h"
+#include "src/ui/video_test_widget.h"
 #include "styles/style_widgets.h"
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
@@ -343,6 +344,9 @@ void MeetingMainWindow::onCardClicked(ActionCardType type) {
 	} else if (type == ActionCardType::ShareScreen) {
 		QMessageBox::information(this, QString::fromUtf8("共享屏幕"),
 			QString::fromUtf8("正在枚举可用桌面与应用视窗，可选择全屏或指定视窗进行超清低延迟屏幕共享。"));
+	} else if (type == ActionCardType::SimulcastTest) {
+		MeetingTestWindow testDlg(this);
+		testDlg.exec();
 	}
 }
 
