@@ -76,7 +76,7 @@ private:
     asio::awaitable<void> AsyncConnectSocket(std::string host, std::string port);
     asio::awaitable<void> AsyncHttpProxyConnect(std::string proxy_host, std::string proxy_port, std::string target_host, std::string target_port, std::optional<std::string> auth_header);
     asio::awaitable<void> AsyncSslHandshake(std::string host);
-    asio::awaitable<void> AsyncWsHandshake(std::string host, std::string path, std::string query, std::string token);
+    asio::awaitable<void> AsyncWsHandshake(std::string host, std::string port, std::string path, std::string query, std::string token);
 
     // Send and read Helpers
     asio::awaitable<size_t> async_read_stream(asio::mutable_buffer buf);

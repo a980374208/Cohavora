@@ -13,7 +13,8 @@ enum class ActionCardType {
 	JoinMeeting,     // 加入会议 (+)
 	QuickMeeting,    // 快速会议 (⚡) ∨
 	ScheduleMeeting, // 预定会议 (✔) ∨
-	ShareScreen      // 共享屏幕 (🗔)
+	ShareScreen,     // 共享屏幕 (🗔)
+	SimulcastTest    // Simulcast与百人测试 (🧪)
 };
 
 class ActionCardWidget : public Ui::RpWidget {
@@ -82,6 +83,7 @@ private:
 	ActionCardWidget *_quickCard = nullptr;
 	ActionCardWidget *_scheduleCard = nullptr;
 	ActionCardWidget *_shareCard = nullptr;
+	ActionCardWidget *_testCard = nullptr;
 
 	rpl::event_stream<ActionCardType> _cardClicks;
 };

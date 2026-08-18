@@ -207,6 +207,23 @@ target_link_libraries(livekit_media_broadcaster PRIVATE
     livekit_signaling
 )
 
+# LiveKit SimpleRoom Standalone Executable
+add_executable(simple_room
+    src/app/simple_room.cpp
+)
+target_link_libraries(simple_room PRIVATE
+    livekit_signaling
+)
+
+# LiveKit SimpleRpc Standalone Executable
+add_executable(simple_rpc
+    src/app/simple_rpc.cpp
+)
+target_link_libraries(simple_rpc PRIVATE
+    livekit_signaling
+)
+
+
 # Meeting App with Telegram libui
 set(TDESKTOP_DIR "E:/vsSource/TDeskTop/tdesktop")
 set(TDESKTOP_OUT_DIR "E:/vsSource/TDeskTop/tdesktop/out")
@@ -228,6 +245,8 @@ add_executable(livekit_meeting_app
     src/ui/meeting_main_window.cpp
     src/ui/meeting_main_window.h
     src/ui/meeting_ui_integration.h
+    src/ui/video_preview_widget.cpp
+    src/ui/video_preview_widget.h
 )
 
 target_include_directories(livekit_meeting_app BEFORE PRIVATE

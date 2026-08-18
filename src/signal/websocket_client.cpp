@@ -186,7 +186,7 @@ asio::awaitable<std::error_code> WebSocketClient::Connect(std::string url_str,
         }
 
         std::cout << "WebSocketClient::Connect: 4.5 (WS handshake starting)" << std::endl;
-        co_await AsyncWsHandshake(url.host, url.path, url.query, token);
+        co_await AsyncWsHandshake(url.host, url.port, url.path, url.query, token);
         std::cout << "WebSocketClient::Connect: 4.6 (WS handshake completed)" << std::endl;
         
         connect_done->store(true);
@@ -497,7 +497,7 @@ asio::awaitable<void> WebSocketClient::AsyncSslHandshake(std::string host) {
     co_await ssl_stream->async_handshake(asio::ssl::stream_base::client, asio::use_awaitable);
 }
 
-asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::string path, std::string query, std::string token) {
+asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::string port, std::string path, std::string query, std::string token) {
     std::cout << "WebSocketClient::AsyncWsHandshake: 1" << std::endl;
     std::string path_query = path;
     if (!query.empty()) {
@@ -505,17 +505,24 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
     }
     std::string ws_key = GenerateWebSocketKey();
     
+    std::string host_hdr = host;
+    if (!port.empty() && port != "80" && port != "443" && host.find(':') == std::string::npos) {
+        host_hdr += ":" + port;
+    }
+
     std::string req = "GET " + path_query + " HTTP/1.1\r\n"
-                      "Host: " + host + "\r\n"
+                      "Host: " + host_hdr + "\r\n"
                       "User-Agent: livekit-sdk-cpp/0.1.0\r\n"
                       "Upgrade: websocket\r\n"
                       "Connection: Upgrade\r\n"
                       "Sec-WebSocket-Key: " + ws_key + "\r\n"
                       "Sec-WebSocket-Version: 13\r\n";
-    if (!token.empty()) {
+    if (!token.empty() && query.find("access_token=") == std::string::npos) {
         req += "Authorization: Bearer " + token + "\r\n";
     }
     req += "\r\n";
+
+    std::cout << "\n--- [HTTP WS HANDSHAKE REQ SENT] ---\n" << req << "------------------------------------\n" << std::endl;
 
     std::cout << "WebSocketClient::AsyncWsHandshake: 2 (writing request...)" << std::endl;
     co_await async_write_stream(asio::buffer(req));
