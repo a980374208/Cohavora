@@ -1,38 +1,67 @@
-.cache/
-CMakeFiles/
-CMakeCache.txt
-.DS_Store
-Makefile
-cmake_install.cmake
-out
-build.log
-build/
-build-debug/
-build-release/
-local-install/
-release/
-vcpkg_installed/
-# Generated header
-include/livekit/build.h
-received_green.avif
-docs/*.bak
-# Doxygen
-docs/doxygen/html/
-docs/doxygen/latex/
-.vs/
-.vscode/
-.cursor/
-# Compiled output
-bin/
-lib/
+# Prerequisites & Dependencies
+/deps/
+/.cache_keys/
+/vcpkg_installed/
+/local-install/
+/release/
+
+# Build outputs & caches
+/build-*/
+/build/*
+!/build/prepare/
+/out/
+/bin/
+/lib/
 *.lib
 *.a
 *.so
 *.dylib
 *.dll
 *.exe
-*.log
-web/
-*trace.json
+*.exp
+*.pdb
+*.ilk
+*.idb
+*.tlog
+
+# CMake artifacts
+/CMakeFiles/
+/CMakeCache.txt
+Makefile
+cmake_install.cmake
 compile_commands.json
+
+# Visual Studio & IDE files
+/.vs/
+/.vscode/
+/.cursor/
+/.idea/
+*.user
+*.suo
+*.VC.db
+*.opendb
+*.VC.opendb
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Logs and temp files
+*.log
+*.bak
+*.tmp
+*trace.json
+received_green.avif
+.cache/
+.DS_Store
+
+# Documentation generated
+docs/doxygen/html/
+docs/doxygen/latex/
+docs/*.bak
+
+# Generated header
+include/livekit/build.h
+web/
 user_stories

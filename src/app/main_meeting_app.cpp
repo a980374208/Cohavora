@@ -2,8 +2,7 @@
 #include <QtWidgets/QApplication>
 #include <QtCore/QDir>
 #include <QtPlugin>
-#include "crl/crl_time.h"
-#include "crl/crl_on_main.h"
+#include "crl/crl.h"
 #include <rpl/rpl.h>
 #include "ui/style/style_core.h"
 #include "src/ui/meeting_ui_integration.h"

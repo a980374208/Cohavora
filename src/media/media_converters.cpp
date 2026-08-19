@@ -1,4 +1,5 @@
 #include "media_converters.h"
+#include <cguid.h>
 #include <algorithm>
 #include <cmath>
 #include <cstring>

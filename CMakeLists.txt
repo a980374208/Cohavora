@@ -7,12 +7,34 @@ set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
 
 set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG "Release;None")
 
+if(MSVC)
+    add_link_options(/FORCE:MULTIPLE)
+endif()
+
 # Find Packages via CMake / Vcpkg
 find_package(asio CONFIG REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
+find_package(OpenSSL REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
+
+add_compile_definitions(
+    WIN32
+    _WINDOWS
+    WIN32_LEAN_AND_MEAN
+    _WIN32_WINNT=0x0A00
+    NOMINMAX
+    _WINSOCK_DEPRECATED_NO_WARNINGS
+    CRL_USE_WINAPI
+    ASIO_STANDALONE
+)
+
+if(MSVC)
+    add_compile_options(/FS /Z7)
+    string(REPLACE "/Zi" "/Z7" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
+    string(REPLACE "/Zi" "/Z7" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
+endif()
 
 # Protobuf Generation Setup
 set(PROTO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/protos)
@@ -149,7 +171,19 @@ add_library(livekit_signaling STATIC
     ${LIVEKIT_HEADERS}
 )
 
-set(WEBRTC_ROOT "E:/vsSource/WebRTC/client-sdk-cpp/client-sdk-rust/target/debug/build/scratch-f4ffd3e87af6f636/out/livekit_webrtc/livekit/win-x64-release-webrtc-51ef663/win-x64-release")
+# Project Local Dependencies Directory (./deps)
+if(NOT DEFINED DEPS_DIR)
+    set(DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps")
+endif()
+
+# WebRTC Root Directory
+if(NOT DEFINED WEBRTC_ROOT)
+    if(DEFINED ENV{WEBRTC_ROOT})
+        set(WEBRTC_ROOT "$ENV{WEBRTC_ROOT}")
+    else()
+        set(WEBRTC_ROOT "${DEPS_DIR}/webrtc")
+    endif()
+endif()
 
 target_include_directories(livekit_signaling BEFORE PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -182,6 +216,8 @@ target_link_libraries(livekit_signaling PUBLIC
     protobuf::libprotobuf
     spdlog::spdlog
     ZLIB::ZLIB
+    OpenSSL::SSL
+    OpenSSL::Crypto
     nlohmann_json::nlohmann_json
     ws2_32
     winmm
@@ -371,15 +407,36 @@ target_link_libraries(simple_rpc PRIVATE
 
 
 
-# Meeting App with Telegram libui
-set(TDESKTOP_DIR "E:/vsSource/TDeskTop/tdesktop")
-set(TDESKTOP_OUT_DIR "E:/vsSource/TDeskTop/tdesktop/out")
-set(TDESKTOP_LIBS_DIR "E:/vsSource/TDeskTop/Libraries/win64")
+if(NOT DEFINED TDESKTOP_LIBS_DIR)
+    if(DEFINED ENV{TDESKTOP_LIBS_DIR})
+        set(TDESKTOP_LIBS_DIR "$ENV{TDESKTOP_LIBS_DIR}")
+    else()
+        set(TDESKTOP_LIBS_DIR "${DEPS_DIR}/Libraries/win64")
+    endif()
+endif()
 
-set(Qt5_DIR "${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/cmake/Qt5")
+set(QT_PATH "${TDESKTOP_LIBS_DIR}/Qt-5.15.18")
+if(NOT EXISTS "${QT_PATH}")
+    message(FATAL_ERROR "\n[ERROR] Qt 5.15.18 library not found in project dependencies: ${QT_PATH}\n"
+                        "Please run 'win.bat' (or 'prepare.bat') first to deploy dependencies to ./deps!\n")
+endif()
+
+list(APPEND CMAKE_PREFIX_PATH "${QT_PATH}")
+set(Qt5_DIR "${QT_PATH}/lib/cmake/Qt5" CACHE PATH "Qt5 Directory" FORCE)
 find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Svg)
 
+foreach(_tool rcc moc uic qmake)
+    if(TARGET Qt5::${_tool})
+        set_property(TARGET Qt5::${_tool} PROPERTY IMPORTED_LOCATION_DEBUG "${QT_PATH}/bin/${_tool}.exe")
+        set_property(TARGET Qt5::${_tool} PROPERTY IMPORTED_LOCATION_RELEASE "${QT_PATH}/bin/${_tool}.exe")
+        set_property(TARGET Qt5::${_tool} PROPERTY IMPORTED_LOCATION "${QT_PATH}/bin/${_tool}.exe")
+    endif()
+endforeach()
+
 set(CMAKE_AUTOMOC ON)
+
+# Add Telegram UI Subproject directly as native C++ targets
+add_subdirectory(src/ui/tdesktop)
 
 add_executable(livekit_meeting_app
     src/app/main_meeting_app.cpp
@@ -398,29 +455,32 @@ add_executable(livekit_meeting_app
 
 target_include_directories(livekit_meeting_app BEFORE PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
-    ${TDESKTOP_DIR}/Telegram/lib_ui
-    ${TDESKTOP_DIR}/Telegram/lib_base
-    ${TDESKTOP_DIR}/Telegram/lib_rpl
-    ${TDESKTOP_DIR}/Telegram/lib_crl
-    ${TDESKTOP_OUT_DIR}/Telegram/lib_ui/gen
-    ${TDESKTOP_DIR}/Telegram/ThirdParty/GSL/include
-    ${TDESKTOP_DIR}/Telegram/ThirdParty/range-v3/include
-    ${TDESKTOP_DIR}/Telegram/ThirdParty/expected/include
-    ${TDESKTOP_DIR}/Telegram/ThirdParty/xxHash
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_ui
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/gen
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/gen/styles
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_base
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_rpl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_crl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/GSL/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/range-v3/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/expected/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/xxHash
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore/5.15.18
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore/5.15.18/QtCore
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui/5.15.18
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui/5.15.18/QtGui
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtWidgets
     ${TDESKTOP_LIBS_DIR}/zlib/include
-    ${TDESKTOP_LIBS_DIR}/openssl3/include
-    ${TDESKTOP_LIBS_DIR}/lzma/include
 )
 
 target_link_libraries(livekit_meeting_app PRIVATE
-    ${TDESKTOP_OUT_DIR}/Telegram/lib_ui/Release/lib_ui.lib
-    ${TDESKTOP_OUT_DIR}/Telegram/lib_base/Release/lib_base.lib
-    ${TDESKTOP_OUT_DIR}/Telegram/lib_crl/lib_crl.dir/Release/lib_crl.lib
-    ${TDESKTOP_OUT_DIR}/cmake/external/lz4/Release/external_lz4_bundled.lib
+    desktop_lib_ui
+    desktop_lib_base
+    desktop_lib_crl
+    desktop_lz4
     ${TDESKTOP_LIBS_DIR}/tg_angle/out/Release/tg_angle.lib
     ${TDESKTOP_LIBS_DIR}/zlib/Release/zlibstatic.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
@@ -470,6 +530,13 @@ set_target_properties(livekit_meeting_app PROPERTIES
 )
 
 target_compile_definitions(livekit_meeting_app PRIVATE
+    WIN32
+    _WINDOWS
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _WINSOCK_DEPRECATED_NO_WARNINGS
+    CRL_USE_WINAPI
+    ASIO_STANDALONE
     $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>
     $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
     $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
