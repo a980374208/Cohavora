@@ -45,14 +45,16 @@ public:
 	explicit JoinMeetingDialog(QWidget *parent = nullptr);
 	~JoinMeetingDialog() override = default;
 
+	QString serverUrl() const;
+	QString token() const;
 	QString meetingId() const;
 	QString displayName() const;
 	bool isAudioMuted() const;
 	bool isVideoMuted() const;
 
 private:
-	QLineEdit *_meetingIdInput = nullptr;
-	QLineEdit *_nameInput = nullptr;
+	QLineEdit *_serverUrlInput = nullptr;
+	QLineEdit *_tokenInput = nullptr;
 	QCheckBox *_audioMuteBox = nullptr;
 	QCheckBox *_videoMuteBox = nullptr;
 	QPushButton *_joinBtn = nullptr;

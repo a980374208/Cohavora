@@ -301,6 +301,10 @@ add_executable(livekit_meeting_app
     src/ui/schedule_widget.h
     src/ui/meeting_main_window.cpp
     src/ui/meeting_main_window.h
+    src/ui/meeting_room_window.cpp
+    src/ui/meeting_room_window.h
+    src/ui/meeting_log_console.cpp
+    src/ui/meeting_log_console.h
     src/ui/meeting_ui_integration.h
     src/ui/video_preview_widget.cpp
     src/ui/video_preview_widget.h

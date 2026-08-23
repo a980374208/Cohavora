@@ -210,11 +210,19 @@ WebRTCManager::~WebRTCManager() {
     Deinitialize();
 }
 
+#include "rtc_base/logging.h"
 bool WebRTCManager::Initialize() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (initialized_) {
         return true;
     }
+
+    // ======= 开启 WebRTC 原生日志 =======
+    // 可选级别: LS_VERBOSE (最详尽), LS_INFO (常规排查), LS_WARNING, LS_ERROR
+    webrtc::LogMessage::LogToDebug(webrtc::LS_INFO);
+    webrtc::LogMessage::LogTimestamps(true); // 显示时间戳
+    webrtc::LogMessage::LogThreads(true);    // 显示线程信息
+    // ===================================
 
     std::cout << "WebRTCManager: Initializing SSL and starting threads..." << std::endl;
     if (!webrtc::InitializeSSL()) {

@@ -108,7 +108,7 @@ public:
                                  uint32_t priority = 0);
 
     // Send update subscription request to server for subscribing / unsubscribing tracks
-    void SendUpdateSubscription(const std::vector<std::string>& track_sids, bool subscribe);
+    void SendUpdateSubscription(const std::vector<std::string>& track_sids, bool subscribe, const std::string& participant_sid = "");
 
     // Close signaling connection
     void Close();
