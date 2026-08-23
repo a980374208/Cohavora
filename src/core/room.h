@@ -3,6 +3,7 @@
 #include <string>
 #include <memory>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <vector>
 #include <mutex>
@@ -114,6 +115,8 @@ public:
     void AddTrackToPublisher(std::shared_ptr<Track> track);
     void SendPublishOffer();
     void NegotiatePublisher();
+    void ExecuteNegotiatePublisher();
+    void OnNegotiationFailed();
 
     // 内部 WebRTC 观察者回调接口
     void OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type);
@@ -123,7 +126,15 @@ public:
     void OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& participant_sid, const std::string& topic);
     void OnRemoteDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel);
 
+    using LogHandler = std::function<void(const std::string& cat, const std::string& tag, const std::string& msg)>;
+    void SetLogHandler(LogHandler handler) {
+        std::lock_guard lock(room_mutex_);
+        log_handler_ = std::move(handler);
+    }
+    void Log(const std::string& cat, const std::string& tag, const std::string& msg);
+
 private:
+    LogHandler log_handler_;
     void HandleSignalEvent(const SignalEvent& event);
     void HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg);
     void UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::ParticipantInfo>& participants);
@@ -136,8 +147,9 @@ private:
     void HandleOfferSignal(const proto::SessionDescription& offer);
     void HandleAnswerSignal(const proto::SessionDescription& answer);
     void HandleTrickleSignal(const proto::TrickleRequest& trickle);
+    void HandleMediaSectionsRequirement(const proto::MediaSectionsRequirement& req);
+    void NegotiateSubscriber(uint32_t num_audios, uint32_t num_videos);
 
-private:
     asio::any_io_executor executor_;
     std::shared_ptr<SignalClient> signal_client_;
     ConnectionState connection_state_ = ConnectionState::Disconnected;
@@ -151,8 +163,28 @@ private:
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> subscriber_pc_;
     std::unique_ptr<webrtc::PeerConnectionObserver> publisher_observer_;
     std::unique_ptr<webrtc::PeerConnectionObserver> subscriber_observer_;
-    bool publisher_negotiating_ = false;
-    bool publisher_renegotiation_pending_ = false;
+    enum class NegotiationState {
+        Idle,
+        InProgress,
+        PendingRetry
+    };
+    NegotiationState negotiation_state_ = NegotiationState::Idle;
+
+    // Subscriber PC 协商状态（客户端发起 Subscriber Offer 模式）
+    bool subscriber_negotiating_ = false;
+    uint32_t current_sub_audios_ = 0;
+    uint32_t current_sub_videos_ = 0;
+    uint32_t pending_sub_audios_ = 0;
+    uint32_t pending_sub_videos_ = 0;
+
+    // Early ICE Candidate 暂存队列结构
+    struct PendingIceCandidate {
+        std::string sdp_mid;
+        int sdp_mline_index = 0;
+        std::string sdp;
+    };
+    std::vector<PendingIceCandidate> pending_sub_ice_candidates_;
+    std::vector<PendingIceCandidate> pending_pub_ice_candidates_;
 
     // DataChannel 句柄与背压控制水线
     webrtc::scoped_refptr<webrtc::DataChannelInterface> reliable_dc_;
@@ -188,6 +220,9 @@ private:
         std::string previous_sid;
     };
     std::vector<PublishedTrackRecord> published_track_records_;
+
+    // 下行 Track 防重挂载
+    std::set<std::string> processed_remote_track_ids_;
 
     // Simulcast 参数下发同步
     static void ApplySimulcastParameters(webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender, const VideoPublishOptions& opts);

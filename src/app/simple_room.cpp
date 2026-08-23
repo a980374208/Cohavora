@@ -19,6 +19,7 @@
 #include "video_frame.h"
 #include "key_provider.h"
 #include "frame_cryptor.h"
+#include "telemetry/telemetry.h"
 
 // 产生 48kHz 单声道模拟音频白噪声/正弦采样帧
 void RunAudioCaptureLoop(std::shared_ptr<livekit::AudioSource> source, std::atomic<bool>& running) {
@@ -139,6 +140,17 @@ public:
             std::cout << "[EVENT] Subscribed to " << kind_str << " track from ["
                       << participant->identity() << "]: name='" << publication->name()
                       << "', sid=" << publication->sid() << std::endl;
+
+            if (track && track->kind() == livekit::TrackKind::Video) {
+                auto first_frame_flag = std::make_shared<std::atomic<bool>>(false);
+                track->addVideoSink([user = participant->identity(), first_frame_flag](const livekit::VideoFrame& frame, const livekit::VideoCaptureOptions&) {
+                    if (!first_frame_flag->exchange(true)) {
+                        std::cout << "[RECV VIDEO SINK] First frame received from [" << user
+                                  << "]: resolution=" << frame.width() << "x" << frame.height() << std::endl;
+                        livekit::Telemetry::Instance().OnFirstRemoteFrameReceived("video");
+                    }
+                });
+            }
         }
     }
 
@@ -161,7 +173,28 @@ public:
         }
     }
 
+    std::vector<std::string> last_speakers_;
+    std::chrono::steady_clock::time_point last_speaker_log_time_;
+
     void OnActiveSpeakersChanged(const std::vector<std::shared_ptr<livekit::Participant>>& speakers) override {
+        std::vector<std::string> current_speakers;
+        for (const auto& spk : speakers) {
+            if (spk) current_speakers.push_back(spk->identity());
+        }
+        std::sort(current_speakers.begin(), current_speakers.end());
+
+        auto now = std::chrono::steady_clock::now();
+        // Debounce: suppress repetitive identical speaker updates within 2 seconds
+        if (current_speakers == last_speakers_) {
+            auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_speaker_log_time_).count();
+            if (elapsed_ms < 2000) {
+                return;
+            }
+        }
+
+        last_speakers_ = current_speakers;
+        last_speaker_log_time_ = now;
+
         std::cout << "[EVENT] Active Speakers Updated (" << speakers.size() << "): ";
         for (const auto& spk : speakers) {
             if (spk) std::cout << spk->identity() << " ";

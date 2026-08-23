@@ -253,7 +253,9 @@ asio::awaitable<ConnectResult> SignalClient::Connect(
         
         client->join_response_ = join_res;
         client->StartHeartbeat();
-        client->SetEventReady();
+        // NOTE: SetEventReady() is NOT called here. Room::Connect() will call it
+        // after creating the subscriber PeerConnection, so that buffered events
+        // (e.g., SFU Subscriber SDP Offer) are dispatched after the PC is ready.
         co_return ConnectResult{client, join_res, {}};
     } catch (...) {
         std::cout << "SignalClient::Connect: Unknown exception" << std::endl;
@@ -403,12 +405,19 @@ void SignalClient::SendUpdateTrackSettings(const std::string& track_sid,
     Send(req);
 }
 
-void SignalClient::SendUpdateSubscription(const std::vector<std::string>& track_sids, bool subscribe) {
+void SignalClient::SendUpdateSubscription(const std::vector<std::string>& track_sids, bool subscribe, const std::string& participant_sid) {
     proto::SignalRequest req;
     auto* sub = req.mutable_subscription();
     sub->set_subscribe(subscribe);
     for (const auto& sid : track_sids) {
         sub->add_track_sids(sid);
+    }
+    if (!participant_sid.empty()) {
+        auto* pt = sub->add_participant_tracks();
+        pt->set_participant_sid(participant_sid);
+        for (const auto& sid : track_sids) {
+            pt->add_track_sids(sid);
+        }
     }
 
     std::cout << "[ADAPTIVE STREAM] Sent UpdateSubscription: subscribe=" << (subscribe ? "true" : "false")

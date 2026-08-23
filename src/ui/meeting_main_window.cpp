@@ -1,4 +1,5 @@
 #include "src/ui/meeting_main_window.h"
+#include "src/ui/meeting_room_window.h"
 #include "src/ui/shadow_helper.h"
 #include "src/ui/video_test_widget.h"
 #include "styles/style_widgets.h"
@@ -109,7 +110,7 @@ void WindowControlsWidget::leaveEventHook(QEvent *e) {
 JoinMeetingDialog::JoinMeetingDialog(QWidget *parent)
 	: QDialog(parent) {
 	setWindowTitle(QString::fromUtf8("加入会议"));
-	setFixedSize(400, 310);
+	setFixedSize(420, 320);
 	setWindowFlags(windowFlags() | Qt::FramelessWindowHint);
 	setAttribute(Qt::WA_TranslucentBackground, true);
 
@@ -188,15 +189,17 @@ JoinMeetingDialog::JoinMeetingDialog(QWidget *parent)
 	titleLayout->addStretch();
 	mainLayout->addLayout(titleLayout);
 
-	_meetingIdInput = new QLineEdit(container);
-	_meetingIdInput->setPlaceholderText(QString::fromUtf8("请输入会议号或链接"));
-	_meetingIdInput->setText("987654321");
-	mainLayout->addWidget(_meetingIdInput);
+	// 第一个输入框：服务器地址
+	_serverUrlInput = new QLineEdit(container);
+	_serverUrlInput->setPlaceholderText(QString::fromUtf8("请输入服务器地址 (如 ws://127.0.0.1:7880)"));
+	_serverUrlInput->setText("ws://127.0.0.1:7880");
+	mainLayout->addWidget(_serverUrlInput);
 
-	_nameInput = new QLineEdit(container);
-	_nameInput->setPlaceholderText(QString::fromUtf8("您的名称"));
-	_nameInput->setText(QString::fromUtf8("LiveKit用户"));
-	mainLayout->addWidget(_nameInput);
+	// 第二个输入框：Token
+	_tokenInput = new QLineEdit(container);
+	_tokenInput->setPlaceholderText(QString::fromUtf8("请输入Token"));
+	_tokenInput->setText("");
+	mainLayout->addWidget(_tokenInput);
 
 	auto optLayout = new QHBoxLayout();
 	_audioMuteBox = new QCheckBox(QString::fromUtf8("入会开启麦克风"), container);
@@ -224,12 +227,20 @@ JoinMeetingDialog::JoinMeetingDialog(QWidget *parent)
 	connect(_joinBtn, &QPushButton::clicked, this, &QDialog::accept);
 }
 
+QString JoinMeetingDialog::serverUrl() const {
+	return _serverUrlInput ? _serverUrlInput->text().trimmed() : QString();
+}
+
+QString JoinMeetingDialog::token() const {
+	return _tokenInput ? _tokenInput->text().trimmed() : QString();
+}
+
 QString JoinMeetingDialog::meetingId() const {
-	return _meetingIdInput ? _meetingIdInput->text().trimmed() : QString();
+	return serverUrl();
 }
 
 QString JoinMeetingDialog::displayName() const {
-	return _nameInput ? _nameInput->text().trimmed() : QString();
+	return QString::fromUtf8("LiveKit用户");
 }
 
 bool JoinMeetingDialog::isAudioMuted() const {
@@ -329,15 +340,28 @@ void MeetingMainWindow::onCardClicked(ActionCardType type) {
 	if (type == ActionCardType::JoinMeeting) {
 		JoinMeetingDialog dlg(this);
 		if (dlg.exec() == QDialog::Accepted) {
-			const QString room = dlg.meetingId();
-			const QString name = dlg.displayName();
-			QMessageBox::information(this, QString::fromUtf8("入会成功"),
-				QString::fromUtf8("已成功连接会议室：%1\n参会昵称：%2\n正在启动音视频采集链路...")
-				.arg(room).arg(name));
+			MeetingRoomWindow::Config cfg;
+			cfg.serverUrl = dlg.serverUrl();
+			cfg.token = dlg.token();
+			cfg.displayName = dlg.displayName();
+			cfg.audioMuted = dlg.isAudioMuted();
+			cfg.videoEnabled = !dlg.isVideoMuted();
+
+			auto *roomWindow = new MeetingRoomWindow(cfg);
+			roomWindow->setAttribute(Qt::WA_DeleteOnClose);
+			roomWindow->show();
 		}
 	} else if (type == ActionCardType::QuickMeeting) {
-		QMessageBox::information(this, QString::fromUtf8("快速会议"),
-			QString::fromUtf8("已一键生成专属个人快速会议号：888-666-999\n音视频设备已准备就绪，正在开启直播..."));
+		MeetingRoomWindow::Config cfg;
+		cfg.serverUrl = "wss://project-a-ofnzcsum.livekit.cloud";
+		cfg.token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJBUEl0ZXhzeFQ5QnJ0MzgiLCJzdWIiOiJ3aW4iLCJleHAiOjE3ODc1MTA0MTEsIm5iZiI6MTc4NzQyMDQxMSwiaWF0IjoxNzg3NDIwNDExLCJpZGVudGl0eSI6IndpbiIsInZpZGVvIjp7InJvb21Kb2luIjp0cnVlLCJyb29tIjoidGVzdCIsImNhblB1Ymxpc2giOnRydWUsImNhblN1YnNjcmliZSI6dHJ1ZSwiY2FuUHVibGlzaERhdGEiOnRydWV9fQ.LPOfSzQKJHl5lum5GAp5u_awdCKTheVwkG1UmYkznOs";
+		cfg.displayName = QString::fromUtf8("快速会议主持人");
+		cfg.audioMuted = false;
+		cfg.videoEnabled = true;
+
+		auto *roomWindow = new MeetingRoomWindow(cfg);
+		roomWindow->setAttribute(Qt::WA_DeleteOnClose);
+		roomWindow->show();
 	} else if (type == ActionCardType::ScheduleMeeting) {
 		QMessageBox::information(this, QString::fromUtf8("预定会议"),
 			QString::fromUtf8("已打开会议预定面板，您可以设定会议主题、时间、周期与参会密码。"));
