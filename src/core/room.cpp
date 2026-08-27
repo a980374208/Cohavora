@@ -57,6 +57,12 @@ public:
                 default: break;
             }
             room->Log("WEBRTC", "ICE_STATE", "PC (" + std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") + ") ICE 状态变为: " + state_str);
+            if (new_state == webrtc::PeerConnectionInterface::kIceConnectionConnected ||
+                new_state == webrtc::PeerConnectionInterface::kIceConnectionCompleted) {
+                asio::post(room->executor(), [room]() {
+                    room->OnIceConnected();
+                });
+            }
         }
     }
     void OnConnectionChange(webrtc::PeerConnectionInterface::PeerConnectionState new_state) override {
@@ -280,8 +286,8 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
                     config.servers.push_back(server);
                 }
 
-                publisher_observer_ = std::make_unique<RoomPeerConnectionObserver>(shared_from_this(), 0);
-                subscriber_observer_ = std::make_unique<RoomPeerConnectionObserver>(shared_from_this(), 1);
+                publisher_observer_ = std::make_shared<RoomPeerConnectionObserver>(shared_from_this(), 0);
+                subscriber_observer_ = std::make_shared<RoomPeerConnectionObserver>(shared_from_this(), 1);
 
                 webrtc::PeerConnectionDependencies pub_deps(publisher_observer_.get());
                 auto pub_res = WebRTCManager::Instance().factory()->CreatePeerConnectionOrError(config, std::move(pub_deps));
@@ -350,6 +356,11 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
         perm->set_all_participants(true);
         signal_client_->Send(perm_req);
         Log("SIGNAL", "SUB_PERM", "已向 LiveKit 发送全员订阅权限 SubscriptionPermission (all_participants=true)");
+
+        // [FIX] 单 PC 模式下，入会成功后主动发起初始 Offer 协商，确保 WebRTC 媒体通道与 recvonly 轨道立即激活
+        if (signal_client_->is_single_pc_mode_active()) {
+            NegotiatePublisher();
+        }
     }
 
     auto listeners_snapshot = GetListenersSnapshot();
@@ -369,11 +380,21 @@ void Room::Disconnect() {
         listeners_snapshot = listeners_;
     }
 
+    // 1. 关闭信令连接
     if (signal_client_) {
         signal_client_->Close();
         signal_client_.reset();
     }
 
+    // 2. 显式关闭 PeerConnection 网络传输
+    if (publisher_pc_) {
+        publisher_pc_->Close();
+    }
+    if (subscriber_pc_ && subscriber_pc_ != publisher_pc_) {
+        subscriber_pc_->Close();
+    }
+
+    // 3. 释放 PeerConnection 与 DataChannel
     publisher_pc_ = nullptr;
     subscriber_pc_ = nullptr;
     reliable_dc_ = nullptr;
@@ -381,6 +402,16 @@ void Room::Disconnect() {
     remote_data_channels_.clear();
     data_channel_observers_.clear();
     remote_track_sinks_.clear();
+
+    // 4. 释放 Observer
+    publisher_observer_.reset();
+    subscriber_observer_.reset();
+
+    {
+        std::lock_guard mlock(remote_media_mutex_);
+        remote_video_tracks_.clear();
+        remote_audio_tracks_.clear();
+    }
 
     for (const auto& listener : listeners_snapshot) {
         listener->OnDisconnected("Client Initiated Disconnect");
@@ -871,6 +902,28 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
     }
 }
 
+void Room::OnIceConnected() {
+    Log("WEBRTC", "ICE_READY", "WebRTC 媒体底层连接已就绪，向 SFU 激活所有下行视频流并请求关键帧...");
+    std::lock_guard lock(room_mutex_);
+    if (signal_client_) {
+        for (const auto& kv : remote_participants_) {
+            if (kv.second) {
+                std::vector<std::string> video_sids;
+                for (const auto& pub_kv : kv.second->tracks()) {
+                    if (pub_kv.second && pub_kv.second->track() && pub_kv.second->track()->kind() == TrackKind::Video) {
+                        video_sids.push_back(pub_kv.first);
+                        signal_client_->SendUpdateTrackSettings(pub_kv.first, false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
+                        Log("SIGNAL", "TRACK_ACTIVE", "已向 SFU 激活视频流 Track SID=" + pub_kv.first + " (Participant: " + kv.second->identity() + ")");
+                    }
+                }
+                if (!video_sids.empty()) {
+                    signal_client_->SendUpdateSubscription(video_sids, true, kv.first);
+                }
+            }
+        }
+    }
+}
+
 void Room::OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type) {
     SendTrickleCandidate(sdp, sdp_mid, sdp_mline_index, pc_type);
 }
@@ -1055,7 +1108,6 @@ void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
                     if (transceiver_res.ok()) {
                         std::cout << "[SIMULCAST TRANSCEIVER] Added Simulcast Transceiver for video track with " 
                                   << p->publish_opts.layers.size() << " layers!\n";
-                        ApplySimulcastParameters(transceiver_res.value()->sender(), p->publish_opts);
                     } else {
                         std::cerr << "[SIMULCAST TRANSCEIVER] AddTransceiver failed: " << transceiver_res.error().message() << "\n";
                         p->pc->AddTrack(p->track, { p->stream_id });
@@ -1160,9 +1212,24 @@ void Room::ExecuteNegotiatePublisher() {
         }
         
         if (pub_pc->signaling_state() != webrtc::PeerConnectionInterface::SignalingState::kStable) {
-            // 这在理论上不应该发生，因为我们锁住了 InProgress
-            // 如果发生了，就标记为重试并退出
             negotiation_state_ = NegotiationState::PendingRetry;
+            auto self = shared_from_this();
+            auto retry_timer = std::make_shared<asio::steady_timer>(executor_, std::chrono::milliseconds(50));
+            retry_timer->async_wait([self, retry_timer](const asio::error_code& ec) {
+                if (!ec) {
+                    bool should_run = false;
+                    {
+                        std::lock_guard lock(self->room_mutex_);
+                        if (self->negotiation_state_ == NegotiationState::PendingRetry) {
+                            self->negotiation_state_ = NegotiationState::InProgress;
+                            should_run = true;
+                        }
+                    }
+                    if (should_run) {
+                        self->ExecuteNegotiatePublisher();
+                    }
+                }
+            });
             return;
         }
     }
@@ -1221,7 +1288,7 @@ void Room::ExecuteNegotiatePublisher() {
 
                     client->Send(req);
                     std::cout << "[WebRTC] -> Sent publisher SDP Offer to LiveKit server with mid_to_track_id mapping!" << std::endl;
-                    self->Log("SIGNAL", "SDP_OFFER_SENT", "已向 LiveKit 服务端发送 Publisher SDP Offer (" + std::to_string(sdp.length()) + " 字节)");
+                    self->Log("SIGNAL", "SDP_OFFER_SENT", "已向 LiveKit 服务端发送 Publisher SDP Offer (" + std::to_string(sdp.length()) + " 字节):\n" + sdp);
                 });
         });
 }
@@ -1249,24 +1316,45 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
         auto audio_track = static_cast<webrtc::AudioTrackInterface*>(track.get());
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
         auto sink = std::make_shared<NativeAudioTrackSink>([this, track_id, has_logged](const AudioFrame& frame) {
-            std::string user_info = "Remote Participant";
+            std::vector<std::shared_ptr<Track>> targets;
             {
+                std::lock_guard lock(remote_media_mutex_);
+                for (auto it = remote_audio_tracks_.begin(); it != remote_audio_tracks_.end();) {
+                    if (auto t = it->lock()) {
+                        targets.push_back(t);
+                        ++it;
+                    } else {
+                        it = remote_audio_tracks_.erase(it);
+                    }
+                }
+            }
+
+            if (targets.empty()) {
                 std::lock_guard lock(room_mutex_);
                 for (const auto& kv : remote_participants_) {
                     if (kv.second) {
-                        user_info = kv.second->identity() + " (sid: " + kv.first + ")";
                         for (const auto& pub_kv : kv.second->tracks()) {
-                            if (pub_kv.second && pub_kv.second->track()) {
-                                pub_kv.second->track()->notifyAudioFrame(frame);
+                            if (pub_kv.second && pub_kv.second->track() && pub_kv.second->track()->kind() == TrackKind::Audio) {
+                                targets.push_back(pub_kv.second->track());
                             }
                         }
                     }
                 }
+                if (!targets.empty()) {
+                    std::lock_guard mlock(remote_media_mutex_);
+                    for (const auto& t : targets) {
+                        remote_audio_tracks_.push_back(t);
+                    }
+                }
             }
+
+            for (const auto& t : targets) {
+                t->notifyAudioFrame(frame);
+            }
+
             if (!has_logged->exchange(true)) {
-                std::cout << "[RECV AUDIO] Started receiving audio PCM stream from user: [" << user_info
-                          << "], sample_rate=" << frame.sampleRate() << "Hz, channels=" << frame.numChannels() << std::endl;
-                Log("WEBRTC", "AUDIO_STREAM", "开始接收远端音频流: " + user_info);
+                std::cout << "[RECV AUDIO] Started receiving audio PCM stream, sample_rate=" << frame.sampleRate() << "Hz, channels=" << frame.numChannels() << std::endl;
+                Log("WEBRTC", "AUDIO_STREAM", "开始接收远端音频流");
             }
         });
         audio_track->AddSink(sink.get());
@@ -1277,33 +1365,52 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
         auto frame_counter = std::make_shared<std::atomic<uint64_t>>(0);
         auto sink = std::make_shared<NativeVideoTrackSink>([this, track_id, has_logged, frame_counter](const VideoFrame& frame, const VideoCaptureOptions& options) {
-            std::string user_info = "Remote Participant";
+            std::vector<std::shared_ptr<Track>> targets;
             {
-                std::lock_guard lock(room_mutex_);
-                for (const auto& kv : remote_participants_) {
-                    if (kv.second) {
-                        user_info = kv.second->identity() + " (sid: " + kv.first + ")";
-                        bool has_pub = false;
-                        for (const auto& pub_kv : kv.second->tracks()) {
-                            if (pub_kv.second && pub_kv.second->track() && pub_kv.second->track()->kind() == TrackKind::Video) {
-                                pub_kv.second->track()->notifyVideoFrame(frame, options);
-                                has_pub = true;
-                            }
-                        }
-                        if (!has_pub) {
-                            auto r_track = std::make_shared<Track>(track_id, "camera_video", TrackKind::Video);
-                            auto pub = std::make_shared<TrackPublication>(r_track, track_id, "camera_video");
-                            kv.second->add_publication(pub);
-                            r_track->notifyVideoFrame(frame, options);
-                        }
+                std::lock_guard lock(remote_media_mutex_);
+                for (auto it = remote_video_tracks_.begin(); it != remote_video_tracks_.end();) {
+                    if (auto t = it->lock()) {
+                        targets.push_back(t);
+                        ++it;
+                    } else {
+                        it = remote_video_tracks_.erase(it);
                     }
                 }
             }
+
+            if (targets.empty()) {
+                std::lock_guard lock(room_mutex_);
+                for (const auto& kv : remote_participants_) {
+                    if (kv.second) {
+                        for (const auto& pub_kv : kv.second->tracks()) {
+                            if (pub_kv.second && pub_kv.second->track() && pub_kv.second->track()->kind() == TrackKind::Video) {
+                                targets.push_back(pub_kv.second->track());
+                            }
+                        }
+                        if (targets.empty()) {
+                            auto r_track = std::make_shared<Track>(track_id, "camera_video", TrackKind::Video);
+                            auto pub = std::make_shared<TrackPublication>(r_track, track_id, "camera_video");
+                            kv.second->add_publication(pub);
+                            targets.push_back(r_track);
+                        }
+                    }
+                }
+                if (!targets.empty()) {
+                    std::lock_guard mlock(remote_media_mutex_);
+                    for (const auto& t : targets) {
+                        remote_video_tracks_.push_back(t);
+                    }
+                }
+            }
+
+            for (const auto& t : targets) {
+                t->notifyVideoFrame(frame, options);
+            }
+
             uint64_t cnt = frame_counter->fetch_add(1);
             if (!has_logged->exchange(true) || cnt % 120 == 0) {
-                std::cout << "[RECV VIDEO] Receiving video stream from user: [" << user_info
-                          << "], frame #" << cnt << ", resolution=" << frame.width() << "x" << frame.height() << std::endl;
-                Log("WEBRTC", "VIDEO_FRAME", "WebRTC 解码器输出第 " + std::to_string(cnt) + " 帧 (" + std::to_string(frame.width()) + "x" + std::to_string(frame.height()) + ") 来自: " + user_info);
+                std::cout << "[RECV VIDEO] Receiving video stream, frame #" << cnt << ", resolution=" << frame.width() << "x" << frame.height() << std::endl;
+                Log("WEBRTC", "VIDEO_FRAME", "WebRTC 解码器输出第 " + std::to_string(cnt) + " 帧 (" + std::to_string(frame.width()) + "x" + std::to_string(frame.height()) + ")");
                 Telemetry::Instance().OnFirstRemoteFrameReceived("video");
             }
         });
@@ -1330,7 +1437,17 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
 
 void Room::OnRenegotiationNeeded(int pc_type) {
     if (pc_type != 0) return; // 只有 Publisher PC 需要由 Client 发送 Offer
-    NegotiatePublisher();
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
+    {
+        std::lock_guard lock(room_mutex_);
+        pub_pc = publisher_pc_;
+        if (negotiation_state_ != NegotiationState::Idle) {
+            return; // 正在协商中，不产生多余的重协商风暴
+        }
+    }
+    if (pub_pc && pub_pc->signaling_state() == webrtc::PeerConnectionInterface::SignalingState::kStable) {
+        NegotiatePublisher();
+    }
 }
 
 void Room::HandleSignalEvent(const SignalEvent& event) {
@@ -1428,6 +1545,16 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
     } else if (msg->has_track_published()) {
         const auto& tp = msg->track_published();
         Log("SIGNAL", "TRACK_PUB_ACK", "收到服务端 TrackPublished ACK: cid=" + tp.cid() + ", track_sid=" + tp.track().sid());
+        std::lock_guard lock(room_mutex_);
+        if (local_participant_) {
+            auto pub = local_participant_->get_publication(tp.cid());
+            if (pub) {
+                if (pub->track()) {
+                    pub->track()->set_sid(tp.track().sid());
+                }
+                local_participant_->add_publication(std::make_shared<TrackPublication>(pub->track(), tp.track().sid(), pub->name()));
+            }
+        }
     } else if (msg->has_subscription_response()) {
         const auto& sr = msg->subscription_response();
         std::string err_str;
@@ -1506,6 +1633,7 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
 void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::ParticipantInfo>& participants) {
     std::vector<std::shared_ptr<RemoteParticipant>> newly_connected;
     std::vector<std::pair<std::shared_ptr<RemoteParticipant>, std::shared_ptr<TrackPublication>>> newly_published_tracks;
+    std::vector<std::pair<std::shared_ptr<RemoteParticipant>, std::shared_ptr<TrackPublication>>> unpublished_tracks;
     std::vector<std::shared_ptr<RemoteParticipant>> disconnected;
     struct AttrChange {
         std::shared_ptr<Participant> participant;
@@ -1519,6 +1647,13 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
         ParticipantPermission new_perm;
     };
     std::vector<PermChange> changed_permissions_events;
+
+    struct MuteChange {
+        std::shared_ptr<Participant> participant;
+        std::shared_ptr<TrackPublication> publication;
+        bool muted;
+    };
+    std::vector<MuteChange> changed_mute_events;
 
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
 
@@ -1593,17 +1728,45 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
                     }
                 }
 
-                // 同步解析远端用户的 Track 列表（支持新增 Track 识别）
+                // 同步解析远端用户的 Track 列表（支持新增、静音状态变更、取消发布识别）
+                std::set<std::string> current_track_sids;
                 for (int t = 0; t < p_info.tracks_size(); ++t) {
                     const auto& t_info = p_info.tracks(t);
-                    if (!remote->get_publication(t_info.sid())) {
+                    current_track_sids.insert(t_info.sid());
+                    auto pub = remote->get_publication(t_info.sid());
+                    if (!pub) {
                         TrackKind kind = (t_info.type() == proto::TrackType::AUDIO) ? TrackKind::Audio : TrackKind::Video;
                         auto remote_track = std::make_shared<Track>(t_info.sid(), t_info.name(), kind);
                         remote_track->set_muted(t_info.muted());
-                        auto pub = std::make_shared<TrackPublication>(remote_track, t_info.sid(), t_info.name());
+                        pub = std::make_shared<TrackPublication>(remote_track, t_info.sid(), t_info.name());
                         remote->add_publication(pub);
+                        {
+                            std::lock_guard mlock(remote_media_mutex_);
+                            if (kind == TrackKind::Video) {
+                                remote_video_tracks_.push_back(remote_track);
+                            } else {
+                                remote_audio_tracks_.push_back(remote_track);
+                            }
+                        }
                         newly_published_tracks.push_back({remote, pub});
-                        Log("TRACK", "NEW_TRACK", "参会人 [" + remote->identity() + "] 发布新 Track: " + t_info.name() + " (" + (kind == TrackKind::Video ? "VIDEO" : "AUDIO") + ", SID: " + t_info.sid() + ")");
+                        Log("TRACK", "NEW_TRACK", "参会人 [" + remote->identity() + "] 发布新 Track: " + t_info.name() + " (" + (kind == TrackKind::Video ? "VIDEO" : "AUDIO") + ", SID: " + t_info.sid() + ", Muted: " + (t_info.muted() ? "true" : "false") + ")");
+                    } else {
+                        // 检测静音/画面开关状态变化
+                        if (pub->track() && pub->track()->muted() != t_info.muted()) {
+                            pub->track()->set_muted(t_info.muted());
+                            changed_mute_events.push_back({remote, pub, t_info.muted()});
+                            Log("TRACK", "MUTE_CHANGED", "参会人 [" + remote->identity() + "] Track [" + t_info.sid() + "] 状态变更为: " + (t_info.muted() ? "静音/关闭" : "开启"));
+                        }
+                    }
+                }
+
+                // 检测被远端取消发布的 Track (Unpublished)
+                auto existing_tracks = remote->tracks();
+                for (const auto& [sid, pub] : existing_tracks) {
+                    if (current_track_sids.find(sid) == current_track_sids.end()) {
+                        remote->remove_publication(sid);
+                        unpublished_tracks.push_back({remote, pub});
+                        Log("TRACK", "UNPUBLISHED", "参会人 [" + remote->identity() + "] 取消发布 Track: " + sid);
                     }
                 }
             }
@@ -1616,18 +1779,55 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
         }
     }
 
+    bool has_new_video_pub = false;
     for (const auto& [p, pub] : newly_published_tracks) {
         if (signal_client_) {
-            signal_client_->SendUpdateSubscription({pub->sid()}, true, p ? p->sid() : "");
             if (pub->track() && pub->track()->kind() == TrackKind::Video) {
                 signal_client_->SendUpdateTrackSettings(pub->sid(), false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
+                has_new_video_pub = true;
             }
-            Log("SIGNAL", "SEND_SUB", "已向 SFU 发送 Track 显式订阅请求: " + pub->sid() + " (Participant: " + (p ? p->identity() : "") + ", " + (pub->track() && pub->track()->kind() == TrackKind::Video ? "VIDEO" : "AUDIO") + ")");
         }
         for (const auto& listener : listeners_snapshot) {
             listener->OnTrackPublished(p, pub);
             if (pub && pub->track()) {
                 listener->OnTrackSubscribed(pub->track(), pub, p);
+            }
+        }
+    }
+
+    // 会议中新增远端视频轨时，确保 Single PC 下扫描并重新激活 Transceiver Receiver
+    if (has_new_video_pub && signal_client_ && signal_client_->is_single_pc_mode_active()) {
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
+        {
+            std::lock_guard lock(room_mutex_);
+            pub_pc = publisher_pc_;
+        }
+        if (pub_pc) {
+            auto transceivers = pub_pc->GetTransceivers();
+            for (const auto& t : transceivers) {
+                if (t->receiver() && t->receiver()->track()) {
+                    std::weak_ptr<Room> weak_this = shared_from_this();
+                    asio::post(executor_, [weak_this, receiver = t->receiver(), track = t->receiver()->track()]() {
+                        if (auto room = weak_this.lock()) {
+                            room->OnRemoteTrackAdded(receiver, track);
+                        }
+                    });
+                }
+            }
+        }
+    }
+
+    for (const auto& evt : changed_mute_events) {
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnTrackMuted(evt.participant, evt.publication, evt.muted);
+        }
+    }
+
+    for (const auto& [p, pub] : unpublished_tracks) {
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnTrackUnpublished(p, pub);
+            if (pub && pub->track()) {
+                listener->OnTrackUnsubscribed(pub->track(), pub, p);
             }
         }
     }
@@ -1795,7 +1995,7 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
     }
 
     std::cout << "[WebRTC] Received SDP Offer from server, setting RemoteDescription..." << std::endl;
-    Log("SIGNAL", "SDP_OFFER", "收到服务端下发的 SDP Offer (" + std::to_string(offer.sdp().length()) + " 字节), 正在设置 RemoteDescription...");
+    Log("SIGNAL", "SDP_OFFER_RECV", "收到服务端下发的 SDP Offer (" + std::to_string(offer.sdp().length()) + " 字节):\n" + offer.sdp());
     auto self = shared_from_this();
     WebRTCManager::Instance().SetRemoteDescription(pc, offer.type(), offer.sdp(), executor_,
         [self, client, pc](const std::string& set_remote_err) {
@@ -1830,7 +2030,7 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
                             answer_msg->set_sdp(sdp);
                             client->Send(req);
                             std::cout << "[WebRTC] -> Successfully created and sent SDP Answer back to LiveKit Server!" << std::endl;
-                            self->Log("SIGNAL", "SDP_ANSWER_SENT", "已生成并向 LiveKit 服务端发送 Subscriber SDP Answer (" + std::to_string(sdp.length()) + " 字节)");
+                            self->Log("SIGNAL", "SDP_ANSWER_SENT", "已生成并向 LiveKit 服务端发送 Subscriber SDP Answer (" + std::to_string(sdp.length()) + " 字节):\n" + sdp);
                         });
                 });
         });
@@ -1854,6 +2054,7 @@ static std::vector<std::string> ExtractSdpMLines(const std::string& sdp) {
 }
 
 void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
+    Log("SIGNAL", "SDP_ANSWER_RECV", "收到服务端下发的 SDP Answer (" + std::to_string(answer.sdp().length()) + " 字节):\n" + answer.sdp());
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> sub_pc;
     bool pub_negotiating = false;
@@ -1898,13 +2099,16 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
                     auto transceivers = pub_pc->GetTransceivers();
                     Log("SIGNAL", "TRANS_SCAN", "Single PC Answer 协商成功，扫描 " + std::to_string(transceivers.size()) + " 个 transceivers");
                     for (const auto& t : transceivers) {
-                        if (t->receiver() && t->receiver()->track()) {
-                            std::weak_ptr<Room> weak_this = shared_from_this();
-                            asio::post(executor_, [weak_this, receiver = t->receiver(), track = t->receiver()->track()]() {
-                                if (auto room = weak_this.lock()) {
-                                    room->OnRemoteTrackAdded(receiver, track);
-                                }
-                            });
+                        if (t && (t->direction() == webrtc::RtpTransceiverDirection::kRecvOnly ||
+                            (t->current_direction().has_value() && *t->current_direction() == webrtc::RtpTransceiverDirection::kRecvOnly))) {
+                            if (t->receiver() && t->receiver()->track()) {
+                                std::weak_ptr<Room> weak_this = shared_from_this();
+                                asio::post(executor_, [weak_this, receiver = t->receiver(), track = t->receiver()->track()]() {
+                                    if (auto room = weak_this.lock()) {
+                                        room->OnRemoteTrackAdded(receiver, track);
+                                    }
+                                });
+                            }
                         }
                     }
 

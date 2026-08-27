@@ -20,64 +20,11 @@ namespace livekit {
 
 class CoroArena {
 public:
-    static constexpr std::size_t kBlockSize = 256 * 1024; // 256KB 保证足够多的并发协程深度
-
-    struct ThreadLocalPool {
-        alignas(64) uint8_t buffer[kBlockSize];
-        std::size_t offset = 0;
-        std::size_t active_allocations = 0;
-        std::size_t count_arena = 0;
-        std::size_t count_sys = 0;
-    };
-
-    static ThreadLocalPool& GetPool() {
-        thread_local ThreadLocalPool pool;
-        return pool;
-    }
-
     static void* Allocate(std::size_t size) {
-        auto& pool = GetPool();
-        std::size_t aligned_size = (size + 15) & ~static_cast<std::size_t>(15);
-        
-        if (pool.offset + aligned_size <= kBlockSize) {
-            void* ptr = pool.buffer + pool.offset;
-            pool.offset += aligned_size;
-            pool.active_allocations++;
-            pool.count_arena++;
-            
-            // 每 10 次 Arena 分配打印一次日志，证明拦截成功且展示水位
-            // if (pool.count_arena % 10 == 0) {
-            //     std::cout << "[CoroArena] Allocated frame in Arena, active=" << pool.active_allocations 
-            //               << ", offset=" << pool.offset << "/" << kBlockSize 
-            //               << ", total_arena_allocs=" << pool.count_arena 
-            //               << ", total_sys_allocs=" << pool.count_sys << std::endl;
-            // }
-            return ptr;
-        }
-        
-        // 空间不足，退回系统分配
-        void* ptr = ::operator new(aligned_size);
-        pool.active_allocations++;
-        pool.count_sys++;
-        // std::cout << "[CoroArena WARNING] Arena exhausted! Fallback to system allocation, size=" << aligned_size << std::endl;
-        return ptr;
+        return ::operator new(size);
     }
 
     static void Deallocate(void* ptr, std::size_t size) {
-        auto& pool = GetPool();
-        std::size_t aligned_size = (size + 15) & ~static_cast<std::size_t>(15);
-        
-        pool.active_allocations--;
-        
-        // 如果是在 Arena 缓冲区内的指针
-        if (ptr >= pool.buffer && ptr < pool.buffer + kBlockSize) {
-            if (pool.active_allocations == 0) {
-                pool.offset = 0;
-            }
-            return;
-        }
-        
-        // 否则归还给系统
         ::operator delete(ptr);
     }
 };

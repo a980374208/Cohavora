@@ -96,38 +96,56 @@ void MediaConverters::ProcessWasapiAudioBuffer(
         return;
     }
 
-    // Step 2: Downmix to target channels (Stereo or Mono)
+    // Step 2: Downmix or Upmix to target channels (Stereo or Mono)
     std::vector<float> mixed_channels(in_frames * target_channels);
-    for (uint32_t f = 0; f < in_frames; ++f) {
-        if (in_channels == 1 && target_channels == 2) {
-            float mono = decoded_channels[f];
-            mixed_channels[f * 2] = mono;
-            mixed_channels[f * 2 + 1] = mono;
-        } else if (in_channels == 2 && target_channels == 2) {
-            mixed_channels[f * 2] = decoded_channels[f * 2];
-            mixed_channels[f * 2 + 1] = decoded_channels[f * 2 + 1];
-        } else if (in_channels == 2 && target_channels == 1) {
-            mixed_channels[f] = 0.5f * (decoded_channels[f * 2] + decoded_channels[f * 2 + 1]);
-        } else if (in_channels > 2) {
-            // 5.1 / 7.1 Downmix to Stereo (Left = L + 0.707*C + 0.707*Ls + 0.5*LFE, Right = R + 0.707*C + 0.707*Rs + 0.5*LFE)
-            float l = decoded_channels[f * in_channels + 0];
-            float r = decoded_channels[f * in_channels + 1];
-            float c = (in_channels >= 3) ? decoded_channels[f * in_channels + 2] : 0.0f;
-            float lfe = (in_channels >= 4) ? decoded_channels[f * in_channels + 3] : 0.0f;
-            float ls = (in_channels >= 5) ? decoded_channels[f * in_channels + 4] : 0.0f;
-            float rs = (in_channels >= 6) ? decoded_channels[f * in_channels + 5] : 0.0f;
-
-            float out_l = l + 0.707f * c + 0.707f * ls + 0.5f * lfe;
-            float out_r = r + 0.707f * c + 0.707f * rs + 0.5f * lfe;
-
-            if (target_channels == 2) {
-                mixed_channels[f * 2] = out_l * 0.7f;
-                mixed_channels[f * 2 + 1] = out_r * 0.7f;
-            } else {
-                mixed_channels[f] = 0.5f * (out_l + out_r) * 0.7f;
+    if (target_channels == 1) {
+        if (in_channels == 1) {
+            for (uint32_t f = 0; f < in_frames; ++f) {
+                mixed_channels[f] = decoded_channels[f];
+            }
+        } else if (in_channels == 2) {
+            for (uint32_t f = 0; f < in_frames; ++f) {
+                mixed_channels[f] = 0.5f * (decoded_channels[f * 2 + 0] + decoded_channels[f * 2 + 1]);
             }
         } else {
-            mixed_channels[f] = decoded_channels[f];
+            for (uint32_t f = 0; f < in_frames; ++f) {
+                float sum = 0.0f;
+                for (WORD c = 0; c < in_channels; ++c) {
+                    sum += decoded_channels[f * in_channels + c];
+                }
+                mixed_channels[f] = sum / in_channels;
+            }
+        }
+    } else if (target_channels == 2) {
+        if (in_channels == 1) {
+            for (uint32_t f = 0; f < in_frames; ++f) {
+                float mono = decoded_channels[f];
+                mixed_channels[f * 2 + 0] = mono;
+                mixed_channels[f * 2 + 1] = mono;
+            }
+        } else if (in_channels == 2) {
+            for (uint32_t f = 0; f < in_frames; ++f) {
+                mixed_channels[f * 2 + 0] = decoded_channels[f * 2 + 0];
+                mixed_channels[f * 2 + 1] = decoded_channels[f * 2 + 1];
+            }
+        } else {
+            for (uint32_t f = 0; f < in_frames; ++f) {
+                float l = decoded_channels[f * in_channels + 0];
+                float r = decoded_channels[f * in_channels + 1];
+                float c = (in_channels >= 3) ? decoded_channels[f * in_channels + 2] : 0.0f;
+                float lfe = (in_channels >= 4) ? decoded_channels[f * in_channels + 3] : 0.0f;
+                float ls = (in_channels >= 5) ? decoded_channels[f * in_channels + 4] : 0.0f;
+                float rs = (in_channels >= 6) ? decoded_channels[f * in_channels + 5] : 0.0f;
+
+                mixed_channels[f * 2 + 0] = (l + 0.707f * c + 0.707f * ls + 0.5f * lfe) * 0.7f;
+                mixed_channels[f * 2 + 1] = (r + 0.707f * c + 0.707f * rs + 0.5f * lfe) * 0.7f;
+            }
+        }
+    } else {
+        for (uint32_t f = 0; f < in_frames; ++f) {
+            for (int c = 0; c < target_channels; ++c) {
+                mixed_channels[f * target_channels + c] = (c < in_channels) ? decoded_channels[f * in_channels + c] : 0.0f;
+            }
         }
     }
 

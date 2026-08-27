@@ -10,6 +10,7 @@
 #include "audio_frame.h"
 #include "video_frame.h"
 #include "video_source.h"
+#include "webrtc_manager.h"
 
 namespace livekit {
 

@@ -62,17 +62,20 @@ def download_and_extract_zip(url: str, extract_to: Path, archive_name: str):
 
 # --- Stage 1: WebRTC Native C++ Package (Downloaded & Deployed into ./deps/webrtc) ---
 
-def prepare_webrtc():
+def prepare_webrtc(debug_archive_path: Path = None):
     stage_name = "webrtc"
     target_webrtc_dir = deps_dir / "webrtc"
-    target_lib = target_webrtc_dir / "lib" / "webrtc.lib"
+    target_lib_dir = target_webrtc_dir / "lib"
+    target_lib_rel = target_lib_dir / "Release" / "webrtc.lib"
+    target_lib_dbg = target_lib_dir / "Debug" / "webrtc.lib"
+    target_lib_root = target_lib_dir / "webrtc.lib"
     target_headers = target_webrtc_dir / "include"
 
-    expected_key = compute_string_hash(f"webrtc-51ef663:{target_lib.exists()}:{target_headers.exists()}")
+    expected_key = compute_string_hash(f"webrtc-51ef663:{target_lib_rel.exists()}:{target_lib_dbg.exists()}:{target_headers.exists()}")
     status = check_cache_key(stage_name, expected_key)
 
-    if status == 'Good' and target_lib.exists() and target_headers.exists():
-        print(f"[STAGE: WebRTC] OK (Ready in ./deps/webrtc)")
+    if status == 'Good' and target_lib_rel.exists() and target_headers.exists():
+        print(f"[STAGE: WebRTC] OK (Release and Debug ready in ./deps/webrtc)")
         return target_webrtc_dir
 
     print(f"\n[STAGE: WebRTC] Downloading and preparing WebRTC C++ SDK directly from official release...")
@@ -93,6 +96,35 @@ def prepare_webrtc():
             shutil.rmtree(sub_dir)
         except Exception:
             pass
+
+    # Ensure lib subdirectories exist
+    (target_lib_dir / "Release").mkdir(parents=True, exist_ok=True)
+    (target_lib_dir / "Debug").mkdir(parents=True, exist_ok=True)
+
+    # Place release webrtc.lib into lib/Release/
+    if target_lib_root.exists():
+        shutil.copy2(target_lib_root, target_lib_rel)
+        print(f" -> Deployed Release WebRTC library: {target_lib_rel}")
+
+    # Handle Debug WebRTC library
+    if debug_archive_path and debug_archive_path.exists():
+        print(f"[EXTRACT] Unpacking Debug WebRTC archive from {debug_archive_path}...")
+        debug_extract_temp = cache_keys_dir / "webrtc_debug_temp"
+        download_and_extract_zip("", debug_extract_temp, debug_archive_path.name)
+        # Find webrtc.lib in extracted content
+        found_dbg = list(debug_extract_temp.glob("**/webrtc.lib"))
+        if found_dbg:
+            shutil.copy2(found_dbg[0], target_lib_dbg)
+            print(f" -> Deployed Debug WebRTC library: {target_lib_dbg}")
+        try:
+            shutil.rmtree(debug_extract_temp)
+        except Exception:
+            pass
+    elif not target_lib_dbg.exists() and target_lib_root.exists():
+        # Fallback copy if custom debug build not yet provided
+        shutil.copy2(target_lib_root, target_lib_dbg)
+        print(f" -> [NOTICE] Initialized Debug WebRTC placeholder with Release binary at: {target_lib_dbg}")
+        print(f"    (You can replace this with your custom compiled Debug webrtc.lib at any time)")
 
     write_cache_key(stage_name, expected_key)
     print(f" -> WebRTC C++ deployed and verified in {target_webrtc_dir}")
@@ -141,6 +173,7 @@ def main():
     import argparse
     parser = argparse.ArgumentParser(description="LiveKit C++ Dependencies Pipeline")
     parser.add_argument("--qt-archive", type=str, help="Path to Qt & Libraries zip archive for extraction")
+    parser.add_argument("--webrtc-debug-archive", type=str, help="Path to custom Debug webrtc zip archive or directory for extraction")
     parser.add_argument("--libraries-src", type=str, help="Explicit path to external Libraries directory to deploy once")
     args = parser.parse_args()
 
@@ -161,9 +194,10 @@ def main():
         shutil.copytree(src_lib, dst_lib, dirs_exist_ok=True, ignore=ignore_func)
 
     qt_archive = Path(args.qt_archive) if args.qt_archive else None
+    webrtc_dbg_archive = Path(args.webrtc_debug_archive) if args.webrtc_debug_archive else None
 
     # Execute standalone dependency stages
-    prepare_webrtc()
+    prepare_webrtc(webrtc_dbg_archive)
     prepare_libraries(qt_archive)
 
     print("\n==================================================")

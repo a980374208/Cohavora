@@ -120,6 +120,7 @@ public:
 
     // 内部 WebRTC 观察者回调接口
     void OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type);
+    void OnIceConnected();
     void OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track);
     void OnRenegotiationNeeded(int pc_type);
     void OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliable);
@@ -161,8 +162,8 @@ private:
     // WebRTC PeerConnection 资源
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher_pc_;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> subscriber_pc_;
-    std::unique_ptr<webrtc::PeerConnectionObserver> publisher_observer_;
-    std::unique_ptr<webrtc::PeerConnectionObserver> subscriber_observer_;
+    std::shared_ptr<webrtc::PeerConnectionObserver> publisher_observer_;
+    std::shared_ptr<webrtc::PeerConnectionObserver> subscriber_observer_;
     enum class NegotiationState {
         Idle,
         InProgress,
@@ -206,6 +207,11 @@ private:
 
     // 线程安全锁
     mutable std::recursive_mutex room_mutex_;
+
+    // 媒体分发专用轻量锁（与信令/状态机大锁 room_mutex_ 完全解耦，防止 60FPS 回调产生 AB-BA 死锁）
+    mutable std::mutex remote_media_mutex_;
+    std::vector<std::weak_ptr<Track>> remote_video_tracks_;
+    std::vector<std::weak_ptr<Track>> remote_audio_tracks_;
 
     // 重连控制
     int reconnect_attempts_ = 0;

@@ -80,8 +80,9 @@ void MeetingLogConsoleWindow::initUi() {
 	topLayout->addStretch();
 
 	_filterInput = new QLineEdit(this);
-	_filterInput->setPlaceholderText(QString::fromUtf8("过滤日志关键词..."));
-	_filterInput->setFixedWidth(160);
+	_filterInput->setPlaceholderText(QString::fromUtf8("搜索/过滤日志关键词..."));
+	_filterInput->setClearButtonEnabled(true);
+	_filterInput->setFixedWidth(200);
 	topLayout->addWidget(_filterInput);
 
 	_autoScrollBox = new QCheckBox(QString::fromUtf8("自动滚屏"), this);
@@ -101,6 +102,7 @@ void MeetingLogConsoleWindow::initUi() {
 	_logView->setMaximumBlockCount(3000); // 限制最多保留 3000 行
 	mainLayout->addWidget(_logView);
 
+	connect(_filterInput, &QLineEdit::textChanged, this, &MeetingLogConsoleWindow::onFilterChanged);
 	connect(_clearBtn, &QPushButton::clicked, this, &MeetingLogConsoleWindow::clearLogs);
 	connect(_copyBtn, &QPushButton::clicked, this, &MeetingLogConsoleWindow::copyAllLogs);
 
@@ -110,12 +112,32 @@ void MeetingLogConsoleWindow::initUi() {
 
 void MeetingLogConsoleWindow::appendLog(LogCategory category, const QString &tag, const QString &message) {
 	const QString timeStr = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
-	const QString formatted = formatLogHtml(timeStr, category, tag, message);
+	QString catName;
+	const QString formatted = formatLogHtml(timeStr, category, tag, message, &catName);
 
-	QMetaObject::invokeMethod(this, [this, formatted]() {
+	LogEntry entry;
+	entry.timeStr = timeStr;
+	entry.category = category;
+	entry.tag = tag;
+	entry.message = message;
+	entry.catName = catName;
+	entry.formattedHtml = formatted;
+	entry.fullText = QString("[%1] [%2] [%3] %4").arg(timeStr, catName, tag, message);
+
+	QMetaObject::invokeMethod(this, [this, entry = std::move(entry)]() {
 		QMutexLocker locker(&_mutex);
-		if (_logView) {
-			_logView->appendHtml(formatted);
+		_logEntries.push_back(entry);
+		if (_logEntries.size() > kMaxLogEntries) {
+			_logEntries.erase(_logEntries.begin());
+		}
+
+		bool match = true;
+		if (!_currentFilter.isEmpty()) {
+			match = entry.fullText.contains(_currentFilter, Qt::CaseInsensitive);
+		}
+
+		if (match && _logView) {
+			_logView->appendHtml(entry.formattedHtml);
 			if (_autoScrollBox && _autoScrollBox->isChecked()) {
 				_logView->moveCursor(QTextCursor::End);
 			}
@@ -123,7 +145,39 @@ void MeetingLogConsoleWindow::appendLog(LogCategory category, const QString &tag
 	}, Qt::QueuedConnection);
 }
 
-QString MeetingLogConsoleWindow::formatLogHtml(const QString &timeStr, LogCategory category, const QString &tag, const QString &message) {
+void MeetingLogConsoleWindow::onFilterChanged(const QString &filterText) {
+	QMutexLocker locker(&_mutex);
+	_currentFilter = filterText.trimmed();
+	rebuildLogView();
+}
+
+void MeetingLogConsoleWindow::rebuildLogView() {
+	if (!_logView) return;
+
+	_logView->clear();
+	int matchedCount = 0;
+
+	for (const auto &entry : _logEntries) {
+		if (_currentFilter.isEmpty() || entry.fullText.contains(_currentFilter, Qt::CaseInsensitive)) {
+			_logView->appendHtml(entry.formattedHtml);
+			matchedCount++;
+		}
+	}
+
+	if (_statusLabel) {
+		if (_currentFilter.isEmpty()) {
+			_statusLabel->setText(QString::fromUtf8("● 控制台就绪 (%1条)").arg(_logEntries.size()));
+		} else {
+			_statusLabel->setText(QString::fromUtf8("● 筛选: %1/%2条").arg(matchedCount).arg(_logEntries.size()));
+		}
+	}
+
+	if (_autoScrollBox && _autoScrollBox->isChecked()) {
+		_logView->moveCursor(QTextCursor::End);
+	}
+}
+
+QString MeetingLogConsoleWindow::formatLogHtml(const QString &timeStr, LogCategory category, const QString &tag, const QString &message, QString *outCatName) {
 	QString color = "#d1d5db"; // 默认浅白
 	QString catName = "INFO";
 
@@ -146,6 +200,10 @@ QString MeetingLogConsoleWindow::formatLogHtml(const QString &timeStr, LogCatego
 		color = "#F53F3F"; catName = "ERROR"; break;
 	}
 
+	if (outCatName) {
+		*outCatName = catName;
+	}
+
 	return QString(R"(<span style="color:#595e6d;">[%1]</span> <span style="color:%2; font-weight:bold;">[%3]</span> <span style="color:#86909c;">[%4]</span> <span style="color:%2;">%5</span>)")
 		.arg(timeStr)
 		.arg(color)
@@ -156,8 +214,12 @@ QString MeetingLogConsoleWindow::formatLogHtml(const QString &timeStr, LogCatego
 
 void MeetingLogConsoleWindow::clearLogs() {
 	QMutexLocker locker(&_mutex);
+	_logEntries.clear();
 	if (_logView) {
 		_logView->clear();
+	}
+	if (_statusLabel) {
+		_statusLabel->setText(QString::fromUtf8("● 控制台就绪 (0条)"));
 	}
 }
 

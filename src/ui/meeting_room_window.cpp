@@ -95,6 +95,10 @@ void VideoTileWidget::setDisplayName(const QString &name) {
 
 void VideoTileWidget::setVideoActive(bool active) {
 	_isVideoActive = active;
+	if (!active) {
+		std::lock_guard<std::mutex> lock(_frameMutex);
+		_currentFrame = QImage();
+	}
 	update();
 }
 
@@ -555,6 +559,26 @@ void RoomBottomBarWidget::setParticipantCount(int count) {
 	update();
 }
 
+bool RoomBottomBarWidget::HasAvailableAudioDevice() {
+	try {
+		auto mics = livekit::WasapiEnumerator::EnumerateInputDevices();
+		auto defMic = livekit::WasapiEnumerator::GetDefaultInputDevice();
+		return !mics.empty() && !defMic.id.empty();
+	} catch (...) {
+		return false;
+	}
+}
+
+bool RoomBottomBarWidget::HasAvailableVideoDevice() {
+	try {
+		auto cams = livekit::DShowEnumerator::EnumerateVideoDevices();
+		auto defCam = livekit::DShowEnumerator::GetDefaultVideoDevice();
+		return !cams.empty() && !defCam.path.empty();
+	} catch (...) {
+		return false;
+	}
+}
+
 void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
@@ -760,16 +784,38 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 		for (const auto &item : _toolItems) {
 			if (item.rect.contains(e->pos())) {
 				switch (item.id) {
-				case 1:
-					_audioMuted = !_audioMuted;
+				case 1: {
+					if (_audioMuted) {
+						// 准备解除静音/开启麦克风，先检查是否有可用麦克风
+						if (!HasAvailableAudioDevice()) {
+							QMessageBox::warning(this, QString::fromUtf8("麦克风不可用"),
+								QString::fromUtf8("未检测到可用的麦克风输入设备，无法开启麦克风！"));
+							break;
+						}
+						_audioMuted = false;
+					} else {
+						_audioMuted = true;
+					}
 					_toggleAudioStream.fire_copy(_audioMuted);
 					update();
 					break;
-				case 2:
-					_videoEnabled = !_videoEnabled;
+				}
+				case 2: {
+					if (!_videoEnabled) {
+						// 准备开启视频，先检查是否有可用摄像头
+						if (!HasAvailableVideoDevice()) {
+							QMessageBox::warning(this, QString::fromUtf8("摄像头不可用"),
+								QString::fromUtf8("未检测到可用的摄像头设备，无法开启视频！"));
+							break;
+						}
+						_videoEnabled = true;
+					} else {
+						_videoEnabled = false;
+					}
 					_toggleVideoStream.fire_copy(_videoEnabled);
 					update();
 					break;
+				}
 				case 3:
 					_shareScreenStream.fire({});
 					break;
@@ -822,7 +868,75 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config, QWidget *parent)
 
 	setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint);
 
+	// 1. 初始化远端音频扬声器播放器
+	_audioPlayer = std::make_unique<PcmAudioPlayer>();
+	_audioPlayer->Open(48000, 2, 16);
+
+	// 2. 校验硬件设备可用性
+	if (!_config.audioMuted) {
+		if (!RoomBottomBarWidget::HasAvailableAudioDevice()) {
+			_config.audioMuted = true;
+			LogToConsole(LogCategory::Media, "AUDIO", "未检测到可用的麦克风设备，麦克风已自动置为静音状态");
+		}
+	}
+	if (_config.videoEnabled) {
+		if (!RoomBottomBarWidget::HasAvailableVideoDevice()) {
+			_config.videoEnabled = false;
+			LogToConsole(LogCategory::Media, "VIDEO", "未检测到可用的摄像头设备，摄像头已自动置为关闭状态");
+		}
+	}
+
 	initLayout();
+
+	// 3. 创建本地音频与视频数据源
+	_localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
+	_localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
+	_localVideoSource->addSink([this](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
+		QImage img = VideoFrameToQImage(frame);
+		if (!img.isNull()) {
+			QMetaObject::invokeMethod(this, [this, img = std::move(img)]() {
+				receiveLocalVideoFrame(img);
+			}, Qt::QueuedConnection);
+		}
+	});
+
+	// 4. 启动物理麦克风 WASAPI 采集
+	_wasapiCap = livekit::WasapiAudioCapture::Create();
+	livekit::WasapiCaptureConfig acfg;
+	acfg.type = livekit::WasapiCaptureType::Microphone;
+	acfg.target_sample_rate = 48000;
+	acfg.target_channels = 2;
+	if (_wasapiCap->Init(acfg, _localAudioSource) && _wasapiCap->Start()) {
+		_wasapiCap->SetMute(_config.audioMuted);
+		LogToConsole(LogCategory::Media, "WASAPI", QString("成功启动物理麦克风音频采集 (48kHz 双声道, 初始状态: %1)").arg(_config.audioMuted ? "静音" : "开启"));
+	} else {
+		LogToConsole(LogCategory::Error, "WASAPI", "物理麦克风初始化或启动失败");
+	}
+
+	// 5. 启动物理摄像头 DirectShow 采集
+	try {
+		auto defaultDev = livekit::DShowEnumerator::GetDefaultVideoDevice();
+		if (!defaultDev.path.empty()) {
+			_dshowCap = livekit::DShowVideoCapture::Create();
+			livekit::DShowCaptureConfig vcfg;
+			vcfg.device_path = defaultDev.path;
+			vcfg.width = 1280;
+			vcfg.height = 720;
+			vcfg.fps = 30;
+			vcfg.output_format = livekit::VideoBufferType::NV12;
+			if (_dshowCap->Init(vcfg, _localVideoSource) && _dshowCap->Start()) {
+				_usingRealCamera = true;
+				LogToConsole(LogCategory::Media, "DSHOW", QString("成功启动物理摄像头: %1 (1280x720@30fps NV12)").arg(QString::fromStdString(defaultDev.name)));
+			}
+		}
+	} catch (const std::exception &ex) {
+		LogToConsole(LogCategory::Error, "DSHOW", QString("摄像头初始化异常: %1").arg(ex.what()));
+	}
+
+	_localTile->setVideoActive(_config.videoEnabled && _usingRealCamera);
+	_localTile->setAudioMuted(_config.audioMuted);
+	updateVideoLayout();
+
 	startLiveKitSession();
 
 	// 自动弹出控制台便于测试观察
@@ -924,23 +1038,35 @@ void MeetingRoomWindow::initLayout() {
 	_bottomBar->toggleAudioRequested() | rpl::on_next([this](bool muted) {
 		_config.audioMuted = muted;
 		_localTile->setAudioMuted(muted);
+		if (_wasapiCap) {
+			_wasapiCap->SetMute(muted);
+		}
 		if (_localAudioTrack) {
 			_localAudioTrack->set_muted(muted);
-			LogToConsole(LogCategory::Media, "AUDIO", muted ? "本地麦克风已静音" : "本地麦克风已解除静音");
 		}
+		if (_room) {
+			auto local = _room->local_participant();
+			if (local && _localAudioTrack) {
+				local->SetMuted(_localAudioTrack->sid(), muted);
+			}
+		}
+		LogToConsole(LogCategory::Media, "AUDIO", muted ? "用户点击静音麦克风" : "用户点击开启/解除麦克风静音");
 	}, lifetime());
 
 	_bottomBar->toggleVideoRequested() | rpl::on_next([this](bool enabled) {
 		_config.videoEnabled = enabled;
-		_localTile->setVideoActive(enabled);
-		if (enabled) {
-			startLocalCapture();
-			LogToConsole(LogCategory::Media, "VIDEO", "用户点击开启本地视频采集");
-		} else {
-			stopLocalCapture();
-			LogToConsole(LogCategory::Media, "VIDEO", "用户点击停止本地视频采集");
+		_localTile->setVideoActive(enabled && _usingRealCamera);
+		if (_localVideoTrack) {
+			_localVideoTrack->set_muted(!enabled);
+		}
+		if (_room) {
+			auto local = _room->local_participant();
+			if (local && _localVideoTrack) {
+				local->SetMuted(_localVideoTrack->sid(), !enabled);
+			}
 		}
 		updateVideoLayout();
+		LogToConsole(LogCategory::Media, "VIDEO", enabled ? "用户点击开启本地视频" : "用户点击关闭本地视频");
 	}, lifetime());
 
 	_bottomBar->shareScreenClicked() | rpl::on_next([this] {
@@ -1010,10 +1136,6 @@ void MeetingRoomWindow::initLayout() {
 
 	_localGenTimer = new QTimer(this);
 	connect(_localGenTimer, &QTimer::timeout, this, &MeetingRoomWindow::onLocalVideoGenerated);
-
-	if (_config.videoEnabled) {
-		startLocalCapture();
-	}
 }
 
 void MeetingRoomWindow::onTimerTick() {
@@ -1066,6 +1188,9 @@ void MeetingRoomWindow::onRemoteParticipantLeft(const QString &identity) {
 void MeetingRoomWindow::onRemoteTrackMuted(bool isVideo, bool muted) {
 	if (isVideo) {
 		_remoteTile->setVideoActive(!muted);
+		if (muted) {
+			_remoteTile->setFrame(QImage());
+		}
 		LogToConsole(LogCategory::Track, "REMOTE_VIDEO", muted ? "远端视频轨道已关闭/静音" : "远端视频轨道已开启");
 		updateVideoLayout();
 	} else {
@@ -1187,79 +1312,7 @@ void MeetingRoomWindow::receiveLocalVideoFrame(const QImage &frame) {
 	}
 }
 
-void MeetingRoomWindow::startLocalCapture() {
-	if (!_localVideoSource) {
-		_localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
-		_localVideoSource->addSink([this](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
-			QImage img = VideoFrameToQImage(frame);
-			if (!img.isNull()) {
-				QMetaObject::invokeMethod(this, [this, img = std::move(img)]() {
-					receiveLocalVideoFrame(img);
-				}, Qt::QueuedConnection);
-			}
-		});
-	}
 
-	_usingRealCamera = false;
-
-	try {
-		auto defaultDev = livekit::DShowEnumerator::GetDefaultVideoDevice();
-		if (!defaultDev.path.empty()) {
-			_dshowCap = livekit::DShowVideoCapture::Create();
-			livekit::DShowCaptureConfig vcfg;
-			vcfg.device_path = defaultDev.path;
-			vcfg.width = 1280;
-			vcfg.height = 720;
-			vcfg.fps = 30;
-			vcfg.output_format = livekit::VideoBufferType::NV12;
-
-			if (_dshowCap->Init(vcfg, _localVideoSource) && _dshowCap->Start()) {
-				_usingRealCamera = true;
-				LogToConsole(LogCategory::Media, "DSHOW", QString("成功启动物理摄像头: %1 (1280x720@30fps NV12)")
-					.arg(QString::fromStdString(defaultDev.name)));
-			}
-		}
-	} catch (const std::exception &ex) {
-		LogToConsole(LogCategory::Error, "DSHOW", QString("摄像头初始化异常: %1").arg(ex.what()));
-	}
-
-	if (!_usingRealCamera) {
-		LogToConsole(LogCategory::Media, "PATTERN", "未检测到空闲物理摄像头，启动平滑测试流发生器");
-		if (_localGenTimer && !_localGenTimer->isActive()) {
-			_localGenTimer->start(33);
-		}
-	}
-
-	if (_room) {
-		auto local = _room->local_participant();
-		if (local) {
-			if (!_localVideoTrack) {
-				_localVideoTrack = livekit::LocalVideoTrack::createLocalVideoTrack("camera_video", _localVideoSource);
-				local->PublishTrack(_localVideoTrack);
-				LogToConsole(LogCategory::Track, "PUBLISH", "已发布 LocalVideoTrack 到 LiveKit 房间");
-			} else {
-				_localVideoTrack->unmute();
-				LogToConsole(LogCategory::Track, "PUBLISH", "已恢复 LocalVideoTrack 视频流发布");
-			}
-		}
-	}
-}
-
-void MeetingRoomWindow::stopLocalCapture() {
-	if (_dshowCap) {
-		_dshowCap->Stop();
-		_dshowCap.reset();
-	}
-	if (_localGenTimer && _localGenTimer->isActive()) {
-		_localGenTimer->stop();
-	}
-	if (_localVideoTrack) {
-		_localVideoTrack->mute();
-	}
-	_usingRealCamera = false;
-	_localTile->setVideoActive(false);
-	updateVideoLayout();
-}
 
 void MeetingRoomWindow::onLocalVideoGenerated() {
 	if (!_localVideoSource) return;
@@ -1403,6 +1456,13 @@ void MeetingRoomWindow::startLiveKitSession() {
 						}, Qt::QueuedConnection);
 					}
 				});
+			} else if (track->kind() == livekit::TrackKind::Audio) {
+				track->addAudioSink([this](const livekit::AudioFrame &frame) {
+					if (_window && _window->_audioPlayer && !frame.data().empty()) {
+						_window->_audioPlayer->Open(frame.sampleRate(), frame.numChannels(), 16);
+						_window->_audioPlayer->Play(reinterpret_cast<const uint8_t*>(frame.data().data()), frame.data().size() * sizeof(int16_t));
+					}
+				});
 			}
 		}
 
@@ -1412,6 +1472,17 @@ void MeetingRoomWindow::startLiveKitSession() {
 			if (!track || !_window) return;
 			LogToConsole(LogCategory::Track, "UNSUBSCRIBED", QString("取消订阅轨道: %1").arg(QString::fromStdString(track->name())));
 			if (track->kind() == livekit::TrackKind::Video) {
+				QMetaObject::invokeMethod(_window, [this]() {
+					_window->onRemoteTrackMuted(true, true);
+				}, Qt::QueuedConnection);
+			}
+		}
+
+		void OnTrackUnpublished(std::shared_ptr<livekit::RemoteParticipant> participant,
+		                        std::shared_ptr<livekit::TrackPublication> publication) override {
+			if (!publication || !_window) return;
+			LogToConsole(LogCategory::Track, "UNPUBLISHED", QString("远端用户取消发布轨道: %1").arg(QString::fromStdString(publication->sid())));
+			if (publication->track() && publication->track()->kind() == livekit::TrackKind::Video) {
 				QMetaObject::invokeMethod(_window, [this]() {
 					_window->onRemoteTrackMuted(true, true);
 				}, Qt::QueuedConnection);
@@ -1457,26 +1528,17 @@ void MeetingRoomWindow::startLiveKitSession() {
 					if (ok) {
 						auto local = _room->local_participant();
 						if (local) {
-							// 自动发布本地音频
-							if (!_config.audioMuted) {
-								if (!_localAudioSource) {
-									_localAudioSource = std::make_shared<livekit::AudioSource>(48000, 1, 10);
-								}
-								if (!_localAudioTrack) {
-									_localAudioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", _localAudioSource);
-									local->PublishTrack(_localAudioTrack);
-									LogToConsole(LogCategory::Track, "PUBLISH", "已向房间发布 LocalAudioTrack");
-								}
-							}
+							// 自动发布本地音频轨
+							_localAudioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", _localAudioSource);
+							_localAudioTrack->set_muted(_config.audioMuted);
+							local->PublishTrack(_localAudioTrack);
+							LogToConsole(LogCategory::Track, "PUBLISH", QString("已向房间发布 LocalAudioTrack (simple_audio, 初始: %1)").arg(_config.audioMuted ? "静音" : "开麦"));
 
-							// 自动发布本地视频
-							if (_config.videoEnabled && _localVideoSource) {
-								if (!_localVideoTrack) {
-									_localVideoTrack = livekit::LocalVideoTrack::createLocalVideoTrack("camera_video", _localVideoSource);
-									local->PublishTrack(_localVideoTrack);
-									LogToConsole(LogCategory::Track, "PUBLISH", "已向房间发布 LocalVideoTrack (WebRTC Pipeline Ready)");
-								}
-							}
+							// 自动发布本地视频轨
+							_localVideoTrack = livekit::LocalVideoTrack::createLocalVideoTrack("camera_video", _localVideoSource);
+							_localVideoTrack->set_muted(!_config.videoEnabled);
+							local->PublishTrack(_localVideoTrack);
+							LogToConsole(LogCategory::Track, "PUBLISH", QString("已向房间发布 LocalVideoTrack (camera_video, 初始: %1)").arg(_config.videoEnabled ? "开启" : "关闭"));
 						}
 					} else {
 						LogToConsole(LogCategory::Error, "CONNECT", "Room::Connect 返回失败，请检查 URL 与 Token 是否有效！");
@@ -1492,9 +1554,23 @@ void MeetingRoomWindow::startLiveKitSession() {
 }
 
 void MeetingRoomWindow::stopLiveKitSession() {
-	_sessionRunning = false;
-	stopLocalCapture();
+	if (!_sessionRunning.exchange(false)) {
+		return; // 已经停止或正在停止，防止 closeEvent 和析构函数重复执行
+	}
+
 	if (_meetingTimer) _meetingTimer->stop();
+
+	if (_wasapiCap) {
+		_wasapiCap->Stop();
+		_wasapiCap.reset();
+	}
+	if (_dshowCap) {
+		_dshowCap->Stop();
+		_dshowCap.reset();
+	}
+	if (_audioPlayer) {
+		_audioPlayer->Close();
+	}
 
 	if (_room) {
 		_room->Disconnect();

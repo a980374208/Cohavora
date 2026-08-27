@@ -82,6 +82,15 @@ void AudioApmProcessor::ProcessRenderFrame(const AudioFrame& render_frame) {
 
     int rate = render_frame.sampleRate();
     int channels = render_frame.numChannels();
+    int samples_per_channel = render_frame.samplesPerChannel();
+
+    // APM 严格要求 10ms 帧长 (如 48kHz 下为 480 采样点)
+    if (rate <= 0 || channels <= 0 || samples_per_channel != (rate / 100)) {
+        return;
+    }
+    if (render_frame.data().size() < static_cast<size_t>(samples_per_channel * channels)) {
+        return;
+    }
 
     webrtc::StreamConfig stream_cfg(rate, channels);
     const int16_t* src_pcm = render_frame.data().data();
@@ -99,6 +108,14 @@ AudioFrame AudioApmProcessor::ProcessCaptureFrame(const AudioFrame& capture_fram
     int rate = capture_frame.sampleRate();
     int channels = capture_frame.numChannels();
     int samples_per_channel = capture_frame.samplesPerChannel();
+
+    // APM 严格要求 10ms 帧长 (如 48kHz 下为 480 采样点)，若不是 10ms 则跳过 APM 避免越界写
+    if (rate <= 0 || channels <= 0 || samples_per_channel != (rate / 100)) {
+        return capture_frame;
+    }
+    if (capture_frame.data().size() < static_cast<size_t>(samples_per_channel * channels)) {
+        return capture_frame;
+    }
 
     webrtc::StreamConfig stream_cfg(rate, channels);
 
