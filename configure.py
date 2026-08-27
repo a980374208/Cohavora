@@ -28,9 +28,12 @@ def main():
     # Pre-check dependency files directly in project-local ./deps
     deps_dir = project_root / "deps"
     qt_lib = deps_dir / "Libraries" / "win64" / "Qt-5.15.18" / "lib" / "Qt5Core.lib"
-    webrtc_lib = deps_dir / "webrtc" / "lib" / "webrtc.lib"
+    webrtc_lib_root = deps_dir / "webrtc" / "lib" / "webrtc.lib"
+    webrtc_lib_rel = deps_dir / "webrtc" / "lib" / "Release" / "webrtc.lib"
+    webrtc_lib_dbg = deps_dir / "webrtc" / "lib" / "Debug" / "webrtc.lib"
+    has_webrtc = webrtc_lib_root.exists() or webrtc_lib_rel.exists() or webrtc_lib_dbg.exists()
 
-    if not qt_lib.exists() or not webrtc_lib.exists():
+    if not qt_lib.exists() or not has_webrtc:
         print("\n[WARN] Project local dependencies in './deps' are missing or incomplete.")
         print("[INFO] Invoking build/prepare/win.bat to prepare dependencies into ./deps...\n")
         prep_cmd = ["cmd", "/c", str(project_root / "build" / "prepare" / "win.bat")]

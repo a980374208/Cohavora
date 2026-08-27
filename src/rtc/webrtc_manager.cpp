@@ -16,6 +16,8 @@
 #include "api/environment/environment_factory.h"
 #include "api/audio/audio_device.h"
 #include "modules/video_coding/codecs/vp8/include/vp8.h"
+#include "modules/video_coding/codecs/vp9/include/vp9.h"
+#include "modules/video_coding/codecs/h264/include/h264.h"
 #include "media/engine/simulcast_encoder_adapter.h"
 
 namespace webrtc {
@@ -77,15 +79,30 @@ private:
 class CustomVideoDecoderFactory : public webrtc::VideoDecoderFactory {
 public:
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
-        return {
-            webrtc::SdpVideoFormat("VP8")
-        };
+        std::vector<webrtc::SdpVideoFormat> formats;
+        formats.push_back(webrtc::SdpVideoFormat("VP8"));
+        formats.push_back(webrtc::SdpVideoFormat("VP9"));
+        if (webrtc::H264Decoder::IsSupported()) {
+            for (const auto& f : webrtc::SupportedH264DecoderCodecs()) {
+                formats.push_back(f);
+            }
+        }
+        return formats;
     }
 
     std::unique_ptr<webrtc::VideoDecoder> Create(
         const webrtc::Environment& env,
         const webrtc::SdpVideoFormat& format) override {
-        return webrtc::CreateVp8Decoder(env);
+        if (_stricmp(format.name.c_str(), "VP8") == 0) {
+            return webrtc::CreateVp8Decoder(env);
+        }
+        if (_stricmp(format.name.c_str(), "VP9") == 0) {
+            return webrtc::VP9Decoder::Create();
+        }
+        if (_stricmp(format.name.c_str(), "H264") == 0) {
+            return webrtc::H264Decoder::Create();
+        }
+        return nullptr;
     }
 };
 
@@ -217,12 +234,9 @@ bool WebRTCManager::Initialize() {
         return true;
     }
 
-    // ======= 开启 WebRTC 原生日志 =======
-    // 可选级别: LS_VERBOSE (最详尽), LS_INFO (常规排查), LS_WARNING, LS_ERROR
-    webrtc::LogMessage::LogToDebug(webrtc::LS_INFO);
-    webrtc::LogMessage::LogTimestamps(true); // 显示时间戳
-    webrtc::LogMessage::LogThreads(true);    // 显示线程信息
-    // ===================================
+    // 屏蔽 WebRTC 原生日志输出
+    webrtc::LogMessage::LogToDebug(webrtc::LS_NONE);
+    webrtc::LogMessage::SetLogToStderr(false);
 
     std::cout << "WebRTCManager: Initializing SSL and starting threads..." << std::endl;
     if (!webrtc::InitializeSSL()) {
@@ -231,9 +245,10 @@ bool WebRTCManager::Initialize() {
     }
 
     network_thread_ = webrtc::Thread::CreateWithSocketServer();
+    worker_thread_ = webrtc::Thread::Create();
     signaling_thread_ = webrtc::Thread::Create();
 
-    if (!network_thread_->Start() || !signaling_thread_->Start()) {
+    if (!network_thread_->Start() || !worker_thread_->Start() || !signaling_thread_->Start()) {
         std::cerr << "WebRTCManager: Failed to start WebRTC helper threads" << std::endl;
         webrtc::CleanupSSL();
         return false;
@@ -248,7 +263,7 @@ bool WebRTCManager::Initialize() {
 
     factory_ = webrtc::CreatePeerConnectionFactory(
         network_thread_.get(),
-        signaling_thread_.get(),
+        worker_thread_.get(),
         signaling_thread_.get(),
         adm,
         audio_encoder_factory,

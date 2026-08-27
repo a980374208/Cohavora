@@ -69,6 +69,7 @@ private:
     std::atomic<bool> is_running_{false};
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> is_muted_{false};
+    std::atomic<bool> device_changed_{false};
     std::atomic<float> volume_{1.0f};
 
     std::thread capture_thread_;

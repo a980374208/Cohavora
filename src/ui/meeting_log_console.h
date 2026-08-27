@@ -37,14 +37,26 @@ public:
 public slots:
 	void clearLogs();
 	void copyAllLogs();
+	void onFilterChanged(const QString &filterText);
 
 protected:
 	void resizeEvent(QResizeEvent *e) override;
 	void closeEvent(QCloseEvent *e) override;
 
 private:
+	struct LogEntry {
+		QString timeStr;
+		LogCategory category;
+		QString tag;
+		QString message;
+		QString catName;
+		QString formattedHtml;
+		QString fullText;
+	};
+
 	void initUi();
-	QString formatLogHtml(const QString &timeStr, LogCategory category, const QString &tag, const QString &message);
+	QString formatLogHtml(const QString &timeStr, LogCategory category, const QString &tag, const QString &message, QString *outCatName = nullptr);
+	void rebuildLogView();
 
 	QPlainTextEdit *_logView = nullptr;
 	QPushButton *_clearBtn = nullptr;
@@ -52,6 +64,10 @@ private:
 	QCheckBox *_autoScrollBox = nullptr;
 	QLabel *_statusLabel = nullptr;
 	QLineEdit *_filterInput = nullptr;
+
+	std::vector<LogEntry> _logEntries;
+	QString _currentFilter;
+	static constexpr size_t kMaxLogEntries = 5000;
 
 	QMutex _mutex;
 };

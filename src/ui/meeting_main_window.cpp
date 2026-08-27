@@ -354,7 +354,7 @@ void MeetingMainWindow::onCardClicked(ActionCardType type) {
 	} else if (type == ActionCardType::QuickMeeting) {
 		MeetingRoomWindow::Config cfg;
 		cfg.serverUrl = "wss://project-a-ofnzcsum.livekit.cloud";
-		cfg.token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJBUEl0ZXhzeFQ5QnJ0MzgiLCJzdWIiOiJ3aW4iLCJleHAiOjE3ODc1MTA0MTEsIm5iZiI6MTc4NzQyMDQxMSwiaWF0IjoxNzg3NDIwNDExLCJpZGVudGl0eSI6IndpbiIsInZpZGVvIjp7InJvb21Kb2luIjp0cnVlLCJyb29tIjoidGVzdCIsImNhblB1Ymxpc2giOnRydWUsImNhblN1YnNjcmliZSI6dHJ1ZSwiY2FuUHVibGlzaERhdGEiOnRydWV9fQ.LPOfSzQKJHl5lum5GAp5u_awdCKTheVwkG1UmYkznOs";
+		cfg.token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJBUEl0ZXhzeFQ5QnJ0MzgiLCJzdWIiOiJ3aW4iLCJleHAiOjE3ODc4NTM3NzksIm5iZiI6MTc4Nzc2Mzc3OSwiaWF0IjoxNzg3NzYzNzc5LCJpZGVudGl0eSI6IndpbiIsInZpZGVvIjp7InJvb21Kb2luIjp0cnVlLCJyb29tIjoidGVzdCIsImNhblB1Ymxpc2giOnRydWUsImNhblN1YnNjcmliZSI6dHJ1ZSwiY2FuUHVibGlzaERhdGEiOnRydWV9fQ.1mIwfbwEOG2PkW1mxZDiA3ayOj1a3UwuYlvM-hfJlcQ";
 		cfg.displayName = QString::fromUtf8("快速会议主持人");
 		cfg.audioMuted = false;
 		cfg.videoEnabled = true;

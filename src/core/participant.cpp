@@ -144,14 +144,31 @@ void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
 }
 
 void LocalParticipant::SetMuted(const std::string& track_sid, bool muted) {
-    auto pub = get_publication(track_sid);
-    if (pub && pub->track()) {
-        pub->track()->set_muted(muted);
+    std::string actual_sid = track_sid;
+    if (actual_sid.empty()) {
+        for (const auto& [sid, pub] : tracks_) {
+            if (pub && pub->track()) {
+                pub->track()->set_muted(muted);
+                if (!sid.empty() && sid.find("TR_") == 0) {
+                    actual_sid = sid;
+                    break;
+                }
+            }
+        }
+    } else {
+        auto pub = get_publication(actual_sid);
+        if (pub && pub->track()) {
+            pub->track()->set_muted(muted);
+        }
+    }
+
+    if (actual_sid.empty()) {
+        return;
     }
 
     proto::SignalRequest req;
     auto* mute_req = req.mutable_mute();
-    mute_req->set_sid(track_sid);
+    mute_req->set_sid(actual_sid);
     mute_req->set_muted(muted);
 
     if (send_handler_) {

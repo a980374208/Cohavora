@@ -200,6 +200,24 @@ target_include_directories(livekit_signaling BEFORE PUBLIC
     ${WEBRTC_ROOT}/include
 )
 
+# WebRTC Library Multi-Config Resolution (Debug vs Release)
+if(EXISTS "${WEBRTC_ROOT}/lib/Debug/webrtc.lib")
+    set(WEBRTC_DEBUG_LIB "${WEBRTC_ROOT}/lib/Debug/webrtc.lib")
+elseif(EXISTS "${WEBRTC_ROOT}/lib/webrtc_d.lib")
+    set(WEBRTC_DEBUG_LIB "${WEBRTC_ROOT}/lib/webrtc_d.lib")
+else()
+    set(WEBRTC_DEBUG_LIB "${WEBRTC_ROOT}/lib/webrtc.lib")
+endif()
+
+if(EXISTS "${WEBRTC_ROOT}/lib/Release/webrtc.lib")
+    set(WEBRTC_RELEASE_LIB "${WEBRTC_ROOT}/lib/Release/webrtc.lib")
+else()
+    set(WEBRTC_RELEASE_LIB "${WEBRTC_ROOT}/lib/webrtc.lib")
+endif()
+
+message(STATUS "[WebRTC] Using Debug Library   : ${WEBRTC_DEBUG_LIB}")
+message(STATUS "[WebRTC] Using Release Library : ${WEBRTC_RELEASE_LIB}")
+
 add_compile_definitions(
     WEBRTC_WIN
     NOMINMAX
@@ -207,11 +225,12 @@ add_compile_definitions(
     RTC_DISABLE_CHECK_MSG=1
     RTC_DISABLE_CHECKING=1
     RTC_NO_UNIQUE_ADDRESS=
-    $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>
+    _ITERATOR_DEBUG_LEVEL=0
 )
 
 target_link_libraries(livekit_signaling PUBLIC
-    ${WEBRTC_ROOT}/lib/webrtc.lib
+    $<$<CONFIG:Debug>:${WEBRTC_DEBUG_LIB}>
+    $<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_LIB}>
     asio::asio
     protobuf::libprotobuf
     spdlog::spdlog
@@ -541,7 +560,9 @@ target_compile_definitions(livekit_meeting_app PRIVATE
     _WINSOCK_DEPRECATED_NO_WARNINGS
     CRL_USE_WINAPI
     ASIO_STANDALONE
-    $<$<CONFIG:Debug>:_ITERATOR_DEBUG_LEVEL=0>
+    WEBRTC_WIN
+    NDEBUG
+    _ITERATOR_DEBUG_LEVEL=0
     $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
     $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
 )

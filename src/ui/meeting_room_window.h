@@ -8,6 +8,9 @@
 #include "src/core/local_video_track.h"
 #include "src/media/dshow_capture.h"
 #include "src/media/dshow_enumerator.h"
+#include "src/media/wasapi_enumerator.h"
+#include "src/media/wasapi_capture.h"
+#include <mmsystem.h>
 
 #include <QtWidgets/QWidget>
 #include <QtWidgets/QLabel>
@@ -23,8 +26,165 @@
 #include <thread>
 #include <atomic>
 #include <mutex>
+#include <cstring>
+
+#include <mmdeviceapi.h>
+#include <audioclient.h>
+#include <wrl/client.h>
+
+#ifndef AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+#define AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 0x80000000
+#endif
+#ifndef AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
+#define AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY 0x08000000
+#endif
 
 namespace MeetingUI {
+
+class PcmAudioPlayer {
+public:
+	PcmAudioPlayer() = default;
+	~PcmAudioPlayer() { Close(); }
+
+	bool Open(int sample_rate = 48000, int channels = 1, int bits_per_sample = 16) {
+		if (closed_.load()) return false;
+		if (is_initialized_.load() && sample_rate_.load() == sample_rate && channels_.load() == channels) {
+			return true;
+		}
+
+		std::unique_lock<std::mutex> lock(init_mutex_, std::try_to_lock);
+		if (!lock.owns_lock() || closed_.load()) return false;
+
+		CloseInternal();
+
+		sample_rate_.store(sample_rate);
+		channels_.store(channels);
+
+		CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+
+		Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator;
+		HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL, IID_PPV_ARGS(&enumerator));
+		if (FAILED(hr) || !enumerator) return false;
+
+		Microsoft::WRL::ComPtr<IMMDevice> device;
+		hr = enumerator->GetDefaultAudioEndpoint(eRender, eCommunications, &device);
+		if (FAILED(hr) || !device) {
+			hr = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
+		}
+		if (FAILED(hr) || !device) {
+			hr = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device);
+		}
+		if (FAILED(hr) || !device) return false;
+
+		hr = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &audio_client_);
+		if (FAILED(hr) || !audio_client_) return false;
+
+		WAVEFORMATEX wfx = {0};
+		wfx.wFormatTag = WAVE_FORMAT_PCM;
+		wfx.nChannels = static_cast<WORD>(channels);
+		wfx.nSamplesPerSec = static_cast<DWORD>(sample_rate);
+		wfx.wBitsPerSample = static_cast<WORD>(bits_per_sample);
+		wfx.nBlockAlign = (wfx.nChannels * wfx.wBitsPerSample) / 8;
+		wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
+		wfx.cbSize = 0;
+
+		REFERENCE_TIME hnsRequestedDuration = 2000000; // 200ms 缓冲
+		DWORD stream_flags = AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY;
+		hr = audio_client_->Initialize(
+			AUDCLNT_SHAREMODE_SHARED,
+			stream_flags,
+			hnsRequestedDuration,
+			0,
+			&wfx,
+			nullptr
+		);
+		if (FAILED(hr)) {
+			hr = audio_client_->Initialize(
+				AUDCLNT_SHAREMODE_SHARED,
+				0,
+				hnsRequestedDuration,
+				0,
+				&wfx,
+				nullptr
+			);
+			if (FAILED(hr)) return false;
+		}
+
+		hr = audio_client_->GetService(IID_PPV_ARGS(&render_client_));
+		if (FAILED(hr) || !render_client_) return false;
+
+		hr = audio_client_->GetBufferSize(&buffer_frame_count_);
+		if (FAILED(hr)) return false;
+
+		hr = audio_client_->Start();
+		if (FAILED(hr)) return false;
+
+		is_initialized_.store(true);
+		return true;
+	}
+
+	void Play(const uint8_t* data, size_t size) {
+		if (!data || size == 0 || closed_.load() || !is_initialized_.load()) return;
+
+		std::unique_lock<std::mutex> lock(play_mutex_, std::try_to_lock);
+		if (!lock.owns_lock() || closed_.load() || !render_client_ || !audio_client_) return;
+
+		int channels = channels_.load();
+		int bytes_per_frame = channels * (16 / 8);
+		if (bytes_per_frame == 0) return;
+
+		UINT32 num_frames = static_cast<UINT32>(size / bytes_per_frame);
+		UINT32 padding = 0;
+		HRESULT hr = audio_client_->GetCurrentPadding(&padding);
+		if (FAILED(hr)) {
+			if (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_RESOURCES_INVALIDATED) {
+				is_initialized_.store(false);
+			}
+			return;
+		}
+
+		UINT32 available_frames = buffer_frame_count_ - padding;
+		if (num_frames > available_frames) {
+			num_frames = available_frames;
+		}
+		if (num_frames == 0) return;
+
+		BYTE* pData = nullptr;
+		hr = render_client_->GetBuffer(num_frames, &pData);
+		if (SUCCEEDED(hr) && pData) {
+			memcpy(pData, data, num_frames * bytes_per_frame);
+			render_client_->ReleaseBuffer(num_frames, 0);
+		} else if (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_RESOURCES_INVALIDATED) {
+			is_initialized_.store(false);
+		}
+	}
+
+	void Close() {
+		closed_.store(true);
+		std::unique_lock<std::mutex> lock(init_mutex_, std::try_to_lock);
+		CloseInternal();
+	}
+
+private:
+	void CloseInternal() {
+		is_initialized_.store(false);
+		if (audio_client_) {
+			audio_client_->Stop();
+		}
+		render_client_.Reset();
+		audio_client_.Reset();
+	}
+
+	std::atomic<bool> closed_{false};
+	std::atomic<bool> is_initialized_{false};
+	std::atomic<int> sample_rate_{48000};
+	std::atomic<int> channels_{1};
+	UINT32 buffer_frame_count_ = 0;
+	Microsoft::WRL::ComPtr<IAudioClient> audio_client_;
+	Microsoft::WRL::ComPtr<IAudioRenderClient> render_client_;
+	std::mutex init_mutex_;
+	std::mutex play_mutex_;
+};
 
 enum class VideoViewMode {
 	Auto,       // 根据参会人数自动选择
@@ -153,6 +313,9 @@ public:
 
 	void setParticipantCount(int count);
 
+	static bool HasAvailableAudioDevice();
+	static bool HasAvailableVideoDevice();
+
 	// 事件流
 	rpl::producer<bool> toggleAudioRequested() const { return _toggleAudioStream.events(); }
 	rpl::producer<bool> toggleVideoRequested() const { return _toggleVideoStream.events(); }
@@ -254,8 +417,6 @@ private:
 	void updateVideoLayout();
 	void startLiveKitSession();
 	void stopLiveKitSession();
-	void startLocalCapture();
-	void stopLocalCapture();
 
 	Config _config;
 	int _elapsedSeconds = 0;
@@ -280,6 +441,10 @@ private:
 	bool _usingRealCamera = false;
 	QTimer *_localGenTimer = nullptr;
 	int _localFrameStep = 0;
+
+	// 本地麦克风采集与远端扬声器播放
+	std::shared_ptr<livekit::WasapiAudioCapture> _wasapiCap;
+	std::unique_ptr<PcmAudioPlayer> _audioPlayer;
 
 	// LiveKit 异步通信核心
 	std::unique_ptr<asio::io_context> _ioContext;

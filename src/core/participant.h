@@ -72,6 +72,10 @@ public:
         return nullptr;
     }
 
+    void remove_publication(const std::string& sid) {
+        tracks_.erase(sid);
+    }
+
 protected:
     std::string sid_;
     std::string identity_;
