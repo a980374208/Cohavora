@@ -230,6 +230,25 @@ private:
     // 下行 Track 防重挂载
     std::set<std::string> processed_remote_track_ids_;
 
+    // === 对齐 Flutter: PendingTrackQueue 暂存队列与 Stream ID 解包 ===
+    struct PendingTrack {
+        webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track;
+        webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver;
+        std::string participant_sid;
+        std::string track_sid;
+        std::chrono::steady_clock::time_point expires_at;
+    };
+    std::map<std::string, std::vector<PendingTrack>> pending_track_queue_;
+
+    static std::pair<std::string, std::string> UnpackStreamId(const std::string& packed);
+    void AttachRemoteTrackToParticipant(
+        std::shared_ptr<RemoteParticipant> participant,
+        webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track,
+        webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+        const std::string& track_sid);
+    void FlushPendingTracks(const std::string& participant_sid);
+    void RemoveExpiredPendingTracks();
+
     // Simulcast 参数下发同步
     static void ApplySimulcastParameters(webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender, const VideoPublishOptions& opts);
 

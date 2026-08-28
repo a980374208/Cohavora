@@ -107,6 +107,14 @@ void VideoTileWidget::setAudioMuted(bool muted) {
 	update();
 }
 
+void VideoTileWidget::setSpeaking(bool speaking, float level) {
+	if (_isSpeaking != speaking || std::abs(_audioLevel - level) > 0.05f) {
+		_isSpeaking = speaking;
+		_audioLevel = level;
+		update();
+	}
+}
+
 void VideoTileWidget::setFrame(const QImage &image) {
 	{
 		std::lock_guard<std::mutex> lock(_frameMutex);
@@ -138,11 +146,31 @@ void VideoTileWidget::paintEvent(QPaintEvent *e) {
 
 	drawBottomNameTag(p, r);
 
+	// 画中画模式下的基础边框
 	if (_isPip) {
 		p.setClipping(false);
-		p.setPen(QPen(QColor(0x16, 0x77, 0xff), 2.0));
+		p.setPen(QPen(_isSpeaking ? QColor(0x16, 0x77, 0xff) : QColor(0x86, 0x90, 0x9c), _isSpeaking ? 3.0 : 2.0));
 		p.setBrush(Qt::NoBrush);
 		p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 10, 10);
+	}
+
+	// 说话中：绘制高质感双层蓝色外发光光圈 (Halo Glow)
+	if (_isSpeaking) {
+		p.save();
+		p.setClipping(false);
+		p.setBrush(Qt::NoBrush);
+
+		// 外层柔和淡蓝弥散光晕 (Glow Layer)
+		QPen outerGlow(QColor(22, 119, 255, 65), 5.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+		p.setPen(outerGlow);
+		p.drawRoundedRect(r.adjusted(3, 3, -3, -3), _isPip ? 10 : 6, _isPip ? 10 : 6);
+
+		// 内层明亮高亮聚焦环 (Focused Ring)
+		QPen innerFocus(QColor(22, 119, 255, 235), 2.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+		p.setPen(innerFocus);
+		p.drawRoundedRect(r.adjusted(1, 1, -1, -1), _isPip ? 10 : 6, _isPip ? 10 : 6);
+
+		p.restore();
 	}
 }
 
@@ -153,7 +181,18 @@ void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
 	const int cy = r.center().y();
 
 	const int outerRadius = 46;
-	p.setPen(QPen(QColor(0xf2, 0xf3, 0xf5), 1.5));
+
+	// 正在说话时：在头像外围绘制随音量动态扩散的声波涟漪光环 (Ripple Aura)
+	if (_isSpeaking) {
+		p.save();
+		const int auraRadius = outerRadius + static_cast<int>(std::clamp(_audioLevel, 0.1f, 1.0f) * 14.0f);
+		p.setPen(QPen(QColor(22, 119, 255, 80), 2.0));
+		p.setBrush(QColor(22, 119, 255, 30));
+		p.drawEllipse(QPoint(cx, cy - 16), auraRadius, auraRadius);
+		p.restore();
+	}
+
+	p.setPen(QPen(_isSpeaking ? QColor(22, 119, 255, 130) : QColor(0xf2, 0xf3, 0xf5), _isSpeaking ? 2.0 : 1.5));
 	p.setBrush(QColor(0xf7, 0xf8, 0xfa));
 	p.drawEllipse(QPoint(cx, cy - 16), outerRadius, outerRadius);
 
@@ -868,11 +907,7 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config, QWidget *parent)
 
 	setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint);
 
-	// 1. 初始化远端音频扬声器播放器
-	_audioPlayer = std::make_unique<PcmAudioPlayer>();
-	_audioPlayer->Open(48000, 2, 16);
-
-	// 2. 校验硬件设备可用性
+	// 1. 校验硬件设备可用性
 	if (!_config.audioMuted) {
 		if (!RoomBottomBarWidget::HasAvailableAudioDevice()) {
 			_config.audioMuted = true;
@@ -1176,10 +1211,12 @@ void MeetingRoomWindow::onRemoteParticipantLeft(const QString &identity) {
 	_participantCount = 1;
 
 	_remoteTile->setVideoActive(false);
+	_remoteTile->setFrame(QImage());
+	_remoteTile->setSpeaking(false, 0.0f);
 	_remoteTile->hide();
 
 	_bottomBar->setParticipantCount(_participantCount);
-	_topBar->setActiveSpeaker(QString::fromUtf8("%1 已离开").arg(identity));
+	_topBar->setActiveSpeaker(QString());
 
 	LogToConsole(LogCategory::Participant, "USER_LEFT", QString("远端参会人已离开: %1").arg(identity));
 	updateVideoLayout();
@@ -1195,7 +1232,70 @@ void MeetingRoomWindow::onRemoteTrackMuted(bool isVideo, bool muted) {
 		updateVideoLayout();
 	} else {
 		_remoteTile->setAudioMuted(muted);
+		if (muted) {
+			_remoteTile->setSpeaking(false, 0.0f);
+		}
 		LogToConsole(LogCategory::Track, "REMOTE_AUDIO", muted ? "远端音频轨道已静音" : "远端音频轨道已开麦");
+	}
+}
+
+void MeetingRoomWindow::updateActiveSpeakers(const std::vector<std::shared_ptr<livekit::Participant>> &speakers) {
+	QString primarySpeakerName;
+	std::unordered_map<std::string, float> speaking_levels;
+
+	for (const auto &spk : speakers) {
+		if (spk && spk->is_speaking()) {
+			speaking_levels[spk->sid()] = spk->audio_level();
+			speaking_levels[spk->identity()] = spk->audio_level();
+			if (primarySpeakerName.isEmpty()) {
+				primarySpeakerName = QString::fromStdString(spk->identity());
+			}
+		}
+	}
+
+	// 1. 顶部状态栏提示更新
+	if (_topBar) {
+		_topBar->setActiveSpeaker(primarySpeakerName);
+	}
+
+	// 2. 本端画框发光光圈联动
+	if (_localTile && _room) {
+		auto local = _room->local_participant();
+		bool localSpeaking = false;
+		float localLevel = 0.0f;
+		if (local) {
+			auto it = speaking_levels.find(local->sid());
+			if (it != speaking_levels.end()) {
+				localSpeaking = true;
+				localLevel = it->second;
+			} else {
+				auto it2 = speaking_levels.find(local->identity());
+				if (it2 != speaking_levels.end()) {
+					localSpeaking = true;
+					localLevel = it2->second;
+				}
+			}
+		}
+		// 如果本地麦克风已物理静音，强制不显示光圈
+		if (_config.audioMuted) {
+			localSpeaking = false;
+		}
+		_localTile->setSpeaking(localSpeaking, localLevel);
+	}
+
+	// 3. 远端画框发光光圈联动
+	if (_remoteTile) {
+		bool remoteSpeaking = false;
+		float remoteLevel = 0.0f;
+		if (_hasRemoteUser && !_remoteUserName.isEmpty()) {
+			std::string rUserStr = _remoteUserName.toStdString();
+			auto it = speaking_levels.find(rUserStr);
+			if (it != speaking_levels.end()) {
+				remoteSpeaking = true;
+				remoteLevel = it->second;
+			}
+		}
+		_remoteTile->setSpeaking(remoteSpeaking, remoteLevel);
 	}
 }
 
@@ -1457,12 +1557,7 @@ void MeetingRoomWindow::startLiveKitSession() {
 					}
 				});
 			} else if (track->kind() == livekit::TrackKind::Audio) {
-				track->addAudioSink([this](const livekit::AudioFrame &frame) {
-					if (_window && _window->_audioPlayer && !frame.data().empty()) {
-						_window->_audioPlayer->Open(frame.sampleRate(), frame.numChannels(), 16);
-						_window->_audioPlayer->Play(reinterpret_cast<const uint8_t*>(frame.data().data()), frame.data().size() * sizeof(int16_t));
-					}
-				});
+				LogToConsole(LogCategory::Media, "AUDIO", QString("远端音频轨已就绪，由 WebRTC 原生硬件驱动 ADM 自动进行混音与扬声器高保真播放"));
 			}
 		}
 
@@ -1500,10 +1595,10 @@ void MeetingRoomWindow::startLiveKitSession() {
 		}
 
 		void OnActiveSpeakersChanged(const std::vector<std::shared_ptr<livekit::Participant>> &speakers) override {
-			if (_window && !speakers.empty() && speakers[0]) {
-				QString name = QString::fromStdString(speakers[0]->identity());
-				QMetaObject::invokeMethod(_window->_topBar, "setActiveSpeaker", Qt::QueuedConnection, Q_ARG(QString, name));
-			}
+			if (!_window) return;
+			QMetaObject::invokeMethod(_window, [this, speakers]() {
+				_window->updateActiveSpeakers(speakers);
+			}, Qt::QueuedConnection);
 		}
 
 	private:
@@ -1567,9 +1662,6 @@ void MeetingRoomWindow::stopLiveKitSession() {
 	if (_dshowCap) {
 		_dshowCap->Stop();
 		_dshowCap.reset();
-	}
-	if (_audioPlayer) {
-		_audioPlayer->Close();
 	}
 
 	if (_room) {

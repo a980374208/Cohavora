@@ -15,10 +15,12 @@
 
 #include "api/environment/environment_factory.h"
 #include "api/audio/audio_device.h"
+#include "api/audio/create_audio_device_module.h"
 #include "modules/video_coding/codecs/vp8/include/vp8.h"
 #include "modules/video_coding/codecs/vp9/include/vp9.h"
 #include "modules/video_coding/codecs/h264/include/h264.h"
 #include "media/engine/simulcast_encoder_adapter.h"
+#include <objbase.h>
 
 namespace webrtc {
 namespace webrtc_checks_impl {
@@ -106,101 +108,155 @@ public:
     }
 };
 
-class DummyAudioDeviceModule : public webrtc::AudioDeviceModule {
+class PlayoutOnlyAudioDeviceModule : public webrtc::AudioDeviceModule {
 public:
-    DummyAudioDeviceModule() : playing_(false), recording_(false), audio_transport_(nullptr) {}
+    explicit PlayoutOnlyAudioDeviceModule(webrtc::scoped_refptr<webrtc::AudioDeviceModule> inner)
+        : inner_(inner) {}
 
-    ~DummyAudioDeviceModule() override {
-        StopPlayout();
-        StopRecording();
+    ~PlayoutOnlyAudioDeviceModule() override = default;
+
+    int32_t ActiveAudioLayer(AudioLayer* audioLayer) const override {
+        return inner_ ? inner_->ActiveAudioLayer(audioLayer) : -1;
     }
 
-    int32_t ActiveAudioLayer(AudioLayer* audioLayer) const override { *audioLayer = kDummyAudio; return 0; }
     int32_t RegisterAudioCallback(webrtc::AudioTransport* audioCallback) override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        audio_transport_ = audioCallback;
-        return 0;
+        return inner_ ? inner_->RegisterAudioCallback(audioCallback) : -1;
     }
-    int32_t Init() override { return 0; }
-    int32_t Terminate() override { 
-        StopPlayout();
-        return 0; 
+
+    int32_t Init() override {
+        return inner_ ? inner_->Init() : 0;
     }
-    bool Initialized() const override { return true; }
-    int16_t PlayoutDevices() override { return 1; }
-    int16_t RecordingDevices() override { return 0; }
-    int32_t PlayoutDeviceName(uint16_t, char[webrtc::kAdmMaxDeviceNameSize], char[webrtc::kAdmMaxGuidSize]) override { return 0; }
-    int32_t RecordingDeviceName(uint16_t, char[webrtc::kAdmMaxDeviceNameSize], char[webrtc::kAdmMaxGuidSize]) override { return 0; }
-    int32_t SetPlayoutDevice(uint16_t) override { return 0; }
-    int32_t SetPlayoutDevice(WindowsDeviceType) override { return 0; }
-    int32_t SetRecordingDevice(uint16_t) override { return 0; }
-    int32_t SetRecordingDevice(WindowsDeviceType) override { return 0; }
-    int32_t PlayoutIsAvailable(bool* available) override { *available = true; return 0; }
-    int32_t InitPlayout() override { return 0; }
-    bool PlayoutIsInitialized() const override { return true; }
-    int32_t RecordingIsAvailable(bool* available) override { *available = false; return 0; }
-    int32_t InitRecording() override { return 0; }
-    bool RecordingIsInitialized() const override { return true; }
+
+    int32_t Terminate() override {
+        return inner_ ? inner_->Terminate() : 0;
+    }
+
+    bool Initialized() const override {
+        return inner_ ? inner_->Initialized() : true;
+    }
+
+    // --- Playout 相关：100% 由原生 Core Audio 处理 ---
+    int16_t PlayoutDevices() override {
+        return inner_ ? inner_->PlayoutDevices() : 0;
+    }
+
+    int32_t PlayoutDeviceName(uint16_t index, char name[webrtc::kAdmMaxDeviceNameSize], char guid[webrtc::kAdmMaxGuidSize]) override {
+        return inner_ ? inner_->PlayoutDeviceName(index, name, guid) : -1;
+    }
+
+    int32_t SetPlayoutDevice(uint16_t index) override {
+        return inner_ ? inner_->SetPlayoutDevice(index) : 0;
+    }
+
+    int32_t SetPlayoutDevice(WindowsDeviceType device) override {
+        return inner_ ? inner_->SetPlayoutDevice(device) : 0;
+    }
+
+    int32_t PlayoutIsAvailable(bool* available) override {
+        return inner_ ? inner_->PlayoutIsAvailable(available) : 0;
+    }
+
+    int32_t InitPlayout() override {
+        return inner_ ? inner_->InitPlayout() : 0;
+    }
+
+    bool PlayoutIsInitialized() const override {
+        return inner_ ? inner_->PlayoutIsInitialized() : false;
+    }
 
     int32_t StartPlayout() override {
-        if (playing_.exchange(true)) return 0;
-        playout_thread_ = std::thread([this]() {
-            int64_t elapsed_time_ms = 0;
-            int64_t ntp_time_ms = 0;
-            int16_t audio_buffer[480 * 2]; // 10ms at 48kHz stereo
-            while (playing_.load()) {
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    if (audio_transport_) {
-                        size_t samples_out = 0;
-                        audio_transport_->NeedMorePlayData(480, sizeof(int16_t), 2, 48000, audio_buffer, samples_out, &elapsed_time_ms, &ntp_time_ms);
-                    }
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-        });
-        return 0;
+        return inner_ ? inner_->StartPlayout() : 0;
     }
 
     int32_t StopPlayout() override {
-        if (!playing_.exchange(false)) return 0;
-        if (playout_thread_.joinable()) {
-            playout_thread_.join();
-        }
-        return 0;
+        return inner_ ? inner_->StopPlayout() : 0;
     }
 
-    bool Playing() const override { return playing_.load(); }
+    bool Playing() const override {
+        return inner_ ? inner_->Playing() : false;
+    }
+
+    int32_t InitSpeaker() override {
+        return inner_ ? inner_->InitSpeaker() : 0;
+    }
+
+    bool SpeakerIsInitialized() const override {
+        return inner_ ? inner_->SpeakerIsInitialized() : false;
+    }
+
+    int32_t SpeakerVolumeIsAvailable(bool* available) override {
+        return inner_ ? inner_->SpeakerVolumeIsAvailable(available) : 0;
+    }
+
+    int32_t SetSpeakerVolume(uint32_t volume) override {
+        return inner_ ? inner_->SetSpeakerVolume(volume) : 0;
+    }
+
+    int32_t SpeakerVolume(uint32_t* volume) const override {
+        return inner_ ? inner_->SpeakerVolume(volume) : 0;
+    }
+
+    int32_t MaxSpeakerVolume(uint32_t* maxVolume) const override {
+        return inner_ ? inner_->MaxSpeakerVolume(maxVolume) : 0;
+    }
+
+    int32_t MinSpeakerVolume(uint32_t* minVolume) const override {
+        return inner_ ? inner_->MinSpeakerVolume(minVolume) : 0;
+    }
+
+    int32_t SpeakerMuteIsAvailable(bool* available) override {
+        return inner_ ? inner_->SpeakerMuteIsAvailable(available) : 0;
+    }
+
+    int32_t SetSpeakerMute(bool enable) override {
+        return inner_ ? inner_->SetSpeakerMute(enable) : 0;
+    }
+
+    int32_t SpeakerMute(bool* enabled) const override {
+        return inner_ ? inner_->SpeakerMute(enabled) : 0;
+    }
+
+    int32_t StereoPlayoutIsAvailable(bool* available) const override {
+        return inner_ ? inner_->StereoPlayoutIsAvailable(available) : 0;
+    }
+
+    int32_t SetStereoPlayout(bool enable) override {
+        return inner_ ? inner_->SetStereoPlayout(enable) : 0;
+    }
+
+    int32_t StereoPlayout(bool* enabled) const override {
+        return inner_ ? inner_->StereoPlayout(enabled) : 0;
+    }
+
+    int32_t PlayoutDelay(uint16_t* delayMS) const override {
+        return inner_ ? inner_->PlayoutDelay(delayMS) : 0;
+    }
+
+    // --- Recording 相关：全部禁用，防止原生录音线程与自定义 WasapiAudioCapture / RtcAudioSource 冲突 ---
+    int16_t RecordingDevices() override { return 0; }
+    int32_t RecordingDeviceName(uint16_t, char[webrtc::kAdmMaxDeviceNameSize], char[webrtc::kAdmMaxGuidSize]) override { return -1; }
+    int32_t SetRecordingDevice(uint16_t) override { return 0; }
+    int32_t SetRecordingDevice(WindowsDeviceType) override { return 0; }
+    int32_t RecordingIsAvailable(bool* available) override { if (available) *available = false; return 0; }
+    int32_t InitRecording() override { return 0; }
+    bool RecordingIsInitialized() const override { return false; }
     int32_t StartRecording() override { return 0; }
     int32_t StopRecording() override { return 0; }
     bool Recording() const override { return false; }
-    int32_t InitSpeaker() override { return 0; }
-    bool SpeakerIsInitialized() const override { return true; }
     int32_t InitMicrophone() override { return 0; }
-    bool MicrophoneIsInitialized() const override { return true; }
-    int32_t SpeakerVolumeIsAvailable(bool* available) override { *available = false; return 0; }
-    int32_t SetSpeakerVolume(uint32_t) override { return 0; }
-    int32_t SpeakerVolume(uint32_t*) const override { return 0; }
-    int32_t MaxSpeakerVolume(uint32_t*) const override { return 0; }
-    int32_t MinSpeakerVolume(uint32_t*) const override { return 0; }
-    int32_t MicrophoneVolumeIsAvailable(bool* available) override { *available = false; return 0; }
+    bool MicrophoneIsInitialized() const override { return false; }
+    int32_t MicrophoneVolumeIsAvailable(bool* available) override { if (available) *available = false; return 0; }
     int32_t SetMicrophoneVolume(uint32_t) override { return 0; }
     int32_t MicrophoneVolume(uint32_t*) const override { return 0; }
     int32_t MaxMicrophoneVolume(uint32_t*) const override { return 0; }
     int32_t MinMicrophoneVolume(uint32_t*) const override { return 0; }
-    int32_t SpeakerMuteIsAvailable(bool* available) override { *available = false; return 0; }
-    int32_t SetSpeakerMute(bool) override { return 0; }
-    int32_t SpeakerMute(bool*) const override { return 0; }
-    int32_t MicrophoneMuteIsAvailable(bool* available) override { *available = false; return 0; }
+    int32_t MicrophoneMuteIsAvailable(bool* available) override { if (available) *available = false; return 0; }
     int32_t SetMicrophoneMute(bool) override { return 0; }
     int32_t MicrophoneMute(bool*) const override { return 0; }
-    int32_t StereoPlayoutIsAvailable(bool* available) const override { *available = true; return 0; }
-    int32_t SetStereoPlayout(bool) override { return 0; }
-    int32_t StereoPlayout(bool* enabled) const override { *enabled = true; return 0; }
-    int32_t StereoRecordingIsAvailable(bool* available) const override { *available = false; return 0; }
+    int32_t StereoRecordingIsAvailable(bool* available) const override { if (available) *available = false; return 0; }
     int32_t SetStereoRecording(bool) override { return 0; }
-    int32_t StereoRecording(bool*) const override { return 0; }
-    int32_t PlayoutDelay(uint16_t* delayMS) const override { *delayMS = 0; return 0; }
+    int32_t StereoRecording(bool* enabled) const override { if (enabled) *enabled = false; return 0; }
+
     bool BuiltInAECIsAvailable() const override { return false; }
     bool BuiltInAGCIsAvailable() const override { return false; }
     bool BuiltInNSIsAvailable() const override { return false; }
@@ -209,11 +265,7 @@ public:
     int32_t EnableBuiltInNS(bool) override { return 0; }
 
 private:
-    std::atomic<bool> playing_;
-    std::atomic<bool> recording_;
-    mutable std::mutex mutex_;
-    webrtc::AudioTransport* audio_transport_;
-    std::thread playout_thread_;
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule> inner_;
 };
 
 } // namespace
@@ -233,6 +285,9 @@ bool WebRTCManager::Initialize() {
     if (initialized_) {
         return true;
     }
+
+    // 确保当前线程启用 COM 多线程环境
+    CoInitializeEx(nullptr, COINIT_MULTITHREADED);
 
     // 屏蔽 WebRTC 原生日志输出
     webrtc::LogMessage::LogToDebug(webrtc::LS_NONE);
@@ -259,13 +314,27 @@ bool WebRTCManager::Initialize() {
     auto video_encoder_factory = std::make_unique<CustomVideoEncoderFactory>();
     auto video_decoder_factory = std::make_unique<CustomVideoDecoderFactory>();
 
-    auto adm = webrtc::make_ref_counted<DummyAudioDeviceModule>();
+    auto env = webrtc::CreateEnvironment();
+    auto raw_adm = webrtc::CreateAudioDeviceModule(env, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
+    if (raw_adm) {
+        adm_ = webrtc::make_ref_counted<PlayoutOnlyAudioDeviceModule>(raw_adm);
+        worker_thread_->BlockingCall([this]() {
+            if (adm_) {
+                adm_->Init();
+                adm_->SetPlayoutDevice(0);
+                adm_->InitSpeaker();
+                adm_->InitPlayout();
+                adm_->StartPlayout();
+            }
+        });
+        std::cout << "WebRTCManager: Native Platform Audio Device Module (Playout-Only ADM) initialized and started playout." << std::endl;
+    }
 
     factory_ = webrtc::CreatePeerConnectionFactory(
         network_thread_.get(),
         worker_thread_.get(),
         signaling_thread_.get(),
-        adm,
+        adm_,
         audio_encoder_factory,
         audio_decoder_factory,
         std::move(video_encoder_factory),
@@ -293,8 +362,31 @@ void WebRTCManager::Deinitialize() {
 
     std::cout << "WebRTCManager: Deinitializing factory and threads..." << std::endl;
 
+    // 1. 显式释放 PeerConnectionFactory
     factory_ = nullptr;
 
+    // 2. 确保在 worker / signaling 线程执行完毕所有内部清理任务
+    if (worker_thread_) {
+        worker_thread_->BlockingCall([]() {});
+    }
+    if (signaling_thread_) {
+        signaling_thread_->BlockingCall([]() {});
+    }
+
+    // 3. 显式终止并释放 ADM
+    if (adm_) {
+        if (worker_thread_) {
+            worker_thread_->BlockingCall([this]() {
+                adm_->Terminate();
+                adm_ = nullptr;
+            });
+        } else {
+            adm_->Terminate();
+            adm_ = nullptr;
+        }
+    }
+
+    // 4. 等待各线程所有剩余任务排空
     if (worker_thread_) {
         worker_thread_->BlockingCall([]() {});
     }
@@ -305,6 +397,7 @@ void WebRTCManager::Deinitialize() {
         network_thread_->BlockingCall([]() {});
     }
 
+    // 5. 停止并释放辅助线程
     if (signaling_thread_) {
         signaling_thread_->Stop();
         signaling_thread_.reset();
