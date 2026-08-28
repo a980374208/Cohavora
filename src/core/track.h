@@ -20,11 +20,19 @@ enum class TrackKind {
     Unknown
 };
 
+enum class TrackSource {
+    Unknown,
+    Camera,
+    Microphone,
+    ScreenShareVideo,
+    ScreenShareAudio
+};
+
 struct VideoPreset {
     int width = 0;
     int height = 0;
     int max_bitrate_bps = 0;
-    double max_fps = 30.0;
+    int max_fps = 30;
 };
 
 struct VideoLayerSetting {
@@ -37,6 +45,7 @@ struct VideoLayerSetting {
 };
 
 struct VideoPublishOptions {
+    TrackSource source = TrackSource::Camera;
     bool simulcast = true;
     std::string video_codec = "vp8"; // "vp8", "h264", "vp9", "av1"
     std::string scalability_mode = ""; // e.g. "L3T3_KEY"
@@ -48,13 +57,15 @@ public:
     using AudioFrameSink = std::function<void(const AudioFrame&)>;
     using VideoFrameSink = std::function<void(const VideoFrame&, const VideoCaptureOptions&)>;
 
-    Track(const std::string& sid, const std::string& name, TrackKind kind)
-        : sid_(sid), name_(name), kind_(kind), muted_(false) {}
+    Track(const std::string& sid, const std::string& name, TrackKind kind, TrackSource source = TrackSource::Unknown)
+        : sid_(sid), name_(name), kind_(kind), source_(source), muted_(false) {}
     virtual ~Track() = default;
 
     std::string sid() const { return sid_; }
     std::string name() const { return name_; }
     TrackKind kind() const { return kind_; }
+    TrackSource source() const { return source_; }
+    void set_source(TrackSource source) { source_ = source; }
     bool muted() const { return muted_; }
 
     void set_muted(bool muted) {
@@ -105,6 +116,7 @@ private:
     std::string sid_;
     std::string name_;
     TrackKind kind_;
+    TrackSource source_;
     bool muted_;
 
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track_;
@@ -122,6 +134,7 @@ public:
     std::string sid() const { return sid_; }
     std::string name() const { return name_; }
     std::shared_ptr<Track> track() const { return track_; }
+    void set_track(std::shared_ptr<Track> track) { track_ = track; }
     bool muted() const { return track_ ? track_->muted() : false; }
 
 private:

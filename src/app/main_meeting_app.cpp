@@ -7,6 +7,7 @@
 #include "ui/style/style_core.h"
 #include "src/ui/meeting_ui_integration.h"
 #include "src/ui/meeting_main_window.h"
+#include "src/rtc/webrtc_manager.h"
 
 // 静态链接 Qt 必须显式导入平台与图像插件
 Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin)
@@ -49,7 +50,8 @@ int main(int argc, char *argv[]) {
 
 	const int result = app.exec();
 
-	// 退出时释放样式系统
+	// 退出时显式释放 WebRTC 资源与样式系统
+	livekit::WebRTCManager::Instance().Deinitialize();
 	style::StopManager();
 
 	return result;

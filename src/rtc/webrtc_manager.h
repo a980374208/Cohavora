@@ -62,6 +62,7 @@ private:
     std::unique_ptr<webrtc::Thread> signaling_thread_;
 
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm_;
 };
 
 } // namespace livekit
