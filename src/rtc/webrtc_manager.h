@@ -23,6 +23,22 @@ public:
     webrtc::Thread* signaling_thread() const { return signaling_thread_.get(); }
 
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory() const { return factory_; }
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm() const { return adm_; }
+
+    bool SetPlayoutDevice(uint16_t index) {
+        if (!adm_ || !worker_thread_) return false;
+        return worker_thread_->BlockingCall([this, index]() {
+            if (adm_) {
+                adm_->StopPlayout();
+                adm_->SetPlayoutDevice(index);
+                adm_->InitSpeaker();
+                adm_->InitPlayout();
+                adm_->StartPlayout();
+                return true;
+            }
+            return false;
+        });
+    }
 
     // 跨线程安全 SDP 协商辅助函数
     void CreateOffer(

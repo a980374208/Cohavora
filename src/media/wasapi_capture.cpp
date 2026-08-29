@@ -218,6 +218,15 @@ void WasapiAudioCapture::OnDeviceChangedNotification() {
     }
 }
 
+bool WasapiAudioCapture::SwitchDevice(const std::string& device_id) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (config_.device_id == device_id) return true;
+    config_.device_id = device_id;
+    spdlog::info("[WasapiAudioCapture] Switching microphone device to ID: {}", device_id.empty() ? "(Default)" : device_id);
+    OnDeviceChangedNotification();
+    return true;
+}
+
 bool WasapiAudioCapture::Start() {
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (is_running_.load()) return true;

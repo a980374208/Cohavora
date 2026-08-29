@@ -71,16 +71,39 @@ public:
     void set_muted(bool muted) {
         muted_ = muted;
         if (rtc_track_) {
-            rtc_track_->set_enabled(!muted);
+            rtc_track_->set_enabled(!muted && volume_ > 0.001);
         }
     }
+
+    void set_volume(double volume) {
+        volume_ = volume;
+        if (rtc_track_ && kind_ == TrackKind::Audio) {
+            auto* audio_track = static_cast<webrtc::AudioTrackInterface*>(rtc_track_.get());
+            if (audio_track) {
+                audio_track->SetVolume(volume);
+                if (volume <= 0.001) {
+                    audio_track->set_enabled(false);
+                } else if (!muted_) {
+                    audio_track->set_enabled(true);
+                }
+            }
+        }
+    }
+    double volume() const { return volume_; }
+
     void set_sid(const std::string& sid) { sid_ = sid; }
 
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track() const { return rtc_track_; }
     void set_rtc_track(webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track) {
         rtc_track_ = rtc_track;
         if (rtc_track_) {
-            rtc_track_->set_enabled(!muted_);
+            rtc_track_->set_enabled(!muted_ && volume_ > 0.001);
+            if (kind_ == TrackKind::Audio) {
+                auto* audio_track = static_cast<webrtc::AudioTrackInterface*>(rtc_track_.get());
+                if (audio_track) {
+                    audio_track->SetVolume(volume_);
+                }
+            }
         }
     }
 
@@ -118,6 +141,7 @@ private:
     TrackKind kind_;
     TrackSource source_;
     bool muted_;
+    double volume_ = 1.0;
 
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track_;
 

@@ -58,6 +58,9 @@ public:
     // 设备拔插或默认设备切换时的重启通知接口
     void OnDeviceChangedNotification();
 
+    // 动态热切换输入音频设备 (空字符串表示使用系统默认麦克风)
+    bool SwitchDevice(const std::string& device_id);
+
 private:
     bool InitializeAudioClient();
     void CleanupAudioClient();

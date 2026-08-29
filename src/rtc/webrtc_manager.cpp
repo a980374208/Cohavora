@@ -321,13 +321,18 @@ bool WebRTCManager::Initialize() {
         worker_thread_->BlockingCall([this]() {
             if (adm_) {
                 adm_->Init();
-                adm_->SetPlayoutDevice(0);
+                // 自动绑定系统默认通信播放端点 (Default Communication Device / Default Console Device)
+                int32_t ret = adm_->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultCommunicationDevice);
+                if (ret != 0) {
+                    adm_->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultDevice);
+                }
                 adm_->InitSpeaker();
+                adm_->SetSpeakerVolume(255);
+                adm_->SetSpeakerMute(false);
                 adm_->InitPlayout();
-                adm_->StartPlayout();
             }
         });
-        std::cout << "WebRTCManager: Native Platform Audio Device Module (Playout-Only ADM) initialized and started playout." << std::endl;
+        std::cout << "WebRTCManager: Native Platform Audio Device Module (Playout-Only ADM) initialized with Default Endpoint." << std::endl;
     }
 
     factory_ = webrtc::CreatePeerConnectionFactory(
@@ -347,6 +352,16 @@ bool WebRTCManager::Initialize() {
         std::cerr << "WebRTCManager: Failed to create PeerConnectionFactory" << std::endl;
         Deinitialize();
         return false;
+    }
+
+    // 关键时序优化：在 PeerConnectionFactory 创建完成 (AudioTransport 已注册) 后，再启动播放渲染驱动！
+    if (adm_) {
+        worker_thread_->BlockingCall([this]() {
+            if (adm_) {
+                adm_->StartPlayout();
+                std::cout << "WebRTCManager: ADM StartPlayout() activated AFTER PeerConnectionFactory & AudioTransport binding." << std::endl;
+            }
+        });
     }
 
     initialized_ = true;
