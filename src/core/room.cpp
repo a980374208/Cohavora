@@ -960,11 +960,26 @@ public:
         if (!callback_) return;
 
         int num_samples = static_cast<int>(number_of_frames * number_of_channels);
+
         AudioFrame frame = AudioFrame::create(sample_rate, static_cast<int>(number_of_channels), static_cast<int>(number_of_frames));
         const int16_t* pcm_data = static_cast<const int16_t*>(audio_data);
         if (!frame.data().empty()) {
             std::copy(pcm_data, pcm_data + num_samples, frame.data().begin());
         }
+
+        /********/
+        double sum = 0.0;
+        for (int i = 0; i < num_samples; ++i) {
+            sum += static_cast<double>(pcm_data[i]) * pcm_data[i];
+        }
+        double rms = std::sqrt(sum / num_samples);
+        // 打印音量诊断（大于 300 说明有明显说话声）
+        if (rms > 300.0) {
+            std::cout << "[AUDIO ACTIVE VOICE] 正在说话! 音量 RMS = " << rms << std::endl;
+        }
+        /*********/
+
+
 
         callback_(frame);
     }
@@ -1308,7 +1323,10 @@ std::pair<std::string, std::string> Room::UnpackStreamId(const std::string& pack
     if (sep_pos != std::string::npos) {
         return {packed.substr(0, sep_pos), packed.substr(sep_pos + 1)};
     }
-    return {packed, ""};
+    if (packed.rfind("PA_", 0) == 0) {
+        return {packed, ""};
+    }
+    return {"", ""};
 }
 
 void Room::RemoveExpiredPendingTracks() {
@@ -1333,8 +1351,21 @@ void Room::AttachRemoteTrackToParticipant(
     const std::string& track_sid) {
     if (!participant || !track) return;
 
-    std::string track_id = track_sid.empty() ? track->id() : track_sid;
     TrackKind kind = (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) ? TrackKind::Audio : TrackKind::Video;
+
+    // 优先使用传入的有效 track_sid (以 TR_ 开头)，若不是以 TR_ 开头，尝试从 participant 已有的 publications 中查找对应类型的有效 SID
+    std::string track_id = track_sid;
+    if (track_id.rfind("TR_", 0) != 0) {
+        for (const auto& [sid, p] : participant->tracks()) {
+            if (p && p->track() && p->track()->kind() == kind && sid.rfind("TR_", 0) == 0) {
+                track_id = sid;
+                break;
+            }
+        }
+    }
+    if (track_id.empty()) {
+        track_id = track->id();
+    }
 
     std::shared_ptr<TrackPublication> pub;
     std::shared_ptr<Track> r_track;
@@ -1376,6 +1407,7 @@ void Room::AttachRemoteTrackToParticipant(
                 remote_audio_tracks_.push_back(r_track);
             }
         }
+        processed_remote_track_ids_.insert(track->id());
     }
 
     if (kind == TrackKind::Audio) {
@@ -1384,12 +1416,30 @@ void Room::AttachRemoteTrackToParticipant(
             audio_track->set_enabled(true);
         }
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
-        auto sink = std::make_shared<NativeAudioTrackSink>([r_track, has_logged](const AudioFrame& frame) {
+        auto last_voice_log_time = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+        auto sink = std::make_shared<NativeAudioTrackSink>([r_track, has_logged, last_voice_log_time, this, participant](const AudioFrame& frame) {
             if (r_track) {
                 r_track->notifyAudioFrame(frame);
             }
             if (!has_logged->exchange(true)) {
                 std::cout << "[RECV AUDIO] Started receiving audio PCM stream for track " << r_track->sid() << ", sample_rate=" << frame.sampleRate() << "Hz, channels=" << frame.numChannels() << std::endl;
+                this->Log("WEBRTC", "AUDIO_FRAME", "收到远端音频首帧数据 (采样率: " + std::to_string(frame.sampleRate()) + "Hz, 声道: " + std::to_string(frame.numChannels()) + ", 帧采样数: " + std::to_string(frame.totalSamples()) + ")");
+            }
+            // 计算音频能量 RMS 并进行周期性语音诊断
+            const auto& samples = frame.data();
+            if (!samples.empty()) {
+                double sum = 0.0;
+                for (size_t i = 0; i < samples.size(); ++i) {
+                    sum += static_cast<double>(samples[i]) * samples[i];
+                }
+                double rms = std::sqrt(sum / static_cast<double>(samples.size()));
+                if (rms > 250.0) {
+                    auto now = std::chrono::steady_clock::now();
+                    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - *last_voice_log_time).count() > 2500) {
+                        *last_voice_log_time = now;
+                        this->Log("MEDIA", "AUDIO_VOICE", "参会人 [" + participant->identity() + "] 正在讲话 (PCM RMS 能量=" + std::to_string(static_cast<int>(rms)) + ", 48kHz 混音播放中)");
+                    }
+                }
             }
         });
         audio_track->AddSink(sink.get());
@@ -1397,19 +1447,22 @@ void Room::AttachRemoteTrackToParticipant(
             std::lock_guard lock(room_mutex_);
             remote_track_sinks_.push_back(sink);
         }
-        Log("WEBRTC", "AUDIO_ATTACH", "远端音频轨已绑定至参会人 [" + participant->identity() + "], Track SID=" + track_id);
+        Log("WEBRTC", "AUDIO_ATTACH", "远端音频轨已绑定至参会人 [" + participant->identity() + "], Track SID=" + track_id + ", 已挂载 NativeAudioTrackSink");
+
+        if (signal_client_) {
+            signal_client_->SendUpdateSubscription({track_id}, true, participant->sid());
+            Log("SIGNAL", "AUDIO_TRACK_ACTIVE", "已向 SFU 激活下行音频流订阅: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
+        }
     } else {
         auto video_track = static_cast<webrtc::VideoTrackInterface*>(track.get());
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
-        auto frame_counter = std::make_shared<std::atomic<uint64_t>>(0);
-        auto sink = std::make_shared<NativeVideoTrackSink>([r_track, has_logged, frame_counter, this](const VideoFrame& frame, const VideoCaptureOptions& options) {
+        auto sink = std::make_shared<NativeVideoTrackSink>([r_track, has_logged, this](const VideoFrame& frame, const VideoCaptureOptions& options) {
             if (r_track) {
                 r_track->notifyVideoFrame(frame, options);
             }
-            uint64_t cnt = frame_counter->fetch_add(1);
-            if (!has_logged->exchange(true) || cnt % 120 == 0) {
-                std::cout << "[RECV VIDEO] Receiving video stream for track " << r_track->sid() << ", frame #" << cnt << ", resolution=" << frame.width() << "x" << frame.height() << std::endl;
-                this->Log("WEBRTC", "VIDEO_FRAME", "WebRTC 解码器输出第 " + std::to_string(cnt) + " 帧 (" + std::to_string(frame.width()) + "x" + std::to_string(frame.height()) + ")");
+            if (!has_logged->exchange(true)) {
+                std::cout << "[RECV VIDEO] Receiving video stream for track " << r_track->sid() << ", resolution=" << frame.width() << "x" << frame.height() << std::endl;
+                this->Log("WEBRTC", "VIDEO_FRAME", "WebRTC 解码器开始输出远端视频流 (" + std::to_string(frame.width()) + "x" + std::to_string(frame.height()) + ")");
                 Telemetry::Instance().OnFirstRemoteFrameReceived("video");
             }
         });
@@ -1445,6 +1498,7 @@ void Room::FlushPendingTracks(const std::string& participant_sid) {
         if (pit == remote_participants_.end()) return;
         participant = pit->second;
 
+        // 仅精确匹配该参会人的暂存队列
         auto qit = pending_track_queue_.find(participant_sid);
         if (qit != pending_track_queue_.end()) {
             pending_to_flush = std::move(qit->second);
@@ -1467,9 +1521,8 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
     {
         std::lock_guard lock(room_mutex_);
         if (processed_remote_track_ids_.find(track_id) != processed_remote_track_ids_.end()) {
-            return; // 已经处理过这个 track
+            return; // 已经成功挂载并处理过这个 track
         }
-        processed_remote_track_ids_.insert(track_id);
     }
 
     // 从 receiver 的 stream_ids 解包 (msid: <participantSid>|<trackSid>)
@@ -1482,29 +1535,29 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
     }
 
     auto [participant_sid, track_sid] = UnpackStreamId(stream_id);
+    
+    // 如果解出来的 participant_sid 为空 (说明是本地预分配的无主临时虚拟轨，尚未绑定远端 SSRC/MSID)，直接忽略
+    if (participant_sid.empty()) {
+        Log("WEBRTC", "ON_TRACK_IGNORE", "忽略未绑定远端 SSRC/MSID 的本地虚拟 Track: TrackID=" + track_id + ", StreamID=" + stream_id + ", Kind=" + std::string(track->kind()));
+        return;
+    }
+
     if (track_sid.empty()) {
         track_sid = track_id;
     }
 
-    Log("WEBRTC", "ON_TRACK_RESOLVE", "下行 Track 解析: StreamID=" + stream_id + ", ParticipantSID=" + participant_sid + ", TrackSID=" + track_sid + ", Kind=" + std::string(track->kind()));
+    Log("WEBRTC", "ON_TRACK_RESOLVE", "下行 Track 解析成功: StreamID=" + stream_id + ", ParticipantSID=" + participant_sid + ", TrackSID=" + track_sid + ", Kind=" + std::string(track->kind()));
 
     std::shared_ptr<RemoteParticipant> participant;
     {
         std::lock_guard lock(room_mutex_);
-        if (!participant_sid.empty()) {
-            auto it = remote_participants_.find(participant_sid);
-            if (it != remote_participants_.end()) {
-                participant = it->second;
-            }
-        }
-        if (!participant && remote_participants_.size() == 1) {
-            // 单参会人 fallback
-            participant = remote_participants_.begin()->second;
-            participant_sid = participant->sid();
+        auto it = remote_participants_.find(participant_sid);
+        if (it != remote_participants_.end()) {
+            participant = it->second;
         }
 
         if (!participant) {
-            // 参会人尚未建立（信令在路上）：放入 PendingTrackQueue 暂存！
+            // 参会人尚未建立（信令在路上）：放入以 participant_sid 为精确 Key 的 PendingTrackQueue 暂存！
             RemoveExpiredPendingTracks();
             PendingTrack pt;
             pt.track = track;
@@ -1513,7 +1566,7 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
             pt.track_sid = track_sid;
             pt.expires_at = std::chrono::steady_clock::now() + std::chrono::seconds(15);
             pending_track_queue_[participant_sid].push_back(pt);
-            Log("TRACK", "ENQUEUE_PENDING", "参会人 [" + participant_sid + "] 尚未就绪，媒体轨已暂存至 PendingTrackQueue (Track SID=" + track_sid + ")");
+            Log("TRACK", "ENQUEUE_PENDING", "参会人 [" + participant_sid + "] 尚未就绪，真实媒体轨已暂存至 PendingTrackQueue (Track SID=" + track_sid + ")");
             return;
         }
     }
@@ -1791,6 +1844,8 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
                 if (it != remote_participants_.end()) {
                     disconnected.push_back(it->second);
                     remote_participants_.erase(it);
+                    current_sub_audios_ = 0;
+                    current_sub_videos_ = 0;
                 }
             } else {
                 std::shared_ptr<RemoteParticipant> remote;
@@ -1881,35 +1936,20 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
                 signal_client_->SendUpdateTrackSettings(pub->sid(), false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
                 has_new_video_pub = true;
             }
+            signal_client_->SendUpdateSubscription({pub->sid()}, true, p->sid());
         }
         for (const auto& listener : listeners_snapshot) {
             listener->OnTrackPublished(p, pub);
-            if (pub && pub->track()) {
+            if (pub && pub->track() && pub->track()->rtc_track()) {
                 listener->OnTrackSubscribed(pub->track(), pub, p);
             }
         }
     }
 
-    // 会议中新增远端视频轨时，确保 Single PC 下扫描并重新激活 Transceiver Receiver
-    if (has_new_video_pub && signal_client_ && signal_client_->is_single_pc_mode_active()) {
-        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
-        {
-            std::lock_guard lock(room_mutex_);
-            pub_pc = publisher_pc_;
-        }
-        if (pub_pc) {
-            auto transceivers = pub_pc->GetTransceivers();
-            for (const auto& t : transceivers) {
-                if (t->receiver() && t->receiver()->track()) {
-                    std::weak_ptr<Room> weak_this = shared_from_this();
-                    asio::post(executor_, [weak_this, receiver = t->receiver(), track = t->receiver()->track()]() {
-                        if (auto room = weak_this.lock()) {
-                            room->OnRemoteTrackAdded(receiver, track);
-                        }
-                    });
-                }
-            }
-        }
+    // 会议中新增远端轨时，确保 Single PC 模式下主动发起 SDP 协商以获取 SFU 下发的 SSRC 与 MSID
+    if (!newly_published_tracks.empty() && signal_client_ && signal_client_->is_single_pc_mode_active()) {
+        Log("SIGNAL", "NEW_TRACK_RENEG", "检测到远端发布新 Track (" + std::to_string(newly_published_tracks.size()) + " 条)，立即触发 Publisher 重新协商获取下行媒体流");
+        NegotiatePublisher();
     }
 
     for (const auto& evt : changed_mute_events) {
@@ -2492,15 +2532,12 @@ void Room::HandleMediaSectionsRequirement(const proto::MediaSectionsRequirement&
     bool should_negotiate = false;
     {
         std::lock_guard lock(room_mutex_);
-
-        // 关键修复 1：如果需要的音视频 section 数量与当前已协商/就绪的数量完全相同，直接跳过，绝不重复协商！
-        if (current_sub_audios_ >= num_audios && current_sub_videos_ >= num_videos) {
-            Log("SIGNAL", "MEDIA_SEC_SKIP", "下行 MediaSections 已满足要求 ("
-                + std::to_string(num_audios) + "A, " + std::to_string(num_videos) + "V)，跳过重复协商");
-            return;
-        }
         if (subscriber_negotiating_) {
             Log("SIGNAL", "MEDIA_SEC_SKIP", "Subscriber 协商已在进行中，跳过");
+            return;
+        }
+        if (num_audios == 0 && num_videos == 0) {
+            Log("SIGNAL", "MEDIA_SEC_SKIP", "下行 MediaSections 要求为 0A, 0V，跳过协商");
             return;
         }
         subscriber_negotiating_ = true;
@@ -2537,23 +2574,29 @@ void Room::NegotiateSubscriber(uint32_t num_audios, uint32_t num_videos) {
 
     // 1. 同步在 signaling thread 上添加 recvonly transceiver (先 audio 后 video)
     WebRTCManager::Instance().signaling_thread()->BlockingCall([sub_pc, target_audios, target_videos]() {
-        // 统计已有的 audio/video transceiver 数量（避免重复添加）
+        // 统计已有的专门用于接收 (RecvOnly) 且依然有效的 audio/video transceiver 数量（排除本地推流和 inactive 失效的 transceiver）
         auto existing_transceivers = sub_pc->GetTransceivers();
-        uint32_t existing_audios = 0, existing_videos = 0;
+        uint32_t existing_recv_audios = 0, existing_recv_videos = 0;
         for (const auto& t : existing_transceivers) {
-            if (t->media_type() == webrtc::MediaType::AUDIO) existing_audios++;
-            else if (t->media_type() == webrtc::MediaType::VIDEO) existing_videos++;
+            if (t && t->direction() == webrtc::RtpTransceiverDirection::kRecvOnly) {
+                // 如果当前已被对端置为 inactive，说明通道已被废弃，不能算作有效接收槽位
+                if (t->current_direction().has_value() && *t->current_direction() == webrtc::RtpTransceiverDirection::kInactive) {
+                    continue;
+                }
+                if (t->media_type() == webrtc::MediaType::AUDIO) existing_recv_audios++;
+                else if (t->media_type() == webrtc::MediaType::VIDEO) existing_recv_videos++;
+            }
         }
 
-        // 补充不足的 audio transceiver
-        for (uint32_t i = existing_audios; i < target_audios; ++i) {
+        // 补充不足的下行接收 audio transceiver
+        for (uint32_t i = existing_recv_audios; i < target_audios; ++i) {
             webrtc::RtpTransceiverInit init;
             init.direction = webrtc::RtpTransceiverDirection::kRecvOnly;
             sub_pc->AddTransceiver(webrtc::MediaType::AUDIO, init);
         }
 
-        // 补充不足的 video transceiver
-        for (uint32_t i = existing_videos; i < target_videos; ++i) {
+        // 补充不足的下行接收 video transceiver
+        for (uint32_t i = existing_recv_videos; i < target_videos; ++i) {
             webrtc::RtpTransceiverInit init;
             init.direction = webrtc::RtpTransceiverDirection::kRecvOnly;
             sub_pc->AddTransceiver(webrtc::MediaType::VIDEO, init);
@@ -2828,6 +2871,34 @@ RoomStatsReport Room::GetStatsSync() {
 
 asio::awaitable<RoomStatsReport> Room::GetStats() {
     co_return GetStatsSync();
+}
+
+void Room::SetParticipantVolume(const std::string& identity_or_sid, double volume) {
+    std::lock_guard lock(room_mutex_);
+    for (auto& [sid, p] : remote_participants_) {
+        if (p->identity() == identity_or_sid || p->sid() == identity_or_sid) {
+            for (auto& [tsid, pub] : p->tracks()) {
+                if (pub && pub->track() && pub->track()->kind() == TrackKind::Audio) {
+                    pub->track()->set_volume(volume);
+                    Log("MEDIA", "VOLUME_SET", "已设置参会人 [" + p->identity() + "] 音量为 " + std::to_string(static_cast<int>(volume * 100)) + "%");
+                }
+            }
+        }
+    }
+}
+
+void Room::SetParticipantMuted(const std::string& identity_or_sid, bool muted) {
+    std::lock_guard lock(room_mutex_);
+    for (auto& [sid, p] : remote_participants_) {
+        if (p->identity() == identity_or_sid || p->sid() == identity_or_sid) {
+            for (auto& [tsid, pub] : p->tracks()) {
+                if (pub && pub->track() && pub->track()->kind() == TrackKind::Audio) {
+                    pub->track()->set_muted(muted);
+                    Log("MEDIA", "MUTE_SET", "已设置参会人 [" + p->identity() + "] 本地静音=" + (muted ? "true" : "false"));
+                }
+            }
+        }
+    }
 }
 
 } // namespace livekit

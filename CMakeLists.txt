@@ -474,6 +474,8 @@ add_executable(livekit_meeting_app
     src/ui/meeting_ui_integration.h
     src/ui/video_test_widget.cpp
     src/ui/video_test_widget.h
+    src/ui/audio_visualizer_widget.cpp
+    src/ui/audio_visualizer_widget.h
 )
 
 target_include_directories(livekit_meeting_app BEFORE PRIVATE

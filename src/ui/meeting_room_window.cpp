@@ -86,6 +86,144 @@ VideoTileWidget::VideoTileWidget(const QString &displayName, bool isLocal, QWidg
 	, _isLocal(isLocal) {
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
+
+	_visualizer = new AudioVisualizerWidget(this, 7);
+	_visualizer->setBarColor(QColor(0, 180, 42));
+	_visualizer->hide();
+
+	setupVolumeControls();
+}
+
+void VideoTileWidget::setupVolumeControls() {
+	if (_isLocal) return;
+
+	_volBtn = new QPushButton(QString::fromUtf8("🔊"), this);
+	_volBtn->setFixedSize(28, 28);
+	_volBtn->setToolTip(QString::fromUtf8("独立调节该参会人音量"));
+	_volBtn->setStyleSheet(R"(
+		QPushButton {
+			background-color: rgba(0, 0, 0, 150);
+			border-radius: 14px;
+			color: white;
+			border: none;
+			font-size: 13px;
+		}
+		QPushButton:hover {
+			background-color: rgba(22, 119, 255, 220);
+		}
+	)");
+	_volBtn->hide();
+
+	_volPopup = new QWidget(this);
+	_volPopup->setFixedSize(190, 44);
+	_volPopup->setStyleSheet(R"(
+		QWidget {
+			background-color: rgba(20, 24, 32, 230);
+			border-radius: 8px;
+			border: 1px solid rgba(255, 255, 255, 40);
+		}
+	)");
+	_volPopup->hide();
+
+	_muteRemoteBtn = new QPushButton(QString::fromUtf8("🔊"), _volPopup);
+	_muteRemoteBtn->setFixedSize(26, 26);
+	_muteRemoteBtn->setGeometry(8, 9, 26, 26);
+	_muteRemoteBtn->setStyleSheet(R"(
+		QPushButton {
+			background: transparent;
+			color: #ffffff;
+			border: none;
+			font-size: 13px;
+		}
+		QPushButton:hover {
+			color: #1677ff;
+		}
+	)");
+
+	_volSlider = new QSlider(Qt::Horizontal, _volPopup);
+	_volSlider->setRange(0, 200);
+	_volSlider->setValue(100);
+	_volSlider->setGeometry(38, 12, 100, 20);
+	_volSlider->setStyleSheet(R"(
+		QSlider::groove:horizontal {
+			height: 4px;
+			background: rgba(255, 255, 255, 60);
+			border-radius: 2px;
+		}
+		QSlider::sub-page:horizontal {
+			background: #1677ff;
+			border-radius: 2px;
+		}
+		QSlider::handle:horizontal {
+			background: #ffffff;
+			width: 12px;
+			margin: -4px 0;
+			border-radius: 6px;
+		}
+	)");
+
+	_volLabel = new QLabel(QString::fromUtf8("100%"), _volPopup);
+	_volLabel->setGeometry(142, 11, 40, 22);
+	_volLabel->setStyleSheet("color: #ffffff; font-size: 11px; border: none; background: transparent;");
+
+	connect(_volBtn, &QPushButton::clicked, [this] {
+		if (_volPopup->isVisible()) {
+			_volPopup->hide();
+		} else {
+			_volPopup->show();
+			_volPopup->raise();
+		}
+	});
+
+	connect(_muteRemoteBtn, &QPushButton::clicked, [this] {
+		_isLocallyMuted = !_isLocallyMuted;
+		_muteRemoteBtn->setText(_isLocallyMuted ? QString::fromUtf8("🔇") : QString::fromUtf8("🔊"));
+		_muteRemoteBtn->setStyleSheet(_isLocallyMuted ? "color: #f53f3f; border: none; font-size: 13px;" : "color: #ffffff; border: none; font-size: 13px;");
+		_volBtn->setText(_isLocallyMuted ? QString::fromUtf8("🔇") : QString::fromUtf8("🔊"));
+		remoteLocalMuteToggled(_isLocallyMuted);
+	});
+
+	connect(_volSlider, &QSlider::valueChanged, [this](int value) {
+		_remoteVolume = static_cast<float>(value) / 100.0f;
+		_volLabel->setText(QString("%1%").arg(value));
+		if (_isLocallyMuted && value > 0) {
+			_isLocallyMuted = false;
+			_muteRemoteBtn->setText(QString::fromUtf8("🔊"));
+			_muteRemoteBtn->setStyleSheet("color: #ffffff; border: none; font-size: 13px;");
+			_volBtn->setText(QString::fromUtf8("🔊"));
+			remoteLocalMuteToggled(false);
+		}
+		remoteVolumeChanged(_remoteVolume);
+	});
+}
+
+void VideoTileWidget::enterEventHook(QEnterEvent *e) {
+	if (_volBtn) _volBtn->show();
+	Ui::RpWidget::enterEventHook(e);
+}
+
+void VideoTileWidget::leaveEventHook(QEvent *e) {
+	if (_volBtn && (!_volPopup || !_volPopup->isVisible())) {
+		_volBtn->hide();
+	}
+	Ui::RpWidget::leaveEventHook(e);
+}
+
+void VideoTileWidget::resizeEvent(QResizeEvent *e) {
+	Ui::RpWidget::resizeEvent(e);
+	const int w = width();
+	const int h = height();
+
+	if (_volBtn) {
+		_volBtn->move(w - 36, 10);
+	}
+	if (_volPopup) {
+		_volPopup->move(w - 200, 42);
+	}
+	if (_visualizer) {
+		_visualizer->setGeometry((w - 90) / 2, h - 36, 90, 24);
+		_visualizer->raise();
+	}
 }
 
 void VideoTileWidget::setDisplayName(const QString &name) {
@@ -104,15 +242,31 @@ void VideoTileWidget::setVideoActive(bool active) {
 
 void VideoTileWidget::setAudioMuted(bool muted) {
 	_isAudioMuted = muted;
+	if (muted) {
+		_isSpeaking = false;
+		_audioLevel = 0.0f;
+		if (_visualizer) {
+			_visualizer->setActive(false);
+			_visualizer->hide();
+		}
+	}
 	update();
 }
 
 void VideoTileWidget::setSpeaking(bool speaking, float level) {
-	if (_isSpeaking != speaking || std::abs(_audioLevel - level) > 0.05f) {
-		_isSpeaking = speaking;
-		_audioLevel = level;
-		update();
+	_isSpeaking = speaking;
+	_audioLevel = level;
+	if (_visualizer) {
+		_visualizer->setActive(speaking);
+		if (speaking) {
+			_visualizer->setAudioLevel(level);
+			_visualizer->show();
+			_visualizer->raise();
+		} else {
+			_visualizer->hide();
+		}
 	}
+	update();
 }
 
 void VideoTileWidget::setFrame(const QImage &image) {
@@ -758,11 +912,11 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 		p.drawText(QRect(r.x(), r.bottom() - 18, r.width(), 16), Qt::AlignCenter, title);
 
 		if (item.hasDropdown) {
-			p.setPen(QPen(QColor(0x86, 0x90, 0x9c), 1.2));
-			const int ax = r.right() - 6;
+			p.setPen(QPen(QColor(0x86, 0x90, 0x9c), 1.4));
+			const int ax = r.right() - 7;
 			const int ay = r.y() + 10;
-			p.drawLine(ax - 2, ay + 1, ax, ay - 1);
-			p.drawLine(ax, ay - 1, ax + 2, ay + 1);
+			p.drawLine(ax - 3, ay, ax, ay + 3);
+			p.drawLine(ax, ay + 3, ax + 3, ay);
 		}
 
 		p.restore();
@@ -793,6 +947,90 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 	p.restore();
 }
 
+void RoomBottomBarWidget::showAudioDeviceMenu(const QPoint &globalPos) {
+	QMenu menu(this);
+	menu.setStyleSheet(R"(
+		QMenu {
+			background-color: #ffffff;
+			border: 1px solid #e5e6eb;
+			border-radius: 8px;
+			padding: 6px;
+			font-size: 13px;
+			color: #1f2329;
+		}
+		QMenu::item {
+			padding: 6px 24px 6px 20px;
+			border-radius: 4px;
+		}
+		QMenu::item:selected {
+			background-color: #f2f3f5;
+			color: #1677ff;
+		}
+		QMenu::separator {
+			height: 1px;
+			background-color: #e5e6eb;
+			margin: 6px 8px;
+		}
+	)");
+
+	// 1. 麦克风输入设备
+	QAction *micHeader = menu.addAction(QString::fromUtf8("🎤 选择麦克风 (输入设备)"));
+	micHeader->setEnabled(false);
+
+	auto inputDevices = livekit::WasapiEnumerator::EnumerateInputDevices();
+	auto defInput = livekit::WasapiEnumerator::GetDefaultInputDevice();
+
+	QActionGroup *micGroup = new QActionGroup(&menu);
+	for (const auto &dev : inputDevices) {
+		QString title = QString::fromStdString(dev.name);
+		if (dev.is_default) {
+			title += QString::fromUtf8(" (系统默认)");
+		}
+		QAction *act = menu.addAction(title);
+		act->setCheckable(true);
+		if (_currentMicId.isEmpty()) {
+			if (dev.is_default) act->setChecked(true);
+		} else if (_currentMicId == QString::fromStdString(dev.id)) {
+			act->setChecked(true);
+		}
+		micGroup->addAction(act);
+
+		connect(act, &QAction::triggered, [this, devId = QString::fromStdString(dev.id)] {
+			_currentMicId = devId;
+			_micDeviceStream.fire_copy(devId);
+		});
+	}
+
+	menu.addSeparator();
+
+	// 2. 扬声器输出设备
+	QAction *spkHeader = menu.addAction(QString::fromUtf8("🔊 选择扬声器 (输出设备)"));
+	spkHeader->setEnabled(false);
+
+	auto outputDevices = livekit::WasapiEnumerator::EnumerateOutputDevices();
+	QActionGroup *spkGroup = new QActionGroup(&menu);
+	for (size_t i = 0; i < outputDevices.size(); ++i) {
+		const auto &dev = outputDevices[i];
+		QString title = QString::fromStdString(dev.name);
+		if (dev.is_default) {
+			title += QString::fromUtf8(" (系统默认)");
+		}
+		QAction *act = menu.addAction(title);
+		act->setCheckable(true);
+		if (static_cast<int>(i) == _currentSpeakerIndex) {
+			act->setChecked(true);
+		}
+		spkGroup->addAction(act);
+
+		connect(act, &QAction::triggered, [this, idx = static_cast<int>(i)] {
+			_currentSpeakerIndex = idx;
+			_speakerDeviceStream.fire_copy(idx);
+		});
+	}
+
+	menu.exec(globalPos);
+}
+
 void RoomBottomBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	const QPoint pos = e->pos();
 	int nextId = -1;
@@ -814,6 +1052,15 @@ void RoomBottomBarWidget::mouseMoveEvent(QMouseEvent *e) {
 }
 
 void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
+	if (e->button() == Qt::RightButton) {
+		for (const auto &item : _toolItems) {
+			if (item.rect.contains(e->pos()) && item.id == 1) {
+				showAudioDeviceMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
+				return;
+			}
+		}
+	}
+
 	if (e->button() == Qt::LeftButton) {
 		if (_endMeetingRect.contains(e->pos())) {
 			_endMeetingStream.fire({});
@@ -824,8 +1071,12 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 			if (item.rect.contains(e->pos())) {
 				switch (item.id) {
 				case 1: {
+					// 如果点击的是右侧下拉小三角区域 (宽 16px)
+					if (e->pos().x() > item.rect.right() - 16) {
+						showAudioDeviceMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
+						break;
+					}
 					if (_audioMuted) {
-						// 准备解除静音/开启麦克风，先检查是否有可用麦克风
 						if (!HasAvailableAudioDevice()) {
 							QMessageBox::warning(this, QString::fromUtf8("麦克风不可用"),
 								QString::fromUtf8("未检测到可用的麦克风输入设备，无法开启麦克风！"));
@@ -925,6 +1176,25 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config, QWidget *parent)
 
 	// 3. 创建本地音频与视频数据源
 	_localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
+	_localAudioSource->addSink([this](const livekit::AudioFrame &frame) {
+		if (_config.audioMuted) return;
+		const auto &samples = frame.data();
+		if (!samples.empty()) {
+			double sum = 0.0;
+			for (size_t i = 0; i < samples.size(); ++i) {
+				sum += static_cast<double>(samples[i]) * samples[i];
+			}
+			double rms = std::sqrt(sum / static_cast<double>(samples.size()));
+			float level = static_cast<float>(std::clamp(rms / 2200.0, 0.0, 1.0));
+			bool speaking = (level > 0.02f);
+			QMetaObject::invokeMethod(this, [this, speaking, level]() {
+				if (_localTile && !_config.audioMuted) {
+					_localTile->setSpeaking(speaking, level);
+				}
+			}, Qt::QueuedConnection);
+		}
+	});
+
 	_localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
 	_localVideoSource->addSink([this](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
 		QImage img = VideoFrameToQImage(frame);
@@ -1160,6 +1430,42 @@ void MeetingRoomWindow::initLayout() {
 		LogToConsole(LogCategory::Participant, "CHAT", QString("%1: %2").arg(_config.displayName).arg(text));
 	}, lifetime());
 
+	_bottomBar->microphoneDeviceChanged() | rpl::on_next([this](const QString &devId) {
+		if (_wasapiCap) {
+			_wasapiCap->SwitchDevice(devId.toStdString());
+			LogToConsole(LogCategory::Media, "DEVICE", QString("麦克风设备已切换为: %1").arg(devId.isEmpty() ? "(系统默认)" : devId));
+		}
+	}, lifetime());
+
+	_bottomBar->speakerDeviceChanged() | rpl::on_next([this](int idx) {
+		livekit::WebRTCManager::Instance().SetPlayoutDevice(static_cast<uint16_t>(idx));
+		LogToConsole(LogCategory::Media, "DEVICE", QString("扬声器播放设备已切换为索引: %1").arg(idx));
+	}, lifetime());
+
+	connect(_remoteTile, &VideoTileWidget::remoteVolumeChanged, [this](float vol) {
+		_remoteVolumes[_remoteUserName] = vol;
+		if (_room && !_remoteUserName.isEmpty()) {
+			_room->SetParticipantVolume(_remoteUserName.toStdString(), vol);
+		}
+		LogToConsole(LogCategory::Media, "REMOTE_VOL", QString("远端参会人 [%1] 独立音量调整为: %2%").arg(_remoteUserName).arg(static_cast<int>(vol * 100)));
+	});
+
+	connect(_remoteTile, &VideoTileWidget::remoteLocalMuteToggled, [this](bool muted) {
+		if (muted) {
+			_locallyMutedUsers.insert(_remoteUserName);
+			if (_room && !_remoteUserName.isEmpty()) {
+				_room->SetParticipantMuted(_remoteUserName.toStdString(), true);
+			}
+			LogToConsole(LogCategory::Media, "REMOTE_MUTE", QString("已在本地静音远端参会人: %1").arg(_remoteUserName));
+		} else {
+			_locallyMutedUsers.erase(_remoteUserName);
+			if (_room && !_remoteUserName.isEmpty()) {
+				_room->SetParticipantMuted(_remoteUserName.toStdString(), false);
+			}
+			LogToConsole(LogCategory::Media, "REMOTE_MUTE", QString("已在本地解除静音远端参会人: %1").arg(_remoteUserName));
+		}
+	});
+
 	connect(_localTile, &VideoTileWidget::tileDoubleClicked, [this] {
 		_viewMode = (_viewMode == VideoViewMode::Grid) ? VideoViewMode::Pip : VideoViewMode::Grid;
 		updateVideoLayout();
@@ -1197,6 +1503,16 @@ void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity) {
 	_remoteTile->setDisplayName(identity);
 	_remoteTile->setVideoActive(false);
 	_remoteTile->show();
+
+	if (_room) {
+		auto itVol = _remoteVolumes.find(identity);
+		if (itVol != _remoteVolumes.end()) {
+			_room->SetParticipantVolume(identity.toStdString(), itVol->second);
+		}
+		if (_locallyMutedUsers.count(identity)) {
+			_room->SetParticipantMuted(identity.toStdString(), true);
+		}
+	}
 
 	_bottomBar->setParticipantCount(_participantCount);
 	_topBar->setActiveSpeaker(QString::fromUtf8("%1 已加入").arg(identity));
@@ -1542,12 +1858,11 @@ void MeetingRoomWindow::startLiveKitSession() {
 				.arg(track->kind() == livekit::TrackKind::Video ? "VIDEO" : "AUDIO"));
 
 			if (track->kind() == livekit::TrackKind::Video) {
-				auto frame_cnt = std::make_shared<std::atomic<uint64_t>>(0);
-				track->addVideoSink([this, identity, frame_cnt](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
-					uint64_t c = frame_cnt->fetch_add(1);
-					if (c == 0 || c % 120 == 0) {
-						LogToConsole(LogCategory::WebRTC, "SINK_FRAME", QString("LiveKit Track 视频 Sink 收到第 %1 帧 (%2x%3 RGBA) 来自: %4")
-							.arg(c).arg(frame.width()).arg(frame.height()).arg(QString::fromStdString(identity)));
+				auto has_logged = std::make_shared<std::atomic<bool>>(false);
+				track->addVideoSink([this, identity, has_logged](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
+					if (!has_logged->exchange(true)) {
+						LogToConsole(LogCategory::WebRTC, "SINK_FRAME", QString("收到来自 [%1] 的远端视频画面 (%2x%3 RGBA)")
+							.arg(QString::fromStdString(identity)).arg(frame.width()).arg(frame.height()));
 					}
 					QImage img = VideoFrameToQImage(frame);
 					if (!img.isNull() && _window) {
@@ -1557,7 +1872,7 @@ void MeetingRoomWindow::startLiveKitSession() {
 					}
 				});
 			} else if (track->kind() == livekit::TrackKind::Audio) {
-				LogToConsole(LogCategory::Media, "AUDIO", QString("远端音频轨已就绪，由 WebRTC 原生硬件驱动 ADM 自动进行混音与扬声器高保真播放"));
+				LogToConsole(LogCategory::Media, "AUDIO", QString("参会人 [%1] 音频轨已挂载至 WebRTC 原生混音播放管线 (WASAPI Playout ADM 活跃中)").arg(QString::fromStdString(identity)));
 			}
 		}
 

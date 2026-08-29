@@ -108,6 +108,10 @@ public:
     asio::awaitable<RoomStatsReport> GetStats();
     RoomStatsReport GetStatsSync();
 
+    // === 远端参会人独立音量与静音管理 ===
+    void SetParticipantVolume(const std::string& identity_or_sid, double volume);
+    void SetParticipantMuted(const std::string& identity_or_sid, bool muted);
+
     // === 新增：E2EE 端到端加密管理器 ===
     void EnableE2ee(const E2eeOptions& options);
     std::shared_ptr<E2eeManager> e2ee_manager() const { return e2ee_manager_; }

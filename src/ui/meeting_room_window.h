@@ -17,6 +17,8 @@
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QMenu>
+#include <QtWidgets/QSlider>
+#include "src/ui/audio_visualizer_widget.h"
 #include <QtCore/QTimer>
 #include <QtCore/QTime>
 #include <QtGui/QImage>
@@ -73,6 +75,10 @@ public:
 
 	void setFrame(const QImage &image);
 
+	// 远端独立音量与静音管理
+	float remoteVolume() const { return _remoteVolume; }
+	bool isLocallyMuted() const { return _isLocallyMuted; }
+
 	// PIP 小窗交互
 	void setPipMode(bool pip) { _isPip = pip; update(); }
 	bool isPipMode() const { return _isPip; }
@@ -80,16 +86,22 @@ public:
 signals:
 	void tileDoubleClicked();
 	void tileClicked();
+	void remoteVolumeChanged(float volume);
+	void remoteLocalMuteToggled(bool muted);
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
+	void resizeEvent(QResizeEvent *e) override;
 	void mousePressEvent(QMouseEvent *e) override;
 	void mouseDoubleClickEvent(QMouseEvent *e) override;
+	void enterEventHook(QEnterEvent *e) override;
+	void leaveEventHook(QEvent *e) override;
 
 private:
 	void drawAvatarPlaceholder(QPainter &p, const QRect &r);
 	void drawVideoFrame(QPainter &p, const QRect &r);
 	void drawBottomNameTag(QPainter &p, const QRect &r);
+	void setupVolumeControls();
 
 	QString _displayName;
 	bool _isLocal = false;
@@ -98,6 +110,18 @@ private:
 	bool _isSpeaking = false;
 	float _audioLevel = 0.0f;
 	bool _isPip = false;
+
+	// 远端独立音量控制
+	float _remoteVolume = 1.0f;
+	bool _isLocallyMuted = false;
+	QPushButton *_volBtn = nullptr;
+	QWidget *_volPopup = nullptr;
+	QSlider *_volSlider = nullptr;
+	QLabel *_volLabel = nullptr;
+	QPushButton *_muteRemoteBtn = nullptr;
+
+	// 频域多柱跳动波形组件
+	AudioVisualizerWidget *_visualizer = nullptr;
 
 	QImage _currentFrame;
 	std::mutex _frameMutex;
@@ -189,6 +213,10 @@ public:
 	rpl::producer<> appsClicked() const { return _appsStream.events(); }
 	rpl::producer<> endMeetingClicked() const { return _endMeetingStream.events(); }
 	rpl::producer<QString> sendChatRequested() const { return _sendChatStream.events(); }
+	rpl::producer<QString> microphoneDeviceChanged() const { return _micDeviceStream.events(); }
+	rpl::producer<int> speakerDeviceChanged() const { return _speakerDeviceStream.events(); }
+
+	void showAudioDeviceMenu(const QPoint &globalPos);
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -219,6 +247,9 @@ private:
 	QRect _endMeetingRect;
 	bool _endHovered = false;
 
+	QString _currentMicId;
+	int _currentSpeakerIndex = 0;
+
 	rpl::event_stream<bool> _toggleAudioStream;
 	rpl::event_stream<bool> _toggleVideoStream;
 	rpl::event_stream<> _shareScreenStream;
@@ -230,6 +261,8 @@ private:
 	rpl::event_stream<> _appsStream;
 	rpl::event_stream<> _endMeetingStream;
 	rpl::event_stream<QString> _sendChatStream;
+	rpl::event_stream<QString> _micDeviceStream;
+	rpl::event_stream<int> _speakerDeviceStream;
 };
 
 // ----------------------------------------------------
@@ -319,6 +352,10 @@ private:
 	std::shared_ptr<livekit::LocalAudioTrack> _localAudioTrack;
 	std::shared_ptr<livekit::VideoSource> _localVideoSource;
 	std::shared_ptr<livekit::AudioSource> _localAudioSource;
+
+	// 远端参会者独立音量与静音管理
+	std::unordered_map<QString, float> _remoteVolumes;
+	std::unordered_set<QString> _locallyMutedUsers;
 
 #if defined(Q_OS_WIN)
 	HWND _handle = nullptr;
