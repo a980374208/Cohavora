@@ -246,8 +246,8 @@ int main(int argc, char* argv[]) {
 
     asio::co_spawn(io_ctx, [room, url, token, opts, &capture_running, &audioThread, &videoThread]() -> asio::awaitable<void> {
         try {
-            bool success = co_await room->Connect(url, token, opts);
-            if (success) {
+            co_await room->ConnectAsync(url, token, opts);
+            {
                 auto lp = room->local_participant();
                 std::cout << "[Connected] Local Participant SID: "
                           << (lp ? lp->sid() : "N/A")
@@ -268,13 +268,13 @@ int main(int argc, char* argv[]) {
                     // 1. 创建音频 Source (48kHz, 单声道) & Track ("noise")
                     auto audio_source = std::make_shared<livekit::AudioSource>(48000, 1, 10);
                     auto audio_track = livekit::LocalAudioTrack::createLocalAudioTrack("noise", audio_source);
-                    lp->PublishTrack(audio_track);
+                    co_await lp->PublishTrackAsync(audio_track);
                     std::cout << "[Media] -> Published Local Audio Track: name='noise'" << std::endl;
 
                     // 2. 创建视频 Source (1280x720) & Track ("rgb")
                     auto video_source = std::make_shared<livekit::VideoSource>(1280, 720);
                     auto video_track = livekit::LocalVideoTrack::createLocalVideoTrack("rgb", video_source);
-                    lp->PublishTrack(video_track);
+                    co_await lp->PublishTrackAsync(video_track);
                     std::cout << "[Media] -> Published Local Video Track: name='rgb'" << std::endl;
 
                     // 3. 启动后台模拟音视频采集采样线程 (仿照 runNoiseCaptureLoop 和 runFakeVideoCaptureLoop)
@@ -290,8 +290,6 @@ int main(int argc, char* argv[]) {
                 }
 
                 std::cout << "\n[Running] LiveKit connection active with published Audio & Video tracks. Press Ctrl+C to exit." << std::endl;
-            } else {
-                std::cerr << "[ERROR] Failed to connect to LiveKit server (Connect returned false)." << std::endl;
             }
         } catch (const std::exception& e) {
             std::cerr << "[EXCEPTION] Connection threw exception: " << e.what() << std::endl;

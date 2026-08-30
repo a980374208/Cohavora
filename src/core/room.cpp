@@ -9,6 +9,8 @@
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include <nlohmann/json.hpp>
+#include <asio/experimental/awaitable_operators.hpp>
+#include <atomic>
 #include <iostream>
 #include <algorithm>
 #include "api/jsep.h"
@@ -78,6 +80,7 @@ public:
                 default: break;
             }
             room->Log("WEBRTC", "PC_STATE", "PC (" + std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") + ") 传输总体状态变为: " + state_str);
+            room->OnPeerConnectionStateChanged(pc_type_, new_state);
         }
     }
 
@@ -212,30 +215,58 @@ void Room::RemoveListener(std::shared_ptr<RoomListener> listener) {
 }
 
 asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& token, const SignalOptions& opts) {
+    try {
+        co_await ConnectAsync(url, token, opts);
+        co_return true;
+    } catch (const std::exception& error) {
+        Log("ERROR", "CONNECT_FAILED", error.what());
+        co_return false;
+    }
+}
+
+asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::string& token, const SignalOptions& opts) {
+    uint64_t generation = 0;
+    bool notify_connected = true;
     {
         std::lock_guard lock(room_mutex_);
         if (connection_state_ != ConnectionState::Disconnected) {
-            co_return false;
+            throw OperationError(OperationKind::Connect,
+                                 OperationErrorCode::InvalidState,
+                                 "connect_start",
+                                 "room is not disconnected");
         }
         connection_state_ = ConnectionState::Connecting;
+        generation = session_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        operation_timeouts_ = opts.timeouts;
+        require_media_connection_ = opts.create_webrtc_pc;
     }
 
-    auto self = shared_from_this();
-    auto conn_res = co_await SignalClient::Connect(url, token, opts, std::nullopt, [self](const SignalEvent& event) {
-        self->HandleSignalEvent(event);
-    });
+    try {
+        auto self = shared_from_this();
+        auto conn_res = co_await SignalClient::Connect(url, token, opts, std::nullopt, [self](const SignalEvent& event) {
+            self->HandleSignalEvent(event);
+        });
 
-    if (conn_res.error || !conn_res.join_response) {
-        std::lock_guard lock(room_mutex_);
-        connection_state_ = ConnectionState::Disconnected;
-        co_return false;
-    }
+        if (conn_res.error || !conn_res.join_response) {
+            throw OperationError(OperationKind::Connect,
+                                 OperationErrorCode::SignalConnectFailed,
+                                 "signal_join",
+                                 conn_res.error ? conn_res.error.message() : "JoinResponse is missing",
+                                 true);
+        }
 
-    signal_client_ = conn_res.client;
-    auto join_res = conn_res.join_response;
+        auto join_res = conn_res.join_response;
 
-    {
-        std::lock_guard lock(room_mutex_);
+        {
+            std::lock_guard lock(room_mutex_);
+            if (generation != session_generation_.load(std::memory_order_acquire) ||
+                connection_state_ != ConnectionState::Connecting) {
+                throw OperationError(OperationKind::Connect,
+                                     OperationErrorCode::Cancelled,
+                                     "join_commit",
+                                     "connect operation was cancelled");
+            }
+        signal_client_ = conn_res.client;
         local_participant_ = std::make_shared<LocalParticipant>(
             join_res->participant().sid(),
             join_res->participant().identity(),
@@ -246,6 +277,21 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
             }
         );
 
+        ParticipantPermission local_permission;
+        if (join_res->participant().has_permission()) {
+            const auto& permission = join_res->participant().permission();
+            local_permission.can_subscribe = permission.can_subscribe();
+            local_permission.can_publish = permission.can_publish();
+            local_permission.can_publish_data = permission.can_publish_data();
+            local_permission.can_update_metadata = permission.can_update_metadata();
+            local_permission.hidden = permission.hidden();
+        }
+        local_participant_->set_permission(local_permission);
+        local_participant_->set_metadata(join_res->participant().metadata());
+        local_participant_->set_attributes(std::map<std::string, std::string>(
+            join_res->participant().attributes().begin(),
+            join_res->participant().attributes().end()));
+
         // 绑定 LocalParticipant 发布 DataChannel 数据包 Handler
         local_participant_->SetPublishDataHandler(
             [self](const std::vector<uint8_t>& payload, bool reliable,
@@ -255,9 +301,11 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
         );
 
         // 绑定 LocalParticipant 发布 Native Track Handler
-        local_participant_->SetPublishTrackHandler(
-            [self](std::shared_ptr<Track> track) {
-                self->AddTrackToPublisher(track);
+        local_participant_->SetAsyncPublishTrackHandler(
+            [self](std::shared_ptr<Track> track,
+                   const proto::SignalRequest& request)
+                -> asio::awaitable<std::shared_ptr<TrackPublication>> {
+                co_return co_await self->PublishLocalTrackAsync(std::move(track), request);
             }
         );
 
@@ -312,6 +360,11 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
                         lossy_dc_->RegisterObserver(obs.get());
                         data_channel_observers_.push_back(obs);
                     }
+                } else {
+                    throw OperationError(OperationKind::Connect,
+                                         OperationErrorCode::PeerConnectionCreateFailed,
+                                         "create_publisher_pc",
+                                         pub_res.error().message());
                 }
 
                 if (signal_client_->is_single_pc_mode_active()) {
@@ -325,8 +378,16 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
                         Log("WEBRTC", "SUB_PC_CREATED", "Subscriber PeerConnection 创建成功");
                     } else {
                         Log("ERROR", "SUB_PC_FAIL", "Subscriber PeerConnection 创建失败: " + std::string(sub_res.error().message()));
+                        throw OperationError(OperationKind::Connect,
+                                             OperationErrorCode::PeerConnectionCreateFailed,
+                                             "create_subscriber_pc",
+                                             sub_res.error().message());
                     }
                 }
+
+                primary_pc_type_ = signal_client_->is_single_pc_mode_active()
+                    ? 0
+                    : (join_res->subscriber_primary() ? 1 : 0);
 
                 // [FIX] 预分配 recvonly 轨道：无论单双 PC，提前为接收方向注册 m=audio 和 m=video，防止初始 SDP 丢失接收能力
                 if (subscriber_pc_) {
@@ -342,11 +403,15 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
                         }
                     });
                 }
+            } else {
+                throw OperationError(OperationKind::Connect,
+                                     OperationErrorCode::PeerConnectionCreateFailed,
+                                     "initialize_webrtc",
+                                     "WebRTCManager initialization failed");
             }
         }
 
         UpdateParticipants(join_res->other_participants());
-        connection_state_ = ConnectionState::Connected;
     }
 
     if (signal_client_) {
@@ -358,60 +423,102 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
         Log("SIGNAL", "SUB_PERM", "已向 LiveKit 发送全员订阅权限 SubscriptionPermission (all_participants=true)");
 
         // [FIX] 单 PC 模式下，入会成功后主动发起初始 Offer 协商，确保 WebRTC 媒体通道与 recvonly 轨道立即激活
-        if (signal_client_->is_single_pc_mode_active()) {
-            NegotiatePublisher();
+        if (require_media_connection_ &&
+            (signal_client_->is_single_pc_mode_active() || primary_pc_type_ == 0)) {
+            co_await NegotiatePublisherAsync(operation_timeouts_.negotiation, generation);
         }
     }
 
-    auto listeners_snapshot = GetListenersSnapshot();
-    for (const auto& listener : listeners_snapshot) {
-        listener->OnConnected();
+    if (require_media_connection_) {
+        co_await WaitForPrimaryPeerConnection(operation_timeouts_.peer_connection, generation);
     }
 
-    co_return true;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (generation != session_generation_.load(std::memory_order_acquire) ||
+            connection_state_ != ConnectionState::Connecting) {
+            throw OperationError(OperationKind::Connect,
+                                 OperationErrorCode::Cancelled,
+                                 "connect_commit",
+                                 "connect operation was cancelled before commit");
+        }
+        connection_state_ = ConnectionState::Connected;
+        notify_connected = !suppress_next_connected_event_;
+        suppress_next_connected_event_ = false;
+    }
+
+    if (notify_connected) {
+        auto listeners_snapshot = GetListenersSnapshot();
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnConnected();
+        }
+    }
+
+    // The Room is externally connected before any delta accumulated during the
+    // handshake is delivered. This prevents participant/track callbacks from
+    // racing ahead of OnConnected while still preserving real post-Join deltas.
+    FlushDeferredRoomMessages();
+
+        co_return;
+    } catch (...) {
+        std::shared_ptr<SignalClient> signal;
+        {
+            std::lock_guard lock(room_mutex_);
+            if (generation == session_generation_.load(std::memory_order_acquire)) {
+                session_generation_.fetch_add(1, std::memory_order_acq_rel);
+            }
+            signal = std::move(signal_client_);
+            local_participant_.reset();
+            remote_participants_.clear();
+            publisher_pc_ = nullptr;
+            subscriber_pc_ = nullptr;
+            reliable_dc_ = nullptr;
+            lossy_dc_ = nullptr;
+            data_channel_observers_.clear();
+            deferred_room_messages_.clear();
+            suppress_next_connected_event_ = false;
+            connection_state_ = ConnectionState::Disconnected;
+        }
+        CancelPendingOperations(OperationErrorCode::Cancelled,
+                                "connect_rollback",
+                                "connect transaction rolled back");
+        if (signal) signal->Close();
+        throw;
+    }
 }
 
 void Room::Disconnect() {
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+    std::shared_ptr<SignalClient> signal;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> subscriber;
     {
         std::lock_guard lock(room_mutex_);
         if (connection_state_ == ConnectionState::Disconnected) return;
         connection_state_ = ConnectionState::Disconnected;
+        session_generation_.fetch_add(1, std::memory_order_acq_rel);
         listeners_snapshot = listeners_;
+        signal = std::move(signal_client_);
+        publisher = std::move(publisher_pc_);
+        subscriber = std::move(subscriber_pc_);
+        local_participant_.reset();
+        remote_participants_.clear();
+        reliable_dc_ = nullptr;
+        lossy_dc_ = nullptr;
+        remote_data_channels_.clear();
+        data_channel_observers_.clear();
+        remote_track_sinks_.clear();
+        publisher_observer_.reset();
+        subscriber_observer_.reset();
+        deferred_room_messages_.clear();
     }
 
-    // 1. 发送优雅离会请求 (LeaveRequest) 告知 LiveKit 服务端立即卸载轨道并广播离会
-    if (signal_client_) {
-        proto::SignalRequest req;
-        auto* leave = req.mutable_leave();
-        leave->set_reason(proto::CLIENT_INITIATED);
-        leave->set_action(proto::LeaveRequest_Action_DISCONNECT);
-        signal_client_->Send(req);
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-        signal_client_->Close();
-        signal_client_.reset();
-    }
-
-    // 2. 显式关闭 PeerConnection 网络传输
-    if (publisher_pc_) {
-        publisher_pc_->Close();
-    }
-    if (subscriber_pc_ && subscriber_pc_ != publisher_pc_) {
-        subscriber_pc_->Close();
-    }
-
-    // 3. 释放 PeerConnection 与 DataChannel
-    publisher_pc_ = nullptr;
-    subscriber_pc_ = nullptr;
-    reliable_dc_ = nullptr;
-    lossy_dc_ = nullptr;
-    remote_data_channels_.clear();
-    data_channel_observers_.clear();
-    remote_track_sinks_.clear();
-
-    // 4. 释放 Observer
-    publisher_observer_.reset();
-    subscriber_observer_.reset();
+    CancelPendingOperations(OperationErrorCode::Cancelled,
+                            "disconnect",
+                            "room disconnected");
+    if (signal) signal->Close();
+    if (publisher) publisher->Close();
+    if (subscriber && subscriber != publisher) subscriber->Close();
 
     {
         std::lock_guard mlock(remote_media_mutex_);
@@ -424,26 +531,120 @@ void Room::Disconnect() {
     }
 }
 
+asio::awaitable<void> Room::DisconnectAsync() {
+    std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+    std::shared_ptr<SignalClient> signal;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> subscriber;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (connection_state_ == ConnectionState::Disconnected) co_return;
+        connection_state_ = ConnectionState::Disconnected;
+        session_generation_.fetch_add(1, std::memory_order_acq_rel);
+        listeners_snapshot = listeners_;
+        signal = std::move(signal_client_);
+        publisher = std::move(publisher_pc_);
+        subscriber = std::move(subscriber_pc_);
+        local_participant_.reset();
+        remote_participants_.clear();
+        reliable_dc_ = nullptr;
+        lossy_dc_ = nullptr;
+        remote_data_channels_.clear();
+        data_channel_observers_.clear();
+        remote_track_sinks_.clear();
+        publisher_observer_.reset();
+        subscriber_observer_.reset();
+        deferred_room_messages_.clear();
+    }
+
+    CancelPendingOperations(OperationErrorCode::Cancelled,
+                            "disconnect",
+                            "room disconnected");
+
+    if (signal && signal->is_connected()) {
+        proto::SignalRequest request;
+        auto* leave = request.mutable_leave();
+        leave->set_reason(proto::CLIENT_INITIATED);
+        leave->set_action(proto::LeaveRequest_Action_DISCONNECT);
+        auto sent = std::make_shared<AwaitableState<void>>(executor_);
+        livekit::safe_co_spawn(executor_, [signal, request = std::move(request), sent]() -> asio::awaitable<void> {
+            try {
+                co_await signal->SendAsync(request);
+                CompleteAwaitable(sent);
+            } catch (...) {
+                FailAwaitable(sent, std::current_exception());
+            }
+        });
+        try {
+            co_await WaitAwaitable<void>(sent,
+                                         operation_timeouts_.disconnect_grace,
+                                         OperationKind::Disconnect,
+                                         OperationErrorCode::SessionClosed,
+                                         "send_leave");
+        } catch (const std::exception& error) {
+            Log("WARNING", "LEAVE_SEND", error.what());
+        }
+    }
+
+    if (signal) signal->Close();
+    if (publisher) publisher->Close();
+    if (subscriber && subscriber != publisher) subscriber->Close();
+    {
+        std::lock_guard lock(remote_media_mutex_);
+        remote_video_tracks_.clear();
+        remote_audio_tracks_.clear();
+    }
+    for (const auto& listener : listeners_snapshot) {
+        listener->OnDisconnected("Client Initiated Disconnect");
+    }
+}
+
 void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
                        const std::vector<std::string>& destination_identities, const std::string& topic) {
     static constexpr size_t kMaxChunkSize = 15000;
+    static constexpr size_t kMaxDataStreamSize = 16 * 1024 * 1024;
+    static std::atomic<uint64_t> stream_sequence{0};
+
+    if (payload.size() > kMaxDataStreamSize) {
+        Log("DATA", "PAYLOAD_TOO_LARGE", "拒绝发送超过 16 MiB 的 DataStream");
+        return;
+    }
 
     webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
+    std::shared_ptr<LocalParticipant> local_participant;
     {
         std::lock_guard lock(room_mutex_);
         dc = reliable ? reliable_dc_ : lossy_dc_;
+        local_participant = local_participant_;
     }
+
+    const std::string local_identity = local_participant ? local_participant->identity() : std::string{};
+    const std::string local_sid = local_participant ? local_participant->sid() : std::string{};
+    auto send_packet = [&](const std::vector<uint8_t>& bytes) {
+        if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
+            webrtc::DataBuffer buffer(
+                webrtc::CopyOnWriteBuffer(bytes.data(), bytes.size()),
+                /*binary=*/true);
+            if (!dc->Send(buffer)) {
+                Log("DATA", "SEND_FAILED", "DataChannel 拒绝发送数据包");
+            }
+        } else {
+            OnIncomingDataPacket(bytes, local_sid, topic);
+        }
+    };
 
     if (payload.size() > kMaxChunkSize) {
         // === DataStream Chunking 大包切片分发逻辑 ===
-        std::string stream_id = "ds_" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count());
+        std::string stream_id = "ds_" + std::to_string(
+            std::chrono::steady_clock::now().time_since_epoch().count()) + "_" +
+            std::to_string(stream_sequence.fetch_add(1, std::memory_order_relaxed));
 
         // 1. 发送 Header 帧
         proto::DataPacket header_pkt;
         header_pkt.set_kind(reliable ? proto::DataPacket::RELIABLE : proto::DataPacket::LOSSY);
-        if (local_participant_) {
-            header_pkt.set_participant_identity(local_participant_->identity());
-            header_pkt.set_participant_sid(local_participant_->sid());
+        if (local_participant) {
+            header_pkt.set_participant_identity(local_identity);
+            header_pkt.set_participant_sid(local_sid);
         }
         auto* header = header_pkt.mutable_stream_header();
         header->set_stream_id(stream_id);
@@ -455,12 +656,7 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
         std::vector<uint8_t> header_bytes(header_pkt.ByteSizeLong());
         header_pkt.SerializeToArray(header_bytes.data(), static_cast<int>(header_bytes.size()));
 
-        if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
-            webrtc::DataBuffer buf(webrtc::CopyOnWriteBuffer(header_bytes.data(), header_bytes.size()), true);
-            dc->Send(buf);
-        } else {
-            OnIncomingDataPacket(header_bytes, local_participant_ ? local_participant_->identity() : "", topic);
-        }
+        send_packet(header_bytes);
 
         // 2. 切片发送 Chunks
         size_t total_chunks = (payload.size() + kMaxChunkSize - 1) / kMaxChunkSize;
@@ -470,9 +666,9 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
 
             proto::DataPacket chunk_pkt;
             chunk_pkt.set_kind(reliable ? proto::DataPacket::RELIABLE : proto::DataPacket::LOSSY);
-            if (local_participant_) {
-                chunk_pkt.set_participant_identity(local_participant_->identity());
-                chunk_pkt.set_participant_sid(local_participant_->sid());
+            if (local_participant) {
+                chunk_pkt.set_participant_identity(local_identity);
+                chunk_pkt.set_participant_sid(local_sid);
             }
             auto* chunk = chunk_pkt.mutable_stream_chunk();
             chunk->set_stream_id(stream_id);
@@ -482,23 +678,15 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
             std::vector<uint8_t> chunk_bytes(chunk_pkt.ByteSizeLong());
             chunk_pkt.SerializeToArray(chunk_bytes.data(), static_cast<int>(chunk_bytes.size()));
 
-            if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
-                while (dc->buffered_amount() > 256 * 1024) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(2));
-                }
-                webrtc::DataBuffer buf(webrtc::CopyOnWriteBuffer(chunk_bytes.data(), chunk_bytes.size()), true);
-                dc->Send(buf);
-            } else {
-                OnIncomingDataPacket(chunk_bytes, local_participant_ ? local_participant_->identity() : "", topic);
-            }
+            send_packet(chunk_bytes);
         }
 
         // 3. 发送 Trailer 结束帧
         proto::DataPacket trailer_pkt;
         trailer_pkt.set_kind(reliable ? proto::DataPacket::RELIABLE : proto::DataPacket::LOSSY);
-        if (local_participant_) {
-            trailer_pkt.set_participant_identity(local_participant_->identity());
-            trailer_pkt.set_participant_sid(local_participant_->sid());
+        if (local_participant) {
+            trailer_pkt.set_participant_identity(local_identity);
+            trailer_pkt.set_participant_sid(local_sid);
         }
         auto* trailer = trailer_pkt.mutable_stream_trailer();
         trailer->set_stream_id(stream_id);
@@ -506,17 +694,16 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
         std::vector<uint8_t> trailer_bytes(trailer_pkt.ByteSizeLong());
         trailer_pkt.SerializeToArray(trailer_bytes.data(), static_cast<int>(trailer_bytes.size()));
 
-        if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
-            webrtc::DataBuffer buf(webrtc::CopyOnWriteBuffer(trailer_bytes.data(), trailer_bytes.size()), true);
-            dc->Send(buf);
-        } else {
-            OnIncomingDataPacket(trailer_bytes, local_participant_ ? local_participant_->identity() : "", topic);
-        }
+        send_packet(trailer_bytes);
         return;
     }
 
     proto::DataPacket packet;
     packet.set_kind(reliable ? proto::DataPacket::RELIABLE : proto::DataPacket::LOSSY);
+    if (local_participant) {
+        packet.set_participant_identity(local_identity);
+        packet.set_participant_sid(local_sid);
+    }
 
     auto* user_packet = packet.mutable_user();
     user_packet->set_topic(topic);
@@ -528,14 +715,7 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
     std::vector<uint8_t> data(packet.ByteSizeLong());
     packet.SerializeToArray(data.data(), static_cast<int>(data.size()));
 
-    if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
-        std::string payload_str(data.begin(), data.end());
-        webrtc::DataBuffer buffer(webrtc::CopyOnWriteBuffer(payload_str.data(), payload_str.size()), /*binary=*/true);
-        dc->Send(buffer);
-    } else {
-        // 若底层 DataChannel 暂未建立物理 Socket，直接进行安全解包分发
-        OnIncomingDataPacket(data, local_participant_ ? local_participant_->identity() : "", topic);
-    }
+    send_packet(data);
 }
 
 asio::awaitable<std::string> Room::SendRpcRequest(const RpcPacket& packet) {
@@ -719,32 +899,16 @@ void Room::OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliabl
     }
 }
 
-void Room::CleanupStaleDataStreams() {
-    std::lock_guard lock(incoming_streams_mutex_);
-    auto now = std::chrono::steady_clock::now();
-    for (auto it = incoming_streams_.begin(); it != incoming_streams_.end(); ) {
-        if (std::chrono::duration_cast<std::chrono::seconds>(now - it->second->start_time).count() > 30) {
-            std::cout << "[DATA_STREAM] Cleaned up stale un-assembled stream '" << it->first << "'\n";
-            it = incoming_streams_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-}
-
 void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& participant_sid, const std::string& topic) {
-    CleanupStaleDataStreams();
-
     std::vector<uint8_t> real_payload = payload;
     std::string real_topic = topic;
     std::string real_sender_sid = participant_sid;
     std::string sender_identity;
-    bool is_protobuf_packet = false;
+    bool is_structured_chat = false;
 
     // 尝试反序列化 Protobuf DataPacket
     proto::DataPacket data_pkt;
     if (data_pkt.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
-        is_protobuf_packet = true;
         if (!data_pkt.participant_identity().empty()) {
             sender_identity = data_pkt.participant_identity();
         }
@@ -754,82 +918,39 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
 
         if (data_pkt.has_stream_header()) {
             const auto& header = data_pkt.stream_header();
-            auto tracker = std::make_shared<IncomingDataStreamTracker>();
-            tracker->stream_id = header.stream_id();
-            tracker->topic = header.topic();
-            tracker->total_length = header.total_length();
-            tracker->sender_identity = sender_identity;
-            tracker->sender_sid = real_sender_sid;
-            tracker->start_time = std::chrono::steady_clock::now();
-
-            std::lock_guard lock(incoming_streams_mutex_);
-            incoming_streams_[header.stream_id()] = tracker;
+            incoming_data_streams_.Begin(
+                header.stream_id(),
+                header.topic(),
+                header.total_length(),
+                sender_identity,
+                real_sender_sid);
             return;
         } else if (data_pkt.has_stream_chunk()) {
             const auto& chunk = data_pkt.stream_chunk();
-            std::shared_ptr<IncomingDataStreamTracker> tracker;
-            {
-                std::lock_guard lock(incoming_streams_mutex_);
-                auto it = incoming_streams_.find(chunk.stream_id());
-                if (it != incoming_streams_.end()) {
-                    tracker = it->second;
-                }
-            }
-
-            if (tracker) {
-                const std::string& content = chunk.content();
-                std::vector<uint8_t> chunk_vec(content.begin(), content.end());
-
-                std::lock_guard lock(incoming_streams_mutex_);
-                if (tracker->chunks.find(chunk.chunk_index()) == tracker->chunks.end()) {
-                    tracker->chunks[chunk.chunk_index()] = chunk_vec;
-                    tracker->current_received_bytes += chunk_vec.size();
-                }
-
-                bool is_complete = (tracker->total_length > 0 && tracker->current_received_bytes >= tracker->total_length);
-                if (is_complete) {
-                    std::vector<uint8_t> assembled_payload;
-                    assembled_payload.reserve(tracker->total_length);
-                    for (const auto& kv : tracker->chunks) {
-                        assembled_payload.insert(assembled_payload.end(), kv.second.begin(), kv.second.end());
-                    }
-
-                    real_payload = assembled_payload;
-                    real_topic = tracker->topic;
-                    if (!tracker->sender_identity.empty()) sender_identity = tracker->sender_identity;
-                    if (!tracker->sender_sid.empty()) real_sender_sid = tracker->sender_sid;
-
-                    incoming_streams_.erase(chunk.stream_id());
-                    // 接收完成，无缝还原 real_payload 并下发到业务层！
-                } else {
-                    return; // 暂未接收完毕，等待后续分片
-                }
-            } else {
+            const auto& content = chunk.content();
+            auto assembled = incoming_data_streams_.AddChunk(
+                chunk.stream_id(),
+                chunk.chunk_index(),
+                std::span<const uint8_t>(
+                    reinterpret_cast<const uint8_t*>(content.data()),
+                    content.size()));
+            if (!assembled) {
                 return;
             }
+            real_payload = std::move(assembled->payload);
+            real_topic = std::move(assembled->topic);
+            sender_identity = std::move(assembled->sender_identity);
+            real_sender_sid = std::move(assembled->sender_sid);
         } else if (data_pkt.has_stream_trailer()) {
             const auto& trailer = data_pkt.stream_trailer();
-            std::shared_ptr<IncomingDataStreamTracker> tracker;
-            {
-                std::lock_guard lock(incoming_streams_mutex_);
-                auto it = incoming_streams_.find(trailer.stream_id());
-                if (it != incoming_streams_.end()) {
-                    tracker = it->second;
-                    incoming_streams_.erase(it);
-                }
-            }
-            if (tracker && tracker->current_received_bytes > 0) {
-                std::vector<uint8_t> assembled_payload;
-                for (const auto& kv : tracker->chunks) {
-                    assembled_payload.insert(assembled_payload.end(), kv.second.begin(), kv.second.end());
-                }
-                real_payload = assembled_payload;
-                real_topic = tracker->topic;
-                if (!tracker->sender_identity.empty()) sender_identity = tracker->sender_identity;
-                if (!tracker->sender_sid.empty()) real_sender_sid = tracker->sender_sid;
-            } else {
+            auto assembled = incoming_data_streams_.Finish(trailer.stream_id());
+            if (!assembled) {
                 return;
             }
+            real_payload = std::move(assembled->payload);
+            real_topic = std::move(assembled->topic);
+            sender_identity = std::move(assembled->sender_identity);
+            real_sender_sid = std::move(assembled->sender_sid);
         } else if (data_pkt.has_user()) {
             const auto& user_pkt = data_pkt.user();
             const std::string& p_bytes = user_pkt.payload();
@@ -839,13 +960,13 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
             const auto& pb_chat = data_pkt.chat_message();
             real_payload.assign(pb_chat.message().begin(), pb_chat.message().end());
             real_topic = "lk.chat";
+            is_structured_chat = true;
         }
     }
 
-    std::string text_payload(real_payload.begin(), real_payload.end());
-
     // 1. 优先校验解包 LiveKit RPC 报文 (Topic 为 lk.rpc)
     if (real_topic == "lk.rpc") {
+        std::string text_payload(real_payload.begin(), real_payload.end());
         auto rpc_pkt_opt = RpcPacket::Decode(text_payload);
         if (rpc_pkt_opt.has_value()) {
             OnIncomingRpcPacket(rpc_pkt_opt.value());
@@ -855,8 +976,10 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
 
     auto listeners_snapshot = GetListenersSnapshot();
     std::shared_ptr<RemoteParticipant> remote_p;
+    std::shared_ptr<LocalParticipant> local_p;
     {
         std::lock_guard lock(room_mutex_);
+        local_p = local_participant_;
         if (!real_sender_sid.empty()) {
             auto it = remote_participants_.find(real_sender_sid);
             if (it != remote_participants_.end()) {
@@ -875,7 +998,7 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
 
     // 2. 解析并派发结构化 Chat 消息
     bool chat_dispatched = false;
-    if (is_protobuf_packet && data_pkt.has_chat_message()) {
+    if (is_structured_chat) {
         const auto& pb_chat = data_pkt.chat_message();
         ChatMessage chat;
         chat.id = pb_chat.id();
@@ -883,15 +1006,16 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
         chat.edit_timestamp = pb_chat.edit_timestamp();
         chat.message = pb_chat.message();
         chat.sender_identity = !sender_identity.empty() ? sender_identity : (remote_p ? remote_p->identity() : real_sender_sid);
-        std::shared_ptr<Participant> p = remote_p ? remote_p : (local_participant_ && (local_participant_->sid() == real_sender_sid || local_participant_->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_participant_) : nullptr);
+        std::shared_ptr<Participant> p = remote_p ? remote_p : (local_p && (local_p->sid() == real_sender_sid || local_p->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_p) : nullptr);
         for (const auto& listener : listeners_snapshot) {
             listener->OnChatMessage(chat, p);
         }
         chat_dispatched = true;
     } else if (real_topic == "lk.chat" || real_topic == "lk-chat-topic" || real_topic.empty()) {
+        std::string text_payload(real_payload.begin(), real_payload.end());
         auto chat_opt = ChatMessage::Decode(text_payload, !sender_identity.empty() ? sender_identity : real_sender_sid);
         if (chat_opt.has_value()) {
-            std::shared_ptr<Participant> p = remote_p ? remote_p : (local_participant_ && (local_participant_->sid() == real_sender_sid || local_participant_->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_participant_) : nullptr);
+            std::shared_ptr<Participant> p = remote_p ? remote_p : (local_p && (local_p->sid() == real_sender_sid || local_p->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_p) : nullptr);
             for (const auto& listener : listeners_snapshot) {
                 listener->OnChatMessage(chat_opt.value(), p);
             }
@@ -900,8 +1024,7 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
     }
 
     // 3. 派发原始 OnDataReceived 事件给 RoomListener
-    // 如果是 LiveKit 原生 Protobuf 包装包（如 DataPacket / ChatMessage / RPC），已在前面派发给对应结构化回调，避免在基础通道中重复输出乱码
-    if (!is_protobuf_packet && !chat_dispatched && real_topic != "lk.chat" && real_topic != "lk-chat-topic" && real_topic != "lk.rpc") {
+    if (!chat_dispatched && real_topic != "lk.chat" && real_topic != "lk-chat-topic" && real_topic != "lk.rpc") {
         for (const auto& listener : listeners_snapshot) {
             listener->OnDataReceived(real_payload, remote_p, real_topic);
         }
@@ -928,6 +1051,128 @@ void Room::OnIceConnected() {
             }
         }
     }
+}
+
+void Room::OnPeerConnectionStateChanged(
+    int pc_type,
+    webrtc::PeerConnectionInterface::PeerConnectionState state) {
+    std::vector<std::shared_ptr<AwaitableState<void>>> success;
+    std::vector<std::shared_ptr<AwaitableState<void>>> failure;
+    {
+        std::lock_guard lock(room_mutex_);
+        const auto generation = session_generation_.load(std::memory_order_acquire);
+        for (const auto& waiter : pending_pc_waits_) {
+            if (waiter.generation != generation || waiter.pc_type != pc_type) continue;
+            if (state == webrtc::PeerConnectionInterface::PeerConnectionState::kConnected) {
+                success.push_back(waiter.completion);
+            } else if (state == webrtc::PeerConnectionInterface::PeerConnectionState::kFailed ||
+                       state == webrtc::PeerConnectionInterface::PeerConnectionState::kClosed) {
+                failure.push_back(waiter.completion);
+            }
+        }
+    }
+    for (const auto& completion : success) CompleteAwaitable(completion);
+    for (const auto& completion : failure) {
+        FailAwaitable(completion, std::make_exception_ptr(OperationError(
+            OperationKind::Connect,
+            OperationErrorCode::PeerConnectionCreateFailed,
+            "peer_connection_state",
+            "primary peer connection failed before becoming connected",
+            true)));
+    }
+}
+
+asio::awaitable<void> Room::WaitForPrimaryPeerConnection(
+    std::chrono::milliseconds timeout,
+    uint64_t generation) {
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    int pc_type = 0;
+    auto completion = std::make_shared<AwaitableState<void>>(executor_);
+    {
+        std::lock_guard lock(room_mutex_);
+        if (generation != session_generation_.load(std::memory_order_acquire)) {
+            throw OperationError(OperationKind::Connect,
+                                 OperationErrorCode::Cancelled,
+                                 "wait_primary_pc",
+                                 "session was replaced while waiting for peer connection");
+        }
+        pc_type = primary_pc_type_;
+        pc = pc_type == 1 ? subscriber_pc_ : publisher_pc_;
+        if (!pc) {
+            throw OperationError(OperationKind::Connect,
+                                 OperationErrorCode::PeerConnectionCreateFailed,
+                                 "wait_primary_pc",
+                                 "primary peer connection is null");
+        }
+        pending_pc_waits_.push_back({generation, pc_type, completion});
+    }
+
+    auto state = pc->peer_connection_state();
+    if (state == webrtc::PeerConnectionInterface::PeerConnectionState::kConnected) {
+        CompleteAwaitable(completion);
+    } else if (state == webrtc::PeerConnectionInterface::PeerConnectionState::kFailed ||
+               state == webrtc::PeerConnectionInterface::PeerConnectionState::kClosed) {
+        FailAwaitable(completion, std::make_exception_ptr(OperationError(
+            OperationKind::Connect,
+            OperationErrorCode::PeerConnectionCreateFailed,
+            "wait_primary_pc",
+            "primary peer connection is already failed",
+            true)));
+    }
+
+    try {
+        co_await WaitAwaitable<void>(completion, timeout,
+                                     OperationKind::Connect,
+                                     OperationErrorCode::PeerConnectionTimeout,
+                                     "wait_primary_pc");
+    } catch (...) {
+        std::lock_guard lock(room_mutex_);
+        pending_pc_waits_.erase(std::remove_if(pending_pc_waits_.begin(), pending_pc_waits_.end(),
+            [&](const PendingPeerConnectionWait& item) { return item.completion == completion; }),
+            pending_pc_waits_.end());
+        throw;
+    }
+
+    std::lock_guard lock(room_mutex_);
+    pending_pc_waits_.erase(std::remove_if(pending_pc_waits_.begin(), pending_pc_waits_.end(),
+        [&](const PendingPeerConnectionWait& item) { return item.completion == completion; }),
+        pending_pc_waits_.end());
+}
+
+void Room::CancelPendingOperations(OperationErrorCode code,
+                                   const std::string& stage,
+                                   const std::string& message) {
+    std::vector<std::shared_ptr<AwaitableState<void>>> void_states;
+    std::vector<std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>>> publish_states;
+    {
+        std::lock_guard lock(room_mutex_);
+        for (const auto& waiter : pending_pc_waits_) void_states.push_back(waiter.completion);
+        pending_pc_waits_.clear();
+        void_states.insert(void_states.end(),
+                           negotiation_waiters_.begin(),
+                           negotiation_waiters_.end());
+        negotiation_waiters_.clear();
+        negotiation_state_ = NegotiationState::Idle;
+        for (const auto& [cid, state] : pending_track_publishes_) publish_states.push_back(state);
+        pending_track_publishes_.clear();
+    }
+    for (const auto& state : void_states) {
+        FailAwaitable(state, std::make_exception_ptr(OperationError(
+            OperationKind::Connect, code, stage, message, true)));
+    }
+    for (const auto& state : publish_states) {
+        FailAwaitable(state, std::make_exception_ptr(OperationError(
+            OperationKind::PublishTrack, code, stage, message, true)));
+    }
+}
+
+void Room::FlushDeferredRoomMessages() {
+    std::vector<std::shared_ptr<proto::SignalResponse>> messages;
+    {
+        std::lock_guard lock(room_mutex_);
+        messages.swap(deferred_room_messages_);
+    }
+    for (auto& message : messages) HandleSignalMessage(std::move(message));
 }
 
 void Room::OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type) {
@@ -967,17 +1212,17 @@ public:
             std::copy(pcm_data, pcm_data + num_samples, frame.data().begin());
         }
 
-        /********/
-        double sum = 0.0;
-        for (int i = 0; i < num_samples; ++i) {
-            sum += static_cast<double>(pcm_data[i]) * pcm_data[i];
-        }
-        double rms = std::sqrt(sum / num_samples);
-        // 打印音量诊断（大于 300 说明有明显说话声）
-        if (rms > 300.0) {
-            std::cout << "[AUDIO ACTIVE VOICE] 正在说话! 音量 RMS = " << rms << std::endl;
-        }
-        /*********/
+        ///********/
+        //double sum = 0.0;
+        //for (int i = 0; i < num_samples; ++i) {
+        //    sum += static_cast<double>(pcm_data[i]) * pcm_data[i];
+        //}
+        //double rms = std::sqrt(sum / num_samples);
+        //// 打印音量诊断（大于 300 说明有明显说话声）
+        //if (rms > 300.0) {
+        //    std::cout << "[AUDIO ACTIVE VOICE] 正在说话! 音量 RMS = " << rms << std::endl;
+        //}
+        ///*********/
 
 
 
@@ -1187,52 +1432,353 @@ void Room::ApplySimulcastParameters(webrtc::scoped_refptr<webrtc::RtpSenderInter
 }
 
 void Room::NegotiatePublisher() {
-    bool should_start = false;
+    auto generation = session_generation_.load(std::memory_order_acquire);
+    auto timeout = operation_timeouts_.negotiation;
+    livekit::safe_co_spawn(executor_, [self = shared_from_this(), generation, timeout]() -> asio::awaitable<void> {
+        try {
+            co_await self->NegotiatePublisherAsync(timeout, generation);
+        } catch (const std::exception& error) {
+            self->Log("ERROR", "NEGOTIATION_ASYNC", error.what());
+        }
+    });
+}
+
+asio::awaitable<webrtc::scoped_refptr<webrtc::RtpSenderInterface>>
+Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation) {
+    if (!track) {
+        throw OperationError(OperationKind::PublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "install_sender",
+                             "track is null");
+    }
+
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    std::string stream_id;
     {
         std::lock_guard lock(room_mutex_);
-        if (negotiation_state_ == NegotiationState::Idle) {
-            negotiation_state_ = NegotiationState::InProgress;
-            should_start = true;
-        } else if (negotiation_state_ == NegotiationState::InProgress) {
-            negotiation_state_ = NegotiationState::PendingRetry;
+        if (generation != session_generation_.load(std::memory_order_acquire) ||
+            connection_state_ != ConnectionState::Connected) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::Cancelled,
+                                 "install_sender",
+                                 "room session changed while publishing");
         }
+        pc = publisher_pc_;
+        stream_id = "livekit_stream_" +
+            (local_participant_ ? local_participant_->identity() : "local");
     }
-    
-    if (should_start) {
-        ExecuteNegotiatePublisher();
+    if (!pc || !WebRTCManager::Instance().factory() ||
+        !WebRTCManager::Instance().signaling_thread()) {
+        throw OperationError(OperationKind::PublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "install_sender",
+                             "publisher peer connection is unavailable");
+    }
+
+    auto rtc_track = track->rtc_track();
+    if (!rtc_track) {
+        if (track->kind() == TrackKind::Audio) {
+            auto audio_track = std::dynamic_pointer_cast<LocalAudioTrack>(track);
+            if (audio_track && audio_track->source()) {
+                auto rtc_src = RtcAudioSource::Create(audio_track->source());
+                rtc_track = WebRTCManager::Instance().factory()->CreateAudioTrack(
+                    track->name(), rtc_src.get());
+            }
+        } else if (track->kind() == TrackKind::Video) {
+            auto video_track = std::dynamic_pointer_cast<LocalVideoTrack>(track);
+            if (video_track && video_track->source()) {
+                auto rtc_src = RtcVideoSource::Create(video_track->source());
+                rtc_track = WebRTCManager::Instance().factory()->CreateVideoTrack(
+                    rtc_src, track->name());
+            }
+        }
+        if (rtc_track) track->set_rtc_track(rtc_track);
+    }
+    if (!rtc_track) {
+        throw OperationError(OperationKind::PublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "install_sender",
+                             "failed to create native WebRTC track");
+    }
+
+    VideoPublishOptions publish_options;
+    if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(track)) {
+        publish_options = video->publish_options();
+    }
+
+    auto completion = std::make_shared<AwaitableState<
+        webrtc::scoped_refptr<webrtc::RtpSenderInterface>>>(executor_);
+    // WebRTC is linked with a static CRT and PostTask type-erases the closure
+    // inside webrtc::Thread. Keep the closure trivially destructible: putting
+    // std::string/std::vector directly in it can make absl::AnyInvocable free
+    // their storage through a different CRT at task teardown.
+    struct AddTrackTaskParams {
+        std::shared_ptr<Room> room;
+        std::shared_ptr<AwaitableState<webrtc::scoped_refptr<webrtc::RtpSenderInterface>>> completion;
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+        webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track;
+        std::string stream_id;
+        VideoPublishOptions publish_options;
+        uint64_t generation = 0;
+    };
+    auto* params = new AddTrackTaskParams{
+        shared_from_this(), completion, pc, rtc_track, stream_id,
+        std::move(publish_options), generation};
+    WebRTCManager::Instance().signaling_thread()->PostTask(
+        [params]() {
+            // Destruction happens in this translation unit rather than in the
+            // AnyInvocable manager instantiated across the WebRTC ABI boundary.
+            std::unique_ptr<AddTrackTaskParams> owned(params);
+            auto& task = *owned;
+            if (task.generation != task.room->session_generation_.load(std::memory_order_acquire)) {
+                FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                    OperationKind::PublishTrack,
+                    OperationErrorCode::Cancelled,
+                    "install_sender",
+                    "session changed before sender installation")));
+                return;
+            }
+
+            webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender;
+            std::string error;
+            if (task.rtc_track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind &&
+                task.publish_options.simulcast && !task.publish_options.layers.empty()) {
+                webrtc::RtpTransceiverInit init;
+                init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
+                init.stream_ids = {task.stream_id};
+                for (const auto& layer : task.publish_options.layers) {
+                    webrtc::RtpEncodingParameters encoding;
+                    encoding.active = true;
+                    encoding.rid = layer.rid;
+                    encoding.scale_resolution_down_by = layer.scale_resolution_down_by;
+                    encoding.max_bitrate_bps = layer.max_bitrate_bps;
+                    encoding.max_framerate = layer.max_fps;
+                    if (!task.publish_options.scalability_mode.empty()) {
+                        encoding.scalability_mode = task.publish_options.scalability_mode;
+                    }
+                    init.send_encodings.push_back(std::move(encoding));
+                }
+                auto result = task.pc->AddTransceiver(task.rtc_track, init);
+                if (result.ok()) {
+                    sender = result.MoveValue()->sender();
+                } else {
+                    error = result.error().message();
+                }
+            } else {
+                auto result = task.pc->AddTrack(task.rtc_track, {task.stream_id});
+                if (result.ok()) {
+                    sender = result.MoveValue();
+                } else {
+                    error = result.error().message();
+                }
+            }
+
+            if (!sender) {
+                FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                    OperationKind::PublishTrack,
+                    OperationErrorCode::StateUncertain,
+                    "install_sender",
+                    error.empty() ? "WebRTC did not return an RTP sender" : error,
+                    true)));
+                return;
+            }
+            CompleteAwaitable(task.completion, std::move(sender));
+        });
+
+    co_return co_await WaitAwaitable<webrtc::scoped_refptr<webrtc::RtpSenderInterface>>(
+        completion,
+        operation_timeouts_.publish,
+        OperationKind::PublishTrack,
+        OperationErrorCode::TrackPublishTimeout,
+        "install_sender");
+}
+
+asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
+    std::shared_ptr<Track> track,
+    const proto::SignalRequest& request) {
+    if (!track || !request.has_add_track()) {
+        throw OperationError(OperationKind::PublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "publish_validate",
+                             "invalid AddTrack request");
+    }
+
+    const auto generation = session_generation_.load(std::memory_order_acquire);
+    const std::string cid = request.add_track().cid();
+    std::shared_ptr<SignalClient> signal;
+    std::shared_ptr<LocalParticipant> local;
+    auto ack = std::make_shared<AwaitableState<proto::TrackPublishedResponse>>(executor_);
+    {
+        std::lock_guard lock(room_mutex_);
+        if (connection_state_ != ConnectionState::Connected ||
+            generation != session_generation_.load(std::memory_order_acquire)) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::InvalidState,
+                                 "publish_validate",
+                                 "room is not connected");
+        }
+        if (pending_track_publishes_.contains(cid)) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::InvalidState,
+                                 "publish_validate",
+                                 "a publish operation for the same CID is already in progress");
+        }
+        signal = signal_client_;
+        local = local_participant_;
+        pending_track_publishes_[cid] = ack;
+    }
+
+    webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender;
+    bool server_acknowledged = false;
+    try {
+        co_await signal->SendAsync(request);
+        auto response = co_await WaitAwaitable<proto::TrackPublishedResponse>(
+            ack,
+            operation_timeouts_.publish,
+            OperationKind::PublishTrack,
+            OperationErrorCode::TrackPublishTimeout,
+            "wait_track_published_ack");
+        server_acknowledged = true;
+
+        {
+            std::lock_guard lock(room_mutex_);
+            pending_track_publishes_.erase(cid);
+        }
+
+        sender = co_await AddTrackToPublisherAsync(track, generation);
+        co_await NegotiatePublisherAsync(operation_timeouts_.negotiation, generation);
+
+        if (generation != session_generation_.load(std::memory_order_acquire)) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::Cancelled,
+                                 "publish_commit",
+                                 "session changed before publication commit");
+        }
+
+        track->set_sid(response.track().sid());
+        auto publication = std::make_shared<TrackPublication>(
+            track, response.track().sid(), response.track().name());
+        {
+            std::lock_guard lock(room_mutex_);
+            if (!local || local != local_participant_) {
+                throw OperationError(OperationKind::PublishTrack,
+                                     OperationErrorCode::Cancelled,
+                                     "publish_commit",
+                                     "local participant changed before publication commit");
+            }
+            local->add_publication(publication);
+        }
+        co_return publication;
+    } catch (...) {
+        {
+            std::lock_guard lock(room_mutex_);
+            pending_track_publishes_.erase(cid);
+        }
+        if (sender && WebRTCManager::Instance().signaling_thread()) {
+            webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+            {
+                std::lock_guard lock(room_mutex_);
+                pc = publisher_pc_;
+            }
+            WebRTCManager::Instance().signaling_thread()->BlockingCall([pc, sender]() {
+                if (pc) pc->RemoveTrackOrError(sender);
+            });
+        }
+        if (server_acknowledged) {
+            Log("ERROR", "PUBLISH_ROLLBACK",
+                "TrackPublished ACK 后本地事务失败；当前协议缺少媒体 Unpublish 请求，已回滚 sender，Session 将在下次重连时重新同步");
+        }
+        throw;
     }
 }
 
 void Room::OnNegotiationFailed() {
-    bool need_retry = false;
+    CompleteNegotiation("publisher negotiation failed");
+}
+
+asio::awaitable<void> Room::NegotiatePublisherAsync(
+    std::chrono::milliseconds timeout,
+    uint64_t generation,
+    bool ice_restart) {
+    std::shared_ptr<AwaitableState<void>> completion;
+    bool should_start = false;
     {
         std::lock_guard lock(room_mutex_);
-        if (negotiation_state_ == NegotiationState::PendingRetry) {
+        if (generation != session_generation_.load(std::memory_order_acquire)) {
+            throw OperationError(OperationKind::Negotiate,
+                                 OperationErrorCode::Cancelled,
+                                 "negotiate_start",
+                                 "session changed before negotiation started");
+        }
+        if (!publisher_pc_ || !signal_client_) {
+            throw OperationError(OperationKind::Negotiate,
+                                 OperationErrorCode::InvalidState,
+                                 "negotiate_start",
+                                 "publisher peer connection or signal client is missing");
+        }
+        completion = std::make_shared<AwaitableState<void>>(executor_);
+        negotiation_waiters_.push_back(completion);
+        negotiation_ice_restart_requested_ = negotiation_ice_restart_requested_ || ice_restart;
+        if (negotiation_state_ == NegotiationState::Idle) {
             negotiation_state_ = NegotiationState::InProgress;
-            need_retry = true;
+            should_start = true;
         } else {
-            negotiation_state_ = NegotiationState::Idle;
-            subscriber_negotiating_ = false;
+            // Keep every waiter pending until the final coalesced round reaches stable.
+            negotiation_state_ = NegotiationState::PendingRetry;
         }
     }
-    if (need_retry) {
-        ExecuteNegotiatePublisher();
+    if (should_start) ExecuteNegotiatePublisher();
+
+    try {
+        co_await WaitAwaitable<void>(completion, timeout,
+                                     OperationKind::Negotiate,
+                                     OperationErrorCode::NegotiationFailed,
+                                     "publisher_negotiation");
+    } catch (...) {
+        std::lock_guard lock(room_mutex_);
+        negotiation_waiters_.erase(
+            std::remove(negotiation_waiters_.begin(), negotiation_waiters_.end(), completion),
+            negotiation_waiters_.end());
+        throw;
+    }
+}
+
+void Room::CompleteNegotiation(const std::string& error) {
+    std::vector<std::shared_ptr<AwaitableState<void>>> waiters;
+    {
+        std::lock_guard lock(room_mutex_);
+        waiters.swap(negotiation_waiters_);
+        negotiation_state_ = NegotiationState::Idle;
+        subscriber_negotiating_ = false;
+    }
+    for (const auto& completion : waiters) {
+        if (error.empty()) {
+            CompleteAwaitable(completion);
+        } else {
+            FailAwaitable(completion, std::make_exception_ptr(OperationError(
+                OperationKind::Negotiate,
+                OperationErrorCode::NegotiationFailed,
+                "publisher_negotiation",
+                error,
+                true)));
+        }
     }
 }
 
 void Room::ExecuteNegotiatePublisher() {
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
     std::shared_ptr<SignalClient> client;
+    bool ice_restart = false;
+    bool unavailable = false;
     {
         std::lock_guard lock(room_mutex_);
         pub_pc = publisher_pc_;
         client = signal_client_;
+        ice_restart = negotiation_ice_restart_requested_;
+        negotiation_ice_restart_requested_ = false;
         if (!pub_pc || !client) {
-            negotiation_state_ = NegotiationState::Idle;
-            return;
-        }
-        
-        if (pub_pc->signaling_state() != webrtc::PeerConnectionInterface::SignalingState::kStable) {
+            unavailable = true;
+        } else if (pub_pc->signaling_state() != webrtc::PeerConnectionInterface::SignalingState::kStable) {
             negotiation_state_ = NegotiationState::PendingRetry;
             auto self = shared_from_this();
             auto retry_timer = std::make_shared<asio::steady_timer>(executor_, std::chrono::milliseconds(50));
@@ -1253,6 +1799,11 @@ void Room::ExecuteNegotiatePublisher() {
             });
             return;
         }
+    }
+
+    if (unavailable) {
+        CompleteNegotiation("publisher peer connection or signal client became unavailable");
+        return;
     }
 
     auto self = shared_from_this();
@@ -1307,11 +1858,17 @@ void Room::ExecuteNegotiatePublisher() {
                         }
                     }
 
-                    client->Send(req);
+                    livekit::safe_co_spawn(self->executor_, [self, client, req = std::move(req)]() -> asio::awaitable<void> {
+                        try {
+                            co_await client->SendAsync(req);
+                        } catch (const std::exception& error) {
+                            self->CompleteNegotiation(error.what());
+                        }
+                    });
                     std::cout << "[WebRTC] -> Sent publisher SDP Offer to LiveKit server with mid_to_track_id mapping!" << std::endl;
                     self->Log("SIGNAL", "SDP_OFFER_SENT", "已向 LiveKit 服务端发送 Publisher SDP Offer (" + std::to_string(sdp.length()) + " 字节):\n" + sdp);
                 });
-        });
+        }, ice_restart);
 }
 
 void Room::SendPublishOffer() {
@@ -1593,6 +2150,7 @@ void Room::OnRenegotiationNeeded(int pc_type) {
 void Room::HandleSignalEvent(const SignalEvent& event) {
     if (event.type == SignalEvent::Close) {
         bool should_reconnect = false;
+        bool connect_failed = false;
         std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
         {
             std::lock_guard lock(room_mutex_);
@@ -1600,11 +2158,19 @@ void Room::HandleSignalEvent(const SignalEvent& event) {
                 connection_state_ = ConnectionState::Reconnecting;
                 reconnect_attempts_++;
                 should_reconnect = true;
+            } else if (connection_state_ == ConnectionState::Connecting) {
+                connection_state_ = ConnectionState::Disconnected;
+                session_generation_.fetch_add(1, std::memory_order_acq_rel);
+                connect_failed = true;
             }
             listeners_snapshot = listeners_;
         }
 
-        if (should_reconnect) {
+        if (connect_failed) {
+            CancelPendingOperations(OperationErrorCode::SessionClosed,
+                                    "signal_close_during_connect",
+                                    event.close_reason.empty() ? "signal closed during connect" : event.close_reason);
+        } else if (should_reconnect) {
             for (const auto& listener : listeners_snapshot) {
                 listener->OnReconnecting();
             }
@@ -1634,6 +2200,20 @@ void Room::HandleSignalEvent(const SignalEvent& event) {
 void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
     if (!msg) return;
 
+    // Internal control messages must always reach their transaction waiters.
+    // User-visible room updates stay buffered until Connect commits.
+    const bool internal_control = msg->has_answer() || msg->has_offer() ||
+        msg->has_trickle() || msg->has_track_published() ||
+        msg->has_media_sections_requirement() || msg->has_reconnect() ||
+        msg->has_leave() || msg->has_refresh_token() ||
+        msg->has_pong() || msg->has_pong_resp();
+    if (!internal_control) {
+        std::lock_guard lock(room_mutex_);
+        if (connection_state_ == ConnectionState::Connecting) {
+            deferred_room_messages_.push_back(std::move(msg));
+            return;
+        }
+    }
     // --- 全量原始消息类型诊断 ---
     {
         std::string type_tag = "UNKNOWN";
@@ -1685,16 +2265,13 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
     } else if (msg->has_track_published()) {
         const auto& tp = msg->track_published();
         Log("SIGNAL", "TRACK_PUB_ACK", "收到服务端 TrackPublished ACK: cid=" + tp.cid() + ", track_sid=" + tp.track().sid());
-        std::lock_guard lock(room_mutex_);
-        if (local_participant_) {
-            auto pub = local_participant_->get_publication(tp.cid());
-            if (pub) {
-                if (pub->track()) {
-                    pub->track()->set_sid(tp.track().sid());
-                }
-                local_participant_->add_publication(std::make_shared<TrackPublication>(pub->track(), tp.track().sid(), pub->name()));
-            }
+        std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>> pending;
+        {
+            std::lock_guard lock(room_mutex_);
+            auto it = pending_track_publishes_.find(tp.cid());
+            if (it != pending_track_publishes_.end()) pending = it->second;
         }
+        if (pending) CompleteAwaitable(pending, tp);
     } else if (msg->has_subscription_response()) {
         const auto& sr = msg->subscription_response();
         std::string err_str;
@@ -1805,7 +2382,9 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
 
     {
         std::lock_guard lock(room_mutex_);
-        listeners_snapshot = listeners_;
+        if (connection_state_ != ConnectionState::Connecting) {
+            listeners_snapshot = listeners_;
+        }
 
         for (const auto& p_info : participants) {
             std::map<std::string, std::string> new_attrs(p_info.attributes().begin(), p_info.attributes().end());
@@ -2219,41 +2798,41 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
 
     if (signal_client_ && signal_client_->is_single_pc_mode_active()) {
         Log("SIGNAL", "SDP_ANS_ROUTING", "Single PC 模式：直接将 Answer 路由至 publisher_pc_");
+        auto self = shared_from_this();
         WebRTCManager::Instance().SetRemoteDescription(pub_pc, "answer", answer.sdp(), executor_,
-            [this, pub_pc](const std::string& err) {
+            [self, pub_pc](const std::string& err) {
                 if (!err.empty()) {
-                    Log("ERROR", "PUB_REMOTE_ERR", "Publisher SetRemoteDescription (Answer) 失败: " + err);
-                    OnNegotiationFailed();
+                    self->Log("ERROR", "PUB_REMOTE_ERR", "Publisher SetRemoteDescription (Answer) 失败: " + err);
+                    self->CompleteNegotiation(err);
                 } else {
-                    Log("SIGNAL", "PUB_STABLE", "Publisher PC 协商完成 (Answer 应用成功)");
+                    self->Log("SIGNAL", "PUB_STABLE", "Publisher PC 协商完成 (Answer 应用成功)");
                     std::vector<PendingIceCandidate> pending_cands;
                     bool need_retry = false;
                     {
-                        std::lock_guard lock(room_mutex_);
-                        subscriber_negotiating_ = false;
-                        if (negotiation_state_ == NegotiationState::PendingRetry) {
-                            negotiation_state_ = NegotiationState::InProgress;
+                        std::lock_guard lock(self->room_mutex_);
+                        self->subscriber_negotiating_ = false;
+                        if (self->negotiation_state_ == NegotiationState::PendingRetry) {
+                            self->negotiation_state_ = NegotiationState::InProgress;
                             need_retry = true;
-                        } else {
-                            negotiation_state_ = NegotiationState::Idle;
                         }
-                        if (reconnect_active_) reconnect_active_ = false;
-                        pending_cands = std::move(pending_pub_ice_candidates_);
+                        pending_cands = std::move(self->pending_pub_ice_candidates_);
                     }
                     if (need_retry) {
-                        Log("SIGNAL", "NEG_RETRY", "检测到挂起的协商请求，开始新一轮重试");
-                        ExecuteNegotiatePublisher();
+                        self->Log("SIGNAL", "NEG_RETRY", "检测到挂起的协商请求，开始新一轮重试");
+                        self->ExecuteNegotiatePublisher();
+                    } else {
+                        self->CompleteNegotiation("");
                     }
                     
                     // 单 PC 模式下，本地主动发起的 recvonly transceiver 不会触发 OnTrack，需手动提取
                     auto transceivers = pub_pc->GetTransceivers();
-                    Log("SIGNAL", "TRANS_SCAN", "Single PC Answer 协商成功，扫描 " + std::to_string(transceivers.size()) + " 个 transceivers");
+                    self->Log("SIGNAL", "TRANS_SCAN", "Single PC Answer 协商成功，扫描 " + std::to_string(transceivers.size()) + " 个 transceivers");
                     for (const auto& t : transceivers) {
                         if (t && (t->direction() == webrtc::RtpTransceiverDirection::kRecvOnly ||
                             (t->current_direction().has_value() && *t->current_direction() == webrtc::RtpTransceiverDirection::kRecvOnly))) {
                             if (t->receiver() && t->receiver()->track()) {
-                                std::weak_ptr<Room> weak_this = shared_from_this();
-                                asio::post(executor_, [weak_this, receiver = t->receiver(), track = t->receiver()->track()]() {
+                                std::weak_ptr<Room> weak_this = self;
+                                asio::post(self->executor_, [weak_this, receiver = t->receiver(), track = t->receiver()->track()]() {
                                     if (auto room = weak_this.lock()) {
                                         room->OnRemoteTrackAdded(receiver, track);
                                     }
@@ -2263,7 +2842,7 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
                     }
 
                     if (!pending_cands.empty()) {
-                        Log("SIGNAL", "ICE_FLUSH", "开始重放暂存的 " + std::to_string(pending_cands.size()) + " 个 Publisher 早期候选...");
+                        self->Log("SIGNAL", "ICE_FLUSH", "开始重放暂存的 " + std::to_string(pending_cands.size()) + " 个 Publisher 早期候选...");
                         std::vector<std::pair<std::string, bool>> results;
                         WebRTCManager::Instance().signaling_thread()->BlockingCall([pub_pc, &pending_cands, &results]() {
                             for (const auto& pcand : pending_cands) {
@@ -2277,7 +2856,7 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
                             }
                         });
                         for (const auto& res : results) {
-                            Log("SIGNAL", "ICE_PUB_REPLAY", "重放早期候选 mid=" + res.first + ", 结果=" + (res.second ? "成功" : "失败"));
+                            self->Log("SIGNAL", "ICE_PUB_REPLAY", "重放早期候选 mid=" + res.first + ", 结果=" + (res.second ? "成功" : "失败"));
                         }
                     }
                 }
@@ -2413,6 +2992,7 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
             if (!err.empty()) {
                 std::cerr << "Room: SetRemoteDescription answer error: " << err << std::endl;
                 self->Log("ERROR", "ANS_ERR", "Publisher SetRemoteDescription 失败: " + err);
+                self->CompleteNegotiation(err);
             } else {
                 std::cout << "[WebRTC] Publisher remote description applied successfully! PC signaling state is STABLE." << std::endl;
                 self->Log("WEBRTC", "PUB_STABLE", "Publisher RemoteDescription 应用成功，信令状态已恢复 STABLE");
@@ -2434,6 +3014,8 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
             if (need_retry) {
                 self->Log("SIGNAL", "NEG_RETRY", "Publisher Answer applied, scheduling pending negotiation retry");
                 self->ExecuteNegotiatePublisher();
+            } else if (err.empty()) {
+                self->CompleteNegotiation("");
             }
         });
 }
@@ -2646,60 +3228,230 @@ void Room::NegotiateSubscriber(uint32_t num_audios, uint32_t num_videos) {
 }
 
 asio::awaitable<void> Room::AttemptReconnect() {
+    std::string reconnect_url;
+    std::string reconnect_token;
+    SignalOptions reconnect_options;
     {
         std::lock_guard lock(room_mutex_);
+        if (reconnect_active_) co_return;
         reconnect_active_ = true;
+        if (signal_client_) {
+            reconnect_url = signal_client_->url();
+            reconnect_token = signal_client_->token();
+            reconnect_options = signal_client_->options();
+        }
     }
 
     RecordPublishedTracks();
 
     int attempts = 0;
-    bool reconnected = false;
-    while (attempts < kMaxReconnectAttempts) {
+    bool full_restart = false;
+    std::string last_error = "reconnect attempts exhausted";
+    const auto reconnect_deadline = std::chrono::steady_clock::now() +
+        operation_timeouts_.reconnect_total;
+
+    while (attempts < kMaxReconnectAttempts &&
+           std::chrono::steady_clock::now() < reconnect_deadline) {
         attempts++;
         auto delay = kBaseReconnectDelay * (1 << (attempts - 1));
         if (delay > kMaxReconnectDelay) delay = kMaxReconnectDelay;
+        // Deterministic operation id based jitter avoids synchronized reconnect storms.
+        delay += std::chrono::milliseconds(
+            static_cast<int>(operation_sequence_.fetch_add(1, std::memory_order_relaxed) % 75));
 
         asio::steady_timer timer(executor_, delay);
         std::error_code ec;
         co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, ec));
 
-        if (!signal_client_) break;
+        {
+            std::lock_guard lock(room_mutex_);
+            if (connection_state_ == ConnectionState::Disconnected && !full_restart) break;
+        }
 
-        auto restart_res = co_await signal_client_->Restart();
-        if (!restart_res.error && restart_res.reconnect_response) {
-            co_await RepublishLocalTracks(restart_res.reconnect_response);
-            co_await RestartIceConnections(restart_res.reconnect_response);
-            signal_client_->SetReconnected();
-            signal_client_->SetEventReady();
+        const auto remaining_total = std::chrono::duration_cast<std::chrono::milliseconds>(
+            reconnect_deadline - std::chrono::steady_clock::now());
+        if (remaining_total <= std::chrono::milliseconds::zero()) break;
+        const auto attempt_budget = std::min(
+            operation_timeouts_.reconnect_attempt, remaining_total);
+        const auto attempt_deadline = std::chrono::steady_clock::now() + attempt_budget;
 
-            {
+        if (!full_restart) {
+            try {
+                std::shared_ptr<SignalClient> signal;
+                std::shared_ptr<LocalParticipant> local;
+                {
+                    std::lock_guard lock(room_mutex_);
+                    signal = signal_client_;
+                    local = local_participant_;
+                }
+                if (!signal) {
+                    throw OperationError(OperationKind::Reconnect,
+                                         OperationErrorCode::SessionClosed,
+                                         "signal_resume",
+                                         "signal client is missing");
+                }
+
+                auto restart_res = co_await signal->Restart(attempt_budget);
+                if (restart_res.error || !restart_res.reconnect_response) {
+                    throw OperationError(OperationKind::Reconnect,
+                                         OperationErrorCode::SignalConnectFailed,
+                                         "signal_resume",
+                                         restart_res.error ? restart_res.error.message()
+                                                           : "ReconnectResponse is missing",
+                                         true);
+                }
+
+                proto::SignalRequest sync_request;
+                auto* sync = sync_request.mutable_sync_state();
+                sync->mutable_subscription()->set_subscribe(!signal->options().auto_subscribe);
+                if (local) {
+                    for (const auto& [sid, publication] : local->tracks()) {
+                        if (!publication || !publication->track()) continue;
+                        auto* published = sync->add_publish_tracks();
+                        published->set_cid(publication->track()->name());
+                        auto* info = published->mutable_track();
+                        info->set_sid(publication->sid());
+                        info->set_name(publication->name());
+                        info->set_muted(publication->track()->muted());
+                        info->set_type(publication->track()->kind() == TrackKind::Audio
+                            ? proto::TrackType::AUDIO : proto::TrackType::VIDEO);
+                        info->set_source(publication->track()->kind() == TrackKind::Audio
+                            ? proto::TrackSource::MICROPHONE : proto::TrackSource::CAMERA);
+                    }
+                }
+                co_await signal->SendAsync(sync_request);
+                const auto media_budget = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    attempt_deadline - std::chrono::steady_clock::now());
+                if (media_budget <= std::chrono::milliseconds::zero()) {
+                    throw OperationError(OperationKind::Reconnect,
+                                         OperationErrorCode::PeerConnectionTimeout,
+                                         "resume_media",
+                                         "reconnect attempt timed out before media recovery",
+                                         true);
+                }
+                co_await RestartIceConnections(restart_res.reconnect_response, media_budget);
+                signal->SetReconnected();
+                signal->SetEventReady();
+
+                {
+                    std::lock_guard lock(room_mutex_);
+                    if (connection_state_ != ConnectionState::Reconnecting) {
+                        throw OperationError(OperationKind::Reconnect,
+                                             OperationErrorCode::Cancelled,
+                                             "resume_commit",
+                                             "reconnect was cancelled before commit");
+                    }
+                    connection_state_ = ConnectionState::Connected;
+                    reconnect_attempts_ = 0;
+                    reconnect_active_ = false;
+                }
+
+                auto listeners_snapshot = GetListenersSnapshot();
+                for (const auto& listener : listeners_snapshot) listener->OnReconnected();
+                co_return;
+            } catch (const std::exception& error) {
+                last_error = error.what();
+                Log("WARNING", "RESUME_FAILED", last_error + "; switching to full restart");
+                full_restart = true;
+            }
+        }
+
+        if (full_restart) {
+            try {
+                std::shared_ptr<SignalClient> old_signal;
+                webrtc::scoped_refptr<webrtc::PeerConnectionInterface> old_publisher;
+                webrtc::scoped_refptr<webrtc::PeerConnectionInterface> old_subscriber;
+                {
+                    std::lock_guard lock(room_mutex_);
+                    old_signal = std::move(signal_client_);
+                    old_publisher = std::move(publisher_pc_);
+                    old_subscriber = std::move(subscriber_pc_);
+                    local_participant_.reset();
+                    remote_participants_.clear();
+                    reliable_dc_ = nullptr;
+                    lossy_dc_ = nullptr;
+                    data_channel_observers_.clear();
+                    remote_track_sinks_.clear();
+                    connection_state_ = ConnectionState::Disconnected;
+                    suppress_next_connected_event_ = true;
+                    session_generation_.fetch_add(1, std::memory_order_acq_rel);
+                }
+                CancelPendingOperations(OperationErrorCode::Cancelled,
+                                        "full_restart",
+                                        "old session replaced by full restart");
+                if (old_signal) old_signal->Close();
+                if (old_publisher) old_publisher->Close();
+                if (old_subscriber && old_subscriber != old_publisher) old_subscriber->Close();
+
+                co_await ConnectAsync(reconnect_url, reconnect_token, reconnect_options);
+
+                std::shared_ptr<LocalParticipant> local;
+                std::vector<std::shared_ptr<RoomListener>> listeners;
+                {
+                    std::lock_guard lock(room_mutex_);
+                    local = local_participant_;
+                    listeners = listeners_;
+                }
+                if (!local) {
+                    throw OperationError(OperationKind::Reconnect,
+                                         OperationErrorCode::StateUncertain,
+                                         "full_restart_republish",
+                                         "local participant is missing after full restart");
+                }
+
+                for (const auto& record : published_track_records_) {
+                    if (!record.track) continue;
+                    auto publication = co_await local->PublishTrackAsync(record.track);
+                    for (const auto& listener : listeners) {
+                        listener->OnLocalTrackRepublished(record.previous_sid, publication);
+                    }
+                }
+
+                {
+                    std::lock_guard lock(room_mutex_);
+                    reconnect_attempts_ = 0;
+                    reconnect_active_ = false;
+                }
+
+                for (const auto& listener : listeners) listener->OnReconnected();
+                co_return;
+            } catch (const std::exception& error) {
+                last_error = error.what();
+                Log("WARNING", "FULL_RESTART_FAILED", last_error);
                 std::lock_guard lock(room_mutex_);
-                connection_state_ = ConnectionState::Connected;
-                reconnect_attempts_ = 0;
-                reconnect_active_ = false;
+                if (connection_state_ == ConnectionState::Disconnected) {
+                    connection_state_ = ConnectionState::Reconnecting;
+                }
+                suppress_next_connected_event_ = false;
             }
-
-            auto listeners_snapshot = GetListenersSnapshot();
-            for (const auto& listener : listeners_snapshot) {
-                listener->OnReconnected();
-            }
-            reconnected = true;
-            break;
         }
     }
 
-    if (!reconnected) {
-        {
-            std::lock_guard lock(room_mutex_);
-            connection_state_ = ConnectionState::Disconnected;
-            reconnect_active_ = false;
-        }
-
-        auto listeners_snapshot = GetListenersSnapshot();
-        for (const auto& listener : listeners_snapshot) {
-            listener->OnDisconnected("Reconnect Max Retries Exceeded");
-        }
+    std::shared_ptr<SignalClient> signal;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> subscriber;
+    std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+    {
+        std::lock_guard lock(room_mutex_);
+        signal = std::move(signal_client_);
+        publisher = std::move(publisher_pc_);
+        subscriber = std::move(subscriber_pc_);
+        local_participant_.reset();
+        remote_participants_.clear();
+        connection_state_ = ConnectionState::Disconnected;
+        reconnect_active_ = false;
+        suppress_next_connected_event_ = false;
+        listeners_snapshot = listeners_;
+        session_generation_.fetch_add(1, std::memory_order_acq_rel);
+    }
+    CancelPendingOperations(OperationErrorCode::ReconnectExhausted,
+                            "reconnect_exhausted",
+                            last_error);
+    if (signal) signal->Close();
+    if (publisher) publisher->Close();
+    if (subscriber && subscriber != publisher) subscriber->Close();
+    for (const auto& listener : listeners_snapshot) {
+        listener->OnDisconnected("Reconnect failed: " + last_error);
     }
 }
 
@@ -2739,9 +3491,7 @@ asio::awaitable<void> Room::RepublishLocalTracks(
     for (auto& record : records) {
         if (!record.track) continue;
 
-        local->PublishTrack(record.track);
-
-        auto new_pub = local->get_publication(record.track->name());
+        auto new_pub = co_await local->PublishTrackAsync(record.track);
         for (const auto& listener : listeners_snapshot) {
             listener->OnLocalTrackRepublished(record.previous_sid, new_pub);
         }
@@ -2749,9 +3499,21 @@ asio::awaitable<void> Room::RepublishLocalTracks(
 }
 
 asio::awaitable<void> Room::RestartIceConnections(
-    std::shared_ptr<proto::ReconnectResponse> reconnect_response) {
+    std::shared_ptr<proto::ReconnectResponse> reconnect_response,
+    std::chrono::milliseconds attempt_timeout) {
+    if (!reconnect_response) {
+        throw OperationError(OperationKind::Reconnect,
+                             OperationErrorCode::JoinRejected,
+                             "reconnect_response",
+                             "ReconnectResponse is missing");
+    }
 
-    if (!reconnect_response) co_return;
+    // Signaling-only mode is deliberately supported by tests and headless users.
+    // A successful reconnect transaction ends at the signaling SyncState ACK in
+    // this mode; there is no media transport whose ICE state can be restarted.
+    if (!require_media_connection_) {
+        co_return;
+    }
 
     webrtc::PeerConnectionInterface::RTCConfiguration new_config;
     new_config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
@@ -2767,39 +3529,91 @@ asio::awaitable<void> Room::RestartIceConnections(
     }
 
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
-    std::shared_ptr<SignalClient> client;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> sub_pc;
+    uint64_t generation = 0;
     {
         std::lock_guard lock(room_mutex_);
         pub_pc = publisher_pc_;
-        client = signal_client_;
+        sub_pc = subscriber_pc_;
+        generation = session_generation_.load(std::memory_order_acquire);
     }
 
-    if (!pub_pc || !client) co_return;
+    if (!pub_pc) {
+        throw OperationError(OperationKind::Reconnect,
+                             OperationErrorCode::PeerConnectionCreateFailed,
+                             "restart_ice",
+                             "publisher peer connection is missing");
+    }
 
-    WebRTCManager::Instance().signaling_thread()->BlockingCall([pub_pc, &new_config]() {
-        pub_pc->SetConfiguration(new_config);
-    });
-
-    auto self = shared_from_this();
-    WebRTCManager::Instance().CreateOffer(pub_pc, executor_,
-        [self, client, pub_pc](const std::string& sdp, const std::string& error) {
-            if (!error.empty()) {
-                std::cerr << "Room: ICE restart CreateOffer failed: " << error << std::endl;
-                return;
+    std::string configuration_error;
+    WebRTCManager::Instance().signaling_thread()->BlockingCall([pub_pc, sub_pc, &new_config, &configuration_error]() {
+        auto pub_result = pub_pc->SetConfiguration(new_config);
+        if (!pub_result.ok()) configuration_error = pub_result.message();
+        if (sub_pc && sub_pc != pub_pc) {
+            auto sub_result = sub_pc->SetConfiguration(new_config);
+            if (!sub_result.ok() && configuration_error.empty()) {
+                configuration_error = sub_result.message();
             }
+        }
+    });
+    if (!configuration_error.empty()) {
+        throw OperationError(OperationKind::Reconnect,
+                             OperationErrorCode::PeerConnectionCreateFailed,
+                             "set_reconnect_configuration",
+                             configuration_error,
+                             true);
+    }
 
-            WebRTCManager::Instance().SetLocalDescription(pub_pc, "offer", sdp,
-                self->executor_,
-                [self, client, sdp, pub_pc](const std::string& set_err) {
-                    if (!set_err.empty()) return;
-                    proto::SignalRequest req;
-                    auto* offer_msg = req.mutable_offer();
-                    offer_msg->set_type("offer");
-                    offer_msg->set_sdp(sdp);
-                    client->Send(req);
-                });
-        });
+    const auto deadline = std::chrono::steady_clock::now() + attempt_timeout;
+    co_await NegotiatePublisherAsync(attempt_timeout,
+                                     generation,
+                                     true);
+    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now());
+    if (remaining <= std::chrono::milliseconds::zero()) {
+        throw OperationError(OperationKind::Reconnect,
+                             OperationErrorCode::PeerConnectionTimeout,
+                             "restart_ice",
+                             "reconnect attempt timed out before peer connection recovery",
+                             true);
+    }
+    co_await WaitForPrimaryPeerConnection(
+        std::min(operation_timeouts_.peer_connection, remaining), generation);
 }
+
+namespace {
+
+void AppendStatsReport(RoomStatsReport& room_report,
+                       const StatsReport& stats,
+                       bool publisher) {
+    for (const auto& candidate_pair : stats.candidate_pairs) {
+        if (!candidate_pair.current_pair) {
+            continue;
+        }
+        if (publisher) {
+            room_report.publisher_rtt_ms =
+                candidate_pair.current_round_trip_time * 1000.0;
+            room_report.available_outgoing_bitrate =
+                candidate_pair.available_outgoing_bitrate;
+        } else {
+            room_report.subscriber_rtt_ms =
+                candidate_pair.current_round_trip_time * 1000.0;
+        }
+    }
+
+    if (publisher) {
+        for (const auto& outbound : stats.outbound_rtp) {
+            room_report.total_bytes_sent += outbound.bytes_sent;
+        }
+    } else {
+        for (const auto& inbound : stats.inbound_rtp) {
+            room_report.total_bytes_received += inbound.bytes_received;
+        }
+    }
+    room_report.reports.push_back(stats);
+}
+
+} // namespace
 
 RoomStatsReport Room::GetStatsSync() {
     RoomStatsReport room_report;
@@ -2827,17 +3641,7 @@ RoomStatsReport Room::GetStatsSync() {
 
         std::unique_lock<std::mutex> lock(state->mutex);
         if (state->cv.wait_for(lock, std::chrono::milliseconds(1500), [&]() { return state->done; })) {
-            const auto& r = state->report;
-            for (const auto& cp : r.candidate_pairs) {
-                if (cp.current_pair) {
-                    room_report.publisher_rtt_ms = cp.current_round_trip_time * 1000.0;
-                    room_report.available_outgoing_bitrate = cp.available_outgoing_bitrate;
-                }
-            }
-            for (const auto& out : r.outbound_rtp) {
-                room_report.total_bytes_sent += out.bytes_sent;
-            }
-            room_report.reports.push_back(r);
+            AppendStatsReport(room_report, state->report, /*publisher=*/true);
         }
     }
 
@@ -2853,16 +3657,7 @@ RoomStatsReport Room::GetStatsSync() {
 
         std::unique_lock<std::mutex> lock(state->mutex);
         if (state->cv.wait_for(lock, std::chrono::milliseconds(1500), [&]() { return state->done; })) {
-            const auto& r = state->report;
-            for (const auto& cp : r.candidate_pairs) {
-                if (cp.current_pair) {
-                    room_report.subscriber_rtt_ms = cp.current_round_trip_time * 1000.0;
-                }
-            }
-            for (const auto& in : r.inbound_rtp) {
-                room_report.total_bytes_received += in.bytes_received;
-            }
-            room_report.reports.push_back(r);
+            AppendStatsReport(room_report, state->report, /*publisher=*/false);
         }
     }
 
@@ -2870,7 +3665,30 @@ RoomStatsReport Room::GetStatsSync() {
 }
 
 asio::awaitable<RoomStatsReport> Room::GetStats() {
-    co_return GetStatsSync();
+    RoomStatsReport room_report;
+    room_report.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> subscriber;
+    {
+        std::lock_guard lock(room_mutex_);
+        publisher = publisher_pc_;
+        subscriber = subscriber_pc_;
+    }
+
+    using namespace asio::experimental::awaitable_operators;
+    auto [publisher_stats, subscriber_stats] = co_await (
+        CollectRtcStats(publisher, executor_) &&
+        CollectRtcStats(subscriber, executor_));
+
+    if (publisher_stats) {
+        AppendStatsReport(room_report, *publisher_stats, /*publisher=*/true);
+    }
+    if (subscriber_stats) {
+        AppendStatsReport(room_report, *subscriber_stats, /*publisher=*/false);
+    }
+    co_return room_report;
 }
 
 void Room::SetParticipantVolume(const std::string& identity_or_sid, double volume) {

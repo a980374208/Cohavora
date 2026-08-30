@@ -2,6 +2,8 @@
 #include <cassert>
 #include <thread>
 #include <chrono>
+#include <asio.hpp>
+#include "room.h"
 #include "stats.h"
 #include "stats_collector.h"
 
@@ -85,6 +87,22 @@ int main() {
     assert(room_report.reports.size() == 1 && "Reports vector count mismatch!");
 
     std::cout << "  -> [Test 2 PASSED] RoomStatsReport Aggregation Verified Successfully!\n\n";
+
+    // ------------------------------------------------------------------
+    // [Test 3] Empty-room async collection must complete without blocking.
+    // ------------------------------------------------------------------
+    asio::io_context io;
+    auto room = livekit::Room::Create(io.get_executor());
+    bool async_completed = false;
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        auto empty_report = co_await room->GetStats();
+        assert(empty_report.reports.empty());
+        async_completed = true;
+    }, asio::detached);
+    io.run();
+    assert(async_completed);
+
+    std::cout << "  -> [Test 3 PASSED] Async empty-room collection completed without blocking!\n\n";
 
     std::cout << "==================================================\n";
     std::cout << " ALL RTCSTATS & QOS MONITORING TESTS PASSED 100%! \n";

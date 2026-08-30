@@ -25,20 +25,14 @@ static int64_t CurrentEpochMs() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
-void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
-    if (!track) return;
-    if (!permission_.can_publish) {
-        std::cerr << "[LocalParticipant] Permission denied: cannot publish track (can_publish is false).\n";
-        return;
-    }
-    Telemetry::Instance().RecordPublishStart();
-
+static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& track,
+                                                 const std::string& identity) {
     proto::SignalRequest req;
     auto* add_track = req.mutable_add_track();
     add_track->set_cid(track->name()); 
     add_track->set_name(track->name());
-    add_track->set_muted(false);
-    std::string stream_id = "livekit_stream_" + (identity().empty() ? "local" : identity());
+    add_track->set_muted(track->muted());
+    std::string stream_id = "livekit_stream_" + (identity.empty() ? "local" : identity);
     add_track->set_stream(stream_id);
     
     if (track->kind() == TrackKind::Audio) {
@@ -131,6 +125,24 @@ void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
         }
     }
 
+    return req;
+}
+
+void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
+    if (!track) return;
+    if (async_publish_track_handler_) {
+        throw OperationError(OperationKind::PublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "legacy_publish",
+                             "Room participants must use PublishTrackAsync");
+    }
+    if (!permission_.can_publish) {
+        std::cerr << "[LocalParticipant] Permission denied: cannot publish track (can_publish is false).\n";
+        return;
+    }
+    Telemetry::Instance().RecordPublishStart();
+
+    auto req = BuildAddTrackRequest(track, identity());
     auto pub = std::make_shared<TrackPublication>(track, track->name(), track->name());
     add_publication(pub);
 
@@ -141,6 +153,32 @@ void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
     if (send_handler_) {
         send_handler_(req);
     }
+}
+
+asio::awaitable<std::shared_ptr<TrackPublication>> LocalParticipant::PublishTrackAsync(
+    std::shared_ptr<Track> track) {
+    if (!track) {
+        throw OperationError(OperationKind::PublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "validate",
+                             "track is null");
+    }
+    if (!permission_.can_publish) {
+        throw OperationError(OperationKind::PublishTrack,
+                             OperationErrorCode::PermissionDenied,
+                             "validate_permission",
+                             "participant is not allowed to publish tracks");
+    }
+    if (!async_publish_track_handler_) {
+        throw OperationError(OperationKind::PublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "validate_session",
+                             "participant is not attached to an active Room");
+    }
+
+    Telemetry::Instance().RecordPublishStart();
+    auto req = BuildAddTrackRequest(track, identity());
+    co_return co_await async_publish_track_handler_(std::move(track), req);
 }
 
 void LocalParticipant::SetMuted(const std::string& track_sid, bool muted) {

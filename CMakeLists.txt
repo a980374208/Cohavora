@@ -92,6 +92,7 @@ set(LIVEKIT_SOURCES
     src/core/local_video_track.cpp
     src/core/remote_track_publication.cpp
     src/core/adaptive_stream_manager.cpp
+    src/core/data_stream_assembler.cpp
     src/rtc/webrtc_manager.cpp
     src/rtc/audio_frame.cpp
     src/rtc/video_frame.cpp
@@ -122,12 +123,14 @@ set(LIVEKIT_HEADERS
     src/signal/signal_stream.h
     src/signal/signal_client.h
     src/core/room.h
+    src/core/operation.h
     src/core/participant.h
     src/core/track.h
     src/core/local_audio_track.h
     src/core/local_video_track.h
     src/core/remote_track_publication.h
     src/core/adaptive_stream_manager.h
+    src/core/data_stream_assembler.h
     src/rtc/webrtc_manager.h
     src/rtc/audio_frame.h
     src/rtc/video_frame.h
@@ -284,6 +287,14 @@ add_executable(test_chunking_simulcast
     tests/test_chunking_simulcast.cpp
 )
 target_link_libraries(test_chunking_simulcast PRIVATE
+    livekit_signaling
+)
+
+# Inbound DataStream assembler unit test
+add_executable(test_data_stream_assembler
+    tests/test_data_stream_assembler.cpp
+)
+target_link_libraries(test_data_stream_assembler PRIVATE
     livekit_signaling
 )
 
@@ -578,6 +589,8 @@ enable_testing()
 add_test(NAME signaling_tests COMMAND livekit_signaling_tests_run_v4)
 add_test(NAME panic_guard_test COMMAND test_panic_guard)
 add_test(NAME advanced_communication_test COMMAND test_advanced_communication)
+add_test(NAME chunking_simulcast_test COMMAND test_chunking_simulcast)
+add_test(NAME data_stream_assembler_test COMMAND test_data_stream_assembler)
 add_test(NAME rpc_system_test COMMAND test_rpc_system)
 add_test(NAME media_streaming_test COMMAND test_media_streaming)
 add_test(NAME stats_system_test COMMAND test_stats_system)

@@ -31,7 +31,22 @@ int main() {
     auto listener = std::make_shared<TestDataListener>();
     room->AddListener(listener);
 
-    // Test 1: Data Packet Chunking (Sending 100 KB payload)
+    // Test 1: Small user packets wrapped in DataPacket still reach raw data listeners.
+    {
+        const std::vector<uint8_t> payload{'h', 'e', 'l', 'l', 'o'};
+        room->PublishData(payload, /*reliable=*/true, {}, "test.small");
+
+        assert(listener->received);
+        assert(listener->received_topic == "test.small");
+        assert(listener->received_payload == payload);
+        std::cout << "  [PASS] Test 1: Small DataPacket payload dispatch verified successfully!" << std::endl;
+    }
+
+    listener->received = false;
+    listener->received_payload.clear();
+    listener->received_topic.clear();
+
+    // Test 2: Data Packet Chunking (Sending 100 KB payload)
     {
         std::vector<uint8_t> large_payload(100 * 1024);
         for (size_t i = 0; i < large_payload.size(); ++i) {
@@ -46,10 +61,10 @@ int main() {
         assert(listener->received_payload.size() == large_payload.size());
         assert(listener->received_payload == large_payload);
 
-        std::cout << "  [PASS] Test 1: Data Packet Chunking 100KB payload assembly verified successfully!" << std::endl;
+        std::cout << "  [PASS] Test 2: Data Packet Chunking 100KB payload assembly verified successfully!" << std::endl;
     }
 
-    // Test 2: Simulcast Video Track Options & ApplySimulcastParameters
+    // Test 3: Simulcast Video Track Options & ApplySimulcastParameters
     {
         auto vsrc = std::make_shared<livekit::VideoSource>(1280, 720);
         auto vtrack = livekit::LocalVideoTrack::createLocalVideoTrack("simulcast_cam", vsrc);
@@ -59,7 +74,7 @@ int main() {
         assert(opts.simulcast == true);
         assert(opts.layers.size() == 3);
 
-        std::cout << "  [PASS] Test 2: Simulcast Video Track options and layers initialized correctly!" << std::endl;
+        std::cout << "  [PASS] Test 3: Simulcast Video Track options and layers initialized correctly!" << std::endl;
     }
 
     std::cout << "[SUCCESS] ALL Data Packet Chunking & Simulcast Verification Tests Passed!" << std::endl;

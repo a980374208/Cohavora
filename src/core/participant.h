@@ -11,6 +11,7 @@
 #include "track.h"
 #include "chat_message.h"
 #include "rpc_types.h"
+#include "operation.h"
 
 // Forward declare generated protobuf messages
 namespace livekit {
@@ -97,8 +98,14 @@ public:
         : Participant(sid, identity), send_handler_(send_handler) {}
 
     using PublishTrackHandler = std::function<void(std::shared_ptr<Track>)>;
+    using AsyncPublishTrackHandler = std::function<asio::awaitable<std::shared_ptr<TrackPublication>>(
+        std::shared_ptr<Track>, const proto::SignalRequest&)>;
     void SetPublishTrackHandler(PublishTrackHandler handler) {
         publish_track_handler_ = std::move(handler);
+    }
+
+    void SetAsyncPublishTrackHandler(AsyncPublishTrackHandler handler) {
+        async_publish_track_handler_ = std::move(handler);
     }
 
     void SetPublishDataHandler(PublishDataHandler handler) {
@@ -109,8 +116,11 @@ public:
         send_rpc_handler_ = std::move(handler);
     }
 
-    // 模拟发布本地 Track 逻辑
+    // Legacy synchronous helper kept for isolated/offline tests. A participant
+    // attached to a Room must use PublishTrackAsync so success cannot be faked.
     void PublishTrack(std::shared_ptr<Track> track);
+    asio::awaitable<std::shared_ptr<TrackPublication>> PublishTrackAsync(
+        std::shared_ptr<Track> track);
 
     // 模拟本地静音控制逻辑
     void SetMuted(const std::string& track_sid, bool muted);
@@ -142,6 +152,7 @@ public:
 private:
     SendSignalHandler send_handler_;
     PublishTrackHandler publish_track_handler_;
+    AsyncPublishTrackHandler async_publish_track_handler_;
     PublishDataHandler publish_data_handler_;
     SendRpcHandler send_rpc_handler_;
 

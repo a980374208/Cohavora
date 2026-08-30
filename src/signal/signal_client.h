@@ -16,6 +16,7 @@
 #include "websocket_client.h"
 #include "signal_stream.h"
 #include "livekit_models.pb.h"
+#include "operation.h"
 
 // Forward declare generated protobuf messages
 namespace livekit {
@@ -53,6 +54,7 @@ struct SignalOptions {
     bool create_webrtc_pc = true; // Toggle actual creation of WebRTC PC instances
     std::chrono::milliseconds connect_timeout = std::chrono::seconds(5);
     std::chrono::milliseconds reconnect_timeout = std::chrono::seconds(5);
+    OperationTimeouts timeouts;
 };
 
 class SignalClient;
@@ -87,7 +89,8 @@ public:
     ~SignalClient();
 
     // Restart connection, returns awaitable RestartResult
-    asio::awaitable<RestartResult> Restart();
+    asio::awaitable<RestartResult> Restart(
+        std::optional<std::chrono::milliseconds> attempt_timeout = std::nullopt);
 
     // Call by engine once fully connected
     void SetReconnected();
@@ -97,6 +100,10 @@ public:
 
     // Send a message
     void Send(const proto::SignalRequest& req);
+
+    // Transactional send. Unlike Send(), this does not silently queue or drop
+    // the request and only completes after the active stream accepted it.
+    asio::awaitable<void> SendAsync(const proto::SignalRequest& req);
 
     // Send update track settings request to server for Adaptive Stream
     void SendUpdateTrackSettings(const std::string& track_sid,
@@ -133,7 +140,8 @@ private:
     asio::awaitable<void> HeartbeatLoop(uint32_t interval_sec, uint32_t timeout_sec);
     asio::awaitable<std::shared_ptr<proto::JoinResponse>> ConnectInternal(
         const std::optional<std::vector<uint8_t>>& publisher_offer_sdp);
-    asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> ReconnectInternal();
+    asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> ReconnectInternal(
+        std::optional<std::chrono::milliseconds> attempt_timeout);
     asio::awaitable<std::shared_ptr<proto::JoinResponse>> TryConnectInternal(const std::string& connect_url);
     asio::awaitable<std::shared_ptr<proto::JoinResponse>> FallbackRegionsInternal(
         const std::error_code& last_error,

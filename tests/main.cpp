@@ -648,6 +648,51 @@ public:
     }
 };
 
+asio::awaitable<void> TestAsyncPublishContract() {
+    std::cout << "Running TestAsyncPublishContract..." << std::endl;
+
+    auto participant = std::make_shared<livekit::LocalParticipant>(
+        "local_async", "publisher", [](const livekit::proto::SignalRequest&) {});
+    bool handler_called = false;
+    bool request_muted = false;
+    participant->SetAsyncPublishTrackHandler(
+        [&handler_called, &request_muted](std::shared_ptr<livekit::Track> track,
+                                          const livekit::proto::SignalRequest& request)
+            -> asio::awaitable<std::shared_ptr<livekit::TrackPublication>> {
+            handler_called = true;
+            request_muted = request.has_add_track() && request.add_track().muted();
+            co_return std::make_shared<livekit::TrackPublication>(
+                std::move(track), "TR_async_ack", "camera");
+        });
+
+    livekit::ParticipantPermission denied;
+    denied.can_publish = false;
+    participant->set_permission(denied);
+    auto denied_track = std::make_shared<livekit::Track>(
+        "denied", "denied", livekit::TrackKind::Video);
+    bool permission_failed = false;
+    try {
+        (void)co_await participant->PublishTrackAsync(denied_track);
+    } catch (const livekit::OperationError& error) {
+        permission_failed = error.code() == livekit::OperationErrorCode::PermissionDenied;
+    }
+    TEST_ASSERT(permission_failed, "PublishTrackAsync did not expose PermissionDenied");
+    TEST_ASSERT(!handler_called, "Publish handler ran after permission rejection");
+
+    livekit::ParticipantPermission allowed;
+    participant->set_permission(allowed);
+    auto muted_track = std::make_shared<livekit::Track>(
+        "muted", "camera", livekit::TrackKind::Video);
+    muted_track->set_muted(true);
+    auto publication = co_await participant->PublishTrackAsync(muted_track);
+    TEST_ASSERT(handler_called, "Async publish handler was not awaited");
+    TEST_ASSERT(request_muted, "AddTrackRequest did not preserve the initial muted state");
+    TEST_ASSERT(publication && publication->sid() == "TR_async_ack",
+                "PublishTrackAsync did not return the committed publication");
+
+    std::cout << "TestAsyncPublishContract PASSED!" << std::endl;
+}
+
 asio::awaitable<void> TestRoomStateMachine() {
     std::cout << "Running TestRoomStateMachine..." << std::endl;
     auto executor = co_await asio::this_coro::executor;
@@ -662,6 +707,7 @@ asio::awaitable<void> TestRoomStateMachine() {
     livekit::SignalOptions opts;
     opts.single_peer_connection = false;
     opts.create_webrtc_pc = false;
+    opts.timeouts.publish = std::chrono::milliseconds(100);
 
     auto room = livekit::Room::Create(executor);
     auto listener = std::make_shared<TestRoomListener>();
@@ -701,24 +747,33 @@ asio::awaitable<void> TestRoomStateMachine() {
     TEST_ASSERT(room->remote_participants().size() == 1, "Incorrect remote participant size");
     std::cout << "[STEP] Remote participant joined event processed and verified." << std::endl;
 
-    // 3. 测试轨道发布逻辑，验证 LocalParticipant 成功组装并向外发包
+    // 3. 未收到 TrackPublished ACK 时必须超时失败，且不能提交伪 publication
     auto track = std::make_shared<livekit::Track>("local_track_sid_temp", "camera", livekit::TrackKind::Video);
-    room->local_participant()->PublishTrack(track);
-
-    timer.expires_after(std::chrono::milliseconds(100));
-    co_await timer.async_wait(asio::use_awaitable);
+    track->set_muted(true);
+    bool publish_timed_out = false;
+    try {
+        (void)co_await room->local_participant()->PublishTrackAsync(track);
+    } catch (const livekit::OperationError& error) {
+        publish_timed_out = error.code() == livekit::OperationErrorCode::TrackPublishTimeout;
+    }
+    TEST_ASSERT(publish_timed_out, "PublishTrackAsync reported success without TrackPublished ACK");
+    TEST_ASSERT(room->local_participant()->tracks().empty(),
+                "Failed publish left a provisional publication behind");
 
     {
         std::lock_guard<std::mutex> lock(server->req_mutex);
         bool has_add_track = false;
+        bool muted_preserved = false;
         for (const auto& r : server->received_requests) {
             if (r.has_add_track() && r.add_track().name() == "camera") {
                 has_add_track = true;
+                muted_preserved = r.add_track().muted();
             }
         }
         TEST_ASSERT(has_add_track, "AddTrackRequest was not sent by LocalParticipant");
+        TEST_ASSERT(muted_preserved, "AddTrackRequest lost the track's muted state");
     }
-    std::cout << "[STEP] Track publish request verified on MockServer." << std::endl;
+    std::cout << "[STEP] Track publish timeout and rollback verified." << std::endl;
 
     // 4. 测试服务端推送静音消息驱动状态机更新与事件派发
     auto pub = std::make_shared<livekit::TrackPublication>(track, "track_real_999", "camera");
@@ -826,6 +881,50 @@ asio::awaitable<void> TestWebRTCIntegration() {
     std::cout << "TestWebRTCIntegration PASSED!" << std::endl;
 }
 
+asio::awaitable<void> TestConnectWaitsForMediaReadiness() {
+    std::cout << "Running TestConnectWaitsForMediaReadiness..." << std::endl;
+    auto executor = co_await asio::this_coro::executor;
+    auto& server_io = static_cast<asio::io_context&>(executor.context());
+
+    auto server = std::make_shared<MockServer>(server_io);
+    g_keep_alive_servers.push_back(server);
+    server->SetMockJoinSids("participant_media_timeout");
+    server->StartAccept();
+
+    livekit::SignalOptions opts;
+    opts.single_peer_connection = true;
+    opts.create_webrtc_pc = true;
+    opts.timeouts.negotiation = std::chrono::milliseconds(150);
+    opts.timeouts.peer_connection = std::chrono::milliseconds(150);
+
+    auto room = livekit::Room::Create(executor);
+    auto listener = std::make_shared<TestRoomListener>();
+    room->AddListener(listener);
+
+    bool failed_at_media_boundary = false;
+    try {
+        const std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
+        co_await room->ConnectAsync(url, "test-token", opts);
+    } catch (const livekit::OperationError& error) {
+        failed_at_media_boundary =
+            error.code() == livekit::OperationErrorCode::NegotiationFailed ||
+            error.code() == livekit::OperationErrorCode::PeerConnectionTimeout;
+    }
+
+    TEST_ASSERT(failed_at_media_boundary,
+                "ConnectAsync reported success without SDP/media readiness");
+    TEST_ASSERT(room->connection_state() == livekit::ConnectionState::Disconnected,
+                "Failed ConnectAsync did not roll the Room back to Disconnected");
+    TEST_ASSERT(!listener->connected_called,
+                "Failed ConnectAsync emitted OnConnected before media readiness");
+    TEST_ASSERT(room->local_participant() == nullptr,
+                "Failed ConnectAsync retained a partial local participant");
+
+    server->CloseActiveConnections();
+    server->Stop();
+    std::cout << "TestConnectWaitsForMediaReadiness PASSED!" << std::endl;
+}
+
 asio::awaitable<void> TestEventReadyHandshake() {
     std::cout << "Running TestEventReadyHandshake..." << std::endl;
     auto executor = co_await asio::this_coro::executor;
@@ -852,8 +951,14 @@ asio::awaitable<void> TestEventReadyHandshake() {
     timer.expires_after(std::chrono::milliseconds(50));
     co_await timer.async_wait(asio::use_awaitable);
 
-    TEST_ASSERT(listener->connected_participant != nullptr, "Buffered participant update was not dispatched");
-    TEST_ASSERT(listener->connected_participant->sid() == "ready_alice", "Incorrect participant SID");
+    auto participants = room->remote_participants();
+    TEST_ASSERT(participants.count("ready_alice") == 1,
+                "Buffered participant delta was not committed after Connect");
+    TEST_ASSERT(listener->connected_participant != nullptr,
+                "Buffered participant delta was not dispatched");
+    TEST_ASSERT(listener->connected_participant->sid() == "ready_alice",
+                "Incorrect buffered participant SID");
+    TEST_ASSERT(listener->connected_called, "OnConnected was not emitted before buffered deltas");
 
     room->Disconnect();
     server->Stop();
@@ -929,8 +1034,12 @@ asio::awaitable<void> TestRoomReconnectAndTrackRecovery() {
 
     TEST_ASSERT(room->connection_state() == livekit::ConnectionState::Connected, "Room did not reconnect, state=" + std::to_string((int)room->connection_state()));
     TEST_ASSERT(listener->reconnected_called, "OnReconnected not called");
-    TEST_ASSERT(listener->republished_prev_sid == "track_real_123", "Local track was not republished with previous SID");
-    TEST_ASSERT(listener->republished_pub != nullptr, "Republished publication is null");
+    TEST_ASSERT(listener->republished_prev_sid.empty(),
+                "Resume reconnect incorrectly republished an existing local track");
+    TEST_ASSERT(listener->republished_pub == nullptr,
+                "Resume reconnect emitted a full-restart republish callback");
+    TEST_ASSERT(room->local_participant()->tracks().size() == 1,
+                "Resume reconnect did not preserve the local publication state");
 
     room->Disconnect();
     server2->CloseActiveConnections();
@@ -991,8 +1100,10 @@ int main() {
             co_await TestReconnectionAndQueueing();
             co_await TestReconnectionInterrupted();
             co_await TestReconnectionTimeout();
+            co_await TestAsyncPublishContract();
             co_await TestRoomStateMachine();
             co_await TestWebRTCIntegration();
+            co_await TestConnectWaitsForMediaReadiness();
             co_await TestEventReadyHandshake();
             co_await TestRoomReconnectAndTrackRecovery();
             co_await TestRoomReconnectExhaustion();

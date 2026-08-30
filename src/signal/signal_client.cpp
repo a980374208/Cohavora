@@ -282,7 +282,8 @@ SignalClient::~SignalClient() {
     Close();
 }
 
-asio::awaitable<RestartResult> SignalClient::Restart() {
+asio::awaitable<RestartResult> SignalClient::Restart(
+    std::optional<std::chrono::milliseconds> attempt_timeout) {
     reconnecting_.store(true, std::memory_order_release);
     event_ready_.store(false, std::memory_order_release);
     StopHeartbeat();
@@ -296,7 +297,7 @@ asio::awaitable<RestartResult> SignalClient::Restart() {
     }
     
     try {
-        auto reconnect_res = co_await ReconnectInternal();
+        auto reconnect_res = co_await ReconnectInternal(attempt_timeout);
         co_return RestartResult{reconnect_res, {}};
     } catch (const std::system_error& e) {
         reconnecting_.store(false, std::memory_order_release);
@@ -379,6 +380,22 @@ void SignalClient::Send(const proto::SignalRequest& req) {
         std::lock_guard<std::mutex> lock(queue_mutex_);
         queued_requests_.push_back(req);
     }
+}
+
+asio::awaitable<void> SignalClient::SendAsync(const proto::SignalRequest& req) {
+    std::shared_ptr<SignalStream> stream;
+    {
+        std::shared_lock<std::shared_mutex> lock(stream_mutex_);
+        stream = stream_;
+    }
+    if (!stream || !stream->IsConnected()) {
+        throw OperationError(OperationKind::Connect,
+                             OperationErrorCode::SessionClosed,
+                             "signal_send",
+                             "signal stream is not connected",
+                             true);
+    }
+    co_await stream->Send(req);
 }
 
 void SignalClient::SendUpdateTrackSettings(const std::string& track_sid,
@@ -587,12 +604,23 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectInter
     co_return join_res;
 }
 
-asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::ReconnectInternal() {
+asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::ReconnectInternal(
+    std::optional<std::chrono::milliseconds> attempt_timeout) {
+    const auto total_timeout = attempt_timeout.value_or(
+        options_.connect_timeout + options_.reconnect_timeout);
+    const auto deadline = std::chrono::steady_clock::now() + total_timeout;
     std::string sid = join_response_->participant().sid();
     std::string tok = this->token();
     std::string reconnect_url = GetLivekitUrl(url_, tok, options_, single_pc_mode_active_, true, sid, std::nullopt);
     
-    auto connect_res = co_await SignalStream::Connect(*ssl_ctx_, reconnect_url, tok, options_.connect_timeout);
+    auto connect_budget = std::min(
+        options_.connect_timeout,
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()));
+    if (connect_budget <= std::chrono::milliseconds::zero()) {
+        throw std::system_error(std::make_error_code(std::errc::timed_out));
+    }
+    auto connect_res = co_await SignalStream::Connect(*ssl_ctx_, reconnect_url, tok, connect_budget);
     if (connect_res.error) {
         throw std::system_error(connect_res.error);
     }
@@ -600,7 +628,15 @@ asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::Reconne
     
     auto executor = co_await asio::this_coro::executor;
     auto timer = std::make_shared<asio::steady_timer>(executor);
-    timer->expires_after(options_.reconnect_timeout);
+    auto response_budget = std::min(
+        options_.reconnect_timeout,
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            deadline - std::chrono::steady_clock::now()));
+    if (response_budget <= std::chrono::milliseconds::zero()) {
+        stream->Close(false);
+        throw std::system_error(std::make_error_code(std::errc::timed_out));
+    }
+    timer->expires_after(response_budget);
     
     std::shared_ptr<proto::ReconnectResponse> rec_res = nullptr;
     std::string close_reason;

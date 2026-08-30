@@ -1934,25 +1934,23 @@ void MeetingRoomWindow::startLiveKitSession() {
 		asio::co_spawn(*_ioContext, [this, urlStr, tokenStr, opts]() -> asio::awaitable<void> {
 			try {
 				if (!urlStr.empty() && !tokenStr.empty()) {
-					bool ok = co_await _room->Connect(urlStr, tokenStr, opts);
-					if (ok) {
-						auto local = _room->local_participant();
-						if (local) {
+                    co_await _room->ConnectAsync(urlStr, tokenStr, opts);
+                    {
+                        auto local = _room->local_participant();
+                        if (local) {
 							// 自动发布本地音频轨
 							_localAudioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", _localAudioSource);
 							_localAudioTrack->set_muted(_config.audioMuted);
-							local->PublishTrack(_localAudioTrack);
+                            co_await local->PublishTrackAsync(_localAudioTrack);
 							LogToConsole(LogCategory::Track, "PUBLISH", QString("已向房间发布 LocalAudioTrack (simple_audio, 初始: %1)").arg(_config.audioMuted ? "静音" : "开麦"));
 
 							// 自动发布本地视频轨
 							_localVideoTrack = livekit::LocalVideoTrack::createLocalVideoTrack("camera_video", _localVideoSource);
 							_localVideoTrack->set_muted(!_config.videoEnabled);
-							local->PublishTrack(_localVideoTrack);
+                            co_await local->PublishTrackAsync(_localVideoTrack);
 							LogToConsole(LogCategory::Track, "PUBLISH", QString("已向房间发布 LocalVideoTrack (camera_video, 初始: %1)").arg(_config.videoEnabled ? "开启" : "关闭"));
 						}
-					} else {
-						LogToConsole(LogCategory::Error, "CONNECT", "Room::Connect 返回失败，请检查 URL 与 Token 是否有效！");
-					}
+                    }
 				}
 			} catch (const std::exception &ex) {
 				LogToConsole(LogCategory::Error, "EXCEPTION", QString("连接异常: %1").arg(ex.what()));
