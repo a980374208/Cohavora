@@ -392,10 +392,27 @@ void WebRTCManager::Deinitialize() {
     if (adm_) {
         if (worker_thread_) {
             worker_thread_->BlockingCall([this]() {
+                // Terminate() alone does not synchronously join the Windows
+                // Core Audio render loop. Stop it first, otherwise the render
+                // thread can enter an ADM critical section after destruction.
+                if (adm_->Playing()) {
+                    adm_->StopPlayout();
+                }
+                if (adm_->Recording()) {
+                    adm_->StopRecording();
+                }
+                adm_->RegisterAudioCallback(nullptr);
                 adm_->Terminate();
                 adm_ = nullptr;
             });
         } else {
+            if (adm_->Playing()) {
+                adm_->StopPlayout();
+            }
+            if (adm_->Recording()) {
+                adm_->StopRecording();
+            }
+            adm_->RegisterAudioCallback(nullptr);
             adm_->Terminate();
             adm_ = nullptr;
         }
@@ -498,17 +515,20 @@ private:
 void WebRTCManager::CreateOffer(
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
     asio::any_io_executor executor,
-    std::function<void(const std::string& sdp, const std::string& error)> callback) {
+    std::function<void(const std::string& sdp, const std::string& error)> callback,
+    bool ice_restart) {
     
     struct TaskParams {
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
         asio::any_io_executor executor;
         std::function<void(const std::string& sdp, const std::string& error)> callback;
+        bool ice_restart;
     };
-    auto* p = new TaskParams{pc, executor, callback};
+    auto* p = new TaskParams{pc, executor, callback, ice_restart};
     signaling_thread_->PostTask([p]() {
         auto observer = CreateSdpObserverProxy::Create(p->executor, p->callback);
         webrtc::PeerConnectionInterface::RTCOfferAnswerOptions options;
+        options.ice_restart = p->ice_restart;
         p->pc->CreateOffer(observer.get(), options);
         delete p;
     });

@@ -364,8 +364,8 @@ int main(int argc, char* argv[]) {
     asio::co_spawn(io_ctx, [room, url, token, opts, publish_audio, publish_video, &capture_running, &audioThread, &videoThread]() -> asio::awaitable<void> {
         try {
             std::cout << "[Connect] Connecting to room..." << std::endl;
-            bool success = co_await room->Connect(url, token, opts);
-            if (success) {
+            co_await room->ConnectAsync(url, token, opts);
+            {
                 auto lp = room->local_participant();
                 std::cout << "[State] Connected! Local Participant Identity: "
                           << (lp ? lp->identity() : "N/A")
@@ -382,7 +382,7 @@ int main(int argc, char* argv[]) {
                     if (publish_audio) {
                         auto audio_source = std::make_shared<livekit::AudioSource>(48000, 1, 10);
                         auto audio_track = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", audio_source);
-                        lp->PublishTrack(audio_track);
+                        co_await lp->PublishTrackAsync(audio_track);
                         std::cout << "[Media] Local Audio Track published ('simple_audio')." << std::endl;
 
                         audioThread = std::thread([audio_source, &capture_running]() {
@@ -394,7 +394,7 @@ int main(int argc, char* argv[]) {
                     if (publish_video) {
                         auto video_source = std::make_shared<livekit::VideoSource>(1280, 720);
                         auto video_track = livekit::LocalVideoTrack::createLocalVideoTrack("simple_video", video_source);
-                        lp->PublishTrack(video_track);
+                        co_await lp->PublishTrackAsync(video_track);
                         std::cout << "[Media] Local Video Track published ('simple_video')." << std::endl;
 
                         videoThread = std::thread([video_source, &capture_running]() {
@@ -404,8 +404,6 @@ int main(int argc, char* argv[]) {
                 }
 
                 std::cout << "\n[Running] SimpleRoom is active. Press Ctrl+C to disconnect and exit." << std::endl;
-            } else {
-                std::cerr << "[ERROR] Room::Connect returned false." << std::endl;
             }
         } catch (const std::exception& e) {
             std::cerr << "[EXCEPTION] Connection exception: " << e.what() << std::endl;

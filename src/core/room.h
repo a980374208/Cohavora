@@ -16,6 +16,8 @@
 #include "chat_message.h"
 #include "rpc_types.h"
 #include "frame_cryptor.h"
+#include "data_stream_assembler.h"
+#include "operation.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include "api/peer_connection_interface.h"
@@ -77,7 +79,9 @@ public:
     ~Room();
 
     asio::awaitable<bool> Connect(const std::string& url, const std::string& token, const SignalOptions& opts);
+    asio::awaitable<void> ConnectAsync(const std::string& url, const std::string& token, const SignalOptions& opts);
     void Disconnect();
+    asio::awaitable<void> DisconnectAsync();
 
     ConnectionState connection_state() const;
     std::shared_ptr<LocalParticipant> local_participant() const;
@@ -117,14 +121,27 @@ public:
     std::shared_ptr<E2eeManager> e2ee_manager() const { return e2ee_manager_; }
 
     void AddTrackToPublisher(std::shared_ptr<Track> track);
+    asio::awaitable<webrtc::scoped_refptr<webrtc::RtpSenderInterface>> AddTrackToPublisherAsync(
+        std::shared_ptr<Track> track,
+        uint64_t generation);
+    asio::awaitable<std::shared_ptr<TrackPublication>> PublishLocalTrackAsync(
+        std::shared_ptr<Track> track,
+        const proto::SignalRequest& request);
     void SendPublishOffer();
     void NegotiatePublisher();
+    asio::awaitable<void> NegotiatePublisherAsync(
+        std::chrono::milliseconds timeout,
+        uint64_t generation,
+        bool ice_restart = false);
     void ExecuteNegotiatePublisher();
     void OnNegotiationFailed();
 
     // 内部 WebRTC 观察者回调接口
     void OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type);
     void OnIceConnected();
+    void OnPeerConnectionStateChanged(
+        int pc_type,
+        webrtc::PeerConnectionInterface::PeerConnectionState state);
     void OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track);
     void OnRenegotiationNeeded(int pc_type);
     void OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliable);
@@ -154,6 +171,12 @@ private:
     void HandleTrickleSignal(const proto::TrickleRequest& trickle);
     void HandleMediaSectionsRequirement(const proto::MediaSectionsRequirement& req);
     void NegotiateSubscriber(uint32_t num_audios, uint32_t num_videos);
+    asio::awaitable<void> WaitForPrimaryPeerConnection(
+        std::chrono::milliseconds timeout,
+        uint64_t generation);
+    void CompleteNegotiation(const std::string& error);
+    void CancelPendingOperations(OperationErrorCode code, const std::string& stage, const std::string& message);
+    void FlushDeferredRoomMessages();
 
     asio::any_io_executor executor_;
     std::shared_ptr<SignalClient> signal_client_;
@@ -174,6 +197,9 @@ private:
         PendingRetry
     };
     NegotiationState negotiation_state_ = NegotiationState::Idle;
+    // The negotiation round is shared, while each caller owns its own timeout.
+    std::vector<std::shared_ptr<AwaitableState<void>>> negotiation_waiters_;
+    bool negotiation_ice_restart_requested_ = false;
 
     // Subscriber PC 协商状态（客户端发起 Subscriber Offer 模式）
     bool subscriber_negotiating_ = false;
@@ -211,6 +237,24 @@ private:
 
     // 线程安全锁
     mutable std::recursive_mutex room_mutex_;
+
+    struct PendingPeerConnectionWait {
+        uint64_t generation = 0;
+        int pc_type = 0;
+        std::shared_ptr<AwaitableState<void>> completion;
+    };
+    std::vector<PendingPeerConnectionWait> pending_pc_waits_;
+
+    std::unordered_map<std::string,
+        std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>>> pending_track_publishes_;
+    std::vector<std::shared_ptr<proto::SignalResponse>> deferred_room_messages_;
+
+    std::atomic<uint64_t> operation_sequence_{1};
+    std::atomic<uint64_t> session_generation_{0};
+    OperationTimeouts operation_timeouts_;
+    int primary_pc_type_ = 0;
+    bool require_media_connection_ = true;
+    bool suppress_next_connected_event_ = false;
 
     // 媒体分发专用轻量锁（与信令/状态机大锁 room_mutex_ 完全解耦，防止 60FPS 回调产生 AB-BA 死锁）
     mutable std::mutex remote_media_mutex_;
@@ -261,25 +305,13 @@ private:
     asio::awaitable<void> RepublishLocalTracks(
         std::shared_ptr<proto::ReconnectResponse> reconnect_response);
     asio::awaitable<void> RestartIceConnections(
-        std::shared_ptr<proto::ReconnectResponse> reconnect_response);
+        std::shared_ptr<proto::ReconnectResponse> reconnect_response,
+        std::chrono::milliseconds attempt_timeout);
     void RecordPublishedTracks();
     std::vector<std::shared_ptr<RoomListener>> GetListenersSnapshot() const;
 
 private:
-    // === DataStream 大包切片重组数据结构 ===
-    struct IncomingDataStreamTracker {
-        std::string stream_id;
-        std::string topic;
-        uint64_t total_length = 0;
-        std::string sender_identity;
-        std::string sender_sid;
-        std::chrono::steady_clock::time_point start_time;
-        std::map<uint64_t, std::vector<uint8_t>> chunks;
-        uint64_t current_received_bytes = 0;
-    };
-    mutable std::mutex incoming_streams_mutex_;
-    std::unordered_map<std::string, std::shared_ptr<IncomingDataStreamTracker>> incoming_streams_;
-    void CleanupStaleDataStreams();
+    IncomingDataStreamAssembler incoming_data_streams_;
 };
 
 } // namespace livekit

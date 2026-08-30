@@ -92,6 +92,7 @@ set(LIVEKIT_SOURCES
     src/core/local_video_track.cpp
     src/core/remote_track_publication.cpp
     src/core/adaptive_stream_manager.cpp
+    src/core/data_stream_assembler.cpp
     src/rtc/webrtc_manager.cpp
     src/rtc/audio_frame.cpp
     src/rtc/video_frame.cpp
@@ -122,12 +123,14 @@ set(LIVEKIT_HEADERS
     src/signal/signal_stream.h
     src/signal/signal_client.h
     src/core/room.h
+    src/core/operation.h
     src/core/participant.h
     src/core/track.h
     src/core/local_audio_track.h
     src/core/local_video_track.h
     src/core/remote_track_publication.h
     src/core/adaptive_stream_manager.h
+    src/core/data_stream_assembler.h
     src/rtc/webrtc_manager.h
     src/rtc/audio_frame.h
     src/rtc/video_frame.h

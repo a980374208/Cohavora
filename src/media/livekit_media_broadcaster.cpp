@@ -435,13 +435,7 @@ int main(int argc, char* argv[]) {
     asio::co_spawn(io_ctx, [&]() -> asio::awaitable<void> {
         try {
             std::cout << "[STATUS] Connecting to LiveKit Server via WebSocket..." << std::endl;
-            bool ok = co_await room->Connect(url, token, opts);
-            if (!ok) {
-                std::cout << "[ERROR] Failed to connect to LiveKit server. Please check URL and Token.\n";
-                pattern_running.store(false);
-                io_ctx.stop();
-                co_return;
-            }
+            co_await room->ConnectAsync(url, token, opts);
 
             auto local = room->local_participant();
             if (local) {
@@ -451,11 +445,11 @@ int main(int argc, char* argv[]) {
                 std::cout << "[ATTRIBUTES] Set Local Participant Attributes: broadcaster_version='v2.0_cpp', device_os='Windows_Native'" << std::endl;
 
                 if (local_audio_track) {
-                    local->PublishTrack(local_audio_track);
+                    co_await local->PublishTrackAsync(local_audio_track);
                     std::cout << "[PUBLISH] Published Local Audio Track (" << local_audio_track->name() << ")" << std::endl;
                 }
                 if (local_video_track) {
-                    local->PublishTrack(local_video_track);
+                    co_await local->PublishTrackAsync(local_video_track);
                     std::cout << "[PUBLISH] Published Local Video Track (" << local_video_track->name() << " - "
                               << video_width << "x" << video_height << ")" << std::endl;
                 }

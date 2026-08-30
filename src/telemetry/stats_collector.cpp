@@ -1,4 +1,5 @@
 #include "stats_collector.h"
+#include "webrtc_manager.h"
 #include "api/stats/rtcstats_objects.h"
 #include <iostream>
 
@@ -10,12 +11,28 @@ webrtc::scoped_refptr<RtcStatsCollectorBridge> RtcStatsCollectorBridge::Create(s
 
 void RtcStatsCollectorBridge::OnStatsDelivered(const webrtc::scoped_refptr<const webrtc::RTCStatsReport>& report) {
     if (!state_) return;
-    std::lock_guard<std::mutex> lock(state_->mutex);
+
+    std::optional<StatsReport> parsed;
     if (report) {
-        state_->report = ParseRtcStatsReport(*report);
+        parsed = ParseRtcStatsReport(*report);
     }
-    state_->done = true;
+
+    std::function<void(std::optional<StatsReport>)> completion;
+    {
+        std::lock_guard<std::mutex> lock(state_->mutex);
+        if (state_->done) {
+            return;
+        }
+        if (parsed) {
+            state_->report = *parsed;
+        }
+        state_->done = true;
+        completion = std::move(state_->completion);
+    }
     state_->cv.notify_all();
+    if (completion) {
+        completion(std::move(parsed));
+    }
 }
 
 StatsReport ParseRtcStatsReport(const webrtc::RTCStatsReport& report) {
@@ -76,6 +93,56 @@ StatsReport ParseRtcStatsReport(const webrtc::RTCStatsReport& report) {
     }
 
     return result;
+}
+
+asio::awaitable<std::optional<StatsReport>> CollectRtcStats(
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection,
+    asio::any_io_executor executor,
+    std::chrono::milliseconds timeout) {
+    if (!peer_connection) {
+        co_return std::nullopt;
+    }
+
+    co_return co_await asio::async_initiate<
+        decltype(asio::use_awaitable),
+        void(std::optional<StatsReport>)>(
+        [peer_connection = std::move(peer_connection), executor, timeout](auto handler) mutable {
+            using Handler = decltype(handler);
+            auto handler_ptr = std::make_shared<Handler>(std::move(handler));
+            auto state = std::make_shared<RtcStatsState>();
+            auto timer = std::make_shared<asio::steady_timer>(executor, timeout);
+
+            state->completion = [executor, timer, handler_ptr](
+                                    std::optional<StatsReport> report) mutable {
+                asio::post(executor, [timer, handler_ptr, report = std::move(report)]() mutable {
+                    std::error_code ignored;
+                    timer->cancel(ignored);
+                    (*handler_ptr)(std::move(report));
+                });
+            };
+
+            timer->async_wait([state, handler_ptr](const std::error_code& error) mutable {
+                if (error) {
+                    return;
+                }
+                {
+                    std::lock_guard lock(state->mutex);
+                    if (state->done) {
+                        return;
+                    }
+                    state->done = true;
+                    state->completion = {};
+                }
+                (*handler_ptr)(std::nullopt);
+            });
+
+            auto callback = RtcStatsCollectorBridge::Create(state);
+            WebRTCManager::Instance().signaling_thread()->PostTask(
+                [peer_connection = std::move(peer_connection), callback]() mutable {
+                    peer_connection->GetStats(callback.get());
+                });
+        },
+        asio::use_awaitable);
 }
 
 } // namespace livekit

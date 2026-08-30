@@ -44,7 +44,8 @@ public:
     void CreateOffer(
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
         asio::any_io_executor executor,
-        std::function<void(const std::string& sdp, const std::string& error)> callback);
+        std::function<void(const std::string& sdp, const std::string& error)> callback,
+        bool ice_restart = false);
 
     void CreateAnswer(
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
