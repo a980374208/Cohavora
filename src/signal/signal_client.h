@@ -142,6 +142,10 @@ private:
         const std::optional<std::vector<uint8_t>>& publisher_offer_sdp);
     asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> ReconnectInternal(
         std::optional<std::chrono::milliseconds> attempt_timeout);
+    asio::awaitable<std::shared_ptr<proto::JoinResponse>> ConnectAtUrlInternal(
+        const std::string& base_url,
+        const std::optional<std::vector<uint8_t>>& publisher_offer_sdp,
+        bool allow_redirect = true);
     asio::awaitable<std::shared_ptr<proto::JoinResponse>> TryConnectInternal(const std::string& connect_url);
     asio::awaitable<std::shared_ptr<proto::JoinResponse>> FallbackRegionsInternal(
         const std::error_code& last_error,

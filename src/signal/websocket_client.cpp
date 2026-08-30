@@ -13,6 +13,42 @@
 
 namespace livekit {
 
+namespace {
+
+class WebSocketHttpErrorCategory final : public std::error_category {
+public:
+    const char* name() const noexcept override {
+        return "websocket_http";
+    }
+
+    std::string message(int value) const override {
+        return "WebSocket upgrade rejected with HTTP " + std::to_string(value);
+    }
+};
+
+const std::error_category& websocket_http_error_category() {
+    static WebSocketHttpErrorCategory category;
+    return category;
+}
+
+} // namespace
+
+std::error_code MakeWebSocketHttpError(unsigned int status_code) {
+    return {static_cast<int>(status_code), websocket_http_error_category()};
+}
+
+std::optional<unsigned int> WebSocketHttpStatus(const std::error_code& error) {
+    if (&error.category() != &websocket_http_error_category() || error.value() < 100) {
+        return std::nullopt;
+    }
+    return static_cast<unsigned int>(error.value());
+}
+
+bool IsWebSocketHttpStatus(const std::error_code& error, unsigned int status_code) {
+    const auto actual = WebSocketHttpStatus(error);
+    return actual.has_value() && *actual == status_code;
+}
+
 Url ParseUrl(const std::string& url_str) {
     Url url;
     size_t scheme_end = url_str.find("://");
@@ -574,7 +610,7 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
         std::cout << body << std::endl;
         std::cout << "---------------------" << std::endl;
 
-        throw std::system_error(std::make_error_code(std::errc::connection_refused));
+        throw std::system_error(MakeWebSocketHttpError(status_code));
     }
     
     std::string header;

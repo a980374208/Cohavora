@@ -15,6 +15,13 @@
 
 namespace livekit {
 
+// WebSocket upgrade failures must retain the HTTP status.  In particular, the
+// signaling layer may fall back from /rtc/v1 to /rtc only for a genuine 404;
+// collapsing every non-101 response to connection_refused loses that semantic.
+std::error_code MakeWebSocketHttpError(unsigned int status_code);
+std::optional<unsigned int> WebSocketHttpStatus(const std::error_code& error);
+bool IsWebSocketHttpStatus(const std::error_code& error, unsigned int status_code);
+
 struct Url {
     std::string scheme;
     std::string host;

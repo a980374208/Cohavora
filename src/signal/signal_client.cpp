@@ -553,55 +553,89 @@ void SignalClient::HandleClose(const std::string& reason) {
 
 asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectInternal(
     const std::optional<std::vector<uint8_t>>& publisher_offer_sdp) {
-    bool try_v1 = options_.single_peer_connection;
-    single_pc_mode_active_ = try_v1;
-    std::string lk_url = GetLivekitUrl(url_, token_, options_, try_v1, false, "", publisher_offer_sdp);
-    
-    std::shared_ptr<proto::JoinResponse> join_res = nullptr;
-    std::optional<std::error_code> first_err;
-    
+    std::optional<std::error_code> primary_error;
     try {
-        join_res = co_await TryConnectInternal(lk_url);
-    } catch (const std::system_error& ec) {
-        first_err = ec.code();
-    } catch (const std::exception&) {
-        first_err = std::make_error_code(std::errc::connection_aborted);
-    } catch (...) {
-        first_err = std::make_error_code(std::errc::connection_aborted);
+        co_return co_await ConnectAtUrlInternal(url_, publisher_offer_sdp);
+    } catch (const std::system_error& error) {
+        primary_error = error.code();
     }
-    
-    if (first_err) {
-        if (try_v1) {
-            single_pc_mode_active_ = false;
-            std::string validate_url = GetLivekitUrl(url_, token_, options_, true, false, "", publisher_offer_sdp);
-            
-            // Validate (we can swallow exception)
-            try {
-                co_await ValidateInternal(validate_url, token_);
-            } catch(...) {
+    co_return co_await FallbackRegionsInternal(*primary_error, publisher_offer_sdp);
+}
+
+asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectAtUrlInternal(
+    const std::string& base_url,
+    const std::optional<std::vector<uint8_t>>& publisher_offer_sdp,
+    bool allow_redirect) {
+    const bool use_v1 = options_.single_peer_connection;
+    const std::string v1_or_v0_url = GetLivekitUrl(
+        base_url, token_, options_, use_v1, false, "", publisher_offer_sdp);
+
+    std::optional<std::error_code> first_error;
+    std::shared_ptr<proto::JoinResponse> response;
+    try {
+        response = co_await TryConnectInternal(v1_or_v0_url);
+    } catch (const std::system_error& error) {
+        first_error = error.code();
+    }
+
+    if (response) {
+        if (!response->alternative_url().empty()) {
+            if (!allow_redirect || response->alternative_url() == base_url) {
+                throw std::system_error(std::make_error_code(std::errc::too_many_links));
             }
-            
-            std::string lk_url_v0 = GetLivekitUrl(url_, token_, options_, false, false, "", std::nullopt);
-            std::optional<std::error_code> v0_err;
-            try {
-                join_res = co_await TryConnectInternal(lk_url_v0);
-            } catch (const std::system_error& ec2) {
-                v0_err = ec2.code();
-            } catch (const std::exception&) {
-                v0_err = std::make_error_code(std::errc::connection_aborted);
-            } catch (...) {
-                v0_err = std::make_error_code(std::errc::connection_aborted);
+            std::shared_ptr<SignalStream> redirected_stream;
+            {
+                std::unique_lock<std::shared_mutex> lock(stream_mutex_);
+                redirected_stream = std::move(stream_);
             }
-            
-            if (v0_err) {
-                join_res = co_await FallbackRegionsInternal(*v0_err, publisher_offer_sdp);
-            }
-        } else {
-            join_res = co_await FallbackRegionsInternal(*first_err, publisher_offer_sdp);
+            if (redirected_stream) co_await redirected_stream->Close(false);
+            auto redirected = co_await ConnectAtUrlInternal(
+                response->alternative_url(), publisher_offer_sdp, false);
+            url_ = response->alternative_url();
+            co_return redirected;
         }
+        single_pc_mode_active_ = use_v1;
+        co_return response;
     }
-    
-    co_return join_res;
+
+    // /rtc/v1 being absent is the only compatibility signal that permits
+    // protocol downgrade. Authentication, overload, timeout and transport
+    // failures must remain visible and must never be hidden by a v0 retry.
+    if (!use_v1 || !IsWebSocketHttpStatus(*first_error, 404)) {
+        co_await ValidateInternal(v1_or_v0_url, token_);
+        throw std::system_error(*first_error);
+    }
+
+    const std::string v0_url = GetLivekitUrl(
+        base_url, token_, options_, false, false, "", std::nullopt);
+    std::optional<std::error_code> v0_error;
+    response.reset();
+    try {
+        response = co_await TryConnectInternal(v0_url);
+    } catch (const std::system_error& error) {
+        v0_error = error.code();
+    }
+    if (response) {
+        if (!response->alternative_url().empty()) {
+            if (!allow_redirect || response->alternative_url() == base_url) {
+                throw std::system_error(std::make_error_code(std::errc::too_many_links));
+            }
+            std::shared_ptr<SignalStream> redirected_stream;
+            {
+                std::unique_lock<std::shared_mutex> lock(stream_mutex_);
+                redirected_stream = std::move(stream_);
+            }
+            if (redirected_stream) co_await redirected_stream->Close(false);
+            auto redirected = co_await ConnectAtUrlInternal(
+                response->alternative_url(), publisher_offer_sdp, false);
+            url_ = response->alternative_url();
+            co_return redirected;
+        }
+        single_pc_mode_active_ = false;
+        co_return response;
+    }
+    co_await ValidateInternal(v0_url, token_);
+    throw std::system_error(*v0_error);
 }
 
 asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::ReconnectInternal(
@@ -788,10 +822,9 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::FallbackRegi
     }
     
     for (size_t i = 0; i < fallback_urls.size(); ++i) {
-        std::string lk_url = GetLivekitUrl(fallback_urls[i], token_, options_, options_.single_peer_connection, false, "", publisher_offer_sdp);
         try {
-            co_return co_await TryConnectInternal(lk_url);
-        } catch (...) {
+            co_return co_await ConnectAtUrlInternal(fallback_urls[i], publisher_offer_sdp);
+        } catch (const std::system_error&) {
             if (i == fallback_urls.size() - 1) {
                 throw;
             }
