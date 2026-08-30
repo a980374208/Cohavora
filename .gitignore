@@ -60,6 +60,7 @@ received_green.avif
 docs/doxygen/html/
 docs/doxygen/latex/
 docs/*.bak
+docs/audit
 
 # Generated header
 include/livekit/build.h

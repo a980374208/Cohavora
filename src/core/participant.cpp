@@ -62,7 +62,7 @@ static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& t
             auto pub_opts = vid_track->publish_options();
             if (pub_opts.simulcast && !pub_opts.layers.empty()) {
                 auto* sim_codec = add_track->add_simulcast_codecs();
-                sim_codec->set_codec("vp8");
+                sim_codec->set_codec(pub_opts.video_codec);
                 sim_codec->set_cid(add_track->cid());
                 sim_codec->set_video_layer_mode(proto::VideoLayer::ONE_SPATIAL_LAYER_PER_STREAM);
 

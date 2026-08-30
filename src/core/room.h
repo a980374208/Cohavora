@@ -8,6 +8,7 @@
 #include <vector>
 #include <mutex>
 #include <chrono>
+#include <functional>
 #include <asio.hpp>
 #include "signal_client.h"
 #include "participant.h"
@@ -86,6 +87,8 @@ public:
     ConnectionState connection_state() const;
     std::shared_ptr<LocalParticipant> local_participant() const;
     std::map<std::string, std::shared_ptr<RemoteParticipant>> remote_participants() const;
+    std::shared_ptr<const proto::JoinResponse> join_response() const;
+    std::vector<std::string> enabled_publish_codecs() const;
     void SetLocalParticipantForTesting(std::shared_ptr<LocalParticipant> local) {
         std::lock_guard lock(room_mutex_);
         local_participant_ = local;
@@ -170,7 +173,7 @@ private:
     void HandleAnswerSignal(const proto::SessionDescription& answer);
     void HandleTrickleSignal(const proto::TrickleRequest& trickle);
     void HandleMediaSectionsRequirement(const proto::MediaSectionsRequirement& req);
-    void NegotiateSubscriber(uint32_t num_audios, uint32_t num_videos);
+    proto::SyncState BuildSyncState() const;
     asio::awaitable<void> WaitForPrimaryPeerConnection(
         std::chrono::milliseconds timeout,
         uint64_t generation);
@@ -180,6 +183,8 @@ private:
 
     asio::any_io_executor executor_;
     std::shared_ptr<SignalClient> signal_client_;
+    std::shared_ptr<proto::JoinResponse> join_response_;
+    std::vector<std::string> enabled_publish_codecs_;
     ConnectionState connection_state_ = ConnectionState::Disconnected;
     std::shared_ptr<LocalParticipant> local_participant_;
     std::map<std::string, std::shared_ptr<RemoteParticipant>> remote_participants_;
@@ -201,12 +206,8 @@ private:
     std::vector<std::shared_ptr<AwaitableState<void>>> negotiation_waiters_;
     bool negotiation_ice_restart_requested_ = false;
 
-    // Subscriber PC 协商状态（客户端发起 Subscriber Offer 模式）
+    // Subscriber PC negotiation state used by the legacy dual-PC answer router.
     bool subscriber_negotiating_ = false;
-    uint32_t current_sub_audios_ = 0;
-    uint32_t current_sub_videos_ = 0;
-    uint32_t pending_sub_audios_ = 0;
-    uint32_t pending_sub_videos_ = 0;
 
     // Early ICE Candidate 暂存队列结构
     struct PendingIceCandidate {
@@ -222,7 +223,17 @@ private:
     webrtc::scoped_refptr<webrtc::DataChannelInterface> lossy_dc_;
     std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> remote_data_channels_;
     std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers_;
-    std::vector<std::shared_ptr<void>> remote_track_sinks_;
+    struct RemoteTrackSinkBinding {
+        std::string track_sid;
+        std::string rtc_track_id;
+        // Keeps both the WebRTC track and its native sink alive. Calling this
+        // unregisters the raw sink pointer before those owners are released.
+        std::function<void()> detach;
+    };
+    std::vector<RemoteTrackSinkBinding> remote_track_sinks_;
+    static void DetachRemoteTrackSinks(std::vector<RemoteTrackSinkBinding> bindings) noexcept;
+    std::vector<RemoteTrackSinkBinding> TakeRemoteTrackSinksForTrackSids(
+        const std::set<std::string>& track_sids);
     uint64_t reliable_buffered_low_threshold_ = 16384;
     uint64_t lossy_buffered_low_threshold_ = 16384;
 

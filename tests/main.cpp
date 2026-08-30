@@ -106,11 +106,17 @@ public:
     }
 
     void SetValidationStatus(int status) { validation_status_ = status; }
+    void SetV1Status(int status) { v1_status_ = status; }
     void SetRegionJson(std::string json) { region_json_ = json; }
     void SetMockJoinSids(std::string sid) { mock_sid_ = sid; }
+    void SetJoinPublishCodecs(std::vector<std::string> codecs) {
+        join_publish_codecs_ = std::move(codecs);
+    }
     
     std::vector<livekit::proto::SignalRequest> received_requests;
     std::mutex req_mutex;
+    std::atomic<int> v1_requests{0};
+    std::atomic<int> v0_requests{0};
 
     void SendResponse(std::shared_ptr<asio::ip::tcp::socket> socket, const livekit::proto::SignalResponse& resp) {
         std::vector<uint8_t> payload(resp.ByteSizeLong());
@@ -171,11 +177,18 @@ private:
                    << region_json_;
                 asio::write(*socket, asio::buffer(ss.str()));
             } else if (req_line.find("GET /rtc") != std::string::npos) {
+                const bool is_v1 = req_line.find("GET /rtc/v1") != std::string::npos;
+                if (is_v1) {
+                    v1_requests.fetch_add(1);
+                } else {
+                    v0_requests.fetch_add(1);
+                }
+                const int handshake_status = is_v1 ? v1_status_ : validation_status_;
                 std::cout << "MockServer: Handling GET /rtc, validation_status=" << validation_status_ << std::endl;
-                if (validation_status_ != 200) {
-                    std::cout << "MockServer: validation failed, writing " << validation_status_ << std::endl;
+                if (handshake_status != 200) {
+                    std::cout << "MockServer: validation failed, writing " << handshake_status << std::endl;
                     std::stringstream ss;
-                    ss << "HTTP/1.1 " << validation_status_ << " Error\r\n"
+                    ss << "HTTP/1.1 " << handshake_status << " Error\r\n"
                        << "Content-Length: 0\r\n"
                        << "Connection: close\r\n\r\n";
                     asio::write(*socket, asio::buffer(ss.str()));
@@ -223,6 +236,9 @@ private:
                     join->set_ping_timeout(2);
                     auto* part = join->mutable_participant();
                     part->set_sid(mock_sid_);
+                    for (const auto& mime : join_publish_codecs_) {
+                        join->add_enabled_publish_codecs()->set_mime(mime);
+                    }
                     SendResponse(socket, resp);
 
                     if (mock_sid_ == "participant_event_ready") {
@@ -339,8 +355,10 @@ private:
     asio::ip::tcp::acceptor acceptor_;
     uint16_t port_ = 0;
     int validation_status_ = 200;
+    int v1_status_ = 200;
     std::string region_json_;
     std::string mock_sid_ = "default_sid";
+    std::vector<std::string> join_publish_codecs_;
     bool dummy_reconnect_ = false;
     std::vector<std::shared_ptr<asio::ip::tcp::socket>> keep_alive_sockets_;
     std::vector<std::shared_ptr<asio::ip::tcp::socket>> active_sockets_;
@@ -395,7 +413,8 @@ asio::awaitable<void> TestValidationFail() {
     
     auto server = std::make_shared<MockServer>(server_io);
     g_keep_alive_servers.push_back(server);
-    server->SetValidationStatus(401); 
+    server->SetValidationStatus(401);
+    server->SetV1Status(401);
     server->StartAccept();
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
@@ -405,8 +424,41 @@ asio::awaitable<void> TestValidationFail() {
     auto res = co_await livekit::SignalClient::Connect(url, "test-token", opts, std::nullopt, [server](const livekit::SignalEvent&) {});
     bool failed = (res.error != std::error_code{});
     TEST_ASSERT(failed, "Expected validation failure, but succeeded!");
+    TEST_ASSERT(server->v1_requests.load() == 1, "v1 endpoint should be attempted once");
+    TEST_ASSERT(server->v0_requests.load() == 0, "non-404 v1 failure must not downgrade to v0");
     server->Stop();
     std::cout << "TestValidationFail PASSED!" << std::endl;
+}
+
+asio::awaitable<void> TestV1FallbackOnlyOn404() {
+    std::cout << "Running TestV1FallbackOnlyOn404..." << std::endl;
+    auto executor = co_await asio::this_coro::executor;
+    auto& server_io = static_cast<asio::io_context&>(executor.context());
+
+    auto server = std::make_shared<MockServer>(server_io);
+    g_keep_alive_servers.push_back(server);
+    server->SetV1Status(404);
+    server->SetMockJoinSids("participant_v0_fallback");
+    server->StartAccept();
+
+    std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
+    livekit::SignalOptions opts;
+    opts.single_peer_connection = true;
+
+    auto res = co_await livekit::SignalClient::Connect(
+        url, "test-token", opts, std::nullopt,
+        [server](const livekit::SignalEvent&) {});
+    TEST_ASSERT(!res.error, "404 compatibility fallback should connect through v0");
+    TEST_ASSERT(res.client && !res.client->is_single_pc_mode_active(),
+                "successful 404 fallback must record dual-PC/v0 mode");
+    TEST_ASSERT(server->v1_requests.load() == 1, "v1 endpoint should be attempted once");
+    TEST_ASSERT(server->v0_requests.load() == 1, "404 v1 response should downgrade exactly once");
+    TEST_ASSERT(livekit::IsWebSocketHttpStatus(livekit::MakeWebSocketHttpError(404), 404),
+                "HTTP handshake error must preserve status code");
+
+    res.client->Close();
+    server->Stop();
+    std::cout << "TestV1FallbackOnlyOn404 PASSED!" << std::endl;
 }
 
 asio::awaitable<void> TestHeartbeat() {
@@ -857,6 +909,7 @@ asio::awaitable<void> TestWebRTCIntegration() {
     auto server = std::make_shared<MockServer>(server_io);
     g_keep_alive_servers.push_back(server);
     server->SetMockJoinSids("webrtc_room_test");
+    server->SetJoinPublishCodecs({"video/H264"});
     server->StartAccept();
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
@@ -869,6 +922,11 @@ asio::awaitable<void> TestWebRTCIntegration() {
     bool ok = co_await room->Connect(url, "test-token", opts);
     TEST_ASSERT(ok, "Room connection failed");
     TEST_ASSERT(room->connection_state() == livekit::ConnectionState::Connected, "Room not connected");
+    TEST_ASSERT(room->join_response() &&
+                room->join_response()->participant().sid() == "webrtc_room_test",
+                "Room did not retain the consumed JoinResponse");
+    TEST_ASSERT(room->enabled_publish_codecs() == std::vector<std::string>{"video/h264"},
+                "Room did not normalize the server publish codec policy");
 
     room->Disconnect();
     server->Stop();
@@ -1040,6 +1098,19 @@ asio::awaitable<void> TestRoomReconnectAndTrackRecovery() {
                 "Resume reconnect emitted a full-restart republish callback");
     TEST_ASSERT(room->local_participant()->tracks().size() == 1,
                 "Resume reconnect did not preserve the local publication state");
+    {
+        std::lock_guard<std::mutex> lock(server2->req_mutex);
+        const livekit::proto::SyncState* sync = nullptr;
+        for (const auto& request : server2->received_requests) {
+            if (request.has_sync_state()) sync = &request.sync_state();
+        }
+        TEST_ASSERT(sync != nullptr, "Resume reconnect did not send SyncState");
+        TEST_ASSERT(sync->has_subscription() && !sync->subscription().subscribe(),
+                    "SyncState did not encode the auto-subscribe baseline");
+        TEST_ASSERT(sync->publish_tracks_size() == 1 &&
+                    sync->publish_tracks(0).track().sid() == "track_real_123",
+                    "SyncState did not include the existing local publication");
+    }
 
     room->Disconnect();
     server2->CloseActiveConnections();
@@ -1063,6 +1134,7 @@ asio::awaitable<void> TestRoomReconnectExhaustion() {
     opts.create_webrtc_pc = false;
     opts.connect_timeout = std::chrono::milliseconds(500);
     opts.reconnect_timeout = std::chrono::milliseconds(500);
+    opts.timeouts.reconnect_total = std::chrono::seconds(5);
 
     auto room = livekit::Room::Create(executor);
     auto listener = std::make_shared<TestRoomListener>();
@@ -1076,7 +1148,7 @@ asio::awaitable<void> TestRoomReconnectExhaustion() {
 
     std::cout << "TestRoomReconnectExhaustion: Waiting for reconnect attempts to exhaust..." << std::endl;
     asio::steady_timer timer(executor);
-    timer.expires_after(std::chrono::milliseconds(10000));
+    timer.expires_after(std::chrono::milliseconds(7000));
     co_await timer.async_wait(asio::use_awaitable);
 
     TEST_ASSERT(room->connection_state() == livekit::ConnectionState::Disconnected, "Room should be Disconnected after reconnect exhaustion");
@@ -1095,6 +1167,7 @@ int main() {
     asio::co_spawn(io_ctx, []() -> asio::awaitable<void> {
         try {
             co_await TestConnectAndJoin();
+            co_await TestV1FallbackOnlyOn404();
             co_await TestValidationFail();
             co_await TestHeartbeat();
             co_await TestReconnectionAndQueueing();
