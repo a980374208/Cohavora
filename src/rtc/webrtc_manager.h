@@ -19,7 +19,7 @@ public:
     void Deinitialize();
 
     webrtc::Thread* network_thread() const { return network_thread_.get(); }
-    webrtc::Thread* worker_thread() const { return signaling_thread_.get(); }
+    webrtc::Thread* worker_thread() const { return worker_thread_.get(); }
     webrtc::Thread* signaling_thread() const { return signaling_thread_.get(); }
 
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory() const { return factory_; }
@@ -29,11 +29,19 @@ public:
         if (!adm_ || !worker_thread_) return false;
         return worker_thread_->BlockingCall([this, index]() {
             if (adm_) {
-                adm_->StopPlayout();
-                adm_->SetPlayoutDevice(index);
-                adm_->InitSpeaker();
-                adm_->InitPlayout();
-                adm_->StartPlayout();
+                const bool was_playing = adm_->Playing();
+                if (was_playing && adm_->StopPlayout() != 0) {
+                    return false;
+                }
+                if (adm_->SetPlayoutDevice(index) != 0) {
+                    return false;
+                }
+                if (was_playing) {
+                    if (adm_->InitSpeaker() != 0 || adm_->InitPlayout() != 0) {
+                        return false;
+                    }
+                    return adm_->StartPlayout() == 0;
+                }
                 return true;
             }
             return false;

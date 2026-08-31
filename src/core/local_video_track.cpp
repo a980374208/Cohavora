@@ -195,7 +195,9 @@ std::shared_ptr<LocalVideoTrack> LocalVideoTrack::createLocalVideoTrack(const st
 
         auto factory = WebRTCManager::Instance().factory();
         if (factory) {
-            WebRTCManager::Instance().worker_thread()->BlockingCall([&]() {
+            // MediaStreamTrack proxies are created and primarily accessed on
+            // the PeerConnection signaling thread.
+            WebRTCManager::Instance().signaling_thread()->BlockingCall([&]() {
                 auto rtc_src = RtcVideoSource::Create(source);
                 track->rtc_source_ = rtc_src;
                 auto rtc_video_track = factory->CreateVideoTrack(rtc_src, name);

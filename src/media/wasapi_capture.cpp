@@ -5,7 +5,9 @@
 #include <avrt.h>
 #include <wrl/implements.h>
 #include <spdlog/spdlog.h>
+#include <algorithm>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 
 namespace livekit {
@@ -270,8 +272,32 @@ void WasapiAudioCapture::CaptureThreadLoop() {
         mmcss_handle = AvSetMmThreadCharacteristicsW(L"Audio", &task_index);
     }
 
+    auto flush_stale_packets = [this]() {
+        if (!capture_client_) return;
+        UINT32 stale_packets = 0;
+        if (SUCCEEDED(capture_client_->GetNextPacketSize(&stale_packets))) {
+            while (stale_packets > 0) {
+                BYTE* pStale = nullptr;
+                UINT32 staleFrames = 0;
+                DWORD staleFlags = 0;
+                if (SUCCEEDED(capture_client_->GetBuffer(&pStale, &staleFrames, &staleFlags, nullptr, nullptr))) {
+                    capture_client_->ReleaseBuffer(staleFrames);
+                }
+                if (FAILED(capture_client_->GetNextPacketSize(&stale_packets))) break;
+            }
+        }
+    };
+
+    std::vector<int16_t> fifo_buffer;
+    const int frames_per_10ms = config_.target_sample_rate / 100;
+    const size_t samples_per_10ms = static_cast<size_t>(frames_per_10ms * config_.target_channels);
+    const uint64_t warmup_total_frames = std::max<uint64_t>(
+        1, static_cast<uint64_t>(config_.target_sample_rate) * 200 / 1000);
+    uint64_t warmup_frames_processed = 0;
+
     // 尝试初次初始化 (若当前未插麦克风也不会退出线程，而是保持后台监听等待插入)
     if (InitializeAudioClient()) {
+        flush_stale_packets();
         audio_client_->Start();
     } else {
         spdlog::info("[WasapiAudioCapture] No audio device on startup. Background watcher is listening for hotplug...");
@@ -279,9 +305,6 @@ void WasapiAudioCapture::CaptureThreadLoop() {
 
     HANDLE wait_handles[2] = { stop_event_, audio_event_ };
     auto last_packet_time = std::chrono::steady_clock::now();
-    std::vector<int16_t> fifo_buffer;
-    const int frames_per_10ms = config_.target_sample_rate / 100;
-    const size_t samples_per_10ms = static_cast<size_t>(frames_per_10ms * config_.target_channels);
 
     while (!stop_requested_.load()) {
         DWORD wait_res = WaitForMultipleObjects(2, wait_handles, FALSE, 20); // 20ms timeout
@@ -295,6 +318,9 @@ void WasapiAudioCapture::CaptureThreadLoop() {
             spdlog::info("[WasapiAudioCapture] Device changed event triggered. Re-initializing audio client to new default device...");
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
             if (InitializeAudioClient()) {
+                fifo_buffer.clear();
+                flush_stale_packets();
+                warmup_frames_processed = 0;
                 if (SUCCEEDED(audio_client_->Start())) {
                     spdlog::info("[WasapiAudioCapture] Audio client successfully restarted on newly plugged/selected device!");
                 }
@@ -315,6 +341,9 @@ void WasapiAudioCapture::CaptureThreadLoop() {
                 spdlog::warn("[WasapiAudioCapture] Audio device invalidated (hr=0x{:08x}). Attempting to re-initialize...", static_cast<uint32_t>(hr));
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
                 if (InitializeAudioClient()) {
+                    fifo_buffer.clear();
+                    flush_stale_packets();
+                    warmup_frames_processed = 0;
                     audio_client_->Start();
                 }
             }
@@ -365,6 +394,27 @@ void WasapiAudioCapture::CaptureThreadLoop() {
                     pcm_out.assign(target_frames * config_.target_channels, 0);
                 }
 
+                // 按实际音频帧计时，而不是按 WASAPI 包数计时。静音包同样推进
+                // 设备预热窗口，避免用户晚些开口时被错误地再次渐入。
+                if (!pcm_out.empty() && warmup_frames_processed < warmup_total_frames) {
+                    const size_t channels = std::max(1, config_.target_channels);
+                    const size_t frames = pcm_out.size() / channels;
+                    for (size_t frame = 0; frame < frames; ++frame) {
+                        const uint64_t numerator = std::min(warmup_frames_processed,
+                                                            warmup_total_frames);
+                        for (size_t channel = 0; channel < channels; ++channel) {
+                            const size_t index = frame * channels + channel;
+                            const int64_t scaled = static_cast<int64_t>(pcm_out[index]) *
+                                                   static_cast<int64_t>(numerator) /
+                                                   static_cast<int64_t>(warmup_total_frames);
+                            pcm_out[index] = static_cast<int16_t>(scaled);
+                        }
+                        if (warmup_frames_processed < warmup_total_frames) {
+                            ++warmup_frames_processed;
+                        }
+                    }
+                }
+
                 if (!pcm_out.empty()) {
                     fifo_buffer.insert(fifo_buffer.end(), pcm_out.begin(), pcm_out.end());
                 }
@@ -397,6 +447,9 @@ void WasapiAudioCapture::CaptureThreadLoop() {
                 spdlog::warn("[WasapiAudioCapture] Microphone capture stalled (1s no data). Re-initializing device...");
                 std::cout << "[WASAPI WATCHDOG] Microphone stream stalled. Re-initializing default microphone..." << std::endl;
                 if (InitializeAudioClient()) {
+                    fifo_buffer.clear();
+                    flush_stale_packets();
+                    warmup_frames_processed = 0;
                     if (SUCCEEDED(audio_client_->Start())) {
                         std::cout << "[WASAPI WATCHDOG] Successfully recovered microphone stream!" << std::endl;
                     }
