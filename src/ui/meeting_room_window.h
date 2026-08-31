@@ -79,6 +79,13 @@ public:
 	float remoteVolume() const { return _remoteVolume; }
 	bool isLocallyMuted() const { return _isLocallyMuted; }
 
+	// Pin 钉住与身份
+	void setPinned(bool pinned) { _isPinned = pinned; update(); }
+	bool isPinned() const { return _isPinned; }
+
+	QString identity() const { return _identity; }
+	void setIdentity(const QString &id) { _identity = id; }
+
 	// PIP 小窗交互
 	void setPipMode(bool pip) { _isPip = pip; update(); }
 	bool isPipMode() const { return _isPip; }
@@ -86,6 +93,7 @@ public:
 signals:
 	void tileDoubleClicked();
 	void tileClicked();
+	void pinToggled(bool pinned);
 	void remoteVolumeChanged(float volume);
 	void remoteLocalMuteToggled(bool muted);
 
@@ -101,13 +109,16 @@ private:
 	void drawAvatarPlaceholder(QPainter &p, const QRect &r);
 	void drawVideoFrame(QPainter &p, const QRect &r);
 	void drawBottomNameTag(QPainter &p, const QRect &r);
+	void drawNetworkQualityBadge(QPainter &p, const QRect &r);
 	void setupVolumeControls();
 
+	QString _identity;
 	QString _displayName;
 	bool _isLocal = false;
 	bool _isVideoActive = false;
 	bool _isAudioMuted = false;
 	bool _isSpeaking = false;
+	bool _isPinned = false;
 	float _audioLevel = 0.0f;
 	bool _isPip = false;
 
@@ -115,6 +126,7 @@ private:
 	float _remoteVolume = 1.0f;
 	bool _isLocallyMuted = false;
 	QPushButton *_volBtn = nullptr;
+	QPushButton *_pinBtn = nullptr;
 	QWidget *_volPopup = nullptr;
 	QSlider *_volSlider = nullptr;
 	QLabel *_volLabel = nullptr;
@@ -199,16 +211,21 @@ public:
 	void setAudioMuted(bool muted);
 	bool isAudioMuted() const { return _audioMuted; }
 
+	void setSpeakerMuted(bool muted);
+	bool isSpeakerMuted() const { return _speakerMuted; }
+
 	void setVideoEnabled(bool enabled);
 	bool isVideoEnabled() const { return _videoEnabled; }
 
 	void setParticipantCount(int count);
 
 	static bool HasAvailableAudioDevice();
+	static bool HasAvailableSpeakerDevice();
 	static bool HasAvailableVideoDevice();
 
 	// 事件流
 	rpl::producer<bool> toggleAudioRequested() const { return _toggleAudioStream.events(); }
+	rpl::producer<bool> toggleSpeakerRequested() const { return _toggleSpeakerStream.events(); }
 	rpl::producer<bool> toggleVideoRequested() const { return _toggleVideoStream.events(); }
 	rpl::producer<> shareScreenClicked() const { return _shareScreenStream.events(); }
 	rpl::producer<> inviteClicked() const { return _inviteStream.events(); }
@@ -223,6 +240,7 @@ public:
 	rpl::producer<livekit::SimulateScenarioType> simulateScenarioRequested() const { return _simulateScenarioStream.events(); }
 
 	void showAudioDeviceMenu(const QPoint &globalPos);
+	void showSpeakerDeviceMenu(const QPoint &globalPos);
 	void showSimulateScenarioMenu(const QPoint &globalPos);
 
 protected:
@@ -243,6 +261,7 @@ private:
 
 	int _hoveredId = -1;
 	bool _audioMuted = false;
+	bool _speakerMuted = false;
 	bool _videoEnabled = true;
 	int _participantCount = 1;
 	bool _isRecording = false;
@@ -258,6 +277,7 @@ private:
 	int _currentSpeakerIndex = 0;
 
 	rpl::event_stream<bool> _toggleAudioStream;
+	rpl::event_stream<bool> _toggleSpeakerStream;
 	rpl::event_stream<bool> _toggleVideoStream;
 	rpl::event_stream<> _shareScreenStream;
 	rpl::event_stream<> _inviteStream;
@@ -329,15 +349,14 @@ private:
 	VideoViewMode _viewMode = VideoViewMode::Grid;
 
 	// 参会状态
-	bool _hasRemoteUser = false;
-	QString _remoteUserName;
 	int _participantCount = 1;
+	QString _pinnedIdentity;
 
 	// UI 组件
 	RoomTopBarWidget *_topBar = nullptr;
 	QWidget *_stageContainer = nullptr;
 	VideoTileWidget *_localTile = nullptr;
-	VideoTileWidget *_remoteTile = nullptr;
+	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteTiles;
 	QLabel *_inviteHintBanner = nullptr;
 	RoomBottomBarWidget *_bottomBar = nullptr;
 

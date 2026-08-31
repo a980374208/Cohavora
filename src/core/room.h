@@ -136,6 +136,7 @@ public:
     // === 远端参会人独立音量与静音管理 ===
     void SetParticipantVolume(const std::string& identity_or_sid, double volume);
     void SetParticipantMuted(const std::string& identity_or_sid, bool muted);
+    void SetAudioOutputMuted(bool muted);
 
     // === 新增：E2EE 端到端加密管理器 ===
     void EnableE2ee(const E2eeOptions& options);
@@ -207,6 +208,7 @@ private:
     std::shared_ptr<LocalParticipant> local_participant_;
     std::map<std::string, std::shared_ptr<RemoteParticipant>> remote_participants_;
     std::vector<std::shared_ptr<RoomListener>> listeners_;
+    bool audio_output_muted_ = false;
     std::shared_ptr<E2eeManager> e2ee_manager_;
 
     // WebRTC PeerConnection 资源
@@ -241,9 +243,14 @@ private:
     webrtc::scoped_refptr<webrtc::DataChannelInterface> lossy_dc_;
     std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> remote_data_channels_;
     std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers_;
+    enum class RemoteTrackSinkThread {
+        Signaling,
+        MediaWorker,
+    };
     struct RemoteTrackSinkBinding {
         std::string track_sid;
         std::string rtc_track_id;
+        RemoteTrackSinkThread detach_thread;
         // Keeps both the WebRTC track and its native sink alive. Calling this
         // unregisters the raw sink pointer before those owners are released.
         std::function<void()> detach;

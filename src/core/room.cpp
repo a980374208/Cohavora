@@ -527,7 +527,6 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         CancelPendingOperations(OperationErrorCode::Cancelled,
                                 "connect_rollback",
                                 "connect transaction rolled back");
-        DetachRemoteTrackSinks(std::move(track_sinks));
         if (signal) signal->Close();
         for (auto& dc : data_channels) {
             if (dc) {
@@ -538,6 +537,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         data_channels.clear();
         if (publisher) publisher->Close();
         if (subscriber && subscriber != publisher) subscriber->Close();
+        DetachRemoteTrackSinks(std::move(track_sinks));
         publisher = nullptr;
         subscriber = nullptr;
         publisher_observer.reset();
@@ -594,7 +594,6 @@ void Room::Disconnect() {
     CancelPendingOperations(OperationErrorCode::Cancelled,
                             "disconnect",
                             "room disconnected");
-    DetachRemoteTrackSinks(std::move(track_sinks));
 
     if (signal && signal->is_connected()) {
         proto::SignalRequest request;
@@ -628,6 +627,7 @@ void Room::Disconnect() {
 
     if (publisher) publisher->Close();
     if (subscriber && subscriber != publisher) subscriber->Close();
+    DetachRemoteTrackSinks(std::move(track_sinks));
 
     publisher = nullptr;
     subscriber = nullptr;
@@ -693,7 +693,6 @@ asio::awaitable<void> Room::DisconnectAsync() {
     CancelPendingOperations(OperationErrorCode::Cancelled,
                             "disconnect",
                             "room disconnected");
-    DetachRemoteTrackSinks(std::move(track_sinks));
 
     if (signal && signal->is_connected()) {
         proto::SignalRequest request;
@@ -733,6 +732,7 @@ asio::awaitable<void> Room::DisconnectAsync() {
 
     if (publisher) publisher->Close();
     if (subscriber && subscriber != publisher) subscriber->Close();
+    DetachRemoteTrackSinks(std::move(track_sinks));
 
     publisher = nullptr;
     subscriber = nullptr;
@@ -1456,7 +1456,17 @@ void Room::DetachRemoteTrackSinks(std::vector<RemoteTrackSinkBinding> bindings) 
     for (auto& binding : bindings) {
         if (!binding.detach) continue;
         try {
-            binding.detach();
+            auto& manager = WebRTCManager::Instance();
+            auto* detach_thread = binding.detach_thread == RemoteTrackSinkThread::Signaling
+                ? manager.signaling_thread()
+                : manager.worker_thread();
+            if (detach_thread) {
+                detach_thread->BlockingCall([detach = std::move(binding.detach)]() mutable {
+                    detach();
+                });
+            } else {
+                binding.detach();
+            }
         } catch (const std::exception& error) {
             std::cerr << "[WEBRTC] Failed to detach remote track sink: "
                       << error.what() << std::endl;
@@ -2282,6 +2292,9 @@ void Room::AttachRemoteTrackToParticipant(
         }
 
         r_track->set_rtc_track(track);
+        if (kind == TrackKind::Audio && audio_output_muted_) {
+            r_track->set_muted(true);
+        }
 
         {
             std::lock_guard mlock(remote_media_mutex_);
@@ -2297,7 +2310,7 @@ void Room::AttachRemoteTrackToParticipant(
     if (kind == TrackKind::Audio) {
         auto audio_track = static_cast<webrtc::AudioTrackInterface*>(track.get());
         if (audio_track) {
-            audio_track->set_enabled(true);
+            audio_track->set_enabled(!r_track->muted());
         }
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
         auto last_voice_log_time = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
@@ -2335,6 +2348,7 @@ void Room::AttachRemoteTrackToParticipant(
         RemoteTrackSinkBinding binding{
             track_id,
             track->id(),
+            RemoteTrackSinkThread::Signaling,
             [track, sink]() {
                 auto* attached_track = static_cast<webrtc::AudioTrackInterface*>(track.get());
                 if (attached_track) attached_track->RemoveSink(sink.get());
@@ -2377,6 +2391,7 @@ void Room::AttachRemoteTrackToParticipant(
         RemoteTrackSinkBinding binding{
             track_id,
             track->id(),
+            RemoteTrackSinkThread::MediaWorker,
             [track, sink]() {
                 auto* attached_track = static_cast<webrtc::VideoTrackInterface*>(track.get());
                 if (attached_track) attached_track->RemoveSink(sink.get());
@@ -3829,7 +3844,6 @@ asio::awaitable<void> Room::AttemptReconnect() {
                 CancelPendingOperations(OperationErrorCode::Cancelled,
                                         "full_restart",
                                         "old session replaced by full restart");
-                DetachRemoteTrackSinks(std::move(old_track_sinks));
                 if (old_signal) old_signal->Close();
                 for (auto& dc : old_data_channels) {
                     if (dc) {
@@ -3840,6 +3854,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
                 old_data_channels.clear();
                 if (old_publisher) old_publisher->Close();
                 if (old_subscriber && old_subscriber != old_publisher) old_subscriber->Close();
+                DetachRemoteTrackSinks(std::move(old_track_sinks));
                 old_publisher = nullptr;
                 old_subscriber = nullptr;
                 old_publisher_observer.reset();
@@ -3933,7 +3948,6 @@ asio::awaitable<void> Room::AttemptReconnect() {
     CancelPendingOperations(OperationErrorCode::ReconnectExhausted,
                             "reconnect_exhausted",
                             last_error);
-    DetachRemoteTrackSinks(std::move(track_sinks));
     if (signal) signal->Close();
     for (auto& dc : data_channels) {
         if (dc) {
@@ -3944,6 +3958,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
     data_channels.clear();
     if (publisher) publisher->Close();
     if (subscriber && subscriber != publisher) subscriber->Close();
+    DetachRemoteTrackSinks(std::move(track_sinks));
     publisher = nullptr;
     subscriber = nullptr;
     publisher_observer.reset();
@@ -4194,31 +4209,58 @@ asio::awaitable<RoomStatsReport> Room::GetStats() {
 }
 
 void Room::SetParticipantVolume(const std::string& identity_or_sid, double volume) {
-    std::lock_guard lock(room_mutex_);
-    for (auto& [sid, p] : remote_participants_) {
-        if (p->identity() == identity_or_sid || p->sid() == identity_or_sid) {
-            for (auto& [tsid, pub] : p->tracks()) {
-                if (pub && pub->track() && pub->track()->kind() == TrackKind::Audio) {
-                    pub->track()->set_volume(volume);
-                    Log("MEDIA", "VOLUME_SET", "已设置参会人 [" + p->identity() + "] 音量为 " + std::to_string(static_cast<int>(volume * 100)) + "%");
+    std::string changed_identity;
+    {
+        std::lock_guard lock(room_mutex_);
+        for (auto& [sid, p] : remote_participants_) {
+            if (p->identity() == identity_or_sid || p->sid() == identity_or_sid) {
+                for (auto& [tsid, pub] : p->tracks()) {
+                    if (pub && pub->track() && pub->track()->kind() == TrackKind::Audio) {
+                        pub->track()->set_volume(volume);
+                        changed_identity = p->identity();
+                    }
                 }
             }
         }
+    }
+    if (!changed_identity.empty()) {
+        Log("MEDIA", "VOLUME_SET", "已设置参会人 [" + changed_identity + "] 音量为 " + std::to_string(static_cast<int>(volume * 100)) + "%");
     }
 }
 
 void Room::SetParticipantMuted(const std::string& identity_or_sid, bool muted) {
-    std::lock_guard lock(room_mutex_);
-    for (auto& [sid, p] : remote_participants_) {
-        if (p->identity() == identity_or_sid || p->sid() == identity_or_sid) {
-            for (auto& [tsid, pub] : p->tracks()) {
-                if (pub && pub->track() && pub->track()->kind() == TrackKind::Audio) {
-                    pub->track()->set_muted(muted);
-                    Log("MEDIA", "MUTE_SET", "已设置参会人 [" + p->identity() + "] 本地静音=" + (muted ? "true" : "false"));
+    std::string changed_identity;
+    {
+        std::lock_guard lock(room_mutex_);
+        for (auto& [sid, p] : remote_participants_) {
+            if (p->identity() == identity_or_sid || p->sid() == identity_or_sid) {
+                for (auto& [tsid, pub] : p->tracks()) {
+                    if (pub && pub->track() && pub->track()->kind() == TrackKind::Audio) {
+                        pub->track()->set_muted(muted);
+                        changed_identity = p->identity();
+                    }
                 }
             }
         }
     }
+    if (!changed_identity.empty()) {
+        Log("MEDIA", "MUTE_SET", "已设置参会人 [" + changed_identity + "] 本地静音=" + (muted ? "true" : "false"));
+    }
+}
+
+void Room::SetAudioOutputMuted(bool muted) {
+    {
+        std::lock_guard lock(room_mutex_);
+        audio_output_muted_ = muted;
+        for (auto& [sid, p] : remote_participants_) {
+            for (auto& [tsid, pub] : p->tracks()) {
+                if (pub && pub->track() && pub->track()->kind() == TrackKind::Audio) {
+                    pub->track()->set_muted(muted);
+                }
+            }
+        }
+    }
+    Log("MEDIA", "SPEAKER_MUTE", "已设置房间音频播放输出静音=" + std::string(muted ? "true" : "false"));
 }
 
 void Room::SimulateScenario(SimulateScenarioType scenario) {

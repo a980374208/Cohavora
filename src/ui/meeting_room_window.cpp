@@ -95,6 +95,32 @@ VideoTileWidget::VideoTileWidget(const QString &displayName, bool isLocal, QWidg
 }
 
 void VideoTileWidget::setupVolumeControls() {
+	_pinBtn = new QPushButton(QString::fromUtf8("📌"), this);
+	_pinBtn->setFixedSize(28, 28);
+	_pinBtn->setToolTip(QString::fromUtf8("钉住此画面 (Pin) / 取消钉住"));
+	_pinBtn->setStyleSheet(R"(
+		QPushButton {
+			background-color: rgba(0, 0, 0, 150);
+			border-radius: 14px;
+			color: white;
+			border: none;
+			font-size: 13px;
+		}
+		QPushButton:hover {
+			background-color: rgba(22, 119, 255, 220);
+		}
+	)");
+	_pinBtn->hide();
+
+	connect(_pinBtn, &QPushButton::clicked, [this] {
+		_isPinned = !_isPinned;
+		_pinBtn->setStyleSheet(_isPinned ?
+			"background-color: #1677ff; border-radius: 14px; color: white; border: none; font-size: 13px;" :
+			"background-color: rgba(0, 0, 0, 150); border-radius: 14px; color: white; border: none; font-size: 13px;");
+		emit pinToggled(_isPinned);
+		update();
+	});
+
 	if (_isLocal) return;
 
 	_volBtn = new QPushButton(QString::fromUtf8("🔊"), this);
@@ -198,11 +224,13 @@ void VideoTileWidget::setupVolumeControls() {
 }
 
 void VideoTileWidget::enterEventHook(QEnterEvent *e) {
+	if (_pinBtn) _pinBtn->show();
 	if (_volBtn) _volBtn->show();
 	Ui::RpWidget::enterEventHook(e);
 }
 
 void VideoTileWidget::leaveEventHook(QEvent *e) {
+	if (_pinBtn && !_isPinned) _pinBtn->hide();
 	if (_volBtn && (!_volPopup || !_volPopup->isVisible())) {
 		_volBtn->hide();
 	}
@@ -214,6 +242,9 @@ void VideoTileWidget::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
 
+	if (_pinBtn) {
+		_pinBtn->move(_volBtn ? (w - 70) : (w - 36), 10);
+	}
 	if (_volBtn) {
 		_volBtn->move(w - 36, 10);
 	}
@@ -299,77 +330,107 @@ void VideoTileWidget::paintEvent(QPaintEvent *e) {
 	}
 
 	drawBottomNameTag(p, r);
+	drawNetworkQualityBadge(p, r);
 
 	// 画中画模式下的基础边框
 	if (_isPip) {
 		p.setClipping(false);
-		p.setPen(QPen(_isSpeaking ? QColor(0x16, 0x77, 0xff) : QColor(0x86, 0x90, 0x9c), _isSpeaking ? 3.0 : 2.0));
+		p.setPen(QPen(_isSpeaking ? QColor(0x00, 0xb4, 0x2a) : QColor(0x86, 0x90, 0x9c), _isSpeaking ? 3.0 : 2.0));
 		p.setBrush(Qt::NoBrush);
 		p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 10, 10);
 	}
 
-	// 说话中：绘制高质感双层蓝色外发光光圈 (Halo Glow)
-	if (_isSpeaking) {
+	// 说话中：绘制高质感双层绿色呼吸发光光圈 (Active Speaker Halo)
+	if (_isSpeaking && !_isAudioMuted) {
 		p.save();
 		p.setClipping(false);
 		p.setBrush(Qt::NoBrush);
 
-		// 外层柔和淡蓝弥散光晕 (Glow Layer)
-		QPen outerGlow(QColor(22, 119, 255, 65), 5.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+		int alpha = static_cast<int>(60 + 150 * std::clamp(_audioLevel * 4.0f, 0.1f, 1.0f));
+		QPen outerGlow(QColor(0, 180, 42, alpha / 3), 6.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
 		p.setPen(outerGlow);
-		p.drawRoundedRect(r.adjusted(3, 3, -3, -3), _isPip ? 10 : 6, _isPip ? 10 : 6);
+		p.drawRoundedRect(r.adjusted(3, 3, -3, -3), _isPip ? 10 : 8, _isPip ? 10 : 8);
 
-		// 内层明亮高亮聚焦环 (Focused Ring)
-		QPen innerFocus(QColor(22, 119, 255, 235), 2.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+		QPen innerFocus(QColor(0, 180, 42, alpha), 2.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
 		p.setPen(innerFocus);
-		p.drawRoundedRect(r.adjusted(1, 1, -1, -1), _isPip ? 10 : 6, _isPip ? 10 : 6);
+		p.drawRoundedRect(r.adjusted(1, 1, -1, -1), _isPip ? 10 : 8, _isPip ? 10 : 8);
 
 		p.restore();
 	}
 }
 
+static std::pair<QColor, QColor> GenerateAvatarGradient(const QString &str) {
+	uint32_t hash = 5381;
+	QByteArray ba = str.toUtf8();
+	for (char c : ba) {
+		hash = ((hash << 5) + hash) + static_cast<uint8_t>(c);
+	}
+	static const std::vector<std::pair<QColor, QColor>> gradients = {
+		{ QColor(0x3a, 0x7b, 0xd5), QColor(0x3a, 0x60, 0x73) }, // Sea Blue
+		{ QColor(0x6a, 0x11, 0xcb), QColor(0x25, 0x75, 0xfc) }, // Purple-Blue
+		{ QColor(0x11, 0x99, 0x8e), QColor(0x38, 0xef, 0x7d) }, // Emerald Green
+		{ QColor(0xf1, 0x27, 0x11), QColor(0xf5, 0xaf, 0x19) }, // Sunset Amber
+		{ QColor(0x8e, 0x2d, 0xe2), QColor(0x4a, 0x00, 0xe0) }, // Royal Purple
+		{ QColor(0x00, 0xb4, 0xd8), QColor(0x00, 0x77, 0xb6) }, // Ocean Cyan
+		{ QColor(0xe0, 0x56, 0xfd), QColor(0x68, 0x6d, 0xe0) }, // Magenta
+		{ QColor(0xeb, 0x3b, 0x5a), QColor(0xfa, 0x82, 0x31) }, // Coral
+	};
+	return gradients[hash % gradients.size()];
+}
+
 void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
-	p.fillRect(r, QColor(0xff, 0xff, 0xff));
+	p.fillRect(r, QColor(0x18, 0x1a, 0x22));
 
 	const int cx = r.center().x();
 	const int cy = r.center().y();
+	const int minDim = std::min(r.width(), r.height());
+	const int outerRadius = std::clamp(minDim * 22 / 100, 28, 54);
 
-	const int outerRadius = 46;
-
-	// 正在说话时：在头像外围绘制随音量动态扩散的声波涟漪光环 (Ripple Aura)
-	if (_isSpeaking) {
+	// 正在说话时：在头像外围绘制随音量动态扩散的声波涟漪光环
+	if (_isSpeaking && !_isAudioMuted) {
 		p.save();
 		const int auraRadius = outerRadius + static_cast<int>(std::clamp(_audioLevel, 0.1f, 1.0f) * 14.0f);
-		p.setPen(QPen(QColor(22, 119, 255, 80), 2.0));
-		p.setBrush(QColor(22, 119, 255, 30));
-		p.drawEllipse(QPoint(cx, cy - 16), auraRadius, auraRadius);
+		p.setPen(QPen(QColor(0x00, 0xb4, 0x2a, 100), 2.0));
+		p.setBrush(QColor(0x00, 0xb4, 0x2a, 35));
+		p.drawEllipse(QPoint(cx, cy - 14), auraRadius, auraRadius);
 		p.restore();
 	}
 
-	p.setPen(QPen(_isSpeaking ? QColor(22, 119, 255, 130) : QColor(0xf2, 0xf3, 0xf5), _isSpeaking ? 2.0 : 1.5));
-	p.setBrush(QColor(0xf7, 0xf8, 0xfa));
-	p.drawEllipse(QPoint(cx, cy - 16), outerRadius, outerRadius);
+	// 质感色彩哈希渐变圆形头像
+	p.save();
+	auto [col1, col2] = GenerateAvatarGradient(_displayName.isEmpty() ? _identity : _displayName);
+	QLinearGradient grad(cx - outerRadius, cy - 14 - outerRadius, cx + outerRadius, cy - 14 + outerRadius);
+	grad.setColorAt(0.0, col1);
+	grad.setColorAt(1.0, col2);
 
-	const int innerRadius = 13;
 	p.setPen(Qt::NoPen);
-	p.setBrush(_isLocal ? QColor(0x16, 0x77, 0xff) : QColor(0xff, 0x7d, 0x00));
-	p.drawEllipse(QPoint(cx, cy - 4), innerRadius, innerRadius);
+	p.setBrush(grad);
+	p.drawEllipse(QPoint(cx, cy - 14), outerRadius, outerRadius);
 
-	p.setBrush(Qt::white);
-	p.drawEllipse(QPoint(cx, cy - 8), 4, 4);
-	QPainterPath bodyPath;
-	bodyPath.moveTo(cx - 6, cy + 3);
-	bodyPath.arcTo(cx - 6, cy - 3, 12, 12, 0, 180);
-	bodyPath.closeSubpath();
-	p.fillPath(bodyPath, Qt::white);
+	QString initial = _displayName.isEmpty() ? (_identity.isEmpty() ? "U" : _identity.left(1)) : _displayName.left(1);
+	if (!_displayName.isEmpty()) {
+		QString clean = _displayName;
+		clean.remove(" (我)");
+		clean.remove(" (Host)");
+		if (!clean.isEmpty()) {
+			initial = clean.left(1).toUpper();
+		}
+	}
+	QFont avatarFont("Microsoft YaHei", outerRadius * 8 / 10, QFont::Bold);
+	p.setFont(avatarFont);
+	p.setPen(Qt::white);
+	QRect avatarRect(cx - outerRadius, cy - 14 - outerRadius, outerRadius * 2, outerRadius * 2);
+	p.drawText(avatarRect, Qt::AlignCenter, initial);
+	p.restore();
 
-	QFont font("Microsoft YaHei", 12, QFont::Bold);
+	// 昵称与麦克风指示
+	QFont font("Microsoft YaHei", std::clamp(minDim * 6 / 100, 9, 12), QFont::Bold);
 	p.setFont(font);
 	QFontMetrics fm(font);
 	const int textW = fm.horizontalAdvance(_displayName);
 	const int totalW = textW + 24;
 	const int startX = cx - totalW / 2;
-	const int nameY = cy + outerRadius + 8;
+	const int nameY = cy + outerRadius + 6;
 
 	const int micX = startX + 6;
 	const int micY = nameY + 6;
@@ -381,8 +442,27 @@ void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
 		p.drawLine(micX - 5, micY - 6, micX + 5, micY + 7);
 	}
 
-	p.setPen(QColor(0x1f, 0x23, 0x29));
+	p.setPen(QColor(0xf0, 0xf2, 0xf5));
 	p.drawText(QRect(startX + 18, nameY - 2, textW + 10, 20), Qt::AlignLeft | Qt::AlignVCenter, _displayName);
+}
+
+void VideoTileWidget::drawNetworkQualityBadge(QPainter &p, const QRect &r) {
+	p.save();
+	const int bx = r.x() + 10;
+	const int by = r.y() + 12;
+
+	p.setPen(Qt::NoPen);
+	p.setBrush(QColor(0x00, 0xb4, 0x2a));
+	p.drawRect(bx, by + 6, 2, 4);
+	p.drawRect(bx + 4, by + 3, 2, 7);
+	p.drawRect(bx + 8, by, 2, 10);
+
+	if (_isPinned) {
+		p.setFont(QFont("Segoe UI Emoji", 10));
+		p.setPen(Qt::white);
+		p.drawText(QRect(bx + 16, by - 2, 16, 16), Qt::AlignCenter, QString::fromUtf8("📌"));
+	}
+	p.restore();
 }
 
 void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
@@ -836,6 +916,11 @@ void RoomBottomBarWidget::setAudioMuted(bool muted) {
 	update();
 }
 
+void RoomBottomBarWidget::setSpeakerMuted(bool muted) {
+	_speakerMuted = muted;
+	update();
+}
+
 void RoomBottomBarWidget::setVideoEnabled(bool enabled) {
 	_videoEnabled = enabled;
 	update();
@@ -851,6 +936,15 @@ bool RoomBottomBarWidget::HasAvailableAudioDevice() {
 		auto mics = livekit::WasapiEnumerator::EnumerateInputDevices();
 		auto defMic = livekit::WasapiEnumerator::GetDefaultInputDevice();
 		return !mics.empty() && !defMic.id.empty();
+	} catch (...) {
+		return false;
+	}
+}
+
+bool RoomBottomBarWidget::HasAvailableSpeakerDevice() {
+	try {
+		auto spks = livekit::WasapiEnumerator::EnumerateOutputDevices();
+		return !spks.empty();
 	} catch (...) {
 		return false;
 	}
@@ -872,6 +966,7 @@ void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 
 	_toolItems = {
 		{ 1, QString::fromUtf8("解除静音"), QString::fromUtf8("静音"), QRect(), true },
+		{ 11, QString::fromUtf8("开启扬声器"), QString::fromUtf8("扬声器"), QRect(), true },
 		{ 2, QString::fromUtf8("开启视频"), QString::fromUtf8("停止视频"), QRect(), true },
 		{ 3, QString::fromUtf8("共享屏幕"), QString::fromUtf8("共享屏幕"), QRect(), true },
 		{ 4, QString::fromUtf8("邀请"), QString::fromUtf8("邀请"), QRect(), true },
@@ -885,10 +980,10 @@ void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 	int itemW = 56;
 	int gap = 6;
 	if (w < 880) {
-		itemW = 48;
-		gap = 3;
-	} else if (w < 1000) {
-		itemW = 52;
+		itemW = 46;
+		gap = 2;
+	} else if (w < 1020) {
+		itemW = 50;
 		gap = 4;
 	}
 
@@ -967,6 +1062,30 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 			if (muted) {
 				p.drawLine(cx - 7, cy - 8, cx + 7, cy + 9);
 			}
+		} else if (item.id == 11) {
+			const bool muted = _speakerMuted;
+			p.setPen(QPen(muted ? QColor(0xf5, 0x3f, 0x3f) : QColor(0x1f, 0x23, 0x29), 1.8, Qt::SolidLine, Qt::RoundCap));
+			p.setBrush(Qt::NoBrush);
+
+			// 喇叭后腔方块
+			p.drawRoundedRect(QRect(cx - 7, cy - 3, 4, 7), 1, 1);
+			// 喇叭扩音锥形
+			QPainterPath hornPath;
+			hornPath.moveTo(cx - 3, cy - 3);
+			hornPath.lineTo(cx + 1, cy - 7);
+			hornPath.lineTo(cx + 1, cy + 7);
+			hornPath.lineTo(cx - 3, cy + 3);
+			hornPath.closeSubpath();
+			p.drawPath(hornPath);
+
+			if (muted) {
+				// 静音状态绘制红色斜线
+				p.drawLine(cx - 8, cy - 8, cx + 8, cy + 9);
+			} else {
+				// 开启状态绘制两道流畅声波弧线
+				p.drawArc(QRect(cx - 2, cy - 5, 8, 11), -55 * 16, 110 * 16);
+				p.drawArc(QRect(cx - 3, cy - 8, 13, 17), -55 * 16, 110 * 16);
+			}
 		} else if (item.id == 2) {
 			const bool closed = !_videoEnabled;
 			p.setPen(QPen(closed ? QColor(0xf5, 0x3f, 0x3f) : QColor(0x1f, 0x23, 0x29), 1.8, Qt::SolidLine, Qt::RoundCap));
@@ -1019,30 +1138,25 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 				}
 			}
 		} else if (item.id == 10) {
-			// 绘制 Bug (Simulate scenario) 图标
 			const QColor bugCol = hovered ? QColor(0x16, 0x77, 0xff) : QColor(0x1f, 0x23, 0x29);
 			p.setPen(QPen(bugCol, 1.6, Qt::SolidLine, Qt::RoundCap));
 			p.setBrush(Qt::NoBrush);
-			// 虫子身体 (椭圆)
 			p.drawRoundedRect(QRect(cx - 5, cy - 4, 10, 11), 4, 4);
-			// 虫子头部 (小圆弧)
 			p.drawArc(QRect(cx - 3, cy - 8, 6, 6), 0, 180 * 16);
-			// 触角
 			p.drawLine(cx - 2, cy - 7, cx - 5, cy - 10);
 			p.drawLine(cx + 2, cy - 7, cx + 5, cy - 10);
-			// 3 对脚
 			p.drawLine(cx - 5, cy - 2, cx - 9, cy - 4);
 			p.drawLine(cx + 5, cy - 2, cx + 9, cy - 4);
 			p.drawLine(cx - 5, cy + 2, cx - 10, cy + 2);
 			p.drawLine(cx + 5, cy + 2, cx + 10, cy + 2);
 			p.drawLine(cx - 5, cy + 6, cx - 9, cy + 8);
 			p.drawLine(cx + 5, cy + 6, cx + 9, cy + 8);
-			// 脊线
 			p.drawLine(cx, cy - 4, cx, cy + 7);
 		}
 
 		QString title = item.title;
 		if (item.id == 1) title = _audioMuted ? QString::fromUtf8("解除静音") : QString::fromUtf8("静音");
+		else if (item.id == 11) title = _speakerMuted ? QString::fromUtf8("开启扬声器") : QString::fromUtf8("扬声器");
 		else if (item.id == 2) title = _videoEnabled ? QString::fromUtf8("停止视频") : QString::fromUtf8("开启视频");
 		else if (item.id == 5) title = QString::fromUtf8("成员(%1)").arg(_participantCount);
 
@@ -1171,6 +1285,68 @@ void RoomBottomBarWidget::showAudioDeviceMenu(const QPoint &globalPos) {
 	menu.exec(globalPos);
 }
 
+void RoomBottomBarWidget::showSpeakerDeviceMenu(const QPoint &globalPos) {
+	QMenu menu(this);
+	menu.setStyleSheet(R"(
+		QMenu {
+			background-color: #ffffff;
+			border: 1px solid #e5e6eb;
+			border-radius: 8px;
+			padding: 6px;
+			font-size: 13px;
+			color: #1f2329;
+		}
+		QMenu::item {
+			padding: 6px 24px 6px 20px;
+			border-radius: 4px;
+		}
+		QMenu::item:selected {
+			background-color: #f2f3f5;
+			color: #1677ff;
+		}
+		QMenu::separator {
+			height: 1px;
+			background-color: #e5e6eb;
+			margin: 6px 8px;
+		}
+	)");
+
+	QAction *spkHeader = menu.addAction(QString::fromUtf8("🔊 选择扬声器 (输出设备)"));
+	spkHeader->setEnabled(false);
+
+	auto outputDevices = livekit::WasapiEnumerator::EnumerateOutputDevices();
+	QActionGroup *spkGroup = new QActionGroup(&menu);
+	for (size_t i = 0; i < outputDevices.size(); ++i) {
+		const auto &dev = outputDevices[i];
+		QString title = QString::fromStdString(dev.name);
+		if (dev.is_default) {
+			title += QString::fromUtf8(" (系统默认)");
+		}
+		QAction *act = menu.addAction(title);
+		act->setCheckable(true);
+		if (static_cast<int>(i) == _currentSpeakerIndex) {
+			act->setChecked(true);
+		}
+		spkGroup->addAction(act);
+
+		connect(act, &QAction::triggered, [this, idx = static_cast<int>(i)] {
+			_currentSpeakerIndex = idx;
+			_speakerDeviceStream.fire_copy(idx);
+		});
+	}
+
+	menu.addSeparator();
+
+	QAction *toggleMuteAct = menu.addAction(_speakerMuted ? QString::fromUtf8("🔊 开启扬声器输出") : QString::fromUtf8("🔇 静音扬声器输出"));
+	connect(toggleMuteAct, &QAction::triggered, [this] {
+		_speakerMuted = !_speakerMuted;
+		_toggleSpeakerStream.fire_copy(_speakerMuted);
+		update();
+	});
+
+	menu.exec(globalPos);
+}
+
 void RoomBottomBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	const QPoint pos = e->pos();
 	int nextId = -1;
@@ -1194,9 +1370,14 @@ void RoomBottomBarWidget::mouseMoveEvent(QMouseEvent *e) {
 void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 	if (e->button() == Qt::RightButton) {
 		for (const auto &item : _toolItems) {
-			if (item.rect.contains(e->pos()) && item.id == 1) {
-				showAudioDeviceMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
-				return;
+			if (item.rect.contains(e->pos())) {
+				if (item.id == 1) {
+					showAudioDeviceMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
+					return;
+				} else if (item.id == 11) {
+					showSpeakerDeviceMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
+					return;
+				}
 			}
 		}
 	}
@@ -1227,6 +1408,26 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 						_audioMuted = true;
 					}
 					_toggleAudioStream.fire_copy(_audioMuted);
+					update();
+					break;
+				}
+				case 11: {
+					// 如果点击的是右侧下拉小三角区域 (宽 16px)
+					if (e->pos().x() > item.rect.right() - 16) {
+						showSpeakerDeviceMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
+						break;
+					}
+					if (_speakerMuted) {
+						if (!HasAvailableSpeakerDevice()) {
+							QMessageBox::warning(this, QString::fromUtf8("扬声器不可用"),
+								QString::fromUtf8("未检测到可用的扬声器输出设备，无法开启扬声器！"));
+							break;
+						}
+						_speakerMuted = false;
+					} else {
+						_speakerMuted = true;
+					}
+					_toggleSpeakerStream.fire_copy(_speakerMuted);
 					update();
 					break;
 				}
@@ -1415,6 +1616,7 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config, QWidget *parent)
 
 	// 4. 启动物理麦克风 WASAPI 采集
 	_wasapiCap = livekit::WasapiAudioCapture::Create();
+	_wasapiCap->EnableApm();
 	livekit::WasapiCaptureConfig acfg;
 	acfg.type = livekit::WasapiCaptureType::Microphone;
 	acfg.target_sample_rate = 48000;
@@ -1495,14 +1697,24 @@ void MeetingRoomWindow::setupNativeWindow() {
 void MeetingRoomWindow::initLayout() {
 	_topBar = new RoomTopBarWidget(this);
 	_stageContainer = new QWidget(this);
-	_stageContainer->setStyleSheet("background-color: #ffffff;");
+	_stageContainer->setStyleSheet("background-color: #12141a;");
 	_bottomBar = new RoomBottomBarWidget(this);
 
-	_remoteTile = new VideoTileWidget(QString::fromUtf8("远端参会人"), false, _stageContainer);
-	_remoteTile->hide();
-
 	_localTile = new VideoTileWidget(QString::fromUtf8("%1 (我)").arg(_config.displayName), true, _stageContainer);
+	_localTile->setIdentity("local");
 	_localTile->show();
+
+	connect(_localTile, &VideoTileWidget::tileDoubleClicked, [this] {
+		if (_pinnedIdentity == "local") _pinnedIdentity.clear();
+		else _pinnedIdentity = "local";
+		updateVideoLayout();
+	});
+
+	connect(_localTile, &VideoTileWidget::pinToggled, [this](bool pinned) {
+		if (pinned) _pinnedIdentity = "local";
+		else if (_pinnedIdentity == "local") _pinnedIdentity.clear();
+		updateVideoLayout();
+	});
 
 	_bottomBar->setAudioMuted(_config.audioMuted);
 	_bottomBar->setVideoEnabled(_config.videoEnabled);
@@ -1511,12 +1723,12 @@ void MeetingRoomWindow::initLayout() {
 	_localTile->setAudioMuted(_config.audioMuted);
 	_localTile->setVideoActive(_config.videoEnabled);
 
-	_inviteHintBanner = new QLabel(QString::fromUtf8("邀请您的联系人参加会议"), _stageContainer);
+	_inviteHintBanner = new QLabel(QString::fromUtf8("等待更多参会人加入会议..."), _stageContainer);
 	_inviteHintBanner->setAlignment(Qt::AlignCenter);
 	_inviteHintBanner->setStyleSheet(R"(
 		QLabel {
-			background-color: #f2f3f5;
-			color: #1f2329;
+			background-color: rgba(255, 255, 255, 25);
+			color: #e5e6eb;
 			border-radius: 8px;
 			font-size: 13px;
 			font-family: "Microsoft YaHei";
@@ -1590,6 +1802,13 @@ void MeetingRoomWindow::initLayout() {
 		LogToConsole(LogCategory::Media, "AUDIO", muted ? "用户点击静音麦克风" : "用户点击开启/解除麦克风静音");
 	}, lifetime());
 
+	_bottomBar->toggleSpeakerRequested() | rpl::on_next([this](bool muted) {
+		if (_room) {
+			_room->SetAudioOutputMuted(muted);
+		}
+		LogToConsole(LogCategory::Media, "SPEAKER", muted ? "用户点击静音扬声器 (关闭声音输出)" : "用户点击开启扬声器 (恢复声音输出)");
+	}, lifetime());
+
 	_bottomBar->toggleVideoRequested() | rpl::on_next([this](bool enabled) {
 		_config.videoEnabled = enabled;
 		_localTile->setVideoActive(enabled && _usingRealCamera);
@@ -1623,8 +1842,11 @@ void MeetingRoomWindow::initLayout() {
 	_bottomBar->participantsClicked() | rpl::on_next([this] {
 		QString userList = QString::fromUtf8("当前参会成员列表 (%1人)：\n1. %2 (我 - 本地)")
 			.arg(_participantCount).arg(_config.displayName);
-		if (_hasRemoteUser) {
-			userList += QString::fromUtf8("\n2. %1 (远端参会人)").arg(_remoteUserName.isEmpty() ? QString::fromUtf8("远端用户") : _remoteUserName);
+		int uIdx = 2;
+		for (const auto &[id, tile] : _remoteTiles) {
+			if (tile) {
+				userList += QString::fromUtf8("\n%1. %2 (远端参会人)").arg(uIdx++).arg(tile->displayName());
+			}
 		}
 		QMessageBox::information(this, QString::fromUtf8("参会成员"), userList);
 	}, lifetime());
@@ -1669,39 +1891,6 @@ void MeetingRoomWindow::initLayout() {
 		LogToConsole(LogCategory::Media, "DEVICE", QString("扬声器播放设备已切换为索引: %1").arg(idx));
 	}, lifetime());
 
-	connect(_remoteTile, &VideoTileWidget::remoteVolumeChanged, [this](float vol) {
-		_remoteVolumes[_remoteUserName] = vol;
-		if (_room && !_remoteUserName.isEmpty()) {
-			_room->SetParticipantVolume(_remoteUserName.toStdString(), vol);
-		}
-		LogToConsole(LogCategory::Media, "REMOTE_VOL", QString("远端参会人 [%1] 独立音量调整为: %2%").arg(_remoteUserName).arg(static_cast<int>(vol * 100)));
-	});
-
-	connect(_remoteTile, &VideoTileWidget::remoteLocalMuteToggled, [this](bool muted) {
-		if (muted) {
-			_locallyMutedUsers.insert(_remoteUserName);
-			if (_room && !_remoteUserName.isEmpty()) {
-				_room->SetParticipantMuted(_remoteUserName.toStdString(), true);
-			}
-			LogToConsole(LogCategory::Media, "REMOTE_MUTE", QString("已在本地静音远端参会人: %1").arg(_remoteUserName));
-		} else {
-			_locallyMutedUsers.erase(_remoteUserName);
-			if (_room && !_remoteUserName.isEmpty()) {
-				_room->SetParticipantMuted(_remoteUserName.toStdString(), false);
-			}
-			LogToConsole(LogCategory::Media, "REMOTE_MUTE", QString("已在本地解除静音远端参会人: %1").arg(_remoteUserName));
-		}
-	});
-
-	connect(_localTile, &VideoTileWidget::tileDoubleClicked, [this] {
-		_viewMode = (_viewMode == VideoViewMode::Grid) ? VideoViewMode::Pip : VideoViewMode::Grid;
-		updateVideoLayout();
-	});
-	connect(_remoteTile, &VideoTileWidget::tileDoubleClicked, [this] {
-		_viewMode = (_viewMode == VideoViewMode::Grid) ? VideoViewMode::Pip : VideoViewMode::Grid;
-		updateVideoLayout();
-	});
-
 	_localGenTimer = new QTimer(this);
 	connect(_localGenTimer, &QTimer::timeout, this, &MeetingRoomWindow::onLocalVideoGenerated);
 }
@@ -1723,13 +1912,44 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 }
 
 void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity) {
-	_hasRemoteUser = true;
-	_remoteUserName = identity;
-	_participantCount = 2;
+	if (identity.isEmpty()) return;
 
-	_remoteTile->setDisplayName(identity);
-	_remoteTile->setVideoActive(false);
-	_remoteTile->show();
+	auto it = _remoteTiles.find(identity);
+	if (it == _remoteTiles.end()) {
+		auto tile = std::make_unique<VideoTileWidget>(identity, false, _stageContainer);
+		tile->setIdentity(identity);
+		tile->setVideoActive(false);
+
+		connect(tile.get(), &VideoTileWidget::tileDoubleClicked, [this, identity] {
+			if (_pinnedIdentity == identity) _pinnedIdentity.clear();
+			else _pinnedIdentity = identity;
+			updateVideoLayout();
+		});
+
+		connect(tile.get(), &VideoTileWidget::pinToggled, [this, identity](bool pinned) {
+			if (pinned) _pinnedIdentity = identity;
+			else if (_pinnedIdentity == identity) _pinnedIdentity.clear();
+			updateVideoLayout();
+		});
+
+		connect(tile.get(), &VideoTileWidget::remoteVolumeChanged, [this, identity](float volume) {
+			_remoteVolumes[identity] = volume;
+			if (_room) {
+				_room->SetParticipantVolume(identity.toStdString(), volume);
+			}
+		});
+
+		connect(tile.get(), &VideoTileWidget::remoteLocalMuteToggled, [this, identity](bool muted) {
+			if (muted) _locallyMutedUsers.insert(identity);
+			else _locallyMutedUsers.erase(identity);
+			if (_room) {
+				_room->SetParticipantMuted(identity.toStdString(), muted);
+			}
+		});
+
+		tile->show();
+		_remoteTiles[identity] = std::move(tile);
+	}
 
 	if (_room) {
 		auto itVol = _remoteVolumes.find(identity);
@@ -1741,45 +1961,54 @@ void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity) {
 		}
 	}
 
-	_bottomBar->setParticipantCount(_participantCount);
-	_topBar->setActiveSpeaker(QString::fromUtf8("%1 已加入").arg(identity));
+	_participantCount = 1 + static_cast<int>(_remoteTiles.size());
+	if (_bottomBar) {
+		_bottomBar->setParticipantCount(_participantCount);
+	}
+	if (_topBar) {
+		_topBar->setActiveSpeaker(QString::fromUtf8("%1 已加入").arg(identity));
+	}
 
-	LogToConsole(LogCategory::Participant, "USER_JOIN", QString("远端参会人已加入: %1").arg(identity));
+	LogToConsole(LogCategory::Participant, "USER_JOIN", QString("远端参会人已加入: %1 (当前房间总人数: %2)").arg(identity).arg(_participantCount));
 	updateVideoLayout();
 }
 
 void MeetingRoomWindow::onRemoteParticipantLeft(const QString &identity) {
-	_hasRemoteUser = false;
-	_remoteUserName.clear();
-	_participantCount = 1;
+	auto it = _remoteTiles.find(identity);
+	if (it != _remoteTiles.end()) {
+		it->second->hide();
+		_remoteTiles.erase(it);
+	}
 
-	_remoteTile->setVideoActive(false);
-	_remoteTile->setFrame(QImage());
-	_remoteTile->setSpeaking(false, 0.0f);
-	_remoteTile->hide();
+	if (_pinnedIdentity == identity) {
+		_pinnedIdentity.clear();
+	}
 
-	_bottomBar->setParticipantCount(_participantCount);
-	_topBar->setActiveSpeaker(QString());
+	_participantCount = 1 + static_cast<int>(_remoteTiles.size());
+	if (_bottomBar) {
+		_bottomBar->setParticipantCount(_participantCount);
+	}
+	if (_topBar) {
+		_topBar->setActiveSpeaker(QString());
+	}
 
-	LogToConsole(LogCategory::Participant, "USER_LEFT", QString("远端参会人已离开: %1").arg(identity));
+	LogToConsole(LogCategory::Participant, "USER_LEFT", QString("远端参会人已离开: %1 (当前房间总人数: %2)").arg(identity).arg(_participantCount));
 	updateVideoLayout();
 }
 
 void MeetingRoomWindow::onRemoteTrackMuted(bool isVideo, bool muted) {
-	if (isVideo) {
-		_remoteTile->setVideoActive(!muted);
-		if (muted) {
-			_remoteTile->setFrame(QImage());
+	for (auto &[id, tile] : _remoteTiles) {
+		if (tile) {
+			if (isVideo) {
+				tile->setVideoActive(!muted);
+				if (muted) tile->setFrame(QImage());
+			} else {
+				tile->setAudioMuted(muted);
+				if (muted) tile->setSpeaking(false, 0.0f);
+			}
 		}
-		LogToConsole(LogCategory::Track, "REMOTE_VIDEO", muted ? "远端视频轨道已关闭/静音" : "远端视频轨道已开启");
-		updateVideoLayout();
-	} else {
-		_remoteTile->setAudioMuted(muted);
-		if (muted) {
-			_remoteTile->setSpeaking(false, 0.0f);
-		}
-		LogToConsole(LogCategory::Track, "REMOTE_AUDIO", muted ? "远端音频轨道已静音" : "远端音频轨道已开麦");
 	}
+	updateVideoLayout();
 }
 
 void MeetingRoomWindow::updateActiveSpeakers(const std::vector<std::shared_ptr<livekit::Participant>> &speakers) {
@@ -1819,26 +2048,24 @@ void MeetingRoomWindow::updateActiveSpeakers(const std::vector<std::shared_ptr<l
 				}
 			}
 		}
-		// 如果本地麦克风已物理静音，强制不显示光圈
 		if (_config.audioMuted) {
 			localSpeaking = false;
 		}
 		_localTile->setSpeaking(localSpeaking, localLevel);
 	}
 
-	// 3. 远端画框发光光圈联动
-	if (_remoteTile) {
-		bool remoteSpeaking = false;
-		float remoteLevel = 0.0f;
-		if (_hasRemoteUser && !_remoteUserName.isEmpty()) {
-			std::string rUserStr = _remoteUserName.toStdString();
-			auto it = speaking_levels.find(rUserStr);
+	// 3. 所有远端画框发光光圈联动
+	for (auto &[id, tile] : _remoteTiles) {
+		if (tile) {
+			bool remoteSpeaking = false;
+			float remoteLevel = 0.0f;
+			auto it = speaking_levels.find(id.toStdString());
 			if (it != speaking_levels.end()) {
 				remoteSpeaking = true;
 				remoteLevel = it->second;
 			}
+			tile->setSpeaking(remoteSpeaking, remoteLevel);
 		}
-		_remoteTile->setSpeaking(remoteSpeaking, remoteLevel);
 	}
 }
 
@@ -1847,103 +2074,175 @@ void MeetingRoomWindow::updateVideoLayout() {
 	const int stageH = _stageContainer->height();
 	if (stageW <= 0 || stageH <= 0) return;
 
-	const bool localActive = _localTile->isVideoActive();
-	const bool remoteActive = _hasRemoteUser && _remoteTile->isVideoActive();
+	std::vector<VideoTileWidget*> allTiles;
+	if (_localTile) {
+		allTiles.push_back(_localTile);
+	}
+	for (auto &[id, tile] : _remoteTiles) {
+		if (tile) {
+			allTiles.push_back(tile.get());
+		}
+	}
 
-	const int bannerW = 200;
+	const int N = static_cast<int>(allTiles.size());
+	if (N == 0) return;
+
+	const bool hasRemote = !_remoteTiles.empty();
+	const bool localActive = _localTile && _localTile->isVideoActive();
+
+	const int bannerW = 220;
 	const int bannerH = 32;
 	_inviteHintBanner->setGeometry((stageW - bannerW) / 2, stageH - bannerH - 12, bannerW, bannerH);
-	_inviteHintBanner->setVisible(!_hasRemoteUser && !localActive);
+	_inviteHintBanner->setVisible(!hasRemote && !localActive);
 
-	if (_hasRemoteUser) {
-		if (localActive && remoteActive) {
-			if (_viewMode == VideoViewMode::Pip) {
-				_remoteTile->setPipMode(false);
-				_remoteTile->setGeometry(0, 0, stageW, stageH);
-				_remoteTile->show();
-				_remoteTile->raise();
-
-				const int pipW = std::max(180, stageW * 24 / 100);
-				const int pipH = pipW * 9 / 16;
-				_localTile->setPipMode(true);
-				_localTile->setGeometry(stageW - pipW - 16, stageH - pipH - 16, pipW, pipH);
-				_localTile->show();
-				_localTile->raise();
-			} else {
-				_remoteTile->setPipMode(false);
-				_localTile->setPipMode(false);
-
-				const int gap = 8;
-				const int margin = 8;
-				const int tileW = (stageW - margin * 2 - gap) / 2;
-				const int tileH = stageH - margin * 2;
-
-				_localTile->setGeometry(margin, margin, tileW, tileH);
-				_remoteTile->setGeometry(margin + tileW + gap, margin, tileW, tileH);
-				_localTile->show();
-				_remoteTile->show();
-			}
-		} else if (remoteActive) {
-			_remoteTile->setPipMode(false);
-			_remoteTile->setGeometry(0, 0, stageW, stageH);
-			_remoteTile->show();
-
-			const int pipW = std::max(160, stageW * 20 / 100);
-			const int pipH = pipW * 9 / 16;
-			_localTile->setPipMode(true);
-			_localTile->setGeometry(stageW - pipW - 16, stageH - pipH - 16, pipW, pipH);
-			_localTile->show();
-			_localTile->raise();
-		} else if (localActive) {
-			_localTile->setPipMode(false);
-			_localTile->setGeometry(0, 0, stageW, stageH);
-			_localTile->show();
-
-			const int pipW = std::max(160, stageW * 20 / 100);
-			const int pipH = pipW * 9 / 16;
-			_remoteTile->setPipMode(true);
-			_remoteTile->setGeometry(stageW - pipW - 16, 16, pipW, pipH);
-			_remoteTile->show();
-			_remoteTile->raise();
-		} else {
-			_remoteTile->setPipMode(false);
-			_localTile->setPipMode(false);
-
-			const int gap = 8;
-			const int margin = 8;
-			const int tileW = (stageW - margin * 2 - gap) / 2;
-			const int tileH = stageH - margin * 2;
-
-			_localTile->setGeometry(margin, margin, tileW, tileH);
-			_remoteTile->setGeometry(margin + tileW + gap, margin, tileW, tileH);
-			_localTile->show();
-			_remoteTile->show();
+	// 1. 画中画模式 (PiP)
+	if (_viewMode == VideoViewMode::Pip && N >= 2) {
+		VideoTileWidget *mainTile = allTiles[1];
+		if (_pinnedIdentity == "local") {
+			mainTile = _localTile;
+		} else if (!_pinnedIdentity.isEmpty()) {
+			auto it = _remoteTiles.find(_pinnedIdentity);
+			if (it != _remoteTiles.end()) mainTile = it->second.get();
 		}
-	} else {
-		_remoteTile->hide();
-		_localTile->setPipMode(false);
-		_localTile->setGeometry(0, 0, stageW, stageH);
-		_localTile->show();
+
+		mainTile->setPipMode(false);
+		mainTile->setGeometry(0, 0, stageW, stageH);
+		mainTile->show();
+		mainTile->lower();
+
+		const int pipW = std::clamp(stageW * 22 / 100, 160, 260);
+		const int pipH = pipW * 9 / 16;
+		int pipRightOffset = 16;
+
+		for (auto *t : allTiles) {
+			if (t == mainTile) continue;
+			t->setPipMode(true);
+			t->setGeometry(stageW - pipW - pipRightOffset, stageH - pipH - 16, pipW, pipH);
+			t->show();
+			t->raise();
+			pipRightOffset += pipW + 10;
+		}
+		return;
+	}
+
+	// 2. 演讲者聚焦模式 (Speaker / Focus Mode)
+	if ((_viewMode == VideoViewMode::Speaker || !_pinnedIdentity.isEmpty()) && N >= 2) {
+		VideoTileWidget *focusTile = allTiles[0];
+		if (_pinnedIdentity == "local") {
+			focusTile = _localTile;
+		} else if (!_pinnedIdentity.isEmpty()) {
+			auto it = _remoteTiles.find(_pinnedIdentity);
+			if (it != _remoteTiles.end()) focusTile = it->second.get();
+		} else {
+			for (auto *t : allTiles) {
+				if (t->isSpeaking()) {
+					focusTile = t;
+					break;
+				}
+			}
+			if (focusTile == _localTile && allTiles.size() > 1) {
+				focusTile = allTiles[1];
+			}
+		}
+
+		std::vector<VideoTileWidget*> otherTiles;
+		for (auto *t : allTiles) {
+			if (t != focusTile) otherTiles.push_back(t);
+		}
+
+		const int margin = 8;
+		const int gap = 8;
+		const int filmstripW = std::clamp(stageW * 24 / 100, 180, 260);
+		const int mainW = stageW - filmstripW - gap - margin * 2;
+		const int mainH = stageH - margin * 2;
+
+		focusTile->setPipMode(false);
+		focusTile->setGeometry(margin, margin, mainW, mainH);
+		focusTile->show();
+
+		const int numOthers = static_cast<int>(otherTiles.size());
+		const int smallH = (mainH - (numOthers - 1) * gap) / std::max(1, numOthers);
+		const int clampedH = std::clamp(smallH, 90, filmstripW * 9 / 16);
+
+		for (int i = 0; i < numOthers; ++i) {
+			otherTiles[i]->setPipMode(false);
+			otherTiles[i]->setGeometry(margin + mainW + gap, margin + i * (clampedH + gap), filmstripW, clampedH);
+			otherTiles[i]->show();
+		}
+		return;
+	}
+
+	// 3. 自适应 16:9 最优画廊宫格模式 (Optimal Gallery Grid)
+	const int margin = 8;
+	const int gap = 8;
+	int bestRows = 1, bestCols = 1;
+	int bestTileW = 0, bestTileH = 0;
+	double maxArea = 0.0;
+
+	for (int cols = 1; cols <= N; ++cols) {
+		int rows = (N + cols - 1) / cols;
+		int availW = stageW - margin * 2 - (cols - 1) * gap;
+		int availH = stageH - margin * 2 - (rows - 1) * gap;
+		if (availW <= 0 || availH <= 0) continue;
+
+		int maxW = availW / cols;
+		int maxH = availH / rows;
+
+		int tW = maxW;
+		int tH = maxH;
+		if (static_cast<double>(maxW) / maxH > 16.0 / 9.0) {
+			tW = static_cast<int>(maxH * 16.0 / 9.0);
+			tH = maxH;
+		} else {
+			tW = maxW;
+			tH = static_cast<int>(maxW * 9.0 / 16.0);
+		}
+
+		double area = static_cast<double>(tW) * tH;
+		if (area > maxArea) {
+			maxArea = area;
+			bestRows = rows;
+			bestCols = cols;
+			bestTileW = tW;
+			bestTileH = tH;
+		}
+	}
+
+	const int totalGridH = bestRows * bestTileH + (bestRows - 1) * gap;
+	const int startY = (stageH - totalGridH) / 2;
+
+	int tileIdx = 0;
+	for (int r = 0; r < bestRows && tileIdx < N; ++r) {
+		int itemsInRow = std::min(bestCols, N - r * bestCols);
+		int rowW = itemsInRow * bestTileW + (itemsInRow - 1) * gap;
+		int startX = (stageW - rowW) / 2;
+
+		for (int c = 0; c < itemsInRow && tileIdx < N; ++c) {
+			QRect geom(startX + c * (bestTileW + gap), startY + r * (bestTileH + gap), bestTileW, bestTileH);
+			allTiles[tileIdx]->setPipMode(false);
+			allTiles[tileIdx]->setGeometry(geom);
+			allTiles[tileIdx]->show();
+			++tileIdx;
+		}
 	}
 }
 
 void MeetingRoomWindow::paintEvent(QPaintEvent *e) {
 	QPainter p(this);
-	p.fillRect(rect(), Qt::white);
+	p.fillRect(rect(), QColor(0x12, 0x14, 0x1a));
 }
 
 void MeetingRoomWindow::receiveRemoteVideoFrame(const QImage &frame, const QString &user) {
-	if (!_hasRemoteUser) {
+	if (user.isEmpty()) return;
+	if (_remoteTiles.find(user) == _remoteTiles.end()) {
 		onRemoteParticipantJoined(user);
 	}
-	if (_remoteTile) {
-		if (!_remoteUserName.isEmpty() && _remoteTile->displayName() != user) {
-			_remoteTile->setDisplayName(user);
-		}
-		_remoteTile->setFrame(frame);
-		if (!_remoteTile->isVideoActive()) {
-			_remoteTile->setVideoActive(true);
-			LogToConsole(LogCategory::WebRTC, "RECV_FRAME", QString("收到远端解码视频流 (%1x%2) - 开始渲染").arg(frame.width()).arg(frame.height()));
+	auto it = _remoteTiles.find(user);
+	if (it != _remoteTiles.end() && it->second) {
+		it->second->setFrame(frame);
+		if (!it->second->isVideoActive()) {
+			it->second->setVideoActive(true);
+			LogToConsole(LogCategory::WebRTC, "RECV_FRAME", QString("收到远端 [%1] 解码视频流 (%2x%3) - 开始渲染").arg(user).arg(frame.width()).arg(frame.height()));
 			updateVideoLayout();
 		}
 	}

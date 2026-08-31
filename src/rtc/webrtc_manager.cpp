@@ -1,6 +1,7 @@
 #include <winsock2.h>
 #include <asio.hpp>
 #include "webrtc_manager.h"
+#include "audio_playout_warmup.h"
 #include "rtc_base/ssl_adapter.h"
 #include "api/create_peerconnection_factory.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
@@ -108,6 +109,82 @@ public:
     }
 };
 
+class PlayoutAudioTransportWrapper : public webrtc::AudioTransport {
+public:
+    explicit PlayoutAudioTransportWrapper(webrtc::AudioTransport* inner)
+        : inner_(inner) {}
+
+    void ResetWarmup() {
+        warmup_.Reset();
+    }
+
+    int32_t RecordedDataIsAvailable(const void* audioSamples,
+                                    size_t nSamples,
+                                    size_t nBytesPerSample,
+                                    size_t nChannels,
+                                    uint32_t samplesPerSec,
+                                    uint32_t totalDelayMS,
+                                    int32_t clockDrift,
+                                    uint32_t currentMicLevel,
+                                    bool keyPressed,
+                                    uint32_t& newMicLevel) override {
+        if (inner_) {
+            return inner_->RecordedDataIsAvailable(audioSamples, nSamples, nBytesPerSample,
+                                                   nChannels, samplesPerSec, totalDelayMS,
+                                                   clockDrift, currentMicLevel, keyPressed, newMicLevel);
+        }
+        return 0;
+    }
+
+    int32_t NeedMorePlayData(size_t nSamples,
+                             size_t nBytesPerSample,
+                             size_t nChannels,
+                             uint32_t samplesPerSec,
+                             void* audioSamples,
+                             size_t& nSamplesOut,
+                             int64_t* elapsed_time_ms,
+                             int64_t* ntp_time_ms) override {
+        if (!inner_) {
+            nSamplesOut = 0;
+            return -1;
+        }
+        int32_t res = inner_->NeedMorePlayData(nSamples, nBytesPerSample, nChannels,
+                                               samplesPerSec, audioSamples, nSamplesOut,
+                                               elapsed_time_ms, ntp_time_ms);
+        if (res == 0 && audioSamples && nSamplesOut > 0 &&
+            nBytesPerSample == sizeof(int16_t)) {
+            const size_t output_frames = std::min(nSamplesOut, nSamples);
+            const size_t output_samples = output_frames * nChannels;
+            warmup_.Process(static_cast<int16_t*>(audioSamples), output_samples,
+                            nChannels, samplesPerSec);
+        }
+        return res;
+    }
+
+    void PullRenderData(int bits_per_sample,
+                        int sample_rate,
+                        size_t number_of_channels,
+                        size_t number_of_frames,
+                        void* audio_data,
+                        int64_t* elapsed_time_ms,
+                        int64_t* ntp_time_ms) override {
+        if (inner_) {
+            inner_->PullRenderData(bits_per_sample, sample_rate, number_of_channels,
+                                   number_of_frames, audio_data, elapsed_time_ms, ntp_time_ms);
+            if (bits_per_sample == 16 && audio_data) {
+                warmup_.Process(static_cast<int16_t*>(audio_data),
+                                number_of_frames * number_of_channels,
+                                number_of_channels,
+                                static_cast<uint32_t>(sample_rate));
+            }
+        }
+    }
+
+private:
+    webrtc::AudioTransport* inner_;
+    AudioPlayoutWarmup warmup_;
+};
+
 class PlayoutOnlyAudioDeviceModule : public webrtc::AudioDeviceModule {
 public:
     explicit PlayoutOnlyAudioDeviceModule(webrtc::scoped_refptr<webrtc::AudioDeviceModule> inner)
@@ -120,7 +197,23 @@ public:
     }
 
     int32_t RegisterAudioCallback(webrtc::AudioTransport* audioCallback) override {
-        return inner_ ? inner_->RegisterAudioCallback(audioCallback) : -1;
+        if (!inner_) return -1;
+        if (audioCallback) {
+            auto wrapper = std::make_unique<PlayoutAudioTransportWrapper>(audioCallback);
+            const int32_t result = inner_->RegisterAudioCallback(wrapper.get());
+            if (result == 0) {
+                transport_wrapper_ = std::move(wrapper);
+            }
+            return result;
+        }
+
+        // The native render thread retains this raw pointer. Unregister it
+        // before releasing the wrapper, otherwise teardown can race a callback.
+        const int32_t result = inner_->RegisterAudioCallback(nullptr);
+        if (result == 0) {
+            transport_wrapper_.reset();
+        }
+        return result;
     }
 
     int32_t Init() override {
@@ -145,10 +238,12 @@ public:
     }
 
     int32_t SetPlayoutDevice(uint16_t index) override {
+        if (transport_wrapper_) transport_wrapper_->ResetWarmup();
         return inner_ ? inner_->SetPlayoutDevice(index) : 0;
     }
 
     int32_t SetPlayoutDevice(WindowsDeviceType device) override {
+        if (transport_wrapper_) transport_wrapper_->ResetWarmup();
         return inner_ ? inner_->SetPlayoutDevice(device) : 0;
     }
 
@@ -165,6 +260,7 @@ public:
     }
 
     int32_t StartPlayout() override {
+        if (transport_wrapper_) transport_wrapper_->ResetWarmup();
         return inner_ ? inner_->StartPlayout() : 0;
     }
 
@@ -266,6 +362,7 @@ public:
 
 private:
     webrtc::scoped_refptr<webrtc::AudioDeviceModule> inner_;
+    std::unique_ptr<PlayoutAudioTransportWrapper> transport_wrapper_;
 };
 
 } // namespace
@@ -326,13 +423,9 @@ bool WebRTCManager::Initialize() {
                 if (ret != 0) {
                     adm_->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultDevice);
                 }
-                adm_->InitSpeaker();
-                adm_->SetSpeakerVolume(255);
-                adm_->SetSpeakerMute(false);
-                adm_->InitPlayout();
             }
         });
-        std::cout << "WebRTCManager: Native Platform Audio Device Module (Playout-Only ADM) initialized with Default Endpoint." << std::endl;
+        std::cout << "WebRTCManager: Native Platform Audio Device Module initialized; playout remains media-driven." << std::endl;
     }
 
     factory_ = webrtc::CreatePeerConnectionFactory(
@@ -354,12 +447,19 @@ bool WebRTCManager::Initialize() {
         return false;
     }
 
-    // 关键时序优化：在 PeerConnectionFactory 创建完成 (AudioTransport 已注册) 后，再启动播放渲染驱动！
+    // The factory registers VoiceEngine's AudioTransport with the ADM. Start
+    // rendering only after that callback is installed; the warmup wrapper
+    // suppresses the first discontinuous buffers without muting real audio.
     if (adm_) {
         worker_thread_->BlockingCall([this]() {
-            if (adm_) {
-                adm_->StartPlayout();
-                std::cout << "WebRTCManager: ADM StartPlayout() activated AFTER PeerConnectionFactory & AudioTransport binding." << std::endl;
+            if (!adm_) return;
+            const int32_t speaker_result = adm_->InitSpeaker();
+            const int32_t playout_result = adm_->InitPlayout();
+            const int32_t start_result = adm_->Playing() ? 0 : adm_->StartPlayout();
+            if (speaker_result != 0 || playout_result != 0 || start_result != 0) {
+                std::cerr << "WebRTCManager: Failed to start ADM playout (speaker="
+                          << speaker_result << ", init=" << playout_result
+                          << ", start=" << start_result << ")" << std::endl;
             }
         });
     }
@@ -375,35 +475,16 @@ void WebRTCManager::Deinitialize() {
         return;
     }
 
-    std::cout << "WebRTCManager: Deinitializing factory and threads..." << std::endl;
-
-    // 1. 显式释放 PeerConnectionFactory
-    factory_ = nullptr;
-
-    // 2. 确保在 worker / signaling 线程执行完毕所有内部清理任务
-    if (worker_thread_) {
-        worker_thread_->BlockingCall([]() {});
-    }
-    if (signaling_thread_) {
-        signaling_thread_->BlockingCall([]() {});
-    }
-
-    // 3. 显式终止并释放 ADM
+    // Stop native callbacks before destroying the VoiceEngine/AudioTransport.
     if (adm_) {
         if (worker_thread_) {
             worker_thread_->BlockingCall([this]() {
-                // Terminate() alone does not synchronously join the Windows
-                // Core Audio render loop. Stop it first, otherwise the render
-                // thread can enter an ADM critical section after destruction.
                 if (adm_->Playing()) {
                     adm_->StopPlayout();
                 }
                 if (adm_->Recording()) {
                     adm_->StopRecording();
                 }
-                adm_->RegisterAudioCallback(nullptr);
-                adm_->Terminate();
-                adm_ = nullptr;
             });
         } else {
             if (adm_->Playing()) {
@@ -412,13 +493,25 @@ void WebRTCManager::Deinitialize() {
             if (adm_->Recording()) {
                 adm_->StopRecording();
             }
+        }
+    }
+
+    factory_ = nullptr;
+
+    if (adm_) {
+        if (worker_thread_) {
+            worker_thread_->BlockingCall([this]() {
+                adm_->RegisterAudioCallback(nullptr);
+                adm_->Terminate();
+                adm_ = nullptr;
+            });
+        } else {
             adm_->RegisterAudioCallback(nullptr);
             adm_->Terminate();
             adm_ = nullptr;
         }
     }
 
-    // 4. 等待各线程所有剩余任务排空
     if (worker_thread_) {
         worker_thread_->BlockingCall([]() {});
     }
@@ -429,7 +522,6 @@ void WebRTCManager::Deinitialize() {
         network_thread_->BlockingCall([]() {});
     }
 
-    // 5. 停止并释放辅助线程
     if (signaling_thread_) {
         signaling_thread_->Stop();
         signaling_thread_.reset();

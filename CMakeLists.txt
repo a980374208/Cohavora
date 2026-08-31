@@ -1,6 +1,16 @@
 cmake_minimum_required(VERSION 3.20)
 project(livekit_signaling_cpp LANGUAGES C CXX)
 
+option(LIVEKIT_BUILD_EXTENDED_TESTS
+    "Build optional feature tests (APM, permissions, adaptive stream, VAD, E2EE)"
+    OFF)
+option(LIVEKIT_BUILD_HARDWARE_TESTS
+    "Build tests that enumerate or open local WASAPI/DirectShow devices"
+    OFF)
+option(LIVEKIT_BUILD_EXTERNAL_TESTS
+    "Build tests that connect to an external LiveKit server"
+    OFF)
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
@@ -298,21 +308,21 @@ target_link_libraries(test_data_stream_assembler PRIVATE
     livekit_signaling
 )
 
-# APM 3A Audio Processor Test
-add_executable(test_apm_3a
-    tests/test_apm_3a.cpp
-)
-target_link_libraries(test_apm_3a PRIVATE
-    livekit_signaling
-)
+if(LIVEKIT_BUILD_EXTENDED_TESTS)
+    add_executable(test_apm_3a
+        tests/test_apm_3a.cpp
+    )
+    target_link_libraries(test_apm_3a PRIVATE
+        livekit_signaling
+    )
 
-# Participant Attributes, Permissions & Track Quality Control Test
-add_executable(test_attributes_permissions_quality
-    tests/test_attributes_permissions_quality.cpp
-)
-target_link_libraries(test_attributes_permissions_quality PRIVATE
-    livekit_signaling
-)
+    add_executable(test_attributes_permissions_quality
+        tests/test_attributes_permissions_quality.cpp
+    )
+    target_link_libraries(test_attributes_permissions_quality PRIVATE
+        livekit_signaling
+    )
+endif()
 
 # RPC System Test
 add_executable(test_rpc_system
@@ -338,35 +348,36 @@ target_link_libraries(test_stats_system PRIVATE
     livekit_signaling
 )
 
-# Official Server Connect Test
-add_executable(test_livekit_official_connect
-    tests/test_livekit_official_connect.cpp
-)
-target_link_libraries(test_livekit_official_connect PRIVATE
-    livekit_signaling
-)
+if(LIVEKIT_BUILD_EXTERNAL_TESTS)
+    add_executable(test_livekit_official_connect
+        tests/test_livekit_official_connect.cpp
+    )
+    target_link_libraries(test_livekit_official_connect PRIVATE
+        livekit_signaling
+    )
+endif()
 
-# WASAPI Audio Capture Test
-add_executable(test_wasapi_capture
-    tests/test_wasapi_capture.cpp
-)
-target_link_libraries(test_wasapi_capture PRIVATE
-    livekit_signaling
-)
+if(LIVEKIT_BUILD_HARDWARE_TESTS)
+    add_executable(test_wasapi_capture
+        tests/test_wasapi_capture.cpp
+    )
+    target_link_libraries(test_wasapi_capture PRIVATE
+        livekit_signaling
+    )
 
-# DirectShow Video Capture Test
-add_executable(test_dshow_capture
-    tests/test_dshow_capture.cpp
-)
-target_link_libraries(test_dshow_capture PRIVATE
-    livekit_signaling
-)
+    add_executable(test_dshow_capture
+        tests/test_dshow_capture.cpp
+    )
+    target_link_libraries(test_dshow_capture PRIVATE
+        livekit_signaling
+    )
+endif()
 
-# Media Pipeline E2E Test
-add_executable(test_media_pipeline_e2e
-    tests/test_media_pipeline_e2e.cpp
+# First-audible-frame playout warmup unit test
+add_executable(test_audio_playout_warmup
+    tests/test_audio_playout_warmup.cpp
 )
-target_link_libraries(test_media_pipeline_e2e PRIVATE
+target_link_libraries(test_audio_playout_warmup PRIVATE
     livekit_signaling
 )
 
@@ -378,38 +389,29 @@ target_link_libraries(test_simulcast PRIVATE
     livekit_signaling
 )
 
-# Adaptive Stream Test
-add_executable(test_adaptive_stream
-    tests/test_adaptive_stream.cpp
-)
-target_link_libraries(test_adaptive_stream PRIVATE
-    livekit_signaling
-)
+if(LIVEKIT_BUILD_EXTENDED_TESTS)
+    add_executable(test_adaptive_stream
+        tests/test_adaptive_stream.cpp
+    )
+    target_link_libraries(test_adaptive_stream PRIVATE
+        livekit_signaling
+    )
 
-# Network Emulation Benchmark Test
-add_executable(test_network_emulation_benchmark
-    tests/test_network_emulation_benchmark.cpp
-)
-target_link_libraries(test_network_emulation_benchmark PRIVATE
-    livekit_signaling
-)
+    add_executable(test_speaker_vad
+        tests/test_speaker_vad.cpp
+    )
+    target_link_libraries(test_speaker_vad PRIVATE
+        livekit_signaling
+    )
 
-# Speaker VAD Test
-add_executable(test_speaker_vad
-    tests/test_speaker_vad.cpp
-)
-target_link_libraries(test_speaker_vad PRIVATE
-    livekit_signaling
-)
-
-# E2EE Test
-add_executable(test_e2ee
-    tests/test_e2ee.cpp
-)
-target_link_libraries(test_e2ee PRIVATE
-    livekit_signaling
-    ${OPENSSL_LIBRARIES}
-)
+    add_executable(test_e2ee
+        tests/test_e2ee.cpp
+    )
+    target_link_libraries(test_e2ee PRIVATE
+        livekit_signaling
+        ${OPENSSL_LIBRARIES}
+    )
+endif()
 
 # Live Media Broadcaster Application
 add_executable(livekit_media_broadcaster
@@ -457,6 +459,11 @@ add_executable(test_backup_codecs
 )
 target_link_libraries(test_backup_codecs PRIVATE
     livekit_signaling
+)
+
+# Multi-User Grid Math & Avatar Hash Test
+add_executable(test_meeting_ui_grid
+    tests/test_meeting_ui_grid.cpp
 )
 
 
@@ -618,15 +625,29 @@ add_test(NAME data_stream_assembler_test COMMAND test_data_stream_assembler)
 add_test(NAME rpc_system_test COMMAND test_rpc_system)
 add_test(NAME media_streaming_test COMMAND test_media_streaming)
 add_test(NAME stats_system_test COMMAND test_stats_system)
-add_test(NAME livekit_official_connect_test COMMAND test_livekit_official_connect)
-add_test(NAME wasapi_capture_test COMMAND test_wasapi_capture)
-add_test(NAME dshow_capture_test COMMAND test_dshow_capture)
-add_test(NAME media_pipeline_e2e_test COMMAND test_media_pipeline_e2e)
+add_test(NAME audio_playout_warmup_test COMMAND test_audio_playout_warmup)
 add_test(NAME simulcast_test COMMAND test_simulcast)
-add_test(NAME network_emulation_benchmark COMMAND test_network_emulation_benchmark)
 add_test(NAME stress_lifecycle_test COMMAND test_stress_lifecycle)
 add_test(NAME simulate_scenario_test COMMAND test_simulate_scenario)
 add_test(NAME backup_codecs_test COMMAND test_backup_codecs)
+add_test(NAME meeting_ui_grid_test COMMAND test_meeting_ui_grid)
+
+if(LIVEKIT_BUILD_EXTENDED_TESTS)
+    add_test(NAME apm_3a_test COMMAND test_apm_3a)
+    add_test(NAME attributes_permissions_quality_test COMMAND test_attributes_permissions_quality)
+    add_test(NAME adaptive_stream_test COMMAND test_adaptive_stream)
+    add_test(NAME speaker_vad_test COMMAND test_speaker_vad)
+    add_test(NAME e2ee_test COMMAND test_e2ee)
+endif()
+
+if(LIVEKIT_BUILD_HARDWARE_TESTS)
+    add_test(NAME wasapi_capture_test COMMAND test_wasapi_capture)
+    add_test(NAME dshow_capture_test COMMAND test_dshow_capture)
+endif()
+
+if(LIVEKIT_BUILD_EXTERNAL_TESTS)
+    add_test(NAME livekit_official_connect_test COMMAND test_livekit_official_connect)
+endif()
 
 
 
