@@ -44,12 +44,31 @@ struct VideoLayerSetting {
     double scale_resolution_down_by = 1.0;
 };
 
+enum class BackupCodecPolicy {
+    PreferRegression = 0,
+    Simulcast = 1,
+    Regression = 2,
+};
+
+struct SimulcastCodecSpec {
+    std::string codec = "vp8";
+    std::string cid;
+    std::string scalability_mode;
+    std::vector<VideoLayerSetting> layers;
+};
+
 struct VideoPublishOptions {
     TrackSource source = TrackSource::Camera;
     bool simulcast = true;
     std::string video_codec = "vp8"; // "vp8", "h264", "vp9", "av1"
     std::string scalability_mode = ""; // e.g. "L3T3_KEY"
     std::vector<VideoLayerSetting> layers;
+
+    // GAP-03: Backup Codec & Multi-Codec Simulcast
+    std::optional<std::string> backup_codec; // e.g. "vp8", "h264"
+    BackupCodecPolicy backup_codec_policy = BackupCodecPolicy::PreferRegression;
+    std::vector<SimulcastCodecSpec> simulcast_codecs;
+    bool auto_backup_codec = true;
 };
 
 class Track {

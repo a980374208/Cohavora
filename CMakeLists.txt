@@ -435,6 +435,30 @@ target_link_libraries(simple_rpc PRIVATE
     livekit_signaling
 )
 
+# Lifecycle & Reconnect Stress Test (GAP-02)
+add_executable(test_stress_lifecycle
+    tests/test_stress_lifecycle.cpp
+)
+target_link_libraries(test_stress_lifecycle PRIVATE
+    livekit_signaling
+)
+
+# Simulate Scenario Suite (Matching Flutter sendSimulateScenario)
+add_executable(test_simulate_scenario
+    tests/test_simulate_scenario.cpp
+)
+target_link_libraries(test_simulate_scenario PRIVATE
+    livekit_signaling
+)
+
+# Multi-Codec Simulcast & Backup Codecs Test (GAP-03)
+add_executable(test_backup_codecs
+    tests/test_backup_codecs.cpp
+)
+target_link_libraries(test_backup_codecs PRIVATE
+    livekit_signaling
+)
+
 
 
 if(NOT DEFINED TDESKTOP_LIBS_DIR)
@@ -600,6 +624,9 @@ add_test(NAME dshow_capture_test COMMAND test_dshow_capture)
 add_test(NAME media_pipeline_e2e_test COMMAND test_media_pipeline_e2e)
 add_test(NAME simulcast_test COMMAND test_simulcast)
 add_test(NAME network_emulation_benchmark COMMAND test_network_emulation_benchmark)
+add_test(NAME stress_lifecycle_test COMMAND test_stress_lifecycle)
+add_test(NAME simulate_scenario_test COMMAND test_simulate_scenario)
+add_test(NAME backup_codecs_test COMMAND test_backup_codecs)
 
 
 

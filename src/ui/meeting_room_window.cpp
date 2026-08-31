@@ -492,21 +492,42 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
 	_maxRect = QRect(w - btnW * 2, 0, btnW, h);
 	_minRect = QRect(w - btnW * 3, 0, btnW, h);
 
-	int rightX = w - btnW * 3 - 10;
+	int rightX = w - btnW * 3 - 6;
 
-	_fullscreenRect = QRect(rightX - 32, 8, 28, 28);
-	rightX -= 36;
+	_fullscreenRect = QRect(rightX - 26, 8, 26, 28);
+	rightX -= 30;
 
-	_settingsRect = QRect(rightX - 58, 8, 54, 28);
-	rightX -= 64;
+	_settingsRect = QRect(rightX - 52, 8, 52, 28);
+	rightX -= 56;
 
-	_consoleRect = QRect(rightX - 76, 8, 72, 28);
+	_simulateRect = QRect(rightX - 58, 8, 58, 28);
+	rightX -= 62;
+
+	_consoleRect = QRect(rightX - 62, 8, 62, 28);
+	rightX -= 66;
+
+	_hostToolsRect = QRect(rightX - 78, 8, 78, 28);
 	rightX -= 82;
 
-	_hostToolsRect = QRect(rightX - 86, 8, 82, 28);
-	rightX -= 90;
+	_layoutRect = QRect(rightX - 74, 8, 74, 28);
+	rightX -= 78;
 
-	_layoutRect = QRect(rightX - 82, 8, 78, 28);
+	const int leftInfoRight = 196;
+	const int rightButtonsLeft = rightX;
+	const int availCenterW = rightButtonsLeft - leftInfoRight - 16;
+
+	if (availCenterW >= 180) {
+		const int pillW = std::min(availCenterW, 200);
+		int pillX = (w - pillW) / 2;
+		pillX = std::max(leftInfoRight + 8, std::min(pillX, rightButtonsLeft - 8 - pillW));
+		_speakerCapsuleRect = QRect(pillX, (h - 26) / 2, pillW, 26);
+	} else if (availCenterW >= 110) {
+		const int pillW = availCenterW;
+		const int pillX = leftInfoRight + 8;
+		_speakerCapsuleRect = QRect(pillX, (h - 26) / 2, pillW, 26);
+	} else {
+		_speakerCapsuleRect = QRect(); // 窗口空间不足时自动隐藏，彻底杜绝元素重叠
+	}
 }
 
 void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
@@ -568,20 +589,21 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	p.restore();
 
 	// 2. 中间：正在讲话提示胶囊
-	const int pillW = 200;
-	const int pillH = 26;
-	const QRect pillRect((w - pillW) / 2, (h - pillH) / 2, pillW, pillH);
+	if (!_speakerCapsuleRect.isEmpty()) {
+		p.save();
+		p.setPen(Qt::NoPen);
+		p.setBrush(QColor(0xe8, 0xf3, 0xff));
+		p.drawRoundedRect(_speakerCapsuleRect, 6, 6);
 
-	p.save();
-	p.setPen(Qt::NoPen);
-	p.setBrush(QColor(0xe8, 0xf3, 0xff));
-	p.drawRoundedRect(pillRect, 6, 6);
-
-	p.setFont(QFont("Microsoft YaHei", 9));
-	p.setPen(QColor(0x16, 0x77, 0xff));
-	QString speakerText = _speakerName.isEmpty() ? QString::fromUtf8("正在讲话: 无") : QString::fromUtf8("正在讲话: %1").arg(_speakerName);
-	p.drawText(pillRect, Qt::AlignCenter, speakerText);
-	p.restore();
+		QFont speakerFont("Microsoft YaHei", 9);
+		p.setFont(speakerFont);
+		p.setPen(QColor(0x16, 0x77, 0xff));
+		QString speakerText = _speakerName.isEmpty() ? QString::fromUtf8("正在讲话: 无") : QString::fromUtf8("正在讲话: %1").arg(_speakerName);
+		QFontMetrics fm(speakerFont);
+		QString elided = fm.elidedText(speakerText, Qt::ElideMiddle, _speakerCapsuleRect.width() - 12);
+		p.drawText(_speakerCapsuleRect, Qt::AlignCenter, elided);
+		p.restore();
+	}
 
 	// 3. 右侧工具按钮
 	auto drawTextBtn = [&](const QRect &r, const QString &text, bool hovered, bool hasArrow = false, const QColor &customColor = QColor(0x4e, 0x59, 0x69)) {
@@ -610,6 +632,7 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	drawTextBtn(_layoutRect, layoutStr, _hoverBtn == HoverBtn::Layout, true);
 	drawTextBtn(_hostToolsRect, QString::fromUtf8("主持人工具"), _hoverBtn == HoverBtn::HostTools, true);
 	drawTextBtn(_consoleRect, QString::fromUtf8("控制台 📋"), _hoverBtn == HoverBtn::Console, false, QColor(0x16, 0x77, 0xff));
+	drawTextBtn(_simulateRect, QString::fromUtf8("🐛 模拟"), _hoverBtn == HoverBtn::Simulate, false, QColor(0xe6, 0x7e, 0x22));
 	drawTextBtn(_settingsRect, QString::fromUtf8("设置 ⚙"), _hoverBtn == HoverBtn::Settings, false);
 
 	p.save();
@@ -647,6 +670,7 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	else if (_minRect.contains(pos)) next = HoverBtn::Min;
 	else if (_fullscreenRect.contains(pos)) next = HoverBtn::Fullscreen;
 	else if (_settingsRect.contains(pos)) next = HoverBtn::Settings;
+	else if (_simulateRect.contains(pos)) next = HoverBtn::Simulate;
 	else if (_consoleRect.contains(pos)) next = HoverBtn::Console;
 	else if (_hostToolsRect.contains(pos)) next = HoverBtn::HostTools;
 	else if (_layoutRect.contains(pos)) next = HoverBtn::Layout;
@@ -667,6 +691,8 @@ void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 			_closeStream.fire({});
 		} else if (_consoleRect.contains(e->pos())) {
 			_consoleStream.fire({});
+		} else if (_simulateRect.contains(e->pos())) {
+			showSimulateScenarioMenu(mapToGlobal(QPoint(_simulateRect.left(), _simulateRect.bottom() + 4)));
 		} else if (_layoutRect.contains(e->pos())) {
 			_currentViewMode = (_currentViewMode == VideoViewMode::Grid) ? VideoViewMode::Pip : VideoViewMode::Grid;
 			_viewModeStream.fire_copy(_currentViewMode);
@@ -675,6 +701,74 @@ void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 			_settingsStream.fire({});
 		}
 	}
+}
+
+void RoomTopBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {
+	QMenu menu(this);
+	menu.setStyleSheet(R"(
+		QMenu {
+			background-color: #1a1a1f;
+			border: 1px solid #2e2e38;
+			border-radius: 8px;
+			padding: 8px 4px;
+			font-family: "Segoe UI", "Microsoft YaHei";
+			color: #e4e4e8;
+		}
+		QMenu::item {
+			padding: 7px 28px 7px 18px;
+			border-radius: 6px;
+			font-size: 13px;
+			font-weight: 500;
+			color: #e4e4e8;
+		}
+		QMenu::item:selected {
+			background-color: #2b2b36;
+			color: #ffffff;
+		}
+		QMenu::item:disabled {
+			color: #8c8c9a;
+			font-size: 14px;
+			font-weight: bold;
+			padding: 8px 18px 6px 18px;
+		}
+		QMenu::separator {
+			height: 1px;
+			background-color: #2e2e38;
+			margin: 4px 8px;
+		}
+	)");
+
+	QAction *header = menu.addAction(QString::fromUtf8("Simulate Scenario"));
+	header->setEnabled(false);
+	menu.addSeparator();
+
+	struct ScenarioEntry {
+		QString name;
+		livekit::SimulateScenarioType type;
+	};
+
+	const std::vector<ScenarioEntry> entries = {
+		{ "signalReconnect", livekit::SimulateScenarioType::SignalReconnect },
+		{ "fullReconnect", livekit::SimulateScenarioType::FullReconnect },
+		{ "speakerUpdate", livekit::SimulateScenarioType::SpeakerUpdate },
+		{ "nodeFailure", livekit::SimulateScenarioType::NodeFailure },
+		{ "migration", livekit::SimulateScenarioType::Migration },
+		{ "serverLeave", livekit::SimulateScenarioType::ServerLeave },
+		{ "switchCandidate", livekit::SimulateScenarioType::SwitchCandidate },
+		{ "e2eeKeyRatchet", livekit::SimulateScenarioType::E2eeKeyRatchet },
+		{ "participantName", livekit::SimulateScenarioType::ParticipantName },
+		{ "participantMetadata", livekit::SimulateScenarioType::ParticipantMetadata },
+		{ "clear", livekit::SimulateScenarioType::Clear }
+	};
+
+	for (const auto &entry : entries) {
+		QAction *act = menu.addAction(entry.name);
+		connect(act, &QAction::triggered, [this, type = entry.type] {
+			_simulateScenarioStream.fire_copy(type);
+		});
+	}
+
+	menu.exec(globalPos);
 }
 
 void RoomTopBarWidget::leaveEventHook(QEvent *e) {
@@ -776,9 +870,6 @@ void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
 
-	_chatInput->setGeometry(16, 20, 130, 32);
-	_handBtn->setGeometry(152, 20, 32, 32);
-
 	_toolItems = {
 		{ 1, QString::fromUtf8("解除静音"), QString::fromUtf8("静音"), QRect(), true },
 		{ 2, QString::fromUtf8("开启视频"), QString::fromUtf8("停止视频"), QRect(), true },
@@ -787,23 +878,57 @@ void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 		{ 5, QString::fromUtf8("成员(%1)").arg(_participantCount), QString::fromUtf8("成员(%1)").arg(_participantCount), QRect(), false },
 		{ 6, QString::fromUtf8("聊天"), QString::fromUtf8("聊天"), QRect(), false },
 		{ 7, QString::fromUtf8("录制"), QString::fromUtf8("停止录制"), QRect(), true },
-		{ 8, QString::fromUtf8("元宝纪要"), QString::fromUtf8("元宝纪要"), QRect(), false },
 		{ 9, QString::fromUtf8("应用"), QString::fromUtf8("应用"), QRect(), false },
+		{ 10, QString::fromUtf8("场景模拟"), QString::fromUtf8("场景模拟"), QRect(), true },
 	};
 
-	const int itemW = 56;
+	int itemW = 56;
+	int gap = 6;
+	if (w < 880) {
+		itemW = 48;
+		gap = 3;
+	} else if (w < 1000) {
+		itemW = 52;
+		gap = 4;
+	}
+
 	const int itemH = 60;
-	const int gap = 6;
-	const int totalItemsW = static_cast<int>(_toolItems.size()) * itemW + (static_cast<int>(_toolItems.size()) - 1) * gap;
+	const int numItems = static_cast<int>(_toolItems.size());
+	const int totalItemsW = numItems * itemW + (numItems - 1) * gap;
 
-	const int startX = (w - totalItemsW) / 2;
+	_endMeetingRect = QRect(w - 92, 12, 78, 52);
+
+	int startX = (w - totalItemsW) / 2;
+	if (startX + totalItemsW > w - 100) {
+		startX = w - 100 - totalItemsW;
+	}
+
+	const int leftSpace = startX - 16;
+	if (leftSpace >= 170) {
+		const int chatW = std::min(130, leftSpace - 32 - 12);
+		_chatInput->setVisible(true);
+		_chatInput->setGeometry(16, 20, chatW, 32);
+		_handBtn->setVisible(true);
+		_handBtn->setGeometry(16 + chatW + 8, 20, 32, 32);
+	} else if (leftSpace >= 110) {
+		const int chatW = leftSpace - 32 - 10;
+		_chatInput->setVisible(true);
+		_chatInput->setGeometry(16, 20, chatW, 32);
+		_handBtn->setVisible(true);
+		_handBtn->setGeometry(16 + chatW + 6, 20, 32, 32);
+	} else if (leftSpace >= 40) {
+		_chatInput->setVisible(false);
+		_handBtn->setVisible(true);
+		_handBtn->setGeometry(16, 20, 32, 32);
+	} else {
+		_chatInput->setVisible(false);
+		_handBtn->setVisible(false);
+	}
+
 	const int startY = 8;
-
 	for (size_t i = 0; i < _toolItems.size(); ++i) {
 		_toolItems[i].rect = QRect(startX + static_cast<int>(i) * (itemW + gap), startY, itemW, itemH);
 	}
-
-	_endMeetingRect = QRect(w - 96, 12, 80, 52);
 }
 
 void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
@@ -885,12 +1010,6 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 			p.drawEllipse(QPoint(cx, cy), 6, 6);
 			p.setBrush(QColor(0x1f, 0x23, 0x29));
 			p.drawEllipse(QPoint(cx, cy), 3, 3);
-		} else if (item.id == 8) {
-			p.setPen(QPen(QColor(0x1f, 0x23, 0x29), 1.6));
-			p.drawRoundedRect(QRect(cx - 6, cy - 7, 12, 14), 2, 2);
-			p.drawLine(cx - 3, cy - 3, cx + 3, cy - 3);
-			p.drawLine(cx - 3, cy, cx + 3, cy);
-			p.drawLine(cx - 3, cy + 3, cx + 1, cy + 3);
 		} else if (item.id == 9) {
 			p.setPen(Qt::NoPen);
 			p.setBrush(QColor(0x1f, 0x23, 0x29));
@@ -899,6 +1018,27 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 					p.drawRect(cx + col * 4 - 1, cy + row * 4 - 1, 2, 2);
 				}
 			}
+		} else if (item.id == 10) {
+			// 绘制 Bug (Simulate scenario) 图标
+			const QColor bugCol = hovered ? QColor(0x16, 0x77, 0xff) : QColor(0x1f, 0x23, 0x29);
+			p.setPen(QPen(bugCol, 1.6, Qt::SolidLine, Qt::RoundCap));
+			p.setBrush(Qt::NoBrush);
+			// 虫子身体 (椭圆)
+			p.drawRoundedRect(QRect(cx - 5, cy - 4, 10, 11), 4, 4);
+			// 虫子头部 (小圆弧)
+			p.drawArc(QRect(cx - 3, cy - 8, 6, 6), 0, 180 * 16);
+			// 触角
+			p.drawLine(cx - 2, cy - 7, cx - 5, cy - 10);
+			p.drawLine(cx + 2, cy - 7, cx + 5, cy - 10);
+			// 3 对脚
+			p.drawLine(cx - 5, cy - 2, cx - 9, cy - 4);
+			p.drawLine(cx + 5, cy - 2, cx + 9, cy - 4);
+			p.drawLine(cx - 5, cy + 2, cx - 10, cy + 2);
+			p.drawLine(cx + 5, cy + 2, cx + 10, cy + 2);
+			p.drawLine(cx - 5, cy + 6, cx - 9, cy + 8);
+			p.drawLine(cx + 5, cy + 6, cx + 9, cy + 8);
+			// 脊线
+			p.drawLine(cx, cy - 4, cx, cy + 7);
 		}
 
 		QString title = item.title;
@@ -906,7 +1046,7 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 		else if (item.id == 2) title = _videoEnabled ? QString::fromUtf8("停止视频") : QString::fromUtf8("开启视频");
 		else if (item.id == 5) title = QString::fromUtf8("成员(%1)").arg(_participantCount);
 
-		QFont font("Microsoft YaHei", 9);
+		QFont font("Microsoft YaHei", r.width() < 50 ? 8 : 9);
 		p.setFont(font);
 		p.setPen(QColor(0x4e, 0x59, 0x69));
 		p.drawText(QRect(r.x(), r.bottom() - 18, r.width(), 16), Qt::AlignCenter, title);
@@ -1123,17 +1263,85 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 					_recordStream.fire({});
 					update();
 					break;
-				case 8:
-					_minutesStream.fire({});
-					break;
 				case 9:
 					_appsStream.fire({});
+					break;
+				case 10:
+					showSimulateScenarioMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
 					break;
 				}
 				break;
 			}
 		}
 	}
+}
+
+void RoomBottomBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {
+	QMenu menu(this);
+	menu.setStyleSheet(R"(
+		QMenu {
+			background-color: #1a1a1f;
+			border: 1px solid #2e2e38;
+			border-radius: 8px;
+			padding: 8px 4px;
+			font-family: "Segoe UI", "Microsoft YaHei";
+			color: #e4e4e8;
+		}
+		QMenu::item {
+			padding: 7px 28px 7px 18px;
+			border-radius: 6px;
+			font-size: 13px;
+			font-weight: 500;
+			color: #e4e4e8;
+		}
+		QMenu::item:selected {
+			background-color: #2b2b36;
+			color: #ffffff;
+		}
+		QMenu::item:disabled {
+			color: #8c8c9a;
+			font-size: 14px;
+			font-weight: bold;
+			padding: 8px 18px 6px 18px;
+		}
+		QMenu::separator {
+			height: 1px;
+			background-color: #2e2e38;
+			margin: 4px 8px;
+		}
+	)");
+
+	QAction *header = menu.addAction(QString::fromUtf8("Simulate Scenario"));
+	header->setEnabled(false);
+	menu.addSeparator();
+
+	struct ScenarioEntry {
+		QString name;
+		livekit::SimulateScenarioType type;
+	};
+
+	const std::vector<ScenarioEntry> entries = {
+		{ "signalReconnect", livekit::SimulateScenarioType::SignalReconnect },
+		{ "fullReconnect", livekit::SimulateScenarioType::FullReconnect },
+		{ "speakerUpdate", livekit::SimulateScenarioType::SpeakerUpdate },
+		{ "nodeFailure", livekit::SimulateScenarioType::NodeFailure },
+		{ "migration", livekit::SimulateScenarioType::Migration },
+		{ "serverLeave", livekit::SimulateScenarioType::ServerLeave },
+		{ "switchCandidate", livekit::SimulateScenarioType::SwitchCandidate },
+		{ "e2eeKeyRatchet", livekit::SimulateScenarioType::E2eeKeyRatchet },
+		{ "participantName", livekit::SimulateScenarioType::ParticipantName },
+		{ "participantMetadata", livekit::SimulateScenarioType::ParticipantMetadata },
+		{ "clear", livekit::SimulateScenarioType::Clear }
+	};
+
+	for (const auto &entry : entries) {
+		QAction *act = menu.addAction(entry.name);
+		connect(act, &QAction::triggered, [this, type = entry.type] {
+			_simulateScenarioStream.fire_copy(type);
+		});
+	}
+
+	menu.exec(globalPos);
 }
 
 void RoomBottomBarWidget::leaveEventHook(QEvent *e) {
@@ -1340,6 +1548,30 @@ void MeetingRoomWindow::initLayout() {
 			QString::fromUtf8("音视频设置已开启：默认音频 48kHz 立体声降噪，视频分辨率自适应 (VP8/H264 Simulcast)。"));
 	}, lifetime());
 
+	auto handleSimulate = [this](livekit::SimulateScenarioType type) {
+		if (_room) {
+			_room->SimulateScenario(type);
+		}
+		QString name;
+		switch (type) {
+		case livekit::SimulateScenarioType::SignalReconnect: name = "signalReconnect"; break;
+		case livekit::SimulateScenarioType::FullReconnect: name = "fullReconnect"; break;
+		case livekit::SimulateScenarioType::SpeakerUpdate: name = "speakerUpdate"; break;
+		case livekit::SimulateScenarioType::NodeFailure: name = "nodeFailure"; break;
+		case livekit::SimulateScenarioType::Migration: name = "migration"; break;
+		case livekit::SimulateScenarioType::ServerLeave: name = "serverLeave"; break;
+		case livekit::SimulateScenarioType::SwitchCandidate: name = "switchCandidate"; break;
+		case livekit::SimulateScenarioType::E2eeKeyRatchet: name = "e2eeKeyRatchet"; break;
+		case livekit::SimulateScenarioType::ParticipantName: name = "participantName"; break;
+		case livekit::SimulateScenarioType::ParticipantMetadata: name = "participantMetadata"; break;
+		case livekit::SimulateScenarioType::Clear: name = "clear"; break;
+		}
+		LogToConsole(LogCategory::General, "SIMULATE", QString("已触发场景模拟: %1").arg(name));
+	};
+
+	_topBar->simulateScenarioRequested() | rpl::on_next(handleSimulate, lifetime());
+	_bottomBar->simulateScenarioRequested() | rpl::on_next(handleSimulate, lifetime());
+
 	_bottomBar->toggleAudioRequested() | rpl::on_next([this](bool muted) {
 		_config.audioMuted = muted;
 		_localTile->setAudioMuted(muted);
@@ -1405,11 +1637,6 @@ void MeetingRoomWindow::initLayout() {
 	_bottomBar->recordClicked() | rpl::on_next([this] {
 		QMessageBox::information(this, QString::fromUtf8("云端录制"),
 			QString::fromUtf8("正在将本次会议视频流实时转码存档至高可用存储。"));
-	}, lifetime());
-
-	_bottomBar->minutesClicked() | rpl::on_next([this] {
-		QMessageBox::information(this, QString::fromUtf8("元宝纪要"),
-			QString::fromUtf8("AI 实时语音转写纪要已开启，正在为您自动提炼会议重点与行动事项。"));
 	}, lifetime());
 
 	_bottomBar->appsClicked() | rpl::on_next([this] {
@@ -1945,10 +2172,21 @@ void MeetingRoomWindow::startLiveKitSession() {
 							LogToConsole(LogCategory::Track, "PUBLISH", QString("已向房间发布 LocalAudioTrack (simple_audio, 初始: %1)").arg(_config.audioMuted ? "静音" : "开麦"));
 
 							// 自动发布本地视频轨
-							_localVideoTrack = livekit::LocalVideoTrack::createLocalVideoTrack("camera_video", _localVideoSource);
+							livekit::VideoPublishOptions vopts;
+							vopts.video_codec = _config.videoCodec.toStdString();
+							if (!_config.backupCodec.isEmpty()) {
+								vopts.backup_codec = _config.backupCodec.toStdString();
+							}
+							vopts.backup_codec_policy = _config.backupCodecPolicy;
+							vopts.auto_backup_codec = true;
+
+							_localVideoTrack = livekit::LocalVideoTrack::createLocalVideoTrack("camera_video", _localVideoSource, livekit::TrackSource::Camera, vopts);
 							_localVideoTrack->set_muted(!_config.videoEnabled);
                             co_await local->PublishTrackAsync(_localVideoTrack);
-							LogToConsole(LogCategory::Track, "PUBLISH", QString("已向房间发布 LocalVideoTrack (camera_video, 初始: %1)").arg(_config.videoEnabled ? "开启" : "关闭"));
+							LogToConsole(LogCategory::Track, "PUBLISH", QString("已向房间发布 LocalVideoTrack (camera_video, 编码: %1, 备用: %2, 初始: %3)")
+								.arg(_config.videoCodec)
+								.arg(_config.backupCodec.isEmpty() ? "None" : _config.backupCodec)
+								.arg(_config.videoEnabled ? "开启" : "关闭"));
 						}
                     }
 				}

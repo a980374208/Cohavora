@@ -37,10 +37,18 @@ static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& t
     
     if (track->kind() == TrackKind::Audio) {
         add_track->set_type(proto::TrackType::AUDIO);
-        add_track->set_source(proto::TrackSource::MICROPHONE);
+        if (track->source() == TrackSource::ScreenShareAudio) {
+            add_track->set_source(proto::TrackSource::SCREEN_SHARE_AUDIO);
+        } else {
+            add_track->set_source(proto::TrackSource::MICROPHONE);
+        }
     } else if (track->kind() == TrackKind::Video) {
         add_track->set_type(proto::TrackType::VIDEO);
-        add_track->set_source(proto::TrackSource::CAMERA);
+        if (track->source() == TrackSource::ScreenShareVideo) {
+            add_track->set_source(proto::TrackSource::SCREEN_SHARE);
+        } else {
+            add_track->set_source(proto::TrackSource::CAMERA);
+        }
         int w = 1280;
         int h = 720;
         auto vid_track = std::dynamic_pointer_cast<LocalVideoTrack>(track);
@@ -60,7 +68,75 @@ static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& t
 
         if (vid_track) {
             auto pub_opts = vid_track->publish_options();
-            if (pub_opts.simulcast && !pub_opts.layers.empty()) {
+
+            // GAP-03: Set BackupCodecPolicy
+            proto::BackupCodecPolicy proto_policy = proto::BackupCodecPolicy::PREFER_REGRESSION;
+            if (pub_opts.backup_codec_policy == BackupCodecPolicy::Simulcast) {
+                proto_policy = proto::BackupCodecPolicy::SIMULCAST;
+            } else if (pub_opts.backup_codec_policy == BackupCodecPolicy::Regression) {
+                proto_policy = proto::BackupCodecPolicy::REGRESSION;
+            }
+            add_track->set_backup_codec_policy(proto_policy);
+
+            if (pub_opts.simulcast && !pub_opts.simulcast_codecs.empty()) {
+                for (size_t c_idx = 0; c_idx < pub_opts.simulcast_codecs.size(); ++c_idx) {
+                    const auto& spec = pub_opts.simulcast_codecs[c_idx];
+                    auto* sim_codec = add_track->add_simulcast_codecs();
+                    sim_codec->set_codec(spec.codec);
+                    std::string codec_cid = spec.cid.empty() ? (c_idx == 0 ? add_track->cid() : add_track->cid() + "_backup") : spec.cid;
+                    sim_codec->set_cid(codec_cid);
+                    sim_codec->set_video_layer_mode(proto::VideoLayer::ONE_SPATIAL_LAYER_PER_STREAM);
+
+                    // Order layers ascending (q:0, h:1, f:2)
+                    std::vector<VideoLayerSetting> ordered_layers = spec.layers;
+                    std::sort(ordered_layers.begin(), ordered_layers.end(), [](const VideoLayerSetting& a, const VideoLayerSetting& b) {
+                        auto get_idx = [](const std::string& r) {
+                            if (r == "q") return 0;
+                            if (r == "h") return 1;
+                            return 2;
+                        };
+                        return get_idx(a.rid) < get_idx(b.rid);
+                    });
+
+                    for (const auto& layer_setting : ordered_layers) {
+                        auto* sim_layer = sim_codec->add_layers();
+
+                        proto::VideoQuality q = proto::VideoQuality::HIGH;
+                        int spatial_idx = 2;
+                        if (layer_setting.rid == "q") {
+                            q = proto::VideoQuality::LOW;
+                            spatial_idx = 0;
+                        } else if (layer_setting.rid == "h") {
+                            q = proto::VideoQuality::MEDIUM;
+                            spatial_idx = 1;
+                        } else {
+                            q = proto::VideoQuality::HIGH;
+                            spatial_idx = 2;
+                        }
+
+                        sim_layer->set_quality(q);
+                        sim_layer->set_width(layer_setting.width);
+                        sim_layer->set_height(layer_setting.height);
+                        sim_layer->set_bitrate(layer_setting.max_bitrate_bps);
+                        sim_layer->set_rid(layer_setting.rid);
+                        sim_layer->set_spatial_layer(spatial_idx);
+
+                        // Populate top-level layers for the primary codec
+                        if (c_idx == 0) {
+                            auto* layer = add_track->add_layers();
+                            layer->set_quality(q);
+                            layer->set_width(layer_setting.width);
+                            layer->set_height(layer_setting.height);
+                            layer->set_bitrate(layer_setting.max_bitrate_bps);
+                            layer->set_rid(layer_setting.rid);
+                            layer->set_spatial_layer(spatial_idx);
+                        }
+                    }
+                }
+                std::cout << "[SIMULCAST SIGNAL] Serialized " << add_track->simulcast_codecs_size() 
+                          << " codecs (Primary=" << (add_track->simulcast_codecs_size() > 0 ? add_track->simulcast_codecs(0).codec() : "") 
+                          << ", Policy=" << add_track->backup_codec_policy() << ") into AddTrackRequest (cid=" << add_track->cid() << ")\n";
+            } else if (pub_opts.simulcast && !pub_opts.layers.empty()) {
                 auto* sim_codec = add_track->add_simulcast_codecs();
                 sim_codec->set_codec(pub_opts.video_codec);
                 sim_codec->set_cid(add_track->cid());
@@ -107,13 +183,6 @@ static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& t
                     sim_layer->set_bitrate(layer_setting.max_bitrate_bps);
                     sim_layer->set_rid(layer_setting.rid);
                     sim_layer->set_spatial_layer(spatial_idx);
-                }
-                std::cout << "[SIMULCAST SIGNAL] Serialized " << pub_opts.layers.size() << " layers into AddTrackRequest (cid=" << add_track->cid() << "):\n";
-                for (int i = 0; i < add_track->layers_size(); ++i) {
-                    const auto& l = add_track->layers(i);
-                    std::cout << "  Layer [" << i << "]: rid='" << l.rid() << "', spatial=" << l.spatial_layer()
-                              << ", quality=" << l.quality() << ", " << l.width() << "x" << l.height()
-                              << " @" << l.bitrate() << "bps\n";
                 }
             } else {
                 auto* layer = add_track->add_layers();

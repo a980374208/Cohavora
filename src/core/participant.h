@@ -38,10 +38,12 @@ public:
 
     std::string sid() const { return sid_; }
     std::string identity() const { return identity_; }
+    std::string name() const { return name_; }
     std::string metadata() const { return metadata_; }
     bool is_speaking() const { return speaking_; }
     float audio_level() const { return audio_level_; }
 
+    void set_name(const std::string& name) { name_ = name; }
     void set_metadata(const std::string& metadata) { metadata_ = metadata; }
     void set_sid(const std::string& sid) { sid_ = sid; }
     void set_speaking(bool speaking) { speaking_ = speaking; }
@@ -80,6 +82,7 @@ public:
 protected:
     std::string sid_;
     std::string identity_;
+    std::string name_;
     std::string metadata_;
     bool speaking_{false};
     float audio_level_{0.0f};
