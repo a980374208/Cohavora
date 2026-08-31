@@ -35,6 +35,20 @@ enum class ConnectionState {
     Reconnecting
 };
 
+enum class SimulateScenarioType {
+    SignalReconnect,
+    FullReconnect,
+    SpeakerUpdate,
+    NodeFailure,
+    Migration,
+    ServerLeave,
+    SwitchCandidate,
+    E2eeKeyRatchet,
+    ParticipantName,
+    ParticipantMetadata,
+    Clear,
+};
+
 class RoomListener {
 public:
     virtual ~RoomListener() = default;
@@ -100,6 +114,10 @@ public:
     void RemoveListener(std::shared_ptr<RoomListener> listener);
 
     asio::any_io_executor executor() const { return executor_; }
+
+    // === 场景模拟 (Simulate Scenario - 对标 Flutter sendSimulateScenario) ===
+    void SimulateScenario(SimulateScenarioType scenario);
+    asio::awaitable<void> SimulateScenarioAsync(SimulateScenarioType scenario);
 
     // === 高级通信与 DataChannel 背压流控 ===
     void PublishData(const std::vector<uint8_t>& payload, bool reliable = true,

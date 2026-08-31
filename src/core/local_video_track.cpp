@@ -12,7 +12,7 @@ LocalVideoTrack::LocalVideoTrack(const std::string& sid, const std::string& name
     int h = source_ ? source_->height() : 720;
     VideoPublishOptions effective_opts = options;
     effective_opts.source = source_type;
-    publish_options_ = ComputeSimulcastOptions(w, h, effective_opts);
+    publish_options_ = ComputeMultiCodecSimulcastOptions(w, h, effective_opts);
 }
 
 static double findEvenScaleDownBy(int src_w, int src_h, int target_w, int target_h) {
@@ -140,12 +140,44 @@ VideoPublishOptions LocalVideoTrack::ComputeSimulcastOptions(int width, int heig
     return opts;
 }
 
+VideoPublishOptions LocalVideoTrack::ComputeMultiCodecSimulcastOptions(int width, int height, const VideoPublishOptions& input_options) {
+    VideoPublishOptions opts = ComputeSimulcastOptions(width, height, input_options);
+
+    std::string codec_lower = opts.video_codec;
+    for (auto& c : codec_lower) c = static_cast<char>(tolower(c));
+
+    SimulcastCodecSpec primary_spec;
+    primary_spec.codec = opts.video_codec;
+    primary_spec.scalability_mode = opts.scalability_mode;
+    primary_spec.layers = opts.layers;
+    opts.simulcast_codecs = { primary_spec };
+
+    // When primary codec is advanced (AV1 or VP9) and backup codec is enabled, compute fallback codec layers (e.g. VP8 / H264)
+    if (opts.simulcast && (codec_lower == "av1" || codec_lower == "vp9") && (opts.auto_backup_codec || opts.backup_codec.has_value())) {
+        std::string backup_codec_name = opts.backup_codec.value_or("vp8");
+        VideoPublishOptions backup_input = input_options;
+        backup_input.video_codec = backup_codec_name;
+        backup_input.scalability_mode = "";
+        backup_input.backup_codec = std::nullopt;
+        backup_input.auto_backup_codec = false;
+
+        VideoPublishOptions backup_computed = ComputeSimulcastOptions(width, height, backup_input);
+        SimulcastCodecSpec backup_spec;
+        backup_spec.codec = backup_codec_name;
+        backup_spec.layers = backup_computed.layers;
+        opts.simulcast_codecs.push_back(backup_spec);
+        opts.backup_codec = backup_codec_name;
+    }
+
+    return opts;
+}
+
 VideoPublishOptions LocalVideoTrack::DefaultVp8SimulcastOptions(int width, int height) {
     VideoPublishOptions opts;
     opts.source = TrackSource::Camera;
     opts.simulcast = true;
     opts.video_codec = "vp8";
-    return ComputeSimulcastOptions(width, height, opts);
+    return ComputeMultiCodecSimulcastOptions(width, height, opts);
 }
 
 std::shared_ptr<LocalVideoTrack> LocalVideoTrack::createLocalVideoTrack(const std::string& name,

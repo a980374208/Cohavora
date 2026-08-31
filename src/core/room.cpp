@@ -1777,40 +1777,45 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
             if (transceiver &&
                 task.rtc_track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind &&
                 !task.publish_options.video_codec.empty()) {
-                std::string selected = task.publish_options.video_codec;
-                std::transform(selected.begin(), selected.end(), selected.begin(),
-                               [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-                auto capabilities = WebRTCManager::Instance().factory()->GetRtpSenderCapabilities(
-                    webrtc::MediaType::VIDEO);
-                std::vector<webrtc::RtpCodecCapability> preferences;
-                std::set<int> selected_payload_types;
-                for (const auto& codec : capabilities.codecs) {
-                    std::string name = codec.name;
-                    std::transform(name.begin(), name.end(), name.begin(),
+                auto get_prefs = [](const std::string& codec_name) {
+                    std::string selected = codec_name;
+                    std::transform(selected.begin(), selected.end(), selected.begin(),
                                    [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-                    if (name == selected) {
+                    auto capabilities = WebRTCManager::Instance().factory()->GetRtpSenderCapabilities(
+                        webrtc::MediaType::VIDEO);
+                    std::vector<webrtc::RtpCodecCapability> preferences;
+                    std::set<int> selected_payload_types;
+                    for (const auto& codec : capabilities.codecs) {
+                        std::string name = codec.name;
+                        std::transform(name.begin(), name.end(), name.begin(),
+                                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                        if (name == selected) {
+                            preferences.push_back(codec);
+                            if (codec.preferred_payload_type) {
+                                selected_payload_types.insert(*codec.preferred_payload_type);
+                            }
+                        }
+                    }
+                    for (const auto& codec : capabilities.codecs) {
+                        if (!codec.IsResiliencyCodec()) continue;
+                        std::string name = codec.name;
+                        std::transform(name.begin(), name.end(), name.begin(),
+                                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                        if (name == "rtx") {
+                            const auto apt = codec.parameters.find("apt");
+                            if (apt == codec.parameters.end()) continue;
+                            try {
+                                if (!selected_payload_types.contains(std::stoi(apt->second))) continue;
+                            } catch (...) {
+                                continue;
+                            }
+                        }
                         preferences.push_back(codec);
-                        if (codec.preferred_payload_type) {
-                            selected_payload_types.insert(*codec.preferred_payload_type);
-                        }
                     }
-                }
-                for (const auto& codec : capabilities.codecs) {
-                    if (!codec.IsResiliencyCodec()) continue;
-                    std::string name = codec.name;
-                    std::transform(name.begin(), name.end(), name.begin(),
-                                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-                    if (name == "rtx") {
-                        const auto apt = codec.parameters.find("apt");
-                        if (apt == codec.parameters.end()) continue;
-                        try {
-                            if (!selected_payload_types.contains(std::stoi(apt->second))) continue;
-                        } catch (...) {
-                            continue;
-                        }
-                    }
-                    preferences.push_back(codec);
-                }
+                    return preferences;
+                };
+
+                auto preferences = get_prefs(task.publish_options.video_codec);
                 if (!preferences.empty()) {
                     auto codec_status = transceiver->SetCodecPreferences(preferences);
                     if (!codec_status.ok()) {
@@ -1822,6 +1827,48 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
                             codec_status.message(),
                             true)));
                         return;
+                    }
+                }
+
+                // GAP-03: Multi-Codec Simulcast & Backup Codecs Transceiver
+                if (task.publish_options.simulcast && task.publish_options.simulcast_codecs.size() > 1) {
+                    for (size_t c_idx = 1; c_idx < task.publish_options.simulcast_codecs.size(); ++c_idx) {
+                        const auto& backup_spec = task.publish_options.simulcast_codecs[c_idx];
+                        if (backup_spec.layers.empty()) continue;
+
+                        webrtc::RtpTransceiverInit backup_init;
+                        backup_init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
+                        backup_init.stream_ids = {task.stream_id};
+                        bool is_active = (task.publish_options.backup_codec_policy == BackupCodecPolicy::Simulcast);
+
+                        for (const auto& layer : backup_spec.layers) {
+                            webrtc::RtpEncodingParameters encoding;
+                            encoding.active = is_active;
+                            encoding.rid = layer.rid;
+                            encoding.scale_resolution_down_by = layer.scale_resolution_down_by;
+                            encoding.max_bitrate_bps = layer.max_bitrate_bps;
+                            encoding.max_framerate = layer.max_fps;
+                            if (!backup_spec.scalability_mode.empty()) {
+                                encoding.scalability_mode = backup_spec.scalability_mode;
+                            }
+                            backup_init.send_encodings.push_back(std::move(encoding));
+                        }
+
+                        auto backup_res = task.pc->AddTransceiver(task.rtc_track, backup_init);
+                        if (backup_res.ok()) {
+                            auto backup_transceiver = backup_res.MoveValue();
+                            auto backup_prefs = get_prefs(backup_spec.codec);
+                            if (!backup_prefs.empty()) {
+                                backup_transceiver->SetCodecPreferences(backup_prefs);
+                            }
+                            std::cout << "[BACKUP CODEC] Added Backup Transceiver for codec=" << backup_spec.codec
+                                      << " (layers=" << backup_spec.layers.size()
+                                      << ", active=" << (is_active ? "ON" : "OFF (on-demand)") << ")\n";
+                            task.room->Log("TRACK", "BACKUP_CODEC_ATTACH",
+                                           "已为视频轨挂载备用编码器 Transceiver: Codec=" + backup_spec.codec +
+                                           ", Layers=" + std::to_string(backup_spec.layers.size()) +
+                                           ", Policy=" + (is_active ? "Simulcast" : "PreferRegression"));
+                        }
                     }
                 }
             }
@@ -2355,10 +2402,9 @@ void Room::AttachRemoteTrackToParticipant(
         }
     }
 
-    // 触发 RoomListener 回调
+    // 触发 RoomListener 回调 (OnTrackPublished 已在 UpdateParticipants 中派发，此处仅派发 OnTrackSubscribed)
     auto listeners = GetListenersSnapshot();
     for (const auto& l : listeners) {
-        l->OnTrackPublished(participant, pub);
         l->OnTrackSubscribed(r_track, pub, participant);
     }
 }
@@ -2610,14 +2656,20 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
         std::string track_sid = squ.track_sid();
         Log("SIGNAL", "QUALITY_UPDATE", "收到 SFU Dynacast 质量调控需求: Track SID=" + track_sid);
 
-        std::map<livekit::proto::VideoQuality, bool> quality_states;
+        std::map<std::string, std::map<livekit::proto::VideoQuality, bool>> codec_quality_map;
+        std::map<livekit::proto::VideoQuality, bool> fallback_quality_states;
+
         for (const auto& sc : squ.subscribed_codecs()) {
+            std::string c_lower = sc.codec();
+            std::transform(c_lower.begin(), c_lower.end(), c_lower.begin(),
+                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
             for (const auto& q : sc.qualities()) {
-                quality_states[q.quality()] = q.enabled();
+                codec_quality_map[c_lower][q.quality()] = q.enabled();
+                fallback_quality_states[q.quality()] = q.enabled();
             }
         }
         for (const auto& q : squ.subscribed_qualities()) {
-            quality_states[q.quality()] = q.enabled();
+            fallback_quality_states[q.quality()] = q.enabled();
         }
 
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
@@ -2636,10 +2688,22 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
                 webrtc::RtpParameters parameters = sender->GetParameters();
                 if (parameters.encodings.empty()) continue;
 
+                // Match specific codec qualities if available
+                const std::map<livekit::proto::VideoQuality, bool>* target_qualities = &fallback_quality_states;
+                if (!parameters.codecs.empty()) {
+                    std::string s_codec = parameters.codecs[0].name;
+                    std::transform(s_codec.begin(), s_codec.end(), s_codec.begin(),
+                                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                    auto it = codec_quality_map.find(s_codec);
+                    if (it != codec_quality_map.end()) {
+                        target_qualities = &it->second;
+                    }
+                }
+
                 bool params_changed = false;
                 std::string active_summary;
 
-                for (const auto& [quality, enabled] : quality_states) {
+                for (const auto& [quality, enabled] : *target_qualities) {
                     std::string target_rid;
                     if (quality == livekit::proto::VideoQuality::HIGH) target_rid = "f";
                     else if (quality == livekit::proto::VideoQuality::MEDIUM) target_rid = "h";
@@ -2834,11 +2898,14 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
     for (const auto& [p, pub] : newly_published_tracks) {
         FlushPendingTracks(p->sid());
         if (signal_client_) {
-            if (pub->track() && pub->track()->kind() == TrackKind::Video) {
-                signal_client_->SendUpdateTrackSettings(pub->sid(), false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
-                has_new_video_pub = true;
+            const bool auto_sub = signal_client_->options().auto_subscribe;
+            if (auto_sub) {
+                if (pub->track() && pub->track()->kind() == TrackKind::Video) {
+                    signal_client_->SendUpdateTrackSettings(pub->sid(), false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
+                    has_new_video_pub = true;
+                }
+                signal_client_->SendUpdateSubscription({pub->sid()}, true, p->sid());
             }
-            signal_client_->SendUpdateSubscription({pub->sid()}, true, p->sid());
         }
         for (const auto& listener : listeners_snapshot) {
             listener->OnTrackPublished(p, pub);
@@ -3068,6 +3135,31 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
                             client->Send(req);
                             std::cout << "[WebRTC] -> Successfully created and sent SDP Answer back to LiveKit Server!" << std::endl;
                             self->Log("SIGNAL", "SDP_ANSWER_SENT", "已生成并向 LiveKit 服务端发送 Subscriber SDP Answer (" + std::to_string(sdp.length()) + " 字节):\n" + sdp);
+
+                            // 重放暂存的 Subscriber 早期 ICE 候选
+                            std::vector<PendingIceCandidate> pending_cands;
+                            {
+                                std::lock_guard lock(self->room_mutex_);
+                                pending_cands = std::move(self->pending_sub_ice_candidates_);
+                            }
+                            if (!pending_cands.empty()) {
+                                self->Log("SIGNAL", "ICE_FLUSH", "开始重放暂存的 " + std::to_string(pending_cands.size()) + " 个 Subscriber 早期候选...");
+                                std::vector<std::pair<std::string, bool>> results;
+                                WebRTCManager::Instance().signaling_thread()->BlockingCall([pc, &pending_cands, &results]() {
+                                    for (const auto& pcand : pending_cands) {
+                                        webrtc::SdpParseError p_err;
+                                        std::unique_ptr<webrtc::IceCandidateInterface> cand(webrtc::CreateIceCandidate(pcand.sdp_mid, pcand.sdp_mline_index, pcand.sdp, &p_err));
+                                        bool ok = false;
+                                        if (cand && pc) {
+                                            ok = pc->AddIceCandidate(cand.get());
+                                        }
+                                        results.push_back({pcand.sdp_mid, ok});
+                                    }
+                                });
+                                for (const auto& res : results) {
+                                    self->Log("SIGNAL", "ICE_SUB_REPLAY", "重放早期候选 mid=" + res.first + ", 结果=" + (res.second ? "成功" : "失败"));
+                                }
+                            }
 
                             // 扫描并激活所有 Subscriber Transceiver 下的 Receiver Track，确保后加入用户的音频被及时挂载与播放
                             auto transceivers = pc->GetTransceivers();
@@ -4127,6 +4219,143 @@ void Room::SetParticipantMuted(const std::string& identity_or_sid, bool muted) {
             }
         }
     }
+}
+
+void Room::SimulateScenario(SimulateScenarioType scenario) {
+    auto self = shared_from_this();
+    livekit::safe_co_spawn(executor_, [self, scenario]() -> asio::awaitable<void> {
+        co_await self->SimulateScenarioAsync(scenario);
+    });
+}
+
+asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario) {
+    std::shared_ptr<SignalClient> signal;
+    std::shared_ptr<LocalParticipant> local;
+    std::shared_ptr<E2eeManager> e2ee;
+    {
+        std::lock_guard lock(room_mutex_);
+        signal = signal_client_;
+        local = local_participant_;
+        e2ee = e2ee_manager_;
+    }
+
+    switch (scenario) {
+    case SimulateScenarioType::SignalReconnect: {
+        Log("SIMULATE", "SIGNAL_RECONNECT", "触发信令断开以模拟软重连 (Soft Reconnect / Resume)");
+        HandleSignalEvent(SignalEvent{SignalEvent::Close, nullptr, "simulated signal reconnect"});
+        break;
+    }
+    case SimulateScenarioType::FullReconnect: {
+        Log("SIMULATE", "FULL_RECONNECT", "触发模拟硬重连 (Hard Reconnect / Full Restart)");
+        if (signal) {
+            proto::SignalRequest req;
+            auto* sim = req.mutable_simulate();
+            sim->set_leave_request_full_reconnect(true);
+            signal->Send(req);
+        }
+        HandleSignalEvent(SignalEvent{SignalEvent::Close, nullptr, "simulated full reconnect"});
+        break;
+    }
+    case SimulateScenarioType::SpeakerUpdate: {
+        Log("SIMULATE", "SPEAKER_UPDATE", "发送 SimulateScenario.speaker_update = 3");
+        if (signal) {
+            proto::SignalRequest req;
+            auto* sim = req.mutable_simulate();
+            sim->set_speaker_update(3);
+            signal->Send(req);
+        }
+        break;
+    }
+    case SimulateScenarioType::NodeFailure: {
+        Log("SIMULATE", "NODE_FAILURE", "发送 SimulateScenario.node_failure = true");
+        if (signal) {
+            proto::SignalRequest req;
+            auto* sim = req.mutable_simulate();
+            sim->set_node_failure(true);
+            signal->Send(req);
+        }
+        break;
+    }
+    case SimulateScenarioType::Migration: {
+        Log("SIMULATE", "MIGRATION", "发送 SimulateScenario.migration = true");
+        if (signal) {
+            proto::SignalRequest req;
+            auto* sim = req.mutable_simulate();
+            sim->set_migration(true);
+            signal->Send(req);
+        }
+        break;
+    }
+    case SimulateScenarioType::ServerLeave: {
+        Log("SIMULATE", "SERVER_LEAVE", "发送 SimulateScenario.server_leave = true");
+        if (signal) {
+            proto::SignalRequest req;
+            auto* sim = req.mutable_simulate();
+            sim->set_server_leave(true);
+            signal->Send(req);
+        }
+        break;
+    }
+    case SimulateScenarioType::SwitchCandidate: {
+        Log("SIMULATE", "SWITCH_CANDIDATE", "发送 SimulateScenario.switch_candidate_protocol = TCP");
+        if (signal) {
+            proto::SignalRequest req;
+            auto* sim = req.mutable_simulate();
+            sim->set_switch_candidate_protocol(proto::CandidateProtocol::TCP);
+            signal->Send(req);
+        }
+        break;
+    }
+    case SimulateScenarioType::E2eeKeyRatchet: {
+        Log("SIMULATE", "E2EE_RATCHET", "触发 E2EE 密钥步进 (Key Ratchet)");
+        if (e2ee) {
+            e2ee->RatchetKey();
+            Log("SIMULATE", "E2EE_RATCHET", "E2EE 密钥已步进更新");
+        } else {
+            Log("SIMULATE", "E2EE_RATCHET", "当前未启用 E2EE 管理器，忽略 Ratchet 操作");
+        }
+        break;
+    }
+    case SimulateScenarioType::ParticipantName: {
+        std::string new_name = "Simulated " + std::to_string(std::chrono::system_clock::now().time_since_epoch().count() % 10000);
+        Log("SIMULATE", "PARTICIPANT_NAME", "模拟本地参会人改名: " + new_name);
+        if (local) {
+            local->set_name(new_name);
+            if (signal) {
+                proto::SignalRequest req;
+                auto* meta = req.mutable_update_metadata();
+                meta->set_name(new_name);
+                signal->Send(req);
+            }
+        }
+        break;
+    }
+    case SimulateScenarioType::ParticipantMetadata: {
+        std::string new_meta = "{\"simulated\":true,\"ts\":" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()) + "}";
+        Log("SIMULATE", "PARTICIPANT_METADATA", "模拟本地参会人元数据更新: " + new_meta);
+        if (local) {
+            local->set_metadata(new_meta);
+            if (signal) {
+                proto::SignalRequest req;
+                auto* meta = req.mutable_update_metadata();
+                meta->set_metadata(new_meta);
+                signal->Send(req);
+            }
+        }
+        break;
+    }
+    case SimulateScenarioType::Clear: {
+        Log("SIMULATE", "CLEAR", "发送 SimulateScenario.subscriber_bandwidth = 0 清除人为限速与限制");
+        if (signal) {
+            proto::SignalRequest req;
+            auto* sim = req.mutable_simulate();
+            sim->set_subscriber_bandwidth(0);
+            signal->Send(req);
+        }
+        break;
+    }
+    }
+    co_return;
 }
 
 } // namespace livekit

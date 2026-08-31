@@ -466,6 +466,7 @@ void SignalClient::FlushQueue() {
 
 void SignalClient::Close() {
     StopHeartbeat();
+    event_handler_ = nullptr;
     
     std::shared_ptr<SignalStream> stream;
     {

@@ -29,6 +29,7 @@ public:
     void unmute() { set_muted(false); }
 
     static VideoPublishOptions ComputeSimulcastOptions(int width, int height, const VideoPublishOptions& input_options);
+    static VideoPublishOptions ComputeMultiCodecSimulcastOptions(int width, int height, const VideoPublishOptions& input_options);
     static VideoPublishOptions DefaultVp8SimulcastOptions(int width, int height);
 
 private:

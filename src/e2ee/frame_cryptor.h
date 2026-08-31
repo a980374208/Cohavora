@@ -80,6 +80,12 @@ public:
     std::shared_ptr<FrameCryptor> GetCryptor(const std::string& participant_identity, const std::string& track_sid);
     std::shared_ptr<DataPacketCryptor> data_packet_cryptor() const { return data_packet_cryptor_; }
 
+    void RatchetKey() {
+        if (options_.key_provider) {
+            options_.key_provider->RatchetSharedKey();
+        }
+    }
+
     void SetStateChangedHandler(StateChangedHandler handler) {
         state_changed_handler_ = std::move(handler);
     }

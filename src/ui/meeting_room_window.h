@@ -146,6 +146,9 @@ public:
 	rpl::producer<> maximizeClicked() const { return _maxStream.events(); }
 	rpl::producer<> closeClicked() const { return _closeStream.events(); }
 	rpl::producer<> settingsClicked() const { return _settingsStream.events(); }
+	rpl::producer<livekit::SimulateScenarioType> simulateScenarioRequested() const { return _simulateScenarioStream.events(); }
+
+	void showSimulateScenarioMenu(const QPoint &globalPos);
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -156,7 +159,7 @@ protected:
 
 private:
 	enum class HoverBtn {
-		None, Layout, HostTools, Console, Settings, Fullscreen, Min, Max, Close
+		None, Layout, HostTools, Console, Simulate, Settings, Fullscreen, Min, Max, Close
 	};
 
 	HoverBtn _hoverBtn = HoverBtn::None;
@@ -167,11 +170,13 @@ private:
 	QRect _layoutRect;
 	QRect _hostToolsRect;
 	QRect _consoleRect;
+	QRect _simulateRect;
 	QRect _settingsRect;
 	QRect _fullscreenRect;
 	QRect _minRect;
 	QRect _maxRect;
 	QRect _closeRect;
+	QRect _speakerCapsuleRect;
 
 	rpl::event_stream<VideoViewMode> _viewModeStream;
 	rpl::event_stream<> _consoleStream;
@@ -179,6 +184,7 @@ private:
 	rpl::event_stream<> _maxStream;
 	rpl::event_stream<> _closeStream;
 	rpl::event_stream<> _settingsStream;
+	rpl::event_stream<livekit::SimulateScenarioType> _simulateScenarioStream;
 };
 
 // ----------------------------------------------------
@@ -209,14 +215,15 @@ public:
 	rpl::producer<> participantsClicked() const { return _participantsStream.events(); }
 	rpl::producer<> chatClicked() const { return _chatStream.events(); }
 	rpl::producer<> recordClicked() const { return _recordStream.events(); }
-	rpl::producer<> minutesClicked() const { return _minutesStream.events(); }
 	rpl::producer<> appsClicked() const { return _appsStream.events(); }
 	rpl::producer<> endMeetingClicked() const { return _endMeetingStream.events(); }
 	rpl::producer<QString> sendChatRequested() const { return _sendChatStream.events(); }
 	rpl::producer<QString> microphoneDeviceChanged() const { return _micDeviceStream.events(); }
 	rpl::producer<int> speakerDeviceChanged() const { return _speakerDeviceStream.events(); }
+	rpl::producer<livekit::SimulateScenarioType> simulateScenarioRequested() const { return _simulateScenarioStream.events(); }
 
 	void showAudioDeviceMenu(const QPoint &globalPos);
+	void showSimulateScenarioMenu(const QPoint &globalPos);
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -257,12 +264,12 @@ private:
 	rpl::event_stream<> _participantsStream;
 	rpl::event_stream<> _chatStream;
 	rpl::event_stream<> _recordStream;
-	rpl::event_stream<> _minutesStream;
 	rpl::event_stream<> _appsStream;
 	rpl::event_stream<> _endMeetingStream;
 	rpl::event_stream<QString> _sendChatStream;
 	rpl::event_stream<QString> _micDeviceStream;
 	rpl::event_stream<int> _speakerDeviceStream;
+	rpl::event_stream<livekit::SimulateScenarioType> _simulateScenarioStream;
 };
 
 // ----------------------------------------------------
@@ -277,6 +284,9 @@ public:
 		QString displayName = QString::fromUtf8("LiveKit用户");
 		bool audioMuted = false;
 		bool videoEnabled = true;
+		QString videoCodec = "vp8"; // "vp8", "h264", "vp9", "av1"
+		QString backupCodec = "vp8";
+		livekit::BackupCodecPolicy backupCodecPolicy = livekit::BackupCodecPolicy::PreferRegression;
 	};
 
 	explicit MeetingRoomWindow(const Config &config, QWidget *parent = nullptr);
