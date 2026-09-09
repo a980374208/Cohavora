@@ -1,4 +1,5 @@
 #include "src/ui/sidebar_widget.h"
+#include "src/net/session_manager.h"
 #include <QtGui/QMouseEvent>
 #include <QtGui/QFont>
 
@@ -187,29 +188,45 @@ void SidebarWidget::drawAvatar(QPainter &p, const QRect &r) {
 	p.setBrush(grad);
 	p.drawEllipse(innerRect);
 
-	// 用户轮廓图标
-	p.setPen(Qt::NoPen);
-	p.setBrush(QColor(0x33, 0x77, 0xdd));
-	// 头部
-	p.drawEllipse(innerRect.center().x() - 4, innerRect.top() + 7, 8, 8);
-	// 身体
-	QPainterPath bodyPath;
-	bodyPath.moveTo(innerRect.center().x() - 9, innerRect.bottom() - 3);
-	bodyPath.cubicTo(innerRect.center().x() - 8, innerRect.center().y() + 4,
-					 innerRect.center().x() + 8, innerRect.center().y() + 4,
-					 innerRect.center().x() + 9, innerRect.bottom() - 3);
-	bodyPath.closeSubpath();
-	p.drawPath(bodyPath);
+	// 用户头像内容
+	auto &session = OpenMeeting::SessionManager::instance();
+	bool isLogged = session.isLoggedIn();
+	QString name = session.nickname();
 
-	// 在线状态小蓝/绿点徽标（右下角）
+	if (isLogged && !name.isEmpty()) {
+		QFont f = p.font();
+		f.setFamily("Microsoft YaHei");
+		f.setPixelSize(14);
+		f.setBold(true);
+		p.setFont(f);
+		p.setPen(QColor(0x16, 0x77, 0xff));
+		QString letter = name.left(1).toUpper();
+		p.drawText(innerRect, Qt::AlignCenter, letter);
+	} else {
+		// 未登录：用户轮廓图标
+		p.setPen(Qt::NoPen);
+		p.setBrush(QColor(0x33, 0x77, 0xdd));
+		// 头部
+		p.drawEllipse(innerRect.center().x() - 4, innerRect.top() + 7, 8, 8);
+		// 身体
+		QPainterPath bodyPath;
+		bodyPath.moveTo(innerRect.center().x() - 9, innerRect.bottom() - 3);
+		bodyPath.cubicTo(innerRect.center().x() - 8, innerRect.center().y() + 4,
+						 innerRect.center().x() + 8, innerRect.center().y() + 4,
+						 innerRect.center().x() + 9, innerRect.bottom() - 3);
+		bodyPath.closeSubpath();
+		p.drawPath(bodyPath);
+	}
+
+	// 在线状态徽标（右下角）
 	const int badgeRadius = 5;
 	const QPoint badgeCenter(avRect.right() - 3, avRect.bottom() - 3);
 	// 白外圈
 	p.setPen(Qt::NoPen);
 	p.setBrush(Qt::white);
 	p.drawEllipse(badgeCenter, badgeRadius + 1, badgeRadius + 1);
-	// 蓝色状态点
-	p.setBrush(QColor(0x40, 0x96, 0xff));
+	// 状态点（已登录绿色，未登录灰色）
+	p.setBrush(isLogged ? QColor(0x52, 0xc4, 0x1a) : QColor(0xbf, 0xbf, 0xbf));
 	p.drawEllipse(badgeCenter, badgeRadius, badgeRadius);
 
 	p.restore();

@@ -563,6 +563,13 @@ void RoomTopBarWidget::setActiveSpeaker(const QString &speakerName) {
 	update();
 }
 
+void RoomTopBarWidget::setMeetingId(const QString &meetingId) {
+	_meetingId = meetingId;
+	QResizeEvent ev(size(), size());
+	resizeEvent(&ev);
+	update();
+}
+
 void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
@@ -593,17 +600,24 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
 	rightX -= 78;
 
 	const int leftInfoRight = 196;
+	if (!_meetingId.isEmpty()) {
+		_meetingIdRect = QRect(leftInfoRight, (h - 26) / 2, 178, 26);
+	} else {
+		_meetingIdRect = QRect();
+	}
+
+	const int leftBoundary = _meetingId.isEmpty() ? leftInfoRight : (leftInfoRight + 188);
 	const int rightButtonsLeft = rightX;
-	const int availCenterW = rightButtonsLeft - leftInfoRight - 16;
+	const int availCenterW = rightButtonsLeft - leftBoundary - 16;
 
 	if (availCenterW >= 180) {
 		const int pillW = std::min(availCenterW, 200);
 		int pillX = (w - pillW) / 2;
-		pillX = std::max(leftInfoRight + 8, std::min(pillX, rightButtonsLeft - 8 - pillW));
+		pillX = std::max(leftBoundary + 8, std::min(pillX, rightButtonsLeft - 8 - pillW));
 		_speakerCapsuleRect = QRect(pillX, (h - 26) / 2, pillW, 26);
 	} else if (availCenterW >= 110) {
 		const int pillW = availCenterW;
-		const int pillX = leftInfoRight + 8;
+		const int pillX = leftBoundary + 8;
 		_speakerCapsuleRect = QRect(pillX, (h - 26) / 2, pillW, 26);
 	} else {
 		_speakerCapsuleRect = QRect(); // 窗口空间不足时自动隐藏，彻底杜绝元素重叠
@@ -667,6 +681,23 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	shieldPath.closeSubpath();
 	p.drawPath(shieldPath);
 	p.restore();
+
+	// 1.5 会议号胶囊徽标与点击复制
+	if (!_meetingIdRect.isEmpty() && !_meetingId.isEmpty()) {
+		p.save();
+		bool isHover = _meetingIdRect.contains(mapFromGlobal(QCursor::pos()));
+		p.setPen(QPen(_copiedAnim ? QColor(0x52, 0xc4, 0x1a) : (isHover ? QColor(0x16, 0x77, 0xff) : QColor(0xd9, 0xd9, 0xd9)), 1));
+		p.setBrush(_copiedAnim ? QColor(0xf6, 0xff, 0xed) : (isHover ? QColor(0xf0, 0xf5, 0xff) : QColor(0xf5, 0xf7, 0xfa)));
+		p.drawRoundedRect(_meetingIdRect, 6, 6);
+
+		QFont mFont("Microsoft YaHei", 9);
+		mFont.setBold(true);
+		p.setFont(mFont);
+		p.setPen(_copiedAnim ? QColor(0x52, 0xc4, 0x1a) : (isHover ? QColor(0x16, 0x77, 0xff) : QColor(0x4e, 0x59, 0x69)));
+		QString dispText = _copiedAnim ? QString::fromUtf8("✔ 已复制会议号") : QString::fromUtf8("🆔 会议号: %1 📋").arg(_meetingId);
+		p.drawText(_meetingIdRect, Qt::AlignCenter, dispText);
+		p.restore();
+	}
 
 	// 2. 中间：正在讲话提示胶囊
 	if (!_speakerCapsuleRect.isEmpty()) {
@@ -755,6 +786,17 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	else if (_hostToolsRect.contains(pos)) next = HoverBtn::HostTools;
 	else if (_layoutRect.contains(pos)) next = HoverBtn::Layout;
 
+	if (!_meetingIdRect.isEmpty() && _meetingIdRect.contains(pos)) {
+		setCursor(Qt::PointingHandCursor);
+		setToolTip(QString::fromUtf8("点击复制会议号: %1").arg(_meetingId));
+	} else if (next != HoverBtn::None) {
+		setCursor(Qt::PointingHandCursor);
+		setToolTip(QString());
+	} else {
+		setCursor(Qt::ArrowCursor);
+		setToolTip(QString());
+	}
+
 	if (next != _hoverBtn) {
 		_hoverBtn = next;
 		update();
@@ -763,6 +805,18 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 
 void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 	if (e->button() == Qt::LeftButton) {
+		if (!_meetingIdRect.isEmpty() && _meetingIdRect.contains(e->pos())) {
+			if (!_meetingId.isEmpty()) {
+				QApplication::clipboard()->setText(_meetingId);
+				_copiedAnim = true;
+				update();
+				QTimer::singleShot(1800, this, [this]() {
+					_copiedAnim = false;
+					update();
+				});
+			}
+			return;
+		}
 		if (_minRect.contains(e->pos())) {
 			_minStream.fire({});
 		} else if (_maxRect.contains(e->pos())) {
@@ -1556,10 +1610,16 @@ void RoomBottomBarWidget::leaveEventHook(QEvent *e) {
 // MeetingRoomWindow 实现
 // ----------------------------------------------------
 
-MeetingRoomWindow::MeetingRoomWindow(const Config &config, QWidget *parent)
+MeetingRoomWindow::MeetingRoomWindow(const Config &config,
+                                     std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator,
+                                     QWidget *parent)
 	: Ui::RpWidget(parent)
-	, _config(config) {
+	, _config(config)
+	, _coordinator(std::move(coordinator)) {
 	setObjectName("MeetingRoomWindow");
+	if (!_coordinator) {
+		_coordinator = OpenMeeting::MeetingCoordinator::create(this);
+	}
 	setWindowTitle(QString::fromUtf8("LiveKit 会议室 - %1").arg(config.displayName));
 	resize(1120, 720);
 	setMinimumSize(850, 560);
@@ -1582,9 +1642,19 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config, QWidget *parent)
 	}
 
 	initLayout();
+	setupCoordinatorBindings();
 
-	// 3. 创建本地音频与视频数据源
-	_localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
+	// 3. 复用 Coordinator 的本地音频与视频数据源，确保外设采集与 WebRTC 发送通道打通
+	if (_coordinator) {
+		_localAudioSource = _coordinator->localAudioSource();
+		_localVideoSource = _coordinator->localVideoSource();
+	}
+	if (!_localAudioSource) {
+		_localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
+	}
+	if (!_localVideoSource) {
+		_localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
+	}
 	_localAudioSource->addSink([this](const livekit::AudioFrame &frame) {
 		if (_config.audioMuted) return;
 		const auto &samples = frame.data();
@@ -1604,7 +1674,6 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config, QWidget *parent)
 		}
 	});
 
-	_localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
 	_localVideoSource->addSink([this](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
 		QImage img = VideoFrameToQImage(frame);
 		if (!img.isNull()) {
@@ -1696,9 +1765,24 @@ void MeetingRoomWindow::setupNativeWindow() {
 
 void MeetingRoomWindow::initLayout() {
 	_topBar = new RoomTopBarWidget(this);
+	QString mId = _coordinator ? _coordinator->currentMeetingId() : QString();
+	if (mId.isEmpty()) mId = _config.meetingId;
+	if (!mId.isEmpty()) {
+		_topBar->setMeetingId(mId);
+		setWindowTitle(QString::fromUtf8("会议 - 会议号: %1").arg(mId));
+	}
 	_stageContainer = new QWidget(this);
 	_stageContainer->setStyleSheet("background-color: #12141a;");
 	_bottomBar = new RoomBottomBarWidget(this);
+
+	_participantsSidebar = new OpenMeeting::ParticipantsSidebarWidget(_coordinator, this);
+	_participantsSidebar->hide();
+	connect(_participantsSidebar, &OpenMeeting::ParticipantsSidebarWidget::closeRequested, this, [this]() {
+		_sidebarVisible = false;
+		_participantsSidebar->hide();
+		QResizeEvent ev(size(), size());
+		resizeEvent(&ev);
+	});
 
 	_localTile = new VideoTileWidget(QString::fromUtf8("%1 (我)").arg(_config.displayName), true, _stageContainer);
 	_localTile->setIdentity("local");
@@ -1787,6 +1871,9 @@ void MeetingRoomWindow::initLayout() {
 	_bottomBar->toggleAudioRequested() | rpl::on_next([this](bool muted) {
 		_config.audioMuted = muted;
 		_localTile->setAudioMuted(muted);
+		if (_coordinator) {
+			_coordinator->setLocalAudioMuted(muted);
+		}
 		if (_wasapiCap) {
 			_wasapiCap->SetMute(muted);
 		}
@@ -1812,6 +1899,9 @@ void MeetingRoomWindow::initLayout() {
 	_bottomBar->toggleVideoRequested() | rpl::on_next([this](bool enabled) {
 		_config.videoEnabled = enabled;
 		_localTile->setVideoActive(enabled && _usingRealCamera);
+		if (_coordinator) {
+			_coordinator->setLocalVideoEnabled(enabled);
+		}
 		if (_localVideoTrack) {
 			_localVideoTrack->set_muted(!enabled);
 		}
@@ -1840,15 +1930,7 @@ void MeetingRoomWindow::initLayout() {
 	}, lifetime());
 
 	_bottomBar->participantsClicked() | rpl::on_next([this] {
-		QString userList = QString::fromUtf8("当前参会成员列表 (%1人)：\n1. %2 (我 - 本地)")
-			.arg(_participantCount).arg(_config.displayName);
-		int uIdx = 2;
-		for (const auto &[id, tile] : _remoteTiles) {
-			if (tile) {
-				userList += QString::fromUtf8("\n%1. %2 (远端参会人)").arg(uIdx++).arg(tile->displayName());
-			}
-		}
-		QMessageBox::information(this, QString::fromUtf8("参会成员"), userList);
+		toggleParticipantsSidebar();
 	}, lifetime());
 
 	_bottomBar->chatClicked() | rpl::on_next([this] {
@@ -1867,16 +1949,15 @@ void MeetingRoomWindow::initLayout() {
 	}, lifetime());
 
 	_bottomBar->endMeetingClicked() | rpl::on_next([this] {
-		if (QMessageBox::question(this, QString::fromUtf8("离开会议"),
-			QString::fromUtf8("您确定要离开或结束当前会议吗？"),
-			QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
-			close();
-		}
+		handleEndMeetingClicked();
 	}, lifetime());
 
 	_bottomBar->sendChatRequested() | rpl::on_next([this](const QString &text) {
 		_topBar->setActiveSpeaker(QString::fromUtf8("%1: %2").arg(_config.displayName).arg(text));
 		LogToConsole(LogCategory::Participant, "CHAT", QString("%1: %2").arg(_config.displayName).arg(text));
+		if (_coordinator) {
+			_coordinator->sendChatMessage(text);
+		}
 	}, lifetime());
 
 	_bottomBar->microphoneDeviceChanged() | rpl::on_next([this](const QString &devId) {
@@ -1900,23 +1981,54 @@ void MeetingRoomWindow::onTimerTick() {
 	_topBar->updateDuration(_elapsedSeconds);
 }
 
+void MeetingRoomWindow::toggleParticipantsSidebar() {
+	_sidebarVisible = !_sidebarVisible;
+	if (_participantsSidebar) {
+		_participantsSidebar->setVisible(_sidebarVisible);
+		if (_sidebarVisible) {
+			_participantsSidebar->raise();
+		}
+	}
+	QResizeEvent ev(size(), size());
+	resizeEvent(&ev);
+}
+
 void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
 
 	_topBar->setGeometry(0, 0, w, 44);
-	_stageContainer->setGeometry(0, 44, w, h - 44 - 76);
+
+	int sidebarW = (_participantsSidebar && _sidebarVisible) ? 300 : 0;
+	int stageW = w - sidebarW;
+	int stageH = h - 44 - 76;
+
+	_stageContainer->setGeometry(0, 44, stageW, stageH);
+	if (_participantsSidebar && _sidebarVisible) {
+		_participantsSidebar->setGeometry(stageW, 44, sidebarW, stageH);
+		_participantsSidebar->raise();
+	}
 	_bottomBar->setGeometry(0, h - 76, w, 76);
 
 	updateVideoLayout();
 }
 
-void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity) {
+void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity, const QString &name) {
 	if (identity.isEmpty()) return;
+
+	QString dispName = name.isEmpty() ? identity : name;
+	if (dispName == identity && _coordinator) {
+		for (const auto &p : _coordinator->participants()) {
+			if (p.identity == identity && !p.name.isEmpty()) {
+				dispName = p.name;
+				break;
+			}
+		}
+	}
 
 	auto it = _remoteTiles.find(identity);
 	if (it == _remoteTiles.end()) {
-		auto tile = std::make_unique<VideoTileWidget>(identity, false, _stageContainer);
+		auto tile = std::make_unique<VideoTileWidget>(dispName, false, _stageContainer);
 		tile->setIdentity(identity);
 		tile->setVideoActive(false);
 
@@ -1949,6 +2061,10 @@ void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity) {
 
 		tile->show();
 		_remoteTiles[identity] = std::move(tile);
+	} else {
+		if (!dispName.isEmpty() && it->second && it->second->displayName() != dispName) {
+			it->second->setDisplayName(dispName);
+		}
 	}
 
 	if (_room) {
@@ -1965,11 +2081,8 @@ void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity) {
 	if (_bottomBar) {
 		_bottomBar->setParticipantCount(_participantCount);
 	}
-	if (_topBar) {
-		_topBar->setActiveSpeaker(QString::fromUtf8("%1 已加入").arg(identity));
-	}
 
-	LogToConsole(LogCategory::Participant, "USER_JOIN", QString("远端参会人已加入: %1 (当前房间总人数: %2)").arg(identity).arg(_participantCount));
+	LogToConsole(LogCategory::Participant, "USER_JOIN", QString("远端参会人已加入: %1 (姓名: %2, 当前房间总人数: %3)").arg(identity).arg(dispName).arg(_participantCount));
 	updateVideoLayout();
 }
 
@@ -1987,9 +2100,6 @@ void MeetingRoomWindow::onRemoteParticipantLeft(const QString &identity) {
 	_participantCount = 1 + static_cast<int>(_remoteTiles.size());
 	if (_bottomBar) {
 		_bottomBar->setParticipantCount(_participantCount);
-	}
-	if (_topBar) {
-		_topBar->setActiveSpeaker(QString());
 	}
 
 	LogToConsole(LogCategory::Participant, "USER_LEFT", QString("远端参会人已离开: %1 (当前房间总人数: %2)").arg(identity).arg(_participantCount));
@@ -2307,200 +2417,234 @@ void MeetingRoomWindow::onLocalVideoGenerated() {
 	_localVideoSource->captureFrame(frame, opts);
 }
 
+void MeetingRoomWindow::setupCoordinatorBindings() {
+	if (!_coordinator) return;
+
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteVideoFrameReceived,
+	        this, [this](const QString &id, const QImage &img) {
+		receiveRemoteVideoFrame(img, id);
+	});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantJoined,
+	        this, [this](const QString &id, const QString &name) {
+		onRemoteParticipantJoined(id, name);
+	});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantLeft,
+	        this, &MeetingRoomWindow::onRemoteParticipantLeft);
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteTrackMuted,
+	        this, [this](const QString &id, bool isVideo, bool muted) {
+		onRemoteTrackMuted(isVideo, muted);
+	});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::activeSpeakersChanged,
+	        this, &MeetingRoomWindow::updateActiveSpeakers);
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingDetailUpdated,
+	        this, &MeetingRoomWindow::onMeetingDetailUpdated);
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantsUpdated,
+	        this, [this](const std::vector<OpenMeeting::ParticipantInfo> &list) {
+		_participantCount = static_cast<int>(list.size());
+		_bottomBar->setParticipantCount(_participantCount);
+		for (const auto &p : list) {
+			if (!p.isLocal) {
+				auto it = _remoteTiles.find(p.identity);
+				if (it != _remoteTiles.end() && it->second && !p.name.isEmpty() && it->second->displayName() != p.name) {
+					it->second->setDisplayName(p.name);
+				}
+			}
+		}
+	});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::localAudioMuteChanged,
+	        this, [this](bool muted) {
+		_config.audioMuted = muted;
+		_bottomBar->setAudioMuted(muted);
+		_localTile->setAudioMuted(muted);
+		if (_wasapiCap) {
+			_wasapiCap->SetMute(muted);
+		}
+		if (_localAudioTrack) {
+			_localAudioTrack->set_muted(muted);
+		}
+		if (_room) {
+			auto local = _room->local_participant();
+			if (local && _localAudioTrack) {
+				local->SetMuted(_localAudioTrack->sid(), muted);
+			}
+		}
+	});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
+	        this, [this](bool enabled) {
+		_config.videoEnabled = enabled;
+		_bottomBar->setVideoEnabled(enabled);
+		_localTile->setVideoActive(enabled && _usingRealCamera);
+		if (_localVideoTrack) {
+			_localVideoTrack->set_muted(!enabled);
+		}
+		if (_room) {
+			auto local = _room->local_participant();
+			if (local && _localVideoTrack) {
+				local->SetMuted(_localVideoTrack->sid(), !enabled);
+			}
+		}
+		updateVideoLayout();
+	});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::kickedOff,
+	        this, &MeetingRoomWindow::onKickedOff);
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteMuteRequested,
+	        this, &MeetingRoomWindow::onRemoteMuteRequested);
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::hostRoleChanged,
+	        this, &MeetingRoomWindow::onHostRoleChanged);
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingDetailUpdated,
+	        this, &MeetingRoomWindow::onMeetingDetailUpdated);
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
+	        this, [this](OpenMeeting::MeetingState state, const QString &) {
+		if (state == OpenMeeting::MeetingState::InMeeting) {
+			_room = _coordinator->room();
+			if (_room) {
+				auto remotes = _room->remote_participants();
+				for (const auto &[sid, p] : remotes) {
+					if (p) onRemoteParticipantJoined(QString::fromStdString(p->identity()), QString::fromStdString(p->name()));
+				}
+			}
+		}
+	});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingLeft,
+	        this, [this]() {
+		close();
+	});
+
+	if (!_coordinator->currentMeetingId().isEmpty()) {
+		if (_topBar) _topBar->setMeetingId(_coordinator->currentMeetingId());
+		setWindowTitle(QString::fromUtf8("会议 - 会议号: %1").arg(_coordinator->currentMeetingId()));
+	}
+}
+
+void MeetingRoomWindow::onKickedOff(const QString &reason, int reasonCode) {
+	QMessageBox::warning(this, QString::fromUtf8("移出会议"),
+	                     QString::fromUtf8("您已被主持人移出会议。\n原因: %1 (代码: %2)")
+	                     .arg(reason.isEmpty() ? QString::fromUtf8("未指定") : reason).arg(reasonCode));
+	close();
+}
+
+void MeetingRoomWindow::onRemoteMuteRequested(bool isVideo, bool mute, const QString &operatorId) {
+	if (isVideo) {
+		if (mute) {
+			_bottomBar->setVideoEnabled(false);
+			_config.videoEnabled = false;
+			_localTile->setVideoActive(false);
+			if (_coordinator) _coordinator->setLocalVideoEnabled(false);
+			updateVideoLayout();
+			LogToConsole(LogCategory::Media, "VIDEO", QString("主持人 [%1] 已关闭您的摄像头").arg(operatorId));
+		} else {
+			if (QMessageBox::question(this, QString::fromUtf8("开启摄像头请求"),
+				QString::fromUtf8("主持人 [%1] 邀请您开启摄像头，是否同意？").arg(operatorId),
+				QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+				_bottomBar->setVideoEnabled(true);
+				_config.videoEnabled = true;
+				_localTile->setVideoActive(_usingRealCamera);
+				if (_coordinator) _coordinator->setLocalVideoEnabled(true);
+				updateVideoLayout();
+			}
+		}
+	} else {
+		if (mute) {
+			_bottomBar->setAudioMuted(true);
+			_config.audioMuted = true;
+			_localTile->setAudioMuted(true);
+			if (_wasapiCap) _wasapiCap->SetMute(true);
+			if (_coordinator) _coordinator->setLocalAudioMuted(true);
+			LogToConsole(LogCategory::Media, "AUDIO", QString("主持人 [%1] 已将您静音").arg(operatorId));
+		} else {
+			if (QMessageBox::question(this, QString::fromUtf8("解除静音请求"),
+				QString::fromUtf8("主持人 [%1] 邀请您开启麦克风发言，是否同意？").arg(operatorId),
+				QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+				_bottomBar->setAudioMuted(false);
+				_config.audioMuted = false;
+				_localTile->setAudioMuted(false);
+				if (_wasapiCap) _wasapiCap->SetMute(false);
+				if (_coordinator) _coordinator->setLocalAudioMuted(false);
+			}
+		}
+	}
+}
+
+void MeetingRoomWindow::onMeetingDetailUpdated(const OpenMeeting::MeetingDetail &detail) {
+	if (!detail.meetingName.isEmpty()) {
+		setWindowTitle(QString::fromUtf8("%1 - 会议号: %2").arg(detail.meetingName).arg(detail.meetingId));
+	}
+	if (_topBar && !detail.meetingId.isEmpty()) {
+		_topBar->setMeetingId(detail.meetingId);
+	}
+	if (_participantsSidebar) {
+		_participantsSidebar->updateParticipants(_coordinator ? _coordinator->participants() : std::vector<OpenMeeting::ParticipantInfo>{});
+	}
+}
+
+void MeetingRoomWindow::onHostRoleChanged(const QString &newHostId, const QString &operatorName) {
+	LogToConsole(LogCategory::Participant, "HOST", QString("主持人身份已移交至: %1 (操作人: %2)").arg(newHostId).arg(operatorName));
+	QMessageBox::information(this, QString::fromUtf8("主持人变更"),
+	                         QString::fromUtf8("参会人 [%1] 已成为新的主持人").arg(newHostId));
+}
+
+void MeetingRoomWindow::handleEndMeetingClicked() {
+	if (_coordinator && _coordinator->isHost()) {
+		QMessageBox box(this);
+		box.setWindowTitle(QString::fromUtf8("结束会议"));
+		box.setText(QString::fromUtf8("您是本次会议的主持人，请选择退出方式："));
+		auto *leaveBtn = box.addButton(QString::fromUtf8("仅离开会议"), QMessageBox::ActionRole);
+		auto *endBtn = box.addButton(QString::fromUtf8("结束全体会议"), QMessageBox::DestructiveRole);
+		auto *cancelBtn = box.addButton(QString::fromUtf8("取消"), QMessageBox::RejectRole);
+		box.exec();
+		if (box.clickedButton() == leaveBtn) {
+			_coordinator->leaveMeetingAsync(false);
+			close();
+		} else if (box.clickedButton() == endBtn) {
+			_coordinator->leaveMeetingAsync(true);
+			close();
+		}
+	} else {
+		if (QMessageBox::question(this, QString::fromUtf8("离开会议"),
+			QString::fromUtf8("您确定要离开当前会议吗？"),
+			QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+			if (_coordinator) {
+				_coordinator->leaveMeetingAsync(false);
+			}
+			close();
+		}
+	}
+}
+
 void MeetingRoomWindow::startLiveKitSession() {
+	if (!_coordinator) return;
+
+	_sessionRunning = true;
+
+	if (_coordinator->state() != OpenMeeting::MeetingState::Idle) {
+		// Coordinator 已经在执行入会流程中 (Validating, ConnectingRoom, InMeeting 等)，
+		// 严禁在此处重复发起连接打断已有流程！
+		_room = _coordinator->room();
+		if (_room && _coordinator->state() == OpenMeeting::MeetingState::InMeeting) {
+			auto remotes = _room->remote_participants();
+			for (const auto &[sid, p] : remotes) {
+				if (p) onRemoteParticipantJoined(QString::fromStdString(p->identity()), QString::fromStdString(p->name()));
+			}
+		}
+		return;
+	}
+
 	if (_config.serverUrl.isEmpty()) {
 		LogToConsole(LogCategory::General, "SESSION", "未指定服务器地址，运行在单机演示模式");
 		return;
 	}
 
-	_sessionRunning = true;
-	_ioContext = std::make_unique<asio::io_context>();
-	_workGuard = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(_ioContext->get_executor());
+	OpenMeeting::MediaPreferences prefs;
+	prefs.enableMicrophone = !_config.audioMuted;
+	prefs.enableVideo = _config.videoEnabled;
 
-	_room = livekit::Room::Create(_ioContext->get_executor());
-
-	_room->SetLogHandler([](const std::string &cat, const std::string &tag, const std::string &msg) {
-		LogCategory c = LogCategory::General;
-		if (cat == "WEBRTC") c = LogCategory::WebRTC;
-		else if (cat == "SIGNAL") c = LogCategory::Signal;
-		else if (cat == "TRACK") c = LogCategory::Track;
-		else if (cat == "ERROR") c = LogCategory::Error;
-		else if (cat == "MEDIA") c = LogCategory::Media;
-		LogToConsole(c, QString::fromStdString(tag), QString::fromStdString(msg));
-	});
-
-	LogToConsole(LogCategory::Connection, "CONNECTING", QString("正在连接 LiveKit 服务器: %1 ...").arg(_config.serverUrl));
-
-	class AppRoomListener : public livekit::RoomListener {
-	public:
-		explicit AppRoomListener(MeetingRoomWindow *w) : _window(w) {}
-
-		void OnConnected() override {
-			LogToConsole(LogCategory::Connection, "CONNECTED", "LiveKit 房间连接成功！");
-			if (!_window) return;
-
-			if (_window->_room) {
-				auto remotes = _window->_room->remote_participants();
-				for (const auto &[sid, p] : remotes) {
-					if (p) {
-						QString id = QString::fromStdString(p->identity());
-						QMetaObject::invokeMethod(_window, [this, id]() {
-							_window->onRemoteParticipantJoined(id);
-						}, Qt::QueuedConnection);
-					}
-				}
-			}
-		}
-
-		void OnParticipantConnected(std::shared_ptr<livekit::RemoteParticipant> p) override {
-			if (p && _window) {
-				QString id = QString::fromStdString(p->identity());
-				LogToConsole(LogCategory::Participant, "REMOTE_JOIN", QString("参会人加入: %1 (SID: %2)").arg(id).arg(QString::fromStdString(p->sid())));
-				QMetaObject::invokeMethod(_window, [this, id]() {
-					_window->onRemoteParticipantJoined(id);
-				}, Qt::QueuedConnection);
-			}
-		}
-
-		void OnParticipantDisconnected(std::shared_ptr<livekit::RemoteParticipant> p) override {
-			if (p && _window) {
-				QString id = QString::fromStdString(p->identity());
-				LogToConsole(LogCategory::Participant, "REMOTE_LEFT", QString("参会人离开: %1").arg(id));
-				QMetaObject::invokeMethod(_window, [this, id]() {
-					_window->onRemoteParticipantLeft(id);
-				}, Qt::QueuedConnection);
-			}
-		}
-
-		void OnTrackSubscribed(std::shared_ptr<livekit::Track> track,
-		                       std::shared_ptr<livekit::TrackPublication> publication,
-		                       std::shared_ptr<livekit::RemoteParticipant> participant) override {
-			if (!track || !participant || !_window) return;
-
-			std::string identity = participant->identity();
-			LogToConsole(LogCategory::Track, "SUBSCRIBED", QString("订阅到用户 %1 的轨道: %2 (%3)")
-				.arg(QString::fromStdString(identity))
-				.arg(QString::fromStdString(track->name()))
-				.arg(track->kind() == livekit::TrackKind::Video ? "VIDEO" : "AUDIO"));
-
-			if (track->kind() == livekit::TrackKind::Video) {
-				auto has_logged = std::make_shared<std::atomic<bool>>(false);
-				track->addVideoSink([this, identity, has_logged](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
-					if (!has_logged->exchange(true)) {
-						LogToConsole(LogCategory::WebRTC, "SINK_FRAME", QString("收到来自 [%1] 的远端视频画面 (%2x%3 RGBA)")
-							.arg(QString::fromStdString(identity)).arg(frame.width()).arg(frame.height()));
-					}
-					QImage img = VideoFrameToQImage(frame);
-					if (!img.isNull() && _window) {
-						QMetaObject::invokeMethod(_window, [this, img = std::move(img), id = QString::fromStdString(identity)]() {
-							_window->receiveRemoteVideoFrame(img, id);
-						}, Qt::QueuedConnection);
-					}
-				});
-			} else if (track->kind() == livekit::TrackKind::Audio) {
-				LogToConsole(LogCategory::Media, "AUDIO", QString("参会人 [%1] 音频轨已挂载至 WebRTC 原生混音播放管线 (WASAPI Playout ADM 活跃中)").arg(QString::fromStdString(identity)));
-			}
-		}
-
-		void OnTrackUnsubscribed(std::shared_ptr<livekit::Track> track,
-		                         std::shared_ptr<livekit::TrackPublication> publication,
-		                         std::shared_ptr<livekit::RemoteParticipant> participant) override {
-			if (!track || !_window) return;
-			LogToConsole(LogCategory::Track, "UNSUBSCRIBED", QString("取消订阅轨道: %1").arg(QString::fromStdString(track->name())));
-			if (track->kind() == livekit::TrackKind::Video) {
-				QMetaObject::invokeMethod(_window, [this]() {
-					_window->onRemoteTrackMuted(true, true);
-				}, Qt::QueuedConnection);
-			}
-		}
-
-		void OnTrackUnpublished(std::shared_ptr<livekit::RemoteParticipant> participant,
-		                        std::shared_ptr<livekit::TrackPublication> publication) override {
-			if (!publication || !_window) return;
-			LogToConsole(LogCategory::Track, "UNPUBLISHED", QString("远端用户取消发布轨道: %1").arg(QString::fromStdString(publication->sid())));
-			if (publication->track() && publication->track()->kind() == livekit::TrackKind::Video) {
-				QMetaObject::invokeMethod(_window, [this]() {
-					_window->onRemoteTrackMuted(true, true);
-				}, Qt::QueuedConnection);
-			}
-		}
-
-		void OnTrackMuted(std::shared_ptr<livekit::Participant> participant,
-		                  std::shared_ptr<livekit::TrackPublication> publication,
-		                  bool muted) override {
-			if (!publication || !publication->track() || !_window) return;
-			const bool isVideo = (publication->track()->kind() == livekit::TrackKind::Video);
-			QMetaObject::invokeMethod(_window, [this, isVideo, muted]() {
-				_window->onRemoteTrackMuted(isVideo, muted);
-			}, Qt::QueuedConnection);
-		}
-
-		void OnActiveSpeakersChanged(const std::vector<std::shared_ptr<livekit::Participant>> &speakers) override {
-			if (!_window) return;
-			QMetaObject::invokeMethod(_window, [this, speakers]() {
-				_window->updateActiveSpeakers(speakers);
-			}, Qt::QueuedConnection);
-		}
-
-	private:
-		MeetingRoomWindow *_window;
-	};
-
-	_roomListener = std::make_shared<AppRoomListener>(this);
-	_room->AddListener(_roomListener);
-
-	const std::string urlStr = _config.serverUrl.toStdString();
-	const std::string tokenStr = _config.token.toStdString();
-
-	_ioThread = std::thread([this, urlStr, tokenStr] {
-		livekit::SignalOptions opts;
-		opts.auto_subscribe = true;
-		opts.connect_timeout = std::chrono::seconds(10);
-
-		asio::co_spawn(*_ioContext, [this, urlStr, tokenStr, opts]() -> asio::awaitable<void> {
-			try {
-				if (!urlStr.empty() && !tokenStr.empty()) {
-                    co_await _room->ConnectAsync(urlStr, tokenStr, opts);
-                    {
-                        auto local = _room->local_participant();
-                        if (local) {
-							// 自动发布本地音频轨
-							_localAudioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", _localAudioSource);
-							_localAudioTrack->set_muted(_config.audioMuted);
-                            co_await local->PublishTrackAsync(_localAudioTrack);
-							LogToConsole(LogCategory::Track, "PUBLISH", QString("已向房间发布 LocalAudioTrack (simple_audio, 初始: %1)").arg(_config.audioMuted ? "静音" : "开麦"));
-
-							// 自动发布本地视频轨
-							livekit::VideoPublishOptions vopts;
-							vopts.video_codec = _config.videoCodec.toStdString();
-							if (!_config.backupCodec.isEmpty()) {
-								vopts.backup_codec = _config.backupCodec.toStdString();
-							}
-							vopts.backup_codec_policy = _config.backupCodecPolicy;
-							vopts.auto_backup_codec = true;
-
-							_localVideoTrack = livekit::LocalVideoTrack::createLocalVideoTrack("camera_video", _localVideoSource, livekit::TrackSource::Camera, vopts);
-							_localVideoTrack->set_muted(!_config.videoEnabled);
-                            co_await local->PublishTrackAsync(_localVideoTrack);
-							LogToConsole(LogCategory::Track, "PUBLISH", QString("已向房间发布 LocalVideoTrack (camera_video, 编码: %1, 备用: %2, 初始: %3)")
-								.arg(_config.videoCodec)
-								.arg(_config.backupCodec.isEmpty() ? "None" : _config.backupCodec)
-								.arg(_config.videoEnabled ? "开启" : "关闭"));
-						}
-                    }
-				}
-			} catch (const std::exception &ex) {
-				LogToConsole(LogCategory::Error, "EXCEPTION", QString("连接异常: %1").arg(ex.what()));
-			}
-		}, asio::detached);
-
-		_ioContext->run();
-	});
+	_coordinator->connectDirectlyAsync(_config.serverUrl, _config.token, "direct", _config.displayName, prefs);
+	_room = _coordinator->room();
 }
 
 void MeetingRoomWindow::stopLiveKitSession() {
 	if (!_sessionRunning.exchange(false)) {
-		return; // 已经停止或正在停止，防止 closeEvent 和析构函数重复执行
+		return;
 	}
 
 	if (_meetingTimer) _meetingTimer->stop();
@@ -2514,21 +2658,10 @@ void MeetingRoomWindow::stopLiveKitSession() {
 		_dshowCap.reset();
 	}
 
-	if (_room) {
-		_room->Disconnect();
-		LogToConsole(LogCategory::Connection, "DISCONNECT", "已断开 LiveKit 房间连接并释放媒体资源");
+	if (_coordinator) {
+		_coordinator->leaveMeetingAsync(false);
 	}
-	if (_workGuard) {
-		_workGuard->reset();
-	}
-	if (_ioContext) {
-		_ioContext->stop();
-	}
-	if (_ioThread.joinable()) {
-		_ioThread.join();
-	}
-	_room.reset();
-	_ioContext.reset();
+	LogToConsole(LogCategory::Connection, "DISCONNECT", "已退出会议视窗并停止媒体采集");
 }
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)

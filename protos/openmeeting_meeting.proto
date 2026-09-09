@@ -1,0 +1,310 @@
+syntax = "proto3";
+
+package openmeeting.meeting;
+
+option optimize_for = SPEED;
+
+enum DayOfWeek {
+  SUNDAY = 0;
+  MONDAY = 1;
+  TUESDAY = 2;
+  WEDNESDAY = 3;
+  THURSDAY = 4;
+  FRIDAY = 5;
+  SATURDAY = 6;
+}
+
+enum KickOffReason {
+  DuplicatedLogin = 0;
+  Offline = 1;
+  Logout = 2;
+}
+
+enum MeetingEndType {
+  CancelType = 0;
+  EndType = 1;
+}
+
+message LiveKit {
+  string token = 1;
+  string url = 2;
+}
+
+message SystemGeneratedMeetingInfo {
+  string creatorUserID = 1;
+  string creatorNickname = 2;
+  string status = 3;
+  int64 startTime = 4;
+  string meetingID = 5;
+}
+
+message CreatorDefinedMeetingInfo {
+  string title = 1;
+  int64 scheduledTime = 2;
+  int64 meetingDuration = 3;
+  string password = 4;
+  string timeZone = 5;
+  string hostUserID = 6;
+  repeated string coHostUSerID = 7;
+}
+
+message MeetingInfo {
+  SystemGeneratedMeetingInfo systemGenerated = 1;
+  CreatorDefinedMeetingInfo creatorDefinedMeeting = 2;
+}
+
+message MeetingRepeatInfo {
+  int64 endDate = 1;
+  int32 repeatTimes = 2;
+  string repeatType = 3;
+  string uintType = 4;
+  int32 interval = 5;
+  repeated DayOfWeek repeatDaysOfWeek = 6;
+}
+
+message MeetingSetting {
+  bool canParticipantsEnableCamera = 1;
+  bool canParticipantsUnmuteMicrophone = 2;
+  bool canParticipantsShareScreen = 3;
+  bool disableCameraOnJoin = 4;
+  bool disableMicrophoneOnJoin = 5;
+  bool canParticipantJoinMeetingEarly = 6;
+  bool lockMeeting = 7;
+  bool audioEncouragement = 8;
+  bool videoMirroring = 9;
+}
+
+message MeetingInfoSetting {
+  MeetingInfo info = 1;
+  MeetingSetting setting = 2;
+  MeetingRepeatInfo repeatInfo = 3;
+}
+
+message UserInfo {
+  string userID = 1;
+  string nickname = 2;
+  string account = 3;
+}
+
+message ParticipantMetaData {
+  UserInfo userInfo = 1;
+}
+
+message BookMeetingReq {
+  string creatorUserID = 1;
+  CreatorDefinedMeetingInfo creatorDefinedMeetingInfo = 2;
+  MeetingSetting setting = 3;
+  MeetingRepeatInfo repeatInfo = 4;
+}
+
+message BookMeetingResp {
+  MeetingInfoSetting detail = 1;
+}
+
+message CreateImmediateMeetingReq {
+  string creatorUserID = 1;
+  CreatorDefinedMeetingInfo creatorDefinedMeetingInfo = 2;
+  MeetingSetting setting = 3;
+}
+
+message CreateImmediateMeetingResp {
+  MeetingInfoSetting detail = 1;
+  LiveKit liveKit = 2;
+}
+
+message JoinMeetingReq {
+  string meetingID = 1;
+  string userID = 2;
+  string password = 3;
+}
+
+message JoinMeetingResp {
+  LiveKit liveKit = 1;
+}
+
+message GetMeetingTokenReq {
+  string meetingID = 1;
+  string userID = 2;
+}
+
+message GetMeetingTokenResp {
+  string meetingID = 1;
+  LiveKit liveKit = 2;
+}
+
+message LeaveMeetingReq {
+  string meetingID = 1;
+  string userID = 2;
+}
+
+message LeaveMeetingResp {
+}
+
+message EndMeetingReq {
+  string meetingID = 1;
+  string userID = 2;
+  MeetingEndType endType = 3;
+}
+
+message EndMeetingResp {
+}
+
+message GetMeetingsReq {
+  string userID = 1;
+  repeated string status = 2;
+}
+
+message GetMeetingsResp {
+  repeated MeetingInfoSetting meetingDetails = 1;
+}
+
+message GetMeetingReq {
+  string userID = 1;
+  string meetingID = 2;
+}
+
+message GetMeetingResp {
+  MeetingInfoSetting meetingDetail = 1;
+}
+
+message ModifyMeetingParticipantNickNameReq {
+  string meetingID = 1;
+  string userID = 2;
+  string participantUserID = 3;
+  string nickname = 4;
+}
+
+message ModifyMeetingParticipantNickNameResp {
+}
+
+message UpdateMeetingRequest {
+  string meetingID = 1;
+  string updatingUserID = 2;
+  string title = 3;
+  int64 scheduledTime = 4;
+  int64 meetingDuration = 5;
+  string password = 6;
+  string timeZone = 7;
+  MeetingRepeatInfo repeatInfo = 8;
+  bool canParticipantsEnableCamera = 9;
+  bool canParticipantsUnmuteMicrophone = 10;
+  bool canParticipantsShareScreen = 11;
+  bool disableCameraOnJoin = 12;
+  bool disableMicrophoneOnJoin = 13;
+  bool canParticipantJoinMeetingEarly = 14;
+  bool lockMeeting = 15;
+  bool audioEncouragement = 16;
+  bool videoMirroring = 17;
+}
+
+message UpdateMeetingResp {
+}
+
+message PersonalMeetingSetting {
+  bool cameraOnEntry = 1;
+  bool microphoneOnEntry = 2;
+}
+
+message GetPersonalMeetingSettingsReq {
+  string meetingID = 1;
+  string userID = 2;
+}
+
+message GetPersonalMeetingSettingsResp {
+  PersonalMeetingSetting setting = 1;
+}
+
+message SetPersonalMeetingSettingsReq {
+  string meetingID = 1;
+  string userID = 2;
+  bool cameraOnEntry = 3;
+  bool microphoneOnEntry = 4;
+}
+
+message SetPersonalMeetingSettingsResp {
+}
+
+message PersonalData {
+  string userID = 1;
+  PersonalMeetingSetting personalSetting = 2;
+  PersonalMeetingSetting limitSetting = 3;
+}
+
+message MeetingMetadata {
+  MeetingInfoSetting detail = 1;
+  repeated PersonalData personalData = 2;
+}
+
+message OperateRoomAllStreamReq {
+  string meetingID = 1;
+  string operatorUserID = 2;
+  bool cameraOnEntry = 3;
+  bool microphoneOnEntry = 4;
+}
+
+message OperateRoomAllStreamResp {
+  repeated string streamNotExistUserIDList = 1;
+  repeated string failedUserIDList = 2;
+}
+
+message RemoveMeetingParticipantsReq {
+  string meetingID = 1;
+  string userID = 2;
+  repeated string participantUserIDs = 3;
+}
+
+message RemoveMeetingParticipantsResp {
+  repeated string successUserIDList = 1;
+  repeated string failedUserIDList = 2;
+}
+
+message SetMeetingHostInfoReq {
+  string meetingID = 1;
+  string userID = 2;
+  string hostUserID = 3;
+  repeated string coHostUserIDs = 4;
+}
+
+message SetMeetingHostInfoResp {
+}
+
+message NotifyMeetingData {
+  string operatorUserID = 1;
+  oneof message_type {
+    StreamOperateData streamOperateData = 2;
+    MeetingHostData meetingHostData = 3;
+    KickOffMeetingData kickOffMeetingData = 4;
+  }
+}
+
+message KickOffMeetingData {
+  string userID = 1;
+  string nickname = 2;
+  KickOffReason reasonCode = 3;
+  string reason = 4;
+}
+
+message StreamOperateData {
+  repeated UserOperationData operation = 1;
+}
+
+message UserOperationData {
+  string userID = 1;
+  bool cameraOnEntry = 2;
+  bool microphoneOnEntry = 3;
+}
+
+message MeetingHostData {
+  string operatorNickname = 2;
+  string userID = 3;
+  string hostType = 4;
+}
+
+message CleanPreviousMeetingsReq {
+  string userID = 1;
+  int32 reasonCode = 2;
+  string reason = 3;
+}
+
+message CleanPreviousMeetingsResp {
+}

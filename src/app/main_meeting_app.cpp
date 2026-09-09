@@ -7,6 +7,8 @@
 #include "ui/style/style_core.h"
 #include "src/ui/meeting_ui_integration.h"
 #include "src/ui/meeting_main_window.h"
+#include "src/ui/login_dialog.h"
+#include "src/net/session_manager.h"
 #include "src/rtc/webrtc_manager.h"
 
 // 静态链接 Qt 必须显式导入平台与图像插件
@@ -43,6 +45,19 @@ int main(int argc, char *argv[]) {
 
 	// 初始化 Telegram Desktop lib_ui 样式系统
 	style::StartManager(100);
+
+	// 初始化会话与用户认证
+	auto &session = OpenMeeting::SessionManager::instance();
+
+	// 如果未登录且未开启自动登录，弹出现代化登录框
+	if (!session.isLoggedIn() || !session.isAutoLogin()) {
+		MeetingUI::LoginDialog loginDlg;
+		if (loginDlg.exec() != QDialog::Accepted) {
+			// 用户主动退出登录对话框，直接退出程序
+			style::StopManager();
+			return 0;
+		}
+	}
 
 	// 创建并展示现代会议主界面
 	MeetingUI::MeetingMainWindow mainWindow;

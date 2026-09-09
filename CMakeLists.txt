@@ -43,6 +43,7 @@ set(PROTO_FILES
     ${PROTO_DIR}/livekit_metrics.proto
     ${PROTO_DIR}/livekit_models.proto
     ${PROTO_DIR}/livekit_rtc.proto
+    ${PROTO_DIR}/openmeeting_meeting.proto
 )
 
 set(GEN_DIR ${CMAKE_CURRENT_BINARY_DIR}/generated)
@@ -61,12 +62,14 @@ set(PROTO_SRCS
     ${GEN_DIR}/livekit_metrics.pb.cc
     ${GEN_DIR}/livekit_models.pb.cc
     ${GEN_DIR}/livekit_rtc.pb.cc
+    ${GEN_DIR}/openmeeting_meeting.pb.cc
 )
 set(PROTO_HDRS
     ${GEN_DIR}/logger/options.pb.h
     ${GEN_DIR}/livekit_metrics.pb.h
     ${GEN_DIR}/livekit_models.pb.h
     ${GEN_DIR}/livekit_rtc.pb.h
+    ${GEN_DIR}/openmeeting_meeting.pb.h
 )
 
 add_custom_command(
@@ -298,7 +301,7 @@ endif()
 
 list(APPEND CMAKE_PREFIX_PATH "${QT_PATH}")
 set(Qt5_DIR "${QT_PATH}/lib/cmake/Qt5" CACHE PATH "Qt5 Directory" FORCE)
-find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Svg)
+find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Svg Network)
 
 foreach(_tool rcc moc uic qmake)
     if(TARGET Qt5::${_tool})
@@ -315,6 +318,13 @@ add_subdirectory(src/ui/tdesktop)
 
 add_executable(livekit_meeting_app
     src/app/main_meeting_app.cpp
+    src/net/http_types.h
+    src/net/openmeeting_http_client.h
+    src/net/openmeeting_http_client.cpp
+    src/net/session_manager.h
+    src/net/session_manager.cpp
+    src/ui/login_dialog.h
+    src/ui/login_dialog.cpp
     src/ui/sidebar_widget.cpp
     src/ui/sidebar_widget.h
     src/ui/action_card_widget.cpp
@@ -328,10 +338,18 @@ add_executable(livekit_meeting_app
     src/ui/meeting_log_console.cpp
     src/ui/meeting_log_console.h
     src/ui/meeting_ui_integration.h
+    src/core/meeting_coordinator.h
+    src/core/meeting_coordinator.cpp
     src/ui/video_preview_widget.cpp
     src/ui/video_preview_widget.h
     src/ui/audio_visualizer_widget.cpp
     src/ui/audio_visualizer_widget.h
+    src/ui/participants_list_model.h
+    src/ui/participants_list_model.cpp
+    src/ui/participant_item_delegate.h
+    src/ui/participant_item_delegate.cpp
+    src/ui/participants_sidebar_widget.h
+    src/ui/participants_sidebar_widget.cpp
 )
 
 target_include_directories(livekit_meeting_app BEFORE PRIVATE
@@ -367,6 +385,7 @@ target_link_libraries(livekit_meeting_app PRIVATE
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Widgets.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Network.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Svg.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5FontDatabaseSupport.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5EventDispatcherSupport.lib
