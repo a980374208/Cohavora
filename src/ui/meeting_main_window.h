@@ -9,6 +9,7 @@
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QCheckBox>
+#include <QtWidgets/QLabel>
 
 namespace MeetingUI {
 
@@ -41,6 +42,7 @@ private:
 
 // 加入会议弹窗
 class JoinMeetingDialog : public QDialog {
+	Q_OBJECT
 public:
 	explicit JoinMeetingDialog(QWidget *parent = nullptr);
 	~JoinMeetingDialog() override = default;
@@ -48,17 +50,50 @@ public:
 	QString serverUrl() const;
 	QString token() const;
 	QString meetingId() const;
+	QString password() const;
 	QString displayName() const;
 	bool isAudioMuted() const;
 	bool isVideoMuted() const;
 
+	void reject() override;
+
+protected:
+	void mousePressEvent(QMouseEvent *e) override;
+	void mouseMoveEvent(QMouseEvent *e) override;
+	void closeEvent(QCloseEvent *e) override;
+
+private slots:
+	void onJoinClicked();
+	void toggleManualServer();
+
 private:
-	QLineEdit *_serverUrlInput = nullptr;
-	QLineEdit *_tokenInput = nullptr;
+	void setLoading(bool loading, const QString &statusText = QString());
+	void showError(const QString &msg);
+
+	QPushButton *_closeBtn = nullptr;
+	QLineEdit *_meetingIdInput = nullptr;
+	QLineEdit *_passwordInput = nullptr;
+	QLineEdit *_displayNameInput = nullptr;
 	QCheckBox *_audioMuteBox = nullptr;
 	QCheckBox *_videoMuteBox = nullptr;
 	QPushButton *_joinBtn = nullptr;
 	QPushButton *_cancelBtn = nullptr;
+	QLabel *_statusLabel = nullptr;
+
+	QPushButton *_manualToggleBtn = nullptr;
+	QWidget *_manualWidget = nullptr;
+	QLineEdit *_serverUrlInput = nullptr;
+	QLineEdit *_tokenInput = nullptr;
+
+	QString _resolvedServerUrl;
+	QString _resolvedToken;
+	QString _cleanMeetingId;
+
+	bool _isLoading = false;
+	bool _isCancelled = false;
+
+	QPoint _dragPosition;
+	bool _isDragging = false;
 };
 
 class MeetingMainWindow : public Ui::RpWidget {

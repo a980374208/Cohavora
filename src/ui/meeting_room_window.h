@@ -10,6 +10,8 @@
 #include "src/media/dshow_enumerator.h"
 #include "src/media/wasapi_enumerator.h"
 #include "src/media/wasapi_capture.h"
+#include "src/core/meeting_coordinator.h"
+#include "src/ui/participants_sidebar_widget.h"
 #include <mmsystem.h>
 
 #include <QtWidgets/QWidget>
@@ -151,6 +153,7 @@ public:
 
 	void updateDuration(int seconds);
 	void setActiveSpeaker(const QString &speakerName);
+	void setMeetingId(const QString &meetingId);
 
 	rpl::producer<VideoViewMode> viewModeChanged() const { return _viewModeStream.events(); }
 	rpl::producer<> consoleClicked() const { return _consoleStream.events(); }
@@ -177,6 +180,8 @@ private:
 	HoverBtn _hoverBtn = HoverBtn::None;
 	int _durationSeconds = 0;
 	QString _speakerName;
+	QString _meetingId;
+	bool _copiedAnim = false;
 	VideoViewMode _currentViewMode = VideoViewMode::Grid;
 
 	QRect _layoutRect;
@@ -189,6 +194,7 @@ private:
 	QRect _maxRect;
 	QRect _closeRect;
 	QRect _speakerCapsuleRect;
+	QRect _meetingIdRect;
 
 	rpl::event_stream<VideoViewMode> _viewModeStream;
 	rpl::event_stream<> _consoleStream;
@@ -301,6 +307,7 @@ public:
 	struct Config {
 		QString serverUrl;
 		QString token;
+		QString meetingId;
 		QString displayName = QString::fromUtf8("LiveKit用户");
 		bool audioMuted = false;
 		bool videoEnabled = true;
@@ -309,16 +316,24 @@ public:
 		livekit::BackupCodecPolicy backupCodecPolicy = livekit::BackupCodecPolicy::PreferRegression;
 	};
 
-	explicit MeetingRoomWindow(const Config &config, QWidget *parent = nullptr);
+	explicit MeetingRoomWindow(const Config &config,
+	                           std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator = nullptr,
+	                           QWidget *parent = nullptr);
 	~MeetingRoomWindow() override;
 
 	void receiveRemoteVideoFrame(const QImage &frame, const QString &user);
 	void receiveLocalVideoFrame(const QImage &frame);
 
-	void onRemoteParticipantJoined(const QString &identity);
+	void onRemoteParticipantJoined(const QString &identity, const QString &name = QString());
 	void onRemoteParticipantLeft(const QString &identity);
 	void onRemoteTrackMuted(bool isVideo, bool muted);
 	void updateActiveSpeakers(const std::vector<std::shared_ptr<livekit::Participant>> &speakers);
+
+	void onKickedOff(const QString &reason, int reasonCode);
+	void onRemoteMuteRequested(bool isVideo, bool mute, const QString &operatorId);
+	void onMeetingDetailUpdated(const OpenMeeting::MeetingDetail &detail);
+	void onHostRoleChanged(const QString &newHostId, const QString &operatorName);
+	void handleEndMeetingClicked();
 
 protected:
 	void resizeEvent(QResizeEvent *e) override;
@@ -340,8 +355,11 @@ private:
 	void setupNativeWindow();
 	void initLayout();
 	void updateVideoLayout();
+	void setupCoordinatorBindings();
 	void startLiveKitSession();
 	void stopLiveKitSession();
+
+	std::shared_ptr<OpenMeeting::MeetingCoordinator> _coordinator;
 
 	Config _config;
 	int _elapsedSeconds = 0;
@@ -359,6 +377,10 @@ private:
 	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteTiles;
 	QLabel *_inviteHintBanner = nullptr;
 	RoomBottomBarWidget *_bottomBar = nullptr;
+	OpenMeeting::ParticipantsSidebarWidget *_participantsSidebar = nullptr;
+	bool _sidebarVisible = false;
+
+	void toggleParticipantsSidebar();
 
 	// 本地摄像头采集与模拟流
 	std::shared_ptr<livekit::DShowVideoCapture> _dshowCap;

@@ -315,6 +315,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             local_permission.hidden = permission.hidden();
         }
         local_participant_->set_permission(local_permission);
+        local_participant_->set_name(join_res->participant().name());
         local_participant_->set_metadata(join_res->participant().metadata());
         local_participant_->set_attributes(std::map<std::string, std::string>(
             join_res->participant().attributes().begin(),
@@ -2768,6 +2769,13 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
     };
     std::vector<PermChange> changed_permissions_events;
 
+    struct MetadataChange {
+        std::shared_ptr<Participant> participant;
+        std::string old_metadata;
+        std::string new_metadata;
+    };
+    std::vector<MetadataChange> changed_metadata_events;
+
     struct MuteChange {
         std::shared_ptr<Participant> participant;
         std::shared_ptr<TrackPublication> publication;
@@ -2797,7 +2805,14 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
             }
 
             if (local_participant_ && p_info.sid() == local_participant_->sid()) {
-                local_participant_->set_metadata(p_info.metadata());
+                if (!p_info.name().empty()) {
+                    local_participant_->set_name(p_info.name());
+                }
+                std::string old_meta = local_participant_->metadata();
+                if (old_meta != p_info.metadata()) {
+                    local_participant_->set_metadata(p_info.metadata());
+                    changed_metadata_events.push_back({local_participant_, old_meta, p_info.metadata()});
+                }
 
                 auto old_attrs = local_participant_->attributes();
                 if (old_attrs != new_attrs) {
@@ -2829,6 +2844,7 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
                 std::shared_ptr<RemoteParticipant> remote;
                 if (it == remote_participants_.end()) {
                     remote = std::make_shared<RemoteParticipant>(p_info.sid(), p_info.identity());
+                    remote->set_name(p_info.name());
                     remote->set_metadata(p_info.metadata());
                     remote->set_attributes(new_attrs);
                     remote->set_permission(new_perm);
@@ -2836,7 +2852,14 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
                     newly_connected.push_back(remote);
                 } else {
                     remote = it->second;
-                    remote->set_metadata(p_info.metadata());
+                    if (!p_info.name().empty()) {
+                        remote->set_name(p_info.name());
+                    }
+                    std::string old_meta = remote->metadata();
+                    if (old_meta != p_info.metadata()) {
+                        remote->set_metadata(p_info.metadata());
+                        changed_metadata_events.push_back({remote, old_meta, p_info.metadata()});
+                    }
 
                     auto old_attrs = remote->attributes();
                     if (old_attrs != new_attrs) {
@@ -2960,6 +2983,12 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
     for (const auto& evt : changed_permissions_events) {
         for (const auto& listener : listeners_snapshot) {
             listener->OnParticipantPermissionsChanged(evt.old_perm, evt.new_perm, evt.participant);
+        }
+    }
+
+    for (const auto& evt : changed_metadata_events) {
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnParticipantMetadataChanged(evt.participant, evt.old_metadata, evt.new_metadata);
         }
     }
 
@@ -3466,7 +3495,7 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
         if (sdp_mid.empty()) sdp_mid = json_cand.value("sdp_mid", "");
         int sdp_mline_index = json_cand.value("sdpMLineIndex", 0);
 
-        Log("SIGNAL", "TRICKLE_RECV", "收到服务端 ICE 候选: target=" + std::string(trickle.target() == proto::SignalTarget::PUBLISHER ? "PUBLISHER" : "SUBSCRIBER") + ", mid=" + sdp_mid);
+        Log("SIGNAL", "TRICKLE_RECV", "收到服务端 ICE 候选: target=" + std::string(trickle.target() == proto::SignalTarget::PUBLISHER ? "PUBLISHER" : "SUBSCRIBER") + ", mid=" + sdp_mid + ", cand=" + sdp);
 
         auto self = shared_from_this();
         WebRTCManager::Instance().signaling_thread()->BlockingCall([self, pub_pc, sub_pc, trickle_target = trickle.target(), sdp_mid, sdp_mline_index, sdp]() {

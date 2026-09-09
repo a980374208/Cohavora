@@ -62,6 +62,7 @@ public:
     virtual void OnParticipantDisconnected(std::shared_ptr<RemoteParticipant> participant) {}
     virtual void OnParticipantAttributesChanged(const std::map<std::string, std::string>& changed_attributes, std::shared_ptr<Participant> participant) {}
     virtual void OnParticipantPermissionsChanged(const ParticipantPermission& old_permission, const ParticipantPermission& new_permission, std::shared_ptr<Participant> participant) {}
+    virtual void OnParticipantMetadataChanged(std::shared_ptr<Participant> participant, const std::string& old_metadata, const std::string& new_metadata) {}
 
     virtual void OnTrackPublished(std::shared_ptr<RemoteParticipant> participant, std::shared_ptr<TrackPublication> publication) {}
     virtual void OnTrackUnpublished(std::shared_ptr<RemoteParticipant> participant, std::shared_ptr<TrackPublication> publication) {}
