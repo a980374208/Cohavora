@@ -985,6 +985,11 @@ void RoomBottomBarWidget::setParticipantCount(int count) {
 	update();
 }
 
+void RoomBottomBarWidget::setChatUnreadCount(int count) {
+	_chatUnreadCount = count;
+	update();
+}
+
 bool RoomBottomBarWidget::HasAvailableAudioDevice() {
 	try {
 		auto mics = livekit::WasapiEnumerator::EnumerateInputDevices();
@@ -1178,6 +1183,26 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 			p.drawRoundedRect(QRect(cx - 7, cy - 6, 14, 11), 3, 3);
 			p.drawLine(cx - 3, cy - 2, cx + 3, cy - 2);
 			p.drawLine(cx - 3, cy + 1, cx + 1, cy + 1);
+
+			if (_chatUnreadCount > 0) {
+				p.save();
+				p.setPen(Qt::NoPen);
+				p.setBrush(QColor(0xf5, 0x3f, 0x3f));
+				if (_chatUnreadCount > 99) {
+					p.drawRoundedRect(QRect(cx + 4, cy - 10, 16, 10), 5, 5);
+					p.setFont(QFont("Microsoft YaHei", 6, QFont::Bold));
+					p.setPen(Qt::white);
+					p.drawText(QRect(cx + 4, cy - 10, 16, 10), Qt::AlignCenter, "99+");
+				} else if (_chatUnreadCount > 9) {
+					p.drawRoundedRect(QRect(cx + 4, cy - 10, 14, 10), 5, 5);
+					p.setFont(QFont("Microsoft YaHei", 6, QFont::Bold));
+					p.setPen(Qt::white);
+					p.drawText(QRect(cx + 4, cy - 10, 14, 10), Qt::AlignCenter, QString::number(_chatUnreadCount));
+				} else {
+					p.drawEllipse(QPoint(cx + 8, cy - 6), 4, 4);
+				}
+				p.restore();
+			}
 		} else if (item.id == 7) {
 			p.setPen(QPen(QColor(0x1f, 0x23, 0x29), 1.6));
 			p.drawEllipse(QPoint(cx, cy), 6, 6);
@@ -1778,10 +1803,96 @@ void MeetingRoomWindow::initLayout() {
 	_participantsSidebar = new OpenMeeting::ParticipantsSidebarWidget(_coordinator, this);
 	_participantsSidebar->hide();
 	connect(_participantsSidebar, &OpenMeeting::ParticipantsSidebarWidget::closeRequested, this, [this]() {
-		_sidebarVisible = false;
-		_participantsSidebar->hide();
-		QResizeEvent ev(size(), size());
-		resizeEvent(&ev);
+		switchSidebar(ActiveSidebar::None);
+	});
+
+	_chatSidebar = new OpenMeeting::MeetingChatSidebarWidget(this);
+	_chatSidebar->hide();
+	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::closeRequested, this, [this]() {
+		switchSidebar(ActiveSidebar::None);
+	});
+	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::messageSent, this, [this](const QString &text) {
+		QString msgId = QString("msg_%1_%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(qrand() % 1000);
+		int64_t seq = _coordinator ? _coordinator->nextSequenceNumber() : (QDateTime::currentMSecsSinceEpoch() * 1000);
+		OpenMeeting::ChatMessageItem item;
+		item.id = msgId;
+		item.senderIdentity = "local";
+		item.senderName = QString::fromUtf8("%1 (我)").arg(_config.displayName);
+		item.text = text;
+		item.timestamp = QDateTime::currentMSecsSinceEpoch();
+		item.seq = seq;
+		item.isMine = true;
+		item.status = OpenMeeting::MessageSendStatus::Sending;
+		_chatSidebar->appendMessage(item);
+
+		if (_coordinator) {
+			_coordinator->sendChatMessage(text, msgId, seq);
+		}
+		LogToConsole(LogCategory::Participant, "CHAT", QString("我: %1").arg(text));
+	});
+
+	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::imageSent, this, [this](const QString &fileName, const QByteArray &data) {
+		QString msgId = QString("img_%1_%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(qrand() % 1000);
+		int64_t seq = _coordinator ? _coordinator->nextSequenceNumber() : (QDateTime::currentMSecsSinceEpoch() * 1000);
+		OpenMeeting::ChatMessageItem item;
+		item.id = msgId;
+		item.senderIdentity = "local";
+		item.senderName = QString::fromUtf8("%1 (我)").arg(_config.displayName);
+		item.type = OpenMeeting::ChatMessageType::Image;
+		item.fileName = fileName;
+		item.fileSize = data.size();
+		item.fileData = data;
+		item.timestamp = QDateTime::currentMSecsSinceEpoch();
+		item.seq = seq;
+		item.isMine = true;
+		item.status = OpenMeeting::MessageSendStatus::Sending;
+		item.progress = 0;
+		_chatSidebar->appendMessage(item);
+
+		if (_coordinator) {
+			_coordinator->sendChatMediaMessage(msgId, "image", fileName, data, seq);
+		}
+		LogToConsole(LogCategory::Participant, "CHAT", QString("我 发送了图片: %1 (%2)").arg(fileName).arg(OpenMeeting::ChatBubbleWidget::formatFileSize(data.size())));
+	});
+
+	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::fileSent, this, [this](const QString &fileName, const QByteArray &data) {
+		QString msgId = QString("file_%1_%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(qrand() % 1000);
+		int64_t seq = _coordinator ? _coordinator->nextSequenceNumber() : (QDateTime::currentMSecsSinceEpoch() * 1000);
+		OpenMeeting::ChatMessageItem item;
+		item.id = msgId;
+		item.senderIdentity = "local";
+		item.senderName = QString::fromUtf8("%1 (我)").arg(_config.displayName);
+		item.type = OpenMeeting::ChatMessageType::File;
+		item.fileName = fileName;
+		item.fileSize = data.size();
+		item.fileData = data;
+		item.timestamp = QDateTime::currentMSecsSinceEpoch();
+		item.seq = seq;
+		item.isMine = true;
+		item.status = OpenMeeting::MessageSendStatus::Sending;
+		item.progress = 0;
+		_chatSidebar->appendMessage(item);
+
+		if (_coordinator) {
+			_coordinator->sendChatMediaMessage(msgId, "file", fileName, data, seq);
+		}
+		LogToConsole(LogCategory::Participant, "CHAT", QString("我 发送了文件: %1 (%2)").arg(fileName).arg(OpenMeeting::ChatBubbleWidget::formatFileSize(data.size())));
+	});
+
+	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::retryRequested, this, [this](const QString &msgId) {
+		if (!_coordinator || !_chatSidebar) return;
+		auto msg = _chatSidebar->findMessage(msgId);
+		if (msg.id.isEmpty()) return;
+
+		_chatSidebar->updateMessageStatus(msgId, OpenMeeting::MessageSendStatus::Sending, 0);
+
+		if (msg.type == OpenMeeting::ChatMessageType::Text) {
+			_coordinator->sendChatMessage(msg.text, msgId, msg.seq);
+		} else if (msg.type == OpenMeeting::ChatMessageType::Image) {
+			_coordinator->sendChatMediaMessage(msgId, "image", msg.fileName, msg.fileData, msg.seq);
+		} else if (msg.type == OpenMeeting::ChatMessageType::File) {
+			_coordinator->sendChatMediaMessage(msgId, "file", msg.fileName, msg.fileData, msg.seq);
+		}
 	});
 
 	_localTile = new VideoTileWidget(QString::fromUtf8("%1 (我)").arg(_config.displayName), true, _stageContainer);
@@ -1930,13 +2041,142 @@ void MeetingRoomWindow::initLayout() {
 	}, lifetime());
 
 	_bottomBar->participantsClicked() | rpl::on_next([this] {
-		toggleParticipantsSidebar();
+		switchSidebar(ActiveSidebar::Participants);
 	}, lifetime());
 
 	_bottomBar->chatClicked() | rpl::on_next([this] {
-		QMessageBox::information(this, QString::fromUtf8("会议聊天"),
-			QString::fromUtf8("聊天通道已激活，可在左下角输入框发送快捷弹幕或消息。"));
+		switchSidebar(ActiveSidebar::Chat);
 	}, lifetime());
+
+	if (_coordinator) {
+		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMessageReceived,
+			this, [this](const QString &senderIdentity, const QString &senderName, const QString &text, int64_t seq) {
+			QString dispName = senderName.trimmed();
+			if (dispName.isEmpty() || dispName.startsWith("PA_")) {
+				dispName = senderIdentity;
+			}
+			if (_coordinator && (dispName.isEmpty() || dispName == senderIdentity || dispName.startsWith("PA_"))) {
+				for (const auto &p : _coordinator->participants()) {
+					if (p.identity == senderIdentity || p.identity == senderName) {
+						if (!p.name.isEmpty()) {
+							dispName = p.name;
+						}
+						break;
+					}
+				}
+			}
+			if (dispName.isEmpty()) {
+				dispName = QString::fromUtf8("参会人");
+			}
+
+			OpenMeeting::ChatMessageItem item;
+			item.id = QString::number(QDateTime::currentMSecsSinceEpoch());
+			item.senderIdentity = senderIdentity;
+			item.senderName = dispName;
+			item.text = text;
+			item.timestamp = QDateTime::currentMSecsSinceEpoch();
+			item.seq = seq;
+			item.isMine = false;
+
+			if (_chatSidebar) {
+				_chatSidebar->appendMessage(item);
+			}
+
+			if (_activeSidebar != ActiveSidebar::Chat && _bottomBar) {
+				_bottomBar->setChatUnreadCount(_bottomBar->chatUnreadCount() + 1);
+			}
+
+			LogToConsole(LogCategory::Participant, "CHAT", QString("%1: %2").arg(dispName).arg(text));
+		});
+
+		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMediaReceivingStarted,
+			this, [this](const QString &transferId, const QString &senderIdentity, const QString &senderName,
+						 const QString &mediaType, const QString &fileName, qint64 totalSize, int64_t seq) {
+			QString dispName = senderName.trimmed();
+			if (dispName.isEmpty() || dispName.startsWith("PA_")) {
+				dispName = senderIdentity;
+			}
+			if (_coordinator && (dispName.isEmpty() || dispName == senderIdentity || dispName.startsWith("PA_"))) {
+				for (const auto &p : _coordinator->participants()) {
+					if (p.identity == senderIdentity || p.identity == senderName) {
+						if (!p.name.isEmpty()) {
+							dispName = p.name;
+						}
+						break;
+					}
+				}
+			}
+			if (dispName.isEmpty()) {
+				dispName = QString::fromUtf8("参会人");
+			}
+
+			if (_chatSidebar) {
+				_chatSidebar->startReceivingMedia(transferId, senderIdentity, dispName, mediaType, fileName, totalSize, seq);
+			}
+
+			if (_activeSidebar != ActiveSidebar::Chat && _bottomBar) {
+				_bottomBar->setChatUnreadCount(_bottomBar->chatUnreadCount() + 1);
+			}
+
+			LogToConsole(LogCategory::Participant, "CHAT", QString("正在接收 %1 发送的%2: %3 (%4)...")
+				.arg(dispName)
+				.arg(mediaType == "image" ? "图片" : "文件")
+				.arg(fileName)
+				.arg(OpenMeeting::ChatBubbleWidget::formatFileSize(totalSize)));
+		});
+
+		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMediaReceivingProgress,
+			this, [this](const QString &transferId, int progress) {
+			if (_chatSidebar) {
+				_chatSidebar->updateReceivingProgress(transferId, progress);
+			}
+		});
+
+		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMediaReceivingCompleted,
+			this, [this](const QString &transferId, const QString &senderIdentity, const QString &senderName,
+						 const QString &mediaType, const QString &fileName, const QByteArray &data) {
+			if (_chatSidebar) {
+				_chatSidebar->completeReceivingMedia(transferId, mediaType, fileName, data);
+			}
+
+			QString dispName = senderName.trimmed();
+			if (dispName.isEmpty() || dispName.startsWith("PA_")) dispName = senderIdentity;
+			LogToConsole(LogCategory::Participant, "CHAT", QString("%1 发送的%2已接收完成: %3 (%4)")
+				.arg(dispName)
+				.arg(mediaType == "image" ? "图片" : "文件")
+				.arg(fileName)
+				.arg(OpenMeeting::ChatBubbleWidget::formatFileSize(data.size())));
+		});
+
+		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMediaReceivingFailed,
+			this, [this](const QString &transferId, const QString &reason) {
+			if (_chatSidebar) {
+				_chatSidebar->failReceivingMedia(transferId, reason);
+			}
+			LogToConsole(LogCategory::Participant, "CHAT", QString("多媒体接收中断: %1").arg(reason));
+		});
+
+		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMessageSendProgress,
+			this, [this](const QString &messageId, int progress) {
+			if (_chatSidebar) {
+				_chatSidebar->updateMessageStatus(messageId, OpenMeeting::MessageSendStatus::Sending, progress);
+			}
+		});
+
+		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMessageSendSuccess,
+			this, [this](const QString &messageId) {
+			if (_chatSidebar) {
+				_chatSidebar->updateMessageStatus(messageId, OpenMeeting::MessageSendStatus::Sent, 100);
+			}
+		});
+
+		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMessageSendFailed,
+			this, [this](const QString &messageId, const QString &error) {
+			if (_chatSidebar) {
+				_chatSidebar->updateMessageStatus(messageId, OpenMeeting::MessageSendStatus::Failed, 0, error);
+			}
+		});
+	}
 
 	_bottomBar->recordClicked() | rpl::on_next([this] {
 		QMessageBox::information(this, QString::fromUtf8("云端录制"),
@@ -1981,14 +2221,17 @@ void MeetingRoomWindow::onTimerTick() {
 	_topBar->updateDuration(_elapsedSeconds);
 }
 
-void MeetingRoomWindow::toggleParticipantsSidebar() {
-	_sidebarVisible = !_sidebarVisible;
-	if (_participantsSidebar) {
-		_participantsSidebar->setVisible(_sidebarVisible);
-		if (_sidebarVisible) {
-			_participantsSidebar->raise();
-		}
+void MeetingRoomWindow::switchSidebar(ActiveSidebar target) {
+	if (_activeSidebar == target) {
+		_activeSidebar = ActiveSidebar::None;
+	} else {
+		_activeSidebar = target;
 	}
+
+	if (_activeSidebar == ActiveSidebar::Chat && _bottomBar) {
+		_bottomBar->setChatUnreadCount(0);
+	}
+
 	QResizeEvent ev(size(), size());
 	resizeEvent(&ev);
 }
@@ -1999,15 +2242,36 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 
 	_topBar->setGeometry(0, 0, w, 44);
 
-	int sidebarW = (_participantsSidebar && _sidebarVisible) ? 300 : 0;
-	int stageW = w - sidebarW;
-	int stageH = h - 44 - 76;
+	constexpr int kSidebarWidth = 340;
+	const int sidebarW = (_activeSidebar != ActiveSidebar::None) ? kSidebarWidth : 0;
+	const int stageW = w - sidebarW;
+	const int stageH = h - 44 - 76;
 
 	_stageContainer->setGeometry(0, 44, stageW, stageH);
-	if (_participantsSidebar && _sidebarVisible) {
-		_participantsSidebar->setGeometry(stageW, 44, sidebarW, stageH);
-		_participantsSidebar->raise();
+
+	if (_activeSidebar == ActiveSidebar::Participants) {
+		if (_participantsSidebar) {
+			_participantsSidebar->setGeometry(stageW, 44, sidebarW, stageH);
+			_participantsSidebar->show();
+			_participantsSidebar->raise();
+		}
+		if (_chatSidebar) {
+			_chatSidebar->hide();
+		}
+	} else if (_activeSidebar == ActiveSidebar::Chat) {
+		if (_chatSidebar) {
+			_chatSidebar->setGeometry(stageW, 44, sidebarW, stageH);
+			_chatSidebar->show();
+			_chatSidebar->raise();
+		}
+		if (_participantsSidebar) {
+			_participantsSidebar->hide();
+		}
+	} else {
+		if (_participantsSidebar) _participantsSidebar->hide();
+		if (_chatSidebar) _chatSidebar->hide();
 	}
+
 	_bottomBar->setGeometry(0, h - 76, w, 76);
 
 	updateVideoLayout();

@@ -3,6 +3,7 @@
 
 #include <QtCore/QDebug>
 #include <QtWidgets/QAction>
+#include <QtGui/QPainter>
 
 namespace OpenMeeting {
 
@@ -19,7 +20,7 @@ ParticipantsSidebarWidget::ParticipantsSidebarWidget(std::shared_ptr<MeetingCoor
 }
 
 void ParticipantsSidebarWidget::setupUi() {
-    setFixedWidth(300);
+    setFixedWidth(340);
     setStyleSheet(
         "QWidget#ParticipantsSidebar {"
         "  background-color: #1A1D24;"
@@ -109,7 +110,7 @@ void ParticipantsSidebarWidget::setupUi() {
     setObjectName("ParticipantsSidebar");
 
     auto *mainLayout = new QVBoxLayout(this);
-    mainLayout->setContentsMargins(0, 0, 0, 0);
+    mainLayout->setContentsMargins(2, 0, 0, 0);
     mainLayout->setSpacing(0);
 
     // 1. Header
@@ -341,6 +342,30 @@ void ParticipantsSidebarWidget::onMuteAllClicked() {
 void ParticipantsSidebarWidget::onUnmuteAllClicked() {
     if (!_coordinator || !_coordinator->isHost()) return;
     _coordinator->muteAllParticipants(false);
+}
+
+void ParticipantsSidebarWidget::paintEvent(QPaintEvent *e) {
+    Q_UNUSED(e);
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, false);
+
+    // 1. 填充主体背景色
+    p.fillRect(rect(), QColor("#1A1D24"));
+
+    // 2. 明显又不突兀的立体双层分界线
+    // 舞台侧深邃暗阴影基底线 (x=0)
+    p.setPen(QPen(QColor(8, 10, 14), 1));
+    p.drawLine(0, 0, 0, height());
+
+    // 侧边栏侧中度冷灰高光分割线 (x=1) - 清晰界定面板边缘
+    p.setPen(QPen(QColor(58, 66, 82), 1));
+    p.drawLine(1, 0, 1, height());
+
+    // 3. 细微边缘层级环境阴影 (x=2 ~ 10)
+    QLinearGradient shadow(2, 0, 10, 0);
+    shadow.setColorAt(0.0, QColor(0, 0, 0, 45));
+    shadow.setColorAt(1.0, QColor(0, 0, 0, 0));
+    p.fillRect(QRect(2, 0, 8, height()), shadow);
 }
 
 } // namespace OpenMeeting

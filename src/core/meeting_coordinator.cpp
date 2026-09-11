@@ -221,6 +221,20 @@ public:
             _coordinator->_participants.erase(id);
             _coordinator->updateParticipantListAndNotify();
             emit _coordinator->participantLeft(id);
+
+            // 检查是否有该参会人正在发送但未完成的多媒体传输，标记为中断
+            std::vector<QString> failedTransfers;
+            for (auto it = _coordinator->_inboundMediaTransfers.begin(); it != _coordinator->_inboundMediaTransfers.end(); ) {
+                if (it->second.senderIdentity == id) {
+                    failedTransfers.push_back(it->first);
+                    it = _coordinator->_inboundMediaTransfers.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            for (const auto &tId : failedTransfers) {
+                emit _coordinator->chatMediaReceivingFailed(tId, QString::fromUtf8("发送方已离会"));
+            }
         }, Qt::QueuedConnection);
     }
 
@@ -309,7 +323,9 @@ public:
                         const std::string &topic) override {
         if (!_coordinator) return;
         std::string sid = participant ? participant->sid() : "";
-        _coordinator->handleDataReceived(payload, sid);
+        std::string identity = participant ? participant->identity() : "";
+        QString name = ResolveParticipantNickname(participant);
+        _coordinator->handleDataReceived(payload, sid, identity, name);
     }
 
 private:
@@ -328,6 +344,9 @@ MeetingCoordinator::MeetingCoordinator(QObject *parent)
     : QObject(parent) {
     _localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
     _localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
+
+    _mediaSendTimer = new QTimer(this);
+    connect(_mediaSendTimer, &QTimer::timeout, this, &MeetingCoordinator::processNextMediaSendChunk);
 }
 
 MeetingCoordinator::~MeetingCoordinator() {
@@ -574,6 +593,21 @@ void MeetingCoordinator::stopRoomSession() {
         return;
     }
 
+    if (_mediaSendTimer && _mediaSendTimer->isActive()) {
+        _mediaSendTimer->stop();
+    }
+    for (const auto &task : _mediaSendQueue) {
+        if (!task.messageId.isEmpty()) {
+            emit chatMessageSendFailed(task.messageId, QString::fromUtf8("会议已退出"));
+        }
+    }
+    _mediaSendQueue.clear();
+
+    for (const auto &[tId, trans] : _inboundMediaTransfers) {
+        emit chatMediaReceivingFailed(tId, QString::fromUtf8("本地已离开会议"));
+    }
+    _inboundMediaTransfers.clear();
+
     if (_wasapiCap) {
         _wasapiCap->Stop();
         _wasapiCap.reset();
@@ -645,11 +679,204 @@ void MeetingCoordinator::sendNotifyData(const openmeeting::meeting::NotifyMeetin
     _room->PublishData(payload, reliable);
 }
 
-void MeetingCoordinator::sendChatMessage(const QString &content) {
-    if (content.isEmpty() || !_room || _state != MeetingState::InMeeting) return;
-    std::string text = content.toStdString();
-    std::vector<uint8_t> payload(text.begin(), text.end());
-    _room->PublishData(payload, true, {}, "chat");
+int64_t MeetingCoordinator::nextSequenceNumber() {
+    int64_t now = QDateTime::currentMSecsSinceEpoch() * 1000;
+    int64_t counter = ++_msgSequenceCounter;
+    return now + (counter % 1000);
+}
+
+void MeetingCoordinator::sendChatMessage(const QString &content, const QString &messageId, int64_t seq) {
+    if (content.isEmpty()) return;
+    if (!_room || _state != MeetingState::InMeeting) {
+        if (!messageId.isEmpty()) {
+            emit chatMessageSendFailed(messageId, QString::fromUtf8("未连入会议房间"));
+        }
+        return;
+    }
+    if (seq <= 0) {
+        seq = nextSequenceNumber();
+    }
+
+    QJsonObject obj;
+    obj["om_type"] = "chat_text";
+    obj["seq"] = static_cast<double>(seq);
+    obj["msgId"] = messageId;
+    obj["text"] = content;
+
+    QJsonDocument doc(obj);
+    QByteArray jsonBytes = doc.toJson(QJsonDocument::Compact);
+    std::vector<uint8_t> payload(jsonBytes.begin(), jsonBytes.end());
+    try {
+        bool ok = _room->PublishData(payload, true, {}, "chat");
+        if (ok) {
+            if (!messageId.isEmpty()) {
+                QMetaObject::invokeMethod(this, [this, messageId]() {
+                    emit chatMessageSendProgress(messageId, 100);
+                    emit chatMessageSendSuccess(messageId);
+                }, Qt::QueuedConnection);
+            }
+        } else {
+            if (!messageId.isEmpty()) {
+                emit chatMessageSendFailed(messageId, QString::fromUtf8("数据通道拥塞，发送失败"));
+            }
+        }
+    } catch (const std::exception &e) {
+        if (!messageId.isEmpty()) {
+            emit chatMessageSendFailed(messageId, QString::fromUtf8("发送异常: %1").arg(e.what()));
+        }
+    } catch (...) {
+        if (!messageId.isEmpty()) {
+            emit chatMessageSendFailed(messageId, QString::fromUtf8("发送遇到未知异常"));
+        }
+    }
+}
+
+void MeetingCoordinator::sendChatMediaMessage(const QString &messageId, const QString &mediaType, const QString &fileName, const QByteArray &data, int64_t seq) {
+    if (data.isEmpty()) {
+        if (!messageId.isEmpty()) {
+            emit chatMessageSendFailed(messageId, QString::fromUtf8("发送数据为空"));
+        }
+        return;
+    }
+    if (!_room || _state != MeetingState::InMeeting) {
+        if (!messageId.isEmpty()) {
+            emit chatMessageSendFailed(messageId, QString::fromUtf8("未连入会议房间"));
+        }
+        return;
+    }
+    if (seq <= 0) {
+        seq = nextSequenceNumber();
+    }
+
+    QString base64 = QString::fromLatin1(data.toBase64());
+    const int chunkSize = 10 * 1024; // 每分片 10KB 字符，确保加上 JSON 协议头后小于 15KB，避免触发 DataStream 二次切片与竞争
+    const int totalLen = base64.length();
+    const int totalChunks = (totalLen + chunkSize - 1) / chunkSize;
+    const QString transferId = QString("media_%1_%2").arg(QDateTime::currentMSecsSinceEpoch()).arg(qrand() % 10000);
+
+    // 1. 发送轻量预告包 media_start 瞬时建立接收端占位 (不等待切片，秒送达)
+    QJsonObject startObj;
+    startObj["om_type"] = "media_start";
+    startObj["transferId"] = transferId;
+    startObj["seq"] = static_cast<double>(seq);
+    startObj["mediaType"] = mediaType;
+    startObj["fileName"] = fileName;
+    startObj["totalSize"] = static_cast<qint64>(data.size());
+    startObj["totalChunks"] = totalChunks;
+
+    QJsonDocument startDoc(startObj);
+    QByteArray startBytes = startDoc.toJson(QJsonDocument::Compact);
+    std::vector<uint8_t> startPayload(startBytes.begin(), startBytes.end());
+    try {
+        _room->PublishData(startPayload, true, {}, "chat");
+    } catch (...) {
+        // 忽略预告包偶发抛错，后续第一个 chunk 也会兜底建立占位
+    }
+
+    // 2. 将数据切片入队由 20ms 平滑流控调度
+    MediaSendChunkTask task;
+    task.messageId = messageId;
+    task.mediaType = mediaType;
+    task.fileName = fileName;
+    task.transferId = transferId;
+    task.totalSize = static_cast<qint64>(data.size());
+    task.seq = seq;
+    task.currentChunk = 0;
+    task.totalChunks = totalChunks;
+    task.base64Payload = base64;
+    task.chunkSize = chunkSize;
+
+    _mediaSendQueue.push_back(std::move(task));
+
+    if (_mediaSendTimer && !_mediaSendTimer->isActive()) {
+        _mediaSendTimer->start(20); // 每 20ms 推送一个分片
+    }
+}
+
+void MeetingCoordinator::processNextMediaSendChunk() {
+    if (_mediaSendQueue.empty()) {
+        if (_mediaSendTimer && _mediaSendTimer->isActive()) {
+            _mediaSendTimer->stop();
+        }
+        return;
+    }
+
+    if (!_room || _state != MeetingState::InMeeting) {
+        while (!_mediaSendQueue.empty()) {
+            auto task = _mediaSendQueue.front();
+            _mediaSendQueue.pop_front();
+            if (!task.messageId.isEmpty()) {
+                emit chatMessageSendFailed(task.messageId, QString::fromUtf8("网络已断开"));
+            }
+        }
+        if (_mediaSendTimer && _mediaSendTimer->isActive()) {
+            _mediaSendTimer->stop();
+        }
+        return;
+    }
+
+    // === DataChannel 背压流控 (Backpressure Flow Control) ===
+    // 检查底层 WebRTC SCTP 待发送缓冲区水位，门限设为 64KB
+    // 若当前积压大于 64KB，暂停本轮推送，让底层网络充分排空，彻底避免打爆 SCTP 缓冲区与丢包
+    uint64_t buffered = _room->GetDataChannelBufferedAmount(true);
+    if (buffered > 64 * 1024) {
+        return; // 等待下一个 20ms tick 再次检测
+    }
+
+    auto &task = _mediaSendQueue.front();
+    int i = task.currentChunk;
+    QString chunkStr = task.base64Payload.mid(i * task.chunkSize, task.chunkSize);
+    QJsonObject obj;
+    obj["om_type"] = "media_chunk";
+    obj["transferId"] = task.transferId;
+    obj["seq"] = static_cast<double>(task.seq);
+    obj["chunkIndex"] = i;
+    obj["totalChunks"] = task.totalChunks;
+    obj["mediaType"] = task.mediaType;
+    obj["fileName"] = task.fileName;
+    obj["totalSize"] = task.totalSize;
+    obj["chunkData"] = chunkStr;
+
+    QJsonDocument doc(obj);
+    QByteArray jsonBytes = doc.toJson(QJsonDocument::Compact);
+    std::vector<uint8_t> payload(jsonBytes.begin(), jsonBytes.end());
+    bool ok = false;
+    try {
+        ok = _room->PublishData(payload, true, {}, "chat");
+    } catch (const std::exception &e) {
+        QString msgId = task.messageId;
+        _mediaSendQueue.pop_front();
+        if (!msgId.isEmpty()) {
+            emit chatMessageSendFailed(msgId, QString::fromUtf8("数据包投递失败: %1").arg(e.what()));
+        }
+        return;
+    } catch (...) {
+        QString msgId = task.messageId;
+        _mediaSendQueue.pop_front();
+        if (!msgId.isEmpty()) {
+            emit chatMessageSendFailed(msgId, QString::fromUtf8("数据包投递遇到未知异常"));
+        }
+        return;
+    }
+
+    if (!ok) {
+        // 底层 Send 拒绝 (网络缓冲区已满)，不推进 currentChunk，保留给下一轮 tick 重试
+        return;
+    }
+
+    task.currentChunk++;
+    int progress = std::min(100, (task.currentChunk * 100) / task.totalChunks);
+    if (!task.messageId.isEmpty()) {
+        emit chatMessageSendProgress(task.messageId, progress);
+    }
+
+    if (task.currentChunk >= task.totalChunks) {
+        QString msgId = task.messageId;
+        _mediaSendQueue.pop_front();
+        if (!msgId.isEmpty()) {
+            emit chatMessageSendSuccess(msgId);
+        }
+    }
 }
 
 void MeetingCoordinator::requestParticipantMute(const QString &targetUserId, bool isVideo, bool mute) {
@@ -809,13 +1036,128 @@ void MeetingCoordinator::parseRoomMetadata(const std::string &metadata) {
     emit meetingDetailUpdated(_meetingDetail);
 }
 
-void MeetingCoordinator::handleDataReceived(const std::vector<uint8_t> &data, const std::string &participantSid) {
+void MeetingCoordinator::handleDataReceived(const std::vector<uint8_t> &data,
+                                           const std::string &participantSid,
+                                           const std::string &participantIdentity,
+                                           const QString &participantName) {
     openmeeting::meeting::NotifyMeetingData notify;
     if (!notify.ParseFromArray(data.data(), static_cast<int>(data.size()))) {
-        // 若不是 NotifyMeetingData，可能是普通聊天文本
+        QString id = !participantIdentity.empty() ? QString::fromStdString(participantIdentity) : QString::fromStdString(participantSid);
+        QString name = participantName;
+        if (name.isEmpty() || name == id) {
+            auto it = _participants.find(id);
+            if (it != _participants.end() && !it->second.name.isEmpty()) {
+                name = it->second.name;
+            } else {
+                name = id;
+            }
+        }
+
+        // 1. 尝试解析为 JSON 消息协议 (chat_text, media_start, media_chunk)
+        QJsonParseError jErr;
+        QJsonDocument jDoc = QJsonDocument::fromJson(QByteArray::fromRawData(reinterpret_cast<const char*>(data.data()), static_cast<int>(data.size())), &jErr);
+        if (jErr.error == QJsonParseError::NoError && jDoc.isObject()) {
+            QJsonObject jObj = jDoc.object();
+            QString omType = jObj.value("om_type").toString();
+
+            // 1.1 文本聊天消息
+            if (omType == "chat_text") {
+                QString text = jObj.value("text").toString();
+                int64_t seq = jObj.value("seq").toVariant().toLongLong();
+                if (seq <= 0) seq = QDateTime::currentMSecsSinceEpoch() * 1000;
+                QMetaObject::invokeMethod(this, [this, id, name, text, seq]() {
+                    emit chatMessageReceived(id, name, text, seq);
+                }, Qt::QueuedConnection);
+                return;
+            }
+
+            // 1.2 多媒体传输轻量预告包 (建立气泡占位)
+            if (omType == "media_start") {
+                QString transferId = jObj.value("transferId").toString();
+                int64_t seq = jObj.value("seq").toVariant().toLongLong();
+                if (seq <= 0) seq = QDateTime::currentMSecsSinceEpoch() * 1000;
+                int totalChunks = jObj.value("totalChunks").toInt();
+                QString mType = jObj.value("mediaType").toString();
+                QString fName = jObj.value("fileName").toString();
+                qint64 totalSize = jObj.value("totalSize").toVariant().toLongLong();
+
+                auto &transfer = _inboundMediaTransfers[transferId];
+                transfer.mediaType = mType;
+                transfer.fileName = fName;
+                transfer.totalChunks = totalChunks;
+                transfer.totalSize = totalSize;
+                transfer.seq = seq;
+                transfer.senderIdentity = id;
+                transfer.senderName = name;
+                transfer.lastActiveTimestamp = QDateTime::currentMSecsSinceEpoch();
+
+                QMetaObject::invokeMethod(this, [this, transferId, id, name, mType, fName, totalSize, seq]() {
+                    emit chatMediaReceivingStarted(transferId, id, name, mType, fName, totalSize, seq);
+                }, Qt::QueuedConnection);
+                return;
+            }
+
+            // 1.3 多媒体数据分片
+            if (omType == "media_chunk") {
+                QString transferId = jObj.value("transferId").toString();
+                int chunkIdx = jObj.value("chunkIndex").toInt();
+                int totalChunks = jObj.value("totalChunks").toInt();
+                QString mType = jObj.value("mediaType").toString();
+                QString fName = jObj.value("fileName").toString();
+                qint64 totalSize = jObj.value("totalSize").toVariant().toLongLong();
+                int64_t seq = jObj.value("seq").toVariant().toLongLong();
+                if (seq <= 0) seq = QDateTime::currentMSecsSinceEpoch() * 1000;
+                QString chunkData = jObj.value("chunkData").toString();
+
+                bool isFirstChunk = (_inboundMediaTransfers.find(transferId) == _inboundMediaTransfers.end());
+                auto &transfer = _inboundMediaTransfers[transferId];
+                if (isFirstChunk) {
+                    transfer.mediaType = mType;
+                    transfer.fileName = fName;
+                    transfer.totalChunks = totalChunks;
+                    transfer.totalSize = totalSize;
+                    transfer.seq = seq;
+                    transfer.senderIdentity = id;
+                    transfer.senderName = name;
+                    transfer.lastActiveTimestamp = QDateTime::currentMSecsSinceEpoch();
+
+                    QMetaObject::invokeMethod(this, [this, transferId, id, name, mType, fName, totalSize, seq]() {
+                        emit chatMediaReceivingStarted(transferId, id, name, mType, fName, totalSize, seq);
+                    }, Qt::QueuedConnection);
+                }
+
+                transfer.lastActiveTimestamp = QDateTime::currentMSecsSinceEpoch();
+                transfer.receivedChunks[chunkIdx] = chunkData;
+
+                int progress = std::min(99, (static_cast<int>(transfer.receivedChunks.size()) * 100) / totalChunks);
+                QMetaObject::invokeMethod(this, [this, transferId, progress]() {
+                    emit chatMediaReceivingProgress(transferId, progress);
+                }, Qt::QueuedConnection);
+
+                if (static_cast<int>(transfer.receivedChunks.size()) == totalChunks) {
+                    QString fullBase64;
+                    fullBase64.reserve(totalChunks * 10240);
+                    for (int i = 0; i < totalChunks; ++i) {
+                        fullBase64.append(transfer.receivedChunks[i]);
+                    }
+                    QByteArray completeData = QByteArray::fromBase64(fullBase64.toLatin1());
+                    _inboundMediaTransfers.erase(transferId);
+
+                    QMetaObject::invokeMethod(this, [this, transferId, id, name, mType, fName, completeData]() {
+                        emit chatMediaReceivingProgress(transferId, 100);
+                        emit chatMediaReceivingCompleted(transferId, id, name, mType, fName, completeData);
+                        emit chatMediaMessageReceived(id, name, mType, fName, completeData);
+                    }, Qt::QueuedConnection);
+                }
+                return;
+            }
+        }
+
+        // 2. 向下兼容：若不是 JSON 协议，作为普通文本聊天广播
         QString text = QString::fromUtf8(reinterpret_cast<const char *>(data.data()), static_cast<int>(data.size()));
-        QMetaObject::invokeMethod(this, [this, participantSid, text]() {
-            emit chatMessageReceived(QString::fromStdString(participantSid), text);
+        int64_t seq = QDateTime::currentMSecsSinceEpoch() * 1000;
+        QMetaObject::invokeMethod(this, [this, id, name, text, seq]() {
+            emit chatMessageReceived(id, name, text, seq);
         }, Qt::QueuedConnection);
         return;
     }

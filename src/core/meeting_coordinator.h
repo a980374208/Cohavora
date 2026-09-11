@@ -5,11 +5,13 @@
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QByteArray>
+#include <QtCore/QTimer>
 #include <QtGui/QImage>
 
 #include <memory>
 #include <string>
 #include <vector>
+#include <deque>
 #include <thread>
 #include <atomic>
 #include <mutex>
@@ -106,9 +108,16 @@ public:
     bool isLocalAudioMuted() const { return _audioMuted; }
     bool isLocalVideoEnabled() const { return _videoEnabled; }
 
+    // 消息时序单调序列发生器
+    int64_t nextSequenceNumber();
+
     // 房间内信令通道发送 (DataChannel)
     void sendNotifyData(const openmeeting::meeting::NotifyMeetingData &data, bool reliable = true);
-    void sendChatMessage(const QString &content);
+    void sendChatMessage(const QString &content, const QString &messageId = QString(), int64_t seq = 0);
+    void sendChatMediaMessage(const QString &messageId, const QString &mediaType, const QString &fileName, const QByteArray &data, int64_t seq = 0);
+    void sendChatMediaMessage(const QString &mediaType, const QString &fileName, const QByteArray &data) {
+        sendChatMediaMessage(QString(), mediaType, fileName, data, 0);
+    }
     void requestParticipantMute(const QString &targetUserId, bool isVideo, bool mute);
     void requestParticipantCamera(const QString &targetUserId, bool enable);
     void requestParticipantMicrophone(const QString &targetUserId, bool enable);
@@ -150,14 +159,30 @@ signals:
     void kickedOff(const QString &reason, int reasonCode);
     void remoteMuteRequested(bool isVideo, bool mute, const QString &operatorId);
     void hostRoleChanged(const QString &newHostUserId, const QString &operatorName);
-    void chatMessageReceived(const QString &senderIdentity, const QString &message);
+    void chatMessageReceived(const QString &senderIdentity, const QString &senderName, const QString &message, int64_t seq = 0);
+    void chatMediaMessageReceived(const QString &senderIdentity, const QString &senderName,
+                                  const QString &mediaType, const QString &fileName, const QByteArray &data);
+    void chatMessageSendProgress(const QString &messageId, int progress);
+    void chatMessageSendSuccess(const QString &messageId);
+    void chatMessageSendFailed(const QString &messageId, const QString &error);
+
+    // 接收端多媒体实时分片传输事件
+    void chatMediaReceivingStarted(const QString &transferId, const QString &senderIdentity, const QString &senderName,
+                                   const QString &mediaType, const QString &fileName, qint64 totalSize, int64_t seq = 0);
+    void chatMediaReceivingProgress(const QString &transferId, int progress);
+    void chatMediaReceivingCompleted(const QString &transferId, const QString &senderIdentity, const QString &senderName,
+                                     const QString &mediaType, const QString &fileName, const QByteArray &data);
+    void chatMediaReceivingFailed(const QString &transferId, const QString &reason);
 
 private:
     void setState(MeetingState s, const QString &detail = QString());
     void startRoomSession(const QString &url, const QString &token);
     void stopRoomSession();
     void parseRoomMetadata(const std::string &metadata);
-    void handleDataReceived(const std::vector<uint8_t> &data, const std::string &participantSid);
+    void handleDataReceived(const std::vector<uint8_t> &data,
+                            const std::string &participantSid,
+                            const std::string &participantIdentity = "",
+                            const QString &participantName = "");
 
     class CoordinatorRoomListener;
     friend class CoordinatorRoomListener;
@@ -175,6 +200,38 @@ private:
     std::map<QString, ParticipantInfo> _participants;
     void ensureLocalParticipant();
     void updateParticipantListAndNotify();
+
+    struct InboundMediaTransfer {
+        QString mediaType;
+        QString fileName;
+        int totalChunks = 0;
+        qint64 totalSize = 0;
+        int64_t seq = 0;
+        qint64 lastActiveTimestamp = 0;
+        QString senderIdentity;
+        QString senderName;
+        std::map<int, QString> receivedChunks;
+    };
+    std::map<QString, InboundMediaTransfer> _inboundMediaTransfers;
+
+    // 出站大文件/多媒体平滑分片调度队列
+    struct MediaSendChunkTask {
+        QString messageId;
+        QString mediaType;
+        QString fileName;
+        QString transferId;
+        qint64 totalSize = 0;
+        int64_t seq = 0;
+        int currentChunk = 0;
+        int totalChunks = 0;
+        QString base64Payload;
+        int chunkSize = 24 * 1024;
+    };
+    std::deque<MediaSendChunkTask> _mediaSendQueue;
+    QTimer *_mediaSendTimer = nullptr;
+    void processNextMediaSendChunk();
+
+    std::atomic<int64_t> _msgSequenceCounter{0};
 
     // LiveKit 异步通信与媒体资源
     std::unique_ptr<asio::io_context> _ioContext;
