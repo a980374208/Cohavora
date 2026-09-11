@@ -121,7 +121,7 @@ public:
     asio::awaitable<void> SimulateScenarioAsync(SimulateScenarioType scenario);
 
     // === 高级通信与 DataChannel 背压流控 ===
-    void PublishData(const std::vector<uint8_t>& payload, bool reliable = true,
+    bool PublishData(const std::vector<uint8_t>& payload, bool reliable = true,
                      const std::vector<std::string>& destination_identities = {}, const std::string& topic = "");
     void SetDataChannelBufferedAmountLowThreshold(uint64_t threshold, bool reliable = true);
     uint64_t GetDataChannelBufferedAmount(bool reliable = true) const;

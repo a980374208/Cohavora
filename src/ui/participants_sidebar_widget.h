@@ -28,6 +28,9 @@ public:
 signals:
     void closeRequested();
 
+protected:
+    void paintEvent(QPaintEvent *e) override;
+
 private slots:
     void onSearchTextChanged(const QString &text);
     void onMicClicked(const QString &identity);

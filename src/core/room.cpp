@@ -751,7 +751,7 @@ asio::awaitable<void> Room::DisconnectAsync() {
     }
 }
 
-void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
+bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
                        const std::vector<std::string>& destination_identities, const std::string& topic) {
     static constexpr size_t kMaxChunkSize = 15000;
     static constexpr size_t kMaxDataStreamSize = 16 * 1024 * 1024;
@@ -759,7 +759,7 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
 
     if (payload.size() > kMaxDataStreamSize) {
         Log("DATA", "PAYLOAD_TOO_LARGE", "拒绝发送超过 16 MiB 的 DataStream");
-        return;
+        return false;
     }
 
     webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
@@ -772,16 +772,19 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
 
     const std::string local_identity = local_participant ? local_participant->identity() : std::string{};
     const std::string local_sid = local_participant ? local_participant->sid() : std::string{};
-    auto send_packet = [&](const std::vector<uint8_t>& bytes) {
+    auto send_packet = [&](const std::vector<uint8_t>& bytes) -> bool {
         if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
             webrtc::DataBuffer buffer(
                 webrtc::CopyOnWriteBuffer(bytes.data(), bytes.size()),
                 /*binary=*/true);
             if (!dc->Send(buffer)) {
                 Log("DATA", "SEND_FAILED", "DataChannel 拒绝发送数据包");
+                return false;
             }
+            return true;
         } else {
             OnIncomingDataPacket(bytes, local_sid, topic);
+            return true;
         }
     };
 
@@ -808,7 +811,9 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
         std::vector<uint8_t> header_bytes(header_pkt.ByteSizeLong());
         header_pkt.SerializeToArray(header_bytes.data(), static_cast<int>(header_bytes.size()));
 
-        send_packet(header_bytes);
+        if (!send_packet(header_bytes)) {
+            return false;
+        }
 
         // 2. 切片发送 Chunks
         size_t total_chunks = (payload.size() + kMaxChunkSize - 1) / kMaxChunkSize;
@@ -830,7 +835,9 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
             std::vector<uint8_t> chunk_bytes(chunk_pkt.ByteSizeLong());
             chunk_pkt.SerializeToArray(chunk_bytes.data(), static_cast<int>(chunk_bytes.size()));
 
-            send_packet(chunk_bytes);
+            if (!send_packet(chunk_bytes)) {
+                return false;
+            }
         }
 
         // 3. 发送 Trailer 结束帧
@@ -846,8 +853,10 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
         std::vector<uint8_t> trailer_bytes(trailer_pkt.ByteSizeLong());
         trailer_pkt.SerializeToArray(trailer_bytes.data(), static_cast<int>(trailer_bytes.size()));
 
-        send_packet(trailer_bytes);
-        return;
+        if (!send_packet(trailer_bytes)) {
+            return false;
+        }
+        return true;
     }
 
     proto::DataPacket packet;
@@ -867,7 +876,7 @@ void Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
     std::vector<uint8_t> data(packet.ByteSizeLong());
     packet.SerializeToArray(data.data(), static_cast<int>(data.size()));
 
-    send_packet(data);
+    return send_packet(data);
 }
 
 asio::awaitable<std::string> Room::SendRpcRequest(const RpcPacket& packet) {

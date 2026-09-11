@@ -536,6 +536,8 @@ add_executable(livekit_meeting_app
     src/ui/participant_item_delegate.cpp
     src/ui/participants_sidebar_widget.h
     src/ui/participants_sidebar_widget.cpp
+    src/ui/meeting_chat_sidebar_widget.h
+    src/ui/meeting_chat_sidebar_widget.cpp
 )
 
 target_include_directories(livekit_meeting_app BEFORE PRIVATE

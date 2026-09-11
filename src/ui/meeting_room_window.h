@@ -12,6 +12,7 @@
 #include "src/media/wasapi_capture.h"
 #include "src/core/meeting_coordinator.h"
 #include "src/ui/participants_sidebar_widget.h"
+#include "src/ui/meeting_chat_sidebar_widget.h"
 #include <mmsystem.h>
 
 #include <QtWidgets/QWidget>
@@ -50,6 +51,12 @@ enum class VideoViewMode {
 	Grid,       // 宫格分屏并排
 	Pip,        // 画中画悬浮窗
 	Speaker     // 演讲者单人聚焦
+};
+
+enum class ActiveSidebar {
+	None,          // 侧边栏折叠，视频舞台全宽
+	Participants,  // 仅显示参会人列表
+	Chat           // 仅显示会议聊天记录
 };
 
 // ----------------------------------------------------
@@ -224,6 +231,8 @@ public:
 	bool isVideoEnabled() const { return _videoEnabled; }
 
 	void setParticipantCount(int count);
+	void setChatUnreadCount(int count);
+	int chatUnreadCount() const { return _chatUnreadCount; }
 
 	static bool HasAvailableAudioDevice();
 	static bool HasAvailableSpeakerDevice();
@@ -270,6 +279,7 @@ private:
 	bool _speakerMuted = false;
 	bool _videoEnabled = true;
 	int _participantCount = 1;
+	int _chatUnreadCount = 0;
 	bool _isRecording = false;
 
 	QLineEdit *_chatInput = nullptr;
@@ -378,9 +388,10 @@ private:
 	QLabel *_inviteHintBanner = nullptr;
 	RoomBottomBarWidget *_bottomBar = nullptr;
 	OpenMeeting::ParticipantsSidebarWidget *_participantsSidebar = nullptr;
-	bool _sidebarVisible = false;
+	OpenMeeting::MeetingChatSidebarWidget *_chatSidebar = nullptr;
+	ActiveSidebar _activeSidebar = ActiveSidebar::None;
 
-	void toggleParticipantsSidebar();
+	void switchSidebar(ActiveSidebar target);
 
 	// 本地摄像头采集与模拟流
 	std::shared_ptr<livekit::DShowVideoCapture> _dshowCap;
