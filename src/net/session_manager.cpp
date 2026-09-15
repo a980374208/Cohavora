@@ -7,14 +7,15 @@ namespace OpenMeeting {
 
 SessionManager::SessionManager(QObject *parent)
     : QObject(parent) {
+    qRegisterMetaType<SessionInvalidationReason>("OpenMeeting::SessionInvalidationReason");
     _settings = std::make_unique<QSettings>("OpenMeeting", "LiveKitClient");
 
     // 监听网络客户端的 Token 失效信号
     connect(&httpClient(), &OpenMeetingHttpClient::tokenExpired, this, [this]() {
-        qWarning() << "[SessionManager] Received tokenExpired signal from HttpClient.";
-        _currentUser = UserInfo();
-        emit sessionExpired();
-        emit loggedOut();
+        if (!isLoggedIn() && httpClient().token().isEmpty()) {
+            return;
+        }
+        invalidateSession(SessionInvalidationReason::TokenExpired);
     });
 
     loadFromSettings();
@@ -105,6 +106,7 @@ void SessionManager::loginWithPassword(const QString &account,
                                        std::function<void(bool success, const QString &errMsg)> callback) {
     httpClient().login(account, password, [this, account, password, remember, autoLogin, callback](bool ok, const UserInfo &info, const HttpError &err) {
         if (ok) {
+            _sessionInvalidating = false;
             _currentUser = info;
             _savedAccount = account;
             _savedPassword = remember ? password : "";
@@ -135,6 +137,7 @@ void SessionManager::registerUser(const QString &account,
 }
 
 void SessionManager::loginAsGuest(const QString &nickname, const QString &customUserId) {
+    _sessionInvalidating = false;
     _currentUser.userId = customUserId.isEmpty()
         ? QString("guest_%1").arg(QUuid::createUuid().toString(QUuid::Id128).left(8))
         : customUserId;
@@ -147,15 +150,49 @@ void SessionManager::loginAsGuest(const QString &nickname, const QString &custom
     emit loggedIn(_currentUser);
 }
 
-void SessionManager::logout() {
-    if (isLoggedIn()) {
+void SessionManager::logout(bool notifyServer) {
+    if (notifyServer && isLoggedIn()) {
         httpClient().logout();
     }
+
     _currentUser = UserInfo();
     _autoLogin = false;
-    _settings->setValue("auth/autoLogin", false);
-    _settings->remove("user");
+    // OpenMeetingHttpClient::setCurrentUser(empty) 不会覆盖已有 token，
+    // 因而必须显式清空 token，避免后续 REST 请求继续携带失效凭据。
+    httpClient().setToken(QString());
+    httpClient().setCurrentUser(UserInfo{});
+
+    if (_settings) {
+        _settings->setValue("auth/autoLogin", false);
+        _settings->remove("user");
+        _settings->sync();
+    }
     emit loggedOut();
+}
+
+void SessionManager::invalidateSession(SessionInvalidationReason reason) {
+    if (reason == SessionInvalidationReason::Unknown) {
+        qWarning() << "[SessionManager] Ignore session invalidation with unknown reason.";
+        return;
+    }
+    if (_sessionInvalidating || (!isLoggedIn() && httpClient().token().isEmpty())) {
+        qInfo() << "[SessionManager] Ignore duplicate/stale session invalidation:" << static_cast<int>(reason);
+        return;
+    }
+
+    _sessionInvalidating = true;
+    qWarning() << "[SessionManager] Invalidate complete local session, reason="
+               << static_cast<int>(reason);
+
+    // 已被服务端撤销的 token 不得再请求 /user/logout；统一复用本地清理路径，
+    // 确保 HTTP client、内存用户和 QSettings 三处状态同步归零。
+    logout(false);
+    emit sessionInvalidated(reason);
+
+    if (reason == SessionInvalidationReason::TokenExpired ||
+        reason == SessionInvalidationReason::TokenInvalid) {
+        emit sessionExpired();
+    }
 }
 
 void SessionManager::loadFromSettings() {

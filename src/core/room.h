@@ -35,6 +35,19 @@ enum class ConnectionState {
     Reconnecting
 };
 
+// Client-facing disconnect semantics. Keep this independent of the protobuf
+// enum so application/UI layers do not need to depend on the signaling schema.
+enum class RoomDisconnectReason {
+    Unknown,
+    UserLeave,
+    NetworkError,
+    ServerShutdown,
+    DuplicateIdentity,
+    ParticipantRemoved,
+};
+
+const char* ToString(RoomDisconnectReason reason);
+
 enum class SimulateScenarioType {
     SignalReconnect,
     FullReconnect,
@@ -54,6 +67,12 @@ public:
     virtual ~RoomListener() = default;
 
     virtual void OnConnected() {}
+    // New typed callback. The legacy overload remains so existing SDK callers
+    // that only consume a textual detail stay source-compatible.
+    virtual void OnDisconnected(RoomDisconnectReason reason, const std::string& detail) {
+        (void)reason;
+        OnDisconnected(detail);
+    }
     virtual void OnDisconnected(const std::string& reason) {}
     virtual void OnReconnecting() {}
     virtual void OnReconnected() {}
@@ -194,6 +213,9 @@ private:
     void HandleTrickleSignal(const proto::TrickleRequest& trickle);
     void HandleMediaSectionsRequirement(const proto::MediaSectionsRequirement& req);
     proto::SyncState BuildSyncState() const;
+    static RoomDisconnectReason ToRoomDisconnectReason(proto::DisconnectReason reason);
+    void BeginServerDisconnect(RoomDisconnectReason reason, std::string detail);
+    asio::awaitable<void> FinalizeServerDisconnectAsync(RoomDisconnectReason reason, std::string detail);
     asio::awaitable<void> WaitForPrimaryPeerConnection(
         std::chrono::milliseconds timeout,
         uint64_t generation);
@@ -304,6 +326,11 @@ private:
     static constexpr std::chrono::milliseconds kBaseReconnectDelay{100};
     static constexpr std::chrono::milliseconds kMaxReconnectDelay{1000};
     bool reconnect_active_ = false;
+    // A server-issued LeaveRequest with DISCONNECT is authoritative. It must
+    // not be mistaken for a transient signal socket close and retried.
+    bool reconnect_disabled_ = false;
+    bool server_disconnect_finalizing_ = false;
+    RoomDisconnectReason disconnect_reason_ = RoomDisconnectReason::Unknown;
 
     // Track 恢复记录
     struct PublishedTrackRecord {

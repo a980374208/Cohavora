@@ -11,6 +11,10 @@
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QLabel>
 
+namespace OpenMeeting {
+enum class SessionInvalidationReason;
+}
+
 namespace MeetingUI {
 
 class WindowControlsWidget : public Ui::RpWidget {
@@ -115,6 +119,7 @@ private:
 	void setupNativeWindow();
 	void initLayout();
 	void onCardClicked(ActionCardType type);
+	void onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason);
 
 	static constexpr int kWindowCornerRadius = 12;
 
@@ -122,6 +127,7 @@ private:
 	ActionGridContainer *_actionGrid = nullptr;
 	ScheduleWidget *_scheduleWidget = nullptr;
 	WindowControlsWidget *_windowControls = nullptr;
+	bool _sessionInvalidationDialogActive = false;
 
 #if defined(Q_OS_WIN)
 	HWND _handle = nullptr;

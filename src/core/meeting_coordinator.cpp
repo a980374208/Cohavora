@@ -101,14 +101,26 @@ public:
         }, Qt::QueuedConnection);
     }
 
-    void OnDisconnected(const std::string &reason) override {
-        if (!_coordinator) return;
-        QString qReason = QString::fromStdString(reason);
-        QMetaObject::invokeMethod(_coordinator, [this, qReason]() {
-            MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection, "DISCONNECTED", QString("与 LiveKit 房间连接断开: %1").arg(qReason));
-            if (_coordinator->_state != MeetingState::Leaving && _coordinator->_state != MeetingState::Idle) {
-                _coordinator->setState(MeetingState::Idle, qReason);
-                emit _coordinator->meetingLeft();
+    void OnDisconnected(livekit::RoomDisconnectReason reason,
+                        const std::string &detail) override {
+        auto *coordinator = _coordinator;
+        if (!coordinator) return;
+        QString qDetail = QString::fromStdString(detail);
+        // 不捕获 listener 自身：DuplicateIdentity 处理会释放 _roomListener，
+        // 捕获 this 会在回调执行期间留下悬垂指针风险。
+        QMetaObject::invokeMethod(coordinator, [coordinator, reason, qDetail]() {
+            MeetingUI::LogToConsole(
+                MeetingUI::LogCategory::Connection,
+                "DISCONNECTED",
+                QString("与 LiveKit 房间连接断开: reason=%1, detail=%2")
+                    .arg(QString::fromLatin1(livekit::ToString(reason)), qDetail));
+            if (reason == livekit::RoomDisconnectReason::DuplicateIdentity) {
+                coordinator->handleDuplicateIdentityKickOff(qDetail);
+                return;
+            }
+            if (coordinator->_state != MeetingState::Leaving && coordinator->_state != MeetingState::Idle) {
+                coordinator->setState(MeetingState::Idle, qDetail);
+                emit coordinator->meetingLeft();
             }
         }, Qt::QueuedConnection);
     }
@@ -329,11 +341,19 @@ std::shared_ptr<MeetingCoordinator> MeetingCoordinator::create(QObject *parent) 
 
 MeetingCoordinator::MeetingCoordinator(QObject *parent)
     : QObject(parent) {
+    qRegisterMetaType<livekit::RoomDisconnectReason>("livekit::RoomDisconnectReason");
     _localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
     _localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
 
     _mediaSendTimer = new QTimer(this);
     connect(_mediaSendTimer, &QTimer::timeout, this, &MeetingCoordinator::processNextMediaSendChunk);
+
+    // 全局账号状态由 SessionManager 统一裁决。这里不发 meetingLeft，避免
+    // MeetingRoomWindow 按普通离会逻辑继续调用业务 HTTP 接口。
+    connect(&SessionManager::instance(), &SessionManager::sessionInvalidated,
+            this, [this](SessionInvalidationReason reason) {
+                handleSessionInvalidated(reason);
+            }, Qt::QueuedConnection);
 }
 
 MeetingCoordinator::~MeetingCoordinator() {
@@ -371,6 +391,10 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
                                          const QString &password,
                                          const QString &displayName,
                                          const MediaPreferences &prefs) {
+    if (_sessionInvalidated) {
+        qInfo() << "[Coordinator] Ignore join request after session invalidation.";
+        return;
+    }
     if (_state != MeetingState::Idle && _state != MeetingState::Failed) {
         emit errorOccurred(QString::fromUtf8("入会错误"), QString::fromUtf8("当前已有正在执行的会议流程，请勿重复加入"));
         return;
@@ -392,6 +416,10 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
     // 第一阶段：向后端鉴权校验密码与会议有效性
     auto &http = SessionManager::instance().httpClient();
     http.joinMeeting(meetingId, password, [this, meetingId, &http](bool ok, bool, const HttpError &err) {
+        if (_sessionInvalidated) {
+            qInfo() << "[Coordinator] Drop stale join-meeting response after session invalidation.";
+            return;
+        }
         if (!ok) {
             setState(MeetingState::Failed, err.message);
             emit errorOccurred(QString::fromUtf8("入会鉴权失败"),
@@ -402,6 +430,10 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
         // 第二阶段：换取 LiveKit 令牌与网关 URL
         setState(MeetingState::FetchingCredentials, QString::fromUtf8("正在换取音视频会话令牌..."));
         http.getMeetingToken(meetingId, [this, meetingId](bool tokenOk, const LiveKitAuthInfo &auth, const HttpError &tokenErr) {
+            if (_sessionInvalidated) {
+                qInfo() << "[Coordinator] Drop stale meeting-token response after session invalidation.";
+                return;
+            }
             if (!tokenOk || auth.url.isEmpty() || auth.token.isEmpty()) {
                 setState(MeetingState::Failed, tokenErr.message);
                 emit errorOccurred(QString::fromUtf8("获取凭据失败"),
@@ -418,6 +450,10 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
 void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
                                                        int durationSeconds,
                                                        const MediaPreferences &prefs) {
+    if (_sessionInvalidated) {
+        qInfo() << "[Coordinator] Ignore quick-meeting request after session invalidation.";
+        return;
+    }
     if (_state != MeetingState::Idle && _state != MeetingState::Failed) {
         emit errorOccurred(QString::fromUtf8("创建错误"), QString::fromUtf8("当前已有活跃会议流程"));
         return;
@@ -436,6 +472,10 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
 
     auto &http = SessionManager::instance().httpClient();
     http.createImmediateMeeting(title, durationSeconds, [this, title](bool ok, const LiveKitAuthInfo &auth, const HttpError &err) {
+        if (_sessionInvalidated) {
+            qInfo() << "[Coordinator] Drop stale create-meeting response after session invalidation.";
+            return;
+        }
         if (!ok || auth.url.isEmpty() || auth.token.isEmpty()) {
             setState(MeetingState::Failed, err.message);
             emit errorOccurred(QString::fromUtf8("创建即时会议失败"),
@@ -462,6 +502,10 @@ void MeetingCoordinator::connectDirectlyAsync(const QString &url,
                                              const QString &meetingId,
                                              const QString &displayName,
                                              const MediaPreferences &prefs) {
+    if (_sessionInvalidated) {
+        qInfo() << "[Coordinator] Ignore direct-connect request after session invalidation.";
+        return;
+    }
     _currentMeetingId = meetingId;
     _currentDisplayName = displayName;
     _mediaPrefs = prefs;
@@ -498,7 +542,51 @@ void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
     emit meetingLeft();
 }
 
+void MeetingCoordinator::handleDuplicateIdentityKickOff(const QString &detail) {
+    if (_state == MeetingState::Leaving || _state == MeetingState::Idle) {
+        return;
+    }
+
+    const QString message = detail.isEmpty()
+        ? QString::fromUtf8("同一账号已在其他设备加入此会议")
+        : detail;
+    MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection,
+                            "DUPLICATE_IDENTITY",
+                            QString("[Coordinator] Meeting kicked off by server: %1").arg(message));
+
+    // Room 已由服务端 LEAVE 流程断开；这里负责停止 Coordinator 所属的
+    // io 线程和媒体资源。不要发出 meetingLeft，否则 UI 会在提示前关闭。
+    stopRoomSession();
+    setState(MeetingState::Idle, message);
+    emit meetingKickOff(livekit::RoomDisconnectReason::DuplicateIdentity);
+}
+
+void MeetingCoordinator::handleSessionInvalidated(SessionInvalidationReason reason) {
+    if (_sessionInvalidated) {
+        return;
+    }
+    _sessionInvalidated = true;
+
+    MeetingUI::LogToConsole(
+        MeetingUI::LogCategory::Connection,
+        "SESSION_INVALIDATED",
+        QString("[Coordinator] Stop room for invalidated account session, reason=%1")
+            .arg(static_cast<int>(reason)));
+
+    if (_state == MeetingState::Idle || _state == MeetingState::Leaving) {
+        return;
+    }
+
+    setState(MeetingState::Leaving, QString::fromUtf8("账号登录状态已失效，正在停止会议..."));
+    stopRoomSession();
+    setState(MeetingState::Idle, QString::fromUtf8("账号登录状态已失效"));
+}
+
 void MeetingCoordinator::startRoomSession(const QString &url, const QString &token) {
+    if (_sessionInvalidated) {
+        qInfo() << "[Coordinator] Refuse to start room after session invalidation.";
+        return;
+    }
     stopRoomSession(); // 确保前序会话已释放
 
     setState(MeetingState::ConnectingRoom, QString::fromUtf8("正在建立 WebRTC 连接..."));
@@ -1151,6 +1239,7 @@ void MeetingCoordinator::handleDataReceived(const std::vector<uint8_t> &data,
     }
 
     const QString localUserId = SessionManager::instance().userId();
+    const bool isServerOrigin = participantSid.empty() && participantIdentity.empty();
 
     // 1. KickOff 踢出信令
     if (notify.has_kickoffmeetingdata()) {
@@ -1159,8 +1248,26 @@ void MeetingCoordinator::handleDataReceived(const std::vector<uint8_t> &data,
         if (targetUser == localUserId) {
             QString reason = QString::fromStdString(kick.reason());
             int code = static_cast<int>(kick.reasoncode());
-            QMetaObject::invokeMethod(this, [this, reason, code]() {
+            QMetaObject::invokeMethod(this, [this, reason, code, isServerOrigin]() {
                 MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "KICK_OFF", QString("收到踢出信令: %1 (代码: %2)").arg(reason).arg(code));
+                if (code == static_cast<int>(openmeeting::meeting::KickOffReason::DuplicatedLogin)) {
+                    // DuplicatedLogin 是全局账号事件，不能伪装成 LiveKit 的
+                    // DuplicateIdentity 房间事件。只有没有参会者来源的服务端
+                    // DataPacket 才拥有清理本地账号会话的权限。
+                    if (!isServerOrigin) {
+                        MeetingUI::LogToConsole(
+                            MeetingUI::LogCategory::Error,
+                            "UNTRUSTED_DUPLICATED_LOGIN",
+                            "[Coordinator] Ignore DuplicatedLogin from a participant data message");
+                        return;
+                    }
+                    MeetingUI::LogToConsole(
+                        MeetingUI::LogCategory::Connection,
+                        "DUPLICATED_LOGIN",
+                        "[Coordinator] Receive trusted server duplicated-login event");
+                    SessionManager::instance().invalidateSession(SessionInvalidationReason::DuplicatedLogin);
+                    return;
+                }
                 emit kickedOff(reason, code);
                 leaveMeetingAsync(false);
             }, Qt::QueuedConnection);

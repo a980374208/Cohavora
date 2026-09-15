@@ -353,6 +353,8 @@ public:
 	void updateActiveSpeakers(const std::vector<std::shared_ptr<livekit::Participant>> &speakers);
 
 	void onKickedOff(const QString &reason, int reasonCode);
+	void onMeetingKickOff(livekit::RoomDisconnectReason reason);
+	void onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason);
 	void onRemoteMuteRequested(bool isVideo, bool mute, const QString &operatorId);
 	void onMeetingDetailUpdated(const OpenMeeting::MeetingDetail &detail);
 	void onHostRoleChanged(const QString &newHostId, const QString &operatorName);
@@ -395,6 +397,7 @@ private:
 	std::unique_ptr<livekit::render::VideoRenderSession> _remoteRenderSession;
 	std::atomic<bool> _usingDx11Backend{false};
 	bool _dx11BackendActivationAttempted = false;
+	bool _closingForSessionInvalidation = false;
 	VideoViewMode _viewMode = VideoViewMode::Grid;
 
 	// 参会状态

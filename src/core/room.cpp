@@ -165,6 +165,33 @@ private:
     bool reliable_;
 };
 
+const char* ToString(RoomDisconnectReason reason) {
+    switch (reason) {
+    case RoomDisconnectReason::UserLeave: return "USER_LEAVE";
+    case RoomDisconnectReason::NetworkError: return "NETWORK_ERROR";
+    case RoomDisconnectReason::ServerShutdown: return "SERVER_SHUTDOWN";
+    case RoomDisconnectReason::DuplicateIdentity: return "DUPLICATE_IDENTITY";
+    case RoomDisconnectReason::ParticipantRemoved: return "PARTICIPANT_REMOVED";
+    case RoomDisconnectReason::Unknown: return "UNKNOWN";
+    }
+    return "UNKNOWN";
+}
+
+RoomDisconnectReason Room::ToRoomDisconnectReason(proto::DisconnectReason reason) {
+    switch (reason) {
+    case proto::CLIENT_INITIATED:
+        return RoomDisconnectReason::UserLeave;
+    case proto::SERVER_SHUTDOWN:
+        return RoomDisconnectReason::ServerShutdown;
+    case proto::DUPLICATE_IDENTITY:
+        return RoomDisconnectReason::DuplicateIdentity;
+    case proto::PARTICIPANT_REMOVED:
+        return RoomDisconnectReason::ParticipantRemoved;
+    default:
+        return RoomDisconnectReason::Unknown;
+    }
+}
+
 Room::Room(asio::any_io_executor executor)
     : executor_(executor) {
     CrashHandler::InstallSignalHandlers();
@@ -248,7 +275,21 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                                  "connect_start",
                                  "room is not disconnected");
         }
+        // AttemptReconnect() 复用 ConnectAsync 做全量重建。若其间收到了
+        // 服务端终态 LeaveRequest，绝不能在这里重置 reconnect_disabled_ 并
+        // 重新加入房间；显式的新 Connect 调用则允许开始一个新会话。
+        if (reconnect_active_ && reconnect_disabled_) {
+            throw OperationError(OperationKind::Reconnect,
+                                 OperationErrorCode::Cancelled,
+                                 "connect_start",
+                                 "reconnect was cancelled by server leave");
+        }
         connection_state_ = ConnectionState::Connecting;
+        disconnect_reason_ = RoomDisconnectReason::Unknown;
+        if (!reconnect_active_) {
+            reconnect_disabled_ = false;
+            server_disconnect_finalizing_ = false;
+        }
         generation = session_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
         operation_timeouts_ = opts.timeouts;
         require_media_connection_ = opts.create_webrtc_pc;
@@ -563,6 +604,8 @@ void Room::Disconnect() {
         std::lock_guard lock(room_mutex_);
         if (connection_state_ == ConnectionState::Disconnected) return;
         connection_state_ = ConnectionState::Disconnected;
+        disconnect_reason_ = RoomDisconnectReason::UserLeave;
+        reconnect_disabled_ = true;
         session_generation_.fetch_add(1, std::memory_order_acq_rel);
         listeners_snapshot = listeners_;
         signal = std::move(signal_client_);
@@ -644,7 +687,8 @@ void Room::Disconnect() {
     }
 
     for (const auto& listener : listeners_snapshot) {
-        listener->OnDisconnected("Client Initiated Disconnect");
+        listener->OnDisconnected(RoomDisconnectReason::UserLeave,
+                                 "Client Initiated Disconnect");
     }
 }
 
@@ -662,6 +706,8 @@ asio::awaitable<void> Room::DisconnectAsync() {
         std::lock_guard lock(room_mutex_);
         if (connection_state_ == ConnectionState::Disconnected) co_return;
         connection_state_ = ConnectionState::Disconnected;
+        disconnect_reason_ = RoomDisconnectReason::UserLeave;
+        reconnect_disabled_ = true;
         session_generation_.fetch_add(1, std::memory_order_acq_rel);
         listeners_snapshot = listeners_;
         signal = std::move(signal_client_);
@@ -748,7 +794,111 @@ asio::awaitable<void> Room::DisconnectAsync() {
         remote_audio_tracks_.clear();
     }
     for (const auto& listener : listeners_snapshot) {
-        listener->OnDisconnected("Client Initiated Disconnect");
+        listener->OnDisconnected(RoomDisconnectReason::UserLeave,
+                                 "Client Initiated Disconnect");
+    }
+}
+
+void Room::BeginServerDisconnect(RoomDisconnectReason reason, std::string detail) {
+    bool should_finalize = false;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (connection_state_ == ConnectionState::Disconnected ||
+            server_disconnect_finalizing_) {
+            return;
+        }
+        disconnect_reason_ = reason;
+        reconnect_disabled_ = true;
+        server_disconnect_finalizing_ = true;
+        should_finalize = true;
+    }
+
+    if (!should_finalize) return;
+
+    Log("SIGNAL", "LEAVE_DISCONNECT",
+        "[Room] 服务端要求退出房间: reason=" + std::string(ToString(reason)) +
+        ", detail=" + detail);
+    livekit::safe_co_spawn(executor_,
+        [self = shared_from_this(), reason, detail = std::move(detail)]()
+            -> asio::awaitable<void> {
+            co_await self->FinalizeServerDisconnectAsync(reason, detail);
+        });
+}
+
+asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
+    RoomDisconnectReason reason, std::string detail) {
+    std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+    std::shared_ptr<SignalClient> signal;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> subscriber;
+    std::shared_ptr<webrtc::PeerConnectionObserver> publisher_observer;
+    std::shared_ptr<webrtc::PeerConnectionObserver> subscriber_observer;
+    std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> data_channels;
+    std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers;
+    std::vector<RemoteTrackSinkBinding> track_sinks;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (connection_state_ == ConnectionState::Disconnected) {
+            server_disconnect_finalizing_ = false;
+            co_return;
+        }
+        connection_state_ = ConnectionState::Disconnected;
+        disconnect_reason_ = reason;
+        reconnect_attempts_ = 0;
+        reconnect_active_ = false;
+        server_disconnect_finalizing_ = false;
+        session_generation_.fetch_add(1, std::memory_order_acq_rel);
+        listeners_snapshot = listeners_;
+        signal = std::move(signal_client_);
+        join_response_.reset();
+        enabled_publish_codecs_.clear();
+        publisher = std::move(publisher_pc_);
+        subscriber = std::move(subscriber_pc_);
+        publisher_observer = std::move(publisher_observer_);
+        subscriber_observer = std::move(subscriber_observer_);
+        local_participant_.reset();
+        remote_participants_.clear();
+        if (reliable_dc_) {
+            data_channels.push_back(reliable_dc_);
+            reliable_dc_ = nullptr;
+        }
+        if (lossy_dc_) {
+            data_channels.push_back(lossy_dc_);
+            lossy_dc_ = nullptr;
+        }
+        for (auto& dc : remote_data_channels_) {
+            if (dc) data_channels.push_back(dc);
+        }
+        remote_data_channels_.clear();
+        data_channel_observers = std::move(data_channel_observers_);
+        track_sinks = std::move(remote_track_sinks_);
+        processed_remote_track_ids_.clear();
+        pending_track_queue_.clear();
+        deferred_room_messages_.clear();
+        suppress_next_connected_event_ = false;
+    }
+
+    CancelPendingOperations(OperationErrorCode::SessionClosed,
+                            "server_leave",
+                            detail);
+    if (signal) signal->Close();
+    for (auto& dc : data_channels) {
+        if (dc) {
+            dc->UnregisterObserver();
+            dc->Close();
+        }
+    }
+    if (publisher) publisher->Close();
+    if (subscriber && subscriber != publisher) subscriber->Close();
+    DetachRemoteTrackSinks(std::move(track_sinks));
+    {
+        std::lock_guard lock(remote_media_mutex_);
+        remote_video_tracks_.clear();
+        remote_audio_tracks_.clear();
+    }
+
+    for (const auto& listener : listeners_snapshot) {
+        listener->OnDisconnected(reason, detail);
     }
 }
 
@@ -2495,10 +2645,17 @@ void Room::HandleSignalEvent(const SignalEvent& event) {
     if (event.type == SignalEvent::Close) {
         bool should_reconnect = false;
         bool connect_failed = false;
+        bool server_disconnect_finalizing = false;
         std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
         {
             std::lock_guard lock(room_mutex_);
-            if (connection_state_ == ConnectionState::Connected && reconnect_attempts_ < kMaxReconnectAttempts) {
+            server_disconnect_finalizing = server_disconnect_finalizing_;
+            if (server_disconnect_finalizing) {
+                // LeaveRequest cleanup owns the final notification. A following
+                // websocket close is expected and must not start a reconnect.
+            } else if (!reconnect_disabled_ &&
+                       connection_state_ == ConnectionState::Connected &&
+                       reconnect_attempts_ < kMaxReconnectAttempts) {
                 connection_state_ = ConnectionState::Reconnecting;
                 reconnect_attempts_++;
                 should_reconnect = true;
@@ -2510,7 +2667,9 @@ void Room::HandleSignalEvent(const SignalEvent& event) {
             listeners_snapshot = listeners_;
         }
 
-        if (connect_failed) {
+        if (server_disconnect_finalizing) {
+            return;
+        } else if (connect_failed) {
             CancelPendingOperations(OperationErrorCode::SessionClosed,
                                     "signal_close_during_connect",
                                     event.close_reason.empty() ? "signal closed during connect" : event.close_reason);
@@ -2532,7 +2691,8 @@ void Room::HandleSignalEvent(const SignalEvent& event) {
             }
             if (notify_disconnect) {
                 for (const auto& listener : listeners_snapshot) {
-                    listener->OnDisconnected(event.close_reason);
+                    listener->OnDisconnected(RoomDisconnectReason::NetworkError,
+                                             event.close_reason);
                 }
             }
         }
@@ -2590,6 +2750,37 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
         } else if (type_tag != "PONG") {
             Log("SIGNAL", "RAW_MSG", "[Signal] 收到服务端消息: " + type_tag);
         }
+    }
+
+    if (msg->has_leave()) {
+        const auto& leave = msg->leave();
+        const auto reason = ToRoomDisconnectReason(leave.reason());
+        std::string action_name = "UNKNOWN";
+        switch (leave.action()) {
+        case proto::LeaveRequest_Action_DISCONNECT: action_name = "DISCONNECT"; break;
+        case proto::LeaveRequest_Action_RESUME: action_name = "RESUME"; break;
+        case proto::LeaveRequest_Action_RECONNECT: action_name = "RECONNECT"; break;
+        default: break;
+        }
+        const std::string detail = "LeaveRequest reason=" +
+            std::string(ToString(reason)) + "(" +
+            std::to_string(static_cast<int>(leave.reason())) + ")" +
+            ", action=" + action_name + "(" +
+            std::to_string(static_cast<int>(leave.action())) + ")";
+        Log("SIGNAL", "LEAVE_RECEIVED", "[Room] Receive " + detail);
+
+        // DUPLICATE_IDENTITY is an explicit, terminal server decision. Do not
+        // wait for the websocket to close and accidentally enter the network
+        // reconnect path. Other explicit DISCONNECT actions are terminal too;
+        // legacy servers may set can_reconnect instead of action.
+        const bool server_requests_disconnect =
+            leave.action() == proto::LeaveRequest_Action_DISCONNECT &&
+            !leave.can_reconnect();
+        if (reason == RoomDisconnectReason::DuplicateIdentity ||
+            server_requests_disconnect) {
+            BeginServerDisconnect(reason, detail);
+        }
+        return;
     }
 
     if (msg->has_update()) {
@@ -3684,7 +3875,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
     SignalOptions reconnect_options;
     {
         std::lock_guard lock(room_mutex_);
-        if (reconnect_active_) co_return;
+        if (reconnect_active_ || reconnect_disabled_) co_return;
         reconnect_active_ = true;
         if (signal_client_) {
             reconnect_url = signal_client_->url();
@@ -3722,7 +3913,11 @@ asio::awaitable<void> Room::AttemptReconnect() {
 
         {
             std::lock_guard lock(room_mutex_);
-            if (connection_state_ == ConnectionState::Disconnected && !full_restart) break;
+            if (reconnect_disabled_ ||
+                (connection_state_ == ConnectionState::Disconnected && !full_restart)) {
+                reconnect_active_ = false;
+                co_return;
+            }
         }
 
         const auto remaining_total = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3774,7 +3969,8 @@ asio::awaitable<void> Room::AttemptReconnect() {
 
                 {
                     std::lock_guard lock(room_mutex_);
-                    if (connection_state_ != ConnectionState::Reconnecting) {
+                    if (connection_state_ != ConnectionState::Reconnecting ||
+                        reconnect_disabled_) {
                         throw OperationError(OperationKind::Reconnect,
                                              OperationErrorCode::Cancelled,
                                              "resume_commit",
@@ -3807,6 +4003,10 @@ asio::awaitable<void> Room::AttemptReconnect() {
                 std::vector<RemoteTrackSinkBinding> old_track_sinks;
                 {
                     std::lock_guard lock(room_mutex_);
+                    if (reconnect_disabled_) {
+                        reconnect_active_ = false;
+                        co_return;
+                    }
                     old_signal = std::move(signal_client_);
                     old_publisher = std::move(publisher_pc_);
                     old_subscriber = std::move(subscriber_pc_);
@@ -3860,6 +4060,12 @@ asio::awaitable<void> Room::AttemptReconnect() {
                 std::vector<std::shared_ptr<RoomListener>> listeners;
                 {
                     std::lock_guard lock(room_mutex_);
+                    if (reconnect_disabled_) {
+                        throw OperationError(OperationKind::Reconnect,
+                                             OperationErrorCode::Cancelled,
+                                             "full_restart_commit",
+                                             "reconnect was cancelled by server leave");
+                    }
                     local = local_participant_;
                     listeners = listeners_;
                 }
@@ -3890,11 +4096,20 @@ asio::awaitable<void> Room::AttemptReconnect() {
                 last_error = error.what();
                 Log("WARNING", "FULL_RESTART_FAILED", last_error);
                 std::lock_guard lock(room_mutex_);
-                if (connection_state_ == ConnectionState::Disconnected) {
+                if (connection_state_ == ConnectionState::Disconnected &&
+                    !reconnect_disabled_) {
                     connection_state_ = ConnectionState::Reconnecting;
                 }
                 suppress_next_connected_event_ = false;
             }
+        }
+    }
+
+    {
+        std::lock_guard lock(room_mutex_);
+        if (reconnect_disabled_) {
+            reconnect_active_ = false;
+            co_return;
         }
     }
 
@@ -3958,7 +4173,8 @@ asio::awaitable<void> Room::AttemptReconnect() {
     subscriber_observer.reset();
     data_channel_observers.clear();
     for (const auto& listener : listeners_snapshot) {
-        listener->OnDisconnected("Reconnect failed: " + last_error);
+        listener->OnDisconnected(RoomDisconnectReason::NetworkError,
+                                 "Reconnect failed: " + last_error);
     }
 }
 
