@@ -3804,6 +3804,8 @@ asio::awaitable<void> Room::AttemptReconnect() {
                 proto::SignalRequest sync_request;
                 *sync_request.mutable_sync_state() = BuildSyncState();
                 co_await signal->SendAsync(sync_request);
+                signal->SetReconnected();
+                signal->SetEventReady();
                 const auto media_budget = std::chrono::duration_cast<std::chrono::milliseconds>(
                     attempt_deadline - std::chrono::steady_clock::now());
                 if (media_budget <= std::chrono::milliseconds::zero()) {
@@ -3814,8 +3816,6 @@ asio::awaitable<void> Room::AttemptReconnect() {
                                          true);
                 }
                 co_await RestartIceConnections(restart_res.reconnect_response, media_budget);
-                signal->SetReconnected();
-                signal->SetEventReady();
 
                 {
                     std::lock_guard lock(room_mutex_);
