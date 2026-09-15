@@ -5,6 +5,7 @@
 #include "local_video_track.h"
 #include "rtc_audio_source.h"
 #include "rtc_video_source.h"
+#include "render/owned_i420_frame.h"
 #include "telemetry.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
@@ -1396,68 +1397,22 @@ private:
 
 class NativeVideoTrackSink : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
 public:
-    explicit NativeVideoTrackSink(std::function<void(const VideoFrame&, const VideoCaptureOptions&)> callback)
+    explicit NativeVideoTrackSink(std::function<void(render::OwnedI420Frame::Ptr)> callback)
         : callback_(std::move(callback)) {}
 
     void OnFrame(const webrtc::VideoFrame& rtc_frame) override {
         if (!callback_) return;
 
-        int width = rtc_frame.width();
-        int height = rtc_frame.height();
-        auto buffer = rtc_frame.video_frame_buffer();
-        if (!buffer || width <= 0 || height <= 0) return;
-
-        auto i420_buffer = buffer->ToI420();
-        if (!i420_buffer) return;
-
-        VideoFrame frame = VideoFrame::create(width, height, VideoBufferType::RGBA);
-        uint8_t* dst_rgba = frame.data();
-        if (!dst_rgba) return;
-
-        const uint8_t* y_src = i420_buffer->DataY();
-        const uint8_t* u_src = i420_buffer->DataU();
-        const uint8_t* v_src = i420_buffer->DataV();
-        const int y_stride = i420_buffer->StrideY();
-        const int u_stride = i420_buffer->StrideU();
-        const int v_stride = i420_buffer->StrideV();
-
-        auto clamp8 = [](int val) -> uint8_t {
-            return static_cast<uint8_t>(val < 0 ? 0 : (val > 255 ? 255 : val));
-        };
-
-        for (int y = 0; y < height; ++y) {
-            const uint8_t* py = y_src + y * y_stride;
-            const uint8_t* pu = u_src + (y / 2) * u_stride;
-            const uint8_t* pv = v_src + (y / 2) * v_stride;
-            uint8_t* pdst = dst_rgba + y * width * 4;
-
-            for (int x = 0; x < width; ++x) {
-                int y_val = py[x] - 16;
-                int u_val = pu[x / 2] - 128;
-                int v_val = pv[x / 2] - 128;
-
-                int r = clamp8((298 * y_val + 409 * v_val + 128) >> 8);
-                int g = clamp8((298 * y_val - 100 * u_val - 208 * v_val + 128) >> 8);
-                int b = clamp8((298 * y_val + 516 * u_val + 128) >> 8);
-
-                pdst[x * 4 + 0] = static_cast<uint8_t>(r);
-                pdst[x * 4 + 1] = static_cast<uint8_t>(g);
-                pdst[x * 4 + 2] = static_cast<uint8_t>(b);
-                pdst[x * 4 + 3] = 255;
-            }
+        // Do not run an I420-to-RGBA pixel loop on WebRTC's media worker.
+        // CopyFrom preserves stride-correct planes and metadata in a frame that
+        // can safely outlive the decoder buffer.
+        if (auto frame = render::OwnedI420Frame::CopyFrom(rtc_frame)) {
+            callback_(std::move(frame));
         }
-
-        VideoCaptureOptions options;
-        options.timestamp_us = rtc_frame.timestamp_us();
-        if (rtc_frame.rotation() == webrtc::kVideoRotation_90) options.rotation = VideoRotation::VIDEO_ROTATION_90;
-        else if (rtc_frame.rotation() == webrtc::kVideoRotation_180) options.rotation = VideoRotation::VIDEO_ROTATION_180;
-        else if (rtc_frame.rotation() == webrtc::kVideoRotation_270) options.rotation = VideoRotation::VIDEO_ROTATION_270;
-
-        callback_(frame, options);
     }
 
 private:
-    std::function<void(const VideoFrame&, const VideoCaptureOptions&)> callback_;
+    std::function<void(render::OwnedI420Frame::Ptr)> callback_;
 };
 
 } // namespace
@@ -2385,14 +2340,14 @@ void Room::AttachRemoteTrackToParticipant(
         auto video_track = static_cast<webrtc::VideoTrackInterface*>(track.get());
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
         std::weak_ptr<Room> weak_room = weak_from_this();
-        auto sink = std::make_shared<NativeVideoTrackSink>([r_track, has_logged, weak_room](const VideoFrame& frame, const VideoCaptureOptions& options) {
+        auto sink = std::make_shared<NativeVideoTrackSink>([r_track, has_logged, weak_room](render::OwnedI420Frame::Ptr frame) {
             if (r_track) {
-                r_track->notifyVideoFrame(frame, options);
+                r_track->notifyI420VideoFrame(frame);
             }
             if (!has_logged->exchange(true)) {
-                std::cout << "[RECV VIDEO] Receiving video stream for track " << r_track->sid() << ", resolution=" << frame.width() << "x" << frame.height() << std::endl;
+                std::cout << "[RECV VIDEO] Receiving video stream for track " << r_track->sid() << ", resolution=" << frame->width() << "x" << frame->height() << std::endl;
                 if (auto room = weak_room.lock()) {
-                    room->Log("WEBRTC", "VIDEO_FRAME", "WebRTC 解码器开始输出远端视频流 (" + std::to_string(frame.width()) + "x" + std::to_string(frame.height()) + ")");
+                    room->Log("WEBRTC", "VIDEO_FRAME", "WebRTC 解码器开始输出远端视频流 (" + std::to_string(frame->width()) + "x" + std::to_string(frame->height()) + ")");
                 }
                 Telemetry::Instance().OnFirstRemoteFrameReceived("video");
             }

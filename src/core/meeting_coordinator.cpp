@@ -1,5 +1,4 @@
 #include "src/core/meeting_coordinator.h"
-#include "src/media/media_converters.h"
 #include "src/ui/meeting_log_console.h"
 
 #include <QtCore/QDebug>
@@ -9,57 +8,6 @@
 #include <QtCore/QMetaObject>
 
 namespace OpenMeeting {
-
-// 内部格式转换工具 (VideoFrame -> QImage)
-static QImage VideoFrameToQImage(const livekit::VideoFrame &frame) {
-    const int w = frame.width();
-    const int h = frame.height();
-    if (w <= 0 || h <= 0 || !frame.data()) return QImage();
-
-    if (frame.type() == livekit::VideoBufferType::RGBA) {
-        return QImage(frame.data(), w, h, w * 4, QImage::Format_RGBA8888).copy();
-    } else if (frame.type() == livekit::VideoBufferType::ARGB || frame.type() == livekit::VideoBufferType::BGRA) {
-        return QImage(frame.data(), w, h, w * 4, QImage::Format_ARGB32).copy();
-    } else if (frame.type() == livekit::VideoBufferType::RGB24) {
-        std::vector<uint8_t> rgba(w * h * 4);
-        livekit::MediaConverters::ConvertRGB24ToRGBA(frame.data(), rgba.data(), w, h);
-        return QImage(rgba.data(), w, h, w * 4, QImage::Format_RGBA8888).copy();
-    } else if (frame.type() == livekit::VideoBufferType::NV12) {
-        std::vector<uint8_t> rgba(w * h * 4);
-        livekit::MediaConverters::ConvertNV12ToRGBA(frame.data(), rgba.data(), w, h);
-        return QImage(rgba.data(), w, h, w * 4, QImage::Format_RGBA8888).copy();
-    } else if (frame.type() == livekit::VideoBufferType::I420) {
-        const uint8_t *y_plane = frame.data();
-        const uint8_t *u_plane = y_plane + (w * h);
-        const uint8_t *v_plane = u_plane + ((w / 2) * (h / 2));
-        std::vector<uint8_t> rgba(w * h * 4);
-
-        auto clamp8 = [](int val) -> uint8_t {
-            return static_cast<uint8_t>(val < 0 ? 0 : (val > 255 ? 255 : val));
-        };
-
-        for (int y = 0; y < h; ++y) {
-            for (int x = 0; x < w; ++x) {
-                int y_val = y_plane[y * w + x];
-                int u_val = u_plane[(y / 2) * (w / 2) + (x / 2)];
-                int v_val = v_plane[(y / 2) * (w / 2) + (x / 2)];
-                int c = y_val - 16;
-                int d = u_val - 128;
-                int e = v_val - 128;
-                int r = clamp8((298 * c + 409 * e + 128) >> 8);
-                int g = clamp8((298 * c - 100 * d - 208 * e + 128) >> 8);
-                int b = clamp8((298 * c + 516 * d + 128) >> 8);
-                const int idx = (y * w + x) * 4;
-                rgba[idx + 0] = static_cast<uint8_t>(r);
-                rgba[idx + 1] = static_cast<uint8_t>(g);
-                rgba[idx + 2] = static_cast<uint8_t>(b);
-                rgba[idx + 3] = 255;
-            }
-        }
-        return QImage(rgba.data(), w, h, w * 4, QImage::Format_RGBA8888).copy();
-    }
-    return QImage();
-}
 
 // 从 LiveKit Participant 中提取真实用户昵称 (优先解析 OpenMeeting metadata 中的 JSON userInfo.nickname)
 static QString ResolveParticipantNickname(const std::shared_ptr<livekit::Participant> &p) {
@@ -140,16 +88,7 @@ public:
                                     info.isAudioMuted = pub->muted();
                                 } else if (pub->track()->kind() == livekit::TrackKind::Video) {
                                     info.isVideoEnabled = !pub->muted();
-                                    auto track = pub->track();
-                                    std::string identity = p->identity();
-                                    track->addVideoSink([this, identity](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
-                                        QImage img = VideoFrameToQImage(frame);
-                                        if (!img.isNull() && _coordinator) {
-                                            QMetaObject::invokeMethod(_coordinator, [this, img = std::move(img), id = QString::fromStdString(identity)]() {
-                                                emit _coordinator->remoteVideoFrameReceived(id, img);
-                                            }, Qt::QueuedConnection);
-                                        }
-                                    });
+                                    emit _coordinator->remoteVideoTrackAvailable(pId, pub->track());
                                 }
                             }
                         }
@@ -170,6 +109,53 @@ public:
             if (_coordinator->_state != MeetingState::Leaving && _coordinator->_state != MeetingState::Idle) {
                 _coordinator->setState(MeetingState::Idle, qReason);
                 emit _coordinator->meetingLeft();
+            }
+        }, Qt::QueuedConnection);
+    }
+
+    void OnReconnecting() override {
+        if (!_coordinator) return;
+        QMetaObject::invokeMethod(_coordinator, [this]() {
+            if (!_coordinator || !_coordinator->_sessionRunning ||
+                _coordinator->_state == MeetingState::Leaving ||
+                _coordinator->_state == MeetingState::Idle) {
+                return;
+            }
+            MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection, "RECONNECTING",
+                                    QString::fromUtf8("网络中断，正在恢复音视频连接"));
+            _coordinator->setState(MeetingState::Reconnecting,
+                                   QString::fromUtf8("网络中断，正在恢复连接..."));
+        }, Qt::QueuedConnection);
+    }
+
+    void OnReconnected() override {
+        if (!_coordinator) return;
+        QMetaObject::invokeMethod(_coordinator, [this]() {
+            if (!_coordinator || !_coordinator->_sessionRunning ||
+                _coordinator->_state == MeetingState::Leaving ||
+                _coordinator->_state == MeetingState::Idle) {
+                return;
+            }
+
+            _coordinator->setState(MeetingState::InMeeting,
+                                   QString::fromUtf8("音视频连接已恢复"));
+            MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection, "RECONNECTED",
+                                    QString::fromUtf8("音视频连接已恢复，重新绑定远端视频轨道"));
+
+            // Soft resume keeps the same Track object and this is idempotent.
+            // A full restart may preserve a track SID while recreating Track;
+            // VideoRenderSession recognizes that replacement and swaps its
+            // subscription before accepting frames from the new source.
+            if (!_coordinator->_room) return;
+            for (const auto &[participant_sid, participant] : _coordinator->_room->remote_participants()) {
+                if (!participant) continue;
+                const QString identity = QString::fromStdString(participant->identity());
+                for (const auto &[track_sid, publication] : participant->tracks()) {
+                    if (publication && publication->track() &&
+                        publication->track()->kind() == livekit::TrackKind::Video) {
+                        emit _coordinator->remoteVideoTrackAvailable(identity, publication->track());
+                    }
+                }
             }
         }, Qt::QueuedConnection);
     }
@@ -245,14 +231,11 @@ public:
         std::string identity = p->identity();
 
         if (track->kind() == livekit::TrackKind::Video) {
-            track->addVideoSink([this, identity](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
-                QImage img = VideoFrameToQImage(frame);
-                if (!img.isNull() && _coordinator) {
-                    QMetaObject::invokeMethod(_coordinator, [this, img = std::move(img), id = QString::fromStdString(identity)]() {
-                        emit _coordinator->remoteVideoFrameReceived(id, img);
-                    }, Qt::QueuedConnection);
+            QMetaObject::invokeMethod(_coordinator, [this, track, identity]() {
+                if (_coordinator) {
+                    emit _coordinator->remoteVideoTrackAvailable(QString::fromStdString(identity), track);
                 }
-            });
+            }, Qt::QueuedConnection);
         }
     }
 
@@ -262,7 +245,11 @@ public:
         if (!track || !p || !_coordinator) return;
         QString id = QString::fromStdString(p->identity());
         bool isVideo = (track->kind() == livekit::TrackKind::Video);
-        QMetaObject::invokeMethod(_coordinator, [this, id, isVideo]() {
+        const std::string track_sid = track->sid();
+        QMetaObject::invokeMethod(_coordinator, [this, id, isVideo, track_sid]() {
+            if (isVideo) {
+                emit _coordinator->remoteVideoTrackUnavailable(id, QString::fromStdString(track_sid));
+            }
             auto it = _coordinator->_participants.find(id);
             if (it != _coordinator->_participants.end()) {
                 if (isVideo) {
@@ -589,7 +576,8 @@ void MeetingCoordinator::startRoomSession(const QString &url, const QString &tok
 }
 
 void MeetingCoordinator::stopRoomSession() {
-    if (!_sessionRunning.exchange(false)) {
+    const bool was_running = _sessionRunning.exchange(false);
+    if (!was_running) {
         return;
     }
 

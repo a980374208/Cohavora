@@ -61,6 +61,8 @@ docs/doxygen/html/
 docs/doxygen/latex/
 docs/*.bak
 docs/audit
+docs/learning
+docs/
 
 # Generated header
 include/livekit/build.h

@@ -115,6 +115,8 @@ set(LIVEKIT_SOURCES
     src/rtc/video_stream.cpp
     src/rtc/rtc_audio_source.cpp
     src/rtc/rtc_video_source.cpp
+    src/render/owned_i420_frame.cpp
+    src/render/video_render_router.cpp
     src/media/media_converters.cpp
     src/media/wasapi_enumerator.cpp
     src/media/wasapi_capture.cpp
@@ -153,6 +155,8 @@ set(LIVEKIT_HEADERS
     src/rtc/video_stream.h
     src/rtc/rtc_audio_source.h
     src/rtc/rtc_video_source.h
+    src/render/owned_i420_frame.h
+    src/render/video_render_router.h
     src/media/media_converters.h
     src/media/wasapi_types.h
     src/media/wasapi_enumerator.h
@@ -526,6 +530,10 @@ add_executable(livekit_meeting_app
     src/ui/meeting_ui_integration.h
     src/core/meeting_coordinator.h
     src/core/meeting_coordinator.cpp
+    src/render/qt_cpu_video_renderer.h
+    src/render/qt_cpu_video_renderer.cpp
+    src/render/video_render_session.h
+    src/render/video_render_session.cpp
     src/ui/video_test_widget.cpp
     src/ui/video_test_widget.h
     src/ui/audio_visualizer_widget.cpp
@@ -538,10 +546,19 @@ add_executable(livekit_meeting_app
     src/ui/participants_sidebar_widget.cpp
     src/ui/meeting_chat_sidebar_widget.h
     src/ui/meeting_chat_sidebar_widget.cpp
+    src/ui/dx11/dx11_types.h
+    src/ui/dx11/dx11_shaders.h
+    src/ui/dx11/dx11_renderer.h
+    src/ui/dx11/dx11_renderer.cpp
+    src/ui/dx11/dx11_texture_pool.h
+    src/ui/dx11/dx11_texture_pool.cpp
+    src/ui/dx11/dx11_video_canvas.h
+    src/ui/dx11/dx11_video_canvas.cpp
 )
 
 target_include_directories(livekit_meeting_app BEFORE PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${WEBRTC_ROOT}/include/third_party/libyuv/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_ui
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/gen
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/gen/styles
@@ -604,6 +621,7 @@ target_link_libraries(livekit_meeting_app PRIVATE
     d3d9
     dxgi
     d3d11
+    d3dcompiler
     dxguid
     netapi32
     userenv
@@ -723,5 +741,291 @@ set_target_properties(test_openmeeting_http PROPERTIES
 )
 add_test(NAME openmeeting_http_test COMMAND test_openmeeting_http)
 
+# GPU Video Converter Test
+add_executable(test_gpu_converter
+    tests/test_gpu_converter.cpp
+    src/ui/dx11/dx11_types.h
+    src/ui/dx11/dx11_shaders.h
+    src/ui/dx11/gpu_video_converter.h
+    src/ui/dx11/gpu_video_converter.cpp
+)
+
+target_include_directories(test_gpu_converter BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui
+)
+
+target_link_libraries(test_gpu_converter PRIVATE
+    livekit_signaling
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtfreetype.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtharfbuzz.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtlibpng.lib
+    d3d11
+    dxgi
+    d3dcompiler
+    imm32
+    winmm
+    wtsapi32
+    version
+    netapi32
+    userenv
+    ws2_32
+    crypt32
+)
+
+target_compile_definitions(test_gpu_converter PRIVATE
+    WIN32
+    _WINDOWS
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _WINSOCK_DEPRECATED_NO_WARNINGS
+    NDEBUG
+    _ITERATOR_DEBUG_LEVEL=0
+    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
+    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
+    LIVEKIT_DX11_TESTING
+)
+
+target_link_options(test_gpu_converter PRIVATE
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
+)
+
+set_target_properties(test_gpu_converter PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME gpu_converter_test COMMAND test_gpu_converter)
+
+# DX11 renderer lifecycle test. It uses deterministic failure injection, so it
+# does not require a GPU, a desktop session, or a visible native window.
+add_executable(test_dx11_renderer_lifecycle
+    tests/test_dx11_renderer_lifecycle.cpp
+    src/ui/dx11/dx11_types.h
+    src/ui/dx11/dx11_color_conversion.h
+    src/ui/dx11/dx11_shaders.h
+    src/ui/dx11/dx11_renderer.h
+    src/ui/dx11/dx11_renderer.cpp
+)
+
+target_include_directories(test_dx11_renderer_lifecycle BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(test_dx11_renderer_lifecycle PRIVATE
+    d3d11
+    dxgi
+    d3dcompiler
+)
+
+target_compile_definitions(test_dx11_renderer_lifecycle PRIVATE
+    WIN32
+    _WINDOWS
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    LIVEKIT_DX11_TESTING
+)
+
+if(MSVC)
+    # dx11_shaders.h contains UTF-8 comments and embedded HLSL source. Match
+    # the application/test compiler encoding so raw string literals are parsed
+    # consistently by MSVC.
+    target_compile_options(test_dx11_renderer_lifecycle PRIVATE /utf-8)
+endif()
+
+set_target_properties(test_dx11_renderer_lifecycle PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME dx11_renderer_lifecycle_test COMMAND test_dx11_renderer_lifecycle)
+
+# Shader-side colour-policy test. It is deterministic and does not need a
+# desktop session or a D3D device.
+add_executable(test_dx11_color_conversion
+    tests/test_dx11_color_conversion.cpp
+    src/ui/dx11/dx11_color_conversion.h
+)
+
+target_include_directories(test_dx11_color_conversion BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(test_dx11_color_conversion PRIVATE
+    livekit_signaling
+)
+
+set_target_properties(test_dx11_color_conversion PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME dx11_color_conversion_test COMMAND test_dx11_color_conversion)
+
+# Compile the embedded HLSL without creating a device or native window. This
+# catches shader/register-layout regressions in CI and remote sessions.
+add_executable(test_dx11_shaders
+    tests/test_dx11_shaders.cpp
+    src/ui/dx11/dx11_shaders.h
+)
+
+target_include_directories(test_dx11_shaders BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+target_link_libraries(test_dx11_shaders PRIVATE
+    d3dcompiler
+)
+
+if(MSVC)
+    target_compile_options(test_dx11_shaders PRIVATE /utf-8)
+endif()
+
+set_target_properties(test_dx11_shaders PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME dx11_shaders_test COMMAND test_dx11_shaders)
+
+# Owned I420 frame and cancellable render subscription contract test.
+add_executable(test_owned_i420_frame
+    tests/test_owned_i420_frame.cpp
+)
+
+target_link_libraries(test_owned_i420_frame PRIVATE
+    livekit_signaling
+)
+
+set_target_properties(test_owned_i420_frame PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME owned_i420_frame_test COMMAND test_owned_i420_frame)
+
+add_executable(test_video_render_router
+    tests/test_video_render_router.cpp
+)
+
+target_link_libraries(test_video_render_router PRIVATE
+    livekit_signaling
+)
+
+set_target_properties(test_video_render_router PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME video_render_router_test COMMAND test_video_render_router)
+
+add_executable(test_qt_cpu_video_renderer
+    tests/test_qt_cpu_video_renderer.cpp
+    src/render/qt_cpu_video_renderer.h
+    src/render/qt_cpu_video_renderer.cpp
+    src/render/video_render_session.h
+    src/render/video_render_session.cpp
+)
+
+target_include_directories(test_qt_cpu_video_renderer BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${WEBRTC_ROOT}/include/third_party/libyuv/include
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui
+)
+
+target_link_libraries(test_qt_cpu_video_renderer PRIVATE
+    livekit_signaling
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtfreetype.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtharfbuzz.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtlibpng.lib
+    imm32
+    winmm
+    wtsapi32
+    version
+    netapi32
+    userenv
+    ws2_32
+    crypt32
+)
+
+target_compile_definitions(test_qt_cpu_video_renderer PRIVATE
+    WIN32
+    _WINDOWS
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _WINSOCK_DEPRECATED_NO_WARNINGS
+    NDEBUG
+    _ITERATOR_DEBUG_LEVEL=0
+    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
+    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
+)
+
+target_link_options(test_qt_cpu_video_renderer PRIVATE
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
+)
+
+set_target_properties(test_qt_cpu_video_renderer PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME qt_cpu_video_renderer_test COMMAND test_qt_cpu_video_renderer)
+
+# Concurrent nine-stream latest-wins/teardown test.  It shares the CPU
+# renderer linkage because VideoRenderSession owns the fallback backend even
+# though this test selects DX11's I420 callback path only.
+add_executable(test_video_render_session_stress
+    tests/test_video_render_session_stress.cpp
+    src/render/qt_cpu_video_renderer.h
+    src/render/qt_cpu_video_renderer.cpp
+    src/render/video_render_session.h
+    src/render/video_render_session.cpp
+)
+
+target_include_directories(test_video_render_session_stress BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${WEBRTC_ROOT}/include/third_party/libyuv/include
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui
+)
+
+target_link_libraries(test_video_render_session_stress PRIVATE
+    livekit_signaling
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtfreetype.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtharfbuzz.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtlibpng.lib
+    imm32
+    winmm
+    wtsapi32
+    version
+    netapi32
+    userenv
+    ws2_32
+    crypt32
+)
+
+target_compile_definitions(test_video_render_session_stress PRIVATE
+    WIN32
+    _WINDOWS
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _WINSOCK_DEPRECATED_NO_WARNINGS
+    NDEBUG
+    _ITERATOR_DEBUG_LEVEL=0
+    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
+    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
+)
+
+target_link_options(test_video_render_session_stress PRIVATE
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
+)
+
+set_target_properties(test_video_render_session_stress PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME video_render_session_stress_test COMMAND test_video_render_session_stress)
 
 

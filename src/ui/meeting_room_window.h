@@ -11,8 +11,10 @@
 #include "src/media/wasapi_enumerator.h"
 #include "src/media/wasapi_capture.h"
 #include "src/core/meeting_coordinator.h"
+#include "src/render/video_render_session.h"
 #include "src/ui/participants_sidebar_widget.h"
 #include "src/ui/meeting_chat_sidebar_widget.h"
+#include "src/ui/dx11/dx11_video_canvas.h"
 #include <mmsystem.h>
 
 #include <QtWidgets/QWidget>
@@ -99,6 +101,10 @@ public:
 	void setPipMode(bool pip) { _isPip = pip; update(); }
 	bool isPipMode() const { return _isPip; }
 
+	// DX11 硬件加速模式支持
+	void setHardwareCanvasMode(bool enabled) { _useHardwareCanvas = enabled; update(); }
+	bool isHardwareCanvasMode() const { return _useHardwareCanvas; }
+
 signals:
 	void tileDoubleClicked();
 	void tileClicked();
@@ -130,6 +136,7 @@ private:
 	bool _isPinned = false;
 	float _audioLevel = 0.0f;
 	bool _isPip = false;
+	bool _useHardwareCanvas = true;
 
 	// 远端独立音量控制
 	float _remoteVolume = 1.0f;
@@ -171,6 +178,12 @@ public:
 	rpl::producer<livekit::SimulateScenarioType> simulateScenarioRequested() const { return _simulateScenarioStream.events(); }
 
 	void showSimulateScenarioMenu(const QPoint &globalPos);
+
+signals:
+	// Native child HWNDs (such as Dx11VideoCanvas) may prevent the top-level
+	// WM_NCHITTEST path from reaching this QWidget. Blank title-bar presses
+	// therefore request a system drag explicitly as a reliable fallback.
+	void windowDragRequested();
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -360,11 +373,15 @@ protected:
 private slots:
 	void onTimerTick();
 	void onLocalVideoGenerated();
+	void onRemoteRenderTick();
 
 private:
 	void setupNativeWindow();
 	void initLayout();
 	void updateVideoLayout();
+	void tryActivateDx11Backend();
+	void fallBackToQtCpuBackend();
+	void syncDx11CanvasLayout(const std::vector<VideoTileWidget*> &tiles);
 	void setupCoordinatorBindings();
 	void startLiveKitSession();
 	void stopLiveKitSession();
@@ -374,6 +391,10 @@ private:
 	Config _config;
 	int _elapsedSeconds = 0;
 	QTimer *_meetingTimer = nullptr;
+	QTimer *_remoteRenderTimer = nullptr;
+	std::unique_ptr<livekit::render::VideoRenderSession> _remoteRenderSession;
+	std::atomic<bool> _usingDx11Backend{false};
+	bool _dx11BackendActivationAttempted = false;
 	VideoViewMode _viewMode = VideoViewMode::Grid;
 
 	// 参会状态
@@ -383,6 +404,7 @@ private:
 	// UI 组件
 	RoomTopBarWidget *_topBar = nullptr;
 	QWidget *_stageContainer = nullptr;
+	livekit::dx11::Dx11VideoCanvas *_dx11Canvas = nullptr;
 	VideoTileWidget *_localTile = nullptr;
 	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteTiles;
 	QLabel *_inviteHintBanner = nullptr;
