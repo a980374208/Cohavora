@@ -6,7 +6,6 @@
 #include <QtCore/QJsonDocument>
 #include <QtCore/QByteArray>
 #include <QtCore/QTimer>
-#include <QtGui/QImage>
 
 #include <memory>
 #include <string>
@@ -14,8 +13,6 @@
 #include <deque>
 #include <thread>
 #include <atomic>
-#include <mutex>
-#include <functional>
 
 #include <asio.hpp>
 #include "src/core/room.h"
@@ -147,7 +144,10 @@ signals:
     void participantJoined(const QString &identity, const QString &name);
     void participantLeft(const QString &identity);
     void participantsUpdated(const std::vector<ParticipantInfo> &participants);
-    void remoteVideoFrameReceived(const QString &identity, const QImage &frame);
+    // 控制面事件：渲染 Session 自行持有 Track subscription，Coordinator
+    // 不保存或转换逐帧视频数据。
+    void remoteVideoTrackAvailable(const QString &identity, std::shared_ptr<livekit::Track> track);
+    void remoteVideoTrackUnavailable(const QString &identity, const QString &trackSid);
     void remoteTrackMuted(const QString &identity, bool isVideo, bool muted);
     void activeSpeakersChanged(const std::vector<std::shared_ptr<livekit::Participant>> &speakers);
 

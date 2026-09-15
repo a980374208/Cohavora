@@ -105,6 +105,8 @@ set(LIVEKIT_SOURCES
     src/rtc/video_stream.cpp
     src/rtc/rtc_audio_source.cpp
     src/rtc/rtc_video_source.cpp
+    src/render/owned_i420_frame.cpp
+    src/render/video_render_router.cpp
     src/media/media_converters.cpp
     src/media/wasapi_enumerator.cpp
     src/media/wasapi_capture.cpp
@@ -143,6 +145,8 @@ set(LIVEKIT_HEADERS
     src/rtc/video_stream.h
     src/rtc/rtc_audio_source.h
     src/rtc/rtc_video_source.h
+    src/render/owned_i420_frame.h
+    src/render/video_render_router.h
     src/media/media_converters.h
     src/media/wasapi_types.h
     src/media/wasapi_enumerator.h
@@ -340,6 +344,10 @@ add_executable(livekit_meeting_app
     src/ui/meeting_ui_integration.h
     src/core/meeting_coordinator.h
     src/core/meeting_coordinator.cpp
+    src/render/qt_cpu_video_renderer.h
+    src/render/qt_cpu_video_renderer.cpp
+    src/render/video_render_session.h
+    src/render/video_render_session.cpp
     src/ui/video_preview_widget.cpp
     src/ui/video_preview_widget.h
     src/ui/audio_visualizer_widget.cpp
@@ -352,10 +360,19 @@ add_executable(livekit_meeting_app
     src/ui/participants_sidebar_widget.cpp
     src/ui/meeting_chat_sidebar_widget.h
     src/ui/meeting_chat_sidebar_widget.cpp
+    src/ui/dx11/dx11_types.h
+    src/ui/dx11/dx11_shaders.h
+    src/ui/dx11/dx11_renderer.h
+    src/ui/dx11/dx11_renderer.cpp
+    src/ui/dx11/dx11_texture_pool.h
+    src/ui/dx11/dx11_texture_pool.cpp
+    src/ui/dx11/dx11_video_canvas.h
+    src/ui/dx11/dx11_video_canvas.cpp
 )
 
 target_include_directories(livekit_meeting_app BEFORE PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${WEBRTC_ROOT}/include/third_party/libyuv/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_ui
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/gen
     ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/gen/styles
@@ -418,6 +435,7 @@ target_link_libraries(livekit_meeting_app PRIVATE
     d3d9
     dxgi
     d3d11
+    d3dcompiler
     dxguid
     netapi32
     userenv

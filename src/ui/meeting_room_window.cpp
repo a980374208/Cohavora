@@ -1,6 +1,7 @@
 #include "src/ui/meeting_room_window.h"
 #include "src/ui/meeting_log_console.h"
 #include "src/media/media_converters.h"
+#include "libyuv/convert_argb.h"
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QMessageBox>
@@ -10,6 +11,7 @@
 #include <QtGui/QPainterPath>
 #include <QtGui/QFont>
 #include <QtGui/QClipboard>
+#include <QtGui/QWindow>
 #include <QtCore/QDateTime>
 #include <QtCore/QDebug>
 #include <cmath>
@@ -39,39 +41,24 @@ static QImage VideoFrameToQImage(const livekit::VideoFrame &frame) {
 		livekit::MediaConverters::ConvertRGB24ToRGBA(frame.data(), rgba.data(), w, h);
 		return QImage(rgba.data(), w, h, w * 4, QImage::Format_RGBA8888).copy();
 	} else if (frame.type() == livekit::VideoBufferType::NV12) {
-		std::vector<uint8_t> rgba(w * h * 4);
-		livekit::MediaConverters::ConvertNV12ToRGBA(frame.data(), rgba.data(), w, h);
-		return QImage(rgba.data(), w, h, w * 4, QImage::Format_RGBA8888).copy();
-	} else if (frame.type() == livekit::VideoBufferType::I420) {
+		QImage image(w, h, QImage::Format_ARGB32);
+		if (image.isNull()) return image;
+		const int chroma_width = (w + 1) / 2;
+		const uint8_t *y_plane = frame.data();
+		const uint8_t *uv_plane = y_plane + (w * h);
+		return libyuv::NV12ToARGB(y_plane, w, uv_plane, chroma_width * 2,
+			image.bits(), image.bytesPerLine(), w, h) == 0 ? image : QImage();
+	} else if (frame.type() == livekit::VideoBufferType::I420 ||
+	           frame.type() == livekit::VideoBufferType::I420A) {
+		QImage image(w, h, QImage::Format_ARGB32);
+		if (image.isNull()) return image;
+		const int chroma_width = (w + 1) / 2;
+		const int chroma_height = (h + 1) / 2;
 		const uint8_t *y_plane = frame.data();
 		const uint8_t *u_plane = y_plane + (w * h);
-		const uint8_t *v_plane = u_plane + ((w / 2) * (h / 2));
-		std::vector<uint8_t> rgba(w * h * 4);
-
-		auto clamp8 = [](int val) -> uint8_t {
-			return static_cast<uint8_t>(val < 0 ? 0 : (val > 255 ? 255 : val));
-		};
-
-		for (int y = 0; y < h; ++y) {
-			for (int x = 0; x < w; ++x) {
-				int y_val = y_plane[y * w + x];
-				int u_val = u_plane[(y / 2) * (w / 2) + (x / 2)];
-				int v_val = v_plane[(y / 2) * (w / 2) + (x / 2)];
-				int c = y_val - 16;
-				int d = u_val - 128;
-				int e_val = v_val - 128;
-
-				int r = clamp8((298 * c + 409 * e_val + 128) >> 8);
-				int g = clamp8((298 * c - 100 * d - 208 * e_val + 128) >> 8);
-				int b = clamp8((298 * c + 516 * d + 128) >> 8);
-				int idx = (y * w + x) * 4;
-				rgba[idx] = r;
-				rgba[idx + 1] = g;
-				rgba[idx + 2] = b;
-				rgba[idx + 3] = 255;
-			}
-		}
-		return QImage(rgba.data(), w, h, w * 4, QImage::Format_RGBA8888).copy();
+		const uint8_t *v_plane = u_plane + (chroma_width * chroma_height);
+		return libyuv::I420ToARGB(y_plane, w, u_plane, chroma_width, v_plane, chroma_width,
+			image.bits(), image.bytesPerLine(), w, h) == 0 ? image : QImage();
 	}
 	return QImage();
 }
@@ -833,8 +820,13 @@ void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 			update();
 		} else if (_settingsRect.contains(e->pos())) {
 			_settingsStream.fire({});
+		} else {
+			emit windowDragRequested();
+			e->accept();
+			return;
 		}
 	}
+	Ui::RpWidget::mousePressEvent(e);
 }
 
 void RoomTopBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {
@@ -1668,6 +1660,13 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 
 	initLayout();
 	setupCoordinatorBindings();
+	_remoteRenderSession = std::make_unique<livekit::render::VideoRenderSession>(
+		[this](const std::string &identity, const QImage &image) {
+			receiveRemoteVideoFrame(image, QString::fromStdString(identity));
+		});
+	_remoteRenderTimer = new QTimer(this);
+	connect(_remoteRenderTimer, &QTimer::timeout, this, &MeetingRoomWindow::onRemoteRenderTick);
+	_remoteRenderTimer->start(33);
 
 	// 3. 复用 Coordinator 的本地音频与视频数据源，确保外设采集与 WebRTC 发送通道打通
 	if (_coordinator) {
@@ -1680,6 +1679,11 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	if (!_localVideoSource) {
 		_localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
 	}
+	_localVideoSource->addSink([this](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
+		if (_usingDx11Backend.load(std::memory_order_acquire) && _dx11Canvas) {
+			_dx11Canvas->updateFrame("local", frame);
+		}
+	});
 	_localAudioSource->addSink([this](const livekit::AudioFrame &frame) {
 		if (_config.audioMuted) return;
 		const auto &samples = frame.data();
@@ -1700,6 +1704,9 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	});
 
 	_localVideoSource->addSink([this](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
+		if (_usingDx11Backend.load(std::memory_order_acquire)) {
+			return;
+		}
 		QImage img = VideoFrameToQImage(frame);
 		if (!img.isNull()) {
 			QMetaObject::invokeMethod(this, [this, img = std::move(img)]() {
@@ -1760,6 +1767,7 @@ MeetingRoomWindow::~MeetingRoomWindow() {
 void MeetingRoomWindow::showEvent(QShowEvent *e) {
 	Ui::RpWidget::showEvent(e);
 	setupNativeWindow();
+	tryActivateDx11Backend();
 }
 
 void MeetingRoomWindow::closeEvent(QCloseEvent *e) {
@@ -1790,6 +1798,14 @@ void MeetingRoomWindow::setupNativeWindow() {
 
 void MeetingRoomWindow::initLayout() {
 	_topBar = new RoomTopBarWidget(this);
+	connect(_topBar, &RoomTopBarWidget::windowDragRequested, this, [this]() {
+		if (isFullScreen()) {
+			return;
+		}
+		if (auto *handle = windowHandle()) {
+			handle->startSystemMove();
+		}
+	});
 	QString mId = _coordinator ? _coordinator->currentMeetingId() : QString();
 	if (mId.isEmpty()) mId = _config.meetingId;
 	if (!mId.isEmpty()) {
@@ -1798,6 +1814,20 @@ void MeetingRoomWindow::initLayout() {
 	}
 	_stageContainer = new QWidget(this);
 	_stageContainer->setStyleSheet("background-color: #12141a;");
+	if (livekit::dx11::Dx11VideoCanvas::IsHardwareBackendAllowed()) {
+		_dx11Canvas = new livekit::dx11::Dx11VideoCanvas(_stageContainer);
+		_dx11Canvas->setGeometry(_stageContainer->rect());
+		_dx11Canvas->hide();
+		connect(_dx11Canvas, &livekit::dx11::Dx11VideoCanvas::rendererUnavailable,
+		        this, &MeetingRoomWindow::fallBackToQtCpuBackend);
+		connect(_dx11Canvas, &livekit::dx11::Dx11VideoCanvas::tileDoubleClicked,
+		        this, [this](const QString &identity) {
+			if (identity.isEmpty()) return;
+			if (_pinnedIdentity == identity) _pinnedIdentity.clear();
+			else _pinnedIdentity = identity;
+			updateVideoLayout();
+		});
+	}
 	_bottomBar = new RoomBottomBarWidget(this);
 
 	_participantsSidebar = new OpenMeeting::ParticipantsSidebarWidget(_coordinator, this);
@@ -2221,6 +2251,12 @@ void MeetingRoomWindow::onTimerTick() {
 	_topBar->updateDuration(_elapsedSeconds);
 }
 
+void MeetingRoomWindow::onRemoteRenderTick() {
+	if (_remoteRenderSession) {
+		_remoteRenderSession->RenderLatestFrames();
+	}
+}
+
 void MeetingRoomWindow::switchSidebar(ActiveSidebar target) {
 	if (_activeSidebar == target) {
 		_activeSidebar = ActiveSidebar::None;
@@ -2351,6 +2387,12 @@ void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity, const
 }
 
 void MeetingRoomWindow::onRemoteParticipantLeft(const QString &identity) {
+	if (_remoteRenderSession) {
+		_remoteRenderSession->RemoveTracksForIdentity(identity.toStdString());
+	}
+	if (_dx11Canvas) {
+		_dx11Canvas->removeUser(identity.toStdString());
+	}
 	auto it = _remoteTiles.find(identity);
 	if (it != _remoteTiles.end()) {
 		it->second->hide();
@@ -2443,6 +2485,83 @@ void MeetingRoomWindow::updateActiveSpeakers(const std::vector<std::shared_ptr<l
 	}
 }
 
+void MeetingRoomWindow::tryActivateDx11Backend() {
+	if (_dx11BackendActivationAttempted || !_dx11Canvas || !_remoteRenderSession ||
+		!livekit::dx11::Dx11VideoCanvas::IsHardwareBackendAllowed()) {
+		return;
+	}
+	_dx11BackendActivationAttempted = true;
+	_dx11Canvas->setGeometry(_stageContainer->rect());
+	_dx11Canvas->show(); // showEvent performs the UI-thread device probe.
+
+	if (!_dx11Canvas->rendererReady()) {
+		_dx11Canvas->hide();
+		_remoteRenderSession->UseQtCpuBackend();
+		LogToConsole(LogCategory::WebRTC, "DX11", "DX11 Canvas 初始化失败，已使用 Qt CPU 视频后端");
+		return;
+	}
+
+	_remoteRenderSession->UseDx11Backend(
+		[this](const std::string &identity, livekit::render::OwnedI420Frame::Ptr frame) {
+			const QString participant = QString::fromStdString(identity);
+			if (_remoteTiles.find(participant) == _remoteTiles.end()) {
+				onRemoteParticipantJoined(participant);
+			}
+			auto it = _remoteTiles.find(participant);
+			if (it != _remoteTiles.end() && it->second && !it->second->isVideoActive()) {
+				it->second->setVideoActive(true);
+				updateVideoLayout();
+			}
+			if (_usingDx11Backend.load(std::memory_order_acquire) && _dx11Canvas) {
+				_dx11Canvas->updateI420Frame(identity, std::move(frame));
+			}
+		});
+	_usingDx11Backend.store(true, std::memory_order_release);
+	LogToConsole(LogCategory::WebRTC, "DX11", "已启用 I420 直渲染后端");
+	updateVideoLayout();
+}
+
+void MeetingRoomWindow::fallBackToQtCpuBackend() {
+	const bool was_using_dx11 = _usingDx11Backend.exchange(false, std::memory_order_acq_rel);
+	if (_remoteRenderSession) {
+		_remoteRenderSession->UseQtCpuBackend();
+	}
+	if (_dx11Canvas) {
+		_dx11Canvas->clearUsers();
+		_dx11Canvas->hide();
+	}
+	if (was_using_dx11) {
+		LogToConsole(LogCategory::Error, "DX11", "DX11 Present/设备失败，已切换到 Qt CPU 视频后端");
+	}
+	updateVideoLayout();
+}
+
+void MeetingRoomWindow::syncDx11CanvasLayout(const std::vector<VideoTileWidget*> &tiles) {
+	if (!_usingDx11Backend.load(std::memory_order_acquire) || !_dx11Canvas) {
+		return;
+	}
+
+	std::vector<livekit::dx11::TileRect> dx11_tiles;
+	dx11_tiles.reserve(tiles.size());
+	for (auto *tile : tiles) {
+		if (!tile) continue;
+		const QRect geometry = tile->geometry();
+		dx11_tiles.push_back({
+			tile->identity().toStdString(),
+			geometry.x(), geometry.y(), geometry.width(), geometry.height(),
+			tile->isSpeaking(), tile->audioLevel(), tile->isVideoActive()
+		});
+		tile->setHardwareCanvasMode(true);
+		tile->hide();
+	}
+
+	_dx11Canvas->setGeometry(_stageContainer->rect());
+	_dx11Canvas->setTilesLayout(dx11_tiles);
+	_dx11Canvas->show();
+	_dx11Canvas->raise();
+	if (_inviteHintBanner) _inviteHintBanner->hide();
+}
+
 void MeetingRoomWindow::updateVideoLayout() {
 	const int stageW = _stageContainer->width();
 	const int stageH = _stageContainer->height();
@@ -2467,7 +2586,7 @@ void MeetingRoomWindow::updateVideoLayout() {
 	const int bannerW = 220;
 	const int bannerH = 32;
 	_inviteHintBanner->setGeometry((stageW - bannerW) / 2, stageH - bannerH - 12, bannerW, bannerH);
-	_inviteHintBanner->setVisible(!hasRemote && !localActive);
+	_inviteHintBanner->setVisible(!_usingDx11Backend.load(std::memory_order_acquire) && !hasRemote && !localActive);
 
 	// 1. 画中画模式 (PiP)
 	if (_viewMode == VideoViewMode::Pip && N >= 2) {
@@ -2496,6 +2615,7 @@ void MeetingRoomWindow::updateVideoLayout() {
 			t->raise();
 			pipRightOffset += pipW + 10;
 		}
+		syncDx11CanvasLayout(allTiles);
 		return;
 	}
 
@@ -2543,6 +2663,7 @@ void MeetingRoomWindow::updateVideoLayout() {
 			otherTiles[i]->setGeometry(margin + mainW + gap, margin + i * (clampedH + gap), filmstripW, clampedH);
 			otherTiles[i]->show();
 		}
+		syncDx11CanvasLayout(allTiles);
 		return;
 	}
 
@@ -2599,6 +2720,7 @@ void MeetingRoomWindow::updateVideoLayout() {
 			++tileIdx;
 		}
 	}
+	syncDx11CanvasLayout(allTiles);
 }
 
 void MeetingRoomWindow::paintEvent(QPaintEvent *e) {
@@ -2684,10 +2806,21 @@ void MeetingRoomWindow::onLocalVideoGenerated() {
 void MeetingRoomWindow::setupCoordinatorBindings() {
 	if (!_coordinator) return;
 
-	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteVideoFrameReceived,
-	        this, [this](const QString &id, const QImage &img) {
-		receiveRemoteVideoFrame(img, id);
-	});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteVideoTrackAvailable,
+	        this, [this](const QString &id, std::shared_ptr<livekit::Track> track) {
+			if (_remoteRenderSession) {
+				_remoteRenderSession->AttachRemoteTrack(track, id.toStdString());
+			}
+		});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteVideoTrackUnavailable,
+	        this, [this](const QString &identity, const QString &trackSid) {
+			if (_remoteRenderSession) {
+				_remoteRenderSession->RemoveTrack(trackSid.toStdString());
+			}
+			if (_dx11Canvas) {
+				_dx11Canvas->removeUser(identity.toStdString());
+			}
+		});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantJoined,
 	        this, [this](const QString &id, const QString &name) {
 		onRemoteParticipantJoined(id, name);
@@ -2887,7 +3020,16 @@ void MeetingRoomWindow::startLiveKitSession() {
 		if (_room && _coordinator->state() == OpenMeeting::MeetingState::InMeeting) {
 			auto remotes = _room->remote_participants();
 			for (const auto &[sid, p] : remotes) {
-				if (p) onRemoteParticipantJoined(QString::fromStdString(p->identity()), QString::fromStdString(p->name()));
+				if (!p) continue;
+				onRemoteParticipantJoined(QString::fromStdString(p->identity()), QString::fromStdString(p->name()));
+				if (_remoteRenderSession) {
+					for (const auto &[track_sid, publication] : p->tracks()) {
+						if (publication && publication->track() &&
+							publication->track()->kind() == livekit::TrackKind::Video) {
+							_remoteRenderSession->AttachRemoteTrack(publication->track(), p->identity());
+						}
+					}
+				}
 			}
 		}
 		return;
@@ -2912,6 +3054,13 @@ void MeetingRoomWindow::stopLiveKitSession() {
 	}
 
 	if (_meetingTimer) _meetingTimer->stop();
+	if (_remoteRenderTimer) _remoteRenderTimer->stop();
+	if (_remoteRenderSession) _remoteRenderSession->Deactivate();
+	_usingDx11Backend.store(false, std::memory_order_release);
+	if (_dx11Canvas) {
+		_dx11Canvas->clearUsers();
+		_dx11Canvas->hide();
+	}
 
 	if (_wasapiCap) {
 		_wasapiCap->Stop();
@@ -2939,7 +3088,11 @@ bool MeetingRoomWindow::nativeEvent(const QByteArray &eventType, void *message, 
 	if (!msg) {
 		return Ui::RpWidget::nativeEvent(eventType, message, result);
 	}
-	HWND handle = msg->hwnd ? msg->hwnd : _handle;
+	// Once the DX11 Canvas creates a native child HWND, Qt may forward a native
+	// message whose hwnd is that child. Hit-testing and resizing are defined in
+	// MeetingRoomWindow coordinates, so never use the child as the conversion
+	// origin here.
+	HWND handle = _handle ? _handle : msg->hwnd;
 
 	switch (msg->message) {
 	case WM_NCCALCSIZE: {
