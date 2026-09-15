@@ -2884,6 +2884,8 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::kickedOff,
 	        this, &MeetingRoomWindow::onKickedOff);
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingKickOff,
+	        this, &MeetingRoomWindow::onMeetingKickOff);
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteMuteRequested,
 	        this, &MeetingRoomWindow::onRemoteMuteRequested);
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::hostRoleChanged,
@@ -2906,6 +2908,11 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	        this, [this]() {
 		close();
 	});
+	connect(&OpenMeeting::SessionManager::instance(),
+	        &OpenMeeting::SessionManager::sessionInvalidated,
+	        this,
+	        &MeetingRoomWindow::onSessionInvalidated,
+	        Qt::QueuedConnection);
 
 	if (!_coordinator->currentMeetingId().isEmpty()) {
 		if (_topBar) _topBar->setMeetingId(_coordinator->currentMeetingId());
@@ -2914,9 +2921,47 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 }
 
 void MeetingRoomWindow::onKickedOff(const QString &reason, int reasonCode) {
+	if (_closingForSessionInvalidation ||
+		OpenMeeting::SessionManager::instance().isSessionInvalidating()) {
+		return;
+	}
 	QMessageBox::warning(this, QString::fromUtf8("移出会议"),
 	                     QString::fromUtf8("您已被主持人移出会议。\n原因: %1 (代码: %2)")
 	                     .arg(reason.isEmpty() ? QString::fromUtf8("未指定") : reason).arg(reasonCode));
+	close();
+}
+
+void MeetingRoomWindow::onMeetingKickOff(livekit::RoomDisconnectReason reason) {
+	if (reason != livekit::RoomDisconnectReason::DuplicateIdentity) {
+		return;
+	}
+	if (_closingForSessionInvalidation ||
+		OpenMeeting::SessionManager::instance().isSessionInvalidating()) {
+		LogToConsole(LogCategory::Connection, "DUPLICATE_IDENTITY_SUPPRESSED",
+		             "[UI] Suppress room-level dialog while account session is invalidating");
+		return;
+	}
+
+	LogToConsole(LogCategory::Connection, "DUPLICATE_IDENTITY",
+	             "[UI] Show duplicate login dialog");
+	// QMessageBox::warning 是模态调用；用户确认前不会关闭会议窗口，避免
+	// 服务器主动踢出表现为无提示的窗口消失。
+	QMessageBox::warning(this,
+	                     QString::fromUtf8("会议已退出"),
+	                     QString::fromUtf8("您的账号已在其他设备加入此会议，当前客户端已被强制退出。"));
+	close();
+}
+
+void MeetingRoomWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason) {
+	if (_closingForSessionInvalidation) {
+		return;
+	}
+	_closingForSessionInvalidation = true;
+	LogToConsole(LogCategory::Connection, "SESSION_INVALIDATED",
+	             QString("[UI] Close meeting window for invalidated account session, reason=%1")
+	                 .arg(static_cast<int>(reason)));
+
+	// 不在会议窗口重复弹窗；全局提示和重新登录由 MeetingMainWindow 统一负责。
 	close();
 }
 

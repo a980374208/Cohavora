@@ -5,6 +5,7 @@
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QByteArray>
+#include <QtCore/QMetaType>
 #include <QtCore/QTimer>
 
 #include <memory>
@@ -136,6 +137,9 @@ signals:
     void errorOccurred(const QString &title, const QString &message);
     void meetingJoinedSuccessfully(const QString &meetingId);
     void meetingLeft();
+    // LiveKit 服务端主动断开（例如同一 identity 重复进入同一房间）。
+    // UI 仅消费客户端枚举，不依赖 protobuf 协议细节。
+    void meetingKickOff(livekit::RoomDisconnectReason reason);
 
     // 房间元数据与设置
     void meetingDetailUpdated(const MeetingDetail &detail);
@@ -179,6 +183,8 @@ private:
     void startRoomSession(const QString &url, const QString &token);
     void stopRoomSession();
     void parseRoomMetadata(const std::string &metadata);
+    void handleDuplicateIdentityKickOff(const QString &detail);
+    void handleSessionInvalidated(SessionInvalidationReason reason);
     void handleDataReceived(const std::vector<uint8_t> &data,
                             const std::string &participantSid,
                             const std::string &participantIdentity = "",
@@ -196,6 +202,9 @@ private:
 
     bool _audioMuted = false;
     bool _videoEnabled = true;
+    // 全局账号会话被撤销后，忽略仍在途的 HTTP 入会回调，防止已经关闭的
+    // 会议窗口重新创建 Room 或重新发布媒体。
+    bool _sessionInvalidated = false;
 
     std::map<QString, ParticipantInfo> _participants;
     void ensureLocalParticipant();
@@ -251,3 +260,5 @@ private:
 };
 
 } // namespace OpenMeeting
+
+Q_DECLARE_METATYPE(livekit::RoomDisconnectReason)

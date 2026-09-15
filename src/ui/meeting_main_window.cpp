@@ -13,6 +13,7 @@
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QAction>
+#include <QtWidgets/QApplication>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QFont>
@@ -488,6 +489,11 @@ MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 	setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint);
 
 	initLayout();
+	connect(&OpenMeeting::SessionManager::instance(),
+	        &OpenMeeting::SessionManager::sessionInvalidated,
+	        this,
+	        &MeetingMainWindow::onSessionInvalidated,
+	        Qt::QueuedConnection);
 }
 
 void MeetingMainWindow::showEvent(QShowEvent *e) {
@@ -578,6 +584,43 @@ void MeetingMainWindow::initLayout() {
 			}
 		}
 	}, lifetime());
+}
+
+void MeetingMainWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason) {
+	if (_sessionInvalidationDialogActive) {
+		return;
+	}
+	_sessionInvalidationDialogActive = true;
+
+	const bool duplicatedLogin =
+		reason == OpenMeeting::SessionInvalidationReason::DuplicatedLogin;
+	qWarning() << "[UI] Show session invalidation dialog, reason="
+	           << static_cast<int>(reason);
+
+	// sessionInvalidated 对象间使用 QueuedConnection，不能依赖投递顺序保证
+	// 会议窗口先于本窗口执行。这里在展示全局登录弹窗前同步关闭全部顶层会议，
+	// 使媒体和 Room 生命周期先收敛，且不会产生每个会议各自的重复弹窗。
+	for (QWidget *widget : QApplication::topLevelWidgets()) {
+		auto *roomWindow = qobject_cast<MeetingRoomWindow *>(widget);
+		if (roomWindow) {
+			roomWindow->onSessionInvalidated(reason);
+		}
+	}
+
+	QMessageBox::warning(this,
+	                     duplicatedLogin ? QString::fromUtf8("账号已下线")
+	                                     : QString::fromUtf8("登录失效"),
+	                     duplicatedLogin
+	                         ? QString::fromUtf8("您的账号已在其他设备登录，当前客户端已退出。")
+	                         : QString::fromUtf8("登录状态已失效，请重新登录。"));
+
+	// SessionManager 在发射 sessionInvalidated 前已复用 logout(false) 清理 token
+	// 和本地 user 设置；这里仅负责让用户回到可重新认证的界面。
+	LoginDialog loginDlg(this);
+	if (loginDlg.exec() == QDialog::Accepted && _sidebar) {
+		_sidebar->update();
+	}
+	_sessionInvalidationDialogActive = false;
 }
 
 void MeetingMainWindow::onCardClicked(ActionCardType type) {
