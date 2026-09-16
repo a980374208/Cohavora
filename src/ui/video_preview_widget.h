@@ -3,6 +3,7 @@
 #include "base/basic_types.h"
 #include "ui/rp_widget.h"
 #include "src/rtc/video_frame.h"
+#include "src/core/participant.h"
 #include "src/core/remote_track_publication.h"
 #include "src/core/adaptive_stream_manager.h"
 
@@ -158,6 +159,9 @@ private:
 
 	std::vector<ParticipantVideoTile*> _tiles;
 	std::vector<std::shared_ptr<livekit::RemoteTrackPublication>> _remoteTracks;
+	// The load-test view still uses synthetic media, but its publications follow
+	// the same participant-map ownership rule as a real Room.
+	std::vector<std::shared_ptr<livekit::RemoteParticipant>> _simulatedParticipants;
 
 	QWidget *_gridContent = nullptr;
 	QScrollArea *_scrollArea = nullptr;

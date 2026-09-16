@@ -57,6 +57,21 @@ struct MeetingDetail {
     bool canJoinEarly = true;
 };
 
+// Qt/business projection of the authoritative native RoomInfo snapshot.
+// Keep protobuf types out of the UI layer.
+struct MeetingRoomInfo {
+    QString sid;
+    QString name;
+    QString metadata;
+    uint32_t emptyTimeout = 0;
+    uint32_t departureTimeout = 0;
+    uint32_t maxParticipants = 0;
+    int64_t creationTimeMs = 0;
+    uint32_t numParticipants = 0;
+    uint32_t numPublishers = 0;
+    bool activeRecording = false;
+};
+
 // 参会人实时属性实体
 struct ParticipantInfo {
     QString identity;
@@ -67,6 +82,11 @@ struct ParticipantInfo {
     bool isVideoEnabled = false;
     bool isSpeaking = false;
     float audioLevel = 0.0f;
+    bool isAudioStreamPaused = false;
+    bool isVideoStreamPaused = false;
+    livekit::ConnectionQuality connectionQuality = livekit::ConnectionQuality::Unknown;
+    float connectionQualityScore = 0.0f;
+    livekit::ParticipantPermission permissions;
 };
 
 class MeetingCoordinator : public QObject {
@@ -82,6 +102,7 @@ public:
     QString currentMeetingId() const { return _currentMeetingId; }
     QString currentDisplayName() const { return _currentDisplayName; }
     const MeetingDetail &meetingDetail() const { return _meetingDetail; }
+    const MeetingRoomInfo &roomInfo() const { return _roomInfo; }
     bool isHost() const;
 
     // 核心入会流程
@@ -147,6 +168,7 @@ signals:
 
     // 房间元数据与设置
     void meetingDetailUpdated(const MeetingDetail &detail);
+    void roomInfoUpdated(const MeetingRoomInfo &info);
 
     // 参会人与媒体轨道事件
     void participantJoined(const QString &identity, const QString &name);
@@ -157,6 +179,15 @@ signals:
     void remoteVideoTrackAvailable(const QString &identity, std::shared_ptr<livekit::Track> track);
     void remoteVideoTrackUnavailable(const QString &identity, const QString &trackSid);
     void remoteTrackMuted(const QString &identity, bool isVideo, bool muted);
+    void participantConnectionQualityChanged(const QString &identity, int quality, float score);
+    void participantTrackStreamStateChanged(const QString &identity, const QString &trackSid,
+                                            bool isVideo, bool paused);
+    void participantPermissionsChanged(const QString &identity,
+                                       const livekit::ParticipantPermission &permission);
+    void trackSubscriptionPermissionChanged(const QString &participantIdentity,
+                                            const QString &participantSid,
+                                            const QString &trackSid,
+                                            bool allowed);
     void activeSpeakersChanged(const std::vector<std::shared_ptr<livekit::Participant>> &speakers);
 
     // 本地媒体状态变动（供 UI 底栏与视频画框联动）
@@ -220,6 +251,7 @@ private:
     QString _currentDisplayName;
     MediaPreferences _mediaPrefs;
     MeetingDetail _meetingDetail;
+    MeetingRoomInfo _roomInfo;
 
     bool _audioMuted = false;
     bool _videoEnabled = true;
@@ -278,3 +310,5 @@ private:
 } // namespace OpenMeeting
 
 Q_DECLARE_METATYPE(livekit::RoomDisconnectReason)
+Q_DECLARE_METATYPE(OpenMeeting::MeetingRoomInfo)
+Q_DECLARE_METATYPE(livekit::ParticipantPermission)

@@ -271,6 +271,18 @@ void VideoTileWidget::setAudioMuted(bool muted) {
 	update();
 }
 
+void VideoTileWidget::setConnectionQuality(livekit::ConnectionQuality quality) {
+	if (_connectionQuality == quality) return;
+	_connectionQuality = quality;
+	update();
+}
+
+void VideoTileWidget::setVideoStreamPaused(bool paused) {
+	if (_isVideoStreamPaused == paused) return;
+	_isVideoStreamPaused = paused;
+	update();
+}
+
 void VideoTileWidget::setSpeaking(bool speaking, float level) {
 	_isSpeaking = speaking;
 	_audioLevel = level;
@@ -437,22 +449,62 @@ void VideoTileWidget::drawNetworkQualityBadge(QPainter &p, const QRect &r) {
 	p.save();
 	const int bx = r.x() + 10;
 	const int by = r.y() + 12;
+	int bars = 0;
+	QColor color(0x86, 0x90, 0x9c);
+	switch (_connectionQuality) {
+	case livekit::ConnectionQuality::Excellent:
+		bars = 3;
+		color = QColor(0x00, 0xb4, 0x2a);
+		break;
+	case livekit::ConnectionQuality::Good:
+		bars = 2;
+		color = QColor(0x52, 0xc4, 0x1a);
+		break;
+	case livekit::ConnectionQuality::Poor:
+		bars = 1;
+		color = QColor(0xe6, 0x7e, 0x22);
+		break;
+	case livekit::ConnectionQuality::Lost:
+		bars = 1;
+		color = QColor(0xf5, 0x3f, 0x3f);
+		break;
+	case livekit::ConnectionQuality::Unknown:
+		break;
+	}
 
 	p.setPen(Qt::NoPen);
-	p.setBrush(QColor(0x00, 0xb4, 0x2a));
-	p.drawRect(bx, by + 6, 2, 4);
-	p.drawRect(bx + 4, by + 3, 2, 7);
-	p.drawRect(bx + 8, by, 2, 10);
+	p.setBrush(color);
+	if (bars >= 1) p.drawRect(bx, by + 6, 2, 4);
+	if (bars >= 2) p.drawRect(bx + 4, by + 3, 2, 7);
+	if (bars >= 3) p.drawRect(bx + 8, by, 2, 10);
+
+	if (_isVideoStreamPaused) {
+		const QRect pausedRect(bx + 16, by - 3, 54, 16);
+		p.setBrush(QColor(0xe6, 0x7e, 0x22, 220));
+		p.drawRoundedRect(pausedRect, 5, 5);
+		p.setPen(Qt::white);
+		p.setFont(QFont("Microsoft YaHei", 8, QFont::DemiBold));
+		p.drawText(pausedRect, Qt::AlignCenter, QString::fromUtf8("网络暂停"));
+	}
 
 	if (_isPinned) {
 		p.setFont(QFont("Segoe UI Emoji", 10));
 		p.setPen(Qt::white);
-		p.drawText(QRect(bx + 16, by - 2, 16, 16), Qt::AlignCenter, QString::fromUtf8("📌"));
+		const int pinOffset = _isVideoStreamPaused ? 74 : 16;
+		p.drawText(QRect(bx + pinOffset, by - 2, 16, 16), Qt::AlignCenter, QString::fromUtf8("📌"));
 	}
 	p.restore();
 }
 
 void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
+	if (_isVideoStreamPaused) {
+		p.fillRect(r, QColor(0x14, 0x16, 0x1d));
+		p.setPen(QColor(0xe6, 0x7e, 0x22));
+		p.setFont(QFont("Microsoft YaHei", 12));
+		p.drawText(r, Qt::AlignCenter, QString::fromUtf8("视频流因网络拥塞暂停"));
+		return;
+	}
+
 	QImage frameCopy;
 	{
 		std::lock_guard<std::mutex> lock(_frameMutex);
@@ -2377,6 +2429,16 @@ void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity, const
 		}
 	}
 
+	if (auto tileIt = _remoteTiles.find(identity);
+		tileIt != _remoteTiles.end() && tileIt->second && _coordinator) {
+		for (const auto &participant : _coordinator->participants()) {
+			if (participant.identity != identity) continue;
+			tileIt->second->setConnectionQuality(participant.connectionQuality);
+			tileIt->second->setVideoStreamPaused(participant.isVideoStreamPaused);
+			break;
+		}
+	}
+
 	_participantCount = 1 + static_cast<int>(_remoteTiles.size());
 	if (_bottomBar) {
 		_bottomBar->setParticipantCount(_participantCount);
@@ -2412,17 +2474,18 @@ void MeetingRoomWindow::onRemoteParticipantLeft(const QString &identity) {
 	updateVideoLayout();
 }
 
-void MeetingRoomWindow::onRemoteTrackMuted(bool isVideo, bool muted) {
-	for (auto &[id, tile] : _remoteTiles) {
-		if (tile) {
-			if (isVideo) {
-				tile->setVideoActive(!muted);
-				if (muted) tile->setFrame(QImage());
-			} else {
-				tile->setAudioMuted(muted);
-				if (muted) tile->setSpeaking(false, 0.0f);
-			}
-		}
+
+void MeetingRoomWindow::onRemoteTrackMuted(const QString &identity, bool isVideo, bool muted) {
+	auto it = _remoteTiles.find(identity);
+	if (it == _remoteTiles.end() || !it->second) {
+		return;
+	}
+	if (isVideo) {
+		it->second->setVideoActive(!muted);
+		if (muted) it->second->setFrame(QImage());
+	} else {
+		it->second->setAudioMuted(muted);
+		if (muted) it->second->setSpeaking(false, 0.0f);
 	}
 	updateVideoLayout();
 }
@@ -2829,24 +2892,52 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	        this, &MeetingRoomWindow::onRemoteParticipantLeft);
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteTrackMuted,
 	        this, [this](const QString &id, bool isVideo, bool muted) {
-		onRemoteTrackMuted(isVideo, muted);
+		onRemoteTrackMuted(id, isVideo, muted);
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::activeSpeakersChanged,
 	        this, &MeetingRoomWindow::updateActiveSpeakers);
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingDetailUpdated,
 	        this, &MeetingRoomWindow::onMeetingDetailUpdated);
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::roomInfoUpdated,
+	        this, [this](const OpenMeeting::MeetingRoomInfo &info) {
+		if (!_coordinator || info.name.isEmpty() ||
+			!_coordinator->meetingDetail().meetingName.isEmpty()) {
+			return;
+		}
+		const QString meetingId = _coordinator->currentMeetingId();
+		setWindowTitle(meetingId.isEmpty()
+			? info.name
+			: QString::fromUtf8("%1 - 会议号: %2").arg(info.name, meetingId));
+	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantsUpdated,
 	        this, [this](const std::vector<OpenMeeting::ParticipantInfo> &list) {
 		_participantCount = static_cast<int>(list.size());
 		_bottomBar->setParticipantCount(_participantCount);
 		for (const auto &p : list) {
-			if (!p.isLocal) {
-				auto it = _remoteTiles.find(p.identity);
-				if (it != _remoteTiles.end() && it->second && !p.name.isEmpty() && it->second->displayName() != p.name) {
+			if (p.isLocal) {
+				if (_localTile) {
+					_localTile->setConnectionQuality(p.connectionQuality);
+					_localTile->setVideoStreamPaused(p.isVideoStreamPaused);
+				}
+				continue;
+			}
+			auto it = _remoteTiles.find(p.identity);
+			if (it != _remoteTiles.end() && it->second) {
+				if (!p.name.isEmpty() && it->second->displayName() != p.name) {
 					it->second->setDisplayName(p.name);
 				}
+				it->second->setConnectionQuality(p.connectionQuality);
+				it->second->setVideoStreamPaused(p.isVideoStreamPaused);
 			}
 		}
+	});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::trackSubscriptionPermissionChanged,
+	        this, [this](const QString &identity, const QString &participantSid,
+	                     const QString &trackSid, bool allowed) {
+		LogToConsole(LogCategory::Connection, "SUBSCRIPTION_PERMISSION",
+			QString("订阅权限更新: participant=%1 sid=%2 track=%3 allowed=%4")
+				.arg(identity.isEmpty() ? QString::fromUtf8("未知") : identity,
+					 participantSid, trackSid, allowed ? QString::fromUtf8("是") : QString::fromUtf8("否")));
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::localAudioMuteChanged,
 	        this, [this](bool muted) {

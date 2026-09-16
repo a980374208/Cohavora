@@ -47,6 +47,45 @@ static QString ResolveParticipantNickname(const std::shared_ptr<livekit::Partici
     return identity;
 }
 
+static MeetingRoomInfo ToMeetingRoomInfo(const livekit::RoomInfo &info) {
+    MeetingRoomInfo result;
+    result.sid = QString::fromStdString(info.sid);
+    result.name = QString::fromStdString(info.name);
+    result.metadata = QString::fromStdString(info.metadata);
+    result.emptyTimeout = info.empty_timeout;
+    result.departureTimeout = info.departure_timeout;
+    result.maxParticipants = info.max_participants;
+    result.creationTimeMs = info.creation_time_ms;
+    result.numParticipants = info.num_participants;
+    result.numPublishers = info.num_publishers;
+    result.activeRecording = info.active_recording;
+    return result;
+}
+
+static void CopyParticipantState(const std::shared_ptr<livekit::Participant> &participant,
+                                 ParticipantInfo *info) {
+    if (!participant || !info) return;
+    info->connectionQuality = participant->connection_quality();
+    info->connectionQualityScore = participant->connection_quality_score();
+    info->permissions = participant->permission();
+
+    bool audio_paused = false;
+    bool video_paused = false;
+    for (const auto &[track_sid, publication] : participant->tracks()) {
+        if (!publication || !publication->track() ||
+            publication->stream_state() != livekit::TrackPublication::StreamState::Paused) {
+            continue;
+        }
+        if (publication->track()->kind() == livekit::TrackKind::Audio) {
+            audio_paused = true;
+        } else if (publication->track()->kind() == livekit::TrackKind::Video) {
+            video_paused = true;
+        }
+    }
+    info->isAudioStreamPaused = audio_paused;
+    info->isVideoStreamPaused = video_paused;
+}
+
 // ----------------------------------------------------
 // CoordinatorRoomListener: LiveKit 事件监听与桥接
 // ----------------------------------------------------
@@ -72,12 +111,13 @@ public:
             // successful meeting join.
             coordinator->_participants.clear();
 
-            // 解析并同步 JoinResponse 中的 Metadata
+            // 读取 Room 的统一原生快照。JoinResponse 与后续 RoomUpdate
+            // 都已经提交到这里，避免 UI 从过期 protobuf 副本读取状态。
             if (coordinator->_room) {
-                auto joinResp = coordinator->_room->join_response();
-                if (joinResp && joinResp->has_room()) {
-                    coordinator->parseRoomMetadata(joinResp->room().metadata());
-                }
+                const auto native_room_info = coordinator->_room->room_info();
+                coordinator->_roomInfo = ToMeetingRoomInfo(native_room_info);
+                emit coordinator->roomInfoUpdated(coordinator->_roomInfo);
+                coordinator->parseRoomMetadata(native_room_info.metadata);
 
                 // 注册本端 Participant (必须包含自己)
                 coordinator->ensureLocalParticipant();
@@ -95,6 +135,7 @@ public:
                         info.isHost = (pId == coordinator->_meetingDetail.hostUserId || pId == coordinator->_meetingDetail.creatorUserId);
                         info.isAudioMuted = true;
                         info.isVideoEnabled = false;
+                        CopyParticipantState(p, &info);
                         for (const auto &[tsid, pub] : p->tracks()) {
                             if (pub && pub->track()) {
                                 if (pub->track()->kind() == livekit::TrackKind::Audio) {
@@ -201,13 +242,154 @@ public:
         }, Qt::QueuedConnection);
     }
 
+    void OnRoomMetadataChanged(const livekit::RoomInfo &room,
+                               const std::string &oldMetadata,
+                               const std::string &newMetadata) override {
+        auto *coordinator = _coordinator;
+        if (!coordinator || _generation == 0) return;
+        const auto generation = _generation;
+        const QString metadata = QString::fromStdString(newMetadata);
+        QMetaObject::invokeMethod(coordinator, [coordinator, generation, metadata]() {
+            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
+            coordinator->parseRoomMetadata(metadata.toStdString());
+        }, Qt::QueuedConnection);
+    }
+
+    void OnRoomUpdated(const livekit::RoomInfo &room) override {
+        auto *coordinator = _coordinator;
+        if (!coordinator || _generation == 0) return;
+        const auto generation = _generation;
+        const MeetingRoomInfo info = ToMeetingRoomInfo(room);
+        QMetaObject::invokeMethod(coordinator, [coordinator, generation, info]() {
+            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
+            coordinator->_roomInfo = info;
+            emit coordinator->roomInfoUpdated(coordinator->_roomInfo);
+        }, Qt::QueuedConnection);
+    }
+
+    void OnConnectionQualityChanged(std::shared_ptr<livekit::Participant> participant,
+                                    livekit::ConnectionQuality quality,
+                                    float score) override {
+        auto *coordinator = _coordinator;
+        if (!participant || !coordinator || _generation == 0) return;
+        const auto generation = _generation;
+        const QString identity = QString::fromStdString(participant->identity());
+        QMetaObject::invokeMethod(coordinator, [coordinator, generation, identity, quality, score]() {
+            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
+            const auto it = coordinator->_participants.find(identity);
+            if (it == coordinator->_participants.end()) return;
+            if (it->second.connectionQuality == quality &&
+                it->second.connectionQualityScore == score) {
+                return;
+            }
+            it->second.connectionQuality = quality;
+            it->second.connectionQualityScore = score;
+            coordinator->updateParticipantListAndNotify();
+            emit coordinator->participantConnectionQualityChanged(
+                identity, static_cast<int>(quality), score);
+        }, Qt::QueuedConnection);
+    }
+
+    void OnTrackStreamStateChanged(
+        std::shared_ptr<livekit::Participant> participant,
+        std::shared_ptr<livekit::TrackPublication> publication,
+        livekit::TrackPublication::StreamState state) override {
+        auto *coordinator = _coordinator;
+        if (!participant || !publication || !publication->track() ||
+            !coordinator || _generation == 0) {
+            return;
+        }
+        const auto generation = _generation;
+        const QString identity = QString::fromStdString(participant->identity());
+        const QString trackSid = QString::fromStdString(publication->sid());
+        const bool isVideo = publication->track()->kind() == livekit::TrackKind::Video;
+        const bool paused = state == livekit::TrackPublication::StreamState::Paused;
+
+        // A participant may have multiple tracks of the same kind. Snapshot
+        // their aggregate paused state on the native callback thread so the
+        // Qt projection remains correct when one of them resumes.
+        bool audioPaused = false;
+        bool videoPaused = false;
+        for (const auto &[sid, candidate] : participant->tracks()) {
+            if (!candidate || !candidate->track() ||
+                candidate->stream_state() != livekit::TrackPublication::StreamState::Paused) {
+                continue;
+            }
+            if (candidate->track()->kind() == livekit::TrackKind::Audio) {
+                audioPaused = true;
+            } else if (candidate->track()->kind() == livekit::TrackKind::Video) {
+                videoPaused = true;
+            }
+        }
+
+        QMetaObject::invokeMethod(coordinator,
+                                  [coordinator, generation, identity, trackSid, isVideo, paused,
+                                   audioPaused, videoPaused]() {
+            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
+            const auto it = coordinator->_participants.find(identity);
+            if (it == coordinator->_participants.end()) return;
+            const bool aggregate_changed =
+                it->second.isAudioStreamPaused != audioPaused ||
+                it->second.isVideoStreamPaused != videoPaused;
+            if (aggregate_changed) {
+                it->second.isAudioStreamPaused = audioPaused;
+                it->second.isVideoStreamPaused = videoPaused;
+                coordinator->updateParticipantListAndNotify();
+            }
+            // A second track of the same kind can change state while the
+            // participant-level aggregate remains paused. Preserve that
+            // track-level event for consumers such as a per-track renderer.
+            emit coordinator->participantTrackStreamStateChanged(
+                identity, trackSid, isVideo, paused);
+        }, Qt::QueuedConnection);
+    }
+
+    void OnParticipantPermissionsChanged(
+        const livekit::ParticipantPermission &oldPermission,
+        const livekit::ParticipantPermission &newPermission,
+        std::shared_ptr<livekit::Participant> participant) override {
+        auto *coordinator = _coordinator;
+        if (!participant || !coordinator || _generation == 0) return;
+        const auto generation = _generation;
+        const QString identity = QString::fromStdString(participant->identity());
+        QMetaObject::invokeMethod(coordinator, [coordinator, generation, identity, newPermission]() {
+            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
+            const auto it = coordinator->_participants.find(identity);
+            if (it == coordinator->_participants.end()) return;
+            it->second.permissions = newPermission;
+            coordinator->updateParticipantListAndNotify();
+            emit coordinator->participantPermissionsChanged(identity, newPermission);
+        }, Qt::QueuedConnection);
+    }
+
+    void OnTrackSubscriptionPermissionChanged(
+        const livekit::TrackSubscriptionPermission &permission,
+        std::shared_ptr<livekit::Participant> participant,
+        std::shared_ptr<livekit::TrackPublication> publication) override {
+        auto *coordinator = _coordinator;
+        if (!coordinator || _generation == 0) return;
+        const auto generation = _generation;
+        const QString identity = participant
+            ? QString::fromStdString(participant->identity())
+            : QString();
+        const QString participantSid = QString::fromStdString(permission.participant_sid);
+        const QString trackSid = QString::fromStdString(permission.track_sid);
+        const bool allowed = permission.allowed;
+        QMetaObject::invokeMethod(coordinator,
+                                  [coordinator, generation, identity, participantSid, trackSid, allowed]() {
+            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
+            emit coordinator->trackSubscriptionPermissionChanged(
+                identity, participantSid, trackSid, allowed);
+        }, Qt::QueuedConnection);
+    }
+
     void OnParticipantConnected(std::shared_ptr<livekit::RemoteParticipant> p) override {
         auto *coordinator = _coordinator;
         if (!p || !coordinator || _generation == 0) return;
         const auto generation = _generation;
         QString id = QString::fromStdString(p->identity());
         QString realNick = ResolveParticipantNickname(p);
-        QMetaObject::invokeMethod(coordinator, [coordinator, generation, id, realNick]() {
+        QMetaObject::invokeMethod(coordinator, [coordinator, generation, id, realNick, p]() {
             if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
             MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "REMOTE_JOIN", QString("参会人加入: %1 (昵称: %2)").arg(id).arg(realNick));
             ParticipantInfo info;
@@ -217,6 +399,7 @@ public:
             info.isHost = (id == coordinator->_meetingDetail.hostUserId || id == coordinator->_meetingDetail.creatorUserId);
             info.isAudioMuted = true;
             info.isVideoEnabled = false;
+            CopyParticipantState(p, &info);
             coordinator->_participants[id] = info;
             coordinator->updateParticipantListAndNotify();
             emit coordinator->participantJoined(id, realNick);
@@ -383,6 +566,8 @@ std::shared_ptr<MeetingCoordinator> MeetingCoordinator::create(QObject *parent) 
 MeetingCoordinator::MeetingCoordinator(QObject *parent)
     : QObject(parent) {
     qRegisterMetaType<livekit::RoomDisconnectReason>("livekit::RoomDisconnectReason");
+    qRegisterMetaType<MeetingRoomInfo>("OpenMeeting::MeetingRoomInfo");
+    qRegisterMetaType<livekit::ParticipantPermission>("livekit::ParticipantPermission");
     _localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
     _localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
 
@@ -1223,6 +1408,9 @@ void MeetingCoordinator::ensureLocalParticipant() {
     localInfo.isHost = isHost();
     localInfo.isAudioMuted = _audioMuted;
     localInfo.isVideoEnabled = _videoEnabled;
+    if (_room && _room->local_participant()) {
+        CopyParticipantState(_room->local_participant(), &localInfo);
+    }
 
     // 清除旧的可能存在的本地项，避免重复
     for (auto it = _participants.begin(); it != _participants.end();) {
@@ -1250,7 +1438,15 @@ void MeetingCoordinator::updateParticipantListAndNotify() {
 }
 
 void MeetingCoordinator::parseRoomMetadata(const std::string &metadata) {
-    if (metadata.empty()) return;
+    if (metadata.empty()) {
+        _meetingDetail = MeetingDetail{};
+        for (auto &[identity, participant] : _participants) {
+            participant.isHost = false;
+        }
+        updateParticipantListAndNotify();
+        emit meetingDetailUpdated(_meetingDetail);
+        return;
+    }
     QJsonParseError err;
     QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromRawData(metadata.data(), static_cast<int>(metadata.size())), &err);
     if (err.error != QJsonParseError::NoError || !doc.isObject()) return;
@@ -1274,6 +1470,12 @@ void MeetingCoordinator::parseRoomMetadata(const std::string &metadata) {
     _meetingDetail.lockMeeting = setting.value("lockMeeting").toBool();
     _meetingDetail.canJoinEarly = setting.value("canParticipantJoinMeetingEarly").toBool(true);
 
+    for (auto &[identity, participant] : _participants) {
+        participant.isHost = (identity == _meetingDetail.hostUserId ||
+                              identity == _meetingDetail.creatorUserId);
+    }
+
+    updateParticipantListAndNotify();
     emit meetingDetailUpdated(_meetingDetail);
 }
 

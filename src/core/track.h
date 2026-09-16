@@ -259,17 +259,33 @@ class TrackPublication {
 public:
     TrackPublication(std::shared_ptr<Track> track, const std::string& sid, const std::string& name)
         : track_(track), sid_(sid), name_(name) {}
+    virtual ~TrackPublication() = default;
 
     std::string sid() const { return sid_; }
     std::string name() const { return name_; }
     std::shared_ptr<Track> track() const { return track_; }
     void set_track(std::shared_ptr<Track> track) { track_ = track; }
     bool muted() const { return track_ ? track_->muted() : false; }
+    enum class StreamState {
+        Active,
+        Paused,
+    };
+
+    StreamState stream_state() const { return stream_state_; }
+    void set_stream_state(StreamState state) { stream_state_ = state; }
+
+    // The server can temporarily deny a subscription for a participant/track
+    // pair. Keep that state on the real publication even before the remote
+    // publication-control unification work lands.
+    bool subscription_allowed() const { return subscription_allowed_; }
+    void set_subscription_allowed(bool allowed) { subscription_allowed_ = allowed; }
 
 private:
     std::shared_ptr<Track> track_;
     std::string sid_;
     std::string name_;
+    StreamState stream_state_{StreamState::Active};
+    bool subscription_allowed_{true};
 };
 
 } // namespace livekit
