@@ -20,6 +20,7 @@
 #include "rpc_types.h"
 #include "frame_cryptor.h"
 #include "data_stream_assembler.h"
+#include "data_stream.h"
 #include "operation.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
@@ -153,6 +154,8 @@ public:
     virtual void OnDataReceived(const std::vector<uint8_t>& payload, std::shared_ptr<RemoteParticipant> participant, const std::string& topic) {}
     virtual void OnChatMessage(const ChatMessage& message, std::shared_ptr<Participant> participant) {}
     virtual void OnDataChannelBufferedAmountLowThresholdChanged(uint64_t amount, bool reliable) {}
+    virtual void OnTextStreamOpened(std::shared_ptr<TextStreamReader> reader, std::shared_ptr<Participant> participant) {}
+    virtual void OnByteStreamOpened(std::shared_ptr<ByteStreamReader> reader, std::shared_ptr<Participant> participant) {}
 
     virtual void OnActiveSpeakersChanged(const std::vector<std::shared_ptr<Participant>>& speakers) {}
 
@@ -208,8 +211,27 @@ public:
     // === 高级通信与 DataChannel 背压流控 ===
     bool PublishData(const std::vector<uint8_t>& payload, bool reliable = true,
                      const std::vector<std::string>& destination_identities = {}, const std::string& topic = "");
+    bool PublishDataPacket(const proto::DataPacket& packet, bool reliable = true);
     void SetDataChannelBufferedAmountLowThreshold(uint64_t threshold, bool reliable = true);
     uint64_t GetDataChannelBufferedAmount(bool reliable = true) const;
+
+    // === 现代流式数据发送与工厂 (Text / Byte Streams) ===
+    std::shared_ptr<TextStreamWriter> CreateTextStreamWriter(
+        const std::string& topic = "",
+        const std::map<std::string, std::string>& attributes = {},
+        const std::string& stream_id = "",
+        std::optional<std::size_t> total_size = std::nullopt,
+        const std::string& reply_to_id = "",
+        const std::vector<std::string>& destination_identities = {});
+
+    std::shared_ptr<ByteStreamWriter> CreateByteStreamWriter(
+        const std::string& name,
+        const std::string& topic = "",
+        const std::map<std::string, std::string>& attributes = {},
+        const std::string& stream_id = "",
+        std::optional<std::size_t> total_size = std::nullopt,
+        const std::string& mime_type = "application/octet-stream",
+        const std::vector<std::string>& destination_identities = {});
 
     // === 新增：RPC 消息解包与发包管理 ===
     asio::awaitable<std::string> SendRpcRequest(const RpcPacket& packet);
@@ -481,6 +503,9 @@ private:
 
 private:
     IncomingDataStreamAssembler incoming_data_streams_;
+    mutable std::mutex streams_mutex_;
+    std::unordered_map<std::string, std::shared_ptr<TextStreamReader>> active_text_readers_;
+    std::unordered_map<std::string, std::shared_ptr<ByteStreamReader>> active_byte_readers_;
 };
 
 } // namespace livekit

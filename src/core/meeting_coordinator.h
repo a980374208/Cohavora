@@ -18,6 +18,7 @@
 
 #include <asio.hpp>
 #include "src/core/room.h"
+#include "src/core/data_stream.h"
 #include "src/core/local_audio_track.h"
 #include "src/core/local_video_track.h"
 #include "src/core/meeting_session_runtime.h"
@@ -156,6 +157,24 @@ public:
     std::shared_ptr<livekit::AudioSource> localAudioSource() const { return _localAudioSource; }
     std::shared_ptr<livekit::VideoSource> localVideoSource() const { return _localVideoSource; }
 
+    // 现代数据流发送工厂方法 (DataStream Writers)
+    std::shared_ptr<livekit::TextStreamWriter> createTextStreamWriter(
+        const QString &topic = QString(),
+        const std::map<std::string, std::string> &attributes = {},
+        const QString &streamId = QString(),
+        std::optional<size_t> totalSize = std::nullopt,
+        const QString &replyToId = QString(),
+        const std::vector<std::string> &destinationIdentities = {});
+
+    std::shared_ptr<livekit::ByteStreamWriter> createByteStreamWriter(
+        const QString &name,
+        const QString &topic = QString(),
+        const std::map<std::string, std::string> &attributes = {},
+        const QString &streamId = QString(),
+        std::optional<size_t> totalSize = std::nullopt,
+        const QString &mimeType = "application/octet-stream",
+        const std::vector<std::string> &destinationIdentities = {});
+
 signals:
     // 状态流转与全局通知
     void stateChanged(MeetingState newState, const QString &detail);
@@ -212,6 +231,10 @@ signals:
     void chatMediaReceivingCompleted(const QString &transferId, const QString &senderIdentity, const QString &senderName,
                                      const QString &mediaType, const QString &fileName, const QByteArray &data);
     void chatMediaReceivingFailed(const QString &transferId, const QString &reason);
+
+    // 现代数据流 (DataStream) 接收信号
+    void textStreamReceived(std::shared_ptr<livekit::TextStreamReader> reader, const QString &senderIdentity);
+    void byteStreamReceived(std::shared_ptr<livekit::ByteStreamReader> reader, const QString &senderIdentity);
 
 private:
     void setState(MeetingState s, const QString &detail = QString());

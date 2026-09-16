@@ -96,6 +96,7 @@ set(LIVEKIT_SOURCES
     src/core/remote_track_publication.cpp
     src/core/adaptive_stream_manager.cpp
     src/core/data_stream_assembler.cpp
+    src/core/data_stream.cpp
     src/rtc/webrtc_manager.cpp
     src/rtc/audio_frame.cpp
     src/rtc/video_frame.cpp
