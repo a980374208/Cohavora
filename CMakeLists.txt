@@ -399,6 +399,14 @@ target_link_libraries(test_audio_render_reference_apm PRIVATE
     livekit_signaling
 )
 
+# Meeting recovery UX and connection state loopback contract
+add_executable(test_meeting_recovery_ux
+    tests/test_meeting_recovery_ux.cpp
+)
+target_link_libraries(test_meeting_recovery_ux PRIVATE
+    livekit_signaling
+)
+
 if(LIVEKIT_BUILD_EXTERNAL_TESTS)
     add_executable(test_livekit_official_connect
         tests/test_livekit_official_connect.cpp
@@ -711,6 +719,7 @@ add_test(NAME remote_publication_lifecycle_test COMMAND test_remote_publication_
 add_test(NAME local_unpublish_transaction_test COMMAND test_local_unpublish_transaction)
 add_test(NAME camera_switch_transaction_test COMMAND test_camera_switch_transaction)
 add_test(NAME audio_render_reference_apm_test COMMAND test_audio_render_reference_apm)
+add_test(NAME meeting_recovery_ux_test COMMAND test_meeting_recovery_ux)
 add_test(NAME media_streaming_test COMMAND test_media_streaming)
 add_test(NAME stats_system_test COMMAND test_stats_system)
 add_test(NAME audio_playout_warmup_test COMMAND test_audio_playout_warmup)
