@@ -8,6 +8,8 @@
 
 namespace livekit {
 
+class AudioApmProcessor;
+
 class WebRTCManager {
 public:
     static WebRTCManager& Instance();
@@ -25,6 +27,11 @@ public:
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory() const { return factory_; }
     webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm() const { return adm_; }
 
+    // APM 3A 扬声器下行渲染参考流对接
+    void SetApmProcessor(std::shared_ptr<AudioApmProcessor> processor);
+    std::shared_ptr<AudioApmProcessor> apm_processor() const;
+    void ResetApmProcessor();
+
     bool SetPlayoutDevice(uint16_t index) {
         if (!adm_ || !worker_thread_) return false;
         return worker_thread_->BlockingCall([this, index]() {
@@ -36,6 +43,7 @@ public:
                 if (adm_->SetPlayoutDevice(index) != 0) {
                     return false;
                 }
+                ResetApmProcessor();
                 if (was_playing) {
                     if (adm_->InitSpeaker() != 0 || adm_->InitPlayout() != 0) {
                         return false;
@@ -88,6 +96,9 @@ private:
 
     webrtc::scoped_refptr<webrtc::PeerConnectionFactoryInterface> factory_;
     webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm_;
+
+    mutable std::mutex apm_mutex_;
+    std::shared_ptr<AudioApmProcessor> apm_processor_;
 };
 
 } // namespace livekit

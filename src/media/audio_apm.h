@@ -50,6 +50,16 @@ public:
     // 传入扬声器播放音频帧 (为 AEC 回声消除提供参考信号)
     void ProcessRenderFrame(const AudioFrame& render_frame);
 
+    // 重置 APM 引擎状态 (清空滤波器与内部延迟，用于设备切换、重连与断开)
+    void Reset();
+
+    // 诊断状态：是否在最近时间窗口内收到过有效的下行渲染参考流
+    bool HasActiveRenderReference(int64_t max_age_ms = 1000) const;
+
+    // 统计指标
+    uint64_t GetRenderFramesProcessed() const noexcept { return render_frames_processed_.load(); }
+    uint64_t GetCaptureFramesProcessed() const noexcept { return capture_frames_processed_.load(); }
+
 private:
     webrtc::scoped_refptr<webrtc::AudioProcessing> apm_;
     ApmConfig config_;
@@ -58,6 +68,11 @@ private:
     // 内部 10ms 帧划分与声道解分流缓冲区
     std::vector<int16_t> render_buffer_;
     std::vector<int16_t> capture_buffer_;
+
+    std::atomic<uint64_t> render_frames_processed_{0};
+    std::atomic<uint64_t> capture_frames_processed_{0};
+    mutable std::mutex stats_mutex_;
+    std::chrono::steady_clock::time_point last_render_frame_time_{};
 };
 
 } // namespace livekit

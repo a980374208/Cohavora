@@ -84,19 +84,42 @@ void AudioApmProcessor::ProcessRenderFrame(const AudioFrame& render_frame) {
     int channels = render_frame.numChannels();
     int samples_per_channel = render_frame.samplesPerChannel();
 
-    // APM 严格要求 10ms 帧长 (如 48kHz 下为 480 采样点)
-    if (rate <= 0 || channels <= 0 || samples_per_channel != (rate / 100)) {
+    if (rate <= 0 || channels <= 0) {
         return;
     }
-    if (render_frame.data().size() < static_cast<size_t>(samples_per_channel * channels)) {
-        return;
-    }
+
+    const int samples_per_10ms_per_channel = rate / 100;
+    const size_t total_samples_per_10ms = static_cast<size_t>(samples_per_10ms_per_channel * channels);
+    if (total_samples_per_10ms == 0) return;
 
     webrtc::StreamConfig stream_cfg(rate, channels);
-    const int16_t* src_pcm = render_frame.data().data();
 
-    // 10ms 帧长直投 APM 反向参考流 (AEC 扬声器信号)
-    apm_->ProcessReverseStream(src_pcm, stream_cfg, stream_cfg, const_cast<int16_t*>(src_pcm));
+    // Fast-path: 刚好是单个 10ms 块且 FIFO 为空
+    if (samples_per_channel == samples_per_10ms_per_channel &&
+        render_frame.data().size() >= total_samples_per_10ms &&
+        render_buffer_.empty()) {
+        const int16_t* src_pcm = render_frame.data().data();
+        apm_->ProcessReverseStream(src_pcm, stream_cfg, stream_cfg, const_cast<int16_t*>(src_pcm));
+        render_frames_processed_.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            last_render_frame_time_ = std::chrono::steady_clock::now();
+        }
+        return;
+    }
+
+    // 分帧处理: 将数据存入 FIFO，按 10ms 连续切片投递
+    render_buffer_.insert(render_buffer_.end(), render_frame.data().begin(), render_frame.data().end());
+    while (render_buffer_.size() >= total_samples_per_10ms) {
+        int16_t* src_pcm = render_buffer_.data();
+        apm_->ProcessReverseStream(src_pcm, stream_cfg, stream_cfg, src_pcm);
+        render_buffer_.erase(render_buffer_.begin(), render_buffer_.begin() + total_samples_per_10ms);
+        render_frames_processed_.fetch_add(1, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> slock(stats_mutex_);
+            last_render_frame_time_ = std::chrono::steady_clock::now();
+        }
+    }
 }
 
 AudioFrame AudioApmProcessor::ProcessCaptureFrame(const AudioFrame& capture_frame) {
@@ -125,7 +148,66 @@ AudioFrame AudioApmProcessor::ProcessCaptureFrame(const AudioFrame& capture_fram
         return capture_frame;
     }
 
+    capture_frames_processed_.fetch_add(1, std::memory_order_relaxed);
     return AudioFrame(std::move(processed_pcm), rate, channels, samples_per_channel);
+}
+
+void AudioApmProcessor::Reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    apm_ = webrtc::BuiltinAudioProcessingBuilder().Build(webrtc::CreateEnvironment());
+    if (apm_) {
+        webrtc::AudioProcessing::Config apm_cfg;
+        apm_cfg.echo_canceller.enabled = config_.enable_aec;
+        apm_cfg.echo_canceller.mobile_mode = false;
+        apm_cfg.noise_suppression.enabled = config_.enable_ans;
+        switch (config_.ns_level) {
+            case NoiseSuppressionLevel::Low:
+                apm_cfg.noise_suppression.level = webrtc::AudioProcessing::Config::NoiseSuppression::kLow;
+                break;
+            case NoiseSuppressionLevel::Moderate:
+                apm_cfg.noise_suppression.level = webrtc::AudioProcessing::Config::NoiseSuppression::kModerate;
+                break;
+            case NoiseSuppressionLevel::High:
+                apm_cfg.noise_suppression.level = webrtc::AudioProcessing::Config::NoiseSuppression::kHigh;
+                break;
+            case NoiseSuppressionLevel::VeryHigh:
+                apm_cfg.noise_suppression.level = webrtc::AudioProcessing::Config::NoiseSuppression::kVeryHigh;
+                break;
+        }
+        apm_cfg.gain_controller1.enabled = config_.enable_agc;
+        switch (config_.agc_mode) {
+            case GainControlMode::AdaptiveAnalog:
+                apm_cfg.gain_controller1.mode = webrtc::AudioProcessing::Config::GainController1::kAdaptiveAnalog;
+                break;
+            case GainControlMode::AdaptiveDigital:
+                apm_cfg.gain_controller1.mode = webrtc::AudioProcessing::Config::GainController1::kAdaptiveDigital;
+                break;
+            case GainControlMode::FixedDigital:
+                apm_cfg.gain_controller1.mode = webrtc::AudioProcessing::Config::GainController1::kFixedDigital;
+                break;
+        }
+        apm_cfg.gain_controller1.target_level_dbfs = config_.target_gain_dbfs;
+        apm_cfg.gain_controller1.compression_gain_db = config_.compression_gain_db;
+        apm_cfg.high_pass_filter.enabled = config_.enable_hpf;
+        apm_->ApplyConfig(apm_cfg);
+    }
+    render_buffer_.clear();
+    capture_buffer_.clear();
+    {
+        std::lock_guard<std::mutex> slock(stats_mutex_);
+        last_render_frame_time_ = {};
+    }
+}
+
+bool AudioApmProcessor::HasActiveRenderReference(int64_t max_age_ms) const {
+    if (!config_.enable_aec) return false;
+    std::lock_guard<std::mutex> lock(stats_mutex_);
+    if (last_render_frame_time_ == std::chrono::steady_clock::time_point{}) {
+        return false;
+    }
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - last_render_frame_time_).count();
+    return elapsed >= 0 && elapsed <= max_age_ms;
 }
 
 } // namespace livekit

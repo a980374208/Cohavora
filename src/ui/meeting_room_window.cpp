@@ -1848,6 +1848,7 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	// 4. 启动物理麦克风 WASAPI 采集
 	_wasapiCap = livekit::WasapiAudioCapture::Create();
 	_wasapiCap->EnableApm();
+	livekit::WebRTCManager::Instance().SetApmProcessor(_wasapiCap->apm_processor());
 	livekit::WasapiCaptureConfig acfg;
 	acfg.type = livekit::WasapiCaptureType::Microphone;
 	acfg.target_sample_rate = 48000;
@@ -2364,6 +2365,9 @@ void MeetingRoomWindow::initLayout() {
 	_bottomBar->microphoneDeviceChanged() | rpl::on_next([this](const QString &devId) {
 		if (_wasapiCap) {
 			_wasapiCap->SwitchDevice(devId.toStdString());
+			if (auto apm = _wasapiCap->apm_processor()) {
+				apm->Reset();
+			}
 			LogToConsole(LogCategory::Media, "DEVICE", QString("麦克风设备已切换为: %1").arg(devId.isEmpty() ? "(系统默认)" : devId));
 		}
 	}, lifetime());
@@ -3327,6 +3331,7 @@ void MeetingRoomWindow::stopLiveKitSession() {
 		_wasapiCap->Stop();
 		_wasapiCap.reset();
 	}
+	livekit::WebRTCManager::Instance().SetApmProcessor(nullptr);
 	if (_cameraManager) {
 		_cameraManager->Stop();
 		_cameraManager.reset();
