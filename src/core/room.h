@@ -2,6 +2,7 @@
 
 #include <string>
 #include <memory>
+#include <cstdint>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -9,6 +10,7 @@
 #include <mutex>
 #include <chrono>
 #include <functional>
+#include <optional>
 #include <asio.hpp>
 #include "signal_client.h"
 #include "participant.h"
@@ -27,12 +29,52 @@
 namespace livekit {
 
 struct RoomStatsReport;
+class RemoteTrackPublication;
+struct RemotePublicationControlRequest;
+enum class RemotePublicationControlDispatch;
 
 enum class ConnectionState {
     Disconnected,
     Connecting,
     Connected,
     Reconnecting
+};
+
+// Snapshot of the server's room state. This is intentionally a native value
+// type instead of a protobuf message so callers do not depend on signaling
+// generated headers or retain mutable protocol state.
+struct RoomInfo {
+    std::string sid;
+    std::string name;
+    std::string metadata;
+    uint32_t empty_timeout = 0;
+    uint32_t departure_timeout = 0;
+    uint32_t max_participants = 0;
+    int64_t creation_time_ms = 0;
+    uint32_t num_participants = 0;
+    uint32_t num_publishers = 0;
+    bool active_recording = false;
+
+    bool operator==(const RoomInfo& other) const {
+        return sid == other.sid &&
+            name == other.name &&
+            metadata == other.metadata &&
+            empty_timeout == other.empty_timeout &&
+            departure_timeout == other.departure_timeout &&
+            max_participants == other.max_participants &&
+            creation_time_ms == other.creation_time_ms &&
+            num_participants == other.num_participants &&
+            num_publishers == other.num_publishers &&
+            active_recording == other.active_recording;
+    }
+
+    bool operator!=(const RoomInfo& other) const { return !(*this == other); }
+};
+
+struct TrackSubscriptionPermission {
+    std::string participant_sid;
+    std::string track_sid;
+    bool allowed = true;
 };
 
 // Client-facing disconnect semantics. Keep this independent of the protobuf
@@ -77,6 +119,11 @@ public:
     virtual void OnReconnecting() {}
     virtual void OnReconnected() {}
 
+    virtual void OnRoomMetadataChanged(const RoomInfo& room,
+                                       const std::string& old_metadata,
+                                       const std::string& new_metadata) {}
+    virtual void OnRoomUpdated(const RoomInfo& room) {}
+
     virtual void OnParticipantConnected(std::shared_ptr<RemoteParticipant> participant) {}
     virtual void OnParticipantDisconnected(std::shared_ptr<RemoteParticipant> participant) {}
     virtual void OnParticipantAttributesChanged(const std::map<std::string, std::string>& changed_attributes, std::shared_ptr<Participant> participant) {}
@@ -88,6 +135,17 @@ public:
     virtual void OnTrackSubscribed(std::shared_ptr<Track> track, std::shared_ptr<TrackPublication> publication, std::shared_ptr<RemoteParticipant> participant) {}
     virtual void OnTrackUnsubscribed(std::shared_ptr<Track> track, std::shared_ptr<TrackPublication> publication, std::shared_ptr<RemoteParticipant> participant) {}
     virtual void OnTrackMuted(std::shared_ptr<Participant> participant, std::shared_ptr<TrackPublication> publication, bool muted) {}
+    virtual void OnTrackStreamStateChanged(std::shared_ptr<Participant> participant,
+                                           std::shared_ptr<TrackPublication> publication,
+                                           TrackPublication::StreamState state) {}
+    virtual void OnTrackSubscriptionPermissionChanged(
+        const TrackSubscriptionPermission& permission,
+        std::shared_ptr<Participant> participant,
+        std::shared_ptr<TrackPublication> publication) {}
+
+    virtual void OnConnectionQualityChanged(std::shared_ptr<Participant> participant,
+                                            ConnectionQuality quality,
+                                            float score) {}
 
     virtual void OnLocalTrackRepublished(const std::string& previous_sid, std::shared_ptr<TrackPublication> publication) {}
 
@@ -123,12 +181,19 @@ public:
     std::map<std::string, std::shared_ptr<RemoteParticipant>> remote_participants() const;
     std::shared_ptr<const proto::JoinResponse> join_response() const;
     std::vector<std::string> enabled_publish_codecs() const;
+    RoomInfo room_info() const;
+    std::optional<TrackSubscriptionPermission> track_subscription_permission(
+        const std::string& participant_sid,
+        const std::string& track_sid) const;
     void SetLocalParticipantForTesting(std::shared_ptr<LocalParticipant> local) {
         std::lock_guard lock(room_mutex_);
         local_participant_ = local;
     }
     void UpdateParticipantsForTesting(const proto::ParticipantUpdate& update);
     void HandleActiveSpeakerUpdateForTesting(const proto::SpeakersChanged& update);
+    // Deterministic state-event injection for unit tests. Production events
+    // still enter through the generation-checked SignalClient callback.
+    void HandleSignalMessageForTesting(const proto::SignalResponse& message);
 
     void AddListener(std::shared_ptr<RoomListener> listener);
     void RemoveListener(std::shared_ptr<RoomListener> listener);
@@ -199,12 +264,33 @@ public:
 
 private:
     LogHandler log_handler_;
-    void HandleSignalEvent(const SignalEvent& event);
+    void HandleSignalEvent(const SignalEvent& event, uint64_t event_generation = 0);
     void HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg);
     void UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::ParticipantInfo>& participants);
     void UpdateParticipants(const proto::ParticipantUpdate& update);
     void UpdateTrackMute(const proto::MuteTrackRequest& mute);
     void HandleActiveSpeakerUpdate(const proto::SpeakersChanged& speakers_changed);
+    void UpdateRoomInfo(const proto::Room& room);
+    void UpdateConnectionQuality(const proto::ConnectionQualityUpdate& update);
+    void UpdateTrackStreamStates(const proto::StreamStateUpdate& update);
+    void UpdateTrackSubscriptionPermission(const proto::SubscriptionPermissionUpdate& update);
+    std::shared_ptr<RemoteTrackPublication> CreateRemoteTrackPublication(
+        std::shared_ptr<Track> track,
+        const std::string& participant_sid,
+        const std::string& track_sid,
+        const std::string& name,
+        proto::TrackType type);
+    RemotePublicationControlDispatch QueueRemotePublicationControl(
+        RemoteTrackPublication* publication,
+        const std::string& participant_sid,
+        uint64_t generation,
+        const RemotePublicationControlRequest& request);
+    void DetachRemotePublicationMedia(RemoteTrackPublication* publication,
+                                      bool notify_listener);
+    void RemoveRemoteMediaTrackReferences(const std::set<std::string>& track_sids);
+    // Called while room_mutex_ is held immediately before the canonical
+    // participant map is discarded by disconnect/recovery teardown.
+    void ClearRemotePublicationMediaBindingsLocked();
 
     // 协商和 Trickle 信令分发
     void SendTrickleCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type);
@@ -227,6 +313,8 @@ private:
     std::shared_ptr<SignalClient> signal_client_;
     std::shared_ptr<proto::JoinResponse> join_response_;
     std::vector<std::string> enabled_publish_codecs_;
+    RoomInfo room_info_;
+    std::map<std::pair<std::string, std::string>, bool> track_subscription_permissions_;
     ConnectionState connection_state_ = ConnectionState::Disconnected;
     std::shared_ptr<LocalParticipant> local_participant_;
     std::map<std::string, std::shared_ptr<RemoteParticipant>> remote_participants_;

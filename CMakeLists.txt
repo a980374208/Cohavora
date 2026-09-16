@@ -355,6 +355,24 @@ target_link_libraries(test_stats_system PRIVATE
     livekit_signaling
 )
 
+# Server room-state delta contract: room metadata, connection quality, stream
+# state, and subscription permissions must commit before listener delivery.
+add_executable(test_room_state_events
+    tests/test_room_state_events.cpp
+)
+target_link_libraries(test_room_state_events PRIVATE
+    livekit_signaling
+)
+
+# Canonical remote-publication ownership, control dispatch, and stale-session
+# rejection. This exercises the P1 lifecycle independently of live media.
+add_executable(test_remote_publication_lifecycle
+    tests/test_remote_publication_lifecycle.cpp
+)
+target_link_libraries(test_remote_publication_lifecycle PRIVATE
+    livekit_signaling
+)
+
 if(LIVEKIT_BUILD_EXTERNAL_TESTS)
     add_executable(test_livekit_official_connect
         tests/test_livekit_official_connect.cpp
@@ -662,6 +680,8 @@ add_test(NAME advanced_communication_test COMMAND test_advanced_communication)
 add_test(NAME chunking_simulcast_test COMMAND test_chunking_simulcast)
 add_test(NAME data_stream_assembler_test COMMAND test_data_stream_assembler)
 add_test(NAME rpc_system_test COMMAND test_rpc_system)
+add_test(NAME room_state_events_test COMMAND test_room_state_events)
+add_test(NAME remote_publication_lifecycle_test COMMAND test_remote_publication_lifecycle)
 add_test(NAME media_streaming_test COMMAND test_media_streaming)
 add_test(NAME stats_system_test COMMAND test_stats_system)
 add_test(NAME audio_playout_warmup_test COMMAND test_audio_playout_warmup)

@@ -366,6 +366,7 @@ void HundredParticipantContainer::rebuildGrid() {
 	qDeleteAll(_tiles);
 	_tiles.clear();
 	_remoteTracks.clear();
+	_simulatedParticipants.clear();
 	livekit::AdaptiveStreamManager::Instance().Clear();
 
 	if (!_gridContent) return;
@@ -389,17 +390,24 @@ void HundredParticipantContainer::rebuildGrid() {
 	for (int i = 0; i < _totalParticipants; ++i) {
 		auto tile = new ParticipantVideoTile(i + 1, _gridContent);
 
-		// 创建对应 C++ SDK 模拟 Track
+		// 创建对应 C++ SDK 模拟 Track。即使是测试网格，也从参会人
+		// 的 canonical publication map 取控制对象，不构造旁路 facade。
+		const std::string participantSid = "PA_video_sim_" + std::to_string(i + 1);
 		const std::string sid = "TR_video_sim_" + std::to_string(i + 1);
 		const std::string name = "cam_" + std::to_string(i + 1);
+		auto participant = std::make_shared<livekit::RemoteParticipant>(
+			participantSid, "simulated_" + std::to_string(i + 1));
 		auto trackPub = std::make_shared<livekit::RemoteTrackPublication>(
 			sid, name, livekit::proto::TrackType::VIDEO, nullptr
 		);
+		participant->add_publication(trackPub);
+		auto canonicalPublication = participant->get_remote_publication(sid);
 
-		tile->setRemoteTrack(trackPub);
-		livekit::AdaptiveStreamManager::Instance().RegisterTrack(trackPub);
+		tile->setRemoteTrack(canonicalPublication);
+		livekit::AdaptiveStreamManager::Instance().RegisterTrack(canonicalPublication);
 
-		_remoteTracks.push_back(trackPub);
+		_simulatedParticipants.push_back(std::move(participant));
+		_remoteTracks.push_back(std::move(canonicalPublication));
 		_tiles.push_back(tile);
 
 		const int row = i / cols;

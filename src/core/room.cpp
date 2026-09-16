@@ -3,6 +3,7 @@
 #include "stats_collector.h"
 #include "local_audio_track.h"
 #include "local_video_track.h"
+#include "remote_track_publication.h"
 #include "rtc_audio_source.h"
 #include "rtc_video_source.h"
 #include "render/owned_i420_frame.h"
@@ -22,6 +23,46 @@
 namespace livekit {
 
 namespace {
+
+RoomInfo RoomInfoFromProto(const proto::Room& room) {
+    RoomInfo info;
+    info.sid = room.sid();
+    info.name = room.name();
+    info.metadata = room.metadata();
+    info.empty_timeout = room.empty_timeout();
+    info.departure_timeout = room.departure_timeout();
+    info.max_participants = room.max_participants();
+    info.creation_time_ms = room.creation_time_ms();
+    info.num_participants = room.num_participants();
+    info.num_publishers = room.num_publishers();
+    info.active_recording = room.active_recording();
+    return info;
+}
+
+ConnectionQuality ConnectionQualityFromProto(proto::ConnectionQuality quality) {
+    switch (quality) {
+    case proto::ConnectionQuality::POOR:
+        return ConnectionQuality::Poor;
+    case proto::ConnectionQuality::GOOD:
+        return ConnectionQuality::Good;
+    case proto::ConnectionQuality::EXCELLENT:
+        return ConnectionQuality::Excellent;
+    case proto::ConnectionQuality::LOST:
+        return ConnectionQuality::Lost;
+    default:
+        return ConnectionQuality::Unknown;
+    }
+}
+
+TrackPublication::StreamState StreamStateFromProto(proto::StreamState state) {
+    switch (state) {
+    case proto::StreamState::PAUSED:
+        return TrackPublication::StreamState::Paused;
+    case proto::StreamState::ACTIVE:
+    default:
+        return TrackPublication::StreamState::Active;
+    }
+}
 
 class RoomPeerConnectionObserver : public webrtc::PeerConnectionObserver {
 public:
@@ -237,6 +278,22 @@ std::vector<std::string> Room::enabled_publish_codecs() const {
     return enabled_publish_codecs_;
 }
 
+RoomInfo Room::room_info() const {
+    std::lock_guard lock(room_mutex_);
+    return room_info_;
+}
+
+std::optional<TrackSubscriptionPermission> Room::track_subscription_permission(
+    const std::string& participant_sid,
+    const std::string& track_sid) const {
+    std::lock_guard lock(room_mutex_);
+    const auto it = track_subscription_permissions_.find({participant_sid, track_sid});
+    if (it == track_subscription_permissions_.end()) {
+        return std::nullopt;
+    }
+    return TrackSubscriptionPermission{participant_sid, track_sid, it->second};
+}
+
 std::vector<std::shared_ptr<RoomListener>> Room::GetListenersSnapshot() const {
     std::lock_guard lock(room_mutex_);
     return listeners_;
@@ -286,6 +343,8 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         }
         connection_state_ = ConnectionState::Connecting;
         disconnect_reason_ = RoomDisconnectReason::Unknown;
+        room_info_ = RoomInfo{};
+        track_subscription_permissions_.clear();
         if (!reconnect_active_) {
             reconnect_disabled_ = false;
             server_disconnect_finalizing_ = false;
@@ -297,8 +356,8 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
 
     try {
         auto self = shared_from_this();
-        auto conn_res = co_await SignalClient::Connect(url, token, opts, std::nullopt, [self](const SignalEvent& event) {
-            self->HandleSignalEvent(event);
+        auto conn_res = co_await SignalClient::Connect(url, token, opts, std::nullopt, [self, generation](const SignalEvent& event) {
+            self->HandleSignalEvent(event, generation);
         });
 
         if (conn_res.error || !conn_res.join_response) {
@@ -330,6 +389,9 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             }
         signal_client_ = conn_res.client;
         join_response_ = join_res;
+        if (join_res->has_room()) {
+            room_info_ = RoomInfoFromProto(join_res->room());
+        }
         enabled_publish_codecs_.clear();
         for (const auto& codec : join_res->enabled_publish_codecs()) {
             std::string mime = codec.mime();
@@ -542,6 +604,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             join_response_.reset();
             enabled_publish_codecs_.clear();
             local_participant_.reset();
+            ClearRemotePublicationMediaBindingsLocked();
             remote_participants_.clear();
             publisher = std::move(publisher_pc_);
             subscriber = std::move(subscriber_pc_);
@@ -616,6 +679,7 @@ void Room::Disconnect() {
         publisher_observer = std::move(publisher_observer_);
         subscriber_observer = std::move(subscriber_observer_);
         local_participant_.reset();
+        ClearRemotePublicationMediaBindingsLocked();
         remote_participants_.clear();
         if (reliable_dc_) {
             data_channels.push_back(reliable_dc_);
@@ -718,6 +782,7 @@ asio::awaitable<void> Room::DisconnectAsync() {
         publisher_observer = std::move(publisher_observer_);
         subscriber_observer = std::move(subscriber_observer_);
         local_participant_.reset();
+        ClearRemotePublicationMediaBindingsLocked();
         remote_participants_.clear();
         if (reliable_dc_) {
             data_channels.push_back(reliable_dc_);
@@ -857,6 +922,7 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
         publisher_observer = std::move(publisher_observer_);
         subscriber_observer = std::move(subscriber_observer_);
         local_participant_.reset();
+        ClearRemotePublicationMediaBindingsLocked();
         remote_participants_.clear();
         if (reliable_dc_) {
             data_channels.push_back(reliable_dc_);
@@ -1608,6 +1674,171 @@ std::vector<Room::RemoteTrackSinkBinding> Room::TakeRemoteTrackSinksForTrackSids
         it = remote_track_sinks_.erase(it);
     }
     return removed;
+}
+
+std::shared_ptr<RemoteTrackPublication> Room::CreateRemoteTrackPublication(
+    std::shared_ptr<Track> track,
+    const std::string& participant_sid,
+    const std::string& track_sid,
+    const std::string& name,
+    proto::TrackType type) {
+    const auto generation = session_generation_.load(std::memory_order_acquire);
+    std::weak_ptr<Room> weak_room = weak_from_this();
+    auto controller = [weak_room, participant_sid, generation](
+                          RemoteTrackPublication* publication,
+                          const RemotePublicationControlRequest& request) {
+        const auto room = weak_room.lock();
+        if (!room) return RemotePublicationControlDispatch::Rejected;
+        return room->QueueRemotePublicationControl(
+            publication, participant_sid, generation, request);
+    };
+    return std::make_shared<RemoteTrackPublication>(
+        std::move(track), track_sid, name, type, generation, std::move(controller));
+}
+
+RemotePublicationControlDispatch Room::QueueRemotePublicationControl(
+    RemoteTrackPublication* publication,
+    const std::string& participant_sid,
+    uint64_t generation,
+    const RemotePublicationControlRequest& request) {
+    if (!publication) return RemotePublicationControlDispatch::Rejected;
+
+    std::shared_ptr<RemoteTrackPublication> canonical;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (connection_state_ != ConnectionState::Connected ||
+            generation != session_generation_.load(std::memory_order_acquire) ||
+            !signal_client_) {
+            return RemotePublicationControlDispatch::Rejected;
+        }
+        const auto participant = remote_participants_.find(participant_sid);
+        if (participant == remote_participants_.end()) {
+            return RemotePublicationControlDispatch::Rejected;
+        }
+        canonical = participant->second->get_remote_publication(publication->sid());
+        if (!canonical || canonical.get() != publication ||
+            canonical->session_generation() != generation) {
+            return RemotePublicationControlDispatch::Rejected;
+        }
+    }
+
+    // All live controls flow through the Room executor. The delayed task
+    // repeats ownership/generation validation, so an unpublish/disconnect in
+    // between cannot send a request or mutate a stale publication.
+    std::weak_ptr<Room> weak_room = weak_from_this();
+    std::weak_ptr<RemoteTrackPublication> weak_publication = canonical;
+    asio::post(executor_, [weak_room, weak_publication, participant_sid, generation, request]() {
+        const auto room = weak_room.lock();
+        const auto canonical = weak_publication.lock();
+        if (!room || !canonical) return;
+
+        std::shared_ptr<SignalClient> signal;
+        {
+            std::lock_guard lock(room->room_mutex_);
+            if (room->connection_state_ != ConnectionState::Connected ||
+                generation != room->session_generation_.load(std::memory_order_acquire) ||
+                !room->signal_client_) {
+                return;
+            }
+            const auto participant = room->remote_participants_.find(participant_sid);
+            if (participant == room->remote_participants_.end() ||
+                participant->second->get_remote_publication(canonical->sid()) != canonical ||
+                canonical->session_generation() != generation) {
+                return;
+            }
+            signal = room->signal_client_;
+        }
+
+        if (request.kind == RemotePublicationControlRequest::Kind::Subscription) {
+            if (request.subscribed.has_value() && !*request.subscribed) {
+                // This executes only after the delayed operation has repeated
+                // canonical-map and generation validation. Detach before the
+                // signal so no renderer can receive a late frame.
+                canonical->DetachMedia(/*notify_listener=*/true);
+            }
+            signal->SendUpdateSubscription({canonical->sid()},
+                                           request.subscribed.value_or(true),
+                                           participant_sid);
+        } else {
+            signal->SendUpdateTrackSettings(
+                canonical->sid(),
+                !request.enabled.value_or(canonical->is_enabled()),
+                request.quality.value_or(canonical->current_quality()),
+                request.width.value_or(canonical->current_width()),
+                request.height.value_or(canonical->current_height()),
+                0,
+                request.priority.value_or(canonical->priority()));
+        }
+        canonical->CommitControl(request);
+    });
+    return RemotePublicationControlDispatch::Queued;
+}
+
+void Room::RemoveRemoteMediaTrackReferences(const std::set<std::string>& track_sids) {
+    if (track_sids.empty()) return;
+    const auto remove_tracks = [&track_sids](std::vector<std::weak_ptr<Track>>& tracks) {
+        tracks.erase(std::remove_if(tracks.begin(), tracks.end(), [&track_sids](const std::weak_ptr<Track>& weak) {
+            const auto track = weak.lock();
+            return !track || track_sids.contains(track->sid());
+        }), tracks.end());
+    };
+
+    std::lock_guard lock(remote_media_mutex_);
+    remove_tracks(remote_video_tracks_);
+    remove_tracks(remote_audio_tracks_);
+}
+
+void Room::ClearRemotePublicationMediaBindingsLocked() {
+    for (const auto& [participant_sid, participant] : remote_participants_) {
+        if (!participant) continue;
+        for (const auto& [track_sid, publication] : participant->tracks()) {
+            if (const auto remote_publication =
+                    std::dynamic_pointer_cast<RemoteTrackPublication>(publication)) {
+                remote_publication->ClearMediaBinding();
+            }
+        }
+    }
+}
+
+void Room::DetachRemotePublicationMedia(RemoteTrackPublication* publication,
+                                        bool notify_listener) {
+    if (!publication) return;
+
+    std::shared_ptr<RemoteParticipant> participant;
+    std::shared_ptr<RemoteTrackPublication> canonical;
+    std::shared_ptr<Track> track;
+    std::vector<std::shared_ptr<RoomListener>> listeners;
+    std::set<std::string> track_sids;
+    {
+        std::lock_guard lock(room_mutex_);
+        for (const auto& [participant_sid, candidate] : remote_participants_) {
+            const auto remote_publication = candidate->get_remote_publication(publication->sid());
+            if (remote_publication && remote_publication.get() == publication) {
+                participant = candidate;
+                canonical = remote_publication;
+                break;
+            }
+        }
+        if (!participant || !canonical || !canonical->has_media_binding()) return;
+
+        track = canonical->track();
+        track_sids.insert(canonical->sid());
+        canonical->ClearMediaBinding();
+        listeners = listeners_;
+    }
+
+    // Move physical sinks out of Room before calling WebRTC RemoveSink. The
+    // publication is already marked detached, making repeated unsubscribe and
+    // replacement calls idempotent.
+    DetachRemoteTrackSinks(TakeRemoteTrackSinksForTrackSids(track_sids));
+    if (track) track->set_rtc_track(nullptr);
+    RemoveRemoteMediaTrackReferences(track_sids);
+
+    if (notify_listener && track) {
+        for (const auto& listener : listeners) {
+            listener->OnTrackUnsubscribed(track, canonical, participant);
+        }
+    }
 }
 
 void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
@@ -2377,6 +2608,8 @@ void Room::AttachRemoteTrackToParticipant(
 
     std::shared_ptr<TrackPublication> pub;
     std::shared_ptr<Track> r_track;
+    std::shared_ptr<RemoteTrackPublication> remote_publication;
+    bool replace_existing_media_binding = false;
 
     {
         std::lock_guard lock(room_mutex_);
@@ -2396,7 +2629,12 @@ void Room::AttachRemoteTrackToParticipant(
 
         if (!pub) {
             r_track = std::make_shared<Track>(track_id, (kind == TrackKind::Video ? "camera_video" : "microphone_audio"), kind);
-            pub = std::make_shared<TrackPublication>(r_track, track_id, r_track->name());
+            pub = CreateRemoteTrackPublication(
+                r_track,
+                participant->sid(),
+                track_id,
+                r_track->name(),
+                kind == TrackKind::Audio ? proto::TrackType::AUDIO : proto::TrackType::VIDEO);
             participant->add_publication(pub);
         } else {
             r_track = pub->track();
@@ -2405,7 +2643,25 @@ void Room::AttachRemoteTrackToParticipant(
                 pub->set_track(r_track);
             }
         }
+        remote_publication = std::dynamic_pointer_cast<RemoteTrackPublication>(pub);
+        replace_existing_media_binding = remote_publication &&
+            remote_publication->has_media_binding() &&
+            remote_publication->media_track_id() != track->id();
+    }
 
+    // A replaced WebRTC receiver must detach its previous raw sink before the
+    // canonical Track points at the new receiver. This keeps one sink binding
+    // per remote publication/SID rather than accumulating stale decoders.
+    if (replace_existing_media_binding && remote_publication) {
+        remote_publication->DetachMedia(/*notify_listener=*/false);
+    }
+
+    {
+        std::lock_guard lock(room_mutex_);
+        if (connection_state_ == ConnectionState::Disconnected ||
+            participant->get_publication(track_id) != pub) {
+            return;
+        }
         r_track->set_rtc_track(track);
         if (kind == TrackKind::Audio && audio_output_muted_) {
             r_track->set_muted(true);
@@ -2413,11 +2669,15 @@ void Room::AttachRemoteTrackToParticipant(
 
         {
             std::lock_guard mlock(remote_media_mutex_);
-            if (kind == TrackKind::Video) {
-                remote_video_tracks_.push_back(r_track);
-            } else {
-                remote_audio_tracks_.push_back(r_track);
-            }
+            auto& media_tracks = kind == TrackKind::Video
+                ? remote_video_tracks_
+                : remote_audio_tracks_;
+            const auto existing = std::find_if(
+                media_tracks.begin(), media_tracks.end(), [&r_track](const std::weak_ptr<Track>& weak) {
+                    const auto candidate = weak.lock();
+                    return candidate && candidate->sid() == r_track->sid();
+                });
+            if (existing == media_tracks.end()) media_tracks.push_back(r_track);
         }
         processed_remote_track_ids_.insert(track->id());
     }
@@ -2480,6 +2740,15 @@ void Room::AttachRemoteTrackToParticipant(
             if (binding.detach) binding.detach();
             return;
         }
+        if (remote_publication) {
+            std::weak_ptr<Room> weak_room = weak_from_this();
+            remote_publication->SetMediaBinding(
+                track->id(), [weak_room](RemoteTrackPublication* publication, bool notify_listener) {
+                    if (const auto room = weak_room.lock()) {
+                        room->DetachRemotePublicationMedia(publication, notify_listener);
+                    }
+                });
+        }
         Log("WEBRTC", "AUDIO_ATTACH", "远端音频轨已绑定至参会人 [" + participant->identity() + "], Track SID=" + track_id + ", 已挂载 NativeAudioTrackSink");
 
         if (signal_client_) {
@@ -2522,6 +2791,15 @@ void Room::AttachRemoteTrackToParticipant(
         if (!retained) {
             if (binding.detach) binding.detach();
             return;
+        }
+        if (remote_publication) {
+            std::weak_ptr<Room> weak_room = weak_from_this();
+            remote_publication->SetMediaBinding(
+                track->id(), [weak_room](RemoteTrackPublication* publication, bool notify_listener) {
+                    if (const auto room = weak_room.lock()) {
+                        room->DetachRemotePublicationMedia(publication, notify_listener);
+                    }
+                });
         }
         Log("WEBRTC", "VIDEO_ATTACH", "远端视频轨已绑定至参会人 [" + participant->identity() + "], Track SID=" + track_id);
 
@@ -2641,7 +2919,17 @@ void Room::OnRenegotiationNeeded(int pc_type) {
     }
 }
 
-void Room::HandleSignalEvent(const SignalEvent& event) {
+void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation) {
+    // SignalClient callbacks can be queued after a disconnect or after the
+    // full-restart path has already installed a replacement client. The
+    // callback is bound to the ConnectAsync generation that created it, so an
+    // old transport must never mutate a newer room session.
+    if (event_generation != 0 &&
+        event_generation != session_generation_.load(std::memory_order_acquire)) {
+        Log("SIGNAL", "STALE_EVENT", "忽略已替换会话的信令事件");
+        return;
+    }
+
     if (event.type == SignalEvent::Close) {
         bool should_reconnect = false;
         bool connect_failed = false;
@@ -2818,10 +3106,16 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
         Log("SIGNAL", "SUB_RESP", "收到服务端 SubscriptionResponse: Track=" + sr.track_sid() + ", Err=" + err_str);
     } else if (msg->has_subscription_permission_update()) {
         Log("SIGNAL", "SUB_PERM_UPDATE", "收到服务端 SubscriptionPermissionUpdate (Allowed: " + std::string(msg->subscription_permission_update().allowed() ? "YES" : "NO") + ")");
+        UpdateTrackSubscriptionPermission(msg->subscription_permission_update());
     } else if (msg->has_stream_state_update()) {
         Log("SIGNAL", "STREAM_STATE", "收到服务端 StreamStateUpdate 状态更新");
+        UpdateTrackStreamStates(msg->stream_state_update());
     } else if (msg->has_room_update()) {
         Log("SIGNAL", "ROOM_UPDATE", "收到服务端 RoomUpdate 房间信息变更");
+        UpdateRoomInfo(msg->room_update().room());
+    } else if (msg->has_connection_quality()) {
+        Log("SIGNAL", "CONN_QUALITY", "收到服务端 ConnectionQualityUpdate 状态更新");
+        UpdateConnectionQuality(msg->connection_quality());
     } else if (msg->has_subscribed_quality_update()) {
         const auto& squ = msg->subscribed_quality_update();
         std::string track_sid = squ.track_sid();
@@ -2991,6 +3285,10 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
                 if (it != remote_participants_.end()) {
                     for (const auto& [sid, publication] : it->second->tracks()) {
                         removed_track_sids.insert(sid);
+                        if (const auto remote_publication =
+                                std::dynamic_pointer_cast<RemoteTrackPublication>(publication)) {
+                            remote_publication->ClearMediaBinding();
+                        }
                     }
                     disconnected.push_back(it->second);
                     remote_participants_.erase(it);
@@ -3042,16 +3340,16 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
                         TrackKind kind = (t_info.type() == proto::TrackType::AUDIO) ? TrackKind::Audio : TrackKind::Video;
                         auto remote_track = std::make_shared<Track>(t_info.sid(), t_info.name(), kind);
                         remote_track->set_muted(t_info.muted());
-                        pub = std::make_shared<TrackPublication>(remote_track, t_info.sid(), t_info.name());
+                        // RemoteParticipant owns the actual controllable
+                        // publication. Do not create a parallel controller by
+                        // SID: subscription/quality settings must target this
+                        // exact object and its eventual sink binding.
+                        pub = CreateRemoteTrackPublication(remote_track,
+                                                           p_info.sid(),
+                                                           t_info.sid(),
+                                                           t_info.name(),
+                                                           t_info.type());
                         remote->add_publication(pub);
-                        {
-                            std::lock_guard mlock(remote_media_mutex_);
-                            if (kind == TrackKind::Video) {
-                                remote_video_tracks_.push_back(remote_track);
-                            } else {
-                                remote_audio_tracks_.push_back(remote_track);
-                            }
-                        }
                         newly_published_tracks.push_back({remote, pub});
                         Log("TRACK", "NEW_TRACK", "参会人 [" + remote->identity() + "] 发布新 Track: " + t_info.name() + " (" + (kind == TrackKind::Video ? "VIDEO" : "AUDIO") + ", SID: " + t_info.sid() + ", Muted: " + (t_info.muted() ? "true" : "false") + ")");
                     } else {
@@ -3069,6 +3367,10 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
                 for (const auto& [sid, pub] : existing_tracks) {
                     if (current_track_sids.find(sid) == current_track_sids.end()) {
                         removed_track_sids.insert(sid);
+                        if (const auto remote_publication =
+                                std::dynamic_pointer_cast<RemoteTrackPublication>(pub)) {
+                            remote_publication->ClearMediaBinding();
+                        }
                         remote->remove_publication(sid);
                         unpublished_tracks.push_back({remote, pub});
                         Log("TRACK", "UNPUBLISHED", "参会人 [" + remote->identity() + "] 取消发布 Track: " + sid);
@@ -3079,6 +3381,7 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
     }
 
     DetachRemoteTrackSinks(TakeRemoteTrackSinksForTrackSids(removed_track_sids));
+    RemoveRemoteMediaTrackReferences(removed_track_sids);
 
     for (const auto& p : newly_connected) {
         for (const auto& listener : listeners_snapshot) {
@@ -3197,6 +3500,10 @@ void Room::UpdateTrackMute(const proto::MuteTrackRequest& mute) {
 
 void Room::UpdateParticipantsForTesting(const proto::ParticipantUpdate& update) {
     UpdateParticipants(update.participants());
+}
+
+void Room::HandleSignalMessageForTesting(const proto::SignalResponse& message) {
+    HandleSignalMessage(std::make_shared<proto::SignalResponse>(message));
 }
 
 void Room::EnableE2ee(const E2eeOptions& options) {
@@ -4013,6 +4320,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
                     old_publisher_observer = std::move(publisher_observer_);
                     old_subscriber_observer = std::move(subscriber_observer_);
                     local_participant_.reset();
+                    ClearRemotePublicationMediaBindingsLocked();
                     remote_participants_.clear();
                     if (reliable_dc_) {
                         old_data_channels.push_back(reliable_dc_);
@@ -4130,6 +4438,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
         publisher_observer = std::move(publisher_observer_);
         subscriber_observer = std::move(subscriber_observer_);
         local_participant_.reset();
+        ClearRemotePublicationMediaBindingsLocked();
         remote_participants_.clear();
         if (reliable_dc_) {
             data_channels.push_back(reliable_dc_);
@@ -4175,6 +4484,209 @@ asio::awaitable<void> Room::AttemptReconnect() {
     for (const auto& listener : listeners_snapshot) {
         listener->OnDisconnected(RoomDisconnectReason::NetworkError,
                                  "Reconnect failed: " + last_error);
+    }
+}
+
+void Room::UpdateRoomInfo(const proto::Room& room) {
+    RoomInfo updated;
+    std::string old_metadata;
+    std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+    bool metadata_changed = false;
+    bool room_changed = false;
+
+    {
+        std::lock_guard lock(room_mutex_);
+        updated = room_info_;
+
+        // Match the Rust SDK's treatment of an empty SID: a RoomUpdate does
+        // not erase a known SID unless the server supplies a replacement.
+        if (!room.sid().empty()) {
+            updated.sid = room.sid();
+        }
+        updated.name = room.name();
+        updated.metadata = room.metadata();
+        updated.empty_timeout = room.empty_timeout();
+        updated.departure_timeout = room.departure_timeout();
+        updated.max_participants = room.max_participants();
+        updated.creation_time_ms = room.creation_time_ms();
+        updated.num_participants = room.num_participants();
+        updated.num_publishers = room.num_publishers();
+        updated.active_recording = room.active_recording();
+
+        old_metadata = room_info_.metadata;
+        metadata_changed = old_metadata != updated.metadata;
+        room_changed = room_info_ != updated;
+        if (!room_changed) {
+            return;
+        }
+
+        room_info_ = updated;
+        listeners_snapshot = listeners_;
+    }
+
+    // State is committed and listeners are snapshotted before callback
+    // delivery. No listener can run while room_mutex_ is held.
+    if (metadata_changed) {
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnRoomMetadataChanged(updated, old_metadata, updated.metadata);
+        }
+    }
+    for (const auto& listener : listeners_snapshot) {
+        listener->OnRoomUpdated(updated);
+    }
+}
+
+void Room::UpdateConnectionQuality(const proto::ConnectionQualityUpdate& update) {
+    struct Change {
+        std::shared_ptr<Participant> participant;
+        ConnectionQuality quality = ConnectionQuality::Unknown;
+        float score = 0.0f;
+    };
+
+    std::vector<Change> changes;
+    std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+    {
+        std::lock_guard lock(room_mutex_);
+        for (const auto& quality_update : update.updates()) {
+            std::shared_ptr<Participant> participant;
+            if (local_participant_ &&
+                local_participant_->sid() == quality_update.participant_sid()) {
+                participant = local_participant_;
+            } else {
+                const auto remote = remote_participants_.find(quality_update.participant_sid());
+                if (remote != remote_participants_.end()) {
+                    participant = remote->second;
+                }
+            }
+
+            if (!participant) {
+                Log("SIGNAL", "CONN_QUALITY_UNKNOWN_PARTICIPANT",
+                    "忽略未知参会人的连接质量更新: " + quality_update.participant_sid());
+                continue;
+            }
+
+            const auto quality = ConnectionQualityFromProto(quality_update.quality());
+            const float score = quality_update.score();
+            if (participant->connection_quality() == quality &&
+                participant->connection_quality_score() == score) {
+                continue;
+            }
+
+            participant->set_connection_quality(quality, score);
+            changes.push_back({participant, quality, score});
+        }
+        if (!changes.empty()) {
+            listeners_snapshot = listeners_;
+        }
+    }
+
+    for (const auto& change : changes) {
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnConnectionQualityChanged(change.participant,
+                                                 change.quality,
+                                                 change.score);
+        }
+    }
+}
+
+void Room::UpdateTrackStreamStates(const proto::StreamStateUpdate& update) {
+    struct Change {
+        std::shared_ptr<Participant> participant;
+        std::shared_ptr<TrackPublication> publication;
+        TrackPublication::StreamState state;
+    };
+
+    std::vector<Change> changes;
+    std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+    {
+        std::lock_guard lock(room_mutex_);
+        for (const auto& stream_state : update.stream_states()) {
+            std::shared_ptr<Participant> participant;
+            if (local_participant_ &&
+                local_participant_->sid() == stream_state.participant_sid()) {
+                participant = local_participant_;
+            } else {
+                const auto remote = remote_participants_.find(stream_state.participant_sid());
+                if (remote != remote_participants_.end()) {
+                    participant = remote->second;
+                }
+            }
+
+            const auto publication = participant
+                ? participant->get_publication(stream_state.track_sid())
+                : nullptr;
+            if (!participant || !publication) {
+                Log("SIGNAL", "STREAM_STATE_UNKNOWN_TRACK",
+                    "忽略未知参会人或 Track 的流状态更新: participant=" +
+                    stream_state.participant_sid() + ", track=" + stream_state.track_sid());
+                continue;
+            }
+
+            const auto state = StreamStateFromProto(stream_state.state());
+            if (publication->stream_state() == state) {
+                continue;
+            }
+
+            publication->set_stream_state(state);
+            changes.push_back({participant, publication, state});
+        }
+        if (!changes.empty()) {
+            listeners_snapshot = listeners_;
+        }
+    }
+
+    for (const auto& change : changes) {
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnTrackStreamStateChanged(change.participant,
+                                                change.publication,
+                                                change.state);
+        }
+    }
+}
+
+void Room::UpdateTrackSubscriptionPermission(
+    const proto::SubscriptionPermissionUpdate& update) {
+    const TrackSubscriptionPermission permission{
+        update.participant_sid(), update.track_sid(), update.allowed()};
+    std::shared_ptr<Participant> participant;
+    std::shared_ptr<TrackPublication> publication;
+    std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+    bool changed = false;
+
+    {
+        std::lock_guard lock(room_mutex_);
+        const auto key = std::make_pair(permission.participant_sid,
+                                        permission.track_sid);
+        const auto existing = track_subscription_permissions_.find(key);
+        changed = existing == track_subscription_permissions_.end() ||
+            existing->second != permission.allowed;
+        if (!changed) {
+            return;
+        }
+        track_subscription_permissions_[key] = permission.allowed;
+
+        if (local_participant_ &&
+            local_participant_->sid() == permission.participant_sid) {
+            participant = local_participant_;
+        } else {
+            const auto remote = remote_participants_.find(permission.participant_sid);
+            if (remote != remote_participants_.end()) {
+                participant = remote->second;
+            }
+        }
+        if (participant) {
+            publication = participant->get_publication(permission.track_sid);
+            if (publication) {
+                publication->set_subscription_allowed(permission.allowed);
+            }
+        }
+        listeners_snapshot = listeners_;
+    }
+
+    for (const auto& listener : listeners_snapshot) {
+        listener->OnTrackSubscriptionPermissionChanged(permission,
+                                                       participant,
+                                                       publication);
     }
 }
 

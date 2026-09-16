@@ -79,6 +79,8 @@ public:
 
 	bool isAudioMuted() const { return _isAudioMuted; }
 	void setAudioMuted(bool muted);
+	void setConnectionQuality(livekit::ConnectionQuality quality);
+	void setVideoStreamPaused(bool paused);
 
 	void setSpeaking(bool speaking, float level = 0.0f);
 	bool isSpeaking() const { return _isSpeaking; }
@@ -132,6 +134,8 @@ private:
 	bool _isLocal = false;
 	bool _isVideoActive = false;
 	bool _isAudioMuted = false;
+	bool _isVideoStreamPaused = false;
+	livekit::ConnectionQuality _connectionQuality = livekit::ConnectionQuality::Unknown;
 	bool _isSpeaking = false;
 	bool _isPinned = false;
 	float _audioLevel = 0.0f;
@@ -349,7 +353,7 @@ public:
 
 	void onRemoteParticipantJoined(const QString &identity, const QString &name = QString());
 	void onRemoteParticipantLeft(const QString &identity);
-	void onRemoteTrackMuted(bool isVideo, bool muted);
+	void onRemoteTrackMuted(const QString &identity, bool isVideo, bool muted);
 	void updateActiveSpeakers(const std::vector<std::shared_ptr<livekit::Participant>> &speakers);
 
 	void onKickedOff(const QString &reason, int reasonCode);

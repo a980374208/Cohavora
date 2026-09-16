@@ -15,12 +15,24 @@
 
 // Forward declare generated protobuf messages
 namespace livekit {
+
+class RemoteTrackPublication;
 namespace proto {
 class SignalRequest;
 }
 }
 
 namespace livekit {
+
+// Client-facing connection quality. Keep this independent from the protobuf
+// enum so business/UI layers do not need to include the signaling schema.
+enum class ConnectionQuality {
+    Unknown,
+    Poor,
+    Good,
+    Excellent,
+    Lost,
+};
 
 struct ParticipantPermission {
     bool can_subscribe = true;
@@ -42,12 +54,18 @@ public:
     std::string metadata() const { return metadata_; }
     bool is_speaking() const { return speaking_; }
     float audio_level() const { return audio_level_; }
+    ConnectionQuality connection_quality() const { return connection_quality_; }
+    float connection_quality_score() const { return connection_quality_score_; }
 
     void set_name(const std::string& name) { name_ = name; }
     void set_metadata(const std::string& metadata) { metadata_ = metadata; }
     void set_sid(const std::string& sid) { sid_ = sid; }
     void set_speaking(bool speaking) { speaking_ = speaking; }
     void set_audio_level(float level) { audio_level_ = level; }
+    void set_connection_quality(ConnectionQuality quality, float score) {
+        connection_quality_ = quality;
+        connection_quality_score_ = score;
+    }
 
     std::map<std::string, std::string> attributes() const { return attributes_; }
     std::string get_attribute(const std::string& key) const {
@@ -86,6 +104,8 @@ protected:
     std::string metadata_;
     bool speaking_{false};
     float audio_level_{0.0f};
+    ConnectionQuality connection_quality_{ConnectionQuality::Unknown};
+    float connection_quality_score_{0.0f};
     std::map<std::string, std::shared_ptr<TrackPublication>> tracks_;
     std::map<std::string, std::string> attributes_;
     ParticipantPermission permission_;
@@ -167,6 +187,12 @@ class RemoteParticipant : public Participant {
 public:
     RemoteParticipant(const std::string& sid, const std::string& identity)
         : Participant(sid, identity) {}
+
+    // The participant map is the only authoritative owner of a remote
+    // publication. Callers that need remote-only controls must resolve it
+    // from here instead of constructing a parallel controller by SID.
+    std::shared_ptr<RemoteTrackPublication> get_remote_publication(
+        const std::string& sid) const;
 };
 
 } // namespace livekit

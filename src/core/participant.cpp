@@ -1,6 +1,7 @@
 #include "participant.h"
 #include "telemetry.h"
 #include "local_video_track.h"
+#include "remote_track_publication.h"
 #include "video_source.h"
 #include "livekit_rtc.pb.h"
 #include <iostream>
@@ -9,6 +10,15 @@
 #include <random>
 
 namespace livekit {
+
+std::shared_ptr<RemoteTrackPublication> RemoteParticipant::get_remote_publication(
+    const std::string& sid) const {
+    const auto it = tracks_.find(sid);
+    if (it == tracks_.end()) {
+        return nullptr;
+    }
+    return std::dynamic_pointer_cast<RemoteTrackPublication>(it->second);
+}
 
 static std::string GenerateUuid() {
     static std::random_device rd;
