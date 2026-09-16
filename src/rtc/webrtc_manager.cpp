@@ -2,6 +2,7 @@
 #include <asio.hpp>
 #include "webrtc_manager.h"
 #include "audio_playout_warmup.h"
+#include "media/audio_apm.h"
 #include "rtc_base/ssl_adapter.h"
 #include "api/create_peerconnection_factory.h"
 #include "api/audio_codecs/builtin_audio_decoder_factory.h"
@@ -157,6 +158,18 @@ public:
             const size_t output_samples = output_frames * nChannels;
             warmup_.Process(static_cast<int16_t*>(audioSamples), output_samples,
                             nChannels, samplesPerSec);
+
+            // 将下行扬声器渲染音频作为反向参考信号送入 APM (AEC 回声消除)
+            auto apm = WebRTCManager::Instance().apm_processor();
+            if (apm) {
+                const int16_t* pcm = static_cast<const int16_t*>(audioSamples);
+                std::vector<int16_t> render_pcm(pcm, pcm + output_samples);
+                AudioFrame render_frame(std::move(render_pcm),
+                                        static_cast<int>(samplesPerSec),
+                                        static_cast<int>(nChannels),
+                                        static_cast<int>(output_frames));
+                apm->ProcessRenderFrame(render_frame);
+            }
         }
         return res;
     }
@@ -172,10 +185,22 @@ public:
             inner_->PullRenderData(bits_per_sample, sample_rate, number_of_channels,
                                    number_of_frames, audio_data, elapsed_time_ms, ntp_time_ms);
             if (bits_per_sample == 16 && audio_data) {
+                const size_t total_samples = number_of_frames * number_of_channels;
                 warmup_.Process(static_cast<int16_t*>(audio_data),
-                                number_of_frames * number_of_channels,
+                                total_samples,
                                 number_of_channels,
                                 static_cast<uint32_t>(sample_rate));
+
+                auto apm = WebRTCManager::Instance().apm_processor();
+                if (apm) {
+                    const int16_t* pcm = static_cast<const int16_t*>(audio_data);
+                    std::vector<int16_t> render_pcm(pcm, pcm + total_samples);
+                    AudioFrame render_frame(std::move(render_pcm),
+                                            sample_rate,
+                                            static_cast<int>(number_of_channels),
+                                            static_cast<int>(number_of_frames));
+                    apm->ProcessRenderFrame(render_frame);
+                }
             }
         }
     }
@@ -719,6 +744,23 @@ void WebRTCManager::SetLocalDescription(
         p->pc->SetLocalDescription(observer.get(), session_desc.release());
         delete p;
     });
+}
+
+void WebRTCManager::SetApmProcessor(std::shared_ptr<AudioApmProcessor> processor) {
+    std::lock_guard<std::mutex> lock(apm_mutex_);
+    apm_processor_ = std::move(processor);
+}
+
+std::shared_ptr<AudioApmProcessor> WebRTCManager::apm_processor() const {
+    std::lock_guard<std::mutex> lock(apm_mutex_);
+    return apm_processor_;
+}
+
+void WebRTCManager::ResetApmProcessor() {
+    auto apm = apm_processor();
+    if (apm) {
+        apm->Reset();
+    }
 }
 
 } // namespace livekit
