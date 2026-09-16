@@ -22,6 +22,7 @@
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QMenu>
+#include "media/camera_source_manager.h"
 #include <QtWidgets/QSlider>
 #include "src/ui/audio_visualizer_widget.h"
 #include <QtCore/QTimer>
@@ -269,10 +270,12 @@ public:
 	rpl::producer<QString> sendChatRequested() const { return _sendChatStream.events(); }
 	rpl::producer<QString> microphoneDeviceChanged() const { return _micDeviceStream.events(); }
 	rpl::producer<int> speakerDeviceChanged() const { return _speakerDeviceStream.events(); }
+	rpl::producer<QString> videoDeviceChanged() const { return _videoDeviceStream.events(); }
 	rpl::producer<livekit::SimulateScenarioType> simulateScenarioRequested() const { return _simulateScenarioStream.events(); }
 
 	void showAudioDeviceMenu(const QPoint &globalPos);
 	void showSpeakerDeviceMenu(const QPoint &globalPos);
+	void showVideoDeviceMenu(const QPoint &globalPos);
 	void showSimulateScenarioMenu(const QPoint &globalPos);
 
 protected:
@@ -322,7 +325,9 @@ private:
 	rpl::event_stream<QString> _sendChatStream;
 	rpl::event_stream<QString> _micDeviceStream;
 	rpl::event_stream<int> _speakerDeviceStream;
+	rpl::event_stream<QString> _videoDeviceStream;
 	rpl::event_stream<livekit::SimulateScenarioType> _simulateScenarioStream;
+	QString _currentCameraPath;
 };
 
 // ----------------------------------------------------
@@ -423,7 +428,9 @@ private:
 	void switchSidebar(ActiveSidebar target);
 
 	// 本地摄像头采集与模拟流
+	std::shared_ptr<livekit::CameraSourceManager> _cameraManager;
 	std::shared_ptr<livekit::DShowVideoCapture> _dshowCap;
+	QString _currentCameraPath;
 	bool _usingRealCamera = false;
 	QTimer *_localGenTimer = nullptr;
 	int _localFrameStep = 0;

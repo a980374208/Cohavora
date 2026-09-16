@@ -1470,6 +1470,76 @@ void RoomBottomBarWidget::showSpeakerDeviceMenu(const QPoint &globalPos) {
 	menu.exec(globalPos);
 }
 
+void RoomBottomBarWidget::showVideoDeviceMenu(const QPoint &globalPos) {
+	QMenu menu(this);
+	menu.setStyleSheet(R"(
+		QMenu {
+			background-color: #ffffff;
+			border: 1px solid #e5e6eb;
+			border-radius: 8px;
+			padding: 6px;
+			font-size: 13px;
+			color: #1f2329;
+		}
+		QMenu::item {
+			padding: 6px 24px 6px 20px;
+			border-radius: 4px;
+		}
+		QMenu::item:selected {
+			background-color: #f2f3f5;
+			color: #1677ff;
+		}
+		QMenu::separator {
+			height: 1px;
+			background-color: #e5e6eb;
+			margin: 6px 8px;
+		}
+	)");
+
+	QAction *camHeader = menu.addAction(QString::fromUtf8("📷 选择摄像头设备"));
+	camHeader->setEnabled(false);
+
+	auto videoDevices = livekit::DShowEnumerator::EnumerateVideoDevices();
+	auto defDev = livekit::DShowEnumerator::GetDefaultVideoDevice();
+
+	QActionGroup *camGroup = new QActionGroup(&menu);
+	for (const auto &dev : videoDevices) {
+		QString title = QString::fromStdString(dev.name);
+		if (dev.path == defDev.path) {
+			title += QString::fromUtf8(" (系统默认)");
+		}
+		QAction *act = menu.addAction(title);
+		act->setCheckable(true);
+		if (_currentCameraPath.isEmpty()) {
+			if (dev.path == defDev.path) act->setChecked(true);
+		} else if (_currentCameraPath == QString::fromStdString(dev.path)) {
+			act->setChecked(true);
+		}
+		camGroup->addAction(act);
+
+		connect(act, &QAction::triggered, [this, devPath = QString::fromStdString(dev.path)] {
+			_currentCameraPath = devPath;
+			_videoDeviceStream.fire_copy(devPath);
+		});
+	}
+
+	if (videoDevices.empty()) {
+		QAction *emptyAct = menu.addAction(QString::fromUtf8("未检测到可用摄像头"));
+		emptyAct->setEnabled(false);
+	}
+
+	menu.addSeparator();
+
+	QAction *toggleVideoAct = menu.addAction(!_videoEnabled ? QString::fromUtf8("📷 开启摄像头视频") : QString::fromUtf8("🚫 停止摄像头视频"));
+	connect(toggleVideoAct, &QAction::triggered, [this] {
+		_videoEnabled = !_videoEnabled;
+		_toggleVideoStream.fire_copy(_videoEnabled);
+		update();
+	});
+
+	menu.exec(globalPos);
+}
+
 void RoomBottomBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	const QPoint pos = e->pos();
 	int nextId = -1;
@@ -1499,6 +1569,9 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 					return;
 				} else if (item.id == 11) {
 					showSpeakerDeviceMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
+					return;
+				} else if (item.id == 2) {
+					showVideoDeviceMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
 					return;
 				}
 			}
@@ -1555,6 +1628,11 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 					break;
 				}
 				case 2: {
+					// 如果点击的是右侧下拉小三角区域 (宽 16px)
+					if (e->pos().x() > item.rect.right() - 16) {
+						showVideoDeviceMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
+						break;
+					}
 					if (!_videoEnabled) {
 						// 准备开启视频，先检查是否有可用摄像头
 						if (!HasAvailableVideoDevice()) {
@@ -1781,19 +1859,20 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 		LogToConsole(LogCategory::Error, "WASAPI", "物理麦克风初始化或启动失败");
 	}
 
-	// 5. 启动物理摄像头 DirectShow 采集
+	// 5. 启动物理摄像头 DirectShow 采集 (使用 CameraSourceManager 支持平滑热切换)
 	try {
 		auto defaultDev = livekit::DShowEnumerator::GetDefaultVideoDevice();
 		if (!defaultDev.path.empty()) {
-			_dshowCap = livekit::DShowVideoCapture::Create();
+			_cameraManager = livekit::CameraSourceManager::Create(_localVideoSource);
 			livekit::DShowCaptureConfig vcfg;
 			vcfg.device_path = defaultDev.path;
 			vcfg.width = 1280;
 			vcfg.height = 720;
 			vcfg.fps = 30;
 			vcfg.output_format = livekit::VideoBufferType::NV12;
-			if (_dshowCap->Init(vcfg, _localVideoSource) && _dshowCap->Start()) {
+			if (_cameraManager->Start(vcfg)) {
 				_usingRealCamera = true;
+				_currentCameraPath = QString::fromStdString(defaultDev.path);
 				LogToConsole(LogCategory::Media, "DSHOW", QString("成功启动物理摄像头: %1 (1280x720@30fps NV12)").arg(QString::fromStdString(defaultDev.name)));
 			}
 		}
@@ -2292,6 +2371,33 @@ void MeetingRoomWindow::initLayout() {
 	_bottomBar->speakerDeviceChanged() | rpl::on_next([this](int idx) {
 		livekit::WebRTCManager::Instance().SetPlayoutDevice(static_cast<uint16_t>(idx));
 		LogToConsole(LogCategory::Media, "DEVICE", QString("扬声器播放设备已切换为索引: %1").arg(idx));
+	}, lifetime());
+
+	_bottomBar->videoDeviceChanged() | rpl::on_next([this](const QString &devPath) {
+		_currentCameraPath = devPath;
+		if (_cameraManager) {
+			LogToConsole(LogCategory::Media, "CAMERA_SWITCH",
+			             QString("正在平滑切换摄像头至: %1 ...").arg(devPath));
+			_cameraManager->SwitchDeviceAsync(devPath.toStdString(), 3000,
+				[this, devPath](bool success, const std::string &err) {
+					QMetaObject::invokeMethod(this, [this, devPath, success, err]() {
+						if (success) {
+							_usingRealCamera = true;
+							if (_localTile) {
+								_localTile->setVideoActive(_config.videoEnabled && _usingRealCamera);
+							}
+							LogToConsole(LogCategory::Media, "CAMERA_SWITCH",
+							             QString("摄像头平滑切换成功: %1").arg(devPath));
+						} else {
+							LogToConsole(LogCategory::Error, "CAMERA_SWITCH",
+							             QString("摄像头切换失败，已自动回滚原设备: %1").arg(QString::fromStdString(err)));
+							QMessageBox::warning(this, QString::fromUtf8("摄像头切换失败"),
+								QString::fromUtf8("无法启动所选摄像头设备，已保持原设备采集。\n原因: %1")
+								.arg(QString::fromStdString(err)));
+						}
+					}, Qt::QueuedConnection);
+				});
+		}
 	}, lifetime());
 
 	_localGenTimer = new QTimer(this);
@@ -3220,6 +3326,10 @@ void MeetingRoomWindow::stopLiveKitSession() {
 	if (_wasapiCap) {
 		_wasapiCap->Stop();
 		_wasapiCap.reset();
+	}
+	if (_cameraManager) {
+		_cameraManager->Stop();
+		_cameraManager.reset();
 	}
 	if (_dshowCap) {
 		_dshowCap->Stop();
