@@ -442,6 +442,20 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             }
         );
 
+        local_participant_->SetAsyncPublishTracksBatchHandler(
+            [self](std::vector<LocalParticipant::BatchTrackItem> items)
+                -> asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> {
+                co_return co_await self->PublishLocalTracksBatchAsync(std::move(items));
+            }
+        );
+
+        local_participant_->SetAsyncUnpublishTrackHandler(
+            [self](const std::string& track_sid)
+                -> asio::awaitable<std::shared_ptr<TrackPublication>> {
+                co_return co_await self->UnpublishLocalTrackAsync(track_sid);
+            }
+        );
+
         // 绑定 LocalParticipant 发送 RPC 请求 Handler
         local_participant_->SetSendRpcHandler(
             [self](const RpcPacket& packet) -> asio::awaitable<std::string> {
@@ -604,6 +618,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             join_response_.reset();
             enabled_publish_codecs_.clear();
             local_participant_.reset();
+            pending_local_unpublishes_.clear();
             ClearRemotePublicationMediaBindingsLocked();
             remote_participants_.clear();
             publisher = std::move(publisher_pc_);
@@ -679,6 +694,7 @@ void Room::Disconnect() {
         publisher_observer = std::move(publisher_observer_);
         subscriber_observer = std::move(subscriber_observer_);
         local_participant_.reset();
+        pending_local_unpublishes_.clear();
         ClearRemotePublicationMediaBindingsLocked();
         remote_participants_.clear();
         if (reliable_dc_) {
@@ -782,6 +798,7 @@ asio::awaitable<void> Room::DisconnectAsync() {
         publisher_observer = std::move(publisher_observer_);
         subscriber_observer = std::move(subscriber_observer_);
         local_participant_.reset();
+        pending_local_unpublishes_.clear();
         ClearRemotePublicationMediaBindingsLocked();
         remote_participants_.clear();
         if (reliable_dc_) {
@@ -922,6 +939,7 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
         publisher_observer = std::move(publisher_observer_);
         subscriber_observer = std::move(subscriber_observer_);
         local_participant_.reset();
+        pending_local_unpublishes_.clear();
         ClearRemotePublicationMediaBindingsLocked();
         remote_participants_.clear();
         if (reliable_dc_) {
@@ -2368,7 +2386,405 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         }
         if (server_acknowledged) {
             Log("ERROR", "PUBLISH_ROLLBACK",
-                "TrackPublished ACK 后本地事务失败；当前协议缺少媒体 Unpublish 请求，已回滚 sender，Session 将在下次重连时重新同步");
+                "TrackPublished ACK 后本地事务失败；已移除 sender 并发起 Publisher SDP 重协商以收敛服务端轨状态");
+            NegotiatePublisher();
+        }
+        throw;
+    }
+}
+
+asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLocalTracksBatchAsync(
+    std::vector<LocalParticipant::BatchTrackItem> items) {
+    if (items.empty()) {
+        co_return std::vector<std::shared_ptr<TrackPublication>>{};
+    }
+
+    std::vector<proto::SignalRequest> effective_requests;
+    effective_requests.reserve(items.size());
+    std::vector<std::string> enabled_codecs;
+    {
+        std::lock_guard lock(room_mutex_);
+        enabled_codecs = enabled_publish_codecs_;
+    }
+
+    for (auto& item : items) {
+        if (!item.track || !item.request || !item.request->has_add_track()) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::InvalidState,
+                                 "publish_validate",
+                                 "invalid AddTrack request in batch item");
+        }
+        proto::SignalRequest eff_req(*item.request);
+        if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(item.track)) {
+            if (!enabled_codecs.empty()) {
+                auto options = video->publish_options();
+                std::string requested = options.video_codec;
+                std::transform(requested.begin(), requested.end(), requested.begin(),
+                               [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                const auto is_requested = [&requested](const std::string& mime) {
+                    return mime == requested || mime == "video/" + requested;
+                };
+                if (std::none_of(enabled_codecs.begin(), enabled_codecs.end(), is_requested)) {
+                    const auto fallback = std::find_if(
+                        enabled_codecs.begin(), enabled_codecs.end(),
+                        [](const std::string& mime) { return mime.rfind("video/", 0) == 0; });
+                    if (fallback == enabled_codecs.end()) {
+                        throw OperationError(OperationKind::PublishTrack,
+                                             OperationErrorCode::PermissionDenied,
+                                             "join_publish_codecs",
+                                             "server did not enable a video publish codec");
+                    }
+                    options.video_codec = fallback->substr(6);
+                    video->set_publish_options(options);
+                    for (auto& codec : *eff_req.mutable_add_track()->mutable_simulcast_codecs()) {
+                        codec.set_codec(options.video_codec);
+                    }
+                    Log("SIGNAL", "PUBLISH_CODEC_FALLBACK",
+                        "服务端未启用请求的编码 " + requested + "，改用 " + options.video_codec);
+                }
+            }
+        }
+        effective_requests.push_back(std::move(eff_req));
+    }
+
+    const auto generation = session_generation_.load(std::memory_order_acquire);
+    std::shared_ptr<SignalClient> signal;
+    std::shared_ptr<LocalParticipant> local;
+    struct PendingAckInfo {
+        std::string cid;
+        std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>> ack;
+    };
+    std::vector<PendingAckInfo> pending_acks;
+    pending_acks.reserve(items.size());
+
+    {
+        std::lock_guard lock(room_mutex_);
+        if (connection_state_ != ConnectionState::Connected ||
+            generation != session_generation_.load(std::memory_order_acquire)) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::InvalidState,
+                                 "publish_validate",
+                                 "room is not connected");
+        }
+        for (const auto& eff_req : effective_requests) {
+            const std::string cid = eff_req.add_track().cid();
+            if (pending_track_publishes_.contains(cid)) {
+                throw OperationError(OperationKind::PublishTrack,
+                                     OperationErrorCode::InvalidState,
+                                     "publish_validate",
+                                     "a publish operation for CID " + cid + " is already in progress");
+            }
+            auto ack = std::make_shared<AwaitableState<proto::TrackPublishedResponse>>(executor_);
+            pending_track_publishes_[cid] = ack;
+            pending_acks.push_back({cid, ack});
+        }
+        signal = signal_client_;
+        local = local_participant_;
+    }
+
+    std::vector<webrtc::scoped_refptr<webrtc::RtpSenderInterface>> senders;
+    std::vector<proto::TrackPublishedResponse> responses;
+    responses.reserve(items.size());
+    bool server_acknowledged_any = false;
+
+    try {
+        for (const auto& eff_req : effective_requests) {
+            co_await signal->SendAsync(eff_req);
+        }
+
+        for (const auto& pa : pending_acks) {
+            auto response = co_await WaitAwaitable<proto::TrackPublishedResponse>(
+                pa.ack,
+                operation_timeouts_.publish,
+                OperationKind::PublishTrack,
+                OperationErrorCode::TrackPublishTimeout,
+                "wait_track_published_ack");
+            server_acknowledged_any = true;
+            responses.push_back(std::move(response));
+        }
+
+        {
+            std::lock_guard lock(room_mutex_);
+            for (const auto& pa : pending_acks) {
+                pending_track_publishes_.erase(pa.cid);
+            }
+        }
+
+        for (const auto& item : items) {
+            auto sender = co_await AddTrackToPublisherAsync(item.track, generation);
+            senders.push_back(sender);
+        }
+
+        // 单次全量 SDP 重协商
+        co_await NegotiatePublisherAsync(operation_timeouts_.negotiation, generation);
+
+        if (generation != session_generation_.load(std::memory_order_acquire)) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::Cancelled,
+                                 "publish_commit",
+                                 "session changed before batch publication commit");
+        }
+
+        std::vector<std::shared_ptr<TrackPublication>> publications;
+        publications.reserve(items.size());
+        {
+            std::lock_guard lock(room_mutex_);
+            if (!local || local != local_participant_) {
+                throw OperationError(OperationKind::PublishTrack,
+                                     OperationErrorCode::Cancelled,
+                                     "publish_commit",
+                                     "local participant changed before batch publication commit");
+            }
+            for (size_t i = 0; i < items.size(); ++i) {
+                items[i].track->set_sid(responses[i].track().sid());
+                auto pub = std::make_shared<TrackPublication>(
+                    items[i].track, responses[i].track().sid(), responses[i].track().name());
+                local->add_publication(pub);
+                publications.push_back(pub);
+            }
+        }
+
+        Log("TRACK", "BATCH_PUBLISHED",
+            "本地音视频批量发布成功: 共 " + std::to_string(publications.size()) + " 条轨道，仅执行单次 SDP 协商");
+        co_return publications;
+    } catch (...) {
+        {
+            std::lock_guard lock(room_mutex_);
+            for (const auto& pa : pending_acks) {
+                pending_track_publishes_.erase(pa.cid);
+            }
+        }
+        if (!senders.empty() && WebRTCManager::Instance().signaling_thread()) {
+            webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+            {
+                std::lock_guard lock(room_mutex_);
+                pc = publisher_pc_;
+            }
+            WebRTCManager::Instance().signaling_thread()->BlockingCall([pc, senders]() {
+                if (pc) {
+                    for (const auto& sender : senders) {
+                        if (sender) pc->RemoveTrackOrError(sender);
+                    }
+                }
+            });
+        }
+        if (server_acknowledged_any) {
+            Log("ERROR", "PUBLISH_BATCH_ROLLBACK",
+                "批量发布事务异常；已回滚本地 senders 并发起 Publisher SDP 重协商以收敛服务端轨状态");
+            NegotiatePublisher();
+        }
+        throw;
+    }
+}
+
+asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
+    std::shared_ptr<Track> track,
+    uint64_t generation) {
+    if (!track || !track->rtc_track()) {
+        throw OperationError(OperationKind::UnpublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "remove_sender_validate",
+                             "local track has no native WebRTC track");
+    }
+
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (generation != session_generation_.load(std::memory_order_acquire) ||
+            connection_state_ != ConnectionState::Connected) {
+            throw OperationError(OperationKind::UnpublishTrack,
+                                 OperationErrorCode::Cancelled,
+                                 "remove_sender_validate",
+                                 "room session changed while unpublishing");
+        }
+        pc = publisher_pc_;
+    }
+    if (!pc || !WebRTCManager::Instance().signaling_thread()) {
+        throw OperationError(OperationKind::UnpublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "remove_sender_validate",
+                             "publisher peer connection is unavailable");
+    }
+
+    auto completion = std::make_shared<AwaitableState<void>>(executor_);
+    struct RemoveTrackTaskParams {
+        std::shared_ptr<Room> room;
+        std::shared_ptr<AwaitableState<void>> completion;
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+        webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track;
+        uint64_t generation = 0;
+    };
+    auto* params = new RemoveTrackTaskParams{
+        shared_from_this(), completion, pc, track->rtc_track(), generation};
+    WebRTCManager::Instance().signaling_thread()->PostTask([params]() {
+        std::unique_ptr<RemoveTrackTaskParams> owned(params);
+        auto& task = *owned;
+        if (task.generation != task.room->session_generation_.load(std::memory_order_acquire)) {
+            FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                OperationKind::UnpublishTrack,
+                OperationErrorCode::Cancelled,
+                "remove_sender",
+                "session changed before sender removal")));
+            return;
+        }
+
+        std::vector<webrtc::scoped_refptr<webrtc::RtpSenderInterface>> senders;
+        for (const auto& sender : task.pc->GetSenders()) {
+            if (!sender || !sender->track()) continue;
+            if (sender->track() == task.rtc_track ||
+                sender->track()->id() == task.rtc_track->id()) {
+                senders.push_back(sender);
+            }
+        }
+        if (senders.empty()) {
+            FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                OperationKind::UnpublishTrack,
+                OperationErrorCode::InvalidState,
+                "remove_sender",
+                "no publisher sender owns the requested local track")));
+            return;
+        }
+
+        for (const auto& sender : senders) {
+            const auto result = task.pc->RemoveTrackOrError(sender);
+            if (!result.ok()) {
+                FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                    OperationKind::UnpublishTrack,
+                    OperationErrorCode::StateUncertain,
+                    "remove_sender",
+                    result.message(),
+                    true)));
+                return;
+            }
+        }
+        CompleteAwaitable(task.completion);
+    });
+
+    co_await WaitAwaitable<void>(
+        completion,
+        operation_timeouts_.publish,
+        OperationKind::UnpublishTrack,
+        OperationErrorCode::TrackUnpublishTimeout,
+        "remove_sender");
+}
+
+asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsync(
+    const std::string& track_sid) {
+    if (track_sid.empty()) {
+        throw OperationError(OperationKind::UnpublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "unpublish_validate",
+                             "track SID is empty");
+    }
+
+    const auto generation = session_generation_.load(std::memory_order_acquire);
+    std::shared_ptr<LocalParticipant> local;
+    std::shared_ptr<TrackPublication> publication;
+    std::shared_ptr<Track> track;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (connection_state_ != ConnectionState::Connected ||
+            generation != session_generation_.load(std::memory_order_acquire)) {
+            throw OperationError(OperationKind::UnpublishTrack,
+                                 OperationErrorCode::InvalidState,
+                                 "unpublish_validate",
+                                 "room is not connected");
+        }
+        local = local_participant_;
+        publication = local ? local->get_publication(track_sid) : nullptr;
+        track = publication ? publication->track() : nullptr;
+        if (!local || !publication || !track) {
+            throw OperationError(OperationKind::UnpublishTrack,
+                                 OperationErrorCode::InvalidState,
+                                 "unpublish_validate",
+                                 "track SID is not an active local publication");
+        }
+        if (pending_local_unpublishes_.contains(track_sid)) {
+            throw OperationError(OperationKind::UnpublishTrack,
+                                 OperationErrorCode::InvalidState,
+                                 "unpublish_validate",
+                                 "an unpublish operation for this track is already in progress");
+        }
+        pending_local_unpublishes_.emplace(track_sid,
+                                            PendingLocalUnpublish{generation, publication, false});
+    }
+
+    bool sender_removed = false;
+    try {
+        co_await RemoveLocalTrackFromPublisherAsync(track, generation);
+        sender_removed = true;
+        {
+            std::lock_guard lock(room_mutex_);
+            const auto it = pending_local_unpublishes_.find(track_sid);
+            if (it == pending_local_unpublishes_.end() ||
+                it->second.generation != generation ||
+                generation != session_generation_.load(std::memory_order_acquire)) {
+                throw OperationError(OperationKind::UnpublishTrack,
+                                     OperationErrorCode::Cancelled,
+                                     "unpublish_negotiate",
+                                     "session changed after sender removal");
+            }
+            it->second.sender_removed = true;
+        }
+
+        co_await NegotiatePublisherAsync(operation_timeouts_.negotiation, generation);
+
+        std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+        {
+            std::lock_guard lock(room_mutex_);
+            const auto it = pending_local_unpublishes_.find(track_sid);
+            if (generation != session_generation_.load(std::memory_order_acquire) ||
+                connection_state_ != ConnectionState::Connected ||
+                !local || local != local_participant_ ||
+                it == pending_local_unpublishes_.end() ||
+                it->second.publication != publication) {
+                throw OperationError(OperationKind::UnpublishTrack,
+                                     OperationErrorCode::Cancelled,
+                                     "unpublish_commit",
+                                     "session changed before local unpublish commit");
+            }
+
+            local->remove_publication(track_sid);
+            published_track_records_.erase(
+                std::remove_if(published_track_records_.begin(),
+                               published_track_records_.end(),
+                               [&track_sid, &track](const PublishedTrackRecord& record) {
+                                   return record.previous_sid == track_sid || record.track == track;
+                               }),
+                published_track_records_.end());
+            pending_local_unpublishes_.erase(it);
+            listeners_snapshot = listeners_;
+        }
+
+        for (const auto& listener : listeners_snapshot) {
+            listener->OnLocalTrackUnpublished(publication);
+        }
+        publication->set_track(nullptr);
+        track->set_sid("");
+        Log("TRACK", "LOCAL_UNPUBLISHED",
+            "本地 Track 已由 Publisher SDP Answer 确认取消发布: " + track_sid);
+        co_return publication;
+    } catch (const std::exception& error) {
+        bool state_uncertain = false;
+        {
+            std::lock_guard lock(room_mutex_);
+            const auto it = pending_local_unpublishes_.find(track_sid);
+            if (it != pending_local_unpublishes_.end()) {
+                state_uncertain = sender_removed || it->second.sender_removed;
+                if (!state_uncertain) {
+                    pending_local_unpublishes_.erase(it);
+                }
+            }
+        }
+        if (state_uncertain) {
+            Log("ERROR", "UNPUBLISH_STATE_UNCERTAIN",
+                "本地 sender 已移除但未收到 SDP Answer；将通过后续恢复按服务端状态收敛: " +
+                    std::string(error.what()));
+            throw OperationError(OperationKind::UnpublishTrack,
+                                 OperationErrorCode::StateUncertain,
+                                 "unpublish_negotiate",
+                                 "publisher sender was removed before unpublish negotiation completed",
+                                 true);
         }
         throw;
     }
@@ -4320,6 +4736,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
                     old_publisher_observer = std::move(publisher_observer_);
                     old_subscriber_observer = std::move(subscriber_observer_);
                     local_participant_.reset();
+                    pending_local_unpublishes_.clear();
                     ClearRemotePublicationMediaBindingsLocked();
                     remote_participants_.clear();
                     if (reliable_dc_) {
@@ -4438,6 +4855,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
         publisher_observer = std::move(publisher_observer_);
         subscriber_observer = std::move(subscriber_observer_);
         local_participant_.reset();
+        pending_local_unpublishes_.clear();
         ClearRemotePublicationMediaBindingsLocked();
         remote_participants_.clear();
         if (reliable_dc_) {
@@ -4697,6 +5115,9 @@ void Room::RecordPublishedTracks() {
     if (!local_participant_) return;
 
     for (const auto& kv : local_participant_->tracks()) {
+        if (pending_local_unpublishes_.contains(kv.first)) {
+            continue;
+        }
         const auto& pub = kv.second;
         if (pub && pub->track()) {
             published_track_records_.push_back({

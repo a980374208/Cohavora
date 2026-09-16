@@ -15,6 +15,7 @@ namespace livekit {
 enum class OperationKind {
     Connect,
     PublishTrack,
+    UnpublishTrack,
     Negotiate,
     Reconnect,
     Disconnect,
@@ -32,6 +33,7 @@ enum class OperationErrorCode {
     PermissionDenied,
     TrackPublishTimeout,
     TrackPublishRejected,
+    TrackUnpublishTimeout,
     ReconnectExhausted,
     SessionClosed,
     StateUncertain,

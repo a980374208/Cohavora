@@ -2871,6 +2871,7 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteVideoTrackAvailable,
 	        this, [this](const QString &id, std::shared_ptr<livekit::Track> track) {
+			onRemoteParticipantJoined(id, id);
 			if (_remoteRenderSession) {
 				_remoteRenderSession->AttachRemoteTrack(track, id.toStdString());
 			}
@@ -2990,7 +2991,16 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 			if (_room) {
 				auto remotes = _room->remote_participants();
 				for (const auto &[sid, p] : remotes) {
-					if (p) onRemoteParticipantJoined(QString::fromStdString(p->identity()), QString::fromStdString(p->name()));
+					if (!p) continue;
+					const QString pId = QString::fromStdString(p->identity());
+					onRemoteParticipantJoined(pId, QString::fromStdString(p->name()));
+					if (_remoteRenderSession) {
+						for (const auto &[tsid, pub] : p->tracks()) {
+							if (pub && pub->track() && pub->track()->kind() == livekit::TrackKind::Video) {
+								_remoteRenderSession->AttachRemoteTrack(pub->track(), p->identity());
+							}
+						}
+					}
 				}
 			}
 		}

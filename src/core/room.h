@@ -132,6 +132,7 @@ public:
 
     virtual void OnTrackPublished(std::shared_ptr<RemoteParticipant> participant, std::shared_ptr<TrackPublication> publication) {}
     virtual void OnTrackUnpublished(std::shared_ptr<RemoteParticipant> participant, std::shared_ptr<TrackPublication> publication) {}
+    virtual void OnLocalTrackUnpublished(std::shared_ptr<TrackPublication> publication) {}
     virtual void OnTrackSubscribed(std::shared_ptr<Track> track, std::shared_ptr<TrackPublication> publication, std::shared_ptr<RemoteParticipant> participant) {}
     virtual void OnTrackUnsubscribed(std::shared_ptr<Track> track, std::shared_ptr<TrackPublication> publication, std::shared_ptr<RemoteParticipant> participant) {}
     virtual void OnTrackMuted(std::shared_ptr<Participant> participant, std::shared_ptr<TrackPublication> publication, bool muted) {}
@@ -234,6 +235,10 @@ public:
     asio::awaitable<std::shared_ptr<TrackPublication>> PublishLocalTrackAsync(
         std::shared_ptr<Track> track,
         const proto::SignalRequest& request);
+    asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> PublishLocalTracksBatchAsync(
+        std::vector<LocalParticipant::BatchTrackItem> items);
+    asio::awaitable<std::shared_ptr<TrackPublication>> UnpublishLocalTrackAsync(
+        const std::string& track_sid);
     void SendPublishOffer();
     void NegotiatePublisher();
     asio::awaitable<void> NegotiatePublisherAsync(
@@ -291,6 +296,9 @@ private:
     // Called while room_mutex_ is held immediately before the canonical
     // participant map is discarded by disconnect/recovery teardown.
     void ClearRemotePublicationMediaBindingsLocked();
+    asio::awaitable<void> RemoveLocalTrackFromPublisherAsync(
+        std::shared_ptr<Track> track,
+        uint64_t generation);
 
     // 协商和 Trickle 信令分发
     void SendTrickleCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type);
@@ -394,6 +402,15 @@ private:
 
     std::unordered_map<std::string,
         std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>>> pending_track_publishes_;
+    // A media sender is changed before the remote SDP answer can commit the
+    // public map mutation. Keep that intent through recovery so a failed
+    // renegotiation never republishes a track the user removed.
+    struct PendingLocalUnpublish {
+        uint64_t generation = 0;
+        std::shared_ptr<TrackPublication> publication;
+        bool sender_removed = false;
+    };
+    std::unordered_map<std::string, PendingLocalUnpublish> pending_local_unpublishes_;
     std::vector<std::shared_ptr<proto::SignalResponse>> deferred_room_messages_;
 
     std::atomic<uint64_t> operation_sequence_{1};

@@ -373,6 +373,15 @@ target_link_libraries(test_remote_publication_lifecycle PRIVATE
     livekit_signaling
 )
 
+# Local media unpublish is committed by publisher SDP answer, not by a guessed
+# SignalRequest. This locks down the protocol gate and public API validation.
+add_executable(test_local_unpublish_transaction
+    tests/test_local_unpublish_transaction.cpp
+)
+target_link_libraries(test_local_unpublish_transaction PRIVATE
+    livekit_signaling
+)
+
 if(LIVEKIT_BUILD_EXTERNAL_TESTS)
     add_executable(test_livekit_official_connect
         tests/test_livekit_official_connect.cpp
@@ -682,6 +691,7 @@ add_test(NAME data_stream_assembler_test COMMAND test_data_stream_assembler)
 add_test(NAME rpc_system_test COMMAND test_rpc_system)
 add_test(NAME room_state_events_test COMMAND test_room_state_events)
 add_test(NAME remote_publication_lifecycle_test COMMAND test_remote_publication_lifecycle)
+add_test(NAME local_unpublish_transaction_test COMMAND test_local_unpublish_transaction)
 add_test(NAME media_streaming_test COMMAND test_media_streaming)
 add_test(NAME stats_system_test COMMAND test_stats_system)
 add_test(NAME audio_playout_warmup_test COMMAND test_audio_playout_warmup)
