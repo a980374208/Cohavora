@@ -2904,6 +2904,15 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 			}
 		}
 	});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::errorOccurred,
+	        this, [this](const QString &title, const QString &message) {
+		if (!_coordinator || _coordinator->state() != OpenMeeting::MeetingState::Failed) {
+			return;
+		}
+		LogToConsole(LogCategory::Error, "SESSION_STARTUP", QString("%1: %2").arg(title, message));
+		QMessageBox::critical(this, title, message);
+		close();
+	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingLeft,
 	        this, [this]() {
 		close();
@@ -3116,7 +3125,7 @@ void MeetingRoomWindow::stopLiveKitSession() {
 		_dshowCap.reset();
 	}
 
-	if (_coordinator) {
+	if (_coordinator && _coordinator->state() != OpenMeeting::MeetingState::Failed) {
 		_coordinator->leaveMeetingAsync(false);
 	}
 	LogToConsole(LogCategory::Connection, "DISCONNECT", "已退出会议视窗并停止媒体采集");

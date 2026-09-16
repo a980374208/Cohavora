@@ -9,6 +9,7 @@
 #include <QtCore/QTimer>
 
 #include <memory>
+#include <cstdint>
 #include <string>
 #include <vector>
 #include <deque>
@@ -19,6 +20,8 @@
 #include "src/core/room.h"
 #include "src/core/local_audio_track.h"
 #include "src/core/local_video_track.h"
+#include "src/core/meeting_session_runtime.h"
+#include "src/core/meeting_startup_transaction.h"
 #include "src/rtc/video_frame.h"
 #include "src/media/wasapi_capture.h"
 #include "src/media/dshow_capture.h"
@@ -33,6 +36,7 @@ enum class MeetingState {
     Validating,         // 第一阶段：向业务后端鉴权（校验会议号、密码、准入状态）
     FetchingCredentials,// 第二阶段：换取 LiveKit 凭据 (URL 与 Token)
     ConnectingRoom,     // 第三阶段：异步连接 LiveKit 房间与 WebRTC 协商
+    StartingLocalMedia, // LiveKit 房间已连接，正在原子发布本地音频和视频
     InMeeting,          // 成功入会，信令通道与音视频就绪
     Reconnecting,       // 网络波动重连中
     Leaving,            // 正在退出或结束会议
@@ -182,13 +186,30 @@ private:
     void setState(MeetingState s, const QString &detail = QString());
     void startRoomSession(const QString &url, const QString &token);
     void stopRoomSession();
+    void completeRoomStartupOnUiThread(uint64_t sessionGeneration,
+                                       std::shared_ptr<livekit::LocalAudioTrack> audioTrack,
+                                       std::shared_ptr<livekit::LocalVideoTrack> videoTrack);
+    void failRoomStartupOnUiThread(uint64_t sessionGeneration,
+                                   const QString &title,
+                                   const QString &detail);
     void parseRoomMetadata(const std::string &metadata);
     void handleDuplicateIdentityKickOff(const QString &detail);
     void handleSessionInvalidated(SessionInvalidationReason reason);
-    void handleDataReceived(const std::vector<uint8_t> &data,
-                            const std::string &participantSid,
-                            const std::string &participantIdentity = "",
-                            const QString &participantName = "");
+    void enqueueDataReceived(const std::shared_ptr<MeetingSessionRuntime> &session,
+                             const std::vector<uint8_t> &data,
+                             const std::string &participantSid,
+                             const std::string &participantIdentity = "",
+                             const QString &participantName = "");
+    void handleDataReceivedOnSessionStrand(const std::shared_ptr<MeetingSessionRuntime> &session,
+                                           const std::vector<uint8_t> &data,
+                                           const std::string &participantSid,
+                                           const std::string &participantIdentity,
+                                           const QString &participantName);
+    void cancelInboundTransfersForParticipant(const QString &participantIdentity);
+    // Queued Qt callbacks use this immutable token instead of retaining a
+    // MeetingSessionRuntime. The runtime owns an ASIO strand, so allowing it
+    // to outlive its io_context through a delayed Qt event is unsafe.
+    bool isCurrentSessionGenerationOnUiThread(uint64_t sessionGeneration) const;
 
     class CoordinatorRoomListener;
     friend class CoordinatorRoomListener;
@@ -209,19 +230,6 @@ private:
     std::map<QString, ParticipantInfo> _participants;
     void ensureLocalParticipant();
     void updateParticipantListAndNotify();
-
-    struct InboundMediaTransfer {
-        QString mediaType;
-        QString fileName;
-        int totalChunks = 0;
-        qint64 totalSize = 0;
-        int64_t seq = 0;
-        qint64 lastActiveTimestamp = 0;
-        QString senderIdentity;
-        QString senderName;
-        std::map<int, QString> receivedChunks;
-    };
-    std::map<QString, InboundMediaTransfer> _inboundMediaTransfers;
 
     // 出站大文件/多媒体平滑分片调度队列
     struct MediaSendChunkTask {
@@ -245,10 +253,18 @@ private:
     // LiveKit 异步通信与媒体资源
     std::unique_ptr<asio::io_context> _ioContext;
     std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> _workGuard;
+    // The Qt thread owns this pointer. Callback-owned transfer state inside the
+    // runtime is accessed only through its ASIO strand.
+    std::shared_ptr<MeetingSessionRuntime> _sessionRuntime;
+    uint64_t _nextSessionGeneration = 0;
     std::shared_ptr<livekit::Room> _room;
     std::shared_ptr<CoordinatorRoomListener> _roomListener;
     std::thread _ioThread;
     std::atomic<bool> _sessionRunning{false};
+    // Qt-thread owned. A reconnect event may arrive while initial local media
+    // publication is still in progress; only a committed startup may surface
+    // as InMeeting.
+    bool _startupCommitted = false;
 
     // 本地媒体源与轨道
     std::shared_ptr<livekit::WasapiAudioCapture> _wasapiCap;

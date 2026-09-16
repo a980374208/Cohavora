@@ -741,6 +741,66 @@ set_target_properties(test_openmeeting_http PROPERTIES
 )
 add_test(NAME openmeeting_http_test COMMAND test_openmeeting_http)
 
+# Coordinator session runtime serialization test
+add_executable(test_meeting_session_runtime
+    tests/test_meeting_session_runtime.cpp
+    src/core/meeting_session_runtime.h
+)
+target_include_directories(test_meeting_session_runtime BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
+)
+target_link_libraries(test_meeting_session_runtime PRIVATE
+    asio::asio
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
+    netapi32
+    userenv
+    version
+    winmm
+)
+target_compile_definitions(test_meeting_session_runtime PRIVATE
+    WIN32
+    _WINDOWS
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    ASIO_STANDALONE
+    NDEBUG
+    _ITERATOR_DEBUG_LEVEL=0
+    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
+    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
+)
+target_link_options(test_meeting_session_runtime PRIVATE
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
+)
+set_target_properties(test_meeting_session_runtime PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME meeting_session_runtime_test COMMAND test_meeting_session_runtime)
+
+# Coordinator startup transaction test: a meeting is committed only after both
+# required local tracks publish, otherwise it must roll back to failure.
+add_executable(test_meeting_startup_transaction
+    tests/test_meeting_startup_transaction.cpp
+    src/core/meeting_startup_transaction.h
+)
+target_include_directories(test_meeting_startup_transaction BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_compile_definitions(test_meeting_startup_transaction PRIVATE
+    WIN32
+    _WINDOWS
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    NDEBUG
+)
+set_target_properties(test_meeting_startup_transaction PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME meeting_startup_transaction_test COMMAND test_meeting_startup_transaction)
+
 # GPU Video Converter Test
 add_executable(test_gpu_converter
     tests/test_gpu_converter.cpp
