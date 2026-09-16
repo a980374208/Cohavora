@@ -1114,6 +1114,107 @@ bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
     return send_packet(data);
 }
 
+bool Room::PublishDataPacket(const proto::DataPacket& packet, bool reliable) {
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
+    std::shared_ptr<LocalParticipant> local_participant;
+    {
+        std::lock_guard lock(room_mutex_);
+        dc = reliable ? reliable_dc_ : lossy_dc_;
+        local_participant = local_participant_;
+    }
+
+    proto::DataPacket final_pkt = packet;
+    final_pkt.set_kind(reliable ? proto::DataPacket::RELIABLE : proto::DataPacket::LOSSY);
+    if (local_participant) {
+        if (final_pkt.participant_identity().empty()) {
+            final_pkt.set_participant_identity(local_participant->identity());
+        }
+        if (final_pkt.participant_sid().empty()) {
+            final_pkt.set_participant_sid(local_participant->sid());
+        }
+    }
+
+    std::vector<uint8_t> bytes(final_pkt.ByteSizeLong());
+    final_pkt.SerializeToArray(bytes.data(), static_cast<int>(bytes.size()));
+
+    if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
+        webrtc::DataBuffer buffer(
+            webrtc::CopyOnWriteBuffer(bytes.data(), bytes.size()),
+            /*binary=*/true);
+        if (!dc->Send(buffer)) {
+            Log("DATA", "SEND_FAILED", "DataChannel 拒绝发送数据包");
+            return false;
+        }
+        return true;
+    } else {
+        std::string topic;
+        if (final_pkt.has_stream_header()) topic = final_pkt.stream_header().topic();
+        else if (final_pkt.has_user()) topic = final_pkt.user().topic();
+        std::string local_sid = local_participant ? local_participant->sid() : std::string{};
+        OnIncomingDataPacket(bytes, local_sid, topic);
+        return true;
+    }
+}
+
+std::shared_ptr<TextStreamWriter> Room::CreateTextStreamWriter(
+    const std::string& topic,
+    const std::map<std::string, std::string>& attributes,
+    const std::string& stream_id,
+    std::optional<std::size_t> total_size,
+    const std::string& reply_to_id,
+    const std::vector<std::string>& destination_identities) {
+
+    std::string sender_id;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (local_participant_) {
+            sender_id = local_participant_->identity();
+        }
+    }
+
+    auto weak_self = weak_from_this();
+    auto publisher = [weak_self](const proto::DataPacket& packet, bool reliable) -> bool {
+        if (auto self = weak_self.lock()) {
+            return self->PublishDataPacket(packet, reliable);
+        }
+        return false;
+    };
+
+    return std::make_shared<TextStreamWriter>(
+        std::move(publisher), topic, attributes, stream_id,
+        total_size, reply_to_id, destination_identities, sender_id);
+}
+
+std::shared_ptr<ByteStreamWriter> Room::CreateByteStreamWriter(
+    const std::string& name,
+    const std::string& topic,
+    const std::map<std::string, std::string>& attributes,
+    const std::string& stream_id,
+    std::optional<std::size_t> total_size,
+    const std::string& mime_type,
+    const std::vector<std::string>& destination_identities) {
+
+    std::string sender_id;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (local_participant_) {
+            sender_id = local_participant_->identity();
+        }
+    }
+
+    auto weak_self = weak_from_this();
+    auto publisher = [weak_self](const proto::DataPacket& packet, bool reliable) -> bool {
+        if (auto self = weak_self.lock()) {
+            return self->PublishDataPacket(packet, reliable);
+        }
+        return false;
+    };
+
+    return std::make_shared<ByteStreamWriter>(
+        std::move(publisher), name, topic, attributes, stream_id,
+        total_size, mime_type, destination_identities, sender_id);
+}
+
 asio::awaitable<std::string> Room::SendRpcRequest(const RpcPacket& packet) {
     auto self = shared_from_this();
     auto pending = std::make_shared<PendingRpcCall>();
@@ -1320,10 +1421,101 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                 header.total_length(),
                 sender_identity,
                 real_sender_sid);
+
+            // 构造并派发上层流式 Reader
+            std::shared_ptr<RemoteParticipant> remote_p;
+            std::shared_ptr<LocalParticipant> local_p;
+            {
+                std::lock_guard lock(room_mutex_);
+                local_p = local_participant_;
+                if (!real_sender_sid.empty()) {
+                    auto it = remote_participants_.find(real_sender_sid);
+                    if (it != remote_participants_.end()) {
+                        remote_p = it->second;
+                    }
+                }
+                if (!remote_p && !sender_identity.empty()) {
+                    for (const auto& kv : remote_participants_) {
+                        if (kv.second && (kv.second->identity() == sender_identity || kv.second->sid() == sender_identity)) {
+                            remote_p = kv.second;
+                            break;
+                        }
+                    }
+                }
+            }
+            std::shared_ptr<Participant> p = remote_p ? std::static_pointer_cast<Participant>(remote_p) : (local_p && (local_p->sid() == real_sender_sid || local_p->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_p) : nullptr);
+            auto listeners_snapshot = GetListenersSnapshot();
+
+            if (header.has_text_header()) {
+                TextStreamInfo info;
+                info.stream_id = header.stream_id();
+                info.topic = header.topic();
+                info.mime_type = header.mime_type();
+                info.timestamp = header.timestamp();
+                if (header.has_total_length()) info.total_length = header.total_length();
+                for (const auto& [k, v] : header.attributes()) {
+                    info.attributes[k] = v;
+                }
+                info.sender_identity = sender_identity;
+                info.sender_sid = real_sender_sid;
+                const auto& th = header.text_header();
+                info.operation_type = th.operation_type();
+                info.version = th.version();
+                info.reply_to_stream_id = th.reply_to_stream_id();
+                for (const auto& att : th.attached_stream_ids()) {
+                    info.attached_stream_ids.push_back(att);
+                }
+                info.generated = th.generated();
+
+                auto reader = std::make_shared<TextStreamReader>(std::move(info));
+                {
+                    std::lock_guard lk(streams_mutex_);
+                    active_text_readers_[header.stream_id()] = reader;
+                }
+                for (const auto& listener : listeners_snapshot) {
+                    listener->OnTextStreamOpened(reader, p);
+                }
+            } else {
+                ByteStreamInfo info;
+                info.stream_id = header.stream_id();
+                info.topic = header.topic();
+                info.mime_type = header.mime_type();
+                info.timestamp = header.timestamp();
+                if (header.has_total_length()) info.total_length = header.total_length();
+                for (const auto& [k, v] : header.attributes()) {
+                    info.attributes[k] = v;
+                }
+                info.sender_identity = sender_identity;
+                info.sender_sid = real_sender_sid;
+                if (header.has_byte_header()) {
+                    info.name = header.byte_header().name();
+                }
+
+                auto reader = std::make_shared<ByteStreamReader>(std::move(info));
+                {
+                    std::lock_guard lk(streams_mutex_);
+                    active_byte_readers_[header.stream_id()] = reader;
+                }
+                for (const auto& listener : listeners_snapshot) {
+                    listener->OnByteStreamOpened(reader, p);
+                }
+            }
             return;
         } else if (data_pkt.has_stream_chunk()) {
             const auto& chunk = data_pkt.stream_chunk();
             const auto& content = chunk.content();
+
+            // 派发给活跃 reader
+            {
+                std::lock_guard lk(streams_mutex_);
+                if (auto it = active_text_readers_.find(chunk.stream_id()); it != active_text_readers_.end()) {
+                    it->second->OnChunkUpdate(content);
+                }
+                if (auto it = active_byte_readers_.find(chunk.stream_id()); it != active_byte_readers_.end()) {
+                    it->second->OnChunkUpdate(reinterpret_cast<const uint8_t*>(content.data()), content.size());
+                }
+            }
+
             auto assembled = incoming_data_streams_.AddChunk(
                 chunk.stream_id(),
                 chunk.chunk_index(),
@@ -1339,6 +1531,21 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
             real_sender_sid = std::move(assembled->sender_sid);
         } else if (data_pkt.has_stream_trailer()) {
             const auto& trailer = data_pkt.stream_trailer();
+
+            // 关闭活跃 reader
+            {
+                std::lock_guard lk(streams_mutex_);
+                std::map<std::string, std::string> attrs(trailer.attributes().begin(), trailer.attributes().end());
+                if (auto it = active_text_readers_.find(trailer.stream_id()); it != active_text_readers_.end()) {
+                    it->second->OnStreamClose(trailer.reason(), attrs);
+                    active_text_readers_.erase(it);
+                }
+                if (auto it = active_byte_readers_.find(trailer.stream_id()); it != active_byte_readers_.end()) {
+                    it->second->OnStreamClose(trailer.reason(), attrs);
+                    active_byte_readers_.erase(it);
+                }
+            }
+
             auto assembled = incoming_data_streams_.Finish(trailer.stream_id());
             if (!assembled) {
                 return;

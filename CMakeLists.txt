@@ -106,6 +106,7 @@ set(LIVEKIT_SOURCES
     src/core/remote_track_publication.cpp
     src/core/adaptive_stream_manager.cpp
     src/core/data_stream_assembler.cpp
+    src/core/data_stream.cpp
     src/rtc/webrtc_manager.cpp
     src/rtc/audio_frame.cpp
     src/rtc/video_frame.cpp
@@ -404,6 +405,14 @@ add_executable(test_meeting_recovery_ux
     tests/test_meeting_recovery_ux.cpp
 )
 target_link_libraries(test_meeting_recovery_ux PRIVATE
+    livekit_signaling
+)
+
+# Modern data stream messaging contract
+add_executable(test_data_stream_messaging
+    tests/test_data_stream_messaging.cpp
+)
+target_link_libraries(test_data_stream_messaging PRIVATE
     livekit_signaling
 )
 
@@ -720,6 +729,7 @@ add_test(NAME local_unpublish_transaction_test COMMAND test_local_unpublish_tran
 add_test(NAME camera_switch_transaction_test COMMAND test_camera_switch_transaction)
 add_test(NAME audio_render_reference_apm_test COMMAND test_audio_render_reference_apm)
 add_test(NAME meeting_recovery_ux_test COMMAND test_meeting_recovery_ux)
+add_test(NAME data_stream_messaging_test COMMAND test_data_stream_messaging)
 add_test(NAME media_streaming_test COMMAND test_media_streaming)
 add_test(NAME stats_system_test COMMAND test_stats_system)
 add_test(NAME audio_playout_warmup_test COMMAND test_audio_playout_warmup)

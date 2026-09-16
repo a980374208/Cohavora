@@ -549,6 +549,32 @@ public:
         coordinator->enqueueDataReceived(session, payload, sid, identity, name);
     }
 
+    void OnTextStreamOpened(std::shared_ptr<livekit::TextStreamReader> reader,
+                            std::shared_ptr<livekit::Participant> participant) override {
+        auto *coordinator = _coordinator;
+        auto session = _session.lock();
+        if (!coordinator || !session || !reader) return;
+        const auto generation = _generation;
+        QString pId = participant ? QString::fromStdString(participant->identity()) : QString();
+        QMetaObject::invokeMethod(coordinator, [coordinator, generation, reader, pId]() {
+            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
+            emit coordinator->textStreamReceived(reader, pId);
+        }, Qt::QueuedConnection);
+    }
+
+    void OnByteStreamOpened(std::shared_ptr<livekit::ByteStreamReader> reader,
+                            std::shared_ptr<livekit::Participant> participant) override {
+        auto *coordinator = _coordinator;
+        auto session = _session.lock();
+        if (!coordinator || !session || !reader) return;
+        const auto generation = _generation;
+        QString pId = participant ? QString::fromStdString(participant->identity()) : QString();
+        QMetaObject::invokeMethod(coordinator, [coordinator, generation, reader, pId]() {
+            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
+            emit coordinator->byteStreamReceived(reader, pId);
+        }, Qt::QueuedConnection);
+    }
+
 private:
     MeetingCoordinator *_coordinator;
     std::weak_ptr<MeetingSessionRuntime> _session;
@@ -568,6 +594,8 @@ MeetingCoordinator::MeetingCoordinator(QObject *parent)
     qRegisterMetaType<livekit::RoomDisconnectReason>("livekit::RoomDisconnectReason");
     qRegisterMetaType<MeetingRoomInfo>("OpenMeeting::MeetingRoomInfo");
     qRegisterMetaType<livekit::ParticipantPermission>("livekit::ParticipantPermission");
+    qRegisterMetaType<std::shared_ptr<livekit::TextStreamReader>>("std::shared_ptr<livekit::TextStreamReader>");
+    qRegisterMetaType<std::shared_ptr<livekit::ByteStreamReader>>("std::shared_ptr<livekit::ByteStreamReader>");
     _localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
     _localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
 
@@ -1766,6 +1794,33 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
             emit meetingDetailUpdated(_meetingDetail);
         }, Qt::QueuedConnection);
     }
+}
+
+std::shared_ptr<livekit::TextStreamWriter> MeetingCoordinator::createTextStreamWriter(
+    const QString &topic,
+    const std::map<std::string, std::string> &attributes,
+    const QString &streamId,
+    std::optional<size_t> totalSize,
+    const QString &replyToId,
+    const std::vector<std::string> &destinationIdentities) {
+    if (!_room) return nullptr;
+    return _room->CreateTextStreamWriter(
+        topic.toStdString(), attributes, streamId.toStdString(),
+        totalSize, replyToId.toStdString(), destinationIdentities);
+}
+
+std::shared_ptr<livekit::ByteStreamWriter> MeetingCoordinator::createByteStreamWriter(
+    const QString &name,
+    const QString &topic,
+    const std::map<std::string, std::string> &attributes,
+    const QString &streamId,
+    std::optional<size_t> totalSize,
+    const QString &mimeType,
+    const std::vector<std::string> &destinationIdentities) {
+    if (!_room) return nullptr;
+    return _room->CreateByteStreamWriter(
+        name.toStdString(), topic.toStdString(), attributes, streamId.toStdString(),
+        totalSize, mimeType.toStdString(), destinationIdentities);
 }
 
 } // namespace OpenMeeting
