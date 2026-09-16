@@ -885,8 +885,10 @@ void MeetingCoordinator::startRoomSession(const QString &url, const QString &tok
                     if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
                         return;
                     }
-                    setState(MeetingState::StartingLocalMedia,
-                             QString::fromUtf8("房间已连接，正在发布本地音视频..."));
+                    // 房间底层信令与下行通道已就绪，立即进入 InMeeting 状态以秒级呈现远端画面
+                    setState(MeetingState::InMeeting,
+                             QString::fromUtf8("已成功连入会议房间，正在激活本地音视频..."));
+                    emit meetingJoinedSuccessfully(_currentMeetingId);
                 }, Qt::QueuedConnection);
 
                 auto local = room->local_participant();
@@ -896,24 +898,24 @@ void MeetingCoordinator::startRoomSession(const QString &url, const QString &tok
 
                 auto audioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", audioSource);
                 audioTrack->set_muted(audioMuted);
-                co_await local->PublishTrackAsync(audioTrack);
-                if (!startup.markAudioPublished()) {
-                    throw std::runtime_error("本地音频发布事务状态无效");
-                }
-                MeetingUI::LogToConsole(MeetingUI::LogCategory::Track, "PUBLISH",
-                    QString("已发布 LocalAudioTrack (初始状态: %1)").arg(audioMuted ? "静音" : "开麦"));
 
                 livekit::VideoPublishOptions vopts;
                 vopts.video_codec = "vp8";
                 auto videoTrack = livekit::LocalVideoTrack::createLocalVideoTrack(
                     "camera_video", videoSource, livekit::TrackSource::Camera, vopts);
                 videoTrack->set_muted(!videoEnabled);
-                co_await local->PublishTrackAsync(videoTrack);
-                if (!startup.markVideoPublished() || !startup.commit()) {
-                    throw std::runtime_error("本地视频发布事务状态无效");
+
+                // 【核心优化】：将本地音视频打包，发起批量发布与单次全量 SDP 协商
+                std::vector<std::shared_ptr<livekit::Track>> tracksToPublish;
+                tracksToPublish.push_back(audioTrack);
+                tracksToPublish.push_back(videoTrack);
+
+                auto pubs = co_await local->PublishTracksBatchAsync(std::move(tracksToPublish));
+                if (!startup.markMediaBatchPublished()) {
+                    throw std::runtime_error("本地媒体批量发布事务状态无效");
                 }
                 MeetingUI::LogToConsole(MeetingUI::LogCategory::Track, "PUBLISH",
-                    QString("已发布 LocalVideoTrack (VP8, 初始状态: %1)").arg(videoEnabled ? "开启" : "关闭"));
+                    QString("本地音视频批量发布成功 (共 %1 条轨，合并单次 SDP 协商完成)").arg(pubs.size()));
 
                 QMetaObject::invokeMethod(this,
                                           [this, sessionGeneration, audioTrack = std::move(audioTrack),
@@ -922,19 +924,30 @@ void MeetingCoordinator::startRoomSession(const QString &url, const QString &tok
                 }, Qt::QueuedConnection);
             } catch (const std::exception &ex) {
                 QString err = QString::fromStdString(ex.what());
-                const QString title = startup.mediaStartupBegan()
+                const bool mediaBegan = startup.mediaStartupBegan();
+                const QString title = mediaBegan
                     ? QString::fromUtf8("本地媒体启动失败")
                     : QString::fromUtf8("连接房间失败");
                 if (startup.beginRollback()) {
-                    // The logical transaction is terminal before the queued
-                    // Qt-owner cleanup releases the actual Room resources.
                     startup.completeRollback();
                 }
                 MeetingUI::LogToConsole(MeetingUI::LogCategory::Error, "STARTUP_TRANSACTION",
                                         QString("%1: %2").arg(title, err));
-                QMetaObject::invokeMethod(this, [this, sessionGeneration, title, err]() {
-                    failRoomStartupOnUiThread(sessionGeneration, title, err);
-                }, Qt::QueuedConnection);
+                if (mediaBegan) {
+                    // 房间本身连接正常，仅本地媒体硬件发布异常：降级为无媒体参会，不强制断开会议
+                    QMetaObject::invokeMethod(this, [this, sessionGeneration, title, err]() {
+                        if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
+                            return;
+                        }
+                        _startupCommitted = true;
+                        emit errorOccurred(title, QString::fromUtf8("%1 (已自动切换为仅收听收看模式)").arg(err));
+                    }, Qt::QueuedConnection);
+                } else {
+                    // 连接房间本身失败：执行回滚并清理
+                    QMetaObject::invokeMethod(this, [this, sessionGeneration, title, err]() {
+                        failRoomStartupOnUiThread(sessionGeneration, title, err);
+                    }, Qt::QueuedConnection);
+                }
             }
         }, asio::detached);
 
@@ -954,7 +967,8 @@ void MeetingCoordinator::completeRoomStartupOnUiThread(
     _localVideoTrack = std::move(videoTrack);
     _startupCommitted = true;
     setState(MeetingState::InMeeting, QString::fromUtf8("本地音视频已就绪，已成功连入会议房间"));
-    emit meetingJoinedSuccessfully(_currentMeetingId);
+    emit localAudioMuteChanged(_audioMuted);
+    emit localVideoEnableChanged(_videoEnabled);
 }
 
 void MeetingCoordinator::failRoomStartupOnUiThread(

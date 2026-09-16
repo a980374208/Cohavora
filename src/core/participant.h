@@ -123,12 +123,28 @@ public:
     using PublishTrackHandler = std::function<void(std::shared_ptr<Track>)>;
     using AsyncPublishTrackHandler = std::function<asio::awaitable<std::shared_ptr<TrackPublication>>(
         std::shared_ptr<Track>, const proto::SignalRequest&)>;
+    using AsyncUnpublishTrackHandler = std::function<asio::awaitable<std::shared_ptr<TrackPublication>>(
+        const std::string&)>;
+    struct BatchTrackItem {
+        std::shared_ptr<Track> track;
+        std::shared_ptr<proto::SignalRequest> request;
+    };
+    using AsyncPublishTracksBatchHandler = std::function<asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>>(
+        std::vector<BatchTrackItem>)>;
     void SetPublishTrackHandler(PublishTrackHandler handler) {
         publish_track_handler_ = std::move(handler);
     }
 
     void SetAsyncPublishTrackHandler(AsyncPublishTrackHandler handler) {
         async_publish_track_handler_ = std::move(handler);
+    }
+
+    void SetAsyncUnpublishTrackHandler(AsyncUnpublishTrackHandler handler) {
+        async_unpublish_track_handler_ = std::move(handler);
+    }
+
+    void SetAsyncPublishTracksBatchHandler(AsyncPublishTracksBatchHandler handler) {
+        async_publish_tracks_batch_handler_ = std::move(handler);
     }
 
     void SetPublishDataHandler(PublishDataHandler handler) {
@@ -144,6 +160,15 @@ public:
     void PublishTrack(std::shared_ptr<Track> track);
     asio::awaitable<std::shared_ptr<TrackPublication>> PublishTrackAsync(
         std::shared_ptr<Track> track);
+    // Batch publishing allows multiple local tracks to be added and negotiated
+    // in a single Offer/Answer roundtrip, reducing startup latency.
+    asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> PublishTracksBatchAsync(
+        std::vector<std::shared_ptr<Track>> tracks);
+    // The Room owns sender removal and publisher renegotiation. This entry
+    // point deliberately delegates there instead of mutating the publication
+    // map optimistically.
+    asio::awaitable<std::shared_ptr<TrackPublication>> UnpublishTrackAsync(
+        const std::string& track_sid);
 
     // 模拟本地静音控制逻辑
     void SetMuted(const std::string& track_sid, bool muted);
@@ -176,6 +201,8 @@ private:
     SendSignalHandler send_handler_;
     PublishTrackHandler publish_track_handler_;
     AsyncPublishTrackHandler async_publish_track_handler_;
+    AsyncPublishTracksBatchHandler async_publish_tracks_batch_handler_;
+    AsyncUnpublishTrackHandler async_unpublish_track_handler_;
     PublishDataHandler publish_data_handler_;
     SendRpcHandler send_rpc_handler_;
 

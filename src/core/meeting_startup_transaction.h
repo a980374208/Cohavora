@@ -24,7 +24,7 @@ public:
         return _phase != Phase::ConnectingRoom;
     }
     [[nodiscard]] bool readyToCommit() const {
-        return _phase == Phase::VideoPublished;
+        return _phase == Phase::VideoPublished || _phase == Phase::Committed;
     }
     [[nodiscard]] bool isTerminal() const {
         return _phase == Phase::Committed ||
@@ -42,6 +42,10 @@ public:
 
     bool markVideoPublished() {
         return transition(Phase::AudioPublished, Phase::VideoPublished);
+    }
+
+    bool markMediaBatchPublished() {
+        return transition(Phase::StartingLocalMedia, Phase::Committed);
     }
 
     bool commit() {

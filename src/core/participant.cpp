@@ -260,6 +260,62 @@ asio::awaitable<std::shared_ptr<TrackPublication>> LocalParticipant::PublishTrac
     co_return co_await async_publish_track_handler_(std::move(track), req);
 }
 
+asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> LocalParticipant::PublishTracksBatchAsync(
+    std::vector<std::shared_ptr<Track>> tracks) {
+    if (tracks.empty()) {
+        co_return std::vector<std::shared_ptr<TrackPublication>>{};
+    }
+    for (const auto& track : tracks) {
+        if (!track) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::InvalidState,
+                                 "validate",
+                                 "track is null");
+        }
+    }
+    if (!permission_.can_publish) {
+        throw OperationError(OperationKind::PublishTrack,
+                             OperationErrorCode::PermissionDenied,
+                             "validate_permission",
+                             "participant is not allowed to publish tracks");
+    }
+    if (!async_publish_tracks_batch_handler_) {
+        // Fallback to sequential publishing if batch handler is not attached
+        std::vector<std::shared_ptr<TrackPublication>> publications;
+        publications.reserve(tracks.size());
+        for (auto& track : tracks) {
+            publications.push_back(co_await PublishTrackAsync(std::move(track)));
+        }
+        co_return publications;
+    }
+
+    std::vector<BatchTrackItem> items;
+    items.reserve(tracks.size());
+    for (auto& track : tracks) {
+        Telemetry::Instance().RecordPublishStart();
+        auto req = std::make_shared<proto::SignalRequest>(BuildAddTrackRequest(track, identity()));
+        items.push_back({std::move(track), std::move(req)});
+    }
+    co_return co_await async_publish_tracks_batch_handler_(std::move(items));
+}
+
+asio::awaitable<std::shared_ptr<TrackPublication>> LocalParticipant::UnpublishTrackAsync(
+    const std::string& track_sid) {
+    if (track_sid.empty()) {
+        throw OperationError(OperationKind::UnpublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "validate",
+                             "track SID is empty");
+    }
+    if (!async_unpublish_track_handler_) {
+        throw OperationError(OperationKind::UnpublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "validate_session",
+                             "participant is not attached to an active Room");
+    }
+    co_return co_await async_unpublish_track_handler_(track_sid);
+}
+
 void LocalParticipant::SetMuted(const std::string& track_sid, bool muted) {
     std::string actual_sid = track_sid;
     if (actual_sid.empty()) {
