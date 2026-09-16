@@ -122,6 +122,7 @@ set(LIVEKIT_SOURCES
     src/media/wasapi_capture.cpp
     src/media/dshow_enumerator.cpp
     src/media/dshow_capture.cpp
+    src/media/camera_source_manager.cpp
     src/media/audio_vad.cpp
     src/media/audio_apm.cpp
     src/e2ee/key_provider.cpp
@@ -379,6 +380,14 @@ add_executable(test_local_unpublish_transaction
     tests/test_local_unpublish_transaction.cpp
 )
 target_link_libraries(test_local_unpublish_transaction PRIVATE
+    livekit_signaling
+)
+
+# Active camera source hot-switch transaction with first-frame verification and rollback
+add_executable(test_camera_switch_transaction
+    tests/test_camera_switch_transaction.cpp
+)
+target_link_libraries(test_camera_switch_transaction PRIVATE
     livekit_signaling
 )
 
@@ -692,6 +701,7 @@ add_test(NAME rpc_system_test COMMAND test_rpc_system)
 add_test(NAME room_state_events_test COMMAND test_room_state_events)
 add_test(NAME remote_publication_lifecycle_test COMMAND test_remote_publication_lifecycle)
 add_test(NAME local_unpublish_transaction_test COMMAND test_local_unpublish_transaction)
+add_test(NAME camera_switch_transaction_test COMMAND test_camera_switch_transaction)
 add_test(NAME media_streaming_test COMMAND test_media_streaming)
 add_test(NAME stats_system_test COMMAND test_stats_system)
 add_test(NAME audio_playout_warmup_test COMMAND test_audio_playout_warmup)
