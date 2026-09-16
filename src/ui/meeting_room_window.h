@@ -278,6 +278,9 @@ public:
 	void showVideoDeviceMenu(const QPoint &globalPos);
 	void showSimulateScenarioMenu(const QPoint &globalPos);
 
+	void setInRecovery(bool inRecovery);
+	bool inRecovery() const { return _inRecovery; }
+
 protected:
 	void paintEvent(QPaintEvent *e) override;
 	void resizeEvent(QResizeEvent *e) override;
@@ -328,6 +331,7 @@ private:
 	rpl::event_stream<QString> _videoDeviceStream;
 	rpl::event_stream<livekit::SimulateScenarioType> _simulateScenarioStream;
 	QString _currentCameraPath;
+	bool _inRecovery = false;
 };
 
 // ----------------------------------------------------
@@ -420,12 +424,16 @@ private:
 	VideoTileWidget *_localTile = nullptr;
 	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteTiles;
 	QLabel *_inviteHintBanner = nullptr;
+	QLabel *_recoveryBanner = nullptr;
+	QTimer *_recoveryBannerFadeTimer = nullptr;
+	bool _wasReconnecting = false;
 	RoomBottomBarWidget *_bottomBar = nullptr;
 	OpenMeeting::ParticipantsSidebarWidget *_participantsSidebar = nullptr;
 	OpenMeeting::MeetingChatSidebarWidget *_chatSidebar = nullptr;
 	ActiveSidebar _activeSidebar = ActiveSidebar::None;
 
 	void switchSidebar(ActiveSidebar target);
+	void updateRecoveryStateUi(OpenMeeting::MeetingState state, const QString &detail = QString());
 
 	// 本地摄像头采集与模拟流
 	std::shared_ptr<livekit::CameraSourceManager> _cameraManager;

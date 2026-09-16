@@ -1034,6 +1034,12 @@ void RoomBottomBarWidget::setChatUnreadCount(int count) {
 	update();
 }
 
+void RoomBottomBarWidget::setInRecovery(bool inRecovery) {
+	if (_inRecovery == inRecovery) return;
+	_inRecovery = inRecovery;
+	update();
+}
+
 bool RoomBottomBarWidget::HasAvailableAudioDevice() {
 	try {
 		auto mics = livekit::WasapiEnumerator::EnumerateInputDevices();
@@ -1143,9 +1149,12 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 
 	for (const auto &item : _toolItems) {
 		const QRect r = item.rect;
-		const bool hovered = (_hoveredId == item.id);
+		const bool hovered = !_inRecovery && (_hoveredId == item.id);
 
 		p.save();
+		if (_inRecovery) {
+			p.setOpacity(0.45);
+		}
 		if (hovered) {
 			p.setPen(Qt::NoPen);
 			p.setBrush(QColor(0xf2, 0xf3, 0xf5));
@@ -1544,10 +1553,12 @@ void RoomBottomBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	const QPoint pos = e->pos();
 	int nextId = -1;
 
-	for (const auto &item : _toolItems) {
-		if (item.rect.contains(pos)) {
-			nextId = item.id;
-			break;
+	if (!_inRecovery) {
+		for (const auto &item : _toolItems) {
+			if (item.rect.contains(pos)) {
+				nextId = item.id;
+				break;
+			}
 		}
 	}
 
@@ -1561,6 +1572,13 @@ void RoomBottomBarWidget::mouseMoveEvent(QMouseEvent *e) {
 }
 
 void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
+	if (_inRecovery) {
+		if (e->button() == Qt::LeftButton && _endMeetingRect.contains(e->pos())) {
+			_endMeetingStream.fire({});
+		}
+		return;
+	}
+
 	if (e->button() == Qt::RightButton) {
 		for (const auto &item : _toolItems) {
 			if (item.rect.contains(e->pos())) {
@@ -2093,6 +2111,18 @@ void MeetingRoomWindow::initLayout() {
 		}
 	)");
 
+	_recoveryBanner = new QLabel(_stageContainer);
+	_recoveryBanner->setAlignment(Qt::AlignCenter);
+	_recoveryBanner->hide();
+
+	_recoveryBannerFadeTimer = new QTimer(this);
+	_recoveryBannerFadeTimer->setSingleShot(true);
+	connect(_recoveryBannerFadeTimer, &QTimer::timeout, this, [this]() {
+		if (_recoveryBanner) {
+			_recoveryBanner->hide();
+		}
+	});
+
 	_meetingTimer = new QTimer(this);
 	connect(_meetingTimer, &QTimer::timeout, this, &MeetingRoomWindow::onTimerTick);
 	_meetingTimer->start(1000);
@@ -2434,6 +2464,117 @@ void MeetingRoomWindow::switchSidebar(ActiveSidebar target) {
 	resizeEvent(&ev);
 }
 
+void MeetingRoomWindow::updateRecoveryStateUi(OpenMeeting::MeetingState state, const QString &detail) {
+	if (!_recoveryBanner) return;
+
+	const int stageW = _stageContainer ? _stageContainer->width() : width();
+	const int bannerW = std::min(stageW - 32, 420);
+	const int bannerH = 34;
+	_recoveryBanner->setGeometry((stageW - bannerW) / 2, 16, bannerW, bannerH);
+
+	switch (state) {
+	case OpenMeeting::MeetingState::ConnectingRoom:
+	case OpenMeeting::MeetingState::StartingLocalMedia: {
+		if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
+		_recoveryBanner->setStyleSheet(R"(
+			QLabel {
+				background-color: rgba(30, 58, 138, 230);
+				color: #e0e7ff;
+				border: 1px solid #3b82f6;
+				border-radius: 8px;
+				font-size: 13px;
+				font-weight: bold;
+				font-family: "Segoe UI", "Microsoft YaHei";
+				padding: 6px 16px;
+			}
+		)");
+		_recoveryBanner->setText(QString::fromUtf8("🔄 正在建立会议连接..."));
+		_recoveryBanner->show();
+		_recoveryBanner->raise();
+		if (_bottomBar) _bottomBar->setInRecovery(true);
+		break;
+	}
+	case OpenMeeting::MeetingState::Reconnecting: {
+		if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
+		_wasReconnecting = true;
+		_recoveryBanner->setStyleSheet(R"(
+			QLabel {
+				background-color: rgba(217, 119, 6, 235);
+				color: #ffffff;
+				border: 1px solid #f59e0b;
+				border-radius: 8px;
+				font-size: 13px;
+				font-weight: bold;
+				font-family: "Segoe UI", "Microsoft YaHei";
+				padding: 6px 16px;
+			}
+		)");
+		_recoveryBanner->setText(QString::fromUtf8("⚠️ 网络连接异常，正在尝试自动恢复会议 (重连中)..."));
+		_recoveryBanner->show();
+		_recoveryBanner->raise();
+		if (_bottomBar) _bottomBar->setInRecovery(true);
+		break;
+	}
+	case OpenMeeting::MeetingState::InMeeting: {
+		if (_bottomBar) _bottomBar->setInRecovery(false);
+		if (_wasReconnecting) {
+			_wasReconnecting = false;
+			_recoveryBanner->setStyleSheet(R"(
+				QLabel {
+					background-color: rgba(22, 101, 52, 235);
+					color: #ffffff;
+					border: 1px solid #22c55e;
+					border-radius: 8px;
+					font-size: 13px;
+					font-weight: bold;
+					font-family: "Segoe UI", "Microsoft YaHei";
+					padding: 6px 16px;
+				}
+			)");
+			_recoveryBanner->setText(QString::fromUtf8("✅ 会议连接已恢复"));
+			_recoveryBanner->show();
+			_recoveryBanner->raise();
+			if (_recoveryBannerFadeTimer) {
+				_recoveryBannerFadeTimer->start(1500);
+			}
+		} else {
+			if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
+			_recoveryBanner->hide();
+		}
+		break;
+	}
+	case OpenMeeting::MeetingState::Failed: {
+		if (_bottomBar) _bottomBar->setInRecovery(false);
+		_wasReconnecting = false;
+		if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
+		_recoveryBanner->setStyleSheet(R"(
+			QLabel {
+				background-color: rgba(185, 28, 28, 235);
+				color: #ffffff;
+				border: 1px solid #ef4444;
+				border-radius: 8px;
+				font-size: 13px;
+				font-weight: bold;
+				font-family: "Segoe UI", "Microsoft YaHei";
+				padding: 6px 16px;
+			}
+		)");
+		_recoveryBanner->setText(QString::fromUtf8("❌ 会议连接失败: %1").arg(detail.isEmpty() ? QString::fromUtf8("网络或鉴权错误") : detail));
+		_recoveryBanner->show();
+		_recoveryBanner->raise();
+		break;
+	}
+	case OpenMeeting::MeetingState::Idle:
+	default: {
+		if (_bottomBar) _bottomBar->setInRecovery(false);
+		_wasReconnecting = false;
+		if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
+		_recoveryBanner->hide();
+		break;
+	}
+	}
+}
+
 void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
@@ -2733,6 +2874,9 @@ void MeetingRoomWindow::syncDx11CanvasLayout(const std::vector<VideoTileWidget*>
 	_dx11Canvas->show();
 	_dx11Canvas->raise();
 	if (_inviteHintBanner) _inviteHintBanner->hide();
+	if (_recoveryBanner && _recoveryBanner->isVisible()) {
+		_recoveryBanner->raise();
+	}
 }
 
 void MeetingRoomWindow::updateVideoLayout() {
@@ -2760,6 +2904,13 @@ void MeetingRoomWindow::updateVideoLayout() {
 	const int bannerH = 32;
 	_inviteHintBanner->setGeometry((stageW - bannerW) / 2, stageH - bannerH - 12, bannerW, bannerH);
 	_inviteHintBanner->setVisible(!_usingDx11Backend.load(std::memory_order_acquire) && !hasRemote && !localActive);
+
+	if (_recoveryBanner && _recoveryBanner->isVisible()) {
+		const int recBannerW = std::min(stageW - 32, 420);
+		const int recBannerH = 34;
+		_recoveryBanner->setGeometry((stageW - recBannerW) / 2, 16, recBannerW, recBannerH);
+		_recoveryBanner->raise();
+	}
 
 	// 1. 画中画模式 (PiP)
 	if (_viewMode == VideoViewMode::Pip && N >= 2) {
@@ -3095,7 +3246,8 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingDetailUpdated,
 	        this, &MeetingRoomWindow::onMeetingDetailUpdated);
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
-	        this, [this](OpenMeeting::MeetingState state, const QString &) {
+	        this, [this](OpenMeeting::MeetingState state, const QString &detail) {
+		updateRecoveryStateUi(state, detail);
 		if (state == OpenMeeting::MeetingState::InMeeting) {
 			_room = _coordinator->room();
 			if (_room) {
@@ -3138,6 +3290,8 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		if (_topBar) _topBar->setMeetingId(_coordinator->currentMeetingId());
 		setWindowTitle(QString::fromUtf8("会议 - 会议号: %1").arg(_coordinator->currentMeetingId()));
 	}
+
+	updateRecoveryStateUi(_coordinator->state());
 }
 
 void MeetingRoomWindow::onKickedOff(const QString &reason, int reasonCode) {
