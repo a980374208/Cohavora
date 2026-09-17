@@ -7,6 +7,7 @@
 #include <QtCore/QJsonDocument>
 #include <QtCore/QMetaObject>
 #include <QtCore/QPointer>
+#include <QtCore/QThread>
 
 #include <exception>
 #include <future>
@@ -15,10 +16,9 @@
 namespace OpenMeeting {
 
 // 从 LiveKit Participant 中提取真实用户昵称 (优先解析 OpenMeeting metadata 中的 JSON userInfo.nickname)
-static QString ResolveParticipantNickname(const std::shared_ptr<livekit::Participant> &p) {
-    if (!p) return QString();
-    QString identity = QString::fromStdString(p->identity()).trimmed();
-    QString metaStr = QString::fromStdString(p->metadata()).trimmed();
+static QString ResolveParticipantNickname(const livekit::ParticipantStateSnapshot &state) {
+    QString identity = QString::fromStdString(state.identity).trimmed();
+    QString metaStr = QString::fromStdString(state.metadata).trimmed();
     if (!metaStr.isEmpty()) {
         QJsonParseError err;
         QJsonDocument doc = QJsonDocument::fromJson(metaStr.toUtf8(), &err);
@@ -41,12 +41,16 @@ static QString ResolveParticipantNickname(const std::shared_ptr<livekit::Partici
         }
     }
     // 4. Participant 原生 name (排除 participant-name)
-    QString rawName = QString::fromStdString(p->name()).trimmed();
+    QString rawName = QString::fromStdString(state.name).trimmed();
     if (!rawName.isEmpty() && rawName != "participant-name") {
         return rawName;
     }
     // 5. 回退 identity (纯数字 ID)
     return identity;
+}
+
+static QString ResolveParticipantNickname(const std::shared_ptr<livekit::Participant> &p) {
+    return p ? ResolveParticipantNickname(p->SnapshotState()) : QString();
 }
 
 static MeetingRoomInfo ToMeetingRoomInfo(const livekit::RoomInfo &info) {
@@ -64,28 +68,41 @@ static MeetingRoomInfo ToMeetingRoomInfo(const livekit::RoomInfo &info) {
     return result;
 }
 
-static void CopyParticipantState(const std::shared_ptr<livekit::Participant> &participant,
+static void CopyParticipantState(const livekit::ParticipantStateSnapshot &state,
                                  ParticipantInfo *info) {
-    if (!participant || !info) return;
-    info->connectionQuality = participant->connection_quality();
-    info->connectionQualityScore = participant->connection_quality_score();
-    info->permissions = participant->permission();
+    if (!info) return;
+    info->connectionQuality = state.connection_quality;
+    info->connectionQualityScore = state.connection_quality_score;
+    info->permissions = state.permission;
 
     bool audio_paused = false;
     bool video_paused = false;
-    for (const auto &[track_sid, publication] : participant->tracks()) {
-        if (!publication || !publication->track() ||
-            publication->stream_state() != livekit::TrackPublication::StreamState::Paused) {
+    for (const auto &publication : state.publications) {
+        if (!publication.track ||
+            publication.stream_state != livekit::TrackPublication::StreamState::Paused) {
             continue;
         }
-        if (publication->track()->kind() == livekit::TrackKind::Audio) {
+        if (publication.kind == livekit::TrackKind::Audio) {
             audio_paused = true;
-        } else if (publication->track()->kind() == livekit::TrackKind::Video) {
+        } else if (publication.kind == livekit::TrackKind::Video) {
             video_paused = true;
         }
     }
     info->isAudioStreamPaused = audio_paused;
     info->isVideoStreamPaused = video_paused;
+}
+
+static void CopyParticipantState(const std::shared_ptr<livekit::Participant> &participant,
+                                 ParticipantInfo *info) {
+    if (participant) CopyParticipantState(participant->SnapshotState(), info);
+}
+
+static QString ParticipantKeyToken(const livekit::ParticipantKey &key) {
+    return QString::number(key.native_room_generation) + QLatin1Char(':') +
+        QString::number(key.incarnation) + QLatin1Char(':') +
+        QString::number(static_cast<qulonglong>(key.sid.size())) + QLatin1Char(':') +
+        QString::fromStdString(key.sid) + QLatin1Char(':') +
+        QString::fromStdString(key.identity);
 }
 
 // ----------------------------------------------------
@@ -99,60 +116,40 @@ public:
           _session(session),
           _generation(session ? session->generation() : 0) {}
 
+    bool ConsumesParticipantEvents() const override { return true; }
+
+    void OnParticipantEvent(const livekit::ParticipantEvent &event) override {
+        auto *coordinator = _coordinator;
+        if (!coordinator || _generation == 0) return;
+        const auto generation = _generation;
+        QMetaObject::invokeMethod(coordinator, [coordinator, generation, event]() {
+            coordinator->applyParticipantEventOnUiThread(generation, event);
+        }, Qt::QueuedConnection);
+    }
+
     void OnConnected() override {
         auto *coordinator = _coordinator;
         if (!coordinator || _generation == 0) return;
         const auto generation = _generation;
         QMetaObject::invokeMethod(coordinator, [coordinator, generation]() {
-            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) {
-                return;
-            }
+            QPointer<MeetingCoordinator> owner(coordinator);
+            if (!owner->isCurrentSessionGenerationOnUiThread(generation)) return;
+            const auto nativeGeneration = owner->_nativeRoomGeneration;
 
             // ConnectAsync only establishes the Room transport.  The startup
             // transaction publishes required local tracks before it reports a
             // successful meeting join.
-            coordinator->_participants.clear();
-
             // 读取 Room 的统一原生快照。JoinResponse 与后续 RoomUpdate
             // 都已经提交到这里，避免 UI 从过期 protobuf 副本读取状态。
-            if (coordinator->_room) {
-                const auto native_room_info = coordinator->_room->room_info();
-                coordinator->_roomInfo = ToMeetingRoomInfo(native_room_info);
-                emit coordinator->roomInfoUpdated(coordinator->_roomInfo);
-                coordinator->parseRoomMetadata(native_room_info.metadata);
+            if (owner->_room) {
+                const auto native_room_info = owner->_room->room_info();
+                const auto info = ToMeetingRoomInfo(native_room_info);
+                owner->_roomInfo = info;
+                emit owner->roomInfoUpdated(info);
+                if (!owner || !owner->isCurrentSessionGenerationOnUiThread(generation) ||
+                    owner->_nativeRoomGeneration != nativeGeneration) return;
+                owner->parseRoomMetadata(native_room_info.metadata);
 
-                // 注册本端 Participant (必须包含自己)
-                coordinator->ensureLocalParticipant();
-
-                // 同步当前已在房间内的参会人
-                auto remotes = coordinator->_room->remote_participants();
-                for (const auto &[sid, p] : remotes) {
-                    if (p) {
-                        QString pId = QString::fromStdString(p->identity());
-                        QString realNick = ResolveParticipantNickname(p);
-                        ParticipantInfo info;
-                        info.identity = pId;
-                        info.name = realNick;
-                        info.isLocal = false;
-                        info.isHost = (pId == coordinator->_meetingDetail.hostUserId || pId == coordinator->_meetingDetail.creatorUserId);
-                        info.isAudioMuted = true;
-                        info.isVideoEnabled = false;
-                        CopyParticipantState(p, &info);
-                        for (const auto &[tsid, pub] : p->tracks()) {
-                            if (pub && pub->track()) {
-                                if (pub->track()->kind() == livekit::TrackKind::Audio) {
-                                    info.isAudioMuted = pub->muted();
-                                } else if (pub->track()->kind() == livekit::TrackKind::Video) {
-                                    info.isVideoEnabled = !pub->muted();
-                                    emit coordinator->remoteVideoTrackAvailable(pId, pub->track());
-                                }
-                            }
-                        }
-                        coordinator->_participants[pId] = info;
-                        emit coordinator->participantJoined(pId, info.name);
-                    }
-                }
-                coordinator->updateParticipantListAndNotify();
             }
         }, Qt::QueuedConnection);
     }
@@ -166,21 +163,27 @@ public:
         // 不捕获 listener 自身：DuplicateIdentity 处理会释放 _roomListener，
         // 捕获 this 会在回调执行期间留下悬垂指针风险。
         QMetaObject::invokeMethod(coordinator, [coordinator, generation, reason, qDetail]() {
-            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) {
-                return;
-            }
+            QPointer<MeetingCoordinator> owner(coordinator);
+            if (!owner->isCurrentSessionGenerationOnUiThread(generation)) return;
+            const auto nativeGeneration = owner->_nativeRoomGeneration;
+            const auto current = [&] {
+                return owner && owner->isCurrentSessionGenerationOnUiThread(generation) &&
+                    owner->_nativeRoomGeneration == nativeGeneration;
+            };
             MeetingUI::LogToConsole(
                 MeetingUI::LogCategory::Connection,
                 "DISCONNECTED",
                 QString("与 LiveKit 房间连接断开: reason=%1, detail=%2")
                     .arg(QString::fromLatin1(livekit::ToString(reason)), qDetail));
+            if (!current()) return;
             if (reason == livekit::RoomDisconnectReason::DuplicateIdentity) {
-                coordinator->handleDuplicateIdentityKickOff(qDetail);
+                owner->handleDuplicateIdentityKickOff(qDetail);
                 return;
             }
-            if (coordinator->_state != MeetingState::Leaving && coordinator->_state != MeetingState::Idle) {
-                coordinator->setState(MeetingState::Idle, qDetail);
-                emit coordinator->meetingLeft();
+            if (owner->_state != MeetingState::Leaving && owner->_state != MeetingState::Idle) {
+                owner->setState(MeetingState::Idle, qDetail);
+                if (!current() || owner->_state != MeetingState::Idle) return;
+                emit owner->meetingLeft();
             }
         }, Qt::QueuedConnection);
     }
@@ -190,14 +193,19 @@ public:
         if (!coordinator || _generation == 0) return;
         const auto generation = _generation;
         QMetaObject::invokeMethod(coordinator, [coordinator, generation]() {
-            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation) ||
-                coordinator->_state == MeetingState::Leaving ||
-                coordinator->_state == MeetingState::Idle) {
+            QPointer<MeetingCoordinator> owner(coordinator);
+            if (!owner->isCurrentSessionGenerationOnUiThread(generation) ||
+                owner->_state == MeetingState::Leaving ||
+                owner->_state == MeetingState::Idle) {
                 return;
             }
+            const auto nativeGeneration = owner->_nativeRoomGeneration;
             MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection, "RECONNECTING",
                                     QString::fromUtf8("网络中断，正在恢复音视频连接"));
-            coordinator->setState(MeetingState::Reconnecting,
+            if (!owner || !owner->isCurrentSessionGenerationOnUiThread(generation) ||
+                owner->_nativeRoomGeneration != nativeGeneration ||
+                owner->_state == MeetingState::Leaving || owner->_state == MeetingState::Idle) return;
+            owner->setState(MeetingState::Reconnecting,
                                   QString::fromUtf8("网络中断，正在恢复连接..."));
         }, Qt::QueuedConnection);
     }
@@ -207,13 +215,15 @@ public:
         if (!coordinator || _generation == 0) return;
         const auto generation = _generation;
         QMetaObject::invokeMethod(coordinator, [coordinator, generation]() {
-            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation) ||
-                coordinator->_state == MeetingState::Leaving ||
-                coordinator->_state == MeetingState::Idle) {
+            QPointer<MeetingCoordinator> owner(coordinator);
+            if (!owner->isCurrentSessionGenerationOnUiThread(generation) ||
+                owner->_state == MeetingState::Leaving ||
+                owner->_state == MeetingState::Idle) {
                 return;
             }
+            const auto nativeGeneration = owner->_nativeRoomGeneration;
 
-            if (!coordinator->_startupCommitted) {
+            if (!owner->_startupCommitted) {
                 MeetingUI::LogToConsole(
                     MeetingUI::LogCategory::Connection,
                     "RECONNECTED_DURING_STARTUP",
@@ -221,26 +231,13 @@ public:
                 return;
             }
 
-            coordinator->setState(MeetingState::InMeeting,
+            owner->setState(MeetingState::InMeeting,
                                   QString::fromUtf8("音视频连接已恢复"));
+            if (!owner || !owner->isCurrentSessionGenerationOnUiThread(generation) ||
+                owner->_nativeRoomGeneration != nativeGeneration ||
+                owner->_state != MeetingState::InMeeting) return;
             MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection, "RECONNECTED",
-                                    QString::fromUtf8("音视频连接已恢复，重新绑定远端视频轨道"));
-
-            // Soft resume keeps the same Track object and this is idempotent.
-            // A full restart may preserve a track SID while recreating Track;
-            // VideoRenderSession recognizes that replacement and swaps its
-            // subscription before accepting frames from the new source.
-            if (!coordinator->_room) return;
-            for (const auto &[participant_sid, participant] : coordinator->_room->remote_participants()) {
-                if (!participant) continue;
-                const QString identity = QString::fromStdString(participant->identity());
-                for (const auto &[track_sid, publication] : participant->tracks()) {
-                    if (publication && publication->track() &&
-                        publication->track()->kind() == livekit::TrackKind::Video) {
-                        emit coordinator->remoteVideoTrackAvailable(identity, publication->track());
-                    }
-                }
-            }
+                                    QString::fromUtf8("音视频连接已恢复，等待值投影恢复远端轨道"));
         }, Qt::QueuedConnection);
     }
 
@@ -265,7 +262,7 @@ public:
         QMetaObject::invokeMethod(coordinator, [coordinator, generation, info]() {
             if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
             coordinator->_roomInfo = info;
-            emit coordinator->roomInfoUpdated(coordinator->_roomInfo);
+            emit coordinator->roomInfoUpdated(info);
         }, Qt::QueuedConnection);
     }
 
@@ -443,8 +440,6 @@ public:
             coordinator->updateParticipantListAndNotify();
             emit coordinator->participantLeft(id);
 
-            // 分片传输状态归属于会话 ASIO strand，Qt 线程只请求按参会人取消。
-            coordinator->cancelInboundTransfersForParticipant(id);
         }, Qt::QueuedConnection);
     }
 
@@ -515,28 +510,7 @@ public:
     }
 
     void OnActiveSpeakersChanged(const std::vector<std::shared_ptr<livekit::Participant>> &speakers) override {
-        auto *coordinator = _coordinator;
-        if (!coordinator || _generation == 0) return;
-        const auto generation = _generation;
-        QMetaObject::invokeMethod(coordinator, [coordinator, generation, speakers]() {
-            if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
-            for (auto &[id, p] : coordinator->_participants) {
-                p.isSpeaking = false;
-                p.audioLevel = 0.0f;
-            }
-            for (const auto &sp : speakers) {
-                if (sp) {
-                    QString spId = QString::fromStdString(sp->identity());
-                    auto it = coordinator->_participants.find(spId);
-                    if (it != coordinator->_participants.end()) {
-                        it->second.isSpeaking = true;
-                        it->second.audioLevel = sp->audio_level();
-                    }
-                }
-            }
-            coordinator->updateParticipantListAndNotify();
-            emit coordinator->activeSpeakersChanged(speakers);
-        }, Qt::QueuedConnection);
+        (void)speakers;
     }
 
     void OnDataReceived(const std::vector<uint8_t> &payload,
@@ -545,10 +519,8 @@ public:
         auto *coordinator = _coordinator;
         auto session = _session.lock();
         if (!coordinator || !session) return;
-        std::string sid = participant ? participant->sid() : "";
-        std::string identity = participant ? participant->identity() : "";
-        QString name = ResolveParticipantNickname(participant);
-        coordinator->enqueueDataReceived(session, payload, sid, identity, name);
+        (void)payload;
+        (void)participant;
     }
 
     void OnTextStreamOpened(std::shared_ptr<livekit::TextStreamReader> reader,
@@ -582,6 +554,317 @@ private:
     std::weak_ptr<MeetingSessionRuntime> _session;
     const uint64_t _generation;
 };
+
+std::shared_ptr<livekit::RoomListener> MeetingCoordinator::participantEventListenerForTesting(
+    const std::shared_ptr<MeetingSessionRuntime> &session, bool retainForOwnedSession) {
+    auto listener = std::make_shared<CoordinatorRoomListener>(this, session);
+    if (retainForOwnedSession) _roomListener = listener;
+    return listener;
+}
+
+void MeetingCoordinator::applyParticipantEventOnUiThread(
+    uint64_t coordinatorGeneration,
+    const livekit::ParticipantEvent &event) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!isCurrentSessionGenerationOnUiThread(coordinatorGeneration)) return;
+    // Every signal below may synchronously destroy the receiver or deliver a
+    // replacement roster. Establish the weak owner before the first effect.
+    QPointer<MeetingCoordinator> owner(this);
+    const auto eventRoomGeneration = event.participant.key.native_room_generation;
+    auto sessionStillCurrent = [&]() {
+        return owner &&
+            owner->isCurrentSessionGenerationOnUiThread(coordinatorGeneration) &&
+            (eventRoomGeneration == 0 ||
+             owner->_nativeRoomGeneration == eventRoomGeneration);
+    };
+
+    const bool participantCleanup =
+        event.kind == livekit::ParticipantEventKind::Departure;
+    const bool trackCleanup =
+        event.kind == livekit::ParticipantEventKind::TrackUnavailable;
+    const bool requiresParticipantTicket =
+        event.kind != livekit::ParticipantEventKind::ActiveSpeakers &&
+        event.kind != livekit::ParticipantEventKind::DataReceived &&
+        !participantCleanup;
+
+    if (requiresParticipantTicket &&
+        !livekit::IsParticipantTicketActive(
+            event.participant.ticket, event.participant.key)) {
+        return;
+    }
+
+    if (!participantCleanup && !trackCleanup &&
+        event.participant.key.native_room_generation != 0) {
+        if (_nativeRoomGeneration != 0 &&
+            eventRoomGeneration < _nativeRoomGeneration) {
+            return;
+        }
+        if (_nativeRoomGeneration == 0 ||
+            eventRoomGeneration > _nativeRoomGeneration) {
+            std::vector<QString> oldRemoteIdentities;
+            for (const auto &[identity, info] : _participants) {
+                if (!info.isLocal) oldRemoteIdentities.push_back(identity);
+                cancelInboundTransfersForParticipant(info.participantKey);
+            }
+            _nativeRoomGeneration = eventRoomGeneration;
+            _participants.clear();
+            _remoteVideoTracks.clear();
+            _participantEventSequences.clear();
+            updateParticipantListAndNotify();
+            if (!sessionStillCurrent()) return;
+            for (const auto &identity : oldRemoteIdentities) {
+                // A reentrant roster may already have installed its successor.
+                if (owner->_participants.find(identity) != owner->_participants.end()) continue;
+                emit participantLeft(identity);
+                if (!sessionStillCurrent()) return;
+            }
+        }
+    }
+
+    const auto key = event.participant.key;
+    const QString identity = QString::fromStdString(
+        key.identity.empty() ? key.sid : key.identity);
+    const QString sequenceKey = ParticipantKeyToken(key);
+    if (!sequenceKey.isEmpty() && key.incarnation != 0) {
+        auto &last = _participantEventSequences[sequenceKey];
+        if (event.event_sequence <= last) return;
+        last = event.event_sequence;
+    }
+
+    auto participantStillCurrent = [&]() {
+        if (!sessionStillCurrent()) return false;
+        const auto it = owner->_participants.find(identity);
+        return it != owner->_participants.end() &&
+            it->second.participantKey == key;
+    };
+    auto valueStillCurrent = [&]() {
+        if (!sessionStillCurrent() ||
+            !livekit::IsParticipantTicketActive(event.participant.ticket, key)) return false;
+        const auto sequence = owner->_participantEventSequences.find(sequenceKey);
+        return sequence != owner->_participantEventSequences.end() &&
+            sequence->second == event.event_sequence;
+    };
+
+    if (event.kind == livekit::ParticipantEventKind::Departure) {
+        // Resource cancellation belongs to the retired key and must be queued
+        // before any UI effect can replace the session or delete this owner.
+        cancelInboundTransfersForParticipant(key);
+        _participantEventSequences.erase(sequenceKey);
+        std::vector<QString> trackSids;
+        const auto tracks = _remoteVideoTracks.find(identity);
+        if (tracks != _remoteVideoTracks.end()) {
+            for (const auto &[sid, value] : tracks->second) {
+                if (value.key.participant == key) trackSids.push_back(sid);
+            }
+        }
+        if (participantStillCurrent()) {
+            _participants.erase(identity);
+            _remoteVideoTracks.erase(identity);
+            updateParticipantListAndNotify();
+            if (!sessionStillCurrent()) return;
+            for (const auto &trackSid : trackSids) {
+                if (owner->_participants.find(identity) != owner->_participants.end()) return;
+                emit remoteVideoTrackUnavailable(identity, trackSid);
+                if (!sessionStillCurrent()) return;
+            }
+            if (owner->_participants.find(identity) != owner->_participants.end()) return;
+            emit participantLeft(identity);
+        }
+        return;
+    }
+
+    if (event.kind == livekit::ParticipantEventKind::ActiveSpeakers) {
+        for (auto &[id, participant] : _participants) {
+            participant.isSpeaking = false;
+            participant.audioLevel = 0.0f;
+        }
+        std::vector<livekit::ActiveSpeakerInfo> accepted;
+        for (const auto &speaker : event.speakers) {
+            if (!livekit::IsParticipantTicketActive(speaker.ticket, speaker.key)) continue;
+            const QString speakerIdentity = QString::fromStdString(
+                speaker.key.identity.empty() ? speaker.key.sid : speaker.key.identity);
+            const auto it = _participants.find(speakerIdentity);
+            if (it == _participants.end() ||
+                it->second.participantKey != speaker.key) {
+                continue;
+            }
+            it->second.isSpeaking = speaker.speaking;
+            it->second.audioLevel = speaker.audio_level;
+            accepted.push_back(speaker);
+        }
+        updateParticipantListAndNotify();
+        if (!sessionStillCurrent()) return;
+        accepted.erase(std::remove_if(accepted.begin(), accepted.end(), [&](const auto &speaker) {
+            if (!livekit::IsParticipantTicketActive(speaker.ticket, speaker.key)) return true;
+            const QString id = QString::fromStdString(
+                speaker.key.identity.empty() ? speaker.key.sid : speaker.key.identity);
+            const auto current = owner->_participants.find(id);
+            return current == owner->_participants.end() ||
+                current->second.participantKey != speaker.key;
+        }), accepted.end());
+        emit activeSpeakersChanged(accepted);
+        return;
+    }
+
+    if (event.kind == livekit::ParticipantEventKind::DataReceived) {
+        const bool serverOrigin = event.sender.origin == livekit::SenderOrigin::Server;
+        if (!serverOrigin &&
+            !livekit::IsParticipantTicketActive(
+                event.sender.ticket, event.sender.key)) {
+            return;
+        }
+        auto session = _sessionRuntime;
+        if (session) enqueueDataReceived(session, event.data, event.sender);
+        return;
+    }
+
+    if (event.kind == livekit::ParticipantEventKind::TextStreamOpened ||
+        event.kind == livekit::ParticipantEventKind::ByteStreamOpened) {
+        if (!livekit::IsParticipantTicketActive(
+                event.sender.ticket, event.sender.key)) {
+            return;
+        }
+        const QString senderIdentity = QString::fromStdString(
+            event.sender.key.identity.empty()
+                ? event.sender.key.sid
+                : event.sender.key.identity);
+        if (event.kind == livekit::ParticipantEventKind::TextStreamOpened &&
+            event.text_reader) {
+            emit textStreamReceived(event.text_reader, senderIdentity);
+        } else if (event.byte_reader) {
+            emit byteStreamReceived(event.byte_reader, senderIdentity);
+        }
+        return;
+    }
+
+    if (event.kind == livekit::ParticipantEventKind::TrackUnavailable) {
+        const QString trackSid = QString::fromStdString(
+            event.track_key.publication_sid);
+        auto participantTracks = _remoteVideoTracks.find(identity);
+        if (participantTracks == _remoteVideoTracks.end()) return;
+        const auto track = participantTracks->second.find(trackSid);
+        if (track == participantTracks->second.end() ||
+            track->second.key != event.track_key) {
+            return;
+        }
+        participantTracks->second.erase(track);
+        if (participantTracks->second.empty()) {
+            _remoteVideoTracks.erase(participantTracks);
+        }
+        emit remoteVideoTrackUnavailable(identity, trackSid);
+        return;
+    }
+
+    if (!livekit::IsParticipantTicketActive(
+            event.participant.ticket, key)) {
+        return;
+    }
+
+    if (event.kind == livekit::ParticipantEventKind::Upsert ||
+        event.kind == livekit::ParticipantEventKind::ConnectionQuality ||
+        event.kind == livekit::ParticipantEventKind::TrackMuted ||
+        event.kind == livekit::ParticipantEventKind::TrackStreamState ||
+        event.kind == livekit::ParticipantEventKind::TrackSubscriptionPermission) {
+        const auto existing = _participants.find(identity);
+        const bool replacing = existing != _participants.end() &&
+            existing->second.participantKey != key;
+        const bool isNew = existing == _participants.end() || replacing;
+        if (replacing) {
+            const auto oldKey = existing->second.participantKey;
+            _participants.erase(existing);
+            _remoteVideoTracks.erase(identity);
+            cancelInboundTransfersForParticipant(oldKey);
+            updateParticipantListAndNotify();
+            if (!valueStillCurrent() || owner->_participants.find(identity) != owner->_participants.end()) return;
+            emit participantLeft(identity);
+            if (!valueStillCurrent() || owner->_participants.find(identity) != owner->_participants.end()) return;
+        }
+
+        ParticipantInfo info;
+        if (const auto current = _participants.find(identity);
+            current != _participants.end()) {
+            info = current->second;
+        }
+        info.identity = identity;
+        info.name = ResolveParticipantNickname(event.participant.state);
+        info.isLocal = event.participant.is_local;
+        info.isHost = identity == _meetingDetail.hostUserId ||
+            identity == _meetingDetail.creatorUserId;
+        info.isAudioMuted = info.isLocal ? _audioMuted : true;
+        info.isVideoEnabled = info.isLocal ? _videoEnabled : false;
+        info.isSpeaking = event.participant.state.speaking;
+        info.audioLevel = event.participant.state.audio_level;
+        info.participantKey = key;
+        info.participantTicket = event.participant.ticket;
+        info.lastEventSequence = event.event_sequence;
+        CopyParticipantState(event.participant.state, &info);
+        for (const auto &publication : event.participant.state.publications) {
+            if (!publication.track) continue;
+            if (publication.kind == livekit::TrackKind::Audio) {
+                info.isAudioMuted = publication.muted;
+            } else if (publication.kind == livekit::TrackKind::Video) {
+                info.isVideoEnabled = !publication.muted;
+            }
+        }
+        _participants[identity] = info;
+        updateParticipantListAndNotify();
+        if (!valueStillCurrent() || !participantStillCurrent()) return;
+
+        if (isNew && !info.isLocal) {
+            emit participantJoined(identity, info.name);
+            if (!valueStillCurrent() || !participantStillCurrent()) return;
+        }
+
+        if (event.kind == livekit::ParticipantEventKind::ConnectionQuality) {
+            emit participantConnectionQualityChanged(
+                identity,
+                static_cast<int>(info.connectionQuality),
+                info.connectionQualityScore);
+        } else if (event.kind == livekit::ParticipantEventKind::TrackMuted) {
+            emit remoteTrackMuted(
+                identity,
+                event.publication.kind == livekit::TrackKind::Video,
+                event.publication.muted);
+        } else if (event.kind == livekit::ParticipantEventKind::TrackStreamState) {
+            emit participantTrackStreamStateChanged(
+                identity,
+                QString::fromStdString(event.track_key.publication_sid),
+                event.publication.kind == livekit::TrackKind::Video,
+                event.publication.stream_state ==
+                    livekit::TrackPublication::StreamState::Paused);
+        } else if (event.kind == livekit::ParticipantEventKind::TrackSubscriptionPermission) {
+            emit trackSubscriptionPermissionChanged(
+                identity,
+                QString::fromStdString(key.sid),
+                QString::fromStdString(event.track_key.publication_sid),
+                event.publication.subscription_allowed);
+        }
+    }
+
+    if (event.kind == livekit::ParticipantEventKind::TrackAvailable) {
+        if (!participantStillCurrent() ||
+            !livekit::IsTrackTicketActive(
+                event.track_ticket, event.track_key) ||
+            event.publication.kind != livekit::TrackKind::Video ||
+            !event.publication.track) {
+            return;
+        }
+        const QString trackSid = QString::fromStdString(
+            event.track_key.publication_sid);
+        const auto participantTracks = _remoteVideoTracks.find(identity);
+        if (participantTracks != _remoteVideoTracks.end()) {
+            const auto existing = participantTracks->second.find(trackSid);
+            if (existing != participantTracks->second.end() &&
+                existing->second.key == event.track_key &&
+                existing->second.track == event.publication.track) {
+                return;
+            }
+        }
+        _remoteVideoTracks[identity][trackSid] = {
+            event.track_key, event.track_ticket, event.publication.track};
+        emit remoteVideoTrackAvailable(identity, event.publication.track);
+    }
+}
 
 // ----------------------------------------------------
 // MeetingCoordinator 实现
@@ -959,6 +1242,7 @@ void MeetingCoordinator::handleDuplicateIdentityKickOff(const QString &detail) {
         return;
     }
     QPointer<MeetingCoordinator> owner(this);
+    const auto sessionGeneration = _nextSessionGeneration;
 
     const QString message = detail.isEmpty()
         ? QString::fromUtf8("同一账号已在其他设备加入此会议")
@@ -966,10 +1250,13 @@ void MeetingCoordinator::handleDuplicateIdentityKickOff(const QString &detail) {
     MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection,
                             "DUPLICATE_IDENTITY",
                             QString("[Coordinator] Meeting kicked off by server: %1").arg(message));
+    // Logging can replace the session or destroy its QObject. Admission
+    // invalidation alone must not suppress cleanup of the original resources.
+    if (!owner || owner->_nextSessionGeneration != sessionGeneration) return;
 
     // Room 已由服务端 LEAVE 流程断开；这里负责停止 Coordinator 所属的
     // io 线程和媒体资源。不要发出 meetingLeft，否则 UI 会在提示前关闭。
-    stopRoomSession();
+    owner->stopRoomSession();
     if (!owner || owner->_admissionGeneration != generation ||
         owner->_admissionStage != AdmissionStage::None) {
         return;
@@ -1214,13 +1501,17 @@ void MeetingCoordinator::stopRoomSession() {
         return;
     }
     _startupCommitted = false;
+    QPointer<MeetingCoordinator> owner(this);
+    const auto stoppedGeneration = _nextSessionGeneration;
+    std::vector<QString> failedOutboundMessages;
+    QString transferCleanupError;
 
     if (_mediaSendTimer && _mediaSendTimer->isActive()) {
         _mediaSendTimer->stop();
     }
     for (const auto &task : _mediaSendQueue) {
         if (!task.messageId.isEmpty()) {
-            emit chatMessageSendFailed(task.messageId, QString::fromUtf8("会议已退出"));
+            failedOutboundMessages.push_back(task.messageId);
         }
     }
     _mediaSendQueue.clear();
@@ -1241,7 +1532,7 @@ void MeetingCoordinator::stopRoomSession() {
                 auto &transfers = session->transfersOnStrand();
                 failed.reserve(transfers.size());
                 for (const auto &[transferId, _] : transfers) {
-                    failed.push_back(transferId);
+                    failed.push_back(transferId.uiTransferId());
                 }
                 transfers.clear();
                 cleanup->set_value(std::move(failed));
@@ -1252,15 +1543,22 @@ void MeetingCoordinator::stopRoomSession() {
         try {
             failedInboundTransfers = completed.get();
         } catch (const std::exception &ex) {
-            MeetingUI::LogToConsole(
-                MeetingUI::LogCategory::Error,
-                "SESSION_TRANSFER_CLEANUP",
-                QString("会话分片清理失败: %1").arg(QString::fromStdString(ex.what())));
+            transferCleanupError =
+                QString("会话分片清理失败: %1").arg(QString::fromStdString(ex.what()));
         }
     }
-    for (const auto &transferId : failedInboundTransfers) {
-        emit chatMediaReceivingFailed(transferId, QString::fromUtf8("本地已离开会议"));
+    for (const auto &[uiTransferId, entry] : _inboundTransferLedger) {
+        if (entry.second) {
+            failedInboundTransfers.erase(std::remove(failedInboundTransfers.begin(),
+                failedInboundTransfers.end(), uiTransferId), failedInboundTransfers.end());
+            continue;
+        }
+        if (std::find(failedInboundTransfers.begin(), failedInboundTransfers.end(), uiTransferId) ==
+            failedInboundTransfers.end()) {
+            failedInboundTransfers.push_back(uiTransferId);
+        }
     }
+    _inboundTransferLedger.clear();
 
     if (_wasapiCap) {
         _wasapiCap->Stop();
@@ -1272,6 +1570,10 @@ void MeetingCoordinator::stopRoomSession() {
     }
 
     if (_room) {
+        // External owners may keep Room alive after this Coordinator. Revoke
+        // its bridge registration before disconnect; the worker join below
+        // still completes any listener batch already taken by the dispatcher.
+        if (_roomListener) _room->RemoveListener(_roomListener);
         _room->Disconnect();
     }
 
@@ -1299,6 +1601,29 @@ void MeetingCoordinator::stopRoomSession() {
     _localVideoTrack.reset();
     _localAudioSource.reset();
     _localVideoSource.reset();
+    _remoteVideoTracks.clear();
+    _participantEventSequences.clear();
+    _nativeRoomGeneration = 0;
+
+    // Finish resource cleanup before notifications can synchronously delete
+    // the owner or start another session. Never clean up that successor.
+    const auto stillStopped = [&] {
+        return owner && owner->_nextSessionGeneration == stoppedGeneration &&
+            !owner->_sessionRunning.load(std::memory_order_acquire);
+    };
+    if (!transferCleanupError.isEmpty()) {
+        MeetingUI::LogToConsole(MeetingUI::LogCategory::Error,
+            "SESSION_TRANSFER_CLEANUP", transferCleanupError);
+        if (!stillStopped()) return;
+    }
+    for (const auto &messageId : failedOutboundMessages) {
+        emit owner->chatMessageSendFailed(messageId, QString::fromUtf8("会议已退出"));
+        if (!stillStopped()) return;
+    }
+    for (const auto &transferId : failedInboundTransfers) {
+        emit owner->chatMediaReceivingFailed(transferId, QString::fromUtf8("本地已离开会议"));
+        if (!stillStopped()) return;
+    }
 }
 
 void MeetingCoordinator::setLocalAudioMuted(bool muted) {
@@ -1666,19 +1991,75 @@ std::vector<ParticipantInfo> MeetingCoordinator::participants() const {
     return list;
 }
 
+std::vector<ParticipantPresentation> MeetingCoordinator::participantPresentations() const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    std::vector<ParticipantPresentation> result;
+    result.reserve(_participants.size());
+    for (const auto &[identity, info] : _participants) {
+        ParticipantPresentation presentation;
+        presentation.participant = info;
+        presentation.coordinatorSession = _nextSessionGeneration;
+        if (!isParticipantPresentationCurrent(presentation)) continue;
+        const auto tracks = _remoteVideoTracks.find(identity);
+        if (tracks != _remoteVideoTracks.end()) {
+            for (const auto &[trackSid, value] : tracks->second) {
+                if (isParticipantPresentationCurrent(presentation, &value)) {
+                    presentation.videoTracks.push_back(value);
+                }
+            }
+        }
+        result.push_back(std::move(presentation));
+    }
+    return result;
+}
+
+bool MeetingCoordinator::isParticipantPresentationCurrent(
+    const ParticipantPresentation &presentation,
+    const RemoteVideoTrackPresentation *track) const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    const auto &info = presentation.participant;
+    if (!isCurrentSessionGenerationOnUiThread(presentation.coordinatorSession) ||
+        _state == MeetingState::Idle || _state == MeetingState::Leaving ||
+        _state == MeetingState::Failed ||
+        info.participantKey.native_room_generation != _nativeRoomGeneration ||
+        !livekit::IsParticipantTicketActive(info.participantTicket, info.participantKey)) {
+        return false;
+    }
+    const auto current = _participants.find(info.identity);
+    if (current == _participants.end() || current->second.participantKey != info.participantKey ||
+        current->second.lastEventSequence != info.lastEventSequence) return false;
+    if (!track) return true;
+    if (!track->track || track->key.participant != info.participantKey ||
+        !livekit::IsTrackTicketActive(track->ticket, track->key)) return false;
+    const auto tracks = _remoteVideoTracks.find(info.identity);
+    if (tracks == _remoteVideoTracks.end()) return false;
+    const auto currentTrack = tracks->second.find(QString::fromStdString(track->key.publication_sid));
+    return currentTrack != tracks->second.end() && currentTrack->second.key == track->key &&
+        currentTrack->second.track == track->track;
+}
+
 void MeetingCoordinator::updateParticipantListAndNotify() {
     auto list = participants();
     emit participantsUpdated(list);
 }
 
 void MeetingCoordinator::parseRoomMetadata(const std::string &metadata) {
+    QPointer<MeetingCoordinator> owner(this);
+    const auto sessionGeneration = _nextSessionGeneration;
+    const auto nativeGeneration = _nativeRoomGeneration;
+    const auto current = [&] {
+        return owner && owner->isCurrentSessionGenerationOnUiThread(sessionGeneration) &&
+            owner->_nativeRoomGeneration == nativeGeneration;
+    };
     if (metadata.empty()) {
         _meetingDetail = MeetingDetail{};
         for (auto &[identity, participant] : _participants) {
             participant.isHost = false;
         }
         updateParticipantListAndNotify();
-        emit meetingDetailUpdated(_meetingDetail);
+        if (!current()) return;
+        const auto detail = owner->_meetingDetail;
+        emit owner->meetingDetailUpdated(detail);
         return;
     }
     QJsonParseError err;
@@ -1710,20 +2091,20 @@ void MeetingCoordinator::parseRoomMetadata(const std::string &metadata) {
     }
 
     updateParticipantListAndNotify();
-    emit meetingDetailUpdated(_meetingDetail);
+    if (!current()) return;
+    const auto updatedDetail = owner->_meetingDetail;
+    emit owner->meetingDetailUpdated(updatedDetail);
 }
 
 void MeetingCoordinator::enqueueDataReceived(const std::shared_ptr<MeetingSessionRuntime> &session,
                                              const std::vector<uint8_t> &data,
-                                             const std::string &participantSid,
-                                             const std::string &participantIdentity,
-                                             const QString &participantName) {
+                                             const livekit::SenderContext &sender) {
     if (!session || !_sessionRunning.load(std::memory_order_acquire)) {
         return;
     }
 
-    asio::post(session->strand(), [this, session, data, participantSid, participantIdentity, participantName]() {
-        handleDataReceivedOnSessionStrand(session, data, participantSid, participantIdentity, participantName);
+    asio::post(session->strand(), [this, session, data, sender]() {
+        handleDataReceivedOnSessionStrand(session, data, sender);
     });
 }
 
@@ -1735,14 +2116,30 @@ bool MeetingCoordinator::isCurrentSessionGenerationOnUiThread(uint64_t sessionGe
         _sessionRuntime->generation() == sessionGeneration;
 }
 
-void MeetingCoordinator::cancelInboundTransfersForParticipant(const QString &participantIdentity) {
+bool MeetingCoordinator::isSenderContextCurrentOnUiThread(
+    const livekit::SenderContext &sender) const {
+    if (sender.origin == livekit::SenderOrigin::Server) return true;
+    if (sender.origin == livekit::SenderOrigin::Unresolved ||
+        !livekit::IsParticipantTicketActive(sender.ticket, sender.key)) {
+        return false;
+    }
+    if (sender.origin == livekit::SenderOrigin::Local) return true;
+    const QString identity = QString::fromStdString(
+        sender.key.identity.empty() ? sender.key.sid : sender.key.identity);
+    const auto participant = _participants.find(identity);
+    return participant != _participants.end() &&
+        participant->second.participantKey == sender.key;
+}
+
+void MeetingCoordinator::cancelInboundTransfersForParticipant(
+    const livekit::ParticipantKey &participantKey) {
     auto session = _sessionRuntime;
     if (!session || !_sessionRunning.load(std::memory_order_acquire)) {
         return;
     }
     const uint64_t sessionGeneration = session->generation();
 
-    asio::post(session->strand(), [this, session, sessionGeneration, participantIdentity]() {
+    asio::post(session->strand(), [this, session, sessionGeneration, participantKey]() {
         if (!session->acceptsDataOnStrand()) {
             return;
         }
@@ -1750,23 +2147,39 @@ void MeetingCoordinator::cancelInboundTransfersForParticipant(const QString &par
         std::vector<QString> failedTransfers;
         auto &transfers = session->transfersOnStrand();
         for (auto it = transfers.begin(); it != transfers.end();) {
-            if (it->second.senderIdentity == participantIdentity) {
-                failedTransfers.push_back(it->first);
+            if (it->second.senderKey == participantKey) {
+                failedTransfers.push_back(it->first.uiTransferId());
                 it = transfers.erase(it);
             } else {
                 ++it;
             }
         }
-        if (failedTransfers.empty()) {
-            return;
-        }
-
-        QMetaObject::invokeMethod(this, [this, sessionGeneration, failedTransfers = std::move(failedTransfers)]() {
+        QMetaObject::invokeMethod(this, [this, sessionGeneration, participantKey,
+                                         failedTransfers = std::move(failedTransfers)]() mutable {
             if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
                 return;
             }
+            QPointer<MeetingCoordinator> owner(this);
+            for (auto it = _inboundTransferLedger.begin();
+                 it != _inboundTransferLedger.end();) {
+                if (it->second.first.nativeRoomGeneration == participantKey.native_room_generation &&
+                    it->second.first.participantIncarnation == participantKey.incarnation &&
+                    it->second.first.coordinatorSession == sessionGeneration) {
+                    if (it->second.second) {
+                        failedTransfers.erase(std::remove(failedTransfers.begin(),
+                            failedTransfers.end(), it->first), failedTransfers.end());
+                    } else if (std::find(failedTransfers.begin(), failedTransfers.end(), it->first) ==
+                        failedTransfers.end()) {
+                        failedTransfers.push_back(it->first);
+                    }
+                    it = _inboundTransferLedger.erase(it);
+                } else {
+                    ++it;
+                }
+            }
             for (const auto &transferId : failedTransfers) {
-                emit chatMediaReceivingFailed(transferId, QString::fromUtf8("发送方已离会"));
+                emit owner->chatMediaReceivingFailed(transferId, QString::fromUtf8("发送方已离会"));
+                if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
             }
         }, Qt::QueuedConnection);
     });
@@ -1775,14 +2188,24 @@ void MeetingCoordinator::cancelInboundTransfersForParticipant(const QString &par
 void MeetingCoordinator::handleDataReceivedOnSessionStrand(
     const std::shared_ptr<MeetingSessionRuntime> &session,
     const std::vector<uint8_t> &data,
-    const std::string &participantSid,
-    const std::string &participantIdentity,
-    const QString &participantName) {
+    const livekit::SenderContext &sender) {
     session->assertOnStrand();
     if (!session->acceptsDataOnStrand()) {
         return;
     }
     const uint64_t sessionGeneration = session->generation();
+    if (sender.origin == livekit::SenderOrigin::Unresolved ||
+        (sender.origin != livekit::SenderOrigin::Server &&
+         !livekit::IsParticipantTicketActive(sender.ticket, sender.key))) {
+        return;
+    }
+    const std::string participantSid = sender.key.sid.empty()
+        ? sender.transport_sid
+        : sender.key.sid;
+    const std::string participantIdentity = sender.key.identity.empty()
+        ? sender.transport_identity
+        : sender.key.identity;
+    const QString participantName = QString::fromStdString(sender.display_name);
 
     openmeeting::meeting::NotifyMeetingData notify;
     if (!notify.ParseFromArray(data.data(), static_cast<int>(data.size()))) {
@@ -1794,6 +2217,13 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
             name = id;
         }
         auto &transfers = session->transfersOnStrand();
+        const auto makeTransferKey = [&](const QString &wireTransferId) {
+            return InboundTransferKey{
+                sessionGeneration,
+                sender.key.native_room_generation,
+                sender.key.incarnation,
+                wireTransferId};
+        };
 
         // 1. 尝试解析为 JSON 消息协议 (chat_text, media_start, media_chunk)
         QJsonParseError jErr;
@@ -1807,8 +2237,9 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
                 QString text = jObj.value("text").toString();
                 int64_t seq = jObj.value("seq").toVariant().toLongLong();
                 if (seq <= 0) seq = QDateTime::currentMSecsSinceEpoch() * 1000;
-                QMetaObject::invokeMethod(this, [this, sessionGeneration, id, name, text, seq]() {
-                    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
+                QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, id, name, text, seq]() {
+                    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+                        !isSenderContextCurrentOnUiThread(sender)) return;
                     emit chatMessageReceived(id, name, text, seq);
                 }, Qt::QueuedConnection);
                 return;
@@ -1823,8 +2254,10 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
                 QString mType = jObj.value("mediaType").toString();
                 QString fName = jObj.value("fileName").toString();
                 qint64 totalSize = jObj.value("totalSize").toVariant().toLongLong();
+                const auto transferKey = makeTransferKey(transferId);
+                const QString uiTransferId = transferKey.uiTransferId();
 
-                auto &transfer = transfers[transferId];
+                auto &transfer = transfers[transferKey];
                 transfer.mediaType = mType;
                 transfer.fileName = fName;
                 transfer.totalChunks = totalChunks;
@@ -1832,11 +2265,17 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
                 transfer.seq = seq;
                 transfer.senderIdentity = id;
                 transfer.senderName = name;
+                transfer.senderKey = sender.key;
+                transfer.senderTicket = sender.ticket;
+                transfer.wireTransferId = transferId;
                 transfer.lastActiveTimestamp = QDateTime::currentMSecsSinceEpoch();
 
-                QMetaObject::invokeMethod(this, [this, sessionGeneration, transferId, id, name, mType, fName, totalSize, seq]() {
-                    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
-                    emit chatMediaReceivingStarted(transferId, id, name, mType, fName, totalSize, seq);
+                QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, transferKey, uiTransferId,
+                                                  id, name, mType, fName, totalSize, seq]() {
+                    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+                        !isSenderContextCurrentOnUiThread(sender)) return;
+                    _inboundTransferLedger[uiTransferId] = {transferKey, false};
+                    emit chatMediaReceivingStarted(uiTransferId, id, name, mType, fName, totalSize, seq);
                 }, Qt::QueuedConnection);
                 return;
             }
@@ -1852,9 +2291,11 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
                 int64_t seq = jObj.value("seq").toVariant().toLongLong();
                 if (seq <= 0) seq = QDateTime::currentMSecsSinceEpoch() * 1000;
                 QString chunkData = jObj.value("chunkData").toString();
+                const auto transferKey = makeTransferKey(transferId);
+                const QString uiTransferId = transferKey.uiTransferId();
 
-                bool isFirstChunk = (transfers.find(transferId) == transfers.end());
-                auto &transfer = transfers[transferId];
+                bool isFirstChunk = (transfers.find(transferKey) == transfers.end());
+                auto &transfer = transfers[transferKey];
                 if (isFirstChunk) {
                     transfer.mediaType = mType;
                     transfer.fileName = fName;
@@ -1863,21 +2304,40 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
                     transfer.seq = seq;
                     transfer.senderIdentity = id;
                     transfer.senderName = name;
+                    transfer.senderKey = sender.key;
+                    transfer.senderTicket = sender.ticket;
+                    transfer.wireTransferId = transferId;
                     transfer.lastActiveTimestamp = QDateTime::currentMSecsSinceEpoch();
 
-                    QMetaObject::invokeMethod(this, [this, sessionGeneration, transferId, id, name, mType, fName, totalSize, seq]() {
-                        if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
-                        emit chatMediaReceivingStarted(transferId, id, name, mType, fName, totalSize, seq);
+                    QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, transferKey, uiTransferId,
+                                                      id, name, mType, fName, totalSize, seq]() {
+                        if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+                            !isSenderContextCurrentOnUiThread(sender)) return;
+                        _inboundTransferLedger[uiTransferId] = {transferKey, false};
+                        emit chatMediaReceivingStarted(uiTransferId, id, name, mType, fName, totalSize, seq);
                     }, Qt::QueuedConnection);
+                }
+
+                if (transfer.senderKey != sender.key ||
+                    !livekit::IsParticipantTicketActive(
+                        transfer.senderTicket, transfer.senderKey)) {
+                    transfers.erase(transferKey);
+                    return;
                 }
 
                 transfer.lastActiveTimestamp = QDateTime::currentMSecsSinceEpoch();
                 transfer.receivedChunks[chunkIdx] = chunkData;
 
                 int progress = std::min(99, (static_cast<int>(transfer.receivedChunks.size()) * 100) / totalChunks);
-                QMetaObject::invokeMethod(this, [this, sessionGeneration, transferId, progress]() {
-                    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
-                    emit chatMediaReceivingProgress(transferId, progress);
+                QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, transferKey, uiTransferId, progress]() {
+                    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+                        !isSenderContextCurrentOnUiThread(sender)) return;
+                    const auto ledger = _inboundTransferLedger.find(uiTransferId);
+                    if (ledger == _inboundTransferLedger.end() ||
+                        ledger->second.first < transferKey ||
+                        transferKey < ledger->second.first ||
+                        ledger->second.second) return;
+                    emit chatMediaReceivingProgress(uiTransferId, progress);
                 }, Qt::QueuedConnection);
 
                 if (static_cast<int>(transfer.receivedChunks.size()) == totalChunks) {
@@ -1887,13 +2347,31 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
                         fullBase64.append(transfer.receivedChunks[i]);
                     }
                     QByteArray completeData = QByteArray::fromBase64(fullBase64.toLatin1());
-                    transfers.erase(transferId);
+                    transfers.erase(transferKey);
 
-                    QMetaObject::invokeMethod(this, [this, sessionGeneration, transferId, id, name, mType, fName, completeData]() {
-                        if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
-                        emit chatMediaReceivingProgress(transferId, 100);
-                        emit chatMediaReceivingCompleted(transferId, id, name, mType, fName, completeData);
-                        emit chatMediaMessageReceived(id, name, mType, fName, completeData);
+                    QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, transferKey, uiTransferId,
+                                                      id, name, mType, fName, completeData]() {
+                        QPointer<MeetingCoordinator> owner(this);
+                        auto valid = [&](bool terminal) {
+                            if (!owner ||
+                                !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+                                !owner->isSenderContextCurrentOnUiThread(sender)) return false;
+                            const auto ledger = owner->_inboundTransferLedger.find(uiTransferId);
+                            return ledger != owner->_inboundTransferLedger.end() &&
+                                !(ledger->second.first < transferKey) &&
+                                !(transferKey < ledger->second.first) &&
+                                ledger->second.second == terminal;
+                        };
+                        if (!valid(false)) return;
+                        emit owner->chatMediaReceivingProgress(uiTransferId, 100);
+                        if (!valid(false)) return;
+                        // Completion is the terminal linearization point. A
+                        // synchronous leave/retire must not report failure too.
+                        owner->_inboundTransferLedger.at(uiTransferId).second = true;
+                        emit owner->chatMediaReceivingCompleted(uiTransferId, id, name, mType, fName, completeData);
+                        if (!valid(true)) return;
+                        owner->_inboundTransferLedger.erase(uiTransferId);
+                        emit owner->chatMediaMessageReceived(id, name, mType, fName, completeData);
                     }, Qt::QueuedConnection);
                 }
                 return;
@@ -1903,15 +2381,16 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
         // 2. 向下兼容：若不是 JSON 协议，作为普通文本聊天广播
         QString text = QString::fromUtf8(reinterpret_cast<const char *>(data.data()), static_cast<int>(data.size()));
         int64_t seq = QDateTime::currentMSecsSinceEpoch() * 1000;
-        QMetaObject::invokeMethod(this, [this, sessionGeneration, id, name, text, seq]() {
-            if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
+        QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, id, name, text, seq]() {
+            if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+                !isSenderContextCurrentOnUiThread(sender)) return;
             emit chatMessageReceived(id, name, text, seq);
         }, Qt::QueuedConnection);
         return;
     }
 
     const QString &localUserId = session->localUserId();
-    const bool isServerOrigin = participantSid.empty() && participantIdentity.empty();
+    const bool isServerOrigin = sender.origin == livekit::SenderOrigin::Server;
 
     // 1. KickOff 踢出信令
     if (notify.has_kickoffmeetingdata()) {
@@ -1920,9 +2399,15 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
         if (targetUser == localUserId) {
             QString reason = QString::fromStdString(kick.reason());
             int code = static_cast<int>(kick.reasoncode());
-            QMetaObject::invokeMethod(this, [this, sessionGeneration, reason, code, isServerOrigin]() {
-                if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
+            QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, reason, code, isServerOrigin]() {
+                QPointer<MeetingCoordinator> owner(this);
+                const auto valid = [&] {
+                    return owner && owner->isCurrentSessionGenerationOnUiThread(sessionGeneration) &&
+                        owner->isSenderContextCurrentOnUiThread(sender);
+                };
+                if (!valid()) return;
                 MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "KICK_OFF", QString("收到踢出信令: %1 (代码: %2)").arg(reason).arg(code));
+                if (!valid()) return;
                 if (code == static_cast<int>(openmeeting::meeting::KickOffReason::DuplicatedLogin)) {
                     // DuplicatedLogin 是全局账号事件，不能伪装成 LiveKit 的
                     // DuplicateIdentity 房间事件。只有没有参会者来源的服务端
@@ -1938,11 +2423,13 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
                         MeetingUI::LogCategory::Connection,
                         "DUPLICATED_LOGIN",
                         "[Coordinator] Receive trusted server duplicated-login event");
+                    if (!valid()) return;
                     SessionManager::instance().invalidateSession(SessionInvalidationReason::DuplicatedLogin);
                     return;
                 }
-                emit kickedOff(reason, code);
-                leaveMeetingAsync(false);
+                emit owner->kickedOff(reason, code);
+                if (!valid()) return;
+                owner->leaveMeetingAsync(false);
             }, Qt::QueuedConnection);
             return;
         }
@@ -1956,14 +2443,16 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
             const auto &op = streamData.operation(i);
             if (QString::fromStdString(op.userid()) == localUserId) {
                 bool camEnable = op.cameraonentry();
-                QMetaObject::invokeMethod(this, [this, sessionGeneration, camEnable, opUser]() {
-                    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
+                QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, camEnable, opUser]() {
+                    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+                        !isSenderContextCurrentOnUiThread(sender)) return;
                     emit remoteMuteRequested(true, !camEnable, opUser);
                 }, Qt::QueuedConnection);
 
                 bool micEnable = op.microphoneonentry();
-                QMetaObject::invokeMethod(this, [this, sessionGeneration, micEnable, opUser]() {
-                    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
+                QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, micEnable, opUser]() {
+                    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+                        !isSenderContextCurrentOnUiThread(sender)) return;
                     emit remoteMuteRequested(false, !micEnable, opUser);
                 }, Qt::QueuedConnection);
             }
@@ -1975,15 +2464,22 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
         const auto &hostData = notify.meetinghostdata();
         QString newHost = QString::fromStdString(hostData.userid());
         QString opNick = QString::fromStdString(hostData.operatornickname());
-        QMetaObject::invokeMethod(this, [this, sessionGeneration, newHost, opNick]() {
-            if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
+        QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, newHost, opNick]() {
+            QPointer<MeetingCoordinator> owner(this);
+            const auto valid = [&] {
+                return owner && owner->isCurrentSessionGenerationOnUiThread(sessionGeneration) &&
+                    owner->isSenderContextCurrentOnUiThread(sender);
+            };
+            if (!valid()) return;
             _meetingDetail.hostUserId = newHost;
             for (auto &[id, p] : _participants) {
                 p.isHost = (id == newHost);
             }
             updateParticipantListAndNotify();
-            emit hostRoleChanged(newHost, opNick);
-            emit meetingDetailUpdated(_meetingDetail);
+            if (!valid()) return;
+            emit owner->hostRoleChanged(newHost, opNick);
+            if (!valid()) return;
+            emit owner->meetingDetailUpdated(owner->_meetingDetail);
         }, Qt::QueuedConnection);
     }
 }

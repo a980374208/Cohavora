@@ -311,6 +311,267 @@ void Room::RemoveListener(std::shared_ptr<RoomListener> listener) {
     listeners_.erase(std::remove(listeners_.begin(), listeners_.end(), listener), listeners_.end());
 }
 
+std::shared_ptr<MembershipState> Room::EnsureMembershipLocked(
+    const std::shared_ptr<Participant>& participant,
+    bool is_local) {
+    if (!participant) return nullptr;
+
+    const bool canonical = is_local
+        ? local_participant_.get() == participant.get()
+        : [&] {
+            const auto it = remote_participants_.find(participant->sid());
+            return it != remote_participants_.end() && it->second.get() == participant.get();
+        }();
+    if (!canonical) return nullptr;
+
+    const auto existing = participant_memberships_.find(participant.get());
+    if (existing != participant_memberships_.end() &&
+        existing->second->active.load(std::memory_order_acquire)) {
+        return existing->second;
+    }
+
+    ParticipantKey key;
+    key.native_room_generation = session_generation_.load(std::memory_order_acquire);
+    key.incarnation = next_participant_incarnation_++;
+    key.sid = participant->sid();
+    key.identity = participant->identity();
+    auto state = std::make_shared<MembershipState>(std::move(key));
+    participant_memberships_[participant.get()] = state;
+    return state;
+}
+
+std::shared_ptr<MembershipState> Room::FindMembershipLocked(
+    const std::shared_ptr<Participant>& participant) const {
+    if (!participant) return nullptr;
+    const auto it = participant_memberships_.find(participant.get());
+    if (it == participant_memberships_.end()) return nullptr;
+    return it->second;
+}
+
+std::shared_ptr<TrackMembershipState> Room::EnsureTrackMembershipLocked(
+    const std::shared_ptr<Participant>& participant,
+    const std::shared_ptr<TrackPublication>& publication) {
+    if (!participant || !publication) return nullptr;
+    auto participant_state = FindMembershipLocked(participant);
+    if (!participant_state ||
+        !participant_state->active.load(std::memory_order_acquire) ||
+        participant->get_publication(publication->sid()).get() != publication.get()) {
+        return nullptr;
+    }
+
+    const auto existing = track_memberships_.find(publication.get());
+    if (existing != track_memberships_.end() &&
+        existing->second->active.load(std::memory_order_acquire)) {
+        return existing->second;
+    }
+
+    TrackKey key;
+    key.participant = participant_state->key;
+    key.publication_incarnation = next_publication_incarnation_++;
+    key.publication_sid = publication->sid();
+    auto state = std::make_shared<TrackMembershipState>(std::move(key));
+    track_memberships_[publication.get()] = state;
+    return state;
+}
+
+void Room::RetireTrackMembershipLocked(
+    const std::shared_ptr<TrackPublication>& publication) {
+    if (!publication) return;
+    const auto it = track_memberships_.find(publication.get());
+    if (it == track_memberships_.end()) return;
+    it->second->active.store(false, std::memory_order_release);
+    track_memberships_.erase(it);
+}
+
+ParticipantEvent Room::MakeParticipantEventLocked(
+    ParticipantEventKind kind,
+    const std::shared_ptr<Participant>& participant,
+    bool is_local) {
+    ParticipantEvent event;
+    event.kind = kind;
+    auto state = EnsureMembershipLocked(participant, is_local);
+    if (!state) return event;
+    event.participant.key = state->key;
+    event.participant.ticket = state;
+    event.participant.state = participant->SnapshotState();
+    event.participant.is_local = is_local;
+    return event;
+}
+
+ParticipantEvent Room::MakeTrackEventLocked(
+    ParticipantEventKind kind,
+    const std::shared_ptr<Participant>& participant,
+    const std::shared_ptr<TrackPublication>& publication,
+    bool is_local) {
+    auto event = MakeParticipantEventLocked(kind, participant, is_local);
+    auto track_state = EnsureTrackMembershipLocked(participant, publication);
+    if (!track_state) return event;
+    event.track_key = track_state->key;
+    event.track_ticket = track_state;
+    event.publication = publication->SnapshotState();
+    return event;
+}
+
+void Room::RetireParticipantLocked(const std::shared_ptr<Participant>& participant) {
+    if (!participant) return;
+    const auto membership = participant_memberships_.find(participant.get());
+    if (membership == participant_memberships_.end()) return;
+    const auto key = membership->second->key;
+    membership->second->active.store(false, std::memory_order_release);
+    participant_memberships_.erase(membership);
+
+    for (auto it = track_memberships_.begin(); it != track_memberships_.end();) {
+        if (it->second->key.participant == key) {
+            it->second->active.store(false, std::memory_order_release);
+            it = track_memberships_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void Room::RetireAllMembershipsLocked(std::deque<ParticipantEvent>& retired_events) {
+    for (auto& [participant, state] : participant_memberships_) {
+        state->active.store(false, std::memory_order_release);
+    }
+    for (auto& [publication, state] : track_memberships_) {
+        state->active.store(false, std::memory_order_release);
+    }
+    participant_memberships_.clear();
+    track_memberships_.clear();
+    // The caller supplies an empty local queue and releases its payloads after
+    // the Room transaction. Keep the scheduled flag: a posted/running drainer
+    // still owns dispatch, including any successor events added before it ends.
+    retired_events.swap(participant_events_);
+}
+
+void Room::EnqueueParticipantEventLocked(ParticipantEvent event) {
+    event.native_room_generation = session_generation_.load(std::memory_order_acquire);
+    event.event_sequence = next_participant_event_sequence_++;
+    participant_events_.push_back(std::move(event));
+    if (participant_event_drain_scheduled_) return;
+
+    participant_event_drain_scheduled_ = true;
+    std::weak_ptr<Room> weak = weak_from_this();
+    asio::post(executor_, [weak] {
+        if (auto room = weak.lock()) room->DrainParticipantEvents();
+    });
+}
+
+void Room::EnqueueRosterLocked() {
+    if (local_participant_) {
+        EnqueueParticipantEventLocked(MakeParticipantEventLocked(
+            ParticipantEventKind::Upsert, local_participant_, true));
+    }
+    for (const auto& [sid, participant] : remote_participants_) {
+        EnqueueParticipantEventLocked(MakeParticipantEventLocked(
+            ParticipantEventKind::Upsert, participant, false));
+        for (const auto& [track_sid, publication] : participant->tracks()) {
+            const auto track = publication ? publication->track() : nullptr;
+            if (track && track->rtc_track()) {
+                EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                    ParticipantEventKind::TrackAvailable,
+                    participant,
+                    publication,
+                    false));
+            }
+        }
+    }
+}
+
+void Room::DrainParticipantEvents() {
+    std::vector<ParticipantEvent> batch;
+    std::vector<std::shared_ptr<RoomListener>> listeners;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (participant_event_drain_paused_for_testing_) {
+            ++participant_event_paused_attempts_for_testing_;
+            return;
+        }
+        const auto count = std::min<std::size_t>(64, participant_events_.size());
+        batch.reserve(count);
+        for (std::size_t i = 0; i < count; ++i) {
+            batch.push_back(std::move(participant_events_.front()));
+            participant_events_.pop_front();
+        }
+        listeners = listeners_;
+    }
+
+    for (const auto& event : batch) {
+        for (const auto& listener : listeners) {
+            if (!listener) continue;
+            try {
+                listener->OnParticipantEvent(event);
+            } catch (...) {
+                // A listener cannot strand the single dispatcher.
+            }
+        }
+    }
+
+    std::lock_guard lock(room_mutex_);
+    if (participant_events_.empty()) {
+        participant_event_drain_scheduled_ = false;
+        return;
+    }
+    std::weak_ptr<Room> weak = weak_from_this();
+    asio::post(executor_, [weak] {
+        if (auto room = weak.lock()) room->DrainParticipantEvents();
+    });
+}
+
+SenderContext Room::ResolveSenderContextLocked(
+    const std::string& participant_sid,
+    const std::string& participant_identity,
+    std::shared_ptr<Participant>* participant) {
+    SenderContext sender;
+    sender.transport_sid = participant_sid;
+    sender.transport_identity = participant_identity;
+    sender.key.native_room_generation =
+        session_generation_.load(std::memory_order_acquire);
+    sender.key.sid = participant_sid;
+    sender.key.identity = participant_identity;
+    std::shared_ptr<Participant> resolved;
+    bool is_local = false;
+
+    if (!participant_sid.empty()) {
+        if (local_participant_ && local_participant_->sid() == participant_sid) {
+            resolved = local_participant_;
+            is_local = true;
+        } else {
+            const auto remote = remote_participants_.find(participant_sid);
+            if (remote != remote_participants_.end()) resolved = remote->second;
+        }
+    } else if (!participant_identity.empty()) {
+        if (local_participant_ && local_participant_->identity() == participant_identity) {
+            resolved = local_participant_;
+            is_local = true;
+        } else {
+            for (const auto& [sid, candidate] : remote_participants_) {
+                if (candidate && candidate->identity() == participant_identity) {
+                    resolved = candidate;
+                    break;
+                }
+            }
+        }
+    }
+
+    if (resolved) {
+        sender.origin = is_local ? SenderOrigin::Local : SenderOrigin::Remote;
+        if (auto membership = EnsureMembershipLocked(resolved, is_local)) {
+            sender.key = membership->key;
+            sender.ticket = membership;
+            const auto snapshot = resolved->SnapshotState();
+            sender.display_name = snapshot.name.empty() ? snapshot.identity : snapshot.name;
+        }
+    } else if (participant_sid.empty() && participant_identity.empty()) {
+        sender.origin = SenderOrigin::Server;
+    } else {
+        sender.origin = SenderOrigin::Unresolved;
+    }
+    if (participant) *participant = std::move(resolved);
+    return sender;
+}
+
 asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& token, const SignalOptions& opts) {
     try {
         co_await ConnectAsync(url, token, opts);
@@ -580,6 +841,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         connection_state_ = ConnectionState::Connected;
         notify_connected = !suppress_next_connected_event_;
         suppress_next_connected_event_ = false;
+        EnqueueRosterLocked();
     }
 
     if (notify_connected) {
@@ -604,6 +866,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> data_channels;
         std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers;
         std::vector<RemoteTrackSinkBinding> track_sinks;
+        std::deque<ParticipantEvent> retired_events;
         {
             std::lock_guard lock(room_mutex_);
             if (generation == session_generation_.load(std::memory_order_acquire)) {
@@ -612,6 +875,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             signal = std::move(signal_client_);
             join_response_.reset();
             enabled_publish_codecs_.clear();
+            RetireAllMembershipsLocked(retired_events);
             local_participant_.reset();
             pending_local_unpublishes_.clear();
             ClearRemotePublicationMediaBindingsLocked();
@@ -640,6 +904,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             suppress_next_connected_event_ = false;
             connection_state_ = ConnectionState::Disconnected;
         }
+        retired_events.clear();
         CancelPendingOperations(OperationErrorCode::Cancelled,
                                 "connect_rollback",
                                 "connect transaction rolled back");
@@ -664,6 +929,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
 }
 
 void Room::Disconnect() {
+    std::deque<ParticipantEvent> retired_events;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::shared_ptr<SignalClient> signal;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
@@ -675,7 +941,10 @@ void Room::Disconnect() {
     std::vector<RemoteTrackSinkBinding> track_sinks;
     {
         std::lock_guard lock(room_mutex_);
-        if (connection_state_ == ConnectionState::Disconnected) return;
+        if (connection_state_ == ConnectionState::Disconnected) {
+            retired_events.swap(participant_events_);
+            return; // The lock is destroyed before the local payload queue.
+        }
         connection_state_ = ConnectionState::Disconnected;
         disconnect_reason_ = RoomDisconnectReason::UserLeave;
         reconnect_disabled_ = true;
@@ -688,6 +957,7 @@ void Room::Disconnect() {
         subscriber = std::move(subscriber_pc_);
         publisher_observer = std::move(publisher_observer_);
         subscriber_observer = std::move(subscriber_observer_);
+        RetireAllMembershipsLocked(retired_events);
         local_participant_.reset();
         pending_local_unpublishes_.clear();
         ClearRemotePublicationMediaBindingsLocked();
@@ -710,6 +980,8 @@ void Room::Disconnect() {
         pending_track_queue_.clear();
         deferred_room_messages_.clear();
     }
+
+    retired_events.clear();
 
     CancelPendingOperations(OperationErrorCode::Cancelled,
                             "disconnect",
@@ -768,6 +1040,7 @@ void Room::Disconnect() {
 }
 
 asio::awaitable<void> Room::DisconnectAsync() {
+    std::deque<ParticipantEvent> retired_events;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::shared_ptr<SignalClient> signal;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
@@ -779,7 +1052,10 @@ asio::awaitable<void> Room::DisconnectAsync() {
     std::vector<RemoteTrackSinkBinding> track_sinks;
     {
         std::lock_guard lock(room_mutex_);
-        if (connection_state_ == ConnectionState::Disconnected) co_return;
+        if (connection_state_ == ConnectionState::Disconnected) {
+            retired_events.swap(participant_events_);
+            co_return; // Payloads outlive the lock, including this early exit.
+        }
         connection_state_ = ConnectionState::Disconnected;
         disconnect_reason_ = RoomDisconnectReason::UserLeave;
         reconnect_disabled_ = true;
@@ -792,6 +1068,7 @@ asio::awaitable<void> Room::DisconnectAsync() {
         subscriber = std::move(subscriber_pc_);
         publisher_observer = std::move(publisher_observer_);
         subscriber_observer = std::move(subscriber_observer_);
+        RetireAllMembershipsLocked(retired_events);
         local_participant_.reset();
         pending_local_unpublishes_.clear();
         ClearRemotePublicationMediaBindingsLocked();
@@ -814,6 +1091,8 @@ asio::awaitable<void> Room::DisconnectAsync() {
         pending_track_queue_.clear();
         deferred_room_messages_.clear();
     }
+
+    retired_events.clear();
 
     CancelPendingOperations(OperationErrorCode::Cancelled,
                             "disconnect",
@@ -904,6 +1183,7 @@ void Room::BeginServerDisconnect(RoomDisconnectReason reason, std::string detail
 
 asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
     RoomDisconnectReason reason, std::string detail) {
+    std::deque<ParticipantEvent> retired_events;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::shared_ptr<SignalClient> signal;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
@@ -917,6 +1197,7 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
         std::lock_guard lock(room_mutex_);
         if (connection_state_ == ConnectionState::Disconnected) {
             server_disconnect_finalizing_ = false;
+            retired_events.swap(participant_events_);
             co_return;
         }
         connection_state_ = ConnectionState::Disconnected;
@@ -933,6 +1214,7 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
         subscriber = std::move(subscriber_pc_);
         publisher_observer = std::move(publisher_observer_);
         subscriber_observer = std::move(subscriber_observer_);
+        RetireAllMembershipsLocked(retired_events);
         local_participant_.reset();
         pending_local_unpublishes_.clear();
         ClearRemotePublicationMediaBindingsLocked();
@@ -956,6 +1238,8 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
         deferred_room_messages_.clear();
         suppress_next_connected_event_ = false;
     }
+
+    retired_events.clear();
 
     CancelPendingOperations(OperationErrorCode::SessionClosed,
                             "server_leave",
@@ -1418,27 +1702,13 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                 real_sender_sid);
 
             // 构造并派发上层流式 Reader
-            std::shared_ptr<RemoteParticipant> remote_p;
-            std::shared_ptr<LocalParticipant> local_p;
+            std::shared_ptr<Participant> p;
+            SenderContext sender;
             {
                 std::lock_guard lock(room_mutex_);
-                local_p = local_participant_;
-                if (!real_sender_sid.empty()) {
-                    auto it = remote_participants_.find(real_sender_sid);
-                    if (it != remote_participants_.end()) {
-                        remote_p = it->second;
-                    }
-                }
-                if (!remote_p && !sender_identity.empty()) {
-                    for (const auto& kv : remote_participants_) {
-                        if (kv.second && (kv.second->identity() == sender_identity || kv.second->sid() == sender_identity)) {
-                            remote_p = kv.second;
-                            break;
-                        }
-                    }
-                }
+                sender = ResolveSenderContextLocked(
+                    real_sender_sid, sender_identity, &p);
             }
-            std::shared_ptr<Participant> p = remote_p ? std::static_pointer_cast<Participant>(remote_p) : (local_p && (local_p->sid() == real_sender_sid || local_p->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_p) : nullptr);
             auto listeners_snapshot = GetListenersSnapshot();
 
             if (header.has_text_header()) {
@@ -1467,8 +1737,23 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                     std::lock_guard lk(streams_mutex_);
                     active_text_readers_[header.stream_id()] = reader;
                 }
+                {
+                    std::lock_guard lock(room_mutex_);
+                    ParticipantEvent event = p
+                        ? MakeParticipantEventLocked(
+                            ParticipantEventKind::TextStreamOpened,
+                            p,
+                            p.get() == local_participant_.get())
+                        : ParticipantEvent{};
+                    event.kind = ParticipantEventKind::TextStreamOpened;
+                    event.sender = sender;
+                    event.text_reader = reader;
+                    EnqueueParticipantEventLocked(std::move(event));
+                }
                 for (const auto& listener : listeners_snapshot) {
-                    listener->OnTextStreamOpened(reader, p);
+                    if (!listener->ConsumesParticipantEvents()) {
+                        listener->OnTextStreamOpened(reader, p);
+                    }
                 }
             } else {
                 ByteStreamInfo info;
@@ -1491,8 +1776,23 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                     std::lock_guard lk(streams_mutex_);
                     active_byte_readers_[header.stream_id()] = reader;
                 }
+                {
+                    std::lock_guard lock(room_mutex_);
+                    ParticipantEvent event = p
+                        ? MakeParticipantEventLocked(
+                            ParticipantEventKind::ByteStreamOpened,
+                            p,
+                            p.get() == local_participant_.get())
+                        : ParticipantEvent{};
+                    event.kind = ParticipantEventKind::ByteStreamOpened;
+                    event.sender = sender;
+                    event.byte_reader = reader;
+                    EnqueueParticipantEventLocked(std::move(event));
+                }
                 for (const auto& listener : listeners_snapshot) {
-                    listener->OnByteStreamOpened(reader, p);
+                    if (!listener->ConsumesParticipantEvents()) {
+                        listener->OnByteStreamOpened(reader, p);
+                    }
                 }
             }
             return;
@@ -1575,23 +1875,14 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
     auto listeners_snapshot = GetListenersSnapshot();
     std::shared_ptr<RemoteParticipant> remote_p;
     std::shared_ptr<LocalParticipant> local_p;
+    std::shared_ptr<Participant> resolved_participant;
+    SenderContext sender_context;
     {
         std::lock_guard lock(room_mutex_);
-        local_p = local_participant_;
-        if (!real_sender_sid.empty()) {
-            auto it = remote_participants_.find(real_sender_sid);
-            if (it != remote_participants_.end()) {
-                remote_p = it->second;
-            }
-        }
-        if (!remote_p && !sender_identity.empty()) {
-            for (const auto& kv : remote_participants_) {
-                if (kv.second && (kv.second->identity() == sender_identity || kv.second->sid() == sender_identity)) {
-                    remote_p = kv.second;
-                    break;
-                }
-            }
-        }
+        sender_context = ResolveSenderContextLocked(
+            real_sender_sid, sender_identity, &resolved_participant);
+        remote_p = std::dynamic_pointer_cast<RemoteParticipant>(resolved_participant);
+        local_p = std::dynamic_pointer_cast<LocalParticipant>(resolved_participant);
     }
 
     // 2. 解析并派发结构化 Chat 消息
@@ -1623,8 +1914,24 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
 
     // 3. 派发原始 OnDataReceived 事件给 RoomListener
     if (!chat_dispatched && real_topic != "lk.chat" && real_topic != "lk-chat-topic" && real_topic != "lk.rpc") {
+        {
+            std::lock_guard lock(room_mutex_);
+            ParticipantEvent event = resolved_participant
+                ? MakeParticipantEventLocked(
+                    ParticipantEventKind::DataReceived,
+                    resolved_participant,
+                    resolved_participant.get() == local_participant_.get())
+                : ParticipantEvent{};
+            event.kind = ParticipantEventKind::DataReceived;
+            event.sender = sender_context;
+            event.data = real_payload;
+            event.topic = real_topic;
+            EnqueueParticipantEventLocked(std::move(event));
+        }
         for (const auto& listener : listeners_snapshot) {
-            listener->OnDataReceived(real_payload, remote_p, real_topic);
+            if (!listener->ConsumesParticipantEvents()) {
+                listener->OnDataReceived(real_payload, remote_p, real_topic);
+            }
         }
     }
 }
@@ -1878,21 +2185,53 @@ void Room::DetachRemoteTrackSinks(std::vector<RemoteTrackSinkBinding> bindings) 
     }
 }
 
-std::vector<Room::RemoteTrackSinkBinding> Room::TakeRemoteTrackSinksForTrackSids(
-    const std::set<std::string>& track_sids) {
+std::vector<Room::RemoteTrackSinkBinding> Room::TakeRemoteTrackSinksForTrackKeys(
+    const std::vector<TrackKey>& track_keys) {
     std::vector<RemoteTrackSinkBinding> removed;
-    if (track_sids.empty()) return removed;
+    if (track_keys.empty()) return removed;
 
     std::lock_guard lock(room_mutex_);
     for (auto it = remote_track_sinks_.begin(); it != remote_track_sinks_.end();) {
-        if (!track_sids.contains(it->track_sid)) {
+        if (std::find(track_keys.begin(), track_keys.end(), it->track_key) ==
+            track_keys.end()) {
             ++it;
             continue;
         }
-        processed_remote_track_ids_.erase(it->rtc_track_id);
         removed.push_back(std::move(*it));
         it = remote_track_sinks_.erase(it);
     }
+    for (const auto& binding : removed) {
+        const bool still_bound = std::any_of(
+            remote_track_sinks_.begin(), remote_track_sinks_.end(),
+            [&binding](const RemoteTrackSinkBinding& candidate) {
+                return candidate.rtc_track_id == binding.rtc_track_id;
+            });
+        if (!still_bound) processed_remote_track_ids_.erase(binding.rtc_track_id);
+    }
+    return removed;
+}
+
+std::vector<Room::RemoteTrackSinkBinding> Room::TakeRemoteTrackSinkForBindingSerial(
+    uint64_t binding_serial) {
+    std::vector<RemoteTrackSinkBinding> removed;
+    if (binding_serial == 0) return removed;
+
+    std::lock_guard lock(room_mutex_);
+    const auto binding = std::find_if(
+        remote_track_sinks_.begin(), remote_track_sinks_.end(),
+        [binding_serial](const RemoteTrackSinkBinding& candidate) {
+            return candidate.binding_serial == binding_serial;
+        });
+    if (binding == remote_track_sinks_.end()) return removed;
+    const std::string rtc_track_id = binding->rtc_track_id;
+    removed.push_back(std::move(*binding));
+    remote_track_sinks_.erase(binding);
+    const bool still_bound = std::any_of(
+        remote_track_sinks_.begin(), remote_track_sinks_.end(),
+        [&rtc_track_id](const RemoteTrackSinkBinding& candidate) {
+            return candidate.rtc_track_id == rtc_track_id;
+        });
+    if (!still_bound) processed_remote_track_ids_.erase(rtc_track_id);
     return removed;
 }
 
@@ -1994,12 +2333,14 @@ RemotePublicationControlDispatch Room::QueueRemotePublicationControl(
     return RemotePublicationControlDispatch::Queued;
 }
 
-void Room::RemoveRemoteMediaTrackReferences(const std::set<std::string>& track_sids) {
-    if (track_sids.empty()) return;
-    const auto remove_tracks = [&track_sids](std::vector<std::weak_ptr<Track>>& tracks) {
-        tracks.erase(std::remove_if(tracks.begin(), tracks.end(), [&track_sids](const std::weak_ptr<Track>& weak) {
+void Room::RemoveRemoteMediaTrackReferences(
+    const std::vector<std::shared_ptr<Track>>& removed_tracks) {
+    if (removed_tracks.empty()) return;
+    const auto remove_tracks = [&removed_tracks](std::vector<std::weak_ptr<Track>>& tracks) {
+        tracks.erase(std::remove_if(tracks.begin(), tracks.end(), [&removed_tracks](const std::weak_ptr<Track>& weak) {
             const auto track = weak.lock();
-            return !track || track_sids.contains(track->sid());
+            return !track || std::find(removed_tracks.begin(), removed_tracks.end(), track) !=
+                removed_tracks.end();
         }), tracks.end());
     };
 
@@ -2018,17 +2359,19 @@ void Room::ClearRemotePublicationMediaBindingsLocked() {
             }
         }
     }
+    current_remote_binding_serials_.clear();
 }
 
 void Room::DetachRemotePublicationMedia(RemoteTrackPublication* publication,
-                                        bool notify_listener) {
+                                        bool notify_listener,
+                                        uint64_t binding_serial) {
     if (!publication) return;
 
     std::shared_ptr<RemoteParticipant> participant;
     std::shared_ptr<RemoteTrackPublication> canonical;
     std::shared_ptr<Track> track;
+    webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> detached_rtc_track;
     std::vector<std::shared_ptr<RoomListener>> listeners;
-    std::set<std::string> track_sids;
     {
         std::lock_guard lock(room_mutex_);
         for (const auto& [participant_sid, candidate] : remote_participants_) {
@@ -2040,23 +2383,46 @@ void Room::DetachRemotePublicationMedia(RemoteTrackPublication* publication,
             }
         }
         if (!participant || !canonical || !canonical->has_media_binding()) return;
+        const auto current_serial = current_remote_binding_serials_.find(canonical.get());
+        if (current_serial == current_remote_binding_serials_.end() ||
+            current_serial->second != binding_serial) {
+            return;
+        }
 
         track = canonical->track();
-        track_sids.insert(canonical->sid());
+        const auto track_membership = track_memberships_.find(canonical.get());
+        if (track_membership == track_memberships_.end()) return;
+        current_remote_binding_serials_.erase(current_serial);
         canonical->ClearMediaBinding();
+        // Retire this binding's logical media references in the same Room
+        // transaction as its serial. A concurrent/reentrant attach may reuse
+        // the canonical Track after this point. Keep the RTC reference alive
+        // so setting nullptr cannot destroy an RTC object under room_mutex_.
+        // set_rtc_track(nullptr) performs no RTC set_enabled call.
+        if (track) {
+            detached_rtc_track = track->rtc_track();
+            track->set_rtc_track(nullptr);
+        }
+        // Matches retain_binding's Room -> remote_media_mutex_ lock order.
+        RemoveRemoteMediaTrackReferences({track});
+        EnqueueParticipantEventLocked(MakeTrackEventLocked(
+            ParticipantEventKind::TrackUnavailable,
+            participant,
+            canonical,
+            false));
         listeners = listeners_;
     }
 
     // Move physical sinks out of Room before calling WebRTC RemoveSink. The
     // publication is already marked detached, making repeated unsubscribe and
     // replacement calls idempotent.
-    DetachRemoteTrackSinks(TakeRemoteTrackSinksForTrackSids(track_sids));
-    if (track) track->set_rtc_track(nullptr);
-    RemoveRemoteMediaTrackReferences(track_sids);
+    DetachRemoteTrackSinks(TakeRemoteTrackSinkForBindingSerial(binding_serial));
 
     if (notify_listener && track) {
         for (const auto& listener : listeners) {
-            listener->OnTrackUnsubscribed(track, canonical, participant);
+            if (!listener->ConsumesParticipantEvents()) {
+                listener->OnTrackUnsubscribed(track, canonical, participant);
+            }
         }
     }
 }
@@ -3246,11 +3612,22 @@ void Room::AttachRemoteTrackToParticipant(
     std::shared_ptr<TrackPublication> pub;
     std::shared_ptr<Track> r_track;
     std::shared_ptr<RemoteTrackPublication> remote_publication;
-    bool replace_existing_media_binding = false;
+    uint64_t replaced_binding_serial = 0;
+    ParticipantKey participant_key;
+    TrackKey track_key;
+    uint64_t binding_serial = 0;
 
     {
         std::lock_guard lock(room_mutex_);
-        if (connection_state_ == ConnectionState::Disconnected) return;
+        const auto canonical = remote_participants_.find(participant->sid());
+        const auto membership = FindMembershipLocked(participant);
+        if (connection_state_ == ConnectionState::Disconnected ||
+            canonical == remote_participants_.end() ||
+            canonical->second.get() != participant.get() ||
+            !membership ||
+            !membership->active.load(std::memory_order_acquire)) {
+            return;
+        }
         // 查找已有 publication
         pub = participant->get_publication(track_id);
         if (!pub) {
@@ -3281,43 +3658,84 @@ void Room::AttachRemoteTrackToParticipant(
             }
         }
         remote_publication = std::dynamic_pointer_cast<RemoteTrackPublication>(pub);
-        replace_existing_media_binding = remote_publication &&
-            remote_publication->has_media_binding() &&
-            remote_publication->media_track_id() != track->id();
+        const auto track_membership = EnsureTrackMembershipLocked(participant, pub);
+        if (!track_membership) return;
+        participant_key = membership->key;
+        track_key = track_membership->key;
+        binding_serial = next_remote_track_binding_serial_++;
+        if (remote_publication && remote_publication->has_media_binding() &&
+            remote_publication->media_track_id() != track->id()) {
+            const auto existing_serial =
+                current_remote_binding_serials_.find(remote_publication.get());
+            if (existing_serial != current_remote_binding_serials_.end()) {
+                replaced_binding_serial = existing_serial->second;
+            }
+        }
     }
 
     // A replaced WebRTC receiver must detach its previous raw sink before the
     // canonical Track points at the new receiver. This keeps one sink binding
     // per remote publication/SID rather than accumulating stale decoders.
-    if (replace_existing_media_binding && remote_publication) {
-        remote_publication->DetachMedia(/*notify_listener=*/false);
+    if (replaced_binding_serial != 0 && remote_publication) {
+        DetachRemotePublicationMedia(
+            remote_publication.get(), /*notify_listener=*/false, replaced_binding_serial);
     }
 
-    {
+    uint64_t superseded_binding_serial = 0;
+    const auto retain_binding = [&](RemoteTrackSinkBinding& binding) {
         std::lock_guard lock(room_mutex_);
+        const auto canonical = remote_participants_.find(participant->sid());
+        const auto membership = FindMembershipLocked(participant);
+        const auto track_membership = track_memberships_.find(pub.get());
         if (connection_state_ == ConnectionState::Disconnected ||
-            participant->get_publication(track_id) != pub) {
-            return;
+            canonical == remote_participants_.end() ||
+            canonical->second.get() != participant.get() ||
+            participant->get_publication(track_id) != pub ||
+            !membership || membership->key != participant_key ||
+            track_membership == track_memberships_.end() ||
+            track_membership->second->key != track_key ||
+            !track_membership->second->active.load(std::memory_order_acquire)) {
+            return false;
         }
+
         r_track->set_rtc_track(track);
         if (kind == TrackKind::Audio && audio_output_muted_) {
             r_track->set_muted(true);
         }
-
         {
-            std::lock_guard mlock(remote_media_mutex_);
+            std::lock_guard media_lock(remote_media_mutex_);
             auto& media_tracks = kind == TrackKind::Video
                 ? remote_video_tracks_
                 : remote_audio_tracks_;
             const auto existing = std::find_if(
                 media_tracks.begin(), media_tracks.end(), [&r_track](const std::weak_ptr<Track>& weak) {
-                    const auto candidate = weak.lock();
-                    return candidate && candidate->sid() == r_track->sid();
+                    return weak.lock() == r_track;
                 });
             if (existing == media_tracks.end()) media_tracks.push_back(r_track);
         }
         processed_remote_track_ids_.insert(track->id());
-    }
+        remote_track_sinks_.push_back(std::move(binding));
+        if (remote_publication) {
+            const auto existing_serial =
+                current_remote_binding_serials_.find(remote_publication.get());
+            if (existing_serial != current_remote_binding_serials_.end() &&
+                existing_serial->second != binding_serial) {
+                superseded_binding_serial = existing_serial->second;
+            }
+            current_remote_binding_serials_[remote_publication.get()] = binding_serial;
+            std::weak_ptr<Room> weak_room = weak_from_this();
+            remote_publication->SetMediaBinding(
+                track->id(),
+                [weak_room, binding_serial](RemoteTrackPublication* publication,
+                                            bool notify_listener) {
+                    if (const auto room = weak_room.lock()) {
+                        room->DetachRemotePublicationMedia(
+                            publication, notify_listener, binding_serial);
+                    }
+                });
+        }
+        return true;
+    };
 
     if (kind == TrackKind::Audio) {
         auto audio_track = static_cast<webrtc::AudioTrackInterface*>(track.get());
@@ -3358,33 +3776,22 @@ void Room::AttachRemoteTrackToParticipant(
         });
         audio_track->AddSink(sink.get());
         RemoteTrackSinkBinding binding{
-            track_id,
+            track_key,
+            binding_serial,
             track->id(),
             RemoteTrackSinkThread::Signaling,
             [track, sink]() {
                 auto* attached_track = static_cast<webrtc::AudioTrackInterface*>(track.get());
                 if (attached_track) attached_track->RemoveSink(sink.get());
             }};
-        bool retained = false;
-        {
-            std::lock_guard lock(room_mutex_);
-            if (connection_state_ != ConnectionState::Disconnected) {
-                remote_track_sinks_.push_back(std::move(binding));
-                retained = true;
-            }
-        }
+        const bool retained = retain_binding(binding);
         if (!retained) {
             if (binding.detach) binding.detach();
             return;
         }
-        if (remote_publication) {
-            std::weak_ptr<Room> weak_room = weak_from_this();
-            remote_publication->SetMediaBinding(
-                track->id(), [weak_room](RemoteTrackPublication* publication, bool notify_listener) {
-                    if (const auto room = weak_room.lock()) {
-                        room->DetachRemotePublicationMedia(publication, notify_listener);
-                    }
-                });
+        if (superseded_binding_serial != 0) {
+            DetachRemoteTrackSinks(
+                TakeRemoteTrackSinkForBindingSerial(superseded_binding_serial));
         }
         Log("WEBRTC", "AUDIO_ATTACH", "远端音频轨已绑定至参会人 [" + participant->identity() + "], Track SID=" + track_id + ", 已挂载 NativeAudioTrackSink");
 
@@ -3410,33 +3817,22 @@ void Room::AttachRemoteTrackToParticipant(
         });
         video_track->AddOrUpdateSink(sink.get(), webrtc::VideoSinkWants());
         RemoteTrackSinkBinding binding{
-            track_id,
+            track_key,
+            binding_serial,
             track->id(),
             RemoteTrackSinkThread::MediaWorker,
             [track, sink]() {
                 auto* attached_track = static_cast<webrtc::VideoTrackInterface*>(track.get());
                 if (attached_track) attached_track->RemoveSink(sink.get());
             }};
-        bool retained = false;
-        {
-            std::lock_guard lock(room_mutex_);
-            if (connection_state_ != ConnectionState::Disconnected) {
-                remote_track_sinks_.push_back(std::move(binding));
-                retained = true;
-            }
-        }
+        const bool retained = retain_binding(binding);
         if (!retained) {
             if (binding.detach) binding.detach();
             return;
         }
-        if (remote_publication) {
-            std::weak_ptr<Room> weak_room = weak_from_this();
-            remote_publication->SetMediaBinding(
-                track->id(), [weak_room](RemoteTrackPublication* publication, bool notify_listener) {
-                    if (const auto room = weak_room.lock()) {
-                        room->DetachRemotePublicationMedia(publication, notify_listener);
-                    }
-                });
+        if (superseded_binding_serial != 0) {
+            DetachRemoteTrackSinks(
+                TakeRemoteTrackSinkForBindingSerial(superseded_binding_serial));
         }
         Log("WEBRTC", "VIDEO_ATTACH", "远端视频轨已绑定至参会人 [" + participant->identity() + "], Track SID=" + track_id);
 
@@ -3448,9 +3844,46 @@ void Room::AttachRemoteTrackToParticipant(
     }
 
     // 触发 RoomListener 回调 (OnTrackPublished 已在 UpdateParticipants 中派发，此处仅派发 OnTrackSubscribed)
-    auto listeners = GetListenersSnapshot();
+    std::vector<std::shared_ptr<RoomListener>> listeners;
+    bool still_current = false;
+    {
+        std::lock_guard lock(room_mutex_);
+        const auto canonical = remote_participants_.find(participant->sid());
+        const auto membership = FindMembershipLocked(participant);
+        const auto track_membership = track_memberships_.find(pub.get());
+        still_current = connection_state_ != ConnectionState::Disconnected &&
+            canonical != remote_participants_.end() &&
+            canonical->second.get() == participant.get() &&
+            participant->get_publication(track_id) == pub &&
+            membership && membership->key == participant_key &&
+            track_membership != track_memberships_.end() &&
+            track_membership->second->key == track_key &&
+            track_membership->second->active.load(std::memory_order_acquire) &&
+            (!remote_publication ||
+             (current_remote_binding_serials_.contains(remote_publication.get()) &&
+              current_remote_binding_serials_.at(remote_publication.get()) == binding_serial));
+        if (still_current) {
+            EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                ParticipantEventKind::TrackAvailable,
+                participant,
+                pub,
+                false));
+            listeners = listeners_;
+        }
+    }
+    if (!still_current) {
+        if (remote_publication) {
+            DetachRemotePublicationMedia(
+                remote_publication.get(), /*notify_listener=*/false, binding_serial);
+        } else {
+            DetachRemoteTrackSinks(TakeRemoteTrackSinkForBindingSerial(binding_serial));
+        }
+        return;
+    }
     for (const auto& l : listeners) {
-        l->OnTrackSubscribed(r_track, pub, participant);
+        if (!l->ConsumesParticipantEvents()) {
+            l->OnTrackSubscribed(r_track, pub, participant);
+        }
     }
 }
 
@@ -3870,7 +4303,8 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
     std::vector<MuteChange> changed_mute_events;
 
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
-    std::set<std::string> removed_track_sids;
+    std::vector<TrackKey> removed_track_keys;
+    std::vector<std::shared_ptr<Track>> removed_tracks;
 
     {
         std::lock_guard lock(room_mutex_);
@@ -3914,6 +4348,8 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
                     local_participant_->set_permission(new_perm);
                     changed_permissions_events.push_back({local_participant_, old_perm, new_perm});
                 }
+                EnqueueParticipantEventLocked(MakeParticipantEventLocked(
+                    ParticipantEventKind::Upsert, local_participant_, true));
                 continue;
             }
 
@@ -3921,14 +4357,29 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
             if (p_info.state() == proto::ParticipantInfo::DISCONNECTED) {
                 if (it != remote_participants_.end()) {
                     for (const auto& [sid, publication] : it->second->tracks()) {
-                        removed_track_sids.insert(sid);
+                        if (publication) {
+                            if (const auto track = publication->track()) {
+                                removed_tracks.push_back(track);
+                            }
+                            const auto track_membership =
+                                track_memberships_.find(publication.get());
+                            if (track_membership != track_memberships_.end()) {
+                                removed_track_keys.push_back(
+                                    track_membership->second->key);
+                            }
+                        }
                         if (const auto remote_publication =
                                 std::dynamic_pointer_cast<RemoteTrackPublication>(publication)) {
+                            current_remote_binding_serials_.erase(remote_publication.get());
                             remote_publication->ClearMediaBinding();
                         }
                     }
+                    auto departure = MakeParticipantEventLocked(
+                        ParticipantEventKind::Departure, it->second, false);
                     disconnected.push_back(it->second);
+                    RetireParticipantLocked(it->second);
                     remote_participants_.erase(it);
+                    EnqueueParticipantEventLocked(std::move(departure));
                 }
             } else {
                 std::shared_ptr<RemoteParticipant> remote;
@@ -3994,6 +4445,11 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
                         if (pub->track() && pub->track()->muted() != t_info.muted()) {
                             pub->track()->set_muted(t_info.muted());
                             changed_mute_events.push_back({remote, pub, t_info.muted()});
+                            EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                                ParticipantEventKind::TrackMuted,
+                                remote,
+                                pub,
+                                false));
                             Log("TRACK", "MUTE_CHANGED", "参会人 [" + remote->identity() + "] Track [" + t_info.sid() + "] 状态变更为: " + (t_info.muted() ? "静音/关闭" : "开启"));
                         }
                     }
@@ -4003,26 +4459,39 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
                 auto existing_tracks = remote->tracks();
                 for (const auto& [sid, pub] : existing_tracks) {
                     if (current_track_sids.find(sid) == current_track_sids.end()) {
-                        removed_track_sids.insert(sid);
+                        if (pub && pub->track()) removed_tracks.push_back(pub->track());
                         if (const auto remote_publication =
                                 std::dynamic_pointer_cast<RemoteTrackPublication>(pub)) {
+                            current_remote_binding_serials_.erase(remote_publication.get());
                             remote_publication->ClearMediaBinding();
                         }
+                        auto unavailable = MakeTrackEventLocked(
+                            ParticipantEventKind::TrackUnavailable,
+                            remote,
+                            pub,
+                            false);
+                        if (unavailable.track_key.publication_incarnation != 0) {
+                            removed_track_keys.push_back(unavailable.track_key);
+                        }
+                        RetireTrackMembershipLocked(pub);
                         remote->remove_publication(sid);
+                        EnqueueParticipantEventLocked(std::move(unavailable));
                         unpublished_tracks.push_back({remote, pub});
                         Log("TRACK", "UNPUBLISHED", "参会人 [" + remote->identity() + "] 取消发布 Track: " + sid);
                     }
                 }
+                EnqueueParticipantEventLocked(MakeParticipantEventLocked(
+                    ParticipantEventKind::Upsert, remote, false));
             }
         }
     }
 
-    DetachRemoteTrackSinks(TakeRemoteTrackSinksForTrackSids(removed_track_sids));
-    RemoveRemoteMediaTrackReferences(removed_track_sids);
+    DetachRemoteTrackSinks(TakeRemoteTrackSinksForTrackKeys(removed_track_keys));
+    RemoveRemoteMediaTrackReferences(removed_tracks);
 
     for (const auto& p : newly_connected) {
         for (const auto& listener : listeners_snapshot) {
-            listener->OnParticipantConnected(p);
+            if (!listener->ConsumesParticipantEvents()) listener->OnParticipantConnected(p);
         }
         FlushPendingTracks(p->sid());
     }
@@ -4041,8 +4510,9 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
             }
         }
         for (const auto& listener : listeners_snapshot) {
-            listener->OnTrackPublished(p, pub);
-            if (pub && pub->track() && pub->track()->rtc_track()) {
+            if (!listener->ConsumesParticipantEvents()) listener->OnTrackPublished(p, pub);
+            if (!listener->ConsumesParticipantEvents() &&
+                pub && pub->track() && pub->track()->rtc_track()) {
                 listener->OnTrackSubscribed(pub->track(), pub, p);
             }
         }
@@ -4056,14 +4526,16 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
 
     for (const auto& evt : changed_mute_events) {
         for (const auto& listener : listeners_snapshot) {
-            listener->OnTrackMuted(evt.participant, evt.publication, evt.muted);
+            if (!listener->ConsumesParticipantEvents()) {
+                listener->OnTrackMuted(evt.participant, evt.publication, evt.muted);
+            }
         }
     }
 
     for (const auto& [p, pub] : unpublished_tracks) {
         for (const auto& listener : listeners_snapshot) {
-            listener->OnTrackUnpublished(p, pub);
-            if (pub && pub->track()) {
+            if (!listener->ConsumesParticipantEvents()) listener->OnTrackUnpublished(p, pub);
+            if (!listener->ConsumesParticipantEvents() && pub && pub->track()) {
                 listener->OnTrackUnsubscribed(pub->track(), pub, p);
             }
         }
@@ -4071,25 +4543,31 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
 
     for (const auto& evt : changed_attributes_events) {
         for (const auto& listener : listeners_snapshot) {
-            listener->OnParticipantAttributesChanged(evt.attrs, evt.participant);
+            if (!listener->ConsumesParticipantEvents()) {
+                listener->OnParticipantAttributesChanged(evt.attrs, evt.participant);
+            }
         }
     }
 
     for (const auto& evt : changed_permissions_events) {
         for (const auto& listener : listeners_snapshot) {
-            listener->OnParticipantPermissionsChanged(evt.old_perm, evt.new_perm, evt.participant);
+            if (!listener->ConsumesParticipantEvents()) {
+                listener->OnParticipantPermissionsChanged(evt.old_perm, evt.new_perm, evt.participant);
+            }
         }
     }
 
     for (const auto& evt : changed_metadata_events) {
         for (const auto& listener : listeners_snapshot) {
-            listener->OnParticipantMetadataChanged(evt.participant, evt.old_metadata, evt.new_metadata);
+            if (!listener->ConsumesParticipantEvents()) {
+                listener->OnParticipantMetadataChanged(evt.participant, evt.old_metadata, evt.new_metadata);
+            }
         }
     }
 
     for (const auto& p : disconnected) {
         for (const auto& listener : listeners_snapshot) {
-            listener->OnParticipantDisconnected(p);
+            if (!listener->ConsumesParticipantEvents()) listener->OnParticipantDisconnected(p);
         }
     }
 }
@@ -4123,14 +4601,27 @@ void Room::UpdateTrackMute(const proto::MuteTrackRequest& mute) {
                 }
             }
         }
+        if (target_participant && target_pub) {
+            if (const auto track = target_pub->track()) {
+                track->set_muted(mute.muted());
+            }
+            EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                ParticipantEventKind::TrackMuted,
+                target_participant,
+                target_pub,
+                target_participant.get() == local_participant_.get()));
+            EnqueueParticipantEventLocked(MakeParticipantEventLocked(
+                ParticipantEventKind::Upsert,
+                target_participant,
+                target_participant.get() == local_participant_.get()));
+        }
     }
 
     if (target_participant && target_pub) {
-        if (target_pub->track()) {
-            target_pub->track()->set_muted(mute.muted());
-        }
         for (const auto& listener : listeners_snapshot) {
-            listener->OnTrackMuted(target_participant, target_pub, mute.muted());
+            if (!listener->ConsumesParticipantEvents()) {
+                listener->OnTrackMuted(target_participant, target_pub, mute.muted());
+            }
         }
     }
 }
@@ -4162,6 +4653,8 @@ void Room::HandleActiveSpeakerUpdateForTesting(const proto::SpeakersChanged& upd
 void Room::HandleActiveSpeakerUpdate(const proto::SpeakersChanged& update) {
     std::vector<std::shared_ptr<Participant>> active_speakers;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+    ParticipantEvent value_event;
+    value_event.kind = ParticipantEventKind::ActiveSpeakers;
 
     {
         std::lock_guard lock(room_mutex_);
@@ -4186,9 +4679,26 @@ void Room::HandleActiveSpeakerUpdate(const proto::SpeakersChanged& update) {
 
                 if (speaker.active()) {
                     active_speakers.push_back(target_p);
+                    const bool is_local = target_p.get() == local_participant_.get();
+                    if (auto membership = EnsureMembershipLocked(target_p, is_local)) {
+                        ActiveSpeakerInfo info;
+                        info.key = membership->key;
+                        info.ticket = membership;
+                        info.sid = membership->key.sid;
+                        info.identity = membership->key.identity;
+                        info.is_local = is_local;
+                        info.speaking = true;
+                        info.audio_level = speaker.level();
+                        value_event.speakers.push_back(std::move(info));
+                    }
                 }
             }
         }
+        std::sort(value_event.speakers.begin(), value_event.speakers.end(),
+                  [](const ActiveSpeakerInfo& a, const ActiveSpeakerInfo& b) {
+                      return a.audio_level > b.audio_level;
+                  });
+        EnqueueParticipantEventLocked(std::move(value_event));
     }
 
     std::sort(active_speakers.begin(), active_speakers.end(), [](const std::shared_ptr<Participant>& a, const std::shared_ptr<Participant>& b) {
@@ -4196,7 +4706,9 @@ void Room::HandleActiveSpeakerUpdate(const proto::SpeakersChanged& update) {
     });
 
     for (const auto& listener : listeners_snapshot) {
-        listener->OnActiveSpeakersChanged(active_speakers);
+        if (!listener->ConsumesParticipantEvents()) {
+            listener->OnActiveSpeakersChanged(active_speakers);
+        }
     }
 }
 
@@ -4923,6 +5435,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
                     connection_state_ = ConnectionState::Connected;
                     reconnect_attempts_ = 0;
                     reconnect_active_ = false;
+                    EnqueueRosterLocked();
                 }
 
                 auto listeners_snapshot = GetListenersSnapshot();
@@ -4937,6 +5450,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
 
         if (full_restart) {
             try {
+                std::deque<ParticipantEvent> retired_events;
                 std::shared_ptr<SignalClient> old_signal;
                 webrtc::scoped_refptr<webrtc::PeerConnectionInterface> old_publisher;
                 webrtc::scoped_refptr<webrtc::PeerConnectionInterface> old_subscriber;
@@ -4956,6 +5470,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
                     old_subscriber = std::move(subscriber_pc_);
                     old_publisher_observer = std::move(publisher_observer_);
                     old_subscriber_observer = std::move(subscriber_observer_);
+                    RetireAllMembershipsLocked(retired_events);
                     local_participant_.reset();
                     pending_local_unpublishes_.clear();
                     ClearRemotePublicationMediaBindingsLocked();
@@ -4980,6 +5495,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
                     suppress_next_connected_event_ = true;
                     session_generation_.fetch_add(1, std::memory_order_acq_rel);
                 }
+                retired_events.clear();
                 CancelPendingOperations(OperationErrorCode::Cancelled,
                                         "full_restart",
                                         "old session replaced by full restart");
@@ -5034,6 +5550,12 @@ asio::awaitable<void> Room::AttemptReconnect() {
                     std::lock_guard lock(room_mutex_);
                     reconnect_attempts_ = 0;
                     reconnect_active_ = false;
+                    if (local_participant_) {
+                        EnqueueParticipantEventLocked(MakeParticipantEventLocked(
+                            ParticipantEventKind::Upsert,
+                            local_participant_,
+                            true));
+                    }
                 }
 
                 for (const auto& listener : listeners) listener->OnReconnected();
@@ -5068,6 +5590,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
     std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers;
     std::vector<RemoteTrackSinkBinding> track_sinks;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+    std::deque<ParticipantEvent> retired_events;
     {
         std::lock_guard lock(room_mutex_);
         signal = std::move(signal_client_);
@@ -5075,6 +5598,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
         subscriber = std::move(subscriber_pc_);
         publisher_observer = std::move(publisher_observer_);
         subscriber_observer = std::move(subscriber_observer_);
+        RetireAllMembershipsLocked(retired_events);
         local_participant_.reset();
         pending_local_unpublishes_.clear();
         ClearRemotePublicationMediaBindingsLocked();
@@ -5101,6 +5625,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
         listeners_snapshot = listeners_;
         session_generation_.fetch_add(1, std::memory_order_acq_rel);
     }
+    retired_events.clear();
     CancelPendingOperations(OperationErrorCode::ReconnectExhausted,
                             "reconnect_exhausted",
                             last_error);
@@ -5213,6 +5738,10 @@ void Room::UpdateConnectionQuality(const proto::ConnectionQualityUpdate& update)
 
             participant->set_connection_quality(quality, score);
             changes.push_back({participant, quality, score});
+            EnqueueParticipantEventLocked(MakeParticipantEventLocked(
+                ParticipantEventKind::ConnectionQuality,
+                participant,
+                participant.get() == local_participant_.get()));
         }
         if (!changes.empty()) {
             listeners_snapshot = listeners_;
@@ -5221,9 +5750,11 @@ void Room::UpdateConnectionQuality(const proto::ConnectionQualityUpdate& update)
 
     for (const auto& change : changes) {
         for (const auto& listener : listeners_snapshot) {
-            listener->OnConnectionQualityChanged(change.participant,
-                                                 change.quality,
-                                                 change.score);
+            if (!listener->ConsumesParticipantEvents()) {
+                listener->OnConnectionQualityChanged(change.participant,
+                                                     change.quality,
+                                                     change.score);
+            }
         }
     }
 }
@@ -5268,6 +5799,11 @@ void Room::UpdateTrackStreamStates(const proto::StreamStateUpdate& update) {
 
             publication->set_stream_state(state);
             changes.push_back({participant, publication, state});
+            EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                ParticipantEventKind::TrackStreamState,
+                participant,
+                publication,
+                participant.get() == local_participant_.get()));
         }
         if (!changes.empty()) {
             listeners_snapshot = listeners_;
@@ -5276,9 +5812,11 @@ void Room::UpdateTrackStreamStates(const proto::StreamStateUpdate& update) {
 
     for (const auto& change : changes) {
         for (const auto& listener : listeners_snapshot) {
-            listener->OnTrackStreamStateChanged(change.participant,
-                                                change.publication,
-                                                change.state);
+            if (!listener->ConsumesParticipantEvents()) {
+                listener->OnTrackStreamStateChanged(change.participant,
+                                                    change.publication,
+                                                    change.state);
+            }
         }
     }
 }
@@ -5317,15 +5855,22 @@ void Room::UpdateTrackSubscriptionPermission(
             publication = participant->get_publication(permission.track_sid);
             if (publication) {
                 publication->set_subscription_allowed(permission.allowed);
+                EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                    ParticipantEventKind::TrackSubscriptionPermission,
+                    participant,
+                    publication,
+                    participant.get() == local_participant_.get()));
             }
         }
         listeners_snapshot = listeners_;
     }
 
     for (const auto& listener : listeners_snapshot) {
-        listener->OnTrackSubscriptionPermissionChanged(permission,
-                                                       participant,
-                                                       publication);
+        if (!listener->ConsumesParticipantEvents()) {
+            listener->OnTrackSubscriptionPermissionChanged(permission,
+                                                           participant,
+                                                           publication);
+        }
     }
 }
 

@@ -1914,6 +1914,38 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 }
 
 MeetingRoomWindow::MeetingRoomWindow(
+		ParticipantWindowTestTag,
+		const Config &config,
+		std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator,
+		QWidget *parent)
+:	Ui::RpWidget(parent),
+	_coordinator(std::move(coordinator)),
+	_config(config) {
+	// Isolated presentation fixture: the bindings, tile operations and CPU
+	// renderer are production paths; no device capture or account singleton.
+	setObjectName("MeetingRoomWindowParticipantFixture");
+	_topBar = new RoomTopBarWidget(this);
+	_stageContainer = new QWidget(this);
+	_bottomBar = new RoomBottomBarWidget(this);
+	_localTile = new VideoTileWidget(_config.displayName, true, _stageContainer);
+	_localTile->setIdentity("local");
+	_localTile->setAudioMuted(true);
+	_localTile->setVideoActive(false);
+	_inviteHintBanner = new QLabel(_stageContainer);
+	_recoveryBanner = new QLabel(_stageContainer);
+	_recoveryBanner->hide();
+	_remoteRenderSession = std::make_unique<livekit::render::VideoRenderSession>(
+		[this](const std::string &identity, const QImage &image) {
+			receiveRemoteVideoFrame(image, QString::fromStdString(identity));
+		});
+	_remoteRenderSession->UseQtCpuBackend();
+	setupCoordinatorBindings();
+	resize(1120, 720);
+	_stageContainer->setGeometry(0, 56, 1120, 588);
+	startLiveKitSession();
+}
+
+MeetingRoomWindow::MeetingRoomWindow(
 		CameraOwnerTestTag,
 		const Config &config,
 		std::shared_ptr<livekit::CameraSourceManager> cameraManager,
@@ -2769,10 +2801,22 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 }
 
 void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity, const QString &name) {
+	applyRemoteParticipantJoined(identity, name, nullptr);
+}
+
+void MeetingRoomWindow::applyRemoteParticipantJoined(const QString &identity, const QString &name,
+		const OpenMeeting::ParticipantPresentation *presentation) {
 	if (identity.isEmpty()) return;
+	QPointer<MeetingRoomWindow> owner(this);
+	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
+	const auto current = [&] {
+		return owner && (!presentation || (coordinator && owner->_coordinator.get() == coordinator &&
+			coordinator->isParticipantPresentationCurrent(*presentation)));
+	};
+	if (!current()) return;
 
 	QString dispName = name.isEmpty() ? identity : name;
-	if (dispName == identity && _coordinator) {
+	if (!presentation && dispName == identity && _coordinator) {
 		for (const auto &p : _coordinator->participants()) {
 			if (p.identity == identity && !p.name.isEmpty()) {
 				dispName = p.name;
@@ -2783,30 +2827,37 @@ void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity, const
 
 	auto it = _remoteTiles.find(identity);
 	if (it == _remoteTiles.end()) {
-		auto tile = std::make_unique<VideoTileWidget>(dispName, false, _stageContainer);
+		QPointer<VideoTileWidget> tile(new VideoTileWidget(dispName, false, _stageContainer));
+		if (!current()) {
+			if (tile) delete tile.data();
+			return;
+		}
+		_remoteTiles[identity].reset(tile.data());
 		tile->setIdentity(identity);
+		if (!current() || !tile) return;
 		tile->setVideoActive(false);
+		if (!current() || !tile) return;
 
-		connect(tile.get(), &VideoTileWidget::tileDoubleClicked, [this, identity] {
+		connect(tile.data(), &VideoTileWidget::tileDoubleClicked, [this, identity] {
 			if (_pinnedIdentity == identity) _pinnedIdentity.clear();
 			else _pinnedIdentity = identity;
 			updateVideoLayout();
 		});
 
-		connect(tile.get(), &VideoTileWidget::pinToggled, [this, identity](bool pinned) {
+		connect(tile.data(), &VideoTileWidget::pinToggled, [this, identity](bool pinned) {
 			if (pinned) _pinnedIdentity = identity;
 			else if (_pinnedIdentity == identity) _pinnedIdentity.clear();
 			updateVideoLayout();
 		});
 
-		connect(tile.get(), &VideoTileWidget::remoteVolumeChanged, [this, identity](float volume) {
+		connect(tile.data(), &VideoTileWidget::remoteVolumeChanged, [this, identity](float volume) {
 			_remoteVolumes[identity] = volume;
 			if (_room) {
 				_room->SetParticipantVolume(identity.toStdString(), volume);
 			}
 		});
 
-		connect(tile.get(), &VideoTileWidget::remoteLocalMuteToggled, [this, identity](bool muted) {
+		connect(tile.data(), &VideoTileWidget::remoteLocalMuteToggled, [this, identity](bool muted) {
 			if (muted) _locallyMutedUsers.insert(identity);
 			else _locallyMutedUsers.erase(identity);
 			if (_room) {
@@ -2815,29 +2866,40 @@ void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity, const
 		});
 
 		tile->show();
-		_remoteTiles[identity] = std::move(tile);
+		if (!current() || !tile) return;
 	} else {
 		if (!dispName.isEmpty() && it->second && it->second->displayName() != dispName) {
 			it->second->setDisplayName(dispName);
+			if (!current()) return;
 		}
 	}
 
+	if (!current()) return;
 	if (_room) {
 		auto itVol = _remoteVolumes.find(identity);
 		if (itVol != _remoteVolumes.end()) {
 			_room->SetParticipantVolume(identity.toStdString(), itVol->second);
+			if (!current()) return;
 		}
 		if (_locallyMutedUsers.count(identity)) {
 			_room->SetParticipantMuted(identity.toStdString(), true);
+			if (!current()) return;
 		}
 	}
 
 	if (auto tileIt = _remoteTiles.find(identity);
 		tileIt != _remoteTiles.end() && tileIt->second && _coordinator) {
-		for (const auto &participant : _coordinator->participants()) {
+		const auto participants = presentation
+			? std::vector<OpenMeeting::ParticipantInfo>{presentation->participant}
+			: _coordinator->participants();
+		QPointer<VideoTileWidget> tile(tileIt->second.get());
+		for (const auto &participant : participants) {
 			if (participant.identity != identity) continue;
-			tileIt->second->setConnectionQuality(participant.connectionQuality);
-			tileIt->second->setVideoStreamPaused(participant.isVideoStreamPaused);
+			if (!current() || !tile) return;
+			tile->setConnectionQuality(participant.connectionQuality);
+			if (!current() || !tile) return;
+			tile->setVideoStreamPaused(participant.isVideoStreamPaused);
+			if (!current() || !tile) return;
 			break;
 		}
 	}
@@ -2845,9 +2907,11 @@ void MeetingRoomWindow::onRemoteParticipantJoined(const QString &identity, const
 	_participantCount = 1 + static_cast<int>(_remoteTiles.size());
 	if (_bottomBar) {
 		_bottomBar->setParticipantCount(_participantCount);
+		if (!current()) return;
 	}
 
 	LogToConsole(LogCategory::Participant, "USER_JOIN", QString("远端参会人已加入: %1 (姓名: %2, 当前房间总人数: %3)").arg(identity).arg(dispName).arg(_participantCount));
+	if (!current()) return;
 	updateVideoLayout();
 }
 
@@ -2893,16 +2957,22 @@ void MeetingRoomWindow::onRemoteTrackMuted(const QString &identity, bool isVideo
 	updateVideoLayout();
 }
 
-void MeetingRoomWindow::updateActiveSpeakers(const std::vector<std::shared_ptr<livekit::Participant>> &speakers) {
+void MeetingRoomWindow::updateActiveSpeakers(const std::vector<livekit::ActiveSpeakerInfo> &speakers) {
 	QString primarySpeakerName;
 	std::unordered_map<std::string, float> speaking_levels;
+	bool localSpeaking = false;
+	float localLevel = 0.0f;
 
 	for (const auto &spk : speakers) {
-		if (spk && spk->is_speaking()) {
-			speaking_levels[spk->sid()] = spk->audio_level();
-			speaking_levels[spk->identity()] = spk->audio_level();
+		if (spk.speaking) {
+			speaking_levels[spk.sid] = spk.audio_level;
+			speaking_levels[spk.identity] = spk.audio_level;
+			if (spk.is_local) {
+				localSpeaking = true;
+				localLevel = spk.audio_level;
+			}
 			if (primarySpeakerName.isEmpty()) {
-				primarySpeakerName = QString::fromStdString(spk->identity());
+				primarySpeakerName = QString::fromStdString(spk.identity);
 			}
 		}
 	}
@@ -2913,23 +2983,7 @@ void MeetingRoomWindow::updateActiveSpeakers(const std::vector<std::shared_ptr<l
 	}
 
 	// 2. 本端画框发光光圈联动
-	if (_localTile && _room) {
-		auto local = _room->local_participant();
-		bool localSpeaking = false;
-		float localLevel = 0.0f;
-		if (local) {
-			auto it = speaking_levels.find(local->sid());
-			if (it != speaking_levels.end()) {
-				localSpeaking = true;
-				localLevel = it->second;
-			} else {
-				auto it2 = speaking_levels.find(local->identity());
-				if (it2 != speaking_levels.end()) {
-					localSpeaking = true;
-					localLevel = it2->second;
-				}
-			}
-		}
+	if (_localTile) {
 		if (_config.audioMuted) {
 			localSpeaking = false;
 		}
@@ -3279,14 +3333,54 @@ void MeetingRoomWindow::onLocalVideoGenerated() {
 	_localVideoSource->captureFrame(frame, opts);
 }
 
+void MeetingRoomWindow::applyParticipantPresentation(
+		const OpenMeeting::ParticipantPresentation &presentation) {
+	QPointer<MeetingRoomWindow> owner(this);
+	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
+	const auto current = [&](const OpenMeeting::RemoteVideoTrackPresentation *track = nullptr) {
+		return owner && coordinator && owner->_coordinator.get() == coordinator &&
+			coordinator->isParticipantPresentationCurrent(presentation, track);
+	};
+	if (presentation.participant.isLocal || !current()) return;
+	applyRemoteParticipantJoined(presentation.participant.identity,
+		presentation.participant.name, &presentation);
+	if (!current()) return;
+	for (const auto &track : presentation.videoTracks) {
+		if (!current()) return;
+		if (!current(&track)) continue;
+		if (owner->_remoteRenderSession) {
+			owner->_remoteRenderSession->AttachRemoteTrack(
+				track.track, presentation.participant.identity.toStdString());
+		}
+	}
+}
+
+void MeetingRoomWindow::restoreParticipantPresentations() {
+	QPointer<MeetingRoomWindow> owner(this);
+	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
+	if (!coordinator) return;
+	const auto presentations = coordinator->participantPresentations();
+	for (const auto &presentation : presentations) {
+		if (!owner || !coordinator || owner->_coordinator.get() != coordinator ||
+			coordinator->state() != OpenMeeting::MeetingState::InMeeting) return;
+		owner->applyParticipantPresentation(presentation);
+	}
+}
+
 void MeetingRoomWindow::setupCoordinatorBindings() {
 	if (!_coordinator) return;
 
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteVideoTrackAvailable,
 	        this, [this](const QString &id, std::shared_ptr<livekit::Track> track) {
-			onRemoteParticipantJoined(id, id);
-			if (_remoteRenderSession) {
-				_remoteRenderSession->AttachRemoteTrack(track, id.toStdString());
+			if (!_coordinator || _remoteTiles.find(id) == _remoteTiles.end()) return;
+			for (const auto &presentation : _coordinator->participantPresentations()) {
+				if (presentation.participant.identity != id) continue;
+				for (const auto &value : presentation.videoTracks) {
+					if (value.track != track ||
+						!_coordinator->isParticipantPresentationCurrent(presentation, &value)) continue;
+					if (_remoteRenderSession) _remoteRenderSession->AttachRemoteTrack(track, id.toStdString());
+					return;
+				}
 			}
 		});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteVideoTrackUnavailable,
@@ -3299,8 +3393,13 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 			}
 		});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantJoined,
-	        this, [this](const QString &id, const QString &name) {
-		onRemoteParticipantJoined(id, name);
+	        this, [this](const QString &id, const QString &) {
+		if (!_coordinator) return;
+		for (const auto &presentation : _coordinator->participantPresentations()) {
+			if (presentation.participant.identity != id) continue;
+			applyParticipantPresentation(presentation);
+			return;
+		}
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantLeft,
 	        this, &MeetingRoomWindow::onRemoteParticipantLeft);
@@ -3410,21 +3509,7 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		}
 		if (state == OpenMeeting::MeetingState::InMeeting) {
 			_room = _coordinator->room();
-			if (_room) {
-				auto remotes = _room->remote_participants();
-				for (const auto &[sid, p] : remotes) {
-					if (!p) continue;
-					const QString pId = QString::fromStdString(p->identity());
-					onRemoteParticipantJoined(pId, QString::fromStdString(p->name()));
-					if (_remoteRenderSession) {
-						for (const auto &[tsid, pub] : p->tracks()) {
-							if (pub && pub->track() && pub->track()->kind() == livekit::TrackKind::Video) {
-								_remoteRenderSession->AttachRemoteTrack(pub->track(), p->identity());
-							}
-						}
-					}
-				}
-			}
+			restoreParticipantPresentations();
 		}
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::errorOccurred,
@@ -3617,20 +3702,8 @@ void MeetingRoomWindow::startLiveKitSession() {
 		// Coordinator 已经在执行入会流程中 (Validating, ConnectingRoom, InMeeting 等)，
 		// 严禁在此处重复发起连接打断已有流程！
 		_room = _coordinator->room();
-		if (_room && _coordinator->state() == OpenMeeting::MeetingState::InMeeting) {
-			auto remotes = _room->remote_participants();
-			for (const auto &[sid, p] : remotes) {
-				if (!p) continue;
-				onRemoteParticipantJoined(QString::fromStdString(p->identity()), QString::fromStdString(p->name()));
-				if (_remoteRenderSession) {
-					for (const auto &[track_sid, publication] : p->tracks()) {
-						if (publication && publication->track() &&
-							publication->track()->kind() == livekit::TrackKind::Video) {
-							_remoteRenderSession->AttachRemoteTrack(publication->track(), p->identity());
-						}
-					}
-				}
-			}
+		if (_coordinator->state() == OpenMeeting::MeetingState::InMeeting) {
+			restoreParticipantPresentations();
 		}
 		return;
 	}

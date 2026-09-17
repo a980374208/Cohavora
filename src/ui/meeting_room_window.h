@@ -50,6 +50,7 @@
 #endif
 
 class CameraOwnerTestAccess;
+class ParticipantWindowTestAccess;
 
 namespace MeetingUI {
 
@@ -128,6 +129,7 @@ protected:
 	void leaveEventHook(QEvent *e) override;
 
 private:
+	friend class ::ParticipantWindowTestAccess;
 	void drawAvatarPlaceholder(QPainter &p, const QRect &r);
 	void drawVideoFrame(QPainter &p, const QRect &r);
 	void drawBottomNameTag(QPainter &p, const QRect &r);
@@ -369,7 +371,7 @@ public:
 	void onRemoteParticipantJoined(const QString &identity, const QString &name = QString());
 	void onRemoteParticipantLeft(const QString &identity);
 	void onRemoteTrackMuted(const QString &identity, bool isVideo, bool muted);
-	void updateActiveSpeakers(const std::vector<std::shared_ptr<livekit::Participant>> &speakers);
+	void updateActiveSpeakers(const std::vector<livekit::ActiveSpeakerInfo> &speakers);
 
 	void onKickedOff(const QString &reason, int reasonCode);
 	void onMeetingKickOff(livekit::RoomDisconnectReason reason);
@@ -398,6 +400,13 @@ private slots:
 
 private:
 	friend class ::CameraOwnerTestAccess;
+	friend class ::ParticipantWindowTestAccess;
+	struct ParticipantWindowTestTag final {};
+	MeetingRoomWindow(
+		ParticipantWindowTestTag,
+		const Config &config,
+		std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator,
+		QWidget *parent = nullptr);
 
 	struct CameraOwnerTestTag final {};
 	using CameraLogEffect = std::function<void(bool error, const QString &tag, const QString &message)>;
@@ -417,6 +426,10 @@ private:
 	void fallBackToQtCpuBackend();
 	void syncDx11CanvasLayout(const std::vector<VideoTileWidget*> &tiles);
 	void setupCoordinatorBindings();
+	void restoreParticipantPresentations();
+	void applyParticipantPresentation(const OpenMeeting::ParticipantPresentation &presentation);
+	void applyRemoteParticipantJoined(const QString &identity, const QString &name,
+		const OpenMeeting::ParticipantPresentation *presentation);
 	void setupCameraCompletionOwner(OpenMeeting::SessionManager &sessionManager);
 	void bindCameraDeviceChanges();
 	void requestCameraSwitch(const QString &devicePath);

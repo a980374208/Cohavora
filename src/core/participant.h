@@ -42,62 +42,64 @@ struct ParticipantPermission {
     bool hidden = false;
 };
 
+struct ParticipantStateSnapshot {
+    std::string sid;
+    std::string identity;
+    std::string name;
+    std::string metadata;
+    bool speaking = false;
+    float audio_level = 0.0f;
+    ConnectionQuality connection_quality = ConnectionQuality::Unknown;
+    float connection_quality_score = 0.0f;
+    std::map<std::string, std::string> attributes;
+    ParticipantPermission permission;
+    std::vector<TrackPublication::StateSnapshot> publications;
+};
+
 class Participant {
 public:
     Participant(const std::string& sid, const std::string& identity)
         : sid_(sid), identity_(identity) {}
+    Participant(const Participant& other);
+    Participant& operator=(const Participant& other);
     virtual ~Participant() = default;
 
-    std::string sid() const { return sid_; }
-    std::string identity() const { return identity_; }
-    std::string name() const { return name_; }
-    std::string metadata() const { return metadata_; }
-    bool is_speaking() const { return speaking_; }
-    float audio_level() const { return audio_level_; }
-    ConnectionQuality connection_quality() const { return connection_quality_; }
-    float connection_quality_score() const { return connection_quality_score_; }
+    std::string sid() const;
+    std::string identity() const;
+    std::string name() const;
+    std::string metadata() const;
+    bool is_speaking() const;
+    float audio_level() const;
+    ConnectionQuality connection_quality() const;
+    float connection_quality_score() const;
 
-    void set_name(const std::string& name) { name_ = name; }
-    void set_metadata(const std::string& metadata) { metadata_ = metadata; }
-    void set_sid(const std::string& sid) { sid_ = sid; }
-    void set_speaking(bool speaking) { speaking_ = speaking; }
-    void set_audio_level(float level) { audio_level_ = level; }
-    void set_connection_quality(ConnectionQuality quality, float score) {
-        connection_quality_ = quality;
-        connection_quality_score_ = score;
-    }
+    void set_name(const std::string& name);
+    void set_metadata(const std::string& metadata);
+    void set_sid(const std::string& sid);
+    void set_speaking(bool speaking);
+    void set_audio_level(float level);
+    void set_connection_quality(ConnectionQuality quality, float score);
 
-    std::map<std::string, std::string> attributes() const { return attributes_; }
-    std::string get_attribute(const std::string& key) const {
-        auto it = attributes_.find(key);
-        if (it != attributes_.end()) return it->second;
-        return "";
-    }
-    void set_attributes(const std::map<std::string, std::string>& attrs) { attributes_ = attrs; }
-    void set_attribute(const std::string& key, const std::string& val) { attributes_[key] = val; }
+    std::map<std::string, std::string> attributes() const;
+    std::string get_attribute(const std::string& key) const;
+    void set_attributes(const std::map<std::string, std::string>& attrs);
+    void set_attribute(const std::string& key, const std::string& val);
 
-    ParticipantPermission permission() const { return permission_; }
-    void set_permission(const ParticipantPermission& perm) { permission_ = perm; }
+    ParticipantPermission permission() const;
+    void set_permission(const ParticipantPermission& perm);
 
-    std::map<std::string, std::shared_ptr<TrackPublication>> tracks() const { return tracks_; }
+    std::map<std::string, std::shared_ptr<TrackPublication>> tracks() const;
 
-    void add_publication(std::shared_ptr<TrackPublication> pub) {
-        tracks_[pub->sid()] = pub;
-    }
+    void add_publication(std::shared_ptr<TrackPublication> pub);
 
-    std::shared_ptr<TrackPublication> get_publication(const std::string& sid) {
-        auto it = tracks_.find(sid);
-        if (it != tracks_.end()) {
-            return it->second;
-        }
-        return nullptr;
-    }
+    std::shared_ptr<TrackPublication> get_publication(const std::string& sid);
+    std::shared_ptr<TrackPublication> get_publication(const std::string& sid) const;
 
-    void remove_publication(const std::string& sid) {
-        tracks_.erase(sid);
-    }
+    void remove_publication(const std::string& sid);
+    ParticipantStateSnapshot SnapshotState() const;
 
 protected:
+    mutable std::mutex state_mutex_;
     std::string sid_;
     std::string identity_;
     std::string name_;

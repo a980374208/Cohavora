@@ -7,6 +7,7 @@
 #include <set>
 #include <unordered_map>
 #include <vector>
+#include <deque>
 #include <mutex>
 #include <chrono>
 #include <functional>
@@ -14,6 +15,7 @@
 #include <asio.hpp>
 #include "signal_client.h"
 #include "participant.h"
+#include "participant_event.h"
 #include "crash_handler.h"
 #include "safe_spawn.h"
 #include "chat_message.h"
@@ -158,6 +160,8 @@ public:
     virtual void OnByteStreamOpened(std::shared_ptr<ByteStreamReader> reader, std::shared_ptr<Participant> participant) {}
 
     virtual void OnActiveSpeakersChanged(const std::vector<std::shared_ptr<Participant>>& speakers) {}
+    virtual void OnParticipantEvent(const ParticipantEvent& event) {}
+    virtual bool ConsumesParticipantEvents() const { return false; }
 
     virtual void OnE2eeStateChanged(const std::string& participant_identity, const std::string& track_sid, EncryptionState state) {}
 
@@ -191,7 +195,11 @@ public:
         const std::string& track_sid) const;
     void SetLocalParticipantForTesting(std::shared_ptr<LocalParticipant> local) {
         std::lock_guard lock(room_mutex_);
+        RetireParticipantLocked(local_participant_);
         local_participant_ = local;
+        if (local_participant_) {
+            EnsureMembershipLocked(local_participant_, true);
+        }
     }
     void UpdateParticipantsForTesting(const proto::ParticipantUpdate& update);
     void HandleActiveSpeakerUpdateForTesting(const proto::SpeakersChanged& update);
@@ -291,6 +299,7 @@ public:
 
 private:
     friend class RoomUnpublishTestAccess;
+    friend class ParticipantSnapshotRoomTestAccess;
     // Only the named test-access friend can install these two transport-boundary
     // hooks. Production keeps them null and uses the existing native methods.
     struct LocalUnpublishTestHooks {
@@ -323,11 +332,40 @@ private:
         uint64_t generation,
         const RemotePublicationControlRequest& request);
     void DetachRemotePublicationMedia(RemoteTrackPublication* publication,
-                                      bool notify_listener);
-    void RemoveRemoteMediaTrackReferences(const std::set<std::string>& track_sids);
+                                      bool notify_listener,
+                                      uint64_t binding_serial);
+    void RemoveRemoteMediaTrackReferences(
+        const std::vector<std::shared_ptr<Track>>& tracks);
     // Called while room_mutex_ is held immediately before the canonical
     // participant map is discarded by disconnect/recovery teardown.
     void ClearRemotePublicationMediaBindingsLocked();
+    std::shared_ptr<MembershipState> EnsureMembershipLocked(
+        const std::shared_ptr<Participant>& participant,
+        bool is_local);
+    std::shared_ptr<MembershipState> FindMembershipLocked(
+        const std::shared_ptr<Participant>& participant) const;
+    std::shared_ptr<TrackMembershipState> EnsureTrackMembershipLocked(
+        const std::shared_ptr<Participant>& participant,
+        const std::shared_ptr<TrackPublication>& publication);
+    void RetireTrackMembershipLocked(const std::shared_ptr<TrackPublication>& publication);
+    ParticipantEvent MakeParticipantEventLocked(
+        ParticipantEventKind kind,
+        const std::shared_ptr<Participant>& participant,
+        bool is_local);
+    ParticipantEvent MakeTrackEventLocked(
+        ParticipantEventKind kind,
+        const std::shared_ptr<Participant>& participant,
+        const std::shared_ptr<TrackPublication>& publication,
+        bool is_local);
+    void RetireParticipantLocked(const std::shared_ptr<Participant>& participant);
+    void RetireAllMembershipsLocked(std::deque<ParticipantEvent>& retired_events);
+    void EnqueueParticipantEventLocked(ParticipantEvent event);
+    void EnqueueRosterLocked();
+    void DrainParticipantEvents();
+    SenderContext ResolveSenderContextLocked(
+        const std::string& participant_sid,
+        const std::string& participant_identity,
+        std::shared_ptr<Participant>* participant);
     asio::awaitable<void> RemoveLocalTrackFromPublisherAsync(
         std::shared_ptr<Track> track,
         uint64_t generation);
@@ -359,6 +397,17 @@ private:
     std::shared_ptr<LocalParticipant> local_participant_;
     std::map<std::string, std::shared_ptr<RemoteParticipant>> remote_participants_;
     std::vector<std::shared_ptr<RoomListener>> listeners_;
+    uint64_t next_participant_incarnation_ = 1;
+    uint64_t next_publication_incarnation_ = 1;
+    uint64_t next_participant_event_sequence_ = 1;
+    std::unordered_map<const Participant*, std::shared_ptr<MembershipState>> participant_memberships_;
+    std::unordered_map<const TrackPublication*, std::shared_ptr<TrackMembershipState>> track_memberships_;
+    std::deque<ParticipantEvent> participant_events_;
+    bool participant_event_drain_scheduled_ = false;
+    // Private deterministic test seam: delay taking a native batch without
+    // blocking the session worker or changing queue/retirement decisions.
+    bool participant_event_drain_paused_for_testing_ = false;
+    std::size_t participant_event_paused_attempts_for_testing_ = 0;
     bool audio_output_muted_ = false;
     std::shared_ptr<E2eeManager> e2ee_manager_;
 
@@ -399,7 +448,8 @@ private:
         MediaWorker,
     };
     struct RemoteTrackSinkBinding {
-        std::string track_sid;
+        TrackKey track_key;
+        uint64_t binding_serial = 0;
         std::string rtc_track_id;
         RemoteTrackSinkThread detach_thread;
         // Keeps both the WebRTC track and its native sink alive. Calling this
@@ -407,9 +457,14 @@ private:
         std::function<void()> detach;
     };
     std::vector<RemoteTrackSinkBinding> remote_track_sinks_;
+    std::unordered_map<const RemoteTrackPublication*, uint64_t>
+        current_remote_binding_serials_;
+    uint64_t next_remote_track_binding_serial_ = 1;
     static void DetachRemoteTrackSinks(std::vector<RemoteTrackSinkBinding> bindings) noexcept;
-    std::vector<RemoteTrackSinkBinding> TakeRemoteTrackSinksForTrackSids(
-        const std::set<std::string>& track_sids);
+    std::vector<RemoteTrackSinkBinding> TakeRemoteTrackSinksForTrackKeys(
+        const std::vector<TrackKey>& track_keys);
+    std::vector<RemoteTrackSinkBinding> TakeRemoteTrackSinkForBindingSerial(
+        uint64_t binding_serial);
     uint64_t reliable_buffered_low_threshold_ = 16384;
     uint64_t lossy_buffered_low_threshold_ = 16384;
 

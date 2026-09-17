@@ -88,6 +88,21 @@ struct ParticipantInfo {
     livekit::ConnectionQuality connectionQuality = livekit::ConnectionQuality::Unknown;
     float connectionQualityScore = 0.0f;
     livekit::ParticipantPermission permissions;
+    livekit::ParticipantKey participantKey;
+    livekit::ParticipantTicket participantTicket;
+    uint64_t lastEventSequence = 0;
+};
+
+struct RemoteVideoTrackPresentation {
+    livekit::TrackKey key;
+    livekit::TrackTicket ticket;
+    std::shared_ptr<livekit::Track> track;
+};
+
+struct ParticipantPresentation {
+    ParticipantInfo participant;
+    uint64_t coordinatorSession = 0;
+    std::vector<RemoteVideoTrackPresentation> videoTracks;
 };
 
 class MeetingCoordinator : public QObject {
@@ -151,6 +166,9 @@ public:
 
     // 参会人列表读取
     std::vector<ParticipantInfo> participants() const;
+    std::vector<ParticipantPresentation> participantPresentations() const;
+    bool isParticipantPresentationCurrent(const ParticipantPresentation &presentation,
+        const RemoteVideoTrackPresentation *track = nullptr) const;
 
     // 底层 LiveKit 房间与媒体源访问
     std::shared_ptr<livekit::Room> room() const { return _room; }
@@ -207,7 +225,7 @@ signals:
                                             const QString &participantSid,
                                             const QString &trackSid,
                                             bool allowed);
-    void activeSpeakersChanged(const std::vector<std::shared_ptr<livekit::Participant>> &speakers);
+    void activeSpeakersChanged(const std::vector<livekit::ActiveSpeakerInfo> &speakers);
 
     // 本地媒体状态变动（供 UI 底栏与视频画框联动）
     void localAudioMuteChanged(bool muted);
@@ -277,23 +295,24 @@ private:
     void handleSessionInvalidated(SessionInvalidationReason reason);
     void enqueueDataReceived(const std::shared_ptr<MeetingSessionRuntime> &session,
                              const std::vector<uint8_t> &data,
-                             const std::string &participantSid,
-                             const std::string &participantIdentity = "",
-                             const QString &participantName = "");
+                             const livekit::SenderContext &sender);
     void handleDataReceivedOnSessionStrand(const std::shared_ptr<MeetingSessionRuntime> &session,
                                            const std::vector<uint8_t> &data,
-                                           const std::string &participantSid,
-                                           const std::string &participantIdentity,
-                                           const QString &participantName);
-    void cancelInboundTransfersForParticipant(const QString &participantIdentity);
+                                           const livekit::SenderContext &sender);
+    void cancelInboundTransfersForParticipant(const livekit::ParticipantKey &participantKey);
+    void applyParticipantEventOnUiThread(uint64_t coordinatorGeneration,
+                                         const livekit::ParticipantEvent &event);
     // Queued Qt callbacks use this immutable token instead of retaining a
     // MeetingSessionRuntime. The runtime owns an ASIO strand, so allowing it
     // to outlive its io_context through a delayed Qt event is unsafe.
     bool isCurrentSessionGenerationOnUiThread(uint64_t sessionGeneration) const;
+    bool isSenderContextCurrentOnUiThread(const livekit::SenderContext &sender) const;
 
     class CoordinatorRoomListener;
     friend class CoordinatorRoomListener;
     friend class MeetingCoordinatorTestAccess;
+    std::shared_ptr<livekit::RoomListener> participantEventListenerForTesting(
+        const std::shared_ptr<MeetingSessionRuntime> &session, bool retainForOwnedSession = false);
 
     SessionManager &_sessionManager;
     AdmissionBackend _admissionBackend;
@@ -316,6 +335,10 @@ private:
     bool _sessionInvalidated = false;
 
     std::map<QString, ParticipantInfo> _participants;
+    std::map<QString, std::map<QString, RemoteVideoTrackPresentation>> _remoteVideoTracks;
+    std::map<QString, uint64_t> _participantEventSequences;
+    std::map<QString, std::pair<InboundTransferKey, bool>> _inboundTransferLedger;
+    uint64_t _nativeRoomGeneration = 0;
     void ensureLocalParticipant();
     void updateParticipantListAndNotify();
 

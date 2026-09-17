@@ -1,6 +1,7 @@
 #pragma once
 
 #include <winsock2.h>
+#include <atomic>
 #include <cstdint>
 #include <string>
 #include <memory>
@@ -130,10 +131,10 @@ public:
     TrackKind kind() const { return kind_; }
     TrackSource source() const { return source_; }
     void set_source(TrackSource source) { source_ = source; }
-    bool muted() const { return muted_; }
+    bool muted() const { return muted_.load(std::memory_order_relaxed); }
 
     void set_muted(bool muted) {
-        muted_ = muted;
+        muted_.store(muted, std::memory_order_relaxed);
         if (rtc_track_) {
             rtc_track_->set_enabled(!muted && volume_ > 0.001);
         }
@@ -147,7 +148,7 @@ public:
                 audio_track->SetVolume(volume);
                 if (volume <= 0.001) {
                     audio_track->set_enabled(false);
-                } else if (!muted_) {
+                } else if (!muted_.load(std::memory_order_relaxed)) {
                     audio_track->set_enabled(true);
                 }
             }
@@ -161,7 +162,7 @@ public:
     void set_rtc_track(webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track) {
         rtc_track_ = rtc_track;
         if (rtc_track_) {
-            rtc_track_->set_enabled(!muted_ && volume_ > 0.001);
+            rtc_track_->set_enabled(!muted_.load(std::memory_order_relaxed) && volume_ > 0.001);
             if (kind_ == TrackKind::Audio) {
                 auto* audio_track = static_cast<webrtc::AudioTrackInterface*>(rtc_track_.get());
                 if (audio_track) {
@@ -235,7 +236,7 @@ private:
     std::string name_;
     TrackKind kind_;
     TrackSource source_;
-    bool muted_;
+    std::atomic<bool> muted_;
     double volume_ = 1.0;
 
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track_;
@@ -257,30 +258,105 @@ inline void Track::I420VideoFrameSubscription::reset() noexcept {
 
 class TrackPublication {
 public:
-    TrackPublication(std::shared_ptr<Track> track, const std::string& sid, const std::string& name)
-        : track_(track), sid_(sid), name_(name) {}
-    virtual ~TrackPublication() = default;
-
-    std::string sid() const { return sid_; }
-    std::string name() const { return name_; }
-    std::shared_ptr<Track> track() const { return track_; }
-    void set_track(std::shared_ptr<Track> track) { track_ = track; }
-    bool muted() const { return track_ ? track_->muted() : false; }
     enum class StreamState {
         Active,
         Paused,
     };
 
-    StreamState stream_state() const { return stream_state_; }
-    void set_stream_state(StreamState state) { stream_state_ = state; }
+    struct StateSnapshot {
+        std::string sid;
+        std::string name;
+        std::shared_ptr<Track> track;
+        TrackKind kind = TrackKind::Unknown;
+        bool muted = false;
+        StreamState stream_state = StreamState::Active;
+        bool subscription_allowed = true;
+    };
+
+    TrackPublication(std::shared_ptr<Track> track, const std::string& sid, const std::string& name)
+        : track_(track), sid_(sid), name_(name) {}
+    TrackPublication(const TrackPublication& other) {
+        const auto snapshot = other.SnapshotState();
+        track_ = snapshot.track;
+        sid_ = snapshot.sid;
+        name_ = snapshot.name;
+        stream_state_ = snapshot.stream_state;
+        subscription_allowed_ = snapshot.subscription_allowed;
+    }
+    TrackPublication& operator=(const TrackPublication& other) {
+        if (this == &other) return *this;
+        const auto snapshot = other.SnapshotState();
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        track_ = snapshot.track;
+        sid_ = snapshot.sid;
+        name_ = snapshot.name;
+        stream_state_ = snapshot.stream_state;
+        subscription_allowed_ = snapshot.subscription_allowed;
+        return *this;
+    }
+    virtual ~TrackPublication() = default;
+
+    std::string sid() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return sid_;
+    }
+    std::string name() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return name_;
+    }
+    std::shared_ptr<Track> track() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return track_;
+    }
+    void set_track(std::shared_ptr<Track> track) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        track_ = std::move(track);
+    }
+    bool muted() const {
+        const auto value = track();
+        return value ? value->muted() : false;
+    }
+
+    StreamState stream_state() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return stream_state_;
+    }
+    void set_stream_state(StreamState state) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        stream_state_ = state;
+    }
 
     // The server can temporarily deny a subscription for a participant/track
     // pair. Keep that state on the real publication even before the remote
     // publication-control unification work lands.
-    bool subscription_allowed() const { return subscription_allowed_; }
-    void set_subscription_allowed(bool allowed) { subscription_allowed_ = allowed; }
+    bool subscription_allowed() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return subscription_allowed_;
+    }
+    void set_subscription_allowed(bool allowed) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        subscription_allowed_ = allowed;
+    }
+
+    StateSnapshot SnapshotState() const {
+        StateSnapshot snapshot;
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            snapshot.sid = sid_;
+            snapshot.name = name_;
+            snapshot.track = track_;
+            snapshot.stream_state = stream_state_;
+            snapshot.subscription_allowed = subscription_allowed_;
+        }
+        if (snapshot.track) {
+            snapshot.kind = snapshot.track->kind();
+            snapshot.muted = snapshot.track->muted();
+        }
+        return snapshot;
+    }
 
 private:
+    mutable std::mutex state_mutex_;
     std::shared_ptr<Track> track_;
     std::string sid_;
     std::string name_;

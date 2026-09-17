@@ -1075,6 +1075,9 @@ add_executable(test_meeting_session_runtime
 )
 target_include_directories(test_meeting_session_runtime BEFORE PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/rtc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/rpc
+    ${WEBRTC_ROOT}/include
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
 )
@@ -1098,6 +1101,9 @@ target_compile_definitions(test_meeting_session_runtime PRIVATE
     $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
     $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
 )
+if(MSVC)
+    target_compile_options(test_meeting_session_runtime PRIVATE /utf-8)
+endif()
 target_link_options(test_meeting_session_runtime PRIVATE
     $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
     $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
@@ -1106,6 +1112,104 @@ set_target_properties(test_meeting_session_runtime PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded"
 )
 add_test(NAME meeting_session_runtime_test COMMAND test_meeting_session_runtime)
+
+# IDA2-P0-001: immutable participant snapshots, incarnation tickets, ordered
+# Room delivery, and delayed Qt projection rejection for retired instances.
+add_executable(test_participant_snapshot_remediation
+    tests/remediation/test_participant_snapshot_remediation.cpp
+    tests/support/test_check.h
+    src/core/meeting_coordinator.cpp
+    src/core/meeting_coordinator.h
+    src/net/openmeeting_http_client.cpp
+    src/net/openmeeting_http_client.h
+    src/net/session_manager.cpp
+    src/net/session_manager.h
+    src/net/http_types.h
+)
+target_include_directories(test_participant_snapshot_remediation BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${GEN_DIR}
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtWidgets
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtNetwork
+)
+target_link_libraries(test_participant_snapshot_remediation PRIVATE
+    livekit_signaling
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Widgets.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Network.lib
+    ${TDESKTOP_LIBS_DIR}/zlib/Release/zlibstatic.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtfreetype.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtharfbuzz.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtlibpng.lib
+    netapi32
+    userenv
+    version
+    ws2_32
+    crypt32
+    dnsapi
+    iphlpapi
+    secur32
+    imm32
+    winmm
+    wtsapi32
+)
+target_compile_definitions(test_participant_snapshot_remediation PRIVATE
+    WIN32
+    _WINDOWS
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _WINSOCK_DEPRECATED_NO_WARNINGS
+    ASIO_STANDALONE
+    WEBRTC_WIN
+    NDEBUG
+    _ITERATOR_DEBUG_LEVEL=0
+    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
+    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
+)
+target_link_options(test_participant_snapshot_remediation PRIVATE
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
+)
+set_target_properties(test_participant_snapshot_remediation PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME participant_snapshot_remediation_test
+    COMMAND test_participant_snapshot_remediation)
+set_tests_properties(participant_snapshot_remediation_test PROPERTIES TIMEOUT 60)
+
+# IDA2 window acceptance uses the same allowed test source with a distinct
+# QApplication branch. It links the production console exactly once; the core
+# target keeps its original synchronous LogToConsole hook and owner cases.
+get_target_property(ida2_window_fixture_sources test_camera_owner_remediation SOURCES)
+list(REMOVE_ITEM ida2_window_fixture_sources tests/remediation/test_camera_owner_remediation.cpp)
+add_executable(test_participant_window_remediation
+    tests/remediation/test_participant_snapshot_remediation.cpp
+    ${ida2_window_fixture_sources}
+)
+get_target_property(ida2_window_fixture_includes test_camera_owner_remediation INCLUDE_DIRECTORIES)
+get_target_property(ida2_window_fixture_libraries test_camera_owner_remediation LINK_LIBRARIES)
+get_target_property(ida2_window_fixture_definitions test_camera_owner_remediation COMPILE_DEFINITIONS)
+get_target_property(ida2_window_fixture_link_options test_camera_owner_remediation LINK_OPTIONS)
+get_target_property(ida2_window_fixture_runtime test_camera_owner_remediation MSVC_RUNTIME_LIBRARY)
+target_include_directories(test_participant_window_remediation BEFORE PRIVATE
+    ${ida2_window_fixture_includes}
+    ${WEBRTC_ROOT}/include/third_party/perfetto/include
+    ${WEBRTC_ROOT}/include/out-x64-release/gen/third_party/perfetto
+    ${WEBRTC_ROOT}/include/out-x64-release/gen/third_party/perfetto/build_config
+)
+target_link_libraries(test_participant_window_remediation PRIVATE ${ida2_window_fixture_libraries})
+target_compile_definitions(test_participant_window_remediation PRIVATE
+    ${ida2_window_fixture_definitions} IDA2_WINDOW_ACCEPTANCE)
+target_link_options(test_participant_window_remediation PRIVATE ${ida2_window_fixture_link_options})
+set_target_properties(test_participant_window_remediation PROPERTIES
+    MSVC_RUNTIME_LIBRARY "${ida2_window_fixture_runtime}")
+add_test(NAME participant_window_remediation_test COMMAND test_participant_window_remediation)
+set_tests_properties(participant_window_remediation_test PROPERTIES TIMEOUT 60)
 
 # Coordinator startup transaction test: a meeting is committed only after both
 # required local tracks publish, otherwise it must roll back to failure.
