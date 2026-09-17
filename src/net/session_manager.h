@@ -96,7 +96,12 @@ signals:
     void preferencesChanged(const MediaPreferences &prefs);
 
 private:
+    // The inspection friend may construct instances. Production retains singleton
+    // lifetime; inspection may inject temporary storage for synchronous execution.
+    friend class SessionManagerInspectionAccess;
     explicit SessionManager(QObject *parent = nullptr);
+    // Null storage is rejected rather than falling back to user settings.
+    explicit SessionManager(std::unique_ptr<QSettings> settings, QObject *parent = nullptr);
     ~SessionManager() override = default;
 
     UserInfo _currentUser;

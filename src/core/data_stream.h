@@ -141,7 +141,7 @@ using StreamPacketPublisher = std::function<bool(const proto::DataPacket& packet
 
 class BaseStreamWriter {
 public:
-    virtual ~BaseStreamWriter();
+    virtual ~BaseStreamWriter() noexcept;
 
     const std::string& stream_id() const noexcept { return stream_id_; }
     const std::string& topic() const noexcept { return topic_; }
@@ -163,13 +163,12 @@ protected:
                      std::optional<std::size_t> total_size,
                      std::string mime_type,
                      std::vector<std::string> destination_identities,
-                     std::string sender_identity);
+                     std::string sender_identity,
+                     proto::DataStream::Header content_header);
 
     void EnsureHeaderSent();
     void SendChunk(const uint8_t* data, size_t size);
     void SendTrailer(const std::string& reason, const std::map<std::string, std::string>& attributes);
-
-    virtual void FillContentHeader(proto::DataStream::Header* header) = 0;
 
     StreamPacketPublisher publisher_;
     std::string stream_id_;
@@ -180,6 +179,9 @@ protected:
     std::map<std::string, std::string> attributes_;
     std::vector<std::string> destination_identities_;
     std::string sender_identity_;
+    // Own every header field before writing starts. Base destruction must not
+    // consult Text/Byte members or dispatch into an already destroyed subtype.
+    proto::DataStream::Header header_;
 
     bool closed_ = false;
     bool header_sent_ = false;
@@ -205,12 +207,8 @@ public:
 
     const TextStreamInfo& info() const noexcept { return info_; }
 
-protected:
-    void FillContentHeader(proto::DataStream::Header* header) override;
-
 private:
     TextStreamInfo info_;
-    std::string reply_to_id_;
 };
 
 /// Writer for outgoing byte streams (files, images, binary data).
@@ -231,9 +229,6 @@ public:
     void Write(const uint8_t* data, size_t size);
 
     const ByteStreamInfo& info() const noexcept { return info_; }
-
-protected:
-    void FillContentHeader(proto::DataStream::Header* header) override;
 
 private:
     ByteStreamInfo info_;

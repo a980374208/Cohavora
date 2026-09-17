@@ -124,7 +124,7 @@ public:
     using AsyncPublishTrackHandler = std::function<asio::awaitable<std::shared_ptr<TrackPublication>>(
         std::shared_ptr<Track>, const proto::SignalRequest&)>;
     using AsyncUnpublishTrackHandler = std::function<asio::awaitable<std::shared_ptr<TrackPublication>>(
-        const std::string&)>;
+        std::string)>;
     struct BatchTrackItem {
         std::shared_ptr<Track> track;
         std::shared_ptr<proto::SignalRequest> request;
@@ -168,7 +168,7 @@ public:
     // point deliberately delegates there instead of mutating the publication
     // map optimistically.
     asio::awaitable<std::shared_ptr<TrackPublication>> UnpublishTrackAsync(
-        const std::string& track_sid);
+        std::string track_sid);
 
     // 模拟本地静音控制逻辑
     void SetMuted(const std::string& track_sid, bool muted);
