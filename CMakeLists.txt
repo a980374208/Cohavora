@@ -1568,4 +1568,26 @@ set_target_properties(test_video_render_session_stress PROPERTIES
 )
 add_test(NAME video_render_session_stress_test COMMAND test_video_render_session_stress)
 
+set_tests_properties(
+    always_active_checks_test
+    camera_owner_remediation_test
+    log_redaction_test
+    connection_log_redaction_test
+    qt_log_redaction_test
+    signaling_tests
+    room_state_events_test
+    remote_publication_lifecycle_test
+    local_unpublish_transaction_test
+    unpublish_lifetime_remediation_test
+    meeting_recovery_ux_test
+    stream_writer_lifetime_remediation_test
+    stress_lifecycle_test
+    http_owner_remediation_test
+    meeting_session_runtime_test
+    participant_snapshot_remediation_test
+    participant_window_remediation_test
+    meeting_startup_transaction_test
+    PROPERTIES LABELS "CORE_REGRESSION"
+)
+
 
