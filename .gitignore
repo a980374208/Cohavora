@@ -23,6 +23,7 @@
 *.ilk
 *.idb
 *.tlog
+AGENTS.md
 
 # CMake artifacts
 /CMakeFiles/
