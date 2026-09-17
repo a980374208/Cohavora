@@ -6,9 +6,11 @@
 #include <QtCore/QJsonObject>
 #include <QtCore/QJsonDocument>
 #include <QtCore/QMetaObject>
+#include <QtCore/QPointer>
 
 #include <exception>
 #include <future>
+#include <utility>
 
 namespace OpenMeeting {
 
@@ -590,7 +592,45 @@ std::shared_ptr<MeetingCoordinator> MeetingCoordinator::create(QObject *parent) 
 }
 
 MeetingCoordinator::MeetingCoordinator(QObject *parent)
-    : QObject(parent) {
+    : MeetingCoordinator(SessionManager::instance(),
+                         makeDefaultAdmissionBackend(SessionManager::instance()),
+                         parent) {
+}
+
+MeetingCoordinator::AdmissionBackend MeetingCoordinator::makeDefaultAdmissionBackend(
+    SessionManager &sessionManager) {
+    AdmissionBackend backend;
+    backend.joinMeeting = [&sessionManager](const QString &meetingId,
+                                            const QString &password,
+                                            ResultCallback<bool> callback) {
+        sessionManager.httpClient().joinMeeting(meetingId, password, std::move(callback));
+    };
+    backend.getMeetingToken = [&sessionManager](const QString &meetingId,
+                                                ResultCallback<LiveKitAuthInfo> callback) {
+        sessionManager.httpClient().getMeetingToken(meetingId, std::move(callback));
+    };
+    backend.createImmediateMeeting = [&sessionManager](const QString &title,
+                                                       int durationSeconds,
+                                                       ResultCallback<LiveKitAuthInfo> callback) {
+        sessionManager.httpClient().createImmediateMeeting(title, durationSeconds, std::move(callback));
+    };
+    backend.leaveMeeting = [&sessionManager](const QString &meetingId,
+                                             ResultCallback<bool> callback) {
+        sessionManager.httpClient().leaveMeeting(meetingId, std::move(callback));
+    };
+    backend.endMeeting = [&sessionManager](const QString &meetingId,
+                                           ResultCallback<bool> callback) {
+        sessionManager.httpClient().endMeeting(meetingId, std::move(callback));
+    };
+    return backend;
+}
+
+MeetingCoordinator::MeetingCoordinator(SessionManager &sessionManager,
+                                       AdmissionBackend admissionBackend,
+                                       QObject *parent)
+    : QObject(parent)
+    , _sessionManager(sessionManager)
+    , _admissionBackend(std::move(admissionBackend)) {
     qRegisterMetaType<livekit::RoomDisconnectReason>("livekit::RoomDisconnectReason");
     qRegisterMetaType<MeetingRoomInfo>("OpenMeeting::MeetingRoomInfo");
     qRegisterMetaType<livekit::ParticipantPermission>("livekit::ParticipantPermission");
@@ -604,13 +644,14 @@ MeetingCoordinator::MeetingCoordinator(QObject *parent)
 
     // 全局账号状态由 SessionManager 统一裁决。这里不发 meetingLeft，避免
     // MeetingRoomWindow 按普通离会逻辑继续调用业务 HTTP 接口。
-    connect(&SessionManager::instance(), &SessionManager::sessionInvalidated,
+    connect(&_sessionManager, &SessionManager::sessionInvalidated,
             this, [this](SessionInvalidationReason reason) {
                 handleSessionInvalidated(reason);
             }, Qt::QueuedConnection);
 }
 
 MeetingCoordinator::~MeetingCoordinator() {
+    invalidateAdmission();
     stopRoomSession();
 }
 
@@ -630,9 +671,32 @@ QString MeetingCoordinator::stateString() const {
 }
 
 bool MeetingCoordinator::isHost() const {
-    QString myUserId = SessionManager::instance().userId();
+    QString myUserId = _sessionManager.userId();
     if (myUserId.isEmpty()) return false;
     return (myUserId == _meetingDetail.hostUserId || myUserId == _meetingDetail.creatorUserId);
+}
+
+uint64_t MeetingCoordinator::beginAdmission(AdmissionStage stage) {
+    ++_admissionGeneration;
+    _admissionStage = stage;
+    return _admissionGeneration;
+}
+
+uint64_t MeetingCoordinator::invalidateAdmission() {
+    ++_admissionGeneration;
+    _admissionStage = AdmissionStage::None;
+    return _admissionGeneration;
+}
+
+bool MeetingCoordinator::canBeginAdmission() const {
+    return _admissionStage == AdmissionStage::None ||
+           _admissionStage == AdmissionStage::Consumed;
+}
+
+bool MeetingCoordinator::isAdmissionCurrent(uint64_t generation,
+                                            AdmissionStage stage) const {
+    return !_sessionInvalidated && _admissionGeneration == generation &&
+           _admissionStage == stage;
 }
 
 void MeetingCoordinator::setState(MeetingState s, const QString &detail) {
@@ -650,14 +714,21 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
         qInfo() << "[Coordinator] Ignore join request after session invalidation.";
         return;
     }
-    if (_state != MeetingState::Idle && _state != MeetingState::Failed) {
+    if ((_state != MeetingState::Idle && _state != MeetingState::Failed) ||
+        !canBeginAdmission()) {
         emit errorOccurred(QString::fromUtf8("入会错误"), QString::fromUtf8("当前已有正在执行的会议流程，请勿重复加入"));
         return;
     }
 
-    _currentMeetingId = meetingId;
-    _currentPassword = password;
-    _currentDisplayName = displayName.isEmpty() ? SessionManager::instance().nickname() : displayName;
+    const QString requestedMeetingId = meetingId;
+    const QString requestedPassword = password;
+    const QString requestedDisplayName = displayName;
+    const uint64_t generation = beginAdmission(AdmissionStage::Joining);
+    QPointer<MeetingCoordinator> owner(this);
+
+    _currentMeetingId = requestedMeetingId;
+    _currentPassword = requestedPassword;
+    _currentDisplayName = requestedDisplayName.isEmpty() ? _sessionManager.nickname() : requestedDisplayName;
     _mediaPrefs = prefs;
     _audioMuted = !prefs.enableMicrophone;
     _videoEnabled = prefs.enableVideo;
@@ -665,39 +736,69 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
     _participants.clear();
     ensureLocalParticipant();
     updateParticipantListAndNotify();
+    if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::Joining)) {
+        return;
+    }
 
-    setState(MeetingState::Validating, QString::fromUtf8("正在校验会议准入资格..."));
+    owner->setState(MeetingState::Validating, QString::fromUtf8("正在校验会议准入资格..."));
+    if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::Joining)) {
+        return;
+    }
 
     // 第一阶段：向后端鉴权校验密码与会议有效性
-    auto &http = SessionManager::instance().httpClient();
-    http.joinMeeting(meetingId, password, [this, meetingId, &http](bool ok, bool, const HttpError &err) {
-        if (_sessionInvalidated) {
-            qInfo() << "[Coordinator] Drop stale join-meeting response after session invalidation.";
+    auto joinRequest = owner->_admissionBackend.joinMeeting;
+    joinRequest(requestedMeetingId, requestedPassword,
+                [owner, generation, requestedMeetingId](bool ok, bool, const HttpError &err) {
+        if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::Joining)) {
             return;
         }
         if (!ok) {
-            setState(MeetingState::Failed, err.message);
-            emit errorOccurred(QString::fromUtf8("入会鉴权失败"),
-                               err.message.isEmpty() ? QString::fromUtf8("会议不存在或入会密码错误") : err.message);
+            const QString detail = err.message;
+            const QString message = detail.isEmpty()
+                ? QString::fromUtf8("会议不存在或入会密码错误") : detail;
+            owner->_admissionStage = AdmissionStage::None;
+            owner->setState(MeetingState::Failed, detail);
+            if (!owner || owner->_admissionGeneration != generation ||
+                owner->_admissionStage != AdmissionStage::None) {
+                return;
+            }
+            emit owner->errorOccurred(QString::fromUtf8("入会鉴权失败"), message);
             return;
         }
 
         // 第二阶段：换取 LiveKit 令牌与网关 URL
-        setState(MeetingState::FetchingCredentials, QString::fromUtf8("正在换取音视频会话令牌..."));
-        http.getMeetingToken(meetingId, [this, meetingId](bool tokenOk, const LiveKitAuthInfo &auth, const HttpError &tokenErr) {
-            if (_sessionInvalidated) {
-                qInfo() << "[Coordinator] Drop stale meeting-token response after session invalidation.";
+        owner->_admissionStage = AdmissionStage::FetchingToken;
+        owner->setState(MeetingState::FetchingCredentials,
+                        QString::fromUtf8("正在换取音视频会话令牌..."));
+        if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::FetchingToken)) {
+            return;
+        }
+        auto tokenRequest = owner->_admissionBackend.getMeetingToken;
+        tokenRequest(requestedMeetingId, [owner, generation](bool tokenOk,
+                                                            const LiveKitAuthInfo &auth,
+                                                            const HttpError &tokenErr) {
+            if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::FetchingToken)) {
                 return;
             }
             if (!tokenOk || auth.url.isEmpty() || auth.token.isEmpty()) {
-                setState(MeetingState::Failed, tokenErr.message);
-                emit errorOccurred(QString::fromUtf8("获取凭据失败"),
-                                   tokenErr.message.isEmpty() ? QString::fromUtf8("无法换取 LiveKit 房间访问凭证") : tokenErr.message);
+                const QString detail = tokenErr.message;
+                const QString message = detail.isEmpty()
+                    ? QString::fromUtf8("无法换取 LiveKit 房间访问凭证") : detail;
+                owner->_admissionStage = AdmissionStage::None;
+                owner->setState(MeetingState::Failed, detail);
+                if (!owner || owner->_admissionGeneration != generation ||
+                    owner->_admissionStage != AdmissionStage::None) {
+                    return;
+                }
+                emit owner->errorOccurred(QString::fromUtf8("获取凭据失败"), message);
                 return;
             }
 
             // 第三阶段：启动 LiveKit 房间连接与媒体发布
-            startRoomSession(auth.url, auth.token);
+            const QString url = auth.url;
+            const QString token = auth.token;
+            owner->_admissionStage = AdmissionStage::ReadyToStart;
+            owner->startRoomSession(url, token, generation);
         });
     });
 }
@@ -709,12 +810,18 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
         qInfo() << "[Coordinator] Ignore quick-meeting request after session invalidation.";
         return;
     }
-    if (_state != MeetingState::Idle && _state != MeetingState::Failed) {
+    if ((_state != MeetingState::Idle && _state != MeetingState::Failed) ||
+        !canBeginAdmission()) {
         emit errorOccurred(QString::fromUtf8("创建错误"), QString::fromUtf8("当前已有活跃会议流程"));
         return;
     }
 
-    _currentDisplayName = SessionManager::instance().nickname();
+    const QString requestedTitle = title;
+    const int requestedDurationSeconds = durationSeconds;
+    const uint64_t generation = beginAdmission(AdmissionStage::Creating);
+    QPointer<MeetingCoordinator> owner(this);
+
+    _currentDisplayName = _sessionManager.nickname();
     _mediaPrefs = prefs;
     _audioMuted = !prefs.enableMicrophone;
     _videoEnabled = prefs.enableVideo;
@@ -722,33 +829,57 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
     _participants.clear();
     ensureLocalParticipant();
     updateParticipantListAndNotify();
+    if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::Creating)) {
+        return;
+    }
 
-    setState(MeetingState::Validating, QString::fromUtf8("正在创建即时会议..."));
+    owner->setState(MeetingState::Validating, QString::fromUtf8("正在创建即时会议..."));
+    if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::Creating)) {
+        return;
+    }
 
-    auto &http = SessionManager::instance().httpClient();
-    http.createImmediateMeeting(title, durationSeconds, [this, title](bool ok, const LiveKitAuthInfo &auth, const HttpError &err) {
-        if (_sessionInvalidated) {
-            qInfo() << "[Coordinator] Drop stale create-meeting response after session invalidation.";
+    auto createRequest = owner->_admissionBackend.createImmediateMeeting;
+    createRequest(requestedTitle, requestedDurationSeconds,
+                  [owner, generation, requestedTitle](bool ok,
+                                                      const LiveKitAuthInfo &auth,
+                                                      const HttpError &err) {
+        if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::Creating)) {
             return;
         }
         if (!ok || auth.url.isEmpty() || auth.token.isEmpty()) {
-            setState(MeetingState::Failed, err.message);
-            emit errorOccurred(QString::fromUtf8("创建即时会议失败"),
-                               err.message.isEmpty() ? QString::fromUtf8("服务端未能分配会议房间") : err.message);
+            const QString detail = err.message;
+            const QString message = detail.isEmpty()
+                ? QString::fromUtf8("服务端未能分配会议房间") : detail;
+            owner->_admissionStage = AdmissionStage::None;
+            owner->setState(MeetingState::Failed, detail);
+            if (!owner || owner->_admissionGeneration != generation ||
+                owner->_admissionStage != AdmissionStage::None) {
+                return;
+            }
+            emit owner->errorOccurred(QString::fromUtf8("创建即时会议失败"), message);
             return;
         }
 
-        _currentMeetingId = auth.meetingId;
-        _meetingDetail.meetingId = auth.meetingId;
-        _meetingDetail.meetingName = title;
-        _meetingDetail.hostUserId = SessionManager::instance().userId();
-        _meetingDetail.creatorUserId = SessionManager::instance().userId();
-        emit meetingDetailUpdated(_meetingDetail);
+        const QString meetingId = auth.meetingId;
+        const QString url = auth.url;
+        const QString token = auth.token;
+        const QString userId = owner->_sessionManager.userId();
+        owner->_admissionStage = AdmissionStage::ReadyToStart;
+        owner->_currentMeetingId = meetingId;
+        owner->_meetingDetail.meetingId = meetingId;
+        owner->_meetingDetail.meetingName = requestedTitle;
+        owner->_meetingDetail.hostUserId = userId;
+        owner->_meetingDetail.creatorUserId = userId;
+        const MeetingDetail detailSnapshot = owner->_meetingDetail;
+        emit owner->meetingDetailUpdated(detailSnapshot);
+        if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::ReadyToStart)) {
+            return;
+        }
 
         MeetingUI::LogToConsole(MeetingUI::LogCategory::General, "MEETING_ID",
-            QString("即时会议创建成功！会议号: %1 (其他参会人可凭此 9 位会议号加入)").arg(auth.meetingId));
+            QString("即时会议创建成功！会议号: %1 (其他参会人可凭此 9 位会议号加入)").arg(meetingId));
 
-        startRoomSession(auth.url, auth.token);
+        owner->startRoomSession(url, token, generation);
     });
 }
 
@@ -757,10 +888,15 @@ void MeetingCoordinator::connectDirectlyAsync(const QString &url,
                                              const QString &meetingId,
                                              const QString &displayName,
                                              const MediaPreferences &prefs) {
+    invalidateAdmission();
     if (_sessionInvalidated) {
         qInfo() << "[Coordinator] Ignore direct-connect request after session invalidation.";
         return;
     }
+    const QString requestedUrl = url;
+    const QString requestedToken = token;
+    const uint64_t generation = beginAdmission(AdmissionStage::ReadyToStart);
+    QPointer<MeetingCoordinator> owner(this);
     _currentMeetingId = meetingId;
     _currentDisplayName = displayName;
     _mediaPrefs = prefs;
@@ -770,37 +906,59 @@ void MeetingCoordinator::connectDirectlyAsync(const QString &url,
     _participants.clear();
     ensureLocalParticipant();
     updateParticipantListAndNotify();
+    if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::ReadyToStart)) {
+        return;
+    }
 
-    startRoomSession(url, token);
+    owner->startRoomSession(requestedUrl, requestedToken, generation);
 }
 
 void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
+    invalidateAdmission();
     if (_state == MeetingState::Idle || _state == MeetingState::Leaving) {
         return;
     }
 
-    setState(MeetingState::Leaving, QString::fromUtf8("正在安全退出会议..."));
+    const QString meetingId = _currentMeetingId;
+    const bool notifyBackend = !meetingId.isEmpty() && _sessionManager.isLoggedIn();
+    const bool shouldEndMeeting = endMeetingForAll && isHost();
+    auto backendRequest = shouldEndMeeting
+        ? _admissionBackend.endMeeting : _admissionBackend.leaveMeeting;
+    QPointer<MeetingCoordinator> owner(this);
 
-    QString mId = _currentMeetingId;
-    if (!mId.isEmpty() && SessionManager::instance().isLoggedIn()) {
-        auto &http = SessionManager::instance().httpClient();
-        if (endMeetingForAll && isHost()) {
-            http.endMeeting(mId, [](bool, bool, const HttpError &) {});
-        } else {
-            http.leaveMeeting(mId, [](bool, bool, const HttpError &) {});
+    setState(MeetingState::Leaving, QString::fromUtf8("正在安全退出会议..."));
+    if (!owner || owner->_state != MeetingState::Leaving ||
+        owner->_admissionStage != AdmissionStage::None || owner->_sessionInvalidated) {
+        return;
+    }
+    if (notifyBackend) {
+        backendRequest(meetingId, [](bool, bool, const HttpError &) {});
+        if (!owner || owner->_state != MeetingState::Leaving ||
+            owner->_admissionStage != AdmissionStage::None || owner->_sessionInvalidated) {
+            return;
         }
     }
 
-    stopRoomSession();
+    owner->stopRoomSession();
+    if (!owner || owner->_state != MeetingState::Leaving ||
+        owner->_admissionStage != AdmissionStage::None || owner->_sessionInvalidated) {
+        return;
+    }
 
-    setState(MeetingState::Idle, QString::fromUtf8("已退出会议"));
-    emit meetingLeft();
+    owner->setState(MeetingState::Idle, QString::fromUtf8("已退出会议"));
+    if (!owner || owner->_state != MeetingState::Idle ||
+        owner->_admissionStage != AdmissionStage::None || owner->_sessionInvalidated) {
+        return;
+    }
+    emit owner->meetingLeft();
 }
 
 void MeetingCoordinator::handleDuplicateIdentityKickOff(const QString &detail) {
+    const uint64_t generation = invalidateAdmission();
     if (_state == MeetingState::Leaving || _state == MeetingState::Idle) {
         return;
     }
+    QPointer<MeetingCoordinator> owner(this);
 
     const QString message = detail.isEmpty()
         ? QString::fromUtf8("同一账号已在其他设备加入此会议")
@@ -812,11 +970,20 @@ void MeetingCoordinator::handleDuplicateIdentityKickOff(const QString &detail) {
     // Room 已由服务端 LEAVE 流程断开；这里负责停止 Coordinator 所属的
     // io 线程和媒体资源。不要发出 meetingLeft，否则 UI 会在提示前关闭。
     stopRoomSession();
-    setState(MeetingState::Idle, message);
-    emit meetingKickOff(livekit::RoomDisconnectReason::DuplicateIdentity);
+    if (!owner || owner->_admissionGeneration != generation ||
+        owner->_admissionStage != AdmissionStage::None) {
+        return;
+    }
+    owner->setState(MeetingState::Idle, message);
+    if (!owner || owner->_admissionGeneration != generation ||
+        owner->_admissionStage != AdmissionStage::None || owner->_state != MeetingState::Idle) {
+        return;
+    }
+    emit owner->meetingKickOff(livekit::RoomDisconnectReason::DuplicateIdentity);
 }
 
 void MeetingCoordinator::handleSessionInvalidated(SessionInvalidationReason reason) {
+    invalidateAdmission();
     if (_sessionInvalidated) {
         return;
     }
@@ -828,23 +995,48 @@ void MeetingCoordinator::handleSessionInvalidated(SessionInvalidationReason reas
         QString("[Coordinator] Stop room for invalidated account session, reason=%1")
             .arg(static_cast<int>(reason)));
 
-    if (_state == MeetingState::Idle || _state == MeetingState::Leaving) {
+    if (_state == MeetingState::Idle) {
         return;
     }
 
-    setState(MeetingState::Leaving, QString::fromUtf8("账号登录状态已失效，正在停止会议..."));
-    stopRoomSession();
-    setState(MeetingState::Idle, QString::fromUtf8("账号登录状态已失效"));
+    QPointer<MeetingCoordinator> owner(this);
+    if (_state != MeetingState::Leaving) {
+        setState(MeetingState::Leaving, QString::fromUtf8("账号登录状态已失效，正在停止会议..."));
+    }
+    if (!owner) {
+        return;
+    }
+    owner->stopRoomSession();
+    if (!owner) {
+        return;
+    }
+    owner->setState(MeetingState::Idle, QString::fromUtf8("账号登录状态已失效"));
 }
 
-void MeetingCoordinator::startRoomSession(const QString &url, const QString &token) {
-    if (_sessionInvalidated) {
+void MeetingCoordinator::startRoomSession(const QString &url,
+                                          const QString &token,
+                                          uint64_t admissionGeneration) {
+    if (!isAdmissionCurrent(admissionGeneration, AdmissionStage::ReadyToStart)) {
         qInfo() << "[Coordinator] Refuse to start room after session invalidation.";
         return;
     }
+    _admissionStage = AdmissionStage::Starting;
+    QPointer<MeetingCoordinator> owner(this);
     stopRoomSession(); // 确保前序会话已释放
+    if (!owner || !owner->isAdmissionCurrent(admissionGeneration, AdmissionStage::Starting)) {
+        return;
+    }
 
-    setState(MeetingState::ConnectingRoom, QString::fromUtf8("正在建立 WebRTC 连接..."));
+    owner->setState(MeetingState::ConnectingRoom, QString::fromUtf8("正在建立 WebRTC 连接..."));
+    if (!owner || !owner->isAdmissionCurrent(admissionGeneration, AdmissionStage::Starting)) {
+        return;
+    }
+    owner->_admissionStage = AdmissionStage::Consumed;
+    auto roomStartHook = owner->_roomStartHook;
+    if (roomStartHook) {
+        roomStartHook(url, token);
+        return;
+    }
     _startupCommitted = false;
 
     _sessionRunning = true;
@@ -853,7 +1045,7 @@ void MeetingCoordinator::startRoomSession(const QString &url, const QString &tok
     _sessionRuntime = std::make_shared<MeetingSessionRuntime>(
         *_ioContext,
         ++_nextSessionGeneration,
-        SessionManager::instance().userId());
+        _sessionManager.userId());
 
     _room = livekit::Room::Create(_ioContext->get_executor());
     _room->SetLogHandler([](const std::string &cat, const std::string &tag, const std::string &msg) {
@@ -1423,7 +1615,7 @@ void MeetingCoordinator::kickParticipant(const QString &targetUserId, const QStr
 }
 
 void MeetingCoordinator::ensureLocalParticipant() {
-    QString myId = SessionManager::instance().userId();
+    QString myId = _sessionManager.userId();
     if (myId.isEmpty() && _room && _room->local_participant()) {
         myId = QString::fromStdString(_room->local_participant()->identity());
     }
@@ -1441,8 +1633,8 @@ void MeetingCoordinator::ensureLocalParticipant() {
         localInfo.name = resolvedNick;
     } else if (!_currentDisplayName.isEmpty()) {
         localInfo.name = _currentDisplayName;
-    } else if (!SessionManager::instance().nickname().isEmpty()) {
-        localInfo.name = SessionManager::instance().nickname();
+    } else if (!_sessionManager.nickname().isEmpty()) {
+        localInfo.name = _sessionManager.nickname();
     } else {
         localInfo.name = myId;
     }
