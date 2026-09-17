@@ -1,6 +1,7 @@
 #include "signal_client.h"
 #include "region_provider.h"
 #include "safe_spawn.h"
+#include "log_redaction.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include "logger/options.pb.h"
@@ -244,7 +245,13 @@ asio::awaitable<ConnectResult> SignalClient::Connect(
             ec = std::make_error_code(std::errc::connection_aborted);
         }
 
-        std::cout << "SignalClient::Connect: ConnectInternal completed, ec=" << ec.message() << std::endl;
+        if (ec) {
+            std::cout << "SignalClient::Connect: ConnectInternal completed, "
+                      << secure_log::ErrorCodeSummary("signal_connect", ec.value(), "system")
+                      << std::endl;
+        } else {
+            std::cout << "SignalClient::Connect: ConnectInternal completed, result=success" << std::endl;
+        }
         
         if (ec) {
             client->Close();
@@ -552,6 +559,13 @@ void SignalClient::HandleClose(const std::string& reason) {
     }
 }
 
+void SignalClient::HandleHeartbeatFailure(const std::error_code& error) {
+    if (error == asio::error::operation_aborted) return;
+    // The close event is an internal business channel. Output consumers must
+    // derive their own safe summary without replacing this original detail.
+    HandleClose("heartbeat timer error: " + error.message());
+}
+
 asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectInternal(
     const std::optional<std::vector<uint8_t>>& publisher_offer_sdp) {
     std::optional<std::error_code> primary_error;
@@ -739,7 +753,8 @@ asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::Reconne
 }
 
 asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::TryConnectInternal(const std::string& connect_url) {
-    std::cout << "SignalClient::TryConnectInternal: Connect URL: " << connect_url << std::endl;
+    std::cout << "SignalClient::TryConnectInternal: Connect endpoint: "
+              << secure_log::EndpointSummary(connect_url) << std::endl;
     auto connect_res = co_await SignalStream::Connect(*ssl_ctx_, connect_url, token_, options_.connect_timeout);
     if (connect_res.error) {
         throw std::system_error(connect_res.error);
@@ -786,7 +801,9 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::TryConnectIn
         stream->Close(false);
         throw std::system_error(std::make_error_code(std::errc::timed_out));
     } catch (const std::system_error& e) {
-        std::cout << "SignalClient::TryConnectInternal: caught system_error: " << e.code().value() << " (" << e.code().message() << ")" << std::endl;
+        std::cout << "SignalClient::TryConnectInternal: caught system_error: "
+                  << secure_log::ErrorCodeSummary("signal_wait_join", e.code().value(), "system")
+                  << std::endl;
         if (e.code() == asio::error::operation_aborted) {
             if (join_res) {
                 {
@@ -887,9 +904,7 @@ asio::awaitable<void> SignalClient::HeartbeatLoop(uint32_t interval_sec, uint32_
             }
         }
     } catch (const std::system_error& e) {
-        if (e.code() != asio::error::operation_aborted) {
-            HandleClose("heartbeat timer error: " + e.code().message());
-        }
+        HandleHeartbeatFailure(e.code());
     }
 }
 

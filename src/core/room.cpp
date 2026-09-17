@@ -8,6 +8,7 @@
 #include "rtc_video_source.h"
 #include "render/owned_i420_frame.h"
 #include "telemetry.h"
+#include "log_redaction.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include <nlohmann/json.hpp>
@@ -137,7 +138,9 @@ public:
         int sdp_mline_index = candidate->sdp_mline_index();
 
         if (auto room = room_.lock()) {
-            room->Log("SIGNAL", "LOCAL_ICE", "收集到本地 ICE 候选 (" + std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") + "): mid=" + sdp_mid);
+            room->Log("SIGNAL", "LOCAL_ICE", "收集到本地 ICE 候选: target=" +
+                std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") +
+                ", detail=[omitted]");
             asio::post(room->executor(), [room, sdp, sdp_mid, sdp_mline_index, type = pc_type_]() {
                 room->OnLocalIceCandidate(sdp, sdp_mid, sdp_mline_index, type);
             });
@@ -245,7 +248,9 @@ void Room::Log(const std::string& cat, const std::string& tag, const std::string
         h = log_handler_;
     }
     if (h) {
-        h(cat, tag, msg);
+        h(secure_log::SanitizeForOutput(cat),
+          secure_log::SanitizeForOutput(tag),
+          secure_log::SanitizeForOutput(msg));
     }
 }
 
@@ -576,8 +581,8 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
     try {
         co_await ConnectAsync(url, token, opts);
         co_return true;
-    } catch (const std::exception& error) {
-        Log("ERROR", "CONNECT_FAILED", error.what());
+    } catch (const std::exception&) {
+        Log("ERROR", "CONNECT_FAILED", secure_log::ExceptionSummary("room_connect"));
         co_return false;
     }
 }
@@ -784,7 +789,8 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                         subscriber_pc_ = sub_res.MoveValue();
                         Log("WEBRTC", "SUB_PC_CREATED", "Subscriber PeerConnection 创建成功");
                     } else {
-                        Log("ERROR", "SUB_PC_FAIL", "Subscriber PeerConnection 创建失败: " + std::string(sub_res.error().message()));
+                        Log("ERROR", "SUB_PC_FAIL",
+                            secure_log::OpaqueSummary("create_subscriber_pc"));
                         throw OperationError(OperationKind::Connect,
                                              OperationErrorCode::PeerConnectionCreateFailed,
                                              "create_subscriber_pc",
@@ -1119,8 +1125,8 @@ asio::awaitable<void> Room::DisconnectAsync() {
                                          OperationKind::Disconnect,
                                          OperationErrorCode::SessionClosed,
                                          "send_leave");
-        } catch (const std::exception& error) {
-            Log("WARNING", "LEAVE_SEND", error.what());
+        } catch (const std::exception&) {
+            Log("WARNING", "LEAVE_SEND", secure_log::ExceptionSummary("send_leave"));
         }
     }
 
@@ -2175,9 +2181,9 @@ void Room::DetachRemoteTrackSinks(std::vector<RemoteTrackSinkBinding> bindings) 
             } else {
                 binding.detach();
             }
-        } catch (const std::exception& error) {
+        } catch (const std::exception&) {
             std::cerr << "[WEBRTC] Failed to detach remote track sink: "
-                      << error.what() << std::endl;
+                      << secure_log::ExceptionSummary("detach_remote_track_sink") << std::endl;
         } catch (...) {
             std::cerr << "[WEBRTC] Failed to detach remote track sink: unknown error"
                       << std::endl;
@@ -2501,7 +2507,8 @@ void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
                         std::cout << "[SIMULCAST TRANSCEIVER] Added Simulcast Transceiver for video track with " 
                                   << p->publish_opts.layers.size() << " layers!\n";
                     } else {
-                        std::cerr << "[SIMULCAST TRANSCEIVER] AddTransceiver failed: " << transceiver_res.error().message() << "\n";
+                        std::cerr << "[SIMULCAST TRANSCEIVER] AddTransceiver failed: "
+                                  << secure_log::OpaqueSummary("add_transceiver") << "\n";
                         p->pc->AddTrack(p->track, { p->stream_id });
                     }
                 } else {
@@ -2552,7 +2559,8 @@ void Room::ApplySimulcastParameters(webrtc::scoped_refptr<webrtc::RtpSenderInter
             std::cout << "[SIMULCAST SET_PARAMS] Successfully applied RtpParameters for " 
                       << parameters.encodings.size() << " encodings!\n";
         } else {
-            std::cerr << "[SIMULCAST SET_PARAMS] SetParameters failed: " << status.message() << "\n";
+            std::cerr << "[SIMULCAST SET_PARAMS] SetParameters failed: "
+                      << secure_log::OpaqueSummary("set_rtp_parameters") << "\n";
         }
     }
 }
@@ -2563,8 +2571,9 @@ void Room::NegotiatePublisher() {
     livekit::safe_co_spawn(executor_, [self = shared_from_this(), generation, timeout]() -> asio::awaitable<void> {
         try {
             co_await self->NegotiatePublisherAsync(timeout, generation);
-        } catch (const std::exception& error) {
-            self->Log("ERROR", "NEGOTIATION_ASYNC", error.what());
+        } catch (const std::exception&) {
+            self->Log("ERROR", "NEGOTIATION_ASYNC",
+                      secure_log::ExceptionSummary("publisher_negotiation"));
         }
     });
 }
@@ -3365,8 +3374,8 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
         }
         if (state_uncertain) {
             Log("ERROR", "UNPUBLISH_STATE_UNCERTAIN",
-                "本地 sender 已移除但未收到 SDP Answer；将通过后续恢复按服务端状态收敛: " +
-                    std::string(error.what()));
+                "本地 sender 已移除但未收到 SDP Answer；将通过后续恢复按服务端状态收敛；" +
+                    secure_log::ExceptionSummary("unpublish_negotiate"));
             throw OperationError(OperationKind::UnpublishTrack,
                                  OperationErrorCode::StateUncertain,
                                  "unpublish_negotiate",
@@ -3495,8 +3504,9 @@ void Room::ExecuteNegotiatePublisher() {
     WebRTCManager::Instance().CreateOffer(pub_pc, executor_,
         [self, client, pub_pc](const std::string& sdp, const std::string& err) {
             if (!err.empty()) {
-                std::cerr << "[WebRTC] CreateOffer error: " << err << std::endl;
-                self->Log("ERROR", "OFFER_FAIL", "CreateOffer error: " + err);
+                std::cerr << "[WebRTC] CreateOffer error: "
+                          << secure_log::OpaqueSummary("create_offer") << std::endl;
+                self->Log("ERROR", "OFFER_FAIL", secure_log::OpaqueSummary("create_offer"));
                 self->OnNegotiationFailed();
                 return;
             }
@@ -3504,8 +3514,10 @@ void Room::ExecuteNegotiatePublisher() {
             WebRTCManager::Instance().SetLocalDescription(pub_pc, "offer", sdp, self->executor_,
                 [self, client, pub_pc, sdp](const std::string& set_local_err) {
                     if (!set_local_err.empty()) {
-                        std::cerr << "[WebRTC] SetLocalDescription offer error: " << set_local_err << std::endl;
-                        self->Log("ERROR", "LOCAL_DESC_FAIL", "SetLocalDescription offer error: " + set_local_err);
+                        std::cerr << "[WebRTC] SetLocalDescription offer error: "
+                                  << secure_log::OpaqueSummary("set_local_offer") << std::endl;
+                        self->Log("ERROR", "LOCAL_DESC_FAIL",
+                                  secure_log::OpaqueSummary("set_local_offer"));
                         self->OnNegotiationFailed();
                         return;
                     }
@@ -3551,7 +3563,8 @@ void Room::ExecuteNegotiatePublisher() {
                         }
                     });
                     std::cout << "[WebRTC] -> Sent publisher SDP Offer to LiveKit server with mid_to_track_id mapping!" << std::endl;
-                    self->Log("SIGNAL", "SDP_OFFER_SENT", "已向 LiveKit 服务端发送 Publisher SDP Offer (" + std::to_string(sdp.length()) + " 字节):\n" + sdp);
+                    self->Log("SIGNAL", "SDP_OFFER_SENT",
+                              secure_log::SdpSummary("publisher_offer_sent", sdp));
                 });
         }, ice_restart);
 }
@@ -4104,7 +4117,8 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
         else if (msg->has_room_moved())              type_tag = "ROOM_MOVED";
 
         if (type_tag == "UNKNOWN") {
-            Log("SIGNAL", "RAW_MSG", "[Signal] 收到服务端未识别消息 (Case=" + std::to_string(msg->message_case()) + "): " + msg->ShortDebugString());
+            Log("SIGNAL", "RAW_MSG", "[Signal] 收到服务端未识别消息 (Case=" +
+                std::to_string(msg->message_case()) + ", detail=[omitted])");
         } else if (type_tag != "PONG") {
             Log("SIGNAL", "RAW_MSG", "[Signal] 收到服务端消息: " + type_tag);
         }
@@ -4733,7 +4747,8 @@ void Room::SendTrickleCandidate(const std::string& sdp, const std::string& sdp_m
 
 void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
     // ⚠ 最早期日志 - 确认此函数被调用
-    Log("SIGNAL", "OFFER_CALLED", "HandleOfferSignal 被调用! type=" + offer.type() + ", SDP size=" + std::to_string(offer.sdp().size()) + " bytes");
+    Log("SIGNAL", "OFFER_CALLED",
+        secure_log::SdpSummary("remote_offer_received", offer.sdp()));
     std::shared_ptr<SignalClient> client;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
     {
@@ -4754,13 +4769,16 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
     }
 
     std::cout << "[WebRTC] Received SDP Offer from server, setting RemoteDescription..." << std::endl;
-    Log("SIGNAL", "SDP_OFFER_RECV", "收到服务端下发的 SDP Offer (" + std::to_string(offer.sdp().length()) + " 字节):\n" + offer.sdp());
+    Log("SIGNAL", "SDP_OFFER_RECV",
+        secure_log::SdpSummary("subscriber_offer_received", offer.sdp()));
     auto self = shared_from_this();
     WebRTCManager::Instance().SetRemoteDescription(pc, offer.type(), offer.sdp(), executor_,
         [self, client, pc](const std::string& set_remote_err) {
             if (!set_remote_err.empty()) {
-                std::cerr << "Room: SetRemoteDescription offer error: " << set_remote_err << std::endl;
-                self->Log("ERROR", "SET_REMOTE_ERR", "Subscriber SetRemoteDescription 失败: " + set_remote_err);
+                std::cerr << "Room: SetRemoteDescription offer error: "
+                          << secure_log::OpaqueSummary("set_remote_offer") << std::endl;
+                self->Log("ERROR", "SET_REMOTE_ERR",
+                          secure_log::OpaqueSummary("set_remote_offer"));
                 return;
             }
 
@@ -4769,8 +4787,10 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
             WebRTCManager::Instance().CreateAnswer(pc, self->executor_,
                 [self, client, pc](const std::string& sdp, const std::string& create_ans_err) {
                     if (!create_ans_err.empty()) {
-                        std::cerr << "Room: CreateAnswer error: " << create_ans_err << std::endl;
-                        self->Log("ERROR", "CREATE_ANS_ERR", "Subscriber CreateAnswer 失败: " + create_ans_err);
+                        std::cerr << "Room: CreateAnswer error: "
+                                  << secure_log::OpaqueSummary("create_answer") << std::endl;
+                        self->Log("ERROR", "CREATE_ANS_ERR",
+                                  secure_log::OpaqueSummary("create_answer"));
                         return;
                     }
 
@@ -4778,8 +4798,10 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
                     WebRTCManager::Instance().SetLocalDescription(pc, "answer", sdp, self->executor_,
                         [self, client, pc, sdp](const std::string& set_local_err) {
                             if (!set_local_err.empty()) {
-                                std::cerr << "Room: SetLocalDescription answer error: " << set_local_err << std::endl;
-                                self->Log("ERROR", "SET_LOCAL_ANS_ERR", "Subscriber SetLocalDescription answer 失败: " + set_local_err);
+                                std::cerr << "Room: SetLocalDescription answer error: "
+                                          << secure_log::OpaqueSummary("set_local_answer") << std::endl;
+                                self->Log("ERROR", "SET_LOCAL_ANS_ERR",
+                                          secure_log::OpaqueSummary("set_local_answer"));
                                 return;
                             }
 
@@ -4789,7 +4811,8 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
                             answer_msg->set_sdp(sdp);
                             client->Send(req);
                             std::cout << "[WebRTC] -> Successfully created and sent SDP Answer back to LiveKit Server!" << std::endl;
-                            self->Log("SIGNAL", "SDP_ANSWER_SENT", "已生成并向 LiveKit 服务端发送 Subscriber SDP Answer (" + std::to_string(sdp.length()) + " 字节):\n" + sdp);
+                            self->Log("SIGNAL", "SDP_ANSWER_SENT",
+                                      secure_log::SdpSummary("subscriber_answer_sent", sdp));
 
                             // 重放暂存的 Subscriber 早期 ICE 候选
                             std::vector<PendingIceCandidate> pending_cands;
@@ -4812,7 +4835,9 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
                                     }
                                 });
                                 for (const auto& res : results) {
-                                    self->Log("SIGNAL", "ICE_SUB_REPLAY", "重放早期候选 mid=" + res.first + ", 结果=" + (res.second ? "成功" : "失败"));
+                                self->Log("SIGNAL", "ICE_SUB_REPLAY",
+                                          std::string("重放早期候选结果=") +
+                                              (res.second ? "成功" : "失败"));
                                 }
                             }
 
@@ -4853,7 +4878,8 @@ static std::vector<std::string> ExtractSdpMLines(const std::string& sdp) {
 }
 
 void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
-    Log("SIGNAL", "SDP_ANSWER_RECV", "收到服务端下发的 SDP Answer (" + std::to_string(answer.sdp().length()) + " 字节):\n" + answer.sdp());
+    Log("SIGNAL", "SDP_ANSWER_RECV",
+        secure_log::SdpSummary("remote_answer_received", answer.sdp()));
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> sub_pc;
     bool pub_negotiating = false;
@@ -4872,7 +4898,8 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
         WebRTCManager::Instance().SetRemoteDescription(pub_pc, "answer", answer.sdp(), executor_,
             [self, pub_pc](const std::string& err) {
                 if (!err.empty()) {
-                    self->Log("ERROR", "PUB_REMOTE_ERR", "Publisher SetRemoteDescription (Answer) 失败: " + err);
+                    self->Log("ERROR", "PUB_REMOTE_ERR",
+                              secure_log::OpaqueSummary("set_publisher_remote_answer"));
                     self->CompleteNegotiation(err);
                 } else {
                     self->Log("SIGNAL", "PUB_STABLE", "Publisher PC 协商完成 (Answer 应用成功)");
@@ -4926,7 +4953,9 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
                             }
                         });
                         for (const auto& res : results) {
-                            self->Log("SIGNAL", "ICE_PUB_REPLAY", "重放早期候选 mid=" + res.first + ", 结果=" + (res.second ? "成功" : "失败"));
+                            self->Log("SIGNAL", "ICE_PUB_REPLAY",
+                                      std::string("重放早期候选结果=") +
+                                          (res.second ? "成功" : "失败"));
                         }
                     }
                 }
@@ -4961,14 +4990,12 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
         });
     }
 
-    std::string ans_m_summary = "";
-    for (const auto& m : answer_mlines) ans_m_summary += m + " ";
-    std::string pub_m_summary = "";
-    for (const auto& m : pub_mlines) pub_m_summary += m + " ";
-    std::string sub_m_summary = "";
-    for (const auto& m : sub_mlines) sub_m_summary += m + " ";
-
-    Log("SIGNAL", "SDP_ANS_ROUTING", "Answer 诊断: Ans=[" + ans_m_summary + "], Pub=[" + pub_m_summary + "], Sub=[" + sub_m_summary + "], PubNeg=" + std::to_string(pub_negotiating) + ", SubNeg=" + std::to_string(sub_negotiating));
+    Log("SIGNAL", "SDP_ANS_ROUTING",
+        secure_log::SdpSummary("answer_route_remote", answer.sdp()) + ", " +
+        secure_log::SdpSummary("answer_route_publisher", pub_desc_str) + ", " +
+        secure_log::SdpSummary("answer_route_subscriber", sub_desc_str) +
+        ", publisher_negotiating=" + std::to_string(pub_negotiating) +
+        ", subscriber_negotiating=" + std::to_string(sub_negotiating));
 
     bool has_application = false;
     for (const auto& m : answer_mlines) {
@@ -5007,11 +5034,10 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
                 }
 
                 if (!err.empty()) {
-                    self->Log("ERROR", "SUB_ANS_ERR", "Subscriber SetRemoteDescription Answer 失败: " + err);
-                    auto ans_m = ExtractSdpMLines(answer_sdp);
-                    std::string m_str = "";
-                    for (const auto& m : ans_m) m_str += m + " ";
-                    self->Log("ERROR", "SUB_ANS_LINES", "失败 Answer 的 m-lines: [" + m_str + "]");
+                    self->Log("ERROR", "SUB_ANS_ERR",
+                              secure_log::OpaqueSummary("set_subscriber_remote_answer"));
+                    self->Log("ERROR", "SUB_ANS_LINES",
+                              secure_log::SdpSummary("failed_subscriber_answer", answer_sdp));
                 } else {
                     self->Log("WEBRTC", "SUB_STABLE", "Subscriber RemoteDescription (Answer) 应用成功，信令状态已稳定 STABLE");
 
@@ -5031,7 +5057,9 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
                             }
                         });
                         for (const auto& res : results) {
-                            self->Log("SIGNAL", "ICE_SUB_REPLAY", "重放早期候选 mid=" + res.first + ", 结果=" + (res.second ? "成功" : "失败"));
+                                self->Log("SIGNAL", "ICE_SUB_REPLAY",
+                                          std::string("重放早期候选结果=") +
+                                              (res.second ? "成功" : "失败"));
                         }
                     }
                 }
@@ -5060,8 +5088,10 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
             }
 
             if (!err.empty()) {
-                std::cerr << "Room: SetRemoteDescription answer error: " << err << std::endl;
-                self->Log("ERROR", "ANS_ERR", "Publisher SetRemoteDescription 失败: " + err);
+                std::cerr << "Room: SetRemoteDescription answer error: "
+                          << secure_log::OpaqueSummary("set_publisher_remote_answer") << std::endl;
+                self->Log("ERROR", "ANS_ERR",
+                          secure_log::OpaqueSummary("set_publisher_remote_answer"));
                 self->CompleteNegotiation(err);
             } else {
                 std::cout << "[WebRTC] Publisher remote description applied successfully! PC signaling state is STABLE." << std::endl;
@@ -5106,14 +5136,17 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
         if (sdp_mid.empty()) sdp_mid = json_cand.value("sdp_mid", "");
         int sdp_mline_index = json_cand.value("sdpMLineIndex", 0);
 
-        Log("SIGNAL", "TRICKLE_RECV", "收到服务端 ICE 候选: target=" + std::string(trickle.target() == proto::SignalTarget::PUBLISHER ? "PUBLISHER" : "SUBSCRIBER") + ", mid=" + sdp_mid + ", cand=" + sdp);
+        Log("SIGNAL", "TRICKLE_RECV", "收到服务端 ICE 候选: target=" +
+            std::string(trickle.target() == proto::SignalTarget::PUBLISHER ? "PUBLISHER" : "SUBSCRIBER") +
+            ", detail=[omitted]");
 
         auto self = shared_from_this();
         WebRTCManager::Instance().signaling_thread()->BlockingCall([self, pub_pc, sub_pc, trickle_target = trickle.target(), sdp_mid, sdp_mline_index, sdp]() {
             webrtc::SdpParseError err;
             std::unique_ptr<webrtc::IceCandidateInterface> cand(webrtc::CreateIceCandidate(sdp_mid, sdp_mline_index, sdp, &err));
             if (!cand) {
-                self->Log("ERROR", "ICE_PARSE_FAIL", "ICE 候选解析失败: " + err.description);
+                self->Log("ERROR", "ICE_PARSE_FAIL",
+                          secure_log::OpaqueSummary("parse_ice_candidate"));
                 return;
             }
 
@@ -5129,9 +5162,11 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
                     if (!ok) {
                         std::lock_guard lock(self->room_mutex_);
                         self->pending_pub_ice_candidates_.push_back({sdp_mid, sdp_mline_index, sdp});
-                        self->Log("SIGNAL", "ICE_PUB_QUEUE", "Publisher PC 暂未就绪，已暂存早期 ICE 候选: mid=" + sdp_mid);
+                        self->Log("SIGNAL", "ICE_PUB_QUEUE",
+                                  "Publisher PC 暂未就绪，已暂存早期 ICE 候选: detail=[omitted]");
                     } else {
-                        self->Log("SIGNAL", "ICE_PUB_ADD", "向 Publisher PC 添加 ICE 候选: mid=" + sdp_mid + ", 结果=成功 (Single PC)");
+                        self->Log("SIGNAL", "ICE_PUB_ADD",
+                                  "向 Publisher PC 添加 ICE 候选: 结果=成功 (Single PC)");
                     }
                 }
                 return;
@@ -5143,9 +5178,11 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
                     if (!ok) {
                         std::lock_guard lock(self->room_mutex_);
                         self->pending_sub_ice_candidates_.push_back({sdp_mid, sdp_mline_index, sdp});
-                        self->Log("SIGNAL", "ICE_SUB_QUEUE", "Subscriber PC 暂未就绪，已暂存早期 ICE 候选: mid=" + sdp_mid);
+                        self->Log("SIGNAL", "ICE_SUB_QUEUE",
+                                  "Subscriber PC 暂未就绪，已暂存早期 ICE 候选: detail=[omitted]");
                     } else {
-                        self->Log("SIGNAL", "ICE_SUB_ADD", "向 Subscriber PC 添加 ICE 候选: mid=" + sdp_mid + ", 结果=成功");
+                        self->Log("SIGNAL", "ICE_SUB_ADD",
+                                  "向 Subscriber PC 添加 ICE 候选: 结果=成功");
                     }
                 }
             } else {
@@ -5162,9 +5199,11 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
                     if (!ok) {
                         std::lock_guard lock(self->room_mutex_);
                         self->pending_sub_ice_candidates_.push_back({sdp_mid, sdp_mline_index, sdp});
-                        self->Log("SIGNAL", "ICE_SUB_QUEUE", "Subscriber PC 暂未就绪，已暂存早期 ICE 候选: mid=" + sdp_mid);
+                        self->Log("SIGNAL", "ICE_SUB_QUEUE",
+                                  "Subscriber PC 暂未就绪，已暂存早期 ICE 候选: detail=[omitted]");
                     } else {
-                        self->Log("SIGNAL", "ICE_SUB_ADD", "向 Subscriber PC 尝试添加 ICE 候选: mid=" + sdp_mid + ", 结果=成功");
+                        self->Log("SIGNAL", "ICE_SUB_ADD",
+                                  "向 Subscriber PC 尝试添加 ICE 候选: 结果=成功");
                     }
                 }
             }
@@ -5215,7 +5254,8 @@ void Room::HandleMediaSectionsRequirement(const proto::MediaSectionsRequirement&
     });
 
     if (!add_error.empty()) {
-        Log("ERROR", "MEDIA_SEC_ADD_FAIL", add_error);
+        Log("ERROR", "MEDIA_SEC_ADD_FAIL",
+            secure_log::OpaqueSummary("add_recvonly_media_section"));
         return;
     }
 
@@ -5443,7 +5483,9 @@ asio::awaitable<void> Room::AttemptReconnect() {
                 co_return;
             } catch (const std::exception& error) {
                 last_error = error.what();
-                Log("WARNING", "RESUME_FAILED", last_error + "; switching to full restart");
+                Log("WARNING", "RESUME_FAILED",
+                    secure_log::ExceptionSummary("resume_reconnect") +
+                        "; switching to full restart");
                 full_restart = true;
             }
         }
@@ -5562,7 +5604,8 @@ asio::awaitable<void> Room::AttemptReconnect() {
                 co_return;
             } catch (const std::exception& error) {
                 last_error = error.what();
-                Log("WARNING", "FULL_RESTART_FAILED", last_error);
+                Log("WARNING", "FULL_RESTART_FAILED",
+                    secure_log::ExceptionSummary("full_restart"));
                 std::lock_guard lock(room_mutex_);
                 if (connection_state_ == ConnectionState::Disconnected &&
                     !reconnect_disabled_) {

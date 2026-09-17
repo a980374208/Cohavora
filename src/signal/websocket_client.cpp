@@ -1,5 +1,6 @@
 #include "websocket_client.h"
 #include "safe_spawn.h"
+#include "log_redaction.h"
 #include <random>
 #include <iostream>
 #include <sstream>
@@ -252,8 +253,9 @@ void WebSocketClient::StartRead() {
             try {
                 co_await self->ReadLoop();
                 std::cout << "WebSocketClient::ReadLoop: coroutine exited cleanly" << std::endl;
-            } catch (const std::exception& e) {
-                std::cout << "WebSocketClient::ReadLoop: coroutine exited with exception: " << e.what() << std::endl;
+            } catch (const std::exception&) {
+                std::cout << "WebSocketClient::ReadLoop: coroutine exited with exception: "
+                          << secure_log::ExceptionSummary("websocket_read_loop") << std::endl;
             } catch (...) {
                 std::cout << "WebSocketClient::ReadLoop: coroutine exited with unknown exception" << std::endl;
             }
@@ -467,7 +469,8 @@ void WebSocketClient::ResetWritingState() {
 }
 
 asio::awaitable<void> WebSocketClient::AsyncConnectSocket(std::string host, std::string port) {
-    std::cout << "WebSocketClient::AsyncConnectSocket: 1 (host: " << host << ", port: " << port << ")" << std::endl;
+    std::cout << "WebSocketClient::AsyncConnectSocket: 1 ("
+              << secure_log::EndpointSummary("ws://" + host + ":" + port) << ")" << std::endl;
     auto executor = co_await asio::this_coro::executor;
     std::cout << "WebSocketClient::AsyncConnectSocket: 2" << std::endl;
     
@@ -558,7 +561,12 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
     }
     req += "\r\n";
 
-    std::cout << "\n--- [HTTP WS HANDSHAKE REQ SENT] ---\n" << req << "------------------------------------\n" << std::endl;
+    const std::string endpoint = (is_ssl_ ? "wss://" : "ws://") + host + ":" + port + path_query;
+    std::cout << "WebSocketClient::AsyncWsHandshake: request "
+              << secure_log::EndpointSummary(endpoint)
+              << ", authorization="
+              << ((!token.empty() && query.find("access_token=") == std::string::npos) ? "present" : "query")
+              << std::endl;
 
     std::cout << "WebSocketClient::AsyncWsHandshake: 2 (writing request...)" << std::endl;
     co_await async_write_stream(asio::buffer(req));
@@ -575,8 +583,9 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
             throw std::system_error(asio::error::not_connected);
         }
         std::cout << "WebSocketClient::AsyncWsHandshake: 4.2 (read_until finished)" << std::endl;
-    } catch (const std::exception& e) {
-        std::cout << "WebSocketClient::AsyncWsHandshake: 4.3 exception: " << e.what() << std::endl;
+    } catch (const std::exception&) {
+        std::cout << "WebSocketClient::AsyncWsHandshake: 4.3 exception: "
+                  << secure_log::ExceptionSummary("websocket_handshake_read") << std::endl;
         throw;
     } catch (...) {
         std::cout << "WebSocketClient::AsyncWsHandshake: 4.4 unknown exception" << std::endl;
@@ -592,13 +601,13 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
     if (status_code != 101) {
         std::string status_msg;
         std::getline(response_stream, status_msg);
-        std::cout << "WebSocketClient::AsyncWsHandshake: Handshake failed! HTTP Status Code: " 
-                  << status_code << " " << status_msg << std::endl;
+        std::cout << "WebSocketClient::AsyncWsHandshake: Handshake failed, "
+                  << secure_log::ErrorCodeSummary(
+                         "websocket_upgrade", static_cast<int>(status_code), "websocket_http")
+                  << std::endl;
 
         std::string line;
-        std::cout << "--- Response Headers ---" << std::endl;
         while (std::getline(response_stream, line) && line != "\r" && !line.empty()) {
-            std::cout << line << std::endl;
         }
 
         std::string body;
@@ -606,9 +615,8 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
             body = std::string(asio::buffers_begin(response_buf_.data()), asio::buffers_end(response_buf_.data()));
             response_buf_.consume(response_buf_.size());
         }
-        std::cout << "--- Response Body ---" << std::endl;
-        std::cout << body << std::endl;
-        std::cout << "---------------------" << std::endl;
+        std::cout << "WebSocketClient::AsyncWsHandshake: response headers=[omitted], body="
+                  << (body.empty() ? "absent" : "present") << std::endl;
 
         throw std::system_error(MakeWebSocketHttpError(status_code));
     }
@@ -637,8 +645,8 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
                 if (val == expected_accept) {
                     accept_verified = true;
                 } else {
-                    std::cout << "WebSocketClient::AsyncWsHandshake: Sec-WebSocket-Accept mismatch! Got: '" 
-                              << val << "', expected: '" << expected_accept << "'" << std::endl;
+                    std::cout << "WebSocketClient::AsyncWsHandshake: Sec-WebSocket-Accept mismatch"
+                              << std::endl;
                 }
             }
         }

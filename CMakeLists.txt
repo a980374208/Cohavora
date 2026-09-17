@@ -119,6 +119,7 @@ set(LIVEKIT_SOURCES
     src/e2ee/key_provider.cpp
     src/e2ee/frame_cryptor.cpp
     src/telemetry/crash_handler.cpp
+    src/telemetry/log_redaction.cpp
     src/telemetry/stats_collector.cpp
 )
 
@@ -165,6 +166,7 @@ set(LIVEKIT_HEADERS
     src/telemetry/stats_collector.h
     src/telemetry/telemetry.h
     src/telemetry/crash_handler.h
+    src/telemetry/log_redaction.h
     src/telemetry/safe_spawn.h
     src/telemetry/coro_allocator.h
 )

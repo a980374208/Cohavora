@@ -300,6 +300,7 @@ public:
 private:
     friend class RoomUnpublishInspectionAccess;
     friend class ParticipantSnapshotRoomInspectionAccess;
+    friend class RoomSecurityInspectionAccess;
     // Only the named inspection friend can install these two transport-boundary
     // hooks. Production keeps them null and uses the existing native methods.
     struct LocalUnpublishOverrides {
