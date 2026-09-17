@@ -11,13 +11,136 @@
 
 namespace livekit {
 
+Participant::Participant(const Participant& other) {
+    std::lock_guard<std::mutex> lock(other.state_mutex_);
+    sid_ = other.sid_;
+    identity_ = other.identity_;
+    name_ = other.name_;
+    metadata_ = other.metadata_;
+    speaking_ = other.speaking_;
+    audio_level_ = other.audio_level_;
+    connection_quality_ = other.connection_quality_;
+    connection_quality_score_ = other.connection_quality_score_;
+    tracks_ = other.tracks_;
+    attributes_ = other.attributes_;
+    permission_ = other.permission_;
+}
+
+Participant& Participant::operator=(const Participant& other) {
+    if (this == &other) return *this;
+
+    std::string sid;
+    std::string identity;
+    std::string name;
+    std::string metadata;
+    bool speaking = false;
+    float audio_level = 0.0f;
+    ConnectionQuality connection_quality = ConnectionQuality::Unknown;
+    float connection_quality_score = 0.0f;
+    std::map<std::string, std::shared_ptr<TrackPublication>> tracks;
+    std::map<std::string, std::string> attributes;
+    ParticipantPermission permission;
+    {
+        std::lock_guard<std::mutex> lock(other.state_mutex_);
+        sid = other.sid_;
+        identity = other.identity_;
+        name = other.name_;
+        metadata = other.metadata_;
+        speaking = other.speaking_;
+        audio_level = other.audio_level_;
+        connection_quality = other.connection_quality_;
+        connection_quality_score = other.connection_quality_score_;
+        tracks = other.tracks_;
+        attributes = other.attributes_;
+        permission = other.permission_;
+    }
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        sid_ = std::move(sid);
+        identity_ = std::move(identity);
+        name_ = std::move(name);
+        metadata_ = std::move(metadata);
+        speaking_ = speaking;
+        audio_level_ = audio_level;
+        connection_quality_ = connection_quality;
+        connection_quality_score_ = connection_quality_score;
+        tracks_ = std::move(tracks);
+        attributes_ = std::move(attributes);
+        permission_ = permission;
+    }
+    return *this;
+}
+
+std::string Participant::sid() const { std::lock_guard<std::mutex> lock(state_mutex_); return sid_; }
+std::string Participant::identity() const { std::lock_guard<std::mutex> lock(state_mutex_); return identity_; }
+std::string Participant::name() const { std::lock_guard<std::mutex> lock(state_mutex_); return name_; }
+std::string Participant::metadata() const { std::lock_guard<std::mutex> lock(state_mutex_); return metadata_; }
+bool Participant::is_speaking() const { std::lock_guard<std::mutex> lock(state_mutex_); return speaking_; }
+float Participant::audio_level() const { std::lock_guard<std::mutex> lock(state_mutex_); return audio_level_; }
+ConnectionQuality Participant::connection_quality() const { std::lock_guard<std::mutex> lock(state_mutex_); return connection_quality_; }
+float Participant::connection_quality_score() const { std::lock_guard<std::mutex> lock(state_mutex_); return connection_quality_score_; }
+
+void Participant::set_name(const std::string& name) { std::lock_guard<std::mutex> lock(state_mutex_); name_ = name; }
+void Participant::set_metadata(const std::string& metadata) { std::lock_guard<std::mutex> lock(state_mutex_); metadata_ = metadata; }
+void Participant::set_sid(const std::string& sid) { std::lock_guard<std::mutex> lock(state_mutex_); sid_ = sid; }
+void Participant::set_speaking(bool speaking) { std::lock_guard<std::mutex> lock(state_mutex_); speaking_ = speaking; }
+void Participant::set_audio_level(float level) { std::lock_guard<std::mutex> lock(state_mutex_); audio_level_ = level; }
+void Participant::set_connection_quality(ConnectionQuality quality, float score) {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    connection_quality_ = quality;
+    connection_quality_score_ = score;
+}
+
+std::map<std::string, std::string> Participant::attributes() const { std::lock_guard<std::mutex> lock(state_mutex_); return attributes_; }
+std::string Participant::get_attribute(const std::string& key) const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const auto it = attributes_.find(key);
+    return it != attributes_.end() ? it->second : std::string();
+}
+void Participant::set_attributes(const std::map<std::string, std::string>& attrs) { std::lock_guard<std::mutex> lock(state_mutex_); attributes_ = attrs; }
+void Participant::set_attribute(const std::string& key, const std::string& val) { std::lock_guard<std::mutex> lock(state_mutex_); attributes_[key] = val; }
+ParticipantPermission Participant::permission() const { std::lock_guard<std::mutex> lock(state_mutex_); return permission_; }
+void Participant::set_permission(const ParticipantPermission& perm) { std::lock_guard<std::mutex> lock(state_mutex_); permission_ = perm; }
+std::map<std::string, std::shared_ptr<TrackPublication>> Participant::tracks() const { std::lock_guard<std::mutex> lock(state_mutex_); return tracks_; }
+void Participant::add_publication(std::shared_ptr<TrackPublication> pub) {
+    if (!pub) return;
+    const auto publication_sid = pub->sid();
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    tracks_[publication_sid] = std::move(pub);
+}
+std::shared_ptr<TrackPublication> Participant::get_publication(const std::string& sid) {
+    return static_cast<const Participant&>(*this).get_publication(sid);
+}
+std::shared_ptr<TrackPublication> Participant::get_publication(const std::string& sid) const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const auto it = tracks_.find(sid);
+    return it != tracks_.end() ? it->second : nullptr;
+}
+void Participant::remove_publication(const std::string& sid) { std::lock_guard<std::mutex> lock(state_mutex_); tracks_.erase(sid); }
+
+ParticipantStateSnapshot Participant::SnapshotState() const {
+    ParticipantStateSnapshot snapshot;
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    snapshot.sid = sid_;
+    snapshot.identity = identity_;
+    snapshot.name = name_;
+    snapshot.metadata = metadata_;
+    snapshot.speaking = speaking_;
+    snapshot.audio_level = audio_level_;
+    snapshot.connection_quality = connection_quality_;
+    snapshot.connection_quality_score = connection_quality_score_;
+    snapshot.attributes = attributes_;
+    snapshot.permission = permission_;
+    snapshot.publications.reserve(tracks_.size());
+    for (const auto& [sid, publication] : tracks_) {
+        if (publication) snapshot.publications.push_back(publication->SnapshotState());
+    }
+    return snapshot;
+}
+
 std::shared_ptr<RemoteTrackPublication> RemoteParticipant::get_remote_publication(
     const std::string& sid) const {
-    const auto it = tracks_.find(sid);
-    if (it == tracks_.end()) {
-        return nullptr;
-    }
-    return std::dynamic_pointer_cast<RemoteTrackPublication>(it->second);
+    return std::dynamic_pointer_cast<RemoteTrackPublication>(get_publication(sid));
 }
 
 static std::string GenerateUuid() {
@@ -215,7 +338,7 @@ void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
                              "legacy_publish",
                              "Room participants must use PublishTrackAsync");
     }
-    if (!permission_.can_publish) {
+    if (!permission().can_publish) {
         std::cerr << "[LocalParticipant] Permission denied: cannot publish track (can_publish is false).\n";
         return;
     }
@@ -242,7 +365,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> LocalParticipant::PublishTrac
                              "validate",
                              "track is null");
     }
-    if (!permission_.can_publish) {
+    if (!permission().can_publish) {
         throw OperationError(OperationKind::PublishTrack,
                              OperationErrorCode::PermissionDenied,
                              "validate_permission",
@@ -273,7 +396,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> LocalParticipant
                                  "track is null");
         }
     }
-    if (!permission_.can_publish) {
+    if (!permission().can_publish) {
         throw OperationError(OperationKind::PublishTrack,
                              OperationErrorCode::PermissionDenied,
                              "validate_permission",
@@ -318,10 +441,13 @@ asio::awaitable<std::shared_ptr<TrackPublication>> LocalParticipant::UnpublishTr
 
 void LocalParticipant::SetMuted(const std::string& track_sid, bool muted) {
     std::string actual_sid = track_sid;
+    std::vector<std::shared_ptr<Track>> target_tracks;
     if (actual_sid.empty()) {
-        for (const auto& [sid, pub] : tracks_) {
-            if (pub && pub->track()) {
-                pub->track()->set_muted(muted);
+        const auto publications = tracks();
+        for (const auto& [sid, pub] : publications) {
+            const auto track = pub ? pub->track() : nullptr;
+            if (track) {
+                target_tracks.push_back(track);
                 if (!sid.empty() && sid.find("TR_") == 0) {
                     actual_sid = sid;
                     break;
@@ -330,10 +456,12 @@ void LocalParticipant::SetMuted(const std::string& track_sid, bool muted) {
         }
     } else {
         auto pub = get_publication(actual_sid);
-        if (pub && pub->track()) {
-            pub->track()->set_muted(muted);
+        if (auto track = pub ? pub->track() : nullptr) {
+            target_tracks.push_back(std::move(track));
         }
     }
+
+    for (const auto& track : target_tracks) track->set_muted(muted);
 
     if (actual_sid.empty()) {
         return;
@@ -351,7 +479,7 @@ void LocalParticipant::SetMuted(const std::string& track_sid, bool muted) {
 
 void LocalParticipant::PublishData(const std::vector<uint8_t>& payload, bool reliable,
                                     const std::vector<std::string>& destination_identities, const std::string& topic) {
-    if (!permission_.can_publish_data) {
+    if (!permission().can_publish_data) {
         std::cerr << "[LocalParticipant] Permission denied: cannot publish data (can_publish_data is false).\n";
         return;
     }
@@ -363,22 +491,28 @@ void LocalParticipant::PublishData(const std::vector<uint8_t>& payload, bool rel
 }
 
 void LocalParticipant::SetAttributes(const std::map<std::string, std::string>& attributes) {
-    if (!permission_.can_update_metadata) {
-        std::cerr << "[LocalParticipant] Permission denied: cannot update metadata/attributes (can_update_metadata is false).\n";
-        return;
-    }
-
-    for (const auto& kv : attributes) {
-        attributes_[kv.first] = kv.second;
+    std::string metadata;
+    std::string identity;
+    std::map<std::string, std::string> merged_attributes;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (!permission_.can_update_metadata) {
+            std::cerr << "[LocalParticipant] Permission denied: cannot update metadata/attributes (can_update_metadata is false).\n";
+            return;
+        }
+        for (const auto& kv : attributes) attributes_[kv.first] = kv.second;
+        metadata = metadata_;
+        identity = identity_;
+        merged_attributes = attributes_;
     }
 
     if (send_handler_) {
         proto::SignalRequest req;
         auto* update_meta = req.mutable_update_metadata();
-        update_meta->set_metadata(metadata_);
-        update_meta->set_name(identity_);
+        update_meta->set_metadata(metadata);
+        update_meta->set_name(identity);
         auto* pb_attrs = update_meta->mutable_attributes();
-        for (const auto& kv : attributes_) {
+        for (const auto& kv : merged_attributes) {
             (*pb_attrs)[kv.first] = kv.second;
         }
         send_handler_(req);
