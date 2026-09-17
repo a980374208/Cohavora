@@ -860,6 +860,76 @@ add_test(NAME openmeeting_http_watchdog_test
         -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/remediation/verify_http_watchdog.cmake"
 )
 
+# CPPQT-001: the real Coordinator callbacks run against a controllable
+# admission backend, while the Room boundary is intercepted before SDK/device
+# creation. The production target continues to use the default HTTP backend.
+add_executable(test_http_admission_owner
+    tests/remediation/test_http_admission_owner.cpp
+    tests/remediation/meeting_log_test_sink.cpp
+    tests/support/test_check.h
+    src/core/meeting_coordinator.cpp
+    src/core/meeting_coordinator.h
+    src/net/openmeeting_http_client.cpp
+    src/net/openmeeting_http_client.h
+    src/net/session_manager.cpp
+    src/net/session_manager.h
+    src/net/http_types.h
+)
+target_include_directories(test_http_admission_owner BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${GEN_DIR}
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtWidgets
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtNetwork
+)
+target_link_libraries(test_http_admission_owner PRIVATE
+    livekit_signaling
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Widgets.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Network.lib
+    ${TDESKTOP_LIBS_DIR}/zlib/Release/zlibstatic.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtfreetype.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtharfbuzz.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtlibpng.lib
+    netapi32
+    userenv
+    version
+    ws2_32
+    crypt32
+    dnsapi
+    iphlpapi
+    secur32
+    imm32
+    winmm
+    wtsapi32
+)
+target_compile_definitions(test_http_admission_owner PRIVATE
+    WIN32
+    _WINDOWS
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _WINSOCK_DEPRECATED_NO_WARNINGS
+    ASIO_STANDALONE
+    WEBRTC_WIN
+    NDEBUG
+    _ITERATOR_DEBUG_LEVEL=0
+    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
+    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
+)
+target_link_options(test_http_admission_owner PRIVATE
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
+)
+set_target_properties(test_http_admission_owner PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME http_owner_remediation_test COMMAND test_http_admission_owner)
+set_tests_properties(http_owner_remediation_test PROPERTIES TIMEOUT 60)
+
 # Coordinator session runtime serialization test
 add_executable(test_meeting_session_runtime
     tests/remediation/restored/test_meeting_session_runtime.cpp

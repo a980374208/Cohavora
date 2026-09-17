@@ -237,8 +237,34 @@ signals:
     void byteStreamReceived(std::shared_ptr<livekit::ByteStreamReader> reader, const QString &senderIdentity);
 
 private:
+    struct AdmissionBackend {
+        std::function<void(const QString &, const QString &, ResultCallback<bool>)> joinMeeting;
+        std::function<void(const QString &, ResultCallback<LiveKitAuthInfo>)> getMeetingToken;
+        std::function<void(const QString &, int, ResultCallback<LiveKitAuthInfo>)> createImmediateMeeting;
+        std::function<void(const QString &, ResultCallback<bool>)> leaveMeeting;
+        std::function<void(const QString &, ResultCallback<bool>)> endMeeting;
+    };
+    using RoomStartHook = std::function<void(const QString &, const QString &)>;
+    enum class AdmissionStage {
+        None,
+        Joining,
+        FetchingToken,
+        Creating,
+        ReadyToStart,
+        Starting,
+        Consumed,
+    };
+
+    static AdmissionBackend makeDefaultAdmissionBackend(SessionManager &sessionManager);
+    MeetingCoordinator(SessionManager &sessionManager,
+                       AdmissionBackend admissionBackend,
+                       QObject *parent);
+    uint64_t beginAdmission(AdmissionStage stage);
+    uint64_t invalidateAdmission();
+    bool canBeginAdmission() const;
+    bool isAdmissionCurrent(uint64_t generation, AdmissionStage stage) const;
     void setState(MeetingState s, const QString &detail = QString());
-    void startRoomSession(const QString &url, const QString &token);
+    void startRoomSession(const QString &url, const QString &token, uint64_t admissionGeneration);
     void stopRoomSession();
     void completeRoomStartupOnUiThread(uint64_t sessionGeneration,
                                        std::shared_ptr<livekit::LocalAudioTrack> audioTrack,
@@ -267,6 +293,13 @@ private:
 
     class CoordinatorRoomListener;
     friend class CoordinatorRoomListener;
+    friend class MeetingCoordinatorTestAccess;
+
+    SessionManager &_sessionManager;
+    AdmissionBackend _admissionBackend;
+    RoomStartHook _roomStartHook;
+    uint64_t _admissionGeneration = 0;
+    AdmissionStage _admissionStage = AdmissionStage::None;
 
     MeetingState _state = MeetingState::Idle;
     QString _currentMeetingId;
