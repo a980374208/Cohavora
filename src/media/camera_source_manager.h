@@ -11,6 +11,8 @@
 #include "dshow_capture.h"
 #include "video_source.h"
 
+class CameraOwnerTestAccess;
+
 namespace livekit {
 
 enum class CameraSwitchState {
@@ -86,6 +88,12 @@ public:
                            SwitchCallback callback);
 
 private:
+    friend class ::CameraOwnerTestAccess;
+
+    using ScheduledTask = std::function<void()>;
+    using TimeoutScheduler = std::function<void(int timeout_ms, ScheduledTask task)>;
+    using CleanupScheduler = std::function<void(ScheduledTask task)>;
+
     void HandleProbeFrameReceived(uint64_t generation,
                                   std::shared_ptr<ICameraCapturer> probe_capturer,
                                   const std::string& target_device_path,
@@ -95,6 +103,11 @@ private:
 
     void HandleProbeTimeout(uint64_t generation,
                             SwitchCallback callback);
+    void DeliverSwitchResult(SwitchCallback callback,
+                             bool success,
+                             const std::string& error_message);
+    void ScheduleTimeout(int timeout_ms, ScheduledTask task);
+    void ScheduleCleanup(ScheduledTask task);
 
     mutable std::mutex state_mutex_;
     std::shared_ptr<VideoSource> output_source_;
@@ -107,6 +120,12 @@ private:
 
     CameraSwitchState switch_state_{CameraSwitchState::Idle};
     std::atomic<uint64_t> switch_generation_{0};
+
+    // Default-empty seams are installed only by the dedicated deterministic
+    // regression. Production keeps the existing detached scheduling behavior.
+    TimeoutScheduler timeout_scheduler_for_test_;
+    CleanupScheduler cleanup_scheduler_for_test_;
+    ScheduledTask before_terminal_delivery_for_test_;
 };
 
 } // namespace livekit

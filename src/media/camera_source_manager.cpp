@@ -179,83 +179,83 @@ void CameraSourceManager::SwitchDeviceAsync(const std::string& target_device_pat
     std::shared_ptr<ICameraCapturer> new_probe;
     uint64_t gen = 0;
     DShowCaptureConfig probe_config;
+    bool has_immediate_result = false;
+    bool immediate_success = false;
+    std::string immediate_error;
 
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (target_device_path == active_device_path_ && active_capturer_ && active_capturer_->IsRunning()) {
             spdlog::info("[CameraSourceManager] Target camera is already active: {}", target_device_path);
-            if (callback) {
-                callback(true, "");
+            has_immediate_result = true;
+            immediate_success = true;
+        } else {
+            gen = ++switch_generation_;
+            switch_state_ = CameraSwitchState::Probing;
+
+            if (probing_capturer_) {
+                old_probe = std::move(probing_capturer_);
             }
-            return;
-        }
 
-        gen = ++switch_generation_;
-        switch_state_ = CameraSwitchState::Probing;
+            probe_config = current_config_;
+            probe_config.device_path = target_device_path;
 
-        if (probing_capturer_) {
-            old_probe = std::move(probing_capturer_);
-        }
+            new_probe = factory_();
+            if (!new_probe) {
+                switch_state_ = CameraSwitchState::Aborted;
+                spdlog::error("[CameraSourceManager] Factory returned null capturer during switch");
+                has_immediate_result = true;
+                immediate_error = "Factory failed to create capturer";
+            } else {
+                auto probe_source = std::make_shared<VideoSource>(probe_config.width, probe_config.height);
+                auto first_frame_handled = std::make_shared<std::atomic<bool>>(false);
+                std::weak_ptr<CameraSourceManager> weak_self = shared_from_this();
 
-        probe_config = current_config_;
-        probe_config.device_path = target_device_path;
-
-        new_probe = factory_();
-        if (!new_probe) {
-            switch_state_ = CameraSwitchState::Aborted;
-            spdlog::error("[CameraSourceManager] Factory returned null capturer during switch");
-            if (callback) {
-                callback(false, "Factory failed to create capturer");
-            }
-            return;
-        }
-
-        auto probe_source = std::make_shared<VideoSource>(probe_config.width, probe_config.height);
-        auto first_frame_handled = std::make_shared<std::atomic<bool>>(false);
-        std::weak_ptr<CameraSourceManager> weak_self = shared_from_this();
-
-        probe_source->addSink([weak_self, gen, new_probe, target_device_path, callback, first_frame_handled]
-                              (const VideoFrame& frame, const VideoCaptureOptions& options) {
-            if (first_frame_handled->exchange(true)) {
-                if (auto self = weak_self.lock()) {
-                    if (auto out = self->GetOutputSource()) {
-                        out->captureFrame(frame, options);
+                probe_source->addSink([weak_self, gen, new_probe, target_device_path, callback, first_frame_handled]
+                                      (const VideoFrame& frame, const VideoCaptureOptions& options) {
+                    if (first_frame_handled->exchange(true)) {
+                        if (auto self = weak_self.lock()) {
+                            if (auto out = self->GetOutputSource()) {
+                                out->captureFrame(frame, options);
+                            }
+                        }
+                        return;
                     }
+                    if (auto self = weak_self.lock()) {
+                        self->HandleProbeFrameReceived(gen, new_probe, target_device_path, frame, options, callback);
+                    }
+                });
+
+                if (!new_probe->Init(probe_config, probe_source) || !new_probe->Start()) {
+                    switch_state_ = CameraSwitchState::Aborted;
+                    spdlog::error("[CameraSourceManager] Failed to init/start probe capturer for: {}", target_device_path);
+                    has_immediate_result = true;
+                    immediate_error = "Failed to start replacement camera device";
+                } else {
+                    probing_capturer_ = new_probe;
                 }
-                return;
             }
-            if (auto self = weak_self.lock()) {
-                self->HandleProbeFrameReceived(gen, new_probe, target_device_path, frame, options, callback);
-            }
-        });
-
-        if (!new_probe->Init(probe_config, probe_source) || !new_probe->Start()) {
-            switch_state_ = CameraSwitchState::Aborted;
-            spdlog::error("[CameraSourceManager] Failed to init/start probe capturer for: {}", target_device_path);
-            if (callback) {
-                callback(false, "Failed to start replacement camera device");
-            }
-            return;
         }
-
-        probing_capturer_ = new_probe;
     }
 
     if (old_probe) {
         old_probe->Stop();
     }
 
+    if (has_immediate_result) {
+        DeliverSwitchResult(std::move(callback), immediate_success, immediate_error);
+        return;
+    }
+
     spdlog::info("[CameraSourceManager] Probing replacement camera: {} (timeout: {}ms, gen: {})",
                  target_device_path, timeout_ms, gen);
 
-    // 启动超时检测
     std::weak_ptr<CameraSourceManager> weak_self = shared_from_this();
-    std::thread([weak_self, gen, timeout_ms, callback]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+    ScheduleTimeout(timeout_ms, [weak_self, gen, callback]() mutable {
         if (auto self = weak_self.lock()) {
-            self->HandleProbeTimeout(gen, callback);
+            self->HandleProbeTimeout(gen, std::move(callback));
         }
-    }).detach();
+    });
 }
 
 void CameraSourceManager::HandleProbeFrameReceived(uint64_t generation,
@@ -294,14 +294,12 @@ void CameraSourceManager::HandleProbeFrameReceived(uint64_t generation,
 
     // 异步安全释放旧设备
     if (old_active) {
-        std::thread([old_active]() {
+        ScheduleCleanup([old_active]() {
             old_active->Stop();
-        }).detach();
+        });
     }
 
-    if (callback) {
-        callback(true, "");
-    }
+    DeliverSwitchResult(std::move(callback), true, "");
 }
 
 void CameraSourceManager::HandleProbeTimeout(uint64_t generation, SwitchCallback callback) {
@@ -320,14 +318,48 @@ void CameraSourceManager::HandleProbeTimeout(uint64_t generation, SwitchCallback
     }
 
     if (timed_out_probe) {
-        std::thread([timed_out_probe]() {
+        ScheduleCleanup([timed_out_probe]() {
             timed_out_probe->Stop();
-        }).detach();
+        });
     }
 
-    if (callback) {
-        callback(false, "Timeout waiting for first usable frame from target camera");
+    DeliverSwitchResult(
+        std::move(callback),
+        false,
+        "Timeout waiting for first usable frame from target camera");
+}
+
+void CameraSourceManager::DeliverSwitchResult(
+        SwitchCallback callback,
+        bool success,
+        const std::string& error_message) {
+    if (before_terminal_delivery_for_test_) {
+        before_terminal_delivery_for_test_();
     }
+    if (callback) {
+        callback(success, error_message);
+    }
+}
+
+void CameraSourceManager::ScheduleTimeout(int timeout_ms, ScheduledTask task) {
+    if (timeout_scheduler_for_test_) {
+        timeout_scheduler_for_test_(timeout_ms, std::move(task));
+        return;
+    }
+    std::thread([timeout_ms, task = std::move(task)]() mutable {
+        std::this_thread::sleep_for(std::chrono::milliseconds(timeout_ms));
+        task();
+    }).detach();
+}
+
+void CameraSourceManager::ScheduleCleanup(ScheduledTask task) {
+    if (cleanup_scheduler_for_test_) {
+        cleanup_scheduler_for_test_(std::move(task));
+        return;
+    }
+    std::thread([task = std::move(task)]() mutable {
+        task();
+    }).detach();
 }
 
 } // namespace livekit

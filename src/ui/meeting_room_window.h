@@ -15,6 +15,7 @@
 #include "src/ui/participants_sidebar_widget.h"
 #include "src/ui/meeting_chat_sidebar_widget.h"
 #include "src/ui/dx11/dx11_video_canvas.h"
+#include "src/ui/camera_switch_completion_owner.h"
 #include <mmsystem.h>
 
 #include <QtWidgets/QWidget>
@@ -35,6 +36,7 @@
 #include <atomic>
 #include <mutex>
 #include <cstring>
+#include <functional>
 
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -46,6 +48,8 @@
 #ifndef AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
 #define AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY 0x08000000
 #endif
+
+class CameraOwnerTestAccess;
 
 namespace MeetingUI {
 
@@ -289,6 +293,8 @@ protected:
 	void leaveEventHook(QEvent *e) override;
 
 private:
+	friend class ::CameraOwnerTestAccess;
+
 	struct ToolItem {
 		int id;
 		QString title;
@@ -391,6 +397,19 @@ private slots:
 	void onRemoteRenderTick();
 
 private:
+	friend class ::CameraOwnerTestAccess;
+
+	struct CameraOwnerTestTag final {};
+	using CameraLogEffect = std::function<void(bool error, const QString &tag, const QString &message)>;
+	using CameraWarningEffect = std::function<void(QWidget *parent, const QString &title, const QString &message)>;
+
+	MeetingRoomWindow(
+		CameraOwnerTestTag,
+		const Config &config,
+		std::shared_ptr<livekit::CameraSourceManager> cameraManager,
+		OpenMeeting::SessionManager &sessionManager,
+		QWidget *parent = nullptr);
+
 	void setupNativeWindow();
 	void initLayout();
 	void updateVideoLayout();
@@ -398,6 +417,16 @@ private:
 	void fallBackToQtCpuBackend();
 	void syncDx11CanvasLayout(const std::vector<VideoTileWidget*> &tiles);
 	void setupCoordinatorBindings();
+	void setupCameraCompletionOwner(OpenMeeting::SessionManager &sessionManager);
+	void bindCameraDeviceChanges();
+	void requestCameraSwitch(const QString &devicePath);
+	void handleCameraSwitchResult(
+		const CameraSwitchCompletionOwner::Ticket &ticket,
+		const QString &devicePath,
+		bool success,
+		const std::string &error);
+	void invalidateCameraCompletion();
+	void stopCameraCapture();
 	void startLiveKitSession();
 	void stopLiveKitSession();
 
@@ -438,6 +467,10 @@ private:
 	// 本地摄像头采集与模拟流
 	std::shared_ptr<livekit::CameraSourceManager> _cameraManager;
 	std::shared_ptr<livekit::DShowVideoCapture> _dshowCap;
+	std::unique_ptr<CameraSwitchCompletionOwner> _cameraCompletionOwner;
+	OpenMeeting::SessionManager *_cameraSessionManager = nullptr;
+	CameraLogEffect _cameraLogEffect;
+	CameraWarningEffect _cameraWarningEffect;
 	QString _currentCameraPath;
 	bool _usingRealCamera = false;
 	QTimer *_localGenTimer = nullptr;

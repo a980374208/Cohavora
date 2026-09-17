@@ -14,6 +14,8 @@
 #include <QtGui/QWindow>
 #include <QtCore/QDateTime>
 #include <QtCore/QDebug>
+#include <QtCore/QPointer>
+#include <QtCore/QThread>
 #include <cmath>
 
 #if defined(Q_OS_WIN)
@@ -1785,6 +1787,7 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	if (!_coordinator) {
 		_coordinator = OpenMeeting::MeetingCoordinator::create(this);
 	}
+	setupCameraCompletionOwner(OpenMeeting::SessionManager::instance());
 	setWindowTitle(QString::fromUtf8("LiveKit 会议室 - %1").arg(config.displayName));
 	resize(1120, 720);
 	setMinimumSize(850, 560);
@@ -1910,7 +1913,31 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	MeetingLogConsoleWindow::Instance().raise();
 }
 
+MeetingRoomWindow::MeetingRoomWindow(
+		CameraOwnerTestTag,
+		const Config &config,
+		std::shared_ptr<livekit::CameraSourceManager> cameraManager,
+		OpenMeeting::SessionManager &sessionManager,
+		QWidget *parent)
+:	Ui::RpWidget(parent),
+	_config(config),
+	_cameraManager(std::move(cameraManager)) {
+	setObjectName("MeetingRoomWindowCameraOwnerFixture");
+	_topBar = new RoomTopBarWidget(this);
+	_stageContainer = new QWidget(this);
+	_bottomBar = new RoomBottomBarWidget(this);
+	_localTile = new VideoTileWidget(
+		QString::fromUtf8("%1 (我)").arg(_config.displayName),
+		true,
+		_stageContainer);
+	_localTile->setIdentity("local");
+	_localTile->setVideoActive(_config.videoEnabled);
+	setupCameraCompletionOwner(sessionManager);
+	bindCameraDeviceChanges();
+}
+
 MeetingRoomWindow::~MeetingRoomWindow() {
+	invalidateCameraCompletion();
 	stopLiveKitSession();
 }
 
@@ -1921,6 +1948,7 @@ void MeetingRoomWindow::showEvent(QShowEvent *e) {
 }
 
 void MeetingRoomWindow::closeEvent(QCloseEvent *e) {
+	invalidateCameraCompletion();
 	stopLiveKitSession();
 	Ui::RpWidget::closeEvent(e);
 }
@@ -2407,35 +2435,159 @@ void MeetingRoomWindow::initLayout() {
 		LogToConsole(LogCategory::Media, "DEVICE", QString("扬声器播放设备已切换为索引: %1").arg(idx));
 	}, lifetime());
 
-	_bottomBar->videoDeviceChanged() | rpl::on_next([this](const QString &devPath) {
-		_currentCameraPath = devPath;
-		if (_cameraManager) {
-			LogToConsole(LogCategory::Media, "CAMERA_SWITCH",
-			             QString("正在平滑切换摄像头至: %1 ...").arg(devPath));
-			_cameraManager->SwitchDeviceAsync(devPath.toStdString(), 3000,
-				[this, devPath](bool success, const std::string &err) {
-					QMetaObject::invokeMethod(this, [this, devPath, success, err]() {
-						if (success) {
-							_usingRealCamera = true;
-							if (_localTile) {
-								_localTile->setVideoActive(_config.videoEnabled && _usingRealCamera);
-							}
-							LogToConsole(LogCategory::Media, "CAMERA_SWITCH",
-							             QString("摄像头平滑切换成功: %1").arg(devPath));
-						} else {
-							LogToConsole(LogCategory::Error, "CAMERA_SWITCH",
-							             QString("摄像头切换失败，已自动回滚原设备: %1").arg(QString::fromStdString(err)));
-							QMessageBox::warning(this, QString::fromUtf8("摄像头切换失败"),
-								QString::fromUtf8("无法启动所选摄像头设备，已保持原设备采集。\n原因: %1")
-								.arg(QString::fromStdString(err)));
-						}
-					}, Qt::QueuedConnection);
-				});
-		}
-	}, lifetime());
+	bindCameraDeviceChanges();
 
 	_localGenTimer = new QTimer(this);
 	connect(_localGenTimer, &QTimer::timeout, this, &MeetingRoomWindow::onLocalVideoGenerated);
+}
+
+void MeetingRoomWindow::setupCameraCompletionOwner(
+		OpenMeeting::SessionManager &sessionManager) {
+	Q_ASSERT(thread() == QThread::currentThread());
+	Q_ASSERT(sessionManager.thread() == thread());
+	_cameraSessionManager = &sessionManager;
+	if (!_cameraLogEffect) {
+		_cameraLogEffect = [](bool error, const QString &tag, const QString &message) {
+			LogToConsole(error ? LogCategory::Error : LogCategory::Media, tag, message);
+		};
+	}
+	if (!_cameraWarningEffect) {
+		_cameraWarningEffect = [](QWidget *parent, const QString &title, const QString &message) {
+			QMessageBox::warning(parent, title, message);
+		};
+	}
+
+	QPointer<MeetingRoomWindow> window(this);
+	_cameraCompletionOwner = std::make_unique<CameraSwitchCompletionOwner>(
+		this,
+		[window](const CameraSwitchCompletionOwner::Ticket &ticket,
+		         const QString &devicePath,
+		         bool success,
+		         const std::string &error) {
+			if (window) {
+				window->handleCameraSwitchResult(ticket, devicePath, success, error);
+			}
+		});
+
+	connect(&sessionManager,
+	        &OpenMeeting::SessionManager::sessionInvalidated,
+	        this,
+	        [this](OpenMeeting::SessionInvalidationReason) {
+			invalidateCameraCompletion();
+		});
+	connect(&sessionManager,
+	        &OpenMeeting::SessionManager::sessionInvalidated,
+	        this,
+	        &MeetingRoomWindow::onSessionInvalidated,
+	        Qt::QueuedConnection);
+}
+
+void MeetingRoomWindow::bindCameraDeviceChanges() {
+	Q_ASSERT(_bottomBar != nullptr);
+	_bottomBar->videoDeviceChanged() | rpl::on_next([this](const QString &devicePath) {
+		requestCameraSwitch(devicePath);
+	}, lifetime());
+}
+
+void MeetingRoomWindow::requestCameraSwitch(const QString &devicePath) {
+	Q_ASSERT(thread() == QThread::currentThread());
+	if (!_cameraCompletionOwner || !_cameraManager || !_cameraSessionManager) {
+		return;
+	}
+	if (_cameraSessionManager->isSessionInvalidating()) {
+		invalidateCameraCompletion();
+		return;
+	}
+
+	_currentCameraPath = devicePath;
+	const auto ticket = _cameraCompletionOwner->beginRequest(devicePath);
+	if (!ticket) {
+		return;
+	}
+	auto manager = _cameraManager;
+	auto callback = _cameraCompletionOwner->makeCallback(ticket);
+	const auto logEffect = _cameraLogEffect;
+	QPointer<MeetingRoomWindow> guard(this);
+	if (logEffect) {
+		logEffect(false, "CAMERA_SWITCH",
+			QString("正在平滑切换摄像头至: %1 ...").arg(devicePath));
+	}
+	if (!guard || !ticket.isCurrent()) {
+		return;
+	}
+	if (!guard->_cameraSessionManager
+		|| guard->_cameraSessionManager->isSessionInvalidating()) {
+		guard->invalidateCameraCompletion();
+		return;
+	}
+	manager->SwitchDeviceAsync(
+		devicePath.toStdString(),
+		3000,
+		std::move(callback));
+}
+
+void MeetingRoomWindow::handleCameraSwitchResult(
+		const CameraSwitchCompletionOwner::Ticket &ticket,
+		const QString &devicePath,
+		bool success,
+		const std::string &error) {
+	Q_ASSERT(thread() == QThread::currentThread());
+	if (!ticket.isCurrent() || !_cameraSessionManager) {
+		return;
+	}
+	if (_cameraSessionManager->isSessionInvalidating()) {
+		invalidateCameraCompletion();
+		return;
+	}
+
+	const auto logEffect = _cameraLogEffect;
+	const auto warningEffect = _cameraWarningEffect;
+	QPointer<MeetingRoomWindow> guard(this);
+	if (success) {
+		_usingRealCamera = true;
+		if (_localTile) {
+			_localTile->setVideoActive(_config.videoEnabled && _usingRealCamera);
+		}
+		if (logEffect) {
+			logEffect(false, "CAMERA_SWITCH",
+				QString("摄像头平滑切换成功: %1").arg(devicePath));
+		}
+		return;
+	}
+
+	const auto errorText = QString::fromStdString(error);
+	if (logEffect) {
+		logEffect(true, "CAMERA_SWITCH",
+			QString("摄像头切换失败，已自动回滚原设备: %1").arg(errorText));
+	}
+	if (!guard || !ticket.isCurrent() || !guard->_cameraSessionManager
+		|| guard->_cameraSessionManager->isSessionInvalidating()) {
+		return;
+	}
+	if (warningEffect) {
+		warningEffect(
+			guard,
+			QString::fromUtf8("摄像头切换失败"),
+			QString::fromUtf8("无法启动所选摄像头设备，已保持原设备采集。\n原因: %1")
+				.arg(errorText));
+	}
+}
+
+void MeetingRoomWindow::invalidateCameraCompletion() {
+	if (_cameraCompletionOwner) {
+		_cameraCompletionOwner->invalidate();
+	}
+}
+
+void MeetingRoomWindow::stopCameraCapture() {
+	auto manager = std::move(_cameraManager);
+	auto legacyCapture = std::move(_dshowCap);
+	if (manager) {
+		manager->Stop();
+	}
+	if (legacyCapture) {
+		legacyCapture->Stop();
+	}
 }
 
 void MeetingRoomWindow::onTimerTick() {
@@ -3247,7 +3399,15 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	        this, &MeetingRoomWindow::onMeetingDetailUpdated);
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
 	        this, [this](OpenMeeting::MeetingState state, const QString &detail) {
+		if (state == OpenMeeting::MeetingState::Leaving
+			|| state == OpenMeeting::MeetingState::Failed) {
+			invalidateCameraCompletion();
+		}
+		QPointer<MeetingRoomWindow> guard(this);
 		updateRecoveryStateUi(state, detail);
+		if (!guard) {
+			return;
+		}
 		if (state == OpenMeeting::MeetingState::InMeeting) {
 			_room = _coordinator->room();
 			if (_room) {
@@ -3272,19 +3432,22 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		if (!_coordinator || _coordinator->state() != OpenMeeting::MeetingState::Failed) {
 			return;
 		}
+		invalidateCameraCompletion();
+		QPointer<MeetingRoomWindow> guard(this);
 		LogToConsole(LogCategory::Error, "SESSION_STARTUP", QString("%1: %2").arg(title, message));
+		if (!guard) {
+			return;
+		}
 		QMessageBox::critical(this, title, message);
-		close();
+		if (guard) {
+			guard->close();
+		}
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingLeft,
 	        this, [this]() {
+		invalidateCameraCompletion();
 		close();
 	});
-	connect(&OpenMeeting::SessionManager::instance(),
-	        &OpenMeeting::SessionManager::sessionInvalidated,
-	        this,
-	        &MeetingRoomWindow::onSessionInvalidated,
-	        Qt::QueuedConnection);
 
 	if (!_coordinator->currentMeetingId().isEmpty()) {
 		if (_topBar) _topBar->setMeetingId(_coordinator->currentMeetingId());
@@ -3299,10 +3462,14 @@ void MeetingRoomWindow::onKickedOff(const QString &reason, int reasonCode) {
 		OpenMeeting::SessionManager::instance().isSessionInvalidating()) {
 		return;
 	}
+	invalidateCameraCompletion();
+	QPointer<MeetingRoomWindow> guard(this);
 	QMessageBox::warning(this, QString::fromUtf8("移出会议"),
 	                     QString::fromUtf8("您已被主持人移出会议。\n原因: %1 (代码: %2)")
 	                     .arg(reason.isEmpty() ? QString::fromUtf8("未指定") : reason).arg(reasonCode));
-	close();
+	if (guard) {
+		guard->close();
+	}
 }
 
 void MeetingRoomWindow::onMeetingKickOff(livekit::RoomDisconnectReason reason) {
@@ -3316,27 +3483,35 @@ void MeetingRoomWindow::onMeetingKickOff(livekit::RoomDisconnectReason reason) {
 		return;
 	}
 
+	invalidateCameraCompletion();
 	LogToConsole(LogCategory::Connection, "DUPLICATE_IDENTITY",
 	             "[UI] Show duplicate login dialog");
 	// QMessageBox::warning 是模态调用；用户确认前不会关闭会议窗口，避免
 	// 服务器主动踢出表现为无提示的窗口消失。
+	QPointer<MeetingRoomWindow> guard(this);
 	QMessageBox::warning(this,
 	                     QString::fromUtf8("会议已退出"),
 	                     QString::fromUtf8("您的账号已在其他设备加入此会议，当前客户端已被强制退出。"));
-	close();
+	if (guard) {
+		guard->close();
+	}
 }
 
 void MeetingRoomWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason) {
+	invalidateCameraCompletion();
 	if (_closingForSessionInvalidation) {
 		return;
 	}
 	_closingForSessionInvalidation = true;
+	QPointer<MeetingRoomWindow> guard(this);
 	LogToConsole(LogCategory::Connection, "SESSION_INVALIDATED",
 	             QString("[UI] Close meeting window for invalidated account session, reason=%1")
 	                 .arg(static_cast<int>(reason)));
 
 	// 不在会议窗口重复弹窗；全局提示和重新登录由 MeetingMainWindow 统一负责。
-	close();
+	if (guard) {
+		guard->close();
+	}
 }
 
 void MeetingRoomWindow::onRemoteMuteRequested(bool isVideo, bool mute, const QString &operatorId) {
@@ -3409,20 +3584,26 @@ void MeetingRoomWindow::handleEndMeetingClicked() {
 		auto *cancelBtn = box.addButton(QString::fromUtf8("取消"), QMessageBox::RejectRole);
 		box.exec();
 		if (box.clickedButton() == leaveBtn) {
+			invalidateCameraCompletion();
+			QPointer<MeetingRoomWindow> guard(this);
 			_coordinator->leaveMeetingAsync(false);
-			close();
+			if (guard) guard->close();
 		} else if (box.clickedButton() == endBtn) {
+			invalidateCameraCompletion();
+			QPointer<MeetingRoomWindow> guard(this);
 			_coordinator->leaveMeetingAsync(true);
-			close();
+			if (guard) guard->close();
 		}
 	} else {
 		if (QMessageBox::question(this, QString::fromUtf8("离开会议"),
 			QString::fromUtf8("您确定要离开当前会议吗？"),
 			QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+			invalidateCameraCompletion();
+			QPointer<MeetingRoomWindow> guard(this);
 			if (_coordinator) {
 				_coordinator->leaveMeetingAsync(false);
 			}
-			close();
+			if (guard) guard->close();
 		}
 	}
 }
@@ -3468,7 +3649,9 @@ void MeetingRoomWindow::startLiveKitSession() {
 }
 
 void MeetingRoomWindow::stopLiveKitSession() {
+	invalidateCameraCompletion();
 	if (!_sessionRunning.exchange(false)) {
+		stopCameraCapture();
 		return;
 	}
 
@@ -3486,14 +3669,7 @@ void MeetingRoomWindow::stopLiveKitSession() {
 		_wasapiCap.reset();
 	}
 	livekit::WebRTCManager::Instance().SetApmProcessor(nullptr);
-	if (_cameraManager) {
-		_cameraManager->Stop();
-		_cameraManager.reset();
-	}
-	if (_dshowCap) {
-		_dshowCap->Stop();
-		_dshowCap.reset();
-	}
+	stopCameraCapture();
 
 	if (_coordinator && _coordinator->state() != OpenMeeting::MeetingState::Failed) {
 		_coordinator->leaveMeetingAsync(false);

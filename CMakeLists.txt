@@ -612,6 +612,8 @@ add_executable(livekit_meeting_app
     src/ui/meeting_main_window.h
     src/ui/meeting_room_window.cpp
     src/ui/meeting_room_window.h
+    src/ui/camera_switch_completion_owner.cpp
+    src/ui/camera_switch_completion_owner.h
     src/ui/meeting_log_console.cpp
     src/ui/meeting_log_console.h
     src/ui/meeting_ui_integration.h
@@ -743,6 +745,142 @@ target_link_options(livekit_meeting_app PRIVATE
 )
 
 enable_testing()
+
+# CPPQT-002: real MeetingRoomWindow wiring with deterministic native camera
+# completion scheduling. The fixture does not start network or physical media.
+add_executable(test_camera_owner_remediation
+    tests/remediation/test_camera_owner_remediation.cpp
+    tests/support/test_check.h
+    src/net/http_types.h
+    src/net/openmeeting_http_client.h
+    src/net/openmeeting_http_client.cpp
+    src/net/session_manager.h
+    src/net/session_manager.cpp
+    src/ui/camera_switch_completion_owner.h
+    src/ui/camera_switch_completion_owner.cpp
+    src/ui/meeting_room_window.h
+    src/ui/meeting_room_window.cpp
+    src/ui/meeting_log_console.h
+    src/ui/meeting_log_console.cpp
+    src/ui/audio_visualizer_widget.h
+    src/ui/audio_visualizer_widget.cpp
+    src/ui/participants_list_model.h
+    src/ui/participants_list_model.cpp
+    src/ui/participant_item_delegate.h
+    src/ui/participant_item_delegate.cpp
+    src/ui/participants_sidebar_widget.h
+    src/ui/participants_sidebar_widget.cpp
+    src/ui/meeting_chat_sidebar_widget.h
+    src/ui/meeting_chat_sidebar_widget.cpp
+    src/core/meeting_coordinator.h
+    src/core/meeting_coordinator.cpp
+    src/render/qt_cpu_video_renderer.h
+    src/render/qt_cpu_video_renderer.cpp
+    src/render/video_render_session.h
+    src/render/video_render_session.cpp
+    src/ui/dx11/dx11_types.h
+    src/ui/dx11/dx11_shaders.h
+    src/ui/dx11/dx11_renderer.h
+    src/ui/dx11/dx11_renderer.cpp
+    src/ui/dx11/dx11_texture_pool.h
+    src/ui/dx11/dx11_texture_pool.cpp
+    src/ui/dx11/dx11_video_canvas.h
+    src/ui/dx11/dx11_video_canvas.cpp
+)
+target_include_directories(test_camera_owner_remediation BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${GEN_DIR}
+    ${WEBRTC_ROOT}/include/third_party/libyuv/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_ui
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/gen
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/gen/styles
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_base
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_rpl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_crl
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/GSL/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/range-v3/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/expected/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/xxHash
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore/5.15.18
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore/5.15.18/QtCore
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui/5.15.18
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui/5.15.18/QtGui
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtWidgets
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtNetwork
+    ${TDESKTOP_LIBS_DIR}/zlib/include
+)
+target_link_libraries(test_camera_owner_remediation PRIVATE
+    desktop_lib_ui
+    desktop_lib_base
+    desktop_lib_crl
+    desktop_lz4
+    ${TDESKTOP_LIBS_DIR}/tg_angle/out/Release/tg_angle.lib
+    ${TDESKTOP_LIBS_DIR}/zlib/Release/zlibstatic.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Widgets.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Network.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Svg.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5FontDatabaseSupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5EventDispatcherSupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5ThemeSupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5WindowsUIAutomationSupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5AccessibilitySupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5DeviceDiscoverySupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5EdidSupport.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtfreetype.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtharfbuzz.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtlibpng.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/platforms/qwindows.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/styles/qwindowsvistastyle.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qsvg.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qico.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qjpeg.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qgif.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/iconengines/qsvgicon.lib
+    ${TDESKTOP_LIBS_DIR}/mozjpeg/release/jpeg-static.lib
+    livekit_signaling
+    Dwmapi
+    UxTheme
+    d3d9
+    dxgi
+    d3d11
+    d3dcompiler
+    dxguid
+    netapi32
+    userenv
+    imm32
+    winmm
+    wtsapi32
+    version
+)
+target_compile_definitions(test_camera_owner_remediation PRIVATE
+    WIN32
+    _WINDOWS
+    WIN32_LEAN_AND_MEAN
+    NOMINMAX
+    _WINSOCK_DEPRECATED_NO_WARNINGS
+    CRL_USE_WINAPI
+    ASIO_STANDALONE
+    WEBRTC_WIN
+    NDEBUG
+    _ITERATOR_DEBUG_LEVEL=0
+    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
+    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
+)
+target_link_options(test_camera_owner_remediation PRIVATE
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
+)
+set_target_properties(test_camera_owner_remediation PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME camera_owner_remediation_test COMMAND test_camera_owner_remediation)
+set_tests_properties(camera_owner_remediation_test PROPERTIES TIMEOUT 60)
 
 # This verifier proves checks execute under the same inherited NDEBUG flags as
 # the native application; dependency ABI definitions must remain unchanged.
