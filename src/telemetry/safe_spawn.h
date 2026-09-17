@@ -6,6 +6,7 @@
 #include <functional>
 #include <string>
 #include "crash_handler.h"
+#include "log_redaction.h"
 
 namespace livekit {
 
@@ -21,9 +22,9 @@ void safe_co_spawn(Executor&& exec, F&& factor_coro,
         [factor_coro = std::forward<F>(factor_coro)]() -> asio::awaitable<void> {
             try {
                 co_await factor_coro();
-            } catch (const std::exception& e) {
-                std::string err_msg = std::string("Unhandled coroutine std::exception: ") + e.what();
-                std::cerr << "[CRITICAL COROUTINE EXCEPTION]: " << err_msg << std::endl;
+            } catch (const std::exception&) {
+                std::cerr << "[CRITICAL COROUTINE EXCEPTION]: "
+                          << secure_log::ExceptionSummary("coroutine_execute") << std::endl;
                 CrashHandler::FlushLogs();
                 throw; // 传递给 completion token 统一处理
             } catch (...) {
@@ -36,12 +37,13 @@ void safe_co_spawn(Executor&& exec, F&& factor_coro,
             if (ep) {
                 try {
                     std::rethrow_exception(ep);
-                } catch (const std::exception& e) {
-                    std::string msg = std::string("Coroutine crashed: ") + e.what();
+                } catch (const std::exception&) {
                     if (on_error) {
                         on_error(ep);
                     } else {
-                        CrashHandler::TriggerPanic(msg, /*raise_sigterm=*/false);
+                        CrashHandler::TriggerPanic(
+                            secure_log::ExceptionSummary("coroutine_completion"),
+                            /*raise_sigterm=*/false);
                     }
                 } catch (...) {
                     if (on_error) {

@@ -20,6 +20,7 @@
 #include "video_source.h"
 #include "local_audio_track.h"
 #include "local_video_track.h"
+#include "log_redaction.h"
 #include "wasapi_types.h"
 #include "wasapi_enumerator.h"
 #include "wasapi_capture.h"
@@ -42,7 +43,9 @@ public:
 
     void OnDisconnected(const std::string& reason) override {
         std::cout << "\n[DISCONNECTED] Room disconnected. Reason: "
-                  << (reason.empty() ? "Normal Disconnect" : reason) << std::endl;
+                  << (reason.empty() ? "Normal Disconnect"
+                                     : livekit::secure_log::OpaqueSummary("room_disconnect"))
+                  << std::endl;
     }
 
     void OnReconnecting() override {
@@ -261,7 +264,8 @@ int main(int argc, char* argv[]) {
     std::cout << "\n===================================================================\n";
     std::cout << "        Starting LiveKit Real-Time Media Broadcaster               \n";
     std::cout << "===================================================================\n";
-    std::cout << "  Server URL:    " << url << "\n";
+    std::cout << "  Server URL:    "
+              << livekit::secure_log::EndpointSummary(url) << "\n";
     std::cout << "  Audio Mode:    " << audio_mode << "\n";
     std::cout << "  Video Mode:    " << video_mode;
     if (video_width > 0 && video_height > 0) {
@@ -456,8 +460,10 @@ int main(int argc, char* argv[]) {
             }
 
             std::cout << "\n[BROADCASTING] Streaming live media to room! Press Ctrl+C to stop broadcasting.\n";
-        } catch (const std::exception& e) {
-            std::cout << "[EXCEPTION] Error in room connection coroutine: " << e.what() << std::endl;
+        } catch (const std::exception&) {
+            std::cout << "[EXCEPTION] Error in room connection coroutine: "
+                      << livekit::secure_log::ExceptionSummary("media_broadcaster_connect")
+                      << std::endl;
             pattern_running.store(false);
             io_ctx.stop();
         }
@@ -488,8 +494,10 @@ int main(int argc, char* argv[]) {
                 last_time = now;
 
                 livekit::Telemetry::Instance().PrintMetricsReport(stats, send_bitrate_mbps);
-            } catch (const std::exception& e) {
-                std::cout << "[TELEMETRY ERROR] " << e.what() << std::endl;
+            } catch (const std::exception&) {
+                std::cout << "[TELEMETRY ERROR] "
+                          << livekit::secure_log::ExceptionSummary("telemetry_export")
+                          << std::endl;
             } catch (...) {}
 
             // 每 3 分钟自动刷新打印一次遥测面板

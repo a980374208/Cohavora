@@ -1,4 +1,5 @@
 #include "crash_handler.h"
+#include "log_redaction.h"
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -35,9 +36,11 @@ void CrashHandler::FlushLogs() {
 }
 
 void CrashHandler::TriggerPanic(const std::string& message, bool raise_sigterm) {
+    (void)message;
+    const std::string safe_message = secure_log::OpaqueSummary("panic");
     // 类似于 client-sdk-cpp ffi_client.cpp:L260-L265
     std::cerr << "\n==================================================\n"
-              << "[CRITICAL PANIC]: " << message << "\n"
+              << "[CRITICAL PANIC]: " << safe_message << "\n"
               << "==================================================\n"
               << std::endl;
 
@@ -51,7 +54,7 @@ void CrashHandler::TriggerPanic(const std::string& message, bool raise_sigterm) 
 
     if (cb_copy) {
         try {
-            cb_copy(message);
+            cb_copy(safe_message);
         } catch (...) {
             // 防止回调再次崩溃
         }

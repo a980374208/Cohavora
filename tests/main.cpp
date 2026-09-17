@@ -675,6 +675,8 @@ class TestRoomListener : public livekit::RoomListener {
 public:
     bool connected_called = false;
     bool disconnected_called = false;
+    livekit::RoomDisconnectReason disconnected_reason = livekit::RoomDisconnectReason::Unknown;
+    std::string disconnected_detail;
     std::shared_ptr<livekit::RemoteParticipant> connected_participant = nullptr;
     std::shared_ptr<livekit::RemoteParticipant> disconnected_participant = nullptr;
     std::shared_ptr<livekit::Participant> muted_participant = nullptr;
@@ -684,8 +686,11 @@ public:
     void OnConnected() override {
         connected_called = true;
     }
-    void OnDisconnected(const std::string&) override {
+    void OnDisconnected(livekit::RoomDisconnectReason reason,
+                        const std::string& detail) override {
         disconnected_called = true;
+        disconnected_reason = reason;
+        disconnected_detail = detail;
     }
     void OnParticipantConnected(std::shared_ptr<livekit::RemoteParticipant> participant) override {
         connected_participant = participant;
@@ -1153,6 +1158,12 @@ asio::awaitable<void> TestRoomReconnectExhaustion() {
 
     TEST_ASSERT(room->connection_state() == livekit::ConnectionState::Disconnected, "Room should be Disconnected after reconnect exhaustion");
     TEST_ASSERT(listener->disconnected_called, "OnDisconnected was not called after reconnect exhaustion");
+    TEST_ASSERT(listener->disconnected_reason == livekit::RoomDisconnectReason::NetworkError,
+                "Reconnect exhaustion lost its typed disconnect reason");
+    TEST_ASSERT(listener->disconnected_detail.rfind("Reconnect failed: ", 0) == 0,
+                "Reconnect exhaustion replaced its business detail: " + listener->disconnected_detail);
+    TEST_ASSERT(listener->disconnected_detail.find("error{stage=") == std::string::npos,
+                "Reconnect business detail was replaced by a diagnostic summary");
 
     room->Disconnect();
     std::cout << "TestRoomReconnectExhaustion PASSED!" << std::endl;

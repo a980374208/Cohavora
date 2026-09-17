@@ -129,6 +129,7 @@ set(LIVEKIT_SOURCES
     src/e2ee/key_provider.cpp
     src/e2ee/frame_cryptor.cpp
     src/telemetry/crash_handler.cpp
+    src/telemetry/log_redaction.cpp
     src/telemetry/stats_collector.cpp
 )
 
@@ -175,6 +176,7 @@ set(LIVEKIT_HEADERS
     src/telemetry/stats_collector.h
     src/telemetry/telemetry.h
     src/telemetry/crash_handler.h
+    src/telemetry/log_redaction.h
     src/telemetry/safe_spawn.h
     src/telemetry/coro_allocator.h
 )
@@ -881,6 +883,52 @@ set_target_properties(test_camera_owner_remediation PROPERTIES
 )
 add_test(NAME camera_owner_remediation_test COMMAND test_camera_owner_remediation)
 set_tests_properties(camera_owner_remediation_test PROPERTIES TIMEOUT 60)
+
+# PR-SEC-001: typed safe summaries, production output boundary, and
+# connection-handshake wire/log separation.
+add_executable(test_log_redaction
+    tests/remediation/test_log_redaction.cpp
+    tests/support/test_check.h
+)
+target_include_directories(test_log_redaction PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_log_redaction PRIVATE livekit_signaling)
+set_target_properties(test_log_redaction PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded")
+add_test(NAME log_redaction_test COMMAND test_log_redaction)
+set_tests_properties(log_redaction_test PROPERTIES TIMEOUT 60)
+
+add_executable(test_connection_log_redaction
+    tests/remediation/test_connection_log_redaction.cpp
+    tests/support/test_check.h
+)
+target_include_directories(test_connection_log_redaction PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_connection_log_redaction PRIVATE livekit_signaling)
+set_target_properties(test_connection_log_redaction PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded")
+add_test(NAME connection_log_redaction_test COMMAND test_connection_log_redaction)
+set_tests_properties(connection_log_redaction_test PROPERTIES TIMEOUT 60)
+
+# Exercise the real Qt console cache. Reuse the established static Qt link
+# environment without pulling unrelated production sources into this fixture.
+get_target_property(pr_sec_qt_includes test_camera_owner_remediation INCLUDE_DIRECTORIES)
+get_target_property(pr_sec_qt_libraries test_camera_owner_remediation LINK_LIBRARIES)
+get_target_property(pr_sec_qt_definitions test_camera_owner_remediation COMPILE_DEFINITIONS)
+get_target_property(pr_sec_qt_link_options test_camera_owner_remediation LINK_OPTIONS)
+get_target_property(pr_sec_qt_runtime test_camera_owner_remediation MSVC_RUNTIME_LIBRARY)
+add_executable(test_qt_log_redaction
+    tests/remediation/test_qt_log_redaction.cpp
+    tests/support/test_check.h
+    src/ui/meeting_log_console.h
+    src/ui/meeting_log_console.cpp
+)
+target_include_directories(test_qt_log_redaction BEFORE PRIVATE ${pr_sec_qt_includes})
+target_link_libraries(test_qt_log_redaction PRIVATE ${pr_sec_qt_libraries})
+target_compile_definitions(test_qt_log_redaction PRIVATE ${pr_sec_qt_definitions})
+target_link_options(test_qt_log_redaction PRIVATE ${pr_sec_qt_link_options})
+set_target_properties(test_qt_log_redaction PROPERTIES
+    MSVC_RUNTIME_LIBRARY "${pr_sec_qt_runtime}")
+add_test(NAME qt_log_redaction_test COMMAND test_qt_log_redaction)
+set_tests_properties(qt_log_redaction_test PROPERTIES TIMEOUT 60)
 
 # This verifier proves checks execute under the same inherited NDEBUG flags as
 # the native application; dependency ABI definitions must remain unchanged.

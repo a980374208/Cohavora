@@ -300,6 +300,7 @@ public:
 private:
     friend class RoomUnpublishTestAccess;
     friend class ParticipantSnapshotRoomTestAccess;
+    friend class RoomIrSec001TestAccess;
     // Only the named test-access friend can install these two transport-boundary
     // hooks. Production keeps them null and uses the existing native methods.
     struct LocalUnpublishTestHooks {

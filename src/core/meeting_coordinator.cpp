@@ -1,5 +1,6 @@
 #include "src/core/meeting_coordinator.h"
 #include "src/ui/meeting_log_console.h"
+#include "src/telemetry/log_redaction.h"
 
 #include <QtCore/QDebug>
 #include <QtCore/QJsonArray>
@@ -159,7 +160,9 @@ public:
         auto *coordinator = _coordinator;
         if (!coordinator || _generation == 0) return;
         const auto generation = _generation;
-        QString qDetail = QString::fromStdString(detail);
+        const QString qDetail = detail.empty()
+            ? QString::fromUtf8("无附加断开说明")
+            : QString::fromStdString(livekit::secure_log::OpaqueSummary("room_disconnect"));
         // 不捕获 listener 自身：DuplicateIdentity 处理会释放 _roomListener，
         // 捕获 this 会在回调执行期间留下悬垂指针风险。
         QMetaObject::invokeMethod(coordinator, [coordinator, generation, reason, qDetail]() {
@@ -177,7 +180,7 @@ public:
                     .arg(QString::fromLatin1(livekit::ToString(reason)), qDetail));
             if (!current()) return;
             if (reason == livekit::RoomDisconnectReason::DuplicateIdentity) {
-                owner->handleDuplicateIdentityKickOff(qDetail);
+                owner->handleDuplicateIdentityKickOff(QString());
                 return;
             }
             if (owner->_state != MeetingState::Leaving && owner->_state != MeetingState::Idle) {
@@ -1246,7 +1249,8 @@ void MeetingCoordinator::handleDuplicateIdentityKickOff(const QString &detail) {
 
     const QString message = detail.isEmpty()
         ? QString::fromUtf8("同一账号已在其他设备加入此会议")
-        : detail;
+        : QString::fromStdString(
+            livekit::secure_log::SanitizeForOutput(detail.toStdString()));
     MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection,
                             "DUPLICATE_IDENTITY",
                             QString("[Coordinator] Meeting kicked off by server: %1").arg(message));
@@ -1429,8 +1433,9 @@ void MeetingCoordinator::startRoomSession(const QString &url,
                                            videoTrack = std::move(videoTrack)]() mutable {
                     completeRoomStartupOnUiThread(sessionGeneration, std::move(audioTrack), std::move(videoTrack));
                 }, Qt::QueuedConnection);
-            } catch (const std::exception &ex) {
-                QString err = QString::fromStdString(ex.what());
+            } catch (const std::exception &) {
+                const QString err = QString::fromStdString(
+                    livekit::secure_log::ExceptionSummary("meeting_startup"));
                 const bool mediaBegan = startup.mediaStartupBegan();
                 const QString title = mediaBegan
                     ? QString::fromUtf8("本地媒体启动失败")
@@ -1542,9 +1547,9 @@ void MeetingCoordinator::stopRoomSession() {
         });
         try {
             failedInboundTransfers = completed.get();
-        } catch (const std::exception &ex) {
-            transferCleanupError =
-                QString("会话分片清理失败: %1").arg(QString::fromStdString(ex.what()));
+        } catch (const std::exception &) {
+            transferCleanupError = QString::fromStdString(
+                livekit::secure_log::ExceptionSummary("transfer_cleanup"));
         }
     }
     for (const auto &[uiTransferId, entry] : _inboundTransferLedger) {
@@ -1705,9 +1710,12 @@ void MeetingCoordinator::sendChatMessage(const QString &content, const QString &
                 emit chatMessageSendFailed(messageId, QString::fromUtf8("数据通道拥塞，发送失败"));
             }
         }
-    } catch (const std::exception &e) {
+    } catch (const std::exception &) {
         if (!messageId.isEmpty()) {
-            emit chatMessageSendFailed(messageId, QString::fromUtf8("发送异常: %1").arg(e.what()));
+            emit chatMessageSendFailed(
+                messageId,
+                QString::fromStdString(
+                    livekit::secure_log::ExceptionSummary("chat_send")));
         }
     } catch (...) {
         if (!messageId.isEmpty()) {
@@ -1828,11 +1836,14 @@ void MeetingCoordinator::processNextMediaSendChunk() {
     bool ok = false;
     try {
         ok = _room->PublishData(payload, true, {}, "chat");
-    } catch (const std::exception &e) {
+    } catch (const std::exception &) {
         QString msgId = task.messageId;
         _mediaSendQueue.pop_front();
         if (!msgId.isEmpty()) {
-            emit chatMessageSendFailed(msgId, QString::fromUtf8("数据包投递失败: %1").arg(e.what()));
+            emit chatMessageSendFailed(
+                msgId,
+                QString::fromStdString(
+                    livekit::secure_log::ExceptionSummary("data_packet_send")));
         }
         return;
     } catch (...) {
@@ -2398,15 +2409,24 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
         QString targetUser = QString::fromStdString(kick.userid());
         if (targetUser == localUserId) {
             QString reason = QString::fromStdString(kick.reason());
+            const QString safeReason = reason.isEmpty()
+                ? QString::fromUtf8("无附加说明")
+                : QString::fromStdString(
+                    livekit::secure_log::OpaqueSummary("kick_reason"));
             int code = static_cast<int>(kick.reasoncode());
-            QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, reason, code, isServerOrigin]() {
+            QMetaObject::invokeMethod(
+                this,
+                [this, sessionGeneration, sender, reason, safeReason, code, isServerOrigin]() {
                 QPointer<MeetingCoordinator> owner(this);
                 const auto valid = [&] {
                     return owner && owner->isCurrentSessionGenerationOnUiThread(sessionGeneration) &&
                         owner->isSenderContextCurrentOnUiThread(sender);
                 };
                 if (!valid()) return;
-                MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "KICK_OFF", QString("收到踢出信令: %1 (代码: %2)").arg(reason).arg(code));
+                MeetingUI::LogToConsole(
+                    MeetingUI::LogCategory::Participant,
+                    "KICK_OFF",
+                    QString("收到踢出信令: %1 (代码: %2)").arg(safeReason).arg(code));
                 if (!valid()) return;
                 if (code == static_cast<int>(openmeeting::meeting::KickOffReason::DuplicatedLogin)) {
                     // DuplicatedLogin 是全局账号事件，不能伪装成 LiveKit 的
@@ -2430,7 +2450,8 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
                 emit owner->kickedOff(reason, code);
                 if (!valid()) return;
                 owner->leaveMeetingAsync(false);
-            }, Qt::QueuedConnection);
+                },
+                Qt::QueuedConnection);
             return;
         }
     }

@@ -1041,12 +1041,15 @@ public:
 
 namespace MeetingUI {
 std::function<void(const QString &)> participantSnapshotLogHook;
+std::function<void(const QString &, const QString &)> participantSnapshotSecurityLogHook;
 
 // This target's own sink can synchronously reenter exactly where production
 // LogToConsole runs; the other regression targets retain their original sink.
-void LogToConsole(LogCategory, const QString &tag, const QString &) {
+void LogToConsole(LogCategory, const QString &tag, const QString &message) {
     const auto hook = participantSnapshotLogHook;
     if (hook) hook(tag);
+    const auto securityHook = participantSnapshotSecurityLogHook;
+    if (securityHook) securityHook(tag, message);
 }
 } // namespace MeetingUI
 
@@ -1643,7 +1646,41 @@ void DuplicateLogInvalidationStillCleansResources() {
     std::cout << "duplicate-log-admission-invalidation-cleanup PASS" << std::endl;
 }
 
+void DisconnectDiagnosticBoundaryUsesSafeCopy() {
+    Fixture fixture;
+    OpenMeeting::MeetingCoordinatorTestAccess::markMeetingActive(*fixture.coordinator);
+    const QString rawDetail = QStringLiteral(
+        "heartbeat timer error: access_token=coordinator-secret Authorization: Bearer ui-secret");
+    QString disconnectedLog;
+    QString stateDetail;
+    QObject::connect(
+        fixture.coordinator.get(),
+        &OpenMeeting::MeetingCoordinator::stateChanged,
+        fixture.coordinator.get(),
+        [&](OpenMeeting::MeetingState, const QString &detail) { stateDetail = detail; });
+    MeetingUI::participantSnapshotSecurityLogHook =
+        [&](const QString &tag, const QString &message) {
+            if (tag == QStringLiteral("DISCONNECTED")) disconnectedLog = message;
+        };
+
+    fixture.listener->OnDisconnected(
+        livekit::RoomDisconnectReason::NetworkError,
+        rawDetail.toStdString());
+    DrainQt();
+    MeetingUI::participantSnapshotSecurityLogHook = {};
+
+    TEST_CHECK(!disconnectedLog.isEmpty());
+    TEST_CHECK(!stateDetail.isEmpty());
+    TEST_CHECK(!disconnectedLog.contains(QStringLiteral("coordinator-secret")));
+    TEST_CHECK(!disconnectedLog.contains(QStringLiteral("ui-secret")));
+    TEST_CHECK(!stateDetail.contains(QStringLiteral("coordinator-secret")));
+    TEST_CHECK(!stateDetail.contains(QStringLiteral("ui-secret")));
+    TEST_CHECK(disconnectedLog.contains(QStringLiteral("opaque{kind=room_disconnect,detail=[omitted]}")));
+    TEST_CHECK(stateDetail == QStringLiteral("opaque{kind=room_disconnect,detail=[omitted]}"));
+}
+
 void ListenerOwnerRegression() {
+    DisconnectDiagnosticBoundaryUsesSafeCopy();
     DisconnectedLogCannotChangeSuccessor();
     for (const auto boundary : {ListenerEffect::DisconnectedLog, ListenerEffect::DisconnectedState,
                                ListenerEffect::ConnectedInfo, ListenerEffect::ConnectedEmptyMetadata,

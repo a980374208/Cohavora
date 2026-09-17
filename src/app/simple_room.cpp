@@ -18,6 +18,7 @@
 #include "audio_frame.h"
 #include "video_frame.h"
 #include "key_provider.h"
+#include "log_redaction.h"
 #include "frame_cryptor.h"
 #include "telemetry/telemetry.h"
 
@@ -97,7 +98,9 @@ public:
 
     void OnDisconnected(const std::string& reason) override {
         std::cout << "\n[INFO] SimpleRoom::OnDisconnected - Reason: "
-                  << (reason.empty() ? "Normal Disconnect" : reason) << std::endl;
+                  << (reason.empty() ? "Normal Disconnect"
+                                     : livekit::secure_log::OpaqueSummary("room_disconnect"))
+                  << std::endl;
     }
 
     void OnReconnecting() override {
@@ -253,8 +256,8 @@ void PrintUsage(const char* prog_name) {
 }
 
 std::string MaskToken(const std::string& token) {
-    if (token.length() <= 12) return "***";
-    return token.substr(0, 6) + "..." + token.substr(token.length() - 6);
+    (void)token;
+    return livekit::secure_log::SecretSummary();
 }
 
 int main(int argc, char* argv[]) {
@@ -309,7 +312,8 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    std::cout << "[Config] LiveKit URL   : " << url << std::endl;
+    std::cout << "[Config] LiveKit URL   : "
+              << livekit::secure_log::EndpointSummary(url) << std::endl;
     std::cout << "[Config] Access Token  : " << MaskToken(token) << std::endl;
     std::cout << "[Config] Publish Audio : " << (publish_audio ? "ENABLED" : "DISABLED") << std::endl;
     std::cout << "[Config] Publish Video : " << (publish_video ? "ENABLED" : "DISABLED") << std::endl;
@@ -405,8 +409,10 @@ int main(int argc, char* argv[]) {
 
                 std::cout << "\n[Running] SimpleRoom is active. Press Ctrl+C to disconnect and exit." << std::endl;
             }
-        } catch (const std::exception& e) {
-            std::cerr << "[EXCEPTION] Connection exception: " << e.what() << std::endl;
+        } catch (const std::exception&) {
+            std::cerr << "[EXCEPTION] Connection exception: "
+                      << livekit::secure_log::ExceptionSummary("simple_room_connect")
+                      << std::endl;
         }
     }, asio::detached);
 

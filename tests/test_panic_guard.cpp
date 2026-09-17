@@ -3,6 +3,7 @@
 #include <string>
 #include <asio.hpp>
 #include "crash_handler.h"
+#include "log_redaction.h"
 #include "safe_spawn.h"
 
 int main() {
@@ -10,20 +11,22 @@ int main() {
     std::cout << " Running Panic Guard & Safe Spawn Tests \n";
     std::cout << "=========================================\n";
 
-    bool panic_callback_triggered = false;
+    int panic_callback_count = 0;
     std::string captured_panic_msg;
 
     // 1. 测试 CrashHandler panic 回调与 Log Flush
     livekit::CrashHandler::SetPanicCallback([&](const std::string& msg) {
-        panic_callback_triggered = true;
+        ++panic_callback_count;
         captured_panic_msg = msg;
     });
 
     std::cout << "[Test 1] Testing CrashHandler::TriggerPanic..." << std::endl;
-    livekit::CrashHandler::TriggerPanic("Test Simulating FFI Panic Exception", /*raise_sigterm=*/false);
+    constexpr const char* kPanicSecret = "panic-access_token=synthetic-panic-secret";
+    livekit::CrashHandler::TriggerPanic(kPanicSecret, /*raise_sigterm=*/false);
 
-    TEST_CHECK(panic_callback_triggered && "Panic callback should have been triggered!");
-    TEST_CHECK(captured_panic_msg.find("Test Simulating FFI Panic Exception") != std::string::npos);
+    TEST_CHECK(panic_callback_count == 1);
+    TEST_CHECK(captured_panic_msg == livekit::secure_log::OpaqueSummary("panic"));
+    TEST_CHECK(captured_panic_msg.find("synthetic-panic-secret") == std::string::npos);
     std::cout << "[Test 1 PASSED] Panic callback successfully intercepted panic message!\n" << std::endl;
 
     // 2. 测试 safe_co_spawn 拦截协程未捕获异常
@@ -35,14 +38,14 @@ int main() {
         io_ctx.get_executor(),
         []() -> asio::awaitable<void> {
             std::cout << "  -> Inside coroutine, preparing to throw runtime_error..." << std::endl;
-            throw std::runtime_error("Simulated unhandled exception inside C++20 coroutine!");
+            throw std::runtime_error("access_token=synthetic-coroutine-secret");
             co_return;
         },
         [&](std::exception_ptr ep) {
             try {
                 if (ep) std::rethrow_exception(ep);
             } catch (const std::exception& e) {
-                std::cout << "  -> Successfully intercepted exception in safe_co_spawn handler: " << e.what() << std::endl;
+                TEST_CHECK(std::string(e.what()).find("synthetic-coroutine-secret") != std::string::npos);
                 coroutine_error_caught = true;
             }
         }
@@ -52,6 +55,20 @@ int main() {
 
     TEST_CHECK(coroutine_error_caught && "safe_co_spawn should have intercepted coroutine exception without process crash!");
     std::cout << "[Test 2 PASSED] Coroutine exception intercepted safely without crash!\n" << std::endl;
+
+    // 3. Without an explicit error handler, safe_co_spawn must preserve panic
+    // delivery while keeping the exception detail out of stderr/callback data.
+    asio::io_context panic_io;
+    livekit::safe_co_spawn(
+        panic_io.get_executor(),
+        []() -> asio::awaitable<void> {
+            throw std::runtime_error("password=synthetic-unhandled-secret");
+            co_return;
+        });
+    panic_io.run();
+    TEST_CHECK(panic_callback_count == 2);
+    TEST_CHECK(captured_panic_msg == livekit::secure_log::OpaqueSummary("panic"));
+    TEST_CHECK(captured_panic_msg.find("synthetic-unhandled-secret") == std::string::npos);
 
     std::cout << "=========================================\n";
     std::cout << " ALL PANIC GUARD TESTS PASSED SUCCESSFULLY! \n";

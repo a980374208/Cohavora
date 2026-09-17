@@ -8,6 +8,8 @@
 
 namespace livekit {
 
+// The callback receives a log-safe diagnostic summary, never the raw panic
+// detail supplied to TriggerPanic.
 using PanicCallback = std::function<void(const std::string& message)>;
 
 class CrashHandler {

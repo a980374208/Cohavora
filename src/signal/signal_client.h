@@ -130,11 +130,13 @@ public:
     bool is_connected() const;
 
 private:
+    friend class SignalClientIrSec001TestAccess;
     void StartHeartbeat();
     void StopHeartbeat();
     void FlushQueue();
     void HandleIncomingMessage(std::shared_ptr<proto::SignalResponse> msg);
     void HandleClose(const std::string& reason);
+    void HandleHeartbeatFailure(const std::error_code& error);
     
     // Coroutine internals
     asio::awaitable<void> HeartbeatLoop(uint32_t interval_sec, uint32_t timeout_sec);

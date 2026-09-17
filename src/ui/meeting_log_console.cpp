@@ -1,4 +1,5 @@
 #include "src/ui/meeting_log_console.h"
+#include "src/telemetry/log_redaction.h"
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QApplication>
@@ -112,17 +113,21 @@ void MeetingLogConsoleWindow::initUi() {
 
 void MeetingLogConsoleWindow::appendLog(LogCategory category, const QString &tag, const QString &message) {
 	const QString timeStr = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
+	const QString safeTag = QString::fromStdString(
+		livekit::secure_log::SanitizeForOutput(tag.toStdString()));
+	const QString safeMessage = QString::fromStdString(
+		livekit::secure_log::SanitizeForOutput(message.toStdString()));
 	QString catName;
-	const QString formatted = formatLogHtml(timeStr, category, tag, message, &catName);
+	const QString formatted = formatLogHtml(timeStr, category, safeTag, safeMessage, &catName);
 
 	LogEntry entry;
 	entry.timeStr = timeStr;
 	entry.category = category;
-	entry.tag = tag;
-	entry.message = message;
+	entry.tag = safeTag;
+	entry.message = safeMessage;
 	entry.catName = catName;
 	entry.formattedHtml = formatted;
-	entry.fullText = QString("[%1] [%2] [%3] %4").arg(timeStr, catName, tag, message);
+	entry.fullText = QString("[%1] [%2] [%3] %4").arg(timeStr, catName, safeTag, safeMessage);
 
 	QMetaObject::invokeMethod(this, [this, entry = std::move(entry)]() {
 		QMutexLocker locker(&_mutex);
