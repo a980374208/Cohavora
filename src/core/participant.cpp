@@ -300,7 +300,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> LocalParticipant
 }
 
 asio::awaitable<std::shared_ptr<TrackPublication>> LocalParticipant::UnpublishTrackAsync(
-    const std::string& track_sid) {
+    std::string track_sid) {
     if (track_sid.empty()) {
         throw OperationError(OperationKind::UnpublishTrack,
                              OperationErrorCode::InvalidState,
@@ -313,7 +313,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> LocalParticipant::UnpublishTr
                              "validate_session",
                              "participant is not attached to an active Room");
     }
-    co_return co_await async_unpublish_track_handler_(track_sid);
+    co_return co_await async_unpublish_track_handler_(std::move(track_sid));
 }
 
 void LocalParticipant::SetMuted(const std::string& track_sid, bool muted) {

@@ -1,6 +1,8 @@
 #include "data_stream.h"
 
 #include <chrono>
+#include <cstdio>
+#include <exception>
 #include <random>
 #include <sstream>
 #include <iomanip>
@@ -21,6 +23,25 @@ std::string GenerateStreamId(const std::string& prefix = "st_") {
 int64_t CurrentTimestampMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+proto::DataStream::Header MakeTextContentHeader(const std::string& reply_to_id) {
+    proto::DataStream::Header header;
+    auto* text = header.mutable_text_header();
+    text->set_operation_type(proto::DataStream::OperationType::DataStream_OperationType_CREATE);
+    if (!reply_to_id.empty()) {
+        text->set_reply_to_stream_id(reply_to_id);
+    }
+    return header;
+}
+
+proto::DataStream::Header MakeByteContentHeader(const std::string& name) {
+    proto::DataStream::Header header;
+    auto* bytes = header.mutable_byte_header();
+    if (!name.empty()) {
+        bytes->set_name(name);
+    }
+    return header;
 }
 
 } // namespace
@@ -185,7 +206,8 @@ BaseStreamWriter::BaseStreamWriter(StreamPacketPublisher publisher,
                                    std::optional<std::size_t> total_size,
                                    std::string mime_type,
                                    std::vector<std::string> destination_identities,
-                                   std::string sender_identity)
+                                   std::string sender_identity,
+                                   proto::DataStream::Header content_header)
     : publisher_(std::move(publisher)),
       stream_id_(stream_id.empty() ? GenerateStreamId() : std::move(stream_id)),
       mime_type_(std::move(mime_type)),
@@ -194,11 +216,31 @@ BaseStreamWriter::BaseStreamWriter(StreamPacketPublisher publisher,
       total_size_(total_size),
       attributes_(std::move(attributes)),
       destination_identities_(std::move(destination_identities)),
-      sender_identity_(std::move(sender_identity)) {}
+      sender_identity_(std::move(sender_identity)),
+      header_(std::move(content_header)) {
+    header_.set_stream_id(stream_id_);
+    header_.set_timestamp(timestamp_ms_);
+    header_.set_topic(topic_);
+    header_.set_mime_type(mime_type_);
+    if (total_size_.has_value()) {
+        header_.set_total_length(static_cast<uint64_t>(total_size_.value()));
+    }
+    for (const auto& [key, value] : attributes_) {
+        (*header_.mutable_attributes())[key] = value;
+    }
+}
 
-BaseStreamWriter::~BaseStreamWriter() {
-    if (!closed_) {
+BaseStreamWriter::~BaseStreamWriter() noexcept {
+    try {
         Close();
+    } catch (const std::exception&) {
+        // Destruction cannot return an error. Explicit Write/Close/Cancel keep
+        // propagating it; this diagnostic must not allocate or throw instead.
+        std::fputs("Stream writer finalization failed during destruction (exception).\n", stderr);
+        std::fflush(stderr);
+    } catch (...) {
+        std::fputs("Stream writer finalization failed during destruction (unknown exception).\n", stderr);
+        std::fflush(stderr);
     }
 }
 
@@ -206,19 +248,7 @@ void BaseStreamWriter::EnsureHeaderSent() {
     if (header_sent_) return;
 
     proto::DataPacket packet;
-    auto* header = packet.mutable_stream_header();
-    header->set_stream_id(stream_id_);
-    header->set_timestamp(timestamp_ms_);
-    header->set_topic(topic_);
-    header->set_mime_type(mime_type_);
-    if (total_size_.has_value()) {
-        header->set_total_length(static_cast<uint64_t>(total_size_.value()));
-    }
-    for (const auto& [k, v] : attributes_) {
-        (*header->mutable_attributes())[k] = v;
-    }
-
-    FillContentHeader(header);
+    *packet.mutable_stream_header() = header_;
 
     if (publisher_) {
         publisher_(packet, true);
@@ -285,24 +315,16 @@ TextStreamWriter::TextStreamWriter(StreamPacketPublisher publisher,
                                    std::string sender_identity)
     : BaseStreamWriter(std::move(publisher), std::move(topic), std::move(attributes),
                        std::move(stream_id), total_size, "text/plain",
-                       std::move(destination_identities), std::move(sender_identity)),
-      reply_to_id_(std::move(reply_to_id)) {
+                       std::move(destination_identities), std::move(sender_identity),
+                       MakeTextContentHeader(reply_to_id)) {
     info_.stream_id = stream_id_;
     info_.topic = topic_;
     info_.mime_type = mime_type_;
     info_.timestamp = timestamp_ms_;
     info_.total_length = total_size_;
     info_.attributes = attributes_;
-    info_.reply_to_stream_id = reply_to_id_;
+    info_.reply_to_stream_id = std::move(reply_to_id);
     info_.sender_identity = sender_identity_;
-}
-
-void TextStreamWriter::FillContentHeader(proto::DataStream::Header* header) {
-    auto* th = header->mutable_text_header();
-    th->set_operation_type(proto::DataStream::OperationType::DataStream_OperationType_CREATE);
-    if (!reply_to_id_.empty()) {
-        th->set_reply_to_stream_id(reply_to_id_);
-    }
 }
 
 void TextStreamWriter::Write(const std::string& text) {
@@ -333,7 +355,8 @@ ByteStreamWriter::ByteStreamWriter(StreamPacketPublisher publisher,
                                    std::string sender_identity)
     : BaseStreamWriter(std::move(publisher), std::move(topic), std::move(attributes),
                        std::move(stream_id), total_size, std::move(mime_type),
-                       std::move(destination_identities), std::move(sender_identity)) {
+                       std::move(destination_identities), std::move(sender_identity),
+                       MakeByteContentHeader(name)) {
     info_.stream_id = stream_id_;
     info_.name = std::move(name);
     info_.topic = topic_;
@@ -342,13 +365,6 @@ ByteStreamWriter::ByteStreamWriter(StreamPacketPublisher publisher,
     info_.total_length = total_size_;
     info_.attributes = attributes_;
     info_.sender_identity = sender_identity_;
-}
-
-void ByteStreamWriter::FillContentHeader(proto::DataStream::Header* header) {
-    auto* bh = header->mutable_byte_header();
-    if (!info_.name.empty()) {
-        bh->set_name(info_.name);
-    }
 }
 
 void ByteStreamWriter::Write(const std::vector<uint8_t>& data) {

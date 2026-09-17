@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <string>
 #include <asio.hpp>
 #include "crash_handler.h"
@@ -22,8 +22,8 @@ int main() {
     std::cout << "[Test 1] Testing CrashHandler::TriggerPanic..." << std::endl;
     livekit::CrashHandler::TriggerPanic("Test Simulating FFI Panic Exception", /*raise_sigterm=*/false);
 
-    assert(panic_callback_triggered && "Panic callback should have been triggered!");
-    assert(captured_panic_msg.find("Test Simulating FFI Panic Exception") != std::string::npos);
+    TEST_CHECK(panic_callback_triggered && "Panic callback should have been triggered!");
+    TEST_CHECK(captured_panic_msg.find("Test Simulating FFI Panic Exception") != std::string::npos);
     std::cout << "[Test 1 PASSED] Panic callback successfully intercepted panic message!\n" << std::endl;
 
     // 2. 测试 safe_co_spawn 拦截协程未捕获异常
@@ -50,7 +50,7 @@ int main() {
 
     io_ctx.run();
 
-    assert(coroutine_error_caught && "safe_co_spawn should have intercepted coroutine exception without process crash!");
+    TEST_CHECK(coroutine_error_caught && "safe_co_spawn should have intercepted coroutine exception without process crash!");
     std::cout << "[Test 2 PASSED] Coroutine exception intercepted safely without crash!\n" << std::endl;
 
     std::cout << "=========================================\n";

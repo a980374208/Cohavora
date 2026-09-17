@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <string>
 #include <memory>
 #include <asio.hpp>
@@ -104,13 +104,13 @@ int main() {
     // 运行 asio 事件循环
     io_ctx.run();
 
-    assert(test_result_1 == "Hello, Alice!" && "Test 1 failed: RPC response did not match expected value!");
+    TEST_CHECK(test_result_1 == "Hello, Alice!" && "Test 1 failed: RPC response did not match expected value!");
     std::cout << "[Test 1 PASSED] Successful RPC invocation verified!\n";
 
-    assert(test_2_failed_as_expected && "Test 2 failed: UNSUPPORTED_METHOD was not returned!");
+    TEST_CHECK(test_2_failed_as_expected && "Test 2 failed: UNSUPPORTED_METHOD was not returned!");
     std::cout << "[Test 2 PASSED] Unsupported method error handling verified!\n";
 
-    assert(test_3_timeout_as_expected && "Test 3 failed: TIMEOUT error was not triggered!");
+    TEST_CHECK(test_3_timeout_as_expected && "Test 3 failed: TIMEOUT error was not triggered!");
     std::cout << "[Test 3 PASSED] RPC timeout handling verified!\n";
 
     std::cout << "==================================================\n";

@@ -96,7 +96,12 @@ signals:
     void preferencesChanged(const MediaPreferences &prefs);
 
 private:
+    // Defined only in the HTTP test. Production instances retain singleton
+    // lifetime; the fixture may inject temporary storage for synchronous tests.
+    friend class SessionManagerTestAccess;
     explicit SessionManager(QObject *parent = nullptr);
+    // Null storage is rejected rather than falling back to user settings.
+    explicit SessionManager(std::unique_ptr<QSettings> settings, QObject *parent = nullptr);
     ~SessionManager() override = default;
 
     UserInfo _currentUser;

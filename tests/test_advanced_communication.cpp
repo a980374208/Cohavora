@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <string>
 #include <memory>
 #include <asio.hpp>
@@ -54,11 +54,11 @@ int main() {
     std::string encoded_str = original_msg.Encode();
     auto decoded_opt = livekit::ChatMessage::Decode(encoded_str, "user_agent_007");
 
-    assert(decoded_opt.has_value() && "ChatMessage Decode failed!");
-    assert(decoded_opt->id == original_msg.id);
-    assert(decoded_opt->message == original_msg.message);
-    assert(decoded_opt->destination_identities.size() == 1);
-    assert(decoded_opt->destination_identities[0] == "agent_pi_1");
+    TEST_CHECK(decoded_opt.has_value() && "ChatMessage Decode failed!");
+    TEST_CHECK(decoded_opt->id == original_msg.id);
+    TEST_CHECK(decoded_opt->message == original_msg.message);
+    TEST_CHECK(decoded_opt->destination_identities.size() == 1);
+    TEST_CHECK(decoded_opt->destination_identities[0] == "agent_pi_1");
     std::cout << "[Test 1 PASSED] ChatMessage encoded JSON: " << encoded_str << "\n" << std::endl;
 
     // 2. 测试 LocalParticipant::SendChatMessage 与 RoomListener::OnChatMessage 分发
@@ -74,29 +74,29 @@ int main() {
     });
 
     auto sent_chat = local_p->SendChatMessage("Testing SendChatMessage API");
-    assert(listener->chat_received && "RoomListener should have received OnChatMessage!");
-    assert(listener->last_chat_msg.id == sent_chat.id);
-    assert(listener->last_chat_msg.message == "Testing SendChatMessage API");
+    TEST_CHECK(listener->chat_received && "RoomListener should have received OnChatMessage!");
+    TEST_CHECK(listener->last_chat_msg.id == sent_chat.id);
+    TEST_CHECK(listener->last_chat_msg.message == "Testing SendChatMessage API");
     std::cout << "[Test 2.1 PASSED] SendChatMessage dispatched correctly!" << std::endl;
 
     // 测试编辑已有 Chat 消息
     listener->chat_received = false;
     auto edited_chat = local_p->EditChatMessage("Testing EditChatMessage API (Updated)", sent_chat.id);
-    assert(listener->chat_received);
-    assert(listener->last_chat_msg.id == sent_chat.id);
-    assert(listener->last_chat_msg.message == "Testing EditChatMessage API (Updated)");
-    assert(listener->last_chat_msg.edit_timestamp.has_value());
+    TEST_CHECK(listener->chat_received);
+    TEST_CHECK(listener->last_chat_msg.id == sent_chat.id);
+    TEST_CHECK(listener->last_chat_msg.message == "Testing EditChatMessage API (Updated)");
+    TEST_CHECK(listener->last_chat_msg.edit_timestamp.has_value());
     std::cout << "[Test 2.2 PASSED] EditChatMessage edited message successfully!\n" << std::endl;
 
     // 3. 测试 DataChannel 缓冲背压控制 (BufferedAmountLowThreshold)
     std::cout << "[Test 3] Testing DataChannel Backpressure Flow Control..." << std::endl;
     room->SetDataChannelBufferedAmountLowThreshold(32768, /*reliable=*/true);
-    assert(room->GetDataChannelBufferedAmount(/*reliable=*/true) == 0);
+    TEST_CHECK(room->GetDataChannelBufferedAmount(/*reliable=*/true) == 0);
 
     // 触发背压水线变动通知
     room->OnDataChannelBufferedAmountLow(65536, /*reliable=*/true);
-    assert(listener->backpressure_changed && "OnDataChannelBufferedAmountLowThresholdChanged listener should be notified!");
-    assert(listener->last_reliable == true);
+    TEST_CHECK(listener->backpressure_changed && "OnDataChannelBufferedAmountLowThresholdChanged listener should be notified!");
+    TEST_CHECK(listener->last_reliable == true);
     std::cout << "[Test 3 PASSED] DataChannel backpressure low threshold notification triggered successfully!\n" << std::endl;
 
     std::cout << "==================================================\n";

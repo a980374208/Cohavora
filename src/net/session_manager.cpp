@@ -2,13 +2,22 @@
 #include <QtCore/QCoreApplication>
 #include <QtCore/QUuid>
 #include <QtCore/QDebug>
+#include <stdexcept>
+#include <utility>
 
 namespace OpenMeeting {
 
 SessionManager::SessionManager(QObject *parent)
-    : QObject(parent) {
+    : SessionManager(std::make_unique<QSettings>("OpenMeeting", "LiveKitClient"), parent) {
+}
+
+SessionManager::SessionManager(std::unique_ptr<QSettings> settings, QObject *parent)
+    : QObject(parent)
+    , _settings(std::move(settings)) {
+    if (!_settings) {
+        throw std::invalid_argument("SessionManager requires explicit settings storage");
+    }
     qRegisterMetaType<SessionInvalidationReason>("OpenMeeting::SessionInvalidationReason");
-    _settings = std::make_unique<QSettings>("OpenMeeting", "LiveKitClient");
 
     // 监听网络客户端的 Token 失效信号
     connect(&httpClient(), &OpenMeetingHttpClient::tokenExpired, this, [this]() {

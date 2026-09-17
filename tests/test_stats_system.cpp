@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <thread>
 #include <chrono>
 #include <asio.hpp>
@@ -31,10 +31,10 @@ int main() {
     inbound.frame_height = 1080;
     inbound.frames_per_second = 30.0;
 
-    assert(inbound.kind == "video" && "Inbound kind mismatch!");
-    assert(inbound.bytes_received == 1048576 && "Inbound bytes_received mismatch!");
-    assert(inbound.packets_lost == 5 && "Inbound packets_lost mismatch!");
-    assert(inbound.frame_width == 1920 && inbound.frame_height == 1080 && "Resolution mismatch!");
+    TEST_CHECK(inbound.kind == "video" && "Inbound kind mismatch!");
+    TEST_CHECK(inbound.bytes_received == 1048576 && "Inbound bytes_received mismatch!");
+    TEST_CHECK(inbound.packets_lost == 5 && "Inbound packets_lost mismatch!");
+    TEST_CHECK(inbound.frame_width == 1920 && inbound.frame_height == 1080 && "Resolution mismatch!");
 
     livekit::OutboundRtpStreamStats outbound;
     outbound.id = "outbound_audio_0";
@@ -45,8 +45,8 @@ int main() {
     outbound.frames_encoded = 250;
     outbound.frames_per_second = 50.0;
 
-    assert(outbound.kind == "audio" && "Outbound kind mismatch!");
-    assert(outbound.bytes_sent == 524288 && "Outbound bytes_sent mismatch!");
+    TEST_CHECK(outbound.kind == "audio" && "Outbound kind mismatch!");
+    TEST_CHECK(outbound.bytes_sent == 524288 && "Outbound bytes_sent mismatch!");
 
     livekit::CandidatePairStats cp;
     cp.id = "cp_active";
@@ -55,8 +55,8 @@ int main() {
     cp.current_round_trip_time = 0.025; // 25ms RTT
     cp.available_outgoing_bitrate = 2500000.0; // 2.5 Mbps
 
-    assert(cp.current_pair && "Candidate pair status mismatch!");
-    assert(cp.current_round_trip_time == 0.025 && "RTT mismatch!");
+    TEST_CHECK(cp.current_pair && "Candidate pair status mismatch!");
+    TEST_CHECK(cp.current_round_trip_time == 0.025 && "RTT mismatch!");
 
     std::cout << "  -> [Test 1 PASSED] All Stats Data Structures & Fields Verified!\n\n";
 
@@ -80,11 +80,11 @@ int main() {
     single_report.candidate_pairs.push_back(cp);
     room_report.reports.push_back(single_report);
 
-    assert(room_report.publisher_rtt_ms == 24.5 && "Publisher RTT mismatch!");
-    assert(room_report.subscriber_rtt_ms == 18.2 && "Subscriber RTT mismatch!");
-    assert(room_report.total_bytes_sent == 524288 && "Total bytes sent mismatch!");
-    assert(room_report.total_bytes_received == 1048576 && "Total bytes received mismatch!");
-    assert(room_report.reports.size() == 1 && "Reports vector count mismatch!");
+    TEST_CHECK(room_report.publisher_rtt_ms == 24.5 && "Publisher RTT mismatch!");
+    TEST_CHECK(room_report.subscriber_rtt_ms == 18.2 && "Subscriber RTT mismatch!");
+    TEST_CHECK(room_report.total_bytes_sent == 524288 && "Total bytes sent mismatch!");
+    TEST_CHECK(room_report.total_bytes_received == 1048576 && "Total bytes received mismatch!");
+    TEST_CHECK(room_report.reports.size() == 1 && "Reports vector count mismatch!");
 
     std::cout << "  -> [Test 2 PASSED] RoomStatsReport Aggregation Verified Successfully!\n\n";
 
@@ -96,11 +96,11 @@ int main() {
     bool async_completed = false;
     asio::co_spawn(io, [&]() -> asio::awaitable<void> {
         auto empty_report = co_await room->GetStats();
-        assert(empty_report.reports.empty());
+        TEST_CHECK(empty_report.reports.empty());
         async_completed = true;
     }, asio::detached);
     io.run();
-    assert(async_completed);
+    TEST_CHECK(async_completed);
 
     std::cout << "  -> [Test 3 PASSED] Async empty-room collection completed without blocking!\n\n";
 

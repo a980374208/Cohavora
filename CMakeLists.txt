@@ -289,6 +289,7 @@ target_link_libraries(livekit_signaling_tests_run_v4 PRIVATE
 add_executable(test_panic_guard
     tests/test_panic_guard.cpp
 )
+target_include_directories(test_panic_guard PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_panic_guard PRIVATE
     livekit_signaling
 )
@@ -297,6 +298,7 @@ target_link_libraries(test_panic_guard PRIVATE
 add_executable(test_advanced_communication
     tests/test_advanced_communication.cpp
 )
+target_include_directories(test_advanced_communication PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_advanced_communication PRIVATE
     livekit_signaling
 )
@@ -305,6 +307,7 @@ target_link_libraries(test_advanced_communication PRIVATE
 add_executable(test_chunking_simulcast
     tests/test_chunking_simulcast.cpp
 )
+target_include_directories(test_chunking_simulcast PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_chunking_simulcast PRIVATE
     livekit_signaling
 )
@@ -313,6 +316,7 @@ target_link_libraries(test_chunking_simulcast PRIVATE
 add_executable(test_data_stream_assembler
     tests/test_data_stream_assembler.cpp
 )
+target_include_directories(test_data_stream_assembler PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_data_stream_assembler PRIVATE
     livekit_signaling
 )
@@ -337,6 +341,7 @@ endif()
 add_executable(test_rpc_system
     tests/test_rpc_system.cpp
 )
+target_include_directories(test_rpc_system PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_rpc_system PRIVATE
     livekit_signaling
 )
@@ -353,6 +358,7 @@ target_link_libraries(test_media_streaming PRIVATE
 add_executable(test_stats_system
     tests/test_stats_system.cpp
 )
+target_include_directories(test_stats_system PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_stats_system PRIVATE
     livekit_signaling
 )
@@ -360,8 +366,9 @@ target_link_libraries(test_stats_system PRIVATE
 # Server room-state delta contract: room metadata, connection quality, stream
 # state, and subscription permissions must commit before listener delivery.
 add_executable(test_room_state_events
-    tests/test_room_state_events.cpp
+    tests/remediation/restored/test_room_state_events.cpp
 )
+target_include_directories(test_room_state_events PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_room_state_events PRIVATE
     livekit_signaling
 )
@@ -369,8 +376,9 @@ target_link_libraries(test_room_state_events PRIVATE
 # Canonical remote-publication ownership, control dispatch, and stale-session
 # rejection. This exercises the P1 lifecycle independently of live media.
 add_executable(test_remote_publication_lifecycle
-    tests/test_remote_publication_lifecycle.cpp
+    tests/remediation/restored/test_remote_publication_lifecycle.cpp
 )
+target_include_directories(test_remote_publication_lifecycle PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_remote_publication_lifecycle PRIVATE
     livekit_signaling
 )
@@ -378,15 +386,24 @@ target_link_libraries(test_remote_publication_lifecycle PRIVATE
 # Local media unpublish is committed by publisher SDP answer, not by a guessed
 # SignalRequest. This locks down the protocol gate and public API validation.
 add_executable(test_local_unpublish_transaction
-    tests/test_local_unpublish_transaction.cpp
+    tests/remediation/restored/test_local_unpublish_transaction.cpp
 )
+target_include_directories(test_local_unpublish_transaction PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_local_unpublish_transaction PRIVATE
     livekit_signaling
 )
 
+# NEW-CPP_QT-002: real Room transaction with privately controlled async boundaries.
+add_executable(test_unpublish_lifetime
+    tests/remediation/test_unpublish_lifetime.cpp
+    tests/support/test_check.h
+)
+target_include_directories(test_unpublish_lifetime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_unpublish_lifetime PRIVATE livekit_signaling)
+
 # Active camera source hot-switch transaction with first-frame verification and rollback
 add_executable(test_camera_switch_transaction
-    tests/test_camera_switch_transaction.cpp
+    tests/remediation/restored/test_camera_switch_transaction.cpp
 )
 target_link_libraries(test_camera_switch_transaction PRIVATE
     livekit_signaling
@@ -394,7 +411,7 @@ target_link_libraries(test_camera_switch_transaction PRIVATE
 
 # AEC playout render reference integration with framing and reset lifecycle
 add_executable(test_audio_render_reference_apm
-    tests/test_audio_render_reference_apm.cpp
+    tests/remediation/restored/test_audio_render_reference_apm.cpp
 )
 target_link_libraries(test_audio_render_reference_apm PRIVATE
     livekit_signaling
@@ -402,7 +419,7 @@ target_link_libraries(test_audio_render_reference_apm PRIVATE
 
 # Meeting recovery UX and connection state loopback contract
 add_executable(test_meeting_recovery_ux
-    tests/test_meeting_recovery_ux.cpp
+    tests/remediation/restored/test_meeting_recovery_ux.cpp
 )
 target_link_libraries(test_meeting_recovery_ux PRIVATE
     livekit_signaling
@@ -410,11 +427,20 @@ target_link_libraries(test_meeting_recovery_ux PRIVATE
 
 # Modern data stream messaging contract
 add_executable(test_data_stream_messaging
-    tests/test_data_stream_messaging.cpp
+    tests/remediation/restored/test_data_stream_messaging.cpp
 )
 target_link_libraries(test_data_stream_messaging PRIVATE
     livekit_signaling
 )
+
+# NEW-CPP_QT-001: actual writer/factory lifetime and packet contracts. Checks stay
+# active with the application's inherited NDEBUG and dependency ABI settings.
+add_executable(test_stream_writer_lifetime
+    tests/remediation/test_stream_writer_lifetime.cpp
+    tests/support/test_check.h
+)
+target_include_directories(test_stream_writer_lifetime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_stream_writer_lifetime PRIVATE livekit_signaling)
 
 if(LIVEKIT_BUILD_EXTERNAL_TESTS)
     add_executable(test_livekit_official_connect
@@ -717,6 +743,24 @@ target_link_options(livekit_meeting_app PRIVATE
 )
 
 enable_testing()
+
+# This verifier proves checks execute under the same inherited NDEBUG flags as
+# the native application; dependency ABI definitions must remain unchanged.
+add_executable(test_always_active_checks
+    tests/remediation/test_check_selftest.cpp
+    tests/support/test_check.h
+)
+target_include_directories(test_always_active_checks PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+set_target_properties(test_always_active_checks PROPERTIES
+    AUTOMOC OFF
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
+)
+add_test(NAME always_active_checks_test
+    COMMAND ${CMAKE_COMMAND}
+        "-DTEST_EXECUTABLE=$<TARGET_FILE:test_always_active_checks>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/remediation/verify_test_check.cmake"
+)
+
 add_test(NAME signaling_tests COMMAND livekit_signaling_tests_run_v4)
 add_test(NAME panic_guard_test COMMAND test_panic_guard)
 add_test(NAME advanced_communication_test COMMAND test_advanced_communication)
@@ -726,10 +770,12 @@ add_test(NAME rpc_system_test COMMAND test_rpc_system)
 add_test(NAME room_state_events_test COMMAND test_room_state_events)
 add_test(NAME remote_publication_lifecycle_test COMMAND test_remote_publication_lifecycle)
 add_test(NAME local_unpublish_transaction_test COMMAND test_local_unpublish_transaction)
+add_test(NAME unpublish_lifetime_remediation_test COMMAND test_unpublish_lifetime)
 add_test(NAME camera_switch_transaction_test COMMAND test_camera_switch_transaction)
 add_test(NAME audio_render_reference_apm_test COMMAND test_audio_render_reference_apm)
 add_test(NAME meeting_recovery_ux_test COMMAND test_meeting_recovery_ux)
 add_test(NAME data_stream_messaging_test COMMAND test_data_stream_messaging)
+add_test(NAME stream_writer_lifetime_remediation_test COMMAND test_stream_writer_lifetime)
 add_test(NAME media_streaming_test COMMAND test_media_streaming)
 add_test(NAME stats_system_test COMMAND test_stats_system)
 add_test(NAME audio_playout_warmup_test COMMAND test_audio_playout_warmup)
@@ -808,10 +854,15 @@ set_target_properties(test_openmeeting_http PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded"
 )
 add_test(NAME openmeeting_http_test COMMAND test_openmeeting_http)
+add_test(NAME openmeeting_http_watchdog_test
+    COMMAND ${CMAKE_COMMAND}
+        "-DTEST_EXECUTABLE=$<TARGET_FILE:test_openmeeting_http>"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/tests/remediation/verify_http_watchdog.cmake"
+)
 
 # Coordinator session runtime serialization test
 add_executable(test_meeting_session_runtime
-    tests/test_meeting_session_runtime.cpp
+    tests/remediation/restored/test_meeting_session_runtime.cpp
     src/core/meeting_session_runtime.h
 )
 target_include_directories(test_meeting_session_runtime BEFORE PRIVATE
@@ -851,7 +902,7 @@ add_test(NAME meeting_session_runtime_test COMMAND test_meeting_session_runtime)
 # Coordinator startup transaction test: a meeting is committed only after both
 # required local tracks publish, otherwise it must roll back to failure.
 add_executable(test_meeting_startup_transaction
-    tests/test_meeting_startup_transaction.cpp
+    tests/remediation/restored/test_meeting_startup_transaction.cpp
     src/core/meeting_startup_transaction.h
 )
 target_include_directories(test_meeting_startup_transaction BEFORE PRIVATE
@@ -942,6 +993,7 @@ add_executable(test_dx11_renderer_lifecycle
 
 target_include_directories(test_dx11_renderer_lifecycle BEFORE PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_link_libraries(test_dx11_renderer_lifecycle PRIVATE

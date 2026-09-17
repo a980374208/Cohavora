@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <memory>
 #include <vector>
 #include <string>
@@ -36,9 +36,9 @@ int main() {
         const std::vector<uint8_t> payload{'h', 'e', 'l', 'l', 'o'};
         room->PublishData(payload, /*reliable=*/true, {}, "test.small");
 
-        assert(listener->received);
-        assert(listener->received_topic == "test.small");
-        assert(listener->received_payload == payload);
+        TEST_CHECK(listener->received);
+        TEST_CHECK(listener->received_topic == "test.small");
+        TEST_CHECK(listener->received_payload == payload);
         std::cout << "  [PASS] Test 1: Small DataPacket payload dispatch verified successfully!" << std::endl;
     }
 
@@ -56,10 +56,10 @@ int main() {
         std::string topic = "test.large_chunking";
         room->PublishData(large_payload, /*reliable=*/true, {}, topic);
 
-        assert(listener->received == true);
-        assert(listener->received_topic == topic);
-        assert(listener->received_payload.size() == large_payload.size());
-        assert(listener->received_payload == large_payload);
+        TEST_CHECK(listener->received == true);
+        TEST_CHECK(listener->received_topic == topic);
+        TEST_CHECK(listener->received_payload.size() == large_payload.size());
+        TEST_CHECK(listener->received_payload == large_payload);
 
         std::cout << "  [PASS] Test 2: Data Packet Chunking 100KB payload assembly verified successfully!" << std::endl;
     }
@@ -69,10 +69,10 @@ int main() {
         auto vsrc = std::make_shared<livekit::VideoSource>(1280, 720);
         auto vtrack = livekit::LocalVideoTrack::createLocalVideoTrack("simulcast_cam", vsrc);
 
-        assert(vtrack != nullptr);
+        TEST_CHECK(vtrack != nullptr);
         auto opts = vtrack->publish_options();
-        assert(opts.simulcast == true);
-        assert(opts.layers.size() == 3);
+        TEST_CHECK(opts.simulcast == true);
+        TEST_CHECK(opts.layers.size() == 3);
 
         std::cout << "  [PASS] Test 3: Simulcast Video Track options and layers initialized correctly!" << std::endl;
     }

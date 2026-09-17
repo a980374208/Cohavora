@@ -1,0 +1,740 @@
+{
+  "run": "remediation-20260916T203449Z",
+  "stage": "Phase2A1",
+  "implementer": "/root/sid_value_fix",
+  "created_utc": "2026-09-17T04:47:35.752039+00:00",
+  "head": "151a753c82ef67888e70222d19146cf2f1f93e0c",
+  "delivery_status": "SOURCE_IMPLEMENTED_PENDING_BUILD_TEST_AND_INDEPENDENT_ACCEPTANCE",
+  "accepted_input_manifest": {
+    "path": "docs/implementation/remediation-20260916T203449Z/evidence/phase2b2-green-r1-full.workspace.json",
+    "sha256": "6b5e3e12b4520f3aa4b53ab99b636dd43d5161ec8a4213222636ca678ba82513"
+  },
+  "cmake_before_sha256": "3d13b7b298538175ce218c251eac143f65be5cd8d050884c79a24ff2796c107a",
+  "cmake_after_sha256": "eab769842685bab254867bdeb4f41327fe83def420981674da129c0e8c0940f4",
+  "cmake_scope": "Nine existing target source paths and three necessary project-root include directories only; target/CTest names and all ABI options unchanged.",
+  "standard_assert_expressions_preserved": 76,
+  "files": [
+    {
+      "original_path": "tests/test_audio_render_reference_apm.cpp",
+      "original_sha256": "46067f2975d3785b65f9dc2d62766c7075040082afa5e9dd52182efd3d0fba20",
+      "original_origin": "PRE_EXISTING_UNTRACKED_INPUT",
+      "delivered_path": "tests/remediation/restored/test_audio_render_reference_apm.cpp",
+      "delivered_sha256": "72215250c43b4354fbf16b68d100a4bbc0ae5d43bbb8749e8f38c7b4bd03bf1d",
+      "delivery_origin": "NEW_UNCOMMITTED_WORKTREE_INPUT",
+      "target": "test_audio_render_reference_apm",
+      "ctest": "audio_render_reference_apm_test",
+      "adaptations": [
+        "Complete self-contained copy; provenance comments added.",
+        "Original active TEST_ASSERT mechanism and complete original source body preserved byte-for-byte."
+      ],
+      "original_standard_assert_count": 0,
+      "delivered_test_check_count": 0,
+      "preserved_active_mechanism": "TEST_ASSERT",
+      "original_body_recoverable_exactly_by_reversing_documented_changes": true,
+      "original_body_preserved_byte_for_byte_after_provenance_comments": true,
+      "assertion_expression_comparison": []
+    },
+    {
+      "original_path": "tests/test_camera_switch_transaction.cpp",
+      "original_sha256": "5f4a10ce96608c243efcf66b81564dbdf534e8499238e82122b66d34f403089c",
+      "original_origin": "PRE_EXISTING_UNTRACKED_INPUT",
+      "delivered_path": "tests/remediation/restored/test_camera_switch_transaction.cpp",
+      "delivered_sha256": "960d703674cdf3e6ccddb9789eb76d1f5a77ffa203bd1fd6098b8140d769ed3f",
+      "delivery_origin": "NEW_UNCOMMITTED_WORKTREE_INPUT",
+      "target": "test_camera_switch_transaction",
+      "ctest": "camera_switch_transaction_test",
+      "adaptations": [
+        "Complete self-contained copy; provenance comments added.",
+        "Original active TEST_ASSERT mechanism and complete original source body preserved byte-for-byte."
+      ],
+      "original_standard_assert_count": 0,
+      "delivered_test_check_count": 0,
+      "preserved_active_mechanism": "TEST_ASSERT",
+      "original_body_recoverable_exactly_by_reversing_documented_changes": true,
+      "original_body_preserved_byte_for_byte_after_provenance_comments": true,
+      "assertion_expression_comparison": []
+    },
+    {
+      "original_path": "tests/test_data_stream_messaging.cpp",
+      "original_sha256": "04af3c4625291638be7a52347b3c9e4a4cc64db71a30d2fa3d60367a91ad12db",
+      "original_origin": "PRE_EXISTING_UNTRACKED_INPUT",
+      "delivered_path": "tests/remediation/restored/test_data_stream_messaging.cpp",
+      "delivered_sha256": "d0cc2d23499e09b5e42a3394abae17f6915dfea1fa68fe86ef97dfbfa5735c58",
+      "delivery_origin": "NEW_UNCOMMITTED_WORKTREE_INPUT",
+      "target": "test_data_stream_messaging",
+      "ctest": "data_stream_messaging_test",
+      "adaptations": [
+        "Complete self-contained copy; provenance comments added.",
+        "Original active TEST_ASSERT mechanism and complete original source body preserved byte-for-byte."
+      ],
+      "original_standard_assert_count": 0,
+      "delivered_test_check_count": 0,
+      "preserved_active_mechanism": "TEST_ASSERT",
+      "original_body_recoverable_exactly_by_reversing_documented_changes": true,
+      "original_body_preserved_byte_for_byte_after_provenance_comments": true,
+      "assertion_expression_comparison": []
+    },
+    {
+      "original_path": "tests/test_local_unpublish_transaction.cpp",
+      "original_sha256": "44cbc0377af20ce39420fdea906d5c7e8f0879873706a641ad51d670c99fb862",
+      "original_origin": "PRE_EXISTING_UNTRACKED_INPUT",
+      "delivered_path": "tests/remediation/restored/test_local_unpublish_transaction.cpp",
+      "delivered_sha256": "3946a027562678ae3f4c2e732fd1ed931d1a395d9ab2fd0b5ce2a2ac2c16ba68",
+      "delivery_origin": "NEW_UNCOMMITTED_WORKTREE_INPUT",
+      "target": "test_local_unpublish_transaction",
+      "ctest": "local_unpublish_transaction_test",
+      "adaptations": [
+        "Complete self-contained copy; provenance comments added.",
+        "All 14 standard assert expressions migrated verbatim to the accepted always-active TEST_CHECK; include changed; operation side effects retained.",
+        "Coroutine handler owns std::string sid by value under accepted Phase2B2 contract; all literal/temporary SID invocation sites unchanged."
+      ],
+      "original_standard_assert_count": 14,
+      "delivered_test_check_count": 14,
+      "preserved_active_mechanism": null,
+      "original_body_recoverable_exactly_by_reversing_documented_changes": true,
+      "original_body_preserved_byte_for_byte_after_provenance_comments": false,
+      "assertion_expression_comparison": [
+        {
+          "original_line": 26,
+          "delivered_line": 33,
+          "original_expression": "false && \"operation unexpectedly succeeded\"",
+          "delivered_expression": "false && \"operation unexpectedly succeeded\"",
+          "identical": true
+        },
+        {
+          "original_line": 38,
+          "delivered_line": 45,
+          "original_expression": "request->FindFieldByName(\"add_track\") != nullptr",
+          "delivered_expression": "request->FindFieldByName(\"add_track\") != nullptr",
+          "identical": true
+        },
+        {
+          "original_line": 39,
+          "delivered_line": 46,
+          "original_expression": "request->FindFieldByName(\"unpublish_data_track_request\") != nullptr",
+          "delivered_expression": "request->FindFieldByName(\"unpublish_data_track_request\") != nullptr",
+          "identical": true
+        },
+        {
+          "original_line": 40,
+          "delivered_line": 47,
+          "original_expression": "request->FindFieldByName(\"unpublish_track\") == nullptr",
+          "delivered_expression": "request->FindFieldByName(\"unpublish_track\") == nullptr",
+          "identical": true
+        },
+        {
+          "original_line": 41,
+          "delivered_line": 48,
+          "original_expression": "request->FindFieldByName(\"remove_track\") == nullptr",
+          "delivered_expression": "request->FindFieldByName(\"remove_track\") == nullptr",
+          "identical": true
+        },
+        {
+          "original_line": 42,
+          "delivered_line": 49,
+          "original_expression": "response->FindFieldByName(\"track_unpublished\") != nullptr",
+          "delivered_expression": "response->FindFieldByName(\"track_unpublished\") != nullptr",
+          "identical": true
+        },
+        {
+          "original_line": 51,
+          "delivered_line": 58,
+          "original_expression": "error.operation() == livekit::OperationKind::UnpublishTrack",
+          "delivered_expression": "error.operation() == livekit::OperationKind::UnpublishTrack",
+          "identical": true
+        },
+        {
+          "original_line": 52,
+          "delivered_line": 59,
+          "original_expression": "error.code() == livekit::OperationErrorCode::InvalidState",
+          "delivered_expression": "error.code() == livekit::OperationErrorCode::InvalidState",
+          "identical": true
+        },
+        {
+          "original_line": 61,
+          "delivered_line": 68,
+          "original_expression": "sid == \"TR_LOCAL\"",
+          "delivered_expression": "sid == \"TR_LOCAL\"",
+          "identical": true
+        },
+        {
+          "original_line": 68,
+          "delivered_line": 75,
+          "original_expression": "delegated.get() == expected",
+          "delivered_expression": "delegated.get() == expected",
+          "identical": true
+        },
+        {
+          "original_line": 69,
+          "delivered_line": 76,
+          "original_expression": "handler_called",
+          "delivered_expression": "handler_called",
+          "identical": true
+        },
+        {
+          "original_line": 81,
+          "delivered_line": 88,
+          "original_expression": "error.operation() == livekit::OperationKind::UnpublishTrack",
+          "delivered_expression": "error.operation() == livekit::OperationKind::UnpublishTrack",
+          "identical": true
+        },
+        {
+          "original_line": 82,
+          "delivered_line": 89,
+          "original_expression": "error.code() == livekit::OperationErrorCode::InvalidState",
+          "delivered_expression": "error.code() == livekit::OperationErrorCode::InvalidState",
+          "identical": true
+        },
+        {
+          "original_line": 83,
+          "delivered_line": 90,
+          "original_expression": "local->get_publication(\"TR_LOCAL\") != nullptr",
+          "delivered_expression": "local->get_publication(\"TR_LOCAL\") != nullptr",
+          "identical": true
+        }
+      ]
+    },
+    {
+      "original_path": "tests/test_meeting_recovery_ux.cpp",
+      "original_sha256": "18f83e26f1e4d12c4eb67938c58aac902008b2aed97d5d5fccb5682016ba8f84",
+      "original_origin": "PRE_EXISTING_UNTRACKED_INPUT",
+      "delivered_path": "tests/remediation/restored/test_meeting_recovery_ux.cpp",
+      "delivered_sha256": "5d00e49a59cf49266e88cd697f901994abfe4b57f03849f5fae47a6d9eb9537d",
+      "delivery_origin": "NEW_UNCOMMITTED_WORKTREE_INPUT",
+      "target": "test_meeting_recovery_ux",
+      "ctest": "meeting_recovery_ux_test",
+      "adaptations": [
+        "Complete self-contained copy; provenance comments added.",
+        "Original active TEST_ASSERT mechanism and complete original source body preserved byte-for-byte."
+      ],
+      "original_standard_assert_count": 0,
+      "delivered_test_check_count": 0,
+      "preserved_active_mechanism": "TEST_ASSERT",
+      "original_body_recoverable_exactly_by_reversing_documented_changes": true,
+      "original_body_preserved_byte_for_byte_after_provenance_comments": true,
+      "assertion_expression_comparison": []
+    },
+    {
+      "original_path": "tests/test_meeting_session_runtime.cpp",
+      "original_sha256": "163325d59fc2ff2de2488c48a2ba9a6caf01b0a803526fb3648605fb9fb25a4b",
+      "original_origin": "PRE_EXISTING_UNTRACKED_INPUT",
+      "delivered_path": "tests/remediation/restored/test_meeting_session_runtime.cpp",
+      "delivered_sha256": "3a443bc2193b958c7b60a380454980c283a2b8c23a92a131578244ad147a23ea",
+      "delivery_origin": "NEW_UNCOMMITTED_WORKTREE_INPUT",
+      "target": "test_meeting_session_runtime",
+      "ctest": "meeting_session_runtime_test",
+      "adaptations": [
+        "Complete self-contained copy; provenance comments added.",
+        "Original active Require mechanism and complete original source body preserved byte-for-byte."
+      ],
+      "original_standard_assert_count": 0,
+      "delivered_test_check_count": 0,
+      "preserved_active_mechanism": "Require",
+      "original_body_recoverable_exactly_by_reversing_documented_changes": true,
+      "original_body_preserved_byte_for_byte_after_provenance_comments": true,
+      "assertion_expression_comparison": []
+    },
+    {
+      "original_path": "tests/test_meeting_startup_transaction.cpp",
+      "original_sha256": "4960217d3bc899f4619bca7fdb6c922115e0270a3154350379f24c5c812b2ae8",
+      "original_origin": "PRE_EXISTING_UNTRACKED_INPUT",
+      "delivered_path": "tests/remediation/restored/test_meeting_startup_transaction.cpp",
+      "delivered_sha256": "ba2735e14978661a5ec3c28b88a9ae2766f01ba8f358fc0b74681a9f3f1970fb",
+      "delivery_origin": "NEW_UNCOMMITTED_WORKTREE_INPUT",
+      "target": "test_meeting_startup_transaction",
+      "ctest": "meeting_startup_transaction_test",
+      "adaptations": [
+        "Complete self-contained copy; provenance comments added.",
+        "Original active Require mechanism and complete original source body preserved byte-for-byte."
+      ],
+      "original_standard_assert_count": 0,
+      "delivered_test_check_count": 0,
+      "preserved_active_mechanism": "Require",
+      "original_body_recoverable_exactly_by_reversing_documented_changes": true,
+      "original_body_preserved_byte_for_byte_after_provenance_comments": true,
+      "assertion_expression_comparison": []
+    },
+    {
+      "original_path": "tests/test_remote_publication_lifecycle.cpp",
+      "original_sha256": "9ed41b85bd9fe04dbf47d4d3f7d676d42fe5acf8557343990b8394c9817dd892",
+      "original_origin": "PRE_EXISTING_UNTRACKED_INPUT",
+      "delivered_path": "tests/remediation/restored/test_remote_publication_lifecycle.cpp",
+      "delivered_sha256": "8bed265bdf760d2ccb1f7a720eb7944bab67f6dab54fccd1d8bb68a20e0535c3",
+      "delivery_origin": "NEW_UNCOMMITTED_WORKTREE_INPUT",
+      "target": "test_remote_publication_lifecycle",
+      "ctest": "remote_publication_lifecycle_test",
+      "adaptations": [
+        "Complete self-contained copy; provenance comments added.",
+        "All 28 standard assert expressions migrated verbatim to the accepted always-active TEST_CHECK; include changed; operation side effects retained."
+      ],
+      "original_standard_assert_count": 28,
+      "delivered_test_check_count": 28,
+      "preserved_active_mechanism": null,
+      "original_body_recoverable_exactly_by_reversing_documented_changes": true,
+      "original_body_preserved_byte_for_byte_after_provenance_comments": false,
+      "assertion_expression_comparison": [
+        {
+          "original_line": 38,
+          "delivered_line": 44,
+          "original_expression": "participant->get_publication(publication->sid()) == publication",
+          "delivered_expression": "participant->get_publication(publication->sid()) == publication",
+          "identical": true
+        },
+        {
+          "original_line": 39,
+          "delivered_line": 45,
+          "original_expression": "participant->get_remote_publication(publication->sid()) == publication",
+          "delivered_expression": "participant->get_remote_publication(publication->sid()) == publication",
+          "identical": true
+        },
+        {
+          "original_line": 40,
+          "delivered_line": 46,
+          "original_expression": "participant->get_remote_publication(\"TR_UNKNOWN\") == nullptr",
+          "delivered_expression": "participant->get_remote_publication(\"TR_UNKNOWN\") == nullptr",
+          "identical": true
+        },
+        {
+          "original_line": 50,
+          "delivered_line": 56,
+          "original_expression": "publication->has_media_binding()",
+          "delivered_expression": "publication->has_media_binding()",
+          "identical": true
+        },
+        {
+          "original_line": 51,
+          "delivered_line": 57,
+          "original_expression": "publication->SetSubscribed(false)",
+          "delivered_expression": "publication->SetSubscribed(false)",
+          "identical": true
+        },
+        {
+          "original_line": 52,
+          "delivered_line": 58,
+          "original_expression": "detach_count == 1",
+          "delivered_expression": "detach_count == 1",
+          "identical": true
+        },
+        {
+          "original_line": 53,
+          "delivered_line": 59,
+          "original_expression": "detach_notified",
+          "delivered_expression": "detach_notified",
+          "identical": true
+        },
+        {
+          "original_line": 54,
+          "delivered_line": 60,
+          "original_expression": "!publication->has_media_binding()",
+          "delivered_expression": "!publication->has_media_binding()",
+          "identical": true
+        },
+        {
+          "original_line": 55,
+          "delivered_line": 61,
+          "original_expression": "!publication->is_subscribed()",
+          "delivered_expression": "!publication->is_subscribed()",
+          "identical": true
+        },
+        {
+          "original_line": 56,
+          "delivered_line": 62,
+          "original_expression": "requests.back().kind == RemotePublicationControlRequest::Kind::Subscription",
+          "delivered_expression": "requests.back().kind == RemotePublicationControlRequest::Kind::Subscription",
+          "identical": true
+        },
+        {
+          "original_line": 57,
+          "delivered_line": 63,
+          "original_expression": "requests.back().subscribed.has_value() && !*requests.back().subscribed",
+          "delivered_expression": "requests.back().subscribed.has_value() && !*requests.back().subscribed",
+          "identical": true
+        },
+        {
+          "original_line": 59,
+          "delivered_line": 65,
+          "original_expression": "publication->SetVideoDimensions(640, 360)",
+          "delivered_expression": "publication->SetVideoDimensions(640, 360)",
+          "identical": true
+        },
+        {
+          "original_line": 60,
+          "delivered_line": 66,
+          "original_expression": "publication->current_width() == 640",
+          "delivered_expression": "publication->current_width() == 640",
+          "identical": true
+        },
+        {
+          "original_line": 61,
+          "delivered_line": 67,
+          "original_expression": "publication->current_height() == 360",
+          "delivered_expression": "publication->current_height() == 360",
+          "identical": true
+        },
+        {
+          "original_line": 62,
+          "delivered_line": 68,
+          "original_expression": "publication->current_quality() == livekit::proto::VideoQuality::MEDIUM",
+          "delivered_expression": "publication->current_quality() == livekit::proto::VideoQuality::MEDIUM",
+          "identical": true
+        },
+        {
+          "original_line": 63,
+          "delivered_line": 69,
+          "original_expression": "publication->SetPriority(7)",
+          "delivered_expression": "publication->SetPriority(7)",
+          "identical": true
+        },
+        {
+          "original_line": 64,
+          "delivered_line": 70,
+          "original_expression": "publication->priority() == 7",
+          "delivered_expression": "publication->priority() == 7",
+          "identical": true
+        },
+        {
+          "original_line": 65,
+          "delivered_line": 71,
+          "original_expression": "publication->SetEnabled(false)",
+          "delivered_expression": "publication->SetEnabled(false)",
+          "identical": true
+        },
+        {
+          "original_line": 66,
+          "delivered_line": 72,
+          "original_expression": "!publication->is_enabled()",
+          "delivered_expression": "!publication->is_enabled()",
+          "identical": true
+        },
+        {
+          "original_line": 76,
+          "delivered_line": 82,
+          "original_expression": "!rejected->SetPriority(9)",
+          "delivered_expression": "!rejected->SetPriority(9)",
+          "identical": true
+        },
+        {
+          "original_line": 77,
+          "delivered_line": 83,
+          "original_expression": "rejected->priority() == 0",
+          "delivered_expression": "rejected->priority() == 0",
+          "identical": true
+        },
+        {
+          "original_line": 97,
+          "delivered_line": 103,
+          "original_expression": "canonical",
+          "delivered_expression": "canonical",
+          "identical": true
+        },
+        {
+          "original_line": 98,
+          "delivered_line": 104,
+          "original_expression": "room_participant->get_publication(canonical->sid()) == canonical",
+          "delivered_expression": "room_participant->get_publication(canonical->sid()) == canonical",
+          "identical": true
+        },
+        {
+          "original_line": 99,
+          "delivered_line": 105,
+          "original_expression": "!canonical->SetPriority(3)",
+          "delivered_expression": "!canonical->SetPriority(3)",
+          "identical": true
+        },
+        {
+          "original_line": 100,
+          "delivered_line": 106,
+          "original_expression": "canonical->priority() == 0",
+          "delivered_expression": "canonical->priority() == 0",
+          "identical": true
+        },
+        {
+          "original_line": 106,
+          "delivered_line": 112,
+          "original_expression": "room->remote_participants().empty()",
+          "delivered_expression": "room->remote_participants().empty()",
+          "identical": true
+        },
+        {
+          "original_line": 107,
+          "delivered_line": 113,
+          "original_expression": "!canonical->SetVideoQuality(livekit::proto::VideoQuality::LOW)",
+          "delivered_expression": "!canonical->SetVideoQuality(livekit::proto::VideoQuality::LOW)",
+          "identical": true
+        },
+        {
+          "original_line": 108,
+          "delivered_line": 114,
+          "original_expression": "canonical->current_quality() == livekit::proto::VideoQuality::HIGH",
+          "delivered_expression": "canonical->current_quality() == livekit::proto::VideoQuality::HIGH",
+          "identical": true
+        }
+      ]
+    },
+    {
+      "original_path": "tests/test_room_state_events.cpp",
+      "original_sha256": "deb11becd6aee1933d67af34f578c3e01191958e9063b3157aa44bf382bd245b",
+      "original_origin": "PRE_EXISTING_UNTRACKED_INPUT",
+      "delivered_path": "tests/remediation/restored/test_room_state_events.cpp",
+      "delivered_sha256": "dc9c48d239c9113c9d608ec35223a4c56ce92e8fda4197efa13e8b28bfc95515",
+      "delivery_origin": "NEW_UNCOMMITTED_WORKTREE_INPUT",
+      "target": "test_room_state_events",
+      "ctest": "room_state_events_test",
+      "adaptations": [
+        "Complete self-contained copy; provenance comments added.",
+        "All 34 standard assert expressions migrated verbatim to the accepted always-active TEST_CHECK; include changed; operation side effects retained."
+      ],
+      "original_standard_assert_count": 34,
+      "delivered_test_check_count": 34,
+      "preserved_active_mechanism": null,
+      "original_body_recoverable_exactly_by_reversing_documented_changes": true,
+      "original_body_preserved_byte_for_byte_after_provenance_comments": false,
+      "assertion_expression_comparison": [
+        {
+          "original_line": 117,
+          "delivered_line": 123,
+          "original_expression": "room_info.sid == \"RM_100\"",
+          "delivered_expression": "room_info.sid == \"RM_100\"",
+          "identical": true
+        },
+        {
+          "original_line": 118,
+          "delivered_line": 124,
+          "original_expression": "room_info.name == \"state-event-room\"",
+          "delivered_expression": "room_info.name == \"state-event-room\"",
+          "identical": true
+        },
+        {
+          "original_line": 119,
+          "delivered_line": 125,
+          "original_expression": "room_info.num_participants == 2",
+          "delivered_expression": "room_info.num_participants == 2",
+          "identical": true
+        },
+        {
+          "original_line": 120,
+          "delivered_line": 126,
+          "original_expression": "room_info.active_recording",
+          "delivered_expression": "room_info.active_recording",
+          "identical": true
+        },
+        {
+          "original_line": 121,
+          "delivered_line": 127,
+          "original_expression": "listener->room_metadata_changed == 1",
+          "delivered_expression": "listener->room_metadata_changed == 1",
+          "identical": true
+        },
+        {
+          "original_line": 122,
+          "delivered_line": 128,
+          "original_expression": "listener->room_updated == 1",
+          "delivered_expression": "listener->room_updated == 1",
+          "identical": true
+        },
+        {
+          "original_line": 123,
+          "delivered_line": 129,
+          "original_expression": "listener->old_metadata.empty()",
+          "delivered_expression": "listener->old_metadata.empty()",
+          "identical": true
+        },
+        {
+          "original_line": 124,
+          "delivered_line": 130,
+          "original_expression": "listener->new_metadata == room_info.metadata",
+          "delivered_expression": "listener->new_metadata == room_info.metadata",
+          "identical": true
+        },
+        {
+          "original_line": 125,
+          "delivered_line": 131,
+          "original_expression": "listener->event_order.size() == 2",
+          "delivered_expression": "listener->event_order.size() == 2",
+          "identical": true
+        },
+        {
+          "original_line": 126,
+          "delivered_line": 132,
+          "original_expression": "listener->event_order[0] == \"metadata\"",
+          "delivered_expression": "listener->event_order[0] == \"metadata\"",
+          "identical": true
+        },
+        {
+          "original_line": 127,
+          "delivered_line": 133,
+          "original_expression": "listener->event_order[1] == \"room\"",
+          "delivered_expression": "listener->event_order[1] == \"room\"",
+          "identical": true
+        },
+        {
+          "original_line": 132,
+          "delivered_line": 138,
+          "original_expression": "listener->room_metadata_changed == 1",
+          "delivered_expression": "listener->room_metadata_changed == 1",
+          "identical": true
+        },
+        {
+          "original_line": 133,
+          "delivered_line": 139,
+          "original_expression": "listener->room_updated == 1",
+          "delivered_expression": "listener->room_updated == 1",
+          "identical": true
+        },
+        {
+          "original_line": 143,
+          "delivered_line": 149,
+          "original_expression": "remote->connection_quality() == livekit::ConnectionQuality::Good",
+          "delivered_expression": "remote->connection_quality() == livekit::ConnectionQuality::Good",
+          "identical": true
+        },
+        {
+          "original_line": 144,
+          "delivered_line": 150,
+          "original_expression": "remote->connection_quality_score() == 0.82f",
+          "delivered_expression": "remote->connection_quality_score() == 0.82f",
+          "identical": true
+        },
+        {
+          "original_line": 145,
+          "delivered_line": 151,
+          "original_expression": "listener->connection_quality_changed == 1",
+          "delivered_expression": "listener->connection_quality_changed == 1",
+          "identical": true
+        },
+        {
+          "original_line": 146,
+          "delivered_line": 152,
+          "original_expression": "listener->quality_participant == remote",
+          "delivered_expression": "listener->quality_participant == remote",
+          "identical": true
+        },
+        {
+          "original_line": 147,
+          "delivered_line": 153,
+          "original_expression": "listener->latest_quality == livekit::ConnectionQuality::Good",
+          "delivered_expression": "listener->latest_quality == livekit::ConnectionQuality::Good",
+          "identical": true
+        },
+        {
+          "original_line": 149,
+          "delivered_line": 155,
+          "original_expression": "listener->connection_quality_changed == 1",
+          "delivered_expression": "listener->connection_quality_changed == 1",
+          "identical": true
+        },
+        {
+          "original_line": 159,
+          "delivered_line": 165,
+          "original_expression": "publication",
+          "delivered_expression": "publication",
+          "identical": true
+        },
+        {
+          "original_line": 160,
+          "delivered_line": 166,
+          "original_expression": "publication->stream_state() == livekit::TrackPublication::StreamState::Paused",
+          "delivered_expression": "publication->stream_state() == livekit::TrackPublication::StreamState::Paused",
+          "identical": true
+        },
+        {
+          "original_line": 161,
+          "delivered_line": 167,
+          "original_expression": "listener->stream_state_changed == 1",
+          "delivered_expression": "listener->stream_state_changed == 1",
+          "identical": true
+        },
+        {
+          "original_line": 162,
+          "delivered_line": 168,
+          "original_expression": "listener->stream_publication == publication",
+          "delivered_expression": "listener->stream_publication == publication",
+          "identical": true
+        },
+        {
+          "original_line": 164,
+          "delivered_line": 170,
+          "original_expression": "listener->stream_state_changed == 1",
+          "delivered_expression": "listener->stream_state_changed == 1",
+          "identical": true
+        },
+        {
+          "original_line": 175,
+          "delivered_line": 181,
+          "original_expression": "cached_permission.has_value()",
+          "delivered_expression": "cached_permission.has_value()",
+          "identical": true
+        },
+        {
+          "original_line": 176,
+          "delivered_line": 182,
+          "original_expression": "!cached_permission->allowed",
+          "delivered_expression": "!cached_permission->allowed",
+          "identical": true
+        },
+        {
+          "original_line": 177,
+          "delivered_line": 183,
+          "original_expression": "!publication->subscription_allowed()",
+          "delivered_expression": "!publication->subscription_allowed()",
+          "identical": true
+        },
+        {
+          "original_line": 178,
+          "delivered_line": 184,
+          "original_expression": "listener->subscription_permission_changed == 1",
+          "delivered_expression": "listener->subscription_permission_changed == 1",
+          "identical": true
+        },
+        {
+          "original_line": 179,
+          "delivered_line": 185,
+          "original_expression": "listener->latest_subscription_permission.participant_sid == \"PA_REMOTE_100\"",
+          "delivered_expression": "listener->latest_subscription_permission.participant_sid == \"PA_REMOTE_100\"",
+          "identical": true
+        },
+        {
+          "original_line": 180,
+          "delivered_line": 186,
+          "original_expression": "listener->latest_subscription_permission.track_sid == \"TR_REMOTE_VIDEO_100\"",
+          "delivered_expression": "listener->latest_subscription_permission.track_sid == \"TR_REMOTE_VIDEO_100\"",
+          "identical": true
+        },
+        {
+          "original_line": 181,
+          "delivered_line": 187,
+          "original_expression": "!listener->latest_subscription_permission.allowed",
+          "delivered_expression": "!listener->latest_subscription_permission.allowed",
+          "identical": true
+        },
+        {
+          "original_line": 183,
+          "delivered_line": 189,
+          "original_expression": "listener->subscription_permission_changed == 1",
+          "delivered_expression": "listener->subscription_permission_changed == 1",
+          "identical": true
+        },
+        {
+          "original_line": 193,
+          "delivered_line": 199,
+          "original_expression": "listener->stream_state_changed == 1",
+          "delivered_expression": "listener->stream_state_changed == 1",
+          "identical": true
+        },
+        {
+          "original_line": 194,
+          "delivered_line": 200,
+          "original_expression": "room->remote_participants().size() == 1",
+          "delivered_expression": "room->remote_participants().size() == 1",
+          "identical": true
+        }
+      ]
+    }
+  ],
+  "known_limits": [
+    "Original nine remain untracked and immutable; delivered copies are also uncommitted worktree files.",
+    "No compile or runtime result is claimed by this manifest.",
+    "Other default and optional assertion sources remain separate Phase2A2 work.",
+    "Prior NEW-BUILD-001 committed HEAD gap cannot close without an authorized commit; no commit is performed."
+  ]
+}

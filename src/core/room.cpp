@@ -449,12 +449,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             }
         );
 
-        local_participant_->SetAsyncUnpublishTrackHandler(
-            [self](const std::string& track_sid)
-                -> asio::awaitable<std::shared_ptr<TrackPublication>> {
-                co_return co_await self->UnpublishLocalTrackAsync(track_sid);
-            }
-        );
+        BindLocalUnpublishHandler();
 
         // 绑定 LocalParticipant 发送 RPC 请求 Handler
         local_participant_->SetSendRpcHandler(
@@ -2875,8 +2870,17 @@ asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
         "remove_sender");
 }
 
+void Room::BindLocalUnpublishHandler() {
+    auto self = shared_from_this();
+    local_participant_->SetAsyncUnpublishTrackHandler(
+        [self](std::string track_sid)
+            -> asio::awaitable<std::shared_ptr<TrackPublication>> {
+            co_return co_await self->UnpublishLocalTrackAsync(std::move(track_sid));
+        });
+}
+
 asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsync(
-    const std::string& track_sid) {
+    std::string track_sid) {
     if (track_sid.empty()) {
         throw OperationError(OperationKind::UnpublishTrack,
                              OperationErrorCode::InvalidState,
@@ -2888,6 +2892,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
     std::shared_ptr<LocalParticipant> local;
     std::shared_ptr<TrackPublication> publication;
     std::shared_ptr<Track> track;
+    std::shared_ptr<LocalUnpublishTestHooks> test_hooks;
     {
         std::lock_guard lock(room_mutex_);
         if (connection_state_ != ConnectionState::Connected ||
@@ -2914,11 +2919,16 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
         }
         pending_local_unpublishes_.emplace(track_sid,
                                             PendingLocalUnpublish{generation, publication, false});
+        test_hooks = local_unpublish_test_hooks_;
     }
 
     bool sender_removed = false;
     try {
-        co_await RemoveLocalTrackFromPublisherAsync(track, generation);
+        if (test_hooks) {
+            co_await test_hooks->remove_sender(track, generation);
+        } else {
+            co_await RemoveLocalTrackFromPublisherAsync(track, generation);
+        }
         sender_removed = true;
         {
             std::lock_guard lock(room_mutex_);
@@ -2934,7 +2944,11 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
             it->second.sender_removed = true;
         }
 
-        co_await NegotiatePublisherAsync(operation_timeouts_.negotiation, generation);
+        if (test_hooks) {
+            co_await test_hooks->negotiate(operation_timeouts_.negotiation, generation);
+        } else {
+            co_await NegotiatePublisherAsync(operation_timeouts_.negotiation, generation);
+        }
 
         std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
         {

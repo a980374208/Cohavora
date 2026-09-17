@@ -260,7 +260,7 @@ public:
     asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> PublishLocalTracksBatchAsync(
         std::vector<LocalParticipant::BatchTrackItem> items);
     asio::awaitable<std::shared_ptr<TrackPublication>> UnpublishLocalTrackAsync(
-        const std::string& track_sid);
+        std::string track_sid);
     void SendPublishOffer();
     void NegotiatePublisher();
     asio::awaitable<void> NegotiatePublisherAsync(
@@ -290,6 +290,16 @@ public:
     void Log(const std::string& cat, const std::string& tag, const std::string& msg);
 
 private:
+    friend class RoomUnpublishTestAccess;
+    // Only the named test-access friend can install these two transport-boundary
+    // hooks. Production keeps them null and uses the existing native methods.
+    struct LocalUnpublishTestHooks {
+        std::function<asio::awaitable<void>(std::shared_ptr<Track>, uint64_t)> remove_sender;
+        std::function<asio::awaitable<void>(std::chrono::milliseconds, uint64_t)> negotiate;
+    };
+    std::shared_ptr<LocalUnpublishTestHooks> local_unpublish_test_hooks_;
+    void BindLocalUnpublishHandler();
+
     LogHandler log_handler_;
     void HandleSignalEvent(const SignalEvent& event, uint64_t event_generation = 0);
     void HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg);
