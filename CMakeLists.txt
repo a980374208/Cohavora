@@ -341,6 +341,8 @@ add_executable(livekit_meeting_app
     src/ui/meeting_main_window.h
     src/ui/meeting_room_window.cpp
     src/ui/meeting_room_window.h
+    src/ui/camera_switch_completion_owner.cpp
+    src/ui/camera_switch_completion_owner.h
     src/ui/meeting_log_console.cpp
     src/ui/meeting_log_console.h
     src/ui/meeting_ui_integration.h
