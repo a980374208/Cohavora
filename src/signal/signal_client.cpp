@@ -229,7 +229,7 @@ asio::awaitable<ConnectResult> SignalClient::Connect(
     
     client->ssl_ctx_ = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_client);
     client->ssl_ctx_->set_default_verify_paths();
-    client->ssl_ctx_->set_verify_mode(asio::ssl::verify_none);
+    client->ssl_ctx_->set_verify_mode(asio::ssl::verify_peer);
     
     try {
         std::cout << "SignalClient::Connect: executing ConnectInternal" << std::endl;
