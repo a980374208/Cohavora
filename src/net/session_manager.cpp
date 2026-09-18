@@ -1,4 +1,5 @@
 #include "src/net/session_manager.h"
+#include "src/net/service_endpoint_policy.h"
 #include <QtCore/QCoreApplication>
 #include <QtCore/QUuid>
 #include <QtCore/QDebug>
@@ -52,6 +53,14 @@ OpenMeetingHttpClient &SessionManager::httpClient() {
 
 bool SessionManager::isLoggedIn() const {
     return !_currentUser.token.isEmpty() && !_currentUser.userId.isEmpty();
+}
+
+bool SessionManager::canPersistSession() const {
+    return serviceAllowsCredentialPersistence(_serverBaseUrl);
+}
+
+bool SessionManager::isDebugHttp() const {
+    return evaluateServiceEndpoint(_serverBaseUrl).isDebugHttp();
 }
 
 const UserInfo &SessionManager::currentUser() const {
@@ -112,8 +121,9 @@ void SessionManager::setVideoMirroring(bool enable) {
 }
 
 bool SessionManager::setServerBaseUrl(const QString &url) {
-    const auto service = canonicalServiceUrl(url);
-    if (service.isEmpty()) return false;
+    const auto policy = evaluateServiceEndpoint(url);
+    if (!policy.requestAllowed()) return false;
+    const auto &service = policy.canonicalUrl;
     if (_serverBaseUrl != service) {
         resetAuthentication();
         forgetSavedSession();
@@ -155,7 +165,7 @@ bool SessionManager::announceLogin(quint64 generation) {
 }
 
 bool SessionManager::resumeSavedSession(bool automatic, std::optional<bool> autoLoginChoice) {
-    if (!_savedSession || (automatic && !_autoLogin) || _loginPending) return false;
+    if (!canPersistSession() || !_savedSession || (automatic && !_autoLogin) || _loginPending) return false;
     // Recheck the tombstone and binding at activation, not just at startup.
     auto loaded = _credentials->load(_serverBaseUrl, _savedAccount);
     _credentialStatus = loaded.status;
@@ -193,15 +203,18 @@ void SessionManager::loginWithPassword(const QString &account,
     forgetSavedSession();
     const auto generation = _authGeneration;
     const auto service = _serverBaseUrl;
-    if (canonicalServiceUrl(service).isEmpty()) {
-        if (callback) callback(false, QString::fromUtf8("服务器地址无效。"));
+    const auto endpoint = evaluateServiceEndpoint(service);
+    if (!endpoint.requestAllowed()) {
+        if (callback) callback(false, serviceEndpointErrorMessage(endpoint.status));
         return;
     }
+    const bool persist = remember && serviceAllowsCredentialPersistence(service);
+    const bool persistAutomatically = persist && autoLogin;
     _loginPending = true;
     const QPointer<SessionManager> self(this);
     const auto httpRevision = httpClient().authRevision();
     httpClient().requestLogin(account, password,
-        [self, generation, httpRevision, service, account, remember, autoLogin, callback]
+        [self, generation, httpRevision, service, account, persist, persistAutomatically, callback]
         (bool ok, const UserInfo &info, const HttpError &err) {
             const auto superseded = QString::fromUtf8("本次登录已取消，请重新登录。");
             if (!self || self->_authGeneration != generation || !self->_loginPending ||
@@ -219,13 +232,13 @@ void SessionManager::loginWithPassword(const QString &account,
             self->_currentUser = info;
             self->_savedAccount = account;
             self->saveToSettings();
-            if (remember) {
-                StoredSession record{service, account, info, autoLogin};
+            if (persist) {
+                StoredSession record{service, account, info, persistAutomatically};
                 self->_credentialStatus = self->_credentials->save(record);
                 if (self->_credentialStatus == CredentialStatus::Ready) {
                     self->_savedSession = std::move(record);
                     self->_rememberSession = true;
-                    self->_autoLogin = autoLogin;
+                    self->_autoLogin = persistAutomatically;
                 }
             }
             self->httpClient().setCurrentUser(info);
@@ -310,8 +323,11 @@ void SessionManager::loadFromSettings() {
     _settingsLoaded = true;
 
     _savedAccount = _settings->value("auth/account", "").toString();
-    _serverBaseUrl = canonicalServiceUrl(
-        _settings->value("network/serverBaseUrl", "http://123.56.225.164:11102").toString());
+    const auto configuredEndpoint = evaluateServiceEndpoint(
+        _settings->value("network/serverBaseUrl", QString()).toString());
+    const bool recognizedEndpoint = configuredEndpoint.status != ServiceEndpointStatus::Unconfigured &&
+        configuredEndpoint.status != ServiceEndpointStatus::InvalidUrl;
+    _serverBaseUrl = recognizedEndpoint ? configuredEndpoint.canonicalUrl : QString();
 
     _mediaPrefs.enableMicrophone = _settings->value("media/enableMicrophone", true).toBool();
     _mediaPrefs.enableSpeaker = _settings->value("media/enableSpeaker", true).toBool();
@@ -320,12 +336,20 @@ void SessionManager::loadFromSettings() {
 
     httpClient().setBaseUrl(_serverBaseUrl);
     resetAuthentication();
-    auto loaded = _credentials->load(_serverBaseUrl, _savedAccount);
-    _credentialStatus = loaded.status;
-    if (loaded.status == CredentialStatus::Ready) {
-        _savedSession = std::move(loaded.session);
-        _rememberSession = true;
-        _autoLogin = _savedSession->autoLogin;
+    if (canPersistSession()) {
+        auto loaded = _credentials->load(_serverBaseUrl, _savedAccount);
+        _credentialStatus = loaded.status;
+        if (loaded.status == CredentialStatus::Ready) {
+            _savedSession = std::move(loaded.session);
+            _rememberSession = true;
+            _autoLogin = _savedSession->autoLogin;
+        }
+    } else {
+        _credentialStatus = CredentialStatus::Empty;
+    }
+    if (!recognizedEndpoint) {
+        _settings->setValue("network/serverBaseUrl", QString());
+        _settings->sync();
     }
 }
 

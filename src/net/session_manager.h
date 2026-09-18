@@ -47,6 +47,8 @@ public:
     bool isRememberSession() const { return _rememberSession; }
     bool isAutoLogin() const { return _autoLogin; }
     QString serverBaseUrl() const { return _serverBaseUrl; }
+    bool canPersistSession() const;
+    bool isDebugHttp() const;
     bool hasSavedSession() const { return _savedSession.has_value(); }
     bool resumeSavedSession(bool automatic = false, std::optional<bool> autoLoginChoice = std::nullopt);
     bool forgetSavedSession();
@@ -129,7 +131,7 @@ private:
     quint64 _authGeneration = 0;
     CredentialStatus _credentialStatus = CredentialStatus::Empty;
     std::optional<StoredSession> _savedSession;
-    QString _serverBaseUrl = "http://116.205.175.233:11102";
+    QString _serverBaseUrl;
 
     std::unique_ptr<QSettings> _settings;
     std::unique_ptr<CredentialStore> _credentials;

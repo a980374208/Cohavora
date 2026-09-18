@@ -1,4 +1,5 @@
 #include "src/net/credential_store.h"
+#include "src/net/service_endpoint_policy.h"
 
 #include <QtCore/QJsonDocument>
 #include <QtCore/QUrl>
@@ -68,6 +69,11 @@ public:
             return {clear() == CredentialStatus::Empty
                 ? CredentialStatus::Migrated : CredentialStatus::CleanupFailed, {}};
         }
+        if (!serviceAllowsCredentialPersistence(service)) {
+            // A remembered HTTP session remains dormant during strict startup.
+            // SessionManager gates activation and a later --debug launch may resume it.
+            return {CredentialStatus::Empty, {}};
+        }
         if (settings_.value(kDisabled, true).toBool()) {
             return {settings_.contains(kRecord) ? clear() : CredentialStatus::Empty, {}};
         }
@@ -98,11 +104,12 @@ public:
     }
 
     CredentialStatus save(const StoredSession &record) override {
-        if (clear() != CredentialStatus::Empty) return CredentialStatus::CleanupFailed;
-        if (record.service.isEmpty() || canonicalServiceUrl(record.service) != record.service ||
+        if (!serviceAllowsCredentialPersistence(record.service) ||
+            canonicalServiceUrl(record.service) != record.service ||
             record.account.isEmpty() || record.user.token.isEmpty() || record.user.userId.isEmpty()) {
             return CredentialStatus::SaveFailed;
         }
+        if (clear() != CredentialStatus::Empty) return CredentialStatus::CleanupFailed;
         QJsonObject object;
         object["version"] = 2;
         object["service"] = record.service;

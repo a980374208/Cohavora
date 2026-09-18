@@ -35,6 +35,7 @@ private:
     void initUI();
     void loadSavedData();
     void updateSavedSessionAction();
+    void updateEndpointOptions();
     void cancelLogin();
     void acceptAuthenticatedSession();
     void setLoading(bool loading, const QString &text = QString());

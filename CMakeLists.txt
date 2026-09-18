@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
 project(livekit_signaling_cpp LANGUAGES C CXX)
-
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
@@ -333,6 +332,8 @@ add_executable(livekit_meeting_app
     src/net/session_manager.cpp
     src/net/credential_store.cpp
     src/net/credential_store.h
+    src/net/service_endpoint_policy.cpp
+    src/net/service_endpoint_policy.h
     src/ui/login_dialog.h
     src/ui/login_dialog.cpp
     src/ui/sidebar_widget.cpp
@@ -476,3 +477,10 @@ target_link_options(livekit_meeting_app PRIVATE
     $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
     $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
 )
+
+# PR-SEC-004: strict startup and explicit runtime --debug HTTP policy.
+foreach(_policy_variant strict dev)
+    if(_policy_variant STREQUAL "dev")
+    else()
+    endif()
+endforeach()
