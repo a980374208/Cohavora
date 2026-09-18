@@ -13,6 +13,7 @@
 #include <queue>
 #include <optional>
 #include <system_error>
+#include <cstdint>
 
 namespace livekit {
 
@@ -22,6 +23,9 @@ namespace livekit {
 std::error_code MakeWebSocketHttpError(unsigned int status_code);
 std::optional<unsigned int> WebSocketHttpStatus(const std::error_code& error);
 bool IsWebSocketHttpStatus(const std::error_code& error, unsigned int status_code);
+
+// Allocation-free admission of a peer-declared length before conversion to size_t.
+std::error_code CheckWebSocketFrameLength(uint64_t payload_length) noexcept;
 
 class WebSocketClient : public std::enable_shared_from_this<WebSocketClient> {
 public:
