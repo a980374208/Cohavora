@@ -6,6 +6,7 @@
 #include <sstream>
 #include <istream>
 #include <ostream>
+#include <limits>
 #include <openssl/sha.h>
 
 #ifdef _WIN32
@@ -48,6 +49,15 @@ std::optional<unsigned int> WebSocketHttpStatus(const std::error_code& error) {
 bool IsWebSocketHttpStatus(const std::error_code& error, unsigned int status_code) {
     const auto actual = WebSocketHttpStatus(error);
     return actual.has_value() && *actual == status_code;
+}
+
+std::error_code CheckWebSocketFrameLength(uint64_t payload_length) noexcept {
+    constexpr uint64_t kMaxFramePayload = 64ULL * 1024 * 1024;
+    if (payload_length > (std::numeric_limits<size_t>::max)() ||
+        payload_length > kMaxFramePayload) {
+        return std::make_error_code(std::errc::message_size);
+    }
+    return {};
 }
 
 static std::string Base64Encode(const unsigned char* buffer, size_t length) {
@@ -330,16 +340,17 @@ asio::awaitable<void> WebSocketClient::ReadFrame() {
         }
     }
 
+    if (const auto error = CheckWebSocketFrameLength(payload_len)) {
+        throw std::system_error(error);
+    }
+
     uint8_t mask_key[4] = {0};
     if (masked) {
         co_await async_read_stream(asio::buffer(mask_key, 4));
     }
 
-    std::vector<uint8_t> payload(payload_len);
+    std::vector<uint8_t> payload(static_cast<size_t>(payload_len));
     if (payload_len > 0) {
-        if (payload_len > 64 * 1024 * 1024) {
-            throw std::system_error(std::make_error_code(std::errc::message_size));
-        }
         co_await async_read_stream(asio::buffer(payload));
         if (masked) {
             for (size_t i = 0; i < payload.size(); ++i) {

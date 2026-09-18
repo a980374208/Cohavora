@@ -7,6 +7,7 @@
 #include <future>
 #include <cassert>
 #include <sstream>
+#include <limits>
 #include <asio.hpp>
 #include <openssl/sha.h>
 #include "signal_client.h"
@@ -109,6 +110,7 @@ public:
     void SetV1Status(int status) { v1_status_ = status; }
     void SetRegionJson(std::string json) { region_json_ = json; }
     void SetMockJoinSids(std::string sid) { mock_sid_ = sid; }
+    void SetRawFrames(std::vector<uint8_t> frames) { raw_frames_ = std::move(frames); }
     void SetJoinPublishCodecs(std::vector<std::string> codecs) {
         join_publish_codecs_ = std::move(codecs);
     }
@@ -219,6 +221,13 @@ private:
                 asio::write(*socket, asio::buffer(ss.str()));
                 std::cout << "MockServer: Switching protocols 101 written" << std::endl;
                 active_sockets_.push_back(socket);
+
+                if (raw_frames_) {
+                    asio::write(*socket, asio::buffer(*raw_frames_));
+                    // Keep the peer open without sending any further bytes. A
+                    // header-only rejection must not depend on body data or EOF.
+                    return;
+                }
                 
                 if (req_line.find("reconnect=1") != std::string::npos) {
                     if (dummy_reconnect_) {
@@ -360,6 +369,7 @@ private:
     std::string mock_sid_ = "default_sid";
     std::vector<std::string> join_publish_codecs_;
     bool dummy_reconnect_ = false;
+    std::optional<std::vector<uint8_t>> raw_frames_;
     std::vector<std::shared_ptr<asio::ip::tcp::socket>> keep_alive_sockets_;
     std::vector<std::shared_ptr<asio::ip::tcp::socket>> active_sockets_;
 
@@ -375,6 +385,116 @@ public:
 static std::vector<std::shared_ptr<MockServer>> g_keep_alive_servers;
 
 // Test Cases (Coroutines)
+void TestWebSocketFrameLengthAdmission() {
+    constexpr uint64_t ceiling = 64ULL * 1024 * 1024;
+    for (const uint64_t length : {0ULL, 3ULL, 125ULL, 126ULL, 65535ULL,
+                                  65536ULL, ceiling - 1, ceiling}) {
+        TEST_ASSERT(!livekit::CheckWebSocketFrameLength(length),
+                    "Valid frame length rejected: " + std::to_string(length));
+    }
+    for (const uint64_t length : {ceiling + 1, 1ULL << 30, (1ULL << 63) - 1,
+                                  1ULL << 63, (std::numeric_limits<uint64_t>::max)()}) {
+        TEST_ASSERT(livekit::CheckWebSocketFrameLength(length) ==
+                        std::make_error_code(std::errc::message_size),
+                    "Oversized frame length admitted: " + std::to_string(length));
+    }
+    std::cout << "TestWebSocketFrameLengthAdmission PASSED!" << std::endl;
+}
+
+asio::awaitable<void> TestWebSocketHeaderOnlyOversize() {
+    auto executor = co_await asio::this_coro::executor;
+    auto& io = static_cast<asio::io_context&>(executor.context());
+    asio::ssl::context ssl(asio::ssl::context::tls_client);
+    constexpr uint64_t ceiling = 64ULL * 1024 * 1024;
+    for (const uint64_t length : {ceiling + 1, 1ULL << 30,
+                                  (std::numeric_limits<uint64_t>::max)()}) {
+        auto server = std::make_shared<MockServer>(io);
+        g_keep_alive_servers.push_back(server);
+        // Deliver a normal small binary frame first, then only the ten-byte
+        // oversized frame header. No allocation scales with the declared length.
+        std::vector<uint8_t> frames{0x82, 3, 1, 2, 3, 0x82, 127};
+        for (int shift = 56; shift >= 0; shift -= 8) {
+            frames.push_back(static_cast<uint8_t>(length >> shift));
+        }
+        server->SetRawFrames(std::move(frames));
+        server->StartAccept();
+        auto ws = std::make_shared<livekit::WebSocketClient>(io, ssl);
+        const auto error = co_await ws->Connect(
+            "ws://127.0.0.1:" + std::to_string(server->port()) + "/rtc",
+            "test-token", std::chrono::seconds(2), livekit::CredentialUrlPolicy{true, false});
+        TEST_ASSERT(!error, "Frame test connect failed: " + error.message());
+
+        asio::steady_timer deadline(executor, std::chrono::seconds(2));
+        int messages = 0;
+        int errors = 0;
+        int closes = 0;
+        bool payload_matches = false;
+        std::error_code received_error;
+        ws->SetOnMessage([&](const std::vector<uint8_t>& payload) {
+            ++messages;
+            payload_matches = payload == std::vector<uint8_t>({1, 2, 3});
+        });
+        ws->SetOnClose([&](uint16_t, const std::string&) { ++closes; });
+        ws->SetOnError([&](const std::error_code& ec) {
+            ++errors;
+            received_error = ec;
+            deadline.cancel();
+        });
+        ws->StartRead();
+        std::error_code wait_error;
+        co_await deadline.async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
+        TEST_ASSERT(wait_error == asio::error::operation_aborted && errors == 1,
+                    "Header-only oversized frame was not rejected before deadline");
+        TEST_ASSERT(received_error == std::make_error_code(std::errc::message_size),
+                    "Oversized frame lost the existing message_size error");
+        TEST_ASSERT(messages == 1 && payload_matches,
+                    "Normal frame changed or oversized payload reached message callback");
+        TEST_ASSERT(!ws->IsConnected() && closes == 0,
+                    "Size error changed socket shutdown / close callback semantics");
+        ws->SetOnMessage(nullptr);
+        ws->SetOnClose(nullptr);
+        ws->SetOnError(nullptr);
+        server->CloseActiveConnections();
+        server->Stop();
+    }
+    std::cout << "TestWebSocketHeaderOnlyOversize PASSED!" << std::endl;
+}
+
+asio::awaitable<void> TestOversizedFrameSignalClose() {
+    auto executor = co_await asio::this_coro::executor;
+    auto& io = static_cast<asio::io_context&>(executor.context());
+    asio::ssl::context ssl(asio::ssl::context::tls_client);
+    auto server = std::make_shared<MockServer>(io);
+    g_keep_alive_servers.push_back(server);
+    // Exactly 64 MiB + 1, encoded in the header; the peer stays open.
+    server->SetRawFrames({0x82, 127, 0, 0, 0, 0, 4, 0, 0, 1});
+    server->StartAccept();
+    auto result = co_await livekit::SignalStream::Connect(
+        ssl, "ws://127.0.0.1:" + std::to_string(server->port()) + "/rtc",
+        "test-token", std::chrono::seconds(2), livekit::CredentialUrlPolicy{true, false});
+    TEST_ASSERT(!result.error && result.stream, "SignalStream frame test connect failed");
+    asio::steady_timer deadline(executor, std::chrono::seconds(2));
+    int closes = 0;
+    std::string reason;
+    result.stream->SetOnClose([&](const std::string& detail) {
+        ++closes;
+        reason = detail;
+        deadline.cancel();
+    });
+    result.stream->StartRead();
+    std::error_code wait_error;
+    co_await deadline.async_wait(asio::redirect_error(asio::use_awaitable, wait_error));
+    TEST_ASSERT(wait_error == asio::error::operation_aborted && closes == 1,
+                "Oversized frame did not propagate one signaling close");
+    TEST_ASSERT(reason == "WebSocket Error: " + std::make_error_code(std::errc::message_size).message(),
+                "Oversized frame changed the signaling close detail");
+    TEST_ASSERT(!result.stream->IsConnected(), "Oversized frame left signaling connected");
+    result.stream->SetOnClose(nullptr);
+    server->CloseActiveConnections();
+    server->Stop();
+    std::cout << "TestOversizedFrameSignalClose PASSED!" << std::endl;
+}
+
 asio::awaitable<void> TestConnectAndJoin() {
     std::cout << "Running TestConnectAndJoin..." << std::endl;
     auto executor = co_await asio::this_coro::executor;
@@ -1190,6 +1310,9 @@ int main() {
     
     asio::co_spawn(io_ctx, []() -> asio::awaitable<void> {
         try {
+            TestWebSocketFrameLengthAdmission();
+            co_await TestWebSocketHeaderOnlyOversize();
+            co_await TestOversizedFrameSignalClose();
             co_await TestConnectAndJoin();
             co_await TestV1FallbackOnlyOn404();
             co_await TestValidationFail();
