@@ -358,7 +358,9 @@ void JoinMeetingDialog::onJoinClicked() {
 	if (_isLoading) return;
 
 	// 1. 检查是否启用了高级手动直连模式
-	if (_manualWidget && _manualWidget->isVisible() && _tokenInput && !_tokenInput->text().trimmed().isEmpty()) {
+	_isManualConnection = _manualWidget && _manualWidget->isVisible()
+		&& _tokenInput && !_tokenInput->text().trimmed().isEmpty();
+	if (_isManualConnection) {
 		_resolvedServerUrl = _serverUrlInput ? _serverUrlInput->text().trimmed() : QString();
 		_resolvedToken = _tokenInput ? _tokenInput->text().trimmed() : QString();
 		_cleanMeetingId = _meetingIdInput ? _meetingIdInput->text().trimmed() : QString();
@@ -639,6 +641,9 @@ void MeetingMainWindow::onCardClicked(ActionCardType type) {
 			cfg.displayName = dlg.displayName();
 			cfg.audioMuted = dlg.isAudioMuted();
 			cfg.videoEnabled = !dlg.isVideoMuted();
+			cfg.invitationMode = dlg.isManualConnection()
+				? InvitationMode::Disabled
+				: InvitationMode::BusinessMeetingId;
 
 			if (!dlg.serverUrl().isEmpty() && !dlg.token().isEmpty()) {
 				// 高级直连模式
@@ -668,6 +673,7 @@ void MeetingMainWindow::onCardClicked(ActionCardType type) {
 		cfg.displayName = session.nickname();
 		cfg.audioMuted = !prefs.enableMicrophone;
 		cfg.videoEnabled = prefs.enableVideo;
+		cfg.invitationMode = InvitationMode::BusinessMeetingId;
 
 		coordinator->createAndJoinQuickMeetingAsync(
 			QString::fromUtf8("%1 的快速会议").arg(session.nickname()),

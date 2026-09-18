@@ -58,6 +58,7 @@ public:
 	QString displayName() const;
 	bool isAudioMuted() const;
 	bool isVideoMuted() const;
+	bool isManualConnection() const { return _isManualConnection; }
 
 	void reject() override;
 
@@ -95,6 +96,7 @@ private:
 
 	bool _isLoading = false;
 	bool _isCancelled = false;
+	bool _isManualConnection = false;
 
 	QPoint _dragPosition;
 	bool _isDragging = false;

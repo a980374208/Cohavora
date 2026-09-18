@@ -1934,6 +1934,7 @@ MeetingRoomWindow::MeetingRoomWindow(
 	_inviteHintBanner = new QLabel(_stageContainer);
 	_recoveryBanner = new QLabel(_stageContainer);
 	_recoveryBanner->hide();
+	setupInvitationBinding();
 	_remoteRenderSession = std::make_unique<livekit::render::VideoRenderSession>(
 		[this](const std::string &identity, const QImage &image) {
 			receiveRemoteVideoFrame(image, QString::fromStdString(identity));
@@ -2283,14 +2284,7 @@ void MeetingRoomWindow::initLayout() {
 			QString::fromUtf8("已开启桌面与窗口采集选择器，您可以选择任意应用进行全高清共享。"));
 	}, lifetime());
 
-	_bottomBar->inviteClicked() | rpl::on_next([this] {
-		QString inviteText = QString::fromUtf8("【LiveKit 会议邀请】\n服务器地址: %1\nToken: %2\n请使用会议客户端连接入会！")
-			.arg(_config.serverUrl).arg(_config.token.isEmpty() ? "(空)" : _config.token);
-		QApplication::clipboard()->setText(inviteText);
-		LogToConsole(LogCategory::General, "INVITE", "会议邀请信息已复制到剪贴板");
-		QMessageBox::information(this, QString::fromUtf8("邀请信息已复制"),
-			QString::fromUtf8("会议邀请信息已复制到剪贴板，您可以直接粘贴发送给其他参会人！"));
-	}, lifetime());
+	setupInvitationBinding();
 
 	_bottomBar->participantsClicked() | rpl::on_next([this] {
 		switchSidebar(ActiveSidebar::Participants);
@@ -3690,6 +3684,75 @@ void MeetingRoomWindow::handleEndMeetingClicked() {
 			}
 			if (guard) guard->close();
 		}
+	}
+}
+
+void MeetingRoomWindow::setupInvitationBinding() {
+	if (!_bottomBar) return;
+	_bottomBar->inviteClicked() | rpl::on_next([this] {
+		handleInviteClicked();
+	}, lifetime());
+}
+
+void MeetingRoomWindow::handleInviteClicked() {
+	if (_config.invitationMode != InvitationMode::BusinessMeetingId) {
+		QPointer<MeetingRoomWindow> guard(this);
+		LogToConsole(LogCategory::General, "INVITE", "当前连接不支持会议号邀请");
+		if (guard) {
+			guard->showInvitationNotice(false, QString::fromUtf8("无法复制邀请"),
+				QString::fromUtf8("此连接不支持会议号邀请，请联系组织者为其他参会者提供独立入会方式。"));
+		}
+		return;
+	}
+
+	const auto ready = _coordinator
+		&& _coordinator->state() == OpenMeeting::MeetingState::InMeeting;
+	const auto meetingId = ready ? _coordinator->currentMeetingId() : QString();
+	bool validMeetingId = !meetingId.isEmpty();
+	for (const QChar character : meetingId) {
+		if (character.isSpace() || !character.isPrint()) {
+			validMeetingId = false;
+			break;
+		}
+	}
+	if (!validMeetingId) {
+		QPointer<MeetingRoomWindow> guard(this);
+		LogToConsole(LogCategory::General, "INVITE", "当前会议尚未就绪，未复制邀请信息");
+		if (guard) {
+			guard->showInvitationNotice(false, QString::fromUtf8("邀请暂不可用"),
+				QString::fromUtf8("当前会议尚未就绪，暂时无法复制邀请信息。"));
+		}
+		return;
+	}
+
+	const auto inviteText = QString::fromUtf8(
+		"【LiveKit 会议邀请】\n"
+		"会议号: %1\n"
+		"请在配置了同一会议服务的客户端登录自己的账号后，使用会议号加入。")
+		.arg(meetingId);
+	QPointer<MeetingRoomWindow> guard(this);
+	QApplication::clipboard()->setText(inviteText);
+	if (!guard) return;
+	LogToConsole(LogCategory::General, "INVITE", "会议邀请信息已复制到剪贴板");
+	if (guard) {
+		guard->showInvitationNotice(true, QString::fromUtf8("邀请信息已复制"),
+			QString::fromUtf8("会议邀请信息已复制到剪贴板，您可以发送给其他参会人。"));
+	}
+}
+
+void MeetingRoomWindow::showInvitationNotice(
+		bool success,
+		const QString &title,
+		const QString &message) {
+	if (_invitationNoticeEffect) {
+		auto effect = _invitationNoticeEffect;
+		effect(success, title, message);
+		return;
+	}
+	if (success) {
+		QMessageBox::information(this, title, message);
+	} else {
+		QMessageBox::warning(this, title, message);
 	}
 }
 
