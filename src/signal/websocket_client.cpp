@@ -50,40 +50,6 @@ bool IsWebSocketHttpStatus(const std::error_code& error, unsigned int status_cod
     return actual.has_value() && *actual == status_code;
 }
 
-Url ParseUrl(const std::string& url_str) {
-    Url url;
-    size_t scheme_end = url_str.find("://");
-    if (scheme_end == std::string::npos) return url;
-    url.scheme = url_str.substr(0, scheme_end);
-    
-    std::string host_port_path = url_str.substr(scheme_end + 3);
-    size_t path_start = host_port_path.find('/');
-    std::string host_port = (path_start == std::string::npos) ? host_port_path : host_port_path.substr(0, path_start);
-    
-    if (path_start != std::string::npos) {
-        std::string path_query = host_port_path.substr(path_start);
-        size_t query_start = path_query.find('?');
-        if (query_start != std::string::npos) {
-            url.path = path_query.substr(0, query_start);
-            url.query = path_query.substr(query_start + 1);
-        } else {
-            url.path = path_query;
-        }
-    } else {
-        url.path = "/";
-    }
-    
-    size_t colon = host_port.find(':');
-    if (colon != std::string::npos) {
-        url.host = host_port.substr(0, colon);
-        url.port = host_port.substr(colon + 1);
-    } else {
-        url.host = host_port;
-        url.port = (url.scheme == "wss" || url.scheme == "https") ? "443" : "80";
-    }
-    return url;
-}
-
 static std::string Base64Encode(const unsigned char* buffer, size_t length) {
     static const char char_set[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     std::string result;
@@ -131,6 +97,38 @@ static std::optional<std::string> GetProxyFromEnv(bool is_secure) {
     return std::nullopt;
 }
 
+struct ProxyEndpoint {
+    std::string host;
+    std::string port;
+    std::string credentials;
+};
+
+static std::optional<ProxyEndpoint> ParseProxyEndpoint(std::string value) {
+    if (value.find("://") == std::string::npos) value = "http://" + value;
+    const size_t scheme_end = value.find("://");
+    const size_t authority_start = scheme_end + 3;
+    const size_t authority_end = value.find_first_of("/?#", authority_start);
+    std::string authority = value.substr(
+        authority_start,
+        authority_end == std::string::npos ? std::string::npos : authority_end - authority_start);
+
+    std::string credentials;
+    const size_t at = authority.rfind('@');
+    if (at != std::string::npos) {
+        credentials = authority.substr(0, at);
+        authority = authority.substr(at + 1);
+    }
+
+    std::error_code error;
+    auto parsed = AdmitCredentialUrl(
+        value.substr(0, authority_start) + authority,
+        CredentialUrlKind::Http,
+        CredentialUrlPolicy{true, false},
+        error);
+    if (!parsed) return std::nullopt;
+    return ProxyEndpoint{parsed->host, parsed->port, std::move(credentials)};
+}
+
 static void LoadSystemCertificates(asio::ssl::context& ssl_ctx) {
 #ifdef _WIN32
     HCERTSTORE hStore = CertOpenSystemStoreA(0, "ROOT");
@@ -165,15 +163,20 @@ WebSocketClient::~WebSocketClient() {
     shutdown_stream();
 }
 
-asio::awaitable<std::error_code> WebSocketClient::Connect(std::string url_str, 
-                                                        std::string token, 
-                                                        std::chrono::milliseconds timeout) {
+asio::awaitable<std::error_code> WebSocketClient::Connect(std::string url_str,
+                                                         std::string token,
+                                                         std::chrono::milliseconds timeout,
+                                                         CredentialUrlPolicy policy) {
     std::cout << "WebSocketClient::Connect: 1 (shared_from_this)" << std::endl;
     auto self = shared_from_this();
     std::cout << "WebSocketClient::Connect: 2" << std::endl;
-    Url url = ParseUrl(url_str);
-    is_ssl_ = (url.scheme == "wss");
-     closed_by_us_ = false;
+    std::error_code admission_error;
+    auto admitted = AdmitCredentialUrl(
+        url_str, CredentialUrlKind::WebSocket, policy, admission_error);
+    if (!admitted) co_return admission_error;
+    const Url url = std::move(*admitted);
+    is_ssl_ = url.secure;
+    closed_by_us_ = false;
 
     auto executor = co_await asio::this_coro::executor;
     std::cout << "WebSocketClient::Connect: 3" << std::endl;
@@ -194,19 +197,20 @@ asio::awaitable<std::error_code> WebSocketClient::Connect(std::string url_str,
         std::cout << "WebSocketClient::Connect: 4.1 (proxy env checked)" << std::endl;
         if (proxy_env) {
             std::cout << "WebSocketClient::Connect: 4.1.1 (using proxy)" << std::endl;
-            std::string proxy_str = *proxy_env;
-            Url p_url = ParseUrl(proxy_str.find("://") == std::string::npos ? "http://" + proxy_str : proxy_str);
-            
+            auto proxy = ParseProxyEndpoint(*proxy_env);
+            if (!proxy) {
+                throw std::system_error(std::make_error_code(std::errc::invalid_argument));
+            }
             std::string auth_hdr;
-            size_t at_sign = p_url.host.find('@');
-            std::string proxy_host = p_url.host;
-            if (at_sign != std::string::npos) {
-                std::string credentials = p_url.host.substr(0, at_sign);
-                proxy_host = p_url.host.substr(at_sign + 1);
-                auth_hdr = "Proxy-Authorization: Basic " + Base64Encode(reinterpret_cast<const unsigned char*>(credentials.data()), credentials.size()) + "\r\n";
+            if (!proxy->credentials.empty()) {
+                auth_hdr = "Proxy-Authorization: Basic " +
+                    Base64Encode(
+                        reinterpret_cast<const unsigned char*>(proxy->credentials.data()),
+                        proxy->credentials.size()) +
+                    "\r\n";
             }
             
-            co_await AsyncConnectSocket(proxy_host, p_url.port);
+            co_await AsyncConnectSocket(proxy->host, proxy->port);
             std::optional<std::string> auth_opt;
             if (!auth_hdr.empty()) auth_opt = auth_hdr;
             co_await AsyncHttpProxyConnect(url.host, url.port, url.host, url.port, auth_opt);
@@ -223,7 +227,7 @@ asio::awaitable<std::error_code> WebSocketClient::Connect(std::string url_str,
         }
 
         std::cout << "WebSocketClient::Connect: 4.5 (WS handshake starting)" << std::endl;
-        co_await AsyncWsHandshake(url.host, url.port, url.path, url.query, token);
+        co_await AsyncWsHandshake(url, std::move(token));
         std::cout << "WebSocketClient::Connect: 4.6 (WS handshake completed)" << std::endl;
         
         connect_done->store(true);
@@ -539,18 +543,14 @@ asio::awaitable<void> WebSocketClient::AsyncSslHandshake(std::string host) {
     co_await ssl_stream->async_handshake(asio::ssl::stream_base::client, asio::use_awaitable);
 }
 
-asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::string port, std::string path, std::string query, std::string token) {
+asio::awaitable<void> WebSocketClient::AsyncWsHandshake(Url url, std::string token) {
     std::cout << "WebSocketClient::AsyncWsHandshake: 1" << std::endl;
-    std::string path_query = path;
-    if (!query.empty()) {
-        path_query += "?" + query;
+    std::string path_query = url.path;
+    if (!url.query.empty()) {
+        path_query += "?" + url.query;
     }
     std::string ws_key = GenerateWebSocketKey();
-    
-    std::string host_hdr = host;
-    if (!port.empty() && port != "80" && port != "443" && host.find(':') == std::string::npos) {
-        host_hdr += ":" + port;
-    }
+    const std::string host_hdr = FormatUrlAuthority(url);
 
     std::string req = "GET " + path_query + " HTTP/1.1\r\n"
                       "Host: " + host_hdr + "\r\n"
@@ -559,16 +559,16 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(std::string host, std::s
                       "Connection: Upgrade\r\n"
                       "Sec-WebSocket-Key: " + ws_key + "\r\n"
                       "Sec-WebSocket-Version: 13\r\n";
-    if (!token.empty() && query.find("access_token=") == std::string::npos) {
+    if (!token.empty() && url.query.find("access_token=") == std::string::npos) {
         req += "Authorization: Bearer " + token + "\r\n";
     }
     req += "\r\n";
 
-    const std::string endpoint = (is_ssl_ ? "wss://" : "ws://") + host + ":" + port + path_query;
+    const std::string endpoint = FormatCredentialUrl(url);
     std::cout << "WebSocketClient::AsyncWsHandshake: request "
               << secure_log::EndpointSummary(endpoint)
               << ", authorization="
-              << ((!token.empty() && query.find("access_token=") == std::string::npos) ? "present" : "query")
+              << ((!token.empty() && url.query.find("access_token=") == std::string::npos) ? "present" : "query")
               << std::endl;
 
     std::cout << "WebSocketClient::AsyncWsHandshake: 2 (writing request...)" << std::endl;

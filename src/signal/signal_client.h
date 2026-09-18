@@ -52,6 +52,9 @@ struct SignalOptions {
     SignalSdkOptions sdk_options;
     bool single_peer_connection = true;
     bool create_webrtc_pc = true; // Toggle actual creation of WebRTC PC instances
+    // Plaintext signaling is an explicit application policy (for example --debug).
+    // The native SDK fails closed unless its owner opts in for this session.
+    bool allow_insecure_transport = false;
     std::chrono::milliseconds connect_timeout = std::chrono::seconds(5);
     std::chrono::milliseconds reconnect_timeout = std::chrono::seconds(5);
     OperationTimeouts timeouts;
@@ -174,6 +177,7 @@ private:
 
     mutable std::mutex token_mutex_;
     std::string token_;
+    bool secure_transport_required_ = false;
 
     // Queued mutations during reconnect
     std::mutex queue_mutex_;

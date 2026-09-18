@@ -1,6 +1,7 @@
 #pragma once
 
 #include "coro_allocator.h"
+#include "credential_url.h"
 #include <asio.hpp>
 #include <asio/ssl.hpp>
 #include <string>
@@ -22,16 +23,6 @@ std::error_code MakeWebSocketHttpError(unsigned int status_code);
 std::optional<unsigned int> WebSocketHttpStatus(const std::error_code& error);
 bool IsWebSocketHttpStatus(const std::error_code& error, unsigned int status_code);
 
-struct Url {
-    std::string scheme;
-    std::string host;
-    std::string port;
-    std::string path;
-    std::string query;
-};
-
-Url ParseUrl(const std::string& url_str);
-
 class WebSocketClient : public std::enable_shared_from_this<WebSocketClient> {
 public:
     using MessageCallback = std::function<void(const std::vector<uint8_t>& binary_payload)>;
@@ -45,7 +36,8 @@ public:
     // Connect to WebSocket server, returns awaitable error_code
     asio::awaitable<std::error_code> Connect(std::string url_str, 
                                              std::string token, 
-                                             std::chrono::milliseconds timeout);
+                                             std::chrono::milliseconds timeout,
+                                             CredentialUrlPolicy policy = {});
 
     // Start background read loop
     void StartRead();
@@ -83,7 +75,7 @@ private:
     asio::awaitable<void> AsyncConnectSocket(std::string host, std::string port);
     asio::awaitable<void> AsyncHttpProxyConnect(std::string proxy_host, std::string proxy_port, std::string target_host, std::string target_port, std::optional<std::string> auth_header);
     asio::awaitable<void> AsyncSslHandshake(std::string host);
-    asio::awaitable<void> AsyncWsHandshake(std::string host, std::string port, std::string path, std::string query, std::string token);
+    asio::awaitable<void> AsyncWsHandshake(Url url, std::string token);
 
     // Send and read Helpers
     asio::awaitable<size_t> async_read_stream(asio::mutable_buffer buf);

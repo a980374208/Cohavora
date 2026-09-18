@@ -84,6 +84,7 @@ add_custom_command(
 
 # 源文件列表
 set(LIVEKIT_SOURCES
+    src/signal/credential_url.cpp
     src/signal/websocket_client.cpp
     src/signal/region_provider.cpp
     src/signal/signal_stream.cpp
@@ -125,6 +126,7 @@ set(LIVEKIT_SOURCES
 # 头文件列表
 set(LIVEKIT_HEADERS
     src/media/audio_apm.h
+    src/signal/credential_url.h
     src/signal/websocket_client.h
     src/signal/region_provider.h
     src/signal/signal_stream.h
