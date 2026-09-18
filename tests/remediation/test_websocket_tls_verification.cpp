@@ -1,4 +1,5 @@
 #include "websocket_client.h"
+#include "region_provider.h"
 #include "tests/support/test_check.h"
 
 #include <openssl/evp.h>
@@ -169,6 +170,76 @@ void RunCase(const char* label, asio::ssl::context& client_tls, X509* cert,
     std::cout << "PASS " << label << (query_token ? " query" : " header") << std::endl;
 }
 
+void RunHttpCase(const char* label, asio::ssl::context& client_tls, X509* cert,
+                 EVP_PKEY* key, const std::string& wire, bool trusted,
+                 std::error_code expected_error = {},
+                 std::chrono::milliseconds timeout = std::chrono::seconds(2)) {
+    asio::io_context io;
+    asio::ssl::context server_tls(asio::ssl::context::tls_server);
+    TEST_CHECK(SSL_CTX_use_certificate(server_tls.native_handle(), cert) == 1);
+    TEST_CHECK(SSL_CTX_use_PrivateKey(server_tls.native_handle(), key) == 1);
+    asio::ip::tcp::acceptor acceptor(io, {asio::ip::address_v4::loopback(), 0});
+    asio::ssl::stream<asio::ip::tcp::socket> peer(io, server_tls);
+    asio::steady_timer watchdog(io, std::chrono::seconds(5));
+    bool timed_out = false;
+    bool client_done = false;
+    bool server_done = false;
+    std::string request;
+    watchdog.async_wait([&](std::error_code error) {
+        if (error) return;
+        timed_out = true;
+        std::error_code ignored;
+        acceptor.close(ignored);
+        peer.next_layer().close(ignored);
+    });
+    auto finish = [&] { if (client_done && server_done) watchdog.cancel(); };
+    asio::co_spawn(io, [&]() -> asio::awaitable<void> {
+        co_await acceptor.async_accept(peer.next_layer(), asio::use_awaitable);
+        std::error_code error;
+        co_await peer.async_handshake(asio::ssl::stream_base::server,
+                                     asio::redirect_error(asio::use_awaitable, error));
+        if (error) co_return;
+        asio::streambuf buffer(4096);
+        co_await asio::async_read_until(peer, buffer, "\r\n\r\n", asio::use_awaitable);
+        request.assign(asio::buffers_begin(buffer.data()), asio::buffers_end(buffer.data()));
+        if (!wire.empty()) {
+            co_await asio::async_write(peer, asio::buffer(wire), asio::redirect_error(asio::use_awaitable, error));
+        }
+        char probe;
+        co_await peer.async_read_some(asio::buffer(&probe, 1), asio::redirect_error(asio::use_awaitable, error));
+    }, [&](std::exception_ptr error) {
+        if (error) std::rethrow_exception(error);
+        server_done = true;
+        finish();
+    });
+    const std::string url = "https://localhost:" + std::to_string(acceptor.local_endpoint().port()) + "/validate";
+    const std::string token = "synthetic-http-tls-token";
+    std::error_code actual_error;
+    livekit::HttpResponse response;
+    asio::co_spawn(io, livekit::HttpClient::Get(client_tls, url, token, timeout),
+        [&](std::exception_ptr error, livekit::HttpResponse value) {
+            response = std::move(value);
+            if (error) {
+                try { std::rethrow_exception(error); }
+                catch (const std::system_error& e) { actual_error = e.code(); }
+            }
+            client_done = true;
+            finish();
+        });
+    io.run();
+    TEST_CHECK(!timed_out && client_done && server_done);
+    if (trusted) {
+        TEST_CHECK(actual_error == expected_error);
+        TEST_CHECK(request.find("Authorization: Bearer " + token) != std::string::npos);
+        if (!expected_error) TEST_CHECK(response.status_code == 200 && response.body == "OK");
+    } else {
+        TEST_CHECK(actual_error.category() == asio::error::get_ssl_category());
+        TEST_CHECK(ERR_GET_REASON(actual_error.value()) == SSL_R_CERTIFICATE_VERIFY_FAILED);
+        TEST_CHECK(request.empty());
+    }
+    std::cout << "PASS native HTTPS " << label << std::endl;
+}
+
 void ClearProxyEnvironment() {
     // This process only uses loopback peers; do not route fixtures through a user's proxy.
     for (const auto* name : {"HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"}) {
@@ -211,5 +282,16 @@ int main() {
         RunCase("wrong IP", trusted, wrong_ip.get(), server_key.get(), "127.0.0.1", query_token, false);
         RunCase("trusted IP", trusted, ip.get(), server_key.get(), "127.0.0.1", query_token, true);
     }
+    const std::string http_ok = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK";
+    RunHttpCase("trusted", trusted, dns.get(), server_key.get(), http_ok, true);
+    RunHttpCase("wrong host", trusted, wrong_dns.get(), server_key.get(), http_ok, false);
+    RunHttpCase("untrusted CA", untrusted, dns.get(), server_key.get(), http_ok, false);
+    RunHttpCase("oversized declaration", trusted, dns.get(), server_key.get(),
+                "HTTP/1.1 200 OK\r\nContent-Length: 1073741824\r\n\r\n", true,
+                std::make_error_code(std::errc::message_size));
+    RunHttpCase("body deadline", trusted, dns.get(), server_key.get(),
+                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nO", true,
+                std::make_error_code(std::errc::timed_out), std::chrono::milliseconds(300));
+    std::cout << "PR_SEC_008_HTTPS_CASES_EXECUTED=5 PASSED=5 FAILED=0\n";
     return 0;
 }

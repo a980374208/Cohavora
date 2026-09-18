@@ -18,6 +18,10 @@ struct HttpResponse {
 
 class HttpClient {
 public:
+    // Native validate/region metadata budgets (wire headers and response body).
+    static constexpr size_t kMaxHeaderBytes = 64 * 1024;
+    static constexpr size_t kMaxBodyBytes = 1024 * 1024;
+
     static asio::awaitable<HttpResponse> Get(asio::ssl::context& ssl_ctx, 
                                              const std::string& url_str, 
                                              const std::string& token, 

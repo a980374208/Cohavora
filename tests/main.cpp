@@ -107,6 +107,7 @@ public:
     }
 
     void SetValidationStatus(int status) { validation_status_ = status; }
+    void SetValidationWire(std::string wire) { validation_wire_ = std::move(wire); }
     void SetV1Status(int status) { v1_status_ = status; }
     void SetRegionJson(std::string json) { region_json_ = json; }
     void SetMockJoinSids(std::string sid) { mock_sid_ = sid; }
@@ -161,6 +162,11 @@ private:
             std::cout << "MockServer: Got request: " << req_line << std::endl;
             
             if (req_line.find("GET /rtc/validate") != std::string::npos || req_line.find("GET /rtc/v1/validate") != std::string::npos) {
+                if (validation_wire_) {
+                    active_sockets_.push_back(socket);
+                    if (!validation_wire_->empty()) asio::write(*socket, asio::buffer(*validation_wire_));
+                    return; // Keep open to exercise validate's own deadline/budget.
+                }
                 std::cout << "MockServer: Handling validate status=" << validation_status_ << std::endl;
                 std::stringstream ss;
                 ss << "HTTP/1.1 " << validation_status_ << " ";
@@ -364,6 +370,7 @@ private:
     asio::ip::tcp::acceptor acceptor_;
     uint16_t port_ = 0;
     int validation_status_ = 200;
+    std::optional<std::string> validation_wire_;
     int v1_status_ = 200;
     std::string region_json_;
     std::string mock_sid_ = "default_sid";
@@ -550,6 +557,35 @@ asio::awaitable<void> TestValidationFail() {
     TEST_ASSERT(server->v0_requests.load() == 0, "non-404 v1 failure must not downgrade to v0");
     server->Stop();
     std::cout << "TestValidationFail PASSED!" << std::endl;
+}
+
+asio::awaitable<void> TestValidationReceiveLimits() {
+    auto executor = co_await asio::this_coro::executor;
+    auto& io = static_cast<asio::io_context&>(executor.context());
+    for (const bool oversize : {false, true}) {
+        auto server = std::make_shared<MockServer>(io);
+        g_keep_alive_servers.push_back(server);
+        server->SetV1Status(503);
+        server->SetValidationWire(oversize
+            ? "HTTP/1.1 200 OK\r\nContent-Length: 1073741824\r\n\r\n" : "");
+        server->StartAccept();
+        const std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
+        livekit::SignalOptions options;
+        options.allow_insecure_transport = true;
+        options.single_peer_connection = true;
+        const auto started = std::chrono::steady_clock::now();
+        const auto result = co_await livekit::SignalClient::Connect(
+            url, "test-token", options, std::nullopt, [](const livekit::SignalEvent&) {});
+        TEST_ASSERT(result.error == std::make_error_code(oversize ? std::errc::message_size : std::errc::timed_out),
+                    "Validate receive failure lost its typed error");
+        TEST_ASSERT(std::chrono::steady_clock::now() - started < std::chrono::seconds(5),
+                    "Validate exceeded its three-second budget");
+        TEST_ASSERT(server->v1_requests.load() == 1 && server->v0_requests.load() == 0,
+                    "Validate failure changed the existing no-downgrade behavior");
+        server->CloseActiveConnections();
+        server->Stop();
+    }
+    std::cout << "TestValidationReceiveLimits PASSED!" << std::endl;
 }
 
 asio::awaitable<void> TestV1FallbackOnlyOn404() {
@@ -1316,6 +1352,7 @@ int main() {
             co_await TestConnectAndJoin();
             co_await TestV1FallbackOnlyOn404();
             co_await TestValidationFail();
+            co_await TestValidationReceiveLimits();
             co_await TestHeartbeat();
             co_await TestReconnectionAndQueueing();
             co_await TestReconnectionInterrupted();

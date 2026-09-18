@@ -15,6 +15,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <array>
 
 namespace {
 
@@ -273,12 +274,194 @@ void CheckExplicitNonDefaultPortInWebSocketHostHeader() {
         "\r\nAuthorization: Bearer sentinel-port-token\r\n") != std::string::npos);
 }
 
+struct HttpWrite {
+    std::chrono::milliseconds delay;
+    std::string bytes;
+};
+
+void CheckHttpExchange(const char* label, std::vector<HttpWrite> writes,
+                       bool eof, std::error_code expected_error,
+                       const std::string& expected_body = {},
+                       std::chrono::milliseconds timeout = std::chrono::seconds(2),
+                       bool tls_stall = false, bool cancel = false, int expected_status = 200) {
+    asio::io_context io;
+    // Exercise an unstranded caller on two workers. Fixture mutations have their
+    // own strand; the production HTTP operation must serialize its own deadline.
+    auto fixture = asio::make_strand(io);
+    asio::ip::tcp::acceptor acceptor(fixture, {asio::ip::address_v4::loopback(), 0});
+    asio::ip::tcp::socket peer(fixture);
+    asio::steady_timer step(fixture);
+    asio::steady_timer watchdog(fixture, std::chrono::seconds(5));
+    asio::steady_timer cancellation_timer(fixture);
+    asio::cancellation_signal cancellation;
+    asio::ssl::context tls(asio::ssl::context::tls_client);
+    const std::string url = std::string(tls_stall ? "https://" : "http://") + "127.0.0.1:" +
+        std::to_string(acceptor.local_endpoint().port()) + "/validate";
+    const std::string token = "synthetic-http-budget-token";
+    bool watchdog_fired = false;
+    bool client_done = false;
+    bool server_done = false;
+    bool peer_saw_eof = false;
+    std::string request;
+    std::error_code actual_error;
+    livekit::HttpResponse response;
+    std::exception_ptr unexpected;
+    std::chrono::steady_clock::duration elapsed{};
+    auto finish = [&] {
+        if (client_done && server_done) watchdog.cancel();
+    };
+    watchdog.async_wait([&](std::error_code error) {
+        if (error) return;
+        watchdog_fired = true;
+        std::error_code ignored;
+        acceptor.close(ignored);
+        peer.close(ignored);
+        step.cancel();
+        cancellation.emit(asio::cancellation_type::terminal);
+    });
+    asio::co_spawn(fixture, [&]() -> asio::awaitable<void> {
+        co_await acceptor.async_accept(peer, asio::use_awaitable);
+        if (!tls_stall) {
+            asio::streambuf buffer(4096);
+            co_await asio::async_read_until(peer, buffer, "\r\n\r\n", asio::use_awaitable);
+            request.assign(asio::buffers_begin(buffer.data()), asio::buffers_end(buffer.data()));
+            for (const auto& write : writes) {
+                if (write.delay.count()) {
+                    step.expires_after(write.delay);
+                    co_await step.async_wait(asio::use_awaitable);
+                }
+                std::error_code error;
+                co_await asio::async_write(peer, asio::buffer(write.bytes),
+                                           asio::redirect_error(asio::use_awaitable, error));
+                if (error) co_return;
+            }
+        }
+        if (eof) {
+            std::error_code ignored;
+            peer.shutdown(asio::ip::tcp::socket::shutdown_send, ignored);
+        }
+        // Hold the peer open. Success with Content-Length, cancellation, size
+        // rejection and TLS/header/body deadlines must all close the transport.
+        std::array<char, 4096> probe;
+        std::error_code error;
+        do {
+            co_await peer.async_read_some(asio::buffer(probe),
+                                          asio::redirect_error(asio::use_awaitable, error));
+        } while (!error);
+        peer_saw_eof = error == asio::error::eof || error == asio::error::connection_reset;
+    }, [&](std::exception_ptr error) {
+        if (error && !cancel && !watchdog_fired) unexpected = error;
+        server_done = true;
+        finish();
+    });
+    if (cancel) {
+        cancellation_timer.expires_after(std::chrono::milliseconds(100));
+        cancellation_timer.async_wait([&](std::error_code error) {
+            if (!error) cancellation.emit(asio::cancellation_type::terminal);
+        });
+    }
+    const auto started = std::chrono::steady_clock::now();
+    asio::co_spawn(io, livekit::HttpClient::Get(tls, url, token, timeout, CredentialUrlPolicy{true, false}),
+        asio::bind_cancellation_slot(cancellation.slot(), asio::bind_executor(fixture,
+            [&](std::exception_ptr error, livekit::HttpResponse value) {
+                elapsed = std::chrono::steady_clock::now() - started;
+                response = std::move(value);
+                if (error) {
+                    try { std::rethrow_exception(error); }
+                    catch (const std::system_error& e) { actual_error = e.code(); }
+                    catch (...) { unexpected = error; }
+                }
+                client_done = true;
+                cancellation_timer.cancel();
+                finish();
+            })));
+    std::thread worker([&] { io.run(); });
+    io.run();
+    worker.join();
+    if (unexpected) std::rethrow_exception(unexpected);
+    if (actual_error != expected_error) {
+        std::cerr << label << ": expected " << expected_error << ", got " << actual_error << '\n';
+    }
+    TEST_CHECK(!watchdog_fired && client_done && server_done);
+    TEST_CHECK(actual_error == expected_error);
+    TEST_CHECK(elapsed < timeout + std::chrono::seconds(1));
+    if (expected_error == std::errc::timed_out) {
+        TEST_CHECK(elapsed >= timeout - std::chrono::milliseconds(30));
+    }
+    if (!expected_error) {
+        TEST_CHECK(response.status_code == expected_status);
+        TEST_CHECK(response.body == expected_body);
+        TEST_CHECK(peer_saw_eof);
+        TEST_CHECK(request.find("Authorization: Bearer " + token) != std::string::npos);
+        TEST_CHECK(std::chrono::steady_clock::now() - started < timeout);
+    }
+    std::cout << "PASS native HTTP " << label << '\n';
+}
+
+void CheckHttpBudgets() {
+    using namespace std::chrono_literals;
+    const auto too_large = std::make_error_code(std::errc::message_size);
+    const auto timed_out = std::make_error_code(std::errc::timed_out);
+    const auto protocol_error = std::make_error_code(std::errc::protocol_error);
+    const std::string header = "HTTP/1.1 200 OK\r\n\r\n";
+    const std::string length_prefix = "HTTP/1.1 200 OK\r\nContent-Length: ";
+    const std::string body(livekit::HttpClient::kMaxBodyBytes, 'x');
+
+    CheckHttpExchange("coalesced body / keep-alive", {{0ms, length_prefix + "2\r\n\r\nOK"}}, false, {}, "OK");
+    CheckHttpExchange("empty / keep-alive", {{0ms, length_prefix + "0\r\n\r\n"}}, false, {});
+    CheckHttpExchange("status and business detail", {{0ms, "HTTP/1.1 401 Unauthorized\r\nContent-Length: 6\r\n\r\ndenied"}},
+                      false, {}, "denied", 2s, false, false, 401);
+    CheckHttpExchange("EOF JSON", {{0ms, header + "{\"regions\":[]}"}}, true, {}, "{\"regions\":[]}");
+    CheckHttpExchange("body exactly at cap / length", {{0ms, length_prefix + std::to_string(body.size()) + "\r\n\r\n" + body}}, false, {}, body);
+    CheckHttpExchange("body exactly at cap / EOF", {{0ms, header + body}}, true, {}, body);
+    CheckHttpExchange("body cap plus one / EOF", {{0ms, header + body + 'x'}}, false, too_large);
+    for (const auto* length : {"1048577", "1073741824", "18446744073709551615", "18446744073709551616"}) {
+        CheckHttpExchange("declared oversized / header only", {{0ms, length_prefix + length + "\r\n\r\n"}}, false, too_large);
+    }
+    const std::string header_prefix = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Padding: ";
+    const std::string exact_header = header_prefix +
+        std::string(livekit::HttpClient::kMaxHeaderBytes - header_prefix.size() - 4, 'x') + "\r\n\r\n";
+    CheckHttpExchange("header exactly at cap", {{0ms, exact_header}}, false, {});
+    CheckHttpExchange("header cap plus one", {{0ms, exact_header.substr(0, exact_header.size() - 4) + "x\r\n\r\n"}}, false, too_large);
+    CheckHttpExchange("unterminated oversized header", {{0ms, std::string(livekit::HttpClient::kMaxHeaderBytes + 1, 'x')}}, false, too_large);
+    CheckHttpExchange("stalled header", {}, false, timed_out, {}, 150ms);
+    CheckHttpExchange("stalled EOF body", {{0ms, header}}, false, timed_out, {}, 150ms);
+    CheckHttpExchange("stalled declared body", {{0ms, length_prefix + "2\r\n\r\nO"}}, false, timed_out, {}, 150ms);
+    CheckHttpExchange("one deadline across header and body", {{100ms, length_prefix + "2\r\n\r\nO"}, {250ms, "K"}}, false, timed_out, {}, 250ms);
+    CheckHttpExchange("slow header cannot renew deadline", {{100ms, "HTTP/1.1 "}, {100ms, "200 OK\r\n"}, {150ms, "\r\n"}}, false, timed_out, {}, 250ms);
+    CheckHttpExchange("TLS handshake stall", {}, false, timed_out, {}, 150ms, true);
+    CheckHttpExchange("external cancellation", {}, false, asio::error::operation_aborted, {}, 2s, false, true);
+    CheckHttpExchange("truncated declared body", {{0ms, length_prefix + "2\r\n\r\nO"}}, true, asio::error::eof);
+    CheckHttpExchange("malformed content length", {{0ms, length_prefix + "oops\r\n\r\n"}}, false, protocol_error);
+    CheckHttpExchange("conflicting content lengths", {{0ms, length_prefix + "1\r\nContent-Length: 2\r\n\r\n"}}, false, protocol_error);
+    // Keep existing transfer-encoded wire-body semantics, but enforce the budget.
+    const std::string chunked = "2\r\nOK\r\n0\r\n\r\n";
+    CheckHttpExchange("transfer encoding retains EOF behavior", {{0ms, "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" + chunked}}, true, {}, chunked);
+
+    // Already-expired budgets fail before starting a socket operation.
+    asio::io_context io;
+    asio::ssl::context tls(asio::ssl::context::tls_client);
+    const std::string url = "http://127.0.0.1:1/validate";
+    const std::string token;
+    for (const auto timeout : {0ms, -1ms}) {
+        io.restart();
+        auto result = asio::co_spawn(io, livekit::HttpClient::Get(tls, url, token, timeout, CredentialUrlPolicy{true, false}), asio::use_future);
+        io.run();
+        bool rejected = false;
+        try { static_cast<void>(result.get()); }
+        catch (const std::system_error& error) { rejected = error.code() == timed_out; }
+        TEST_CHECK(rejected);
+    }
+    std::cout << "PR_SEC_008_HTTP_BUDGET_EXECUTED=1 PASSED=1 FAILED=0\n";
+}
+
 } // namespace
 
 int main() {
     CheckParserAndPolicy();
     CheckRejectedCredentialsDoNotReachSocket();
     CheckExplicitNonDefaultPortInWebSocketHostHeader();
+    CheckHttpBudgets();
     std::cout << "PR_SEC_006_SIGNALING_URL_POLICY_EXECUTED=1 PASSED=1 FAILED=0\n";
     return 0;
 }
