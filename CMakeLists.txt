@@ -912,6 +912,20 @@ set_target_properties(test_connection_log_redaction PROPERTIES
 add_test(NAME connection_log_redaction_test COMMAND test_connection_log_redaction)
 set_tests_properties(connection_log_redaction_test PROPERTIES TIMEOUT 60)
 
+# PR-SEC-003: real loopback TLS handshakes must authenticate the endpoint
+# before either query or header credentials reach the WebSocket server.
+add_executable(test_websocket_tls_verification
+    tests/remediation/test_websocket_tls_verification.cpp
+    tests/support/test_check.h
+)
+target_include_directories(test_websocket_tls_verification PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_websocket_tls_verification PRIVATE livekit_signaling)
+set_target_properties(test_websocket_tls_verification PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded")
+add_test(NAME websocket_tls_verification_test COMMAND test_websocket_tls_verification)
+set_tests_properties(websocket_tls_verification_test PROPERTIES
+    TIMEOUT 60 LABELS "CORE_REGRESSION")
+
 # Exercise the real Qt console cache. Reuse the established static Qt link
 # environment without pulling unrelated production sources into this fixture.
 get_target_property(pr_sec_qt_includes test_camera_owner_remediation INCLUDE_DIRECTORIES)

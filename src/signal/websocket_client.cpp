@@ -531,7 +531,10 @@ asio::awaitable<void> WebSocketClient::AsyncSslHandshake(std::string host) {
     auto& ssl_stream = std::get<SslStreamPtr>(stream_);
     SSL_set_tlsext_host_name(ssl_stream->native_handle(), host.c_str());
     
-    ssl_stream->set_verify_mode(asio::ssl::verify_none);
+    // Authenticate the endpoint before sending the upgrade request and token.
+    // SNI selects a certificate; it does not verify the chain or host identity.
+    ssl_stream->set_verify_mode(asio::ssl::verify_peer);
+    ssl_stream->set_verify_callback(asio::ssl::host_name_verification(host));
 
     co_await ssl_stream->async_handshake(asio::ssl::stream_base::client, asio::use_awaitable);
 }
