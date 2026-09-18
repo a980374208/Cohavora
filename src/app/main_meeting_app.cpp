@@ -48,8 +48,9 @@ int main(int argc, char *argv[]) {
 
 	// 初始化会话与用户认证
 	auto &session = OpenMeeting::SessionManager::instance();
+	session.resumeSavedSession(true);
 
-	// 如果未登录且未开启自动登录，弹出现代化登录框
+	// Only a successfully restored, explicitly enabled session skips login.
 	if (!session.isLoggedIn() || !session.isAutoLogin()) {
 		MeetingUI::LoginDialog loginDlg;
 		if (loginDlg.exec() != QDialog::Accepted) {

@@ -602,6 +602,8 @@ add_executable(livekit_meeting_app
     src/net/openmeeting_http_client.cpp
     src/net/session_manager.h
     src/net/session_manager.cpp
+    src/net/credential_store.cpp
+    src/net/credential_store.h
     src/ui/login_dialog.h
     src/ui/login_dialog.cpp
     src/ui/sidebar_widget.cpp
@@ -758,6 +760,8 @@ add_executable(test_camera_owner_remediation
     src/net/openmeeting_http_client.cpp
     src/net/session_manager.h
     src/net/session_manager.cpp
+    src/net/credential_store.cpp
+    src/net/credential_store.h
     src/ui/camera_switch_completion_owner.h
     src/ui/camera_switch_completion_owner.cpp
     src/ui/meeting_room_window.h
@@ -994,6 +998,8 @@ add_executable(test_openmeeting_http
     src/net/openmeeting_http_client.cpp
     src/net/openmeeting_http_client.h
     src/net/session_manager.cpp
+    src/net/credential_store.cpp
+    src/net/credential_store.h
     src/net/session_manager.h
     src/net/http_types.h
 )
@@ -1058,6 +1064,8 @@ add_executable(test_http_admission_owner
     src/net/openmeeting_http_client.cpp
     src/net/openmeeting_http_client.h
     src/net/session_manager.cpp
+    src/net/credential_store.cpp
+    src/net/credential_store.h
     src/net/session_manager.h
     src/net/http_types.h
 )
@@ -1171,6 +1179,8 @@ add_executable(test_participant_snapshot_remediation
     src/net/openmeeting_http_client.cpp
     src/net/openmeeting_http_client.h
     src/net/session_manager.cpp
+    src/net/credential_store.cpp
+    src/net/credential_store.h
     src/net/session_manager.h
     src/net/http_types.h
 )
@@ -1591,3 +1601,26 @@ set_tests_properties(
 )
 
 
+
+# PR-SEC-002: isolated credential storage, auth response ordering, and real login UI.
+add_executable(test_session_credentials
+    tests/remediation/test_session_credentials.cpp
+    tests/support/test_check.h
+    src/net/credential_store.cpp
+    src/net/credential_store.h
+    src/net/session_manager.cpp
+    src/net/session_manager.h
+    src/net/openmeeting_http_client.cpp
+    src/net/openmeeting_http_client.h
+    src/ui/login_dialog.cpp
+    src/ui/login_dialog.h
+)
+target_include_directories(test_session_credentials BEFORE PRIVATE ${pr_sec_qt_includes})
+target_link_libraries(test_session_credentials PRIVATE ${pr_sec_qt_libraries} crypt32)
+target_compile_definitions(test_session_credentials PRIVATE ${pr_sec_qt_definitions})
+target_link_options(test_session_credentials PRIVATE ${pr_sec_qt_link_options})
+set_target_properties(test_session_credentials PROPERTIES MSVC_RUNTIME_LIBRARY "${pr_sec_qt_runtime}")
+add_test(NAME session_credentials_test COMMAND test_session_credentials)
+set_tests_properties(session_credentials_test PROPERTIES TIMEOUT 60)
+set_property(TEST session_credentials_test openmeeting_http_test openmeeting_http_watchdog_test
+    http_owner_remediation_test APPEND PROPERTY LABELS "PR_SEC_002_FOCUSED")

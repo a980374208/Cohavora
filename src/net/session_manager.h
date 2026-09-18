@@ -6,6 +6,8 @@
 #include <QtCore/QSettings>
 #include <functional>
 #include <memory>
+#include <optional>
+#include "src/net/credential_store.h"
 #include "src/net/http_types.h"
 #include "src/net/openmeeting_http_client.h"
 
@@ -42,10 +44,16 @@ public:
 
     // 持久化的登录与网络配置
     QString savedAccount() const { return _savedAccount; }
-    QString savedPassword() const { return _savedPassword; }
-    bool isRememberPassword() const { return _rememberPassword; }
+    bool isRememberSession() const { return _rememberSession; }
     bool isAutoLogin() const { return _autoLogin; }
     QString serverBaseUrl() const { return _serverBaseUrl; }
+    bool hasSavedSession() const { return _savedSession.has_value(); }
+    bool resumeSavedSession(bool automatic = false, std::optional<bool> autoLoginChoice = std::nullopt);
+    bool forgetSavedSession();
+    void cancelPendingLogin();
+    quint64 authGeneration() const { return _authGeneration; }
+    QString persistenceMessage() const { return credentialStatusMessage(_credentialStatus); }
+    CredentialStatus credentialStatus() const { return _credentialStatus; }
 
     // 媒体首选项
     const MediaPreferences &mediaPreferences() const { return _mediaPrefs; }
@@ -59,7 +67,7 @@ public:
     OpenMeetingHttpClient &httpClient();
 
     // 登录业务操作
-    void setServerBaseUrl(const QString &url);
+    bool setServerBaseUrl(const QString &url);
     void loginWithPassword(const QString &account,
                            const QString &password,
                            bool remember,
@@ -102,18 +110,30 @@ private:
     explicit SessionManager(QObject *parent = nullptr);
     // Null storage is rejected rather than falling back to user settings.
     explicit SessionManager(std::unique_ptr<QSettings> settings, QObject *parent = nullptr);
+    SessionManager(std::unique_ptr<QSettings> settings,
+                   std::unique_ptr<CredentialStore> credentials,
+                   OpenMeetingHttpClient *client, QObject *parent = nullptr);
     ~SessionManager() override = default;
+
+    void resetAuthentication();
+    bool announceLogin(quint64 generation);
 
     UserInfo _currentUser;
     MediaPreferences _mediaPrefs;
     QString _savedAccount;
-    QString _savedPassword;
-    bool _rememberPassword = false;
+    bool _rememberSession = false;
     bool _autoLogin = false;
     bool _sessionInvalidating = false;
+    bool _settingsLoaded = false;
+    bool _loginPending = false;
+    quint64 _authGeneration = 0;
+    CredentialStatus _credentialStatus = CredentialStatus::Empty;
+    std::optional<StoredSession> _savedSession;
     QString _serverBaseUrl = "http://116.205.175.233:11102";
 
     std::unique_ptr<QSettings> _settings;
+    std::unique_ptr<CredentialStore> _credentials;
+    OpenMeetingHttpClient *_client = nullptr; // injected client outlives this owner
 };
 
 } // namespace OpenMeeting
