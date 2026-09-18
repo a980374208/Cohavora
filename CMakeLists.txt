@@ -763,6 +763,8 @@ add_executable(test_camera_owner_remediation
     src/net/session_manager.cpp
     src/net/credential_store.cpp
     src/net/credential_store.h
+    src/net/service_endpoint_policy.cpp
+    src/net/service_endpoint_policy.h
     src/ui/camera_switch_completion_owner.h
     src/ui/camera_switch_completion_owner.cpp
     src/ui/meeting_room_window.h

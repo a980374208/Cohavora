@@ -67,6 +67,11 @@ enum class ActiveSidebar {
 	Chat           // 仅显示会议聊天记录
 };
 
+enum class InvitationMode {
+	Disabled,
+	BusinessMeetingId,
+};
+
 // ----------------------------------------------------
 // VideoTileWidget: 单个视频/头像渲染画框组件
 // ----------------------------------------------------
@@ -296,6 +301,7 @@ protected:
 
 private:
 	friend class ::CameraOwnerTestAccess;
+	friend class ::ParticipantWindowTestAccess;
 
 	struct ToolItem {
 		int id;
@@ -358,6 +364,7 @@ public:
 		QString videoCodec = "vp8"; // "vp8", "h264", "vp9", "av1"
 		QString backupCodec = "vp8";
 		livekit::BackupCodecPolicy backupCodecPolicy = livekit::BackupCodecPolicy::PreferRegression;
+		InvitationMode invitationMode = InvitationMode::Disabled;
 	};
 
 	explicit MeetingRoomWindow(const Config &config,
@@ -411,6 +418,7 @@ private:
 	struct CameraOwnerTestTag final {};
 	using CameraLogEffect = std::function<void(bool error, const QString &tag, const QString &message)>;
 	using CameraWarningEffect = std::function<void(QWidget *parent, const QString &title, const QString &message)>;
+	using InvitationNoticeEffect = std::function<void(bool success, const QString &title, const QString &message)>;
 
 	MeetingRoomWindow(
 		CameraOwnerTestTag,
@@ -426,6 +434,9 @@ private:
 	void fallBackToQtCpuBackend();
 	void syncDx11CanvasLayout(const std::vector<VideoTileWidget*> &tiles);
 	void setupCoordinatorBindings();
+	void setupInvitationBinding();
+	void handleInviteClicked();
+	void showInvitationNotice(bool success, const QString &title, const QString &message);
 	void restoreParticipantPresentations();
 	void applyParticipantPresentation(const OpenMeeting::ParticipantPresentation &presentation);
 	void applyRemoteParticipantJoined(const QString &identity, const QString &name,
@@ -484,6 +495,7 @@ private:
 	OpenMeeting::SessionManager *_cameraSessionManager = nullptr;
 	CameraLogEffect _cameraLogEffect;
 	CameraWarningEffect _cameraWarningEffect;
+	InvitationNoticeEffect _invitationNoticeEffect;
 	QString _currentCameraPath;
 	bool _usingRealCamera = false;
 	QTimer *_localGenTimer = nullptr;

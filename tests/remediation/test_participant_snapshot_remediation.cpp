@@ -21,10 +21,13 @@
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDir>
 #include <QtCore/QEvent>
+#include <QtCore/QPointer>
 #include <QtCore/QSettings>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QTemporaryDir>
 #include <QtCore/QThread>
+#include <QtCore/QMimeData>
+#include <QtGui/QClipboard>
 #include <QtPlugin>
 #include <QtWidgets/QApplication>
 
@@ -80,6 +83,13 @@ public:
         owner._startupCommitted = true;
         owner.setState(MeetingState::InMeeting);
     }
+    static void setInvitationState(
+            MeetingCoordinator &owner,
+            MeetingState state,
+            const QString &meetingId) {
+        owner._state = state;
+        owner._currentMeetingId = meetingId;
+    }
 };
 } // namespace OpenMeeting
 
@@ -100,10 +110,16 @@ public:
 class ParticipantWindowTestAccess final {
 public:
     static std::unique_ptr<MeetingUI::MeetingRoomWindow> create(
-        const std::shared_ptr<OpenMeeting::MeetingCoordinator> &coordinator) {
+            const std::shared_ptr<OpenMeeting::MeetingCoordinator> &coordinator) {
         MeetingUI::MeetingRoomWindow::Config config;
         config.audioMuted = true; config.videoEnabled = false;
         config.displayName = QStringLiteral("IDA2 Window Acceptance");
+        return create(coordinator, std::move(config));
+    }
+    static std::unique_ptr<MeetingUI::MeetingRoomWindow> create(
+            const std::shared_ptr<OpenMeeting::MeetingCoordinator> &coordinator,
+            MeetingUI::MeetingRoomWindow::Config config) {
+        config.audioMuted = true; config.videoEnabled = false;
         return std::unique_ptr<MeetingUI::MeetingRoomWindow>(new MeetingUI::MeetingRoomWindow(
             MeetingUI::MeetingRoomWindow::ParticipantWindowTestTag{}, config, coordinator));
     }
@@ -125,6 +141,18 @@ public:
     static void render(MeetingUI::MeetingRoomWindow &window) {
         TEST_CHECK(QThread::currentThread() == window.thread());
         window.onRemoteRenderTick();
+    }
+    static void invite(MeetingUI::MeetingRoomWindow &window) {
+        TEST_CHECK(window._bottomBar);
+        window._bottomBar->_inviteStream.fire({});
+    }
+    static void setInvitationNoticeEffect(
+            MeetingUI::MeetingRoomWindow &window,
+            MeetingUI::MeetingRoomWindow::InvitationNoticeEffect effect) {
+        window._invitationNoticeEffect = std::move(effect);
+    }
+    static QString configuredToken(const MeetingUI::MeetingRoomWindow &window) {
+        return window._config.token;
     }
 };
 
@@ -274,6 +302,9 @@ public:
         return media;
     }
     void open() { window = ParticipantWindowTestAccess::create(coordinator); }
+    void open(MeetingUI::MeetingRoomWindow::Config config) {
+        window = ParticipantWindowTestAccess::create(coordinator, std::move(config));
+    }
 
     QTemporaryDir settingsDirectory;
     OpenMeeting::SessionManagerTestAccess::ScopedSession session;
@@ -285,6 +316,192 @@ public:
     std::shared_ptr<livekit::RoomListener> listener;
     std::unique_ptr<MeetingUI::MeetingRoomWindow> window;
 };
+
+class ClipboardSnapshot final {
+public:
+    ClipboardSnapshot() : clipboard_(QApplication::clipboard()), snapshot_(std::make_unique<QMimeData>()) {
+        TEST_CHECK(clipboard_);
+        const auto *source = clipboard_->mimeData();
+        if (!source) return;
+        for (const auto &format : source->formats()) {
+            snapshot_->setData(format, source->data(format));
+        }
+    }
+    ~ClipboardSnapshot() {
+        if (clipboard_) clipboard_->setMimeData(snapshot_.release());
+    }
+
+private:
+    QClipboard *clipboard_ = nullptr;
+    std::unique_ptr<QMimeData> snapshot_;
+};
+
+void PrSec005InvitationContract() {
+    ClipboardSnapshot restoreClipboard;
+    auto *clipboard = QApplication::clipboard();
+    TEST_CHECK(clipboard);
+
+    WindowFixture business;
+    MeetingUI::MeetingRoomWindow::Config businessConfig;
+    businessConfig.displayName = QStringLiteral("Business Invite");
+    businessConfig.serverUrl = QStringLiteral(
+        "wss://user:password-secret@example.invalid/livekit?loginToken=login-token-secret");
+    businessConfig.token = QStringLiteral("participant-bearer-secret");
+    businessConfig.meetingId = QStringLiteral("stale-config-meeting");
+    businessConfig.invitationMode = MeetingUI::InvitationMode::BusinessMeetingId;
+    OpenMeeting::MeetingCoordinatorTestAccess::setInvitationState(
+        *business.coordinator, OpenMeeting::MeetingState::InMeeting, QStringLiteral("business-current-001"));
+    business.open(businessConfig);
+    std::vector<bool> businessNotices;
+    ParticipantWindowTestAccess::setInvitationNoticeEffect(*business.window,
+        [&](bool success, const QString &, const QString &) { businessNotices.push_back(success); });
+    const auto roomBeforeInvite = business.coordinator->room();
+    const auto tokenBeforeInvite = ParticipantWindowTestAccess::configuredToken(*business.window);
+
+    clipboard->setText(QStringLiteral("business-clipboard-sentinel"));
+    ParticipantWindowTestAccess::invite(*business.window);
+    const auto firstInvite = clipboard->text();
+    TEST_CHECK(firstInvite.contains(QStringLiteral("business-current-001")));
+    TEST_CHECK(!firstInvite.contains(QStringLiteral("stale-config-meeting")));
+    TEST_CHECK(!firstInvite.contains(QStringLiteral("participant-bearer-secret")));
+    TEST_CHECK(!firstInvite.contains(QStringLiteral("login-token-secret")));
+    TEST_CHECK(!firstInvite.contains(QStringLiteral("password-secret")));
+    TEST_CHECK(!firstInvite.contains(QStringLiteral("wss://")));
+    TEST_CHECK(businessNotices == std::vector<bool>{true});
+    TEST_CHECK(ParticipantWindowTestAccess::configuredToken(*business.window) == tokenBeforeInvite);
+    TEST_CHECK(business.coordinator->room() == roomBeforeInvite);
+    TEST_CHECK(business.coordinator->state() == OpenMeeting::MeetingState::InMeeting);
+
+    businessNotices.clear();
+    OpenMeeting::MeetingCoordinatorTestAccess::setInvitationState(
+        *business.coordinator, OpenMeeting::MeetingState::InMeeting, QStringLiteral("business-current-002"));
+    ParticipantWindowTestAccess::invite(*business.window);
+    const auto refreshedInvite = clipboard->text();
+    TEST_CHECK(refreshedInvite.contains(QStringLiteral("business-current-002")));
+    TEST_CHECK(!refreshedInvite.contains(QStringLiteral("business-current-001")));
+    TEST_CHECK(businessNotices == std::vector<bool>{true});
+
+    WindowFixture quick;
+    MeetingUI::MeetingRoomWindow::Config quickConfig;
+    quickConfig.displayName = QStringLiteral("Quick Invite");
+    quickConfig.invitationMode = MeetingUI::InvitationMode::BusinessMeetingId;
+    quick.open(quickConfig);
+    std::vector<bool> quickNotices;
+    ParticipantWindowTestAccess::setInvitationNoticeEffect(*quick.window,
+        [&](bool success, const QString &, const QString &) { quickNotices.push_back(success); });
+    OpenMeeting::MeetingCoordinatorTestAccess::setInvitationState(
+        *quick.coordinator, OpenMeeting::MeetingState::InMeeting, QString());
+    clipboard->setText(QStringLiteral("quick-not-ready-sentinel"));
+    ParticipantWindowTestAccess::invite(*quick.window);
+    TEST_CHECK(clipboard->text() == QStringLiteral("quick-not-ready-sentinel"));
+    TEST_CHECK(quickNotices == std::vector<bool>{false});
+
+    quickNotices.clear();
+    OpenMeeting::MeetingCoordinatorTestAccess::setInvitationState(
+        *quick.coordinator, OpenMeeting::MeetingState::InMeeting, QStringLiteral("quick-real-31415"));
+    ParticipantWindowTestAccess::invite(*quick.window);
+    TEST_CHECK(clipboard->text().contains(QStringLiteral("quick-real-31415")));
+    TEST_CHECK(quickNotices == std::vector<bool>{true});
+
+    quickNotices.clear();
+    OpenMeeting::MeetingCoordinatorTestAccess::setInvitationState(
+        *quick.coordinator, OpenMeeting::MeetingState::Leaving, QStringLiteral("quick-real-31415"));
+    clipboard->setText(QStringLiteral("quick-leaving-sentinel"));
+    ParticipantWindowTestAccess::invite(*quick.window);
+    TEST_CHECK(clipboard->text() == QStringLiteral("quick-leaving-sentinel"));
+    TEST_CHECK(quickNotices == std::vector<bool>{false});
+
+    for (const auto &invalidId : {QStringLiteral("invalid meeting"), QStringLiteral("invalid\nmeeting")}) {
+        quickNotices.clear();
+        OpenMeeting::MeetingCoordinatorTestAccess::setInvitationState(
+            *quick.coordinator, OpenMeeting::MeetingState::InMeeting, invalidId);
+        clipboard->setText(QStringLiteral("invalid-id-sentinel"));
+        ParticipantWindowTestAccess::invite(*quick.window);
+        TEST_CHECK(clipboard->text() == QStringLiteral("invalid-id-sentinel"));
+        TEST_CHECK(quickNotices == std::vector<bool>{false});
+    }
+
+    WindowFixture direct;
+    MeetingUI::MeetingRoomWindow::Config directConfig;
+    directConfig.displayName = QStringLiteral("Direct Invite");
+    directConfig.serverUrl = QStringLiteral("ws://127.0.0.1:7880/private-path");
+    directConfig.token = QStringLiteral("direct-bearer-secret");
+    directConfig.meetingId = QStringLiteral("custom-direct-room");
+    directConfig.invitationMode = MeetingUI::InvitationMode::Disabled;
+    OpenMeeting::MeetingCoordinatorTestAccess::setInvitationState(
+        *direct.coordinator, OpenMeeting::MeetingState::InMeeting, QStringLiteral("livekit_room"));
+    direct.open(directConfig);
+    std::vector<bool> directNotices;
+    ParticipantWindowTestAccess::setInvitationNoticeEffect(*direct.window,
+        [&](bool success, const QString &, const QString &) { directNotices.push_back(success); });
+    clipboard->setText(QStringLiteral("direct-clipboard-sentinel"));
+    ParticipantWindowTestAccess::invite(*direct.window);
+    TEST_CHECK(clipboard->text() == QStringLiteral("direct-clipboard-sentinel"));
+    TEST_CHECK(directNotices == std::vector<bool>{false});
+
+    directNotices.clear();
+    OpenMeeting::MeetingCoordinatorTestAccess::setInvitationState(
+        *direct.coordinator, OpenMeeting::MeetingState::InMeeting, QStringLiteral("custom-direct-room"));
+    ParticipantWindowTestAccess::invite(*direct.window);
+    TEST_CHECK(clipboard->text() == QStringLiteral("direct-clipboard-sentinel"));
+    TEST_CHECK(directNotices == std::vector<bool>{false});
+    TEST_CHECK(ParticipantWindowTestAccess::configuredToken(*direct.window)
+        == QStringLiteral("direct-bearer-secret"));
+
+    WindowFixture clipboardReentrant;
+    MeetingUI::MeetingRoomWindow::Config clipboardReentrantConfig;
+    clipboardReentrantConfig.displayName = QStringLiteral("Clipboard Reentrant Invite");
+    clipboardReentrantConfig.invitationMode = MeetingUI::InvitationMode::BusinessMeetingId;
+    OpenMeeting::MeetingCoordinatorTestAccess::setInvitationState(
+        *clipboardReentrant.coordinator, OpenMeeting::MeetingState::InMeeting,
+        QStringLiteral("clipboard-reentrant-001"));
+    clipboardReentrant.open(clipboardReentrantConfig);
+    QPointer<MeetingUI::MeetingRoomWindow> clipboardReentrantWindow = clipboardReentrant.window.get();
+    bool clipboardNotice = false;
+    ParticipantWindowTestAccess::setInvitationNoticeEffect(*clipboardReentrant.window,
+        [&](bool success, const QString &, const QString &) { clipboardNotice = success; });
+    bool clipboardDestroyedFromSignal = false;
+    QMetaObject::Connection clipboardConnection;
+    clipboardConnection = QObject::connect(clipboard, &QClipboard::dataChanged, [&] {
+        QObject::disconnect(clipboardConnection);
+        clipboardDestroyedFromSignal = clipboardDestroyedFromSignal || !!clipboardReentrant.window;
+        if (auto *window = clipboardReentrant.window.release()) {
+            window->deleteLater();
+        }
+    });
+    ParticipantWindowTestAccess::invite(*clipboardReentrant.window);
+    QCoreApplication::processEvents(QEventLoop::AllEvents);
+    QObject::disconnect(clipboardConnection);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    TEST_CHECK(clipboardDestroyedFromSignal);
+    TEST_CHECK(clipboardReentrantWindow.isNull());
+    TEST_CHECK(clipboard->text().contains(QStringLiteral("clipboard-reentrant-001")));
+    TEST_CHECK(clipboardNotice);
+
+    WindowFixture noticeReentrant;
+    MeetingUI::MeetingRoomWindow::Config noticeReentrantConfig;
+    noticeReentrantConfig.displayName = QStringLiteral("Notice Reentrant Invite");
+    noticeReentrantConfig.invitationMode = MeetingUI::InvitationMode::BusinessMeetingId;
+    OpenMeeting::MeetingCoordinatorTestAccess::setInvitationState(
+        *noticeReentrant.coordinator, OpenMeeting::MeetingState::InMeeting,
+        QStringLiteral("notice-reentrant-001"));
+    noticeReentrant.open(noticeReentrantConfig);
+    QPointer<MeetingUI::MeetingRoomWindow> noticeReentrantWindow = noticeReentrant.window.get();
+    bool noticeDestroyedWindow = false;
+    ParticipantWindowTestAccess::setInvitationNoticeEffect(*noticeReentrant.window,
+        [&](bool success, const QString &, const QString &) {
+            noticeDestroyedWindow = success && !!noticeReentrant.window;
+            if (auto *window = noticeReentrant.window.release()) {
+                window->deleteLater();
+            }
+        });
+    ParticipantWindowTestAccess::invite(*noticeReentrant.window);
+    QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    TEST_CHECK(noticeDestroyedWindow);
+    TEST_CHECK(noticeReentrantWindow.isNull());
+
+    std::cout << "PR_SEC_005_INVITATION_EXECUTED=1 PASSED=1 FAILED=0" << std::endl;
+}
 
 void CheckWindowPeer(WindowFixture &fixture, const QString &name) {
     TEST_CHECK(ParticipantWindowTestAccess::tileCount(*fixture.window) == 1);
@@ -811,7 +1028,9 @@ int WindowAcceptanceMain(int argc, char **argv) {
         QDir::cleanPath(probe.fileName()).startsWith(QDir::cleanPath(settingsDirectory.path()) + "/"));
     // No Notify or account callback is emitted by this target. All Coordinator
     // instances above use explicitly injected temporary SessionManager objects.
-    if (application.arguments().contains("--ak-window-late")) {
+    if (application.arguments().contains("--pr-sec-005")) {
+        PrSec005InvitationContract();
+    } else if (application.arguments().contains("--ak-window-late")) {
         AkWindowRetiredPresentation(false);
         std::cout << "AK_WINDOW_LATE_EXECUTED=1 PASSED=1 FAILED=0" << std::endl;
     } else if (application.arguments().contains("--ak-window-inmeeting")) {
@@ -823,7 +1042,8 @@ int WindowAcceptanceMain(int argc, char **argv) {
         AkWindowFullRestart();
         std::cout << "AK_WINDOW_NETWORK_EXECUTED=3 PASSED=3 FAILED=0" << std::endl;
     } else {
-        std::cout << "AK_WINDOW_PLANNED=7 (F4/F5 local precondition; F1/F2/F3 real loopback)" << std::endl;
+        std::cout << "AK_WINDOW_PLANNED=8 (PR-SEC-005 invitation; F4/F5 local precondition; F1/F2/F3 real loopback)" << std::endl;
+        PrSec005InvitationContract();
         AkWindowAliveLate();
         AkWindowOldTrack();
         AkWindowRetiredPresentation(false);
@@ -831,7 +1051,7 @@ int WindowAcceptanceMain(int argc, char **argv) {
         AkWindowInitialRoster();
         AkWindowSoftResume();
         AkWindowFullRestart();
-        std::cout << "AK_WINDOW_EXECUTED=7 PASSED=7 FAILED=0" << std::endl;
+        std::cout << "AK_WINDOW_EXECUTED=8 PASSED=8 FAILED=0" << std::endl;
     }
     if (wrappedThread) webrtc::ThreadManager::Instance()->UnwrapCurrentThread();
     style::StopManager();
