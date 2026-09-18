@@ -13,6 +13,7 @@
 #include <QtNetwork/QTcpSocket>
 #include "openmeeting_meeting.pb.h"
 #include "src/net/openmeeting_http_client.h"
+#include "src/net/service_endpoint_policy.h"
 #include "src/net/session_manager.h"
 #include "tests/support/test_check.h"
 
@@ -200,6 +201,8 @@ void verifyLocalHttp(bool withholdResponse) {
 
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
+    OpenMeeting::initializeServiceEndpointPolicy(
+        app.arguments().contains(QStringLiteral("--debug")));
     if (app.arguments().contains("--stall-response")) {
         verifyLocalHttp(true);
         return 0; // The watchdog verifier rejects reaching this success path.

@@ -76,6 +76,9 @@ signals:
 
 private:
     friend class SessionManager;
+    friend class OpenMeetingHttpClientTestAccess;
+    OpenMeetingHttpClient(std::unique_ptr<QNetworkAccessManager> networkManager,
+                          QObject *parent);
     // SessionManager owns its state/persistence transaction and notifications.
     // These transport-only operations must not commit client authentication.
     void requestLogin(const QString &account, const QString &password, ResultCallback<UserInfo> callback);
@@ -87,7 +90,7 @@ private:
                   std::function<void(bool ok, const QJsonValue &data, const HttpError &err)> cb,
                   bool authenticated = true);
 
-    QString _baseUrl = "http://116.205.175.233:11102";
+    QString _baseUrl;
     QString _token;
     UserInfo _currentUser;
     quint64 _authRevision = 0;

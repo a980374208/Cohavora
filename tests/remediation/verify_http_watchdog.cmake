@@ -4,7 +4,7 @@ endif()
 
 # The child listens only on loopback and deliberately withholds its response.
 # A crash, launch failure, connection failure or accidental PASS is insufficient.
-execute_process(COMMAND "${TEST_EXECUTABLE}" --stall-response
+execute_process(COMMAND "${TEST_EXECUTABLE}" --debug --stall-response
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error
     TIMEOUT 10)
 if(NOT "${result}" STREQUAL "1" OR

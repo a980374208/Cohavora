@@ -1,4 +1,5 @@
 #include "src/ui/login_dialog.h"
+#include "src/net/service_endpoint_policy.h"
 #include "src/net/session_manager.h"
 #include <QtCore/QDateTime>
 #include <QtCore/QPointer>
@@ -26,7 +27,8 @@ LoginDialog::LoginDialog(OpenMeeting::SessionManager &session, QWidget *parent)
     initUI();
     loadSavedData();
     connect(_rememberBox, &QCheckBox::toggled, this, [this](bool checked) {
-        _autoLoginBox->setEnabled(checked);
+        _autoLoginBox->setEnabled(checked &&
+            OpenMeeting::serviceAllowsCredentialPersistence(_serverUrlInput->text()));
         if (!checked) {
             _autoLoginBox->setChecked(false);
             if (!_session.forgetSavedSession()) showError(_session.persistenceMessage());
@@ -34,7 +36,10 @@ LoginDialog::LoginDialog(OpenMeeting::SessionManager &session, QWidget *parent)
         }
     });
     connect(_accountInput, &QLineEdit::textChanged, this, [this] { updateSavedSessionAction(); });
-    connect(_serverUrlInput, &QLineEdit::textChanged, this, [this] { updateSavedSessionAction(); });
+    connect(_serverUrlInput, &QLineEdit::textChanged, this, [this] {
+        updateSavedSessionAction();
+        updateEndpointOptions();
+    });
 }
 
 LoginDialog::~LoginDialog() {
@@ -356,7 +361,7 @@ void LoginDialog::initUI() {
     auto advLabel = new QLabel(QString::fromUtf8("服务器:"), _advancedWidget);
     advLabel->setStyleSheet("color: #606266; font-size: 12px;");
     _serverUrlInput = new QLineEdit(_advancedWidget);
-    _serverUrlInput->setPlaceholderText(QString::fromUtf8("如 http://123.56.225.164:11102"));
+    _serverUrlInput->setPlaceholderText(QString::fromUtf8("https://api.example.com"));
     advLayout->addWidget(advLabel);
     advLayout->addWidget(_serverUrlInput);
     _advancedWidget->setVisible(false);
@@ -391,6 +396,11 @@ void LoginDialog::loadSavedData() {
     _serverUrlInput->setText(session.serverBaseUrl());
     _guestNicknameInput->setText(QString::fromUtf8("访客_%1").arg(QDateTime::currentDateTime().toString("mmss")));
     updateSavedSessionAction();
+    updateEndpointOptions();
+    if (session.serverBaseUrl().isEmpty()) {
+        _advancedWidget->setVisible(true);
+        _advancedToggleBtn->setText(QString::fromUtf8("⚙ 服务器设置 ▴"));
+    }
     if (!session.persistenceMessage().isEmpty()) showError(session.persistenceMessage());
 }
 
@@ -398,6 +408,16 @@ void LoginDialog::updateSavedSessionAction() {
     _resumeBtn->setVisible(_session.hasSavedSession() &&
         _accountInput->text().trimmed() == _session.savedAccount() &&
         OpenMeeting::canonicalServiceUrl(_serverUrlInput->text()) == _session.serverBaseUrl());
+}
+
+void LoginDialog::updateEndpointOptions() {
+    const auto policy = OpenMeeting::evaluateServiceEndpoint(_serverUrlInput->text());
+    const bool persistent = OpenMeeting::serviceAllowsCredentialPersistence(_serverUrlInput->text());
+    _rememberBox->setEnabled(persistent);
+    _autoLoginBox->setEnabled(persistent && _rememberBox->isChecked());
+    _rememberBox->setText(policy.isDebugHttp()
+        ? QString::fromUtf8("记住登录状态（调试 HTTP 为未加密传输）")
+        : QString::fromUtf8("记住登录状态"));
 }
 
 void LoginDialog::acceptAuthenticatedSession() {
@@ -427,8 +447,10 @@ void LoginDialog::togglePasswordVisibility() {
 }
 
 void LoginDialog::setLoading(bool loading, const QString &text) {
-    _rememberBox->setEnabled(!loading);
-    _autoLoginBox->setEnabled(!loading && _rememberBox->isChecked());
+    const bool persistent = OpenMeeting::serviceAllowsCredentialPersistence(
+        _serverUrlInput->text());
+    _rememberBox->setEnabled(!loading && persistent);
+    _autoLoginBox->setEnabled(!loading && persistent && _rememberBox->isChecked());
     _serverUrlInput->setEnabled(!loading);
     _resumeBtn->setEnabled(!loading);
     _loginBtn->setEnabled(!loading);
@@ -519,7 +541,8 @@ void LoginDialog::onRegisterClicked() {
 
     auto &session = _session;
     if (!session.setServerBaseUrl(serverUrl)) {
-        showError(QString::fromUtf8("请输入有效的服务器地址。"));
+        showError(OpenMeeting::serviceEndpointErrorMessage(
+            OpenMeeting::evaluateServiceEndpoint(serverUrl).status));
         return;
     }
 
@@ -562,7 +585,8 @@ void LoginDialog::onLoginClicked() {
 
     auto &session = _session;
     if (!session.setServerBaseUrl(serverUrl)) {
-        showError(QString::fromUtf8("请输入有效的服务器地址。"));
+        showError(OpenMeeting::serviceEndpointErrorMessage(
+            OpenMeeting::evaluateServiceEndpoint(serverUrl).status));
         return;
     }
 

@@ -8,6 +8,7 @@
 #include "src/ui/meeting_ui_integration.h"
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/login_dialog.h"
+#include "src/net/service_endpoint_policy.h"
 #include "src/net/session_manager.h"
 #include "src/rtc/webrtc_manager.h"
 
@@ -38,6 +39,8 @@ int main(int argc, char *argv[]) {
 	QApplication app(argc, argv);
 	app.setApplicationName(QString::fromUtf8("LiveKitMeetingClient"));
 	app.setApplicationDisplayName(QString::fromUtf8("音视频会议客户端 - LiveKit Powered"));
+	OpenMeeting::initializeServiceEndpointPolicy(
+		app.arguments().contains(QStringLiteral("--debug")));
 
 	// 设置 UI 抽象层 Integration
 	MeetingUI::MeetingUiIntegration integration;

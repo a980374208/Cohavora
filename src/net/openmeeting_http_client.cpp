@@ -1,14 +1,25 @@
 #include "openmeeting_http_client.h"
+#include "src/net/service_endpoint_policy.h"
 #include <QtCore/QUrl>
 #include <QtCore/QDebug>
 #include <QtCore/QPointer>
+#include <QtCore/QTimer>
 #include <QtNetwork/QNetworkProxy>
+#include <QtNetwork/QSslConfiguration>
+#include <QtNetwork/QSslSocket>
 
 namespace OpenMeeting {
 
 OpenMeetingHttpClient::OpenMeetingHttpClient(QObject *parent)
+    : OpenMeetingHttpClient(std::make_unique<QNetworkAccessManager>(), parent) {
+}
+
+OpenMeetingHttpClient::OpenMeetingHttpClient(
+        std::unique_ptr<QNetworkAccessManager> networkManager, QObject *parent)
     : QObject(parent)
-    , _nam(std::make_unique<QNetworkAccessManager>(this)) {
+    , _nam(std::move(networkManager)) {
+    Q_ASSERT(_nam);
+    _nam->setParent(this);
     // 针对音视频会议服务直连，避免本地 HTTP 代理软件（如 Clash 127.0.0.1:7890）误拦截非标端口造成 502 错误
     _nam->setProxy(QNetworkProxy::NoProxy);
 }
@@ -19,8 +30,10 @@ OpenMeetingHttpClient &OpenMeetingHttpClient::instance() {
 }
 
 void OpenMeetingHttpClient::setBaseUrl(const QString &url) {
-    auto effectiveUrl = url;
-    if (effectiveUrl.endsWith('/')) effectiveUrl.chop(1);
+    const auto policy = evaluateServiceEndpoint(url);
+    const auto effectiveUrl = policy.status == ServiceEndpointStatus::InvalidUrl ||
+            policy.status == ServiceEndpointStatus::Unconfigured
+        ? QString() : policy.canonicalUrl;
     if (_baseUrl == effectiveUrl) return;
     _baseUrl = effectiveUrl;
     setCurrentUser(UserInfo{});
@@ -50,17 +63,49 @@ void OpenMeetingHttpClient::sendPost(
     std::function<void(bool ok, const QJsonValue &data, const HttpError &err)> cb,
     bool authenticated) {
 
-    QString fullUrl;
-    if (path.startsWith("http://", Qt::CaseInsensitive) || path.startsWith("https://", Qt::CaseInsensitive)) {
-        fullUrl = path;
-    } else {
-        fullUrl = _baseUrl + (path.startsWith('/') ? path : ("/" + path));
+    const auto opId = QString::number(QDateTime::currentMSecsSinceEpoch());
+    const auto basePolicy = evaluateServiceEndpoint(_baseUrl);
+    const bool internalPath = path.startsWith('/') && !path.startsWith("//") &&
+        !path.contains('?') && !path.contains('#');
+    const QString fullUrl = internalPath ? _baseUrl + path : QString();
+    const auto requestPolicy = evaluateServiceEndpoint(fullUrl);
+    const QUrl baseUrl(basePolicy.canonicalUrl, QUrl::StrictMode);
+    const QUrl targetUrl(requestPolicy.canonicalUrl, QUrl::StrictMode);
+    const bool tlsAvailable = targetUrl.scheme() != QStringLiteral("https") ||
+        QSslSocket::supportsSsl();
+    const bool sameOrigin = internalPath && basePolicy.requestAllowed() &&
+        requestPolicy.requestAllowed() && baseUrl.scheme() == targetUrl.scheme() &&
+        baseUrl.host() == targetUrl.host() && baseUrl.port(-1) == targetUrl.port(-1);
+    if (!sameOrigin || !tlsAvailable) {
+        HttpError error;
+        const auto status = !basePolicy.requestAllowed() ? basePolicy.status : requestPolicy.status;
+        error.code = static_cast<int>(!tlsAvailable ? ErrorCode::NetworkError
+            : status == ServiceEndpointStatus::InsecureTransportBlocked
+                ? ErrorCode::InsecureTransport : ErrorCode::InvalidServiceUrl);
+        error.message = !tlsAvailable
+            ? QString::fromUtf8("当前环境不支持 HTTPS，已取消请求。")
+            : serviceEndpointErrorMessage(status);
+        if (error.message.isEmpty()) {
+            error.message = QString::fromUtf8("请求地址不属于已配置的服务器。");
+        }
+        error.operationId = opId;
+        QTimer::singleShot(0, this, [cb = std::move(cb), error]() {
+            if (cb) cb(false, QJsonValue(), error);
+        });
+        return;
     }
-    QNetworkRequest request{QUrl(fullUrl)};
+
+    QNetworkRequest request{targetUrl};
     request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::ManualRedirectPolicy);
+    if (targetUrl.scheme() == QStringLiteral("https")) {
+        auto ssl = request.sslConfiguration();
+        ssl.setPeerVerifyMode(QSslSocket::VerifyPeer);
+        request.setSslConfiguration(ssl);
+    }
 
     // 注入全链路追踪 operationID (毫秒时间戳)
-    QString opId = QString::number(QDateTime::currentMSecsSinceEpoch());
     request.setRawHeader("operationID", opId.toUtf8());
 
     // 注入身份 Token
@@ -88,6 +133,13 @@ void OpenMeetingHttpClient::sendPost(
 
         int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         QByteArray responseData = reply->readAll();
+
+        if (httpStatus >= 300 && httpStatus < 400) {
+            err.code = static_cast<int>(ErrorCode::RedirectRejected);
+            err.message = QString::fromUtf8("服务器返回了不允许的重定向。");
+            if (cb) cb(false, QJsonValue(), err);
+            return;
+        }
 
         // 优先检查响应体中是否含有服务端返回的 JSON 业务错误信息 (即使 HTTP 状态码非 200)
         QJsonParseError parseErr;
@@ -128,7 +180,7 @@ void OpenMeetingHttpClient::sendPost(
             } else if (reply->error() == QNetworkReply::TimeoutError) {
                 err.message = QString::fromUtf8("连接服务器超时，请检查网络或安全组防火墙设置");
             } else if (reply->error() == QNetworkReply::RemoteHostClosedError || rawErr.contains("Connection closed", Qt::CaseInsensitive)) {
-                err.message = QString::fromUtf8("服务器连接中断 (Connection closed)：请确认阿里云安全组已放行 11102 和 11022 端口");
+                err.message = QString::fromUtf8("服务器连接中断，请检查 HTTPS 服务状态。");
             } else {
                 err.message = rawErr;
             }
@@ -230,14 +282,7 @@ void OpenMeetingHttpClient::registerUser(const QString &account, const QString &
     body["password"] = password;
     body["nickname"] = nickname.isEmpty() ? account : nickname;
 
-    // OpenMeeting 服务端注册接口位于 openmeeting-admin-api (端口 11022，路由 /admin/user/register)
-    QString regUrl = _baseUrl;
-    if (regUrl.contains(":11102")) {
-        regUrl.replace(":11102", ":11022");
-    }
-    QString targetPath = regUrl.contains(":11022") ? (regUrl + "/admin/user/register") : "/user/register";
-
-    sendPost(targetPath, body, [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+    sendPost("/user/register", body, [callback](bool ok, const QJsonValue &data, const HttpError &err) {
         if (!ok) {
             if (callback) callback(false, UserInfo{}, err);
             return;

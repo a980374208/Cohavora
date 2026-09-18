@@ -10,7 +10,6 @@ option(LIVEKIT_BUILD_HARDWARE_TESTS
 option(LIVEKIT_BUILD_EXTERNAL_TESTS
     "Build tests that connect to an external LiveKit server"
     OFF)
-
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
@@ -604,6 +603,8 @@ add_executable(livekit_meeting_app
     src/net/session_manager.cpp
     src/net/credential_store.cpp
     src/net/credential_store.h
+    src/net/service_endpoint_policy.cpp
+    src/net/service_endpoint_policy.h
     src/ui/login_dialog.h
     src/ui/login_dialog.cpp
     src/ui/sidebar_widget.cpp
@@ -1014,6 +1015,8 @@ add_executable(test_openmeeting_http
     src/net/session_manager.cpp
     src/net/credential_store.cpp
     src/net/credential_store.h
+    src/net/service_endpoint_policy.cpp
+    src/net/service_endpoint_policy.h
     src/net/session_manager.h
     src/net/http_types.h
 )
@@ -1059,7 +1062,7 @@ target_link_options(test_openmeeting_http PRIVATE
 set_target_properties(test_openmeeting_http PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded"
 )
-add_test(NAME openmeeting_http_test COMMAND test_openmeeting_http)
+add_test(NAME openmeeting_http_test COMMAND test_openmeeting_http --debug)
 add_test(NAME openmeeting_http_watchdog_test
     COMMAND ${CMAKE_COMMAND}
         "-DTEST_EXECUTABLE=$<TARGET_FILE:test_openmeeting_http>"
@@ -1080,6 +1083,8 @@ add_executable(test_http_admission_owner
     src/net/session_manager.cpp
     src/net/credential_store.cpp
     src/net/credential_store.h
+    src/net/service_endpoint_policy.cpp
+    src/net/service_endpoint_policy.h
     src/net/session_manager.h
     src/net/http_types.h
 )
@@ -1135,7 +1140,7 @@ target_link_options(test_http_admission_owner PRIVATE
 set_target_properties(test_http_admission_owner PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded"
 )
-add_test(NAME http_owner_remediation_test COMMAND test_http_admission_owner)
+add_test(NAME http_owner_remediation_test COMMAND test_http_admission_owner --debug)
 set_tests_properties(http_owner_remediation_test PROPERTIES TIMEOUT 60)
 
 # Coordinator session runtime serialization test
@@ -1622,6 +1627,8 @@ add_executable(test_session_credentials
     tests/support/test_check.h
     src/net/credential_store.cpp
     src/net/credential_store.h
+    src/net/service_endpoint_policy.cpp
+    src/net/service_endpoint_policy.h
     src/net/session_manager.cpp
     src/net/session_manager.h
     src/net/openmeeting_http_client.cpp
@@ -1631,10 +1638,64 @@ add_executable(test_session_credentials
 )
 target_include_directories(test_session_credentials BEFORE PRIVATE ${pr_sec_qt_includes})
 target_link_libraries(test_session_credentials PRIVATE ${pr_sec_qt_libraries} crypt32)
-target_compile_definitions(test_session_credentials PRIVATE ${pr_sec_qt_definitions})
+target_compile_definitions(test_session_credentials PRIVATE
+    ${pr_sec_qt_definitions}
+)
 target_link_options(test_session_credentials PRIVATE ${pr_sec_qt_link_options})
 set_target_properties(test_session_credentials PROPERTIES MSVC_RUNTIME_LIBRARY "${pr_sec_qt_runtime}")
-add_test(NAME session_credentials_test COMMAND test_session_credentials)
+add_test(NAME session_credentials_test COMMAND test_session_credentials --debug)
 set_tests_properties(session_credentials_test PROPERTIES TIMEOUT 60)
 set_property(TEST session_credentials_test openmeeting_http_test openmeeting_http_watchdog_test
     http_owner_remediation_test APPEND PROPERTY LABELS "PR_SEC_002_FOCUSED")
+
+# PR-SEC-004: strict startup and explicit runtime --debug HTTP policy.
+foreach(_policy_variant strict dev)
+    set(_policy_target test_http_transport_policy_${_policy_variant})
+    add_executable(${_policy_target}
+        tests/remediation/test_http_transport_policy.cpp
+        tests/support/test_check.h
+        src/net/credential_store.cpp
+        src/net/credential_store.h
+        src/net/service_endpoint_policy.cpp
+        src/net/service_endpoint_policy.h
+        src/net/session_manager.cpp
+        src/net/session_manager.h
+        src/net/openmeeting_http_client.cpp
+        src/net/openmeeting_http_client.h
+    )
+    target_include_directories(${_policy_target} BEFORE PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
+        ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
+        ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtNetwork
+    )
+    target_link_libraries(${_policy_target} PRIVATE
+        ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
+        ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Network.lib
+        ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
+        OpenSSL::SSL OpenSSL::Crypto
+        netapi32 userenv version ws2_32 crypt32 dnsapi iphlpapi secur32 winmm
+    )
+    target_compile_definitions(${_policy_target} PRIVATE
+        WIN32 _WINDOWS WIN32_LEAN_AND_MEAN NOMINMAX
+        _WINSOCK_DEPRECATED_NO_WARNINGS NDEBUG _ITERATOR_DEBUG_LEVEL=0
+        $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
+        $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
+    )
+    target_compile_options(${_policy_target} PRIVATE /utf-8)
+    if(_policy_variant STREQUAL "dev")
+        target_compile_definitions(${_policy_target} PRIVATE LIVEKIT_EXPECT_DEBUG_HTTP)
+    endif()
+    target_link_options(${_policy_target} PRIVATE
+        $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
+        $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
+    )
+    set_target_properties(${_policy_target} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
+    if(_policy_variant STREQUAL "dev")
+        add_test(NAME http_transport_policy_${_policy_variant}_test COMMAND ${_policy_target} --debug)
+    else()
+        add_test(NAME http_transport_policy_${_policy_variant}_test COMMAND ${_policy_target} --debugger)
+    endif()
+    set_tests_properties(http_transport_policy_${_policy_variant}_test PROPERTIES
+        TIMEOUT 30 LABELS "PR_SEC_004_FOCUSED")
+endforeach()

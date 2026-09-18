@@ -13,6 +13,9 @@ enum class ErrorCode {
     Success = 0,
     NetworkError = -1,
     ParseError = -2,
+    InvalidServiceUrl = -3,
+    InsecureTransport = -4,
+    RedirectRejected = -5,
     TokenExpired = 100010,
     TokenInvalid = 100002,
     UnknownError = -999

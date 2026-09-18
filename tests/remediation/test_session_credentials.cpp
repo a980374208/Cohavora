@@ -1,4 +1,5 @@
 #include "src/net/session_manager.h"
+#include "src/net/service_endpoint_policy.h"
 #include "src/ui/login_dialog.h"
 #include "tests/support/test_check.h"
 
@@ -126,6 +127,37 @@ void verifyStore() {
     TEST_CHECK(canonicalServiceUrl("https://user:password@example.invalid").isEmpty());
     TEST_CHECK(canonicalServiceUrl("https://example.invalid?token=value").isEmpty());
     std::puts("STORE PASS: DPAPI, child-process restore, binding, migration, crash marker, failure");
+}
+
+void verifyDebugHttpPersistenceAcrossStartupModes() {
+    TEST_CHECK(isDebugHttpTransportEnabled());
+    QTemporaryDir directory;
+    TEST_CHECK(directory.isValid());
+    const auto path = directory.filePath("debug-http-session.ini");
+    const auto service = QStringLiteral("http://debug.example.invalid:8080/api");
+    auto settings = settingsAt(path);
+    settings->setValue("network/serverBaseUrl", service);
+    settings->setValue("auth/account", QStringLiteral("account"));
+    auto store = makeCredentialStore(*settings);
+    TEST_CHECK(store->save(record(service)) == CredentialStatus::Ready);
+    const auto cipher = settings->value("auth/protectedSessionV2").toByteArray();
+    TEST_CHECK(!cipher.isEmpty() && !cipher.contains(kToken));
+    settings.reset();
+
+    QProcess strictChild;
+    strictChild.start(QCoreApplication::applicationFilePath(),
+                      {"--strict-http-restore", path});
+    TEST_CHECK(strictChild.waitForFinished(10000));
+    TEST_CHECK(strictChild.exitStatus() == QProcess::NormalExit && strictChild.exitCode() == 0);
+    TEST_CHECK(settingsAt(path)->contains("auth/protectedSessionV2"));
+
+    QProcess debugChild;
+    debugChild.start(QCoreApplication::applicationFilePath(),
+                     {"--debug-http-restore", path, "--debug"});
+    TEST_CHECK(debugChild.waitForFinished(10000));
+    TEST_CHECK(debugChild.exitStatus() == QProcess::NormalExit && debugChild.exitCode() == 0);
+    TEST_CHECK(settingsAt(path)->contains("auth/protectedSessionV2"));
+    std::puts("DEBUG HTTP PERSISTENCE PASS: encrypted save, strict dormancy, debug auto restore");
 }
 
 class Server {
@@ -717,21 +749,50 @@ void verifyOrdering() {
 } // namespace
 
 int main(int argc, char **argv) {
-    if (argc == 3 && QByteArray(argv[1]) == "--restore") {
+    if (argc >= 3 && QByteArray(argv[1]) == "--restore") {
         QCoreApplication app(argc, argv);
+        OpenMeeting::initializeServiceEndpointPolicy(
+            app.arguments().contains(QStringLiteral("--debug")));
         auto settings = settingsAt(QString::fromLocal8Bit(argv[2]));
         auto store = makeCredentialStore(*settings);
         const auto loaded = store->load(record().service, record().account);
         TEST_CHECK(loaded.status == CredentialStatus::Ready && loaded.session.user.token == kToken);
         return 0;
     }
+    if (argc >= 3 && (QByteArray(argv[1]) == "--strict-http-restore" ||
+                      QByteArray(argv[1]) == "--debug-http-restore")) {
+        QCoreApplication app(argc, argv);
+        const bool debugHttp = app.arguments().contains(QStringLiteral("--debug"));
+        OpenMeeting::initializeServiceEndpointPolicy(debugHttp);
+        const auto path = QString::fromLocal8Bit(argv[2]);
+        const auto expectedService = QStringLiteral("http://debug.example.invalid:8080/api");
+        OpenMeeting::OpenMeetingHttpClient client;
+        auto session = OpenMeeting::SessionManagerTestAccess::create(settingsAt(path), client);
+        TEST_CHECK(session->serverBaseUrl() == expectedService);
+        TEST_CHECK(client.baseUrl() == expectedService);
+        if (QByteArray(argv[1]) == "--strict-http-restore") {
+            TEST_CHECK(!debugHttp && !session->hasSavedSession());
+            TEST_CHECK(!session->resumeSavedSession(true));
+            TEST_CHECK(!session->isLoggedIn() && client.token().isEmpty());
+        } else {
+            TEST_CHECK(debugHttp && session->hasSavedSession());
+            TEST_CHECK(session->resumeSavedSession(true));
+            TEST_CHECK(session->isLoggedIn() && client.token() == kToken);
+        }
+        TEST_CHECK(settingsAt(path)->contains("auth/protectedSessionV2"));
+        return 0;
+    }
     QApplication app(argc, argv);
+    OpenMeeting::initializeServiceEndpointPolicy(
+        app.arguments().contains(QStringLiteral("--debug")));
+    TEST_CHECK(OpenMeeting::isDebugHttpTransportEnabled());
     app.setQuitOnLastWindowClosed(false);
     verifyPublicAuthContract();
     verifyPublicInvalidLoginData();
     verifyPublicAuthOrdering();
     verifyPublicLogoutBoundaries();
     verifyStore();
+    verifyDebugHttpPersistenceAcrossStartupModes();
     verifySessionInvalidLoginData();
     verifySessionAndUi();
     verifyOrdering();

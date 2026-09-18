@@ -1,4 +1,5 @@
 #include "src/core/meeting_coordinator.h"
+#include "src/net/service_endpoint_policy.h"
 #include "tests/support/test_check.h"
 
 #include <QtCore/QCoreApplication>
@@ -1104,6 +1105,8 @@ void RunRedOnly() {
 
 int main(int argc, char *argv[]) {
     QCoreApplication app(argc, argv);
+    OpenMeeting::initializeServiceEndpointPolicy(
+        app.arguments().contains(QStringLiteral("--debug")));
     const bool redOnly = app.arguments().contains("--red-only");
     if (redOnly) RunRedOnly(); else RunFullMatrix();
     std::cout << "CPPQT001_CASES_PLANNED=" << (redOnly ? 1 : kPlannedCases)
