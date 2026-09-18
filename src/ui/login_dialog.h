@@ -7,13 +7,17 @@
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QTabWidget>
 
+namespace OpenMeeting { class SessionManager; }
+
 namespace MeetingUI {
 
 class LoginDialog : public QDialog {
     Q_OBJECT
 public:
     explicit LoginDialog(QWidget *parent = nullptr);
-    ~LoginDialog() override = default;
+    explicit LoginDialog(OpenMeeting::SessionManager &session, QWidget *parent = nullptr);
+    ~LoginDialog() override;
+    void reject() override;
 
 protected:
     void mousePressEvent(QMouseEvent *e) override;
@@ -30,6 +34,9 @@ private slots:
 private:
     void initUI();
     void loadSavedData();
+    void updateSavedSessionAction();
+    void cancelLogin();
+    void acceptAuthenticatedSession();
     void setLoading(bool loading, const QString &text = QString());
     void showError(const QString &msg);
     void showSuccess(const QString &msg);
@@ -44,6 +51,10 @@ private:
     QCheckBox *_autoLoginBox = nullptr;
     QPushButton *_toRegisterLinkBtn = nullptr;
     QPushButton *_loginBtn = nullptr;
+    QPushButton *_resumeBtn = nullptr;
+    OpenMeeting::SessionManager &_session;
+    bool _loginInFlight = false;
+    quint64 _loginGeneration = 0;
 
     // 用户注册
     QLineEdit *_regAccountInput = nullptr;

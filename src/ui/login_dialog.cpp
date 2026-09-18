@@ -5,6 +5,7 @@
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QGraphicsDropShadowEffect>
+#include <QtWidgets/QMessageBox>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QFont>
@@ -12,7 +13,11 @@
 namespace MeetingUI {
 
 LoginDialog::LoginDialog(QWidget *parent)
-    : QDialog(parent) {
+    : LoginDialog(OpenMeeting::SessionManager::instance(), parent) {
+}
+
+LoginDialog::LoginDialog(OpenMeeting::SessionManager &session, QWidget *parent)
+    : QDialog(parent), _session(session) {
     setWindowTitle(QString::fromUtf8("OpenMeeting 登录"));
     setFixedSize(460, 600);
     setWindowFlags(windowFlags() | Qt::FramelessWindowHint);
@@ -20,6 +25,30 @@ LoginDialog::LoginDialog(QWidget *parent)
 
     initUI();
     loadSavedData();
+    connect(_rememberBox, &QCheckBox::toggled, this, [this](bool checked) {
+        _autoLoginBox->setEnabled(checked);
+        if (!checked) {
+            _autoLoginBox->setChecked(false);
+            if (!_session.forgetSavedSession()) showError(_session.persistenceMessage());
+            updateSavedSessionAction();
+        }
+    });
+    connect(_accountInput, &QLineEdit::textChanged, this, [this] { updateSavedSessionAction(); });
+    connect(_serverUrlInput, &QLineEdit::textChanged, this, [this] { updateSavedSessionAction(); });
+}
+
+LoginDialog::~LoginDialog() {
+    cancelLogin();
+}
+
+void LoginDialog::cancelLogin() {
+    if (_loginInFlight && _session.authGeneration() == _loginGeneration) _session.cancelPendingLogin();
+    _loginInFlight = false;
+}
+
+void LoginDialog::reject() {
+    cancelLogin();
+    QDialog::reject();
 }
 
 void LoginDialog::initUI() {
@@ -190,11 +219,12 @@ void LoginDialog::initUI() {
     pwdLayout->addWidget(_togglePwdBtn);
     accLayout->addLayout(pwdLayout);
 
-    // 记住密码与自动登录 + 快速去注册
+    // 记住登录状态与自动登录 + 快速去注册
     auto optLayout = new QHBoxLayout();
-    _rememberBox = new QCheckBox(QString::fromUtf8("记住密码"), accountTab);
-    _rememberBox->setChecked(true);
+    _rememberBox = new QCheckBox(QString::fromUtf8("记住登录状态"), accountTab);
+    _rememberBox->setObjectName("rememberSession");
     _autoLoginBox = new QCheckBox(QString::fromUtf8("自动登录"), accountTab);
+    _autoLoginBox->setObjectName("autoLogin");
     optLayout->addWidget(_rememberBox);
     optLayout->addWidget(_autoLoginBox);
     optLayout->addStretch();
@@ -210,6 +240,21 @@ void LoginDialog::initUI() {
     _loginBtn->setObjectName("primaryBtn");
     _loginBtn->setFixedHeight(40);
     connect(_loginBtn, &QPushButton::clicked, this, &LoginDialog::onLoginClicked);
+    _resumeBtn = new QPushButton(QString::fromUtf8("继续使用已保存账号"), accountTab);
+    _resumeBtn->setObjectName("resumeSavedSession");
+    accLayout->addWidget(_resumeBtn);
+    connect(_resumeBtn, &QPushButton::clicked, this, [this] {
+        if (_accountInput->text().trimmed() != _session.savedAccount() ||
+            OpenMeeting::canonicalServiceUrl(_serverUrlInput->text()) != _session.serverBaseUrl()) return;
+        const QPointer<LoginDialog> self(this);
+        const bool resumed = _session.resumeSavedSession(false, _autoLoginBox->isChecked());
+        if (!self) return;
+        if (resumed) acceptAuthenticatedSession();
+        else {
+            showError(_session.persistenceMessage());
+            updateSavedSessionAction();
+        }
+    });
     accLayout->addWidget(_loginBtn);
 
     _tabWidget->addTab(accountTab, QString::fromUtf8("账号登录"));
@@ -333,15 +378,36 @@ void LoginDialog::initUI() {
 }
 
 void LoginDialog::loadSavedData() {
-    auto &session = OpenMeeting::SessionManager::instance();
-    session.loadFromSettings();
+    auto &session = _session;
 
     _accountInput->setText(session.savedAccount());
-    _passwordInput->setText(session.savedPassword());
-    _rememberBox->setChecked(session.isRememberPassword());
+    _passwordInput->clear();
+    _passwordInput->setObjectName("loginPassword");
+    _accountInput->setObjectName("loginAccount");
+    _serverUrlInput->setObjectName("serverBaseUrl");
+    _rememberBox->setChecked(session.isRememberSession());
     _autoLoginBox->setChecked(session.isAutoLogin());
+    _autoLoginBox->setEnabled(session.isRememberSession());
     _serverUrlInput->setText(session.serverBaseUrl());
     _guestNicknameInput->setText(QString::fromUtf8("访客_%1").arg(QDateTime::currentDateTime().toString("mmss")));
+    updateSavedSessionAction();
+    if (!session.persistenceMessage().isEmpty()) showError(session.persistenceMessage());
+}
+
+void LoginDialog::updateSavedSessionAction() {
+    _resumeBtn->setVisible(_session.hasSavedSession() &&
+        _accountInput->text().trimmed() == _session.savedAccount() &&
+        OpenMeeting::canonicalServiceUrl(_serverUrlInput->text()) == _session.serverBaseUrl());
+}
+
+void LoginDialog::acceptAuthenticatedSession() {
+    const QPointer<LoginDialog> self(this);
+    const auto generation = _session.authGeneration();
+    const auto warning = _session.persistenceMessage();
+    if (!warning.isEmpty()) QMessageBox::warning(this, QString::fromUtf8("登录状态"), warning);
+    if (!self || _session.authGeneration() != generation || !_session.isLoggedIn()) return;
+    _passwordInput->clear();
+    accept();
 }
 
 void LoginDialog::toggleAdvancedSettings() {
@@ -361,6 +427,10 @@ void LoginDialog::togglePasswordVisibility() {
 }
 
 void LoginDialog::setLoading(bool loading, const QString &text) {
+    _rememberBox->setEnabled(!loading);
+    _autoLoginBox->setEnabled(!loading && _rememberBox->isChecked());
+    _serverUrlInput->setEnabled(!loading);
+    _resumeBtn->setEnabled(!loading);
     _loginBtn->setEnabled(!loading);
     _guestBtn->setEnabled(!loading);
     _accountInput->setEnabled(!loading);
@@ -447,9 +517,10 @@ void LoginDialog::onRegisterClicked() {
         return;
     }
 
-    auto &session = OpenMeeting::SessionManager::instance();
-    if (!serverUrl.isEmpty()) {
-        session.setServerBaseUrl(serverUrl);
+    auto &session = _session;
+    if (!session.setServerBaseUrl(serverUrl)) {
+        showError(QString::fromUtf8("请输入有效的服务器地址。"));
+        return;
     }
 
     setLoading(true, QString::fromUtf8("正在注册..."));
@@ -489,24 +560,28 @@ void LoginDialog::onLoginClicked() {
         return;
     }
 
-    auto &session = OpenMeeting::SessionManager::instance();
-    if (!serverUrl.isEmpty()) {
-        session.setServerBaseUrl(serverUrl);
+    auto &session = _session;
+    if (!session.setServerBaseUrl(serverUrl)) {
+        showError(QString::fromUtf8("请输入有效的服务器地址。"));
+        return;
     }
 
     setLoading(true);
 
     QPointer<LoginDialog> self = this;
+    _loginInFlight = true;
     session.loginWithPassword(account, password, _rememberBox && _rememberBox->isChecked(), _autoLoginBox && _autoLoginBox->isChecked(),
         [self](bool success, const QString &errMsg) {
             if (!self) return;
+            self->_loginInFlight = false;
             self->setLoading(false);
             if (success) {
-                self->accept();
+                self->acceptAuthenticatedSession();
             } else {
                 self->showError(errMsg.isEmpty() ? QString::fromUtf8("登录失败，请检查账号密码或服务器连接") : errMsg);
             }
         });
+    if (self) _loginGeneration = session.authGeneration();
 }
 
 void LoginDialog::onGuestLoginClicked() {
@@ -515,7 +590,7 @@ void LoginDialog::onGuestLoginClicked() {
         nickname = QString::fromUtf8("访客用户");
     }
 
-    auto &session = OpenMeeting::SessionManager::instance();
+    auto &session = _session;
     session.loginAsGuest(nickname);
     accept();
 }

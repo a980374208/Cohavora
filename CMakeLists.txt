@@ -331,6 +331,8 @@ add_executable(livekit_meeting_app
     src/net/openmeeting_http_client.cpp
     src/net/session_manager.h
     src/net/session_manager.cpp
+    src/net/credential_store.cpp
+    src/net/credential_store.h
     src/ui/login_dialog.h
     src/ui/login_dialog.cpp
     src/ui/sidebar_widget.cpp
@@ -474,5 +476,3 @@ target_link_options(livekit_meeting_app PRIVATE
     $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
     $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
 )
-
-

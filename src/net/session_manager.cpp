@@ -2,6 +2,8 @@
 #include <QtCore/QCoreApplication>
 #include <QtCore/QUuid>
 #include <QtCore/QDebug>
+#include <QtCore/QPointer>
+#include <QtCore/QThread>
 #include <stdexcept>
 #include <utility>
 
@@ -12,11 +14,20 @@ SessionManager::SessionManager(QObject *parent)
 }
 
 SessionManager::SessionManager(std::unique_ptr<QSettings> settings, QObject *parent)
+    : SessionManager(std::move(settings), nullptr, nullptr, parent) {
+}
+
+SessionManager::SessionManager(std::unique_ptr<QSettings> settings,
+                               std::unique_ptr<CredentialStore> credentials,
+                               OpenMeetingHttpClient *client, QObject *parent)
     : QObject(parent)
-    , _settings(std::move(settings)) {
+    , _settings(std::move(settings))
+    , _credentials(std::move(credentials))
+    , _client(client ? client : &OpenMeetingHttpClient::instance()) {
     if (!_settings) {
         throw std::invalid_argument("SessionManager requires explicit settings storage");
     }
+    if (!_credentials) _credentials = makeCredentialStore(*_settings);
     qRegisterMetaType<SessionInvalidationReason>("OpenMeeting::SessionInvalidationReason");
 
     // 监听网络客户端的 Token 失效信号
@@ -36,7 +47,7 @@ SessionManager &SessionManager::instance() {
 }
 
 OpenMeetingHttpClient &SessionManager::httpClient() {
-    return OpenMeetingHttpClient::instance();
+    return *_client;
 }
 
 bool SessionManager::isLoggedIn() const {
@@ -100,12 +111,77 @@ void SessionManager::setVideoMirroring(bool enable) {
     }
 }
 
-void SessionManager::setServerBaseUrl(const QString &url) {
-    if (_serverBaseUrl != url && !url.isEmpty()) {
-        _serverBaseUrl = url;
-        httpClient().setBaseUrl(url);
+bool SessionManager::setServerBaseUrl(const QString &url) {
+    const auto service = canonicalServiceUrl(url);
+    if (service.isEmpty()) return false;
+    if (_serverBaseUrl != service) {
+        resetAuthentication();
+        forgetSavedSession();
+        _serverBaseUrl = service;
+        httpClient().setBaseUrl(service);
         saveToSettings();
     }
+    return true;
+}
+
+void SessionManager::resetAuthentication() {
+    Q_ASSERT(QThread::currentThread() == thread());
+    ++_authGeneration;
+    _loginPending = false;
+    _currentUser = {};
+    httpClient().setCurrentUser({});
+}
+
+void SessionManager::cancelPendingLogin() {
+    if (_loginPending) resetAuthentication();
+}
+
+bool SessionManager::forgetSavedSession() {
+    if (_loginPending) resetAuthentication();
+    _savedSession.reset();
+    _rememberSession = false;
+    _autoLogin = false;
+    _credentialStatus = _credentials->clear();
+    return _credentialStatus == CredentialStatus::Empty;
+}
+
+bool SessionManager::announceLogin(quint64 generation) {
+    const QPointer<SessionManager> self(this);
+    const auto user = _currentUser;
+    emit httpClient().userLoggedIn(user);
+    if (!self || _authGeneration != generation) return false;
+    emit loggedIn(user);
+    return self && self->_authGeneration == generation && self->isLoggedIn();
+}
+
+bool SessionManager::resumeSavedSession(bool automatic, std::optional<bool> autoLoginChoice) {
+    if (!_savedSession || (automatic && !_autoLogin) || _loginPending) return false;
+    // Recheck the tombstone and binding at activation, not just at startup.
+    auto loaded = _credentials->load(_serverBaseUrl, _savedAccount);
+    _credentialStatus = loaded.status;
+    if (loaded.status != CredentialStatus::Ready || (automatic && !loaded.session.autoLogin)) {
+        _savedSession.reset();
+        _rememberSession = _autoLogin = false;
+        return false;
+    }
+    resetAuthentication();
+    _sessionInvalidating = false;
+    _savedSession = std::move(loaded.session);
+    _currentUser = _savedSession->user;
+    _rememberSession = true;
+    _autoLogin = _savedSession->autoLogin;
+    if (autoLoginChoice && *autoLoginChoice != _autoLogin) {
+        _savedSession->autoLogin = *autoLoginChoice;
+        _credentialStatus = _credentials->save(*_savedSession);
+        if (_credentialStatus == CredentialStatus::Ready) {
+            _autoLogin = *autoLoginChoice;
+        } else {
+            _savedSession.reset();
+            _rememberSession = _autoLogin = false;
+        }
+    }
+    httpClient().setCurrentUser(_currentUser);
+    return announceLogin(_authGeneration);
 }
 
 void SessionManager::loginWithPassword(const QString &account,
@@ -113,23 +189,49 @@ void SessionManager::loginWithPassword(const QString &account,
                                        bool remember,
                                        bool autoLogin,
                                        std::function<void(bool success, const QString &errMsg)> callback) {
-    httpClient().login(account, password, [this, account, password, remember, autoLogin, callback](bool ok, const UserInfo &info, const HttpError &err) {
-        if (ok) {
-            _sessionInvalidating = false;
-            _currentUser = info;
-            _savedAccount = account;
-            _savedPassword = remember ? password : "";
-            _rememberPassword = remember;
-            _autoLogin = autoLogin;
-            httpClient().setToken(info.token);
-            httpClient().setCurrentUser(info);
-            saveToSettings();
-            emit loggedIn(_currentUser);
-            if (callback) callback(true, QString());
-        } else {
-            if (callback) callback(false, err.message);
-        }
-    });
+    resetAuthentication();
+    forgetSavedSession();
+    const auto generation = _authGeneration;
+    const auto service = _serverBaseUrl;
+    if (canonicalServiceUrl(service).isEmpty()) {
+        if (callback) callback(false, QString::fromUtf8("服务器地址无效。"));
+        return;
+    }
+    _loginPending = true;
+    const QPointer<SessionManager> self(this);
+    const auto httpRevision = httpClient().authRevision();
+    httpClient().requestLogin(account, password,
+        [self, generation, httpRevision, service, account, remember, autoLogin, callback]
+        (bool ok, const UserInfo &info, const HttpError &err) {
+            const auto superseded = QString::fromUtf8("本次登录已取消，请重新登录。");
+            if (!self || self->_authGeneration != generation || !self->_loginPending ||
+                self->_serverBaseUrl != service || self->httpClient().authRevision() != httpRevision ||
+                self->httpClient().baseUrl() != service) {
+                if (callback) callback(false, superseded);
+                return;
+            }
+            self->_loginPending = false;
+            if (!ok || info.token.isEmpty() || info.userId.isEmpty()) {
+                if (callback) callback(false, ok ? QString::fromUtf8("登录响应缺少必要凭据。") : err.message);
+                return;
+            }
+            self->_sessionInvalidating = false;
+            self->_currentUser = info;
+            self->_savedAccount = account;
+            self->saveToSettings();
+            if (remember) {
+                StoredSession record{service, account, info, autoLogin};
+                self->_credentialStatus = self->_credentials->save(record);
+                if (self->_credentialStatus == CredentialStatus::Ready) {
+                    self->_savedSession = std::move(record);
+                    self->_rememberSession = true;
+                    self->_autoLogin = autoLogin;
+                }
+            }
+            self->httpClient().setCurrentUser(info);
+            const bool committed = self->announceLogin(generation);
+            if (callback) callback(committed, committed ? QString() : superseded);
+        });
 }
 
 void SessionManager::registerUser(const QString &account,
@@ -146,6 +248,8 @@ void SessionManager::registerUser(const QString &account,
 }
 
 void SessionManager::loginAsGuest(const QString &nickname, const QString &customUserId) {
+    resetAuthentication();
+    forgetSavedSession();
     _sessionInvalidating = false;
     _currentUser.userId = customUserId.isEmpty()
         ? QString("guest_%1").arg(QUuid::createUuid().toString(QUuid::Id128).left(8))
@@ -154,28 +258,21 @@ void SessionManager::loginAsGuest(const QString &nickname, const QString &custom
     _currentUser.token = QString("guest_token_%1").arg(QUuid::createUuid().toString(QUuid::Id128));
     _currentUser.faceURL = "";
 
-    httpClient().setToken(_currentUser.token);
     httpClient().setCurrentUser(_currentUser);
-    emit loggedIn(_currentUser);
+    announceLogin(_authGeneration);
 }
 
 void SessionManager::logout(bool notifyServer) {
     if (notifyServer && isLoggedIn()) {
-        httpClient().logout();
+        httpClient().requestLogout();
     }
 
-    _currentUser = UserInfo();
-    _autoLogin = false;
-    // OpenMeetingHttpClient::setCurrentUser(empty) 不会覆盖已有 token，
-    // 因而必须显式清空 token，避免后续 REST 请求继续携带失效凭据。
-    httpClient().setToken(QString());
-    httpClient().setCurrentUser(UserInfo{});
-
-    if (_settings) {
-        _settings->setValue("auth/autoLogin", false);
-        _settings->remove("user");
-        _settings->sync();
-    }
+    resetAuthentication();
+    forgetSavedSession();
+    const auto generation = _authGeneration;
+    const QPointer<SessionManager> self(this);
+    emit httpClient().userLoggedOut();
+    if (!self || self->_authGeneration != generation) return;
     emit loggedOut();
 }
 
@@ -184,7 +281,7 @@ void SessionManager::invalidateSession(SessionInvalidationReason reason) {
         qWarning() << "[SessionManager] Ignore session invalidation with unknown reason.";
         return;
     }
-    if (_sessionInvalidating || (!isLoggedIn() && httpClient().token().isEmpty())) {
+    if (_sessionInvalidating || (!_loginPending && !isLoggedIn() && httpClient().token().isEmpty())) {
         qInfo() << "[SessionManager] Ignore duplicate/stale session invalidation:" << static_cast<int>(reason);
         return;
     }
@@ -195,8 +292,12 @@ void SessionManager::invalidateSession(SessionInvalidationReason reason) {
 
     // 已被服务端撤销的 token 不得再请求 /user/logout；统一复用本地清理路径，
     // 确保 HTTP client、内存用户和 QSettings 三处状态同步归零。
+    const QPointer<SessionManager> self(this);
+    const auto invalidatedGeneration = _authGeneration + 1;
     logout(false);
+    if (!self || self->_authGeneration != invalidatedGeneration) return;
     emit sessionInvalidated(reason);
+    if (!self || self->_authGeneration != invalidatedGeneration) return;
 
     if (reason == SessionInvalidationReason::TokenExpired ||
         reason == SessionInvalidationReason::TokenInvalid) {
@@ -205,13 +306,12 @@ void SessionManager::invalidateSession(SessionInvalidationReason reason) {
 }
 
 void SessionManager::loadFromSettings() {
-    if (!_settings) return;
+    if (_settingsLoaded) return;
+    _settingsLoaded = true;
 
     _savedAccount = _settings->value("auth/account", "").toString();
-    _savedPassword = _settings->value("auth/password", "").toString();
-    _rememberPassword = _settings->value("auth/rememberPassword", false).toBool();
-    _autoLogin = _settings->value("auth/autoLogin", false).toBool();
-    _serverBaseUrl = _settings->value("network/serverBaseUrl", "http://123.56.225.164:11102").toString();
+    _serverBaseUrl = canonicalServiceUrl(
+        _settings->value("network/serverBaseUrl", "http://123.56.225.164:11102").toString());
 
     _mediaPrefs.enableMicrophone = _settings->value("media/enableMicrophone", true).toBool();
     _mediaPrefs.enableSpeaker = _settings->value("media/enableSpeaker", true).toBool();
@@ -219,17 +319,13 @@ void SessionManager::loadFromSettings() {
     _mediaPrefs.videoIsMirroring = _settings->value("media/videoMirroring", false).toBool();
 
     httpClient().setBaseUrl(_serverBaseUrl);
-
-    if (_rememberPassword) {
-        _currentUser.token = _settings->value("user/token", "").toString();
-        _currentUser.userId = _settings->value("user/userId", "").toString();
-        _currentUser.nickname = _settings->value("user/nickname", "").toString();
-        _currentUser.faceURL = _settings->value("user/faceURL", "").toString();
-
-        if (!_currentUser.token.isEmpty()) {
-            httpClient().setToken(_currentUser.token);
-            httpClient().setCurrentUser(_currentUser);
-        }
+    resetAuthentication();
+    auto loaded = _credentials->load(_serverBaseUrl, _savedAccount);
+    _credentialStatus = loaded.status;
+    if (loaded.status == CredentialStatus::Ready) {
+        _savedSession = std::move(loaded.session);
+        _rememberSession = true;
+        _autoLogin = _savedSession->autoLogin;
     }
 }
 
@@ -237,9 +333,6 @@ void SessionManager::saveToSettings() {
     if (!_settings) return;
 
     _settings->setValue("auth/account", _savedAccount);
-    _settings->setValue("auth/password", _rememberPassword ? _savedPassword : "");
-    _settings->setValue("auth/rememberPassword", _rememberPassword);
-    _settings->setValue("auth/autoLogin", _autoLogin);
     _settings->setValue("network/serverBaseUrl", _serverBaseUrl);
 
     _settings->setValue("media/enableMicrophone", _mediaPrefs.enableMicrophone);
@@ -247,12 +340,6 @@ void SessionManager::saveToSettings() {
     _settings->setValue("media/enableVideo", _mediaPrefs.enableVideo);
     _settings->setValue("media/videoMirroring", _mediaPrefs.videoIsMirroring);
 
-    if (isLoggedIn() && _rememberPassword) {
-        _settings->setValue("user/token", _currentUser.token);
-        _settings->setValue("user/userId", _currentUser.userId);
-        _settings->setValue("user/nickname", _currentUser.nickname);
-        _settings->setValue("user/faceURL", _currentUser.faceURL);
-    }
     _settings->sync();
 }
 
