@@ -92,7 +92,9 @@ FailureCaseResult RunFailureCase(bool token_in_query) {
         completion = asio::co_spawn(
             client_io,
             [client, url, token]() -> asio::awaitable<std::error_code> {
-                co_return co_await client->Connect(url, token, std::chrono::seconds(3));
+                co_return co_await client->Connect(
+                    url, token, std::chrono::seconds(3),
+                    livekit::CredentialUrlPolicy{true, false});
             },
             asio::use_future);
         client_io.run();

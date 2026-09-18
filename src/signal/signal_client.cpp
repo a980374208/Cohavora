@@ -160,14 +160,16 @@ static std::string CreateJoinRequestParam(const SignalOptions& options,
 static std::string GetLivekitUrl(const std::string& base_url,
                                  const std::string& token,
                                  const SignalOptions& options,
+                                 CredentialUrlPolicy policy,
                                  bool use_v1_path,
                                  bool reconnect,
                                  const std::string& participant_sid,
                                  const std::optional<std::vector<uint8_t>>& publisher_offer_sdp) {
-    Url url = ParseUrl(base_url);
-    std::string scheme = url.scheme;
-    if (scheme == "https") scheme = "wss";
-    else if (scheme == "http") scheme = "ws";
+    std::error_code admission_error;
+    auto admitted = AdmitCredentialUrl(
+        base_url, CredentialUrlKind::LiveKitBase, policy, admission_error);
+    if (!admitted) throw std::system_error(admission_error);
+    Url url = ConvertCredentialUrl(*admitted, CredentialUrlKind::WebSocket);
     
     std::string full_path = url.path;
     if (!full_path.empty() && full_path.back() == '/') {
@@ -209,12 +211,9 @@ static std::string GetLivekitUrl(const std::string& base_url,
         query += ss.str();
     }
 
-    std::string result = scheme + "://" + url.host;
-    if (url.port != "80" && url.port != "443" && (url.port != "80" || scheme != "ws") && (url.port != "443" || scheme != "wss")) {
-        result += ":" + url.port;
-    }
-    result += full_path + "?" + query;
-    return result;
+    url.path = std::move(full_path);
+    url.query = std::move(query);
+    return FormatCredentialUrl(url);
 }
 
 asio::awaitable<ConnectResult> SignalClient::Connect(
@@ -223,9 +222,22 @@ asio::awaitable<ConnectResult> SignalClient::Connect(
                     const SignalOptions& options,
                     const std::optional<std::vector<uint8_t>>& publisher_offer_sdp,
                     SignalEventHandler event_handler) {
-    std::cout << "SignalClient::Connect: Creating SignalClient instance" << std::endl;
     auto executor = co_await asio::this_coro::executor;
-    auto client = std::make_shared<SignalClient>(url_str, token, options, options.single_peer_connection, nullptr, event_handler, executor);
+    std::error_code admission_error;
+    auto initial_url = AdmitCredentialUrl(
+        url_str,
+        CredentialUrlKind::LiveKitBase,
+        CredentialUrlPolicy{options.allow_insecure_transport, false},
+        admission_error);
+    if (!initial_url) {
+        co_return ConnectResult{nullptr, nullptr, admission_error};
+    }
+
+    std::cout << "SignalClient::Connect: Creating SignalClient instance" << std::endl;
+    auto client = std::make_shared<SignalClient>(
+        FormatCredentialUrl(*initial_url), token, options, options.single_peer_connection,
+        nullptr, event_handler, executor);
+    client->secure_transport_required_ = initial_url->secure;
     
     client->ssl_ctx_ = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_client);
     client->ssl_ctx_->set_default_verify_paths();
@@ -581,9 +593,19 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectAtUrl
     const std::string& base_url,
     const std::optional<std::vector<uint8_t>>& publisher_offer_sdp,
     bool allow_redirect) {
+    const CredentialUrlPolicy policy{
+        options_.allow_insecure_transport, secure_transport_required_};
+    std::error_code admission_error;
+    auto admitted_base = AdmitCredentialUrl(
+        base_url, CredentialUrlKind::LiveKitBase, policy, admission_error);
+    if (!admitted_base) throw std::system_error(admission_error);
+    const CredentialUrlPolicy derived_policy =
+        PolicyForDerivedCredentialUrl(policy, *admitted_base);
+    const std::string canonical_base_url = FormatCredentialUrl(*admitted_base);
     const bool use_v1 = options_.single_peer_connection;
     const std::string v1_or_v0_url = GetLivekitUrl(
-        base_url, token_, options_, use_v1, false, "", publisher_offer_sdp);
+        canonical_base_url, token_, options_, derived_policy,
+        use_v1, false, "", publisher_offer_sdp);
 
     std::optional<std::error_code> first_error;
     std::shared_ptr<proto::JoinResponse> response;
@@ -595,7 +617,13 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectAtUrl
 
     if (response) {
         if (!response->alternative_url().empty()) {
-            if (!allow_redirect || response->alternative_url() == base_url) {
+            std::error_code redirect_error;
+            auto redirect = AdmitCredentialUrl(
+                response->alternative_url(), CredentialUrlKind::LiveKitBase,
+                derived_policy, redirect_error);
+            if (!redirect) throw std::system_error(redirect_error);
+            const std::string redirect_url = FormatCredentialUrl(*redirect);
+            if (!allow_redirect || redirect_url == canonical_base_url) {
                 throw std::system_error(std::make_error_code(std::errc::too_many_links));
             }
             std::shared_ptr<SignalStream> redirected_stream;
@@ -605,10 +633,11 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectAtUrl
             }
             if (redirected_stream) co_await redirected_stream->Close(false);
             auto redirected = co_await ConnectAtUrlInternal(
-                response->alternative_url(), publisher_offer_sdp, false);
-            url_ = response->alternative_url();
+                redirect_url, publisher_offer_sdp, false);
             co_return redirected;
         }
+        url_ = canonical_base_url;
+        secure_transport_required_ = secure_transport_required_ || admitted_base->secure;
         single_pc_mode_active_ = use_v1;
         co_return response;
     }
@@ -622,7 +651,8 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectAtUrl
     }
 
     const std::string v0_url = GetLivekitUrl(
-        base_url, token_, options_, false, false, "", std::nullopt);
+        canonical_base_url, token_, options_, derived_policy,
+        false, false, "", std::nullopt);
     std::optional<std::error_code> v0_error;
     response.reset();
     try {
@@ -632,7 +662,13 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectAtUrl
     }
     if (response) {
         if (!response->alternative_url().empty()) {
-            if (!allow_redirect || response->alternative_url() == base_url) {
+            std::error_code redirect_error;
+            auto redirect = AdmitCredentialUrl(
+                response->alternative_url(), CredentialUrlKind::LiveKitBase,
+                derived_policy, redirect_error);
+            if (!redirect) throw std::system_error(redirect_error);
+            const std::string redirect_url = FormatCredentialUrl(*redirect);
+            if (!allow_redirect || redirect_url == canonical_base_url) {
                 throw std::system_error(std::make_error_code(std::errc::too_many_links));
             }
             std::shared_ptr<SignalStream> redirected_stream;
@@ -642,10 +678,11 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::ConnectAtUrl
             }
             if (redirected_stream) co_await redirected_stream->Close(false);
             auto redirected = co_await ConnectAtUrlInternal(
-                response->alternative_url(), publisher_offer_sdp, false);
-            url_ = response->alternative_url();
+                redirect_url, publisher_offer_sdp, false);
             co_return redirected;
         }
+        url_ = canonical_base_url;
+        secure_transport_required_ = secure_transport_required_ || admitted_base->secure;
         single_pc_mode_active_ = false;
         co_return response;
     }
@@ -660,7 +697,11 @@ asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::Reconne
     const auto deadline = std::chrono::steady_clock::now() + total_timeout;
     std::string sid = join_response_->participant().sid();
     std::string tok = this->token();
-    std::string reconnect_url = GetLivekitUrl(url_, tok, options_, single_pc_mode_active_, true, sid, std::nullopt);
+    const CredentialUrlPolicy policy{
+        options_.allow_insecure_transport, secure_transport_required_};
+    std::string reconnect_url = GetLivekitUrl(
+        url_, tok, options_, policy,
+        single_pc_mode_active_, true, sid, std::nullopt);
     
     auto connect_budget = std::min(
         options_.connect_timeout,
@@ -669,7 +710,8 @@ asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::Reconne
     if (connect_budget <= std::chrono::milliseconds::zero()) {
         throw std::system_error(std::make_error_code(std::errc::timed_out));
     }
-    auto connect_res = co_await SignalStream::Connect(*ssl_ctx_, reconnect_url, tok, connect_budget);
+    auto connect_res = co_await SignalStream::Connect(
+        *ssl_ctx_, reconnect_url, tok, connect_budget, policy);
     if (connect_res.error) {
         throw std::system_error(connect_res.error);
     }
@@ -755,7 +797,10 @@ asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::Reconne
 asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::TryConnectInternal(const std::string& connect_url) {
     std::cout << "SignalClient::TryConnectInternal: Connect endpoint: "
               << secure_log::EndpointSummary(connect_url) << std::endl;
-    auto connect_res = co_await SignalStream::Connect(*ssl_ctx_, connect_url, token_, options_.connect_timeout);
+    auto connect_res = co_await SignalStream::Connect(
+        *ssl_ctx_, connect_url, token_, options_.connect_timeout,
+        CredentialUrlPolicy{
+            options_.allow_insecure_transport, secure_transport_required_});
     if (connect_res.error) {
         throw std::system_error(connect_res.error);
     }
@@ -834,7 +879,10 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::FallbackRegi
     const std::error_code& last_error,
     const std::optional<std::vector<uint8_t>>& publisher_offer_sdp) {
     
-    std::vector<std::string> fallback_urls = co_await RegionUrlProvider::FetchRegionUrls(*ssl_ctx_, url_, token_);
+    std::vector<std::string> fallback_urls = co_await RegionUrlProvider::FetchRegionUrls(
+        *ssl_ctx_, url_, token_,
+        CredentialUrlPolicy{
+            options_.allow_insecure_transport, secure_transport_required_});
     if (fallback_urls.empty()) {
         throw std::system_error(last_error);
     }
@@ -852,22 +900,22 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::FallbackRegi
 }
 
 asio::awaitable<void> SignalClient::ValidateInternal(const std::string& url_str, const std::string& token) {
-    Url url = ParseUrl(url_str);
-    std::string scheme = (url.scheme == "wss" || url.scheme == "https") ? "https" : "http";
+    const CredentialUrlPolicy policy{
+        options_.allow_insecure_transport, secure_transport_required_};
+    std::error_code admission_error;
+    auto admitted = AdmitCredentialUrl(
+        url_str, CredentialUrlKind::WebSocket, policy, admission_error);
+    if (!admitted) throw std::system_error(admission_error);
+    Url url = ConvertCredentialUrl(*admitted, CredentialUrlKind::Http);
     std::string val_path = url.path;
     if (!val_path.empty() && val_path.back() == '/') val_path.pop_back();
     val_path += "/validate";
     
-    std::string val_url = scheme + "://" + url.host;
-    if (url.port != "80" && url.port != "443" && (url.port != "80" || scheme != "http") && (url.port != "443" || scheme != "https")) {
-        val_url += ":" + url.port;
-    }
-    val_url += val_path;
-    if (!url.query.empty()) {
-        val_url += "?" + url.query;
-    }
+    url.path = std::move(val_path);
+    const std::string val_url = FormatCredentialUrl(url);
 
-    HttpResponse res = co_await HttpClient::Get(*ssl_ctx_, val_url, token, std::chrono::seconds(3));
+    HttpResponse res = co_await HttpClient::Get(
+        *ssl_ctx_, val_url, token, std::chrono::seconds(3), policy);
     if (res.status_code >= 400) {
         throw std::system_error(std::make_error_code(std::errc::permission_denied));
     }

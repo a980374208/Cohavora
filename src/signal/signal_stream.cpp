@@ -20,12 +20,13 @@ asio::awaitable<SignalStream::ConnectResult> SignalStream::Connect(
                     asio::ssl::context& ssl_ctx,
                     std::string url_str,
                     std::string token,
-                    std::chrono::milliseconds timeout) {
+                    std::chrono::milliseconds timeout,
+                    CredentialUrlPolicy policy) {
     auto executor = co_await asio::this_coro::executor;
     auto& io_ctx = static_cast<asio::io_context&>(executor.context());
     
     auto ws_client = std::make_shared<WebSocketClient>(io_ctx, ssl_ctx);
-    auto ec = co_await ws_client->Connect(url_str, token, timeout);
+    auto ec = co_await ws_client->Connect(url_str, token, timeout, policy);
     
     if (ec) {
         co_return ConnectResult{nullptr, ec};

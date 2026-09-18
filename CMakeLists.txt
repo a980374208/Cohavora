@@ -94,6 +94,7 @@ add_custom_command(
 
 # 源文件列表
 set(LIVEKIT_SOURCES
+    src/signal/credential_url.cpp
     src/signal/websocket_client.cpp
     src/signal/region_provider.cpp
     src/signal/signal_stream.cpp
@@ -135,6 +136,7 @@ set(LIVEKIT_SOURCES
 # 头文件列表
 set(LIVEKIT_HEADERS
     src/media/audio_apm.h
+    src/signal/credential_url.h
     src/signal/websocket_client.h
     src/signal/region_provider.h
     src/signal/signal_stream.h
@@ -284,6 +286,16 @@ add_executable(livekit_signaling_tests_run_v4
 
 target_link_libraries(livekit_signaling_tests_run_v4 PRIVATE
     livekit_signaling
+)
+
+add_executable(test_signaling_url_policy
+    tests/remediation/test_signaling_url_policy.cpp
+    tests/support/test_check.h
+)
+target_include_directories(test_signaling_url_policy PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_signaling_url_policy PRIVATE livekit_signaling)
+set_target_properties(test_signaling_url_policy PROPERTIES
+    MSVC_RUNTIME_LIBRARY "MultiThreaded"
 )
 
 # Panic Guard Test
@@ -969,6 +981,9 @@ add_test(NAME always_active_checks_test
 )
 
 add_test(NAME signaling_tests COMMAND livekit_signaling_tests_run_v4)
+add_test(NAME signaling_url_policy_test COMMAND test_signaling_url_policy)
+set_tests_properties(signaling_url_policy_test PROPERTIES
+    TIMEOUT 30)
 add_test(NAME panic_guard_test COMMAND test_panic_guard)
 add_test(NAME advanced_communication_test COMMAND test_advanced_communication)
 add_test(NAME chunking_simulcast_test COMMAND test_chunking_simulcast)
@@ -1606,6 +1621,7 @@ set_tests_properties(
     connection_log_redaction_test
     qt_log_redaction_test
     signaling_tests
+    signaling_url_policy_test
     room_state_events_test
     remote_publication_lifecycle_test
     local_unpublish_transaction_test
@@ -1620,6 +1636,8 @@ set_tests_properties(
     meeting_startup_transaction_test
     PROPERTIES LABELS "CORE_REGRESSION"
 )
+set_property(TEST signaling_tests signaling_url_policy_test
+    APPEND PROPERTY LABELS "PR_SEC_006_FOCUSED")
 
 
 

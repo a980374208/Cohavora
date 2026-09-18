@@ -714,6 +714,7 @@ void WindowConnect(WindowFixture &fixture, const std::shared_ptr<WindowLoopbackS
     const std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     const std::string token = "ida2-window-local-test-token";
     livekit::SignalOptions options;
+    options.allow_insecure_transport = true;
     options.single_peer_connection = false;
     options.create_webrtc_pc = false;
     options.timeouts.reconnect_attempt = std::chrono::milliseconds(800);

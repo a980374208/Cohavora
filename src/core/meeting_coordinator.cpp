@@ -1,4 +1,5 @@
 #include "src/core/meeting_coordinator.h"
+#include "src/net/service_endpoint_policy.h"
 #include "src/ui/meeting_log_console.h"
 #include "src/telemetry/log_redaction.h"
 
@@ -1370,13 +1371,16 @@ void MeetingCoordinator::startRoomSession(const QString &url,
     auto videoSource = _localVideoSource;
     const bool audioMuted = _audioMuted;
     const bool videoEnabled = _videoEnabled;
+    const bool allowInsecureTransport = isDebugHttpTransportEnabled();
 
     _ioThread = std::thread([this, ioContext, room = std::move(room), session = std::move(session),
                              audioSource = std::move(audioSource), videoSource = std::move(videoSource),
-                             audioMuted, videoEnabled, urlStr, tokenStr, sessionGeneration] {
+                             audioMuted, videoEnabled, allowInsecureTransport,
+                             urlStr, tokenStr, sessionGeneration] {
         livekit::SignalOptions opts;
         opts.auto_subscribe = true;
         opts.connect_timeout = std::chrono::seconds(10);
+        opts.allow_insecure_transport = allowInsecureTransport;
 
         asio::co_spawn(*ioContext,
                         [this, room = std::move(room), session = std::move(session),

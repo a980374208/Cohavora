@@ -31,7 +31,8 @@ public:
                         asio::ssl::context& ssl_ctx,
                         std::string url_str,
                         std::string token,
-                        std::chrono::milliseconds timeout);
+                        std::chrono::milliseconds timeout,
+                        CredentialUrlPolicy policy);
 
     SignalStream(std::shared_ptr<WebSocketClient> ws_client);
     ~SignalStream();

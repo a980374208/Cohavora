@@ -11,12 +11,15 @@ namespace livekit {
 asio::awaitable<HttpResponse> HttpClient::Get(asio::ssl::context& ssl_ctx, 
                                              const std::string& url_str, 
                                              const std::string& token, 
-                                             std::chrono::milliseconds timeout) {
-    Url url = ParseUrl(url_str);
-    if (url.scheme == "wss") url.scheme = "https";
-    else if (url.scheme == "ws") url.scheme = "http";
-    
-    bool is_ssl = (url.scheme == "https");
+                                             std::chrono::milliseconds timeout,
+                                             CredentialUrlPolicy policy) {
+    std::error_code admission_error;
+    auto admitted = AdmitCredentialUrl(
+        url_str, CredentialUrlKind::Http, policy, admission_error);
+    if (!admitted) throw std::system_error(admission_error);
+    const Url url = std::move(*admitted);
+
+    bool is_ssl = url.secure;
     auto executor = co_await asio::this_coro::executor;
     
     // Resolve
@@ -49,7 +52,7 @@ asio::awaitable<HttpResponse> HttpClient::Get(asio::ssl::context& ssl_ctx,
         path_query += "?" + url.query;
     }
     std::string req = "GET " + path_query + " HTTP/1.1\r\n"
-                      "Host: " + url.host + "\r\n"
+                      "Host: " + FormatUrlAuthority(url) + "\r\n"
                       "Accept: */*\r\n";
     if (!token.empty()) {
         req += "Authorization: Bearer " + token + "\r\n";
@@ -128,20 +131,28 @@ asio::awaitable<HttpResponse> HttpClient::Get(asio::ssl::context& ssl_ctx,
 }
 
 asio::awaitable<std::vector<std::string>> RegionUrlProvider::FetchRegionUrls(asio::ssl::context& ssl_ctx,
-                                                                            const std::string& url_str,
-                                                                            const std::string& token) {
-    Url url = ParseUrl(url_str);
+                                                                             const std::string& url_str,
+                                                                             const std::string& token,
+                                                                             CredentialUrlPolicy policy) {
+    std::error_code admission_error;
+    auto admitted = AdmitCredentialUrl(
+        url_str, CredentialUrlKind::LiveKitBase, policy, admission_error);
+    if (!admitted) co_return std::vector<std::string>{};
+    const Url url = std::move(*admitted);
     bool is_cloud = url.host.ends_with(".livekit.cloud") || url.host.ends_with(".livekit.run");
     if (!is_cloud) {
         co_return std::vector<std::string>{};
     }
     
-    std::string scheme = (url.scheme == "wss" || url.scheme == "https") ? "https" : "http";
-    std::string regions_url = scheme + "://" + url.host + "/settings/regions";
+    Url regions_endpoint = ConvertCredentialUrl(url, CredentialUrlKind::Http);
+    regions_endpoint.path = "/settings/regions";
+    regions_endpoint.query.clear();
+    const std::string regions_url = FormatCredentialUrl(regions_endpoint);
     
     HttpResponse res;
     try {
-        res = co_await HttpClient::Get(ssl_ctx, regions_url, token, std::chrono::seconds(3));
+        res = co_await HttpClient::Get(
+            ssl_ctx, regions_url, token, std::chrono::seconds(3), policy);
     } catch (...) {
         co_return std::vector<std::string>{};
     }
@@ -156,7 +167,13 @@ asio::awaitable<std::vector<std::string>> RegionUrlProvider::FetchRegionUrls(asi
         if (j.contains("regions") && j["regions"].is_array()) {
             for (const auto& r : j["regions"]) {
                 if (r.contains("url") && r["url"].is_string()) {
-                    urls.push_back(r["url"].get<std::string>());
+                    std::error_code candidate_error;
+                    auto candidate = AdmitCredentialUrl(
+                        r["url"].get<std::string>(),
+                        CredentialUrlKind::LiveKitBase,
+                        policy,
+                        candidate_error);
+                    if (candidate) urls.push_back(FormatCredentialUrl(*candidate));
                 }
             }
         }

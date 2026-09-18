@@ -328,6 +328,7 @@ asio::awaitable<void> TestCase1_RapidConnectDisconnect100Cycles(asio::any_io_exe
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
     opts.create_webrtc_pc = false;
     opts.connect_timeout = std::chrono::milliseconds(100);
@@ -395,6 +396,7 @@ asio::awaitable<void> TestCase2_SuddenDropAndSoftReconnect(asio::any_io_executor
     uint16_t port = server1->port();
     std::string url = "ws://127.0.0.1:" + std::to_string(port);
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
     opts.create_webrtc_pc = false;
     opts.timeouts.reconnect_attempt = std::chrono::milliseconds(500);
@@ -457,6 +459,7 @@ asio::awaitable<void> TestCase3_HardReconnectFallback(asio::any_io_executor exec
     uint16_t port = server1->port();
     std::string url = "ws://127.0.0.1:" + std::to_string(port);
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
     opts.create_webrtc_pc = false;
     opts.timeouts.reconnect_attempt = std::chrono::milliseconds(200);
@@ -512,6 +515,7 @@ asio::awaitable<void> TestCase4_ConcurrentEventAndDestructionRace(asio::any_io_e
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
     opts.create_webrtc_pc = false;
 

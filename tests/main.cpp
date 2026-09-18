@@ -388,6 +388,7 @@ asio::awaitable<void> TestConnectAndJoin() {
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
 
     std::cout << "TestConnectAndJoin: calling SignalClient::Connect" << std::endl;
@@ -419,6 +420,7 @@ asio::awaitable<void> TestValidationFail() {
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = true;
 
     auto res = co_await livekit::SignalClient::Connect(url, "test-token", opts, std::nullopt, [server](const livekit::SignalEvent&) {});
@@ -443,6 +445,7 @@ asio::awaitable<void> TestV1FallbackOnlyOn404() {
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = true;
 
     auto res = co_await livekit::SignalClient::Connect(
@@ -473,6 +476,7 @@ asio::awaitable<void> TestHeartbeat() {
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
 
     auto res = co_await livekit::SignalClient::Connect(url, "test-token", opts, std::nullopt, [server](const livekit::SignalEvent&) {});
@@ -513,6 +517,7 @@ asio::awaitable<void> TestReconnectionAndQueueing() {
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
 
     auto res = co_await livekit::SignalClient::Connect(url, "test-token", opts, std::nullopt, [server](const livekit::SignalEvent&) {});
@@ -575,6 +580,7 @@ asio::awaitable<void> TestReconnectionInterrupted() {
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
 
     auto res = co_await livekit::SignalClient::Connect(url, "test-token", opts, std::nullopt, [server](const livekit::SignalEvent&) {});
@@ -644,6 +650,7 @@ asio::awaitable<void> TestReconnectionTimeout() {
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
     opts.reconnect_timeout = std::chrono::milliseconds(100); // 设为很短的 100ms 超时
 
@@ -762,6 +769,7 @@ asio::awaitable<void> TestRoomStateMachine() {
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
     opts.create_webrtc_pc = false;
     opts.timeouts.publish = std::chrono::milliseconds(100);
@@ -919,6 +927,7 @@ asio::awaitable<void> TestWebRTCIntegration() {
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
     opts.create_webrtc_pc = false;
 
@@ -955,6 +964,7 @@ asio::awaitable<void> TestConnectWaitsForMediaReadiness() {
     server->StartAccept();
 
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = true;
     opts.create_webrtc_pc = true;
     opts.timeouts.negotiation = std::chrono::milliseconds(150);
@@ -1000,6 +1010,7 @@ asio::awaitable<void> TestEventReadyHandshake() {
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
     opts.create_webrtc_pc = false;
 
@@ -1059,6 +1070,7 @@ asio::awaitable<void> TestRoomReconnectAndTrackRecovery() {
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
     opts.create_webrtc_pc = false;
 
@@ -1135,6 +1147,7 @@ asio::awaitable<void> TestRoomReconnectExhaustion() {
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
     opts.create_webrtc_pc = false;
     opts.connect_timeout = std::chrono::milliseconds(500);

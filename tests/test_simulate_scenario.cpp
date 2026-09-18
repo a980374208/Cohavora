@@ -288,6 +288,7 @@ asio::awaitable<void> TestSimulateScenarioSuite(asio::any_io_executor executor) 
 
     std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
     opts.single_peer_connection = false;
     opts.create_webrtc_pc = false;
 

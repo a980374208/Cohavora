@@ -135,7 +135,9 @@ void RunCase(const char* label, asio::ssl::context& client_tls, X509* cert,
 
     auto client = std::make_shared<livekit::WebSocketClient>(io, client_tls);
     const std::string token = "synthetic-tls-bearer-secret";
-    const auto url = "wss://" + host + ":" + std::to_string(acceptor.local_endpoint().port())
+    const auto port = acceptor.local_endpoint().port();
+    TEST_CHECK(port != 443);
+    const auto url = "wss://" + host + ":" + std::to_string(port)
         + "/rtc/v1" + (query_token ? "?access_token=" + token : "?protocol=14");
     auto completion = asio::co_spawn(io, client->Connect(url, token, std::chrono::seconds(3)),
                                      asio::use_future);
@@ -147,6 +149,9 @@ void RunCase(const char* label, asio::ssl::context& client_tls, X509* cert,
     if (accepted) {
         TEST_CHECK(!error);
         TEST_CHECK(sni == host);
+        TEST_CHECK(request.find(
+            "\r\nHost: " + host + ":" + std::to_string(port) + "\r\n") !=
+            std::string::npos);
         TEST_CHECK(request.find(token) != std::string::npos);
         if (query_token) {
             TEST_CHECK(request.find("GET /rtc/v1?access_token=" + token) != std::string::npos);
