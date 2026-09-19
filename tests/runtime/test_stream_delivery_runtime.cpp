@@ -31,6 +31,27 @@
 #include "operation.h"
 #include "room.h"
 
+namespace livekit {
+// Observe authentication in production, not merely the configured E2EE option.
+class RoomStreamDeliveryTestAccess final {
+public:
+    static void ObserveDecrypt(Room& room, std::shared_ptr<std::atomic<size_t>> count) {
+        std::lock_guard lock(room.room_mutex_);
+        auto hooks = std::make_shared<Room::StreamDeliveryTestHooks>();
+        hooks->after_decrypt_before_commit = [count] { count->fetch_add(1); };
+        room.stream_delivery_test_hooks_ = std::move(hooks);
+    }
+    static bool EncryptedHeader(Room& room, const std::string& id) {
+        std::lock_guard lock(room.room_mutex_);
+        if (auto it = room.active_text_readers_.find(id); it != room.active_text_readers_.end())
+            return it->second.encryption_type == EncryptionType::GCM;
+        if (auto it = room.active_byte_readers_.find(id); it != room.active_byte_readers_.end())
+            return it->second.encryption_type == EncryptionType::GCM;
+        return false;
+    }
+};
+} // namespace livekit
+
 namespace {
 
 using namespace std::chrono_literals;
@@ -69,6 +90,7 @@ enum class RuntimeCase {
     SlowConsumer,
     ReaderOverlimit,
     ReaderTtl,
+    E2eeInterop,
 };
 
 struct Config {
@@ -80,6 +102,8 @@ struct Config {
     std::string run_id;
     std::string destination;
     std::string expected_sender;
+    std::string e2ee_mode;
+    std::string e2ee_key_state = "good";
     std::size_t text_bytes = kDefaultTextBytes;
     std::size_t byte_bytes = kDefaultByteBytes;
     std::size_t batch_bytes = kDefaultBatchBytes;
@@ -124,6 +148,7 @@ const char* CaseName(RuntimeCase value) {
     case RuntimeCase::SlowConsumer: return "slow-consumer";
     case RuntimeCase::ReaderOverlimit: return "reader-overlimit";
     case RuntimeCase::ReaderTtl: return "reader-ttl";
+    case RuntimeCase::E2eeInterop: return "e2ee-interop";
     }
     return "unknown";
 }
@@ -182,7 +207,9 @@ void PrintUsage(const char* executable) {
         << "  " << executable << " --role sender|receiver --case CASE --run-id ID [options]\n\n"
         << "CASES:\n"
         << "  baseline | backpressure | soft-resume | full-restart\n"
-        << "  slow-consumer | reader-overlimit | reader-ttl\n\n"
+        << "  slow-consumer | reader-overlimit | reader-ttl | e2ee-interop\n\n"
+        << "E2EE RECEIVER ENV: LIVEKIT_L3_E2EE_MODE=shared|participant\n"
+        << "  LIVEKIT_L3_E2EE_KEY_STATE=good|wrong|missing (public synthetic test key only)\n\n"
         << "COMMON OPTIONS:\n"
         << "  --url URL                    or LIVEKIT_URL\n"
         << "  --token TOKEN                or LIVEKIT_TOKEN (environment preferred)\n"
@@ -228,6 +255,7 @@ std::optional<RuntimeCase> ParseCase(std::string_view value) {
     if (value == "slow-consumer") return RuntimeCase::SlowConsumer;
     if (value == "reader-overlimit") return RuntimeCase::ReaderOverlimit;
     if (value == "reader-ttl") return RuntimeCase::ReaderTtl;
+    if (value == "e2ee-interop") return RuntimeCase::E2eeInterop;
     return std::nullopt;
 }
 
@@ -241,6 +269,8 @@ ParseResult ParseArguments(int argc, char** argv) {
     if (const char* value = std::getenv("LIVEKIT_URL")) config.url = value;
     if (const char* value = std::getenv("LIVEKIT_TOKEN")) config.token = value;
     if (const char* value = std::getenv("LIVEKIT_L3_RUN_ID")) config.run_id = value;
+    if (const char* value = std::getenv("LIVEKIT_L3_E2EE_MODE")) config.e2ee_mode = value;
+    if (const char* value = std::getenv("LIVEKIT_L3_E2EE_KEY_STATE")) config.e2ee_key_state = value;
 
     auto require_value = [&](int& index) -> std::optional<std::string> {
         if (index + 1 >= argc) {
@@ -391,6 +421,16 @@ ParseResult ParseArguments(int argc, char** argv) {
         PrintLine("[CONFIG_ERROR] expected counts cannot be negative");
         return {};
     }
+    if (config.runtime_case == RuntimeCase::E2eeInterop &&
+        (config.role != Role::Receiver ||
+         (config.e2ee_mode != "shared" && config.e2ee_mode != "participant") ||
+         (config.e2ee_key_state != "good" && config.e2ee_key_state != "wrong" &&
+          config.e2ee_key_state != "missing") ||
+         (config.expected_complete != 0 && config.expected_complete != 2) ||
+         config.expected_incomplete != 0)) {
+        PrintLine("[CONFIG_ERROR] e2ee-interop requires receiver, mode, key state and expected count 0 or 2");
+        return {};
+    }
     return {config, kExitPassed};
 }
 
@@ -534,6 +574,33 @@ class RuntimeListener final : public livekit::RoomListener {
 public:
     explicit RuntimeListener(Config config) : config_(std::move(config)) {}
 
+    void ObserveEncryption(const std::shared_ptr<livekit::Room>& room) {
+        observed_room_ = room;
+        livekit::RoomStreamDeliveryTestAccess::ObserveDecrypt(*room, authenticated_);
+    }
+    bool e2ee_done() const { return e2ee_done_.load(); }
+    bool ValidateEncryption() const {
+        const auto complete = static_cast<size_t>(config_.expected_complete);
+        const auto count = authenticated_->load();
+        // The reference C++ sender broadcasts its two trailers. An observer may
+        // authenticate those, but must open no Readers and receive no stream data.
+        // One additional authenticated DONE packet uses the independent control
+        // key slot, including when the stream key is missing or deliberately wrong.
+        const bool authenticated = complete == 2 ? count == 12 :
+            config_.e2ee_key_state == "good" ? count == 3 : count == 1;
+        const bool valid = e2ee_done() && authenticated &&
+            encrypted_headers_.load() == complete && raw_streams_.load() == complete &&
+            raw_events_.load() == complete && unexpected_raw_.load() == 0;
+        PrintLine("[E2EE] authenticated_packets=", count,
+                  " encrypted_headers=", encrypted_headers_.load(),
+                  " raw_streams=", raw_streams_.load(),
+                  " raw_events=", raw_events_.load(),
+                  " unexpected_raw=", unexpected_raw_.load(),
+                  " done=", e2ee_done() ? "true" : "false",
+                  " valid=", valid ? "true" : "false");
+        return valid;
+    }
+
     void OnConnected() override {
         connected_.fetch_add(1, std::memory_order_release);
         PrintLine("[STATE] connected");
@@ -559,6 +626,7 @@ public:
         std::shared_ptr<livekit::TextStreamReader> reader,
         std::shared_ptr<livekit::Participant>) override {
         if (!Matches(reader->info())) return;
+        CheckEncryptedHeader(reader->info().stream_id);
         const auto info = reader->info();
         StartWorker([this, reader = std::move(reader), info]() mutable {
             Sha256Accumulator hash;
@@ -577,6 +645,7 @@ public:
         std::shared_ptr<livekit::ByteStreamReader> reader,
         std::shared_ptr<livekit::Participant>) override {
         if (!Matches(reader->info())) return;
+        CheckEncryptedHeader(reader->info().stream_id);
         const auto info = reader->info();
         if (config_.runtime_case == RuntimeCase::SlowConsumer) {
             opened_.fetch_add(1, std::memory_order_acq_rel);
@@ -631,6 +700,14 @@ public:
         const std::vector<uint8_t>& payload,
         std::shared_ptr<livekit::RemoteParticipant> participant,
         const std::string& topic) override {
+        if (config_.runtime_case == RuntimeCase::E2eeInterop) {
+            if (!participant || participant->identity() != config_.expected_sender) {
+                unexpected_raw_.fetch_add(1);
+                return;
+            }
+            CheckE2eeData(payload, topic, false);
+            return;
+        }
         if (config_.role != Role::Sender || topic != AckTopic(config_) ||
             payload != AckPayload(config_)) {
             return;
@@ -642,6 +719,12 @@ public:
         }
         ack_received_.store(true, std::memory_order_release);
         PrintLine("[ACK] receiver_validation_received=true");
+    }
+
+    void OnParticipantEvent(const livekit::ParticipantEvent& event) override {
+        if (config_.runtime_case == RuntimeCase::E2eeInterop &&
+            event.kind == livekit::ParticipantEventKind::DataReceived)
+            CheckE2eeData(event.data, event.topic, true);
     }
 
     int reconnecting() const noexcept {
@@ -719,6 +802,30 @@ public:
     }
 
 private:
+    void CheckEncryptedHeader(const std::string& id) {
+        if (config_.runtime_case != RuntimeCase::E2eeInterop) return;
+        auto room = observed_room_.lock();
+        if (room && livekit::RoomStreamDeliveryTestAccess::EncryptedHeader(*room, id))
+            encrypted_headers_.fetch_add(1);
+        else worker_failures_.fetch_add(1);
+    }
+    void CheckE2eeData(const std::vector<uint8_t>& payload, const std::string& topic,
+                       bool event) {
+        const std::string done = "e2ee-done-v1\n" + config_.run_id;
+        if (topic == config_.topic + ".done" &&
+            payload == std::vector<uint8_t>(done.begin(), done.end())) {
+            if (!event) e2ee_done_.store(true);
+            return;
+        }
+        const auto text = MakeText(45000, 17);
+        if (topic != config_.topic ||
+            (payload != std::vector<uint8_t>(text.begin(), text.end()) &&
+             payload != MakeBytes(60000, 23))) {
+            unexpected_raw_.fetch_add(1);
+            return;
+        }
+        (event ? raw_events_ : raw_streams_).fetch_add(1);
+    }
     template <typename Info>
     bool Matches(const Info& info) const {
         const auto run = info.attributes.find("l3_run_id");
@@ -753,7 +860,7 @@ private:
         result.close_reason = std::move(close_reason);
         result.actual_bytes = actual_bytes;
         result.actual_sha256 = std::move(actual_hash);
-        result.complete = result.close_reason == "complete";
+        result.complete = result.close_reason.empty();
         result.sender_valid = config_.expected_sender.empty() ||
                               result.sender_identity == config_.expected_sender;
 
@@ -791,6 +898,11 @@ private:
     }
 
     Config config_;
+    std::weak_ptr<livekit::Room> observed_room_;
+    std::shared_ptr<std::atomic<size_t>> authenticated_ =
+        std::make_shared<std::atomic<size_t>>(0);
+    std::atomic<size_t> encrypted_headers_{0}, raw_streams_{0}, raw_events_{0}, unexpected_raw_{0};
+    std::atomic<bool> e2ee_done_{false};
     std::atomic<int> connected_{0};
     std::atomic<int> reconnecting_{0};
     std::atomic<int> reconnected_{0};
@@ -869,7 +981,7 @@ void SendText(const std::shared_ptr<livekit::Room>& room,
         {},
         Destinations(config));
     writer->Write(payload);
-    writer->Close("complete", {{"l3_result", "complete"}});
+    writer->Close("", {{"l3_result", "complete"}});
     PrintLine("[SEND] kind=text sequence=", sequence,
               " bytes=", payload.size(), " sha256=", hash);
 }
@@ -890,7 +1002,7 @@ void SendBytes(const std::shared_ptr<livekit::Room>& room,
         "application/octet-stream",
         Destinations(config));
     writer->Write(payload);
-    writer->Close("complete", {{"l3_result", "complete"}});
+    writer->Close("", {{"l3_result", "complete"}});
     PrintLine("[SEND] kind=byte sequence=", sequence,
               " bytes=", payload.size(), " sha256=", hash);
 }
@@ -976,7 +1088,7 @@ asio::awaitable<int> RunBackpressure(
                           " buffered_amount=", room->GetDataChannelBufferedAmount(true));
             }
         }
-        writer->Close("complete", {{"l3_result", "complete"}});
+        writer->Close("", {{"l3_result", "complete"}});
     } catch (const livekit::OperationError& error) {
         failure = Fingerprint(error);
         PrintLine("[SEND_ERROR] operation=", OperationName(error.operation()),
@@ -1088,7 +1200,7 @@ asio::awaitable<int> RunSoftResume(
     }
 
     survivor->Write(payload);
-    survivor->Close("complete", {{"l3_result", "complete"}});
+    survivor->Close("", {{"l3_result", "complete"}});
     PrintLine("[SEND] kind=text sequence=soft-survivor bytes=",
               payload.size(), " sha256=", hash);
     co_return kExitPassed;
@@ -1169,7 +1281,7 @@ asio::awaitable<int> RunReaderBudgetTransfer(
         offset += batch.size();
         co_await DelayFor(room->executor(), 20ms);
     }
-    writer->Close("complete", {{"l3_result", "complete"}});
+    writer->Close("", {{"l3_result", "complete"}});
     PrintLine("[SEND] kind=byte sequence=", sequence,
               " bytes=", kReaderOverLimitBytes,
               " sha256=", expected_hash);
@@ -1256,6 +1368,8 @@ asio::awaitable<int> RunSender(
     case RuntimeCase::ReaderTtl:
         result = co_await RunReaderTtl(room, config);
         break;
+    case RuntimeCase::E2eeInterop:
+        throw RuntimeFailure("e2ee_requires_official_sender");
     }
     if (result != kExitPassed) co_return result;
 
@@ -1350,7 +1464,8 @@ int ValidateReceiver(const RuntimeListener& listener, const Config& config) {
     if (summary.opened != expected_total || summary.finished != expected_total ||
         summary.complete != static_cast<std::size_t>(config.expected_complete) ||
         summary.incomplete != static_cast<std::size_t>(config.expected_incomplete) ||
-        summary.invalid != 0 || !ValidateReaderFailure(listener, config)) {
+        summary.invalid != 0 || !ValidateReaderFailure(listener, config) ||
+        (config.runtime_case == RuntimeCase::E2eeInterop && !listener.ValidateEncryption())) {
         return kExitFailed;
     }
     return kExitPassed;
@@ -1381,7 +1496,8 @@ asio::awaitable<int> RunReceiver(
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(config.timeout_seconds);
     const bool ready = co_await WaitUntil(room->executor(), deadline, [&] {
-        return ReceiverReady(listener->Summary(), config);
+        return ReceiverReady(listener->Summary(), config) &&
+            (config.runtime_case != RuntimeCase::E2eeInterop || listener->e2ee_done());
     });
     if (!ready) {
         PrintLine("[RESULT_DETAIL] receiver_timeout=true");
@@ -1406,6 +1522,8 @@ asio::awaitable<int> RunReceiver(
         }
     }
     const auto summary = listener->Summary();
+    if (config.runtime_case == RuntimeCase::E2eeInterop && !listener->ValidateEncryption())
+        co_return kExitFailed;
     if (!ReceiverCanAcknowledge(summary, config) ||
         !ValidateReaderFailure(*listener, config)) {
         PrintLine("[RESULT_DETAIL] receiver_ack_validation_failed=true");
@@ -1431,6 +1549,22 @@ asio::awaitable<int> RunHarness(Config config,
     int result = kExitFailed;
 
     try {
+        if (config.runtime_case == RuntimeCase::E2eeInterop) {
+            livekit::KeyProviderOptions key_options;
+            key_options.shared_key = config.e2ee_mode == "shared";
+            auto provider = std::make_shared<livekit::KeyProvider>(key_options);
+            std::vector<uint8_t> material(32, 0x42); // Public synthetic fixture; not a credential.
+            if (config.e2ee_key_state == "wrong") material.front() ^= 1;
+            if (config.e2ee_key_state != "missing") {
+                if (key_options.shared_key) provider->SetSharedKey(material, 3);
+                else provider->SetKey(config.expected_sender, 3, material);
+            }
+            const std::vector<uint8_t> control_material(32, 0x43);
+            if (key_options.shared_key) provider->SetSharedKey(control_material, 4);
+            else provider->SetKey(config.expected_sender, 4, control_material);
+            room->EnableE2ee({livekit::EncryptionType::GCM, provider});
+            listener->ObserveEncryption(room);
+        }
         livekit::SignalOptions options;
         options.auto_subscribe = true;
         options.single_peer_connection = true;
