@@ -18,6 +18,7 @@ enum class ErrorCode {
     RedirectRejected = -5,
     TokenExpired = 100010,
     TokenInvalid = 100002,
+    TokenNotFound = 100004,
     UnknownError = -999
 };
 
@@ -28,7 +29,8 @@ struct HttpError {
 
     bool isTokenExpired() const {
         return code == static_cast<int>(ErrorCode::TokenExpired) ||
-               code == static_cast<int>(ErrorCode::TokenInvalid);
+               code == static_cast<int>(ErrorCode::TokenInvalid) ||
+               code == static_cast<int>(ErrorCode::TokenNotFound);
     }
 };
 

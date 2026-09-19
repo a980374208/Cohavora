@@ -3508,7 +3508,9 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::errorOccurred,
 	        this, [this](const QString &title, const QString &message) {
-		if (!_coordinator || _coordinator->state() != OpenMeeting::MeetingState::Failed) {
+		if (_closingForSessionInvalidation ||
+			OpenMeeting::SessionManager::instance().isSessionInvalidating() ||
+			!_coordinator || _coordinator->state() != OpenMeeting::MeetingState::Failed) {
 			return;
 		}
 		invalidateCameraCompletion();

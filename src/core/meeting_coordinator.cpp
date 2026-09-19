@@ -982,7 +982,8 @@ bool MeetingCoordinator::canBeginAdmission() const {
 
 bool MeetingCoordinator::isAdmissionCurrent(uint64_t generation,
                                             AdmissionStage stage) const {
-    return !_sessionInvalidated && _admissionGeneration == generation &&
+    return !_sessionInvalidated && !_sessionManager.isSessionInvalidating() &&
+           _admissionGeneration == generation &&
            _admissionStage == stage;
 }
 
@@ -997,7 +998,7 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
                                          const QString &password,
                                          const QString &displayName,
                                          const MediaPreferences &prefs) {
-    if (_sessionInvalidated) {
+    if (_sessionInvalidated || _sessionManager.isSessionInvalidating()) {
         qInfo() << "[Coordinator] Ignore join request after session invalidation.";
         return;
     }
@@ -1093,7 +1094,7 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
 void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
                                                        int durationSeconds,
                                                        const MediaPreferences &prefs) {
-    if (_sessionInvalidated) {
+    if (_sessionInvalidated || _sessionManager.isSessionInvalidating()) {
         qInfo() << "[Coordinator] Ignore quick-meeting request after session invalidation.";
         return;
     }
@@ -1176,7 +1177,7 @@ void MeetingCoordinator::connectDirectlyAsync(const QString &url,
                                              const QString &displayName,
                                              const MediaPreferences &prefs) {
     invalidateAdmission();
-    if (_sessionInvalidated) {
+    if (_sessionInvalidated || _sessionManager.isSessionInvalidating()) {
         qInfo() << "[Coordinator] Ignore direct-connect request after session invalidation.";
         return;
     }
