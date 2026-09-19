@@ -96,6 +96,8 @@ struct ParticipantInfo {
 struct RemoteVideoTrackPresentation {
     livekit::TrackKey key;
     livekit::TrackTicket ticket;
+    livekit::MediaBindingKey mediaBindingKey;
+    livekit::MediaBindingTicket mediaBindingTicket;
     std::shared_ptr<livekit::Track> track;
 };
 

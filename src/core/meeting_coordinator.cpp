@@ -750,7 +750,9 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
         if (participantTracks == _remoteVideoTracks.end()) return;
         const auto track = participantTracks->second.find(trackSid);
         if (track == participantTracks->second.end() ||
-            track->second.key != event.track_key) {
+            track->second.key != event.track_key ||
+            (event.media_binding_key.serial != 0 &&
+             track->second.mediaBindingKey != event.media_binding_key)) {
             return;
         }
         participantTracks->second.erase(track);
@@ -851,6 +853,8 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
         if (!participantStillCurrent() ||
             !livekit::IsTrackTicketActive(
                 event.track_ticket, event.track_key) ||
+            !livekit::IsMediaBindingTicketActive(
+                event.media_binding_ticket, event.media_binding_key) ||
             event.publication.kind != livekit::TrackKind::Video ||
             !event.publication.track) {
             return;
@@ -862,12 +866,17 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
             const auto existing = participantTracks->second.find(trackSid);
             if (existing != participantTracks->second.end() &&
                 existing->second.key == event.track_key &&
+                existing->second.mediaBindingKey == event.media_binding_key &&
                 existing->second.track == event.publication.track) {
                 return;
             }
         }
         _remoteVideoTracks[identity][trackSid] = {
-            event.track_key, event.track_ticket, event.publication.track};
+            event.track_key,
+            event.track_ticket,
+            event.media_binding_key,
+            event.media_binding_ticket,
+            event.publication.track};
         emit remoteVideoTrackAvailable(identity, event.publication.track);
     }
 }
@@ -2125,11 +2134,14 @@ bool MeetingCoordinator::isParticipantPresentationCurrent(
         current->second.lastEventSequence != info.lastEventSequence) return false;
     if (!track) return true;
     if (!track->track || track->key.participant != info.participantKey ||
-        !livekit::IsTrackTicketActive(track->ticket, track->key)) return false;
+        !livekit::IsTrackTicketActive(track->ticket, track->key) ||
+        !livekit::IsMediaBindingTicketActive(
+            track->mediaBindingTicket, track->mediaBindingKey)) return false;
     const auto tracks = _remoteVideoTracks.find(info.identity);
     if (tracks == _remoteVideoTracks.end()) return false;
     const auto currentTrack = tracks->second.find(QString::fromStdString(track->key.publication_sid));
     return currentTrack != tracks->second.end() && currentTrack->second.key == track->key &&
+        currentTrack->second.mediaBindingKey == track->mediaBindingKey &&
         currentTrack->second.track == track->track;
 }
 
