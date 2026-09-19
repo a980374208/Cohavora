@@ -1,4 +1,5 @@
 #include "data_stream.h"
+#include "operation.h"
 
 #include <chrono>
 #include <cstdio>
@@ -231,6 +232,7 @@ BaseStreamWriter::BaseStreamWriter(StreamPacketPublisher publisher,
 }
 
 BaseStreamWriter::~BaseStreamWriter() noexcept {
+    if (state_.load(std::memory_order_acquire) != State::Open) return;
     try {
         Close();
     } catch (const std::exception&) {
@@ -244,15 +246,51 @@ BaseStreamWriter::~BaseStreamWriter() noexcept {
     }
 }
 
+void BaseStreamWriter::EnsureOpenOrRethrowLocked() {
+    if (state_.load(std::memory_order_relaxed) != State::Failed) return;
+    std::rethrow_exception(first_failure_);
+}
+
+[[noreturn]] void BaseStreamWriter::FailLocked(std::exception_ptr error) {
+    if (state_.load(std::memory_order_relaxed) != State::Failed) {
+        first_failure_ = std::move(error);
+        state_.store(State::Failed, std::memory_order_release);
+    }
+    std::rethrow_exception(first_failure_);
+}
+
+void BaseStreamWriter::PublishPacket(const proto::DataPacket& packet,
+                                     const char* stage) {
+    if (!publisher_) {
+        FailLocked(std::make_exception_ptr(OperationError(
+            OperationKind::SendData,
+            OperationErrorCode::DataChannelUnavailable,
+            stage,
+            "stream publisher is unavailable")));
+    }
+
+    bool accepted = false;
+    try {
+        accepted = publisher_(packet, true);
+    } catch (...) {
+        FailLocked(std::current_exception());
+    }
+    if (!accepted) {
+        FailLocked(std::make_exception_ptr(OperationError(
+            OperationKind::SendData,
+            OperationErrorCode::DataChannelRejected,
+            stage,
+            "stream packet was rejected")));
+    }
+}
+
 void BaseStreamWriter::EnsureHeaderSent() {
     if (header_sent_) return;
 
     proto::DataPacket packet;
     *packet.mutable_stream_header() = header_;
 
-    if (publisher_) {
-        publisher_(packet, true);
-    }
+    PublishPacket(packet, "header");
     header_sent_ = true;
 }
 
@@ -262,14 +300,13 @@ void BaseStreamWriter::SendChunk(const uint8_t* data, size_t size) {
     proto::DataPacket packet;
     auto* chunk = packet.mutable_stream_chunk();
     chunk->set_stream_id(stream_id_);
-    chunk->set_chunk_index(next_chunk_index_++);
+    chunk->set_chunk_index(next_chunk_index_);
     if (data && size > 0) {
         chunk->set_content(data, size);
     }
 
-    if (publisher_) {
-        publisher_(packet, true);
-    }
+    PublishPacket(packet, "chunk");
+    ++next_chunk_index_;
 }
 
 void BaseStreamWriter::SendTrailer(const std::string& reason, const std::map<std::string, std::string>& attributes) {
@@ -285,16 +322,15 @@ void BaseStreamWriter::SendTrailer(const std::string& reason, const std::map<std
         (*trailer->mutable_attributes())[k] = v;
     }
 
-    if (publisher_) {
-        publisher_(packet, true);
-    }
+    PublishPacket(packet, "trailer");
 }
 
 void BaseStreamWriter::Close(const std::string& reason, const std::map<std::string, std::string>& attributes) {
     std::lock_guard lock(write_mutex_);
-    if (closed_) return;
-    closed_ = true;
+    EnsureOpenOrRethrowLocked();
+    if (state_.load(std::memory_order_relaxed) == State::Closed) return;
     SendTrailer(reason, attributes);
+    state_.store(State::Closed, std::memory_order_release);
 }
 
 void BaseStreamWriter::Cancel(const std::string& reason) {
@@ -329,7 +365,8 @@ TextStreamWriter::TextStreamWriter(StreamPacketPublisher publisher,
 
 void TextStreamWriter::Write(const std::string& text) {
     std::lock_guard lock(write_mutex_);
-    if (closed_ || text.empty()) return;
+    EnsureOpenOrRethrowLocked();
+    if (state_.load(std::memory_order_relaxed) == State::Closed || text.empty()) return;
 
     size_t offset = 0;
     const size_t len = text.size();
@@ -373,7 +410,8 @@ void ByteStreamWriter::Write(const std::vector<uint8_t>& data) {
 
 void ByteStreamWriter::Write(const uint8_t* data, size_t size) {
     std::lock_guard lock(write_mutex_);
-    if (closed_ || !data || size == 0) return;
+    EnsureOpenOrRethrowLocked();
+    if (state_.load(std::memory_order_relaxed) == State::Closed || !data || size == 0) return;
 
     size_t offset = 0;
     while (offset < size) {
