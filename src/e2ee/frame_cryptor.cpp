@@ -1,4 +1,6 @@
 #include "frame_cryptor.h"
+#include "api/crypto/frame_crypto_transformer.h"
+#include <algorithm>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <iostream>
@@ -168,8 +170,84 @@ bool FrameCryptor::DecryptFrame(const std::vector<uint8_t>& encrypted_payload, s
     }
 }
 
+struct DataPacketCryptor::PacketBackend {
+    std::mutex mutex;
+    // One cached key context: bounded even with arbitrarily many sender IDs.
+    std::string identity;
+    uint32_t index = 0;
+    std::vector<uint8_t> material;
+    webrtc::scoped_refptr<webrtc::KeyProvider> provider;
+    webrtc::scoped_refptr<webrtc::DataPacketCryptor> cryptor;
+};
+
 DataPacketCryptor::DataPacketCryptor(std::shared_ptr<KeyProvider> key_provider)
-    : key_provider_(key_provider) {}
+    : packet_backend_(std::make_shared<PacketBackend>()),
+      key_provider_(std::move(key_provider)) {}
+
+std::variant<AuthenticatedDataPayload, PacketCryptoError>
+DataPacketCryptor::DecryptPacket(std::string_view sender_identity,
+                               const EncryptedDataPacket& packet) {
+    if (packet.encryption_type != EncryptionType::GCM)
+        return PacketCryptoError::UnsupportedType;
+    if (packet.iv.size() > kMaxEncryptedPacketBytes ||
+        packet.ciphertext.size() > kMaxEncryptedPacketBytes - packet.iv.size())
+        return PacketCryptoError::SizeLimitExceeded;
+    if (sender_identity.empty() || packet.iv.size() != 12 ||
+        packet.ciphertext.size() < 16)
+        return PacketCryptoError::InvalidEnvelope;
+    if (!key_provider_) return PacketCryptoError::MissingKey;
+
+    try {
+        const auto options = key_provider_->options();
+        const auto ring_size = options.key_ring_size <= 0 ? 16 :
+            std::min(options.key_ring_size, 255);
+        // Check before narrowing: the native key ring indexes without bounds checks.
+        if (packet.key_index >= static_cast<uint32_t>(ring_size))
+            return PacketCryptoError::InvalidEnvelope;
+        std::lock_guard lock(packet_backend_->mutex);
+        const std::string identity(sender_identity);
+        // Get*Key takes the provider lock and returns one consistent material snapshot.
+        auto material = options.shared_key
+            ? key_provider_->GetSharedKey(static_cast<int>(packet.key_index))
+            : key_provider_->GetKey(identity, static_cast<int>(packet.key_index));
+        if (material.empty()) return PacketCryptoError::MissingKey;
+        auto& backend = *packet_backend_;
+        if (!backend.cryptor || backend.identity != identity ||
+            backend.index != packet.key_index || backend.material != material) {
+            webrtc::KeyProviderOptions native_options;
+            native_options.shared_key = options.shared_key;
+            native_options.key_ring_size = ring_size;
+            native_options.ratchet_salt.assign(
+                options.ratchet_salt.begin(), options.ratchet_salt.end());
+            native_options.key_derivation_algorithm =
+                options.key_derivation_algorithm == KeyDerivationAlgorithm::HKDF
+                    ? webrtc::kHKDF : webrtc::kPBKDF2;
+            // Packet reception uses explicitly installed slots. Do not silently
+            // adopt the frame backend's different automatic ratchet semantics.
+            native_options.ratchet_window_size = 0;
+            auto provider = webrtc::make_ref_counted<webrtc::DefaultKeyProviderImpl>(native_options);
+            const bool installed = options.shared_key
+                ? provider->SetSharedKey(static_cast<int>(packet.key_index), material)
+                : provider->SetKey(identity, static_cast<int>(packet.key_index), material);
+            if (!installed) return PacketCryptoError::BackendFailure;
+            auto cryptor = webrtc::make_ref_counted<webrtc::DataPacketCryptor>(
+                webrtc::FrameCryptorTransformer::Algorithm::kAesGcm, provider);
+            backend.cryptor = std::move(cryptor);
+            backend.provider = std::move(provider);
+            backend.identity = identity;
+            backend.index = packet.key_index;
+            backend.material = std::move(material);
+        }
+        auto envelope = webrtc::make_ref_counted<webrtc::EncryptedPacket>(
+            packet.ciphertext, packet.iv, static_cast<uint8_t>(packet.key_index));
+        auto result = backend.cryptor->Decrypt(identity, envelope);
+        if (!result.ok()) return PacketCryptoError::AuthenticationFailed;
+        return AuthenticatedDataPayload{EncryptionType::GCM, std::move(result.value())};
+    } catch (...) {
+        // Never expose backend exceptions, key material or unauthenticated bytes.
+        return PacketCryptoError::BackendFailure;
+    }
+}
 
 bool DataPacketCryptor::EncryptData(const std::vector<uint8_t>& plain_data, std::vector<uint8_t>& encrypted_data) {
     FrameCryptor cryptor("global", "data_packet", key_provider_);

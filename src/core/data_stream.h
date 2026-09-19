@@ -74,6 +74,8 @@ inline constexpr char kDataStreamExpired[] =
     "data stream expired";
 inline constexpr char kDataStreamReplaced[] =
     "data stream replaced";
+inline constexpr char kDataStreamEncryptionTypeMismatch[] =
+    "data stream encryption type mismatch";
 
 /// Shared accounting for Reader-owned inbound memory. A Room owns one budget
 /// per native session; retained Readers keep that session's accounting alive.
