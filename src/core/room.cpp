@@ -2088,6 +2088,75 @@ void Room::OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliabl
     }
 }
 
+void Room::RetireIncomingReaderLocked(const std::string& stream_id,
+                                      const std::string& reason) {
+    if (auto it = active_text_readers_.find(stream_id);
+        it != active_text_readers_.end()) {
+        it->second->OnStreamError(reason);
+        active_text_readers_.erase(it);
+    }
+    if (auto it = active_byte_readers_.find(stream_id);
+        it != active_byte_readers_.end()) {
+        it->second->OnStreamError(reason);
+        active_byte_readers_.erase(it);
+    }
+    incoming_stream_deadlines_.erase(stream_id);
+}
+
+size_t Room::PurgeIncomingStreamsLocked(
+    IncomingDataStreamAssembler::TimePoint now,
+    uint64_t generation) {
+    if (!IsNativeGenerationCurrentLocked(generation)) return 0;
+
+    std::vector<std::string> expired;
+    for (const auto& [stream_id, deadline] : incoming_stream_deadlines_) {
+        if (now >= deadline) expired.push_back(stream_id);
+    }
+    for (const auto& stream_id : expired) {
+        RetireIncomingReaderLocked(stream_id, kDataStreamExpired);
+        incoming_data_streams_->Discard(stream_id);
+    }
+    return expired.size();
+}
+
+void Room::ScheduleIncomingStreamCleanupLocked(uint64_t generation) {
+    if (incoming_stream_deadlines_.empty()) {
+        if (incoming_stream_cleanup_timer_) {
+            std::error_code ignored;
+            incoming_stream_cleanup_timer_->cancel(ignored);
+            incoming_stream_cleanup_timer_.reset();
+        }
+        return;
+    }
+
+    const auto next = std::min_element(
+        incoming_stream_deadlines_.begin(),
+        incoming_stream_deadlines_.end(),
+        [](const auto& lhs, const auto& rhs) {
+            return lhs.second < rhs.second;
+        });
+    if (!incoming_stream_cleanup_timer_) {
+        incoming_stream_cleanup_timer_ =
+            std::make_shared<asio::steady_timer>(executor_);
+    }
+    auto timer = incoming_stream_cleanup_timer_;
+    timer->expires_at(next->second);
+    timer->async_wait(
+        [weak = weak_from_this(), timer, generation](const std::error_code& ec) {
+            if (ec) return;
+            if (auto room = weak.lock()) {
+                std::lock_guard lock(room->room_mutex_);
+                if (!room->IsNativeGenerationCurrentLocked(generation) ||
+                    room->incoming_stream_cleanup_timer_ != timer) {
+                    return;
+                }
+                room->PurgeIncomingStreamsLocked(
+                    IncomingDataStreamAssembler::Clock::now(), generation);
+                room->ScheduleIncomingStreamCleanupLocked(generation);
+            }
+        });
+}
+
 void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& participant_sid, const std::string& topic) {
     OnIncomingDataPacket(payload, participant_sid, topic, session_generation_.load(std::memory_order_acquire));
 }
@@ -2112,27 +2181,13 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
 
         if (data_pkt.has_stream_header()) {
             const auto& header = data_pkt.stream_header();
-            {
-                std::lock_guard lock(room_mutex_);
-                if (!IsNativeGenerationCurrentLocked(generation)) return;
-                incoming_data_streams_->Begin(
-                    header.stream_id(),
-                    header.topic(),
-                    header.total_length(),
-                    sender_identity,
-                    real_sender_sid);
-            }
-
-            // 构造并派发上层流式 Reader
             std::shared_ptr<Participant> p;
             SenderContext sender;
-            {
-                std::lock_guard lock(room_mutex_);
-                if (!IsNativeGenerationCurrentLocked(generation)) return;
-                sender = ResolveSenderContextLocked(
-                    real_sender_sid, sender_identity, &p);
-            }
-            auto listeners_snapshot = GetListenersSnapshot();
+            std::shared_ptr<TextStreamReader> text_reader;
+            std::shared_ptr<ByteStreamReader> byte_reader;
+            std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+            const auto now = IncomingDataStreamAssembler::Clock::now();
+            bool invalid_declared_length = false;
 
             if (header.has_text_header()) {
                 TextStreamInfo info;
@@ -2140,7 +2195,15 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                 info.topic = header.topic();
                 info.mime_type = header.mime_type();
                 info.timestamp = header.timestamp();
-                if (header.has_total_length()) info.total_length = header.total_length();
+                if (header.has_total_length()) {
+                    if (header.total_length() <=
+                        std::numeric_limits<size_t>::max()) {
+                        info.total_length =
+                            static_cast<size_t>(header.total_length());
+                    } else {
+                        invalid_declared_length = true;
+                    }
+                }
                 for (const auto& [k, v] : header.attributes()) {
                     info.attributes[k] = v;
                 }
@@ -2155,11 +2218,36 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                 }
                 info.generated = th.generated();
 
-                auto reader = std::make_shared<TextStreamReader>(std::move(info));
                 {
                     std::lock_guard lk(room_mutex_);
                     if (!IsNativeGenerationCurrentLocked(generation)) return;
-                    active_text_readers_[header.stream_id()] = reader;
+                    sender = ResolveSenderContextLocked(
+                        real_sender_sid, sender_identity, &p);
+                    RetireIncomingReaderLocked(
+                        header.stream_id(), kDataStreamReplaced);
+                    incoming_data_streams_->Discard(header.stream_id());
+                    if (header.has_total_length()) {
+                        incoming_data_streams_->Begin(
+                            header.stream_id(), header.topic(),
+                            header.total_length(), sender_identity,
+                            real_sender_sid, now);
+                    }
+                    text_reader = std::make_shared<TextStreamReader>(
+                        std::move(info), incoming_reader_budget_);
+                    if (invalid_declared_length) {
+                        text_reader->OnStreamError(
+                            kDataStreamDeclaredLengthExceeded);
+                    }
+                    if (text_reader->admitted() &&
+                        !text_reader->is_closed()) {
+                        active_text_readers_[header.stream_id()] = text_reader;
+                        incoming_stream_deadlines_[header.stream_id()] =
+                            now + incoming_reader_budget_->limits()
+                                      .stream_ttl;
+                        ScheduleIncomingStreamCleanupLocked(generation);
+                    } else {
+                        incoming_data_streams_->Discard(header.stream_id());
+                    }
                     ParticipantEvent event = p
                         ? MakeParticipantEventLocked(
                             ParticipantEventKind::TextStreamOpened,
@@ -2168,12 +2256,13 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                         : ParticipantEvent{};
                     event.kind = ParticipantEventKind::TextStreamOpened;
                     event.sender = sender;
-                    event.text_reader = reader;
+                    event.text_reader = text_reader;
                     EnqueueParticipantEventLocked(std::move(event));
+                    listeners_snapshot = listeners_;
                 }
                 for (const auto& listener : listeners_snapshot) {
                     DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
-                        target.OnTextStreamOpened(reader, p);
+                        target.OnTextStreamOpened(text_reader, p);
                     }, true);
                 }
             } else {
@@ -2182,7 +2271,15 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                 info.topic = header.topic();
                 info.mime_type = header.mime_type();
                 info.timestamp = header.timestamp();
-                if (header.has_total_length()) info.total_length = header.total_length();
+                if (header.has_total_length()) {
+                    if (header.total_length() <=
+                        std::numeric_limits<size_t>::max()) {
+                        info.total_length =
+                            static_cast<size_t>(header.total_length());
+                    } else {
+                        invalid_declared_length = true;
+                    }
+                }
                 for (const auto& [k, v] : header.attributes()) {
                     info.attributes[k] = v;
                 }
@@ -2192,11 +2289,36 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                     info.name = header.byte_header().name();
                 }
 
-                auto reader = std::make_shared<ByteStreamReader>(std::move(info));
                 {
                     std::lock_guard lk(room_mutex_);
                     if (!IsNativeGenerationCurrentLocked(generation)) return;
-                    active_byte_readers_[header.stream_id()] = reader;
+                    sender = ResolveSenderContextLocked(
+                        real_sender_sid, sender_identity, &p);
+                    RetireIncomingReaderLocked(
+                        header.stream_id(), kDataStreamReplaced);
+                    incoming_data_streams_->Discard(header.stream_id());
+                    if (header.has_total_length()) {
+                        incoming_data_streams_->Begin(
+                            header.stream_id(), header.topic(),
+                            header.total_length(), sender_identity,
+                            real_sender_sid, now);
+                    }
+                    byte_reader = std::make_shared<ByteStreamReader>(
+                        std::move(info), incoming_reader_budget_);
+                    if (invalid_declared_length) {
+                        byte_reader->OnStreamError(
+                            kDataStreamDeclaredLengthExceeded);
+                    }
+                    if (byte_reader->admitted() &&
+                        !byte_reader->is_closed()) {
+                        active_byte_readers_[header.stream_id()] = byte_reader;
+                        incoming_stream_deadlines_[header.stream_id()] =
+                            now + incoming_reader_budget_->limits()
+                                      .stream_ttl;
+                        ScheduleIncomingStreamCleanupLocked(generation);
+                    } else {
+                        incoming_data_streams_->Discard(header.stream_id());
+                    }
                     ParticipantEvent event = p
                         ? MakeParticipantEventLocked(
                             ParticipantEventKind::ByteStreamOpened,
@@ -2205,12 +2327,13 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                         : ParticipantEvent{};
                     event.kind = ParticipantEventKind::ByteStreamOpened;
                     event.sender = sender;
-                    event.byte_reader = reader;
+                    event.byte_reader = byte_reader;
                     EnqueueParticipantEventLocked(std::move(event));
+                    listeners_snapshot = listeners_;
                 }
                 for (const auto& listener : listeners_snapshot) {
                     DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
-                        target.OnByteStreamOpened(reader, p);
+                        target.OnByteStreamOpened(byte_reader, p);
                     }, true);
                 }
             }
@@ -2220,22 +2343,50 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
             const auto& content = chunk.content();
 
             std::optional<AssembledDataStream> assembled;
-            // Reader updates and assembler commits share the generation boundary.
+            const auto now = IncomingDataStreamAssembler::Clock::now();
             {
                 std::lock_guard lk(room_mutex_);
                 if (!IsNativeGenerationCurrentLocked(generation)) return;
-                if (auto it = active_text_readers_.find(chunk.stream_id()); it != active_text_readers_.end()) {
-                    it->second->OnChunkUpdate(content);
-                }
-                if (auto it = active_byte_readers_.find(chunk.stream_id()); it != active_byte_readers_.end()) {
-                    it->second->OnChunkUpdate(reinterpret_cast<const uint8_t*>(content.data()), content.size());
-                }
+                const bool assembler_was_active =
+                    incoming_data_streams_->Contains(chunk.stream_id());
                 assembled = incoming_data_streams_->AddChunk(
                     chunk.stream_id(),
                     chunk.chunk_index(),
                     std::span<const uint8_t>(
                         reinterpret_cast<const uint8_t*>(content.data()),
-                        content.size()));
+                        content.size()),
+                    now);
+                const bool assembler_rejected =
+                    assembler_was_active && !assembled &&
+                    !incoming_data_streams_->Contains(chunk.stream_id());
+                if (assembler_rejected) {
+                    RetireIncomingReaderLocked(
+                        chunk.stream_id(), kDataStreamAssemblyRejected);
+                    ScheduleIncomingStreamCleanupLocked(generation);
+                    return;
+                }
+
+                bool reader_terminated = false;
+                if (auto it = active_text_readers_.find(chunk.stream_id()); it != active_text_readers_.end()) {
+                    if (!it->second->TryOnChunkUpdate(content) &&
+                        it->second->is_closed()) {
+                        reader_terminated = true;
+                    }
+                }
+                if (auto it = active_byte_readers_.find(chunk.stream_id()); it != active_byte_readers_.end()) {
+                    if (!it->second->TryOnChunkUpdate(
+                            reinterpret_cast<const uint8_t*>(content.data()),
+                            content.size()) && it->second->is_closed()) {
+                        reader_terminated = true;
+                    }
+                }
+                if (reader_terminated) {
+                    RetireIncomingReaderLocked(
+                        chunk.stream_id(), kDataStreamBufferLimitExceeded);
+                    incoming_data_streams_->Discard(chunk.stream_id());
+                    ScheduleIncomingStreamCleanupLocked(generation);
+                    return;
+                }
             }
             if (!assembled) {
                 return;
@@ -2252,15 +2403,30 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                 std::lock_guard lk(room_mutex_);
                 if (!IsNativeGenerationCurrentLocked(generation)) return;
                 std::map<std::string, std::string> attrs(trailer.attributes().begin(), trailer.attributes().end());
+                const bool assembler_was_active =
+                    incoming_data_streams_->Contains(trailer.stream_id());
+                assembled = incoming_data_streams_->Finish(trailer.stream_id());
+                const bool incomplete_normal_stream =
+                    trailer.reason().empty() && assembler_was_active &&
+                    !assembled;
                 if (auto it = active_text_readers_.find(trailer.stream_id()); it != active_text_readers_.end()) {
-                    it->second->OnStreamClose(trailer.reason(), attrs);
+                    if (incomplete_normal_stream) {
+                        it->second->OnStreamError(kDataStreamAssemblyRejected);
+                    } else {
+                        it->second->OnStreamClose(trailer.reason(), attrs);
+                    }
                     active_text_readers_.erase(it);
                 }
                 if (auto it = active_byte_readers_.find(trailer.stream_id()); it != active_byte_readers_.end()) {
-                    it->second->OnStreamClose(trailer.reason(), attrs);
+                    if (incomplete_normal_stream) {
+                        it->second->OnStreamError(kDataStreamAssemblyRejected);
+                    } else {
+                        it->second->OnStreamClose(trailer.reason(), attrs);
+                    }
                     active_byte_readers_.erase(it);
                 }
-                assembled = incoming_data_streams_->Finish(trailer.stream_id());
+                incoming_stream_deadlines_.erase(trailer.stream_id());
+                ScheduleIncomingStreamCleanupLocked(generation);
             }
             if (!assembled) {
                 return;
@@ -2587,7 +2753,14 @@ Room::PendingOperationCleanup Room::TakePendingOperationsLocked() {
     for (auto& [id, reader] : active_byte_readers_) reader->OnStreamClose("session closed", {});
     active_text_readers_.clear();
     active_byte_readers_.clear();
+    incoming_stream_deadlines_.clear();
+    if (incoming_stream_cleanup_timer_) {
+        std::error_code ignored;
+        incoming_stream_cleanup_timer_->cancel(ignored);
+        incoming_stream_cleanup_timer_.reset();
+    }
     incoming_data_streams_ = std::make_unique<IncomingDataStreamAssembler>();
+    incoming_reader_budget_ = std::make_shared<DataStreamReaderBudget>();
     PendingOperationCleanup pending;
     for (const auto& waiter : pending_pc_waits_) {
         pending.void_states.push_back(waiter.completion);

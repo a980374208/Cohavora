@@ -1,10 +1,13 @@
 #include "data_stream.h"
 #include "operation.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <exception>
+#include <limits>
 #include <random>
+#include <stdexcept>
 #include <sstream>
 #include <iomanip>
 
@@ -48,15 +51,83 @@ proto::DataStream::Header MakeByteContentHeader(const std::string& name) {
 } // namespace
 
 // =========================================================================
+// Reader Budget Implementation
+// =========================================================================
+
+DataStreamReaderBudget::DataStreamReaderBudget()
+    : DataStreamReaderBudget(Limits{}) {}
+
+DataStreamReaderBudget::DataStreamReaderBudget(Limits limits)
+    : limits_(limits) {}
+
+bool DataStreamReaderBudget::TryAcquireReader() {
+    std::lock_guard lock(mutex_);
+    if (active_readers_ >= limits_.max_active_readers) return false;
+    ++active_readers_;
+    return true;
+}
+
+void DataStreamReaderBudget::ReleaseReader() {
+    std::lock_guard lock(mutex_);
+    if (active_readers_ > 0) --active_readers_;
+}
+
+bool DataStreamReaderBudget::TryReserveBuffered(size_t bytes) {
+    std::lock_guard lock(mutex_);
+    if (bytes > limits_.max_buffered_bytes -
+                    std::min(buffered_bytes_, limits_.max_buffered_bytes)) {
+        return false;
+    }
+    buffered_bytes_ += bytes;
+    return true;
+}
+
+void DataStreamReaderBudget::ReleaseBuffered(size_t bytes) {
+    std::lock_guard lock(mutex_);
+    buffered_bytes_ = bytes <= buffered_bytes_ ? buffered_bytes_ - bytes : 0;
+}
+
+size_t DataStreamReaderBudget::active_readers() const {
+    std::lock_guard lock(mutex_);
+    return active_readers_;
+}
+
+size_t DataStreamReaderBudget::buffered_bytes() const {
+    std::lock_guard lock(mutex_);
+    return buffered_bytes_;
+}
+
+// =========================================================================
 // TextStreamReader Implementation
 // =========================================================================
 
 TextStreamReader::TextStreamReader(TextStreamInfo info)
-    : info_(std::move(info)) {}
+    : TextStreamReader(
+          std::move(info), std::make_shared<DataStreamReaderBudget>()) {}
+
+TextStreamReader::TextStreamReader(
+    TextStreamInfo info,
+    std::shared_ptr<DataStreamReaderBudget> budget)
+    : info_(std::move(info)),
+      budget_(budget ? std::move(budget)
+                     : std::make_shared<DataStreamReaderBudget>()) {
+    admitted_ = budget_->TryAcquireReader();
+    active_registered_ = admitted_;
+    if (!admitted_) {
+        closed_ = true;
+        failed_ = true;
+        close_reason_ = kDataStreamActiveReaderLimitExceeded;
+    }
+}
 
 TextStreamReader::~TextStreamReader() {
     std::lock_guard lock(mutex_);
     closed_ = true;
+    ReleaseActiveLocked();
+    budget_->ReleaseBuffered(buffered_bytes_);
+    buffered_bytes_ = 0;
+    queued_chunks_ = 0;
+    queue_.clear();
     cv_.notify_all();
 }
 
@@ -67,8 +138,12 @@ bool TextStreamReader::ReadNext(std::string& out) {
     });
 
     if (!queue_.empty()) {
+        const auto bytes = queue_.front().size();
         out = std::move(queue_.front());
         queue_.pop_front();
+        buffered_bytes_ -= bytes;
+        --queued_chunks_;
+        budget_->ReleaseBuffered(bytes);
         return true;
     }
 
@@ -77,10 +152,45 @@ bool TextStreamReader::ReadNext(std::string& out) {
 
 std::string TextStreamReader::ReadAll() {
     std::string result;
-    std::string chunk;
-    while (ReadNext(chunk)) {
-        result.append(chunk);
+    size_t accounted_result_bytes = 0;
+    while (true) {
+        std::string chunk;
+        {
+            std::unique_lock lock(mutex_);
+            cv_.wait(lock, [this]() {
+                return !queue_.empty() || closed_;
+            });
+            if (queue_.empty()) break;
+            chunk = std::move(queue_.front());
+            queue_.pop_front();
+            buffered_bytes_ -= chunk.size();
+            --queued_chunks_;
+        }
+
+        const auto limit = budget_->limits().max_read_all_bytes;
+        if (chunk.size() > limit - std::min(result.size(), limit)) {
+            MarkReadAllLimitExceeded();
+            budget_->ReleaseBuffered(accounted_result_bytes + chunk.size());
+            throw std::length_error(kDataStreamReadAllLimitExceeded);
+        }
+        try {
+            result.append(chunk);
+        } catch (...) {
+            OnStreamError("data stream allocation failed");
+            budget_->ReleaseBuffered(accounted_result_bytes + chunk.size());
+            throw;
+        }
+        accounted_result_bytes += chunk.size();
     }
+    bool failed = false;
+    std::string failure_reason;
+    {
+        std::lock_guard lock(mutex_);
+        failed = failed_;
+        failure_reason = close_reason_;
+    }
+    budget_->ReleaseBuffered(accounted_result_bytes);
+    if (failed) throw std::runtime_error(failure_reason);
     return result;
 }
 
@@ -89,9 +199,19 @@ bool TextStreamReader::HasAvailableChunk() const {
     return !queue_.empty();
 }
 
+size_t TextStreamReader::buffered_bytes() const {
+    std::lock_guard lock(mutex_);
+    return buffered_bytes_;
+}
+
 bool TextStreamReader::is_closed() const {
     std::lock_guard lock(mutex_);
     return closed_;
+}
+
+bool TextStreamReader::is_failed() const {
+    std::lock_guard lock(mutex_);
+    return failed_;
 }
 
 const std::string& TextStreamReader::close_reason() const {
@@ -100,20 +220,91 @@ const std::string& TextStreamReader::close_reason() const {
 }
 
 void TextStreamReader::OnChunkUpdate(const std::string& text) {
+    (void)TryOnChunkUpdate(text);
+}
+
+bool TextStreamReader::TryOnChunkUpdate(const std::string& text) {
     std::lock_guard lock(mutex_);
-    if (closed_) return;
-    queue_.push_back(text);
+    if (closed_) return false;
+    if (text.empty()) return true;
+
+    const auto& limits = budget_->limits();
+    if (text.size() > std::numeric_limits<size_t>::max() - received_bytes_ ||
+        (info_.total_length.has_value() &&
+         (received_bytes_ > *info_.total_length ||
+          text.size() > *info_.total_length - received_bytes_))) {
+        FailLocked(kDataStreamDeclaredLengthExceeded);
+        return false;
+    }
+    if (queued_chunks_ >= limits.max_queued_chunks_per_reader) {
+        FailLocked(kDataStreamChunkLimitExceeded);
+        return false;
+    }
+    if (text.size() > limits.max_buffered_bytes_per_reader -
+                          std::min(buffered_bytes_,
+                                   limits.max_buffered_bytes_per_reader) ||
+        !budget_->TryReserveBuffered(text.size())) {
+        FailLocked(kDataStreamBufferLimitExceeded);
+        return false;
+    }
+    try {
+        queue_.push_back(text);
+    } catch (...) {
+        budget_->ReleaseBuffered(text.size());
+        FailLocked("data stream allocation failed");
+        return false;
+    }
+    buffered_bytes_ += text.size();
+    received_bytes_ += text.size();
+    ++queued_chunks_;
     cv_.notify_one();
+    return true;
 }
 
 void TextStreamReader::OnStreamClose(const std::string& reason, const std::map<std::string, std::string>& trailer_attrs) {
     std::lock_guard lock(mutex_);
     if (closed_) return;
-    closed_ = true;
-    close_reason_ = reason;
     for (const auto& [k, v] : trailer_attrs) {
         info_.attributes[k] = v;
     }
+    if (reason.empty() && info_.total_length.has_value() &&
+        received_bytes_ != *info_.total_length) {
+        FailLocked(kDataStreamLengthMismatch);
+        return;
+    }
+    closed_ = true;
+    close_reason_ = reason;
+    ReleaseActiveLocked();
+    cv_.notify_all();
+}
+
+void TextStreamReader::OnStreamError(const std::string& reason) {
+    std::lock_guard lock(mutex_);
+    FailLocked(reason);
+}
+
+void TextStreamReader::ReleaseActiveLocked() {
+    if (!active_registered_) return;
+    active_registered_ = false;
+    budget_->ReleaseReader();
+}
+
+void TextStreamReader::FailLocked(const std::string& reason) {
+    if (closed_) return;
+    closed_ = true;
+    failed_ = true;
+    close_reason_ = reason;
+    ReleaseActiveLocked();
+    cv_.notify_all();
+}
+
+void TextStreamReader::MarkReadAllLimitExceeded() {
+    std::lock_guard lock(mutex_);
+    if (failed_) return;
+    closed_ = true;
+    failed_ = true;
+    close_reason_ = kDataStreamReadAllLimitExceeded;
+    ReleaseActiveLocked();
     cv_.notify_all();
 }
 
@@ -122,11 +313,32 @@ void TextStreamReader::OnStreamClose(const std::string& reason, const std::map<s
 // =========================================================================
 
 ByteStreamReader::ByteStreamReader(ByteStreamInfo info)
-    : info_(std::move(info)) {}
+    : ByteStreamReader(
+          std::move(info), std::make_shared<DataStreamReaderBudget>()) {}
+
+ByteStreamReader::ByteStreamReader(
+    ByteStreamInfo info,
+    std::shared_ptr<DataStreamReaderBudget> budget)
+    : info_(std::move(info)),
+      budget_(budget ? std::move(budget)
+                     : std::make_shared<DataStreamReaderBudget>()) {
+    admitted_ = budget_->TryAcquireReader();
+    active_registered_ = admitted_;
+    if (!admitted_) {
+        closed_ = true;
+        failed_ = true;
+        close_reason_ = kDataStreamActiveReaderLimitExceeded;
+    }
+}
 
 ByteStreamReader::~ByteStreamReader() {
     std::lock_guard lock(mutex_);
     closed_ = true;
+    ReleaseActiveLocked();
+    budget_->ReleaseBuffered(buffered_bytes_);
+    buffered_bytes_ = 0;
+    queued_chunks_ = 0;
+    queue_.clear();
     cv_.notify_all();
 }
 
@@ -137,8 +349,12 @@ bool ByteStreamReader::ReadNext(std::vector<uint8_t>& out) {
     });
 
     if (!queue_.empty()) {
+        const auto bytes = queue_.front().size();
         out = std::move(queue_.front());
         queue_.pop_front();
+        buffered_bytes_ -= bytes;
+        --queued_chunks_;
+        budget_->ReleaseBuffered(bytes);
         return true;
     }
 
@@ -147,19 +363,56 @@ bool ByteStreamReader::ReadNext(std::vector<uint8_t>& out) {
 
 std::vector<uint8_t> ByteStreamReader::ReadAll() {
     std::vector<uint8_t> result;
-    if (info_.total_length.has_value()) {
-        result.reserve(info_.total_length.value());
+    size_t accounted_result_bytes = 0;
+    while (true) {
+        std::vector<uint8_t> chunk;
+        {
+            std::unique_lock lock(mutex_);
+            cv_.wait(lock, [this]() {
+                return !queue_.empty() || closed_;
+            });
+            if (queue_.empty()) break;
+            chunk = std::move(queue_.front());
+            queue_.pop_front();
+            buffered_bytes_ -= chunk.size();
+            --queued_chunks_;
+        }
+
+        const auto limit = budget_->limits().max_read_all_bytes;
+        if (chunk.size() > limit - std::min(result.size(), limit)) {
+            MarkReadAllLimitExceeded();
+            budget_->ReleaseBuffered(accounted_result_bytes + chunk.size());
+            throw std::length_error(kDataStreamReadAllLimitExceeded);
+        }
+        try {
+            result.insert(result.end(), chunk.begin(), chunk.end());
+        } catch (...) {
+            OnStreamError("data stream allocation failed");
+            budget_->ReleaseBuffered(accounted_result_bytes + chunk.size());
+            throw;
+        }
+        accounted_result_bytes += chunk.size();
     }
-    std::vector<uint8_t> chunk;
-    while (ReadNext(chunk)) {
-        result.insert(result.end(), chunk.begin(), chunk.end());
+    bool failed = false;
+    std::string failure_reason;
+    {
+        std::lock_guard lock(mutex_);
+        failed = failed_;
+        failure_reason = close_reason_;
     }
+    budget_->ReleaseBuffered(accounted_result_bytes);
+    if (failed) throw std::runtime_error(failure_reason);
     return result;
 }
 
 bool ByteStreamReader::HasAvailableChunk() const {
     std::lock_guard lock(mutex_);
     return !queue_.empty();
+}
+
+size_t ByteStreamReader::buffered_bytes() const {
+    std::lock_guard lock(mutex_);
+    return buffered_bytes_;
 }
 
 size_t ByteStreamReader::received_bytes() const {
@@ -172,27 +425,102 @@ bool ByteStreamReader::is_closed() const {
     return closed_;
 }
 
+bool ByteStreamReader::is_failed() const {
+    std::lock_guard lock(mutex_);
+    return failed_;
+}
+
 const std::string& ByteStreamReader::close_reason() const {
     std::lock_guard lock(mutex_);
     return close_reason_;
 }
 
 void ByteStreamReader::OnChunkUpdate(const uint8_t* data, size_t size) {
+    (void)TryOnChunkUpdate(data, size);
+}
+
+bool ByteStreamReader::TryOnChunkUpdate(const uint8_t* data, size_t size) {
     std::lock_guard lock(mutex_);
-    if (closed_ || !data || size == 0) return;
-    queue_.emplace_back(data, data + size);
+    if (closed_) return false;
+    if (!data || size == 0) return true;
+
+    const auto& limits = budget_->limits();
+    if (size > std::numeric_limits<size_t>::max() - received_bytes_ ||
+        (info_.total_length.has_value() &&
+         (received_bytes_ > *info_.total_length ||
+          size > *info_.total_length - received_bytes_))) {
+        FailLocked(kDataStreamDeclaredLengthExceeded);
+        return false;
+    }
+    if (queued_chunks_ >= limits.max_queued_chunks_per_reader) {
+        FailLocked(kDataStreamChunkLimitExceeded);
+        return false;
+    }
+    if (size > limits.max_buffered_bytes_per_reader -
+                   std::min(buffered_bytes_,
+                            limits.max_buffered_bytes_per_reader) ||
+        !budget_->TryReserveBuffered(size)) {
+        FailLocked(kDataStreamBufferLimitExceeded);
+        return false;
+    }
+    try {
+        queue_.emplace_back(data, data + size);
+    } catch (...) {
+        budget_->ReleaseBuffered(size);
+        FailLocked("data stream allocation failed");
+        return false;
+    }
+    buffered_bytes_ += size;
     received_bytes_ += size;
+    ++queued_chunks_;
     cv_.notify_one();
+    return true;
 }
 
 void ByteStreamReader::OnStreamClose(const std::string& reason, const std::map<std::string, std::string>& trailer_attrs) {
     std::lock_guard lock(mutex_);
     if (closed_) return;
-    closed_ = true;
-    close_reason_ = reason;
     for (const auto& [k, v] : trailer_attrs) {
         info_.attributes[k] = v;
     }
+    if (reason.empty() && info_.total_length.has_value() &&
+        received_bytes_ != *info_.total_length) {
+        FailLocked(kDataStreamLengthMismatch);
+        return;
+    }
+    closed_ = true;
+    close_reason_ = reason;
+    ReleaseActiveLocked();
+    cv_.notify_all();
+}
+
+void ByteStreamReader::OnStreamError(const std::string& reason) {
+    std::lock_guard lock(mutex_);
+    FailLocked(reason);
+}
+
+void ByteStreamReader::ReleaseActiveLocked() {
+    if (!active_registered_) return;
+    active_registered_ = false;
+    budget_->ReleaseReader();
+}
+
+void ByteStreamReader::FailLocked(const std::string& reason) {
+    if (closed_) return;
+    closed_ = true;
+    failed_ = true;
+    close_reason_ = reason;
+    ReleaseActiveLocked();
+    cv_.notify_all();
+}
+
+void ByteStreamReader::MarkReadAllLimitExceeded() {
+    std::lock_guard lock(mutex_);
+    if (failed_) return;
+    closed_ = true;
+    failed_ = true;
+    close_reason_ = kDataStreamReadAllLimitExceeded;
+    ReleaseActiveLocked();
     cv_.notify_all();
 }
 

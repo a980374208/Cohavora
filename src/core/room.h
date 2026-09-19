@@ -398,6 +398,12 @@ private:
                                    const webrtc::DataChannelInterface* channel);
     void OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliable, uint64_t generation);
     void OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& sid, const std::string& topic, uint64_t generation);
+    void ScheduleIncomingStreamCleanupLocked(uint64_t generation);
+    size_t PurgeIncomingStreamsLocked(
+        IncomingDataStreamAssembler::TimePoint now,
+        uint64_t generation);
+    void RetireIncomingReaderLocked(const std::string& stream_id,
+                                    const std::string& reason);
     void OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation);
     bool PublishData(const std::vector<uint8_t>& payload, bool reliable,
                      const std::vector<std::string>& destinations, const std::string& topic, uint64_t generation);
@@ -788,8 +794,13 @@ private:
     // Protected by room_mutex_ together with the native generation check.
     std::unique_ptr<IncomingDataStreamAssembler> incoming_data_streams_ =
         std::make_unique<IncomingDataStreamAssembler>();
+    std::shared_ptr<DataStreamReaderBudget> incoming_reader_budget_ =
+        std::make_shared<DataStreamReaderBudget>();
     std::unordered_map<std::string, std::shared_ptr<TextStreamReader>> active_text_readers_;
     std::unordered_map<std::string, std::shared_ptr<ByteStreamReader>> active_byte_readers_;
+    std::unordered_map<std::string, IncomingDataStreamAssembler::TimePoint>
+        incoming_stream_deadlines_;
+    std::shared_ptr<asio::steady_timer> incoming_stream_cleanup_timer_;
 };
 
 } // namespace livekit

@@ -60,6 +60,8 @@ public:
         TimePoint now = Clock::now());
 
     size_t PurgeExpired(TimePoint now = Clock::now());
+    bool Contains(const std::string& stream_id) const;
+    bool Discard(const std::string& stream_id);
     size_t active_streams() const;
     size_t buffered_bytes() const;
 
