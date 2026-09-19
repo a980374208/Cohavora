@@ -9,6 +9,7 @@
 #include <random>
 #include <stdexcept>
 #include <sstream>
+#include <string_view>
 #include <iomanip>
 
 namespace livekit {
@@ -46,6 +47,62 @@ proto::DataStream::Header MakeByteContentHeader(const std::string& name) {
         bytes->set_name(name);
     }
     return header;
+}
+
+bool IsUtf8Continuation(unsigned char byte) {
+    return (byte & 0xc0) == 0x80;
+}
+
+bool IsValidUtf8(std::string_view text) {
+    size_t offset = 0;
+    while (offset < text.size()) {
+        const auto first = static_cast<unsigned char>(text[offset]);
+        if (first <= 0x7f) {
+            ++offset;
+            continue;
+        }
+
+        size_t length = 0;
+        unsigned char second_min = 0x80;
+        unsigned char second_max = 0xbf;
+        if (first >= 0xc2 && first <= 0xdf) {
+            length = 2;
+        } else if (first >= 0xe0 && first <= 0xef) {
+            length = 3;
+            if (first == 0xe0) second_min = 0xa0;
+            if (first == 0xed) second_max = 0x9f;
+        } else if (first >= 0xf0 && first <= 0xf4) {
+            length = 4;
+            if (first == 0xf0) second_min = 0x90;
+            if (first == 0xf4) second_max = 0x8f;
+        } else {
+            return false;
+        }
+
+        if (length > text.size() - offset) return false;
+        const auto second = static_cast<unsigned char>(text[offset + 1]);
+        if (second < second_min || second > second_max) return false;
+        for (size_t index = 2; index < length; ++index) {
+            if (!IsUtf8Continuation(
+                    static_cast<unsigned char>(text[offset + index]))) {
+                return false;
+            }
+        }
+        offset += length;
+    }
+    return true;
+}
+
+size_t Utf8AwareChunkSize(std::string_view text, size_t offset) {
+    size_t size = std::min(text.size() - offset, kStreamChunkSize);
+    if (offset + size == text.size()) return size;
+
+    size_t boundary = offset + size;
+    while (boundary > offset && IsUtf8Continuation(
+                                    static_cast<unsigned char>(text[boundary]))) {
+        --boundary;
+    }
+    return boundary == offset ? size : boundary - offset;
 }
 
 } // namespace
@@ -225,8 +282,31 @@ void TextStreamReader::OnChunkUpdate(const std::string& text) {
 
 bool TextStreamReader::TryOnChunkUpdate(const std::string& text) {
     std::lock_guard lock(mutex_);
+    return TryOnChunkUpdateLocked(next_chunk_index_, text);
+}
+
+bool TextStreamReader::TryOnChunkUpdate(uint64_t chunk_index,
+                                        const std::string& text) {
+    std::lock_guard lock(mutex_);
+    return TryOnChunkUpdateLocked(chunk_index, text);
+}
+
+bool TextStreamReader::TryOnChunkUpdateLocked(
+    uint64_t chunk_index,
+    const std::string& text) {
     if (closed_) return false;
-    if (text.empty()) return true;
+    if (chunk_index != next_chunk_index_) {
+        FailLocked(kDataStreamChunkSequenceMismatch);
+        return false;
+    }
+    if (!IsValidUtf8(text)) {
+        FailLocked(kDataStreamInvalidUtf8);
+        return false;
+    }
+    if (text.empty()) {
+        ++next_chunk_index_;
+        return true;
+    }
 
     const auto& limits = budget_->limits();
     if (text.size() > std::numeric_limits<size_t>::max() - received_bytes_ ||
@@ -257,6 +337,7 @@ bool TextStreamReader::TryOnChunkUpdate(const std::string& text) {
     buffered_bytes_ += text.size();
     received_bytes_ += text.size();
     ++queued_chunks_;
+    ++next_chunk_index_;
     cv_.notify_one();
     return true;
 }
@@ -267,13 +348,17 @@ void TextStreamReader::OnStreamClose(const std::string& reason, const std::map<s
     for (const auto& [k, v] : trailer_attrs) {
         info_.attributes[k] = v;
     }
-    if (reason.empty() && info_.total_length.has_value() &&
+    if (info_.total_length.has_value() &&
         received_bytes_ != *info_.total_length) {
         FailLocked(kDataStreamLengthMismatch);
         return;
     }
+    if (!reason.empty()) {
+        FailLocked(reason);
+        return;
+    }
     closed_ = true;
-    close_reason_ = reason;
+    close_reason_.clear();
     ReleaseActiveLocked();
     cv_.notify_all();
 }
@@ -441,8 +526,29 @@ void ByteStreamReader::OnChunkUpdate(const uint8_t* data, size_t size) {
 
 bool ByteStreamReader::TryOnChunkUpdate(const uint8_t* data, size_t size) {
     std::lock_guard lock(mutex_);
+    return TryOnChunkUpdateLocked(next_chunk_index_, data, size);
+}
+
+bool ByteStreamReader::TryOnChunkUpdate(uint64_t chunk_index,
+                                        const uint8_t* data,
+                                        size_t size) {
+    std::lock_guard lock(mutex_);
+    return TryOnChunkUpdateLocked(chunk_index, data, size);
+}
+
+bool ByteStreamReader::TryOnChunkUpdateLocked(
+    uint64_t chunk_index,
+    const uint8_t* data,
+    size_t size) {
     if (closed_) return false;
-    if (!data || size == 0) return true;
+    if (chunk_index != next_chunk_index_) {
+        FailLocked(kDataStreamChunkSequenceMismatch);
+        return false;
+    }
+    if (!data || size == 0) {
+        ++next_chunk_index_;
+        return true;
+    }
 
     const auto& limits = budget_->limits();
     if (size > std::numeric_limits<size_t>::max() - received_bytes_ ||
@@ -473,6 +579,7 @@ bool ByteStreamReader::TryOnChunkUpdate(const uint8_t* data, size_t size) {
     buffered_bytes_ += size;
     received_bytes_ += size;
     ++queued_chunks_;
+    ++next_chunk_index_;
     cv_.notify_one();
     return true;
 }
@@ -483,13 +590,17 @@ void ByteStreamReader::OnStreamClose(const std::string& reason, const std::map<s
     for (const auto& [k, v] : trailer_attrs) {
         info_.attributes[k] = v;
     }
-    if (reason.empty() && info_.total_length.has_value() &&
+    if (info_.total_length.has_value() &&
         received_bytes_ != *info_.total_length) {
         FailLocked(kDataStreamLengthMismatch);
         return;
     }
+    if (!reason.empty()) {
+        FailLocked(reason);
+        return;
+    }
     closed_ = true;
-    close_reason_ = reason;
+    close_reason_.clear();
     ReleaseActiveLocked();
     cv_.notify_all();
 }
@@ -703,7 +814,7 @@ void TextStreamWriter::Write(const std::string& text) {
     size_t offset = 0;
     const size_t len = text.size();
     while (offset < len) {
-        const size_t chunk_size = std::min(len - offset, kStreamChunkSize);
+        const size_t chunk_size = Utf8AwareChunkSize(text, offset);
         SendChunk(reinterpret_cast<const uint8_t*>(text.data() + offset), chunk_size);
         offset += chunk_size;
     }
