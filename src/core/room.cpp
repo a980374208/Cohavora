@@ -16,6 +16,7 @@
 #include <atomic>
 #include <future>
 #include <cctype>
+#include <limits>
 #include <iostream>
 #include <algorithm>
 #include "api/jsep.h"
@@ -181,10 +182,24 @@ private:
 
 class RoomDataChannelObserver : public webrtc::DataChannelObserver {
 public:
-    RoomDataChannelObserver(std::shared_ptr<Room> room, bool reliable, uint64_t generation)
-        : room_(room), reliable_(reliable), generation_(generation) {}
+    RoomDataChannelObserver(std::shared_ptr<Room> room,
+                            bool reliable,
+                            uint64_t generation,
+                            webrtc::DataChannelInterface* channel)
+        : room_(room), reliable_(reliable), generation_(generation), channel_(channel) {}
 
-    void OnStateChange() override {}
+    void OnStateChange() override {
+        if (!channel_) return;
+        const auto state = channel_->state();
+        if (auto room = room_.lock()) {
+            asio::post(room->executor(),
+                [room, reliable = reliable_, state, generation = generation_,
+                 channel = channel_]() {
+                    room->OnDataChannelStateChanged(
+                        reliable, state, generation, channel);
+                });
+        }
+    }
 
     void OnMessage(const webrtc::DataBuffer& buffer) override {
         if (auto room = room_.lock()) {
@@ -207,14 +222,19 @@ private:
     std::weak_ptr<Room> room_;
     bool reliable_;
     const uint64_t generation_;
+    webrtc::DataChannelInterface* const channel_;
 };
 
 std::shared_ptr<webrtc::PeerConnectionObserver> Room::CreatePeerConnectionObserver(int pc_type, uint64_t generation) {
     return std::make_shared<RoomPeerConnectionObserver>(shared_from_this(), pc_type, generation);
 }
 
-std::shared_ptr<webrtc::DataChannelObserver> Room::CreateDataChannelObserver(bool reliable, uint64_t generation) {
-    return std::make_shared<RoomDataChannelObserver>(shared_from_this(), reliable, generation);
+std::shared_ptr<webrtc::DataChannelObserver> Room::CreateDataChannelObserver(
+    bool reliable,
+    uint64_t generation,
+    webrtc::DataChannelInterface* channel) {
+    return std::make_shared<RoomDataChannelObserver>(
+        shared_from_this(), reliable, generation, channel);
 }
 
 void Room::PostRemoteTrack(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
@@ -937,7 +957,8 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                     rel_init.ordered = true;
                     native.reliable = native.publisher->CreateDataChannel("_reliable", &rel_init);
                     if (native.reliable) {
-                        auto obs = CreateDataChannelObserver(true, generation);
+                        auto obs = CreateDataChannelObserver(
+                            true, generation, native.reliable.get());
                         native.reliable->RegisterObserver(obs.get());
                         native.dc_observers.push_back(obs);
                     }
@@ -947,7 +968,8 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                     lossy_init.maxRetransmits = 0;
                     native.lossy = native.publisher->CreateDataChannel("_lossy", &lossy_init);
                     if (native.lossy) {
-                        auto obs = CreateDataChannelObserver(false, generation);
+                        auto obs = CreateDataChannelObserver(
+                            false, generation, native.lossy.get());
                         native.lossy->RegisterObserver(obs.get());
                         native.dc_observers.push_back(obs);
                     }
@@ -1659,47 +1681,78 @@ bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
 }
 
 bool Room::PublishDataPacket(const proto::DataPacket& packet, bool reliable) {
+    const auto result = PublishDataPacket(
+        packet, reliable, session_generation_.load(std::memory_order_acquire));
+    return result == DataPacketSendResult::Accepted;
+}
+
+Room::DataPacketSendResult Room::PublishDataPacket(
+    const proto::DataPacket& packet,
+    bool reliable,
+    uint64_t expected_generation) {
     webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
-    std::shared_ptr<LocalParticipant> local_participant;
-    uint64_t generation = 0;
+    std::string sender_identity;
+    std::string sender_sid;
+    std::function<void()> before_admission;
+    std::function<void()> after_admission;
     {
         std::lock_guard lock(room_mutex_);
-        generation = session_generation_.load(std::memory_order_acquire);
-        dc = reliable ? reliable_dc_ : lossy_dc_;
-        local_participant = local_participant_;
+        if (stream_delivery_test_hooks_) {
+            before_admission = stream_delivery_test_hooks_->before_admission;
+        }
     }
+    if (before_admission) before_admission();
+    {
+        std::lock_guard lock(room_mutex_);
+        if (expected_generation == 0 ||
+            session_generation_.load(std::memory_order_acquire) != expected_generation ||
+            installed_session_generation_ != expected_generation ||
+            connection_state_ != ConnectionState::Connected) {
+            return DataPacketSendResult::SessionInvalid;
+        }
+        dc = reliable ? reliable_dc_ : lossy_dc_;
+        if (!dc) return DataPacketSendResult::ChannelUnavailable;
+        if (local_participant_) {
+            sender_identity = local_participant_->identity();
+            sender_sid = local_participant_->sid();
+        }
+        if (stream_delivery_test_hooks_) {
+            after_admission = stream_delivery_test_hooks_->after_admission;
+        }
+    }
+    if (after_admission) after_admission();
 
     proto::DataPacket final_pkt = packet;
     final_pkt.set_kind(reliable ? proto::DataPacket::RELIABLE : proto::DataPacket::LOSSY);
-    if (local_participant) {
+    if (!sender_identity.empty() || !sender_sid.empty()) {
         if (final_pkt.participant_identity().empty()) {
-            final_pkt.set_participant_identity(local_participant->identity());
+            final_pkt.set_participant_identity(sender_identity);
         }
         if (final_pkt.participant_sid().empty()) {
-            final_pkt.set_participant_sid(local_participant->sid());
+            final_pkt.set_participant_sid(sender_sid);
         }
     }
 
-    std::vector<uint8_t> bytes(final_pkt.ByteSizeLong());
-    final_pkt.SerializeToArray(bytes.data(), static_cast<int>(bytes.size()));
-
-    if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
-        webrtc::DataBuffer buffer(
-            webrtc::CopyOnWriteBuffer(bytes.data(), bytes.size()),
-            /*binary=*/true);
-        if (!dc->Send(buffer)) {
-            Log("DATA", "SEND_FAILED", "DataChannel 拒绝发送数据包");
-            return false;
-        }
-        return true;
-    } else {
-        std::string topic;
-        if (final_pkt.has_stream_header()) topic = final_pkt.stream_header().topic();
-        else if (final_pkt.has_user()) topic = final_pkt.user().topic();
-        std::string local_sid = local_participant ? local_participant->sid() : std::string{};
-        OnIncomingDataPacket(bytes, local_sid, topic, generation);
-        return true;
+    const auto byte_size = final_pkt.ByteSizeLong();
+    if (byte_size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
+        return DataPacketSendResult::SerializationFailed;
     }
+    std::vector<uint8_t> bytes(byte_size);
+    if (!final_pkt.SerializeToArray(bytes.data(), static_cast<int>(bytes.size()))) {
+        return DataPacketSendResult::SerializationFailed;
+    }
+
+    if (dc->state() != webrtc::DataChannelInterface::kOpen) {
+        return DataPacketSendResult::ChannelUnavailable;
+    }
+    webrtc::DataBuffer buffer(
+        webrtc::CopyOnWriteBuffer(bytes.data(), bytes.size()),
+        /*binary=*/true);
+    if (!dc->Send(buffer)) {
+        Log("DATA", "SEND_FAILED", "DataChannel 拒绝发送数据包");
+        return DataPacketSendResult::ChannelRejected;
+    }
+    return DataPacketSendResult::Accepted;
 }
 
 std::shared_ptr<TextStreamWriter> Room::CreateTextStreamWriter(
@@ -1711,19 +1764,53 @@ std::shared_ptr<TextStreamWriter> Room::CreateTextStreamWriter(
     const std::vector<std::string>& destination_identities) {
 
     std::string sender_id;
+    uint64_t generation = 0;
     {
         std::lock_guard lock(room_mutex_);
+        generation = installed_session_generation_;
         if (local_participant_) {
             sender_id = local_participant_->identity();
         }
     }
 
     auto weak_self = weak_from_this();
-    auto publisher = [weak_self](const proto::DataPacket& packet, bool reliable) -> bool {
+    auto publisher = [weak_self, generation](const proto::DataPacket& packet,
+                                              bool reliable) -> bool {
         if (auto self = weak_self.lock()) {
-            return self->PublishDataPacket(packet, reliable);
+            const auto result = self->PublishDataPacket(packet, reliable, generation);
+            if (result == DataPacketSendResult::Accepted) return true;
+            OperationErrorCode code = OperationErrorCode::DataChannelRejected;
+            const char* message = "data channel rejected stream packet";
+            switch (result) {
+            case DataPacketSendResult::SessionInvalid:
+                code = OperationErrorCode::SessionInvalid;
+                message = "stream session is no longer valid";
+                break;
+            case DataPacketSendResult::ChannelUnavailable:
+                code = OperationErrorCode::DataChannelUnavailable;
+                message = "stream data channel is unavailable";
+                break;
+            case DataPacketSendResult::SerializationFailed:
+                code = OperationErrorCode::SerializationFailed;
+                message = "stream packet serialization failed";
+                break;
+            case DataPacketSendResult::ChannelRejected:
+                break;
+            case DataPacketSendResult::Accepted:
+                return true;
+            }
+            const char* stage = packet.has_stream_header() ? "header" :
+                packet.has_stream_chunk() ? "chunk" :
+                packet.has_stream_trailer() ? "trailer" : "packet";
+            throw OperationError(OperationKind::SendData, code, stage, message);
         }
-        return false;
+        const char* stage = packet.has_stream_header() ? "header" :
+            packet.has_stream_chunk() ? "chunk" :
+            packet.has_stream_trailer() ? "trailer" : "packet";
+        throw OperationError(OperationKind::SendData,
+                             OperationErrorCode::SessionInvalid,
+                             stage,
+                             "stream room is no longer available");
     };
 
     return std::make_shared<TextStreamWriter>(
@@ -1741,19 +1828,53 @@ std::shared_ptr<ByteStreamWriter> Room::CreateByteStreamWriter(
     const std::vector<std::string>& destination_identities) {
 
     std::string sender_id;
+    uint64_t generation = 0;
     {
         std::lock_guard lock(room_mutex_);
+        generation = installed_session_generation_;
         if (local_participant_) {
             sender_id = local_participant_->identity();
         }
     }
 
     auto weak_self = weak_from_this();
-    auto publisher = [weak_self](const proto::DataPacket& packet, bool reliable) -> bool {
+    auto publisher = [weak_self, generation](const proto::DataPacket& packet,
+                                              bool reliable) -> bool {
         if (auto self = weak_self.lock()) {
-            return self->PublishDataPacket(packet, reliable);
+            const auto result = self->PublishDataPacket(packet, reliable, generation);
+            if (result == DataPacketSendResult::Accepted) return true;
+            OperationErrorCode code = OperationErrorCode::DataChannelRejected;
+            const char* message = "data channel rejected stream packet";
+            switch (result) {
+            case DataPacketSendResult::SessionInvalid:
+                code = OperationErrorCode::SessionInvalid;
+                message = "stream session is no longer valid";
+                break;
+            case DataPacketSendResult::ChannelUnavailable:
+                code = OperationErrorCode::DataChannelUnavailable;
+                message = "stream data channel is unavailable";
+                break;
+            case DataPacketSendResult::SerializationFailed:
+                code = OperationErrorCode::SerializationFailed;
+                message = "stream packet serialization failed";
+                break;
+            case DataPacketSendResult::ChannelRejected:
+                break;
+            case DataPacketSendResult::Accepted:
+                return true;
+            }
+            const char* stage = packet.has_stream_header() ? "header" :
+                packet.has_stream_chunk() ? "chunk" :
+                packet.has_stream_trailer() ? "trailer" : "packet";
+            throw OperationError(OperationKind::SendData, code, stage, message);
         }
-        return false;
+        const char* stage = packet.has_stream_header() ? "header" :
+            packet.has_stream_chunk() ? "chunk" :
+            packet.has_stream_trailer() ? "trailer" : "packet";
+        throw OperationError(OperationKind::SendData,
+                             OperationErrorCode::SessionInvalid,
+                             stage,
+                             "stream room is no longer available");
     };
 
     return std::make_shared<ByteStreamWriter>(
@@ -2370,6 +2491,96 @@ asio::awaitable<void> Room::WaitForPrimaryPeerConnection(
         pending_pc_waits_.end());
 }
 
+void Room::OnDataChannelStateChanged(
+    bool reliable,
+    webrtc::DataChannelInterface::DataState state,
+    uint64_t generation,
+    const webrtc::DataChannelInterface* channel) {
+    if (!reliable || !channel) return;
+    BeforeNativeEventCommit(generation);
+
+    std::vector<std::shared_ptr<AwaitableState<void>>> success;
+    std::vector<std::shared_ptr<AwaitableState<void>>> failure;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            reliable_dc_.get() != channel) {
+            return;
+        }
+        for (const auto& waiter : pending_reliable_dc_waits_) {
+            if (waiter.generation != generation) continue;
+            if (state == webrtc::DataChannelInterface::kOpen) {
+                success.push_back(waiter.completion);
+            } else if (state == webrtc::DataChannelInterface::kClosing ||
+                       state == webrtc::DataChannelInterface::kClosed) {
+                failure.push_back(waiter.completion);
+            }
+        }
+    }
+    for (const auto& completion : success) CompleteAwaitable(completion);
+    for (const auto& completion : failure) {
+        FailAwaitable(completion, std::make_exception_ptr(OperationError(
+            OperationKind::Reconnect,
+            OperationErrorCode::DataChannelUnavailable,
+            "reliable_data_channel_state",
+            "reliable data channel closed before becoming ready",
+            true)));
+    }
+}
+
+asio::awaitable<void> Room::WaitForReliableDataChannel(
+    std::chrono::milliseconds timeout,
+    uint64_t generation) {
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+    auto completion = std::make_shared<AwaitableState<void>>(executor_);
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) {
+            throw OperationError(OperationKind::Reconnect,
+                                 OperationErrorCode::Cancelled,
+                                 "wait_reliable_data_channel",
+                                 "session was replaced while waiting for data transport");
+        }
+        channel = reliable_dc_;
+        if (!channel) {
+            throw OperationError(OperationKind::Reconnect,
+                                 OperationErrorCode::DataChannelUnavailable,
+                                 "wait_reliable_data_channel",
+                                 "reliable data channel is missing",
+                                 true);
+        }
+        pending_reliable_dc_waits_.push_back({generation, completion});
+    }
+
+    OnDataChannelStateChanged(true, channel->state(), generation, channel.get());
+
+    try {
+        co_await WaitAwaitable<void>(completion, timeout,
+                                     OperationKind::Reconnect,
+                                     OperationErrorCode::DataChannelUnavailable,
+                                     "wait_reliable_data_channel");
+    } catch (...) {
+        std::lock_guard lock(room_mutex_);
+        pending_reliable_dc_waits_.erase(
+            std::remove_if(pending_reliable_dc_waits_.begin(),
+                           pending_reliable_dc_waits_.end(),
+                [&](const PendingDataChannelWait& item) {
+                    return item.completion == completion;
+                }),
+            pending_reliable_dc_waits_.end());
+        throw;
+    }
+
+    std::lock_guard lock(room_mutex_);
+    pending_reliable_dc_waits_.erase(
+        std::remove_if(pending_reliable_dc_waits_.begin(),
+                       pending_reliable_dc_waits_.end(),
+            [&](const PendingDataChannelWait& item) {
+                return item.completion == completion;
+            }),
+        pending_reliable_dc_waits_.end());
+}
+
 Room::PendingOperationCleanup Room::TakePendingOperationsLocked() {
     // Retire only this bundle's streams, under the same lock as DC commits.
     for (auto& [id, reader] : active_text_readers_) reader->OnStreamClose("session closed", {});
@@ -2382,6 +2593,10 @@ Room::PendingOperationCleanup Room::TakePendingOperationsLocked() {
         pending.void_states.push_back(waiter.completion);
     }
     pending_pc_waits_.clear();
+    for (const auto& waiter : pending_reliable_dc_waits_) {
+        pending.void_states.push_back(waiter.completion);
+    }
+    pending_reliable_dc_waits_.clear();
     pending.void_states.insert(pending.void_states.end(),
                                negotiation_waiters_.begin(),
                                negotiation_waiters_.end());
@@ -2451,7 +2666,7 @@ void Room::OnRemoteDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterfac
 void Room::OnRemoteDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel, uint64_t generation) {
     if (!data_channel) return;
     bool reliable = (data_channel->label() == "_reliable" || data_channel->label() == "reliable");
-    auto obs = CreateDataChannelObserver(reliable, generation);
+    auto obs = CreateDataChannelObserver(reliable, generation, data_channel.get());
     // Until the commit below, registration belongs solely to this callback.
     data_channel->RegisterObserver(obs.get());
     BeforeNativeEventCommit(generation);
@@ -6639,6 +6854,70 @@ asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
                 }
 
                 co_await RepublishLocalTracks(reconnect_generation);
+
+                bool wait_for_reliable_data_channel = false;
+                bool negotiate_lazy_publisher = false;
+                std::function<void(uint64_t)> before_data_channel_wait;
+                std::function<asio::awaitable<void>(std::chrono::milliseconds, uint64_t)>
+                    negotiate_publisher_for_testing;
+                {
+                    std::lock_guard lock(room_mutex_);
+                    if (!IsSignalGenerationCurrentLocked(reconnect_generation) ||
+                        installed_session_generation_ != reconnect_generation ||
+                        connection_state_ != ConnectionState::Connected ||
+                        !reconnect_active_ || reconnect_disabled_) {
+                        co_return;
+                    }
+                    wait_for_reliable_data_channel = require_media_connection_;
+                    // Subscriber-primary dual-PC joins may leave the publisher
+                    // lazy. With no tracks to republish, explicitly negotiate
+                    // its SCTP transport before waiting for the data channel.
+                    negotiate_lazy_publisher = signal_client_ &&
+                        !signal_client_->is_single_pc_mode_active() &&
+                        join_response_ && join_response_->subscriber_primary() &&
+                        !join_response_->fast_publish() && local->tracks().empty();
+                    if (stream_delivery_test_hooks_) {
+                        before_data_channel_wait =
+                            stream_delivery_test_hooks_->before_full_restart_data_channel_wait;
+                        negotiate_publisher_for_testing =
+                            stream_delivery_test_hooks_->negotiate_full_restart_publisher;
+                    }
+                }
+                if (before_data_channel_wait) {
+                    before_data_channel_wait(reconnect_generation);
+                    wait_for_reliable_data_channel = true;
+                }
+                if (wait_for_reliable_data_channel) {
+                    const auto remaining_data_budget = [&] {
+                        const auto remaining =
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                attempt_deadline - std::chrono::steady_clock::now());
+                        if (remaining <= std::chrono::milliseconds::zero()) {
+                            throw OperationError(OperationKind::Reconnect,
+                                                 OperationErrorCode::DataChannelUnavailable,
+                                                 "wait_reliable_data_channel",
+                                                 "reconnect attempt timed out before data transport readiness",
+                                                 true);
+                        }
+                        return remaining;
+                    };
+                    if (negotiate_lazy_publisher) {
+                        const auto negotiation_budget = std::min(
+                            reconnect_options.timeouts.negotiation,
+                            remaining_data_budget());
+                        if (negotiate_publisher_for_testing) {
+                            co_await negotiate_publisher_for_testing(
+                                negotiation_budget, reconnect_generation);
+                        } else {
+                            co_await NegotiatePublisherAsync(
+                                negotiation_budget, reconnect_generation);
+                        }
+                    }
+                    co_await WaitForReliableDataChannel(
+                        std::min(reconnect_options.timeouts.peer_connection,
+                                 remaining_data_budget()),
+                        reconnect_generation);
+                }
 
                 {
                     std::lock_guard lock(room_mutex_);

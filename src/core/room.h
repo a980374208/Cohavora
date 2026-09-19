@@ -170,6 +170,7 @@ public:
 };
 
 class RoomDataChannelObserver;
+class RoomStreamDeliveryTestAccess;
 
 class Room : public std::enable_shared_from_this<Room> {
 public:
@@ -305,6 +306,7 @@ private:
     friend class ParticipantSnapshotRoomTestAccess;
     friend class RoomIrSec001TestAccess;
     friend class RoomConnectAttemptTestAccess;
+    friend class RoomStreamDeliveryTestAccess;
     // Only the named test-access friend can install these two transport-boundary
     // hooks. Production keeps them null and uses the existing native methods.
     struct LocalUnpublishTestHooks {
@@ -322,6 +324,14 @@ private:
         std::function<void(uint64_t)> before_republish_listener_delivery;
     };
     std::shared_ptr<ConnectAttemptTestHooks> connect_attempt_test_hooks_;
+    struct StreamDeliveryTestHooks {
+        std::function<void()> before_admission;
+        std::function<void()> after_admission;
+        std::function<void(uint64_t)> before_full_restart_data_channel_wait;
+        std::function<asio::awaitable<void>(std::chrono::milliseconds, uint64_t)>
+            negotiate_full_restart_publisher;
+    };
+    std::shared_ptr<StreamDeliveryTestHooks> stream_delivery_test_hooks_;
     void BindLocalUnpublishHandler();
 
     LogHandler log_handler_;
@@ -369,7 +379,10 @@ private:
     }
     void BeforeNativeEventCommit(uint64_t generation);
     std::shared_ptr<webrtc::PeerConnectionObserver> CreatePeerConnectionObserver(int pc_type, uint64_t generation);
-    std::shared_ptr<webrtc::DataChannelObserver> CreateDataChannelObserver(bool reliable, uint64_t generation);
+    std::shared_ptr<webrtc::DataChannelObserver> CreateDataChannelObserver(
+        bool reliable,
+        uint64_t generation,
+        webrtc::DataChannelInterface* channel = nullptr);
     void PostRemoteTrack(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
                          webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, uint64_t generation);
     void OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
@@ -379,11 +392,25 @@ private:
     void OnIceConnected(uint64_t generation);
     void OnPeerConnectionStateChanged(int pc_type, webrtc::PeerConnectionInterface::PeerConnectionState state, uint64_t generation);
     void OnRenegotiationNeeded(int pc_type, uint64_t generation);
+    void OnDataChannelStateChanged(bool reliable,
+                                   webrtc::DataChannelInterface::DataState state,
+                                   uint64_t generation,
+                                   const webrtc::DataChannelInterface* channel);
     void OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliable, uint64_t generation);
     void OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& sid, const std::string& topic, uint64_t generation);
     void OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation);
     bool PublishData(const std::vector<uint8_t>& payload, bool reliable,
                      const std::vector<std::string>& destinations, const std::string& topic, uint64_t generation);
+    enum class DataPacketSendResult {
+        Accepted,
+        SessionInvalid,
+        ChannelUnavailable,
+        SerializationFailed,
+        ChannelRejected,
+    };
+    DataPacketSendResult PublishDataPacket(const proto::DataPacket& packet,
+                                           bool reliable,
+                                           uint64_t expected_generation);
     void NegotiatePublisher(uint64_t generation);
     asio::awaitable<std::shared_ptr<TrackPublication>> PublishLocalTrackAsync(
         std::shared_ptr<Track> track, const proto::SignalRequest& request, uint64_t generation);
@@ -538,6 +565,9 @@ private:
     asio::awaitable<void> WaitForPrimaryPeerConnection(
         std::chrono::milliseconds timeout,
         uint64_t generation);
+    asio::awaitable<void> WaitForReliableDataChannel(
+        std::chrono::milliseconds timeout,
+        uint64_t generation);
     void CompleteNegotiation(
         const std::string& error,
         uint64_t generation = 0);
@@ -654,6 +684,11 @@ private:
         std::shared_ptr<AwaitableState<void>> completion;
     };
     std::vector<PendingPeerConnectionWait> pending_pc_waits_;
+    struct PendingDataChannelWait {
+        uint64_t generation = 0;
+        std::shared_ptr<AwaitableState<void>> completion;
+    };
+    std::vector<PendingDataChannelWait> pending_reliable_dc_waits_;
 
     std::unordered_map<std::string,
         std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>>> pending_track_publishes_;

@@ -383,8 +383,8 @@ void TestExplicitPublisherFailures() {
                     TEST_CHECK(trace.thrown == 1);
                     TEST_CHECK(writer->is_closed());
                     const auto attempts = trace.attempts.size();
-                    writer->Close();
-                    writer->Cancel();
+                    ExpectPublisherFailure(nonstandard, [&] { writer->Close(); });
+                    ExpectPublisherFailure(nonstandard, [&] { writer->Cancel(); });
                     writer.reset();
                     TEST_CHECK(trace.attempts.size() == attempts);
                     TEST_CHECK(trace.count(PacketKind::Header) == 1);
@@ -401,6 +401,8 @@ void TestExplicitPublisherFailures() {
                 try {
                     auto writer = MakeWriter(kind, trace);
                     // Destruction occurs during the publisher exception unwind.
+                    // Failed is terminal, so it must not retry the header or
+                    // append a successful trailer to a failed stream.
                     Write(kind, *writer, "write-failure");
                 } catch (const PublisherFailure&) {
                     TEST_CHECK(!nonstandard);
@@ -411,9 +413,8 @@ void TestExplicitPublisherFailures() {
                 }
                 TEST_CHECK(operation_caught);
                 TEST_CHECK(trace.thrown == 1);
-                TEST_CHECK(trace.count(PacketKind::Trailer) == 1);
-                TEST_CHECK(trace.count(PacketKind::Header) ==
-                           (point == PacketKind::Header ? 2 : 1));
+                TEST_CHECK(trace.count(PacketKind::Trailer) == 0);
+                TEST_CHECK(trace.count(PacketKind::Header) == 1);
                 TEST_CHECK(trace.count(PacketKind::Chunk) ==
                            (point == PacketKind::Chunk ? 1 : 0));
             }

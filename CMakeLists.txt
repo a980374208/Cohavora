@@ -461,11 +461,29 @@ add_executable(test_stream_writer_lifetime
 target_include_directories(test_stream_writer_lifetime PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_stream_writer_lifetime PRIVATE livekit_signaling)
 
+# NEW-SIGNALING-002: stream failure terminal state, transport admission, and
+# native-session isolation through soft resume and full restart.
+add_executable(test_stream_delivery_remediation
+    tests/remediation/test_stream_delivery_remediation.cpp
+    tests/support/test_check.h
+)
+target_include_directories(test_stream_delivery_remediation PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(test_stream_delivery_remediation PRIVATE livekit_signaling)
+
 if(LIVEKIT_BUILD_EXTERNAL_TESTS)
     add_executable(test_livekit_official_connect
         tests/test_livekit_official_connect.cpp
     )
     target_link_libraries(test_livekit_official_connect PRIVATE
+        livekit_signaling
+    )
+
+    # Manual L3 harness. It is intentionally not registered with CTest because
+    # it requires two real-service participants and operator-controlled faults.
+    add_executable(test_stream_delivery_runtime
+        tests/runtime/test_stream_delivery_runtime.cpp
+    )
+    target_link_libraries(test_stream_delivery_runtime PRIVATE
         livekit_signaling
     )
 endif()
@@ -1004,6 +1022,7 @@ add_test(NAME audio_render_reference_apm_test COMMAND test_audio_render_referenc
 add_test(NAME meeting_recovery_ux_test COMMAND test_meeting_recovery_ux)
 add_test(NAME data_stream_messaging_test COMMAND test_data_stream_messaging)
 add_test(NAME stream_writer_lifetime_remediation_test COMMAND test_stream_writer_lifetime)
+add_test(NAME stream_delivery_remediation_test COMMAND test_stream_delivery_remediation)
 add_test(NAME media_streaming_test COMMAND test_media_streaming)
 add_test(NAME stats_system_test COMMAND test_stats_system)
 add_test(NAME audio_playout_warmup_test COMMAND test_audio_playout_warmup)

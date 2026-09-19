@@ -1,10 +1,12 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <exception>
 #include <functional>
 #include <map>
 #include <memory>
@@ -147,7 +149,9 @@ public:
     const std::string& topic() const noexcept { return topic_; }
     const std::string& mime_type() const noexcept { return mime_type_; }
     int64_t timestamp_ms() const noexcept { return timestamp_ms_; }
-    bool is_closed() const noexcept { return closed_; }
+    bool is_closed() const noexcept {
+        return state_.load(std::memory_order_acquire) != State::Open;
+    }
 
     /// Closes the stream normally with optional reason and trailing attributes.
     void Close(const std::string& reason = "", const std::map<std::string, std::string>& attributes = {});
@@ -166,9 +170,19 @@ protected:
                      std::string sender_identity,
                      proto::DataStream::Header content_header);
 
+    enum class State : uint8_t {
+        Open,
+        Closed,
+        Failed,
+    };
+
+    void EnsureOpenOrRethrowLocked();
     void EnsureHeaderSent();
     void SendChunk(const uint8_t* data, size_t size);
-    void SendTrailer(const std::string& reason, const std::map<std::string, std::string>& attributes);
+    void SendTrailer(const std::string& reason,
+                     const std::map<std::string, std::string>& attributes);
+    void PublishPacket(const proto::DataPacket& packet, const char* stage);
+    [[noreturn]] void FailLocked(std::exception_ptr error);
 
     StreamPacketPublisher publisher_;
     std::string stream_id_;
@@ -183,7 +197,10 @@ protected:
     // consult Text/Byte members or dispatch into an already destroyed subtype.
     proto::DataStream::Header header_;
 
-    bool closed_ = false;
+    std::atomic<State> state_{State::Open};
+    // Protected by write_mutex_. The first failure is stable for every later
+    // explicit operation, including non-standard publisher exceptions.
+    std::exception_ptr first_failure_;
     bool header_sent_ = false;
     uint64_t next_chunk_index_ = 0;
     std::mutex write_mutex_;

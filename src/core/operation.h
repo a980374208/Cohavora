@@ -19,6 +19,7 @@ enum class OperationKind {
     Negotiate,
     Reconnect,
     Disconnect,
+    SendData,
 };
 
 enum class OperationErrorCode {
@@ -37,6 +38,10 @@ enum class OperationErrorCode {
     ReconnectExhausted,
     SessionClosed,
     StateUncertain,
+    SessionInvalid,
+    DataChannelUnavailable,
+    SerializationFailed,
+    DataChannelRejected,
 };
 
 class OperationError final : public std::runtime_error {
