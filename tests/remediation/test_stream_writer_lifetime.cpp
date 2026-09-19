@@ -34,6 +34,7 @@ const std::string kTopic = "lifetime.topic";
 const std::string kReplyTo = "ST_reply_" + std::string(96, 'r');
 const std::string kFileName = std::string(96, 'n') + ".bin";
 const std::string kSender = "sender-lifetime";
+const std::vector<std::string> kDestinationIdentities{"destination"};
 const std::map<std::string, std::string> kAttributes{
     {"purpose", "lifetime"}, {"detail", std::string(96, 'm')}};
 constexpr int kPublisherSentinel = 409;
@@ -147,15 +148,17 @@ private:
 
 std::unique_ptr<livekit::BaseStreamWriter> MakeWriter(
     WriterKind kind, PublisherTrace& trace,
-    std::optional<std::size_t> total_size = std::nullopt) {
+    std::optional<std::size_t> total_size = std::nullopt,
+    const std::vector<std::string>& destination_identities =
+        kDestinationIdentities) {
     if (kind == WriterKind::Text) {
         return std::make_unique<livekit::TextStreamWriter>(
             trace.publisher(), kTopic, kAttributes, kStreamId, total_size,
-            kReplyTo, std::vector<std::string>{"destination"}, kSender);
+            kReplyTo, destination_identities, kSender);
     }
     return std::make_unique<livekit::ByteStreamWriter>(
         trace.publisher(), kFileName, kTopic, kAttributes, kStreamId, total_size,
-        "application/x-lifetime", std::vector<std::string>{"destination"}, kSender);
+        "application/x-lifetime", destination_identities, kSender);
 }
 
 void Write(WriterKind kind, livekit::BaseStreamWriter& writer, const std::string& bytes) {
@@ -213,15 +216,31 @@ void CheckHeader(const livekit::proto::DataPacket& packet, WriterKind kind,
     }
 }
 
+void CheckDestinations(
+    const livekit::proto::DataPacket& packet,
+    const std::vector<std::string>& expected) {
+    TEST_CHECK(packet.destination_identities_size() ==
+               static_cast<int>(expected.size()));
+    for (std::size_t index = 0; index < expected.size(); ++index) {
+        TEST_CHECK(packet.destination_identities(static_cast<int>(index)) ==
+                   expected[index]);
+    }
+}
+
 void CheckSequence(const PublisherTrace& trace, WriterKind kind, int64_t timestamp,
                    const std::string& payload = {}, const std::string& reason = {},
                    const std::map<std::string, std::string>& trailer_attributes = {},
-                   std::optional<std::size_t> total_size = std::nullopt) {
+                   std::optional<std::size_t> total_size = std::nullopt,
+                   const std::vector<std::string>& destination_identities =
+                       kDestinationIdentities) {
     const std::size_t chunks =
         (payload.size() + livekit::kStreamChunkSize - 1) / livekit::kStreamChunkSize;
     TEST_CHECK(trace.attempts.size() == chunks + 2);
     TEST_CHECK(trace.thrown == 0);
-    for (const auto& attempt : trace.attempts) TEST_CHECK(attempt.reliable);
+    for (const auto& attempt : trace.attempts) {
+        TEST_CHECK(attempt.reliable);
+        CheckDestinations(attempt.packet, destination_identities);
+    }
     CheckHeader(trace.attempts.front().packet, kind, timestamp, total_size);
     std::string reconstructed;
     for (std::size_t index = 0; index < chunks; ++index) {
@@ -325,6 +344,26 @@ void TestChunks() {
             }
             writer.reset();
             CheckSequence(trace, kind, timestamp, payload, "", {}, payload.size());
+        }
+    }
+}
+
+void TestDestinationRouting() {
+    const std::vector<std::vector<std::string>> route_cases{
+        {}, {"receiver-one"}, {"receiver-one", "receiver-two"}};
+    const std::string payload(livekit::kStreamChunkSize * 2 + 17, 'r');
+    for (const auto kind : {WriterKind::Text, WriterKind::Byte}) {
+        for (const auto& expected : route_cases) {
+            PublisherTrace trace;
+            auto caller_destinations = expected;
+            auto writer = MakeWriter(kind, trace, payload.size(),
+                                     caller_destinations);
+            const auto timestamp = writer->timestamp_ms();
+            caller_destinations.assign({"mutated-after-create"});
+            Write(kind, *writer, payload);
+            writer->Close();
+            CheckSequence(trace, kind, timestamp, payload, "", {},
+                          payload.size(), expected);
         }
     }
 }
@@ -499,6 +538,7 @@ int main(int argc, char** argv) {
         {"empty-byte", [] { TestEmpty(WriterKind::Byte); }},
         {"explicit", TestExplicitCloseCancel},
         {"chunks", TestChunks},
+        {"routing", TestDestinationRouting},
         {"unwind", TestOuterUnwind},
         {"explicit-exceptions", TestExplicitPublisherFailures},
         {"destructor-exceptions", TestDestructorPublisherFailures},
@@ -514,7 +554,7 @@ int main(int argc, char** argv) {
         std::printf("[PASS] stream writer lifetime: %s\n", test.name);
     }
     TEST_CHECK(executed > 0);
-    TEST_CHECK(selected != "all" || executed == 8);
+    TEST_CHECK(selected != "all" || executed == 9);
     std::printf("[SUCCESS] stream writer lifetime groups executed=%d\n", executed);
     return 0;
 }

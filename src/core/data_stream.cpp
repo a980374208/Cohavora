@@ -271,7 +271,11 @@ void BaseStreamWriter::PublishPacket(const proto::DataPacket& packet,
 
     bool accepted = false;
     try {
-        accepted = publisher_(packet, true);
+        proto::DataPacket routed_packet = packet;
+        for (const auto& identity : destination_identities_) {
+            routed_packet.add_destination_identities(identity);
+        }
+        accepted = publisher_(routed_packet, true);
     } catch (...) {
         FailLocked(std::current_exception());
     }

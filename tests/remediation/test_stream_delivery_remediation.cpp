@@ -932,6 +932,29 @@ asio::awaitable<void> TestRoomDeliveryAndSessions(asio::any_io_executor executor
     current_a->Close();
     TEST_CHECK(channel_a->accepted().size() == 3);
 
+    const auto routed_start = channel_a->accepted().size();
+    std::vector<std::string> routed_destinations{"receiver-a", "receiver-b"};
+    auto routed = room->CreateTextStreamWriter(
+        "routed", {}, "routed-through-room", std::nullopt, "",
+        routed_destinations);
+    routed_destinations.assign({"mutated-after-create"});
+    routed->Write(std::string(livekit::kStreamChunkSize + 1, 'r'));
+    routed->Close();
+    const auto routed_packets = channel_a->accepted();
+    TEST_CHECK(routed_packets.size() == routed_start + 4);
+    for (std::size_t index = routed_start; index < routed_packets.size(); ++index) {
+        const auto& packet = routed_packets[index];
+        TEST_CHECK(packet.destination_identities_size() == 2);
+        TEST_CHECK(packet.destination_identities(0) == "receiver-a");
+        TEST_CHECK(packet.destination_identities(1) == "receiver-b");
+        TEST_CHECK(!packet.has_user());
+        TEST_CHECK(packet.participant_identity() == "same-user");
+    }
+    TEST_CHECK(routed_packets[routed_start].has_stream_header());
+    TEST_CHECK(routed_packets[routed_start + 1].has_stream_chunk());
+    TEST_CHECK(routed_packets[routed_start + 2].has_stream_chunk());
+    TEST_CHECK(routed_packets[routed_start + 3].has_stream_trailer());
+
     auto soft_survivor = room->CreateTextStreamWriter("soft-survivor");
     auto soft_failed = room->CreateTextStreamWriter("soft-failed");
     const int reconnecting_before =
