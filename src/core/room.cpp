@@ -574,13 +574,28 @@ void Room::EnqueueRosterLocked() {
             ParticipantEventKind::Upsert, participant, false));
         for (const auto& [track_sid, publication] : participant->tracks()) {
             const auto track = publication ? publication->track() : nullptr;
-            if (track && track->rtc_track()) {
-                EnqueueParticipantEventLocked(MakeTrackEventLocked(
-                    ParticipantEventKind::TrackAvailable,
-                    participant,
-                    publication,
-                    false));
+            const auto remote_publication =
+                std::dynamic_pointer_cast<RemoteTrackPublication>(publication);
+            if (!track || !track->rtc_track() || !remote_publication ||
+                !remote_publication->is_subscribed()) {
+                continue;
             }
+            const auto current =
+                current_remote_binding_serials_.find(remote_publication.get());
+            const auto media_binding = current == current_remote_binding_serials_.end()
+                ? nullptr : FindMediaBindingLocked(current->second);
+            if (!media_binding ||
+                !media_binding->active.load(std::memory_order_acquire)) {
+                continue;
+            }
+            auto available = MakeTrackEventLocked(
+                ParticipantEventKind::TrackAvailable,
+                participant,
+                publication,
+                false);
+            available.media_binding_key = media_binding->key;
+            available.media_binding_ticket = media_binding;
+            EnqueueParticipantEventLocked(std::move(available));
         }
     }
 }
@@ -606,9 +621,20 @@ void Room::DrainParticipantEvents() {
     for (const auto& event : batch) {
         for (const auto& listener : listeners) {
             if (!listener) continue;
+            if (event.kind == ParticipantEventKind::TrackAvailable &&
+                !IsMediaBindingTicketActive(
+                    event.media_binding_ticket, event.media_binding_key)) {
+                break;
+            }
             try {
                 DeliverListener({event.native_room_generation}, listener,
-                    [&](RoomListener& target) { target.OnParticipantEvent(event); });
+                    [&](RoomListener& target) {
+                        if (event.kind != ParticipantEventKind::TrackAvailable ||
+                            IsMediaBindingTicketActive(
+                                event.media_binding_ticket, event.media_binding_key)) {
+                            target.OnParticipantEvent(event);
+                        }
+                    });
             } catch (...) {
                 // A listener cannot strand the single dispatcher.
             }
@@ -696,6 +722,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
     const SignalOptions attempt_options = opts;
     uint64_t generation = 0;
     bool notify_connected = true;
+    bool restart_connect = false;
     std::shared_ptr<SignalClient> attempt_signal;
     std::shared_ptr<ConnectAttemptTestHooks> test_hooks;
     {
@@ -710,7 +737,8 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         // AttemptReconnect() 复用 ConnectAsync 做全量重建。若其间收到了
         // 服务端终态 LeaveRequest，绝不能在这里重置 reconnect_disabled_ 并
         // 重新加入房间；显式的新 Connect 调用则允许开始一个新会话。
-        if (reconnect_active_ && reconnect_disabled_) {
+        restart_connect = reconnect_active_;
+        if (restart_connect && reconnect_disabled_) {
             throw OperationError(OperationKind::Reconnect,
                                  OperationErrorCode::Cancelled,
                                  "connect_start",
@@ -723,6 +751,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         if (!reconnect_active_) {
             reconnect_disabled_ = false;
             server_disconnect_finalizing_ = false;
+            ResetSubscriptionSessionLocked(attempt_options.auto_subscribe);
         }
         generation = session_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
         operation_timeouts_ = attempt_options.timeouts;
@@ -773,6 +802,16 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         signal_client_ = attempt_signal;
         installed_session_generation_ = generation;
         join_response_ = join_res;
+        const std::string joined_room_sid = join_res->has_room()
+            ? join_res->room().sid()
+            : std::string{};
+        if (restart_connect && subscription_room_sid_ != joined_room_sid) {
+            ResetSubscriptionSessionLocked(attempt_options.auto_subscribe);
+            // This Connect is still owned by the active recovery transaction.
+            // Default/new-room intents must wait for its final commit.
+            subscription_recovery_barrier_ = true;
+        }
+        subscription_room_sid_ = joined_room_sid;
         if (join_res->has_room()) {
             room_info_ = RoomInfoFromProto(join_res->room());
         }
@@ -962,6 +1001,12 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         }
 
         UpdateParticipants(join_res->other_participants(), generation);
+        {
+            std::lock_guard lock(room_mutex_);
+            if (IsNativeGenerationCurrentLocked(generation)) {
+                PruneSubscriptionIntentsLocked();
+            }
+        }
 
     if (attempt_signal) {
         attempt_signal->SetEventReady();
@@ -1000,6 +1045,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         notify_connected = !suppress_next_connected_event_;
         suppress_next_connected_event_ = false;
         EnqueueRosterLocked();
+        ScheduleSubscriptionDrainLocked();
     }
 
     if (notify_connected) {
@@ -1075,6 +1121,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                 suppress_next_connected_event_ = false;
                 connection_state_ = ConnectionState::Disconnected;
                 pending = TakePendingOperationsLocked();
+                if (!restart_connect) ClearSubscriptionSessionLocked();
             }
         }
         retired_events.clear();
@@ -1167,6 +1214,7 @@ void Room::Disconnect() {
         processed_remote_track_ids_.clear();
         pending_track_queue_.clear();
         deferred_room_messages_.clear();
+        ClearSubscriptionSessionLocked();
         pending = TakePendingOperationsLocked();
     }
 
@@ -1285,6 +1333,7 @@ asio::awaitable<void> Room::DisconnectAsync() {
         processed_remote_track_ids_.clear();
         pending_track_queue_.clear();
         deferred_room_messages_.clear();
+        ClearSubscriptionSessionLocked();
         pending = TakePendingOperationsLocked();
     }
 
@@ -1444,6 +1493,7 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
         processed_remote_track_ids_.clear();
         pending_track_queue_.clear();
         deferred_room_messages_.clear();
+        ClearSubscriptionSessionLocked();
         suppress_next_connected_event_ = false;
         pending = TakePendingOperationsLocked();
     }
@@ -2206,8 +2256,16 @@ void Room::OnIceConnected(uint64_t generation) {
         for (const auto& kv : remote_participants_) {
             if (kv.second) {
                 for (const auto& pub_kv : kv.second->tracks()) {
-                    if (pub_kv.second && pub_kv.second->track() && pub_kv.second->track()->kind() == TrackKind::Video) {
+                    if (!pub_kv.second || !pub_kv.second->track() ||
+                        pub_kv.second->track()->kind() != TrackKind::Video) {
+                        continue;
+                    }
+                    const auto key = MakeSubscriptionIntentKeyLocked(
+                        kv.first, kv.second->identity(), pub_kv.first);
+                    auto& intent = EnsureSubscriptionIntentLocked(key);
+                    if (intent.subscribed) {
                         videos[kv.first].push_back(pub_kv.first);
+                        QueueSubscriptionUpdateLocked(key);
                     }
                 }
             }
@@ -2216,7 +2274,6 @@ void Room::OnIceConnected(uint64_t generation) {
     if (signal) {
         for (const auto& [sid, tracks] : videos) {
             for (const auto& track : tracks) signal->SendUpdateTrackSettings(track, false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
-            signal->SendUpdateSubscription(tracks, true, sid);
         }
     }
 }
@@ -2477,6 +2534,9 @@ private:
 
 void Room::DetachRemoteTrackSinks(std::vector<RemoteTrackSinkBinding> bindings) noexcept {
     for (auto& binding : bindings) {
+        if (binding.media_binding) {
+            binding.media_binding->active.store(false, std::memory_order_release);
+        }
         if (!binding.detach) continue;
         try {
             auto& manager = WebRTCManager::Instance();
@@ -2512,6 +2572,9 @@ std::vector<Room::RemoteTrackSinkBinding> Room::TakeRemoteTrackSinksForTrackKeys
             ++it;
             continue;
         }
+        if (it->media_binding) {
+            it->media_binding->active.store(false, std::memory_order_release);
+        }
         removed.push_back(std::move(*it));
         it = remote_track_sinks_.erase(it);
     }
@@ -2538,6 +2601,9 @@ std::vector<Room::RemoteTrackSinkBinding> Room::TakeRemoteTrackSinkForBindingSer
             return candidate.binding_serial == binding_serial;
         });
     if (binding == remote_track_sinks_.end()) return removed;
+    if (binding->media_binding) {
+        binding->media_binding->active.store(false, std::memory_order_release);
+    }
     const std::string rtc_track_id = binding->rtc_track_id;
     removed.push_back(std::move(*binding));
     remote_track_sinks_.erase(binding);
@@ -2550,9 +2616,213 @@ std::vector<Room::RemoteTrackSinkBinding> Room::TakeRemoteTrackSinkForBindingSer
     return removed;
 }
 
+Room::SubscriptionIntentKey Room::MakeSubscriptionIntentKeyLocked(
+    const std::string& participant_sid,
+    const std::string& participant_identity,
+    const std::string& track_sid) const {
+    return {participant_sid, participant_identity, track_sid};
+}
+
+Room::RemoteSubscriptionIntent& Room::EnsureSubscriptionIntentLocked(
+    const SubscriptionIntentKey& key) {
+    const auto [it, inserted] = subscription_intents_.try_emplace(key);
+    if (inserted) {
+        it->second.subscribed = session_auto_subscribe_;
+        it->second.revision = next_subscription_revision_++;
+    }
+    return it->second;
+}
+
+const Room::RemoteSubscriptionIntent* Room::FindSubscriptionIntentLocked(
+    const SubscriptionIntentKey& key) const {
+    const auto it = subscription_intents_.find(key);
+    return it == subscription_intents_.end() ? nullptr : &it->second;
+}
+
+void Room::QueueSubscriptionUpdateLocked(const SubscriptionIntentKey& key) {
+    const auto* intent = FindSubscriptionIntentLocked(key);
+    if (!intent) return;
+    pending_subscription_updates_[key] = {intent->subscribed, intent->revision};
+    ScheduleSubscriptionDrainLocked();
+}
+
+void Room::ScheduleSubscriptionDrainLocked() {
+    if (subscription_sender_active_ || pending_subscription_updates_.empty() ||
+        subscription_recovery_barrier_ ||
+        connection_state_ != ConnectionState::Connected || !signal_client_) {
+        return;
+    }
+    subscription_sender_active_ = true;
+    subscription_sender_session_ = subscription_session_generation_;
+    subscription_sender_operation_ = next_subscription_sender_operation_++;
+    const auto logical_session = subscription_sender_session_;
+    const auto sender_operation = subscription_sender_operation_;
+    const auto signal = signal_client_;
+    std::weak_ptr<Room> weak = weak_from_this();
+    asio::post(executor_, [weak, logical_session, sender_operation, signal] {
+        if (const auto room = weak.lock()) {
+            livekit::safe_co_spawn(room->executor_,
+                [room, logical_session, sender_operation, signal]() -> asio::awaitable<void> {
+                co_await room->DrainSubscriptionUpdates(
+                    logical_session, sender_operation, signal);
+            });
+        }
+    });
+}
+
+asio::awaitable<void> Room::DrainSubscriptionUpdates(
+    uint64_t logical_session,
+    uint64_t sender_operation,
+    std::shared_ptr<SignalClient> signal) {
+    for (;;) {
+        SubscriptionIntentKey key;
+        PendingSubscriptionUpdate update;
+        std::shared_ptr<ConnectAttemptTestHooks> test_hooks;
+        {
+            std::lock_guard lock(room_mutex_);
+            if (logical_session != subscription_session_generation_ ||
+                !subscription_sender_active_ ||
+                subscription_sender_session_ != logical_session ||
+                subscription_sender_operation_ != sender_operation ||
+                subscription_recovery_barrier_ || signal_client_ != signal) {
+                co_return;
+            }
+            if (connection_state_ != ConnectionState::Connected || !signal_client_) {
+                subscription_sender_active_ = false;
+                co_return;
+            }
+            if (pending_subscription_updates_.empty()) {
+                subscription_sender_active_ = false;
+                co_return;
+            }
+            auto pending = pending_subscription_updates_.begin();
+            key = pending->first;
+            update = pending->second;
+            pending_subscription_updates_.erase(pending);
+            const auto* intent = FindSubscriptionIntentLocked(key);
+            if (!intent || intent->revision != update.revision ||
+                intent->subscribed != update.subscribed) {
+                continue;
+            }
+            test_hooks = connect_attempt_test_hooks_;
+        }
+
+        proto::SignalRequest request;
+        auto* subscription = request.mutable_subscription();
+        subscription->set_subscribe(update.subscribed);
+        subscription->add_track_sids(key.track_sid);
+        auto* participant_tracks = subscription->add_participant_tracks();
+        participant_tracks->set_participant_sid(key.participant_sid);
+        participant_tracks->add_track_sids(key.track_sid);
+        try {
+            if (test_hooks && test_hooks->before_subscription_send) {
+                co_await test_hooks->before_subscription_send(
+                    update.subscribed, update.revision);
+            }
+            {
+                std::lock_guard lock(room_mutex_);
+                if (logical_session != subscription_session_generation_ ||
+                    !subscription_sender_active_ ||
+                    subscription_sender_session_ != logical_session ||
+                    subscription_sender_operation_ != sender_operation ||
+                    subscription_recovery_barrier_ || signal_client_ != signal ||
+                    connection_state_ != ConnectionState::Connected) {
+                    co_return;
+                }
+            }
+            co_await signal->SendAsync(request);
+        } catch (...) {
+            std::lock_guard lock(room_mutex_);
+            if (logical_session == subscription_session_generation_ &&
+                subscription_sender_active_ &&
+                subscription_sender_session_ == logical_session &&
+                subscription_sender_operation_ == sender_operation &&
+                signal_client_ == signal) {
+                if (const auto* current = FindSubscriptionIntentLocked(key)) {
+                    pending_subscription_updates_[key] = {
+                        current->subscribed, current->revision};
+                }
+                subscription_sender_active_ = false;
+            }
+            co_return;
+        }
+    }
+}
+
+void Room::PauseSubscriptionSendingLocked() {
+    subscription_recovery_barrier_ = true;
+    subscription_sender_active_ = false;
+    subscription_sender_operation_ = next_subscription_sender_operation_++;
+    for (const auto& [key, intent] : subscription_intents_) {
+        pending_subscription_updates_[key] = {intent.subscribed, intent.revision};
+    }
+}
+
+void Room::FinishSubscriptionRecoveryLocked(
+    const SubscriptionSyncSnapshot& snapshot,
+    const std::shared_ptr<SignalClient>& signal) {
+    if (snapshot.logical_session != subscription_session_generation_ ||
+        signal_client_ != signal) {
+        return;
+    }
+    for (const auto& [key, revision] : snapshot.revisions) {
+        const auto current = subscription_intents_.find(key);
+        const auto pending = pending_subscription_updates_.find(key);
+        if (current != subscription_intents_.end() &&
+            current->second.revision == revision &&
+            pending != pending_subscription_updates_.end() &&
+            pending->second.revision == revision) {
+            pending_subscription_updates_.erase(pending);
+        }
+    }
+    subscription_recovery_barrier_ = false;
+}
+
+void Room::ResetSubscriptionSessionLocked(bool auto_subscribe) {
+    ++subscription_session_generation_;
+    next_subscription_revision_ = 1;
+    session_auto_subscribe_ = auto_subscribe;
+    subscription_recovery_barrier_ = false;
+    subscription_room_sid_.clear();
+    subscription_intents_.clear();
+    pending_subscription_updates_.clear();
+    subscription_sender_active_ = false;
+    subscription_sender_session_ = subscription_session_generation_;
+    subscription_sender_operation_ = next_subscription_sender_operation_++;
+}
+
+void Room::ClearSubscriptionSessionLocked() {
+    ResetSubscriptionSessionLocked(true);
+}
+
+void Room::PruneSubscriptionIntentsLocked() {
+    for (auto it = subscription_intents_.begin(); it != subscription_intents_.end();) {
+        const auto participant = remote_participants_.find(it->first.participant_sid);
+        if (participant == remote_participants_.end() || !participant->second ||
+            participant->second->identity() != it->first.participant_identity ||
+            !participant->second->get_publication(it->first.track_sid)) {
+            pending_subscription_updates_.erase(it->first);
+            it = subscription_intents_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+std::shared_ptr<MediaBindingState> Room::FindMediaBindingLocked(
+    uint64_t binding_serial) const {
+    const auto binding = std::find_if(
+        remote_track_sinks_.begin(), remote_track_sinks_.end(),
+        [binding_serial](const RemoteTrackSinkBinding& candidate) {
+            return candidate.binding_serial == binding_serial;
+        });
+    return binding == remote_track_sinks_.end() ? nullptr : binding->media_binding;
+}
+
 std::shared_ptr<RemoteTrackPublication> Room::CreateRemoteTrackPublication(
     std::shared_ptr<Track> track,
     const std::string& participant_sid,
+    const std::string& participant_identity,
     const std::string& track_sid,
     const std::string& name,
     proto::TrackType type) {
@@ -2566,8 +2836,16 @@ std::shared_ptr<RemoteTrackPublication> Room::CreateRemoteTrackPublication(
         return room->QueueRemotePublicationControl(
             publication, participant_sid, generation, request);
     };
+    const auto key = MakeSubscriptionIntentKeyLocked(
+        participant_sid, participant_identity, track_sid);
+    auto& intent = EnsureSubscriptionIntentLocked(key);
+    // Full restart preserves desired state/revision, but request sequences
+    // belong to each publication object. The successor starts at sequence 1;
+    // generation and canonical-pointer checks still reject the old controller.
+    intent.last_request_sequence = 0;
     return std::make_shared<RemoteTrackPublication>(
-        std::move(track), track_sid, name, type, generation, std::move(controller));
+        std::move(track), track_sid, name, type, generation,
+        std::move(controller), intent.subscribed);
 }
 
 RemotePublicationControlDispatch Room::QueueRemotePublicationControl(
@@ -2576,6 +2854,57 @@ RemotePublicationControlDispatch Room::QueueRemotePublicationControl(
     uint64_t generation,
     const RemotePublicationControlRequest& request) {
     if (!publication) return RemotePublicationControlDispatch::Rejected;
+
+    if (request.kind == RemotePublicationControlRequest::Kind::Subscription &&
+        request.subscribed.has_value()) {
+        std::shared_ptr<RemoteTrackPublication> canonical;
+        uint64_t binding_serial = 0;
+        {
+            std::lock_guard lock(room_mutex_);
+            if ((connection_state_ != ConnectionState::Connected &&
+                 connection_state_ != ConnectionState::Reconnecting) ||
+                generation != session_generation_.load(std::memory_order_acquire)) {
+                return RemotePublicationControlDispatch::Rejected;
+            }
+            const auto participant = remote_participants_.find(participant_sid);
+            if (participant == remote_participants_.end() || !participant->second) {
+                return RemotePublicationControlDispatch::Rejected;
+            }
+            canonical = participant->second->get_remote_publication(publication->sid());
+            if (!canonical || canonical.get() != publication ||
+                canonical->session_generation() != generation) {
+                return RemotePublicationControlDispatch::Rejected;
+            }
+
+            const auto key = MakeSubscriptionIntentKeyLocked(
+                participant_sid, participant->second->identity(), canonical->sid());
+            auto& intent = EnsureSubscriptionIntentLocked(key);
+            if (request.sequence <= intent.last_request_sequence) {
+                return RemotePublicationControlDispatch::Rejected;
+            }
+            intent.last_request_sequence = request.sequence;
+            intent.subscribed = *request.subscribed;
+            intent.revision = next_subscription_revision_++;
+            canonical->CommitControl(request);
+
+            if (!intent.subscribed) {
+                const auto current = current_remote_binding_serials_.find(canonical.get());
+                if (current != current_remote_binding_serials_.end()) {
+                    binding_serial = current->second;
+                    if (const auto media_binding = FindMediaBindingLocked(binding_serial)) {
+                        media_binding->active.store(false, std::memory_order_release);
+                    }
+                }
+            }
+            QueueSubscriptionUpdateLocked(key);
+        }
+
+        if (binding_serial != 0) {
+            DetachRemotePublicationMedia(
+                canonical.get(), /*notify_listener=*/true, binding_serial);
+        }
+        return RemotePublicationControlDispatch::Queued;
+    }
 
     std::shared_ptr<RemoteTrackPublication> canonical;
     {
@@ -2623,26 +2952,14 @@ RemotePublicationControlDispatch Room::QueueRemotePublicationControl(
             signal = room->signal_client_;
         }
 
-        if (request.kind == RemotePublicationControlRequest::Kind::Subscription) {
-            if (request.subscribed.has_value() && !*request.subscribed) {
-                // This executes only after the delayed operation has repeated
-                // canonical-map and generation validation. Detach before the
-                // signal so no renderer can receive a late frame.
-                canonical->DetachMedia(/*notify_listener=*/true);
-            }
-            signal->SendUpdateSubscription({canonical->sid()},
-                                           request.subscribed.value_or(true),
-                                           participant_sid);
-        } else {
-            signal->SendUpdateTrackSettings(
-                canonical->sid(),
-                !request.enabled.value_or(canonical->is_enabled()),
-                request.quality.value_or(canonical->current_quality()),
-                request.width.value_or(canonical->current_width()),
-                request.height.value_or(canonical->current_height()),
-                0,
-                request.priority.value_or(canonical->priority()));
-        }
+        signal->SendUpdateTrackSettings(
+            canonical->sid(),
+            !request.enabled.value_or(canonical->is_enabled()),
+            request.quality.value_or(canonical->current_quality()),
+            request.width.value_or(canonical->current_width()),
+            request.height.value_or(canonical->current_height()),
+            0,
+            request.priority.value_or(canonical->priority()));
         canonical->CommitControl(request);
     });
     return RemotePublicationControlDispatch::Queued;
@@ -2665,6 +2982,11 @@ void Room::RemoveRemoteMediaTrackReferences(
 }
 
 void Room::ClearRemotePublicationMediaBindingsLocked() {
+    for (auto& binding : remote_track_sinks_) {
+        if (binding.media_binding) {
+            binding.media_binding->active.store(false, std::memory_order_release);
+        }
+    }
     // Retire the owner's shared media index before releasing room_mutex_. Slow
     // native detach must never clear a replacement's newly installed entries.
     {
@@ -2694,6 +3016,7 @@ void Room::DetachRemotePublicationMedia(RemoteTrackPublication* publication,
     std::shared_ptr<Track> track;
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> detached_rtc_track;
     std::vector<std::shared_ptr<RoomListener>> listeners;
+    std::shared_ptr<MediaBindingState> media_binding;
     uint64_t generation = 0;
     {
         std::lock_guard lock(room_mutex_);
@@ -2710,6 +3033,10 @@ void Room::DetachRemotePublicationMedia(RemoteTrackPublication* publication,
         if (current_serial == current_remote_binding_serials_.end() ||
             current_serial->second != binding_serial) {
             return;
+        }
+        media_binding = FindMediaBindingLocked(binding_serial);
+        if (media_binding) {
+            media_binding->active.store(false, std::memory_order_release);
         }
 
         track = canonical->track();
@@ -2728,11 +3055,16 @@ void Room::DetachRemotePublicationMedia(RemoteTrackPublication* publication,
         }
         // Matches retain_binding's Room -> remote_media_mutex_ lock order.
         RemoveRemoteMediaTrackReferences({track});
-        EnqueueParticipantEventLocked(MakeTrackEventLocked(
+        auto unavailable = MakeTrackEventLocked(
             ParticipantEventKind::TrackUnavailable,
             participant,
             canonical,
-            false));
+            false);
+        if (media_binding) {
+            unavailable.media_binding_key = media_binding->key;
+            unavailable.media_binding_ticket = media_binding;
+        }
+        EnqueueParticipantEventLocked(std::move(unavailable));
         listeners = listeners_;
         generation = session_generation_.load(std::memory_order_acquire);
     }
@@ -2745,7 +3077,23 @@ void Room::DetachRemotePublicationMedia(RemoteTrackPublication* publication,
     if (notify_listener && track) {
         for (const auto& listener : listeners) {
             DeliverListener({generation}, listener, [&](RoomListener& target) {
-                target.OnTrackUnsubscribed(track, canonical, participant);
+                bool current_cleanup = false;
+                {
+                    std::lock_guard lock(room_mutex_);
+                    const auto current_participant =
+                        remote_participants_.find(participant->sid());
+                    const auto current_binding =
+                        current_remote_binding_serials_.find(canonical.get());
+                    current_cleanup =
+                        current_participant != remote_participants_.end() &&
+                        current_participant->second.get() == participant.get() &&
+                        participant->get_remote_publication(canonical->sid()) == canonical &&
+                        (current_binding == current_remote_binding_serials_.end() ||
+                         current_binding->second == binding_serial);
+                }
+                if (current_cleanup) {
+                    target.OnTrackUnsubscribed(track, canonical, participant);
+                }
             }, true);
         }
     }
@@ -3978,6 +4326,9 @@ void Room::AttachRemoteTrackToParticipant(
     ParticipantKey participant_key;
     TrackKey track_key;
     uint64_t binding_serial = 0;
+    SubscriptionIntentKey subscription_key;
+    uint64_t subscription_revision = 0;
+    std::shared_ptr<MediaBindingState> media_binding;
     std::shared_ptr<SignalClient> signal;
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> retired_rtc_track;
     bool native_enabled = true;
@@ -4015,6 +4366,7 @@ void Room::AttachRemoteTrackToParticipant(
             pub = CreateRemoteTrackPublication(
                 r_track,
                 participant->sid(),
+                participant->identity(),
                 track_id,
                 r_track->name(),
                 kind == TrackKind::Audio ? proto::TrackType::AUDIO : proto::TrackType::VIDEO);
@@ -4031,7 +4383,17 @@ void Room::AttachRemoteTrackToParticipant(
         if (!track_membership) return;
         participant_key = membership->key;
         track_key = track_membership->key;
+        subscription_key = MakeSubscriptionIntentKeyLocked(
+            participant->sid(), participant->identity(), track_id);
+        auto& subscription_intent = EnsureSubscriptionIntentLocked(subscription_key);
+        if (!subscription_intent.subscribed ||
+            (remote_publication && !remote_publication->is_subscribed())) {
+            return;
+        }
+        subscription_revision = subscription_intent.revision;
         binding_serial = next_remote_track_binding_serial_++;
+        media_binding = std::make_shared<MediaBindingState>(
+            MediaBindingKey{track_key, binding_serial});
         if (remote_publication && remote_publication->has_media_binding() &&
             remote_publication->media_track_id() != rtc_track_id) {
             const auto existing_serial =
@@ -4057,6 +4419,7 @@ void Room::AttachRemoteTrackToParticipant(
         const auto canonical = remote_participants_.find(participant->sid());
         const auto membership = FindMembershipLocked(participant);
         const auto track_membership = track_memberships_.find(pub.get());
+        const auto* subscription_intent = FindSubscriptionIntentLocked(subscription_key);
         if (connection_state_ == ConnectionState::Disconnected ||
             canonical == remote_participants_.end() ||
             canonical->second.get() != participant.get() ||
@@ -4064,7 +4427,10 @@ void Room::AttachRemoteTrackToParticipant(
             !membership || membership->key != participant_key ||
             track_membership == track_memberships_.end() ||
             track_membership->second->key != track_key ||
-            !track_membership->second->active.load(std::memory_order_acquire)) {
+            !track_membership->second->active.load(std::memory_order_acquire) ||
+            !subscription_intent || !subscription_intent->subscribed ||
+            subscription_intent->revision != subscription_revision ||
+            !remote_publication || !remote_publication->is_subscribed()) {
             return false;
         }
 
@@ -4085,6 +4451,7 @@ void Room::AttachRemoteTrackToParticipant(
         }
         processed_remote_track_ids_.insert(rtc_track_id);
         signal = signal_client_;
+        media_binding->active.store(true, std::memory_order_release);
         remote_track_sinks_.push_back(std::move(binding));
         if (remote_publication) {
             const auto existing_serial =
@@ -4105,6 +4472,7 @@ void Room::AttachRemoteTrackToParticipant(
                     }
                 });
         }
+        QueueSubscriptionUpdateLocked(subscription_key);
         return true;
     };
     const auto configure_native = [&]() {
@@ -4122,7 +4490,8 @@ void Room::AttachRemoteTrackToParticipant(
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
         auto last_voice_log_time = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
         std::weak_ptr<Room> weak_room = weak_from_this();
-        auto sink = std::make_shared<NativeAudioTrackSink>([r_track, has_logged, last_voice_log_time, weak_room, participant](const AudioFrame& frame) {
+        auto sink = std::make_shared<NativeAudioTrackSink>([r_track, has_logged, last_voice_log_time, weak_room, participant, media_binding](const AudioFrame& frame) {
+            if (!media_binding->active.load(std::memory_order_acquire)) return;
             if (r_track) {
                 r_track->notifyAudioFrame(frame);
             }
@@ -4155,6 +4524,7 @@ void Room::AttachRemoteTrackToParticipant(
         RemoteTrackSinkBinding binding{
             track_key,
             binding_serial,
+            media_binding,
             track->id(),
             RemoteTrackSinkThread::Signaling,
             [track, sink]() {
@@ -4173,15 +4543,13 @@ void Room::AttachRemoteTrackToParticipant(
         }
         Log("WEBRTC", "AUDIO_ATTACH", "远端音频轨已绑定至参会人 [" + participant->identity() + "], Track SID=" + track_id + ", 已挂载 NativeAudioTrackSink");
 
-        if (signal) {
-            signal->SendUpdateSubscription({track_id}, true, participant->sid());
-            Log("SIGNAL", "AUDIO_TRACK_ACTIVE", "已向 SFU 激活下行音频流订阅: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
-        }
+        Log("SIGNAL", "AUDIO_TRACK_ACTIVE", "已协调 SFU 下行音频流订阅: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
     } else {
         auto video_track = static_cast<webrtc::VideoTrackInterface*>(track.get());
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
         std::weak_ptr<Room> weak_room = weak_from_this();
-        auto sink = std::make_shared<NativeVideoTrackSink>([r_track, has_logged, weak_room](render::OwnedI420Frame::Ptr frame) {
+        auto sink = std::make_shared<NativeVideoTrackSink>([r_track, has_logged, weak_room, media_binding](render::OwnedI420Frame::Ptr frame) {
+            if (!media_binding->active.load(std::memory_order_acquire)) return;
             if (r_track) {
                 r_track->notifyI420VideoFrame(frame);
             }
@@ -4197,6 +4565,7 @@ void Room::AttachRemoteTrackToParticipant(
         RemoteTrackSinkBinding binding{
             track_key,
             binding_serial,
+            media_binding,
             track->id(),
             RemoteTrackSinkThread::MediaWorker,
             [track, sink]() {
@@ -4217,8 +4586,7 @@ void Room::AttachRemoteTrackToParticipant(
 
         if (signal) {
             signal->SendUpdateTrackSettings(track_id, false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
-            signal->SendUpdateSubscription({track_id}, true, participant->sid());
-            Log("SIGNAL", "TRACK_ACTIVE", "已向 SFU 激活下行视频流: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
+            Log("SIGNAL", "TRACK_ACTIVE", "已协调 SFU 下行视频流订阅: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
         }
     }
 
@@ -4230,6 +4598,7 @@ void Room::AttachRemoteTrackToParticipant(
         const auto canonical = remote_participants_.find(participant->sid());
         const auto membership = FindMembershipLocked(participant);
         const auto track_membership = track_memberships_.find(pub.get());
+        const auto* subscription_intent = FindSubscriptionIntentLocked(subscription_key);
         still_current = (generation == 0 || IsNativeGenerationCurrentLocked(generation)) &&
             connection_state_ != ConnectionState::Disconnected &&
             canonical != remote_participants_.end() &&
@@ -4239,15 +4608,21 @@ void Room::AttachRemoteTrackToParticipant(
             track_membership != track_memberships_.end() &&
             track_membership->second->key == track_key &&
             track_membership->second->active.load(std::memory_order_acquire) &&
+            subscription_intent && subscription_intent->subscribed &&
+            subscription_intent->revision == subscription_revision &&
+            media_binding->active.load(std::memory_order_acquire) &&
             (!remote_publication ||
              (current_remote_binding_serials_.contains(remote_publication.get()) &&
               current_remote_binding_serials_.at(remote_publication.get()) == binding_serial));
         if (still_current) {
-            EnqueueParticipantEventLocked(MakeTrackEventLocked(
+            auto available = MakeTrackEventLocked(
                 ParticipantEventKind::TrackAvailable,
                 participant,
                 pub,
-                false));
+                false);
+            available.media_binding_key = media_binding->key;
+            available.media_binding_ticket = media_binding;
+            EnqueueParticipantEventLocked(std::move(available));
             listeners = listeners_;
         }
     }
@@ -4261,8 +4636,11 @@ void Room::AttachRemoteTrackToParticipant(
         return;
     }
     for (const auto& l : listeners) {
+        if (!media_binding->active.load(std::memory_order_acquire)) break;
         DeliverListener({delivery_generation, {}, generation != 0}, l, [&](RoomListener& target) {
-            target.OnTrackSubscribed(r_track, pub, participant);
+            if (media_binding->active.load(std::memory_order_acquire)) {
+                target.OnTrackSubscribed(r_track, pub, participant);
+            }
         }, true);
     }
 }
@@ -4429,6 +4807,7 @@ void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation
                            reconnect_attempts_ < kMaxReconnectAttempts) {
                     connection_state_ = ConnectionState::Reconnecting;
                     reconnect_attempts_++;
+                    PauseSubscriptionSendingLocked();
                     should_reconnect = true;
                     reconnect_generation = session_generation_.load(std::memory_order_acquire);
                 } else if (connection_state_ == ConnectionState::Connecting) {
@@ -4819,6 +5198,10 @@ void Room::UpdateParticipants(
             if (p_info.state() == proto::ParticipantInfo::DISCONNECTED) {
                 if (it != remote_participants_.end()) {
                     for (const auto& [sid, publication] : it->second->tracks()) {
+                        const auto intent_key = MakeSubscriptionIntentKeyLocked(
+                            it->second->sid(), it->second->identity(), sid);
+                        subscription_intents_.erase(intent_key);
+                        pending_subscription_updates_.erase(intent_key);
                         if (publication) {
                             if (const auto track = publication->track()) {
                                 removed_tracks.push_back(track);
@@ -4832,6 +5215,13 @@ void Room::UpdateParticipants(
                         }
                         if (const auto remote_publication =
                                 std::dynamic_pointer_cast<RemoteTrackPublication>(publication)) {
+                            const auto current =
+                                current_remote_binding_serials_.find(remote_publication.get());
+                            if (current != current_remote_binding_serials_.end()) {
+                                if (const auto media_binding = FindMediaBindingLocked(current->second)) {
+                                    media_binding->active.store(false, std::memory_order_release);
+                                }
+                            }
                             current_remote_binding_serials_.erase(remote_publication.get());
                             remote_publication->ClearMediaBinding();
                         }
@@ -4896,10 +5286,15 @@ void Room::UpdateParticipants(
                         // exact object and its eventual sink binding.
                         pub = CreateRemoteTrackPublication(remote_track,
                                                            p_info.sid(),
+                                                           p_info.identity(),
                                                            t_info.sid(),
                                                            t_info.name(),
                                                            t_info.type());
                         remote->add_publication(pub);
+                        const auto intent_key = MakeSubscriptionIntentKeyLocked(
+                            remote->sid(), remote->identity(), t_info.sid());
+                        EnsureSubscriptionIntentLocked(intent_key);
+                        QueueSubscriptionUpdateLocked(intent_key);
                         newly_published_tracks.push_back({remote, pub});
                         Log("TRACK", "NEW_TRACK", "参会人 [" + remote->identity() + "] 发布新 Track: " + t_info.name() + " (" + (kind == TrackKind::Video ? "VIDEO" : "AUDIO") + ", SID: " + t_info.sid() + ", Muted: " + (t_info.muted() ? "true" : "false") + ")");
                     } else {
@@ -4921,9 +5316,20 @@ void Room::UpdateParticipants(
                 auto existing_tracks = remote->tracks();
                 for (const auto& [sid, pub] : existing_tracks) {
                     if (current_track_sids.find(sid) == current_track_sids.end()) {
+                        const auto intent_key = MakeSubscriptionIntentKeyLocked(
+                            remote->sid(), remote->identity(), sid);
+                        subscription_intents_.erase(intent_key);
+                        pending_subscription_updates_.erase(intent_key);
                         if (pub && pub->track()) removed_tracks.push_back(pub->track());
                         if (const auto remote_publication =
                                 std::dynamic_pointer_cast<RemoteTrackPublication>(pub)) {
+                            const auto current =
+                                current_remote_binding_serials_.find(remote_publication.get());
+                            if (current != current_remote_binding_serials_.end()) {
+                                if (const auto media_binding = FindMediaBindingLocked(current->second)) {
+                                    media_binding->active.store(false, std::memory_order_release);
+                                }
+                            }
                             current_remote_binding_serials_.erase(remote_publication.get());
                             remote_publication->ClearMediaBinding();
                         }
@@ -4963,14 +5369,14 @@ void Room::UpdateParticipants(
     bool has_new_video_pub = false;
     for (const auto& [p, pub] : newly_published_tracks) {
         FlushPendingTracks(p->sid(), event_generation);
-        if (signal_snapshot) {
-            const bool auto_sub = signal_snapshot->options().auto_subscribe;
-            if (auto_sub) {
-                if (pub->track() && pub->track()->kind() == TrackKind::Video) {
-                    signal_snapshot->SendUpdateTrackSettings(pub->sid(), false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
-                    has_new_video_pub = true;
-                }
-                signal_snapshot->SendUpdateSubscription({pub->sid()}, true, p->sid());
+        if (signal_snapshot && pub->track() &&
+            pub->track()->kind() == TrackKind::Video) {
+            const auto remote_publication =
+                std::dynamic_pointer_cast<RemoteTrackPublication>(pub);
+            if (remote_publication && remote_publication->is_subscribed()) {
+                signal_snapshot->SendUpdateTrackSettings(
+                    pub->sid(), false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
+                has_new_video_pub = true;
             }
         }
         for (const auto& listener : listeners_snapshot) {
@@ -5817,7 +6223,7 @@ void Room::HandleMediaSectionsRequirement(
     }
 }
 
-proto::SyncState Room::BuildSyncState() const {
+proto::SyncState Room::BuildSyncState(SubscriptionSyncSnapshot* snapshot) const {
     proto::SyncState state;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> sync_pc;
     webrtc::scoped_refptr<webrtc::DataChannelInterface> reliable;
@@ -5826,18 +6232,43 @@ proto::SyncState Room::BuildSyncState() const {
     std::shared_ptr<LocalParticipant> local;
     bool single_pc = false;
     bool auto_subscribe = true;
+    std::map<std::string, std::vector<std::string>> subscription_exceptions;
     {
         std::lock_guard lock(room_mutex_);
+        if (snapshot) {
+            snapshot->logical_session = subscription_session_generation_;
+            snapshot->revisions.clear();
+        }
         single_pc = signal_client_ && signal_client_->is_single_pc_mode_active();
-        auto_subscribe = signal_client_ ? signal_client_->options().auto_subscribe : true;
+        auto_subscribe = session_auto_subscribe_;
         sync_pc = single_pc ? publisher_pc_ : subscriber_pc_;
         reliable = reliable_dc_;
         lossy = lossy_dc_;
         remote_channels = remote_data_channels_;
         local = local_participant_;
+        for (const auto& [key, intent] : subscription_intents_) {
+            if (snapshot) snapshot->revisions[key] = intent.revision;
+            if (intent.subscribed == auto_subscribe) continue;
+            const auto participant = remote_participants_.find(key.participant_sid);
+            if (participant == remote_participants_.end() || !participant->second ||
+                participant->second->identity() != key.participant_identity ||
+                !participant->second->get_publication(key.track_sid)) {
+                continue;
+            }
+            subscription_exceptions[key.participant_sid].push_back(key.track_sid);
+        }
     }
 
-    state.mutable_subscription()->set_subscribe(!auto_subscribe);
+    auto* subscription = state.mutable_subscription();
+    subscription->set_subscribe(!auto_subscribe);
+    for (const auto& [participant_sid, track_sids] : subscription_exceptions) {
+        auto* participant_tracks = subscription->add_participant_tracks();
+        participant_tracks->set_participant_sid(participant_sid);
+        for (const auto& track_sid : track_sids) {
+            subscription->add_track_sids(track_sid);
+            participant_tracks->add_track_sids(track_sid);
+        }
+    }
 
     if (local) {
         for (const auto& [sid, publication] : local->tracks()) {
@@ -6015,8 +6446,42 @@ asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
                                          true);
                 }
 
+                SubscriptionSyncSnapshot subscription_snapshot;
                 proto::SignalRequest sync_request;
-                *sync_request.mutable_sync_state() = BuildSyncState();
+                *sync_request.mutable_sync_state() =
+                    BuildSyncState(&subscription_snapshot);
+                std::shared_ptr<ConnectAttemptTestHooks> test_hooks;
+                {
+                    std::lock_guard lock(room_mutex_);
+                    if (!IsSignalGenerationCurrentLocked(reconnect_generation) ||
+                        installed_session_generation_ != reconnect_generation ||
+                        signal_client_ != signal ||
+                        subscription_snapshot.logical_session !=
+                            subscription_session_generation_) {
+                        throw OperationError(OperationKind::Reconnect,
+                                             OperationErrorCode::Cancelled,
+                                             "sync_state_admission",
+                                             "reconnect was replaced before SyncState");
+                    }
+                    test_hooks = connect_attempt_test_hooks_;
+                }
+                if (test_hooks && test_hooks->before_subscription_sync_send) {
+                    co_await test_hooks->before_subscription_sync_send(
+                        sync_request.sync_state());
+                }
+                {
+                    std::lock_guard lock(room_mutex_);
+                    if (!IsSignalGenerationCurrentLocked(reconnect_generation) ||
+                        installed_session_generation_ != reconnect_generation ||
+                        signal_client_ != signal ||
+                        subscription_snapshot.logical_session !=
+                            subscription_session_generation_) {
+                        throw OperationError(OperationKind::Reconnect,
+                                             OperationErrorCode::Cancelled,
+                                             "sync_state_send",
+                                             "reconnect was replaced before SyncState send");
+                    }
+                }
                 co_await signal->SendAsync(sync_request);
                 signal->SetReconnected();
                 signal->SetEventReady();
@@ -6046,7 +6511,9 @@ asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
                     connection_state_ = ConnectionState::Connected;
                     reconnect_attempts_ = 0;
                     reconnect_active_ = false;
+                    FinishSubscriptionRecoveryLocked(subscription_snapshot, signal);
                     EnqueueRosterLocked();
+                    ScheduleSubscriptionDrainLocked();
                     reconnected_delivery.kind = LifecycleListenerEventKind::Reconnected;
                     reconnected_delivery.generation = reconnect_generation;
                     reconnected_delivery.required_state = ConnectionState::Connected;
@@ -6183,6 +6650,8 @@ asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
                     }
                     reconnect_attempts_ = 0;
                     reconnect_active_ = false;
+                    subscription_recovery_barrier_ = false;
+                    ScheduleSubscriptionDrainLocked();
                     if (local_participant_) {
                         EnqueueParticipantEventLocked(MakeParticipantEventLocked(
                             ParticipantEventKind::Upsert,
@@ -6293,6 +6762,7 @@ asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
         track_sinks = std::move(remote_track_sinks_);
         processed_remote_track_ids_.clear();
         pending_track_queue_.clear();
+        ClearSubscriptionSessionLocked();
         connection_state_ = ConnectionState::Disconnected;
         reconnect_active_ = false;
         suppress_next_connected_event_ = false;

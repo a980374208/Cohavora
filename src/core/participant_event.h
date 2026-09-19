@@ -55,6 +55,24 @@ struct TrackMembershipState {
 
 using TrackTicket = std::weak_ptr<const TrackMembershipState>;
 
+struct MediaBindingKey {
+    TrackKey track;
+    uint64_t serial = 0;
+
+    bool operator==(const MediaBindingKey& other) const {
+        return track == other.track && serial == other.serial;
+    }
+    bool operator!=(const MediaBindingKey& other) const { return !(*this == other); }
+};
+
+struct MediaBindingState {
+    explicit MediaBindingState(MediaBindingKey value) : key(std::move(value)) {}
+    const MediaBindingKey key;
+    std::atomic<bool> active{false};
+};
+
+using MediaBindingTicket = std::weak_ptr<const MediaBindingState>;
+
 inline bool IsParticipantTicketActive(const ParticipantTicket& ticket,
                                       const ParticipantKey& expected) {
     const auto state = ticket.lock();
@@ -64,6 +82,13 @@ inline bool IsParticipantTicketActive(const ParticipantTicket& ticket,
 inline bool IsTrackTicketActive(const TrackTicket& ticket, const TrackKey& expected) {
     const auto state = ticket.lock();
     return state && state->key == expected && state->active.load(std::memory_order_acquire);
+}
+
+inline bool IsMediaBindingTicketActive(const MediaBindingTicket& ticket,
+                                       const MediaBindingKey& expected) {
+    const auto state = ticket.lock();
+    return state && state->key == expected &&
+        state->active.load(std::memory_order_acquire);
 }
 
 enum class ParticipantEventKind {
@@ -121,6 +146,8 @@ struct ParticipantEvent {
     ParticipantSnapshotEvent participant;
     TrackKey track_key;
     TrackTicket track_ticket;
+    MediaBindingKey media_binding_key;
+    MediaBindingTicket media_binding_ticket;
     TrackPublication::StateSnapshot publication;
     std::vector<ActiveSpeakerInfo> speakers;
     SenderContext sender;

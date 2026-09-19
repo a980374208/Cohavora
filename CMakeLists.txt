@@ -133,6 +133,12 @@ set(LIVEKIT_SOURCES
     src/telemetry/stats_collector.cpp
 )
 
+if(MSVC)
+    # Room's coroutine-heavy state machine exceeds the default COFF section
+    # count once the subscription owner protocol is included.
+    set_source_files_properties(src/core/room.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+endif()
+
 # 头文件列表
 set(LIVEKIT_HEADERS
     src/media/audio_apm.h

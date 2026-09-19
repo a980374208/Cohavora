@@ -48,7 +48,8 @@ public:
                            std::string name,
                            proto::TrackType type,
                            uint64_t session_generation,
-                           ControlHandler controller = {});
+                           ControlHandler controller = {},
+                           bool initially_subscribed = true);
 
     // Compatibility constructor for synthetic/test-only tiles. It creates a
     // real TrackPublication base object but cannot control a live Room.
@@ -100,6 +101,8 @@ private:
     uint32_t height_{0};
     uint32_t priority_{0};
     uint64_t next_control_sequence_{1};
+    uint64_t last_subscription_sequence_{0};
+    uint64_t last_settings_sequence_{0};
     std::string media_track_id_;
     MediaDetachHandler media_detach_handler_;
 };

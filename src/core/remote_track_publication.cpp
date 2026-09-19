@@ -16,11 +16,13 @@ RemoteTrackPublication::RemoteTrackPublication(std::shared_ptr<Track> track,
                                                std::string name,
                                                proto::TrackType type,
                                                uint64_t session_generation,
-                                               ControlHandler controller)
+                                               ControlHandler controller,
+                                               bool initially_subscribed)
     : TrackPublication(std::move(track), sid, name),
       type_(type),
       session_generation_(session_generation),
-      control_handler_(std::move(controller)) {}
+      control_handler_(std::move(controller)),
+      subscribed_(initially_subscribed) {}
 
 RemoteTrackPublication::RemoteTrackPublication(std::string sid,
                                                std::string name,
@@ -134,6 +136,13 @@ bool RemoteTrackPublication::DispatchControl(RemotePublicationControlRequest req
 
 void RemoteTrackPublication::CommitControl(const RemotePublicationControlRequest& request) {
     std::lock_guard lock(mutex_);
+    if (request.kind == RemotePublicationControlRequest::Kind::Subscription) {
+        if (request.sequence != 0 && request.sequence <= last_subscription_sequence_) return;
+        if (request.sequence != 0) last_subscription_sequence_ = request.sequence;
+    } else {
+        if (request.sequence != 0 && request.sequence <= last_settings_sequence_) return;
+        if (request.sequence != 0) last_settings_sequence_ = request.sequence;
+    }
     if (request.subscribed.has_value()) subscribed_ = *request.subscribed;
     if (request.enabled.has_value()) enabled_ = *request.enabled;
     if (request.quality.has_value()) current_quality_ = *request.quality;

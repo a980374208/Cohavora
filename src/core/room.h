@@ -12,6 +12,7 @@
 #include <chrono>
 #include <functional>
 #include <optional>
+#include <tuple>
 #include <asio.hpp>
 #include "signal_client.h"
 #include "participant.h"
@@ -313,6 +314,8 @@ private:
     std::shared_ptr<LocalUnpublishTestHooks> local_unpublish_test_hooks_;
     struct ConnectAttemptTestHooks {
         std::function<asio::awaitable<void>(uint64_t)> before_join_commit;
+        std::function<asio::awaitable<void>(bool, uint64_t)> before_subscription_send;
+        std::function<asio::awaitable<void>(const proto::SyncState&)> before_subscription_sync_send;
         std::function<void(uint64_t)> before_signal_event_commit;
         std::function<void(uint64_t, ConnectionState)> before_lifecycle_listener_delivery;
         std::function<void(uint64_t)> before_native_event_commit;
@@ -411,9 +414,56 @@ private:
     void UpdateTrackSubscriptionPermission(
         const proto::SubscriptionPermissionUpdate& update,
         uint64_t event_generation = 0);
+    struct SubscriptionIntentKey {
+        std::string participant_sid;
+        std::string participant_identity;
+        std::string track_sid;
+
+        bool operator<(const SubscriptionIntentKey& other) const {
+            return std::tie(participant_sid, participant_identity, track_sid) <
+                std::tie(other.participant_sid, other.participant_identity, other.track_sid);
+        }
+    };
+    struct RemoteSubscriptionIntent {
+        bool subscribed = true;
+        uint64_t revision = 0;
+        uint64_t last_request_sequence = 0;
+    };
+    struct PendingSubscriptionUpdate {
+        bool subscribed = true;
+        uint64_t revision = 0;
+    };
+    struct SubscriptionSyncSnapshot {
+        uint64_t logical_session = 0;
+        std::map<SubscriptionIntentKey, uint64_t> revisions;
+    };
+    SubscriptionIntentKey MakeSubscriptionIntentKeyLocked(
+        const std::string& participant_sid,
+        const std::string& participant_identity,
+        const std::string& track_sid) const;
+    RemoteSubscriptionIntent& EnsureSubscriptionIntentLocked(
+        const SubscriptionIntentKey& key);
+    const RemoteSubscriptionIntent* FindSubscriptionIntentLocked(
+        const SubscriptionIntentKey& key) const;
+    void QueueSubscriptionUpdateLocked(const SubscriptionIntentKey& key);
+    void ScheduleSubscriptionDrainLocked();
+    asio::awaitable<void> DrainSubscriptionUpdates(
+        uint64_t logical_session,
+        uint64_t sender_operation,
+        std::shared_ptr<SignalClient> signal);
+    void PauseSubscriptionSendingLocked();
+    void FinishSubscriptionRecoveryLocked(
+        const SubscriptionSyncSnapshot& snapshot,
+        const std::shared_ptr<SignalClient>& signal);
+    void ResetSubscriptionSessionLocked(bool auto_subscribe);
+    void ClearSubscriptionSessionLocked();
+    void PruneSubscriptionIntentsLocked();
+    std::shared_ptr<MediaBindingState> FindMediaBindingLocked(
+        uint64_t binding_serial) const;
     std::shared_ptr<RemoteTrackPublication> CreateRemoteTrackPublication(
         std::shared_ptr<Track> track,
         const std::string& participant_sid,
+        const std::string& participant_identity,
         const std::string& track_sid,
         const std::string& name,
         proto::TrackType type);
@@ -475,7 +525,7 @@ private:
     void HandleMediaSectionsRequirement(
         const proto::MediaSectionsRequirement& req,
         uint64_t event_generation = 0);
-    proto::SyncState BuildSyncState() const;
+    proto::SyncState BuildSyncState(SubscriptionSyncSnapshot* snapshot = nullptr) const;
     static RoomDisconnectReason ToRoomDisconnectReason(proto::DisconnectReason reason);
     void BeginServerDisconnect(
         RoomDisconnectReason reason,
@@ -567,6 +617,7 @@ private:
     struct RemoteTrackSinkBinding {
         TrackKey track_key;
         uint64_t binding_serial = 0;
+        std::shared_ptr<MediaBindingState> media_binding;
         std::string rtc_track_id;
         RemoteTrackSinkThread detach_thread;
         // Keeps both the WebRTC track and its native sink alive. Calling this
@@ -623,6 +674,17 @@ private:
     // Signal/Room/WebRTC bundle. Validity may advance before cleanup runs, so
     // it cannot also serve as the resource owner token.
     uint64_t installed_session_generation_ = 0;
+    uint64_t subscription_session_generation_ = 0;
+    uint64_t next_subscription_revision_ = 1;
+    uint64_t next_subscription_sender_operation_ = 1;
+    bool session_auto_subscribe_ = true;
+    bool subscription_recovery_barrier_ = false;
+    std::string subscription_room_sid_;
+    std::map<SubscriptionIntentKey, RemoteSubscriptionIntent> subscription_intents_;
+    std::map<SubscriptionIntentKey, PendingSubscriptionUpdate> pending_subscription_updates_;
+    bool subscription_sender_active_ = false;
+    uint64_t subscription_sender_session_ = 0;
+    uint64_t subscription_sender_operation_ = 0;
     OperationTimeouts operation_timeouts_;
     int primary_pc_type_ = 0;
     bool require_media_connection_ = true;

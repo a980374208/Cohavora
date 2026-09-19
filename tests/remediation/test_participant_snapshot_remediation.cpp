@@ -96,6 +96,11 @@ public:
 namespace livekit {
 class ParticipantSnapshotRoomTestAccess final {
 public:
+    using BeforeSubscriptionSend =
+        std::function<asio::awaitable<void>(bool, uint64_t)>;
+    using BeforeSubscriptionSyncSend =
+        std::function<asio::awaitable<void>(const proto::SyncState&)>;
+
     static void establishLocalConnectedPrecondition(Room &room) {
         std::lock_guard lock(room.room_mutex_);
         room.connection_state_ = ConnectionState::Connected;
@@ -103,6 +108,30 @@ public:
     static void attach(Room &room, const std::shared_ptr<RemoteParticipant> &participant,
         webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, const std::string &sid) {
         room.AttachRemoteTrackToParticipant(participant, std::move(track), nullptr, sid);
+    }
+    static std::size_t bindingCount(Room &room) {
+        std::lock_guard lock(room.room_mutex_);
+        return room.remote_track_sinks_.size();
+    }
+    static void setSubscriptionHooks(
+            Room &room,
+            BeforeSubscriptionSend beforeSend,
+            BeforeSubscriptionSyncSend beforeSyncSend) {
+        std::lock_guard lock(room.room_mutex_);
+        if (!room.connect_attempt_test_hooks_) {
+            room.connect_attempt_test_hooks_ =
+                std::make_shared<Room::ConnectAttemptTestHooks>();
+        }
+        room.connect_attempt_test_hooks_->before_subscription_send =
+            std::move(beforeSend);
+        room.connect_attempt_test_hooks_->before_subscription_sync_send =
+            std::move(beforeSyncSend);
+    }
+    static void clearSubscriptionHooks(Room &room) {
+        std::lock_guard lock(room.room_mutex_);
+        if (!room.connect_attempt_test_hooks_) return;
+        room.connect_attempt_test_hooks_->before_subscription_send = {};
+        room.connect_attempt_test_hooks_->before_subscription_sync_send = {};
     }
 };
 } // namespace livekit
@@ -169,17 +198,23 @@ void WindowDrainQt() {
     QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 }
 
-livekit::proto::ParticipantUpdate WindowParticipant(const std::string &name, bool active = true, bool video = true) {
+livekit::proto::ParticipantUpdate WindowParticipant(
+        const std::string &name,
+        bool active = true,
+        bool video = true,
+        const std::string &participantSid = "PA_WINDOW",
+        const std::string &trackSid = "TR_PA_WINDOW",
+        const std::string &identity = "window-peer") {
     livekit::proto::ParticipantUpdate update;
     auto *participant = update.add_participants();
-    participant->set_sid("PA_WINDOW"); participant->set_identity("window-peer"); participant->set_name(name);
+    participant->set_sid(participantSid); participant->set_identity(identity); participant->set_name(name);
     participant->set_state(active ? livekit::proto::ParticipantInfo::ACTIVE : livekit::proto::ParticipantInfo::DISCONNECTED);
     participant->mutable_permission()->set_can_subscribe(true);
     participant->mutable_permission()->set_can_publish(true);
     participant->mutable_permission()->set_can_publish_data(true);
     if (active && video) {
         auto *track = participant->add_tracks();
-        track->set_sid("TR_PA_WINDOW"); track->set_name("window-video"); track->set_type(livekit::proto::TrackType::VIDEO);
+        track->set_sid(trackSid); track->set_name("window-video"); track->set_type(livekit::proto::TrackType::VIDEO);
     }
     return update;
 }
@@ -289,7 +324,7 @@ public:
         room->UpdateParticipantsForTesting(WindowParticipant(name));
         return attachExisting(rtcId);
     }
-    WindowMedia attachExisting(const std::string &rtcId) {
+    WindowMedia attachExisting(const std::string &rtcId, bool drain = true) {
         auto participant = room->remote_participants().at("PA_WINDOW");
         WindowMedia media;
         media.source = webrtc::make_ref_counted<WindowMemoryVideoSource>();
@@ -298,7 +333,7 @@ public:
         livekit::ParticipantSnapshotRoomTestAccess::attach(*room, participant, media.rtc, "TR_PA_WINDOW");
         media.track = participant->get_publication("TR_PA_WINDOW")->track();
         TEST_CHECK(media.track && media.track->rtc_track().get() == media.rtc.get());
-        pump();
+        if (drain) pump();
         return media;
     }
     void open() { window = ParticipantWindowTestAccess::create(coordinator); }
@@ -558,11 +593,18 @@ public:
         }
     }
     bool rejectResume = false;
+    bool addRestartTrack = false;
     bool protocolFailure = false;
+    std::string restartRoomSid = "RM_WINDOW_LOOPBACK";
+    std::string restartParticipantSid = "PA_WINDOW";
+    std::string restartParticipantIdentity = "window-peer";
     int joins = 0;
     int resumes = 0;
     int rejectedResumes = 0;
     int syncStates = 0;
+    std::vector<livekit::proto::SyncState> syncStateMessages;
+    std::vector<livekit::proto::UpdateSubscription> subscriptionMessages;
+    std::vector<std::string> subscriptionWireOrder;
 private:
     void send(const std::shared_ptr<Connection> &connection, const livekit::proto::SignalResponse &response) {
         std::string payload;
@@ -632,7 +674,8 @@ private:
             ++joins;
             auto *join = initial.mutable_join();
             join->set_ping_interval(10); join->set_ping_timeout(20);
-            join->mutable_room()->set_sid("RM_WINDOW_LOOPBACK");
+            join->mutable_room()->set_sid(
+                joins == 1 ? "RM_WINDOW_LOOPBACK" : restartRoomSid);
             join->mutable_room()->set_name("window-loopback");
             auto *local = join->mutable_participant();
             local->set_sid("PA_WINDOW_LOCAL"); local->set_identity("local-user");
@@ -641,7 +684,18 @@ private:
             local->mutable_permission()->set_can_publish(true);
             local->mutable_permission()->set_can_publish_data(true);
             *join->add_other_participants() = WindowParticipant(
-                joins == 1 ? "join-window-peer" : "restart-window-peer").participants(0);
+                joins == 1 ? "join-window-peer" : "restart-window-peer",
+                true,
+                true,
+                joins == 1 ? "PA_WINDOW" : restartParticipantSid,
+                "TR_PA_WINDOW",
+                joins == 1 ? "window-peer" : restartParticipantIdentity).participants(0);
+            if (joins > 1 && addRestartTrack) {
+                auto *track = join->mutable_other_participants(0)->add_tracks();
+                track->set_sid("TR_PA_WINDOW_NEW");
+                track->set_name("window-video-new");
+                track->set_type(livekit::proto::TrackType::VIDEO);
+            }
             join->mutable_client_configuration()->set_resume_connection(livekit::proto::ClientConfigSetting::ENABLED);
         }
         send(connection, initial);
@@ -678,7 +732,17 @@ private:
             if (opcode == 10) continue;
             livekit::proto::SignalRequest signal;
             if (opcode != 2 || !signal.ParseFromString(payload)) { protocolFailure = true; co_return; }
-            if (signal.has_sync_state()) ++syncStates;
+            if (signal.has_sync_state()) {
+                ++syncStates;
+                syncStateMessages.push_back(signal.sync_state());
+                subscriptionWireOrder.push_back(std::string("sync:") +
+                    (signal.sync_state().subscription().subscribe() ? "true" : "false"));
+            }
+            if (signal.has_subscription()) {
+                subscriptionMessages.push_back(signal.subscription());
+                subscriptionWireOrder.push_back(std::string("update:") +
+                    (signal.subscription().subscribe() ? "true" : "false"));
+            }
             if (signal.has_ping_req()) {
                 livekit::proto::SignalResponse pong;
                 pong.mutable_pong_resp()->set_last_ping_timestamp(signal.ping_req().timestamp());
@@ -710,11 +774,15 @@ void WindowPumpUntil(WindowFixture &fixture, Predicate complete, const char *bou
     fixture.pump();
 }
 
-void WindowConnect(WindowFixture &fixture, const std::shared_ptr<WindowLoopbackServer> &server) {
+void WindowConnect(WindowFixture &fixture,
+                   const std::shared_ptr<WindowLoopbackServer> &server,
+                   bool autoSubscribe = true,
+                   int expectedJoins = 1) {
     const std::string url = "ws://127.0.0.1:" + std::to_string(server->port());
     const std::string token = "ida2-window-local-test-token";
     livekit::SignalOptions options;
     options.allow_insecure_transport = true;
+    options.auto_subscribe = autoSubscribe;
     options.single_peer_connection = false;
     options.create_webrtc_pc = false;
     options.timeouts.reconnect_attempt = std::chrono::milliseconds(800);
@@ -730,7 +798,8 @@ void WindowConnect(WindowFixture &fixture, const std::shared_ptr<WindowLoopbackS
         catch (const std::exception &error) { std::cerr << "AK_WINDOW_CONNECT " << error.what() << std::endl; }
     }
     TEST_CHECK(!failure && fixture.room->connection_state() == livekit::ConnectionState::Connected);
-    TEST_CHECK(server->joins == 1 && !server->protocolFailure && fixture.observer->connected == 1);
+    TEST_CHECK(server->joins == expectedJoins && !server->protocolFailure &&
+        fixture.observer->connected == expectedJoins);
     // Network Connect is real. Local capture/HTTP startup is deliberately a
     // pre-established premise; this does not pretend to validate devices.
     OpenMeeting::MeetingCoordinatorTestAccess::commitLocalStartupPrecondition(*fixture.coordinator);
@@ -1005,6 +1074,481 @@ void AkWindowFullRestart() {
                  "old-Qt-values+frames-rejected/new-frame PASS" << std::endl;
 }
 
+bool SubscriptionContains(const livekit::proto::UpdateSubscription &subscription,
+                          const std::string &participantSid,
+                          const std::string &trackSid) {
+    const bool flat = std::find(subscription.track_sids().begin(),
+        subscription.track_sids().end(), trackSid) != subscription.track_sids().end();
+    const bool scoped = std::any_of(
+        subscription.participant_tracks().begin(),
+        subscription.participant_tracks().end(),
+        [&](const auto &participant) {
+            return participant.participant_sid() == participantSid &&
+                std::find(participant.track_sids().begin(),
+                    participant.track_sids().end(), trackSid) !=
+                    participant.track_sids().end();
+        });
+    return flat && scoped;
+}
+
+bool HasSubscriptionSince(
+        const WindowLoopbackServer &server,
+        std::size_t begin,
+        const std::string &participantSid,
+        const std::string &trackSid,
+        bool subscribed) {
+    return std::any_of(
+        server.subscriptionMessages.begin() +
+            std::min(begin, server.subscriptionMessages.size()),
+        server.subscriptionMessages.end(),
+        [&](const auto &message) {
+            return message.subscribe() == subscribed &&
+                SubscriptionContains(message, participantSid, trackSid);
+        });
+}
+
+void GapWindowSoftResumeUnsubscribe() {
+    WindowFixture fixture(false);
+    auto server = std::make_shared<WindowLoopbackServer>(fixture.io);
+    WindowServerGuard stop{server};
+    server->start();
+    WindowConnect(fixture, server);
+    auto media = fixture.attachExisting("gap-soft-resume");
+    const auto participant = fixture.room->remote_participants().at("PA_WINDOW");
+    const auto publication = participant->get_remote_publication("TR_PA_WINDOW");
+    TEST_CHECK(publication && publication->SetSubscribed(false));
+    WindowPumpUntil(fixture, [&] {
+        return !server->subscriptionMessages.empty() &&
+            !server->subscriptionMessages.back().subscribe() &&
+            SubscriptionContains(server->subscriptionMessages.back(),
+                "PA_WINDOW", "TR_PA_WINDOW");
+    }, "gap-soft-unsubscribe-wire");
+    TEST_CHECK(!publication->is_subscribed());
+    TEST_CHECK(!publication->track()->rtc_track());
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room) == 0);
+
+    server->closeActive();
+    WindowPumpUntil(fixture, [&] {
+        return fixture.observer->reconnected == 1 && server->syncStates == 1;
+    }, "gap-soft-resume");
+    TEST_CHECK(server->syncStateMessages.size() == 1);
+    const auto &subscription = server->syncStateMessages.front().subscription();
+    TEST_CHECK(!subscription.subscribe());
+    TEST_CHECK(SubscriptionContains(subscription, "PA_WINDOW", "TR_PA_WINDOW"));
+    TEST_CHECK(publication->is_subscribed() == false);
+    TEST_CHECK(!publication->track()->rtc_track());
+    media.source->push(115, 41000);
+    TEST_CHECK(!media.track->rtc_track());
+    TEST_CHECK(!server->protocolFailure);
+    std::cout << "GAP_P1_03_CASE_4 real-soft-resume/SyncState/unsubscribe/no-sink PASS" << std::endl;
+}
+
+void GapWindowFullRestartUnsubscribe() {
+    WindowFixture fixture(false);
+    auto server = std::make_shared<WindowLoopbackServer>(fixture.io);
+    WindowServerGuard stop{server};
+    server->start();
+    WindowConnect(fixture, server);
+    const auto originalParticipant = fixture.room->remote_participants().at("PA_WINDOW");
+    const auto original = originalParticipant->get_remote_publication("TR_PA_WINDOW");
+    TEST_CHECK(original && original->SetSubscribed(true));
+    TEST_CHECK(original->SetSubscribed(false));
+    WindowPumpUntil(fixture, [&] {
+        return !server->subscriptionMessages.empty() &&
+            !server->subscriptionMessages.back().subscribe();
+    }, "gap-full-unsubscribe-wire");
+
+    const auto restartMessages = server->subscriptionMessages.size();
+    server->addRestartTrack = true;
+    server->rejectResume = true;
+    server->closeActive();
+    WindowPumpUntil(fixture, [&] {
+        return server->joins == 2 && fixture.observer->reconnected == 1 &&
+            fixture.room->connection_state() == livekit::ConnectionState::Connected;
+    }, "gap-full-restart");
+    const auto successorParticipant = fixture.room->remote_participants().at("PA_WINDOW");
+    const auto successor = successorParticipant->get_remote_publication("TR_PA_WINDOW");
+    const auto newTrack = successorParticipant->get_remote_publication("TR_PA_WINDOW_NEW");
+    TEST_CHECK(successorParticipant != originalParticipant);
+    TEST_CHECK(successorParticipant->sid() == originalParticipant->sid());
+    TEST_CHECK(successorParticipant->identity() == originalParticipant->identity());
+    TEST_CHECK(successor && successor != original && !successor->is_subscribed());
+    TEST_CHECK(newTrack && newTrack->is_subscribed());
+    WindowPumpUntil(fixture, [&] {
+        return HasSubscriptionSince(*server, restartMessages,
+                   "PA_WINDOW", "TR_PA_WINDOW", false) &&
+            HasSubscriptionSince(*server, restartMessages,
+                   "PA_WINDOW", "TR_PA_WINDOW_NEW", true);
+    }, "gap-full-restored-wire");
+
+    auto source = webrtc::make_ref_counted<WindowMemoryVideoSource>();
+    auto rtc = webrtc::VideoTrack::Create(
+        "gap-full-late", source, webrtc::Thread::Current());
+    TEST_CHECK(rtc);
+    livekit::ParticipantSnapshotRoomTestAccess::attach(
+        *fixture.room, successorParticipant, rtc, "TR_PA_WINDOW");
+    fixture.pump();
+    TEST_CHECK(!successor->track()->rtc_track());
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room) == 0);
+
+    // The first control on the new object must be accepted even though the
+    // logical intent retained the old object's last request sequence.
+    const auto successorMessages = server->subscriptionMessages.size();
+    TEST_CHECK(successor->SetSubscribed(true));
+    TEST_CHECK(successor->is_subscribed());
+    TEST_CHECK(!original->SetSubscribed(false));
+    WindowPumpUntil(fixture, [&] {
+        return HasSubscriptionSince(*server, successorMessages,
+            "PA_WINDOW", "TR_PA_WINDOW", true);
+    }, "gap-full-successor-first-control");
+    TEST_CHECK(!HasSubscriptionSince(*server, successorMessages,
+        "PA_WINDOW", "TR_PA_WINDOW", false));
+    auto restored = fixture.attachExisting("gap-full-successor-controlled");
+    fixture.open();
+    CheckWindowPeer(fixture, "restart-window-peer");
+    restored.source->push(120, 1000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(!ParticipantWindowTestAccess::frame(*fixture.window, "window-peer").isNull());
+
+    const auto unsubscribeMessages = server->subscriptionMessages.size();
+    TEST_CHECK(successor->SetSubscribed(false));
+    WindowPumpUntil(fixture, [&] {
+        return HasSubscriptionSince(*server, unsubscribeMessages,
+            "PA_WINDOW", "TR_PA_WINDOW", false);
+    }, "gap-full-successor-second-control");
+    TEST_CHECK(!successor->is_subscribed() && !successor->track()->rtc_track());
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room) == 0);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(*fixture.window).attached_track_count == 0);
+    TEST_CHECK(!server->protocolFailure);
+    std::cout << "GAP_P1_03_CASE_5 real-full-restart/restored-false/successor-controls/old-owner-rejected PASS" << std::endl;
+}
+
+void GapWindowOrderedSenderAndResumeSnapshot() {
+    WindowFixture fixture(false);
+    auto server = std::make_shared<WindowLoopbackServer>(fixture.io);
+    WindowServerGuard stop{server};
+    server->start();
+    WindowConnect(fixture, server);
+    const auto participant = fixture.room->remote_participants().at("PA_WINDOW");
+    const auto publication = participant->get_remote_publication("TR_PA_WINDOW");
+    TEST_CHECK(publication);
+    fixture.pump();
+
+    asio::steady_timer sendGate(fixture.io);
+    sendGate.expires_at(std::chrono::steady_clock::time_point::max());
+    bool sendEntered = false;
+    bool pauseNextSend = true;
+    livekit::ParticipantSnapshotRoomTestAccess::setSubscriptionHooks(
+        *fixture.room,
+        [&](bool, uint64_t) -> asio::awaitable<void> {
+            if (!pauseNextSend) co_return;
+            pauseNextSend = false;
+            sendEntered = true;
+            std::error_code ignored;
+            co_await sendGate.async_wait(
+                asio::redirect_error(asio::use_awaitable, ignored));
+        },
+        {});
+    const auto orderedBegin = server->subscriptionMessages.size();
+    TEST_CHECK(publication->SetSubscribed(true));
+    WindowPumpUntil(fixture, [&] { return sendEntered; }, "gap-sender-true-paused");
+    TEST_CHECK(publication->SetSubscribed(false));
+    std::error_code ignored;
+    sendGate.cancel(ignored);
+    WindowPumpUntil(fixture, [&] {
+        return HasSubscriptionSince(*server, orderedBegin,
+                   "PA_WINDOW", "TR_PA_WINDOW", true) &&
+            HasSubscriptionSince(*server, orderedBegin,
+                   "PA_WINDOW", "TR_PA_WINDOW", false);
+    }, "gap-sender-ordered-latest");
+    std::vector<bool> ordered;
+    for (std::size_t i = orderedBegin; i < server->subscriptionMessages.size(); ++i) {
+        const auto &message = server->subscriptionMessages[i];
+        if (SubscriptionContains(message, "PA_WINDOW", "TR_PA_WINDOW")) {
+            ordered.push_back(message.subscribe());
+        }
+    }
+    TEST_CHECK(ordered.size() >= 2 && ordered[ordered.size() - 2] && !ordered.back());
+
+    livekit::ParticipantSnapshotRoomTestAccess::clearSubscriptionHooks(*fixture.room);
+    asio::steady_timer syncGate(fixture.io);
+    syncGate.expires_at(std::chrono::steady_clock::time_point::max());
+    bool syncEntered = false;
+    livekit::proto::SyncState capturedSync;
+    livekit::ParticipantSnapshotRoomTestAccess::setSubscriptionHooks(
+        *fixture.room,
+        {},
+        [&](const livekit::proto::SyncState &snapshot) -> asio::awaitable<void> {
+            capturedSync = snapshot;
+            syncEntered = true;
+            std::error_code waitError;
+            co_await syncGate.async_wait(
+                asio::redirect_error(asio::use_awaitable, waitError));
+        });
+    const auto resumeWireBegin = server->subscriptionWireOrder.size();
+    const auto resumeMessageBegin = server->subscriptionMessages.size();
+    server->closeActive();
+    WindowPumpUntil(fixture, [&] { return syncEntered; }, "gap-sync-snapshot-paused");
+    TEST_CHECK(!capturedSync.subscription().subscribe());
+    TEST_CHECK(SubscriptionContains(
+        capturedSync.subscription(), "PA_WINDOW", "TR_PA_WINDOW"));
+    TEST_CHECK(publication->SetSubscribed(true));
+    syncGate.cancel(ignored);
+    WindowPumpUntil(fixture, [&] {
+        return fixture.observer->reconnected == 1 && server->syncStates == 1 &&
+            HasSubscriptionSince(*server, resumeMessageBegin,
+                "PA_WINDOW", "TR_PA_WINDOW", true);
+    }, "gap-sync-latest-delta");
+    TEST_CHECK(server->subscriptionWireOrder.size() >= resumeWireBegin + 2);
+    TEST_CHECK(server->subscriptionWireOrder[resumeWireBegin] == "sync:false");
+    TEST_CHECK(std::find(
+        server->subscriptionWireOrder.begin() + resumeWireBegin + 1,
+        server->subscriptionWireOrder.end(),
+        "update:true") != server->subscriptionWireOrder.end());
+    TEST_CHECK(publication->is_subscribed());
+    livekit::ParticipantSnapshotRoomTestAccess::clearSubscriptionHooks(*fixture.room);
+    TEST_CHECK(!server->protocolFailure);
+    std::cout << "GAP_P1_03_CASE_6 sender-order/SyncState-snapshot/latest-revision PASS" << std::endl;
+}
+
+void GapWindowDefaultFalseSoftResume() {
+    WindowFixture fixture(false);
+    auto server = std::make_shared<WindowLoopbackServer>(fixture.io);
+    WindowServerGuard stop{server};
+    server->start();
+    WindowConnect(fixture, server, false);
+    const auto participant = fixture.room->remote_participants().at("PA_WINDOW");
+    const auto publication = participant->get_remote_publication("TR_PA_WINDOW");
+    TEST_CHECK(publication && !publication->is_subscribed());
+    TEST_CHECK(publication->SetSubscribed(true));
+    WindowPumpUntil(fixture, [&] {
+        return HasSubscriptionSince(*server, 0,
+            "PA_WINDOW", "TR_PA_WINDOW", true);
+    }, "gap-default-false-explicit-true");
+    auto media = fixture.attachExisting("gap-default-false");
+    fixture.open();
+    CheckWindowPeer(fixture, "join-window-peer");
+    const auto bindingCount =
+        livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room);
+
+    server->closeActive();
+    WindowPumpUntil(fixture, [&] {
+        return fixture.observer->reconnected == 1 && server->syncStates == 1;
+    }, "gap-default-false-resume");
+    const auto &subscription = server->syncStateMessages.back().subscription();
+    TEST_CHECK(subscription.subscribe());
+    TEST_CHECK(SubscriptionContains(subscription, "PA_WINDOW", "TR_PA_WINDOW"));
+    TEST_CHECK(publication->is_subscribed());
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room) ==
+        bindingCount);
+    TEST_CHECK(publication->track()->rtc_track().get() == media.rtc.get());
+    TEST_CHECK(!server->protocolFailure);
+    std::cout << "GAP_P1_03_CASE_7 auto-subscribe-false/explicit-true/soft-resume PASS" << std::endl;
+}
+
+void GapWindowFullRestartIdentityBoundaries() {
+    enum class Boundary { ParticipantSid, ParticipantIdentity, RoomSid };
+    for (const auto boundary : {Boundary::ParticipantSid,
+            Boundary::ParticipantIdentity, Boundary::RoomSid}) {
+        WindowFixture fixture(false);
+        auto server = std::make_shared<WindowLoopbackServer>(fixture.io);
+        WindowServerGuard stop{server};
+        server->start();
+        WindowConnect(fixture, server);
+        const auto originalParticipant = fixture.room->remote_participants().at("PA_WINDOW");
+        const auto original = originalParticipant->get_remote_publication("TR_PA_WINDOW");
+        TEST_CHECK(original && original->SetSubscribed(false));
+        WindowPumpUntil(fixture, [&] {
+            return HasSubscriptionSince(*server, 0,
+                "PA_WINDOW", "TR_PA_WINDOW", false);
+        }, "gap-boundary-unsubscribe");
+        const auto restartMessages = server->subscriptionMessages.size();
+        if (boundary == Boundary::RoomSid) {
+            server->restartRoomSid = "RM_WINDOW_REPLACEMENT";
+        } else if (boundary == Boundary::ParticipantSid) {
+            server->restartParticipantSid = "PA_WINDOW_REPLACEMENT";
+        } else {
+            // Keep both participant SID and track SID: only identity changes.
+            server->restartParticipantIdentity = "replacement-window-peer";
+        }
+        server->rejectResume = true;
+        server->closeActive();
+        WindowPumpUntil(fixture, [&] {
+            return server->joins == 2 && fixture.observer->reconnected == 1;
+        }, "gap-full-restart-identity-boundary");
+        const auto &participantSid = server->restartParticipantSid;
+        const auto participants = fixture.room->remote_participants();
+        TEST_CHECK(participants.contains(participantSid));
+        TEST_CHECK(participants.at(participantSid)->identity() == server->restartParticipantIdentity);
+        if (boundary == Boundary::ParticipantIdentity) {
+            TEST_CHECK(server->restartRoomSid == "RM_WINDOW_LOOPBACK");
+            TEST_CHECK(participantSid == originalParticipant->sid());
+            TEST_CHECK(participants.at(participantSid)->identity() != originalParticipant->identity());
+        }
+        const auto successor =
+            participants.at(participantSid)->get_remote_publication("TR_PA_WINDOW");
+        TEST_CHECK(successor && successor != original && successor->is_subscribed());
+        WindowPumpUntil(fixture, [&] {
+            return HasSubscriptionSince(*server, restartMessages,
+                participantSid, "TR_PA_WINDOW", true);
+        }, "gap-full-restart-boundary-default");
+        TEST_CHECK(!HasSubscriptionSince(*server, restartMessages,
+            participantSid, "TR_PA_WINDOW", false));
+        TEST_CHECK(!original->SetSubscribed(false));
+
+        const auto controlMessages = server->subscriptionMessages.size();
+        TEST_CHECK(successor->SetSubscribed(false));
+        WindowPumpUntil(fixture, [&] {
+            return HasSubscriptionSince(*server, controlMessages,
+                participantSid, "TR_PA_WINDOW", false);
+        }, "gap-full-restart-boundary-control");
+        TEST_CHECK(!successor->is_subscribed());
+        TEST_CHECK(!server->protocolFailure);
+    }
+    std::cout << "GAP_P1_03_CASE_8 full-restart/new-SID+identity-only+new-room/default-isolation PASS" << std::endl;
+}
+
+void GapWindowDisconnectInvalidatesOldSender() {
+    WindowFixture fixture(false);
+    auto server = std::make_shared<WindowLoopbackServer>(fixture.io);
+    WindowServerGuard stop{server};
+    server->start();
+    WindowConnect(fixture, server);
+    const auto original = fixture.room->remote_participants()
+        .at("PA_WINDOW")->get_remote_publication("TR_PA_WINDOW");
+    asio::steady_timer gate(fixture.io);
+    gate.expires_at(std::chrono::steady_clock::time_point::max());
+    bool entered = false;
+    livekit::ParticipantSnapshotRoomTestAccess::setSubscriptionHooks(
+        *fixture.room,
+        [&](bool, uint64_t) -> asio::awaitable<void> {
+            if (entered) co_return;
+            entered = true;
+            std::error_code waitError;
+            co_await gate.async_wait(
+                asio::redirect_error(asio::use_awaitable, waitError));
+        },
+        {});
+    TEST_CHECK(original && original->SetSubscribed(false));
+    WindowPumpUntil(fixture, [&] { return entered; }, "gap-old-sender-paused");
+    fixture.room->Disconnect();
+    fixture.pump();
+    server->subscriptionMessages.clear();
+    server->subscriptionWireOrder.clear();
+    WindowConnect(fixture, server, true, 2);
+    const auto successor = fixture.room->remote_participants()
+        .at("PA_WINDOW")->get_remote_publication("TR_PA_WINDOW");
+    TEST_CHECK(successor && successor != original && successor->is_subscribed());
+    std::error_code ignored;
+    gate.cancel(ignored);
+    WindowPumpUntil(fixture, [&] {
+        return HasSubscriptionSince(*server, 0,
+            "PA_WINDOW", "TR_PA_WINDOW", true);
+    }, "gap-replacement-sender");
+    TEST_CHECK(std::none_of(
+        server->subscriptionMessages.begin(),
+        server->subscriptionMessages.end(),
+        [](const auto &message) { return !message.subscribe(); }));
+    const auto replacementUpdate = server->subscriptionMessages.size();
+    TEST_CHECK(successor->SetSubscribed(false));
+    WindowPumpUntil(fixture, [&] {
+        return HasSubscriptionSince(*server, replacementUpdate,
+            "PA_WINDOW", "TR_PA_WINDOW", false);
+    }, "gap-replacement-sender-still-live");
+    livekit::ParticipantSnapshotRoomTestAccess::clearSubscriptionHooks(*fixture.room);
+    TEST_CHECK(!server->protocolFailure);
+    std::cout << "GAP_P1_03_CASE_9 Disconnect/new-session/old-sender-invalidated PASS" << std::endl;
+}
+
+void GapWindowQueuedVideoBindingLease() {
+    WindowFixture fixture;
+    fixture.room->UpdateParticipantsForTesting(WindowParticipant("gap-lease-peer"));
+    fixture.pump();
+    const auto participant = fixture.room->remote_participants().at("PA_WINDOW");
+    const auto publication = participant->get_remote_publication("TR_PA_WINDOW");
+    TEST_CHECK(publication);
+    QObject observer;
+    int available = 0, unavailable = 0;
+    QObject::connect(fixture.coordinator.get(),
+        &OpenMeeting::MeetingCoordinator::remoteVideoTrackAvailable, &observer,
+        [&](const QString &, std::shared_ptr<livekit::Track>) { ++available; });
+    QObject::connect(fixture.coordinator.get(),
+        &OpenMeeting::MeetingCoordinator::remoteVideoTrackUnavailable, &observer,
+        [&](const QString &, const QString &) { ++unavailable; });
+
+    auto queued = fixture.attachExisting("gap-lease-queued", false);
+    WindowDrainNative(fixture.io); // Real Room delivery has queued the Qt adapter.
+    const auto oldAvailable = fixture.observer->latest(livekit::ParticipantEventKind::TrackAvailable);
+    const auto oldLease = oldAvailable.media_binding_ticket.lock();
+    TEST_CHECK(oldLease && oldLease->active.load());
+    TEST_CHECK(available == 0);
+    TEST_CHECK(publication->SetSubscribed(false));
+    TEST_CHECK(!oldLease->active.load());
+    TEST_CHECK(livekit::IsParticipantTicketActive(oldAvailable.participant.ticket, oldAvailable.participant.key));
+    TEST_CHECK(livekit::IsTrackTicketActive(oldAvailable.track_ticket, oldAvailable.track_key));
+    TEST_CHECK(participant->get_remote_publication("TR_PA_WINDOW") == publication);
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room) == 0);
+
+    // Do not drain Room again: only the previously admitted Available reaches
+    // Qt here. Its lease must reject it before any Available signal is emitted.
+    WindowDrainQt();
+    TEST_CHECK(available == 0 && unavailable == 0);
+    auto presentations = fixture.coordinator->participantPresentations();
+    TEST_CHECK(presentations.size() == 1 && presentations.front().videoTracks.empty());
+    fixture.open();
+    TEST_CHECK(ParticipantWindowTestAccess::tileCount(*fixture.window) == 1);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(*fixture.window).attached_track_count == 0);
+    fixture.pump();
+
+    TEST_CHECK(publication->SetSubscribed(true));
+    auto live = fixture.attachExisting("gap-lease-presented");
+    TEST_CHECK(live.track == queued.track && available == 1);
+    CheckWindowPeer(fixture, "gap-lease-peer");
+    presentations = fixture.coordinator->participantPresentations();
+    TEST_CHECK(presentations.size() == 1 && presentations.front().videoTracks.size() == 1);
+    const auto saved = presentations.front();
+    const auto &savedTrack = saved.videoTracks.front();
+    TEST_CHECK(fixture.coordinator->isParticipantPresentationCurrent(saved, &savedTrack));
+    live.source->push(80, 1000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(!ParticipantWindowTestAccess::frame(*fixture.window, "window-peer").isNull());
+
+    TEST_CHECK(publication->SetSubscribed(false));
+    WindowDrainNative(fixture.io); // Unavailable is queued, projection still holds the old lease.
+    TEST_CHECK(livekit::IsParticipantTicketActive(saved.participant.participantTicket,
+        saved.participant.participantKey));
+    TEST_CHECK(livekit::IsTrackTicketActive(savedTrack.ticket, savedTrack.key));
+    TEST_CHECK(fixture.coordinator->isParticipantPresentationCurrent(saved));
+    TEST_CHECK(!fixture.coordinator->isParticipantPresentationCurrent(saved, &savedTrack));
+    presentations = fixture.coordinator->participantPresentations();
+    TEST_CHECK(presentations.size() == 1 && presentations.front().videoTracks.empty());
+    TEST_CHECK(unavailable == 0);
+    WindowDrainQt();
+    TEST_CHECK(available == 1 && unavailable == 1);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(*fixture.window).attached_track_count == 0);
+
+    TEST_CHECK(publication->SetSubscribed(true));
+    auto successor = fixture.attachExisting("gap-lease-successor");
+    TEST_CHECK(successor.track == live.track && available == 2);
+    CheckWindowPeer(fixture, "gap-lease-peer");
+    presentations = fixture.coordinator->participantPresentations();
+    TEST_CHECK(presentations.size() == 1 && presentations.front().videoTracks.size() == 1);
+    const auto &currentTrack = presentations.front().videoTracks.front();
+    TEST_CHECK(currentTrack.key == savedTrack.key);
+    TEST_CHECK(currentTrack.mediaBindingKey != savedTrack.mediaBindingKey);
+    TEST_CHECK(fixture.coordinator->isParticipantPresentationCurrent(presentations.front(), &currentTrack));
+    TEST_CHECK(!fixture.coordinator->isParticipantPresentationCurrent(saved, &savedTrack));
+    const auto delivered = ParticipantWindowTestAccess::statistics(*fixture.window).delivered_to_qt_cpu;
+    queued.source->push(20, 2000);
+    live.source->push(30, 3000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(*fixture.window).delivered_to_qt_cpu == delivered);
+    successor.source->push(160, 4000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(*fixture.window).delivered_to_qt_cpu == delivered + 1);
+    std::cout << "GAP_P1_03_CASE_11 Room-drain/revoke/Qt-drain/video-lease/presentation/successor PASS" << std::endl;
+}
+
 int WindowAcceptanceMain(int argc, char **argv) {
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
@@ -1031,6 +1575,12 @@ int WindowAcceptanceMain(int argc, char **argv) {
     // instances above use explicitly injected temporary SessionManager objects.
     if (application.arguments().contains("--pr-sec-005")) {
         PrSec005InvitationContract();
+    } else if (application.arguments().contains("--gap-full-restart")) {
+        GapWindowFullRestartUnsubscribe();
+    } else if (application.arguments().contains("--gap-identity-boundaries")) {
+        GapWindowFullRestartIdentityBoundaries();
+    } else if (application.arguments().contains("--gap-video-lease")) {
+        GapWindowQueuedVideoBindingLease();
     } else if (application.arguments().contains("--ak-window-late")) {
         AkWindowRetiredPresentation(false);
         std::cout << "AK_WINDOW_LATE_EXECUTED=1 PASSED=1 FAILED=0" << std::endl;
@@ -1041,9 +1591,15 @@ int WindowAcceptanceMain(int argc, char **argv) {
         AkWindowInitialRoster();
         AkWindowSoftResume();
         AkWindowFullRestart();
-        std::cout << "AK_WINDOW_NETWORK_EXECUTED=3 PASSED=3 FAILED=0" << std::endl;
+        GapWindowSoftResumeUnsubscribe();
+        GapWindowFullRestartUnsubscribe();
+        GapWindowOrderedSenderAndResumeSnapshot();
+        GapWindowDefaultFalseSoftResume();
+        GapWindowFullRestartIdentityBoundaries();
+        GapWindowDisconnectInvalidatesOldSender();
+        std::cout << "AK_WINDOW_NETWORK_EXECUTED=9 PASSED=9 FAILED=0" << std::endl;
     } else {
-        std::cout << "AK_WINDOW_PLANNED=8 (PR-SEC-005 invitation; F4/F5 local precondition; F1/F2/F3 real loopback)" << std::endl;
+        std::cout << "AK_WINDOW_PLANNED=15 (PR-SEC-005 invitation; F4/F5 and GAP video lease local precondition; F1/F2/F3 and GAP recovery real loopback)" << std::endl;
         PrSec005InvitationContract();
         AkWindowAliveLate();
         AkWindowOldTrack();
@@ -1052,7 +1608,14 @@ int WindowAcceptanceMain(int argc, char **argv) {
         AkWindowInitialRoster();
         AkWindowSoftResume();
         AkWindowFullRestart();
-        std::cout << "AK_WINDOW_EXECUTED=8 PASSED=8 FAILED=0" << std::endl;
+        GapWindowSoftResumeUnsubscribe();
+        GapWindowFullRestartUnsubscribe();
+        GapWindowOrderedSenderAndResumeSnapshot();
+        GapWindowDefaultFalseSoftResume();
+        GapWindowFullRestartIdentityBoundaries();
+        GapWindowDisconnectInvalidatesOldSender();
+        GapWindowQueuedVideoBindingLease();
+        std::cout << "AK_WINDOW_EXECUTED=15 PASSED=15 FAILED=0" << std::endl;
     }
     if (wrappedThread) webrtc::ThreadManager::Instance()->UnwrapCurrentThread();
     style::StopManager();
@@ -1105,8 +1668,10 @@ namespace livekit {
 // existing production operations. It never replaces their validity checks.
 class ParticipantSnapshotRoomTestAccess final {
 public:
-    static void establishConnectedAttachPrecondition(Room &room) {
+    static void establishConnectedAttachPrecondition(Room &room,
+                                                     bool autoSubscribe = true) {
         std::lock_guard lock(room.room_mutex_);
+        room.ResetSubscriptionSessionLocked(autoSubscribe);
         room.connection_state_ = ConnectionState::Connected;
     }
     static void attach(Room &room, const std::shared_ptr<RemoteParticipant> &participant,
@@ -1126,6 +1691,7 @@ public:
     static void detach(Room &room, RemoteTrackPublication *publication, uint64_t serial) {
         room.DetachRemotePublicationMedia(publication, false, serial);
     }
+    static proto::SyncState syncState(Room &room) { return room.BuildSyncState(); }
     static void pauseParticipantDrain(Room &room) {
         std::lock_guard lock(room.room_mutex_);
         room.participant_event_drain_paused_for_testing_ = true;
@@ -1137,6 +1703,13 @@ public:
     static std::size_t pausedDrainAttempts(Room &room) {
         std::lock_guard lock(room.room_mutex_);
         return room.participant_event_paused_attempts_for_testing_;
+    }
+    static void resumeParticipantDrain(Room &room) {
+        {
+            std::lock_guard lock(room.room_mutex_);
+            room.participant_event_drain_paused_for_testing_ = false;
+        }
+        room.DrainParticipantEvents();
     }
     static ParticipantTicket firstPendingTicket(Room &room) {
         std::lock_guard lock(room.room_mutex_);
@@ -2788,14 +3361,15 @@ public:
 
 class AttachFixture final : public Fixture {
 public:
-    AttachFixture()
+    explicit AttachFixture(bool autoSubscribe = true)
         : sourceA(webrtc::make_ref_counted<CountingAudioSource>()),
           sourceB(webrtc::make_ref_counted<CountingAudioSource>()),
           rtcA(webrtc::AudioTrack::Create("rtc-attach-A", sourceA)),
           rtcB(webrtc::AudioTrack::Create("rtc-attach-B", sourceB)) {
         TEST_CHECK(rtcA && rtcB);
         // H is a resolved-attach local test. This is NOT a real Connect/F test.
-        livekit::ParticipantSnapshotRoomTestAccess::establishConnectedAttachPrecondition(*room);
+        livekit::ParticipantSnapshotRoomTestAccess::establishConnectedAttachPrecondition(
+            *room, autoSubscribe);
         addParticipant();
         participantA = room->remote_participants().at("PA_ATTACH");
         publicationA = participantA->get_remote_publication("TR_ATTACH");
@@ -2956,6 +3530,149 @@ void AkAttachRemoveReentry() {
     TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room) == 1);
     PumpPipeline(fixture);
     std::cout << "AK_CASE_H6 external-RemoveSink/reentrant-successor PASS" << std::endl;
+}
+
+bool SyncHasSubscriptionException(const livekit::proto::SyncState &state,
+                                  const std::string &participantSid,
+                                  const std::string &trackSid) {
+    const auto &subscription = state.subscription();
+    const bool flat = std::find(subscription.track_sids().begin(),
+        subscription.track_sids().end(), trackSid) != subscription.track_sids().end();
+    const bool scoped = std::any_of(
+        subscription.participant_tracks().begin(),
+        subscription.participant_tracks().end(),
+        [&](const auto &participant) {
+            return participant.participant_sid() == participantSid &&
+                std::find(participant.track_sids().begin(),
+                    participant.track_sids().end(), trackSid) !=
+                    participant.track_sids().end();
+        });
+    return flat && scoped;
+}
+
+void GapSubscriptionLateAttachAndSyncState() {
+    {
+        AttachFixture fixture;
+        TEST_CHECK(fixture.publicationA->SetSubscribed(false));
+        TEST_CHECK(!fixture.publicationA->is_subscribed());
+        const auto sync = livekit::ParticipantSnapshotRoomTestAccess::syncState(*fixture.room);
+        TEST_CHECK(!sync.subscription().subscribe());
+        TEST_CHECK(SyncHasSubscriptionException(sync, "PA_ATTACH", "TR_ATTACH"));
+
+        fixture.attachA();
+        PumpPipeline(fixture);
+        TEST_CHECK(fixture.sourceA->added.empty() && fixture.sourceA->sinks.empty());
+        TEST_CHECK(fixture.availableCount() == 0);
+
+        TEST_CHECK(fixture.publicationA->SetSubscribed(true));
+        fixture.attachA();
+        PumpPipeline(fixture);
+        TEST_CHECK(fixture.sourceA->added.size() == 1 && fixture.sourceA->sinks.size() == 1);
+        TEST_CHECK(fixture.availableCount() == 1);
+    }
+    {
+        AttachFixture fixture(false);
+        TEST_CHECK(!fixture.publicationA->is_subscribed());
+        auto sync = livekit::ParticipantSnapshotRoomTestAccess::syncState(*fixture.room);
+        TEST_CHECK(sync.subscription().subscribe());
+        TEST_CHECK(!SyncHasSubscriptionException(sync, "PA_ATTACH", "TR_ATTACH"));
+        TEST_CHECK(fixture.publicationA->SetSubscribed(true));
+        sync = livekit::ParticipantSnapshotRoomTestAccess::syncState(*fixture.room);
+        TEST_CHECK(sync.subscription().subscribe());
+        TEST_CHECK(SyncHasSubscriptionException(sync, "PA_ATTACH", "TR_ATTACH"));
+    }
+    std::cout << "GAP_P1_03_CASE_1 late-attach/auto-subscribe-matrix/SyncState PASS" << std::endl;
+}
+
+void GapSubscriptionAcquireInterleave() {
+    AttachFixture fixture;
+    fixture.sourceA->onAdd = [&] {
+        TEST_CHECK(fixture.publicationA->SetSubscribed(false));
+    };
+    fixture.attachA();
+    PumpPipeline(fixture);
+    TEST_CHECK(!fixture.publicationA->is_subscribed());
+    TEST_CHECK(fixture.sourceA->added.size() == 1);
+    TEST_CHECK(fixture.sourceA->removed.size() == 1);
+    TEST_CHECK(fixture.sourceA->sinks.empty());
+    TEST_CHECK(!fixture.trackA->rtc_track());
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room) == 0);
+    TEST_CHECK(fixture.availableCount() == 0);
+    std::cout << "GAP_P1_03_CASE_2 unsubscribe-between-AddSink-and-retain PASS" << std::endl;
+}
+
+void GapSubscriptionQueuedDeliveryAndStaleCleanup() {
+    AttachFixture fixture;
+    livekit::ParticipantSnapshotRoomTestAccess::pauseParticipantDrain(*fixture.room);
+    fixture.attachA();
+    const auto firstSerial =
+        livekit::ParticipantSnapshotRoomTestAccess::bindingSerial(
+            *fixture.room, fixture.publicationA.get());
+    TEST_CHECK(firstSerial != 0);
+    TEST_CHECK(fixture.publicationA->SetSubscribed(false));
+    TEST_CHECK(fixture.sourceA->removed.size() == 1 && fixture.sourceA->sinks.empty());
+    TEST_CHECK(fixture.publicationA->SetSubscribed(true));
+    fixture.attachB(fixture.participantA);
+    const auto successorSerial =
+        livekit::ParticipantSnapshotRoomTestAccess::bindingSerial(
+            *fixture.room, fixture.publicationA.get());
+    TEST_CHECK(successorSerial > firstSerial);
+    TEST_CHECK(fixture.sourceB->sinks.size() == 1 && fixture.sourceB->removed.empty());
+
+    livekit::ParticipantSnapshotRoomTestAccess::resumeParticipantDrain(*fixture.room);
+    PumpPipeline(fixture);
+    TEST_CHECK(fixture.availableCount() == 1);
+    TEST_CHECK(fixture.trackA->rtc_track().get() == fixture.rtcB.get());
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingSerial(
+        *fixture.room, fixture.publicationA.get()) == successorSerial);
+    TEST_CHECK(fixture.sourceB->sinks.size() == 1 && fixture.sourceB->removed.empty());
+    std::cout << "GAP_P1_03_CASE_3 revoked-Available/stale-Unavailable/new-binding PASS" << std::endl;
+}
+
+class ReentrantUnsubscribeListener final : public livekit::RoomListener {
+public:
+    explicit ReentrantUnsubscribeListener(std::shared_ptr<livekit::Room> room)
+        : room_(std::move(room)) {}
+
+    void OnTrackUnsubscribed(
+            std::shared_ptr<livekit::Track>,
+            std::shared_ptr<livekit::TrackPublication> publication,
+            std::shared_ptr<livekit::RemoteParticipant>) override {
+        ++callbacks;
+        const auto room = room_.lock();
+        TEST_CHECK(room && !room->remote_participants().empty());
+        const auto remote =
+            std::dynamic_pointer_cast<livekit::RemoteTrackPublication>(publication);
+        TEST_CHECK(remote && remote->SetSubscribed(true));
+        resubscribed = true;
+    }
+
+    int callbacks = 0;
+    bool resubscribed = false;
+
+private:
+    std::weak_ptr<livekit::Room> room_;
+};
+
+void GapSubscriptionReentrantAndRepeatedCleanup() {
+    AttachFixture fixture;
+    auto listener =
+        std::make_shared<ReentrantUnsubscribeListener>(fixture.room);
+    fixture.room->AddListener(listener);
+    fixture.attachA();
+    TEST_CHECK(fixture.publicationA->SetSubscribed(false));
+    TEST_CHECK(listener->callbacks == 1 && listener->resubscribed);
+    TEST_CHECK(fixture.publicationA->is_subscribed());
+    TEST_CHECK(fixture.sourceA->removed.size() == 1 && fixture.sourceA->sinks.empty());
+
+    fixture.attachB(fixture.participantA);
+    TEST_CHECK(fixture.sourceB->sinks.size() == 1);
+    fixture.room->RemoveListener(listener);
+    TEST_CHECK(fixture.publicationA->SetSubscribed(false));
+    TEST_CHECK(fixture.publicationA->SetSubscribed(false));
+    TEST_CHECK(fixture.sourceB->removed.size() == 1 && fixture.sourceB->sinks.empty());
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room) == 0);
+    std::cout << "GAP_P1_03_CASE_10 listener-reentry/repeated-false/no-double-cleanup PASS" << std::endl;
 }
 
 struct OwnedStopWitness {
@@ -3305,7 +4022,11 @@ void AkAttachRegression() {
     AkAttachSupersededSerial();
     AkAttachStaleCleanup();
     AkAttachRemoveReentry();
-    std::cout << "AK_ATTACH_EXECUTED=7 PASS (resolved-attach local precondition; no F Connect claim)" << std::endl;
+    GapSubscriptionLateAttachAndSyncState();
+    GapSubscriptionAcquireInterleave();
+    GapSubscriptionQueuedDeliveryAndStaleCleanup();
+    GapSubscriptionReentrantAndRepeatedCleanup();
+    std::cout << "AK_ATTACH_EXECUTED=11 PASS (resolved-attach local precondition; no F Connect claim)" << std::endl;
 }
 
 void AkCoreRegression() {
