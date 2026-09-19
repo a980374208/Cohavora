@@ -106,6 +106,20 @@ size_t IncomingDataStreamAssembler::PurgeExpired(TimePoint now) {
     return PurgeExpiredLocked(now);
 }
 
+bool IncomingDataStreamAssembler::Contains(
+    const std::string& stream_id) const {
+    std::lock_guard lock(mutex_);
+    return streams_.contains(stream_id);
+}
+
+bool IncomingDataStreamAssembler::Discard(const std::string& stream_id) {
+    std::lock_guard lock(mutex_);
+    auto it = streams_.find(stream_id);
+    if (it == streams_.end()) return false;
+    EraseLocked(it);
+    return true;
+}
+
 size_t IncomingDataStreamAssembler::active_streams() const {
     std::lock_guard lock(mutex_);
     return streams_.size();

@@ -52,10 +52,63 @@ struct ByteStreamInfo : BaseStreamInfo {
 // Readers (Incoming Streams)
 // =========================================================================
 
+inline constexpr char kDataStreamActiveReaderLimitExceeded[] =
+    "data stream active reader limit exceeded";
+inline constexpr char kDataStreamBufferLimitExceeded[] =
+    "data stream buffer limit exceeded";
+inline constexpr char kDataStreamChunkLimitExceeded[] =
+    "data stream queued chunk limit exceeded";
+inline constexpr char kDataStreamReadAllLimitExceeded[] =
+    "data stream ReadAll limit exceeded";
+inline constexpr char kDataStreamDeclaredLengthExceeded[] =
+    "data stream declared length exceeded";
+inline constexpr char kDataStreamLengthMismatch[] =
+    "data stream length mismatch";
+inline constexpr char kDataStreamAssemblyRejected[] =
+    "data stream assembly rejected";
+inline constexpr char kDataStreamExpired[] =
+    "data stream expired";
+inline constexpr char kDataStreamReplaced[] =
+    "data stream replaced";
+
+/// Shared accounting for Reader-owned inbound memory. A Room owns one budget
+/// per native session; retained Readers keep that session's accounting alive.
+class DataStreamReaderBudget {
+public:
+    struct Limits {
+        size_t max_active_readers = 64;
+        size_t max_buffered_bytes_per_reader = 16 * 1024 * 1024;
+        size_t max_buffered_bytes = 64 * 1024 * 1024;
+        size_t max_queued_chunks_per_reader = 4096;
+        size_t max_read_all_bytes = 16 * 1024 * 1024;
+        std::chrono::seconds stream_ttl{30};
+    };
+
+    DataStreamReaderBudget();
+    explicit DataStreamReaderBudget(Limits limits);
+
+    bool TryAcquireReader();
+    void ReleaseReader();
+    bool TryReserveBuffered(size_t bytes);
+    void ReleaseBuffered(size_t bytes);
+
+    size_t active_readers() const;
+    size_t buffered_bytes() const;
+    const Limits& limits() const noexcept { return limits_; }
+
+private:
+    Limits limits_;
+    mutable std::mutex mutex_;
+    size_t active_readers_ = 0;
+    size_t buffered_bytes_ = 0;
+};
+
 /// Reader for incoming text streams.
 class TextStreamReader {
 public:
     explicit TextStreamReader(TextStreamInfo info);
+    TextStreamReader(TextStreamInfo info,
+                     std::shared_ptr<DataStreamReaderBudget> budget);
     ~TextStreamReader();
 
     TextStreamReader(const TextStreamReader&) = delete;
@@ -73,19 +126,35 @@ public:
     bool HasAvailableChunk() const;
 
     const TextStreamInfo& info() const noexcept { return info_; }
+    bool admitted() const noexcept { return admitted_; }
+    size_t buffered_bytes() const;
     bool is_closed() const;
+    bool is_failed() const;
     const std::string& close_reason() const;
 
     /// Called by Room when a new chunk arrives
     void OnChunkUpdate(const std::string& text);
+    bool TryOnChunkUpdate(const std::string& text);
 
     /// Called by Room when the stream is closed
     void OnStreamClose(const std::string& reason, const std::map<std::string, std::string>& trailer_attrs);
+    void OnStreamError(const std::string& reason);
 
 private:
+    void ReleaseActiveLocked();
+    void FailLocked(const std::string& reason);
+    void MarkReadAllLimitExceeded();
+
     TextStreamInfo info_;
+    std::shared_ptr<DataStreamReaderBudget> budget_;
     std::deque<std::string> queue_;
+    size_t buffered_bytes_ = 0;
+    size_t received_bytes_ = 0;
+    size_t queued_chunks_ = 0;
+    bool admitted_ = false;
+    bool active_registered_ = false;
     bool closed_ = false;
+    bool failed_ = false;
     std::string close_reason_;
 
     mutable std::mutex mutex_;
@@ -96,6 +165,8 @@ private:
 class ByteStreamReader {
 public:
     explicit ByteStreamReader(ByteStreamInfo info);
+    ByteStreamReader(ByteStreamInfo info,
+                     std::shared_ptr<DataStreamReaderBudget> budget);
     ~ByteStreamReader();
 
     ByteStreamReader(const ByteStreamReader&) = delete;
@@ -113,21 +184,36 @@ public:
     bool HasAvailableChunk() const;
 
     const ByteStreamInfo& info() const noexcept { return info_; }
+    bool admitted() const noexcept { return admitted_; }
+    size_t buffered_bytes() const;
     size_t received_bytes() const;
     bool is_closed() const;
+    bool is_failed() const;
     const std::string& close_reason() const;
 
     /// Called by Room when a new chunk arrives
     void OnChunkUpdate(const uint8_t* data, size_t size);
+    bool TryOnChunkUpdate(const uint8_t* data, size_t size);
 
     /// Called by Room when the stream is closed
     void OnStreamClose(const std::string& reason, const std::map<std::string, std::string>& trailer_attrs);
+    void OnStreamError(const std::string& reason);
 
 private:
+    void ReleaseActiveLocked();
+    void FailLocked(const std::string& reason);
+    void MarkReadAllLimitExceeded();
+
     ByteStreamInfo info_;
+    std::shared_ptr<DataStreamReaderBudget> budget_;
     std::deque<std::vector<uint8_t>> queue_;
+    size_t buffered_bytes_ = 0;
     size_t received_bytes_ = 0;
+    size_t queued_chunks_ = 0;
+    bool admitted_ = false;
+    bool active_registered_ = false;
     bool closed_ = false;
+    bool failed_ = false;
     std::string close_reason_;
 
     mutable std::mutex mutex_;
