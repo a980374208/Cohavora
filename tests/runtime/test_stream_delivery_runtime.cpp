@@ -43,6 +43,9 @@ constexpr std::size_t kDefaultByteBytes = 4 * 1024 * 1024;
 constexpr std::size_t kDefaultBatchBytes = 1024 * 1024;
 constexpr std::size_t kDefaultMaxBytes = 256 * 1024 * 1024;
 constexpr std::size_t kMaximumConfiguredBytes = 1024ull * 1024 * 1024;
+constexpr std::size_t kReaderLimitBytes = 16 * 1024 * 1024;
+constexpr std::size_t kReaderOverLimitBytes =
+    kReaderLimitBytes + livekit::kStreamChunkSize;
 
 std::mutex g_output_mutex;
 
@@ -58,7 +61,15 @@ std::string SafeOutput(std::string_view value) {
 }
 
 enum class Role { Sender, Receiver };
-enum class RuntimeCase { Baseline, Backpressure, SoftResume, FullRestart };
+enum class RuntimeCase {
+    Baseline,
+    Backpressure,
+    SoftResume,
+    FullRestart,
+    SlowConsumer,
+    ReaderOverlimit,
+    ReaderTtl,
+};
 
 struct Config {
     Role role = Role::Receiver;
@@ -110,6 +121,9 @@ const char* CaseName(RuntimeCase value) {
     case RuntimeCase::Backpressure: return "backpressure";
     case RuntimeCase::SoftResume: return "soft-resume";
     case RuntimeCase::FullRestart: return "full-restart";
+    case RuntimeCase::SlowConsumer: return "slow-consumer";
+    case RuntimeCase::ReaderOverlimit: return "reader-overlimit";
+    case RuntimeCase::ReaderTtl: return "reader-ttl";
     }
     return "unknown";
 }
@@ -167,7 +181,8 @@ void PrintUsage(const char* executable) {
         << "Usage:\n"
         << "  " << executable << " --role sender|receiver --case CASE --run-id ID [options]\n\n"
         << "CASES:\n"
-        << "  baseline | backpressure | soft-resume | full-restart\n\n"
+        << "  baseline | backpressure | soft-resume | full-restart\n"
+        << "  slow-consumer | reader-overlimit | reader-ttl\n\n"
         << "COMMON OPTIONS:\n"
         << "  --url URL                    or LIVEKIT_URL\n"
         << "  --token TOKEN                or LIVEKIT_TOKEN (environment preferred)\n"
@@ -210,6 +225,9 @@ std::optional<RuntimeCase> ParseCase(std::string_view value) {
     if (value == "backpressure") return RuntimeCase::Backpressure;
     if (value == "soft-resume") return RuntimeCase::SoftResume;
     if (value == "full-restart") return RuntimeCase::FullRestart;
+    if (value == "slow-consumer") return RuntimeCase::SlowConsumer;
+    if (value == "reader-overlimit") return RuntimeCase::ReaderOverlimit;
+    if (value == "reader-ttl") return RuntimeCase::ReaderTtl;
     return std::nullopt;
 }
 
@@ -357,11 +375,16 @@ ParseResult ParseArguments(int argc, char** argv) {
         return {};
     }
 
+    const bool reader_failure_case =
+        config.runtime_case == RuntimeCase::SlowConsumer ||
+        config.runtime_case == RuntimeCase::ReaderOverlimit ||
+        config.runtime_case == RuntimeCase::ReaderTtl;
     if (!complete_set) {
-        config.expected_complete = config.runtime_case == RuntimeCase::Baseline ? 2 : 1;
+        config.expected_complete = reader_failure_case ? 0 :
+            (config.runtime_case == RuntimeCase::Baseline ? 2 : 1);
     }
     if (!incomplete_set) {
-        config.expected_incomplete =
+        config.expected_incomplete = reader_failure_case ||
             config.runtime_case == RuntimeCase::Backpressure ? 1 : 0;
     }
     if (config.expected_complete < 0 || config.expected_incomplete < 0) {
@@ -502,6 +525,11 @@ struct ReceiveSummary {
     std::size_t invalid = 0;
 };
 
+struct DeferredByteReader {
+    std::shared_ptr<livekit::ByteStreamReader> reader;
+    livekit::ByteStreamInfo info;
+};
+
 class RuntimeListener final : public livekit::RoomListener {
 public:
     explicit RuntimeListener(Config config) : config_(std::move(config)) {}
@@ -550,6 +578,42 @@ public:
         std::shared_ptr<livekit::Participant>) override {
         if (!Matches(reader->info())) return;
         const auto info = reader->info();
+        if (config_.runtime_case == RuntimeCase::SlowConsumer) {
+            opened_.fetch_add(1, std::memory_order_acq_rel);
+            std::lock_guard lock(deferred_mutex_);
+            deferred_byte_readers_.push_back({std::move(reader), info});
+            return;
+        }
+        if (config_.runtime_case == RuntimeCase::ReaderOverlimit) {
+            StartWorker([this, reader = std::move(reader), info]() mutable {
+                try {
+                    (void)reader->ReadAll();
+                    throw RuntimeFailure("read_all_limit_not_observed");
+                } catch (const std::length_error& error) {
+                    if (std::string_view(error.what()) !=
+                        livekit::kDataStreamReadAllLimitExceeded) {
+                        throw;
+                    }
+                    Record(BuildResult(
+                        "byte", info, reader->received_bytes(), {},
+                        reader->close_reason()));
+                } catch (const std::runtime_error& error) {
+                    const std::string_view reason(error.what());
+                    const char* classification =
+                        reason == livekit::kDataStreamBufferLimitExceeded
+                            ? "buffer_limit"
+                        : reason == livekit::kDataStreamExpired
+                            ? "ttl"
+                        : reason == "session closed"
+                            ? "session_closed"
+                            : "other";
+                    PrintLine("[RESULT_DETAIL] read_all_unexpected_terminal=",
+                              classification);
+                    throw;
+                }
+            });
+            return;
+        }
         StartWorker([this, reader = std::move(reader), info]() mutable {
             Sha256Accumulator hash;
             std::size_t bytes = 0;
@@ -612,6 +676,32 @@ public:
     std::vector<ReceivedResult> Results() const {
         std::lock_guard lock(results_mutex_);
         return results_;
+    }
+
+    bool FinalizeDeferredReaders() {
+        std::vector<DeferredByteReader> readers;
+        {
+            std::lock_guard lock(deferred_mutex_);
+            if (std::any_of(
+                    deferred_byte_readers_.begin(),
+                    deferred_byte_readers_.end(),
+                    [](const auto& item) { return !item.reader->is_closed(); })) {
+                return false;
+            }
+            readers.swap(deferred_byte_readers_);
+        }
+        for (auto& item : readers) {
+            Sha256Accumulator hash;
+            std::size_t bytes = 0;
+            std::vector<uint8_t> chunk;
+            while (item.reader->ReadNext(chunk)) {
+                hash.Update(chunk.data(), chunk.size());
+                bytes += chunk.size();
+            }
+            Record(BuildResult("byte", item.info, bytes, hash.Finish(),
+                               item.reader->close_reason()));
+        }
+        return true;
     }
 
     void JoinWorkers() {
@@ -712,11 +802,20 @@ private:
     std::vector<ReceivedResult> results_;
     std::mutex workers_mutex_;
     std::vector<std::thread> workers_;
+    std::mutex deferred_mutex_;
+    std::vector<DeferredByteReader> deferred_byte_readers_;
 };
 
 asio::awaitable<void> Delay(asio::any_io_executor executor, int seconds) {
     if (seconds <= 0) co_return;
     asio::steady_timer timer(executor, std::chrono::seconds(seconds));
+    std::error_code error;
+    co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+}
+
+asio::awaitable<void> DelayFor(asio::any_io_executor executor,
+                               std::chrono::milliseconds duration) {
+    asio::steady_timer timer(executor, duration);
     std::error_code error;
     co_await timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
 }
@@ -1042,6 +1141,86 @@ asio::awaitable<int> RunFullRestart(
     co_return kExitPassed;
 }
 
+asio::awaitable<int> RunReaderBudgetTransfer(
+    const std::shared_ptr<livekit::Room>& room,
+    const Config& config,
+    std::string sequence,
+    uint32_t seed) {
+    const auto batch_size =
+        std::min<std::size_t>(config.batch_bytes, 256 * 1024);
+    const auto expected_hash = Sha256ForGeneratedBytes(
+        kReaderOverLimitBytes, batch_size, seed);
+    auto writer = room->CreateByteStreamWriter(
+        sequence + ".bin",
+        config.topic,
+        StreamAttributes(config, "byte", sequence,
+                         kReaderOverLimitBytes, expected_hash),
+        config.run_id + "-" + sequence,
+        kReaderOverLimitBytes,
+        "application/octet-stream",
+        Destinations(config));
+
+    std::size_t offset = 0;
+    while (offset < kReaderOverLimitBytes) {
+        std::vector<uint8_t> batch(
+            std::min(batch_size, kReaderOverLimitBytes - offset));
+        FillBytes(batch, offset, seed);
+        writer->Write(batch);
+        offset += batch.size();
+        co_await DelayFor(room->executor(), 20ms);
+    }
+    writer->Close("complete", {{"l3_result", "complete"}});
+    PrintLine("[SEND] kind=byte sequence=", sequence,
+              " bytes=", kReaderOverLimitBytes,
+              " sha256=", expected_hash);
+    co_return kExitPassed;
+}
+
+asio::awaitable<int> RunReaderTtl(
+    const std::shared_ptr<livekit::Room>& room,
+    const Config& config) {
+    constexpr std::string_view payload = "t";
+    const std::string sequence = "reader-ttl";
+    const std::string stream_id = config.run_id + "-" + sequence;
+    const auto attributes = StreamAttributes(
+        config, "text", sequence, payload.size(),
+        Sha256Of(payload.data(), payload.size()));
+
+    livekit::proto::DataPacket header_packet;
+    for (const auto& destination : Destinations(config)) {
+        header_packet.add_destination_identities(destination);
+    }
+    auto* header = header_packet.mutable_stream_header();
+    header->set_stream_id(stream_id);
+    header->set_topic(config.topic);
+    header->set_mime_type("text/plain");
+    header->set_total_length(2);
+    header->mutable_text_header();
+    for (const auto& [key, value] : attributes) {
+        (*header->mutable_attributes())[key] = value;
+    }
+    if (!room->PublishDataPacket(header_packet, /*reliable=*/true)) {
+        PrintLine("[RESULT_DETAIL] ttl_header_send_failed=true");
+        co_return kExitInconclusive;
+    }
+
+    livekit::proto::DataPacket chunk_packet;
+    for (const auto& destination : Destinations(config)) {
+        chunk_packet.add_destination_identities(destination);
+    }
+    auto* chunk = chunk_packet.mutable_stream_chunk();
+    chunk->set_stream_id(stream_id);
+    chunk->set_chunk_index(0);
+    chunk->set_content(payload.data(), payload.size());
+    if (!room->PublishDataPacket(chunk_packet, /*reliable=*/true)) {
+        PrintLine("[RESULT_DETAIL] ttl_chunk_send_failed=true");
+        co_return kExitInconclusive;
+    }
+
+    PrintLine("[SEND] kind=text sequence=reader-ttl bytes=1 trailer=false");
+    co_return kExitPassed;
+}
+
 asio::awaitable<int> RunSender(
     const std::shared_ptr<livekit::Room>& room,
     const std::shared_ptr<RuntimeListener>& listener,
@@ -1065,6 +1244,17 @@ asio::awaitable<int> RunSender(
         break;
     case RuntimeCase::FullRestart:
         result = co_await RunFullRestart(room, listener, config);
+        break;
+    case RuntimeCase::SlowConsumer:
+        result = co_await RunReaderBudgetTransfer(
+            room, config, "slow-consumer", 71);
+        break;
+    case RuntimeCase::ReaderOverlimit:
+        result = co_await RunReaderBudgetTransfer(
+            room, config, "reader-overlimit", 73);
+        break;
+    case RuntimeCase::ReaderTtl:
+        result = co_await RunReaderTtl(room, config);
         break;
     }
     if (result != kExitPassed) co_return result;
@@ -1091,6 +1281,62 @@ bool ReceiverReady(const ReceiveSummary& summary, const Config& config) {
     return summary.finished >= total;
 }
 
+bool IsReaderFailureCase(RuntimeCase runtime_case) {
+    return runtime_case == RuntimeCase::SlowConsumer ||
+           runtime_case == RuntimeCase::ReaderOverlimit ||
+           runtime_case == RuntimeCase::ReaderTtl;
+}
+
+const char* ExpectedReaderFailure(RuntimeCase runtime_case) {
+    switch (runtime_case) {
+    case RuntimeCase::SlowConsumer:
+        return livekit::kDataStreamBufferLimitExceeded;
+    case RuntimeCase::ReaderOverlimit:
+        return livekit::kDataStreamReadAllLimitExceeded;
+    case RuntimeCase::ReaderTtl:
+        return livekit::kDataStreamExpired;
+    default:
+        return "";
+    }
+}
+
+bool ValidateReaderFailure(const RuntimeListener& listener,
+                           const Config& config) {
+    if (!IsReaderFailureCase(config.runtime_case) ||
+        config.expected_incomplete == 0) {
+        return true;
+    }
+    const auto results = listener.Results();
+    if (results.size() != 1 ||
+        results.front().close_reason !=
+            ExpectedReaderFailure(config.runtime_case)) {
+        PrintLine("[RESULT_DETAIL] reader_terminal_reason_match=false");
+        return false;
+    }
+    if (config.runtime_case == RuntimeCase::SlowConsumer &&
+        (results.front().actual_bytes == 0 ||
+         results.front().actual_bytes > kReaderLimitBytes)) {
+        PrintLine("[RESULT_DETAIL] slow_consumer_buffer_bound=false bytes=",
+                  results.front().actual_bytes);
+        return false;
+    }
+    if (config.runtime_case == RuntimeCase::ReaderOverlimit &&
+        results.front().actual_bytes <= kReaderLimitBytes) {
+        PrintLine("[RESULT_DETAIL] read_all_limit_crossed=false bytes=",
+                  results.front().actual_bytes);
+        return false;
+    }
+    if (config.runtime_case == RuntimeCase::ReaderTtl &&
+        results.front().actual_bytes != 1) {
+        PrintLine("[RESULT_DETAIL] ttl_prefix_bytes_invalid=true bytes=",
+                  results.front().actual_bytes);
+        return false;
+    }
+    PrintLine("[CHECK] reader_terminal_reason_match=true bounded_bytes=",
+              results.front().actual_bytes);
+    return true;
+}
+
 int ValidateReceiver(const RuntimeListener& listener, const Config& config) {
     const auto summary = listener.Summary();
     const std::size_t expected_total =
@@ -1104,7 +1350,7 @@ int ValidateReceiver(const RuntimeListener& listener, const Config& config) {
     if (summary.opened != expected_total || summary.finished != expected_total ||
         summary.complete != static_cast<std::size_t>(config.expected_complete) ||
         summary.incomplete != static_cast<std::size_t>(config.expected_incomplete) ||
-        summary.invalid != 0) {
+        summary.invalid != 0 || !ValidateReaderFailure(listener, config)) {
         return kExitFailed;
     }
     return kExitPassed;
@@ -1144,8 +1390,24 @@ asio::awaitable<int> RunReceiver(
     if (config.expected_incomplete > 0) {
         co_await Delay(room->executor(), config.incomplete_grace_seconds);
     }
+    if (IsReaderFailureCase(config.runtime_case) &&
+        config.expected_incomplete > 0) {
+        if (!listener->FinalizeDeferredReaders()) {
+            PrintLine("[RESULT_DETAIL] reader_not_terminal_after_grace=true");
+            co_return kExitFailed;
+        }
+        const auto terminal_deadline = std::chrono::steady_clock::now() + 2s;
+        if (!co_await WaitUntil(room->executor(), terminal_deadline, [&] {
+                return listener->Summary().finished ==
+                    static_cast<std::size_t>(config.expected_incomplete);
+            })) {
+            PrintLine("[RESULT_DETAIL] reader_result_not_recorded=true");
+            co_return kExitFailed;
+        }
+    }
     const auto summary = listener->Summary();
-    if (!ReceiverCanAcknowledge(summary, config)) {
+    if (!ReceiverCanAcknowledge(summary, config) ||
+        !ValidateReaderFailure(*listener, config)) {
         PrintLine("[RESULT_DETAIL] receiver_ack_validation_failed=true");
         co_return kExitFailed;
     }
