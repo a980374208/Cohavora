@@ -275,8 +275,8 @@ public:
         std::chrono::milliseconds timeout,
         uint64_t generation,
         bool ice_restart = false);
-    void ExecuteNegotiatePublisher();
-    void OnNegotiationFailed();
+    void ExecuteNegotiatePublisher(uint64_t generation = 0);
+    void OnNegotiationFailed(uint64_t generation = 0);
 
     // 内部 WebRTC 观察者回调接口
     void OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type);
@@ -298,9 +298,12 @@ public:
     void Log(const std::string& cat, const std::string& tag, const std::string& msg);
 
 private:
+    friend class RoomPeerConnectionObserver;
+    friend class RoomDataChannelObserver;
     friend class RoomUnpublishTestAccess;
     friend class ParticipantSnapshotRoomTestAccess;
     friend class RoomIrSec001TestAccess;
+    friend class RoomConnectAttemptTestAccess;
     // Only the named test-access friend can install these two transport-boundary
     // hooks. Production keeps them null and uses the existing native methods.
     struct LocalUnpublishTestHooks {
@@ -308,19 +311,106 @@ private:
         std::function<asio::awaitable<void>(std::chrono::milliseconds, uint64_t)> negotiate;
     };
     std::shared_ptr<LocalUnpublishTestHooks> local_unpublish_test_hooks_;
+    struct ConnectAttemptTestHooks {
+        std::function<asio::awaitable<void>(uint64_t)> before_join_commit;
+        std::function<void(uint64_t)> before_signal_event_commit;
+        std::function<void(uint64_t, ConnectionState)> before_lifecycle_listener_delivery;
+        std::function<void(uint64_t)> before_native_event_commit;
+        std::function<void(uint64_t)> before_republish_listener_delivery;
+    };
+    std::shared_ptr<ConnectAttemptTestHooks> connect_attempt_test_hooks_;
     void BindLocalUnpublishHandler();
 
     LogHandler log_handler_;
+    enum class LifecycleListenerEventKind {
+        Connected,
+        Disconnected,
+        Reconnecting,
+        Reconnected
+    };
+    struct LifecycleListenerDelivery {
+        LifecycleListenerEventKind kind = LifecycleListenerEventKind::Connected;
+        uint64_t generation = 0;
+        ConnectionState required_state = ConnectionState::Disconnected;
+        RoomDisconnectReason reason = RoomDisconnectReason::Unknown;
+        std::string detail;
+        std::vector<std::shared_ptr<RoomListener>> listeners;
+    };
+    void DeliverLifecycleListenerEvent(LifecycleListenerDelivery delivery);
+    void DeliverRepublishedTrack(uint64_t generation, const std::string& previous_sid,
+                                std::shared_ptr<TrackPublication> publication);
+    bool IsNativeGenerationCurrentLocked(uint64_t generation) const;
+    struct ListenerDeliveryContext {
+        uint64_t generation;
+        std::optional<ConnectionState> required_state = std::nullopt;
+        bool require_installed_owner = false;
+        bool require_reconnect = false;
+        std::shared_ptr<E2eeManager> e2ee_owner;
+    };
+    bool AdmitListener(const ListenerDeliveryContext& context,
+                       const std::shared_ptr<RoomListener>& listener) const;
+    template <typename Callback>
+    void DeliverListener(const ListenerDeliveryContext& context,
+                         const std::shared_ptr<RoomListener>& listener,
+                         Callback&& callback, bool legacy_only = false) {
+        if (!AdmitListener(context, listener)) return;
+        // This virtual query is also application code: never hold room_mutex_,
+        // and re-admit after it in case it removed a listener or replaced Room.
+        if (legacy_only) {
+            if (listener->ConsumesParticipantEvents()) return;
+            if (!AdmitListener(context, listener)) return;
+        }
+        // Admission is the linearization point. An admitted invocation may
+        // finish; replacement suppresses every subsequent admission.
+        callback(*listener);
+    }
+    void BeforeNativeEventCommit(uint64_t generation);
+    std::shared_ptr<webrtc::PeerConnectionObserver> CreatePeerConnectionObserver(int pc_type, uint64_t generation);
+    std::shared_ptr<webrtc::DataChannelObserver> CreateDataChannelObserver(bool reliable, uint64_t generation);
+    void PostRemoteTrack(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+                         webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, uint64_t generation);
+    void OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+                            webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, uint64_t generation);
+    void OnRemoteDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> channel, uint64_t generation);
+    void OnLocalIceCandidate(const std::string& sdp, const std::string& mid, int index, int pc_type, uint64_t generation);
+    void OnIceConnected(uint64_t generation);
+    void OnPeerConnectionStateChanged(int pc_type, webrtc::PeerConnectionInterface::PeerConnectionState state, uint64_t generation);
+    void OnRenegotiationNeeded(int pc_type, uint64_t generation);
+    void OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliable, uint64_t generation);
+    void OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& sid, const std::string& topic, uint64_t generation);
+    void OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation);
+    bool PublishData(const std::vector<uint8_t>& payload, bool reliable,
+                     const std::vector<std::string>& destinations, const std::string& topic, uint64_t generation);
+    void NegotiatePublisher(uint64_t generation);
+    asio::awaitable<std::shared_ptr<TrackPublication>> PublishLocalTrackAsync(
+        std::shared_ptr<Track> track, const proto::SignalRequest& request, uint64_t generation);
     void HandleSignalEvent(const SignalEvent& event, uint64_t event_generation = 0);
-    void HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg);
-    void UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::ParticipantInfo>& participants);
-    void UpdateParticipants(const proto::ParticipantUpdate& update);
-    void UpdateTrackMute(const proto::MuteTrackRequest& mute);
-    void HandleActiveSpeakerUpdate(const proto::SpeakersChanged& speakers_changed);
-    void UpdateRoomInfo(const proto::Room& room);
-    void UpdateConnectionQuality(const proto::ConnectionQualityUpdate& update);
-    void UpdateTrackStreamStates(const proto::StreamStateUpdate& update);
-    void UpdateTrackSubscriptionPermission(const proto::SubscriptionPermissionUpdate& update);
+    void HandleSignalMessage(
+        std::shared_ptr<proto::SignalResponse> msg,
+        uint64_t event_generation = 0);
+    bool IsSignalGenerationCurrentLocked(uint64_t event_generation) const;
+    void UpdateParticipants(
+        const google::protobuf::RepeatedPtrField<proto::ParticipantInfo>& participants,
+        uint64_t event_generation = 0);
+    void UpdateParticipants(
+        const proto::ParticipantUpdate& update,
+        uint64_t event_generation = 0);
+    void UpdateTrackMute(
+        const proto::MuteTrackRequest& mute,
+        uint64_t event_generation = 0);
+    void HandleActiveSpeakerUpdate(
+        const proto::SpeakersChanged& speakers_changed,
+        uint64_t event_generation = 0);
+    void UpdateRoomInfo(const proto::Room& room, uint64_t event_generation = 0);
+    void UpdateConnectionQuality(
+        const proto::ConnectionQualityUpdate& update,
+        uint64_t event_generation = 0);
+    void UpdateTrackStreamStates(
+        const proto::StreamStateUpdate& update,
+        uint64_t event_generation = 0);
+    void UpdateTrackSubscriptionPermission(
+        const proto::SubscriptionPermissionUpdate& update,
+        uint64_t event_generation = 0);
     std::shared_ptr<RemoteTrackPublication> CreateRemoteTrackPublication(
         std::shared_ptr<Track> track,
         const std::string& participant_sid,
@@ -372,21 +462,47 @@ private:
         uint64_t generation);
 
     // 协商和 Trickle 信令分发
-    void SendTrickleCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type);
-    void HandleOfferSignal(const proto::SessionDescription& offer);
-    void HandleAnswerSignal(const proto::SessionDescription& answer);
-    void HandleTrickleSignal(const proto::TrickleRequest& trickle);
-    void HandleMediaSectionsRequirement(const proto::MediaSectionsRequirement& req);
+    void SendTrickleCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type, uint64_t generation);
+    void HandleOfferSignal(
+        const proto::SessionDescription& offer,
+        uint64_t event_generation = 0);
+    void HandleAnswerSignal(
+        const proto::SessionDescription& answer,
+        uint64_t event_generation = 0);
+    void HandleTrickleSignal(
+        const proto::TrickleRequest& trickle,
+        uint64_t event_generation = 0);
+    void HandleMediaSectionsRequirement(
+        const proto::MediaSectionsRequirement& req,
+        uint64_t event_generation = 0);
     proto::SyncState BuildSyncState() const;
     static RoomDisconnectReason ToRoomDisconnectReason(proto::DisconnectReason reason);
-    void BeginServerDisconnect(RoomDisconnectReason reason, std::string detail);
-    asio::awaitable<void> FinalizeServerDisconnectAsync(RoomDisconnectReason reason, std::string detail);
+    void BeginServerDisconnect(
+        RoomDisconnectReason reason,
+        std::string detail,
+        uint64_t event_generation);
+    asio::awaitable<void> FinalizeServerDisconnectAsync(
+        RoomDisconnectReason reason,
+        std::string detail,
+        uint64_t event_generation);
     asio::awaitable<void> WaitForPrimaryPeerConnection(
         std::chrono::milliseconds timeout,
         uint64_t generation);
-    void CompleteNegotiation(const std::string& error);
+    void CompleteNegotiation(
+        const std::string& error,
+        uint64_t generation = 0);
+    struct PendingOperationCleanup {
+        std::vector<std::shared_ptr<AwaitableState<void>>> void_states;
+        std::vector<std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>>> publish_states;
+    };
+    PendingOperationCleanup TakePendingOperationsLocked();
+    static void FailPendingOperations(
+        PendingOperationCleanup pending,
+        OperationErrorCode code,
+        const std::string& stage,
+        const std::string& message);
     void CancelPendingOperations(OperationErrorCode code, const std::string& stage, const std::string& message);
-    void FlushDeferredRoomMessages();
+    void FlushDeferredRoomMessages(uint64_t generation);
 
     asio::any_io_executor executor_;
     std::shared_ptr<SignalClient> signal_client_;
@@ -443,7 +559,7 @@ private:
     webrtc::scoped_refptr<webrtc::DataChannelInterface> reliable_dc_;
     webrtc::scoped_refptr<webrtc::DataChannelInterface> lossy_dc_;
     std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> remote_data_channels_;
-    std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers_;
+    std::vector<std::shared_ptr<webrtc::DataChannelObserver>> data_channel_observers_;
     enum class RemoteTrackSinkThread {
         Signaling,
         MediaWorker,
@@ -503,6 +619,10 @@ private:
 
     std::atomic<uint64_t> operation_sequence_{1};
     std::atomic<uint64_t> session_generation_{0};
+    // Identifies the Connect attempt that installed the current shared
+    // Signal/Room/WebRTC bundle. Validity may advance before cleanup runs, so
+    // it cannot also serve as the resource owner token.
+    uint64_t installed_session_generation_ = 0;
     OperationTimeouts operation_timeouts_;
     int primary_pc_type_ = 0;
     bool require_media_connection_ = true;
@@ -537,6 +657,7 @@ private:
 
     // === 对齐 Flutter: PendingTrackQueue 暂存队列与 Stream ID 解包 ===
     struct PendingTrack {
+        uint64_t generation = 0;
         webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track;
         webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver;
         std::string participant_sid;
@@ -550,17 +671,16 @@ private:
         std::shared_ptr<RemoteParticipant> participant,
         webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track,
         webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
-        const std::string& track_sid);
-    void FlushPendingTracks(const std::string& participant_sid);
+        const std::string& track_sid, uint64_t generation = 0);
+    void FlushPendingTracks(const std::string& participant_sid, uint64_t generation);
     void RemoveExpiredPendingTracks();
 
     // Simulcast 参数下发同步
     static void ApplySimulcastParameters(webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender, const VideoPublishOptions& opts);
 
     // 内部私有方法
-    asio::awaitable<void> AttemptReconnect();
-    asio::awaitable<void> RepublishLocalTracks(
-        std::shared_ptr<proto::ReconnectResponse> reconnect_response);
+    asio::awaitable<void> AttemptReconnect(uint64_t owner_generation);
+    asio::awaitable<void> RepublishLocalTracks(uint64_t generation);
     asio::awaitable<void> RestartIceConnections(
         std::shared_ptr<proto::ReconnectResponse> reconnect_response,
         std::chrono::milliseconds attempt_timeout);
@@ -568,8 +688,9 @@ private:
     std::vector<std::shared_ptr<RoomListener>> GetListenersSnapshot() const;
 
 private:
-    IncomingDataStreamAssembler incoming_data_streams_;
-    mutable std::mutex streams_mutex_;
+    // Protected by room_mutex_ together with the native generation check.
+    std::unique_ptr<IncomingDataStreamAssembler> incoming_data_streams_ =
+        std::make_unique<IncomingDataStreamAssembler>();
     std::unordered_map<std::string, std::shared_ptr<TextStreamReader>> active_text_readers_;
     std::unordered_map<std::string, std::shared_ptr<ByteStreamReader>> active_byte_readers_;
 };

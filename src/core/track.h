@@ -81,6 +81,15 @@ struct VideoPublishOptions {
 
 class Track {
 private:
+    friend class Room;
+    // Room configures the captured native track outside its mutex, then swaps
+    // only the binding at the generation-protected commit. Retire the old
+    // reference outside that mutex as well.
+    webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> ExchangeRtcTrackBinding(
+        webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, bool force_muted) {
+        if (force_muted) muted_.store(true, std::memory_order_relaxed);
+        return std::exchange(rtc_track_, std::move(track));
+    }
     struct I420VideoSinkRegistry;
 
 public:

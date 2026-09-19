@@ -12,6 +12,23 @@
 
 namespace livekit {
 
+namespace {
+
+struct JoinWaitState {
+    std::mutex mutex;
+    std::shared_ptr<proto::JoinResponse> response;
+    std::string close_reason;
+};
+
+struct ReconnectWaitState {
+    std::mutex mutex;
+    std::shared_ptr<proto::ReconnectResponse> response;
+    std::string close_reason;
+    bool got_leave = false;
+};
+
+} // namespace
+
 // Base64 helper from websocket_client
 static std::string Base64Encode(const unsigned char* buffer, size_t length) {
     static const char char_set[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -293,7 +310,8 @@ SignalClient::SignalClient(const std::string& url_str,
     : url_(url_str), options_(options),
       single_pc_mode_active_(single_pc_mode_active),
       join_response_(join_response), event_handler_(event_handler),
-      executor_(executor), token_(token) {
+      executor_(executor), token_(token),
+      heartbeat_strand_(asio::make_strand(executor)) {
     last_received_time_.store(std::chrono::steady_clock::now());
 }
 
@@ -336,6 +354,7 @@ void SignalClient::SetReconnected() {
 }
 
 void SignalClient::SetEventReady() {
+    if (closed_.load(std::memory_order_acquire)) return;
     std::vector<std::shared_ptr<proto::SignalResponse>> pending;
     {
         std::lock_guard<std::mutex> lock(event_buffer_mutex_);
@@ -343,13 +362,16 @@ void SignalClient::SetEventReady() {
         pending.swap(buffered_events_);
     }
 
+    SignalEventHandler handler;
+    {
+        std::lock_guard lock(event_handler_mutex_);
+        handler = event_handler_;
+    }
     for (const auto& msg : pending) {
         SignalEvent event;
         event.type = SignalEvent::Message;
         event.message = msg;
-        if (event_handler_) {
-            event_handler_(event);
-        }
+        if (handler) handler(event);
     }
 }
 
@@ -484,8 +506,12 @@ void SignalClient::FlushQueue() {
 }
 
 void SignalClient::Close() {
+    if (closed_.exchange(true, std::memory_order_acq_rel)) return;
     StopHeartbeat();
-    event_handler_ = nullptr;
+    {
+        std::lock_guard lock(event_handler_mutex_);
+        event_handler_ = nullptr;
+    }
     
     std::shared_ptr<SignalStream> stream;
     {
@@ -493,8 +519,8 @@ void SignalClient::Close() {
         stream = stream_;
         stream_.reset();
     }
-    
-    stream.reset();
+
+    if (stream) stream->Abort();
 }
 
 bool SignalClient::is_connected() const {
@@ -509,6 +535,9 @@ std::string SignalClient::token() const {
 
 void SignalClient::StartHeartbeat() {
     StopHeartbeat();
+    if (closed_.load(std::memory_order_acquire)) return;
+    const uint64_t generation =
+        heartbeat_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
     heartbeat_active_ = true;
     last_received_time_ = std::chrono::steady_clock::now();
 
@@ -518,20 +547,29 @@ void SignalClient::StartHeartbeat() {
     if (timeout_sec == 0) timeout_sec = 29;
 
     auto self = shared_from_this();
-    livekit::safe_co_spawn(executor_, [self, this, interval_sec, timeout_sec]() -> asio::awaitable<void> {
-        co_await HeartbeatLoop(interval_sec, timeout_sec);
+    livekit::safe_co_spawn(heartbeat_strand_, [self, interval_sec, timeout_sec, generation]() -> asio::awaitable<void> {
+        co_await self->HeartbeatLoop(interval_sec, timeout_sec, generation);
     });
 }
 
 void SignalClient::StopHeartbeat() {
     heartbeat_active_ = false;
-    if (heartbeat_timer_) {
-        std::error_code ec;
-        heartbeat_timer_->cancel(ec);
+    heartbeat_generation_.fetch_add(1, std::memory_order_acq_rel);
+    std::shared_ptr<asio::steady_timer> timer;
+    {
+        std::lock_guard lock(heartbeat_timer_mutex_);
+        timer = heartbeat_timer_;
+    }
+    if (timer) {
+        asio::post(heartbeat_strand_, [timer]() {
+            std::error_code ec;
+            timer->cancel(ec);
+        });
     }
 }
 
 void SignalClient::HandleIncomingMessage(std::shared_ptr<proto::SignalResponse> msg) {
+    if (closed_.load(std::memory_order_acquire)) return;
     last_received_time_.store(std::chrono::steady_clock::now(), std::memory_order_release);
     
     if (msg->has_refresh_token()) {
@@ -555,20 +593,27 @@ void SignalClient::HandleIncomingMessage(std::shared_ptr<proto::SignalResponse> 
     SignalEvent event;
     event.type = SignalEvent::Message;
     event.message = msg;
-    if (event_handler_) {
-        event_handler_(event);
+    SignalEventHandler handler;
+    {
+        std::lock_guard lock(event_handler_mutex_);
+        handler = event_handler_;
     }
+    if (handler) handler(event);
 }
 
 void SignalClient::HandleClose(const std::string& reason) {
+    if (closed_.load(std::memory_order_acquire)) return;
     StopHeartbeat();
     
     SignalEvent event;
     event.type = SignalEvent::Close;
     event.close_reason = reason;
-    if (event_handler_) {
-        event_handler_(event);
+    SignalEventHandler handler;
+    {
+        std::lock_guard lock(event_handler_mutex_);
+        handler = event_handler_;
     }
+    if (handler) handler(event);
 }
 
 void SignalClient::HandleHeartbeatFailure(const std::error_code& error) {
@@ -724,22 +769,26 @@ asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::Reconne
         std::chrono::duration_cast<std::chrono::milliseconds>(
             deadline - std::chrono::steady_clock::now()));
     if (response_budget <= std::chrono::milliseconds::zero()) {
-        stream->Close(false);
+        stream->Abort();
         throw std::system_error(std::make_error_code(std::errc::timed_out));
     }
     timer->expires_after(response_budget);
     
-    std::shared_ptr<proto::ReconnectResponse> rec_res = nullptr;
-    std::string close_reason;
-    bool got_leave = false;
+    auto wait_state = std::make_shared<ReconnectWaitState>();
     
-    stream->SetOnMessage([this, timer, &rec_res, &got_leave](std::shared_ptr<proto::SignalResponse> msg) {
+    stream->SetOnMessage([this, timer, wait_state](std::shared_ptr<proto::SignalResponse> msg) {
         if (msg->has_reconnect()) {
-            rec_res = std::make_shared<proto::ReconnectResponse>(msg->reconnect());
+            {
+                std::lock_guard lock(wait_state->mutex);
+                wait_state->response = std::make_shared<proto::ReconnectResponse>(msg->reconnect());
+            }
             auto n = timer->cancel();
             std::cout << "SignalClient::ReconnectInternal: timer->cancel() returned: " << n << std::endl;
         } else if (msg->has_leave()) {
-            got_leave = true;
+            {
+                std::lock_guard lock(wait_state->mutex);
+                wait_state->got_leave = true;
+            }
             auto n = timer->cancel();
             std::cout << "SignalClient::ReconnectInternal: leave timer->cancel() returned: " << n << std::endl;
         } else {
@@ -752,8 +801,11 @@ asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::Reconne
         }
     });
     
-    stream->SetOnClose([timer, &close_reason](const std::string& reason) {
-        close_reason = reason;
+    stream->SetOnClose([timer, wait_state](const std::string& reason) {
+        {
+            std::lock_guard lock(wait_state->mutex);
+            wait_state->close_reason = reason;
+        }
         auto n = timer->cancel();
         std::cout << "SignalClient::ReconnectInternal: SetOnClose timer->cancel() returned: " << n << std::endl;
     });
@@ -762,10 +814,19 @@ asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::Reconne
     
     try {
         co_await timer->async_wait(asio::use_awaitable);
-        stream->Close(false);
+        stream->Abort();
         throw std::system_error(std::make_error_code(std::errc::timed_out));
     } catch (const std::system_error& e) {
         if (e.code() == asio::error::operation_aborted) {
+            std::shared_ptr<proto::ReconnectResponse> rec_res;
+            std::string close_reason;
+            bool got_leave = false;
+            {
+                std::lock_guard lock(wait_state->mutex);
+                rec_res = wait_state->response;
+                close_reason = wait_state->close_reason;
+                got_leave = wait_state->got_leave;
+            }
             if (rec_res) {
                 {
                     std::unique_lock<std::shared_mutex> lock(stream_mutex_);
@@ -785,7 +846,7 @@ asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::Reconne
                 StartHeartbeat();
                 co_return rec_res;
             } else {
-                stream->Close(false);
+                stream->Abort();
                 throw std::system_error(std::make_error_code(std::errc::connection_aborted), got_leave ? "leave" : close_reason);
             }
         } else {
@@ -812,13 +873,15 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::TryConnectIn
     timer->expires_after(options_.connect_timeout);
     std::cout << "SignalClient::TryConnectInternal: Created timer address: " << timer.get() << std::endl;
     
-    std::shared_ptr<proto::JoinResponse> join_res = nullptr;
-    std::string close_reason;
+    auto wait_state = std::make_shared<JoinWaitState>();
     
-    stream->SetOnMessage([this, timer, &join_res](std::shared_ptr<proto::SignalResponse> msg) {
+    stream->SetOnMessage([this, timer, wait_state](std::shared_ptr<proto::SignalResponse> msg) {
         std::cout << "SignalClient::TryConnectInternal: SetOnMessage callback, has_join=" << msg->has_join() << " timer address: " << timer.get() << std::endl;
         if (msg->has_join()) {
-            join_res = std::make_shared<proto::JoinResponse>(msg->join());
+            {
+                std::lock_guard lock(wait_state->mutex);
+                wait_state->response = std::make_shared<proto::JoinResponse>(msg->join());
+            }
             auto n = timer->cancel();
             std::cout << "SignalClient::TryConnectInternal: timer->cancel() returned: " << n << std::endl;
         } else {
@@ -831,8 +894,11 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::TryConnectIn
         }
     });
     
-    stream->SetOnClose([timer, &close_reason](const std::string& reason) {
-        close_reason = reason;
+    stream->SetOnClose([timer, wait_state](const std::string& reason) {
+        {
+            std::lock_guard lock(wait_state->mutex);
+            wait_state->close_reason = reason;
+        }
         auto n = timer->cancel();
         std::cout << "SignalClient::TryConnectInternal: SetOnClose timer->cancel() returned: " << n << " timer address: " << timer.get() << std::endl;
     });
@@ -843,13 +909,20 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::TryConnectIn
         std::cout << "SignalClient::TryConnectInternal: co_awaiting timer address: " << timer.get() << std::endl;
         co_await timer->async_wait(asio::use_awaitable);
         std::cout << "SignalClient::TryConnectInternal: timer wait ended normally (no exception)" << std::endl;
-        stream->Close(false);
+        stream->Abort();
         throw std::system_error(std::make_error_code(std::errc::timed_out));
     } catch (const std::system_error& e) {
         std::cout << "SignalClient::TryConnectInternal: caught system_error: "
                   << secure_log::ErrorCodeSummary("signal_wait_join", e.code().value(), "system")
                   << std::endl;
         if (e.code() == asio::error::operation_aborted) {
+            std::shared_ptr<proto::JoinResponse> join_res;
+            std::string close_reason;
+            {
+                std::lock_guard lock(wait_state->mutex);
+                join_res = wait_state->response;
+                close_reason = wait_state->close_reason;
+            }
             if (join_res) {
                 {
                     std::unique_lock<std::shared_mutex> lock(stream_mutex_);
@@ -921,16 +994,28 @@ asio::awaitable<void> SignalClient::ValidateInternal(const std::string& url_str,
     }
 }
 
-asio::awaitable<void> SignalClient::HeartbeatLoop(uint32_t interval_sec, uint32_t timeout_sec) {
+asio::awaitable<void> SignalClient::HeartbeatLoop(
+    uint32_t interval_sec,
+    uint32_t timeout_sec,
+    uint64_t generation) {
     auto executor = co_await asio::this_coro::executor;
-    heartbeat_timer_ = std::make_shared<asio::steady_timer>(executor);
+    auto timer = std::make_shared<asio::steady_timer>(executor);
+    {
+        std::lock_guard lock(heartbeat_timer_mutex_);
+        if (generation != heartbeat_generation_.load(std::memory_order_acquire)) co_return;
+        heartbeat_timer_ = timer;
+    }
     
     try {
-        while (heartbeat_active_) {
-            heartbeat_timer_->expires_after(std::chrono::seconds(interval_sec));
-            co_await heartbeat_timer_->async_wait(asio::use_awaitable);
+        while (heartbeat_active_.load(std::memory_order_acquire) &&
+               generation == heartbeat_generation_.load(std::memory_order_acquire)) {
+            timer->expires_after(std::chrono::seconds(interval_sec));
+            co_await timer->async_wait(asio::use_awaitable);
             
-            if (!heartbeat_active_) break;
+            if (!heartbeat_active_.load(std::memory_order_acquire) ||
+                generation != heartbeat_generation_.load(std::memory_order_acquire)) {
+                break;
+            }
             
             int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
@@ -952,7 +1037,13 @@ asio::awaitable<void> SignalClient::HeartbeatLoop(uint32_t interval_sec, uint32_
             }
         }
     } catch (const std::system_error& e) {
-        HandleHeartbeatFailure(e.code());
+        if (generation == heartbeat_generation_.load(std::memory_order_acquire)) {
+            HandleHeartbeatFailure(e.code());
+        }
+    }
+    {
+        std::lock_guard lock(heartbeat_timer_mutex_);
+        if (heartbeat_timer_ == timer) heartbeat_timer_.reset();
     }
 }
 

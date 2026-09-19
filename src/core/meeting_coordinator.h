@@ -287,6 +287,11 @@ private:
     void completeRoomStartupOnUiThread(uint64_t sessionGeneration,
                                        std::shared_ptr<livekit::LocalAudioTrack> audioTrack,
                                        std::shared_ptr<livekit::LocalVideoTrack> videoTrack);
+    void completeRoomStartupDegradedOnUiThread(uint64_t sessionGeneration,
+                                               const QString &title,
+                                               const QString &detail);
+    bool tryCommitOperationalStateOnUiThread(uint64_t sessionGeneration,
+                                             const QString &detail);
     void failRoomStartupOnUiThread(uint64_t sessionGeneration,
                                    const QString &title,
                                    const QString &detail);
@@ -372,10 +377,11 @@ private:
     std::shared_ptr<CoordinatorRoomListener> _roomListener;
     std::thread _ioThread;
     std::atomic<bool> _sessionRunning{false};
-    // Qt-thread owned. A reconnect event may arrive while initial local media
-    // publication is still in progress; only a committed startup may surface
-    // as InMeeting.
+    // Qt-thread owned session state. Startup and transport recovery complete on
+    // separate callbacks, so neither may independently clear Reconnecting.
     bool _startupCommitted = false;
+    bool _startupReconnectPending = false;
+    bool _startupListenOnly = false;
 
     // 本地媒体源与轨道
     std::shared_ptr<livekit::WasapiAudioCapture> _wasapiCap;

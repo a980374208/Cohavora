@@ -65,10 +65,12 @@ TrackPublication::StreamState StreamStateFromProto(proto::StreamState state) {
     }
 }
 
+} // namespace
+
 class RoomPeerConnectionObserver : public webrtc::PeerConnectionObserver {
 public:
-    RoomPeerConnectionObserver(std::shared_ptr<Room> room, int pc_type)
-        : room_(room), pc_type_(pc_type) {}
+    RoomPeerConnectionObserver(std::shared_ptr<Room> room, int pc_type, uint64_t generation)
+        : room_(room), pc_type_(pc_type), generation_(generation) {}
 
     void OnSignalingChange(webrtc::PeerConnectionInterface::SignalingState) override {}
     void OnAddStream(webrtc::scoped_refptr<webrtc::MediaStreamInterface>) override {}
@@ -76,16 +78,16 @@ public:
     void OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override {
         if (!data_channel) return;
         if (auto room = room_.lock()) {
-            asio::post(room->executor(), [room, data_channel]() {
-                room->OnRemoteDataChannel(data_channel);
+            asio::post(room->executor(), [room, data_channel, generation = generation_]() {
+                room->OnRemoteDataChannel(data_channel, generation);
             });
         }
     }
     
     void OnRenegotiationNeeded() override {
         if (auto room = room_.lock()) {
-            asio::post(room->executor(), [room, type = pc_type_]() {
-                room->OnRenegotiationNeeded(type);
+            asio::post(room->executor(), [room, type = pc_type_, generation = generation_]() {
+                room->OnRenegotiationNeeded(type, generation);
             });
         }
     }
@@ -106,8 +108,8 @@ public:
             room->Log("WEBRTC", "ICE_STATE", "PC (" + std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") + ") ICE 状态变为: " + state_str);
             if (new_state == webrtc::PeerConnectionInterface::kIceConnectionConnected ||
                 new_state == webrtc::PeerConnectionInterface::kIceConnectionCompleted) {
-                asio::post(room->executor(), [room]() {
-                    room->OnIceConnected();
+                asio::post(room->executor(), [room, generation = generation_]() {
+                    room->OnIceConnected(generation);
                 });
             }
         }
@@ -125,7 +127,9 @@ public:
                 default: break;
             }
             room->Log("WEBRTC", "PC_STATE", "PC (" + std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") + ") 传输总体状态变为: " + state_str);
-            room->OnPeerConnectionStateChanged(pc_type_, new_state);
+            asio::post(room->executor(), [room, type = pc_type_, new_state, generation = generation_]() {
+                room->OnPeerConnectionStateChanged(type, new_state, generation);
+            });
         }
     }
 
@@ -141,8 +145,8 @@ public:
             room->Log("SIGNAL", "LOCAL_ICE", "收集到本地 ICE 候选: target=" +
                 std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") +
                 ", detail=[omitted]");
-            asio::post(room->executor(), [room, sdp, sdp_mid, sdp_mline_index, type = pc_type_]() {
-                room->OnLocalIceCandidate(sdp, sdp_mid, sdp_mline_index, type);
+            asio::post(room->executor(), [room, sdp, sdp_mid, sdp_mline_index, type = pc_type_, generation = generation_]() {
+                room->OnLocalIceCandidate(sdp, sdp_mid, sdp_mline_index, type, generation);
             });
         }
     }
@@ -153,9 +157,7 @@ public:
                 auto receiver = transceiver->receiver();
                 auto track = receiver->track();
                 room->Log("WEBRTC", "ON_TRACK", "WebRTC Transceiver OnTrack (Kind: " + (track ? std::string(track->kind()) : "null") + ", ID: " + (track ? track->id() : "null") + ")");
-                asio::post(room->executor(), [room, receiver, track]() {
-                    room->OnRemoteTrackAdded(receiver, track);
-                });
+                room->PostRemoteTrack(receiver, track, generation_);
             }
         }
     }
@@ -166,9 +168,7 @@ public:
             if (receiver) {
                 auto track = receiver->track();
                 room->Log("WEBRTC", "ON_ADD_TRACK", "WebRTC Receiver OnAddTrack (Kind: " + (track ? std::string(track->kind()) : "null") + ", ID: " + (track ? track->id() : "null") + ")");
-                asio::post(room->executor(), [room, receiver, track]() {
-                    room->OnRemoteTrackAdded(receiver, track);
-                });
+                room->PostRemoteTrack(receiver, track, generation_);
             }
         }
     }
@@ -176,30 +176,29 @@ public:
 private:
     std::weak_ptr<Room> room_;
     int pc_type_; // 0 = Publisher, 1 = Subscriber
+    const uint64_t generation_;
 };
-
-} // namespace
 
 class RoomDataChannelObserver : public webrtc::DataChannelObserver {
 public:
-    RoomDataChannelObserver(std::shared_ptr<Room> room, bool reliable)
-        : room_(room), reliable_(reliable) {}
+    RoomDataChannelObserver(std::shared_ptr<Room> room, bool reliable, uint64_t generation)
+        : room_(room), reliable_(reliable), generation_(generation) {}
 
     void OnStateChange() override {}
 
     void OnMessage(const webrtc::DataBuffer& buffer) override {
         if (auto room = room_.lock()) {
             std::vector<uint8_t> payload(buffer.data.data(), buffer.data.data() + buffer.data.size());
-            asio::post(room->executor(), [room, payload]() {
-                room->OnIncomingDataPacket(payload, "", "");
+            asio::post(room->executor(), [room, payload, generation = generation_]() {
+                room->OnIncomingDataPacket(payload, "", "", generation);
             });
         }
     }
 
     void OnBufferedAmountChange(uint64_t previous_amount) override {
         if (auto room = room_.lock()) {
-            asio::post(room->executor(), [room, previous_amount, reliable = reliable_]() {
-                room->OnDataChannelBufferedAmountLow(previous_amount, reliable);
+            asio::post(room->executor(), [room, previous_amount, reliable = reliable_, generation = generation_]() {
+                room->OnDataChannelBufferedAmountLow(previous_amount, reliable, generation);
             });
         }
     }
@@ -207,7 +206,71 @@ public:
 private:
     std::weak_ptr<Room> room_;
     bool reliable_;
+    const uint64_t generation_;
 };
+
+std::shared_ptr<webrtc::PeerConnectionObserver> Room::CreatePeerConnectionObserver(int pc_type, uint64_t generation) {
+    return std::make_shared<RoomPeerConnectionObserver>(shared_from_this(), pc_type, generation);
+}
+
+std::shared_ptr<webrtc::DataChannelObserver> Room::CreateDataChannelObserver(bool reliable, uint64_t generation) {
+    return std::make_shared<RoomDataChannelObserver>(shared_from_this(), reliable, generation);
+}
+
+void Room::PostRemoteTrack(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+                           webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, uint64_t generation) {
+    asio::post(executor_, [weak = weak_from_this(), receiver, track, generation]() {
+        if (auto room = weak.lock()) room->OnRemoteTrackAdded(receiver, track, generation);
+    });
+}
+
+bool Room::IsNativeGenerationCurrentLocked(uint64_t generation) const {
+    // Zero is retained only for legacy synchronous API/test callers before Connect.
+    return generation == session_generation_.load(std::memory_order_acquire) &&
+        generation == installed_session_generation_;
+}
+
+bool Room::AdmitListener(const ListenerDeliveryContext& context,
+                         const std::shared_ptr<RoomListener>& listener) const {
+    std::lock_guard lock(room_mutex_);
+    // Zero is an actual pre-Connect generation here, never a wildcard.
+    return listener &&
+        context.generation == session_generation_.load(std::memory_order_acquire) &&
+        (!context.require_installed_owner || context.generation == installed_session_generation_) &&
+        (!context.required_state || connection_state_ == *context.required_state) &&
+        (!context.require_reconnect || (reconnect_active_ && !reconnect_disabled_)) &&
+        (!context.e2ee_owner || context.e2ee_owner == e2ee_manager_) &&
+        std::find(listeners_.begin(), listeners_.end(), listener) != listeners_.end();
+}
+
+void Room::BeforeNativeEventCommit(uint64_t generation) {
+    std::shared_ptr<ConnectAttemptTestHooks> hooks;
+    {
+        std::lock_guard lock(room_mutex_);
+        hooks = connect_attempt_test_hooks_;
+    }
+    if (hooks && hooks->before_native_event_commit) hooks->before_native_event_commit(generation);
+}
+
+void Room::DeliverRepublishedTrack(uint64_t generation, const std::string& previous_sid,
+                                   std::shared_ptr<TrackPublication> publication) {
+    std::vector<std::shared_ptr<RoomListener>> listeners;
+    std::shared_ptr<ConnectAttemptTestHooks> hooks;
+    {
+        std::lock_guard lock(room_mutex_);
+        hooks = connect_attempt_test_hooks_;
+        listeners = listeners_;
+    }
+    if (hooks && hooks->before_republish_listener_delivery) hooks->before_republish_listener_delivery(generation);
+    for (const auto& listener : listeners) {
+        try {
+            DeliverListener({generation, ConnectionState::Connected, true, true}, listener,
+                [&](RoomListener& target) { target.OnLocalTrackRepublished(previous_sid, publication); });
+        } catch (...) {
+            // An application listener cannot strand reconnect ownership cleanup.
+        }
+    }
+}
 
 const char* ToString(RoomDisconnectReason reason) {
     switch (reason) {
@@ -251,6 +314,44 @@ void Room::Log(const std::string& cat, const std::string& tag, const std::string
         h(secure_log::SanitizeForOutput(cat),
           secure_log::SanitizeForOutput(tag),
           secure_log::SanitizeForOutput(msg));
+    }
+}
+
+void Room::DeliverLifecycleListenerEvent(LifecycleListenerDelivery delivery) {
+    std::shared_ptr<ConnectAttemptTestHooks> test_hooks;
+    {
+        std::lock_guard lock(room_mutex_);
+        test_hooks = connect_attempt_test_hooks_;
+    }
+
+    // Tests can stop an accepted event after its state commit. Replacement
+    // invalidation still happens in the production validation below.
+    if (test_hooks && test_hooks->before_lifecycle_listener_delivery) {
+        test_hooks->before_lifecycle_listener_delivery(
+            delivery.generation, delivery.required_state);
+    }
+
+    for (const auto& listener : delivery.listeners) {
+        try {
+            DeliverListener({delivery.generation, delivery.required_state}, listener, [&](RoomListener& target) {
+                switch (delivery.kind) {
+                case LifecycleListenerEventKind::Connected:
+                    target.OnConnected();
+                    break;
+                case LifecycleListenerEventKind::Disconnected:
+                    target.OnDisconnected(delivery.reason, delivery.detail);
+                    break;
+                case LifecycleListenerEventKind::Reconnecting:
+                    target.OnReconnecting();
+                    break;
+                case LifecycleListenerEventKind::Reconnected:
+                    target.OnReconnected();
+                    break;
+                }
+            });
+        } catch (...) {
+            // Listener failures cannot interrupt lifecycle ownership cleanup.
+        }
     }
 }
 
@@ -506,7 +607,8 @@ void Room::DrainParticipantEvents() {
         for (const auto& listener : listeners) {
             if (!listener) continue;
             try {
-                listener->OnParticipantEvent(event);
+                DeliverListener({event.native_room_generation}, listener,
+                    [&](RoomListener& target) { target.OnParticipantEvent(event); });
             } catch (...) {
                 // A listener cannot strand the single dispatcher.
             }
@@ -588,11 +690,18 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
 }
 
 asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::string& token, const SignalOptions& opts) {
+    auto self = shared_from_this();
+    const std::string attempt_url = url;
+    const std::string attempt_token = token;
+    const SignalOptions attempt_options = opts;
     uint64_t generation = 0;
     bool notify_connected = true;
+    std::shared_ptr<SignalClient> attempt_signal;
+    std::shared_ptr<ConnectAttemptTestHooks> test_hooks;
     {
         std::lock_guard lock(room_mutex_);
-        if (connection_state_ != ConnectionState::Disconnected) {
+        if (connection_state_ != ConnectionState::Disconnected ||
+            installed_session_generation_ != 0) {
             throw OperationError(OperationKind::Connect,
                                  OperationErrorCode::InvalidState,
                                  "connect_start",
@@ -616,15 +725,18 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             server_disconnect_finalizing_ = false;
         }
         generation = session_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
-        operation_timeouts_ = opts.timeouts;
-        require_media_connection_ = opts.create_webrtc_pc;
+        operation_timeouts_ = attempt_options.timeouts;
+        require_media_connection_ = attempt_options.create_webrtc_pc;
+        test_hooks = connect_attempt_test_hooks_;
     }
 
     try {
-        auto self = shared_from_this();
-        auto conn_res = co_await SignalClient::Connect(url, token, opts, std::nullopt, [self, generation](const SignalEvent& event) {
+        auto conn_res = co_await SignalClient::Connect(
+            attempt_url, attempt_token, attempt_options, std::nullopt,
+            [self, generation](const SignalEvent& event) {
             self->HandleSignalEvent(event, generation);
         });
+        attempt_signal = conn_res.client;
 
         if (conn_res.error || !conn_res.join_response) {
             throw OperationError(OperationKind::Connect,
@@ -644,16 +756,22 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                                  true);
         }
 
+        if (test_hooks && test_hooks->before_join_commit) {
+            co_await test_hooks->before_join_commit(generation);
+        }
+
         {
             std::lock_guard lock(room_mutex_);
             if (generation != session_generation_.load(std::memory_order_acquire) ||
-                connection_state_ != ConnectionState::Connecting) {
+                connection_state_ != ConnectionState::Connecting ||
+                installed_session_generation_ != 0) {
                 throw OperationError(OperationKind::Connect,
                                      OperationErrorCode::Cancelled,
                                      "join_commit",
                                      "connect operation was cancelled");
             }
-        signal_client_ = conn_res.client;
+        signal_client_ = attempt_signal;
+        installed_session_generation_ = generation;
         join_response_ = join_res;
         if (join_res->has_room()) {
             room_info_ = RoomInfoFromProto(join_res->room());
@@ -668,10 +786,14 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         local_participant_ = std::make_shared<LocalParticipant>(
             join_res->participant().sid(),
             join_res->participant().identity(),
-            [self](const proto::SignalRequest& req) {
-                if (self->signal_client_) {
-                    self->signal_client_->Send(req);
+            [self, generation](const proto::SignalRequest& req) {
+                std::shared_ptr<SignalClient> signal;
+                {
+                    std::lock_guard lock(self->room_mutex_);
+                    if (self->installed_session_generation_ != generation) return;
+                    signal = self->signal_client_;
                 }
+                if (signal) signal->Send(req);
             }
         );
 
@@ -693,18 +815,18 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
 
         // 绑定 LocalParticipant 发布 DataChannel 数据包 Handler
         local_participant_->SetPublishDataHandler(
-            [self](const std::vector<uint8_t>& payload, bool reliable,
+            [self, generation](const std::vector<uint8_t>& payload, bool reliable,
                    const std::vector<std::string>& destination_identities, const std::string& topic) {
-                self->PublishData(payload, reliable, destination_identities, topic);
+                self->PublishData(payload, reliable, destination_identities, topic, generation);
             }
         );
 
         // 绑定 LocalParticipant 发布 Native Track Handler
         local_participant_->SetAsyncPublishTrackHandler(
-            [self](std::shared_ptr<Track> track,
+            [self, generation](std::shared_ptr<Track> track,
                    const proto::SignalRequest& request)
                 -> asio::awaitable<std::shared_ptr<TrackPublication>> {
-                co_return co_await self->PublishLocalTrackAsync(std::move(track), request);
+                co_return co_await self->PublishLocalTrackAsync(std::move(track), request, generation);
             }
         );
 
@@ -723,8 +845,26 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                 co_return co_await self->SendRpcRequest(packet);
             }
         );
+        }
 
-        if (opts.create_webrtc_pc) {
+        if (attempt_options.create_webrtc_pc) {
+            // Creation can synchronously invoke WebRTC callbacks. Keep it outside
+            // room_mutex_, and retain local ownership until the protected commit.
+            struct NativeAttempt {
+                std::shared_ptr<webrtc::PeerConnectionObserver> publisher_observer;
+                std::shared_ptr<webrtc::PeerConnectionObserver> subscriber_observer;
+                std::vector<std::shared_ptr<webrtc::DataChannelObserver>> dc_observers;
+                webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
+                webrtc::scoped_refptr<webrtc::PeerConnectionInterface> subscriber;
+                webrtc::scoped_refptr<webrtc::DataChannelInterface> reliable;
+                webrtc::scoped_refptr<webrtc::DataChannelInterface> lossy;
+                ~NativeAttempt() {
+                    if (reliable) { reliable->UnregisterObserver(); reliable->Close(); }
+                    if (lossy) { lossy->UnregisterObserver(); lossy->Close(); }
+                    if (publisher) publisher->Close();
+                    if (subscriber && subscriber != publisher) subscriber->Close();
+                }
+            } native;
             if (WebRTCManager::Instance().Initialize()) {
                 webrtc::PeerConnectionInterface::RTCConfiguration config;
                 config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
@@ -746,31 +886,31 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                     config.servers.push_back(server);
                 }
 
-                publisher_observer_ = std::make_shared<RoomPeerConnectionObserver>(shared_from_this(), 0);
-                subscriber_observer_ = std::make_shared<RoomPeerConnectionObserver>(shared_from_this(), 1);
+                native.publisher_observer = CreatePeerConnectionObserver(0, generation);
+                native.subscriber_observer = CreatePeerConnectionObserver(1, generation);
 
-                webrtc::PeerConnectionDependencies pub_deps(publisher_observer_.get());
+                webrtc::PeerConnectionDependencies pub_deps(native.publisher_observer.get());
                 auto pub_res = WebRTCManager::Instance().factory()->CreatePeerConnectionOrError(config, std::move(pub_deps));
                 if (pub_res.ok()) {
-                    publisher_pc_ = pub_res.MoveValue();
+                    native.publisher = pub_res.MoveValue();
 
                     webrtc::DataChannelInit rel_init;
                     rel_init.ordered = true;
-                    reliable_dc_ = publisher_pc_->CreateDataChannel("_reliable", &rel_init);
-                    if (reliable_dc_) {
-                        auto obs = std::make_shared<RoomDataChannelObserver>(shared_from_this(), true);
-                        reliable_dc_->RegisterObserver(obs.get());
-                        data_channel_observers_.push_back(obs);
+                    native.reliable = native.publisher->CreateDataChannel("_reliable", &rel_init);
+                    if (native.reliable) {
+                        auto obs = CreateDataChannelObserver(true, generation);
+                        native.reliable->RegisterObserver(obs.get());
+                        native.dc_observers.push_back(obs);
                     }
 
                     webrtc::DataChannelInit lossy_init;
                     lossy_init.ordered = false;
                     lossy_init.maxRetransmits = 0;
-                    lossy_dc_ = publisher_pc_->CreateDataChannel("_lossy", &lossy_init);
-                    if (lossy_dc_) {
-                        auto obs = std::make_shared<RoomDataChannelObserver>(shared_from_this(), false);
-                        lossy_dc_->RegisterObserver(obs.get());
-                        data_channel_observers_.push_back(obs);
+                    native.lossy = native.publisher->CreateDataChannel("_lossy", &lossy_init);
+                    if (native.lossy) {
+                        auto obs = CreateDataChannelObserver(false, generation);
+                        native.lossy->RegisterObserver(obs.get());
+                        native.dc_observers.push_back(obs);
                     }
                 } else {
                     throw OperationError(OperationKind::Connect,
@@ -779,14 +919,14 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                                          pub_res.error().message());
                 }
 
-                if (signal_client_->is_single_pc_mode_active()) {
-                    subscriber_pc_ = publisher_pc_;
+                if (attempt_signal->is_single_pc_mode_active()) {
+                    native.subscriber = native.publisher;
                     Log("WEBRTC", "SINGLE_PC", "启用 Single PC 模式，subscriber_pc_ 共享 publisher_pc_");
                 } else {
-                    webrtc::PeerConnectionDependencies sub_deps(subscriber_observer_.get());
+                    webrtc::PeerConnectionDependencies sub_deps(native.subscriber_observer.get());
                     auto sub_res = WebRTCManager::Instance().factory()->CreatePeerConnectionOrError(config, std::move(sub_deps));
                     if (sub_res.ok()) {
-                        subscriber_pc_ = sub_res.MoveValue();
+                        native.subscriber = sub_res.MoveValue();
                         Log("WEBRTC", "SUB_PC_CREATED", "Subscriber PeerConnection 创建成功");
                     } else {
                         Log("ERROR", "SUB_PC_FAIL",
@@ -798,47 +938,59 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                     }
                 }
 
-                primary_pc_type_ = signal_client_->is_single_pc_mode_active()
-                    ? 0
-                    : (join_res->subscriber_primary() ? 1 : 0);
             } else {
                 throw OperationError(OperationKind::Connect,
                                      OperationErrorCode::PeerConnectionCreateFailed,
                                      "initialize_webrtc",
                                      "WebRTCManager initialization failed");
             }
+            std::lock_guard lock(room_mutex_);
+            if (!IsNativeGenerationCurrentLocked(generation)) {
+                throw OperationError(OperationKind::Connect, OperationErrorCode::Cancelled,
+                                     "native_commit", "connect was replaced during native creation");
+            }
+            publisher_observer_ = std::move(native.publisher_observer);
+            subscriber_observer_ = std::move(native.subscriber_observer);
+            publisher_pc_ = std::move(native.publisher);
+            subscriber_pc_ = std::move(native.subscriber);
+            reliable_dc_ = std::move(native.reliable);
+            lossy_dc_ = std::move(native.lossy);
+            data_channel_observers_.insert(data_channel_observers_.end(),
+                native.dc_observers.begin(), native.dc_observers.end());
+            primary_pc_type_ = attempt_signal->is_single_pc_mode_active()
+                ? 0 : (join_res->subscriber_primary() ? 1 : 0);
         }
 
-        UpdateParticipants(join_res->other_participants());
-    }
+        UpdateParticipants(join_res->other_participants(), generation);
 
-    if (signal_client_) {
-        signal_client_->SetEventReady();
+    if (attempt_signal) {
+        attempt_signal->SetEventReady();
         proto::SignalRequest perm_req;
         auto* perm = perm_req.mutable_subscription_permission();
         perm->set_all_participants(true);
-        signal_client_->Send(perm_req);
+        attempt_signal->Send(perm_req);
         Log("SIGNAL", "SUB_PERM", "已向 LiveKit 发送全员订阅权限 SubscriptionPermission (all_participants=true)");
 
         // JoinResponse determines which transport must be established eagerly.
         // subscriber-primary is lazy unless the server explicitly requests
         // fast_publish; single-PC always needs its sole transport negotiated.
-        if (require_media_connection_ &&
-            (signal_client_->is_single_pc_mode_active() ||
+        if (attempt_options.create_webrtc_pc &&
+            (attempt_signal->is_single_pc_mode_active() ||
              !join_res->subscriber_primary() ||
              join_res->fast_publish())) {
-            co_await NegotiatePublisherAsync(operation_timeouts_.negotiation, generation);
+            co_await NegotiatePublisherAsync(attempt_options.timeouts.negotiation, generation);
         }
     }
 
-    if (require_media_connection_) {
-        co_await WaitForPrimaryPeerConnection(operation_timeouts_.peer_connection, generation);
+    if (attempt_options.create_webrtc_pc) {
+        co_await WaitForPrimaryPeerConnection(attempt_options.timeouts.peer_connection, generation);
     }
 
     {
         std::lock_guard lock(room_mutex_);
         if (generation != session_generation_.load(std::memory_order_acquire) ||
-            connection_state_ != ConnectionState::Connecting) {
+            connection_state_ != ConnectionState::Connecting ||
+            installed_session_generation_ != generation) {
             throw OperationError(OperationKind::Connect,
                                  OperationErrorCode::Cancelled,
                                  "connect_commit",
@@ -851,16 +1003,18 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
     }
 
     if (notify_connected) {
-        auto listeners_snapshot = GetListenersSnapshot();
-        for (const auto& listener : listeners_snapshot) {
-            listener->OnConnected();
-        }
+        LifecycleListenerDelivery delivery;
+        delivery.kind = LifecycleListenerEventKind::Connected;
+        delivery.generation = generation;
+        delivery.required_state = ConnectionState::Connected;
+        delivery.listeners = GetListenersSnapshot();
+        DeliverLifecycleListenerEvent(std::move(delivery));
     }
 
     // The Room is externally connected before any delta accumulated during the
     // handshake is delivered. This prevents participant/track callbacks from
     // racing ahead of OnConnected while still preserving real post-Join deltas.
-    FlushDeferredRoomMessages();
+    FlushDeferredRoomMessages(generation);
 
         co_return;
     } catch (...) {
@@ -870,51 +1024,72 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         std::shared_ptr<webrtc::PeerConnectionObserver> publisher_observer;
         std::shared_ptr<webrtc::PeerConnectionObserver> subscriber_observer;
         std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> data_channels;
-        std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers;
+        std::vector<std::shared_ptr<webrtc::DataChannelObserver>> data_channel_observers;
         std::vector<RemoteTrackSinkBinding> track_sinks;
         std::deque<ParticipantEvent> retired_events;
+        PendingOperationCleanup pending;
+        bool cleanup_shared_state = false;
         {
             std::lock_guard lock(room_mutex_);
-            if (generation == session_generation_.load(std::memory_order_acquire)) {
+            const bool is_current =
+                generation == session_generation_.load(std::memory_order_acquire);
+            const bool owns_installed_session =
+                installed_session_generation_ == generation;
+            cleanup_shared_state = is_current || owns_installed_session;
+            if (is_current) {
                 session_generation_.fetch_add(1, std::memory_order_acq_rel);
             }
-            signal = std::move(signal_client_);
-            join_response_.reset();
-            enabled_publish_codecs_.clear();
-            RetireAllMembershipsLocked(retired_events);
-            local_participant_.reset();
-            pending_local_unpublishes_.clear();
-            ClearRemotePublicationMediaBindingsLocked();
-            remote_participants_.clear();
-            publisher = std::move(publisher_pc_);
-            subscriber = std::move(subscriber_pc_);
-            publisher_observer = std::move(publisher_observer_);
-            subscriber_observer = std::move(subscriber_observer_);
-            if (reliable_dc_) {
-                data_channels.push_back(reliable_dc_);
-                reliable_dc_ = nullptr;
+            if (owns_installed_session) {
+                installed_session_generation_ = 0;
+                signal = std::move(signal_client_);
+                join_response_.reset();
+                enabled_publish_codecs_.clear();
+                RetireAllMembershipsLocked(retired_events);
+                local_participant_.reset();
+                pending_local_unpublishes_.clear();
+                ClearRemotePublicationMediaBindingsLocked();
+                remote_participants_.clear();
+                publisher = std::move(publisher_pc_);
+                subscriber = std::move(subscriber_pc_);
+                publisher_observer = std::move(publisher_observer_);
+                subscriber_observer = std::move(subscriber_observer_);
+                if (reliable_dc_) {
+                    data_channels.push_back(reliable_dc_);
+                    reliable_dc_ = nullptr;
+                }
+                if (lossy_dc_) {
+                    data_channels.push_back(lossy_dc_);
+                    lossy_dc_ = nullptr;
+                }
+                for (auto& dc : remote_data_channels_) {
+                    if (dc) data_channels.push_back(dc);
+                }
+                remote_data_channels_.clear();
+                data_channel_observers = std::move(data_channel_observers_);
+                track_sinks = std::move(remote_track_sinks_);
+                processed_remote_track_ids_.clear();
+                pending_track_queue_.clear();
             }
-            if (lossy_dc_) {
-                data_channels.push_back(lossy_dc_);
-                lossy_dc_ = nullptr;
+            if (cleanup_shared_state) {
+                deferred_room_messages_.clear();
+                suppress_next_connected_event_ = false;
+                connection_state_ = ConnectionState::Disconnected;
+                pending = TakePendingOperationsLocked();
             }
-            for (auto& dc : remote_data_channels_) {
-                if (dc) data_channels.push_back(dc);
-            }
-            remote_data_channels_.clear();
-            data_channel_observers = std::move(data_channel_observers_);
-            track_sinks = std::move(remote_track_sinks_);
-            processed_remote_track_ids_.clear();
-            pending_track_queue_.clear();
-            deferred_room_messages_.clear();
-            suppress_next_connected_event_ = false;
-            connection_state_ = ConnectionState::Disconnected;
         }
         retired_events.clear();
-        CancelPendingOperations(OperationErrorCode::Cancelled,
-                                "connect_rollback",
-                                "connect transaction rolled back");
-        if (signal) signal->Close();
+        FailPendingOperations(std::move(pending),
+                              OperationErrorCode::Cancelled,
+                              "connect_rollback",
+                              "connect transaction rolled back");
+        if (signal) {
+            signal->Close();
+        } else if (attempt_signal) {
+            // A stale attempt still owns the SignalClient that was never
+            // installed (or was already detached by Disconnect). It must be
+            // terminated even though it may no longer mutate Room state.
+            attempt_signal->Close();
+        }
         for (auto& dc : data_channels) {
             if (dc) {
                 dc->UnregisterObserver();
@@ -943,18 +1118,25 @@ void Room::Disconnect() {
     std::shared_ptr<webrtc::PeerConnectionObserver> publisher_observer;
     std::shared_ptr<webrtc::PeerConnectionObserver> subscriber_observer;
     std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> data_channels;
-    std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers;
+    std::vector<std::shared_ptr<webrtc::DataChannelObserver>> data_channel_observers;
     std::vector<RemoteTrackSinkBinding> track_sinks;
+    PendingOperationCleanup pending;
+    uint64_t disconnected_generation = 0;
     {
         std::lock_guard lock(room_mutex_);
-        if (connection_state_ == ConnectionState::Disconnected) {
+        if (connection_state_ == ConnectionState::Disconnected &&
+            installed_session_generation_ == 0 &&
+            !reconnect_active_) {
             retired_events.swap(participant_events_);
             return; // The lock is destroyed before the local payload queue.
         }
         connection_state_ = ConnectionState::Disconnected;
         disconnect_reason_ = RoomDisconnectReason::UserLeave;
         reconnect_disabled_ = true;
-        session_generation_.fetch_add(1, std::memory_order_acq_rel);
+        reconnect_active_ = false;
+        disconnected_generation =
+            session_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        installed_session_generation_ = 0;
         listeners_snapshot = listeners_;
         signal = std::move(signal_client_);
         join_response_.reset();
@@ -985,13 +1167,15 @@ void Room::Disconnect() {
         processed_remote_track_ids_.clear();
         pending_track_queue_.clear();
         deferred_room_messages_.clear();
+        pending = TakePendingOperationsLocked();
     }
 
     retired_events.clear();
 
-    CancelPendingOperations(OperationErrorCode::Cancelled,
-                            "disconnect",
-                            "room disconnected");
+    FailPendingOperations(std::move(pending),
+                          OperationErrorCode::Cancelled,
+                          "disconnect",
+                          "room disconnected");
 
     if (signal && signal->is_connected()) {
         proto::SignalRequest request;
@@ -1033,16 +1217,14 @@ void Room::Disconnect() {
     subscriber_observer.reset();
     data_channel_observers.clear();
 
-    {
-        std::lock_guard mlock(remote_media_mutex_);
-        remote_video_tracks_.clear();
-        remote_audio_tracks_.clear();
-    }
-
-    for (const auto& listener : listeners_snapshot) {
-        listener->OnDisconnected(RoomDisconnectReason::UserLeave,
-                                 "Client Initiated Disconnect");
-    }
+    LifecycleListenerDelivery delivery;
+    delivery.kind = LifecycleListenerEventKind::Disconnected;
+    delivery.generation = disconnected_generation;
+    delivery.required_state = ConnectionState::Disconnected;
+    delivery.reason = RoomDisconnectReason::UserLeave;
+    delivery.detail = "Client Initiated Disconnect";
+    delivery.listeners = std::move(listeners_snapshot);
+    DeliverLifecycleListenerEvent(std::move(delivery));
 }
 
 asio::awaitable<void> Room::DisconnectAsync() {
@@ -1054,18 +1236,25 @@ asio::awaitable<void> Room::DisconnectAsync() {
     std::shared_ptr<webrtc::PeerConnectionObserver> publisher_observer;
     std::shared_ptr<webrtc::PeerConnectionObserver> subscriber_observer;
     std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> data_channels;
-    std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers;
+    std::vector<std::shared_ptr<webrtc::DataChannelObserver>> data_channel_observers;
     std::vector<RemoteTrackSinkBinding> track_sinks;
+    PendingOperationCleanup pending;
+    uint64_t disconnected_generation = 0;
     {
         std::lock_guard lock(room_mutex_);
-        if (connection_state_ == ConnectionState::Disconnected) {
+        if (connection_state_ == ConnectionState::Disconnected &&
+            installed_session_generation_ == 0 &&
+            !reconnect_active_) {
             retired_events.swap(participant_events_);
             co_return; // Payloads outlive the lock, including this early exit.
         }
         connection_state_ = ConnectionState::Disconnected;
         disconnect_reason_ = RoomDisconnectReason::UserLeave;
         reconnect_disabled_ = true;
-        session_generation_.fetch_add(1, std::memory_order_acq_rel);
+        reconnect_active_ = false;
+        disconnected_generation =
+            session_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        installed_session_generation_ = 0;
         listeners_snapshot = listeners_;
         signal = std::move(signal_client_);
         join_response_.reset();
@@ -1096,13 +1285,15 @@ asio::awaitable<void> Room::DisconnectAsync() {
         processed_remote_track_ids_.clear();
         pending_track_queue_.clear();
         deferred_room_messages_.clear();
+        pending = TakePendingOperationsLocked();
     }
 
     retired_events.clear();
 
-    CancelPendingOperations(OperationErrorCode::Cancelled,
-                            "disconnect",
-                            "room disconnected");
+    FailPendingOperations(std::move(pending),
+                          OperationErrorCode::Cancelled,
+                          "disconnect",
+                          "room disconnected");
 
     if (signal && signal->is_connected()) {
         proto::SignalRequest request;
@@ -1150,22 +1341,25 @@ asio::awaitable<void> Room::DisconnectAsync() {
     subscriber_observer.reset();
     data_channel_observers.clear();
 
-    {
-        std::lock_guard lock(remote_media_mutex_);
-        remote_video_tracks_.clear();
-        remote_audio_tracks_.clear();
-    }
-    for (const auto& listener : listeners_snapshot) {
-        listener->OnDisconnected(RoomDisconnectReason::UserLeave,
-                                 "Client Initiated Disconnect");
-    }
+    LifecycleListenerDelivery delivery;
+    delivery.kind = LifecycleListenerEventKind::Disconnected;
+    delivery.generation = disconnected_generation;
+    delivery.required_state = ConnectionState::Disconnected;
+    delivery.reason = RoomDisconnectReason::UserLeave;
+    delivery.detail = "Client Initiated Disconnect";
+    delivery.listeners = std::move(listeners_snapshot);
+    DeliverLifecycleListenerEvent(std::move(delivery));
 }
 
-void Room::BeginServerDisconnect(RoomDisconnectReason reason, std::string detail) {
+void Room::BeginServerDisconnect(
+    RoomDisconnectReason reason,
+    std::string detail,
+    uint64_t event_generation) {
     bool should_finalize = false;
     {
         std::lock_guard lock(room_mutex_);
-        if (connection_state_ == ConnectionState::Disconnected ||
+        if (!IsSignalGenerationCurrentLocked(event_generation) ||
+            connection_state_ == ConnectionState::Disconnected ||
             server_disconnect_finalizing_) {
             return;
         }
@@ -1181,14 +1375,16 @@ void Room::BeginServerDisconnect(RoomDisconnectReason reason, std::string detail
         "[Room] 服务端要求退出房间: reason=" + std::string(ToString(reason)) +
         ", detail=" + detail);
     livekit::safe_co_spawn(executor_,
-        [self = shared_from_this(), reason, detail = std::move(detail)]()
+        [self = shared_from_this(), reason, detail = std::move(detail), event_generation]()
             -> asio::awaitable<void> {
-            co_await self->FinalizeServerDisconnectAsync(reason, detail);
+            co_await self->FinalizeServerDisconnectAsync(reason, detail, event_generation);
         });
 }
 
 asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
-    RoomDisconnectReason reason, std::string detail) {
+    RoomDisconnectReason reason,
+    std::string detail,
+    uint64_t event_generation) {
     std::deque<ParticipantEvent> retired_events;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::shared_ptr<SignalClient> signal;
@@ -1197,11 +1393,15 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
     std::shared_ptr<webrtc::PeerConnectionObserver> publisher_observer;
     std::shared_ptr<webrtc::PeerConnectionObserver> subscriber_observer;
     std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> data_channels;
-    std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers;
+    std::vector<std::shared_ptr<webrtc::DataChannelObserver>> data_channel_observers;
     std::vector<RemoteTrackSinkBinding> track_sinks;
+    PendingOperationCleanup pending;
+    uint64_t disconnected_generation = 0;
     {
         std::lock_guard lock(room_mutex_);
-        if (connection_state_ == ConnectionState::Disconnected) {
+        if (!IsSignalGenerationCurrentLocked(event_generation)) co_return;
+        if (connection_state_ == ConnectionState::Disconnected &&
+            installed_session_generation_ == 0) {
             server_disconnect_finalizing_ = false;
             retired_events.swap(participant_events_);
             co_return;
@@ -1211,7 +1411,9 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
         reconnect_attempts_ = 0;
         reconnect_active_ = false;
         server_disconnect_finalizing_ = false;
-        session_generation_.fetch_add(1, std::memory_order_acq_rel);
+        disconnected_generation =
+            session_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        installed_session_generation_ = 0;
         listeners_snapshot = listeners_;
         signal = std::move(signal_client_);
         join_response_.reset();
@@ -1243,13 +1445,15 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
         pending_track_queue_.clear();
         deferred_room_messages_.clear();
         suppress_next_connected_event_ = false;
+        pending = TakePendingOperationsLocked();
     }
 
     retired_events.clear();
 
-    CancelPendingOperations(OperationErrorCode::SessionClosed,
-                            "server_leave",
-                            detail);
+    FailPendingOperations(std::move(pending),
+                          OperationErrorCode::SessionClosed,
+                          "server_leave",
+                          detail);
     if (signal) signal->Close();
     for (auto& dc : data_channels) {
         if (dc) {
@@ -1260,19 +1464,23 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
     if (publisher) publisher->Close();
     if (subscriber && subscriber != publisher) subscriber->Close();
     DetachRemoteTrackSinks(std::move(track_sinks));
-    {
-        std::lock_guard lock(remote_media_mutex_);
-        remote_video_tracks_.clear();
-        remote_audio_tracks_.clear();
-    }
-
-    for (const auto& listener : listeners_snapshot) {
-        listener->OnDisconnected(reason, detail);
-    }
+    LifecycleListenerDelivery delivery;
+    delivery.kind = LifecycleListenerEventKind::Disconnected;
+    delivery.generation = disconnected_generation;
+    delivery.required_state = ConnectionState::Disconnected;
+    delivery.reason = reason;
+    delivery.detail = std::move(detail);
+    delivery.listeners = std::move(listeners_snapshot);
+    DeliverLifecycleListenerEvent(std::move(delivery));
 }
 
 bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
                        const std::vector<std::string>& destination_identities, const std::string& topic) {
+    return PublishData(payload, reliable, destination_identities, topic, session_generation_.load(std::memory_order_acquire));
+}
+
+bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
+                       const std::vector<std::string>& destination_identities, const std::string& topic, uint64_t generation) {
     static constexpr size_t kMaxChunkSize = 15000;
     static constexpr size_t kMaxDataStreamSize = 16 * 1024 * 1024;
     static std::atomic<uint64_t> stream_sequence{0};
@@ -1286,6 +1494,7 @@ bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
     std::shared_ptr<LocalParticipant> local_participant;
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) return false;
         dc = reliable ? reliable_dc_ : lossy_dc_;
         local_participant = local_participant_;
     }
@@ -1303,7 +1512,7 @@ bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
             }
             return true;
         } else {
-            OnIncomingDataPacket(bytes, local_sid, topic);
+            OnIncomingDataPacket(bytes, local_sid, topic, generation);
             return true;
         }
     };
@@ -1402,8 +1611,10 @@ bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
 bool Room::PublishDataPacket(const proto::DataPacket& packet, bool reliable) {
     webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
     std::shared_ptr<LocalParticipant> local_participant;
+    uint64_t generation = 0;
     {
         std::lock_guard lock(room_mutex_);
+        generation = session_generation_.load(std::memory_order_acquire);
         dc = reliable ? reliable_dc_ : lossy_dc_;
         local_participant = local_participant_;
     }
@@ -1436,7 +1647,7 @@ bool Room::PublishDataPacket(const proto::DataPacket& packet, bool reliable) {
         if (final_pkt.has_stream_header()) topic = final_pkt.stream_header().topic();
         else if (final_pkt.has_user()) topic = final_pkt.user().topic();
         std::string local_sid = local_participant ? local_participant->sid() : std::string{};
-        OnIncomingDataPacket(bytes, local_sid, topic);
+        OnIncomingDataPacket(bytes, local_sid, topic, generation);
         return true;
     }
 }
@@ -1573,9 +1784,15 @@ asio::awaitable<std::string> Room::SendRpcRequest(const RpcPacket& packet) {
 }
 
 void Room::OnIncomingRpcPacket(const RpcPacket& packet) {
+    OnIncomingRpcPacket(packet, session_generation_.load(std::memory_order_acquire));
+}
+
+void Room::OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation) {
     if (packet.type == RpcPacketType::Response) {
         std::shared_ptr<PendingRpcCall> pending;
         {
+            std::lock_guard room_lock(room_mutex_);
+            if (!IsNativeGenerationCurrentLocked(generation)) return;
             std::lock_guard<std::mutex> lock(pending_rpc_mutex_);
             auto it = pending_rpc_calls_.find(packet.request_id);
             if (it != pending_rpc_calls_.end()) {
@@ -1594,6 +1811,7 @@ void Room::OnIncomingRpcPacket(const RpcPacket& packet) {
         std::shared_ptr<LocalParticipant> local;
         {
             std::lock_guard lock(room_mutex_);
+            if (!IsNativeGenerationCurrentLocked(generation)) return;
             local = local_participant_;
         }
         if (!local) return;
@@ -1614,7 +1832,7 @@ void Room::OnIncomingRpcPacket(const RpcPacket& packet) {
 
             std::string encoded = err_resp.Encode();
             std::vector<uint8_t> data(encoded.begin(), encoded.end());
-            PublishData(data, /*reliable=*/true, {packet.caller_identity}, "lk.rpc");
+            PublishData(data, /*reliable=*/true, {packet.caller_identity}, "lk.rpc", generation);
             return;
         }
 
@@ -1624,7 +1842,11 @@ void Room::OnIncomingRpcPacket(const RpcPacket& packet) {
         inv_data.payload = packet.payload;
         inv_data.response_timeout_sec = packet.timeout_sec;
 
-        livekit::safe_co_spawn(executor_, [self, local, handler, inv_data, packet]() -> asio::awaitable<void> {
+        livekit::safe_co_spawn(executor_, [self, local, handler, inv_data, packet, generation]() -> asio::awaitable<void> {
+            {
+                std::lock_guard lock(self->room_mutex_);
+                if (!self->IsNativeGenerationCurrentLocked(generation)) co_return;
+            }
             RpcPacket resp;
             resp.type = RpcPacketType::Response;
             resp.request_id = packet.request_id;
@@ -1650,7 +1872,7 @@ void Room::OnIncomingRpcPacket(const RpcPacket& packet) {
 
             std::string encoded = resp.Encode();
             std::vector<uint8_t> data(encoded.begin(), encoded.end());
-            self->PublishData(data, /*reliable=*/true, {packet.caller_identity}, "lk.rpc");
+            self->PublishData(data, /*reliable=*/true, {packet.caller_identity}, "lk.rpc", generation);
         });
     }
 }
@@ -1674,14 +1896,33 @@ uint64_t Room::GetDataChannelBufferedAmount(bool reliable) const {
 }
 
 void Room::OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliable) {
-    auto snapshot = GetListenersSnapshot();
-    uint64_t current_amount = GetDataChannelBufferedAmount(reliable);
+    OnDataChannelBufferedAmountLow(previous_amount, reliable, session_generation_.load(std::memory_order_acquire));
+}
+
+void Room::OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliable, uint64_t generation) {
+    BeforeNativeEventCommit(generation);
+    std::vector<std::shared_ptr<RoomListener>> snapshot;
+    webrtc::scoped_refptr<webrtc::DataChannelInterface> channel;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) return;
+        snapshot = listeners_;
+        channel = reliable ? reliable_dc_ : lossy_dc_;
+    }
+    const uint64_t current_amount = channel ? channel->buffered_amount() : 0;
     for (const auto& listener : snapshot) {
-        listener->OnDataChannelBufferedAmountLowThresholdChanged(current_amount, reliable);
+        DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
+            target.OnDataChannelBufferedAmountLowThresholdChanged(current_amount, reliable);
+        });
     }
 }
 
 void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& participant_sid, const std::string& topic) {
+    OnIncomingDataPacket(payload, participant_sid, topic, session_generation_.load(std::memory_order_acquire));
+}
+
+void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& participant_sid, const std::string& topic, uint64_t generation) {
+    BeforeNativeEventCommit(generation);
     std::vector<uint8_t> real_payload = payload;
     std::string real_topic = topic;
     std::string real_sender_sid = participant_sid;
@@ -1700,18 +1941,23 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
 
         if (data_pkt.has_stream_header()) {
             const auto& header = data_pkt.stream_header();
-            incoming_data_streams_.Begin(
-                header.stream_id(),
-                header.topic(),
-                header.total_length(),
-                sender_identity,
-                real_sender_sid);
+            {
+                std::lock_guard lock(room_mutex_);
+                if (!IsNativeGenerationCurrentLocked(generation)) return;
+                incoming_data_streams_->Begin(
+                    header.stream_id(),
+                    header.topic(),
+                    header.total_length(),
+                    sender_identity,
+                    real_sender_sid);
+            }
 
             // 构造并派发上层流式 Reader
             std::shared_ptr<Participant> p;
             SenderContext sender;
             {
                 std::lock_guard lock(room_mutex_);
+                if (!IsNativeGenerationCurrentLocked(generation)) return;
                 sender = ResolveSenderContextLocked(
                     real_sender_sid, sender_identity, &p);
             }
@@ -1740,11 +1986,9 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
 
                 auto reader = std::make_shared<TextStreamReader>(std::move(info));
                 {
-                    std::lock_guard lk(streams_mutex_);
+                    std::lock_guard lk(room_mutex_);
+                    if (!IsNativeGenerationCurrentLocked(generation)) return;
                     active_text_readers_[header.stream_id()] = reader;
-                }
-                {
-                    std::lock_guard lock(room_mutex_);
                     ParticipantEvent event = p
                         ? MakeParticipantEventLocked(
                             ParticipantEventKind::TextStreamOpened,
@@ -1757,9 +2001,9 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                     EnqueueParticipantEventLocked(std::move(event));
                 }
                 for (const auto& listener : listeners_snapshot) {
-                    if (!listener->ConsumesParticipantEvents()) {
-                        listener->OnTextStreamOpened(reader, p);
-                    }
+                    DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
+                        target.OnTextStreamOpened(reader, p);
+                    }, true);
                 }
             } else {
                 ByteStreamInfo info;
@@ -1779,11 +2023,9 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
 
                 auto reader = std::make_shared<ByteStreamReader>(std::move(info));
                 {
-                    std::lock_guard lk(streams_mutex_);
+                    std::lock_guard lk(room_mutex_);
+                    if (!IsNativeGenerationCurrentLocked(generation)) return;
                     active_byte_readers_[header.stream_id()] = reader;
-                }
-                {
-                    std::lock_guard lock(room_mutex_);
                     ParticipantEvent event = p
                         ? MakeParticipantEventLocked(
                             ParticipantEventKind::ByteStreamOpened,
@@ -1796,9 +2038,9 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                     EnqueueParticipantEventLocked(std::move(event));
                 }
                 for (const auto& listener : listeners_snapshot) {
-                    if (!listener->ConsumesParticipantEvents()) {
-                        listener->OnByteStreamOpened(reader, p);
-                    }
+                    DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
+                        target.OnByteStreamOpened(reader, p);
+                    }, true);
                 }
             }
             return;
@@ -1806,23 +2048,24 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
             const auto& chunk = data_pkt.stream_chunk();
             const auto& content = chunk.content();
 
-            // 派发给活跃 reader
+            std::optional<AssembledDataStream> assembled;
+            // Reader updates and assembler commits share the generation boundary.
             {
-                std::lock_guard lk(streams_mutex_);
+                std::lock_guard lk(room_mutex_);
+                if (!IsNativeGenerationCurrentLocked(generation)) return;
                 if (auto it = active_text_readers_.find(chunk.stream_id()); it != active_text_readers_.end()) {
                     it->second->OnChunkUpdate(content);
                 }
                 if (auto it = active_byte_readers_.find(chunk.stream_id()); it != active_byte_readers_.end()) {
                     it->second->OnChunkUpdate(reinterpret_cast<const uint8_t*>(content.data()), content.size());
                 }
+                assembled = incoming_data_streams_->AddChunk(
+                    chunk.stream_id(),
+                    chunk.chunk_index(),
+                    std::span<const uint8_t>(
+                        reinterpret_cast<const uint8_t*>(content.data()),
+                        content.size()));
             }
-
-            auto assembled = incoming_data_streams_.AddChunk(
-                chunk.stream_id(),
-                chunk.chunk_index(),
-                std::span<const uint8_t>(
-                    reinterpret_cast<const uint8_t*>(content.data()),
-                    content.size()));
             if (!assembled) {
                 return;
             }
@@ -1833,9 +2076,10 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
         } else if (data_pkt.has_stream_trailer()) {
             const auto& trailer = data_pkt.stream_trailer();
 
-            // 关闭活跃 reader
+            std::optional<AssembledDataStream> assembled;
             {
-                std::lock_guard lk(streams_mutex_);
+                std::lock_guard lk(room_mutex_);
+                if (!IsNativeGenerationCurrentLocked(generation)) return;
                 std::map<std::string, std::string> attrs(trailer.attributes().begin(), trailer.attributes().end());
                 if (auto it = active_text_readers_.find(trailer.stream_id()); it != active_text_readers_.end()) {
                     it->second->OnStreamClose(trailer.reason(), attrs);
@@ -1845,9 +2089,8 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                     it->second->OnStreamClose(trailer.reason(), attrs);
                     active_byte_readers_.erase(it);
                 }
+                assembled = incoming_data_streams_->Finish(trailer.stream_id());
             }
-
-            auto assembled = incoming_data_streams_.Finish(trailer.stream_id());
             if (!assembled) {
                 return;
             }
@@ -1873,7 +2116,7 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
         std::string text_payload(real_payload.begin(), real_payload.end());
         auto rpc_pkt_opt = RpcPacket::Decode(text_payload);
         if (rpc_pkt_opt.has_value()) {
-            OnIncomingRpcPacket(rpc_pkt_opt.value());
+            OnIncomingRpcPacket(rpc_pkt_opt.value(), generation);
             return;
         }
     }
@@ -1885,6 +2128,7 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
     SenderContext sender_context;
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) return;
         sender_context = ResolveSenderContextLocked(
             real_sender_sid, sender_identity, &resolved_participant);
         remote_p = std::dynamic_pointer_cast<RemoteParticipant>(resolved_participant);
@@ -1903,7 +2147,9 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
         chat.sender_identity = !sender_identity.empty() ? sender_identity : (remote_p ? remote_p->identity() : real_sender_sid);
         std::shared_ptr<Participant> p = remote_p ? remote_p : (local_p && (local_p->sid() == real_sender_sid || local_p->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_p) : nullptr);
         for (const auto& listener : listeners_snapshot) {
-            listener->OnChatMessage(chat, p);
+            DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
+                target.OnChatMessage(chat, p);
+            });
         }
         chat_dispatched = true;
     } else if (real_topic == "lk.chat" || real_topic == "lk-chat-topic" || real_topic.empty()) {
@@ -1912,7 +2158,9 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
         if (chat_opt.has_value()) {
             std::shared_ptr<Participant> p = remote_p ? remote_p : (local_p && (local_p->sid() == real_sender_sid || local_p->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_p) : nullptr);
             for (const auto& listener : listeners_snapshot) {
-                listener->OnChatMessage(chat_opt.value(), p);
+                DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
+                    target.OnChatMessage(chat_opt.value(), p);
+                });
             }
             chat_dispatched = true;
         }
@@ -1922,6 +2170,7 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
     if (!chat_dispatched && real_topic != "lk.chat" && real_topic != "lk-chat-topic" && real_topic != "lk.rpc") {
         {
             std::lock_guard lock(room_mutex_);
+            if (!IsNativeGenerationCurrentLocked(generation)) return;
             ParticipantEvent event = resolved_participant
                 ? MakeParticipantEventLocked(
                     ParticipantEventKind::DataReceived,
@@ -1935,31 +2184,39 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
             EnqueueParticipantEventLocked(std::move(event));
         }
         for (const auto& listener : listeners_snapshot) {
-            if (!listener->ConsumesParticipantEvents()) {
-                listener->OnDataReceived(real_payload, remote_p, real_topic);
-            }
+            DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
+                target.OnDataReceived(real_payload, remote_p, real_topic);
+            }, true);
         }
     }
 }
 
 void Room::OnIceConnected() {
-    Log("WEBRTC", "ICE_READY", "WebRTC 媒体底层连接已就绪，向 SFU 激活所有下行视频流并请求关键帧...");
-    std::lock_guard lock(room_mutex_);
-    if (signal_client_) {
+    OnIceConnected(session_generation_.load(std::memory_order_acquire));
+}
+
+void Room::OnIceConnected(uint64_t generation) {
+    BeforeNativeEventCommit(generation);
+    std::shared_ptr<SignalClient> signal;
+    std::map<std::string, std::vector<std::string>> videos;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) return;
+        signal = signal_client_;
         for (const auto& kv : remote_participants_) {
             if (kv.second) {
-                std::vector<std::string> video_sids;
                 for (const auto& pub_kv : kv.second->tracks()) {
                     if (pub_kv.second && pub_kv.second->track() && pub_kv.second->track()->kind() == TrackKind::Video) {
-                        video_sids.push_back(pub_kv.first);
-                        signal_client_->SendUpdateTrackSettings(pub_kv.first, false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
-                        Log("SIGNAL", "TRACK_ACTIVE", "已向 SFU 激活视频流 Track SID=" + pub_kv.first + " (Participant: " + kv.second->identity() + ")");
+                        videos[kv.first].push_back(pub_kv.first);
                     }
                 }
-                if (!video_sids.empty()) {
-                    signal_client_->SendUpdateSubscription(video_sids, true, kv.first);
-                }
             }
+        }
+    }
+    if (signal) {
+        for (const auto& [sid, tracks] : videos) {
+            for (const auto& track : tracks) signal->SendUpdateTrackSettings(track, false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
+            signal->SendUpdateSubscription(tracks, true, sid);
         }
     }
 }
@@ -1967,11 +2224,17 @@ void Room::OnIceConnected() {
 void Room::OnPeerConnectionStateChanged(
     int pc_type,
     webrtc::PeerConnectionInterface::PeerConnectionState state) {
+    OnPeerConnectionStateChanged(pc_type, state, session_generation_.load(std::memory_order_acquire));
+}
+
+void Room::OnPeerConnectionStateChanged(int pc_type,
+    webrtc::PeerConnectionInterface::PeerConnectionState state, uint64_t generation) {
+    BeforeNativeEventCommit(generation);
     std::vector<std::shared_ptr<AwaitableState<void>>> success;
     std::vector<std::shared_ptr<AwaitableState<void>>> failure;
     {
         std::lock_guard lock(room_mutex_);
-        const auto generation = session_generation_.load(std::memory_order_acquire);
+        if (!IsNativeGenerationCurrentLocked(generation)) return;
         for (const auto& waiter : pending_pc_waits_) {
             if (waiter.generation != generation || waiter.pc_type != pc_type) continue;
             if (state == webrtc::PeerConnectionInterface::PeerConnectionState::kConnected) {
@@ -2050,55 +2313,101 @@ asio::awaitable<void> Room::WaitForPrimaryPeerConnection(
         pending_pc_waits_.end());
 }
 
-void Room::CancelPendingOperations(OperationErrorCode code,
-                                   const std::string& stage,
-                                   const std::string& message) {
-    std::vector<std::shared_ptr<AwaitableState<void>>> void_states;
-    std::vector<std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>>> publish_states;
-    {
-        std::lock_guard lock(room_mutex_);
-        for (const auto& waiter : pending_pc_waits_) void_states.push_back(waiter.completion);
-        pending_pc_waits_.clear();
-        void_states.insert(void_states.end(),
-                           negotiation_waiters_.begin(),
-                           negotiation_waiters_.end());
-        negotiation_waiters_.clear();
-        negotiation_state_ = NegotiationState::Idle;
-        for (const auto& [cid, state] : pending_track_publishes_) publish_states.push_back(state);
-        pending_track_publishes_.clear();
+Room::PendingOperationCleanup Room::TakePendingOperationsLocked() {
+    // Retire only this bundle's streams, under the same lock as DC commits.
+    for (auto& [id, reader] : active_text_readers_) reader->OnStreamClose("session closed", {});
+    for (auto& [id, reader] : active_byte_readers_) reader->OnStreamClose("session closed", {});
+    active_text_readers_.clear();
+    active_byte_readers_.clear();
+    incoming_data_streams_ = std::make_unique<IncomingDataStreamAssembler>();
+    PendingOperationCleanup pending;
+    for (const auto& waiter : pending_pc_waits_) {
+        pending.void_states.push_back(waiter.completion);
     }
-    for (const auto& state : void_states) {
+    pending_pc_waits_.clear();
+    pending.void_states.insert(pending.void_states.end(),
+                               negotiation_waiters_.begin(),
+                               negotiation_waiters_.end());
+    negotiation_waiters_.clear();
+    negotiation_state_ = NegotiationState::Idle;
+    for (const auto& [cid, state] : pending_track_publishes_) {
+        pending.publish_states.push_back(state);
+    }
+    pending_track_publishes_.clear();
+    return pending;
+}
+
+void Room::FailPendingOperations(PendingOperationCleanup pending,
+                                 OperationErrorCode code,
+                                 const std::string& stage,
+                                 const std::string& message) {
+    for (const auto& state : pending.void_states) {
         FailAwaitable(state, std::make_exception_ptr(OperationError(
             OperationKind::Connect, code, stage, message, true)));
     }
-    for (const auto& state : publish_states) {
+    for (const auto& state : pending.publish_states) {
         FailAwaitable(state, std::make_exception_ptr(OperationError(
             OperationKind::PublishTrack, code, stage, message, true)));
     }
 }
 
-void Room::FlushDeferredRoomMessages() {
+void Room::CancelPendingOperations(OperationErrorCode code,
+                                   const std::string& stage,
+                                   const std::string& message) {
+    PendingOperationCleanup pending;
+    {
+        std::lock_guard lock(room_mutex_);
+        pending = TakePendingOperationsLocked();
+    }
+    FailPendingOperations(std::move(pending), code, stage, message);
+}
+
+void Room::FlushDeferredRoomMessages(uint64_t generation) {
     std::vector<std::shared_ptr<proto::SignalResponse>> messages;
     {
         std::lock_guard lock(room_mutex_);
+        if (generation != session_generation_.load(std::memory_order_acquire) ||
+            installed_session_generation_ != generation ||
+            connection_state_ != ConnectionState::Connected) {
+            return;
+        }
         messages.swap(deferred_room_messages_);
     }
-    for (auto& message : messages) HandleSignalMessage(std::move(message));
+    for (auto& message : messages) {
+        HandleSignalMessage(std::move(message), generation);
+    }
 }
 
 void Room::OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type) {
-    SendTrickleCandidate(sdp, sdp_mid, sdp_mline_index, pc_type);
+    OnLocalIceCandidate(sdp, sdp_mid, sdp_mline_index, pc_type, session_generation_.load(std::memory_order_acquire));
+}
+
+void Room::OnLocalIceCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type, uint64_t generation) {
+    BeforeNativeEventCommit(generation);
+    SendTrickleCandidate(sdp, sdp_mid, sdp_mline_index, pc_type, generation);
 }
 
 void Room::OnRemoteDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) {
+    OnRemoteDataChannel(data_channel, session_generation_.load(std::memory_order_acquire));
+}
+
+void Room::OnRemoteDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel, uint64_t generation) {
     if (!data_channel) return;
     bool reliable = (data_channel->label() == "_reliable" || data_channel->label() == "reliable");
-    auto obs = std::make_shared<RoomDataChannelObserver>(shared_from_this(), reliable);
+    auto obs = CreateDataChannelObserver(reliable, generation);
+    // Until the commit below, registration belongs solely to this callback.
     data_channel->RegisterObserver(obs.get());
-    std::cout << "[WebRTC DataChannel] Registered observer on remote DataChannel: " << data_channel->label() << std::endl;
-    std::lock_guard lock(room_mutex_);
-    data_channel_observers_.push_back(obs);
-    remote_data_channels_.push_back(data_channel);
+    BeforeNativeEventCommit(generation);
+    {
+        std::lock_guard lock(room_mutex_);
+        if (IsNativeGenerationCurrentLocked(generation)) {
+            data_channel_observers_.push_back(obs);
+            remote_data_channels_.push_back(data_channel);
+            return;
+        }
+    }
+    data_channel->UnregisterObserver();
+    data_channel->Close();
 }
 
 namespace {
@@ -2356,6 +2665,13 @@ void Room::RemoveRemoteMediaTrackReferences(
 }
 
 void Room::ClearRemotePublicationMediaBindingsLocked() {
+    // Retire the owner's shared media index before releasing room_mutex_. Slow
+    // native detach must never clear a replacement's newly installed entries.
+    {
+        std::lock_guard media_lock(remote_media_mutex_);
+        remote_video_tracks_.clear();
+        remote_audio_tracks_.clear();
+    }
     for (const auto& [participant_sid, participant] : remote_participants_) {
         if (!participant) continue;
         for (const auto& [track_sid, publication] : participant->tracks()) {
@@ -2378,6 +2694,7 @@ void Room::DetachRemotePublicationMedia(RemoteTrackPublication* publication,
     std::shared_ptr<Track> track;
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> detached_rtc_track;
     std::vector<std::shared_ptr<RoomListener>> listeners;
+    uint64_t generation = 0;
     {
         std::lock_guard lock(room_mutex_);
         for (const auto& [participant_sid, candidate] : remote_participants_) {
@@ -2417,6 +2734,7 @@ void Room::DetachRemotePublicationMedia(RemoteTrackPublication* publication,
             canonical,
             false));
         listeners = listeners_;
+        generation = session_generation_.load(std::memory_order_acquire);
     }
 
     // Move physical sinks out of Room before calling WebRTC RemoveSink. The
@@ -2426,9 +2744,9 @@ void Room::DetachRemotePublicationMedia(RemoteTrackPublication* publication,
 
     if (notify_listener && track) {
         for (const auto& listener : listeners) {
-            if (!listener->ConsumesParticipantEvents()) {
-                listener->OnTrackUnsubscribed(track, canonical, participant);
-            }
+            DeliverListener({generation}, listener, [&](RoomListener& target) {
+                target.OnTrackUnsubscribed(track, canonical, participant);
+            }, true);
         }
     }
 }
@@ -2566,8 +2884,16 @@ void Room::ApplySimulcastParameters(webrtc::scoped_refptr<webrtc::RtpSenderInter
 }
 
 void Room::NegotiatePublisher() {
-    auto generation = session_generation_.load(std::memory_order_acquire);
-    auto timeout = operation_timeouts_.negotiation;
+    NegotiatePublisher(session_generation_.load(std::memory_order_acquire));
+}
+
+void Room::NegotiatePublisher(uint64_t generation) {
+    std::chrono::milliseconds timeout;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) return;
+        timeout = operation_timeouts_.negotiation;
+    }
     livekit::safe_co_spawn(executor_, [self = shared_from_this(), generation, timeout]() -> asio::awaitable<void> {
         try {
             co_await self->NegotiatePublisherAsync(timeout, generation);
@@ -2837,6 +3163,12 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
 asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
     std::shared_ptr<Track> track,
     const proto::SignalRequest& request) {
+    co_return co_await PublishLocalTrackAsync(std::move(track), request,
+        session_generation_.load(std::memory_order_acquire));
+}
+
+asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
+    std::shared_ptr<Track> track, const proto::SignalRequest& request, uint64_t generation) {
     if (!track || !request.has_add_track()) {
         throw OperationError(OperationKind::PublishTrack,
                              OperationErrorCode::InvalidState,
@@ -2880,10 +3212,11 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         }
     }
 
-    const auto generation = session_generation_.load(std::memory_order_acquire);
     const std::string cid = effective_request.add_track().cid();
     std::shared_ptr<SignalClient> signal;
     std::shared_ptr<LocalParticipant> local;
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
+    OperationTimeouts timeouts;
     auto ack = std::make_shared<AwaitableState<proto::TrackPublishedResponse>>(executor_);
     {
         std::lock_guard lock(room_mutex_);
@@ -2902,8 +3235,17 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         }
         signal = signal_client_;
         local = local_participant_;
+        publisher = publisher_pc_;
+        timeouts = operation_timeouts_;
         pending_track_publishes_[cid] = ack;
     }
+    const auto release_ack = [&]() {
+        std::lock_guard lock(room_mutex_);
+        const auto found = pending_track_publishes_.find(cid);
+        if (found != pending_track_publishes_.end() && found->second == ack) {
+            pending_track_publishes_.erase(found);
+        }
+    };
 
     webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender;
     bool server_acknowledged = false;
@@ -2911,19 +3253,16 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         co_await signal->SendAsync(effective_request);
         auto response = co_await WaitAwaitable<proto::TrackPublishedResponse>(
             ack,
-            operation_timeouts_.publish,
+            timeouts.publish,
             OperationKind::PublishTrack,
             OperationErrorCode::TrackPublishTimeout,
             "wait_track_published_ack");
         server_acknowledged = true;
 
-        {
-            std::lock_guard lock(room_mutex_);
-            pending_track_publishes_.erase(cid);
-        }
+        release_ack();
 
         sender = co_await AddTrackToPublisherAsync(track, generation);
-        co_await NegotiatePublisherAsync(operation_timeouts_.negotiation, generation);
+        co_await NegotiatePublisherAsync(timeouts.negotiation, generation);
 
         if (generation != session_generation_.load(std::memory_order_acquire)) {
             throw OperationError(OperationKind::PublishTrack,
@@ -2932,39 +3271,31 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
                                  "session changed before publication commit");
         }
 
-        track->set_sid(response.track().sid());
         auto publication = std::make_shared<TrackPublication>(
             track, response.track().sid(), response.track().name());
         {
             std::lock_guard lock(room_mutex_);
-            if (!local || local != local_participant_) {
+            if (!IsNativeGenerationCurrentLocked(generation) || !local || local != local_participant_) {
                 throw OperationError(OperationKind::PublishTrack,
                                      OperationErrorCode::Cancelled,
                                      "publish_commit",
                                      "local participant changed before publication commit");
             }
+            track->set_sid(response.track().sid());
             local->add_publication(publication);
         }
         co_return publication;
     } catch (...) {
-        {
-            std::lock_guard lock(room_mutex_);
-            pending_track_publishes_.erase(cid);
-        }
+        release_ack();
         if (sender && WebRTCManager::Instance().signaling_thread()) {
-            webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
-            {
-                std::lock_guard lock(room_mutex_);
-                pc = publisher_pc_;
-            }
-            WebRTCManager::Instance().signaling_thread()->BlockingCall([pc, sender]() {
-                if (pc) pc->RemoveTrackOrError(sender);
+            WebRTCManager::Instance().signaling_thread()->BlockingCall([publisher, sender]() {
+                if (publisher) publisher->RemoveTrackOrError(sender);
             });
         }
         if (server_acknowledged) {
             Log("ERROR", "PUBLISH_ROLLBACK",
                 "TrackPublished ACK 后本地事务失败；已移除 sender 并发起 Publisher SDP 重协商以收敛服务端轨状态");
-            NegotiatePublisher();
+            NegotiatePublisher(generation);
         }
         throw;
     }
@@ -3353,7 +3684,9 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
         }
 
         for (const auto& listener : listeners_snapshot) {
-            listener->OnLocalTrackUnpublished(publication);
+            DeliverListener({generation}, listener, [&](RoomListener& target) {
+                target.OnLocalTrackUnpublished(publication);
+            });
         }
         publication->set_track(nullptr);
         track->set_sid("");
@@ -3386,8 +3719,8 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
     }
 }
 
-void Room::OnNegotiationFailed() {
-    CompleteNegotiation("publisher negotiation failed");
+void Room::OnNegotiationFailed(uint64_t generation) {
+    CompleteNegotiation("publisher negotiation failed", generation);
 }
 
 asio::awaitable<void> Room::NegotiatePublisherAsync(
@@ -3421,7 +3754,7 @@ asio::awaitable<void> Room::NegotiatePublisherAsync(
             negotiation_state_ = NegotiationState::PendingRetry;
         }
     }
-    if (should_start) ExecuteNegotiatePublisher();
+    if (should_start) ExecuteNegotiatePublisher(generation);
 
     try {
         co_await WaitAwaitable<void>(completion, timeout,
@@ -3437,10 +3770,13 @@ asio::awaitable<void> Room::NegotiatePublisherAsync(
     }
 }
 
-void Room::CompleteNegotiation(const std::string& error) {
+void Room::CompleteNegotiation(
+    const std::string& error,
+    uint64_t generation) {
     std::vector<std::shared_ptr<AwaitableState<void>>> waiters;
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(generation)) return;
         waiters.swap(negotiation_waiters_);
         negotiation_state_ = NegotiationState::Idle;
         subscriber_negotiating_ = false;
@@ -3459,13 +3795,14 @@ void Room::CompleteNegotiation(const std::string& error) {
     }
 }
 
-void Room::ExecuteNegotiatePublisher() {
+void Room::ExecuteNegotiatePublisher(uint64_t generation) {
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
     std::shared_ptr<SignalClient> client;
     bool ice_restart = false;
     bool unavailable = false;
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(generation)) return;
         pub_pc = publisher_pc_;
         client = signal_client_;
         ice_restart = negotiation_ice_restart_requested_;
@@ -3476,18 +3813,19 @@ void Room::ExecuteNegotiatePublisher() {
             negotiation_state_ = NegotiationState::PendingRetry;
             auto self = shared_from_this();
             auto retry_timer = std::make_shared<asio::steady_timer>(executor_, std::chrono::milliseconds(50));
-            retry_timer->async_wait([self, retry_timer](const asio::error_code& ec) {
+            retry_timer->async_wait([self, retry_timer, generation](const asio::error_code& ec) {
                 if (!ec) {
                     bool should_run = false;
                     {
                         std::lock_guard lock(self->room_mutex_);
-                        if (self->negotiation_state_ == NegotiationState::PendingRetry) {
+                        if (self->IsSignalGenerationCurrentLocked(generation) &&
+                            self->negotiation_state_ == NegotiationState::PendingRetry) {
                             self->negotiation_state_ = NegotiationState::InProgress;
                             should_run = true;
                         }
                     }
                     if (should_run) {
-                        self->ExecuteNegotiatePublisher();
+                        self->ExecuteNegotiatePublisher(generation);
                     }
                 }
             });
@@ -3496,29 +3834,39 @@ void Room::ExecuteNegotiatePublisher() {
     }
 
     if (unavailable) {
-        CompleteNegotiation("publisher peer connection or signal client became unavailable");
+        CompleteNegotiation(
+            "publisher peer connection or signal client became unavailable",
+            generation);
         return;
     }
 
     auto self = shared_from_this();
     WebRTCManager::Instance().CreateOffer(pub_pc, executor_,
-        [self, client, pub_pc](const std::string& sdp, const std::string& err) {
+        [self, client, pub_pc, generation](const std::string& sdp, const std::string& err) {
+            {
+                std::lock_guard lock(self->room_mutex_);
+                if (!self->IsSignalGenerationCurrentLocked(generation)) return;
+            }
             if (!err.empty()) {
                 std::cerr << "[WebRTC] CreateOffer error: "
                           << secure_log::OpaqueSummary("create_offer") << std::endl;
                 self->Log("ERROR", "OFFER_FAIL", secure_log::OpaqueSummary("create_offer"));
-                self->OnNegotiationFailed();
+                self->OnNegotiationFailed(generation);
                 return;
             }
 
             WebRTCManager::Instance().SetLocalDescription(pub_pc, "offer", sdp, self->executor_,
-                [self, client, pub_pc, sdp](const std::string& set_local_err) {
+                [self, client, pub_pc, sdp, generation](const std::string& set_local_err) {
+                    {
+                        std::lock_guard lock(self->room_mutex_);
+                        if (!self->IsSignalGenerationCurrentLocked(generation)) return;
+                    }
                     if (!set_local_err.empty()) {
                         std::cerr << "[WebRTC] SetLocalDescription offer error: "
                                   << secure_log::OpaqueSummary("set_local_offer") << std::endl;
                         self->Log("ERROR", "LOCAL_DESC_FAIL",
                                   secure_log::OpaqueSummary("set_local_offer"));
-                        self->OnNegotiationFailed();
+                        self->OnNegotiationFailed(generation);
                         return;
                     }
 
@@ -3555,11 +3903,11 @@ void Room::ExecuteNegotiatePublisher() {
                         }
                     }
 
-                    livekit::safe_co_spawn(self->executor_, [self, client, req = std::move(req)]() -> asio::awaitable<void> {
+                    livekit::safe_co_spawn(self->executor_, [self, client, req = std::move(req), generation]() -> asio::awaitable<void> {
                         try {
                             co_await client->SendAsync(req);
                         } catch (const std::exception& error) {
-                            self->CompleteNegotiation(error.what());
+                            self->CompleteNegotiation(error.what(), generation);
                         }
                     });
                     std::cout << "[WebRTC] -> Sent publisher SDP Offer to LiveKit server with mid_to_track_id mapping!" << std::endl;
@@ -3603,8 +3951,9 @@ void Room::AttachRemoteTrackToParticipant(
     std::shared_ptr<RemoteParticipant> participant,
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track,
     webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
-    const std::string& track_sid) {
+    const std::string& track_sid, uint64_t generation) {
     if (!participant || !track) return;
+    const auto rtc_track_id = track->id();
 
     TrackKind kind = (track->kind() == webrtc::MediaStreamTrackInterface::kAudioKind) ? TrackKind::Audio : TrackKind::Video;
 
@@ -3619,7 +3968,7 @@ void Room::AttachRemoteTrackToParticipant(
         }
     }
     if (track_id.empty()) {
-        track_id = track->id();
+        track_id = rtc_track_id;
     }
 
     std::shared_ptr<TrackPublication> pub;
@@ -3629,9 +3978,16 @@ void Room::AttachRemoteTrackToParticipant(
     ParticipantKey participant_key;
     TrackKey track_key;
     uint64_t binding_serial = 0;
+    std::shared_ptr<SignalClient> signal;
+    webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> retired_rtc_track;
+    bool native_enabled = true;
+    double native_volume = 1.0;
+    uint64_t delivery_generation = 0;
 
     {
         std::lock_guard lock(room_mutex_);
+        if (generation != 0 && !IsNativeGenerationCurrentLocked(generation)) return;
+        delivery_generation = session_generation_.load(std::memory_order_acquire);
         const auto canonical = remote_participants_.find(participant->sid());
         const auto membership = FindMembershipLocked(participant);
         if (connection_state_ == ConnectionState::Disconnected ||
@@ -3677,7 +4033,7 @@ void Room::AttachRemoteTrackToParticipant(
         track_key = track_membership->key;
         binding_serial = next_remote_track_binding_serial_++;
         if (remote_publication && remote_publication->has_media_binding() &&
-            remote_publication->media_track_id() != track->id()) {
+            remote_publication->media_track_id() != rtc_track_id) {
             const auto existing_serial =
                 current_remote_binding_serials_.find(remote_publication.get());
             if (existing_serial != current_remote_binding_serials_.end()) {
@@ -3697,6 +4053,7 @@ void Room::AttachRemoteTrackToParticipant(
     uint64_t superseded_binding_serial = 0;
     const auto retain_binding = [&](RemoteTrackSinkBinding& binding) {
         std::lock_guard lock(room_mutex_);
+        if (generation != 0 && !IsNativeGenerationCurrentLocked(generation)) return false;
         const auto canonical = remote_participants_.find(participant->sid());
         const auto membership = FindMembershipLocked(participant);
         const auto track_membership = track_memberships_.find(pub.get());
@@ -3711,10 +4068,10 @@ void Room::AttachRemoteTrackToParticipant(
             return false;
         }
 
-        r_track->set_rtc_track(track);
-        if (kind == TrackKind::Audio && audio_output_muted_) {
-            r_track->set_muted(true);
-        }
+        retired_rtc_track = r_track->ExchangeRtcTrackBinding(
+            track, kind == TrackKind::Audio && audio_output_muted_);
+        native_volume = r_track->volume();
+        native_enabled = !r_track->muted() && native_volume > 0.001;
         {
             std::lock_guard media_lock(remote_media_mutex_);
             auto& media_tracks = kind == TrackKind::Video
@@ -3726,7 +4083,8 @@ void Room::AttachRemoteTrackToParticipant(
                 });
             if (existing == media_tracks.end()) media_tracks.push_back(r_track);
         }
-        processed_remote_track_ids_.insert(track->id());
+        processed_remote_track_ids_.insert(rtc_track_id);
+        signal = signal_client_;
         remote_track_sinks_.push_back(std::move(binding));
         if (remote_publication) {
             const auto existing_serial =
@@ -3738,7 +4096,7 @@ void Room::AttachRemoteTrackToParticipant(
             current_remote_binding_serials_[remote_publication.get()] = binding_serial;
             std::weak_ptr<Room> weak_room = weak_from_this();
             remote_publication->SetMediaBinding(
-                track->id(),
+                rtc_track_id,
                 [weak_room, binding_serial](RemoteTrackPublication* publication,
                                             bool notify_listener) {
                     if (const auto room = weak_room.lock()) {
@@ -3748,6 +4106,12 @@ void Room::AttachRemoteTrackToParticipant(
                 });
         }
         return true;
+    };
+    const auto configure_native = [&]() {
+        track->set_enabled(native_enabled);
+        if (kind == TrackKind::Audio) {
+            static_cast<webrtc::AudioTrackInterface*>(track.get())->SetVolume(native_volume);
+        }
     };
 
     if (kind == TrackKind::Audio) {
@@ -3802,14 +4166,15 @@ void Room::AttachRemoteTrackToParticipant(
             if (binding.detach) binding.detach();
             return;
         }
+        configure_native();
         if (superseded_binding_serial != 0) {
             DetachRemoteTrackSinks(
                 TakeRemoteTrackSinkForBindingSerial(superseded_binding_serial));
         }
         Log("WEBRTC", "AUDIO_ATTACH", "远端音频轨已绑定至参会人 [" + participant->identity() + "], Track SID=" + track_id + ", 已挂载 NativeAudioTrackSink");
 
-        if (signal_client_) {
-            signal_client_->SendUpdateSubscription({track_id}, true, participant->sid());
+        if (signal) {
+            signal->SendUpdateSubscription({track_id}, true, participant->sid());
             Log("SIGNAL", "AUDIO_TRACK_ACTIVE", "已向 SFU 激活下行音频流订阅: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
         }
     } else {
@@ -3843,15 +4208,16 @@ void Room::AttachRemoteTrackToParticipant(
             if (binding.detach) binding.detach();
             return;
         }
+        configure_native();
         if (superseded_binding_serial != 0) {
             DetachRemoteTrackSinks(
                 TakeRemoteTrackSinkForBindingSerial(superseded_binding_serial));
         }
         Log("WEBRTC", "VIDEO_ATTACH", "远端视频轨已绑定至参会人 [" + participant->identity() + "], Track SID=" + track_id);
 
-        if (signal_client_) {
-            signal_client_->SendUpdateTrackSettings(track_id, false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
-            signal_client_->SendUpdateSubscription({track_id}, true, participant->sid());
+        if (signal) {
+            signal->SendUpdateTrackSettings(track_id, false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
+            signal->SendUpdateSubscription({track_id}, true, participant->sid());
             Log("SIGNAL", "TRACK_ACTIVE", "已向 SFU 激活下行视频流: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
         }
     }
@@ -3864,7 +4230,8 @@ void Room::AttachRemoteTrackToParticipant(
         const auto canonical = remote_participants_.find(participant->sid());
         const auto membership = FindMembershipLocked(participant);
         const auto track_membership = track_memberships_.find(pub.get());
-        still_current = connection_state_ != ConnectionState::Disconnected &&
+        still_current = (generation == 0 || IsNativeGenerationCurrentLocked(generation)) &&
+            connection_state_ != ConnectionState::Disconnected &&
             canonical != remote_participants_.end() &&
             canonical->second.get() == participant.get() &&
             participant->get_publication(track_id) == pub &&
@@ -3894,17 +4261,18 @@ void Room::AttachRemoteTrackToParticipant(
         return;
     }
     for (const auto& l : listeners) {
-        if (!l->ConsumesParticipantEvents()) {
-            l->OnTrackSubscribed(r_track, pub, participant);
-        }
+        DeliverListener({delivery_generation, {}, generation != 0}, l, [&](RoomListener& target) {
+            target.OnTrackSubscribed(r_track, pub, participant);
+        }, true);
     }
 }
 
-void Room::FlushPendingTracks(const std::string& participant_sid) {
+void Room::FlushPendingTracks(const std::string& participant_sid, uint64_t generation) {
     std::vector<PendingTrack> pending_to_flush;
     std::shared_ptr<RemoteParticipant> participant;
     {
         std::lock_guard lock(room_mutex_);
+        if (generation != 0 && !IsNativeGenerationCurrentLocked(generation)) return;
         RemoveExpiredPendingTracks();
         auto pit = remote_participants_.find(participant_sid);
         if (pit == remote_participants_.end()) return;
@@ -3921,12 +4289,16 @@ void Room::FlushPendingTracks(const std::string& participant_sid) {
     if (!pending_to_flush.empty()) {
         Log("TRACK", "FLUSH_PENDING", "开始冲刷参会人 [" + participant->identity() + "] 的 " + std::to_string(pending_to_flush.size()) + " 条暂存媒体轨");
         for (const auto& item : pending_to_flush) {
-            AttachRemoteTrackToParticipant(participant, item.track, item.receiver, item.track_sid);
+            AttachRemoteTrackToParticipant(participant, item.track, item.receiver, item.track_sid, item.generation);
         }
     }
 }
 
 void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track) {
+    OnRemoteTrackAdded(receiver, track, session_generation_.load(std::memory_order_acquire));
+}
+
+void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, uint64_t generation) {
     if (!track) return;
     
     std::string track_id = track->id();
@@ -3961,8 +4333,10 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
     Log("WEBRTC", "ON_TRACK_RESOLVE", "下行 Track 解析成功: StreamID=" + stream_id + ", ParticipantSID=" + participant_sid + ", TrackSID=" + track_sid + ", Kind=" + std::string(track->kind()));
 
     std::shared_ptr<RemoteParticipant> participant;
+    BeforeNativeEventCommit(generation);
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) return;
         auto it = remote_participants_.find(participant_sid);
         if (it != remote_participants_.end()) {
             participant = it->second;
@@ -3972,107 +4346,162 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
             // 参会人尚未建立（信令在路上）：放入以 participant_sid 为精确 Key 的 PendingTrackQueue 暂存！
             RemoveExpiredPendingTracks();
             PendingTrack pt;
+            pt.generation = generation;
             pt.track = track;
             pt.receiver = receiver;
             pt.participant_sid = participant_sid;
             pt.track_sid = track_sid;
             pt.expires_at = std::chrono::steady_clock::now() + std::chrono::seconds(15);
             pending_track_queue_[participant_sid].push_back(pt);
-            Log("TRACK", "ENQUEUE_PENDING", "参会人 [" + participant_sid + "] 尚未就绪，真实媒体轨已暂存至 PendingTrackQueue (Track SID=" + track_sid + ")");
-            return;
         }
+    }
+    if (!participant) {
+        Log("TRACK", "ENQUEUE_PENDING", "参会人 [" + participant_sid + "] 尚未就绪，真实媒体轨已暂存至 PendingTrackQueue (Track SID=" + track_sid + ")");
+        return;
     }
 
     // 参会人已就绪，立即绑定挂载
-    AttachRemoteTrackToParticipant(participant, track, receiver, track_sid);
+    AttachRemoteTrackToParticipant(participant, track, receiver, track_sid, generation);
 }
 
 void Room::OnRenegotiationNeeded(int pc_type) {
+    OnRenegotiationNeeded(pc_type, session_generation_.load(std::memory_order_acquire));
+}
+
+void Room::OnRenegotiationNeeded(int pc_type, uint64_t generation) {
     if (pc_type != 0) return; // 只有 Publisher PC 需要由 Client 发送 Offer
+    BeforeNativeEventCommit(generation);
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) return;
         pub_pc = publisher_pc_;
         if (negotiation_state_ != NegotiationState::Idle) {
             return; // 正在协商中，不产生多余的重协商风暴
         }
     }
     if (pub_pc && pub_pc->signaling_state() == webrtc::PeerConnectionInterface::SignalingState::kStable) {
-        NegotiatePublisher();
+        NegotiatePublisher(generation);
     }
 }
 
 void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation) {
-    // SignalClient callbacks can be queued after a disconnect or after the
-    // full-restart path has already installed a replacement client. The
-    // callback is bound to the ConnectAsync generation that created it, so an
-    // old transport must never mutate a newer room session.
-    if (event_generation != 0 &&
-        event_generation != session_generation_.load(std::memory_order_acquire)) {
+    std::shared_ptr<ConnectAttemptTestHooks> test_hooks;
+    bool stale_event_at_admission = false;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) {
+            stale_event_at_admission = true;
+        } else {
+            test_hooks = connect_attempt_test_hooks_;
+        }
+    }
+    if (stale_event_at_admission) {
         Log("SIGNAL", "STALE_EVENT", "忽略已替换会话的信令事件");
         return;
     }
 
+    // Tests pause here after admission and before the mutation boundary. The
+    // production path is a no-op and still revalidates under room_mutex_.
+    if (test_hooks && test_hooks->before_signal_event_commit) {
+        test_hooks->before_signal_event_commit(event_generation);
+    }
+
     if (event.type == SignalEvent::Close) {
+        bool stale_event = false;
         bool should_reconnect = false;
         bool connect_failed = false;
         bool server_disconnect_finalizing = false;
+        uint64_t reconnect_generation = 0;
         std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+        PendingOperationCleanup connect_pending;
         {
             std::lock_guard lock(room_mutex_);
-            server_disconnect_finalizing = server_disconnect_finalizing_;
-            if (server_disconnect_finalizing) {
-                // LeaveRequest cleanup owns the final notification. A following
-                // websocket close is expected and must not start a reconnect.
-            } else if (!reconnect_disabled_ &&
-                       connection_state_ == ConnectionState::Connected &&
-                       reconnect_attempts_ < kMaxReconnectAttempts) {
-                connection_state_ = ConnectionState::Reconnecting;
-                reconnect_attempts_++;
-                should_reconnect = true;
-            } else if (connection_state_ == ConnectionState::Connecting) {
-                connection_state_ = ConnectionState::Disconnected;
-                session_generation_.fetch_add(1, std::memory_order_acq_rel);
-                connect_failed = true;
+            if (!IsSignalGenerationCurrentLocked(event_generation)) {
+                stale_event = true;
+            } else {
+                server_disconnect_finalizing = server_disconnect_finalizing_;
+                if (server_disconnect_finalizing) {
+                    // LeaveRequest cleanup owns the final notification. A following
+                    // websocket close is expected and must not start a reconnect.
+                } else if (!reconnect_disabled_ &&
+                           connection_state_ == ConnectionState::Connected &&
+                           reconnect_attempts_ < kMaxReconnectAttempts) {
+                    connection_state_ = ConnectionState::Reconnecting;
+                    reconnect_attempts_++;
+                    should_reconnect = true;
+                    reconnect_generation = session_generation_.load(std::memory_order_acquire);
+                } else if (connection_state_ == ConnectionState::Connecting) {
+                    connection_state_ = ConnectionState::Disconnected;
+                    session_generation_.fetch_add(1, std::memory_order_acq_rel);
+                    connect_pending = TakePendingOperationsLocked();
+                    connect_failed = true;
+                }
+                listeners_snapshot = listeners_;
             }
-            listeners_snapshot = listeners_;
+        }
+
+        if (stale_event) {
+            Log("SIGNAL", "STALE_EVENT", "忽略已替换会话的信令事件");
+            return;
         }
 
         if (server_disconnect_finalizing) {
             return;
         } else if (connect_failed) {
-            CancelPendingOperations(OperationErrorCode::SessionClosed,
-                                    "signal_close_during_connect",
-                                    event.close_reason.empty() ? "signal closed during connect" : event.close_reason);
+            FailPendingOperations(
+                std::move(connect_pending),
+                OperationErrorCode::SessionClosed,
+                "signal_close_during_connect",
+                event.close_reason.empty() ? "signal closed during connect" : event.close_reason);
         } else if (should_reconnect) {
-            for (const auto& listener : listeners_snapshot) {
-                listener->OnReconnecting();
-            }
-            livekit::safe_co_spawn(executor_, [self = shared_from_this()]() -> asio::awaitable<void> {
-                co_await self->AttemptReconnect();
+            LifecycleListenerDelivery delivery;
+            delivery.kind = LifecycleListenerEventKind::Reconnecting;
+            delivery.generation = reconnect_generation;
+            delivery.required_state = ConnectionState::Reconnecting;
+            delivery.listeners = listeners_snapshot;
+            DeliverLifecycleListenerEvent(std::move(delivery));
+            livekit::safe_co_spawn(executor_, [self = shared_from_this(), reconnect_generation]() -> asio::awaitable<void> {
+                co_await self->AttemptReconnect(reconnect_generation);
             });
         } else {
             bool notify_disconnect = false;
+            uint64_t disconnected_generation = 0;
             {
                 std::lock_guard lock(room_mutex_);
-                if (connection_state_ != ConnectionState::Disconnected && connection_state_ != ConnectionState::Reconnecting) {
+                if (IsSignalGenerationCurrentLocked(event_generation) &&
+                    connection_state_ != ConnectionState::Disconnected &&
+                    connection_state_ != ConnectionState::Reconnecting) {
                     connection_state_ = ConnectionState::Disconnected;
+                    disconnected_generation =
+                        session_generation_.load(std::memory_order_acquire);
                     notify_disconnect = true;
                 }
             }
             if (notify_disconnect) {
-                for (const auto& listener : listeners_snapshot) {
-                    listener->OnDisconnected(RoomDisconnectReason::NetworkError,
-                                             event.close_reason);
-                }
+                LifecycleListenerDelivery delivery;
+                delivery.kind = LifecycleListenerEventKind::Disconnected;
+                delivery.generation = disconnected_generation;
+                delivery.required_state = ConnectionState::Disconnected;
+                delivery.reason = RoomDisconnectReason::NetworkError;
+                delivery.detail = event.close_reason;
+                delivery.listeners = std::move(listeners_snapshot);
+                DeliverLifecycleListenerEvent(std::move(delivery));
             }
         }
     } else if (event.type == SignalEvent::Message) {
-        HandleSignalMessage(event.message);
+        HandleSignalMessage(event.message, event_generation);
     }
 }
 
-void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
+bool Room::IsSignalGenerationCurrentLocked(uint64_t event_generation) const {
+    return event_generation == 0 ||
+        event_generation == session_generation_.load(std::memory_order_acquire);
+}
+
+void Room::HandleSignalMessage(
+    std::shared_ptr<proto::SignalResponse> msg,
+    uint64_t event_generation) {
     if (!msg) return;
 
     // Internal control messages must always reach their transaction waiters.
@@ -4082,12 +4511,20 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
         msg->has_media_sections_requirement() || msg->has_reconnect() ||
         msg->has_leave() || msg->has_refresh_token() ||
         msg->has_pong() || msg->has_pong_resp();
-    if (!internal_control) {
+    bool stale_message_at_admission = false;
+    {
         std::lock_guard lock(room_mutex_);
-        if (connection_state_ == ConnectionState::Connecting) {
+        if (!IsSignalGenerationCurrentLocked(event_generation)) {
+            stale_message_at_admission = true;
+        } else if (!internal_control &&
+                   connection_state_ == ConnectionState::Connecting) {
             deferred_room_messages_.push_back(std::move(msg));
             return;
         }
+    }
+    if (stale_message_at_admission) {
+        Log("SIGNAL", "STALE_EVENT", "忽略已替换会话的信令消息");
+        return;
     }
     // --- 全量原始消息类型诊断 ---
     {
@@ -4150,31 +4587,32 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
             !leave.can_reconnect();
         if (reason == RoomDisconnectReason::DuplicateIdentity ||
             server_requests_disconnect) {
-            BeginServerDisconnect(reason, detail);
+            BeginServerDisconnect(reason, detail, event_generation);
         }
         return;
     }
 
     if (msg->has_update()) {
         Log("SIGNAL", "PARTICIPANT_UPDATE", "收到服务端 ParticipantUpdate 信令 (参会人更新数量: " + std::to_string(msg->update().participants_size()) + ")");
-        UpdateParticipants(msg->update().participants());
+        UpdateParticipants(msg->update().participants(), event_generation);
     } else if (msg->has_mute()) {
         Log("SIGNAL", "MUTE_UPDATE", "收到 Track Mute 更新: SID=" + msg->mute().sid());
-        UpdateTrackMute(msg->mute());
+        UpdateTrackMute(msg->mute(), event_generation);
     } else if (msg->has_speakers_changed()) {
-        HandleActiveSpeakerUpdate(msg->speakers_changed());
+        HandleActiveSpeakerUpdate(msg->speakers_changed(), event_generation);
     } else if (msg->has_offer()) {
-        HandleOfferSignal(msg->offer());
+        HandleOfferSignal(msg->offer(), event_generation);
     } else if (msg->has_answer()) {
-        HandleAnswerSignal(msg->answer());
+        HandleAnswerSignal(msg->answer(), event_generation);
     } else if (msg->has_trickle()) {
-        HandleTrickleSignal(msg->trickle());
+        HandleTrickleSignal(msg->trickle(), event_generation);
     } else if (msg->has_track_published()) {
         const auto& tp = msg->track_published();
         Log("SIGNAL", "TRACK_PUB_ACK", "收到服务端 TrackPublished ACK: cid=" + tp.cid() + ", track_sid=" + tp.track().sid());
         std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>> pending;
         {
             std::lock_guard lock(room_mutex_);
+            if (!IsSignalGenerationCurrentLocked(event_generation)) return;
             auto it = pending_track_publishes_.find(tp.cid());
             if (it != pending_track_publishes_.end()) pending = it->second;
         }
@@ -4190,16 +4628,17 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
         Log("SIGNAL", "SUB_RESP", "收到服务端 SubscriptionResponse: Track=" + sr.track_sid() + ", Err=" + err_str);
     } else if (msg->has_subscription_permission_update()) {
         Log("SIGNAL", "SUB_PERM_UPDATE", "收到服务端 SubscriptionPermissionUpdate (Allowed: " + std::string(msg->subscription_permission_update().allowed() ? "YES" : "NO") + ")");
-        UpdateTrackSubscriptionPermission(msg->subscription_permission_update());
+        UpdateTrackSubscriptionPermission(
+            msg->subscription_permission_update(), event_generation);
     } else if (msg->has_stream_state_update()) {
         Log("SIGNAL", "STREAM_STATE", "收到服务端 StreamStateUpdate 状态更新");
-        UpdateTrackStreamStates(msg->stream_state_update());
+        UpdateTrackStreamStates(msg->stream_state_update(), event_generation);
     } else if (msg->has_room_update()) {
         Log("SIGNAL", "ROOM_UPDATE", "收到服务端 RoomUpdate 房间信息变更");
-        UpdateRoomInfo(msg->room_update().room());
+        UpdateRoomInfo(msg->room_update().room(), event_generation);
     } else if (msg->has_connection_quality()) {
         Log("SIGNAL", "CONN_QUALITY", "收到服务端 ConnectionQualityUpdate 状态更新");
-        UpdateConnectionQuality(msg->connection_quality());
+        UpdateConnectionQuality(msg->connection_quality(), event_generation);
     } else if (msg->has_subscribed_quality_update()) {
         const auto& squ = msg->subscribed_quality_update();
         std::string track_sid = squ.track_sid();
@@ -4224,6 +4663,7 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
         {
             std::lock_guard lock(room_mutex_);
+            if (!IsSignalGenerationCurrentLocked(event_generation)) return;
             pub_pc = publisher_pc_;
         }
 
@@ -4280,11 +4720,13 @@ void Room::HandleSignalMessage(std::shared_ptr<proto::SignalResponse> msg) {
     } else if (msg->has_media_sections_requirement()) {
         const auto& msr = msg->media_sections_requirement();
         Log("SIGNAL", "MEDIA_SEC_REQ", "收到 MediaSectionsRequirement: audio=" + std::to_string(msr.num_audios()) + ", video=" + std::to_string(msr.num_videos()));
-        HandleMediaSectionsRequirement(msr);
+        HandleMediaSectionsRequirement(msr, event_generation);
     }
 }
 
-void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::ParticipantInfo>& participants) {
+void Room::UpdateParticipants(
+    const google::protobuf::RepeatedPtrField<proto::ParticipantInfo>& participants,
+    uint64_t event_generation) {
     std::vector<std::shared_ptr<RemoteParticipant>> newly_connected;
     std::vector<std::pair<std::shared_ptr<RemoteParticipant>, std::shared_ptr<TrackPublication>>> newly_published_tracks;
     std::vector<std::pair<std::shared_ptr<RemoteParticipant>, std::shared_ptr<TrackPublication>>> unpublished_tracks;
@@ -4317,11 +4759,17 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
     std::vector<MuteChange> changed_mute_events;
 
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
+    std::shared_ptr<SignalClient> signal_snapshot;
+    std::chrono::milliseconds negotiation_timeout{};
     std::vector<TrackKey> removed_track_keys;
     std::vector<std::shared_ptr<Track>> removed_tracks;
 
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        event_generation = session_generation_.load(std::memory_order_acquire);
+        signal_snapshot = signal_client_;
+        negotiation_timeout = operation_timeouts_.negotiation;
         if (connection_state_ != ConnectionState::Connecting) {
             listeners_snapshot = listeners_;
         }
@@ -4505,98 +4953,132 @@ void Room::UpdateParticipants(const google::protobuf::RepeatedPtrField<proto::Pa
 
     for (const auto& p : newly_connected) {
         for (const auto& listener : listeners_snapshot) {
-            if (!listener->ConsumesParticipantEvents()) listener->OnParticipantConnected(p);
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnParticipantConnected(p);
+            }, true);
         }
-        FlushPendingTracks(p->sid());
+        FlushPendingTracks(p->sid(), event_generation);
     }
 
     bool has_new_video_pub = false;
     for (const auto& [p, pub] : newly_published_tracks) {
-        FlushPendingTracks(p->sid());
-        if (signal_client_) {
-            const bool auto_sub = signal_client_->options().auto_subscribe;
+        FlushPendingTracks(p->sid(), event_generation);
+        if (signal_snapshot) {
+            const bool auto_sub = signal_snapshot->options().auto_subscribe;
             if (auto_sub) {
                 if (pub->track() && pub->track()->kind() == TrackKind::Video) {
-                    signal_client_->SendUpdateTrackSettings(pub->sid(), false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
+                    signal_snapshot->SendUpdateTrackSettings(pub->sid(), false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
                     has_new_video_pub = true;
                 }
-                signal_client_->SendUpdateSubscription({pub->sid()}, true, p->sid());
+                signal_snapshot->SendUpdateSubscription({pub->sid()}, true, p->sid());
             }
         }
         for (const auto& listener : listeners_snapshot) {
-            if (!listener->ConsumesParticipantEvents()) listener->OnTrackPublished(p, pub);
-            if (!listener->ConsumesParticipantEvents() &&
-                pub && pub->track() && pub->track()->rtc_track()) {
-                listener->OnTrackSubscribed(pub->track(), pub, p);
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnTrackPublished(p, pub);
+            }, true);
+            if (pub && pub->track() && pub->track()->rtc_track()) {
+                DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                    target.OnTrackSubscribed(pub->track(), pub, p);
+                }, true);
             }
         }
     }
 
     // 会议中新增远端轨时，确保 Single PC 模式下主动发起 SDP 协商以获取 SFU 下发的 SSRC 与 MSID
-    if (!newly_published_tracks.empty() && signal_client_ && signal_client_->is_single_pc_mode_active()) {
+    if (!newly_published_tracks.empty() && signal_snapshot &&
+        signal_snapshot->is_single_pc_mode_active()) {
         Log("SIGNAL", "NEW_TRACK_RENEG", "检测到远端发布新 Track (" + std::to_string(newly_published_tracks.size()) + " 条)，立即触发 Publisher 重新协商获取下行媒体流");
-        NegotiatePublisher();
+        if (event_generation == 0) {
+            NegotiatePublisher();
+        } else {
+            livekit::safe_co_spawn(
+                executor_,
+                [self = shared_from_this(), event_generation, negotiation_timeout]()
+                    -> asio::awaitable<void> {
+                    try {
+                        co_await self->NegotiatePublisherAsync(
+                            negotiation_timeout, event_generation);
+                    } catch (const std::exception&) {
+                        self->Log("ERROR", "NEGOTIATION_ASYNC",
+                                  secure_log::ExceptionSummary(
+                                      "publisher_negotiation"));
+                    }
+                });
+        }
     }
 
     for (const auto& evt : changed_mute_events) {
         for (const auto& listener : listeners_snapshot) {
-            if (!listener->ConsumesParticipantEvents()) {
-                listener->OnTrackMuted(evt.participant, evt.publication, evt.muted);
-            }
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnTrackMuted(evt.participant, evt.publication, evt.muted);
+            }, true);
         }
     }
 
     for (const auto& [p, pub] : unpublished_tracks) {
         for (const auto& listener : listeners_snapshot) {
-            if (!listener->ConsumesParticipantEvents()) listener->OnTrackUnpublished(p, pub);
-            if (!listener->ConsumesParticipantEvents() && pub && pub->track()) {
-                listener->OnTrackUnsubscribed(pub->track(), pub, p);
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnTrackUnpublished(p, pub);
+            }, true);
+            if (pub && pub->track()) {
+                DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                    target.OnTrackUnsubscribed(pub->track(), pub, p);
+                }, true);
             }
         }
     }
 
     for (const auto& evt : changed_attributes_events) {
         for (const auto& listener : listeners_snapshot) {
-            if (!listener->ConsumesParticipantEvents()) {
-                listener->OnParticipantAttributesChanged(evt.attrs, evt.participant);
-            }
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnParticipantAttributesChanged(evt.attrs, evt.participant);
+            }, true);
         }
     }
 
     for (const auto& evt : changed_permissions_events) {
         for (const auto& listener : listeners_snapshot) {
-            if (!listener->ConsumesParticipantEvents()) {
-                listener->OnParticipantPermissionsChanged(evt.old_perm, evt.new_perm, evt.participant);
-            }
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnParticipantPermissionsChanged(evt.old_perm, evt.new_perm, evt.participant);
+            }, true);
         }
     }
 
     for (const auto& evt : changed_metadata_events) {
         for (const auto& listener : listeners_snapshot) {
-            if (!listener->ConsumesParticipantEvents()) {
-                listener->OnParticipantMetadataChanged(evt.participant, evt.old_metadata, evt.new_metadata);
-            }
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnParticipantMetadataChanged(evt.participant, evt.old_metadata, evt.new_metadata);
+            }, true);
         }
     }
 
     for (const auto& p : disconnected) {
         for (const auto& listener : listeners_snapshot) {
-            if (!listener->ConsumesParticipantEvents()) listener->OnParticipantDisconnected(p);
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnParticipantDisconnected(p);
+            }, true);
         }
     }
 }
 
-void Room::UpdateParticipants(const proto::ParticipantUpdate& update) {
-    UpdateParticipants(update.participants());
+void Room::UpdateParticipants(
+    const proto::ParticipantUpdate& update,
+    uint64_t event_generation) {
+    UpdateParticipants(update.participants(), event_generation);
 }
 
-void Room::UpdateTrackMute(const proto::MuteTrackRequest& mute) {
+void Room::UpdateTrackMute(
+    const proto::MuteTrackRequest& mute,
+    uint64_t event_generation) {
     std::shared_ptr<Participant> target_participant;
     std::shared_ptr<TrackPublication> target_pub;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
 
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        event_generation = session_generation_.load(std::memory_order_acquire);
         listeners_snapshot = listeners_;
 
         if (local_participant_) {
@@ -4633,9 +5115,9 @@ void Room::UpdateTrackMute(const proto::MuteTrackRequest& mute) {
 
     if (target_participant && target_pub) {
         for (const auto& listener : listeners_snapshot) {
-            if (!listener->ConsumesParticipantEvents()) {
-                listener->OnTrackMuted(target_participant, target_pub, mute.muted());
-            }
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnTrackMuted(target_participant, target_pub, mute.muted());
+            }, true);
         }
     }
 }
@@ -4651,11 +5133,27 @@ void Room::HandleSignalMessageForTesting(const proto::SignalResponse& message) {
 void Room::EnableE2ee(const E2eeOptions& options) {
     std::lock_guard lock(room_mutex_);
     e2ee_manager_ = std::make_shared<E2eeManager>(options);
-    auto self = shared_from_this();
-    e2ee_manager_->SetStateChangedHandler([self](const std::string& identity, EncryptionState state) {
-        auto snapshot = self->GetListenersSnapshot();
-        for (const auto& listener : snapshot) {
-            listener->OnE2eeStateChanged(identity, "", state);
+    std::weak_ptr<E2eeManager> manager = e2ee_manager_;
+    e2ee_manager_->SetStateChangedHandler([weak = weak_from_this(), manager](
+        const std::string& identity, EncryptionState state) {
+        if (auto self = weak.lock()) {
+            std::vector<std::shared_ptr<RoomListener>> snapshot;
+            ListenerDeliveryContext context{};
+            {
+                std::lock_guard lock(self->room_mutex_);
+                context.e2ee_owner = manager.lock();
+                if (!context.e2ee_owner || context.e2ee_owner != self->e2ee_manager_) return;
+                // E2EE configuration is Room-global and can be enabled before
+                // Connect. Bind each emitted event (not the configuration) to
+                // the admitted session; replacement invalidates later delivery.
+                context.generation = self->session_generation_.load(std::memory_order_acquire);
+                snapshot = self->listeners_;
+            }
+            for (const auto& listener : snapshot) {
+                self->DeliverListener(context, listener, [&](RoomListener& target) {
+                    target.OnE2eeStateChanged(identity, "", state);
+                });
+            }
         }
     });
 }
@@ -4664,7 +5162,9 @@ void Room::HandleActiveSpeakerUpdateForTesting(const proto::SpeakersChanged& upd
     HandleActiveSpeakerUpdate(update);
 }
 
-void Room::HandleActiveSpeakerUpdate(const proto::SpeakersChanged& update) {
+void Room::HandleActiveSpeakerUpdate(
+    const proto::SpeakersChanged& update,
+    uint64_t event_generation) {
     std::vector<std::shared_ptr<Participant>> active_speakers;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     ParticipantEvent value_event;
@@ -4672,6 +5172,8 @@ void Room::HandleActiveSpeakerUpdate(const proto::SpeakersChanged& update) {
 
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        event_generation = session_generation_.load(std::memory_order_acquire);
         listeners_snapshot = listeners_;
 
         for (int i = 0; i < update.speakers_size(); ++i) {
@@ -4720,13 +5222,13 @@ void Room::HandleActiveSpeakerUpdate(const proto::SpeakersChanged& update) {
     });
 
     for (const auto& listener : listeners_snapshot) {
-        if (!listener->ConsumesParticipantEvents()) {
-            listener->OnActiveSpeakersChanged(active_speakers);
-        }
+        DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+            target.OnActiveSpeakersChanged(active_speakers);
+        }, true);
     }
 }
 
-void Room::SendTrickleCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type) {
+void Room::SendTrickleCandidate(const std::string& sdp, const std::string& sdp_mid, int sdp_mline_index, int pc_type, uint64_t generation) {
     proto::SignalRequest req;
     auto* trickle = req.mutable_trickle();
     
@@ -4740,12 +5242,18 @@ void Room::SendTrickleCandidate(const std::string& sdp, const std::string& sdp_m
     trickle->set_candidateinit(candidate_json.dump());
     trickle->set_target(pc_type == 0 ? proto::SignalTarget::PUBLISHER : proto::SignalTarget::SUBSCRIBER);
 
-    if (signal_client_) {
-        signal_client_->Send(req);
+    std::shared_ptr<SignalClient> signal;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) return;
+        signal = signal_client_;
     }
+    if (signal) signal->Send(req);
 }
 
-void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
+void Room::HandleOfferSignal(
+    const proto::SessionDescription& offer,
+    uint64_t event_generation) {
     // ⚠ 最早期日志 - 确认此函数被调用
     Log("SIGNAL", "OFFER_CALLED",
         secure_log::SdpSummary("remote_offer_received", offer.sdp()));
@@ -4753,6 +5261,7 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
         client = signal_client_;
         pc = (offer.type() == "offer" && subscriber_pc_) ? subscriber_pc_ : publisher_pc_;
         
@@ -4773,7 +5282,11 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
         secure_log::SdpSummary("subscriber_offer_received", offer.sdp()));
     auto self = shared_from_this();
     WebRTCManager::Instance().SetRemoteDescription(pc, offer.type(), offer.sdp(), executor_,
-        [self, client, pc](const std::string& set_remote_err) {
+        [self, client, pc, event_generation](const std::string& set_remote_err) {
+            {
+                std::lock_guard lock(self->room_mutex_);
+                if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
+            }
             if (!set_remote_err.empty()) {
                 std::cerr << "Room: SetRemoteDescription offer error: "
                           << secure_log::OpaqueSummary("set_remote_offer") << std::endl;
@@ -4785,7 +5298,13 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
             std::cout << "[WebRTC] SetRemoteDescription offer succeeded. Generating SDP Answer..." << std::endl;
             self->Log("SIGNAL", "OFFER_APPLIED", "服务端 Offer 设置成功，正在生成 SDP Answer...");
             WebRTCManager::Instance().CreateAnswer(pc, self->executor_,
-                [self, client, pc](const std::string& sdp, const std::string& create_ans_err) {
+                [self, client, pc, event_generation](
+                    const std::string& sdp,
+                    const std::string& create_ans_err) {
+                    {
+                        std::lock_guard lock(self->room_mutex_);
+                        if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
+                    }
                     if (!create_ans_err.empty()) {
                         std::cerr << "Room: CreateAnswer error: "
                                   << secure_log::OpaqueSummary("create_answer") << std::endl;
@@ -4796,13 +5315,32 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
 
                     std::cout << "[WebRTC] CreateAnswer succeeded. Setting LocalDescription..." << std::endl;
                     WebRTCManager::Instance().SetLocalDescription(pc, "answer", sdp, self->executor_,
-                        [self, client, pc, sdp](const std::string& set_local_err) {
+                        [self, client, pc, sdp, event_generation](
+                            const std::string& set_local_err) {
+                            {
+                                std::lock_guard lock(self->room_mutex_);
+                                if (!self->IsSignalGenerationCurrentLocked(
+                                        event_generation)) {
+                                    return;
+                                }
+                            }
                             if (!set_local_err.empty()) {
                                 std::cerr << "Room: SetLocalDescription answer error: "
                                           << secure_log::OpaqueSummary("set_local_answer") << std::endl;
                                 self->Log("ERROR", "SET_LOCAL_ANS_ERR",
                                           secure_log::OpaqueSummary("set_local_answer"));
                                 return;
+                            }
+
+                            std::vector<PendingIceCandidate> pending_cands;
+                            {
+                                std::lock_guard lock(self->room_mutex_);
+                                if (!self->IsSignalGenerationCurrentLocked(
+                                        event_generation)) {
+                                    return;
+                                }
+                                pending_cands =
+                                    std::move(self->pending_sub_ice_candidates_);
                             }
 
                             proto::SignalRequest req;
@@ -4815,11 +5353,6 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
                                       secure_log::SdpSummary("subscriber_answer_sent", sdp));
 
                             // 重放暂存的 Subscriber 早期 ICE 候选
-                            std::vector<PendingIceCandidate> pending_cands;
-                            {
-                                std::lock_guard lock(self->room_mutex_);
-                                pending_cands = std::move(self->pending_sub_ice_candidates_);
-                            }
                             if (!pending_cands.empty()) {
                                 self->Log("SIGNAL", "ICE_FLUSH", "开始重放暂存的 " + std::to_string(pending_cands.size()) + " 个 Subscriber 早期候选...");
                                 std::vector<std::pair<std::string, bool>> results;
@@ -4847,12 +5380,7 @@ void Room::HandleOfferSignal(const proto::SessionDescription& offer) {
                                 if (t && t->receiver() && t->receiver()->track()) {
                                     auto r_track = t->receiver()->track();
                                     r_track->set_enabled(true);
-                                    std::weak_ptr<Room> weak_this = self;
-                                    asio::post(self->executor_, [weak_this, receiver = t->receiver(), r_track]() {
-                                        if (auto room = weak_this.lock()) {
-                                            room->OnRemoteTrackAdded(receiver, r_track);
-                                        }
-                                    });
+                                    self->PostRemoteTrack(t->receiver(), r_track, event_generation);
                                 }
                             }
                         });
@@ -4877,36 +5405,46 @@ static std::vector<std::string> ExtractSdpMLines(const std::string& sdp) {
     return mlines;
 }
 
-void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
+void Room::HandleAnswerSignal(
+    const proto::SessionDescription& answer,
+    uint64_t event_generation) {
     Log("SIGNAL", "SDP_ANSWER_RECV",
         secure_log::SdpSummary("remote_answer_received", answer.sdp()));
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> sub_pc;
     bool pub_negotiating = false;
     bool sub_negotiating = false;
+    bool single_pc = false;
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
         pub_pc = publisher_pc_;
         sub_pc = subscriber_pc_;
         pub_negotiating = (negotiation_state_ != NegotiationState::Idle);
         sub_negotiating = subscriber_negotiating_;
+        single_pc = signal_client_ && signal_client_->is_single_pc_mode_active();
     }
 
-    if (signal_client_ && signal_client_->is_single_pc_mode_active()) {
+    if (single_pc) {
         Log("SIGNAL", "SDP_ANS_ROUTING", "Single PC 模式：直接将 Answer 路由至 publisher_pc_");
         auto self = shared_from_this();
         WebRTCManager::Instance().SetRemoteDescription(pub_pc, "answer", answer.sdp(), executor_,
-            [self, pub_pc](const std::string& err) {
+            [self, pub_pc, event_generation](const std::string& err) {
+                {
+                    std::lock_guard lock(self->room_mutex_);
+                    if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
+                }
                 if (!err.empty()) {
                     self->Log("ERROR", "PUB_REMOTE_ERR",
                               secure_log::OpaqueSummary("set_publisher_remote_answer"));
-                    self->CompleteNegotiation(err);
+                    self->CompleteNegotiation(err, event_generation);
                 } else {
                     self->Log("SIGNAL", "PUB_STABLE", "Publisher PC 协商完成 (Answer 应用成功)");
                     std::vector<PendingIceCandidate> pending_cands;
                     bool need_retry = false;
                     {
                         std::lock_guard lock(self->room_mutex_);
+                        if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
                         self->subscriber_negotiating_ = false;
                         if (self->negotiation_state_ == NegotiationState::PendingRetry) {
                             self->negotiation_state_ = NegotiationState::InProgress;
@@ -4916,9 +5454,9 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
                     }
                     if (need_retry) {
                         self->Log("SIGNAL", "NEG_RETRY", "检测到挂起的协商请求，开始新一轮重试");
-                        self->ExecuteNegotiatePublisher();
+                        self->ExecuteNegotiatePublisher(event_generation);
                     } else {
-                        self->CompleteNegotiation("");
+                        self->CompleteNegotiation("", event_generation);
                     }
                     
                     // 单 PC 模式下，本地主动发起的 recvonly transceiver 不会触发 OnTrack，需手动提取
@@ -4928,12 +5466,7 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
                         if (t && (t->direction() == webrtc::RtpTransceiverDirection::kRecvOnly ||
                             (t->current_direction().has_value() && *t->current_direction() == webrtc::RtpTransceiverDirection::kRecvOnly))) {
                             if (t->receiver() && t->receiver()->track()) {
-                                std::weak_ptr<Room> weak_this = self;
-                                asio::post(self->executor_, [weak_this, receiver = t->receiver(), track = t->receiver()->track()]() {
-                                    if (auto room = weak_this.lock()) {
-                                        room->OnRemoteTrackAdded(receiver, track);
-                                    }
-                                });
+                                self->PostRemoteTrack(t->receiver(), t->receiver()->track(), event_generation);
                             }
                         }
                     }
@@ -5023,10 +5556,11 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
         Log("SIGNAL", "SUB_ANS_RECV", "收到 Subscriber SDP Answer (" + std::to_string(answer.sdp().length()) + " 字节, m-lines=" + std::to_string(answer_mlines.size()) + "), 正在应用到 Subscriber PC...");
         auto self = shared_from_this();
         WebRTCManager::Instance().SetRemoteDescription(sub_pc, answer.type(), answer.sdp(), executor_,
-            [self, sub_pc, answer_sdp = answer.sdp()](const std::string& err) {
+            [self, sub_pc, answer_sdp = answer.sdp(), event_generation](const std::string& err) {
                 std::vector<PendingIceCandidate> pending_cands;
                 {
                     std::lock_guard lock(self->room_mutex_);
+                    if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
                     self->subscriber_negotiating_ = false;
                     if (err.empty()) {
                         pending_cands = std::move(self->pending_sub_ice_candidates_);
@@ -5071,11 +5605,12 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
     Log("SIGNAL", "SDP_ANSWER_RECV", "收到 Publisher 的远端 SDP Answer (" + std::to_string(answer.sdp().length()) + " 字节, m-lines=" + std::to_string(answer_mlines.size()) + ")");
     auto self = shared_from_this();
     WebRTCManager::Instance().SetRemoteDescription(pub_pc, answer.type(), answer.sdp(), executor_,
-        [self, pub_pc](const std::string& err) {
+        [self, pub_pc, event_generation](const std::string& err) {
             bool need_retry = false;
             std::vector<PendingIceCandidate> pending_cands;
             {
                 std::lock_guard lock(self->room_mutex_);
+                if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
                 if (self->negotiation_state_ == NegotiationState::PendingRetry) {
                     self->negotiation_state_ = NegotiationState::InProgress;
                     need_retry = true;
@@ -5092,7 +5627,7 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
                           << secure_log::OpaqueSummary("set_publisher_remote_answer") << std::endl;
                 self->Log("ERROR", "ANS_ERR",
                           secure_log::OpaqueSummary("set_publisher_remote_answer"));
-                self->CompleteNegotiation(err);
+                self->CompleteNegotiation(err, event_generation);
             } else {
                 std::cout << "[WebRTC] Publisher remote description applied successfully! PC signaling state is STABLE." << std::endl;
                 self->Log("WEBRTC", "PUB_STABLE", "Publisher RemoteDescription 应用成功，信令状态已恢复 STABLE");
@@ -5113,18 +5648,21 @@ void Room::HandleAnswerSignal(const proto::SessionDescription& answer) {
 
             if (need_retry) {
                 self->Log("SIGNAL", "NEG_RETRY", "Publisher Answer applied, scheduling pending negotiation retry");
-                self->ExecuteNegotiatePublisher();
+                self->ExecuteNegotiatePublisher(event_generation);
             } else if (err.empty()) {
-                self->CompleteNegotiation("");
+                self->CompleteNegotiation("", event_generation);
             }
         });
 }
 
-void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
+void Room::HandleTrickleSignal(
+    const proto::TrickleRequest& trickle,
+    uint64_t event_generation) {
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> sub_pc;
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
         pub_pc = publisher_pc_;
         sub_pc = subscriber_pc_;
     }
@@ -5141,7 +5679,7 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
             ", detail=[omitted]");
 
         auto self = shared_from_this();
-        WebRTCManager::Instance().signaling_thread()->BlockingCall([self, pub_pc, sub_pc, trickle_target = trickle.target(), sdp_mid, sdp_mline_index, sdp]() {
+        WebRTCManager::Instance().signaling_thread()->BlockingCall([self, pub_pc, sub_pc, trickle_target = trickle.target(), sdp_mid, sdp_mline_index, sdp, event_generation]() {
             webrtc::SdpParseError err;
             std::unique_ptr<webrtc::IceCandidateInterface> cand(webrtc::CreateIceCandidate(sdp_mid, sdp_mline_index, sdp, &err));
             if (!cand) {
@@ -5153,6 +5691,7 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
             bool is_single = false;
             {
                 std::lock_guard lock(self->room_mutex_);
+                if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
                 is_single = self->signal_client_ && self->signal_client_->is_single_pc_mode_active();
             }
 
@@ -5161,6 +5700,7 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
                     bool ok = pub_pc->AddIceCandidate(cand.get());
                     if (!ok) {
                         std::lock_guard lock(self->room_mutex_);
+                        if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
                         self->pending_pub_ice_candidates_.push_back({sdp_mid, sdp_mline_index, sdp});
                         self->Log("SIGNAL", "ICE_PUB_QUEUE",
                                   "Publisher PC 暂未就绪，已暂存早期 ICE 候选: detail=[omitted]");
@@ -5177,6 +5717,7 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
                     bool ok = sub_pc->AddIceCandidate(cand.get());
                     if (!ok) {
                         std::lock_guard lock(self->room_mutex_);
+                        if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
                         self->pending_sub_ice_candidates_.push_back({sdp_mid, sdp_mline_index, sdp});
                         self->Log("SIGNAL", "ICE_SUB_QUEUE",
                                   "Subscriber PC 暂未就绪，已暂存早期 ICE 候选: detail=[omitted]");
@@ -5190,6 +5731,7 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
                     bool ok = pub_pc->AddIceCandidate(cand.get());
                     if (!ok) {
                         std::lock_guard lock(self->room_mutex_);
+                        if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
                         self->pending_pub_ice_candidates_.push_back({sdp_mid, sdp_mline_index, sdp});
                     }
                 }
@@ -5198,6 +5740,7 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
                     bool ok = sub_pc->AddIceCandidate(cand.get());
                     if (!ok) {
                         std::lock_guard lock(self->room_mutex_);
+                        if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
                         self->pending_sub_ice_candidates_.push_back({sdp_mid, sdp_mline_index, sdp});
                         self->Log("SIGNAL", "ICE_SUB_QUEUE",
                                   "Subscriber PC 暂未就绪，已暂存早期 ICE 候选: detail=[omitted]");
@@ -5215,13 +5758,16 @@ void Room::HandleTrickleSignal(const proto::TrickleRequest& trickle) {
 
 // The SFU sends this only for the client-offer/single-PC flow. The counts are
 // additional media sections required by the server, not desired totals.
-void Room::HandleMediaSectionsRequirement(const proto::MediaSectionsRequirement& req) {
+void Room::HandleMediaSectionsRequirement(
+    const proto::MediaSectionsRequirement& req,
+    uint64_t event_generation) {
     const uint32_t num_audios = req.num_audios();
     const uint32_t num_videos = req.num_videos();
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
     bool single_pc = false;
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
         single_pc = signal_client_ && signal_client_->is_single_pc_mode_active();
         publisher = publisher_pc_;
     }
@@ -5264,7 +5810,11 @@ void Room::HandleMediaSectionsRequirement(const proto::MediaSectionsRequirement&
         ", video=" + std::to_string(num_videos));
     // NegotiatePublisher coalesces repeated requirements received while an
     // offer is in flight, so no server request is dropped.
-    NegotiatePublisher();
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        NegotiatePublisher();
+    }
 }
 
 proto::SyncState Room::BuildSyncState() const {
@@ -5365,13 +5915,22 @@ proto::SyncState Room::BuildSyncState() const {
     return state;
 }
 
-asio::awaitable<void> Room::AttemptReconnect() {
+asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
     std::string reconnect_url;
     std::string reconnect_token;
     SignalOptions reconnect_options;
+    uint64_t reconnect_generation = owner_generation;
     {
         std::lock_guard lock(room_mutex_);
-        if (reconnect_active_ || reconnect_disabled_) co_return;
+        if (reconnect_generation == 0) {
+            reconnect_generation = session_generation_.load(std::memory_order_acquire);
+        }
+        if (!IsSignalGenerationCurrentLocked(reconnect_generation) ||
+            installed_session_generation_ != reconnect_generation ||
+            connection_state_ != ConnectionState::Reconnecting ||
+            reconnect_active_ || reconnect_disabled_) {
+            co_return;
+        }
         reconnect_active_ = true;
         if (signal_client_) {
             reconnect_url = signal_client_->url();
@@ -5409,6 +5968,11 @@ asio::awaitable<void> Room::AttemptReconnect() {
 
         {
             std::lock_guard lock(room_mutex_);
+            if (!IsSignalGenerationCurrentLocked(reconnect_generation) ||
+                (installed_session_generation_ != 0 &&
+                 installed_session_generation_ != reconnect_generation)) {
+                co_return;
+            }
             if (reconnect_disabled_ ||
                 (connection_state_ == ConnectionState::Disconnected && !full_restart)) {
                 reconnect_active_ = false;
@@ -5428,6 +5992,10 @@ asio::awaitable<void> Room::AttemptReconnect() {
                 std::shared_ptr<SignalClient> signal;
                 {
                     std::lock_guard lock(room_mutex_);
+                    if (!IsSignalGenerationCurrentLocked(reconnect_generation) ||
+                        installed_session_generation_ != reconnect_generation) {
+                        co_return;
+                    }
                     signal = signal_client_;
                 }
                 if (!signal) {
@@ -5463,9 +6031,12 @@ asio::awaitable<void> Room::AttemptReconnect() {
                 }
                 co_await RestartIceConnections(restart_res.reconnect_response, media_budget);
 
+                LifecycleListenerDelivery reconnected_delivery;
                 {
                     std::lock_guard lock(room_mutex_);
-                    if (connection_state_ != ConnectionState::Reconnecting ||
+                    if (!IsSignalGenerationCurrentLocked(reconnect_generation) ||
+                        installed_session_generation_ != reconnect_generation ||
+                        connection_state_ != ConnectionState::Reconnecting ||
                         reconnect_disabled_) {
                         throw OperationError(OperationKind::Reconnect,
                                              OperationErrorCode::Cancelled,
@@ -5476,10 +6047,12 @@ asio::awaitable<void> Room::AttemptReconnect() {
                     reconnect_attempts_ = 0;
                     reconnect_active_ = false;
                     EnqueueRosterLocked();
+                    reconnected_delivery.kind = LifecycleListenerEventKind::Reconnected;
+                    reconnected_delivery.generation = reconnect_generation;
+                    reconnected_delivery.required_state = ConnectionState::Connected;
+                    reconnected_delivery.listeners = listeners_;
                 }
-
-                auto listeners_snapshot = GetListenersSnapshot();
-                for (const auto& listener : listeners_snapshot) listener->OnReconnected();
+                DeliverLifecycleListenerEvent(std::move(reconnected_delivery));
                 co_return;
             } catch (const std::exception& error) {
                 last_error = error.what();
@@ -5491,6 +6064,7 @@ asio::awaitable<void> Room::AttemptReconnect() {
         }
 
         if (full_restart) {
+            uint64_t restart_connect_generation = 0;
             try {
                 std::deque<ParticipantEvent> retired_events;
                 std::shared_ptr<SignalClient> old_signal;
@@ -5499,15 +6073,23 @@ asio::awaitable<void> Room::AttemptReconnect() {
                 std::shared_ptr<webrtc::PeerConnectionObserver> old_publisher_observer;
                 std::shared_ptr<webrtc::PeerConnectionObserver> old_subscriber_observer;
                 std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> old_data_channels;
-                std::vector<std::shared_ptr<RoomDataChannelObserver>> old_data_channel_observers;
+                std::vector<std::shared_ptr<webrtc::DataChannelObserver>> old_data_channel_observers;
                 std::vector<RemoteTrackSinkBinding> old_track_sinks;
+                PendingOperationCleanup old_pending;
+                LifecycleListenerDelivery reconnected_delivery;
                 {
                     std::lock_guard lock(room_mutex_);
+                    if (!IsSignalGenerationCurrentLocked(reconnect_generation) ||
+                        (installed_session_generation_ != 0 &&
+                         installed_session_generation_ != reconnect_generation)) {
+                        co_return;
+                    }
                     if (reconnect_disabled_) {
                         reconnect_active_ = false;
                         co_return;
                     }
                     old_signal = std::move(signal_client_);
+                    installed_session_generation_ = 0;
                     old_publisher = std::move(publisher_pc_);
                     old_subscriber = std::move(subscriber_pc_);
                     old_publisher_observer = std::move(publisher_observer_);
@@ -5535,12 +6117,15 @@ asio::awaitable<void> Room::AttemptReconnect() {
                     pending_track_queue_.clear();
                     connection_state_ = ConnectionState::Disconnected;
                     suppress_next_connected_event_ = true;
-                    session_generation_.fetch_add(1, std::memory_order_acq_rel);
+                    reconnect_generation =
+                        session_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+                    old_pending = TakePendingOperationsLocked();
                 }
                 retired_events.clear();
-                CancelPendingOperations(OperationErrorCode::Cancelled,
-                                        "full_restart",
-                                        "old session replaced by full restart");
+                FailPendingOperations(std::move(old_pending),
+                                      OperationErrorCode::Cancelled,
+                                      "full_restart",
+                                      "old session replaced by full restart");
                 if (old_signal) old_signal->Close();
                 for (auto& dc : old_data_channels) {
                     if (dc) {
@@ -5558,18 +6143,24 @@ asio::awaitable<void> Room::AttemptReconnect() {
                 old_subscriber_observer.reset();
                 old_data_channel_observers.clear();
 
+                restart_connect_generation = reconnect_generation + 1;
                 co_await ConnectAsync(reconnect_url, reconnect_token, reconnect_options);
 
                 std::shared_ptr<LocalParticipant> local;
                 std::vector<std::shared_ptr<RoomListener>> listeners;
                 {
                     std::lock_guard lock(room_mutex_);
-                    if (reconnect_disabled_) {
+                    if (!IsSignalGenerationCurrentLocked(restart_connect_generation) ||
+                        installed_session_generation_ != restart_connect_generation ||
+                        connection_state_ != ConnectionState::Connected ||
+                        !reconnect_active_ ||
+                        reconnect_disabled_) {
                         throw OperationError(OperationKind::Reconnect,
                                              OperationErrorCode::Cancelled,
                                              "full_restart_commit",
                                              "reconnect was cancelled by server leave");
                     }
+                    reconnect_generation = restart_connect_generation;
                     local = local_participant_;
                     listeners = listeners_;
                 }
@@ -5580,16 +6171,16 @@ asio::awaitable<void> Room::AttemptReconnect() {
                                          "local participant is missing after full restart");
                 }
 
-                for (const auto& record : published_track_records_) {
-                    if (!record.track) continue;
-                    auto publication = co_await local->PublishTrackAsync(record.track);
-                    for (const auto& listener : listeners) {
-                        listener->OnLocalTrackRepublished(record.previous_sid, publication);
-                    }
-                }
+                co_await RepublishLocalTracks(reconnect_generation);
 
                 {
                     std::lock_guard lock(room_mutex_);
+                    if (!IsSignalGenerationCurrentLocked(reconnect_generation) ||
+                        installed_session_generation_ != reconnect_generation ||
+                        connection_state_ != ConnectionState::Connected ||
+                        !reconnect_active_ || reconnect_disabled_) {
+                        co_return;
+                    }
                     reconnect_attempts_ = 0;
                     reconnect_active_ = false;
                     if (local_participant_) {
@@ -5598,18 +6189,45 @@ asio::awaitable<void> Room::AttemptReconnect() {
                             local_participant_,
                             true));
                     }
+                    reconnected_delivery.kind = LifecycleListenerEventKind::Reconnected;
+                    reconnected_delivery.generation = reconnect_generation;
+                    reconnected_delivery.required_state = ConnectionState::Connected;
+                    reconnected_delivery.listeners = listeners;
                 }
-
-                for (const auto& listener : listeners) listener->OnReconnected();
+                DeliverLifecycleListenerEvent(std::move(reconnected_delivery));
                 co_return;
             } catch (const std::exception& error) {
                 last_error = error.what();
                 Log("WARNING", "FULL_RESTART_FAILED",
                     secure_log::ExceptionSummary("full_restart"));
                 std::lock_guard lock(room_mutex_);
-                if (connection_state_ == ConnectionState::Disconnected &&
-                    !reconnect_disabled_) {
+                const uint64_t current_generation =
+                    session_generation_.load(std::memory_order_acquire);
+                const uint64_t failed_connect_cleanup_generation =
+                    restart_connect_generation + 1;
+                if (restart_connect_generation != 0 &&
+                    current_generation == restart_connect_generation &&
+                    installed_session_generation_ == restart_connect_generation &&
+                    connection_state_ == ConnectionState::Connected &&
+                    !reconnect_disabled_ && reconnect_active_) {
+                    reconnect_generation = restart_connect_generation;
                     connection_state_ = ConnectionState::Reconnecting;
+                } else if (restart_connect_generation != 0 &&
+                    current_generation == failed_connect_cleanup_generation &&
+                    connection_state_ == ConnectionState::Disconnected &&
+                    installed_session_generation_ == 0 &&
+                    !reconnect_disabled_ && reconnect_active_) {
+                    reconnect_generation = failed_connect_cleanup_generation;
+                    connection_state_ = ConnectionState::Reconnecting;
+                } else if (restart_connect_generation == 0 &&
+                           current_generation == reconnect_generation &&
+                           connection_state_ == ConnectionState::Disconnected &&
+                           installed_session_generation_ == 0 &&
+                           !reconnect_disabled_ && reconnect_active_) {
+                    connection_state_ = ConnectionState::Reconnecting;
+                } else if (connection_state_ != ConnectionState::Reconnecting ||
+                           !IsSignalGenerationCurrentLocked(reconnect_generation)) {
+                    co_return;
                 }
                 suppress_next_connected_event_ = false;
             }
@@ -5618,6 +6236,11 @@ asio::awaitable<void> Room::AttemptReconnect() {
 
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(reconnect_generation) ||
+            (installed_session_generation_ != 0 &&
+             installed_session_generation_ != reconnect_generation)) {
+            co_return;
+        }
         if (reconnect_disabled_) {
             reconnect_active_ = false;
             co_return;
@@ -5630,13 +6253,21 @@ asio::awaitable<void> Room::AttemptReconnect() {
     std::shared_ptr<webrtc::PeerConnectionObserver> publisher_observer;
     std::shared_ptr<webrtc::PeerConnectionObserver> subscriber_observer;
     std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> data_channels;
-    std::vector<std::shared_ptr<RoomDataChannelObserver>> data_channel_observers;
+    std::vector<std::shared_ptr<webrtc::DataChannelObserver>> data_channel_observers;
     std::vector<RemoteTrackSinkBinding> track_sinks;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::deque<ParticipantEvent> retired_events;
+    PendingOperationCleanup pending;
+    uint64_t disconnected_generation = 0;
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(reconnect_generation) ||
+            (installed_session_generation_ != 0 &&
+             installed_session_generation_ != reconnect_generation)) {
+            co_return;
+        }
         signal = std::move(signal_client_);
+        installed_session_generation_ = 0;
         publisher = std::move(publisher_pc_);
         subscriber = std::move(subscriber_pc_);
         publisher_observer = std::move(publisher_observer_);
@@ -5666,12 +6297,15 @@ asio::awaitable<void> Room::AttemptReconnect() {
         reconnect_active_ = false;
         suppress_next_connected_event_ = false;
         listeners_snapshot = listeners_;
-        session_generation_.fetch_add(1, std::memory_order_acq_rel);
+        disconnected_generation =
+            session_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        pending = TakePendingOperationsLocked();
     }
     retired_events.clear();
-    CancelPendingOperations(OperationErrorCode::ReconnectExhausted,
-                            "reconnect_exhausted",
-                            last_error);
+    FailPendingOperations(std::move(pending),
+                          OperationErrorCode::ReconnectExhausted,
+                          "reconnect_exhausted",
+                          last_error);
     if (signal) signal->Close();
     for (auto& dc : data_channels) {
         if (dc) {
@@ -5688,13 +6322,17 @@ asio::awaitable<void> Room::AttemptReconnect() {
     publisher_observer.reset();
     subscriber_observer.reset();
     data_channel_observers.clear();
-    for (const auto& listener : listeners_snapshot) {
-        listener->OnDisconnected(RoomDisconnectReason::NetworkError,
-                                 "Reconnect failed: " + last_error);
-    }
+    LifecycleListenerDelivery delivery;
+    delivery.kind = LifecycleListenerEventKind::Disconnected;
+    delivery.generation = disconnected_generation;
+    delivery.required_state = ConnectionState::Disconnected;
+    delivery.reason = RoomDisconnectReason::NetworkError;
+    delivery.detail = "Reconnect failed: " + last_error;
+    delivery.listeners = std::move(listeners_snapshot);
+    DeliverLifecycleListenerEvent(std::move(delivery));
 }
 
-void Room::UpdateRoomInfo(const proto::Room& room) {
+void Room::UpdateRoomInfo(const proto::Room& room, uint64_t event_generation) {
     RoomInfo updated;
     std::string old_metadata;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
@@ -5703,6 +6341,8 @@ void Room::UpdateRoomInfo(const proto::Room& room) {
 
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        event_generation = session_generation_.load(std::memory_order_acquire);
         updated = room_info_;
 
         // Match the Rust SDK's treatment of an empty SID: a RoomUpdate does
@@ -5735,15 +6375,21 @@ void Room::UpdateRoomInfo(const proto::Room& room) {
     // delivery. No listener can run while room_mutex_ is held.
     if (metadata_changed) {
         for (const auto& listener : listeners_snapshot) {
-            listener->OnRoomMetadataChanged(updated, old_metadata, updated.metadata);
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnRoomMetadataChanged(updated, old_metadata, updated.metadata);
+            });
         }
     }
     for (const auto& listener : listeners_snapshot) {
-        listener->OnRoomUpdated(updated);
+        DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+            target.OnRoomUpdated(updated);
+        });
     }
 }
 
-void Room::UpdateConnectionQuality(const proto::ConnectionQualityUpdate& update) {
+void Room::UpdateConnectionQuality(
+    const proto::ConnectionQualityUpdate& update,
+    uint64_t event_generation) {
     struct Change {
         std::shared_ptr<Participant> participant;
         ConnectionQuality quality = ConnectionQuality::Unknown;
@@ -5754,6 +6400,8 @@ void Room::UpdateConnectionQuality(const proto::ConnectionQualityUpdate& update)
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        event_generation = session_generation_.load(std::memory_order_acquire);
         for (const auto& quality_update : update.updates()) {
             std::shared_ptr<Participant> participant;
             if (local_participant_ &&
@@ -5793,16 +6441,18 @@ void Room::UpdateConnectionQuality(const proto::ConnectionQualityUpdate& update)
 
     for (const auto& change : changes) {
         for (const auto& listener : listeners_snapshot) {
-            if (!listener->ConsumesParticipantEvents()) {
-                listener->OnConnectionQualityChanged(change.participant,
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnConnectionQualityChanged(change.participant,
                                                      change.quality,
                                                      change.score);
-            }
+            }, true);
         }
     }
 }
 
-void Room::UpdateTrackStreamStates(const proto::StreamStateUpdate& update) {
+void Room::UpdateTrackStreamStates(
+    const proto::StreamStateUpdate& update,
+    uint64_t event_generation) {
     struct Change {
         std::shared_ptr<Participant> participant;
         std::shared_ptr<TrackPublication> publication;
@@ -5813,6 +6463,8 @@ void Room::UpdateTrackStreamStates(const proto::StreamStateUpdate& update) {
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        event_generation = session_generation_.load(std::memory_order_acquire);
         for (const auto& stream_state : update.stream_states()) {
             std::shared_ptr<Participant> participant;
             if (local_participant_ &&
@@ -5855,17 +6507,18 @@ void Room::UpdateTrackStreamStates(const proto::StreamStateUpdate& update) {
 
     for (const auto& change : changes) {
         for (const auto& listener : listeners_snapshot) {
-            if (!listener->ConsumesParticipantEvents()) {
-                listener->OnTrackStreamStateChanged(change.participant,
+            DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+                target.OnTrackStreamStateChanged(change.participant,
                                                     change.publication,
                                                     change.state);
-            }
+            }, true);
         }
     }
 }
 
 void Room::UpdateTrackSubscriptionPermission(
-    const proto::SubscriptionPermissionUpdate& update) {
+    const proto::SubscriptionPermissionUpdate& update,
+    uint64_t event_generation) {
     const TrackSubscriptionPermission permission{
         update.participant_sid(), update.track_sid(), update.allowed()};
     std::shared_ptr<Participant> participant;
@@ -5875,6 +6528,8 @@ void Room::UpdateTrackSubscriptionPermission(
 
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        event_generation = session_generation_.load(std::memory_order_acquire);
         const auto key = std::make_pair(permission.participant_sid,
                                         permission.track_sid);
         const auto existing = track_subscription_permissions_.find(key);
@@ -5909,11 +6564,11 @@ void Room::UpdateTrackSubscriptionPermission(
     }
 
     for (const auto& listener : listeners_snapshot) {
-        if (!listener->ConsumesParticipantEvents()) {
-            listener->OnTrackSubscriptionPermissionChanged(permission,
+        DeliverListener({event_generation}, listener, [&](RoomListener& target) {
+            target.OnTrackSubscriptionPermissionChanged(permission,
                                                            participant,
                                                            publication);
-        }
+        }, true);
     }
 }
 
@@ -5938,28 +6593,29 @@ void Room::RecordPublishedTracks() {
 }
 
 asio::awaitable<void> Room::RepublishLocalTracks(
-    std::shared_ptr<proto::ReconnectResponse> reconnect_response) {
+    uint64_t generation) {
 
     std::vector<PublishedTrackRecord> records;
     std::shared_ptr<LocalParticipant> local;
-    std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
 
     {
         std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) co_return;
         records = published_track_records_;
         local = local_participant_;
-        listeners_snapshot = listeners_;
     }
 
     if (!local) co_return;
 
     for (auto& record : records) {
         if (!record.track) continue;
-
-        auto new_pub = co_await local->PublishTrackAsync(record.track);
-        for (const auto& listener : listeners_snapshot) {
-            listener->OnLocalTrackRepublished(record.previous_sid, new_pub);
+        {
+            std::lock_guard lock(room_mutex_);
+            if (!IsNativeGenerationCurrentLocked(generation) ||
+                !reconnect_active_ || reconnect_disabled_) co_return;
         }
+        auto new_pub = co_await local->PublishTrackAsync(record.track);
+        DeliverRepublishedTrack(generation, record.previous_sid, std::move(new_pub));
     }
 }
 

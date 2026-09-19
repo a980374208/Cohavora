@@ -14,6 +14,7 @@
 #include <optional>
 #include <system_error>
 #include <cstdint>
+#include <atomic>
 
 namespace livekit {
 
@@ -52,16 +53,23 @@ public:
 
     // Close WebSocket
     asio::awaitable<void> Close(uint16_t code, const std::string& reason);
+    // Immediately terminates this transport. Cleanup paths use this when a
+    // coroutine can no longer await a graceful close.
+    void Abort();
 
-    // Setup Callbacks
-    void SetOnMessage(MessageCallback cb) { message_cb_ = std::move(cb); }
-    void SetOnTextMessage(TextMessageCallback cb) { text_message_cb_ = std::move(cb); }
-    void SetOnClose(CloseCallback cb) { close_cb_ = std::move(cb); }
-    void SetOnError(ErrorCallback cb) { error_cb_ = std::move(cb); }
+    // Callback replacement is serialized with read/write/shutdown on strand_.
+    void SetOnMessage(MessageCallback cb);
+    void SetOnTextMessage(TextMessageCallback cb);
+    void SetOnClose(CloseCallback cb);
+    void SetOnError(ErrorCallback cb);
 
-    bool IsConnected() const { return connected_; }
+    bool IsConnected() const { return connected_.load(std::memory_order_acquire); }
 
 private:
+    friend class RoomConnectAttemptTestAccess;
+    // Installed before the test interleave on strand_; observes the actual
+    // shutdown boundary without substituting transport operations.
+    std::function<void(bool)> before_shutdown_for_testing_;
     struct QueuedMessage {
         std::vector<uint8_t> data;
     };
@@ -69,6 +77,13 @@ private:
     asio::awaitable<void> ReadLoop();
     asio::awaitable<void> ReadFrame();
     asio::awaitable<void> HandleFrame(uint8_t opcode, bool fin, std::vector<uint8_t> payload);
+    asio::awaitable<std::error_code> ConnectOnOwner(
+        std::string url_str,
+        std::string token,
+        std::chrono::milliseconds timeout,
+        CredentialUrlPolicy policy);
+    asio::awaitable<void> CloseOnOwner(uint16_t code, std::string reason);
+    void AbortOnOwner();
 
     asio::awaitable<void> SendRawFrame(uint8_t opcode, const std::vector<uint8_t>& payload);
     asio::awaitable<void> WriteLoop();
@@ -99,8 +114,9 @@ private:
     std::variant<std::monostate, SocketPtr, SslStreamPtr> stream_;
 
     bool is_ssl_ = false;
-    bool connected_ = false;
+    std::atomic<bool> connected_{false};
     bool closed_by_us_ = false;
+    bool abort_started_ = false;
 
     // Callbacks
     MessageCallback message_cb_;

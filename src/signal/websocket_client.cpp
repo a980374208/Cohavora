@@ -166,20 +166,34 @@ WebSocketClient::WebSocketClient(asio::io_context& io_ctx, asio::ssl::context& s
 }
 
 WebSocketClient::~WebSocketClient() {
-    message_cb_ = nullptr;
-    text_message_cb_ = nullptr;
-    close_cb_ = nullptr;
-    error_cb_ = nullptr;
-    shutdown_stream();
 }
 
 asio::awaitable<std::error_code> WebSocketClient::Connect(std::string url_str,
                                                          std::string token,
                                                          std::chrono::milliseconds timeout,
                                                          CredentialUrlPolicy policy) {
+    auto self = shared_from_this();
+    co_return co_await asio::co_spawn(
+        strand_,
+        [self, url_str = std::move(url_str), token = std::move(token), timeout, policy]() mutable
+            -> asio::awaitable<std::error_code> {
+            co_return co_await self->ConnectOnOwner(
+                std::move(url_str), std::move(token), timeout, policy);
+        },
+        asio::use_awaitable);
+}
+
+asio::awaitable<std::error_code> WebSocketClient::ConnectOnOwner(
+    std::string url_str,
+    std::string token,
+    std::chrono::milliseconds timeout,
+    CredentialUrlPolicy policy) {
     std::cout << "WebSocketClient::Connect: 1 (shared_from_this)" << std::endl;
     auto self = shared_from_this();
     std::cout << "WebSocketClient::Connect: 2" << std::endl;
+    if (abort_started_) {
+        co_return asio::error::operation_aborted;
+    }
     std::error_code admission_error;
     auto admitted = AdmitCredentialUrl(
         url_str, CredentialUrlKind::WebSocket, policy, admission_error);
@@ -242,7 +256,7 @@ asio::awaitable<std::error_code> WebSocketClient::Connect(std::string url_str,
         
         connect_done->store(true);
         timer->cancel();
-        connected_ = true;
+        connected_.store(true, std::memory_order_release);
         
         co_return std::error_code{};
     } catch (const std::system_error& e) {
@@ -260,9 +274,13 @@ asio::awaitable<std::error_code> WebSocketClient::Connect(std::string url_str,
 
 void WebSocketClient::StartRead() {
     std::cout << "WebSocketClient::StartRead: posting ReadLoop spawn" << std::endl;
-    asio::post(io_ctx_, [self = this->shared_from_this()]() {
+    asio::post(strand_, [self = this->shared_from_this()]() {
+        if (self->abort_started_ ||
+            !self->connected_.load(std::memory_order_acquire)) {
+            return;
+        }
         std::cout << "WebSocketClient::StartRead: spawning ReadLoop via post" << std::endl;
-        livekit::safe_co_spawn(self->io_ctx_, [self]() -> asio::awaitable<void> {
+        livekit::safe_co_spawn(self->strand_, [self]() -> asio::awaitable<void> {
             std::cout << "WebSocketClient::ReadLoop: coroutine started" << std::endl;
             try {
                 co_await self->ReadLoop();
@@ -278,16 +296,38 @@ void WebSocketClient::StartRead() {
 }
 
 asio::awaitable<void> WebSocketClient::SendBinary(std::vector<uint8_t> data) {
-    co_await SendRawFrame(0x2, data);
+    auto self = shared_from_this();
+    co_await asio::co_spawn(
+        strand_,
+        [self, data = std::move(data)]() -> asio::awaitable<void> {
+            co_await self->SendRawFrame(0x2, data);
+        },
+        asio::use_awaitable);
 }
 
 asio::awaitable<void> WebSocketClient::SendText(std::string text) {
-    std::vector<uint8_t> data(text.begin(), text.end());
-    co_await SendRawFrame(0x1, data);
+    auto self = shared_from_this();
+    co_await asio::co_spawn(
+        strand_,
+        [self, text = std::move(text)]() -> asio::awaitable<void> {
+            std::vector<uint8_t> data(text.begin(), text.end());
+            co_await self->SendRawFrame(0x1, data);
+        },
+        asio::use_awaitable);
 }
 
 asio::awaitable<void> WebSocketClient::Close(uint16_t code, const std::string& reason) {
-    if (!connected_) co_return;
+    auto self = shared_from_this();
+    co_await asio::co_spawn(
+        strand_,
+        [self, code, reason]() -> asio::awaitable<void> {
+            co_await self->CloseOnOwner(code, reason);
+        },
+        asio::use_awaitable);
+}
+
+asio::awaitable<void> WebSocketClient::CloseOnOwner(uint16_t code, std::string reason) {
+    if (!connected_.load(std::memory_order_acquire)) co_return;
     closed_by_us_ = true;
     
     std::vector<uint8_t> payload;
@@ -303,9 +343,50 @@ asio::awaitable<void> WebSocketClient::Close(uint16_t code, const std::string& r
     shutdown_stream();
 }
 
+void WebSocketClient::Abort() {
+    asio::post(strand_, [self = shared_from_this()]() {
+        self->AbortOnOwner();
+    });
+}
+
+void WebSocketClient::AbortOnOwner() {
+    if (abort_started_) return;
+    abort_started_ = true;
+    closed_by_us_ = true;
+    message_cb_ = nullptr;
+    text_message_cb_ = nullptr;
+    close_cb_ = nullptr;
+    error_cb_ = nullptr;
+    shutdown_stream();
+}
+
+void WebSocketClient::SetOnMessage(MessageCallback cb) {
+    asio::post(strand_, [self = shared_from_this(), cb = std::move(cb)]() mutable {
+        if (!self->abort_started_) self->message_cb_ = std::move(cb);
+    });
+}
+
+void WebSocketClient::SetOnTextMessage(TextMessageCallback cb) {
+    asio::post(strand_, [self = shared_from_this(), cb = std::move(cb)]() mutable {
+        if (!self->abort_started_) self->text_message_cb_ = std::move(cb);
+    });
+}
+
+void WebSocketClient::SetOnClose(CloseCallback cb) {
+    asio::post(strand_, [self = shared_from_this(), cb = std::move(cb)]() mutable {
+        if (!self->abort_started_) self->close_cb_ = std::move(cb);
+    });
+}
+
+void WebSocketClient::SetOnError(ErrorCallback cb) {
+    asio::post(strand_, [self = shared_from_this(), cb = std::move(cb)]() mutable {
+        if (!self->abort_started_) self->error_cb_ = std::move(cb);
+    });
+}
+
 asio::awaitable<void> WebSocketClient::ReadLoop() {
     try {
-        while (connected_) {
+        while (connected_.load(std::memory_order_acquire)) {
             co_await ReadFrame();
         }
     } catch (const std::system_error& e) {
@@ -439,7 +520,7 @@ asio::awaitable<void> WebSocketClient::SendRawFrame(uint8_t opcode, const std::v
     }
     
     if (should_spawn) {
-        livekit::safe_co_spawn(io_ctx_, [self = shared_from_this()]() -> asio::awaitable<void> {
+        livekit::safe_co_spawn(strand_, [self = shared_from_this()]() -> asio::awaitable<void> {
             co_await self->WriteLoop();
         });
     }
@@ -469,7 +550,7 @@ asio::awaitable<void> WebSocketClient::WriteLoop() {
 
 std::shared_ptr<WebSocketClient::QueuedMessage> WebSocketClient::PopWriteQueue() {
     std::lock_guard<std::mutex> lock(write_mutex_);
-    if (write_queue_.empty() || !connected_) {
+    if (write_queue_.empty() || !connected_.load(std::memory_order_acquire)) {
         writing_ = false;
         return nullptr;
     }
@@ -708,7 +789,10 @@ asio::awaitable<size_t> WebSocketClient::async_write_stream(asio::const_buffer b
 }
 
 void WebSocketClient::shutdown_stream() {
-    connected_ = false;
+    if (before_shutdown_for_testing_) {
+        before_shutdown_for_testing_(strand_.running_in_this_thread());
+    }
+    connected_.store(false, std::memory_order_release);
     std::visit([](auto& s) {
         using T = std::decay_t<decltype(s)>;
         if constexpr (std::is_same_v<T, SocketPtr>) {

@@ -134,6 +134,7 @@ public:
 
 private:
     friend class SignalClientIrSec001TestAccess;
+    friend class RoomConnectAttemptTestAccess;
     void StartHeartbeat();
     void StopHeartbeat();
     void FlushQueue();
@@ -142,7 +143,10 @@ private:
     void HandleHeartbeatFailure(const std::error_code& error);
     
     // Coroutine internals
-    asio::awaitable<void> HeartbeatLoop(uint32_t interval_sec, uint32_t timeout_sec);
+    asio::awaitable<void> HeartbeatLoop(
+        uint32_t interval_sec,
+        uint32_t timeout_sec,
+        uint64_t generation);
     asio::awaitable<std::shared_ptr<proto::JoinResponse>> ConnectInternal(
         const std::optional<std::vector<uint8_t>>& publisher_offer_sdp);
     asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> ReconnectInternal(
@@ -170,7 +174,9 @@ private:
     SignalOptions options_;
     bool single_pc_mode_active_ = false;
     std::shared_ptr<proto::JoinResponse> join_response_;
+    mutable std::mutex event_handler_mutex_;
     SignalEventHandler event_handler_;
+    std::atomic<bool> closed_{false};
 
     std::atomic<bool> reconnecting_{false};
     std::atomic<uint32_t> request_id_{1};
@@ -185,6 +191,9 @@ private:
 
     // Heartbeats
     std::atomic<bool> heartbeat_active_{false};
+    std::atomic<uint64_t> heartbeat_generation_{0};
+    asio::strand<asio::any_io_executor> heartbeat_strand_;
+    mutable std::mutex heartbeat_timer_mutex_;
     std::shared_ptr<asio::steady_timer> heartbeat_timer_;
     std::atomic<std::chrono::steady_clock::time_point> last_received_time_;
     std::atomic<int64_t> last_rtt_{0};

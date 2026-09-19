@@ -6,6 +6,7 @@
 #include <chrono>
 #include <functional>
 #include <system_error>
+#include <mutex>
 #include "websocket_client.h"
 
 namespace livekit {
@@ -39,19 +40,22 @@ public:
 
     asio::awaitable<void> Send(const livekit::proto::SignalRequest& req);
     asio::awaitable<void> Close(bool notify_close);
+    void Abort();
 
     void StartRead();
 
-    void SetOnMessage(MessageCallback cb) { message_cb_ = std::move(cb); }
-    void SetOnClose(CloseCallback cb) { close_cb_ = std::move(cb); }
+    void SetOnMessage(MessageCallback cb);
+    void SetOnClose(CloseCallback cb);
 
     bool IsConnected() const { return ws_client_->IsConnected(); }
 
 private:
     void SetupCallbacks();
+    friend class RoomConnectAttemptTestAccess;
 
 private:
     std::shared_ptr<WebSocketClient> ws_client_;
+    mutable std::mutex callback_mutex_;
     MessageCallback message_cb_;
     CloseCallback close_cb_;
 };

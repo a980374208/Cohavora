@@ -28,12 +28,16 @@ public:
 class RoomIrSec001TestAccess final {
 public:
     static void DeliverClose(Room& room, const SignalEvent& event) {
+        uint64_t generation = 0;
         {
             std::lock_guard lock(room.room_mutex_);
+            // Model an installed Connected session, including its owner token.
+            generation = room.session_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+            room.installed_session_generation_ = generation;
             room.connection_state_ = ConnectionState::Connected;
             room.reconnect_disabled_ = true;
         }
-        room.HandleSignalEvent(event);
+        room.HandleSignalEvent(event, generation);
     }
 };
 

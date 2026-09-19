@@ -1216,6 +1216,7 @@ add_executable(test_participant_snapshot_remediation
     src/net/openmeeting_http_client.h
     src/net/session_manager.cpp
     src/net/credential_store.cpp
+    src/net/service_endpoint_policy.cpp
     src/net/credential_store.h
     src/net/session_manager.h
     src/net/http_types.h

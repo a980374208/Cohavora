@@ -1206,6 +1206,68 @@ public:
         coordinator._startupCommitted = true;
     }
 
+    static void prepareStartup(MeetingCoordinator &coordinator,
+                               bool audioMuted = false,
+                               bool videoEnabled = true) {
+        coordinator._state = MeetingState::InMeeting;
+        coordinator._startupCommitted = false;
+        coordinator._startupReconnectPending = false;
+        coordinator._startupListenOnly = false;
+        coordinator._localAudioTrack.reset();
+        coordinator._localVideoTrack.reset();
+        coordinator._audioMuted = audioMuted;
+        coordinator._videoEnabled = videoEnabled;
+        coordinator._participants.clear();
+        coordinator.ensureLocalParticipant();
+    }
+
+    static uint64_t sessionGeneration(const MeetingCoordinator &coordinator) {
+        return coordinator._nextSessionGeneration;
+    }
+
+    static void queueSuccessfulStartup(MeetingCoordinator &coordinator,
+                                       uint64_t sessionGeneration) {
+        auto *target = &coordinator;
+        QMetaObject::invokeMethod(target, [target, sessionGeneration]() {
+            target->completeRoomStartupOnUiThread(sessionGeneration, {}, {});
+        }, Qt::QueuedConnection);
+    }
+
+    static void queueDegradedStartup(MeetingCoordinator &coordinator,
+                                     uint64_t sessionGeneration) {
+        auto *target = &coordinator;
+        QMetaObject::invokeMethod(target, [target, sessionGeneration]() {
+            target->completeRoomStartupDegradedOnUiThread(
+                sessionGeneration, QStringLiteral("local-media"), QStringLiteral("test-only"));
+        }, Qt::QueuedConnection);
+    }
+
+    static bool startupCommitted(const MeetingCoordinator &coordinator) {
+        return coordinator._startupCommitted;
+    }
+
+    static bool reconnectPending(const MeetingCoordinator &coordinator) {
+        return coordinator._startupReconnectPending;
+    }
+
+    static bool startupListenOnly(const MeetingCoordinator &coordinator) {
+        return coordinator._startupListenOnly;
+    }
+
+    static bool hasNoLocalTracks(const MeetingCoordinator &coordinator) {
+        return !coordinator._localAudioTrack && !coordinator._localVideoTrack;
+    }
+
+    static bool localProjection(const MeetingCoordinator &coordinator,
+                                bool audioMuted,
+                                bool videoEnabled) {
+        const auto local = std::find_if(coordinator._participants.begin(), coordinator._participants.end(),
+            [](const auto &entry) { return entry.second.isLocal; });
+        return local != coordinator._participants.end() &&
+            local->second.isAudioMuted == audioMuted &&
+            local->second.isVideoEnabled == videoEnabled;
+    }
+
     static void invalidateAdmissionOnly(MeetingCoordinator &coordinator) {
         coordinator.invalidateAdmission();
     }
@@ -1917,6 +1979,211 @@ void ListenerOwnerRegression() {
     }
     DuplicateLogInvalidationStillCleansResources();
     std::cout << "LISTENER_OWNER_CASES=25 PASS" << std::endl;
+}
+
+struct StartupReconnectSignals final {
+    std::vector<OpenMeeting::MeetingState> states;
+    std::vector<bool> audioMuted;
+    std::vector<bool> videoEnabled;
+    int errors = 0;
+};
+
+void ObserveStartupReconnect(Fixture &fixture, QObject &observer,
+                             StartupReconnectSignals &observed) {
+    QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
+        &observer, [&](OpenMeeting::MeetingState state, const QString &) { observed.states.push_back(state); });
+    QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::localAudioMuteChanged,
+        &observer, [&](bool muted) { observed.audioMuted.push_back(muted); });
+    QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
+        &observer, [&](bool enabled) { observed.videoEnabled.push_back(enabled); });
+    QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::errorOccurred,
+        &observer, [&](const QString &, const QString &) { ++observed.errors; });
+}
+
+void StartupReconnectOrder(bool degraded, bool reconnectedFirst) {
+    Fixture fixture;
+    OpenMeeting::MeetingCoordinatorTestAccess::prepareStartup(*fixture.coordinator);
+    const auto generation = OpenMeeting::MeetingCoordinatorTestAccess::sessionGeneration(*fixture.coordinator);
+    QObject observer;
+    StartupReconnectSignals observed;
+    ObserveStartupReconnect(fixture, observer, observed);
+
+    fixture.listener->OnReconnecting();
+    DrainQt();
+    TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::Reconnecting);
+    TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::reconnectPending(*fixture.coordinator));
+
+    const auto queueTerminal = [&] {
+        if (degraded) {
+            OpenMeeting::MeetingCoordinatorTestAccess::queueDegradedStartup(*fixture.coordinator, generation);
+        } else {
+            OpenMeeting::MeetingCoordinatorTestAccess::queueSuccessfulStartup(*fixture.coordinator, generation);
+        }
+    };
+
+    if (reconnectedFirst) {
+        fixture.listener->OnReconnected();
+        DrainQt();
+        TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::Reconnecting);
+        TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::reconnectPending(*fixture.coordinator));
+        queueTerminal();
+        DrainQt();
+    } else {
+        queueTerminal();
+        DrainQt();
+        TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::Reconnecting);
+        TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::reconnectPending(*fixture.coordinator));
+        fixture.listener->OnReconnected();
+        DrainQt();
+    }
+
+    TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::InMeeting);
+    TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::startupCommitted(*fixture.coordinator));
+    TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::reconnectPending(*fixture.coordinator));
+    if (degraded) {
+        TEST_CHECK(fixture.coordinator->isLocalAudioMuted());
+        TEST_CHECK(!fixture.coordinator->isLocalVideoEnabled());
+        TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::hasNoLocalTracks(*fixture.coordinator));
+        TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::localProjection(*fixture.coordinator, true, false));
+        TEST_CHECK(observed.audioMuted == std::vector<bool>{true});
+        TEST_CHECK(observed.videoEnabled == std::vector<bool>{false});
+        TEST_CHECK(observed.errors == 1);
+        TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::startupListenOnly(*fixture.coordinator));
+        fixture.coordinator->setLocalAudioMuted(false);
+        fixture.coordinator->setLocalVideoEnabled(true);
+        TEST_CHECK(fixture.coordinator->isLocalAudioMuted());
+        TEST_CHECK(!fixture.coordinator->isLocalVideoEnabled());
+        TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::localProjection(*fixture.coordinator, true, false));
+        TEST_CHECK((observed.audioMuted == std::vector<bool>{true, true}));
+        TEST_CHECK((observed.videoEnabled == std::vector<bool>{false, false}));
+    }
+    TEST_CHECK(std::count(observed.states.begin(), observed.states.end(),
+                          OpenMeeting::MeetingState::Reconnecting) == 1);
+    TEST_CHECK(std::count(observed.states.begin(), observed.states.end(),
+                          OpenMeeting::MeetingState::InMeeting) == 1);
+}
+
+void StartupReconnectNormalSuccess() {
+    Fixture fixture;
+    OpenMeeting::MeetingCoordinatorTestAccess::prepareStartup(*fixture.coordinator, true, false);
+    const auto generation = OpenMeeting::MeetingCoordinatorTestAccess::sessionGeneration(*fixture.coordinator);
+    QObject observer;
+    StartupReconnectSignals observed;
+    ObserveStartupReconnect(fixture, observer, observed);
+
+    OpenMeeting::MeetingCoordinatorTestAccess::queueSuccessfulStartup(*fixture.coordinator, generation);
+    DrainQt();
+
+    TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::InMeeting);
+    TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::startupCommitted(*fixture.coordinator));
+    TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::reconnectPending(*fixture.coordinator));
+    TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::startupListenOnly(*fixture.coordinator));
+    TEST_CHECK(observed.audioMuted == std::vector<bool>{true});
+    TEST_CHECK(observed.videoEnabled == std::vector<bool>{false});
+}
+
+void StartupReconnectRejectsStaleAndStoppedTerminals() {
+    Fixture replacement;
+    OpenMeeting::MeetingCoordinatorTestAccess::prepareStartup(*replacement.coordinator);
+    const auto oldGeneration = OpenMeeting::MeetingCoordinatorTestAccess::sessionGeneration(*replacement.coordinator);
+    auto oldListener = replacement.listener;
+    oldListener->OnReconnecting();
+    DrainQt();
+    oldListener->OnReconnected();
+    OpenMeeting::MeetingCoordinatorTestAccess::queueDegradedStartup(*replacement.coordinator, oldGeneration);
+    replacement.replaceSession();
+    OpenMeeting::MeetingCoordinatorTestAccess::prepareStartup(*replacement.coordinator, true, false);
+    DrainQt();
+    TEST_CHECK(replacement.coordinator->state() == OpenMeeting::MeetingState::InMeeting);
+    TEST_CHECK(replacement.coordinator->isLocalAudioMuted());
+    TEST_CHECK(!replacement.coordinator->isLocalVideoEnabled());
+    TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::startupCommitted(*replacement.coordinator));
+    TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::reconnectPending(*replacement.coordinator));
+
+    Fixture stopped;
+    OpenMeeting::MeetingCoordinatorTestAccess::prepareStartup(*stopped.coordinator);
+    const auto stoppedGeneration = OpenMeeting::MeetingCoordinatorTestAccess::sessionGeneration(*stopped.coordinator);
+    stopped.listener->OnReconnecting();
+    DrainQt();
+    stopped.listener->OnReconnected();
+    OpenMeeting::MeetingCoordinatorTestAccess::queueDegradedStartup(*stopped.coordinator, stoppedGeneration);
+    stopped.coordinator->leaveMeetingAsync(false);
+    DrainQt();
+    TEST_CHECK(stopped.coordinator->state() == OpenMeeting::MeetingState::Idle);
+    TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::startupCommitted(*stopped.coordinator));
+    TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::reconnectPending(*stopped.coordinator));
+}
+
+void StartupReconnectTerminalIdempotenceAndReentry() {
+    Fixture idempotent;
+    OpenMeeting::MeetingCoordinatorTestAccess::prepareStartup(*idempotent.coordinator);
+    const auto generation = OpenMeeting::MeetingCoordinatorTestAccess::sessionGeneration(*idempotent.coordinator);
+    QObject observer;
+    StartupReconnectSignals observed;
+    ObserveStartupReconnect(idempotent, observer, observed);
+    idempotent.listener->OnReconnecting();
+    idempotent.listener->OnReconnecting();
+    DrainQt();
+    idempotent.listener->OnReconnected();
+    idempotent.listener->OnReconnected();
+    OpenMeeting::MeetingCoordinatorTestAccess::queueDegradedStartup(*idempotent.coordinator, generation);
+    OpenMeeting::MeetingCoordinatorTestAccess::queueDegradedStartup(*idempotent.coordinator, generation);
+    DrainQt();
+    TEST_CHECK(idempotent.coordinator->state() == OpenMeeting::MeetingState::InMeeting);
+    TEST_CHECK(observed.audioMuted == std::vector<bool>{true});
+    TEST_CHECK(observed.videoEnabled == std::vector<bool>{false});
+    TEST_CHECK(observed.errors == 1);
+    TEST_CHECK(std::count(observed.states.begin(), observed.states.end(),
+                          OpenMeeting::MeetingState::Reconnecting) == 1);
+    TEST_CHECK(std::count(observed.states.begin(), observed.states.end(),
+                          OpenMeeting::MeetingState::InMeeting) == 1);
+
+    Fixture reentrant;
+    OpenMeeting::MeetingCoordinatorTestAccess::prepareStartup(*reentrant.coordinator);
+    const auto reentrantGeneration = OpenMeeting::MeetingCoordinatorTestAccess::sessionGeneration(*reentrant.coordinator);
+    reentrant.listener->OnReconnecting();
+    DrainQt();
+    reentrant.listener->OnReconnected();
+    DrainQt();
+    QObject reentryObserver;
+    int staleCapabilitySignals = 0;
+    int staleErrors = 0;
+    bool replaced = false;
+    QObject::connect(reentrant.coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
+        &reentryObserver, [&](OpenMeeting::MeetingState state, const QString &) {
+            if (state == OpenMeeting::MeetingState::InMeeting && !replaced) {
+                replaced = true;
+                reentrant.replaceSession();
+                OpenMeeting::MeetingCoordinatorTestAccess::prepareStartup(*reentrant.coordinator, true, false);
+            }
+        });
+    QObject::connect(reentrant.coordinator.get(), &OpenMeeting::MeetingCoordinator::localAudioMuteChanged,
+        &reentryObserver, [&](bool) { ++staleCapabilitySignals; });
+    QObject::connect(reentrant.coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
+        &reentryObserver, [&](bool) { ++staleCapabilitySignals; });
+    QObject::connect(reentrant.coordinator.get(), &OpenMeeting::MeetingCoordinator::errorOccurred,
+        &reentryObserver, [&](const QString &, const QString &) { ++staleErrors; });
+    OpenMeeting::MeetingCoordinatorTestAccess::queueDegradedStartup(
+        *reentrant.coordinator, reentrantGeneration);
+    DrainQt();
+    TEST_CHECK(replaced);
+    TEST_CHECK(reentrant.coordinator->state() == OpenMeeting::MeetingState::InMeeting);
+    TEST_CHECK(reentrant.coordinator->isLocalAudioMuted());
+    TEST_CHECK(!reentrant.coordinator->isLocalVideoEnabled());
+    TEST_CHECK(staleCapabilitySignals == 0);
+    TEST_CHECK(staleErrors == 0);
+}
+
+void StartupReconnectRegression() {
+    StartupReconnectNormalSuccess();
+    for (bool degraded : {false, true}) {
+        for (bool reconnectedFirst : {false, true}) {
+            StartupReconnectOrder(degraded, reconnectedFirst);
+        }
+    }
+    StartupReconnectRejectsStaleAndStoppedTerminals();
+    StartupReconnectTerminalIdempotenceAndReentry();
+    std::cout << "STARTUP_RECONNECT_CASES=9 PASS" << std::endl;
 }
 
 void OwnerTerminalRegression() {
@@ -3321,6 +3588,7 @@ int main(int argc, char **argv) {
     TEST_CHECK(participantLeftCount >= 1);
     OwnerTerminalRegression();
     ListenerOwnerRegression();
+    StartupReconnectRegression();
     AkCoreRegression();
     AkAttachRegression();
     AkShutdownRegression();
