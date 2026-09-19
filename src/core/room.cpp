@@ -556,7 +556,7 @@ void Room::RetireParticipantLocked(const std::shared_ptr<Participant>& participa
     }
 }
 
-void Room::RetireAllMembershipsLocked(std::deque<ParticipantEvent>& retired_events) {
+void Room::RetireAllMembershipsLocked(std::deque<QueuedParticipantEvent>& retired_events) {
     for (auto& [participant, state] : participant_memberships_) {
         state->active.store(false, std::memory_order_release);
     }
@@ -571,10 +571,11 @@ void Room::RetireAllMembershipsLocked(std::deque<ParticipantEvent>& retired_even
     retired_events.swap(participant_events_);
 }
 
-void Room::EnqueueParticipantEventLocked(ParticipantEvent event) {
+void Room::EnqueueParticipantEventLocked(ParticipantEvent event,
+                                        std::shared_ptr<E2eeManager> e2ee_owner) {
     event.native_room_generation = session_generation_.load(std::memory_order_acquire);
     event.event_sequence = next_participant_event_sequence_++;
-    participant_events_.push_back(std::move(event));
+    participant_events_.emplace_back(std::move(event), std::move(e2ee_owner));
     if (participant_event_drain_scheduled_) return;
 
     participant_event_drain_scheduled_ = true;
@@ -621,7 +622,7 @@ void Room::EnqueueRosterLocked() {
 }
 
 void Room::DrainParticipantEvents() {
-    std::vector<ParticipantEvent> batch;
+    std::vector<QueuedParticipantEvent> batch;
     std::vector<std::shared_ptr<RoomListener>> listeners;
     {
         std::lock_guard lock(room_mutex_);
@@ -647,7 +648,8 @@ void Room::DrainParticipantEvents() {
                 break;
             }
             try {
-                DeliverListener({event.native_room_generation}, listener,
+                DeliverListener({event.native_room_generation, {}, false, false,
+                                 event.e2ee_owner}, listener,
                     [&](RoomListener& target) {
                         if (event.kind != ParticipantEventKind::TrackAvailable ||
                             IsMediaBindingTicketActive(
@@ -1094,7 +1096,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> data_channels;
         std::vector<std::shared_ptr<webrtc::DataChannelObserver>> data_channel_observers;
         std::vector<RemoteTrackSinkBinding> track_sinks;
-        std::deque<ParticipantEvent> retired_events;
+        std::deque<QueuedParticipantEvent> retired_events;
         PendingOperationCleanup pending;
         bool cleanup_shared_state = false;
         {
@@ -1179,7 +1181,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
 }
 
 void Room::Disconnect() {
-    std::deque<ParticipantEvent> retired_events;
+    std::deque<QueuedParticipantEvent> retired_events;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::shared_ptr<SignalClient> signal;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
@@ -1298,7 +1300,7 @@ void Room::Disconnect() {
 }
 
 asio::awaitable<void> Room::DisconnectAsync() {
-    std::deque<ParticipantEvent> retired_events;
+    std::deque<QueuedParticipantEvent> retired_events;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::shared_ptr<SignalClient> signal;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
@@ -1456,7 +1458,7 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
     RoomDisconnectReason reason,
     std::string detail,
     uint64_t event_generation) {
-    std::deque<ParticipantEvent> retired_events;
+    std::deque<QueuedParticipantEvent> retired_events;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::shared_ptr<SignalClient> signal;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
@@ -2092,12 +2094,12 @@ void Room::RetireIncomingReaderLocked(const std::string& stream_id,
                                       const std::string& reason) {
     if (auto it = active_text_readers_.find(stream_id);
         it != active_text_readers_.end()) {
-        it->second->OnStreamError(reason);
+        it->second.reader->OnStreamError(reason);
         active_text_readers_.erase(it);
     }
     if (auto it = active_byte_readers_.find(stream_id);
         it != active_byte_readers_.end()) {
-        it->second->OnStreamError(reason);
+        it->second.reader->OnStreamError(reason);
         active_byte_readers_.erase(it);
     }
     incoming_stream_deadlines_.erase(stream_id);
@@ -2174,15 +2176,72 @@ void Room::OnIncomingDataPacketAt(
     uint64_t generation,
     IncomingDataStreamAssembler::TimePoint now) {
     BeforeNativeEventCommit(generation);
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) return;
+    }
+    // Protobuf takes an int length. Never narrow an unbounded wire size.
+    if (payload.size() > static_cast<size_t>(std::numeric_limits<int>::max())) return;
     std::vector<uint8_t> real_payload = payload;
     std::string real_topic = topic;
     std::string real_sender_sid = participant_sid;
     std::string sender_identity;
     bool is_structured_chat = false;
+    EncryptionType encryption_type = EncryptionType::NONE;
+    std::shared_ptr<E2eeManager> decrypt_owner;
+    // Called only with room_mutex_ held, at each state/event commit.
+    const auto can_commit = [&] {
+        return IsNativeGenerationCurrentLocked(generation) &&
+            (!decrypt_owner || (e2ee_manager_ == decrypt_owner && decrypt_owner->enabled()));
+    };
 
     // 尝试反序列化 Protobuf DataPacket
     proto::DataPacket data_pkt;
     if (data_pkt.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        if (data_pkt.has_encrypted_packet()) {
+            std::shared_ptr<StreamDeliveryTestHooks> hooks;
+            {
+                std::lock_guard lock(room_mutex_);
+                if (!IsNativeGenerationCurrentLocked(generation)) return;
+                decrypt_owner = e2ee_manager_;
+                if (!decrypt_owner || !decrypt_owner->enabled() ||
+                    decrypt_owner->encryption_type() != EncryptionType::GCM) return;
+                hooks = stream_delivery_test_hooks_;
+            }
+            const auto& envelope = data_pkt.encrypted_packet();
+            // Validate before copying the ciphertext into the cryptor interface.
+            if (envelope.encryption_type() != proto::Encryption::GCM ||
+                envelope.iv().size() != 12 ||
+                envelope.encrypted_value().size() >
+                    DataPacketCryptor::kMaxEncryptedPacketBytes - 12) return;
+            EncryptedDataPacket packet{
+                EncryptionType::GCM, envelope.key_index(),
+                {envelope.iv().begin(), envelope.iv().end()},
+                {envelope.encrypted_value().begin(), envelope.encrypted_value().end()}};
+            auto result = decrypt_owner->data_packet_cryptor()->DecryptPacket(
+                data_pkt.participant_identity(), packet);
+            auto* authenticated = std::get_if<AuthenticatedDataPayload>(&result);
+            if (!authenticated) return; // An encrypted envelope never falls back to raw data.
+            proto::EncryptedPacketPayload inner;
+            if (!inner.ParseFromArray(authenticated->bytes.data(),
+                                      static_cast<int>(authenticated->bytes.size()))) return;
+            encryption_type = authenticated->encryption_type;
+            // Preserve the outer sender metadata while replacing the envelope.
+            if (inner.has_stream_header())
+                *data_pkt.mutable_stream_header() = inner.stream_header();
+            else if (inner.has_stream_chunk())
+                *data_pkt.mutable_stream_chunk() = inner.stream_chunk();
+            else if (inner.has_stream_trailer())
+                *data_pkt.mutable_stream_trailer() = inner.stream_trailer();
+            else if (inner.has_user())
+                *data_pkt.mutable_user() = inner.user();
+            else if (inner.has_chat_message())
+                *data_pkt.mutable_chat_message() = inner.chat_message();
+            else
+                return; // Unsupported/empty inner values are never application raw data.
+            if (hooks && hooks->after_decrypt_before_commit)
+                hooks->after_decrypt_before_commit();
+        }
         if (!data_pkt.participant_identity().empty()) {
             sender_identity = data_pkt.participant_identity();
         }
@@ -2233,7 +2292,7 @@ void Room::OnIncomingDataPacketAt(
 
                 {
                     std::lock_guard lk(room_mutex_);
-                    if (!IsNativeGenerationCurrentLocked(generation)) return;
+                    if (!can_commit()) return;
                     sender = ResolveSenderContextLocked(
                         real_sender_sid, sender_identity, &p);
                     RetireIncomingReaderLocked(
@@ -2253,7 +2312,7 @@ void Room::OnIncomingDataPacketAt(
                     }
                     if (text_reader->admitted() &&
                         !text_reader->is_closed()) {
-                        active_text_readers_[header.stream_id()] = text_reader;
+                        active_text_readers_[header.stream_id()] = {text_reader, encryption_type};
                         incoming_stream_deadlines_[header.stream_id()] =
                             now + incoming_reader_budget_->limits()
                                       .stream_ttl;
@@ -2270,11 +2329,11 @@ void Room::OnIncomingDataPacketAt(
                     event.kind = ParticipantEventKind::TextStreamOpened;
                     event.sender = sender;
                     event.text_reader = text_reader;
-                    EnqueueParticipantEventLocked(std::move(event));
+                    EnqueueParticipantEventLocked(std::move(event), decrypt_owner);
                     listeners_snapshot = listeners_;
                 }
                 for (const auto& listener : listeners_snapshot) {
-                    DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
+                    DeliverListener({generation, {}, true, false, decrypt_owner}, listener, [&](RoomListener& target) {
                         target.OnTextStreamOpened(text_reader, p);
                     }, true);
                 }
@@ -2304,7 +2363,7 @@ void Room::OnIncomingDataPacketAt(
 
                 {
                     std::lock_guard lk(room_mutex_);
-                    if (!IsNativeGenerationCurrentLocked(generation)) return;
+                    if (!can_commit()) return;
                     sender = ResolveSenderContextLocked(
                         real_sender_sid, sender_identity, &p);
                     RetireIncomingReaderLocked(
@@ -2324,7 +2383,7 @@ void Room::OnIncomingDataPacketAt(
                     }
                     if (byte_reader->admitted() &&
                         !byte_reader->is_closed()) {
-                        active_byte_readers_[header.stream_id()] = byte_reader;
+                        active_byte_readers_[header.stream_id()] = {byte_reader, encryption_type};
                         incoming_stream_deadlines_[header.stream_id()] =
                             now + incoming_reader_budget_->limits()
                                       .stream_ttl;
@@ -2341,11 +2400,11 @@ void Room::OnIncomingDataPacketAt(
                     event.kind = ParticipantEventKind::ByteStreamOpened;
                     event.sender = sender;
                     event.byte_reader = byte_reader;
-                    EnqueueParticipantEventLocked(std::move(event));
+                    EnqueueParticipantEventLocked(std::move(event), decrypt_owner);
                     listeners_snapshot = listeners_;
                 }
                 for (const auto& listener : listeners_snapshot) {
-                    DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
+                    DeliverListener({generation, {}, true, false, decrypt_owner}, listener, [&](RoomListener& target) {
                         target.OnByteStreamOpened(byte_reader, p);
                     }, true);
                 }
@@ -2358,13 +2417,24 @@ void Room::OnIncomingDataPacketAt(
             std::optional<AssembledDataStream> assembled;
             {
                 std::lock_guard lk(room_mutex_);
-                if (!IsNativeGenerationCurrentLocked(generation)) return;
+                if (!can_commit()) return;
                 if (auto deadline = incoming_stream_deadlines_.find(
                         chunk.stream_id());
                     deadline != incoming_stream_deadlines_.end() &&
                     now >= deadline->second) {
                     RetireIncomingReaderLocked(
                         chunk.stream_id(), kDataStreamExpired);
+                    incoming_data_streams_->Discard(chunk.stream_id());
+                    ScheduleIncomingStreamCleanupLocked(generation);
+                    return;
+                }
+                const auto text = active_text_readers_.find(chunk.stream_id());
+                const auto bytes = active_byte_readers_.find(chunk.stream_id());
+                if ((text != active_text_readers_.end() &&
+                     text->second.encryption_type != encryption_type) ||
+                    (bytes != active_byte_readers_.end() &&
+                     bytes->second.encryption_type != encryption_type)) {
+                    RetireIncomingReaderLocked(chunk.stream_id(), kDataStreamEncryptionTypeMismatch);
                     incoming_data_streams_->Discard(chunk.stream_id());
                     ScheduleIncomingStreamCleanupLocked(generation);
                     return;
@@ -2391,18 +2461,18 @@ void Room::OnIncomingDataPacketAt(
                 bool reader_accepted = false;
                 bool reader_terminated = false;
                 if (auto it = active_text_readers_.find(chunk.stream_id()); it != active_text_readers_.end()) {
-                    reader_accepted = it->second->TryOnChunkUpdate(
+                    reader_accepted = it->second.reader->TryOnChunkUpdate(
                         chunk.chunk_index(), content);
-                    if (!reader_accepted && it->second->is_closed()) {
+                    if (!reader_accepted && it->second.reader->is_closed()) {
                         reader_terminated = true;
                     }
                 }
                 if (auto it = active_byte_readers_.find(chunk.stream_id()); it != active_byte_readers_.end()) {
-                    reader_accepted = it->second->TryOnChunkUpdate(
+                    reader_accepted = it->second.reader->TryOnChunkUpdate(
                         chunk.chunk_index(),
                         reinterpret_cast<const uint8_t*>(content.data()),
                         content.size());
-                    if (!reader_accepted && it->second->is_closed()) {
+                    if (!reader_accepted && it->second.reader->is_closed()) {
                         reader_terminated = true;
                     }
                 }
@@ -2432,7 +2502,7 @@ void Room::OnIncomingDataPacketAt(
             std::optional<AssembledDataStream> assembled;
             {
                 std::lock_guard lk(room_mutex_);
-                if (!IsNativeGenerationCurrentLocked(generation)) return;
+                if (!can_commit()) return;
                 if (auto deadline = incoming_stream_deadlines_.find(
                         trailer.stream_id());
                     deadline != incoming_stream_deadlines_.end() &&
@@ -2457,17 +2527,17 @@ void Room::OnIncomingDataPacketAt(
                     !assembled;
                 if (auto it = active_text_readers_.find(trailer.stream_id()); it != active_text_readers_.end()) {
                     if (incomplete_normal_stream) {
-                        it->second->OnStreamError(kDataStreamAssemblyRejected);
+                        it->second.reader->OnStreamError(kDataStreamAssemblyRejected);
                     } else {
-                        it->second->OnStreamClose(trailer.reason(), attrs);
+                        it->second.reader->OnStreamClose(trailer.reason(), attrs);
                     }
                     active_text_readers_.erase(it);
                 }
                 if (auto it = active_byte_readers_.find(trailer.stream_id()); it != active_byte_readers_.end()) {
                     if (incomplete_normal_stream) {
-                        it->second->OnStreamError(kDataStreamAssemblyRejected);
+                        it->second.reader->OnStreamError(kDataStreamAssemblyRejected);
                     } else {
-                        it->second->OnStreamClose(trailer.reason(), attrs);
+                        it->second.reader->OnStreamClose(trailer.reason(), attrs);
                     }
                     active_byte_readers_.erase(it);
                 }
@@ -2496,6 +2566,8 @@ void Room::OnIncomingDataPacketAt(
 
     // 1. 优先校验解包 LiveKit RPC 报文 (Topic 为 lk.rpc)
     if (real_topic == "lk.rpc") {
+        // Encrypted RPC is not wired by this stream/user/chat receive adapter.
+        if (decrypt_owner) return;
         std::string text_payload(real_payload.begin(), real_payload.end());
         auto rpc_pkt_opt = RpcPacket::Decode(text_payload);
         if (rpc_pkt_opt.has_value()) {
@@ -2511,7 +2583,7 @@ void Room::OnIncomingDataPacketAt(
     SenderContext sender_context;
     {
         std::lock_guard lock(room_mutex_);
-        if (!IsNativeGenerationCurrentLocked(generation)) return;
+        if (!can_commit()) return;
         sender_context = ResolveSenderContextLocked(
             real_sender_sid, sender_identity, &resolved_participant);
         remote_p = std::dynamic_pointer_cast<RemoteParticipant>(resolved_participant);
@@ -2530,7 +2602,7 @@ void Room::OnIncomingDataPacketAt(
         chat.sender_identity = !sender_identity.empty() ? sender_identity : (remote_p ? remote_p->identity() : real_sender_sid);
         std::shared_ptr<Participant> p = remote_p ? remote_p : (local_p && (local_p->sid() == real_sender_sid || local_p->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_p) : nullptr);
         for (const auto& listener : listeners_snapshot) {
-            DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
+            DeliverListener({generation, {}, true, false, decrypt_owner}, listener, [&](RoomListener& target) {
                 target.OnChatMessage(chat, p);
             });
         }
@@ -2541,7 +2613,7 @@ void Room::OnIncomingDataPacketAt(
         if (chat_opt.has_value()) {
             std::shared_ptr<Participant> p = remote_p ? remote_p : (local_p && (local_p->sid() == real_sender_sid || local_p->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_p) : nullptr);
             for (const auto& listener : listeners_snapshot) {
-                DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
+                DeliverListener({generation, {}, true, false, decrypt_owner}, listener, [&](RoomListener& target) {
                     target.OnChatMessage(chat_opt.value(), p);
                 });
             }
@@ -2553,7 +2625,7 @@ void Room::OnIncomingDataPacketAt(
     if (!chat_dispatched && real_topic != "lk.chat" && real_topic != "lk-chat-topic" && real_topic != "lk.rpc") {
         {
             std::lock_guard lock(room_mutex_);
-            if (!IsNativeGenerationCurrentLocked(generation)) return;
+            if (!can_commit()) return;
             ParticipantEvent event = resolved_participant
                 ? MakeParticipantEventLocked(
                     ParticipantEventKind::DataReceived,
@@ -2564,10 +2636,10 @@ void Room::OnIncomingDataPacketAt(
             event.sender = sender_context;
             event.data = real_payload;
             event.topic = real_topic;
-            EnqueueParticipantEventLocked(std::move(event));
+            EnqueueParticipantEventLocked(std::move(event), decrypt_owner);
         }
         for (const auto& listener : listeners_snapshot) {
-            DeliverListener({generation, {}, true}, listener, [&](RoomListener& target) {
+            DeliverListener({generation, {}, true, false, decrypt_owner}, listener, [&](RoomListener& target) {
                 target.OnDataReceived(real_payload, remote_p, real_topic);
             }, true);
         }
@@ -2795,8 +2867,8 @@ asio::awaitable<void> Room::WaitForReliableDataChannel(
 
 Room::PendingOperationCleanup Room::TakePendingOperationsLocked() {
     // Retire only this bundle's streams, under the same lock as DC commits.
-    for (auto& [id, reader] : active_text_readers_) reader->OnStreamClose("session closed", {});
-    for (auto& [id, reader] : active_byte_readers_) reader->OnStreamClose("session closed", {});
+    for (auto& [id, entry] : active_text_readers_) entry.reader->OnStreamClose("session closed", {});
+    for (auto& [id, entry] : active_byte_readers_) entry.reader->OnStreamClose("session closed", {});
     active_text_readers_.clear();
     active_byte_readers_.clear();
     incoming_stream_deadlines_.clear();
@@ -6967,7 +7039,7 @@ asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
         if (full_restart) {
             uint64_t restart_connect_generation = 0;
             try {
-                std::deque<ParticipantEvent> retired_events;
+                std::deque<QueuedParticipantEvent> retired_events;
                 std::shared_ptr<SignalClient> old_signal;
                 webrtc::scoped_refptr<webrtc::PeerConnectionInterface> old_publisher;
                 webrtc::scoped_refptr<webrtc::PeerConnectionInterface> old_subscriber;
@@ -7223,7 +7295,7 @@ asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
     std::vector<std::shared_ptr<webrtc::DataChannelObserver>> data_channel_observers;
     std::vector<RemoteTrackSinkBinding> track_sinks;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
-    std::deque<ParticipantEvent> retired_events;
+    std::deque<QueuedParticipantEvent> retired_events;
     PendingOperationCleanup pending;
     uint64_t disconnected_generation = 0;
     {

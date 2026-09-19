@@ -11,6 +11,7 @@
 #include <thread>
 #include <vector>
 
+#include "api/crypto/frame_crypto_transformer.h"
 #include "data_stream.h"
 #include "data_stream_assembler.h"
 #include "room.h"
@@ -73,6 +74,13 @@ public:
     static std::shared_ptr<DataStreamReaderBudget> Budget(const Room& room) {
         std::lock_guard lock(room.room_mutex_);
         return room.incoming_reader_budget_;
+    }
+
+    static void AfterDecrypt(Room& room, std::function<void()> hook) {
+        std::lock_guard lock(room.room_mutex_);
+        auto hooks = std::make_shared<Room::StreamDeliveryTestHooks>();
+        hooks->after_decrypt_before_commit = std::move(hook);
+        room.stream_delivery_test_hooks_ = std::move(hooks);
     }
 
     static bool AssemblerContains(const Room& room,
@@ -200,8 +208,28 @@ public:
         byte_readers.push_back(std::move(reader));
     }
 
+    void OnDataReceived(const std::vector<uint8_t>& payload,
+                        std::shared_ptr<livekit::RemoteParticipant>,
+                        const std::string&) override {
+        raw_data.push_back(payload);
+    }
+
+    void OnParticipantEvent(const livekit::ParticipantEvent& event) override {
+        ++event_count;
+        if (event.kind == livekit::ParticipantEventKind::DataReceived) {
+            event_data.push_back(event.data);
+        }
+    }
+
+    void OnChatMessage(const livekit::ChatMessage&,
+                       std::shared_ptr<livekit::Participant>) override { ++chat_count; }
+
+    size_t event_count = 0;
+    size_t chat_count = 0;
     std::vector<std::shared_ptr<livekit::TextStreamReader>> text_readers;
     std::vector<std::shared_ptr<livekit::ByteStreamReader>> byte_readers;
+    std::vector<std::vector<uint8_t>> raw_data;
+    std::vector<std::vector<uint8_t>> event_data;
 };
 
 void TestReaderBudgets() {
@@ -872,9 +900,677 @@ void TestRoomReaderLifecycle() {
         *room, 3, reader_limits, assembler_limits);
 }
 
+// Generate protocol packets using the LiveKit WebRTC cryptor used by the Rust
+// reference (webrtc-sys/src/frame_cryptor.cpp), independently of the local helper
+// under test. Nonces may vary; no assertion depends on random bytes or timing.
+class EncryptedStreamPeer final {
+public:
+    static constexpr int kKeyIndex = 3;
+    static constexpr char kIdentity[] = "e2ee-alice";
+
+    explicit EncryptedStreamPeer(bool shared_key,
+                                 bool hkdf = false,
+                                 std::string salt = "LKFrameEncryptionKey") {
+        webrtc::KeyProviderOptions options;
+        options.shared_key = shared_key;
+        options.ratchet_salt.assign(salt.begin(), salt.end());
+        options.key_derivation_algorithm = hkdf ? webrtc::kHKDF : webrtc::kPBKDF2;
+        options.ratchet_window_size = 16;
+        provider_ = webrtc::make_ref_counted<webrtc::DefaultKeyProviderImpl>(options);
+        if (shared_key) {
+            TEST_CHECK(provider_->SetSharedKey(kKeyIndex, KeyMaterial()));
+        } else {
+            TEST_CHECK(provider_->SetKey(kIdentity, kKeyIndex, KeyMaterial()));
+        }
+        cryptor_ = webrtc::make_ref_counted<webrtc::DataPacketCryptor>(
+            webrtc::FrameCryptorTransformer::Algorithm::kAesGcm, provider_);
+    }
+
+    static std::vector<uint8_t> KeyMaterial() {
+        return std::vector<uint8_t>(32, 0x42); // Public, synthetic test material.
+    }
+
+    livekit::proto::DataPacket Encrypt(const livekit::proto::DataPacket& plain) {
+        livekit::proto::EncryptedPacketPayload inner;
+        if (plain.has_stream_header()) {
+            *inner.mutable_stream_header() = plain.stream_header();
+        } else if (plain.has_stream_chunk()) {
+            *inner.mutable_stream_chunk() = plain.stream_chunk();
+        } else if (plain.has_user()) {
+            *inner.mutable_user() = plain.user();
+        } else if (plain.has_chat_message()) {
+            *inner.mutable_chat_message() = plain.chat_message();
+        } else {
+            TEST_CHECK(plain.has_stream_trailer());
+            *inner.mutable_stream_trailer() = plain.stream_trailer();
+        }
+        std::string encoded;
+        TEST_CHECK(inner.SerializeToString(&encoded));
+        return EncryptBytes(std::vector<uint8_t>(encoded.begin(), encoded.end()));
+    }
+
+    void SetKey(int index, const std::vector<uint8_t>& material) {
+        TEST_CHECK(provider_->SetKey(kIdentity, index, material));
+    }
+
+    livekit::proto::DataPacket EncryptBytes(const std::vector<uint8_t>& bytes,
+                                           int index = kKeyIndex) {
+        auto sealed = cryptor_->Encrypt(kIdentity, index, bytes);
+        TEST_CHECK(sealed.ok());
+        auto verified = cryptor_->Decrypt(kIdentity, sealed.value());
+        TEST_CHECK(verified.ok());
+        TEST_CHECK(verified.value() == bytes);
+        TEST_CHECK(sealed.value()->key_index == index);
+        TEST_CHECK(sealed.value()->iv.size() == 12);
+
+        livekit::proto::DataPacket packet;
+        packet.set_participant_identity(kIdentity);
+        packet.set_participant_sid("PA_READER");
+        auto* envelope = packet.mutable_encrypted_packet();
+        envelope->set_encryption_type(livekit::proto::Encryption::GCM);
+        envelope->set_key_index(sealed.value()->key_index);
+        envelope->set_iv(sealed.value()->iv.data(), sealed.value()->iv.size());
+        envelope->set_encrypted_value(
+            sealed.value()->data.data(), sealed.value()->data.size());
+        return packet;
+    }
+
+    livekit::proto::DataPacket Tamper(livekit::proto::DataPacket packet) {
+        auto* data = packet.mutable_encrypted_packet()->mutable_encrypted_value();
+        TEST_CHECK(!data->empty());
+        data->back() ^= 1;
+        const auto& envelope = packet.encrypted_packet();
+        auto native = webrtc::make_ref_counted<webrtc::EncryptedPacket>(
+            std::vector<uint8_t>(data->begin(), data->end()),
+            std::vector<uint8_t>(envelope.iv().begin(), envelope.iv().end()),
+            static_cast<uint8_t>(envelope.key_index()));
+        TEST_CHECK(!cryptor_->Decrypt(kIdentity, native).ok());
+        return packet;
+    }
+
+private:
+    webrtc::scoped_refptr<webrtc::KeyProvider> provider_;
+    webrtc::scoped_refptr<webrtc::DataPacketCryptor> cryptor_;
+};
+
+struct EncryptedRoomFixture {
+    using Access = livekit::RoomStreamDeliveryTestAccess;
+    using Clock = livekit::IncomingDataStreamAssembler::Clock;
+
+    asio::io_context io;
+    std::shared_ptr<livekit::Room> room = livekit::Room::Create(io.get_executor());
+    std::shared_ptr<ReaderTrace> trace = std::make_shared<ReaderTrace>();
+    Clock::time_point now = Clock::now();
+
+    EncryptedRoomFixture() {
+        room->AddListener(trace);
+        Access::InstallSession(*room, 1, {});
+    }
+
+    void Enable(bool shared_key, bool install_key = true, bool wrong_key = false) {
+        livekit::KeyProviderOptions options;
+        options.shared_key = shared_key;
+        auto provider = std::make_shared<livekit::KeyProvider>(options);
+        if (install_key) {
+            auto material = EncryptedStreamPeer::KeyMaterial();
+            if (wrong_key) material.front() ^= 1;
+            if (shared_key) {
+                provider->SetSharedKey(material, EncryptedStreamPeer::kKeyIndex);
+            } else {
+                TEST_CHECK(provider->SetKey(EncryptedStreamPeer::kIdentity,
+                    EncryptedStreamPeer::kKeyIndex, material));
+            }
+        }
+        room->EnableE2ee({livekit::EncryptionType::GCM, provider});
+    }
+
+    void DrainEvents() {
+        io.restart();
+        io.poll(); // Only ready callbacks; never wait for the Reader TTL timer.
+    }
+
+    void Dispatch(livekit::proto::DataPacket packet, uint64_t generation = 1) {
+        if (packet.participant_identity().empty()) {
+            packet.set_participant_identity(EncryptedStreamPeer::kIdentity);
+        }
+        Access::DispatchAt(*room, packet, generation, now);
+        DrainEvents();
+    }
+
+    void CheckNoRawData() const {
+        TEST_CHECK(trace->raw_data.empty());
+        TEST_CHECK(trace->event_data.empty());
+    }
+};
+
+void TestEncryptedHeader(bool byte_stream, bool shared_key) {
+    EncryptedRoomFixture f;
+    f.Enable(shared_key);
+    EncryptedStreamPeer peer(shared_key);
+    const std::string id = "encrypted-header";
+    auto budget = EncryptedRoomFixture::Access::Budget(*f.room);
+    f.Dispatch(peer.Encrypt(byte_stream ? ByteHeader(id, 3) : TextHeader(id, 3)));
+    // This must open a real Reader, not report ciphertext as raw application data.
+    TEST_CHECK(f.trace->text_readers.size() == (byte_stream ? 0u : 1u));
+    TEST_CHECK(f.trace->byte_readers.size() == (byte_stream ? 1u : 0u));
+    f.CheckNoRawData();
+    TEST_CHECK(budget->active_readers() == 1);
+    f.Dispatch(peer.Encrypt(StreamChunk(id, 0, "ab")));
+    f.Dispatch(peer.Encrypt(StreamChunk(id, 1, "c")));
+    TEST_CHECK(budget->buffered_bytes() == 3);
+    f.Dispatch(peer.Encrypt(StreamTrailer(id)));
+    TEST_CHECK(budget->active_readers() == 0);
+    // Normal termination retains the unread bytes until consumed.
+    TEST_CHECK(budget->buffered_bytes() == 3);
+    if (byte_stream) {
+        const auto& reader = f.trace->byte_readers.front();
+        TEST_CHECK(reader->is_closed() && !reader->is_failed());
+        TEST_CHECK(reader->close_reason().empty());
+        TEST_CHECK(reader->info().sender_identity == EncryptedStreamPeer::kIdentity);
+        TEST_CHECK(reader->ReadAll() == std::vector<uint8_t>({'a', 'b', 'c'}));
+    } else {
+        const auto& reader = f.trace->text_readers.front();
+        TEST_CHECK(reader->is_closed() && !reader->is_failed());
+        TEST_CHECK(reader->close_reason().empty());
+        TEST_CHECK(reader->info().sender_identity == EncryptedStreamPeer::kIdentity);
+        TEST_CHECK(reader->ReadAll() == "abc");
+    }
+    TEST_CHECK(budget->buffered_bytes() == 0);
+    // The existing legacy assembler may emit the authenticated plaintext once.
+    const std::vector<std::vector<uint8_t>> plaintext{{'a', 'b', 'c'}};
+    TEST_CHECK(f.trace->raw_data == plaintext);
+    TEST_CHECK(f.trace->event_data == plaintext);
+}
+
+template <typename Reader>
+void CheckEncryptionMismatch(EncryptedRoomFixture& f,
+                             EncryptedStreamPeer& peer,
+                             std::shared_ptr<Reader> reader,
+                             bool encrypted_header) {
+    const auto id = reader->info().stream_id;
+    // No queued bytes: ReadAll must be woken by failure without a trailer/TTL.
+    std::latch reading(1);
+    auto waiter = std::async(std::launch::async, [reader, &reading] {
+        reading.count_down();
+        try {
+            (void)reader->ReadAll();
+        } catch (const std::runtime_error& error) {
+            return std::string(error.what());
+        }
+        return std::string("unexpected normal completion");
+    });
+    reading.wait();
+    const auto chunk = StreamChunk(id, 0, "x");
+    f.Dispatch(encrypted_header ? chunk : peer.Encrypt(chunk));
+    const bool closed_on_dispatch = reader->is_closed();
+    // Preserve the failed observation, but release the worker before TEST_CHECK
+    // exits so the red test itself cannot hang during process teardown.
+    if (!closed_on_dispatch) reader->OnStreamError("test cleanup after missing terminal");
+    TEST_CHECK(waiter.wait_for(std::chrono::seconds(2)) == std::future_status::ready);
+    const auto waiter_reason = waiter.get();
+    TEST_CHECK(closed_on_dispatch);
+    TEST_CHECK(reader->is_failed());
+    constexpr auto reason = "data stream encryption type mismatch";
+    TEST_CHECK(reader->close_reason() == reason);
+    TEST_CHECK(waiter_reason == reason);
+    auto budget = EncryptedRoomFixture::Access::Budget(*f.room);
+    TEST_CHECK(budget->active_readers() == 0);
+    TEST_CHECK(budget->buffered_bytes() == 0);
+    TEST_CHECK(!EncryptedRoomFixture::Access::AssemblerContains(*f.room, id));
+    TEST_CHECK(!EncryptedRoomFixture::Access::HasDeadline(*f.room, id));
+    // A one-byte final chunk would otherwise let the assembler emit plaintext
+    // before the Reader checked its type. Neither delivery surface may see it.
+    f.CheckNoRawData();
+    f.Dispatch(peer.Encrypt(StreamChunk(id, 1, "late")));
+    f.Dispatch(StreamTrailer(id));
+    f.Dispatch(peer.Encrypt(StreamTrailer(id)));
+    TEST_CHECK(reader->close_reason() == reason);
+    TEST_CHECK(budget->buffered_bytes() == 0);
+    f.CheckNoRawData();
+}
+
+void TestEncryptionMismatch(bool byte_stream, bool encrypted_header) {
+    EncryptedRoomFixture f;
+    f.Enable(false);
+    EncryptedStreamPeer peer(false);
+    const std::string id = "mixed-encryption";
+    auto header = byte_stream ? ByteHeader(id, 1) : TextHeader(id, 1);
+    f.Dispatch(encrypted_header ? peer.Encrypt(header) : header);
+    if (byte_stream) {
+        TEST_CHECK(f.trace->byte_readers.size() == 1);
+        CheckEncryptionMismatch(f, peer, f.trace->byte_readers.front(), encrypted_header);
+    } else {
+        TEST_CHECK(f.trace->text_readers.size() == 1);
+        CheckEncryptionMismatch(f, peer, f.trace->text_readers.front(), encrypted_header);
+    }
+}
+
+enum class UndecryptableCase { Disabled, MissingKey, WrongKey, Tampered };
+
+void TestUndecryptableDoesNotFallback(UndecryptableCase failure) {
+    EncryptedRoomFixture f;
+    if (failure != UndecryptableCase::Disabled) {
+        f.Enable(false, failure != UndecryptableCase::MissingKey,
+                 failure == UndecryptableCase::WrongKey);
+    }
+    EncryptedStreamPeer peer(false);
+    const std::string id = "unaffected-plaintext";
+    f.Dispatch(TextHeader(id));
+    auto reader = f.trace->text_readers.front();
+    const auto deadline = EncryptedRoomFixture::Access::Deadline(*f.room, id);
+    auto budget = EncryptedRoomFixture::Access::Budget(*f.room);
+    auto packet = peer.Encrypt(StreamChunk(id, 0, "unauthenticated"));
+    if (failure == UndecryptableCase::Tampered) packet = peer.Tamper(std::move(packet));
+    f.Dispatch(std::move(packet));
+    f.CheckNoRawData();
+    TEST_CHECK(f.trace->text_readers.size() == 1);
+    TEST_CHECK(f.trace->byte_readers.empty());
+    TEST_CHECK(!reader->is_closed());
+    TEST_CHECK(budget->active_readers() == 1);
+    TEST_CHECK(budget->buffered_bytes() == 0);
+    TEST_CHECK(EncryptedRoomFixture::Access::Deadline(*f.room, id) == deadline);
+    // Authentication failure cannot reveal a trustworthy stream id. Do not
+    // invent a mismatch, refresh TTL or damage another Reader from ciphertext.
+    f.Dispatch(StreamChunk(id, 0, "ok"));
+    f.Dispatch(StreamTrailer(id));
+    TEST_CHECK(reader->is_closed() && !reader->is_failed());
+    TEST_CHECK(reader->ReadAll() == "ok");
+    TEST_CHECK(budget->active_readers() == 0 && budget->buffered_bytes() == 0);
+    f.CheckNoRawData();
+}
+
+void TestEncryptedOldGeneration() {
+    EncryptedRoomFixture f;
+    f.Enable(false);
+    EncryptedStreamPeer peer(false);
+    const std::string id = "reused-session-stream";
+    f.Dispatch(TextHeader(id));
+    auto old_reader = f.trace->text_readers.back();
+    f.Dispatch(StreamChunk(id, 0, "old"));
+    auto old_budget = EncryptedRoomFixture::Access::Budget(*f.room);
+
+    // Queue callbacks carrying generation 1, then install a new session before
+    // allowing them to execute. Include plaintext as a non-vacuous guard control.
+    const std::vector<livekit::proto::DataPacket> late_packets{
+        peer.Encrypt(TextHeader(id)), peer.Encrypt(ByteHeader("old-only")),
+        peer.Encrypt(StreamChunk(id, 0, "late")), peer.Encrypt(StreamTrailer(id)),
+        peer.Tamper(peer.Encrypt(StreamChunk(id, 1, "bad"))),
+        TextHeader(id), StreamChunk(id, 0, "late"), StreamTrailer(id)};
+    for (const auto& packet : late_packets) {
+        asio::post(f.io, [room = f.room, packet, now = f.now] {
+            EncryptedRoomFixture::Access::DispatchAt(*room, packet, 1, now);
+        });
+    }
+    EncryptedRoomFixture::Access::AdvanceSession(*f.room, 2, {});
+    // Deliberately do not poll until the replacement Reader has been installed.
+    EncryptedRoomFixture::Access::DispatchAt(*f.room, TextHeader(id), 2, f.now);
+    auto current = f.trace->text_readers.back();
+    auto budget = EncryptedRoomFixture::Access::Budget(*f.room);
+    const auto deadline = EncryptedRoomFixture::Access::Deadline(*f.room, id);
+    f.DrainEvents();
+    TEST_CHECK(f.trace->text_readers.size() == 2);
+    TEST_CHECK(f.trace->byte_readers.empty());
+    TEST_CHECK(current != old_reader && !current->is_closed());
+    TEST_CHECK(old_reader->close_reason() == "session closed");
+    TEST_CHECK(old_budget != budget);
+    TEST_CHECK(old_budget->active_readers() == 0 && old_budget->buffered_bytes() == 3);
+    TEST_CHECK(budget->active_readers() == 1 && budget->buffered_bytes() == 0);
+    TEST_CHECK(EncryptedRoomFixture::Access::Deadline(*f.room, id) == deadline);
+    f.CheckNoRawData();
+    f.Dispatch(StreamChunk(id, 0, "new"), 2);
+    f.Dispatch(StreamTrailer(id), 2);
+    TEST_CHECK(current->is_closed() && !current->is_failed());
+    TEST_CHECK(current->ReadAll() == "new");
+    std::string old_data;
+    TEST_CHECK(old_reader->ReadNext(old_data) && old_data == "old");
+    TEST_CHECK(old_budget->buffered_bytes() == 0 && budget->buffered_bytes() == 0);
+}
+
+void TestDecryptCommitReplacement(bool replace_session) {
+    using Access = EncryptedRoomFixture::Access;
+    // Stop after authentication, before each kind of state/callback commit.
+    // The same stream id is deliberately reused by the replacement owner.
+    for (int kind = 0; kind < 6; ++kind) {
+        EncryptedRoomFixture f;
+        f.Enable(false);
+        EncryptedStreamPeer peer(false);
+        const std::string id = "decrypt-commit";
+        f.Dispatch(peer.Encrypt(TextHeader(id)));
+        auto old_reader = f.trace->text_readers.back();
+        auto old_budget = Access::Budget(*f.room);
+        f.Dispatch(peer.Encrypt(StreamChunk(id, 0, "old")));
+        livekit::proto::DataPacket plain;
+        switch (kind) {
+        case 0: plain = TextHeader(id); break;
+        case 1: plain = ByteHeader(id); break;
+        case 2: plain = StreamChunk(id, 0, "bad"); break;
+        case 3: plain = StreamTrailer(id); break;
+        case 4:
+            plain.mutable_user()->set_payload("old data");
+            plain.mutable_user()->set_topic("reader-budget");
+            break;
+        case 5: plain.mutable_chat_message()->set_message("old chat"); break;
+        }
+        auto packet = peer.Encrypt(plain);
+        std::promise<void> entered;
+        auto reached = entered.get_future();
+        std::latch resume(1);
+        Access::AfterDecrypt(*f.room, [&] {
+            entered.set_value();
+            resume.wait();
+        });
+        auto dispatch = std::async(std::launch::async, [&] {
+            Access::DispatchAt(*f.room, packet, 1, f.now);
+        });
+        const bool reached_commit =
+            reached.wait_for(std::chrono::seconds(2)) == std::future_status::ready;
+        if (!reached_commit) {
+            resume.count_down();
+            dispatch.get();
+            TEST_CHECK(reached_commit);
+        }
+        Access::AfterDecrypt(*f.room, {});
+        const uint64_t generation = replace_session ? 2 : 1;
+        if (replace_session) Access::AdvanceSession(*f.room, generation, {});
+        else f.Enable(false);
+        f.Dispatch(peer.Encrypt(TextHeader(id, 3)), generation);
+        auto current = f.trace->text_readers.back();
+        auto budget = Access::Budget(*f.room);
+        const auto deadline = Access::Deadline(*f.room, id);
+        const auto event_count = f.trace->event_count;
+        resume.count_down();
+        dispatch.get();
+        f.DrainEvents();
+        TEST_CHECK(f.trace->text_readers.size() == 2);
+        TEST_CHECK(f.trace->byte_readers.empty());
+        TEST_CHECK(f.trace->event_count == event_count);
+        TEST_CHECK(f.trace->chat_count == 0);
+        f.CheckNoRawData();
+        TEST_CHECK(current != old_reader && !current->is_closed());
+        TEST_CHECK(old_reader->close_reason() ==
+            (replace_session ? "session closed" : livekit::kDataStreamReplaced));
+        TEST_CHECK(budget->active_readers() == 1);
+        TEST_CHECK(budget->buffered_bytes() == (replace_session ? 0 : 3));
+        TEST_CHECK(Access::Deadline(*f.room, id) == deadline);
+        TEST_CHECK(Access::AssemblerContains(*f.room, id));
+        f.Dispatch(peer.Encrypt(StreamChunk(id, 0, "new")), generation);
+        f.Dispatch(peer.Encrypt(StreamTrailer(id)), generation);
+        TEST_CHECK(!current->is_failed() && current->ReadAll() == "new");
+        std::string prefix;
+        TEST_CHECK(old_reader->ReadNext(prefix) && prefix == "old");
+        TEST_CHECK(old_budget->buffered_bytes() == 0 && budget->buffered_bytes() == 0);
+    }
+}
+
+void TestEncryptedQueuedEventOwner() {
+    EncryptedRoomFixture f;
+    f.Enable(false);
+    EncryptedStreamPeer peer(false);
+    // Legacy delivery was already admitted, but the queued participant event
+    // must re-admit against the manager that authenticated this packet.
+    EncryptedRoomFixture::Access::DispatchAt(
+        *f.room, peer.Encrypt(TextHeader("queued")), 1, f.now);
+    TEST_CHECK(f.trace->text_readers.size() == 1);
+    TEST_CHECK(f.trace->event_count == 0);
+    f.Enable(false);
+    f.DrainEvents();
+    TEST_CHECK(f.trace->event_count == 0);
+    livekit::proto::DataPacket user;
+    user.mutable_user()->set_payload("verified");
+    user.mutable_user()->set_topic("reader-budget");
+    EncryptedRoomFixture::Access::DispatchAt(*f.room, peer.Encrypt(user), 1, f.now);
+    TEST_CHECK(f.trace->raw_data.size() == 1);
+    f.Enable(false);
+    f.DrainEvents();
+    TEST_CHECK(f.trace->event_data.empty());
+    // A packet admitted under the current owner is still delivered normally.
+    f.Dispatch(peer.Encrypt(user));
+    TEST_CHECK(f.trace->event_data == std::vector<std::vector<uint8_t>>({
+        {'v', 'e', 'r', 'i', 'f', 'i', 'e', 'd'}}));
+    livekit::proto::DataPacket chat;
+    chat.mutable_chat_message()->set_message("verified chat");
+    f.Dispatch(peer.Encrypt(chat));
+    TEST_CHECK(f.trace->chat_count == 1);
+}
+
+void TestEncryptedListenerReadmission() {
+    class ReplacingListener final : public livekit::RoomListener {
+    public:
+        std::function<void()> replace;
+        void OnTextStreamOpened(std::shared_ptr<livekit::TextStreamReader>,
+                                std::shared_ptr<livekit::Participant>) override { replace(); }
+        void OnDataReceived(const std::vector<uint8_t>&,
+                            std::shared_ptr<livekit::RemoteParticipant>,
+                            const std::string&) override { replace(); }
+        void OnChatMessage(const livekit::ChatMessage&,
+                           std::shared_ptr<livekit::Participant>) override { replace(); }
+    };
+    EncryptedRoomFixture f;
+    f.Enable(false);
+    EncryptedStreamPeer peer(false);
+    auto replacing = std::make_shared<ReplacingListener>();
+    size_t replacements = 0;
+    replacing->replace = [&] { ++replacements; f.Enable(false); };
+    f.room->RemoveListener(f.trace);
+    f.room->AddListener(replacing);
+    f.room->AddListener(f.trace);
+    f.Dispatch(peer.Encrypt(TextHeader("readmit")));
+    livekit::proto::DataPacket user, chat;
+    user.mutable_user()->set_payload("stale");
+    user.mutable_user()->set_topic("reader-budget");
+    chat.mutable_chat_message()->set_message("stale");
+    f.Dispatch(peer.Encrypt(user));
+    f.Dispatch(peer.Encrypt(chat));
+    TEST_CHECK(replacements == 3);
+    TEST_CHECK(f.trace->text_readers.empty());
+    TEST_CHECK(f.trace->event_count == 0 && f.trace->chat_count == 0);
+    f.CheckNoRawData();
+}
+
+void TestEncryptedSlotRotationAndUnreadMismatch() {
+    EncryptedRoomFixture f;
+    livekit::KeyProviderOptions options;
+    auto provider = std::make_shared<livekit::KeyProvider>(options);
+    provider->SetKey(EncryptedStreamPeer::kIdentity, 3, EncryptedStreamPeer::KeyMaterial());
+    f.room->EnableE2ee({livekit::EncryptionType::GCM, provider});
+    EncryptedStreamPeer peer(false);
+    f.Dispatch(peer.Encrypt(TextHeader("rotate")));
+    auto reader = f.trace->text_readers.back();
+    auto budget = EncryptedRoomFixture::Access::Budget(*f.room);
+    f.Dispatch(peer.Encrypt(StreamChunk("rotate", 0, "a")));
+    auto material = EncryptedStreamPeer::KeyMaterial();
+    material.back() ^= 1;
+    provider->SetKey(EncryptedStreamPeer::kIdentity, 4, material);
+    peer.SetKey(4, material);
+    livekit::proto::EncryptedPacketPayload chunk;
+    *chunk.mutable_stream_chunk() = StreamChunk("rotate", 1, "b").stream_chunk();
+    const auto encoded = chunk.SerializeAsString();
+    f.Dispatch(peer.EncryptBytes({encoded.begin(), encoded.end()}, 4));
+    TEST_CHECK(!reader->is_closed() && budget->buffered_bytes() == 2);
+    f.Dispatch(StreamChunk("rotate", 2, "untrusted"));
+    TEST_CHECK(reader->close_reason() == livekit::kDataStreamEncryptionTypeMismatch);
+    TEST_CHECK(budget->active_readers() == 0 && budget->buffered_bytes() == 2);
+    TEST_CHECK(!EncryptedRoomFixture::Access::HasDeadline(*f.room, "rotate"));
+    std::string prefix;
+    TEST_CHECK(reader->ReadNext(prefix) && prefix == "a");
+    TEST_CHECK(reader->ReadNext(prefix) && prefix == "b");
+    TEST_CHECK(!reader->ReadNext(prefix));
+    TEST_CHECK(budget->buffered_bytes() == 0);
+    f.CheckNoRawData();
+}
+
+livekit::EncryptedDataPacket CryptoEnvelope(const livekit::proto::DataPacket& packet) {
+    const auto& e = packet.encrypted_packet();
+    return {static_cast<livekit::EncryptionType>(e.encryption_type()), e.key_index(),
+        {e.iv().begin(), e.iv().end()}, {e.encrypted_value().begin(), e.encrypted_value().end()}};
+}
+
+void TestPacketCryptorBoundaries() {
+    using Error = livekit::PacketCryptoError;
+    livekit::KeyProviderOptions options;
+    auto provider = std::make_shared<livekit::KeyProvider>(options);
+    provider->SetKey(EncryptedStreamPeer::kIdentity, 3, EncryptedStreamPeer::KeyMaterial());
+    livekit::DataPacketCryptor cryptor(provider);
+    EncryptedStreamPeer peer(false);
+    const auto check_error = [&](const livekit::EncryptedDataPacket& packet, Error expected) {
+        auto result = cryptor.DecryptPacket(EncryptedStreamPeer::kIdentity, packet);
+        TEST_CHECK(std::holds_alternative<Error>(result));
+        TEST_CHECK(std::get<Error>(result) == expected);
+    };
+    const auto good = CryptoEnvelope(peer.Encrypt(TextHeader("bounds")));
+    for (auto type : {livekit::EncryptionType::NONE, livekit::EncryptionType::CUSTOM,
+                      static_cast<livekit::EncryptionType>(99)}) {
+        auto bad = good;
+        bad.encryption_type = type;
+        check_error(bad, Error::UnsupportedType);
+    }
+    for (uint32_t index : {16u, 259u, std::numeric_limits<uint32_t>::max()}) {
+        auto bad = good;
+        bad.key_index = index;
+        check_error(bad, Error::InvalidEnvelope);
+    }
+    auto bad = good;
+    bad.iv.pop_back();
+    check_error(bad, Error::InvalidEnvelope);
+    bad = good;
+    bad.ciphertext.resize(15);
+    check_error(bad, Error::InvalidEnvelope);
+    bad = good;
+    bad.key_index = 4;
+    check_error(bad, Error::MissingKey);
+    bad = good;
+    bad.ciphertext.back() ^= 1;
+    check_error(bad, Error::AuthenticationFailed);
+    auto result = cryptor.DecryptPacket("another-participant", good);
+    TEST_CHECK(std::get<Error>(result) == Error::MissingKey);
+    result = cryptor.DecryptPacket("", good);
+    TEST_CHECK(std::get<Error>(result) == Error::InvalidEnvelope);
+    // A failed authentication must not poison subsequent valid packets.
+    TEST_CHECK(std::holds_alternative<livekit::AuthenticatedDataPayload>(
+        cryptor.DecryptPacket(EncryptedStreamPeer::kIdentity, good)));
+    std::vector<uint8_t> limit(livekit::DataPacketCryptor::kMaxEncryptedPacketBytes - 28, 0x61);
+    auto bounded = CryptoEnvelope(peer.EncryptBytes(limit));
+    result = cryptor.DecryptPacket(EncryptedStreamPeer::kIdentity, bounded);
+    TEST_CHECK(std::get<livekit::AuthenticatedDataPayload>(result).bytes == limit);
+    bounded.ciphertext.push_back(0);
+    check_error(bounded, Error::SizeLimitExceeded);
+
+    // Explicit slot rotation and replacement invalidate the bounded backend cache.
+    auto changed = EncryptedStreamPeer::KeyMaterial();
+    changed.front() ^= 1;
+    peer.SetKey(4, changed);
+    provider->SetKey(EncryptedStreamPeer::kIdentity, 4, changed);
+    const std::vector<uint8_t> sample{1, 2, 3};
+    auto rotated = CryptoEnvelope(peer.EncryptBytes(sample, 4));
+    result = cryptor.DecryptPacket(EncryptedStreamPeer::kIdentity, rotated);
+    TEST_CHECK(std::get<livekit::AuthenticatedDataPayload>(result).bytes == sample);
+    peer.SetKey(3, changed);
+    provider->SetKey(EncryptedStreamPeer::kIdentity, 3, changed);
+    check_error(good, Error::AuthenticationFailed);
+    result = cryptor.DecryptPacket(EncryptedStreamPeer::kIdentity,
+                                   CryptoEnvelope(peer.EncryptBytes(sample)));
+    TEST_CHECK(std::get<livekit::AuthenticatedDataPayload>(result).bytes == sample);
+    provider->SetKey(EncryptedStreamPeer::kIdentity, 3, {});
+    check_error(good, Error::MissingKey);
+
+    options.key_derivation_algorithm = livekit::KeyDerivationAlgorithm::HKDF;
+    options.ratchet_salt = "packet-test-salt";
+    auto hkdf_provider = std::make_shared<livekit::KeyProvider>(options);
+    hkdf_provider->SetKey(EncryptedStreamPeer::kIdentity, 3, EncryptedStreamPeer::KeyMaterial());
+    livekit::DataPacketCryptor hkdf(hkdf_provider);
+    EncryptedStreamPeer hkdf_peer(false, true, options.ratchet_salt);
+    result = hkdf.DecryptPacket(EncryptedStreamPeer::kIdentity,
+                               CryptoEnvelope(hkdf_peer.EncryptBytes(sample)));
+    TEST_CHECK(std::get<livekit::AuthenticatedDataPayload>(result).bytes == sample);
+
+    // The pre-existing helper retains its public API and AES-256 combined format.
+    livekit::KeyProviderOptions legacy_options;
+    legacy_options.shared_key = true;
+    auto legacy_provider = std::make_shared<livekit::KeyProvider>(legacy_options);
+    legacy_provider->SetSharedKey(EncryptedStreamPeer::KeyMaterial());
+    livekit::DataPacketCryptor legacy(legacy_provider);
+    std::vector<uint8_t> sealed, opened;
+    TEST_CHECK(legacy.EncryptData(sample, sealed));
+    TEST_CHECK(sealed.size() == sample.size() + 28);
+    TEST_CHECK(legacy.DecryptData(sealed, opened) && opened == sample);
+}
+
+void TestInvalidEncryptedEnvelopeNoFallback() {
+    EncryptedRoomFixture f;
+    f.Enable(false);
+    EncryptedStreamPeer peer(false);
+    const auto good = peer.Encrypt(TextHeader("bad-envelope"));
+    for (int kind = 0; kind < 9; ++kind) {
+        auto bad = good;
+        auto* e = bad.mutable_encrypted_packet();
+        switch (kind) {
+        case 0: e->set_encryption_type(livekit::proto::Encryption::NONE); break;
+        case 1: e->set_encryption_type(livekit::proto::Encryption::CUSTOM); break;
+        case 2: e->set_iv("bad"); break;
+        case 3: e->set_key_index(259); break;
+        case 4: e->set_encrypted_value(std::string(65536, 'x')); break;
+        case 5: e->set_encrypted_value("short-tag"); break;
+        case 6: bad = peer.EncryptBytes({0xff}); break; // Authenticated, invalid protobuf.
+        case 7: bad = peer.EncryptBytes({}); break; // Authenticated, unset inner oneof.
+        case 8: bad.set_participant_identity("unknown-participant"); break;
+        }
+        f.Dispatch(std::move(bad));
+        f.CheckNoRawData();
+        TEST_CHECK(f.trace->text_readers.empty() && f.trace->byte_readers.empty());
+        TEST_CHECK(!EncryptedRoomFixture::Access::HasCleanupTimer(*f.room));
+        TEST_CHECK(EncryptedRoomFixture::Access::Budget(*f.room)->active_readers() == 0);
+    }
+    f.room->e2ee_manager()->SetEnabled(false);
+    f.Dispatch(good);
+    f.CheckNoRawData();
+    TEST_CHECK(f.trace->text_readers.empty());
+    f.room->e2ee_manager()->SetEnabled(true);
+    f.Dispatch(good);
+    TEST_CHECK(f.trace->text_readers.size() == 1);
+}
+
+struct EncryptedInboundCase {
+    std::string_view name;
+    void (*run)();
+};
+
+const EncryptedInboundCase kEncryptedInboundCases[] = {
+    {"e2ee-header-text-shared", [] { TestEncryptedHeader(false, true); }},
+    {"e2ee-header-byte-participant", [] { TestEncryptedHeader(true, false); }},
+    {"e2ee-mismatch-text-none-gcm", [] { TestEncryptionMismatch(false, false); }},
+    {"e2ee-mismatch-byte-none-gcm", [] { TestEncryptionMismatch(true, false); }},
+    {"e2ee-mismatch-text-gcm-none", [] { TestEncryptionMismatch(false, true); }},
+    {"e2ee-mismatch-byte-gcm-none", [] { TestEncryptionMismatch(true, true); }},
+    {"e2ee-disabled-no-raw", [] { TestUndecryptableDoesNotFallback(UndecryptableCase::Disabled); }},
+    {"e2ee-missing-key-no-raw", [] { TestUndecryptableDoesNotFallback(UndecryptableCase::MissingKey); }},
+    {"e2ee-wrong-key-no-raw", [] { TestUndecryptableDoesNotFallback(UndecryptableCase::WrongKey); }},
+    {"e2ee-tampered-no-raw", [] { TestUndecryptableDoesNotFallback(UndecryptableCase::Tampered); }},
+    {"e2ee-old-generation", TestEncryptedOldGeneration},
+    {"e2ee-decrypt-session-replaced", [] { TestDecryptCommitReplacement(true); }},
+    {"e2ee-decrypt-manager-replaced", [] { TestDecryptCommitReplacement(false); }},
+    {"e2ee-queued-event-owner", TestEncryptedQueuedEventOwner},
+    {"e2ee-listener-readmission", TestEncryptedListenerReadmission},
+    {"e2ee-slot-rotation-unread-mismatch", TestEncryptedSlotRotationAndUnreadMismatch},
+    {"e2ee-cryptor-boundaries", TestPacketCryptorBoundaries},
+    {"e2ee-invalid-envelope-no-raw", TestInvalidEncryptedEnvelopeNoFallback},
+};
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc != 1) {
+        TEST_CHECK(argc == 3 && std::string_view(argv[1]) == "--case");
+        for (const auto& test : kEncryptedInboundCases) {
+            if (test.name == argv[2]) {
+                std::cout << "[RUN] " << test.name << std::endl;
+                test.run();
+                std::cout << "[PASS] " << test.name << std::endl;
+                return 0;
+            }
+        }
+        std::cerr << "Unknown encrypted inbound test case\n";
+        return 2;
+    }
     using livekit::IncomingDataStreamAssembler;
 
     const auto start = IncomingDataStreamAssembler::Clock::now();
@@ -933,6 +1629,10 @@ int main() {
     TEST_CHECK(limited.PurgeExpired(start + std::chrono::seconds(2)) == 1);
     TEST_CHECK(limited.buffered_bytes() == 0);
 
+    for (const auto& test : kEncryptedInboundCases) {
+        std::cout << "[RUN] " << test.name << std::endl;
+        test.run();
+    }
     std::cout << "[PASS] IncomingDataStreamAssembler tests passed\n";
     return 0;
 }

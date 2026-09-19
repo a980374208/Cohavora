@@ -325,6 +325,7 @@ private:
     };
     std::shared_ptr<ConnectAttemptTestHooks> connect_attempt_test_hooks_;
     struct StreamDeliveryTestHooks {
+        std::function<void()> after_decrypt_before_commit;
         std::function<void()> before_admission;
         std::function<void()> after_admission;
         std::function<void(uint64_t)> before_full_restart_data_channel_wait;
@@ -538,8 +539,15 @@ private:
         const std::shared_ptr<TrackPublication>& publication,
         bool is_local);
     void RetireParticipantLocked(const std::shared_ptr<Participant>& participant);
-    void RetireAllMembershipsLocked(std::deque<ParticipantEvent>& retired_events);
-    void EnqueueParticipantEventLocked(ParticipantEvent event);
+    // Delivery metadata stays private; the public ParticipantEvent DTO is unchanged.
+    struct QueuedParticipantEvent : ParticipantEvent {
+        std::shared_ptr<E2eeManager> e2ee_owner;
+        QueuedParticipantEvent(ParticipantEvent event, std::shared_ptr<E2eeManager> owner)
+            : ParticipantEvent(std::move(event)), e2ee_owner(std::move(owner)) {}
+    };
+    void RetireAllMembershipsLocked(std::deque<QueuedParticipantEvent>& retired_events);
+    void EnqueueParticipantEventLocked(ParticipantEvent event,
+                                      std::shared_ptr<E2eeManager> e2ee_owner = {});
     void EnqueueRosterLocked();
     void DrainParticipantEvents();
     SenderContext ResolveSenderContextLocked(
@@ -611,7 +619,7 @@ private:
     uint64_t next_participant_event_sequence_ = 1;
     std::unordered_map<const Participant*, std::shared_ptr<MembershipState>> participant_memberships_;
     std::unordered_map<const TrackPublication*, std::shared_ptr<TrackMembershipState>> track_memberships_;
-    std::deque<ParticipantEvent> participant_events_;
+    std::deque<QueuedParticipantEvent> participant_events_;
     bool participant_event_drain_scheduled_ = false;
     // Private deterministic test seam: delay taking a native batch without
     // blocking the session worker or changing queue/retirement decisions.
@@ -802,8 +810,12 @@ private:
         std::make_unique<IncomingDataStreamAssembler>();
     std::shared_ptr<DataStreamReaderBudget> incoming_reader_budget_ =
         std::make_shared<DataStreamReaderBudget>();
-    std::unordered_map<std::string, std::shared_ptr<TextStreamReader>> active_text_readers_;
-    std::unordered_map<std::string, std::shared_ptr<ByteStreamReader>> active_byte_readers_;
+    template <typename Reader> struct IncomingReader {
+        std::shared_ptr<Reader> reader;
+        EncryptionType encryption_type;
+    };
+    std::unordered_map<std::string, IncomingReader<TextStreamReader>> active_text_readers_;
+    std::unordered_map<std::string, IncomingReader<ByteStreamReader>> active_byte_readers_;
     std::unordered_map<std::string, IncomingDataStreamAssembler::TimePoint>
         incoming_stream_deadlines_;
     std::shared_ptr<asio::steady_timer> incoming_stream_cleanup_timer_;

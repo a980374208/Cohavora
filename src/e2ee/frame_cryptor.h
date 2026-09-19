@@ -6,6 +6,8 @@
 #include <map>
 #include <functional>
 #include <mutex>
+#include <string_view>
+#include <variant>
 #include "key_provider.h"
 
 namespace livekit {
@@ -57,14 +59,40 @@ private:
     EncryptionState state_{EncryptionState::NEW};
 };
 
+enum class PacketCryptoError {
+    UnsupportedType, InvalidEnvelope, MissingKey,
+    AuthenticationFailed, SizeLimitExceeded, BackendFailure
+};
+
+struct EncryptedDataPacket {
+    EncryptionType encryption_type{EncryptionType::NONE};
+    uint32_t key_index{0};
+    std::vector<uint8_t> iv;
+    std::vector<uint8_t> ciphertext;
+};
+
+struct AuthenticatedDataPayload {
+    EncryptionType encryption_type{EncryptionType::NONE};
+    std::vector<uint8_t> bytes; // Encoded EncryptedPacketPayload, authenticated.
+};
+
 class DataPacketCryptor {
 public:
     explicit DataPacketCryptor(std::shared_ptr<KeyProvider> key_provider);
 
+    // Local inbound envelope limit, including IV and GCM tag. This comfortably
+    // fits the 15 KB stream chunks; it is not a total stream transfer limit.
+    static constexpr size_t kMaxEncryptedPacketBytes = 64 * 1024;
+    std::variant<AuthenticatedDataPayload, PacketCryptoError> DecryptPacket(
+        std::string_view sender_identity, const EncryptedDataPacket& packet);
+
+    // Legacy AES-256 helper and combined IV/ciphertext/tag format are unchanged.
     bool EncryptData(const std::vector<uint8_t>& plain_data, std::vector<uint8_t>& encrypted_data);
     bool DecryptData(const std::vector<uint8_t>& encrypted_data, std::vector<uint8_t>& decrypted_data);
 
 private:
+    struct PacketBackend;
+    std::shared_ptr<PacketBackend> packet_backend_;
     std::shared_ptr<KeyProvider> key_provider_;
 };
 
@@ -75,7 +103,8 @@ public:
     explicit E2eeManager(const E2eeOptions& options);
 
     void SetEnabled(bool enabled);
-    bool enabled() const { return enabled_; }
+    bool enabled() const { std::lock_guard lock(mutex_); return enabled_; }
+    EncryptionType encryption_type() const { return options_.encryption_type; }
 
     std::shared_ptr<FrameCryptor> GetCryptor(const std::string& participant_identity, const std::string& track_sid);
     std::shared_ptr<DataPacketCryptor> data_packet_cryptor() const { return data_packet_cryptor_; }
