@@ -39,7 +39,7 @@ bool IncomingDataStreamAssembler::Begin(
     stream.total_length = static_cast<size_t>(total_length);
     stream.sender_identity = std::move(sender_identity);
     stream.sender_sid = std::move(sender_sid);
-    stream.started_at = now;
+    stream.last_activity_at = now;
     streams_.emplace(std::move(stream_id), std::move(stream));
     return true;
 }
@@ -49,10 +49,6 @@ std::optional<AssembledDataStream> IncomingDataStreamAssembler::AddChunk(
     uint64_t chunk_index,
     std::span<const uint8_t> content,
     TimePoint now) {
-    if (content.empty()) {
-        return std::nullopt;
-    }
-
     std::lock_guard lock(mutex_);
     MaybePurgeExpiredLocked(now);
 
@@ -62,6 +58,10 @@ std::optional<AssembledDataStream> IncomingDataStreamAssembler::AddChunk(
     }
 
     auto& stream = it->second;
+    if (now - stream.last_activity_at >= limits_.stream_ttl) {
+        EraseLocked(it);
+        return std::nullopt;
+    }
     if (stream.chunks.contains(chunk_index)) {
         return std::nullopt;
     }
@@ -77,6 +77,7 @@ std::optional<AssembledDataStream> IncomingDataStreamAssembler::AddChunk(
         std::vector<uint8_t>(content.begin(), content.end()));
     stream.received_bytes += content.size();
     buffered_bytes_ += content.size();
+    stream.last_activity_at = now;
 
     if (!IsCompleteLocked(stream)) {
         return std::nullopt;
@@ -139,7 +140,7 @@ void IncomingDataStreamAssembler::MaybePurgeExpiredLocked(TimePoint now) {
 size_t IncomingDataStreamAssembler::PurgeExpiredLocked(TimePoint now) {
     size_t removed = 0;
     for (auto it = streams_.begin(); it != streams_.end();) {
-        if (now - it->second.started_at >= limits_.stream_ttl) {
+        if (now - it->second.last_activity_at >= limits_.stream_ttl) {
             buffered_bytes_ -= it->second.received_bytes;
             it = streams_.erase(it);
             ++removed;
@@ -158,7 +159,7 @@ bool IncomingDataStreamAssembler::IsCompleteLocked(const StreamState& stream) co
 
     uint64_t expected_index = 0;
     for (const auto& [index, chunk] : stream.chunks) {
-        if (index != expected_index || chunk.empty()) {
+        if (index != expected_index) {
             return false;
         }
         ++expected_index;

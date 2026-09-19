@@ -2162,6 +2162,17 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
 }
 
 void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& participant_sid, const std::string& topic, uint64_t generation) {
+    OnIncomingDataPacketAt(
+        payload, participant_sid, topic, generation,
+        IncomingDataStreamAssembler::Clock::now());
+}
+
+void Room::OnIncomingDataPacketAt(
+    const std::vector<uint8_t>& payload,
+    const std::string& participant_sid,
+    const std::string& topic,
+    uint64_t generation,
+    IncomingDataStreamAssembler::TimePoint now) {
     BeforeNativeEventCommit(generation);
     std::vector<uint8_t> real_payload = payload;
     std::string real_topic = topic;
@@ -2181,12 +2192,14 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
 
         if (data_pkt.has_stream_header()) {
             const auto& header = data_pkt.stream_header();
+            if (!header.has_text_header() && !header.has_byte_header()) {
+                return;
+            }
             std::shared_ptr<Participant> p;
             SenderContext sender;
             std::shared_ptr<TextStreamReader> text_reader;
             std::shared_ptr<ByteStreamReader> byte_reader;
             std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
-            const auto now = IncomingDataStreamAssembler::Clock::now();
             bool invalid_declared_length = false;
 
             if (header.has_text_header()) {
@@ -2343,10 +2356,19 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
             const auto& content = chunk.content();
 
             std::optional<AssembledDataStream> assembled;
-            const auto now = IncomingDataStreamAssembler::Clock::now();
             {
                 std::lock_guard lk(room_mutex_);
                 if (!IsNativeGenerationCurrentLocked(generation)) return;
+                if (auto deadline = incoming_stream_deadlines_.find(
+                        chunk.stream_id());
+                    deadline != incoming_stream_deadlines_.end() &&
+                    now >= deadline->second) {
+                    RetireIncomingReaderLocked(
+                        chunk.stream_id(), kDataStreamExpired);
+                    incoming_data_streams_->Discard(chunk.stream_id());
+                    ScheduleIncomingStreamCleanupLocked(generation);
+                    return;
+                }
                 const bool assembler_was_active =
                     incoming_data_streams_->Contains(chunk.stream_id());
                 assembled = incoming_data_streams_->AddChunk(
@@ -2366,17 +2388,21 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                     return;
                 }
 
+                bool reader_accepted = false;
                 bool reader_terminated = false;
                 if (auto it = active_text_readers_.find(chunk.stream_id()); it != active_text_readers_.end()) {
-                    if (!it->second->TryOnChunkUpdate(content) &&
-                        it->second->is_closed()) {
+                    reader_accepted = it->second->TryOnChunkUpdate(
+                        chunk.chunk_index(), content);
+                    if (!reader_accepted && it->second->is_closed()) {
                         reader_terminated = true;
                     }
                 }
                 if (auto it = active_byte_readers_.find(chunk.stream_id()); it != active_byte_readers_.end()) {
-                    if (!it->second->TryOnChunkUpdate(
-                            reinterpret_cast<const uint8_t*>(content.data()),
-                            content.size()) && it->second->is_closed()) {
+                    reader_accepted = it->second->TryOnChunkUpdate(
+                        chunk.chunk_index(),
+                        reinterpret_cast<const uint8_t*>(content.data()),
+                        content.size());
+                    if (!reader_accepted && it->second->is_closed()) {
                         reader_terminated = true;
                     }
                 }
@@ -2386,6 +2412,11 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
                     incoming_data_streams_->Discard(chunk.stream_id());
                     ScheduleIncomingStreamCleanupLocked(generation);
                     return;
+                }
+                if (reader_accepted) {
+                    incoming_stream_deadlines_[chunk.stream_id()] =
+                        now + incoming_reader_budget_->limits().stream_ttl;
+                    ScheduleIncomingStreamCleanupLocked(generation);
                 }
             }
             if (!assembled) {
@@ -2402,10 +2433,25 @@ void Room::OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::
             {
                 std::lock_guard lk(room_mutex_);
                 if (!IsNativeGenerationCurrentLocked(generation)) return;
+                if (auto deadline = incoming_stream_deadlines_.find(
+                        trailer.stream_id());
+                    deadline != incoming_stream_deadlines_.end() &&
+                    now >= deadline->second) {
+                    RetireIncomingReaderLocked(
+                        trailer.stream_id(), kDataStreamExpired);
+                    incoming_data_streams_->Discard(trailer.stream_id());
+                    ScheduleIncomingStreamCleanupLocked(generation);
+                    return;
+                }
                 std::map<std::string, std::string> attrs(trailer.attributes().begin(), trailer.attributes().end());
                 const bool assembler_was_active =
                     incoming_data_streams_->Contains(trailer.stream_id());
-                assembled = incoming_data_streams_->Finish(trailer.stream_id());
+                if (trailer.reason().empty()) {
+                    assembled = incoming_data_streams_->Finish(
+                        trailer.stream_id(), now);
+                } else {
+                    incoming_data_streams_->Discard(trailer.stream_id());
+                }
                 const bool incomplete_normal_stream =
                     trailer.reason().empty() && assembler_was_active &&
                     !assembled;

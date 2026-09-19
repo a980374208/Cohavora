@@ -46,7 +46,7 @@ void TestTextStreamSlicingAndReading() {
 
     // 写入数据并关闭
     writer.Write(full_text);
-    writer.Close("finished", {{"final_attr", "done"}});
+    writer.Close("", {{"final_attr", "done"}});
 
     // 验证发出的报文结构：1 Header + 3 Chunks + 1 Trailer = 5 报文
     TEST_ASSERT(delivered_packets.size() == 5);
@@ -92,7 +92,7 @@ void TestTextStreamSlicingAndReading() {
     reader.OnStreamClose(delivered_packets[4].stream_trailer().reason(), trailer_attrs);
 
     TEST_ASSERT(reader.is_closed());
-    TEST_ASSERT(reader.close_reason() == "finished");
+    TEST_ASSERT(reader.close_reason().empty());
     TEST_ASSERT(reader.info().attributes.at("final_attr") == "done");
 
     // 读取全部内容并校验完全一致
@@ -101,6 +101,38 @@ void TestTextStreamSlicingAndReading() {
     TEST_ASSERT(received_text == full_text);
 
     std::cout << "[TestTextStreamSlicingAndReading] Passed!" << std::endl;
+}
+
+void TestUtf8AwareTextSlicing() {
+    std::string full_text(livekit::kStreamChunkSize - 1, 'a');
+    full_text.append("\xE4\xB8\xAD", 3);
+
+    std::vector<livekit::proto::DataPacket> delivered_packets;
+    auto publisher = [&](const livekit::proto::DataPacket& packet,
+                         bool reliable) -> bool {
+        TEST_ASSERT(reliable);
+        delivered_packets.push_back(packet);
+        return true;
+    };
+
+    livekit::TextStreamWriter writer(
+        publisher, "utf8-topic", {}, "utf8-boundary", full_text.size());
+    writer.Write(full_text);
+    writer.Close();
+
+    TEST_ASSERT(delivered_packets.size() == 4);
+    TEST_ASSERT(delivered_packets[1].stream_chunk().content().size() ==
+                livekit::kStreamChunkSize - 1);
+    TEST_ASSERT(delivered_packets[2].stream_chunk().content().size() == 3);
+
+    livekit::TextStreamInfo info;
+    info.stream_id = "utf8-boundary";
+    info.total_length = full_text.size();
+    livekit::TextStreamReader reader(std::move(info));
+    reader.OnChunkUpdate(delivered_packets[1].stream_chunk().content());
+    reader.OnChunkUpdate(delivered_packets[2].stream_chunk().content());
+    reader.OnStreamClose("", {});
+    TEST_ASSERT(reader.ReadAll() == full_text);
 }
 
 void TestByteStreamBinaryTransfer() {
@@ -191,6 +223,7 @@ void TestStreamCancellationAndInterruption() {
     reader.OnStreamClose("network_abort", {});
 
     TEST_ASSERT(reader.is_closed());
+    TEST_ASSERT(reader.is_failed());
     TEST_ASSERT(reader.close_reason() == "network_abort");
 
     std::string part;
@@ -220,8 +253,8 @@ void TestConcurrentStreamsIsolation() {
     reader_a.OnChunkUpdate("A2");
     reader_b.OnChunkUpdate("B2");
 
-    reader_a.OnStreamClose("done", {});
-    reader_b.OnStreamClose("done", {});
+    reader_a.OnStreamClose("", {});
+    reader_b.OnStreamClose("", {});
 
     TEST_ASSERT(reader_a.ReadAll() == "A1-A2");
     TEST_ASSERT(reader_b.ReadAll() == "B1-B2");
@@ -234,6 +267,7 @@ void TestConcurrentStreamsIsolation() {
 int main() {
     std::cout << "Running test_data_stream_messaging..." << std::endl;
     TestTextStreamSlicingAndReading();
+    TestUtf8AwareTextSlicing();
     TestByteStreamBinaryTransfer();
     TestStreamCancellationAndInterruption();
     TestConcurrentStreamsIsolation();

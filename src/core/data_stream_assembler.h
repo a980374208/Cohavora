@@ -34,6 +34,7 @@ public:
         size_t max_stream_size = 16 * 1024 * 1024;
         size_t max_buffered_bytes = 64 * 1024 * 1024;
         size_t max_chunks_per_stream = 4096;
+        // Maximum time without an accepted chunk before assembly expires.
         std::chrono::seconds stream_ttl{30};
         std::chrono::seconds cleanup_interval{1};
     };
@@ -71,7 +72,7 @@ private:
         size_t total_length = 0;
         std::string sender_identity;
         std::string sender_sid;
-        TimePoint started_at;
+        TimePoint last_activity_at;
         std::map<uint64_t, std::vector<uint8_t>> chunks;
         size_t received_bytes = 0;
     };

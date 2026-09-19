@@ -398,6 +398,12 @@ private:
                                    const webrtc::DataChannelInterface* channel);
     void OnDataChannelBufferedAmountLow(uint64_t previous_amount, bool reliable, uint64_t generation);
     void OnIncomingDataPacket(const std::vector<uint8_t>& payload, const std::string& sid, const std::string& topic, uint64_t generation);
+    void OnIncomingDataPacketAt(
+        const std::vector<uint8_t>& payload,
+        const std::string& sid,
+        const std::string& topic,
+        uint64_t generation,
+        IncomingDataStreamAssembler::TimePoint now);
     void ScheduleIncomingStreamCleanupLocked(uint64_t generation);
     size_t PurgeIncomingStreamsLocked(
         IncomingDataStreamAssembler::TimePoint now,

@@ -58,6 +58,10 @@ inline constexpr char kDataStreamBufferLimitExceeded[] =
     "data stream buffer limit exceeded";
 inline constexpr char kDataStreamChunkLimitExceeded[] =
     "data stream queued chunk limit exceeded";
+inline constexpr char kDataStreamChunkSequenceMismatch[] =
+    "data stream chunk sequence mismatch";
+inline constexpr char kDataStreamInvalidUtf8[] =
+    "data stream invalid UTF-8 chunk";
 inline constexpr char kDataStreamReadAllLimitExceeded[] =
     "data stream ReadAll limit exceeded";
 inline constexpr char kDataStreamDeclaredLengthExceeded[] =
@@ -81,6 +85,7 @@ public:
         size_t max_buffered_bytes = 64 * 1024 * 1024;
         size_t max_queued_chunks_per_reader = 4096;
         size_t max_read_all_bytes = 16 * 1024 * 1024;
+        // Maximum time without an accepted chunk before the Reader expires.
         std::chrono::seconds stream_ttl{30};
     };
 
@@ -135,6 +140,7 @@ public:
     /// Called by Room when a new chunk arrives
     void OnChunkUpdate(const std::string& text);
     bool TryOnChunkUpdate(const std::string& text);
+    bool TryOnChunkUpdate(uint64_t chunk_index, const std::string& text);
 
     /// Called by Room when the stream is closed
     void OnStreamClose(const std::string& reason, const std::map<std::string, std::string>& trailer_attrs);
@@ -144,6 +150,8 @@ private:
     void ReleaseActiveLocked();
     void FailLocked(const std::string& reason);
     void MarkReadAllLimitExceeded();
+    bool TryOnChunkUpdateLocked(uint64_t chunk_index,
+                                const std::string& text);
 
     TextStreamInfo info_;
     std::shared_ptr<DataStreamReaderBudget> budget_;
@@ -151,6 +159,7 @@ private:
     size_t buffered_bytes_ = 0;
     size_t received_bytes_ = 0;
     size_t queued_chunks_ = 0;
+    uint64_t next_chunk_index_ = 0;
     bool admitted_ = false;
     bool active_registered_ = false;
     bool closed_ = false;
@@ -194,6 +203,9 @@ public:
     /// Called by Room when a new chunk arrives
     void OnChunkUpdate(const uint8_t* data, size_t size);
     bool TryOnChunkUpdate(const uint8_t* data, size_t size);
+    bool TryOnChunkUpdate(uint64_t chunk_index,
+                          const uint8_t* data,
+                          size_t size);
 
     /// Called by Room when the stream is closed
     void OnStreamClose(const std::string& reason, const std::map<std::string, std::string>& trailer_attrs);
@@ -203,6 +215,9 @@ private:
     void ReleaseActiveLocked();
     void FailLocked(const std::string& reason);
     void MarkReadAllLimitExceeded();
+    bool TryOnChunkUpdateLocked(uint64_t chunk_index,
+                                const uint8_t* data,
+                                size_t size);
 
     ByteStreamInfo info_;
     std::shared_ptr<DataStreamReaderBudget> budget_;
@@ -210,6 +225,7 @@ private:
     size_t buffered_bytes_ = 0;
     size_t received_bytes_ = 0;
     size_t queued_chunks_ = 0;
+    uint64_t next_chunk_index_ = 0;
     bool admitted_ = false;
     bool active_registered_ = false;
     bool closed_ = false;
@@ -239,7 +255,8 @@ public:
         return state_.load(std::memory_order_acquire) != State::Open;
     }
 
-    /// Closes the stream normally with optional reason and trailing attributes.
+    /// Closes the stream. An empty reason is normal; a non-empty reason signals
+    /// an abnormal remote termination.
     void Close(const std::string& reason = "", const std::map<std::string, std::string>& attributes = {});
 
     /// Cancels the stream prematurely with an error reason.
