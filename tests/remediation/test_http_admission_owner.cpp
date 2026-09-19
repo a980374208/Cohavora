@@ -97,7 +97,7 @@ using OpenMeeting::SessionInvalidationReason;
 using OpenMeeting::SessionManager;
 using OpenMeeting::SessionManagerTestAccess;
 
-constexpr int kPlannedCases = 75;
+constexpr int kPlannedCases = 81;
 int gExecutedCases = 0;
 int gPassedCases = 0;
 
@@ -563,6 +563,31 @@ void VerifyReplacementOrdering() {
 }
 
 void VerifyInvalidationAndDuplicateCompletion() {
+    for (const auto stage : {PendingStage::Join, PendingStage::Token, PendingStage::Create}) {
+        for (const bool success : {true, false}) {
+            RunCase(StageName(stage) + " callback rejected while session invalidation is queued " +
+                        (success ? "success" : "error"), [stage, success] {
+                Fixture fixture;
+                const auto pendingIndex = PreparePending(fixture, stage, "invalidating-current");
+                const auto tokenCount = fixture.backend.tokens.size();
+                const auto detailCount = fixture.details.size();
+                const auto errorCount = fixture.errors.size();
+
+                fixture.session->invalidateSession(SessionInvalidationReason::TokenInvalid);
+                TEST_CHECK(fixture.session->isSessionInvalidating());
+                DeliverPending(fixture, stage, pendingIndex, success, "invalidating-current");
+
+                TEST_CHECK(fixture.starts == 0);
+                TEST_CHECK(fixture.backend.tokens.size() == tokenCount);
+                TEST_CHECK(fixture.details.size() == detailCount);
+                TEST_CHECK(fixture.errors.size() == errorCount);
+                DrainEvents();
+                TEST_CHECK(fixture.coordinator->state() == MeetingState::Idle);
+                TEST_CHECK(!MeetingCoordinatorTestAccess::hasRoomArtifacts(*fixture.coordinator));
+            });
+        }
+    }
+
     for (const auto stage : {PendingStage::Join, PendingStage::Token, PendingStage::Create}) {
         for (const bool success : {true, false}) {
             RunCase(StageName(stage) + " pending -> invalidation -> late " +

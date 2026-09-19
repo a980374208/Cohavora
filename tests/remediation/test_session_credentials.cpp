@@ -602,6 +602,36 @@ void verifySessionInvalidLoginData() {
     std::puts("SESSION INVALID DATA PASS: nonempty error, no auth commit, no persisted credentials");
 }
 
+void verifyMissingServerTokenInvalidatesSession() {
+    constexpr int kNotFoundUserToken = 100004;
+    Fixture f;
+    f.login();
+
+    int invalidated = 0;
+    int completed = 0;
+    QObject::connect(f.session.get(), &SessionManager::sessionInvalidated,
+                     f.session.get(), [&](SessionInvalidationReason reason) {
+        TEST_CHECK(reason == SessionInvalidationReason::TokenExpired);
+        ++invalidated;
+    });
+
+    const auto request = f.server.requests.size();
+    f.client.getMeetings({}, [&](bool ok, const QJsonArray &, const HttpError &error) {
+        TEST_CHECK(!ok && error.code == kNotFoundUserToken);
+        ++completed;
+    });
+    f.server.received(request + 1);
+    TEST_CHECK(f.server.requests[request]->token == QByteArray(kToken));
+    f.server.replyData(request, QJsonObject{}, kNotFoundUserToken);
+    waitFor([&] { return completed == 1; });
+
+    TEST_CHECK(invalidated == 1);
+    TEST_CHECK(!f.session->isLoggedIn() && !f.client.isLoggedIn());
+    TEST_CHECK(f.session->token().isEmpty() && f.client.token().isEmpty());
+    TEST_CHECK(!f.hasCipher() && !f.session->isRememberSession());
+    std::puts("MISSING TOKEN PASS: server-rejected token invalidates memory and persisted session");
+}
+
 void verifySessionAndUi() {
     Fixture f;
     int httpLoginSignals = 0, httpLogoutSignals = 0;
@@ -794,6 +824,7 @@ int main(int argc, char **argv) {
     verifyStore();
     verifyDebugHttpPersistenceAcrossStartupModes();
     verifySessionInvalidLoginData();
+    verifyMissingServerTokenInvalidatesSession();
     verifySessionAndUi();
     verifyOrdering();
     std::puts("PR-SEC-002 focused cases PASS");
