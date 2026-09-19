@@ -209,6 +209,7 @@ public:
             if (!owner || !owner->isCurrentSessionGenerationOnUiThread(generation) ||
                 owner->_nativeRoomGeneration != nativeGeneration ||
                 owner->_state == MeetingState::Leaving || owner->_state == MeetingState::Idle) return;
+            owner->_startupReconnectPending = true;
             owner->setState(MeetingState::Reconnecting,
                                   QString::fromUtf8("网络中断，正在恢复连接..."));
         }, Qt::QueuedConnection);
@@ -226,7 +227,11 @@ public:
                 return;
             }
             const auto nativeGeneration = owner->_nativeRoomGeneration;
-
+            owner->_startupReconnectPending = false;
+            if (!owner->tryCommitOperationalStateOnUiThread(
+                    generation, QString::fromUtf8("音视频连接已恢复"))) {
+                return;
+            }
             if (!owner->_startupCommitted) {
                 MeetingUI::LogToConsole(
                     MeetingUI::LogCategory::Connection,
@@ -234,9 +239,6 @@ public:
                     QString::fromUtf8("连接已恢复，等待本地音视频启动事务提交"));
                 return;
             }
-
-            owner->setState(MeetingState::InMeeting,
-                                  QString::fromUtf8("音视频连接已恢复"));
             if (!owner || !owner->isCurrentSessionGenerationOnUiThread(generation) ||
                 owner->_nativeRoomGeneration != nativeGeneration ||
                 owner->_state != MeetingState::InMeeting) return;
@@ -1325,12 +1327,14 @@ void MeetingCoordinator::startRoomSession(const QString &url,
         return;
     }
     owner->_admissionStage = AdmissionStage::Consumed;
+    owner->_startupCommitted = false;
+    owner->_startupReconnectPending = false;
+    owner->_startupListenOnly = false;
     auto roomStartHook = owner->_roomStartHook;
     if (roomStartHook) {
         roomStartHook(url, token);
         return;
     }
-    _startupCommitted = false;
 
     _sessionRunning = true;
     _ioContext = std::make_unique<asio::io_context>();
@@ -1453,11 +1457,7 @@ void MeetingCoordinator::startRoomSession(const QString &url,
                 if (mediaBegan) {
                     // 房间本身连接正常，仅本地媒体硬件发布异常：降级为无媒体参会，不强制断开会议
                     QMetaObject::invokeMethod(this, [this, sessionGeneration, title, err]() {
-                        if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
-                            return;
-                        }
-                        _startupCommitted = true;
-                        emit errorOccurred(title, QString::fromUtf8("%1 (已自动切换为仅收听收看模式)").arg(err));
+                        completeRoomStartupDegradedOnUiThread(sessionGeneration, title, err);
                     }, Qt::QueuedConnection);
                 } else {
                     // 连接房间本身失败：执行回滚并清理
@@ -1479,13 +1479,84 @@ void MeetingCoordinator::completeRoomStartupOnUiThread(
     if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
         return;
     }
+    if (_startupCommitted) {
+        return;
+    }
 
+    QPointer<MeetingCoordinator> owner(this);
     _localAudioTrack = std::move(audioTrack);
     _localVideoTrack = std::move(videoTrack);
+    _startupListenOnly = false;
     _startupCommitted = true;
-    setState(MeetingState::InMeeting, QString::fromUtf8("本地音视频已就绪，已成功连入会议房间"));
-    emit localAudioMuteChanged(_audioMuted);
-    emit localVideoEnableChanged(_videoEnabled);
+    if (!tryCommitOperationalStateOnUiThread(
+            sessionGeneration, QString::fromUtf8("本地音视频已就绪，已成功连入会议房间"))) {
+        return;
+    }
+    emit owner->localAudioMuteChanged(owner->_audioMuted);
+    if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
+        return;
+    }
+    emit owner->localVideoEnableChanged(owner->_videoEnabled);
+}
+
+void MeetingCoordinator::completeRoomStartupDegradedOnUiThread(
+    uint64_t sessionGeneration,
+    const QString &title,
+    const QString &detail) {
+    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) || _startupCommitted) {
+        return;
+    }
+
+    QPointer<MeetingCoordinator> owner(this);
+    _localAudioTrack.reset();
+    _localVideoTrack.reset();
+    _audioMuted = true;
+    _videoEnabled = false;
+    _startupListenOnly = true;
+    ensureLocalParticipant();
+    for (auto &[_, participant] : _participants) {
+        if (!participant.isLocal) continue;
+        participant.isAudioMuted = true;
+        participant.isVideoEnabled = false;
+        break;
+    }
+    _startupCommitted = true;
+    if (!tryCommitOperationalStateOnUiThread(
+            sessionGeneration, QString::fromUtf8("本地媒体不可用，已切换为仅收听收看模式"))) {
+        return;
+    }
+
+    updateParticipantListAndNotify();
+    if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
+        return;
+    }
+    emit owner->localAudioMuteChanged(true);
+    if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
+        return;
+    }
+    emit owner->localVideoEnableChanged(false);
+    if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
+        return;
+    }
+    emit owner->errorOccurred(
+        title, QString::fromUtf8("%1 (已自动切换为仅收听收看模式)").arg(detail));
+}
+
+bool MeetingCoordinator::tryCommitOperationalStateOnUiThread(
+    uint64_t sessionGeneration,
+    const QString &detail) {
+    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+        _state == MeetingState::Leaving || _state == MeetingState::Idle) {
+        return false;
+    }
+    if (!_startupCommitted || _startupReconnectPending) {
+        return true;
+    }
+
+    QPointer<MeetingCoordinator> owner(this);
+    setState(MeetingState::InMeeting, detail);
+    return owner && owner->isCurrentSessionGenerationOnUiThread(sessionGeneration) &&
+        owner->_state == MeetingState::InMeeting;
 }
 
 void MeetingCoordinator::failRoomStartupOnUiThread(
@@ -1506,11 +1577,13 @@ void MeetingCoordinator::failRoomStartupOnUiThread(
 }
 
 void MeetingCoordinator::stopRoomSession() {
+    _startupCommitted = false;
+    _startupReconnectPending = false;
+    _startupListenOnly = false;
     const bool was_running = _sessionRunning.exchange(false);
     if (!was_running) {
         return;
     }
-    _startupCommitted = false;
     QPointer<MeetingCoordinator> owner(this);
     const auto stoppedGeneration = _nextSessionGeneration;
     std::vector<QString> failedOutboundMessages;
@@ -1637,6 +1710,9 @@ void MeetingCoordinator::stopRoomSession() {
 }
 
 void MeetingCoordinator::setLocalAudioMuted(bool muted) {
+    if (_startupListenOnly) {
+        muted = true;
+    }
     _audioMuted = muted;
     if (_localAudioTrack) {
         _localAudioTrack->set_muted(muted);
@@ -1652,6 +1728,9 @@ void MeetingCoordinator::setLocalAudioMuted(bool muted) {
 }
 
 void MeetingCoordinator::setLocalVideoEnabled(bool enabled) {
+    if (_startupListenOnly) {
+        enabled = false;
+    }
     _videoEnabled = enabled;
     if (_localVideoTrack) {
         _localVideoTrack->set_muted(!enabled);

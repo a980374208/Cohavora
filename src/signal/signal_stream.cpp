@@ -9,10 +9,13 @@ SignalStream::SignalStream(std::shared_ptr<WebSocketClient> ws_client)
 }
 
 SignalStream::~SignalStream() {
+    {
+        std::lock_guard lock(callback_mutex_);
+        message_cb_ = nullptr;
+        close_cb_ = nullptr;
+    }
     if (ws_client_) {
-        ws_client_->SetOnMessage(nullptr);
-        ws_client_->SetOnClose(nullptr);
-        ws_client_->SetOnError(nullptr);
+        ws_client_->Abort();
     }
 }
 
@@ -53,6 +56,26 @@ asio::awaitable<void> SignalStream::Close(bool notify_close) {
     }
 }
 
+void SignalStream::Abort() {
+    {
+        std::lock_guard lock(callback_mutex_);
+        message_cb_ = nullptr;
+        close_cb_ = nullptr;
+    }
+    if (!ws_client_) return;
+    ws_client_->Abort();
+}
+
+void SignalStream::SetOnMessage(MessageCallback cb) {
+    std::lock_guard lock(callback_mutex_);
+    message_cb_ = std::move(cb);
+}
+
+void SignalStream::SetOnClose(CloseCallback cb) {
+    std::lock_guard lock(callback_mutex_);
+    close_cb_ = std::move(cb);
+}
+
 void SignalStream::StartRead() {
     if (ws_client_) {
         ws_client_->StartRead();
@@ -70,9 +93,12 @@ void SignalStream::SetupCallbacks() {
 
         auto resp = std::make_shared<livekit::proto::SignalResponse>();
         if (resp->ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
-            if (self->message_cb_) {
-                self->message_cb_(resp);
+            MessageCallback callback;
+            {
+                std::lock_guard lock(self->callback_mutex_);
+                callback = self->message_cb_;
             }
+            if (callback) callback(resp);
         } else {
             std::cout << "SignalStream::SetupCallbacks: Failed to parse SignalResponse!" << std::endl;
         }
@@ -82,18 +108,24 @@ void SignalStream::SetupCallbacks() {
         auto self = weak_self.lock();
         if (!self) return;
 
-        if (self->close_cb_) {
-            self->close_cb_(reason);
+        CloseCallback callback;
+        {
+            std::lock_guard lock(self->callback_mutex_);
+            callback = self->close_cb_;
         }
+        if (callback) callback(reason);
     });
 
     ws_client_->SetOnError([weak_self](const std::error_code& ec) {
         auto self = weak_self.lock();
         if (!self) return;
 
-        if (self->close_cb_) {
-            self->close_cb_("WebSocket Error: " + ec.message());
+        CloseCallback callback;
+        {
+            std::lock_guard lock(self->callback_mutex_);
+            callback = self->close_cb_;
         }
+        if (callback) callback("WebSocket Error: " + ec.message());
     });
 }
 
