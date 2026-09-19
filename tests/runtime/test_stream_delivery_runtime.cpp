@@ -67,6 +67,8 @@ constexpr std::size_t kMaximumConfiguredBytes = 1024ull * 1024 * 1024;
 constexpr std::size_t kReaderLimitBytes = 16 * 1024 * 1024;
 constexpr std::size_t kReaderOverLimitBytes =
     kReaderLimitBytes + livekit::kStreamChunkSize;
+constexpr int kActiveReaderChunkIntervalSeconds = 8;
+constexpr std::size_t kActiveReaderChunkCount = 5;
 
 std::mutex g_output_mutex;
 
@@ -90,6 +92,7 @@ enum class RuntimeCase {
     SlowConsumer,
     ReaderOverlimit,
     ReaderTtl,
+    ReaderTtlActive,
     E2eeInterop,
 };
 
@@ -148,6 +151,7 @@ const char* CaseName(RuntimeCase value) {
     case RuntimeCase::SlowConsumer: return "slow-consumer";
     case RuntimeCase::ReaderOverlimit: return "reader-overlimit";
     case RuntimeCase::ReaderTtl: return "reader-ttl";
+    case RuntimeCase::ReaderTtlActive: return "reader-ttl-active";
     case RuntimeCase::E2eeInterop: return "e2ee-interop";
     }
     return "unknown";
@@ -207,7 +211,7 @@ void PrintUsage(const char* executable) {
         << "  " << executable << " --role sender|receiver --case CASE --run-id ID [options]\n\n"
         << "CASES:\n"
         << "  baseline | backpressure | soft-resume | full-restart\n"
-        << "  slow-consumer | reader-overlimit | reader-ttl | e2ee-interop\n\n"
+        << "  slow-consumer | reader-overlimit | reader-ttl | reader-ttl-active | e2ee-interop\n\n"
         << "E2EE RECEIVER ENV: LIVEKIT_L3_E2EE_MODE=shared|participant\n"
         << "  LIVEKIT_L3_E2EE_KEY_STATE=good|wrong|missing (public synthetic test key only)\n\n"
         << "COMMON OPTIONS:\n"
@@ -255,6 +259,7 @@ std::optional<RuntimeCase> ParseCase(std::string_view value) {
     if (value == "slow-consumer") return RuntimeCase::SlowConsumer;
     if (value == "reader-overlimit") return RuntimeCase::ReaderOverlimit;
     if (value == "reader-ttl") return RuntimeCase::ReaderTtl;
+    if (value == "reader-ttl-active") return RuntimeCase::ReaderTtlActive;
     if (value == "e2ee-interop") return RuntimeCase::E2eeInterop;
     return std::nullopt;
 }
@@ -1333,6 +1338,48 @@ asio::awaitable<int> RunReaderTtl(
     co_return kExitPassed;
 }
 
+asio::awaitable<int> RunReaderTtlActive(
+    const std::shared_ptr<livekit::Room>& room,
+    const Config& config) {
+    const std::string sequence = "reader-ttl-active";
+    const std::string payload = "abcde";
+    static_assert(kActiveReaderChunkCount == 5);
+
+    auto writer = room->CreateTextStreamWriter(
+        config.topic,
+        StreamAttributes(config, "text", sequence, payload.size(),
+                         Sha256Of(payload.data(), payload.size())),
+        config.run_id + "-" + sequence,
+        payload.size(),
+        {},
+        Destinations(config));
+
+    const auto started_at = std::chrono::steady_clock::now();
+    for (std::size_t index = 0; index < kActiveReaderChunkCount; ++index) {
+        if (index != 0) {
+            co_await Delay(room->executor(), kActiveReaderChunkIntervalSeconds);
+        }
+        writer->Write(payload.substr(index, 1));
+        PrintLine("[PROGRESS] sequence=", sequence,
+                  " accepted_chunk=", index + 1,
+                  " total_chunks=", kActiveReaderChunkCount);
+    }
+    writer->Close("", {{"l3_result", "complete"}});
+
+    const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::steady_clock::now() - started_at);
+    if (elapsed < std::chrono::seconds(30)) {
+        PrintLine("[RESULT_DETAIL] active_stream_did_not_cross_ttl=true",
+                  " elapsed_sec=", elapsed.count());
+        co_return kExitFailed;
+    }
+    PrintLine("[SEND] kind=text sequence=", sequence,
+              " bytes=", payload.size(),
+              " elapsed_sec=", elapsed.count(),
+              " sha256=", Sha256Of(payload.data(), payload.size()));
+    co_return kExitPassed;
+}
+
 asio::awaitable<int> RunSender(
     const std::shared_ptr<livekit::Room>& room,
     const std::shared_ptr<RuntimeListener>& listener,
@@ -1367,6 +1414,9 @@ asio::awaitable<int> RunSender(
         break;
     case RuntimeCase::ReaderTtl:
         result = co_await RunReaderTtl(room, config);
+        break;
+    case RuntimeCase::ReaderTtlActive:
+        result = co_await RunReaderTtlActive(room, config);
         break;
     case RuntimeCase::E2eeInterop:
         throw RuntimeFailure("e2ee_requires_official_sender");
