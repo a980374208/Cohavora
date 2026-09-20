@@ -88,6 +88,7 @@ std::string SafeOutput(std::string_view value) {
 enum class Role { Sender, Receiver };
 enum class RuntimeCase {
     Baseline,
+    SenderBinding,
     Backpressure,
     SoftResume,
     FullRestart,
@@ -153,6 +154,7 @@ const char* RoleName(Role role) {
 const char* CaseName(RuntimeCase value) {
     switch (value) {
     case RuntimeCase::Baseline: return "baseline";
+    case RuntimeCase::SenderBinding: return "sender-binding";
     case RuntimeCase::Backpressure: return "backpressure";
     case RuntimeCase::SoftResume: return "soft-resume";
     case RuntimeCase::FullRestart: return "full-restart";
@@ -220,7 +222,7 @@ void PrintUsage(const char* executable) {
         << "Usage:\n"
         << "  " << executable << " --role sender|receiver --case CASE --run-id ID [options]\n\n"
         << "CASES:\n"
-        << "  baseline | backpressure | soft-resume | full-restart\n"
+        << "  baseline | sender-binding | backpressure | soft-resume | full-restart\n"
         << "  slow-consumer | reader-overlimit | reader-ttl | reader-ttl-active\n"
         << "  e2ee-interop (official sender) | e2ee-outbound (native sender)\n\n"
         << "E2EE RECEIVER ENV: LIVEKIT_L3_E2EE_MODE=shared|participant\n"
@@ -265,6 +267,7 @@ bool ParseUnsigned(std::string_view text, Integer& output) {
 
 std::optional<RuntimeCase> ParseCase(std::string_view value) {
     if (value == "baseline") return RuntimeCase::Baseline;
+    if (value == "sender-binding") return RuntimeCase::SenderBinding;
     if (value == "backpressure") return RuntimeCase::Backpressure;
     if (value == "soft-resume") return RuntimeCase::SoftResume;
     if (value == "full-restart") return RuntimeCase::FullRestart;
@@ -430,7 +433,8 @@ ParseResult ParseArguments(int argc, char** argv) {
         config.runtime_case == RuntimeCase::ReaderTtl;
     if (!complete_set) {
         config.expected_complete = reader_failure_case ? 0 :
-            (config.runtime_case == RuntimeCase::Baseline ? 2 : 1);
+            (config.runtime_case == RuntimeCase::Baseline ? 2 :
+             config.runtime_case == RuntimeCase::SenderBinding ? 3 : 1);
     }
     if (!incomplete_set) {
         config.expected_incomplete = reader_failure_case ||
@@ -456,6 +460,16 @@ ParseResult ParseArguments(int argc, char** argv) {
          (config.role == Role::Sender && (config.destination.empty() ||
           config.observer.empty() || config.observer == config.destination)))) {
         PrintLine("[CONFIG_ERROR] outbound requires a good-key zero-stream observer or two distinct sender destinations");
+        return {};
+    }
+    if (config.runtime_case == RuntimeCase::SenderBinding &&
+        (config.destination.empty() || config.observer.empty() ||
+         config.expected_sender.empty() ||
+         config.destination == config.observer ||
+         config.destination == config.expected_sender ||
+         config.observer == config.expected_sender ||
+         config.expected_complete != 3 || config.expected_incomplete != 0)) {
+        PrintLine("[CONFIG_ERROR] sender-binding requires distinct primary, contender, receiver and exact 3/0 counts");
         return {};
     }
     return {config, kExitPassed};
@@ -568,11 +582,25 @@ std::vector<uint8_t> AckPayload(const Config& config) {
     return {value.begin(), value.end()};
 }
 
+std::string BindingControlTopic(const Config& config) {
+    return config.topic + ".binding-control";
+}
+
+std::vector<uint8_t> BindingControlPayload(const Config& config,
+                                           std::string_view verb) {
+    const std::string value = std::string("l3-binding-v1\n") +
+        config.run_id + "\n" + std::string(verb);
+    return {value.begin(), value.end()};
+}
+
 struct ReceivedResult {
     std::string kind;
     std::string stream_id;
     std::string sequence;
     std::string sender_identity;
+    std::string sender_sid;
+    std::string participant_identity;
+    std::string participant_sid;
     std::string close_reason;
     std::string actual_sha256;
     std::string expected_sha256;
@@ -580,6 +608,7 @@ struct ReceivedResult {
     std::size_t expected_bytes = 0;
     bool metadata_valid = false;
     bool sender_valid = false;
+    bool sender_instance_valid = false;
     bool complete = false;
     bool integrity_valid = false;
 };
@@ -595,6 +624,8 @@ struct ReceiveSummary {
 struct DeferredByteReader {
     std::shared_ptr<livekit::ByteStreamReader> reader;
     livekit::ByteStreamInfo info;
+    std::string participant_sid;
+    std::string participant_identity;
 };
 
 class RuntimeListener final : public livekit::RoomListener {
@@ -663,11 +694,15 @@ public:
 
     void OnTextStreamOpened(
         std::shared_ptr<livekit::TextStreamReader> reader,
-        std::shared_ptr<livekit::Participant>) override {
+        std::shared_ptr<livekit::Participant> participant) override {
         if (!Matches(reader->info())) return;
         CheckEncryptedHeader(reader->info().stream_id);
         const auto info = reader->info();
-        StartWorker([this, reader = std::move(reader), info]() mutable {
+        const auto participant_sid = participant ? participant->sid() : std::string{};
+        const auto participant_identity = participant
+            ? participant->identity() : std::string{};
+        StartWorker([this, reader = std::move(reader), info,
+                     participant_sid, participant_identity]() mutable {
             Sha256Accumulator hash;
             std::size_t bytes = 0;
             std::string chunk;
@@ -676,24 +711,30 @@ public:
                 bytes += chunk.size();
             }
             Record(BuildResult("text", info, bytes, hash.Finish(),
-                               reader->close_reason()));
+                               reader->close_reason(), participant_sid,
+                               participant_identity));
         });
     }
 
     void OnByteStreamOpened(
         std::shared_ptr<livekit::ByteStreamReader> reader,
-        std::shared_ptr<livekit::Participant>) override {
+        std::shared_ptr<livekit::Participant> participant) override {
         if (!Matches(reader->info())) return;
         CheckEncryptedHeader(reader->info().stream_id);
         const auto info = reader->info();
+        const auto participant_sid = participant ? participant->sid() : std::string{};
+        const auto participant_identity = participant
+            ? participant->identity() : std::string{};
         if (config_.runtime_case == RuntimeCase::SlowConsumer) {
             opened_.fetch_add(1, std::memory_order_acq_rel);
             std::lock_guard lock(deferred_mutex_);
-            deferred_byte_readers_.push_back({std::move(reader), info});
+            deferred_byte_readers_.push_back(
+                {std::move(reader), info, participant_sid, participant_identity});
             return;
         }
         if (config_.runtime_case == RuntimeCase::ReaderOverlimit) {
-            StartWorker([this, reader = std::move(reader), info]() mutable {
+            StartWorker([this, reader = std::move(reader), info,
+                         participant_sid, participant_identity]() mutable {
                 try {
                     (void)reader->ReadAll();
                     throw RuntimeFailure("read_all_limit_not_observed");
@@ -704,7 +745,8 @@ public:
                     }
                     Record(BuildResult(
                         "byte", info, reader->received_bytes(), {},
-                        reader->close_reason()));
+                        reader->close_reason(), participant_sid,
+                        participant_identity));
                 } catch (const std::runtime_error& error) {
                     const std::string_view reason(error.what());
                     const char* classification =
@@ -722,7 +764,8 @@ public:
             });
             return;
         }
-        StartWorker([this, reader = std::move(reader), info]() mutable {
+        StartWorker([this, reader = std::move(reader), info,
+                     participant_sid, participant_identity]() mutable {
             Sha256Accumulator hash;
             std::size_t bytes = 0;
             std::vector<uint8_t> chunk;
@@ -731,7 +774,8 @@ public:
                 bytes += chunk.size();
             }
             Record(BuildResult("byte", info, bytes, hash.Finish(),
-                               reader->close_reason()));
+                               reader->close_reason(), participant_sid,
+                               participant_identity));
         });
     }
 
@@ -739,6 +783,35 @@ public:
         const std::vector<uint8_t>& payload,
         std::shared_ptr<livekit::RemoteParticipant> participant,
         const std::string& topic) override {
+        if (config_.runtime_case == RuntimeCase::SenderBinding &&
+            topic == BindingControlTopic(config_)) {
+            if (!participant) return;
+            const auto& identity = participant->identity();
+            const auto accept = [&](std::string_view verb,
+                                    const std::string& expected_identity,
+                                    std::atomic<bool>& flag) {
+                if (identity != expected_identity ||
+                    payload != BindingControlPayload(config_, verb)) {
+                    return false;
+                }
+                flag.store(true, std::memory_order_release);
+                PrintLine("[CONTROL] verb=", verb,
+                          " sender=", SafeOutput(identity));
+                return true;
+            };
+            if (config_.role == Role::Receiver) {
+                (void)(accept("primary-prefix", config_.expected_sender,
+                              primary_prefix_received_) ||
+                       accept("contender-done", config_.observer,
+                              contender_done_received_));
+            } else {
+                (void)(accept("primary-observed", config_.destination,
+                              primary_observed_received_) ||
+                       accept("contender-observed", config_.destination,
+                              contender_observed_received_));
+            }
+            return;
+        }
         if (IsE2eeCase(config_.runtime_case) && config_.role == Role::Receiver) {
             if (!participant || participant->identity() != config_.expected_sender) {
                 unexpected_raw_.fetch_add(1);
@@ -791,6 +864,22 @@ public:
         return ack_received_.load(std::memory_order_acquire);
     }
 
+    bool primary_prefix_received() const noexcept {
+        return primary_prefix_received_.load(std::memory_order_acquire);
+    }
+
+    bool contender_done_received() const noexcept {
+        return contender_done_received_.load(std::memory_order_acquire);
+    }
+
+    bool primary_observed_received() const noexcept {
+        return primary_observed_received_.load(std::memory_order_acquire);
+    }
+
+    bool contender_observed_received() const noexcept {
+        return contender_observed_received_.load(std::memory_order_acquire);
+    }
+
     ReceiveSummary Summary() const {
         ReceiveSummary summary;
         summary.opened = opened_.load(std::memory_order_acquire);
@@ -799,6 +888,8 @@ public:
         summary.finished = results_.size();
         for (const auto& result : results_) {
             if (!result.metadata_valid || !result.sender_valid ||
+                (config_.runtime_case == RuntimeCase::SenderBinding &&
+                 !result.sender_instance_valid) ||
                 (result.complete && !result.integrity_valid)) {
                 ++summary.invalid;
             }
@@ -834,7 +925,9 @@ public:
                 bytes += chunk.size();
             }
             Record(BuildResult("byte", item.info, bytes, hash.Finish(),
-                               item.reader->close_reason()));
+                               item.reader->close_reason(),
+                               item.participant_sid,
+                               item.participant_identity));
         }
         return true;
     }
@@ -904,17 +997,27 @@ private:
                                const Info& info,
                                std::size_t actual_bytes,
                                std::string actual_hash,
-                               std::string close_reason) const {
+                               std::string close_reason,
+                               std::string participant_sid,
+                               std::string participant_identity) const {
         ReceivedResult result;
         result.kind = actual_kind;
         result.stream_id = info.stream_id;
         result.sender_identity = info.sender_identity;
+        result.sender_sid = info.sender_sid;
+        result.participant_identity = std::move(participant_identity);
+        result.participant_sid = std::move(participant_sid);
         result.close_reason = std::move(close_reason);
         result.actual_bytes = actual_bytes;
         result.actual_sha256 = std::move(actual_hash);
         result.complete = result.close_reason.empty();
         result.sender_valid = config_.expected_sender.empty() ||
-                              result.sender_identity == config_.expected_sender;
+            result.sender_identity == config_.expected_sender ||
+            (config_.runtime_case == RuntimeCase::SenderBinding &&
+             result.sender_identity == config_.observer);
+        result.sender_instance_valid = !result.sender_sid.empty() &&
+            result.sender_sid == result.participant_sid &&
+            result.sender_identity == result.participant_identity;
 
         const auto kind = info.attributes.find("l3_kind");
         const auto sequence = info.attributes.find("l3_sequence");
@@ -945,6 +1048,15 @@ private:
                   " complete=", result.complete ? "true" : "false",
                   " integrity=", result.integrity_valid ? "true" : "false",
                   " sender_valid=", result.sender_valid ? "true" : "false");
+        if (config_.runtime_case == RuntimeCase::SenderBinding) {
+            PrintLine("[OUTER_SENDER] sequence=", SafeOutput(result.sequence),
+                      " outer_sid=", SafeOutput(result.sender_sid),
+                      " outer_identity=", SafeOutput(result.sender_identity),
+                      " participant_sid=", SafeOutput(result.participant_sid),
+                      " participant_identity=", SafeOutput(result.participant_identity),
+                      " instance_match=",
+                      result.sender_instance_valid ? "true" : "false");
+        }
         std::lock_guard lock(results_mutex_);
         results_.push_back(std::move(result));
     }
@@ -965,6 +1077,10 @@ private:
     std::atomic<std::size_t> opened_{0};
     std::atomic<std::size_t> worker_failures_{0};
     std::atomic<bool> ack_received_{false};
+    std::atomic<bool> primary_prefix_received_{false};
+    std::atomic<bool> contender_done_received_{false};
+    std::atomic<bool> primary_observed_received_{false};
+    std::atomic<bool> contender_observed_received_{false};
     mutable std::mutex results_mutex_;
     std::vector<ReceivedResult> results_;
     std::mutex workers_mutex_;
@@ -1012,6 +1128,23 @@ asio::awaitable<bool> WaitForDestination(
         return std::any_of(participants.begin(), participants.end(),
             [&](const auto& item) {
                 return item.second && item.second->identity() == config.destination;
+            });
+    });
+}
+
+asio::awaitable<bool> WaitForParticipants(
+    const std::shared_ptr<livekit::Room>& room,
+    const std::vector<std::string>& identities,
+    std::chrono::steady_clock::time_point deadline) {
+    co_return co_await WaitUntil(room->executor(), deadline, [&] {
+        const auto participants = room->remote_participants();
+        return std::all_of(identities.begin(), identities.end(),
+            [&](const std::string& identity) {
+                return std::any_of(participants.begin(), participants.end(),
+                    [&](const auto& item) {
+                        return item.second &&
+                               item.second->identity() == identity;
+                    });
             });
     });
 }
@@ -1308,6 +1441,59 @@ asio::awaitable<int> RunFullRestart(
     co_return kExitPassed;
 }
 
+bool PublishBindingControl(const std::shared_ptr<livekit::Room>& room,
+                           const Config& config,
+                           std::string_view verb,
+                           const std::string& destination) {
+    return room->PublishData(
+        BindingControlPayload(config, verb), true, {destination},
+        BindingControlTopic(config));
+}
+
+bool PublishBindingHeader(const std::shared_ptr<livekit::Room>& room,
+                          const Config& config,
+                          const std::string& sequence,
+                          std::string_view payload) {
+    livekit::proto::DataPacket packet;
+    packet.add_destination_identities(config.destination);
+    auto* header = packet.mutable_stream_header();
+    header->set_stream_id(config.run_id + "-shared-stream");
+    header->set_topic(config.topic);
+    header->set_mime_type("text/plain");
+    header->set_total_length(payload.size());
+    header->mutable_text_header();
+    const auto attributes = StreamAttributes(
+        config, "text", sequence, payload.size(),
+        Sha256Of(payload.data(), payload.size()));
+    for (const auto& [key, value] : attributes) {
+        (*header->mutable_attributes())[key] = value;
+    }
+    return room->PublishDataPacket(packet, true);
+}
+
+bool PublishBindingChunk(const std::shared_ptr<livekit::Room>& room,
+                         const Config& config,
+                         uint64_t index,
+                         std::string_view payload) {
+    livekit::proto::DataPacket packet;
+    packet.add_destination_identities(config.destination);
+    auto* chunk = packet.mutable_stream_chunk();
+    chunk->set_stream_id(config.run_id + "-shared-stream");
+    chunk->set_chunk_index(index);
+    chunk->set_content(payload.data(), payload.size());
+    return room->PublishDataPacket(packet, true);
+}
+
+bool PublishBindingTrailer(const std::shared_ptr<livekit::Room>& room,
+                           const Config& config) {
+    livekit::proto::DataPacket packet;
+    packet.add_destination_identities(config.destination);
+    auto* trailer = packet.mutable_stream_trailer();
+    trailer->set_stream_id(config.run_id + "-shared-stream");
+    (*trailer->mutable_attributes())["l3_result"] = "complete";
+    return room->PublishDataPacket(packet, true);
+}
+
 asio::awaitable<int> RunReaderBudgetTransfer(
     const std::shared_ptr<livekit::Room>& room,
     const Config& config,
@@ -1430,6 +1616,73 @@ asio::awaitable<int> RunReaderTtlActive(
     co_return kExitPassed;
 }
 
+asio::awaitable<int> RunSenderBinding(
+    const std::shared_ptr<livekit::Room>& room,
+    const std::shared_ptr<RuntimeListener>& listener,
+    const Config& config) {
+    const auto local = room->local_participant();
+    if (!local) throw RuntimeFailure("sender_binding_local_missing");
+    const bool primary = local->identity() == config.expected_sender;
+    const bool contender = local->identity() == config.observer;
+    if (!primary && !contender)
+        throw RuntimeFailure("sender_binding_identity_invalid");
+
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(config.timeout_seconds);
+    const std::string peer = primary ? config.observer : config.expected_sender;
+    if (!co_await WaitForParticipants(
+            room, {config.destination, peer}, deadline)) {
+        PrintLine("[RESULT_DETAIL] sender_binding_peers_not_connected=true");
+        co_return kExitInconclusive;
+    }
+
+    if (primary) {
+        SendText(room, config, "binding-primary-probe", 37, 79);
+        constexpr std::string_view payload = "AB";
+        if (!PublishBindingHeader(
+                room, config, "binding-primary", payload) ||
+            !PublishBindingChunk(room, config, 0, payload.substr(0, 1)) ||
+            !PublishBindingControl(
+                room, config, "primary-prefix", config.destination)) {
+            PrintLine("[RESULT_DETAIL] sender_binding_primary_prefix_send_failed=true");
+            co_return kExitInconclusive;
+        }
+        PrintLine("[SEND] sequence=binding-primary prefix=true shared_id=true");
+        if (!co_await WaitUntil(room->executor(), deadline, [&] {
+                return listener->contender_observed_received();
+            })) {
+            PrintLine("[RESULT_DETAIL] sender_binding_contender_observation_timeout=true");
+            co_return kExitInconclusive;
+        }
+        if (!PublishBindingChunk(room, config, 1, payload.substr(1, 1)) ||
+            !PublishBindingTrailer(room, config)) {
+            PrintLine("[RESULT_DETAIL] sender_binding_primary_finish_send_failed=true");
+            co_return kExitInconclusive;
+        }
+        PrintLine("[SEND] sequence=binding-primary complete=true shared_id=true");
+    } else {
+        SendText(room, config, "binding-contender-probe", 41, 83);
+        if (!co_await WaitUntil(room->executor(), deadline, [&] {
+                return listener->primary_observed_received();
+            })) {
+            PrintLine("[RESULT_DETAIL] sender_binding_primary_observation_timeout=true");
+            co_return kExitInconclusive;
+        }
+        constexpr std::string_view payload = "X";
+        if (!PublishBindingHeader(
+                room, config, "binding-contender", payload) ||
+            !PublishBindingChunk(room, config, 0, payload) ||
+            !PublishBindingTrailer(room, config) ||
+            !PublishBindingControl(
+                room, config, "contender-done", config.destination)) {
+            PrintLine("[RESULT_DETAIL] sender_binding_contender_send_failed=true");
+            co_return kExitInconclusive;
+        }
+        PrintLine("[SEND] sequence=binding-contender conflict_complete=true shared_id=true");
+    }
+    co_return kExitPassed;
+}
+
 asio::awaitable<int> RunSender(
     const std::shared_ptr<livekit::Room>& room,
     const std::shared_ptr<RuntimeListener>& listener,
@@ -1444,6 +1697,9 @@ asio::awaitable<int> RunSender(
     switch (config.runtime_case) {
     case RuntimeCase::Baseline:
         result = co_await RunBaseline(room, config);
+        break;
+    case RuntimeCase::SenderBinding:
+        result = co_await RunSenderBinding(room, listener, config);
         break;
     case RuntimeCase::Backpressure:
         result = co_await RunBackpressure(room, config);
@@ -1571,6 +1827,53 @@ bool ValidateReaderFailure(const RuntimeListener& listener,
     return true;
 }
 
+bool ValidateSenderBinding(const RuntimeListener& listener,
+                           const Config& config) {
+    if (config.runtime_case != RuntimeCase::SenderBinding) return true;
+    const auto results = listener.Results();
+    const auto find = [&](std::string_view sequence) -> const ReceivedResult* {
+        const auto item = std::find_if(results.begin(), results.end(),
+            [&](const ReceivedResult& result) {
+                return result.sequence == sequence;
+            });
+        return item == results.end() ? nullptr : &*item;
+    };
+    const auto* primary_probe = find("binding-primary-probe");
+    const auto* contender_probe = find("binding-contender-probe");
+    const auto* shared = find("binding-primary");
+    const auto contender_shared = std::count_if(
+        results.begin(), results.end(), [](const ReceivedResult& result) {
+            return result.sequence == "binding-contender";
+        });
+    const auto shared_id = config.run_id + "-shared-stream";
+    const auto valid_result = [](const ReceivedResult* result) {
+        return result && result->complete && result->metadata_valid &&
+               result->integrity_valid && result->sender_instance_valid;
+    };
+    const bool distinct_sids = primary_probe && contender_probe &&
+        !primary_probe->sender_sid.empty() &&
+        !contender_probe->sender_sid.empty() &&
+        primary_probe->sender_sid != contender_probe->sender_sid;
+    const bool valid = results.size() == 3 && contender_shared == 0 &&
+        valid_result(primary_probe) && valid_result(contender_probe) &&
+        valid_result(shared) &&
+        primary_probe->sender_identity == config.expected_sender &&
+        contender_probe->sender_identity == config.observer &&
+        shared->sender_identity == config.expected_sender &&
+        shared->sender_sid == primary_probe->sender_sid &&
+        shared->stream_id == shared_id && distinct_sids;
+    PrintLine("[CHECK] sender_binding_isolation=", valid ? "true" : "false",
+              " outer_metadata_match=",
+              (valid_result(primary_probe) && valid_result(contender_probe) &&
+               valid_result(shared)) ? "true" : "false",
+              " distinct_sender_sids=", distinct_sids ? "true" : "false",
+              " primary_sid=",
+              SafeOutput(primary_probe ? primary_probe->sender_sid : "missing"),
+              " contender_sid=",
+              SafeOutput(contender_probe ? contender_probe->sender_sid : "missing"));
+    return valid;
+}
+
 int ValidateReceiver(const RuntimeListener& listener, const Config& config) {
     const auto summary = listener.Summary();
     const std::size_t expected_total =
@@ -1585,10 +1888,42 @@ int ValidateReceiver(const RuntimeListener& listener, const Config& config) {
         summary.complete != static_cast<std::size_t>(config.expected_complete) ||
         summary.incomplete != static_cast<std::size_t>(config.expected_incomplete) ||
         summary.invalid != 0 || !ValidateReaderFailure(listener, config) ||
+        !ValidateSenderBinding(listener, config) ||
         (IsE2eeCase(config.runtime_case) && !listener.ValidateEncryption())) {
         return kExitFailed;
     }
     return kExitPassed;
+}
+
+asio::awaitable<int> CoordinateSenderBindingReceiver(
+    const std::shared_ptr<livekit::Room>& room,
+    const std::shared_ptr<RuntimeListener>& listener,
+    const Config& config) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(config.timeout_seconds);
+    if (!co_await WaitUntil(room->executor(), deadline, [&] {
+            return listener->primary_prefix_received();
+        })) {
+        PrintLine("[RESULT_DETAIL] sender_binding_primary_prefix_timeout=true");
+        co_return kExitInconclusive;
+    }
+    if (!PublishBindingControl(
+            room, config, "primary-observed", config.observer)) {
+        PrintLine("[RESULT_DETAIL] sender_binding_primary_observation_send_failed=true");
+        co_return kExitInconclusive;
+    }
+    if (!co_await WaitUntil(room->executor(), deadline, [&] {
+            return listener->contender_done_received();
+        })) {
+        PrintLine("[RESULT_DETAIL] sender_binding_contender_timeout=true");
+        co_return kExitInconclusive;
+    }
+    if (!PublishBindingControl(
+            room, config, "contender-observed", config.expected_sender)) {
+        PrintLine("[RESULT_DETAIL] sender_binding_contender_observation_send_failed=true");
+        co_return kExitInconclusive;
+    }
+    co_return kExitPassed;
 }
 
 bool ReceiverCanAcknowledge(const ReceiveSummary& summary,
@@ -1613,6 +1948,11 @@ asio::awaitable<int> RunReceiver(
     const std::shared_ptr<livekit::Room>& room,
     const std::shared_ptr<RuntimeListener>& listener,
     const Config& config) {
+    if (config.runtime_case == RuntimeCase::SenderBinding) {
+        const int coordination = co_await CoordinateSenderBindingReceiver(
+            room, listener, config);
+        if (coordination != kExitPassed) co_return coordination;
+    }
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(config.timeout_seconds);
     const bool ready = co_await WaitUntil(room->executor(), deadline, [&] {
@@ -1645,14 +1985,19 @@ asio::awaitable<int> RunReceiver(
     if (IsE2eeCase(config.runtime_case) && !listener->ValidateEncryption())
         co_return kExitFailed;
     if (!ReceiverCanAcknowledge(summary, config) ||
-        !ValidateReaderFailure(*listener, config)) {
+        !ValidateReaderFailure(*listener, config) ||
+        !ValidateSenderBinding(*listener, config)) {
         PrintLine("[RESULT_DETAIL] receiver_ack_validation_failed=true");
         co_return kExitFailed;
     }
 
     const auto ack = AckPayload(config);
+    const std::vector<std::string> ack_destinations =
+        config.runtime_case == RuntimeCase::SenderBinding
+        ? std::vector<std::string>{config.expected_sender, config.observer}
+        : std::vector<std::string>{config.expected_sender};
     if (!room->PublishData(ack, /*reliable=*/true,
-                           {config.expected_sender}, AckTopic(config))) {
+                           ack_destinations, AckTopic(config))) {
         PrintLine("[RESULT_DETAIL] receiver_ack_send_failed=true");
         co_return kExitInconclusive;
     }

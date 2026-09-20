@@ -718,6 +718,52 @@ void TestOutboundBounds() {
 
 void TestOutboundInterleavings();
 
+void TestOutboundSenderInstanceBinding() {
+    for (const auto kind : {WriterKind::Text, WriterKind::Byte}) {
+        OutboundFixture f;
+        auto stale = f.Writer(kind);
+        f.room->SetLocalParticipantForTesting(
+            std::make_shared<livekit::LocalParticipant>(
+                "PA_OUTBOUND", "outbound",
+                livekit::LocalParticipant::SendSignalHandler{}));
+        const auto before = f.channel->attempts();
+        try {
+            Write(kind, *stale, "must-not-cross-sender-instance");
+            TEST_CHECK(false);
+        } catch (const OperationError& error) {
+            TEST_CHECK(error.code() == OperationErrorCode::InvalidState);
+            TEST_CHECK(error.stage() == "header");
+        }
+        TEST_CHECK(stale->is_closed());
+        TEST_CHECK(f.channel->attempts() == before);
+
+        auto fresh = f.Writer(kind);
+        fresh->Close();
+        TEST_CHECK(f.channel->attempts() == before + 2);
+    }
+
+    OutboundFixture f;
+    auto admitted = f.Writer(WriterKind::Text);
+    livekit::RoomStreamDeliveryTestAccess::SetAdmissionHooks(
+        *f.room, {}, [room = f.room] {
+            room->SetLocalParticipantForTesting(
+                std::make_shared<livekit::LocalParticipant>(
+                    "PA_OUTBOUND", "outbound",
+                    livekit::LocalParticipant::SendSignalHandler{}));
+        });
+    try {
+        Write(WriterKind::Text, *admitted,
+              "must-not-commit-after-sender-replacement");
+        TEST_CHECK(false);
+    } catch (const OperationError& error) {
+        TEST_CHECK(error.code() == OperationErrorCode::InvalidState);
+        TEST_CHECK(error.stage() == "header");
+    }
+    livekit::RoomStreamDeliveryTestAccess::ClearAdmissionHooks(*f.room);
+    TEST_CHECK(admitted->is_closed());
+    TEST_CHECK(f.channel->attempts() == 0);
+}
+
 void RunOutboundCase(const std::string& name) {
     if (name == "text") TestOutboundEnvelope(WriterKind::Text);
     else if (name == "byte") TestOutboundEnvelope(WriterKind::Byte);
@@ -726,6 +772,7 @@ void RunOutboundCase(const std::string& name) {
     else if (name == "failure-stages") TestOutboundFailureStages();
     else if (name == "bounds") TestOutboundBounds();
     else if (name == "interleavings") TestOutboundInterleavings();
+    else if (name == "sender-instance") TestOutboundSenderInstanceBinding();
     else {
         TEST_CHECK(name == "missing" || name == "replace" || name == "disable");
         TestOutboundFailure(name);
@@ -1556,7 +1603,8 @@ int main(int argc, char** argv) {
         return 0;
     }
     for (const auto* name : {"text", "byte", "missing", "replace", "disable", "rotation",
-                            "empty-cancel", "failure-stages", "bounds", "interleavings"})
+                            "empty-cancel", "failure-stages", "bounds", "interleavings",
+                            "sender-instance"})
         RunOutboundCase(name);
     TestWriterFailureMatrix();
     TestMidWriteFailureStopsPrefix();

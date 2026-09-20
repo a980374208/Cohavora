@@ -66,6 +66,39 @@ TrackPublication::StreamState StreamStateFromProto(proto::StreamState state) {
     }
 }
 
+bool SenderMetadataMatchesBoundInstance(const SenderContext& sender) {
+    return (sender.transport_sid.empty() || sender.transport_sid == sender.key.sid) &&
+        (sender.transport_identity.empty() ||
+         sender.transport_identity == sender.key.identity);
+}
+
+bool SameSenderInstance(const SenderContext& expected,
+                        const SenderContext& actual) {
+    if (expected.origin != actual.origin) return false;
+    const bool expected_bound = expected.key.incarnation != 0;
+    const bool actual_bound = actual.key.incarnation != 0;
+    if (expected_bound || actual_bound) {
+        return expected_bound && actual_bound && expected.key == actual.key &&
+            SenderMetadataMatchesBoundInstance(expected) &&
+            SenderMetadataMatchesBoundInstance(actual) &&
+            IsParticipantTicketActive(expected.ticket, expected.key) &&
+            IsParticipantTicketActive(actual.ticket, actual.key);
+    }
+    if (!expected.transport_sid.empty() || !actual.transport_sid.empty()) {
+        return !expected.transport_sid.empty() && !actual.transport_sid.empty() &&
+            expected.transport_sid == actual.transport_sid &&
+            (expected.transport_identity.empty() || actual.transport_identity.empty() ||
+             expected.transport_identity == actual.transport_identity);
+    }
+    return expected.transport_identity == actual.transport_identity;
+}
+
+bool IsSenderInstanceActive(const SenderContext& sender) {
+    return sender.key.incarnation == 0 ||
+        (SenderMetadataMatchesBoundInstance(sender) &&
+         IsParticipantTicketActive(sender.ticket, sender.key));
+}
+
 } // namespace
 
 class RoomPeerConnectionObserver : public webrtc::PeerConnectionObserver {
@@ -1698,6 +1731,7 @@ Room::DataPacketSendResult Room::PublishDataPacket(
                                packet.has_stream_trailer();
     std::shared_ptr<E2eeManager> encryption_owner;
     E2eeManager::DataPacketState encryption_state{};
+    std::shared_ptr<LocalParticipant> sender_owner;
     std::string sender_identity;
     std::string sender_sid;
     std::function<void()> before_admission;
@@ -1720,9 +1754,10 @@ Room::DataPacketSendResult Room::PublishDataPacket(
         }
         dc = reliable ? reliable_dc_ : lossy_dc_;
         if (!dc) return DataPacketSendResult::ChannelUnavailable;
-        if (local_participant_) {
-            sender_identity = local_participant_->identity();
-            sender_sid = local_participant_->sid();
+        sender_owner = local_participant_;
+        if (sender_owner) {
+            sender_identity = sender_owner->identity();
+            sender_sid = sender_owner->sid();
         }
         if (stream_packet) {
             encryption_owner = e2ee_manager_;
@@ -1731,6 +1766,8 @@ Room::DataPacketSendResult Room::PublishDataPacket(
                 (stream_context->manager != encryption_owner ||
                  stream_context->policy_revision != encryption_state.policy_revision))
                 return DataPacketSendResult::EncryptionContextChanged;
+            if (stream_context && stream_context->sender.lock() != sender_owner)
+                return DataPacketSendResult::SenderContextChanged;
         }
         if (stream_delivery_test_hooks_) {
             after_admission = stream_delivery_test_hooks_->after_admission;
@@ -1797,6 +1834,10 @@ Room::DataPacketSendResult Room::PublishDataPacket(
             (encryption_owner && encryption_owner->data_packet_state().policy_revision !=
                                      encryption_state.policy_revision))
             return DataPacketSendResult::EncryptionContextChanged;
+        if (stream_context &&
+            (stream_context->sender.lock() != sender_owner ||
+             local_participant_ != sender_owner))
+            return DataPacketSendResult::SenderContextChanged;
         if ((reliable ? reliable_dc_ : lossy_dc_) != dc)
             return DataPacketSendResult::ChannelUnavailable;
         // This is the final send admission. WebRTC calls use this captured channel
@@ -1830,6 +1871,7 @@ std::shared_ptr<TextStreamWriter> Room::CreateTextStreamWriter(
         std::lock_guard lock(room_mutex_);
         generation = installed_session_generation_;
         stream_context.manager = e2ee_manager_;
+        stream_context.sender = local_participant_;
         if (stream_context.manager)
             stream_context.policy_revision = stream_context.manager->data_packet_state().policy_revision;
         if (local_participant_) {
@@ -1867,6 +1909,10 @@ std::shared_ptr<TextStreamWriter> Room::CreateTextStreamWriter(
             case DataPacketSendResult::EncryptionContextChanged:
                 code = OperationErrorCode::InvalidState;
                 message = "stream encryption context changed";
+                break;
+            case DataPacketSendResult::SenderContextChanged:
+                code = OperationErrorCode::InvalidState;
+                message = "stream sender context changed";
                 break;
             case DataPacketSendResult::Accepted:
                 return true;
@@ -1906,6 +1952,7 @@ std::shared_ptr<ByteStreamWriter> Room::CreateByteStreamWriter(
         std::lock_guard lock(room_mutex_);
         generation = installed_session_generation_;
         stream_context.manager = e2ee_manager_;
+        stream_context.sender = local_participant_;
         if (stream_context.manager)
             stream_context.policy_revision = stream_context.manager->data_packet_state().policy_revision;
         if (local_participant_) {
@@ -1943,6 +1990,10 @@ std::shared_ptr<ByteStreamWriter> Room::CreateByteStreamWriter(
             case DataPacketSendResult::EncryptionContextChanged:
                 code = OperationErrorCode::InvalidState;
                 message = "stream encryption context changed";
+                break;
+            case DataPacketSendResult::SenderContextChanged:
+                code = OperationErrorCode::InvalidState;
+                message = "stream sender context changed";
                 break;
             case DataPacketSendResult::Accepted:
                 return true;
@@ -2187,6 +2238,32 @@ void Room::RetireIncomingReaderLocked(const std::string& stream_id,
     incoming_stream_deadlines_.erase(stream_id);
 }
 
+size_t Room::RetireIncomingReadersForParticipantLocked(
+    const std::shared_ptr<Participant>& participant,
+    const std::string& reason) {
+    const auto membership = FindMembershipLocked(participant);
+    if (!membership) return 0;
+
+    std::vector<std::string> stream_ids;
+    const auto collect = [&](const auto& readers) {
+        for (const auto& [stream_id, entry] : readers) {
+            if (entry.sender.key == membership->key) {
+                stream_ids.push_back(stream_id);
+            }
+        }
+    };
+    collect(active_text_readers_);
+    collect(active_byte_readers_);
+    std::sort(stream_ids.begin(), stream_ids.end());
+    stream_ids.erase(std::unique(stream_ids.begin(), stream_ids.end()),
+                     stream_ids.end());
+    for (const auto& stream_id : stream_ids) {
+        RetireIncomingReaderLocked(stream_id, reason);
+        incoming_data_streams_->Discard(stream_id);
+    }
+    return stream_ids.size();
+}
+
 size_t Room::PurgeIncomingStreamsLocked(
     IncomingDataStreamAssembler::TimePoint now,
     uint64_t generation) {
@@ -2271,15 +2348,32 @@ void Room::OnIncomingDataPacketAt(
     bool is_structured_chat = false;
     EncryptionType encryption_type = EncryptionType::NONE;
     std::shared_ptr<E2eeManager> decrypt_owner;
+    SenderContext packet_sender;
+    std::shared_ptr<Participant> packet_participant;
+    bool sender_captured = false;
     // Called only with room_mutex_ held, at each state/event commit.
     const auto can_commit = [&] {
         return IsNativeGenerationCurrentLocked(generation) &&
-            (!decrypt_owner || (e2ee_manager_ == decrypt_owner && decrypt_owner->enabled()));
+            (!decrypt_owner || (e2ee_manager_ == decrypt_owner && decrypt_owner->enabled())) &&
+            (!sender_captured || IsSenderInstanceActive(packet_sender));
     };
 
     // 尝试反序列化 Protobuf DataPacket
     proto::DataPacket data_pkt;
     if (data_pkt.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+        if (!data_pkt.participant_identity().empty()) {
+            sender_identity = data_pkt.participant_identity();
+        }
+        if (!data_pkt.participant_sid().empty()) {
+            real_sender_sid = data_pkt.participant_sid();
+        }
+        {
+            std::lock_guard lock(room_mutex_);
+            if (!IsNativeGenerationCurrentLocked(generation)) return;
+            packet_sender = ResolveSenderContextLocked(
+                real_sender_sid, sender_identity, &packet_participant);
+            sender_captured = true;
+        }
         if (data_pkt.has_encrypted_packet()) {
             std::shared_ptr<StreamDeliveryTestHooks> hooks;
             {
@@ -2324,13 +2418,6 @@ void Room::OnIncomingDataPacketAt(
             if (hooks && hooks->after_decrypt_before_commit)
                 hooks->after_decrypt_before_commit();
         }
-        if (!data_pkt.participant_identity().empty()) {
-            sender_identity = data_pkt.participant_identity();
-        }
-        if (!data_pkt.participant_sid().empty()) {
-            real_sender_sid = data_pkt.participant_sid();
-        }
-
         if (data_pkt.has_stream_header()) {
             const auto& header = data_pkt.stream_header();
             if (!header.has_text_header() && !header.has_byte_header()) {
@@ -2375,8 +2462,16 @@ void Room::OnIncomingDataPacketAt(
                 {
                     std::lock_guard lk(room_mutex_);
                     if (!can_commit()) return;
-                    sender = ResolveSenderContextLocked(
-                        real_sender_sid, sender_identity, &p);
+                    sender = packet_sender;
+                    p = packet_participant;
+                    const auto text = active_text_readers_.find(header.stream_id());
+                    const auto bytes = active_byte_readers_.find(header.stream_id());
+                    if ((text != active_text_readers_.end() &&
+                         !SameSenderInstance(text->second.sender, sender)) ||
+                        (bytes != active_byte_readers_.end() &&
+                         !SameSenderInstance(bytes->second.sender, sender))) {
+                        return;
+                    }
                     RetireIncomingReaderLocked(
                         header.stream_id(), kDataStreamReplaced);
                     incoming_data_streams_->Discard(header.stream_id());
@@ -2394,7 +2489,8 @@ void Room::OnIncomingDataPacketAt(
                     }
                     if (text_reader->admitted() &&
                         !text_reader->is_closed()) {
-                        active_text_readers_[header.stream_id()] = {text_reader, encryption_type};
+                        active_text_readers_[header.stream_id()] = {
+                            text_reader, encryption_type, sender};
                         incoming_stream_deadlines_[header.stream_id()] =
                             now + incoming_reader_budget_->limits()
                                       .stream_ttl;
@@ -2446,8 +2542,16 @@ void Room::OnIncomingDataPacketAt(
                 {
                     std::lock_guard lk(room_mutex_);
                     if (!can_commit()) return;
-                    sender = ResolveSenderContextLocked(
-                        real_sender_sid, sender_identity, &p);
+                    sender = packet_sender;
+                    p = packet_participant;
+                    const auto text = active_text_readers_.find(header.stream_id());
+                    const auto bytes = active_byte_readers_.find(header.stream_id());
+                    if ((text != active_text_readers_.end() &&
+                         !SameSenderInstance(text->second.sender, sender)) ||
+                        (bytes != active_byte_readers_.end() &&
+                         !SameSenderInstance(bytes->second.sender, sender))) {
+                        return;
+                    }
                     RetireIncomingReaderLocked(
                         header.stream_id(), kDataStreamReplaced);
                     incoming_data_streams_->Discard(header.stream_id());
@@ -2465,7 +2569,8 @@ void Room::OnIncomingDataPacketAt(
                     }
                     if (byte_reader->admitted() &&
                         !byte_reader->is_closed()) {
-                        active_byte_readers_[header.stream_id()] = {byte_reader, encryption_type};
+                        active_byte_readers_[header.stream_id()] = {
+                            byte_reader, encryption_type, sender};
                         incoming_stream_deadlines_[header.stream_id()] =
                             now + incoming_reader_budget_->limits()
                                       .stream_ttl;
@@ -2500,6 +2605,14 @@ void Room::OnIncomingDataPacketAt(
             {
                 std::lock_guard lk(room_mutex_);
                 if (!can_commit()) return;
+                const auto text = active_text_readers_.find(chunk.stream_id());
+                const auto bytes = active_byte_readers_.find(chunk.stream_id());
+                if ((text != active_text_readers_.end() &&
+                     !SameSenderInstance(text->second.sender, packet_sender)) ||
+                    (bytes != active_byte_readers_.end() &&
+                     !SameSenderInstance(bytes->second.sender, packet_sender))) {
+                    return;
+                }
                 if (auto deadline = incoming_stream_deadlines_.find(
                         chunk.stream_id());
                     deadline != incoming_stream_deadlines_.end() &&
@@ -2510,8 +2623,6 @@ void Room::OnIncomingDataPacketAt(
                     ScheduleIncomingStreamCleanupLocked(generation);
                     return;
                 }
-                const auto text = active_text_readers_.find(chunk.stream_id());
-                const auto bytes = active_byte_readers_.find(chunk.stream_id());
                 if ((text != active_text_readers_.end() &&
                      text->second.encryption_type != encryption_type) ||
                     (bytes != active_byte_readers_.end() &&
@@ -2585,6 +2696,24 @@ void Room::OnIncomingDataPacketAt(
             {
                 std::lock_guard lk(room_mutex_);
                 if (!can_commit()) return;
+                const auto text = active_text_readers_.find(trailer.stream_id());
+                const auto bytes = active_byte_readers_.find(trailer.stream_id());
+                if ((text != active_text_readers_.end() &&
+                     !SameSenderInstance(text->second.sender, packet_sender)) ||
+                    (bytes != active_byte_readers_.end() &&
+                     !SameSenderInstance(bytes->second.sender, packet_sender))) {
+                    return;
+                }
+                if ((text != active_text_readers_.end() &&
+                     text->second.encryption_type != encryption_type) ||
+                    (bytes != active_byte_readers_.end() &&
+                     bytes->second.encryption_type != encryption_type)) {
+                    RetireIncomingReaderLocked(
+                        trailer.stream_id(), kDataStreamEncryptionTypeMismatch);
+                    incoming_data_streams_->Discard(trailer.stream_id());
+                    ScheduleIncomingStreamCleanupLocked(generation);
+                    return;
+                }
                 if (auto deadline = incoming_stream_deadlines_.find(
                         trailer.stream_id());
                     deadline != incoming_stream_deadlines_.end() &&
@@ -2607,21 +2736,21 @@ void Room::OnIncomingDataPacketAt(
                 const bool incomplete_normal_stream =
                     trailer.reason().empty() && assembler_was_active &&
                     !assembled;
-                if (auto it = active_text_readers_.find(trailer.stream_id()); it != active_text_readers_.end()) {
+                if (text != active_text_readers_.end()) {
                     if (incomplete_normal_stream) {
-                        it->second.reader->OnStreamError(kDataStreamAssemblyRejected);
+                        text->second.reader->OnStreamError(kDataStreamAssemblyRejected);
                     } else {
-                        it->second.reader->OnStreamClose(trailer.reason(), attrs);
+                        text->second.reader->OnStreamClose(trailer.reason(), attrs);
                     }
-                    active_text_readers_.erase(it);
+                    active_text_readers_.erase(text);
                 }
-                if (auto it = active_byte_readers_.find(trailer.stream_id()); it != active_byte_readers_.end()) {
+                if (bytes != active_byte_readers_.end()) {
                     if (incomplete_normal_stream) {
-                        it->second.reader->OnStreamError(kDataStreamAssemblyRejected);
+                        bytes->second.reader->OnStreamError(kDataStreamAssemblyRejected);
                     } else {
-                        it->second.reader->OnStreamClose(trailer.reason(), attrs);
+                        bytes->second.reader->OnStreamClose(trailer.reason(), attrs);
                     }
-                    active_byte_readers_.erase(it);
+                    active_byte_readers_.erase(bytes);
                 }
                 incoming_stream_deadlines_.erase(trailer.stream_id());
                 ScheduleIncomingStreamCleanupLocked(generation);
@@ -5817,6 +5946,10 @@ void Room::UpdateParticipants(
                     auto departure = MakeParticipantEventLocked(
                         ParticipantEventKind::Departure, it->second, false);
                     disconnected.push_back(it->second);
+                    if (RetireIncomingReadersForParticipantLocked(
+                            it->second, kDataStreamSenderDisconnected) != 0) {
+                        ScheduleIncomingStreamCleanupLocked(event_generation);
+                    }
                     RetireParticipantLocked(it->second);
                     remote_participants_.erase(it);
                     EnqueueParticipantEventLocked(std::move(departure));

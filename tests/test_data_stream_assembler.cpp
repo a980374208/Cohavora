@@ -194,6 +194,26 @@ livekit::proto::DataPacket StreamTrailer(
     return packet;
 }
 
+livekit::proto::DataPacket FromSender(livekit::proto::DataPacket packet,
+                                      const std::string& sid,
+                                      const std::string& identity) {
+    packet.set_participant_sid(sid);
+    packet.set_participant_identity(identity);
+    return packet;
+}
+
+livekit::proto::ParticipantUpdate ParticipantUpdate(
+    const std::string& sid,
+    const std::string& identity,
+    livekit::proto::ParticipantInfo::State state) {
+    livekit::proto::ParticipantUpdate update;
+    auto* participant = update.add_participants();
+    participant->set_sid(sid);
+    participant->set_identity(identity);
+    participant->set_state(state);
+    return update;
+}
+
 class ReaderTrace final : public livekit::RoomListener {
 public:
     void OnTextStreamOpened(
@@ -900,6 +920,91 @@ void TestRoomReaderLifecycle() {
         *room, 3, reader_limits, assembler_limits);
 }
 
+void TestReaderSenderInstanceIsolationAndDeparture() {
+    asio::io_context io;
+    auto room = livekit::Room::Create(io.get_executor());
+    auto trace = std::make_shared<ReaderTrace>();
+    room->AddListener(trace);
+    livekit::RoomStreamDeliveryTestAccess::InstallSession(
+        *room, 1, livekit::DataStreamReaderBudget::Limits{});
+    auto budget = livekit::RoomStreamDeliveryTestAccess::Budget(*room);
+
+    room->UpdateParticipantsForTesting(ParticipantUpdate(
+        "PA_A", "sender-a", livekit::proto::ParticipantInfo::ACTIVE));
+    room->UpdateParticipantsForTesting(ParticipantUpdate(
+        "PA_B", "sender-b", livekit::proto::ParticipantInfo::ACTIVE));
+
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(TextHeader("bound-text", 2), "PA_A", "sender-a"), 1);
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(ByteHeader("bound-byte", 2), "PA_A", "sender-a"), 1);
+    TEST_CHECK(trace->text_readers.size() == 1);
+    TEST_CHECK(trace->byte_readers.size() == 1);
+    const auto text = trace->text_readers.back();
+    const auto bytes = trace->byte_readers.back();
+    TEST_CHECK(budget->active_readers() == 2);
+
+    // A different participant cannot replace, append to, or close A's streams,
+    // even when it deliberately reuses both wire stream IDs.
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(TextHeader("bound-text", 1), "PA_B", "sender-b"), 1);
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(ByteHeader("bound-byte", 1), "PA_B", "sender-b"), 1);
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(StreamChunk("bound-text", 0, "x"), "PA_B", "sender-b"), 1);
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(StreamChunk("bound-byte", 0, "x"), "PA_B", "sender-b"), 1);
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(StreamTrailer("bound-text"), "PA_B", "sender-b"), 1);
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(StreamTrailer("bound-byte"), "PA_B", "sender-b"), 1);
+    TEST_CHECK(trace->text_readers.size() == 1);
+    TEST_CHECK(trace->byte_readers.size() == 1);
+    TEST_CHECK(!text->is_closed() && text->buffered_bytes() == 0);
+    TEST_CHECK(!bytes->is_closed() && bytes->buffered_bytes() == 0);
+
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(StreamChunk("bound-text", 0, "a"), "PA_A", "sender-a"), 1);
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(StreamChunk("bound-byte", 0, "a"), "PA_A", "sender-a"), 1);
+    TEST_CHECK(text->buffered_bytes() == 1);
+    TEST_CHECK(bytes->buffered_bytes() == 1);
+
+    room->UpdateParticipantsForTesting(ParticipantUpdate(
+        "PA_A", "sender-a", livekit::proto::ParticipantInfo::DISCONNECTED));
+    TEST_CHECK(text->is_closed() && text->is_failed());
+    TEST_CHECK(bytes->is_closed() && bytes->is_failed());
+    TEST_CHECK(text->close_reason() == livekit::kDataStreamSenderDisconnected);
+    TEST_CHECK(bytes->close_reason() == livekit::kDataStreamSenderDisconnected);
+    TEST_CHECK(budget->active_readers() == 0);
+    TEST_CHECK(!livekit::RoomStreamDeliveryTestAccess::AssemblerContains(
+        *room, "bound-text"));
+    TEST_CHECK(!livekit::RoomStreamDeliveryTestAccess::AssemblerContains(
+        *room, "bound-byte"));
+    TEST_CHECK(!livekit::RoomStreamDeliveryTestAccess::HasDeadline(
+        *room, "bound-text"));
+    TEST_CHECK(!livekit::RoomStreamDeliveryTestAccess::HasDeadline(
+        *room, "bound-byte"));
+
+    std::string text_chunk;
+    std::vector<uint8_t> byte_chunk;
+    TEST_CHECK(text->ReadNext(text_chunk) && text_chunk == "a");
+    TEST_CHECK(bytes->ReadNext(byte_chunk) &&
+               byte_chunk == std::vector<uint8_t>{static_cast<uint8_t>('a')});
+    TEST_CHECK(budget->buffered_bytes() == 0);
+
+    // Once A's instance has departed, B may legitimately claim those IDs.
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(TextHeader("bound-text", 1), "PA_B", "sender-b"), 1);
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(StreamChunk("bound-text", 0, "b"), "PA_B", "sender-b"), 1);
+    livekit::RoomStreamDeliveryTestAccess::Dispatch(
+        *room, FromSender(StreamTrailer("bound-text"), "PA_B", "sender-b"), 1);
+    TEST_CHECK(trace->text_readers.size() == 2);
+    TEST_CHECK(trace->text_readers.back()->is_closed());
+    TEST_CHECK(!trace->text_readers.back()->is_failed());
+}
+
 // Generate protocol packets using the LiveKit WebRTC cryptor used by the Rust
 // reference (webrtc-sys/src/frame_cryptor.cpp), independently of the local helper
 // under test. Nonces may vary; no assertion depends on random bytes or timing.
@@ -1587,6 +1692,7 @@ int main(int argc, char** argv) {
     TestReaderBudgets();
     TestAssemblerInactivityTimeout();
     TestRoomReaderLifecycle();
+    TestReaderSenderInstanceIsolationAndDeparture();
 
     // Out-of-order chunks are accepted but only emitted once all contiguous
     // chunk indexes and the declared byte count are present.
