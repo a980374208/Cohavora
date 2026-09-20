@@ -745,8 +745,6 @@ add_executable(livekit_meeting_app
     src/render/qt_cpu_video_renderer.cpp
     src/render/video_render_session.h
     src/render/video_render_session.cpp
-    src/ui/video_test_widget.cpp
-    src/ui/video_test_widget.h
     src/ui/audio_visualizer_widget.cpp
     src/ui/audio_visualizer_widget.h
     src/ui/participants_list_model.h

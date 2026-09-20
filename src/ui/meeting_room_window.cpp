@@ -643,9 +643,6 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
 
 	int rightX = w - btnW * 3 - 6;
 
-	_fullscreenRect = QRect(rightX - 26, 8, 26, 28);
-	rightX -= 30;
-
 	_settingsRect = QRect(rightX - 52, 8, 52, 28);
 	rightX -= 56;
 
@@ -654,9 +651,6 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
 
 	_consoleRect = QRect(rightX - 62, 8, 62, 28);
 	rightX -= 66;
-
-	_hostToolsRect = QRect(rightX - 78, 8, 78, 28);
-	rightX -= 82;
 
 	_layoutRect = QRect(rightX - 74, 8, 74, 28);
 	rightX -= 78;
@@ -803,22 +797,9 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 
 	QString layoutStr = (_currentViewMode == VideoViewMode::Grid) ? QString::fromUtf8("宫格布局") : QString::fromUtf8("画中画");
 	drawTextBtn(_layoutRect, layoutStr, _hoverBtn == HoverBtn::Layout, true);
-	drawTextBtn(_hostToolsRect, QString::fromUtf8("主持人工具"), _hoverBtn == HoverBtn::HostTools, true);
 	drawTextBtn(_consoleRect, QString::fromUtf8("控制台 📋"), _hoverBtn == HoverBtn::Console, false, QColor(0x16, 0x77, 0xff));
 	drawTextBtn(_simulateRect, QString::fromUtf8("🐛 模拟"), _hoverBtn == HoverBtn::Simulate, false, QColor(0xe6, 0x7e, 0x22));
 	drawTextBtn(_settingsRect, QString::fromUtf8("设置 ⚙"), _hoverBtn == HoverBtn::Settings, false);
-
-	p.save();
-	if (_hoverBtn == HoverBtn::Fullscreen) {
-		p.setPen(Qt::NoPen);
-		p.setBrush(QColor(0xf2, 0xf3, 0xf5));
-		p.drawRoundedRect(_fullscreenRect, 6, 6);
-	}
-	p.setPen(QPen(QColor(0x4e, 0x59, 0x69), 1.3));
-	const int fx = _fullscreenRect.center().x();
-	const int fy = _fullscreenRect.center().y();
-	p.drawRect(fx - 5, fy - 5, 10, 10);
-	p.restore();
 
 	// 4. 窗口控制按钮
 	p.save();
@@ -841,11 +822,9 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	if (_closeRect.contains(pos)) next = HoverBtn::Close;
 	else if (_maxRect.contains(pos)) next = HoverBtn::Max;
 	else if (_minRect.contains(pos)) next = HoverBtn::Min;
-	else if (_fullscreenRect.contains(pos)) next = HoverBtn::Fullscreen;
 	else if (_settingsRect.contains(pos)) next = HoverBtn::Settings;
 	else if (_simulateRect.contains(pos)) next = HoverBtn::Simulate;
 	else if (_consoleRect.contains(pos)) next = HoverBtn::Console;
-	else if (_hostToolsRect.contains(pos)) next = HoverBtn::HostTools;
 	else if (_layoutRect.contains(pos)) next = HoverBtn::Layout;
 
 	if (!_meetingIdRect.isEmpty() && _meetingIdRect.contains(pos)) {
@@ -1109,8 +1088,6 @@ void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 		{ 4, QString::fromUtf8("邀请"), QString::fromUtf8("邀请"), QRect(), true },
 		{ 5, QString::fromUtf8("成员(%1)").arg(_participantCount), QString::fromUtf8("成员(%1)").arg(_participantCount), QRect(), false },
 		{ 6, QString::fromUtf8("聊天"), QString::fromUtf8("聊天"), QRect(), false },
-		{ 7, QString::fromUtf8("录制"), QString::fromUtf8("停止录制"), QRect(), true },
-		{ 9, QString::fromUtf8("应用"), QString::fromUtf8("应用"), QRect(), false },
 		{ 10, QString::fromUtf8("场景模拟"), QString::fromUtf8("场景模拟"), QRect(), true },
 	};
 
@@ -1284,19 +1261,6 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 					p.drawEllipse(QPoint(cx + 8, cy - 6), 4, 4);
 				}
 				p.restore();
-			}
-		} else if (item.id == 7) {
-			p.setPen(QPen(QColor(0x1f, 0x23, 0x29), 1.6));
-			p.drawEllipse(QPoint(cx, cy), 6, 6);
-			p.setBrush(QColor(0x1f, 0x23, 0x29));
-			p.drawEllipse(QPoint(cx, cy), 3, 3);
-		} else if (item.id == 9) {
-			p.setPen(Qt::NoPen);
-			p.setBrush(QColor(0x1f, 0x23, 0x29));
-			for (int row = -1; row <= 1; ++row) {
-				for (int col = -1; col <= 1; ++col) {
-					p.drawRect(cx + col * 4 - 1, cy + row * 4 - 1, 2, 2);
-				}
 			}
 		} else if (item.id == 10) {
 			const QColor bugCol = hovered ? QColor(0x16, 0x77, 0xff) : QColor(0x1f, 0x23, 0x29);
@@ -1723,14 +1687,6 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 					break;
 				case 6:
 					_chatStream.fire({});
-					break;
-				case 7:
-					_isRecording = !_isRecording;
-					_recordStream.fire({});
-					update();
-					break;
-				case 9:
-					_appsStream.fire({});
 					break;
 				case 10:
 					showSimulateScenarioMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
@@ -2437,16 +2393,6 @@ void MeetingRoomWindow::initLayout() {
 			}
 		});
 	}
-
-	_bottomBar->recordClicked() | rpl::on_next([this] {
-		QMessageBox::information(this, QString::fromUtf8("云端录制"),
-			QString::fromUtf8("正在将本次会议视频流实时转码存档至高可用存储。"));
-	}, lifetime());
-
-	_bottomBar->appsClicked() | rpl::on_next([this] {
-		QMessageBox::information(this, QString::fromUtf8("会议应用"),
-			QString::fromUtf8("可用应用：互动白板、投票调查、同声传译、计时器。"));
-	}, lifetime());
 
 	_bottomBar->endMeetingClicked() | rpl::on_next([this] {
 		handleEndMeetingClicked();

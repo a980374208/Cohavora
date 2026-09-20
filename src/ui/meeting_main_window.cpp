@@ -2,7 +2,6 @@
 #include "src/ui/meeting_room_window.h"
 #include "src/ui/login_dialog.h"
 #include "src/ui/shadow_helper.h"
-#include "src/ui/video_test_widget.h"
 #include "src/core/meeting_coordinator.h"
 #include "src/net/session_manager.h"
 #include "styles/style_widgets.h"
@@ -626,6 +625,17 @@ void MeetingMainWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationRea
 }
 
 void MeetingMainWindow::onCardClicked(ActionCardType type) {
+	std::unique_ptr<QObject> meetingReservation;
+	if (type == ActionCardType::JoinMeeting || type == ActionCardType::ShareScreen
+		|| type == ActionCardType::QuickMeeting) {
+		// Reserve before modal dialogs: joining also sends HTTP from its dialog.
+		meetingReservation = _meetingEntryGuard.tryAcquire();
+		if (!meetingReservation) {
+			QMessageBox::information(this, QString::fromUtf8("会议忙碌"),
+				QString::fromUtf8("当前正在处理会议或已有会议窗口，请先完成或关闭后再试。"));
+			return;
+		}
+	}
 	if (type == ActionCardType::JoinMeeting || type == ActionCardType::ShareScreen) {
 		JoinMeetingDialog dlg(this);
 		if (dlg.exec() == QDialog::Accepted) {
@@ -654,6 +664,8 @@ void MeetingMainWindow::onCardClicked(ActionCardType type) {
 			}
 
 			auto *roomWindow = new MeetingRoomWindow(cfg, coordinator);
+			meetingReservation->setParent(roomWindow);
+			meetingReservation.release();
 			roomWindow->setAttribute(Qt::WA_DeleteOnClose);
 			if (type == ActionCardType::ShareScreen) {
 				connect(coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
@@ -689,14 +701,13 @@ void MeetingMainWindow::onCardClicked(ActionCardType type) {
 			prefs);
 
 		auto *roomWindow = new MeetingRoomWindow(cfg, coordinator);
+		meetingReservation->setParent(roomWindow);
+		meetingReservation.release();
 		roomWindow->setAttribute(Qt::WA_DeleteOnClose);
 		roomWindow->show();
 	} else if (type == ActionCardType::ScheduleMeeting) {
 		QMessageBox::information(this, QString::fromUtf8("预定会议"),
 			QString::fromUtf8("已打开会议预定面板，您可以设定会议主题、时间、周期与参会密码。"));
-	} else if (type == ActionCardType::SimulcastTest) {
-		MeetingTestWindow testDlg(this);
-		testDlg.exec();
 	}
 }
 

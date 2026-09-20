@@ -53,12 +53,6 @@ void SidebarWidget::updateLayout() {
 	contactsNav.rect = QRect((w - navItemWidth) / 2, navStartY + (navItemHeight + navSpacing), navItemWidth, navItemHeight);
 	_navItems.push_back(contactsNav);
 
-	NavItem recNav;
-	recNav.type = NavItemType::Recordings;
-	recNav.text = QString::fromUtf8("录制");
-	recNav.rect = QRect((w - navItemWidth) / 2, navStartY + (navItemHeight + navSpacing) * 2, navItemWidth, navItemHeight);
-	_navItems.push_back(recNav);
-
 	// 底部辅助项
 	_bottomItems.clear();
 	const int bottomItemSize = 36;
@@ -76,15 +70,7 @@ void SidebarWidget::updateLayout() {
 	settingsItem.type = BottomItemType::Settings;
 	settingsItem.tooltip = QString::fromUtf8("设置");
 	settingsItem.rect = QRect((w - bottomItemSize) / 2, bottomY, bottomItemSize, bottomItemSize);
-	settingsItem.hasRedDot = true;
 	_bottomItems.push_back(settingsItem);
-
-	bottomY -= (bottomItemSize + bottomSpacing);
-	BottomItem mailItem;
-	mailItem.type = BottomItemType::Mail;
-	mailItem.tooltip = QString::fromUtf8("消息与邮件");
-	mailItem.rect = QRect((w - bottomItemSize) / 2, bottomY, bottomItemSize, bottomItemSize);
-	_bottomItems.push_back(mailItem);
 }
 
 void SidebarWidget::paintEvent(QPaintEvent *e) {
@@ -159,7 +145,7 @@ void SidebarWidget::paintEvent(QPaintEvent *e) {
 			p.setBrush(QColor(0xe5, 0xe8, 0xef));
 			p.drawRoundedRect(bItem.rect, 6, 6);
 		}
-		drawBottomIcon(p, bItem.type, bItem.rect, isHovered, bItem.hasRedDot);
+		drawBottomIcon(p, bItem.type, bItem.rect, isHovered);
 	}
 }
 
@@ -270,18 +256,12 @@ void SidebarWidget::drawNavIcon(QPainter &p, NavItemType type, const QRect &r, b
 		p.drawLine(cx - 4, cy - 4, cx + 4, cy - 4);
 		p.drawLine(cx - 4, cy, cx + 4, cy);
 		p.drawLine(cx - 4, cy + 4, cx + 1, cy + 4);
-	} else if (type == NavItemType::Recordings) {
-		// 录制圆环与同心圆图标
-		p.drawEllipse(QPoint(cx, cy), 8, 8);
-		p.setPen(Qt::NoPen);
-		p.setBrush(color);
-		p.drawEllipse(QPoint(cx, cy), 4, 4);
 	}
 
 	p.restore();
 }
 
-void SidebarWidget::drawBottomIcon(QPainter &p, BottomItemType type, const QRect &r, bool hovered, bool hasRedDot) {
+void SidebarWidget::drawBottomIcon(QPainter &p, BottomItemType type, const QRect &r, bool hovered) {
 	p.save();
 	p.setRenderHint(QPainter::Antialiasing);
 
@@ -292,13 +272,7 @@ void SidebarWidget::drawBottomIcon(QPainter &p, BottomItemType type, const QRect
 	const int cx = r.center().x();
 	const int cy = r.center().y();
 
-	if (type == BottomItemType::Mail) {
-		// 信封图标
-		QRect mailRect(cx - 8, cy - 6, 16, 12);
-		p.drawRoundedRect(mailRect, 1.5, 1.5);
-		p.drawLine(mailRect.left() + 1, mailRect.top() + 1, cx, cy);
-		p.drawLine(cx, cy, mailRect.right() - 1, mailRect.top() + 1);
-	} else if (type == BottomItemType::Settings) {
+	if (type == BottomItemType::Settings) {
 		// 齿轮设置图标
 		p.drawEllipse(QPoint(cx, cy), 4, 4);
 		for (int i = 0; i < 6; ++i) {
@@ -319,13 +293,6 @@ void SidebarWidget::drawBottomIcon(QPainter &p, BottomItemType type, const QRect
 		// 加号
 		p.drawLine(cx + 4, cy - 1, cx + 8, cy - 1);
 		p.drawLine(cx + 6, cy - 3, cx + 6, cy + 1);
-	}
-
-	// 小红点提醒
-	if (hasRedDot) {
-		p.setPen(Qt::NoPen);
-		p.setBrush(QColor(0xf5, 0x3f, 0x3f));
-		p.drawEllipse(r.right() - 8, r.top() + 4, 6, 6);
 	}
 
 	p.restore();

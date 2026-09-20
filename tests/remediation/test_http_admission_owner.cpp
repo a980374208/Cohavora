@@ -1,5 +1,6 @@
 #include "src/core/meeting_coordinator.h"
 #include "src/net/service_endpoint_policy.h"
+#include "src/ui/meeting_entry_guard.h"
 #include "tests/support/test_check.h"
 
 #include <QtCore/QCoreApplication>
@@ -97,7 +98,7 @@ using OpenMeeting::SessionInvalidationReason;
 using OpenMeeting::SessionManager;
 using OpenMeeting::SessionManagerTestAccess;
 
-constexpr int kPlannedCases = 81;
+constexpr int kPlannedCases = 86;
 int gExecutedCases = 0;
 int gPassedCases = 0;
 
@@ -1099,7 +1100,86 @@ void VerifyDefaultBackendLoopback() {
     });
 }
 
+void VerifyApplicationMeetingEntryGuard() {
+    for (const auto stage : {PendingStage::Join, PendingStage::Token, PendingStage::Create}) {
+        RunCase("application busy during " + StageName(stage) + " and late completion", [stage] {
+            MeetingUI::MeetingEntryGuard guard;
+            auto reservation = guard.tryAcquire();
+            TEST_CHECK(reservation);
+            // The reservation exists before even the login/join dialog opens.
+            TEST_CHECK(!guard.tryAcquire());
+            Fixture fixture;
+            const auto index = PreparePending(fixture, stage, "busy-old");
+            const auto dispatches = fixture.backend.dispatches;
+            if (auto second = guard.tryAcquire()) {
+                fixture.coordinator->createAndJoinQuickMeetingAsync("blocked", 900, {});
+                TEST_CHECK(false);
+            }
+            TEST_CHECK(fixture.backend.dispatches == dispatches);
+
+            // Closing an admission window cancels its Coordinator before
+            // destroying the reservation child. A late reply cannot reopen it
+            // or release a successor's reservation.
+            fixture.coordinator->leaveMeetingAsync();
+            TEST_CHECK(!guard.tryAcquire());
+            reservation.reset();
+            auto successor = guard.tryAcquire();
+            TEST_CHECK(successor);
+            DeliverPending(fixture, stage, index, true, "busy-old");
+            TEST_CHECK(fixture.starts == 0);
+            TEST_CHECK(!guard.tryAcquire());
+        });
+    }
+
+    RunCase("application busy releases on dialog cancellation", [] {
+        MeetingUI::MeetingEntryGuard guard;
+        {
+            auto dialogReservation = guard.tryAcquire();
+            TEST_CHECK(dialogReservation);
+            TEST_CHECK(!guard.tryAcquire());
+        }
+        TEST_CHECK(guard.tryAcquire());
+    });
+
+    RunCase("failed meeting retains reservation through window cleanup", [] {
+        MeetingUI::MeetingEntryGuard guard;
+        Fixture fixture;
+        auto reservation = guard.tryAcquire();
+        TEST_CHECK(reservation);
+        const auto index = PreparePending(fixture, PendingStage::Create, "failed-window");
+        fixture.backend.completeCreate(index, false, {}, {}, {}, "expected failure");
+        TEST_CHECK(fixture.coordinator->state() == MeetingState::Failed);
+
+        class WindowOwner final : public QObject {
+        public:
+            explicit WindowOwner(std::function<void()> cleanup) : _cleanup(std::move(cleanup)) {}
+            ~WindowOwner() override { _cleanup(); }
+        private:
+            std::function<void()> _cleanup;
+        };
+        auto window = std::make_unique<WindowOwner>([&] {
+            TEST_CHECK(!guard.tryAcquire());
+            fixture.coordinator.reset();
+            TEST_CHECK(!guard.tryAcquire());
+        });
+        reservation->setParent(window.get());
+        reservation.release();
+        // A failed window can still own capture/render resources while its
+        // notice is visible; state alone must not free application capacity.
+        TEST_CHECK(!guard.tryAcquire());
+        window.reset();
+        auto next = guard.tryAcquire();
+        TEST_CHECK(next);
+        fixture.coordinator = MeetingCoordinatorTestAccess::create(*fixture.session, fixture.backend.functions());
+        fixture.installObservers();
+        fixture.coordinator->connectDirectlyAsync("wss://fixture.invalid", "fixture-token", "next", "user", {});
+        TEST_CHECK(fixture.starts == 1);
+        TEST_CHECK(!guard.tryAcquire());
+    });
+}
+
 void RunFullMatrix() {
+    VerifyApplicationMeetingEntryGuard();
     VerifyNormalFlows();
     VerifyErrors();
     VerifyLeaveAndDestroy();
