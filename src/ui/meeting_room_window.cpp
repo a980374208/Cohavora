@@ -104,12 +104,7 @@ void VideoTileWidget::setupVolumeControls() {
 	_pinBtn->hide();
 
 	connect(_pinBtn, &QPushButton::clicked, [this] {
-		_isPinned = !_isPinned;
-		_pinBtn->setStyleSheet(_isPinned ?
-			"background-color: #1677ff; border-radius: 14px; color: white; border: none; font-size: 13px;" :
-			"background-color: rgba(0, 0, 0, 150); border-radius: 14px; color: white; border: none; font-size: 13px;");
-		emit pinToggled(_isPinned);
-		update();
+		emit pinToggled(!_isPinned); // The window owns the single selected identity.
 	});
 
 	if (_isLocal || _isScreenShare) return;
@@ -234,7 +229,7 @@ void VideoTileWidget::resizeEvent(QResizeEvent *e) {
 	const int h = height();
 
 	if (_pinBtn) {
-		_pinBtn->move(_volBtn ? (w - 70) : (w - 36), 10);
+		_pinBtn->setGeometry(pinButtonRect());
 	}
 	if (_volBtn) {
 		_volBtn->move(w - 36, 10);
@@ -249,20 +244,23 @@ void VideoTileWidget::resizeEvent(QResizeEvent *e) {
 }
 
 void VideoTileWidget::setDisplayName(const QString &name) {
+	if (_displayName == name) return;
 	_displayName = name;
-	update();
+	invalidatePresentation();
 }
 
 void VideoTileWidget::setVideoActive(bool active) {
+	if (_isVideoActive == active) return;
 	_isVideoActive = active;
 	if (!active) {
 		std::lock_guard<std::mutex> lock(_frameMutex);
 		_currentFrame = QImage();
 	}
-	update();
+	invalidatePresentation();
 }
 
 void VideoTileWidget::setAudioMuted(bool muted) {
+	if (_isAudioMuted == muted) return;
 	_isAudioMuted = muted;
 	if (muted) {
 		_isSpeaking = false;
@@ -272,22 +270,23 @@ void VideoTileWidget::setAudioMuted(bool muted) {
 			_visualizer->hide();
 		}
 	}
-	update();
+	invalidatePresentation();
 }
 
 void VideoTileWidget::setConnectionQuality(livekit::ConnectionQuality quality) {
 	if (_connectionQuality == quality) return;
 	_connectionQuality = quality;
-	update();
+	invalidatePresentation();
 }
 
 void VideoTileWidget::setVideoStreamPaused(bool paused) {
 	if (_isVideoStreamPaused == paused) return;
 	_isVideoStreamPaused = paused;
-	update();
+	invalidatePresentation();
 }
 
 void VideoTileWidget::setSpeaking(bool speaking, float level) {
+	if (_isSpeaking == speaking && _audioLevel == level) return;
 	_isSpeaking = speaking;
 	_audioLevel = level;
 	if (_visualizer) {
@@ -300,7 +299,50 @@ void VideoTileWidget::setSpeaking(bool speaking, float level) {
 			_visualizer->hide();
 		}
 	}
+	invalidatePresentation();
+}
+
+void VideoTileWidget::invalidatePresentation() {
+	_hardwareDecoration = {};
 	update();
+	emit presentationChanged();
+}
+
+void VideoTileWidget::setPinned(bool pinned) {
+	if (_isPinned == pinned) return;
+	_isPinned = pinned;
+	_pinBtn->setStyleSheet(pinned ?
+		"background-color: #1677ff; border-radius: 14px; color: white; border: none; font-size: 13px;" :
+		"background-color: rgba(0, 0, 0, 150); border-radius: 14px; color: white; border: none; font-size: 13px;");
+	_pinBtn->setVisible(pinned || underMouse());
+	invalidatePresentation();
+}
+
+void VideoTileWidget::setPipMode(bool pip) {
+	if (_isPip == pip) return;
+	_isPip = pip;
+	invalidatePresentation();
+}
+
+QRect VideoTileWidget::pinButtonRect() const {
+	return QRect(_volBtn ? width() - 70 : width() - 36, 10, 28, 28);
+}
+
+QImage VideoTileWidget::hardwareDecoration(const QSize &pixels, bool hasFrame, bool hovered) {
+	if (pixels.isEmpty() || size().isEmpty()) return {};
+	if (!_hardwareDecoration.isNull() && _hardwareDecoration.size() == pixels &&
+		_decorationLogicalSize == size() && _decorationHasFrame == hasFrame &&
+		_decorationHovered == hovered) return _hardwareDecoration;
+	_hardwareDecoration = QImage(pixels, QImage::Format_RGBA8888_Premultiplied);
+	_hardwareDecoration.fill(Qt::transparent);
+	_decorationLogicalSize = size();
+	_decorationHasFrame = hasFrame;
+	_decorationHovered = hovered;
+	QPainter painter(&_hardwareDecoration);
+	painter.scale(double(pixels.width()) / width(), double(pixels.height()) / height());
+	paintCard(painter, true, hasFrame, hovered);
+	painter.end();
+	return _hardwareDecoration;
 }
 
 void VideoTileWidget::setFrame(const QImage &image) {
@@ -313,13 +355,17 @@ void VideoTileWidget::setFrame(const QImage &image) {
 
 void VideoTileWidget::paintEvent(QPaintEvent *e) {
 	QPainter p(this);
+	paintCard(p, false, false, underMouse());
+}
+
+void VideoTileWidget::paintCard(QPainter &p, bool decorationOnly, bool hasFrame, bool hovered) {
 	p.setRenderHint(QPainter::Antialiasing);
 	p.setRenderHint(QPainter::SmoothPixmapTransform);
 	p.setRenderHint(QPainter::TextAntialiasing);
 
 	const QRect r = rect();
 
-	if (_isPip) {
+	if (_isPip && !decorationOnly) {
 		QPainterPath path;
 		path.addRoundedRect(r.adjusted(2, 2, -2, -2), 10, 10);
 		p.setClipPath(path);
@@ -327,13 +373,25 @@ void VideoTileWidget::paintEvent(QPaintEvent *e) {
 	}
 
 	if (_isVideoActive) {
-		drawVideoFrame(p, r);
+		if (!decorationOnly) drawVideoFrame(p, r);
+		else if (_isVideoStreamPaused || !hasFrame) drawVideoPlaceholder(p, r);
 	} else {
 		drawAvatarPlaceholder(p, r);
 	}
 
 	drawBottomNameTag(p, r);
 	drawNetworkQualityBadge(p, r);
+	if (decorationOnly && (hovered || _isPinned)) {
+		p.save();
+		const auto button = pinButtonRect();
+		p.setPen(Qt::NoPen);
+		p.setBrush(_isPinned ? QColor("#1677ff") : QColor(0, 0, 0, 150));
+		p.drawRoundedRect(button, 14, 14);
+		p.setPen(Qt::white);
+		p.setFont(QFont("Segoe UI Emoji", 10));
+		p.drawText(button, Qt::AlignCenter, QString::fromUtf8("📌"));
+		p.restore();
+	}
 
 	// 画中画模式下的基础边框
 	if (_isPip) {
@@ -430,7 +488,8 @@ void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
 	QFont font("Microsoft YaHei", std::clamp(minDim * 6 / 100, 9, 12), QFont::Bold);
 	p.setFont(font);
 	QFontMetrics fm(font);
-	const int textW = fm.horizontalAdvance(_displayName);
+	const auto label = fm.elidedText(_displayName, Qt::ElideRight, std::max(0, r.width() - 40));
+	const int textW = fm.horizontalAdvance(label);
 	const int totalW = textW + 24;
 	const int startX = cx - totalW / 2;
 	const int nameY = cy + outerRadius + 6;
@@ -446,7 +505,7 @@ void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
 	}
 
 	p.setPen(QColor(0xf0, 0xf2, 0xf5));
-	p.drawText(QRect(startX + 18, nameY - 2, textW + 10, 20), Qt::AlignLeft | Qt::AlignVCenter, _displayName);
+	p.drawText(QRect(startX + 18, nameY - 2, textW + 10, 20), Qt::AlignLeft | Qt::AlignVCenter, label);
 }
 
 void VideoTileWidget::drawNetworkQualityBadge(QPainter &p, const QRect &r) {
@@ -500,14 +559,17 @@ void VideoTileWidget::drawNetworkQualityBadge(QPainter &p, const QRect &r) {
 	p.restore();
 }
 
+void VideoTileWidget::drawVideoPlaceholder(QPainter &p, const QRect &r) {
+	p.fillRect(r, QColor(0x14, 0x16, 0x1d));
+	p.setPen(_isVideoStreamPaused ? QColor(0xe6, 0x7e, 0x22) : QColor(0x86, 0x90, 0x9c));
+	p.setFont(QFont("Microsoft YaHei", 12));
+	const auto label = _isVideoStreamPaused ? QString::fromUtf8("视频流因网络拥塞暂停") :
+		QString::fromUtf8("正在等待视频画面...");
+	p.drawText(r.adjusted(12, 0, -12, 0), Qt::AlignCenter,
+		p.fontMetrics().elidedText(label, Qt::ElideRight, std::max(0, r.width() - 24)));
+}
+
 void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
-	if (_isVideoStreamPaused) {
-		p.fillRect(r, QColor(0x14, 0x16, 0x1d));
-		p.setPen(QColor(0xe6, 0x7e, 0x22));
-		p.setFont(QFont("Microsoft YaHei", 12));
-		p.drawText(r, Qt::AlignCenter, QString::fromUtf8("视频流因网络拥塞暂停"));
-		return;
-	}
 
 	QImage frameCopy;
 	{
@@ -515,11 +577,8 @@ void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
 		frameCopy = _currentFrame;
 	}
 
-	if (frameCopy.isNull()) {
-		p.fillRect(r, QColor(0x14, 0x16, 0x1d));
-		p.setPen(QColor(0x86, 0x90, 0x9c));
-		p.setFont(QFont("Microsoft YaHei", 12));
-		p.drawText(r, Qt::AlignCenter, QString::fromUtf8("正在等待视频画面..."));
+	if (_isVideoStreamPaused || frameCopy.isNull()) {
+		drawVideoPlaceholder(p, r);
 		return;
 	}
 
@@ -546,7 +605,8 @@ void VideoTileWidget::drawBottomNameTag(QPainter &p, const QRect &r) {
 	QFont font("Microsoft YaHei", 10);
 	p.setFont(font);
 	QFontMetrics fm(font);
-	const int textW = fm.horizontalAdvance(_displayName);
+	const auto label = fm.elidedText(_displayName, Qt::ElideRight, std::max(0, r.width() - margin * 2 - 30));
+	const int textW = fm.horizontalAdvance(label);
 	const int tagW = textW + 30;
 
 	QRect tagRect(r.x() + margin, r.bottom() - margin - tagH, tagW, tagH);
@@ -567,7 +627,7 @@ void VideoTileWidget::drawBottomNameTag(QPainter &p, const QRect &r) {
 	}
 
 	p.setPen(Qt::white);
-	p.drawText(QRect(tagRect.x() + 20, tagRect.y(), textW + 6, tagH), Qt::AlignVCenter | Qt::AlignLeft, _displayName);
+	p.drawText(QRect(tagRect.x() + 20, tagRect.y(), textW + 6, tagH), Qt::AlignVCenter | Qt::AlignLeft, label);
 	p.restore();
 }
 
@@ -1954,6 +2014,7 @@ MeetingRoomWindow::MeetingRoomWindow(
 	_bottomBar = new RoomBottomBarWidget(this);
 	_localTile = new VideoTileWidget(_config.displayName, true, _stageContainer);
 	_localTile->setIdentity("local");
+	bindTileInteractions(_localTile);
 	_localTile->setAudioMuted(true);
 	_localTile->setVideoActive(false);
 	_inviteHintBanner = new QLabel(_stageContainer);
@@ -1995,6 +2056,7 @@ MeetingRoomWindow::MeetingRoomWindow(
 }
 
 MeetingRoomWindow::~MeetingRoomWindow() {
+	if (_nativeResizeFilterInstalled && qApp) qApp->removeNativeEventFilter(this);
 	invalidateCameraCompletion();
 	stopLiveKitSession();
 }
@@ -2013,10 +2075,12 @@ void MeetingRoomWindow::closeEvent(QCloseEvent *e) {
 
 void MeetingRoomWindow::setupNativeWindow() {
 #if defined(Q_OS_WIN)
-	if (!_handle) {
-		_handle = reinterpret_cast<HWND>(winId());
-	}
+	_handle = reinterpret_cast<HWND>(winId());
 	if (!_handle) return;
+	if (!_nativeResizeFilterInstalled) {
+		qApp->installNativeEventFilter(this);
+		_nativeResizeFilterInstalled = true;
+	}
 
 	LONG_PTR style = GetWindowLongPtr(_handle, GWL_STYLE);
 	SetWindowLongPtr(_handle, GWL_STYLE, style | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
@@ -2056,17 +2120,6 @@ void MeetingRoomWindow::initLayout() {
 		_dx11Canvas->hide();
 		connect(_dx11Canvas, &livekit::dx11::Dx11VideoCanvas::rendererUnavailable,
 		        this, &MeetingRoomWindow::fallBackToQtCpuBackend);
-		connect(_dx11Canvas, &livekit::dx11::Dx11VideoCanvas::tileDoubleClicked,
-		        this, [this](const QString &renderKey) {
-			QString identity = renderKey;
-			for (const auto &[id, tile] : _remoteTiles) {
-				if (tile->renderKey() == renderKey) identity = tile->identity();
-			}
-			if (identity.isEmpty()) return;
-			if (_pinnedIdentity == identity) _pinnedIdentity.clear();
-			else _pinnedIdentity = identity;
-			updateVideoLayout();
-		});
 	}
 	_bottomBar = new RoomBottomBarWidget(this);
 
@@ -2169,17 +2222,7 @@ void MeetingRoomWindow::initLayout() {
 	_localTile->setIdentity("local");
 	_localTile->show();
 
-	connect(_localTile, &VideoTileWidget::tileDoubleClicked, [this] {
-		if (_pinnedIdentity == "local") _pinnedIdentity.clear();
-		else _pinnedIdentity = "local";
-		updateVideoLayout();
-	});
-
-	connect(_localTile, &VideoTileWidget::pinToggled, [this](bool pinned) {
-		if (pinned) _pinnedIdentity = "local";
-		else if (_pinnedIdentity == "local") _pinnedIdentity.clear();
-		updateVideoLayout();
-	});
+	bindTileInteractions(_localTile);
 
 	_bottomBar->setAudioMuted(_config.audioMuted);
 	_bottomBar->setVideoEnabled(_config.videoEnabled);
@@ -2876,17 +2919,7 @@ void MeetingRoomWindow::applyRemoteParticipantJoined(const QString &identity, co
 		tile->setVideoActive(false);
 		if (!current() || !tile) return;
 
-		connect(tile.data(), &VideoTileWidget::tileDoubleClicked, [this, identity] {
-			if (_pinnedIdentity == identity) _pinnedIdentity.clear();
-			else _pinnedIdentity = identity;
-			updateVideoLayout();
-		});
-
-		connect(tile.data(), &VideoTileWidget::pinToggled, [this, identity](bool pinned) {
-			if (pinned) _pinnedIdentity = identity;
-			else if (_pinnedIdentity == identity) _pinnedIdentity.clear();
-			updateVideoLayout();
-		});
+		bindTileInteractions(tile.data());
 
 		connect(tile.data(), &VideoTileWidget::remoteVolumeChanged, [this, identity](float volume) {
 			_remoteVolumes[identity] = volume;
@@ -2936,8 +2969,6 @@ void MeetingRoomWindow::applyRemoteParticipantJoined(const QString &identity, co
 			if (!current() || !tile) return;
 			tile->setConnectionQuality(participant.connectionQuality);
 			if (!current() || !tile) return;
-			tile->setVideoStreamPaused(participant.isVideoStreamPaused);
-			if (!current() || !tile) return;
 			break;
 		}
 	}
@@ -2971,8 +3002,8 @@ void MeetingRoomWindow::onRemoteParticipantLeft(const QString &identity) {
 		_remoteTiles.erase(it);
 	}
 
-	if (_pinnedIdentity == identity) {
-		_pinnedIdentity.clear();
+	if (_pinnedRenderKey == QStringLiteral("remote-camera/") + identity) {
+		_pinnedRenderKey.clear();
 	}
 
 	_participantCount = 1 + static_cast<int>(_remoteTiles.size());
@@ -2991,15 +3022,8 @@ void MeetingRoomWindow::onRemoteTrackMuted(const QString &identity, bool isVideo
 		return;
 	}
 	if (isVideo) {
-		// A screen mute event must not change the participant's camera tile.
-		for (const auto &[sid, binding] : _remoteVideoBindings) {
-			if (binding.identity != identity) continue;
-			auto track = binding.track.lock();
-			auto *tile = remoteVideoTile(sid);
-			if (!track || !tile) continue;
-			tile->setVideoActive(!track->muted());
-			if (track->muted()) tile->setFrame(QImage());
-		}
+		refreshRemoteVideoPresentations();
+		return;
 	} else {
 		it->second->setAudioMuted(muted);
 		if (muted) it->second->setSpeaking(false, 0.0f);
@@ -3061,6 +3085,7 @@ void MeetingRoomWindow::tryActivateDx11Backend() {
 		return;
 	}
 	_dx11BackendActivationAttempted = true;
+	setupDx11CanvasInteractions();
 	_dx11Canvas->setGeometry(_stageContainer->rect());
 	_dx11Canvas->show(); // showEvent performs the UI-thread device probe.
 
@@ -3073,6 +3098,7 @@ void MeetingRoomWindow::tryActivateDx11Backend() {
 
 	_remoteRenderSession->UseDx11Backend(
 		[this](const std::string &trackSid, livekit::render::OwnedI420Frame::Ptr frame) {
+			if (!canRenderRemoteVideo(QString::fromStdString(trackSid))) return;
 			auto *tile = remoteVideoTile(QString::fromStdString(trackSid));
 			if (!tile) return;
 			if (!tile->isVideoActive()) {
@@ -3116,8 +3142,13 @@ void MeetingRoomWindow::syncDx11CanvasLayout(const std::vector<VideoTileWidget*>
 		dx11_tiles.push_back({
 			tile->renderKey().toStdString(),
 			geometry.x(), geometry.y(), geometry.width(), geometry.height(),
-			tile->isSpeaking(), tile->audioLevel(), tile->isVideoActive()
+			tile->isSpeaking(), tile->audioLevel(), tile->isVideoActive() && !tile->isVideoStreamPaused()
 		});
+		QPointer<VideoTileWidget> guarded(tile);
+		_dx11Canvas->setTileDecoration(tile->renderKey().toStdString(),
+			[guarded](const QSize &pixels, bool hasFrame, bool hovered) {
+				return guarded ? guarded->hardwareDecoration(pixels, hasFrame, hovered) : QImage();
+			}, tile->pinButtonRect());
 		tile->setHardwareCanvasMode(true);
 		tile->hide();
 	}
@@ -3130,6 +3161,43 @@ void MeetingRoomWindow::syncDx11CanvasLayout(const std::vector<VideoTileWidget*>
 	if (_recoveryBanner && _recoveryBanner->isVisible()) {
 		_recoveryBanner->raise();
 	}
+}
+
+void MeetingRoomWindow::setupDx11CanvasInteractions() {
+	connect(_dx11Canvas, &livekit::dx11::Dx11VideoCanvas::tileDoubleClicked,
+		this, &MeetingRoomWindow::togglePinForRenderKey, Qt::UniqueConnection);
+	connect(_dx11Canvas, &livekit::dx11::Dx11VideoCanvas::tilePinRequested,
+		this, &MeetingRoomWindow::togglePinForRenderKey, Qt::UniqueConnection);
+}
+
+void MeetingRoomWindow::bindTileInteractions(VideoTileWidget *tile) {
+	connect(tile, &VideoTileWidget::tileDoubleClicked, this, [this, tile] {
+		setPinnedTile(tile->renderKey(), !tile->isPinned());
+	});
+	connect(tile, &VideoTileWidget::pinToggled, this, [this, tile](bool pinned) {
+		setPinnedTile(tile->renderKey(), pinned);
+	});
+	connect(tile, &VideoTileWidget::presentationChanged, this, [this, tile] {
+		if (_dx11Canvas) _dx11Canvas->updateTilePresentation(tile->renderKey().toStdString(),
+			tile->isVideoActive() && !tile->isVideoStreamPaused());
+	});
+}
+
+void MeetingRoomWindow::setPinnedTile(const QString &renderKey, bool pinned) {
+	if (pinned) _pinnedRenderKey = renderKey;
+	else if (_pinnedRenderKey == renderKey) _pinnedRenderKey.clear();
+	updateVideoLayout(); // Projects the one authoritative Pin state to every card.
+}
+
+void MeetingRoomWindow::togglePinForRenderKey(const QString &renderKey) {
+	const auto toggle = [&](VideoTileWidget *tile) {
+		if (!tile || tile->renderKey() != renderKey) return false;
+		setPinnedTile(tile->renderKey(), _pinnedRenderKey != tile->renderKey());
+		return true;
+	};
+	if (toggle(_localTile) || toggle(_localScreenTile.get())) return;
+	for (const auto &[id, tile] : _remoteTiles) if (toggle(tile.get())) return;
+	for (const auto &[sid, tile] : _remoteScreenTiles) if (toggle(tile.get())) return;
 }
 
 void MeetingRoomWindow::updateVideoLayout() {
@@ -3148,6 +3216,10 @@ void MeetingRoomWindow::updateVideoLayout() {
 	}
 	if (_localScreenTile) allTiles.push_back(_localScreenTile.get());
 	for (auto &[sid, tile] : _remoteScreenTiles) allTiles.push_back(tile.get());
+	if (std::none_of(allTiles.begin(), allTiles.end(), [this](const auto *tile) {
+		return tile->renderKey() == _pinnedRenderKey;
+	})) _pinnedRenderKey.clear();
+	for (auto *tile : allTiles) tile->setPinned(tile->renderKey() == _pinnedRenderKey);
 	if (!_usingDx11Backend.load(std::memory_order_acquire)) {
 		for (auto *tile : allTiles) tile->setHardwareCanvasMode(false);
 	}
@@ -3173,11 +3245,10 @@ void MeetingRoomWindow::updateVideoLayout() {
 	// 1. 画中画模式 (PiP)
 	if (_viewMode == VideoViewMode::Pip && N >= 2) {
 		VideoTileWidget *mainTile = allTiles[1];
-		if (_pinnedIdentity == "local") {
-			mainTile = _localTile;
-		} else if (!_pinnedIdentity.isEmpty()) {
-			for (auto *tile : allTiles) if (tile->identity() == _pinnedIdentity) mainTile = tile;
-		}
+		for (auto *tile : allTiles) if (tile->renderKey() == _pinnedRenderKey) mainTile = tile;
+		// One back-to-front order drives both QWidget stacking and DX11 drawing.
+		const auto main = std::find(allTiles.begin(), allTiles.end(), mainTile);
+		std::rotate(allTiles.begin(), main, main + 1);
 
 		mainTile->setPipMode(false);
 		mainTile->setGeometry(0, 0, stageW, stageH);
@@ -3201,12 +3272,10 @@ void MeetingRoomWindow::updateVideoLayout() {
 	}
 
 	// 2. 演讲者聚焦模式 (Speaker / Focus Mode)
-	if ((_viewMode == VideoViewMode::Speaker || !_pinnedIdentity.isEmpty()) && N >= 2) {
+	if ((_viewMode == VideoViewMode::Speaker || !_pinnedRenderKey.isEmpty()) && N >= 2) {
 		VideoTileWidget *focusTile = allTiles[0];
-		if (_pinnedIdentity == "local") {
-			focusTile = _localTile;
-		} else if (!_pinnedIdentity.isEmpty()) {
-			for (auto *tile : allTiles) if (tile->identity() == _pinnedIdentity) focusTile = tile;
+		if (!_pinnedRenderKey.isEmpty()) {
+			for (auto *tile : allTiles) if (tile->renderKey() == _pinnedRenderKey) focusTile = tile;
 		} else {
 			for (auto *t : allTiles) {
 				if (t->isSpeaking()) {
@@ -3309,6 +3378,7 @@ void MeetingRoomWindow::paintEvent(QPaintEvent *e) {
 }
 
 void MeetingRoomWindow::receiveRemoteVideoFrame(const QImage &frame, const QString &trackSid) {
+	if (frame.isNull() || !canRenderRemoteVideo(trackSid)) return;
 	if (auto *tile = remoteVideoTile(trackSid)) {
 		tile->setFrame(frame);
 		if (!tile->isVideoActive()) {
@@ -3434,6 +3504,28 @@ VideoTileWidget *MeetingRoomWindow::remoteVideoTile(const QString &trackSid) con
 	return tile == _remoteTiles.end() ? nullptr : tile->second.get();
 }
 
+bool MeetingRoomWindow::canRenderRemoteVideo(const QString &trackSid) const {
+	const auto found = _remoteVideoBindings.find(trackSid);
+	if (found == _remoteVideoBindings.end()) return false;
+	const auto &binding = found->second;
+	const auto track = binding.track.lock();
+	return track && !track->muted() && !binding.muted && !binding.paused &&
+		livekit::IsMediaBindingTicketActive(binding.mediaBindingTicket, binding.mediaBindingKey);
+}
+
+void MeetingRoomWindow::refreshRemoteVideoPresentations() {
+	QPointer<MeetingRoomWindow> owner(this);
+	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
+	if (!coordinator) return;
+	const auto presentations = coordinator->participantPresentations();
+	for (const auto &presentation : presentations) {
+		for (const auto &video : presentation.videoTracks) {
+			if (!owner || !coordinator || owner->_coordinator.get() != coordinator) return;
+			owner->attachRemoteVideo(presentation, video);
+		}
+	}
+}
+
 void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresentation &presentation,
 		const OpenMeeting::RemoteVideoTrackPresentation &value) {
 	if (!_remoteRenderSession || !_coordinator ||
@@ -3450,7 +3542,13 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 	if (const auto old = _remoteVideoBindings.find(sid);
 		old != _remoteVideoBindings.end() && old->second.screen != screen) removeRemoteVideo(sid);
 	if (!current()) return;
-	_remoteVideoBindings[sid] = {identity, screen, value.track};
+	const auto old = _remoteVideoBindings.find(sid);
+	const bool resetFrame = old == _remoteVideoBindings.end() ||
+		old->second.identity != identity || old->second.track.lock() != value.track ||
+		old->second.mediaBindingKey != value.mediaBindingKey ||
+		old->second.muted != value.muted || old->second.paused != value.paused;
+	_remoteVideoBindings[sid] = {identity, screen, value.track,
+		value.mediaBindingKey, value.mediaBindingTicket, value.muted, value.paused};
 	if (screen && !_remoteScreenTiles.count(sid)) {
 		QPointer<VideoTileWidget> tile(new VideoTileWidget(
 			QString::fromUtf8("%1 · 屏幕共享").arg(presentation.participant.name), false, _stageContainer, true));
@@ -3460,19 +3558,27 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 		}
 		_remoteScreenTiles[sid].reset(tile.data());
 		tile->setIdentity(QStringLiteral("remote-screen/") + sid);
-		const auto key = tile->identity();
-		connect(tile.data(), &VideoTileWidget::tileDoubleClicked, this, [this, key] {
-			_pinnedIdentity = _pinnedIdentity == key ? QString() : key;
-			updateVideoLayout();
-		});
-		connect(tile.data(), &VideoTileWidget::pinToggled, this, [this, key](bool pinned) {
-			if (pinned) _pinnedIdentity = key;
-			else if (_pinnedIdentity == key) _pinnedIdentity.clear();
-			updateVideoLayout();
-		});
+		bindTileInteractions(tile.data());
 	}
-	_remoteRenderSession->AttachRemoteTrack(value.track, identity.toStdString(), sid.toStdString());
-	updateVideoLayout();
+	if (!current()) return;
+	QPointer<VideoTileWidget> tile(remoteVideoTile(sid));
+	if (!tile) return;
+	if (resetFrame) {
+		// Revoke the render subscription before clearing either backend. This also
+		// rejects callbacks already in flight when the same Track is rebound.
+		_remoteRenderSession->RemoveTrack(sid.toStdString());
+		if (_dx11Canvas) _dx11Canvas->removeUser(tile->renderKey().toStdString());
+		tile->setFrame({});
+	}
+	tile->setVideoActive(!value.muted);
+	tile->setVideoStreamPaused(!value.muted && value.paused);
+	tile->setConnectionQuality(presentation.participant.connectionQuality);
+	if (screen) tile->setDisplayName(QString::fromUtf8("%1 · 屏幕共享").arg(presentation.participant.name));
+	if (!current() || !tile) return;
+	if (!value.muted && !value.paused) {
+		_remoteRenderSession->AttachRemoteTrack(value.track, identity.toStdString(), sid.toStdString());
+	}
+	if (resetFrame) updateVideoLayout();
 }
 
 void MeetingRoomWindow::removeRemoteVideo(const QString &trackSid) {
@@ -3481,7 +3587,8 @@ void MeetingRoomWindow::removeRemoteVideo(const QString &trackSid) {
 		if (_dx11Canvas) _dx11Canvas->removeUser(tile->renderKey().toStdString());
 		tile->setFrame({});
 		tile->setVideoActive(false);
-		if (_remoteScreenTiles.count(trackSid) && _pinnedIdentity == tile->identity()) _pinnedIdentity.clear();
+		tile->setVideoStreamPaused(false);
+		if (_remoteScreenTiles.count(trackSid) && _pinnedRenderKey == tile->renderKey()) _pinnedRenderKey.clear();
 	}
 	_remoteScreenTiles.erase(trackSid);
 	_remoteVideoBindings.erase(trackSid);
@@ -3511,18 +3618,10 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		_localScreenTile = std::make_unique<VideoTileWidget>(QString::fromUtf8("我的屏幕共享"), true, _stageContainer, true);
 		_localScreenTile->setIdentity(QStringLiteral("local-screen"));
 		_localScreenTile->setVideoActive(true);
-		connect(_localScreenTile.get(), &VideoTileWidget::tileDoubleClicked, this, [this] {
-			_pinnedIdentity = _pinnedIdentity == "local-screen" ? QString() : QStringLiteral("local-screen");
-			updateVideoLayout();
-		});
-		connect(_localScreenTile.get(), &VideoTileWidget::pinToggled, this, [this](bool pinned) {
-			if (pinned) _pinnedIdentity = QStringLiteral("local-screen");
-			else if (_pinnedIdentity == "local-screen") _pinnedIdentity.clear();
-			updateVideoLayout();
-		});
+		bindTileInteractions(_localScreenTile.get());
 	} else if (!active && _localScreenTile) {
 		if (_dx11Canvas) _dx11Canvas->removeUser(_localScreenTile->renderKey().toStdString());
-		if (_pinnedIdentity == _localScreenTile->identity()) _pinnedIdentity.clear();
+		if (_pinnedRenderKey == _localScreenTile->renderKey()) _pinnedRenderKey.clear();
 		_localScreenTile.reset();
 	}
 	QResizeEvent layout(size(), size());
@@ -3634,7 +3733,6 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 			if (p.isLocal) {
 				if (_localTile) {
 					_localTile->setConnectionQuality(p.connectionQuality);
-					_localTile->setVideoStreamPaused(p.isVideoStreamPaused);
 				}
 				continue;
 			}
@@ -3644,9 +3742,9 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 					it->second->setDisplayName(p.name);
 				}
 				it->second->setConnectionQuality(p.connectionQuality);
-				it->second->setVideoStreamPaused(p.isVideoStreamPaused);
 			}
 		}
+		refreshRemoteVideoPresentations();
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::trackSubscriptionPermissionChanged,
 	        this, [this](const QString &identity, const QString &participantSid,
@@ -4038,6 +4136,51 @@ void MeetingRoomWindow::stopLiveKitSession() {
 	LogToConsole(LogCategory::Connection, "DISCONNECT", "已退出会议视窗并停止媒体采集");
 }
 
+#if defined(Q_OS_WIN)
+int MeetingRoomWindow::nativeResizeHitTest(LPARAM position) const {
+	if (!_handle || isMaximized() || isFullScreen()) return HTCLIENT;
+	POINT point{ GET_X_LPARAM(position), GET_Y_LPARAM(position) };
+	RECT client{};
+	if (!ScreenToClient(_handle, &point) || !GetClientRect(_handle, &client) ||
+		!PtInRect(&client, point)) return HTCLIENT;
+	const int border = std::max(1, qRound(8 * devicePixelRatioF()));
+	const bool left = point.x < border;
+	const bool right = point.x >= client.right - border;
+	const bool top = point.y < border;
+	const bool bottom = point.y >= client.bottom - border;
+	if (top && left) return HTTOPLEFT;
+	if (top && right) return HTTOPRIGHT;
+	if (bottom && left) return HTBOTTOMLEFT;
+	if (bottom && right) return HTBOTTOMRIGHT;
+	if (left) return HTLEFT;
+	if (right) return HTRIGHT;
+	if (top) return HTTOP;
+	if (bottom) return HTBOTTOM;
+	return HTCLIENT;
+}
+#endif
+
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+bool MeetingRoomWindow::nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result)
+#else
+bool MeetingRoomWindow::nativeEventFilter(const QByteArray &eventType, void *message, long *result)
+#endif
+{
+	Q_UNUSED(eventType);
+#if defined(Q_OS_WIN)
+	const auto msg = static_cast<MSG*>(message);
+	if (msg && msg->message == WM_NCHITTEST && _handle && msg->hwnd != _handle &&
+		IsChild(_handle, msg->hwnd) && nativeResizeHitTest(msg->lParam) != HTCLIENT) {
+		// DX11 makes the stage (and its Qt ancestors/siblings) native HWNDs.
+		// Let Windows continue hit-testing to the meeting's top-level HWND at
+		// resize edges. Returning HTLEFT/etc. here would resize the child itself.
+		*result = HTTRANSPARENT;
+		return true;
+	}
+#endif
+	return false;
+}
+
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 bool MeetingRoomWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
 #else
@@ -4065,6 +4208,11 @@ bool MeetingRoomWindow::nativeEvent(const QByteArray &eventType, void *message, 
 
 	case WM_NCHITTEST: {
 		if (!handle) break;
+		const int resizeHit = nativeResizeHitTest(msg->lParam);
+		if (resizeHit != HTCLIENT) {
+			*result = resizeHit;
+			return true;
+		}
 
 		POINT p{ GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam) };
 		ScreenToClient(handle, &p);
@@ -4074,24 +4222,6 @@ bool MeetingRoomWindow::nativeEvent(const QByteArray &eventType, void *message, 
 		const int y = static_cast<int>(p.y / ratio);
 
 		const int w = width();
-		const int h = height();
-		const int border = 8;
-
-		if (!isMaximized() && !isFullScreen()) {
-			const bool left = (x < border);
-			const bool right = (x >= w - border);
-			const bool top = (y < border);
-			const bool bottom = (y >= h - border);
-
-			if (top && left) { *result = HTTOPLEFT; return true; }
-			if (top && right) { *result = HTTOPRIGHT; return true; }
-			if (bottom && left) { *result = HTBOTTOMLEFT; return true; }
-			if (bottom && right) { *result = HTBOTTOMRIGHT; return true; }
-			if (left) { *result = HTLEFT; return true; }
-			if (right) { *result = HTRIGHT; return true; }
-			if (top) { *result = HTTOP; return true; }
-			if (bottom) { *result = HTBOTTOM; return true; }
-		}
 
 		if (y < 44 && x < w - 420 && (x < (w - 220) / 2 || x > (w + 220) / 2)) {
 			*result = HTCAPTION;

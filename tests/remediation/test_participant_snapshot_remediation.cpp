@@ -288,6 +288,194 @@ public:
         TEST_CHECK(QThread::currentThread() == window.thread());
         window.onRemoteRenderTick();
     }
+    static bool paused(const MeetingUI::VideoTileWidget *tile) {
+        TEST_CHECK(tile);
+        return tile->_isVideoStreamPaused;
+    }
+    static void savePresentation(MeetingUI::MeetingRoomWindow &window, const QString &name) {
+        const auto directory = qEnvironmentVariable("LIVEKIT_PRESENTATION_EVIDENCE_DIR");
+        if (directory.isEmpty()) return;
+        TEST_CHECK(QDir().mkpath(directory));
+        window.resize(960, 640);
+        QResizeEvent resize(window.size(), window.size());
+        window.resizeEvent(&resize);
+        QImage image(window._stageContainer->size(), QImage::Format_ARGB32);
+        image.fill(QColor("#12141a"));
+        window._stageContainer->render(&image);
+        TEST_CHECK(image.save(QDir(directory).filePath(name + ".png")));
+    }
+    static bool enableGpu(MeetingUI::MeetingRoomWindow &window) {
+        if (!livekit::dx11::Dx11VideoCanvas::IsHardwareBackendAllowed()) return false;
+        window.setAttribute(Qt::WA_DontShowOnScreen);
+        window._dx11Canvas = new livekit::dx11::Dx11VideoCanvas(window._stageContainer);
+        QObject::connect(window._dx11Canvas, &livekit::dx11::Dx11VideoCanvas::rendererUnavailable,
+            &window, &MeetingUI::MeetingRoomWindow::fallBackToQtCpuBackend);
+        window.show(); // Production showEvent selects the mutually exclusive backend.
+        return window._usingDx11Backend.load();
+    }
+    static bool gpuHasFrame(MeetingUI::MeetingRoomWindow &window, const QString &key) {
+        return window._dx11Canvas->hasVideo(key.toStdString());
+    }
+    static void prepareResizeWindow(MeetingUI::MeetingRoomWindow &window) {
+        window.setWindowFlags(Qt::Window | Qt::FramelessWindowHint |
+            Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint);
+        window.setMinimumSize(850, 560);
+    }
+    static int checkNativeResize(MeetingUI::MeetingRoomWindow &window, bool before, const char *backend,
+        bool disabled = false) {
+        const auto handle = reinterpret_cast<HWND>(window.winId());
+        if (!disabled) TEST_CHECK(GetWindowLongPtr(handle, GWL_STYLE) & WS_THICKFRAME);
+        RECT client{};
+        TEST_CHECK(GetClientRect(handle, &client));
+        const int w = client.right, h = client.bottom;
+        const std::array<std::pair<POINT, int>, 8> edges{{
+            {{2, h / 2}, HTLEFT}, {{w - 3, h / 2}, HTRIGHT},
+            {{w / 2, 2}, HTTOP}, {{w / 2, h - 3}, HTBOTTOM},
+            {{2, 2}, HTTOPLEFT}, {{w - 3, 2}, HTTOPRIGHT},
+            {{2, h - 3}, HTBOTTOMLEFT}, {{w - 3, h - 3}, HTBOTTOMRIGHT}
+        }};
+        std::vector<HWND> children;
+        EnumChildWindows(handle, [](HWND child, LPARAM param) -> BOOL {
+            reinterpret_cast<std::vector<HWND> *>(param)->push_back(child);
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&children));
+        int blocked = 0, tested = 0;
+        for (const auto &[clientPoint, expected] : edges) {
+            auto point = clientPoint;
+            TEST_CHECK(ClientToScreen(handle, &point));
+            const auto position = MAKELPARAM(point.x, point.y);
+            const auto rootHit = SendMessage(handle, WM_NCHITTEST, 0, position);
+            if (disabled) TEST_CHECK(rootHit < HTLEFT || rootHit > HTBOTTOMRIGHT);
+            else TEST_CHECK(rootHit == expected);
+            for (const auto child : children) {
+                RECT bounds{};
+                TEST_CHECK(GetWindowRect(child, &bounds));
+                if (!PtInRect(&bounds, point)) continue;
+                ++tested;
+                const auto result = SendMessage(child, WM_NCHITTEST, 0, position);
+                if (result != HTTRANSPARENT && !disabled) ++blocked;
+                if (!before) TEST_CHECK(disabled ? result != HTTRANSPARENT : result == HTTRANSPARENT);
+            }
+        }
+        TEST_CHECK(tested > 0);
+        // Card content is still delivered to the child HWND, not the window frame.
+        const auto canvas = reinterpret_cast<HWND>(window._dx11Canvas->winId());
+        RECT canvasRect{};
+        TEST_CHECK(GetClientRect(canvas, &canvasRect));
+        POINT center{canvasRect.right / 2, canvasRect.bottom / 2};
+        TEST_CHECK(ClientToScreen(canvas, &center));
+        TEST_CHECK(SendMessage(canvas, WM_NCHITTEST, 0, MAKELPARAM(center.x, center.y)) == HTCLIENT);
+        std::cout << "NATIVE_RESIZE " << backend << (before ? " BEFORE" : " AFTER")
+            << " root-edges=8 child-edge-hits=" << tested << " blocked=" << blocked
+            << " dpr=" << window.devicePixelRatioF() << '\n';
+        return blocked;
+    }
+    static MeetingUI::VideoTileWidget *local(MeetingUI::MeetingRoomWindow &window) { return window._localTile; }
+    static QString pinned(const MeetingUI::MeetingRoomWindow &window) { return window._pinnedRenderKey; }
+    static void cpuPin(MeetingUI::VideoTileWidget *tile) { tile->_pinBtn->click(); }
+    static void cpuDoubleClick(MeetingUI::VideoTileWidget *tile) {
+        QMouseEvent event(QEvent::MouseButtonDblClick, tile->rect().center(), Qt::LeftButton,
+            Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(tile, &event);
+    }
+    static void gpuPin(MeetingUI::MeetingRoomWindow &window, MeetingUI::VideoTileWidget *tile) {
+        const QPoint point = tile->pos() + tile->pinButtonRect().center();
+        QMouseEvent move(QEvent::MouseMove, point, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(window._dx11Canvas, &move);
+        QMouseEvent press(QEvent::MouseButtonPress, point, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(window._dx11Canvas, &press);
+        QMouseEvent release(QEvent::MouseButtonRelease, point, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(window._dx11Canvas, &release);
+    }
+    static void checkOrder(MeetingUI::MeetingRoomWindow &window, MeetingUI::VideoTileWidget *main) {
+        TEST_CHECK(window._dx11Canvas->tiles_.front().identity == main->renderKey().toStdString());
+        TEST_CHECK(main->geometry() == window._stageContainer->rect());
+        for (const auto &item : window._dx11Canvas->tiles_) {
+            MeetingUI::VideoTileWidget *tile = nullptr;
+            if (window._localTile->renderKey().toStdString() == item.identity) tile = window._localTile;
+            for (auto &[id, candidate] : window._remoteTiles)
+                if (candidate->renderKey().toStdString() == item.identity) tile = candidate.get();
+            for (auto &[id, candidate] : window._remoteScreenTiles)
+                if (candidate->renderKey().toStdString() == item.identity) tile = candidate.get();
+            TEST_CHECK(tile && tile->geometry() == QRect(item.x, item.y, item.width, item.height));
+        }
+    }
+    static qint64 decorationKey(MeetingUI::MeetingRoomWindow &window, MeetingUI::VideoTileWidget *tile) {
+        return window._dx11Canvas->decorations_.at(tile->renderKey().toStdString()).cacheKey;
+    }
+    static bool decorationExists(MeetingUI::MeetingRoomWindow &window, const std::string &key) {
+        return window._dx11Canvas->decorations_.count(key) != 0;
+    }
+    static bool gpuDirty(MeetingUI::MeetingRoomWindow &window) {
+        return window._dx11Canvas->frame_dirty_.exchange(false);
+    }
+    static void resizeWithSidebar(MeetingUI::MeetingRoomWindow &window, const QSize &size) {
+        if (!window._participantsSidebar) window._participantsSidebar =
+            new OpenMeeting::ParticipantsSidebarWidget(window._coordinator, &window);
+        window.resize(size);
+        window.switchSidebar(MeetingUI::ActiveSidebar::Participants);
+        QResizeEvent resize(window.size(), window.size());
+        window.resizeEvent(&resize);
+    }
+    static void fallback(MeetingUI::MeetingRoomWindow &window) { window.fallBackToQtCpuBackend(); }
+    static void layout(MeetingUI::MeetingRoomWindow &window, MeetingUI::VideoViewMode mode) {
+        window._viewMode = mode;
+        window.resize(960, 640);
+        QResizeEvent resize(window.size(), window.size());
+        window.resizeEvent(&resize); // Exercise the production layout, including stacking.
+    }
+    static QString doubleClickGpu(MeetingUI::MeetingRoomWindow &window, const QPoint &point) {
+        QString hit;
+        const auto connection = QObject::connect(window._dx11Canvas,
+            &livekit::dx11::Dx11VideoCanvas::tileDoubleClicked, &window,
+            [&](const QString &key) { hit = key; });
+        QMouseEvent event(QEvent::MouseButtonDblClick, point, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(window._dx11Canvas, &event);
+        QObject::disconnect(connection);
+        return hit;
+    }
+    static QImage gpuImage(MeetingUI::MeetingRoomWindow &window, const QString &name) {
+        using Microsoft::WRL::ComPtr;
+        auto &canvas = *window._dx11Canvas;
+        canvas.render();
+        auto &renderer = canvas.renderer_;
+        TEST_CHECK(renderer.is_initialized());
+        ComPtr<ID3D11RenderTargetView> view;
+        renderer.context()->OMGetRenderTargets(1, view.GetAddressOf(), nullptr);
+        TEST_CHECK(view);
+        ComPtr<ID3D11Resource> resource;
+        view->GetResource(resource.GetAddressOf());
+        ComPtr<ID3D11Texture2D> texture;
+        TEST_CHECK(SUCCEEDED(resource.As(&texture)));
+        D3D11_TEXTURE2D_DESC desc{};
+        texture->GetDesc(&desc);
+        TEST_CHECK(desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM);
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        desc.MiscFlags = 0;
+        ComPtr<ID3D11Texture2D> readback;
+        TEST_CHECK(SUCCEEDED(renderer.device()->CreateTexture2D(&desc, nullptr, readback.GetAddressOf())));
+        renderer.context()->CopyResource(readback.Get(), texture.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        TEST_CHECK(SUCCEEDED(renderer.context()->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped)));
+        const QImage image = QImage(static_cast<const uchar *>(mapped.pData), desc.Width, desc.Height,
+            mapped.RowPitch, QImage::Format_RGBA8888).copy();
+        renderer.context()->Unmap(readback.Get(), 0);
+        const auto directory = qEnvironmentVariable("LIVEKIT_PRESENTATION_EVIDENCE_DIR");
+        if (!directory.isEmpty()) {
+            TEST_CHECK(QDir().mkpath(directory));
+            TEST_CHECK(image.save(QDir(directory).filePath("after-gpu-" + name + ".png")));
+        }
+        return image;
+    }
+    static QColor gpuTileCenter(MeetingUI::MeetingRoomWindow &window,
+        const QImage &image, const MeetingUI::VideoTileWidget *tile) {
+        // Sample away from the shared avatar, waiting text and status overlay.
+        const auto point = tile->pos() + QPoint(tile->width() / 2, tile->height() / 4);
+        return image.pixelColor(point.x() * image.width() / window._stageContainer->width(),
+            point.y() * image.height() / window._stageContainer->height());
+    }
     static void invite(MeetingUI::MeetingRoomWindow &window) {
         TEST_CHECK(window._bottomBar);
         window._bottomBar->_inviteStream.fire({});
@@ -1718,6 +1906,352 @@ void ScreenShareCameraCoexistence() {
     std::cout << "SCREEN_SHARE_WINDOW camera/screen independent, mute/stop isolation, late open, aspect ratios PASS\n";
 }
 
+// Drive real Room protobuf state, Coordinator projection, Track sinks and the
+// production widgets. The explicit before mode records the unmodified product;
+// it is never part of the regression gate and does not claim a passing verdict.
+void TrackPresentationAcceptance(bool before = false) {
+    WindowFixture fixture;
+    auto roster = WindowParticipant("Camera and screen");
+    roster.mutable_participants(0)->mutable_tracks(0)->set_source(livekit::proto::CAMERA);
+    auto *share = roster.mutable_participants(0)->add_tracks();
+    share->set_sid("TR_WINDOW_SCREEN");
+    share->set_name("screen");
+    share->set_type(livekit::proto::VIDEO);
+    share->set_source(livekit::proto::SCREEN_SHARE);
+    fixture.room->UpdateParticipantsForTesting(roster);
+    auto camera = fixture.attachExisting("presentation-camera");
+    auto screen = fixture.attachExisting("presentation-screen", true, "TR_WINDOW_SCREEN");
+    fixture.open();
+    const auto cameraTile = [&] { return ParticipantWindowTestAccess::tile(*fixture.window, "window-peer"); };
+    const auto screenTile = [&] { return ParticipantWindowTestAccess::screen(*fixture.window, "TR_WINDOW_SCREEN"); };
+    const auto snapshot = [&](const QString &step) {
+        ParticipantWindowTestAccess::savePresentation(*fixture.window, (before ? "before-" : "after-") + step);
+    };
+    const auto pause = [&](const char *sid, bool paused) {
+        livekit::proto::SignalResponse response;
+        auto *state = response.mutable_stream_state_update()->add_stream_states();
+        state->set_participant_sid("PA_WINDOW");
+        state->set_track_sid(sid);
+        state->set_state(paused ? livekit::proto::PAUSED : livekit::proto::ACTIVE);
+        fixture.room->HandleSignalMessageForTesting(response);
+        fixture.pump();
+    };
+    snapshot("first-frame");
+    if (!before) {
+        TEST_CHECK(cameraTile()->isVideoActive() && screenTile()->isVideoActive());
+        TEST_CHECK(ParticipantWindowTestAccess::tileFrame(cameraTile()).isNull());
+        TEST_CHECK(ParticipantWindowTestAccess::tileFrame(screenTile()).isNull());
+    }
+    camera.source->push(90, 1000);
+    screen.source->push(210, 1000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    const auto cameraImage = ParticipantWindowTestAccess::tileFrame(cameraTile());
+    snapshot("playing");
+    pause("TR_WINDOW_SCREEN", true);
+    snapshot("screen-paused");
+    std::cout << "TRACK_PRESENTATION " << (before ? "BEFORE" : "AFTER")
+        << " screen_pause: camera=" << ParticipantWindowTestAccess::paused(cameraTile())
+        << " screen=" << ParticipantWindowTestAccess::paused(screenTile()) << std::endl;
+    if (before) return;
+    TEST_CHECK(!ParticipantWindowTestAccess::paused(cameraTile()));
+    TEST_CHECK(ParticipantWindowTestAccess::paused(screenTile()));
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(cameraTile()) == cameraImage);
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(screenTile()).isNull());
+    screen.source->push(235, 2000); // A paused/in-flight frame cannot revive the view.
+    pause("TR_WINDOW_SCREEN", false);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(screenTile()).isNull());
+    screen.source->push(160, 3000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(!ParticipantWindowTestAccess::tileFrame(screenTile()).isNull());
+    pause("TR_PA_WINDOW", true);
+    TEST_CHECK(ParticipantWindowTestAccess::paused(cameraTile()));
+    TEST_CHECK(!ParticipantWindowTestAccess::paused(screenTile()));
+    // Late hydration must recover per-track state, not the participant aggregate.
+    auto lateWindow = ParticipantWindowTestAccess::create(fixture.coordinator);
+    TEST_CHECK(ParticipantWindowTestAccess::paused(ParticipantWindowTestAccess::tile(*lateWindow, "window-peer")));
+    TEST_CHECK(!ParticipantWindowTestAccess::paused(ParticipantWindowTestAccess::screen(*lateWindow, "TR_WINDOW_SCREEN")));
+    pause("TR_PA_WINDOW", false);
+    camera.source->push(90, 4000);
+    screen.source->push(210, 4000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    roster.mutable_participants(0)->mutable_tracks(1)->set_muted(true);
+    fixture.room->UpdateParticipantsForTesting(roster);
+    fixture.pump();
+    TEST_CHECK(cameraTile()->isVideoActive() && !screenTile()->isVideoActive());
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(screenTile()).isNull());
+    screen.source->push(235, 5000);
+    roster.mutable_participants(0)->mutable_tracks(1)->set_muted(false);
+    fixture.room->UpdateParticipantsForTesting(roster);
+    fixture.pump();
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(screenTile()->isVideoActive());
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(screenTile()).isNull());
+    screen.source->push(210, 6000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    auto successor = fixture.attachExisting("presentation-screen-successor", true, "TR_WINDOW_SCREEN");
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(screenTile()).isNull());
+    screen.source->push(235, 7000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(screenTile()).isNull());
+    successor.source->push(140, 8000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(!ParticipantWindowTestAccess::tileFrame(screenTile()).isNull());
+    snapshot("track-replaced");
+    fixture.room->UpdateParticipantsForTesting(WindowParticipant("departed", false));
+    fixture.pump();
+    TEST_CHECK(ParticipantWindowTestAccess::tileCount(*fixture.window) == 0);
+    TEST_CHECK(ParticipantWindowTestAccess::screenCount(*fixture.window) == 0);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(*fixture.window).attached_track_count == 0);
+    successor.source->push(235, 9000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::screenCount(*fixture.window) == 0);
+    std::cout << "TRACK_PRESENTATION PASS: independent pause/mute, first frame, late hydration, replacement, departure\n";
+}
+
+void NativeWindowResizeAcceptance(bool before = false) {
+    WindowFixture fixture;
+    fixture.open();
+    auto &window = *fixture.window;
+    ParticipantWindowTestAccess::prepareResizeWindow(window);
+    if (!ParticipantWindowTestAccess::enableGpu(window)) {
+        std::cout << "NATIVE_RESIZE_GPU NOT_RUN: DX11 unavailable\n";
+        return;
+    }
+    const int blocked = ParticipantWindowTestAccess::checkNativeResize(window, before, "DX11");
+    if (before) { TEST_CHECK(blocked > 0); return; }
+    TEST_CHECK(ParticipantWindowTestAccess::doubleClickGpu(window,
+        ParticipantWindowTestAccess::local(window)->geometry().center()) == "local");
+    TEST_CHECK(ParticipantWindowTestAccess::local(window)->isPinned());
+    window.showMaximized();
+    ParticipantWindowTestAccess::checkNativeResize(window, false, "maximized", true);
+    window.showFullScreen();
+    ParticipantWindowTestAccess::checkNativeResize(window, false, "fullscreen", true);
+    window.showNormal();
+    ParticipantWindowTestAccess::checkNativeResize(window, false, "restored");
+    ParticipantWindowTestAccess::fallback(window);
+    ParticipantWindowTestAccess::checkNativeResize(window, false, "CPU-fallback");
+    QWidget unrelated;
+    unrelated.setAttribute(Qt::WA_DontShowOnScreen);
+    unrelated.setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
+    unrelated.resize(320, 240); unrelated.show();
+    const auto other = reinterpret_cast<HWND>(unrelated.winId());
+    POINT edge{2, 120}; TEST_CHECK(ClientToScreen(other, &edge));
+    TEST_CHECK(SendMessage(other, WM_NCHITTEST, 0, MAKELPARAM(edge.x, edge.y)) == HTCLIENT);
+    std::cout << "NATIVE_RESIZE PASS: eight edges, DX11/CPU, maximize/fullscreen/restore, content Pin, unrelated HWND\n";
+}
+
+void CardChromeAcceptance(bool before = false) {
+    WindowFixture fixture;
+    auto media = fixture.add("Card name / camera", "card-chrome-camera");
+    fixture.open();
+    auto &window = *fixture.window;
+    const QString prefix = before ? "baseline-card-" : "card-";
+    auto *local = ParticipantWindowTestAccess::local(window);
+    auto *remote = ParticipantWindowTestAccess::tile(window, "window-peer");
+    if (!before) {
+        ParticipantWindowTestAccess::cpuPin(local);
+        TEST_CHECK(local->isPinned() && !remote->isPinned());
+        ParticipantWindowTestAccess::cpuDoubleClick(remote);
+        TEST_CHECK(!local->isPinned() && remote->isPinned());
+        ParticipantWindowTestAccess::cpuPin(remote);
+        TEST_CHECK(!remote->isPinned() && ParticipantWindowTestAccess::pinned(window).isEmpty());
+        // A participant identity must not alias a local-camera render key.
+        fixture.room->UpdateParticipantsForTesting(WindowParticipant("Remote named local", true, false,
+            "PA_ALIAS", "TR_ALIAS", "local")); fixture.pump();
+        auto *alias = ParticipantWindowTestAccess::tile(window, "local");
+        ParticipantWindowTestAccess::cpuPin(alias);
+        TEST_CHECK(alias->isPinned() && !local->isPinned() && !remote->isPinned());
+        fixture.room->UpdateParticipantsForTesting(WindowParticipant("Remote named local", false, false,
+            "PA_ALIAS", "TR_ALIAS", "local")); fixture.pump();
+        TEST_CHECK(ParticipantWindowTestAccess::pinned(window).isEmpty());
+    }
+    if (!qEnvironmentVariableIsSet("LIVEKIT_PRESENTATION_TEST_GPU")) {
+        std::cout << "CARD_CHROME_CPU PASS; GPU NOT_RUN: explicit GPU gate not requested\n";
+        return;
+    }
+    if (!ParticipantWindowTestAccess::enableGpu(window)) {
+        std::cout << "CARD_CHROME_CPU PASS; GPU NOT_RUN: DX11 unavailable\n";
+        return;
+    }
+    media.source->push(190, 1000);
+    ParticipantWindowTestAccess::render(window);
+    remote->setAudioMuted(true);
+    remote->setConnectionQuality(livekit::ConnectionQuality::Poor);
+    ParticipantWindowTestAccess::layout(window, MeetingUI::VideoViewMode::Grid);
+    const auto grid = ParticipantWindowTestAccess::gpuImage(window, prefix + "grid");
+    std::cout << "CARD_CHROME_SCALE logical-window=" << window.width()
+        << " physical-canvas=" << grid.width() << " dpr=" << window.devicePixelRatioF() << "\n";
+    ParticipantWindowTestAccess::layout(window, MeetingUI::VideoViewMode::Pip);
+    const auto pipImage = ParticipantWindowTestAccess::gpuImage(window, prefix + "pip");
+    if (!before) {
+        ParticipantWindowTestAccess::checkOrder(window, remote);
+        // The upper card's opaque corner is visible, not the main video's black letterbox.
+        const auto point = local->pos() + QPoint(8, local->height() / 2);
+        const auto pixel = pipImage.pixelColor(point.x() * pipImage.width() / window.width(),
+            point.y() * pipImage.height() / remote->height());
+        TEST_CHECK(pixel.red() >= 20 && pixel.red() < 40);
+    }
+    const auto hit = ParticipantWindowTestAccess::doubleClickGpu(window, local->geometry().center());
+    std::cout << "CARD_CHROME " << (before ? "BEFORE" : "AFTER")
+        << " local-thumbnail-hit=" << hit.toStdString() << "\n";
+    if (before) return;
+    TEST_CHECK(hit == local->renderKey());
+    TEST_CHECK(local->isPinned() && !remote->isPinned());
+    ParticipantWindowTestAccess::checkOrder(window, local);
+    ParticipantWindowTestAccess::gpuImage(window, "card-pip-local-pinned");
+    TEST_CHECK(ParticipantWindowTestAccess::doubleClickGpu(window, remote->geometry().center()) == remote->renderKey());
+    TEST_CHECK(!local->isPinned() && remote->isPinned());
+    ParticipantWindowTestAccess::gpuPin(window, remote);
+    TEST_CHECK(ParticipantWindowTestAccess::pinned(window).isEmpty() && !remote->isPinned());
+    ParticipantWindowTestAccess::layout(window, MeetingUI::VideoViewMode::Grid);
+    auto plain = ParticipantWindowTestAccess::gpuImage(window, "card-before-state");
+    const auto cachedKey = ParticipantWindowTestAccess::decorationKey(window, remote);
+    media.source->push(190, 2000);
+    ParticipantWindowTestAccess::render(window);
+    ParticipantWindowTestAccess::gpuImage(window, "card-next-frame");
+    TEST_CHECK(ParticipantWindowTestAccess::decorationKey(window, remote) == cachedKey);
+    // Accepted native events must update card metadata without a resize or a new video frame.
+    ParticipantWindowTestAccess::gpuDirty(window);
+    livekit::proto::SignalResponse quality;
+    auto *q = quality.mutable_connection_quality()->add_updates();
+    q->set_participant_sid("PA_WINDOW"); q->set_quality(livekit::proto::ConnectionQuality::EXCELLENT);
+    fixture.room->HandleSignalMessageForTesting(quality);
+    fixture.pump();
+    TEST_CHECK(ParticipantWindowTestAccess::gpuDirty(window));
+    auto qualityImage = ParticipantWindowTestAccess::gpuImage(window, "card-quality");
+    TEST_CHECK(qualityImage != plain);
+    auto roster = WindowParticipant("Card name / camera");
+    auto *mic = roster.mutable_participants(0)->add_tracks();
+    mic->set_sid("TR_CARD_MIC"); mic->set_type(livekit::proto::AUDIO); mic->set_muted(true);
+    fixture.room->UpdateParticipantsForTesting(roster); fixture.pump();
+    TEST_CHECK(remote->isAudioMuted());
+    mic->set_muted(false);
+    fixture.room->UpdateParticipantsForTesting(roster); fixture.pump();
+    TEST_CHECK(!remote->isAudioMuted());
+    ParticipantWindowTestAccess::gpuDirty(window);
+    livekit::proto::SignalResponse speakerUpdate;
+    auto *speaker = speakerUpdate.mutable_speakers_changed()->add_speakers();
+    speaker->set_sid("PA_WINDOW"); speaker->set_level(0.6f); speaker->set_active(true);
+    fixture.room->HandleSignalMessageForTesting(speakerUpdate);
+    fixture.pump();
+    TEST_CHECK(ParticipantWindowTestAccess::gpuDirty(window));
+    auto speaking = ParticipantWindowTestAccess::gpuImage(window, "card-speaking");
+    TEST_CHECK(speaking != qualityImage);
+    roster.mutable_participants(0)->set_name("Renamed camera / long participant name to elide");
+    roster.mutable_participants(0)->mutable_tracks(0)->set_source(livekit::proto::CAMERA);
+    auto *share = roster.mutable_participants(0)->add_tracks();
+    share->set_sid("TR_CARD_SCREEN"); share->set_type(livekit::proto::VIDEO);
+    share->set_source(livekit::proto::SCREEN_SHARE);
+    fixture.room->UpdateParticipantsForTesting(roster); fixture.pump();
+    auto screenMedia = fixture.attachExisting("card-chrome-screen", true, "TR_CARD_SCREEN");
+    auto *screen = ParticipantWindowTestAccess::screen(window, "TR_CARD_SCREEN");
+    TEST_CHECK(remote->displayName().startsWith("Renamed") && screen);
+    ParticipantWindowTestAccess::gpuImage(window, "card-screen-waiting");
+    screenMedia.source->push(235, 3000);
+    ParticipantWindowTestAccess::render(window);
+    ParticipantWindowTestAccess::layout(window, MeetingUI::VideoViewMode::Pip);
+    ParticipantWindowTestAccess::gpuPin(window, screen);
+    TEST_CHECK(screen->isPinned() && !remote->isPinned() && !local->isPinned());
+    ParticipantWindowTestAccess::checkOrder(window, screen);
+    ParticipantWindowTestAccess::gpuImage(window, "card-screen-pinned");
+    ParticipantWindowTestAccess::resizeWithSidebar(window, QSize(1120, 720));
+    ParticipantWindowTestAccess::checkOrder(window, screen);
+    TEST_CHECK(ParticipantWindowTestAccess::doubleClickGpu(window, remote->geometry().center()) == remote->renderKey());
+    ParticipantWindowTestAccess::gpuImage(window, "card-sidebar");
+    ParticipantWindowTestAccess::gpuPin(window, screen);
+    roster.mutable_participants(0)->mutable_tracks()->RemoveLast();
+    fixture.room->UpdateParticipantsForTesting(roster); fixture.pump();
+    TEST_CHECK(ParticipantWindowTestAccess::pinned(window).isEmpty());
+    TEST_CHECK(!ParticipantWindowTestAccess::decorationExists(window, "remote-screen/TR_CARD_SCREEN"));
+    ParticipantWindowTestAccess::gpuPin(window, remote);
+    ParticipantWindowTestAccess::fallback(window);
+    TEST_CHECK(remote->isPinned() && !local->isPinned());
+    ParticipantWindowTestAccess::savePresentation(window, "after-card-cpu-fallback");
+    ParticipantWindowTestAccess::cpuPin(local);
+    TEST_CHECK(local->isPinned() && !remote->isPinned());
+    ParticipantWindowTestAccess::cpuPin(remote);
+    fixture.room->UpdateParticipantsForTesting(WindowParticipant("departed", false)); fixture.pump();
+    TEST_CHECK(ParticipantWindowTestAccess::pinned(window).isEmpty() && !local->isPinned());
+    TEST_CHECK(!ParticipantWindowTestAccess::decorationExists(window, "remote-screen/TR_CARD_SCREEN"));
+    std::cout << "CARD_CHROME PASS: native metadata, cached overlays, single Pin, PiP draw/hit order, sidebar, fallback, departure\n";
+}
+
+void TrackPresentationGpuAcceptance() {
+    if (!qEnvironmentVariableIsSet("LIVEKIT_PRESENTATION_TEST_GPU")) {
+        std::cout << "TRACK_PRESENTATION_GPU NOT_RUN: explicit GPU gate not requested\n";
+        return;
+    }
+    WindowFixture fixture;
+    auto roster = WindowParticipant("GPU camera and screen");
+    roster.mutable_participants(0)->mutable_tracks(0)->set_source(livekit::proto::CAMERA);
+    auto *share = roster.mutable_participants(0)->add_tracks();
+    share->set_sid("TR_WINDOW_SCREEN"); share->set_type(livekit::proto::VIDEO);
+    share->set_source(livekit::proto::SCREEN_SHARE);
+    fixture.room->UpdateParticipantsForTesting(roster);
+    auto camera = fixture.attachExisting("gpu-presentation-camera");
+    auto screen = fixture.attachExisting("gpu-presentation-screen", true, "TR_WINDOW_SCREEN");
+    fixture.open();
+    if (!ParticipantWindowTestAccess::enableGpu(*fixture.window)) {
+        std::cout << "TRACK_PRESENTATION_GPU NOT_RUN: DX11 unavailable\n";
+        return;
+    }
+    auto &window = *fixture.window;
+    const auto cameraTile = [&] { return ParticipantWindowTestAccess::tile(window, "window-peer"); };
+    const auto screenTile = [&] { return ParticipantWindowTestAccess::screen(window, "TR_WINDOW_SCREEN"); };
+    const auto pause = [&](bool paused) {
+        livekit::proto::SignalResponse response;
+        auto *state = response.mutable_stream_state_update()->add_stream_states();
+        state->set_participant_sid("PA_WINDOW"); state->set_track_sid("TR_WINDOW_SCREEN");
+        state->set_state(paused ? livekit::proto::PAUSED : livekit::proto::ACTIVE);
+        fixture.room->HandleSignalMessageForTesting(response);
+        fixture.pump();
+    };
+    camera.source->push(90, 1000); screen.source->push(210, 1000);
+    ParticipantWindowTestAccess::render(window);
+    auto playing = ParticipantWindowTestAccess::gpuImage(window, "playing");
+    TEST_CHECK(ParticipantWindowTestAccess::gpuTileCenter(window, playing, screenTile()).red() > 200);
+    const auto cameraColor = ParticipantWindowTestAccess::gpuTileCenter(window, playing, cameraTile());
+    pause(true);
+    auto paused = ParticipantWindowTestAccess::gpuImage(window, "screen-paused");
+    TEST_CHECK(ParticipantWindowTestAccess::gpuTileCenter(window, paused, cameraTile()) == cameraColor);
+    TEST_CHECK(ParticipantWindowTestAccess::gpuTileCenter(window, paused, screenTile()).red() < 80);
+    TEST_CHECK(!ParticipantWindowTestAccess::gpuHasFrame(window, screenTile()->renderKey()));
+    screen.source->push(235, 2000);
+    pause(false);
+    ParticipantWindowTestAccess::render(window);
+    auto waiting = ParticipantWindowTestAccess::gpuImage(window, "resume-waiting");
+    TEST_CHECK(ParticipantWindowTestAccess::gpuTileCenter(window, waiting, screenTile()).red() < 80);
+    screen.source->push(210, 3000);
+    ParticipantWindowTestAccess::render(window);
+    ParticipantWindowTestAccess::gpuImage(window, "resumed");
+    // Include both an already uploaded frame and a pending frame at replacement.
+    screen.source->push(235, 4000);
+    auto successor = fixture.attachExisting("gpu-presentation-successor", true, "TR_WINDOW_SCREEN");
+    auto replaced = ParticipantWindowTestAccess::gpuImage(window, "replacement-waiting");
+    TEST_CHECK(ParticipantWindowTestAccess::gpuTileCenter(window, replaced, screenTile()).red() < 80);
+    screen.source->push(235, 5000);
+    ParticipantWindowTestAccess::render(window);
+    TEST_CHECK(!ParticipantWindowTestAccess::gpuHasFrame(window, screenTile()->renderKey()));
+    successor.source->push(140, 6000);
+    ParticipantWindowTestAccess::render(window);
+    auto current = ParticipantWindowTestAccess::gpuImage(window, "replacement-frame");
+    TEST_CHECK(ParticipantWindowTestAccess::gpuTileCenter(window, current, screenTile()).red() > 120);
+    roster.mutable_participants(0)->mutable_tracks(0)->set_muted(true);
+    fixture.room->UpdateParticipantsForTesting(roster);
+    fixture.pump();
+    auto muted = ParticipantWindowTestAccess::gpuImage(window, "camera-muted");
+    TEST_CHECK(ParticipantWindowTestAccess::gpuTileCenter(window, muted, cameraTile()).red() < 80);
+    TEST_CHECK(ParticipantWindowTestAccess::gpuTileCenter(window, muted, screenTile()) ==
+        ParticipantWindowTestAccess::gpuTileCenter(window, current, screenTile()));
+    fixture.room->UpdateParticipantsForTesting(WindowParticipant("departed", false));
+    fixture.pump();
+    TEST_CHECK(!ParticipantWindowTestAccess::gpuHasFrame(window, "remote-camera/window-peer"));
+    TEST_CHECK(!ParticipantWindowTestAccess::gpuHasFrame(window, "remote-screen/TR_WINDOW_SCREEN"));
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(window).delivered_to_qt_cpu == 0);
+    std::cout << "TRACK_PRESENTATION_GPU PASS: actual draw/readback, pause/mute isolation, replacement, cleanup\n";
+}
+
 void ScreenShareWindowControls() {
     WindowFixture fixture;
     OpenMeeting::MeetingCoordinatorTestAccess::commitLocalStartupPrecondition(*fixture.coordinator);
@@ -1775,11 +2309,15 @@ void ScreenShareWindowControls() {
     ParticipantWindowTestAccess::render(*fixture.window);
     TEST_CHECK(ParticipantWindowTestAccess::sharingBanner(*fixture.window));
     TEST_CHECK(ParticipantWindowTestAccess::tileFrame(ParticipantWindowTestAccess::localScreen(*fixture.window)).size() == QSize(640, 480));
+    ParticipantWindowTestAccess::cpuPin(ParticipantWindowTestAccess::localScreen(*fixture.window));
+    TEST_CHECK(ParticipantWindowTestAccess::pinned(*fixture.window) == "local-screen");
+    TEST_CHECK(!ParticipantWindowTestAccess::local(*fixture.window)->isPinned());
     fixture.coordinator->stopScreenShare();
     fixture.pump();
     captureFrame(localFrame); // Old capture callback cannot recreate the preview.
     ParticipantWindowTestAccess::render(*fixture.window);
     TEST_CHECK(!ParticipantWindowTestAccess::localScreen(*fixture.window));
+    TEST_CHECK(ParticipantWindowTestAccess::pinned(*fixture.window).isEmpty());
     TEST_CHECK(!ParticipantWindowTestAccess::sharingBanner(*fixture.window));
     OpenMeeting::MeetingCoordinatorTestAccess::screenSnapshot(*fixture.coordinator, fixture.runtime->generation() - 1,
         {livekit::ScreenShareState::Active, livekit::ScreenShareError::None});
@@ -1922,7 +2460,20 @@ int WindowAcceptanceMain(int argc, char **argv) {
         QDir::cleanPath(probe.fileName()).startsWith(QDir::cleanPath(settingsDirectory.path()) + "/"));
     // No Notify or account callback is emitted by this target. All Coordinator
     // instances above use explicitly injected temporary SessionManager objects.
-    if (application.arguments().contains("--account-lifecycle")) {
+    if (application.arguments().contains("--window-resize-before")) {
+        NativeWindowResizeAcceptance(true);
+    } else if (application.arguments().contains("--window-resize")) {
+        NativeWindowResizeAcceptance();
+    } else if (application.arguments().contains("--card-chrome-before")) {
+        CardChromeAcceptance(true);
+    } else if (application.arguments().contains("--card-chrome")) {
+        CardChromeAcceptance();
+    } else if (application.arguments().contains("--track-presentation-before")) {
+        TrackPresentationAcceptance(true);
+    } else if (application.arguments().contains("--track-presentation")) {
+        TrackPresentationAcceptance();
+        TrackPresentationGpuAcceptance();
+    } else if (application.arguments().contains("--account-lifecycle")) {
         AccountLogoutAndDuplicateLogin();
     } else if (application.arguments().contains("--departure-notice")) {
         DepartureNoticeLifetime();
@@ -1978,6 +2529,10 @@ int WindowAcceptanceMain(int argc, char **argv) {
         ScreenShareCameraCoexistence();
         DepartureNoticeLifetime();
         AccountLogoutAndDuplicateLogin();
+        TrackPresentationAcceptance();
+        TrackPresentationGpuAcceptance();
+        CardChromeAcceptance();
+        NativeWindowResizeAcceptance();
     }
     if (wrappedThread) webrtc::ThreadManager::Instance()->UnwrapCurrentThread();
     style::StopManager();
