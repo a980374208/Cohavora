@@ -116,7 +116,9 @@ public:
                             const std::shared_ptr<MeetingSessionRuntime> &session)
         : _coordinator(c),
           _session(session),
-          _generation(session ? session->generation() : 0) {}
+          _generation(session ? session->generation() : 0),
+          _authGeneration(c->_sessionManager.authGeneration()),
+          _localUserId(session ? session->localUserId() : QString()) {}
 
     bool ConsumesParticipantEvents() const override { return true; }
 
@@ -124,7 +126,10 @@ public:
         auto *coordinator = _coordinator;
         if (!coordinator || _generation == 0) return;
         const auto generation = _generation;
-        QMetaObject::invokeMethod(coordinator, [coordinator, generation, event]() {
+        const auto authGeneration = _authGeneration;
+        const auto localUserId = _localUserId;
+        QMetaObject::invokeMethod(coordinator, [coordinator, generation, authGeneration, localUserId, event]() {
+            if (coordinator->applyAccountNotificationOnUiThread(generation, authGeneration, localUserId, event)) return;
             coordinator->applyParticipantEventOnUiThread(generation, event);
         }, Qt::QueuedConnection);
     }
@@ -158,6 +163,11 @@ public:
 
     void OnDisconnected(livekit::RoomDisconnectReason reason,
                         const std::string &detail) override {
+        if (auto session = _session.lock()) {
+            asio::post(session->strand(), [session] {
+                if (auto share = session->screenShareOnStrand()) share->Shutdown();
+            });
+        }
         auto *coordinator = _coordinator;
         if (!coordinator || _generation == 0) return;
         const auto generation = _generation;
@@ -185,6 +195,9 @@ public:
                 return;
             }
             if (owner->_state != MeetingState::Leaving && owner->_state != MeetingState::Idle) {
+                owner->_screenShareSnapshot = {};
+                emit owner->screenShareChanged({});
+                if (!current()) return;
                 owner->setState(MeetingState::Idle, qDetail);
                 if (!current() || owner->_state != MeetingState::Idle) return;
                 emit owner->meetingLeft();
@@ -193,6 +206,11 @@ public:
     }
 
     void OnReconnecting() override {
+        if (auto session = _session.lock()) {
+            asio::post(session->strand(), [session] {
+                if (auto share = session->screenShareOnStrand()) share->SetTransportReady(false);
+            });
+        }
         auto *coordinator = _coordinator;
         if (!coordinator || _generation == 0) return;
         const auto generation = _generation;
@@ -216,6 +234,11 @@ public:
     }
 
     void OnReconnected() override {
+        if (auto session = _session.lock()) {
+            asio::post(session->strand(), [session] {
+                if (auto share = session->screenShareOnStrand()) share->SetTransportReady(true);
+            });
+        }
         auto *coordinator = _coordinator;
         if (!coordinator || _generation == 0) return;
         const auto generation = _generation;
@@ -559,7 +582,35 @@ private:
     MeetingCoordinator *_coordinator;
     std::weak_ptr<MeetingSessionRuntime> _session;
     const uint64_t _generation;
+    const quint64 _authGeneration;
+    const QString _localUserId;
 };
+
+bool MeetingCoordinator::applyAccountNotificationOnUiThread(uint64_t sessionGeneration, quint64 authGeneration,
+        const QString &localUserId, const livekit::ParticipantEvent &event) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (event.kind != livekit::ParticipantEventKind::DataReceived ||
+        event.sender.origin != livekit::SenderOrigin::Server) return false;
+    openmeeting::meeting::NotifyMeetingData notify;
+    if (!notify.ParseFromArray(event.data.data(), static_cast<int>(event.data.size())) ||
+        !notify.has_kickoffmeetingdata() ||
+        notify.kickoffmeetingdata().reasoncode() != openmeeting::meeting::KickOffReason::DuplicatedLogin) return false;
+
+    // Account state belongs to this Qt owner. Do not send an accepted account
+    // notification through Qt -> strand -> Qt: the server sends RemoveParticipant
+    // immediately after it, which can retire the room before that round trip ends.
+    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+        _sessionManager.authGeneration() != authGeneration || !_sessionManager.isLoggedIn() ||
+        _sessionManager.userId() != localUserId ||
+        QString::fromStdString(notify.kickoffmeetingdata().userid()) != localUserId) return true;
+    QPointer<MeetingCoordinator> owner(this);
+    MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection, "DUPLICATED_LOGIN",
+        "[Coordinator] Apply trusted server duplicated-login event");
+    if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+        owner->_sessionManager.authGeneration() != authGeneration) return true;
+    owner->_sessionManager.invalidateSession(SessionInvalidationReason::DuplicatedLogin);
+    return true;
+}
 
 std::shared_ptr<livekit::RoomListener> MeetingCoordinator::participantEventListenerForTesting(
     const std::shared_ptr<MeetingSessionRuntime> &session, bool retainForOwnedSession) {
@@ -946,6 +997,10 @@ MeetingCoordinator::MeetingCoordinator(SessionManager &sessionManager,
             this, [this](SessionInvalidationReason reason) {
                 handleSessionInvalidated(reason);
             }, Qt::QueuedConnection);
+    connect(&_sessionManager, &SessionManager::loggedOut, this, [this]() {
+        if (!_sessionManager.isSessionInvalidating())
+            handleSessionInvalidated(SessionInvalidationReason::UserLogout);
+    });
 }
 
 MeetingCoordinator::~MeetingCoordinator() {
@@ -1354,6 +1409,20 @@ void MeetingCoordinator::startRoomSession(const QString &url,
         _sessionManager.userId());
 
     _room = livekit::Room::Create(_ioContext->get_executor());
+    {
+        auto session = _sessionRuntime;
+        auto room = _room;
+        const auto generation = session->generation();
+        asio::post(session->strand(), [this, session, room, generation] {
+            session->screenShareOnStrand() = std::make_shared<livekit::ScreenShareSession>(
+                session->strand(), livekit::ScreenShareSession::ForRoom(room),
+                [this, generation](livekit::ScreenShareSnapshot snapshot) {
+                    QMetaObject::invokeMethod(this, [this, generation, snapshot] {
+                        applyScreenShareSnapshotOnUiThread(generation, snapshot);
+                    }, Qt::QueuedConnection);
+                });
+        });
+    }
     _room->SetLogHandler([](const std::string &cat, const std::string &tag, const std::string &msg) {
         MeetingUI::LogCategory c = MeetingUI::LogCategory::General;
         if (cat == "WEBRTC") c = MeetingUI::LogCategory::WebRTC;
@@ -1586,6 +1655,8 @@ void MeetingCoordinator::failRoomStartupOnUiThread(
 }
 
 void MeetingCoordinator::stopRoomSession() {
+    ++_screenSourceRequest;
+    _screenShareSnapshot = {};
     _startupCommitted = false;
     _startupReconnectPending = false;
     _startupListenOnly = false;
@@ -1619,6 +1690,10 @@ void MeetingCoordinator::stopRoomSession() {
             try {
                 session->assertOnStrand();
                 session->stopAcceptingDataOnStrand();
+                if (auto &share = session->screenShareOnStrand()) {
+                    share->Shutdown();
+                    share.reset();
+                }
 
                 std::vector<QString> failed;
                 auto &transfers = session->transfersOnStrand();
@@ -1716,6 +1791,51 @@ void MeetingCoordinator::stopRoomSession() {
         emit owner->chatMediaReceivingFailed(transferId, QString::fromUtf8("本地已离开会议"));
         if (!stillStopped()) return;
     }
+}
+
+void MeetingCoordinator::applyScreenShareSnapshotOnUiThread(uint64_t generation, livekit::ScreenShareSnapshot snapshot) {
+    if (!isCurrentSessionGenerationOnUiThread(generation) ||
+        (_state != MeetingState::InMeeting && _state != MeetingState::Reconnecting)) return;
+    _screenShareSnapshot = snapshot;
+    emit screenShareChanged(snapshot);
+}
+
+void MeetingCoordinator::requestScreenShareSources() {
+    if (!_sessionRuntime || !_sessionRunning || _state != MeetingState::InMeeting || !_startupCommitted) {
+        emit errorOccurred(QString::fromUtf8("屏幕共享"), QString::fromUtf8("请等待会议连接和本地媒体初始化完成"));
+        return;
+    }
+    const auto request = ++_screenSourceRequest;
+    auto session = _sessionRuntime;
+    const auto generation = session->generation();
+    asio::post(session->strand(), [this, session, generation, request] {
+        if (!session->acceptsDataOnStrand()) return;
+        std::vector<livekit::DesktopSource> sources;
+        try { sources = livekit::EnumerateDesktopSources(); } catch (...) {}
+        QMetaObject::invokeMethod(this, [this, generation, request, sources = std::move(sources)] {
+            if (!isCurrentSessionGenerationOnUiThread(generation) || request != _screenSourceRequest ||
+                _state != MeetingState::InMeeting) return;
+            emit screenShareSourcesReady(sources);
+        }, Qt::QueuedConnection);
+    });
+}
+
+void MeetingCoordinator::startScreenShare(livekit::DesktopSource source) {
+    if (!_sessionRuntime || !_sessionRunning || _state != MeetingState::InMeeting || !_startupCommitted) return;
+    auto session = _sessionRuntime;
+    asio::post(session->strand(), [session, source = std::move(source)] {
+        if (!session->acceptsDataOnStrand()) return;
+        if (auto share = session->screenShareOnStrand()) share->Start(source);
+    });
+}
+
+void MeetingCoordinator::stopScreenShare() {
+    ++_screenSourceRequest;
+    if (!_sessionRuntime || !_sessionRunning) return;
+    auto session = _sessionRuntime;
+    asio::post(session->strand(), [session] {
+        if (auto share = session->screenShareOnStrand()) share->Stop();
+    });
 }
 
 void MeetingCoordinator::setLocalAudioMuted(bool muted) {
@@ -2535,12 +2655,8 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
                             "[Coordinator] Ignore DuplicatedLogin from a participant data message");
                         return;
                     }
-                    MeetingUI::LogToConsole(
-                        MeetingUI::LogCategory::Connection,
-                        "DUPLICATED_LOGIN",
-                        "[Coordinator] Receive trusted server duplicated-login event");
-                    if (!valid()) return;
-                    SessionManager::instance().invalidateSession(SessionInvalidationReason::DuplicatedLogin);
+                    // Trusted account notifications are consumed on their first
+                    // Qt delivery, with the listener's authentication generation.
                     return;
                 }
                 emit owner->kickedOff(reason, code);

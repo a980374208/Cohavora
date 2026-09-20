@@ -11,6 +11,8 @@
 
 #include "participant_event.h"
 
+namespace livekit { class ScreenShareSession; }
+
 namespace OpenMeeting {
 
 struct InboundTransferKey {
@@ -106,12 +108,18 @@ public:
         return _inboundMediaTransfers;
     }
 
+    std::shared_ptr<livekit::ScreenShareSession> &screenShareOnStrand() {
+        assertOnStrand();
+        return _screenShare;
+    }
+
 private:
     Strand _strand;
     const uint64_t _generation;
     const QString _localUserId;
     bool _acceptingData = true;
     std::map<InboundTransferKey, InboundMediaTransfer> _inboundMediaTransfers;
+    std::shared_ptr<livekit::ScreenShareSession> _screenShare;
 };
 
 } // namespace OpenMeeting

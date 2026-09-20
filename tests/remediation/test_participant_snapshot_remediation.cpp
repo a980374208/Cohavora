@@ -30,6 +30,8 @@
 #include <QtGui/QClipboard>
 #include <QtPlugin>
 #include <QtWidgets/QApplication>
+#include <QtWidgets/QInputDialog>
+#include <QtGui/QMouseEvent>
 
 #include <algorithm>
 #include <array>
@@ -59,8 +61,8 @@ namespace OpenMeeting {
 class SessionManagerTestAccess final {
 public:
     using ScopedSession = std::unique_ptr<SessionManager, void (*)(SessionManager *)>;
-    static ScopedSession create(std::unique_ptr<QSettings> settings) {
-        return ScopedSession(new SessionManager(std::move(settings)), [](SessionManager *value) { delete value; });
+    static ScopedSession create(std::unique_ptr<QSettings> settings, OpenMeetingHttpClient *client = nullptr) {
+        return ScopedSession(new SessionManager(std::move(settings), nullptr, client, nullptr), [](SessionManager *value) { delete value; });
     }
 };
 class MeetingCoordinatorTestAccess final {
@@ -79,6 +81,9 @@ public:
     }
     static void prepareInMeetingEntry(MeetingCoordinator &owner) { owner._state = MeetingState::ConnectingRoom; }
     static void enterInMeeting(MeetingCoordinator &owner) { owner.setState(MeetingState::InMeeting); }
+    static void screenSnapshot(MeetingCoordinator &owner, uint64_t generation, livekit::ScreenShareSnapshot snapshot) {
+        owner.applyScreenShareSnapshotOnUiThread(generation, snapshot);
+    }
     static void commitLocalStartupPrecondition(MeetingCoordinator &owner) {
         owner._startupCommitted = true;
         owner.setState(MeetingState::InMeeting);
@@ -138,6 +143,25 @@ public:
 
 class ParticipantWindowTestAccess final {
 public:
+    static livekit::ScreenShareState shareState(const MeetingUI::MeetingRoomWindow &window) {
+        return window._bottomBar->_screenShareState;
+    }
+    static void clickShareDuringRecovery(MeetingUI::MeetingRoomWindow &window) {
+        auto *bar = window._bottomBar;
+        bar->resize(1120, 80);
+        QResizeEvent resize(bar->size(), bar->size());
+        QApplication::sendEvent(bar, &resize);
+        bar->setInRecovery(true);
+        bool clicked = false;
+        for (const auto &item : bar->_toolItems) {
+            if (item.id != 3) continue;
+            clicked = true;
+            QMouseEvent press(QEvent::MouseButtonPress, item.rect.center(), Qt::LeftButton,
+                Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(bar, &press);
+        }
+        TEST_CHECK(clicked);
+    }
     static std::unique_ptr<MeetingUI::MeetingRoomWindow> create(
             const std::shared_ptr<OpenMeeting::MeetingCoordinator> &coordinator) {
         MeetingUI::MeetingRoomWindow::Config config;
@@ -153,6 +177,99 @@ public:
             MeetingUI::MeetingRoomWindow::ParticipantWindowTestTag{}, config, coordinator));
     }
     static std::size_t tileCount(const MeetingUI::MeetingRoomWindow &window) { return window._remoteTiles.size(); }
+    static std::size_t screenCount(const MeetingUI::MeetingRoomWindow &window) { return window._remoteScreenTiles.size(); }
+    static MeetingUI::VideoTileWidget *screen(MeetingUI::MeetingRoomWindow &window, const QString &sid) {
+        const auto it = window._remoteScreenTiles.find(sid);
+        return it == window._remoteScreenTiles.end() ? nullptr : it->second.get();
+    }
+    static MeetingUI::VideoTileWidget *localScreen(MeetingUI::MeetingRoomWindow &window) { return window._localScreenTile.get(); }
+    static bool sharingBanner(const MeetingUI::MeetingRoomWindow &window) {
+        return window._screenShareBanner && !window._screenShareBanner->isHidden() &&
+            window._screenShareBanner->text().startsWith(QString::fromUtf8("正在共享："));
+    }
+    static QImage tileFrame(MeetingUI::VideoTileWidget *tile) {
+        TEST_CHECK(tile);
+        std::lock_guard lock(tile->_frameMutex);
+        return tile->_currentFrame.copy();
+    }
+    static void checkAspect(MeetingUI::VideoTileWidget &tile) {
+        for (const auto source : {QSize(400, 300), QSize(160, 90), QSize(90, 160), QSize(234, 66)}) {
+            QImage frame(source, QImage::Format_RGB32);
+            frame.fill(Qt::white);
+            tile.setFrame(frame);
+            QImage painted(500, 300, QImage::Format_RGB32);
+            painted.fill(Qt::black);
+            { QPainter painter(&painted); tile.drawVideoFrame(painter, painted.rect()); }
+            int left = 500, top = 300, right = -1, bottom = -1;
+            for (int y = 0; y < painted.height(); ++y) for (int x = 0; x < painted.width(); ++x) {
+                if (painted.pixelColor(x, y).red() < 240) continue;
+                left = std::min(left, x); right = std::max(right, x);
+                top = std::min(top, y); bottom = std::max(bottom, y);
+            }
+            TEST_CHECK(right >= left && bottom >= top);
+            TEST_CHECK(std::abs(double(right - left + 1) / (bottom - top + 1) -
+                double(source.width()) / source.height()) < 0.025);
+        }
+    }
+    static void checkGpuAspect() {
+        using Microsoft::WRL::ComPtr;
+        livekit::dx11::Dx11VideoCanvas canvas;
+        canvas.setAttribute(Qt::WA_DontShowOnScreen);
+        canvas.resize(640, 360);
+        canvas.show();
+        TEST_CHECK(canvas.rendererReady());
+        for (const auto size : {QSize(400, 300), QSize(160, 90), QSize(90, 160), QSize(234, 66)}) {
+            for (const auto rotation : {livekit::VideoRotation::VIDEO_ROTATION_0,
+                                       livekit::VideoRotation::VIDEO_ROTATION_90}) {
+                std::vector<uint8_t> y(size.width() * size.height(), 235);
+                std::vector<uint8_t> uv(((size.width() + 1) / 2) * ((size.height() + 1) / 2), 128);
+                auto frame = livekit::render::OwnedI420Frame::CopyFromPlanes(size.width(), size.height(),
+                    y.data(), size.width(), uv.data(), (size.width() + 1) / 2,
+                    uv.data(), (size.width() + 1) / 2, 0, rotation);
+                canvas.setTilesLayout({{"aspect", 0, 0, canvas.width(), canvas.height(), false, 0.0f, true}});
+                canvas.updateI420Frame("aspect", frame);
+                // Reproduce a stale, differently shaped backbuffer after a
+                // native-window size change; the draw must resynchronize it.
+                TEST_CHECK(canvas.renderer_.Resize(800, 800));
+                canvas.render();
+                RECT client{};
+                TEST_CHECK(GetClientRect(reinterpret_cast<HWND>(canvas.winId()), &client));
+                TEST_CHECK(canvas.renderer_.width() == client.right && canvas.renderer_.height() == client.bottom);
+                ComPtr<ID3D11RenderTargetView> view;
+                canvas.renderer_.context()->OMGetRenderTargets(1, view.GetAddressOf(), nullptr);
+                TEST_CHECK(view);
+                ComPtr<ID3D11Resource> resource;
+                view->GetResource(resource.GetAddressOf());
+                ComPtr<ID3D11Texture2D> texture;
+                TEST_CHECK(SUCCEEDED(resource.As(&texture)));
+                D3D11_TEXTURE2D_DESC desc{};
+                texture->GetDesc(&desc);
+                desc.Usage = D3D11_USAGE_STAGING;
+                desc.BindFlags = 0;
+                desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+                desc.MiscFlags = 0;
+                ComPtr<ID3D11Texture2D> readback;
+                TEST_CHECK(SUCCEEDED(canvas.renderer_.device()->CreateTexture2D(&desc, nullptr, readback.GetAddressOf())));
+                canvas.renderer_.context()->CopyResource(readback.Get(), texture.Get());
+                D3D11_MAPPED_SUBRESOURCE mapped{};
+                TEST_CHECK(SUCCEEDED(canvas.renderer_.context()->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped)));
+                int left = desc.Width, top = desc.Height, right = -1, bottom = -1;
+                for (unsigned row = 0; row < desc.Height; ++row) for (unsigned col = 0; col < desc.Width; ++col) {
+                    const auto *pixel = static_cast<const uint8_t*>(mapped.pData) + row * mapped.RowPitch + col * 4;
+                    if (pixel[0] < 240 || pixel[1] < 240 || pixel[2] < 240) continue;
+                    left = std::min(left, int(col)); right = std::max(right, int(col));
+                    top = std::min(top, int(row)); bottom = std::max(bottom, int(row));
+                }
+                canvas.renderer_.context()->Unmap(readback.Get(), 0);
+                const double expected = rotation == livekit::VideoRotation::VIDEO_ROTATION_0
+                    ? double(size.width()) / size.height() : double(size.height()) / size.width();
+                TEST_CHECK(right >= left && bottom >= top);
+                TEST_CHECK(std::abs(double(right - left + 1) / (bottom - top + 1) - expected) < 0.025);
+                std::cout << "GPU_ASPECT source=" << size.width() << 'x' << size.height()
+                    << " rotation=" << int(rotation) << " displayed=" << (right - left + 1) << 'x' << (bottom - top + 1) << '\n';
+            }
+        }
+    }
     static MeetingUI::VideoTileWidget *tile(MeetingUI::MeetingRoomWindow &window, const QString &identity) {
         const auto found = window._remoteTiles.find(identity);
         return found == window._remoteTiles.end() ? nullptr : found->second.get();
@@ -182,6 +299,9 @@ public:
     }
     static QString configuredToken(const MeetingUI::MeetingRoomWindow &window) {
         return window._config.token;
+    }
+    static void bindAccount(MeetingUI::MeetingRoomWindow &window, OpenMeeting::SessionManager &session) {
+        window.setupCameraCompletionOwner(session);
     }
 };
 
@@ -264,14 +384,15 @@ struct WindowMedia {
 
 class WindowFixture final {
 public:
-    explicit WindowFixture(bool localConnectedPrecondition = true)
+    explicit WindowFixture(bool localConnectedPrecondition = true, bool authenticated = false)
         : session(OpenMeeting::SessionManagerTestAccess::create(
-              std::make_unique<QSettings>(settingsDirectory.filePath("settings.ini"), QSettings::IniFormat))),
+              std::make_unique<QSettings>(settingsDirectory.filePath("settings.ini"), QSettings::IniFormat), &httpClient)),
           room(livekit::Room::Create(io.get_executor())),
           runtime(std::make_shared<OpenMeeting::MeetingSessionRuntime>(io, 71, QStringLiteral("local-user"))),
           coordinator(OpenMeeting::MeetingCoordinatorTestAccess::create(*session)),
           observer(std::make_shared<WindowValueObserver>()) {
         TEST_CHECK(settingsDirectory.isValid());
+        if (authenticated) session->loginAsGuest("Account fixture", "local-user");
         if (localConnectedPrecondition) {
             livekit::ParticipantSnapshotRoomTestAccess::establishLocalConnectedPrecondition(*room);
         }
@@ -324,14 +445,15 @@ public:
         room->UpdateParticipantsForTesting(WindowParticipant(name));
         return attachExisting(rtcId);
     }
-    WindowMedia attachExisting(const std::string &rtcId, bool drain = true) {
+    WindowMedia attachExisting(const std::string &rtcId, bool drain = true,
+                              const std::string &trackSid = "TR_PA_WINDOW") {
         auto participant = room->remote_participants().at("PA_WINDOW");
         WindowMedia media;
         media.source = webrtc::make_ref_counted<WindowMemoryVideoSource>();
         media.rtc = webrtc::VideoTrack::Create(rtcId, media.source, webrtc::Thread::Current());
         TEST_CHECK(media.rtc);
-        livekit::ParticipantSnapshotRoomTestAccess::attach(*room, participant, media.rtc, "TR_PA_WINDOW");
-        media.track = participant->get_publication("TR_PA_WINDOW")->track();
+        livekit::ParticipantSnapshotRoomTestAccess::attach(*room, participant, media.rtc, trackSid);
+        media.track = participant->get_publication(trackSid)->track();
         TEST_CHECK(media.track && media.track->rtc_track().get() == media.rtc.get());
         if (drain) pump();
         return media;
@@ -342,6 +464,7 @@ public:
     }
 
     QTemporaryDir settingsDirectory;
+    OpenMeeting::OpenMeetingHttpClient httpClient;
     OpenMeeting::SessionManagerTestAccess::ScopedSession session;
     asio::io_context io;
     std::shared_ptr<livekit::Room> room;
@@ -1549,6 +1672,232 @@ void GapWindowQueuedVideoBindingLease() {
     std::cout << "GAP_P1_03_CASE_11 Room-drain/revoke/Qt-drain/video-lease/presentation/successor PASS" << std::endl;
 }
 
+void ScreenShareCameraCoexistence() {
+    WindowFixture fixture;
+    auto update = WindowParticipant("camera-and-screen");
+    update.mutable_participants(0)->mutable_tracks(0)->set_source(livekit::proto::CAMERA);
+    auto *screenInfo = update.mutable_participants(0)->add_tracks();
+    screenInfo->set_sid("TR_WINDOW_SCREEN");
+    screenInfo->set_name("screen");
+    screenInfo->set_type(livekit::proto::VIDEO);
+    screenInfo->set_source(livekit::proto::SCREEN_SHARE);
+    fixture.room->UpdateParticipantsForTesting(update);
+    auto camera = fixture.attachExisting("camera-rtc");
+    auto screen = fixture.attachExisting("screen-rtc", true, "TR_WINDOW_SCREEN");
+    fixture.open(); // Late-open hydration must reconstruct both views.
+    TEST_CHECK(ParticipantWindowTestAccess::tileCount(*fixture.window) == 1);
+    TEST_CHECK(ParticipantWindowTestAccess::screenCount(*fixture.window) == 1);
+    camera.source->push(50, 1000);
+    screen.source->push(200, 1000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    const auto cameraImage = ParticipantWindowTestAccess::frame(*fixture.window, "window-peer");
+    auto *screenTile = ParticipantWindowTestAccess::screen(*fixture.window, "TR_WINDOW_SCREEN");
+    TEST_CHECK(!cameraImage.isNull());
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(screenTile).pixelColor(0, 0).red() >
+        cameraImage.pixelColor(0, 0).red() + 100);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(*fixture.window).delivered_to_qt_cpu == 2);
+    ParticipantWindowTestAccess::checkAspect(*screenTile);
+
+    // Screen mute/unpublish cannot blank or detach the camera.
+    update.mutable_participants(0)->mutable_tracks(1)->set_muted(true);
+    fixture.room->UpdateParticipantsForTesting(update);
+    fixture.pump();
+    TEST_CHECK(ParticipantWindowTestAccess::tile(*fixture.window, "window-peer")->isVideoActive());
+    update.mutable_participants(0)->mutable_tracks()->RemoveLast();
+    fixture.room->UpdateParticipantsForTesting(update);
+    fixture.pump();
+    TEST_CHECK(ParticipantWindowTestAccess::screenCount(*fixture.window) == 0);
+    TEST_CHECK(ParticipantWindowTestAccess::frame(*fixture.window, "window-peer") == cameraImage);
+    const auto delivered = ParticipantWindowTestAccess::statistics(*fixture.window).delivered_to_qt_cpu;
+    screen.source->push(235, 2000);
+    camera.source->push(80, 2000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(*fixture.window).delivered_to_qt_cpu == delivered + 1);
+    TEST_CHECK(ParticipantWindowTestAccess::frame(*fixture.window, "window-peer").pixelColor(0, 0).red() >
+        cameraImage.pixelColor(0, 0).red());
+    std::cout << "SCREEN_SHARE_WINDOW camera/screen independent, mute/stop isolation, late open, aspect ratios PASS\n";
+}
+
+void ScreenShareWindowControls() {
+    WindowFixture fixture;
+    OpenMeeting::MeetingCoordinatorTestAccess::commitLocalStartupPrecondition(*fixture.coordinator);
+    int starts = 0, stops = 0;
+    livekit::IDesktopCapture::FrameCallback captureFrame;
+    class PendingCapture final : public livekit::IDesktopCapture {
+    public:
+        PendingCapture(int &starts, int &stops, FrameCallback &frame) : starts(starts), stops(stops), frame(frame) {}
+        void Start(livekit::DesktopSource, FrameCallback callback, EndCallback) override { ++starts; frame = std::move(callback); }
+        void Stop() override { ++stops; }
+        int &starts, &stops;
+        FrameCallback &frame;
+    };
+    auto backend = livekit::ScreenShareSession::ForRoom(fixture.room);
+    backend.capture = [&] { return std::make_unique<PendingCapture>(starts, stops, captureFrame); };
+    backend.publish = [](auto) -> asio::awaitable<void> { co_return; };
+    backend.unpublish = [](auto) -> asio::awaitable<void> { co_return; };
+    auto share = std::make_shared<livekit::ScreenShareSession>(fixture.runtime->strand(), std::move(backend),
+        [&](livekit::ScreenShareSnapshot snapshot) {
+            const auto generation = fixture.runtime->generation();
+            QMetaObject::invokeMethod(fixture.coordinator.get(), [&, generation, snapshot] {
+                OpenMeeting::MeetingCoordinatorTestAccess::screenSnapshot(*fixture.coordinator, generation, snapshot);
+            }, Qt::QueuedConnection);
+        });
+    asio::post(fixture.runtime->strand(), [&] { fixture.runtime->screenShareOnStrand() = share; });
+    fixture.pump();
+    fixture.open();
+    const std::vector<livekit::DesktopSource> sources{{livekit::DesktopSourceKind::Window, 123, "test window"}};
+    emit fixture.coordinator->screenShareSourcesReady(sources);
+    auto *picker = fixture.window->findChild<QInputDialog *>(QStringLiteral("screen-share-picker"));
+    TEST_CHECK(picker != nullptr);
+    picker->reject();
+    fixture.pump();
+    TEST_CHECK(starts == 0 && stops == 0);
+    emit fixture.coordinator->screenShareSourcesReady(sources);
+    picker = fixture.window->findChild<QInputDialog *>(QStringLiteral("screen-share-picker"));
+    TEST_CHECK(picker != nullptr);
+    picker->accept();
+    fixture.pump();
+    TEST_CHECK(starts == 1);
+    TEST_CHECK(ParticipantWindowTestAccess::shareState(*fixture.window) == livekit::ScreenShareState::Starting);
+    ParticipantWindowTestAccess::clickShareDuringRecovery(*fixture.window);
+    fixture.pump();
+    TEST_CHECK(stops == 1);
+    TEST_CHECK(ParticipantWindowTestAccess::shareState(*fixture.window) == livekit::ScreenShareState::Idle);
+    fixture.coordinator->startScreenShare(sources.front());
+    fixture.pump();
+    auto localFrame = livekit::VideoFrame::create(640, 480, livekit::VideoBufferType::I420);
+    std::fill(localFrame.data(), localFrame.data() + 640 * 480, uint8_t(200));
+    std::fill(localFrame.data() + 640 * 480, localFrame.data() + 640 * 480 * 3 / 2, uint8_t(128));
+    captureFrame(localFrame);
+    WindowPumpUntil(fixture, [&] {
+        return ParticipantWindowTestAccess::shareState(*fixture.window) == livekit::ScreenShareState::Active;
+    }, "local-screen-preview");
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::sharingBanner(*fixture.window));
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(ParticipantWindowTestAccess::localScreen(*fixture.window)).size() == QSize(640, 480));
+    fixture.coordinator->stopScreenShare();
+    fixture.pump();
+    captureFrame(localFrame); // Old capture callback cannot recreate the preview.
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(!ParticipantWindowTestAccess::localScreen(*fixture.window));
+    TEST_CHECK(!ParticipantWindowTestAccess::sharingBanner(*fixture.window));
+    OpenMeeting::MeetingCoordinatorTestAccess::screenSnapshot(*fixture.coordinator, fixture.runtime->generation() - 1,
+        {livekit::ScreenShareState::Active, livekit::ScreenShareError::None});
+    TEST_CHECK(ParticipantWindowTestAccess::shareState(*fixture.window) == livekit::ScreenShareState::Idle);
+    asio::post(fixture.runtime->strand(), [&] { share->Shutdown(); fixture.runtime->screenShareOnStrand().reset(); });
+    fixture.pump();
+    share.reset();
+    std::cout << "SCREEN_SHARE_WINDOW picker cancel/select, native start/cancel, recovery stop, stale generation PASS\n";
+}
+
+void AccountLogoutAndDuplicateLogin() {
+    const auto sendKick = [](WindowFixture &fixture, bool fromParticipant, const std::string &target, int reason) {
+        openmeeting::meeting::NotifyMeetingData notify;
+        auto *kick = notify.mutable_kickoffmeetingdata();
+        kick->set_userid(target);
+        kick->set_reasoncode(static_cast<openmeeting::meeting::KickOffReason>(reason));
+        livekit::proto::DataPacket packet;
+        if (fromParticipant) {
+            packet.set_participant_sid("PA_WINDOW");
+            packet.set_participant_identity("window-peer");
+        }
+        packet.mutable_user()->set_payload(notify.SerializeAsString());
+        const auto bytes = packet.SerializeAsString();
+        fixture.room->OnIncomingDataPacket({bytes.begin(), bytes.end()}, "", "");
+    };
+
+    // Real Room data -> Coordinator -> isolated SessionManager -> real Qt window.
+    // Match the server: send DuplicatedLogin then immediately remove the participant.
+    {
+        WindowFixture fixture(true, true);
+        fixture.open();
+        auto *window = fixture.window.release();
+        ParticipantWindowTestAccess::bindAccount(*window, *fixture.session);
+        window->setAttribute(Qt::WA_DeleteOnClose);
+        QPointer<MeetingUI::MeetingRoomWindow> guard(window);
+        int invalidations = 0;
+        QObject::connect(fixture.session.get(), &OpenMeeting::SessionManager::sessionInvalidated,
+            fixture.session.get(), [&](OpenMeeting::SessionInvalidationReason reason) {
+                TEST_CHECK(reason == OpenMeeting::SessionInvalidationReason::DuplicatedLogin);
+                ++invalidations;
+            });
+        sendKick(fixture, false, "local-user", 0);
+        sendKick(fixture, false, "local-user", 0); // repeated server delivery is idempotent
+        fixture.listener->OnDisconnected(livekit::RoomDisconnectReason::ParticipantRemoved, "");
+        fixture.pump();
+        TEST_CHECK(invalidations == 1 && !fixture.session->isLoggedIn());
+        TEST_CHECK(fixture.httpClient.token().isEmpty() && !guard);
+        TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::Idle);
+    }
+    // Neither a participant's forged packet, a different target, nor a delayed
+    // packet bound to an earlier login of the same user may clear current auth.
+    for (int scenario = 0; scenario != 3; ++scenario) {
+        WindowFixture fixture(true, true);
+        fixture.room->UpdateParticipantsForTesting(WindowParticipant("peer", true, false));
+        fixture.pump();
+        sendKick(fixture, scenario == 0, scenario == 1 ? "other-user" : "local-user", 0);
+        if (scenario == 2) fixture.session->loginAsGuest("Replacement login", "local-user");
+        fixture.pump();
+        TEST_CHECK(fixture.session->isLoggedIn() && !fixture.session->isSessionInvalidating());
+    }
+    for (bool noticeAlreadyOpen : {false, true}) {
+        WindowFixture fixture(true, true);
+        fixture.open();
+        auto *window = fixture.window.release();
+        ParticipantWindowTestAccess::bindAccount(*window, *fixture.session);
+        window->setAttribute(Qt::WA_DeleteOnClose);
+        QPointer<MeetingUI::MeetingRoomWindow> guard(window);
+        if (noticeAlreadyOpen) fixture.coordinator->kickedOff("old notification", 2);
+        QPointer<QMessageBox> notice(window->findChild<QMessageBox*>("meetingDepartureNotice"));
+        sendKick(fixture, false, "local-user", 2); // queued old server logout reply
+        fixture.session->logout(false);
+        TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::Idle);
+        TEST_CHECK(!fixture.coordinator->room()); // no waiting for server reply
+        fixture.pump();
+        TEST_CHECK(!guard && !notice);
+    }
+    std::cout << "ACCOUNT_LIFECYCLE PASS: duplicate-login/removal race, auth generation, trusted origin, logout, late reply\n";
+}
+
+void DepartureNoticeLifetime() {
+    for (const bool duplicateIdentity : {false, true}) {
+        for (const bool destroyWhileOpen : {false, true}) {
+            WindowFixture fixture;
+            fixture.open();
+            auto *window = fixture.window.release();
+            window->setAttribute(Qt::WA_DeleteOnClose);
+            QPointer<MeetingUI::MeetingRoomWindow> guard(window);
+            bool queuedCallbackRan = false;
+            QTimer::singleShot(0, window, [&] { queuedCallbackRan = true; });
+            const auto notify = [&] {
+                if (duplicateIdentity)
+                    fixture.coordinator->meetingKickOff(livekit::RoomDisconnectReason::DuplicateIdentity);
+                else
+                    fixture.coordinator->kickedOff(QStringLiteral("host removed participant"), 2);
+            };
+            notify();
+            TEST_CHECK(guard && !queuedCallbackRan); // no nested event loop
+            QPointer<QMessageBox> notice(window->findChild<QMessageBox*>("meetingDepartureNotice"));
+            TEST_CHECK(notice && notice->isVisible() && notice->testAttribute(Qt::WA_DeleteOnClose));
+            notify();
+            TEST_CHECK(window->findChildren<QMessageBox*>("meetingDepartureNotice").size() == 1);
+            fixture.coordinator->meetingLeft();
+            fixture.pump();
+            TEST_CHECK(guard && notice && queuedCallbackRan);
+            if (destroyWhileOpen) {
+                // Reproduce the attachment's queued parent destruction while
+                // the notice is still visible (session invalidation/teardown).
+                window->deleteLater();
+            } else {
+                notice->accept();
+            }
+            fixture.pump();
+            TEST_CHECK(!guard && !notice);
+        }
+    }
+    std::cout << "DEPARTURE_NOTICE PASS: kick/duplicate identity, leave-before-ack, parent deletion, deduplication\n";
+}
+
 int WindowAcceptanceMain(int argc, char **argv) {
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
@@ -1573,7 +1922,16 @@ int WindowAcceptanceMain(int argc, char **argv) {
         QDir::cleanPath(probe.fileName()).startsWith(QDir::cleanPath(settingsDirectory.path()) + "/"));
     // No Notify or account callback is emitted by this target. All Coordinator
     // instances above use explicitly injected temporary SessionManager objects.
-    if (application.arguments().contains("--pr-sec-005")) {
+    if (application.arguments().contains("--account-lifecycle")) {
+        AccountLogoutAndDuplicateLogin();
+    } else if (application.arguments().contains("--departure-notice")) {
+        DepartureNoticeLifetime();
+    } else if (application.arguments().contains("--screen-share-gpu")) {
+        ParticipantWindowTestAccess::checkGpuAspect();
+    } else if (application.arguments().contains("--screen-share")) {
+        ScreenShareWindowControls();
+        ScreenShareCameraCoexistence();
+    } else if (application.arguments().contains("--pr-sec-005")) {
         PrSec005InvitationContract();
     } else if (application.arguments().contains("--gap-full-restart")) {
         GapWindowFullRestartUnsubscribe();
@@ -1616,6 +1974,10 @@ int WindowAcceptanceMain(int argc, char **argv) {
         GapWindowDisconnectInvalidatesOldSender();
         GapWindowQueuedVideoBindingLease();
         std::cout << "AK_WINDOW_EXECUTED=15 PASSED=15 FAILED=0" << std::endl;
+        ScreenShareWindowControls();
+        ScreenShareCameraCoexistence();
+        DepartureNoticeLifetime();
+        AccountLogoutAndDuplicateLogin();
     }
     if (wrappedThread) webrtc::ThreadManager::Instance()->UnwrapCurrentThread();
     style::StopManager();
@@ -2050,9 +2412,8 @@ bool IsSessionOnlyNotify(const openmeeting::meeting::NotifyMeetingData &notify) 
 }
 
 std::vector<uint8_t> SessionOnlyNotifyBytes(const openmeeting::meeting::NotifyMeetingData &notify) {
-    // The production singleton owns native account settings. This target uses
-    // injected temporary SessionManager instances and must never enter that
-    // singleton's account-invalidation branch, including proto3's default 0.
+    // These core scenarios exercise room-only notifications. Account invalidation
+    // (including proto3's default 0) is covered by the isolated Qt window fixture.
     TEST_CHECK(IsSessionOnlyNotify(notify));
     const auto bytes = notify.SerializeAsString();
     return {bytes.begin(), bytes.end()};
@@ -2320,6 +2681,9 @@ void CancelRetiredInstancePreservesSuccessor() {
     std::cout << "retired-instance-cancellation PASS" << std::endl;
 }
 
+void SendWrappedData(Fixture &fixture, const std::string &sid, const std::string &identity,
+                     const std::vector<uint8_t> &payload);
+
 void DataEffectReentry(bool logBoundary, ReentryAction action) {
     Fixture fixture;
     AddSender(fixture);
@@ -2353,7 +2717,9 @@ void DataEffectReentry(bool logBoundary, ReentryAction action) {
         kick->set_reason("test-only");
         kick->set_reasoncode(openmeeting::meeting::KickOffReason::Logout);
     } else notify.mutable_meetinghostdata()->set_userid("reentry-peer");
-    fixture.room->OnIncomingDataPacket(SessionOnlyNotifyBytes(notify), "PA_REENTRY", "chat");
+    // Match PublishData's real wire envelope. A bare Notify has field numbers
+    // that collide with DataPacket metadata and is not a transport packet.
+    SendWrappedData(fixture, "PA_REENTRY", "reentry-peer", SessionOnlyNotifyBytes(notify));
     PumpPipeline(fixture);
     MeetingUI::participantSnapshotLogHook = {};
     TEST_CHECK(effects == 1);

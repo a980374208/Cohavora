@@ -626,7 +626,7 @@ void MeetingMainWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationRea
 }
 
 void MeetingMainWindow::onCardClicked(ActionCardType type) {
-	if (type == ActionCardType::JoinMeeting) {
+	if (type == ActionCardType::JoinMeeting || type == ActionCardType::ShareScreen) {
 		JoinMeetingDialog dlg(this);
 		if (dlg.exec() == QDialog::Accepted) {
 			auto coordinator = OpenMeeting::MeetingCoordinator::create();
@@ -655,6 +655,14 @@ void MeetingMainWindow::onCardClicked(ActionCardType type) {
 
 			auto *roomWindow = new MeetingRoomWindow(cfg, coordinator);
 			roomWindow->setAttribute(Qt::WA_DeleteOnClose);
+			if (type == ActionCardType::ShareScreen) {
+				connect(coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
+					roomWindow, [roomWindow, pending = true](bool) mutable {
+						if (!pending) return;
+						pending = false;
+						roomWindow->requestScreenShare();
+					});
+			}
 			roomWindow->show();
 		}
 	} else if (type == ActionCardType::QuickMeeting) {
@@ -686,9 +694,6 @@ void MeetingMainWindow::onCardClicked(ActionCardType type) {
 	} else if (type == ActionCardType::ScheduleMeeting) {
 		QMessageBox::information(this, QString::fromUtf8("预定会议"),
 			QString::fromUtf8("已打开会议预定面板，您可以设定会议主题、时间、周期与参会密码。"));
-	} else if (type == ActionCardType::ShareScreen) {
-		QMessageBox::information(this, QString::fromUtf8("共享屏幕"),
-			QString::fromUtf8("正在枚举可用桌面与应用视窗，可选择全屏或指定视窗进行超清低延迟屏幕共享。"));
 	} else if (type == ActionCardType::SimulcastTest) {
 		MeetingTestWindow testDlg(this);
 		testDlg.exec();

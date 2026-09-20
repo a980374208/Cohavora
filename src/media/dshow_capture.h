@@ -53,6 +53,9 @@ public:
     DShowCaptureConfig GetConfig() const;
 
 private:
+    friend class DShowCaptureTestAccess;
+    void ConfigureCaptureFormat(IAMStreamConfig* stream_config);
+    bool ApplyConnectedFormat(const AM_MEDIA_TYPE& media_type);
     bool BuildFilterGraph();
     void TeardownFilterGraph();
 

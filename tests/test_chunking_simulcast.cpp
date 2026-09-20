@@ -14,6 +14,12 @@ public:
     bool received = false;
     std::vector<uint8_t> received_payload;
     std::string received_topic;
+    int byte_streams = 0;
+
+    void OnByteStreamOpened(std::shared_ptr<livekit::ByteStreamReader>,
+                            std::shared_ptr<livekit::Participant>) override {
+        ++byte_streams;
+    }
 
     void OnDataReceived(const std::vector<uint8_t>& payload, std::shared_ptr<livekit::RemoteParticipant> participant, const std::string& topic) override {
         received = true;
@@ -54,8 +60,9 @@ int main() {
         }
 
         std::string topic = "test.large_chunking";
-        room->PublishData(large_payload, /*reliable=*/true, {}, topic);
+        TEST_CHECK(room->PublishData(large_payload, /*reliable=*/true, {}, topic));
 
+        TEST_CHECK(listener->byte_streams == 1);
         TEST_CHECK(listener->received == true);
         TEST_CHECK(listener->received_topic == topic);
         TEST_CHECK(listener->received_payload.size() == large_payload.size());

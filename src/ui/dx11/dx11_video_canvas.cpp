@@ -92,12 +92,6 @@ void Dx11VideoCanvas::showEvent(QShowEvent* e) {
 
 void Dx11VideoCanvas::resizeEvent(QResizeEvent* e) {
     QWidget::resizeEvent(e);
-    if (renderer_.is_initialized()) {
-        if (!renderer_.Resize(width(), height())) {
-            NotifyRendererUnavailable();
-            return;
-        }
-    }
     render();
 }
 
@@ -110,6 +104,18 @@ void Dx11VideoCanvas::render() {
     if (!isVisible() || width() <= 0 || height() <= 0) return;
 
     if (!EnsureRenderer()) {
+        return;
+    }
+    // DXGI presents to physical HWND pixels. Match its backbuffer to that
+    // surface on every draw, including hidden resize and DPI transitions;
+    // otherwise DXGI can independently stretch the two logical dimensions.
+    RECT client{};
+    if (!GetClientRect(reinterpret_cast<HWND>(winId()), &client)) return;
+    const int pixelWidth = client.right - client.left;
+    const int pixelHeight = client.bottom - client.top;
+    if (pixelWidth <= 0 || pixelHeight <= 0) return;
+    if (!renderer_.Resize(pixelWidth, pixelHeight)) {
+        NotifyRendererUnavailable();
         return;
     }
 
@@ -129,7 +135,15 @@ void Dx11VideoCanvas::render() {
         tiles = tiles_;
     }
 
-    for (const auto& tile : tiles) {
+    for (auto tile : tiles) {
+        const auto pixelX = [&](int x) { return static_cast<int>(std::lround(x * double(pixelWidth) / width())); };
+        const auto pixelY = [&](int y) { return static_cast<int>(std::lround(y * double(pixelHeight) / height())); };
+        const int right = pixelX(tile.x + tile.width);
+        const int bottom = pixelY(tile.y + tile.height);
+        tile.x = pixelX(tile.x);
+        tile.y = pixelY(tile.y);
+        tile.width = right - tile.x;
+        tile.height = bottom - tile.y;
         if (tile.width <= 0 || tile.height <= 0) continue;
 
         // Keep tile chrome in the same native surface: a speaking border and

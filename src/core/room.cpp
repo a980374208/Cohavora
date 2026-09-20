@@ -26,6 +26,16 @@ namespace livekit {
 
 namespace {
 
+TrackSource TrackSourceFromProto(proto::TrackSource source) {
+    switch (source) {
+    case proto::TrackSource::CAMERA: return TrackSource::Camera;
+    case proto::TrackSource::MICROPHONE: return TrackSource::Microphone;
+    case proto::TrackSource::SCREEN_SHARE: return TrackSource::ScreenShareVideo;
+    case proto::TrackSource::SCREEN_SHARE_AUDIO: return TrackSource::ScreenShareAudio;
+    default: return TrackSource::Unknown;
+    }
+}
+
 RoomInfo RoomInfoFromProto(const proto::Room& room) {
     RoomInfo info;
     info.sid = room.sid();
@@ -1643,6 +1653,10 @@ bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
             std::chrono::system_clock::now().time_since_epoch()).count());
         header->set_topic(topic);
         header->set_total_length(payload.size());
+        // A binary DataStream must carry its header oneof even when it has no
+        // filename. The receiver (and official SDKs) reject untyped headers.
+        header->set_mime_type("application/octet-stream");
+        header->mutable_byte_header();
 
         std::vector<uint8_t> header_bytes(header_pkt.ByteSizeLong());
         header_pkt.SerializeToArray(header_bytes.data(), static_cast<int>(header_bytes.size()));
@@ -3840,7 +3854,8 @@ void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
         } else if (track->kind() == TrackKind::Video) {
             auto video_track = std::dynamic_pointer_cast<LocalVideoTrack>(track);
             if (video_track && video_track->source()) {
-                auto rtc_src = RtcVideoSource::Create(video_track->source());
+                auto rtc_src = RtcVideoSource::Create(video_track->source(),
+                    video_track->source() && video_track->Track::source() == TrackSource::ScreenShareVideo);
                 auto rtc_video_track = WebRTCManager::Instance().factory()->CreateVideoTrack(rtc_src, track->name());
                 track->set_rtc_track(rtc_video_track);
                 rtc_track = rtc_video_track;
@@ -4013,7 +4028,8 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
         } else if (track->kind() == TrackKind::Video) {
             auto video_track = std::dynamic_pointer_cast<LocalVideoTrack>(track);
             if (video_track && video_track->source()) {
-                auto rtc_src = RtcVideoSource::Create(video_track->source());
+                auto rtc_src = RtcVideoSource::Create(video_track->source(),
+                    video_track->source() && video_track->Track::source() == TrackSource::ScreenShareVideo);
                 rtc_track = WebRTCManager::Instance().factory()->CreateVideoTrack(
                     rtc_src, track->name());
             }
@@ -5757,16 +5773,22 @@ void Room::HandleSignalMessage(
         }
 
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
+        webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> quality_track;
         {
             std::lock_guard lock(room_mutex_);
             if (!IsSignalGenerationCurrentLocked(event_generation)) return;
             pub_pc = publisher_pc_;
+            const auto publication = local_participant_ ? local_participant_->get_publication(track_sid) : nullptr;
+            if (publication && publication->track()) quality_track = publication->track()->rtc_track();
         }
 
-        if (pub_pc) {
+        // Flutter dispatches a quality update to its publication's local track.
+        // A screen update must never switch the camera's encodings off.
+        if (pub_pc && quality_track) {
             auto senders = pub_pc->GetSenders();
             for (auto& sender : senders) {
-                if (!sender || !sender->track() || sender->track()->kind() != webrtc::MediaStreamTrackInterface::kVideoKind) {
+                if (!sender || sender->track() != quality_track ||
+                    quality_track->kind() != webrtc::MediaStreamTrackInterface::kVideoKind) {
                     continue;
                 }
 
@@ -5788,19 +5810,15 @@ void Room::HandleSignalMessage(
                 bool params_changed = false;
                 std::string active_summary;
 
-                for (const auto& [quality, enabled] : *target_qualities) {
-                    std::string target_rid;
-                    if (quality == livekit::proto::VideoQuality::HIGH) target_rid = "f";
-                    else if (quality == livekit::proto::VideoQuality::MEDIUM) target_rid = "h";
-                    else if (quality == livekit::proto::VideoQuality::LOW) target_rid = "q";
-
-                    for (auto& enc : parameters.encodings) {
-                        if (enc.rid == target_rid || (parameters.encodings.size() == 1 && target_rid == "f")) {
-                            if (enc.active != enabled) {
-                                enc.active = enabled;
-                                params_changed = true;
-                            }
-                        }
+                for (auto& enc : parameters.encodings) {
+                    // Match Flutter setPublishingLayersForSender: an omitted
+                    // RID is q/LOW. Do not apply HIGH again to a single q layer.
+                    const auto quality = enc.rid.empty() || enc.rid == "q" ? proto::VideoQuality::LOW
+                        : enc.rid == "h" ? proto::VideoQuality::MEDIUM : proto::VideoQuality::HIGH;
+                    const auto requested = target_qualities->find(quality);
+                    if (requested != target_qualities->end() && enc.active != requested->second) {
+                        enc.active = requested->second;
+                        params_changed = true;
                     }
                 }
 
@@ -5999,7 +6017,8 @@ void Room::UpdateParticipants(
                     auto pub = remote->get_publication(t_info.sid());
                     if (!pub) {
                         TrackKind kind = (t_info.type() == proto::TrackType::AUDIO) ? TrackKind::Audio : TrackKind::Video;
-                        auto remote_track = std::make_shared<Track>(t_info.sid(), t_info.name(), kind);
+                        auto remote_track = std::make_shared<Track>(t_info.sid(), t_info.name(), kind,
+                            TrackSourceFromProto(t_info.source()));
                         remote_track->set_muted(t_info.muted());
                         // RemoteParticipant owns the actual controllable
                         // publication. Do not create a parallel controller by
@@ -6019,6 +6038,9 @@ void Room::UpdateParticipants(
                         newly_published_tracks.push_back({remote, pub});
                         Log("TRACK", "NEW_TRACK", "参会人 [" + remote->identity() + "] 发布新 Track: " + t_info.name() + " (" + (kind == TrackKind::Video ? "VIDEO" : "AUDIO") + ", SID: " + t_info.sid() + ", Muted: " + (t_info.muted() ? "true" : "false") + ")");
                     } else {
+                        // Metadata can arrive after an early RTC binding. Its
+                        // source is projected to the same track read by render.
+                        if (pub->track()) pub->track()->set_source(TrackSourceFromProto(t_info.source()));
                         // 检测静音/画面开关状态变化
                         if (pub->track() && pub->track()->muted() != t_info.muted()) {
                             pub->track()->set_muted(t_info.muted());

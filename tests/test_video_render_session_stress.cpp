@@ -5,6 +5,7 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <map>
 
 #include "core/track.h"
 #include "render/owned_i420_frame.h"
@@ -30,6 +31,33 @@ livekit::render::OwnedI420Frame::Ptr MakeFrame(uint8_t y_value) {
 } // namespace
 
 int main() {
+    {
+        livekit::render::VideoRenderSession share_session({}, 2);
+        std::map<std::string, int> luminance;
+        share_session.UseDx11Backend([&](const std::string& key, livekit::render::OwnedI420Frame::Ptr frame) {
+            luminance[key] = frame->data_y()[0];
+        });
+        auto camera = std::make_shared<livekit::Track>("TR_CAMERA", "camera",
+            livekit::TrackKind::Video, livekit::TrackSource::Camera);
+        auto screen = std::make_shared<livekit::Track>("TR_SCREEN", "screen",
+            livekit::TrackKind::Video, livekit::TrackSource::ScreenShareVideo);
+        share_session.AttachRemoteTrack(camera, "same-participant", "camera-view");
+        share_session.AttachRemoteTrack(screen, "same-participant", "screen-view");
+        camera->notifyI420VideoFrame(MakeFrame(30));
+        screen->notifyI420VideoFrame(MakeFrame(200));
+        share_session.RenderLatestFrames();
+        if (!Expect(luminance.size() == 2 && luminance["camera-view"] == 30 && luminance["screen-view"] == 200,
+                    "camera and screen must render independently for the same participant")) return 1;
+        share_session.RemoveTrack("TR_SCREEN");
+        luminance.clear();
+        camera->notifyI420VideoFrame(MakeFrame(40));
+        screen->notifyI420VideoFrame(MakeFrame(220));
+        share_session.RenderLatestFrames();
+        if (!Expect(luminance.size() == 1 && luminance["camera-view"] == 40,
+                    "screen stop must preserve camera and reject late screen frames")) return 1;
+        share_session.RemoveTracksForIdentity("same-participant");
+        if (!Expect(share_session.statistics().attached_track_count == 0, "departure removes all participant tracks")) return 1;
+    }
     constexpr int kTrackCount = 9;
     constexpr int kFramesPerTrack = 2000;
 

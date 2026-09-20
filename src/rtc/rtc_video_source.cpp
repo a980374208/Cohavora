@@ -11,20 +11,22 @@
 
 namespace livekit {
 
-webrtc::scoped_refptr<RtcVideoSource> RtcVideoSource::Create(std::shared_ptr<VideoSource> source) {
-    return webrtc::make_ref_counted<RtcVideoSource>(source);
+webrtc::scoped_refptr<RtcVideoSource> RtcVideoSource::Create(std::shared_ptr<VideoSource> source, bool screencast) {
+    return webrtc::make_ref_counted<RtcVideoSource>(source, screencast);
 }
 
-RtcVideoSource::RtcVideoSource(std::shared_ptr<VideoSource> source)
-    : lk_source_(source) {
+RtcVideoSource::RtcVideoSource(std::shared_ptr<VideoSource> source, bool screencast)
+    : lk_source_(source), screencast_(screencast) {
     if (lk_source_) {
-        lk_source_->addSink([this](const VideoFrame& frame, const VideoCaptureOptions& options) {
+        subscription_ = lk_source_->subscribe([this](const VideoFrame& frame, const VideoCaptureOptions& options) {
             OnVideoFrame(frame, options);
         });
     }
 }
 
-RtcVideoSource::~RtcVideoSource() = default;
+RtcVideoSource::~RtcVideoSource() {
+    if (subscription_) subscription_->disconnect();
+}
 
 void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOptions& options) {
     int width = frame.width();
@@ -106,7 +108,7 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
         }
     }
 
-    if (width > 1280) {
+    if (!screencast_ && width > 1280) {
         int target_w = 1280;
         int target_h = (height * 1280) / width;
         webrtc::scoped_refptr<webrtc::I420Buffer> scaled_buffer = webrtc::I420Buffer::Create(target_w, target_h);

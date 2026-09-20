@@ -23,6 +23,8 @@
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QMenu>
+#include <QtWidgets/QMessageBox>
+#include <QtCore/QPointer>
 #include "media/camera_source_manager.h"
 #include <QtWidgets/QSlider>
 #include "src/ui/audio_visualizer_widget.h"
@@ -78,7 +80,8 @@ enum class InvitationMode {
 class VideoTileWidget : public Ui::RpWidget {
 	Q_OBJECT
 public:
-	explicit VideoTileWidget(const QString &displayName, bool isLocal, QWidget *parent = nullptr);
+	explicit VideoTileWidget(const QString &displayName, bool isLocal, QWidget *parent = nullptr,
+		bool isScreenShare = false);
 	~VideoTileWidget() override = default;
 
 	void setDisplayName(const QString &name);
@@ -109,6 +112,8 @@ public:
 
 	QString identity() const { return _identity; }
 	void setIdentity(const QString &id) { _identity = id; }
+	QString renderKey() const { return _renderKey.isEmpty() ? _identity : _renderKey; }
+	void setRenderKey(const QString &key) { _renderKey = key; }
 
 	// PIP 小窗交互
 	void setPipMode(bool pip) { _isPip = pip; update(); }
@@ -142,6 +147,8 @@ private:
 	void setupVolumeControls();
 
 	QString _identity;
+	QString _renderKey;
+	bool _isScreenShare = false;
 	QString _displayName;
 	bool _isLocal = false;
 	bool _isVideoActive = false;
@@ -258,6 +265,7 @@ public:
 
 	void setVideoEnabled(bool enabled);
 	bool isVideoEnabled() const { return _videoEnabled; }
+	void setScreenShareState(livekit::ScreenShareState state);
 
 	void setParticipantCount(int count);
 	void setChatUnreadCount(int count);
@@ -302,6 +310,11 @@ protected:
 private:
 	friend class ::CameraOwnerTestAccess;
 	friend class ::ParticipantWindowTestAccess;
+	bool canStopScreenShare() const {
+		using State = livekit::ScreenShareState;
+		return _screenShareState == State::Starting || _screenShareState == State::Active ||
+			_screenShareState == State::StopFailed;
+	}
 
 	struct ToolItem {
 		int id;
@@ -315,6 +328,7 @@ private:
 	bool _audioMuted = false;
 	bool _speakerMuted = false;
 	bool _videoEnabled = true;
+	livekit::ScreenShareState _screenShareState = livekit::ScreenShareState::Idle;
 	int _participantCount = 1;
 	int _chatUnreadCount = 0;
 	bool _isRecording = false;
@@ -370,6 +384,7 @@ public:
 	explicit MeetingRoomWindow(const Config &config,
 	                           std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator = nullptr,
 	                           QWidget *parent = nullptr);
+	void requestScreenShare();
 	~MeetingRoomWindow() override;
 
 	void receiveRemoteVideoFrame(const QImage &frame, const QString &user);
@@ -434,11 +449,18 @@ private:
 	void fallBackToQtCpuBackend();
 	void syncDx11CanvasLayout(const std::vector<VideoTileWidget*> &tiles);
 	void setupCoordinatorBindings();
+	void showDepartureNotice(const QString &title, const QString &message,
+		QMessageBox::Icon icon = QMessageBox::Warning);
 	void setupInvitationBinding();
 	void handleInviteClicked();
 	void showInvitationNotice(bool success, const QString &title, const QString &message);
 	void restoreParticipantPresentations();
 	void applyParticipantPresentation(const OpenMeeting::ParticipantPresentation &presentation);
+	void attachRemoteVideo(const OpenMeeting::ParticipantPresentation &presentation,
+		const OpenMeeting::RemoteVideoTrackPresentation &track);
+	void removeRemoteVideo(const QString &trackSid);
+	VideoTileWidget *remoteVideoTile(const QString &trackSid) const;
+	void applyScreenShareSnapshot(livekit::ScreenShareSnapshot snapshot);
 	void applyRemoteParticipantJoined(const QString &identity, const QString &name,
 		const OpenMeeting::ParticipantPresentation *presentation);
 	void setupCameraCompletionOwner(OpenMeeting::SessionManager &sessionManager);
@@ -464,6 +486,7 @@ private:
 	std::atomic<bool> _usingDx11Backend{false};
 	bool _dx11BackendActivationAttempted = false;
 	bool _closingForSessionInvalidation = false;
+	QPointer<QMessageBox> _departureNotice;
 	VideoViewMode _viewMode = VideoViewMode::Grid;
 
 	// 参会状态
@@ -476,6 +499,16 @@ private:
 	livekit::dx11::Dx11VideoCanvas *_dx11Canvas = nullptr;
 	VideoTileWidget *_localTile = nullptr;
 	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteTiles;
+	struct RemoteVideoBinding {
+		QString identity;
+		bool screen = false;
+		std::weak_ptr<livekit::Track> track;
+	};
+	std::map<QString, RemoteVideoBinding> _remoteVideoBindings;
+	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteScreenTiles;
+	std::unique_ptr<VideoTileWidget> _localScreenTile;
+	std::shared_ptr<livekit::render::VideoRenderRouter> _localScreenPreview;
+	QLabel *_screenShareBanner = nullptr;
 	QLabel *_inviteHintBanner = nullptr;
 	QLabel *_recoveryBanner = nullptr;
 	QTimer *_recoveryBannerFadeTimer = nullptr;

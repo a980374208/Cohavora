@@ -8,6 +8,9 @@
 #include <chrono>
 #include <iostream>
 #include <atomic>
+#include <algorithm>
+#include <limits>
+#include <tuple>
 
 using Microsoft::WRL::ComPtr;
 
@@ -78,6 +81,104 @@ static void FreeMediaType(AM_MEDIA_TYPE& mt) {
     }
 }
 
+namespace {
+struct MediaTypeDeleter {
+    void operator()(AM_MEDIA_TYPE* type) const {
+        if (!type) return;
+        FreeMediaType(*type);
+        CoTaskMemFree(type);
+    }
+};
+using OwnedMediaType = std::unique_ptr<AM_MEDIA_TYPE, MediaTypeDeleter>;
+
+BITMAPINFOHEADER* BitmapHeader(const AM_MEDIA_TYPE& type) {
+    if (!type.pbFormat || type.majortype != MEDIATYPE_Video) return nullptr;
+    if (type.formattype == FORMAT_VideoInfo && type.cbFormat >= sizeof(VIDEOINFOHEADER))
+        return &reinterpret_cast<VIDEOINFOHEADER*>(type.pbFormat)->bmiHeader;
+    if (type.formattype == FORMAT_VideoInfo2 && type.cbFormat >= sizeof(VIDEOINFOHEADER2))
+        return &reinterpret_cast<VIDEOINFOHEADER2*>(type.pbFormat)->bmiHeader;
+    return nullptr;
+}
+
+REFERENCE_TIME* FrameInterval(const AM_MEDIA_TYPE& type) {
+    if (!BitmapHeader(type)) return nullptr;
+    if (type.formattype == FORMAT_VideoInfo)
+        return &reinterpret_cast<VIDEOINFOHEADER*>(type.pbFormat)->AvgTimePerFrame;
+    return &reinterpret_cast<VIDEOINFOHEADER2*>(type.pbFormat)->AvgTimePerFrame;
+}
+
+bool ValidDimensions(const BITMAPINFOHEADER* bitmap) {
+    return bitmap && bitmap->biWidth > 0 && bitmap->biHeight != 0 &&
+        bitmap->biHeight != (std::numeric_limits<LONG>::min)() &&
+        int64_t(bitmap->biWidth) * std::abs(int64_t(bitmap->biHeight)) <=
+            (std::numeric_limits<int>::max)() / 4;
+}
+} // namespace
+
+void DShowVideoCapture::ConfigureCaptureFormat(IAMStreamConfig* stream_config) {
+    int count = 0, size = 0;
+    if (FAILED(stream_config->GetNumberOfCapabilities(&count, &size)) ||
+        size < int(sizeof(VIDEO_STREAM_CONFIG_CAPS))) return;
+
+    struct Candidate {
+        OwnedMediaType type;
+        std::tuple<int64_t, bool, int64_t> rank;
+    };
+    std::vector<Candidate> candidates;
+    std::vector<BYTE> caps_buffer(size);
+    for (int i = 0; i < count; ++i) {
+        AM_MEDIA_TYPE* raw = nullptr;
+        const auto hr = stream_config->GetStreamCaps(i, &raw, caps_buffer.data());
+        OwnedMediaType type(raw);
+        if (FAILED(hr) || !type) continue;
+        const auto* bitmap = BitmapHeader(*type);
+        if (!ValidDimensions(bitmap)) continue;
+        const auto* caps = reinterpret_cast<const VIDEO_STREAM_CONFIG_CAPS*>(caps_buffer.data());
+        auto* interval = FrameInterval(*type);
+        const auto requested_interval = config_.fps > 0 ? 10000000LL / config_.fps : *interval;
+        if (caps->MinFrameInterval > 0 && caps->MaxFrameInterval >= caps->MinFrameInterval)
+            *interval = std::clamp<REFERENCE_TIME>(requested_interval, caps->MinFrameInterval, caps->MaxFrameInterval);
+        const auto distance = std::abs(int64_t(bitmap->biWidth) - config_.width) +
+            std::abs(std::abs(int64_t(bitmap->biHeight)) - config_.height);
+        const bool different_format = config_.preferred_format != DShowPixelFormat::Unknown &&
+            MediaConverters::SubtypeToPixelFormat(type->subtype) != config_.preferred_format;
+        candidates.push_back({std::move(type), {distance, different_format, std::abs(*interval - requested_interval)}});
+    }
+    std::stable_sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) { return a.rank < b.rank; });
+    for (const auto& candidate : candidates) {
+        // Use the device's complete media type. Rewriting only width/height or
+        // subtype can make virtual cameras stretch pixels into an invented mode.
+        const auto hr = stream_config->SetFormat(candidate.type.get());
+        if (SUCCEEDED(hr)) {
+            const auto* bitmap = BitmapHeader(*candidate.type);
+            spdlog::info("[DShowVideoCapture] Requested {}x{}, selected supported {}x{} ({})",
+                config_.width, config_.height, bitmap->biWidth, std::abs(bitmap->biHeight),
+                MediaConverters::PixelFormatToString(MediaConverters::SubtypeToPixelFormat(candidate.type->subtype)));
+            return;
+        }
+        spdlog::warn("[DShowVideoCapture] Supported format rejected, hr=0x{:08x}", static_cast<uint32_t>(hr));
+    }
+    // Leave the driver default intact when none of its advertised modes works.
+}
+
+bool DShowVideoCapture::ApplyConnectedFormat(const AM_MEDIA_TYPE& type) {
+    const auto* bitmap = BitmapHeader(type);
+    if (!ValidDimensions(bitmap)) return false;
+    const auto format = MediaConverters::SubtypeToPixelFormat(type.subtype);
+    if (format != DShowPixelFormat::NV12 && format != DShowPixelFormat::YUY2 &&
+        format != DShowPixelFormat::RGB24 && format != DShowPixelFormat::ARGB32) return false;
+    const int width = bitmap->biWidth, height = std::abs(bitmap->biHeight);
+    if ((format == DShowPixelFormat::NV12 || format == DShowPixelFormat::YUY2 ||
+         config_.output_format == VideoBufferType::NV12) && ((width & 1) || (height & 1))) return false;
+    actual_width_ = width;
+    actual_height_ = height;
+    negotiated_format_ = format;
+    // YUV formats are top-down regardless of the sign of biHeight.
+    const bool rgb = format == DShowPixelFormat::RGB24 || format == DShowPixelFormat::ARGB32;
+    flip_vertically_ = (rgb && bitmap->biHeight > 0) ^ config_.flip_vertically;
+    return true;
+}
+
 std::shared_ptr<DShowVideoCapture> DShowVideoCapture::Create() {
     return std::make_shared<DShowVideoCapture>();
 }
@@ -109,8 +210,8 @@ bool DShowVideoCapture::Init(const DShowCaptureConfig& config, std::shared_ptr<V
     }
     config_ = config;
     video_source_ = video_source;
-    actual_width_ = config.width;
-    actual_height_ = config.height;
+    actual_width_ = 0;
+    actual_height_ = 0;
     flip_vertically_ = config.flip_vertically;
     return true;
 }
@@ -227,28 +328,7 @@ bool DShowVideoCapture::BuildFilterGraph() {
         }
     }
 
-    if (stream_config && config_.width > 0 && config_.height > 0) {
-        AM_MEDIA_TYPE* pmt = nullptr;
-        if (SUCCEEDED(stream_config->GetFormat(&pmt)) && pmt) {
-            if (pmt->formattype == FORMAT_VideoInfo && pmt->cbFormat >= sizeof(VIDEOINFOHEADER)) {
-                auto* vih = reinterpret_cast<VIDEOINFOHEADER*>(pmt->pbFormat);
-                vih->bmiHeader.biWidth = config_.width;
-                vih->bmiHeader.biHeight = config_.height;
-                if (config_.fps > 0) {
-                    vih->AvgTimePerFrame = 10000000LL / config_.fps;
-                }
-                if (config_.preferred_format != DShowPixelFormat::Unknown) {
-                    GUID sub = MediaConverters::PixelFormatToSubtype(config_.preferred_format);
-                    if (sub != GUID_NULL) {
-                        pmt->subtype = sub;
-                    }
-                }
-                stream_config->SetFormat(pmt);
-            }
-            FreeMediaType(*pmt);
-            CoTaskMemFree(pmt);
-        }
-    }
+    if (stream_config) ConfigureCaptureFormat(stream_config.Get());
 
     // 创建 SampleGrabber Filter
     hr = CoCreateInstance(CLSID_SampleGrabber_Local, nullptr, CLSCTX_INPROC_SERVER,
@@ -348,17 +428,15 @@ bool DShowVideoCapture::BuildFilterGraph() {
     // 获取协商后的实际格式与分辨率
     AM_MEDIA_TYPE connected_mt;
     ZeroMemory(&connected_mt, sizeof(AM_MEDIA_TYPE));
-    if (SUCCEEDED(sample_grabber->GetConnectedMediaType(&connected_mt))) {
-        negotiated_format_ = MediaConverters::SubtypeToPixelFormat(connected_mt.subtype);
-        if (connected_mt.formattype == FORMAT_VideoInfo && connected_mt.cbFormat >= sizeof(VIDEOINFOHEADER)) {
-            auto* vih = reinterpret_cast<VIDEOINFOHEADER*>(connected_mt.pbFormat);
-            actual_width_ = vih->bmiHeader.biWidth;
-            actual_height_ = std::abs(vih->bmiHeader.biHeight);
-            // DirectShow 中 biHeight > 0 表示图像为自下而上存储 (倒置)
-            flip_vertically_ = (vih->bmiHeader.biHeight > 0) ^ config_.flip_vertically;
-        }
-        FreeMediaType(connected_mt);
+    hr = sample_grabber->GetConnectedMediaType(&connected_mt);
+    const bool valid_format = SUCCEEDED(hr) && ApplyConnectedFormat(connected_mt);
+    FreeMediaType(connected_mt);
+    if (!valid_format) {
+        spdlog::error("[DShowVideoCapture] Invalid or unsupported connected media type");
+        return false;
     }
+    spdlog::info("[DShowVideoCapture] Connected {}x{} ({})", actual_width_, actual_height_,
+        MediaConverters::PixelFormatToString(negotiated_format_));
 
     graph_builder_.As(&media_control_);
     graph_builder_.As(&media_event_);
@@ -433,11 +511,29 @@ void DShowVideoCapture::Stop() {
 void DShowVideoCapture::OnRawFrameReceived(double sample_time, const uint8_t* buffer, long buffer_len) {
     if (!buffer || buffer_len <= 0 || !video_source_) return;
 
-    captured_frames_count_.fetch_add(1);
-
     int w = actual_width_;
     int h = actual_height_;
     if (w <= 0 || h <= 0) return;
+
+    size_t row_bytes = 0, stride = 0, required = 0;
+    switch (negotiated_format_) {
+        case DShowPixelFormat::NV12: required = size_t(w) * h * 3 / 2; break;
+        case DShowPixelFormat::YUY2: row_bytes = stride = size_t(w) * 2; break;
+        case DShowPixelFormat::RGB24: row_bytes = size_t(w) * 3; stride = (row_bytes + 3) & ~size_t(3); break;
+        case DShowPixelFormat::ARGB32: row_bytes = stride = size_t(w) * 4; break;
+        default: return;
+    }
+    if (stride) required = stride * h;
+    if (size_t(buffer_len) < required) return;
+    if (config_.output_format != VideoBufferType::RGBA && config_.output_format != VideoBufferType::NV12) return;
+    // RGB DIB rows may include padding; the converters consume packed rows.
+    std::vector<uint8_t> packed;
+    if (stride != row_bytes) {
+        packed.resize(row_bytes * h);
+        for (int y = 0; y < h; ++y)
+            std::memcpy(packed.data() + y * row_bytes, buffer + y * stride, row_bytes);
+        buffer = packed.data();
+    }
 
     // 输出目标 VideoFrame
     VideoFrame frame;
@@ -459,8 +555,7 @@ void DShowVideoCapture::OnRawFrameReceived(double sample_time, const uint8_t* bu
                 MediaConverters::ConvertARGB32ToRGBA(buffer, dst_rgba, w, h, flip_vertically_);
                 break;
             default:
-                MediaConverters::ConvertRGB24ToRGBA(buffer, dst_rgba, w, h, flip_vertically_);
-                break;
+                return;
         }
     } else if (config_.output_format == VideoBufferType::NV12) {
         frame = VideoFrame::create(w, h, VideoBufferType::NV12);
@@ -471,9 +566,12 @@ void DShowVideoCapture::OnRawFrameReceived(double sample_time, const uint8_t* bu
         } else if (negotiated_format_ == DShowPixelFormat::YUY2) {
             MediaConverters::ConvertYUY2ToNV12(buffer, dst_nv12, w, h);
         } else {
-            // RGB24 -> NV12
+            // RGB -> NV12
             std::vector<uint8_t> temp_rgba(w * h * 4);
-            MediaConverters::ConvertRGB24ToRGBA(buffer, temp_rgba.data(), w, h, flip_vertically_);
+            if (negotiated_format_ == DShowPixelFormat::ARGB32)
+                MediaConverters::ConvertARGB32ToRGBA(buffer, temp_rgba.data(), w, h, flip_vertically_);
+            else
+                MediaConverters::ConvertRGB24ToRGBA(buffer, temp_rgba.data(), w, h, flip_vertically_);
             // Convert RGBA -> NV12 Y plane
             uint8_t* y_p = dst_nv12;
             uint8_t* uv_p = dst_nv12 + (w * h);
@@ -500,6 +598,7 @@ void DShowVideoCapture::OnRawFrameReceived(double sample_time, const uint8_t* bu
     }
     options.rotation = VideoRotation::VIDEO_ROTATION_0;
 
+    captured_frames_count_.fetch_add(1);
     video_source_->captureFrame(frame, options);
 }
 

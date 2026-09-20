@@ -28,6 +28,7 @@ enum class SessionInvalidationReason {
     TokenExpired,
     TokenInvalid,
     ServerLogout,
+    UserLogout,
 };
 
 class SessionManager : public QObject {

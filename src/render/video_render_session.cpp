@@ -16,7 +16,8 @@ VideoRenderSession::~VideoRenderSession() {
 }
 
 void VideoRenderSession::AttachRemoteTrack(const std::shared_ptr<Track>& track,
-                                           const std::string& identity) {
+                                           const std::string& identity,
+                                           const std::string& render_key) {
     if (!track || track->kind() != TrackKind::Video || identity.empty()) {
         return;
     }
@@ -67,7 +68,8 @@ void VideoRenderSession::AttachRemoteTrack(const std::shared_ptr<Track>& track,
         return;
     }
 
-    tracks_.emplace(track_id, TrackBinding{identity, track, binding_generation, std::move(subscription)});
+    tracks_.emplace(track_id, TrackBinding{identity, render_key.empty() ? identity : render_key,
+        track, binding_generation, std::move(subscription)});
 }
 
 void VideoRenderSession::RemoveTrack(const std::string& track_id) {
@@ -100,12 +102,13 @@ void VideoRenderSession::RenderLatestFrames() {
 
     for (const auto& [track_id, binding] : tracks_) {
         auto frame = state->router->TakeLatest(track_id, state->generation);
-        if (!frame) {
+        const auto track = binding.track.lock();
+        if (!frame || !track || track->muted()) {
             continue;
         }
         if (backend_ == Backend::Dx11) {
             if (i420_frame_ready_callback_) {
-                i420_frame_ready_callback_(binding.identity, std::move(frame));
+                i420_frame_ready_callback_(binding.render_key, std::move(frame));
                 state->delivered_to_dx11.fetch_add(1, std::memory_order_relaxed);
             }
             continue;
@@ -114,7 +117,7 @@ void VideoRenderSession::RenderLatestFrames() {
         if (frame_ready_callback_) {
             QImage image = cpu_renderer_.Convert(*frame);
             if (!image.isNull()) {
-                frame_ready_callback_(binding.identity, image);
+                frame_ready_callback_(binding.render_key, image);
                 state->delivered_to_qt_cpu.fetch_add(1, std::memory_order_relaxed);
             } else {
                 state->qt_cpu_conversion_failures.fetch_add(1, std::memory_order_relaxed);

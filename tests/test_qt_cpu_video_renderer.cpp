@@ -33,6 +33,18 @@ livekit::render::OwnedI420Frame::Ptr MakeFrame(uint8_t y_value,
 
 int main() {
     livekit::render::QtCpuVideoRenderer renderer;
+    const uint8_t rotatedY[] = {16, 16, 235, 235, 16, 16, 235, 235};
+    const uint8_t rotatedUV[] = {128, 128};
+    for (auto rotation : {livekit::VideoRotation::VIDEO_ROTATION_90, livekit::VideoRotation::VIDEO_ROTATION_270}) {
+        auto frame = livekit::render::OwnedI420Frame::CopyFromPlanes(
+            4, 2, rotatedY, 4, rotatedUV, 2, rotatedUV, 2, 0, rotation);
+        const auto image = renderer.Convert(*frame);
+        if (!Expect(image.size() == QSize(2, 4), "CPU fallback must preserve the rotated display aspect ratio")) return 1;
+        const bool clockwise = rotation == livekit::VideoRotation::VIDEO_ROTATION_90;
+        if (!Expect((image.pixelColor(0, 0).red() < 10) == clockwise &&
+                    (image.pixelColor(0, 3).red() > 245) == clockwise,
+                    "CPU fallback must rotate pixels along with the display dimensions")) return 1;
+    }
 
     auto black = MakeFrame(16, 128, 128);
     auto white = MakeFrame(235, 128, 128);

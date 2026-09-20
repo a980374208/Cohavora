@@ -138,8 +138,8 @@ public:
     std::string sid() const { return sid_; }
     std::string name() const { return name_; }
     TrackKind kind() const { return kind_; }
-    TrackSource source() const { return source_; }
-    void set_source(TrackSource source) { source_ = source; }
+    TrackSource source() const { return source_.load(std::memory_order_relaxed); }
+    void set_source(TrackSource source) { source_.store(source, std::memory_order_relaxed); }
     bool muted() const { return muted_.load(std::memory_order_relaxed); }
 
     void set_muted(bool muted) {
@@ -244,7 +244,7 @@ private:
     std::string sid_;
     std::string name_;
     TrackKind kind_;
-    TrackSource source_;
+    std::atomic<TrackSource> source_;
     std::atomic<bool> muted_;
     double volume_ = 1.0;
 

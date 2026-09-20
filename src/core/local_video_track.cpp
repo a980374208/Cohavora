@@ -160,8 +160,8 @@ std::shared_ptr<LocalVideoTrack> LocalVideoTrack::createLocalVideoTrack(const st
     std::string sid = "TR_VID_" + name;
     auto track = std::make_shared<LocalVideoTrack>(sid, name, source, source_type, options);
     if (source) {
-        source->addSink([track](const VideoFrame& frame, const VideoCaptureOptions& cap_options) {
-            if (!track->muted()) {
+        source->addSink([weak = std::weak_ptr<LocalVideoTrack>(track)](const VideoFrame& frame, const VideoCaptureOptions& cap_options) {
+            if (auto track = weak.lock(); track && !track->muted()) {
                 track->notifyVideoFrame(frame, cap_options);
             }
         });
@@ -171,7 +171,7 @@ std::shared_ptr<LocalVideoTrack> LocalVideoTrack::createLocalVideoTrack(const st
             // MediaStreamTrack proxies are created and primarily accessed on
             // the PeerConnection signaling thread.
             WebRTCManager::Instance().signaling_thread()->BlockingCall([&]() {
-                auto rtc_src = RtcVideoSource::Create(source);
+                auto rtc_src = RtcVideoSource::Create(source, source_type == TrackSource::ScreenShareVideo);
                 track->rtc_source_ = rtc_src;
                 auto rtc_video_track = factory->CreateVideoTrack(rtc_src, name);
                 track->set_rtc_track(rtc_video_track);
