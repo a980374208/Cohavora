@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <vector>
 #include <cmath>
 #include "audio_apm.h"
@@ -18,7 +18,7 @@ int main() {
     config.agc_mode = livekit::GainControlMode::AdaptiveDigital;
 
     auto apm = livekit::AudioApmProcessor::Create(config);
-    assert(apm != nullptr);
+    TEST_CHECK(apm != nullptr);
     std::cout << "  [PASS] Test 1: AudioApmProcessor created and configured with 3A algorithms." << std::endl;
 
     // Test 2: Process 10ms Capture Audio Frame with Noise & Low Gain
@@ -40,9 +40,9 @@ int main() {
         livekit::AudioFrame raw_frame(raw_pcm, sample_rate, num_channels, samples_per_channel);
         livekit::AudioFrame clean_frame = apm->ProcessCaptureFrame(raw_frame);
 
-        assert(clean_frame.data().size() == raw_frame.data().size());
-        assert(clean_frame.sampleRate() == sample_rate);
-        assert(clean_frame.numChannels() == num_channels);
+        TEST_CHECK(clean_frame.data().size() == raw_frame.data().size());
+        TEST_CHECK(clean_frame.sampleRate() == sample_rate);
+        TEST_CHECK(clean_frame.numChannels() == num_channels);
 
         std::cout << "  [PASS] Test 2: 10ms 48kHz audio capture frame processed via APM 3A successfully!" << std::endl;
     }

@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <vector>
 #include <cmath>
 #include "participant.h"
@@ -71,16 +71,16 @@ void TestActiveSpeakerUpdateSignal() {
 
     room->HandleActiveSpeakerUpdateForTesting(speaker_update);
 
-    assert(listener->event_count == 1);
-    assert(listener->last_speakers.size() == 2);
+    TEST_CHECK(listener->event_count == 1);
+    TEST_CHECK(listener->last_speakers.size() == 2);
     // Bob should be first (0.9), Alice second (0.4)
-    assert(listener->last_speakers[0]->sid() == "PA_222");
-    assert(listener->last_speakers[0]->audio_level() == 0.9f);
-    assert(listener->last_speakers[0]->is_speaking() == true);
+    TEST_CHECK(listener->last_speakers[0]->sid() == "PA_222");
+    TEST_CHECK(listener->last_speakers[0]->audio_level() == 0.9f);
+    TEST_CHECK(listener->last_speakers[0]->is_speaking() == true);
 
-    assert(listener->last_speakers[1]->sid() == "PA_111");
-    assert(listener->last_speakers[1]->audio_level() == 0.4f);
-    assert(listener->last_speakers[1]->is_speaking() == true);
+    TEST_CHECK(listener->last_speakers[1]->sid() == "PA_111");
+    TEST_CHECK(listener->last_speakers[1]->audio_level() == 0.4f);
+    TEST_CHECK(listener->last_speakers[1]->is_speaking() == true);
 
     std::cout << "  [PASS] ActiveSpeakerUpdate parsed and active speakers sorted by volume." << std::endl;
 }
@@ -96,9 +96,9 @@ void TestAudioVadCalculation() {
     float silent_level = AudioVad::RmsToAudioLevel(silent_rms);
     bool silent_speaking = vad.IsSpeaking(silent_rms);
 
-    assert(silent_rms == 0.0f);
-    assert(silent_level == 0.0f);
-    assert(silent_speaking == false);
+    TEST_CHECK(silent_rms == 0.0f);
+    TEST_CHECK(silent_level == 0.0f);
+    TEST_CHECK(silent_speaking == false);
     std::cout << "  [PASS] Silent PCM correctly detected as silent." << std::endl;
 
     // 2. Loud sine wave buffer (amplitude 16384)
@@ -110,9 +110,9 @@ void TestAudioVadCalculation() {
     float loud_level = AudioVad::RmsToAudioLevel(loud_rms);
     bool loud_speaking = vad.IsSpeaking(loud_rms);
 
-    assert(loud_rms > 0.3f);
-    assert(loud_level > 0.8f);
-    assert(loud_speaking == true);
+    TEST_CHECK(loud_rms > 0.3f);
+    TEST_CHECK(loud_level > 0.8f);
+    TEST_CHECK(loud_speaking == true);
     std::cout << "  [PASS] Loud PCM (Sine Wave) correctly detected as speaking (RMS=" << loud_rms << ", level=" << loud_level << ")." << std::endl;
 }
 

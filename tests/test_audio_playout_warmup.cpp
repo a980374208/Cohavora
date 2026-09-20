@@ -1,5 +1,5 @@
 #include <algorithm>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <cstdint>
 #include <iostream>
 #include <vector>
@@ -18,7 +18,7 @@ int main() {
     for (int i = 0; i < 100; ++i) {
         std::vector<int16_t> silence(kSamplesPerBuffer, 0);
         warmup.Process(silence.data(), silence.size(), kChannels, kSampleRate);
-        assert(std::all_of(silence.begin(), silence.end(), [](int16_t v) { return v == 0; }));
+        TEST_CHECK(std::all_of(silence.begin(), silence.end(), [](int16_t v) { return v == 0; }));
     }
 
     // Guard samples prove that stereo processing stays within the advertised
@@ -28,11 +28,11 @@ int main() {
     guarded.front() = kGuard;
     guarded.back() = kGuard;
     warmup.Process(guarded.data() + 1, kSamplesPerBuffer, kChannels, kSampleRate);
-    assert(guarded.front() == kGuard);
-    assert(guarded.back() == kGuard);
-    assert(guarded[1] == 0);
-    assert(guarded[kSamplesPerBuffer] > 0);
-    assert(guarded[kSamplesPerBuffer] < 2000);
+    TEST_CHECK(guarded.front() == kGuard);
+    TEST_CHECK(guarded.back() == kGuard);
+    TEST_CHECK(guarded[1] == 0);
+    TEST_CHECK(guarded[kSamplesPerBuffer] > 0);
+    TEST_CHECK(guarded[kSamplesPerBuffer] < 2000);
 
     // Complete the remaining 90 ms. The next buffer must pass through exactly.
     for (int i = 1; i < 10; ++i) {
@@ -41,24 +41,24 @@ int main() {
     }
     std::vector<int16_t> active(kSamplesPerBuffer, -7777);
     warmup.Process(active.data(), active.size(), kChannels, kSampleRate);
-    assert(std::all_of(active.begin(), active.end(), [](int16_t v) { return v == -7777; }));
+    TEST_CHECK(std::all_of(active.begin(), active.end(), [](int16_t v) { return v == -7777; }));
 
     // Device/session reset must re-arm the first-audible-frame gate.
     warmup.Reset();
     std::vector<int16_t> reset_signal(kFramesPerBuffer, 9000);
     warmup.Process(reset_signal.data(), reset_signal.size(), 1, kSampleRate);
-    assert(reset_signal.front() == 0);
-    assert(reset_signal.back() > 0);
-    assert(reset_signal.back() < 2000);
+    TEST_CHECK(reset_signal.front() == 0);
+    TEST_CHECK(reset_signal.back() > 0);
+    TEST_CHECK(reset_signal.back() < 2000);
 
     // Sub-threshold comfort noise is suppressed and does not start the fade.
     warmup.Reset();
     std::vector<int16_t> comfort_noise(kSamplesPerBuffer, 16);
     warmup.Process(comfort_noise.data(), comfort_noise.size(), kChannels, kSampleRate);
-    assert(std::all_of(comfort_noise.begin(), comfort_noise.end(), [](int16_t v) { return v == 0; }));
+    TEST_CHECK(std::all_of(comfort_noise.begin(), comfort_noise.end(), [](int16_t v) { return v == 0; }));
     std::vector<int16_t> first_signal(kSamplesPerBuffer, 5000);
     warmup.Process(first_signal.data(), first_signal.size(), kChannels, kSampleRate);
-    assert(first_signal.front() == 0);
+    TEST_CHECK(first_signal.front() == 0);
 
     std::cout << "Audio playout warmup tests PASSED!\n";
     return 0;

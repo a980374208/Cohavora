@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <memory>
 #include "local_video_track.h"
 #include "video_source.h"
@@ -21,23 +21,29 @@ int main() {
         av1_opts.auto_backup_codec = true;
 
         auto computed = livekit::LocalVideoTrack::ComputeMultiCodecSimulcastOptions(1280, 720, av1_opts);
-        assert(computed.simulcast == true);
-        assert(computed.video_codec == "av1");
-        assert(computed.backup_codec.has_value());
-        assert(computed.backup_codec.value() == "vp8");
-        assert(computed.simulcast_codecs.size() == 2);
+        TEST_CHECK(computed.simulcast == true);
+        TEST_CHECK(computed.video_codec == "av1");
+        TEST_CHECK(computed.backup_codec.has_value());
+        TEST_CHECK(computed.backup_codec.value() == "vp8");
+        TEST_CHECK(computed.simulcast_codecs.size() == 2);
 
         // Primary AV1 Spec
         const auto& pri = computed.simulcast_codecs[0];
-        assert(pri.codec == "av1");
-        assert(pri.layers.size() == 3);
-        assert(pri.layers[0].max_bitrate_bps == static_cast<int>(1700000 * 0.70)); // AV1 factor 0.7x
+        TEST_CHECK(pri.codec == "av1");
+        TEST_CHECK(pri.layers.size() == 3);
+        // The pinned Rust policy selects the first preset wider than 1280:
+        // 3 Mbps, with the codec factor applied only to the source layer.
+        TEST_CHECK(pri.layers[0].max_bitrate_bps == 2100000);
+        TEST_CHECK(pri.layers[1].max_bitrate_bps == 450000);
+        TEST_CHECK(pri.layers[2].max_bitrate_bps == 160000);
 
         // Backup VP8 Spec
         const auto& bak = computed.simulcast_codecs[1];
-        assert(bak.codec == "vp8");
-        assert(bak.layers.size() == 3);
-        assert(bak.layers[0].max_bitrate_bps == 1700000); // VP8 factor 1.0x
+        TEST_CHECK(bak.codec == "vp8");
+        TEST_CHECK(bak.layers.size() == 3);
+        TEST_CHECK(bak.layers[0].max_bitrate_bps == 3000000);
+        TEST_CHECK(bak.layers[1].max_bitrate_bps == 450000);
+        TEST_CHECK(bak.layers[2].max_bitrate_bps == 160000);
 
         std::cout << "     [PASS] AV1 primary (0.7x) + VP8 backup (1.0x) specs correctly computed." << std::endl;
     }
@@ -52,10 +58,10 @@ int main() {
         vp9_opts.backup_codec_policy = livekit::BackupCodecPolicy::Simulcast;
 
         auto computed = livekit::LocalVideoTrack::ComputeMultiCodecSimulcastOptions(1280, 720, vp9_opts);
-        assert(computed.simulcast_codecs.size() == 2);
-        assert(computed.simulcast_codecs[0].codec == "vp9");
-        assert(computed.simulcast_codecs[1].codec == "h264");
-        assert(computed.backup_codec_policy == livekit::BackupCodecPolicy::Simulcast);
+        TEST_CHECK(computed.simulcast_codecs.size() == 2);
+        TEST_CHECK(computed.simulcast_codecs[0].codec == "vp9");
+        TEST_CHECK(computed.simulcast_codecs[1].codec == "h264");
+        TEST_CHECK(computed.backup_codec_policy == livekit::BackupCodecPolicy::Simulcast);
 
         std::cout << "     [PASS] VP9 + H264 multi-codec simulcast options verified." << std::endl;
     }
@@ -83,26 +89,26 @@ int main() {
 
         local_p->PublishTrack(vtrack);
 
-        assert(sent_req.has_add_track());
+        TEST_CHECK(sent_req.has_add_track());
         const auto& add_t = sent_req.add_track();
-        assert(add_t.name() == "camera_av1");
-        assert(add_t.type() == livekit::proto::TrackType::VIDEO);
-        assert(add_t.backup_codec_policy() == livekit::proto::BackupCodecPolicy::PREFER_REGRESSION);
+        TEST_CHECK(add_t.name() == "camera_av1");
+        TEST_CHECK(add_t.type() == livekit::proto::TrackType::VIDEO);
+        TEST_CHECK(add_t.backup_codec_policy() == livekit::proto::BackupCodecPolicy::PREFER_REGRESSION);
 
         // Verify 2 Simulcast Codecs
-        assert(add_t.simulcast_codecs_size() == 2);
+        TEST_CHECK(add_t.simulcast_codecs_size() == 2);
         
         // Codec 0: AV1
         const auto& c0 = add_t.simulcast_codecs(0);
-        assert(c0.codec() == "av1");
-        assert(c0.cid() == add_t.cid());
-        assert(c0.layers_size() == 3);
+        TEST_CHECK(c0.codec() == "av1");
+        TEST_CHECK(c0.cid() == add_t.cid());
+        TEST_CHECK(c0.layers_size() == 3);
 
         // Codec 1: VP8 Backup
         const auto& c1 = add_t.simulcast_codecs(1);
-        assert(c1.codec() == "vp8");
-        assert(c1.cid() == add_t.cid() + "_backup");
-        assert(c1.layers_size() == 3);
+        TEST_CHECK(c1.codec() == "vp8");
+        TEST_CHECK(c1.cid() == add_t.cid() + "_backup");
+        TEST_CHECK(c1.layers_size() == 3);
 
         std::cout << "     [PASS] AddTrackRequest serialized 2 codecs (AV1 + VP8_backup) with PREFER_REGRESSION policy." << std::endl;
     }
@@ -129,7 +135,7 @@ int main() {
         );
 
         local_p->PublishTrack(vtrack);
-        assert(sent_req.add_track().backup_codec_policy() == livekit::proto::BackupCodecPolicy::SIMULCAST);
+        TEST_CHECK(sent_req.add_track().backup_codec_policy() == livekit::proto::BackupCodecPolicy::SIMULCAST);
 
         std::cout << "     [PASS] SIMULCAST policy correctly serialized in AddTrackRequest." << std::endl;
     }

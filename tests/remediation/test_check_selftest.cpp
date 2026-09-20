@@ -2,6 +2,10 @@
 
 #include <cstring>
 
+#ifndef NDEBUG
+#error "The always-active check verifier must exercise the NDEBUG configuration"
+#endif
+
 int main(int argc, char** argv) {
     if (argc != 2) {
         return 2;

@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include "remote_track_publication.h"
 #include "adaptive_stream_manager.h"
 #include "livekit_rtc.pb.h"
@@ -17,12 +17,12 @@ void TestSignalRequestGeneration() {
     setting->set_width(640);
     setting->set_height(360);
 
-    assert(req.has_track_setting());
-    assert(req.track_setting().track_sids(0) == "TR_video_test_123");
-    assert(req.track_setting().disabled() == false);
-    assert(req.track_setting().quality() == proto::VideoQuality::MEDIUM);
-    assert(req.track_setting().width() == 640);
-    assert(req.track_setting().height() == 360);
+    TEST_CHECK(req.has_track_setting());
+    TEST_CHECK(req.track_setting().track_sids(0) == "TR_video_test_123");
+    TEST_CHECK(req.track_setting().disabled() == false);
+    TEST_CHECK(req.track_setting().quality() == proto::VideoQuality::MEDIUM);
+    TEST_CHECK(req.track_setting().width() == 640);
+    TEST_CHECK(req.track_setting().height() == 360);
 
     std::cout << "  [PASS] UpdateTrackSettings Protobuf verified." << std::endl;
 
@@ -31,9 +31,9 @@ void TestSignalRequestGeneration() {
     sub->set_subscribe(true);
     sub->add_track_sids("TR_video_test_123");
 
-    assert(sub_req.has_subscription());
-    assert(sub_req.subscription().subscribe() == true);
-    assert(sub_req.subscription().track_sids(0) == "TR_video_test_123");
+    TEST_CHECK(sub_req.has_subscription());
+    TEST_CHECK(sub_req.subscription().subscribe() == true);
+    TEST_CHECK(sub_req.subscription().track_sids(0) == "TR_video_test_123");
 
     std::cout << "  [PASS] UpdateSubscription Protobuf verified." << std::endl;
 }
@@ -48,22 +48,22 @@ void TestRemoteTrackPublicationDimensions() {
         nullptr
     );
 
-    assert(pub->is_subscribed() == true);
-    assert(pub->is_enabled() == true);
+    TEST_CHECK(pub->is_subscribed() == true);
+    TEST_CHECK(pub->is_enabled() == true);
 
     // Test 180p -> LOW
     pub->SetVideoDimensions(320, 180);
-    assert(pub->current_quality() == proto::VideoQuality::LOW);
+    TEST_CHECK(pub->current_quality() == proto::VideoQuality::LOW);
     std::cout << "  [PASS] 320x180 mapped to VideoQuality::LOW" << std::endl;
 
     // Test 480p -> MEDIUM
     pub->SetVideoDimensions(640, 360);
-    assert(pub->current_quality() == proto::VideoQuality::MEDIUM);
+    TEST_CHECK(pub->current_quality() == proto::VideoQuality::MEDIUM);
     std::cout << "  [PASS] 640x360 mapped to VideoQuality::MEDIUM" << std::endl;
 
     // Test 1080p -> HIGH
     pub->SetVideoDimensions(1920, 1080);
-    assert(pub->current_quality() == proto::VideoQuality::HIGH);
+    TEST_CHECK(pub->current_quality() == proto::VideoQuality::HIGH);
     std::cout << "  [PASS] 1920x1080 mapped to VideoQuality::HIGH" << std::endl;
 }
 
@@ -80,11 +80,11 @@ void TestAdaptiveStreamManager() {
     AdaptiveStreamManager::Instance().RegisterTrack(pub);
     AdaptiveStreamManager::Instance().UpdateTrackDimensions("TR_video_789", 640, 360);
 
-    assert(pub->current_quality() == proto::VideoQuality::MEDIUM);
+    TEST_CHECK(pub->current_quality() == proto::VideoQuality::MEDIUM);
     std::cout << "  [PASS] AdaptiveStreamManager successfully updated track dimension & quality." << std::endl;
 
     AdaptiveStreamManager::Instance().SetTrackVisibility("TR_video_789", false);
-    assert(pub->is_enabled() == false);
+    TEST_CHECK(pub->is_enabled() == false);
     std::cout << "  [PASS] AdaptiveStreamManager successfully paused disabled track." << std::endl;
 
     AdaptiveStreamManager::Instance().Clear();

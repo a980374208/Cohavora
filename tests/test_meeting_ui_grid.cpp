@@ -1,7 +1,7 @@
 #include <iostream>
 #include <vector>
 #include <string>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <cmath>
 #include <algorithm>
 #include <map>
@@ -110,20 +110,20 @@ void TestGridGeometry() {
 
 	for (int n = 1; n <= 16; ++n) {
 		auto res = ComputeOptimal16x9Grid(W, H, n);
-		assert(res.tiles.size() == static_cast<size_t>(n));
-		assert(res.tileW > 0 && res.tileH > 0);
+		TEST_CHECK(res.tiles.size() == static_cast<size_t>(n));
+		TEST_CHECK(res.tileW > 0 && res.tileH > 0);
 
 		double aspect = static_cast<double>(res.tileW) / res.tileH;
-		assert(std::abs(aspect - 16.0 / 9.0) < 0.15);
+		TEST_CHECK(std::abs(aspect - 16.0 / 9.0) < 0.15);
 
 		for (const auto &t : res.tiles) {
-			assert(t.x >= 0 && t.right() <= W);
-			assert(t.y >= 0 && t.bottom() <= H);
+			TEST_CHECK(t.x >= 0 && t.right() <= W);
+			TEST_CHECK(t.y >= 0 && t.bottom() <= H);
 		}
 
 		for (size_t i = 0; i < res.tiles.size(); ++i) {
 			for (size_t j = i + 1; j < res.tiles.size(); ++j) {
-				assert(!res.tiles[i].intersects(res.tiles[j]));
+				TEST_CHECK(!res.tiles[i].intersects(res.tiles[j]));
 			}
 		}
 
@@ -144,9 +144,9 @@ void TestAvatarHash() {
 	uint32_t hB = HashString(userB);
 	uint32_t hC = HashString(userC);
 
-	assert(hA1 == hA2);
-	assert(hA1 != hB);
-	assert(hB != hC);
+	TEST_CHECK(hA1 == hA2);
+	TEST_CHECK(hA1 != hB);
+	TEST_CHECK(hB != hC);
 
 	std::cout << "  - Alice: 0x" << std::hex << hA1 << " (Palette: " << (hA1 % 8) << ")" << std::endl;
 	std::cout << "  - Bob:   0x" << std::hex << hB  << " (Palette: " << (hB % 8) << ")" << std::endl;

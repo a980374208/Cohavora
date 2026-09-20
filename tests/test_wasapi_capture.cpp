@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <thread>
 #include <chrono>
 #include <atomic>
@@ -75,12 +75,12 @@ int main() {
         pcm_out
     );
 
-    assert(!pcm_out.empty() && "Resampled PCM output should not be empty!");
+    TEST_CHECK(!pcm_out.empty() && "Resampled PCM output should not be empty!");
     // 441 frames @ 44.1kHz -> 480 frames @ 48kHz * 2 channels = 960 samples
     std::cout << "  Input 441 frames @ 44.1kHz -> Output " << (pcm_out.size() / 2) << " frames @ 48kHz\n";
-    assert((pcm_out.size() / 2) == 480 && "Resampled frame count should be exactly 480 for 10ms at 48kHz!");
-    assert(pcm_out[0] > 15000 && pcm_out[0] < 17000 && "Left channel sample value scaled properly!");
-    assert(pcm_out[1] < -15000 && pcm_out[1] > -17000 && "Right channel sample value scaled properly!");
+    TEST_CHECK((pcm_out.size() / 2) == 480 && "Resampled frame count should be exactly 480 for 10ms at 48kHz!");
+    TEST_CHECK(pcm_out[0] > 15000 && pcm_out[0] < 17000 && "Left channel sample value scaled properly!");
+    TEST_CHECK(pcm_out[1] < -15000 && pcm_out[1] > -17000 && "Right channel sample value scaled properly!");
 
     std::cout << "  -> [Test 2 PASSED] Audio conversion and resampling precision verified.\n\n";
 
@@ -107,7 +107,7 @@ int main() {
     cap_config.target_channels = 2;
 
     bool init_ok = wasapi_cap->Init(cap_config, audio_source);
-    assert(init_ok && "WasapiAudioCapture::Init failed!");
+    TEST_CHECK(init_ok && "WasapiAudioCapture::Init failed!");
 
     bool start_ok = wasapi_cap->Start();
     std::cout << "  WASAPI Microphone capture started: " << (start_ok ? "SUCCESS" : "NO DEVICE") << "\n";
@@ -120,14 +120,14 @@ int main() {
                   << ", Total Samples: " << total_samples_received.load() << "\n";
 
         wasapi_cap->SetVolume(1.5f);
-        assert(wasapi_cap->GetVolume() == 1.5f && "Volume setting failed!");
+        TEST_CHECK(wasapi_cap->GetVolume() == 1.5f && "Volume setting failed!");
 
         wasapi_cap->SetMute(true);
-        assert(wasapi_cap->IsMuted() && "Mute state mismatch!");
+        TEST_CHECK(wasapi_cap->IsMuted() && "Mute state mismatch!");
 
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
         wasapi_cap->Stop();
-        assert(!wasapi_cap->IsRunning() && "WasapiAudioCapture should be stopped!");
+        TEST_CHECK(!wasapi_cap->IsRunning() && "WasapiAudioCapture should be stopped!");
     }
 
     std::cout << "  -> [Test 3 PASSED] WASAPI audio capture pipeline verified.\n\n";
@@ -146,7 +146,7 @@ int main() {
     loop_cfg.target_channels = 2;
 
     bool loop_init = loopback_cap->Init(loop_cfg, loopback_source);
-    assert(loop_init && "Loopback WasapiAudioCapture::Init failed!");
+    TEST_CHECK(loop_init && "Loopback WasapiAudioCapture::Init failed!");
 
     bool loop_start = loopback_cap->Start();
     std::cout << "  WASAPI Loopback capture started: " << (loop_start ? "SUCCESS" : "NO OUTPUT DEVICE") << "\n";

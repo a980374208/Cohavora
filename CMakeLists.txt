@@ -344,6 +344,7 @@ if(LIVEKIT_BUILD_EXTENDED_TESTS)
     add_executable(test_apm_3a
         tests/test_apm_3a.cpp
     )
+    target_include_directories(test_apm_3a PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_apm_3a PRIVATE
         livekit_signaling
     )
@@ -351,6 +352,7 @@ if(LIVEKIT_BUILD_EXTENDED_TESTS)
     add_executable(test_attributes_permissions_quality
         tests/test_attributes_permissions_quality.cpp
     )
+    target_include_directories(test_attributes_permissions_quality PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_attributes_permissions_quality PRIVATE
         livekit_signaling
     )
@@ -369,6 +371,7 @@ target_link_libraries(test_rpc_system PRIVATE
 add_executable(test_media_streaming
     tests/test_media_streaming.cpp
 )
+target_include_directories(test_media_streaming PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_media_streaming PRIVATE
     livekit_signaling
 )
@@ -492,6 +495,7 @@ if(LIVEKIT_BUILD_HARDWARE_TESTS)
     add_executable(test_wasapi_capture
         tests/test_wasapi_capture.cpp
     )
+    target_include_directories(test_wasapi_capture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_wasapi_capture PRIVATE
         livekit_signaling
     )
@@ -499,6 +503,7 @@ if(LIVEKIT_BUILD_HARDWARE_TESTS)
     add_executable(test_dshow_capture
         tests/test_dshow_capture.cpp
     )
+    target_include_directories(test_dshow_capture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_dshow_capture PRIVATE
         livekit_signaling
     )
@@ -508,6 +513,7 @@ endif()
 add_executable(test_audio_playout_warmup
     tests/test_audio_playout_warmup.cpp
 )
+target_include_directories(test_audio_playout_warmup PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_audio_playout_warmup PRIVATE
     livekit_signaling
 )
@@ -516,6 +522,7 @@ target_link_libraries(test_audio_playout_warmup PRIVATE
 add_executable(test_simulcast
     tests/test_simulcast.cpp
 )
+target_include_directories(test_simulcast PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_simulcast PRIVATE
     livekit_signaling
 )
@@ -524,6 +531,7 @@ if(LIVEKIT_BUILD_EXTENDED_TESTS)
     add_executable(test_adaptive_stream
         tests/test_adaptive_stream.cpp
     )
+    target_include_directories(test_adaptive_stream PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_adaptive_stream PRIVATE
         livekit_signaling
     )
@@ -531,6 +539,7 @@ if(LIVEKIT_BUILD_EXTENDED_TESTS)
     add_executable(test_speaker_vad
         tests/test_speaker_vad.cpp
     )
+    target_include_directories(test_speaker_vad PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_speaker_vad PRIVATE
         livekit_signaling
     )
@@ -538,6 +547,7 @@ if(LIVEKIT_BUILD_EXTENDED_TESTS)
     add_executable(test_e2ee
         tests/test_e2ee.cpp
     )
+    target_include_directories(test_e2ee PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
     target_link_libraries(test_e2ee PRIVATE
         livekit_signaling
         ${OPENSSL_LIBRARIES}
@@ -588,6 +598,7 @@ target_link_libraries(test_simulate_scenario PRIVATE
 add_executable(test_backup_codecs
     tests/test_backup_codecs.cpp
 )
+target_include_directories(test_backup_codecs PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(test_backup_codecs PRIVATE
     livekit_signaling
 )
@@ -596,6 +607,7 @@ target_link_libraries(test_backup_codecs PRIVATE
 add_executable(test_meeting_ui_grid
     tests/test_meeting_ui_grid.cpp
 )
+target_include_directories(test_meeting_ui_grid PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 
 
 
@@ -1032,12 +1044,32 @@ add_test(NAME simulate_scenario_test COMMAND test_simulate_scenario)
 add_test(NAME backup_codecs_test COMMAND test_backup_codecs)
 add_test(NAME meeting_ui_grid_test COMMAND test_meeting_ui_grid)
 
+# NEW-TEST-001: repeatable, device-free assertion restoration gate. Keep the
+# intentional-failure verifier alongside the tests whose checks it validates.
+set_tests_properties(
+    always_active_checks_test
+    media_streaming_test
+    audio_playout_warmup_test
+    simulcast_test
+    backup_codecs_test
+    meeting_ui_grid_test
+    PROPERTIES LABELS "ASSERTION_REGRESSION" TIMEOUT 60
+)
+
 if(LIVEKIT_BUILD_EXTENDED_TESTS)
     add_test(NAME apm_3a_test COMMAND test_apm_3a)
     add_test(NAME attributes_permissions_quality_test COMMAND test_attributes_permissions_quality)
     add_test(NAME adaptive_stream_test COMMAND test_adaptive_stream)
     add_test(NAME speaker_vad_test COMMAND test_speaker_vad)
     add_test(NAME e2ee_test COMMAND test_e2ee)
+    set_tests_properties(
+        apm_3a_test
+        attributes_permissions_quality_test
+        adaptive_stream_test
+        speaker_vad_test
+        e2ee_test
+        PROPERTIES LABELS "ASSERTION_REGRESSION" TIMEOUT 60
+    )
 endif()
 
 if(LIVEKIT_BUILD_HARDWARE_TESTS)
@@ -1664,6 +1696,8 @@ set_tests_properties(
 )
 set_property(TEST signaling_tests signaling_url_policy_test
     APPEND PROPERTY LABELS "PR_SEC_006_FOCUSED")
+set_property(TEST always_active_checks_test
+    APPEND PROPERTY LABELS "ASSERTION_REGRESSION")
 
 
 

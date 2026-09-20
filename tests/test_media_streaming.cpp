@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <thread>
 #include <chrono>
 #include "audio_frame.h"
@@ -40,12 +40,12 @@ int main() {
 
     livekit::AudioFrameEvent audio_ev;
     bool audio_read_success = audio_stream->read(audio_ev);
-    assert(audio_read_success && "AudioStream failed to read frame!");
-    assert(audio_ev.frame.sampleRate() == 48000 && "AudioFrame sample rate mismatch!");
-    assert(audio_ev.frame.numChannels() == 2 && "AudioFrame num channels mismatch!");
-    assert(audio_ev.frame.samplesPerChannel() == 480 && "AudioFrame samples per channel mismatch!");
-    assert(audio_ev.frame.data().size() == 960 && "AudioFrame data size mismatch!");
-    assert(audio_ev.frame.data()[10] == static_cast<std::int16_t>(10 % 3000) && "AudioFrame sample content modified!");
+    TEST_CHECK(audio_read_success && "AudioStream failed to read frame!");
+    TEST_CHECK(audio_ev.frame.sampleRate() == 48000 && "AudioFrame sample rate mismatch!");
+    TEST_CHECK(audio_ev.frame.numChannels() == 2 && "AudioFrame num channels mismatch!");
+    TEST_CHECK(audio_ev.frame.samplesPerChannel() == 480 && "AudioFrame samples per channel mismatch!");
+    TEST_CHECK(audio_ev.frame.data().size() == 960 && "AudioFrame data size mismatch!");
+    TEST_CHECK(audio_ev.frame.data()[10] == static_cast<std::int16_t>(10 % 3000) && "AudioFrame sample content modified!");
 
     std::cout << "  -> [Test 1 PASSED] Successfully read PCM AudioFrame from AudioStream!\n\n";
 
@@ -79,16 +79,16 @@ int main() {
 
     livekit::VideoFrameEvent video_ev;
     bool video_read_success = video_stream->read(video_ev);
-    assert(video_read_success && "VideoStream failed to read frame!");
-    assert(video_ev.frame.width() == 1280 && "VideoFrame width mismatch!");
-    assert(video_ev.frame.height() == 720 && "VideoFrame height mismatch!");
-    assert(video_ev.rotation == livekit::VideoRotation::VIDEO_ROTATION_90 && "VideoRotation mismatch!");
-    assert(video_ev.timestamp_us == 987654321 && "VideoFrame timestamp mismatch!");
-    assert(video_ev.frame.data()[0] == 255 && video_ev.frame.data()[1] == 128 && "VideoFrame pixel content mismatch!");
+    TEST_CHECK(video_read_success && "VideoStream failed to read frame!");
+    TEST_CHECK(video_ev.frame.width() == 1280 && "VideoFrame width mismatch!");
+    TEST_CHECK(video_ev.frame.height() == 720 && "VideoFrame height mismatch!");
+    TEST_CHECK(video_ev.rotation == livekit::VideoRotation::VIDEO_ROTATION_90 && "VideoRotation mismatch!");
+    TEST_CHECK(video_ev.timestamp_us == 987654321 && "VideoFrame timestamp mismatch!");
+    TEST_CHECK(video_ev.frame.data()[0] == 255 && video_ev.frame.data()[1] == 128 && "VideoFrame pixel content mismatch!");
 
     auto planes = video_ev.frame.planeInfos();
-    assert(planes.size() == 1 && "RGBA plane count should be 1!");
-    assert(planes[0].stride == 1280 * 4 && "RGBA stride should be width * 4!");
+    TEST_CHECK(planes.size() == 1 && "RGBA plane count should be 1!");
+    TEST_CHECK(planes[0].stride == 1280 * 4 && "RGBA stride should be width * 4!");
 
     std::cout << "  -> [Test 2 PASSED] Successfully read VideoFrame from VideoStream!\n\n";
 
@@ -98,7 +98,7 @@ int main() {
     std::cout << "[Test 3] Testing Track Mute Isolation...\n";
 
     audio_track->mute();
-    assert(audio_track->muted() && "AudioTrack should be muted!");
+    TEST_CHECK(audio_track->muted() && "AudioTrack should be muted!");
 
     audio_source->captureFrame(frame_in);
 
@@ -112,7 +112,7 @@ int main() {
     bool read_after_mute = audio_stream->read(muted_ev);
     if (close_thread.joinable()) close_thread.join();
 
-    assert(!read_after_mute && "AudioStream should NOT deliver frames while track is muted!");
+    TEST_CHECK(!read_after_mute && "AudioStream should NOT deliver frames while track is muted!");
     std::cout << "  -> [Test 3 PASSED] Muted track correctly isolated frame delivery!\n\n";
 
     std::cout << "==================================================\n";

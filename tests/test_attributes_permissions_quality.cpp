@@ -1,5 +1,5 @@
 #include <iostream>
-#include <cassert>
+#include "tests/support/test_check.h"
 #include <memory>
 #include <map>
 #include <string>
@@ -44,13 +44,13 @@ int main() {
         local_p->SetAttribute("role", "host");
         local_p->SetAttribute("avatar", "avatar_01.png");
 
-        assert(local_p->get_attribute("role") == "host");
-        assert(local_p->get_attribute("avatar") == "avatar_01.png");
-        assert(sent_req.has_update_metadata());
+        TEST_CHECK(local_p->get_attribute("role") == "host");
+        TEST_CHECK(local_p->get_attribute("avatar") == "avatar_01.png");
+        TEST_CHECK(sent_req.has_update_metadata());
 
         const auto& meta_req = sent_req.update_metadata();
-        assert(meta_req.attributes().at("role") == "host");
-        assert(meta_req.attributes().at("avatar") == "avatar_01.png");
+        TEST_CHECK(meta_req.attributes().at("role") == "host");
+        TEST_CHECK(meta_req.attributes().at("avatar") == "avatar_01.png");
 
         std::cout << "  [PASS] Test 1: Participant Attributes SetAttribute & UpdateMetadata Signal Request verified." << std::endl;
     }
@@ -75,7 +75,7 @@ int main() {
         // Try publishing track & data (should be blocked safely)
         auto dummy_track = std::make_shared<livekit::Track>("TR_01", "mic", livekit::TrackKind::Audio);
         local_p->PublishTrack(dummy_track);
-        assert(!sent_req.has_add_track()); // Blocked!
+        TEST_CHECK(!sent_req.has_add_track()); // Blocked!
 
         local_p->PublishData({1, 2, 3}); // Blocked!
 
@@ -91,15 +91,15 @@ int main() {
         );
 
         remote_pub.SetVideoDimensions(640, 360);
-        assert(remote_pub.current_quality() == livekit::proto::VideoQuality::MEDIUM);
-        assert(remote_pub.current_width() == 640);
-        assert(remote_pub.current_height() == 360);
+        TEST_CHECK(remote_pub.current_quality() == livekit::proto::VideoQuality::MEDIUM);
+        TEST_CHECK(remote_pub.current_width() == 640);
+        TEST_CHECK(remote_pub.current_height() == 360);
 
         remote_pub.SetVideoQuality(livekit::proto::VideoQuality::LOW);
-        assert(remote_pub.current_quality() == livekit::proto::VideoQuality::LOW);
+        TEST_CHECK(remote_pub.current_quality() == livekit::proto::VideoQuality::LOW);
 
         remote_pub.SetSubscribed(false);
-        assert(remote_pub.is_subscribed() == false);
+        TEST_CHECK(remote_pub.is_subscribed() == false);
 
         std::cout << "  [PASS] Test 3: RemoteTrackPublication SetVideoDimensions & SetVideoQuality verified." << std::endl;
     }
@@ -116,18 +116,26 @@ int main() {
         p->set_sid("PA_REMOTE_100");
         p->set_identity("remote_user");
         p->set_state(livekit::proto::ParticipantInfo::ACTIVE);
-        (*p->mutable_attributes())["team"] = "alpha";
-
         auto* perm = p->mutable_permission();
         perm->set_can_subscribe(true);
+        perm->set_can_publish(true);
+
+        // Joining installs the initial snapshot. Change callbacks describe a
+        // later update to an existing participant, not that initial snapshot.
+        room->UpdateParticipantsForTesting(update);
+        TEST_CHECK(room->remote_participants().size() == 1);
+        TEST_CHECK(!listener->attrs_changed);
+        TEST_CHECK(!listener->perms_changed);
+
+        (*p->mutable_attributes())["team"] = "alpha";
         perm->set_can_publish(false);
 
         room->UpdateParticipantsForTesting(update);
 
-        assert(listener->attrs_changed == true);
-        assert(listener->last_attrs.at("team") == "alpha");
-        assert(listener->perms_changed == true);
-        assert(listener->last_new_perm.can_publish == false);
+        TEST_CHECK(listener->attrs_changed == true);
+        TEST_CHECK(listener->last_attrs.at("team") == "alpha");
+        TEST_CHECK(listener->perms_changed == true);
+        TEST_CHECK(listener->last_new_perm.can_publish == false);
 
         std::cout << "  [PASS] Test 4: Room Listener OnParticipantAttributesChanged & OnParticipantPermissionsChanged events verified." << std::endl;
     }
