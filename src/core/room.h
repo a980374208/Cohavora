@@ -412,6 +412,9 @@ private:
         uint64_t generation);
     void RetireIncomingReaderLocked(const std::string& stream_id,
                                     const std::string& reason);
+    size_t RetireIncomingReadersForParticipantLocked(
+        const std::shared_ptr<Participant>& participant,
+        const std::string& reason);
     void OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation);
     bool PublishData(const std::vector<uint8_t>& payload, bool reliable,
                      const std::vector<std::string>& destinations, const std::string& topic, uint64_t generation);
@@ -423,9 +426,11 @@ private:
         ChannelRejected,
         EncryptionFailed,
         EncryptionContextChanged,
+        SenderContextChanged,
     };
     struct OutgoingStreamContext {
         std::shared_ptr<E2eeManager> manager;
+        std::weak_ptr<LocalParticipant> sender;
         uint64_t policy_revision = 0;
     };
     DataPacketSendResult PublishDataPacket(const proto::DataPacket& packet,
@@ -821,6 +826,7 @@ private:
     template <typename Reader> struct IncomingReader {
         std::shared_ptr<Reader> reader;
         EncryptionType encryption_type;
+        SenderContext sender;
     };
     std::unordered_map<std::string, IncomingReader<TextStreamReader>> active_text_readers_;
     std::unordered_map<std::string, IncomingReader<ByteStreamReader>> active_byte_readers_;
