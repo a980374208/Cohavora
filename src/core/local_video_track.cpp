@@ -2,6 +2,10 @@
 #include "webrtc_manager.h"
 #include "rtc_video_source.h"
 
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+
 namespace livekit {
 
 LocalVideoTrack::LocalVideoTrack(const std::string& sid, const std::string& name, std::shared_ptr<VideoSource> source,
@@ -15,136 +19,105 @@ LocalVideoTrack::LocalVideoTrack(const std::string& sid, const std::string& name
     publish_options_ = ComputeMultiCodecSimulcastOptions(w, h, effective_opts);
 }
 
-static double findEvenScaleDownBy(int src_w, int src_h, int target_w, int target_h) {
-    int src_max = std::max(src_w, src_h);
-    int target_max = std::max(target_w, target_h);
-    if (target_max <= 0) return 1.0;
+namespace {
 
-    for (int i = 0; i <= 30; ++i) {
-        double scale = static_cast<double>(src_max) / (target_max + i);
-        if (scale < 1.0) scale = 1.0;
-        int scaled_w = static_cast<int>(src_w / scale);
-        int scaled_h = static_cast<int>(src_h / scale);
-        if (scaled_w % 2 == 0 && scaled_h % 2 == 0) {
-            return scale;
-        }
+// Default encoding policy from client-sdk-cpp's Rust core:
+// livekit/src/room/options.rs @ a0c91f5ae2309f3911c4a5d5843f385e6f20846a.
+// Presets choose bitrate/fps and lower layers; the top layer keeps source size.
+constexpr VideoPreset kCamera169[] = {
+    {160, 90, 90000, 15}, {320, 180, 160000, 15},
+    {384, 216, 180000, 15}, {640, 360, 450000, 20},
+    {960, 540, 800000, 25}, {1280, 720, 1700000, 30},
+    {1920, 1080, 3000000, 30}, {2560, 1440, 5000000, 30},
+    {3840, 2160, 8000000, 30},
+};
+constexpr VideoPreset kCamera43[] = {
+    {160, 120, 80000, 15}, {240, 180, 100000, 15},
+    {320, 240, 150000, 15}, {480, 360, 225000, 20},
+    {640, 480, 300000, 20}, {720, 540, 450000, 25},
+    {960, 720, 1500000, 30}, {1440, 1080, 2500000, 30},
+    {1920, 1440, 3500000, 30},
+};
+constexpr VideoPreset kScreenShare[] = {
+    {640, 360, 200000, 3}, {1280, 720, 400000, 5},
+    {1280, 720, 1000000, 15}, {1920, 1080, 1500000, 15},
+    {1920, 1080, 3000000, 30},
+};
+
+template <size_t N>
+VideoPreset EncodingPreset(const VideoPreset (&presets)[N], int size) {
+    for (const auto& preset : presets) {
+        // Rust uses a strict > here, including at exact preset boundaries.
+        if (preset.width > size) return preset;
     }
-    return static_cast<double>(src_max) / target_max;
+    return presets[N - 1];
 }
+
+std::string CodecName(std::string codec) {
+    for (auto& c : codec) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return codec;
+}
+
+} // namespace
 
 VideoPublishOptions LocalVideoTrack::ComputeSimulcastOptions(int width, int height, const VideoPublishOptions& input_options) {
     VideoPublishOptions opts = input_options;
-
     if (width <= 0 || height <= 0) {
         width = 1280;
         height = 720;
     }
 
-    // 1. 编码器码率折算系数 (AV1=0.7x, VP9=0.85x, VP8/H264=1.0x)
-    double codec_factor = 1.0;
-    std::string codec_lower = opts.video_codec;
-    for (auto& c : codec_lower) c = static_cast<char>(tolower(c));
-    if (codec_lower == "av1") {
-        codec_factor = 0.70;
-    } else if (codec_lower == "vp9") {
-        codec_factor = 0.85;
+    const int max_size = std::max(width, height);
+    const int min_size = std::min(width, height);
+    const float aspect = static_cast<float>(max_size) / min_size;
+    const bool is_16_9 = std::abs(aspect - 16.0f / 9.0f) < std::abs(aspect - 4.0f / 3.0f);
+    const bool screenshare = opts.source == TrackSource::ScreenShareVideo;
+    auto original = screenshare ? EncodingPreset(kScreenShare, max_size)
+        : (is_16_9 ? EncodingPreset(kCamera169, max_size) : EncodingPreset(kCamera43, max_size));
+    original.width = width;
+    original.height = height;
+    const auto codec = CodecName(opts.video_codec);
+    // The reference adjusts only the source encoding, not the lower presets.
+    if (codec == "av1") {
+        original.max_bitrate_bps = static_cast<int>(static_cast<float>(original.max_bitrate_bps) * 0.7f);
+    } else if (codec == "vp9") {
+        original.max_bitrate_bps = static_cast<int>(static_cast<float>(original.max_bitrate_bps) * 0.85f);
     }
 
-    // 2. 屏幕共享专属策略 (分辨率与文字清晰度优先，帧率限制在 15fps)
-    if (opts.source == TrackSource::ScreenShareVideo) {
-        if (codec_lower == "vp9" || codec_lower == "av1") {
-            opts.scalability_mode = "L1T3";
+    // Keep the Rust low-to-high preset order until RID assignment is complete.
+    // An explicit SVC mode uses one RTP encoding; codecs do not imply a mode.
+    std::vector<VideoPreset> presets;
+    if (opts.simulcast && opts.scalability_mode.empty() && max_size >= 480) {
+        if (screenshare) {
+            const int low_bitrate = std::max(150000,
+                original.max_bitrate_bps / (4 * (original.max_fps / 3)));
+            presets.push_back({width / 2, height / 2, low_bitrate, 3});
+        } else {
+            const auto& camera = is_16_9 ? kCamera169 : kCamera43;
+            if (max_size >= 960) presets.push_back(camera[1]); // 180p
+            presets.push_back(camera[3]); // 360p, also the lower of two layers
         }
-
-        if (!opts.simulcast) {
-            VideoLayerSetting f_layer{width, height, static_cast<int>(2500000 * codec_factor), 15, "f", 1.0};
-            opts.layers = {f_layer};
-            return opts;
-        }
-
-        // 屏幕共享 2 层 Simulcast (100% 原生分辨率 + 50% 缩放)
-        int half_w = (width / 2 / 2) * 2;
-        int half_h = (height / 2 / 2) * 2;
-        VideoLayerSetting f_layer{width, height, static_cast<int>(2500000 * codec_factor), 15, "f", 1.0};
-        VideoLayerSetting q_layer{half_w, half_h, static_cast<int>(800000 * codec_factor), 15, "q", 2.0};
-        opts.layers = {f_layer, q_layer};
-        return opts;
     }
+    presets.push_back(original);
 
-    // 3. 摄像头推流：画幅比例自适应 (16:9 vs 4:3)
-    double aspect = static_cast<double>(width) / height;
-    bool is_16_9 = std::abs(aspect - (16.0 / 9.0)) <= std::abs(aspect - (4.0 / 3.0));
-
-    // SVC 模式支持 (VP9 / AV1 默认启用 L3T3_KEY)
-    if (opts.simulcast && (codec_lower == "vp9" || codec_lower == "av1")) {
-        opts.scalability_mode = "L3T3_KEY";
+    opts.layers.clear();
+    constexpr char kRids[] = {'q', 'h', 'f'};
+    for (size_t i = 0; i < presets.size(); ++i) {
+        const auto& preset = presets[i];
+        const double scale = std::max(1.0,
+            static_cast<double>(min_size) / std::min(preset.width, preset.height));
+        opts.layers.push_back({static_cast<int>(width / scale), static_cast<int>(height / scale),
+            preset.max_bitrate_bps, preset.max_fps, std::string(1, kRids[i]), scale});
     }
-
-    if (!opts.simulcast) {
-        int max_dim = std::max(width, height);
-        int bitrate = (max_dim >= 1280) ? 2000000 : ((max_dim >= 720) ? 1200000 : 500000);
-        VideoLayerSetting f_layer{width, height, static_cast<int>(bitrate * codec_factor), 30, "f", 1.0};
-        opts.layers = {f_layer};
-        return opts;
-    }
-
-    // 4. 标准 Simulcast 分层计算 (基于宽高最大维度)
-    int max_size = std::max(width, height);
-
-    if (max_size >= 960) {
-        // 3 层推流 (High 720p@30fps, Mid 360p@20fps, Low 180p@15fps)
-        int f_w = is_16_9 ? 1280 : 960;
-        int f_h = 720;
-        int h_w = is_16_9 ? 640 : 480;
-        int h_h = is_16_9 ? 360 : 360;
-        int q_w = is_16_9 ? 320 : 240;
-        int q_h = is_16_9 ? 180 : 180;
-
-        double scale_f = findEvenScaleDownBy(width, height, f_w, f_h);
-        double scale_h = findEvenScaleDownBy(width, height, h_w, h_h);
-        double scale_q = findEvenScaleDownBy(width, height, q_w, q_h);
-
-        int bit_f = static_cast<int>(1700000 * codec_factor);
-        int bit_h = static_cast<int>(450000 * codec_factor);
-        int bit_q = static_cast<int>(160000 * codec_factor);
-
-        VideoLayerSetting f_layer{static_cast<int>(width / scale_f), static_cast<int>(height / scale_f), bit_f, 30, "f", scale_f};
-        VideoLayerSetting h_layer{static_cast<int>(width / scale_h), static_cast<int>(height / scale_h), bit_h, 20, "h", scale_h};
-        VideoLayerSetting q_layer{static_cast<int>(width / scale_q), static_cast<int>(height / scale_q), bit_q, 15, "q", scale_q};
-
-        opts.layers = {f_layer, h_layer, q_layer};
-    } else if (max_size >= 480) {
-        // 2 层推流 (High + Low)
-        int f_w = is_16_9 ? 640 : 480;
-        int f_h = is_16_9 ? 360 : 360;
-        int q_w = is_16_9 ? 320 : 240;
-        int q_h = is_16_9 ? 180 : 180;
-
-        double scale_f = findEvenScaleDownBy(width, height, f_w, f_h);
-        double scale_q = findEvenScaleDownBy(width, height, q_w, q_h);
-
-        int bit_f = static_cast<int>(800000 * codec_factor);
-        int bit_q = static_cast<int>(180000 * codec_factor);
-
-        VideoLayerSetting f_layer{static_cast<int>(width / scale_f), static_cast<int>(height / scale_f), bit_f, 25, "f", scale_f};
-        VideoLayerSetting q_layer{static_cast<int>(width / scale_q), static_cast<int>(height / scale_q), bit_q, 15, "q", scale_q};
-
-        opts.layers = {f_layer, q_layer};
-    } else {
-        // 1 层推流
-        int bit_f = static_cast<int>(300000 * codec_factor);
-        VideoLayerSetting f_layer{width, height, bit_f, 30, "f", 1.0};
-        opts.layers = {f_layer};
-    }
-
+    // Match Rust into_rtp_encodings: f/h/q for three, h/q for two, q for one.
+    std::reverse(opts.layers.begin(), opts.layers.end());
     return opts;
 }
 
 VideoPublishOptions LocalVideoTrack::ComputeMultiCodecSimulcastOptions(int width, int height, const VideoPublishOptions& input_options) {
     VideoPublishOptions opts = ComputeSimulcastOptions(width, height, input_options);
 
-    std::string codec_lower = opts.video_codec;
-    for (auto& c : codec_lower) c = static_cast<char>(tolower(c));
+    const auto codec_lower = CodecName(opts.video_codec);
 
     SimulcastCodecSpec primary_spec;
     primary_spec.codec = opts.video_codec;
