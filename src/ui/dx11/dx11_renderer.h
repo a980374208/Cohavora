@@ -31,6 +31,7 @@ public:
     void SetRotation(VideoRotation rotation);
     void DrawQuad(PixelFormatType format, ID3D11ShaderResourceView* const* srvs, UINT count);
     void DrawSolidQuad(float r, float g, float b, float a = 1.0f);
+    void DrawPremultipliedOverlay(ID3D11ShaderResourceView* srv);
     bool EndFrame(bool vsync = true);
 
     ID3D11Device* device() const { return device_.Get(); }
@@ -73,6 +74,7 @@ private:
     ComPtr<ID3D11Buffer> vertex_buffer_;
     ComPtr<ID3D11SamplerState> sampler_state_;
     ComPtr<ID3D11RasterizerState> rasterizer_state_;
+    ComPtr<ID3D11BlendState> overlay_blend_state_;
     ComPtr<ID3D11Buffer> yuv_conversion_buffer_;
     ComPtr<ID3D11Buffer> frame_transform_buffer_;
     ComPtr<ID3D11Buffer> solid_color_buffer_;

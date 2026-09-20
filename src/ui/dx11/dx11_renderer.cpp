@@ -104,6 +104,7 @@ void Dx11Renderer::CleanupLocked() {
     ps_solid_color_.Reset();
     vertex_buffer_.Reset();
     sampler_state_.Reset();
+    overlay_blend_state_.Reset();
     rasterizer_state_.Reset();
     yuv_conversion_buffer_.Reset();
     frame_transform_buffer_.Reset();
@@ -287,6 +288,19 @@ bool Dx11Renderer::CreateShadersAndPipeline() {
     hr = device_->CreateRasterizerState(&rastDesc, rasterizer_state_.GetAddressOf());
     if (FAILED(hr)) return false;
 
+    D3D11_BLEND_DESC blend{};
+    auto& target = blend.RenderTarget[0];
+    target.BlendEnable = TRUE;
+    target.SrcBlend = D3D11_BLEND_ONE;
+    target.DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    target.BlendOp = D3D11_BLEND_OP_ADD;
+    target.SrcBlendAlpha = D3D11_BLEND_ONE;
+    target.DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    target.BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    target.RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    hr = device_->CreateBlendState(&blend, overlay_blend_state_.GetAddressOf());
+    if (FAILED(hr)) return false;
+
     D3D11_BUFFER_DESC conversion_desc = {};
     conversion_desc.Usage = D3D11_USAGE_DYNAMIC;
     conversion_desc.ByteWidth = static_cast<UINT>(sizeof(YuvColorConversion));
@@ -446,6 +460,14 @@ void Dx11Renderer::DrawSolidQuad(float r, float g, float b, float a) {
     context_->PSSetConstantBuffers(2, 1, buffers);
     context_->PSSetShader(ps_solid_color_.Get(), nullptr, 0);
     context_->Draw(4, 0);
+}
+
+void Dx11Renderer::DrawPremultipliedOverlay(ID3D11ShaderResourceView* srv) {
+    if (!context_ || !srv || !overlay_blend_state_) return;
+    SetRotation(VideoRotation::VIDEO_ROTATION_0);
+    context_->OMSetBlendState(overlay_blend_state_.Get(), nullptr, 0xffffffff);
+    DrawQuad(PixelFormatType::RGBA, &srv, 1);
+    context_->OMSetBlendState(nullptr, nullptr, 0xffffffff);
 }
 
 bool Dx11Renderer::EndFrame(bool vsync) {

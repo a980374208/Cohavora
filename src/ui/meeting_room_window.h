@@ -25,6 +25,7 @@
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QMessageBox>
 #include <QtCore/QPointer>
+#include <QtCore/QAbstractNativeEventFilter>
 #include "media/camera_source_manager.h"
 #include <QtWidgets/QSlider>
 #include "src/ui/audio_visualizer_widget.h"
@@ -95,6 +96,7 @@ public:
 	void setAudioMuted(bool muted);
 	void setConnectionQuality(livekit::ConnectionQuality quality);
 	void setVideoStreamPaused(bool paused);
+	bool isVideoStreamPaused() const { return _isVideoStreamPaused; }
 
 	void setSpeaking(bool speaking, float level = 0.0f);
 	bool isSpeaking() const { return _isSpeaking; }
@@ -107,7 +109,7 @@ public:
 	bool isLocallyMuted() const { return _isLocallyMuted; }
 
 	// Pin 钉住与身份
-	void setPinned(bool pinned) { _isPinned = pinned; update(); }
+	void setPinned(bool pinned);
 	bool isPinned() const { return _isPinned; }
 
 	QString identity() const { return _identity; }
@@ -116,12 +118,15 @@ public:
 	void setRenderKey(const QString &key) { _renderKey = key; }
 
 	// PIP 小窗交互
-	void setPipMode(bool pip) { _isPip = pip; update(); }
+	void setPipMode(bool pip);
 	bool isPipMode() const { return _isPip; }
 
 	// DX11 硬件加速模式支持
 	void setHardwareCanvasMode(bool enabled) { _useHardwareCanvas = enabled; update(); }
 	bool isHardwareCanvasMode() const { return _useHardwareCanvas; }
+	// UI-thread-only decoration cache. Video pixels never pass through this image.
+	QImage hardwareDecoration(const QSize &pixels, bool hasFrame, bool hovered);
+	QRect pinButtonRect() const;
 
 signals:
 	void tileDoubleClicked();
@@ -129,6 +134,7 @@ signals:
 	void pinToggled(bool pinned);
 	void remoteVolumeChanged(float volume);
 	void remoteLocalMuteToggled(bool muted);
+	void presentationChanged();
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
@@ -144,6 +150,9 @@ private:
 	void drawVideoFrame(QPainter &p, const QRect &r);
 	void drawBottomNameTag(QPainter &p, const QRect &r);
 	void drawNetworkQualityBadge(QPainter &p, const QRect &r);
+	void drawVideoPlaceholder(QPainter &p, const QRect &r);
+	void paintCard(QPainter &p, bool decorationOnly, bool hasFrame, bool hovered);
+	void invalidatePresentation();
 	void setupVolumeControls();
 
 	QString _identity;
@@ -177,6 +186,10 @@ private:
 	QImage _currentFrame;
 	std::mutex _frameMutex;
 	bool _hasLoggedFirstPaint = false;
+	QImage _hardwareDecoration;
+	QSize _decorationLogicalSize;
+	bool _decorationHasFrame = false;
+	bool _decorationHovered = false;
 };
 
 // ----------------------------------------------------
@@ -365,7 +378,7 @@ private:
 // ----------------------------------------------------
 // MeetingRoomWindow: 现代化会议室主视窗
 // ----------------------------------------------------
-class MeetingRoomWindow : public Ui::RpWidget {
+class MeetingRoomWindow : public Ui::RpWidget, private QAbstractNativeEventFilter {
 	Q_OBJECT
 public:
 	struct Config {
@@ -443,11 +456,24 @@ private:
 		QWidget *parent = nullptr);
 
 	void setupNativeWindow();
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+	bool nativeEventFilter(const QByteArray &eventType, void *message, qintptr *result) override;
+#else
+	bool nativeEventFilter(const QByteArray &eventType, void *message, long *result) override;
+#endif
+#if defined(Q_OS_WIN)
+	int nativeResizeHitTest(LPARAM position) const;
+#endif
+	bool _nativeResizeFilterInstalled = false;
 	void initLayout();
 	void updateVideoLayout();
 	void tryActivateDx11Backend();
 	void fallBackToQtCpuBackend();
 	void syncDx11CanvasLayout(const std::vector<VideoTileWidget*> &tiles);
+	void setupDx11CanvasInteractions();
+	void bindTileInteractions(VideoTileWidget *tile);
+	void setPinnedTile(const QString &renderKey, bool pinned);
+	void togglePinForRenderKey(const QString &renderKey);
 	void setupCoordinatorBindings();
 	void showDepartureNotice(const QString &title, const QString &message,
 		QMessageBox::Icon icon = QMessageBox::Warning);
@@ -460,6 +486,8 @@ private:
 		const OpenMeeting::RemoteVideoTrackPresentation &track);
 	void removeRemoteVideo(const QString &trackSid);
 	VideoTileWidget *remoteVideoTile(const QString &trackSid) const;
+	bool canRenderRemoteVideo(const QString &trackSid) const;
+	void refreshRemoteVideoPresentations();
 	void applyScreenShareSnapshot(livekit::ScreenShareSnapshot snapshot);
 	void applyRemoteParticipantJoined(const QString &identity, const QString &name,
 		const OpenMeeting::ParticipantPresentation *presentation);
@@ -491,7 +519,7 @@ private:
 
 	// 参会状态
 	int _participantCount = 1;
-	QString _pinnedIdentity;
+	QString _pinnedRenderKey;
 
 	// UI 组件
 	RoomTopBarWidget *_topBar = nullptr;
@@ -503,6 +531,10 @@ private:
 		QString identity;
 		bool screen = false;
 		std::weak_ptr<livekit::Track> track;
+		livekit::MediaBindingKey mediaBindingKey;
+		livekit::MediaBindingTicket mediaBindingTicket;
+		bool muted = false;
+		bool paused = false;
 	};
 	std::map<QString, RemoteVideoBinding> _remoteVideoBindings;
 	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteScreenTiles;

@@ -863,6 +863,15 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
                 info.isAudioMuted = publication.muted;
             } else if (publication.kind == livekit::TrackKind::Video) {
                 info.isVideoEnabled = !publication.muted;
+                const auto participantTracks = _remoteVideoTracks.find(identity);
+                if (participantTracks != _remoteVideoTracks.end()) {
+                    const auto video = participantTracks->second.find(QString::fromStdString(publication.sid));
+                    if (video != participantTracks->second.end() &&
+                        video->second.key.participant == key && video->second.track == publication.track) {
+                        video->second.muted = publication.muted;
+                        video->second.paused = publication.stream_state == livekit::TrackPublication::StreamState::Paused;
+                    }
+                }
             }
         }
         _participants[identity] = info;
@@ -927,7 +936,9 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
             event.track_ticket,
             event.media_binding_key,
             event.media_binding_ticket,
-            event.publication.track};
+            event.publication.track,
+            event.publication.muted,
+            event.publication.stream_state == livekit::TrackPublication::StreamState::Paused};
         emit remoteVideoTrackAvailable(identity, event.publication.track);
     }
 }

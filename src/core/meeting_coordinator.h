@@ -100,6 +100,10 @@ struct RemoteVideoTrackPresentation {
     livekit::MediaBindingKey mediaBindingKey;
     livekit::MediaBindingTicket mediaBindingTicket;
     std::shared_ptr<livekit::Track> track;
+    // Publication state copied from the accepted native snapshot. Participant
+    // aggregates cannot describe camera and screen-share views independently.
+    bool muted = false;
+    bool paused = false;
 };
 
 struct ParticipantPresentation {
