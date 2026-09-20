@@ -56,4 +56,30 @@ QImage QtCpuVideoRenderer::Convert(const OwnedI420Frame& frame) const {
     return image;
 }
 
+QImage QtCpuVideoRenderer::Convert(const VideoRenderFrame& frame) const {
+    if (frame.i420Owner()) return Convert(*frame.i420Owner());
+    const auto& v = frame.view();
+    QImage image;
+    if (v.format == LK_RENDER_RGBA8) {
+        image = QImage(v.planes[0].data, int(v.width), int(v.height),
+            int(v.planes[0].stride_bytes), QImage::Format_RGBA8888).copy();
+    } else {
+        image = QImage(int(v.width), int(v.height), QImage::Format_ARGB32);
+        if (image.isNull()) return {};
+        int status = -1;
+        if (v.format == LK_RENDER_I420) {
+            status = libyuv::I420ToARGBMatrix(v.planes[0].data, int(v.planes[0].stride_bytes),
+                v.planes[1].data, int(v.planes[1].stride_bytes), v.planes[2].data, int(v.planes[2].stride_bytes),
+                image.bits(), image.bytesPerLine(), SelectYuvConstants(frame.colorSpace()), int(v.width), int(v.height));
+        } else if (v.format == LK_RENDER_NV12) {
+            status = libyuv::NV12ToARGBMatrix(v.planes[0].data, int(v.planes[0].stride_bytes),
+                v.planes[1].data, int(v.planes[1].stride_bytes), image.bits(), image.bytesPerLine(),
+                SelectYuvConstants(frame.colorSpace()), int(v.width), int(v.height));
+        }
+        if (status != 0) return {};
+    }
+    if (v.rotation_degrees) image = image.transformed(QTransform().rotate(v.rotation_degrees));
+    return image;
+}
+
 } // namespace livekit::render

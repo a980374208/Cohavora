@@ -1,6 +1,7 @@
 #pragma once
 
 #include <d3d11.h>
+#include "render/video_layout.h"
 #include <dxgi.h>
 #include <wrl/client.h>
 #include <string>
@@ -18,17 +19,7 @@ struct Vertex {
     float u, v;
 };
 
-// 单个参会人画框在画布内的物理像素坐标
-struct TileRect {
-    std::string identity;
-    int x = 0;
-    int y = 0;
-    int width = 0;
-    int height = 0;
-    bool isSpeaking = false;
-    float audioLevel = 0.0f;
-    bool hasVideo = false;
-};
+using TileRect = render::VideoTileRect;
 
 enum class PixelFormatType {
     Unknown,

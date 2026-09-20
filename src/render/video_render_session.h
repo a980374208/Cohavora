@@ -12,6 +12,7 @@
 #include "src/core/track.h"
 #include "src/render/qt_cpu_video_renderer.h"
 #include "src/render/video_render_router.h"
+#include "src/render/local_video_render_input.h"
 
 namespace livekit::render {
 
@@ -21,18 +22,18 @@ class VideoRenderSession final {
 public:
     enum class Backend {
         QtCpu,
-        Dx11,
+        Gpu,
     };
 
     using FrameReadyCallback = std::function<void(const std::string& identity, const QImage& image)>;
-    using I420FrameReadyCallback = std::function<void(const std::string& identity, OwnedI420Frame::Ptr frame)>;
+    using GpuFrameReadyCallback = std::function<void(const std::string& render_key, VideoRenderFrame::Ptr frame)>;
 
     // These counters are intended for UI diagnostics and stress-test assertions.
     // They deliberately describe work that reached the selected backend, rather
     // than the producer-side Router counters alone.
     struct Statistics {
         VideoRenderRouter::Statistics router;
-        uint64_t delivered_to_dx11 = 0;
+        uint64_t delivered_to_gpu = 0;
         uint64_t delivered_to_qt_cpu = 0;
         uint64_t qt_cpu_conversion_failures = 0;
         uint64_t rejected_track_attachments = 0;
@@ -54,7 +55,11 @@ public:
     void RemoveTrack(const std::string& track_id);
     void RemoveTracksForIdentity(const std::string& identity);
     void RenderLatestFrames();
-    void UseDx11Backend(I420FrameReadyCallback frame_ready_callback);
+    void AttachLocalSource(const std::shared_ptr<VideoSource>& source, const std::string& render_key = "local");
+    void DetachLocalSource();
+    // UI-thread-only common dispatch, also used by the existing screen mailbox.
+    void RenderFrame(const std::string& render_key, VideoRenderFrame::Ptr frame);
+    void UseGpuBackend(GpuFrameReadyCallback frame_ready_callback);
     void UseQtCpuBackend();
     void Deactivate();
 
@@ -71,7 +76,7 @@ private:
         const uint64_t generation;
         std::atomic<bool> active{true};
         std::shared_ptr<VideoRenderRouter> router;
-        std::atomic<uint64_t> delivered_to_dx11{0};
+        std::atomic<uint64_t> delivered_to_gpu{0};
         std::atomic<uint64_t> delivered_to_qt_cpu{0};
         std::atomic<uint64_t> qt_cpu_conversion_failures{0};
         std::atomic<uint64_t> rejected_track_attachments{0};
@@ -93,7 +98,9 @@ private:
     const size_t max_active_tracks_;
     QtCpuVideoRenderer cpu_renderer_;
     FrameReadyCallback frame_ready_callback_;
-    I420FrameReadyCallback i420_frame_ready_callback_;
+    GpuFrameReadyCallback gpu_frame_ready_callback_;
+    LocalVideoRenderInput local_input_;
+    std::string local_render_key_;
     Backend backend_ = Backend::QtCpu;
 };
 

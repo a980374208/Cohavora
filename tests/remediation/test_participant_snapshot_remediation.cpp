@@ -5,8 +5,26 @@
 #include "rpl/rpl.h"
 #include "src/core/meeting_coordinator.h"
 #include "src/core/remote_track_publication.h"
+#include "src/net/service_endpoint_policy.h"
+#include "src/rtc/webrtc_manager.h"
 #include "src/render/owned_i420_frame.h"
 #include "src/ui/meeting_room_window.h"
+#include "src/ui/render/module_video_canvas.h"
+#include "src/ui/render/gl_video_canvas.h"
+#include <QtGui/QWindow>
+#include <QtGui/QOpenGLContext>
+#include <QtGui/QScreen>
+#include <QtCore/QElapsedTimer>
+#include <QtCore/QSaveFile>
+#include <QtCore/QJsonDocument>
+#include <QtCore/QJsonObject>
+#include <QtCore/QDateTime>
+void RunOpenGlContract();
+#include "src/render/api/render_backend_dx11_native.h"
+#include "src/render/api/render_backend_module_info.h"
+#include "tests/render_p2/dx11_test_hooks.h"
+#include <d3d11.h>
+#include <wrl/client.h>
 #include "src/ui/meeting_ui_integration.h"
 #include "tests/support/test_check.h"
 #include "ui/integration.h"
@@ -21,6 +39,7 @@
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDir>
 #include <QtCore/QEvent>
+#include <QtCore/QFile>
 #include <QtCore/QPointer>
 #include <QtCore/QSettings>
 #include <QtCore/QStandardPaths>
@@ -36,13 +55,18 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <future>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <stdexcept>
+#include <type_traits>
+#include <thread>
 #include <vector>
 
 Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin)
@@ -211,13 +235,450 @@ public:
                 double(source.width()) / source.height()) < 0.025);
         }
     }
+    struct NativeRenderer {
+        ID3D11Device* device_;
+        ID3D11DeviceContext* context_;
+        ID3D11Device* device() const { return device_; }
+        ID3D11DeviceContext* context() const { return context_; }
+    };
+    template <typename Task>
+    static auto onDxOwner(livekit::render::ModuleVideoCanvas& canvas, Task task) {
+        using Result = decltype(task(std::declval<livekit::render::BackendDevice&>()));
+        auto completion = std::make_shared<std::promise<Result>>();
+        auto result = completion->get_future();
+        canvas.runOnOwnerForTest([completion, task = std::move(task)](livekit::render::BackendDevice& device) mutable {
+            TEST_CHECK(QThread::currentThread() != qApp->thread());
+            if constexpr (std::is_void_v<Result>) { task(device); completion->set_value(); }
+            else completion->set_value(task(device));
+        });
+        QElapsedTimer wait; wait.start();
+        while (result.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready && wait.elapsed() < 5000)
+            QApplication::processEvents(QEventLoop::AllEvents, 20);
+        TEST_CHECK(result.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready);
+        return result.get();
+    }
+    // Borrowed native handles never leave their BackendDevice owner invocation.
+    static NativeRenderer nativeRenderer(livekit::render::BackendDevice& device) {
+        lk_render_dx11_native_v1 native{};
+        TEST_CHECK(device.QueryExtension(LK_RENDER_EXT_DX11_NATIVE,
+            LK_RENDER_DX11_NATIVE_V1, sizeof(native), &native) == LK_RENDER_OK);
+        return {reinterpret_cast<ID3D11Device*>(native.device), reinterpret_cast<ID3D11DeviceContext*>(native.context)};
+    }
+    static QImage dxImage(livekit::render::BackendDevice& device) {
+        using Microsoft::WRL::ComPtr;
+        const auto renderer = nativeRenderer(device);
+        ComPtr<ID3D11RenderTargetView> view;
+        renderer.context()->OMGetRenderTargets(1, view.GetAddressOf(), nullptr);
+        TEST_CHECK(view);
+        ComPtr<ID3D11Resource> resource;
+        view->GetResource(resource.GetAddressOf());
+        ComPtr<ID3D11Texture2D> texture;
+        TEST_CHECK(SUCCEEDED(resource.As(&texture)));
+        D3D11_TEXTURE2D_DESC desc{};
+        texture->GetDesc(&desc);
+        TEST_CHECK(desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM);
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.BindFlags = 0;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        desc.MiscFlags = 0;
+        ComPtr<ID3D11Texture2D> readback;
+        TEST_CHECK(SUCCEEDED(renderer.device()->CreateTexture2D(&desc, nullptr, readback.GetAddressOf())));
+        renderer.context()->CopyResource(readback.Get(), texture.Get());
+        D3D11_MAPPED_SUBRESOURCE mapped{};
+        TEST_CHECK(SUCCEEDED(renderer.context()->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped)));
+        const auto image = QImage(static_cast<const uchar*>(mapped.pData), desc.Width, desc.Height,
+            mapped.RowPitch, QImage::Format_RGBA8888).copy();
+        renderer.context()->Unmap(readback.Get(), 0);
+        return image;
+    }
+    static void checkGlStageAndLoss(MeetingUI::MeetingRoomWindow& window) {
+        auto* canvas = dynamic_cast<livekit::render::GlVideoCanvas*>(window._videoCanvas);
+        TEST_CHECK(canvas && canvas->rendererReady());
+        const auto activeDiagnostics = window.renderDiagnostics();
+        TEST_CHECK(activeDiagnostics.requested_backend == livekit::render::RenderBackend::OpenGL &&
+            activeDiagnostics.actual_backend == livekit::render::RenderBackend::OpenGL &&
+            activeDiagnostics.abi_version == LK_RENDER_ABI_V1 &&
+            activeDiagnostics.module_version == LK_RENDER_MODULE_VERSION &&
+            !activeDiagnostics.driver_description.isEmpty() &&
+            activeDiagnostics.gpu_failure == livekit::render::RenderGpuFailure::None &&
+            activeDiagnostics.fallback_reason == livekit::render::RenderFallbackReason::None);
+        const auto native = window.winId();
+        const auto capture = [&](const QString& name, bool gpu) {
+            int swapped = 0;
+            const auto connection = QObject::connect(canvas, &livekit::render::GlVideoCanvas::framePresented,
+                &window, [&] { ++swapped; });
+            if (gpu) canvas->requestRender();
+            QElapsedTimer wait; wait.start();
+            while ((wait.elapsed() < 150 || (gpu && !swapped)) && wait.elapsed() < 1500)
+                QApplication::processEvents(QEventLoop::AllEvents, 20);
+            QObject::disconnect(connection);
+            TEST_CHECK(!gpu || swapped > 0);
+            auto image = window.screen()->grabWindow(window.winId()).toImage();
+            TEST_CHECK(!image.isNull());
+            const auto origin = canvas->mapTo(&window, QPoint());
+            const qreal sx = qreal(image.width()) / window.width(), sy = qreal(image.height()) / window.height();
+            image = image.copy(qRound(origin.x()*sx), qRound(origin.y()*sy),
+                qRound(canvas->width()*sx), qRound(canvas->height()*sy));
+            const auto directory = qEnvironmentVariable("LIVEKIT_PRESENTATION_EVIDENCE_DIR");
+            if (!directory.isEmpty()) TEST_CHECK(image.save(QDir(directory).filePath(name + ".png")));
+            return image;
+        };
+        auto* banner = window._recoveryBanner;
+        banner->setStyleSheet("QLabel { background: rgb(20, 220, 60); color: black; }");
+        banner->setText("GL recovery overlay");
+        banner->setGeometry(20, 20, 260, 38); banner->show();
+        auto image = gpuImage(window, "recovery-overlay");
+        auto sample = [&](const QImage& input) {
+            return input.pixelColor(25 * input.width() / canvas->width(), 25 * input.height() / canvas->height());
+        };
+        TEST_CHECK(sample(image).green() > 200 && sample(image).red() < 35);
+        TEST_CHECK(sample(capture("native-gl-presented", true)).green() > 200);
+        window.resize(window.width() + 40, window.height() + 30);
+        banner->setGeometry(20, 20, 260, 38);
+        image = capture("native-gl-resized", true);
+        TEST_CHECK(sample(image).green() > 200 && native == window.winId());
+        banner->setStyleSheet("QLabel { background: rgb(30, 60, 220); color: white; }");
+        image = gpuImage(window, "recovery-updated");
+        TEST_CHECK(sample(image).blue() > 200 && sample(image).green() < 80);
+        banner->hide();
+        image = gpuImage(window, "recovery-hidden");
+        TEST_CHECK(sample(image).blue() < 200);
+        // Retire on UI without touching a render-owner context. Late completion
+        // must not reactivate the GPU session before/after queued CPU fallback.
+        canvas->fail(livekit::render::RenderGpuFailure::DeviceLost);
+        TEST_CHECK(!canvas->rendererReady() && window._usingGpuBackend.load());
+        QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
+        TEST_CHECK(!window._usingGpuBackend.load() && !canvas->isVisible() && native == window.winId());
+        TEST_CHECK(window._remoteRenderSession->backend() == livekit::render::VideoRenderSession::Backend::QtCpu);
+        const auto fallbackDiagnostics = window.renderDiagnostics();
+        TEST_CHECK(fallbackDiagnostics.actual_backend == livekit::render::RenderBackend::QtCpu &&
+            fallbackDiagnostics.gpu_failure == livekit::render::RenderGpuFailure::DeviceLost &&
+            fallbackDiagnostics.fallback_reason == livekit::render::RenderFallbackReason::GpuDeviceLost);
+        banner->setStyleSheet("QLabel { background: rgb(20, 220, 60); color: black; }");
+        banner->setGeometry(20, 20, 260, 38); banner->show(); banner->raise();
+        TEST_CHECK(sample(capture("native-cpu-fallback", false)).green() > 200);
+        std::cout << "P3_GL_SURFACE PASS: native presented pixels/swap/resize, recovery overlay/update/hide, context-retirement injection, queued CPU pixels, stable top-level window\n";
+    }
+    static void checkGlDiagnostics(MeetingUI::MeetingRoomWindow& window) {
+        auto* canvas = dynamic_cast<livekit::render::GlVideoCanvas*>(window._videoCanvas);
+        TEST_CHECK(canvas && canvas->rendererReady() && window._usingGpuBackend.load());
+        auto diagnostics = window.renderDiagnostics();
+        TEST_CHECK(diagnostics.requested_backend == livekit::render::RenderBackend::OpenGL &&
+            diagnostics.actual_backend == livekit::render::RenderBackend::OpenGL &&
+            diagnostics.abi_version == LK_RENDER_ABI_V1 &&
+            diagnostics.module_version == LK_RENDER_MODULE_VERSION &&
+            diagnostics.driver_description == livekit::render::SanitizeRenderDriverDescription(canvas->driverDescription()) &&
+            !diagnostics.driver_description.isEmpty() &&
+            diagnostics.gpu_failure == livekit::render::RenderGpuFailure::None &&
+            diagnostics.fallback_reason == livekit::render::RenderFallbackReason::None);
+        TEST_CHECK(!livekit::render::RenderDiagnosticsSafeSummary(diagnostics).contains(
+            diagnostics.driver_description, Qt::CaseSensitive));
+
+        canvas->fail(livekit::render::RenderGpuFailure::DeviceLost);
+        QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
+        diagnostics = window.renderDiagnostics();
+        TEST_CHECK(!window._usingGpuBackend.load() &&
+            diagnostics.actual_backend == livekit::render::RenderBackend::QtCpu &&
+            diagnostics.gpu_failure == livekit::render::RenderGpuFailure::DeviceLost &&
+            diagnostics.fallback_reason == livekit::render::RenderFallbackReason::GpuDeviceLost);
+        std::cout << "RENDER_DIAGNOSTICS_GL PASS: active backend, ABI/module version, sanitized driver, typed device-loss fallback\n";
+    }
+    static void checkDriverLoss(MeetingUI::MeetingRoomWindow& window, const QString& directory,
+            bool smoke, bool angle, bool liveMeeting = false,
+            const std::shared_ptr<OpenMeeting::MeetingCoordinator>& coordinator = {}) {
+        using Microsoft::WRL::ComPtr;
+        TEST_CHECK(QDir().mkpath(directory));
+        const QString api = angle ? "angle" : "dx11";
+        if (angle) TEST_CHECK(QOpenGLContext::openGLModuleType() == QOpenGLContext::LibGLES);
+        else {
+            TEST_CHECK(!qEnvironmentVariableIsSet("LIVEKIT_RENDER_BACKEND"));
+            TEST_CHECK(livekit::render::BackendModule::DefaultBackend() == LK_RENDER_BACKEND_DX11);
+        }
+        std::shared_ptr<livekit::VideoSource> source;
+        if (!liveMeeting) {
+            source = std::make_shared<livekit::VideoSource>(16, 9);
+            bindLocal(window, source);
+        } else {
+            TEST_CHECK(!angle && coordinator);
+        }
+        TEST_CHECK(enableGpu(window, true));
+        layout(window, MeetingUI::VideoViewMode::Grid);
+        auto* canvas = window._videoCanvas;
+        TEST_CHECK(canvas && canvas->rendererReady());
+        auto* gl = dynamic_cast<livekit::render::GlVideoCanvas*>(canvas);
+        DXGI_ADAPTER_DESC rendererDescription{};
+        QString driver;
+        if (angle) {
+            TEST_CHECK(gl);
+            driver = gl->driverDescription();
+            TEST_CHECK(driver.contains("OpenGL ES") && driver.contains("ANGLE") && driver.contains("Direct3D11"));
+            TEST_CHECK(!GetModuleHandleW(L"livekit-render-dx11.dll"));
+        } else {
+            auto* dx = dynamic_cast<livekit::render::ModuleVideoCanvas*>(canvas);
+            TEST_CHECK(dx && !gl && canvas->backendName() == "DX11");
+            TEST_CHECK(GetModuleHandleW(L"livekit-render-dx11.dll") && !GetModuleHandleW(L"livekit-render-opengl.dll"));
+            rendererDescription = onDxOwner(*dx, [](livekit::render::BackendDevice& device) {
+                const auto renderer = nativeRenderer(device);
+                TEST_CHECK(renderer.device()->GetDeviceRemovedReason() == S_OK);
+                ComPtr<IDXGIDevice> dxgi; ComPtr<IDXGIAdapter> adapter;
+                DXGI_ADAPTER_DESC description{};
+                TEST_CHECK(SUCCEEDED(renderer.device()->QueryInterface(IID_PPV_ARGS(dxgi.GetAddressOf()))) &&
+                    SUCCEEDED(dxgi->GetAdapter(adapter.GetAddressOf())) && SUCCEEDED(adapter->GetDesc(&description)));
+                return description;
+            });
+            driver = "DX11 / " + QString::fromWCharArray(rendererDescription.Description);
+        }
+        std::cout << api.toUpper().toStdString() << "_TDR_DRIVER " << driver.toStdString() << std::endl;
+        const auto native = window.winId();
+        QElapsedTimer clock; clock.start();
+        const auto wait = [&](const std::function<bool()>& done, int timeout = 5000) {
+            QElapsedTimer deadline; deadline.start();
+            while (!done() && deadline.elapsed() < timeout) QApplication::processEvents(QEventLoop::AllEvents, 20);
+            return done();
+        };
+        const auto cpuActive = [&] {
+            return !window._usingGpuBackend.load() &&
+                window._remoteRenderSession->backend() == livekit::render::VideoRenderSession::Backend::QtCpu;
+        };
+        const auto videoTile = [&]() -> MeetingUI::VideoTileWidget* {
+            if (!liveMeeting) return window._localTile;
+            for (const auto& [trackSid, binding] : window._remoteVideoBindings) {
+                auto* tile = window.remoteVideoTile(trackSid);
+                if (tile && tile->isVideoActive()) return tile;
+            }
+            return nullptr;
+        };
+        const auto renderKey = [&] {
+            auto* tile = videoTile();
+            return tile ? tile->renderKey().toStdString() : std::string();
+        };
+        const auto sendFrame = [&] {
+            if (source) {
+                auto frame = livekit::VideoFrame::create(16, 9, livekit::VideoBufferType::RGBA);
+                const bool cpu = cpuActive();
+                for (size_t i = 0; i < frame.dataSize(); i += 4) {
+                    frame.data()[i] = cpu ? 20 : 240; frame.data()[i + 1] = cpu ? 80 : 20;
+                    frame.data()[i + 2] = cpu ? 220 : 20; frame.data()[i + 3] = 255;
+                }
+                source->captureFrame(frame, {});
+            }
+            render(window); // Production latest-frame/session/CPU-or-GPU entry.
+        };
+        const auto capture = [&](const QString& name, const std::function<bool(QColor)>& accept) {
+            const auto start = clock.elapsed();
+            QImage image;
+            QColor color;
+            TEST_CHECK(wait([&] {
+                if (clock.elapsed() - start <= 180) return false;
+                if (liveMeeting) render(window);
+                auto* tile = videoTile();
+                if (!tile) return false;
+                image = window.screen()->grabWindow(native).toImage();
+                if (image.isNull()) return false;
+                const auto point = tile->mapTo(&window,
+                    QPoint(tile->width() / 2, tile->height() / 2));
+                color = image.pixelColor(point.x() * image.width() / window.width(),
+                    point.y() * image.height() / window.height());
+                return accept(color);
+            }, liveMeeting ? 6000 : 1500));
+            TEST_CHECK(!image.isNull());
+            TEST_CHECK(image.save(QDir(directory).filePath(name + ".png")));
+            return color;
+        };
+        sendFrame();
+        TEST_CHECK(wait([&] {
+            if (liveMeeting) render(window);
+            const auto key = renderKey();
+            const auto stats = statistics(window);
+            return (!liveMeeting || coordinator->state() == OpenMeeting::MeetingState::InMeeting) &&
+                !key.empty() && canvas->hasVideo(key) && stats.delivered_to_gpu >= (liveMeeting ? 10 : 1) &&
+                stats.attached_track_count >= (liveMeeting ? 1u : 0u) && (!gl || gl->scenePresentedForTest());
+        }, liveMeeting ? 45000 : 5000));
+        const auto colorful = [](QColor color) {
+            const auto high = std::max({color.red(), color.green(), color.blue()});
+            const auto low = std::min({color.red(), color.green(), color.blue()});
+            return high > 150 && high - low > 80;
+        };
+        const auto red = [](QColor color) {
+            return color.red() > 220 && color.green() < 40 && color.blue() < 40;
+        };
+        capture("native-" + api + (liveMeeting ? "-live-remote-before-reset" : "-before-reset"),
+            liveMeeting ? std::function<bool(QColor)>(colorful) : std::function<bool(QColor)>(red));
+        ComPtr<ID3D11Device> witness;
+        TEST_CHECK(SUCCEEDED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
+            nullptr, 0, D3D11_SDK_VERSION, witness.GetAddressOf(), nullptr, nullptr)));
+        TEST_CHECK(witness->GetDeviceRemovedReason() == S_OK);
+        ComPtr<IDXGIDevice> dxgi; ComPtr<IDXGIAdapter> adapter; DXGI_ADAPTER_DESC description{};
+        TEST_CHECK(SUCCEEDED(witness.As(&dxgi)) && SUCCEEDED(dxgi->GetAdapter(adapter.GetAddressOf())) &&
+            SUCCEEDED(adapter->GetDesc(&description)));
+        const auto luid = QString("%1:%2").arg(quint32(description.AdapterLuid.HighPart), 8, 16, QLatin1Char('0'))
+            .arg(description.AdapterLuid.LowPart, 8, 16, QLatin1Char('0'));
+        if (!angle) TEST_CHECK(rendererDescription.AdapterLuid.HighPart == description.AdapterLuid.HighPart &&
+            rendererDescription.AdapterLuid.LowPart == description.AdapterLuid.LowPart);
+        int failures = 0, lateReady = 0, uiTicks = 0;
+        qint64 lastTick = clock.elapsed(), maxUiGap = 0, resetObservedMs = -1, fallbackMs = -1;
+        QObject scope; // Disconnect captures before returning, including failure paths.
+        QObject::connect(canvas, &livekit::render::VideoCanvas::rendererUnavailable, &scope, [&] { ++failures; });
+        QObject::connect(canvas, &livekit::render::VideoCanvas::rendererInitialized, &scope, [&] { ++lateReady; });
+        const auto statePath = QDir(directory).filePath("driver-observer.json");
+        const auto writeState = [&](const QString& phase) {
+            const auto stats = statistics(window);
+            const auto diagnostics = window.renderDiagnostics();
+            QSaveFile file(statePath); TEST_CHECK(file.open(QIODevice::WriteOnly));
+            file.write(QJsonDocument(QJsonObject{
+                {"pid", double(QCoreApplication::applicationPid())}, {"timestampMs", double(QDateTime::currentMSecsSinceEpoch())},
+                {"phase", phase}, {"api", api}, {"scenario", liveMeeting ? "live-meeting" : "fixture"},
+                {"driver", driver}, {"adapterLuid", luid}, {"smoke", smoke},
+                {"reason", QString("0x%1").arg(quint32(witness->GetDeviceRemovedReason()), 0, 16)},
+                // The renderer device is owner-only and unavailable after retirement.
+                {"rendererDeviceReason", QJsonValue()},
+                {"defaultBackend", !angle && !qEnvironmentVariableIsSet("LIVEKIT_RENDER_BACKEND")},
+                {"nativeGpuPixelsVerified", true},
+                {"meetingConnected", liveMeeting && coordinator && coordinator->state() == OpenMeeting::MeetingState::InMeeting},
+                {"remoteTrackCount", liveMeeting ? double(stats.attached_track_count) : 0.0},
+                {"remoteMediaFlowing", liveMeeting && stats.attached_track_count > 0 &&
+                    (stats.delivered_to_gpu > 0 || stats.delivered_to_qt_cpu > 0)},
+                {"gpuReady", canvas->rendererReady()}, {"cpuActive", cpuActive()},
+                // DX11 has no public present counter; do not mislabel submitted frames as swaps.
+                {"swaps", gl ? QJsonValue(double(gl->presentedFrames())) : QJsonValue()},
+                {"failures", failures}, {"lateReady", lateReady},
+                {"renderBackend", livekit::render::RenderBackendName(diagnostics.actual_backend)},
+                {"renderAbiVersion", int(diagnostics.abi_version)},
+                {"renderModuleVersion", int(diagnostics.module_version)},
+                {"renderDriver", diagnostics.driver_description},
+                {"hostFailure", livekit::render::RenderGpuFailureName(diagnostics.gpu_failure)},
+                {"fallbackReason", livekit::render::RenderFallbackReasonName(diagnostics.fallback_reason)},
+                {"uiTicks", uiTicks}, {"maxUiGapMs", double(maxUiGap)},
+                {"resetObservedMs", double(resetObservedMs)}, {"fallbackMs", double(fallbackMs)},
+                {"deliveredToCpu", double(stats.delivered_to_qt_cpu)}, {"deliveredToGpu", double(stats.delivered_to_gpu)},
+                {"topLevelStable", window.winId() == native}
+            }).toJson()); TEST_CHECK(file.commit());
+        };
+        QString phase = smoke ? "smoke" : "waiting";
+        QTimer heartbeat, producer;
+        QObject::connect(&heartbeat, &QTimer::timeout, &scope, [&] {
+            const auto now = clock.elapsed(); maxUiGap = std::max(maxUiGap, now - lastTick); lastTick = now;
+            ++uiTicks; writeState(phase);
+        });
+        QObject::connect(&producer, &QTimer::timeout, &scope, sendFrame);
+        heartbeat.start(250); producer.start(33); writeState(phase);
+        std::cout << api.toUpper().toStdString()
+            << (liveMeeting ? "_LIVE_MEETING_WAITING_FOR_REAL_DRIVER_LOSS" :
+                (smoke ? "_OBSERVER_SMOKE" : "_WAITING_FOR_REAL_DRIVER_LOSS"))
+            << " pid=" << QCoreApplication::applicationPid() << " adapter=" << luid.toStdString() << std::endl;
+        if (smoke) {
+            if (gl) gl->fail(livekit::render::RenderGpuFailure::DeviceLost);
+            else canvas->notifyRendererUnavailable();
+        }
+        const bool recovered = wait([&] {
+            if (FAILED(witness->GetDeviceRemovedReason()) && resetObservedMs < 0) resetObservedMs = clock.elapsed();
+            if (cpuActive() && fallbackMs < 0) fallbackMs = clock.elapsed();
+            return (smoke || resetObservedMs >= 0) && cpuActive();
+        }, smoke ? 5000 : 180000);
+        phase = recovered ? "observed" : "timeout"; writeState(phase);
+        TEST_CHECK(recovered && failures == 1 && !lateReady && window.winId() == native);
+        TEST_CHECK(smoke ? witness->GetDeviceRemovedReason() == S_OK : FAILED(witness->GetDeviceRemovedReason()));
+        TEST_CHECK(!canvas->rendererReady() && !canvas->isVisible());
+        const auto gpuCount = statistics(window).delivered_to_gpu;
+        const auto cpuCount = statistics(window).delivered_to_qt_cpu;
+        const auto ticksBefore = uiTicks;
+        heartbeat.start(25);
+        TEST_CHECK(wait([&] {
+            return uiTicks >= ticksBefore + 10 && statistics(window).delivered_to_qt_cpu > cpuCount &&
+                (!liveMeeting || coordinator->state() == OpenMeeting::MeetingState::InMeeting);
+        }, liveMeeting ? 15000 : 5000));
+        const auto blue = [](QColor color) { return color.blue() > 200 && color.green() > 60 && color.green() < 100 && color.red() < 40; };
+        capture("native-" + api + (liveMeeting ? "-live-remote-cpu-after-reset" : "-cpu-after-reset"),
+            liveMeeting ? std::function<bool(QColor)>(colorful) : std::function<bool(QColor)>(blue));
+        window.resize(window.width() + 40, window.height() + 30);
+        window.hide(); QApplication::processEvents(); window.show();
+        capture("native-" + api + (liveMeeting ? "-live-remote-cpu-responsive" : "-cpu-responsive"),
+            liveMeeting ? std::function<bool(QColor)>(colorful) : std::function<bool(QColor)>(blue));
+        TEST_CHECK(statistics(window).delivered_to_gpu == gpuCount && !lateReady && failures == 1 && window.winId() == native);
+        TEST_CHECK(!liveMeeting || (coordinator->state() == OpenMeeting::MeetingState::InMeeting &&
+            statistics(window).attached_track_count > 0 && statistics(window).delivered_to_qt_cpu > cpuCount));
+        producer.stop(); heartbeat.stop(); phase = "verified"; writeState(phase);
+        std::cout << api.toUpper().toStdString()
+            << (liveMeeting ? "_LIVE_MEETING_REAL_TDR PASS" : (smoke ? "_OBSERVER_SMOKE PASS" : "_REAL_TDR PASS"))
+            << " reason=0x" << std::hex << quint32(witness->GetDeviceRemovedReason()) << std::dec
+            << " maxUiGapMs=" << maxUiGap
+            << " uiTicks=" << uiTicks << " CPU frames=" << statistics(window).delivered_to_qt_cpu << std::endl;
+    }
+    static void waitGlOwners() {
+        QElapsedTimer wait; wait.start();
+        while (!livekit::render::GlVideoCanvas::workersIdleForTest() && wait.elapsed() < 5000)
+            QApplication::processEvents(QEventLoop::AllEvents, 20);
+        TEST_CHECK(livekit::render::GlVideoCanvas::workersIdleForTest());
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    }
+    static bool glWorkersIdle() {
+        return livekit::render::GlVideoCanvas::workersIdleForTest();
+    }
+    static void waitDxOwners() {
+        QElapsedTimer wait; wait.start();
+        while (!livekit::render::ModuleVideoCanvas::workersIdleForTest() && wait.elapsed() < 5000)
+            QApplication::processEvents(QEventLoop::AllEvents, 20);
+        TEST_CHECK(livekit::render::ModuleVideoCanvas::workersIdleForTest());
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+    }
+    static livekit::render::ModuleVideoCanvas& dxCanvas(MeetingUI::MeetingRoomWindow& window) {
+        auto* canvas = dynamic_cast<livekit::render::ModuleVideoCanvas*>(window._videoCanvas);
+        TEST_CHECK(canvas && !dynamic_cast<livekit::render::GlVideoCanvas*>(canvas));
+        return *canvas;
+    }
+    static QWindow* dxSurface(MeetingUI::MeetingRoomWindow& window) {
+        return dxCanvas(window).windowSurface();
+    }
+    static void requestDxScene(MeetingUI::MeetingRoomWindow& window) {
+        // A scheduled scene may already have failed after hook installation.
+        // Rendering a retired canvas is deliberately a no-op in production.
+        dxCanvas(window).render();
+    }
+    static void installDxHooks(MeetingUI::MeetingRoomWindow& window, lk_render_dx11_test_hooks_v1 hooks) {
+        onDxOwner(dxCanvas(window), [hooks](livekit::render::BackendDevice& device) {
+            lk_render_dx11_test_control_v1 control{};
+            TEST_CHECK(device.QueryExtension(LK_RENDER_EXT_DX11_TEST_HOOKS, LK_RENDER_DX11_TEST_HOOKS_V1,
+                sizeof(control), &control) == LK_RENDER_OK);
+            TEST_CHECK(control.set_hooks && control.set_hooks(control.device, &hooks) == LK_RENDER_OK);
+        });
+    }
+    static void throwOnDxOwner(MeetingUI::MeetingRoomWindow& window) {
+        dxCanvas(window).runOnOwnerForTest([](livekit::render::BackendDevice&) {
+            TEST_CHECK(QThread::currentThread() != qApp->thread());
+            throw std::runtime_error("deterministic render owner exception");
+        });
+    }
+    static void simulateModuleFailure(MeetingUI::MeetingRoomWindow& window) {
+        window._videoCanvas->notifyRendererUnavailable();
+        TEST_CHECK(window._usingGpuBackend.load()); // Delivery is queued until draw returns.
+        QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
+        TEST_CHECK(!window._usingGpuBackend.load());
+    }
+    static void queueModuleFailure(MeetingUI::MeetingRoomWindow& window) {
+        TEST_CHECK(window._videoCanvas && window._usingGpuBackend.load());
+        window._videoCanvas->notifyRendererUnavailable();
+        TEST_CHECK(window._usingGpuBackend.load());
+    }
     static void checkGpuAspect() {
         using Microsoft::WRL::ComPtr;
-        livekit::dx11::Dx11VideoCanvas canvas;
+        std::unique_ptr<livekit::render::VideoCanvas> owner(livekit::render::CreateVideoCanvas(nullptr));
+        TEST_CHECK(owner);
+        auto &canvas = *static_cast<livekit::render::ModuleVideoCanvas*>(owner.get());
         canvas.setAttribute(Qt::WA_DontShowOnScreen);
         canvas.resize(640, 360);
         canvas.show();
+        QElapsedTimer initialized; initialized.start();
+        while (!canvas.rendererReady() && canvas.rendererPending() && initialized.elapsed() < 6000)
+            QApplication::processEvents(QEventLoop::AllEvents, 20);
         TEST_CHECK(canvas.rendererReady());
+        const auto diagnostics = canvas.renderDiagnostics();
+        TEST_CHECK(diagnostics.requested_backend == livekit::render::RenderBackend::Dx11 &&
+            diagnostics.actual_backend == livekit::render::RenderBackend::Dx11 &&
+            diagnostics.abi_version == LK_RENDER_ABI_V1 &&
+            diagnostics.module_version == LK_RENDER_MODULE_VERSION &&
+            diagnostics.driver_description.startsWith("DX11") &&
+            diagnostics.gpu_failure == livekit::render::RenderGpuFailure::None &&
+            diagnostics.fallback_reason == livekit::render::RenderFallbackReason::None);
         for (const auto size : {QSize(400, 300), QSize(160, 90), QSize(90, 160), QSize(234, 66)}) {
             for (const auto rotation : {livekit::VideoRotation::VIDEO_ROTATION_0,
                                        livekit::VideoRotation::VIDEO_ROTATION_90}) {
@@ -230,37 +691,24 @@ public:
                 canvas.updateI420Frame("aspect", frame);
                 // Reproduce a stale, differently shaped backbuffer after a
                 // native-window size change; the draw must resynchronize it.
-                TEST_CHECK(canvas.renderer_.Resize(800, 800));
-                canvas.render();
+                auto staleTarget = canvas.target_;
+                staleTarget.pixel_width = staleTarget.pixel_height = 800;
+                onDxOwner(canvas, [staleTarget](livekit::render::BackendDevice& device) {
+                    TEST_CHECK(device.Resize(staleTarget) == LK_RENDER_OK);
+                });
+                const auto image = onDxOwner(canvas, [](livekit::render::BackendDevice& device) {
+                    return dxImage(device);
+                });
                 RECT client{};
-                TEST_CHECK(GetClientRect(reinterpret_cast<HWND>(canvas.winId()), &client));
-                TEST_CHECK(canvas.renderer_.width() == client.right && canvas.renderer_.height() == client.bottom);
-                ComPtr<ID3D11RenderTargetView> view;
-                canvas.renderer_.context()->OMGetRenderTargets(1, view.GetAddressOf(), nullptr);
-                TEST_CHECK(view);
-                ComPtr<ID3D11Resource> resource;
-                view->GetResource(resource.GetAddressOf());
-                ComPtr<ID3D11Texture2D> texture;
-                TEST_CHECK(SUCCEEDED(resource.As(&texture)));
-                D3D11_TEXTURE2D_DESC desc{};
-                texture->GetDesc(&desc);
-                desc.Usage = D3D11_USAGE_STAGING;
-                desc.BindFlags = 0;
-                desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-                desc.MiscFlags = 0;
-                ComPtr<ID3D11Texture2D> readback;
-                TEST_CHECK(SUCCEEDED(canvas.renderer_.device()->CreateTexture2D(&desc, nullptr, readback.GetAddressOf())));
-                canvas.renderer_.context()->CopyResource(readback.Get(), texture.Get());
-                D3D11_MAPPED_SUBRESOURCE mapped{};
-                TEST_CHECK(SUCCEEDED(canvas.renderer_.context()->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped)));
-                int left = desc.Width, top = desc.Height, right = -1, bottom = -1;
-                for (unsigned row = 0; row < desc.Height; ++row) for (unsigned col = 0; col < desc.Width; ++col) {
-                    const auto *pixel = static_cast<const uint8_t*>(mapped.pData) + row * mapped.RowPitch + col * 4;
-                    if (pixel[0] < 240 || pixel[1] < 240 || pixel[2] < 240) continue;
+                TEST_CHECK(GetClientRect(reinterpret_cast<HWND>(canvas.windowSurface()->winId()), &client));
+                TEST_CHECK(image.width() == client.right && image.height() == client.bottom);
+                int left = image.width(), top = image.height(), right = -1, bottom = -1;
+                for (int row = 0; row < image.height(); ++row) for (int col = 0; col < image.width(); ++col) {
+                    const auto pixel = image.pixelColor(col, row);
+                    if (pixel.red() < 240 || pixel.green() < 240 || pixel.blue() < 240) continue;
                     left = std::min(left, int(col)); right = std::max(right, int(col));
                     top = std::min(top, int(row)); bottom = std::max(bottom, int(row));
                 }
-                canvas.renderer_.context()->Unmap(readback.Get(), 0);
                 const double expected = rotation == livekit::VideoRotation::VIDEO_ROTATION_0
                     ? double(size.width()) / size.height() : double(size.height()) / size.width();
                 TEST_CHECK(right >= left && bottom >= top);
@@ -284,9 +732,34 @@ public:
         TEST_CHECK(window._remoteRenderSession);
         return window._remoteRenderSession->statistics();
     }
+    static uint64_t renderGeneration(const MeetingUI::MeetingRoomWindow &window) {
+        TEST_CHECK(window._remoteRenderSession);
+        return window._remoteRenderSession->generation();
+    }
+    static bool renderSessionActive(const MeetingUI::MeetingRoomWindow &window) {
+        return window._remoteRenderSession && window._remoteRenderSession->active();
+    }
+    static bool usingGpu(const MeetingUI::MeetingRoomWindow &window) {
+        return window._usingGpuBackend.load(std::memory_order_acquire);
+    }
     static void render(MeetingUI::MeetingRoomWindow &window) {
         TEST_CHECK(QThread::currentThread() == window.thread());
         window.onRemoteRenderTick();
+    }
+    static void renderGpuCanvas(MeetingUI::MeetingRoomWindow &window) {
+        TEST_CHECK(window._videoCanvas && window._usingGpuBackend.load());
+        window._videoCanvas->render();
+    }
+    static void bindLocal(MeetingUI::MeetingRoomWindow &window,
+            const std::shared_ptr<livekit::VideoSource> &source, bool enabled = true) {
+        window._localVideoSource = source;
+        window._config.videoEnabled = enabled;
+        window._localTile->setVideoActive(enabled);
+        window.updateVideoLayout();
+    }
+    static void stopRenderSession(MeetingUI::MeetingRoomWindow &window) {
+        window.stopLiveKitSession();
+        TEST_CHECK(!window._remoteRenderSession->active());
     }
     static bool paused(const MeetingUI::VideoTileWidget *tile) {
         TEST_CHECK(tile);
@@ -304,17 +777,45 @@ public:
         window._stageContainer->render(&image);
         TEST_CHECK(image.save(QDir(directory).filePath(name + ".png")));
     }
-    static bool enableGpu(MeetingUI::MeetingRoomWindow &window) {
-        if (!livekit::dx11::Dx11VideoCanvas::IsHardwareBackendAllowed()) return false;
-        window.setAttribute(Qt::WA_DontShowOnScreen);
-        window._dx11Canvas = new livekit::dx11::Dx11VideoCanvas(window._stageContainer);
-        QObject::connect(window._dx11Canvas, &livekit::dx11::Dx11VideoCanvas::rendererUnavailable,
-            &window, &MeetingUI::MeetingRoomWindow::fallBackToQtCpuBackend);
+    static livekit::render::VideoCanvas* startGpu(MeetingUI::MeetingRoomWindow &window, bool visible = false,
+            std::shared_ptr<livekit::render::BackendModule> module = {}) {
+        if (!(GetSystemMetrics(SM_REMOTESESSION) == 0)) return nullptr;
+        const bool gl = qgetenv("LIVEKIT_RENDER_BACKEND") == "opengl";
+        window.setAttribute(Qt::WA_DontShowOnScreen, !gl && !visible);
+        window._videoCanvas = module
+            ? new livekit::render::ModuleVideoCanvas(std::move(module), window._stageContainer)
+            : livekit::render::CreateVideoCanvas(window._stageContainer, &window._renderDiagnostics);
+        if (!window._videoCanvas) return nullptr;
+        QObject::connect(window._videoCanvas, &livekit::render::VideoCanvas::rendererUnavailable,
+            &window, &MeetingUI::MeetingRoomWindow::fallBackToQtCpuBackend, Qt::QueuedConnection);
         window.show(); // Production showEvent selects the mutually exclusive backend.
-        return window._usingDx11Backend.load();
+        return window._videoCanvas;
+    }
+    static bool enableGpu(MeetingUI::MeetingRoomWindow &window, bool visible = false,
+            std::shared_ptr<livekit::render::BackendModule> module = {}) {
+        if (!startGpu(window, visible, std::move(module))) return false;
+        {
+            QElapsedTimer wait; wait.start();
+            while (!window._usingGpuBackend.load() && window._videoCanvas->rendererPending() && wait.elapsed() < 6000)
+                QApplication::processEvents(QEventLoop::AllEvents, 20);
+            QApplication::processEvents(); // queued initialized signal
+            TEST_CHECK(window._usingGpuBackend.load());
+        }
+        return window._usingGpuBackend.load();
+    }
+    static livekit::render::GlVideoCanvas& glCanvas(MeetingUI::MeetingRoomWindow& window) {
+        auto* canvas = dynamic_cast<livekit::render::GlVideoCanvas*>(window._videoCanvas);
+        TEST_CHECK(canvas);
+        return *canvas;
+    }
+    static void setGlBeforePresent(MeetingUI::MeetingRoomWindow& window, std::function<void()> hook) {
+        glCanvas(window).setBeforePresentForTest(std::move(hook));
+    }
+    static void requestGlScene(MeetingUI::MeetingRoomWindow& window) {
+        glCanvas(window).requestRender();
     }
     static bool gpuHasFrame(MeetingUI::MeetingRoomWindow &window, const QString &key) {
-        return window._dx11Canvas->hasVideo(key.toStdString());
+        return window._videoCanvas->hasVideo(key.toStdString());
     }
     static void prepareResizeWindow(MeetingUI::MeetingRoomWindow &window) {
         window.setWindowFlags(Qt::Window | Qt::FramelessWindowHint |
@@ -359,7 +860,7 @@ public:
         }
         TEST_CHECK(tested > 0);
         // Card content is still delivered to the child HWND, not the window frame.
-        const auto canvas = reinterpret_cast<HWND>(window._dx11Canvas->winId());
+        const auto canvas = reinterpret_cast<HWND>(window._videoCanvas->winId());
         RECT canvasRect{};
         TEST_CHECK(GetClientRect(canvas, &canvasRect));
         POINT center{canvasRect.right / 2, canvasRect.bottom / 2};
@@ -381,16 +882,16 @@ public:
     static void gpuPin(MeetingUI::MeetingRoomWindow &window, MeetingUI::VideoTileWidget *tile) {
         const QPoint point = tile->pos() + tile->pinButtonRect().center();
         QMouseEvent move(QEvent::MouseMove, point, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
-        QApplication::sendEvent(window._dx11Canvas, &move);
+        QApplication::sendEvent(window._videoCanvas, &move);
         QMouseEvent press(QEvent::MouseButtonPress, point, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-        QApplication::sendEvent(window._dx11Canvas, &press);
+        QApplication::sendEvent(window._videoCanvas, &press);
         QMouseEvent release(QEvent::MouseButtonRelease, point, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
-        QApplication::sendEvent(window._dx11Canvas, &release);
+        QApplication::sendEvent(window._videoCanvas, &release);
     }
     static void checkOrder(MeetingUI::MeetingRoomWindow &window, MeetingUI::VideoTileWidget *main) {
-        TEST_CHECK(window._dx11Canvas->tiles_.front().identity == main->renderKey().toStdString());
+        TEST_CHECK(window._videoCanvas->tiles_.front().identity == main->renderKey().toStdString());
         TEST_CHECK(main->geometry() == window._stageContainer->rect());
-        for (const auto &item : window._dx11Canvas->tiles_) {
+        for (const auto &item : window._videoCanvas->tiles_) {
             MeetingUI::VideoTileWidget *tile = nullptr;
             if (window._localTile->renderKey().toStdString() == item.identity) tile = window._localTile;
             for (auto &[id, candidate] : window._remoteTiles)
@@ -401,13 +902,13 @@ public:
         }
     }
     static qint64 decorationKey(MeetingUI::MeetingRoomWindow &window, MeetingUI::VideoTileWidget *tile) {
-        return window._dx11Canvas->decorations_.at(tile->renderKey().toStdString()).cacheKey;
+        return window._videoCanvas->decorations_.at(tile->renderKey().toStdString()).cacheKey;
     }
     static bool decorationExists(MeetingUI::MeetingRoomWindow &window, const std::string &key) {
-        return window._dx11Canvas->decorations_.count(key) != 0;
+        return window._videoCanvas->decorations_.count(key) != 0;
     }
     static bool gpuDirty(MeetingUI::MeetingRoomWindow &window) {
-        return window._dx11Canvas->frame_dirty_.exchange(false);
+        return window._videoCanvas->frame_dirty_.exchange(false);
     }
     static void resizeWithSidebar(MeetingUI::MeetingRoomWindow &window, const QSize &size) {
         if (!window._participantsSidebar) window._participantsSidebar =
@@ -424,44 +925,49 @@ public:
         QResizeEvent resize(window.size(), window.size());
         window.resizeEvent(&resize); // Exercise the production layout, including stacking.
     }
+    static void pin(MeetingUI::MeetingRoomWindow &window, MeetingUI::VideoTileWidget *tile) {
+        TEST_CHECK(tile);
+        window.setPinnedTile(tile->renderKey(), true);
+    }
     static QString doubleClickGpu(MeetingUI::MeetingRoomWindow &window, const QPoint &point) {
         QString hit;
-        const auto connection = QObject::connect(window._dx11Canvas,
-            &livekit::dx11::Dx11VideoCanvas::tileDoubleClicked, &window,
+        const auto connection = QObject::connect(window._videoCanvas,
+            &livekit::render::VideoCanvas::tileDoubleClicked, &window,
             [&](const QString &key) { hit = key; });
         QMouseEvent event(QEvent::MouseButtonDblClick, point, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
-        QApplication::sendEvent(window._dx11Canvas, &event);
+        if (auto* gl = dynamic_cast<livekit::render::GlVideoCanvas*>(window._videoCanvas))
+            QApplication::sendEvent(gl->windowSurface(), &event);
+        else QApplication::sendEvent(window._videoCanvas, &event);
         QObject::disconnect(connection);
         return hit;
     }
     static QImage gpuImage(MeetingUI::MeetingRoomWindow &window, const QString &name) {
         using Microsoft::WRL::ComPtr;
-        auto &canvas = *window._dx11Canvas;
-        canvas.render();
-        auto &renderer = canvas.renderer_;
-        TEST_CHECK(renderer.is_initialized());
-        ComPtr<ID3D11RenderTargetView> view;
-        renderer.context()->OMGetRenderTargets(1, view.GetAddressOf(), nullptr);
-        TEST_CHECK(view);
-        ComPtr<ID3D11Resource> resource;
-        view->GetResource(resource.GetAddressOf());
-        ComPtr<ID3D11Texture2D> texture;
-        TEST_CHECK(SUCCEEDED(resource.As(&texture)));
-        D3D11_TEXTURE2D_DESC desc{};
-        texture->GetDesc(&desc);
-        TEST_CHECK(desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM);
-        desc.Usage = D3D11_USAGE_STAGING;
-        desc.BindFlags = 0;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        desc.MiscFlags = 0;
-        ComPtr<ID3D11Texture2D> readback;
-        TEST_CHECK(SUCCEEDED(renderer.device()->CreateTexture2D(&desc, nullptr, readback.GetAddressOf())));
-        renderer.context()->CopyResource(readback.Get(), texture.Get());
-        D3D11_MAPPED_SUBRESOURCE mapped{};
-        TEST_CHECK(SUCCEEDED(renderer.context()->Map(readback.Get(), 0, D3D11_MAP_READ, 0, &mapped)));
-        const QImage image = QImage(static_cast<const uchar *>(mapped.pData), desc.Width, desc.Height,
-            mapped.RowPitch, QImage::Format_RGBA8888).copy();
-        renderer.context()->Unmap(readback.Get(), 0);
+        auto &canvas = *static_cast<livekit::render::ModuleVideoCanvas*>(window._videoCanvas);
+        if (auto* gl = dynamic_cast<livekit::render::GlVideoCanvas*>(&canvas)) {
+            QApplication::processEvents();
+            gl->requestRender();
+            QElapsedTimer wait; wait.start();
+            while (!gl->scenePresentedForTest() && wait.elapsed() < 3000)
+                QApplication::processEvents(QEventLoop::AllEvents, 20);
+            TEST_CHECK(gl->scenePresentedForTest());
+            wait.restart();
+            while (wait.elapsed() < 100) QApplication::processEvents(QEventLoop::AllEvents, 20);
+            auto image = window.screen()->grabWindow(window.winId()).toImage();
+            const auto origin = canvas.mapTo(&window, QPoint());
+            const qreal sx = qreal(image.width()) / window.width(), sy = qreal(image.height()) / window.height();
+            image = image.copy(qRound(origin.x()*sx), qRound(origin.y()*sy),
+                qRound(canvas.width()*sx), qRound(canvas.height()*sy));
+            TEST_CHECK(canvas.rendererReady() && !image.isNull());
+            const auto directory = qEnvironmentVariable("LIVEKIT_PRESENTATION_EVIDENCE_DIR");
+            if (!directory.isEmpty()) {
+                TEST_CHECK(QDir().mkpath(directory));
+                TEST_CHECK(image.save(QDir(directory).filePath("after-gl-" + name + ".png")));
+            }
+            return image;
+        }
+        TEST_CHECK(canvas.rendererReady());
+        const auto image = onDxOwner(canvas, [](livekit::render::BackendDevice& device) { return dxImage(device); });
         const auto directory = qEnvironmentVariable("LIVEKIT_PRESENTATION_EVIDENCE_DIR");
         if (!directory.isEmpty()) {
             TEST_CHECK(QDir().mkpath(directory));
@@ -634,8 +1140,9 @@ public:
         return attachExisting(rtcId);
     }
     WindowMedia attachExisting(const std::string &rtcId, bool drain = true,
-                              const std::string &trackSid = "TR_PA_WINDOW") {
-        auto participant = room->remote_participants().at("PA_WINDOW");
+                              const std::string &trackSid = "TR_PA_WINDOW",
+                              const std::string &participantSid = "PA_WINDOW") {
+        auto participant = room->remote_participants().at(participantSid);
         WindowMedia media;
         media.source = webrtc::make_ref_counted<WindowMemoryVideoSource>();
         media.rtc = webrtc::VideoTrack::Create(rtcId, media.source, webrtc::Thread::Current());
@@ -2397,6 +2904,512 @@ void AccountLogoutAndDuplicateLogin() {
     std::cout << "ACCOUNT_LIFECYCLE PASS: duplicate-login/removal race, auth generation, trusted origin, logout, late reply\n";
 }
 
+void LocalRenderInputAcceptance() {
+    WindowFixture fixture;
+    fixture.open();
+    auto &window = *fixture.window;
+    auto source = std::make_shared<livekit::VideoSource>(8, 4);
+    ParticipantWindowTestAccess::bindLocal(window, source);
+    auto frame = livekit::VideoFrame::create(8, 4, livekit::VideoBufferType::RGBA);
+    for (size_t i = 0; i < frame.dataSize(); i += 4) {
+        frame.data()[i] = 240; frame.data()[i + 1] = 20;
+        frame.data()[i + 2] = 10; frame.data()[i + 3] = 255;
+    }
+    livekit::VideoCaptureOptions options;
+    options.rotation = livekit::VideoRotation::VIDEO_ROTATION_90;
+    source->captureFrame(frame, options);
+    ParticipantWindowTestAccess::render(window);
+    auto *tile = ParticipantWindowTestAccess::local(window);
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(tile).size() == QSize(4, 8));
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(tile).pixelColor(1, 1) == QColor(240, 20, 10));
+    const auto cpuBeforeGpu = ParticipantWindowTestAccess::statistics(window).delivered_to_qt_cpu;
+    if (ParticipantWindowTestAccess::enableGpu(window)) {
+        ParticipantWindowTestAccess::layout(window, MeetingUI::VideoViewMode::Grid);
+        source->captureFrame(frame, options);
+        ParticipantWindowTestAccess::render(window);
+        auto image = ParticipantWindowTestAccess::gpuImage(window, "p1-local-gpu");
+        TEST_CHECK(ParticipantWindowTestAccess::gpuHasFrame(window, "local"));
+        TEST_CHECK(ParticipantWindowTestAccess::gpuTileCenter(window, image, tile).red() > 220);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(window).delivered_to_qt_cpu == cpuBeforeGpu);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(window).delivered_to_gpu == 1);
+        for (auto format : {livekit::VideoBufferType::I420, livekit::VideoBufferType::NV12}) {
+            auto yuv = livekit::VideoFrame::create(3, 5, format);
+            std::fill(yuv.data(), yuv.data() + 15, uint8_t(81));
+            for (size_t i = 15; i < yuv.dataSize(); ++i) {
+                yuv.data()[i] = format == livekit::VideoBufferType::NV12
+                    ? ((i - 15) % 2 == 0 ? 90 : 240) : (i < 21 ? 90 : 240);
+            }
+            source->captureFrame(yuv, options);
+            ParticipantWindowTestAccess::render(window);
+            image = ParticipantWindowTestAccess::gpuImage(window,
+                format == livekit::VideoBufferType::NV12 ? "p1-local-nv12" : "p1-local-i420");
+            const auto color = ParticipantWindowTestAccess::gpuTileCenter(window, image, tile);
+            TEST_CHECK(color.red() > 220 && color.green() < 35 && color.blue() < 35);
+        }
+        // An already queued local frame must be consumed by the selected CPU backend.
+        source->captureFrame(frame, options);
+        ParticipantWindowTestAccess::simulateModuleFailure(window);
+        ParticipantWindowTestAccess::render(window);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(window).delivered_to_qt_cpu == cpuBeforeGpu + 1);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(window).delivered_to_gpu == 3);
+        TEST_CHECK(ParticipantWindowTestAccess::tileFrame(tile).size() == QSize(4, 8));
+        TEST_CHECK(!ParticipantWindowTestAccess::gpuHasFrame(window, "local"));
+        std::cout << "P1_LOCAL_GPU PASS: common canvas, exclusive dispatch, queued-frame CPU fallback\n";
+    } else {
+        std::cout << "P1_LOCAL_GPU NOT_RUN: DX11 unavailable\n";
+    }
+    source->captureFrame(frame, options);
+    ParticipantWindowTestAccess::bindLocal(window, source, false);
+    source->captureFrame(frame, options);
+    ParticipantWindowTestAccess::render(window);
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(tile).isNull());
+    ParticipantWindowTestAccess::bindLocal(window, source);
+    ParticipantWindowTestAccess::render(window);
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(tile).isNull());
+    source->captureFrame(frame, options);
+    ParticipantWindowTestAccess::render(window);
+    TEST_CHECK(!ParticipantWindowTestAccess::tileFrame(tile).isNull());
+    auto replacement = std::make_shared<livekit::VideoSource>(8, 4);
+    ParticipantWindowTestAccess::bindLocal(window, replacement);
+    const auto delivered = ParticipantWindowTestAccess::statistics(window).delivered_to_qt_cpu;
+    source->captureFrame(frame, options);
+    ParticipantWindowTestAccess::render(window);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(window).delivered_to_qt_cpu == delivered);
+    replacement->captureFrame(frame, options);
+    ParticipantWindowTestAccess::render(window);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(window).delivered_to_qt_cpu == delivered + 1);
+    ParticipantWindowTestAccess::stopRenderSession(window);
+    replacement->captureFrame(frame, options);
+    ParticipantWindowTestAccess::render(window);
+    fixture.window.reset();
+    replacement->captureFrame(frame, options); // Producer can outlive the window.
+    std::cout << "P1_LOCAL_INPUT PASS: rotation, disable/reopen, replacement, stop, window destruction\n";
+}
+
+void RenderMultiSessionLifecycleAcceptance() {
+    qunsetenv("LIVEKIT_RENDER_BACKEND"); // Exercise the Windows production default.
+    const auto modulePath = livekit::render::BackendModule::DefaultPath(
+        std::filesystem::path(QCoreApplication::applicationDirPath().toStdWString()));
+    webrtc::scoped_refptr<WindowMemoryVideoSource> retiredSource;
+    std::shared_ptr<livekit::Track> retiredTrack;
+    uint64_t firstGeneration = 0;
+    QPointer<MeetingUI::MeetingRoomWindow> retiredWindow;
+
+    {
+        WindowFixture first;
+        auto roster = WindowParticipant("first-generation");
+        roster.mutable_participants(0)->mutable_tracks(0)->set_source(livekit::proto::CAMERA);
+        auto *screenInfo = roster.mutable_participants(0)->add_tracks();
+        screenInfo->set_sid("TR_WINDOW_SCREEN");
+        screenInfo->set_name("screen");
+        screenInfo->set_type(livekit::proto::VIDEO);
+        screenInfo->set_source(livekit::proto::SCREEN_SHARE);
+        const auto secondParticipant = WindowParticipant("second-participant", true, true,
+            "PA_SECOND", "TR_SECOND", "second-peer");
+        *roster.add_participants() = secondParticipant.participants(0);
+        first.room->UpdateParticipantsForTesting(roster);
+        auto camera = first.attachExisting("lifecycle-camera-a");
+        auto screen = first.attachExisting("lifecycle-screen-a", true, "TR_WINDOW_SCREEN");
+        auto second = first.attachExisting("lifecycle-camera-second", true, "TR_SECOND", "PA_SECOND");
+        first.open();
+        TEST_CHECK(ParticipantWindowTestAccess::tileCount(*first.window) == 2);
+        TEST_CHECK(ParticipantWindowTestAccess::screenCount(*first.window) == 1);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*first.window).attached_track_count == 3);
+        TEST_CHECK(ParticipantWindowTestAccess::enableGpu(*first.window));
+        firstGeneration = ParticipantWindowTestAccess::renderGeneration(*first.window);
+        TEST_CHECK(firstGeneration != 0);
+
+        camera.source->push(60, 1000);
+        screen.source->push(180, 1000);
+        second.source->push(220, 1000);
+        ParticipantWindowTestAccess::render(*first.window);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*first.window).delivered_to_gpu == 3);
+        auto *cameraTile = ParticipantWindowTestAccess::tile(*first.window, "window-peer");
+        TEST_CHECK(cameraTile);
+        ParticipantWindowTestAccess::layout(*first.window, MeetingUI::VideoViewMode::Pip);
+        ParticipantWindowTestAccess::pin(*first.window, cameraTile);
+        ParticipantWindowTestAccess::checkOrder(*first.window, cameraTile);
+        ParticipantWindowTestAccess::layout(*first.window, MeetingUI::VideoViewMode::Grid);
+
+        roster.mutable_participants(0)->mutable_tracks(1)->set_muted(true);
+        first.room->UpdateParticipantsForTesting(roster);
+        first.pump();
+        TEST_CHECK(!ParticipantWindowTestAccess::screen(*first.window, "TR_WINDOW_SCREEN")->isVideoActive());
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*first.window).attached_track_count == 2);
+        const auto hiddenDelivered = ParticipantWindowTestAccess::statistics(*first.window).delivered_to_gpu;
+        screen.source->push(235, 2000);
+        ParticipantWindowTestAccess::render(*first.window);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*first.window).delivered_to_gpu == hiddenDelivered);
+
+        roster.mutable_participants(0)->mutable_tracks(1)->set_muted(false);
+        first.room->UpdateParticipantsForTesting(roster);
+        first.pump();
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*first.window).attached_track_count == 3);
+        TEST_CHECK(!ParticipantWindowTestAccess::gpuHasFrame(*first.window, "remote-screen/TR_WINDOW_SCREEN"));
+        screen.source->push(170, 3000);
+        ParticipantWindowTestAccess::render(*first.window);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*first.window).delivered_to_gpu == hiddenDelivered + 1);
+
+        first.room->UpdateParticipantsForTesting(WindowParticipant("departed", false, false,
+            "PA_SECOND", "TR_SECOND", "second-peer"));
+        first.pump();
+        TEST_CHECK(ParticipantWindowTestAccess::tileCount(*first.window) == 1);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*first.window).attached_track_count == 2);
+        const auto beforeLateSecond = ParticipantWindowTestAccess::statistics(*first.window).delivered_to_gpu;
+        second.source->push(240, 4000);
+        ParticipantWindowTestAccess::render(*first.window);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*first.window).delivered_to_gpu == beforeLateSecond);
+
+        retiredSource = camera.source;
+        retiredTrack = camera.track;
+        retiredWindow = first.window.get();
+        ParticipantWindowTestAccess::queueModuleFailure(*first.window);
+        TEST_CHECK(first.window->close());
+        TEST_CHECK(!ParticipantWindowTestAccess::renderSessionActive(*first.window));
+        TEST_CHECK(!ParticipantWindowTestAccess::usingGpu(*first.window));
+        first.window.reset();
+        first.pump();
+        TEST_CHECK(retiredWindow.isNull());
+    }
+    ParticipantWindowTestAccess::waitDxOwners();
+    TEST_CHECK(!GetModuleHandleW(modulePath.c_str()));
+
+    {
+        WindowFixture second;
+        auto successor = second.add("second-generation", "lifecycle-camera-b");
+        second.open();
+        TEST_CHECK(ParticipantWindowTestAccess::enableGpu(*second.window));
+        const auto secondGeneration = ParticipantWindowTestAccess::renderGeneration(*second.window);
+        TEST_CHECK(secondGeneration != 0 && secondGeneration != firstGeneration);
+        WindowDrainQt(); // The retired window cannot receive its queued failure.
+        TEST_CHECK(ParticipantWindowTestAccess::usingGpu(*second.window));
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*second.window).delivered_to_gpu == 0);
+
+        const uint8_t y[16] = {35,35,35,35,35,35,35,35,35,35,35,35,35,35,35,35};
+        const uint8_t uv[4] = {128,128,128,128};
+        retiredSource->push(35, 5000);
+        retiredTrack->notifyI420VideoFrame(livekit::render::OwnedI420Frame::CopyFromPlanes(
+            4, 4, y, 4, uv, 2, uv, 2, 5000));
+        ParticipantWindowTestAccess::render(*second.window);
+        ParticipantWindowTestAccess::renderGpuCanvas(*second.window);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*second.window).delivered_to_gpu == 0);
+        TEST_CHECK(!ParticipantWindowTestAccess::gpuHasFrame(*second.window, "remote-camera/window-peer"));
+
+        successor.source->push(190, 6000);
+        ParticipantWindowTestAccess::render(*second.window);
+        ParticipantWindowTestAccess::renderGpuCanvas(*second.window);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*second.window).delivered_to_gpu == 1);
+        TEST_CHECK(ParticipantWindowTestAccess::gpuHasFrame(*second.window, "remote-camera/window-peer"));
+
+        ParticipantWindowTestAccess::simulateModuleFailure(*second.window);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*second.window).backend ==
+            livekit::render::VideoRenderSession::Backend::QtCpu);
+        const auto cpuBefore = ParticipantWindowTestAccess::statistics(*second.window).delivered_to_qt_cpu;
+        successor.source->push(120, 7000);
+        ParticipantWindowTestAccess::render(*second.window);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*second.window).delivered_to_qt_cpu == cpuBefore + 1);
+        TEST_CHECK(!ParticipantWindowTestAccess::tileFrame(
+            ParticipantWindowTestAccess::tile(*second.window, "window-peer")).isNull());
+        TEST_CHECK(second.window->close());
+        TEST_CHECK(!ParticipantWindowTestAccess::renderSessionActive(*second.window));
+        second.window.reset();
+        second.pump();
+    }
+    retiredTrack.reset();
+    retiredSource = nullptr;
+    WindowDrainQt();
+    ParticipantWindowTestAccess::waitDxOwners();
+    TEST_CHECK(!GetModuleHandleW(modulePath.c_str()));
+    std::cout << "RENDER_MULTISESSION_LIFECYCLE PASS: leave/rejoin, window rebuild, track churn, hide/restore, layout, stale generation/frame/GPU callback isolation, CPU fallback, unload\n";
+}
+
+struct GlOwnerExitLatch final {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::atomic<bool> entered{false};
+    bool released = false;
+    void block() {
+        entered.store(true, std::memory_order_release);
+        std::unique_lock lock(mutex);
+        changed.wait(lock, [&] { return released; });
+    }
+    void release() {
+        { std::lock_guard lock(mutex); released = true; }
+        changed.notify_all();
+    }
+};
+
+void AngleRapidRebuildAcceptance() {
+    using namespace livekit::render;
+    qputenv("LIVEKIT_RENDER_BACKEND", "opengl");
+    TEST_CHECK(QOpenGLContext::openGLModuleType() == QOpenGLContext::LibGLES);
+    const auto modulePath = BackendModule::PathForBackend(
+        std::filesystem::path(QCoreApplication::applicationDirPath().toStdWString()),
+        LK_RENDER_BACKEND_OPENGL);
+    const auto wait = [](const std::function<bool()>& done, int timeout = 6000) {
+        QElapsedTimer timer; timer.start();
+        while (!done() && timer.elapsed() < timeout)
+            QApplication::processEvents(QEventLoop::AllEvents, 20);
+        TEST_CHECK(done());
+    };
+
+    auto latch = std::make_shared<GlOwnerExitLatch>();
+    auto retiredSource = std::make_shared<livekit::VideoSource>(16, 9);
+    uint64_t retiredGeneration = 0;
+    {
+        WindowFixture retired;
+        retired.open();
+        ParticipantWindowTestAccess::bindLocal(*retired.window, retiredSource);
+        TEST_CHECK(ParticipantWindowTestAccess::enableGpu(*retired.window, true));
+        retiredGeneration = ParticipantWindowTestAccess::renderGeneration(*retired.window);
+        ParticipantWindowTestAccess::setGlBeforePresent(*retired.window,
+            [latch] { latch->block(); });
+        ParticipantWindowTestAccess::requestGlScene(*retired.window);
+        wait([&] { return latch->entered.load(std::memory_order_acquire); });
+        QPointer<MeetingUI::MeetingRoomWindow> retiredWindow(retired.window.get());
+        QElapsedTimer close; close.start();
+        TEST_CHECK(retired.window->close());
+        retired.window.reset();
+        TEST_CHECK(close.elapsed() < 500 && !retiredWindow);
+        TEST_CHECK(!ParticipantWindowTestAccess::glWorkersIdle() && GetModuleHandleW(modulePath.c_str()));
+    }
+
+    WindowFixture successor;
+    successor.open();
+    auto successorSource = std::make_shared<livekit::VideoSource>(16, 9);
+    ParticipantWindowTestAccess::bindLocal(*successor.window, successorSource);
+    auto* pending = ParticipantWindowTestAccess::startGpu(*successor.window, true);
+    TEST_CHECK(pending && pending->rendererPending() && !pending->rendererReady());
+    const auto successorGeneration = ParticipantWindowTestAccess::renderGeneration(*successor.window);
+    TEST_CHECK(successorGeneration && successorGeneration != retiredGeneration);
+    int ready = 0, failures = 0;
+    QObject scope;
+    QObject::connect(pending, &VideoCanvas::rendererInitialized, &scope, [&] { ++ready; });
+    QObject::connect(pending, &VideoCanvas::rendererUnavailable, &scope, [&] { ++failures; });
+
+    QElapsedTimer clock; clock.start();
+    qint64 previous = 0, maximum = 0;
+    int ticks = 0;
+    QTimer heartbeat;
+    QObject::connect(&heartbeat, &QTimer::timeout, &scope, [&] {
+        const auto now = clock.elapsed();
+        maximum = std::max(maximum, now - previous);
+        previous = now;
+        ++ticks;
+    });
+    heartbeat.start(25);
+    wait([&] { return clock.elapsed() >= 300; }, 1000);
+    TEST_CHECK(ticks >= 8 && maximum < 500 && clock.elapsed() - previous < 500);
+    TEST_CHECK(pending->rendererPending() && !pending->rendererReady() &&
+        !ParticipantWindowTestAccess::usingGpu(*successor.window) && failures == 0);
+    const auto waitingDiagnostics = pending->renderDiagnostics();
+    TEST_CHECK(waitingDiagnostics.requested_backend == RenderBackend::OpenGL &&
+        waitingDiagnostics.actual_backend == RenderBackend::QtCpu &&
+        waitingDiagnostics.gpu_failure == RenderGpuFailure::None &&
+        waitingDiagnostics.fallback_reason == RenderFallbackReason::None);
+
+    latch->release();
+    wait([&] { return ParticipantWindowTestAccess::usingGpu(*successor.window); });
+    TEST_CHECK(ready == 1 && failures == 0 && pending->rendererReady());
+    const auto activeDiagnostics = successor.window->renderDiagnostics();
+    TEST_CHECK(activeDiagnostics.actual_backend == RenderBackend::OpenGL &&
+        activeDiagnostics.gpu_failure == RenderGpuFailure::None &&
+        activeDiagnostics.fallback_reason == RenderFallbackReason::None);
+
+    const auto beforeLate = ParticipantWindowTestAccess::statistics(*successor.window).delivered_to_gpu;
+    auto late = livekit::VideoFrame::create(16, 9, livekit::VideoBufferType::RGBA);
+    std::memset(late.data(), 0, late.dataSize());
+    retiredSource->captureFrame(late, {});
+    ParticipantWindowTestAccess::render(*successor.window);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(*successor.window).delivered_to_gpu == beforeLate);
+    successorSource->captureFrame(late, {});
+    ParticipantWindowTestAccess::render(*successor.window);
+    wait([&] { return ParticipantWindowTestAccess::statistics(*successor.window).delivered_to_gpu == beforeLate + 1; });
+    TEST_CHECK(ready == 1 && failures == 0 && maximum < 500 && clock.elapsed() - previous < 500);
+
+    TEST_CHECK(successor.window->close());
+    successor.window.reset();
+    ParticipantWindowTestAccess::waitGlOwners();
+    TEST_CHECK(!GetModuleHandleW(modulePath.c_str()));
+    std::cout << "ANGLE_RAPID_REBUILD PASS: temporary owner capacity stayed pending, UI progressed, successor activated once, stale generation/frame rejected, module unloaded; heartbeat ticks="
+        << ticks << " maxUiGapMs=" << maximum << " (asserted <500ms)\n";
+}
+
+// The callback runs inside the real DX11 EndFrame/Destroy paths. The test only
+// controls a deterministic latch; it never resets the adapter or triggers TDR.
+struct DxOwnerFault final {
+    std::mutex mutex;
+    std::condition_variable changed;
+    std::atomic<bool> presentEntered{false}, destroyEntered{false};
+    bool release = false;
+    bool blockPresent = false, blockDestroy = false;
+    HRESULT result = S_OK;
+    const std::thread::id ui = std::this_thread::get_id();
+    static int32_t LK_RENDER_CALL beforePresent(void* context) {
+        auto& fault = *static_cast<DxOwnerFault*>(context);
+        TEST_CHECK(std::this_thread::get_id() != fault.ui);
+        fault.presentEntered.store(true, std::memory_order_release);
+        if (fault.blockPresent) {
+            std::unique_lock lock(fault.mutex);
+            fault.changed.wait(lock, [&] { return fault.release; });
+        }
+        return int32_t(fault.result);
+    }
+    static void LK_RENDER_CALL beforeDestroy(void* context) {
+        auto& fault = *static_cast<DxOwnerFault*>(context);
+        TEST_CHECK(std::this_thread::get_id() != fault.ui);
+        fault.destroyEntered.store(true, std::memory_order_release);
+        if (fault.blockDestroy) {
+            std::unique_lock lock(fault.mutex);
+            fault.changed.wait(lock, [&] { return fault.release; });
+        }
+    }
+    lk_render_dx11_test_hooks_v1 hooks() {
+        return {sizeof(lk_render_dx11_test_hooks_v1), 0, this, beforePresent, beforeDestroy};
+    }
+    void unblock() {
+        { std::lock_guard lock(mutex); release = true; }
+        changed.notify_all();
+    }
+};
+
+void Dx11RenderOwnerAcceptance(const QString& fixturePath) {
+    using namespace livekit::render;
+    qunsetenv("LIVEKIT_RENDER_BACKEND");
+    TEST_CHECK(BackendModule::DefaultBackend() == LK_RENDER_BACKEND_DX11);
+    const auto modulePath = std::filesystem::path(fixturePath.toStdWString());
+    const auto load = [&] {
+        ModuleLoadError error{};
+        auto module = BackendModule::Load(modulePath, LK_RENDER_BACKEND_DX11, error);
+        TEST_CHECK(module && error == ModuleLoadError::None);
+        return module;
+    };
+    const auto wait = [](const std::function<bool()>& done, int timeout = 4000) {
+        QElapsedTimer timer; timer.start();
+        while (!done() && timer.elapsed() < timeout) QApplication::processEvents(QEventLoop::AllEvents, 20);
+        TEST_CHECK(done());
+    };
+    const auto cpuFrame = [](MeetingUI::MeetingRoomWindow& window,
+            const std::shared_ptr<livekit::VideoSource>& source, QColor color) {
+        auto frame = livekit::VideoFrame::create(16, 9, livekit::VideoBufferType::RGBA);
+        for (size_t i = 0; i < frame.dataSize(); i += 4) {
+            frame.data()[i] = color.red(); frame.data()[i + 1] = color.green();
+            frame.data()[i + 2] = color.blue(); frame.data()[i + 3] = 255;
+        }
+        source->captureFrame(frame, {});
+        ParticipantWindowTestAccess::render(window);
+        const auto image = ParticipantWindowTestAccess::tileFrame(ParticipantWindowTestAccess::local(window));
+        TEST_CHECK(!image.isNull() && image.pixelColor(0, 0) == color);
+    };
+    // Failure results cross the owner/UI boundary as typed diagnostics, once.
+    for (int scenario = 0; scenario != 3; ++scenario) {
+        DxOwnerFault fault;
+        fault.result = scenario == 1 ? DXGI_ERROR_DEVICE_REMOVED : E_FAIL;
+        WindowFixture fixture; fixture.open();
+        TEST_CHECK(ParticipantWindowTestAccess::enableGpu(*fixture.window, true, load()));
+        auto& canvas = ParticipantWindowTestAccess::dxCanvas(*fixture.window);
+        QObject scope;
+        int failures = 0;
+        QObject::connect(&canvas, &VideoCanvas::rendererUnavailable, &scope, [&] { ++failures; });
+        if (scenario == 2) ParticipantWindowTestAccess::throwOnDxOwner(*fixture.window);
+        else {
+            ParticipantWindowTestAccess::installDxHooks(*fixture.window, fault.hooks());
+            ParticipantWindowTestAccess::requestDxScene(*fixture.window);
+        }
+        wait([&] { return !ParticipantWindowTestAccess::usingGpu(*fixture.window); });
+        TEST_CHECK(scenario == 2 || fault.presentEntered.load(std::memory_order_acquire));
+        const auto diagnostics = fixture.window->renderDiagnostics();
+        const auto expected = scenario == 0 ? RenderGpuFailure::ModuleDeviceFailed :
+            scenario == 1 ? RenderGpuFailure::DeviceLost : RenderGpuFailure::RenderOwnerException;
+        TEST_CHECK(failures == 1 && diagnostics.actual_backend == RenderBackend::QtCpu &&
+            diagnostics.gpu_failure == expected && diagnostics.fallback_reason ==
+                (scenario == 1 ? RenderFallbackReason::GpuDeviceLost : RenderFallbackReason::GpuRuntimeFailed));
+        auto source = std::make_shared<livekit::VideoSource>(16, 9);
+        ParticipantWindowTestAccess::bindLocal(*fixture.window, source);
+        cpuFrame(*fixture.window, source, QColor(20, 80, 220));
+        fixture.window.reset();
+        ParticipantWindowTestAccess::waitDxOwners();
+        TEST_CHECK(!GetModuleHandleW(modulePath.c_str()));
+    }
+    // Driver resource cleanup may block too: close and surface detachment must
+    // return while the independent owner retains all of the driver lifetimes.
+    {
+        DxOwnerFault fault; fault.blockDestroy = true;
+        WindowFixture fixture; fixture.open();
+        TEST_CHECK(ParticipantWindowTestAccess::enableGpu(*fixture.window, true, load()));
+        QPointer<QWindow> surface(ParticipantWindowTestAccess::dxSurface(*fixture.window));
+        const auto hwnd = reinterpret_cast<HWND>(surface->winId());
+        ParticipantWindowTestAccess::installDxHooks(*fixture.window, fault.hooks());
+        QElapsedTimer close; close.start();
+        TEST_CHECK(fixture.window->close()); fixture.window.reset();
+        TEST_CHECK(close.elapsed() < 500);
+        wait([&] { return fault.destroyEntered.load(std::memory_order_acquire); });
+        TEST_CHECK(surface && IsWindow(hwnd) && GetModuleHandleW(modulePath.c_str()));
+        QElapsedTimer clock; clock.start();
+        QTimer heartbeat; int ticks = 0; qint64 previous = 0, maximum = 0;
+        QObject::connect(&heartbeat, &QTimer::timeout, &heartbeat, [&] {
+            maximum = std::max(maximum, clock.elapsed() - previous); previous = clock.elapsed(); ++ticks;
+        });
+        heartbeat.start(25);
+        wait([&] { return clock.elapsed() >= 300; }, 1000);
+        TEST_CHECK(ticks >= 8 && maximum < 500 && clock.elapsed() - previous < 500);
+        fault.unblock();
+        ParticipantWindowTestAccess::waitDxOwners();
+        TEST_CHECK(!surface && !IsWindow(hwnd) && !GetModuleHandleW(modulePath.c_str()));
+    }
+    // A hung Present is the final case: timeout deliberately quarantines DX11
+    // for this process, bounding the number of abandoned graphics owners.
+    DxOwnerFault fault; fault.blockPresent = true; fault.result = DXGI_ERROR_DEVICE_REMOVED;
+    WindowFixture old; old.open();
+    auto oldSource = std::make_shared<livekit::VideoSource>(16, 9);
+    ParticipantWindowTestAccess::bindLocal(*old.window, oldSource);
+    TEST_CHECK(ParticipantWindowTestAccess::enableGpu(*old.window, true, load()));
+    const auto oldGeneration = ParticipantWindowTestAccess::renderGeneration(*old.window);
+    QPointer<QWindow> surface(ParticipantWindowTestAccess::dxSurface(*old.window));
+    const auto hwnd = reinterpret_cast<HWND>(surface->winId());
+    QElapsedTimer clock; clock.start();
+    QTimer heartbeat; int ticks = 0; qint64 previous = 0, maximum = 0;
+    QObject::connect(&heartbeat, &QTimer::timeout, &heartbeat, [&] {
+        const auto now = clock.elapsed(); maximum = std::max(maximum, now - previous); previous = now; ++ticks;
+    });
+    heartbeat.start(25);
+    ParticipantWindowTestAccess::installDxHooks(*old.window, fault.hooks());
+    ParticipantWindowTestAccess::requestDxScene(*old.window);
+    wait([&] { return fault.presentEntered.load(std::memory_order_acquire); });
+    wait([&] { return !ParticipantWindowTestAccess::usingGpu(*old.window); });
+    TEST_CHECK(ticks >= 20 && maximum < 500 && clock.elapsed() - previous < 500);
+    const auto diagnostics = old.window->renderDiagnostics();
+    TEST_CHECK(diagnostics.actual_backend == RenderBackend::QtCpu &&
+        diagnostics.gpu_failure == RenderGpuFailure::PresentationTimeout &&
+        diagnostics.fallback_reason == RenderFallbackReason::GpuRuntimeFailed);
+    cpuFrame(*old.window, oldSource, QColor(20, 80, 220));
+    QPointer<MeetingUI::MeetingRoomWindow> oldWindow(old.window.get());
+    QElapsedTimer close; close.start();
+    TEST_CHECK(old.window->close()); old.window.reset();
+    TEST_CHECK(close.elapsed() < 500 && !oldWindow);
+    TEST_CHECK(surface && IsWindow(hwnd) && GetModuleHandleW(modulePath.c_str()));
+    WindowFixture successor; successor.open();
+    const auto newGeneration = ParticipantWindowTestAccess::renderGeneration(*successor.window);
+    TEST_CHECK(newGeneration != oldGeneration);
+    auto newSource = std::make_shared<livekit::VideoSource>(16, 9);
+    ParticipantWindowTestAccess::bindLocal(*successor.window, newSource);
+    cpuFrame(*successor.window, newSource, QColor(220, 80, 20));
+    const auto successorDiagnostics = successor.window->renderDiagnostics();
+    const auto delivered = ParticipantWindowTestAccess::statistics(*successor.window).delivered_to_qt_cpu;
+    auto late = livekit::VideoFrame::create(16, 9, livekit::VideoBufferType::RGBA);
+    std::memset(late.data(), 0, late.dataSize()); oldSource->captureFrame(late, {});
+    fault.unblock();
+    ParticipantWindowTestAccess::waitDxOwners();
+    ParticipantWindowTestAccess::render(*successor.window);
+    TEST_CHECK(!surface && !IsWindow(hwnd) && !GetModuleHandleW(modulePath.c_str()));
+    TEST_CHECK(successor.window->renderDiagnostics() == successorDiagnostics &&
+        ParticipantWindowTestAccess::statistics(*successor.window).delivered_to_qt_cpu == delivered &&
+        ParticipantWindowTestAccess::tileFrame(ParticipantWindowTestAccess::local(*successor.window)).pixelColor(0, 0) == QColor(220, 80, 20));
+    TEST_CHECK(maximum < 500 && clock.elapsed() - previous < 500);
+    std::cout << "DX11_OWNER PASS: typed Present/device-loss/owner-exception, blocked cleanup/Present, CPU frames, close<500ms, retained surface/module, old generation/frame/callback isolation; heartbeat ticks="
+        << ticks << " maxUiGapMs=" << maximum << " (asserted <500ms)\n";
+}
+
 void DepartureNoticeLifetime() {
     for (const bool duplicateIdentity : {false, true}) {
         for (const bool destroyWhileOpen : {false, true}) {
@@ -2479,6 +3492,189 @@ int WindowAcceptanceMain(int argc, char **argv) {
         DepartureNoticeLifetime();
     } else if (application.arguments().contains("--screen-share-gpu")) {
         ParticipantWindowTestAccess::checkGpuAspect();
+    } else if (application.arguments().contains("--opengl-contract")) {
+        RunOpenGlContract();
+    } else if (application.arguments().contains("--live-meeting-dx11-driver-loss") ||
+               application.arguments().contains("--live-meeting-dx11-driver-loss-smoke")) {
+        const bool liveSmoke = application.arguments().contains("--live-meeting-dx11-driver-loss-smoke");
+        qunsetenv("LIVEKIT_RENDER_BACKEND");
+        const auto output = application.arguments().indexOf("--output");
+        TEST_CHECK(output >= 0 && output + 1 < application.arguments().size());
+        const auto url = qEnvironmentVariable("LIVEKIT_URL");
+        const auto token = qEnvironmentVariable("LIVEKIT_RENDER_OBSERVER_TOKEN");
+        TEST_CHECK(!url.isEmpty() && !token.isEmpty());
+        OpenMeeting::initializeServiceEndpointPolicy(true);
+        auto coordinator = OpenMeeting::MeetingCoordinator::create();
+        OpenMeeting::MediaPreferences prefs;
+        prefs.enableMicrophone = false;
+        prefs.enableVideo = false;
+        coordinator->connectDirectlyAsync(url, token, QStringLiteral("render-recovery"),
+            QStringLiteral("render-observer"), prefs);
+        MeetingUI::MeetingRoomWindow::Config config;
+        config.audioMuted = true;
+        config.videoEnabled = false;
+        config.displayName = QStringLiteral("Live meeting render observer");
+        auto window = ParticipantWindowTestAccess::create(coordinator, std::move(config));
+        ParticipantWindowTestAccess::checkDriverLoss(*window, application.arguments()[output + 1],
+            liveSmoke, false, true, coordinator);
+        WindowPhase("live-meeting-window-reset");
+        QElapsedTimer close; close.start(); window.reset();
+        TEST_CHECK(close.elapsed() < 5000);
+        WindowPhase("live-meeting-window-reset-complete");
+        coordinator.reset();
+        WindowPhase("live-meeting-coordinator-reset-complete");
+        livekit::WebRTCManager::Instance().Deinitialize();
+        WindowPhase("live-meeting-webrtc-deinitialize-complete");
+        ParticipantWindowTestAccess::waitDxOwners();
+        TEST_CHECK(!GetModuleHandleW(L"livekit-render-opengl.dll"));
+        TEST_CHECK(!GetModuleHandleW(L"livekit-render-dx11.dll"));
+        std::cout << "DX11_LIVE_MEETING_TDR_LIFETIME PASS: room leave, window close, module unload\n";
+    } else if (application.arguments().contains("--opengl-driver-loss") ||
+               application.arguments().contains("--opengl-driver-loss-smoke") ||
+               application.arguments().contains("--dx11-driver-loss") ||
+               application.arguments().contains("--dx11-driver-loss-smoke")) {
+        const bool angle = application.arguments().contains("--opengl-driver-loss") ||
+            application.arguments().contains("--opengl-driver-loss-smoke");
+        if (angle) qputenv("LIVEKIT_RENDER_BACKEND", "opengl");
+        else qunsetenv("LIVEKIT_RENDER_BACKEND"); // Exercise the Windows default selection.
+        const auto output = application.arguments().indexOf("--output");
+        TEST_CHECK(output >= 0 && output + 1 < application.arguments().size());
+        {
+            WindowFixture fixture; fixture.open();
+            ParticipantWindowTestAccess::checkDriverLoss(*fixture.window, application.arguments()[output + 1],
+                application.arguments().contains(angle ? "--opengl-driver-loss-smoke" : "--dx11-driver-loss-smoke"), angle);
+            QElapsedTimer close; close.start(); fixture.window.reset();
+            TEST_CHECK(close.elapsed() < 1000);
+        }
+        if (angle) ParticipantWindowTestAccess::waitGlOwners();
+        else ParticipantWindowTestAccess::waitDxOwners();
+        TEST_CHECK(!GetModuleHandleW(L"livekit-render-opengl.dll"));
+        TEST_CHECK(!GetModuleHandleW(L"livekit-render-dx11.dll"));
+        std::cout << (angle ? "ANGLE" : "DX11") << "_TDR_LIFETIME PASS: window close, render owner completion, module unload\n";
+    } else if (application.arguments().contains("--opengl-window")) {
+        qputenv("LIVEKIT_RENDER_BACKEND", "opengl");
+        qputenv("LIVEKIT_PRESENTATION_TEST_GPU", "1");
+        LocalRenderInputAcceptance();
+        ParticipantWindowTestAccess::waitGlOwners();
+        CardChromeAcceptance();
+        ParticipantWindowTestAccess::waitGlOwners();
+        {
+            WindowFixture fixture; fixture.open();
+            TEST_CHECK(ParticipantWindowTestAccess::enableGpu(*fixture.window));
+            ParticipantWindowTestAccess::checkGlStageAndLoss(*fixture.window);
+        }
+        ParticipantWindowTestAccess::waitGlOwners();
+        const auto path = livekit::render::BackendModule::PathForBackend(
+            std::filesystem::path(QCoreApplication::applicationDirPath().toStdWString()), LK_RENDER_BACKEND_OPENGL);
+        TEST_CHECK(!GetModuleHandleW(path.c_str()));
+        std::cout << "P3_GL_WINDOW PASS: asynchronous activation, I420/NV12/RGBA, chrome, Pin/PiP, CPU fallback, reload/unload\n";
+    } else if (application.arguments().contains("--opengl-rapid-rebuild")) {
+        AngleRapidRebuildAcceptance();
+    } else if (application.arguments().contains("--opengl-diagnostics")) {
+        qputenv("LIVEKIT_RENDER_BACKEND", "opengl");
+        {
+            WindowFixture fixture; fixture.open();
+            TEST_CHECK(ParticipantWindowTestAccess::enableGpu(*fixture.window));
+            ParticipantWindowTestAccess::checkGlDiagnostics(*fixture.window);
+        }
+        ParticipantWindowTestAccess::waitGlOwners();
+        TEST_CHECK(!GetModuleHandleW(L"livekit-render-opengl.dll"));
+    } else if (application.arguments().contains("--module-lifecycle")) {
+        QTemporaryDir emptyDirectory;
+        TEST_CHECK(emptyDirectory.isValid());
+        TEST_CHECK(!livekit::render::CreateVideoCanvasFromDirectory(nullptr, emptyDirectory.path()));
+        const auto modulePath = livekit::render::BackendModule::DefaultPath(
+            std::filesystem::path(QCoreApplication::applicationDirPath().toStdWString()));
+        LocalRenderInputAcceptance();
+        ParticipantWindowTestAccess::waitDxOwners();
+        TEST_CHECK(!GetModuleHandleW(modulePath.c_str()));
+        qputenv("LIVEKIT_PRESENTATION_TEST_GPU", "1");
+        CardChromeAcceptance();
+        ParticipantWindowTestAccess::waitDxOwners();
+        TEST_CHECK(!GetModuleHandleW(modulePath.c_str()));
+        ParticipantWindowTestAccess::checkGpuAspect();
+        ParticipantWindowTestAccess::waitDxOwners();
+        TEST_CHECK(!GetModuleHandleW(modulePath.c_str()));
+        std::cout << "P2_MODULE_WINDOW PASS: missing module, loaded display, queued fallback/unload, same-module reload, destroy\n";
+    } else if (application.arguments().contains("--dx11-owner")) {
+        const auto mode = application.arguments().indexOf("--dx11-owner");
+        TEST_CHECK(mode + 1 < application.arguments().size());
+        Dx11RenderOwnerAcceptance(application.arguments()[mode + 1]);
+    } else if (application.arguments().contains("--render-multisession-lifecycle")) {
+        RenderMultiSessionLifecycleAcceptance();
+    } else if (application.arguments().contains("--module-fallback")) {
+        const auto mode = application.arguments().indexOf("--module-fallback");
+        TEST_CHECK(mode >= 0 && mode + 2 < application.arguments().size());
+        QTemporaryDir directory;
+        TEST_CHECK(directory.isValid());
+        const auto root = std::filesystem::path(directory.path().toStdWString());
+        const auto modulePath = livekit::render::BackendModule::DefaultPath(root);
+        TEST_CHECK(QDir().mkpath(QString::fromStdWString(modulePath.parent_path().wstring())));
+
+        livekit::render::VideoRenderSession session([](const std::string&, const QImage&) {});
+        livekit::render::RenderDiagnostics diagnostics;
+        TEST_CHECK(session.backend() == livekit::render::VideoRenderSession::Backend::QtCpu);
+        qputenv("LIVEKIT_RENDER_BACKEND", "cpu");
+        TEST_CHECK(!livekit::render::CreateVideoCanvasFromDirectory(nullptr, directory.path(), &diagnostics));
+        TEST_CHECK(diagnostics.requested_backend == livekit::render::RenderBackend::QtCpu &&
+            diagnostics.actual_backend == livekit::render::RenderBackend::QtCpu &&
+            diagnostics.fallback_reason == livekit::render::RenderFallbackReason::UserSelectedCpu &&
+            diagnostics.gpu_failure == livekit::render::RenderGpuFailure::None);
+        qunsetenv("LIVEKIT_RENDER_BACKEND");
+        TEST_CHECK(!livekit::render::CreateVideoCanvasFromDirectory(nullptr, directory.path(), &diagnostics));
+        TEST_CHECK(diagnostics.gpu_failure == livekit::render::RenderGpuFailure::ModuleOpenFailed &&
+            diagnostics.fallback_reason == livekit::render::RenderFallbackReason::ModuleLoadFailed);
+
+        const auto installFixture = [&](const QString& source) {
+            TEST_CHECK(QFile::remove(QString::fromStdWString(modulePath.wstring())) || !QFile::exists(QString::fromStdWString(modulePath.wstring())));
+            TEST_CHECK(QFile::copy(source, QString::fromStdWString(modulePath.wstring())));
+        };
+        installFixture(application.arguments()[mode + 1]);
+        TEST_CHECK(!livekit::render::CreateVideoCanvasFromDirectory(nullptr, directory.path(), &diagnostics));
+        TEST_CHECK(diagnostics.gpu_failure == livekit::render::RenderGpuFailure::ModuleAbiMismatch &&
+            diagnostics.fallback_reason == livekit::render::RenderFallbackReason::ModuleLoadFailed &&
+            diagnostics.actual_backend == livekit::render::RenderBackend::QtCpu);
+        TEST_CHECK(!GetModuleHandleW(modulePath.c_str()));
+
+        installFixture(application.arguments()[mode + 2]);
+        std::unique_ptr<livekit::render::VideoCanvas> canvas(
+            livekit::render::CreateVideoCanvasFromDirectory(nullptr, directory.path(), &diagnostics));
+        TEST_CHECK(canvas && GetModuleHandleW(modulePath.c_str()));
+        TEST_CHECK(diagnostics.abi_version == LK_RENDER_ABI_V1 &&
+            diagnostics.actual_backend == livekit::render::RenderBackend::QtCpu &&
+            diagnostics.gpu_failure == livekit::render::RenderGpuFailure::None);
+        int unavailable = 0;
+        session.UseGpuBackend([](const std::string&, livekit::render::VideoRenderFrame::Ptr) {});
+        QObject::connect(canvas.get(), &livekit::render::VideoCanvas::rendererUnavailable,
+            canvas.get(), [&] {
+                ++unavailable;
+                session.UseQtCpuBackend();
+                canvas->shutdownRenderer();
+                canvas->hide();
+            }, Qt::QueuedConnection);
+        canvas->resize(64, 64);
+        canvas->show();
+        QElapsedTimer wait;
+        wait.start();
+        while (!unavailable && wait.elapsed() < 2000)
+            QApplication::processEvents(QEventLoop::AllEvents, 20);
+        TEST_CHECK(unavailable == 1);
+        TEST_CHECK(session.backend() == livekit::render::VideoRenderSession::Backend::QtCpu);
+        ParticipantWindowTestAccess::waitDxOwners();
+        TEST_CHECK(!canvas->rendererReady() && !GetModuleHandleW(modulePath.c_str()));
+        diagnostics = canvas->renderDiagnostics();
+        TEST_CHECK(diagnostics.actual_backend == livekit::render::RenderBackend::QtCpu &&
+            diagnostics.abi_version == LK_RENDER_ABI_V1 && diagnostics.module_version == 0 &&
+            diagnostics.gpu_failure == livekit::render::RenderGpuFailure::DeviceCreateFailed &&
+            diagnostics.fallback_reason == livekit::render::RenderFallbackReason::GpuInitializationFailed);
+        TEST_CHECK(!livekit::render::RenderDiagnosticsSafeSummary(diagnostics).contains("token", Qt::CaseInsensitive));
+        QApplication::processEvents(QEventLoop::AllEvents, 50);
+        TEST_CHECK(unavailable == 1);
+        canvas.reset();
+        TEST_CHECK(!GetModuleHandleW(modulePath.c_str()));
+        std::cout << "PRODUCTION_MODULE_FALLBACK PASS: explicit CPU, missing module, ABI rejection, initialization failure, CPU fallback, unload\n";
+    } else if (application.arguments().contains("--local-render-input")) {
+        LocalRenderInputAcceptance();
     } else if (application.arguments().contains("--screen-share")) {
         ScreenShareWindowControls();
         ScreenShareCameraCoexistence();
@@ -2533,6 +3729,9 @@ int WindowAcceptanceMain(int argc, char **argv) {
         TrackPresentationGpuAcceptance();
         CardChromeAcceptance();
         NativeWindowResizeAcceptance();
+        if ((GetSystemMetrics(SM_REMOTESESSION) == 0))
+            ParticipantWindowTestAccess::checkGpuAspect();
+        LocalRenderInputAcceptance();
     }
     if (wrappedThread) webrtc::ThreadManager::Instance()->UnwrapCurrentThread();
     style::StopManager();

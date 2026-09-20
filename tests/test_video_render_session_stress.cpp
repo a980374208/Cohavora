@@ -31,11 +31,40 @@ livekit::render::OwnedI420Frame::Ptr MakeFrame(uint8_t y_value) {
 } // namespace
 
 int main() {
+    // A producer remains alive while the UI retires/rebinds its local mailbox.
+    // Delivery is UI-owned; the worker never captures the session or a canvas.
+    {
+        auto source = std::make_shared<livekit::VideoSource>(4, 4);
+        std::atomic<bool> started{false};
+        std::atomic<bool> done{false};
+        int delivered = 0;
+        livekit::render::VideoRenderSession local({});
+        local.AttachLocalSource(source);
+        local.UseGpuBackend([&](const std::string&, livekit::render::VideoRenderFrame::Ptr) { ++delivered; });
+        std::thread capture([&] {
+            auto frame = livekit::VideoFrame::create(4, 4, livekit::VideoBufferType::RGBA);
+            started.store(true, std::memory_order_release);
+            for (int i = 0; i < 4000; ++i) source->captureFrame(frame, i);
+            done.store(true, std::memory_order_release);
+        });
+        while (!started.load(std::memory_order_acquire)) std::this_thread::yield();
+        for (int i = 0; i < 100; ++i) {
+            local.RenderLatestFrames();
+            local.DetachLocalSource();
+            local.AttachLocalSource(source);
+        }
+        local.Deactivate();
+        const int before = delivered;
+        capture.join();
+        local.RenderLatestFrames();
+        if (!Expect(done.load() && delivered == before && !local.active(),
+                    "concurrent local detach/deactivate must reject all late frames")) return 1;
+    }
     {
         livekit::render::VideoRenderSession share_session({}, 2);
         std::map<std::string, int> luminance;
-        share_session.UseDx11Backend([&](const std::string& key, livekit::render::OwnedI420Frame::Ptr frame) {
-            luminance[key] = frame->data_y()[0];
+        share_session.UseGpuBackend([&](const std::string& key, livekit::render::VideoRenderFrame::Ptr frame) {
+            luminance[key] = frame->view().planes[0].data[0];
         });
         auto camera = std::make_shared<livekit::Track>("TR_CAMERA", "camera",
             livekit::TrackKind::Video, livekit::TrackSource::Camera);
@@ -61,11 +90,11 @@ int main() {
     constexpr int kTrackCount = 9;
     constexpr int kFramesPerTrack = 2000;
 
-    std::atomic<uint64_t> dx11_delivered{0};
+    std::atomic<uint64_t> gpu_delivered{0};
     livekit::render::VideoRenderSession session({}, kTrackCount);
-    session.UseDx11Backend(
-        [&dx11_delivered](const std::string&, livekit::render::OwnedI420Frame::Ptr) {
-            dx11_delivered.fetch_add(1, std::memory_order_relaxed);
+    session.UseGpuBackend(
+        [&gpu_delivered](const std::string&, livekit::render::VideoRenderFrame::Ptr) {
+            gpu_delivered.fetch_add(1, std::memory_order_relaxed);
         });
 
     std::vector<std::shared_ptr<livekit::Track>> tracks;
@@ -118,7 +147,7 @@ int main() {
     session.RenderLatestFrames();
     session.RenderLatestFrames();
     const auto stats = session.statistics();
-    const uint64_t delivered_before_deactivate = dx11_delivered.load(std::memory_order_relaxed);
+    const uint64_t delivered_before_deactivate = gpu_delivered.load(std::memory_order_relaxed);
     if (!Expect(stats.router.submitted == static_cast<uint64_t>(kTrackCount * kFramesPerTrack),
                 "all active Track callbacks must reach the bounded Router") ||
         !Expect(stats.attached_track_count == kTrackCount &&
@@ -127,7 +156,7 @@ int main() {
                 "nine streams must remain within the configured subscription and slot bounds") ||
         !Expect(delivered_before_deactivate >= kTrackCount &&
                     delivered_before_deactivate <= stats.router.submitted &&
-                    stats.delivered_to_dx11 == delivered_before_deactivate,
+                    stats.delivered_to_gpu == delivered_before_deactivate,
                 "DX11 consumption statistics must remain bounded by submitted frames")) {
         return 1;
     }
@@ -138,7 +167,7 @@ int main() {
     }
     session.RenderLatestFrames();
     if (!Expect(!session.active() &&
-                    dx11_delivered.load(std::memory_order_relaxed) == delivered_before_deactivate,
+                    gpu_delivered.load(std::memory_order_relaxed) == delivered_before_deactivate,
                 "deactivation must detach every producer before late frames can render")) {
         return 1;
     }

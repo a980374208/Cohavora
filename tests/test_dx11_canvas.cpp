@@ -47,7 +47,7 @@ int main(int argc, char* argv[]) {
     }
 
     livekit::VideoFrame testFrame(w, h, livekit::VideoBufferType::RGBA, std::move(rgba));
-    canvas->updateFrame("user_1", testFrame);
+    canvas->updateFrame("user_1", livekit::render::VideoRenderFrame::CopyFrom(testFrame));
 
     std::vector<livekit::dx11::TileRect> tiles = {
         { "user_1", 20, 20, 640, 360, false, 0.0f, true }

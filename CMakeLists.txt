@@ -10,6 +10,9 @@ option(LIVEKIT_BUILD_HARDWARE_TESTS
 option(LIVEKIT_BUILD_EXTERNAL_TESTS
     "Build tests that connect to an external LiveKit server"
     OFF)
+option(LIVEKIT_BUILD_RENDERER_RUNTIME_TESTS
+    "Register renderer tests that require an interactive desktop or real GPU"
+    OFF)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
@@ -118,6 +121,8 @@ set(LIVEKIT_SOURCES
     src/rtc/rtc_audio_source.cpp
     src/rtc/rtc_video_source.cpp
     src/render/owned_i420_frame.cpp
+    src/render/video_render_frame.h
+    src/render/video_render_frame.cpp
     src/render/video_render_router.cpp
     src/media/media_converters.cpp
     src/media/wasapi_enumerator.cpp
@@ -667,6 +672,45 @@ set(CMAKE_AUTOMOC ON)
 # Add Telegram UI Subproject directly as native C++ targets
 add_subdirectory(src/ui/tdesktop)
 
+# The selected backend is deployed next to each executable, but never linked
+# into the UI. No Qt/WebRTC runtime or C++ exports cross the module boundary.
+if(WIN32)
+    add_library(livekit_render_dx11 MODULE
+        src/render/modules/dx11_backend.cpp
+        src/ui/dx11/dx11_renderer.cpp)
+    set_target_properties(livekit_render_dx11 PROPERTIES AUTOMOC OFF
+        PREFIX "" OUTPUT_NAME "livekit-render-dx11" CXX_VISIBILITY_PRESET hidden)
+    target_include_directories(livekit_render_dx11 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(livekit_render_dx11 PRIVATE LK_RENDER_MODULE_BUILD)
+    target_link_libraries(livekit_render_dx11 PRIVATE d3d11 dxgi d3dcompiler)
+    if(MSVC)
+        target_compile_options(livekit_render_dx11 PRIVATE /utf-8)
+    endif()
+endif()
+add_library(livekit_render_opengl MODULE src/render/modules/opengl_backend.cpp)
+set_target_properties(livekit_render_opengl PROPERTIES AUTOMOC OFF
+    OUTPUT_NAME "livekit-render-opengl" CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
+if(APPLE)
+    set_target_properties(livekit_render_opengl PROPERTIES SUFFIX ".dylib")
+endif()
+target_include_directories(livekit_render_opengl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(livekit_render_opengl PRIVATE LK_RENDER_MODULE_BUILD)
+if(MSVC)
+    target_compile_options(livekit_render_opengl PRIVATE /utf-8)
+endif()
+function(livekit_deploy_renderer target)
+    foreach(backend dx11 opengl)
+        if(TARGET livekit_render_${backend})
+            add_custom_target(${target}_renderer_${backend}
+                DEPENDS livekit_render_${backend}
+                COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/renderers"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:livekit_render_${backend}>"
+                    "$<TARGET_FILE_DIR:${target}>/renderers/$<TARGET_FILE_NAME:livekit_render_${backend}>")
+            add_dependencies(${target} ${target}_renderer_${backend})
+        endif()
+    endforeach()
+endfunction()
+
 add_executable(livekit_meeting_app
     src/app/main_meeting_app.cpp
     src/net/http_types.h
@@ -713,14 +757,15 @@ add_executable(livekit_meeting_app
     src/ui/participants_sidebar_widget.cpp
     src/ui/meeting_chat_sidebar_widget.h
     src/ui/meeting_chat_sidebar_widget.cpp
-    src/ui/dx11/dx11_types.h
-    src/ui/dx11/dx11_shaders.h
-    src/ui/dx11/dx11_renderer.h
-    src/ui/dx11/dx11_renderer.cpp
-    src/ui/dx11/dx11_texture_pool.h
-    src/ui/dx11/dx11_texture_pool.cpp
-    src/ui/dx11/dx11_video_canvas.h
-    src/ui/dx11/dx11_video_canvas.cpp
+    src/render/backend_module.h
+    src/render/backend_module.cpp
+    src/ui/render/module_video_canvas.h
+    src/ui/render/module_video_canvas.cpp
+    src/ui/render/gl_video_canvas.h
+    src/ui/render/gl_video_canvas.cpp
+    src/ui/render/video_canvas.h
+    src/ui/render/video_canvas.cpp
+    src/ui/render/video_canvas_factory.cpp
 )
 
 target_include_directories(livekit_meeting_app BEFORE PRIVATE
@@ -748,6 +793,7 @@ target_include_directories(livekit_meeting_app BEFORE PRIVATE
 )
 
 target_link_libraries(livekit_meeting_app PRIVATE
+    ${CMAKE_DL_LIBS}
     desktop_lib_ui
     desktop_lib_base
     desktop_lib_crl
@@ -860,14 +906,15 @@ add_executable(test_camera_owner_remediation
     src/render/qt_cpu_video_renderer.cpp
     src/render/video_render_session.h
     src/render/video_render_session.cpp
-    src/ui/dx11/dx11_types.h
-    src/ui/dx11/dx11_shaders.h
-    src/ui/dx11/dx11_renderer.h
-    src/ui/dx11/dx11_renderer.cpp
-    src/ui/dx11/dx11_texture_pool.h
-    src/ui/dx11/dx11_texture_pool.cpp
-    src/ui/dx11/dx11_video_canvas.h
-    src/ui/dx11/dx11_video_canvas.cpp
+    src/render/backend_module.h
+    src/render/backend_module.cpp
+    src/ui/render/module_video_canvas.h
+    src/ui/render/module_video_canvas.cpp
+    src/ui/render/gl_video_canvas.h
+    src/ui/render/gl_video_canvas.cpp
+    src/ui/render/video_canvas.h
+    src/ui/render/video_canvas.cpp
+    src/ui/render/video_canvas_factory.cpp
 )
 target_include_directories(test_camera_owner_remediation BEFORE PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -895,6 +942,7 @@ target_include_directories(test_camera_owner_remediation BEFORE PRIVATE
     ${TDESKTOP_LIBS_DIR}/zlib/include
 )
 target_link_libraries(test_camera_owner_remediation PRIVATE
+    ${CMAKE_DL_LIBS}
     desktop_lib_ui
     desktop_lib_base
     desktop_lib_crl
@@ -1385,8 +1433,11 @@ target_compile_definitions(test_participant_window_remediation PRIVATE
 target_link_options(test_participant_window_remediation PRIVATE ${ida2_window_fixture_link_options})
 set_target_properties(test_participant_window_remediation PROPERTIES
     MSVC_RUNTIME_LIBRARY "${ida2_window_fixture_runtime}")
-add_test(NAME participant_window_remediation_test COMMAND test_participant_window_remediation)
-set_tests_properties(participant_window_remediation_test PROPERTIES TIMEOUT 60)
+if(LIVEKIT_BUILD_RENDERER_RUNTIME_TESTS)
+    add_test(NAME participant_window_remediation_test COMMAND test_participant_window_remediation)
+    set_tests_properties(participant_window_remediation_test PROPERTIES
+        TIMEOUT 60 LABELS "CORE_REGRESSION;RENDER_RUNTIME")
+endif()
 
 # Coordinator startup transaction test: a meeting is committed only after both
 # required local tracks publish, otherwise it must roll back to failure.
@@ -1715,7 +1766,6 @@ set_tests_properties(
     http_owner_remediation_test
     meeting_session_runtime_test
     participant_snapshot_remediation_test
-    participant_window_remediation_test
     meeting_startup_transaction_test
     PROPERTIES LABELS "CORE_REGRESSION"
 )
@@ -1804,3 +1854,103 @@ foreach(_policy_variant strict dev)
     set_tests_properties(http_transport_policy_${_policy_variant}_test PROPERTIES
         TIMEOUT 30 LABELS "PR_SEC_004_FOCUSED")
 endforeach()
+
+# Deploy whichever modules exist on this platform. The loader itself stays
+# portable; on Unix its consumers link CMAKE_DL_LIBS above (also inherited by
+# test_participant_window_remediation from test_camera_owner_remediation).
+livekit_deploy_renderer(livekit_meeting_app)
+livekit_deploy_renderer(test_camera_owner_remediation)
+livekit_deploy_renderer(test_participant_window_remediation)
+
+# These contracts and the production-window fixture use HWND/Win32 APIs.
+# Keep their fixtures, D3D links and target-file expressions out of Unix builds.
+if(WIN32)
+# P2 focused module contract + actual DX11 lifetime gate.
+add_library(livekit_render_dx11_test MODULE
+    src/render/modules/dx11_backend.cpp
+    src/ui/dx11/dx11_renderer.cpp)
+set_target_properties(livekit_render_dx11_test PROPERTIES AUTOMOC OFF
+    PREFIX "" OUTPUT_NAME "livekit-render-dx11-test" CXX_VISIBILITY_PRESET hidden)
+target_include_directories(livekit_render_dx11_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${CMAKE_CURRENT_SOURCE_DIR}/tests/render_p2)
+target_compile_definitions(livekit_render_dx11_test PRIVATE
+    LK_RENDER_MODULE_BUILD LIVEKIT_DX11_MODULE_TESTING=1)
+target_link_libraries(livekit_render_dx11_test PRIVATE d3d11 dxgi d3dcompiler)
+if(MSVC)
+    target_compile_options(livekit_render_dx11_test PRIVATE /utf-8)
+endif()
+add_dependencies(test_participant_window_remediation livekit_render_dx11_test)
+
+add_executable(test_render_module tests/render_p2/test_render_module.cpp src/render/backend_module.cpp)
+set_target_properties(test_render_module PROPERTIES AUTOMOC OFF)
+target_include_directories(test_render_module PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(test_render_module PRIVATE d3d11 dxgi)
+foreach(variant missing_entry wrong_version missing_function wrong_capabilities create_failure)
+    add_library(render_fixture_${variant} MODULE tests/render_p2/invalid_module.c)
+    set_target_properties(render_fixture_${variant} PROPERTIES AUTOMOC OFF)
+    target_include_directories(render_fixture_${variant} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(render_fixture_${variant} PRIVATE LK_RENDER_MODULE_BUILD FIXTURE_${variant})
+    add_dependencies(test_render_module render_fixture_${variant})
+endforeach()
+livekit_deploy_renderer(test_render_module)
+add_dependencies(test_participant_window_remediation render_fixture_wrong_version render_fixture_create_failure)
+add_test(NAME render_module_fallback_test COMMAND test_participant_window_remediation --module-fallback
+    $<TARGET_FILE:render_fixture_wrong_version> $<TARGET_FILE:render_fixture_create_failure>)
+set_tests_properties(render_module_fallback_test PROPERTIES
+    TIMEOUT 45 LABELS "RENDER_MODULE_FOCUSED")
+
+# The GL ABI contract uses a fake dispatch table and needs no context, GPU or desktop.
+target_sources(test_participant_window_remediation PRIVATE tests/render_p3/opengl_contract.cpp)
+add_test(NAME render_opengl_contract_test COMMAND test_participant_window_remediation --opengl-contract)
+set_tests_properties(render_opengl_contract_test PROPERTIES
+    TIMEOUT 45 LABELS "RENDER_CONTRACT")
+
+# These cases need a real native window, GPU/context, desktop capture or driver
+# observer. Labels classify them; this option is what keeps them out of default CTest.
+if(LIVEKIT_BUILD_RENDERER_RUNTIME_TESTS)
+    add_test(NAME render_dx11_owner_test COMMAND test_participant_window_remediation
+        --dx11-owner $<TARGET_FILE:livekit_render_dx11_test>)
+    add_test(NAME render_module_test COMMAND test_render_module
+        $<TARGET_FILE:livekit_render_dx11>
+        $<TARGET_FILE:render_fixture_missing_entry>
+        $<TARGET_FILE:render_fixture_wrong_version>
+        $<TARGET_FILE:render_fixture_missing_function>
+        $<TARGET_FILE:render_fixture_wrong_capabilities>)
+    add_test(NAME render_module_window_test COMMAND test_participant_window_remediation --module-lifecycle)
+    add_test(NAME render_opengl_rapid_rebuild_test COMMAND test_participant_window_remediation
+        --opengl-rapid-rebuild)
+    add_test(NAME render_opengl_window_test COMMAND test_participant_window_remediation --opengl-window)
+    add_test(NAME render_opengl_window_hidpi_test COMMAND test_participant_window_remediation --opengl-window)
+    add_test(NAME render_backend_diagnostics_test COMMAND test_participant_window_remediation --opengl-diagnostics)
+    add_test(NAME render_multisession_lifecycle_test COMMAND test_participant_window_remediation
+        --render-multisession-lifecycle)
+    add_test(NAME render_angle_tdr_observer_test COMMAND test_participant_window_remediation
+        --opengl-driver-loss-smoke --output "${CMAKE_BINARY_DIR}/render-angle-tdr/smoke")
+    add_test(NAME render_dx11_tdr_observer_test COMMAND test_participant_window_remediation
+        --dx11-driver-loss-smoke --output "${CMAKE_BINARY_DIR}/render-dx11-tdr/smoke")
+
+    set_tests_properties(render_dx11_owner_test render_module_test render_module_window_test
+        render_opengl_rapid_rebuild_test render_backend_diagnostics_test
+        render_multisession_lifecycle_test render_angle_tdr_observer_test
+        render_dx11_tdr_observer_test PROPERTIES
+        TIMEOUT 60 RUN_SERIAL TRUE LABELS "RENDER_RUNTIME" ENVIRONMENT "QT_SCALE_FACTOR=1")
+    set_tests_properties(render_opengl_window_test render_opengl_window_hidpi_test PROPERTIES
+        TIMEOUT 60 RUN_SERIAL TRUE LABELS "RENDER_RUNTIME;RENDER_PIXEL_RUNTIME")
+    set_tests_properties(render_opengl_window_test PROPERTIES ENVIRONMENT
+        "QT_SCALE_FACTOR=1;LIVEKIT_PRESENTATION_EVIDENCE_DIR=${CMAKE_BINARY_DIR}/render-recovery/dpi100")
+    set_tests_properties(render_opengl_window_hidpi_test PROPERTIES ENVIRONMENT
+        "QT_SCALE_FACTOR=1.5;LIVEKIT_PRESENTATION_EVIDENCE_DIR=${CMAKE_BINARY_DIR}/render-recovery/dpi150")
+
+    # This is a real-service observer with injected loss, so it requires both
+    # explicit runtime and external-service opt-ins. Real TDR trigger modes stay manual.
+    if(LIVEKIT_BUILD_EXTERNAL_TESTS)
+        add_test(NAME render_live_meeting_recovery_test COMMAND test_participant_window_remediation
+            --live-meeting-dx11-driver-loss-smoke
+            --output "${CMAKE_BINARY_DIR}/render-live-meeting-tdr/smoke")
+        set_tests_properties(render_live_meeting_recovery_test PROPERTIES
+            TIMEOUT 90 RUN_SERIAL TRUE LABELS "RENDER_RUNTIME;EXTERNAL_RUNTIME"
+            ENVIRONMENT "QT_SCALE_FACTOR=1")
+    endif()
+endif()
+endif()

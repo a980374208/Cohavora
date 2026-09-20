@@ -3,6 +3,7 @@
 #include <QtGui/QImage>
 
 #include "src/render/owned_i420_frame.h"
+#include "src/render/video_render_frame.h"
 
 namespace livekit::render {
 
@@ -11,6 +12,7 @@ namespace livekit::render {
 class QtCpuVideoRenderer final {
 public:
     QImage Convert(const OwnedI420Frame& frame) const;
+    QImage Convert(const VideoRenderFrame& frame) const;
 };
 
 } // namespace livekit::render

@@ -19,6 +19,8 @@ struct FrameTransformConstants {
 
 struct SolidColorConstants {
     float color[4]{};
+    float opaque = 1;
+    float padding[3]{};
 };
 } // namespace
 
@@ -75,6 +77,7 @@ bool Dx11Renderer::InitializeLocked(HWND hwnd, int width, int height) {
     }
 
     initialized_ = true;
+    last_present_result_ = S_OK;
     std::cout << "[Dx11Renderer] Initialized successfully (" << width << "x" << height << ")" << std::endl;
     return true;
 }
@@ -117,6 +120,13 @@ void Dx11Renderer::CleanupLocked() {
 #if defined(LIVEKIT_DX11_TESTING)
 void Dx11Renderer::SetForceInitializationFailureForTesting(bool enabled) {
     g_force_initialization_failure.store(enabled, std::memory_order_relaxed);
+}
+#endif
+
+#if defined(LIVEKIT_DX11_MODULE_TESTING)
+void Dx11Renderer::SetPresentHookForTesting(lk_render_dx11_before_present hook, void* context) noexcept {
+    before_present_for_test_ = hook;
+    present_hook_context_for_test_ = context;
 }
 #endif
 
@@ -285,6 +295,7 @@ bool Dx11Renderer::CreateShadersAndPipeline() {
     rastDesc.FillMode = D3D11_FILL_SOLID;
     rastDesc.CullMode = D3D11_CULL_NONE;
     rastDesc.DepthClipEnable = FALSE;
+    rastDesc.ScissorEnable = TRUE;
     hr = device_->CreateRasterizerState(&rastDesc, rasterizer_state_.GetAddressOf());
     if (FAILED(hr)) return false;
 
@@ -352,11 +363,11 @@ bool Dx11Renderer::Resize(int width, int height) {
     return true;
 }
 
-bool Dx11Renderer::BeginFrame(float r, float g, float b) {
+bool Dx11Renderer::BeginFrame(float r, float g, float b, float a) {
     std::lock_guard<std::mutex> lock(render_mutex_);
     if (!initialized_ || !context_ || !render_target_view_) return false;
 
-    float clearColor[4] = { r, g, b, 1.0f };
+    float clearColor[4] = { r, g, b, a };
     context_->ClearRenderTargetView(render_target_view_.Get(), clearColor);
 
     ID3D11RenderTargetView* rtvs[] = { render_target_view_.Get() };
@@ -371,6 +382,7 @@ bool Dx11Renderer::BeginFrame(float r, float g, float b) {
 
     context_->VSSetShader(vertex_shader_.Get(), nullptr, 0);
     context_->RSSetState(rasterizer_state_.Get());
+    SetClip(0, 0, width_, height_);
 
     ID3D11SamplerState* samplers[] = { sampler_state_.Get() };
     context_->PSSetSamplers(0, 1, samplers);
@@ -420,8 +432,17 @@ void Dx11Renderer::SetRotation(VideoRotation rotation) {
     context_->VSSetConstantBuffers(1, 1, buffers);
 }
 
-void Dx11Renderer::DrawQuad(PixelFormatType format, ID3D11ShaderResourceView* const* srvs, UINT count) {
+void Dx11Renderer::SetClip(int left, int top, int right, int bottom) {
+    if (!context_) return;
+    const D3D11_RECT clip{left, top, right, bottom};
+    context_->RSSetScissorRects(1, &clip);
+}
+
+void Dx11Renderer::DrawQuad(PixelFormatType format, ID3D11ShaderResourceView* const* srvs, UINT count,
+        const float* modulation, bool opaque) {
     if (!context_ || !srvs || count == 0) return;
+    if (!(modulation ? SetDrawColor(modulation[0], modulation[1], modulation[2], modulation[3], opaque)
+                     : SetDrawColor(1, 1, 1, 1, opaque))) return;
 
     switch (format) {
     case PixelFormatType::I420:
@@ -438,45 +459,65 @@ void Dx11Renderer::DrawQuad(PixelFormatType format, ID3D11ShaderResourceView* co
     }
 
     context_->PSSetShaderResources(0, count, srvs);
+    context_->OMSetBlendState(overlay_blend_state_.Get(), nullptr, 0xffffffff);
     context_->Draw(4, 0);
+    context_->OMSetBlendState(nullptr, nullptr, 0xffffffff);
 
     // 解绑 SRV，防止管线危险状态冲突
     ID3D11ShaderResourceView* nullSrvs[3] = { nullptr, nullptr, nullptr };
     context_->PSSetShaderResources(0, count, nullSrvs);
 }
 
-void Dx11Renderer::DrawSolidQuad(float r, float g, float b, float a) {
-    if (!context_ || !ps_solid_color_ || !solid_color_buffer_) return;
+bool Dx11Renderer::SetDrawColor(float r, float g, float b, float a, bool opaque) {
+    if (!context_ || !solid_color_buffer_) return false;
 
     SolidColorConstants constants{{r, g, b, a}};
+    constants.opaque = opaque ? 1.0f : 0.0f;
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     if (FAILED(context_->Map(solid_color_buffer_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
-        return;
+        return false;
     }
     std::memcpy(mapped.pData, &constants, sizeof(constants));
     context_->Unmap(solid_color_buffer_.Get(), 0);
 
     ID3D11Buffer* buffers[] = { solid_color_buffer_.Get() };
     context_->PSSetConstantBuffers(2, 1, buffers);
-    context_->PSSetShader(ps_solid_color_.Get(), nullptr, 0);
-    context_->Draw(4, 0);
+    return true;
 }
 
-void Dx11Renderer::DrawPremultipliedOverlay(ID3D11ShaderResourceView* srv) {
+void Dx11Renderer::DrawSolidQuad(float r, float g, float b, float a) {
+    if (!ps_solid_color_ || !SetDrawColor(r, g, b, a)) return;
+    context_->OMSetBlendState(overlay_blend_state_.Get(), nullptr, 0xffffffff);
+    context_->PSSetShader(ps_solid_color_.Get(), nullptr, 0);
+    context_->Draw(4, 0);
+    context_->OMSetBlendState(nullptr, nullptr, 0xffffffff);
+}
+
+void Dx11Renderer::DrawPremultipliedOverlay(ID3D11ShaderResourceView* srv, const float* modulation) {
     if (!context_ || !srv || !overlay_blend_state_) return;
     SetRotation(VideoRotation::VIDEO_ROTATION_0);
     context_->OMSetBlendState(overlay_blend_state_.Get(), nullptr, 0xffffffff);
-    DrawQuad(PixelFormatType::RGBA, &srv, 1);
+    DrawQuad(PixelFormatType::RGBA, &srv, 1, modulation, false);
     context_->OMSetBlendState(nullptr, nullptr, 0xffffffff);
 }
 
 bool Dx11Renderer::EndFrame(bool vsync) {
     std::lock_guard<std::mutex> lock(render_mutex_);
     if (!initialized_ || !swap_chain_) return false;
-    const HRESULT hr = swap_chain_->Present(vsync ? 1 : 0, 0);
+    HRESULT hr = S_OK;
+#if defined(LIVEKIT_DX11_MODULE_TESTING)
+    if (before_present_for_test_) {
+        try { hr = static_cast<HRESULT>(before_present_for_test_(present_hook_context_for_test_)); }
+        catch (...) { hr = E_UNEXPECTED; }
+    }
+#endif
+    if (SUCCEEDED(hr)) hr = swap_chain_->Present(vsync ? 1 : 0, 0);
+    last_present_result_ = hr;
     if (FAILED(hr)) {
         std::cerr << "[Dx11Renderer] Present failed: 0x" << std::hex << hr << std::endl;
-        CleanupLocked();
+        // Report the typed failure before cleanup, which may itself block in
+        // the driver. The owner retains all COM resources until its teardown.
+        initialized_ = false;
         return false;
     }
     return true;

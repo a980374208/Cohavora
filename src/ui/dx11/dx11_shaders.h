@@ -53,6 +53,7 @@ Texture2D    g_texY       : register(t0);
 Texture2D    g_texU       : register(t1);
 Texture2D    g_texV       : register(t2);
 SamplerState g_sampler    : register(s0);
+cbuffer DrawColor : register(b2) { float4 g_modulation; float g_opaque; float3 g_draw_padding; };
 
 cbuffer YuvConversion : register(b0) {
     float4 g_yuv_to_rgb_row0;
@@ -73,7 +74,7 @@ float4 main(PS_INPUT input) : SV_TARGET {
     float3 rgb = float3(dot(g_yuv_to_rgb_row0.xyz, yuv),
                          dot(g_yuv_to_rgb_row1.xyz, yuv),
                          dot(g_yuv_to_rgb_row2.xyz, yuv));
-    return float4(saturate(rgb), 1.0f);
+    return float4(saturate(rgb), 1.0f) * g_modulation;
 }
 )";
 
@@ -82,6 +83,7 @@ inline const char* kPixelShaderNV12Source = R"(
 Texture2D    g_texY       : register(t0);
 Texture2D    g_texUV      : register(t1);
 SamplerState g_sampler    : register(s0);
+cbuffer DrawColor : register(b2) { float4 g_modulation; float g_opaque; float3 g_draw_padding; };
 
 cbuffer YuvConversion : register(b0) {
     float4 g_yuv_to_rgb_row0;
@@ -101,7 +103,7 @@ float4 main(PS_INPUT input) : SV_TARGET {
     float3 rgb = float3(dot(g_yuv_to_rgb_row0.xyz, yuv),
                          dot(g_yuv_to_rgb_row1.xyz, yuv),
                          dot(g_yuv_to_rgb_row2.xyz, yuv));
-    return float4(saturate(rgb), 1.0f);
+    return float4(saturate(rgb), 1.0f) * g_modulation;
 }
 )";
 
@@ -109,6 +111,7 @@ float4 main(PS_INPUT input) : SV_TARGET {
 inline const char* kPixelShaderRGBASource = R"(
 Texture2D    g_texRGBA    : register(t0);
 SamplerState g_sampler    : register(s0);
+cbuffer DrawColor : register(b2) { float4 g_modulation; float g_opaque; float3 g_draw_padding; };
 
 struct PS_INPUT {
     float4 pos : SV_POSITION;
@@ -116,7 +119,9 @@ struct PS_INPUT {
 };
 
 float4 main(PS_INPUT input) : SV_TARGET {
-    return g_texRGBA.Sample(g_sampler, input.uv);
+    float4 rgba = g_texRGBA.Sample(g_sampler, input.uv);
+    if (g_opaque != 0) rgba.a = 1;
+    return rgba * g_modulation;
 }
 )";
 

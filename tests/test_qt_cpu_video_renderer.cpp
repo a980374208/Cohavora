@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <memory>
@@ -29,9 +30,78 @@ livekit::render::OwnedI420Frame::Ptr MakeFrame(uint8_t y_value,
     return livekit::render::OwnedI420Frame::CopyFromPlanes(2, 2, y, 2, u, 1, v, 1);
 }
 
+bool LocalFrameAcceptance() {
+    using namespace livekit;
+    using namespace livekit::render;
+    QtCpuVideoRenderer renderer;
+    VideoCaptureOptions options;
+    options.timestamp_us = 7654321;
+    options.rotation = VideoRotation::VIDEO_ROTATION_90;
+    auto nv12 = VideoFrame::create(3, 5, VideoBufferType::NV12);
+    std::fill(nv12.data(), nv12.data() + 15, uint8_t(235));
+    std::fill(nv12.data() + 15, nv12.data() + nv12.dataSize(), uint8_t(128));
+    auto owned = VideoRenderFrame::CopyFrom(nv12, options);
+    nv12.data()[0] = 16;
+    if (!Expect(owned && owned->view().format == LK_RENDER_NV12 && owned->view().planes[1].stride_bytes == 4 &&
+                owned->view().planes[1].height_samples == 3 && owned->view().timestamp_us == options.timestamp_us &&
+                owned->view().planes[0].data[0] == 235, "odd NV12 planes and capture metadata must survive producer reuse")) return false;
+    const auto rotated = renderer.Convert(*owned);
+    if (!Expect(rotated.size() == QSize(5, 3) && rotated.pixelColor(2, 1).red() > 245,
+                "local NV12 CPU conversion must preserve rotation")) return false;
+    for (auto format : {VideoBufferType::RGBA, VideoBufferType::BGRA, VideoBufferType::ARGB, VideoBufferType::ABGR}) {
+        std::vector<uint8_t> bytes;
+        switch (format) {
+        case VideoBufferType::RGBA: bytes = {240, 20, 10, 255}; break;
+        case VideoBufferType::BGRA: bytes = {10, 20, 240, 255}; break;
+        case VideoBufferType::ARGB: bytes = {255, 240, 20, 10}; break;
+        case VideoBufferType::ABGR: bytes = {255, 10, 20, 240}; break;
+        default: break;
+        }
+        auto packed = VideoRenderFrame::CopyFrom(VideoFrame(1, 1, format, bytes));
+        if (!Expect(packed && packed->view().format == LK_RENDER_RGBA8 &&
+                    renderer.Convert(*packed).pixelColor(0, 0) == QColor(240, 20, 10),
+                    "packed format names must describe byte order, not alias all formats to RGBA")) return false;
+    }
+    if (!Expect(!VideoRenderFrame::CopyFrom(VideoFrame{}), "empty local frame rejected")) return false;
+    options.rotation = static_cast<VideoRotation>(45);
+    if (!Expect(!VideoRenderFrame::CopyFrom(nv12, options), "unsupported rotation rejected")) return false;
+
+    auto first = std::make_shared<VideoSource>(3, 5);
+    auto replacement = std::make_shared<VideoSource>(3, 5);
+    int gpu = 0, cpu = 0;
+    VideoRenderFrame::Ptr received;
+    VideoRenderSession session([&](const std::string& key, const QImage& image) {
+        if (key == "local" && !image.isNull()) ++cpu;
+    });
+    session.AttachLocalSource(first);
+    session.UseGpuBackend([&](const std::string& key, VideoRenderFrame::Ptr frame) {
+        if (key == "local") { ++gpu; received = std::move(frame); }
+    });
+    for (int i = 1; i <= 100; ++i) first->captureFrame(nv12, i);
+    session.AttachLocalSource(first); // Idempotent layout refresh must preserve pending latest frame.
+    session.RenderLatestFrames(); session.RenderLatestFrames();
+    if (!Expect(gpu == 1 && cpu == 0 && received->view().timestamp_us == 100,
+                "local mailbox must retain exactly the latest frame and select one backend")) return false;
+    first->captureFrame(nv12, 101);
+    session.UseQtCpuBackend(); session.RenderLatestFrames();
+    if (!Expect(gpu == 1 && cpu == 1, "pending local frame must follow the newly selected CPU backend")) return false;
+    first->captureFrame(nv12, 102);
+    session.AttachLocalSource(replacement);
+    first->captureFrame(nv12, 103);
+    session.RenderLatestFrames();
+    if (!Expect(cpu == 1, "rebinding must discard old queued frames and disconnect old producers")) return false;
+    replacement->captureFrame(nv12, 104); session.RenderLatestFrames();
+    if (!Expect(cpu == 2, "replacement local source must deliver")) return false;
+    session.Deactivate();
+    replacement->captureFrame(nv12, 105); session.RenderLatestFrames();
+    if (!Expect(cpu == 2 && gpu == 1, "deactivated local source cannot revive rendering")) return false;
+    return true;
+}
+
 } // namespace
 
 int main() {
+    if (!LocalFrameAcceptance()) return 1;
     livekit::render::QtCpuVideoRenderer renderer;
     const uint8_t rotatedY[] = {16, 16, 235, 235, 16, 16, 235, 235};
     const uint8_t rotatedUV[] = {128, 128};
@@ -94,34 +164,34 @@ int main() {
     }
 
     int cpu_delivered = 0;
-    int dx11_delivered = 0;
-    std::string dx11_identity;
-    livekit::render::OwnedI420Frame::Ptr dx11_frame;
+    int gpu_delivered = 0;
+    std::string gpu_identity;
+    livekit::render::VideoRenderFrame::Ptr gpu_frame;
     livekit::render::VideoRenderSession backend_session(
         [&cpu_delivered](const std::string&, const QImage&) {
             ++cpu_delivered;
         });
     auto backend_track = std::make_shared<livekit::Track>("TR_DX11", "dx11", livekit::TrackKind::Video);
     backend_session.AttachRemoteTrack(backend_track, "participant-b");
-    backend_session.UseDx11Backend(
-        [&dx11_delivered, &dx11_identity, &dx11_frame](const std::string& identity,
-                                                        livekit::render::OwnedI420Frame::Ptr frame) {
-            ++dx11_delivered;
-            dx11_identity = identity;
-            dx11_frame = std::move(frame);
+    backend_session.UseGpuBackend(
+        [&gpu_delivered, &gpu_identity, &gpu_frame](const std::string& identity,
+                                                        livekit::render::VideoRenderFrame::Ptr frame) {
+            ++gpu_delivered;
+            gpu_identity = identity;
+            gpu_frame = std::move(frame);
         });
     backend_track->notifyI420VideoFrame(red);
     backend_session.RenderLatestFrames();
-    if (!Expect(dx11_delivered == 1 && cpu_delivered == 0 && dx11_identity == "participant-b",
+    if (!Expect(gpu_delivered == 1 && cpu_delivered == 0 && gpu_identity == "participant-b",
                 "DX11 backend must consume I420 directly without a QImage callback") ||
-        !Expect(dx11_frame == red, "DX11 callback must receive the owned Router frame")) {
+        !Expect(gpu_frame && gpu_frame->i420Owner() == red, "DX11 callback must receive the owned Router frame")) {
         return 1;
     }
 
     backend_session.UseQtCpuBackend();
     backend_track->notifyI420VideoFrame(white);
     backend_session.RenderLatestFrames();
-    if (!Expect(cpu_delivered == 1 && dx11_delivered == 1,
+    if (!Expect(cpu_delivered == 1 && gpu_delivered == 1,
                 "backend switch must make CPU and DX11 consumption mutually exclusive")) {
         return 1;
     }
@@ -129,38 +199,38 @@ int main() {
     // Full reconnect may recreate Track while the SFU preserves its SID.  The
     // old subscription must be cancelled; otherwise the replacement will
     // never deliver frames because the SID is already present in the session.
-    backend_session.UseDx11Backend(
-        [&dx11_delivered, &dx11_identity, &dx11_frame](const std::string& identity,
-                                                        livekit::render::OwnedI420Frame::Ptr frame) {
-            ++dx11_delivered;
-            dx11_identity = identity;
-            dx11_frame = std::move(frame);
+    backend_session.UseGpuBackend(
+        [&gpu_delivered, &gpu_identity, &gpu_frame](const std::string& identity,
+                                                        livekit::render::VideoRenderFrame::Ptr frame) {
+            ++gpu_delivered;
+            gpu_identity = identity;
+            gpu_frame = std::move(frame);
         });
     auto replacement_track = std::make_shared<livekit::Track>(
         "TR_DX11", "dx11-after-reconnect", livekit::TrackKind::Video);
     backend_session.AttachRemoteTrack(replacement_track, "participant-b");
     backend_track->notifyI420VideoFrame(black);
     backend_session.RenderLatestFrames();
-    if (!Expect(dx11_delivered == 1,
+    if (!Expect(gpu_delivered == 1,
                 "replaced Track must cancel the old same-SID subscription")) {
         return 1;
     }
     replacement_track->notifyI420VideoFrame(black);
     backend_session.RenderLatestFrames();
     const auto reconnect_stats = backend_session.statistics();
-    if (!Expect(dx11_delivered == 2 && dx11_identity == "participant-b" && dx11_frame == black,
+    if (!Expect(gpu_delivered == 2 && gpu_identity == "participant-b" && gpu_frame && gpu_frame->i420Owner() == black,
                 "replacement Track with the same SID must render after reconnect") ||
-        !Expect(reconnect_stats.delivered_to_dx11 == 2 &&
+        !Expect(reconnect_stats.delivered_to_gpu == 2 &&
                     reconnect_stats.attached_track_count == 1 &&
-                    reconnect_stats.backend == livekit::render::VideoRenderSession::Backend::Dx11,
+                    reconnect_stats.backend == livekit::render::VideoRenderSession::Backend::Gpu,
                 "session diagnostics must describe the active backend and delivered work")) {
         return 1;
     }
 
     int capped_delivered = 0;
     livekit::render::VideoRenderSession capped_session({}, 1);
-    capped_session.UseDx11Backend(
-        [&capped_delivered](const std::string&, livekit::render::OwnedI420Frame::Ptr) {
+    capped_session.UseGpuBackend(
+        [&capped_delivered](const std::string&, livekit::render::VideoRenderFrame::Ptr) {
             ++capped_delivered;
         });
     auto first_capped_track = std::make_shared<livekit::Track>(
