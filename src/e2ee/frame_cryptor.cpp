@@ -182,7 +182,69 @@ struct DataPacketCryptor::PacketBackend {
 
 DataPacketCryptor::DataPacketCryptor(std::shared_ptr<KeyProvider> key_provider)
     : packet_backend_(std::make_shared<PacketBackend>()),
+      send_backend_(std::make_shared<PacketBackend>()),
       key_provider_(std::move(key_provider)) {}
+
+std::variant<EncryptedDataPacket, PacketCryptoError>
+DataPacketCryptor::EncryptPacket(std::string_view sender_identity, int key_index,
+                                const std::vector<uint8_t>& payload) {
+    // Account for both the IV and the authentication tag before encrypting.
+    if (payload.size() > kMaxEncryptedPacketBytes - 12 - 16)
+        return PacketCryptoError::SizeLimitExceeded;
+    if (sender_identity.empty()) return PacketCryptoError::InvalidEnvelope;
+    if (!key_provider_) return PacketCryptoError::MissingKey;
+    try {
+        const auto options = key_provider_->options();
+        const int ring_size = options.key_ring_size <= 0 ? 16 :
+            std::min(options.key_ring_size, 255);
+        if (key_index < 0 || key_index >= ring_size)
+            return PacketCryptoError::InvalidEnvelope;
+        std::lock_guard lock(send_backend_->mutex);
+        const std::string identity(sender_identity);
+        // One material snapshot for this exact identity/slot, even during rotation.
+        auto material = options.shared_key ? key_provider_->GetSharedKey(key_index)
+                                          : key_provider_->GetKey(identity, key_index);
+        if (material.empty()) return PacketCryptoError::MissingKey;
+        auto& backend = *send_backend_;
+        if (!backend.cryptor || backend.identity != identity) {
+            webrtc::KeyProviderOptions native_options;
+            native_options.shared_key = options.shared_key;
+            native_options.key_ring_size = ring_size;
+            native_options.ratchet_salt.assign(options.ratchet_salt.begin(), options.ratchet_salt.end());
+            native_options.key_derivation_algorithm =
+                options.key_derivation_algorithm == KeyDerivationAlgorithm::HKDF
+                    ? webrtc::kHKDF : webrtc::kPBKDF2;
+            native_options.ratchet_window_size = 0;
+            auto provider = webrtc::make_ref_counted<webrtc::DefaultKeyProviderImpl>(native_options);
+            auto cryptor = webrtc::make_ref_counted<webrtc::DataPacketCryptor>(
+                webrtc::FrameCryptorTransformer::Algorithm::kAesGcm, provider);
+            backend.provider = std::move(provider);
+            backend.cryptor = std::move(cryptor);
+            backend.identity = identity;
+            backend.material.clear();
+        }
+        if (backend.index != static_cast<uint32_t>(key_index) || backend.material != material) {
+            const bool installed = options.shared_key
+                ? backend.provider->SetSharedKey(key_index, material)
+                : backend.provider->SetKey(identity, key_index, material);
+            if (!installed) return PacketCryptoError::BackendFailure;
+            backend.index = static_cast<uint32_t>(key_index);
+            backend.material = std::move(material);
+        }
+        // Keep the sending cryptor alive across slot/material changes, preserving
+        // its IV counter. Receive-side cache replacement never resets this state.
+        auto sealed = backend.cryptor->Encrypt(identity, key_index, payload);
+        if (!sealed.ok()) return PacketCryptoError::BackendFailure;
+        const auto& result = sealed.value();
+        if (result->iv.size() != 12 || result->data.size() != payload.size() + 16 ||
+            result->key_index != key_index)
+            return PacketCryptoError::BackendFailure;
+        return EncryptedDataPacket{EncryptionType::GCM, result->key_index,
+                                   result->iv, result->data};
+    } catch (...) {
+        return PacketCryptoError::BackendFailure;
+    }
+}
 
 std::variant<AuthenticatedDataPayload, PacketCryptoError>
 DataPacketCryptor::DecryptPacket(std::string_view sender_identity,
@@ -261,14 +323,30 @@ bool DataPacketCryptor::DecryptData(const std::vector<uint8_t>& encrypted_data, 
 
 E2eeManager::E2eeManager(const E2eeOptions& options)
     : options_(options),
+      data_packet_key_index_(options.data_packet_key_index),
       data_packet_cryptor_(std::make_shared<DataPacketCryptor>(options.key_provider)) {}
 
 void E2eeManager::SetEnabled(bool enabled) {
     std::lock_guard lock(mutex_);
+    if (enabled_ != enabled) ++data_packet_policy_revision_;
     enabled_ = enabled;
     for (auto& [key, cryptor] : cryptors_) {
         cryptor->set_enabled(enabled);
     }
+}
+
+E2eeManager::DataPacketState E2eeManager::data_packet_state() const {
+    std::lock_guard lock(mutex_);
+    return {enabled_, data_packet_key_index_, data_packet_policy_revision_};
+}
+
+bool E2eeManager::SetDataPacketKeyIndex(int index) {
+    const int configured = options_.key_provider ? options_.key_provider->options().key_ring_size : 16;
+    const int ring_size = configured <= 0 ? 16 : std::min(configured, 255);
+    if (index < 0 || index >= ring_size) return false;
+    std::lock_guard lock(mutex_);
+    data_packet_key_index_ = index;
+    return true;
 }
 
 std::shared_ptr<FrameCryptor> E2eeManager::GetCryptor(const std::string& participant_identity, const std::string& track_sid) {

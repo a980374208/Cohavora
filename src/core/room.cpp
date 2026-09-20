@@ -1691,12 +1691,18 @@ bool Room::PublishDataPacket(const proto::DataPacket& packet, bool reliable) {
 Room::DataPacketSendResult Room::PublishDataPacket(
     const proto::DataPacket& packet,
     bool reliable,
-    uint64_t expected_generation) {
+    uint64_t expected_generation,
+    const OutgoingStreamContext* stream_context) {
     webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
+    const bool stream_packet = packet.has_stream_header() || packet.has_stream_chunk() ||
+                               packet.has_stream_trailer();
+    std::shared_ptr<E2eeManager> encryption_owner;
+    E2eeManager::DataPacketState encryption_state{};
     std::string sender_identity;
     std::string sender_sid;
     std::function<void()> before_admission;
     std::function<void()> after_admission;
+    std::function<void()> after_encrypt;
     {
         std::lock_guard lock(room_mutex_);
         if (stream_delivery_test_hooks_) {
@@ -1718,8 +1724,17 @@ Room::DataPacketSendResult Room::PublishDataPacket(
             sender_identity = local_participant_->identity();
             sender_sid = local_participant_->sid();
         }
+        if (stream_packet) {
+            encryption_owner = e2ee_manager_;
+            if (encryption_owner) encryption_state = encryption_owner->data_packet_state();
+            if (stream_context &&
+                (stream_context->manager != encryption_owner ||
+                 stream_context->policy_revision != encryption_state.policy_revision))
+                return DataPacketSendResult::EncryptionContextChanged;
+        }
         if (stream_delivery_test_hooks_) {
             after_admission = stream_delivery_test_hooks_->after_admission;
+            after_encrypt = stream_delivery_test_hooks_->after_encrypt_before_commit;
         }
     }
     if (after_admission) after_admission();
@@ -1735,6 +1750,35 @@ Room::DataPacketSendResult Room::PublishDataPacket(
         }
     }
 
+    if (stream_packet && encryption_owner && encryption_state.enabled &&
+        encryption_owner->encryption_type() != EncryptionType::NONE) {
+        if (encryption_owner->encryption_type() != EncryptionType::GCM ||
+            sender_identity.empty() || final_pkt.participant_identity() != sender_identity)
+            return DataPacketSendResult::EncryptionFailed;
+        proto::EncryptedPacketPayload inner;
+        if (packet.has_stream_header()) *inner.mutable_stream_header() = packet.stream_header();
+        else if (packet.has_stream_chunk()) *inner.mutable_stream_chunk() = packet.stream_chunk();
+        else *inner.mutable_stream_trailer() = packet.stream_trailer();
+        const auto inner_size = inner.ByteSizeLong();
+        if (inner_size > DataPacketCryptor::kMaxEncryptedPacketBytes - 12 - 16)
+            return DataPacketSendResult::EncryptionFailed;
+        std::vector<uint8_t> payload(inner_size);
+        if (!inner.SerializeToArray(payload.data(), static_cast<int>(payload.size())))
+            return DataPacketSendResult::SerializationFailed;
+        auto result = encryption_owner->data_packet_cryptor()->EncryptPacket(
+            sender_identity, encryption_state.key_index, payload);
+        const auto* sealed = std::get_if<EncryptedDataPacket>(&result);
+        if (!sealed) return DataPacketSendResult::EncryptionFailed;
+        // Only replace the oneof: destinations, ordering and outer sender metadata
+        // remain exactly as admitted. No deprecated Header/Chunk encryption fields.
+        auto* envelope = final_pkt.mutable_encrypted_packet();
+        envelope->set_encryption_type(proto::Encryption::GCM);
+        envelope->set_key_index(sealed->key_index);
+        envelope->set_iv(sealed->iv.data(), sealed->iv.size());
+        envelope->set_encrypted_value(sealed->ciphertext.data(), sealed->ciphertext.size());
+        if (after_encrypt) after_encrypt();
+    }
+
     const auto byte_size = final_pkt.ByteSizeLong();
     if (byte_size > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         return DataPacketSendResult::SerializationFailed;
@@ -1744,6 +1788,20 @@ Room::DataPacketSendResult Room::PublishDataPacket(
         return DataPacketSendResult::SerializationFailed;
     }
 
+    if (stream_packet) {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(expected_generation) ||
+            connection_state_ != ConnectionState::Connected)
+            return DataPacketSendResult::SessionInvalid;
+        if (e2ee_manager_ != encryption_owner ||
+            (encryption_owner && encryption_owner->data_packet_state().policy_revision !=
+                                     encryption_state.policy_revision))
+            return DataPacketSendResult::EncryptionContextChanged;
+        if ((reliable ? reliable_dc_ : lossy_dc_) != dc)
+            return DataPacketSendResult::ChannelUnavailable;
+        // This is the final send admission. WebRTC calls use this captured channel
+        // outside room_mutex_; a later replacement cannot redirect it to a new one.
+    }
     if (dc->state() != webrtc::DataChannelInterface::kOpen) {
         return DataPacketSendResult::ChannelUnavailable;
     }
@@ -1767,19 +1825,23 @@ std::shared_ptr<TextStreamWriter> Room::CreateTextStreamWriter(
 
     std::string sender_id;
     uint64_t generation = 0;
+    OutgoingStreamContext stream_context;
     {
         std::lock_guard lock(room_mutex_);
         generation = installed_session_generation_;
+        stream_context.manager = e2ee_manager_;
+        if (stream_context.manager)
+            stream_context.policy_revision = stream_context.manager->data_packet_state().policy_revision;
         if (local_participant_) {
             sender_id = local_participant_->identity();
         }
     }
 
     auto weak_self = weak_from_this();
-    auto publisher = [weak_self, generation](const proto::DataPacket& packet,
+    auto publisher = [weak_self, generation, stream_context](const proto::DataPacket& packet,
                                               bool reliable) -> bool {
         if (auto self = weak_self.lock()) {
-            const auto result = self->PublishDataPacket(packet, reliable, generation);
+            const auto result = self->PublishDataPacket(packet, reliable, generation, &stream_context);
             if (result == DataPacketSendResult::Accepted) return true;
             OperationErrorCode code = OperationErrorCode::DataChannelRejected;
             const char* message = "data channel rejected stream packet";
@@ -1797,6 +1859,14 @@ std::shared_ptr<TextStreamWriter> Room::CreateTextStreamWriter(
                 message = "stream packet serialization failed";
                 break;
             case DataPacketSendResult::ChannelRejected:
+                break;
+            case DataPacketSendResult::EncryptionFailed:
+                code = OperationErrorCode::EncryptionFailed;
+                message = "stream packet encryption failed";
+                break;
+            case DataPacketSendResult::EncryptionContextChanged:
+                code = OperationErrorCode::InvalidState;
+                message = "stream encryption context changed";
                 break;
             case DataPacketSendResult::Accepted:
                 return true;
@@ -1831,19 +1901,23 @@ std::shared_ptr<ByteStreamWriter> Room::CreateByteStreamWriter(
 
     std::string sender_id;
     uint64_t generation = 0;
+    OutgoingStreamContext stream_context;
     {
         std::lock_guard lock(room_mutex_);
         generation = installed_session_generation_;
+        stream_context.manager = e2ee_manager_;
+        if (stream_context.manager)
+            stream_context.policy_revision = stream_context.manager->data_packet_state().policy_revision;
         if (local_participant_) {
             sender_id = local_participant_->identity();
         }
     }
 
     auto weak_self = weak_from_this();
-    auto publisher = [weak_self, generation](const proto::DataPacket& packet,
+    auto publisher = [weak_self, generation, stream_context](const proto::DataPacket& packet,
                                               bool reliable) -> bool {
         if (auto self = weak_self.lock()) {
-            const auto result = self->PublishDataPacket(packet, reliable, generation);
+            const auto result = self->PublishDataPacket(packet, reliable, generation, &stream_context);
             if (result == DataPacketSendResult::Accepted) return true;
             OperationErrorCode code = OperationErrorCode::DataChannelRejected;
             const char* message = "data channel rejected stream packet";
@@ -1861,6 +1935,14 @@ std::shared_ptr<ByteStreamWriter> Room::CreateByteStreamWriter(
                 message = "stream packet serialization failed";
                 break;
             case DataPacketSendResult::ChannelRejected:
+                break;
+            case DataPacketSendResult::EncryptionFailed:
+                code = OperationErrorCode::EncryptionFailed;
+                message = "stream packet encryption failed";
+                break;
+            case DataPacketSendResult::EncryptionContextChanged:
+                code = OperationErrorCode::InvalidState;
+                message = "stream encryption context changed";
                 break;
             case DataPacketSendResult::Accepted:
                 return true;

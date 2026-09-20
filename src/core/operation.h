@@ -42,6 +42,7 @@ enum class OperationErrorCode {
     DataChannelUnavailable,
     SerializationFailed,
     DataChannelRejected,
+    EncryptionFailed,
 };
 
 class OperationError final : public std::runtime_error {

@@ -30,6 +30,8 @@ enum class EncryptionState {
 struct E2eeOptions {
     EncryptionType encryption_type{EncryptionType::GCM};
     std::shared_ptr<KeyProvider> key_provider;
+    // Explicit DataPacket send slot; independent of media cryptors and receive-key installation.
+    int data_packet_key_index{0};
 };
 
 class FrameCryptor {
@@ -80,11 +82,14 @@ class DataPacketCryptor {
 public:
     explicit DataPacketCryptor(std::shared_ptr<KeyProvider> key_provider);
 
-    // Local inbound envelope limit, including IV and GCM tag. This comfortably
+    // Local packet envelope limit, including IV and GCM tag. This comfortably
     // fits the 15 KB stream chunks; it is not a total stream transfer limit.
     static constexpr size_t kMaxEncryptedPacketBytes = 64 * 1024;
     std::variant<AuthenticatedDataPayload, PacketCryptoError> DecryptPacket(
         std::string_view sender_identity, const EncryptedDataPacket& packet);
+    std::variant<EncryptedDataPacket, PacketCryptoError> EncryptPacket(
+        std::string_view sender_identity, int key_index,
+        const std::vector<uint8_t>& payload);
 
     // Legacy AES-256 helper and combined IV/ciphertext/tag format are unchanged.
     bool EncryptData(const std::vector<uint8_t>& plain_data, std::vector<uint8_t>& encrypted_data);
@@ -93,6 +98,7 @@ public:
 private:
     struct PacketBackend;
     std::shared_ptr<PacketBackend> packet_backend_;
+    std::shared_ptr<PacketBackend> send_backend_;
     std::shared_ptr<KeyProvider> key_provider_;
 };
 
@@ -105,6 +111,15 @@ public:
     void SetEnabled(bool enabled);
     bool enabled() const { std::lock_guard lock(mutex_); return enabled_; }
     EncryptionType encryption_type() const { return options_.encryption_type; }
+    struct DataPacketState {
+        bool enabled;
+        int key_index;
+        uint64_t policy_revision;
+    };
+    DataPacketState data_packet_state() const;
+    // Explicit send selection; installing receive keys does not change it.
+    // Invalid ring indexes return false without changing the selected slot.
+    bool SetDataPacketKeyIndex(int index);
 
     std::shared_ptr<FrameCryptor> GetCryptor(const std::string& participant_identity, const std::string& track_sid);
     std::shared_ptr<DataPacketCryptor> data_packet_cryptor() const { return data_packet_cryptor_; }
@@ -122,6 +137,8 @@ public:
 private:
     E2eeOptions options_;
     bool enabled_{true};
+    int data_packet_key_index_{0};
+    uint64_t data_packet_policy_revision_{0};
     std::shared_ptr<DataPacketCryptor> data_packet_cryptor_;
     mutable std::mutex mutex_;
     std::map<std::pair<std::string, std::string>, std::shared_ptr<FrameCryptor>> cryptors_;

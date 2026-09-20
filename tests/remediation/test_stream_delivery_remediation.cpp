@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -18,6 +19,7 @@
 #include <vector>
 
 #include "api/make_ref_counted.h"
+#include "api/crypto/frame_crypto_transformer.h"
 #include "data_stream.h"
 #include "operation.h"
 #include "room.h"
@@ -44,6 +46,21 @@ namespace livekit {
 
 class RoomStreamDeliveryTestAccess final {
 public:
+    static void InstallOutboundSession(Room& room, uint64_t generation) {
+        std::lock_guard lock(room.room_mutex_);
+        room.session_generation_.store(generation);
+        room.installed_session_generation_ = generation;
+        room.connection_state_ = ConnectionState::Connected;
+        room.local_participant_ = std::make_shared<LocalParticipant>(
+            "PA_OUTBOUND", "outbound", LocalParticipant::SendSignalHandler{});
+    }
+
+    static void AfterEncrypt(Room& room, std::function<void()> hook) {
+        std::lock_guard lock(room.room_mutex_);
+        room.stream_delivery_test_hooks_ = std::make_shared<Room::StreamDeliveryTestHooks>();
+        room.stream_delivery_test_hooks_->after_encrypt_before_commit = std::move(hook);
+    }
+
     static void AttachReliableChannel(
         Room& room,
         webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) {
@@ -432,6 +449,290 @@ private:
     std::vector<livekit::proto::DataPacket> accepted_;
 };
 
+struct OutboundFixture {
+    asio::io_context io;
+    std::shared_ptr<livekit::Room> room = livekit::Room::Create(io.get_executor());
+    webrtc::scoped_refptr<ControlledDataChannel> channel =
+        webrtc::make_ref_counted<ControlledDataChannel>("encrypted-outbound");
+    std::shared_ptr<livekit::KeyProvider> keys;
+    explicit OutboundFixture(bool shared = true, bool install_key = true) {
+        livekit::RoomStreamDeliveryTestAccess::InstallOutboundSession(*room, 1);
+        livekit::RoomStreamDeliveryTestAccess::AttachReliableChannel(*room, channel);
+        livekit::KeyProviderOptions options;
+        options.shared_key = shared;
+        keys = std::make_shared<livekit::KeyProvider>(options);
+        if (install_key) {
+            if (shared) keys->SetSharedKey(std::vector<uint8_t>(32, 0x42));
+            else keys->SetKey("outbound", 0, std::vector<uint8_t>(32, 0x42));
+        }
+        room->EnableE2ee({livekit::EncryptionType::GCM, keys});
+    }
+    std::shared_ptr<livekit::BaseStreamWriter> Writer(WriterKind kind,
+        const std::vector<std::string>& destinations = {"b", "a", "b"}) {
+        if (kind == WriterKind::Text)
+            return room->CreateTextStreamWriter("encrypted", {{"attribute", "secret"}},
+                "encrypted-stream", std::nullopt, "reply", destinations);
+        return room->CreateByteStreamWriter("secret.bin", "encrypted",
+            {{"attribute", "secret"}}, "encrypted-stream", std::nullopt,
+            "application/octet-stream", destinations);
+    }
+};
+
+livekit::proto::EncryptedPacketPayload OpenOutbound(
+    const livekit::proto::DataPacket& packet, bool shared, int index = 0,
+    const std::vector<uint8_t>& material = std::vector<uint8_t>(32, 0x42),
+    bool hkdf = false, const std::string& salt = "LKFrameEncryptionKey") {
+    TEST_CHECK(packet.has_encrypted_packet());
+    TEST_CHECK(!packet.has_stream_header() && !packet.has_stream_chunk() &&
+               !packet.has_stream_trailer());
+    TEST_CHECK(packet.participant_identity() == "outbound");
+    TEST_CHECK(packet.participant_sid() == "PA_OUTBOUND");
+    TEST_CHECK(packet.kind() == livekit::proto::DataPacket::RELIABLE);
+    const auto& envelope = packet.encrypted_packet();
+    TEST_CHECK(envelope.encryption_type() == livekit::proto::Encryption::GCM);
+    TEST_CHECK(envelope.key_index() == index && envelope.iv().size() == 12);
+    TEST_CHECK(envelope.encrypted_value().size() >= 16);
+    webrtc::KeyProviderOptions options;
+    options.shared_key = shared;
+    options.ratchet_salt.assign(salt.begin(), salt.end());
+    options.key_derivation_algorithm = hkdf ? webrtc::kHKDF : webrtc::kPBKDF2;
+    auto provider = webrtc::make_ref_counted<webrtc::DefaultKeyProviderImpl>(options);
+    TEST_CHECK(shared ? provider->SetSharedKey(index, material)
+                      : provider->SetKey("outbound", index, material));
+    auto cryptor = webrtc::make_ref_counted<webrtc::DataPacketCryptor>(
+        webrtc::FrameCryptorTransformer::Algorithm::kAesGcm, provider);
+    auto sealed = webrtc::make_ref_counted<webrtc::EncryptedPacket>(
+        std::vector<uint8_t>(envelope.encrypted_value().begin(), envelope.encrypted_value().end()),
+        std::vector<uint8_t>(envelope.iv().begin(), envelope.iv().end()),
+        static_cast<uint8_t>(envelope.key_index()));
+    auto opened = cryptor->Decrypt("outbound", sealed);
+    TEST_CHECK(opened.ok());
+    livekit::proto::EncryptedPacketPayload inner;
+    TEST_CHECK(inner.ParseFromArray(opened.value().data(), static_cast<int>(opened.value().size())));
+    return inner;
+}
+
+void TestOutboundEnvelope(WriterKind kind) {
+    const bool shared = kind == WriterKind::Text;
+    OutboundFixture f(shared);
+    for (const auto& expected : {std::vector<std::string>{"b", "a", "b"},
+                                 std::vector<std::string>{}}) {
+        auto destinations = expected;
+        const auto start = f.channel->accepted().size();
+        auto writer = f.Writer(kind, destinations);
+        destinations.assign({"changed"});
+        const std::string payload(livekit::kStreamChunkSize + 3, 's');
+        Write(kind, *writer, payload);
+        writer->Close("", {{"final", "secret-final"}});
+        const auto packets = f.channel->accepted();
+        TEST_CHECK(packets.size() == start + 4);
+        std::string received;
+        for (size_t i = start; i < packets.size(); ++i) {
+            TEST_CHECK(std::vector<std::string>(packets[i].destination_identities().begin(),
+                packets[i].destination_identities().end()) == expected);
+            const auto inner = OpenOutbound(packets[i], shared);
+            if (i == start) {
+                TEST_CHECK(inner.has_stream_header());
+                TEST_CHECK(inner.stream_header().topic() == "encrypted");
+                TEST_CHECK(inner.stream_header().attributes().at("attribute") == "secret");
+                TEST_CHECK(inner.stream_header().stream_id() == "encrypted-stream");
+            } else if (i == start + 3) {
+                TEST_CHECK(inner.has_stream_trailer());
+                TEST_CHECK(inner.stream_trailer().reason().empty());
+                TEST_CHECK(inner.stream_trailer().attributes().at("final") == "secret-final");
+            } else {
+                TEST_CHECK(inner.has_stream_chunk());
+                TEST_CHECK(inner.stream_chunk().chunk_index() == i - start - 1);
+                received += inner.stream_chunk().content();
+            }
+        }
+        TEST_CHECK(received == payload);
+    }
+}
+
+void CheckSameFailure(std::exception_ptr first, std::exception_ptr repeated) {
+    const auto fingerprint = [](std::exception_ptr error) {
+        TEST_CHECK(error != nullptr);
+        try { std::rethrow_exception(error); }
+        catch (const OperationError& failure) {
+            return std::to_string(static_cast<int>(failure.operation())) + ":" +
+                std::to_string(static_cast<int>(failure.code())) + ":" + failure.stage() +
+                ":" + failure.what() + ":" + (failure.retryable() ? "retryable" : "terminal");
+        }
+        TEST_CHECK(false);
+        return std::string{};
+    };
+    TEST_CHECK(fingerprint(first) == fingerprint(repeated));
+}
+
+void TestOutboundFailure(const std::string& scenario) {
+    OutboundFixture f(true, scenario != "missing");
+    auto writer = f.Writer(WriterKind::Text);
+    if (scenario != "missing") {
+        Write(WriterKind::Text, *writer, "prefix");
+        if (scenario == "replace")
+            f.room->EnableE2ee({livekit::EncryptionType::GCM, f.keys});
+        else f.room->e2ee_manager()->SetEnabled(false);
+    }
+    const auto before = f.channel->attempts();
+    std::exception_ptr first;
+    try { Write(WriterKind::Text, *writer, "must-not-send"); }
+    catch (...) { first = std::current_exception(); }
+    TEST_CHECK(first != nullptr);
+    try { std::rethrow_exception(first); }
+    catch (const OperationError& error) {
+        TEST_CHECK(error.code() == (scenario == "missing" ? OperationErrorCode::EncryptionFailed
+                                                         : OperationErrorCode::InvalidState));
+        TEST_CHECK(error.stage() == (scenario == "missing" ? "header" : "chunk"));
+    }
+    TEST_CHECK(writer->is_closed());
+    TEST_CHECK(f.channel->attempts() == before);
+    for (int operation = 0; operation < 2; ++operation) {
+        std::exception_ptr repeated;
+        try { if (operation == 0) writer->Close(); else writer->Cancel(); }
+        catch (...) { repeated = std::current_exception(); }
+        CheckSameFailure(first, repeated);
+    }
+    writer.reset();
+    TEST_CHECK(f.channel->attempts() == before);
+}
+
+void TestOutboundRotation() {
+    for (bool shared : {true, false}) {
+        OutboundFixture f(shared);
+        const std::vector<uint8_t> key3(32, 0x43), key4(32, 0x44), replacement(32, 0x45);
+        auto install = [&](int index, const std::vector<uint8_t>& key) {
+            if (shared) f.keys->SetSharedKey(key, index);
+            else TEST_CHECK(f.keys->SetKey("outbound", index, key));
+        };
+        install(3, key3);
+        install(4, key4);
+        f.room->EnableE2ee({livekit::EncryptionType::GCM, f.keys, 3});
+        auto manager = f.room->e2ee_manager();
+        // Installing another participant's receive material must not select a send slot.
+        f.keys->SetKey("remote", 8, replacement);
+        const auto kind = shared ? WriterKind::Text : WriterKind::Byte;
+        auto writer = f.Writer(kind);
+        Write(kind, *writer, "a");
+        TEST_CHECK(manager->SetDataPacketKeyIndex(4));
+        Write(kind, *writer, "b");
+        install(4, replacement);
+        TEST_CHECK(!manager->SetDataPacketKeyIndex(-1));
+        TEST_CHECK(!manager->SetDataPacketKeyIndex(16));
+        TEST_CHECK(!manager->SetDataPacketKeyIndex(259));
+        writer->Close();
+        const auto packets = f.channel->accepted();
+        TEST_CHECK(packets.size() == 4);
+        TEST_CHECK(OpenOutbound(packets[0], shared, 3, key3).has_stream_header());
+        TEST_CHECK(OpenOutbound(packets[1], shared, 3, key3).stream_chunk().content() == "a");
+        TEST_CHECK(OpenOutbound(packets[2], shared, 4, key4).stream_chunk().content() == "b");
+        TEST_CHECK(OpenOutbound(packets[3], shared, 4, replacement).has_stream_trailer());
+        std::set<std::string> ivs;
+        for (const auto& packet : packets) TEST_CHECK(ivs.insert(packet.encrypted_packet().iv()).second);
+    }
+}
+
+void TestOutboundEmptyAndCancel() {
+    for (auto kind : {WriterKind::Text, WriterKind::Byte}) {
+        for (bool cancel : {true, false}) {
+            OutboundFixture f;
+            auto writer = f.Writer(kind);
+            if (cancel) writer->Cancel("stop"); else writer->Close();
+            writer->Close();
+            writer.reset();
+            const auto packets = f.channel->accepted();
+            TEST_CHECK(packets.size() == 2);
+            TEST_CHECK(OpenOutbound(packets[0], true).has_stream_header());
+            const auto trailer = OpenOutbound(packets[1], true).stream_trailer();
+            TEST_CHECK(trailer.reason() == (cancel ? "stop" : ""));
+        }
+    }
+}
+
+void TestOutboundFailureStages() {
+    for (auto kind : {WriterKind::Text, WriterKind::Byte}) {
+        for (auto stage : {PacketKind::Header, PacketKind::Chunk, PacketKind::Trailer}) {
+            OutboundFixture f;
+            auto writer = f.Writer(kind);
+            if (stage != PacketKind::Header) Write(kind, *writer, "prefix");
+            f.keys->SetSharedKey({});
+            const auto before = f.channel->attempts();
+            std::exception_ptr first;
+            try {
+                if (stage == PacketKind::Trailer) writer->Close();
+                else Write(kind, *writer, "secret");
+            } catch (const OperationError& error) {
+                TEST_CHECK(error.code() == OperationErrorCode::EncryptionFailed);
+                TEST_CHECK(error.stage() == StageOf(stage));
+                first = std::current_exception();
+            }
+            TEST_CHECK(first && writer->is_closed());
+            // Recovery of the key must not revive a Failed writer.
+            f.keys->SetSharedKey(std::vector<uint8_t>(32, 0x42));
+            try { writer->Cancel(); TEST_CHECK(false); }
+            catch (...) { CheckSameFailure(first, std::current_exception()); }
+            writer.reset();
+            TEST_CHECK(f.channel->attempts() == before);
+        }
+    }
+}
+
+void TestOutboundBounds() {
+    using Error = livekit::PacketCryptoError;
+    OutboundFixture f;
+    auto cryptor = f.room->e2ee_manager()->data_packet_cryptor();
+    for (int index : {-1, 16, 255, 259})
+        TEST_CHECK(std::get<Error>(cryptor->EncryptPacket("outbound", index, {})) == Error::InvalidEnvelope);
+    TEST_CHECK(std::get<Error>(cryptor->EncryptPacket("", 0, {})) == Error::InvalidEnvelope);
+    TEST_CHECK(std::get<Error>(cryptor->EncryptPacket("outbound", 3, {})) == Error::MissingKey);
+    std::vector<uint8_t> bytes(livekit::DataPacketCryptor::kMaxEncryptedPacketBytes - 28, 0x61);
+    const auto sealed = std::get<livekit::EncryptedDataPacket>(cryptor->EncryptPacket("outbound", 0, bytes));
+    TEST_CHECK(sealed.iv.size() + sealed.ciphertext.size() == livekit::DataPacketCryptor::kMaxEncryptedPacketBytes);
+    TEST_CHECK(std::get<livekit::AuthenticatedDataPayload>(cryptor->DecryptPacket("outbound", sealed)).bytes == bytes);
+    bytes.push_back(0);
+    TEST_CHECK(std::get<Error>(cryptor->EncryptPacket("outbound", 0, bytes)) == Error::SizeLimitExceeded);
+    for (bool oversized : {false, true}) {
+        if (!oversized) f.room->EnableE2ee({livekit::EncryptionType::CUSTOM, f.keys});
+        else f.room->EnableE2ee({livekit::EncryptionType::GCM, f.keys});
+        auto writer = f.room->CreateTextStreamWriter("bounded",
+            {{"metadata", std::string(oversized ? 65536 : 1, 'x')}});
+        try { writer->Close(); TEST_CHECK(false); }
+        catch (const OperationError& error) { TEST_CHECK(error.code() == OperationErrorCode::EncryptionFailed); }
+        TEST_CHECK(f.channel->attempts() == 0);
+    }
+    // HKDF and a non-default salt must also interoperate with the native backend.
+    livekit::KeyProviderOptions options;
+    options.key_derivation_algorithm = livekit::KeyDerivationAlgorithm::HKDF;
+    options.ratchet_salt = "outbound-test-salt";
+    auto keys = std::make_shared<livekit::KeyProvider>(options);
+    const std::vector<uint8_t> material(32, 0x61);
+    keys->SetKey("outbound", 3, material);
+    f.room->EnableE2ee({livekit::EncryptionType::GCM, keys, 3});
+    auto writer = f.Writer(WriterKind::Byte);
+    writer->Close();
+    const auto packets = f.channel->accepted();
+    TEST_CHECK(packets.size() == 2);
+    TEST_CHECK(OpenOutbound(packets[0], false, 3, material, true, options.ratchet_salt).has_stream_header());
+    TEST_CHECK(OpenOutbound(packets[1], false, 3, material, true, options.ratchet_salt).has_stream_trailer());
+}
+
+void TestOutboundInterleavings();
+
+void RunOutboundCase(const std::string& name) {
+    if (name == "text") TestOutboundEnvelope(WriterKind::Text);
+    else if (name == "byte") TestOutboundEnvelope(WriterKind::Byte);
+    else if (name == "rotation") TestOutboundRotation();
+    else if (name == "empty-cancel") TestOutboundEmptyAndCancel();
+    else if (name == "failure-stages") TestOutboundFailureStages();
+    else if (name == "bounds") TestOutboundBounds();
+    else if (name == "interleavings") TestOutboundInterleavings();
+    else {
+        TEST_CHECK(name == "missing" || name == "replace" || name == "disable");
+        TestOutboundFailure(name);
+    }
+    std::printf("[PASS] e2ee-outbound-%s\n", name.c_str());
+}
+
 std::string Base64Encode(const unsigned char* data, std::size_t length) {
     static constexpr char chars[] =
         "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
@@ -730,6 +1031,104 @@ private:
     bool arrived_ = false;
     bool released_ = false;
 };
+
+void TestOutboundInterleavings() {
+    using Access = livekit::RoomStreamDeliveryTestAccess;
+    for (auto kind : {WriterKind::Text, WriterKind::Byte}) {
+        for (auto stage : {PacketKind::Header, PacketKind::Chunk, PacketKind::Trailer}) {
+            for (const auto* transition : {"manager", "disable", "disable-enable", "session", "channel"}) {
+                OutboundFixture f;
+                auto writer = f.Writer(kind);
+                if (stage != PacketKind::Header) Write(kind, *writer, "prefix");
+                const auto before = f.channel->attempts();
+                auto replacement = webrtc::make_ref_counted<ControlledDataChannel>("replacement");
+                Barrier barrier;
+                Access::AfterEncrypt(*f.room, [&] { barrier.ArriveAndWait(); });
+                std::exception_ptr error;
+                std::thread sending([&] {
+                    try {
+                        if (stage == PacketKind::Trailer) writer->Close();
+                        else Write(kind, *writer, "stale");
+                    } catch (...) { error = std::current_exception(); }
+                });
+                barrier.WaitUntilArrived();
+                const std::string change(transition);
+                OperationErrorCode expected = OperationErrorCode::InvalidState;
+                if (change == "manager") f.room->EnableE2ee({livekit::EncryptionType::GCM, f.keys});
+                else if (change == "session") {
+                    Access::InstallOutboundSession(*f.room, 2);
+                    Access::AttachReliableChannel(*f.room, replacement);
+                    expected = OperationErrorCode::SessionInvalid;
+                } else if (change == "channel") {
+                    Access::AttachReliableChannel(*f.room, replacement);
+                    expected = OperationErrorCode::DataChannelUnavailable;
+                } else {
+                    f.room->e2ee_manager()->SetEnabled(false);
+                    if (change == "disable-enable") f.room->e2ee_manager()->SetEnabled(true);
+                }
+                Access::ClearAdmissionHooks(*f.room);
+                barrier.Release();
+                sending.join();
+                TEST_CHECK(error && writer->is_closed());
+                try { std::rethrow_exception(error); }
+                catch (const OperationError& failure) {
+                    TEST_CHECK(failure.code() == expected);
+                    TEST_CHECK(failure.stage() == StageOf(stage));
+                }
+                try { writer->Cancel(); TEST_CHECK(false); }
+                catch (...) { CheckSameFailure(error, std::current_exception()); }
+                writer.reset();
+                TEST_CHECK(f.channel->attempts() == before && replacement->attempts() == 0);
+                // A fresh writer remains usable in the current context.
+                f.room->e2ee_manager()->SetEnabled(true);
+                auto fresh = f.Writer(kind);
+                fresh->Close();
+                auto packets = (change == "session" || change == "channel")
+                    ? replacement->accepted() : f.channel->accepted();
+                TEST_CHECK(OpenOutbound(packets.back(), true).has_stream_trailer());
+            }
+        }
+    }
+    // Plain-to-encrypted transitions must also fail an already-created stream.
+    {
+        OutboundFixture f;
+        f.room->e2ee_manager()->SetEnabled(false);
+        auto writer = f.Writer(WriterKind::Text);
+        Write(WriterKind::Text, *writer, "plain");
+        TEST_CHECK(f.channel->accepted()[0].has_stream_header());
+        f.room->e2ee_manager()->SetEnabled(true);
+        try { writer->Close(); TEST_CHECK(false); }
+        catch (const OperationError& error) { TEST_CHECK(error.code() == OperationErrorCode::InvalidState); }
+        TEST_CHECK(f.channel->attempts() == 2);
+    }
+    // A slot/material update after encryption does not relabel the captured
+    // ciphertext; it affects the next packet, with no mixed snapshot.
+    {
+        OutboundFixture f;
+        auto writer = f.Writer(WriterKind::Byte);
+        const std::vector<uint8_t> rotated(32, 0x55);
+        Barrier barrier;
+        Access::AfterEncrypt(*f.room, [&] { barrier.ArriveAndWait(); });
+        std::exception_ptr error;
+        std::thread sending([&] {
+            try { Write(WriterKind::Byte, *writer, "after-rotation"); }
+            catch (...) { error = std::current_exception(); }
+        });
+        barrier.WaitUntilArrived();
+        f.keys->SetSharedKey(rotated, 3);
+        TEST_CHECK(f.room->e2ee_manager()->SetDataPacketKeyIndex(3));
+        Access::ClearAdmissionHooks(*f.room);
+        barrier.Release();
+        sending.join();
+        TEST_CHECK(!error);
+        writer->Close();
+        const auto packets = f.channel->accepted();
+        TEST_CHECK(packets.size() == 3);
+        TEST_CHECK(OpenOutbound(packets[0], true).has_stream_header());
+        TEST_CHECK(OpenOutbound(packets[1], true, 3, rotated).stream_chunk().content() == "after-rotation");
+        TEST_CHECK(OpenOutbound(packets[2], true, 3, rotated).has_stream_trailer());
+    }
+}
 
 template <typename Predicate>
 asio::awaitable<void> WaitFor(asio::any_io_executor executor,
@@ -1151,7 +1550,14 @@ asio::awaitable<void> TestRoomDeliveryAndSessions(asio::any_io_executor executor
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--e2ee-outbound") {
+        RunOutboundCase(argv[2]);
+        return 0;
+    }
+    for (const auto* name : {"text", "byte", "missing", "replace", "disable", "rotation",
+                            "empty-cancel", "failure-stages", "bounds", "interleavings"})
+        RunOutboundCase(name);
     TestWriterFailureMatrix();
     TestMidWriteFailureStopsPrefix();
     TestEmptyPublisher();

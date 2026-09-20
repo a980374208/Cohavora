@@ -326,6 +326,7 @@ private:
     std::shared_ptr<ConnectAttemptTestHooks> connect_attempt_test_hooks_;
     struct StreamDeliveryTestHooks {
         std::function<void()> after_decrypt_before_commit;
+        std::function<void()> after_encrypt_before_commit;
         std::function<void()> before_admission;
         std::function<void()> after_admission;
         std::function<void(uint64_t)> before_full_restart_data_channel_wait;
@@ -420,10 +421,17 @@ private:
         ChannelUnavailable,
         SerializationFailed,
         ChannelRejected,
+        EncryptionFailed,
+        EncryptionContextChanged,
+    };
+    struct OutgoingStreamContext {
+        std::shared_ptr<E2eeManager> manager;
+        uint64_t policy_revision = 0;
     };
     DataPacketSendResult PublishDataPacket(const proto::DataPacket& packet,
-                                           bool reliable,
-                                           uint64_t expected_generation);
+                                          bool reliable,
+                                          uint64_t expected_generation,
+                                          const OutgoingStreamContext* stream_context = nullptr);
     void NegotiatePublisher(uint64_t generation);
     asio::awaitable<std::shared_ptr<TrackPublication>> PublishLocalTrackAsync(
         std::shared_ptr<Track> track, const proto::SignalRequest& request, uint64_t generation);
