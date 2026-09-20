@@ -230,7 +230,7 @@ protected:
 
 private:
 	enum class HoverBtn {
-		None, Layout, HostTools, Console, Simulate, Settings, Fullscreen, Min, Max, Close
+		None, Layout, Console, Simulate, Settings, Min, Max, Close
 	};
 
 	HoverBtn _hoverBtn = HoverBtn::None;
@@ -241,11 +241,9 @@ private:
 	VideoViewMode _currentViewMode = VideoViewMode::Grid;
 
 	QRect _layoutRect;
-	QRect _hostToolsRect;
 	QRect _consoleRect;
 	QRect _simulateRect;
 	QRect _settingsRect;
-	QRect _fullscreenRect;
 	QRect _minRect;
 	QRect _maxRect;
 	QRect _closeRect;
@@ -296,8 +294,6 @@ public:
 	rpl::producer<> inviteClicked() const { return _inviteStream.events(); }
 	rpl::producer<> participantsClicked() const { return _participantsStream.events(); }
 	rpl::producer<> chatClicked() const { return _chatStream.events(); }
-	rpl::producer<> recordClicked() const { return _recordStream.events(); }
-	rpl::producer<> appsClicked() const { return _appsStream.events(); }
 	rpl::producer<> endMeetingClicked() const { return _endMeetingStream.events(); }
 	rpl::producer<QString> sendChatRequested() const { return _sendChatStream.events(); }
 	rpl::producer<QString> microphoneDeviceChanged() const { return _micDeviceStream.events(); }
@@ -344,7 +340,6 @@ private:
 	livekit::ScreenShareState _screenShareState = livekit::ScreenShareState::Idle;
 	int _participantCount = 1;
 	int _chatUnreadCount = 0;
-	bool _isRecording = false;
 
 	QLineEdit *_chatInput = nullptr;
 	QPushButton *_handBtn = nullptr;
@@ -363,8 +358,6 @@ private:
 	rpl::event_stream<> _inviteStream;
 	rpl::event_stream<> _participantsStream;
 	rpl::event_stream<> _chatStream;
-	rpl::event_stream<> _recordStream;
-	rpl::event_stream<> _appsStream;
 	rpl::event_stream<> _endMeetingStream;
 	rpl::event_stream<QString> _sendChatStream;
 	rpl::event_stream<QString> _micDeviceStream;

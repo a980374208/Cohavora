@@ -10,12 +10,10 @@ namespace MeetingUI {
 
 enum class NavItemType {
 	Meeting,
-	Contacts,
-	Recordings
+	Contacts
 };
 
 enum class BottomItemType {
-	Mail,
 	Settings,
 	User
 };
@@ -59,13 +57,12 @@ private:
 		BottomItemType type;
 		QString tooltip;
 		QRect rect;
-		bool hasRedDot = false;
 	};
 
 	void updateLayout();
 	void drawAvatar(QPainter &p, const QRect &r);
 	void drawNavIcon(QPainter &p, NavItemType type, const QRect &iconRect, bool active, bool hovered);
-	void drawBottomIcon(QPainter &p, BottomItemType type, const QRect &iconRect, bool hovered, bool hasRedDot);
+	void drawBottomIcon(QPainter &p, BottomItemType type, const QRect &iconRect, bool hovered);
 
 	NavItemType _activeNav = NavItemType::Meeting;
 	std::optional<NavItemType> _hoveredNav;

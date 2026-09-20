@@ -5,6 +5,20 @@
 
 namespace MeetingUI {
 
+namespace {
+constexpr int kCardSize = 120;
+constexpr int kCardTop = 5;
+constexpr int kTitleGap = 12;
+constexpr int kBottomPadding = 8;
+
+QFont CardTitleFont() {
+	QFont font("Microsoft YaHei");
+	font.setPixelSize(14);
+	font.setBold(false);
+	return font;
+}
+} // namespace
+
 ActionCardWidget::ActionCardWidget(
 	QWidget *parent,
 	ActionCardType type,
@@ -31,6 +45,11 @@ ActionCardWidget::ActionCardWidget(
 	});
 }
 
+QSize ActionCardWidget::sizeHint() const {
+	const int titleHeight = std::max(22, QFontMetrics(CardTitleFont()).height());
+	return QSize(kCardSize, kCardTop + kCardSize + kTitleGap + titleHeight + kBottomPadding);
+}
+
 void ActionCardWidget::paintEvent(QPaintEvent *e) {
 	QPainter p(this);
 	p.setRenderHint(QPainter::Antialiasing);
@@ -38,11 +57,10 @@ void ActionCardWidget::paintEvent(QPaintEvent *e) {
 	p.setRenderHint(QPainter::SmoothPixmapTransform);
 
 	const int w = width();
-	const int h = height();
 
 	// 按钮卡片区域（上部方形卡片）
-	const int cardSize = std::min(w, 126);
-	const int cardY = (_hovered ? 2 : 5); // 悬浮上浮动效
+	const int cardSize = std::min(w, kCardSize);
+	const int cardY = (_hovered ? 2 : kCardTop); // 悬浮上浮动效
 	_cardRect = QRect((w - cardSize) / 2, cardY, cardSize, cardSize);
 
 	// 1. 调用 TDeskTop 原生 Ui::BoxShadow 进行九宫格抗锯齿阴影贴图
@@ -75,15 +93,13 @@ void ActionCardWidget::paintEvent(QPaintEvent *e) {
 	p.restore();
 
 	// 绘制下方标题文本
-	QFont font = p.font();
-	font.setFamily("Microsoft YaHei");
-	font.setPixelSize(14);
-	font.setBold(false);
+	const QFont font = CardTitleFont();
 	p.setFont(font);
 	p.setPen(QColor(0x1f, 0x23, 0x29));
 
-	const int textTop = cardY + cardSize + 12;
-	QRect textRect(0, textTop, w, 22);
+	const int textTop = kCardTop + cardSize + kTitleGap;
+	const int titleHeight = std::max(22, QFontMetrics(font).height());
+	QRect textRect(0, textTop, w, titleHeight);
 
 	if (_hasDropdown) {
 		// 计算带下拉小箭头的居中位置
@@ -92,19 +108,19 @@ void ActionCardWidget::paintEvent(QPaintEvent *e) {
 		const int totalW = textW + 14;
 		const int startX = (w - totalW) / 2;
 
-		p.drawText(QRect(startX, textTop, textW, 22), Qt::AlignLeft | Qt::AlignVCenter, _title);
+		p.drawText(QRect(startX, textTop, textW, titleHeight), Qt::AlignLeft | Qt::AlignVCenter, _title);
 
 		// 绘制小下拉箭头 ∨
 		p.save();
 		p.setPen(QPen(QColor(0x60, 0x62, 0x66), 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 		const int arrowX = startX + textW + 6;
-		const int arrowY = textTop + 8;
+		const int arrowY = textRect.center().y() - 2;
 		QPainterPath arrowPath;
 		arrowPath.moveTo(arrowX, arrowY);
 		arrowPath.lineTo(arrowX + 4, arrowY + 4);
 		arrowPath.lineTo(arrowX + 8, arrowY);
 		p.drawPath(arrowPath);
-		_dropdownRect = QRect(arrowX - 4, textTop, 18, 22);
+		_dropdownRect = QRect(arrowX - 4, textTop, 18, titleHeight);
 		p.restore();
 	} else {
 		p.drawText(textRect, Qt::AlignCenter, _title);
@@ -168,26 +184,6 @@ void ActionCardWidget::drawCardIcon(QPainter &p, const QRect &r) {
 		// 底座支架
 		p.drawLine(cx + 5, cy + 12, cx + 5, cy + 16);
 		p.drawLine(cx, cy + 16, cx + 10, cy + 16);
-	} else if (_type == ActionCardType::SimulcastTest) {
-		// 实验烧杯 / 性能流测试 (🧪)
-		p.setPen(QPen(Qt::white, 3.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-		p.setBrush(Qt::NoBrush);
-
-		// 试管瓶身
-		QPainterPath path;
-		path.moveTo(cx - 6, cy - 16);
-		path.lineTo(cx + 6, cy - 16);
-		path.moveTo(cx - 4, cy - 16);
-		path.lineTo(cx - 4, cy - 6);
-		path.lineTo(cx - 14, cy + 12);
-		path.arcTo(cx - 14, cy + 4, 28, 16, 180, 180);
-		path.lineTo(cx + 4, cy - 6);
-		path.lineTo(cx + 4, cy - 16);
-		p.drawPath(path);
-
-		// 试管内波浪液体
-		p.setBrush(QColor(0x00, 0xb4, 0x2a));
-		p.drawEllipse(cx - 4, cy + 4, 8, 8);
 	}
 
 	p.restore();
@@ -239,25 +235,23 @@ ActionGridContainer::ActionGridContainer(QWidget *parent)
 	_quickCard = new ActionCardWidget(this, ActionCardType::QuickMeeting, QString::fromUtf8("快速会议"), true);
 	_scheduleCard = new ActionCardWidget(this, ActionCardType::ScheduleMeeting, QString::fromUtf8("预定会议"), true);
 	_shareCard = new ActionCardWidget(this, ActionCardType::ShareScreen, QString::fromUtf8("共享屏幕"), false);
-	_testCard = new ActionCardWidget(this, ActionCardType::SimulcastTest, QString::fromUtf8("百人 & Simulcast"), false);
 
 	_joinCard->clicked() | rpl::on_next([this](ActionCardType t) { _cardClicks.fire_copy(t); }, lifetime());
 	_quickCard->clicked() | rpl::on_next([this](ActionCardType t) { _cardClicks.fire_copy(t); }, lifetime());
 	_scheduleCard->clicked() | rpl::on_next([this](ActionCardType t) { _cardClicks.fire_copy(t); }, lifetime());
 	_shareCard->clicked() | rpl::on_next([this](ActionCardType t) { _cardClicks.fire_copy(t); }, lifetime());
-	_testCard->clicked() | rpl::on_next([this](ActionCardType t) { _cardClicks.fire_copy(t); }, lifetime());
 }
 
 void ActionGridContainer::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
 
-	const int cardW = 120;
-	const int cardH = 150;
+	const int cardW = _joinCard->sizeHint().width();
+	const int cardH = _joinCard->sizeHint().height();
 	const int gapX = 24;
 	const int gapY = 24;
 
-	const int totalGridW = cardW * 3 + gapX * 2;
+	const int totalGridW = cardW * 2 + gapX;
 	const int totalGridH = cardH * 2 + gapY;
 
 	const int startX = std::max(12, (w - totalGridW) / 2);
@@ -265,10 +259,8 @@ void ActionGridContainer::resizeEvent(QResizeEvent *e) {
 
 	_joinCard->setGeometry(startX, startY, cardW, cardH);
 	_quickCard->setGeometry(startX + cardW + gapX, startY, cardW, cardH);
-	_scheduleCard->setGeometry(startX + (cardW + gapX) * 2, startY, cardW, cardH);
-	
-	_shareCard->setGeometry(startX, startY + cardH + gapY, cardW, cardH);
-	_testCard->setGeometry(startX + cardW + gapX, startY + cardH + gapY, cardW, cardH);
+	_scheduleCard->setGeometry(startX, startY + cardH + gapY, cardW, cardH);
+	_shareCard->setGeometry(startX + cardW + gapX, startY + cardH + gapY, cardW, cardH);
 }
 
 } // namespace MeetingUI

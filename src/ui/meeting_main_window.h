@@ -5,6 +5,7 @@
 #include "src/ui/sidebar_widget.h"
 #include "src/ui/action_card_widget.h"
 #include "src/ui/schedule_widget.h"
+#include "src/ui/meeting_entry_guard.h"
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QPushButton>
@@ -130,6 +131,7 @@ private:
 	ScheduleWidget *_scheduleWidget = nullptr;
 	WindowControlsWidget *_windowControls = nullptr;
 	bool _sessionInvalidationDialogActive = false;
+	MeetingEntryGuard _meetingEntryGuard;
 
 #if defined(Q_OS_WIN)
 	HWND _handle = nullptr;
