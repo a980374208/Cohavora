@@ -108,6 +108,8 @@ set(LIVEKIT_SOURCES
     src/rtc/rtc_audio_source.cpp
     src/rtc/rtc_video_source.cpp
     src/render/owned_i420_frame.cpp
+    src/render/video_render_frame.h
+    src/render/video_render_frame.cpp
     src/render/video_render_router.cpp
     src/media/media_converters.cpp
     src/media/wasapi_enumerator.cpp
@@ -342,6 +344,45 @@ set(CMAKE_AUTOMOC ON)
 # Add Telegram UI Subproject directly as native C++ targets
 add_subdirectory(src/ui/tdesktop)
 
+# The selected backend is deployed next to each executable, but never linked
+# into the UI. No Qt/WebRTC runtime or C++ exports cross the module boundary.
+if(WIN32)
+    add_library(livekit_render_dx11 MODULE
+        src/render/modules/dx11_backend.cpp
+        src/ui/dx11/dx11_renderer.cpp)
+    set_target_properties(livekit_render_dx11 PROPERTIES AUTOMOC OFF
+        PREFIX "" OUTPUT_NAME "livekit-render-dx11" CXX_VISIBILITY_PRESET hidden)
+    target_include_directories(livekit_render_dx11 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(livekit_render_dx11 PRIVATE LK_RENDER_MODULE_BUILD)
+    target_link_libraries(livekit_render_dx11 PRIVATE d3d11 dxgi d3dcompiler)
+    if(MSVC)
+        target_compile_options(livekit_render_dx11 PRIVATE /utf-8)
+    endif()
+endif()
+add_library(livekit_render_opengl MODULE src/render/modules/opengl_backend.cpp)
+set_target_properties(livekit_render_opengl PROPERTIES AUTOMOC OFF
+    OUTPUT_NAME "livekit-render-opengl" CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
+if(APPLE)
+    set_target_properties(livekit_render_opengl PROPERTIES SUFFIX ".dylib")
+endif()
+target_include_directories(livekit_render_opengl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(livekit_render_opengl PRIVATE LK_RENDER_MODULE_BUILD)
+if(MSVC)
+    target_compile_options(livekit_render_opengl PRIVATE /utf-8)
+endif()
+function(livekit_deploy_renderer target)
+    foreach(backend dx11 opengl)
+        if(TARGET livekit_render_${backend})
+            add_custom_target(${target}_renderer_${backend}
+                DEPENDS livekit_render_${backend}
+                COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/renderers"
+                COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:livekit_render_${backend}>"
+                    "$<TARGET_FILE_DIR:${target}>/renderers/$<TARGET_FILE_NAME:livekit_render_${backend}>")
+            add_dependencies(${target} ${target}_renderer_${backend})
+        endif()
+    endforeach()
+endfunction()
+
 add_executable(livekit_meeting_app
     src/app/main_meeting_app.cpp
     src/net/http_types.h
@@ -388,14 +429,15 @@ add_executable(livekit_meeting_app
     src/ui/participants_sidebar_widget.cpp
     src/ui/meeting_chat_sidebar_widget.h
     src/ui/meeting_chat_sidebar_widget.cpp
-    src/ui/dx11/dx11_types.h
-    src/ui/dx11/dx11_shaders.h
-    src/ui/dx11/dx11_renderer.h
-    src/ui/dx11/dx11_renderer.cpp
-    src/ui/dx11/dx11_texture_pool.h
-    src/ui/dx11/dx11_texture_pool.cpp
-    src/ui/dx11/dx11_video_canvas.h
-    src/ui/dx11/dx11_video_canvas.cpp
+    src/render/backend_module.h
+    src/render/backend_module.cpp
+    src/ui/render/module_video_canvas.h
+    src/ui/render/module_video_canvas.cpp
+    src/ui/render/gl_video_canvas.h
+    src/ui/render/gl_video_canvas.cpp
+    src/ui/render/video_canvas.h
+    src/ui/render/video_canvas.cpp
+    src/ui/render/video_canvas_factory.cpp
 )
 
 target_include_directories(livekit_meeting_app BEFORE PRIVATE
@@ -423,6 +465,7 @@ target_include_directories(livekit_meeting_app BEFORE PRIVATE
 )
 
 target_link_libraries(livekit_meeting_app PRIVATE
+    ${CMAKE_DL_LIBS}
     desktop_lib_ui
     desktop_lib_base
     desktop_lib_crl
@@ -503,3 +546,17 @@ foreach(_policy_variant strict dev)
     else()
     endif()
 endforeach()
+
+# Deploy whichever modules exist on this platform. The loader itself stays
+# portable; on Unix its consumers link CMAKE_DL_LIBS above (also inherited by
+livekit_deploy_renderer(livekit_meeting_app)
+
+# These contracts and the production-window fixture use HWND/Win32 APIs.
+# Keep their fixtures, D3D links and target-file expressions out of Unix builds.
+if(WIN32)
+foreach(variant missing_entry wrong_version missing_function wrong_capabilities create_failure)
+    set_target_properties(render_fixture_${variant} PROPERTIES AUTOMOC OFF)
+    target_include_directories(render_fixture_${variant} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_compile_definitions(render_fixture_${variant} PRIVATE LK_RENDER_MODULE_BUILD FIXTURE_${variant})
+endforeach()
+endif()

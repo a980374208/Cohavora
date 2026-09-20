@@ -1,7 +1,5 @@
 #include "src/ui/meeting_room_window.h"
 #include "src/ui/meeting_log_console.h"
-#include "src/media/media_converters.h"
-#include "libyuv/convert_argb.h"
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QMessageBox>
@@ -26,45 +24,6 @@
 #endif
 
 namespace MeetingUI {
-
-// ----------------------------------------------------
-// 视频帧格式转换工具 (VideoFrame -> QImage)
-// ----------------------------------------------------
-static QImage VideoFrameToQImage(const livekit::VideoFrame &frame) {
-	const int w = frame.width();
-	const int h = frame.height();
-	if (w <= 0 || h <= 0 || !frame.data()) return QImage();
-
-	if (frame.type() == livekit::VideoBufferType::RGBA) {
-		return QImage(frame.data(), w, h, w * 4, QImage::Format_RGBA8888).copy();
-	} else if (frame.type() == livekit::VideoBufferType::ARGB || frame.type() == livekit::VideoBufferType::BGRA) {
-		return QImage(frame.data(), w, h, w * 4, QImage::Format_ARGB32).copy();
-	} else if (frame.type() == livekit::VideoBufferType::RGB24) {
-		std::vector<uint8_t> rgba(w * h * 4);
-		livekit::MediaConverters::ConvertRGB24ToRGBA(frame.data(), rgba.data(), w, h);
-		return QImage(rgba.data(), w, h, w * 4, QImage::Format_RGBA8888).copy();
-	} else if (frame.type() == livekit::VideoBufferType::NV12) {
-		QImage image(w, h, QImage::Format_ARGB32);
-		if (image.isNull()) return image;
-		const int chroma_width = (w + 1) / 2;
-		const uint8_t *y_plane = frame.data();
-		const uint8_t *uv_plane = y_plane + (w * h);
-		return libyuv::NV12ToARGB(y_plane, w, uv_plane, chroma_width * 2,
-			image.bits(), image.bytesPerLine(), w, h) == 0 ? image : QImage();
-	} else if (frame.type() == livekit::VideoBufferType::I420 ||
-	           frame.type() == livekit::VideoBufferType::I420A) {
-		QImage image(w, h, QImage::Format_ARGB32);
-		if (image.isNull()) return image;
-		const int chroma_width = (w + 1) / 2;
-		const int chroma_height = (h + 1) / 2;
-		const uint8_t *y_plane = frame.data();
-		const uint8_t *u_plane = y_plane + (w * h);
-		const uint8_t *v_plane = u_plane + (chroma_width * chroma_height);
-		return libyuv::I420ToARGB(y_plane, w, u_plane, chroma_width, v_plane, chroma_width,
-			image.bits(), image.bytesPerLine(), w, h) == 0 ? image : QImage();
-	}
-	return QImage();
-}
 
 // ----------------------------------------------------
 // VideoTileWidget 实现
@@ -1898,7 +1857,7 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	setupCoordinatorBindings();
 	_remoteRenderSession = std::make_unique<livekit::render::VideoRenderSession>(
 		[this](const std::string &identity, const QImage &image) {
-			receiveRemoteVideoFrame(image, QString::fromStdString(identity));
+			receiveRenderedVideoFrame(image, QString::fromStdString(identity));
 		});
 	_remoteRenderTimer = new QTimer(this);
 	connect(_remoteRenderTimer, &QTimer::timeout, this, &MeetingRoomWindow::onRemoteRenderTick);
@@ -1915,11 +1874,8 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	if (!_localVideoSource) {
 		_localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
 	}
-	_localVideoSource->addSink([this](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
-		if (_usingDx11Backend.load(std::memory_order_acquire) && _dx11Canvas) {
-			_dx11Canvas->updateFrame("local", frame);
-		}
-	});
+	if (_config.videoEnabled) _remoteRenderSession->AttachLocalSource(_localVideoSource);
+
 	_localAudioSource->addSink([this](const livekit::AudioFrame &frame) {
 		if (_config.audioMuted) return;
 		const auto &samples = frame.data();
@@ -1939,17 +1895,6 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 		}
 	});
 
-	_localVideoSource->addSink([this](const livekit::VideoFrame &frame, const livekit::VideoCaptureOptions &) {
-		if (_usingDx11Backend.load(std::memory_order_acquire)) {
-			return;
-		}
-		QImage img = VideoFrameToQImage(frame);
-		if (!img.isNull()) {
-			QMetaObject::invokeMethod(this, [this, img = std::move(img)]() {
-				receiveLocalVideoFrame(img);
-			}, Qt::QueuedConnection);
-		}
-	});
 
 	// 4. 启动物理麦克风 WASAPI 采集
 	_wasapiCap = livekit::WasapiAudioCapture::Create();
@@ -2023,7 +1968,7 @@ MeetingRoomWindow::MeetingRoomWindow(
 	setupInvitationBinding();
 	_remoteRenderSession = std::make_unique<livekit::render::VideoRenderSession>(
 		[this](const std::string &identity, const QImage &image) {
-			receiveRemoteVideoFrame(image, QString::fromStdString(identity));
+			receiveRenderedVideoFrame(image, QString::fromStdString(identity));
 		});
 	_remoteRenderSession->UseQtCpuBackend();
 	setupCoordinatorBindings();
@@ -2064,7 +2009,7 @@ MeetingRoomWindow::~MeetingRoomWindow() {
 void MeetingRoomWindow::showEvent(QShowEvent *e) {
 	Ui::RpWidget::showEvent(e);
 	setupNativeWindow();
-	tryActivateDx11Backend();
+	tryActivateGpuBackend();
 }
 
 void MeetingRoomWindow::closeEvent(QCloseEvent *e) {
@@ -2114,12 +2059,14 @@ void MeetingRoomWindow::initLayout() {
 	}
 	_stageContainer = new QWidget(this);
 	_stageContainer->setStyleSheet("background-color: #12141a;");
-	if (livekit::dx11::Dx11VideoCanvas::IsHardwareBackendAllowed()) {
-		_dx11Canvas = new livekit::dx11::Dx11VideoCanvas(_stageContainer);
-		_dx11Canvas->setGeometry(_stageContainer->rect());
-		_dx11Canvas->hide();
-		connect(_dx11Canvas, &livekit::dx11::Dx11VideoCanvas::rendererUnavailable,
-		        this, &MeetingRoomWindow::fallBackToQtCpuBackend);
+	if ((_videoCanvas = livekit::render::CreateVideoCanvas(_stageContainer, &_renderDiagnostics))) {
+		_videoCanvas->setGeometry(_stageContainer->rect());
+		_videoCanvas->hide();
+		connect(_videoCanvas, &livekit::render::VideoCanvas::rendererUnavailable,
+		        this, &MeetingRoomWindow::fallBackToQtCpuBackend, Qt::QueuedConnection);
+	} else {
+		LogToConsole(LogCategory::WebRTC, "RENDER",
+			"Qt CPU 视频后端: " + livekit::render::RenderDiagnosticsSafeSummary(_renderDiagnostics));
 	}
 	_bottomBar = new RoomBottomBarWidget(this);
 
@@ -2702,11 +2649,9 @@ void MeetingRoomWindow::onRemoteRenderTick() {
 		auto frame = _localScreenPreview->TakeLatest("screen", _localScreenPreview->generation());
 		if (!frame) return;
 		_localScreenTile->setVideoActive(true);
-		if (_usingDx11Backend.load(std::memory_order_acquire) && _dx11Canvas) {
-			_dx11Canvas->updateI420Frame(_localScreenTile->renderKey().toStdString(), std::move(frame));
-		} else {
-			_localScreenTile->setFrame(livekit::render::QtCpuVideoRenderer().Convert(*frame));
-		}
+        if (_remoteRenderSession) _remoteRenderSession->RenderFrame(
+            _localScreenTile->renderKey().toStdString(),
+            livekit::render::VideoRenderFrame::FromI420(std::move(frame)));
 	}
 }
 
@@ -2834,6 +2779,7 @@ void MeetingRoomWindow::updateRecoveryStateUi(OpenMeeting::MeetingState state, c
 		break;
 	}
 	}
+    if (_videoCanvas) _videoCanvas->setStageOverlay(_recoveryBanner);
 }
 
 void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
@@ -2993,8 +2939,8 @@ void MeetingRoomWindow::onRemoteParticipantLeft(const QString &identity) {
 	if (_remoteRenderSession) {
 		_remoteRenderSession->RemoveTracksForIdentity(identity.toStdString());
 	}
-	if (_dx11Canvas) {
-		_dx11Canvas->removeUser((QStringLiteral("remote-camera/") + identity).toStdString());
+	if (_videoCanvas) {
+		_videoCanvas->removeUser((QStringLiteral("remote-camera/") + identity).toStdString());
 	}
 	auto it = _remoteTiles.find(identity);
 	if (it != _remoteTiles.end()) {
@@ -3079,73 +3025,76 @@ void MeetingRoomWindow::updateActiveSpeakers(const std::vector<livekit::ActiveSp
 	}
 }
 
-void MeetingRoomWindow::tryActivateDx11Backend() {
-	if (_dx11BackendActivationAttempted || !_dx11Canvas || !_remoteRenderSession ||
-		!livekit::dx11::Dx11VideoCanvas::IsHardwareBackendAllowed()) {
-		return;
-	}
-	_dx11BackendActivationAttempted = true;
-	setupDx11CanvasInteractions();
-	_dx11Canvas->setGeometry(_stageContainer->rect());
-	_dx11Canvas->show(); // showEvent performs the UI-thread device probe.
+void MeetingRoomWindow::tryActivateGpuBackend() {
+	if (!_videoCanvas || !_remoteRenderSession || !_remoteRenderSession->active() ||
+        _usingGpuBackend.load(std::memory_order_acquire)) return;
+    if (_gpuBackendActivationAttempted) {
+        if (!_videoCanvas->rendererReady()) return;
+    } else {
+        _gpuBackendActivationAttempted = true;
+        setupVideoCanvasInteractions();
+        _videoCanvas->setGeometry(_stageContainer->rect());
+        _videoCanvas->show();
+    }
 
-	if (!_dx11Canvas->rendererReady()) {
-		_dx11Canvas->hide();
+	if (!_videoCanvas->rendererReady()) {
+        if (_videoCanvas->rendererPending()) return; // Qt initializes the GL context asynchronously.
+		_renderDiagnostics = _videoCanvas->renderDiagnostics();
+		_videoCanvas->shutdownRenderer();
+		_videoCanvas->hide();
 		_remoteRenderSession->UseQtCpuBackend();
-		LogToConsole(LogCategory::WebRTC, "DX11", "DX11 Canvas 初始化失败，已使用 Qt CPU 视频后端");
+		_renderDiagnostics = _videoCanvas->renderDiagnostics();
+		LogToConsole(LogCategory::WebRTC, "RENDER", "GPU Canvas 初始化失败，已使用 Qt CPU 视频后端: " +
+			livekit::render::RenderDiagnosticsSafeSummary(_renderDiagnostics));
 		return;
 	}
 
-	_remoteRenderSession->UseDx11Backend(
-		[this](const std::string &trackSid, livekit::render::OwnedI420Frame::Ptr frame) {
-			if (!canRenderRemoteVideo(QString::fromStdString(trackSid))) return;
-			auto *tile = remoteVideoTile(QString::fromStdString(trackSid));
-			if (!tile) return;
-			if (!tile->isVideoActive()) {
-				tile->setVideoActive(true);
-				updateVideoLayout();
-			}
-			if (_usingDx11Backend.load(std::memory_order_acquire) && _dx11Canvas) {
-				_dx11Canvas->updateI420Frame(tile->renderKey().toStdString(), std::move(frame));
-			}
-		});
-	_usingDx11Backend.store(true, std::memory_order_release);
-	LogToConsole(LogCategory::WebRTC, "DX11", "已启用 I420 直渲染后端");
+	_remoteRenderSession->UseGpuBackend(
+        [this](const std::string& key, livekit::render::VideoRenderFrame::Ptr frame) {
+            receiveGpuVideoFrame(key, std::move(frame));
+        });
+	_usingGpuBackend.store(true, std::memory_order_release);
+	_renderDiagnostics = _videoCanvas->renderDiagnostics();
+	LogToConsole(LogCategory::WebRTC, "RENDER", "已启用 GPU 直渲染后端: " +
+		livekit::render::RenderDiagnosticsSafeSummary(_renderDiagnostics));
 	updateVideoLayout();
 }
 
 void MeetingRoomWindow::fallBackToQtCpuBackend() {
-	const bool was_using_dx11 = _usingDx11Backend.exchange(false, std::memory_order_acq_rel);
+	const bool was_using_gpu = _usingGpuBackend.exchange(false, std::memory_order_acq_rel);
 	if (_remoteRenderSession) {
 		_remoteRenderSession->UseQtCpuBackend();
 	}
-	if (_dx11Canvas) {
-		_dx11Canvas->clearUsers();
-		_dx11Canvas->hide();
+	if (_videoCanvas) {
+		_renderDiagnostics = _videoCanvas->renderDiagnostics();
+		_videoCanvas->shutdownRenderer();
+		_videoCanvas->hide();
+		_renderDiagnostics = _videoCanvas->renderDiagnostics();
 	}
-	if (was_using_dx11) {
-		LogToConsole(LogCategory::Error, "DX11", "DX11 Present/设备失败，已切换到 Qt CPU 视频后端");
+	if (was_using_gpu) {
+		LogToConsole(LogCategory::Error, "RENDER", "GPU 呈现/设备失败，已切换到 Qt CPU 视频后端: " +
+			livekit::render::RenderDiagnosticsSafeSummary(_renderDiagnostics));
 	}
 	updateVideoLayout();
 }
 
-void MeetingRoomWindow::syncDx11CanvasLayout(const std::vector<VideoTileWidget*> &tiles) {
-	if (!_usingDx11Backend.load(std::memory_order_acquire) || !_dx11Canvas) {
+void MeetingRoomWindow::syncVideoCanvasLayout(const std::vector<VideoTileWidget*> &tiles) {
+	if (!_usingGpuBackend.load(std::memory_order_acquire) || !_videoCanvas) {
 		return;
 	}
 
-	std::vector<livekit::dx11::TileRect> dx11_tiles;
-	dx11_tiles.reserve(tiles.size());
+	std::vector<livekit::render::VideoTileRect> canvas_tiles;
+	canvas_tiles.reserve(tiles.size());
 	for (auto *tile : tiles) {
 		if (!tile) continue;
 		const QRect geometry = tile->geometry();
-		dx11_tiles.push_back({
+		canvas_tiles.push_back({
 			tile->renderKey().toStdString(),
 			geometry.x(), geometry.y(), geometry.width(), geometry.height(),
 			tile->isSpeaking(), tile->audioLevel(), tile->isVideoActive() && !tile->isVideoStreamPaused()
 		});
 		QPointer<VideoTileWidget> guarded(tile);
-		_dx11Canvas->setTileDecoration(tile->renderKey().toStdString(),
+		_videoCanvas->setTileDecoration(tile->renderKey().toStdString(),
 			[guarded](const QSize &pixels, bool hasFrame, bool hovered) {
 				return guarded ? guarded->hardwareDecoration(pixels, hasFrame, hovered) : QImage();
 			}, tile->pinButtonRect());
@@ -3153,20 +3102,24 @@ void MeetingRoomWindow::syncDx11CanvasLayout(const std::vector<VideoTileWidget*>
 		tile->hide();
 	}
 
-	_dx11Canvas->setGeometry(_stageContainer->rect());
-	_dx11Canvas->setTilesLayout(dx11_tiles);
-	_dx11Canvas->show();
-	_dx11Canvas->raise();
+	_videoCanvas->setGeometry(_stageContainer->rect());
+	_videoCanvas->setTilesLayout(canvas_tiles);
+	_videoCanvas->show();
+	_videoCanvas->raise();
 	if (_inviteHintBanner) _inviteHintBanner->hide();
 	if (_recoveryBanner && _recoveryBanner->isVisible()) {
 		_recoveryBanner->raise();
 	}
 }
 
-void MeetingRoomWindow::setupDx11CanvasInteractions() {
-	connect(_dx11Canvas, &livekit::dx11::Dx11VideoCanvas::tileDoubleClicked,
+void MeetingRoomWindow::setupVideoCanvasInteractions() {
+    _videoCanvas->setStageOverlay(_recoveryBanner);
+    connect(_videoCanvas, &livekit::render::VideoCanvas::rendererInitialized,
+        this, &MeetingRoomWindow::tryActivateGpuBackend,
+        static_cast<Qt::ConnectionType>(Qt::QueuedConnection | Qt::UniqueConnection));
+	connect(_videoCanvas, &livekit::render::VideoCanvas::tileDoubleClicked,
 		this, &MeetingRoomWindow::togglePinForRenderKey, Qt::UniqueConnection);
-	connect(_dx11Canvas, &livekit::dx11::Dx11VideoCanvas::tilePinRequested,
+	connect(_videoCanvas, &livekit::render::VideoCanvas::tilePinRequested,
 		this, &MeetingRoomWindow::togglePinForRenderKey, Qt::UniqueConnection);
 }
 
@@ -3178,7 +3131,7 @@ void MeetingRoomWindow::bindTileInteractions(VideoTileWidget *tile) {
 		setPinnedTile(tile->renderKey(), pinned);
 	});
 	connect(tile, &VideoTileWidget::presentationChanged, this, [this, tile] {
-		if (_dx11Canvas) _dx11Canvas->updateTilePresentation(tile->renderKey().toStdString(),
+		if (_videoCanvas) _videoCanvas->updateTilePresentation(tile->renderKey().toStdString(),
 			tile->isVideoActive() && !tile->isVideoStreamPaused());
 	});
 }
@@ -3201,6 +3154,15 @@ void MeetingRoomWindow::togglePinForRenderKey(const QString &renderKey) {
 }
 
 void MeetingRoomWindow::updateVideoLayout() {
+    if (_remoteRenderSession && _localVideoSource) {
+        if (_config.videoEnabled) {
+            _remoteRenderSession->AttachLocalSource(_localVideoSource);
+        } else {
+            _remoteRenderSession->DetachLocalSource();
+            if (_videoCanvas) _videoCanvas->removeUser("local");
+            if (_localTile) _localTile->setFrame({});
+        }
+    }
 	const int stageW = _stageContainer->width();
 	const int stageH = _stageContainer->height();
 	if (stageW <= 0 || stageH <= 0) return;
@@ -3220,7 +3182,7 @@ void MeetingRoomWindow::updateVideoLayout() {
 		return tile->renderKey() == _pinnedRenderKey;
 	})) _pinnedRenderKey.clear();
 	for (auto *tile : allTiles) tile->setPinned(tile->renderKey() == _pinnedRenderKey);
-	if (!_usingDx11Backend.load(std::memory_order_acquire)) {
+	if (!_usingGpuBackend.load(std::memory_order_acquire)) {
 		for (auto *tile : allTiles) tile->setHardwareCanvasMode(false);
 	}
 
@@ -3233,7 +3195,7 @@ void MeetingRoomWindow::updateVideoLayout() {
 	const int bannerW = 220;
 	const int bannerH = 32;
 	_inviteHintBanner->setGeometry((stageW - bannerW) / 2, stageH - bannerH - 12, bannerW, bannerH);
-	_inviteHintBanner->setVisible(!_usingDx11Backend.load(std::memory_order_acquire) && !hasRemote && !localActive);
+	_inviteHintBanner->setVisible(!_usingGpuBackend.load(std::memory_order_acquire) && !hasRemote && !localActive);
 
 	if (_recoveryBanner && _recoveryBanner->isVisible()) {
 		const int recBannerW = std::min(stageW - 32, 420);
@@ -3267,7 +3229,7 @@ void MeetingRoomWindow::updateVideoLayout() {
 			t->raise();
 			pipRightOffset += pipW + 10;
 		}
-		syncDx11CanvasLayout(allTiles);
+		syncVideoCanvasLayout(allTiles);
 		return;
 	}
 
@@ -3312,7 +3274,7 @@ void MeetingRoomWindow::updateVideoLayout() {
 			otherTiles[i]->setGeometry(margin + mainW + gap, margin + i * (clampedH + gap), filmstripW, clampedH);
 			otherTiles[i]->show();
 		}
-		syncDx11CanvasLayout(allTiles);
+		syncVideoCanvasLayout(allTiles);
 		return;
 	}
 
@@ -3369,12 +3331,39 @@ void MeetingRoomWindow::updateVideoLayout() {
 			++tileIdx;
 		}
 	}
-	syncDx11CanvasLayout(allTiles);
+	syncVideoCanvasLayout(allTiles);
 }
 
 void MeetingRoomWindow::paintEvent(QPaintEvent *e) {
 	QPainter p(this);
 	p.fillRect(rect(), QColor(0x12, 0x14, 0x1a));
+}
+
+void MeetingRoomWindow::receiveRenderedVideoFrame(const QImage& image, const QString& key) {
+    if (key == QStringLiteral("local")) {
+        if (_config.videoEnabled) receiveLocalVideoFrame(image);
+    } else if (_localScreenTile && key == _localScreenTile->renderKey()) {
+        _localScreenTile->setFrame(image);
+    } else {
+        receiveRemoteVideoFrame(image, key);
+    }
+}
+
+void MeetingRoomWindow::receiveGpuVideoFrame(const std::string& key, livekit::render::VideoRenderFrame::Ptr frame) {
+    if (!_usingGpuBackend.load(std::memory_order_acquire) || !_videoCanvas) return;
+    const auto qkey = QString::fromStdString(key);
+    VideoTileWidget* tile = nullptr;
+    if (qkey == QStringLiteral("local")) {
+        if (!_config.videoEnabled) return;
+        tile = _localTile;
+    } else if (_localScreenTile && qkey == _localScreenTile->renderKey()) {
+        tile = _localScreenTile.get();
+    } else {
+        if (!canRenderRemoteVideo(qkey)) return;
+        tile = remoteVideoTile(qkey);
+        if (tile && !tile->isVideoActive()) { tile->setVideoActive(true); updateVideoLayout(); }
+    }
+    if (tile) _videoCanvas->updateFrame(tile->renderKey().toStdString(), std::move(frame));
 }
 
 void MeetingRoomWindow::receiveRemoteVideoFrame(const QImage &frame, const QString &trackSid) {
@@ -3567,7 +3556,7 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 		// Revoke the render subscription before clearing either backend. This also
 		// rejects callbacks already in flight when the same Track is rebound.
 		_remoteRenderSession->RemoveTrack(sid.toStdString());
-		if (_dx11Canvas) _dx11Canvas->removeUser(tile->renderKey().toStdString());
+		if (_videoCanvas) _videoCanvas->removeUser(tile->renderKey().toStdString());
 		tile->setFrame({});
 	}
 	tile->setVideoActive(!value.muted);
@@ -3584,7 +3573,7 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 void MeetingRoomWindow::removeRemoteVideo(const QString &trackSid) {
 	if (_remoteRenderSession) _remoteRenderSession->RemoveTrack(trackSid.toStdString());
 	if (auto *tile = remoteVideoTile(trackSid)) {
-		if (_dx11Canvas) _dx11Canvas->removeUser(tile->renderKey().toStdString());
+		if (_videoCanvas) _videoCanvas->removeUser(tile->renderKey().toStdString());
 		tile->setFrame({});
 		tile->setVideoActive(false);
 		tile->setVideoStreamPaused(false);
@@ -3620,7 +3609,7 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		_localScreenTile->setVideoActive(true);
 		bindTileInteractions(_localScreenTile.get());
 	} else if (!active && _localScreenTile) {
-		if (_dx11Canvas) _dx11Canvas->removeUser(_localScreenTile->renderKey().toStdString());
+		if (_videoCanvas) _videoCanvas->removeUser(_localScreenTile->renderKey().toStdString());
 		if (_pinnedRenderKey == _localScreenTile->renderKey()) _pinnedRenderKey.clear();
 		_localScreenTile.reset();
 	}
@@ -4109,6 +4098,7 @@ void MeetingRoomWindow::startLiveKitSession() {
 void MeetingRoomWindow::stopLiveKitSession() {
 	invalidateCameraCompletion();
 	_localScreenPreview.reset();
+	if (_remoteRenderSession) _remoteRenderSession->Deactivate();
 	if (!_sessionRunning.exchange(false)) {
 		stopCameraCapture();
 		return;
@@ -4116,11 +4106,10 @@ void MeetingRoomWindow::stopLiveKitSession() {
 
 	if (_meetingTimer) _meetingTimer->stop();
 	if (_remoteRenderTimer) _remoteRenderTimer->stop();
-	if (_remoteRenderSession) _remoteRenderSession->Deactivate();
-	_usingDx11Backend.store(false, std::memory_order_release);
-	if (_dx11Canvas) {
-		_dx11Canvas->clearUsers();
-		_dx11Canvas->hide();
+	_usingGpuBackend.store(false, std::memory_order_release);
+	if (_videoCanvas) {
+		_videoCanvas->shutdownRenderer();
+		_videoCanvas->hide();
 	}
 
 	if (_wasapiCap) {

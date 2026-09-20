@@ -106,32 +106,48 @@ void VideoRenderSession::RenderLatestFrames() {
         if (!frame || !track || track->muted()) {
             continue;
         }
-        if (backend_ == Backend::Dx11) {
-            if (i420_frame_ready_callback_) {
-                i420_frame_ready_callback_(binding.render_key, std::move(frame));
-                state->delivered_to_dx11.fetch_add(1, std::memory_order_relaxed);
-            }
-            continue;
-        }
+        RenderFrame(binding.render_key, VideoRenderFrame::FromI420(std::move(frame)));
+    }
+    if (auto local = local_input_.TakeLatest()) RenderFrame(local_render_key_, std::move(local));
+}
 
-        if (frame_ready_callback_) {
-            QImage image = cpu_renderer_.Convert(*frame);
-            if (!image.isNull()) {
-                frame_ready_callback_(binding.render_key, image);
-                state->delivered_to_qt_cpu.fetch_add(1, std::memory_order_relaxed);
-            } else {
-                state->qt_cpu_conversion_failures.fetch_add(1, std::memory_order_relaxed);
-            }
+void VideoRenderSession::AttachLocalSource(const std::shared_ptr<VideoSource>& source, const std::string& key) {
+    if (!active() || key.empty()) return;
+    if (local_render_key_ != key) local_input_.Detach();
+    local_render_key_ = key;
+    local_input_.Attach(source);
+}
+
+void VideoRenderSession::DetachLocalSource() {
+    local_input_.Detach();
+    local_render_key_.clear();
+}
+
+void VideoRenderSession::RenderFrame(const std::string& key, VideoRenderFrame::Ptr frame) {
+    const auto state = state_;
+    if (!state || !state->active.load(std::memory_order_acquire) || !frame || key.empty()) return;
+    if (backend_ == Backend::Gpu) {
+        if (gpu_frame_ready_callback_) {
+            gpu_frame_ready_callback_(key, std::move(frame));
+            state->delivered_to_gpu.fetch_add(1, std::memory_order_relaxed);
+        }
+    } else if (frame_ready_callback_) {
+        const auto image = cpu_renderer_.Convert(*frame);
+        if (!image.isNull()) {
+            frame_ready_callback_(key, image);
+            state->delivered_to_qt_cpu.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            state->qt_cpu_conversion_failures.fetch_add(1, std::memory_order_relaxed);
         }
     }
 }
 
-void VideoRenderSession::UseDx11Backend(I420FrameReadyCallback frame_ready_callback) {
+void VideoRenderSession::UseGpuBackend(GpuFrameReadyCallback frame_ready_callback) {
     if (!state_ || !state_->active.load(std::memory_order_acquire) || !frame_ready_callback) {
         return;
     }
-    i420_frame_ready_callback_ = std::move(frame_ready_callback);
-    backend_ = Backend::Dx11;
+    gpu_frame_ready_callback_ = std::move(frame_ready_callback);
+    backend_ = Backend::Gpu;
 }
 
 void VideoRenderSession::UseQtCpuBackend() {
@@ -139,10 +155,11 @@ void VideoRenderSession::UseQtCpuBackend() {
         return;
     }
     backend_ = Backend::QtCpu;
-    i420_frame_ready_callback_ = {};
+    gpu_frame_ready_callback_ = {};
 }
 
 void VideoRenderSession::Deactivate() {
+    DetachLocalSource();
     auto state = std::move(state_);
     if (!state) {
         return;
@@ -152,7 +169,7 @@ void VideoRenderSession::Deactivate() {
     state->router->Deactivate(state->generation);
     tracks_.clear();
     frame_ready_callback_ = {};
-    i420_frame_ready_callback_ = {};
+    gpu_frame_ready_callback_ = {};
 }
 
 bool VideoRenderSession::active() const noexcept {
@@ -170,7 +187,7 @@ VideoRenderSession::Statistics VideoRenderSession::statistics() const noexcept {
     }
     return {
         state->router->statistics(),
-        state->delivered_to_dx11.load(std::memory_order_relaxed),
+        state->delivered_to_gpu.load(std::memory_order_relaxed),
         state->delivered_to_qt_cpu.load(std::memory_order_relaxed),
         state->qt_cpu_conversion_failures.load(std::memory_order_relaxed),
         state->rejected_track_attachments.load(std::memory_order_relaxed),

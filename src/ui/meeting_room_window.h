@@ -14,7 +14,7 @@
 #include "src/render/video_render_session.h"
 #include "src/ui/participants_sidebar_widget.h"
 #include "src/ui/meeting_chat_sidebar_widget.h"
-#include "src/ui/dx11/dx11_video_canvas.h"
+#include "src/ui/render/video_canvas.h"
 #include "src/ui/camera_switch_completion_owner.h"
 #include <mmsystem.h>
 
@@ -415,6 +415,7 @@ public:
 	void onMeetingDetailUpdated(const OpenMeeting::MeetingDetail &detail);
 	void onHostRoleChanged(const QString &newHostId, const QString &operatorName);
 	void handleEndMeetingClicked();
+	livekit::render::RenderDiagnostics renderDiagnostics() const { return _renderDiagnostics; }
 
 protected:
 	void resizeEvent(QResizeEvent *e) override;
@@ -467,10 +468,12 @@ private:
 	bool _nativeResizeFilterInstalled = false;
 	void initLayout();
 	void updateVideoLayout();
-	void tryActivateDx11Backend();
+	void tryActivateGpuBackend();
+	void receiveRenderedVideoFrame(const QImage&, const QString&);
+	void receiveGpuVideoFrame(const std::string&, livekit::render::VideoRenderFrame::Ptr);
 	void fallBackToQtCpuBackend();
-	void syncDx11CanvasLayout(const std::vector<VideoTileWidget*> &tiles);
-	void setupDx11CanvasInteractions();
+	void syncVideoCanvasLayout(const std::vector<VideoTileWidget*> &tiles);
+	void setupVideoCanvasInteractions();
 	void bindTileInteractions(VideoTileWidget *tile);
 	void setPinnedTile(const QString &renderKey, bool pinned);
 	void togglePinForRenderKey(const QString &renderKey);
@@ -511,8 +514,9 @@ private:
 	QTimer *_meetingTimer = nullptr;
 	QTimer *_remoteRenderTimer = nullptr;
 	std::unique_ptr<livekit::render::VideoRenderSession> _remoteRenderSession;
-	std::atomic<bool> _usingDx11Backend{false};
-	bool _dx11BackendActivationAttempted = false;
+	std::atomic<bool> _usingGpuBackend{false};
+	bool _gpuBackendActivationAttempted = false;
+	livekit::render::RenderDiagnostics _renderDiagnostics;
 	bool _closingForSessionInvalidation = false;
 	QPointer<QMessageBox> _departureNotice;
 	VideoViewMode _viewMode = VideoViewMode::Grid;
@@ -524,7 +528,7 @@ private:
 	// UI 组件
 	RoomTopBarWidget *_topBar = nullptr;
 	QWidget *_stageContainer = nullptr;
-	livekit::dx11::Dx11VideoCanvas *_dx11Canvas = nullptr;
+	livekit::render::VideoCanvas *_videoCanvas = nullptr;
 	VideoTileWidget *_localTile = nullptr;
 	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteTiles;
 	struct RemoteVideoBinding {

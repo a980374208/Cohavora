@@ -1,9 +1,8 @@
 #pragma once
 
 #include "dx11_types.h"
-#include "src/render/owned_i420_frame.h"
+#include "src/render/video_render_frame.h"
 #include <map>
-#include <mutex>
 #include <memory>
 #include <optional>
 
@@ -41,12 +40,8 @@ public:
     Dx11TexturePool();
     ~Dx11TexturePool();
 
-    // 跨线程投递：当 WebRTC 解码出新帧时调用（线程安全）
-    void PostUserFrame(const std::string& identity, const livekit::VideoFrame& frame);
-
-    // UI/render thread submits the Router-owned remote frame. This is the
-    // production DX11 path: no RGBA conversion and no staging readback.
-    void PostI420Frame(const std::string& identity, render::OwnedI420Frame::Ptr frame);
+    // Owner/UI thread only; capture threads submit to the host mailbox.
+    void PostFrame(const std::string& identity, render::VideoRenderFrame::Ptr frame);
 
     // 参会人离开或关闭摄像头时清理
     void RemoveUser(const std::string& identity);
@@ -63,15 +58,8 @@ public:
 private:
     bool EnsureGpuTexture(ID3D11Device* device, UserGpuResource& res, PixelFormatType format, int width, int height);
 
-    struct PendingFrame {
-        VideoFrame legacy_frame;
-        render::OwnedI420Frame::Ptr i420_frame;
-    };
-
-private:
-    mutable std::mutex frame_mutex_;
-    // 每路只保留一个待上传帧。生产者只在此表中替换，不接触 D3D 资源。
-    std::map<std::string, PendingFrame> pending_frames_;
+    // Per-stream latest frame, only populated by the bounded host bindings.
+    std::map<std::string, render::VideoRenderFrame::Ptr> pending_frames_;
 
     // 渲染线程持有的 GPU 资源表
     std::map<std::string, UserGpuResource> gpu_resources_;

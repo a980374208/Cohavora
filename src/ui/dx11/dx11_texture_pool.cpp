@@ -10,30 +10,16 @@ Dx11TexturePool::~Dx11TexturePool() {
     Clear();
 }
 
-void Dx11TexturePool::PostUserFrame(const std::string& identity, const livekit::VideoFrame& frame) {
-    if (identity.empty() || frame.width() <= 0 || frame.height() <= 0 || !frame.data()) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-    pending_frames_[identity] = PendingFrame{frame, nullptr};
-}
-
-void Dx11TexturePool::PostI420Frame(const std::string& identity, render::OwnedI420Frame::Ptr frame) {
-    if (identity.empty() || !frame || frame->width() <= 0 || frame->height() <= 0) {
-        return;
-    }
-    std::lock_guard<std::mutex> lock(frame_mutex_);
-    pending_frames_[identity] = PendingFrame{VideoFrame{}, std::move(frame)};
+void Dx11TexturePool::PostFrame(const std::string& identity, render::VideoRenderFrame::Ptr frame) {
+    if (!identity.empty() && frame) pending_frames_[identity] = std::move(frame);
 }
 
 void Dx11TexturePool::RemoveUser(const std::string& identity) {
-    std::lock_guard<std::mutex> lock(frame_mutex_);
     pending_frames_.erase(identity);
     gpu_resources_.erase(identity);
 }
 
 void Dx11TexturePool::Clear() {
-    std::lock_guard<std::mutex> lock(frame_mutex_);
     pending_frames_.clear();
     gpu_resources_.clear();
 }
@@ -112,64 +98,20 @@ bool Dx11TexturePool::EnsureGpuTexture(ID3D11Device* device, UserGpuResource& re
 
 void Dx11TexturePool::UploadPendingFrames(ID3D11Device* device, ID3D11DeviceContext* context) {
     if (!device || !context) return;
-
-    // Take the bounded latest-frame mailbox under a short lock. D3D uploads
-    // occur after the lock so media producers never wait for the GPU.
-    std::map<std::string, PendingFrame> pending_frames;
-    {
-        std::lock_guard<std::mutex> lock(frame_mutex_);
-        pending_frames.swap(pending_frames_);
-    }
-
-    for (auto& [id, pending] : pending_frames) {
-        const auto& owned = pending.i420_frame;
-        const VideoFrame& legacy = pending.legacy_frame;
-        const int w = owned ? owned->width() : legacy.width();
-        const int h = owned ? owned->height() : legacy.height();
-        if (w <= 0 || h <= 0 || (!owned && !legacy.data())) continue;
-
-        const PixelFormatType fmt = owned
-            ? PixelFormatType::I420
-            : MapBufferTypeToPixelFormat(legacy.type());
-        if (fmt == PixelFormatType::Unknown) continue;
-
-        UserGpuResource& res = gpu_resources_[id];
-        if (!EnsureGpuTexture(device, res, fmt, w, h)) {
-            continue;
+    auto pending = std::move(pending_frames_);
+    pending_frames_.clear();
+    for (const auto& [id, frame] : pending) {
+        const auto& view = frame->view();
+        const auto format = view.format == LK_RENDER_I420 ? PixelFormatType::I420
+            : view.format == LK_RENDER_NV12 ? PixelFormatType::NV12 : PixelFormatType::RGBA;
+        auto& resource = gpu_resources_[id];
+        if (!EnsureGpuTexture(device, resource, format, int(view.width), int(view.height))) continue;
+        for (uint32_t plane = 0; plane < view.plane_count; ++plane) {
+            context->UpdateSubresource(resource.textures[plane].Get(), 0, nullptr,
+                view.planes[plane].data, view.planes[plane].stride_bytes, 0);
         }
-
-        if (fmt == PixelFormatType::I420) {
-            if (owned) {
-                context->UpdateSubresource(res.textures[0].Get(), 0, nullptr, owned->data_y(), static_cast<UINT>(owned->stride_y()), 0);
-                context->UpdateSubresource(res.textures[1].Get(), 0, nullptr, owned->data_u(), static_cast<UINT>(owned->stride_u()), 0);
-                context->UpdateSubresource(res.textures[2].Get(), 0, nullptr, owned->data_v(), static_cast<UINT>(owned->stride_v()), 0);
-                res.rotation = owned->rotation();
-                res.color_space = owned->color_space();
-            } else {
-                const int chroma_width = (w + 1) / 2;
-                const int chroma_height = (h + 1) / 2;
-                const uint8_t* y_plane = legacy.data();
-                const uint8_t* u_plane = y_plane + (w * h);
-                const uint8_t* v_plane = u_plane + (chroma_width * chroma_height);
-                context->UpdateSubresource(res.textures[0].Get(), 0, nullptr, y_plane, static_cast<UINT>(w), 0);
-                context->UpdateSubresource(res.textures[1].Get(), 0, nullptr, u_plane, static_cast<UINT>(chroma_width), 0);
-                context->UpdateSubresource(res.textures[2].Get(), 0, nullptr, v_plane, static_cast<UINT>(chroma_width), 0);
-                res.rotation = VideoRotation::VIDEO_ROTATION_0;
-                res.color_space = {render::RenderColorMatrix::Bt601, render::RenderColorRange::Limited};
-            }
-        } else if (fmt == PixelFormatType::NV12) {
-            const uint8_t* y_plane = legacy.data();
-            const uint8_t* uv_plane = y_plane + (w * h);
-            const int chroma_width = (w + 1) / 2;
-
-            context->UpdateSubresource(res.textures[0].Get(), 0, nullptr, y_plane, static_cast<UINT>(w), 0);
-            context->UpdateSubresource(res.textures[1].Get(), 0, nullptr, uv_plane, static_cast<UINT>(chroma_width * 2), 0);
-            res.rotation = VideoRotation::VIDEO_ROTATION_0;
-            res.color_space = {render::RenderColorMatrix::Bt601, render::RenderColorRange::Limited};
-        } else if (fmt == PixelFormatType::RGBA) {
-            context->UpdateSubresource(res.textures[0].Get(), 0, nullptr, legacy.data(), static_cast<UINT>(w * 4), 0);
-            res.rotation = VideoRotation::VIDEO_ROTATION_0;
-        }
+        resource.rotation = static_cast<VideoRotation>(view.rotation_degrees);
+        resource.color_space = frame->colorSpace();
     }
 }
 
