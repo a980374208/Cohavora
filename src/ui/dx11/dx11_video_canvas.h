@@ -10,6 +10,8 @@
 #include <mutex>
 #include <atomic>
 
+class ParticipantWindowInspectionAccess;
+
 namespace livekit {
 namespace dx11 {
 
@@ -54,6 +56,7 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent* e) override;
 
 private:
+    friend class ::ParticipantWindowInspectionAccess;
     void render();
     bool EnsureRenderer();
     void NotifyRendererUnavailable();

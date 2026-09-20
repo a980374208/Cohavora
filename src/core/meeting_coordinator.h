@@ -23,6 +23,7 @@
 #include "src/core/local_video_track.h"
 #include "src/core/meeting_session_runtime.h"
 #include "src/core/meeting_startup_transaction.h"
+#include "src/core/screen_share_session.h"
 #include "src/rtc/video_frame.h"
 #include "src/media/wasapi_capture.h"
 #include "src/media/dshow_capture.h"
@@ -148,6 +149,10 @@ public:
     void setLocalVideoEnabled(bool enabled);
     bool isLocalAudioMuted() const { return _audioMuted; }
     bool isLocalVideoEnabled() const { return _videoEnabled; }
+    void requestScreenShareSources();
+    void startScreenShare(livekit::DesktopSource source);
+    void stopScreenShare();
+    livekit::ScreenShareSnapshot screenShareSnapshot() const { return _screenShareSnapshot; }
 
     // 消息时序单调序列发生器
     int64_t nextSequenceNumber();
@@ -232,6 +237,8 @@ signals:
     // 本地媒体状态变动（供 UI 底栏与视频画框联动）
     void localAudioMuteChanged(bool muted);
     void localVideoEnableChanged(bool enabled);
+    void screenShareSourcesReady(const std::vector<livekit::DesktopSource> &sources);
+    void screenShareChanged(livekit::ScreenShareSnapshot snapshot);
 
     // 业务信令事件 (从 DataChannel NotifyMeetingData 解包)
     void kickedOff(const QString &reason, int reasonCode);
@@ -300,6 +307,9 @@ private:
     void parseRoomMetadata(const std::string &metadata);
     void handleDuplicateIdentityKickOff(const QString &detail);
     void handleSessionInvalidated(SessionInvalidationReason reason);
+    bool applyAccountNotificationOnUiThread(uint64_t sessionGeneration, quint64 authGeneration,
+                                           const QString &localUserId,
+                                           const livekit::ParticipantEvent &event);
     void enqueueDataReceived(const std::shared_ptr<MeetingSessionRuntime> &session,
                              const std::vector<uint8_t> &data,
                              const livekit::SenderContext &sender);
@@ -313,6 +323,7 @@ private:
     // MeetingSessionRuntime. The runtime owns an ASIO strand, so allowing it
     // to outlive its io_context through a delayed Qt event is unsafe.
     bool isCurrentSessionGenerationOnUiThread(uint64_t sessionGeneration) const;
+    void applyScreenShareSnapshotOnUiThread(uint64_t generation, livekit::ScreenShareSnapshot snapshot);
     bool isSenderContextCurrentOnUiThread(const livekit::SenderContext &sender) const;
 
     class CoordinatorRoomListener;
@@ -337,6 +348,8 @@ private:
 
     bool _audioMuted = false;
     bool _videoEnabled = true;
+    livekit::ScreenShareSnapshot _screenShareSnapshot;
+    uint64_t _screenSourceRequest = 0;
     // 全局账号会话被撤销后，忽略仍在途的 HTTP 入会回调，防止已经关闭的
     // 会议窗口重新创建 Room 或重新发布媒体。
     bool _sessionInvalidated = false;

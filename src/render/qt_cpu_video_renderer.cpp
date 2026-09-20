@@ -1,6 +1,7 @@
 #include "qt_cpu_video_renderer.h"
 
 #include "libyuv/convert_argb.h"
+#include <QtGui/QTransform>
 
 namespace livekit::render {
 namespace {
@@ -48,7 +49,11 @@ QImage QtCpuVideoRenderer::Convert(const OwnedI420Frame& frame) const {
                                                   SelectYuvConstants(frame.color_space()),
                                                   frame.width(),
                                                   frame.height());
-    return result == 0 ? image : QImage();
+    if (result != 0) return {};
+    if (frame.rotation() != VideoRotation::VIDEO_ROTATION_0) {
+        image = image.transformed(QTransform().rotate(static_cast<int>(frame.rotation())));
+    }
+    return image;
 }
 
 } // namespace livekit::render

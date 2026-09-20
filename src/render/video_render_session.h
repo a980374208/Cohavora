@@ -47,7 +47,10 @@ public:
     VideoRenderSession(const VideoRenderSession&) = delete;
     VideoRenderSession& operator=(const VideoRenderSession&) = delete;
 
-    void AttachRemoteTrack(const std::shared_ptr<Track>& track, const std::string& identity);
+    // render_key identifies a view independently of the participant (camera
+    // and screen share must not overwrite one another).
+    void AttachRemoteTrack(const std::shared_ptr<Track>& track, const std::string& identity,
+                           const std::string& render_key = {});
     void RemoveTrack(const std::string& track_id);
     void RemoveTracksForIdentity(const std::string& identity);
     void RenderLatestFrames();
@@ -77,6 +80,7 @@ private:
 
     struct TrackBinding {
         std::string identity;
+        std::string render_key;
         std::weak_ptr<Track> track;
         uint64_t binding_generation = 0;
         Track::I420VideoFrameSubscription subscription;

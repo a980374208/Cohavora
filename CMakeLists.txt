@@ -93,6 +93,7 @@ set(LIVEKIT_SOURCES
     src/core/room.cpp
     src/core/local_audio_track.cpp
     src/core/local_video_track.cpp
+    src/core/screen_share_session.cpp
     src/core/remote_track_publication.cpp
     src/core/adaptive_stream_manager.cpp
     src/core/data_stream_assembler.cpp
@@ -113,6 +114,7 @@ set(LIVEKIT_SOURCES
     src/media/wasapi_capture.cpp
     src/media/dshow_enumerator.cpp
     src/media/dshow_capture.cpp
+    src/media/desktop_capture.cpp
     src/media/camera_source_manager.cpp
     src/media/audio_vad.cpp
     src/media/audio_apm.cpp
@@ -127,6 +129,10 @@ if(MSVC)
     # Room's coroutine-heavy state machine exceeds the default COFF section
     # count once the subscription owner protocol is included.
     set_source_files_properties(src/core/room.cpp PROPERTIES COMPILE_OPTIONS "/bigobj")
+    # The bundled Windows WebRTC includes WGC. This macro changes the layout
+    # of DesktopCaptureOptions and must match its compiled library ABI.
+    set_source_files_properties(src/media/desktop_capture.cpp PROPERTIES
+        COMPILE_DEFINITIONS "RTC_ENABLE_WIN_WGC")
 endif()
 
 # 头文件列表
@@ -219,6 +225,7 @@ target_include_directories(livekit_signaling BEFORE PUBLIC
     ${GEN_DIR}
     ${WEBRTC_ROOT}/include/third_party/boringssl/src/include
     ${WEBRTC_ROOT}/include
+    ${WEBRTC_ROOT}/include/third_party/libyuv/include
 )
 
 # WebRTC Library Multi-Config Resolution (Debug vs Release)
@@ -273,6 +280,10 @@ target_link_libraries(livekit_signaling PUBLIC
     ole32
     oleaut32
     propsys
+    d3d11
+    dxgi
+    dwmapi
+    shcore
 )
 
 # Live Media Broadcaster Application

@@ -5,6 +5,8 @@
 #include <vector>
 #include <functional>
 #include <mutex>
+#include <atomic>
+#include <memory>
 #include "video_frame.h"
 
 namespace livekit {
@@ -29,6 +31,24 @@ struct VideoCaptureOptions {
 
 class VideoSource {
 public:
+    using FrameSink = std::function<void(const VideoFrame&, const VideoCaptureOptions&)>;
+    class Subscription {
+    public:
+        explicit Subscription(FrameSink sink);
+        Subscription(const Subscription&) = delete;
+        Subscription& operator=(const Subscription&) = delete;
+        ~Subscription() { disconnect(); }
+        void disconnect();
+    private:
+        friend class VideoSource;
+        struct State {
+            explicit State(FrameSink sink) : sink(std::move(sink)) {}
+            void deliver(const VideoFrame& frame, const VideoCaptureOptions& options);
+            std::recursive_mutex mutex;
+            FrameSink sink;
+        };
+        std::shared_ptr<State> state_;
+    };
     VideoSource(int width, int height);
     virtual ~VideoSource() = default;
 
@@ -42,14 +62,17 @@ public:
     void captureFrame(const VideoFrame& frame, std::int64_t timestamp_us = 0,
                       VideoRotation rotation = VideoRotation::VIDEO_ROTATION_0);
 
-    using FrameSink = std::function<void(const VideoFrame&, const VideoCaptureOptions&)>;
     void addSink(FrameSink sink);
+    // Destruction/disconnect waits for in-flight delivery. The source holds
+    // only a weak subscription, so it cannot keep a retired consumer alive.
+    std::shared_ptr<Subscription> subscribe(FrameSink sink);
 
 private:
-    int width_{0};
-    int height_{0};
+    std::atomic<int> width_{0};
+    std::atomic<int> height_{0};
     mutable std::mutex sink_mutex_;
     std::vector<FrameSink> sinks_;
+    std::vector<std::weak_ptr<Subscription::State>> subscriptions_;
 };
 
 } // namespace livekit
