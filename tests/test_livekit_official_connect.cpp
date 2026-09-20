@@ -173,8 +173,14 @@ void PrintUsage(const char* prog_name) {
 }
 
 std::string MaskToken(const std::string& token) {
-    if (token.length() <= 12) return "***";
-    return token.substr(0, 6) + "..." + token.substr(token.length() - 6);
+    (void)token;
+    return "***";
+}
+
+bool IsLoopbackDevelopmentUrl(const std::string& url) {
+    return url.rfind("ws://127.0.0.1", 0) == 0 ||
+           url.rfind("ws://localhost", 0) == 0 ||
+           url.rfind("ws://[::1]", 0) == 0;
 }
 
 int main(int argc, char* argv[]) {
@@ -243,6 +249,9 @@ int main(int argc, char* argv[]) {
     opts.auto_subscribe = true;
     opts.single_peer_connection = true;
     opts.connect_timeout = std::chrono::seconds(10);
+    // This manual L3 tool may use a loopback development server. Never widen
+    // plaintext transport to a remote host.
+    opts.allow_insecure_transport = IsLoopbackDevelopmentUrl(url);
 
     asio::co_spawn(io_ctx, [room, url, token, opts, &capture_running, &audioThread, &videoThread]() -> asio::awaitable<void> {
         try {
