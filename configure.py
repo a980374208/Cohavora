@@ -5,7 +5,7 @@ import argparse
 from pathlib import Path
 
 def main():
-    parser = argparse.ArgumentParser(description="LiveKit C++ Client Project Configuration Script")
+    parser = argparse.ArgumentParser(description="Cohavora Project Configuration Script")
     parser.add_argument("-B", "--build-dir", type=str, default="build-debug", help="Build directory (default: build-debug)")
     parser.add_argument("-G", "--generator", type=str, help="CMake generator (e.g., 'Visual Studio 17 2022', 'Ninja')")
     parser.add_argument("-A", "--architecture", type=str, help="Generator architecture specifier (e.g., x64)")
@@ -20,7 +20,7 @@ def main():
     build_dir = project_root / args.build_dir
 
     print("==================================================")
-    print("      LiveKit C++ Project Configurator            ")
+    print("           Cohavora Project Configurator          ")
     print("==================================================")
     print(f"Project Root    : {project_root}")
     print(f"Build Directory : {build_dir}")

@@ -15,7 +15,7 @@ target_include_directories(test_gpu_converter BEFORE PRIVATE
 )
 
 target_link_libraries(test_gpu_converter PRIVATE
-    livekit_signaling
+    cohavora_core
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
@@ -112,7 +112,7 @@ target_include_directories(test_dx11_color_conversion BEFORE PRIVATE
 )
 
 target_link_libraries(test_dx11_color_conversion PRIVATE
-    livekit_signaling
+    cohavora_core
 )
 
 set_target_properties(test_dx11_color_conversion PROPERTIES
@@ -150,7 +150,7 @@ add_executable(test_owned_i420_frame
 )
 
 target_link_libraries(test_owned_i420_frame PRIVATE
-    livekit_signaling
+    cohavora_core
 )
 
 set_target_properties(test_owned_i420_frame PROPERTIES
@@ -163,7 +163,7 @@ add_executable(test_video_render_router
 )
 
 target_link_libraries(test_video_render_router PRIVATE
-    livekit_signaling
+    cohavora_core
 )
 
 set_target_properties(test_video_render_router PROPERTIES
@@ -188,7 +188,7 @@ target_include_directories(test_qt_cpu_video_renderer BEFORE PRIVATE
 )
 
 target_link_libraries(test_qt_cpu_video_renderer PRIVATE
-    livekit_signaling
+    cohavora_core
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
@@ -247,7 +247,7 @@ target_include_directories(test_video_render_session_stress BEFORE PRIVATE
 )
 
 target_link_libraries(test_video_render_session_stress PRIVATE
-    livekit_signaling
+    cohavora_core
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib

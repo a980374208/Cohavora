@@ -418,11 +418,11 @@ public:
             TEST_CHECK(gl);
             driver = gl->driverDescription();
             TEST_CHECK(driver.contains("OpenGL ES") && driver.contains("ANGLE") && driver.contains("Direct3D11"));
-            TEST_CHECK(!GetModuleHandleW(L"livekit-render-dx11.dll"));
+            TEST_CHECK(!GetModuleHandleW(L"cohavora-render-dx11.dll"));
         } else {
             auto* dx = dynamic_cast<livekit::render::ModuleVideoCanvas*>(canvas);
             TEST_CHECK(dx && !gl && canvas->backendName() == "DX11");
-            TEST_CHECK(GetModuleHandleW(L"livekit-render-dx11.dll") && !GetModuleHandleW(L"livekit-render-opengl.dll"));
+            TEST_CHECK(GetModuleHandleW(L"cohavora-render-dx11.dll") && !GetModuleHandleW(L"cohavora-render-opengl.dll"));
             rendererDescription = onDxOwner(*dx, [](livekit::render::BackendDevice& device) {
                 const auto renderer = nativeRenderer(device);
                 TEST_CHECK(renderer.device()->GetDeviceRemovedReason() == S_OK);
@@ -3562,8 +3562,8 @@ int WindowAcceptanceMain(int argc, char **argv) {
         livekit::WebRTCManager::Instance().Deinitialize();
         WindowPhase("live-meeting-webrtc-deinitialize-complete");
         ParticipantWindowTestAccess::waitDxOwners();
-        TEST_CHECK(!GetModuleHandleW(L"livekit-render-opengl.dll"));
-        TEST_CHECK(!GetModuleHandleW(L"livekit-render-dx11.dll"));
+        TEST_CHECK(!GetModuleHandleW(L"cohavora-render-opengl.dll"));
+        TEST_CHECK(!GetModuleHandleW(L"cohavora-render-dx11.dll"));
         std::cout << "DX11_LIVE_MEETING_TDR_LIFETIME PASS: room leave, window close, module unload\n";
     } else if (application.arguments().contains("--opengl-driver-loss") ||
                application.arguments().contains("--opengl-driver-loss-smoke") ||
@@ -3584,8 +3584,8 @@ int WindowAcceptanceMain(int argc, char **argv) {
         }
         if (angle) ParticipantWindowTestAccess::waitGlOwners();
         else ParticipantWindowTestAccess::waitDxOwners();
-        TEST_CHECK(!GetModuleHandleW(L"livekit-render-opengl.dll"));
-        TEST_CHECK(!GetModuleHandleW(L"livekit-render-dx11.dll"));
+        TEST_CHECK(!GetModuleHandleW(L"cohavora-render-opengl.dll"));
+        TEST_CHECK(!GetModuleHandleW(L"cohavora-render-dx11.dll"));
         std::cout << (angle ? "ANGLE" : "DX11") << "_TDR_LIFETIME PASS: window close, render owner completion, module unload\n";
     } else if (application.arguments().contains("--opengl-window")) {
         qputenv("LIVEKIT_RENDER_BACKEND", "opengl");
@@ -3614,7 +3614,7 @@ int WindowAcceptanceMain(int argc, char **argv) {
             ParticipantWindowTestAccess::checkGlDiagnostics(*fixture.window);
         }
         ParticipantWindowTestAccess::waitGlOwners();
-        TEST_CHECK(!GetModuleHandleW(L"livekit-render-opengl.dll"));
+        TEST_CHECK(!GetModuleHandleW(L"cohavora-render-opengl.dll"));
     } else if (application.arguments().contains("--module-lifecycle")) {
         QTemporaryDir emptyDirectory;
         TEST_CHECK(emptyDirectory.isValid());
@@ -3645,11 +3645,16 @@ int WindowAcceptanceMain(int argc, char **argv) {
         TEST_CHECK(directory.isValid());
         const auto root = std::filesystem::path(directory.path().toStdWString());
         const auto modulePath = livekit::render::BackendModule::DefaultPath(root);
+        const auto legacyModulePath = livekit::render::BackendModule::LegacyPathForBackend(
+            root, LK_RENDER_BACKEND_DX11);
+        TEST_CHECK(modulePath.filename() == L"cohavora-render-dx11.dll");
+        TEST_CHECK(legacyModulePath.filename() == L"livekit-render-dx11.dll");
         TEST_CHECK(QDir().mkpath(QString::fromStdWString(modulePath.parent_path().wstring())));
 
         livekit::render::VideoRenderSession session([](const std::string&, const QImage&) {});
         livekit::render::RenderDiagnostics diagnostics;
         TEST_CHECK(session.backend() == livekit::render::VideoRenderSession::Backend::QtCpu);
+        qunsetenv("COHAVORA_RENDER_BACKEND");
         qputenv("LIVEKIT_RENDER_BACKEND", "cpu");
         TEST_CHECK(!livekit::render::CreateVideoCanvasFromDirectory(nullptr, directory.path(), &diagnostics));
         TEST_CHECK(diagnostics.requested_backend == livekit::render::RenderBackend::QtCpu &&
@@ -3657,22 +3662,42 @@ int WindowAcceptanceMain(int argc, char **argv) {
             diagnostics.fallback_reason == livekit::render::RenderFallbackReason::UserSelectedCpu &&
             diagnostics.gpu_failure == livekit::render::RenderGpuFailure::None);
         qunsetenv("LIVEKIT_RENDER_BACKEND");
+        qputenv("COHAVORA_RENDER_BACKEND", "cpu");
+        TEST_CHECK(!livekit::render::CreateVideoCanvasFromDirectory(nullptr, directory.path(), &diagnostics));
+        TEST_CHECK(diagnostics.requested_backend == livekit::render::RenderBackend::QtCpu &&
+            diagnostics.fallback_reason == livekit::render::RenderFallbackReason::UserSelectedCpu);
+        qputenv("LIVEKIT_RENDER_BACKEND", "cpu");
+        qputenv("COHAVORA_RENDER_BACKEND", "opengl");
+        TEST_CHECK(!livekit::render::CreateVideoCanvasFromDirectory(nullptr, directory.path(), &diagnostics));
+        TEST_CHECK(diagnostics.requested_backend == livekit::render::RenderBackend::OpenGL &&
+            diagnostics.gpu_failure == livekit::render::RenderGpuFailure::ModuleOpenFailed);
+        qputenv("COHAVORA_RENDER_BACKEND", "unsupported");
+        TEST_CHECK(!livekit::render::CreateVideoCanvasFromDirectory(nullptr, directory.path(), &diagnostics));
+        TEST_CHECK(diagnostics.gpu_failure == livekit::render::RenderGpuFailure::InvalidBackendSelection &&
+            diagnostics.fallback_reason == livekit::render::RenderFallbackReason::InvalidConfiguration);
+        qunsetenv("COHAVORA_RENDER_BACKEND");
+        qunsetenv("LIVEKIT_RENDER_BACKEND");
         TEST_CHECK(!livekit::render::CreateVideoCanvasFromDirectory(nullptr, directory.path(), &diagnostics));
         TEST_CHECK(diagnostics.gpu_failure == livekit::render::RenderGpuFailure::ModuleOpenFailed &&
             diagnostics.fallback_reason == livekit::render::RenderFallbackReason::ModuleLoadFailed);
 
-        const auto installFixture = [&](const QString& source) {
-            TEST_CHECK(QFile::remove(QString::fromStdWString(modulePath.wstring())) || !QFile::exists(QString::fromStdWString(modulePath.wstring())));
-            TEST_CHECK(QFile::copy(source, QString::fromStdWString(modulePath.wstring())));
+        const auto installFixtureAt = [&](const QString& source, const std::filesystem::path& destination) {
+            const auto path = QString::fromStdWString(destination.wstring());
+            TEST_CHECK(QFile::remove(path) || !QFile::exists(path));
+            TEST_CHECK(QFile::copy(source, path));
         };
-        installFixture(application.arguments()[mode + 1]);
+        installFixtureAt(application.arguments()[mode + 1], legacyModulePath);
+        TEST_CHECK(!livekit::render::CreateVideoCanvasFromDirectory(nullptr, directory.path(), &diagnostics));
+        TEST_CHECK(diagnostics.gpu_failure == livekit::render::RenderGpuFailure::ModuleAbiMismatch);
+
+        installFixtureAt(application.arguments()[mode + 1], modulePath);
         TEST_CHECK(!livekit::render::CreateVideoCanvasFromDirectory(nullptr, directory.path(), &diagnostics));
         TEST_CHECK(diagnostics.gpu_failure == livekit::render::RenderGpuFailure::ModuleAbiMismatch &&
             diagnostics.fallback_reason == livekit::render::RenderFallbackReason::ModuleLoadFailed &&
             diagnostics.actual_backend == livekit::render::RenderBackend::QtCpu);
         TEST_CHECK(!GetModuleHandleW(modulePath.c_str()));
 
-        installFixture(application.arguments()[mode + 2]);
+        installFixtureAt(application.arguments()[mode + 2], modulePath);
         std::unique_ptr<livekit::render::VideoCanvas> canvas(
             livekit::render::CreateVideoCanvasFromDirectory(nullptr, directory.path(), &diagnostics));
         TEST_CHECK(canvas && GetModuleHandleW(modulePath.c_str()));

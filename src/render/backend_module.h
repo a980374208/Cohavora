@@ -23,7 +23,11 @@ class BackendModule final : public std::enable_shared_from_this<BackendModule> {
 public:
     static uint32_t DefaultBackend();
     static std::filesystem::path PathForBackend(const std::filesystem::path&, uint32_t backend);
+    static std::filesystem::path LegacyPathForBackend(const std::filesystem::path&, uint32_t backend);
     static std::filesystem::path DefaultPath(const std::filesystem::path& applicationDirectory);
+    static std::shared_ptr<BackendModule> LoadFromDirectory(
+        const std::filesystem::path& applicationDirectory,
+        uint32_t expectedBackend, ModuleLoadError& error);
     static std::shared_ptr<BackendModule> Load(const std::filesystem::path& absolutePath,
         uint32_t expectedBackend, ModuleLoadError& error);
     ~BackendModule();

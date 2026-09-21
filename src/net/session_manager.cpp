@@ -6,13 +6,102 @@
 #include <QtCore/QPointer>
 #include <QtCore/QThread>
 #include <algorithm>
+#include <array>
 #include <stdexcept>
 #include <utility>
 
 namespace OpenMeeting {
+namespace {
+constexpr auto kSettingsMigrationVersion = "migration/cohavoraSettingsVersion";
+constexpr int kCurrentSettingsMigrationVersion = 1;
+constexpr std::array<const char *, 20> kMigratedSettingsKeys = {
+    "network/serverBaseUrl",
+    "media/enableMicrophone",
+    "media/enableSpeaker",
+    "media/enableVideo",
+    "media/videoMirroring",
+    "media/videoMirrorMode",
+    "media/pushToTalkWhenMuted",
+    "media/noiseSuppression",
+    "media/cameraDeviceId",
+    "media/microphoneDeviceId",
+    "media/speakerDeviceId",
+    "media/videoCaptureWidth",
+    "media/videoCaptureHeight",
+    "media/videoCaptureFps",
+    "general/quitOnMainWindowClose",
+    "general/showActiveSpeaker",
+    "general/stayInMeetingWhenLocked",
+    "auth/account",
+    "auth/protectedSessionV2",
+    "auth/restoreDisabled",
+};
+constexpr std::array<const char *, 5> kLegacyCredentialKeys = {
+    "auth/protectedSessionV2",
+    "auth/restoreDisabled",
+    "auth/password",
+    "auth/rememberPassword",
+    "auth/autoLogin",
+};
+
+bool clearLegacyCredentials(QSettings &legacy) {
+    for (const auto *key : kLegacyCredentialKeys) legacy.remove(key);
+    legacy.remove(QStringLiteral("user"));
+    legacy.sync();
+    return legacy.status() == QSettings::NoError;
+}
+
+std::unique_ptr<QSettings> makeApplicationSettings() {
+    auto selected = migrateCohavoraSettings(
+        std::make_unique<QSettings>(QStringLiteral("Cohavora"), QStringLiteral("Cohavora")),
+        std::make_unique<QSettings>(QStringLiteral("OpenMeeting"), QStringLiteral("LiveKitClient")));
+    return std::move(selected.settings);
+}
+} // namespace
+
+SettingsMigrationSelection migrateCohavoraSettings(
+        std::unique_ptr<QSettings> current, std::unique_ptr<QSettings> legacy) {
+    if (!current || !legacy) {
+        throw std::invalid_argument("Settings migration requires current and legacy storage");
+    }
+    current->setFallbacksEnabled(false);
+    legacy->setFallbacksEnabled(false);
+    current->sync();
+    legacy->sync();
+
+    if (current->value(kSettingsMigrationVersion, 0).toInt()
+            >= kCurrentSettingsMigrationVersion) {
+        clearLegacyCredentials(*legacy);
+        return {std::move(current), SettingsMigrationStatus::Current};
+    }
+    if (current->status() != QSettings::NoError) {
+        return {std::move(legacy), SettingsMigrationStatus::LegacyFallback};
+    }
+
+    for (const auto *key : kMigratedSettingsKeys) {
+        if (!current->contains(key) && legacy->contains(key)) {
+            current->setValue(key, legacy->value(key));
+        }
+    }
+    current->sync();
+    if (current->status() != QSettings::NoError) {
+        return {std::move(legacy), SettingsMigrationStatus::LegacyFallback};
+    }
+
+    if (!clearLegacyCredentials(*legacy)) {
+        return {std::move(legacy), SettingsMigrationStatus::LegacyFallback};
+    }
+
+    current->setValue(kSettingsMigrationVersion, kCurrentSettingsMigrationVersion);
+    current->sync();
+    if (current->status() != QSettings::NoError) {
+        return {std::move(legacy), SettingsMigrationStatus::LegacyFallback};
+    }
+    return {std::move(current), SettingsMigrationStatus::Migrated};
+}
 
 SessionManager::SessionManager(QObject *parent)
-    : SessionManager(std::make_unique<QSettings>("OpenMeeting", "LiveKitClient"), parent) {
+    : SessionManager(makeApplicationSettings(), parent) {
 }
 
 SessionManager::SessionManager(std::unique_ptr<QSettings> settings, QObject *parent)

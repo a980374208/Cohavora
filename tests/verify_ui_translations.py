@@ -18,7 +18,7 @@ PLACEHOLDERS = re.compile(r"%(?:L?[1-9][0-9]*|n)")
 
 def main():
     errors = []
-    catalog = ET.parse(ROOT / "src/ui/translations/livekit_meeting_zh_CN.ts")
+    catalog = ET.parse(ROOT / "src/ui/translations/cohavora_zh_CN.ts")
     if catalog.getroot().get("sourcelanguage") != "en_US":
         errors.append("Catalog source language must be en_US")
     entries = {}

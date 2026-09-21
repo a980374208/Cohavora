@@ -21,7 +21,7 @@ target_include_directories(test_openmeeting_http BEFORE PRIVATE
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtNetwork
 )
 target_link_libraries(test_openmeeting_http PRIVATE
-    livekit_signaling
+    cohavora_core
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Network.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
@@ -93,7 +93,7 @@ target_include_directories(test_http_admission_owner BEFORE PRIVATE
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtNetwork
 )
 target_link_libraries(test_http_admission_owner PRIVATE
-    livekit_signaling
+    cohavora_core
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Widgets.lib
@@ -211,7 +211,7 @@ target_include_directories(test_participant_snapshot_remediation BEFORE PRIVATE
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtNetwork
 )
 target_link_libraries(test_participant_snapshot_remediation PRIVATE
-    livekit_signaling
+    cohavora_core
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Widgets.lib

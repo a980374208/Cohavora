@@ -1,5 +1,6 @@
 #include <QtCore/QCoreApplication>
 #include "src/ui/app_theme.h"
+#include "src/ui/app_branding.h"
 #include "src/ui/login_dialog.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/net/session_manager.h"
@@ -21,7 +22,7 @@ LoginDialog::LoginDialog(QWidget *parent)
 
 LoginDialog::LoginDialog(OpenMeeting::SessionManager &session, QWidget *parent)
     : QDialog(parent), _session(session) {
-    setWindowTitle(QCoreApplication::translate("MeetingUI", "OpenMeeting Sign In"));
+    setWindowTitle(QCoreApplication::translate("MeetingUI", "Cohavora Sign In"));
     resize(460, 600);
     setWindowFlags(windowFlags() | Qt::FramelessWindowHint);
     setAttribute(Qt::WA_TranslucentBackground, true);
@@ -86,16 +87,17 @@ void LoginDialog::initUI() {
     // 标题区域
     auto titleBox = new QVBoxLayout();
     titleBox->setSpacing(4);
-    auto title = new QLabel(QString::fromUtf8("OpenMeeting"), card);
+    auto title = new QLabel(AppBranding::name(), card);
     QFont tf = title->font();
     tf.setPixelSize(22);
     tf.setBold(true);
     title->setFont(tf);
     title->setAlignment(Qt::AlignCenter);
 
-    auto subtitle = new QLabel(QCoreApplication::translate("MeetingUI", "Video meetings powered by LiveKit & WebRTC"), card);
+    auto subtitle = new QLabel(AppBranding::tagline(), card);
     MeetingUI::AppTheme::setStyleVariant(*subtitle, "login-dialog-subtitle");
     subtitle->setAlignment(Qt::AlignCenter);
+    subtitle->setWordWrap(true);
 
     titleBox->addWidget(title);
     titleBox->addWidget(subtitle);

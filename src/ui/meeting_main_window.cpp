@@ -1,4 +1,5 @@
 #include <QtCore/QCoreApplication>
+#include "src/ui/app_branding.h"
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/app_theme.h"
 #include "src/ui/meeting_log_console.h"
@@ -454,7 +455,7 @@ void JoinMeetingDialog::mouseMoveEvent(QMouseEvent *e) {
 MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 	: Ui::RpWidget(parent) {
 	setObjectName("MeetingMainWindow");
-	setWindowTitle(QCoreApplication::translate("MeetingUI", "Meeting Client - Powered by LiveKit"));
+	setWindowTitle(AppBranding::displayName());
 	resize(1040, 660);
 	setMinimumSize(900, 580);
 	if (!parent) {

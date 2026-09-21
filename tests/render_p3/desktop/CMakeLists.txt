@@ -11,11 +11,11 @@ endif()
 
 # Rebuild the exact production module and host against a desktop Qt kit.
 # No alternate renderer implementation and no modification of the bundled Qt.
-add_library(livekit_render_opengl MODULE "${LIVEKIT_ROOT}/src/render/modules/opengl_backend.cpp")
-set_target_properties(livekit_render_opengl PROPERTIES AUTOMOC OFF
-    OUTPUT_NAME "livekit-render-opengl" CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
-target_compile_definitions(livekit_render_opengl PRIVATE LK_RENDER_MODULE_BUILD)
-target_include_directories(livekit_render_opengl PRIVATE "${LIVEKIT_ROOT}" "${LIVEKIT_ROOT}/src")
+add_library(cohavora_render_opengl MODULE "${LIVEKIT_ROOT}/src/render/modules/opengl_backend.cpp")
+set_target_properties(cohavora_render_opengl PROPERTIES AUTOMOC OFF
+    OUTPUT_NAME "cohavora-render-opengl" CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
+target_compile_definitions(cohavora_render_opengl PRIVATE LK_RENDER_MODULE_BUILD)
+target_include_directories(cohavora_render_opengl PRIVATE "${LIVEKIT_ROOT}" "${LIVEKIT_ROOT}/src")
 add_executable(desktop_gl_probe
     desktop_gl_probe.cpp
     "${LIVEKIT_ROOT}/tests/render_p3/opengl_contract.cpp"
@@ -33,10 +33,10 @@ add_executable(driver_reset_control driver_reset_control.cpp)
 set_target_properties(driver_reset_control PROPERTIES AUTOMOC OFF)
 target_link_libraries(driver_reset_control PRIVATE gdi32 user32)
 add_custom_target(deploy_desktop_gl
-    DEPENDS livekit_render_opengl
+    DEPENDS cohavora_render_opengl
     COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:desktop_gl_probe>/renderers"
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:livekit_render_opengl>"
-        "$<TARGET_FILE_DIR:desktop_gl_probe>/renderers/$<TARGET_FILE_NAME:livekit_render_opengl>")
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:cohavora_render_opengl>"
+        "$<TARGET_FILE_DIR:desktop_gl_probe>/renderers/$<TARGET_FILE_NAME:cohavora_render_opengl>")
 add_dependencies(desktop_gl_probe deploy_desktop_gl)
 
 get_target_property(_qmake Qt5::qmake IMPORTED_LOCATION)

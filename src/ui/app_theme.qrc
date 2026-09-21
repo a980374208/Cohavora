@@ -1,5 +1,6 @@
 <RCC>
   <qresource prefix="/meeting-ui/icons">
+    <file alias="cohavora.svg">icons/cohavora.svg</file>
     <file alias="chevron-down-light.svg">icons/chevron-down-light.svg</file>
     <file alias="chevron-up-light.svg">icons/chevron-up-light.svg</file>
     <file alias="chevron-down-dark.svg">icons/chevron-down-dark.svg</file>

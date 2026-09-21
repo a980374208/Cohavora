@@ -104,12 +104,12 @@
             <translation>切换摄像头预览失败：%1</translation>
         </message>
         <message>
-            <source>OpenMeeting Sign In</source>
-            <translation>OpenMeeting 登录</translation>
+            <source>Cohavora Sign In</source>
+            <translation>Cohavora 登录</translation>
         </message>
         <message>
-            <source>Video meetings powered by LiveKit &amp; WebRTC</source>
-            <translation>基于 LiveKit &amp; WebRTC 的现代化音视频会议</translation>
+            <source>Open-source Audio and Video Meeting Client</source>
+            <translation>开源音视频会议客户端</translation>
         </message>
         <message>
             <source>Phone number or account</source>
@@ -932,8 +932,8 @@ Meeting ID: %2</source>
             <translation>yyyy年M月d日 dddd</translation>
         </message>
         <message>
-            <source>LiveKit Console / Debug Logs</source>
-            <translation>LiveKit 实时控制台 / 调试日志</translation>
+            <source>Cohavora Console / Debug Logs</source>
+            <translation>Cohavora 实时控制台 / 调试日志</translation>
         </message>
         <message>
             <source>● Console Ready</source>
@@ -956,8 +956,8 @@ Meeting ID: %2</source>
             <translation>清空</translation>
         </message>
         <message>
-            <source>LiveKit console started. Listening for signaling, WebRTC media, and device events...</source>
-            <translation>LiveKit 客户端控制台已启动，实时监听信令、WebRTC 媒体与设备事件...</translation>
+            <source>Cohavora console started. Listening for signaling, WebRTC media, and device events...</source>
+            <translation>Cohavora 客户端控制台已启动，实时监听信令、WebRTC 媒体与设备事件...</translation>
         </message>
         <message>
             <source>● Console Ready (%1 entries)</source>
@@ -1068,8 +1068,8 @@ Meeting ID: %2</source>
             <translation>参会者</translation>
         </message>
         <message>
-            <source>Meeting Client - Powered by LiveKit</source>
-            <translation>会议客户端 - LiveKit Powered</translation>
+            <source>Cohavora - Open-source Audio and Video Meeting Client</source>
+            <translation>Cohavora · 开源音视频会议客户端</translation>
         </message>
         <message>
             <source>Notice</source>
@@ -1368,8 +1368,8 @@ Meeting ID: %2</source>
             <translation>未检测到可用的摄像头设备，无法开启视频！</translation>
         </message>
         <message>
-            <source>LiveKit Meeting Room - %1</source>
-            <translation>LiveKit 会议室 - %1</translation>
+            <source>Cohavora Meeting Room - %1</source>
+            <translation>Cohavora 会议室 - %1</translation>
         </message>
         <message>
             <source>No microphone available. The microphone has been muted automatically.</source>
@@ -1404,8 +1404,8 @@ Meeting ID: %2</source>
             <translation>%1 (我)</translation>
         </message>
         <message>
-            <source>Meeting - ID: %1</source>
-            <translation>会议 - 会议号: %1</translation>
+            <source>Cohavora - Meeting ID: %1</source>
+            <translation>Cohavora - 会议号: %1</translation>
         </message>
         <message>
             <source>Qt CPU video backend: </source>
@@ -1610,8 +1610,12 @@ Reason: %1</source>
             <translation>本地采集已停止，但远端取消发布尚未确认。请重试停止或退出会议。</translation>
         </message>
         <message>
-            <source>%1 - Meeting ID: %2</source>
-            <translation>%1 - 会议号: %2</translation>
+            <source>Cohavora - %1 - Meeting ID: %2</source>
+            <translation>Cohavora - %1 - 会议号: %2</translation>
+        </message>
+        <message>
+            <source>Cohavora - %1</source>
+            <translation>Cohavora - %1</translation>
         </message>
         <message>
             <source>Subscription permission updated: participant=%1 sid=%2 track=%3 allowed=%4</source>
@@ -1732,10 +1736,10 @@ Reason: %1 (code: %2)</source>
             <translation>当前会议尚未就绪，暂时无法复制邀请信息。</translation>
         </message>
         <message>
-            <source>[LiveKit Meeting Invitation]
+            <source>[Cohavora Meeting Invitation]
 Meeting ID: %1
 Sign in with your own account in a client configured for the same meeting service, then join using this meeting ID.</source>
-            <translation>【LiveKit 会议邀请】
+            <translation>【Cohavora 会议邀请】
 会议号: %1
 请在配置了同一会议服务的客户端登录自己的账号后，使用会议号加入。</translation>
         </message>
@@ -1760,8 +1764,8 @@ Sign in with your own account in a client configured for the same meeting servic
             <translation>已退出会议视窗并停止媒体采集</translation>
         </message>
         <message>
-            <source>LiveKit User</source>
-            <translation>LiveKit用户</translation>
+            <source>Cohavora User</source>
+            <translation>Cohavora 用户</translation>
         </message>
         <message>
             <source>Copy</source>
@@ -2092,10 +2096,6 @@ Sign in with your own account in a client configured for the same meeting servic
             <translation>未检测到可用扬声器</translation>
         </message>
         <message>
-            <source>LiveKit Meeting</source>
-            <translation>LiveKit 会议</translation>
-        </message>
-        <message>
             <source>Development Build</source>
             <translation>开发版本</translation>
         </message>
@@ -2322,10 +2322,6 @@ Sign in with your own account in a client configured for the same meeting servic
         <message>
             <source>The sign-in response contains invalid data.</source>
             <translation>登录响应数据格式无效。</translation>
-        </message>
-        <message>
-            <source>Video Meeting Client - Powered by LiveKit</source>
-            <translation>音视频会议客户端 - LiveKit Powered</translation>
         </message>
         <message>
             <source>No additional disconnect details</source>

@@ -4,6 +4,7 @@
 #include "tests/support/test_check.h"
 
 #include <QtCore/QElapsedTimer>
+#include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QPointer>
 #include <QtCore/QProcess>
@@ -59,6 +60,96 @@ std::unique_ptr<QSettings> settingsAt(const QString &path) {
 
 StoredSession record(const QString &service = "https://example.invalid/api") {
     return {service, "account", {kToken, "user", "Synthetic user", {}}, true};
+}
+
+void verifySettingsMigration() {
+    QTemporaryDir directory;
+    TEST_CHECK(directory.isValid());
+    const auto legacyPath = directory.filePath("legacy.ini");
+    const auto currentPath = directory.filePath("current.ini");
+    {
+        auto legacy = settingsAt(legacyPath);
+        legacy->setValue("network/serverBaseUrl", QStringLiteral("https://example.invalid/api"));
+        legacy->setValue("media/enableVideo", true);
+        legacy->setValue("general/showActiveSpeaker", false);
+        legacy->setValue("auth/account", QStringLiteral("account"));
+        legacy->setValue("auth/password", kPassword);
+        legacy->setValue("user/token", kToken);
+        legacy->setValue("custom/unknown", QStringLiteral("must-not-migrate"));
+        legacy->sync();
+    }
+    auto first = migrateCohavoraSettings(settingsAt(currentPath), settingsAt(legacyPath));
+    TEST_CHECK(first.status == SettingsMigrationStatus::Migrated);
+    TEST_CHECK(first.settings->value("media/enableVideo").toBool());
+    TEST_CHECK(!first.settings->value("general/showActiveSpeaker").toBool());
+    TEST_CHECK(first.settings->value("auth/account").toString() == QStringLiteral("account"));
+    TEST_CHECK(!first.settings->contains("custom/unknown"));
+    TEST_CHECK(!first.settings->contains("auth/password"));
+    TEST_CHECK(!first.settings->contains("user/token"));
+    TEST_CHECK(first.settings->value("migration/cohavoraSettingsVersion").toInt() == 1);
+    first.settings.reset();
+    auto cleanedLegacy = settingsAt(legacyPath);
+    TEST_CHECK(!cleanedLegacy->contains("auth/password") && !cleanedLegacy->contains("user/token"));
+    TEST_CHECK(cleanedLegacy->contains("custom/unknown"));
+
+    cleanedLegacy->setValue("media/enableVideo", false);
+    cleanedLegacy->sync();
+    auto repeated = migrateCohavoraSettings(settingsAt(currentPath), settingsAt(legacyPath));
+    TEST_CHECK(repeated.status == SettingsMigrationStatus::Current);
+    TEST_CHECK(repeated.settings->value("media/enableVideo").toBool());
+
+    const auto priorityLegacyPath = directory.filePath("priority-legacy.ini");
+    const auto priorityCurrentPath = directory.filePath("priority-current.ini");
+    auto priorityLegacy = settingsAt(priorityLegacyPath);
+    priorityLegacy->setValue("media/enableVideo", false);
+    priorityLegacy->sync();
+    auto priorityCurrent = settingsAt(priorityCurrentPath);
+    priorityCurrent->setValue("media/enableVideo", true);
+    priorityCurrent->sync();
+    auto priority = migrateCohavoraSettings(std::move(priorityCurrent), std::move(priorityLegacy));
+    TEST_CHECK(priority.status == SettingsMigrationStatus::Migrated);
+    TEST_CHECK(priority.settings->value("media/enableVideo").toBool());
+
+    const auto encryptedLegacyPath = directory.filePath("encrypted-legacy.ini");
+    const auto encryptedCurrentPath = directory.filePath("encrypted-current.ini");
+    auto encryptedLegacy = settingsAt(encryptedLegacyPath);
+    encryptedLegacy->setValue("network/serverBaseUrl", record().service);
+    encryptedLegacy->setValue("auth/account", record().account);
+    auto legacyStore = makeCredentialStore(*encryptedLegacy);
+    TEST_CHECK(legacyStore->save(record()) == CredentialStatus::Ready);
+    legacyStore.reset();
+    auto encrypted = migrateCohavoraSettings(
+        settingsAt(encryptedCurrentPath), std::move(encryptedLegacy));
+    TEST_CHECK(encrypted.status == SettingsMigrationStatus::Migrated);
+    auto currentStore = makeCredentialStore(*encrypted.settings);
+    const auto restored = currentStore->load(record().service, record().account);
+    TEST_CHECK(restored.status == CredentialStatus::Ready);
+    TEST_CHECK(restored.session.user.token == kToken);
+    TEST_CHECK(!settingsAt(encryptedLegacyPath)->contains("auth/protectedSessionV2"));
+
+    const auto blockedPath = directory.filePath("blocked");
+    QFile blocker(blockedPath);
+    TEST_CHECK(blocker.open(QIODevice::WriteOnly));
+    blocker.close();
+    const auto fallbackLegacyPath = directory.filePath("fallback-legacy.ini");
+    auto fallbackLegacy = settingsAt(fallbackLegacyPath);
+    fallbackLegacy->setValue("media/enableVideo", true);
+    auto fallbackStore = makeCredentialStore(*fallbackLegacy);
+    TEST_CHECK(fallbackStore->save(record()) == CredentialStatus::Ready);
+    fallbackStore.reset();
+    auto fallback = migrateCohavoraSettings(
+        settingsAt(blockedPath + "/current.ini"), std::move(fallbackLegacy));
+    TEST_CHECK(fallback.status == SettingsMigrationStatus::LegacyFallback);
+    TEST_CHECK(fallback.settings->value("media/enableVideo").toBool());
+    TEST_CHECK(fallback.settings->contains("auth/protectedSessionV2"));
+    fallback.settings.reset();
+    TEST_CHECK(QFile::remove(blockedPath));
+    TEST_CHECK(QDir().mkpath(blockedPath));
+    auto retry = migrateCohavoraSettings(
+        settingsAt(blockedPath + "/current.ini"), settingsAt(fallbackLegacyPath));
+    TEST_CHECK(retry.status == SettingsMigrationStatus::Migrated);
+    TEST_CHECK(retry.settings->value("migration/cohavoraSettingsVersion").toInt() == 1);
+    std::puts("SETTINGS MIGRATION PASS: first, repeat, new-value priority, write fallback, encrypted session");
 }
 
 void verifyStore() {
@@ -817,6 +908,7 @@ int main(int argc, char **argv) {
         app.arguments().contains(QStringLiteral("--debug")));
     TEST_CHECK(OpenMeeting::isDebugHttpTransportEnabled());
     app.setQuitOnLastWindowClosed(false);
+    verifySettingsMigration();
     verifyPublicAuthContract();
     verifyPublicInvalidLoginData();
     verifyPublicAuthOrdering();

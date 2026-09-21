@@ -9,6 +9,7 @@
 #include <QtWidgets/QInputDialog>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
+#include <QtGui/QIcon>
 #include <QtGui/QPainterPath>
 #include <QtGui/QFont>
 #include <QtGui/QClipboard>
@@ -37,42 +38,11 @@ QSize bannerSize(QLabel &label, int availableWidth, int preferredWidth) {
  return QSize(width, std::max(32, label.heightForWidth(width)));
 }
 
-QSize toolbarCellSize(int width) {
- QFont font("Microsoft YaHei");
- font.setPixelSize(11);
- const QFontMetrics metrics(font);
- const QStringList captions = {
-  QCoreApplication::translate("MeetingUI", "Enable Speaker"),
-  QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(999999999),
-  QCoreApplication::translate("MeetingUI", "Simulate Scenario"),
-  QCoreApplication::translate("MeetingUI", "Cancel Sharing"),
-  QCoreApplication::translate("MeetingUI", "Stop Sharing"),
-  QCoreApplication::translate("MeetingUI", "Share Screen"),
-  QCoreApplication::translate("MeetingUI", "Stopping"),
-  QCoreApplication::translate("MeetingUI", "Retry Stop"),
-  QCoreApplication::translate("MeetingUI", "Start Video"),
-  QCoreApplication::translate("MeetingUI", "Stop Video"),
-  QCoreApplication::translate("MeetingUI", "Unmute"),
-  QCoreApplication::translate("MeetingUI", "Mute"),
-  QCoreApplication::translate("MeetingUI", "Speaker"),
-  QCoreApplication::translate("MeetingUI", "Invite"),
-  QCoreApplication::translate("MeetingUI", "Chat"),
-  QCoreApplication::translate("MeetingUI", "End Meeting")
- };
- int minimumWidth = 100;
- for (const auto &caption : captions) {
-  for (const auto &word : caption.split(QLatin1Char(' ')))
-   minimumWidth = std::max(minimumWidth, metrics.horizontalAdvance(word) + 12);
- }
- const int columns = std::max(1, std::min(8, (width - 116) / (minimumWidth + 4)));
- const int cellWidth = std::max(minimumWidth, (width - 116) / columns - 4);
- int textHeight = 30;
- for (const auto &caption : captions) {
-  textHeight = std::max(textHeight, metrics.boundingRect(
-      QRect(0, 0, cellWidth, 1000), Qt::TextWordWrap, caption).height());
- }
- return QSize(cellWidth, textHeight + 36);
-}
+constexpr int kBottomBarHeight = 72;
+constexpr int kBottomBarPadding = 12;
+constexpr int kBottomBarGap = 6;
+constexpr int kBottomBarEndWidth = 88;
+constexpr int kBottomBarPreferredToolWidth = 76;
 
 bool isChatSenderPlaceholderName(const QString &name) {
 	const auto normalized = name.trimmed().toCaseFolded();
@@ -747,10 +717,7 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	p.save();
 	const int logoX = 14;
 	const int logoY = 22;
-	p.setPen(Qt::NoPen);
-	p.setBrush(QColor(0x16, 0x77, 0xff));
-	p.drawEllipse(QPoint(logoX, logoY), 5, 5);
-	p.drawEllipse(QPoint(logoX + 7, logoY - 4), 4, 4);
+	windowIcon().paint(&p, QRect(logoX - 8, logoY - 12, 24, 24));
 
 	QFont font("Microsoft YaHei", 10);
 	p.setFont(font);
@@ -969,7 +936,7 @@ void RoomTopBarWidget::leaveEventHook(QEvent *e) {
 
 RoomBottomBarWidget::RoomBottomBarWidget(QWidget *parent)
 	: Ui::RpWidget(parent) {
-	setMinimumHeight(76);
+	setMinimumHeight(kBottomBarHeight);
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
 
@@ -1063,14 +1030,13 @@ bool RoomBottomBarWidget::HasAvailableVideoDevice() {
 }
 
 int RoomBottomBarWidget::heightForWidth(int width) const {
- const auto cell = toolbarCellSize(width);
- const int columns = std::max(1, std::min(8, (width - 116) / (cell.width() + 4)));
- return ((8 + columns - 1) / columns) * cell.height() + 16;
+	Q_UNUSED(width);
+	return kBottomBarHeight;
 }
 
 void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
+	Q_UNUSED(e);
 	const int w = width();
-	const int h = height();
 
 	_toolItems = {
 		{ 1, QCoreApplication::translate("MeetingUI", "Unmute"), QCoreApplication::translate("MeetingUI", "Mute"), QRect(), true },
@@ -1083,15 +1049,23 @@ void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 		{ 10, QCoreApplication::translate("MeetingUI", "Simulate Scenario"), QCoreApplication::translate("MeetingUI", "Simulate Scenario"), QRect(), true },
 	};
 
- const auto cell = toolbarCellSize(w);
- const int columns = std::max(1, std::min(8, (w - 116) / (cell.width() + 4)));
- _endMeetingRect = QRect(w - 104, 8, 96, cell.height());
- _chatInput->hide();
- _handBtn->hide();
- for (size_t i = 0; i < _toolItems.size(); ++i) {
-  _toolItems[i].rect = QRect(8 + (i % columns) * (cell.width() + 4),
-      8 + (i / columns) * cell.height(), cell.width(), cell.height());
- }
+	const int endWidth = std::min(kBottomBarEndWidth, std::max(64, w / 5));
+	_endMeetingRect = QRect(w - kBottomBarPadding - endWidth, 5, endWidth,
+		kBottomBarHeight - 10);
+	const int controlsLeft = kBottomBarPadding;
+	const int controlsRight = _endMeetingRect.left() - kBottomBarGap;
+	const int controlsWidth = std::max(0, controlsRight - controlsLeft);
+	const int itemCount = static_cast<int>(_toolItems.size());
+	const int toolWidth = std::max(1, std::min(kBottomBarPreferredToolWidth,
+		(controlsWidth - (itemCount - 1) * kBottomBarGap) / itemCount));
+	const int toolsWidth = itemCount * toolWidth + (itemCount - 1) * kBottomBarGap;
+	const int toolsLeft = controlsLeft + std::max(0, (controlsWidth - toolsWidth) / 2);
+	_chatInput->hide();
+	_handBtn->hide();
+	for (size_t i = 0; i < _toolItems.size(); ++i) {
+		_toolItems[i].rect = QRect(toolsLeft + static_cast<int>(i) * (toolWidth + kBottomBarGap),
+			5, toolWidth, kBottomBarHeight - 10);
+	}
 }
 
 void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
@@ -1250,8 +1224,10 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 		font.setPixelSize(11);
 		p.setFont(font);
 		p.setPen(QColor(0x4e, 0x59, 0x69));
-		p.drawText(QRect(r.x(), r.y() + 32, r.width(), r.height() - 32),
-			Qt::AlignCenter | Qt::TextWordWrap, title);
+		const int textWidth = std::max(0, r.width() - (item.hasDropdown ? 18 : 8));
+		const auto visibleTitle = QFontMetrics(font).elidedText(title, Qt::ElideRight, textWidth);
+		p.drawText(QRect(r.x() + 4, r.y() + 32, r.width() - 8, r.height() - 32),
+			Qt::AlignCenter | Qt::TextSingleLine, visibleTitle);
 
 		if (item.hasDropdown) {
 			p.setPen(QPen(QColor(0x86, 0x90, 0x9c), 1.4));
@@ -1288,8 +1264,12 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 	endFont.setBold(true);
 	p.setFont(endFont);
 	p.setPen(QColor(0xf5, 0x3f, 0x3f));
-	p.drawText(QRect(_endMeetingRect.x(), _endMeetingRect.y() + 32, _endMeetingRect.width(), _endMeetingRect.height() - 32),
-		Qt::AlignCenter | Qt::TextWordWrap, QCoreApplication::translate("MeetingUI", "End Meeting"));
+	const auto endMeetingTitle = QFontMetrics(endFont).elidedText(
+		QCoreApplication::translate("MeetingUI", "End Meeting"), Qt::ElideRight,
+		std::max(0, _endMeetingRect.width() - 8));
+	p.drawText(QRect(_endMeetingRect.x() + 4, _endMeetingRect.y() + 32,
+		_endMeetingRect.width() - 8, _endMeetingRect.height() - 32),
+		Qt::AlignCenter | Qt::TextSingleLine, endMeetingTitle);
 	p.restore();
 }
 
@@ -1652,7 +1632,7 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 		_coordinator = OpenMeeting::MeetingCoordinator::create(this);
 	}
 	setupCameraCompletionOwner(OpenMeeting::SessionManager::instance());
-	setWindowTitle(QCoreApplication::translate("MeetingUI", "LiveKit Meeting Room - %1").arg(config.displayName));
+	setWindowTitle(QCoreApplication::translate("MeetingUI", "Cohavora Meeting Room - %1").arg(config.displayName));
 	resize(1120, 720);
 	setMinimumSize(850, 560);
 	if (!parent) {
@@ -1926,7 +1906,7 @@ void MeetingRoomWindow::initLayout() {
 	if (mId.isEmpty()) mId = _config.meetingId;
 	if (!mId.isEmpty()) {
 		_topBar->setMeetingId(mId);
-		setWindowTitle(QCoreApplication::translate("MeetingUI", "Meeting - ID: %1").arg(mId));
+		setWindowTitle(QCoreApplication::translate("MeetingUI", "Cohavora - Meeting ID: %1").arg(mId));
 	}
 	_stageContainer = new QWidget(this);
 	MeetingUI::AppTheme::setStyleVariant(*_stageContainer, "meeting-room-window-stagecontainer");
@@ -3519,8 +3499,8 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		}
 		const QString meetingId = _coordinator->currentMeetingId();
 		setWindowTitle(meetingId.isEmpty()
-			? info.name
-			: QCoreApplication::translate("MeetingUI", "%1 - Meeting ID: %2").arg(info.name, meetingId));
+			? QCoreApplication::translate("MeetingUI", "Cohavora - %1").arg(info.name)
+			: QCoreApplication::translate("MeetingUI", "Cohavora - %1 - Meeting ID: %2").arg(info.name, meetingId));
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantsUpdated,
 	        this, [this](const std::vector<OpenMeeting::ParticipantInfo> &list) {
@@ -3660,7 +3640,7 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 
 	if (!_coordinator->currentMeetingId().isEmpty()) {
 		if (_topBar) _topBar->setMeetingId(_coordinator->currentMeetingId());
-		setWindowTitle(QCoreApplication::translate("MeetingUI", "Meeting - ID: %1").arg(_coordinator->currentMeetingId()));
+		setWindowTitle(QCoreApplication::translate("MeetingUI", "Cohavora - Meeting ID: %1").arg(_coordinator->currentMeetingId()));
 	}
 
 	updateRecoveryStateUi(_coordinator->state());
@@ -3776,7 +3756,7 @@ void MeetingRoomWindow::onRemoteMuteRequested(bool isVideo, bool mute, const QSt
 
 void MeetingRoomWindow::onMeetingDetailUpdated(const OpenMeeting::MeetingDetail &detail) {
 	if (!detail.meetingName.isEmpty()) {
-		setWindowTitle(QCoreApplication::translate("MeetingUI", "%1 - Meeting ID: %2").arg(detail.meetingName).arg(detail.meetingId));
+		setWindowTitle(QCoreApplication::translate("MeetingUI", "Cohavora - %1 - Meeting ID: %2").arg(detail.meetingName).arg(detail.meetingId));
 	}
 	if (_topBar && !detail.meetingId.isEmpty()) {
 		_topBar->setMeetingId(detail.meetingId);
@@ -3864,7 +3844,7 @@ void MeetingRoomWindow::handleInviteClicked() {
 		return;
 	}
 
-	const auto inviteText = QCoreApplication::translate("MeetingUI", "[LiveKit Meeting Invitation]\nMeeting ID: %1\nSign in with your own account in a client configured for the same meeting service, then join using this meeting ID.")
+	const auto inviteText = QCoreApplication::translate("MeetingUI", "[Cohavora Meeting Invitation]\nMeeting ID: %1\nSign in with your own account in a client configured for the same meeting service, then join using this meeting ID.")
 		.arg(meetingId);
 	QPointer<MeetingRoomWindow> guard(this);
 	QApplication::clipboard()->setText(inviteText);

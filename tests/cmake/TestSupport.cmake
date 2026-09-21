@@ -1,5 +1,5 @@
-add_library(livekit_qt_test_environment INTERFACE)
-target_include_directories(livekit_qt_test_environment BEFORE INTERFACE
+add_library(cohavora_qt_test_environment INTERFACE)
+target_include_directories(cohavora_qt_test_environment BEFORE INTERFACE
     ${LIVEKIT_PROJECT_SOURCE_DIR}
     ${GEN_DIR}
     ${WEBRTC_ROOT}/include/third_party/libyuv/include
@@ -23,7 +23,7 @@ target_include_directories(livekit_qt_test_environment BEFORE INTERFACE
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtWidgets
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtNetwork
     ${TDESKTOP_LIBS_DIR}/zlib/include)
-target_link_libraries(livekit_qt_test_environment INTERFACE
+target_link_libraries(cohavora_qt_test_environment INTERFACE
     ${CMAKE_DL_LIBS}
     desktop_lib_ui
     desktop_lib_base
@@ -55,7 +55,7 @@ target_link_libraries(livekit_qt_test_environment INTERFACE
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qgif.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/iconengines/qsvgicon.lib
     ${TDESKTOP_LIBS_DIR}/mozjpeg/release/jpeg-static.lib
-    livekit_signaling
+    cohavora_core
     Dwmapi
     UxTheme
     d3d9
@@ -69,7 +69,7 @@ target_link_libraries(livekit_qt_test_environment INTERFACE
     winmm
     wtsapi32
     version)
-target_compile_definitions(livekit_qt_test_environment INTERFACE
+target_compile_definitions(cohavora_qt_test_environment INTERFACE
     WIN32
     _WINDOWS
     WIN32_LEAN_AND_MEAN
@@ -82,11 +82,11 @@ target_compile_definitions(livekit_qt_test_environment INTERFACE
     _ITERATOR_DEBUG_LEVEL=0
     $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
     $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>)
-target_link_options(livekit_qt_test_environment INTERFACE
+target_link_options(cohavora_qt_test_environment INTERFACE
     $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
     $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>)
 
 function(livekit_configure_qt_test target)
-    target_link_libraries(${target} PRIVATE livekit_qt_test_environment)
+    target_link_libraries(${target} PRIVATE cohavora_qt_test_environment)
     set_target_properties(${target} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
 endfunction()

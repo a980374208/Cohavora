@@ -58,7 +58,7 @@ add_executable(test_log_redaction
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
 )
 target_include_directories(test_log_redaction PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
-target_link_libraries(test_log_redaction PRIVATE livekit_signaling)
+target_link_libraries(test_log_redaction PRIVATE cohavora_core)
 set_target_properties(test_log_redaction PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded")
 add_test(NAME log_redaction_test COMMAND test_log_redaction)
@@ -69,7 +69,7 @@ add_executable(test_connection_log_redaction
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
 )
 target_include_directories(test_connection_log_redaction PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
-target_link_libraries(test_connection_log_redaction PRIVATE livekit_signaling)
+target_link_libraries(test_connection_log_redaction PRIVATE cohavora_core)
 set_target_properties(test_connection_log_redaction PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded")
 add_test(NAME connection_log_redaction_test COMMAND test_connection_log_redaction)
@@ -82,7 +82,7 @@ add_executable(test_websocket_tls_verification
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
 )
 target_include_directories(test_websocket_tls_verification PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
-target_link_libraries(test_websocket_tls_verification PRIVATE livekit_signaling)
+target_link_libraries(test_websocket_tls_verification PRIVATE cohavora_core)
 set_target_properties(test_websocket_tls_verification PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded")
 add_test(NAME websocket_tls_verification_test COMMAND test_websocket_tls_verification)
@@ -118,7 +118,7 @@ add_test(NAME always_active_checks_test
         -P "${LIVEKIT_TEST_SOURCE_DIR}/remediation/verify_test_check.cmake"
 )
 
-add_test(NAME signaling_tests COMMAND livekit_signaling_tests_run_v4)
+add_test(NAME signaling_tests COMMAND cohavora_core_tests)
 add_test(NAME signaling_url_policy_test COMMAND test_signaling_url_policy)
 set_tests_properties(signaling_url_policy_test PROPERTIES
     TIMEOUT 30)

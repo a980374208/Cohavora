@@ -89,12 +89,34 @@ std::filesystem::path BackendModule::DefaultPath(const std::filesystem::path& di
 std::filesystem::path BackendModule::PathForBackend(const std::filesystem::path& directory, uint32_t backend) {
     if (backend != LK_RENDER_BACKEND_DX11 && backend != LK_RENDER_BACKEND_OPENGL) return {};
 #if defined(_WIN32)
-    return directory / "renderers" / (backend == LK_RENDER_BACKEND_DX11 ? "livekit-render-dx11.dll" : "livekit-render-opengl.dll");
+    return directory / "renderers" / (backend == LK_RENDER_BACKEND_DX11 ? "cohavora-render-dx11.dll" : "cohavora-render-opengl.dll");
 #elif defined(__APPLE__)
-    return backend == LK_RENDER_BACKEND_OPENGL ? directory / "renderers" / "liblivekit-render-opengl.dylib" : std::filesystem::path{};
+    return backend == LK_RENDER_BACKEND_OPENGL ? directory / "renderers" / "libcohavora-render-opengl.dylib" : std::filesystem::path{};
 #else
-    return backend == LK_RENDER_BACKEND_OPENGL ? directory / "renderers" / "liblivekit-render-opengl.so" : std::filesystem::path{};
+    return backend == LK_RENDER_BACKEND_OPENGL ? directory / "renderers" / "libcohavora-render-opengl.so" : std::filesystem::path{};
 #endif
+}
+std::filesystem::path BackendModule::LegacyPathForBackend(
+        const std::filesystem::path& directory, uint32_t backend) {
+    if (backend != LK_RENDER_BACKEND_DX11 && backend != LK_RENDER_BACKEND_OPENGL) return {};
+#if defined(_WIN32)
+    return directory / "renderers" / (backend == LK_RENDER_BACKEND_DX11
+        ? "livekit-render-dx11.dll" : "livekit-render-opengl.dll");
+#elif defined(__APPLE__)
+    return backend == LK_RENDER_BACKEND_OPENGL
+        ? directory / "renderers" / "liblivekit-render-opengl.dylib" : std::filesystem::path{};
+#else
+    return backend == LK_RENDER_BACKEND_OPENGL
+        ? directory / "renderers" / "liblivekit-render-opengl.so" : std::filesystem::path{};
+#endif
+}
+std::shared_ptr<BackendModule> BackendModule::LoadFromDirectory(
+        const std::filesystem::path& directory, uint32_t backend, ModuleLoadError& error) {
+    const auto current = PathForBackend(directory, backend);
+    std::error_code existsError;
+    const bool currentExists = !current.empty() && std::filesystem::exists(current, existsError);
+    if (currentExists || existsError) return Load(current, backend, error);
+    return Load(LegacyPathForBackend(directory, backend), backend, error);
 }
 std::shared_ptr<BackendModule> BackendModule::Load(const std::filesystem::path& path,
         uint32_t backend, ModuleLoadError& error) {

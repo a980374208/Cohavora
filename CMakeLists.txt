@@ -1,8 +1,28 @@
 cmake_minimum_required(VERSION 3.20)
-project(livekit_signaling_cpp LANGUAGES C CXX)
+project(Cohavora VERSION 0.1.0
+    DESCRIPTION "Cohavora - Open-source Audio and Video Meeting Client"
+    LANGUAGES C CXX)
+set(COHAVORA_DISPLAY_NAME "Cohavora · 开源音视频会议客户端")
 
-option(LIVEKIT_BUILD_SAMPLES "Build standalone sample applications" ON)
-option(LIVEKIT_BUILD_MEETING_APP "Build the Qt meeting application" ON)
+function(cohavora_compat_option current legacy description default_value)
+    if(DEFINED CACHE{${current}})
+        set(initial_value "${${current}}")
+    elseif(DEFINED CACHE{${legacy}})
+        set(initial_value "${${legacy}}")
+    else()
+        set(initial_value "${default_value}")
+    endif()
+    if(DEFINED CACHE{${legacy}})
+        message(DEPRECATION
+            "${legacy} is deprecated; use ${current}. ${current} takes precedence when both are set.")
+    endif()
+    option(${current} "${description}" "${initial_value}")
+endfunction()
+
+cohavora_compat_option(COHAVORA_BUILD_SAMPLES LIVEKIT_BUILD_SAMPLES
+    "Build standalone sample applications" ON)
+cohavora_compat_option(COHAVORA_BUILD_MEETING_APP LIVEKIT_BUILD_MEETING_APP
+    "Build the Qt meeting application" ON)
 option(BUILD_TESTING "Build the test targets" ON)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
@@ -199,7 +219,7 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Source Files" FILES ${LI
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Header Files" FILES ${LIVEKIT_HEADERS})
 
 # Main Signaling Library
-add_library(livekit_signaling STATIC
+add_library(cohavora_core STATIC
     ${PROTO_SRCS}
     ${PROTO_HDRS}
     ${LIVEKIT_SOURCES}
@@ -220,7 +240,7 @@ if(NOT DEFINED WEBRTC_ROOT)
     endif()
 endif()
 
-target_include_directories(livekit_signaling BEFORE PUBLIC
+target_include_directories(cohavora_core BEFORE PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/src/core
     ${CMAKE_CURRENT_SOURCE_DIR}/src/signal
@@ -264,7 +284,7 @@ add_compile_definitions(
     _ITERATOR_DEBUG_LEVEL=0
 )
 
-target_link_libraries(livekit_signaling PUBLIC
+target_link_libraries(cohavora_core PUBLIC
     $<$<CONFIG:Debug>:${WEBRTC_DEBUG_LIB}>
     $<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_LIB}>
     asio::asio
@@ -294,11 +314,11 @@ target_link_libraries(livekit_signaling PUBLIC
     shcore
 )
 
-if(LIVEKIT_BUILD_SAMPLES)
+if(COHAVORA_BUILD_SAMPLES)
     add_subdirectory(samples)
 endif()
 
-if(LIVEKIT_BUILD_MEETING_APP OR BUILD_TESTING)
+if(COHAVORA_BUILD_MEETING_APP OR BUILD_TESTING)
 if(NOT DEFINED TDESKTOP_LIBS_DIR)
     if(DEFINED ENV{TDESKTOP_LIBS_DIR})
         set(TDESKTOP_LIBS_DIR "$ENV{TDESKTOP_LIBS_DIR}")
@@ -374,7 +394,7 @@ add_subdirectory(src/ui)
 
 add_subdirectory(src/render)
 
-if(LIVEKIT_BUILD_MEETING_APP)
+if(COHAVORA_BUILD_MEETING_APP)
     add_subdirectory(src/app)
 endif()
 endif()
@@ -382,4 +402,8 @@ endif()
 if(BUILD_TESTING)
     enable_testing()
     add_subdirectory(tests)
+endif()
+
+if(TARGET cohavora_app)
+    include(cmake/CohavoraPackaging.cmake)
 endif()

@@ -13,6 +13,23 @@
 
 namespace OpenMeeting {
 
+enum class SettingsMigrationStatus {
+    Current,
+    Migrated,
+    LegacyFallback,
+};
+
+struct SettingsMigrationSelection {
+    std::unique_ptr<QSettings> settings;
+    SettingsMigrationStatus status = SettingsMigrationStatus::Current;
+};
+
+// Internal startup boundary, exposed so migration behavior can be tested with
+// isolated INI stores instead of touching the user's native settings.
+SettingsMigrationSelection migrateCohavoraSettings(
+    std::unique_ptr<QSettings> current,
+    std::unique_ptr<QSettings> legacy);
+
 enum class VideoMirrorMode {
     Off = 0,
     LocalOnly = 1,

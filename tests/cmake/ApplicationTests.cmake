@@ -18,7 +18,8 @@ add_executable(test_session_credentials
 livekit_configure_qt_test(test_session_credentials)
 target_link_libraries(test_session_credentials PRIVATE crypt32)
 add_test(NAME session_credentials_test COMMAND test_session_credentials --debug)
-set_tests_properties(session_credentials_test PROPERTIES TIMEOUT 60)
+set_tests_properties(session_credentials_test PROPERTIES
+    TIMEOUT 60 LABELS "CORE_REGRESSION")
 set_property(TEST session_credentials_test openmeeting_http_test openmeeting_http_watchdog_test
     http_owner_remediation_test APPEND PROPERTY LABELS "PR_SEC_002_FOCUSED")
 
@@ -134,21 +135,21 @@ livekit_deploy_renderer(test_participant_window_remediation)
 # Keep their fixtures, D3D links and target-file expressions out of Unix builds.
 if(WIN32)
 # P2 focused module contract + actual DX11 lifetime gate.
-add_library(livekit_render_dx11_test MODULE
+add_library(cohavora_render_dx11_test MODULE
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/render/modules/dx11_backend.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/dx11/dx11_renderer.cpp)
-set_target_properties(livekit_render_dx11_test PROPERTIES AUTOMOC OFF
-    PREFIX "" OUTPUT_NAME "livekit-render-dx11-test" CXX_VISIBILITY_PRESET hidden)
-target_include_directories(livekit_render_dx11_test PRIVATE
+set_target_properties(cohavora_render_dx11_test PROPERTIES AUTOMOC OFF
+    PREFIX "" OUTPUT_NAME "cohavora-render-dx11-test" CXX_VISIBILITY_PRESET hidden)
+target_include_directories(cohavora_render_dx11_test PRIVATE
     ${LIVEKIT_PROJECT_SOURCE_DIR} ${LIVEKIT_PROJECT_SOURCE_DIR}/src
     ${LIVEKIT_TEST_SOURCE_DIR}/render_p2)
-target_compile_definitions(livekit_render_dx11_test PRIVATE
+target_compile_definitions(cohavora_render_dx11_test PRIVATE
     LK_RENDER_MODULE_BUILD LIVEKIT_DX11_MODULE_TESTING=1)
-target_link_libraries(livekit_render_dx11_test PRIVATE d3d11 dxgi d3dcompiler)
+target_link_libraries(cohavora_render_dx11_test PRIVATE d3d11 dxgi d3dcompiler)
 if(MSVC)
-    target_compile_options(livekit_render_dx11_test PRIVATE /utf-8)
+    target_compile_options(cohavora_render_dx11_test PRIVATE /utf-8)
 endif()
-add_dependencies(test_participant_window_remediation livekit_render_dx11_test)
+add_dependencies(test_participant_window_remediation cohavora_render_dx11_test)
 
 add_executable(test_render_module ${LIVEKIT_TEST_SOURCE_DIR}/render_p2/test_render_module.cpp ${LIVEKIT_PROJECT_SOURCE_DIR}/src/render/backend_module.cpp)
 set_target_properties(test_render_module PROPERTIES AUTOMOC OFF)
@@ -166,7 +167,7 @@ add_dependencies(test_participant_window_remediation render_fixture_wrong_versio
 add_test(NAME render_module_fallback_test COMMAND test_participant_window_remediation --module-fallback
     $<TARGET_FILE:render_fixture_wrong_version> $<TARGET_FILE:render_fixture_create_failure>)
 set_tests_properties(render_module_fallback_test PROPERTIES
-    TIMEOUT 45 LABELS "RENDER_MODULE_FOCUSED")
+    TIMEOUT 45 LABELS "CORE_REGRESSION;RENDER_MODULE_FOCUSED")
 
 # The GL ABI contract uses a fake dispatch table and needs no context, GPU or desktop.
 target_sources(test_participant_window_remediation PRIVATE ${LIVEKIT_TEST_SOURCE_DIR}/render_p3/opengl_contract.cpp)
@@ -178,9 +179,9 @@ set_tests_properties(render_opengl_contract_test PROPERTIES
 # observer. Labels classify them; this option is what keeps them out of default CTest.
 if(LIVEKIT_BUILD_RENDERER_RUNTIME_TESTS)
     add_test(NAME render_dx11_owner_test COMMAND test_participant_window_remediation
-        --dx11-owner $<TARGET_FILE:livekit_render_dx11_test>)
+        --dx11-owner $<TARGET_FILE:cohavora_render_dx11_test>)
     add_test(NAME render_module_test COMMAND test_render_module
-        $<TARGET_FILE:livekit_render_dx11>
+        $<TARGET_FILE:cohavora_render_dx11>
         $<TARGET_FILE:render_fixture_missing_entry>
         $<TARGET_FILE:render_fixture_wrong_version>
         $<TARGET_FILE:render_fixture_missing_function>
@@ -226,7 +227,7 @@ endif()
 # All Qt consumers use the same compiled startup theme target.
 foreach(ui_theme_consumer IN ITEMS test_camera_owner_remediation
         test_participant_window_remediation test_session_credentials test_qt_log_redaction)
-    target_link_libraries(${ui_theme_consumer} PRIVATE livekit_ui_theme)
+    target_link_libraries(${ui_theme_consumer} PRIVATE cohavora_ui_theme)
 endforeach()
 
 if(LIVEKIT_LRELEASE_EXECUTABLE)
@@ -234,8 +235,8 @@ if(LIVEKIT_LRELEASE_EXECUTABLE)
         ${LIVEKIT_TEST_SOURCE_DIR}/test_ui_presentation.cpp)
     livekit_configure_qt_test(test_ui_presentation)
     target_link_libraries(test_ui_presentation PRIVATE
-        livekit_ui_theme
-        livekit_ui_translations)
+        cohavora_ui_theme
+        cohavora_ui_translations)
     target_compile_options(test_ui_presentation PRIVATE /utf-8)
     add_test(NAME ui_presentation_test COMMAND test_ui_presentation)
     set_tests_properties(ui_presentation_test PROPERTIES TIMEOUT 30 LABELS "UI_PRESENTATION")
