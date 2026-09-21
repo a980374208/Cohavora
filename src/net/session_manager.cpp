@@ -5,6 +5,7 @@
 #include <QtCore/QDebug>
 #include <QtCore/QPointer>
 #include <QtCore/QThread>
+#include <algorithm>
 #include <stdexcept>
 #include <utility>
 
@@ -112,9 +113,9 @@ void SessionManager::setEnableVideo(bool enable) {
     }
 }
 
-void SessionManager::setVideoMirroring(bool enable) {
-    if (_mediaPrefs.videoIsMirroring != enable) {
-        _mediaPrefs.videoIsMirroring = enable;
+void SessionManager::setVideoMirrorMode(VideoMirrorMode mode) {
+    if (_mediaPrefs.mirrorMode != mode) {
+        _mediaPrefs.mirrorMode = mode;
         saveToSettings();
         emit preferencesChanged(_mediaPrefs);
     }
@@ -333,7 +334,34 @@ void SessionManager::loadFromSettings() {
     _mediaPrefs.enableMicrophone = _settings->value("media/enableMicrophone", true).toBool();
     _mediaPrefs.enableSpeaker = _settings->value("media/enableSpeaker", true).toBool();
     _mediaPrefs.enableVideo = _settings->value("media/enableVideo", false).toBool();
-    _mediaPrefs.videoIsMirroring = _settings->value("media/videoMirroring", false).toBool();
+    const auto legacyMirroring = _settings->value("media/videoMirroring", false).toBool();
+    const auto mirrorValue = _settings->value(
+        "media/videoMirrorMode",
+        legacyMirroring ? static_cast<int>(VideoMirrorMode::LocalOnly)
+                        : static_cast<int>(VideoMirrorMode::Off)).toInt();
+    _mediaPrefs.mirrorMode = mirrorValue >= static_cast<int>(VideoMirrorMode::Off) &&
+            mirrorValue <= static_cast<int>(VideoMirrorMode::LocalAndRemote)
+        ? static_cast<VideoMirrorMode>(mirrorValue)
+        : VideoMirrorMode::Off;
+    _mediaPrefs.quitOnMainWindowClose =
+        _settings->value("general/quitOnMainWindowClose", true).toBool();
+    _mediaPrefs.showActiveSpeaker =
+        _settings->value("general/showActiveSpeaker", true).toBool();
+    _mediaPrefs.stayInMeetingWhenLocked =
+        _settings->value("general/stayInMeetingWhenLocked", true).toBool();
+    _mediaPrefs.pushToTalkWhenMuted =
+        _settings->value("media/pushToTalkWhenMuted", false).toBool();
+    _mediaPrefs.noiseSuppression =
+        _settings->value("media/noiseSuppression", true).toBool();
+    _mediaPrefs.cameraDeviceId = _settings->value("media/cameraDeviceId").toString();
+    _mediaPrefs.microphoneDeviceId = _settings->value("media/microphoneDeviceId").toString();
+    _mediaPrefs.speakerDeviceId = _settings->value("media/speakerDeviceId").toString();
+    _mediaPrefs.videoCaptureWidth =
+        std::max(0, _settings->value("media/videoCaptureWidth", 0).toInt());
+    _mediaPrefs.videoCaptureHeight =
+        std::max(0, _settings->value("media/videoCaptureHeight", 0).toInt());
+    _mediaPrefs.videoCaptureFps =
+        std::max(1, _settings->value("media/videoCaptureFps", 30).toInt());
 
     httpClient().setBaseUrl(_serverBaseUrl);
     resetAuthentication();
@@ -363,7 +391,19 @@ void SessionManager::saveToSettings() {
     _settings->setValue("media/enableMicrophone", _mediaPrefs.enableMicrophone);
     _settings->setValue("media/enableSpeaker", _mediaPrefs.enableSpeaker);
     _settings->setValue("media/enableVideo", _mediaPrefs.enableVideo);
-    _settings->setValue("media/videoMirroring", _mediaPrefs.videoIsMirroring);
+    _settings->setValue("media/videoMirrorMode", static_cast<int>(_mediaPrefs.mirrorMode));
+    _settings->remove("media/videoMirroring");
+    _settings->setValue("general/quitOnMainWindowClose", _mediaPrefs.quitOnMainWindowClose);
+    _settings->setValue("general/showActiveSpeaker", _mediaPrefs.showActiveSpeaker);
+    _settings->setValue("general/stayInMeetingWhenLocked", _mediaPrefs.stayInMeetingWhenLocked);
+    _settings->setValue("media/pushToTalkWhenMuted", _mediaPrefs.pushToTalkWhenMuted);
+    _settings->setValue("media/noiseSuppression", _mediaPrefs.noiseSuppression);
+    _settings->setValue("media/cameraDeviceId", _mediaPrefs.cameraDeviceId);
+    _settings->setValue("media/microphoneDeviceId", _mediaPrefs.microphoneDeviceId);
+    _settings->setValue("media/speakerDeviceId", _mediaPrefs.speakerDeviceId);
+    _settings->setValue("media/videoCaptureWidth", _mediaPrefs.videoCaptureWidth);
+    _settings->setValue("media/videoCaptureHeight", _mediaPrefs.videoCaptureHeight);
+    _settings->setValue("media/videoCaptureFps", _mediaPrefs.videoCaptureFps);
 
     _settings->sync();
 }

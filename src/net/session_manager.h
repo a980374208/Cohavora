@@ -13,11 +13,29 @@
 
 namespace OpenMeeting {
 
+enum class VideoMirrorMode {
+    Off = 0,
+    LocalOnly = 1,
+    LocalAndRemote = 2,
+};
+
 struct MediaPreferences {
     bool enableMicrophone = true;
     bool enableSpeaker = true;
     bool enableVideo = false;
-    bool videoIsMirroring = false;
+    VideoMirrorMode mirrorMode = VideoMirrorMode::Off;
+    bool quitOnMainWindowClose = true;
+    bool showActiveSpeaker = true;
+    bool stayInMeetingWhenLocked = true;
+    bool pushToTalkWhenMuted = false;
+    bool noiseSuppression = true;
+    QString cameraDeviceId;
+    QString microphoneDeviceId;
+    QString speakerDeviceId;
+    // A zero size means "choose the best device mode around 1080p".
+    int videoCaptureWidth = 0;
+    int videoCaptureHeight = 0;
+    int videoCaptureFps = 30;
 };
 
 // 业务账号会话的失效原因。它与 LiveKit 房间连接的断开原因严格分离：
@@ -64,7 +82,10 @@ public:
     void setEnableMicrophone(bool enable);
     void setEnableSpeaker(bool enable);
     void setEnableVideo(bool enable);
-    void setVideoMirroring(bool enable);
+    void setVideoMirrorMode(VideoMirrorMode mode);
+    void setVideoMirroring(bool enable) {
+        setVideoMirrorMode(enable ? VideoMirrorMode::LocalOnly : VideoMirrorMode::Off);
+    }
 
     // HTTP 客户端获取
     OpenMeetingHttpClient &httpClient();

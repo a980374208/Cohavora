@@ -746,6 +746,12 @@ add_executable(livekit_meeting_app
     src/ui/schedule_widget.h
     src/ui/meeting_main_window.cpp
     src/ui/meeting_main_window.h
+    src/ui/settings_dialog.cpp
+    src/ui/settings_dialog.h
+    src/ui/audio_device_test_controller.cpp
+    src/ui/audio_device_test_controller.h
+    src/ui/camera_preview_widget.cpp
+    src/ui/camera_preview_widget.h
     src/ui/meeting_room_window.cpp
     src/ui/meeting_room_window.h
     src/ui/camera_switch_completion_owner.cpp
