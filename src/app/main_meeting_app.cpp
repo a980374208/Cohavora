@@ -6,6 +6,7 @@
 #include <rpl/rpl.h>
 #include "ui/style/style_core.h"
 #include "src/ui/meeting_ui_integration.h"
+#include "src/ui/app_theme.h"
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/login_dialog.h"
 #include "src/net/service_endpoint_policy.h"
@@ -48,6 +49,7 @@ int main(int argc, char *argv[]) {
 
 	// 初始化 Telegram Desktop lib_ui 样式系统
 	style::StartManager(100);
+	MeetingUI::AppTheme::install(app);
 
 	// 初始化会话与用户认证
 	auto &session = OpenMeeting::SessionManager::instance();

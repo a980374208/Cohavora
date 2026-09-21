@@ -124,6 +124,7 @@ protected:
 	void resizeEvent(QResizeEvent *e) override;
 	void paintEvent(QPaintEvent *e) override;
 	void showEvent(QShowEvent *e) override;
+	void closeEvent(QCloseEvent *e) override;
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 	bool nativeEvent(const QByteArray &eventType, void *message, qintptr *result) override;
 #else
@@ -136,6 +137,9 @@ private:
 	void onCardClicked(ActionCardType type);
 	void openQuickMeeting(std::unique_ptr<QObject> reservation, bool startScreenShare);
 	void onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason);
+	void handleUserLogout();
+	void closeMeetingWindows();
+	void hideLogConsole();
 	void showBookingDialog();
 	void showMeetingListDialog();
 	void showMeetingDetail(const QString &meetingId);

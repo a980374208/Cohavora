@@ -1,4 +1,5 @@
 #include "src/ui/meeting_chat_sidebar_widget.h"
+#include "src/ui/app_theme.h"
 #include <QtWidgets/QScrollBar>
 #include <QtWidgets/QGraphicsDropShadowEffect>
 #include <QtWidgets/QFileDialog>
@@ -96,6 +97,7 @@ void ChatBubbleWidget::showImagePreview(const QImage &img, const QString &title)
     if (img.isNull()) return;
 
     auto *dlg = new QDialog();
+	MeetingUI::AppTheme::setTone(*dlg, MeetingUI::AppTheme::Tone::Dark);
     dlg->setWindowTitle(title.isEmpty() ? QString::fromUtf8("图片预览") : title);
     dlg->resize(std::min(1000, std::max(400, img.width() + 40)),
                 std::min(800, std::max(300, img.height() + 80)));
@@ -708,6 +710,7 @@ void ChatBubbleWidget::failReceivingMedia(const QString &reason) {
 // ----------------------------------------------------
 SendConfirmDialog::SendConfirmDialog(const QStringList &filePaths, QWidget *parent)
     : QDialog(parent) {
+	MeetingUI::AppTheme::setTone(*this, MeetingUI::AppTheme::Tone::Dark);
     setWindowTitle(QString::fromUtf8("发送确认"));
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
     setStyleSheet(
@@ -942,6 +945,7 @@ void SendConfirmDialog::setupUi(const QStringList &filePaths) {
 // ----------------------------------------------------
 MeetingChatSidebarWidget::MeetingChatSidebarWidget(QWidget *parent)
     : QWidget(parent) {
+	MeetingUI::AppTheme::setTone(*this, MeetingUI::AppTheme::Tone::Dark);
     setupUi();
 }
 

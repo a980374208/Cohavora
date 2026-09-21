@@ -1,4 +1,5 @@
 #include "src/ui/meeting_room_window.h"
+#include "src/ui/app_theme.h"
 #include "src/ui/meeting_log_console.h"
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
@@ -25,6 +26,42 @@
 #endif
 
 namespace MeetingUI {
+namespace {
+
+bool isChatSenderPlaceholderName(const QString &name) {
+	const auto normalized = name.trimmed().toCaseFolded();
+	return normalized.isEmpty()
+		|| normalized.startsWith(QStringLiteral("pa_"))
+		|| normalized == QStringLiteral("participant-name")
+		|| normalized == QStringLiteral("participant_name")
+		|| normalized == QStringLiteral("participant name");
+}
+
+QString resolveChatSenderDisplayName(
+	const std::shared_ptr<OpenMeeting::MeetingCoordinator> &coordinator,
+	const QString &senderIdentity,
+	const QString &senderName) {
+	QString displayName = senderName.trimmed();
+	const auto needsParticipantLookup = isChatSenderPlaceholderName(displayName);
+	if (needsParticipantLookup) {
+		displayName = senderIdentity;
+	}
+	if (coordinator && (needsParticipantLookup || displayName == senderIdentity)) {
+		for (const auto &participant : coordinator->participants()) {
+			if (participant.identity != senderIdentity && participant.identity != senderName) {
+				continue;
+			}
+			const auto participantName = participant.name.trimmed();
+			if (!isChatSenderPlaceholderName(participantName)) {
+				displayName = participantName;
+			}
+			break;
+		}
+	}
+	return displayName.isEmpty() ? QString::fromUtf8("参会人") : displayName;
+}
+
+} // namespace
 
 // ----------------------------------------------------
 // VideoTileWidget 实现
@@ -644,9 +681,6 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
 
 	int rightX = w - btnW * 3 - 6;
 
-	_settingsRect = QRect(rightX - 52, 8, 52, 28);
-	rightX -= 56;
-
 	_simulateRect = QRect(rightX - 58, 8, 58, 28);
 	rightX -= 62;
 
@@ -800,7 +834,6 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	drawTextBtn(_layoutRect, layoutStr, _hoverBtn == HoverBtn::Layout, true);
 	drawTextBtn(_consoleRect, QString::fromUtf8("控制台 📋"), _hoverBtn == HoverBtn::Console, false, QColor(0x16, 0x77, 0xff));
 	drawTextBtn(_simulateRect, QString::fromUtf8("🐛 模拟"), _hoverBtn == HoverBtn::Simulate, false, QColor(0xe6, 0x7e, 0x22));
-	drawTextBtn(_settingsRect, QString::fromUtf8("设置 ⚙"), _hoverBtn == HoverBtn::Settings, false);
 
 	// 4. 窗口控制按钮
 	p.save();
@@ -823,7 +856,6 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	if (_closeRect.contains(pos)) next = HoverBtn::Close;
 	else if (_maxRect.contains(pos)) next = HoverBtn::Max;
 	else if (_minRect.contains(pos)) next = HoverBtn::Min;
-	else if (_settingsRect.contains(pos)) next = HoverBtn::Settings;
 	else if (_simulateRect.contains(pos)) next = HoverBtn::Simulate;
 	else if (_consoleRect.contains(pos)) next = HoverBtn::Console;
 	else if (_layoutRect.contains(pos)) next = HoverBtn::Layout;
@@ -873,8 +905,6 @@ void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 			_currentViewMode = (_currentViewMode == VideoViewMode::Grid) ? VideoViewMode::Pip : VideoViewMode::Grid;
 			_viewModeStream.fire_copy(_currentViewMode);
 			update();
-		} else if (_settingsRect.contains(e->pos())) {
-			_settingsStream.fire({});
 		} else {
 			emit windowDragRequested();
 			e->accept();
@@ -886,38 +916,7 @@ void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 
 void RoomTopBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {
 	QMenu menu(this);
-	menu.setStyleSheet(R"(
-		QMenu {
-			background-color: #1a1a1f;
-			border: 1px solid #2e2e38;
-			border-radius: 8px;
-			padding: 8px 4px;
-			font-family: "Segoe UI", "Microsoft YaHei";
-			color: #e4e4e8;
-		}
-		QMenu::item {
-			padding: 7px 28px 7px 18px;
-			border-radius: 6px;
-			font-size: 13px;
-			font-weight: 500;
-			color: #e4e4e8;
-		}
-		QMenu::item:selected {
-			background-color: #2b2b36;
-			color: #ffffff;
-		}
-		QMenu::item:disabled {
-			color: #8c8c9a;
-			font-size: 14px;
-			font-weight: bold;
-			padding: 8px 18px 6px 18px;
-		}
-		QMenu::separator {
-			height: 1px;
-			background-color: #2e2e38;
-			margin: 4px 8px;
-		}
-	)");
+	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
 
 	QAction *header = menu.addAction(QString::fromUtf8("Simulate Scenario"));
 	header->setEnabled(false);
@@ -1010,6 +1009,9 @@ RoomBottomBarWidget::RoomBottomBarWidget(QWidget *parent)
 	connect(_handBtn, &QPushButton::clicked, [this] {
 		QMessageBox::information(this, QString::fromUtf8("举手"), QString::fromUtf8("您已向主持人举手申请发言！"));
 	});
+
+	_chatInput->hide();
+	_handBtn->hide();
 }
 
 void RoomBottomBarWidget::setAudioMuted(bool muted) {
@@ -1113,27 +1115,8 @@ void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 		startX = w - 100 - totalItemsW;
 	}
 
-	const int leftSpace = startX - 16;
-	if (leftSpace >= 170) {
-		const int chatW = std::min(130, leftSpace - 32 - 12);
-		_chatInput->setVisible(true);
-		_chatInput->setGeometry(16, 20, chatW, 32);
-		_handBtn->setVisible(true);
-		_handBtn->setGeometry(16 + chatW + 8, 20, 32, 32);
-	} else if (leftSpace >= 110) {
-		const int chatW = leftSpace - 32 - 10;
-		_chatInput->setVisible(true);
-		_chatInput->setGeometry(16, 20, chatW, 32);
-		_handBtn->setVisible(true);
-		_handBtn->setGeometry(16 + chatW + 6, 20, 32, 32);
-	} else if (leftSpace >= 40) {
-		_chatInput->setVisible(false);
-		_handBtn->setVisible(true);
-		_handBtn->setGeometry(16, 20, 32, 32);
-	} else {
-		_chatInput->setVisible(false);
-		_handBtn->setVisible(false);
-	}
+	_chatInput->hide();
+	_handBtn->hide();
 
 	const int startY = 8;
 	for (size_t i = 0; i < _toolItems.size(); ++i) {
@@ -1336,29 +1319,7 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 
 void RoomBottomBarWidget::showAudioDeviceMenu(const QPoint &globalPos) {
 	QMenu menu(this);
-	menu.setStyleSheet(R"(
-		QMenu {
-			background-color: #ffffff;
-			border: 1px solid #e5e6eb;
-			border-radius: 8px;
-			padding: 6px;
-			font-size: 13px;
-			color: #1f2329;
-		}
-		QMenu::item {
-			padding: 6px 24px 6px 20px;
-			border-radius: 4px;
-		}
-		QMenu::item:selected {
-			background-color: #f2f3f5;
-			color: #1677ff;
-		}
-		QMenu::separator {
-			height: 1px;
-			background-color: #e5e6eb;
-			margin: 6px 8px;
-		}
-	)");
+	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
 
 	// 1. 麦克风输入设备
 	QAction *micHeader = menu.addAction(QString::fromUtf8("🎤 选择麦克风 (输入设备)"));
@@ -1420,29 +1381,7 @@ void RoomBottomBarWidget::showAudioDeviceMenu(const QPoint &globalPos) {
 
 void RoomBottomBarWidget::showSpeakerDeviceMenu(const QPoint &globalPos) {
 	QMenu menu(this);
-	menu.setStyleSheet(R"(
-		QMenu {
-			background-color: #ffffff;
-			border: 1px solid #e5e6eb;
-			border-radius: 8px;
-			padding: 6px;
-			font-size: 13px;
-			color: #1f2329;
-		}
-		QMenu::item {
-			padding: 6px 24px 6px 20px;
-			border-radius: 4px;
-		}
-		QMenu::item:selected {
-			background-color: #f2f3f5;
-			color: #1677ff;
-		}
-		QMenu::separator {
-			height: 1px;
-			background-color: #e5e6eb;
-			margin: 6px 8px;
-		}
-	)");
+	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
 
 	QAction *spkHeader = menu.addAction(QString::fromUtf8("🔊 选择扬声器 (输出设备)"));
 	spkHeader->setEnabled(false);
@@ -1482,29 +1421,7 @@ void RoomBottomBarWidget::showSpeakerDeviceMenu(const QPoint &globalPos) {
 
 void RoomBottomBarWidget::showVideoDeviceMenu(const QPoint &globalPos) {
 	QMenu menu(this);
-	menu.setStyleSheet(R"(
-		QMenu {
-			background-color: #ffffff;
-			border: 1px solid #e5e6eb;
-			border-radius: 8px;
-			padding: 6px;
-			font-size: 13px;
-			color: #1f2329;
-		}
-		QMenu::item {
-			padding: 6px 24px 6px 20px;
-			border-radius: 4px;
-		}
-		QMenu::item:selected {
-			background-color: #f2f3f5;
-			color: #1677ff;
-		}
-		QMenu::separator {
-			height: 1px;
-			background-color: #e5e6eb;
-			margin: 6px 8px;
-		}
-	)");
+	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
 
 	QAction *camHeader = menu.addAction(QString::fromUtf8("📷 选择摄像头设备"));
 	camHeader->setEnabled(false);
@@ -1701,38 +1618,7 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 
 void RoomBottomBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {
 	QMenu menu(this);
-	menu.setStyleSheet(R"(
-		QMenu {
-			background-color: #1a1a1f;
-			border: 1px solid #2e2e38;
-			border-radius: 8px;
-			padding: 8px 4px;
-			font-family: "Segoe UI", "Microsoft YaHei";
-			color: #e4e4e8;
-		}
-		QMenu::item {
-			padding: 7px 28px 7px 18px;
-			border-radius: 6px;
-			font-size: 13px;
-			font-weight: 500;
-			color: #e4e4e8;
-		}
-		QMenu::item:selected {
-			background-color: #2b2b36;
-			color: #ffffff;
-		}
-		QMenu::item:disabled {
-			color: #8c8c9a;
-			font-size: 14px;
-			font-weight: bold;
-			padding: 8px 18px 6px 18px;
-		}
-		QMenu::separator {
-			height: 1px;
-			background-color: #2e2e38;
-			margin: 4px 8px;
-		}
-	)");
+	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
 
 	QAction *header = menu.addAction(QString::fromUtf8("Simulate Scenario"));
 	header->setEnabled(false);
@@ -1785,6 +1671,7 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	, _config(config)
 	, _coordinator(std::move(coordinator)) {
 	setObjectName("MeetingRoomWindow");
+	AppTheme::setTone(*this, AppTheme::Tone::Dark);
 	if (!_coordinator) {
 		_coordinator = OpenMeeting::MeetingCoordinator::create(this);
 	}
@@ -1792,6 +1679,9 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	setWindowTitle(QString::fromUtf8("LiveKit 会议室 - %1").arg(config.displayName));
 	resize(1120, 720);
 	setMinimumSize(850, 560);
+	if (!parent) {
+		AppTheme::centerOnScreen(*this);
+	}
 	setMouseTracking(true);
 
 	setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint);
@@ -1949,6 +1839,7 @@ MeetingRoomWindow::MeetingRoomWindow(
 	// Isolated presentation fixture: the bindings, tile operations and CPU
 	// renderer are production paths; no device capture or account singleton.
 	setObjectName("MeetingRoomWindowParticipantFixture");
+	AppTheme::setTone(*this, AppTheme::Tone::Dark);
 	_topBar = new RoomTopBarWidget(this);
 	_stageContainer = new QWidget(this);
 	_bottomBar = new RoomBottomBarWidget(this);
@@ -1982,6 +1873,7 @@ MeetingRoomWindow::MeetingRoomWindow(
 	_config(config),
 	_cameraManager(std::move(cameraManager)) {
 	setObjectName("MeetingRoomWindowCameraOwnerFixture");
+	AppTheme::setTone(*this, AppTheme::Tone::Dark);
 	_topBar = new RoomTopBarWidget(this);
 	_stageContainer = new QWidget(this);
 	_bottomBar = new RoomBottomBarWidget(this);
@@ -2008,8 +1900,16 @@ void MeetingRoomWindow::showEvent(QShowEvent *e) {
 }
 
 void MeetingRoomWindow::closeEvent(QCloseEvent *e) {
-	invalidateCameraCompletion();
-	stopLiveKitSession();
+	if (!_closeRequested) {
+		_closeRequested = true;
+		if (!_closingForSessionInvalidation &&
+			!OpenMeeting::SessionManager::instance().isSessionInvalidating() &&
+			_coordinator) {
+			_coordinator->leaveMeetingAsync(false);
+		}
+		invalidateCameraCompletion();
+		stopLiveKitSession();
+	}
 	Ui::RpWidget::closeEvent(e);
 }
 
@@ -2217,10 +2117,6 @@ void MeetingRoomWindow::initLayout() {
 		MeetingLogConsoleWindow::Instance().raise();
 		MeetingLogConsoleWindow::Instance().activateWindow();
 	}, lifetime());
-	_topBar->settingsClicked() | rpl::on_next([this] {
-		QMessageBox::information(this, QString::fromUtf8("会议设置"),
-			QString::fromUtf8("音视频设置已开启：默认音频 48kHz 立体声降噪，视频分辨率自适应 (VP8/H264 Simulcast)。"));
-	}, lifetime());
 
 	auto handleSimulate = [this](livekit::SimulateScenarioType type) {
 		if (_room) {
@@ -2306,23 +2202,8 @@ void MeetingRoomWindow::initLayout() {
 	if (_coordinator) {
 		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMessageReceived,
 			this, [this](const QString &senderIdentity, const QString &senderName, const QString &text, int64_t seq) {
-			QString dispName = senderName.trimmed();
-			if (dispName.isEmpty() || dispName.startsWith("PA_")) {
-				dispName = senderIdentity;
-			}
-			if (_coordinator && (dispName.isEmpty() || dispName == senderIdentity || dispName.startsWith("PA_"))) {
-				for (const auto &p : _coordinator->participants()) {
-					if (p.identity == senderIdentity || p.identity == senderName) {
-						if (!p.name.isEmpty()) {
-							dispName = p.name;
-						}
-						break;
-					}
-				}
-			}
-			if (dispName.isEmpty()) {
-				dispName = QString::fromUtf8("参会人");
-			}
+			const auto dispName = resolveChatSenderDisplayName(
+				_coordinator, senderIdentity, senderName);
 
 			OpenMeeting::ChatMessageItem item;
 			item.id = QString::number(QDateTime::currentMSecsSinceEpoch());
@@ -2347,23 +2228,8 @@ void MeetingRoomWindow::initLayout() {
 		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMediaReceivingStarted,
 			this, [this](const QString &transferId, const QString &senderIdentity, const QString &senderName,
 						 const QString &mediaType, const QString &fileName, qint64 totalSize, int64_t seq) {
-			QString dispName = senderName.trimmed();
-			if (dispName.isEmpty() || dispName.startsWith("PA_")) {
-				dispName = senderIdentity;
-			}
-			if (_coordinator && (dispName.isEmpty() || dispName == senderIdentity || dispName.startsWith("PA_"))) {
-				for (const auto &p : _coordinator->participants()) {
-					if (p.identity == senderIdentity || p.identity == senderName) {
-						if (!p.name.isEmpty()) {
-							dispName = p.name;
-						}
-						break;
-					}
-				}
-			}
-			if (dispName.isEmpty()) {
-				dispName = QString::fromUtf8("参会人");
-			}
+			const auto dispName = resolveChatSenderDisplayName(
+				_coordinator, senderIdentity, senderName);
 
 			if (_chatSidebar) {
 				_chatSidebar->startReceivingMedia(transferId, senderIdentity, dispName, mediaType, fileName, totalSize, seq);

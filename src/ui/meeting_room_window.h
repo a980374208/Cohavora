@@ -210,7 +210,6 @@ public:
 	rpl::producer<> minimizeClicked() const { return _minStream.events(); }
 	rpl::producer<> maximizeClicked() const { return _maxStream.events(); }
 	rpl::producer<> closeClicked() const { return _closeStream.events(); }
-	rpl::producer<> settingsClicked() const { return _settingsStream.events(); }
 	rpl::producer<livekit::SimulateScenarioType> simulateScenarioRequested() const { return _simulateScenarioStream.events(); }
 
 	void showSimulateScenarioMenu(const QPoint &globalPos);
@@ -230,7 +229,7 @@ protected:
 
 private:
 	enum class HoverBtn {
-		None, Layout, Console, Simulate, Settings, Min, Max, Close
+		None, Layout, Console, Simulate, Min, Max, Close
 	};
 
 	HoverBtn _hoverBtn = HoverBtn::None;
@@ -243,7 +242,6 @@ private:
 	QRect _layoutRect;
 	QRect _consoleRect;
 	QRect _simulateRect;
-	QRect _settingsRect;
 	QRect _minRect;
 	QRect _maxRect;
 	QRect _closeRect;
@@ -255,7 +253,6 @@ private:
 	rpl::event_stream<> _minStream;
 	rpl::event_stream<> _maxStream;
 	rpl::event_stream<> _closeStream;
-	rpl::event_stream<> _settingsStream;
 	rpl::event_stream<livekit::SimulateScenarioType> _simulateScenarioStream;
 };
 
@@ -512,6 +509,7 @@ private:
 	std::atomic<bool> _usingGpuBackend{false};
 	bool _gpuBackendActivationAttempted = false;
 	livekit::render::RenderDiagnostics _renderDiagnostics;
+	bool _closeRequested = false;
 	bool _closingForSessionInvalidation = false;
 	QPointer<QMessageBox> _departureNotice;
 	VideoViewMode _viewMode = VideoViewMode::Grid;

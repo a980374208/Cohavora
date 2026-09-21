@@ -347,7 +347,8 @@ void OpenMeetingHttpClient::createImmediateMeeting(
     setting["canParticipantsEnableCamera"] = true;
     setting["canParticipantsShareScreen"] = true;
     setting["canParticipantsUnmuteMicrophone"] = true;
-    setting["disableCameraOnJoin"] = true;
+    // Quick meetings allow each client to apply its persisted camera preference.
+    setting["disableCameraOnJoin"] = false;
     setting["disableMicrophoneOnJoin"] = false;
 
     QJsonObject body;

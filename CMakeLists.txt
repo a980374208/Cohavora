@@ -711,7 +711,12 @@ function(livekit_deploy_renderer target)
     endforeach()
 endfunction()
 
+qt5_add_resources(LIVEKIT_MEETING_APP_THEME_RESOURCES
+    src/ui/app_theme.qrc
+)
+
 add_executable(livekit_meeting_app
+    ${LIVEKIT_MEETING_APP_THEME_RESOURCES}
     src/app/main_meeting_app.cpp
     src/net/http_types.h
     src/net/meeting_types.h
@@ -728,6 +733,8 @@ add_executable(livekit_meeting_app
     src/net/service_endpoint_policy.h
     src/ui/login_dialog.h
     src/ui/login_dialog.cpp
+    src/ui/app_theme.cpp
+    src/ui/app_theme.h
     src/ui/sidebar_widget.cpp
     src/ui/sidebar_widget.h
     src/ui/action_card_widget.cpp

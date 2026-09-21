@@ -217,7 +217,7 @@ void SettingsDialog::buildUi() {
 			border: 1px solid #dcdfe6;
 			border-radius: 5px;
 			background: #ffffff;
-			padding: 0 10px;
+			padding: 0 36px 0 10px;
 		}
 		QComboBox:hover, QComboBox:focus { border-color: #1677ff; }
 		QComboBox:disabled { background: #f5f6f7; color: #a8abb2; }
