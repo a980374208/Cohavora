@@ -170,6 +170,12 @@ public:
     static livekit::ScreenShareState shareState(const MeetingUI::MeetingRoomWindow &window) {
         return window._bottomBar->_screenShareState;
     }
+    static void deliverDefaultScreenSources(
+            MeetingUI::MeetingRoomWindow &window,
+            const std::vector<livekit::DesktopSource> &sources) {
+        window._defaultScreenSharePending = true;
+        window.handleScreenShareSources(sources);
+    }
     static void clickShareDuringRecovery(MeetingUI::MeetingRoomWindow &window) {
         auto *bar = window._bottomBar;
         bar->resize(1120, 80);
@@ -2763,17 +2769,30 @@ void ScreenShareWindowControls() {
     WindowFixture fixture;
     OpenMeeting::MeetingCoordinatorTestAccess::commitLocalStartupPrecondition(*fixture.coordinator);
     int starts = 0, stops = 0;
+    livekit::DesktopSource selectedSource;
     livekit::IDesktopCapture::FrameCallback captureFrame;
     class PendingCapture final : public livekit::IDesktopCapture {
     public:
-        PendingCapture(int &starts, int &stops, FrameCallback &frame) : starts(starts), stops(stops), frame(frame) {}
-        void Start(livekit::DesktopSource, FrameCallback callback, EndCallback) override { ++starts; frame = std::move(callback); }
+        PendingCapture(
+                int &starts,
+                int &stops,
+                livekit::DesktopSource &selectedSource,
+                FrameCallback &frame)
+            : starts(starts), stops(stops), selectedSource(selectedSource), frame(frame) {}
+        void Start(livekit::DesktopSource source, FrameCallback callback, EndCallback) override {
+            ++starts;
+            selectedSource = std::move(source);
+            frame = std::move(callback);
+        }
         void Stop() override { ++stops; }
         int &starts, &stops;
+        livekit::DesktopSource &selectedSource;
         FrameCallback &frame;
     };
     auto backend = livekit::ScreenShareSession::ForRoom(fixture.room);
-    backend.capture = [&] { return std::make_unique<PendingCapture>(starts, stops, captureFrame); };
+    backend.capture = [&] {
+        return std::make_unique<PendingCapture>(starts, stops, selectedSource, captureFrame);
+    };
     backend.publish = [](auto) -> asio::awaitable<void> { co_return; };
     backend.unpublish = [](auto) -> asio::awaitable<void> { co_return; };
     auto share = std::make_shared<livekit::ScreenShareSession>(fixture.runtime->strand(), std::move(backend),
@@ -2786,6 +2805,23 @@ void ScreenShareWindowControls() {
     asio::post(fixture.runtime->strand(), [&] { fixture.runtime->screenShareOnStrand() = share; });
     fixture.pump();
     fixture.open();
+
+    const std::vector<livekit::DesktopSource> defaultSources{
+        {livekit::DesktopSourceKind::Window, 123, "test window"},
+        {livekit::DesktopSourceKind::Screen, 456, "primary screen"},
+    };
+    ParticipantWindowTestAccess::deliverDefaultScreenSources(*fixture.window, defaultSources);
+    fixture.pump();
+    TEST_CHECK(fixture.window->findChild<QInputDialog *>(QStringLiteral("screen-share-picker")) == nullptr);
+    TEST_CHECK(starts == 1 && selectedSource.kind == livekit::DesktopSourceKind::Screen &&
+        selectedSource.id == 456);
+    fixture.coordinator->stopScreenShare();
+    fixture.pump();
+    TEST_CHECK(stops == 1);
+    starts = 0;
+    stops = 0;
+    captureFrame = {};
+
     const std::vector<livekit::DesktopSource> sources{{livekit::DesktopSourceKind::Window, 123, "test window"}};
     emit fixture.coordinator->screenShareSourcesReady(sources);
     auto *picker = fixture.window->findChild<QInputDialog *>(QStringLiteral("screen-share-picker"));
@@ -2832,7 +2868,7 @@ void ScreenShareWindowControls() {
     asio::post(fixture.runtime->strand(), [&] { share->Shutdown(); fixture.runtime->screenShareOnStrand().reset(); });
     fixture.pump();
     share.reset();
-    std::cout << "SCREEN_SHARE_WINDOW picker cancel/select, native start/cancel, recovery stop, stale generation PASS\n";
+    std::cout << "SCREEN_SHARE_WINDOW default screen, picker cancel/select, native start/cancel, recovery stop, stale generation PASS\n";
 }
 
 void AccountLogoutAndDuplicateLogin() {
@@ -3918,8 +3954,14 @@ public:
                                        uint64_t sessionGeneration) {
         auto *target = &coordinator;
         QMetaObject::invokeMethod(target, [target, sessionGeneration]() {
-            target->completeRoomStartupOnUiThread(sessionGeneration, {}, {});
+            target->completeRoomStartupOnUiThread(
+                sessionGeneration, {}, {}, target->_audioMuted, target->_videoEnabled,
+                target->_audioMuted, target->_videoEnabled);
         }, Qt::QueuedConnection);
+    }
+
+    static void parseMetadata(MeetingCoordinator &coordinator, const std::string &metadata) {
+        coordinator.parseRoomMetadata(metadata);
     }
 
     static void queueDegradedStartup(MeetingCoordinator &coordinator,
@@ -6162,6 +6204,103 @@ void AkCoreRegression() {
     std::cout << "AK_CORE_EXECUTED=" << executed << " PASS (A-E/I/J first batch; F/H/K not claimed)" << std::endl;
 }
 
+void VerifyOpenMeetingInitialMediaProjection() {
+    OpenMeeting::MediaPreferences requested;
+    requested.enableMicrophone = true;
+    requested.enableVideo = true;
+    const std::string nested = R"({
+        "detail": {
+            "info": {
+                "systemGenerated": {
+                    "meetingID": "nested-meeting",
+                    "creatorUserID": "creator-user",
+                    "startTime": 1700000000
+                },
+                "creatorDefinedMeeting": {
+                    "title": "Nested title",
+                    "hostUserID": "host-user",
+                    "scheduledTime": 1700000100,
+                    "meetingDuration": 3600
+                }
+            },
+            "setting": {
+                "disableCameraOnJoin": true,
+                "disableMicrophoneOnJoin": true,
+                "canParticipantJoinMeetingEarly": false
+            }
+        }
+    })";
+    const auto nestedState = OpenMeeting::MeetingCoordinator::resolveInitialMediaState(
+        nested, requested);
+    TEST_CHECK(nestedState.hasOpenMeetingDetail && nestedState.metadataValid);
+    TEST_CHECK(!nestedState.microphoneEnabled && !nestedState.videoEnabled);
+    TEST_CHECK(nestedState.detail.meetingId == QStringLiteral("nested-meeting"));
+    TEST_CHECK(nestedState.detail.meetingName == QStringLiteral("Nested title"));
+    TEST_CHECK(nestedState.detail.creatorUserId == QStringLiteral("creator-user"));
+    TEST_CHECK(nestedState.detail.hostUserId == QStringLiteral("host-user"));
+    TEST_CHECK(nestedState.detail.startTime == 1700000000);
+    TEST_CHECK(nestedState.detail.endTime == 1700003600);
+
+    OpenMeeting::MediaPreferences userDisabled;
+    userDisabled.enableMicrophone = false;
+    userDisabled.enableVideo = false;
+    const auto unrestricted = OpenMeeting::MeetingCoordinator::resolveInitialMediaState(
+        R"({"detail":{"info":{},"setting":{}}})", userDisabled);
+    TEST_CHECK(unrestricted.hasOpenMeetingDetail && unrestricted.metadataValid);
+    TEST_CHECK(!unrestricted.microphoneEnabled && !unrestricted.videoEnabled);
+
+    const auto unrelated = OpenMeeting::MeetingCoordinator::resolveInitialMediaState(
+        R"({"custom":"manual-livekit"})", requested);
+    TEST_CHECK(!unrelated.hasOpenMeetingDetail && unrelated.metadataValid);
+    TEST_CHECK(unrelated.microphoneEnabled && unrelated.videoEnabled);
+
+    const auto invalid = OpenMeeting::MeetingCoordinator::resolveInitialMediaState(
+        R"({"detail":{"setting":{"disableCameraOnJoin":"false"}}})", requested);
+    TEST_CHECK(invalid.hasOpenMeetingDetail && !invalid.metadataValid);
+    TEST_CHECK(!invalid.microphoneEnabled && !invalid.videoEnabled);
+
+    const std::string legacy = R"({
+        "detail": {
+            "info": {
+                "meetingID": "legacy-meeting",
+                "meetingName": "Legacy title",
+                "creatorUserID": "legacy-creator",
+                "hostUserID": "legacy-host",
+                "startTime": 1800000000,
+                "endTime": 1800007200
+            },
+            "setting": {"disableCameraOnJoin": true}
+        }
+    })";
+    const auto legacyState = OpenMeeting::MeetingCoordinator::resolveInitialMediaState(
+        legacy, requested);
+    TEST_CHECK(legacyState.hasOpenMeetingDetail && legacyState.metadataValid);
+    TEST_CHECK(legacyState.microphoneEnabled && !legacyState.videoEnabled);
+    TEST_CHECK(legacyState.detail.meetingName == QStringLiteral("Legacy title"));
+
+    Fixture metadataFixture;
+    metadataFixture.room->UpdateParticipantsForTesting(MakeParticipantUpdate(
+        "PA_HOST", "host-user", "Host", livekit::proto::ParticipantInfo::ACTIVE));
+    DrainNative(metadataFixture.io);
+    DrainQt();
+    OpenMeeting::MeetingCoordinatorTestAccess::parseMetadata(
+        *metadataFixture.coordinator, nested);
+    TEST_CHECK(metadataFixture.coordinator->meetingDetail().meetingId ==
+        QStringLiteral("nested-meeting"));
+    const auto projected = OpenMeeting::MeetingCoordinatorTestAccess::participants(
+        *metadataFixture.coordinator);
+    const auto *host = FindParticipant(projected, QStringLiteral("host-user"));
+    TEST_CHECK(host != nullptr && host->isHost);
+
+    OpenMeeting::MeetingCoordinatorTestAccess::parseMetadata(
+        *metadataFixture.coordinator, legacy);
+    TEST_CHECK(metadataFixture.coordinator->meetingDetail().meetingId ==
+        QStringLiteral("legacy-meeting"));
+    TEST_CHECK(metadataFixture.coordinator->meetingDetail().hostUserId ==
+        QStringLiteral("legacy-host"));
+    std::cout << "P4_METADATA_MEDIA_POLICY PASS" << std::endl;
+}
+
 } // namespace
 
 int main(int argc, char **argv) {
@@ -6207,6 +6346,7 @@ int main(int argc, char **argv) {
         OwnerTerminalRegression();
         return 0;
     }
+    VerifyOpenMeetingInitialMediaProjection();
     Fixture fixture;
 
     std::vector<QString> projectedNames;

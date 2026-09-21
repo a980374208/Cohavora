@@ -232,8 +232,8 @@ void ActionCardWidget::leaveEventHook(QEvent *e) {
 ActionGridContainer::ActionGridContainer(QWidget *parent)
 	: Ui::RpWidget(parent) {
 	_joinCard = new ActionCardWidget(this, ActionCardType::JoinMeeting, QString::fromUtf8("加入会议"), false);
-	_quickCard = new ActionCardWidget(this, ActionCardType::QuickMeeting, QString::fromUtf8("快速会议"), true);
-	_scheduleCard = new ActionCardWidget(this, ActionCardType::ScheduleMeeting, QString::fromUtf8("预定会议"), true);
+	_quickCard = new ActionCardWidget(this, ActionCardType::QuickMeeting, QString::fromUtf8("快速会议"), false);
+	_scheduleCard = new ActionCardWidget(this, ActionCardType::ScheduleMeeting, QString::fromUtf8("预定会议"), false);
 	_shareCard = new ActionCardWidget(this, ActionCardType::ShareScreen, QString::fromUtf8("共享屏幕"), false);
 
 	_joinCard->clicked() | rpl::on_next([this](ActionCardType t) { _cardClicks.fire_copy(t); }, lifetime());

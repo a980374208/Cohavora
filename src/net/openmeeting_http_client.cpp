@@ -9,6 +9,16 @@
 #include <QtNetwork/QSslSocket>
 
 namespace OpenMeeting {
+namespace {
+
+HttpError parseError(const HttpError &source, const QString &message) {
+    auto error = source;
+    error.code = static_cast<int>(ErrorCode::ParseError);
+    error.message = message;
+    return error;
+}
+
+} // namespace
 
 OpenMeetingHttpClient::OpenMeetingHttpClient(QObject *parent)
     : OpenMeetingHttpClient(std::make_unique<QNetworkAccessManager>(), parent) {
@@ -406,41 +416,136 @@ void OpenMeetingHttpClient::getMeetingToken(const QString &meetingId, ResultCall
     });
 }
 
-void OpenMeetingHttpClient::getMeetings(const std::vector<int> &statusList, ResultCallback<QJsonArray> callback) {
+void OpenMeetingHttpClient::getMeetings(
+        const std::vector<MeetingStatus> &statusList, ResultCallback<MeetingList> callback) {
     QJsonObject body;
     body["userID"] = _currentUser.userId;
 
     QJsonArray arr;
-    for (int st : statusList) {
-        if (st == 1) arr.append("Scheduled");
-        else if (st == 2) arr.append("In-Progress");
-        else if (st == 3) arr.append("Completed");
+    for (const auto status : statusList) {
+        const auto wire = meetingStatusToWire(status);
+        if (!wire.isEmpty()) arr.append(wire);
     }
     body["status"] = arr;
 
     sendPost("/meeting/get_meetings", body, [callback](bool ok, const QJsonValue &data, const HttpError &err) {
-        if (!ok || !data.isObject()) {
-            if (callback) callback(false, QJsonArray{}, err);
+        if (!ok) {
+            if (callback) callback(false, MeetingList{}, err);
             return;
         }
-        QJsonArray details = data.toObject().value("meetingDetails").toArray();
-        if (callback) callback(true, details, err);
+        if (!data.isObject()) {
+            if (callback) callback(false, MeetingList{},
+                parseError(err, QStringLiteral("Meeting list response data is not an object.")));
+            return;
+        }
+        MeetingList meetings;
+        QString message;
+        if (!parseMeetingList(data.toObject().value(QStringLiteral("meetingDetails")),
+                              &meetings, &message)) {
+            if (callback) callback(false, MeetingList{}, parseError(err, message));
+            return;
+        }
+        if (callback) callback(true, meetings, err);
     });
 }
 
-void OpenMeetingHttpClient::getMeetingInfo(const QString &meetingId, ResultCallback<QJsonObject> callback) {
+void OpenMeetingHttpClient::getMeetingInfo(
+        const QString &meetingId, ResultCallback<MeetingCatalogDetail> callback) {
     QJsonObject body;
     body["userID"] = _currentUser.userId;
     body["meetingID"] = meetingId;
 
     sendPost("/meeting/get_meeting", body, [callback](bool ok, const QJsonValue &data, const HttpError &err) {
-        if (!ok || !data.isObject()) {
-            if (callback) callback(false, QJsonObject{}, err);
+        if (!ok) {
+            if (callback) callback(false, MeetingCatalogDetail{}, err);
             return;
         }
-        QJsonObject detail = data.toObject().value("meetingDetail").toObject();
+        if (!data.isObject() || !data.toObject().value(QStringLiteral("meetingDetail")).isObject()) {
+            if (callback) callback(false, MeetingCatalogDetail{},
+                parseError(err, QStringLiteral("Meeting detail response structure is invalid.")));
+            return;
+        }
+        MeetingCatalogDetail detail;
+        QString message;
+        if (!parseMeetingCatalogDetail(
+                data.toObject().value(QStringLiteral("meetingDetail")).toObject(), &detail, &message)) {
+            if (callback) callback(false, MeetingCatalogDetail{}, parseError(err, message));
+            return;
+        }
         if (callback) callback(true, detail, err);
     });
+}
+
+void OpenMeetingHttpClient::bookMeeting(
+        const MeetingBookingRequest &request, ResultCallback<MeetingCatalogDetail> callback) {
+    QString message;
+    if (!validateMeetingBookingRequest(request, &message) || _currentUser.userId.isEmpty()) {
+        if (_currentUser.userId.isEmpty()) message = QStringLiteral("Current user is missing.");
+        const auto error = parseError({}, message);
+        QTimer::singleShot(0, this, [callback, error] {
+            if (callback) callback(false, MeetingCatalogDetail{}, error);
+        });
+        return;
+    }
+    const auto body = meetingBookingToJson(request, _currentUser.userId);
+    sendPost("/meeting/book_meeting", body,
+        [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+            if (!ok) {
+                if (callback) callback(false, MeetingCatalogDetail{}, err);
+                return;
+            }
+            if (!data.isObject() || !data.toObject().value(QStringLiteral("detail")).isObject()) {
+                if (callback) callback(false, MeetingCatalogDetail{},
+                    parseError(err, QStringLiteral("Booked meeting response structure is invalid.")));
+                return;
+            }
+            MeetingCatalogDetail detail;
+            QString message;
+            if (!parseMeetingCatalogDetail(
+                    data.toObject().value(QStringLiteral("detail")).toObject(), &detail, &message)) {
+                if (callback) callback(false, MeetingCatalogDetail{}, parseError(err, message));
+                return;
+            }
+            if (callback) callback(true, detail, err);
+        });
+}
+
+void OpenMeetingHttpClient::updateMeeting(
+        const MeetingUpdateRequest &request, ResultCallback<bool> callback) {
+    QString message;
+    if (!validateMeetingUpdateRequest(request, &message) || _currentUser.userId.isEmpty()) {
+        if (_currentUser.userId.isEmpty()) message = QStringLiteral("Current user is missing.");
+        const auto error = parseError({}, message);
+        QTimer::singleShot(0, this, [callback, error] {
+            if (callback) callback(false, false, error);
+        });
+        return;
+    }
+    const auto body = meetingUpdateToJson(request, _currentUser.userId);
+    sendPost("/meeting/update_meeting", body,
+        [callback](bool ok, const QJsonValue &, const HttpError &err) {
+            if (callback) callback(ok, ok, err);
+        });
+}
+
+void OpenMeetingHttpClient::cancelMeeting(
+        const QString &meetingId, ResultCallback<bool> callback) {
+    if (meetingId.isEmpty() || _currentUser.userId.isEmpty()) {
+        const auto error = parseError({}, meetingId.isEmpty()
+            ? QStringLiteral("Meeting ID is empty.") : QStringLiteral("Current user is missing."));
+        QTimer::singleShot(0, this, [callback, error] {
+            if (callback) callback(false, false, error);
+        });
+        return;
+    }
+    QJsonObject body;
+    body["meetingID"] = meetingId;
+    body["userID"] = _currentUser.userId;
+    body["endType"] = 0;
+    sendPost("/meeting/end_meeting", body,
+        [callback](bool ok, const QJsonValue &, const HttpError &err) {
+            if (callback) callback(ok, ok, err);
+        });
 }
 
 void OpenMeetingHttpClient::leaveMeeting(const QString &meetingId, ResultCallback<bool> callback) {

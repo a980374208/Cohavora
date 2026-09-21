@@ -140,6 +140,7 @@ void SessionManager::resetAuthentication() {
     _loginPending = false;
     _currentUser = {};
     httpClient().setCurrentUser({});
+    emit authenticationReset(_authGeneration);
 }
 
 void SessionManager::cancelPendingLogin() {

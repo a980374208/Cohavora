@@ -385,6 +385,8 @@ void VerifyNormalFlows() {
         TEST_CHECK(fixture.details.back().meetingId == "quick-id");
         TEST_CHECK(fixture.details.back().meetingName == "normal-quick-title");
         TEST_CHECK(fixture.details.back().hostUserId == "fixture-user");
+        TEST_CHECK(fixture.details.back().creatorUserId == "fixture-user");
+        TEST_CHECK(fixture.coordinator->isHost());
     });
     RunCase("normal Direct", [] {
         Fixture fixture;
@@ -394,6 +396,7 @@ void VerifyNormalFlows() {
         fixture.coordinator->connectDirectlyAsync("wss://direct", "direct-token", "direct-id",
                                                   "Direct User", preferences);
         TEST_CHECK(fixture.starts == 1);
+        TEST_CHECK(fixture.backend.dispatches == 0);
         TEST_CHECK(fixture.startedUrls.back() == "wss://direct");
         TEST_CHECK(fixture.coordinator->currentMeetingId() == "direct-id");
     });

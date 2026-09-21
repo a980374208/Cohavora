@@ -59,6 +59,14 @@ struct MeetingDetail {
     bool canJoinEarly = true;
 };
 
+struct InitialMediaState {
+    bool microphoneEnabled = true;
+    bool videoEnabled = false;
+    bool hasOpenMeetingDetail = false;
+    bool metadataValid = true;
+    MeetingDetail detail;
+};
+
 // Qt/business projection of the authoritative native RoomInfo snapshot.
 // Keep protobuf types out of the UI layer.
 struct MeetingRoomInfo {
@@ -127,6 +135,9 @@ public:
     const MeetingDetail &meetingDetail() const { return _meetingDetail; }
     const MeetingRoomInfo &roomInfo() const { return _roomInfo; }
     bool isHost() const;
+    static InitialMediaState resolveInitialMediaState(
+        const std::string &metadata,
+        const MediaPreferences &preferences);
 
     // 核心入会流程
     void joinMeetingAsync(const QString &meetingId,
@@ -299,7 +310,11 @@ private:
     void stopRoomSession();
     void completeRoomStartupOnUiThread(uint64_t sessionGeneration,
                                        std::shared_ptr<livekit::LocalAudioTrack> audioTrack,
-                                       std::shared_ptr<livekit::LocalVideoTrack> videoTrack);
+                                       std::shared_ptr<livekit::LocalVideoTrack> videoTrack,
+                                       bool requestedAudioMuted,
+                                       bool requestedVideoEnabled,
+                                       bool effectiveAudioMuted,
+                                       bool effectiveVideoEnabled);
     void completeRoomStartupDegradedOnUiThread(uint64_t sessionGeneration,
                                                const QString &title,
                                                const QString &detail);

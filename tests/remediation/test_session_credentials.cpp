@@ -616,7 +616,7 @@ void verifyMissingServerTokenInvalidatesSession() {
     });
 
     const auto request = f.server.requests.size();
-    f.client.getMeetings({}, [&](bool ok, const QJsonArray &, const HttpError &error) {
+    f.client.getMeetings({}, [&](bool ok, const MeetingList &, const HttpError &error) {
         TEST_CHECK(!ok && error.code == kNotFoundUserToken);
         ++completed;
     });
@@ -723,7 +723,7 @@ void verifyOrdering() {
     TEST_CHECK(f.client.token() == kToken && f.session->isLoggedIn());
 
     int staleError = 0;
-    f.client.getMeetings({}, [&](bool ok, const QJsonArray &, const HttpError &) { TEST_CHECK(!ok); ++staleError; });
+    f.client.getMeetings({}, [&](bool ok, const MeetingList &, const HttpError &) { TEST_CHECK(!ok); ++staleError; });
     const auto staleIndex = f.server.requests.size();
     f.server.received(staleIndex + 1);
     f.login();

@@ -98,6 +98,9 @@ public:
     void saveToSettings();
 
 signals:
+    // Emitted immediately after credentials and the HTTP identity are cleared,
+    // including service changes and the beginning of a replacement login.
+    void authenticationReset(quint64 generation);
     void loggedIn(const UserInfo &user);
     void loggedOut();
     void sessionInvalidated(SessionInvalidationReason reason);

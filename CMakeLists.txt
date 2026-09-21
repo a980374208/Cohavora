@@ -714,10 +714,14 @@ endfunction()
 add_executable(livekit_meeting_app
     src/app/main_meeting_app.cpp
     src/net/http_types.h
+    src/net/meeting_types.h
+    src/net/meeting_types.cpp
     src/net/openmeeting_http_client.h
     src/net/openmeeting_http_client.cpp
     src/net/session_manager.h
     src/net/session_manager.cpp
+    src/core/meeting_catalog_controller.h
+    src/core/meeting_catalog_controller.cpp
     src/net/credential_store.cpp
     src/net/credential_store.h
     src/net/service_endpoint_policy.cpp
@@ -728,6 +732,16 @@ add_executable(livekit_meeting_app
     src/ui/sidebar_widget.h
     src/ui/action_card_widget.cpp
     src/ui/action_card_widget.h
+    src/ui/meeting_list_model.cpp
+    src/ui/meeting_list_model.h
+    src/ui/meeting_list_delegate.cpp
+    src/ui/meeting_list_delegate.h
+    src/ui/meeting_list_dialog.cpp
+    src/ui/meeting_list_dialog.h
+    src/ui/meeting_booking_dialog.cpp
+    src/ui/meeting_booking_dialog.h
+    src/ui/meeting_detail_dialog.cpp
+    src/ui/meeting_detail_dialog.h
     src/ui/schedule_widget.cpp
     src/ui/schedule_widget.h
     src/ui/meeting_main_window.cpp
@@ -874,6 +888,8 @@ add_executable(test_camera_owner_remediation
     tests/remediation/test_camera_owner_remediation.cpp
     tests/support/test_check.h
     src/net/http_types.h
+    src/net/meeting_types.h
+    src/net/meeting_types.cpp
     src/net/openmeeting_http_client.h
     src/net/openmeeting_http_client.cpp
     src/net/session_manager.h
@@ -1155,6 +1171,8 @@ endif()
 # OpenMeeting HTTP Client Test
 add_executable(test_openmeeting_http
     tests/test_openmeeting_http.cpp
+    src/net/meeting_types.cpp
+    src/net/meeting_types.h
     src/net/openmeeting_http_client.cpp
     src/net/openmeeting_http_client.h
     src/net/session_manager.cpp
@@ -1223,6 +1241,8 @@ add_executable(test_http_admission_owner
     tests/support/test_check.h
     src/core/meeting_coordinator.cpp
     src/core/meeting_coordinator.h
+    src/net/meeting_types.cpp
+    src/net/meeting_types.h
     src/net/openmeeting_http_client.cpp
     src/net/openmeeting_http_client.h
     src/net/session_manager.cpp
@@ -1340,6 +1360,8 @@ add_executable(test_participant_snapshot_remediation
     tests/support/test_check.h
     src/core/meeting_coordinator.cpp
     src/core/meeting_coordinator.h
+    src/net/meeting_types.cpp
+    src/net/meeting_types.h
     src/net/openmeeting_http_client.cpp
     src/net/openmeeting_http_client.h
     src/net/session_manager.cpp
@@ -1784,6 +1806,8 @@ add_executable(test_session_credentials
     src/net/service_endpoint_policy.h
     src/net/session_manager.cpp
     src/net/session_manager.h
+    src/net/meeting_types.cpp
+    src/net/meeting_types.h
     src/net/openmeeting_http_client.cpp
     src/net/openmeeting_http_client.h
     src/ui/login_dialog.cpp
@@ -1801,6 +1825,54 @@ set_tests_properties(session_credentials_test PROPERTIES TIMEOUT 60)
 set_property(TEST session_credentials_test openmeeting_http_test openmeeting_http_watchdog_test
     http_owner_remediation_test APPEND PROPERTY LABELS "PR_SEC_002_FOCUSED")
 
+# Typed meeting catalog contracts and Qt owner ordering/lifetime behavior.
+add_executable(test_meeting_catalog
+    tests/test_meeting_catalog.cpp
+    tests/support/test_check.h
+    src/ui/meeting_list_model.cpp
+    src/ui/meeting_list_model.h
+    src/core/meeting_catalog_controller.cpp
+    src/core/meeting_catalog_controller.h
+    src/net/meeting_types.cpp
+    src/net/meeting_types.h
+    src/net/credential_store.cpp
+    src/net/credential_store.h
+    src/net/service_endpoint_policy.cpp
+    src/net/service_endpoint_policy.h
+    src/net/session_manager.cpp
+    src/net/session_manager.h
+    src/net/openmeeting_http_client.cpp
+    src/net/openmeeting_http_client.h
+    src/net/http_types.h
+)
+target_include_directories(test_meeting_catalog BEFORE PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtNetwork
+)
+target_link_libraries(test_meeting_catalog PRIVATE
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Network.lib
+    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
+    OpenSSL::SSL OpenSSL::Crypto
+    netapi32 userenv version ws2_32 crypt32 dnsapi iphlpapi secur32 winmm
+)
+target_compile_definitions(test_meeting_catalog PRIVATE
+    WIN32 _WINDOWS WIN32_LEAN_AND_MEAN NOMINMAX
+    _WINSOCK_DEPRECATED_NO_WARNINGS NDEBUG _ITERATOR_DEBUG_LEVEL=0
+    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
+    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
+)
+target_compile_options(test_meeting_catalog PRIVATE /utf-8)
+target_link_options(test_meeting_catalog PRIVATE
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
+    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
+)
+set_target_properties(test_meeting_catalog PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
+add_test(NAME meeting_catalog_test COMMAND test_meeting_catalog)
+set_tests_properties(meeting_catalog_test PROPERTIES TIMEOUT 60 LABELS "CORE_REGRESSION")
+
 # PR-SEC-004: strict startup and explicit runtime --debug HTTP policy.
 foreach(_policy_variant strict dev)
     set(_policy_target test_http_transport_policy_${_policy_variant})
@@ -1813,6 +1885,8 @@ foreach(_policy_variant strict dev)
         src/net/service_endpoint_policy.h
         src/net/session_manager.cpp
         src/net/session_manager.h
+        src/net/meeting_types.cpp
+        src/net/meeting_types.h
         src/net/openmeeting_http_client.cpp
         src/net/openmeeting_http_client.h
     )
