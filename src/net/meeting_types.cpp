@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/net/meeting_types.h"
 
 #include <QtCore/QJsonArray>
@@ -29,18 +30,18 @@ bool parseInt64(const QJsonValue &value, qint64 defaultValue, qint64 *result,
         if (!ok || text.isEmpty() || text.startsWith(QLatin1Char('+')) ||
             (text.size() > 1 && text.startsWith(QLatin1Char('0'))) ||
             (text.size() > 2 && text.startsWith(QStringLiteral("-0")))) {
-            return fail(errorMessage, field + QStringLiteral(" is not a decimal integer."));
+            return fail(errorMessage, QCoreApplication::translate("MeetingUI", "%1 is not a decimal integer.").arg(field));
         }
         *result = parsed;
         return true;
     }
     if (!value.isDouble()) {
-        return fail(errorMessage, field + QStringLiteral(" is not an integer."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "%1 is not an integer.").arg(field));
     }
     const double number = value.toDouble();
     if (!std::isfinite(number) || std::floor(number) != number ||
         std::abs(number) > static_cast<double>(kMaxSafeJsonInteger)) {
-        return fail(errorMessage, field + QStringLiteral(" is outside the safe JSON integer range."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "%1 is outside the safe JSON integer range.").arg(field));
     }
     *result = static_cast<qint64>(number);
     return true;
@@ -51,7 +52,7 @@ bool parseInt32(const QJsonValue &value, int defaultValue, int *result,
     qint64 parsed = 0;
     if (!parseInt64(value, defaultValue, &parsed, errorMessage, field)) return false;
     if (parsed < std::numeric_limits<int>::min() || parsed > std::numeric_limits<int>::max()) {
-        return fail(errorMessage, field + QStringLiteral(" is outside the int32 range."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "%1 is outside the int32 range.").arg(field));
     }
     *result = static_cast<int>(parsed);
     return true;
@@ -61,14 +62,14 @@ bool parseString(const QJsonValue &value, QString *result, QString *errorMessage
                  const QString &field, bool required = false) {
     if (value.isUndefined() || value.isNull()) {
         result->clear();
-        return required ? fail(errorMessage, field + QStringLiteral(" is missing.")) : true;
+        return required ? fail(errorMessage, QCoreApplication::translate("MeetingUI", "%1 is missing.").arg(field)) : true;
     }
     if (!value.isString()) {
-        return fail(errorMessage, field + QStringLiteral(" is not a string."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "%1 is not a string.").arg(field));
     }
     *result = value.toString();
     if (required && result->isEmpty()) {
-        return fail(errorMessage, field + QStringLiteral(" is empty."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "%1 is empty.").arg(field));
     }
     return true;
 }
@@ -81,7 +82,7 @@ bool parseBool(const QJsonObject &object, const char *name, bool *result,
         return true;
     }
     if (!value.isBool()) {
-        return fail(errorMessage, QString::fromLatin1(name) + QStringLiteral(" is not a boolean."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "%1 is not a boolean.").arg(QString::fromLatin1(name)));
     }
     *result = value.toBool();
     return true;
@@ -89,7 +90,7 @@ bool parseBool(const QJsonObject &object, const char *name, bool *result,
 
 bool parseSettings(const QJsonValue &value, MeetingSettings *settings, QString *errorMessage) {
     if (value.isUndefined() || value.isNull()) return true;
-    if (!value.isObject()) return fail(errorMessage, QStringLiteral("setting is not an object."));
+    if (!value.isObject()) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "setting is not an object."));
     const auto object = value.toObject();
     return parseBool(object, "canParticipantsEnableCamera", &settings->canParticipantsEnableCamera, errorMessage) &&
         parseBool(object, "canParticipantsUnmuteMicrophone", &settings->canParticipantsUnmuteMicrophone, errorMessage) &&
@@ -104,7 +105,7 @@ bool parseSettings(const QJsonValue &value, MeetingSettings *settings, QString *
 
 bool parseRepeatRule(const QJsonValue &value, MeetingRepeatRule *rule, QString *errorMessage) {
     if (value.isUndefined() || value.isNull()) return true;
-    if (!value.isObject()) return fail(errorMessage, QStringLiteral("repeatInfo is not an object."));
+    if (!value.isObject()) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "repeatInfo is not an object."));
     const auto object = value.toObject();
     if (!parseString(object.value(QStringLiteral("repeatType")), &rule->rawType, errorMessage,
                      QStringLiteral("repeatInfo.repeatType"))) return false;
@@ -120,12 +121,12 @@ bool parseRepeatRule(const QJsonValue &value, MeetingRepeatRule *rule, QString *
                     errorMessage, QStringLiteral("repeatInfo.interval"))) return false;
     const auto days = object.value(QStringLiteral("repeatDaysOfWeek"));
     if (!days.isUndefined() && !days.isNull()) {
-        if (!days.isArray()) return fail(errorMessage, QStringLiteral("repeatInfo.repeatDaysOfWeek is not an array."));
+        if (!days.isArray()) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "repeatInfo.repeatDaysOfWeek is not an array."));
         for (const auto &dayValue : days.toArray()) {
             int day = 0;
             if (!parseInt32(dayValue, 0, &day, errorMessage,
                             QStringLiteral("repeatInfo.repeatDaysOfWeek")) || day < 0 || day > 6) {
-                return fail(errorMessage, QStringLiteral("repeatInfo.repeatDaysOfWeek contains an invalid day."));
+                return fail(errorMessage, QCoreApplication::translate("MeetingUI", "repeatInfo.repeatDaysOfWeek contains an invalid day."));
             }
             rule->daysOfWeek.push_back(day);
         }
@@ -233,33 +234,33 @@ bool isMeetingRepeatTypeSupportedForCreate(MeetingRepeatType type) {
 bool isMeetingRepeatRuleSupportedForWrite(
         const MeetingRepeatRule &rule, QString *errorMessage) {
     if (!isMeetingRepeatTypeSupportedForCreate(rule.type)) {
-        return fail(errorMessage, QStringLiteral("Repeat type is read-only and cannot be submitted."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Repeat type is read-only and cannot be submitted."));
     }
     if (!safeRequestInteger(rule.endDateSeconds)) {
-        return fail(errorMessage, QStringLiteral("Repeat end date is invalid."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Repeat end date is invalid."));
     }
     if (rule.repeatTimes != 0) {
-        return fail(errorMessage, QStringLiteral("Repeat count is not supported."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Repeat count is not supported."));
     }
     if (!rule.unitType.trimmed().isEmpty() || rule.interval != 0 || !rule.daysOfWeek.empty()) {
-        return fail(errorMessage, QStringLiteral("Fixed repeat type contains custom repeat fields."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Fixed repeat type contains custom repeat fields."));
     }
     if (rule.type == MeetingRepeatType::None && rule.endDateSeconds != 0) {
-        return fail(errorMessage, QStringLiteral("A non-repeating meeting cannot have a repeat end date."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "A non-repeating meeting cannot have a repeat end date."));
     }
     return true;
 }
 
 bool parseMeetingCatalogDetail(
         const QJsonObject &object, MeetingCatalogDetail *detail, QString *errorMessage) {
-    if (!detail) return fail(errorMessage, QStringLiteral("Meeting output is null."));
+    if (!detail) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting output is null."));
     const auto infoValue = object.value(QStringLiteral("info"));
-    if (!infoValue.isObject()) return fail(errorMessage, QStringLiteral("Meeting info is missing."));
+    if (!infoValue.isObject()) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting info is missing."));
     const auto info = infoValue.toObject();
     const auto systemValue = info.value(QStringLiteral("systemGenerated"));
     const auto creatorValue = info.value(QStringLiteral("creatorDefinedMeeting"));
     if (!systemValue.isObject() || !creatorValue.isObject()) {
-        return fail(errorMessage, QStringLiteral("Meeting info structure is invalid."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting info structure is invalid."));
     }
     const auto system = systemValue.toObject();
     const auto creator = creatorValue.toObject();
@@ -290,7 +291,7 @@ bool parseMeetingCatalogDetail(
     record.status = meetingStatusFromWire(record.rawStatus);
     const auto coHosts = creator.value(QStringLiteral("coHostUSerID"));
     if (!coHosts.isUndefined() && !coHosts.isNull()) {
-        if (!coHosts.isArray()) return fail(errorMessage, QStringLiteral("coHostUSerID is not an array."));
+        if (!coHosts.isArray()) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "coHostUSerID is not an array."));
         for (const auto &value : coHosts.toArray()) {
             QString id;
             if (!parseString(value, &id, errorMessage, QStringLiteral("coHostUSerID"))) return false;
@@ -304,16 +305,16 @@ bool parseMeetingCatalogDetail(
 }
 
 bool parseMeetingList(const QJsonValue &value, MeetingList *meetings, QString *errorMessage) {
-    if (!meetings) return fail(errorMessage, QStringLiteral("Meeting list output is null."));
+    if (!meetings) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting list output is null."));
     if (value.isUndefined() || value.isNull()) {
         meetings->clear();
         return true;
     }
-    if (!value.isArray()) return fail(errorMessage, QStringLiteral("meetingDetails is not an array."));
+    if (!value.isArray()) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "meetingDetails is not an array."));
     MeetingList parsed;
     parsed.reserve(static_cast<size_t>(value.toArray().size()));
     for (const auto &item : value.toArray()) {
-        if (!item.isObject()) return fail(errorMessage, QStringLiteral("meetingDetails contains a non-object item."));
+        if (!item.isObject()) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "meetingDetails contains a non-object item."));
         MeetingCatalogDetail detail;
         if (!parseMeetingCatalogDetail(item.toObject(), &detail, errorMessage)) return false;
         parsed.push_back(std::move(detail.record));
@@ -323,54 +324,54 @@ bool parseMeetingList(const QJsonValue &value, MeetingList *meetings, QString *e
 }
 
 bool validateMeetingBookingRequest(const MeetingBookingRequest &request, QString *errorMessage) {
-    if (request.title.trimmed().isEmpty()) return fail(errorMessage, QStringLiteral("Meeting title is empty."));
+    if (request.title.trimmed().isEmpty()) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting title is empty."));
     if (!safeRequestInteger(request.scheduledTimeSeconds) || request.scheduledTimeSeconds == 0) {
-        return fail(errorMessage, QStringLiteral("Scheduled time is invalid."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Scheduled time is invalid."));
     }
     if (!safeRequestInteger(request.meetingDurationSeconds) || request.meetingDurationSeconds == 0) {
-        return fail(errorMessage, QStringLiteral("Meeting duration is invalid."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting duration is invalid."));
     }
     if (request.timeZone.isEmpty() || !QTimeZone(request.timeZone.toUtf8()).isValid()) {
-        return fail(errorMessage, QStringLiteral("Meeting time zone is invalid."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting time zone is invalid."));
     }
     if (!isMeetingRepeatRuleSupportedForWrite(request.repeatRule, errorMessage)) return false;
     if (request.repeatRule.type != MeetingRepeatType::None &&
         request.repeatRule.endDateSeconds != 0 &&
         request.repeatRule.endDateSeconds < request.scheduledTimeSeconds) {
-        return fail(errorMessage, QStringLiteral("Repeat end date precedes the first meeting."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Repeat end date precedes the first meeting."));
     }
     return true;
 }
 
 bool validateMeetingUpdateRequest(const MeetingUpdateRequest &request, QString *errorMessage) {
-    if (request.meetingId.isEmpty()) return fail(errorMessage, QStringLiteral("Meeting ID is empty."));
+    if (request.meetingId.isEmpty()) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting ID is empty."));
     const bool hasChange = request.title || request.scheduledTimeSeconds || request.meetingDurationSeconds ||
         request.password || request.timeZone || request.canParticipantsEnableCamera ||
         request.canParticipantsUnmuteMicrophone || request.canParticipantsShareScreen ||
         request.disableCameraOnJoin || request.disableMicrophoneOnJoin ||
         request.canParticipantJoinMeetingEarly || request.lockMeeting || request.audioEncouragement ||
         request.videoMirroring || request.repeatRule;
-    if (!hasChange) return fail(errorMessage, QStringLiteral("Meeting update contains no changes."));
+    if (!hasChange) return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting update contains no changes."));
     if (request.title && request.title->trimmed().isEmpty()) {
-        return fail(errorMessage, QStringLiteral("Meeting title is empty."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting title is empty."));
     }
     if (request.scheduledTimeSeconds &&
         (!safeRequestInteger(*request.scheduledTimeSeconds) || *request.scheduledTimeSeconds == 0)) {
-        return fail(errorMessage, QStringLiteral("Scheduled time is invalid."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Scheduled time is invalid."));
     }
     if (request.meetingDurationSeconds &&
         (!safeRequestInteger(*request.meetingDurationSeconds) || *request.meetingDurationSeconds == 0)) {
-        return fail(errorMessage, QStringLiteral("Meeting duration is invalid."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting duration is invalid."));
     }
     if (request.timeZone && (request.timeZone->isEmpty() || !QTimeZone(request.timeZone->toUtf8()).isValid())) {
-        return fail(errorMessage, QStringLiteral("Meeting time zone is invalid."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Meeting time zone is invalid."));
     }
     if (request.repeatRule &&
         !isMeetingRepeatRuleSupportedForWrite(*request.repeatRule, errorMessage)) return false;
     if (request.scheduledTimeSeconds && request.repeatRule->type != MeetingRepeatType::None &&
         request.repeatRule->endDateSeconds != 0 &&
         request.repeatRule->endDateSeconds < *request.scheduledTimeSeconds) {
-        return fail(errorMessage, QStringLiteral("Repeat end date precedes the first meeting."));
+        return fail(errorMessage, QCoreApplication::translate("MeetingUI", "Repeat end date precedes the first meeting."));
     }
     return true;
 }

@@ -7,4 +7,8 @@
     <file alias="chevron-down-disabled.svg">icons/chevron-down-disabled.svg</file>
     <file alias="chevron-up-disabled.svg">icons/chevron-up-disabled.svg</file>
   </qresource>
+  <qresource prefix="/meeting-ui/styles">
+    <file alias="application.qss">styles/application.qss</file>
+    <file alias="widgets.qss">styles/widgets.qss</file>
+  </qresource>
 </RCC>

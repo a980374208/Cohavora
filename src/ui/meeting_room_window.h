@@ -1,5 +1,7 @@
 #pragma once
 
+#include <QtCore/QCoreApplication>
+
 #include "base/basic_types.h"
 #include "ui/widgets/rp_window.h"
 #include "src/rtc/video_frame.h"
@@ -200,6 +202,7 @@ class RoomTopBarWidget : public Ui::RpWidget {
 public:
 	explicit RoomTopBarWidget(QWidget *parent = nullptr);
 	~RoomTopBarWidget() override = default;
+	int heightForWidth(int width) const override;
 
 	void updateDuration(int seconds);
 	void setActiveSpeaker(const QString &speakerName);
@@ -264,6 +267,7 @@ class RoomBottomBarWidget : public Ui::RpWidget {
 public:
 	explicit RoomBottomBarWidget(QWidget *parent = nullptr);
 	~RoomBottomBarWidget() override = default;
+	int heightForWidth(int width) const override;
 
 	void setAudioMuted(bool muted);
 	bool isAudioMuted() const { return _audioMuted; }
@@ -375,7 +379,7 @@ public:
 		QString serverUrl;
 		QString token;
 		QString meetingId;
-		QString displayName = QString::fromUtf8("LiveKit用户");
+		QString displayName = QCoreApplication::translate("MeetingUI", "LiveKit User");
 		bool audioMuted = false;
 		bool videoEnabled = true;
 		QString videoCodec = "vp8"; // "vp8", "h264", "vp9", "av1"

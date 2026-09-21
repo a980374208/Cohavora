@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/core/meeting_coordinator.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/ui/meeting_log_console.h"
@@ -342,7 +343,7 @@ public:
         if (!coordinator || _generation == 0) return;
         const auto generation = _generation;
         const QString qDetail = detail.empty()
-            ? QString::fromUtf8("无附加断开说明")
+            ? QCoreApplication::translate("MeetingUI", "No additional disconnect details")
             : QString::fromStdString(livekit::secure_log::OpaqueSummary("room_disconnect"));
         // 不捕获 listener 自身：DuplicateIdentity 处理会释放 _roomListener，
         // 捕获 this 会在回调执行期间留下悬垂指针风险。
@@ -357,7 +358,7 @@ public:
             MeetingUI::LogToConsole(
                 MeetingUI::LogCategory::Connection,
                 "DISCONNECTED",
-                QString("与 LiveKit 房间连接断开: reason=%1, detail=%2")
+                QCoreApplication::translate("MeetingUI", "Disconnected from the LiveKit room: reason=%1, detail=%2")
                     .arg(QString::fromLatin1(livekit::ToString(reason)), qDetail));
             if (!current()) return;
             if (reason == livekit::RoomDisconnectReason::DuplicateIdentity) {
@@ -393,13 +394,13 @@ public:
             }
             const auto nativeGeneration = owner->_nativeRoomGeneration;
             MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection, "RECONNECTING",
-                                    QString::fromUtf8("网络中断，正在恢复音视频连接"));
+                                    QCoreApplication::translate("MeetingUI", "Network interrupted. Restoring the audio/video connection."));
             if (!owner || !owner->isCurrentSessionGenerationOnUiThread(generation) ||
                 owner->_nativeRoomGeneration != nativeGeneration ||
                 owner->_state == MeetingState::Leaving || owner->_state == MeetingState::Idle) return;
             owner->_startupReconnectPending = true;
             owner->setState(MeetingState::Reconnecting,
-                                  QString::fromUtf8("网络中断，正在恢复连接..."));
+                                  QCoreApplication::translate("MeetingUI", "Network interrupted. Reconnecting..."));
         }, Qt::QueuedConnection);
     }
 
@@ -422,21 +423,21 @@ public:
             const auto nativeGeneration = owner->_nativeRoomGeneration;
             owner->_startupReconnectPending = false;
             if (!owner->tryCommitOperationalStateOnUiThread(
-                    generation, QString::fromUtf8("音视频连接已恢复"))) {
+                    generation, QCoreApplication::translate("MeetingUI", "Audio/video connection restored"))) {
                 return;
             }
             if (!owner->_startupCommitted) {
                 MeetingUI::LogToConsole(
                     MeetingUI::LogCategory::Connection,
                     "RECONNECTED_DURING_STARTUP",
-                    QString::fromUtf8("连接已恢复，等待本地音视频启动事务提交"));
+                    QCoreApplication::translate("MeetingUI", "Connection restored. Waiting for local media startup to complete."));
                 return;
             }
             if (!owner || !owner->isCurrentSessionGenerationOnUiThread(generation) ||
                 owner->_nativeRoomGeneration != nativeGeneration ||
                 owner->_state != MeetingState::InMeeting) return;
             MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection, "RECONNECTED",
-                                    QString::fromUtf8("音视频连接已恢复，等待值投影恢复远端轨道"));
+                                    QCoreApplication::translate("MeetingUI", "Audio/video connection restored. Waiting for state projection to restore remote tracks."));
         }, Qt::QueuedConnection);
     }
 
@@ -589,7 +590,7 @@ public:
         QString realNick = ResolveParticipantNickname(p);
         QMetaObject::invokeMethod(coordinator, [coordinator, generation, id, realNick, p]() {
             if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
-            MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "REMOTE_JOIN", QString("参会人加入: %1 (昵称: %2)").arg(id).arg(realNick));
+            MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "REMOTE_JOIN", QCoreApplication::translate("MeetingUI", "Participant joined: %1 (display name: %2)").arg(id).arg(realNick));
             ParticipantInfo info;
             info.identity = id;
             info.name = realNick;
@@ -615,7 +616,7 @@ public:
         QMetaObject::invokeMethod(coordinator, [coordinator, generation, id, realNick]() {
             if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
             MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "METADATA_CHANGED",
-                                    QString("参会人 [%1] 元数据更新，刷新昵称为: %2").arg(id).arg(realNick));
+                                    QCoreApplication::translate("MeetingUI", "Participant [%1] metadata updated. Display name: %2").arg(id).arg(realNick));
             auto it = coordinator->_participants.find(id);
             if (it != coordinator->_participants.end()) {
                 if (!it->second.isLocal) {
@@ -634,7 +635,7 @@ public:
         QString id = QString::fromStdString(p->identity());
         QMetaObject::invokeMethod(coordinator, [coordinator, generation, id]() {
             if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
-            MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "REMOTE_LEFT", QString("参会人离开: %1").arg(id));
+            MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant, "REMOTE_LEFT", QCoreApplication::translate("MeetingUI", "Participant left: %1").arg(id));
             coordinator->_participants.erase(id);
             coordinator->updateParticipantListAndNotify();
             emit coordinator->participantLeft(id);
@@ -1191,17 +1192,17 @@ MeetingCoordinator::~MeetingCoordinator() {
 
 QString MeetingCoordinator::stateString() const {
     switch (_state) {
-        case MeetingState::Idle: return QString::fromUtf8("未就绪/闲置");
-        case MeetingState::Validating: return QString::fromUtf8("准入校验中");
-        case MeetingState::FetchingCredentials: return QString::fromUtf8("凭据获取中");
-        case MeetingState::ConnectingRoom: return QString::fromUtf8("正在连接房间");
-        case MeetingState::StartingLocalMedia: return QString::fromUtf8("正在启动本地音视频");
-        case MeetingState::InMeeting: return QString::fromUtf8("会议进行中");
-        case MeetingState::Reconnecting: return QString::fromUtf8("断线重连中");
-        case MeetingState::Leaving: return QString::fromUtf8("退出清理中");
-        case MeetingState::Failed: return QString::fromUtf8("操作失败");
+        case MeetingState::Idle: return QCoreApplication::translate("MeetingUI", "Not Ready / Idle");
+        case MeetingState::Validating: return QCoreApplication::translate("MeetingUI", "Checking Access");
+        case MeetingState::FetchingCredentials: return QCoreApplication::translate("MeetingUI", "Fetching Credentials");
+        case MeetingState::ConnectingRoom: return QCoreApplication::translate("MeetingUI", "Connecting to Room");
+        case MeetingState::StartingLocalMedia: return QCoreApplication::translate("MeetingUI", "Starting Local Media");
+        case MeetingState::InMeeting: return QCoreApplication::translate("MeetingUI", "In Meeting");
+        case MeetingState::Reconnecting: return QCoreApplication::translate("MeetingUI", "Reconnecting");
+        case MeetingState::Leaving: return QCoreApplication::translate("MeetingUI", "Leaving and Cleaning Up");
+        case MeetingState::Failed: return QCoreApplication::translate("MeetingUI", "Operation Failed");
     }
-    return QString::fromUtf8("未知状态");
+    return QCoreApplication::translate("MeetingUI", "Unknown State");
 }
 
 bool MeetingCoordinator::isHost() const {
@@ -1251,7 +1252,7 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
     }
     if ((_state != MeetingState::Idle && _state != MeetingState::Failed) ||
         !canBeginAdmission()) {
-        emit errorOccurred(QString::fromUtf8("入会错误"), QString::fromUtf8("当前已有正在执行的会议流程，请勿重复加入"));
+        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Join Error"), QCoreApplication::translate("MeetingUI", "A meeting operation is already in progress. Do not join again."));
         return;
     }
 
@@ -1275,7 +1276,7 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
         return;
     }
 
-    owner->setState(MeetingState::Validating, QString::fromUtf8("正在校验会议准入资格..."));
+    owner->setState(MeetingState::Validating, QCoreApplication::translate("MeetingUI", "Checking meeting access..."));
     if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::Joining)) {
         return;
     }
@@ -1290,21 +1291,21 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
         if (!ok) {
             const QString detail = err.message;
             const QString message = detail.isEmpty()
-                ? QString::fromUtf8("会议不存在或入会密码错误") : detail;
+                ? QCoreApplication::translate("MeetingUI", "The meeting does not exist or the password is incorrect") : detail;
             owner->_admissionStage = AdmissionStage::None;
             owner->setState(MeetingState::Failed, detail);
             if (!owner || owner->_admissionGeneration != generation ||
                 owner->_admissionStage != AdmissionStage::None) {
                 return;
             }
-            emit owner->errorOccurred(QString::fromUtf8("入会鉴权失败"), message);
+            emit owner->errorOccurred(QCoreApplication::translate("MeetingUI", "Meeting Authentication Failed"), message);
             return;
         }
 
         // 第二阶段：换取 LiveKit 令牌与网关 URL
         owner->_admissionStage = AdmissionStage::FetchingToken;
         owner->setState(MeetingState::FetchingCredentials,
-                        QString::fromUtf8("正在换取音视频会话令牌..."));
+                        QCoreApplication::translate("MeetingUI", "Requesting an audio/video session token..."));
         if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::FetchingToken)) {
             return;
         }
@@ -1318,14 +1319,14 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
             if (!tokenOk || auth.url.isEmpty() || auth.token.isEmpty()) {
                 const QString detail = tokenErr.message;
                 const QString message = detail.isEmpty()
-                    ? QString::fromUtf8("无法换取 LiveKit 房间访问凭证") : detail;
+                    ? QCoreApplication::translate("MeetingUI", "Unable to obtain LiveKit room credentials") : detail;
                 owner->_admissionStage = AdmissionStage::None;
                 owner->setState(MeetingState::Failed, detail);
                 if (!owner || owner->_admissionGeneration != generation ||
                     owner->_admissionStage != AdmissionStage::None) {
                     return;
                 }
-                emit owner->errorOccurred(QString::fromUtf8("获取凭据失败"), message);
+                emit owner->errorOccurred(QCoreApplication::translate("MeetingUI", "Unable to Obtain Credentials"), message);
                 return;
             }
 
@@ -1347,7 +1348,7 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
     }
     if ((_state != MeetingState::Idle && _state != MeetingState::Failed) ||
         !canBeginAdmission()) {
-        emit errorOccurred(QString::fromUtf8("创建错误"), QString::fromUtf8("当前已有活跃会议流程"));
+        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Create Error"), QCoreApplication::translate("MeetingUI", "A meeting operation is already active"));
         return;
     }
 
@@ -1368,7 +1369,7 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
         return;
     }
 
-    owner->setState(MeetingState::Validating, QString::fromUtf8("正在创建即时会议..."));
+    owner->setState(MeetingState::Validating, QCoreApplication::translate("MeetingUI", "Creating an instant meeting..."));
     if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::Creating)) {
         return;
     }
@@ -1384,14 +1385,14 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
         if (!ok || auth.url.isEmpty() || auth.token.isEmpty()) {
             const QString detail = err.message;
             const QString message = detail.isEmpty()
-                ? QString::fromUtf8("服务端未能分配会议房间") : detail;
+                ? QCoreApplication::translate("MeetingUI", "The server could not allocate a meeting room") : detail;
             owner->_admissionStage = AdmissionStage::None;
             owner->setState(MeetingState::Failed, detail);
             if (!owner || owner->_admissionGeneration != generation ||
                 owner->_admissionStage != AdmissionStage::None) {
                 return;
             }
-            emit owner->errorOccurred(QString::fromUtf8("创建即时会议失败"), message);
+            emit owner->errorOccurred(QCoreApplication::translate("MeetingUI", "Unable to Create Instant Meeting"), message);
             return;
         }
 
@@ -1412,7 +1413,7 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
         }
 
         MeetingUI::LogToConsole(MeetingUI::LogCategory::General, "MEETING_ID",
-            QString("即时会议创建成功！会议号: %1 (其他参会人可凭此 9 位会议号加入)").arg(meetingId));
+            QCoreApplication::translate("MeetingUI", "Instant meeting created! Meeting ID: %1 (others can join using this 9-digit ID)").arg(meetingId));
 
         owner->startRoomSession(url, token, generation);
     });
@@ -1461,7 +1462,7 @@ void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
         ? _admissionBackend.endMeeting : _admissionBackend.leaveMeeting;
     QPointer<MeetingCoordinator> owner(this);
 
-    setState(MeetingState::Leaving, QString::fromUtf8("正在安全退出会议..."));
+    setState(MeetingState::Leaving, QCoreApplication::translate("MeetingUI", "Leaving the meeting safely..."));
     if (!owner || owner->_state != MeetingState::Leaving ||
         owner->_admissionStage != AdmissionStage::None || owner->_sessionInvalidated) {
         return;
@@ -1480,7 +1481,7 @@ void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
         return;
     }
 
-    owner->setState(MeetingState::Idle, QString::fromUtf8("已退出会议"));
+    owner->setState(MeetingState::Idle, QCoreApplication::translate("MeetingUI", "Left Meeting"));
     if (!owner || owner->_state != MeetingState::Idle ||
         owner->_admissionStage != AdmissionStage::None || owner->_sessionInvalidated) {
         return;
@@ -1497,7 +1498,7 @@ void MeetingCoordinator::handleDuplicateIdentityKickOff(const QString &detail) {
     const auto sessionGeneration = _nextSessionGeneration;
 
     const QString message = detail.isEmpty()
-        ? QString::fromUtf8("同一账号已在其他设备加入此会议")
+        ? QCoreApplication::translate("MeetingUI", "This account joined the meeting on another device")
         : QString::fromStdString(
             livekit::secure_log::SanitizeForOutput(detail.toStdString()));
     MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection,
@@ -1541,7 +1542,7 @@ void MeetingCoordinator::handleSessionInvalidated(SessionInvalidationReason reas
 
     QPointer<MeetingCoordinator> owner(this);
     if (_state != MeetingState::Leaving) {
-        setState(MeetingState::Leaving, QString::fromUtf8("账号登录状态已失效，正在停止会议..."));
+        setState(MeetingState::Leaving, QCoreApplication::translate("MeetingUI", "Account session expired. Stopping the meeting..."));
     }
     if (!owner) {
         return;
@@ -1550,7 +1551,7 @@ void MeetingCoordinator::handleSessionInvalidated(SessionInvalidationReason reas
     if (!owner) {
         return;
     }
-    owner->setState(MeetingState::Idle, QString::fromUtf8("账号登录状态已失效"));
+    owner->setState(MeetingState::Idle, QCoreApplication::translate("MeetingUI", "Account session expired"));
 }
 
 void MeetingCoordinator::startRoomSession(const QString &url,
@@ -1567,7 +1568,7 @@ void MeetingCoordinator::startRoomSession(const QString &url,
         return;
     }
 
-    owner->setState(MeetingState::ConnectingRoom, QString::fromUtf8("正在建立 WebRTC 连接..."));
+    owner->setState(MeetingState::ConnectingRoom, QCoreApplication::translate("MeetingUI", "Establishing a WebRTC connection..."));
     if (!owner || !owner->isAdmissionCurrent(admissionGeneration, AdmissionStage::Starting)) {
         return;
     }
@@ -1653,12 +1654,12 @@ void MeetingCoordinator::startRoomSession(const QString &url,
             MeetingStartupTransaction startup;
             try {
                 if (urlStr.empty() || tokenStr.empty()) {
-                    throw std::runtime_error("LiveKit URL 或访问令牌为空");
+                    throw std::runtime_error(QCoreApplication::translate("MeetingUI", "The LiveKit URL or access token is empty").toStdString());
                 }
 
                 co_await room->ConnectAsync(urlStr, tokenStr, opts);
                 if (!startup.markRoomConnected()) {
-                    throw std::runtime_error("本地媒体启动事务状态无效");
+                    throw std::runtime_error(QCoreApplication::translate("MeetingUI", "Invalid local media startup transaction state").toStdString());
                 }
                 MediaPreferences requestedPreferences;
                 requestedPreferences.enableMicrophone = !audioMuted;
@@ -1685,13 +1686,13 @@ void MeetingCoordinator::startRoomSession(const QString &url,
                     }
                     // 房间底层信令与下行通道已就绪，立即进入 InMeeting 状态以秒级呈现远端画面
                     setState(MeetingState::InMeeting,
-                             QString::fromUtf8("已成功连入会议房间，正在激活本地音视频..."));
+                             QCoreApplication::translate("MeetingUI", "Connected to the meeting room. Starting local audio and video..."));
                     emit meetingJoinedSuccessfully(_currentMeetingId);
                 }, Qt::QueuedConnection);
 
                 auto local = room->local_participant();
                 if (!local) {
-                    throw std::runtime_error("LiveKit 房间连接完成后未创建本地参会者");
+                    throw std::runtime_error(QCoreApplication::translate("MeetingUI", "The LiveKit room connected without creating a local participant").toStdString());
                 }
 
                 auto audioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", audioSource);
@@ -1710,10 +1711,10 @@ void MeetingCoordinator::startRoomSession(const QString &url,
 
                 auto pubs = co_await local->PublishTracksBatchAsync(std::move(tracksToPublish));
                 if (!startup.markMediaBatchPublished()) {
-                    throw std::runtime_error("本地媒体批量发布事务状态无效");
+                    throw std::runtime_error(QCoreApplication::translate("MeetingUI", "Invalid local media batch publication transaction state").toStdString());
                 }
                 MeetingUI::LogToConsole(MeetingUI::LogCategory::Track, "PUBLISH",
-                    QString("本地音视频批量发布成功 (共 %1 条轨，合并单次 SDP 协商完成)").arg(pubs.size()));
+                    QCoreApplication::translate("MeetingUI", "Local audio/video published (%1 tracks, a single combined SDP negotiation)").arg(pubs.size()));
 
                 QMetaObject::invokeMethod(this,
                                           [this, sessionGeneration, audioTrack = std::move(audioTrack),
@@ -1728,8 +1729,8 @@ void MeetingCoordinator::startRoomSession(const QString &url,
                     livekit::secure_log::ExceptionSummary("meeting_startup"));
                 const bool mediaBegan = startup.mediaStartupBegan();
                 const QString title = mediaBegan
-                    ? QString::fromUtf8("本地媒体启动失败")
-                    : QString::fromUtf8("连接房间失败");
+                    ? QCoreApplication::translate("MeetingUI", "Local Media Startup Failed")
+                    : QCoreApplication::translate("MeetingUI", "Room Connection Failed");
                 if (startup.beginRollback()) {
                     startup.completeRollback();
                 }
@@ -1791,7 +1792,7 @@ void MeetingCoordinator::completeRoomStartupOnUiThread(
         break;
     }
     if (!tryCommitOperationalStateOnUiThread(
-            sessionGeneration, QString::fromUtf8("本地音视频已就绪，已成功连入会议房间"))) {
+            sessionGeneration, QCoreApplication::translate("MeetingUI", "Local audio and video are ready. Connected to the meeting room."))) {
         return;
     }
     updateParticipantListAndNotify();
@@ -1828,7 +1829,7 @@ void MeetingCoordinator::completeRoomStartupDegradedOnUiThread(
     }
     _startupCommitted = true;
     if (!tryCommitOperationalStateOnUiThread(
-            sessionGeneration, QString::fromUtf8("本地媒体不可用，已切换为仅收听收看模式"))) {
+            sessionGeneration, QCoreApplication::translate("MeetingUI", "Local media is unavailable. Switched to receive-only mode."))) {
         return;
     }
 
@@ -1845,7 +1846,7 @@ void MeetingCoordinator::completeRoomStartupDegradedOnUiThread(
         return;
     }
     emit owner->errorOccurred(
-        title, QString::fromUtf8("%1 (已自动切换为仅收听收看模式)").arg(detail));
+        title, QCoreApplication::translate("MeetingUI", "%1 (automatically switched to receive-only mode)").arg(detail));
 }
 
 bool MeetingCoordinator::tryCommitOperationalStateOnUiThread(
@@ -1876,7 +1877,7 @@ void MeetingCoordinator::failRoomStartupOnUiThread(
     // The target protocol has no local media-Unpublish request.  A full Room
     // disconnect is therefore the only server-visible rollback that cannot
     // leave an audio-only or video-only startup publication behind.
-    setState(MeetingState::Leaving, QString::fromUtf8("本地媒体启动失败，正在回滚房间会话..."));
+    setState(MeetingState::Leaving, QCoreApplication::translate("MeetingUI", "Local media startup failed. Rolling back the room session..."));
     stopRoomSession();
     setState(MeetingState::Failed, detail);
     emit errorOccurred(title, detail);
@@ -2012,11 +2013,11 @@ void MeetingCoordinator::stopRoomSession() {
         if (!stillStopped()) return;
     }
     for (const auto &messageId : failedOutboundMessages) {
-        emit owner->chatMessageSendFailed(messageId, QString::fromUtf8("会议已退出"));
+        emit owner->chatMessageSendFailed(messageId, QCoreApplication::translate("MeetingUI", "Meeting Left"));
         if (!stillStopped()) return;
     }
     for (const auto &transferId : failedInboundTransfers) {
-        emit owner->chatMediaReceivingFailed(transferId, QString::fromUtf8("本地已离开会议"));
+        emit owner->chatMediaReceivingFailed(transferId, QCoreApplication::translate("MeetingUI", "You have left the meeting"));
         if (!stillStopped()) return;
     }
 }
@@ -2030,7 +2031,7 @@ void MeetingCoordinator::applyScreenShareSnapshotOnUiThread(uint64_t generation,
 
 void MeetingCoordinator::requestScreenShareSources() {
     if (!_sessionRuntime || !_sessionRunning || _state != MeetingState::InMeeting || !_startupCommitted) {
-        emit errorOccurred(QString::fromUtf8("屏幕共享"), QString::fromUtf8("请等待会议连接和本地媒体初始化完成"));
+        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Screen Sharing"), QCoreApplication::translate("MeetingUI", "Wait for the connection and local media setup to complete"));
         return;
     }
     const auto request = ++_screenSourceRequest;
@@ -2120,7 +2121,7 @@ void MeetingCoordinator::sendChatMessage(const QString &content, const QString &
     if (content.isEmpty()) return;
     if (!_room || _state != MeetingState::InMeeting) {
         if (!messageId.isEmpty()) {
-            emit chatMessageSendFailed(messageId, QString::fromUtf8("未连入会议房间"));
+            emit chatMessageSendFailed(messageId, QCoreApplication::translate("MeetingUI", "Not connected to a meeting room"));
         }
         return;
     }
@@ -2148,7 +2149,7 @@ void MeetingCoordinator::sendChatMessage(const QString &content, const QString &
             }
         } else {
             if (!messageId.isEmpty()) {
-                emit chatMessageSendFailed(messageId, QString::fromUtf8("数据通道拥塞，发送失败"));
+                emit chatMessageSendFailed(messageId, QCoreApplication::translate("MeetingUI", "Data channel congested. Send failed."));
             }
         }
     } catch (const std::exception &) {
@@ -2160,7 +2161,7 @@ void MeetingCoordinator::sendChatMessage(const QString &content, const QString &
         }
     } catch (...) {
         if (!messageId.isEmpty()) {
-            emit chatMessageSendFailed(messageId, QString::fromUtf8("发送遇到未知异常"));
+            emit chatMessageSendFailed(messageId, QCoreApplication::translate("MeetingUI", "An unknown error occurred while sending"));
         }
     }
 }
@@ -2168,13 +2169,13 @@ void MeetingCoordinator::sendChatMessage(const QString &content, const QString &
 void MeetingCoordinator::sendChatMediaMessage(const QString &messageId, const QString &mediaType, const QString &fileName, const QByteArray &data, int64_t seq) {
     if (data.isEmpty()) {
         if (!messageId.isEmpty()) {
-            emit chatMessageSendFailed(messageId, QString::fromUtf8("发送数据为空"));
+            emit chatMessageSendFailed(messageId, QCoreApplication::translate("MeetingUI", "No data to send"));
         }
         return;
     }
     if (!_room || _state != MeetingState::InMeeting) {
         if (!messageId.isEmpty()) {
-            emit chatMessageSendFailed(messageId, QString::fromUtf8("未连入会议房间"));
+            emit chatMessageSendFailed(messageId, QCoreApplication::translate("MeetingUI", "Not connected to a meeting room"));
         }
         return;
     }
@@ -2240,7 +2241,7 @@ void MeetingCoordinator::processNextMediaSendChunk() {
             auto task = _mediaSendQueue.front();
             _mediaSendQueue.pop_front();
             if (!task.messageId.isEmpty()) {
-                emit chatMessageSendFailed(task.messageId, QString::fromUtf8("网络已断开"));
+                emit chatMessageSendFailed(task.messageId, QCoreApplication::translate("MeetingUI", "Network disconnected"));
             }
         }
         if (_mediaSendTimer && _mediaSendTimer->isActive()) {
@@ -2291,7 +2292,7 @@ void MeetingCoordinator::processNextMediaSendChunk() {
         QString msgId = task.messageId;
         _mediaSendQueue.pop_front();
         if (!msgId.isEmpty()) {
-            emit chatMessageSendFailed(msgId, QString::fromUtf8("数据包投递遇到未知异常"));
+            emit chatMessageSendFailed(msgId, QCoreApplication::translate("MeetingUI", "An unknown error occurred while delivering the packet"));
         }
         return;
     }
@@ -2614,7 +2615,7 @@ void MeetingCoordinator::cancelInboundTransfersForParticipant(
                 }
             }
             for (const auto &transferId : failedTransfers) {
-                emit owner->chatMediaReceivingFailed(transferId, QString::fromUtf8("发送方已离会"));
+                emit owner->chatMediaReceivingFailed(transferId, QCoreApplication::translate("MeetingUI", "The sender has left the meeting"));
                 if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
             }
         }, Qt::QueuedConnection);
@@ -2835,7 +2836,7 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
         if (targetUser == localUserId) {
             QString reason = QString::fromStdString(kick.reason());
             const QString safeReason = reason.isEmpty()
-                ? QString::fromUtf8("无附加说明")
+                ? QCoreApplication::translate("MeetingUI", "No additional details")
                 : QString::fromStdString(
                     livekit::secure_log::OpaqueSummary("kick_reason"));
             int code = static_cast<int>(kick.reasoncode());
@@ -2851,7 +2852,7 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
                 MeetingUI::LogToConsole(
                     MeetingUI::LogCategory::Participant,
                     "KICK_OFF",
-                    QString("收到踢出信令: %1 (代码: %2)").arg(safeReason).arg(code));
+                    QCoreApplication::translate("MeetingUI", "Removal signal received: %1 (code: %2)").arg(safeReason).arg(code));
                 if (!valid()) return;
                 if (code == static_cast<int>(openmeeting::meeting::KickOffReason::DuplicatedLogin)) {
                     // DuplicatedLogin 是全局账号事件，不能伪装成 LiveKit 的

@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/ui/participants_sidebar_widget.h"
 #include "src/ui/app_theme.h"
 #include "src/net/session_manager.h"
@@ -22,93 +23,8 @@ ParticipantsSidebarWidget::ParticipantsSidebarWidget(std::shared_ptr<MeetingCoor
 }
 
 void ParticipantsSidebarWidget::setupUi() {
-    setFixedWidth(340);
-    setStyleSheet(
-        "QWidget#ParticipantsSidebar {"
-        "  background-color: #1A1D24;"
-        "  border-left: 1px solid #2B303C;"
-        "}"
-        "QLabel#SidebarTitle {"
-        "  color: #F3F4F6;"
-        "  font-size: 14px;"
-        "  font-weight: bold;"
-        "}"
-        "QPushButton#CloseBtn {"
-        "  background: transparent;"
-        "  color: #9CA3AF;"
-        "  font-size: 16px;"
-        "  border: none;"
-        "  border-radius: 4px;"
-        "  min-width: 24px;"
-        "  max-width: 24px;"
-        "  min-height: 24px;"
-        "  max-height: 24px;"
-        "}"
-        "QPushButton#CloseBtn:hover {"
-        "  background-color: rgba(255, 255, 255, 0.1);"
-        "  color: #FFFFFF;"
-        "}"
-        "QLineEdit#SearchEdit {"
-        "  background-color: #242831;"
-        "  border: 1px solid #363C4A;"
-        "  border-radius: 4px;"
-        "  color: #F3F4F6;"
-        "  padding: 4px 8px;"
-        "  font-size: 12px;"
-        "}"
-        "QLineEdit#SearchEdit:focus {"
-        "  border: 1px solid #3B82F6;"
-        "}"
-        "QListView#ParticipantList {"
-        "  background-color: transparent;"
-        "  border: none;"
-        "  outline: none;"
-        "}"
-        "QListView#ParticipantList::item {"
-        "  border-bottom: 1px solid #232731;"
-        "}"
-        "QScrollBar:vertical {"
-        "  border: none;"
-        "  background: transparent;"
-        "  width: 6px;"
-        "  margin: 0px 0px 0px 0px;"
-        "}"
-        "QScrollBar::handle:vertical {"
-        "  background: #4B5563;"
-        "  min-height: 20px;"
-        "  border-radius: 3px;"
-        "}"
-        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
-        "  height: 0px;"
-        "}"
-        "QWidget#BottomPanel {"
-        "  background-color: #171A20;"
-        "  border-top: 1px solid #2B303C;"
-        "}"
-        "QPushButton#MuteAllBtn {"
-        "  background-color: #EF4444;"
-        "  color: #FFFFFF;"
-        "  border: none;"
-        "  border-radius: 4px;"
-        "  padding: 6px 12px;"
-        "  font-size: 12px;"
-        "  font-weight: 500;"
-        "}"
-        "QPushButton#MuteAllBtn:hover {"
-        "  background-color: #DC2626;"
-        "}"
-        "QPushButton#UnmuteAllBtn {"
-        "  background-color: #374151;"
-        "  color: #F3F4F6;"
-        "  border: none;"
-        "  border-radius: 4px;"
-        "  padding: 6px 12px;"
-        "  font-size: 12px;"
-        "}"
-        "QPushButton#UnmuteAllBtn:hover {"
-        "  background-color: #4B5563;"
-        "}"
-    );
+    setMinimumWidth(280);
+    MeetingUI::AppTheme::setStyleVariant(*this, "participants-sidebar-widget-this");
     setObjectName("ParticipantsSidebar");
 
     auto *mainLayout = new QVBoxLayout(this);
@@ -117,12 +33,13 @@ void ParticipantsSidebarWidget::setupUi() {
 
     // 1. Header
     auto *headerWidget = new QWidget(this);
-    headerWidget->setFixedHeight(44);
+    headerWidget->setMinimumHeight(44);
     auto *headerLayout = new QHBoxLayout(headerWidget);
     headerLayout->setContentsMargins(16, 0, 12, 0);
 
-    _titleLabel = new QLabel(QString::fromUtf8("参会人 (0)"), headerWidget);
+    _titleLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Participants (0)"), headerWidget);
     _titleLabel->setObjectName("SidebarTitle");
+    _titleLabel->setWordWrap(true);
 
     _closeBtn = new QPushButton(QString::fromUtf8("✕"), headerWidget);
     _closeBtn->setObjectName("CloseBtn");
@@ -141,7 +58,7 @@ void ParticipantsSidebarWidget::setupUi() {
 
     _searchEdit = new QLineEdit(searchContainer);
     _searchEdit->setObjectName("SearchEdit");
-    _searchEdit->setPlaceholderText(QString::fromUtf8("搜索参会人..."));
+    _searchEdit->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Search participants..."));
     _searchEdit->setClearButtonEnabled(true);
     connect(_searchEdit, &QLineEdit::textChanged, this, &ParticipantsSidebarWidget::onSearchTextChanged);
     searchLayout->addWidget(_searchEdit);
@@ -173,17 +90,17 @@ void ParticipantsSidebarWidget::setupUi() {
     // 4. 底部全员会控面板
     _bottomPanel = new QWidget(this);
     _bottomPanel->setObjectName("BottomPanel");
-    _bottomPanel->setFixedHeight(52);
+    _bottomPanel->setMinimumHeight(52);
     auto *bottomLayout = new QHBoxLayout(_bottomPanel);
     bottomLayout->setContentsMargins(12, 0, 12, 0);
     bottomLayout->setSpacing(10);
 
-    _muteAllBtn = new QPushButton(QString::fromUtf8("全员静音"), _bottomPanel);
+    _muteAllBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Mute All"), _bottomPanel);
     _muteAllBtn->setObjectName("MuteAllBtn");
     _muteAllBtn->setCursor(Qt::PointingHandCursor);
     connect(_muteAllBtn, &QPushButton::clicked, this, &ParticipantsSidebarWidget::onMuteAllClicked);
 
-    _unmuteAllBtn = new QPushButton(QString::fromUtf8("解除静音"), _bottomPanel);
+    _unmuteAllBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Unmute"), _bottomPanel);
     _unmuteAllBtn->setObjectName("UnmuteAllBtn");
     _unmuteAllBtn->setCursor(Qt::PointingHandCursor);
     connect(_unmuteAllBtn, &QPushButton::clicked, this, &ParticipantsSidebarWidget::onUnmuteAllClicked);
@@ -199,9 +116,9 @@ void ParticipantsSidebarWidget::updateParticipants(const std::vector<Participant
     _listModel->setParticipants(participants);
     QString mId = _coordinator ? _coordinator->currentMeetingId() : "";
     if (!mId.isEmpty()) {
-        _titleLabel->setText(QString::fromUtf8("参会人 (%1) · 会议号: %2").arg(participants.size()).arg(mId));
+        _titleLabel->setText(QCoreApplication::translate("MeetingUI", "Participants (%1) · Meeting ID: %2").arg(participants.size()).arg(mId));
     } else {
-        _titleLabel->setText(QString::fromUtf8("参会人 (%1)").arg(participants.size()));
+        _titleLabel->setText(QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(participants.size()));
     }
     updateHostControlsVisibility();
 }
@@ -256,13 +173,13 @@ void ParticipantsSidebarWidget::onMoreClicked(const QString &identity, const QPo
 
     if (target.isLocal) {
         // 本地用户菜单
-        auto *infoAct = menu.addAction(QString::fromUtf8("身份: 本机参与者"));
+        auto *infoAct = menu.addAction(QCoreApplication::translate("MeetingUI", "Role: Local Participant"));
         infoAct->setEnabled(false);
-        auto *toggleMicAct = menu.addAction(target.isAudioMuted ? QString::fromUtf8("开启麦克风") : QString::fromUtf8("静音自己"));
+        auto *toggleMicAct = menu.addAction(target.isAudioMuted ? QCoreApplication::translate("MeetingUI", "Enable Microphone") : QCoreApplication::translate("MeetingUI", "Mute Myself"));
         connect(toggleMicAct, &QAction::triggered, this, [this, target]() {
             _coordinator->setLocalAudioMuted(!target.isAudioMuted);
         });
-        auto *toggleCamAct = menu.addAction(target.isVideoEnabled ? QString::fromUtf8("关闭摄像头") : QString::fromUtf8("开启摄像头"));
+        auto *toggleCamAct = menu.addAction(target.isVideoEnabled ? QCoreApplication::translate("MeetingUI", "Turn Off Camera") : QCoreApplication::translate("MeetingUI", "Turn On Camera"));
         connect(toggleCamAct, &QAction::triggered, this, [this, target]() {
             _coordinator->setLocalVideoEnabled(!target.isVideoEnabled);
         });
@@ -270,38 +187,38 @@ void ParticipantsSidebarWidget::onMoreClicked(const QString &identity, const QPo
         // 远端参会人
         bool canAdmin = _coordinator->isHost();
         if (canAdmin) {
-            auto *toggleMic = menu.addAction(target.isAudioMuted ? QString::fromUtf8("请求开启麦克风") : QString::fromUtf8("静音该成员"));
+            auto *toggleMic = menu.addAction(target.isAudioMuted ? QCoreApplication::translate("MeetingUI", "Request Unmute") : QCoreApplication::translate("MeetingUI", "Mute Participant"));
             connect(toggleMic, &QAction::triggered, this, [this, target]() {
                 _coordinator->requestParticipantMicrophone(target.identity, target.isAudioMuted);
             });
 
-            auto *toggleCam = menu.addAction(target.isVideoEnabled ? QString::fromUtf8("关闭该成员视频") : QString::fromUtf8("请求开启摄像头"));
+            auto *toggleCam = menu.addAction(target.isVideoEnabled ? QCoreApplication::translate("MeetingUI", "Turn Off Participant Video") : QCoreApplication::translate("MeetingUI", "Request Camera On"));
             connect(toggleCam, &QAction::triggered, this, [this, target]() {
                 _coordinator->requestParticipantCamera(target.identity, !target.isVideoEnabled);
             });
 
             menu.addSeparator();
 
-            auto *transferAct = menu.addAction(QString::fromUtf8("移交主持人"));
+            auto *transferAct = menu.addAction(QCoreApplication::translate("MeetingUI", "Transfer Host"));
             connect(transferAct, &QAction::triggered, this, [this, target]() {
-                auto ret = QMessageBox::question(this, QString::fromUtf8("移交主持人"),
-                    QString::fromUtf8("确定要将主持人权限移交给【%1】吗？").arg(target.name));
+                auto ret = QMessageBox::question(this, QCoreApplication::translate("MeetingUI", "Transfer Host"),
+                    QCoreApplication::translate("MeetingUI", "Transfer host permissions to \"%1\"?").arg(target.name));
                 if (ret == QMessageBox::Yes) {
                     _coordinator->transferHost(target.identity);
                 }
             });
 
-            auto *kickAct = menu.addAction(QString::fromUtf8("移出会议"));
+            auto *kickAct = menu.addAction(QCoreApplication::translate("MeetingUI", "Remove from Meeting"));
             connect(kickAct, &QAction::triggered, this, [this, target]() {
-                auto ret = QMessageBox::warning(this, QString::fromUtf8("移出会议确认"),
-                    QString::fromUtf8("确定要将【%1】移出当前会议吗？").arg(target.name),
+                auto ret = QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Confirm Removal"),
+                    QCoreApplication::translate("MeetingUI", "Remove \"%1\" from this meeting?").arg(target.name),
                     QMessageBox::Yes | QMessageBox::Cancel);
                 if (ret == QMessageBox::Yes) {
-                    _coordinator->kickParticipant(target.identity, QString::fromUtf8("已被主持人移出会议"));
+                    _coordinator->kickParticipant(target.identity, QCoreApplication::translate("MeetingUI", "Removed from the meeting by the host"));
                 }
             });
         } else {
-            auto *infoAct = menu.addAction(QString::fromUtf8("参会人: %1").arg(target.name));
+            auto *infoAct = menu.addAction(QCoreApplication::translate("MeetingUI", "Participant: %1").arg(target.name));
             infoAct->setEnabled(false);
         }
     }
@@ -311,8 +228,8 @@ void ParticipantsSidebarWidget::onMoreClicked(const QString &identity, const QPo
 
 void ParticipantsSidebarWidget::onMuteAllClicked() {
     if (!_coordinator || !_coordinator->isHost()) return;
-    auto ret = QMessageBox::question(this, QString::fromUtf8("全员静音"),
-        QString::fromUtf8("确定要静音所有参会成员吗？"),
+    auto ret = QMessageBox::question(this, QCoreApplication::translate("MeetingUI", "Mute All"),
+        QCoreApplication::translate("MeetingUI", "Mute all participants?"),
         QMessageBox::Yes | QMessageBox::No);
     if (ret == QMessageBox::Yes) {
         _coordinator->muteAllParticipants(true);

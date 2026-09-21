@@ -25,6 +25,7 @@ public:
 		bool hasDropdown = false);
 	~ActionCardWidget() override = default;
 	QSize sizeHint() const override;
+	int heightForWidth(int width) const override;
 
 	[[nodiscard]] ActionCardType type() const {
 		return _type;

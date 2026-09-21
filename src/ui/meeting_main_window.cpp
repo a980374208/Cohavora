@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/app_theme.h"
 #include "src/ui/meeting_log_console.h"
@@ -127,79 +128,12 @@ JoinMeetingDialog::JoinMeetingDialog(
 		std::optional<OpenMeeting::MeetingSettings> meetingSettings)
 	: QDialog(parent)
 	, _meetingSettings(std::move(meetingSettings)) {
-	setWindowTitle(QString::fromUtf8("加入会议"));
-	setFixedSize(460, 560);
+	setWindowTitle(QCoreApplication::translate("MeetingUI", "Join Meeting"));
+	resize(460, 560);
 	setWindowFlags(windowFlags() | Qt::FramelessWindowHint);
 	setAttribute(Qt::WA_TranslucentBackground, true);
 
-	setStyleSheet(R"(
-		QDialog {
-			background: transparent;
-		}
-		#dialogContainer {
-			background-color: #ffffff;
-			border-radius: 14px;
-			border: 1px solid #e1e4ea;
-		}
-		QLabel {
-			color: #1f2329;
-			font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-			font-size: 13px;
-		}
-		QLineEdit {
-			border: 1px solid #dcdfe6;
-			border-radius: 8px;
-			padding: 8px 12px;
-			font-size: 13px;
-			background: #f8f9fa;
-		}
-		QLineEdit:focus {
-			border: 1px solid #1677ff;
-			background: #ffffff;
-		}
-		QPushButton#joinBtn {
-			background-color: #1677ff;
-			color: #ffffff;
-			border-radius: 8px;
-			padding: 9px 24px;
-			font-size: 14px;
-			font-weight: bold;
-			border: none;
-		}
-		QPushButton#joinBtn:hover {
-			background-color: #4096ff;
-		}
-		QPushButton#joinBtn:disabled {
-			background-color: #b7d6ff;
-		}
-		QPushButton#cancelBtn {
-			background-color: #f2f3f5;
-			color: #4e5969;
-			border-radius: 8px;
-			padding: 9px 20px;
-			font-size: 14px;
-			border: none;
-		}
-		QPushButton#cancelBtn:hover {
-			background-color: #e5e6eb;
-		}
-		QPushButton#linkBtn {
-			background: transparent;
-			color: #1677ff;
-			font-size: 12px;
-			border: none;
-			padding: 0;
-			text-align: left;
-		}
-		QPushButton#linkBtn:hover {
-			color: #4096ff;
-			text-decoration: underline;
-		}
-		QCheckBox {
-			font-size: 13px;
-			color: #4e5969;
-		}
-	)");
+	MeetingUI::AppTheme::setStyleVariant(*this, "meeting-main-window-this");
 
 	auto rootLayout = new QVBoxLayout(this);
 	rootLayout->setContentsMargins(12, 12, 12, 12);
@@ -214,7 +148,7 @@ JoinMeetingDialog::JoinMeetingDialog(
 
 	// 标题栏
 	auto titleLayout = new QHBoxLayout();
-	auto titleLabel = new QLabel(QString::fromUtf8("加入会议"), container);
+	auto titleLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Join Meeting"), container);
 	QFont tf = titleLabel->font();
 	tf.setPixelSize(18);
 	tf.setBold(true);
@@ -223,49 +157,49 @@ JoinMeetingDialog::JoinMeetingDialog(
 	titleLayout->addStretch();
 
 	_closeBtn = new QPushButton(QString::fromUtf8("✕"), container);
-	_closeBtn->setStyleSheet("border:none; color:#8c8c8c; font-size:14px;");
+	MeetingUI::AppTheme::setStyleVariant(*_closeBtn, "meeting-main-window-closebtn");
 	_closeBtn->setFixedSize(24, 24);
 	connect(_closeBtn, &QPushButton::clicked, this, &QDialog::reject);
 	titleLayout->addWidget(_closeBtn);
 	mainLayout->addLayout(titleLayout);
 
 	// 会议号输入框
-	auto idLabel = new QLabel(QString::fromUtf8("会议号"), container);
-	idLabel->setStyleSheet("font-weight: bold; color: #303133; font-size: 12px;");
+	auto idLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Meeting ID"), container);
+	MeetingUI::AppTheme::setStyleVariant(*idLabel, "meeting-main-window-idlabel");
 	mainLayout->addWidget(idLabel);
 
 	_meetingIdInput = new QLineEdit(container);
-	_meetingIdInput->setPlaceholderText(QString::fromUtf8("请输入 9 位会议号 (如 847-123-456)"));
+	_meetingIdInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "9-digit meeting ID (e.g. 847-123-456)"));
 	_meetingIdInput->setText(initialMeetingId);
 	_meetingIdInput->setReadOnly(!initialMeetingId.trimmed().isEmpty());
 	mainLayout->addWidget(_meetingIdInput);
 
 	// 入会密码输入框
-	auto pwdLabel = new QLabel(QString::fromUtf8("会议密码 (选填)"), container);
-	pwdLabel->setStyleSheet("font-weight: bold; color: #303133; font-size: 12px;");
+	auto pwdLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Meeting Password (Optional)"), container);
+	MeetingUI::AppTheme::setStyleVariant(*pwdLabel, "meeting-main-window-pwdlabel");
 	mainLayout->addWidget(pwdLabel);
 
 	_passwordInput = new QLineEdit(container);
-	_passwordInput->setPlaceholderText(QString::fromUtf8("如果会议加密请输入密码"));
+	_passwordInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Enter the password if required"));
 	_passwordInput->setEchoMode(QLineEdit::Password);
 	mainLayout->addWidget(_passwordInput);
 
 	// 参会昵称输入框
-	auto nameLabel = new QLabel(QString::fromUtf8("参会昵称"), container);
-	nameLabel->setStyleSheet("font-weight: bold; color: #303133; font-size: 12px;");
+	auto nameLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Display Name"), container);
+	MeetingUI::AppTheme::setStyleVariant(*nameLabel, "meeting-main-window-namelabel");
 	mainLayout->addWidget(nameLabel);
 
 	_displayNameInput = new QLineEdit(container);
-	_displayNameInput->setPlaceholderText(QString::fromUtf8("请输入入会后显示的昵称"));
+	_displayNameInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Name shown in the meeting"));
 	auto &session = OpenMeeting::SessionManager::instance();
 	_displayNameInput->setText(session.nickname());
 	mainLayout->addWidget(_displayNameInput);
 
 	// 入会音视频设置
 	auto optLayout = new QHBoxLayout();
-	_audioMuteBox = new QCheckBox(QString::fromUtf8("入会开启麦克风"), container);
+	_audioMuteBox = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable microphone on joining"), container);
 	_audioMuteBox->setChecked(session.mediaPreferences().enableMicrophone);
-	_videoMuteBox = new QCheckBox(QString::fromUtf8("入会开启摄像头"), container);
+	_videoMuteBox = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable camera on joining"), container);
 	_videoMuteBox->setChecked(session.mediaPreferences().enableVideo);
 	optLayout->addWidget(_audioMuteBox);
 	optLayout->addWidget(_videoMuteBox);
@@ -274,26 +208,21 @@ JoinMeetingDialog::JoinMeetingDialog(
 	_meetingPolicyLabel = new QLabel(container);
 	_meetingPolicyLabel->setWordWrap(true);
 	_meetingPolicyLabel->setTextFormat(Qt::PlainText);
-	_meetingPolicyLabel->setStyleSheet(
-		QStringLiteral("color: #8f5b00; background: #fff7e6; border: 1px solid #ffe7ba; "
-			"border-radius: 6px; padding: 7px 9px;"));
+	MeetingUI::AppTheme::setStyleVariant(*_meetingPolicyLabel, "meeting-main-window-meetingpolicylabel");
 	if (_meetingSettings && _meetingSettings->disableCameraOnJoin &&
 		_meetingSettings->disableMicrophoneOnJoin) {
-		_meetingPolicyLabel->setText(QString::fromUtf8(
-			"此会议要求入会时关闭摄像头和麦克风；上方选项仍保存为您的个人偏好。"));
+		_meetingPolicyLabel->setText(QCoreApplication::translate("MeetingUI", "This meeting requires your camera and microphone to be off when joining. Your personal preferences above are still saved."));
 	} else if (_meetingSettings && _meetingSettings->disableCameraOnJoin) {
-		_meetingPolicyLabel->setText(QString::fromUtf8(
-			"此会议要求入会时关闭摄像头；上方选项仍保存为您的个人偏好。"));
+		_meetingPolicyLabel->setText(QCoreApplication::translate("MeetingUI", "This meeting requires your camera to be off when joining. Your personal preferences above are still saved."));
 	} else if (_meetingSettings && _meetingSettings->disableMicrophoneOnJoin) {
-		_meetingPolicyLabel->setText(QString::fromUtf8(
-			"此会议要求入会时关闭麦克风；上方选项仍保存为您的个人偏好。"));
+		_meetingPolicyLabel->setText(QCoreApplication::translate("MeetingUI", "This meeting requires your microphone to be off when joining. Your personal preferences above are still saved."));
 	} else {
 		_meetingPolicyLabel->hide();
 	}
 	mainLayout->addWidget(_meetingPolicyLabel);
 
 	// 手动/高级直连设置折叠栏
-	_manualToggleBtn = new QPushButton(QString::fromUtf8("⚙ 高级 LiveKit 直连设置 ▾"), container);
+	_manualToggleBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "⚙ Advanced LiveKit Connection ▾"), container);
 	_manualToggleBtn->setObjectName("linkBtn");
 	connect(_manualToggleBtn, &QPushButton::clicked, this, &JoinMeetingDialog::toggleManualServer);
 	mainLayout->addWidget(_manualToggleBtn);
@@ -305,11 +234,11 @@ JoinMeetingDialog::JoinMeetingDialog(
 	manLayout->setSpacing(4);
 
 	_serverUrlInput = new QLineEdit(_manualWidget);
-	_serverUrlInput->setPlaceholderText(QString::fromUtf8("服务器地址 (如 ws://127.0.0.1:7880)"));
+	_serverUrlInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Server URL (e.g. ws://127.0.0.1:7880)"));
 	_serverUrlInput->setText("ws://127.0.0.1:7880");
 
 	_tokenInput = new QLineEdit(_manualWidget);
-	_tokenInput->setPlaceholderText(QString::fromUtf8("手动指定 LiveKit Token (选填)"));
+	_tokenInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Custom LiveKit Token (Optional)"));
 
 	manLayout->addWidget(_serverUrlInput);
 	manLayout->addWidget(_tokenInput);
@@ -318,7 +247,7 @@ JoinMeetingDialog::JoinMeetingDialog(
 
 	// 状态/错误提示
 	_statusLabel = new QLabel(container);
-	_statusLabel->setStyleSheet("color: #f53f3f; font-size: 12px; padding: 2px 4px;");
+	MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-main-window-statuslabel");
 	_statusLabel->setAlignment(Qt::AlignCenter);
 	_statusLabel->setWordWrap(true);
 	_statusLabel->setMinimumHeight(32);
@@ -328,9 +257,9 @@ JoinMeetingDialog::JoinMeetingDialog(
 	// 底部按钮栏
 	auto btnLayout = new QHBoxLayout();
 	btnLayout->addStretch();
-	_cancelBtn = new QPushButton(QString::fromUtf8("取消"), container);
+	_cancelBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Cancel"), container);
 	_cancelBtn->setObjectName("cancelBtn");
-	_joinBtn = new QPushButton(QString::fromUtf8("加入会议"), container);
+	_joinBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Join Meeting"), container);
 	_joinBtn->setObjectName("joinBtn");
 
 	btnLayout->addWidget(_cancelBtn);
@@ -340,13 +269,14 @@ JoinMeetingDialog::JoinMeetingDialog(
 	connect(_cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
 	connect(_joinBtn, &QPushButton::clicked, this, &JoinMeetingDialog::onJoinClicked);
 	connect(_meetingIdInput, &QLineEdit::returnPressed, this, &JoinMeetingDialog::onJoinClicked);
+	AppTheme::makeDialogAdaptive(*this, QSize(460, 560));
 }
 
 void JoinMeetingDialog::toggleManualServer() {
 	bool isVisible = _manualWidget->isVisible();
 	_manualWidget->setVisible(!isVisible);
-	_manualToggleBtn->setText(!isVisible ? QString::fromUtf8("⚙ 高级 LiveKit 直连设置 ▴") : QString::fromUtf8("⚙ 高级 LiveKit 直连设置 ▾"));
-	adjustSize();
+	_manualToggleBtn->setText(!isVisible ? QCoreApplication::translate("MeetingUI", "⚙ Advanced LiveKit Connection ▴") : QCoreApplication::translate("MeetingUI", "⚙ Advanced LiveKit Connection ▾"));
+	layout()->activate();
 }
 
 void JoinMeetingDialog::reject() {
@@ -371,20 +301,20 @@ void JoinMeetingDialog::setLoading(bool loading, const QString &statusText) {
 	if (_displayNameInput) _displayNameInput->setEnabled(!loading);
 
 	if (loading) {
-		if (_joinBtn) _joinBtn->setText(QString::fromUtf8("正在入会..."));
+		if (_joinBtn) _joinBtn->setText(QCoreApplication::translate("MeetingUI", "Joining..."));
 		if (_statusLabel) {
-			_statusLabel->setStyleSheet("color: #1677ff; font-size: 12px;");
-			_statusLabel->setText(statusText.isEmpty() ? QString::fromUtf8("正在处理入会请求...") : statusText);
+			MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-main-window-statuslabel-2");
+			_statusLabel->setText(statusText.isEmpty() ? QCoreApplication::translate("MeetingUI", "Processing join request...") : statusText);
 			_statusLabel->setVisible(true);
 		}
 	} else {
-		if (_joinBtn) _joinBtn->setText(QString::fromUtf8("加入会议"));
+		if (_joinBtn) _joinBtn->setText(QCoreApplication::translate("MeetingUI", "Join Meeting"));
 	}
 }
 
 void JoinMeetingDialog::showError(const QString &msg) {
 	if (!_statusLabel) return;
-	_statusLabel->setStyleSheet("color: #f53f3f; font-size: 12px;");
+	MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-main-window-statuslabel-3");
 	_statusLabel->setText(msg);
 	_statusLabel->setVisible(!msg.isEmpty());
 }
@@ -403,7 +333,7 @@ void JoinMeetingDialog::onJoinClicked() {
 			_cleanMeetingId = "livekit_room";
 		}
 		if (_resolvedServerUrl.isEmpty()) {
-			showError(QString::fromUtf8("手动直连需要填写 LiveKit 服务器地址"));
+			showError(QCoreApplication::translate("MeetingUI", "Enter a LiveKit server URL for a direct connection"));
 			return;
 		}
 		persistMediaPreferences();
@@ -417,7 +347,7 @@ void JoinMeetingDialog::onJoinClicked() {
 	_cleanMeetingId.remove('-').remove(' ');
 
 	if (_cleanMeetingId.isEmpty()) {
-		showError(QString::fromUtf8("请输入有效的会议号"));
+		showError(QCoreApplication::translate("MeetingUI", "Enter a valid meeting ID"));
 		if (_meetingIdInput) _meetingIdInput->setFocus();
 		return;
 	}
@@ -425,7 +355,7 @@ void JoinMeetingDialog::onJoinClicked() {
 	const QString password = _passwordInput ? _passwordInput->text() : QString();
 	auto &session = OpenMeeting::SessionManager::instance();
 
-	setLoading(true, QString::fromUtf8("正在校验会议权限..."));
+	setLoading(true, QCoreApplication::translate("MeetingUI", "Checking meeting access..."));
 
 	QPointer<JoinMeetingDialog> self = this;
 
@@ -437,14 +367,14 @@ void JoinMeetingDialog::onJoinClicked() {
 		if (!ok) {
 			self->setLoading(false);
 			if (err.message.contains("user already in meeting", Qt::CaseInsensitive) || err.code == 200001) {
-				self->showError(QString::fromUtf8("该账号已在当前会议中，不能重复入会。请使用【访客体验】或换一个账号登录加入！"));
+				self->showError(QCoreApplication::translate("MeetingUI", "This account is already in the meeting. Use Guest Access or sign in with another account to join."));
 			} else {
-				self->showError(QString::fromUtf8("入会校验失败: %1").arg(err.message.isEmpty() ? QString::fromUtf8("会议不存在或网络不可达") : err.message));
+				self->showError(QCoreApplication::translate("MeetingUI", "Meeting access check failed: %1").arg(err.message.isEmpty() ? QCoreApplication::translate("MeetingUI", "The meeting does not exist or the network is unreachable") : err.message));
 			}
 			return;
 		}
 
-		self->setLoading(true, QString::fromUtf8("正在换取 LiveKit 视讯凭据..."));
+		self->setLoading(true, QCoreApplication::translate("MeetingUI", "Requesting LiveKit credentials..."));
 
 		// 第二阶段：换取 LiveKit Token 与 URL
 		auto &sess = OpenMeeting::SessionManager::instance();
@@ -454,7 +384,7 @@ void JoinMeetingDialog::onJoinClicked() {
 			}
 			self->setLoading(false);
 			if (!tokenOk || auth.url.isEmpty() || auth.token.isEmpty()) {
-				self->showError(QString::fromUtf8("获取凭据失败: %1").arg(tokenErr.message.isEmpty() ? QString::fromUtf8("凭据解析异常") : tokenErr.message));
+				self->showError(QCoreApplication::translate("MeetingUI", "Unable to obtain credentials: %1").arg(tokenErr.message.isEmpty() ? QCoreApplication::translate("MeetingUI", "Invalid credentials response") : tokenErr.message));
 				return;
 			}
 
@@ -491,7 +421,7 @@ QString JoinMeetingDialog::password() const {
 
 QString JoinMeetingDialog::displayName() const {
 	const QString name = _displayNameInput ? _displayNameInput->text().trimmed() : QString();
-	return name.isEmpty() ? QString::fromUtf8("参会者") : name;
+	return name.isEmpty() ? QCoreApplication::translate("MeetingUI", "Participant") : name;
 }
 
 bool JoinMeetingDialog::isAudioMuted() const {
@@ -524,7 +454,7 @@ void JoinMeetingDialog::mouseMoveEvent(QMouseEvent *e) {
 MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 	: Ui::RpWidget(parent) {
 	setObjectName("MeetingMainWindow");
-	setWindowTitle(QString::fromUtf8("会议客户端 - LiveKit Powered"));
+	setWindowTitle(QCoreApplication::translate("MeetingUI", "Meeting Client - Powered by LiveKit"));
 	resize(1040, 660);
 	setMinimumSize(900, 580);
 	if (!parent) {
@@ -618,8 +548,8 @@ void MeetingMainWindow::initLayout() {
 		_sidebar->setActiveNav(NavItemType::Meeting);
 		QMessageBox::information(
 			this,
-			QString::fromUtf8("提示"),
-			QString::fromUtf8("功能待完善"));
+			QCoreApplication::translate("MeetingUI", "Notice"),
+			QCoreApplication::translate("MeetingUI", "This feature is not yet available"));
 	}, lifetime());
 
 	_sidebar->bottomItemClicked() | rpl::on_next([this](BottomItemType type) {
@@ -630,8 +560,8 @@ void MeetingMainWindow::initLayout() {
 		}
 		QMessageBox::information(
 			this,
-			QString::fromUtf8("提示"),
-			QString::fromUtf8("功能待完善"));
+			QCoreApplication::translate("MeetingUI", "Notice"),
+			QCoreApplication::translate("MeetingUI", "This feature is not yet available"));
 	}, lifetime());
 
 	// 会议目录入口
@@ -666,13 +596,13 @@ void MeetingMainWindow::initLayout() {
 		QMenu menu(this);
 		AppTheme::styleMenu(menu, AppTheme::Tone::Light);
 		QString statusStr = session.isLoggedIn()
-			? QString::fromUtf8("当前用户: %1 (%2)").arg(session.nickname(), session.userId())
-			: QString::fromUtf8("当前未登录");
+			? QCoreApplication::translate("MeetingUI", "Current User: %1 (%2)").arg(session.nickname(), session.userId())
+			: QCoreApplication::translate("MeetingUI", "Not Signed In");
 		menu.addAction(statusStr)->setEnabled(false);
 		menu.addSeparator();
 
-		auto *switchAction = menu.addAction(QString::fromUtf8("切换账号 / 登录"));
-		auto *logoutAction = menu.addAction(QString::fromUtf8("退出登录"));
+		auto *switchAction = menu.addAction(QCoreApplication::translate("MeetingUI", "Switch Account / Sign In"));
+		auto *logoutAction = menu.addAction(QCoreApplication::translate("MeetingUI", "Sign Out"));
 
 		QAction *selected = menu.exec(QCursor::pos());
 		if (selected == switchAction || selected == logoutAction) {
@@ -743,11 +673,11 @@ void MeetingMainWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationRea
 	}
 
 	QMessageBox::warning(this,
-	                     duplicatedLogin ? QString::fromUtf8("账号已下线")
-	                                     : QString::fromUtf8("登录失效"),
+	                     duplicatedLogin ? QCoreApplication::translate("MeetingUI", "Account Signed Out")
+	                                     : QCoreApplication::translate("MeetingUI", "Session Expired"),
 	                     duplicatedLogin
-	                         ? QString::fromUtf8("您的账号已在其他设备登录，当前客户端已退出。")
-	                         : QString::fromUtf8("登录状态已失效，请重新登录。"));
+	                         ? QCoreApplication::translate("MeetingUI", "Your account signed in on another device. This client has been signed out.")
+	                         : QCoreApplication::translate("MeetingUI", "Your session has expired. Please sign in again."));
 
 	// SessionManager 在发射 sessionInvalidated 前已复用 logout(false) 清理 token
 	// 和本地 user 设置；这里仅负责让用户回到可重新认证的界面。
@@ -768,8 +698,8 @@ void MeetingMainWindow::onCardClicked(ActionCardType type) {
 		// Reserve before modal dialogs: joining also sends HTTP from its dialog.
 		auto meetingReservation = _meetingEntryGuard.tryAcquire();
 		if (!meetingReservation) {
-			QMessageBox::information(this, QString::fromUtf8("会议忙碌"),
-				QString::fromUtf8("当前正在处理会议或已有会议窗口，请先完成或关闭后再试。"));
+			QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Meeting Busy"),
+				QCoreApplication::translate("MeetingUI", "A meeting is already open or a request is in progress. Finish or close it before trying again."));
 			return;
 		}
 		openQuickMeeting(std::move(meetingReservation), type == ActionCardType::ShareScreen);
@@ -810,7 +740,7 @@ void MeetingMainWindow::openQuickMeeting(
 			});
 	}
 	coordinator->createAndJoinQuickMeetingAsync(
-		QString::fromUtf8("%1 的快速会议").arg(session.nickname()), 3600, prefs);
+		QCoreApplication::translate("MeetingUI", "%1's Instant Meeting").arg(session.nickname()), 3600, prefs);
 	roomWindow->show();
 }
 
@@ -821,8 +751,8 @@ void MeetingMainWindow::beginMeetingEntry(
 		bool shareScreenAfterJoin) {
 	auto reservation = _meetingEntryGuard.tryAcquire();
 	if (!reservation) {
-		QMessageBox::information(this, QString::fromUtf8("会议忙碌"),
-			QString::fromUtf8("当前正在处理会议或已有会议窗口，请先完成或关闭后再试。"));
+		QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Meeting Busy"),
+			QCoreApplication::translate("MeetingUI", "A meeting is already open or a request is in progress. Finish or close it before trying again."));
 		return;
 	}
 
@@ -837,9 +767,9 @@ void MeetingMainWindow::beginMeetingEntry(
 	_pendingShareScreen = shareScreenAfterJoin;
 	const auto generation = ++_pendingMeetingEntryGeneration;
 	auto *progress = new QProgressDialog(
-		QString::fromUtf8("正在读取最新会议详情..."),
-		QString::fromUtf8("取消"), 0, 0, this);
-	progress->setWindowTitle(QString::fromUtf8("准备加入会议"));
+		QCoreApplication::translate("MeetingUI", "Loading the latest meeting details..."),
+		QCoreApplication::translate("MeetingUI", "Cancel"), 0, 0, this);
+	progress->setWindowTitle(QCoreApplication::translate("MeetingUI", "Preparing to Join"));
 	progress->setWindowModality(Qt::WindowModal);
 	progress->setAutoClose(false);
 	progress->setAutoReset(false);
@@ -861,8 +791,8 @@ void MeetingMainWindow::openJoinMeetingDialog(
 	JoinMeetingDialog dialog(this, meetingId, meetingSettings);
 	if (dialog.exec() != QDialog::Accepted) return;
 	if (dialog.serverUrl().isEmpty() || dialog.token().isEmpty()) {
-		QMessageBox::warning(this, QString::fromUtf8("无法加入会议"),
-			QString::fromUtf8("入会凭据不完整，请重新尝试。"));
+		QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Unable to Join Meeting"),
+			QCoreApplication::translate("MeetingUI", "Meeting credentials are incomplete. Please try again."));
 		return;
 	}
 
@@ -913,8 +843,8 @@ void MeetingMainWindow::handlePendingMeetingEntryDetail() {
 		if (status != OpenMeeting::MeetingStatus::Scheduled &&
 			status != OpenMeeting::MeetingStatus::InProgress) {
 			clearPendingMeetingEntry();
-			QMessageBox::information(this, QString::fromUtf8("无法加入会议"),
-				QString::fromUtf8("该会议当前状态不允许加入。"));
+			QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Unable to Join Meeting"),
+				QCoreApplication::translate("MeetingUI", "This meeting cannot be joined in its current state."));
 			return;
 		}
 
@@ -929,8 +859,8 @@ void MeetingMainWindow::handlePendingMeetingEntryDetail() {
 	}
 
 	clearPendingMeetingEntry();
-	QMessageBox::warning(this, QString::fromUtf8("无法读取会议"),
-		QString::fromUtf8("未能取得最新会议详情，请检查网络后重试。"));
+	QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Unable to Read Meeting"),
+		QCoreApplication::translate("MeetingUI", "Unable to get the latest meeting details. Check your network and try again."));
 }
 
 void MeetingMainWindow::clearPendingMeetingEntry() {
@@ -948,8 +878,8 @@ void MeetingMainWindow::clearPendingMeetingEntry() {
 void MeetingMainWindow::showBookingDialog() {
 	auto &session = OpenMeeting::SessionManager::instance();
 	if (!session.isLoggedIn()) {
-		QMessageBox::information(this, QString::fromUtf8("需要登录"),
-			QString::fromUtf8("请先登录后再预定会议。"));
+		QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Sign-In Required"),
+			QCoreApplication::translate("MeetingUI", "Sign in to schedule a meeting."));
 		return;
 	}
 	MeetingBookingDialog dialog(*_meetingCatalog, session, this);
@@ -959,8 +889,8 @@ void MeetingMainWindow::showBookingDialog() {
 void MeetingMainWindow::showMeetingListDialog() {
 	auto &session = OpenMeeting::SessionManager::instance();
 	if (!session.isLoggedIn()) {
-		QMessageBox::information(this, QString::fromUtf8("需要登录"),
-			QString::fromUtf8("请先登录后查看会议列表。"));
+		QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Sign-In Required"),
+			QCoreApplication::translate("MeetingUI", "Sign in to view the meeting list."));
 		return;
 	}
 	MeetingListDialog dialog(*_meetingCatalog, session, this);

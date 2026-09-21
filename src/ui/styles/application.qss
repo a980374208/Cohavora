@@ -1,0 +1,1116 @@
+/* Shared controls, dialogs, menus and light/dark surfaces. */
+
+QToolTip {
+    background: #242831;
+    color: #f7f8fa;
+    border: 1px solid #3a414f;
+    border-radius: 5px;
+    padding: 5px 8px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    color: #1f2329;
+    border: 1px solid #dfe3e8;
+    border-radius: 7px;
+    padding: 4px;
+    outline: none;
+    selection-background-color: #eaf3ff;
+    selection-color: #1677ff;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+}
+
+QComboBox QAbstractItemView::item {
+    min-height: 30px;
+    padding: 0 9px;
+    border-radius: 5px;
+}
+
+QCalendarWidget {
+    background: #ffffff;
+    color: #1f2329;
+}
+
+QCalendarWidget QWidget[objectName="qt_calendar_navigationbar"] {
+    background: #f7f8fa;
+    border-bottom: 1px solid #e5e8ec;
+}
+
+QCalendarWidget QToolButton {
+    min-height: 30px;
+    color: #303133;
+    background: transparent;
+    border: none;
+    border-radius: 5px;
+    padding: 0 8px;
+}
+
+QCalendarWidget QToolButton:hover {
+    color: #1677ff;
+    background: #eaf3ff;
+}
+
+QCalendarWidget QSpinBox {
+    min-height: 28px;
+    color: #1f2329;
+    background: #ffffff;
+    border: 1px solid #dcdfe6;
+    border-radius: 5px;
+    padding: 0 6px;
+}
+
+QCalendarWidget QAbstractItemView {
+    background: #ffffff;
+    color: #303133;
+    outline: none;
+    selection-background-color: #1677ff;
+    selection-color: #ffffff;
+}
+
+QComboBox,
+QSpinBox,
+QDoubleSpinBox,
+QDateEdit,
+QDateTimeEdit,
+QTimeEdit {
+    padding-right: 36px;
+}
+
+QComboBox::drop-down,
+QDateEdit::drop-down,
+QDateTimeEdit::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 32px;
+    border: none;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    background: transparent;
+}
+
+QComboBox::drop-down:hover,
+QDateEdit::drop-down:hover,
+QDateTimeEdit::drop-down:hover {
+    background: #f5f9ff;
+}
+
+QComboBox::drop-down:pressed,
+QComboBox::drop-down:on,
+QDateEdit::drop-down:pressed,
+QDateEdit::drop-down:on,
+QDateTimeEdit::drop-down:pressed,
+QDateTimeEdit::drop-down:on {
+    background: #eaf3ff;
+}
+
+QComboBox::drop-down:disabled,
+QDateEdit::drop-down:disabled,
+QDateTimeEdit::drop-down:disabled {
+    background: transparent;
+}
+
+QComboBox::down-arrow,
+QDateEdit::down-arrow,
+QDateTimeEdit::down-arrow {
+    image: url(:/meeting-ui/icons/chevron-down-light.svg);
+    width: 12px;
+    height: 12px;
+}
+
+QComboBox::down-arrow:on,
+QDateEdit::down-arrow:on,
+QDateTimeEdit::down-arrow:on {
+    image: url(:/meeting-ui/icons/chevron-up-light.svg);
+}
+
+QComboBox::down-arrow:disabled,
+QDateEdit::down-arrow:disabled,
+QDateTimeEdit::down-arrow:disabled {
+    image: url(:/meeting-ui/icons/chevron-down-disabled.svg);
+}
+
+QSpinBox::up-button,
+QDoubleSpinBox::up-button,
+QDateEdit::up-button,
+QDateTimeEdit::up-button,
+QTimeEdit::up-button,
+QSpinBox::down-button,
+QDoubleSpinBox::down-button,
+QDateEdit::down-button,
+QDateTimeEdit::down-button,
+QTimeEdit::down-button {
+    subcontrol-origin: padding;
+    width: 32px;
+    border: none;
+    background: transparent;
+}
+
+QSpinBox::up-button,
+QDoubleSpinBox::up-button,
+QDateEdit::up-button,
+QDateTimeEdit::up-button,
+QTimeEdit::up-button {
+    border-top-right-radius: 6px;
+}
+
+QSpinBox::down-button,
+QDoubleSpinBox::down-button,
+QDateEdit::down-button,
+QDateTimeEdit::down-button,
+QTimeEdit::down-button {
+    border-bottom-right-radius: 6px;
+}
+
+QSpinBox::up-button:hover,
+QDoubleSpinBox::up-button:hover,
+QDateEdit::up-button:hover,
+QDateTimeEdit::up-button:hover,
+QTimeEdit::up-button:hover,
+QSpinBox::down-button:hover,
+QDoubleSpinBox::down-button:hover,
+QDateEdit::down-button:hover,
+QDateTimeEdit::down-button:hover,
+QTimeEdit::down-button:hover {
+    background: #f5f9ff;
+}
+
+QSpinBox::up-button:pressed,
+QDoubleSpinBox::up-button:pressed,
+QDateEdit::up-button:pressed,
+QDateTimeEdit::up-button:pressed,
+QTimeEdit::up-button:pressed,
+QSpinBox::down-button:pressed,
+QDoubleSpinBox::down-button:pressed,
+QDateEdit::down-button:pressed,
+QDateTimeEdit::down-button:pressed,
+QTimeEdit::down-button:pressed {
+    background: #eaf3ff;
+}
+
+QSpinBox::up-button:disabled,
+QDoubleSpinBox::up-button:disabled,
+QDateEdit::up-button:disabled,
+QDateTimeEdit::up-button:disabled,
+QTimeEdit::up-button:disabled,
+QSpinBox::down-button:disabled,
+QDoubleSpinBox::down-button:disabled,
+QDateEdit::down-button:disabled,
+QDateTimeEdit::down-button:disabled,
+QTimeEdit::down-button:disabled {
+    background: transparent;
+}
+
+QSpinBox::up-arrow,
+QDoubleSpinBox::up-arrow,
+QDateEdit::up-arrow,
+QDateTimeEdit::up-arrow,
+QTimeEdit::up-arrow {
+    image: url(:/meeting-ui/icons/chevron-up-light.svg);
+    width: 11px;
+    height: 11px;
+}
+
+QSpinBox::down-arrow,
+QDoubleSpinBox::down-arrow,
+QDateEdit::down-arrow,
+QDateTimeEdit::down-arrow,
+QTimeEdit::down-arrow {
+    image: url(:/meeting-ui/icons/chevron-down-light.svg);
+    width: 11px;
+    height: 11px;
+}
+
+QSpinBox::up-arrow:disabled,
+QDoubleSpinBox::up-arrow:disabled,
+QDateEdit::up-arrow:disabled,
+QDateTimeEdit::up-arrow:disabled,
+QTimeEdit::up-arrow:disabled {
+    image: url(:/meeting-ui/icons/chevron-up-disabled.svg);
+}
+
+QSpinBox::down-arrow:disabled,
+QDoubleSpinBox::down-arrow:disabled,
+QDateEdit::down-arrow:disabled,
+QDateTimeEdit::down-arrow:disabled,
+QTimeEdit::down-arrow:disabled {
+    image: url(:/meeting-ui/icons/chevron-down-disabled.svg);
+}
+
+[meetingUiTone="dark"] QComboBox,
+[meetingUiTone="dark"] QSpinBox,
+[meetingUiTone="dark"] QDoubleSpinBox,
+[meetingUiTone="dark"] QDateEdit,
+[meetingUiTone="dark"] QDateTimeEdit,
+[meetingUiTone="dark"] QTimeEdit {
+    padding-right: 36px;
+}
+
+[meetingUiTone="dark"] QComboBox::drop-down,
+[meetingUiTone="dark"] QDateEdit::drop-down,
+[meetingUiTone="dark"] QDateTimeEdit::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: top right;
+    width: 32px;
+    border: none;
+    border-top-right-radius: 6px;
+    border-bottom-right-radius: 6px;
+    background: transparent;
+}
+
+[meetingUiTone="dark"] QComboBox::drop-down:hover,
+[meetingUiTone="dark"] QDateEdit::drop-down:hover,
+[meetingUiTone="dark"] QDateTimeEdit::drop-down:hover {
+    background: #303641;
+}
+
+[meetingUiTone="dark"] QComboBox::drop-down:pressed,
+[meetingUiTone="dark"] QComboBox::drop-down:on,
+[meetingUiTone="dark"] QDateEdit::drop-down:pressed,
+[meetingUiTone="dark"] QDateEdit::drop-down:on,
+[meetingUiTone="dark"] QDateTimeEdit::drop-down:pressed,
+[meetingUiTone="dark"] QDateTimeEdit::drop-down:on {
+    background: #394252;
+}
+
+[meetingUiTone="dark"] QComboBox::drop-down:disabled,
+[meetingUiTone="dark"] QDateEdit::drop-down:disabled,
+[meetingUiTone="dark"] QDateTimeEdit::drop-down:disabled {
+    background: transparent;
+}
+
+[meetingUiTone="dark"] QComboBox::down-arrow,
+[meetingUiTone="dark"] QDateEdit::down-arrow,
+[meetingUiTone="dark"] QDateTimeEdit::down-arrow {
+    image: url(:/meeting-ui/icons/chevron-down-dark.svg);
+    width: 12px;
+    height: 12px;
+}
+
+[meetingUiTone="dark"] QComboBox::down-arrow:on,
+[meetingUiTone="dark"] QDateEdit::down-arrow:on,
+[meetingUiTone="dark"] QDateTimeEdit::down-arrow:on {
+    image: url(:/meeting-ui/icons/chevron-up-dark.svg);
+}
+
+[meetingUiTone="dark"] QComboBox::down-arrow:disabled,
+[meetingUiTone="dark"] QDateEdit::down-arrow:disabled,
+[meetingUiTone="dark"] QDateTimeEdit::down-arrow:disabled {
+    image: url(:/meeting-ui/icons/chevron-down-disabled.svg);
+}
+
+[meetingUiTone="dark"] QSpinBox::up-button,
+[meetingUiTone="dark"] QDoubleSpinBox::up-button,
+[meetingUiTone="dark"] QDateEdit::up-button,
+[meetingUiTone="dark"] QDateTimeEdit::up-button,
+[meetingUiTone="dark"] QTimeEdit::up-button,
+[meetingUiTone="dark"] QSpinBox::down-button,
+[meetingUiTone="dark"] QDoubleSpinBox::down-button,
+[meetingUiTone="dark"] QDateEdit::down-button,
+[meetingUiTone="dark"] QDateTimeEdit::down-button,
+[meetingUiTone="dark"] QTimeEdit::down-button {
+    subcontrol-origin: padding;
+    width: 32px;
+    border: none;
+    background: transparent;
+}
+
+[meetingUiTone="dark"] QSpinBox::up-button,
+[meetingUiTone="dark"] QDoubleSpinBox::up-button,
+[meetingUiTone="dark"] QDateEdit::up-button,
+[meetingUiTone="dark"] QDateTimeEdit::up-button,
+[meetingUiTone="dark"] QTimeEdit::up-button {
+    border-top-right-radius: 6px;
+}
+
+[meetingUiTone="dark"] QSpinBox::down-button,
+[meetingUiTone="dark"] QDoubleSpinBox::down-button,
+[meetingUiTone="dark"] QDateEdit::down-button,
+[meetingUiTone="dark"] QDateTimeEdit::down-button,
+[meetingUiTone="dark"] QTimeEdit::down-button {
+    border-bottom-right-radius: 6px;
+}
+
+[meetingUiTone="dark"] QSpinBox::up-button:hover,
+[meetingUiTone="dark"] QDoubleSpinBox::up-button:hover,
+[meetingUiTone="dark"] QDateEdit::up-button:hover,
+[meetingUiTone="dark"] QDateTimeEdit::up-button:hover,
+[meetingUiTone="dark"] QTimeEdit::up-button:hover,
+[meetingUiTone="dark"] QSpinBox::down-button:hover,
+[meetingUiTone="dark"] QDoubleSpinBox::down-button:hover,
+[meetingUiTone="dark"] QDateEdit::down-button:hover,
+[meetingUiTone="dark"] QDateTimeEdit::down-button:hover,
+[meetingUiTone="dark"] QTimeEdit::down-button:hover {
+    background: #303641;
+}
+
+[meetingUiTone="dark"] QSpinBox::up-button:pressed,
+[meetingUiTone="dark"] QDoubleSpinBox::up-button:pressed,
+[meetingUiTone="dark"] QDateEdit::up-button:pressed,
+[meetingUiTone="dark"] QDateTimeEdit::up-button:pressed,
+[meetingUiTone="dark"] QTimeEdit::up-button:pressed,
+[meetingUiTone="dark"] QSpinBox::down-button:pressed,
+[meetingUiTone="dark"] QDoubleSpinBox::down-button:pressed,
+[meetingUiTone="dark"] QDateEdit::down-button:pressed,
+[meetingUiTone="dark"] QDateTimeEdit::down-button:pressed,
+[meetingUiTone="dark"] QTimeEdit::down-button:pressed {
+    background: #394252;
+}
+
+[meetingUiTone="dark"] QSpinBox::up-button:disabled,
+[meetingUiTone="dark"] QDoubleSpinBox::up-button:disabled,
+[meetingUiTone="dark"] QDateEdit::up-button:disabled,
+[meetingUiTone="dark"] QDateTimeEdit::up-button:disabled,
+[meetingUiTone="dark"] QTimeEdit::up-button:disabled,
+[meetingUiTone="dark"] QSpinBox::down-button:disabled,
+[meetingUiTone="dark"] QDoubleSpinBox::down-button:disabled,
+[meetingUiTone="dark"] QDateEdit::down-button:disabled,
+[meetingUiTone="dark"] QDateTimeEdit::down-button:disabled,
+[meetingUiTone="dark"] QTimeEdit::down-button:disabled {
+    background: transparent;
+}
+
+[meetingUiTone="dark"] QSpinBox::up-arrow,
+[meetingUiTone="dark"] QDoubleSpinBox::up-arrow,
+[meetingUiTone="dark"] QDateEdit::up-arrow,
+[meetingUiTone="dark"] QDateTimeEdit::up-arrow,
+[meetingUiTone="dark"] QTimeEdit::up-arrow {
+    image: url(:/meeting-ui/icons/chevron-up-dark.svg);
+    width: 11px;
+    height: 11px;
+}
+
+[meetingUiTone="dark"] QSpinBox::down-arrow,
+[meetingUiTone="dark"] QDoubleSpinBox::down-arrow,
+[meetingUiTone="dark"] QDateEdit::down-arrow,
+[meetingUiTone="dark"] QDateTimeEdit::down-arrow,
+[meetingUiTone="dark"] QTimeEdit::down-arrow {
+    image: url(:/meeting-ui/icons/chevron-down-dark.svg);
+    width: 11px;
+    height: 11px;
+}
+
+[meetingUiTone="dark"] QSpinBox::up-arrow:disabled,
+[meetingUiTone="dark"] QDoubleSpinBox::up-arrow:disabled,
+[meetingUiTone="dark"] QDateEdit::up-arrow:disabled,
+[meetingUiTone="dark"] QDateTimeEdit::up-arrow:disabled,
+[meetingUiTone="dark"] QTimeEdit::up-arrow:disabled {
+    image: url(:/meeting-ui/icons/chevron-up-disabled.svg);
+}
+
+[meetingUiTone="dark"] QSpinBox::down-arrow:disabled,
+[meetingUiTone="dark"] QDoubleSpinBox::down-arrow:disabled,
+[meetingUiTone="dark"] QDateEdit::down-arrow:disabled,
+[meetingUiTone="dark"] QDateTimeEdit::down-arrow:disabled,
+[meetingUiTone="dark"] QTimeEdit::down-arrow:disabled {
+    image: url(:/meeting-ui/icons/chevron-down-disabled.svg);
+}
+
+QMessageBox[meetingUiTone="light"] {
+    background: #ffffff;
+    border: 1px solid #dfe3e8;
+    border-radius: 10px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+
+QMessageBox[meetingUiTone="light"] QLabel {
+    color: #1f2329;
+    font-size: 13px;
+}
+
+QMessageBox[meetingUiTone="light"] QLabel[objectName="qt_msgbox_label"] {
+    min-width: 340px;
+    max-width: 520px;
+    padding: 8px 4px 10px 4px;
+}
+
+QMessageBox[meetingUiTone="light"] QLabel[objectName="qt_msgbox_informativelabel"] {
+    color: #606266;
+    padding: 0 4px 8px 4px;
+}
+
+QMessageBox[meetingUiTone="light"] QCheckBox {
+    color: #606266;
+    spacing: 8px;
+}
+
+QMessageBox[meetingUiTone="light"] QPushButton {
+    min-width: 76px;
+    min-height: 32px;
+    padding: 0 14px;
+    border: 1px solid #dcdfe6;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #303133;
+    font-size: 13px;
+}
+
+QMessageBox[meetingUiTone="light"] QPushButton:hover {
+    color: #1677ff;
+    border-color: #8fc2ff;
+    background: #f5f9ff;
+}
+
+QMessageBox[meetingUiTone="light"] QPushButton:pressed {
+    color: #0958d9;
+    border-color: #1677ff;
+    background: #eaf3ff;
+}
+
+QMessageBox[meetingUiTone="light"] QPushButton:disabled {
+    color: #a8abb2;
+    background: #f5f6f7;
+    border-color: #e4e7ed;
+}
+
+QMessageBox[meetingUiTone="light"] QPushButton[meetingUiRole="primary"] {
+    background: #1677ff;
+    color: #ffffff;
+    border-color: #1677ff;
+}
+
+QMessageBox[meetingUiTone="light"] QPushButton[meetingUiRole="primary"]:hover {
+    background: #4096ff;
+    border-color: #4096ff;
+}
+
+QMessageBox[meetingUiTone="light"] QPushButton[meetingUiRole="primary"]:pressed {
+    background: #0958d9;
+    border-color: #0958d9;
+}
+
+QMessageBox[meetingUiTone="light"] QPushButton[meetingUiRole="danger"] {
+    background: #d9363e;
+    color: #ffffff;
+    border-color: #d9363e;
+}
+
+QMessageBox[meetingUiTone="light"] QPushButton[meetingUiRole="danger"]:hover {
+    background: #ed5a60;
+    border-color: #ed5a60;
+}
+
+QMessageBox[meetingUiTone="light"] QPushButton[meetingUiRole="danger"]:pressed {
+    background: #b5222a;
+    border-color: #b5222a;
+}
+
+QMessageBox[meetingUiTone="light"] QPushButton[meetingUiRole="link"] {
+    background: transparent;
+    color: #1677ff;
+    border-color: transparent;
+}
+
+QMessageBox[meetingUiTone="light"] QPushButton[meetingUiRole="link"]:hover {
+    color: #4096ff;
+    background: #f5f9ff;
+}
+
+QInputDialog[meetingUiTone="light"] {
+    background: #ffffff;
+    border: 1px solid #dcdfe6;
+    border-radius: 10px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+
+QInputDialog[meetingUiTone="light"] QLabel {
+    color: #1f2329;
+    font-size: 13px;
+}
+
+QInputDialog[meetingUiTone="light"] QLineEdit,
+QInputDialog[meetingUiTone="light"] QComboBox,
+QInputDialog[meetingUiTone="light"] QSpinBox,
+QInputDialog[meetingUiTone="light"] QDoubleSpinBox {
+    min-height: 34px;
+    padding: 0 10px;
+    border: 1px solid #dcdfe6;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #1f2329;
+    selection-background-color: #1677ff;
+    selection-color: #ffffff;
+}
+
+QInputDialog[meetingUiTone="light"] QLineEdit:focus,
+QInputDialog[meetingUiTone="light"] QComboBox:focus,
+QInputDialog[meetingUiTone="light"] QSpinBox:focus,
+QInputDialog[meetingUiTone="light"] QDoubleSpinBox:focus {
+    border-color: #1677ff;
+}
+
+QInputDialog[meetingUiTone="light"] QComboBox QAbstractItemView {
+    background: #ffffff;
+    color: #1f2329;
+    border: 1px solid #dcdfe6;
+    border-radius: 7px;
+    padding: 4px;
+    outline: none;
+    selection-background-color: #eaf3ff;
+    selection-color: #1677ff;
+}
+
+QInputDialog[meetingUiTone="light"] QComboBox QAbstractItemView::item {
+    min-height: 30px;
+    padding: 0 9px;
+    border-radius: 5px;
+}
+
+QInputDialog[meetingUiTone="light"] QPushButton {
+    min-width: 76px;
+    min-height: 32px;
+    padding: 0 14px;
+    border: 1px solid #dcdfe6;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #303133;
+    font-size: 13px;
+}
+
+QInputDialog[meetingUiTone="light"] QPushButton:hover {
+    color: #1677ff;
+    border-color: #8fc2ff;
+    background: #f5f9ff;
+}
+
+QInputDialog[meetingUiTone="light"] QPushButton:pressed {
+    color: #0958d9;
+    border-color: #1677ff;
+    background: #eaf3ff;
+}
+
+QInputDialog[meetingUiTone="light"] QPushButton:disabled {
+    color: #a8abb2;
+    background: #f5f6f7;
+    border-color: #e4e7ed;
+}
+
+QInputDialog[meetingUiTone="light"] QPushButton[meetingUiRole="primary"] {
+    background: #1677ff;
+    color: #ffffff;
+    border-color: #1677ff;
+}
+
+QInputDialog[meetingUiTone="light"] QPushButton[meetingUiRole="primary"]:hover {
+    background: #4096ff;
+    border-color: #4096ff;
+}
+
+QInputDialog[meetingUiTone="light"] QPushButton[meetingUiRole="primary"]:pressed {
+    background: #0958d9;
+    border-color: #0958d9;
+}
+
+QInputDialog[meetingUiTone="light"] QPushButton[meetingUiRole="danger"] {
+    background: #d9363e;
+    color: #ffffff;
+    border-color: #d9363e;
+}
+
+QInputDialog[meetingUiTone="light"] QPushButton[meetingUiRole="danger"]:hover {
+    background: #ed5a60;
+    border-color: #ed5a60;
+}
+
+QInputDialog[meetingUiTone="light"] QPushButton[meetingUiRole="danger"]:pressed {
+    background: #b5222a;
+    border-color: #b5222a;
+}
+
+QInputDialog[meetingUiTone="light"] QPushButton[meetingUiRole="link"] {
+    background: transparent;
+    color: #1677ff;
+    border-color: transparent;
+}
+
+QInputDialog[meetingUiTone="light"] QPushButton[meetingUiRole="link"]:hover {
+    color: #4096ff;
+    background: #f5f9ff;
+}
+
+QProgressDialog[meetingUiTone="light"] {
+    background: #ffffff;
+    border: 1px solid #dfe3e8;
+    border-radius: 10px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+
+QProgressDialog[meetingUiTone="light"] QLabel {
+    color: #1f2329;
+    font-size: 13px;
+    padding: 4px 0;
+}
+
+QProgressDialog[meetingUiTone="light"] QProgressBar {
+    min-height: 8px;
+    max-height: 8px;
+    border: none;
+    border-radius: 4px;
+    background: #e9edf2;
+}
+
+QProgressDialog[meetingUiTone="light"] QProgressBar::chunk {
+    border-radius: 4px;
+    background: #1677ff;
+}
+
+QProgressDialog[meetingUiTone="light"] QPushButton {
+    min-width: 76px;
+    min-height: 32px;
+    padding: 0 14px;
+    border: 1px solid #dcdfe6;
+    border-radius: 6px;
+    background: #ffffff;
+    color: #303133;
+    font-size: 13px;
+}
+
+QProgressDialog[meetingUiTone="light"] QPushButton:hover {
+    color: #1677ff;
+    border-color: #8fc2ff;
+    background: #f5f9ff;
+}
+
+QProgressDialog[meetingUiTone="light"] QPushButton:pressed {
+    color: #0958d9;
+    border-color: #1677ff;
+    background: #eaf3ff;
+}
+
+QProgressDialog[meetingUiTone="light"] QPushButton:disabled {
+    color: #a8abb2;
+    background: #f5f6f7;
+    border-color: #e4e7ed;
+}
+
+QProgressDialog[meetingUiTone="light"] QPushButton[meetingUiRole="primary"] {
+    background: #1677ff;
+    color: #ffffff;
+    border-color: #1677ff;
+}
+
+QProgressDialog[meetingUiTone="light"] QPushButton[meetingUiRole="primary"]:hover {
+    background: #4096ff;
+    border-color: #4096ff;
+}
+
+QProgressDialog[meetingUiTone="light"] QPushButton[meetingUiRole="primary"]:pressed {
+    background: #0958d9;
+    border-color: #0958d9;
+}
+
+QProgressDialog[meetingUiTone="light"] QPushButton[meetingUiRole="danger"] {
+    background: #d9363e;
+    color: #ffffff;
+    border-color: #d9363e;
+}
+
+QProgressDialog[meetingUiTone="light"] QPushButton[meetingUiRole="danger"]:hover {
+    background: #ed5a60;
+    border-color: #ed5a60;
+}
+
+QProgressDialog[meetingUiTone="light"] QPushButton[meetingUiRole="danger"]:pressed {
+    background: #b5222a;
+    border-color: #b5222a;
+}
+
+QProgressDialog[meetingUiTone="light"] QPushButton[meetingUiRole="link"] {
+    background: transparent;
+    color: #1677ff;
+    border-color: transparent;
+}
+
+QProgressDialog[meetingUiTone="light"] QPushButton[meetingUiRole="link"]:hover {
+    color: #4096ff;
+    background: #f5f9ff;
+}
+
+QMenu[meetingUiTone="light"] {
+    background: #ffffff;
+    color: #1f2329;
+    border: 1px solid #dfe3e8;
+    border-radius: 8px;
+    padding: 6px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+}
+
+QMenu[meetingUiTone="light"]::item {
+    min-height: 22px;
+    padding: 6px 28px 6px 12px;
+    border-radius: 5px;
+}
+
+QMenu[meetingUiTone="light"]::item:selected {
+    background: #eaf3ff;
+    color: #1677ff;
+}
+
+QMenu[meetingUiTone="light"]::item:pressed {
+    background: #dcecff;
+}
+
+QMenu[meetingUiTone="light"]::item:disabled {
+    color: #a8abb2;
+    background: transparent;
+}
+
+QMenu[meetingUiTone="light"]::separator {
+    height: 1px;
+    background: #e5e8ec;
+    margin: 5px 7px;
+}
+
+QMessageBox[meetingUiTone="dark"] {
+    background: #1a1d24;
+    border: 1px solid #363c4a;
+    border-radius: 10px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+
+QMessageBox[meetingUiTone="dark"] QLabel {
+    color: #f3f4f6;
+    font-size: 13px;
+}
+
+QMessageBox[meetingUiTone="dark"] QLabel[objectName="qt_msgbox_label"] {
+    min-width: 340px;
+    max-width: 520px;
+    padding: 8px 4px 10px 4px;
+}
+
+QMessageBox[meetingUiTone="dark"] QLabel[objectName="qt_msgbox_informativelabel"] {
+    color: #aeb4c0;
+    padding: 0 4px 8px 4px;
+}
+
+QMessageBox[meetingUiTone="dark"] QCheckBox {
+    color: #aeb4c0;
+    spacing: 8px;
+}
+
+QMessageBox[meetingUiTone="dark"] QPushButton {
+    min-width: 76px;
+    min-height: 32px;
+    padding: 0 14px;
+    border: 1px solid #454c5a;
+    border-radius: 6px;
+    background: #2b3039;
+    color: #e8eaf0;
+    font-size: 13px;
+}
+
+QMessageBox[meetingUiTone="dark"] QPushButton:hover {
+    background: #363c47;
+    border-color: #596273;
+}
+
+QMessageBox[meetingUiTone="dark"] QPushButton:pressed {
+    background: #222731;
+}
+
+QMessageBox[meetingUiTone="dark"] QPushButton:disabled {
+    color: #707785;
+    background: #252a32;
+    border-color: #343a45;
+}
+
+QMessageBox[meetingUiTone="dark"] QPushButton[meetingUiRole="primary"] {
+    background: #1677ff;
+    color: #ffffff;
+    border-color: #1677ff;
+}
+
+QMessageBox[meetingUiTone="dark"] QPushButton[meetingUiRole="primary"]:hover {
+    background: #4096ff;
+    border-color: #4096ff;
+}
+
+QMessageBox[meetingUiTone="dark"] QPushButton[meetingUiRole="primary"]:pressed {
+    background: #0958d9;
+    border-color: #0958d9;
+}
+
+QMessageBox[meetingUiTone="dark"] QPushButton[meetingUiRole="danger"] {
+    background: #dc3545;
+    color: #ffffff;
+    border-color: #dc3545;
+}
+
+QMessageBox[meetingUiTone="dark"] QPushButton[meetingUiRole="danger"]:hover {
+    background: #e55361;
+    border-color: #e55361;
+}
+
+QMessageBox[meetingUiTone="dark"] QPushButton[meetingUiRole="danger"]:pressed {
+    background: #b92534;
+    border-color: #b92534;
+}
+
+QMessageBox[meetingUiTone="dark"] QPushButton[meetingUiRole="link"] {
+    background: transparent;
+    color: #69a8ff;
+    border-color: transparent;
+}
+
+QMessageBox[meetingUiTone="dark"] QPushButton[meetingUiRole="link"]:hover {
+    color: #91c0ff;
+    background: #292f38;
+}
+
+QInputDialog[meetingUiTone="dark"] {
+    background: #1a1d24;
+    border: 1px solid #454c5a;
+    border-radius: 10px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+
+QInputDialog[meetingUiTone="dark"] QLabel {
+    color: #f3f4f6;
+    font-size: 13px;
+}
+
+QInputDialog[meetingUiTone="dark"] QLineEdit,
+QInputDialog[meetingUiTone="dark"] QComboBox,
+QInputDialog[meetingUiTone="dark"] QSpinBox,
+QInputDialog[meetingUiTone="dark"] QDoubleSpinBox {
+    min-height: 34px;
+    padding: 0 10px;
+    border: 1px solid #454c5a;
+    border-radius: 6px;
+    background: #242831;
+    color: #f3f4f6;
+    selection-background-color: #1677ff;
+    selection-color: #ffffff;
+}
+
+QInputDialog[meetingUiTone="dark"] QLineEdit:focus,
+QInputDialog[meetingUiTone="dark"] QComboBox:focus,
+QInputDialog[meetingUiTone="dark"] QSpinBox:focus,
+QInputDialog[meetingUiTone="dark"] QDoubleSpinBox:focus {
+    border-color: #1677ff;
+}
+
+QInputDialog[meetingUiTone="dark"] QComboBox QAbstractItemView {
+    background: #242831;
+    color: #f3f4f6;
+    border: 1px solid #454c5a;
+    border-radius: 7px;
+    padding: 4px;
+    outline: none;
+    selection-background-color: #2b3442;
+    selection-color: #ffffff;
+}
+
+QInputDialog[meetingUiTone="dark"] QComboBox QAbstractItemView::item {
+    min-height: 30px;
+    padding: 0 9px;
+    border-radius: 5px;
+}
+
+QInputDialog[meetingUiTone="dark"] QPushButton {
+    min-width: 76px;
+    min-height: 32px;
+    padding: 0 14px;
+    border: 1px solid #454c5a;
+    border-radius: 6px;
+    background: #2b3039;
+    color: #e8eaf0;
+    font-size: 13px;
+}
+
+QInputDialog[meetingUiTone="dark"] QPushButton:hover {
+    background: #363c47;
+    border-color: #596273;
+}
+
+QInputDialog[meetingUiTone="dark"] QPushButton:pressed {
+    background: #222731;
+}
+
+QInputDialog[meetingUiTone="dark"] QPushButton:disabled {
+    color: #707785;
+    background: #252a32;
+    border-color: #343a45;
+}
+
+QInputDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="primary"] {
+    background: #1677ff;
+    color: #ffffff;
+    border-color: #1677ff;
+}
+
+QInputDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="primary"]:hover {
+    background: #4096ff;
+    border-color: #4096ff;
+}
+
+QInputDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="primary"]:pressed {
+    background: #0958d9;
+    border-color: #0958d9;
+}
+
+QInputDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="danger"] {
+    background: #dc3545;
+    color: #ffffff;
+    border-color: #dc3545;
+}
+
+QInputDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="danger"]:hover {
+    background: #e55361;
+    border-color: #e55361;
+}
+
+QInputDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="danger"]:pressed {
+    background: #b92534;
+    border-color: #b92534;
+}
+
+QInputDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="link"] {
+    background: transparent;
+    color: #69a8ff;
+    border-color: transparent;
+}
+
+QInputDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="link"]:hover {
+    color: #91c0ff;
+    background: #292f38;
+}
+
+QProgressDialog[meetingUiTone="dark"] {
+    background: #1a1d24;
+    border: 1px solid #363c4a;
+    border-radius: 10px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+
+QProgressDialog[meetingUiTone="dark"] QLabel {
+    color: #f3f4f6;
+    font-size: 13px;
+    padding: 4px 0;
+}
+
+QProgressDialog[meetingUiTone="dark"] QProgressBar {
+    min-height: 8px;
+    max-height: 8px;
+    border: none;
+    border-radius: 4px;
+    background: #303641;
+}
+
+QProgressDialog[meetingUiTone="dark"] QProgressBar::chunk {
+    border-radius: 4px;
+    background: #1677ff;
+}
+
+QProgressDialog[meetingUiTone="dark"] QPushButton {
+    min-width: 76px;
+    min-height: 32px;
+    padding: 0 14px;
+    border: 1px solid #454c5a;
+    border-radius: 6px;
+    background: #2b3039;
+    color: #e8eaf0;
+    font-size: 13px;
+}
+
+QProgressDialog[meetingUiTone="dark"] QPushButton:hover {
+    background: #363c47;
+    border-color: #596273;
+}
+
+QProgressDialog[meetingUiTone="dark"] QPushButton:pressed {
+    background: #222731;
+}
+
+QProgressDialog[meetingUiTone="dark"] QPushButton:disabled {
+    color: #707785;
+    background: #252a32;
+    border-color: #343a45;
+}
+
+QProgressDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="primary"] {
+    background: #1677ff;
+    color: #ffffff;
+    border-color: #1677ff;
+}
+
+QProgressDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="primary"]:hover {
+    background: #4096ff;
+    border-color: #4096ff;
+}
+
+QProgressDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="primary"]:pressed {
+    background: #0958d9;
+    border-color: #0958d9;
+}
+
+QProgressDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="danger"] {
+    background: #dc3545;
+    color: #ffffff;
+    border-color: #dc3545;
+}
+
+QProgressDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="danger"]:hover {
+    background: #e55361;
+    border-color: #e55361;
+}
+
+QProgressDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="danger"]:pressed {
+    background: #b92534;
+    border-color: #b92534;
+}
+
+QProgressDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="link"] {
+    background: transparent;
+    color: #69a8ff;
+    border-color: transparent;
+}
+
+QProgressDialog[meetingUiTone="dark"] QPushButton[meetingUiRole="link"]:hover {
+    color: #91c0ff;
+    background: #292f38;
+}
+
+QMenu[meetingUiTone="dark"] {
+    background: #1a1d24;
+    color: #f3f4f6;
+    border: 1px solid #363c4a;
+    border-radius: 8px;
+    padding: 6px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+}
+
+QMenu[meetingUiTone="dark"]::item {
+    min-height: 22px;
+    padding: 6px 28px 6px 12px;
+    border-radius: 5px;
+}
+
+QMenu[meetingUiTone="dark"]::item:selected {
+    background: #2b3442;
+    color: #ffffff;
+}
+
+QMenu[meetingUiTone="dark"]::item:pressed {
+    background: #343f50;
+}
+
+QMenu[meetingUiTone="dark"]::item:disabled {
+    color: #7f8795;
+    background: transparent;
+}
+
+QMenu[meetingUiTone="dark"]::separator {
+    height: 1px;
+    background: #363c4a;
+    margin: 5px 7px;
+}
+QScrollArea#adaptiveDialogScroll, QWidget#adaptiveDialogContent {
+    background: transparent;
+    border: none;
+}

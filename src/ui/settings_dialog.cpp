@@ -1,3 +1,5 @@
+#include <QtCore/QCoreApplication>
+#include "src/ui/app_theme.h"
 #include "src/ui/settings_dialog.h"
 
 #include "src/media/dshow_enumerator.h"
@@ -82,7 +84,7 @@ QWidget *makeScrollablePage(QWidget *content, QWidget *parent) {
 	auto *scroll = new QScrollArea(parent);
 	scroll->setWidgetResizable(true);
 	scroll->setFrameShape(QFrame::NoFrame);
-	scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+	scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 	scroll->setWidget(content);
 	return scroll;
 }
@@ -90,10 +92,10 @@ QWidget *makeScrollablePage(QWidget *content, QWidget *parent) {
 QString displayDeviceName(const std::string &name, bool isDefault) {
 	auto result = QString::fromStdString(name);
 	if (result.trimmed().isEmpty()) {
-		result = QString::fromUtf8("未命名设备");
+		result = QCoreApplication::translate("MeetingUI", "Unnamed Device");
 	}
 	if (isDefault) {
-		result += QString::fromUtf8("（系统默认）");
+		result += QCoreApplication::translate("MeetingUI", "(System Default)");
 	}
 	return result;
 }
@@ -118,13 +120,14 @@ SettingsDialog::SettingsDialog(
 	: QDialog(parent)
 	, _session(session) {
 	setObjectName(QStringLiteral("settingsDialog"));
-	setWindowTitle(QString::fromUtf8("设置"));
+	setWindowTitle(QCoreApplication::translate("MeetingUI", "Settings"));
 	setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint);
 	setAttribute(Qt::WA_TranslucentBackground, true);
 	setModal(true);
 	resize(760 + kShadowMargin * 2, 640 + kShadowMargin * 2);
 	setMinimumSize(680 + kShadowMargin * 2, 520 + kShadowMargin * 2);
 	buildUi();
+	AppTheme::makeDialogAdaptive(*this, QSize(796, 676));
 	setPreferences(_session.mediaPreferences());
 	connectPreferenceControls();
 	connectDeviceControllers();
@@ -158,97 +161,7 @@ SettingsDialog::~SettingsDialog() {
 }
 
 void SettingsDialog::buildUi() {
-	setStyleSheet(R"(
-		QDialog#settingsDialog {
-			background: transparent;
-		}
-		QFrame#settingsShadowSurface {
-			background: #ffffff;
-			border-radius: 12px;
-		}
-		QFrame#settingsSurface {
-			background: #ffffff;
-			border: 1px solid #dfe3e8;
-			border-radius: 12px;
-		}
-		QWidget {
-			font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-			font-size: 13px;
-			color: #1f2329;
-		}
-		QWidget#titleBar {
-			background: #ffffff;
-			border-bottom: 1px solid #e5e8ec;
-		}
-		QLabel#dialogTitle {
-			font-size: 15px;
-			font-weight: 500;
-			color: #303133;
-		}
-		QPushButton#closeButton {
-			border: none;
-			background: transparent;
-			border-radius: 4px;
-		}
-		QPushButton#closeButton:hover { background: #f2f3f5; }
-		QListWidget#settingsNavigation {
-			background: #ffffff;
-			border: none;
-			border-right: 1px solid #e5e8ec;
-			outline: none;
-			padding: 8px 7px;
-		}
-		QListWidget#settingsNavigation::item {
-			height: 40px;
-			padding-left: 12px;
-			border-radius: 6px;
-			color: #303133;
-		}
-		QListWidget#settingsNavigation::item:hover { background: #f5f7fa; }
-		QListWidget#settingsNavigation::item:selected {
-			background: #1677ff;
-			color: #ffffff;
-		}
-		QLabel#pageTitle { color: #1f2329; }
-		QLabel#sectionTitle { color: #1f2329; }
-		QLabel#hintLabel { color: #8f959e; font-size: 12px; }
-		QComboBox {
-			min-height: 34px;
-			border: 1px solid #dcdfe6;
-			border-radius: 5px;
-			background: #ffffff;
-			padding: 0 36px 0 10px;
-		}
-		QComboBox:hover, QComboBox:focus { border-color: #1677ff; }
-		QComboBox:disabled { background: #f5f6f7; color: #a8abb2; }
-		QCheckBox, QRadioButton { spacing: 8px; min-height: 26px; }
-		QCheckBox::indicator, QRadioButton::indicator { width: 16px; height: 16px; }
-		QPushButton#secondaryButton {
-			min-height: 34px;
-			padding: 0 16px;
-			border: 1px solid #dcdfe6;
-			border-radius: 5px;
-			background: #ffffff;
-			color: #303133;
-		}
-		QPushButton#secondaryButton:hover { border-color: #1677ff; color: #1677ff; }
-		QPushButton#secondaryButton:pressed { background: #eef5ff; }
-		QPushButton#secondaryButton:disabled { color: #a8abb2; background: #f5f6f7; }
-		QFrame#previewHost {
-			background: #172033;
-			border: 1px solid #26334d;
-			border-radius: 7px;
-		}
-		QLabel#previewMessage { color: #c8d1df; font-size: 14px; }
-		QProgressBar {
-			min-height: 8px;
-			max-height: 8px;
-			border: none;
-			border-radius: 4px;
-			background: #e9edf2;
-		}
-		QProgressBar::chunk { border-radius: 4px; background: #20b26b; }
-	)" );
+	MeetingUI::AppTheme::setStyleVariant(*this, "settings-dialog-this");
 
 	auto *root = new QVBoxLayout(this);
 	root->setContentsMargins(
@@ -283,18 +196,18 @@ void SettingsDialog::buildUi() {
 
 	auto *titleBar = new QWidget(surface);
 	titleBar->setObjectName(QStringLiteral("titleBar"));
-	titleBar->setFixedHeight(kTitleBarHeight);
+	titleBar->setMinimumHeight(kTitleBarHeight);
 	auto *titleLayout = new QHBoxLayout(titleBar);
 	titleLayout->setContentsMargins(18, 0, 12, 0);
 	titleLayout->addStretch();
-	auto *title = new QLabel(QString::fromUtf8("设置"), titleBar);
+	auto *title = new QLabel(QCoreApplication::translate("MeetingUI", "Settings"), titleBar);
 	title->setObjectName(QStringLiteral("dialogTitle"));
 	titleLayout->addWidget(title);
 	titleLayout->addStretch();
 	auto *closeButton = new QPushButton(titleBar);
 	closeButton->setObjectName(QStringLiteral("closeButton"));
 	closeButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
-	closeButton->setToolTip(QString::fromUtf8("关闭"));
+	closeButton->setToolTip(QCoreApplication::translate("MeetingUI", "Close"));
 	closeButton->setFixedSize(28, 28);
 	titleLayout->addWidget(closeButton);
 	connect(closeButton, &QPushButton::clicked, this, &QDialog::accept);
@@ -306,22 +219,25 @@ void SettingsDialog::buildUi() {
 
 	_navigation = new QListWidget(surface);
 	_navigation->setObjectName(QStringLiteral("settingsNavigation"));
-	_navigation->setFixedWidth(190);
+	_navigation->setMinimumWidth(150);
+	_navigation->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Expanding);
+	_navigation->setWordWrap(true);
+	_navigation->setTextElideMode(Qt::ElideNone);
 	_navigation->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-	_navigation->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+	_navigation->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 	_navigation->setSelectionMode(QAbstractItemView::SingleSelection);
 	_navigation->addItem(new QListWidgetItem(
 		style()->standardIcon(QStyle::SP_FileDialogDetailedView),
-		QString::fromUtf8("常规设置")));
+		QCoreApplication::translate("MeetingUI", "General")));
 	_navigation->addItem(new QListWidgetItem(
 		style()->standardIcon(QStyle::SP_MediaPlay),
-		QString::fromUtf8("视频")));
+		QCoreApplication::translate("MeetingUI", "Video")));
 	_navigation->addItem(new QListWidgetItem(
 		style()->standardIcon(QStyle::SP_MediaVolume),
-		QString::fromUtf8("音频")));
+		QCoreApplication::translate("MeetingUI", "Audio")));
 	_navigation->addItem(new QListWidgetItem(
 		style()->standardIcon(QStyle::SP_MessageBoxInformation),
-		QString::fromUtf8("关于我们")));
+		QCoreApplication::translate("MeetingUI", "About")));
 	body->addWidget(_navigation);
 
 	_pages = new QStackedWidget(surface);
@@ -358,15 +274,15 @@ QWidget *SettingsDialog::buildGeneralPage() {
 	auto *layout = new QVBoxLayout(content);
 	layout->setContentsMargins(24, 20, 24, 24);
 	layout->setSpacing(8);
-	layout->addWidget(makePageTitle(QString::fromUtf8("常规设置"), content));
+	layout->addWidget(makePageTitle(QCoreApplication::translate("MeetingUI", "General"), content));
 	layout->addSpacing(6);
 
-	_generalCamera = new QCheckBox(QString::fromUtf8("入会开启摄像头"), content);
-	_generalMicrophone = new QCheckBox(QString::fromUtf8("入会开启麦克风"), content);
-	_generalSpeaker = new QCheckBox(QString::fromUtf8("入会时使用电脑音频"), content);
-	_quitOnClose = new QCheckBox(QString::fromUtf8("关闭主面板时，退出程序"), content);
-	_showActiveSpeaker = new QCheckBox(QString::fromUtf8("显示当前说话者"), content);
-	_stayWhenLocked = new QCheckBox(QString::fromUtf8("锁屏时不退出会议"), content);
+	_generalCamera = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable camera on joining"), content);
+	_generalMicrophone = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable microphone on joining"), content);
+	_generalSpeaker = new QCheckBox(QCoreApplication::translate("MeetingUI", "Use computer audio when joining"), content);
+	_quitOnClose = new QCheckBox(QCoreApplication::translate("MeetingUI", "Quit when the main window is closed"), content);
+	_showActiveSpeaker = new QCheckBox(QCoreApplication::translate("MeetingUI", "Show the active speaker"), content);
+	_stayWhenLocked = new QCheckBox(QCoreApplication::translate("MeetingUI", "Stay in the meeting when the screen is locked"), content);
 
 	layout->addWidget(_generalCamera);
 	layout->addWidget(_generalMicrophone);
@@ -384,7 +300,7 @@ QWidget *SettingsDialog::buildVideoPage() {
 	auto *layout = new QVBoxLayout(content);
 	layout->setContentsMargins(24, 20, 24, 24);
 	layout->setSpacing(8);
-	layout->addWidget(makePageTitle(QString::fromUtf8("视频"), content));
+	layout->addWidget(makePageTitle(QCoreApplication::translate("MeetingUI", "Video"), content));
 	layout->addSpacing(4);
 
 	_previewHost = new QFrame(content);
@@ -396,7 +312,7 @@ QWidget *SettingsDialog::buildVideoPage() {
 	previewLayout->setContentsMargins(0, 0, 0, 0);
 	_cameraPreview = new CameraPreviewWidget(_previewHost);
 	previewLayout->addWidget(_cameraPreview, 1);
-	_previewMessage = new QLabel(QString::fromUtf8("摄像头预览"), _previewHost);
+	_previewMessage = new QLabel(QCoreApplication::translate("MeetingUI", "Camera Preview"), _previewHost);
 	_previewMessage->setObjectName(QStringLiteral("previewMessage"));
 	_previewMessage->setAlignment(Qt::AlignCenter);
 	_previewMessage->setWordWrap(true);
@@ -404,31 +320,31 @@ QWidget *SettingsDialog::buildVideoPage() {
 	previewLayout->addWidget(_previewMessage, 1);
 	layout->addWidget(_previewHost);
 
-	layout->addWidget(makeSectionTitle(QString::fromUtf8("摄像头"), content));
+	layout->addWidget(makeSectionTitle(QCoreApplication::translate("MeetingUI", "Camera"), content));
 	_cameraCombo = new QComboBox(content);
 	_cameraCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
 	_cameraCombo->setMinimumContentsLength(28);
 	layout->addWidget(_cameraCombo);
 
-	_videoCamera = new QCheckBox(QString::fromUtf8("入会开启摄像头"), content);
+	_videoCamera = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable camera on joining"), content);
 	layout->addWidget(_videoCamera);
 
-	_highDefinition = new QCheckBox(QString::fromUtf8("高清摄像头画质"), content);
+	_highDefinition = new QCheckBox(QCoreApplication::translate("MeetingUI", "HD Camera Quality"), content);
 	layout->addWidget(_highDefinition);
 	_resolutionCombo = new QComboBox(content);
 	_resolutionCombo->setMinimumWidth(280);
 	layout->addWidget(_resolutionCombo);
 	auto *resolutionHint = new QLabel(
-		QString::fromUtf8("默认选择最接近 1920 × 1080 的设备档位；低于 1080p 的设备使用其最高档位。"),
+		QCoreApplication::translate("MeetingUI", "Selects the device mode closest to 1920 × 1080 by default. Devices below 1080p use their highest available resolution."),
 		content);
 	resolutionHint->setObjectName(QStringLiteral("hintLabel"));
 	resolutionHint->setWordWrap(true);
 	layout->addWidget(resolutionHint);
 
-	_mirrorEnabled = new QCheckBox(QString::fromUtf8("视频镜像"), content);
+	_mirrorEnabled = new QCheckBox(QCoreApplication::translate("MeetingUI", "Mirror Video"), content);
 	layout->addWidget(_mirrorEnabled);
-	_localMirror = new QRadioButton(QString::fromUtf8("仅自己看到镜像"), content);
-	_remoteMirror = new QRadioButton(QString::fromUtf8("所有参会者看到镜像"), content);
+	_localMirror = new QRadioButton(QCoreApplication::translate("MeetingUI", "Mirror only my preview"), content);
+	_remoteMirror = new QRadioButton(QCoreApplication::translate("MeetingUI", "Mirror for all participants"), content);
 	auto *mirrorGroup = new QButtonGroup(content);
 	mirrorGroup->setExclusive(true);
 	mirrorGroup->addButton(_localMirror);
@@ -452,29 +368,29 @@ QWidget *SettingsDialog::buildAudioPage() {
 	auto *layout = new QVBoxLayout(content);
 	layout->setContentsMargins(24, 20, 24, 24);
 	layout->setSpacing(8);
-	layout->addWidget(makePageTitle(QString::fromUtf8("音频"), content));
+	layout->addWidget(makePageTitle(QCoreApplication::translate("MeetingUI", "Audio"), content));
 	layout->addSpacing(4);
 
-	layout->addWidget(makeSectionTitle(QString::fromUtf8("扬声器"), content));
+	layout->addWidget(makeSectionTitle(QCoreApplication::translate("MeetingUI", "Speaker"), content));
 	auto *speakerRow = new QHBoxLayout();
 	_speakerCombo = new QComboBox(content);
 	_speakerCombo->setMinimumContentsLength(24);
-	_speakerTestButton = new QPushButton(QString::fromUtf8("检测扬声器"), content);
+	_speakerTestButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Test Speaker"), content);
 	_speakerTestButton->setObjectName(QStringLiteral("secondaryButton"));
-	_speakerTestButton->setFixedWidth(108);
+	_speakerTestButton->setMinimumWidth(108);
 	speakerRow->addWidget(_speakerCombo, 1);
 	speakerRow->addWidget(_speakerTestButton);
 	layout->addLayout(speakerRow);
 	layout->addSpacing(12);
 
-	layout->addWidget(makeSectionTitle(QString::fromUtf8("麦克风"), content));
+	layout->addWidget(makeSectionTitle(QCoreApplication::translate("MeetingUI", "Microphone"), content));
 	auto *microphoneRow = new QHBoxLayout();
 	_microphoneCombo = new QComboBox(content);
 	_microphoneCombo->setMinimumContentsLength(24);
-	_microphoneTestButton = new QPushButton(QString::fromUtf8("检测麦克风"), content);
+	_microphoneTestButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Test Microphone"), content);
 	_microphoneTestButton->setObjectName(QStringLiteral("secondaryButton"));
 	_microphoneTestButton->setCheckable(true);
-	_microphoneTestButton->setFixedWidth(108);
+	_microphoneTestButton->setMinimumWidth(108);
 	microphoneRow->addWidget(_microphoneCombo, 1);
 	microphoneRow->addWidget(_microphoneTestButton);
 	layout->addLayout(microphoneRow);
@@ -482,7 +398,7 @@ QWidget *SettingsDialog::buildAudioPage() {
 	_microphoneLevel->setRange(0, 100);
 	_microphoneLevel->setValue(0);
 	_microphoneLevel->setTextVisible(false);
-	_microphoneLevel->setAccessibleName(QString::fromUtf8("麦克风输入电平"));
+	_microphoneLevel->setAccessibleName(QCoreApplication::translate("MeetingUI", "Microphone Input Level"));
 	layout->addWidget(_microphoneLevel);
 	_audioStatus = new QLabel(content);
 	_audioStatus->setObjectName(QStringLiteral("hintLabel"));
@@ -491,15 +407,15 @@ QWidget *SettingsDialog::buildAudioPage() {
 	layout->addWidget(_audioStatus);
 	layout->addSpacing(8);
 
-	_audioMicrophone = new QCheckBox(QString::fromUtf8("入会开启麦克风"), content);
-	_audioSpeaker = new QCheckBox(QString::fromUtf8("入会时使用电脑音频"), content);
-	_pushToTalk = new QCheckBox(QString::fromUtf8("静音状态下长按空格键临时开启麦克风"), content);
-	_noiseSuppression = new QCheckBox(QString::fromUtf8("抑制背景噪声"), content);
+	_audioMicrophone = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable microphone on joining"), content);
+	_audioSpeaker = new QCheckBox(QCoreApplication::translate("MeetingUI", "Use computer audio when joining"), content);
+	_pushToTalk = new QCheckBox(QCoreApplication::translate("MeetingUI", "Hold Space to temporarily unmute"), content);
+	_noiseSuppression = new QCheckBox(QCoreApplication::translate("MeetingUI", "Suppress background noise"), content);
 	layout->addWidget(_audioMicrophone);
 	layout->addWidget(_audioSpeaker);
 	layout->addWidget(_pushToTalk);
 	layout->addSpacing(8);
-	layout->addWidget(makeSectionTitle(QString::fromUtf8("音频降噪与增强"), content));
+	layout->addWidget(makeSectionTitle(QCoreApplication::translate("MeetingUI", "Noise Reduction and Audio Enhancement"), content));
 	layout->addWidget(_noiseSuppression);
 	layout->addStretch();
 	return makeScrollablePage(content, this);
@@ -546,7 +462,7 @@ void SettingsDialog::connectDeviceControllers() {
 		this,
 		[this](const QString &message) {
 			setMicrophoneTestActive(false);
-			_audioStatus->setStyleSheet(QStringLiteral("color: #f53f3f;"));
+			MeetingUI::AppTheme::setStyleVariant(*_audioStatus, "settings-dialog-audiostatus");
 			_audioStatus->setText(message);
 			_audioStatus->show();
 		});
@@ -555,11 +471,9 @@ void SettingsDialog::connectDeviceControllers() {
 		&AudioDeviceTestController::speakerTestFinished,
 		this,
 		[this](bool success, const QString &message) {
-			_audioStatus->setStyleSheet(success
-				? QStringLiteral("color: #20a162;")
-				: QStringLiteral("color: #f53f3f;"));
+			MeetingUI::AppTheme::setStyleVariant(*_audioStatus, success ? "settings-dialog-audiostatus-2-active" : "settings-dialog-audiostatus-2-normal");
 			_audioStatus->setText(success
-				? QString::fromUtf8("扬声器检测完成")
+				? QCoreApplication::translate("MeetingUI", "Speaker test complete")
 				: message);
 			_audioStatus->setVisible(success || !message.isEmpty());
 		});
@@ -568,7 +482,7 @@ void SettingsDialog::connectDeviceControllers() {
 		&AudioDeviceTestController::deviceEnumerationFailed,
 		this,
 		[this](const QString &message) {
-			_audioStatus->setStyleSheet(QStringLiteral("color: #f53f3f;"));
+			MeetingUI::AppTheme::setStyleVariant(*_audioStatus, "settings-dialog-audiostatus-3");
 			_audioStatus->setText(message);
 			_audioStatus->show();
 		});
@@ -598,23 +512,23 @@ void SettingsDialog::connectDeviceControllers() {
 			auto defaultSpeaker = -1;
 			for (const auto &device : microphones) {
 				auto name = device.name.trimmed().isEmpty()
-					? QString::fromUtf8("未命名设备")
+					? QCoreApplication::translate("MeetingUI", "Unnamed Device")
 					: device.name;
-				if (device.isDefault) name += QString::fromUtf8("（系统默认）");
+				if (device.isDefault) name += QCoreApplication::translate("MeetingUI", "(System Default)");
 				_microphoneCombo->addItem(name, device.id);
 				if (device.isDefault) defaultMicrophone = _microphoneCombo->count() - 1;
 			}
 			for (const auto &device : speakers) {
 				auto name = device.name.trimmed().isEmpty()
-					? QString::fromUtf8("未命名设备")
+					? QCoreApplication::translate("MeetingUI", "Unnamed Device")
 					: device.name;
-				if (device.isDefault) name += QString::fromUtf8("（系统默认）");
+				if (device.isDefault) name += QCoreApplication::translate("MeetingUI", "(System Default)");
 				_speakerCombo->addItem(name, device.id);
 				if (device.isDefault) defaultSpeaker = _speakerCombo->count() - 1;
 			}
 
 			if (_microphoneCombo->count() == 0) {
-				_microphoneCombo->addItem(QString::fromUtf8("未检测到可用麦克风"), QString());
+				_microphoneCombo->addItem(QCoreApplication::translate("MeetingUI", "No microphone detected"), QString());
 				_microphoneCombo->setEnabled(false);
 				_microphoneTestButton->setEnabled(false);
 			} else {
@@ -625,7 +539,7 @@ void SettingsDialog::connectDeviceControllers() {
 					selected >= 0 ? selected : (defaultMicrophone >= 0 ? defaultMicrophone : 0));
 			}
 			if (_speakerCombo->count() == 0) {
-				_speakerCombo->addItem(QString::fromUtf8("未检测到可用扬声器"), QString());
+				_speakerCombo->addItem(QCoreApplication::translate("MeetingUI", "No speaker detected"), QString());
 				_speakerCombo->setEnabled(false);
 				_speakerTestButton->setEnabled(false);
 			} else {
@@ -651,12 +565,12 @@ QWidget *SettingsDialog::buildAboutPage() {
 	auto *layout = new QVBoxLayout(content);
 	layout->setContentsMargins(24, 20, 24, 24);
 	layout->setSpacing(12);
-	layout->addWidget(makePageTitle(QString::fromUtf8("关于我们"), content));
+	layout->addWidget(makePageTitle(QCoreApplication::translate("MeetingUI", "About"), content));
 	layout->addStretch();
 
 	auto *productName = new QLabel(QCoreApplication::applicationName(), content);
 	if (productName->text().trimmed().isEmpty()) {
-		productName->setText(QStringLiteral("LiveKit Meeting"));
+		productName->setText(QCoreApplication::translate("MeetingUI", "LiveKit Meeting"));
 	}
 	productName->setAlignment(Qt::AlignCenter);
 	auto nameFont = productName->font();
@@ -667,16 +581,16 @@ QWidget *SettingsDialog::buildAboutPage() {
 
 	auto version = QCoreApplication::applicationVersion().trimmed();
 	if (version.isEmpty()) {
-		version = QString::fromUtf8("开发版本");
+		version = QCoreApplication::translate("MeetingUI", "Development Build");
 	}
-	auto *versionLabel = new QLabel(QString::fromUtf8("版本 %1").arg(version), content);
+	auto *versionLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Version %1").arg(version), content);
 	versionLabel->setObjectName(QStringLiteral("hintLabel"));
 	versionLabel->setAlignment(Qt::AlignCenter);
 	layout->addWidget(versionLabel);
 
-	auto *updateButton = new QPushButton(QString::fromUtf8("检查更新"), content);
+	auto *updateButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Check for Updates"), content);
 	updateButton->setObjectName(QStringLiteral("secondaryButton"));
-	updateButton->setFixedWidth(240);
+	updateButton->setMinimumWidth(240);
 	layout->addWidget(updateButton, 0, Qt::AlignHCenter);
 	layout->addStretch(2);
 	return makeScrollablePage(content, this);
@@ -921,10 +835,10 @@ void SettingsDialog::refreshDevices() {
 	const auto oldUpdating = _updatingUi;
 	_updatingUi = true;
 	_microphoneCombo->clear();
-	_microphoneCombo->addItem(QString::fromUtf8("正在检测麦克风…"), QString());
+	_microphoneCombo->addItem(QCoreApplication::translate("MeetingUI", "Testing microphone..."), QString());
 	_microphoneCombo->setEnabled(false);
 	_speakerCombo->clear();
-	_speakerCombo->addItem(QString::fromUtf8("正在检测扬声器…"), QString());
+	_speakerCombo->addItem(QCoreApplication::translate("MeetingUI", "Testing speaker..."), QString());
 	_speakerCombo->setEnabled(false);
 	_microphoneTestButton->setEnabled(false);
 	_speakerTestButton->setEnabled(false);
@@ -988,9 +902,9 @@ void SettingsDialog::refreshVideoDevices(const OpenMeeting::MediaPreferences &va
 	}
 
 	if (_cameraCombo->count() == 0) {
-		_cameraCombo->addItem(QString::fromUtf8("未检测到可用摄像头"), QString());
+		_cameraCombo->addItem(QCoreApplication::translate("MeetingUI", "No camera available"), QString());
 		_cameraCombo->setEnabled(false);
-		setVideoPreviewMessage(QString::fromUtf8("未检测到可用摄像头"), true);
+		setVideoPreviewMessage(QCoreApplication::translate("MeetingUI", "No camera available"), true);
 	} else {
 		_cameraCombo->setEnabled(true);
 		auto selectedIndex = findData(_cameraCombo, value.cameraDeviceId);
@@ -1021,7 +935,7 @@ void SettingsDialog::rebuildResolutionChoices(
 	const auto formats = _cameraFormats.value(selectedCameraDeviceId());
 	for (const auto &format : formats) {
 		_resolutionCombo->addItem(
-			QString::fromUtf8("%1 × %2  ·  %3 fps")
+			QCoreApplication::translate("MeetingUI", "%1 × %2  ·  %3 fps")
 				.arg(format.width)
 				.arg(format.height)
 				.arg(format.fps));
@@ -1032,7 +946,7 @@ void SettingsDialog::rebuildResolutionChoices(
 	}
 
 	if (formats.isEmpty()) {
-		_resolutionCombo->addItem(QString::fromUtf8("未获取到分辨率档位"));
+		_resolutionCombo->addItem(QCoreApplication::translate("MeetingUI", "No resolution modes available"));
 		_resolutionCombo->setEnabled(false);
 		_highDefinition->setEnabled(false);
 		_highDefinition->setChecked(false);
@@ -1167,7 +1081,7 @@ void SettingsDialog::requestPreviewIfVisible() {
 	const auto value = preferences();
 	if (value.cameraDeviceId.isEmpty()) {
 		_cameraPreview->stopPreview();
-		setVideoPreviewMessage(QString::fromUtf8("未检测到可用摄像头"), true);
+		setVideoPreviewMessage(QCoreApplication::translate("MeetingUI", "No camera available"), true);
 		return;
 	}
 	const auto format = selectedVideoFormat();
@@ -1203,7 +1117,7 @@ void SettingsDialog::setMicrophoneTestActive(bool active) {
 	const QSignalBlocker blocker(_microphoneTestButton);
 	_microphoneTestButton->setChecked(active);
 	_microphoneTestButton->setText(
-		active ? QString::fromUtf8("停止检测") : QString::fromUtf8("检测麦克风"));
+		active ? QCoreApplication::translate("MeetingUI", "Stop Test") : QCoreApplication::translate("MeetingUI", "Test Microphone"));
 	if (!active) {
 		setMicrophoneLevel(0.0f);
 	}
@@ -1216,7 +1130,7 @@ void SettingsDialog::setSpeakerTestActive(bool active) {
 	}
 	_speakerTestButton->setEnabled(!active && _speakerCombo->isEnabled());
 	_speakerTestButton->setText(
-		active ? QString::fromUtf8("正在播放") : QString::fromUtf8("检测扬声器"));
+		active ? QCoreApplication::translate("MeetingUI", "Playing") : QCoreApplication::translate("MeetingUI", "Test Speaker"));
 }
 
 void SettingsDialog::setVideoPreviewMessage(const QString &message, bool error) {
@@ -1224,7 +1138,7 @@ void SettingsDialog::setVideoPreviewMessage(const QString &message, bool error) 
 		return;
 	}
 	_previewMessage->setText(message);
-	_previewMessage->setStyleSheet(error ? QStringLiteral("color: #ff7875;") : QString());
+	MeetingUI::AppTheme::setStyleVariant(*_previewMessage, error ? "settings-dialog-previewmessage-active" : "settings-dialog-previewmessage-normal");
 	_previewMessage->setVisible(true);
 	if (!_usingExternalPreview) {
 		_cameraPreview->setVisible(false);

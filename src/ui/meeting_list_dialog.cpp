@@ -1,3 +1,5 @@
+#include <QtCore/QCoreApplication>
+#include "src/ui/app_theme.h"
 #include "src/ui/meeting_list_dialog.h"
 
 #include "src/core/meeting_catalog_controller.h"
@@ -32,7 +34,7 @@ QWidget *createListPage(
 	(*stateLabel)->setWordWrap(true);
 	(*stateLabel)->setTextFormat(Qt::PlainText);
 	(*stateLabel)->setAlignment(Qt::AlignCenter);
-	(*stateLabel)->setStyleSheet(QStringLiteral("color: #8f959e; padding: 12px;"));
+	MeetingUI::AppTheme::setStyleVariant(*(*stateLabel), "meeting-list-dialog-statelabel");
 	layout->addWidget(*stateLabel);
 
 	*view = new QListView(page);
@@ -43,10 +45,7 @@ QWidget *createListPage(
 	(*view)->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 	(*view)->setMouseTracking(true);
 	(*view)->setUniformItemSizes(false);
-	(*view)->setStyleSheet(R"(
-		QListView { border: none; background: #ffffff; outline: none; }
-		QListView::item { background: transparent; }
-	)");
+	MeetingUI::AppTheme::setStyleVariant(*(*view), "meeting-list-dialog-view");
 	layout->addWidget(*view, 1);
 	return page;
 }
@@ -55,18 +54,18 @@ QString stateText(
 		const OpenMeeting::MeetingListViewState &state,
 		const MeetingListModel &model,
 		bool history) {
-	if (state.refreshing && !state.hasSnapshot) return QString::fromUtf8("正在加载会议...");
+	if (state.refreshing && !state.hasSnapshot) return QCoreApplication::translate("MeetingUI", "Loading meeting...");
 	if (state.state == OpenMeeting::MeetingCatalogLoadState::Error && !state.hasSnapshot) {
-		return QString::fromUtf8("会议加载失败，请检查网络后重试。");
+		return QCoreApplication::translate("MeetingUI", "Unable to load meetings. Check your network and try again.");
 	}
 	if (model.rowCount() == 0) {
-		if (model.isFiltering()) return QString::fromUtf8("没有匹配的会议。");
+		if (model.isFiltering()) return QCoreApplication::translate("MeetingUI", "No matching meetings.");
 		return history
-			? QString::fromUtf8("暂无由您创建的历史会议。")
-			: QString::fromUtf8("暂无待进行的会议。");
+			? QCoreApplication::translate("MeetingUI", "You have no past meetings.")
+			: QCoreApplication::translate("MeetingUI", "No upcoming meetings.");
 	}
-	if (state.refreshing) return QString::fromUtf8("正在刷新，当前显示最近一次结果。");
-	if (state.error.code != 0) return QString::fromUtf8("刷新失败，当前显示最近一次结果。");
+	if (state.refreshing) return QCoreApplication::translate("MeetingUI", "Refreshing. Showing the last available results.");
+	if (state.error.code != 0) return QCoreApplication::translate("MeetingUI", "Refresh failed. Showing the last available results.");
 	return {};
 }
 
@@ -79,21 +78,11 @@ MeetingListDialog::MeetingListDialog(
 	: QDialog(parent)
 	, _controller(controller)
 	, _session(session) {
-	setWindowTitle(QString::fromUtf8("全部会议"));
+	setWindowTitle(QCoreApplication::translate("MeetingUI", "All Meetings"));
 	setModal(true);
 	resize(720, 620);
 	setMinimumSize(620, 500);
-	setStyleSheet(R"(
-		QDialog { background: #ffffff; }
-		QLineEdit { min-height: 36px; border: 1px solid #dcdfe6; border-radius: 6px; padding: 0 10px; }
-		QLineEdit:focus { border-color: #1677ff; }
-		QTabWidget::pane { border: 1px solid #e5e8ec; border-radius: 6px; top: -1px; }
-		QTabBar::tab { min-width: 150px; padding: 10px 14px; color: #606266; }
-		QTabBar::tab:selected { color: #1677ff; font-weight: bold; }
-		QPushButton { min-height: 34px; padding: 0 16px; border-radius: 6px; }
-		QPushButton#primary { background: #1677ff; color: white; border: none; }
-		QPushButton#secondary { background: #f2f3f5; color: #4e5969; border: none; }
-	)");
+	MeetingUI::AppTheme::setStyleVariant(*this, "meeting-list-dialog-this");
 
 	_upcomingModel = new MeetingListModel(this);
 	_historyModel = new MeetingListModel(this);
@@ -101,7 +90,7 @@ MeetingListDialog::MeetingListDialog(
 	auto *root = new QVBoxLayout(this);
 	root->setContentsMargins(24, 20, 24, 20);
 	root->setSpacing(12);
-	auto *heading = new QLabel(QString::fromUtf8("会议安排"), this);
+	auto *heading = new QLabel(QCoreApplication::translate("MeetingUI", "Meeting Schedule"), this);
 	auto headingFont = heading->font();
 	headingFont.setPixelSize(20);
 	headingFont.setBold(true);
@@ -111,8 +100,8 @@ MeetingListDialog::MeetingListDialog(
 	auto *toolbar = new QHBoxLayout();
 	_searchEdit = new QLineEdit(this);
 	_searchEdit->setClearButtonEnabled(true);
-	_searchEdit->setPlaceholderText(QString::fromUtf8("搜索会议主题或创建者"));
-	_refreshButton = new QPushButton(QString::fromUtf8("刷新"), this);
+	_searchEdit->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Search by meeting title or creator"));
+	_refreshButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Refresh"), this);
 	_refreshButton->setObjectName(QStringLiteral("secondary"));
 	toolbar->addWidget(_searchEdit, 1);
 	toolbar->addWidget(_refreshButton);
@@ -121,26 +110,27 @@ MeetingListDialog::MeetingListDialog(
 	_tabs = new QTabWidget(this);
 	_tabs->addTab(
 		createListPage(_upcomingModel, &_upcomingView, &_upcomingState, _tabs),
-		QString::fromUtf8("未结束会议"));
+		QCoreApplication::translate("MeetingUI", "Upcoming and Active"));
 	_tabs->addTab(
 		createListPage(_historyModel, &_historyView, &_historyState, _tabs),
-		QString::fromUtf8("我创建的历史会议"));
+		QCoreApplication::translate("MeetingUI", "My Past Meetings"));
 	root->addWidget(_tabs, 1);
 
 	auto *buttons = new QHBoxLayout();
 	buttons->addStretch();
-	auto *closeButton = new QPushButton(QString::fromUtf8("关闭"), this);
+	auto *closeButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Close"), this);
 	closeButton->setObjectName(QStringLiteral("secondary"));
-	_viewButton = new QPushButton(QString::fromUtf8("查看详情"), this);
+	_viewButton = new QPushButton(QCoreApplication::translate("MeetingUI", "View Details"), this);
 	_viewButton->setObjectName(QStringLiteral("secondary"));
 	_viewButton->setEnabled(false);
-	_joinButton = new QPushButton(QString::fromUtf8("加入会议"), this);
+	_joinButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Join Meeting"), this);
 	_joinButton->setObjectName(QStringLiteral("primary"));
 	_joinButton->setEnabled(false);
 	buttons->addWidget(closeButton);
 	buttons->addWidget(_viewButton);
 	buttons->addWidget(_joinButton);
 	root->addLayout(buttons);
+	AppTheme::makeDialogAdaptive(*this, QSize(720, 620));
 
 	connect(closeButton, &QPushButton::clicked, this, &QDialog::accept);
 	connect(_refreshButton, &QPushButton::clicked, this, [this] { refreshCurrent(); });

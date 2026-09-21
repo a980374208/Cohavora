@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/net/credential_store.h"
 #include "src/net/service_endpoint_policy.h"
 
@@ -155,14 +156,14 @@ QString canonicalServiceUrl(const QString &text) {
 QString credentialStatusMessage(CredentialStatus status) {
     switch (status) {
     case CredentialStatus::Migrated:
-        return QString::fromUtf8("已清理旧版登录凭据，请重新登录。密码将不再保存。");
+        return QCoreApplication::translate("MeetingUI", "Legacy sign-in credentials have been removed. Please sign in again. Passwords will no longer be saved.");
     case CredentialStatus::InvalidRecord:
-        return QString::fromUtf8("已保存的登录状态无法使用，请重新登录。");
+        return QCoreApplication::translate("MeetingUI", "Your saved session cannot be used. Please sign in again.");
     case CredentialStatus::Unavailable:
     case CredentialStatus::SaveFailed:
-        return QString::fromUtf8("登录状态未保存，下次启动需要重新登录。");
+        return QCoreApplication::translate("MeetingUI", "Your session was not saved. You will need to sign in again next time.");
     case CredentialStatus::CleanupFailed:
-        return QString::fromUtf8("本地凭据清理失败，无法保证重启后旧凭据已移除。请恢复配置写入权限后重试。");
+        return QCoreApplication::translate("MeetingUI", "Unable to clear local credentials. Old credentials may remain after restarting. Restore write access to settings and try again.");
     default: return {};
     }
 }

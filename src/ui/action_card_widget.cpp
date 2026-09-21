@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/ui/action_card_widget.h"
 #include "styles/style_widgets.h"
 #include <QtGui/QMouseEvent>
@@ -47,7 +48,15 @@ ActionCardWidget::ActionCardWidget(
 
 QSize ActionCardWidget::sizeHint() const {
 	const int titleHeight = std::max(22, QFontMetrics(CardTitleFont()).height());
-	return QSize(kCardSize, kCardTop + kCardSize + kTitleGap + titleHeight + kBottomPadding);
+	const int titleWidth = QFontMetrics(CardTitleFont()).horizontalAdvance(_title) + 16;
+	return QSize(std::max(kCardSize, titleWidth), kCardTop + kCardSize + kTitleGap + titleHeight + kBottomPadding);
+}
+
+int ActionCardWidget::heightForWidth(int width) const {
+ const int textWidth = std::max(1, width - (_hasDropdown ? 18 : 0));
+ const int textHeight = QFontMetrics(CardTitleFont()).boundingRect(
+     QRect(0, 0, textWidth, 1000), Qt::TextWordWrap, _title).height();
+ return kCardTop + std::min(width, kCardSize) + kTitleGap + std::max(22, textHeight) + kBottomPadding;
 }
 
 void ActionCardWidget::paintEvent(QPaintEvent *e) {
@@ -98,17 +107,17 @@ void ActionCardWidget::paintEvent(QPaintEvent *e) {
 	p.setPen(QColor(0x1f, 0x23, 0x29));
 
 	const int textTop = kCardTop + cardSize + kTitleGap;
-	const int titleHeight = std::max(22, QFontMetrics(font).height());
+	const int titleHeight = std::max(22, height() - textTop - kBottomPadding);
 	QRect textRect(0, textTop, w, titleHeight);
 
 	if (_hasDropdown) {
 		// 计算带下拉小箭头的居中位置
 		QFontMetrics fm(font);
-		const int textW = fm.horizontalAdvance(_title);
+		const int textW = std::min(fm.horizontalAdvance(_title), std::max(1, w - 18));
 		const int totalW = textW + 14;
 		const int startX = (w - totalW) / 2;
 
-		p.drawText(QRect(startX, textTop, textW, titleHeight), Qt::AlignLeft | Qt::AlignVCenter, _title);
+		p.drawText(QRect(startX, textTop, textW, titleHeight), Qt::AlignCenter | Qt::TextWordWrap, _title);
 
 		// 绘制小下拉箭头 ∨
 		p.save();
@@ -123,7 +132,7 @@ void ActionCardWidget::paintEvent(QPaintEvent *e) {
 		_dropdownRect = QRect(arrowX - 4, textTop, 18, titleHeight);
 		p.restore();
 	} else {
-		p.drawText(textRect, Qt::AlignCenter, _title);
+		p.drawText(textRect, Qt::AlignCenter | Qt::TextWordWrap, _title);
 		_dropdownRect = QRect();
 	}
 }
@@ -231,10 +240,10 @@ void ActionCardWidget::leaveEventHook(QEvent *e) {
 
 ActionGridContainer::ActionGridContainer(QWidget *parent)
 	: Ui::RpWidget(parent) {
-	_joinCard = new ActionCardWidget(this, ActionCardType::JoinMeeting, QString::fromUtf8("加入会议"), false);
-	_quickCard = new ActionCardWidget(this, ActionCardType::QuickMeeting, QString::fromUtf8("快速会议"), false);
-	_scheduleCard = new ActionCardWidget(this, ActionCardType::ScheduleMeeting, QString::fromUtf8("预定会议"), false);
-	_shareCard = new ActionCardWidget(this, ActionCardType::ShareScreen, QString::fromUtf8("共享屏幕"), false);
+	_joinCard = new ActionCardWidget(this, ActionCardType::JoinMeeting, QCoreApplication::translate("MeetingUI", "Join Meeting"), false);
+	_quickCard = new ActionCardWidget(this, ActionCardType::QuickMeeting, QCoreApplication::translate("MeetingUI", "Start Meeting"), false);
+	_scheduleCard = new ActionCardWidget(this, ActionCardType::ScheduleMeeting, QCoreApplication::translate("MeetingUI", "Schedule Meeting"), false);
+	_shareCard = new ActionCardWidget(this, ActionCardType::ShareScreen, QCoreApplication::translate("MeetingUI", "Share Screen"), false);
 
 	_joinCard->clicked() | rpl::on_next([this](ActionCardType t) { _cardClicks.fire_copy(t); }, lifetime());
 	_quickCard->clicked() | rpl::on_next([this](ActionCardType t) { _cardClicks.fire_copy(t); }, lifetime());
@@ -246,8 +255,11 @@ void ActionGridContainer::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
 
-	const int cardW = _joinCard->sizeHint().width();
-	const int cardH = _joinCard->sizeHint().height();
+	const int desiredCardW = std::max({ _joinCard->sizeHint().width(), _quickCard->sizeHint().width(),
+		_scheduleCard->sizeHint().width(), _shareCard->sizeHint().width() });
+	const int cardW = std::max(1, std::min(desiredCardW, (w - 48) / 2));
+	const int cardH = std::max({ _joinCard->heightForWidth(cardW), _quickCard->heightForWidth(cardW),
+		_scheduleCard->heightForWidth(cardW), _shareCard->heightForWidth(cardW) });
 	const int gapX = 24;
 	const int gapY = 24;
 

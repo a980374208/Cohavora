@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "base/basic_types.h"
 #include <QtWidgets/QApplication>
 #include <QtCore/QDir>
@@ -7,6 +8,7 @@
 #include "ui/style/style_core.h"
 #include "src/ui/meeting_ui_integration.h"
 #include "src/ui/app_theme.h"
+#include "src/ui/app_translation.h"
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/login_dialog.h"
 #include "src/net/service_endpoint_policy.h"
@@ -39,7 +41,9 @@ int main(int argc, char *argv[]) {
 
 	QApplication app(argc, argv);
 	app.setApplicationName(QString::fromUtf8("LiveKitMeetingClient"));
-	app.setApplicationDisplayName(QString::fromUtf8("音视频会议客户端 - LiveKit Powered"));
+	MeetingUI::AppTranslation::install(app,
+		MeetingUI::AppTranslation::startupLocale(app.arguments()));
+	app.setApplicationDisplayName(QCoreApplication::translate("MeetingUI", "Video Meeting Client - Powered by LiveKit"));
 	OpenMeeting::initializeServiceEndpointPolicy(
 		app.arguments().contains(QStringLiteral("--debug")));
 

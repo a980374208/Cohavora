@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/ui/sidebar_widget.h"
 #include "src/net/session_manager.h"
 #include <QtGui/QMouseEvent>
@@ -43,13 +44,13 @@ void SidebarWidget::updateLayout() {
 
 	NavItem meetingNav;
 	meetingNav.type = NavItemType::Meeting;
-	meetingNav.text = QString::fromUtf8("会议");
+	meetingNav.text = QCoreApplication::translate("MeetingUI", "Meetings");
 	meetingNav.rect = QRect((w - navItemWidth) / 2, navStartY, navItemWidth, navItemHeight);
 	_navItems.push_back(meetingNav);
 
 	NavItem contactsNav;
 	contactsNav.type = NavItemType::Contacts;
-	contactsNav.text = QString::fromUtf8("通讯录");
+	contactsNav.text = QCoreApplication::translate("MeetingUI", "Contacts");
 	contactsNav.rect = QRect((w - navItemWidth) / 2, navStartY + (navItemHeight + navSpacing), navItemWidth, navItemHeight);
 	_navItems.push_back(contactsNav);
 
@@ -61,14 +62,14 @@ void SidebarWidget::updateLayout() {
 
 	BottomItem userItem;
 	userItem.type = BottomItemType::User;
-	userItem.tooltip = QString::fromUtf8("用户中心");
+	userItem.tooltip = QCoreApplication::translate("MeetingUI", "User Center");
 	userItem.rect = QRect((w - bottomItemSize) / 2, bottomY, bottomItemSize, bottomItemSize);
 	_bottomItems.push_back(userItem);
 
 	bottomY -= (bottomItemSize + bottomSpacing);
 	BottomItem settingsItem;
 	settingsItem.type = BottomItemType::Settings;
-	settingsItem.tooltip = QString::fromUtf8("设置");
+	settingsItem.tooltip = QCoreApplication::translate("MeetingUI", "Settings");
 	settingsItem.rect = QRect((w - bottomItemSize) / 2, bottomY, bottomItemSize, bottomItemSize);
 	_bottomItems.push_back(settingsItem);
 }

@@ -80,6 +80,10 @@ private:
 	FloatingActionButton *_fabButton = nullptr;
 	QListView *_listView = nullptr;
 	MeetingListModel *_model = nullptr;
+	QRect _dateRect;
+	QRect _subDateRect;
+	int _headerBottom = 144;
+	int _stateHeight = 0;
 	QRect _allMeetingsRect;
 	QRect _refreshRect;
 	bool _allMeetingsHovered = false;

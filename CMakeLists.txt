@@ -714,9 +714,11 @@ endfunction()
 qt5_add_resources(LIVEKIT_MEETING_APP_THEME_RESOURCES
     src/ui/app_theme.qrc
 )
+include(cmake/UiTranslations.cmake)
 
 add_executable(livekit_meeting_app
     ${LIVEKIT_MEETING_APP_THEME_RESOURCES}
+    ${LIVEKIT_UI_TRANSLATION_RESOURCES}
     src/app/main_meeting_app.cpp
     src/net/http_types.h
     src/net/meeting_types.h
@@ -735,6 +737,8 @@ add_executable(livekit_meeting_app
     src/ui/login_dialog.cpp
     src/ui/app_theme.cpp
     src/ui/app_theme.h
+    src/ui/app_translation.cpp
+    src/ui/app_translation.h
     src/ui/sidebar_widget.cpp
     src/ui/sidebar_widget.h
     src/ui/action_card_widget.cpp
@@ -2038,4 +2042,26 @@ if(LIVEKIT_BUILD_RENDERER_RUNTIME_TESTS)
             ENVIRONMENT "QT_SCALE_FACTOR=1")
     endif()
 endif()
+endif()
+
+# All Qt consumers use the same startup theme resources.
+foreach(ui_theme_consumer IN ITEMS test_camera_owner_remediation
+        test_participant_window_remediation test_session_credentials test_qt_log_redaction)
+    target_sources(${ui_theme_consumer} PRIVATE
+        src/ui/app_theme.cpp ${LIVEKIT_MEETING_APP_THEME_RESOURCES})
+endforeach()
+
+if(LIVEKIT_LRELEASE_EXECUTABLE)
+    add_executable(test_ui_presentation
+        tests/test_ui_presentation.cpp
+        src/ui/app_theme.cpp src/ui/app_translation.cpp
+        ${LIVEKIT_MEETING_APP_THEME_RESOURCES} ${LIVEKIT_UI_TRANSLATION_RESOURCES})
+    target_include_directories(test_ui_presentation BEFORE PRIVATE ${pr_sec_qt_includes})
+    target_link_libraries(test_ui_presentation PRIVATE ${pr_sec_qt_libraries})
+    target_compile_definitions(test_ui_presentation PRIVATE ${pr_sec_qt_definitions})
+    target_compile_options(test_ui_presentation PRIVATE /utf-8)
+    target_link_options(test_ui_presentation PRIVATE ${pr_sec_qt_link_options})
+    set_target_properties(test_ui_presentation PROPERTIES MSVC_RUNTIME_LIBRARY "${pr_sec_qt_runtime}")
+    add_test(NAME ui_presentation_test COMMAND test_ui_presentation)
+    set_tests_properties(ui_presentation_test PROPERTIES TIMEOUT 30 LABELS "UI_PRESENTATION")
 endif()

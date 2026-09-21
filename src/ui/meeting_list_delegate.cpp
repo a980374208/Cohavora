@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/ui/meeting_list_delegate.h"
 
 #include "src/ui/meeting_list_model.h"
@@ -81,7 +82,7 @@ void MeetingListDelegate::paint(
 	stateFont.setPixelSize(11);
 	stateFont.setBold(false);
 	painter->setFont(stateFont);
-	painter->setPen(status == QString::fromUtf8("进行中")
+	painter->setPen(status == QCoreApplication::translate("MeetingUI", "In Progress")
 		? QColor(0x08, 0x9f, 0x62)
 		: QColor(0x60, 0x62, 0x66));
 	painter->drawText(
@@ -90,10 +91,10 @@ void MeetingListDelegate::paint(
 		status);
 
 	auto subtitle = creator.trimmed().isEmpty()
-		? QString::fromUtf8("会议号 %1").arg(index.data(MeetingIdRole).toString())
-		: QString::fromUtf8("%1 · 会议号 %2").arg(creator, index.data(MeetingIdRole).toString());
+		? QCoreApplication::translate("MeetingUI", "Meeting ID %1").arg(index.data(MeetingIdRole).toString())
+		: QCoreApplication::translate("MeetingUI", "%1 · Meeting ID %2").arg(creator, index.data(MeetingIdRole).toString());
 	const auto repeat = index.data(MeetingRepeatRole).toString();
-	if (repeat != QString::fromUtf8("不重复")) {
+	if (repeat != QCoreApplication::translate("MeetingUI", "Does Not Repeat")) {
 		subtitle += QString::fromUtf8(" · %1").arg(repeat);
 	}
 	painter->setPen(QColor(0x8f, 0x95, 0x9e));

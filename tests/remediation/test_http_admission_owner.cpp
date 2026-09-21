@@ -409,7 +409,7 @@ void VerifyErrors() {
         fixture.backend.completeJoin(index, false, "join-denied");
         TEST_CHECK(fixture.coordinator->state() == MeetingState::Failed);
         TEST_CHECK(fixture.errors.size() == 1);
-        TEST_CHECK(fixture.errors[0].title == QString::fromUtf8("入会鉴权失败"));
+        TEST_CHECK(fixture.errors[0].title == QString::fromUtf8("Meeting Authentication Failed"));
         TEST_CHECK(fixture.errors[0].message == "join-denied");
         PreparePending(fixture, PendingStage::Join, "join-retry");
         TEST_CHECK(fixture.backend.joins.size() == 2);
@@ -420,7 +420,7 @@ void VerifyErrors() {
         fixture.backend.completeToken(index, false, "token-error", {}, {}, "token-denied");
         TEST_CHECK(fixture.starts == 0);
         TEST_CHECK(fixture.errors.size() == 1);
-        TEST_CHECK(fixture.errors[0].title == QString::fromUtf8("获取凭据失败"));
+        TEST_CHECK(fixture.errors[0].title == QString::fromUtf8("Unable to Obtain Credentials"));
         TEST_CHECK(fixture.errors[0].message == "token-denied");
     });
     RunCase("Token missing URL", [] {
@@ -429,7 +429,7 @@ void VerifyErrors() {
         fixture.backend.completeToken(index, true, "token-no-url", {}, "token");
         TEST_CHECK(fixture.starts == 0);
         TEST_CHECK(fixture.errors.size() == 1);
-        TEST_CHECK(fixture.errors[0].message == QString::fromUtf8("无法换取 LiveKit 房间访问凭证"));
+        TEST_CHECK(fixture.errors[0].message == QString::fromUtf8("Unable to obtain LiveKit room credentials"));
     });
     RunCase("Token missing token", [] {
         Fixture fixture;
@@ -444,7 +444,7 @@ void VerifyErrors() {
         fixture.backend.completeCreate(index, false, {}, {}, {}, "create-denied");
         TEST_CHECK(fixture.starts == 0);
         TEST_CHECK(fixture.errors.size() == 1);
-        TEST_CHECK(fixture.errors[0].title == QString::fromUtf8("创建即时会议失败"));
+        TEST_CHECK(fixture.errors[0].title == QString::fromUtf8("Unable to Create Instant Meeting"));
         TEST_CHECK(fixture.errors[0].message == "create-denied");
     });
     RunCase("Create missing URL", [] {

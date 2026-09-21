@@ -1,3 +1,5 @@
+#include <QtCore/QCoreApplication>
+#include "src/ui/app_theme.h"
 #include "src/ui/meeting_detail_dialog.h"
 
 #include "src/core/meeting_catalog_controller.h"
@@ -29,11 +31,11 @@ QLabel *detailValue(QWidget *parent) {
 
 QString durationText(qint64 seconds) {
 	const auto minutes = std::max<qint64>(1, (seconds + 59) / 60);
-	if (minutes % 60 == 0) return QString::fromUtf8("%1 小时").arg(minutes / 60);
+	if (minutes % 60 == 0) return QCoreApplication::translate("MeetingUI", "%1 hr").arg(minutes / 60);
 	if (minutes > 60) {
-		return QString::fromUtf8("%1 小时 %2 分钟").arg(minutes / 60).arg(minutes % 60);
+		return QCoreApplication::translate("MeetingUI", "%1 hr %2 min").arg(minutes / 60).arg(minutes % 60);
 	}
-	return QString::fromUtf8("%1 分钟").arg(minutes);
+	return QCoreApplication::translate("MeetingUI", "%1 min").arg(minutes);
 }
 
 } // namespace
@@ -47,17 +49,10 @@ MeetingDetailDialog::MeetingDetailDialog(
 	, _meetingId(meetingId)
 	, _controller(controller)
 	, _session(session) {
-	setWindowTitle(QString::fromUtf8("会议详情"));
+	setWindowTitle(QCoreApplication::translate("MeetingUI", "Meeting Details"));
 	setModal(true);
 	setMinimumWidth(540);
-	setStyleSheet(R"(
-		QDialog { background: #ffffff; }
-		QLabel { color: #303133; font-size: 13px; }
-		QPushButton { min-height: 34px; padding: 0 16px; border-radius: 6px; }
-		QPushButton#primary { background: #1677ff; color: white; border: none; }
-		QPushButton#secondary { background: #f2f3f5; color: #4e5969; border: none; }
-		QPushButton#danger { background: #fff1f0; color: #cf1322; border: 1px solid #ffccc7; }
-	)");
+	MeetingUI::AppTheme::setStyleVariant(*this, "meeting-detail-dialog-this");
 
 	auto *root = new QVBoxLayout(this);
 	root->setContentsMargins(28, 24, 28, 24);
@@ -67,7 +62,7 @@ MeetingDetailDialog::MeetingDetailDialog(
 	titleFont.setPixelSize(21);
 	titleFont.setBold(true);
 	_titleLabel->setFont(titleFont);
-	_titleLabel->setText(QString::fromUtf8("正在加载会议..."));
+	_titleLabel->setText(QCoreApplication::translate("MeetingUI", "Loading meeting..."));
 	root->addWidget(_titleLabel);
 
 	auto *form = new QFormLayout();
@@ -81,36 +76,36 @@ MeetingDetailDialog::MeetingDetailDialog(
 	_timeZoneLabel = detailValue(this);
 	_meetingStatusLabel = detailValue(this);
 	_repeatLabel = detailValue(this);
-	form->addRow(QString::fromUtf8("会议号"), _meetingIdLabel);
-	form->addRow(QString::fromUtf8("创建者"), _creatorLabel);
-	form->addRow(QString::fromUtf8("预约时间"), _timeLabel);
-	form->addRow(QString::fromUtf8("计划时长"), _durationLabel);
-	form->addRow(QString::fromUtf8("预约时区"), _timeZoneLabel);
-	form->addRow(QString::fromUtf8("状态"), _meetingStatusLabel);
-	form->addRow(QString::fromUtf8("重复"), _repeatLabel);
+	form->addRow(QCoreApplication::translate("MeetingUI", "Meeting ID"), _meetingIdLabel);
+	form->addRow(QCoreApplication::translate("MeetingUI", "Created By"), _creatorLabel);
+	form->addRow(QCoreApplication::translate("MeetingUI", "Scheduled For"), _timeLabel);
+	form->addRow(QCoreApplication::translate("MeetingUI", "Duration"), _durationLabel);
+	form->addRow(QCoreApplication::translate("MeetingUI", "Time Zone"), _timeZoneLabel);
+	form->addRow(QCoreApplication::translate("MeetingUI", "Status"), _meetingStatusLabel);
+	form->addRow(QCoreApplication::translate("MeetingUI", "Repeat"), _repeatLabel);
 	root->addLayout(form);
 
 	_stateLabel = new QLabel(this);
 	_stateLabel->setWordWrap(true);
 	_stateLabel->setTextFormat(Qt::PlainText);
-	_stateLabel->setStyleSheet(QStringLiteral("color: #8f959e;"));
+	MeetingUI::AppTheme::setStyleVariant(*_stateLabel, "meeting-detail-dialog-statelabel");
 	root->addWidget(_stateLabel);
 
-	_retryButton = new QPushButton(QString::fromUtf8("重试"), this);
+	_retryButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Retry"), this);
 	_retryButton->setObjectName(QStringLiteral("secondary"));
 	_retryButton->hide();
 	root->addWidget(_retryButton, 0, Qt::AlignLeft);
 
 	auto *buttons = new QHBoxLayout();
-	_copyButton = new QPushButton(QString::fromUtf8("复制会议号"), this);
+	_copyButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Copy Meeting ID"), this);
 	_copyButton->setObjectName(QStringLiteral("secondary"));
-	_joinButton = new QPushButton(QString::fromUtf8("加入会议"), this);
+	_joinButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Join Meeting"), this);
 	_joinButton->setObjectName(QStringLiteral("primary"));
-	_editButton = new QPushButton(QString::fromUtf8("编辑"), this);
+	_editButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Edit"), this);
 	_editButton->setObjectName(QStringLiteral("secondary"));
-	_cancelMeetingButton = new QPushButton(QString::fromUtf8("取消会议"), this);
+	_cancelMeetingButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Cancel Meeting"), this);
 	_cancelMeetingButton->setObjectName(QStringLiteral("danger"));
-	auto *closeButton = new QPushButton(QString::fromUtf8("关闭"), this);
+	auto *closeButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Close"), this);
 	closeButton->setObjectName(QStringLiteral("secondary"));
 	buttons->addWidget(_copyButton);
 	buttons->addStretch();
@@ -138,6 +133,7 @@ MeetingDetailDialog::MeetingDetailDialog(
 	connect(&_session, &OpenMeeting::SessionManager::authenticationReset,
 		this, [this](quint64) { reject(); });
 
+	AppTheme::makeDialogAdaptive(*this, QSize(640, 520));
 	setActionsEnabled(false);
 	updateDetail();
 	_controller.loadMeetingDetail(_meetingId);
@@ -153,25 +149,25 @@ void MeetingDetailDialog::updateDetail() {
 		populate(*state.detail, freshForJoin);
 		_retryButton->hide();
 		if (state.refreshing) {
-			_stateLabel->setStyleSheet(QStringLiteral("color: #1677ff;"));
-			_stateLabel->setText(QString::fromUtf8("正在刷新详情..."));
+			MeetingUI::AppTheme::setStyleVariant(*_stateLabel, "meeting-detail-dialog-statelabel-2");
+			_stateLabel->setText(QCoreApplication::translate("MeetingUI", "Refreshing details..."));
 		} else if (state.error.code != 0) {
-			_stateLabel->setStyleSheet(QStringLiteral("color: #d4380d;"));
-			_stateLabel->setText(QString::fromUtf8("刷新失败，当前显示最近一次结果。"));
+			MeetingUI::AppTheme::setStyleVariant(*_stateLabel, "meeting-detail-dialog-statelabel-3");
+			_stateLabel->setText(QCoreApplication::translate("MeetingUI", "Refresh failed. Showing the last available results."));
 		}
 		return;
 	}
 
 	setActionsEnabled(false);
 	if (state.state == OpenMeeting::MeetingCatalogLoadState::Loading || state.refreshing) {
-		_titleLabel->setText(QString::fromUtf8("正在加载会议..."));
-		_stateLabel->setStyleSheet(QStringLiteral("color: #1677ff;"));
-		_stateLabel->setText(QString::fromUtf8("正在读取最新会议详情..."));
+		_titleLabel->setText(QCoreApplication::translate("MeetingUI", "Loading meeting..."));
+		MeetingUI::AppTheme::setStyleVariant(*_stateLabel, "meeting-detail-dialog-statelabel-4");
+		_stateLabel->setText(QCoreApplication::translate("MeetingUI", "Loading the latest meeting details..."));
 		_retryButton->hide();
 	} else if (state.state == OpenMeeting::MeetingCatalogLoadState::Error) {
-		_titleLabel->setText(QString::fromUtf8("无法加载会议"));
-		_stateLabel->setStyleSheet(QStringLiteral("color: #d4380d;"));
-		_stateLabel->setText(QString::fromUtf8("会议详情加载失败，请检查网络后重试。"));
+		_titleLabel->setText(QCoreApplication::translate("MeetingUI", "Unable to Load Meeting"));
+		MeetingUI::AppTheme::setStyleVariant(*_stateLabel, "meeting-detail-dialog-statelabel-5");
+		_stateLabel->setText(QCoreApplication::translate("MeetingUI", "Unable to load meeting details. Check your network and try again."));
 		_retryButton->show();
 	}
 }
@@ -182,17 +178,17 @@ void MeetingDetailDialog::populate(
 	const auto &meeting = detail.record;
 	if (!_cancelling) _stateLabel->clear();
 	_titleLabel->setText(meeting.title.trimmed().isEmpty()
-		? QString::fromUtf8("未命名会议") : meeting.title);
+		? QCoreApplication::translate("MeetingUI", "Untitled Meeting") : meeting.title);
 	_meetingIdLabel->setText(meeting.meetingId);
 	_creatorLabel->setText(meeting.creatorNickname.trimmed().isEmpty()
 		? meeting.creatorUserId : meeting.creatorNickname);
 	const auto dateTime = MeetingListModel::scheduledDateTime(meeting);
 	_timeLabel->setText(dateTime.isValid()
 		? dateTime.toString(QStringLiteral("yyyy-MM-dd HH:mm"))
-		: QString::fromUtf8("时间待确认"));
+		: QCoreApplication::translate("MeetingUI", "Time to Be Confirmed"));
 	_durationLabel->setText(durationText(meeting.meetingDurationSeconds));
 	_timeZoneLabel->setText(meeting.timeZone.trimmed().isEmpty()
-		? QString::fromUtf8("系统本地时区") : meeting.timeZone);
+		? QCoreApplication::translate("MeetingUI", "System Time Zone") : meeting.timeZone);
 	_meetingStatusLabel->setText(MeetingListModel::statusText(meeting.status));
 	_repeatLabel->setText(MeetingListModel::repeatText(meeting.repeatRule, meeting.timeZone));
 
@@ -209,14 +205,14 @@ void MeetingDetailDialog::populate(
 	_editButton->setEnabled(canManage);
 	_cancelMeetingButton->setEnabled(canManage);
 	if (!singleMeeting && !_cancelling) {
-		_stateLabel->setStyleSheet(QStringLiteral("color: #8f959e;"));
-		_stateLabel->setText(QString::fromUtf8("重复会议当前仅支持查看。"));
+		MeetingUI::AppTheme::setStyleVariant(*_stateLabel, "meeting-detail-dialog-statelabel-6");
+		_stateLabel->setText(QCoreApplication::translate("MeetingUI", "Recurring meetings are currently read-only."));
 	} else if (!ownsMeeting && !_cancelling) {
-		_stateLabel->setStyleSheet(QStringLiteral("color: #8f959e;"));
-		_stateLabel->setText(QString::fromUtf8("只有会议创建者可以编辑或取消该预约。"));
+		MeetingUI::AppTheme::setStyleVariant(*_stateLabel, "meeting-detail-dialog-statelabel-7");
+		_stateLabel->setText(QCoreApplication::translate("MeetingUI", "Only the meeting creator can edit or cancel this meeting."));
 	} else if (!scheduled && !_cancelling) {
-		_stateLabel->setStyleSheet(QStringLiteral("color: #8f959e;"));
-		_stateLabel->setText(QString::fromUtf8("当前状态下会议详情为只读。"));
+		MeetingUI::AppTheme::setStyleVariant(*_stateLabel, "meeting-detail-dialog-statelabel-8");
+		_stateLabel->setText(QCoreApplication::translate("MeetingUI", "Meeting details are read-only in the current state."));
 	}
 }
 
@@ -231,9 +227,8 @@ void MeetingDetailDialog::handleWriteState() {
 		return;
 	}
 	if (_detail) populate(*_detail, false);
-	_stateLabel->setStyleSheet(QStringLiteral("color: #d4380d;"));
-	_stateLabel->setText(QString::fromUtf8(
-		"取消失败。网络中断时结果可能未知，请刷新会议列表确认后再操作。"));
+	MeetingUI::AppTheme::setStyleVariant(*_stateLabel, "meeting-detail-dialog-statelabel-9");
+	_stateLabel->setText(QCoreApplication::translate("MeetingUI", "Unable to cancel. A network interruption may leave the result unknown. Refresh the meeting list before trying again."));
 }
 
 void MeetingDetailDialog::editMeeting() {
@@ -246,12 +241,12 @@ void MeetingDetailDialog::cancelMeeting() {
 	if (!_detail || _cancelling || !_cancelMeetingButton->isEnabled()) return;
 	const auto when = MeetingListModel::scheduledDateTime(_detail->record);
 	QMessageBox confirm(QMessageBox::Question,
-		QString::fromUtf8("取消会议"),
-		QString::fromUtf8("确定取消“%1”？\n预约时间：%2")
+		QCoreApplication::translate("MeetingUI", "Cancel Meeting"),
+		QCoreApplication::translate("MeetingUI", "Cancel \"%1\"?\nScheduled for: %2")
 			.arg(_detail->record.title.trimmed().isEmpty()
-				? QString::fromUtf8("未命名会议") : _detail->record.title,
+				? QCoreApplication::translate("MeetingUI", "Untitled Meeting") : _detail->record.title,
 				when.isValid() ? when.toString(QStringLiteral("yyyy-MM-dd HH:mm"))
-					: QString::fromUtf8("时间待确认")),
+					: QCoreApplication::translate("MeetingUI", "Time to Be Confirmed")),
 		QMessageBox::Yes | QMessageBox::No,
 		this);
 	confirm.setTextFormat(Qt::PlainText);
@@ -259,8 +254,8 @@ void MeetingDetailDialog::cancelMeeting() {
 
 	_cancelling = true;
 	setActionsEnabled(false);
-	_stateLabel->setStyleSheet(QStringLiteral("color: #1677ff;"));
-	_stateLabel->setText(QString::fromUtf8("正在取消会议..."));
+	MeetingUI::AppTheme::setStyleVariant(*_stateLabel, "meeting-detail-dialog-statelabel-10");
+	_stateLabel->setText(QCoreApplication::translate("MeetingUI", "Canceling meeting..."));
 	if (!_controller.cancelMeeting(_meetingId)) {
 		_cancelling = false;
 		if (_detail) populate(*_detail, false);
@@ -270,8 +265,8 @@ void MeetingDetailDialog::cancelMeeting() {
 void MeetingDetailDialog::copyMeetingId() {
 	if (!_detail) return;
 	QApplication::clipboard()->setText(_detail->record.meetingId);
-	_stateLabel->setStyleSheet(QStringLiteral("color: #089f62;"));
-	_stateLabel->setText(QString::fromUtf8("会议号已复制。"));
+	MeetingUI::AppTheme::setStyleVariant(*_stateLabel, "meeting-detail-dialog-statelabel-11");
+	_stateLabel->setText(QCoreApplication::translate("MeetingUI", "Meeting ID copied."));
 }
 
 void MeetingDetailDialog::requestJoin() {

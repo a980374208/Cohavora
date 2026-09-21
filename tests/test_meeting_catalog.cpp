@@ -569,7 +569,7 @@ void verifyMeetingListProjection() {
     TEST_CHECK(model.index(1, 0).data(MeetingUI::MeetingIdRole).toString() ==
                QStringLiteral("000000002"));
     TEST_CHECK(model.index(1, 0).data(MeetingUI::MeetingRepeatRole).toString() ==
-               QString::fromUtf8("每天重复，至 2026-10-31"));
+               QString::fromUtf8("Repeats Daily, until 2026-10-31"));
     TEST_CHECK(model.index(0, 0).data(MeetingUI::MeetingShowDateHeaderRole).toBool());
     TEST_CHECK(!model.index(1, 0).data(MeetingUI::MeetingShowDateHeaderRole).toBool());
 
@@ -599,15 +599,15 @@ void verifyMeetingListProjection() {
     custom.interval = 2;
     custom.daysOfWeek = {1, 3};
     const auto customText = MeetingUI::MeetingListModel::repeatText(custom, QStringLiteral("Asia/Shanghai"));
-    TEST_CHECK(customText.contains(QString::fromUtf8("自定义重复（只读")));
-    TEST_CHECK(customText.contains(QString::fromUtf8("每 2 周")));
-    TEST_CHECK(customText.contains(QString::fromUtf8("周一、周三")));
+    TEST_CHECK(customText.contains(QString::fromUtf8("Custom Recurrence (Read-Only")));
+    TEST_CHECK(customText.contains(QString::fromUtf8("Every 2 week(s)")));
+    TEST_CHECK(customText.contains(QString::fromUtf8("Mon, Wed")));
 
     MeetingRepeatRule unknown;
     unknown.type = MeetingRepeatType::Unknown;
     unknown.rawType = QStringLiteral("FutureRepeat");
     TEST_CHECK(MeetingUI::MeetingListModel::repeatText(unknown).contains(
-        QString::fromUtf8("FutureRepeat（只读）")));
+        QString::fromUtf8("FutureRepeat (Read-Only)")));
     std::puts("MEETING LIST MODEL PASS: deduplication, ordering, grouping, search, creator history boundary");
 }
 

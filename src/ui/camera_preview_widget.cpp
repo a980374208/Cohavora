@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/ui/camera_preview_widget.h"
 
 #include <QtCore/QMetaObject>
@@ -19,7 +20,7 @@ CameraPreviewWidget::CameraPreviewWidget(QWidget *parent)
 	_input.Attach(_source);
 	_renderTimer.setInterval(33);
 	connect(&_renderTimer, &QTimer::timeout, this, &CameraPreviewWidget::renderLatestFrame);
-	setStatus(QString::fromUtf8("选择摄像头后显示预览"), false);
+	setStatus(QCoreApplication::translate("MeetingUI", "Select a camera to preview video"), false);
 }
 
 CameraPreviewWidget::~CameraPreviewWidget() {
@@ -37,7 +38,7 @@ void CameraPreviewWidget::startPreview(
 		int fps) {
 	if (!_camera || deviceId.isEmpty() || width <= 0 || height <= 0 || fps <= 0) {
 		stopPreview();
-		setStatus(QString::fromUtf8("未检测到可用摄像头或分辨率"), true);
+		setStatus(QCoreApplication::translate("MeetingUI", "No camera or supported resolution available"), true);
 		return;
 	}
 
@@ -47,7 +48,7 @@ void CameraPreviewWidget::startPreview(
 	config.height = height;
 	config.fps = fps;
 	config.output_format = livekit::VideoBufferType::NV12;
-	setStatus(QString::fromUtf8("正在启动摄像头预览…"), false);
+	setStatus(QCoreApplication::translate("MeetingUI", "Starting camera preview..."), false);
 	_renderTimer.start();
 
 	if (!_camera->IsRunning()) {
@@ -55,7 +56,7 @@ void CameraPreviewWidget::startPreview(
 			setStatus(QString(), false);
 		} else {
 			_renderTimer.stop();
-			setStatus(QString::fromUtf8("无法打开摄像头，设备可能正被其他程序占用"), true);
+			setStatus(QCoreApplication::translate("MeetingUI", "Unable to open the camera. Another application may be using it."), true);
 		}
 		return;
 	}
@@ -69,7 +70,7 @@ void CameraPreviewWidget::startPreview(
 					guard->setStatus(QString(), false);
 				} else {
 					guard->setStatus(
-						QString::fromUtf8("切换摄像头预览失败：%1")
+						QCoreApplication::translate("MeetingUI", "Failed to switch camera preview: %1")
 							.arg(QString::fromStdString(error)),
 						true);
 				}
