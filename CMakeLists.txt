@@ -1,5 +1,10 @@
 cmake_minimum_required(VERSION 3.20)
 project(livekit_signaling_cpp LANGUAGES C CXX)
+
+option(LIVEKIT_BUILD_SAMPLES "Build standalone sample applications" ON)
+option(LIVEKIT_BUILD_MEETING_APP "Build the Qt meeting application" ON)
+
+set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
@@ -288,31 +293,11 @@ target_link_libraries(livekit_signaling PUBLIC
     shcore
 )
 
-# Live Media Broadcaster Application
-add_executable(livekit_media_broadcaster
-    src/media/livekit_media_broadcaster.cpp
-)
-target_link_libraries(livekit_media_broadcaster PRIVATE
-    livekit_signaling
-)
+if(LIVEKIT_BUILD_SAMPLES)
+    add_subdirectory(samples)
+endif()
 
-# LiveKit SimpleRoom Standalone Executable
-add_executable(simple_room
-    src/app/simple_room.cpp
-)
-target_link_libraries(simple_room PRIVATE
-    livekit_signaling
-)
-
-# LiveKit SimpleRpc Standalone Executable
-add_executable(simple_rpc
-    src/app/simple_rpc.cpp
-)
-target_link_libraries(simple_rpc PRIVATE
-    livekit_signaling
-)
-
-
+if(LIVEKIT_BUILD_MEETING_APP)
 if(NOT DEFINED TDESKTOP_LIBS_DIR)
     if(DEFINED ENV{TDESKTOP_LIBS_DIR})
         set(TDESKTOP_LIBS_DIR "$ENV{TDESKTOP_LIBS_DIR}")
@@ -328,8 +313,50 @@ if(NOT EXISTS "${QT_PATH}")
 endif()
 
 list(APPEND CMAKE_PREFIX_PATH "${QT_PATH}")
-set(Qt5_DIR "${QT_PATH}/lib/cmake/Qt5" CACHE PATH "Qt5 Directory" FORCE)
+file(GLOB livekit_qt_package_dirs LIST_DIRECTORIES TRUE
+    "${QT_PATH}/lib/cmake/Qt5*")
+foreach(livekit_qt_package_dir IN LISTS livekit_qt_package_dirs)
+    if(IS_DIRECTORY "${livekit_qt_package_dir}")
+        get_filename_component(livekit_qt_package "${livekit_qt_package_dir}" NAME)
+        set(${livekit_qt_package}_DIR "${livekit_qt_package_dir}"
+            CACHE PATH "${livekit_qt_package} directory" FORCE)
+    endif()
+endforeach()
 find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Svg Network)
+
+# The bundled Qt libraries are release-only and the whole project uses the
+# matching release CRT ABI in every CMake configuration. Qt 5's static package
+# embeds configuration expressions in its link interface, so mapping the
+# imported location alone would still pull debug support libraries into Debug.
+get_property(livekit_imported_targets DIRECTORY PROPERTY IMPORTED_TARGETS)
+foreach(livekit_imported_target IN LISTS livekit_imported_targets)
+    if(livekit_imported_target MATCHES "^Qt5::")
+        set_property(TARGET ${livekit_imported_target}
+            PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
+
+        foreach(livekit_imported_property IN ITEMS LOCATION IMPLIB SONAME)
+            get_target_property(livekit_qt_release_value
+                ${livekit_imported_target}
+                IMPORTED_${livekit_imported_property}_RELEASE)
+            if(livekit_qt_release_value
+                    AND NOT livekit_qt_release_value MATCHES "-NOTFOUND$")
+                set_property(TARGET ${livekit_imported_target}
+                    PROPERTY IMPORTED_${livekit_imported_property}_DEBUG
+                    "${livekit_qt_release_value}")
+            endif()
+        endforeach()
+
+        get_target_property(livekit_qt_release_dependencies
+            ${livekit_imported_target}
+            IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE)
+        if(livekit_qt_release_dependencies
+                AND NOT livekit_qt_release_dependencies MATCHES "-NOTFOUND$")
+            set_property(TARGET ${livekit_imported_target}
+                PROPERTY INTERFACE_LINK_LIBRARIES
+                "${livekit_qt_release_dependencies}")
+        endif()
+    endif()
+endforeach()
 
 foreach(_tool rcc moc uic qmake)
     if(TARGET Qt5::${_tool})
@@ -341,251 +368,12 @@ endforeach()
 
 set(CMAKE_AUTOMOC ON)
 
-# Add Telegram UI Subproject directly as native C++ targets
-add_subdirectory(src/ui/tdesktop)
+# Add UI support libraries and generated resources.
+add_subdirectory(src/ui)
 
-# The selected backend is deployed next to each executable, but never linked
-# into the UI. No Qt/WebRTC runtime or C++ exports cross the module boundary.
-if(WIN32)
-    add_library(livekit_render_dx11 MODULE
-        src/render/modules/dx11_backend.cpp
-        src/ui/dx11/dx11_renderer.cpp)
-    set_target_properties(livekit_render_dx11 PROPERTIES AUTOMOC OFF
-        PREFIX "" OUTPUT_NAME "livekit-render-dx11" CXX_VISIBILITY_PRESET hidden)
-    target_include_directories(livekit_render_dx11 PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_compile_definitions(livekit_render_dx11 PRIVATE LK_RENDER_MODULE_BUILD)
-    target_link_libraries(livekit_render_dx11 PRIVATE d3d11 dxgi d3dcompiler)
-    if(MSVC)
-        target_compile_options(livekit_render_dx11 PRIVATE /utf-8)
-    endif()
+add_subdirectory(src/render)
+
+if(LIVEKIT_BUILD_MEETING_APP)
+    add_subdirectory(src/app)
 endif()
-add_library(livekit_render_opengl MODULE src/render/modules/opengl_backend.cpp)
-set_target_properties(livekit_render_opengl PROPERTIES AUTOMOC OFF
-    OUTPUT_NAME "livekit-render-opengl" CXX_VISIBILITY_PRESET hidden VISIBILITY_INLINES_HIDDEN YES)
-if(APPLE)
-    set_target_properties(livekit_render_opengl PROPERTIES SUFFIX ".dylib")
-endif()
-target_include_directories(livekit_render_opengl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/src)
-target_compile_definitions(livekit_render_opengl PRIVATE LK_RENDER_MODULE_BUILD)
-if(MSVC)
-    target_compile_options(livekit_render_opengl PRIVATE /utf-8)
-endif()
-function(livekit_deploy_renderer target)
-    foreach(backend dx11 opengl)
-        if(TARGET livekit_render_${backend})
-            add_custom_target(${target}_renderer_${backend}
-                DEPENDS livekit_render_${backend}
-                COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${target}>/renderers"
-                COMMAND ${CMAKE_COMMAND} -E copy_if_different "$<TARGET_FILE:livekit_render_${backend}>"
-                    "$<TARGET_FILE_DIR:${target}>/renderers/$<TARGET_FILE_NAME:livekit_render_${backend}>")
-            add_dependencies(${target} ${target}_renderer_${backend})
-        endif()
-    endforeach()
-endfunction()
-
-qt5_add_resources(LIVEKIT_MEETING_APP_THEME_RESOURCES
-    src/ui/app_theme.qrc
-)
-include(cmake/UiTranslations.cmake)
-
-add_executable(livekit_meeting_app
-    ${LIVEKIT_MEETING_APP_THEME_RESOURCES}
-    ${LIVEKIT_UI_TRANSLATION_RESOURCES}
-    src/app/main_meeting_app.cpp
-    src/net/http_types.h
-    src/net/meeting_types.h
-    src/net/meeting_types.cpp
-    src/net/openmeeting_http_client.h
-    src/net/openmeeting_http_client.cpp
-    src/net/session_manager.h
-    src/net/session_manager.cpp
-    src/core/meeting_catalog_controller.h
-    src/core/meeting_catalog_controller.cpp
-    src/net/credential_store.cpp
-    src/net/credential_store.h
-    src/net/service_endpoint_policy.cpp
-    src/net/service_endpoint_policy.h
-    src/ui/login_dialog.h
-    src/ui/login_dialog.cpp
-    src/ui/app_theme.cpp
-    src/ui/app_theme.h
-    src/ui/app_translation.cpp
-    src/ui/app_translation.h
-    src/ui/sidebar_widget.cpp
-    src/ui/sidebar_widget.h
-    src/ui/action_card_widget.cpp
-    src/ui/action_card_widget.h
-    src/ui/meeting_list_model.cpp
-    src/ui/meeting_list_model.h
-    src/ui/meeting_list_delegate.cpp
-    src/ui/meeting_list_delegate.h
-    src/ui/meeting_list_dialog.cpp
-    src/ui/meeting_list_dialog.h
-    src/ui/meeting_booking_dialog.cpp
-    src/ui/meeting_booking_dialog.h
-    src/ui/meeting_detail_dialog.cpp
-    src/ui/meeting_detail_dialog.h
-    src/ui/schedule_widget.cpp
-    src/ui/schedule_widget.h
-    src/ui/meeting_main_window.cpp
-    src/ui/meeting_main_window.h
-    src/ui/settings_dialog.cpp
-    src/ui/settings_dialog.h
-    src/ui/audio_device_test_controller.cpp
-    src/ui/audio_device_test_controller.h
-    src/ui/camera_preview_widget.cpp
-    src/ui/camera_preview_widget.h
-    src/ui/meeting_room_window.cpp
-    src/ui/meeting_room_window.h
-    src/ui/camera_switch_completion_owner.cpp
-    src/ui/camera_switch_completion_owner.h
-    src/ui/meeting_log_console.cpp
-    src/ui/meeting_log_console.h
-    src/ui/meeting_ui_integration.h
-    src/core/meeting_coordinator.h
-    src/core/meeting_coordinator.cpp
-    src/render/qt_cpu_video_renderer.h
-    src/render/qt_cpu_video_renderer.cpp
-    src/render/video_render_session.h
-    src/render/video_render_session.cpp
-    src/ui/audio_visualizer_widget.cpp
-    src/ui/audio_visualizer_widget.h
-    src/ui/participants_list_model.h
-    src/ui/participants_list_model.cpp
-    src/ui/participant_item_delegate.h
-    src/ui/participant_item_delegate.cpp
-    src/ui/participants_sidebar_widget.h
-    src/ui/participants_sidebar_widget.cpp
-    src/ui/meeting_chat_sidebar_widget.h
-    src/ui/meeting_chat_sidebar_widget.cpp
-    src/render/backend_module.h
-    src/render/backend_module.cpp
-    src/ui/render/module_video_canvas.h
-    src/ui/render/module_video_canvas.cpp
-    src/ui/render/gl_video_canvas.h
-    src/ui/render/gl_video_canvas.cpp
-    src/ui/render/video_canvas.h
-    src/ui/render/video_canvas.cpp
-    src/ui/render/video_canvas_factory.cpp
-)
-
-target_include_directories(livekit_meeting_app BEFORE PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${WEBRTC_ROOT}/include/third_party/libyuv/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_ui
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/gen
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/gen/styles
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_base
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_rpl
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/lib_crl
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/GSL/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/range-v3/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/expected/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/xxHash
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore/5.15.18
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore/5.15.18/QtCore
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui/5.15.18
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui/5.15.18/QtGui
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtWidgets
-    ${TDESKTOP_LIBS_DIR}/zlib/include
-)
-
-target_link_libraries(livekit_meeting_app PRIVATE
-    ${CMAKE_DL_LIBS}
-    desktop_lib_ui
-    desktop_lib_base
-    desktop_lib_crl
-    desktop_lz4
-    ${TDESKTOP_LIBS_DIR}/tg_angle/out/Release/tg_angle.lib
-    ${TDESKTOP_LIBS_DIR}/zlib/Release/zlibstatic.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Widgets.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Network.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Svg.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5FontDatabaseSupport.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5EventDispatcherSupport.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5ThemeSupport.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5WindowsUIAutomationSupport.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5AccessibilitySupport.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5DeviceDiscoverySupport.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5EdidSupport.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtfreetype.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtharfbuzz.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtlibpng.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/platforms/qwindows.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/styles/qwindowsvistastyle.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qsvg.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qico.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qjpeg.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qgif.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qtga.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qtiff.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qwbmp.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qwebp.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/iconengines/qsvgicon.lib
-    ${TDESKTOP_LIBS_DIR}/mozjpeg/release/jpeg-static.lib
-    livekit_signaling
-    Dwmapi
-    UxTheme
-    d3d9
-    dxgi
-    d3d11
-    d3dcompiler
-    dxguid
-    netapi32
-    userenv
-    imm32
-    winmm
-    wtsapi32
-    version
-)
-
-set_target_properties(livekit_meeting_app PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded"
-)
-
-target_compile_definitions(livekit_meeting_app PRIVATE
-    WIN32
-    _WINDOWS
-    WIN32_LEAN_AND_MEAN
-    NOMINMAX
-    _WINSOCK_DEPRECATED_NO_WARNINGS
-    CRL_USE_WINAPI
-    ASIO_STANDALONE
-    WEBRTC_WIN
-    NDEBUG
-    _ITERATOR_DEBUG_LEVEL=0
-    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
-    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
-)
-
-target_link_options(livekit_meeting_app PRIVATE
-    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
-    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
-)
-
-# PR-SEC-004: strict startup and explicit runtime --debug HTTP policy.
-foreach(_policy_variant strict dev)
-    if(_policy_variant STREQUAL "dev")
-    else()
-    endif()
-endforeach()
-
-# Deploy whichever modules exist on this platform. The loader itself stays
-# portable; on Unix its consumers link CMAKE_DL_LIBS above (also inherited by
-livekit_deploy_renderer(livekit_meeting_app)
-
-# These contracts and the production-window fixture use HWND/Win32 APIs.
-# Keep their fixtures, D3D links and target-file expressions out of Unix builds.
-if(WIN32)
-foreach(variant missing_entry wrong_version missing_function wrong_capabilities create_failure)
-    set_target_properties(render_fixture_${variant} PROPERTIES AUTOMOC OFF)
-    target_include_directories(render_fixture_${variant} PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_compile_definitions(render_fixture_${variant} PRIVATE LK_RENDER_MODULE_BUILD FIXTURE_${variant})
-endforeach()
 endif()
