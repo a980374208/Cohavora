@@ -9,6 +9,7 @@
 #include <QtNetwork/QNetworkRequest>
 #include <memory>
 #include "http_types.h"
+#include "meeting_types.h"
 
 namespace OpenMeeting {
 
@@ -57,11 +58,16 @@ public:
     // 5. 换取会议 LiveKit Token (第二阶段：凭据获取)
     void getMeetingToken(const QString &meetingId, ResultCallback<LiveKitAuthInfo> callback);
 
-    // 6. 查询会议列表 (statusList: 1-待开始, 2-进行中, 3-已结束)
-    void getMeetings(const std::vector<int> &statusList, ResultCallback<QJsonArray> callback);
+    // 6. 查询会议列表
+    void getMeetings(const std::vector<MeetingStatus> &statusList, ResultCallback<MeetingList> callback);
 
     // 7. 查询单个会议详情
-    void getMeetingInfo(const QString &meetingId, ResultCallback<QJsonObject> callback);
+    void getMeetingInfo(const QString &meetingId, ResultCallback<MeetingCatalogDetail> callback);
+
+    // 7.1 预约、更新和取消预约
+    void bookMeeting(const MeetingBookingRequest &request, ResultCallback<MeetingCatalogDetail> callback);
+    void updateMeeting(const MeetingUpdateRequest &request, ResultCallback<bool> callback);
+    void cancelMeeting(const QString &meetingId, ResultCallback<bool> callback);
 
     // 8. 离开会议
     void leaveMeeting(const QString &meetingId, ResultCallback<bool> callback);

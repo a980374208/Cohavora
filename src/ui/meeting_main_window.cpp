@@ -1,7 +1,11 @@
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/meeting_room_window.h"
+#include "src/ui/meeting_booking_dialog.h"
+#include "src/ui/meeting_detail_dialog.h"
+#include "src/ui/meeting_list_dialog.h"
 #include "src/ui/login_dialog.h"
 #include "src/ui/shadow_helper.h"
+#include "src/core/meeting_catalog_controller.h"
 #include "src/core/meeting_coordinator.h"
 #include "src/net/session_manager.h"
 #include "styles/style_widgets.h"
@@ -13,6 +17,7 @@
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QAction>
 #include <QtWidgets/QApplication>
+#include <QtWidgets/QProgressDialog>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QFont>
@@ -113,10 +118,14 @@ void WindowControlsWidget::leaveEventHook(QEvent *e) {
 // JoinMeetingDialog 加入会议对话框
 // ----------------------------------------------------
 
-JoinMeetingDialog::JoinMeetingDialog(QWidget *parent)
-	: QDialog(parent) {
+JoinMeetingDialog::JoinMeetingDialog(
+		QWidget *parent,
+		const QString &initialMeetingId,
+		std::optional<OpenMeeting::MeetingSettings> meetingSettings)
+	: QDialog(parent)
+	, _meetingSettings(std::move(meetingSettings)) {
 	setWindowTitle(QString::fromUtf8("加入会议"));
-	setFixedSize(460, 520);
+	setFixedSize(460, 560);
 	setWindowFlags(windowFlags() | Qt::FramelessWindowHint);
 	setAttribute(Qt::WA_TranslucentBackground, true);
 
@@ -224,6 +233,8 @@ JoinMeetingDialog::JoinMeetingDialog(QWidget *parent)
 
 	_meetingIdInput = new QLineEdit(container);
 	_meetingIdInput->setPlaceholderText(QString::fromUtf8("请输入 9 位会议号 (如 847-123-456)"));
+	_meetingIdInput->setText(initialMeetingId);
+	_meetingIdInput->setReadOnly(!initialMeetingId.trimmed().isEmpty());
 	mainLayout->addWidget(_meetingIdInput);
 
 	// 入会密码输入框
@@ -257,11 +268,33 @@ JoinMeetingDialog::JoinMeetingDialog(QWidget *parent)
 	optLayout->addWidget(_videoMuteBox);
 	mainLayout->addLayout(optLayout);
 
+	_meetingPolicyLabel = new QLabel(container);
+	_meetingPolicyLabel->setWordWrap(true);
+	_meetingPolicyLabel->setTextFormat(Qt::PlainText);
+	_meetingPolicyLabel->setStyleSheet(
+		QStringLiteral("color: #8f5b00; background: #fff7e6; border: 1px solid #ffe7ba; "
+			"border-radius: 6px; padding: 7px 9px;"));
+	if (_meetingSettings && _meetingSettings->disableCameraOnJoin &&
+		_meetingSettings->disableMicrophoneOnJoin) {
+		_meetingPolicyLabel->setText(QString::fromUtf8(
+			"此会议要求入会时关闭摄像头和麦克风；上方选项仍保存为您的个人偏好。"));
+	} else if (_meetingSettings && _meetingSettings->disableCameraOnJoin) {
+		_meetingPolicyLabel->setText(QString::fromUtf8(
+			"此会议要求入会时关闭摄像头；上方选项仍保存为您的个人偏好。"));
+	} else if (_meetingSettings && _meetingSettings->disableMicrophoneOnJoin) {
+		_meetingPolicyLabel->setText(QString::fromUtf8(
+			"此会议要求入会时关闭麦克风；上方选项仍保存为您的个人偏好。"));
+	} else {
+		_meetingPolicyLabel->hide();
+	}
+	mainLayout->addWidget(_meetingPolicyLabel);
+
 	// 手动/高级直连设置折叠栏
 	_manualToggleBtn = new QPushButton(QString::fromUtf8("⚙ 高级 LiveKit 直连设置 ▾"), container);
 	_manualToggleBtn->setObjectName("linkBtn");
 	connect(_manualToggleBtn, &QPushButton::clicked, this, &JoinMeetingDialog::toggleManualServer);
 	mainLayout->addWidget(_manualToggleBtn);
+	_manualToggleBtn->setVisible(initialMeetingId.trimmed().isEmpty());
 
 	_manualWidget = new QWidget(container);
 	auto manLayout = new QVBoxLayout(_manualWidget);
@@ -366,6 +399,11 @@ void JoinMeetingDialog::onJoinClicked() {
 		if (_cleanMeetingId.isEmpty()) {
 			_cleanMeetingId = "livekit_room";
 		}
+		if (_resolvedServerUrl.isEmpty()) {
+			showError(QString::fromUtf8("手动直连需要填写 LiveKit 服务器地址"));
+			return;
+		}
+		persistMediaPreferences();
 		accept();
 		return;
 	}
@@ -420,14 +458,16 @@ void JoinMeetingDialog::onJoinClicked() {
 			self->_resolvedServerUrl = auth.url;
 			self->_resolvedToken = auth.token;
 
-			// 保存偏好设置
-			auto &s = OpenMeeting::SessionManager::instance();
-			if (self->_audioMuteBox) s.setEnableMicrophone(self->_audioMuteBox->isChecked());
-			if (self->_videoMuteBox) s.setEnableVideo(self->_videoMuteBox->isChecked());
-
+			self->persistMediaPreferences();
 			self->accept();
 		});
 	});
+}
+
+void JoinMeetingDialog::persistMediaPreferences() {
+	auto &session = OpenMeeting::SessionManager::instance();
+	if (_audioMuteBox) session.setEnableMicrophone(_audioMuteBox->isChecked());
+	if (_videoMuteBox) session.setEnableVideo(_videoMuteBox->isChecked());
 }
 
 QString JoinMeetingDialog::serverUrl() const {
@@ -489,12 +529,18 @@ MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 	// 设置无边框但保留系统窗口特性
 	setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint);
 
+	auto &session = OpenMeeting::SessionManager::instance();
+	_meetingCatalog = new OpenMeeting::MeetingCatalogController(session, this);
 	initLayout();
-	connect(&OpenMeeting::SessionManager::instance(),
+	connect(&session,
 	        &OpenMeeting::SessionManager::sessionInvalidated,
 	        this,
 	        &MeetingMainWindow::onSessionInvalidated,
 	        Qt::QueuedConnection);
+	connect(_meetingCatalog, &OpenMeeting::MeetingCatalogController::detailChanged,
+		this, [this] { handlePendingMeetingEntryDetail(); });
+	connect(&session, &OpenMeeting::SessionManager::authenticationReset,
+		this, [this](quint64) { clearPendingMeetingEntry(); });
 }
 
 void MeetingMainWindow::showEvent(QShowEvent *e) {
@@ -554,14 +600,31 @@ void MeetingMainWindow::initLayout() {
 		onCardClicked(t);
 	}, lifetime());
 
-	// 全部会议与添加日程事件
+	// 会议目录入口
 	_scheduleWidget->allMeetingsClicked() | rpl::on_next([this] {
-		QMessageBox::information(this, QString::fromUtf8("全部会议"), QString::fromUtf8("当前已与您的日程系统同步，暂无待进行的预定会议。"));
+		showMeetingListDialog();
 	}, lifetime());
 
 	_scheduleWidget->addScheduleClicked() | rpl::on_next([this] {
-		QMessageBox::information(this, QString::fromUtf8("预定日程"), QString::fromUtf8("点击创建新的会议日程，邀请参会人！"));
+		showBookingDialog();
 	}, lifetime());
+
+	_scheduleWidget->refreshClicked() | rpl::on_next([this] {
+		if (!_meetingCatalog->upcomingState().refreshing) {
+			_meetingCatalog->refreshUpcoming();
+		}
+	}, lifetime());
+
+	_scheduleWidget->meetingClicked() | rpl::on_next([this](const QString &meetingId) {
+		showMeetingDetail(meetingId);
+	}, lifetime());
+
+	connect(_meetingCatalog, &OpenMeeting::MeetingCatalogController::upcomingChanged,
+		this, [this] { syncSchedule(); });
+	syncSchedule();
+	if (OpenMeeting::SessionManager::instance().isLoggedIn()) {
+		_meetingCatalog->refreshUpcoming();
+	}
 
 	// 侧边栏用户头像点击菜单
 	_sidebar->avatarClicked() | rpl::on_next([this] {
@@ -625,89 +688,241 @@ void MeetingMainWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationRea
 }
 
 void MeetingMainWindow::onCardClicked(ActionCardType type) {
-	std::unique_ptr<QObject> meetingReservation;
-	if (type == ActionCardType::JoinMeeting || type == ActionCardType::ShareScreen
-		|| type == ActionCardType::QuickMeeting) {
+	if (type == ActionCardType::JoinMeeting) {
+		beginMeetingEntry();
+		return;
+	}
+
+	if (type == ActionCardType::QuickMeeting || type == ActionCardType::ShareScreen) {
 		// Reserve before modal dialogs: joining also sends HTTP from its dialog.
-		meetingReservation = _meetingEntryGuard.tryAcquire();
+		auto meetingReservation = _meetingEntryGuard.tryAcquire();
 		if (!meetingReservation) {
 			QMessageBox::information(this, QString::fromUtf8("会议忙碌"),
 				QString::fromUtf8("当前正在处理会议或已有会议窗口，请先完成或关闭后再试。"));
 			return;
 		}
+		openQuickMeeting(std::move(meetingReservation), type == ActionCardType::ShareScreen);
+		return;
 	}
-	if (type == ActionCardType::JoinMeeting || type == ActionCardType::ShareScreen) {
-		JoinMeetingDialog dlg(this);
-		if (dlg.exec() == QDialog::Accepted) {
-			auto coordinator = OpenMeeting::MeetingCoordinator::create();
-			OpenMeeting::MediaPreferences prefs;
-			prefs.enableMicrophone = !dlg.isAudioMuted();
-			prefs.enableVideo = !dlg.isVideoMuted();
+	if (type == ActionCardType::ScheduleMeeting) {
+		showBookingDialog();
+	}
+}
 
-			MeetingRoomWindow::Config cfg;
-			cfg.serverUrl = dlg.serverUrl();
-			cfg.token = dlg.token();
-			cfg.meetingId = dlg.meetingId();
-			cfg.displayName = dlg.displayName();
-			cfg.audioMuted = dlg.isAudioMuted();
-			cfg.videoEnabled = !dlg.isVideoMuted();
-			cfg.invitationMode = dlg.isManualConnection()
-				? InvitationMode::Disabled
-				: InvitationMode::BusinessMeetingId;
+void MeetingMainWindow::openQuickMeeting(
+		std::unique_ptr<QObject> reservation, bool startScreenShare) {
+	auto &session = OpenMeeting::SessionManager::instance();
+	if (!session.isLoggedIn()) {
+		LoginDialog loginDlg(this);
+		if (loginDlg.exec() != QDialog::Accepted) return;
+	}
 
-			if (!dlg.serverUrl().isEmpty() && !dlg.token().isEmpty()) {
-				// 高级直连模式
-				coordinator->connectDirectlyAsync(dlg.serverUrl(), dlg.token(), dlg.meetingId(), dlg.displayName(), prefs);
-			} else {
-				// 标准两阶段入会
-				coordinator->joinMeetingAsync(dlg.meetingId(), dlg.password(), dlg.displayName(), prefs);
-			}
+	auto coordinator = OpenMeeting::MeetingCoordinator::create();
+	const auto prefs = session.mediaPreferences();
 
-			auto *roomWindow = new MeetingRoomWindow(cfg, coordinator);
-			meetingReservation->setParent(roomWindow);
-			meetingReservation.release();
-			roomWindow->setAttribute(Qt::WA_DeleteOnClose);
-			if (type == ActionCardType::ShareScreen) {
-				connect(coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
-					roomWindow, [roomWindow, pending = true](bool) mutable {
-						if (!pending) return;
-						pending = false;
-						roomWindow->requestScreenShare();
-					});
-			}
-			roomWindow->show();
+	MeetingRoomWindow::Config config;
+	config.displayName = session.nickname();
+	config.audioMuted = !prefs.enableMicrophone;
+	config.videoEnabled = prefs.enableVideo;
+	config.invitationMode = InvitationMode::BusinessMeetingId;
+
+	auto *roomWindow = new MeetingRoomWindow(config, coordinator);
+	reservation->setParent(roomWindow);
+	reservation.release();
+	roomWindow->setAttribute(Qt::WA_DeleteOnClose);
+	if (startScreenShare) {
+		connect(coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
+			roomWindow, [roomWindow, pending = true](bool) mutable {
+				if (!pending) return;
+				pending = false;
+				roomWindow->requestDefaultScreenShare();
+			});
+	}
+	coordinator->createAndJoinQuickMeetingAsync(
+		QString::fromUtf8("%1 的快速会议").arg(session.nickname()), 3600, prefs);
+	roomWindow->show();
+}
+
+void MeetingMainWindow::beginMeetingEntry(
+		const QString &meetingId,
+		std::optional<OpenMeeting::MeetingSettings> meetingSettings,
+		bool requireFreshDetail,
+		bool shareScreenAfterJoin) {
+	auto reservation = _meetingEntryGuard.tryAcquire();
+	if (!reservation) {
+		QMessageBox::information(this, QString::fromUtf8("会议忙碌"),
+			QString::fromUtf8("当前正在处理会议或已有会议窗口，请先完成或关闭后再试。"));
+		return;
+	}
+
+	if (!requireFreshDetail) {
+		openJoinMeetingDialog(
+			std::move(reservation), meetingId, std::move(meetingSettings), shareScreenAfterJoin);
+		return;
+	}
+
+	_pendingMeetingReservation = std::move(reservation);
+	_pendingMeetingId = meetingId;
+	_pendingShareScreen = shareScreenAfterJoin;
+	const auto generation = ++_pendingMeetingEntryGeneration;
+	auto *progress = new QProgressDialog(
+		QString::fromUtf8("正在读取最新会议详情..."),
+		QString::fromUtf8("取消"), 0, 0, this);
+	progress->setWindowTitle(QString::fromUtf8("准备加入会议"));
+	progress->setWindowModality(Qt::WindowModal);
+	progress->setAutoClose(false);
+	progress->setAutoReset(false);
+	progress->setMinimumDuration(0);
+	progress->setAttribute(Qt::WA_DeleteOnClose);
+	_pendingMeetingProgress = progress;
+	connect(progress, &QProgressDialog::canceled, this, [this, generation] {
+		if (generation == _pendingMeetingEntryGeneration) clearPendingMeetingEntry();
+	});
+	progress->show();
+	_meetingCatalog->loadMeetingDetail(meetingId);
+}
+
+void MeetingMainWindow::openJoinMeetingDialog(
+		std::unique_ptr<QObject> reservation,
+		const QString &meetingId,
+		std::optional<OpenMeeting::MeetingSettings> meetingSettings,
+		bool shareScreenAfterJoin) {
+	JoinMeetingDialog dialog(this, meetingId, meetingSettings);
+	if (dialog.exec() != QDialog::Accepted) return;
+	if (dialog.serverUrl().isEmpty() || dialog.token().isEmpty()) {
+		QMessageBox::warning(this, QString::fromUtf8("无法加入会议"),
+			QString::fromUtf8("入会凭据不完整，请重新尝试。"));
+		return;
+	}
+
+	auto coordinator = OpenMeeting::MeetingCoordinator::create();
+	OpenMeeting::MediaPreferences preferences;
+	preferences.enableMicrophone = !dialog.isAudioMuted();
+	preferences.enableVideo = !dialog.isVideoMuted();
+
+	MeetingRoomWindow::Config config;
+	config.serverUrl = dialog.serverUrl();
+	config.token = dialog.token();
+	config.meetingId = dialog.meetingId();
+	config.displayName = dialog.displayName();
+	config.audioMuted = dialog.isAudioMuted() ||
+		(meetingSettings && meetingSettings->disableMicrophoneOnJoin);
+	config.videoEnabled = !dialog.isVideoMuted() &&
+		(!meetingSettings || !meetingSettings->disableCameraOnJoin);
+	config.invitationMode = dialog.isManualConnection()
+		? InvitationMode::Disabled
+		: InvitationMode::BusinessMeetingId;
+
+	auto *roomWindow = new MeetingRoomWindow(config, coordinator);
+	reservation->setParent(roomWindow);
+	reservation.release();
+	roomWindow->setAttribute(Qt::WA_DeleteOnClose);
+	if (shareScreenAfterJoin) {
+		connect(coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
+			roomWindow, [roomWindow, pending = true](bool) mutable {
+				if (!pending) return;
+				pending = false;
+				roomWindow->requestDefaultScreenShare();
+			});
+	}
+	coordinator->connectDirectlyAsync(
+		dialog.serverUrl(), dialog.token(), dialog.meetingId(), dialog.displayName(), preferences);
+	roomWindow->show();
+}
+
+void MeetingMainWindow::handlePendingMeetingEntryDetail() {
+	if (!_pendingMeetingReservation || _pendingMeetingId.isEmpty()) return;
+	const auto &state = _meetingCatalog->detailState();
+	if (state.meetingId != _pendingMeetingId || state.refreshing) return;
+
+	if (state.state == OpenMeeting::MeetingCatalogLoadState::Ready &&
+		state.error.code == 0 && state.detail &&
+		state.detail->record.meetingId == _pendingMeetingId) {
+		const auto status = state.detail->record.status;
+		if (status != OpenMeeting::MeetingStatus::Scheduled &&
+			status != OpenMeeting::MeetingStatus::InProgress) {
+			clearPendingMeetingEntry();
+			QMessageBox::information(this, QString::fromUtf8("无法加入会议"),
+				QString::fromUtf8("该会议当前状态不允许加入。"));
+			return;
 		}
-	} else if (type == ActionCardType::QuickMeeting) {
-		auto &session = OpenMeeting::SessionManager::instance();
-		if (!session.isLoggedIn()) {
-			LoginDialog loginDlg(this);
-			if (loginDlg.exec() != QDialog::Accepted) {
-				return;
-			}
-		}
 
-		auto coordinator = OpenMeeting::MeetingCoordinator::create();
-		auto prefs = session.mediaPreferences();
+		auto reservation = std::move(_pendingMeetingReservation);
+		const auto meetingId = _pendingMeetingId;
+		const auto settings = state.detail->record.settings;
+		const bool shareScreen = _pendingShareScreen;
+		clearPendingMeetingEntry();
+		openJoinMeetingDialog(
+			std::move(reservation), meetingId, settings, shareScreen);
+		return;
+	}
 
-		MeetingRoomWindow::Config cfg;
-		cfg.displayName = session.nickname();
-		cfg.audioMuted = !prefs.enableMicrophone;
-		cfg.videoEnabled = prefs.enableVideo;
-		cfg.invitationMode = InvitationMode::BusinessMeetingId;
+	clearPendingMeetingEntry();
+	QMessageBox::warning(this, QString::fromUtf8("无法读取会议"),
+		QString::fromUtf8("未能取得最新会议详情，请检查网络后重试。"));
+}
 
-		coordinator->createAndJoinQuickMeetingAsync(
-			QString::fromUtf8("%1 的快速会议").arg(session.nickname()),
-			3600,
-			prefs);
+void MeetingMainWindow::clearPendingMeetingEntry() {
+	++_pendingMeetingEntryGeneration;
+	_pendingMeetingReservation.reset();
+	_pendingMeetingId.clear();
+	_pendingShareScreen = false;
+	if (_pendingMeetingProgress) {
+		disconnect(_pendingMeetingProgress, nullptr, this, nullptr);
+		_pendingMeetingProgress->close();
+		_pendingMeetingProgress = nullptr;
+	}
+}
 
-		auto *roomWindow = new MeetingRoomWindow(cfg, coordinator);
-		meetingReservation->setParent(roomWindow);
-		meetingReservation.release();
-		roomWindow->setAttribute(Qt::WA_DeleteOnClose);
-		roomWindow->show();
-	} else if (type == ActionCardType::ScheduleMeeting) {
-		QMessageBox::information(this, QString::fromUtf8("预定会议"),
-			QString::fromUtf8("已打开会议预定面板，您可以设定会议主题、时间、周期与参会密码。"));
+void MeetingMainWindow::showBookingDialog() {
+	auto &session = OpenMeeting::SessionManager::instance();
+	if (!session.isLoggedIn()) {
+		QMessageBox::information(this, QString::fromUtf8("需要登录"),
+			QString::fromUtf8("请先登录后再预定会议。"));
+		return;
+	}
+	MeetingBookingDialog dialog(*_meetingCatalog, session, this);
+	dialog.exec();
+}
+
+void MeetingMainWindow::showMeetingListDialog() {
+	auto &session = OpenMeeting::SessionManager::instance();
+	if (!session.isLoggedIn()) {
+		QMessageBox::information(this, QString::fromUtf8("需要登录"),
+			QString::fromUtf8("请先登录后查看会议列表。"));
+		return;
+	}
+	MeetingListDialog dialog(*_meetingCatalog, session, this);
+	QString requestedJoinMeetingId;
+	connect(&dialog, &MeetingListDialog::meetingActivated,
+		this, [this](const QString &meetingId) { showMeetingDetail(meetingId); });
+	connect(&dialog, &MeetingListDialog::joinRequested,
+		this, [&dialog, &requestedJoinMeetingId](const QString &meetingId) {
+			requestedJoinMeetingId = meetingId;
+			dialog.accept();
+		});
+	dialog.exec();
+	if (!requestedJoinMeetingId.isEmpty()) {
+		beginMeetingEntry(requestedJoinMeetingId, std::nullopt, true);
+	}
+}
+
+void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
+	if (meetingId.isEmpty()) return;
+	MeetingDetailDialog dialog(
+		meetingId,
+		*_meetingCatalog,
+		OpenMeeting::SessionManager::instance(),
+		this);
+	dialog.exec();
+	if (const auto detail = dialog.detailForJoin()) {
+		beginMeetingEntry(detail->record.meetingId, detail->record.settings);
+	}
+}
+
+void MeetingMainWindow::syncSchedule() {
+	if (_scheduleWidget && _meetingCatalog) {
+		_scheduleWidget->setMeetingState(_meetingCatalog->upcomingState());
 	}
 }
 

@@ -386,10 +386,14 @@ endfunction()
 add_executable(livekit_meeting_app
     src/app/main_meeting_app.cpp
     src/net/http_types.h
+    src/net/meeting_types.h
+    src/net/meeting_types.cpp
     src/net/openmeeting_http_client.h
     src/net/openmeeting_http_client.cpp
     src/net/session_manager.h
     src/net/session_manager.cpp
+    src/core/meeting_catalog_controller.h
+    src/core/meeting_catalog_controller.cpp
     src/net/credential_store.cpp
     src/net/credential_store.h
     src/net/service_endpoint_policy.cpp
@@ -400,6 +404,16 @@ add_executable(livekit_meeting_app
     src/ui/sidebar_widget.h
     src/ui/action_card_widget.cpp
     src/ui/action_card_widget.h
+    src/ui/meeting_list_model.cpp
+    src/ui/meeting_list_model.h
+    src/ui/meeting_list_delegate.cpp
+    src/ui/meeting_list_delegate.h
+    src/ui/meeting_list_dialog.cpp
+    src/ui/meeting_list_dialog.h
+    src/ui/meeting_booking_dialog.cpp
+    src/ui/meeting_booking_dialog.h
+    src/ui/meeting_detail_dialog.cpp
+    src/ui/meeting_detail_dialog.h
     src/ui/schedule_widget.cpp
     src/ui/schedule_widget.h
     src/ui/meeting_main_window.cpp

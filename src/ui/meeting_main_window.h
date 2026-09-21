@@ -6,14 +6,20 @@
 #include "src/ui/action_card_widget.h"
 #include "src/ui/schedule_widget.h"
 #include "src/ui/meeting_entry_guard.h"
+#include "src/net/meeting_types.h"
+#include <QtCore/QPointer>
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QLabel>
 
+#include <memory>
+#include <optional>
+
 namespace OpenMeeting {
 enum class SessionInvalidationReason;
+class MeetingCatalogController;
 }
 
 namespace MeetingUI {
@@ -49,7 +55,10 @@ private:
 class JoinMeetingDialog : public QDialog {
 	Q_OBJECT
 public:
-	explicit JoinMeetingDialog(QWidget *parent = nullptr);
+	explicit JoinMeetingDialog(
+		QWidget *parent = nullptr,
+		const QString &initialMeetingId = QString(),
+		std::optional<OpenMeeting::MeetingSettings> meetingSettings = std::nullopt);
 	~JoinMeetingDialog() override = default;
 
 	QString serverUrl() const;
@@ -75,6 +84,7 @@ private slots:
 private:
 	void setLoading(bool loading, const QString &statusText = QString());
 	void showError(const QString &msg);
+	void persistMediaPreferences();
 
 	QPushButton *_closeBtn = nullptr;
 	QLineEdit *_meetingIdInput = nullptr;
@@ -85,6 +95,7 @@ private:
 	QPushButton *_joinBtn = nullptr;
 	QPushButton *_cancelBtn = nullptr;
 	QLabel *_statusLabel = nullptr;
+	QLabel *_meetingPolicyLabel = nullptr;
 
 	QPushButton *_manualToggleBtn = nullptr;
 	QWidget *_manualWidget = nullptr;
@@ -98,6 +109,7 @@ private:
 	bool _isLoading = false;
 	bool _isCancelled = false;
 	bool _isManualConnection = false;
+	std::optional<OpenMeeting::MeetingSettings> _meetingSettings;
 
 	QPoint _dragPosition;
 	bool _isDragging = false;
@@ -122,7 +134,24 @@ private:
 	void setupNativeWindow();
 	void initLayout();
 	void onCardClicked(ActionCardType type);
+	void openQuickMeeting(std::unique_ptr<QObject> reservation, bool startScreenShare);
 	void onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason);
+	void showBookingDialog();
+	void showMeetingListDialog();
+	void showMeetingDetail(const QString &meetingId);
+	void beginMeetingEntry(
+		const QString &meetingId = QString(),
+		std::optional<OpenMeeting::MeetingSettings> meetingSettings = std::nullopt,
+		bool requireFreshDetail = false,
+		bool shareScreenAfterJoin = false);
+	void openJoinMeetingDialog(
+		std::unique_ptr<QObject> reservation,
+		const QString &meetingId,
+		std::optional<OpenMeeting::MeetingSettings> meetingSettings,
+		bool shareScreenAfterJoin);
+	void handlePendingMeetingEntryDetail();
+	void clearPendingMeetingEntry();
+	void syncSchedule();
 
 	static constexpr int kWindowCornerRadius = 12;
 
@@ -130,8 +159,14 @@ private:
 	ActionGridContainer *_actionGrid = nullptr;
 	ScheduleWidget *_scheduleWidget = nullptr;
 	WindowControlsWidget *_windowControls = nullptr;
+	OpenMeeting::MeetingCatalogController *_meetingCatalog = nullptr;
 	bool _sessionInvalidationDialogActive = false;
 	MeetingEntryGuard _meetingEntryGuard;
+	std::unique_ptr<QObject> _pendingMeetingReservation;
+	QString _pendingMeetingId;
+	bool _pendingShareScreen = false;
+	quint64 _pendingMeetingEntryGeneration = 0;
+	QPointer<QDialog> _pendingMeetingProgress;
 
 #if defined(Q_OS_WIN)
 	HWND _handle = nullptr;

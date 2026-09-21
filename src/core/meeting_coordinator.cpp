@@ -13,6 +13,7 @@
 
 #include <exception>
 #include <future>
+#include <limits>
 #include <utility>
 
 namespace OpenMeeting {
@@ -67,6 +68,175 @@ static MeetingRoomInfo ToMeetingRoomInfo(const livekit::RoomInfo &info) {
     result.numParticipants = info.num_participants;
     result.numPublishers = info.num_publishers;
     result.activeRecording = info.active_recording;
+    return result;
+}
+
+enum class OpenMeetingMetadataState {
+    Absent,
+    Valid,
+    Invalid,
+};
+
+struct ParsedOpenMeetingMetadata {
+    OpenMeetingMetadataState state = OpenMeetingMetadataState::Absent;
+    MeetingDetail detail;
+};
+
+static bool ReadOptionalString(
+        const QJsonObject &object, const char *key, QString *value) {
+    if (!object.contains(key)) return true;
+    const auto candidate = object.value(key);
+    if (!candidate.isString()) return false;
+    *value = candidate.toString();
+    return true;
+}
+
+static bool ReadOptionalInt64(
+        const QJsonObject &object, const char *key, int64_t *value) {
+    if (!object.contains(key)) return true;
+    const auto candidate = object.value(key);
+    if (candidate.isDouble()) {
+        *value = candidate.toVariant().toLongLong();
+        return true;
+    }
+    if (candidate.isString()) {
+        bool ok = false;
+        const auto parsed = candidate.toString().toLongLong(&ok);
+        if (ok) {
+            *value = parsed;
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ReadOptionalBool(
+        const QJsonObject &object, const char *key, bool *value) {
+    if (!object.contains(key)) return true;
+    const auto candidate = object.value(key);
+    if (!candidate.isBool()) return false;
+    *value = candidate.toBool();
+    return true;
+}
+
+static bool ReadOptionalObject(
+        const QJsonObject &object, const char *key, QJsonObject *value) {
+    if (!object.contains(key)) return true;
+    const auto candidate = object.value(key);
+    if (!candidate.isObject()) return false;
+    *value = candidate.toObject();
+    return true;
+}
+
+static ParsedOpenMeetingMetadata ParseOpenMeetingMetadata(const std::string &metadata) {
+    ParsedOpenMeetingMetadata result;
+    if (metadata.empty()) return result;
+
+    QJsonParseError error;
+    const auto document = QJsonDocument::fromJson(
+        QByteArray::fromRawData(metadata.data(), static_cast<int>(metadata.size())), &error);
+    if (error.error != QJsonParseError::NoError || !document.isObject()) return result;
+
+    const auto root = document.object();
+    if (!root.contains(QStringLiteral("detail"))) return result;
+    result.state = OpenMeetingMetadataState::Invalid;
+    if (!root.value(QStringLiteral("detail")).isObject()) return result;
+
+    const auto detailObject = root.value(QStringLiteral("detail")).toObject();
+    QJsonObject info;
+    QJsonObject setting;
+    QJsonObject systemGenerated;
+    QJsonObject creatorDefined;
+    if (!ReadOptionalObject(detailObject, "info", &info) ||
+        !ReadOptionalObject(detailObject, "setting", &setting) ||
+        !ReadOptionalObject(info, "systemGenerated", &systemGenerated) ||
+        !ReadOptionalObject(info, "creatorDefinedMeeting", &creatorDefined)) {
+        return result;
+    }
+
+    auto parsed = MeetingDetail{};
+    parsed.canJoinEarly = false;
+    int64_t scheduledTime = 0;
+    int64_t duration = 0;
+    if (!ReadOptionalString(systemGenerated, "meetingID", &parsed.meetingId) ||
+        !ReadOptionalString(systemGenerated, "creatorUserID", &parsed.creatorUserId) ||
+        !ReadOptionalInt64(systemGenerated, "startTime", &parsed.startTime) ||
+        !ReadOptionalString(creatorDefined, "title", &parsed.meetingName) ||
+        !ReadOptionalString(creatorDefined, "hostUserID", &parsed.hostUserId) ||
+        !ReadOptionalInt64(creatorDefined, "scheduledTime", &scheduledTime) ||
+        !ReadOptionalInt64(creatorDefined, "meetingDuration", &duration)) {
+        return result;
+    }
+
+    // Older clients and fixtures used a flat detail.info shape. Preserve that
+    // input while preferring the server's nested protobuf JSON structure.
+    QString legacyString;
+    int64_t legacyTime = 0;
+    if (parsed.meetingId.isEmpty()) {
+        legacyString.clear();
+        if (!ReadOptionalString(info, "meetingID", &legacyString)) return result;
+        parsed.meetingId = legacyString;
+    }
+    if (parsed.meetingName.isEmpty()) {
+        legacyString.clear();
+        if (!ReadOptionalString(info, "meetingName", &legacyString)) return result;
+        parsed.meetingName = legacyString;
+    }
+    if (parsed.creatorUserId.isEmpty()) {
+        legacyString.clear();
+        if (!ReadOptionalString(info, "creatorUserID", &legacyString)) return result;
+        parsed.creatorUserId = legacyString;
+    }
+    if (parsed.hostUserId.isEmpty()) {
+        legacyString.clear();
+        if (!ReadOptionalString(info, "hostUserID", &legacyString)) return result;
+        parsed.hostUserId = legacyString;
+    }
+    if (parsed.startTime == 0) {
+        if (!ReadOptionalInt64(info, "startTime", &legacyTime)) return result;
+        parsed.startTime = legacyTime != 0 ? legacyTime : scheduledTime;
+    }
+    if (!ReadOptionalInt64(info, "endTime", &parsed.endTime)) return result;
+    if (parsed.endTime == 0 && parsed.startTime > 0 && duration > 0 &&
+        duration <= std::numeric_limits<int64_t>::max() - parsed.startTime) {
+        parsed.endTime = parsed.startTime + duration;
+    }
+    if (parsed.hostUserId.isEmpty()) parsed.hostUserId = parsed.creatorUserId;
+
+    if (!ReadOptionalBool(setting, "disableMicrophoneOnJoin", &parsed.disableMicrophoneOnJoin) ||
+        !ReadOptionalBool(setting, "disableCameraOnJoin", &parsed.disableCameraOnJoin) ||
+        !ReadOptionalBool(setting, "lockMeeting", &parsed.lockMeeting) ||
+        !ReadOptionalBool(setting, "canParticipantJoinMeetingEarly", &parsed.canJoinEarly)) {
+        return result;
+    }
+
+    result.state = OpenMeetingMetadataState::Valid;
+    result.detail = std::move(parsed);
+    return result;
+}
+
+InitialMediaState MeetingCoordinator::resolveInitialMediaState(
+        const std::string &metadata,
+        const MediaPreferences &preferences) {
+    InitialMediaState result;
+    result.microphoneEnabled = preferences.enableMicrophone;
+    result.videoEnabled = preferences.enableVideo;
+
+    const auto parsed = ParseOpenMeetingMetadata(metadata);
+    result.hasOpenMeetingDetail = parsed.state != OpenMeetingMetadataState::Absent;
+    result.metadataValid = parsed.state != OpenMeetingMetadataState::Invalid;
+    if (parsed.state == OpenMeetingMetadataState::Invalid) {
+        result.microphoneEnabled = false;
+        result.videoEnabled = false;
+        return result;
+    }
+    if (parsed.state == OpenMeetingMetadataState::Valid) {
+        result.detail = parsed.detail;
+        result.microphoneEnabled = preferences.enableMicrophone &&
+            !parsed.detail.disableMicrophoneOnJoin;
+        result.videoEnabled = preferences.enableVideo &&
+            !parsed.detail.disableCameraOnJoin;
+    }
     return result;
 }
 
@@ -1490,6 +1660,25 @@ void MeetingCoordinator::startRoomSession(const QString &url,
                 if (!startup.markRoomConnected()) {
                     throw std::runtime_error("本地媒体启动事务状态无效");
                 }
+                MediaPreferences requestedPreferences;
+                requestedPreferences.enableMicrophone = !audioMuted;
+                requestedPreferences.enableVideo = videoEnabled;
+                const auto initialMedia = resolveInitialMediaState(
+                    room->room_info().metadata, requestedPreferences);
+                const bool effectiveAudioMuted = !initialMedia.microphoneEnabled;
+                const bool effectiveVideoEnabled = initialMedia.videoEnabled;
+                MeetingUI::LogToConsole(
+                    MeetingUI::LogCategory::Media,
+                    "INITIAL_MEDIA_POLICY",
+                    QString("metadata=%1 valid=%2 microphone=%3 camera=%4")
+                        .arg(initialMedia.hasOpenMeetingDetail ? QStringLiteral("openmeeting")
+                                                              : QStringLiteral("none"))
+                        .arg(initialMedia.metadataValid ? QStringLiteral("true")
+                                                        : QStringLiteral("false"))
+                        .arg(initialMedia.microphoneEnabled ? QStringLiteral("enabled")
+                                                            : QStringLiteral("disabled"))
+                        .arg(initialMedia.videoEnabled ? QStringLiteral("enabled")
+                                                       : QStringLiteral("disabled")));
                 QMetaObject::invokeMethod(this, [this, sessionGeneration]() {
                     if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
                         return;
@@ -1506,13 +1695,13 @@ void MeetingCoordinator::startRoomSession(const QString &url,
                 }
 
                 auto audioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", audioSource);
-                audioTrack->set_muted(audioMuted);
+                audioTrack->set_muted(effectiveAudioMuted);
 
                 livekit::VideoPublishOptions vopts;
                 vopts.video_codec = "vp8";
                 auto videoTrack = livekit::LocalVideoTrack::createLocalVideoTrack(
                     "camera_video", videoSource, livekit::TrackSource::Camera, vopts);
-                videoTrack->set_muted(!videoEnabled);
+                videoTrack->set_muted(!effectiveVideoEnabled);
 
                 // 【核心优化】：将本地音视频打包，发起批量发布与单次全量 SDP 协商
                 std::vector<std::shared_ptr<livekit::Track>> tracksToPublish;
@@ -1528,8 +1717,11 @@ void MeetingCoordinator::startRoomSession(const QString &url,
 
                 QMetaObject::invokeMethod(this,
                                           [this, sessionGeneration, audioTrack = std::move(audioTrack),
-                                           videoTrack = std::move(videoTrack)]() mutable {
-                    completeRoomStartupOnUiThread(sessionGeneration, std::move(audioTrack), std::move(videoTrack));
+                                           videoTrack = std::move(videoTrack), audioMuted, videoEnabled,
+                                           effectiveAudioMuted, effectiveVideoEnabled]() mutable {
+                    completeRoomStartupOnUiThread(
+                        sessionGeneration, std::move(audioTrack), std::move(videoTrack),
+                        audioMuted, videoEnabled, effectiveAudioMuted, effectiveVideoEnabled);
                 }, Qt::QueuedConnection);
             } catch (const std::exception &) {
                 const QString err = QString::fromStdString(
@@ -1564,7 +1756,11 @@ void MeetingCoordinator::startRoomSession(const QString &url,
 void MeetingCoordinator::completeRoomStartupOnUiThread(
     uint64_t sessionGeneration,
     std::shared_ptr<livekit::LocalAudioTrack> audioTrack,
-    std::shared_ptr<livekit::LocalVideoTrack> videoTrack) {
+    std::shared_ptr<livekit::LocalVideoTrack> videoTrack,
+    bool requestedAudioMuted,
+    bool requestedVideoEnabled,
+    bool effectiveAudioMuted,
+    bool effectiveVideoEnabled) {
     if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
         return;
     }
@@ -1573,12 +1769,33 @@ void MeetingCoordinator::completeRoomStartupOnUiThread(
     }
 
     QPointer<MeetingCoordinator> owner(this);
+    if (_audioMuted == requestedAudioMuted) {
+        _audioMuted = effectiveAudioMuted;
+    } else if (audioTrack) {
+        audioTrack->set_muted(_audioMuted);
+    }
+    if (_videoEnabled == requestedVideoEnabled) {
+        _videoEnabled = effectiveVideoEnabled;
+    } else if (videoTrack) {
+        videoTrack->set_muted(!_videoEnabled);
+    }
     _localAudioTrack = std::move(audioTrack);
     _localVideoTrack = std::move(videoTrack);
     _startupListenOnly = false;
     _startupCommitted = true;
+    ensureLocalParticipant();
+    for (auto &[_, participant] : _participants) {
+        if (!participant.isLocal) continue;
+        participant.isAudioMuted = _audioMuted;
+        participant.isVideoEnabled = _videoEnabled;
+        break;
+    }
     if (!tryCommitOperationalStateOnUiThread(
             sessionGeneration, QString::fromUtf8("本地音视频已就绪，已成功连入会议房间"))) {
+        return;
+    }
+    updateParticipantListAndNotify();
+    if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
         return;
     }
     emit owner->localAudioMuteChanged(owner->_audioMuted);
@@ -2300,28 +2517,9 @@ void MeetingCoordinator::parseRoomMetadata(const std::string &metadata) {
         emit owner->meetingDetailUpdated(detail);
         return;
     }
-    QJsonParseError err;
-    QJsonDocument doc = QJsonDocument::fromJson(QByteArray::fromRawData(metadata.data(), static_cast<int>(metadata.size())), &err);
-    if (err.error != QJsonParseError::NoError || !doc.isObject()) return;
-
-    QJsonObject root = doc.object();
-    QJsonObject detail = root.value("detail").toObject();
-    if (detail.isEmpty()) return;
-
-    QJsonObject info = detail.value("info").toObject();
-    QJsonObject setting = detail.value("setting").toObject();
-
-    _meetingDetail.meetingId = info.value("meetingID").toString();
-    _meetingDetail.meetingName = info.value("meetingName").toString();
-    _meetingDetail.creatorUserId = info.value("creatorUserID").toString();
-    _meetingDetail.hostUserId = info.value("hostUserID").toString();
-    _meetingDetail.startTime = info.value("startTime").toVariant().toLongLong();
-    _meetingDetail.endTime = info.value("endTime").toVariant().toLongLong();
-
-    _meetingDetail.disableMicrophoneOnJoin = setting.value("disableMicrophoneOnJoin").toBool();
-    _meetingDetail.disableCameraOnJoin = setting.value("disableCameraOnJoin").toBool();
-    _meetingDetail.lockMeeting = setting.value("lockMeeting").toBool();
-    _meetingDetail.canJoinEarly = setting.value("canParticipantJoinMeetingEarly").toBool(true);
+    const auto parsed = ParseOpenMeetingMetadata(metadata);
+    if (parsed.state != OpenMeetingMetadataState::Valid) return;
+    _meetingDetail = parsed.detail;
 
     for (auto &[identity, participant] : _participants) {
         participant.isHost = (identity == _meetingDetail.hostUserId ||

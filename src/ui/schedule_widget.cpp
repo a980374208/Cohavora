@@ -1,8 +1,14 @@
 #include "src/ui/schedule_widget.h"
+#include "src/ui/meeting_list_delegate.h"
+#include "src/ui/meeting_list_model.h"
 #include "styles/style_widgets.h"
 #include <QtGui/QMouseEvent>
 #include <QtGui/QFont>
 #include <QtCore/QLocale>
+#include <QtWidgets/QAbstractItemView>
+#include <QtWidgets/QListView>
+
+#include <algorithm>
 
 namespace MeetingUI {
 
@@ -124,12 +130,32 @@ ScheduleWidget::ScheduleWidget(QWidget *parent)
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
 
+	_model = new MeetingListModel(this);
+	_listView = new QListView(this);
+	_listView->setModel(_model);
+	_listView->setItemDelegate(new MeetingListDelegate(true, _listView));
+	_listView->setSelectionMode(QAbstractItemView::SingleSelection);
+	_listView->setEditTriggers(QAbstractItemView::NoEditTriggers);
+	_listView->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+	_listView->setMouseTracking(true);
+	_listView->setUniformItemSizes(false);
+	_listView->setStyleSheet(R"(
+		QListView { border: none; background: transparent; outline: none; }
+		QListView::item { background: transparent; }
+	)");
+	_listView->hide();
+	connect(_listView, &QListView::clicked, this, [this](const QModelIndex &index) {
+		const auto meetingId = index.data(MeetingIdRole).toString();
+		if (!meetingId.isEmpty()) _meetingClicks.fire_copy(meetingId);
+	});
+
 	_fabButton = new FloatingActionButton(this);
+	_fabButton->raise();
 }
 
 void ScheduleWidget::resizeEvent(QResizeEvent *e) {
-	const int fabMargin = 28;
-	_fabButton->move(width() - _fabButton->width() - fabMargin, height() - _fabButton->height() - fabMargin);
+	layoutChildren();
+	Ui::RpWidget::resizeEvent(e);
 }
 
 QString ScheduleWidget::getFormattedDate() const {
@@ -144,8 +170,38 @@ QString ScheduleWidget::getFormattedSubDate() const {
 		"周一", "周二", "周三", "周四", "周五", "周六", "周日"
 	};
 	const QString weekStr = (dayOfWeek >= 1 && dayOfWeek <= 7) ? QString::fromUtf8(weekdays[dayOfWeek - 1]) : QString::fromUtf8("周日");
-	// 农历显示示例（与实际日期对应）
-	return QString::fromUtf8("%1 农历六月廿七").arg(weekStr);
+	return weekStr;
+}
+
+void ScheduleWidget::setMeetingState(const OpenMeeting::MeetingListViewState &state) {
+	_model->setMeetings(state.meetings, false);
+	_stateMessage.clear();
+	_showEmptyIllustration = false;
+	if (state.refreshing && !state.hasSnapshot) {
+		_stateMessage = QString::fromUtf8("正在加载日程...");
+	} else if (state.state == OpenMeeting::MeetingCatalogLoadState::Error && !state.hasSnapshot) {
+		_stateMessage = QString::fromUtf8("日程加载失败，请点击刷新重试。");
+	} else if (_model->rowCount() == 0) {
+		_showEmptyIllustration = true;
+	} else if (state.refreshing) {
+		_stateMessage = QString::fromUtf8("正在刷新，当前显示最近一次结果。");
+	} else if (state.error.code != 0) {
+		_stateMessage = QString::fromUtf8("刷新失败，当前显示最近一次结果。");
+	}
+	layoutChildren();
+	update();
+}
+
+void ScheduleWidget::layoutChildren() {
+	const int fabMargin = 28;
+	_fabButton->move(
+		width() - _fabButton->width() - fabMargin,
+		height() - _fabButton->height() - fabMargin);
+	const int listTop = _stateMessage.isEmpty() ? 118 : 143;
+	_listView->setGeometry(24, listTop, std::max(0, width() - 48),
+		std::max(0, height() - listTop - 82));
+	_listView->setVisible(_model->rowCount() > 0);
+	_fabButton->raise();
 }
 
 void ScheduleWidget::paintEvent(QPaintEvent *e) {
@@ -157,10 +213,15 @@ void ScheduleWidget::paintEvent(QPaintEvent *e) {
 	// 绘制顶部日期和全部会议入口
 	drawHeader(p);
 
-	// 绘制中间咖啡杯矢量插画与“暂无会议”
 	const int startY = 120;
-	const QRect emptyArea(0, startY, width(), height() - startY - 70);
-	drawEmptyCoffeeIllustration(p, emptyArea);
+	const QRect stateArea(0, startY, width(), height() - startY - 70);
+	if (_showEmptyIllustration) {
+		drawEmptyCoffeeIllustration(p, stateArea);
+	} else if (_model->rowCount() == 0) {
+		drawStateMessage(p, stateArea);
+	} else if (!_stateMessage.isEmpty()) {
+		drawStateMessage(p, QRect(28, 112, width() - 56, 24));
+	}
 }
 
 void ScheduleWidget::drawHeader(QPainter &p) {
@@ -197,6 +258,11 @@ void ScheduleWidget::drawHeader(QPainter &p) {
 	QFontMetrics fm(subFont);
 	const int allW = fm.horizontalAdvance(allMeetingsText) + 8;
 	_allMeetingsRect = QRect(w - rightMargin - allW, top + 42, allW, 20);
+	const QString refreshText = QString::fromUtf8("刷新");
+	const int refreshW = fm.horizontalAdvance(refreshText) + 8;
+	_refreshRect = QRect(_allMeetingsRect.left() - refreshW - 18, top + 42, refreshW, 20);
+	p.setPen(_refreshHovered ? QColor(0x16, 0x77, 0xff) : QColor(0x8f, 0x95, 0x9e));
+	p.drawText(_refreshRect, Qt::AlignCenter, refreshText);
 
 	if (_allMeetingsHovered) {
 		p.setPen(QColor(0x16, 0x77, 0xff));
@@ -352,10 +418,23 @@ void ScheduleWidget::drawCoffeeSteam(QPainter &p, int cx, int cy) {
 	p.restore();
 }
 
+void ScheduleWidget::drawStateMessage(QPainter &p, const QRect &area) {
+	p.save();
+	QFont font = p.font();
+	font.setFamily(QStringLiteral("Microsoft YaHei"));
+	font.setPixelSize(13);
+	p.setFont(font);
+	p.setPen(_model->rowCount() > 0 ? QColor(0xd4, 0x88, 0x06) : QColor(0x8f, 0x95, 0x9e));
+	p.drawText(area, Qt::AlignCenter | Qt::TextWordWrap, _stateMessage);
+	p.restore();
+}
+
 void ScheduleWidget::mouseMoveEvent(QMouseEvent *e) {
-	const bool hovered = _allMeetingsRect.contains(e->pos());
-	if (hovered != _allMeetingsHovered) {
-		_allMeetingsHovered = hovered;
+	const bool allHovered = _allMeetingsRect.contains(e->pos());
+	const bool refreshHovered = _refreshRect.contains(e->pos());
+	if (allHovered != _allMeetingsHovered || refreshHovered != _refreshHovered) {
+		_allMeetingsHovered = allHovered;
+		_refreshHovered = refreshHovered;
 		update();
 	}
 }
@@ -363,11 +442,14 @@ void ScheduleWidget::mouseMoveEvent(QMouseEvent *e) {
 void ScheduleWidget::mousePressEvent(QMouseEvent *e) {
 	if (e->button() == Qt::LeftButton && _allMeetingsRect.contains(e->pos())) {
 		_allMeetingsClicks.fire({});
+	} else if (e->button() == Qt::LeftButton && _refreshRect.contains(e->pos())) {
+		_refreshClicks.fire({});
 	}
 }
 
 void ScheduleWidget::leaveEventHook(QEvent *e) {
 	_allMeetingsHovered = false;
+	_refreshHovered = false;
 	update();
 	Ui::RpWidget::leaveEventHook(e);
 }

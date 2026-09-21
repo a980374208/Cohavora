@@ -391,6 +391,7 @@ public:
 	                           std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator = nullptr,
 	                           QWidget *parent = nullptr);
 	void requestScreenShare();
+	void requestDefaultScreenShare();
 	~MeetingRoomWindow() override;
 
 	void receiveRemoteVideoFrame(const QImage &frame, const QString &user);
@@ -485,6 +486,7 @@ private:
 	bool canRenderRemoteVideo(const QString &trackSid) const;
 	void refreshRemoteVideoPresentations();
 	void applyScreenShareSnapshot(livekit::ScreenShareSnapshot snapshot);
+	void handleScreenShareSources(const std::vector<livekit::DesktopSource> &sources);
 	void applyRemoteParticipantJoined(const QString &identity, const QString &name,
 		const OpenMeeting::ParticipantPresentation *presentation);
 	void setupCameraCompletionOwner(OpenMeeting::SessionManager &sessionManager);
@@ -538,6 +540,7 @@ private:
 	std::unique_ptr<VideoTileWidget> _localScreenTile;
 	std::shared_ptr<livekit::render::VideoRenderRouter> _localScreenPreview;
 	QLabel *_screenShareBanner = nullptr;
+	bool _defaultScreenSharePending = false;
 	QLabel *_inviteHintBanner = nullptr;
 	QLabel *_recoveryBanner = nullptr;
 	QTimer *_recoveryBannerFadeTimer = nullptr;

@@ -15,6 +15,7 @@
 #include <QtCore/QDebug>
 #include <QtCore/QPointer>
 #include <QtCore/QThread>
+#include <algorithm>
 #include <cmath>
 
 #if defined(Q_OS_WIN)
@@ -3428,6 +3429,63 @@ void MeetingRoomWindow::requestScreenShare() {
 	}
 }
 
+void MeetingRoomWindow::requestDefaultScreenShare() {
+	if (!_coordinator) return;
+	using State = livekit::ScreenShareState;
+	const auto state = _coordinator->screenShareSnapshot().state;
+	if (state != State::Idle && state != State::Failed) return;
+	_defaultScreenSharePending = true;
+	_coordinator->requestScreenShareSources();
+}
+
+void MeetingRoomWindow::handleScreenShareSources(
+		const std::vector<livekit::DesktopSource> &sources) {
+	if (sources.empty()) {
+		_defaultScreenSharePending = false;
+		QMessageBox::warning(this, QString::fromUtf8("屏幕共享"),
+			QString::fromUtf8("未找到可共享的屏幕或窗口"));
+		return;
+	}
+	if (_defaultScreenSharePending) {
+		_defaultScreenSharePending = false;
+		auto source = std::find_if(sources.begin(), sources.end(), [](const auto &candidate) {
+			return candidate.kind == livekit::DesktopSourceKind::Screen;
+		});
+		if (source == sources.end()) source = sources.begin();
+		if (_coordinator) _coordinator->startScreenShare(*source);
+		return;
+	}
+
+	auto *dialog = new QInputDialog(this);
+	dialog->setObjectName(QStringLiteral("screen-share-picker"));
+	dialog->setAttribute(Qt::WA_DeleteOnClose);
+	dialog->setWindowTitle(QString::fromUtf8("选择共享来源"));
+	dialog->setLabelText(QString::fromUtf8("选择屏幕或窗口（仅共享画面）："));
+	QStringList choices;
+	for (size_t i = 0; i < sources.size(); ++i) {
+		const auto &source = sources[i];
+		const auto kind = source.kind == livekit::DesktopSourceKind::Screen
+			? QString::fromUtf8("屏幕") : QString::fromUtf8("窗口");
+		choices.push_back(QString::number(i + 1) + QStringLiteral(". ") + kind +
+			QStringLiteral(" — ") + QString::fromStdString(source.title));
+	}
+	dialog->setComboBoxItems(choices);
+	dialog->setComboBoxEditable(false);
+	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
+	const std::weak_ptr<livekit::Room> room = _coordinator->room();
+	connect(dialog, &QInputDialog::textValueSelected, this,
+		[coordinator, room, sources, choices](const QString &choice) {
+			const int index = choices.indexOf(choice);
+			if (coordinator && !room.expired() && coordinator->room() == room.lock() && index >= 0)
+				coordinator->startScreenShare(sources[index]);
+		});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
+		dialog, [dialog](OpenMeeting::MeetingState state, const QString &) {
+			if (state != OpenMeeting::MeetingState::InMeeting) dialog->reject();
+		});
+	dialog->open();
+}
+
 VideoTileWidget *MeetingRoomWindow::remoteVideoTile(const QString &trackSid) const {
 	const auto found = _remoteVideoBindings.find(trackSid);
 	if (found == _remoteVideoBindings.end()) return nullptr;
@@ -3581,38 +3639,7 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::screenShareSourcesReady,
 		this, [this](const std::vector<livekit::DesktopSource> &sources) {
-			if (sources.empty()) {
-				QMessageBox::warning(this, QString::fromUtf8("屏幕共享"), QString::fromUtf8("未找到可共享的屏幕或窗口"));
-				return;
-			}
-			auto *dialog = new QInputDialog(this);
-			dialog->setObjectName(QStringLiteral("screen-share-picker"));
-			dialog->setAttribute(Qt::WA_DeleteOnClose);
-			dialog->setWindowTitle(QString::fromUtf8("选择共享来源"));
-			dialog->setLabelText(QString::fromUtf8("选择屏幕或窗口（仅共享画面）："));
-			QStringList choices;
-			for (size_t i = 0; i < sources.size(); ++i) {
-				const auto &source = sources[i];
-				const auto kind = source.kind == livekit::DesktopSourceKind::Screen
-					? QString::fromUtf8("屏幕") : QString::fromUtf8("窗口");
-				choices.push_back(QString::number(i + 1) + QStringLiteral(". ") + kind +
-					QStringLiteral(" — ") + QString::fromStdString(source.title));
-			}
-			dialog->setComboBoxItems(choices);
-			dialog->setComboBoxEditable(false);
-			QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
-			const std::weak_ptr<livekit::Room> room = _coordinator->room();
-			connect(dialog, &QInputDialog::textValueSelected, this,
-				[coordinator, room, sources, choices](const QString &choice) {
-					const int index = choices.indexOf(choice);
-					if (coordinator && !room.expired() && coordinator->room() == room.lock() && index >= 0)
-						coordinator->startScreenShare(sources[index]);
-				});
-			connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
-				dialog, [dialog](OpenMeeting::MeetingState state, const QString &) {
-					if (state != OpenMeeting::MeetingState::InMeeting) dialog->reject();
-				});
-			dialog->open();
+			handleScreenShareSources(sources);
 		});
 
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteVideoTrackAvailable,
@@ -3735,6 +3762,9 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	        this, &MeetingRoomWindow::onMeetingDetailUpdated);
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
 	        this, [this](OpenMeeting::MeetingState state, const QString &detail) {
+		if (state != OpenMeeting::MeetingState::InMeeting) {
+			_defaultScreenSharePending = false;
+		}
 		if (state == OpenMeeting::MeetingState::Leaving
 			|| state == OpenMeeting::MeetingState::Failed) {
 			invalidateCameraCompletion();
