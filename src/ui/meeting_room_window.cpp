@@ -1854,11 +1854,15 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 
 
 	// 4. 启动物理麦克风 WASAPI 采集
+	const auto mediaPreferences = OpenMeeting::SessionManager::instance().mediaPreferences();
 	_wasapiCap = livekit::WasapiAudioCapture::Create();
-	_wasapiCap->EnableApm();
+	livekit::ApmConfig apmConfig;
+	apmConfig.enable_ans = mediaPreferences.noiseSuppression;
+	_wasapiCap->EnableApm(apmConfig);
 	livekit::WebRTCManager::Instance().SetApmProcessor(_wasapiCap->apm_processor());
 	livekit::WasapiCaptureConfig acfg;
 	acfg.type = livekit::WasapiCaptureType::Microphone;
+	acfg.device_id = mediaPreferences.microphoneDeviceId.toStdString();
 	acfg.target_sample_rate = 48000;
 	acfg.target_channels = 2;
 	if (_wasapiCap->Init(acfg, _localAudioSource) && _wasapiCap->Start()) {
@@ -1870,19 +1874,53 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 
 	// 5. 启动物理摄像头 DirectShow 采集 (使用 CameraSourceManager 支持平滑热切换)
 	try {
-		auto defaultDev = livekit::DShowEnumerator::GetDefaultVideoDevice();
-		if (!defaultDev.path.empty()) {
+		auto selectedDevice = livekit::DShowEnumerator::GetDefaultVideoDevice();
+		const auto cameraDevices = livekit::DShowEnumerator::EnumerateVideoDevices();
+		if (!mediaPreferences.cameraDeviceId.isEmpty()) {
+			const auto selectedId = mediaPreferences.cameraDeviceId.toStdString();
+			const auto found = std::find_if(cameraDevices.begin(), cameraDevices.end(),
+				[&](const livekit::DShowDeviceInfo &device) {
+					return device.path == selectedId || device.name == selectedId;
+				});
+			if (found != cameraDevices.end()) selectedDevice = *found;
+		}
+		if (!selectedDevice.path.empty()) {
 			_cameraManager = livekit::CameraSourceManager::Create(_localVideoSource);
 			livekit::DShowCaptureConfig vcfg;
-			vcfg.device_path = defaultDev.path;
-			vcfg.width = 1280;
-			vcfg.height = 720;
-			vcfg.fps = 30;
+			vcfg.device_path = selectedDevice.path;
+			const auto resolutions =
+				livekit::CameraSourceManager::GetSupportedResolutions(selectedDevice.path);
+			auto selectedResolution = std::find_if(
+				resolutions.begin(), resolutions.end(),
+				[&](const livekit::CameraResolution &resolution) {
+					return resolution.width == mediaPreferences.videoCaptureWidth &&
+						resolution.height == mediaPreferences.videoCaptureHeight;
+				});
+			if (selectedResolution == resolutions.end()) {
+				const auto automatic =
+					livekit::CameraSourceManager::SelectDefaultResolution(resolutions);
+				if (automatic) {
+					vcfg.width = automatic->width;
+					vcfg.height = automatic->height;
+					vcfg.fps = automatic->max_fps > 0
+						? (std::min)(30, automatic->max_fps) : 30;
+				}
+			} else {
+				vcfg.width = selectedResolution->width;
+				vcfg.height = selectedResolution->height;
+				vcfg.fps = selectedResolution->max_fps > 0
+					? (std::min)(mediaPreferences.videoCaptureFps,
+						selectedResolution->max_fps)
+					: mediaPreferences.videoCaptureFps;
+			}
 			vcfg.output_format = livekit::VideoBufferType::NV12;
 			if (_cameraManager->Start(vcfg)) {
 				_usingRealCamera = true;
-				_currentCameraPath = QString::fromStdString(defaultDev.path);
-				LogToConsole(LogCategory::Media, "DSHOW", QString("成功启动物理摄像头: %1 (1280x720@30fps NV12)").arg(QString::fromStdString(defaultDev.name)));
+				_currentCameraPath = QString::fromStdString(selectedDevice.path);
+				LogToConsole(LogCategory::Media, "DSHOW",
+					QString("成功启动物理摄像头: %1 (%2x%3@%4fps NV12)")
+						.arg(QString::fromStdString(selectedDevice.name))
+						.arg(vcfg.width).arg(vcfg.height).arg(vcfg.fps));
 			}
 		}
 	} catch (const std::exception &ex) {
@@ -2946,7 +2984,8 @@ void MeetingRoomWindow::updateActiveSpeakers(const std::vector<livekit::ActiveSp
 
 	// 1. 顶部状态栏提示更新
 	if (_topBar) {
-		_topBar->setActiveSpeaker(primarySpeakerName);
+		const auto &preferences = OpenMeeting::SessionManager::instance().mediaPreferences();
+		_topBar->setActiveSpeaker(preferences.showActiveSpeaker ? primarySpeakerName : QString());
 	}
 
 	// 2. 本端画框发光光圈联动
@@ -3777,6 +3816,23 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		}
 		if (state == OpenMeeting::MeetingState::InMeeting) {
 			_room = _coordinator->room();
+			const auto preferences = OpenMeeting::SessionManager::instance().mediaPreferences();
+			if (_bottomBar) {
+				_bottomBar->setSpeakerMuted(!preferences.enableSpeaker);
+			}
+			if (_room) {
+				_room->SetAudioOutputMuted(!preferences.enableSpeaker);
+			}
+			if (!preferences.speakerDeviceId.isEmpty()) {
+				const auto outputs = livekit::WasapiEnumerator::EnumerateOutputDevices();
+				for (size_t index = 0; index < outputs.size(); ++index) {
+					if (QString::fromStdString(outputs[index].id) == preferences.speakerDeviceId) {
+						livekit::WebRTCManager::Instance().SetPlayoutDevice(
+							static_cast<uint16_t>(index));
+						break;
+					}
+				}
+			}
 			restoreParticipantPresentations();
 		}
 	});

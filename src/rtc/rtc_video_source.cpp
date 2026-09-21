@@ -8,6 +8,8 @@
 #include <chrono>
 #include <iostream>
 #include <atomic>
+#include <algorithm>
+#include <cstdint>
 
 namespace livekit {
 
@@ -31,6 +33,9 @@ RtcVideoSource::~RtcVideoSource() {
 void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOptions& options) {
     int width = frame.width();
     int height = frame.height();
+    if (width <= 0 || height <= 0) {
+        return;
+    }
 
     webrtc::scoped_refptr<webrtc::I420Buffer> i420_buffer = webrtc::I420Buffer::Create(width, height);
     
@@ -108,12 +113,36 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
         }
     }
 
-    if (!screencast_ && width > 1280) {
-        int target_w = 1280;
-        int target_h = (height * 1280) / width;
-        webrtc::scoped_refptr<webrtc::I420Buffer> scaled_buffer = webrtc::I420Buffer::Create(target_w, target_h);
-        scaled_buffer->ScaleFrom(*i420_buffer);
-        i420_buffer = scaled_buffer;
+    if (!screencast_) {
+        const bool landscape = width >= height;
+        const int max_width = landscape ? 1920 : 1080;
+        const int max_height = landscape ? 1080 : 1920;
+        int target_w = width;
+        int target_h = height;
+
+        if (width > max_width || height > max_height) {
+            if (static_cast<int64_t>(max_width) * height <=
+                static_cast<int64_t>(max_height) * width) {
+                target_w = max_width;
+                target_h = static_cast<int>(
+                    static_cast<int64_t>(height) * max_width / width);
+            } else {
+                target_h = max_height;
+                target_w = static_cast<int>(
+                    static_cast<int64_t>(width) * max_height / height);
+            }
+
+            // Chroma planes are most interoperable with even output dimensions.
+            target_w = (std::max)(2, target_w & ~1);
+            target_h = (std::max)(2, target_h & ~1);
+        }
+
+        if (target_w != width || target_h != height) {
+            webrtc::scoped_refptr<webrtc::I420Buffer> scaled_buffer =
+                webrtc::I420Buffer::Create(target_w, target_h);
+            scaled_buffer->ScaleFrom(*i420_buffer);
+            i420_buffer = scaled_buffer;
+        }
     }
 
     webrtc::VideoRotation rtc_rotation = webrtc::kVideoRotation_0;

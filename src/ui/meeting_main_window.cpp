@@ -4,6 +4,7 @@
 #include "src/ui/meeting_detail_dialog.h"
 #include "src/ui/meeting_list_dialog.h"
 #include "src/ui/login_dialog.h"
+#include "src/ui/settings_dialog.h"
 #include "src/ui/shadow_helper.h"
 #include "src/core/meeting_catalog_controller.h"
 #include "src/core/meeting_coordinator.h"
@@ -598,6 +599,12 @@ void MeetingMainWindow::initLayout() {
 	// 卡片点击事件
 	_actionGrid->cardClicked() | rpl::on_next([this](ActionCardType t) {
 		onCardClicked(t);
+	}, lifetime());
+
+	_sidebar->bottomItemClicked() | rpl::on_next([this](BottomItemType type) {
+		if (type != BottomItemType::Settings) return;
+		SettingsDialog dialog(OpenMeeting::SessionManager::instance(), this);
+		dialog.exec();
 	}, lifetime());
 
 	// 会议目录入口

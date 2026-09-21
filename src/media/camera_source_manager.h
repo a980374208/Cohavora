@@ -3,6 +3,8 @@
 #include <memory>
 #include <string>
 #include <functional>
+#include <optional>
+#include <vector>
 #include <mutex>
 #include <atomic>
 #include <chrono>
@@ -20,6 +22,14 @@ enum class CameraSwitchState {
     Probing,
     Committed,
     Aborted
+};
+
+struct CameraResolution {
+    int width = 0;
+    int height = 0;
+    int max_fps = 0;
+
+    bool operator==(const CameraResolution&) const = default;
 };
 
 // 抽象捕获器接口，便于测试与多后端扩展
@@ -82,6 +92,19 @@ public:
     DShowCaptureConfig GetActiveConfig() const;
     CameraSwitchState GetSwitchState() const;
 
+    // 返回设备可供用户选择的分辨率；相同宽高会合并并保留最高帧率。
+    static std::vector<CameraResolution> GetSupportedResolutions(
+        const std::string& device_path);
+
+    // 最高能力低于 1080p 时选择最高档，否则选择最接近 1080p 的档位。
+    static std::optional<CameraResolution> SelectDefaultResolution(
+        const std::vector<CameraResolution>& resolutions);
+
+    // 事务式应用完整采集配置，用于同设备切换分辨率或帧率。
+    void ReconfigureAsync(const DShowCaptureConfig& target_config,
+                          int timeout_ms,
+                          SwitchCallback callback);
+
     // 活跃摄像头平滑热切换 (带首帧验证与超时回滚)
     void SwitchDeviceAsync(const std::string& target_device_path,
                            int timeout_ms,
@@ -96,7 +119,7 @@ private:
 
     void HandleProbeFrameReceived(uint64_t generation,
                                   std::shared_ptr<ICameraCapturer> probe_capturer,
-                                  const std::string& target_device_path,
+                                  const DShowCaptureConfig& target_config,
                                   const VideoFrame& frame,
                                   const VideoCaptureOptions& options,
                                   SwitchCallback callback);
