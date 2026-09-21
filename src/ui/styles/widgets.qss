@@ -1,0 +1,1893 @@
+/* Application widget variants. Selected with AppTheme::setStyleVariant. */
+
+QDialog[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"],
+[uiStyle="login-dialog-this"] QDialog {
+    background: transparent;
+}
+
+[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="loginCard"],
+[uiStyle="login-dialog-this"] [objectName="loginCard"] {
+    background-color: #ffffff;
+    border-radius: 16px;
+    border: 1px solid #e1e4ea;
+}
+
+QLabel[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"],
+[uiStyle="login-dialog-this"] QLabel {
+    color: #1f2329;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+}
+
+QLineEdit[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"],
+[uiStyle="login-dialog-this"] QLineEdit {
+    border: 1px solid #dcdfe6;
+    border-radius: 8px;
+    padding: 10px 14px;
+    font-size: 13px;
+    background: #f8f9fa;
+}
+
+QLineEdit[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"]:focus,
+[uiStyle="login-dialog-this"] QLineEdit:focus {
+    border: 1px solid #1677ff;
+    background: #ffffff;
+}
+
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="primaryBtn"],
+[uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"] {
+    background-color: #1677ff;
+    color: #ffffff;
+    border-radius: 8px;
+    padding: 10px 24px;
+    font-size: 14px;
+    font-weight: bold;
+    border: none;
+}
+
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="primaryBtn"]:hover,
+[uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"]:hover {
+    background-color: #4096ff;
+}
+
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="primaryBtn"]:pressed,
+[uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"]:pressed {
+    background-color: #0958d9;
+}
+
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="primaryBtn"]:disabled,
+[uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"]:disabled {
+    background-color: #b7d6ff;
+}
+
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="guestBtn"],
+[uiStyle="login-dialog-this"] QPushButton[objectName="guestBtn"] {
+    background-color: #f2f3f5;
+    color: #1f2329;
+    border-radius: 8px;
+    padding: 10px 24px;
+    font-size: 14px;
+    border: 1px solid #dcdfe6;
+}
+
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="guestBtn"]:hover,
+[uiStyle="login-dialog-this"] QPushButton[objectName="guestBtn"]:hover {
+    background-color: #e5e6eb;
+}
+
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="linkBtn"],
+[uiStyle="login-dialog-this"] QPushButton[objectName="linkBtn"] {
+    background: transparent;
+    color: #1677ff;
+    font-size: 12px;
+    border: none;
+    padding: 0;
+    text-align: left;
+}
+
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="linkBtn"]:hover,
+[uiStyle="login-dialog-this"] QPushButton[objectName="linkBtn"]:hover {
+    color: #4096ff;
+    text-decoration: underline;
+}
+
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="closeBtn"],
+[uiStyle="login-dialog-this"] QPushButton[objectName="closeBtn"] {
+    background: transparent;
+    border: none;
+    font-size: 16px;
+    color: #8c8c8c;
+    border-radius: 4px;
+}
+
+QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="closeBtn"]:hover,
+[uiStyle="login-dialog-this"] QPushButton[objectName="closeBtn"]:hover {
+    background: #f5f5f5;
+    color: #f53f3f;
+}
+
+QCheckBox[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"],
+[uiStyle="login-dialog-this"] QCheckBox {
+    font-size: 12px;
+    color: #606266;
+}
+
+QTabWidget[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"]::pane,
+[uiStyle="login-dialog-this"] QTabWidget::pane {
+    border: none;
+    background: transparent;
+}
+
+QTabBar[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"]::tab,
+[uiStyle="login-dialog-this"] QTabBar::tab {
+    background: transparent;
+    color: #8c8c8c;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 8px 14px;
+    min-width: 80px;
+    border-bottom: 2px solid transparent;
+}
+
+QTabBar[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"]::tab:selected,
+[uiStyle="login-dialog-this"] QTabBar::tab:selected {
+    color: #1677ff;
+    border-bottom: 2px solid #1677ff;
+    font-weight: bold;
+}
+
+[uiStyle="login-dialog-subtitle"][uiStyle="login-dialog-subtitle"][uiStyle="login-dialog-subtitle"],
+[uiStyle="login-dialog-subtitle"] * {
+    color: #8c8c8c;
+    font-size: 12px;
+}
+
+[uiStyle="login-dialog-togglepwdbtn"][uiStyle="login-dialog-togglepwdbtn"][uiStyle="login-dialog-togglepwdbtn"],
+[uiStyle="login-dialog-togglepwdbtn"] * {
+    border: 1px solid #dcdfe6;
+    border-radius: 8px;
+    background: #f8f9fa;
+}
+
+[uiStyle="login-dialog-toggleregpwdbtn"][uiStyle="login-dialog-toggleregpwdbtn"][uiStyle="login-dialog-toggleregpwdbtn"],
+[uiStyle="login-dialog-toggleregpwdbtn"] * {
+    border: 1px solid #dcdfe6;
+    border-radius: 8px;
+    background: #f8f9fa;
+}
+
+[uiStyle="login-dialog-guestdesc"][uiStyle="login-dialog-guestdesc"][uiStyle="login-dialog-guestdesc"],
+[uiStyle="login-dialog-guestdesc"] * {
+    color: #606266;
+    font-size: 12px;
+}
+
+[uiStyle="login-dialog-advancedtogglebtn"][uiStyle="login-dialog-advancedtogglebtn"][uiStyle="login-dialog-advancedtogglebtn"],
+[uiStyle="login-dialog-advancedtogglebtn"] * {
+    color: #8c8c8c;
+    font-size: 11px;
+}
+
+[uiStyle="login-dialog-advlabel"][uiStyle="login-dialog-advlabel"][uiStyle="login-dialog-advlabel"],
+[uiStyle="login-dialog-advlabel"] * {
+    color: #606266;
+    font-size: 12px;
+}
+
+[uiStyle="login-dialog-errorlabel"][uiStyle="login-dialog-errorlabel"][uiStyle="login-dialog-errorlabel"],
+[uiStyle="login-dialog-errorlabel"] * {
+    color: #f53f3f;
+    font-size: 12px;
+    padding: 2px 4px;
+}
+
+[uiStyle="login-dialog-errorlabel-2"][uiStyle="login-dialog-errorlabel-2"][uiStyle="login-dialog-errorlabel-2"],
+[uiStyle="login-dialog-errorlabel-2"] * {
+    color: #f53f3f;
+    font-size: 12px;
+    padding: 2px 0;
+}
+
+[uiStyle="login-dialog-errorlabel-3"][uiStyle="login-dialog-errorlabel-3"][uiStyle="login-dialog-errorlabel-3"],
+[uiStyle="login-dialog-errorlabel-3"] * {
+    color: #00b578;
+    font-size: 12px;
+    padding: 2px 0;
+    font-weight: bold;
+}
+
+QDialog[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QDialog {
+    background: #ffffff;
+}
+
+QLabel[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QLabel {
+    color: #303133;
+    font-size: 13px;
+}
+
+QLineEdit[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QLineEdit,
+QDateEdit[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QDateEdit,
+QDateTimeEdit[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QDateTimeEdit,
+QSpinBox[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QSpinBox,
+QComboBox[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QComboBox {
+    min-height: 34px;
+    border: 1px solid #dcdfe6;
+    border-radius: 6px;
+    background: #ffffff;
+}
+
+QLineEdit[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QLineEdit {
+    padding: 0 9px;
+}
+
+QDateEdit[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QDateEdit,
+QDateTimeEdit[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QDateTimeEdit,
+QSpinBox[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QSpinBox,
+QComboBox[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QComboBox {
+    padding: 0 36px 0 9px;
+}
+
+QLineEdit[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"]:focus,
+[uiStyle="meeting-booking-dialog-this"] QLineEdit:focus,
+QDateEdit[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"]:focus,
+[uiStyle="meeting-booking-dialog-this"] QDateEdit:focus,
+QDateTimeEdit[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"]:focus,
+[uiStyle="meeting-booking-dialog-this"] QDateTimeEdit:focus,
+QSpinBox[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"]:focus,
+[uiStyle="meeting-booking-dialog-this"] QSpinBox:focus,
+QComboBox[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"]:focus,
+[uiStyle="meeting-booking-dialog-this"] QComboBox:focus {
+    border-color: #1677ff;
+}
+
+QPushButton[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
+[uiStyle="meeting-booking-dialog-this"] QPushButton {
+    min-height: 34px;
+    padding: 0 18px;
+    border-radius: 6px;
+}
+
+QPushButton[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][objectName="primary"],
+[uiStyle="meeting-booking-dialog-this"] QPushButton[objectName="primary"] {
+    background: #1677ff;
+    color: white;
+    border: none;
+}
+
+QPushButton[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][objectName="primary"]:hover,
+[uiStyle="meeting-booking-dialog-this"] QPushButton[objectName="primary"]:hover {
+    background: #4096ff;
+}
+
+QPushButton[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][objectName="primary"]:disabled,
+[uiStyle="meeting-booking-dialog-this"] QPushButton[objectName="primary"]:disabled {
+    background: #b7d6ff;
+}
+
+QPushButton[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][objectName="secondary"],
+[uiStyle="meeting-booking-dialog-this"] QPushButton[objectName="secondary"] {
+    background: #f2f3f5;
+    color: #4e5969;
+    border: none;
+}
+
+[uiStyle="meeting-booking-dialog-statuslabel"][uiStyle="meeting-booking-dialog-statuslabel"][uiStyle="meeting-booking-dialog-statuslabel"],
+[uiStyle="meeting-booking-dialog-statuslabel"] * {
+    color: #d4380d;
+}
+
+[uiStyle="meeting-booking-dialog-statuslabel-2"][uiStyle="meeting-booking-dialog-statuslabel-2"][uiStyle="meeting-booking-dialog-statuslabel-2"],
+[uiStyle="meeting-booking-dialog-statuslabel-2"] * {
+    color: #1677ff;
+}
+
+[uiStyle="meeting-booking-dialog-statuslabel-3"][uiStyle="meeting-booking-dialog-statuslabel-3"][uiStyle="meeting-booking-dialog-statuslabel-3"],
+[uiStyle="meeting-booking-dialog-statuslabel-3"] * {
+    color: #d4380d;
+}
+
+QPlainTextEdit[uiStyle="meeting-chat-sidebar-widget-this"][uiStyle="meeting-chat-sidebar-widget-this"][uiStyle="meeting-chat-sidebar-widget-this"],
+[uiStyle="meeting-chat-sidebar-widget-this"] QPlainTextEdit {
+    background-color: #242831;
+    border: 1px solid #363C4A;
+    border-radius: 6px;
+    color: #F3F4F6;
+    padding: 6px 8px;
+    font-size: 13px;
+    font-family: "Microsoft YaHei", sans-serif;
+}
+
+QPlainTextEdit[uiStyle="meeting-chat-sidebar-widget-this"][uiStyle="meeting-chat-sidebar-widget-this"][uiStyle="meeting-chat-sidebar-widget-this"]:focus,
+[uiStyle="meeting-chat-sidebar-widget-this"] QPlainTextEdit:focus {
+    border: 1px solid #3B82F6;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-dlg"][uiStyle="meeting-chat-sidebar-widget-dlg"][uiStyle="meeting-chat-sidebar-widget-dlg"],
+[uiStyle="meeting-chat-sidebar-widget-dlg"] * {
+    background-color: #12141A;
+    color: #FFFFFF;
+    font-family: "Microsoft YaHei";
+}
+
+[uiStyle="meeting-chat-sidebar-widget-scroll"][uiStyle="meeting-chat-sidebar-widget-scroll"][uiStyle="meeting-chat-sidebar-widget-scroll"],
+[uiStyle="meeting-chat-sidebar-widget-scroll"] * {
+    background-color: transparent;
+    border: none;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-savebtn"][uiStyle="meeting-chat-sidebar-widget-savebtn"][uiStyle="meeting-chat-sidebar-widget-savebtn"],
+[uiStyle="meeting-chat-sidebar-widget-savebtn"] QPushButton {
+    background-color: #2563EB;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 18px;
+    font-size: 12px;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-savebtn"][uiStyle="meeting-chat-sidebar-widget-savebtn"][uiStyle="meeting-chat-sidebar-widget-savebtn"]:hover,
+[uiStyle="meeting-chat-sidebar-widget-savebtn"] QPushButton:hover {
+    background-color: #1D4ED8;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-closebtn"][uiStyle="meeting-chat-sidebar-widget-closebtn"][uiStyle="meeting-chat-sidebar-widget-closebtn"],
+[uiStyle="meeting-chat-sidebar-widget-closebtn"] QPushButton {
+    background-color: #374151;
+    color: #E5E7EB;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 18px;
+    font-size: 12px;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-closebtn"][uiStyle="meeting-chat-sidebar-widget-closebtn"][uiStyle="meeting-chat-sidebar-widget-closebtn"]:hover,
+[uiStyle="meeting-chat-sidebar-widget-closebtn"] QPushButton:hover {
+    background-color: #4B5563;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-retrybtn"][uiStyle="meeting-chat-sidebar-widget-retrybtn"][uiStyle="meeting-chat-sidebar-widget-retrybtn"],
+[uiStyle="meeting-chat-sidebar-widget-retrybtn"] QPushButton {
+    background: transparent;
+    color: #EF4444;
+    border: none;
+    font-size: 10px;
+    font-weight: bold;
+    padding: 0px 2px;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-retrybtn"][uiStyle="meeting-chat-sidebar-widget-retrybtn"][uiStyle="meeting-chat-sidebar-widget-retrybtn"]:hover,
+[uiStyle="meeting-chat-sidebar-widget-retrybtn"] QPushButton:hover {
+    text-decoration: underline;
+    color: #F87171;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-timelabel"][uiStyle="meeting-chat-sidebar-widget-timelabel"][uiStyle="meeting-chat-sidebar-widget-timelabel"],
+[uiStyle="meeting-chat-sidebar-widget-timelabel"] * {
+    color: #6B7280;
+    font-size: 10px;
+    font-family: "Microsoft YaHei";
+}
+
+[uiStyle="meeting-chat-sidebar-widget-statuslabel"][uiStyle="meeting-chat-sidebar-widget-statuslabel"][uiStyle="meeting-chat-sidebar-widget-statuslabel"],
+[uiStyle="meeting-chat-sidebar-widget-statuslabel"] * {
+    font-size: 11px;
+    font-family: "Microsoft YaHei";
+}
+
+[uiStyle="meeting-chat-sidebar-widget-namelabel"][uiStyle="meeting-chat-sidebar-widget-namelabel"][uiStyle="meeting-chat-sidebar-widget-namelabel"],
+[uiStyle="meeting-chat-sidebar-widget-namelabel"] * {
+    color: #9CA3AF;
+    font-size: 11px;
+    font-weight: 500;
+    font-family: "Microsoft YaHei";
+}
+
+[uiStyle="meeting-chat-sidebar-widget-timelabel-2"][uiStyle="meeting-chat-sidebar-widget-timelabel-2"][uiStyle="meeting-chat-sidebar-widget-timelabel-2"],
+[uiStyle="meeting-chat-sidebar-widget-timelabel-2"] * {
+    color: #6B7280;
+    font-size: 10px;
+    font-family: "Microsoft YaHei";
+}
+
+QWidget[uiStyle="meeting-chat-sidebar-widget-bubble-active"][uiStyle="meeting-chat-sidebar-widget-bubble-active"][uiStyle="meeting-chat-sidebar-widget-bubble-active"][objectName="MyTextBubble"],
+[uiStyle="meeting-chat-sidebar-widget-bubble-active"] QWidget[objectName="MyTextBubble"] {
+    background-color: #2563EB;
+    border-radius: 8px;
+}
+
+QWidget[uiStyle="meeting-chat-sidebar-widget-bubble-normal"][uiStyle="meeting-chat-sidebar-widget-bubble-normal"][uiStyle="meeting-chat-sidebar-widget-bubble-normal"][objectName="OtherTextBubble"],
+[uiStyle="meeting-chat-sidebar-widget-bubble-normal"] QWidget[objectName="OtherTextBubble"] {
+    background-color: #242831;
+    border: 1px solid #363C4A;
+    border-radius: 8px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-textlabel-active"][uiStyle="meeting-chat-sidebar-widget-textlabel-active"][uiStyle="meeting-chat-sidebar-widget-textlabel-active"],
+[uiStyle="meeting-chat-sidebar-widget-textlabel-active"] * {
+    color: #FFFFFF;
+    font-size: 13px;
+    font-family: "Microsoft YaHei";
+}
+
+[uiStyle="meeting-chat-sidebar-widget-textlabel-normal"][uiStyle="meeting-chat-sidebar-widget-textlabel-normal"][uiStyle="meeting-chat-sidebar-widget-textlabel-normal"],
+[uiStyle="meeting-chat-sidebar-widget-textlabel-normal"] * {
+    color: #F3F4F6;
+    font-size: 13px;
+    font-family: "Microsoft YaHei";
+}
+
+QWidget[uiStyle="meeting-chat-sidebar-widget-imgcontainer"][uiStyle="meeting-chat-sidebar-widget-imgcontainer"][uiStyle="meeting-chat-sidebar-widget-imgcontainer"][objectName="OtherImgContainer"],
+[uiStyle="meeting-chat-sidebar-widget-imgcontainer"] QWidget[objectName="OtherImgContainer"] {
+    background-color: #1F242D;
+    border: 1px dashed #3B4252;
+    border-radius: 8px;
+    padding: 4px;
+}
+
+QWidget[uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-active"][uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-active"][uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-active"][objectName="MyImgContainer"],
+[uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-active"] QWidget[objectName="MyImgContainer"] {
+    background-color: #1D4ED8;
+    border-radius: 8px;
+    padding: 4px;
+}
+
+QWidget[uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-normal"][uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-normal"][uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-normal"][objectName="OtherImgContainer"],
+[uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-normal"] QWidget[objectName="OtherImgContainer"] {
+    background-color: #242831;
+    border: 1px solid #363C4A;
+    border-radius: 8px;
+    padding: 4px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-fnlabel"][uiStyle="meeting-chat-sidebar-widget-fnlabel"][uiStyle="meeting-chat-sidebar-widget-fnlabel"],
+[uiStyle="meeting-chat-sidebar-widget-fnlabel"] * {
+    color: rgba(255, 255, 255, 0.7);
+    font-size: 11px;
+    font-family: "Microsoft YaHei";
+}
+
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-2"][uiStyle="meeting-chat-sidebar-widget-statuslabel-2"][uiStyle="meeting-chat-sidebar-widget-statuslabel-2"],
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-2"] * {
+    color: #60A5FA;
+    font-size: 10px;
+    font-family: "Microsoft YaHei";
+}
+
+QProgressBar[uiStyle="meeting-chat-sidebar-widget-progressbar"][uiStyle="meeting-chat-sidebar-widget-progressbar"][uiStyle="meeting-chat-sidebar-widget-progressbar"],
+[uiStyle="meeting-chat-sidebar-widget-progressbar"] QProgressBar {
+    background-color: rgba(255, 255, 255, 0.2);
+    border: none;
+    border-radius: 1px;
+}
+
+QProgressBar[uiStyle="meeting-chat-sidebar-widget-progressbar"][uiStyle="meeting-chat-sidebar-widget-progressbar"][uiStyle="meeting-chat-sidebar-widget-progressbar"]::chunk,
+[uiStyle="meeting-chat-sidebar-widget-progressbar"] QProgressBar::chunk {
+    background-color: #60A5FA;
+    border-radius: 1px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-imgpreviewbtn"][uiStyle="meeting-chat-sidebar-widget-imgpreviewbtn"][uiStyle="meeting-chat-sidebar-widget-imgpreviewbtn"],
+[uiStyle="meeting-chat-sidebar-widget-imgpreviewbtn"] * {
+    background: transparent;
+    border: none;
+}
+
+QWidget[uiStyle="meeting-chat-sidebar-widget-card-active"][uiStyle="meeting-chat-sidebar-widget-card-active"][uiStyle="meeting-chat-sidebar-widget-card-active"][objectName="MyFileCard"],
+[uiStyle="meeting-chat-sidebar-widget-card-active"] QWidget[objectName="MyFileCard"] {
+    background-color: #2563EB;
+    border-radius: 8px;
+}
+
+QWidget[uiStyle="meeting-chat-sidebar-widget-card-normal"][uiStyle="meeting-chat-sidebar-widget-card-normal"][uiStyle="meeting-chat-sidebar-widget-card-normal"][objectName="OtherFileCard"],
+[uiStyle="meeting-chat-sidebar-widget-card-normal"] QWidget[objectName="OtherFileCard"] {
+    background-color: #242831;
+    border: 1px solid #363C4A;
+    border-radius: 8px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-namelabel-2"][uiStyle="meeting-chat-sidebar-widget-namelabel-2"][uiStyle="meeting-chat-sidebar-widget-namelabel-2"],
+[uiStyle="meeting-chat-sidebar-widget-namelabel-2"] * {
+    color: #FFFFFF;
+    font-size: 12px;
+    font-weight: bold;
+    font-family: "Microsoft YaHei";
+}
+
+[uiStyle="meeting-chat-sidebar-widget-sizelabel"][uiStyle="meeting-chat-sidebar-widget-sizelabel"][uiStyle="meeting-chat-sidebar-widget-sizelabel"],
+[uiStyle="meeting-chat-sidebar-widget-sizelabel"] * {
+    color: rgba(255, 255, 255, 0.65);
+    font-size: 10px;
+    font-family: "Microsoft YaHei";
+}
+
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-3"][uiStyle="meeting-chat-sidebar-widget-statuslabel-3"][uiStyle="meeting-chat-sidebar-widget-statuslabel-3"],
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-3"] * {
+    color: #60A5FA;
+    font-size: 10px;
+    font-family: "Microsoft YaHei";
+}
+
+QProgressBar[uiStyle="meeting-chat-sidebar-widget-progressbar-2"][uiStyle="meeting-chat-sidebar-widget-progressbar-2"][uiStyle="meeting-chat-sidebar-widget-progressbar-2"],
+[uiStyle="meeting-chat-sidebar-widget-progressbar-2"] QProgressBar {
+    background-color: rgba(255, 255, 255, 0.2);
+    border: none;
+    border-radius: 1px;
+}
+
+QProgressBar[uiStyle="meeting-chat-sidebar-widget-progressbar-2"][uiStyle="meeting-chat-sidebar-widget-progressbar-2"][uiStyle="meeting-chat-sidebar-widget-progressbar-2"]::chunk,
+[uiStyle="meeting-chat-sidebar-widget-progressbar-2"] QProgressBar::chunk {
+    background-color: #60A5FA;
+    border-radius: 1px;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn"][uiStyle="meeting-chat-sidebar-widget-actionbtn"][uiStyle="meeting-chat-sidebar-widget-actionbtn"],
+[uiStyle="meeting-chat-sidebar-widget-actionbtn"] QPushButton {
+    background-color: rgba(255, 255, 255, 0.05);
+    color: #6B7280;
+    border-radius: 14px;
+    border: none;
+    font-size: 12px;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-2"][uiStyle="meeting-chat-sidebar-widget-actionbtn-2"][uiStyle="meeting-chat-sidebar-widget-actionbtn-2"],
+[uiStyle="meeting-chat-sidebar-widget-actionbtn-2"] QPushButton {
+    background-color: rgba(255, 255, 255, 0.15);
+    color: #FFFFFF;
+    border-radius: 14px;
+    border: none;
+    font-size: 12px;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-2"][uiStyle="meeting-chat-sidebar-widget-actionbtn-2"][uiStyle="meeting-chat-sidebar-widget-actionbtn-2"]:hover,
+[uiStyle="meeting-chat-sidebar-widget-actionbtn-2"] QPushButton:hover {
+    background-color: rgba(255, 255, 255, 0.3);
+}
+
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-4"][uiStyle="meeting-chat-sidebar-widget-statuslabel-4"][uiStyle="meeting-chat-sidebar-widget-statuslabel-4"],
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-4"] * {
+    color: #9CA3AF;
+    font-size: 10px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-5"][uiStyle="meeting-chat-sidebar-widget-statuslabel-5"][uiStyle="meeting-chat-sidebar-widget-statuslabel-5"],
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-5"] * {
+    color: #93C5FD;
+    font-size: 10px;
+    font-weight: 500;
+    font-family: "Microsoft YaHei";
+}
+
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-6"][uiStyle="meeting-chat-sidebar-widget-statuslabel-6"][uiStyle="meeting-chat-sidebar-widget-statuslabel-6"],
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-6"] * {
+    color: #60A5FA;
+    font-size: 11px;
+    font-weight: bold;
+    font-family: "Microsoft YaHei";
+}
+
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-7"][uiStyle="meeting-chat-sidebar-widget-statuslabel-7"][uiStyle="meeting-chat-sidebar-widget-statuslabel-7"],
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-7"] * {
+    color: #EF4444;
+    font-size: 11px;
+    font-family: "Microsoft YaHei";
+}
+
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-8"][uiStyle="meeting-chat-sidebar-widget-statuslabel-8"][uiStyle="meeting-chat-sidebar-widget-statuslabel-8"],
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-8"] * {
+    color: #60A5FA;
+    font-size: 10px;
+    font-family: "Microsoft YaHei";
+}
+
+QWidget[uiStyle="meeting-chat-sidebar-widget-imgcontainer-3"][uiStyle="meeting-chat-sidebar-widget-imgcontainer-3"][uiStyle="meeting-chat-sidebar-widget-imgcontainer-3"][objectName="OtherImgContainer"],
+[uiStyle="meeting-chat-sidebar-widget-imgcontainer-3"] QWidget[objectName="OtherImgContainer"] {
+    background-color: #242831;
+    border: 1px solid #363C4A;
+    border-radius: 8px;
+    padding: 4px;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-3"][uiStyle="meeting-chat-sidebar-widget-actionbtn-3"][uiStyle="meeting-chat-sidebar-widget-actionbtn-3"],
+[uiStyle="meeting-chat-sidebar-widget-actionbtn-3"] QPushButton {
+    background-color: rgba(255, 255, 255, 0.15);
+    color: #FFFFFF;
+    border-radius: 14px;
+    border: none;
+    font-size: 12px;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-3"][uiStyle="meeting-chat-sidebar-widget-actionbtn-3"][uiStyle="meeting-chat-sidebar-widget-actionbtn-3"]:hover,
+[uiStyle="meeting-chat-sidebar-widget-actionbtn-3"] QPushButton:hover {
+    background-color: rgba(255, 255, 255, 0.3);
+}
+
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-9"][uiStyle="meeting-chat-sidebar-widget-statuslabel-9"][uiStyle="meeting-chat-sidebar-widget-statuslabel-9"],
+[uiStyle="meeting-chat-sidebar-widget-statuslabel-9"] * {
+    color: #EF4444;
+    font-size: 10px;
+    font-weight: bold;
+    font-family: "Microsoft YaHei";
+}
+
+QDialog[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"],
+[uiStyle="meeting-chat-sidebar-widget-this-2"] QDialog {
+    background-color: #1A1D24;
+    color: #FFFFFF;
+    font-family: "Microsoft YaHei", sans-serif;
+}
+
+QLabel[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"],
+[uiStyle="meeting-chat-sidebar-widget-this-2"] QLabel {
+    color: #E5E7EB;
+    font-family: "Microsoft YaHei", sans-serif;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][objectName="CancelBtn"],
+[uiStyle="meeting-chat-sidebar-widget-this-2"] QPushButton[objectName="CancelBtn"] {
+    background-color: #374151;
+    color: #E5E7EB;
+    border: 1px solid #4B5563;
+    border-radius: 6px;
+    padding: 6px 18px;
+    font-size: 13px;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][objectName="CancelBtn"]:hover,
+[uiStyle="meeting-chat-sidebar-widget-this-2"] QPushButton[objectName="CancelBtn"]:hover {
+    background-color: #4B5563;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][objectName="SendBtn"],
+[uiStyle="meeting-chat-sidebar-widget-this-2"] QPushButton[objectName="SendBtn"] {
+    background-color: #2563EB;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 6px;
+    padding: 6px 22px;
+    font-size: 13px;
+    font-weight: bold;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][objectName="SendBtn"]:hover,
+[uiStyle="meeting-chat-sidebar-widget-this-2"] QPushButton[objectName="SendBtn"]:hover {
+    background-color: #1D4ED8;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][objectName="SendBtn"]:disabled,
+[uiStyle="meeting-chat-sidebar-widget-this-2"] QPushButton[objectName="SendBtn"]:disabled {
+    background-color: #374151;
+    color: #6B7280;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-titlelabel"][uiStyle="meeting-chat-sidebar-widget-titlelabel"][uiStyle="meeting-chat-sidebar-widget-titlelabel"],
+[uiStyle="meeting-chat-sidebar-widget-titlelabel"] * {
+    font-size: 15px;
+    font-weight: bold;
+    color: #F9FAFB;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-imgcard"][uiStyle="meeting-chat-sidebar-widget-imgcard"][uiStyle="meeting-chat-sidebar-widget-imgcard"],
+[uiStyle="meeting-chat-sidebar-widget-imgcard"] * {
+    background-color: #12141A;
+    border: 1px solid #2B303C;
+    border-radius: 8px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-infolabel"][uiStyle="meeting-chat-sidebar-widget-infolabel"][uiStyle="meeting-chat-sidebar-widget-infolabel"],
+[uiStyle="meeting-chat-sidebar-widget-infolabel"] * {
+    color: #9CA3AF;
+    font-size: 12px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-filecard"][uiStyle="meeting-chat-sidebar-widget-filecard"][uiStyle="meeting-chat-sidebar-widget-filecard"],
+[uiStyle="meeting-chat-sidebar-widget-filecard"] * {
+    background-color: #242831;
+    border: 1px solid #363C4A;
+    border-radius: 8px;
+}
+
+[uiStyle="file-badge-document"][uiStyle="file-badge-document"][uiStyle="file-badge-document"],
+[uiStyle="file-badge-document"] * {
+    background-color: #2563EB;
+    color: #FFFFFF;
+    font-size: 11px;
+    font-weight: bold;
+    border-radius: 6px;
+}
+
+[uiStyle="file-badge-pdf"][uiStyle="file-badge-pdf"][uiStyle="file-badge-pdf"],
+[uiStyle="file-badge-pdf"] * {
+    background-color: #DC2626;
+    color: #FFFFFF;
+    font-size: 11px;
+    font-weight: bold;
+    border-radius: 6px;
+}
+
+[uiStyle="file-badge-archive"][uiStyle="file-badge-archive"][uiStyle="file-badge-archive"],
+[uiStyle="file-badge-archive"] * {
+    background-color: #D97706;
+    color: #FFFFFF;
+    font-size: 11px;
+    font-weight: bold;
+    border-radius: 6px;
+}
+
+[uiStyle="file-badge-spreadsheet"][uiStyle="file-badge-spreadsheet"][uiStyle="file-badge-spreadsheet"],
+[uiStyle="file-badge-spreadsheet"] * {
+    background-color: #059669;
+    color: #FFFFFF;
+    font-size: 11px;
+    font-weight: bold;
+    border-radius: 6px;
+}
+
+[uiStyle="file-badge-text"][uiStyle="file-badge-text"][uiStyle="file-badge-text"],
+[uiStyle="file-badge-text"] * {
+    background-color: #4B5563;
+    color: #FFFFFF;
+    font-size: 11px;
+    font-weight: bold;
+    border-radius: 6px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-namelabel-3"][uiStyle="meeting-chat-sidebar-widget-namelabel-3"][uiStyle="meeting-chat-sidebar-widget-namelabel-3"],
+[uiStyle="meeting-chat-sidebar-widget-namelabel-3"] * {
+    color: #F3F4F6;
+    font-size: 13px;
+    font-weight: bold;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-sizelabel-2"][uiStyle="meeting-chat-sidebar-widget-sizelabel-2"][uiStyle="meeting-chat-sidebar-widget-sizelabel-2"],
+[uiStyle="meeting-chat-sidebar-widget-sizelabel-2"] * {
+    color: #9CA3AF;
+    font-size: 12px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-scroll-2"][uiStyle="meeting-chat-sidebar-widget-scroll-2"][uiStyle="meeting-chat-sidebar-widget-scroll-2"],
+[uiStyle="meeting-chat-sidebar-widget-scroll-2"] * {
+    background-color: transparent;
+    border: 1px solid #2B303C;
+    border-radius: 6px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-container"][uiStyle="meeting-chat-sidebar-widget-container"][uiStyle="meeting-chat-sidebar-widget-container"],
+[uiStyle="meeting-chat-sidebar-widget-container"] * {
+    background-color: transparent;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-itemrow-active"][uiStyle="meeting-chat-sidebar-widget-itemrow-active"][uiStyle="meeting-chat-sidebar-widget-itemrow-active"],
+[uiStyle="meeting-chat-sidebar-widget-itemrow-active"] * {
+    background-color: rgba(239, 68, 68, 0.15);
+    border: 1px solid #EF4444;
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-itemrow-normal"][uiStyle="meeting-chat-sidebar-widget-itemrow-normal"][uiStyle="meeting-chat-sidebar-widget-itemrow-normal"],
+[uiStyle="meeting-chat-sidebar-widget-itemrow-normal"] * {
+    background-color: #242831;
+    border-radius: 4px;
+    padding: 4px 8px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-namelbl-active"][uiStyle="meeting-chat-sidebar-widget-namelbl-active"][uiStyle="meeting-chat-sidebar-widget-namelbl-active"],
+[uiStyle="meeting-chat-sidebar-widget-namelbl-active"] * {
+    color: #FCA5A5;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-namelbl-normal"][uiStyle="meeting-chat-sidebar-widget-namelbl-normal"][uiStyle="meeting-chat-sidebar-widget-namelbl-normal"],
+[uiStyle="meeting-chat-sidebar-widget-namelbl-normal"] * {
+    color: #F3F4F6;
+    font-size: 12px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-sizelbl-active"][uiStyle="meeting-chat-sidebar-widget-sizelbl-active"][uiStyle="meeting-chat-sidebar-widget-sizelbl-active"],
+[uiStyle="meeting-chat-sidebar-widget-sizelbl-active"] * {
+    color: #EF4444;
+    font-size: 11px;
+    font-weight: bold;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-sizelbl-normal"][uiStyle="meeting-chat-sidebar-widget-sizelbl-normal"][uiStyle="meeting-chat-sidebar-widget-sizelbl-normal"],
+[uiStyle="meeting-chat-sidebar-widget-sizelbl-normal"] * {
+    color: #9CA3AF;
+    font-size: 11px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-summarylbl"][uiStyle="meeting-chat-sidebar-widget-summarylbl"][uiStyle="meeting-chat-sidebar-widget-summarylbl"],
+[uiStyle="meeting-chat-sidebar-widget-summarylbl"] * {
+    color: #9CA3AF;
+    font-size: 12px;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-warnlbl"][uiStyle="meeting-chat-sidebar-widget-warnlbl"][uiStyle="meeting-chat-sidebar-widget-warnlbl"],
+[uiStyle="meeting-chat-sidebar-widget-warnlbl"] * {
+    color: #EF4444;
+    font-size: 12px;
+    font-weight: bold;
+}
+
+QWidget[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="ChatSidebar"],
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QWidget[objectName="ChatSidebar"] {
+    background-color: #1A1D24;
+    border-left: 1px solid #2B303C;
+}
+
+QLabel[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="ChatTitle"],
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QLabel[objectName="ChatTitle"] {
+    color: #F3F4F6;
+    font-size: 14px;
+    font-weight: bold;
+    font-family: "Microsoft YaHei";
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="CloseBtn"],
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="CloseBtn"] {
+    background: transparent;
+    color: #9CA3AF;
+    font-size: 16px;
+    border: none;
+    border-radius: 4px;
+    min-width: 24px;
+    max-width: 24px;
+    min-height: 24px;
+    max-height: 24px;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="CloseBtn"]:hover,
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="CloseBtn"]:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+    color: #FFFFFF;
+}
+
+QScrollArea[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="MessageScrollArea"],
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QScrollArea[objectName="MessageScrollArea"] {
+    background-color: transparent;
+    border: none;
+}
+
+QScrollBar[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"]:vertical,
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QScrollBar:vertical {
+    border: none;
+    background: transparent;
+    width: 6px;
+    margin: 0px;
+}
+
+QScrollBar[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"]::handle:vertical,
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QScrollBar::handle:vertical {
+    background: #4B5563;
+    min-height: 20px;
+    border-radius: 3px;
+}
+
+QScrollBar[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"]::add-line:vertical,
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QScrollBar::add-line:vertical,
+QScrollBar[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"]::sub-line:vertical,
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+QWidget[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="BottomInputPanel"],
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QWidget[objectName="BottomInputPanel"] {
+    background-color: #171A20;
+    border-top: 1px solid #2B303C;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="MediaBtn"],
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="MediaBtn"] {
+    background-color: transparent;
+    color: #9CA3AF;
+    border: none;
+    border-radius: 4px;
+    padding: 4px 8px;
+    font-size: 13px;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="MediaBtn"]:hover,
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="MediaBtn"]:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+    color: #F3F4F6;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="SendBtn"],
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="SendBtn"] {
+    background-color: #2563EB;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 14px;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: "Microsoft YaHei";
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="SendBtn"]:hover,
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="SendBtn"]:hover {
+    background-color: #1D4ED8;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="SendBtn"]:disabled,
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="SendBtn"]:disabled {
+    background-color: #374151;
+    color: #6B7280;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="ScrollDownBtn"],
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="ScrollDownBtn"] {
+    background-color: rgba(36, 40, 49, 0.9);
+    border: 1px solid #363C4A;
+    color: #3B82F6;
+    border-radius: 12px;
+    font-size: 11px;
+    padding: 4px 10px;
+    font-weight: 500;
+}
+
+QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="ScrollDownBtn"]:hover,
+[uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="ScrollDownBtn"]:hover {
+    background-color: #2563EB;
+    color: #FFFFFF;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-scrollcontent"][uiStyle="meeting-chat-sidebar-widget-scrollcontent"][uiStyle="meeting-chat-sidebar-widget-scrollcontent"],
+[uiStyle="meeting-chat-sidebar-widget-scrollcontent"] * {
+    background-color: transparent;
+}
+
+[uiStyle="meeting-chat-sidebar-widget-dropoverlay"][uiStyle="meeting-chat-sidebar-widget-dropoverlay"][uiStyle="meeting-chat-sidebar-widget-dropoverlay"],
+[uiStyle="meeting-chat-sidebar-widget-dropoverlay"] * {
+    background-color: rgba(30, 58, 138, 0.88);
+    border: 2px dashed #60A5FA;
+    border-radius: 8px;
+    color: #FFFFFF;
+    font-size: 14px;
+    font-weight: bold;
+    font-family: "Microsoft YaHei", sans-serif;
+}
+
+QDialog[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"],
+[uiStyle="meeting-detail-dialog-this"] QDialog {
+    background: #ffffff;
+}
+
+QLabel[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"],
+[uiStyle="meeting-detail-dialog-this"] QLabel {
+    color: #303133;
+    font-size: 13px;
+}
+
+QPushButton[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"],
+[uiStyle="meeting-detail-dialog-this"] QPushButton {
+    min-height: 34px;
+    padding: 0 16px;
+    border-radius: 6px;
+}
+
+QPushButton[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][objectName="primary"],
+[uiStyle="meeting-detail-dialog-this"] QPushButton[objectName="primary"] {
+    background: #1677ff;
+    color: white;
+    border: none;
+}
+
+QPushButton[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][objectName="secondary"],
+[uiStyle="meeting-detail-dialog-this"] QPushButton[objectName="secondary"] {
+    background: #f2f3f5;
+    color: #4e5969;
+    border: none;
+}
+
+QPushButton[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][objectName="danger"],
+[uiStyle="meeting-detail-dialog-this"] QPushButton[objectName="danger"] {
+    background: #fff1f0;
+    color: #cf1322;
+    border: 1px solid #ffccc7;
+}
+
+[uiStyle="meeting-detail-dialog-statelabel"][uiStyle="meeting-detail-dialog-statelabel"][uiStyle="meeting-detail-dialog-statelabel"],
+[uiStyle="meeting-detail-dialog-statelabel"] * {
+    color: #8f959e;
+}
+
+[uiStyle="meeting-detail-dialog-statelabel-2"][uiStyle="meeting-detail-dialog-statelabel-2"][uiStyle="meeting-detail-dialog-statelabel-2"],
+[uiStyle="meeting-detail-dialog-statelabel-2"] * {
+    color: #1677ff;
+}
+
+[uiStyle="meeting-detail-dialog-statelabel-3"][uiStyle="meeting-detail-dialog-statelabel-3"][uiStyle="meeting-detail-dialog-statelabel-3"],
+[uiStyle="meeting-detail-dialog-statelabel-3"] * {
+    color: #d4380d;
+}
+
+[uiStyle="meeting-detail-dialog-statelabel-4"][uiStyle="meeting-detail-dialog-statelabel-4"][uiStyle="meeting-detail-dialog-statelabel-4"],
+[uiStyle="meeting-detail-dialog-statelabel-4"] * {
+    color: #1677ff;
+}
+
+[uiStyle="meeting-detail-dialog-statelabel-5"][uiStyle="meeting-detail-dialog-statelabel-5"][uiStyle="meeting-detail-dialog-statelabel-5"],
+[uiStyle="meeting-detail-dialog-statelabel-5"] * {
+    color: #d4380d;
+}
+
+[uiStyle="meeting-detail-dialog-statelabel-6"][uiStyle="meeting-detail-dialog-statelabel-6"][uiStyle="meeting-detail-dialog-statelabel-6"],
+[uiStyle="meeting-detail-dialog-statelabel-6"] * {
+    color: #8f959e;
+}
+
+[uiStyle="meeting-detail-dialog-statelabel-7"][uiStyle="meeting-detail-dialog-statelabel-7"][uiStyle="meeting-detail-dialog-statelabel-7"],
+[uiStyle="meeting-detail-dialog-statelabel-7"] * {
+    color: #8f959e;
+}
+
+[uiStyle="meeting-detail-dialog-statelabel-8"][uiStyle="meeting-detail-dialog-statelabel-8"][uiStyle="meeting-detail-dialog-statelabel-8"],
+[uiStyle="meeting-detail-dialog-statelabel-8"] * {
+    color: #8f959e;
+}
+
+[uiStyle="meeting-detail-dialog-statelabel-9"][uiStyle="meeting-detail-dialog-statelabel-9"][uiStyle="meeting-detail-dialog-statelabel-9"],
+[uiStyle="meeting-detail-dialog-statelabel-9"] * {
+    color: #d4380d;
+}
+
+[uiStyle="meeting-detail-dialog-statelabel-10"][uiStyle="meeting-detail-dialog-statelabel-10"][uiStyle="meeting-detail-dialog-statelabel-10"],
+[uiStyle="meeting-detail-dialog-statelabel-10"] * {
+    color: #1677ff;
+}
+
+[uiStyle="meeting-detail-dialog-statelabel-11"][uiStyle="meeting-detail-dialog-statelabel-11"][uiStyle="meeting-detail-dialog-statelabel-11"],
+[uiStyle="meeting-detail-dialog-statelabel-11"] * {
+    color: #089f62;
+}
+
+[uiStyle="meeting-list-dialog-statelabel"][uiStyle="meeting-list-dialog-statelabel"][uiStyle="meeting-list-dialog-statelabel"],
+[uiStyle="meeting-list-dialog-statelabel"] * {
+    color: #8f959e;
+    padding: 12px;
+}
+
+QListView[uiStyle="meeting-list-dialog-view"][uiStyle="meeting-list-dialog-view"][uiStyle="meeting-list-dialog-view"],
+[uiStyle="meeting-list-dialog-view"] QListView {
+    border: none;
+    background: #ffffff;
+    outline: none;
+}
+
+QListView[uiStyle="meeting-list-dialog-view"][uiStyle="meeting-list-dialog-view"][uiStyle="meeting-list-dialog-view"]::item,
+[uiStyle="meeting-list-dialog-view"] QListView::item {
+    background: transparent;
+}
+
+QDialog[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"],
+[uiStyle="meeting-list-dialog-this"] QDialog {
+    background: #ffffff;
+}
+
+QLineEdit[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"],
+[uiStyle="meeting-list-dialog-this"] QLineEdit {
+    min-height: 36px;
+    border: 1px solid #dcdfe6;
+    border-radius: 6px;
+    padding: 0 10px;
+}
+
+QLineEdit[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"]:focus,
+[uiStyle="meeting-list-dialog-this"] QLineEdit:focus {
+    border-color: #1677ff;
+}
+
+QTabWidget[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"]::pane,
+[uiStyle="meeting-list-dialog-this"] QTabWidget::pane {
+    border: 1px solid #e5e8ec;
+    border-radius: 6px;
+    top: -1px;
+}
+
+QTabBar[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"]::tab,
+[uiStyle="meeting-list-dialog-this"] QTabBar::tab {
+    min-width: 150px;
+    padding: 10px 14px;
+    color: #606266;
+}
+
+QTabBar[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"]::tab:selected,
+[uiStyle="meeting-list-dialog-this"] QTabBar::tab:selected {
+    color: #1677ff;
+    font-weight: bold;
+}
+
+QPushButton[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"],
+[uiStyle="meeting-list-dialog-this"] QPushButton {
+    min-height: 34px;
+    padding: 0 16px;
+    border-radius: 6px;
+}
+
+QPushButton[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][objectName="primary"],
+[uiStyle="meeting-list-dialog-this"] QPushButton[objectName="primary"] {
+    background: #1677ff;
+    color: white;
+    border: none;
+}
+
+QPushButton[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][objectName="secondary"],
+[uiStyle="meeting-list-dialog-this"] QPushButton[objectName="secondary"] {
+    background: #f2f3f5;
+    color: #4e5969;
+    border: none;
+}
+
+QDialog[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"],
+[uiStyle="meeting-log-console-this"] QDialog {
+    background-color: #18191f;
+    color: #e5e6eb;
+    font-family: "Consolas", "Courier New", "Microsoft YaHei", monospace;
+}
+
+QPlainTextEdit[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"],
+[uiStyle="meeting-log-console-this"] QPlainTextEdit {
+    background-color: #121316;
+    color: #d1d5db;
+    border: 1px solid #2d3039;
+    border-radius: 6px;
+    font-size: 12px;
+    padding: 8px;
+    selection-background-color: #1677ff;
+}
+
+QPushButton[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"],
+[uiStyle="meeting-log-console-this"] QPushButton {
+    background-color: #272a34;
+    color: #e5e6eb;
+    border: 1px solid #3c404d;
+    border-radius: 6px;
+    padding: 6px 14px;
+    font-size: 12px;
+}
+
+QPushButton[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"]:hover,
+[uiStyle="meeting-log-console-this"] QPushButton:hover {
+    background-color: #363a47;
+}
+
+QLineEdit[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"],
+[uiStyle="meeting-log-console-this"] QLineEdit {
+    background-color: #1e2027;
+    border: 1px solid #2d3039;
+    border-radius: 6px;
+    padding: 4px 10px;
+    color: #ffffff;
+    font-size: 12px;
+}
+
+QCheckBox[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"],
+[uiStyle="meeting-log-console-this"] QCheckBox {
+    color: #86909c;
+    font-size: 12px;
+}
+
+[uiStyle="meeting-log-console-statuslabel"][uiStyle="meeting-log-console-statuslabel"][uiStyle="meeting-log-console-statuslabel"],
+[uiStyle="meeting-log-console-statuslabel"] * {
+    color: #00b42a;
+    font-weight: bold;
+    font-size: 13px;
+}
+
+QDialog[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"],
+[uiStyle="meeting-main-window-this"] QDialog {
+    background: transparent;
+}
+
+[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="dialogContainer"],
+[uiStyle="meeting-main-window-this"] [objectName="dialogContainer"] {
+    background-color: #ffffff;
+    border-radius: 14px;
+    border: 1px solid #e1e4ea;
+}
+
+QLabel[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"],
+[uiStyle="meeting-main-window-this"] QLabel {
+    color: #1f2329;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+}
+
+QLineEdit[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"],
+[uiStyle="meeting-main-window-this"] QLineEdit {
+    border: 1px solid #dcdfe6;
+    border-radius: 8px;
+    padding: 8px 12px;
+    font-size: 13px;
+    background: #f8f9fa;
+}
+
+QLineEdit[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"]:focus,
+[uiStyle="meeting-main-window-this"] QLineEdit:focus {
+    border: 1px solid #1677ff;
+    background: #ffffff;
+}
+
+QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="joinBtn"],
+[uiStyle="meeting-main-window-this"] QPushButton[objectName="joinBtn"] {
+    background-color: #1677ff;
+    color: #ffffff;
+    border-radius: 8px;
+    padding: 9px 24px;
+    font-size: 14px;
+    font-weight: bold;
+    border: none;
+}
+
+QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="joinBtn"]:hover,
+[uiStyle="meeting-main-window-this"] QPushButton[objectName="joinBtn"]:hover {
+    background-color: #4096ff;
+}
+
+QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="joinBtn"]:disabled,
+[uiStyle="meeting-main-window-this"] QPushButton[objectName="joinBtn"]:disabled {
+    background-color: #b7d6ff;
+}
+
+QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="cancelBtn"],
+[uiStyle="meeting-main-window-this"] QPushButton[objectName="cancelBtn"] {
+    background-color: #f2f3f5;
+    color: #4e5969;
+    border-radius: 8px;
+    padding: 9px 20px;
+    font-size: 14px;
+    border: none;
+}
+
+QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="cancelBtn"]:hover,
+[uiStyle="meeting-main-window-this"] QPushButton[objectName="cancelBtn"]:hover {
+    background-color: #e5e6eb;
+}
+
+QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="linkBtn"],
+[uiStyle="meeting-main-window-this"] QPushButton[objectName="linkBtn"] {
+    background: transparent;
+    color: #1677ff;
+    font-size: 12px;
+    border: none;
+    padding: 0;
+    text-align: left;
+}
+
+QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="linkBtn"]:hover,
+[uiStyle="meeting-main-window-this"] QPushButton[objectName="linkBtn"]:hover {
+    color: #4096ff;
+    text-decoration: underline;
+}
+
+QCheckBox[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"],
+[uiStyle="meeting-main-window-this"] QCheckBox {
+    font-size: 13px;
+    color: #4e5969;
+}
+
+[uiStyle="meeting-main-window-closebtn"][uiStyle="meeting-main-window-closebtn"][uiStyle="meeting-main-window-closebtn"],
+[uiStyle="meeting-main-window-closebtn"] * {
+    border:none;
+    color:#8c8c8c;
+    font-size:14px;
+}
+
+[uiStyle="meeting-main-window-idlabel"][uiStyle="meeting-main-window-idlabel"][uiStyle="meeting-main-window-idlabel"],
+[uiStyle="meeting-main-window-idlabel"] * {
+    font-weight: bold;
+    color: #303133;
+    font-size: 12px;
+}
+
+[uiStyle="meeting-main-window-pwdlabel"][uiStyle="meeting-main-window-pwdlabel"][uiStyle="meeting-main-window-pwdlabel"],
+[uiStyle="meeting-main-window-pwdlabel"] * {
+    font-weight: bold;
+    color: #303133;
+    font-size: 12px;
+}
+
+[uiStyle="meeting-main-window-namelabel"][uiStyle="meeting-main-window-namelabel"][uiStyle="meeting-main-window-namelabel"],
+[uiStyle="meeting-main-window-namelabel"] * {
+    font-weight: bold;
+    color: #303133;
+    font-size: 12px;
+}
+
+[uiStyle="meeting-main-window-meetingpolicylabel"][uiStyle="meeting-main-window-meetingpolicylabel"][uiStyle="meeting-main-window-meetingpolicylabel"],
+[uiStyle="meeting-main-window-meetingpolicylabel"] * {
+    color: #8f5b00;
+    background: #fff7e6;
+    border: 1px solid #ffe7ba;
+    border-radius: 6px;
+    padding: 7px 9px;
+}
+
+[uiStyle="meeting-main-window-statuslabel"][uiStyle="meeting-main-window-statuslabel"][uiStyle="meeting-main-window-statuslabel"],
+[uiStyle="meeting-main-window-statuslabel"] * {
+    color: #f53f3f;
+    font-size: 12px;
+    padding: 2px 4px;
+}
+
+[uiStyle="meeting-main-window-statuslabel-2"][uiStyle="meeting-main-window-statuslabel-2"][uiStyle="meeting-main-window-statuslabel-2"],
+[uiStyle="meeting-main-window-statuslabel-2"] * {
+    color: #1677ff;
+    font-size: 12px;
+}
+
+[uiStyle="meeting-main-window-statuslabel-3"][uiStyle="meeting-main-window-statuslabel-3"][uiStyle="meeting-main-window-statuslabel-3"],
+[uiStyle="meeting-main-window-statuslabel-3"] * {
+    color: #f53f3f;
+    font-size: 12px;
+}
+
+QPushButton[uiStyle="meeting-room-window-pinbtn"][uiStyle="meeting-room-window-pinbtn"][uiStyle="meeting-room-window-pinbtn"],
+[uiStyle="meeting-room-window-pinbtn"] QPushButton {
+    background-color: rgba(0, 0, 0, 150);
+    border-radius: 14px;
+    color: white;
+    border: none;
+    font-size: 13px;
+}
+
+QPushButton[uiStyle="meeting-room-window-pinbtn"][uiStyle="meeting-room-window-pinbtn"][uiStyle="meeting-room-window-pinbtn"]:hover,
+[uiStyle="meeting-room-window-pinbtn"] QPushButton:hover {
+    background-color: rgba(22, 119, 255, 220);
+}
+
+QPushButton[uiStyle="meeting-room-window-volbtn"][uiStyle="meeting-room-window-volbtn"][uiStyle="meeting-room-window-volbtn"],
+[uiStyle="meeting-room-window-volbtn"] QPushButton {
+    background-color: rgba(0, 0, 0, 150);
+    border-radius: 14px;
+    color: white;
+    border: none;
+    font-size: 13px;
+}
+
+QPushButton[uiStyle="meeting-room-window-volbtn"][uiStyle="meeting-room-window-volbtn"][uiStyle="meeting-room-window-volbtn"]:hover,
+[uiStyle="meeting-room-window-volbtn"] QPushButton:hover {
+    background-color: rgba(22, 119, 255, 220);
+}
+
+QWidget[uiStyle="meeting-room-window-volpopup"][uiStyle="meeting-room-window-volpopup"][uiStyle="meeting-room-window-volpopup"],
+[uiStyle="meeting-room-window-volpopup"] QWidget {
+    background-color: rgba(20, 24, 32, 230);
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 40);
+}
+
+QPushButton[uiStyle="meeting-room-window-muteremotebtn"][uiStyle="meeting-room-window-muteremotebtn"][uiStyle="meeting-room-window-muteremotebtn"],
+[uiStyle="meeting-room-window-muteremotebtn"] QPushButton {
+    background: transparent;
+    color: #ffffff;
+    border: none;
+    font-size: 13px;
+}
+
+QPushButton[uiStyle="meeting-room-window-muteremotebtn"][uiStyle="meeting-room-window-muteremotebtn"][uiStyle="meeting-room-window-muteremotebtn"]:hover,
+[uiStyle="meeting-room-window-muteremotebtn"] QPushButton:hover {
+    color: #1677ff;
+}
+
+QSlider[uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-volslider"]::groove:horizontal,
+[uiStyle="meeting-room-window-volslider"] QSlider::groove:horizontal {
+    height: 4px;
+    background: rgba(255, 255, 255, 60);
+    border-radius: 2px;
+}
+
+QSlider[uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-volslider"]::sub-page:horizontal,
+[uiStyle="meeting-room-window-volslider"] QSlider::sub-page:horizontal {
+    background: #1677ff;
+    border-radius: 2px;
+}
+
+QSlider[uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-volslider"]::handle:horizontal,
+[uiStyle="meeting-room-window-volslider"] QSlider::handle:horizontal {
+    background: #ffffff;
+    width: 12px;
+    margin: -4px 0;
+    border-radius: 6px;
+}
+
+[uiStyle="meeting-room-window-vollabel"][uiStyle="meeting-room-window-vollabel"][uiStyle="meeting-room-window-vollabel"],
+[uiStyle="meeting-room-window-vollabel"] * {
+    color: #ffffff;
+    font-size: 11px;
+    border: none;
+    background: transparent;
+}
+
+[uiStyle="meeting-room-window-muteremotebtn-2-active"][uiStyle="meeting-room-window-muteremotebtn-2-active"][uiStyle="meeting-room-window-muteremotebtn-2-active"],
+[uiStyle="meeting-room-window-muteremotebtn-2-active"] * {
+    color: #f53f3f;
+    border: none;
+    font-size: 13px;
+}
+
+[uiStyle="meeting-room-window-muteremotebtn-2-normal"][uiStyle="meeting-room-window-muteremotebtn-2-normal"][uiStyle="meeting-room-window-muteremotebtn-2-normal"],
+[uiStyle="meeting-room-window-muteremotebtn-2-normal"] * {
+    color: #ffffff;
+    border: none;
+    font-size: 13px;
+}
+
+[uiStyle="meeting-room-window-muteremotebtn-3"][uiStyle="meeting-room-window-muteremotebtn-3"][uiStyle="meeting-room-window-muteremotebtn-3"],
+[uiStyle="meeting-room-window-muteremotebtn-3"] * {
+    color: #ffffff;
+    border: none;
+    font-size: 13px;
+}
+
+[uiStyle="meeting-room-window-pinbtn-2-active"][uiStyle="meeting-room-window-pinbtn-2-active"][uiStyle="meeting-room-window-pinbtn-2-active"],
+[uiStyle="meeting-room-window-pinbtn-2-active"] * {
+    background-color: #1677ff;
+    border-radius: 14px;
+    color: white;
+    border: none;
+    font-size: 13px;
+}
+
+[uiStyle="meeting-room-window-pinbtn-2-normal"][uiStyle="meeting-room-window-pinbtn-2-normal"][uiStyle="meeting-room-window-pinbtn-2-normal"],
+[uiStyle="meeting-room-window-pinbtn-2-normal"] * {
+    background-color: rgba(0, 0, 0, 150);
+    border-radius: 14px;
+    color: white;
+    border: none;
+    font-size: 13px;
+}
+
+QLineEdit[uiStyle="meeting-room-window-chatinput"][uiStyle="meeting-room-window-chatinput"][uiStyle="meeting-room-window-chatinput"],
+[uiStyle="meeting-room-window-chatinput"] QLineEdit {
+    background-color: #f2f3f5;
+    border-radius: 16px;
+    border: 1px solid transparent;
+    padding: 4px 14px;
+    font-size: 12px;
+    color: #1f2329;
+}
+
+QLineEdit[uiStyle="meeting-room-window-chatinput"][uiStyle="meeting-room-window-chatinput"][uiStyle="meeting-room-window-chatinput"]:focus,
+[uiStyle="meeting-room-window-chatinput"] QLineEdit:focus {
+    background-color: #ffffff;
+    border: 1px solid #1677ff;
+}
+
+QPushButton[uiStyle="meeting-room-window-handbtn"][uiStyle="meeting-room-window-handbtn"][uiStyle="meeting-room-window-handbtn"],
+[uiStyle="meeting-room-window-handbtn"] QPushButton {
+    background-color: #f2f3f5;
+    border-radius: 16px;
+    border: none;
+    font-size: 15px;
+}
+
+QPushButton[uiStyle="meeting-room-window-handbtn"][uiStyle="meeting-room-window-handbtn"][uiStyle="meeting-room-window-handbtn"]:hover,
+[uiStyle="meeting-room-window-handbtn"] QPushButton:hover {
+    background-color: #e5e6eb;
+}
+
+[uiStyle="meeting-room-window-stagecontainer"][uiStyle="meeting-room-window-stagecontainer"][uiStyle="meeting-room-window-stagecontainer"],
+[uiStyle="meeting-room-window-stagecontainer"] * {
+    background-color: #12141a;
+}
+
+QLabel[uiStyle="meeting-room-window-invitehintbanner"][uiStyle="meeting-room-window-invitehintbanner"][uiStyle="meeting-room-window-invitehintbanner"],
+[uiStyle="meeting-room-window-invitehintbanner"] QLabel {
+    background-color: rgba(255, 255, 255, 25);
+    color: #e5e6eb;
+    border-radius: 8px;
+    font-size: 13px;
+    font-family: "Microsoft YaHei";
+    padding: 6px 14px;
+}
+
+QLabel[uiStyle="meeting-room-window-recoverybanner"][uiStyle="meeting-room-window-recoverybanner"][uiStyle="meeting-room-window-recoverybanner"],
+[uiStyle="meeting-room-window-recoverybanner"] QLabel {
+    background-color: rgba(30, 58, 138, 230);
+    color: #e0e7ff;
+    border: 1px solid #3b82f6;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: bold;
+    font-family: "Segoe UI", "Microsoft YaHei";
+    padding: 6px 16px;
+}
+
+QLabel[uiStyle="meeting-room-window-recoverybanner-2"][uiStyle="meeting-room-window-recoverybanner-2"][uiStyle="meeting-room-window-recoverybanner-2"],
+[uiStyle="meeting-room-window-recoverybanner-2"] QLabel {
+    background-color: rgba(217, 119, 6, 235);
+    color: #ffffff;
+    border: 1px solid #f59e0b;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: bold;
+    font-family: "Segoe UI", "Microsoft YaHei";
+    padding: 6px 16px;
+}
+
+QLabel[uiStyle="meeting-room-window-recoverybanner-3"][uiStyle="meeting-room-window-recoverybanner-3"][uiStyle="meeting-room-window-recoverybanner-3"],
+[uiStyle="meeting-room-window-recoverybanner-3"] QLabel {
+    background-color: rgba(22, 101, 52, 235);
+    color: #ffffff;
+    border: 1px solid #22c55e;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: bold;
+    font-family: "Segoe UI", "Microsoft YaHei";
+    padding: 6px 16px;
+}
+
+QLabel[uiStyle="meeting-room-window-recoverybanner-4"][uiStyle="meeting-room-window-recoverybanner-4"][uiStyle="meeting-room-window-recoverybanner-4"],
+[uiStyle="meeting-room-window-recoverybanner-4"] QLabel {
+    background-color: rgba(185, 28, 28, 235);
+    color: #ffffff;
+    border: 1px solid #ef4444;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: bold;
+    font-family: "Segoe UI", "Microsoft YaHei";
+    padding: 6px 16px;
+}
+
+[uiStyle="meeting-room-window-screensharebanner"][uiStyle="meeting-room-window-screensharebanner"][uiStyle="meeting-room-window-screensharebanner"],
+[uiStyle="meeting-room-window-screensharebanner"] * {
+    background: #087f5b;
+    color: white;
+    font-weight: bold;
+}
+
+QWidget[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="ParticipantsSidebar"],
+[uiStyle="participants-sidebar-widget-this"] QWidget[objectName="ParticipantsSidebar"] {
+    background-color: #1A1D24;
+    border-left: 1px solid #2B303C;
+}
+
+QLabel[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="SidebarTitle"],
+[uiStyle="participants-sidebar-widget-this"] QLabel[objectName="SidebarTitle"] {
+    color: #F3F4F6;
+    font-size: 14px;
+    font-weight: bold;
+}
+
+QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="CloseBtn"],
+[uiStyle="participants-sidebar-widget-this"] QPushButton[objectName="CloseBtn"] {
+    background: transparent;
+    color: #9CA3AF;
+    font-size: 16px;
+    border: none;
+    border-radius: 4px;
+    min-width: 24px;
+    max-width: 24px;
+    min-height: 24px;
+    max-height: 24px;
+}
+
+QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="CloseBtn"]:hover,
+[uiStyle="participants-sidebar-widget-this"] QPushButton[objectName="CloseBtn"]:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+    color: #FFFFFF;
+}
+
+QLineEdit[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="SearchEdit"],
+[uiStyle="participants-sidebar-widget-this"] QLineEdit[objectName="SearchEdit"] {
+    background-color: #242831;
+    border: 1px solid #363C4A;
+    border-radius: 4px;
+    color: #F3F4F6;
+    padding: 4px 8px;
+    font-size: 12px;
+}
+
+QLineEdit[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="SearchEdit"]:focus,
+[uiStyle="participants-sidebar-widget-this"] QLineEdit[objectName="SearchEdit"]:focus {
+    border: 1px solid #3B82F6;
+}
+
+QListView[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="ParticipantList"],
+[uiStyle="participants-sidebar-widget-this"] QListView[objectName="ParticipantList"] {
+    background-color: transparent;
+    border: none;
+    outline: none;
+}
+
+QListView[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="ParticipantList"]::item,
+[uiStyle="participants-sidebar-widget-this"] QListView[objectName="ParticipantList"]::item {
+    border-bottom: 1px solid #232731;
+}
+
+QScrollBar[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"]:vertical,
+[uiStyle="participants-sidebar-widget-this"] QScrollBar:vertical {
+    border: none;
+    background: transparent;
+    width: 6px;
+    margin: 0px 0px 0px 0px;
+}
+
+QScrollBar[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"]::handle:vertical,
+[uiStyle="participants-sidebar-widget-this"] QScrollBar::handle:vertical {
+    background: #4B5563;
+    min-height: 20px;
+    border-radius: 3px;
+}
+
+QScrollBar[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"]::add-line:vertical,
+[uiStyle="participants-sidebar-widget-this"] QScrollBar::add-line:vertical,
+QScrollBar[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"]::sub-line:vertical,
+[uiStyle="participants-sidebar-widget-this"] QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+QWidget[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="BottomPanel"],
+[uiStyle="participants-sidebar-widget-this"] QWidget[objectName="BottomPanel"] {
+    background-color: #171A20;
+    border-top: 1px solid #2B303C;
+}
+
+QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="MuteAllBtn"],
+[uiStyle="participants-sidebar-widget-this"] QPushButton[objectName="MuteAllBtn"] {
+    background-color: #EF4444;
+    color: #FFFFFF;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-size: 12px;
+    font-weight: 500;
+}
+
+QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="MuteAllBtn"]:hover,
+[uiStyle="participants-sidebar-widget-this"] QPushButton[objectName="MuteAllBtn"]:hover {
+    background-color: #DC2626;
+}
+
+QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="UnmuteAllBtn"],
+[uiStyle="participants-sidebar-widget-this"] QPushButton[objectName="UnmuteAllBtn"] {
+    background-color: #374151;
+    color: #F3F4F6;
+    border: none;
+    border-radius: 4px;
+    padding: 6px 12px;
+    font-size: 12px;
+}
+
+QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="UnmuteAllBtn"]:hover,
+[uiStyle="participants-sidebar-widget-this"] QPushButton[objectName="UnmuteAllBtn"]:hover {
+    background-color: #4B5563;
+}
+
+QListView[uiStyle="schedule-widget-listview"][uiStyle="schedule-widget-listview"][uiStyle="schedule-widget-listview"],
+[uiStyle="schedule-widget-listview"] QListView {
+    border: none;
+    background: transparent;
+    outline: none;
+}
+
+QListView[uiStyle="schedule-widget-listview"][uiStyle="schedule-widget-listview"][uiStyle="schedule-widget-listview"]::item,
+[uiStyle="schedule-widget-listview"] QListView::item {
+    background: transparent;
+}
+
+QDialog[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsDialog"],
+[uiStyle="settings-dialog-this"] QDialog[objectName="settingsDialog"] {
+    background: transparent;
+}
+
+QFrame[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsShadowSurface"],
+[uiStyle="settings-dialog-this"] QFrame[objectName="settingsShadowSurface"] {
+    background: #ffffff;
+    border-radius: 12px;
+}
+
+QFrame[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsSurface"],
+[uiStyle="settings-dialog-this"] QFrame[objectName="settingsSurface"] {
+    background: #ffffff;
+    border: 1px solid #dfe3e8;
+    border-radius: 12px;
+}
+
+QWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"],
+[uiStyle="settings-dialog-this"] QWidget {
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+    color: #1f2329;
+}
+
+QWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="titleBar"],
+[uiStyle="settings-dialog-this"] QWidget[objectName="titleBar"] {
+    background: #ffffff;
+    border-bottom: 1px solid #e5e8ec;
+}
+
+QLabel[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="dialogTitle"],
+[uiStyle="settings-dialog-this"] QLabel[objectName="dialogTitle"] {
+    font-size: 15px;
+    font-weight: 500;
+    color: #303133;
+}
+
+QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="closeButton"],
+[uiStyle="settings-dialog-this"] QPushButton[objectName="closeButton"] {
+    border: none;
+    background: transparent;
+    border-radius: 4px;
+}
+
+QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="closeButton"]:hover,
+[uiStyle="settings-dialog-this"] QPushButton[objectName="closeButton"]:hover {
+    background: #f2f3f5;
+}
+
+QListWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsNavigation"],
+[uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"] {
+    background: #ffffff;
+    border: none;
+    border-right: 1px solid #e5e8ec;
+    outline: none;
+    padding: 8px 7px;
+}
+
+QListWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsNavigation"]::item,
+[uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"]::item {
+    min-height: 40px;
+    padding-left: 12px;
+    border-radius: 6px;
+    color: #303133;
+}
+
+QListWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsNavigation"]::item:hover,
+[uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"]::item:hover {
+    background: #f5f7fa;
+}
+
+QListWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsNavigation"]::item:selected,
+[uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"]::item:selected {
+    background: #1677ff;
+    color: #ffffff;
+}
+
+QLabel[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="pageTitle"],
+[uiStyle="settings-dialog-this"] QLabel[objectName="pageTitle"] {
+    color: #1f2329;
+}
+
+QLabel[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="sectionTitle"],
+[uiStyle="settings-dialog-this"] QLabel[objectName="sectionTitle"] {
+    color: #1f2329;
+}
+
+QLabel[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="hintLabel"],
+[uiStyle="settings-dialog-this"] QLabel[objectName="hintLabel"] {
+    color: #8f959e;
+    font-size: 12px;
+}
+
+QComboBox[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"],
+[uiStyle="settings-dialog-this"] QComboBox {
+    min-height: 34px;
+    border: 1px solid #dcdfe6;
+    border-radius: 5px;
+    background: #ffffff;
+    padding: 0 36px 0 10px;
+}
+
+QComboBox[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"]:hover,
+[uiStyle="settings-dialog-this"] QComboBox:hover,
+QComboBox[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"]:focus,
+[uiStyle="settings-dialog-this"] QComboBox:focus {
+    border-color: #1677ff;
+}
+
+QComboBox[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"]:disabled,
+[uiStyle="settings-dialog-this"] QComboBox:disabled {
+    background: #f5f6f7;
+    color: #a8abb2;
+}
+
+QCheckBox[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"],
+[uiStyle="settings-dialog-this"] QCheckBox,
+QRadioButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"],
+[uiStyle="settings-dialog-this"] QRadioButton {
+    spacing: 8px;
+    min-height: 26px;
+}
+
+QCheckBox[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"]::indicator,
+[uiStyle="settings-dialog-this"] QCheckBox::indicator,
+QRadioButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"]::indicator,
+[uiStyle="settings-dialog-this"] QRadioButton::indicator {
+    width: 16px;
+    height: 16px;
+}
+
+QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="secondaryButton"],
+[uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"] {
+    min-height: 34px;
+    padding: 0 16px;
+    border: 1px solid #dcdfe6;
+    border-radius: 5px;
+    background: #ffffff;
+    color: #303133;
+}
+
+QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="secondaryButton"]:hover,
+[uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"]:hover {
+    border-color: #1677ff;
+    color: #1677ff;
+}
+
+QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="secondaryButton"]:pressed,
+[uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"]:pressed {
+    background: #eef5ff;
+}
+
+QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="secondaryButton"]:disabled,
+[uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"]:disabled {
+    color: #a8abb2;
+    background: #f5f6f7;
+}
+
+QFrame[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="previewHost"],
+[uiStyle="settings-dialog-this"] QFrame[objectName="previewHost"] {
+    background: #172033;
+    border: 1px solid #26334d;
+    border-radius: 7px;
+}
+
+QLabel[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="previewMessage"],
+[uiStyle="settings-dialog-this"] QLabel[objectName="previewMessage"] {
+    color: #c8d1df;
+    font-size: 14px;
+}
+
+QProgressBar[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"],
+[uiStyle="settings-dialog-this"] QProgressBar {
+    min-height: 8px;
+    max-height: 8px;
+    border: none;
+    border-radius: 4px;
+    background: #e9edf2;
+}
+
+QProgressBar[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"]::chunk,
+[uiStyle="settings-dialog-this"] QProgressBar::chunk {
+    border-radius: 4px;
+    background: #20b26b;
+}
+
+[uiStyle="settings-dialog-audiostatus"][uiStyle="settings-dialog-audiostatus"][uiStyle="settings-dialog-audiostatus"],
+[uiStyle="settings-dialog-audiostatus"] * {
+    color: #f53f3f;
+}
+
+[uiStyle="settings-dialog-audiostatus-2-active"][uiStyle="settings-dialog-audiostatus-2-active"][uiStyle="settings-dialog-audiostatus-2-active"],
+[uiStyle="settings-dialog-audiostatus-2-active"] * {
+    color: #20a162;
+}
+
+[uiStyle="settings-dialog-audiostatus-2-normal"][uiStyle="settings-dialog-audiostatus-2-normal"][uiStyle="settings-dialog-audiostatus-2-normal"],
+[uiStyle="settings-dialog-audiostatus-2-normal"] * {
+    color: #f53f3f;
+}
+
+[uiStyle="settings-dialog-audiostatus-3"][uiStyle="settings-dialog-audiostatus-3"][uiStyle="settings-dialog-audiostatus-3"],
+[uiStyle="settings-dialog-audiostatus-3"] * {
+    color: #f53f3f;
+}
+
+[uiStyle="settings-dialog-previewmessage-active"][uiStyle="settings-dialog-previewmessage-active"][uiStyle="settings-dialog-previewmessage-active"],
+[uiStyle="settings-dialog-previewmessage-active"] * {
+    color: #ff7875;
+}

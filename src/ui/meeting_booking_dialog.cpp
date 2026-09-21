@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/ui/meeting_booking_dialog.h"
 
 #include "src/core/meeting_catalog_controller.h"
@@ -35,8 +36,8 @@ void addTimeZone(QComboBox *combo, const QString &id) {
 }
 
 QString saveFailureText(const OpenMeeting::HttpError &error) {
-	if (error.code == 0) return QString::fromUtf8("保存失败，请稍后重试。");
-	return QString::fromUtf8("保存失败。网络中断时结果可能未知，请刷新会议列表确认后再操作。");
+	if (error.code == 0) return QCoreApplication::translate("MeetingUI", "Unable to save. Please try again later.");
+	return QCoreApplication::translate("MeetingUI", "Unable to save. A network interruption may leave the result unknown. Refresh the meeting list before trying again.");
 }
 
 OpenMeeting::MeetingRepeatType selectedRepeatType(const QComboBox *combo) {
@@ -45,11 +46,11 @@ OpenMeeting::MeetingRepeatType selectedRepeatType(const QComboBox *combo) {
 
 QString readOnlyRepeatName(const OpenMeeting::MeetingRepeatRule &rule) {
 	if (rule.type == OpenMeeting::MeetingRepeatType::Custom) {
-		return QString::fromUtf8("自定义重复（只读）");
+		return QCoreApplication::translate("MeetingUI", "Custom Recurrence (Read-Only)");
 	}
 	return rule.rawType.trimmed().isEmpty()
-		? QString::fromUtf8("未知重复规则（只读）")
-		: QString::fromUtf8("%1（只读）").arg(rule.rawType);
+		? QCoreApplication::translate("MeetingUI", "Unknown Recurrence (Read-Only)")
+		: QCoreApplication::translate("MeetingUI", "%1 (Read-Only)").arg(rule.rawType);
 }
 
 } // namespace
@@ -63,6 +64,7 @@ MeetingBookingDialog::MeetingBookingDialog(
 	, _session(session) {
 	initUi();
 	populateCreateDefaults();
+	AppTheme::makeDialogAdaptive(*this, QSize(560, 620));
 }
 
 MeetingBookingDialog::MeetingBookingDialog(
@@ -76,31 +78,15 @@ MeetingBookingDialog::MeetingBookingDialog(
 	, _original(detail) {
 	initUi();
 	populateEditValues();
+	AppTheme::makeDialogAdaptive(*this, QSize(560, 620));
 }
 
 void MeetingBookingDialog::initUi() {
-	setWindowTitle(_original ? QString::fromUtf8("编辑会议") : QString::fromUtf8("预定会议"));
+	setWindowTitle(_original ? QCoreApplication::translate("MeetingUI", "Edit Meeting") : QCoreApplication::translate("MeetingUI", "Schedule Meeting"));
 	setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 	setModal(true);
 	setMinimumWidth(500);
-	setStyleSheet(R"(
-		QDialog { background: #ffffff; }
-		QLabel { color: #303133; font-size: 13px; }
-		QLineEdit, QDateEdit, QDateTimeEdit, QSpinBox, QComboBox {
-			min-height: 34px; border: 1px solid #dcdfe6; border-radius: 6px;
-			background: #ffffff;
-		}
-		QLineEdit { padding: 0 9px; }
-		QDateEdit, QDateTimeEdit, QSpinBox, QComboBox { padding: 0 36px 0 9px; }
-		QLineEdit:focus, QDateEdit:focus, QDateTimeEdit:focus, QSpinBox:focus, QComboBox:focus {
-			border-color: #1677ff;
-		}
-		QPushButton { min-height: 34px; padding: 0 18px; border-radius: 6px; }
-		QPushButton#primary { background: #1677ff; color: white; border: none; }
-		QPushButton#primary:hover { background: #4096ff; }
-		QPushButton#primary:disabled { background: #b7d6ff; }
-		QPushButton#secondary { background: #f2f3f5; color: #4e5969; border: none; }
-	)");
+	MeetingUI::AppTheme::setStyleVariant(*this, "meeting-booking-dialog-this");
 	AppTheme::setTone(*this, AppTheme::Tone::Light);
 	AppTheme::styleChoiceControls(*this, AppTheme::Tone::Light);
 
@@ -109,7 +95,7 @@ void MeetingBookingDialog::initUi() {
 	root->setSpacing(16);
 
 	auto *title = new QLabel(
-		_original ? QString::fromUtf8("编辑会议安排") : QString::fromUtf8("创建会议安排"), this);
+		_original ? QCoreApplication::translate("MeetingUI", "Edit Meeting Schedule") : QCoreApplication::translate("MeetingUI", "Schedule a Meeting"), this);
 	auto titleFont = title->font();
 	titleFont.setPixelSize(20);
 	titleFont.setBold(true);
@@ -123,20 +109,20 @@ void MeetingBookingDialog::initUi() {
 
 	_titleEdit = new QLineEdit(this);
 	_titleEdit->setMaxLength(128);
-	_titleEdit->setPlaceholderText(QString::fromUtf8("请输入会议主题"));
-	form->addRow(QString::fromUtf8("会议主题"), _titleEdit);
+	_titleEdit->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Enter a meeting title"));
+	form->addRow(QCoreApplication::translate("MeetingUI", "Meeting Title"), _titleEdit);
 
 	_startEdit = new QDateTimeEdit(this);
 	_startEdit->setCalendarPopup(true);
 	_startEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm"));
 	_startEdit->setMinimumDate(QDate(2000, 1, 1));
 	_startEdit->setMaximumDate(QDate(2100, 12, 31));
-	form->addRow(QString::fromUtf8("开始时间"), _startEdit);
+	form->addRow(QCoreApplication::translate("MeetingUI", "Start Time"), _startEdit);
 
 	_durationEdit = new QSpinBox(this);
 	_durationEdit->setRange(1, 7 * 24 * 60);
-	_durationEdit->setSuffix(QString::fromUtf8(" 分钟"));
-	form->addRow(QString::fromUtf8("计划时长"), _durationEdit);
+	_durationEdit->setSuffix(QCoreApplication::translate("MeetingUI", " min"));
+	form->addRow(QCoreApplication::translate("MeetingUI", "Duration"), _durationEdit);
 
 	_timeZoneEdit = new QComboBox(this);
 	_timeZoneEdit->setEditable(true);
@@ -146,26 +132,26 @@ void MeetingBookingDialog::initUi() {
 	addTimeZone(_timeZoneEdit, QStringLiteral("UTC"));
 	addTimeZone(_timeZoneEdit, QStringLiteral("America/New_York"));
 	addTimeZone(_timeZoneEdit, QStringLiteral("Europe/London"));
-	form->addRow(QString::fromUtf8("预约时区"), _timeZoneEdit);
+	form->addRow(QCoreApplication::translate("MeetingUI", "Time Zone"), _timeZoneEdit);
 
 	_repeatTypeEdit = new QComboBox(this);
-	_repeatTypeEdit->addItem(QString::fromUtf8("不重复"),
+	_repeatTypeEdit->addItem(QCoreApplication::translate("MeetingUI", "Does Not Repeat"),
 		static_cast<int>(OpenMeeting::MeetingRepeatType::None));
-	_repeatTypeEdit->addItem(QString::fromUtf8("每天"),
+	_repeatTypeEdit->addItem(QCoreApplication::translate("MeetingUI", "Daily"),
 		static_cast<int>(OpenMeeting::MeetingRepeatType::Daily));
-	_repeatTypeEdit->addItem(QString::fromUtf8("每周"),
+	_repeatTypeEdit->addItem(QCoreApplication::translate("MeetingUI", "Weekly"),
 		static_cast<int>(OpenMeeting::MeetingRepeatType::Weekly));
-	_repeatTypeEdit->addItem(QString::fromUtf8("工作日"),
+	_repeatTypeEdit->addItem(QCoreApplication::translate("MeetingUI", "Weekdays"),
 		static_cast<int>(OpenMeeting::MeetingRepeatType::WeekDay));
-	_repeatTypeEdit->addItem(QString::fromUtf8("每月"),
+	_repeatTypeEdit->addItem(QCoreApplication::translate("MeetingUI", "Monthly"),
 		static_cast<int>(OpenMeeting::MeetingRepeatType::Monthly));
-	form->addRow(QString::fromUtf8("重复规则"), _repeatTypeEdit);
+	form->addRow(QCoreApplication::translate("MeetingUI", "Recurrence"), _repeatTypeEdit);
 
 	auto *repeatEndRow = new QWidget(this);
 	auto *repeatEndLayout = new QHBoxLayout(repeatEndRow);
 	repeatEndLayout->setContentsMargins(0, 0, 0, 0);
 	repeatEndLayout->setSpacing(10);
-	_repeatEndEnabled = new QCheckBox(QString::fromUtf8("设置结束日期"), repeatEndRow);
+	_repeatEndEnabled = new QCheckBox(QCoreApplication::translate("MeetingUI", "Set an end date"), repeatEndRow);
 	_repeatEndEdit = new QDateEdit(repeatEndRow);
 	_repeatEndEdit->setCalendarPopup(true);
 	_repeatEndEdit->setDisplayFormat(QStringLiteral("yyyy-MM-dd"));
@@ -173,32 +159,32 @@ void MeetingBookingDialog::initUi() {
 	_repeatEndEdit->setMaximumDate(QDate(2100, 12, 31));
 	repeatEndLayout->addWidget(_repeatEndEnabled);
 	repeatEndLayout->addWidget(_repeatEndEdit, 1);
-	form->addRow(QString::fromUtf8("重复结束"), repeatEndRow);
+	form->addRow(QCoreApplication::translate("MeetingUI", "Repeat Until"), repeatEndRow);
 
 	_passwordEdit = new QLineEdit(this);
 	_passwordEdit->setEchoMode(QLineEdit::Password);
-	_passwordEdit->setPlaceholderText(QString::fromUtf8("选填；清空后保存可移除密码"));
-	form->addRow(QString::fromUtf8("入会密码"), _passwordEdit);
+	_passwordEdit->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Optional; clear this field to remove the password"));
+	form->addRow(QCoreApplication::translate("MeetingUI", "Meeting Password"), _passwordEdit);
 	root->addLayout(form);
 
-	_cameraOnJoin = new QCheckBox(QString::fromUtf8("入会时默认开启摄像头"), this);
-	_microphoneOnJoin = new QCheckBox(QString::fromUtf8("入会时默认开启麦克风"), this);
+	_cameraOnJoin = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable camera on joining"), this);
+	_microphoneOnJoin = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable microphone on joining"), this);
 	root->addWidget(_cameraOnJoin);
 	root->addWidget(_microphoneOnJoin);
 
 	_statusLabel = new QLabel(this);
 	_statusLabel->setWordWrap(true);
 	_statusLabel->setTextFormat(Qt::PlainText);
-	_statusLabel->setStyleSheet(QStringLiteral("color: #d4380d;"));
+	MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-booking-dialog-statuslabel");
 	_statusLabel->hide();
 	root->addWidget(_statusLabel);
 
 	auto *buttons = new QHBoxLayout();
 	buttons->addStretch();
-	_cancelButton = new QPushButton(QString::fromUtf8("取消"), this);
+	_cancelButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Cancel"), this);
 	_cancelButton->setObjectName(QStringLiteral("secondary"));
 	_submitButton = new QPushButton(
-		_original ? QString::fromUtf8("保存修改") : QString::fromUtf8("创建会议"), this);
+		_original ? QCoreApplication::translate("MeetingUI", "Save Changes") : QCoreApplication::translate("MeetingUI", "Create Meeting"), this);
 	_submitButton->setObjectName(QStringLiteral("primary"));
 	buttons->addWidget(_cancelButton);
 	buttons->addWidget(_submitButton);
@@ -224,8 +210,8 @@ void MeetingBookingDialog::initUi() {
 void MeetingBookingDialog::populateCreateDefaults() {
 	const auto nickname = _session.nickname().trimmed();
 	_titleEdit->setText(nickname.isEmpty()
-		? QString::fromUtf8("我的会议")
-		: QString::fromUtf8("%1的会议").arg(nickname));
+		? QCoreApplication::translate("MeetingUI", "My Meeting")
+		: QCoreApplication::translate("MeetingUI", "%1's Meeting").arg(nickname));
 	const auto timeZoneId = systemTimeZoneId();
 	_timeZoneEdit->setCurrentText(timeZoneId);
 	_initialTimeZoneText = timeZoneId;
@@ -280,7 +266,7 @@ bool MeetingBookingDialog::collectCommon(
 		QString *timeZoneId) {
 	const auto title = _titleEdit->text().trimmed();
 	if (title.isEmpty()) {
-		showError(QString::fromUtf8("请输入会议主题。"));
+		showError(QCoreApplication::translate("MeetingUI", "Enter a meeting title."));
 		_titleEdit->setFocus();
 		return false;
 	}
@@ -288,7 +274,7 @@ bool MeetingBookingDialog::collectCommon(
 	*timeZoneId = _timeZoneEdit->currentText().trimmed();
 	const QTimeZone timeZone(timeZoneId->toUtf8());
 	if (!timeZone.isValid()) {
-		showError(QString::fromUtf8("请选择有效的 IANA 时区。"));
+		showError(QCoreApplication::translate("MeetingUI", "Select a valid IANA time zone."));
 		_timeZoneEdit->setFocus();
 		return false;
 	}
@@ -297,7 +283,7 @@ bool MeetingBookingDialog::collectCommon(
 	const auto requestedTime = _startEdit->time();
 	const QDateTime scheduled(requestedDate, requestedTime, timeZone);
 	if (!scheduled.isValid() || scheduled.date() != requestedDate || scheduled.time() != requestedTime) {
-		showError(QString::fromUtf8("所选时间在该时区中无效，请重新选择。"));
+		showError(QCoreApplication::translate("MeetingUI", "The selected time is invalid in this time zone. Choose another time."));
 		_startEdit->setFocus();
 		return false;
 	}
@@ -307,7 +293,7 @@ bool MeetingBookingDialog::collectCommon(
 	const bool startChanged = !_original ||
 		*scheduledTimeSeconds != _original->record.scheduledTimeSeconds;
 	if (startChanged && *scheduledTimeSeconds <= QDateTime::currentSecsSinceEpoch()) {
-		showError(QString::fromUtf8("开始时间必须晚于当前时间。"));
+		showError(QCoreApplication::translate("MeetingUI", "The start time must be in the future."));
 		_startEdit->setFocus();
 		return false;
 	}
@@ -323,7 +309,7 @@ bool MeetingBookingDialog::collectRepeatRule(
 	repeatRule->type = selectedRepeatType(_repeatTypeEdit);
 	repeatRule->rawType = OpenMeeting::meetingRepeatTypeToWire(repeatRule->type);
 	if (!OpenMeeting::isMeetingRepeatTypeSupportedForCreate(repeatRule->type)) {
-		showError(QString::fromUtf8("该重复规则仅支持查看，不能用于新预约。"));
+		showError(QCoreApplication::translate("MeetingUI", "This recurrence is read-only and cannot be used for a new meeting."));
 		_repeatTypeEdit->setFocus();
 		return false;
 	}
@@ -334,12 +320,12 @@ bool MeetingBookingDialog::collectRepeatRule(
 		const auto requestedDate = _repeatEndEdit->date();
 		const QDateTime end(requestedDate, start.time(), timeZone);
 		if (!end.isValid() || end.date() != requestedDate || end.time() != start.time()) {
-			showError(QString::fromUtf8("重复结束时间在所选时区中无效，请更换结束日期。"));
+			showError(QCoreApplication::translate("MeetingUI", "The recurrence end time is invalid in the selected time zone. Choose another end date."));
 			_repeatEndEdit->setFocus();
 			return false;
 		}
 		if (end < start) {
-			showError(QString::fromUtf8("重复结束日期不能早于首次预约日期。"));
+			showError(QCoreApplication::translate("MeetingUI", "The recurrence end date cannot precede the first meeting."));
 			_repeatEndEdit->setFocus();
 			return false;
 		}
@@ -347,7 +333,7 @@ bool MeetingBookingDialog::collectRepeatRule(
 	}
 	QString validationMessage;
 	if (!OpenMeeting::isMeetingRepeatRuleSupportedForWrite(*repeatRule, &validationMessage)) {
-		showError(QString::fromUtf8("重复规则无效，请重新选择。"));
+		showError(QCoreApplication::translate("MeetingUI", "Invalid recurrence. Please choose another option."));
 		return false;
 	}
 	return true;
@@ -378,7 +364,7 @@ std::optional<OpenMeeting::MeetingUpdateRequest> MeetingBookingDialog::updateReq
 	if (!_original) return std::nullopt;
 	const auto &record = _original->record;
 	if (record.repeatRule.type != OpenMeeting::MeetingRepeatType::None) {
-		if (message) *message = QString::fromUtf8("重复会议当前仅支持查看。请等待服务端规则验证完成后再编辑。");
+		if (message) *message = QCoreApplication::translate("MeetingUI", "Recurring meetings are currently read-only. Editing will be available after server rule validation is complete.");
 		return std::nullopt;
 	}
 
@@ -405,7 +391,7 @@ std::optional<OpenMeeting::MeetingUpdateRequest> MeetingBookingDialog::updateReq
 
 	QString validationMessage;
 	if (!OpenMeeting::validateMeetingUpdateRequest(request, &validationMessage)) {
-		if (message) *message = QString::fromUtf8("没有需要保存的修改。");
+		if (message) *message = QCoreApplication::translate("MeetingUI", "No changes to save.");
 		return std::nullopt;
 	}
 	return request;
@@ -478,11 +464,11 @@ void MeetingBookingDialog::setBusy(bool busy) {
 	_microphoneOnJoin->setEnabled(!busy);
 	_submitButton->setEnabled(!busy);
 	_submitButton->setText(busy
-		? QString::fromUtf8("正在保存...")
-		: (_original ? QString::fromUtf8("保存修改") : QString::fromUtf8("创建会议")));
+		? QCoreApplication::translate("MeetingUI", "Saving...")
+		: (_original ? QCoreApplication::translate("MeetingUI", "Save Changes") : QCoreApplication::translate("MeetingUI", "Create Meeting")));
 	if (busy) {
-		_statusLabel->setStyleSheet(QStringLiteral("color: #1677ff;"));
-		_statusLabel->setText(QString::fromUtf8("正在保存会议安排..."));
+		MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-booking-dialog-statuslabel-2");
+		_statusLabel->setText(QCoreApplication::translate("MeetingUI", "Saving meeting schedule..."));
 		_statusLabel->show();
 	}
 }
@@ -498,7 +484,7 @@ void MeetingBookingDialog::updateRepeatControls() {
 }
 
 void MeetingBookingDialog::showError(const QString &message) {
-	_statusLabel->setStyleSheet(QStringLiteral("color: #d4380d;"));
+	MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-booking-dialog-statuslabel-3");
 	_statusLabel->setText(message);
 	_statusLabel->setVisible(!message.isEmpty());
 }

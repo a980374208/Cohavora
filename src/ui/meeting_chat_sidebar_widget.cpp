@@ -1,3 +1,5 @@
+#include <QtCore/QLocale>
+#include <QtCore/QCoreApplication>
 #include "src/ui/meeting_chat_sidebar_widget.h"
 #include "src/ui/app_theme.h"
 #include <QtWidgets/QScrollBar>
@@ -22,22 +24,10 @@ namespace OpenMeeting {
 // ----------------------------------------------------
 ChatInputEdit::ChatInputEdit(QWidget *parent)
     : QPlainTextEdit(parent) {
-    setPlaceholderText(QString::fromUtf8("发送消息... (Enter 发送, Shift+Enter 换行, Ctrl+V 粘贴截图)"));
-    setFixedHeight(48);
-    setStyleSheet(
-        "QPlainTextEdit {"
-        "  background-color: #242831;"
-        "  border: 1px solid #363C4A;"
-        "  border-radius: 6px;"
-        "  color: #F3F4F6;"
-        "  padding: 6px 8px;"
-        "  font-size: 13px;"
-        "  font-family: \"Microsoft YaHei\", sans-serif;"
-        "}"
-        "QPlainTextEdit:focus {"
-        "  border: 1px solid #3B82F6;"
-        "}"
-    );
+    setPlaceholderText(QCoreApplication::translate("MeetingUI", "Type a message... (Enter to send, Shift+Enter for a new line, Ctrl+V to paste an image)"));
+    setMinimumHeight(64);
+    setMaximumHeight(120);
+    MeetingUI::AppTheme::setStyleVariant(*this, "meeting-chat-sidebar-widget-this");
 }
 
 void ChatInputEdit::keyPressEvent(QKeyEvent *e) {
@@ -76,11 +66,11 @@ ChatBubbleWidget::ChatBubbleWidget(const ChatMessageItem &msg, QWidget *parent)
 }
 
 QString ChatBubbleWidget::formatFileSize(qint64 bytes) {
-    if (bytes < 1024) return QString::number(bytes) + " B";
+    if (bytes < 1024) return QCoreApplication::translate("MeetingUI", "%1 B").arg(QLocale().toString(bytes));
     double kb = bytes / 1024.0;
-    if (kb < 1024.0) return QString::number(kb, 'f', 1) + " KB";
+    if (kb < 1024.0) return QCoreApplication::translate("MeetingUI", "%1 KB").arg(QLocale().toString(kb, 'f', 1));
     double mb = kb / 1024.0;
-    return QString::number(mb, 'f', 1) + " MB";
+    return QCoreApplication::translate("MeetingUI", "%1 MB").arg(QLocale().toString(mb, 'f', 1));
 }
 
 QColor ChatBubbleWidget::avatarColor(const QString &seed) {
@@ -98,17 +88,17 @@ void ChatBubbleWidget::showImagePreview(const QImage &img, const QString &title)
 
     auto *dlg = new QDialog();
 	MeetingUI::AppTheme::setTone(*dlg, MeetingUI::AppTheme::Tone::Dark);
-    dlg->setWindowTitle(title.isEmpty() ? QString::fromUtf8("图片预览") : title);
+    dlg->setWindowTitle(title.isEmpty() ? QCoreApplication::translate("MeetingUI", "Image Preview") : title);
     dlg->resize(std::min(1000, std::max(400, img.width() + 40)),
                 std::min(800, std::max(300, img.height() + 80)));
-    dlg->setStyleSheet("background-color: #12141A; color: #FFFFFF; font-family: \"Microsoft YaHei\";");
+    MeetingUI::AppTheme::setStyleVariant(*dlg, "meeting-chat-sidebar-widget-dlg");
 
     auto *layout = new QVBoxLayout(dlg);
     layout->setContentsMargins(16, 16, 16, 16);
     layout->setSpacing(12);
 
     auto *scroll = new QScrollArea(dlg);
-    scroll->setStyleSheet("background-color: transparent; border: none;");
+    MeetingUI::AppTheme::setStyleVariant(*scroll, "meeting-chat-sidebar-widget-scroll");
     scroll->setAlignment(Qt::AlignCenter);
 
     auto *imgLabel = new QLabel(scroll);
@@ -119,46 +109,27 @@ void ChatBubbleWidget::showImagePreview(const QImage &img, const QString &title)
     auto *bottomRow = new QHBoxLayout();
     bottomRow->addStretch();
 
-    auto *saveBtn = new QPushButton(QString::fromUtf8("另存为..."), dlg);
-    saveBtn->setStyleSheet(
-        "QPushButton {"
-        "  background-color: #2563EB;"
-        "  color: #FFFFFF;"
-        "  border: none;"
-        "  border-radius: 4px;"
-        "  padding: 6px 18px;"
-        "  font-size: 12px;"
-        "}"
-        "QPushButton:hover { background-color: #1D4ED8; }"
-    );
+    auto *saveBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Save As..."), dlg);
+    MeetingUI::AppTheme::setStyleVariant(*saveBtn, "meeting-chat-sidebar-widget-savebtn");
     QObject::connect(saveBtn, &QPushButton::clicked, [dlg, img, title]() {
         QString defaultName = title.isEmpty() ? "image.png" : title;
-        QString savePath = QFileDialog::getSaveFileName(dlg, QString::fromUtf8("保存图片"), defaultName,
-                                                        "PNG 图片 (*.png);;JPEG 图片 (*.jpg *.jpeg);;所有文件 (*.*)");
+        QString savePath = QFileDialog::getSaveFileName(dlg, QCoreApplication::translate("MeetingUI", "Save Image"), defaultName,
+                                                        QCoreApplication::translate("MeetingUI", "PNG Images (*.png);;JPEG Images (*.jpg *.jpeg);;All Files (*.*)"), nullptr, QFileDialog::DontUseNativeDialog);
         if (!savePath.isEmpty()) {
             img.save(savePath);
-            QMessageBox::information(dlg, QString::fromUtf8("保存成功"), QString::fromUtf8("图片已成功保存到:\n%1").arg(savePath));
+            QMessageBox::information(dlg, QCoreApplication::translate("MeetingUI", "Saved"), QCoreApplication::translate("MeetingUI", "Image saved to:\n%1").arg(savePath));
         }
     });
     bottomRow->addWidget(saveBtn);
 
-    auto *closeBtn = new QPushButton(QString::fromUtf8("关闭"), dlg);
-    closeBtn->setStyleSheet(
-        "QPushButton {"
-        "  background-color: #374151;"
-        "  color: #E5E7EB;"
-        "  border: none;"
-        "  border-radius: 4px;"
-        "  padding: 6px 18px;"
-        "  font-size: 12px;"
-        "}"
-        "QPushButton:hover { background-color: #4B5563; }"
-    );
+    auto *closeBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Close"), dlg);
+    MeetingUI::AppTheme::setStyleVariant(*closeBtn, "meeting-chat-sidebar-widget-closebtn");
     QObject::connect(closeBtn, &QPushButton::clicked, dlg, &QDialog::accept);
     bottomRow->addWidget(closeBtn);
 
     layout->addLayout(bottomRow);
 
+    MeetingUI::AppTheme::makeDialogAdaptive(*dlg, dlg->size());
     dlg->setAttribute(Qt::WA_DeleteOnClose);
     dlg->show();
 }
@@ -197,12 +168,9 @@ void ChatBubbleWidget::setupUi(const ChatMessageItem &msg) {
         bottomRow->setSpacing(4);
         bottomRow->addStretch();
 
-        _retryBtn = new QPushButton(QString::fromUtf8("重试"), this);
+        _retryBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Retry"), this);
         _retryBtn->setCursor(Qt::PointingHandCursor);
-        _retryBtn->setStyleSheet(
-            "QPushButton { background: transparent; color: #EF4444; border: none; font-size: 10px; font-weight: bold; padding: 0px 2px; }"
-            "QPushButton:hover { text-decoration: underline; color: #F87171; }"
-        );
+        MeetingUI::AppTheme::setStyleVariant(*_retryBtn, "meeting-chat-sidebar-widget-retrybtn");
         _retryBtn->hide();
         connect(_retryBtn, &QPushButton::clicked, this, [this]() {
             emit retryClicked(_msg.id);
@@ -210,11 +178,11 @@ void ChatBubbleWidget::setupUi(const ChatMessageItem &msg) {
         bottomRow->addWidget(_retryBtn);
 
         auto *timeLabel = new QLabel(timeStr, this);
-        timeLabel->setStyleSheet("color: #6B7280; font-size: 10px; font-family: \"Microsoft YaHei\";");
+        MeetingUI::AppTheme::setStyleVariant(*timeLabel, "meeting-chat-sidebar-widget-timelabel");
         bottomRow->addWidget(timeLabel);
 
         _statusLabel = new QLabel(this);
-        _statusLabel->setStyleSheet("font-size: 11px; font-family: \"Microsoft YaHei\";");
+        MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-chat-sidebar-widget-statuslabel");
         bottomRow->addWidget(_statusLabel);
 
         contentCol->addLayout(bottomRow);
@@ -257,11 +225,12 @@ void ChatBubbleWidget::setupUi(const ChatMessageItem &msg) {
         metaLayout->setSpacing(6);
 
         auto *nameLabel = new QLabel(msg.senderName.isEmpty() ? msg.senderIdentity : msg.senderName, this);
-        nameLabel->setStyleSheet("color: #9CA3AF; font-size: 11px; font-weight: 500; font-family: \"Microsoft YaHei\";");
+        nameLabel->setWordWrap(true);
+        MeetingUI::AppTheme::setStyleVariant(*nameLabel, "meeting-chat-sidebar-widget-namelabel");
         metaLayout->addWidget(nameLabel);
 
         auto *timeLabel = new QLabel(timeStr, this);
-        timeLabel->setStyleSheet("color: #6B7280; font-size: 10px; font-family: \"Microsoft YaHei\";");
+        MeetingUI::AppTheme::setStyleVariant(*timeLabel, "meeting-chat-sidebar-widget-timelabel-2");
         metaLayout->addWidget(timeLabel);
         metaLayout->addStretch();
         contentCol->addLayout(metaLayout);
@@ -282,11 +251,7 @@ void ChatBubbleWidget::setupUi(const ChatMessageItem &msg) {
 void ChatBubbleWidget::setupTextBubble(QVBoxLayout *col, const ChatMessageItem &msg) {
     auto *bubble = new QWidget(this);
     bubble->setObjectName(msg.isMine ? "MyTextBubble" : "OtherTextBubble");
-    bubble->setStyleSheet(
-        msg.isMine
-        ? "QWidget#MyTextBubble { background-color: #2563EB; border-radius: 8px; }"
-        : "QWidget#OtherTextBubble { background-color: #242831; border: 1px solid #363C4A; border-radius: 8px; }"
-    );
+    MeetingUI::AppTheme::setStyleVariant(*bubble, msg.isMine ? "meeting-chat-sidebar-widget-bubble-active" : "meeting-chat-sidebar-widget-bubble-normal");
 
     auto *bubbleLayout = new QVBoxLayout(bubble);
     bubbleLayout->setContentsMargins(10, 8, 10, 8);
@@ -295,11 +260,7 @@ void ChatBubbleWidget::setupTextBubble(QVBoxLayout *col, const ChatMessageItem &
     auto *textLabel = new QLabel(msg.text, bubble);
     textLabel->setWordWrap(true);
     textLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    textLabel->setStyleSheet(
-        msg.isMine
-        ? "color: #FFFFFF; font-size: 13px; font-family: \"Microsoft YaHei\"; line-height: 1.4;"
-        : "color: #F3F4F6; font-size: 13px; font-family: \"Microsoft YaHei\"; line-height: 1.4;"
-    );
+    MeetingUI::AppTheme::setStyleVariant(*textLabel, msg.isMine ? "meeting-chat-sidebar-widget-textlabel-active" : "meeting-chat-sidebar-widget-textlabel-normal");
     textLabel->setMaximumWidth(230);
 
     bubbleLayout->addWidget(textLabel);
@@ -331,9 +292,7 @@ void ChatBubbleWidget::setupImageBubble(QVBoxLayout *col, const ChatMessageItem 
     _thumbLabel->setAlignment(Qt::AlignCenter);
 
     if (msg.status == MessageSendStatus::Receiving) {
-        _imgContainer->setStyleSheet(
-            "QWidget#OtherImgContainer { background-color: #1F242D; border: 1px dashed #3B4252; border-radius: 8px; padding: 4px; }"
-        );
+        MeetingUI::AppTheme::setStyleVariant(*_imgContainer, "meeting-chat-sidebar-widget-imgcontainer");
         _thumbLabel->setFixedSize(210, 130);
 
         QPixmap placePix(210, 130);
@@ -349,15 +308,11 @@ void ChatBubbleWidget::setupImageBubble(QVBoxLayout *col, const ChatMessageItem 
             QFont f2("Microsoft YaHei", 10);
             p.setFont(f2);
             p.setPen(QColor(156, 163, 175));
-            p.drawText(QRect(0, 75, 210, 30), Qt::AlignCenter, QString::fromUtf8("正在接收图片..."));
+            p.drawText(QRect(0, 75, 210, 30), Qt::AlignCenter, QCoreApplication::translate("MeetingUI", "Receiving image..."));
         }
         _thumbLabel->setPixmap(placePix);
     } else {
-        _imgContainer->setStyleSheet(
-            msg.isMine
-            ? "QWidget#MyImgContainer { background-color: #1D4ED8; border-radius: 8px; padding: 4px; }"
-            : "QWidget#OtherImgContainer { background-color: #242831; border: 1px solid #363C4A; border-radius: 8px; padding: 4px; }"
-        );
+        MeetingUI::AppTheme::setStyleVariant(*_imgContainer, msg.isMine ? "meeting-chat-sidebar-widget-imgcontainer-2-active" : "meeting-chat-sidebar-widget-imgcontainer-2-normal");
 
         // 缩略图保真等比缩放
         QImage thumb = img.scaled(210, 160, Qt::KeepAspectRatio, Qt::SmoothTransformation);
@@ -377,16 +332,17 @@ void ChatBubbleWidget::setupImageBubble(QVBoxLayout *col, const ChatMessageItem 
 
     if (!msg.fileName.isEmpty()) {
         auto *fnLabel = new QLabel(msg.fileName, _imgContainer);
-        fnLabel->setStyleSheet("color: rgba(255, 255, 255, 0.7); font-size: 11px; font-family: \"Microsoft YaHei\";");
-        fnLabel->setMaximumWidth(210);
+        MeetingUI::AppTheme::setStyleVariant(*fnLabel, "meeting-chat-sidebar-widget-fnlabel");
+        fnLabel->setWordWrap(true);
         imgLayout->addWidget(fnLabel);
     }
 
     if (msg.isMine || msg.status == MessageSendStatus::Receiving) {
         _statusLabel = new QLabel(_imgContainer);
+        _statusLabel->setWordWrap(true);
         if (msg.status == MessageSendStatus::Receiving) {
-            _statusLabel->setText(QString::fromUtf8("📥 接收中 %1%").arg(msg.progress));
-            _statusLabel->setStyleSheet("color: #60A5FA; font-size: 10px; font-family: \"Microsoft YaHei\";");
+            _statusLabel->setText(QCoreApplication::translate("MeetingUI", "📥 Receiving %1%").arg(msg.progress));
+            MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-chat-sidebar-widget-statuslabel-2");
         } else {
             _statusLabel->hide();
         }
@@ -397,10 +353,7 @@ void ChatBubbleWidget::setupImageBubble(QVBoxLayout *col, const ChatMessageItem 
         _progressBar->setTextVisible(false);
         _progressBar->setRange(0, 100);
         _progressBar->setValue(msg.progress);
-        _progressBar->setStyleSheet(
-            "QProgressBar { background-color: rgba(255, 255, 255, 0.2); border: none; border-radius: 1px; }"
-            "QProgressBar::chunk { background-color: #60A5FA; border-radius: 1px; }"
-        );
+        MeetingUI::AppTheme::setStyleVariant(*_progressBar, "meeting-chat-sidebar-widget-progressbar");
         if (msg.status != MessageSendStatus::Sending && msg.status != MessageSendStatus::Receiving) {
             _progressBar->hide();
         }
@@ -411,14 +364,14 @@ void ChatBubbleWidget::setupImageBubble(QVBoxLayout *col, const ChatMessageItem 
 
     // 点击弹出大图预览按钮
     _imgPreviewBtn = new QPushButton(_imgContainer);
-    _imgPreviewBtn->setStyleSheet("background: transparent; border: none;");
+    MeetingUI::AppTheme::setStyleVariant(*_imgPreviewBtn, "meeting-chat-sidebar-widget-imgpreviewbtn");
     _imgPreviewBtn->setGeometry(0, 0, 220, 180);
     _imgPreviewBtn->raise();
 
     if (msg.status == MessageSendStatus::Receiving) {
         _imgPreviewBtn->setEnabled(false);
     } else {
-        QString title = msg.fileName.isEmpty() ? QString::fromUtf8("图片预览") : msg.fileName;
+        QString title = msg.fileName.isEmpty() ? QCoreApplication::translate("MeetingUI", "Image Preview") : msg.fileName;
         connect(_imgPreviewBtn, &QPushButton::clicked, [img, title]() {
             showImagePreview(img, title);
         });
@@ -428,12 +381,8 @@ void ChatBubbleWidget::setupImageBubble(QVBoxLayout *col, const ChatMessageItem 
 void ChatBubbleWidget::setupFileBubble(QVBoxLayout *col, const ChatMessageItem &msg) {
     auto *card = new QWidget(this);
     card->setObjectName(msg.isMine ? "MyFileCard" : "OtherFileCard");
-    card->setFixedWidth(230);
-    card->setStyleSheet(
-        msg.isMine
-        ? "QWidget#MyFileCard { background-color: #2563EB; border-radius: 8px; }"
-        : "QWidget#OtherFileCard { background-color: #242831; border: 1px solid #363C4A; border-radius: 8px; }"
-    );
+    card->setMinimumWidth(210);
+    MeetingUI::AppTheme::setStyleVariant(*card, msg.isMine ? "meeting-chat-sidebar-widget-card-active" : "meeting-chat-sidebar-widget-card-normal");
 
     auto *cardLayout = new QHBoxLayout(card);
     cardLayout->setContentsMargins(10, 8, 10, 8);
@@ -441,7 +390,7 @@ void ChatBubbleWidget::setupFileBubble(QVBoxLayout *col, const ChatMessageItem &
 
     // 文件类型图标
     QString ext = QFileInfo(msg.fileName).suffix().toUpper();
-    if (ext.isEmpty()) ext = "FILE";
+    if (ext.isEmpty()) ext = QCoreApplication::translate("MeetingUI", "FILE");
     QColor iconColor = "#4B5563";
     if (ext == "PDF") iconColor = "#DC2626";
     else if (ext == "DOC" || ext == "DOCX") iconColor = "#2563EB";
@@ -473,22 +422,23 @@ void ChatBubbleWidget::setupFileBubble(QVBoxLayout *col, const ChatMessageItem &
     infoCol->setContentsMargins(0, 0, 0, 0);
     infoCol->setSpacing(2);
 
-    auto *nameLabel = new QLabel(msg.fileName.isEmpty() ? QString::fromUtf8("未命名文件") : msg.fileName, card);
-    nameLabel->setStyleSheet("color: #FFFFFF; font-size: 12px; font-weight: bold; font-family: \"Microsoft YaHei\";");
-    nameLabel->setMaximumWidth(130);
+    auto *nameLabel = new QLabel(msg.fileName.isEmpty() ? QCoreApplication::translate("MeetingUI", "Unnamed File") : msg.fileName, card);
+    MeetingUI::AppTheme::setStyleVariant(*nameLabel, "meeting-chat-sidebar-widget-namelabel-2");
+    nameLabel->setWordWrap(true);
     nameLabel->setToolTip(msg.fileName);
     infoCol->addWidget(nameLabel);
 
     QString sizeStr = formatFileSize(msg.fileSize > 0 ? msg.fileSize : msg.fileData.size());
     auto *sizeLabel = new QLabel(sizeStr, card);
-    sizeLabel->setStyleSheet("color: rgba(255, 255, 255, 0.65); font-size: 10px; font-family: \"Microsoft YaHei\";");
+    MeetingUI::AppTheme::setStyleVariant(*sizeLabel, "meeting-chat-sidebar-widget-sizelabel");
     infoCol->addWidget(sizeLabel);
 
     if (msg.isMine || msg.status == MessageSendStatus::Receiving) {
         _statusLabel = new QLabel(card);
+        _statusLabel->setWordWrap(true);
         if (msg.status == MessageSendStatus::Receiving) {
-            _statusLabel->setText(QString::fromUtf8("📥 接收中 %1%").arg(msg.progress));
-            _statusLabel->setStyleSheet("color: #60A5FA; font-size: 10px; font-family: \"Microsoft YaHei\";");
+            _statusLabel->setText(QCoreApplication::translate("MeetingUI", "📥 Receiving %1%").arg(msg.progress));
+            MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-chat-sidebar-widget-statuslabel-3");
         } else {
             _statusLabel->hide();
         }
@@ -499,10 +449,7 @@ void ChatBubbleWidget::setupFileBubble(QVBoxLayout *col, const ChatMessageItem &
         _progressBar->setTextVisible(false);
         _progressBar->setRange(0, 100);
         _progressBar->setValue(msg.progress);
-        _progressBar->setStyleSheet(
-            "QProgressBar { background-color: rgba(255, 255, 255, 0.2); border: none; border-radius: 1px; }"
-            "QProgressBar::chunk { background-color: #60A5FA; border-radius: 1px; }"
-        );
+        MeetingUI::AppTheme::setStyleVariant(*_progressBar, "meeting-chat-sidebar-widget-progressbar-2");
         if (msg.status != MessageSendStatus::Sending && msg.status != MessageSendStatus::Receiving) {
             _progressBar->hide();
         }
@@ -517,32 +464,13 @@ void ChatBubbleWidget::setupFileBubble(QVBoxLayout *col, const ChatMessageItem &
     _actionBtn->setCursor(Qt::PointingHandCursor);
     if (msg.status == MessageSendStatus::Receiving) {
         _actionBtn->setEnabled(false);
-        _actionBtn->setStyleSheet(
-            "QPushButton {"
-            "  background-color: rgba(255, 255, 255, 0.05);"
-            "  color: #6B7280;"
-            "  border-radius: 14px;"
-            "  border: none;"
-            "  font-size: 12px;"
-            "}"
-        );
+        MeetingUI::AppTheme::setStyleVariant(*_actionBtn, "meeting-chat-sidebar-widget-actionbtn");
         _actionBtn->setText("💾");
-        _actionBtn->setToolTip(QString::fromUtf8("正在接收文件..."));
+        _actionBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Receiving file..."));
     } else {
-        _actionBtn->setStyleSheet(
-            "QPushButton {"
-            "  background-color: rgba(255, 255, 255, 0.15);"
-            "  color: #FFFFFF;"
-            "  border-radius: 14px;"
-            "  border: none;"
-            "  font-size: 12px;"
-            "}"
-            "QPushButton:hover {"
-            "  background-color: rgba(255, 255, 255, 0.3);"
-            "}"
-        );
+        MeetingUI::AppTheme::setStyleVariant(*_actionBtn, "meeting-chat-sidebar-widget-actionbtn-2");
         _actionBtn->setText(msg.isMine && !msg.localFilePath.isEmpty() ? "📂" : "💾");
-        _actionBtn->setToolTip(msg.isMine && !msg.localFilePath.isEmpty() ? QString::fromUtf8("打开文件") : QString::fromUtf8("另存为..."));
+        _actionBtn->setToolTip(msg.isMine && !msg.localFilePath.isEmpty() ? QCoreApplication::translate("MeetingUI", "Open File") : QCoreApplication::translate("MeetingUI", "Save As..."));
     }
 
     connect(_actionBtn, &QPushButton::clicked, [this, card]() {
@@ -553,24 +481,24 @@ void ChatBubbleWidget::setupFileBubble(QVBoxLayout *col, const ChatMessageItem &
         }
         QByteArray data = _msg.fileData;
         if (data.isEmpty()) {
-            QMessageBox::warning(card, QString::fromUtf8("文件不可用"), QString::fromUtf8("该文件未包含本地数据或传输中断。"));
+            QMessageBox::warning(card, QCoreApplication::translate("MeetingUI", "File Unavailable"), QCoreApplication::translate("MeetingUI", "The file has no local data or the transfer was interrupted."));
             return;
         }
         QString fName = _msg.fileName;
-        QString savePath = QFileDialog::getSaveFileName(card, QString::fromUtf8("另存为文件"), fName, "所有文件 (*.*)");
+        QString savePath = QFileDialog::getSaveFileName(card, QCoreApplication::translate("MeetingUI", "Save File As"), fName, QCoreApplication::translate("MeetingUI", "All Files (*.*)"), nullptr, QFileDialog::DontUseNativeDialog);
         if (!savePath.isEmpty()) {
             QFile file(savePath);
             if (file.open(QIODevice::WriteOnly)) {
                 file.write(data);
                 file.close();
-                auto res = QMessageBox::information(card, QString::fromUtf8("保存成功"),
-                                                     QString::fromUtf8("文件已保存至:\n%1\n\n是否立即打开？").arg(savePath),
+                auto res = QMessageBox::information(card, QCoreApplication::translate("MeetingUI", "Saved"),
+                                                     QCoreApplication::translate("MeetingUI", "File saved to:\n%1\n\nOpen it now?").arg(savePath),
                                                      QMessageBox::Yes | QMessageBox::No);
                 if (res == QMessageBox::Yes) {
                     QDesktopServices::openUrl(QUrl::fromLocalFile(savePath));
                 }
             } else {
-                QMessageBox::critical(card, QString::fromUtf8("保存失败"), QString::fromUtf8("无法写入目标路径文件。"));
+                QMessageBox::critical(card, QCoreApplication::translate("MeetingUI", "Save Failed"), QCoreApplication::translate("MeetingUI", "Unable to write to the selected file."));
             }
         }
     });
@@ -589,12 +517,12 @@ void ChatBubbleWidget::updateStatus(MessageSendStatus status, int progress, cons
     if (status == MessageSendStatus::Sending) {
         if (_msg.type == ChatMessageType::Text) {
             _statusLabel->setText(QString::fromUtf8("⏳"));
-            _statusLabel->setStyleSheet("color: #9CA3AF; font-size: 10px;");
+            MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-chat-sidebar-widget-statuslabel-4");
         } else {
             _statusLabel->setText(QString::fromUtf8("⏳ %1%").arg(progress));
-            _statusLabel->setStyleSheet("color: #93C5FD; font-size: 10px; font-weight: 500; font-family: \"Microsoft YaHei\";");
+            MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-chat-sidebar-widget-statuslabel-5");
         }
-        _statusLabel->setToolTip(QString::fromUtf8("正在发送..."));
+        _statusLabel->setToolTip(QCoreApplication::translate("MeetingUI", "Sending..."));
         if (_progressBar) {
             _progressBar->setValue(progress);
             _progressBar->show();
@@ -602,14 +530,14 @@ void ChatBubbleWidget::updateStatus(MessageSendStatus status, int progress, cons
         if (_retryBtn) _retryBtn->hide();
     } else if (status == MessageSendStatus::Sent) {
         _statusLabel->setText(QString::fromUtf8("✓"));
-        _statusLabel->setStyleSheet("color: #60A5FA; font-size: 11px; font-weight: bold; font-family: \"Microsoft YaHei\";");
-        _statusLabel->setToolTip(QString::fromUtf8("已发送"));
+        MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-chat-sidebar-widget-statuslabel-6");
+        _statusLabel->setToolTip(QCoreApplication::translate("MeetingUI", "Sent"));
         if (_progressBar) _progressBar->hide();
         if (_retryBtn) _retryBtn->hide();
     } else if (status == MessageSendStatus::Failed) {
         _statusLabel->setText(QString::fromUtf8("⚠️"));
-        _statusLabel->setStyleSheet("color: #EF4444; font-size: 11px; font-family: \"Microsoft YaHei\";");
-        _statusLabel->setToolTip(errorMessage.isEmpty() ? QString::fromUtf8("发送失败，点击重试") : errorMessage);
+        MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-chat-sidebar-widget-statuslabel-7");
+        _statusLabel->setToolTip(errorMessage.isEmpty() ? QCoreApplication::translate("MeetingUI", "Send failed. Click to retry.") : errorMessage);
         if (_progressBar) _progressBar->hide();
         if (_retryBtn) _retryBtn->show();
     }
@@ -622,8 +550,8 @@ void ChatBubbleWidget::updateReceivingProgress(int progress) {
         _progressBar->show();
     }
     if (_statusLabel) {
-        _statusLabel->setText(QString::fromUtf8("📥 接收中 %1%").arg(progress));
-        _statusLabel->setStyleSheet("color: #60A5FA; font-size: 10px; font-family: \"Microsoft YaHei\";");
+        _statusLabel->setText(QCoreApplication::translate("MeetingUI", "📥 Receiving %1%").arg(progress));
+        MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-chat-sidebar-widget-statuslabel-8");
         _statusLabel->show();
     }
 }
@@ -660,12 +588,12 @@ void ChatBubbleWidget::completeReceivingMedia(const QByteArray &data) {
             _thumbLabel->setFixedSize(roundedThumb.size());
 
             if (_imgContainer) {
-                _imgContainer->setStyleSheet("QWidget#OtherImgContainer { background-color: #242831; border: 1px solid #363C4A; border-radius: 8px; padding: 4px; }");
+                MeetingUI::AppTheme::setStyleVariant(*_imgContainer, "meeting-chat-sidebar-widget-imgcontainer-3");
             }
 
             if (_imgPreviewBtn) {
                 _imgPreviewBtn->setEnabled(true);
-                QString title = _msg.fileName.isEmpty() ? QString::fromUtf8("图片预览") : _msg.fileName;
+                QString title = _msg.fileName.isEmpty() ? QCoreApplication::translate("MeetingUI", "Image Preview") : _msg.fileName;
                 disconnect(_imgPreviewBtn, &QPushButton::clicked, nullptr, nullptr);
                 connect(_imgPreviewBtn, &QPushButton::clicked, [img, title]() {
                     showImagePreview(img, title);
@@ -675,20 +603,9 @@ void ChatBubbleWidget::completeReceivingMedia(const QByteArray &data) {
     } else if (_msg.type == ChatMessageType::File) {
         if (_actionBtn) {
             _actionBtn->setEnabled(true);
-            _actionBtn->setStyleSheet(
-                "QPushButton {"
-                "  background-color: rgba(255, 255, 255, 0.15);"
-                "  color: #FFFFFF;"
-                "  border-radius: 14px;"
-                "  border: none;"
-                "  font-size: 12px;"
-                "}"
-                "QPushButton:hover {"
-                "  background-color: rgba(255, 255, 255, 0.3);"
-                "}"
-            );
+            MeetingUI::AppTheme::setStyleVariant(*_actionBtn, "meeting-chat-sidebar-widget-actionbtn-3");
             _actionBtn->setText("💾");
-            _actionBtn->setToolTip(QString::fromUtf8("另存为..."));
+            _actionBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Save As..."));
         }
     }
 }
@@ -699,8 +616,8 @@ void ChatBubbleWidget::failReceivingMedia(const QString &reason) {
         _progressBar->hide();
     }
     if (_statusLabel) {
-        _statusLabel->setText(QString::fromUtf8("⚠️ %1").arg(reason.isEmpty() ? QString::fromUtf8("接收中断") : reason));
-        _statusLabel->setStyleSheet("color: #EF4444; font-size: 10px; font-weight: bold; font-family: \"Microsoft YaHei\";");
+        _statusLabel->setText(QString::fromUtf8("⚠️ %1").arg(reason.isEmpty() ? QCoreApplication::translate("MeetingUI", "Transfer interrupted") : reason));
+        MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-chat-sidebar-widget-statuslabel-9");
         _statusLabel->show();
     }
 }
@@ -711,39 +628,9 @@ void ChatBubbleWidget::failReceivingMedia(const QString &reason) {
 SendConfirmDialog::SendConfirmDialog(const QStringList &filePaths, QWidget *parent)
     : QDialog(parent) {
 	MeetingUI::AppTheme::setTone(*this, MeetingUI::AppTheme::Tone::Dark);
-    setWindowTitle(QString::fromUtf8("发送确认"));
+    setWindowTitle(QCoreApplication::translate("MeetingUI", "Confirm Send"));
     setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
-    setStyleSheet(
-        "QDialog {"
-        "  background-color: #1A1D24;"
-        "  color: #FFFFFF;"
-        "  font-family: \"Microsoft YaHei\", sans-serif;"
-        "}"
-        "QLabel { color: #E5E7EB; font-family: \"Microsoft YaHei\", sans-serif; }"
-        "QPushButton#CancelBtn {"
-        "  background-color: #374151;"
-        "  color: #E5E7EB;"
-        "  border: 1px solid #4B5563;"
-        "  border-radius: 6px;"
-        "  padding: 6px 18px;"
-        "  font-size: 13px;"
-        "}"
-        "QPushButton#CancelBtn:hover { background-color: #4B5563; }"
-        "QPushButton#SendBtn {"
-        "  background-color: #2563EB;"
-        "  color: #FFFFFF;"
-        "  border: none;"
-        "  border-radius: 6px;"
-        "  padding: 6px 22px;"
-        "  font-size: 13px;"
-        "  font-weight: bold;"
-        "}"
-        "QPushButton#SendBtn:hover { background-color: #1D4ED8; }"
-        "QPushButton#SendBtn:disabled {"
-        "  background-color: #374151;"
-        "  color: #6B7280;"
-        "}"
-    );
+    MeetingUI::AppTheme::setStyleVariant(*this, "meeting-chat-sidebar-widget-this-2");
     setupUi(filePaths);
 }
 
@@ -752,8 +639,8 @@ void SendConfirmDialog::setupUi(const QStringList &filePaths) {
     layout->setContentsMargins(20, 20, 20, 18);
     layout->setSpacing(14);
 
-    auto *titleLabel = new QLabel(QString::fromUtf8("📤 确认发送以下文件到会议聊天？"), this);
-    titleLabel->setStyleSheet("font-size: 15px; font-weight: bold; color: #F9FAFB;");
+    auto *titleLabel = new QLabel(QCoreApplication::translate("MeetingUI", "📤 Send these files to the meeting chat?"), this);
+    MeetingUI::AppTheme::setStyleVariant(*titleLabel, "meeting-chat-sidebar-widget-titlelabel");
     layout->addWidget(titleLabel);
 
     bool hasOversize = false;
@@ -775,7 +662,7 @@ void SendConfirmDialog::setupUi(const QStringList &filePaths) {
             QImage img(path);
             if (!img.isNull()) {
                 auto *imgCard = new QWidget(this);
-                imgCard->setStyleSheet("background-color: #12141A; border: 1px solid #2B303C; border-radius: 8px;");
+                MeetingUI::AppTheme::setStyleVariant(*imgCard, "meeting-chat-sidebar-widget-imgcard");
                 auto *cardLayout = new QVBoxLayout(imgCard);
                 cardLayout->setContentsMargins(12, 12, 12, 12);
                 cardLayout->setSpacing(8);
@@ -795,7 +682,7 @@ void SendConfirmDialog::setupUi(const QStringList &filePaths) {
                     imgCard
                 );
                 infoLabel->setAlignment(Qt::AlignCenter);
-                infoLabel->setStyleSheet("color: #9CA3AF; font-size: 12px; line-height: 1.4;");
+                MeetingUI::AppTheme::setStyleVariant(*infoLabel, "meeting-chat-sidebar-widget-infolabel");
                 cardLayout->addWidget(infoLabel);
 
                 layout->addWidget(imgCard);
@@ -806,33 +693,31 @@ void SendConfirmDialog::setupUi(const QStringList &filePaths) {
 
         if (!isImg) {
             auto *fileCard = new QWidget(this);
-            fileCard->setStyleSheet("background-color: #242831; border: 1px solid #363C4A; border-radius: 8px;");
+            MeetingUI::AppTheme::setStyleVariant(*fileCard, "meeting-chat-sidebar-widget-filecard");
             auto *cardLayout = new QHBoxLayout(fileCard);
             cardLayout->setContentsMargins(14, 14, 14, 14);
             cardLayout->setSpacing(12);
 
-            auto *badge = new QLabel(ext.isEmpty() ? "FILE" : ext.left(4).toUpper(), fileCard);
+            auto *badge = new QLabel(ext.isEmpty() ? QCoreApplication::translate("MeetingUI", "FILE") : ext.left(4).toUpper(), fileCard);
             badge->setFixedSize(44, 44);
             badge->setAlignment(Qt::AlignCenter);
-            QString badgeColor = "#2563EB";
-            if (ext == "pdf") badgeColor = "#DC2626";
-            else if (ext == "zip" || ext == "rar" || ext == "7z") badgeColor = "#D97706";
-            else if (ext == "doc" || ext == "docx") badgeColor = "#2563EB";
-            else if (ext == "xls" || ext == "xlsx") badgeColor = "#059669";
-            else if (ext == "txt" || ext == "log" || ext == "md") badgeColor = "#4B5563";
-            badge->setStyleSheet(QString(
-                "background-color: %1; color: #FFFFFF; font-size: 11px; font-weight: bold; border-radius: 6px;"
-            ).arg(badgeColor));
+            const char *badgeStyle = "file-badge-document";
+            if (ext == "pdf") badgeStyle = "file-badge-pdf";
+            else if (ext == "zip" || ext == "rar" || ext == "7z") badgeStyle = "file-badge-archive";
+            else if (ext == "doc" || ext == "docx") badgeStyle = "file-badge-document";
+            else if (ext == "xls" || ext == "xlsx") badgeStyle = "file-badge-spreadsheet";
+            else if (ext == "txt" || ext == "log" || ext == "md") badgeStyle = "file-badge-text";
+            MeetingUI::AppTheme::setStyleVariant(*badge, badgeStyle);
             cardLayout->addWidget(badge);
 
             auto *textCol = new QVBoxLayout();
             textCol->setSpacing(4);
             auto *nameLabel = new QLabel(fi.fileName(), fileCard);
-            nameLabel->setStyleSheet("color: #F3F4F6; font-size: 13px; font-weight: bold;");
+            MeetingUI::AppTheme::setStyleVariant(*nameLabel, "meeting-chat-sidebar-widget-namelabel-3");
             textCol->addWidget(nameLabel);
 
             auto *sizeLabel = new QLabel(ChatBubbleWidget::formatFileSize(fi.size()), fileCard);
-            sizeLabel->setStyleSheet("color: #9CA3AF; font-size: 12px;");
+            MeetingUI::AppTheme::setStyleVariant(*sizeLabel, "meeting-chat-sidebar-widget-sizelabel-2");
             textCol->addWidget(sizeLabel);
 
             cardLayout->addLayout(textCol, 1);
@@ -840,12 +725,12 @@ void SendConfirmDialog::setupUi(const QStringList &filePaths) {
         }
     } else {
         auto *scroll = new QScrollArea(this);
-        scroll->setStyleSheet("background-color: transparent; border: 1px solid #2B303C; border-radius: 6px;");
+        MeetingUI::AppTheme::setStyleVariant(*scroll, "meeting-chat-sidebar-widget-scroll-2");
         scroll->setWidgetResizable(true);
         scroll->setMaximumHeight(220);
 
         auto *container = new QWidget();
-        container->setStyleSheet("background-color: transparent;");
+        MeetingUI::AppTheme::setStyleVariant(*container, "meeting-chat-sidebar-widget-container");
         auto *listLayout = new QVBoxLayout(container);
         listLayout->setContentsMargins(8, 8, 8, 8);
         listLayout->setSpacing(6);
@@ -860,9 +745,7 @@ void SendConfirmDialog::setupUi(const QStringList &filePaths) {
 
             QString ext = fi.suffix().toLower();
             auto *itemRow = new QWidget(container);
-            itemRow->setStyleSheet(isItemOversize
-                ? "background-color: rgba(239, 68, 68, 0.15); border: 1px solid #EF4444; border-radius: 4px; padding: 4px 8px;"
-                : "background-color: #242831; border-radius: 4px; padding: 4px 8px;");
+            MeetingUI::AppTheme::setStyleVariant(*itemRow, isItemOversize ? "meeting-chat-sidebar-widget-itemrow-active" : "meeting-chat-sidebar-widget-itemrow-normal");
             auto *rowLayout = new QHBoxLayout(itemRow);
             rowLayout->setContentsMargins(6, 4, 6, 4);
             rowLayout->setSpacing(8);
@@ -872,18 +755,14 @@ void SendConfirmDialog::setupUi(const QStringList &filePaths) {
             rowLayout->addWidget(iconLbl);
 
             auto *nameLbl = new QLabel(fi.fileName(), itemRow);
-            nameLbl->setStyleSheet(isItemOversize
-                ? "color: #FCA5A5; font-size: 12px; font-weight: bold;"
-                : "color: #F3F4F6; font-size: 12px;");
+            MeetingUI::AppTheme::setStyleVariant(*nameLbl, isItemOversize ? "meeting-chat-sidebar-widget-namelbl-active" : "meeting-chat-sidebar-widget-namelbl-normal");
             rowLayout->addWidget(nameLbl, 1);
 
             QString sizeText = isItemOversize
-                ? QString::fromUtf8("%1 (超限)").arg(ChatBubbleWidget::formatFileSize(fi.size()))
+                ? QCoreApplication::translate("MeetingUI", "%1 (Too Large)").arg(ChatBubbleWidget::formatFileSize(fi.size()))
                 : ChatBubbleWidget::formatFileSize(fi.size());
             auto *sizeLbl = new QLabel(sizeText, itemRow);
-            sizeLbl->setStyleSheet(isItemOversize
-                ? "color: #EF4444; font-size: 11px; font-weight: bold;"
-                : "color: #9CA3AF; font-size: 11px;");
+            MeetingUI::AppTheme::setStyleVariant(*sizeLbl, isItemOversize ? "meeting-chat-sidebar-widget-sizelbl-active" : "meeting-chat-sidebar-widget-sizelbl-normal");
             rowLayout->addWidget(sizeLbl);
 
             listLayout->addWidget(itemRow);
@@ -892,22 +771,22 @@ void SendConfirmDialog::setupUi(const QStringList &filePaths) {
         layout->addWidget(scroll);
 
         auto *summaryLbl = new QLabel(
-            QString::fromUtf8("共 %1 个文件，总大小: %2")
+            QCoreApplication::translate("MeetingUI", "Files: %1 · Total size: %2")
                 .arg(filePaths.size())
                 .arg(ChatBubbleWidget::formatFileSize(totalSize)),
             this
         );
-        summaryLbl->setStyleSheet("color: #9CA3AF; font-size: 12px;");
+        MeetingUI::AppTheme::setStyleVariant(*summaryLbl, "meeting-chat-sidebar-widget-summarylbl");
         layout->addWidget(summaryLbl);
     }
 
     if (hasOversize) {
         QString warnText = (filePaths.size() == 1)
-            ? QString::fromUtf8("❌ 注意：文件大于 15MB 限制（当前大小：%1），系统已禁止发送！").arg(ChatBubbleWidget::formatFileSize(totalSize))
-            : QString::fromUtf8("❌ 注意：列表中包含大于 15MB 的文件（单文件限制 15MB），系统已禁止发送！");
+            ? QCoreApplication::translate("MeetingUI", "❌ This file exceeds the 15 MB limit (size: %1) and cannot be sent.").arg(ChatBubbleWidget::formatFileSize(totalSize))
+            : QCoreApplication::translate("MeetingUI", "❌ The list contains files larger than the 15 MB per-file limit. Sending is disabled.");
         auto *warnLbl = new QLabel(warnText, this);
         warnLbl->setWordWrap(true);
-        warnLbl->setStyleSheet("color: #EF4444; font-size: 12px; font-weight: bold; line-height: 1.3;");
+        MeetingUI::AppTheme::setStyleVariant(*warnLbl, "meeting-chat-sidebar-widget-warnlbl");
         layout->addWidget(warnLbl);
     }
 
@@ -915,18 +794,18 @@ void SendConfirmDialog::setupUi(const QStringList &filePaths) {
     btnRow->setSpacing(10);
     btnRow->addStretch();
 
-    auto *cancelBtn = new QPushButton(QString::fromUtf8("取消"), this);
+    auto *cancelBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Cancel"), this);
     cancelBtn->setObjectName("CancelBtn");
     cancelBtn->setCursor(Qt::PointingHandCursor);
     connect(cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
     btnRow->addWidget(cancelBtn);
 
-    auto *sendBtn = new QPushButton(QString::fromUtf8("确认发送"), this);
+    auto *sendBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Send Files"), this);
     sendBtn->setObjectName("SendBtn");
     sendBtn->setCursor(Qt::PointingHandCursor);
     if (hasOversize) {
         sendBtn->setEnabled(false);
-        sendBtn->setToolTip(QString::fromUtf8("存在超过 15MB 的文件，禁止发送"));
+        sendBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Files larger than 15 MB cannot be sent"));
         sendBtn->setDefault(false);
     } else {
         sendBtn->setDefault(true);
@@ -936,8 +815,7 @@ void SendConfirmDialog::setupUi(const QStringList &filePaths) {
 
     layout->addLayout(btnRow);
 
-    setMinimumWidth(380);
-    adjustSize();
+    MeetingUI::AppTheme::makeDialogAdaptive(*this, QSize(420, 360));
 }
 
 // ----------------------------------------------------
@@ -950,98 +828,8 @@ MeetingChatSidebarWidget::MeetingChatSidebarWidget(QWidget *parent)
 }
 
 void MeetingChatSidebarWidget::setupUi() {
-    setFixedWidth(340);
-    setStyleSheet(
-        "QWidget#ChatSidebar {"
-        "  background-color: #1A1D24;"
-        "  border-left: 1px solid #2B303C;"
-        "}"
-        "QLabel#ChatTitle {"
-        "  color: #F3F4F6;"
-        "  font-size: 14px;"
-        "  font-weight: bold;"
-        "  font-family: \"Microsoft YaHei\";"
-        "}"
-        "QPushButton#CloseBtn {"
-        "  background: transparent;"
-        "  color: #9CA3AF;"
-        "  font-size: 16px;"
-        "  border: none;"
-        "  border-radius: 4px;"
-        "  min-width: 24px;"
-        "  max-width: 24px;"
-        "  min-height: 24px;"
-        "  max-height: 24px;"
-        "}"
-        "QPushButton#CloseBtn:hover {"
-        "  background-color: rgba(255, 255, 255, 0.1);"
-        "  color: #FFFFFF;"
-        "}"
-        "QScrollArea#MessageScrollArea {"
-        "  background-color: transparent;"
-        "  border: none;"
-        "}"
-        "QScrollBar:vertical {"
-        "  border: none;"
-        "  background: transparent;"
-        "  width: 6px;"
-        "  margin: 0px;"
-        "}"
-        "QScrollBar::handle:vertical {"
-        "  background: #4B5563;"
-        "  min-height: 20px;"
-        "  border-radius: 3px;"
-        "}"
-        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {"
-        "  height: 0px;"
-        "}"
-        "QWidget#BottomInputPanel {"
-        "  background-color: #171A20;"
-        "  border-top: 1px solid #2B303C;"
-        "}"
-        "QPushButton#MediaBtn {"
-        "  background-color: transparent;"
-        "  color: #9CA3AF;"
-        "  border: none;"
-        "  border-radius: 4px;"
-        "  padding: 4px 8px;"
-        "  font-size: 13px;"
-        "}"
-        "QPushButton#MediaBtn:hover {"
-        "  background-color: rgba(255, 255, 255, 0.08);"
-        "  color: #F3F4F6;"
-        "}"
-        "QPushButton#SendBtn {"
-        "  background-color: #2563EB;"
-        "  color: #FFFFFF;"
-        "  border: none;"
-        "  border-radius: 4px;"
-        "  padding: 6px 14px;"
-        "  font-size: 12px;"
-        "  font-weight: 500;"
-        "  font-family: \"Microsoft YaHei\";"
-        "}"
-        "QPushButton#SendBtn:hover {"
-        "  background-color: #1D4ED8;"
-        "}"
-        "QPushButton#SendBtn:disabled {"
-        "  background-color: #374151;"
-        "  color: #6B7280;"
-        "}"
-        "QPushButton#ScrollDownBtn {"
-        "  background-color: rgba(36, 40, 49, 0.9);"
-        "  border: 1px solid #363C4A;"
-        "  color: #3B82F6;"
-        "  border-radius: 12px;"
-        "  font-size: 11px;"
-        "  padding: 4px 10px;"
-        "  font-weight: 500;"
-        "}"
-        "QPushButton#ScrollDownBtn:hover {"
-        "  background-color: #2563EB;"
-        "  color: #FFFFFF;"
-        "}"
-    );
+    setMinimumWidth(280);
+    MeetingUI::AppTheme::setStyleVariant(*this, "meeting-chat-sidebar-widget-this-3");
 
     setObjectName("ChatSidebar");
 
@@ -1051,12 +839,13 @@ void MeetingChatSidebarWidget::setupUi() {
 
     // 1. 顶部 Header
     auto *headerWidget = new QWidget(this);
-    headerWidget->setFixedHeight(44);
+    headerWidget->setMinimumHeight(44);
     auto *headerLayout = new QHBoxLayout(headerWidget);
     headerLayout->setContentsMargins(16, 0, 12, 0);
 
-    _titleLabel = new QLabel(QString::fromUtf8("会议聊天"), headerWidget);
+    _titleLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Meeting Chat"), headerWidget);
     _titleLabel->setObjectName("ChatTitle");
+    _titleLabel->setWordWrap(true);
     headerLayout->addWidget(_titleLabel);
 
     headerLayout->addStretch();
@@ -1076,7 +865,7 @@ void MeetingChatSidebarWidget::setupUi() {
     _scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 
     _scrollContent = new QWidget();
-    _scrollContent->setStyleSheet("background-color: transparent;");
+    MeetingUI::AppTheme::setStyleVariant(*_scrollContent, "meeting-chat-sidebar-widget-scrollcontent");
     _messagesLayout = new QVBoxLayout(_scrollContent);
     _messagesLayout->setContentsMargins(0, 8, 0, 8);
     _messagesLayout->setSpacing(4);
@@ -1110,30 +899,30 @@ void MeetingChatSidebarWidget::setupUi() {
     btnRowLayout->setContentsMargins(0, 0, 0, 0);
     btnRowLayout->setSpacing(6);
 
-    _imageBtn = new QPushButton(QString::fromUtf8("🖼️ 图片"), _inputContainer);
+    _imageBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "🖼️ Image"), _inputContainer);
     _imageBtn->setObjectName("MediaBtn");
-    _imageBtn->setToolTip(QString::fromUtf8("发送图片文件"));
+    _imageBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Send an image"));
     _imageBtn->setCursor(Qt::PointingHandCursor);
     connect(_imageBtn, &QPushButton::clicked, this, &MeetingChatSidebarWidget::onChooseImageClicked);
     btnRowLayout->addWidget(_imageBtn);
 
-    _fileBtn = new QPushButton(QString::fromUtf8("📎 文件"), _inputContainer);
+    _fileBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "📎 File"), _inputContainer);
     _fileBtn->setObjectName("MediaBtn");
-    _fileBtn->setToolTip(QString::fromUtf8("发送附件文件"));
+    _fileBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Send an attachment"));
     _fileBtn->setCursor(Qt::PointingHandCursor);
     connect(_fileBtn, &QPushButton::clicked, this, &MeetingChatSidebarWidget::onChooseFileClicked);
     btnRowLayout->addWidget(_fileBtn);
 
-    _scrollToBottomBtn = new QPushButton(QString::fromUtf8("新消息 ↓"), _inputContainer);
+    _scrollToBottomBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "New Messages ↓"), _inputContainer);
     _scrollToBottomBtn->setObjectName("ScrollDownBtn");
     _scrollToBottomBtn->setCursor(Qt::PointingHandCursor);
     _scrollToBottomBtn->hide();
     connect(_scrollToBottomBtn, &QPushButton::clicked, this, &MeetingChatSidebarWidget::scrollToBottom);
-    btnRowLayout->addWidget(_scrollToBottomBtn);
+    inputColLayout->addWidget(_scrollToBottomBtn);
 
     btnRowLayout->addStretch();
 
-    _sendBtn = new QPushButton(QString::fromUtf8("发送"), _inputContainer);
+    _sendBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Send"), _inputContainer);
     _sendBtn->setObjectName("SendBtn");
     _sendBtn->setCursor(Qt::PointingHandCursor);
     _sendBtn->setEnabled(false);
@@ -1160,16 +949,9 @@ void MeetingChatSidebarWidget::setupUi() {
     _dropOverlay = new QLabel(this);
     _dropOverlay->setObjectName("DropOverlay");
     _dropOverlay->setAlignment(Qt::AlignCenter);
-    _dropOverlay->setText(QString::fromUtf8("📥 松开鼠标以发送文件或图片"));
-    _dropOverlay->setStyleSheet(
-        "background-color: rgba(30, 58, 138, 0.88);"
-        "border: 2px dashed #60A5FA;"
-        "border-radius: 8px;"
-        "color: #FFFFFF;"
-        "font-size: 14px;"
-        "font-weight: bold;"
-        "font-family: \"Microsoft YaHei\", sans-serif;"
-    );
+    _dropOverlay->setWordWrap(true);
+    _dropOverlay->setText(QCoreApplication::translate("MeetingUI", "📥 Drop to send files or images"));
+    MeetingUI::AppTheme::setStyleVariant(*_dropOverlay, "meeting-chat-sidebar-widget-dropoverlay");
     _dropOverlay->setAttribute(Qt::WA_TransparentForMouseEvents);
     _dropOverlay->hide();
 }
@@ -1210,7 +992,7 @@ void MeetingChatSidebarWidget::appendMessage(const ChatMessageItem &msg) {
     }
     _messagesLayout->insertWidget(targetPos, bubble);
 
-    _titleLabel->setText(QString::fromUtf8("会议聊天 (%1)").arg(_messages.size()));
+    _titleLabel->setText(QCoreApplication::translate("MeetingUI", "Meeting Chat (%1)").arg(_messages.size()));
 
     if (_isAtBottom) {
         QTimer::singleShot(10, this, &MeetingChatSidebarWidget::scrollToBottom);
@@ -1310,7 +1092,7 @@ void MeetingChatSidebarWidget::clearMessages() {
         delete item;
     }
     _messagesLayout->addStretch();
-    _titleLabel->setText(QString::fromUtf8("会议聊天"));
+    _titleLabel->setText(QCoreApplication::translate("MeetingUI", "Meeting Chat"));
     if (_scrollToBottomBtn) _scrollToBottomBtn->hide();
 }
 
@@ -1342,14 +1124,14 @@ void MeetingChatSidebarWidget::onSendClicked() {
 }
 
 void MeetingChatSidebarWidget::onChooseImageClicked() {
-    QString path = QFileDialog::getOpenFileName(this, QString::fromUtf8("选择发送图片"), "",
-                                                "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif);;所有文件 (*.*)");
+    QString path = QFileDialog::getOpenFileName(this, QCoreApplication::translate("MeetingUI", "Select an Image to Send"), "",
+                                                QCoreApplication::translate("MeetingUI", "Images (*.png *.jpg *.jpeg *.bmp *.gif);;All Files (*.*)"), nullptr, QFileDialog::DontUseNativeDialog);
     if (path.isEmpty()) return;
 
     QFileInfo fi(path);
     if (fi.size() > 15 * 1024 * 1024) {
-        QMessageBox::warning(this, QString::fromUtf8("禁止发送"),
-                             QString::fromUtf8("图片 \"%1\" 大小为 %2，超过 15MB 限制，禁止发送。")
+        QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Cannot Send"),
+                             QCoreApplication::translate("MeetingUI", "Image \"%1\" is %2 and exceeds the 15 MB limit. It cannot be sent.")
                              .arg(fi.fileName())
                              .arg(ChatBubbleWidget::formatFileSize(fi.size())));
         return;
@@ -1357,7 +1139,7 @@ void MeetingChatSidebarWidget::onChooseImageClicked() {
 
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
-        QMessageBox::warning(this, QString::fromUtf8("打开失败"), QString::fromUtf8("无法读取选中的图片文件。"));
+        QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Open Failed"), QCoreApplication::translate("MeetingUI", "Unable to read the selected image."));
         return;
     }
     QByteArray data = file.readAll();
@@ -1368,13 +1150,13 @@ void MeetingChatSidebarWidget::onChooseImageClicked() {
 }
 
 void MeetingChatSidebarWidget::onChooseFileClicked() {
-    QString path = QFileDialog::getOpenFileName(this, QString::fromUtf8("选择发送文件"), "", "所有文件 (*.*)");
+    QString path = QFileDialog::getOpenFileName(this, QCoreApplication::translate("MeetingUI", "Select Files to Send"), "", QCoreApplication::translate("MeetingUI", "All Files (*.*)"), nullptr, QFileDialog::DontUseNativeDialog);
     if (path.isEmpty()) return;
 
     QFileInfo fi(path);
     if (fi.size() > 15 * 1024 * 1024) {
-        QMessageBox::warning(this, QString::fromUtf8("禁止发送"),
-                             QString::fromUtf8("文件 \"%1\" 大小为 %2，超过 15MB 限制，禁止发送。")
+        QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Cannot Send"),
+                             QCoreApplication::translate("MeetingUI", "File \"%1\" is %2 and exceeds the 15 MB limit. It cannot be sent.")
                              .arg(fi.fileName())
                              .arg(ChatBubbleWidget::formatFileSize(fi.size())));
         return;
@@ -1382,7 +1164,7 @@ void MeetingChatSidebarWidget::onChooseFileClicked() {
 
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
-        QMessageBox::warning(this, QString::fromUtf8("打开失败"), QString::fromUtf8("无法读取选中的文件。"));
+        QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Open Failed"), QCoreApplication::translate("MeetingUI", "Unable to read the selected file."));
         return;
     }
     QByteArray data = file.readAll();
@@ -1548,8 +1330,8 @@ void MeetingChatSidebarWidget::handleDroppedFiles(const QStringList &filePaths) 
     if (filePaths.size() == 1) {
         QFileInfo fi(filePaths.first());
         if (fi.size() > 15 * 1024 * 1024) {
-            QMessageBox::warning(this, QString::fromUtf8("禁止发送"),
-                                 QString::fromUtf8("文件 \"%1\" 大小为 %2，超过 15MB 限制，禁止发送。")
+            QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Cannot Send"),
+                                 QCoreApplication::translate("MeetingUI", "File \"%1\" is %2 and exceeds the 15 MB limit. It cannot be sent.")
                                  .arg(fi.fileName())
                                  .arg(ChatBubbleWidget::formatFileSize(fi.size())));
             return;
@@ -1563,8 +1345,8 @@ void MeetingChatSidebarWidget::handleDroppedFiles(const QStringList &filePaths) 
             }
         }
         if (allOversize) {
-            QMessageBox::warning(this, QString::fromUtf8("禁止发送"),
-                                 QString::fromUtf8("所选文件均超过 15MB 限制，禁止发送。"));
+            QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Cannot Send"),
+                                 QCoreApplication::translate("MeetingUI", "All selected files exceed the 15 MB limit and cannot be sent."));
             return;
         }
     }

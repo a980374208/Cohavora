@@ -80,7 +80,7 @@ QString SessionManager::nickname() const {
     if (!_currentUser.nickname.isEmpty()) {
         return _currentUser.nickname;
     }
-    return _currentUser.userId.isEmpty() ? QString::fromUtf8("未登录") : _currentUser.userId;
+    return _currentUser.userId.isEmpty() ? QCoreApplication::translate("MeetingUI", "Not Signed In") : _currentUser.userId;
 }
 
 void SessionManager::setMediaPreferences(const MediaPreferences &prefs) {
@@ -218,7 +218,7 @@ void SessionManager::loginWithPassword(const QString &account,
     httpClient().requestLogin(account, password,
         [self, generation, httpRevision, service, account, persist, persistAutomatically, callback]
         (bool ok, const UserInfo &info, const HttpError &err) {
-            const auto superseded = QString::fromUtf8("本次登录已取消，请重新登录。");
+            const auto superseded = QCoreApplication::translate("MeetingUI", "This sign-in attempt was canceled. Please sign in again.");
             if (!self || self->_authGeneration != generation || !self->_loginPending ||
                 self->_serverBaseUrl != service || self->httpClient().authRevision() != httpRevision ||
                 self->httpClient().baseUrl() != service) {
@@ -227,7 +227,7 @@ void SessionManager::loginWithPassword(const QString &account,
             }
             self->_loginPending = false;
             if (!ok || info.token.isEmpty() || info.userId.isEmpty()) {
-                if (callback) callback(false, ok ? QString::fromUtf8("登录响应缺少必要凭据。") : err.message);
+                if (callback) callback(false, ok ? QCoreApplication::translate("MeetingUI", "The sign-in response is missing required credentials.") : err.message);
                 return;
             }
             self->_sessionInvalidating = false;
@@ -269,7 +269,7 @@ void SessionManager::loginAsGuest(const QString &nickname, const QString &custom
     _currentUser.userId = customUserId.isEmpty()
         ? QString("guest_%1").arg(QUuid::createUuid().toString(QUuid::Id128).left(8))
         : customUserId;
-    _currentUser.nickname = nickname.isEmpty() ? QString::fromUtf8("访客用户") : nickname;
+    _currentUser.nickname = nickname.isEmpty() ? QCoreApplication::translate("MeetingUI", "Guest User") : nickname;
     _currentUser.token = QString("guest_token_%1").arg(QUuid::createUuid().toString(QUuid::Id128));
     _currentUser.faceURL = "";
 

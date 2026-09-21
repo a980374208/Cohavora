@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/ui/meeting_list_model.h"
 
 #include <QtCore/QSet>
@@ -16,7 +17,7 @@ QTimeZone meetingTimeZone(const OpenMeeting::MeetingRecord &meeting) {
 
 QString displayTitle(const OpenMeeting::MeetingRecord &meeting) {
 	const auto title = meeting.title.trimmed();
-	return title.isEmpty() ? QString::fromUtf8("未命名会议") : title;
+	return title.isEmpty() ? QCoreApplication::translate("MeetingUI", "Untitled Meeting") : title;
 }
 
 QString displayCreator(const OpenMeeting::MeetingRecord &meeting) {
@@ -31,7 +32,7 @@ QString repeatEndSuffix(
 	const auto timeZone = requested.isValid() ? requested : QTimeZone::systemTimeZone();
 	const auto end = QDateTime::fromSecsSinceEpoch(rule.endDateSeconds, timeZone);
 	return end.isValid()
-		? QString::fromUtf8("，至 %1").arg(end.date().toString(QStringLiteral("yyyy-MM-dd")))
+		? QCoreApplication::translate("MeetingUI", ", until %1").arg(end.date().toString(QStringLiteral("yyyy-MM-dd")))
 		: QString();
 }
 
@@ -39,30 +40,30 @@ QString customRepeatText(const OpenMeeting::MeetingRepeatRule &rule) {
 	QStringList details;
 	if (rule.interval > 0 || !rule.unitType.trimmed().isEmpty()) {
 		QString unit;
-		if (rule.unitType == QStringLiteral("Day")) unit = QString::fromUtf8("天");
-		else if (rule.unitType == QStringLiteral("Week")) unit = QString::fromUtf8("周");
-		else if (rule.unitType == QStringLiteral("Month")) unit = QString::fromUtf8("月");
+		if (rule.unitType == QStringLiteral("Day")) unit = QCoreApplication::translate("MeetingUI", "day(s)");
+		else if (rule.unitType == QStringLiteral("Week")) unit = QCoreApplication::translate("MeetingUI", "week(s)");
+		else if (rule.unitType == QStringLiteral("Month")) unit = QCoreApplication::translate("MeetingUI", "month(s)");
 		else unit = rule.unitType.trimmed().isEmpty()
-			? QString::fromUtf8("未知单位") : rule.unitType.trimmed();
-		details.push_back(QString::fromUtf8("每 %1 %2").arg(rule.interval).arg(unit));
+			? QCoreApplication::translate("MeetingUI", "Unknown Unit") : rule.unitType.trimmed();
+		details.push_back(QCoreApplication::translate("MeetingUI", "Every %1 %2").arg(rule.interval).arg(unit));
 	}
 	if (!rule.daysOfWeek.empty()) {
 		static const QStringList names{
-			QString::fromUtf8("周日"), QString::fromUtf8("周一"),
-			QString::fromUtf8("周二"), QString::fromUtf8("周三"),
-			QString::fromUtf8("周四"), QString::fromUtf8("周五"),
-			QString::fromUtf8("周六"),
+			QCoreApplication::translate("MeetingUI", "Sun"), QCoreApplication::translate("MeetingUI", "Mon"),
+			QCoreApplication::translate("MeetingUI", "Tue"), QCoreApplication::translate("MeetingUI", "Wed"),
+			QCoreApplication::translate("MeetingUI", "Thu"), QCoreApplication::translate("MeetingUI", "Fri"),
+			QCoreApplication::translate("MeetingUI", "Sat"),
 		};
 		QStringList days;
 		for (const int day : rule.daysOfWeek) {
 			days.push_back(day >= 0 && day < names.size()
 				? names[day] : QString::number(day));
 		}
-		details.push_back(days.join(QString::fromUtf8("、")));
+		details.push_back(days.join(QCoreApplication::translate("MeetingUI", ", ")));
 	}
 	return details.isEmpty()
-		? QString::fromUtf8("自定义重复（只读）")
-		: QString::fromUtf8("自定义重复（只读：%1）").arg(details.join(QString::fromUtf8("；")));
+		? QCoreApplication::translate("MeetingUI", "Custom Recurrence (Read-Only)")
+		: QCoreApplication::translate("MeetingUI", "Custom Recurrence (Read-Only: %1)").arg(details.join(QCoreApplication::translate("MeetingUI", "; ")));
 }
 
 } // namespace
@@ -86,7 +87,7 @@ QVariant MeetingListModel::data(const QModelIndex &index, int role) const {
 	case MeetingTitleRole:
 		return displayTitle(meeting);
 	case Qt::ToolTipRole:
-		return QString::fromUtf8("%1\n会议号：%2")
+		return QCoreApplication::translate("MeetingUI", "%1\nMeeting ID: %2")
 			.arg(displayTitle(meeting), meeting.meetingId);
 	case MeetingIdRole:
 		return meeting.meetingId;
@@ -160,15 +161,15 @@ QDateTime MeetingListModel::scheduledDateTime(const OpenMeeting::MeetingRecord &
 QString MeetingListModel::statusText(OpenMeeting::MeetingStatus status) {
 	switch (status) {
 	case OpenMeeting::MeetingStatus::Scheduled:
-		return QString::fromUtf8("待开始");
+		return QCoreApplication::translate("MeetingUI", "Scheduled");
 	case OpenMeeting::MeetingStatus::InProgress:
-		return QString::fromUtf8("进行中");
+		return QCoreApplication::translate("MeetingUI", "In Progress");
 	case OpenMeeting::MeetingStatus::Completed:
-		return QString::fromUtf8("已结束");
+		return QCoreApplication::translate("MeetingUI", "Ended");
 	case OpenMeeting::MeetingStatus::Unknown:
-		return QString::fromUtf8("状态未知");
+		return QCoreApplication::translate("MeetingUI", "Unknown Status");
 	}
-	return QString::fromUtf8("状态未知");
+	return QCoreApplication::translate("MeetingUI", "Unknown Status");
 }
 
 QString MeetingListModel::repeatText(
@@ -176,29 +177,29 @@ QString MeetingListModel::repeatText(
 	QString text;
 	switch (rule.type) {
 	case OpenMeeting::MeetingRepeatType::None:
-		return QString::fromUtf8("不重复");
+		return QCoreApplication::translate("MeetingUI", "Does Not Repeat");
 	case OpenMeeting::MeetingRepeatType::Daily:
-		text = QString::fromUtf8("每天重复");
+		text = QCoreApplication::translate("MeetingUI", "Repeats Daily");
 		break;
 	case OpenMeeting::MeetingRepeatType::Weekly:
-		text = QString::fromUtf8("每周重复");
+		text = QCoreApplication::translate("MeetingUI", "Repeats Weekly");
 		break;
 	case OpenMeeting::MeetingRepeatType::WeekDay:
-		text = QString::fromUtf8("工作日重复");
+		text = QCoreApplication::translate("MeetingUI", "Repeats on Weekdays");
 		break;
 	case OpenMeeting::MeetingRepeatType::Monthly:
-		text = QString::fromUtf8("每月重复");
+		text = QCoreApplication::translate("MeetingUI", "Repeats Monthly");
 		break;
 	case OpenMeeting::MeetingRepeatType::Custom:
 		text = customRepeatText(rule);
 		break;
 	case OpenMeeting::MeetingRepeatType::Unknown:
 		text = rule.rawType.trimmed().isEmpty()
-			? QString::fromUtf8("未知重复规则（只读）")
-			: QString::fromUtf8("重复规则：%1（只读）").arg(rule.rawType);
+			? QCoreApplication::translate("MeetingUI", "Unknown Recurrence (Read-Only)")
+			: QCoreApplication::translate("MeetingUI", "Recurrence: %1 (Read-Only)").arg(rule.rawType);
 		break;
 	}
-	if (text.isEmpty()) text = QString::fromUtf8("未知重复规则（只读）");
+	if (text.isEmpty()) text = QCoreApplication::translate("MeetingUI", "Unknown Recurrence (Read-Only)");
 	return text + repeatEndSuffix(rule, timeZone);
 }
 
@@ -237,8 +238,8 @@ void MeetingListModel::rebuild() {
 	for (auto &meeting : projected) {
 		const auto dateTime = scheduledDateTime(meeting);
 		const auto dateGroup = dateTime.isValid()
-			? dateTime.date().toString(QString::fromUtf8("yyyy年M月d日 dddd"))
-			: QString::fromUtf8("时间待确认");
+			? dateTime.date().toString(QCoreApplication::translate("MeetingUI", "dddd, MMMM d, yyyy"))
+			: QCoreApplication::translate("MeetingUI", "Time to Be Confirmed");
 		_rows.push_back({std::move(meeting), dateGroup, dateGroup != previousDateGroup});
 		previousDateGroup = dateGroup;
 	}

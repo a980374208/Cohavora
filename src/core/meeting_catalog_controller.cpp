@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/core/meeting_catalog_controller.h"
 
 #include "src/net/openmeeting_http_client.h"
@@ -101,7 +102,7 @@ bool MeetingCatalogController::startListQuery(bool history) {
     if (!context || !_backend.getMeetings) {
         state = {};
         state.state = MeetingCatalogLoadState::Error;
-        state.error = localError(QStringLiteral("Meeting catalog requires an authenticated account."));
+        state.error = localError(QCoreApplication::translate("MeetingUI", "Meeting catalog requires an authenticated account."));
         emit (this->*signal)();
         return false;
     }
@@ -154,8 +155,8 @@ bool MeetingCatalogController::loadMeetingDetail(const QString &meetingId) {
         _detail.meetingId = meetingId;
         _detail.state = MeetingCatalogLoadState::Error;
         _detail.error = localError(meetingId.isEmpty()
-            ? QStringLiteral("Meeting ID is empty.")
-            : QStringLiteral("Meeting detail requires an authenticated account."));
+            ? QCoreApplication::translate("MeetingUI", "Meeting ID is empty.")
+            : QCoreApplication::translate("MeetingUI", "Meeting detail requires an authenticated account."));
         emit detailChanged();
         return false;
     }
@@ -188,7 +189,7 @@ bool MeetingCatalogController::loadMeetingDetail(const QString &meetingId) {
             } else if (ok) {
                 self->_detail.state = self->_detail.hasSnapshot
                     ? MeetingCatalogLoadState::Ready : MeetingCatalogLoadState::Error;
-                self->_detail.error = localError(QStringLiteral("Meeting detail ID does not match the request."));
+                self->_detail.error = localError(QCoreApplication::translate("MeetingUI", "Meeting detail ID does not match the request."));
             } else if (self->_detail.hasSnapshot) {
                 self->_detail.state = MeetingCatalogLoadState::Ready;
             } else {
@@ -247,9 +248,9 @@ bool MeetingCatalogController::bookMeeting(const MeetingBookingRequest &request)
     auto context = captureContext();
     if (!validateMeetingBookingRequest(request, &message) || !context ||
         !_backend.bookMeeting || _bookingGeneration) {
-        if (!context) message = QStringLiteral("Meeting booking requires an authenticated account.");
-        else if (_bookingGeneration) message = QStringLiteral("A meeting booking request is already in progress.");
-        else if (!_backend.bookMeeting) message = QStringLiteral("Meeting booking backend is unavailable.");
+        if (!context) message = QCoreApplication::translate("MeetingUI", "Meeting booking requires an authenticated account.");
+        else if (_bookingGeneration) message = QCoreApplication::translate("MeetingUI", "A meeting booking request is already in progress.");
+        else if (!_backend.bookMeeting) message = QCoreApplication::translate("MeetingUI", "Meeting booking backend is unavailable.");
         publishWriteFailure(MeetingWriteKind::Book, {}, message);
         return false;
     }
@@ -283,10 +284,10 @@ bool MeetingCatalogController::updateMeeting(const MeetingUpdateRequest &request
     auto context = captureContext();
     if (!validateMeetingUpdateRequest(request, &message) || !context ||
         !_backend.updateMeeting || _meetingWriteGenerations.contains(request.meetingId)) {
-        if (!context) message = QStringLiteral("Meeting update requires an authenticated account.");
+        if (!context) message = QCoreApplication::translate("MeetingUI", "Meeting update requires an authenticated account.");
         else if (_meetingWriteGenerations.contains(request.meetingId)) {
-            message = QStringLiteral("A write request for this meeting is already in progress.");
-        } else if (!_backend.updateMeeting) message = QStringLiteral("Meeting update backend is unavailable.");
+            message = QCoreApplication::translate("MeetingUI", "A write request for this meeting is already in progress.");
+        } else if (!_backend.updateMeeting) message = QCoreApplication::translate("MeetingUI", "Meeting update backend is unavailable.");
         publishWriteFailure(MeetingWriteKind::Update, request.meetingId, message);
         return false;
     }
@@ -326,11 +327,11 @@ bool MeetingCatalogController::cancelMeeting(const QString &meetingId) {
     if (meetingId.isEmpty() || !context || !_backend.cancelMeeting ||
         _meetingWriteGenerations.contains(meetingId)) {
         QString message;
-        if (meetingId.isEmpty()) message = QStringLiteral("Meeting ID is empty.");
-        else if (!context) message = QStringLiteral("Meeting cancellation requires an authenticated account.");
+        if (meetingId.isEmpty()) message = QCoreApplication::translate("MeetingUI", "Meeting ID is empty.");
+        else if (!context) message = QCoreApplication::translate("MeetingUI", "Meeting cancellation requires an authenticated account.");
         else if (_meetingWriteGenerations.contains(meetingId)) {
-            message = QStringLiteral("A write request for this meeting is already in progress.");
-        } else message = QStringLiteral("Meeting cancellation backend is unavailable.");
+            message = QCoreApplication::translate("MeetingUI", "A write request for this meeting is already in progress.");
+        } else message = QCoreApplication::translate("MeetingUI", "Meeting cancellation backend is unavailable.");
         publishWriteFailure(MeetingWriteKind::Cancel, meetingId, message);
         return false;
     }

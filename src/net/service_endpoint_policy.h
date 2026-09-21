@@ -1,4 +1,5 @@
 #pragma once
+#include <QtCore/QCoreApplication>
 
 #include "src/net/credential_store.h"
 
@@ -91,11 +92,11 @@ inline bool serviceAllowsCredentialPersistence(const QString &input) {
 inline QString serviceEndpointErrorMessage(ServiceEndpointStatus status) {
     switch (status) {
     case ServiceEndpointStatus::Unconfigured:
-        return QString::fromUtf8("尚未配置 HTTPS 服务器地址。");
+        return QCoreApplication::translate("MeetingUI", "No HTTPS server URL configured.");
     case ServiceEndpointStatus::InvalidUrl:
-        return QString::fromUtf8("服务器地址格式无效。");
+        return QCoreApplication::translate("MeetingUI", "Invalid server URL.");
     case ServiceEndpointStatus::InsecureTransportBlocked:
-        return QString::fromUtf8("服务器必须使用 HTTPS；HTTP 仅可通过 --debug 启用。");
+        return QCoreApplication::translate("MeetingUI", "The server must use HTTPS. HTTP is only available with --debug.");
     default:
         return {};
     }

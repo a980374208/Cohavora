@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/ui/meeting_room_window.h"
 #include "src/ui/app_theme.h"
 #include "src/ui/meeting_log_console.h"
@@ -27,6 +28,51 @@
 
 namespace MeetingUI {
 namespace {
+
+QSize bannerSize(QLabel &label, int availableWidth, int preferredWidth) {
+ label.setWordWrap(true);
+ label.ensurePolished();
+ const int width = std::max(1, std::min(availableWidth - 32,
+     std::max(preferredWidth, label.sizeHint().width())));
+ return QSize(width, std::max(32, label.heightForWidth(width)));
+}
+
+QSize toolbarCellSize(int width) {
+ QFont font("Microsoft YaHei");
+ font.setPixelSize(11);
+ const QFontMetrics metrics(font);
+ const QStringList captions = {
+  QCoreApplication::translate("MeetingUI", "Enable Speaker"),
+  QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(999999999),
+  QCoreApplication::translate("MeetingUI", "Simulate Scenario"),
+  QCoreApplication::translate("MeetingUI", "Cancel Sharing"),
+  QCoreApplication::translate("MeetingUI", "Stop Sharing"),
+  QCoreApplication::translate("MeetingUI", "Share Screen"),
+  QCoreApplication::translate("MeetingUI", "Stopping"),
+  QCoreApplication::translate("MeetingUI", "Retry Stop"),
+  QCoreApplication::translate("MeetingUI", "Start Video"),
+  QCoreApplication::translate("MeetingUI", "Stop Video"),
+  QCoreApplication::translate("MeetingUI", "Unmute"),
+  QCoreApplication::translate("MeetingUI", "Mute"),
+  QCoreApplication::translate("MeetingUI", "Speaker"),
+  QCoreApplication::translate("MeetingUI", "Invite"),
+  QCoreApplication::translate("MeetingUI", "Chat"),
+  QCoreApplication::translate("MeetingUI", "End Meeting")
+ };
+ int minimumWidth = 100;
+ for (const auto &caption : captions) {
+  for (const auto &word : caption.split(QLatin1Char(' ')))
+   minimumWidth = std::max(minimumWidth, metrics.horizontalAdvance(word) + 12);
+ }
+ const int columns = std::max(1, std::min(8, (width - 116) / (minimumWidth + 4)));
+ const int cellWidth = std::max(minimumWidth, (width - 116) / columns - 4);
+ int textHeight = 30;
+ for (const auto &caption : captions) {
+  textHeight = std::max(textHeight, metrics.boundingRect(
+      QRect(0, 0, cellWidth, 1000), Qt::TextWordWrap, caption).height());
+ }
+ return QSize(cellWidth, textHeight + 36);
+}
 
 bool isChatSenderPlaceholderName(const QString &name) {
 	const auto normalized = name.trimmed().toCaseFolded();
@@ -58,7 +104,7 @@ QString resolveChatSenderDisplayName(
 			break;
 		}
 	}
-	return displayName.isEmpty() ? QString::fromUtf8("参会人") : displayName;
+	return displayName.isEmpty() ? QCoreApplication::translate("MeetingUI", "Participants") : displayName;
 }
 
 } // namespace
@@ -85,19 +131,8 @@ VideoTileWidget::VideoTileWidget(const QString &displayName, bool isLocal, QWidg
 void VideoTileWidget::setupVolumeControls() {
 	_pinBtn = new QPushButton(QString::fromUtf8("📌"), this);
 	_pinBtn->setFixedSize(28, 28);
-	_pinBtn->setToolTip(QString::fromUtf8("钉住此画面 (Pin) / 取消钉住"));
-	_pinBtn->setStyleSheet(R"(
-		QPushButton {
-			background-color: rgba(0, 0, 0, 150);
-			border-radius: 14px;
-			color: white;
-			border: none;
-			font-size: 13px;
-		}
-		QPushButton:hover {
-			background-color: rgba(22, 119, 255, 220);
-		}
-	)");
+	_pinBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Pin / Unpin Video"));
+	MeetingUI::AppTheme::setStyleVariant(*_pinBtn, "meeting-room-window-pinbtn");
 	_pinBtn->hide();
 
 	connect(_pinBtn, &QPushButton::clicked, [this] {
@@ -108,72 +143,33 @@ void VideoTileWidget::setupVolumeControls() {
 
 	_volBtn = new QPushButton(QString::fromUtf8("🔊"), this);
 	_volBtn->setFixedSize(28, 28);
-	_volBtn->setToolTip(QString::fromUtf8("独立调节该参会人音量"));
-	_volBtn->setStyleSheet(R"(
-		QPushButton {
-			background-color: rgba(0, 0, 0, 150);
-			border-radius: 14px;
-			color: white;
-			border: none;
-			font-size: 13px;
-		}
-		QPushButton:hover {
-			background-color: rgba(22, 119, 255, 220);
-		}
-	)");
+	_volBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Adjust this participant's volume"));
+	MeetingUI::AppTheme::setStyleVariant(*_volBtn, "meeting-room-window-volbtn");
 	_volBtn->hide();
 
 	_volPopup = new QWidget(this);
-	_volPopup->setFixedSize(190, 44);
-	_volPopup->setStyleSheet(R"(
-		QWidget {
-			background-color: rgba(20, 24, 32, 230);
-			border-radius: 8px;
-			border: 1px solid rgba(255, 255, 255, 40);
-		}
-	)");
+	auto *volumeLayout = new QHBoxLayout(_volPopup);
+ volumeLayout->setContentsMargins(8, 8, 8, 8);
+ volumeLayout->setSpacing(6);
+	MeetingUI::AppTheme::setStyleVariant(*_volPopup, "meeting-room-window-volpopup");
 	_volPopup->hide();
 
 	_muteRemoteBtn = new QPushButton(QString::fromUtf8("🔊"), _volPopup);
 	_muteRemoteBtn->setFixedSize(26, 26);
-	_muteRemoteBtn->setGeometry(8, 9, 26, 26);
-	_muteRemoteBtn->setStyleSheet(R"(
-		QPushButton {
-			background: transparent;
-			color: #ffffff;
-			border: none;
-			font-size: 13px;
-		}
-		QPushButton:hover {
-			color: #1677ff;
-		}
-	)");
+	volumeLayout->addWidget(_muteRemoteBtn);
+	MeetingUI::AppTheme::setStyleVariant(*_muteRemoteBtn, "meeting-room-window-muteremotebtn");
 
 	_volSlider = new QSlider(Qt::Horizontal, _volPopup);
 	_volSlider->setRange(0, 200);
 	_volSlider->setValue(100);
-	_volSlider->setGeometry(38, 12, 100, 20);
-	_volSlider->setStyleSheet(R"(
-		QSlider::groove:horizontal {
-			height: 4px;
-			background: rgba(255, 255, 255, 60);
-			border-radius: 2px;
-		}
-		QSlider::sub-page:horizontal {
-			background: #1677ff;
-			border-radius: 2px;
-		}
-		QSlider::handle:horizontal {
-			background: #ffffff;
-			width: 12px;
-			margin: -4px 0;
-			border-radius: 6px;
-		}
-	)");
+	_volSlider->setMinimumWidth(100);
+	volumeLayout->addWidget(_volSlider, 1);
+	MeetingUI::AppTheme::setStyleVariant(*_volSlider, "meeting-room-window-volslider");
 
 	_volLabel = new QLabel(QString::fromUtf8("100%"), _volPopup);
-	_volLabel->setGeometry(142, 11, 40, 22);
-	_volLabel->setStyleSheet("color: #ffffff; font-size: 11px; border: none; background: transparent;");
+	volumeLayout->addWidget(_volLabel);
+	_volPopup->adjustSize();
+	MeetingUI::AppTheme::setStyleVariant(*_volLabel, "meeting-room-window-vollabel");
 
 	connect(_volBtn, &QPushButton::clicked, [this] {
 		if (_volPopup->isVisible()) {
@@ -187,7 +183,7 @@ void VideoTileWidget::setupVolumeControls() {
 	connect(_muteRemoteBtn, &QPushButton::clicked, [this] {
 		_isLocallyMuted = !_isLocallyMuted;
 		_muteRemoteBtn->setText(_isLocallyMuted ? QString::fromUtf8("🔇") : QString::fromUtf8("🔊"));
-		_muteRemoteBtn->setStyleSheet(_isLocallyMuted ? "color: #f53f3f; border: none; font-size: 13px;" : "color: #ffffff; border: none; font-size: 13px;");
+		MeetingUI::AppTheme::setStyleVariant(*_muteRemoteBtn, _isLocallyMuted ? "meeting-room-window-muteremotebtn-2-active" : "meeting-room-window-muteremotebtn-2-normal");
 		_volBtn->setText(_isLocallyMuted ? QString::fromUtf8("🔇") : QString::fromUtf8("🔊"));
 		remoteLocalMuteToggled(_isLocallyMuted);
 	});
@@ -198,7 +194,7 @@ void VideoTileWidget::setupVolumeControls() {
 		if (_isLocallyMuted && value > 0) {
 			_isLocallyMuted = false;
 			_muteRemoteBtn->setText(QString::fromUtf8("🔊"));
-			_muteRemoteBtn->setStyleSheet("color: #ffffff; border: none; font-size: 13px;");
+			MeetingUI::AppTheme::setStyleVariant(*_muteRemoteBtn, "meeting-room-window-muteremotebtn-3");
 			_volBtn->setText(QString::fromUtf8("🔊"));
 			remoteLocalMuteToggled(false);
 		}
@@ -232,7 +228,7 @@ void VideoTileWidget::resizeEvent(QResizeEvent *e) {
 		_volBtn->move(w - 36, 10);
 	}
 	if (_volPopup) {
-		_volPopup->move(w - 200, 42);
+		_volPopup->move(std::max(0, w - _volPopup->width() - 10), 42);
 	}
 	if (_visualizer) {
 		_visualizer->setGeometry((w - 90) / 2, h - 36, 90, 24);
@@ -308,9 +304,7 @@ void VideoTileWidget::invalidatePresentation() {
 void VideoTileWidget::setPinned(bool pinned) {
 	if (_isPinned == pinned) return;
 	_isPinned = pinned;
-	_pinBtn->setStyleSheet(pinned ?
-		"background-color: #1677ff; border-radius: 14px; color: white; border: none; font-size: 13px;" :
-		"background-color: rgba(0, 0, 0, 150); border-radius: 14px; color: white; border: none; font-size: 13px;");
+	MeetingUI::AppTheme::setStyleVariant(*_pinBtn, pinned ? "meeting-room-window-pinbtn-2-active" : "meeting-room-window-pinbtn-2-normal");
 	_pinBtn->setVisible(pinned || underMouse());
 	invalidatePresentation();
 }
@@ -468,7 +462,7 @@ void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
 	QString initial = _displayName.isEmpty() ? (_identity.isEmpty() ? "U" : _identity.left(1)) : _displayName.left(1);
 	if (!_displayName.isEmpty()) {
 		QString clean = _displayName;
-		clean.remove(" (我)");
+		clean.remove(QCoreApplication::translate("MeetingUI", " (Me)"));
 		clean.remove(" (Host)");
 		if (!clean.isEmpty()) {
 			initial = clean.left(1).toUpper();
@@ -544,7 +538,7 @@ void VideoTileWidget::drawNetworkQualityBadge(QPainter &p, const QRect &r) {
 		p.drawRoundedRect(pausedRect, 5, 5);
 		p.setPen(Qt::white);
 		p.setFont(QFont("Microsoft YaHei", 8, QFont::DemiBold));
-		p.drawText(pausedRect, Qt::AlignCenter, QString::fromUtf8("网络暂停"));
+		p.drawText(pausedRect, Qt::AlignCenter, QCoreApplication::translate("MeetingUI", "Paused: Network"));
 	}
 
 	if (_isPinned) {
@@ -560,8 +554,8 @@ void VideoTileWidget::drawVideoPlaceholder(QPainter &p, const QRect &r) {
 	p.fillRect(r, QColor(0x14, 0x16, 0x1d));
 	p.setPen(_isVideoStreamPaused ? QColor(0xe6, 0x7e, 0x22) : QColor(0x86, 0x90, 0x9c));
 	p.setFont(QFont("Microsoft YaHei", 12));
-	const auto label = _isVideoStreamPaused ? QString::fromUtf8("视频流因网络拥塞暂停") :
-		QString::fromUtf8("正在等待视频画面...");
+	const auto label = _isVideoStreamPaused ? QCoreApplication::translate("MeetingUI", "Video paused due to network congestion") :
+		QCoreApplication::translate("MeetingUI", "Waiting for video...");
 	p.drawText(r.adjusted(12, 0, -12, 0), Qt::AlignCenter,
 		p.fontMetrics().elidedText(label, Qt::ElideRight, std::max(0, r.width() - 24)));
 }
@@ -581,7 +575,7 @@ void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
 
 	if (!_hasLoggedFirstPaint) {
 		_hasLoggedFirstPaint = true;
-		LogToConsole(LogCategory::WebRTC, "PAINT_FRAME", QString("VideoTileWidget [%1] 画面成功上屏绘制 (图像: %2x%3, 视口: %4x%5)")
+		LogToConsole(LogCategory::WebRTC, "PAINT_FRAME", QCoreApplication::translate("MeetingUI", "VideoTileWidget [%1] frame rendered (image: %2x%3, viewport: %4x%5)")
 			.arg(_displayName).arg(frameCopy.width()).arg(frameCopy.height()).arg(r.width()).arg(r.height()));
 	}
 
@@ -648,7 +642,7 @@ void VideoTileWidget::mouseDoubleClickEvent(QMouseEvent *e) {
 
 RoomTopBarWidget::RoomTopBarWidget(QWidget *parent)
 	: Ui::RpWidget(parent) {
-	setFixedHeight(44);
+	setMinimumHeight(44);
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
 }
@@ -660,14 +654,27 @@ void RoomTopBarWidget::updateDuration(int seconds) {
 
 void RoomTopBarWidget::setActiveSpeaker(const QString &speakerName) {
 	_speakerName = speakerName;
+	setToolTip(QCoreApplication::translate("MeetingUI", "Speaking: %1").arg(speakerName));
 	update();
 }
 
 void RoomTopBarWidget::setMeetingId(const QString &meetingId) {
 	_meetingId = meetingId;
+	if (auto *parent = parentWidget()) {
+		QCoreApplication::postEvent(parent, new QResizeEvent(parent->size(), parent->size()));
+	}
 	QResizeEvent ev(size(), size());
 	resizeEvent(&ev);
 	update();
+}
+
+int RoomTopBarWidget::heightForWidth(int width) const {
+ const QFontMetrics metrics(QFont("Microsoft YaHei", 9));
+ const int toolsWidth = metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "Picture-in-Picture"))
+     + metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "Console 📋"))
+     + metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "🐛 Simulate")) + 80;
+ const int idWidth = metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "🆔 Meeting ID: %1 📋").arg(_meetingId)) + 24;
+ return width < toolsWidth + idWidth + 420 ? 88 : 44;
 }
 
 void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
@@ -681,23 +688,32 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
 
 	int rightX = w - btnW * 3 - 6;
 
-	_simulateRect = QRect(rightX - 58, 8, 58, 28);
-	rightX -= 62;
-
-	_consoleRect = QRect(rightX - 62, 8, 62, 28);
-	rightX -= 66;
-
-	_layoutRect = QRect(rightX - 74, 8, 74, 28);
-	rightX -= 78;
-
-	const int leftInfoRight = 180;
-	if (!_meetingId.isEmpty()) {
-		_meetingIdRect = QRect(leftInfoRight, (h - 26) / 2, 178, 26);
-	} else {
-		_meetingIdRect = QRect();
-	}
-
-	const int leftBoundary = _meetingId.isEmpty() ? leftInfoRight : (leftInfoRight + 188);
+ const bool twoRows = heightForWidth(w) > 44;
+ const int rowY = twoRows ? 52 : 8;
+ const QFontMetrics metrics(QFont("Microsoft YaHei", 9));
+ const auto buttonWidth = [&](const QString &text) { return metrics.horizontalAdvance(text) + 24; };
+ const int simulateW = buttonWidth(QCoreApplication::translate("MeetingUI", "🐛 Simulate"));
+ const int consoleW = buttonWidth(QCoreApplication::translate("MeetingUI", "Console 📋"));
+ const int layoutW = std::max(buttonWidth(QCoreApplication::translate("MeetingUI", "Grid View")),
+     buttonWidth(QCoreApplication::translate("MeetingUI", "Picture-in-Picture"))) + 8;
+ _simulateRect = QRect(rightX - simulateW, rowY, simulateW, 28);
+ rightX -= simulateW + 4;
+ _consoleRect = QRect(rightX - consoleW, rowY, consoleW, 28);
+ rightX -= consoleW + 4;
+ _layoutRect = QRect(rightX - layoutW, rowY, layoutW, 28);
+ rightX -= layoutW + 4;
+ const int leftInfoRight = QFontMetrics(QFont("Microsoft YaHei", 10)).horizontalAdvance(
+     QCoreApplication::translate("MeetingUI", "Meetings")) + 116;
+ if (!_meetingId.isEmpty()) {
+  auto idFont = QFont("Microsoft YaHei", 9); idFont.setBold(true);
+  const int desired = QFontMetrics(idFont).horizontalAdvance(
+      QCoreApplication::translate("MeetingUI", "🆔 Meeting ID: %1 📋").arg(_meetingId)) + 24;
+  const int available = (twoRows ? w - btnW * 3 - 12 : rightX) - leftInfoRight - 8;
+  _meetingIdRect = QRect(leftInfoRight, 9, std::max(1, std::min(desired, available)), 26);
+ } else {
+  _meetingIdRect = QRect();
+ }
+ const int leftBoundary = twoRows ? 8 : (_meetingId.isEmpty() ? leftInfoRight : _meetingIdRect.right() + 8);
 	const int rightButtonsLeft = rightX;
 	const int availCenterW = rightButtonsLeft - leftBoundary - 16;
 
@@ -705,11 +721,11 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
 		const int pillW = std::min(availCenterW, 200);
 		int pillX = (w - pillW) / 2;
 		pillX = std::max(leftBoundary + 8, std::min(pillX, rightButtonsLeft - 8 - pillW));
-		_speakerCapsuleRect = QRect(pillX, (h - 26) / 2, pillW, 26);
+		_speakerCapsuleRect = QRect(pillX, (twoRows ? 53 : 9), pillW, 26);
 	} else if (availCenterW >= 110) {
 		const int pillW = availCenterW;
 		const int pillX = leftBoundary + 8;
-		_speakerCapsuleRect = QRect(pillX, (h - 26) / 2, pillW, 26);
+		_speakerCapsuleRect = QRect(pillX, (twoRows ? 53 : 9), pillW, 26);
 	} else {
 		_speakerCapsuleRect = QRect(); // 窗口空间不足时自动隐藏，彻底杜绝元素重叠
 	}
@@ -730,7 +746,7 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	// 1. 左侧：Logo、会议名称与持续时间
 	p.save();
 	const int logoX = 14;
-	const int logoY = h / 2;
+	const int logoY = 22;
 	p.setPen(Qt::NoPen);
 	p.setBrush(QColor(0x16, 0x77, 0xff));
 	p.drawEllipse(QPoint(logoX, logoY), 5, 5);
@@ -739,7 +755,8 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	QFont font("Microsoft YaHei", 10);
 	p.setFont(font);
 	p.setPen(QColor(0x4e, 0x59, 0x69));
-	p.drawText(QRect(logoX + 16, 0, 70, h), Qt::AlignVCenter | Qt::AlignLeft, QString::fromUtf8("会议"));
+	const int nameWidth = QFontMetrics(font).horizontalAdvance(QCoreApplication::translate("MeetingUI", "Meetings"));
+	p.drawText(QRect(logoX + 16, 0, nameWidth, 44), Qt::AlignVCenter | Qt::AlignLeft, QCoreApplication::translate("MeetingUI", "Meetings"));
 
 	const int minutes = _durationSeconds / 60;
 	const int secs = _durationSeconds % 60;
@@ -750,10 +767,10 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	QFont timeFont("Microsoft YaHei", 10, QFont::DemiBold);
 	p.setFont(timeFont);
 	p.setPen(QColor(0x1f, 0x23, 0x29));
-	p.drawText(QRect(logoX + 90, 0, 48, h), Qt::AlignVCenter | Qt::AlignLeft, timeStr);
+	p.drawText(QRect(logoX + 24 + nameWidth, 0, 60, 44), Qt::AlignVCenter | Qt::AlignLeft, timeStr);
 
-	const int sigX = logoX + 144;
-	const int sigY = h / 2 + 3;
+	const int sigX = logoX + 88 + nameWidth;
+	const int sigY = 25;
 	p.setPen(Qt::NoPen);
 	p.setBrush(QColor(0x00, 0xb4, 0x2a));
 	p.drawRect(sigX, sigY - 4, 2, 4);
@@ -774,7 +791,7 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 		mFont.setBold(true);
 		p.setFont(mFont);
 		p.setPen(_copiedAnim ? QColor(0x52, 0xc4, 0x1a) : (isHover ? QColor(0x16, 0x77, 0xff) : QColor(0x4e, 0x59, 0x69)));
-		QString dispText = _copiedAnim ? QString::fromUtf8("✔ 已复制会议号") : QString::fromUtf8("🆔 会议号: %1 📋").arg(_meetingId);
+		QString dispText = _copiedAnim ? QCoreApplication::translate("MeetingUI", "✔ Meeting ID Copied") : QCoreApplication::translate("MeetingUI", "🆔 Meeting ID: %1 📋").arg(_meetingId);
 		p.drawText(_meetingIdRect, Qt::AlignCenter, dispText);
 		p.restore();
 	}
@@ -789,7 +806,7 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 		QFont speakerFont("Microsoft YaHei", 9);
 		p.setFont(speakerFont);
 		p.setPen(QColor(0x16, 0x77, 0xff));
-		QString speakerText = _speakerName.isEmpty() ? QString::fromUtf8("正在讲话: 无") : QString::fromUtf8("正在讲话: %1").arg(_speakerName);
+		QString speakerText = _speakerName.isEmpty() ? QCoreApplication::translate("MeetingUI", "Speaking: None") : QCoreApplication::translate("MeetingUI", "Speaking: %1").arg(_speakerName);
 		QFontMetrics fm(speakerFont);
 		QString elided = fm.elidedText(speakerText, Qt::ElideMiddle, _speakerCapsuleRect.width() - 12);
 		p.drawText(_speakerCapsuleRect, Qt::AlignCenter, elided);
@@ -819,10 +836,10 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 		p.restore();
 	};
 
-	QString layoutStr = (_currentViewMode == VideoViewMode::Grid) ? QString::fromUtf8("宫格布局") : QString::fromUtf8("画中画");
+	QString layoutStr = (_currentViewMode == VideoViewMode::Grid) ? QCoreApplication::translate("MeetingUI", "Grid View") : QCoreApplication::translate("MeetingUI", "Picture-in-Picture");
 	drawTextBtn(_layoutRect, layoutStr, _hoverBtn == HoverBtn::Layout, true);
-	drawTextBtn(_consoleRect, QString::fromUtf8("控制台 📋"), _hoverBtn == HoverBtn::Console, false, QColor(0x16, 0x77, 0xff));
-	drawTextBtn(_simulateRect, QString::fromUtf8("🐛 模拟"), _hoverBtn == HoverBtn::Simulate, false, QColor(0xe6, 0x7e, 0x22));
+	drawTextBtn(_consoleRect, QCoreApplication::translate("MeetingUI", "Console 📋"), _hoverBtn == HoverBtn::Console, false, QColor(0x16, 0x77, 0xff));
+	drawTextBtn(_simulateRect, QCoreApplication::translate("MeetingUI", "🐛 Simulate"), _hoverBtn == HoverBtn::Simulate, false, QColor(0xe6, 0x7e, 0x22));
 
 	// 4. 窗口控制按钮
 	p.save();
@@ -851,7 +868,7 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 
 	if (!_meetingIdRect.isEmpty() && _meetingIdRect.contains(pos)) {
 		setCursor(Qt::PointingHandCursor);
-		setToolTip(QString::fromUtf8("点击复制会议号: %1").arg(_meetingId));
+		setToolTip(QCoreApplication::translate("MeetingUI", "Click to copy meeting ID: %1").arg(_meetingId));
 	} else if (next != HoverBtn::None) {
 		setCursor(Qt::PointingHandCursor);
 		setToolTip(QString());
@@ -907,7 +924,7 @@ void RoomTopBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {
 	QMenu menu(this);
 	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
 
-	QAction *header = menu.addAction(QString::fromUtf8("Simulate Scenario"));
+	QAction *header = menu.addAction(QCoreApplication::translate("MeetingUI", "Simulate Scenario"));
 	header->setEnabled(false);
 	menu.addSeparator();
 
@@ -952,41 +969,18 @@ void RoomTopBarWidget::leaveEventHook(QEvent *e) {
 
 RoomBottomBarWidget::RoomBottomBarWidget(QWidget *parent)
 	: Ui::RpWidget(parent) {
-	setFixedHeight(76);
+	setMinimumHeight(76);
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
 
 	_chatInput = new QLineEdit(this);
-	_chatInput->setPlaceholderText(QString::fromUtf8("说点什么..."));
-	_chatInput->setStyleSheet(R"(
-		QLineEdit {
-			background-color: #f2f3f5;
-			border-radius: 16px;
-			border: 1px solid transparent;
-			padding: 4px 14px;
-			font-size: 12px;
-			color: #1f2329;
-		}
-		QLineEdit:focus {
-			background-color: #ffffff;
-			border: 1px solid #1677ff;
-		}
-	)");
+	_chatInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Type a message..."));
+	MeetingUI::AppTheme::setStyleVariant(*_chatInput, "meeting-room-window-chatinput");
 
 	_handBtn = new QPushButton(QString::fromUtf8("✋"), this);
-	_handBtn->setToolTip(QString::fromUtf8("举手发言"));
+	_handBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Raise Hand to Speak"));
 	_handBtn->setFixedSize(32, 32);
-	_handBtn->setStyleSheet(R"(
-		QPushButton {
-			background-color: #f2f3f5;
-			border-radius: 16px;
-			border: none;
-			font-size: 15px;
-		}
-		QPushButton:hover {
-			background-color: #e5e6eb;
-		}
-	)");
+	MeetingUI::AppTheme::setStyleVariant(*_handBtn, "meeting-room-window-handbtn");
 
 	connect(_chatInput, &QLineEdit::returnPressed, [this] {
 		if (!_chatInput->text().trimmed().isEmpty()) {
@@ -996,7 +990,7 @@ RoomBottomBarWidget::RoomBottomBarWidget(QWidget *parent)
 	});
 
 	connect(_handBtn, &QPushButton::clicked, [this] {
-		QMessageBox::information(this, QString::fromUtf8("举手"), QString::fromUtf8("您已向主持人举手申请发言！"));
+		QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Raise Hand"), QCoreApplication::translate("MeetingUI", "The host has been notified that you would like to speak."));
 	});
 
 	_chatInput->hide();
@@ -1068,49 +1062,36 @@ bool RoomBottomBarWidget::HasAvailableVideoDevice() {
 	}
 }
 
+int RoomBottomBarWidget::heightForWidth(int width) const {
+ const auto cell = toolbarCellSize(width);
+ const int columns = std::max(1, std::min(8, (width - 116) / (cell.width() + 4)));
+ return ((8 + columns - 1) / columns) * cell.height() + 16;
+}
+
 void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
 
 	_toolItems = {
-		{ 1, QString::fromUtf8("解除静音"), QString::fromUtf8("静音"), QRect(), true },
-		{ 11, QString::fromUtf8("开启扬声器"), QString::fromUtf8("扬声器"), QRect(), true },
-		{ 2, QString::fromUtf8("开启视频"), QString::fromUtf8("停止视频"), QRect(), true },
-		{ 3, QString::fromUtf8("共享屏幕"), QString::fromUtf8("共享屏幕"), QRect(), true },
-		{ 4, QString::fromUtf8("邀请"), QString::fromUtf8("邀请"), QRect(), true },
-		{ 5, QString::fromUtf8("成员(%1)").arg(_participantCount), QString::fromUtf8("成员(%1)").arg(_participantCount), QRect(), false },
-		{ 6, QString::fromUtf8("聊天"), QString::fromUtf8("聊天"), QRect(), false },
-		{ 10, QString::fromUtf8("场景模拟"), QString::fromUtf8("场景模拟"), QRect(), true },
+		{ 1, QCoreApplication::translate("MeetingUI", "Unmute"), QCoreApplication::translate("MeetingUI", "Mute"), QRect(), true },
+		{ 11, QCoreApplication::translate("MeetingUI", "Enable Speaker"), QCoreApplication::translate("MeetingUI", "Speaker"), QRect(), true },
+		{ 2, QCoreApplication::translate("MeetingUI", "Start Video"), QCoreApplication::translate("MeetingUI", "Stop Video"), QRect(), true },
+		{ 3, QCoreApplication::translate("MeetingUI", "Share Screen"), QCoreApplication::translate("MeetingUI", "Share Screen"), QRect(), true },
+		{ 4, QCoreApplication::translate("MeetingUI", "Invite"), QCoreApplication::translate("MeetingUI", "Invite"), QRect(), true },
+		{ 5, QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(_participantCount), QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(_participantCount), QRect(), false },
+		{ 6, QCoreApplication::translate("MeetingUI", "Chat"), QCoreApplication::translate("MeetingUI", "Chat"), QRect(), false },
+		{ 10, QCoreApplication::translate("MeetingUI", "Simulate Scenario"), QCoreApplication::translate("MeetingUI", "Simulate Scenario"), QRect(), true },
 	};
 
-	int itemW = 56;
-	int gap = 6;
-	if (w < 880) {
-		itemW = 46;
-		gap = 2;
-	} else if (w < 1020) {
-		itemW = 50;
-		gap = 4;
-	}
-
-	const int itemH = 60;
-	const int numItems = static_cast<int>(_toolItems.size());
-	const int totalItemsW = numItems * itemW + (numItems - 1) * gap;
-
-	_endMeetingRect = QRect(w - 92, 12, 78, 52);
-
-	int startX = (w - totalItemsW) / 2;
-	if (startX + totalItemsW > w - 100) {
-		startX = w - 100 - totalItemsW;
-	}
-
-	_chatInput->hide();
-	_handBtn->hide();
-
-	const int startY = 8;
-	for (size_t i = 0; i < _toolItems.size(); ++i) {
-		_toolItems[i].rect = QRect(startX + static_cast<int>(i) * (itemW + gap), startY, itemW, itemH);
-	}
+ const auto cell = toolbarCellSize(w);
+ const int columns = std::max(1, std::min(8, (w - 116) / (cell.width() + 4)));
+ _endMeetingRect = QRect(w - 104, 8, 96, cell.height());
+ _chatInput->hide();
+ _handBtn->hide();
+ for (size_t i = 0; i < _toolItems.size(); ++i) {
+  _toolItems[i].rect = QRect(8 + (i % columns) * (cell.width() + 4),
+      8 + (i / columns) * cell.height(), cell.width(), cell.height());
+ }
 }
 
 void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
@@ -1253,22 +1234,24 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 		}
 
 		QString title = item.title;
-		if (item.id == 1) title = _audioMuted ? QString::fromUtf8("解除静音") : QString::fromUtf8("静音");
-		else if (item.id == 11) title = _speakerMuted ? QString::fromUtf8("开启扬声器") : QString::fromUtf8("扬声器");
-		else if (item.id == 2) title = _videoEnabled ? QString::fromUtf8("停止视频") : QString::fromUtf8("开启视频");
+		if (item.id == 1) title = _audioMuted ? QCoreApplication::translate("MeetingUI", "Unmute") : QCoreApplication::translate("MeetingUI", "Mute");
+		else if (item.id == 11) title = _speakerMuted ? QCoreApplication::translate("MeetingUI", "Enable Speaker") : QCoreApplication::translate("MeetingUI", "Speaker");
+		else if (item.id == 2) title = _videoEnabled ? QCoreApplication::translate("MeetingUI", "Stop Video") : QCoreApplication::translate("MeetingUI", "Start Video");
 		else if (item.id == 3) {
 			using State = livekit::ScreenShareState;
-			if (_screenShareState == State::Starting) title = QString::fromUtf8("取消共享");
-			else if (_screenShareState == State::Active) title = QString::fromUtf8("停止共享");
-			else if (_screenShareState == State::Stopping) title = QString::fromUtf8("正在停止");
-			else if (_screenShareState == State::StopFailed) title = QString::fromUtf8("重试停止");
+			if (_screenShareState == State::Starting) title = QCoreApplication::translate("MeetingUI", "Cancel Sharing");
+			else if (_screenShareState == State::Active) title = QCoreApplication::translate("MeetingUI", "Stop Sharing");
+			else if (_screenShareState == State::Stopping) title = QCoreApplication::translate("MeetingUI", "Stopping");
+			else if (_screenShareState == State::StopFailed) title = QCoreApplication::translate("MeetingUI", "Retry Stop");
 		}
-		else if (item.id == 5) title = QString::fromUtf8("成员(%1)").arg(_participantCount);
+		else if (item.id == 5) title = QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(_participantCount);
 
-		QFont font("Microsoft YaHei", r.width() < 50 ? 8 : 9);
+		QFont font("Microsoft YaHei");
+		font.setPixelSize(11);
 		p.setFont(font);
 		p.setPen(QColor(0x4e, 0x59, 0x69));
-		p.drawText(QRect(r.x(), r.bottom() - 18, r.width(), 16), Qt::AlignCenter, title);
+		p.drawText(QRect(r.x(), r.y() + 32, r.width(), r.height() - 32),
+			Qt::AlignCenter | Qt::TextWordWrap, title);
 
 		if (item.hasDropdown) {
 			p.setPen(QPen(QColor(0x86, 0x90, 0x9c), 1.4));
@@ -1300,9 +1283,13 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 	p.drawLine(ecx - 4, ecy - 3, ecx - 1, ecy);
 	p.drawLine(ecx - 4, ecy + 3, ecx - 1, ecy);
 
-	p.setFont(QFont("Microsoft YaHei", 10, QFont::Bold));
+	QFont endFont("Microsoft YaHei");
+	endFont.setPixelSize(11);
+	endFont.setBold(true);
+	p.setFont(endFont);
 	p.setPen(QColor(0xf5, 0x3f, 0x3f));
-	p.drawText(QRect(_endMeetingRect.x(), _endMeetingRect.bottom() - 20, _endMeetingRect.width(), 18), Qt::AlignCenter, QString::fromUtf8("结束会议"));
+	p.drawText(QRect(_endMeetingRect.x(), _endMeetingRect.y() + 32, _endMeetingRect.width(), _endMeetingRect.height() - 32),
+		Qt::AlignCenter | Qt::TextWordWrap, QCoreApplication::translate("MeetingUI", "End Meeting"));
 	p.restore();
 }
 
@@ -1311,7 +1298,7 @@ void RoomBottomBarWidget::showAudioDeviceMenu(const QPoint &globalPos) {
 	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
 
 	// 1. 麦克风输入设备
-	QAction *micHeader = menu.addAction(QString::fromUtf8("🎤 选择麦克风 (输入设备)"));
+	QAction *micHeader = menu.addAction(QCoreApplication::translate("MeetingUI", "🎤 Select Microphone (Input)"));
 	micHeader->setEnabled(false);
 
 	auto inputDevices = livekit::WasapiEnumerator::EnumerateInputDevices();
@@ -1321,7 +1308,7 @@ void RoomBottomBarWidget::showAudioDeviceMenu(const QPoint &globalPos) {
 	for (const auto &dev : inputDevices) {
 		QString title = QString::fromStdString(dev.name);
 		if (dev.is_default) {
-			title += QString::fromUtf8(" (系统默认)");
+			title += QCoreApplication::translate("MeetingUI", " (System Default)");
 		}
 		QAction *act = menu.addAction(title);
 		act->setCheckable(true);
@@ -1341,7 +1328,7 @@ void RoomBottomBarWidget::showAudioDeviceMenu(const QPoint &globalPos) {
 	menu.addSeparator();
 
 	// 2. 扬声器输出设备
-	QAction *spkHeader = menu.addAction(QString::fromUtf8("🔊 选择扬声器 (输出设备)"));
+	QAction *spkHeader = menu.addAction(QCoreApplication::translate("MeetingUI", "🔊 Select Speaker (Output)"));
 	spkHeader->setEnabled(false);
 
 	auto outputDevices = livekit::WasapiEnumerator::EnumerateOutputDevices();
@@ -1350,7 +1337,7 @@ void RoomBottomBarWidget::showAudioDeviceMenu(const QPoint &globalPos) {
 		const auto &dev = outputDevices[i];
 		QString title = QString::fromStdString(dev.name);
 		if (dev.is_default) {
-			title += QString::fromUtf8(" (系统默认)");
+			title += QCoreApplication::translate("MeetingUI", " (System Default)");
 		}
 		QAction *act = menu.addAction(title);
 		act->setCheckable(true);
@@ -1372,7 +1359,7 @@ void RoomBottomBarWidget::showSpeakerDeviceMenu(const QPoint &globalPos) {
 	QMenu menu(this);
 	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
 
-	QAction *spkHeader = menu.addAction(QString::fromUtf8("🔊 选择扬声器 (输出设备)"));
+	QAction *spkHeader = menu.addAction(QCoreApplication::translate("MeetingUI", "🔊 Select Speaker (Output)"));
 	spkHeader->setEnabled(false);
 
 	auto outputDevices = livekit::WasapiEnumerator::EnumerateOutputDevices();
@@ -1381,7 +1368,7 @@ void RoomBottomBarWidget::showSpeakerDeviceMenu(const QPoint &globalPos) {
 		const auto &dev = outputDevices[i];
 		QString title = QString::fromStdString(dev.name);
 		if (dev.is_default) {
-			title += QString::fromUtf8(" (系统默认)");
+			title += QCoreApplication::translate("MeetingUI", " (System Default)");
 		}
 		QAction *act = menu.addAction(title);
 		act->setCheckable(true);
@@ -1398,7 +1385,7 @@ void RoomBottomBarWidget::showSpeakerDeviceMenu(const QPoint &globalPos) {
 
 	menu.addSeparator();
 
-	QAction *toggleMuteAct = menu.addAction(_speakerMuted ? QString::fromUtf8("🔊 开启扬声器输出") : QString::fromUtf8("🔇 静音扬声器输出"));
+	QAction *toggleMuteAct = menu.addAction(_speakerMuted ? QCoreApplication::translate("MeetingUI", "🔊 Enable Speaker Output") : QCoreApplication::translate("MeetingUI", "🔇 Mute Speaker Output"));
 	connect(toggleMuteAct, &QAction::triggered, [this] {
 		_speakerMuted = !_speakerMuted;
 		_toggleSpeakerStream.fire_copy(_speakerMuted);
@@ -1412,7 +1399,7 @@ void RoomBottomBarWidget::showVideoDeviceMenu(const QPoint &globalPos) {
 	QMenu menu(this);
 	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
 
-	QAction *camHeader = menu.addAction(QString::fromUtf8("📷 选择摄像头设备"));
+	QAction *camHeader = menu.addAction(QCoreApplication::translate("MeetingUI", "📷 Select Camera"));
 	camHeader->setEnabled(false);
 
 	auto videoDevices = livekit::DShowEnumerator::EnumerateVideoDevices();
@@ -1422,7 +1409,7 @@ void RoomBottomBarWidget::showVideoDeviceMenu(const QPoint &globalPos) {
 	for (const auto &dev : videoDevices) {
 		QString title = QString::fromStdString(dev.name);
 		if (dev.path == defDev.path) {
-			title += QString::fromUtf8(" (系统默认)");
+			title += QCoreApplication::translate("MeetingUI", " (System Default)");
 		}
 		QAction *act = menu.addAction(title);
 		act->setCheckable(true);
@@ -1440,13 +1427,13 @@ void RoomBottomBarWidget::showVideoDeviceMenu(const QPoint &globalPos) {
 	}
 
 	if (videoDevices.empty()) {
-		QAction *emptyAct = menu.addAction(QString::fromUtf8("未检测到可用摄像头"));
+		QAction *emptyAct = menu.addAction(QCoreApplication::translate("MeetingUI", "No camera available"));
 		emptyAct->setEnabled(false);
 	}
 
 	menu.addSeparator();
 
-	QAction *toggleVideoAct = menu.addAction(!_videoEnabled ? QString::fromUtf8("📷 开启摄像头视频") : QString::fromUtf8("🚫 停止摄像头视频"));
+	QAction *toggleVideoAct = menu.addAction(!_videoEnabled ? QCoreApplication::translate("MeetingUI", "📷 Start Camera Video") : QCoreApplication::translate("MeetingUI", "🚫 Stop Camera Video"));
 	connect(toggleVideoAct, &QAction::triggered, [this] {
 		_videoEnabled = !_videoEnabled;
 		_toggleVideoStream.fire_copy(_videoEnabled);
@@ -1530,8 +1517,8 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 					}
 					if (_audioMuted) {
 						if (!HasAvailableAudioDevice()) {
-							QMessageBox::warning(this, QString::fromUtf8("麦克风不可用"),
-								QString::fromUtf8("未检测到可用的麦克风输入设备，无法开启麦克风！"));
+							QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Microphone Unavailable"),
+								QCoreApplication::translate("MeetingUI", "No microphone input device is available. The microphone cannot be enabled."));
 							break;
 						}
 						_audioMuted = false;
@@ -1550,8 +1537,8 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 					}
 					if (_speakerMuted) {
 						if (!HasAvailableSpeakerDevice()) {
-							QMessageBox::warning(this, QString::fromUtf8("扬声器不可用"),
-								QString::fromUtf8("未检测到可用的扬声器输出设备，无法开启扬声器！"));
+							QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Speaker Unavailable"),
+								QCoreApplication::translate("MeetingUI", "No speaker output device is available. The speaker cannot be enabled."));
 							break;
 						}
 						_speakerMuted = false;
@@ -1571,8 +1558,8 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 					if (!_videoEnabled) {
 						// 准备开启视频，先检查是否有可用摄像头
 						if (!HasAvailableVideoDevice()) {
-							QMessageBox::warning(this, QString::fromUtf8("摄像头不可用"),
-								QString::fromUtf8("未检测到可用的摄像头设备，无法开启视频！"));
+							QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Camera Unavailable"),
+								QCoreApplication::translate("MeetingUI", "No camera device is available. Video cannot be enabled."));
 							break;
 						}
 						_videoEnabled = true;
@@ -1609,7 +1596,7 @@ void RoomBottomBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {
 	QMenu menu(this);
 	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
 
-	QAction *header = menu.addAction(QString::fromUtf8("Simulate Scenario"));
+	QAction *header = menu.addAction(QCoreApplication::translate("MeetingUI", "Simulate Scenario"));
 	header->setEnabled(false);
 	menu.addSeparator();
 
@@ -1665,7 +1652,7 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 		_coordinator = OpenMeeting::MeetingCoordinator::create(this);
 	}
 	setupCameraCompletionOwner(OpenMeeting::SessionManager::instance());
-	setWindowTitle(QString::fromUtf8("LiveKit 会议室 - %1").arg(config.displayName));
+	setWindowTitle(QCoreApplication::translate("MeetingUI", "LiveKit Meeting Room - %1").arg(config.displayName));
 	resize(1120, 720);
 	setMinimumSize(850, 560);
 	if (!parent) {
@@ -1679,13 +1666,13 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	if (!_config.audioMuted) {
 		if (!RoomBottomBarWidget::HasAvailableAudioDevice()) {
 			_config.audioMuted = true;
-			LogToConsole(LogCategory::Media, "AUDIO", "未检测到可用的麦克风设备，麦克风已自动置为静音状态");
+			LogToConsole(LogCategory::Media, "AUDIO", QCoreApplication::translate("MeetingUI", "No microphone available. The microphone has been muted automatically."));
 		}
 	}
 	if (_config.videoEnabled) {
 		if (!RoomBottomBarWidget::HasAvailableVideoDevice()) {
 			_config.videoEnabled = false;
-			LogToConsole(LogCategory::Media, "VIDEO", "未检测到可用的摄像头设备，摄像头已自动置为关闭状态");
+			LogToConsole(LogCategory::Media, "VIDEO", QCoreApplication::translate("MeetingUI", "No camera available. The camera has been turned off automatically."));
 		}
 	}
 
@@ -1746,9 +1733,9 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	acfg.target_channels = 2;
 	if (_wasapiCap->Init(acfg, _localAudioSource) && _wasapiCap->Start()) {
 		_wasapiCap->SetMute(_config.audioMuted);
-		LogToConsole(LogCategory::Media, "WASAPI", QString("成功启动物理麦克风音频采集 (48kHz 双声道, 初始状态: %1)").arg(_config.audioMuted ? "静音" : "开启"));
+		LogToConsole(LogCategory::Media, "WASAPI", QCoreApplication::translate("MeetingUI", "Microphone capture started (48 kHz stereo, initial state: %1)").arg(_config.audioMuted ? QCoreApplication::translate("MeetingUI", "Mute") : QCoreApplication::translate("MeetingUI", "On")));
 	} else {
-		LogToConsole(LogCategory::Error, "WASAPI", "物理麦克风初始化或启动失败");
+		LogToConsole(LogCategory::Error, "WASAPI", QCoreApplication::translate("MeetingUI", "Unable to initialize or start the microphone"));
 	}
 
 	// 5. 启动物理摄像头 DirectShow 采集 (使用 CameraSourceManager 支持平滑热切换)
@@ -1797,13 +1784,13 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 				_usingRealCamera = true;
 				_currentCameraPath = QString::fromStdString(selectedDevice.path);
 				LogToConsole(LogCategory::Media, "DSHOW",
-					QString("成功启动物理摄像头: %1 (%2x%3@%4fps NV12)")
+					QCoreApplication::translate("MeetingUI", "Camera started: %1 (%2x%3@%4fps NV12)")
 						.arg(QString::fromStdString(selectedDevice.name))
 						.arg(vcfg.width).arg(vcfg.height).arg(vcfg.fps));
 			}
 		}
 	} catch (const std::exception &ex) {
-		LogToConsole(LogCategory::Error, "DSHOW", QString("摄像头初始化异常: %1").arg(ex.what()));
+		LogToConsole(LogCategory::Error, "DSHOW", QCoreApplication::translate("MeetingUI", "Camera initialization error: %1").arg(ex.what()));
 	}
 
 	_localTile->setVideoActive(_config.videoEnabled && _usingRealCamera);
@@ -1867,7 +1854,7 @@ MeetingRoomWindow::MeetingRoomWindow(
 	_stageContainer = new QWidget(this);
 	_bottomBar = new RoomBottomBarWidget(this);
 	_localTile = new VideoTileWidget(
-		QString::fromUtf8("%1 (我)").arg(_config.displayName),
+		QCoreApplication::translate("MeetingUI", "%1 (Me)").arg(_config.displayName),
 		true,
 		_stageContainer);
 	_localTile->setIdentity("local");
@@ -1939,10 +1926,10 @@ void MeetingRoomWindow::initLayout() {
 	if (mId.isEmpty()) mId = _config.meetingId;
 	if (!mId.isEmpty()) {
 		_topBar->setMeetingId(mId);
-		setWindowTitle(QString::fromUtf8("会议 - 会议号: %1").arg(mId));
+		setWindowTitle(QCoreApplication::translate("MeetingUI", "Meeting - ID: %1").arg(mId));
 	}
 	_stageContainer = new QWidget(this);
-	_stageContainer->setStyleSheet("background-color: #12141a;");
+	MeetingUI::AppTheme::setStyleVariant(*_stageContainer, "meeting-room-window-stagecontainer");
 	if ((_videoCanvas = livekit::render::CreateVideoCanvas(_stageContainer, &_renderDiagnostics))) {
 		_videoCanvas->setGeometry(_stageContainer->rect());
 		_videoCanvas->hide();
@@ -1950,7 +1937,7 @@ void MeetingRoomWindow::initLayout() {
 		        this, &MeetingRoomWindow::fallBackToQtCpuBackend, Qt::QueuedConnection);
 	} else {
 		LogToConsole(LogCategory::WebRTC, "RENDER",
-			"Qt CPU 视频后端: " + livekit::render::RenderDiagnosticsSafeSummary(_renderDiagnostics));
+			QCoreApplication::translate("MeetingUI", "Qt CPU video backend: ") + livekit::render::RenderDiagnosticsSafeSummary(_renderDiagnostics));
 	}
 	_bottomBar = new RoomBottomBarWidget(this);
 
@@ -1971,7 +1958,7 @@ void MeetingRoomWindow::initLayout() {
 		OpenMeeting::ChatMessageItem item;
 		item.id = msgId;
 		item.senderIdentity = "local";
-		item.senderName = QString::fromUtf8("%1 (我)").arg(_config.displayName);
+		item.senderName = QCoreApplication::translate("MeetingUI", "%1 (Me)").arg(_config.displayName);
 		item.text = text;
 		item.timestamp = QDateTime::currentMSecsSinceEpoch();
 		item.seq = seq;
@@ -1982,7 +1969,7 @@ void MeetingRoomWindow::initLayout() {
 		if (_coordinator) {
 			_coordinator->sendChatMessage(text, msgId, seq);
 		}
-		LogToConsole(LogCategory::Participant, "CHAT", QString("我: %1").arg(text));
+		LogToConsole(LogCategory::Participant, "CHAT", QCoreApplication::translate("MeetingUI", "Me: %1").arg(text));
 	});
 
 	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::imageSent, this, [this](const QString &fileName, const QByteArray &data) {
@@ -1991,7 +1978,7 @@ void MeetingRoomWindow::initLayout() {
 		OpenMeeting::ChatMessageItem item;
 		item.id = msgId;
 		item.senderIdentity = "local";
-		item.senderName = QString::fromUtf8("%1 (我)").arg(_config.displayName);
+		item.senderName = QCoreApplication::translate("MeetingUI", "%1 (Me)").arg(_config.displayName);
 		item.type = OpenMeeting::ChatMessageType::Image;
 		item.fileName = fileName;
 		item.fileSize = data.size();
@@ -2006,7 +1993,7 @@ void MeetingRoomWindow::initLayout() {
 		if (_coordinator) {
 			_coordinator->sendChatMediaMessage(msgId, "image", fileName, data, seq);
 		}
-		LogToConsole(LogCategory::Participant, "CHAT", QString("我 发送了图片: %1 (%2)").arg(fileName).arg(OpenMeeting::ChatBubbleWidget::formatFileSize(data.size())));
+		LogToConsole(LogCategory::Participant, "CHAT", QCoreApplication::translate("MeetingUI", "I sent an image: %1 (%2)").arg(fileName).arg(OpenMeeting::ChatBubbleWidget::formatFileSize(data.size())));
 	});
 
 	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::fileSent, this, [this](const QString &fileName, const QByteArray &data) {
@@ -2015,7 +2002,7 @@ void MeetingRoomWindow::initLayout() {
 		OpenMeeting::ChatMessageItem item;
 		item.id = msgId;
 		item.senderIdentity = "local";
-		item.senderName = QString::fromUtf8("%1 (我)").arg(_config.displayName);
+		item.senderName = QCoreApplication::translate("MeetingUI", "%1 (Me)").arg(_config.displayName);
 		item.type = OpenMeeting::ChatMessageType::File;
 		item.fileName = fileName;
 		item.fileSize = data.size();
@@ -2030,7 +2017,7 @@ void MeetingRoomWindow::initLayout() {
 		if (_coordinator) {
 			_coordinator->sendChatMediaMessage(msgId, "file", fileName, data, seq);
 		}
-		LogToConsole(LogCategory::Participant, "CHAT", QString("我 发送了文件: %1 (%2)").arg(fileName).arg(OpenMeeting::ChatBubbleWidget::formatFileSize(data.size())));
+		LogToConsole(LogCategory::Participant, "CHAT", QCoreApplication::translate("MeetingUI", "I sent a file: %1 (%2)").arg(fileName).arg(OpenMeeting::ChatBubbleWidget::formatFileSize(data.size())));
 	});
 
 	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::retryRequested, this, [this](const QString &msgId) {
@@ -2049,7 +2036,7 @@ void MeetingRoomWindow::initLayout() {
 		}
 	});
 
-	_localTile = new VideoTileWidget(QString::fromUtf8("%1 (我)").arg(_config.displayName), true, _stageContainer);
+	_localTile = new VideoTileWidget(QCoreApplication::translate("MeetingUI", "%1 (Me)").arg(_config.displayName), true, _stageContainer);
 	_localTile->setIdentity("local");
 	_localTile->show();
 
@@ -2062,18 +2049,9 @@ void MeetingRoomWindow::initLayout() {
 	_localTile->setAudioMuted(_config.audioMuted);
 	_localTile->setVideoActive(_config.videoEnabled);
 
-	_inviteHintBanner = new QLabel(QString::fromUtf8("等待更多参会人加入会议..."), _stageContainer);
+	_inviteHintBanner = new QLabel(QCoreApplication::translate("MeetingUI", "Waiting for more participants..."), _stageContainer);
 	_inviteHintBanner->setAlignment(Qt::AlignCenter);
-	_inviteHintBanner->setStyleSheet(R"(
-		QLabel {
-			background-color: rgba(255, 255, 255, 25);
-			color: #e5e6eb;
-			border-radius: 8px;
-			font-size: 13px;
-			font-family: "Microsoft YaHei";
-			padding: 6px 14px;
-		}
-	)");
+	MeetingUI::AppTheme::setStyleVariant(*_inviteHintBanner, "meeting-room-window-invitehintbanner");
 
 	_recoveryBanner = new QLabel(_stageContainer);
 	_recoveryBanner->setAlignment(Qt::AlignCenter);
@@ -2125,7 +2103,7 @@ void MeetingRoomWindow::initLayout() {
 		case livekit::SimulateScenarioType::ParticipantMetadata: name = "participantMetadata"; break;
 		case livekit::SimulateScenarioType::Clear: name = "clear"; break;
 		}
-		LogToConsole(LogCategory::General, "SIMULATE", QString("已触发场景模拟: %1").arg(name));
+		LogToConsole(LogCategory::General, "SIMULATE", QCoreApplication::translate("MeetingUI", "Scenario simulation triggered: %1").arg(name));
 	};
 
 	_topBar->simulateScenarioRequested() | rpl::on_next(handleSimulate, lifetime());
@@ -2149,14 +2127,14 @@ void MeetingRoomWindow::initLayout() {
 				local->SetMuted(_localAudioTrack->sid(), muted);
 			}
 		}
-		LogToConsole(LogCategory::Media, "AUDIO", muted ? "用户点击静音麦克风" : "用户点击开启/解除麦克风静音");
+		LogToConsole(LogCategory::Media, "AUDIO", muted ? QCoreApplication::translate("MeetingUI", "User muted the microphone") : QCoreApplication::translate("MeetingUI", "User enabled or unmuted the microphone"));
 	}, lifetime());
 
 	_bottomBar->toggleSpeakerRequested() | rpl::on_next([this](bool muted) {
 		if (_room) {
 			_room->SetAudioOutputMuted(muted);
 		}
-		LogToConsole(LogCategory::Media, "SPEAKER", muted ? "用户点击静音扬声器 (关闭声音输出)" : "用户点击开启扬声器 (恢复声音输出)");
+		LogToConsole(LogCategory::Media, "SPEAKER", muted ? QCoreApplication::translate("MeetingUI", "User muted speaker output") : QCoreApplication::translate("MeetingUI", "User enabled speaker output"));
 	}, lifetime());
 
 	_bottomBar->toggleVideoRequested() | rpl::on_next([this](bool enabled) {
@@ -2175,7 +2153,7 @@ void MeetingRoomWindow::initLayout() {
 			}
 		}
 		updateVideoLayout();
-		LogToConsole(LogCategory::Media, "VIDEO", enabled ? "用户点击开启本地视频" : "用户点击关闭本地视频");
+		LogToConsole(LogCategory::Media, "VIDEO", enabled ? QCoreApplication::translate("MeetingUI", "User enabled local video") : QCoreApplication::translate("MeetingUI", "User disabled local video"));
 	}, lifetime());
 
 	setupInvitationBinding();
@@ -2228,9 +2206,9 @@ void MeetingRoomWindow::initLayout() {
 				_bottomBar->setChatUnreadCount(_bottomBar->chatUnreadCount() + 1);
 			}
 
-			LogToConsole(LogCategory::Participant, "CHAT", QString("正在接收 %1 发送的%2: %3 (%4)...")
+			LogToConsole(LogCategory::Participant, "CHAT", QCoreApplication::translate("MeetingUI", "Receiving %2 from %1: %3 (%4)...")
 				.arg(dispName)
-				.arg(mediaType == "image" ? "图片" : "文件")
+				.arg(mediaType == "image" ? QCoreApplication::translate("MeetingUI", "image") : QCoreApplication::translate("MeetingUI", "file"))
 				.arg(fileName)
 				.arg(OpenMeeting::ChatBubbleWidget::formatFileSize(totalSize)));
 		});
@@ -2251,9 +2229,9 @@ void MeetingRoomWindow::initLayout() {
 
 			QString dispName = senderName.trimmed();
 			if (dispName.isEmpty() || dispName.startsWith("PA_")) dispName = senderIdentity;
-			LogToConsole(LogCategory::Participant, "CHAT", QString("%1 发送的%2已接收完成: %3 (%4)")
+			LogToConsole(LogCategory::Participant, "CHAT", QCoreApplication::translate("MeetingUI", "Received %2 from %1: %3 (%4)")
 				.arg(dispName)
-				.arg(mediaType == "image" ? "图片" : "文件")
+				.arg(mediaType == "image" ? QCoreApplication::translate("MeetingUI", "image") : QCoreApplication::translate("MeetingUI", "file"))
 				.arg(fileName)
 				.arg(OpenMeeting::ChatBubbleWidget::formatFileSize(data.size())));
 		});
@@ -2263,7 +2241,7 @@ void MeetingRoomWindow::initLayout() {
 			if (_chatSidebar) {
 				_chatSidebar->failReceivingMedia(transferId, reason);
 			}
-			LogToConsole(LogCategory::Participant, "CHAT", QString("多媒体接收中断: %1").arg(reason));
+			LogToConsole(LogCategory::Participant, "CHAT", QCoreApplication::translate("MeetingUI", "Media transfer interrupted: %1").arg(reason));
 		});
 
 		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMessageSendProgress,
@@ -2306,13 +2284,13 @@ void MeetingRoomWindow::initLayout() {
 			if (auto apm = _wasapiCap->apm_processor()) {
 				apm->Reset();
 			}
-			LogToConsole(LogCategory::Media, "DEVICE", QString("麦克风设备已切换为: %1").arg(devId.isEmpty() ? "(系统默认)" : devId));
+			LogToConsole(LogCategory::Media, "DEVICE", QCoreApplication::translate("MeetingUI", "Microphone switched to: %1").arg(devId.isEmpty() ? QCoreApplication::translate("MeetingUI", "(System Default)") : devId));
 		}
 	}, lifetime());
 
 	_bottomBar->speakerDeviceChanged() | rpl::on_next([this](int idx) {
 		livekit::WebRTCManager::Instance().SetPlayoutDevice(static_cast<uint16_t>(idx));
-		LogToConsole(LogCategory::Media, "DEVICE", QString("扬声器播放设备已切换为索引: %1").arg(idx));
+		LogToConsole(LogCategory::Media, "DEVICE", QCoreApplication::translate("MeetingUI", "Speaker output device switched to index: %1").arg(idx));
 	}, lifetime());
 
 	bindCameraDeviceChanges();
@@ -2396,7 +2374,7 @@ void MeetingRoomWindow::requestCameraSwitch(const QString &devicePath) {
 	QPointer<MeetingRoomWindow> guard(this);
 	if (logEffect) {
 		logEffect(false, "CAMERA_SWITCH",
-			QString("正在平滑切换摄像头至: %1 ...").arg(devicePath));
+			QCoreApplication::translate("MeetingUI", "Switching camera to: %1 ...").arg(devicePath));
 	}
 	if (!guard || !ticket.isCurrent()) {
 		return;
@@ -2436,7 +2414,7 @@ void MeetingRoomWindow::handleCameraSwitchResult(
 		}
 		if (logEffect) {
 			logEffect(false, "CAMERA_SWITCH",
-				QString("摄像头平滑切换成功: %1").arg(devicePath));
+				QCoreApplication::translate("MeetingUI", "Camera switched successfully: %1").arg(devicePath));
 		}
 		return;
 	}
@@ -2444,7 +2422,7 @@ void MeetingRoomWindow::handleCameraSwitchResult(
 	const auto errorText = QString::fromStdString(error);
 	if (logEffect) {
 		logEffect(true, "CAMERA_SWITCH",
-			QString("摄像头切换失败，已自动回滚原设备: %1").arg(errorText));
+			QCoreApplication::translate("MeetingUI", "Camera switch failed. The previous device was restored: %1").arg(errorText));
 	}
 	if (!guard || !ticket.isCurrent() || !guard->_cameraSessionManager
 		|| guard->_cameraSessionManager->isSessionInvalidating()) {
@@ -2453,8 +2431,8 @@ void MeetingRoomWindow::handleCameraSwitchResult(
 	if (warningEffect) {
 		warningEffect(
 			guard,
-			QString::fromUtf8("摄像头切换失败"),
-			QString::fromUtf8("无法启动所选摄像头设备，已保持原设备采集。\n原因: %1")
+			QCoreApplication::translate("MeetingUI", "Camera Switch Failed"),
+			QCoreApplication::translate("MeetingUI", "Unable to start the selected camera. Capture continues on the previous device.\nReason: %1")
 				.arg(errorText));
 	}
 }
@@ -2514,27 +2492,14 @@ void MeetingRoomWindow::updateRecoveryStateUi(OpenMeeting::MeetingState state, c
 	if (!_recoveryBanner) return;
 
 	const int stageW = _stageContainer ? _stageContainer->width() : width();
-	const int bannerW = std::min(stageW - 32, 420);
-	const int bannerH = 34;
-	_recoveryBanner->setGeometry((stageW - bannerW) / 2, 16, bannerW, bannerH);
+
 
 	switch (state) {
 	case OpenMeeting::MeetingState::ConnectingRoom:
 	case OpenMeeting::MeetingState::StartingLocalMedia: {
 		if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
-		_recoveryBanner->setStyleSheet(R"(
-			QLabel {
-				background-color: rgba(30, 58, 138, 230);
-				color: #e0e7ff;
-				border: 1px solid #3b82f6;
-				border-radius: 8px;
-				font-size: 13px;
-				font-weight: bold;
-				font-family: "Segoe UI", "Microsoft YaHei";
-				padding: 6px 16px;
-			}
-		)");
-		_recoveryBanner->setText(QString::fromUtf8("🔄 正在建立会议连接..."));
+		MeetingUI::AppTheme::setStyleVariant(*_recoveryBanner, "meeting-room-window-recoverybanner");
+		_recoveryBanner->setText(QCoreApplication::translate("MeetingUI", "🔄 Connecting to the meeting..."));
 		_recoveryBanner->show();
 		_recoveryBanner->raise();
 		if (_bottomBar) _bottomBar->setInRecovery(true);
@@ -2543,19 +2508,8 @@ void MeetingRoomWindow::updateRecoveryStateUi(OpenMeeting::MeetingState state, c
 	case OpenMeeting::MeetingState::Reconnecting: {
 		if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
 		_wasReconnecting = true;
-		_recoveryBanner->setStyleSheet(R"(
-			QLabel {
-				background-color: rgba(217, 119, 6, 235);
-				color: #ffffff;
-				border: 1px solid #f59e0b;
-				border-radius: 8px;
-				font-size: 13px;
-				font-weight: bold;
-				font-family: "Segoe UI", "Microsoft YaHei";
-				padding: 6px 16px;
-			}
-		)");
-		_recoveryBanner->setText(QString::fromUtf8("⚠️ 网络连接异常，正在尝试自动恢复会议 (重连中)..."));
+		MeetingUI::AppTheme::setStyleVariant(*_recoveryBanner, "meeting-room-window-recoverybanner-2");
+		_recoveryBanner->setText(QCoreApplication::translate("MeetingUI", "⚠️ Connection interrupted. Reconnecting to the meeting..."));
 		_recoveryBanner->show();
 		_recoveryBanner->raise();
 		if (_bottomBar) _bottomBar->setInRecovery(true);
@@ -2565,19 +2519,8 @@ void MeetingRoomWindow::updateRecoveryStateUi(OpenMeeting::MeetingState state, c
 		if (_bottomBar) _bottomBar->setInRecovery(false);
 		if (_wasReconnecting) {
 			_wasReconnecting = false;
-			_recoveryBanner->setStyleSheet(R"(
-				QLabel {
-					background-color: rgba(22, 101, 52, 235);
-					color: #ffffff;
-					border: 1px solid #22c55e;
-					border-radius: 8px;
-					font-size: 13px;
-					font-weight: bold;
-					font-family: "Segoe UI", "Microsoft YaHei";
-					padding: 6px 16px;
-				}
-			)");
-			_recoveryBanner->setText(QString::fromUtf8("✅ 会议连接已恢复"));
+			MeetingUI::AppTheme::setStyleVariant(*_recoveryBanner, "meeting-room-window-recoverybanner-3");
+			_recoveryBanner->setText(QCoreApplication::translate("MeetingUI", "✅ Meeting connection restored"));
 			_recoveryBanner->show();
 			_recoveryBanner->raise();
 			if (_recoveryBannerFadeTimer) {
@@ -2593,19 +2536,8 @@ void MeetingRoomWindow::updateRecoveryStateUi(OpenMeeting::MeetingState state, c
 		if (_bottomBar) _bottomBar->setInRecovery(false);
 		_wasReconnecting = false;
 		if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
-		_recoveryBanner->setStyleSheet(R"(
-			QLabel {
-				background-color: rgba(185, 28, 28, 235);
-				color: #ffffff;
-				border: 1px solid #ef4444;
-				border-radius: 8px;
-				font-size: 13px;
-				font-weight: bold;
-				font-family: "Segoe UI", "Microsoft YaHei";
-				padding: 6px 16px;
-			}
-		)");
-		_recoveryBanner->setText(QString::fromUtf8("❌ 会议连接失败: %1").arg(detail.isEmpty() ? QString::fromUtf8("网络或鉴权错误") : detail));
+		MeetingUI::AppTheme::setStyleVariant(*_recoveryBanner, "meeting-room-window-recoverybanner-4");
+		_recoveryBanner->setText(QCoreApplication::translate("MeetingUI", "❌ Meeting connection failed: %1").arg(detail.isEmpty() ? QCoreApplication::translate("MeetingUI", "Network or authentication error") : detail));
 		_recoveryBanner->show();
 		_recoveryBanner->raise();
 		break;
@@ -2619,6 +2551,8 @@ void MeetingRoomWindow::updateRecoveryStateUi(OpenMeeting::MeetingState state, c
 		break;
 	}
 	}
+ const auto size = bannerSize(*_recoveryBanner, stageW, 420);
+ _recoveryBanner->setGeometry(QRect(QPoint((stageW - size.width()) / 2, 16), size));
     if (_videoCanvas) _videoCanvas->setStageOverlay(_recoveryBanner);
 }
 
@@ -2626,15 +2560,19 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
 
-	_topBar->setGeometry(0, 0, w, 44);
+ const int topBarH = _topBar->heightForWidth(w);
+ const int bottomBarH = _bottomBar->heightForWidth(w);
+ _topBar->setGeometry(0, 0, w, topBarH);
 
-	constexpr int kSidebarWidth = 340;
-	const int sidebarW = (_activeSidebar != ActiveSidebar::None) ? kSidebarWidth : 0;
+ QWidget *sidebar = _activeSidebar == ActiveSidebar::Participants
+     ? static_cast<QWidget *>(_participantsSidebar) : static_cast<QWidget *>(_chatSidebar);
+ const int sidebarW = _activeSidebar != ActiveSidebar::None && sidebar
+     ? std::min(w / 2, std::max(340, sidebar->minimumSizeHint().width())) : 0;
 	const int stageW = w - sidebarW;
-	const int shareBannerH = _screenShareBanner && !_screenShareBanner->isHidden() ? 28 : 0;
-	const int stageTop = 44 + shareBannerH;
-	const int stageH = h - stageTop - 76;
-	if (_screenShareBanner) _screenShareBanner->setGeometry(0, 44, w, shareBannerH);
+	const int shareBannerH = _screenShareBanner && !_screenShareBanner->isHidden() ? std::max(28, _screenShareBanner->heightForWidth(w)) : 0;
+	const int stageTop = topBarH + shareBannerH;
+	const int stageH = std::max(0, h - stageTop - bottomBarH);
+	if (_screenShareBanner) _screenShareBanner->setGeometry(0, topBarH, w, shareBannerH);
 
 	_stageContainer->setGeometry(0, stageTop, stageW, stageH);
 
@@ -2661,7 +2599,7 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 		if (_chatSidebar) _chatSidebar->hide();
 	}
 
-	_bottomBar->setGeometry(0, h - 76, w, 76);
+	_bottomBar->setGeometry(0, h - bottomBarH, w, bottomBarH);
 
 	updateVideoLayout();
 }
@@ -2765,7 +2703,7 @@ void MeetingRoomWindow::applyRemoteParticipantJoined(const QString &identity, co
 		if (!current()) return;
 	}
 
-	LogToConsole(LogCategory::Participant, "USER_JOIN", QString("远端参会人已加入: %1 (姓名: %2, 当前房间总人数: %3)").arg(identity).arg(dispName).arg(_participantCount));
+	LogToConsole(LogCategory::Participant, "USER_JOIN", QCoreApplication::translate("MeetingUI", "Remote participant joined: %1 (name: %2, participants: %3)").arg(identity).arg(dispName).arg(_participantCount));
 	if (!current()) return;
 	updateVideoLayout();
 }
@@ -2797,7 +2735,7 @@ void MeetingRoomWindow::onRemoteParticipantLeft(const QString &identity) {
 		_bottomBar->setParticipantCount(_participantCount);
 	}
 
-	LogToConsole(LogCategory::Participant, "USER_LEFT", QString("远端参会人已离开: %1 (当前房间总人数: %2)").arg(identity).arg(_participantCount));
+	LogToConsole(LogCategory::Participant, "USER_LEFT", QCoreApplication::translate("MeetingUI", "Remote participant left: %1 (participants: %2)").arg(identity).arg(_participantCount));
 	updateVideoLayout();
 }
 
@@ -2885,7 +2823,7 @@ void MeetingRoomWindow::tryActivateGpuBackend() {
 		_videoCanvas->hide();
 		_remoteRenderSession->UseQtCpuBackend();
 		_renderDiagnostics = _videoCanvas->renderDiagnostics();
-		LogToConsole(LogCategory::WebRTC, "RENDER", "GPU Canvas 初始化失败，已使用 Qt CPU 视频后端: " +
+		LogToConsole(LogCategory::WebRTC, "RENDER", QCoreApplication::translate("MeetingUI", "GPU canvas initialization failed. Using the Qt CPU video backend: ") +
 			livekit::render::RenderDiagnosticsSafeSummary(_renderDiagnostics));
 		return;
 	}
@@ -2896,7 +2834,7 @@ void MeetingRoomWindow::tryActivateGpuBackend() {
         });
 	_usingGpuBackend.store(true, std::memory_order_release);
 	_renderDiagnostics = _videoCanvas->renderDiagnostics();
-	LogToConsole(LogCategory::WebRTC, "RENDER", "已启用 GPU 直渲染后端: " +
+	LogToConsole(LogCategory::WebRTC, "RENDER", QCoreApplication::translate("MeetingUI", "GPU video backend enabled: ") +
 		livekit::render::RenderDiagnosticsSafeSummary(_renderDiagnostics));
 	updateVideoLayout();
 }
@@ -2913,7 +2851,7 @@ void MeetingRoomWindow::fallBackToQtCpuBackend() {
 		_renderDiagnostics = _videoCanvas->renderDiagnostics();
 	}
 	if (was_using_gpu) {
-		LogToConsole(LogCategory::Error, "RENDER", "GPU 呈现/设备失败，已切换到 Qt CPU 视频后端: " +
+		LogToConsole(LogCategory::Error, "RENDER", QCoreApplication::translate("MeetingUI", "GPU presentation or device failure. Switched to the Qt CPU video backend: ") +
 			livekit::render::RenderDiagnosticsSafeSummary(_renderDiagnostics));
 	}
 	updateVideoLayout();
@@ -3033,14 +2971,16 @@ void MeetingRoomWindow::updateVideoLayout() {
 	const bool hasRemote = !_remoteTiles.empty();
 	const bool localActive = _localTile && _localTile->isVideoActive();
 
-	const int bannerW = 220;
-	const int bannerH = 32;
+ const auto inviteSize = bannerSize(*_inviteHintBanner, stageW, 220);
+ const int bannerW = inviteSize.width();
+ const int bannerH = inviteSize.height();
 	_inviteHintBanner->setGeometry((stageW - bannerW) / 2, stageH - bannerH - 12, bannerW, bannerH);
 	_inviteHintBanner->setVisible(!_usingGpuBackend.load(std::memory_order_acquire) && !hasRemote && !localActive);
 
 	if (_recoveryBanner && _recoveryBanner->isVisible()) {
-		const int recBannerW = std::min(stageW - 32, 420);
-		const int recBannerH = 34;
+  const auto recoverySize = bannerSize(*_recoveryBanner, stageW, 420);
+  const int recBannerW = recoverySize.width();
+  const int recBannerH = recoverySize.height();
 		_recoveryBanner->setGeometry((stageW - recBannerW) / 2, 16, recBannerW, recBannerH);
 		_recoveryBanner->raise();
 	}
@@ -3336,8 +3276,8 @@ void MeetingRoomWindow::handleScreenShareSources(
 		const std::vector<livekit::DesktopSource> &sources) {
 	if (sources.empty()) {
 		_defaultScreenSharePending = false;
-		QMessageBox::warning(this, QString::fromUtf8("屏幕共享"),
-			QString::fromUtf8("未找到可共享的屏幕或窗口"));
+		QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Screen Sharing"),
+			QCoreApplication::translate("MeetingUI", "No screens or windows available to share"));
 		return;
 	}
 	if (_defaultScreenSharePending) {
@@ -3353,13 +3293,13 @@ void MeetingRoomWindow::handleScreenShareSources(
 	auto *dialog = new QInputDialog(this);
 	dialog->setObjectName(QStringLiteral("screen-share-picker"));
 	dialog->setAttribute(Qt::WA_DeleteOnClose);
-	dialog->setWindowTitle(QString::fromUtf8("选择共享来源"));
-	dialog->setLabelText(QString::fromUtf8("选择屏幕或窗口（仅共享画面）："));
+	dialog->setWindowTitle(QCoreApplication::translate("MeetingUI", "Select a Source to Share"));
+	dialog->setLabelText(QCoreApplication::translate("MeetingUI", "Select a screen or window (video only):"));
 	QStringList choices;
 	for (size_t i = 0; i < sources.size(); ++i) {
 		const auto &source = sources[i];
 		const auto kind = source.kind == livekit::DesktopSourceKind::Screen
-			? QString::fromUtf8("屏幕") : QString::fromUtf8("窗口");
+			? QCoreApplication::translate("MeetingUI", "Screen") : QCoreApplication::translate("MeetingUI", "Window");
 		choices.push_back(QString::number(i + 1) + QStringLiteral(". ") + kind +
 			QStringLiteral(" — ") + QString::fromStdString(source.title));
 	}
@@ -3438,7 +3378,7 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 		value.mediaBindingKey, value.mediaBindingTicket, value.muted, value.paused};
 	if (screen && !_remoteScreenTiles.count(sid)) {
 		QPointer<VideoTileWidget> tile(new VideoTileWidget(
-			QString::fromUtf8("%1 · 屏幕共享").arg(presentation.participant.name), false, _stageContainer, true));
+			QCoreApplication::translate("MeetingUI", "%1 · Screen Share").arg(presentation.participant.name), false, _stageContainer, true));
 		if (!current()) {
 			if (tile) delete tile.data();
 			return;
@@ -3460,7 +3400,7 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 	tile->setVideoActive(!value.muted);
 	tile->setVideoStreamPaused(!value.muted && value.paused);
 	tile->setConnectionQuality(presentation.participant.connectionQuality);
-	if (screen) tile->setDisplayName(QString::fromUtf8("%1 · 屏幕共享").arg(presentation.participant.name));
+	if (screen) tile->setDisplayName(QCoreApplication::translate("MeetingUI", "%1 · Screen Share").arg(presentation.participant.name));
 	if (!current() || !tile) return;
 	if (!value.muted && !value.paused) {
 		_remoteRenderSession->AttachRemoteTrack(value.track, identity.toStdString(), sid.toStdString());
@@ -3488,21 +3428,22 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 	if (!_screenShareBanner) {
 		_screenShareBanner = new QLabel(this);
 		_screenShareBanner->setTextFormat(Qt::PlainText);
+		_screenShareBanner->setWordWrap(true);
 		_screenShareBanner->setAlignment(Qt::AlignCenter);
-		_screenShareBanner->setStyleSheet("background: #087f5b; color: white; font-weight: bold;");
+		MeetingUI::AppTheme::setStyleVariant(*_screenShareBanner, "meeting-room-window-screensharebanner");
 	}
 	const bool active = snapshot.state == State::Active;
-	_screenShareBanner->setText(active ? QString::fromUtf8("正在共享：%1").arg(
-		QString::fromStdString(snapshot.source_title).isEmpty() ? QString::fromUtf8("屏幕") :
+	_screenShareBanner->setText(active ? QCoreApplication::translate("MeetingUI", "Sharing: %1").arg(
+		QString::fromStdString(snapshot.source_title).isEmpty() ? QCoreApplication::translate("MeetingUI", "Screen") :
 		QString::fromStdString(snapshot.source_title)) :
-		snapshot.state == State::Starting ? QString::fromUtf8("正在启动屏幕共享…") :
-		snapshot.state == State::StopFailed ? QString::fromUtf8("采集已停止，取消发布失败，请重试停止共享") :
-		QString::fromUtf8("正在停止屏幕共享…"));
+		snapshot.state == State::Starting ? QCoreApplication::translate("MeetingUI", "Starting screen sharing...") :
+		snapshot.state == State::StopFailed ? QCoreApplication::translate("MeetingUI", "Capture stopped, but unpublishing failed. Try stopping sharing again.") :
+		QCoreApplication::translate("MeetingUI", "Stopping screen sharing..."));
 	_screenShareBanner->setVisible(active || snapshot.state == State::Starting ||
 		snapshot.state == State::Stopping || snapshot.state == State::StopFailed);
 	_localScreenPreview = active ? snapshot.preview : nullptr;
 	if (active && !_localScreenTile) {
-		_localScreenTile = std::make_unique<VideoTileWidget>(QString::fromUtf8("我的屏幕共享"), true, _stageContainer, true);
+		_localScreenTile = std::make_unique<VideoTileWidget>(QCoreApplication::translate("MeetingUI", "My Screen Share"), true, _stageContainer, true);
 		_localScreenTile->setIdentity(QStringLiteral("local-screen"));
 		_localScreenTile->setVideoActive(true);
 		bindTileInteractions(_localScreenTile.get());
@@ -3525,11 +3466,11 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 			if (snapshot.error == livekit::ScreenShareError::None) return;
 			QString message;
 			if (snapshot.error == livekit::ScreenShareError::Capture)
-				message = QString::fromUtf8("所选屏幕或窗口无法继续采集，共享已停止。可重新选择共享来源。");
+				message = QCoreApplication::translate("MeetingUI", "The selected screen or window is no longer available. Sharing has stopped. You can select another source.");
 			else if (snapshot.error == livekit::ScreenShareError::Publish)
-				message = QString::fromUtf8("屏幕共享发布失败，采集已停止。请检查连接和发布权限后重试。");
-			else message = QString::fromUtf8("本地采集已停止，但远端取消发布尚未确认。请重试停止或退出会议。");
-			QMessageBox::warning(this, QString::fromUtf8("屏幕共享"), message);
+				message = QCoreApplication::translate("MeetingUI", "Unable to publish the screen share. Capture has stopped. Check your connection and publishing permissions, then try again.");
+			else message = QCoreApplication::translate("MeetingUI", "Local capture has stopped, but remote unpublishing is not yet confirmed. Try stopping again or leave the meeting.");
+			QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Screen Sharing"), message);
 		});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::screenShareSourcesReady,
 		this, [this](const std::vector<livekit::DesktopSource> &sources) {
@@ -3579,7 +3520,7 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		const QString meetingId = _coordinator->currentMeetingId();
 		setWindowTitle(meetingId.isEmpty()
 			? info.name
-			: QString::fromUtf8("%1 - 会议号: %2").arg(info.name, meetingId));
+			: QCoreApplication::translate("MeetingUI", "%1 - Meeting ID: %2").arg(info.name, meetingId));
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantsUpdated,
 	        this, [this](const std::vector<OpenMeeting::ParticipantInfo> &list) {
@@ -3606,9 +3547,9 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	        this, [this](const QString &identity, const QString &participantSid,
 	                     const QString &trackSid, bool allowed) {
 		LogToConsole(LogCategory::Connection, "SUBSCRIPTION_PERMISSION",
-			QString("订阅权限更新: participant=%1 sid=%2 track=%3 allowed=%4")
-				.arg(identity.isEmpty() ? QString::fromUtf8("未知") : identity,
-					 participantSid, trackSid, allowed ? QString::fromUtf8("是") : QString::fromUtf8("否")));
+			QCoreApplication::translate("MeetingUI", "Subscription permission updated: participant=%1 sid=%2 track=%3 allowed=%4")
+				.arg(identity.isEmpty() ? QCoreApplication::translate("MeetingUI", "Unknown") : identity,
+					 participantSid, trackSid, allowed ? QCoreApplication::translate("MeetingUI", "Yes") : QCoreApplication::translate("MeetingUI", "No")));
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::localAudioMuteChanged,
 	        this, [this](bool muted) {
@@ -3719,7 +3660,7 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 
 	if (!_coordinator->currentMeetingId().isEmpty()) {
 		if (_topBar) _topBar->setMeetingId(_coordinator->currentMeetingId());
-		setWindowTitle(QString::fromUtf8("会议 - 会议号: %1").arg(_coordinator->currentMeetingId()));
+		setWindowTitle(QCoreApplication::translate("MeetingUI", "Meeting - ID: %1").arg(_coordinator->currentMeetingId()));
 	}
 
 	updateRecoveryStateUi(_coordinator->state());
@@ -3748,9 +3689,9 @@ void MeetingRoomWindow::onKickedOff(const QString &reason, int reasonCode) {
 		return;
 	}
 	invalidateCameraCompletion();
-	showDepartureNotice(QString::fromUtf8("移出会议"),
-	                     QString::fromUtf8("您已被主持人移出会议。\n原因: %1 (代码: %2)")
-	                     .arg(reason.isEmpty() ? QString::fromUtf8("未指定") : reason).arg(reasonCode));
+	showDepartureNotice(QCoreApplication::translate("MeetingUI", "Remove from Meeting"),
+	                     QCoreApplication::translate("MeetingUI", "You were removed from the meeting by the host.\nReason: %1 (code: %2)")
+	                     .arg(reason.isEmpty() ? QCoreApplication::translate("MeetingUI", "Not Specified") : reason).arg(reasonCode));
 }
 
 void MeetingRoomWindow::onMeetingKickOff(livekit::RoomDisconnectReason reason) {
@@ -3770,8 +3711,8 @@ void MeetingRoomWindow::onMeetingKickOff(livekit::RoomDisconnectReason reason) {
 	             "[UI] Show duplicate login dialog");
 	if (!guard) return;
 	showDepartureNotice(
-	                     QString::fromUtf8("会议已退出"),
-	                     QString::fromUtf8("您的账号已在其他设备加入此会议，当前客户端已被强制退出。"));
+	                     QCoreApplication::translate("MeetingUI", "Meeting Left"),
+	                     QCoreApplication::translate("MeetingUI", "Your account joined this meeting on another device. This client has been disconnected."));
 }
 
 void MeetingRoomWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason) {
@@ -3799,10 +3740,10 @@ void MeetingRoomWindow::onRemoteMuteRequested(bool isVideo, bool mute, const QSt
 			_localTile->setVideoActive(false);
 			if (_coordinator) _coordinator->setLocalVideoEnabled(false);
 			updateVideoLayout();
-			LogToConsole(LogCategory::Media, "VIDEO", QString("主持人 [%1] 已关闭您的摄像头").arg(operatorId));
+			LogToConsole(LogCategory::Media, "VIDEO", QCoreApplication::translate("MeetingUI", "Host [%1] turned off your camera").arg(operatorId));
 		} else {
-			if (QMessageBox::question(this, QString::fromUtf8("开启摄像头请求"),
-				QString::fromUtf8("主持人 [%1] 邀请您开启摄像头，是否同意？").arg(operatorId),
+			if (QMessageBox::question(this, QCoreApplication::translate("MeetingUI", "Request to Enable Camera"),
+				QCoreApplication::translate("MeetingUI", "Host [%1] would like you to turn on your camera. Allow?").arg(operatorId),
 				QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
 				_bottomBar->setVideoEnabled(true);
 				_config.videoEnabled = true;
@@ -3818,10 +3759,10 @@ void MeetingRoomWindow::onRemoteMuteRequested(bool isVideo, bool mute, const QSt
 			_localTile->setAudioMuted(true);
 			if (_wasapiCap) _wasapiCap->SetMute(true);
 			if (_coordinator) _coordinator->setLocalAudioMuted(true);
-			LogToConsole(LogCategory::Media, "AUDIO", QString("主持人 [%1] 已将您静音").arg(operatorId));
+			LogToConsole(LogCategory::Media, "AUDIO", QCoreApplication::translate("MeetingUI", "Host [%1] muted you").arg(operatorId));
 		} else {
-			if (QMessageBox::question(this, QString::fromUtf8("解除静音请求"),
-				QString::fromUtf8("主持人 [%1] 邀请您开启麦克风发言，是否同意？").arg(operatorId),
+			if (QMessageBox::question(this, QCoreApplication::translate("MeetingUI", "Request to Unmute"),
+				QCoreApplication::translate("MeetingUI", "Host [%1] would like you to unmute your microphone. Allow?").arg(operatorId),
 				QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
 				_bottomBar->setAudioMuted(false);
 				_config.audioMuted = false;
@@ -3835,7 +3776,7 @@ void MeetingRoomWindow::onRemoteMuteRequested(bool isVideo, bool mute, const QSt
 
 void MeetingRoomWindow::onMeetingDetailUpdated(const OpenMeeting::MeetingDetail &detail) {
 	if (!detail.meetingName.isEmpty()) {
-		setWindowTitle(QString::fromUtf8("%1 - 会议号: %2").arg(detail.meetingName).arg(detail.meetingId));
+		setWindowTitle(QCoreApplication::translate("MeetingUI", "%1 - Meeting ID: %2").arg(detail.meetingName).arg(detail.meetingId));
 	}
 	if (_topBar && !detail.meetingId.isEmpty()) {
 		_topBar->setMeetingId(detail.meetingId);
@@ -3846,19 +3787,19 @@ void MeetingRoomWindow::onMeetingDetailUpdated(const OpenMeeting::MeetingDetail 
 }
 
 void MeetingRoomWindow::onHostRoleChanged(const QString &newHostId, const QString &operatorName) {
-	LogToConsole(LogCategory::Participant, "HOST", QString("主持人身份已移交至: %1 (操作人: %2)").arg(newHostId).arg(operatorName));
-	QMessageBox::information(this, QString::fromUtf8("主持人变更"),
-	                         QString::fromUtf8("参会人 [%1] 已成为新的主持人").arg(newHostId));
+	LogToConsole(LogCategory::Participant, "HOST", QCoreApplication::translate("MeetingUI", "Host transferred to: %1 (by: %2)").arg(newHostId).arg(operatorName));
+	QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Host Changed"),
+	                         QCoreApplication::translate("MeetingUI", "Participant [%1] is now the host").arg(newHostId));
 }
 
 void MeetingRoomWindow::handleEndMeetingClicked() {
 	if (_coordinator && _coordinator->isHost()) {
 		QMessageBox box(this);
-		box.setWindowTitle(QString::fromUtf8("结束会议"));
-		box.setText(QString::fromUtf8("您是本次会议的主持人，请选择退出方式："));
-		auto *leaveBtn = box.addButton(QString::fromUtf8("仅离开会议"), QMessageBox::ActionRole);
-		auto *endBtn = box.addButton(QString::fromUtf8("结束全体会议"), QMessageBox::DestructiveRole);
-		auto *cancelBtn = box.addButton(QString::fromUtf8("取消"), QMessageBox::RejectRole);
+		box.setWindowTitle(QCoreApplication::translate("MeetingUI", "End Meeting"));
+		box.setText(QCoreApplication::translate("MeetingUI", "You are the host. How would you like to leave?"));
+		auto *leaveBtn = box.addButton(QCoreApplication::translate("MeetingUI", "Leave Only"), QMessageBox::ActionRole);
+		auto *endBtn = box.addButton(QCoreApplication::translate("MeetingUI", "End for Everyone"), QMessageBox::DestructiveRole);
+		auto *cancelBtn = box.addButton(QCoreApplication::translate("MeetingUI", "Cancel"), QMessageBox::RejectRole);
 		box.exec();
 		if (box.clickedButton() == leaveBtn) {
 			invalidateCameraCompletion();
@@ -3872,8 +3813,8 @@ void MeetingRoomWindow::handleEndMeetingClicked() {
 			if (guard) guard->close();
 		}
 	} else {
-		if (QMessageBox::question(this, QString::fromUtf8("离开会议"),
-			QString::fromUtf8("您确定要离开当前会议吗？"),
+		if (QMessageBox::question(this, QCoreApplication::translate("MeetingUI", "Leave Meeting"),
+			QCoreApplication::translate("MeetingUI", "Are you sure you want to leave this meeting?"),
 			QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
 			invalidateCameraCompletion();
 			QPointer<MeetingRoomWindow> guard(this);
@@ -3895,10 +3836,10 @@ void MeetingRoomWindow::setupInvitationBinding() {
 void MeetingRoomWindow::handleInviteClicked() {
 	if (_config.invitationMode != InvitationMode::BusinessMeetingId) {
 		QPointer<MeetingRoomWindow> guard(this);
-		LogToConsole(LogCategory::General, "INVITE", "当前连接不支持会议号邀请");
+		LogToConsole(LogCategory::General, "INVITE", QCoreApplication::translate("MeetingUI", "This connection does not support meeting ID invitations"));
 		if (guard) {
-			guard->showInvitationNotice(false, QString::fromUtf8("无法复制邀请"),
-				QString::fromUtf8("此连接不支持会议号邀请，请联系组织者为其他参会者提供独立入会方式。"));
+			guard->showInvitationNotice(false, QCoreApplication::translate("MeetingUI", "Unable to Copy Invitation"),
+				QCoreApplication::translate("MeetingUI", "This connection does not support meeting ID invitations. Ask the organizer to provide another way for participants to join."));
 		}
 		return;
 	}
@@ -3915,26 +3856,23 @@ void MeetingRoomWindow::handleInviteClicked() {
 	}
 	if (!validMeetingId) {
 		QPointer<MeetingRoomWindow> guard(this);
-		LogToConsole(LogCategory::General, "INVITE", "当前会议尚未就绪，未复制邀请信息");
+		LogToConsole(LogCategory::General, "INVITE", QCoreApplication::translate("MeetingUI", "The meeting is not ready. No invitation was copied."));
 		if (guard) {
-			guard->showInvitationNotice(false, QString::fromUtf8("邀请暂不可用"),
-				QString::fromUtf8("当前会议尚未就绪，暂时无法复制邀请信息。"));
+			guard->showInvitationNotice(false, QCoreApplication::translate("MeetingUI", "Invitation Unavailable"),
+				QCoreApplication::translate("MeetingUI", "The meeting is not ready. The invitation cannot be copied yet."));
 		}
 		return;
 	}
 
-	const auto inviteText = QString::fromUtf8(
-		"【LiveKit 会议邀请】\n"
-		"会议号: %1\n"
-		"请在配置了同一会议服务的客户端登录自己的账号后，使用会议号加入。")
+	const auto inviteText = QCoreApplication::translate("MeetingUI", "[LiveKit Meeting Invitation]\nMeeting ID: %1\nSign in with your own account in a client configured for the same meeting service, then join using this meeting ID.")
 		.arg(meetingId);
 	QPointer<MeetingRoomWindow> guard(this);
 	QApplication::clipboard()->setText(inviteText);
 	if (!guard) return;
-	LogToConsole(LogCategory::General, "INVITE", "会议邀请信息已复制到剪贴板");
+	LogToConsole(LogCategory::General, "INVITE", QCoreApplication::translate("MeetingUI", "Meeting invitation copied to the clipboard"));
 	if (guard) {
-		guard->showInvitationNotice(true, QString::fromUtf8("邀请信息已复制"),
-			QString::fromUtf8("会议邀请信息已复制到剪贴板，您可以发送给其他参会人。"));
+		guard->showInvitationNotice(true, QCoreApplication::translate("MeetingUI", "Invitation Copied"),
+			QCoreApplication::translate("MeetingUI", "The meeting invitation has been copied to the clipboard. You can send it to other participants."));
 	}
 }
 
@@ -3970,7 +3908,7 @@ void MeetingRoomWindow::startLiveKitSession() {
 	}
 
 	if (_config.serverUrl.isEmpty()) {
-		LogToConsole(LogCategory::General, "SESSION", "未指定服务器地址，运行在单机演示模式");
+		LogToConsole(LogCategory::General, "SESSION", QCoreApplication::translate("MeetingUI", "No server URL specified. Running in local demo mode."));
 		return;
 	}
 
@@ -4009,7 +3947,7 @@ void MeetingRoomWindow::stopLiveKitSession() {
 	if (_coordinator && _coordinator->state() != OpenMeeting::MeetingState::Failed) {
 		_coordinator->leaveMeetingAsync(false);
 	}
-	LogToConsole(LogCategory::Connection, "DISCONNECT", "已退出会议视窗并停止媒体采集");
+	LogToConsole(LogCategory::Connection, "DISCONNECT", QCoreApplication::translate("MeetingUI", "Meeting window closed and media capture stopped"));
 }
 
 #if defined(Q_OS_WIN)

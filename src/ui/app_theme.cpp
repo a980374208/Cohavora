@@ -1,6 +1,7 @@
 #include "src/ui/app_theme.h"
 
 #include <QtCore/QEvent>
+#include <QtCore/QFile>
 #include <QtCore/QObject>
 #include <QtCore/QVariant>
 #include <QtGui/QCursor>
@@ -11,6 +12,9 @@
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QDialogButtonBox>
+#include <QtWidgets/QFormLayout>
+#include <QtWidgets/QScrollArea>
+#include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QInputDialog>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QMenu>
@@ -116,344 +120,6 @@ const char *dialogButtonRole(QDialogButtonBox::ButtonRole role) {
 	}
 }
 
-QString buttonStyleSheet(Tone tone) {
-	if (tone == Tone::Dark) {
-		return QStringLiteral(R"(
-			QPushButton {
-				min-width: 76px;
-				min-height: 32px;
-				padding: 0 14px;
-				border: 1px solid #454c5a;
-				border-radius: 6px;
-				background: #2b3039;
-				color: #e8eaf0;
-				font-size: 13px;
-			}
-			QPushButton:hover { background: #363c47; border-color: #596273; }
-			QPushButton:pressed { background: #222731; }
-			QPushButton:disabled { color: #707785; background: #252a32; border-color: #343a45; }
-			QPushButton[meetingUiRole="primary"] {
-				background: #1677ff; color: #ffffff; border-color: #1677ff;
-			}
-			QPushButton[meetingUiRole="primary"]:hover { background: #4096ff; border-color: #4096ff; }
-			QPushButton[meetingUiRole="primary"]:pressed { background: #0958d9; border-color: #0958d9; }
-			QPushButton[meetingUiRole="danger"] {
-				background: #dc3545; color: #ffffff; border-color: #dc3545;
-			}
-			QPushButton[meetingUiRole="danger"]:hover { background: #e55361; border-color: #e55361; }
-			QPushButton[meetingUiRole="danger"]:pressed { background: #b92534; border-color: #b92534; }
-			QPushButton[meetingUiRole="link"] { background: transparent; color: #69a8ff; border-color: transparent; }
-			QPushButton[meetingUiRole="link"]:hover { color: #91c0ff; background: #292f38; }
-		)");
-	}
-
-	return QStringLiteral(R"(
-		QPushButton {
-			min-width: 76px;
-			min-height: 32px;
-			padding: 0 14px;
-			border: 1px solid #dcdfe6;
-			border-radius: 6px;
-			background: #ffffff;
-			color: #303133;
-			font-size: 13px;
-		}
-		QPushButton:hover { color: #1677ff; border-color: #8fc2ff; background: #f5f9ff; }
-		QPushButton:pressed { color: #0958d9; border-color: #1677ff; background: #eaf3ff; }
-		QPushButton:disabled { color: #a8abb2; background: #f5f6f7; border-color: #e4e7ed; }
-		QPushButton[meetingUiRole="primary"] {
-			background: #1677ff; color: #ffffff; border-color: #1677ff;
-		}
-		QPushButton[meetingUiRole="primary"]:hover { background: #4096ff; border-color: #4096ff; }
-		QPushButton[meetingUiRole="primary"]:pressed { background: #0958d9; border-color: #0958d9; }
-		QPushButton[meetingUiRole="danger"] {
-			background: #d9363e; color: #ffffff; border-color: #d9363e;
-		}
-		QPushButton[meetingUiRole="danger"]:hover { background: #ed5a60; border-color: #ed5a60; }
-		QPushButton[meetingUiRole="danger"]:pressed { background: #b5222a; border-color: #b5222a; }
-		QPushButton[meetingUiRole="link"] { background: transparent; color: #1677ff; border-color: transparent; }
-		QPushButton[meetingUiRole="link"]:hover { color: #4096ff; background: #f5f9ff; }
-	)");
-}
-
-QString choiceControlStyleSheet(Tone tone) {
-	const auto dark = tone == Tone::Dark;
-	return QStringLiteral(R"(
-		QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QDateTimeEdit, QTimeEdit {
-			padding-right: 36px;
-		}
-		QComboBox::drop-down, QDateEdit::drop-down, QDateTimeEdit::drop-down {
-			subcontrol-origin: padding;
-			subcontrol-position: top right;
-			width: 32px;
-			border: none;
-			border-top-right-radius: 6px;
-			border-bottom-right-radius: 6px;
-			background: transparent;
-		}
-		QComboBox::drop-down:hover,
-		QDateEdit::drop-down:hover, QDateTimeEdit::drop-down:hover { background: %1; }
-		QComboBox::drop-down:pressed, QComboBox::drop-down:on,
-		QDateEdit::drop-down:pressed, QDateEdit::drop-down:on,
-		QDateTimeEdit::drop-down:pressed, QDateTimeEdit::drop-down:on { background: %2; }
-		QComboBox::drop-down:disabled,
-		QDateEdit::drop-down:disabled, QDateTimeEdit::drop-down:disabled { background: transparent; }
-		QComboBox::down-arrow, QDateEdit::down-arrow, QDateTimeEdit::down-arrow {
-			image: url(%3);
-			width: 12px;
-			height: 12px;
-		}
-		QComboBox::down-arrow:on,
-		QDateEdit::down-arrow:on, QDateTimeEdit::down-arrow:on { image: url(%4); }
-		QComboBox::down-arrow:disabled,
-		QDateEdit::down-arrow:disabled, QDateTimeEdit::down-arrow:disabled { image: url(%5); }
-
-		QSpinBox::up-button, QDoubleSpinBox::up-button,
-		QDateEdit::up-button, QDateTimeEdit::up-button, QTimeEdit::up-button,
-		QSpinBox::down-button, QDoubleSpinBox::down-button,
-		QDateEdit::down-button, QDateTimeEdit::down-button, QTimeEdit::down-button {
-			subcontrol-origin: padding;
-			width: 32px;
-			border: none;
-			background: transparent;
-		}
-		QSpinBox::up-button, QDoubleSpinBox::up-button,
-		QDateEdit::up-button, QDateTimeEdit::up-button, QTimeEdit::up-button {
-			border-top-right-radius: 6px;
-		}
-		QSpinBox::down-button, QDoubleSpinBox::down-button,
-		QDateEdit::down-button, QDateTimeEdit::down-button, QTimeEdit::down-button {
-			border-bottom-right-radius: 6px;
-		}
-		QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
-		QDateEdit::up-button:hover, QDateTimeEdit::up-button:hover, QTimeEdit::up-button:hover,
-		QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover,
-		QDateEdit::down-button:hover, QDateTimeEdit::down-button:hover, QTimeEdit::down-button:hover {
-			background: %1;
-		}
-		QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
-		QDateEdit::up-button:pressed, QDateTimeEdit::up-button:pressed, QTimeEdit::up-button:pressed,
-		QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed,
-		QDateEdit::down-button:pressed, QDateTimeEdit::down-button:pressed, QTimeEdit::down-button:pressed {
-			background: %2;
-		}
-		QSpinBox::up-button:disabled, QDoubleSpinBox::up-button:disabled,
-		QDateEdit::up-button:disabled, QDateTimeEdit::up-button:disabled, QTimeEdit::up-button:disabled,
-		QSpinBox::down-button:disabled, QDoubleSpinBox::down-button:disabled,
-		QDateEdit::down-button:disabled, QDateTimeEdit::down-button:disabled, QTimeEdit::down-button:disabled {
-			background: transparent;
-		}
-		QSpinBox::up-arrow, QDoubleSpinBox::up-arrow,
-		QDateEdit::up-arrow, QDateTimeEdit::up-arrow, QTimeEdit::up-arrow {
-			image: url(%4);
-			width: 11px;
-			height: 11px;
-		}
-		QSpinBox::down-arrow, QDoubleSpinBox::down-arrow,
-		QDateEdit::down-arrow, QDateTimeEdit::down-arrow, QTimeEdit::down-arrow {
-			image: url(%3);
-			width: 11px;
-			height: 11px;
-		}
-		QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled,
-		QDateEdit::up-arrow:disabled, QDateTimeEdit::up-arrow:disabled, QTimeEdit::up-arrow:disabled {
-			image: url(%6);
-		}
-		QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled,
-		QDateEdit::down-arrow:disabled, QDateTimeEdit::down-arrow:disabled, QTimeEdit::down-arrow:disabled {
-			image: url(%5);
-		}
-	)")
-		.arg(
-			dark ? QStringLiteral("#303641") : QStringLiteral("#f5f9ff"),
-			dark ? QStringLiteral("#394252") : QStringLiteral("#eaf3ff"),
-			dark
-				? QStringLiteral(":/meeting-ui/icons/chevron-down-dark.svg")
-				: QStringLiteral(":/meeting-ui/icons/chevron-down-light.svg"),
-			dark
-				? QStringLiteral(":/meeting-ui/icons/chevron-up-dark.svg")
-				: QStringLiteral(":/meeting-ui/icons/chevron-up-light.svg"),
-			QStringLiteral(":/meeting-ui/icons/chevron-down-disabled.svg"),
-			QStringLiteral(":/meeting-ui/icons/chevron-up-disabled.svg"));
-}
-
-QString messageBoxStyleSheet(Tone tone) {
-	const auto dark = tone == Tone::Dark;
-	return QStringLiteral(R"(
-		QMessageBox {
-			background: %1;
-			border: 1px solid %2;
-			border-radius: 10px;
-			font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-		}
-		QMessageBox QLabel { color: %3; font-size: 13px; }
-		QMessageBox QLabel#qt_msgbox_label {
-			min-width: 340px;
-			max-width: 520px;
-			padding: 8px 4px 10px 4px;
-		}
-		QMessageBox QLabel#qt_msgbox_informativelabel { color: %4; padding: 0 4px 8px 4px; }
-		QMessageBox QCheckBox { color: %4; spacing: 8px; }
-	)")
-		.arg(
-			dark ? QStringLiteral("#1a1d24") : QStringLiteral("#ffffff"),
-			dark ? QStringLiteral("#363c4a") : QStringLiteral("#dfe3e8"),
-			dark ? QStringLiteral("#f3f4f6") : QStringLiteral("#1f2329"),
-			dark ? QStringLiteral("#aeb4c0") : QStringLiteral("#606266"))
-		+ buttonStyleSheet(tone);
-}
-
-QString inputDialogStyleSheet(Tone tone) {
-	const auto dark = tone == Tone::Dark;
-	return QStringLiteral(R"(
-		QInputDialog {
-			background: %1;
-			border: 1px solid %2;
-			border-radius: 10px;
-			font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-		}
-		QInputDialog QLabel { color: %3; font-size: 13px; }
-		QInputDialog QLineEdit, QInputDialog QComboBox, QInputDialog QSpinBox, QInputDialog QDoubleSpinBox {
-			min-height: 34px;
-			padding: 0 10px;
-			border: 1px solid %2;
-			border-radius: 6px;
-			background: %4;
-			color: %3;
-			selection-background-color: #1677ff;
-			selection-color: #ffffff;
-		}
-		QInputDialog QLineEdit:focus, QInputDialog QComboBox:focus,
-		QInputDialog QSpinBox:focus, QInputDialog QDoubleSpinBox:focus { border-color: #1677ff; }
-		QInputDialog QComboBox QAbstractItemView {
-			background: %4;
-			color: %3;
-			border: 1px solid %2;
-			border-radius: 7px;
-			padding: 4px;
-			outline: none;
-			selection-background-color: %5;
-			selection-color: %6;
-		}
-		QInputDialog QComboBox QAbstractItemView::item {
-			min-height: 30px; padding: 0 9px; border-radius: 5px;
-		}
-	)")
-		.arg(
-			dark ? QStringLiteral("#1a1d24") : QStringLiteral("#ffffff"),
-			dark ? QStringLiteral("#454c5a") : QStringLiteral("#dcdfe6"),
-			dark ? QStringLiteral("#f3f4f6") : QStringLiteral("#1f2329"),
-			dark ? QStringLiteral("#242831") : QStringLiteral("#ffffff"),
-			dark ? QStringLiteral("#2b3442") : QStringLiteral("#eaf3ff"),
-			dark ? QStringLiteral("#ffffff") : QStringLiteral("#1677ff"))
-		+ buttonStyleSheet(tone)
-		+ choiceControlStyleSheet(tone);
-}
-
-QString progressDialogStyleSheet(Tone tone) {
-	const auto dark = tone == Tone::Dark;
-	return QStringLiteral(R"(
-		QProgressDialog {
-			background: %1;
-			border: 1px solid %2;
-			border-radius: 10px;
-			font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-		}
-		QProgressDialog QLabel { color: %3; font-size: 13px; padding: 4px 0; }
-		QProgressDialog QProgressBar {
-			min-height: 8px; max-height: 8px;
-			border: none; border-radius: 4px; background: %4;
-		}
-		QProgressDialog QProgressBar::chunk { border-radius: 4px; background: #1677ff; }
-	)")
-		.arg(
-			dark ? QStringLiteral("#1a1d24") : QStringLiteral("#ffffff"),
-			dark ? QStringLiteral("#363c4a") : QStringLiteral("#dfe3e8"),
-			dark ? QStringLiteral("#f3f4f6") : QStringLiteral("#1f2329"),
-			dark ? QStringLiteral("#303641") : QStringLiteral("#e9edf2"))
-		+ buttonStyleSheet(tone);
-}
-
-QString menuStyleSheet(Tone tone) {
-	if (tone == Tone::Dark) {
-		return QStringLiteral(R"(
-			QMenu {
-				background: #1a1d24;
-				color: #f3f4f6;
-				border: 1px solid #363c4a;
-				border-radius: 8px;
-				padding: 6px;
-				font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-				font-size: 13px;
-			}
-			QMenu::item { min-height: 22px; padding: 6px 28px 6px 12px; border-radius: 5px; }
-			QMenu::item:selected { background: #2b3442; color: #ffffff; }
-			QMenu::item:pressed { background: #343f50; }
-			QMenu::item:disabled { color: #7f8795; background: transparent; }
-			QMenu::separator { height: 1px; background: #363c4a; margin: 5px 7px; }
-		)");
-	}
-
-	return QStringLiteral(R"(
-		QMenu {
-			background: #ffffff;
-			color: #1f2329;
-			border: 1px solid #dfe3e8;
-			border-radius: 8px;
-			padding: 6px;
-			font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-			font-size: 13px;
-		}
-		QMenu::item { min-height: 22px; padding: 6px 28px 6px 12px; border-radius: 5px; }
-		QMenu::item:selected { background: #eaf3ff; color: #1677ff; }
-		QMenu::item:pressed { background: #dcecff; }
-		QMenu::item:disabled { color: #a8abb2; background: transparent; }
-		QMenu::separator { height: 1px; background: #e5e8ec; margin: 5px 7px; }
-	)");
-}
-
-QString applicationStyleSheet() {
-	return QStringLiteral(R"(
-		QToolTip {
-			background: #242831;
-			color: #f7f8fa;
-			border: 1px solid #3a414f;
-			border-radius: 5px;
-			padding: 5px 8px;
-			font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-			font-size: 12px;
-		}
-		QComboBox QAbstractItemView {
-			background: #ffffff;
-			color: #1f2329;
-			border: 1px solid #dfe3e8;
-			border-radius: 7px;
-			padding: 4px;
-			outline: none;
-			selection-background-color: #eaf3ff;
-			selection-color: #1677ff;
-			font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
-			font-size: 13px;
-		}
-		QComboBox QAbstractItemView::item { min-height: 30px; padding: 0 9px; border-radius: 5px; }
-		QCalendarWidget { background: #ffffff; color: #1f2329; }
-		QCalendarWidget QWidget#qt_calendar_navigationbar { background: #f7f8fa; border-bottom: 1px solid #e5e8ec; }
-		QCalendarWidget QToolButton {
-			min-height: 30px; color: #303133; background: transparent;
-			border: none; border-radius: 5px; padding: 0 8px;
-		}
-		QCalendarWidget QToolButton:hover { color: #1677ff; background: #eaf3ff; }
-		QCalendarWidget QSpinBox {
-			min-height: 28px; color: #1f2329; background: #ffffff;
-			border: 1px solid #dcdfe6; border-radius: 5px; padding: 0 6px;
-		}
-		QCalendarWidget QAbstractItemView {
-			background: #ffffff; color: #303133; outline: none;
-			selection-background-color: #1677ff; selection-color: #ffffff;
-		}
-	)") + choiceControlStyleSheet(Tone::Light);
-}
-
 void styleDialogButtons(QDialogButtonBox &buttonBox) {
 	for (auto *button : buttonBox.buttons()) {
 		setButtonRole(button, dialogButtonRole(buttonBox.buttonRole(button)));
@@ -473,7 +139,7 @@ void configureMessageBox(QMessageBox &box, Tone tone) {
 	for (auto *button : box.buttons()) {
 		setButtonRole(button, messageButtonRole(box.buttonRole(button)));
 	}
-	box.setStyleSheet(messageBoxStyleSheet(tone));
+	refreshStyle(box);
 }
 
 void configureInputDialog(QInputDialog &dialog, Tone tone) {
@@ -482,7 +148,7 @@ void configureInputDialog(QInputDialog &dialog, Tone tone) {
 	for (auto *buttonBox : dialog.findChildren<QDialogButtonBox *>()) {
 		styleDialogButtons(*buttonBox);
 	}
-	dialog.setStyleSheet(inputDialogStyleSheet(tone));
+	refreshStyle(dialog);
 }
 
 void configureProgressDialog(QProgressDialog &dialog, Tone tone) {
@@ -491,7 +157,7 @@ void configureProgressDialog(QProgressDialog &dialog, Tone tone) {
 	for (auto *button : dialog.findChildren<QPushButton *>()) {
 		setButtonRole(button, "secondary");
 	}
-	dialog.setStyleSheet(progressDialogStyleSheet(tone));
+	refreshStyle(dialog);
 }
 
 void applyNativeCorners(QWidget &widget, Tone tone) {
@@ -610,6 +276,15 @@ protected:
 			dialog->setProperty(kToneProperty, toneName(tone));
 		}
 		if (event->type() == QEvent::Show) {
+			if (dialog->property("meetingUiAdaptive").toBool()) {
+				auto *content = dialog->findChild<QWidget *>(QStringLiteral("adaptiveDialogContent"));
+				auto desired = dialog->property("meetingUiPreferredSize").toSize();
+				if (content) desired = desired.expandedTo(content->sizeHint());
+				if (auto *screen = screenForWindow(*dialog)) {
+					desired = desired.boundedTo(screen->availableGeometry().size() - QSize(32, 64));
+				}
+				dialog->resize(desired);
+			}
 			applyNativeCorners(*dialog, tone);
 			if (!dialog->property(kCenteredProperty).toBool()) {
 				centerOnParentOrScreen(*dialog);
@@ -622,12 +297,51 @@ protected:
 
 } // namespace
 
+void makeDialogAdaptive(QDialog &dialog, QSize preferredSize) {
+	if (!dialog.layout() || dialog.property("meetingUiAdaptive").toBool()) return;
+	dialog.setProperty("meetingUiAdaptive", true);
+	for (auto *label : dialog.findChildren<QLabel *>()) {
+		if (label->maximumHeight() == QWIDGETSIZE_MAX) label->setWordWrap(true);
+	}
+	for (auto *form : dialog.findChildren<QFormLayout *>()) {
+		form->setRowWrapPolicy(QFormLayout::WrapLongRows);
+		form->setFieldGrowthPolicy(QFormLayout::AllNonFixedFieldsGrow);
+	}
+	auto *content = new QWidget;
+	content->setObjectName(QStringLiteral("adaptiveDialogContent"));
+	content->setLayout(dialog.layout());
+	content->layout()->setSizeConstraint(QLayout::SetMinAndMaxSize);
+	auto *scroll = new QScrollArea(&dialog);
+	scroll->setObjectName(QStringLiteral("adaptiveDialogScroll"));
+	scroll->setFrameShape(QFrame::NoFrame);
+	scroll->setWidgetResizable(true);
+	scroll->viewport()->setAutoFillBackground(false);
+	content->setAutoFillBackground(false);
+	scroll->setWidget(content);
+	auto *root = new QVBoxLayout(&dialog);
+	root->setContentsMargins(0, 0, 0, 0);
+	root->addWidget(scroll);
+	dialog.setMinimumSize(280, 180);
+	dialog.setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+	dialog.setSizeGripEnabled(!dialog.windowFlags().testFlag(Qt::FramelessWindowHint));
+	dialog.setProperty("meetingUiPreferredSize", preferredSize);
+	dialog.resize(preferredSize);
+}
+
 void install(QApplication &application) {
 	if (application.property(kInstalledProperty).toBool()) {
 		return;
 	}
 	application.setProperty(kInstalledProperty, true);
-	application.setStyleSheet(application.styleSheet() + applicationStyleSheet());
+	QString sheet;
+	for (const auto *path : { ":/meeting-ui/styles/widgets.qss", ":/meeting-ui/styles/application.qss" }) {
+		QFile file(QString::fromLatin1(path));
+		if (!file.open(QIODevice::ReadOnly)) {
+			qFatal("Cannot load the application theme resource");
+		}
+		sheet += QString::fromUtf8(file.readAll()) + QLatin1Char('\n');
+	}
+	application.setStyleSheet(sheet);
 	application.installEventFilter(new ThemeEventFilter(&application));
 }
 
@@ -637,7 +351,7 @@ void setTone(QWidget &widget, Tone tone) {
 }
 
 void styleChoiceControls(QWidget &widget, Tone tone) {
-	widget.setStyleSheet(widget.styleSheet() + choiceControlStyleSheet(tone));
+	setTone(widget, tone);
 }
 
 void styleMenu(QMenu &menu, Tone tone) {
@@ -646,7 +360,7 @@ void styleMenu(QMenu &menu, Tone tone) {
 #if !defined(Q_OS_WIN)
 	menu.setAttribute(Qt::WA_TranslucentBackground, true);
 #endif
-	menu.setStyleSheet(menuStyleSheet(tone));
+	refreshStyle(menu);
 }
 
 void centerOnScreen(QWidget &window) {

@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "audio_device_test_controller.h"
 
 #include "src/media/wasapi_capture.h"
@@ -40,7 +41,7 @@ constexpr double kToneFrequencyHz = 660.0;
 constexpr double kToneAmplitude = 0.12;
 
 QString HResultMessage(const QString &operation, HRESULT result) {
-	return QString::fromUtf8("%1失败（错误码 0x%2）")
+	return QCoreApplication::translate("MeetingUI", "%1 failed (error code 0x%2)")
 		.arg(operation)
 		.arg(static_cast<quint32>(result), 8, 16, QLatin1Char('0'));
 }
@@ -248,7 +249,7 @@ ToneResult PlayTone(
 	ScopedComInitialization com;
 	const auto comResult = com.result();
 	if (FAILED(comResult) && comResult != RPC_E_CHANGED_MODE) {
-		return { false, HResultMessage(QString::fromUtf8("初始化音频线程"), comResult) };
+		return { false, HResultMessage(QCoreApplication::translate("MeetingUI", "Initialize audio thread"), comResult) };
 	}
 
 	ComPtr<IMMDeviceEnumerator> enumerator;
@@ -258,7 +259,7 @@ ToneResult PlayTone(
 		CLSCTX_ALL,
 		IID_PPV_ARGS(&enumerator));
 	if (FAILED(result) || !enumerator) {
-		return { false, HResultMessage(QString::fromUtf8("打开音频设备服务"), result) };
+		return { false, HResultMessage(QCoreApplication::translate("MeetingUI", "Open audio device service"), result) };
 	}
 
 	ComPtr<IMMDevice> device;
@@ -272,19 +273,19 @@ ToneResult PlayTone(
 		result = enumerator->GetDevice(wideId.c_str(), &device);
 	}
 	if (FAILED(result) || !device) {
-		return { false, HResultMessage(QString::fromUtf8("打开所选扬声器"), result) };
+		return { false, HResultMessage(QCoreApplication::translate("MeetingUI", "Open selected speaker"), result) };
 	}
 
 	ComPtr<IAudioClient> audioClient;
 	result = device->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, &audioClient);
 	if (FAILED(result) || !audioClient) {
-		return { false, HResultMessage(QString::fromUtf8("创建扬声器测试流"), result) };
+		return { false, HResultMessage(QCoreApplication::translate("MeetingUI", "Create speaker test stream"), result) };
 	}
 
 	WAVEFORMATEX *mixFormat = nullptr;
 	result = audioClient->GetMixFormat(&mixFormat);
 	if (FAILED(result) || !mixFormat) {
-		return { false, HResultMessage(QString::fromUtf8("读取扬声器格式"), result) };
+		return { false, HResultMessage(QCoreApplication::translate("MeetingUI", "Read speaker format"), result) };
 	}
 
 	auto releaseFormat = [&] {
@@ -297,7 +298,7 @@ ToneResult PlayTone(
 		|| mixFormat->nSamplesPerSec == 0
 		|| mixFormat->nBlockAlign == 0) {
 		releaseFormat();
-		return { false, QString::fromUtf8("所选扬声器的共享格式不支持测试音") };
+		return { false, QCoreApplication::translate("MeetingUI", "The selected speaker's shared format does not support the test tone") };
 	}
 
 	constexpr REFERENCE_TIME kRequestedBufferDuration = 100 * 10000;
@@ -310,7 +311,7 @@ ToneResult PlayTone(
 		nullptr);
 	if (FAILED(result)) {
 		releaseFormat();
-		return { false, HResultMessage(QString::fromUtf8("初始化扬声器测试流"), result) };
+		return { false, HResultMessage(QCoreApplication::translate("MeetingUI", "Initialize speaker test stream"), result) };
 	}
 
 	UINT32 bufferFrameCount = 0;
@@ -321,7 +322,7 @@ ToneResult PlayTone(
 	}
 	if (FAILED(result) || !renderClient || bufferFrameCount == 0) {
 		releaseFormat();
-		return { false, HResultMessage(QString::fromUtf8("准备扬声器测试缓冲区"), result) };
+		return { false, HResultMessage(QCoreApplication::translate("MeetingUI", "Prepare speaker test buffer"), result) };
 	}
 
 	const auto totalFrames = std::max<std::uint64_t>(
@@ -396,10 +397,10 @@ ToneResult PlayTone(
 	releaseFormat();
 
 	if (stopRequested.load(std::memory_order_acquire)) {
-		return { false, QString::fromUtf8("扬声器测试已停止") };
+		return { false, QCoreApplication::translate("MeetingUI", "Speaker test stopped") };
 	}
 	if (FAILED(result)) {
-		return { false, HResultMessage(QString::fromUtf8("播放扬声器测试音"), result) };
+		return { false, HResultMessage(QCoreApplication::translate("MeetingUI", "Play speaker test tone"), result) };
 	}
 	return { true, QString() };
 }
@@ -481,10 +482,10 @@ void AudioDeviceTestController::refreshDevices() {
 				microphones = ToDescriptors(livekit::WasapiEnumerator::EnumerateInputDevices());
 				speakers = ToDescriptors(livekit::WasapiEnumerator::EnumerateOutputDevices());
 			} catch (const std::exception &exception) {
-				error = QString::fromUtf8("枚举音频设备失败：%1")
+				error = QCoreApplication::translate("MeetingUI", "Failed to list audio devices: %1")
 					.arg(QString::fromLocal8Bit(exception.what()));
 			} catch (...) {
-				error = QString::fromUtf8("枚举音频设备失败");
+				error = QCoreApplication::translate("MeetingUI", "Failed to list audio devices");
 			}
 
 			_impl->enumerating.store(false, std::memory_order_release);
@@ -525,7 +526,7 @@ void AudioDeviceTestController::startMicrophoneTest(const QString &deviceId) {
 			return requestedId.empty() || device.id == requestedId;
 		});
 	if (found == availableDevices.end()) {
-		emit microphoneTestFailed(QString::fromUtf8("未找到可用的麦克风设备"));
+		emit microphoneTestFailed(QCoreApplication::translate("MeetingUI", "No microphone available"));
 		return;
 	}
 
@@ -581,14 +582,14 @@ void AudioDeviceTestController::startMicrophoneTest(const QString &deviceId) {
 	config.auto_reconnect = true;
 
 	if (!capture->Init(config, source)) {
-		emit microphoneTestFailed(QString::fromUtf8("无法初始化麦克风检测"));
+		emit microphoneTestFailed(QCoreApplication::translate("MeetingUI", "Unable to initialize microphone test"));
 		return;
 	}
 	// WasapiAudioCapture creates a private APM by default. The level meter needs
 	// raw samples only and must not attach to the meeting's render reference.
 	capture->DisableApm();
 	if (!capture->Start()) {
-		emit microphoneTestFailed(QString::fromUtf8("无法启动麦克风检测"));
+		emit microphoneTestFailed(QCoreApplication::translate("MeetingUI", "Unable to start microphone test"));
 		return;
 	}
 

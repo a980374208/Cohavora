@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/ui/meeting_log_console.h"
 #include "src/ui/app_theme.h"
 #include "src/telemetry/log_redaction.h"
@@ -22,53 +23,15 @@ void LogToConsole(LogCategory cat, const QString &tag, const QString &msg) {
 MeetingLogConsoleWindow::MeetingLogConsoleWindow(QWidget *parent)
 	: QDialog(parent) {
 	AppTheme::setTone(*this, AppTheme::Tone::Dark);
-	setWindowTitle(QString::fromUtf8("LiveKit 实时控制台 / 调试日志"));
+	setWindowTitle(QCoreApplication::translate("MeetingUI", "LiveKit Console / Debug Logs"));
 	resize(780, 520);
 	setMinimumSize(600, 380);
 	initUi();
+	AppTheme::makeDialogAdaptive(*this, QSize(780, 520));
 }
 
 void MeetingLogConsoleWindow::initUi() {
-	setStyleSheet(R"(
-		QDialog {
-			background-color: #18191f;
-			color: #e5e6eb;
-			font-family: "Consolas", "Courier New", "Microsoft YaHei", monospace;
-		}
-		QPlainTextEdit {
-			background-color: #121316;
-			color: #d1d5db;
-			border: 1px solid #2d3039;
-			border-radius: 6px;
-			font-size: 12px;
-			line-height: 1.4;
-			padding: 8px;
-			selection-background-color: #1677ff;
-		}
-		QPushButton {
-			background-color: #272a34;
-			color: #e5e6eb;
-			border: 1px solid #3c404d;
-			border-radius: 6px;
-			padding: 6px 14px;
-			font-size: 12px;
-		}
-		QPushButton:hover {
-			background-color: #363a47;
-		}
-		QLineEdit {
-			background-color: #1e2027;
-			border: 1px solid #2d3039;
-			border-radius: 6px;
-			padding: 4px 10px;
-			color: #ffffff;
-			font-size: 12px;
-		}
-		QCheckBox {
-			color: #86909c;
-			font-size: 12px;
-		}
-	)");
+	MeetingUI::AppTheme::setStyleVariant(*this, "meeting-log-console-this");
 
 	auto mainLayout = new QVBoxLayout(this);
 	mainLayout->setContentsMargins(12, 12, 12, 12);
@@ -76,24 +39,24 @@ void MeetingLogConsoleWindow::initUi() {
 
 	// 顶部工具条
 	auto topLayout = new QHBoxLayout();
-	_statusLabel = new QLabel(QString::fromUtf8("● 控制台就绪"), this);
-	_statusLabel->setStyleSheet("color: #00b42a; font-weight: bold; font-size: 13px;");
+	_statusLabel = new QLabel(QCoreApplication::translate("MeetingUI", "● Console Ready"), this);
+	MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-log-console-statuslabel");
 	topLayout->addWidget(_statusLabel);
 
 	topLayout->addStretch();
 
 	_filterInput = new QLineEdit(this);
-	_filterInput->setPlaceholderText(QString::fromUtf8("搜索/过滤日志关键词..."));
+	_filterInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Search or filter logs..."));
 	_filterInput->setClearButtonEnabled(true);
-	_filterInput->setFixedWidth(200);
+	_filterInput->setMinimumWidth(200);
 	topLayout->addWidget(_filterInput);
 
-	_autoScrollBox = new QCheckBox(QString::fromUtf8("自动滚屏"), this);
+	_autoScrollBox = new QCheckBox(QCoreApplication::translate("MeetingUI", "Auto-scroll"), this);
 	_autoScrollBox->setChecked(true);
 	topLayout->addWidget(_autoScrollBox);
 
-	_copyBtn = new QPushButton(QString::fromUtf8("复制全部"), this);
-	_clearBtn = new QPushButton(QString::fromUtf8("清空"), this);
+	_copyBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Copy All"), this);
+	_clearBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Clear"), this);
 	topLayout->addWidget(_copyBtn);
 	topLayout->addWidget(_clearBtn);
 
@@ -110,7 +73,7 @@ void MeetingLogConsoleWindow::initUi() {
 	connect(_copyBtn, &QPushButton::clicked, this, &MeetingLogConsoleWindow::copyAllLogs);
 
 	// 欢迎信息
-	appendLog(LogCategory::General, "SYSTEM", QString::fromUtf8("LiveKit 客户端控制台已启动，实时监听信令、WebRTC 媒体与设备事件..."));
+	appendLog(LogCategory::General, "SYSTEM", QCoreApplication::translate("MeetingUI", "LiveKit console started. Listening for signaling, WebRTC media, and device events..."));
 }
 
 void MeetingLogConsoleWindow::appendLog(LogCategory category, const QString &tag, const QString &message) {
@@ -173,9 +136,9 @@ void MeetingLogConsoleWindow::rebuildLogView() {
 
 	if (_statusLabel) {
 		if (_currentFilter.isEmpty()) {
-			_statusLabel->setText(QString::fromUtf8("● 控制台就绪 (%1条)").arg(_logEntries.size()));
+			_statusLabel->setText(QCoreApplication::translate("MeetingUI", "● Console Ready (%1 entries)").arg(_logEntries.size()));
 		} else {
-			_statusLabel->setText(QString::fromUtf8("● 筛选: %1/%2条").arg(matchedCount).arg(_logEntries.size()));
+			_statusLabel->setText(QCoreApplication::translate("MeetingUI", "● Filtered: %1/%2 entries").arg(matchedCount).arg(_logEntries.size()));
 		}
 	}
 
@@ -226,7 +189,7 @@ void MeetingLogConsoleWindow::clearLogs() {
 		_logView->clear();
 	}
 	if (_statusLabel) {
-		_statusLabel->setText(QString::fromUtf8("● 控制台就绪 (0条)"));
+		_statusLabel->setText(QCoreApplication::translate("MeetingUI", "● Console Ready (0 entries)"));
 	}
 }
 

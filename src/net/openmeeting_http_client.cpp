@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "openmeeting_http_client.h"
 #include "src/net/service_endpoint_policy.h"
 #include <QtCore/QUrl>
@@ -93,10 +94,10 @@ void OpenMeetingHttpClient::sendPost(
             : status == ServiceEndpointStatus::InsecureTransportBlocked
                 ? ErrorCode::InsecureTransport : ErrorCode::InvalidServiceUrl);
         error.message = !tlsAvailable
-            ? QString::fromUtf8("当前环境不支持 HTTPS，已取消请求。")
+            ? QCoreApplication::translate("MeetingUI", "HTTPS is not supported in this environment. The request was canceled.")
             : serviceEndpointErrorMessage(status);
         if (error.message.isEmpty()) {
-            error.message = QString::fromUtf8("请求地址不属于已配置的服务器。");
+            error.message = QCoreApplication::translate("MeetingUI", "The request URL does not belong to the configured server.");
         }
         error.operationId = opId;
         QTimer::singleShot(0, this, [cb = std::move(cb), error]() {
@@ -146,7 +147,7 @@ void OpenMeetingHttpClient::sendPost(
 
         if (httpStatus >= 300 && httpStatus < 400) {
             err.code = static_cast<int>(ErrorCode::RedirectRejected);
-            err.message = QString::fromUtf8("服务器返回了不允许的重定向。");
+            err.message = QCoreApplication::translate("MeetingUI", "The server returned a disallowed redirect.");
             if (cb) cb(false, QJsonValue(), err);
             return;
         }
@@ -180,17 +181,17 @@ void OpenMeetingHttpClient::sendPost(
             err.code = static_cast<int>(ErrorCode::NetworkError);
             QString rawErr = reply->errorString();
             if (httpStatus == 502 || rawErr.contains("Bad Gateway", Qt::CaseInsensitive)) {
-                err.message = QString::fromUtf8("服务器网关错误 (502 Bad Gateway)：OpenMeeting 服务端进程未启动，请在服务器执行 mage start");
+                err.message = QCoreApplication::translate("MeetingUI", "502 Bad Gateway: The OpenMeeting server is not running. Run mage start on the server.");
             } else if (httpStatus == 504 || rawErr.contains("Gateway Timeout", Qt::CaseInsensitive)) {
-                err.message = QString::fromUtf8("网关响应超时 (504 Gateway Timeout)：请检查服务器网络负载");
+                err.message = QCoreApplication::translate("MeetingUI", "504 Gateway Timeout: Check the server's network and load.");
             } else if (httpStatus == 404 || rawErr.contains("Not Found", Qt::CaseInsensitive)) {
-                err.message = QString::fromUtf8("请求接口不存在 (404 Not Found)：请检查服务器路由配置");
+                err.message = QCoreApplication::translate("MeetingUI", "404 Not Found: Check the server's routing configuration.");
             } else if (reply->error() == QNetworkReply::ConnectionRefusedError) {
-                err.message = QString::fromUtf8("无法连接到服务器：连接被拒绝，请检查服务器 IP 和端口是否正确开放");
+                err.message = QCoreApplication::translate("MeetingUI", "Connection refused. Check the server IP address and port accessibility.");
             } else if (reply->error() == QNetworkReply::TimeoutError) {
-                err.message = QString::fromUtf8("连接服务器超时，请检查网络或安全组防火墙设置");
+                err.message = QCoreApplication::translate("MeetingUI", "Connection timed out. Check your network and firewall or security group settings.");
             } else if (reply->error() == QNetworkReply::RemoteHostClosedError || rawErr.contains("Connection closed", Qt::CaseInsensitive)) {
-                err.message = QString::fromUtf8("服务器连接中断，请检查 HTTPS 服务状态。");
+                err.message = QCoreApplication::translate("MeetingUI", "The server connection was interrupted. Check the HTTPS service.");
             } else {
                 err.message = rawErr;
             }
@@ -235,7 +236,7 @@ void OpenMeetingHttpClient::login(const QString &account, const QString &passwor
         auto superseded = [&] {
             auto error = err;
             error.code = static_cast<int>(ErrorCode::UnknownError);
-            error.message = QString::fromUtf8("本次登录已取消，请重新登录。");
+            error.message = QCoreApplication::translate("MeetingUI", "This sign-in attempt was canceled. Please sign in again.");
             if (callback) callback(false, UserInfo{}, error);
         };
         if (!self || self->_authRevision != revision) {
@@ -249,7 +250,7 @@ void OpenMeetingHttpClient::login(const QString &account, const QString &passwor
         if (user.token.isEmpty() || user.userId.isEmpty()) {
             auto error = err;
             error.code = static_cast<int>(ErrorCode::ParseError);
-            error.message = QString::fromUtf8("登录响应缺少必要凭据。");
+            error.message = QCoreApplication::translate("MeetingUI", "The sign-in response is missing required credentials.");
             if (callback) callback(false, UserInfo{}, error);
             return;
         }
@@ -277,7 +278,7 @@ void OpenMeetingHttpClient::requestLogin(const QString &account, const QString &
         if (!data.isObject()) {
             auto error = err;
             error.code = static_cast<int>(ErrorCode::ParseError);
-            error.message = QString::fromUtf8("登录响应数据格式无效。");
+            error.message = QCoreApplication::translate("MeetingUI", "The sign-in response contains invalid data.");
             if (callback) callback(false, UserInfo{}, error);
             return;
         }

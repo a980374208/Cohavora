@@ -1,3 +1,4 @@
+#include <QtCore/QCoreApplication>
 #include "src/ui/participant_item_delegate.h"
 #include "src/ui/participants_list_model.h"
 
@@ -85,7 +86,7 @@ void ParticipantItemDelegate::paint(QPainter *painter, const QStyleOptionViewIte
     // 拼接补充文字 (我) 与 主持人
     QString suffix = "";
     if (isLocal) {
-        suffix += QString::fromUtf8(" (我)");
+        suffix += QCoreApplication::translate("MeetingUI", " (Me)");
     }
 
     int suffixWidth = fm.horizontalAdvance(suffix);
@@ -126,7 +127,7 @@ void ParticipantItemDelegate::paint(QPainter *painter, const QStyleOptionViewIte
         tagFont.setBold(true);
         painter->setFont(tagFont);
         painter->setPen(QColor("#F59E0B"));
-        painter->drawText(tagRect, Qt::AlignCenter, QString::fromUtf8("主持人"));
+        painter->drawText(tagRect, Qt::AlignCenter, QCoreApplication::translate("MeetingUI", "Host"));
     }
 
     // 4. 绘制右侧操作图标

@@ -149,7 +149,7 @@ public:
                 case webrtc::PeerConnectionInterface::kIceConnectionClosed: state_str = "Closed"; break;
                 default: break;
             }
-            room->Log("WEBRTC", "ICE_STATE", "PC (" + std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") + ") ICE 状态变为: " + state_str);
+            room->Log("WEBRTC", "ICE_STATE", "PC (" + std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") + ") ICE state changed to: " + state_str);
             if (new_state == webrtc::PeerConnectionInterface::kIceConnectionConnected ||
                 new_state == webrtc::PeerConnectionInterface::kIceConnectionCompleted) {
                 asio::post(room->executor(), [room, generation = generation_]() {
@@ -170,7 +170,7 @@ public:
                 case webrtc::PeerConnectionInterface::PeerConnectionState::kClosed: state_str = "Closed"; break;
                 default: break;
             }
-            room->Log("WEBRTC", "PC_STATE", "PC (" + std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") + ") 传输总体状态变为: " + state_str);
+            room->Log("WEBRTC", "PC_STATE", "PC (" + std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") + ") transport state changed to: " + state_str);
             asio::post(room->executor(), [room, type = pc_type_, new_state, generation = generation_]() {
                 room->OnPeerConnectionStateChanged(type, new_state, generation);
             });
@@ -186,7 +186,7 @@ public:
         int sdp_mline_index = candidate->sdp_mline_index();
 
         if (auto room = room_.lock()) {
-            room->Log("SIGNAL", "LOCAL_ICE", "收集到本地 ICE 候选: target=" +
+            room->Log("SIGNAL", "LOCAL_ICE", "Local ICE candidate collected: target=" +
                 std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") +
                 ", detail=[omitted]");
             asio::post(room->executor(), [room, sdp, sdp_mid, sdp_mline_index, type = pc_type_, generation = generation_]() {
@@ -1027,13 +1027,13 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
 
                 if (attempt_signal->is_single_pc_mode_active()) {
                     native.subscriber = native.publisher;
-                    Log("WEBRTC", "SINGLE_PC", "启用 Single PC 模式，subscriber_pc_ 共享 publisher_pc_");
+                    Log("WEBRTC", "SINGLE_PC", "Single PC mode enabled; subscriber_pc_ shares publisher_pc_");
                 } else {
                     webrtc::PeerConnectionDependencies sub_deps(native.subscriber_observer.get());
                     auto sub_res = WebRTCManager::Instance().factory()->CreatePeerConnectionOrError(config, std::move(sub_deps));
                     if (sub_res.ok()) {
                         native.subscriber = sub_res.MoveValue();
-                        Log("WEBRTC", "SUB_PC_CREATED", "Subscriber PeerConnection 创建成功");
+                        Log("WEBRTC", "SUB_PC_CREATED", "Subscriber PeerConnection created");
                     } else {
                         Log("ERROR", "SUB_PC_FAIL",
                             secure_log::OpaqueSummary("create_subscriber_pc"));
@@ -1081,7 +1081,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         auto* perm = perm_req.mutable_subscription_permission();
         perm->set_all_participants(true);
         attempt_signal->Send(perm_req);
-        Log("SIGNAL", "SUB_PERM", "已向 LiveKit 发送全员订阅权限 SubscriptionPermission (all_participants=true)");
+        Log("SIGNAL", "SUB_PERM", "Sent SubscriptionPermission to LiveKit (all_participants=true)");
 
         // JoinResponse determines which transport must be established eagerly.
         // subscriber-primary is lazy unless the server explicitly requests
@@ -1488,7 +1488,7 @@ void Room::BeginServerDisconnect(
     if (!should_finalize) return;
 
     Log("SIGNAL", "LEAVE_DISCONNECT",
-        "[Room] 服务端要求退出房间: reason=" + std::string(ToString(reason)) +
+        "[Room] Server requested leave: reason=" + std::string(ToString(reason)) +
         ", detail=" + detail);
     livekit::safe_co_spawn(executor_,
         [self = shared_from_this(), reason, detail = std::move(detail), event_generation]()
@@ -1603,7 +1603,7 @@ bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
     static std::atomic<uint64_t> stream_sequence{0};
 
     if (payload.size() > kMaxDataStreamSize) {
-        Log("DATA", "PAYLOAD_TOO_LARGE", "拒绝发送超过 16 MiB 的 DataStream");
+        Log("DATA", "PAYLOAD_TOO_LARGE", "Rejected DataStream larger than 16 MiB");
         return false;
     }
 
@@ -1624,7 +1624,7 @@ bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
                 webrtc::CopyOnWriteBuffer(bytes.data(), bytes.size()),
                 /*binary=*/true);
             if (!dc->Send(buffer)) {
-                Log("DATA", "SEND_FAILED", "DataChannel 拒绝发送数据包");
+                Log("DATA", "SEND_FAILED", "DataChannel rejected the packet");
                 return false;
             }
             return true;
@@ -1864,7 +1864,7 @@ Room::DataPacketSendResult Room::PublishDataPacket(
         webrtc::CopyOnWriteBuffer(bytes.data(), bytes.size()),
         /*binary=*/true);
     if (!dc->Send(buffer)) {
-        Log("DATA", "SEND_FAILED", "DataChannel 拒绝发送数据包");
+        Log("DATA", "SEND_FAILED", "DataChannel rejected the packet");
         return DataPacketSendResult::ChannelRejected;
     }
     return DataPacketSendResult::Accepted;
@@ -3913,7 +3913,7 @@ void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
                     p->pc->AddTrack(p->track, { p->stream_id });
                 }
                 std::cout << "[WebRTC] Added native track (" << p->track->kind() << ") to Publisher PeerConnection." << std::endl;
-                p->room->Log("TRACK", "PUB_ATTACH", "已将 Track [" + p->track->id() + "] (" + p->track->kind() + ") 添加至 Publisher PeerConnection");
+                p->room->Log("TRACK", "PUB_ATTACH", "Added Track [" + p->track->id() + "] (" + p->track->kind() + ") to the Publisher PeerConnection");
                 p->room->SendPublishOffer();
             }
             delete p;
@@ -4223,7 +4223,7 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
                                       << " (layers=" << backup_spec.layers.size()
                                       << ", active=" << (is_active ? "ON" : "OFF (on-demand)") << ")\n";
                             task.room->Log("TRACK", "BACKUP_CODEC_ATTACH",
-                                           "已为视频轨挂载备用编码器 Transceiver: Codec=" + backup_spec.codec +
+                                           "Attached backup codec transceiver to video track: Codec=" + backup_spec.codec +
                                            ", Layers=" + std::to_string(backup_spec.layers.size()) +
                                            ", Policy=" + (is_active ? "Simulcast" : "PreferRegression"));
                         }
@@ -4288,7 +4288,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
                     codec.set_codec(options.video_codec);
                 }
                 Log("SIGNAL", "PUBLISH_CODEC_FALLBACK",
-                    "服务端未启用请求的编码 " + requested + "，改用 " + options.video_codec);
+                    "Server did not enable the requested codec " + requested + "; using " + options.video_codec);
             }
         }
     }
@@ -4375,7 +4375,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         }
         if (server_acknowledged) {
             Log("ERROR", "PUBLISH_ROLLBACK",
-                "TrackPublished ACK 后本地事务失败；已移除 sender 并发起 Publisher SDP 重协商以收敛服务端轨状态");
+                "Local transaction failed after TrackPublished ACK; removed the sender and requested Publisher SDP renegotiation to reconcile server tracks");
             NegotiatePublisher(generation);
         }
         throw;
@@ -4429,7 +4429,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                         codec.set_codec(options.video_codec);
                     }
                     Log("SIGNAL", "PUBLISH_CODEC_FALLBACK",
-                        "服务端未启用请求的编码 " + requested + "，改用 " + options.video_codec);
+                        "Server did not enable the requested codec " + requested + "; using " + options.video_codec);
                 }
             }
         }
@@ -4534,7 +4534,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
         }
 
         Log("TRACK", "BATCH_PUBLISHED",
-            "本地音视频批量发布成功: 共 " + std::to_string(publications.size()) + " 条轨道，仅执行单次 SDP 协商");
+            "Local audio/video batch published: " + std::to_string(publications.size()) + " tracks in a single SDP negotiation");
         co_return publications;
     } catch (...) {
         {
@@ -4559,7 +4559,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
         }
         if (server_acknowledged_any) {
             Log("ERROR", "PUBLISH_BATCH_ROLLBACK",
-                "批量发布事务异常；已回滚本地 senders 并发起 Publisher SDP 重协商以收敛服务端轨状态");
+                "Batch publication failed; rolled back local senders and requested Publisher SDP renegotiation to reconcile server tracks");
             NegotiatePublisher();
         }
         throw;
@@ -4772,7 +4772,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
         publication->set_track(nullptr);
         track->set_sid("");
         Log("TRACK", "LOCAL_UNPUBLISHED",
-            "本地 Track 已由 Publisher SDP Answer 确认取消发布: " + track_sid);
+            "Publisher SDP Answer confirmed local track unpublication: " + track_sid);
         co_return publication;
     } catch (const std::exception& error) {
         bool state_uncertain = false;
@@ -4788,7 +4788,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
         }
         if (state_uncertain) {
             Log("ERROR", "UNPUBLISH_STATE_UNCERTAIN",
-                "本地 sender 已移除但未收到 SDP Answer；将通过后续恢复按服务端状态收敛；" +
+                "Local sender removed without SDP Answer; recovery will reconcile with server state; " +
                     secure_log::ExceptionSummary("unpublish_negotiate"));
             throw OperationError(OperationKind::UnpublishTrack,
                                  OperationErrorCode::StateUncertain,
@@ -5231,7 +5231,7 @@ void Room::AttachRemoteTrackToParticipant(
             if (!has_logged->exchange(true)) {
                 std::cout << "[RECV AUDIO] Started receiving audio PCM stream for track " << r_track->sid() << ", sample_rate=" << frame.sampleRate() << "Hz, channels=" << frame.numChannels() << std::endl;
                 if (auto room = weak_room.lock()) {
-                    room->Log("WEBRTC", "AUDIO_FRAME", "收到远端音频首帧数据 (采样率: " + std::to_string(frame.sampleRate()) + "Hz, 声道: " + std::to_string(frame.numChannels()) + ", 帧采样数: " + std::to_string(frame.totalSamples()) + ")");
+                    room->Log("WEBRTC", "AUDIO_FRAME", "First remote audio frame received (sample rate: " + std::to_string(frame.sampleRate()) + "Hz, channels: " + std::to_string(frame.numChannels()) + ", samples per frame: " + std::to_string(frame.totalSamples()) + ")");
                 }
             }
             // 计算音频能量 RMS 并进行周期性语音诊断
@@ -5247,7 +5247,7 @@ void Room::AttachRemoteTrackToParticipant(
                     if (std::chrono::duration_cast<std::chrono::milliseconds>(now - *last_voice_log_time).count() > 2500) {
                         *last_voice_log_time = now;
                         if (auto room = weak_room.lock()) {
-                            room->Log("MEDIA", "AUDIO_VOICE", "参会人 [" + participant->identity() + "] 正在讲话 (PCM RMS 能量=" + std::to_string(static_cast<int>(rms)) + ", 48kHz 混音播放中)");
+                            room->Log("MEDIA", "AUDIO_VOICE", "Participant [" + participant->identity() + "] is speaking (PCM RMS energy=" + std::to_string(static_cast<int>(rms)) + ", mixing at 48 kHz)");
                         }
                     }
                 }
@@ -5274,9 +5274,9 @@ void Room::AttachRemoteTrackToParticipant(
             DetachRemoteTrackSinks(
                 TakeRemoteTrackSinkForBindingSerial(superseded_binding_serial));
         }
-        Log("WEBRTC", "AUDIO_ATTACH", "远端音频轨已绑定至参会人 [" + participant->identity() + "], Track SID=" + track_id + ", 已挂载 NativeAudioTrackSink");
+        Log("WEBRTC", "AUDIO_ATTACH", "Remote audio track attached to participant [" + participant->identity() + "], Track SID=" + track_id + ", NativeAudioTrackSink attached");
 
-        Log("SIGNAL", "AUDIO_TRACK_ACTIVE", "已协调 SFU 下行音频流订阅: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
+        Log("SIGNAL", "AUDIO_TRACK_ACTIVE", "SFU downstream audio subscription reconciled: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
     } else {
         auto video_track = static_cast<webrtc::VideoTrackInterface*>(track.get());
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
@@ -5289,7 +5289,7 @@ void Room::AttachRemoteTrackToParticipant(
             if (!has_logged->exchange(true)) {
                 std::cout << "[RECV VIDEO] Receiving video stream for track " << r_track->sid() << ", resolution=" << frame->width() << "x" << frame->height() << std::endl;
                 if (auto room = weak_room.lock()) {
-                    room->Log("WEBRTC", "VIDEO_FRAME", "WebRTC 解码器开始输出远端视频流 (" + std::to_string(frame->width()) + "x" + std::to_string(frame->height()) + ")");
+                    room->Log("WEBRTC", "VIDEO_FRAME", "WebRTC decoder started producing remote video (" + std::to_string(frame->width()) + "x" + std::to_string(frame->height()) + ")");
                 }
                 Telemetry::Instance().OnFirstRemoteFrameReceived("video");
             }
@@ -5315,11 +5315,11 @@ void Room::AttachRemoteTrackToParticipant(
             DetachRemoteTrackSinks(
                 TakeRemoteTrackSinkForBindingSerial(superseded_binding_serial));
         }
-        Log("WEBRTC", "VIDEO_ATTACH", "远端视频轨已绑定至参会人 [" + participant->identity() + "], Track SID=" + track_id);
+        Log("WEBRTC", "VIDEO_ATTACH", "Remote video track attached to participant [" + participant->identity() + "], Track SID=" + track_id);
 
         if (signal) {
             signal->SendUpdateTrackSettings(track_id, false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
-            Log("SIGNAL", "TRACK_ACTIVE", "已协调 SFU 下行视频流订阅: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
+            Log("SIGNAL", "TRACK_ACTIVE", "SFU downstream video subscription reconciled: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
         }
     }
 
@@ -5398,7 +5398,7 @@ void Room::FlushPendingTracks(const std::string& participant_sid, uint64_t gener
     }
 
     if (!pending_to_flush.empty()) {
-        Log("TRACK", "FLUSH_PENDING", "开始冲刷参会人 [" + participant->identity() + "] 的 " + std::to_string(pending_to_flush.size()) + " 条暂存媒体轨");
+        Log("TRACK", "FLUSH_PENDING", "Flushing participant [" + participant->identity() + "]'s " + std::to_string(pending_to_flush.size()) + " pending media tracks");
         for (const auto& item : pending_to_flush) {
             AttachRemoteTrackToParticipant(participant, item.track, item.receiver, item.track_sid, item.generation);
         }
@@ -5433,7 +5433,7 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
     
     // 如果解出来的 participant_sid 为空 (说明是本地预分配的无主临时虚拟轨，尚未绑定远端 SSRC/MSID)，直接忽略
     if (participant_sid.empty()) {
-        Log("WEBRTC", "ON_TRACK_IGNORE", "忽略未绑定远端 SSRC/MSID 的本地虚拟 Track: TrackID=" + track_id + ", StreamID=" + stream_id + ", Kind=" + std::string(track->kind()));
+        Log("WEBRTC", "ON_TRACK_IGNORE", "Ignoring local virtual track without remote SSRC/MSID: TrackID=" + track_id + ", StreamID=" + stream_id + ", Kind=" + std::string(track->kind()));
         return;
     }
 
@@ -5441,7 +5441,7 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
         track_sid = track_id;
     }
 
-    Log("WEBRTC", "ON_TRACK_RESOLVE", "下行 Track 解析成功: StreamID=" + stream_id + ", ParticipantSID=" + participant_sid + ", TrackSID=" + track_sid + ", Kind=" + std::string(track->kind()));
+    Log("WEBRTC", "ON_TRACK_RESOLVE", "Downstream track resolved: StreamID=" + stream_id + ", ParticipantSID=" + participant_sid + ", TrackSID=" + track_sid + ", Kind=" + std::string(track->kind()));
 
     std::shared_ptr<RemoteParticipant> participant;
     BeforeNativeEventCommit(generation);
@@ -5467,7 +5467,7 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
         }
     }
     if (!participant) {
-        Log("TRACK", "ENQUEUE_PENDING", "参会人 [" + participant_sid + "] 尚未就绪，真实媒体轨已暂存至 PendingTrackQueue (Track SID=" + track_sid + ")");
+        Log("TRACK", "ENQUEUE_PENDING", "Participant [" + participant_sid + "] is not ready; media track saved in PendingTrackQueue (Track SID=" + track_sid + ")");
         return;
     }
 
@@ -5508,7 +5508,7 @@ void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation
         }
     }
     if (stale_event_at_admission) {
-        Log("SIGNAL", "STALE_EVENT", "忽略已替换会话的信令事件");
+        Log("SIGNAL", "STALE_EVENT", "Ignoring signaling event from a replaced session");
         return;
     }
 
@@ -5554,7 +5554,7 @@ void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation
         }
 
         if (stale_event) {
-            Log("SIGNAL", "STALE_EVENT", "忽略已替换会话的信令事件");
+            Log("SIGNAL", "STALE_EVENT", "Ignoring signaling event from a replaced session");
             return;
         }
 
@@ -5635,7 +5635,7 @@ void Room::HandleSignalMessage(
         }
     }
     if (stale_message_at_admission) {
-        Log("SIGNAL", "STALE_EVENT", "忽略已替换会话的信令消息");
+        Log("SIGNAL", "STALE_EVENT", "Ignoring signaling message from a replaced session");
         return;
     }
     // --- 全量原始消息类型诊断 ---
@@ -5666,10 +5666,10 @@ void Room::HandleSignalMessage(
         else if (msg->has_room_moved())              type_tag = "ROOM_MOVED";
 
         if (type_tag == "UNKNOWN") {
-            Log("SIGNAL", "RAW_MSG", "[Signal] 收到服务端未识别消息 (Case=" +
+            Log("SIGNAL", "RAW_MSG", "[Signal] Unknown server message received (Case=" +
                 std::to_string(msg->message_case()) + ", detail=[omitted])");
         } else if (type_tag != "PONG") {
-            Log("SIGNAL", "RAW_MSG", "[Signal] 收到服务端消息: " + type_tag);
+            Log("SIGNAL", "RAW_MSG", "[Signal] Server message received: " + type_tag);
         }
     }
 
@@ -5705,10 +5705,10 @@ void Room::HandleSignalMessage(
     }
 
     if (msg->has_update()) {
-        Log("SIGNAL", "PARTICIPANT_UPDATE", "收到服务端 ParticipantUpdate 信令 (参会人更新数量: " + std::to_string(msg->update().participants_size()) + ")");
+        Log("SIGNAL", "PARTICIPANT_UPDATE", "ParticipantUpdate received (updated participants: " + std::to_string(msg->update().participants_size()) + ")");
         UpdateParticipants(msg->update().participants(), event_generation);
     } else if (msg->has_mute()) {
-        Log("SIGNAL", "MUTE_UPDATE", "收到 Track Mute 更新: SID=" + msg->mute().sid());
+        Log("SIGNAL", "MUTE_UPDATE", "Track mute update received: SID=" + msg->mute().sid());
         UpdateTrackMute(msg->mute(), event_generation);
     } else if (msg->has_speakers_changed()) {
         HandleActiveSpeakerUpdate(msg->speakers_changed(), event_generation);
@@ -5720,7 +5720,7 @@ void Room::HandleSignalMessage(
         HandleTrickleSignal(msg->trickle(), event_generation);
     } else if (msg->has_track_published()) {
         const auto& tp = msg->track_published();
-        Log("SIGNAL", "TRACK_PUB_ACK", "收到服务端 TrackPublished ACK: cid=" + tp.cid() + ", track_sid=" + tp.track().sid());
+        Log("SIGNAL", "TRACK_PUB_ACK", "TrackPublished ACK received: cid=" + tp.cid() + ", track_sid=" + tp.track().sid());
         std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>> pending;
         {
             std::lock_guard lock(room_mutex_);
@@ -5735,26 +5735,26 @@ void Room::HandleSignalMessage(
         switch (sr.err()) {
             case proto::SE_TRACK_NOTFOUND: err_str = "SE_TRACK_NOTFOUND (2)"; break;
             case proto::SE_CODEC_UNSUPPORTED: err_str = "SE_CODEC_UNSUPPORTED (1)"; break;
-            default: err_str = "SE_UNKNOWN (0) - 订阅成功或状态未知"; break;
+            default: err_str = "SE_UNKNOWN (0) - subscription succeeded or status unknown"; break;
         }
-        Log("SIGNAL", "SUB_RESP", "收到服务端 SubscriptionResponse: Track=" + sr.track_sid() + ", Err=" + err_str);
+        Log("SIGNAL", "SUB_RESP", "SubscriptionResponse received: Track=" + sr.track_sid() + ", Err=" + err_str);
     } else if (msg->has_subscription_permission_update()) {
-        Log("SIGNAL", "SUB_PERM_UPDATE", "收到服务端 SubscriptionPermissionUpdate (Allowed: " + std::string(msg->subscription_permission_update().allowed() ? "YES" : "NO") + ")");
+        Log("SIGNAL", "SUB_PERM_UPDATE", "SubscriptionPermissionUpdate received (Allowed: " + std::string(msg->subscription_permission_update().allowed() ? "YES" : "NO") + ")");
         UpdateTrackSubscriptionPermission(
             msg->subscription_permission_update(), event_generation);
     } else if (msg->has_stream_state_update()) {
-        Log("SIGNAL", "STREAM_STATE", "收到服务端 StreamStateUpdate 状态更新");
+        Log("SIGNAL", "STREAM_STATE", "StreamStateUpdate received");
         UpdateTrackStreamStates(msg->stream_state_update(), event_generation);
     } else if (msg->has_room_update()) {
-        Log("SIGNAL", "ROOM_UPDATE", "收到服务端 RoomUpdate 房间信息变更");
+        Log("SIGNAL", "ROOM_UPDATE", "RoomUpdate received");
         UpdateRoomInfo(msg->room_update().room(), event_generation);
     } else if (msg->has_connection_quality()) {
-        Log("SIGNAL", "CONN_QUALITY", "收到服务端 ConnectionQualityUpdate 状态更新");
+        Log("SIGNAL", "CONN_QUALITY", "ConnectionQualityUpdate received");
         UpdateConnectionQuality(msg->connection_quality(), event_generation);
     } else if (msg->has_subscribed_quality_update()) {
         const auto& squ = msg->subscribed_quality_update();
         std::string track_sid = squ.track_sid();
-        Log("SIGNAL", "QUALITY_UPDATE", "收到 SFU Dynacast 质量调控需求: Track SID=" + track_sid);
+        Log("SIGNAL", "QUALITY_UPDATE", "SFU Dynacast quality request received: Track SID=" + track_sid);
 
         std::map<std::string, std::map<livekit::proto::VideoQuality, bool>> codec_quality_map;
         std::map<livekit::proto::VideoQuality, bool> fallback_quality_states;
@@ -5827,13 +5827,13 @@ void Room::HandleSignalMessage(
                         active_summary += (enc.rid.empty() ? "single" : enc.rid) + ":" + (enc.active ? "ON " : "OFF ");
                     }
                     sender->SetParameters(parameters);
-                    Log("DYNACAST", "LAYER_UPDATE", "Dynacast 动态调节生效 [" + active_summary + "]");
+                    Log("DYNACAST", "LAYER_UPDATE", "Dynacast adjustment applied [" + active_summary + "]");
                 }
             }
         }
     } else if (msg->has_media_sections_requirement()) {
         const auto& msr = msg->media_sections_requirement();
-        Log("SIGNAL", "MEDIA_SEC_REQ", "收到 MediaSectionsRequirement: audio=" + std::to_string(msr.num_audios()) + ", video=" + std::to_string(msr.num_videos()));
+        Log("SIGNAL", "MEDIA_SEC_REQ", "MediaSectionsRequirement received: audio=" + std::to_string(msr.num_audios()) + ", video=" + std::to_string(msr.num_videos()));
         HandleMediaSectionsRequirement(msr, event_generation);
     }
 }
@@ -6036,7 +6036,7 @@ void Room::UpdateParticipants(
                         EnsureSubscriptionIntentLocked(intent_key);
                         QueueSubscriptionUpdateLocked(intent_key);
                         newly_published_tracks.push_back({remote, pub});
-                        Log("TRACK", "NEW_TRACK", "参会人 [" + remote->identity() + "] 发布新 Track: " + t_info.name() + " (" + (kind == TrackKind::Video ? "VIDEO" : "AUDIO") + ", SID: " + t_info.sid() + ", Muted: " + (t_info.muted() ? "true" : "false") + ")");
+                        Log("TRACK", "NEW_TRACK", "Participant [" + remote->identity() + "] published track: " + t_info.name() + " (" + (kind == TrackKind::Video ? "VIDEO" : "AUDIO") + ", SID: " + t_info.sid() + ", Muted: " + (t_info.muted() ? "true" : "false") + ")");
                     } else {
                         // Metadata can arrive after an early RTC binding. Its
                         // source is projected to the same track read by render.
@@ -6050,7 +6050,7 @@ void Room::UpdateParticipants(
                                 remote,
                                 pub,
                                 false));
-                            Log("TRACK", "MUTE_CHANGED", "参会人 [" + remote->identity() + "] Track [" + t_info.sid() + "] 状态变更为: " + (t_info.muted() ? "静音/关闭" : "开启"));
+                            Log("TRACK", "MUTE_CHANGED", "Participant [" + remote->identity() + "] Track [" + t_info.sid() + "] state changed to: " + (t_info.muted() ? "muted/off" : "on"));
                         }
                     }
                 }
@@ -6088,7 +6088,7 @@ void Room::UpdateParticipants(
                         remote->remove_publication(sid);
                         EnqueueParticipantEventLocked(std::move(unavailable));
                         unpublished_tracks.push_back({remote, pub});
-                        Log("TRACK", "UNPUBLISHED", "参会人 [" + remote->identity() + "] 取消发布 Track: " + sid);
+                        Log("TRACK", "UNPUBLISHED", "Participant [" + remote->identity() + "] unpublished track: " + sid);
                     }
                 }
                 EnqueueParticipantEventLocked(MakeParticipantEventLocked(
@@ -6137,7 +6137,7 @@ void Room::UpdateParticipants(
     // 会议中新增远端轨时，确保 Single PC 模式下主动发起 SDP 协商以获取 SFU 下发的 SSRC 与 MSID
     if (!newly_published_tracks.empty() && signal_snapshot &&
         signal_snapshot->is_single_pc_mode_active()) {
-        Log("SIGNAL", "NEW_TRACK_RENEG", "检测到远端发布新 Track (" + std::to_string(newly_published_tracks.size()) + " 条)，立即触发 Publisher 重新协商获取下行媒体流");
+        Log("SIGNAL", "NEW_TRACK_RENEG", "New remote tracks detected (" + std::to_string(newly_published_tracks.size()) + "); requesting Publisher renegotiation for downstream media");
         if (event_generation == 0) {
             NegotiatePublisher();
         } else {
@@ -6415,14 +6415,14 @@ void Room::HandleOfferSignal(
         pc = (offer.type() == "offer" && subscriber_pc_) ? subscriber_pc_ : publisher_pc_;
         
         if (client && client->is_single_pc_mode_active()) {
-            Log("WARNING", "UNEXPECTED_OFFER", "在 Single PC 模式下收到了服务端的 Offer，忽略该消息");
+            Log("WARNING", "UNEXPECTED_OFFER", "Ignoring server Offer in Single PC mode");
             return;
         }
     }
 
     if (!pc || !client) {
         std::cerr << "Room::HandleOfferSignal: warning, PeerConnection or SignalClient is null" << std::endl;
-        Log("ERROR", "SDP_ERR", "HandleOfferSignal: PeerConnection 或 SignalClient 为空");
+        Log("ERROR", "SDP_ERR", "HandleOfferSignal: PeerConnection or SignalClient is null");
         return;
     }
 
@@ -6445,7 +6445,7 @@ void Room::HandleOfferSignal(
             }
 
             std::cout << "[WebRTC] SetRemoteDescription offer succeeded. Generating SDP Answer..." << std::endl;
-            self->Log("SIGNAL", "OFFER_APPLIED", "服务端 Offer 设置成功，正在生成 SDP Answer...");
+            self->Log("SIGNAL", "OFFER_APPLIED", "Server Offer applied. Generating SDP Answer...");
             WebRTCManager::Instance().CreateAnswer(pc, self->executor_,
                 [self, client, pc, event_generation](
                     const std::string& sdp,
@@ -6503,7 +6503,7 @@ void Room::HandleOfferSignal(
 
                             // 重放暂存的 Subscriber 早期 ICE 候选
                             if (!pending_cands.empty()) {
-                                self->Log("SIGNAL", "ICE_FLUSH", "开始重放暂存的 " + std::to_string(pending_cands.size()) + " 个 Subscriber 早期候选...");
+                                self->Log("SIGNAL", "ICE_FLUSH", "Replaying " + std::to_string(pending_cands.size()) + " buffered early Subscriber candidates...");
                                 std::vector<std::pair<std::string, bool>> results;
                                 WebRTCManager::Instance().signaling_thread()->BlockingCall([pc, &pending_cands, &results]() {
                                     for (const auto& pcand : pending_cands) {
@@ -6518,8 +6518,8 @@ void Room::HandleOfferSignal(
                                 });
                                 for (const auto& res : results) {
                                 self->Log("SIGNAL", "ICE_SUB_REPLAY",
-                                          std::string("重放早期候选结果=") +
-                                              (res.second ? "成功" : "失败"));
+                                          std::string("Early candidate replay result=") +
+                                              (res.second ? "success" : "failure"));
                                 }
                             }
 
@@ -6575,7 +6575,7 @@ void Room::HandleAnswerSignal(
     }
 
     if (single_pc) {
-        Log("SIGNAL", "SDP_ANS_ROUTING", "Single PC 模式：直接将 Answer 路由至 publisher_pc_");
+        Log("SIGNAL", "SDP_ANS_ROUTING", "Single PC mode: routing Answer to publisher_pc_");
         auto self = shared_from_this();
         WebRTCManager::Instance().SetRemoteDescription(pub_pc, "answer", answer.sdp(), executor_,
             [self, pub_pc, event_generation](const std::string& err) {
@@ -6588,7 +6588,7 @@ void Room::HandleAnswerSignal(
                               secure_log::OpaqueSummary("set_publisher_remote_answer"));
                     self->CompleteNegotiation(err, event_generation);
                 } else {
-                    self->Log("SIGNAL", "PUB_STABLE", "Publisher PC 协商完成 (Answer 应用成功)");
+                    self->Log("SIGNAL", "PUB_STABLE", "Publisher PC negotiation completed (Answer applied)");
                     std::vector<PendingIceCandidate> pending_cands;
                     bool need_retry = false;
                     {
@@ -6602,7 +6602,7 @@ void Room::HandleAnswerSignal(
                         pending_cands = std::move(self->pending_pub_ice_candidates_);
                     }
                     if (need_retry) {
-                        self->Log("SIGNAL", "NEG_RETRY", "检测到挂起的协商请求，开始新一轮重试");
+                        self->Log("SIGNAL", "NEG_RETRY", "Pending negotiation detected; starting another attempt");
                         self->ExecuteNegotiatePublisher(event_generation);
                     } else {
                         self->CompleteNegotiation("", event_generation);
@@ -6610,7 +6610,7 @@ void Room::HandleAnswerSignal(
                     
                     // 单 PC 模式下，本地主动发起的 recvonly transceiver 不会触发 OnTrack，需手动提取
                     auto transceivers = pub_pc->GetTransceivers();
-                    self->Log("SIGNAL", "TRANS_SCAN", "Single PC Answer 协商成功，扫描 " + std::to_string(transceivers.size()) + " 个 transceivers");
+                    self->Log("SIGNAL", "TRANS_SCAN", "Single PC Answer negotiation completed; scanning " + std::to_string(transceivers.size()) + " transceivers");
                     for (const auto& t : transceivers) {
                         if (t && (t->direction() == webrtc::RtpTransceiverDirection::kRecvOnly ||
                             (t->current_direction().has_value() && *t->current_direction() == webrtc::RtpTransceiverDirection::kRecvOnly))) {
@@ -6621,7 +6621,7 @@ void Room::HandleAnswerSignal(
                     }
 
                     if (!pending_cands.empty()) {
-                        self->Log("SIGNAL", "ICE_FLUSH", "开始重放暂存的 " + std::to_string(pending_cands.size()) + " 个 Publisher 早期候选...");
+                        self->Log("SIGNAL", "ICE_FLUSH", "Replaying " + std::to_string(pending_cands.size()) + " buffered early Publisher candidates...");
                         std::vector<std::pair<std::string, bool>> results;
                         WebRTCManager::Instance().signaling_thread()->BlockingCall([pub_pc, &pending_cands, &results]() {
                             for (const auto& pcand : pending_cands) {
@@ -6636,8 +6636,8 @@ void Room::HandleAnswerSignal(
                         });
                         for (const auto& res : results) {
                             self->Log("SIGNAL", "ICE_PUB_REPLAY",
-                                      std::string("重放早期候选结果=") +
-                                          (res.second ? "成功" : "失败"));
+                                      std::string("Early candidate replay result=") +
+                                          (res.second ? "success" : "failure"));
                         }
                     }
                 }
@@ -6702,7 +6702,7 @@ void Room::HandleAnswerSignal(
 
     if (route_to_sub && sub_pc) {
         // Subscriber Answer: 服务端回应我们发出的 Subscriber Offer
-        Log("SIGNAL", "SUB_ANS_RECV", "收到 Subscriber SDP Answer (" + std::to_string(answer.sdp().length()) + " 字节, m-lines=" + std::to_string(answer_mlines.size()) + "), 正在应用到 Subscriber PC...");
+        Log("SIGNAL", "SUB_ANS_RECV", "Subscriber SDP Answer received (" + std::to_string(answer.sdp().length()) + " bytes, m-lines=" + std::to_string(answer_mlines.size()) + "); applying to Subscriber PC...");
         auto self = shared_from_this();
         WebRTCManager::Instance().SetRemoteDescription(sub_pc, answer.type(), answer.sdp(), executor_,
             [self, sub_pc, answer_sdp = answer.sdp(), event_generation](const std::string& err) {
@@ -6722,11 +6722,11 @@ void Room::HandleAnswerSignal(
                     self->Log("ERROR", "SUB_ANS_LINES",
                               secure_log::SdpSummary("failed_subscriber_answer", answer_sdp));
                 } else {
-                    self->Log("WEBRTC", "SUB_STABLE", "Subscriber RemoteDescription (Answer) 应用成功，信令状态已稳定 STABLE");
+                    self->Log("WEBRTC", "SUB_STABLE", "Subscriber RemoteDescription (Answer) applied; signaling state is STABLE");
 
                     // 在锁外部安全重放早期候选，彻底避免死锁
                     if (!pending_cands.empty()) {
-                        self->Log("SIGNAL", "ICE_FLUSH", "开始重放暂存的 " + std::to_string(pending_cands.size()) + " 个 Subscriber 早期候选...");
+                        self->Log("SIGNAL", "ICE_FLUSH", "Replaying " + std::to_string(pending_cands.size()) + " buffered early Subscriber candidates...");
                         std::vector<std::pair<std::string, bool>> results;
                         WebRTCManager::Instance().signaling_thread()->BlockingCall([sub_pc, &pending_cands, &results]() {
                             for (const auto& pcand : pending_cands) {
@@ -6741,8 +6741,8 @@ void Room::HandleAnswerSignal(
                         });
                         for (const auto& res : results) {
                                 self->Log("SIGNAL", "ICE_SUB_REPLAY",
-                                          std::string("重放早期候选结果=") +
-                                              (res.second ? "成功" : "失败"));
+                                          std::string("Early candidate replay result=") +
+                                              (res.second ? "success" : "failure"));
                         }
                     }
                 }
@@ -6751,7 +6751,7 @@ void Room::HandleAnswerSignal(
     }
 
     // Publisher Answer
-    Log("SIGNAL", "SDP_ANSWER_RECV", "收到 Publisher 的远端 SDP Answer (" + std::to_string(answer.sdp().length()) + " 字节, m-lines=" + std::to_string(answer_mlines.size()) + ")");
+    Log("SIGNAL", "SDP_ANSWER_RECV", "Remote Publisher SDP Answer received (" + std::to_string(answer.sdp().length()) + " bytes, m-lines=" + std::to_string(answer_mlines.size()) + ")");
     auto self = shared_from_this();
     WebRTCManager::Instance().SetRemoteDescription(pub_pc, answer.type(), answer.sdp(), executor_,
         [self, pub_pc, event_generation](const std::string& err) {
@@ -6779,7 +6779,7 @@ void Room::HandleAnswerSignal(
                 self->CompleteNegotiation(err, event_generation);
             } else {
                 std::cout << "[WebRTC] Publisher remote description applied successfully! PC signaling state is STABLE." << std::endl;
-                self->Log("WEBRTC", "PUB_STABLE", "Publisher RemoteDescription 应用成功，信令状态已恢复 STABLE");
+                self->Log("WEBRTC", "PUB_STABLE", "Publisher RemoteDescription applied; signaling state is STABLE");
 
                 // 在锁外部安全重放早期候选
                 if (!pending_cands.empty()) {
@@ -6823,7 +6823,7 @@ void Room::HandleTrickleSignal(
         if (sdp_mid.empty()) sdp_mid = json_cand.value("sdp_mid", "");
         int sdp_mline_index = json_cand.value("sdpMLineIndex", 0);
 
-        Log("SIGNAL", "TRICKLE_RECV", "收到服务端 ICE 候选: target=" +
+        Log("SIGNAL", "TRICKLE_RECV", "Server ICE candidate received: target=" +
             std::string(trickle.target() == proto::SignalTarget::PUBLISHER ? "PUBLISHER" : "SUBSCRIBER") +
             ", detail=[omitted]");
 
@@ -6852,10 +6852,10 @@ void Room::HandleTrickleSignal(
                         if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
                         self->pending_pub_ice_candidates_.push_back({sdp_mid, sdp_mline_index, sdp});
                         self->Log("SIGNAL", "ICE_PUB_QUEUE",
-                                  "Publisher PC 暂未就绪，已暂存早期 ICE 候选: detail=[omitted]");
+                                  "Publisher PC not ready; early ICE candidate buffered: detail=[omitted]");
                     } else {
                         self->Log("SIGNAL", "ICE_PUB_ADD",
-                                  "向 Publisher PC 添加 ICE 候选: 结果=成功 (Single PC)");
+                                  "Added ICE candidate to Publisher PC: success (Single PC)");
                     }
                 }
                 return;
@@ -6869,10 +6869,10 @@ void Room::HandleTrickleSignal(
                         if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
                         self->pending_sub_ice_candidates_.push_back({sdp_mid, sdp_mline_index, sdp});
                         self->Log("SIGNAL", "ICE_SUB_QUEUE",
-                                  "Subscriber PC 暂未就绪，已暂存早期 ICE 候选: detail=[omitted]");
+                                  "Subscriber PC not ready; early ICE candidate buffered: detail=[omitted]");
                     } else {
                         self->Log("SIGNAL", "ICE_SUB_ADD",
-                                  "向 Subscriber PC 添加 ICE 候选: 结果=成功");
+                                  "Added ICE candidate to Subscriber PC: success");
                     }
                 }
             } else {
@@ -6892,10 +6892,10 @@ void Room::HandleTrickleSignal(
                         if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
                         self->pending_sub_ice_candidates_.push_back({sdp_mid, sdp_mline_index, sdp});
                         self->Log("SIGNAL", "ICE_SUB_QUEUE",
-                                  "Subscriber PC 暂未就绪，已暂存早期 ICE 候选: detail=[omitted]");
+                                  "Subscriber PC not ready; early ICE candidate buffered: detail=[omitted]");
                     } else {
                         self->Log("SIGNAL", "ICE_SUB_ADD",
-                                  "向 Subscriber PC 尝试添加 ICE 候选: 结果=成功");
+                                  "Attempted to add ICE candidate to Subscriber PC: success");
                     }
                 }
             }
@@ -6923,11 +6923,11 @@ void Room::HandleMediaSectionsRequirement(
 
     if (!single_pc) {
         Log("SIGNAL", "MEDIA_SEC_SKIP",
-            "忽略 dual-PC 模式下的 MediaSectionsRequirement；Subscriber SDP 由服务端发起");
+            "Ignoring MediaSectionsRequirement in dual-PC mode; the server initiates Subscriber SDP");
         return;
     }
     if (!publisher || (num_audios == 0 && num_videos == 0)) {
-        Log("SIGNAL", "MEDIA_SEC_SKIP", "MediaSectionsRequirement 无需新增媒体段");
+        Log("SIGNAL", "MEDIA_SEC_SKIP", "MediaSectionsRequirement needs no additional media sections");
         return;
     }
 
@@ -6955,7 +6955,7 @@ void Room::HandleMediaSectionsRequirement(
     }
 
     Log("SIGNAL", "MEDIA_SEC_ADDED",
-        "按服务端请求新增 recvonly 媒体段: audio=" + std::to_string(num_audios) +
+        "Added server-requested recvonly media sections: audio=" + std::to_string(num_audios) +
         ", video=" + std::to_string(num_videos));
     // NegotiatePublisher coalesces repeated requirements received while an
     // offer is in flight, so no server request is dropped.
@@ -7693,7 +7693,7 @@ void Room::UpdateConnectionQuality(
 
             if (!participant) {
                 Log("SIGNAL", "CONN_QUALITY_UNKNOWN_PARTICIPANT",
-                    "忽略未知参会人的连接质量更新: " + quality_update.participant_sid());
+                    "Ignoring connection quality update for an unknown participant: " + quality_update.participant_sid());
                 continue;
             }
 
@@ -7759,7 +7759,7 @@ void Room::UpdateTrackStreamStates(
                 : nullptr;
             if (!participant || !publication) {
                 Log("SIGNAL", "STREAM_STATE_UNKNOWN_TRACK",
-                    "忽略未知参会人或 Track 的流状态更新: participant=" +
+                    "Ignoring stream state update for an unknown participant or track: participant=" +
                     stream_state.participant_sid() + ", track=" + stream_state.track_sid());
                 continue;
             }
@@ -8108,7 +8108,7 @@ void Room::SetParticipantVolume(const std::string& identity_or_sid, double volum
         }
     }
     if (!changed_identity.empty()) {
-        Log("MEDIA", "VOLUME_SET", "已设置参会人 [" + changed_identity + "] 音量为 " + std::to_string(static_cast<int>(volume * 100)) + "%");
+        Log("MEDIA", "VOLUME_SET", "Set participant [" + changed_identity + "] volume to " + std::to_string(static_cast<int>(volume * 100)) + "%");
     }
 }
 
@@ -8128,7 +8128,7 @@ void Room::SetParticipantMuted(const std::string& identity_or_sid, bool muted) {
         }
     }
     if (!changed_identity.empty()) {
-        Log("MEDIA", "MUTE_SET", "已设置参会人 [" + changed_identity + "] 本地静音=" + (muted ? "true" : "false"));
+        Log("MEDIA", "MUTE_SET", "Set participant [" + changed_identity + "] local mute=" + (muted ? "true" : "false"));
     }
 }
 
@@ -8144,7 +8144,7 @@ void Room::SetAudioOutputMuted(bool muted) {
             }
         }
     }
-    Log("MEDIA", "SPEAKER_MUTE", "已设置房间音频播放输出静音=" + std::string(muted ? "true" : "false"));
+    Log("MEDIA", "SPEAKER_MUTE", "Set room audio output mute=" + std::string(muted ? "true" : "false"));
 }
 
 void Room::SimulateScenario(SimulateScenarioType scenario) {
@@ -8167,12 +8167,12 @@ asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario)
 
     switch (scenario) {
     case SimulateScenarioType::SignalReconnect: {
-        Log("SIMULATE", "SIGNAL_RECONNECT", "触发信令断开以模拟软重连 (Soft Reconnect / Resume)");
+        Log("SIMULATE", "SIGNAL_RECONNECT", "Disconnecting signaling to simulate soft reconnect / resume");
         HandleSignalEvent(SignalEvent{SignalEvent::Close, nullptr, "simulated signal reconnect"});
         break;
     }
     case SimulateScenarioType::FullReconnect: {
-        Log("SIMULATE", "FULL_RECONNECT", "触发模拟硬重连 (Hard Reconnect / Full Restart)");
+        Log("SIMULATE", "FULL_RECONNECT", "Simulating hard reconnect / full restart");
         if (signal) {
             proto::SignalRequest req;
             auto* sim = req.mutable_simulate();
@@ -8183,7 +8183,7 @@ asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario)
         break;
     }
     case SimulateScenarioType::SpeakerUpdate: {
-        Log("SIMULATE", "SPEAKER_UPDATE", "发送 SimulateScenario.speaker_update = 3");
+        Log("SIMULATE", "SPEAKER_UPDATE", "Sending SimulateScenario.speaker_update = 3");
         if (signal) {
             proto::SignalRequest req;
             auto* sim = req.mutable_simulate();
@@ -8193,7 +8193,7 @@ asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario)
         break;
     }
     case SimulateScenarioType::NodeFailure: {
-        Log("SIMULATE", "NODE_FAILURE", "发送 SimulateScenario.node_failure = true");
+        Log("SIMULATE", "NODE_FAILURE", "Sending SimulateScenario.node_failure = true");
         if (signal) {
             proto::SignalRequest req;
             auto* sim = req.mutable_simulate();
@@ -8203,7 +8203,7 @@ asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario)
         break;
     }
     case SimulateScenarioType::Migration: {
-        Log("SIMULATE", "MIGRATION", "发送 SimulateScenario.migration = true");
+        Log("SIMULATE", "MIGRATION", "Sending SimulateScenario.migration = true");
         if (signal) {
             proto::SignalRequest req;
             auto* sim = req.mutable_simulate();
@@ -8213,7 +8213,7 @@ asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario)
         break;
     }
     case SimulateScenarioType::ServerLeave: {
-        Log("SIMULATE", "SERVER_LEAVE", "发送 SimulateScenario.server_leave = true");
+        Log("SIMULATE", "SERVER_LEAVE", "Sending SimulateScenario.server_leave = true");
         if (signal) {
             proto::SignalRequest req;
             auto* sim = req.mutable_simulate();
@@ -8223,7 +8223,7 @@ asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario)
         break;
     }
     case SimulateScenarioType::SwitchCandidate: {
-        Log("SIMULATE", "SWITCH_CANDIDATE", "发送 SimulateScenario.switch_candidate_protocol = TCP");
+        Log("SIMULATE", "SWITCH_CANDIDATE", "Sending SimulateScenario.switch_candidate_protocol = TCP");
         if (signal) {
             proto::SignalRequest req;
             auto* sim = req.mutable_simulate();
@@ -8233,18 +8233,18 @@ asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario)
         break;
     }
     case SimulateScenarioType::E2eeKeyRatchet: {
-        Log("SIMULATE", "E2EE_RATCHET", "触发 E2EE 密钥步进 (Key Ratchet)");
+        Log("SIMULATE", "E2EE_RATCHET", "Triggering E2EE key ratchet");
         if (e2ee) {
             e2ee->RatchetKey();
-            Log("SIMULATE", "E2EE_RATCHET", "E2EE 密钥已步进更新");
+            Log("SIMULATE", "E2EE_RATCHET", "E2EE key ratcheted");
         } else {
-            Log("SIMULATE", "E2EE_RATCHET", "当前未启用 E2EE 管理器，忽略 Ratchet 操作");
+            Log("SIMULATE", "E2EE_RATCHET", "E2EE manager is disabled; ignoring key ratchet");
         }
         break;
     }
     case SimulateScenarioType::ParticipantName: {
         std::string new_name = "Simulated " + std::to_string(std::chrono::system_clock::now().time_since_epoch().count() % 10000);
-        Log("SIMULATE", "PARTICIPANT_NAME", "模拟本地参会人改名: " + new_name);
+        Log("SIMULATE", "PARTICIPANT_NAME", "Simulating local participant rename: " + new_name);
         if (local) {
             local->set_name(new_name);
             if (signal) {
@@ -8258,7 +8258,7 @@ asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario)
     }
     case SimulateScenarioType::ParticipantMetadata: {
         std::string new_meta = "{\"simulated\":true,\"ts\":" + std::to_string(std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()) + "}";
-        Log("SIMULATE", "PARTICIPANT_METADATA", "模拟本地参会人元数据更新: " + new_meta);
+        Log("SIMULATE", "PARTICIPANT_METADATA", "Simulating local participant metadata update: " + new_meta);
         if (local) {
             local->set_metadata(new_meta);
             if (signal) {
@@ -8271,7 +8271,7 @@ asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario)
         break;
     }
     case SimulateScenarioType::Clear: {
-        Log("SIMULATE", "CLEAR", "发送 SimulateScenario.subscriber_bandwidth = 0 清除人为限速与限制");
+        Log("SIMULATE", "CLEAR", "Sending SimulateScenario.subscriber_bandwidth = 0 to clear bandwidth restrictions");
         if (signal) {
             proto::SignalRequest req;
             auto* sim = req.mutable_simulate();

@@ -386,9 +386,11 @@ endfunction()
 qt5_add_resources(LIVEKIT_MEETING_APP_THEME_RESOURCES
     src/ui/app_theme.qrc
 )
+include(cmake/UiTranslations.cmake)
 
 add_executable(livekit_meeting_app
     ${LIVEKIT_MEETING_APP_THEME_RESOURCES}
+    ${LIVEKIT_UI_TRANSLATION_RESOURCES}
     src/app/main_meeting_app.cpp
     src/net/http_types.h
     src/net/meeting_types.h
@@ -407,6 +409,8 @@ add_executable(livekit_meeting_app
     src/ui/login_dialog.cpp
     src/ui/app_theme.cpp
     src/ui/app_theme.h
+    src/ui/app_translation.cpp
+    src/ui/app_translation.h
     src/ui/sidebar_widget.cpp
     src/ui/sidebar_widget.h
     src/ui/action_card_widget.cpp
