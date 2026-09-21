@@ -86,8 +86,10 @@ void MeetingBookingDialog::initUi() {
 		QLabel { color: #303133; font-size: 13px; }
 		QLineEdit, QDateEdit, QDateTimeEdit, QSpinBox, QComboBox {
 			min-height: 34px; border: 1px solid #dcdfe6; border-radius: 6px;
-			padding: 0 9px; background: #ffffff;
+			background: #ffffff;
 		}
+		QLineEdit { padding: 0 9px; }
+		QDateEdit, QDateTimeEdit, QSpinBox, QComboBox { padding: 0 36px 0 9px; }
 		QLineEdit:focus, QDateEdit:focus, QDateTimeEdit:focus, QSpinBox:focus, QComboBox:focus {
 			border-color: #1677ff;
 		}

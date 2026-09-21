@@ -1,4 +1,6 @@
 #include "src/ui/meeting_main_window.h"
+#include "src/ui/app_theme.h"
+#include "src/ui/meeting_log_console.h"
 #include "src/ui/meeting_room_window.h"
 #include "src/ui/meeting_booking_dialog.h"
 #include "src/ui/meeting_detail_dialog.h"
@@ -525,6 +527,9 @@ MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 	setWindowTitle(QString::fromUtf8("会议客户端 - LiveKit Powered"));
 	resize(1040, 660);
 	setMinimumSize(900, 580);
+	if (!parent) {
+		AppTheme::centerOnScreen(*this);
+	}
 	setMouseTracking(true);
 
 	// 设置无边框但保留系统窗口特性
@@ -547,6 +552,13 @@ MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 void MeetingMainWindow::showEvent(QShowEvent *e) {
 	Ui::RpWidget::showEvent(e);
 	setupNativeWindow();
+}
+
+void MeetingMainWindow::closeEvent(QCloseEvent *e) {
+	clearPendingMeetingEntry();
+	closeMeetingWindows();
+	hideLogConsole();
+	Ui::RpWidget::closeEvent(e);
 }
 
 void MeetingMainWindow::setupNativeWindow() {
@@ -637,6 +649,7 @@ void MeetingMainWindow::initLayout() {
 	_sidebar->avatarClicked() | rpl::on_next([this] {
 		auto &session = OpenMeeting::SessionManager::instance();
 		QMenu menu(this);
+		AppTheme::styleMenu(menu, AppTheme::Tone::Light);
 		QString statusStr = session.isLoggedIn()
 			? QString::fromUtf8("当前用户: %1 (%2)").arg(session.nickname(), session.userId())
 			: QString::fromUtf8("当前未登录");
@@ -648,13 +661,49 @@ void MeetingMainWindow::initLayout() {
 
 		QAction *selected = menu.exec(QCursor::pos());
 		if (selected == switchAction || selected == logoutAction) {
-			session.logout();
-			LoginDialog loginDlg(this);
-			if (loginDlg.exec() == QDialog::Accepted) {
-				_sidebar->update();
-			}
+			handleUserLogout();
 		}
 	}, lifetime());
+}
+
+void MeetingMainWindow::handleUserLogout() {
+	closeMeetingWindows();
+	hideLogConsole();
+	OpenMeeting::SessionManager::instance().logout();
+
+	// The main window is unavailable while no account is authenticated.  The
+	// login dialog has no parent so the hidden main window is never exposed.
+	hide();
+	LoginDialog loginDlg;
+	if (loginDlg.exec() == QDialog::Accepted) {
+		if (_sidebar) _sidebar->update();
+		if (_meetingCatalog) _meetingCatalog->refreshUpcoming();
+		show();
+		raise();
+		activateWindow();
+		return;
+	}
+
+	close();
+}
+
+void MeetingMainWindow::closeMeetingWindows() {
+	clearPendingMeetingEntry();
+	const auto topLevelWidgets = QApplication::topLevelWidgets();
+	for (QWidget *widget : topLevelWidgets) {
+		if (auto *roomWindow = qobject_cast<MeetingRoomWindow *>(widget)) {
+			roomWindow->close();
+		}
+	}
+}
+
+void MeetingMainWindow::hideLogConsole() {
+	const auto topLevelWidgets = QApplication::topLevelWidgets();
+	for (QWidget *widget : topLevelWidgets) {
+		if (auto *console = qobject_cast<MeetingLogConsoleWindow *>(widget)) {
+			console->hide();
+		}
+	}
 }
 
 void MeetingMainWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason) {

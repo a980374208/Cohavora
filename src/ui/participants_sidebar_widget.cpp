@@ -1,4 +1,5 @@
 #include "src/ui/participants_sidebar_widget.h"
+#include "src/ui/app_theme.h"
 #include "src/net/session_manager.h"
 
 #include <QtCore/QDebug>
@@ -10,6 +11,7 @@ namespace OpenMeeting {
 ParticipantsSidebarWidget::ParticipantsSidebarWidget(std::shared_ptr<MeetingCoordinator> coordinator, QWidget *parent)
     : QWidget(parent)
     , _coordinator(coordinator) {
+    MeetingUI::AppTheme::setTone(*this, MeetingUI::AppTheme::Tone::Dark);
     setupUi();
 
     if (_coordinator) {
@@ -250,29 +252,7 @@ void ParticipantsSidebarWidget::onMoreClicked(const QString &identity, const QPo
     if (target.identity.isEmpty()) return;
 
     QMenu menu(this);
-    menu.setStyleSheet(
-        "QMenu {"
-        "  background-color: #22262E;"
-        "  border: 1px solid #363C4A;"
-        "  border-radius: 6px;"
-        "  padding: 4px;"
-        "}"
-        "QMenu::item {"
-        "  color: #E5E7EB;"
-        "  padding: 6px 20px;"
-        "  border-radius: 4px;"
-        "  font-size: 12px;"
-        "}"
-        "QMenu::item:selected {"
-        "  background-color: #3B82F6;"
-        "  color: #FFFFFF;"
-        "}"
-        "QMenu::separator {"
-        "  height: 1px;"
-        "  background-color: #363C4A;"
-        "  margin: 4px 6px;"
-        "}"
-    );
+    MeetingUI::AppTheme::styleMenu(menu, MeetingUI::AppTheme::Tone::Dark);
 
     if (target.isLocal) {
         // 本地用户菜单

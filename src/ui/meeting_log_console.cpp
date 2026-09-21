@@ -1,4 +1,5 @@
 #include "src/ui/meeting_log_console.h"
+#include "src/ui/app_theme.h"
 #include "src/telemetry/log_redaction.h"
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
@@ -20,6 +21,7 @@ void LogToConsole(LogCategory cat, const QString &tag, const QString &msg) {
 
 MeetingLogConsoleWindow::MeetingLogConsoleWindow(QWidget *parent)
 	: QDialog(parent) {
+	AppTheme::setTone(*this, AppTheme::Tone::Dark);
 	setWindowTitle(QString::fromUtf8("LiveKit 实时控制台 / 调试日志"));
 	resize(780, 520);
 	setMinimumSize(600, 380);
