@@ -2,6 +2,7 @@
 
 #include "src/core/meeting_catalog_controller.h"
 #include "src/net/session_manager.h"
+#include "src/ui/app_theme.h"
 
 #include <QtCore/QDateTime>
 #include <QtCore/QTimeZone>
@@ -79,6 +80,7 @@ MeetingBookingDialog::MeetingBookingDialog(
 
 void MeetingBookingDialog::initUi() {
 	setWindowTitle(_original ? QString::fromUtf8("编辑会议") : QString::fromUtf8("预定会议"));
+	setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
 	setModal(true);
 	setMinimumWidth(500);
 	setStyleSheet(R"(
@@ -99,6 +101,8 @@ void MeetingBookingDialog::initUi() {
 		QPushButton#primary:disabled { background: #b7d6ff; }
 		QPushButton#secondary { background: #f2f3f5; color: #4e5969; border: none; }
 	)");
+	AppTheme::setTone(*this, AppTheme::Tone::Light);
+	AppTheme::styleChoiceControls(*this, AppTheme::Tone::Light);
 
 	auto *root = new QVBoxLayout(this);
 	root->setContentsMargins(28, 24, 28, 24);

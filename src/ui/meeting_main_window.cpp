@@ -613,10 +613,25 @@ void MeetingMainWindow::initLayout() {
 		onCardClicked(t);
 	}, lifetime());
 
+	_sidebar->navChanged() | rpl::on_next([this](NavItemType type) {
+		if (type != NavItemType::Contacts) return;
+		_sidebar->setActiveNav(NavItemType::Meeting);
+		QMessageBox::information(
+			this,
+			QString::fromUtf8("提示"),
+			QString::fromUtf8("功能待完善"));
+	}, lifetime());
+
 	_sidebar->bottomItemClicked() | rpl::on_next([this](BottomItemType type) {
-		if (type != BottomItemType::Settings) return;
-		SettingsDialog dialog(OpenMeeting::SessionManager::instance(), this);
-		dialog.exec();
+		if (type == BottomItemType::Settings) {
+			SettingsDialog dialog(OpenMeeting::SessionManager::instance(), this);
+			dialog.exec();
+			return;
+		}
+		QMessageBox::information(
+			this,
+			QString::fromUtf8("提示"),
+			QString::fromUtf8("功能待完善"));
 	}, lifetime());
 
 	// 会议目录入口
