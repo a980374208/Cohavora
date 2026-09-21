@@ -182,7 +182,7 @@ QString choiceControlStyleSheet(Tone tone) {
 		QComboBox, QSpinBox, QDoubleSpinBox, QDateEdit, QDateTimeEdit, QTimeEdit {
 			padding-right: 36px;
 		}
-		QComboBox::drop-down {
+		QComboBox::drop-down, QDateEdit::drop-down, QDateTimeEdit::drop-down {
 			subcontrol-origin: padding;
 			subcontrol-position: top right;
 			width: 32px;
@@ -191,16 +191,22 @@ QString choiceControlStyleSheet(Tone tone) {
 			border-bottom-right-radius: 6px;
 			background: transparent;
 		}
-		QComboBox::drop-down:hover { background: %1; }
-		QComboBox::drop-down:pressed, QComboBox::drop-down:on { background: %2; }
-		QComboBox::drop-down:disabled { background: transparent; }
-		QComboBox::down-arrow {
+		QComboBox::drop-down:hover,
+		QDateEdit::drop-down:hover, QDateTimeEdit::drop-down:hover { background: %1; }
+		QComboBox::drop-down:pressed, QComboBox::drop-down:on,
+		QDateEdit::drop-down:pressed, QDateEdit::drop-down:on,
+		QDateTimeEdit::drop-down:pressed, QDateTimeEdit::drop-down:on { background: %2; }
+		QComboBox::drop-down:disabled,
+		QDateEdit::drop-down:disabled, QDateTimeEdit::drop-down:disabled { background: transparent; }
+		QComboBox::down-arrow, QDateEdit::down-arrow, QDateTimeEdit::down-arrow {
 			image: url(%3);
 			width: 12px;
 			height: 12px;
 		}
-		QComboBox::down-arrow:on { image: url(%4); }
-		QComboBox::down-arrow:disabled { image: url(%5); }
+		QComboBox::down-arrow:on,
+		QDateEdit::down-arrow:on, QDateTimeEdit::down-arrow:on { image: url(%4); }
+		QComboBox::down-arrow:disabled,
+		QDateEdit::down-arrow:disabled, QDateTimeEdit::down-arrow:disabled { image: url(%5); }
 
 		QSpinBox::up-button, QDoubleSpinBox::up-button,
 		QDateEdit::up-button, QDateTimeEdit::up-button, QTimeEdit::up-button,
@@ -515,6 +521,39 @@ void applyNativeCorners(QWidget &widget, Tone tone) {
 #endif
 }
 
+void centerOnParentOrScreen(QWidget &window) {
+	auto *parentWindow = window.parentWidget();
+	while (parentWindow && !parentWindow->isWindow()) {
+		parentWindow = parentWindow->parentWidget();
+	}
+	if (!parentWindow || !parentWindow->isVisible()) {
+		centerOnScreen(window);
+		return;
+	}
+
+	auto size = window.frameGeometry().size();
+	if (size.isEmpty()) {
+		size = window.size();
+	}
+	const auto parentGeometry = parentWindow->frameGeometry();
+	auto *screen = QGuiApplication::screenAt(parentGeometry.center());
+	if (!screen) {
+		screen = screenForWindow(window);
+	}
+	if (!screen) {
+		return;
+	}
+
+	const auto available = screen->availableGeometry();
+	const auto desiredX = parentGeometry.center().x() - size.width() / 2;
+	const auto desiredY = parentGeometry.center().y() - size.height() / 2;
+	const auto maxX = qMax(available.left(), available.right() - size.width() + 1);
+	const auto maxY = qMax(available.top(), available.bottom() - size.height() + 1);
+	window.move(
+		qBound(available.left(), desiredX, maxX),
+		qBound(available.top(), desiredY, maxY));
+}
+
 class ThemeEventFilter final : public QObject {
 public:
 	using QObject::QObject;
@@ -573,7 +612,7 @@ protected:
 		if (event->type() == QEvent::Show) {
 			applyNativeCorners(*dialog, tone);
 			if (!dialog->property(kCenteredProperty).toBool()) {
-				centerOnScreen(*dialog);
+				centerOnParentOrScreen(*dialog);
 				dialog->setProperty(kCenteredProperty, true);
 			}
 		}
@@ -595,6 +634,10 @@ void install(QApplication &application) {
 void setTone(QWidget &widget, Tone tone) {
 	widget.setProperty(kToneProperty, toneName(tone));
 	refreshStyle(widget);
+}
+
+void styleChoiceControls(QWidget &widget, Tone tone) {
+	widget.setStyleSheet(widget.styleSheet() + choiceControlStyleSheet(tone));
 }
 
 void styleMenu(QMenu &menu, Tone tone) {

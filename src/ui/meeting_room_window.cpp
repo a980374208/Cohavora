@@ -690,7 +690,7 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
 	_layoutRect = QRect(rightX - 74, 8, 74, 28);
 	rightX -= 78;
 
-	const int leftInfoRight = 196;
+	const int leftInfoRight = 180;
 	if (!_meetingId.isEmpty()) {
 		_meetingIdRect = QRect(leftInfoRight, (h - 26) / 2, 178, 26);
 	} else {
@@ -760,17 +760,6 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	p.drawRect(sigX + 4, sigY - 7, 2, 7);
 	p.drawRect(sigX + 8, sigY - 10, 2, 10);
 
-	const int shieldX = sigX + 22;
-	p.setPen(QPen(QColor(0x86, 0x90, 0x9c), 1.3));
-	p.setBrush(Qt::NoBrush);
-	QPainterPath shieldPath;
-	shieldPath.moveTo(shieldX, logoY - 5);
-	shieldPath.lineTo(shieldX + 8, logoY - 5);
-	shieldPath.lineTo(shieldX + 8, logoY);
-	shieldPath.quadTo(shieldX + 4, logoY + 7, shieldX + 4, logoY + 7);
-	shieldPath.quadTo(shieldX, logoY + 7, shieldX, logoY);
-	shieldPath.closeSubpath();
-	p.drawPath(shieldPath);
 	p.restore();
 
 	// 1.5 会议号胶囊徽标与点击复制
