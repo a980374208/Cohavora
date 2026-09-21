@@ -1,4 +1,4 @@
-add_executable(livekit_meeting_app
+add_executable(cohavora_app
     main_meeting_app.cpp
     ${PROJECT_SOURCE_DIR}/src/net/http_types.h
     ${PROJECT_SOURCE_DIR}/src/net/meeting_types.h
@@ -72,7 +72,7 @@ add_executable(livekit_meeting_app
     ${PROJECT_SOURCE_DIR}/src/ui/render/video_canvas.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/render/video_canvas_factory.cpp)
 
-target_include_directories(livekit_meeting_app BEFORE PRIVATE
+target_include_directories(cohavora_app BEFORE PRIVATE
     ${PROJECT_SOURCE_DIR}
     ${WEBRTC_ROOT}/include/third_party/libyuv/include
     ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/lib_ui
@@ -95,9 +95,9 @@ target_include_directories(livekit_meeting_app BEFORE PRIVATE
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtWidgets
     ${TDESKTOP_LIBS_DIR}/zlib/include)
 
-target_link_libraries(livekit_meeting_app PRIVATE
-    livekit_ui_theme
-    livekit_ui_translations
+target_link_libraries(cohavora_app PRIVATE
+    cohavora_ui_theme
+    cohavora_ui_translations
     ${CMAKE_DL_LIBS}
     desktop_lib_ui
     desktop_lib_base
@@ -133,7 +133,7 @@ target_link_libraries(livekit_meeting_app PRIVATE
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/imageformats/qwebp.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/plugins/iconengines/qsvgicon.lib
     ${TDESKTOP_LIBS_DIR}/mozjpeg/release/jpeg-static.lib
-    livekit_signaling
+    cohavora_core
     Dwmapi
     UxTheme
     d3d9
@@ -148,9 +148,19 @@ target_link_libraries(livekit_meeting_app PRIVATE
     wtsapi32
     version)
 
-set_target_properties(livekit_meeting_app PROPERTIES
+set_target_properties(cohavora_app PROPERTIES
+    OUTPUT_NAME "Cohavora"
     MSVC_RUNTIME_LIBRARY "MultiThreaded")
-target_compile_definitions(livekit_meeting_app PRIVATE
+target_compile_definitions(cohavora_app PRIVATE
+    COHAVORA_VERSION="${PROJECT_VERSION}")
+if(WIN32)
+    enable_language(RC)
+    configure_file(cohavora.rc.in "${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc" @ONLY)
+    target_sources(cohavora_app PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc")
+    set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc" PROPERTIES
+        OBJECT_DEPENDS "${PROJECT_SOURCE_DIR}/src/ui/icons/cohavora.ico")
+endif()
+target_compile_definitions(cohavora_app PRIVATE
     WIN32
     _WINDOWS
     WIN32_LEAN_AND_MEAN
@@ -163,8 +173,8 @@ target_compile_definitions(livekit_meeting_app PRIVATE
     _ITERATOR_DEBUG_LEVEL=0
     $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
     $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>)
-target_link_options(livekit_meeting_app PRIVATE
+target_link_options(cohavora_app PRIVATE
     $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
     $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>)
 
-livekit_deploy_renderer(livekit_meeting_app)
+livekit_deploy_renderer(cohavora_app)

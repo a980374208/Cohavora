@@ -22,7 +22,7 @@ function(livekit_add_ui_translations target)
         "${source_root}/src/core/meeting_coordinator.cpp"
         "${source_root}/src/core/meeting_catalog_controller.cpp")
     file(GLOB ui_translation_catalogs CONFIGURE_DEPENDS
-        "${source_root}/src/ui/translations/livekit_meeting_*.ts")
+        "${source_root}/src/ui/translations/cohavora_*.ts")
 
     if(LIVEKIT_LUPDATE_EXECUTABLE)
         add_custom_target(update_ui_translations

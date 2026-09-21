@@ -23,7 +23,7 @@ void LogToConsole(LogCategory cat, const QString &tag, const QString &msg) {
 MeetingLogConsoleWindow::MeetingLogConsoleWindow(QWidget *parent)
 	: QDialog(parent) {
 	AppTheme::setTone(*this, AppTheme::Tone::Dark);
-	setWindowTitle(QCoreApplication::translate("MeetingUI", "LiveKit Console / Debug Logs"));
+	setWindowTitle(QCoreApplication::translate("MeetingUI", "Cohavora Console / Debug Logs"));
 	resize(780, 520);
 	setMinimumSize(600, 380);
 	initUi();
@@ -73,7 +73,7 @@ void MeetingLogConsoleWindow::initUi() {
 	connect(_copyBtn, &QPushButton::clicked, this, &MeetingLogConsoleWindow::copyAllLogs);
 
 	// 欢迎信息
-	appendLog(LogCategory::General, "SYSTEM", QCoreApplication::translate("MeetingUI", "LiveKit console started. Listening for signaling, WebRTC media, and device events..."));
+	appendLog(LogCategory::General, "SYSTEM", QCoreApplication::translate("MeetingUI", "Cohavora console started. Listening for signaling, WebRTC media, and device events..."));
 }
 
 void MeetingLogConsoleWindow::appendLog(LogCategory category, const QString &tag, const QString &message) {

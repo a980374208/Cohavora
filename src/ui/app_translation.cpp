@@ -33,17 +33,21 @@ void install(QCoreApplication &application, const QLocale &locale,
 			for (const auto &name : names) {
 				if (translator->load(locale, name, QStringLiteral("_"), path)) {
 					application.installTranslator(translator);
-					return;
+					return true;
 				}
 			}
 		}
 		delete translator; // Missing catalogs fall back to source text.
+		return false;
 	};
 	load({ QStringLiteral("qt"), QStringLiteral("qtbase") },
 		{ directory, QStringLiteral(":/meeting-ui/translations"),
 			QLibraryInfo::location(QLibraryInfo::TranslationsPath) });
-	load({ QStringLiteral("livekit_meeting") },
-		{ directory, QStringLiteral(":/meeting-ui/translations") });
+	if (!load({ QStringLiteral("cohavora") },
+			{ directory, QStringLiteral(":/meeting-ui/translations") })) {
+		// Legacy catalogs are accepted only as external deployment artifacts.
+		load({ QStringLiteral("livekit_meeting") }, { directory });
+	}
 	application.setProperty("meetingUiTranslationInstalled", true);
 }
 

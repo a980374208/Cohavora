@@ -379,7 +379,7 @@ public:
 		QString serverUrl;
 		QString token;
 		QString meetingId;
-		QString displayName = QCoreApplication::translate("MeetingUI", "LiveKit User");
+		QString displayName = QCoreApplication::translate("MeetingUI", "Cohavora User");
 		bool audioMuted = false;
 		bool videoEnabled = true;
 		QString videoCodec = "vp8"; // "vp8", "h264", "vp9", "av1"

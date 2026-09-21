@@ -1,0 +1,3 @@
+if(CPACK_GENERATOR STREQUAL "NSIS")
+    string(APPEND CPACK_PACKAGE_FILE_NAME "-Setup")
+endif()

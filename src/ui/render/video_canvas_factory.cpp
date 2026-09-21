@@ -34,7 +34,9 @@ void LogFallback(const RenderDiagnostics& diagnostics) {
 VideoCanvas* CreateVideoCanvasFromDirectory(QWidget* parent, const QString& directory,
         RenderDiagnostics* initialDiagnostics) {
     auto backend = BackendModule::DefaultBackend();
-    const auto selection = qgetenv("LIVEKIT_RENDER_BACKEND").trimmed().toLower();
+    const auto selection = (qEnvironmentVariableIsSet("COHAVORA_RENDER_BACKEND")
+        ? qgetenv("COHAVORA_RENDER_BACKEND")
+        : qgetenv("LIVEKIT_RENDER_BACKEND")).trimmed().toLower();
     RenderDiagnostics diagnostics;
     if (selection == "cpu") {
         diagnostics.requested_backend = RenderBackend::QtCpu;
@@ -67,8 +69,7 @@ VideoCanvas* CreateVideoCanvasFromDirectory(QWidget* parent, const QString& dire
 #endif
     try {
         ModuleLoadError error;
-        auto module = BackendModule::Load(BackendModule::PathForBackend(applicationDirectory, backend),
-            backend, error);
+        auto module = BackendModule::LoadFromDirectory(applicationDirectory, backend, error);
         if (!module) {
             diagnostics.gpu_failure = LoadFailure(error);
             diagnostics.fallback_reason = RenderFallbackReason::ModuleLoadFailed;

@@ -1,6 +1,7 @@
 #include <QtCore/QCoreApplication>
 #include "base/basic_types.h"
 #include <QtWidgets/QApplication>
+#include <QtGui/QIcon>
 #include <QtCore/QDir>
 #include <QtPlugin>
 #include "crl/crl.h"
@@ -8,6 +9,7 @@
 #include "ui/style/style_core.h"
 #include "src/ui/meeting_ui_integration.h"
 #include "src/ui/app_theme.h"
+#include "src/ui/app_branding.h"
 #include "src/ui/app_translation.h"
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/login_dialog.h"
@@ -40,10 +42,12 @@ int main(int argc, char *argv[]) {
 	crl::details::init();
 
 	QApplication app(argc, argv);
-	app.setApplicationName(QString::fromUtf8("LiveKitMeetingClient"));
+	app.setApplicationName(MeetingUI::AppBranding::name());
+	app.setWindowIcon(QIcon(QStringLiteral(":/meeting-ui/icons/cohavora.svg")));
+	app.setApplicationVersion(QStringLiteral(COHAVORA_VERSION));
 	MeetingUI::AppTranslation::install(app,
 		MeetingUI::AppTranslation::startupLocale(app.arguments()));
-	app.setApplicationDisplayName(QCoreApplication::translate("MeetingUI", "Video Meeting Client - Powered by LiveKit"));
+	app.setApplicationDisplayName(MeetingUI::AppBranding::displayName());
 	OpenMeeting::initializeServiceEndpointPolicy(
 		app.arguments().contains(QStringLiteral("--debug")));
 

@@ -1,4 +1,5 @@
 #include <QtCore/QCoreApplication>
+#include "src/ui/app_branding.h"
 #include "src/ui/app_theme.h"
 #include "src/ui/settings_dialog.h"
 
@@ -570,7 +571,7 @@ QWidget *SettingsDialog::buildAboutPage() {
 
 	auto *productName = new QLabel(QCoreApplication::applicationName(), content);
 	if (productName->text().trimmed().isEmpty()) {
-		productName->setText(QCoreApplication::translate("MeetingUI", "LiveKit Meeting"));
+		productName->setText(AppBranding::name());
 	}
 	productName->setAlignment(Qt::AlignCenter);
 	auto nameFont = productName->font();
