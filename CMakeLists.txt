@@ -1,4 +1,38 @@
 cmake_minimum_required(VERSION 3.20)
+
+# A vcpkg manifest is activated only when its toolchain is loaded before the
+# first project() call. Keep explicit toolchains authoritative, and make the
+# documented bare configure command work when VCPKG_ROOT is available.
+if(CMAKE_HOST_WIN32
+        AND (NOT DEFINED VCPKG_TARGET_TRIPLET OR VCPKG_TARGET_TRIPLET STREQUAL ""))
+    string(TOLOWER "${CMAKE_GENERATOR_PLATFORM}" cohavora_generator_platform)
+    if(cohavora_generator_platform STREQUAL "win32"
+            OR cohavora_generator_platform STREQUAL "x86")
+        set(cohavora_vcpkg_triplet "x86-windows-static")
+    elseif(cohavora_generator_platform MATCHES "^(arm64|aarch64)$")
+        set(cohavora_vcpkg_triplet "arm64-windows-static")
+    else()
+        set(cohavora_vcpkg_triplet "x64-windows-static")
+    endif()
+    set(VCPKG_TARGET_TRIPLET "${cohavora_vcpkg_triplet}"
+        CACHE STRING "vcpkg target triplet")
+    unset(cohavora_vcpkg_triplet)
+    unset(cohavora_generator_platform)
+endif()
+
+if((NOT DEFINED CMAKE_TOOLCHAIN_FILE OR CMAKE_TOOLCHAIN_FILE STREQUAL "")
+        AND DEFINED ENV{VCPKG_ROOT})
+    file(TO_CMAKE_PATH "$ENV{VCPKG_ROOT}" cohavora_vcpkg_root)
+    set(cohavora_vcpkg_toolchain
+        "${cohavora_vcpkg_root}/scripts/buildsystems/vcpkg.cmake")
+    if(EXISTS "${cohavora_vcpkg_toolchain}")
+        set(CMAKE_TOOLCHAIN_FILE "${cohavora_vcpkg_toolchain}"
+            CACHE FILEPATH "CMake toolchain file" FORCE)
+    endif()
+    unset(cohavora_vcpkg_toolchain)
+    unset(cohavora_vcpkg_root)
+endif()
+
 project(Cohavora VERSION 0.1.0
     DESCRIPTION "Cohavora - Open-source Audio and Video Meeting Client"
     LANGUAGES C CXX)
@@ -218,6 +252,11 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Source Files" FILES ${LI
 # 头文件分组
 source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Header Files" FILES ${LIVEKIT_HEADERS})
 
+# Keep generated protobuf sources together in Visual Studio while preserving
+# subdirectories such as logger/ beneath the generated output root.
+source_group(TREE "${GEN_DIR}" PREFIX "Generated Files\\Protobuf"
+    FILES ${PROTO_SRCS} ${PROTO_HDRS})
+
 # Main Signaling Library
 add_library(cohavora_core STATIC
     ${PROTO_SRCS}
@@ -406,4 +445,35 @@ endif()
 
 if(TARGET cohavora_app)
     include(cmake/CohavoraPackaging.cmake)
+    if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+        set_property(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}" PROPERTY
+            VS_STARTUP_PROJECT cohavora_app)
+    endif()
+endif()
+
+# AUTOMOC aggregation sources must remain compiled, but they are generated
+# implementation details and should not clutter Visual Studio projects.
+if(CMAKE_GENERATOR MATCHES "^Visual Studio")
+    function(cohavora_hide_automoc_sources source_dir)
+        get_property(directory_targets DIRECTORY "${source_dir}" PROPERTY BUILDSYSTEM_TARGETS)
+        foreach(target IN LISTS directory_targets)
+            get_target_property(target_automoc ${target} AUTOMOC)
+            if(target_automoc)
+                get_target_property(target_binary_dir ${target} BINARY_DIR)
+                foreach(config IN LISTS CMAKE_CONFIGURATION_TYPES)
+                    set_source_files_properties(
+                        "${target_binary_dir}/${target}_autogen/mocs_compilation_${config}.cpp"
+                        TARGET_DIRECTORY ${target}
+                        PROPERTIES VS_SETTINGS "Visible=false")
+                endforeach()
+            endif()
+        endforeach()
+
+        get_property(subdirectories DIRECTORY "${source_dir}" PROPERTY SUBDIRECTORIES)
+        foreach(subdirectory IN LISTS subdirectories)
+            cohavora_hide_automoc_sources("${subdirectory}")
+        endforeach()
+    endfunction()
+
+    cohavora_hide_automoc_sources("${CMAKE_CURRENT_SOURCE_DIR}")
 endif()

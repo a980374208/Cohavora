@@ -151,6 +151,7 @@ target_link_libraries(cohavora_app PRIVATE
 set_target_properties(cohavora_app PROPERTIES
     OUTPUT_NAME "Cohavora"
     MSVC_RUNTIME_LIBRARY "MultiThreaded")
+source_group("Generated Files" REGULAR_EXPRESSION ".*mocs_compilation.*")
 target_compile_definitions(cohavora_app PRIVATE
     COHAVORA_VERSION="${PROJECT_VERSION}")
 if(WIN32)
@@ -159,6 +160,16 @@ if(WIN32)
     target_sources(cohavora_app PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc")
     set_source_files_properties("${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc" PROPERTIES
         OBJECT_DEPENDS "${PROJECT_SOURCE_DIR}/src/ui/icons/cohavora.ico")
+
+    set(cohavora_resource_files "${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc")
+    get_target_property(nlohmann_json_interface_sources
+        nlohmann_json::nlohmann_json INTERFACE_SOURCES)
+    foreach(interface_source IN LISTS nlohmann_json_interface_sources)
+        if(interface_source MATCHES "\\.natvis$")
+            list(APPEND cohavora_resource_files "${interface_source}")
+        endif()
+    endforeach()
+    source_group("Resources" FILES ${cohavora_resource_files})
 endif()
 target_compile_definitions(cohavora_app PRIVATE
     WIN32
