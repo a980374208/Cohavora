@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <string>
 #include <vector>
 #include <unordered_map>
@@ -40,6 +41,17 @@ struct OutboundRtpStreamStats {
     std::uint64_t packets_sent{0};
     std::uint32_t frames_encoded{0};
     double frames_per_second{0.0};
+
+    // Preserve the numeric defaults for existing consumers, but diagnostic
+    // consumers must check availability before interpreting a value as zero.
+    bool kind_available{false};
+    bool bytes_sent_available{false};
+    bool packets_sent_available{false};
+    bool frames_encoded_available{false};
+    std::string mid;
+    std::string rid;
+    bool mid_available{false};
+    bool rid_available{false};
 };
 
 /// @brief 远端接收端反馈的 RTCP 统计 (Remote Inbound RTP)
@@ -60,6 +72,22 @@ struct CandidatePairStats {
     double available_incoming_bitrate{0.0}; // 可用下行估计码率 (bps)
 };
 
+// Plain-data sender state captured on WebRTC's signaling thread. No native
+// track, transceiver or sender reference crosses into the room executor.
+struct RtpSenderDiagnostic {
+    std::string track_id;
+    std::string kind;
+    std::string mid;
+    std::string direction;
+    std::string current_direction;
+    bool mid_available{false};
+    bool current_direction_available{false};
+    bool track_enabled{false};
+    // An empty encoding list means the encoder state is not yet available.
+    std::size_t encoding_count{0};
+    std::size_t active_encoding_count{0};
+};
+
 /// @brief 综合 WebRTC Stats 报表单据
 struct StatsReport {
     std::int64_t timestamp_ms{0};
@@ -67,6 +95,8 @@ struct StatsReport {
     std::vector<OutboundRtpStreamStats> outbound_rtp;
     std::vector<RemoteInboundRtpStreamStats> remote_inbound_rtp;
     std::vector<CandidatePairStats> candidate_pairs;
+    std::vector<RtpSenderDiagnostic> senders;
+    bool senders_available{false};
 };
 
 /// @brief LiveKit 房间级汇总统计快照 (RoomStatsReport)

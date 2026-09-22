@@ -109,6 +109,69 @@ bool IsSenderInstanceActive(const SenderContext& sender) {
          IsParticipantTicketActive(sender.ticket, sender.key));
 }
 
+void LogSdpNegotiationDetails(Room& room,
+                              const char* tag,
+                              std::string_view kind,
+                              std::string_view sdp) {
+    for (const auto& detail : secure_log::SdpNegotiationDetails(kind, sdp)) {
+        room.Log("SIGNAL", tag, detail);
+    }
+}
+
+std::string MediaDiagnosticToken(std::string_view value) {
+    if (value.empty()) return "N/A";
+    std::string result;
+    for (const unsigned char ch : value.substr(0, 96)) {
+        result.push_back(std::isalnum(ch) || ch == '_' || ch == '-' || ch == '.'
+            ? static_cast<char>(ch) : '_');
+    }
+    return result;
+}
+
+std::string MediaCounter(bool available, uint64_t value) {
+    return available ? std::to_string(value) : "N/A";
+}
+
+std::string MediaCounterDelta(bool available, uint64_t value,
+                              bool previous_available, uint64_t previous) {
+    if (!available || !previous_available) return "N/A";
+    return value >= previous ? std::to_string(value - previous) : "reset";
+}
+
+struct PublisherRtpTotals {
+    size_t audio_streams = 0, video_streams = 0, unknown_kind_streams = 0;
+    uint64_t audio_packets = 0, video_packets = 0, video_bytes = 0, video_frames = 0;
+    bool audio_packets_available = true, video_packets_available = true;
+    bool video_bytes_available = true, video_frames_available = true;
+};
+
+PublisherRtpTotals SummarizePublisherRtp(const StatsReport& report) {
+    PublisherRtpTotals totals;
+    for (const auto& stream : report.outbound_rtp) {
+        if (stream.kind_available && stream.kind == "audio") {
+            ++totals.audio_streams;
+            totals.audio_packets += stream.packets_sent;
+            totals.audio_packets_available &= stream.packets_sent_available;
+        } else if (stream.kind_available && stream.kind == "video") {
+            ++totals.video_streams;
+            totals.video_packets += stream.packets_sent;
+            totals.video_bytes += stream.bytes_sent;
+            totals.video_frames += stream.frames_encoded;
+            totals.video_packets_available &= stream.packets_sent_available;
+            totals.video_bytes_available &= stream.bytes_sent_available;
+            totals.video_frames_available &= stream.frames_encoded_available;
+        } else {
+            ++totals.unknown_kind_streams;
+        }
+    }
+    const bool known_kinds = totals.unknown_kind_streams == 0;
+    totals.audio_packets_available &= totals.audio_streams > 0 && known_kinds;
+    totals.video_packets_available &= totals.video_streams > 0 && known_kinds;
+    totals.video_bytes_available &= totals.video_streams > 0 && known_kinds;
+    totals.video_frames_available &= totals.video_streams > 0 && known_kinds;
+    return totals;
+}
+
 } // namespace
 
 class RoomPeerConnectionObserver : public webrtc::PeerConnectionObserver {
@@ -3857,6 +3920,7 @@ void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
                 auto rtc_src = RtcVideoSource::Create(video_track->source(),
                     video_track->source() && video_track->Track::source() == TrackSource::ScreenShareVideo);
                 auto rtc_video_track = WebRTCManager::Instance().factory()->CreateVideoTrack(rtc_src, track->name());
+                video_track->set_rtc_source_for_diagnostics(rtc_src);
                 track->set_rtc_track(rtc_video_track);
                 rtc_track = rtc_video_track;
             }
@@ -4030,6 +4094,7 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
             if (video_track && video_track->source()) {
                 auto rtc_src = RtcVideoSource::Create(video_track->source(),
                     video_track->source() && video_track->Track::source() == TrackSource::ScreenShareVideo);
+                video_track->set_rtc_source_for_diagnostics(rtc_src);
                 rtc_track = WebRTCManager::Instance().factory()->CreateVideoTrack(
                     rtc_src, track->name());
             }
@@ -4084,11 +4149,14 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
             webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender;
             webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver;
             std::string error;
+            // Match the official SDK's publishing flow: a local publication
+            // owns a sendonly transceiver. AddTrack can reuse a recvonly
+            // transceiver in Single-PC mode and retain its previous MSID.
+            webrtc::RtpTransceiverInit init;
+            init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
+            init.stream_ids = {task.stream_id};
             if (task.rtc_track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind &&
                 task.publish_options.simulcast && !task.publish_options.layers.empty()) {
-                webrtc::RtpTransceiverInit init;
-                init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
-                init.stream_ids = {task.stream_id};
                 for (const auto& layer : task.publish_options.layers) {
                     webrtc::RtpEncodingParameters encoding;
                     encoding.active = true;
@@ -4101,26 +4169,13 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
                     }
                     init.send_encodings.push_back(std::move(encoding));
                 }
-                auto result = task.pc->AddTransceiver(task.rtc_track, init);
-                if (result.ok()) {
-                    transceiver = result.MoveValue();
-                    sender = transceiver->sender();
-                } else {
-                    error = result.error().message();
-                }
+            }
+            auto result = task.pc->AddTransceiver(task.rtc_track, init);
+            if (result.ok()) {
+                transceiver = result.MoveValue();
+                sender = transceiver->sender();
             } else {
-                auto result = task.pc->AddTrack(task.rtc_track, {task.stream_id});
-                if (result.ok()) {
-                    sender = result.MoveValue();
-                    for (const auto& candidate : task.pc->GetTransceivers()) {
-                        if (candidate && candidate->sender() == sender) {
-                            transceiver = candidate;
-                            break;
-                        }
-                    }
-                } else {
-                    error = result.error().message();
-                }
+                error = result.error().message();
             }
 
             if (!sender) {
@@ -4365,6 +4420,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             track->set_sid(response.track().sid());
             local->add_publication(publication);
         }
+        if (track->kind() == TrackKind::Video) SchedulePublisherMediaDiagnostic(generation);
         co_return publication;
     } catch (...) {
         release_ack();
@@ -4535,6 +4591,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
 
         Log("TRACK", "BATCH_PUBLISHED",
             "Local audio/video batch published: " + std::to_string(publications.size()) + " tracks in a single SDP negotiation");
+        SchedulePublisherMediaDiagnostic(generation);
         co_return publications;
     } catch (...) {
         {
@@ -4564,6 +4621,137 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
         }
         throw;
     }
+}
+
+void Room::SchedulePublisherMediaDiagnostic(uint64_t generation) {
+    // Two bounded snapshots distinguish startup from stalled media. All native
+    // sender inspection stays in RequestRtcStats on the signaling thread.
+    static std::atomic<uint64_t> next_diagnostic_id{0};
+    const auto diagnostic_id = next_diagnostic_id.fetch_add(1, std::memory_order_relaxed) + 1;
+    livekit::safe_co_spawn(executor_, [self = shared_from_this(), generation, diagnostic_id]() -> asio::awaitable<void> {
+        const auto started = std::chrono::steady_clock::now();
+        // Retain only identity across timers so diagnostics cannot keep a native
+        // PC alive after Disconnect has released it and stopped its threads.
+        webrtc::PeerConnectionInterface* publisher_identity = nullptr;
+        {
+            std::lock_guard lock(self->room_mutex_);
+            if (!self->IsNativeGenerationCurrentLocked(generation)) co_return;
+            publisher_identity = self->publisher_pc_.get();
+        }
+        if (!publisher_identity) co_return;
+        std::optional<StatsReport> previous_stats;
+        std::map<std::string, VideoFrameDiagnostics> previous_sources;
+        for (int sample = 1; sample <= 2; ++sample) {
+            asio::steady_timer timer(self->executor_);
+            timer.expires_at(started + std::chrono::seconds(sample == 1 ? 2 : 5));
+            co_await timer.async_wait(asio::use_awaitable);
+            webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
+            {
+                std::lock_guard lock(self->room_mutex_);
+                if (!self->IsNativeGenerationCurrentLocked(generation) ||
+                    publisher_identity != self->publisher_pc_.get()) co_return;
+                publisher = self->publisher_pc_;
+            }
+
+            auto stats = co_await CollectRtcStats(publisher, self->executor_);
+            publisher = nullptr;
+            std::vector<std::pair<std::string, std::shared_ptr<LocalVideoTrack>>> videos;
+            {
+                std::lock_guard lock(self->room_mutex_);
+                if (!self->IsNativeGenerationCurrentLocked(generation) ||
+                    publisher_identity != self->publisher_pc_.get()) co_return;
+                if (self->local_participant_) {
+                    for (const auto& [sid, publication] : self->local_participant_->tracks()) {
+                        if (publication) {
+                            if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(publication->track())) {
+                                videos.emplace_back(sid, std::move(video));
+                            }
+                        }
+                    }
+                }
+            }
+            const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - started).count();
+            const std::string prefix = "run=" + std::to_string(diagnostic_id) +
+                ", sample=" + std::to_string(sample) +
+                ", elapsed_ms=" + std::to_string(elapsed_ms);
+            for (const auto& [sid, video] : videos) {
+                const auto frames = video->frame_diagnostics();
+                const auto previous = previous_sources.find(sid);
+                const auto before = previous == previous_sources.end()
+                    ? VideoFrameDiagnostics{} : previous->second;
+                self->Log("MEDIA", "PUBLISH_SOURCE", prefix +
+                    ", track=" + MediaDiagnosticToken(video->name()) +
+                    ", sid=" + MediaDiagnosticToken(sid) +
+                    ", muted=" + (video->muted() ? "yes" : "no") +
+                    ", source_frames=" + MediaCounter(frames.source_available, frames.source_frames) +
+                    ", source_delta=" + MediaCounterDelta(frames.source_available, frames.source_frames,
+                        before.source_available, before.source_frames) +
+                    ", rtc_input_frames=" + MediaCounter(frames.rtc_available, frames.rtc_input_frames) +
+                    ", rtc_input_delta=" + MediaCounterDelta(frames.rtc_available, frames.rtc_input_frames,
+                        before.rtc_available, before.rtc_input_frames) +
+                    ", rtc_output_frames=" + MediaCounter(frames.rtc_available, frames.rtc_output_frames) +
+                    ", rtc_output_delta=" + MediaCounterDelta(frames.rtc_available, frames.rtc_output_frames,
+                        before.rtc_available, before.rtc_output_frames) +
+                    ", rtc_dropped_frames=" + MediaCounter(frames.rtc_available, frames.rtc_dropped_frames) +
+                    ", output_stage=OnFrame_submission");
+                previous_sources[sid] = frames;
+            }
+            if (!stats) {
+                self->Log("MEDIA", "PUBLISH_RTP", prefix + ", status=unavailable");
+                previous_stats.reset();
+                continue;
+            }
+            const auto totals = SummarizePublisherRtp(*stats);
+            self->Log("MEDIA", "PUBLISH_RTP", prefix +
+                ", outbound_streams=" + std::to_string(stats->outbound_rtp.size()) +
+                ", audio_streams=" + std::to_string(totals.audio_streams) +
+                ", video_streams=" + std::to_string(totals.video_streams) +
+                ", unknown_kind_streams=" + std::to_string(totals.unknown_kind_streams) +
+                ", audio_packets=" + MediaCounter(totals.audio_packets_available, totals.audio_packets) +
+                ", video_frames_encoded=" + MediaCounter(totals.video_frames_available, totals.video_frames) +
+                ", video_packets=" + MediaCounter(totals.video_packets_available, totals.video_packets) +
+                ", video_bytes=" + MediaCounter(totals.video_bytes_available, totals.video_bytes) +
+                ", senders=" + MediaCounter(stats->senders_available, stats->senders.size()));
+            for (const auto& sender : stats->senders) {
+                self->Log("MEDIA", "PUBLISH_SENDER", prefix +
+                    ", track=" + MediaDiagnosticToken(sender.track_id) +
+                    ", kind=" + MediaDiagnosticToken(sender.kind) +
+                    ", mid=" + (sender.mid_available ? MediaDiagnosticToken(sender.mid) : "N/A") +
+                    ", enabled=" + (sender.track_enabled ? "yes" : "no") +
+                    ", direction=" + MediaDiagnosticToken(sender.direction) +
+                    ", current_direction=" + (sender.current_direction_available
+                        ? MediaDiagnosticToken(sender.current_direction) : "N/A") +
+                    ", encodings=" + std::to_string(sender.encoding_count) +
+                    ", active_encodings=" + MediaCounter(sender.encoding_count > 0, sender.active_encoding_count));
+            }
+            for (const auto& stream : stats->outbound_rtp) {
+                const OutboundRtpStreamStats* before = nullptr;
+                if (previous_stats && !stream.id.empty()) {
+                    const auto found = std::find_if(previous_stats->outbound_rtp.begin(),
+                        previous_stats->outbound_rtp.end(), [&](const auto& candidate) {
+                            return candidate.id == stream.id && candidate.kind == stream.kind &&
+                                candidate.mid == stream.mid && candidate.rid == stream.rid;
+                        });
+                    if (found != previous_stats->outbound_rtp.end()) before = &*found;
+                }
+                self->Log("MEDIA", "PUBLISH_RTP_STREAM", prefix +
+                    ", kind=" + (stream.kind_available ? MediaDiagnosticToken(stream.kind) : "N/A") +
+                    ", mid=" + (stream.mid_available ? MediaDiagnosticToken(stream.mid) : "N/A") +
+                    ", rid=" + (stream.rid_available ? MediaDiagnosticToken(stream.rid) : "N/A") +
+                    ", frames_encoded=" + MediaCounter(stream.frames_encoded_available, stream.frames_encoded) +
+                    ", frames_encoded_delta=" + MediaCounterDelta(stream.frames_encoded_available, stream.frames_encoded,
+                        before && before->frames_encoded_available, before ? before->frames_encoded : 0) +
+                    ", packets=" + MediaCounter(stream.packets_sent_available, stream.packets_sent) +
+                    ", packets_delta=" + MediaCounterDelta(stream.packets_sent_available, stream.packets_sent,
+                        before && before->packets_sent_available, before ? before->packets_sent : 0) +
+                    ", bytes=" + MediaCounter(stream.bytes_sent_available, stream.bytes_sent) +
+                    ", bytes_delta=" + MediaCounterDelta(stream.bytes_sent_available, stream.bytes_sent,
+                        before && before->bytes_sent_available, before ? before->bytes_sent : 0));
+            }
+            previous_stats = std::move(stats);
+        }
+    });
 }
 
 asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
@@ -4956,32 +5144,58 @@ void Room::ExecuteNegotiatePublisher(uint64_t generation) {
                     offer_msg->set_type("offer");
                     offer_msg->set_sdp(sdp);
 
-                    // 1. 从 WebRTC Transceivers 读取 MID -> Track ID 映射
-                    for (const auto& transceiver : pub_pc->GetTransceivers()) {
-                        if (transceiver && transceiver->mid().has_value() && transceiver->sender() && transceiver->sender()->track()) {
-                            std::string mid = *transceiver->mid();
-                            std::string track_id = transceiver->sender()->track()->id();
-                            (*offer_msg->mutable_mid_to_track_id())[mid] = track_id;
-                            std::cout << "[WebRTC] Transceiver MID '" << mid << "' mapped to Track '" << track_id << "'" << std::endl;
-                        }
-                    }
-
-                    // 2. 从 SDP 解析 a=mid: 和 a=msid: 双重绑定映射
+                    // Limit bindings to active sending sections in this exact
+                    // offer. A transceiver added while CreateOffer/SetLocal is
+                    // pending belongs to the next negotiation round.
+                    std::set<std::string> offered_send_mids;
                     std::istringstream sdp_stream(sdp);
                     std::string line;
-                    std::string cur_mid = "";
+                    std::string cur_mid;
+                    bool section_active = false;
+                    bool section_sending = true;
+                    const auto finish_section = [&] {
+                        if (section_active && section_sending && !cur_mid.empty()) {
+                            offered_send_mids.insert(cur_mid);
+                        }
+                    };
                     while (std::getline(sdp_stream, line)) {
                         if (!line.empty() && line.back() == '\r') line.pop_back();
-                        if (line.rfind("a=mid:", 0) == 0) {
+                        if (line.rfind("m=", 0) == 0) {
+                            finish_section();
+                            cur_mid.clear();
+                            section_sending = true;
+                            std::istringstream media_line(line.substr(2));
+                            std::string media, port;
+                            media_line >> media >> port;
+                            section_active = !port.empty() && port != "0";
+                        } else if (line.rfind("a=mid:", 0) == 0) {
                             cur_mid = line.substr(6);
-                        } else if (line.rfind("a=msid:", 0) == 0 && !cur_mid.empty()) {
-                            std::string msid_content = line.substr(7);
-                            std::istringstream msid_ss(msid_content);
-                            std::string stream_id, track_id;
-                            if (msid_ss >> stream_id >> track_id) {
-                                (*offer_msg->mutable_mid_to_track_id())[cur_mid] = track_id;
-                            }
+                        } else if (line == "a=bundle-only") {
+                            // Port zero is valid for a bundle-only section;
+                            // it denotes rejection only without this attribute.
+                            section_active = true;
+                        } else if (line == "a=recvonly" || line == "a=inactive") {
+                            section_sending = false;
+                        } else if (line == "a=sendonly" || line == "a=sendrecv") {
+                            section_sending = true;
                         }
+                    }
+                    finish_section();
+
+                    // The native local track ID is the publication CID. SDP
+                    // MSID may retain a previous sender ID after reuse/rebind;
+                    // it must never overwrite this authoritative binding.
+                    for (const auto& transceiver : pub_pc->GetTransceivers()) {
+                        if (!transceiver) continue;
+                        const auto mid = transceiver->mid();
+                        const auto sender = transceiver->sender();
+                        const auto track = sender ? sender->track() : nullptr;
+                        if (!mid || !offered_send_mids.contains(*mid) || !track) continue;
+                        (*offer_msg->mutable_mid_to_track_id())[*mid] = track->id();
+                    }
+                    for (const auto& [mid, cid] : offer_msg->mid_to_track_id()) {
+                        self->Log("SIGNAL", "MID_TRACK_BIND", "mid=" + MediaDiagnosticToken(mid) +
+                            ", cid=" + MediaDiagnosticToken(cid));
                     }
 
                     livekit::safe_co_spawn(self->executor_, [self, client, req = std::move(req), generation]() -> asio::awaitable<void> {
@@ -4994,6 +5208,8 @@ void Room::ExecuteNegotiatePublisher(uint64_t generation) {
                     std::cout << "[WebRTC] -> Sent publisher SDP Offer to LiveKit server with mid_to_track_id mapping!" << std::endl;
                     self->Log("SIGNAL", "SDP_OFFER_SENT",
                               secure_log::SdpSummary("publisher_offer_sent", sdp));
+                    LogSdpNegotiationDetails(
+                        *self, "SDP_OFFER_DETAIL", "publisher_offer_sent", sdp);
                 });
         }, ice_restart);
 }
@@ -5170,7 +5386,7 @@ void Room::AttachRemoteTrackToParticipant(
         retired_rtc_track = r_track->ExchangeRtcTrackBinding(
             track, kind == TrackKind::Audio && audio_output_muted_);
         native_volume = r_track->volume();
-        native_enabled = !r_track->muted() && native_volume > 0.001;
+        native_enabled = !r_track->muted() && !r_track->playout_muted() && native_volume > 0.001;
         {
             std::lock_guard media_lock(remote_media_mutex_);
             auto& media_tracks = kind == TrackKind::Video
@@ -5218,7 +5434,7 @@ void Room::AttachRemoteTrackToParticipant(
     if (kind == TrackKind::Audio) {
         auto audio_track = static_cast<webrtc::AudioTrackInterface*>(track.get());
         if (audio_track) {
-            audio_track->set_enabled(!r_track->muted());
+            audio_track->set_enabled(!r_track->muted() && !r_track->playout_muted());
         }
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
         auto last_voice_log_time = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
@@ -5774,60 +5990,89 @@ void Room::HandleSignalMessage(
 
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
         webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> quality_track;
+        std::shared_ptr<TrackPublication> quality_publication;
+        std::shared_ptr<Track> quality_local_track;
         {
             std::lock_guard lock(room_mutex_);
             if (!IsSignalGenerationCurrentLocked(event_generation)) return;
             pub_pc = publisher_pc_;
-            const auto publication = local_participant_ ? local_participant_->get_publication(track_sid) : nullptr;
-            if (publication && publication->track()) quality_track = publication->track()->rtc_track();
+            quality_publication = local_participant_ ? local_participant_->get_publication(track_sid) : nullptr;
+            quality_local_track = quality_publication ? quality_publication->track() : nullptr;
+            if (quality_local_track) quality_track = quality_local_track->rtc_track();
         }
 
         // Flutter dispatches a quality update to its publication's local track.
         // A screen update must never switch the camera's encodings off.
         if (pub_pc && quality_track) {
-            auto senders = pub_pc->GetSenders();
-            for (auto& sender : senders) {
-                if (!sender || sender->track() != quality_track ||
-                    quality_track->kind() != webrtc::MediaStreamTrackInterface::kVideoKind) {
-                    continue;
-                }
-
-                webrtc::RtpParameters parameters = sender->GetParameters();
-                if (parameters.encodings.empty()) continue;
-
-                // Match specific codec qualities if available
-                const std::map<livekit::proto::VideoQuality, bool>* target_qualities = &fallback_quality_states;
-                if (!parameters.codecs.empty()) {
-                    std::string s_codec = parameters.codecs[0].name;
-                    std::transform(s_codec.begin(), s_codec.end(), s_codec.begin(),
-                                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-                    auto it = codec_quality_map.find(s_codec);
-                    if (it != codec_quality_map.end()) {
-                        target_qualities = &it->second;
-                    }
-                }
-
-                bool params_changed = false;
+            const auto still_current = [&] {
+                std::lock_guard lock(room_mutex_);
+                const auto current = local_participant_ ? local_participant_->get_publication(track_sid) : nullptr;
+                return IsSignalGenerationCurrentLocked(event_generation) && publisher_pc_ == pub_pc &&
+                    current == quality_publication && current && current->track() == quality_local_track;
+            };
+            struct QualityUpdateResult {
+                bool applied;
+                int error_type;
                 std::string active_summary;
-
-                for (auto& enc : parameters.encodings) {
-                    // Match Flutter setPublishingLayersForSender: an omitted
-                    // RID is q/LOW. Do not apply HIGH again to a single q layer.
-                    const auto quality = enc.rid.empty() || enc.rid == "q" ? proto::VideoQuality::LOW
-                        : enc.rid == "h" ? proto::VideoQuality::MEDIUM : proto::VideoQuality::HIGH;
-                    const auto requested = target_qualities->find(quality);
-                    if (requested != target_qualities->end() && enc.active != requested->second) {
-                        enc.active = requested->second;
-                        params_changed = true;
+            };
+            std::vector<QualityUpdateResult> results;
+            auto* signaling = WebRTCManager::Instance().signaling_thread();
+            if (!signaling || signaling->IsQuitting()) return;
+            signaling->BlockingCall([&] {
+                if (!still_current()) return;
+                // GetParameters refreshes the sender's transaction ID. Keep
+                // read/modify/write in one signaling task so a stats snapshot
+                // cannot invalidate it between separate proxy calls.
+                for (const auto& sender : pub_pc->GetSenders()) {
+                    if (!sender || sender->track() != quality_track ||
+                        quality_track->kind() != webrtc::MediaStreamTrackInterface::kVideoKind) {
+                        continue;
                     }
-                }
 
-                if (params_changed) {
+                    webrtc::RtpParameters parameters = sender->GetParameters();
+                    if (parameters.encodings.empty()) continue;
+
+                    // Match specific codec qualities if available.
+                    const auto* target_qualities = &fallback_quality_states;
+                    if (!parameters.codecs.empty()) {
+                        std::string s_codec = parameters.codecs[0].name;
+                        std::transform(s_codec.begin(), s_codec.end(), s_codec.begin(),
+                                       [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                        const auto it = codec_quality_map.find(s_codec);
+                        if (it != codec_quality_map.end()) target_qualities = &it->second;
+                    }
+
+                    bool params_changed = false;
+                    for (auto& enc : parameters.encodings) {
+                        // Flutter treats an omitted RID as q/LOW; a lone q
+                        // layer must not also receive the HIGH setting.
+                        const auto quality = enc.rid.empty() || enc.rid == "q" ? proto::VideoQuality::LOW
+                            : enc.rid == "h" ? proto::VideoQuality::MEDIUM : proto::VideoQuality::HIGH;
+                        const auto requested = target_qualities->find(quality);
+                        if (requested != target_qualities->end() && enc.active != requested->second) {
+                            enc.active = requested->second;
+                            params_changed = true;
+                        }
+                    }
+                    if (!params_changed) continue;
+
+                    std::string active_summary;
                     for (const auto& enc : parameters.encodings) {
                         active_summary += (enc.rid.empty() ? "single" : enc.rid) + ":" + (enc.active ? "ON " : "OFF ");
                     }
-                    sender->SetParameters(parameters);
-                    Log("DYNACAST", "LAYER_UPDATE", "Dynacast adjustment applied [" + active_summary + "]");
+                    const auto status = sender->SetParameters(parameters);
+                    results.push_back({status.ok(), static_cast<int>(status.type()), std::move(active_summary)});
+                }
+            });
+            if (!still_current()) return;
+            // Only plain results cross back into the room executor. Keep user
+            // logging callbacks outside both the room lock and signaling task.
+            for (const auto& result : results) {
+                if (result.applied) {
+                    Log("DYNACAST", "LAYER_UPDATE", "Dynacast adjustment applied [" + result.active_summary + "]");
+                } else {
+                    Log("DYNACAST", "LAYER_UPDATE_FAILED", "Dynacast adjustment failed: code=" +
+                        std::to_string(result.error_type) + ", detail=[omitted]");
                 }
             }
         }
@@ -5874,7 +6119,6 @@ void Room::UpdateParticipants(
 
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::shared_ptr<SignalClient> signal_snapshot;
-    std::chrono::milliseconds negotiation_timeout{};
     std::vector<TrackKey> removed_track_keys;
     std::vector<std::shared_ptr<Track>> removed_tracks;
 
@@ -5883,7 +6127,6 @@ void Room::UpdateParticipants(
         if (!IsSignalGenerationCurrentLocked(event_generation)) return;
         event_generation = session_generation_.load(std::memory_order_acquire);
         signal_snapshot = signal_client_;
-        negotiation_timeout = operation_timeouts_.negotiation;
         if (connection_state_ != ConnectionState::Connecting) {
             listeners_snapshot = listeners_;
         }
@@ -6109,7 +6352,6 @@ void Room::UpdateParticipants(
         FlushPendingTracks(p->sid(), event_generation);
     }
 
-    bool has_new_video_pub = false;
     for (const auto& [p, pub] : newly_published_tracks) {
         FlushPendingTracks(p->sid(), event_generation);
         if (signal_snapshot && pub->track() &&
@@ -6119,7 +6361,6 @@ void Room::UpdateParticipants(
             if (remote_publication && remote_publication->is_subscribed()) {
                 signal_snapshot->SendUpdateTrackSettings(
                     pub->sid(), false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
-                has_new_video_pub = true;
             }
         }
         for (const auto& listener : listeners_snapshot) {
@@ -6134,28 +6375,8 @@ void Room::UpdateParticipants(
         }
     }
 
-    // 会议中新增远端轨时，确保 Single PC 模式下主动发起 SDP 协商以获取 SFU 下发的 SSRC 与 MSID
-    if (!newly_published_tracks.empty() && signal_snapshot &&
-        signal_snapshot->is_single_pc_mode_active()) {
-        Log("SIGNAL", "NEW_TRACK_RENEG", "New remote tracks detected (" + std::to_string(newly_published_tracks.size()) + "); requesting Publisher renegotiation for downstream media");
-        if (event_generation == 0) {
-            NegotiatePublisher();
-        } else {
-            livekit::safe_co_spawn(
-                executor_,
-                [self = shared_from_this(), event_generation, negotiation_timeout]()
-                    -> asio::awaitable<void> {
-                    try {
-                        co_await self->NegotiatePublisherAsync(
-                            negotiation_timeout, event_generation);
-                    } catch (const std::exception&) {
-                        self->Log("ERROR", "NEGOTIATION_ASYNC",
-                                  secure_log::ExceptionSummary(
-                                      "publisher_negotiation"));
-                    }
-                });
-        }
-    }
+    // In single-PC mode the SFU's MediaSectionsRequirement is authoritative.
+    // Offering here races that request before its recvonly sections exist.
 
     for (const auto& evt : changed_mute_events) {
         for (const auto& listener : listeners_snapshot) {
@@ -6406,6 +6627,8 @@ void Room::HandleOfferSignal(
     // ⚠ 最早期日志 - 确认此函数被调用
     Log("SIGNAL", "OFFER_CALLED",
         secure_log::SdpSummary("remote_offer_received", offer.sdp()));
+    LogSdpNegotiationDetails(
+        *this, "SDP_OFFER_DETAIL", "subscriber_offer_received", offer.sdp());
     std::shared_ptr<SignalClient> client;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
     {
@@ -6500,6 +6723,8 @@ void Room::HandleOfferSignal(
                             std::cout << "[WebRTC] -> Successfully created and sent SDP Answer back to LiveKit Server!" << std::endl;
                             self->Log("SIGNAL", "SDP_ANSWER_SENT",
                                       secure_log::SdpSummary("subscriber_answer_sent", sdp));
+                            LogSdpNegotiationDetails(
+                                *self, "SDP_ANSWER_DETAIL", "subscriber_answer_sent", sdp);
 
                             // 重放暂存的 Subscriber 早期 ICE 候选
                             if (!pending_cands.empty()) {
@@ -6559,6 +6784,8 @@ void Room::HandleAnswerSignal(
     uint64_t event_generation) {
     Log("SIGNAL", "SDP_ANSWER_RECV",
         secure_log::SdpSummary("remote_answer_received", answer.sdp()));
+    LogSdpNegotiationDetails(
+        *this, "SDP_ANSWER_DETAIL", "remote_answer_received", answer.sdp());
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> sub_pc;
     bool pub_negotiating = false;
@@ -6926,8 +7153,8 @@ void Room::HandleMediaSectionsRequirement(
             "Ignoring MediaSectionsRequirement in dual-PC mode; the server initiates Subscriber SDP");
         return;
     }
-    if (!publisher || (num_audios == 0 && num_videos == 0)) {
-        Log("SIGNAL", "MEDIA_SEC_SKIP", "MediaSectionsRequirement needs no additional media sections");
+    if (!publisher) {
+        Log("SIGNAL", "MEDIA_SEC_SKIP", "MediaSectionsRequirement has no active Publisher PC");
         return;
     }
 
@@ -6954,15 +7181,17 @@ void Room::HandleMediaSectionsRequirement(
         return;
     }
 
-    Log("SIGNAL", "MEDIA_SEC_ADDED",
-        "Added server-requested recvonly media sections: audio=" + std::to_string(num_audios) +
-        ", video=" + std::to_string(num_videos));
+    Log("SIGNAL", "MEDIA_SEC_NEGOTIATE",
+        "Server requested downstream negotiation: added_audio=" + std::to_string(num_audios) +
+        ", added_video=" + std::to_string(num_videos));
+    // Match rtc_session.rs::handle_media_sections_requirement: zero additional
+    // sections still requests an offer to bind/rebind tracks on existing MIDs.
     // NegotiatePublisher coalesces repeated requirements received while an
     // offer is in flight, so no server request is dropped.
     {
         std::lock_guard lock(room_mutex_);
         if (!IsSignalGenerationCurrentLocked(event_generation)) return;
-        NegotiatePublisher();
+        NegotiatePublisher(event_generation);
     }
 }
 
@@ -8036,29 +8265,23 @@ RoomStatsReport Room::GetStatsSync() {
 
     if (pub_pc) {
         auto state = std::make_shared<RtcStatsState>();
-        auto pub_cb = RtcStatsCollectorBridge::Create(state);
-
-        WebRTCManager::Instance().signaling_thread()->PostTask([pub_pc, pub_cb]() {
-            pub_pc->GetStats(pub_cb.get());
-        });
-
-        std::unique_lock<std::mutex> lock(state->mutex);
-        if (state->cv.wait_for(lock, std::chrono::milliseconds(1500), [&]() { return state->done; })) {
-            AppendStatsReport(room_report, state->report, /*publisher=*/true);
+        if (RequestRtcStats(pub_pc, state)) {
+            std::unique_lock<std::mutex> lock(state->mutex);
+            if (state->cv.wait_for(lock, std::chrono::milliseconds(1500), [&]() { return state->done; })) {
+                AppendStatsReport(room_report, state->report, /*publisher=*/true);
+            }
+            state->done = true;
         }
     }
 
     if (sub_pc) {
         auto state = std::make_shared<RtcStatsState>();
-        auto sub_cb = RtcStatsCollectorBridge::Create(state);
-
-        WebRTCManager::Instance().signaling_thread()->PostTask([sub_pc, sub_cb]() {
-            sub_pc->GetStats(sub_cb.get());
-        });
-
-        std::unique_lock<std::mutex> lock(state->mutex);
-        if (state->cv.wait_for(lock, std::chrono::milliseconds(1500), [&]() { return state->done; })) {
-            AppendStatsReport(room_report, state->report, /*publisher=*/false);
+        if (RequestRtcStats(sub_pc, state)) {
+            std::unique_lock<std::mutex> lock(state->mutex);
+            if (state->cv.wait_for(lock, std::chrono::milliseconds(1500), [&]() { return state->done; })) {
+                AppendStatsReport(room_report, state->report, /*publisher=*/false);
+            }
+            state->done = true;
         }
     }
 
@@ -8120,7 +8343,7 @@ void Room::SetParticipantMuted(const std::string& identity_or_sid, bool muted) {
             if (p->identity() == identity_or_sid || p->sid() == identity_or_sid) {
                 for (auto& [tsid, pub] : p->tracks()) {
                     if (pub && pub->track() && pub->track()->kind() == TrackKind::Audio) {
-                        pub->track()->set_muted(muted);
+                        pub->track()->set_playout_muted(muted);
                         changed_identity = p->identity();
                     }
                 }
@@ -8139,7 +8362,7 @@ void Room::SetAudioOutputMuted(bool muted) {
         for (auto& [sid, p] : remote_participants_) {
             for (auto& [tsid, pub] : p->tracks()) {
                 if (pub && pub->track() && pub->track()->kind() == TrackKind::Audio) {
-                    pub->track()->set_muted(muted);
+                    pub->track()->set_output_muted(muted);
                 }
             }
         }

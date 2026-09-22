@@ -5,6 +5,7 @@
 #include "api/video/video_frame.h"
 #include "api/video/i420_buffer.h"
 #include "rtc_base/ref_counted_object.h"
+#include "rtc_base/timestamp_aligner.h"
 #include "video_source.h"
 
 namespace livekit {
@@ -22,11 +23,19 @@ public:
     bool is_screencast() const override { return screencast_; }
     std::optional<bool> needs_denoising() const override { return false; }
 
+    VideoFrameDiagnostics frame_diagnostics() const noexcept;
+
 private:
     void OnVideoFrame(const VideoFrame& frame, const VideoCaptureOptions& options);
 
     std::shared_ptr<VideoSource> lk_source_;
     const bool screencast_;
+    // VideoSource::Subscription serializes the entire frame callback and waits
+    // for it during disconnect, including timestamp alignment and OnFrame.
+    webrtc::TimestampAligner timestamp_aligner_;
+    std::atomic<std::uint64_t> input_frames_{0};
+    std::atomic<std::uint64_t> output_frames_{0};
+    std::atomic<std::uint64_t> dropped_frames_{0};
     std::shared_ptr<VideoSource::Subscription> subscription_;
 };
 

@@ -86,9 +86,18 @@ private:
     // only the binding at the generation-protected commit. Retire the old
     // reference outside that mutex as well.
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> ExchangeRtcTrackBinding(
-        webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, bool force_muted) {
-        if (force_muted) muted_.store(true, std::memory_order_relaxed);
+        webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, bool output_muted) {
+        output_muted_.store(output_muted, std::memory_order_relaxed);
         return std::exchange(rtc_track_, std::move(track));
+    }
+    void set_output_muted(bool muted) {
+        output_muted_.store(muted, std::memory_order_relaxed);
+        UpdateRtcTrackEnabled();
+    }
+    void UpdateRtcTrackEnabled() {
+        if (rtc_track_) {
+            rtc_track_->set_enabled(!muted() && !playout_muted() && volume_ > 0.001);
+        }
     }
     struct I420VideoSinkRegistry;
 
@@ -142,11 +151,20 @@ public:
     void set_source(TrackSource source) { source_.store(source, std::memory_order_relaxed); }
     bool muted() const { return muted_.load(std::memory_order_relaxed); }
 
+    // Receiver-only controls must never alter the publisher's muted state,
+    // which is projected to participants and synchronized with the SFU.
+    bool playout_muted() const {
+        return playout_muted_.load(std::memory_order_relaxed) ||
+            output_muted_.load(std::memory_order_relaxed);
+    }
+    void set_playout_muted(bool muted) {
+        playout_muted_.store(muted, std::memory_order_relaxed);
+        UpdateRtcTrackEnabled();
+    }
+
     void set_muted(bool muted) {
         muted_.store(muted, std::memory_order_relaxed);
-        if (rtc_track_) {
-            rtc_track_->set_enabled(!muted && volume_ > 0.001);
-        }
+        UpdateRtcTrackEnabled();
     }
 
     void set_volume(double volume) {
@@ -155,11 +173,7 @@ public:
             auto* audio_track = static_cast<webrtc::AudioTrackInterface*>(rtc_track_.get());
             if (audio_track) {
                 audio_track->SetVolume(volume);
-                if (volume <= 0.001) {
-                    audio_track->set_enabled(false);
-                } else if (!muted_.load(std::memory_order_relaxed)) {
-                    audio_track->set_enabled(true);
-                }
+                UpdateRtcTrackEnabled();
             }
         }
     }
@@ -171,7 +185,7 @@ public:
     void set_rtc_track(webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track) {
         rtc_track_ = rtc_track;
         if (rtc_track_) {
-            rtc_track_->set_enabled(!muted_.load(std::memory_order_relaxed) && volume_ > 0.001);
+            UpdateRtcTrackEnabled();
             if (kind_ == TrackKind::Audio) {
                 auto* audio_track = static_cast<webrtc::AudioTrackInterface*>(rtc_track_.get());
                 if (audio_track) {
@@ -246,6 +260,8 @@ private:
     TrackKind kind_;
     std::atomic<TrackSource> source_;
     std::atomic<bool> muted_;
+    std::atomic<bool> playout_muted_{false};
+    std::atomic<bool> output_muted_{false};
     double volume_ = 1.0;
 
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track_;

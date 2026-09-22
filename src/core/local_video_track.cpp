@@ -19,6 +19,31 @@ LocalVideoTrack::LocalVideoTrack(const std::string& sid, const std::string& name
     publish_options_ = ComputeMultiCodecSimulcastOptions(w, h, effective_opts);
 }
 
+LocalVideoTrack::~LocalVideoTrack() = default;
+
+VideoFrameDiagnostics LocalVideoTrack::frame_diagnostics() const noexcept {
+    webrtc::scoped_refptr<RtcVideoSource> rtc_source;
+    {
+        std::lock_guard lock(rtc_source_mutex_);
+        rtc_source = rtc_source_;
+    }
+    // No WebRTC thread hop is needed to read the bridge's counters.
+    if (rtc_source) return rtc_source->frame_diagnostics();
+    VideoFrameDiagnostics result;
+    result.source_available = static_cast<bool>(source_);
+    if (source_) result.source_frames = source_->captured_frame_count();
+    return result;
+}
+
+void LocalVideoTrack::set_rtc_source_for_diagnostics(webrtc::scoped_refptr<RtcVideoSource> source) {
+    {
+        std::lock_guard lock(rtc_source_mutex_);
+        rtc_source_.swap(source);
+    }
+    // Release a replaced source outside the lock: disconnect can wait for a
+    // frame already being delivered to WebRTC.
+}
+
 namespace {
 
 // Default encoding policy from client-sdk-cpp's Rust core:
@@ -172,7 +197,7 @@ std::shared_ptr<LocalVideoTrack> LocalVideoTrack::createLocalVideoTrack(const st
             // the PeerConnection signaling thread.
             WebRTCManager::Instance().signaling_thread()->BlockingCall([&]() {
                 auto rtc_src = RtcVideoSource::Create(source, source_type == TrackSource::ScreenShareVideo);
-                track->rtc_source_ = rtc_src;
+                track->set_rtc_source_for_diagnostics(rtc_src);
                 auto rtc_video_track = factory->CreateVideoTrack(rtc_src, name);
                 track->set_rtc_track(rtc_video_track);
             });

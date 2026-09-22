@@ -5,6 +5,8 @@
 #include <atomic>
 #include <thread>
 #include <mutex>
+#include <condition_variable>
+#include <functional>
 #include <vector>
 #include <windows.h>
 #include <mmdeviceapi.h>
@@ -31,14 +33,18 @@ public:
     // 初始化捕获器
     bool Init(const WasapiCaptureConfig& config, std::shared_ptr<AudioSource> audio_source);
 
-    // 启动音频捕获线程
+    // 等待初次设备启动结果；无设备时返回 false，但保留热插拔监听。
     bool Start();
 
     // 停止音频捕获
     void Stop();
 
-    // 是否正在运行
+    // 是否已成功启动设备（后台监听线程存在不代表设备可用）。
     bool IsRunning() const noexcept { return is_running_.load(); }
+
+    // 捕获线程通知实际设备状态；回调不得阻塞或直接调用 Start/Stop。
+    // Qt 调用方须排队回到会话/UI owner，并校验会话是否仍有效。
+    void SetCaptureStateCallback(std::function<void(bool)> callback);
 
     // 静音与音量调节
     void SetMute(bool mute) noexcept { is_muted_.store(mute); }
@@ -65,6 +71,7 @@ private:
     bool InitializeAudioClient();
     void CleanupAudioClient();
     void CaptureThreadLoop();
+    void SetCaptureRunning(bool running, bool force_notification = false);
 
     WasapiCaptureConfig config_;
     std::shared_ptr<AudioSource> audio_source_;
@@ -76,7 +83,13 @@ private:
     std::atomic<float> volume_{1.0f};
 
     std::thread capture_thread_;
-    std::mutex state_mutex_;
+    std::mutex lifecycle_mutex_;
+    mutable std::mutex state_mutex_;
+    std::mutex startup_mutex_;
+    std::condition_variable startup_condition_;
+    bool startup_complete_{false};
+    std::mutex callback_mutex_;
+    std::function<void(bool)> capture_state_callback_;
 
     // Windows Core Audio COM 接口
     Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator_;

@@ -45,7 +45,9 @@ struct MediaPreferences {
     bool showActiveSpeaker = true;
     bool stayInMeetingWhenLocked = true;
     bool pushToTalkWhenMuted = false;
+    bool echoCancellation = true;
     bool noiseSuppression = true;
+    bool autoGainControl = true;
     QString cameraDeviceId;
     QString microphoneDeviceId;
     QString speakerDeviceId;
@@ -83,6 +85,7 @@ public:
     bool isRememberSession() const { return _rememberSession; }
     bool isAutoLogin() const { return _autoLogin; }
     QString serverBaseUrl() const { return _serverBaseUrl; }
+    QString registrationServerBaseUrl(const QString &serviceUrl = {}) const;
     bool canPersistSession() const;
     bool isDebugHttp() const;
     bool hasSavedSession() const { return _savedSession.has_value(); }
@@ -109,6 +112,7 @@ public:
 
     // 登录业务操作
     bool setServerBaseUrl(const QString &url);
+    bool setRegistrationServerBaseUrl(const QString &url);
     void loginWithPassword(const QString &account,
                            const QString &password,
                            bool remember,

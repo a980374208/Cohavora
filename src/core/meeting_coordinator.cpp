@@ -1075,12 +1075,14 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
         info.participantTicket = event.participant.ticket;
         info.lastEventSequence = event.event_sequence;
         CopyParticipantState(event.participant.state, &info);
+        // Local effective state includes device readiness and newer UI intent.
+        // An older publication snapshot must not re-enable a failed device.
         for (const auto &publication : event.participant.state.publications) {
             if (!publication.track) continue;
-            if (publication.kind == livekit::TrackKind::Audio) {
+            if (!info.isLocal && publication.kind == livekit::TrackKind::Audio) {
                 info.isAudioMuted = publication.muted;
             } else if (publication.kind == livekit::TrackKind::Video) {
-                info.isVideoEnabled = !publication.muted;
+                if (!info.isLocal) info.isVideoEnabled = !publication.muted;
                 const auto participantTracks = _remoteVideoTracks.find(identity);
                 if (participantTracks != _remoteVideoTracks.end()) {
                     const auto video = participantTracks->second.find(QString::fromStdString(publication.sid));
@@ -1325,8 +1327,10 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
     _currentPassword = requestedPassword;
     _currentDisplayName = requestedDisplayName.isEmpty() ? _sessionManager.nickname() : requestedDisplayName;
     _mediaPrefs = prefs;
-    _audioMuted = !prefs.enableMicrophone;
-    _videoEnabled = prefs.enableVideo;
+    _requestedAudioMuted = !prefs.enableMicrophone;
+    _requestedVideoEnabled = prefs.enableVideo;
+    _audioMuted = _requestedAudioMuted || !_localAudioAvailable;
+    _videoEnabled = _requestedVideoEnabled && _localVideoAvailable;
 
     _participants.clear();
     ensureLocalParticipant();
@@ -1418,8 +1422,10 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
 
     _currentDisplayName = _sessionManager.nickname();
     _mediaPrefs = prefs;
-    _audioMuted = !prefs.enableMicrophone;
-    _videoEnabled = prefs.enableVideo;
+    _requestedAudioMuted = !prefs.enableMicrophone;
+    _requestedVideoEnabled = prefs.enableVideo;
+    _audioMuted = _requestedAudioMuted || !_localAudioAvailable;
+    _videoEnabled = _requestedVideoEnabled && _localVideoAvailable;
 
     _participants.clear();
     ensureLocalParticipant();
@@ -1495,8 +1501,10 @@ void MeetingCoordinator::connectDirectlyAsync(const QString &url,
     _currentMeetingId = meetingId;
     _currentDisplayName = displayName;
     _mediaPrefs = prefs;
-    _audioMuted = !prefs.enableMicrophone;
-    _videoEnabled = prefs.enableVideo;
+    _requestedAudioMuted = !prefs.enableMicrophone;
+    _requestedVideoEnabled = prefs.enableVideo;
+    _audioMuted = _requestedAudioMuted || !_localAudioAvailable;
+    _videoEnabled = _requestedVideoEnabled && _localVideoAvailable;
 
     _participants.clear();
     ensureLocalParticipant();
@@ -1693,13 +1701,15 @@ void MeetingCoordinator::startRoomSession(const QString &url,
     const uint64_t sessionGeneration = session->generation();
     auto audioSource = _localAudioSource;
     auto videoSource = _localVideoSource;
-    const bool audioMuted = _audioMuted;
-    const bool videoEnabled = _videoEnabled;
+    const bool audioMuted = _requestedAudioMuted;
+    const bool videoEnabled = _requestedVideoEnabled;
+    const bool audioAvailable = _localAudioAvailable;
+    const bool videoAvailable = _localVideoAvailable;
     const bool allowInsecureTransport = isDebugHttpTransportEnabled();
 
     _ioThread = std::thread([this, ioContext, room = std::move(room), session = std::move(session),
                              audioSource = std::move(audioSource), videoSource = std::move(videoSource),
-                             audioMuted, videoEnabled, allowInsecureTransport,
+                             audioMuted, videoEnabled, audioAvailable, videoAvailable, allowInsecureTransport,
                              urlStr, tokenStr, sessionGeneration] {
         livekit::SignalOptions opts;
         opts.auto_subscribe = true;
@@ -1709,7 +1719,8 @@ void MeetingCoordinator::startRoomSession(const QString &url,
         asio::co_spawn(*ioContext,
                         [this, room = std::move(room), session = std::move(session),
                          audioSource = std::move(audioSource), videoSource = std::move(videoSource),
-                         audioMuted, videoEnabled, urlStr, tokenStr, opts, sessionGeneration]() mutable -> asio::awaitable<void> {
+                         audioMuted, videoEnabled, audioAvailable, videoAvailable,
+                         urlStr, tokenStr, opts, sessionGeneration]() mutable -> asio::awaitable<void> {
             MeetingStartupTransaction startup;
             try {
                 if (urlStr.empty() || tokenStr.empty()) {
@@ -1755,13 +1766,13 @@ void MeetingCoordinator::startRoomSession(const QString &url,
                 }
 
                 auto audioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", audioSource);
-                audioTrack->set_muted(effectiveAudioMuted);
+                audioTrack->set_muted(effectiveAudioMuted || !audioAvailable);
 
                 livekit::VideoPublishOptions vopts;
                 vopts.video_codec = "vp8";
                 auto videoTrack = livekit::LocalVideoTrack::createLocalVideoTrack(
                     "camera_video", videoSource, livekit::TrackSource::Camera, vopts);
-                videoTrack->set_muted(!effectiveVideoEnabled);
+                videoTrack->set_muted(!effectiveVideoEnabled || !videoAvailable);
 
                 // 【核心优化】：将本地音视频打包，发起批量发布与单次全量 SDP 协商
                 std::vector<std::shared_ptr<livekit::Track>> tracksToPublish;
@@ -1829,18 +1840,22 @@ void MeetingCoordinator::completeRoomStartupOnUiThread(
     }
 
     QPointer<MeetingCoordinator> owner(this);
-    if (_audioMuted == requestedAudioMuted) {
-        _audioMuted = effectiveAudioMuted;
-    } else if (audioTrack) {
-        audioTrack->set_muted(_audioMuted);
+    if (_requestedAudioMuted == requestedAudioMuted) {
+        _requestedAudioMuted = effectiveAudioMuted;
     }
-    if (_videoEnabled == requestedVideoEnabled) {
-        _videoEnabled = effectiveVideoEnabled;
-    } else if (videoTrack) {
-        videoTrack->set_muted(!_videoEnabled);
+    if (_requestedVideoEnabled == requestedVideoEnabled) {
+        _requestedVideoEnabled = effectiveVideoEnabled;
     }
+    // Device readiness is temporary; the join policy and explicit user intent
+    // survive a capture restart so recovery cannot undo a requested mute.
+    _audioMuted = _requestedAudioMuted || !_localAudioAvailable;
+    _videoEnabled = _requestedVideoEnabled && _localVideoAvailable;
     _localAudioTrack = std::move(audioTrack);
     _localVideoTrack = std::move(videoTrack);
+    // AddTrack carries the initial state. A device failure or user action may
+    // have changed it while publication was pending; send the final state too.
+    publishLocalTrackMute(_localAudioTrack, _audioMuted);
+    publishLocalTrackMute(_localVideoTrack, !_videoEnabled);
     _startupListenOnly = false;
     _startupCommitted = true;
     ensureLocalParticipant();
@@ -2142,14 +2157,49 @@ void MeetingCoordinator::stopScreenShare() {
     });
 }
 
+void MeetingCoordinator::publishLocalTrackMute(
+    const std::shared_ptr<livekit::Track> &track, bool muted) {
+    if (!track || !_sessionRuntime || !_sessionRunning || !_room) return;
+    auto session = _sessionRuntime;
+    auto room = _room;
+    auto local = room->local_participant();
+    if (!local) return;
+    asio::post(session->strand(), [session, room, local, track, muted] {
+        if (!session->acceptsDataOnStrand() || room->local_participant() != local) return;
+        // Resolve the SID from the live publication, never from a track CID or
+        // a retired session. SetMuted applies native state and informs the SFU.
+        for (const auto &[sid, publication] : local->tracks()) {
+            if (!sid.empty() && publication && publication->track() == track) {
+                local->SetMuted(sid, muted);
+                return;
+            }
+        }
+    });
+}
+
+void MeetingCoordinator::setLocalAudioAvailable(bool available) {
+    if (_localAudioAvailable == available) return;
+    _localAudioAvailable = available;
+    applyLocalAudioState();
+}
+
+void MeetingCoordinator::setLocalVideoAvailable(bool available) {
+    if (_localVideoAvailable == available) return;
+    _localVideoAvailable = available;
+    applyLocalVideoState();
+}
+
 void MeetingCoordinator::setLocalAudioMuted(bool muted) {
-    if (_startupListenOnly) {
-        muted = true;
-    }
+    _requestedAudioMuted = muted;
+    applyLocalAudioState();
+}
+
+void MeetingCoordinator::applyLocalAudioState() {
+    const bool muted = _requestedAudioMuted || _startupListenOnly || !_localAudioAvailable;
+    QPointer<MeetingCoordinator> owner(this);
+    const auto generation = _nextSessionGeneration;
     _audioMuted = muted;
-    if (_localAudioTrack) {
-        _localAudioTrack->set_muted(muted);
-    }
+    publishLocalTrackMute(_localAudioTrack, muted);
     for (auto &[id, p] : _participants) {
         if (p.isLocal) {
             p.isAudioMuted = muted;
@@ -2157,17 +2207,22 @@ void MeetingCoordinator::setLocalAudioMuted(bool muted) {
         }
     }
     updateParticipantListAndNotify();
-    emit localAudioMuteChanged(muted);
+    if (owner && owner->_nextSessionGeneration == generation && owner->_audioMuted == muted) {
+        emit owner->localAudioMuteChanged(muted);
+    }
 }
 
 void MeetingCoordinator::setLocalVideoEnabled(bool enabled) {
-    if (_startupListenOnly) {
-        enabled = false;
-    }
+    _requestedVideoEnabled = enabled;
+    applyLocalVideoState();
+}
+
+void MeetingCoordinator::applyLocalVideoState() {
+    const bool enabled = _requestedVideoEnabled && !_startupListenOnly && _localVideoAvailable;
+    QPointer<MeetingCoordinator> owner(this);
+    const auto generation = _nextSessionGeneration;
     _videoEnabled = enabled;
-    if (_localVideoTrack) {
-        _localVideoTrack->set_muted(!enabled);
-    }
+    publishLocalTrackMute(_localVideoTrack, !enabled);
     for (auto &[id, p] : _participants) {
         if (p.isLocal) {
             p.isVideoEnabled = enabled;
@@ -2175,7 +2230,9 @@ void MeetingCoordinator::setLocalVideoEnabled(bool enabled) {
         }
     }
     updateParticipantListAndNotify();
-    emit localVideoEnableChanged(enabled);
+    if (owner && owner->_nextSessionGeneration == generation && owner->_videoEnabled == enabled) {
+        emit owner->localVideoEnableChanged(enabled);
+    }
 }
 
 void MeetingCoordinator::sendNotifyData(const openmeeting::meeting::NotifyMeetingData &data, bool reliable) {
@@ -2394,7 +2451,7 @@ void MeetingCoordinator::processNextMediaSendChunk() {
 
 void MeetingCoordinator::requestParticipantMute(const QString &targetUserId, bool isVideo, bool mute) {
     openmeeting::meeting::NotifyMeetingData notify;
-    notify.set_operatoruserid(SessionManager::instance().userId().toStdString());
+    notify.set_operatoruserid(_sessionManager.userId().toStdString());
 
     auto *streamOp = notify.mutable_streamoperatedata();
     auto *op = streamOp->add_operation();
@@ -2419,14 +2476,13 @@ void MeetingCoordinator::requestParticipantMicrophone(const QString &targetUserI
 void MeetingCoordinator::muteAllParticipants(bool muteMic, bool /*allowSelfUnmute*/) {
     if (!_room || _state != MeetingState::InMeeting) return;
     openmeeting::meeting::NotifyMeetingData notify;
-    notify.set_operatoruserid(SessionManager::instance().userId().toStdString());
+    notify.set_operatoruserid(_sessionManager.userId().toStdString());
 
     auto *streamOp = notify.mutable_streamoperatedata();
     for (const auto &[uid, info] : _participants) {
         if (!info.isLocal) {
             auto *op = streamOp->add_operation();
             op->set_userid(uid.toStdString());
-            op->set_cameraonentry(info.isVideoEnabled);
             op->set_microphoneonentry(!muteMic);
         }
     }
@@ -3153,19 +3209,23 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
         for (int i = 0; i < streamData.operation_size(); ++i) {
             const auto &op = streamData.operation(i);
             if (QString::fromStdString(op.userid()) == localUserId) {
-                bool camEnable = op.cameraonentry();
-                QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, camEnable, opUser]() {
-                    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
-                        !isSenderContextCurrentOnUiThread(sender)) return;
-                    emit remoteMuteRequested(true, !camEnable, opUser);
-                }, Qt::QueuedConnection);
+                if (op.has_cameraonentry()) {
+                    const bool camEnable = op.cameraonentry();
+                    QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, camEnable, opUser]() {
+                        if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+                            !isSenderContextCurrentOnUiThread(sender)) return;
+                        emit remoteMuteRequested(true, !camEnable, opUser);
+                    }, Qt::QueuedConnection);
+                }
 
-                bool micEnable = op.microphoneonentry();
-                QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, micEnable, opUser]() {
-                    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
-                        !isSenderContextCurrentOnUiThread(sender)) return;
-                    emit remoteMuteRequested(false, !micEnable, opUser);
-                }, Qt::QueuedConnection);
+                if (op.has_microphoneonentry()) {
+                    const bool micEnable = op.microphoneonentry();
+                    QMetaObject::invokeMethod(this, [this, sessionGeneration, sender, micEnable, opUser]() {
+                        if (!isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+                            !isSenderContextCurrentOnUiThread(sender)) return;
+                        emit remoteMuteRequested(false, !micEnable, opUser);
+                    }, Qt::QueuedConnection);
+                }
             }
         }
     }

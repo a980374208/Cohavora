@@ -6,6 +6,7 @@
 #include <charconv>
 #include <limits>
 #include <sstream>
+#include <vector>
 
 namespace livekit::secure_log {
 namespace {
@@ -47,6 +48,50 @@ std::string SafeIdentifier(std::string_view value) {
     }
     return result;
 }
+
+std::string SafeSdpAtom(std::string_view value) {
+    if (value.empty() || value.size() > 64) return "unknown";
+    std::string result;
+    result.reserve(value.size());
+    for (const char ch : value) {
+        const auto byte = static_cast<unsigned char>(ch);
+        if (!std::isalnum(byte) && ch != '_' && ch != '-' && ch != '.' &&
+            ch != '+' && ch != '/' && ch != '|') {
+            return "unknown";
+        }
+        result.push_back(LowerAscii(ch));
+    }
+    return result;
+}
+
+std::string JoinSdpAtoms(const std::vector<std::string>& values) {
+    if (values.empty()) return "none";
+    std::string result;
+    for (const auto& value : values) {
+        if (!result.empty()) result.push_back('|');
+        result += value;
+    }
+    return result;
+}
+
+struct SdpMediaDetail {
+    std::string media = "unknown";
+    std::string port = "unknown";
+    std::string protocol = "unknown";
+    std::string mid = "none";
+    std::string direction;
+    std::string setup = "none";
+    std::vector<std::string> formats;
+    std::vector<std::string> codecs;
+    std::vector<std::string> msids;
+    std::size_t format_count = 0;
+    std::size_t codec_count = 0;
+    std::size_t msid_count = 0;
+    std::size_t ssrc_lines = 0;
+    std::size_t rid_lines = 0;
+    bool rtcp_mux = false;
+    bool simulcast = false;
+};
 
 bool IsSensitiveText(std::string_view value) {
     const auto lower = LowerAscii(value);
@@ -226,6 +271,148 @@ std::string SdpSummary(std::string_view kind, std::string_view sdp) {
     return "sdp{kind=" + SafeIdentifier(kind) + ",bytes=" + std::to_string(sdp.size()) +
         ",audio=" + std::to_string(audio) + ",video=" + std::to_string(video) +
         ",application=" + std::to_string(application) + ",other=" + std::to_string(other) + "}";
+}
+
+std::vector<std::string> SdpNegotiationDetails(std::string_view kind,
+                                               std::string_view sdp) {
+    constexpr std::size_t kMaxLoggedSections = 16;
+    constexpr std::size_t kMaxLoggedFormats = 16;
+    constexpr std::size_t kMaxLoggedCodecs = 16;
+    constexpr std::size_t kMaxLoggedMsids = 4;
+
+    const auto safe_kind = SafeIdentifier(kind);
+    if (sdp.size() > kMaxInputBytes) {
+        return {"sdp-negotiation{kind=" + safe_kind +
+                ",bytes=" + std::to_string(sdp.size()) +
+                ",status=omitted,reason=oversized}"};
+    }
+
+    std::vector<SdpMediaDetail> sections;
+    std::vector<std::string> bundle_mids;
+    std::string session_direction;
+    SdpMediaDetail* current = nullptr;
+    bool inside_media_section = false;
+    std::size_t media_section_count = 0;
+
+    std::size_t position = 0;
+    while (position < sdp.size()) {
+        const auto line_end = sdp.find('\n', position);
+        auto line = sdp.substr(
+            position,
+            line_end == std::string_view::npos ? sdp.size() - position
+                                               : line_end - position);
+        if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+
+        if (line.rfind("m=", 0) == 0) {
+            ++media_section_count;
+            inside_media_section = true;
+            current = nullptr;
+            if (sections.size() < kMaxLoggedSections) {
+                sections.emplace_back();
+                current = &sections.back();
+                std::istringstream fields{std::string(line.substr(2))};
+                std::string media;
+                std::string port;
+                std::string protocol;
+                fields >> media >> port >> protocol;
+                current->media = SafeSdpAtom(media);
+                current->port = SafeSdpAtom(port);
+                current->protocol = SafeSdpAtom(protocol);
+
+                std::string format;
+                while (fields >> format) {
+                    ++current->format_count;
+                    if (current->formats.size() < kMaxLoggedFormats) {
+                        current->formats.push_back(SafeSdpAtom(format));
+                    }
+                }
+            }
+        } else if (line.rfind("a=group:BUNDLE", 0) == 0 && !inside_media_section) {
+            std::istringstream mids{std::string(line.substr(14))};
+            std::string mid;
+            while (mids >> mid && bundle_mids.size() < kMaxLoggedSections) {
+                bundle_mids.push_back(SafeSdpAtom(mid));
+            }
+        } else if (line == "a=sendrecv" || line == "a=sendonly" ||
+                   line == "a=recvonly" || line == "a=inactive") {
+            const auto direction = std::string(line.substr(2));
+            if (current) current->direction = direction;
+            else if (!inside_media_section) session_direction = direction;
+        } else if (current && line.rfind("a=mid:", 0) == 0) {
+            current->mid = SafeSdpAtom(line.substr(6));
+        } else if (current && line.rfind("a=setup:", 0) == 0) {
+            current->setup = SafeSdpAtom(line.substr(8));
+        } else if (current && line.rfind("a=rtpmap:", 0) == 0) {
+            const auto mapping = line.substr(9);
+            const auto separator = mapping.find(' ');
+            ++current->codec_count;
+            if (separator != std::string_view::npos &&
+                current->codecs.size() < kMaxLoggedCodecs) {
+                current->codecs.push_back(
+                    SafeSdpAtom(mapping.substr(0, separator)) + ":" +
+                    SafeSdpAtom(mapping.substr(separator + 1)));
+            }
+        } else if (current && line.rfind("a=msid:", 0) == 0) {
+            ++current->msid_count;
+            if (current->msids.size() < kMaxLoggedMsids) {
+                std::istringstream ids{std::string(line.substr(7))};
+                std::string stream_id;
+                std::string track_id;
+                ids >> stream_id >> track_id;
+                current->msids.push_back(
+                    SafeSdpAtom(stream_id) + "/" + SafeSdpAtom(track_id));
+            }
+        } else if (current && line.rfind("a=ssrc:", 0) == 0) {
+            ++current->ssrc_lines;
+        } else if (current && line.rfind("a=rid:", 0) == 0) {
+            ++current->rid_lines;
+        } else if (current && line.rfind("a=simulcast:", 0) == 0) {
+            current->simulcast = true;
+        } else if (current && line == "a=rtcp-mux") {
+            current->rtcp_mux = true;
+        }
+
+        if (line_end == std::string_view::npos) break;
+        position = line_end + 1;
+    }
+
+    std::vector<std::string> details;
+    details.reserve(sections.size() + 1);
+    details.push_back(
+        "sdp-negotiation{kind=" + safe_kind +
+        ",bytes=" + std::to_string(sdp.size()) +
+        ",media_sections=" + std::to_string(media_section_count) +
+        ",logged_sections=" + std::to_string(sections.size()) +
+        ",bundle=" + JoinSdpAtoms(bundle_mids) +
+        ",truncated=" + (media_section_count > sections.size() ? "yes" : "no") + "}");
+
+    for (std::size_t index = 0; index < sections.size(); ++index) {
+        const auto& section = sections[index];
+        const auto direction = section.direction.empty()
+            ? (session_direction.empty() ? "sendrecv" : session_direction)
+            : section.direction;
+        details.push_back(
+            "sdp-mline{kind=" + safe_kind +
+            ",index=" + std::to_string(index) +
+            ",media=" + section.media +
+            ",mid=" + section.mid +
+            ",port=" + section.port +
+            ",protocol=" + section.protocol +
+            ",rejected=" + (section.port == "0" ? "yes" : "no") +
+            ",direction=" + direction +
+            ",setup=" + section.setup +
+            ",formats=" + JoinSdpAtoms(section.formats) +
+            ",format_count=" + std::to_string(section.format_count) +
+            ",codecs=" + JoinSdpAtoms(section.codecs) +
+            ",codec_count=" + std::to_string(section.codec_count) +
+            ",msids=" + JoinSdpAtoms(section.msids) +
+            ",msid_count=" + std::to_string(section.msid_count) +
+            ",ssrc_lines=" + std::to_string(section.ssrc_lines) +
+            ",rid_lines=" + std::to_string(section.rid_lines) +
+            ",simulcast=" + (section.simulcast ? "yes" : "no") +
+            ",rtcp_mux=" + (section.rtcp_mux ? "yes" : "no") + "}");
+    }
+    return details;
 }
 
 std::string SanitizeForOutput(std::string_view value) {

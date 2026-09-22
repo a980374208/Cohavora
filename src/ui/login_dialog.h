@@ -69,6 +69,7 @@ private:
     // 高级设置
     QWidget *_advancedWidget = nullptr;
     QLineEdit *_serverUrlInput = nullptr;
+    QLineEdit *_registrationServerUrlInput = nullptr;
     QPushButton *_advancedToggleBtn = nullptr;
 
     // 访客入会

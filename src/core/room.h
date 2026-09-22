@@ -300,6 +300,7 @@ public:
     void Log(const std::string& cat, const std::string& tag, const std::string& msg);
 
 private:
+    void SchedulePublisherMediaDiagnostic(uint64_t generation);
     friend class RoomPeerConnectionObserver;
     friend class RoomDataChannelObserver;
     friend class RoomUnpublishInspectionAccess;
@@ -307,6 +308,7 @@ private:
     friend class RoomSecurityInspectionAccess;
     friend class RoomConnectAttemptInspectionAccess;
     friend class RoomStreamDeliveryInspectionAccess;
+    friend class RoomSinglePcInspectionAccess;
     // Only the named inspection friend can install these two transport-boundary
     // hooks. Production keeps them null and uses the existing native methods.
     struct LocalUnpublishOverrides {

@@ -1,6 +1,7 @@
 #include <winsock2.h>
 #include <asio.hpp>
 #include "webrtc_manager.h"
+#include "audio_playout_device_selection.h"
 #include "audio_playout_warmup.h"
 #include "media/audio_apm.h"
 #include "rtc_base/ssl_adapter.h"
@@ -443,10 +444,10 @@ bool WebRTCManager::Initialize() {
         worker_thread_->BlockingCall([this]() {
             if (adm_) {
                 adm_->Init();
-                // 自动绑定系统默认通信播放端点 (Default Communication Device / Default Console Device)
-                int32_t ret = adm_->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultCommunicationDevice);
-                if (ret != 0) {
-                    adm_->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultDevice);
+                // Use the same Windows default playback role as settings and
+                // speaker testing, rather than the separate communications role.
+                if (adm_->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultDevice) != 0) {
+                    std::cerr << "WebRTCManager: Failed to select system default playout device" << std::endl;
                 }
             }
         });
@@ -492,6 +493,35 @@ bool WebRTCManager::Initialize() {
     initialized_ = true;
     std::cout << "WebRTCManager: Initialized successfully with Audio/Video pipelines!" << std::endl;
     return true;
+}
+
+bool WebRTCManager::SetPlayoutDevice(uint16_t index) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!adm_ || !worker_thread_) return false;
+    return worker_thread_->BlockingCall([this, index]() {
+        return detail::ApplyPlayoutDevice(*adm_, index, [this] { ResetApmProcessor(); });
+    });
+}
+
+bool WebRTCManager::SetPlayoutDeviceById(const std::string& device_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!adm_ || !worker_thread_) return false;
+    // BlockingCall completes before device_id goes out of scope. Keep its
+    // closure small and trivially copyable across the packaged WebRTC ABI.
+    return worker_thread_->BlockingCall([this, &device_id]() {
+        return detail::SelectPlayoutDeviceById(*adm_, device_id, [this] { ResetApmProcessor(); });
+    });
+}
+
+bool WebRTCManager::EnsurePlayout() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!adm_ || !worker_thread_) return false;
+    return worker_thread_->BlockingCall([this]() {
+        if (adm_->Playing()) return true;
+        if (!adm_->PlayoutIsInitialized()
+                && (adm_->InitSpeaker() != 0 || adm_->InitPlayout() != 0)) return false;
+        return adm_->StartPlayout() == 0 && adm_->Playing();
+    });
 }
 
 void WebRTCManager::Deinitialize() {

@@ -39,6 +39,7 @@ namespace MeetingUI {
 namespace {
 
 constexpr auto kDeviceIdRole = Qt::UserRole;
+constexpr auto kDevicePendingRole = Qt::UserRole + 1;
 constexpr auto kWidthRole = Qt::UserRole;
 constexpr auto kHeightRole = Qt::UserRole + 1;
 constexpr auto kFpsRole = Qt::UserRole + 2;
@@ -375,6 +376,7 @@ QWidget *SettingsDialog::buildAudioPage() {
 	layout->addWidget(makeSectionTitle(QCoreApplication::translate("MeetingUI", "Speaker"), content));
 	auto *speakerRow = new QHBoxLayout();
 	_speakerCombo = new QComboBox(content);
+	_speakerCombo->setObjectName(QStringLiteral("speakerDeviceCombo"));
 	_speakerCombo->setMinimumContentsLength(24);
 	_speakerTestButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Test Speaker"), content);
 	_speakerTestButton->setObjectName(QStringLiteral("secondaryButton"));
@@ -387,6 +389,7 @@ QWidget *SettingsDialog::buildAudioPage() {
 	layout->addWidget(makeSectionTitle(QCoreApplication::translate("MeetingUI", "Microphone"), content));
 	auto *microphoneRow = new QHBoxLayout();
 	_microphoneCombo = new QComboBox(content);
+	_microphoneCombo->setObjectName(QStringLiteral("microphoneDeviceCombo"));
 	_microphoneCombo->setMinimumContentsLength(24);
 	_microphoneTestButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Test Microphone"), content);
 	_microphoneTestButton->setObjectName(QStringLiteral("secondaryButton"));
@@ -411,13 +414,20 @@ QWidget *SettingsDialog::buildAudioPage() {
 	_audioMicrophone = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable microphone on joining"), content);
 	_audioSpeaker = new QCheckBox(QCoreApplication::translate("MeetingUI", "Use computer audio when joining"), content);
 	_pushToTalk = new QCheckBox(QCoreApplication::translate("MeetingUI", "Hold Space to temporarily unmute"), content);
-	_noiseSuppression = new QCheckBox(QCoreApplication::translate("MeetingUI", "Suppress background noise"), content);
+	_echoCancellation = new QCheckBox(QCoreApplication::translate("MeetingUI", "Echo cancellation (AEC)"), content);
+	_echoCancellation->setObjectName(QStringLiteral("echoCancellationCheckBox"));
+	_noiseSuppression = new QCheckBox(QCoreApplication::translate("MeetingUI", "Noise suppression (ANS)"), content);
+	_noiseSuppression->setObjectName(QStringLiteral("noiseSuppressionCheckBox"));
+	_autoGainControl = new QCheckBox(QCoreApplication::translate("MeetingUI", "Automatic gain control (AGC)"), content);
+	_autoGainControl->setObjectName(QStringLiteral("autoGainControlCheckBox"));
 	layout->addWidget(_audioMicrophone);
 	layout->addWidget(_audioSpeaker);
 	layout->addWidget(_pushToTalk);
 	layout->addSpacing(8);
 	layout->addWidget(makeSectionTitle(QCoreApplication::translate("MeetingUI", "Noise Reduction and Audio Enhancement"), content));
+	layout->addWidget(_echoCancellation);
 	layout->addWidget(_noiseSuppression);
+	layout->addWidget(_autoGainControl);
 	layout->addStretch();
 	return makeScrollablePage(content, this);
 }
@@ -483,6 +493,13 @@ void SettingsDialog::connectDeviceControllers() {
 		&AudioDeviceTestController::deviceEnumerationFailed,
 		this,
 		[this](const QString &message) {
+			// Keep the pending IDs so editing other settings cannot reset a
+			// saved endpoint after a transient enumeration failure.
+			for (auto *combo : { _microphoneCombo, _speakerCombo }) {
+				if (combo->count() > 0 && combo->itemData(0, kDevicePendingRole).toBool()) {
+					combo->setItemText(0, QCoreApplication::translate("MeetingUI", "Failed to list audio devices"));
+				}
+			}
 			MeetingUI::AppTheme::setStyleVariant(*_audioStatus, "settings-dialog-audiostatus-3");
 			_audioStatus->setText(message);
 			_audioStatus->show();
@@ -509,15 +526,15 @@ void SettingsDialog::connectDeviceControllers() {
 			_updatingUi = true;
 			_microphoneCombo->clear();
 			_speakerCombo->clear();
-			auto defaultMicrophone = -1;
-			auto defaultSpeaker = -1;
+			// An empty ID represents the system default, not a pinned endpoint.
+			_microphoneCombo->addItem(QCoreApplication::translate("MeetingUI", "System Default"), QString());
+			_speakerCombo->addItem(QCoreApplication::translate("MeetingUI", "System Default"), QString());
 			for (const auto &device : microphones) {
 				auto name = device.name.trimmed().isEmpty()
 					? QCoreApplication::translate("MeetingUI", "Unnamed Device")
 					: device.name;
 				if (device.isDefault) name += QCoreApplication::translate("MeetingUI", "(System Default)");
 				_microphoneCombo->addItem(name, device.id);
-				if (device.isDefault) defaultMicrophone = _microphoneCombo->count() - 1;
 			}
 			for (const auto &device : speakers) {
 				auto name = device.name.trimmed().isEmpty()
@@ -525,11 +542,10 @@ void SettingsDialog::connectDeviceControllers() {
 					: device.name;
 				if (device.isDefault) name += QCoreApplication::translate("MeetingUI", "(System Default)");
 				_speakerCombo->addItem(name, device.id);
-				if (device.isDefault) defaultSpeaker = _speakerCombo->count() - 1;
 			}
 
-			if (_microphoneCombo->count() == 0) {
-				_microphoneCombo->addItem(QCoreApplication::translate("MeetingUI", "No microphone detected"), QString());
+			if (microphones.isEmpty()) {
+				_microphoneCombo->setItemText(0, QCoreApplication::translate("MeetingUI", "No microphone detected"));
 				_microphoneCombo->setEnabled(false);
 				_microphoneTestButton->setEnabled(false);
 			} else {
@@ -537,10 +553,10 @@ void SettingsDialog::connectDeviceControllers() {
 				_microphoneTestButton->setEnabled(true);
 				const auto selected = findData(_microphoneCombo, saved.microphoneDeviceId);
 				_microphoneCombo->setCurrentIndex(
-					selected >= 0 ? selected : (defaultMicrophone >= 0 ? defaultMicrophone : 0));
+					selected >= 0 ? selected : 0);
 			}
-			if (_speakerCombo->count() == 0) {
-				_speakerCombo->addItem(QCoreApplication::translate("MeetingUI", "No speaker detected"), QString());
+			if (speakers.isEmpty()) {
+				_speakerCombo->setItemText(0, QCoreApplication::translate("MeetingUI", "No speaker detected"));
 				_speakerCombo->setEnabled(false);
 				_speakerTestButton->setEnabled(false);
 			} else {
@@ -548,7 +564,7 @@ void SettingsDialog::connectDeviceControllers() {
 				_speakerTestButton->setEnabled(true);
 				const auto selected = findData(_speakerCombo, saved.speakerDeviceId);
 				_speakerCombo->setCurrentIndex(
-					selected >= 0 ? selected : (defaultSpeaker >= 0 ? defaultSpeaker : 0));
+					selected >= 0 ? selected : 0);
 			}
 			_updatingUi = oldUpdating;
 			_audioStatus->hide();
@@ -621,7 +637,9 @@ void SettingsDialog::connectPreferenceControls() {
 		_showActiveSpeaker,
 		_stayWhenLocked,
 		_pushToTalk,
-		_noiseSuppression }) {
+		_echoCancellation,
+		_noiseSuppression,
+		_autoGainControl }) {
 		connect(checkBox, &QCheckBox::toggled, this, [this](bool) {
 			if (!_updatingUi) {
 				commitPreferences();
@@ -737,7 +755,9 @@ OpenMeeting::MediaPreferences SettingsDialog::preferences() const {
 	value.showActiveSpeaker = _showActiveSpeaker && _showActiveSpeaker->isChecked();
 	value.stayInMeetingWhenLocked = _stayWhenLocked && _stayWhenLocked->isChecked();
 	value.pushToTalkWhenMuted = _pushToTalk && _pushToTalk->isChecked();
+	value.echoCancellation = _echoCancellation && _echoCancellation->isChecked();
 	value.noiseSuppression = _noiseSuppression && _noiseSuppression->isChecked();
+	value.autoGainControl = _autoGainControl && _autoGainControl->isChecked();
 	value.cameraDeviceId = selectedCameraDeviceId();
 	value.microphoneDeviceId = selectedMicrophoneDeviceId();
 	value.speakerDeviceId = selectedSpeakerDeviceId();
@@ -776,7 +796,26 @@ void SettingsDialog::setPreferences(const OpenMeeting::MediaPreferences &value) 
 	_showActiveSpeaker->setChecked(value.showActiveSpeaker);
 	_stayWhenLocked->setChecked(value.stayInMeetingWhenLocked);
 	_pushToTalk->setChecked(value.pushToTalkWhenMuted);
+	_echoCancellation->setChecked(value.echoCancellation);
 	_noiseSuppression->setChecked(value.noiseSuppression);
+	_autoGainControl->setChecked(value.autoGainControl);
+	if (_microphoneCombo && _microphoneCombo->count() > 0) {
+		if (_microphoneCombo->itemData(0, kDevicePendingRole).toBool()) {
+			_microphoneCombo->setItemData(0, value.microphoneDeviceId, kDeviceIdRole);
+		} else {
+			const auto selected = _microphoneCombo->findData(value.microphoneDeviceId, kDeviceIdRole);
+			_microphoneCombo->setCurrentIndex(selected >= 0 ? selected : 0);
+		}
+	}
+	if (_speakerCombo && _speakerCombo->count() > 0) {
+		if (_speakerCombo->itemData(0, kDevicePendingRole).toBool()) {
+			// Keep the requested endpoint while asynchronous enumeration is pending.
+			_speakerCombo->setItemData(0, value.speakerDeviceId, kDeviceIdRole);
+		} else {
+			const auto selected = _speakerCombo->findData(value.speakerDeviceId, kDeviceIdRole);
+			_speakerCombo->setCurrentIndex(selected >= 0 ? selected : 0);
+		}
+	}
 
 	const auto mirrorEnabled = value.mirrorMode != OpenMeeting::VideoMirrorMode::Off;
 	_mirrorEnabled->setChecked(mirrorEnabled);
@@ -836,10 +875,12 @@ void SettingsDialog::refreshDevices() {
 	const auto oldUpdating = _updatingUi;
 	_updatingUi = true;
 	_microphoneCombo->clear();
-	_microphoneCombo->addItem(QCoreApplication::translate("MeetingUI", "Testing microphone..."), QString());
+	_microphoneCombo->addItem(QCoreApplication::translate("MeetingUI", "Testing microphone..."), value.microphoneDeviceId);
+	_microphoneCombo->setItemData(0, true, kDevicePendingRole);
 	_microphoneCombo->setEnabled(false);
 	_speakerCombo->clear();
-	_speakerCombo->addItem(QCoreApplication::translate("MeetingUI", "Testing speaker..."), QString());
+	_speakerCombo->addItem(QCoreApplication::translate("MeetingUI", "Testing speaker..."), value.speakerDeviceId);
+	_speakerCombo->setItemData(0, true, kDevicePendingRole);
 	_speakerCombo->setEnabled(false);
 	_microphoneTestButton->setEnabled(false);
 	_speakerTestButton->setEnabled(false);

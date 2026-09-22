@@ -19,6 +19,11 @@ AudioApmProcessor::~AudioApmProcessor() = default;
 
 void AudioApmProcessor::ApplyConfig(const ApmConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
+    if (config_.enable_aec != config.enable_aec) {
+        render_buffer_.clear();
+        std::lock_guard<std::mutex> stats_lock(stats_mutex_);
+        last_render_frame_time_ = {};
+    }
     config_ = config;
     if (!apm_) return;
 
@@ -200,6 +205,7 @@ void AudioApmProcessor::Reset() {
 }
 
 bool AudioApmProcessor::HasActiveRenderReference(int64_t max_age_ms) const {
+    std::lock_guard<std::mutex> config_lock(mutex_);
     if (!config_.enable_aec) return false;
     std::lock_guard<std::mutex> lock(stats_mutex_);
     if (last_render_frame_time_ == std::chrono::steady_clock::time_point{}) {

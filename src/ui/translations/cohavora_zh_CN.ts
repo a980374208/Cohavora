@@ -197,6 +197,22 @@
             <translation>服务器:</translation>
         </message>
         <message>
+            <source>Meeting service:</source>
+            <translation>会议服务:</translation>
+        </message>
+        <message>
+            <source>Registration service:</source>
+            <translation>注册服务:</translation>
+        </message>
+        <message>
+            <source>Leave empty to use the default</source>
+            <translation>留空使用默认地址</translation>
+        </message>
+        <message>
+            <source>Default registration port: 11022. You can set a separate service or reverse-proxy base URL.</source>
+            <translation>默认部署的注册端口为 11022，可单独配置注册服务或反向代理地址。</translation>
+        </message>
+        <message>
             <source>Guest_%1</source>
             <translation>访客_%1</translation>
         </message>
@@ -2082,8 +2098,20 @@ Sign in with your own account in a client configured for the same meeting servic
             <translation>静音状态下长按空格键临时开启麦克风</translation>
         </message>
         <message>
-            <source>Suppress background noise</source>
-            <translation>抑制背景噪声</translation>
+            <source>Echo cancellation (AEC)</source>
+            <translation>回声消除（AEC）</translation>
+        </message>
+        <message>
+            <source>Noise suppression (ANS)</source>
+            <translation>噪声抑制（ANS）</translation>
+        </message>
+        <message>
+            <source>Automatic gain control (AGC)</source>
+            <translation>自动增益（AGC）</translation>
+        </message>
+        <message>
+            <source>System Default</source>
+            <translation>系统默认</translation>
         </message>
         <message>
             <source>Noise Reduction and Audio Enhancement</source>

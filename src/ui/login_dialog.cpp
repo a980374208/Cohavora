@@ -8,6 +8,7 @@
 #include <QtCore/QPointer>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
+#include <QtWidgets/QGridLayout>
 #include <QtWidgets/QGraphicsDropShadowEffect>
 #include <QtWidgets/QMessageBox>
 #include <QtGui/QMouseEvent>
@@ -41,6 +42,8 @@ LoginDialog::LoginDialog(OpenMeeting::SessionManager &session, QWidget *parent)
     });
     connect(_accountInput, &QLineEdit::textChanged, this, [this] { updateSavedSessionAction(); });
     connect(_serverUrlInput, &QLineEdit::textChanged, this, [this] {
+        _registrationServerUrlInput->setText(
+            _session.registrationServerBaseUrl(_serverUrlInput->text()));
         updateSavedSessionAction();
         updateEndpointOptions();
     });
@@ -178,15 +181,18 @@ void LoginDialog::initUI() {
     regLayout->setSpacing(10);
 
     _regAccountInput = new QLineEdit(regTab);
+    _regAccountInput->setObjectName("registerAccount");
     _regAccountInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Account or phone number"));
     regLayout->addWidget(_regAccountInput);
 
     _regNicknameInput = new QLineEdit(regTab);
+    _regNicknameInput->setObjectName("registerNickname");
     _regNicknameInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Display name"));
     regLayout->addWidget(_regNicknameInput);
 
     auto regPwdLayout = new QHBoxLayout();
     _regPasswordInput = new QLineEdit(regTab);
+    _regPasswordInput->setObjectName("registerPassword");
     _regPasswordInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Password (at least 6 characters)"));
     _regPasswordInput->setEchoMode(QLineEdit::Password);
     regPwdLayout->addWidget(_regPasswordInput);
@@ -199,6 +205,7 @@ void LoginDialog::initUI() {
     regLayout->addLayout(regPwdLayout);
 
     _regConfirmPwdInput = new QLineEdit(regTab);
+    _regConfirmPwdInput->setObjectName("registerConfirmPassword");
     _regConfirmPwdInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Confirm password"));
     _regConfirmPwdInput->setEchoMode(QLineEdit::Password);
     regLayout->addWidget(_regConfirmPwdInput);
@@ -262,20 +269,36 @@ void LoginDialog::initUI() {
     cardLayout->addLayout(advToggleLayout);
 
     _advancedWidget = new QWidget(card);
-    auto advLayout = new QHBoxLayout(_advancedWidget);
+    auto advLayout = new QGridLayout(_advancedWidget);
     advLayout->setContentsMargins(0, 2, 0, 2);
     advLayout->setSpacing(6);
-    auto advLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Server:"), _advancedWidget);
+    auto advLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Meeting service:"), _advancedWidget);
     MeetingUI::AppTheme::setStyleVariant(*advLabel, "login-dialog-advlabel");
     _serverUrlInput = new QLineEdit(_advancedWidget);
     _serverUrlInput->setPlaceholderText(QString::fromUtf8("https://api.example.com"));
-    advLayout->addWidget(advLabel);
-    advLayout->addWidget(_serverUrlInput);
+    advLayout->addWidget(advLabel, 0, 0);
+    advLayout->addWidget(_serverUrlInput, 0, 1);
+
+    auto registrationLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Registration service:"), _advancedWidget);
+    MeetingUI::AppTheme::setStyleVariant(*registrationLabel, "login-dialog-advlabel");
+    _registrationServerUrlInput = new QLineEdit(_advancedWidget);
+    _registrationServerUrlInput->setObjectName("registrationServerBaseUrl");
+    _registrationServerUrlInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Leave empty to use the default"));
+    advLayout->addWidget(registrationLabel, 1, 0);
+    advLayout->addWidget(_registrationServerUrlInput, 1, 1);
+    advLayout->setColumnStretch(1, 1);
+
+    auto registrationHint = new QLabel(QCoreApplication::translate("MeetingUI",
+        "Default registration port: 11022. You can set a separate service or reverse-proxy base URL."), _advancedWidget);
+    MeetingUI::AppTheme::setStyleVariant(*registrationHint, "login-dialog-advlabel");
+    registrationHint->setWordWrap(true);
+    advLayout->addWidget(registrationHint, 2, 0, 1, 2);
     _advancedWidget->setVisible(false);
     cardLayout->addWidget(_advancedWidget);
 
     // 错误/成功提示 Label（自适应换行，确保不会被卡片边缘截断）
     _errorLabel = new QLabel(card);
+    _errorLabel->setObjectName("loginStatus");
     MeetingUI::AppTheme::setStyleVariant(*_errorLabel, "login-dialog-errorlabel");
     _errorLabel->setAlignment(Qt::AlignCenter);
     _errorLabel->setWordWrap(true);
@@ -301,6 +324,7 @@ void LoginDialog::loadSavedData() {
     _autoLoginBox->setChecked(session.isAutoLogin());
     _autoLoginBox->setEnabled(session.isRememberSession());
     _serverUrlInput->setText(session.serverBaseUrl());
+    _registrationServerUrlInput->setText(session.registrationServerBaseUrl());
     _guestNicknameInput->setText(QCoreApplication::translate("MeetingUI", "Guest_%1").arg(QDateTime::currentDateTime().toString("mmss")));
     updateSavedSessionAction();
     updateEndpointOptions();
@@ -359,6 +383,7 @@ void LoginDialog::setLoading(bool loading, const QString &text) {
     _rememberBox->setEnabled(!loading && persistent);
     _autoLoginBox->setEnabled(!loading && persistent && _rememberBox->isChecked());
     _serverUrlInput->setEnabled(!loading);
+    _registrationServerUrlInput->setEnabled(!loading);
     _resumeBtn->setEnabled(!loading);
     _loginBtn->setEnabled(!loading);
     _guestBtn->setEnabled(!loading);
@@ -369,6 +394,7 @@ void LoginDialog::setLoading(bool loading, const QString &text) {
     if (_regNicknameInput) _regNicknameInput->setEnabled(!loading);
     if (_regPasswordInput) _regPasswordInput->setEnabled(!loading);
     if (_regConfirmPwdInput) _regConfirmPwdInput->setEnabled(!loading);
+    if (_toggleRegPwdBtn) _toggleRegPwdBtn->setEnabled(!loading);
 
     if (loading) {
         if (!text.isEmpty()) {
@@ -452,6 +478,14 @@ void LoginDialog::onRegisterClicked() {
             OpenMeeting::evaluateServiceEndpoint(serverUrl).status));
         return;
     }
+    const QString registrationUrl = _registrationServerUrlInput->text().trimmed();
+    if (!session.setRegistrationServerBaseUrl(registrationUrl)) {
+        showError(OpenMeeting::serviceEndpointErrorMessage(
+            OpenMeeting::evaluateServiceEndpoint(registrationUrl).status));
+        _registrationServerUrlInput->setFocus();
+        return;
+    }
+    _registrationServerUrlInput->setText(session.registrationServerBaseUrl());
 
     setLoading(true, QCoreApplication::translate("MeetingUI", "Creating account..."));
 
