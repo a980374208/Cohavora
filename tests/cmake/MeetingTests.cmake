@@ -274,6 +274,24 @@ target_include_directories(test_participant_window_remediation BEFORE PRIVATE
 )
 livekit_configure_qt_test(test_participant_window_remediation)
 target_compile_definitions(test_participant_window_remediation PRIVATE IDA2_WINDOW_ACCEPTANCE)
+# Entry ownership and capture/publication source identity use synthetic media;
+# keep this regression in the default suite without enabling device/GPU tests.
+add_test(NAME meeting_entry_media_contract_test
+    COMMAND test_participant_window_remediation --entry-media-contract)
+set_tests_properties(meeting_entry_media_contract_test PROPERTIES
+    TIMEOUT 30 LABELS "CORE_REGRESSION")
+add_test(NAME meeting_audio_preferences_test
+    COMMAND test_participant_window_remediation --audio-preferences-contract)
+set_tests_properties(meeting_audio_preferences_test PROPERTIES
+    TIMEOUT 30 LABELS "CORE_REGRESSION")
+add_test(NAME meeting_local_media_state_test
+    COMMAND test_participant_window_remediation --local-media-state)
+set_tests_properties(meeting_local_media_state_test PROPERTIES
+    TIMEOUT 30 LABELS "CORE_REGRESSION")
+add_test(NAME meeting_moderation_contract_test
+    COMMAND test_participant_window_remediation --moderation-contract)
+set_tests_properties(meeting_moderation_contract_test PROPERTIES
+    TIMEOUT 30 LABELS "CORE_REGRESSION")
 if(LIVEKIT_BUILD_RENDERER_RUNTIME_TESTS)
     add_test(NAME participant_window_remediation_test COMMAND test_participant_window_remediation)
     set_tests_properties(participant_window_remediation_test PROPERTIES

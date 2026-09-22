@@ -36,6 +36,9 @@ void VideoSource::addSink(FrameSink sink) {
 }
 
 void VideoSource::captureFrame(const VideoFrame& frame, const VideoCaptureOptions& options) {
+    if (frame.width() > 0 && frame.height() > 0 && frame.dataSize() > 0) {
+        captured_frame_count_.fetch_add(1, std::memory_order_relaxed);
+    }
     if (frame.width() > 0 && frame.height() > 0) {
         width_ = frame.width();
         height_ = frame.height();

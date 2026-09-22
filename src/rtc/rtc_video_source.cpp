@@ -4,8 +4,8 @@
 #include "api/video/i420_buffer.h"
 #include "api/video/video_frame.h"
 #include "api/video/video_rotation.h"
+#include "rtc_base/time_utils.h"
 #include <cstring>
-#include <chrono>
 #include <iostream>
 #include <atomic>
 #include <algorithm>
@@ -30,12 +30,35 @@ RtcVideoSource::~RtcVideoSource() {
     if (subscription_) subscription_->disconnect();
 }
 
+VideoFrameDiagnostics RtcVideoSource::frame_diagnostics() const noexcept {
+    VideoFrameDiagnostics result;
+    result.source_available = static_cast<bool>(lk_source_);
+    result.rtc_available = true;
+    if (lk_source_) result.source_frames = lk_source_->captured_frame_count();
+    result.rtc_input_frames = input_frames_.load(std::memory_order_relaxed);
+    result.rtc_output_frames = output_frames_.load(std::memory_order_relaxed);
+    result.rtc_dropped_frames = dropped_frames_.load(std::memory_order_relaxed);
+    return result;
+}
+
 void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOptions& options) {
+    input_frames_.fetch_add(1, std::memory_order_relaxed);
     int width = frame.width();
     int height = frame.height();
-    if (width <= 0 || height <= 0) {
+    if (width <= 0 || height <= 0 || frame.dataSize() == 0) {
+        dropped_frames_.fetch_add(1, std::memory_order_relaxed);
         return;
     }
+
+    // Match the native SDK's capture-clock -> WebRTC-clock alignment. Camera
+    // timestamps can be relative to a capture session and reset on restart.
+    // Mixing them with a system-clock fallback makes the encoder discard every
+    // subsequent frame as old after a reset or a missing capture timestamp.
+    const int64_t system_timestamp_us = webrtc::TimeMicros();
+    const int64_t capture_timestamp_us = options.timestamp_us > 0
+        ? options.timestamp_us : system_timestamp_us;
+    const int64_t timestamp_us = timestamp_aligner_.TranslateTimestamp(
+        capture_timestamp_us, system_timestamp_us);
 
     webrtc::scoped_refptr<webrtc::I420Buffer> i420_buffer = webrtc::I420Buffer::Create(width, height);
     
@@ -150,9 +173,6 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
     else if (options.rotation == VideoRotation::VIDEO_ROTATION_180) rtc_rotation = webrtc::kVideoRotation_180;
     else if (options.rotation == VideoRotation::VIDEO_ROTATION_270) rtc_rotation = webrtc::kVideoRotation_270;
 
-    int64_t timestamp_us = options.timestamp_us > 0 ? options.timestamp_us : (std::chrono::duration_cast<std::chrono::microseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count());
-
     webrtc::VideoFrame rtc_frame = webrtc::VideoFrame::Builder()
                                        .set_video_frame_buffer(i420_buffer)
                                        .set_rotation(rtc_rotation)
@@ -160,6 +180,8 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
                                        .build();
 
     Telemetry::Instance().OnFirstVideoFrameInjected();
+    // This counts API submissions, even when the bridge has no encoder sink.
+    output_frames_.fetch_add(1, std::memory_order_relaxed);
     OnFrame(rtc_frame);
 }
 

@@ -394,7 +394,7 @@ void verifyDevelopmentPolicy() {
         });
     waitFor([&] { return registered == 1; });
     TEST_CHECK(registration.requests() == 1);
-    TEST_CHECK(registration.path() == "/api/user/register");
+    TEST_CHECK(registration.path() == "/api/admin/user/register");
 
     SingleResponseServer redirectTarget(200, success);
     SingleResponseServer redirect(302, success, redirectTarget.url("/leak").toUtf8());
@@ -445,6 +445,19 @@ void verifyStrictDispatchAndStorage() {
     waitFor([&] { return callbacks == 2; });
     TEST_CHECK(!server.hasPendingConnections());
     TEST_CHECK(loggedIn == 0 && client.token() == "old-token");
+
+    // An explicitly configured registration service obeys the same transport
+    // policy even when the meeting service itself uses HTTPS.
+    OpenMeetingHttpClient registrationClient;
+    registrationClient.setBaseUrl("https://example.invalid/api");
+    int registrationBlocked = 0;
+    registrationClient.registerUser("account", "password", "name",
+        [&](bool ok, const UserInfo &, const HttpError &error) {
+            TEST_CHECK(!ok && error.code == static_cast<int>(ErrorCode::InsecureTransport));
+            ++registrationBlocked;
+        }, httpUrl);
+    waitFor([&] { return registrationBlocked == 1; });
+    TEST_CHECK(!server.hasPendingConnections());
 
     QTemporaryDir directory;
     TEST_CHECK(directory.isValid());

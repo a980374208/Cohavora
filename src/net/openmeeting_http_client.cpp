@@ -73,12 +73,21 @@ void OpenMeetingHttpClient::sendPost(
     const QJsonObject &body,
     std::function<void(bool ok, const QJsonValue &data, const HttpError &err)> cb,
     bool authenticated) {
+    sendPostToEndpoint(_baseUrl, path, body, std::move(cb), authenticated);
+}
+
+void OpenMeetingHttpClient::sendPostToEndpoint(
+    const QString &endpointBaseUrl,
+    const QString &path,
+    const QJsonObject &body,
+    std::function<void(bool ok, const QJsonValue &data, const HttpError &err)> cb,
+    bool authenticated) {
 
     const auto opId = QString::number(QDateTime::currentMSecsSinceEpoch());
-    const auto basePolicy = evaluateServiceEndpoint(_baseUrl);
+    const auto basePolicy = evaluateServiceEndpoint(endpointBaseUrl);
     const bool internalPath = path.startsWith('/') && !path.startsWith("//") &&
         !path.contains('?') && !path.contains('#');
-    const QString fullUrl = internalPath ? _baseUrl + path : QString();
+    const QString fullUrl = internalPath ? basePolicy.canonicalUrl + path : QString();
     const auto requestPolicy = evaluateServiceEndpoint(fullUrl);
     const QUrl baseUrl(basePolicy.canonicalUrl, QUrl::StrictMode);
     const QUrl targetUrl(requestPolicy.canonicalUrl, QUrl::StrictMode);
@@ -287,13 +296,17 @@ void OpenMeetingHttpClient::requestLogin(const QString &account, const QString &
     }, false);
 }
 
-void OpenMeetingHttpClient::registerUser(const QString &account, const QString &password, const QString &nickname, ResultCallback<UserInfo> callback) {
+void OpenMeetingHttpClient::registerUser(const QString &account, const QString &password,
+        const QString &nickname, ResultCallback<UserInfo> callback, const QString &registrationBaseUrl) {
     QJsonObject body;
     body["account"] = account;
     body["password"] = password;
     body["nickname"] = nickname.isEmpty() ? account : nickname;
 
-    sendPost("/user/register", body, [callback](bool ok, const QJsonValue &data, const HttpError &err) {
+    // /user/register only imports meeting identities; it does not store account passwords.
+    // Keep registration anonymous and leave the meeting/login endpoint and its auth state intact.
+    sendPostToEndpoint(registrationBaseUrl.isEmpty() ? _baseUrl : registrationBaseUrl,
+        "/admin/user/register", body, [callback](bool ok, const QJsonValue &data, const HttpError &err) {
         if (!ok) {
             if (callback) callback(false, UserInfo{}, err);
             return;

@@ -278,6 +278,8 @@ public:
 
 	void setSpeakerMuted(bool muted);
 	bool isSpeakerMuted() const { return _speakerMuted; }
+	void setSpeakerDeviceId(const QString &deviceId) { _currentSpeakerId = deviceId; }
+	void setMicrophoneDeviceId(const QString &deviceId) { _currentMicId = deviceId; }
 
 	void setVideoEnabled(bool enabled);
 	bool isVideoEnabled() const { return _videoEnabled; }
@@ -303,7 +305,7 @@ public:
 	rpl::producer<> endMeetingClicked() const { return _endMeetingStream.events(); }
 	rpl::producer<QString> sendChatRequested() const { return _sendChatStream.events(); }
 	rpl::producer<QString> microphoneDeviceChanged() const { return _micDeviceStream.events(); }
-	rpl::producer<int> speakerDeviceChanged() const { return _speakerDeviceStream.events(); }
+	rpl::producer<QString> speakerDeviceChanged() const { return _speakerDeviceStream.events(); }
 	rpl::producer<QString> videoDeviceChanged() const { return _videoDeviceStream.events(); }
 	rpl::producer<livekit::SimulateScenarioType> simulateScenarioRequested() const { return _simulateScenarioStream.events(); }
 
@@ -325,6 +327,7 @@ protected:
 private:
 	friend class ::CameraOwnerTestAccess;
 	friend class ::ParticipantWindowTestAccess;
+	void appendSpeakerDeviceActions(QMenu &menu);
 	bool canStopScreenShare() const {
 		using State = livekit::ScreenShareState;
 		return _screenShareState == State::Starting || _screenShareState == State::Active ||
@@ -355,7 +358,7 @@ private:
 	bool _endHovered = false;
 
 	QString _currentMicId;
-	int _currentSpeakerIndex = 0;
+	QString _currentSpeakerId;
 
 	rpl::event_stream<bool> _toggleAudioStream;
 	rpl::event_stream<bool> _toggleSpeakerStream;
@@ -368,7 +371,7 @@ private:
 	rpl::event_stream<> _endMeetingStream;
 	rpl::event_stream<QString> _sendChatStream;
 	rpl::event_stream<QString> _micDeviceStream;
-	rpl::event_stream<int> _speakerDeviceStream;
+	rpl::event_stream<QString> _speakerDeviceStream;
 	rpl::event_stream<QString> _videoDeviceStream;
 	rpl::event_stream<livekit::SimulateScenarioType> _simulateScenarioStream;
 	QString _currentCameraPath;
@@ -394,6 +397,8 @@ public:
 		InvitationMode invitationMode = InvitationMode::Disabled;
 	};
 
+	// Prepares capture and presentation only. The entry owner must explicitly
+	// start admission through the coordinator after constructing the window.
 	explicit MeetingRoomWindow(const Config &config,
 	                           std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator = nullptr,
 	                           QWidget *parent = nullptr);
@@ -502,6 +507,12 @@ private:
 	void applyRemoteParticipantJoined(const QString &identity, const QString &name,
 		const OpenMeeting::ParticipantPresentation *presentation);
 	void setupCameraCompletionOwner(OpenMeeting::SessionManager &sessionManager);
+	void setupAudioPreferencesBinding(OpenMeeting::SessionManager &sessionManager);
+	void applyAudioProcessingPreferences(const OpenMeeting::MediaPreferences &preferences);
+	bool selectSpeakerDevice(const QString &deviceId);
+	void applyMicrophoneAvailability(bool available);
+	void bindMicrophoneCaptureState();
+	void setSpeakerOutputMuted(bool muted);
 	void bindCameraDeviceChanges();
 	void requestCameraSwitch(const QString &devicePath);
 	void handleCameraSwitchResult(
@@ -511,7 +522,8 @@ private:
 		const std::string &error);
 	void invalidateCameraCompletion();
 	void stopCameraCapture();
-	void startLiveKitSession();
+	void bindLocalMediaSources();
+	void attachCoordinatorSession();
 	void stopLiveKitSession();
 
 	std::shared_ptr<OpenMeeting::MeetingCoordinator> _coordinator;
@@ -589,6 +601,8 @@ private:
 
 	// 本地麦克风采集
 	std::shared_ptr<livekit::WasapiAudioCapture> _wasapiCap;
+	bool _microphoneAvailable = false;
+	bool _speakerAvailable = false;
 
 	// LiveKit 异步通信核心
 	std::unique_ptr<asio::io_context> _ioContext;

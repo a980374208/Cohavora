@@ -98,7 +98,7 @@ using OpenMeeting::SessionInvalidationReason;
 using OpenMeeting::SessionManager;
 using OpenMeeting::SessionManagerTestAccess;
 
-constexpr int kPlannedCases = 86;
+constexpr int kPlannedCases = 89;
 int gExecutedCases = 0;
 int gPassedCases = 0;
 
@@ -400,6 +400,68 @@ void VerifyNormalFlows() {
         TEST_CHECK(fixture.startedUrls.back() == "wss://direct");
         TEST_CHECK(fixture.coordinator->currentMeetingId() == "direct-id");
     });
+}
+
+void VerifyEntryMediaAvailability() {
+    for (const auto entry : {QStringLiteral("Join"), QStringLiteral("Quick"),
+                            QStringLiteral("Direct")}) {
+        RunCase(entry + " preserves unavailable media and user intent", [entry] {
+            Fixture fixture;
+            auto &coordinator = *fixture.coordinator;
+            // A window may discover missing devices before its sole explicit
+            // entry call applies the saved preferences.
+            coordinator.setLocalAudioMuted(true);
+            coordinator.setLocalVideoEnabled(false);
+            coordinator.setLocalAudioAvailable(false);
+            coordinator.setLocalVideoAvailable(false);
+            const auto check = [&](bool muted, bool videoEnabled) {
+                TEST_CHECK(coordinator.isLocalAudioMuted() == muted);
+                TEST_CHECK(coordinator.isLocalVideoEnabled() == videoEnabled);
+                bool foundLocal = false;
+                for (const auto &participant : coordinator.participants()) {
+                    if (!participant.isLocal) continue;
+                    foundLocal = true;
+                    TEST_CHECK(participant.isAudioMuted == muted);
+                    TEST_CHECK(participant.isVideoEnabled == videoEnabled);
+                }
+                TEST_CHECK(foundLocal);
+            };
+            MediaPreferences preferences;
+            preferences.enableMicrophone = true;
+            preferences.enableVideo = true;
+            if (entry == QStringLiteral("Join")) {
+                coordinator.joinMeetingAsync("media-entry", {}, "Media User", preferences);
+                check(true, false);
+                fixture.backend.completeJoin(0, true);
+                check(true, false);
+                fixture.backend.completeToken(0, true, "media-entry");
+            } else if (entry == QStringLiteral("Quick")) {
+                coordinator.createAndJoinQuickMeetingAsync("Media Entry", 900, preferences);
+                check(true, false);
+                fixture.backend.completeCreate(0, true, "media-entry");
+            } else {
+                coordinator.connectDirectlyAsync("wss://fixture.invalid", "fixture-token",
+                                                  "media-entry", "Media User", preferences);
+            }
+            TEST_CHECK(fixture.starts == 1);
+            TEST_CHECK(!MeetingCoordinatorTestAccess::hasRoomArtifacts(coordinator));
+            check(true, false);
+
+            // Entry resets intent to preferences without overriding readiness;
+            // recovery can now honor the requested enable state.
+            coordinator.setLocalAudioAvailable(true);
+            coordinator.setLocalVideoAvailable(true);
+            check(false, true);
+            coordinator.setLocalAudioAvailable(false);
+            coordinator.setLocalVideoAvailable(false);
+            coordinator.setLocalAudioMuted(true);
+            coordinator.setLocalVideoEnabled(false);
+            coordinator.setLocalAudioAvailable(true);
+            coordinator.setLocalVideoAvailable(true);
+            check(true, false);
+            TEST_CHECK(fixture.starts == 1);
+        });
+    }
 }
 
 void VerifyErrors() {
@@ -1184,6 +1246,7 @@ void VerifyApplicationMeetingEntryGuard() {
 void RunFullMatrix() {
     VerifyApplicationMeetingEntryGuard();
     VerifyNormalFlows();
+    VerifyEntryMediaAvailability();
     VerifyErrors();
     VerifyLeaveAndDestroy();
     VerifyReplacementOrdering();

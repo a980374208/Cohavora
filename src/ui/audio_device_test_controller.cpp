@@ -264,10 +264,8 @@ ToneResult PlayTone(
 
 	ComPtr<IMMDevice> device;
 	if (deviceId.isEmpty()) {
-		result = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device);
-		if (FAILED(result) || !device) {
-			result = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
-		}
+		// Match WebRTC ADM kDefaultDevice (the Windows console/playback role).
+		result = enumerator->GetDefaultAudioEndpoint(eRender, eConsole, &device);
 	} else {
 		const auto wideId = Utf8ToWide(deviceId);
 		result = enumerator->GetDevice(wideId.c_str(), &device);

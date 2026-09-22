@@ -2,6 +2,8 @@
 #include "screen_share_session.h"
 #include "room.h"
 #include "rtc_video_source.h"
+#include "stats_collector.h"
+#include "rtc_base/time_utils.h"
 #include "livekit_rtc.pb.h"
 #include <atomic>
 #include <iostream>
@@ -312,24 +314,122 @@ struct Sink : webrtc::VideoSinkInterface<webrtc::VideoFrame> {
         width = frame.width(); height = frame.height(); ++frames;
     }
 };
+
+void FrameTimestampAlignment() {
+    // Run before any WebRTC worker threads start: SetClockForTesting is global.
+    class CaptureClock final : public webrtc::ClockInterface {
+    public:
+        CaptureClock() : previous_(webrtc::SetClockForTesting(this)) {}
+        ~CaptureClock() override { webrtc::SetClockForTesting(previous_); }
+        int64_t TimeNanos() const override { return now_us * 1000; }
+        int64_t now_us = 50'000'000;
+    private:
+        webrtc::ClockInterface* previous_;
+    } clock;
+
+    struct TimestampSink final : webrtc::VideoSinkInterface<webrtc::VideoFrame> {
+        std::vector<int64_t> timestamps;
+        std::vector<int64_t> render_times;
+        void OnFrame(const webrtc::VideoFrame& frame) override {
+            TEST_CHECK(frame.width() == 8 && frame.height() == 8);
+            timestamps.push_back(frame.timestamp_us());
+            render_times.push_back(frame.render_time_ms());
+        }
+    } sink;
+
+    const auto frame = livekit::VideoFrame::create(8, 8, livekit::VideoBufferType::I420);
+    for (bool screencast : {false, true}) {
+        sink.timestamps.clear();
+        sink.render_times.clear();
+        auto source = std::make_shared<livekit::VideoSource>(8, 8);
+        auto rtc = livekit::RtcVideoSource::Create(source, screencast);
+        auto* bridge = static_cast<webrtc::VideoTrackSourceInterface*>(rtc.get());
+        bridge->AddOrUpdateSink(&sink, webrtc::VideoSinkWants{});
+        const int64_t first_system_time = clock.now_us;
+        const auto push = [&](int64_t capture_time) {
+            source->captureFrame(frame, capture_time);
+            TEST_CHECK(!sink.timestamps.empty());
+            TEST_CHECK(sink.timestamps.back() >= first_system_time);
+            TEST_CHECK(sink.timestamps.back() <= clock.now_us);
+            if (sink.render_times.size() > 1) {
+                // VideoStreamEncoder rejects equal/older capture NTP values;
+                // these derive from render_time_ms plus a constant offset.
+                TEST_CHECK(sink.render_times.back() >
+                    sink.render_times[sink.render_times.size() - 2]);
+            }
+            clock.now_us += 33'333;
+        };
+
+        push(30'000'000); // DirectShow relative capture clock.
+        push(30'033'333);
+        push(0); // Missing timestamp must not poison following relative frames.
+        push(clock.now_us); // A source that supplies system timestamps.
+        push(33'333); // Capture restart resets its relative clock.
+        push(66'666);
+        push(100'000);
+        TEST_CHECK(sink.timestamps.size() == 7);
+        bridge->RemoveSink(&sink);
+    }
+}
+
 void FrameBridgeLifetime() {
     auto source = std::make_shared<livekit::VideoSource>(1920, 1080);
+    const auto frame = livekit::VideoFrame::create(1920, 1080, livekit::VideoBufferType::I420);
+    source->captureFrame(frame); // Capture can run before a publication exists.
+    auto fallback = std::make_shared<livekit::LocalVideoTrack>("TR_FALLBACK", "fallback", source);
+    const auto fallback_stats = fallback->frame_diagnostics();
+    TEST_CHECK(fallback_stats.source_available && !fallback_stats.rtc_available);
+    TEST_CHECK(fallback_stats.source_frames == 1);
     auto rtc = livekit::RtcVideoSource::Create(source, true);
     TEST_CHECK(rtc->is_screencast());
+    TEST_CHECK(rtc->frame_diagnostics().rtc_input_frames == 0);
     Sink sink;
     static_cast<webrtc::VideoTrackSourceInterface*>(rtc.get())->AddOrUpdateSink(&sink, webrtc::VideoSinkWants{});
-    const auto frame = livekit::VideoFrame::create(1920, 1080, livekit::VideoBufferType::I420);
     source->captureFrame(frame);
     TEST_CHECK(sink.width == 1920 && sink.height == 1080 && sink.frames == 1);
+    auto stats = rtc->frame_diagnostics();
+    TEST_CHECK(stats.source_available && stats.rtc_available);
+    TEST_CHECK(stats.source_frames == 2 && stats.rtc_input_frames == 1);
+    TEST_CHECK(stats.rtc_output_frames == 1 && stats.rtc_dropped_frames == 0);
+
+    source->captureFrame(livekit::VideoFrame{});
+    stats = rtc->frame_diagnostics();
+    TEST_CHECK(stats.source_frames == 2 && stats.rtc_input_frames == 2);
+    TEST_CHECK(stats.rtc_output_frames == 1 && stats.rtc_dropped_frames == 1);
+    TEST_CHECK(sink.frames == 1);
+
+    // A shared source is counted once; each bridge counts its own submissions.
+    // The second bridge has no sink, so output cannot be read as encoded frames.
+    auto second = livekit::RtcVideoSource::Create(source, true);
+    source->captureFrame(frame);
+    stats = rtc->frame_diagnostics();
+    const auto second_stats = second->frame_diagnostics();
+    TEST_CHECK(stats.source_frames == 3 && second_stats.source_frames == 3);
+    TEST_CHECK(stats.rtc_input_frames == 3 && stats.rtc_output_frames == 2);
+    TEST_CHECK(second_stats.rtc_input_frames == 1 && second_stats.rtc_output_frames == 1);
+    TEST_CHECK(sink.frames == 2);
+    second = nullptr;
     static_cast<webrtc::VideoTrackSourceInterface*>(rtc.get())->RemoveSink(&sink);
     rtc = nullptr;
     source->captureFrame(frame); // retained source must not call a destroyed RTC adapter
+    TEST_CHECK(source->captured_frame_count() == 4 && sink.frames == 2);
     auto camera = livekit::RtcVideoSource::Create(source);
     TEST_CHECK(!camera->is_screencast());
+    TEST_CHECK(camera->frame_diagnostics().rtc_input_frames == 0);
     static_cast<webrtc::VideoTrackSourceInterface*>(camera.get())->AddOrUpdateSink(&sink, webrtc::VideoSinkWants{});
     source->captureFrame(frame);
-    TEST_CHECK(sink.width == 1920 && sink.height == 1080 && sink.frames == 2);
+    TEST_CHECK(sink.width == 1920 && sink.height == 1080 && sink.frames == 3);
+    stats = camera->frame_diagnostics();
+    TEST_CHECK(stats.source_frames == 5 && stats.rtc_input_frames == 1);
+    TEST_CHECK(stats.rtc_output_frames == 1 && stats.rtc_dropped_frames == 0);
     static_cast<webrtc::VideoTrackSourceInterface*>(camera.get())->RemoveSink(&sink);
+    // Delayed RTC initialization must expose the same bridge counters.
+    fallback->set_rtc_source_for_diagnostics(camera);
+    const auto bound_stats = fallback->frame_diagnostics();
+    TEST_CHECK(bound_stats.rtc_available && bound_stats.source_frames == 5);
+    TEST_CHECK(bound_stats.rtc_input_frames == 1 && bound_stats.rtc_output_frames == 1);
+    fallback->set_rtc_source_for_diagnostics(nullptr);
+    TEST_CHECK(!fallback->frame_diagnostics().rtc_available);
 }
 
 void InFlightFrameTeardown() {
@@ -350,6 +450,10 @@ void InFlightFrameTeardown() {
     auto frame = livekit::VideoFrame::create(8, 8, livekit::VideoBufferType::I420);
     std::thread producer([&] { source->captureFrame(frame); });
     TEST_CHECK(entered.wait_for(2s) == std::future_status::ready);
+    // Reading counters must not wait for the in-flight sink to return.
+    const auto pending_stats = rtc->frame_diagnostics();
+    TEST_CHECK(pending_stats.source_frames == 1 && pending_stats.rtc_input_frames == 1);
+    TEST_CHECK(pending_stats.rtc_output_frames == 1 && pending_stats.rtc_dropped_frames == 0);
     std::promise<void> destroying, destroyed;
     auto starting = destroying.get_future();
     auto finished = destroyed.get_future();
@@ -420,6 +524,11 @@ void DynacastPublicationIsolation() {
     const auto add = [&](const char* name, const char* rid, const char* sid, livekit::TrackSource source) {
         auto track = livekit::LocalVideoTrack::createLocalVideoTrack(name,
             std::make_shared<livekit::VideoSource>(320, 180), source);
+        track->source()->captureFrame(livekit::VideoFrame::create(320, 180, livekit::VideoBufferType::I420));
+        const auto frame_stats = track->frame_diagnostics();
+        TEST_CHECK(frame_stats.source_available && frame_stats.rtc_available);
+        TEST_CHECK(frame_stats.source_frames == 1 && frame_stats.rtc_input_frames == 1);
+        TEST_CHECK(frame_stats.rtc_output_frames == 1 && frame_stats.rtc_dropped_frames == 0);
         local->add_publication(std::make_shared<livekit::TrackPublication>(track, sid, name));
         webrtc::RtpTransceiverInit init;
         init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
@@ -433,8 +542,15 @@ void DynacastPublicationIsolation() {
     auto camera = add("quality-camera", "q", "TR_QUALITY_CAMERA", livekit::TrackSource::Camera);
     auto screen = add("quality-screen", "h", "TR_QUALITY_SCREEN", livekit::TrackSource::ScreenShareVideo);
     asio::io_context io;
+    int failed_layer_updates = 0;
     auto room = livekit::Room::Create(io.get_executor());
     livekit::RoomUnpublishTestAccess::InstallPublisher(*room, local, publisher);
+    room->SetLogHandler([&](const std::string&, const std::string& tag, const std::string& message) {
+        if (tag == "LAYER_UPDATE_FAILED") {
+            ++failed_layer_updates;
+            std::cerr << tag << ": " << message << '\n';
+        }
+    });
     const auto update = [&](const char* sid, bool low, bool medium, bool high) {
         livekit::proto::SignalResponse message;
         auto* quality = message.mutable_subscribed_quality_update();
@@ -454,12 +570,55 @@ void DynacastPublicationIsolation() {
     TEST_CHECK(!screen->GetParameters().encodings.front().active);
     update("TR_RETIRED", false, false, false);
     TEST_CHECK(camera->GetParameters().encodings.front().active);
+
+    // Keep production diagnostic reads queued while Dynacast performs its
+    // read/modify/write. GetParameters refreshes the sender transaction ID, so
+    // another diagnostic must not run between a quality update's Get and Set.
+    struct StatsPump {
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer;
+        webrtc::Thread* signaling;
+        bool running = true; // Only accessed on signaling.
+        size_t requests = 0;
+
+        void Step() {
+            if (!running) return;
+            if (livekit::RequestRtcStats(peer, std::make_shared<livekit::RtcStatsState>())) {
+                ++requests;
+            }
+            signaling->PostTask([pump = this] { pump->Step(); });
+        }
+        void Stop() {
+            signaling->BlockingCall([this] { running = false; });
+            // Drain the final queued Step and stats request before releasing
+            // the stack-owned pump. Stats callbacks retain only their DTO state.
+            signaling->BlockingCall([] {});
+        }
+    } pump{publisher, livekit::WebRTCManager::Instance().signaling_thread()};
+    pump.signaling->PostTask([pump_ptr = &pump] { pump_ptr->Step(); });
+    for (int iteration = 0; iteration < 24; ++iteration) {
+        const bool active = iteration % 2 == 0;
+        // WebRTC may normalize a single encoding's RID to empty (LOW).
+        // Toggle every quality for this publication, preserving the camera.
+        update("TR_QUALITY_SCREEN", active, active, active);
+        const auto encoding = screen->GetParameters().encodings.front();
+        if (encoding.active != active) {
+            std::cerr << "Dynacast iteration=" << iteration << ", rid=" << encoding.rid
+                      << ", expected_active=" << active << ", actual_active=" << encoding.active << '\n';
+        }
+        TEST_CHECK(encoding.active == active);
+        TEST_CHECK(camera->GetParameters().encodings.front().active);
+    }
+    pump.Stop();
+    TEST_CHECK(pump.requests > 0);
+    TEST_CHECK(failed_layer_updates == 0);
+    pump.peer = nullptr;
     room->Disconnect();
     io.run();
 }
 }
 
 int main() {
+    FrameTimestampAlignment();
     NormalAndRepeat();
     ScreenBindingLifecycle();
     CancelPublishAndLeave();

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace livekit::secure_log {
 
@@ -17,6 +18,8 @@ std::string ErrorCodeSummary(std::string_view stage,
                              std::string_view category);
 std::string ExceptionSummary(std::string_view stage);
 std::string SdpSummary(std::string_view kind, std::string_view sdp);
+std::vector<std::string> SdpNegotiationDetails(std::string_view kind,
+                                               std::string_view sdp);
 
 // Final defensive boundary for trusted templates. Dynamic network payloads and
 // exception text must be summarized at their source before reaching this API.

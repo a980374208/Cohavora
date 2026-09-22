@@ -42,8 +42,10 @@ public:
     // 被后续认证操作、配置更改或信号重入替代的登录返回失败。
     void login(const QString &account, const QString &password, ResultCallback<UserInfo> callback);
 
-    // 1.1 注册
-    void registerUser(const QString &account, const QString &password, const QString &nickname, ResultCallback<UserInfo> callback);
+    // Account registration uses the separate account service (or a shared gateway).
+    // Success does not authenticate the client; the service may return null data.
+    void registerUser(const QString &account, const QString &password, const QString &nickname,
+                      ResultCallback<UserInfo> callback, const QString &registrationBaseUrl = {});
 
     // 2. 登出：响应到达时清理本次会话（包括服务端失败），发出 userLoggedOut。
     // 不清理已替换的会话；callback 始终报告本次服务端请求结果。
@@ -95,6 +97,11 @@ private:
                   const QJsonObject &body,
                   std::function<void(bool ok, const QJsonValue &data, const HttpError &err)> cb,
                   bool authenticated = true);
+    void sendPostToEndpoint(const QString &endpointBaseUrl,
+                            const QString &path,
+                            const QJsonObject &body,
+                            std::function<void(bool ok, const QJsonValue &data, const HttpError &err)> cb,
+                            bool authenticated);
 
     QString _baseUrl;
     QString _token;

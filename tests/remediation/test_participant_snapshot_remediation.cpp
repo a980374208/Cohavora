@@ -49,6 +49,7 @@ void RunOpenGlContract();
 #include <QtCore/QStandardPaths>
 #include <QtCore/QTemporaryDir>
 #include <QtCore/QThread>
+#include <QtCore/QTimer>
 #include <QtCore/QMimeData>
 #include <QtGui/QClipboard>
 #include <QtPlugin>
@@ -98,6 +99,26 @@ public:
     static std::shared_ptr<MeetingCoordinator> create(SessionManager &session) {
         return std::shared_ptr<MeetingCoordinator>(new MeetingCoordinator(session, {}, nullptr));
     }
+    static void setRoomStartHook(MeetingCoordinator &owner,
+            std::function<void(const QString &, const QString &)> hook) {
+        owner._roomStartHook = std::move(hook);
+    }
+    static void establishLocalMediaSession(MeetingCoordinator &owner, asio::io_context &io,
+            std::shared_ptr<livekit::LocalAudioTrack> audio,
+            std::shared_ptr<livekit::LocalVideoTrack> video) {
+        owner._sessionRuntime = std::make_shared<MeetingSessionRuntime>(
+            io, ++owner._nextSessionGeneration, QStringLiteral("entry-local-user"));
+        owner._room = livekit::Room::Create(io.get_executor());
+        owner._localAudioTrack = std::move(audio);
+        owner._localVideoTrack = std::move(video);
+        owner._sessionRunning.store(true, std::memory_order_release);
+    }
+    static uint64_t sessionGeneration(const MeetingCoordinator &owner) {
+        return owner._nextSessionGeneration;
+    }
+    static bool sessionRunning(const MeetingCoordinator &owner) {
+        return owner._sessionRunning.load(std::memory_order_acquire);
+    }
     static std::shared_ptr<livekit::RoomListener> bind(MeetingCoordinator &owner,
         const std::shared_ptr<livekit::Room> &room, const std::shared_ptr<MeetingSessionRuntime> &runtime) {
         owner._room = room;
@@ -115,6 +136,14 @@ public:
     static void commitLocalStartupPrecondition(MeetingCoordinator &owner) {
         owner._startupCommitted = true;
         owner.setState(MeetingState::InMeeting);
+    }
+    static void installLocalTracks(MeetingCoordinator &owner,
+            std::shared_ptr<livekit::LocalAudioTrack> audio,
+            std::shared_ptr<livekit::LocalVideoTrack> video) {
+        owner._localAudioTrack = std::move(audio);
+        owner._localVideoTrack = std::move(video);
+        owner._startupCommitted = true;
+        owner.ensureLocalParticipant();
     }
     static void setMeetingState(MeetingCoordinator &owner, MeetingState state) {
         owner.setState(state);
@@ -181,6 +210,42 @@ public:
 
 class ParticipantWindowTestAccess final {
 public:
+    static void captureAvailability(MeetingUI::MeetingRoomWindow &window, bool available) {
+        window.applyMicrophoneAvailability(available);
+        window._usingRealCamera = available;
+        window._coordinator->setLocalVideoAvailable(available);
+    }
+    static void checkLocalMediaUi(const MeetingUI::MeetingRoomWindow &window,
+            bool muted, bool video) {
+        TEST_CHECK(window._bottomBar->isAudioMuted() == muted);
+        TEST_CHECK(window._localTile->isAudioMuted() == muted);
+        TEST_CHECK(window._bottomBar->isVideoEnabled() == video);
+        TEST_CHECK(window._localTile->isVideoActive() == video);
+    }
+    static void checkFailedSpeaker(MeetingUI::MeetingRoomWindow &window) {
+        // This fixture never initializes the native ADM: selection/start fails.
+        TEST_CHECK(!window.selectSpeakerDevice("unavailable-output-for-test"));
+        TEST_CHECK(window._bottomBar->isSpeakerMuted());
+    }
+    static std::shared_ptr<livekit::AudioApmProcessor> bindAudioPreferences(
+            MeetingUI::MeetingRoomWindow &window, OpenMeeting::SessionManager &session) {
+        window._wasapiCap = livekit::WasapiAudioCapture::Create();
+        window._wasapiCap->EnableApm();
+        window.setupAudioPreferencesBinding(session);
+        return window._wasapiCap->apm_processor();
+    }
+    static std::shared_ptr<livekit::AudioApmProcessor> audioProcessor(
+            const MeetingUI::MeetingRoomWindow &window) {
+        return window._wasapiCap->apm_processor();
+    }
+    static std::shared_ptr<livekit::AudioSource> audioSource(
+            const MeetingUI::MeetingRoomWindow &window) {
+        return window._localAudioSource;
+    }
+    static std::shared_ptr<livekit::VideoSource> videoSource(
+            const MeetingUI::MeetingRoomWindow &window) {
+        return window._localVideoSource;
+    }
     static void clickWhiteboard(MeetingUI::MeetingRoomWindow &window) {
         auto *bar = window._bottomBar;
         QResizeEvent resized(bar->size(), bar->size());
@@ -1426,6 +1491,413 @@ void CheckWindowPeer(WindowFixture &fixture, const QString &name) {
     TEST_CHECK(tile && tile->identity() == "window-peer" && tile->displayName() == name);
     const auto stats = ParticipantWindowTestAccess::statistics(*fixture.window);
     TEST_CHECK(stats.attached_track_count == 1 && stats.backend == livekit::render::VideoRenderSession::Backend::QtCpu);
+}
+
+void MeetingAudioPreferencesContract() {
+    QTemporaryDir directory;
+    TEST_CHECK(directory.isValid());
+    OpenMeeting::OpenMeetingHttpClient http;
+    auto session = OpenMeeting::SessionManagerTestAccess::create(
+        std::make_unique<QSettings>(directory.filePath("audio.ini"), QSettings::IniFormat), &http);
+    auto preferences = session->mediaPreferences();
+    preferences.echoCancellation = false;
+    preferences.autoGainControl = false;
+    session->setMediaPreferences(preferences);
+    auto coordinator = OpenMeeting::MeetingCoordinatorTestAccess::create(*session);
+    auto window = ParticipantWindowTestAccess::create(coordinator);
+    const auto processor = ParticipantWindowTestAccess::bindAudioPreferences(*window, *session);
+    TEST_CHECK(!processor->GetConfig().enable_aec && processor->GetConfig().enable_ans
+        && !processor->GetConfig().enable_agc);
+    auto frame = livekit::AudioFrame::create(48000, 1, 480);
+    std::fill(frame.data().begin(), frame.data().end(), int16_t(512));
+    for (int mask = 0; mask != 8; ++mask) {
+        preferences.echoCancellation = (mask & 1) != 0;
+        preferences.noiseSuppression = (mask & 2) != 0;
+        preferences.autoGainControl = (mask & 4) != 0;
+        session->setMediaPreferences(preferences);
+        const auto config = processor->GetConfig();
+        TEST_CHECK(config.enable_aec == preferences.echoCancellation);
+        TEST_CHECK(config.enable_ans == preferences.noiseSuppression);
+        TEST_CHECK(config.enable_agc == preferences.autoGainControl);
+        TEST_CHECK(ParticipantWindowTestAccess::audioProcessor(*window) == processor);
+        processor->Reset(); // Device changes must preserve all three choices.
+        const auto afterReset = processor->GetConfig();
+        TEST_CHECK(afterReset.enable_aec == config.enable_aec
+            && afterReset.enable_ans == config.enable_ans
+            && afterReset.enable_agc == config.enable_agc);
+        const auto renders = processor->GetRenderFramesProcessed();
+        processor->ProcessRenderFrame(frame);
+        TEST_CHECK(processor->GetRenderFramesProcessed() == renders + (config.enable_aec ? 1 : 0));
+        TEST_CHECK(processor->HasActiveRenderReference() == config.enable_aec);
+        const auto captures = processor->GetCaptureFramesProcessed();
+        TEST_CHECK(processor->ProcessCaptureFrame(frame).data().size() == frame.data().size());
+        TEST_CHECK(processor->GetCaptureFramesProcessed() == captures + 1);
+    }
+    // Re-enabling AEC cannot reuse a reference buffered before it was disabled.
+    preferences.echoCancellation = false;
+    session->setMediaPreferences(preferences);
+    TEST_CHECK(!processor->HasActiveRenderReference());
+    preferences.echoCancellation = true;
+    session->setMediaPreferences(preferences);
+    TEST_CHECK(!processor->HasActiveRenderReference());
+    processor->ProcessRenderFrame(frame);
+    TEST_CHECK(processor->HasActiveRenderReference());
+    QObject::disconnect(coordinator.get(), nullptr, window.get(), nullptr);
+    window.reset();
+    preferences.echoCancellation = false;
+    session->setMediaPreferences(preferences);
+    TEST_CHECK(processor->GetConfig().enable_aec); // Retired window no longer applies preferences.
+    std::cout << "AUDIO_PREFERENCES_CONTRACT startup/live/reset/retired=PASS devices=NOT_RUN\n";
+}
+
+void MeetingLocalMediaStateContract() {
+    WindowFixture sender(true, true);
+    WindowFixture receiver;
+    auto roster = WindowParticipant("publisher");
+    auto *micInfo = roster.mutable_participants(0)->add_tracks();
+    micInfo->set_sid("TR_MIC_STATE");
+    micInfo->set_name("microphone");
+    micInfo->set_type(livekit::proto::TrackType::AUDIO);
+    receiver.room->UpdateParticipantsForTesting(roster);
+    auto remoteVideo = receiver.attachExisting("state-video");
+    receiver.open();
+    sender.open();
+    OpenMeeting::ParticipantsSidebarWidget senderSidebar(sender.coordinator);
+    OpenMeeting::ParticipantsSidebarWidget receiverSidebar(receiver.coordinator);
+    auto *senderModel = senderSidebar.findChild<OpenMeeting::ParticipantListModel *>();
+    auto *receiverModel = receiverSidebar.findChild<OpenMeeting::ParticipantListModel *>();
+    TEST_CHECK(senderModel && receiverModel);
+    auto audio = livekit::LocalAudioTrack::createLocalAudioTrack(
+        "state-audio", sender.coordinator->localAudioSource());
+    auto video = livekit::LocalVideoTrack::createLocalVideoTrack(
+        "state-video", sender.coordinator->localVideoSource());
+    audio->set_sid("TR_MIC_STATE");
+    video->set_sid("TR_PA_WINDOW");
+    std::vector<livekit::proto::SignalRequest> sent;
+    auto local = std::make_shared<livekit::LocalParticipant>("PA_LOCAL_STATE", "local-user",
+        [&](const livekit::proto::SignalRequest &request) {
+            if (!request.has_mute()) return;
+            sent.push_back(request);
+            TEST_CHECK(sender.runtime->strand().running_in_this_thread());
+            for (auto &track : *roster.mutable_participants(0)->mutable_tracks()) {
+                if (track.sid() == request.mute().sid()) track.set_muted(request.mute().muted());
+            }
+            // Model the SFU's resulting ParticipantUpdate through the real
+            // receiver Room -> Coordinator -> list model and video-tile paths.
+            receiver.room->UpdateParticipantsForTesting(roster);
+        });
+    local->add_publication(std::make_shared<livekit::TrackPublication>(audio, audio->sid(), "microphone"));
+    local->add_publication(std::make_shared<livekit::TrackPublication>(video, video->sid(), "camera"));
+    sender.room->SetLocalParticipantForTesting(local);
+    OpenMeeting::MeetingCoordinatorTestAccess::installLocalTracks(*sender.coordinator, audio, video);
+    ParticipantWindowTestAccess::captureAvailability(*sender.window, true);
+    const auto check = [&](bool muted, bool enabled) {
+        sender.pump(); receiver.pump();
+        ParticipantWindowTestAccess::checkLocalMediaUi(*sender.window, muted, enabled);
+        const auto localInfo = senderModel->findParticipantById("local-user");
+        const auto remoteInfo = receiverModel->findParticipantById("window-peer");
+        TEST_CHECK(localInfo.isAudioMuted == muted && localInfo.isVideoEnabled == enabled);
+        TEST_CHECK(remoteInfo.isAudioMuted == muted && remoteInfo.isVideoEnabled == enabled);
+        auto *tile = ParticipantWindowTestAccess::tile(*receiver.window, "window-peer");
+        TEST_CHECK(tile && tile->isAudioMuted() == muted && tile->isVideoActive() == enabled);
+        TEST_CHECK(audio->muted() == muted && video->muted() == !enabled);
+    };
+    sender.coordinator->setLocalAudioMuted(false);
+    sender.coordinator->setLocalVideoEnabled(true);
+    check(false, true);
+    const auto beforeMute = sent.size();
+    sender.coordinator->setLocalAudioMuted(true);
+    sender.coordinator->setLocalVideoEnabled(false);
+    check(true, false);
+    TEST_CHECK(sent.size() == beforeMute + 2);
+    sender.coordinator->setLocalAudioMuted(false);
+    sender.coordinator->setLocalVideoEnabled(true);
+    check(false, true);
+    ParticipantWindowTestAccess::captureAvailability(*sender.window, false);
+    check(true, false);
+    sender.coordinator->setLocalAudioMuted(false);
+    sender.coordinator->setLocalVideoEnabled(true);
+    check(true, false); // Attempts to enable failed devices remain disabled.
+    ParticipantWindowTestAccess::captureAvailability(*sender.window, true);
+    check(false, true); // Temporary restart preserves the user's intent.
+    ParticipantWindowTestAccess::captureAvailability(*sender.window, false);
+    sender.coordinator->setLocalAudioMuted(true);
+    sender.coordinator->setLocalVideoEnabled(false);
+    ParticipantWindowTestAccess::captureAvailability(*sender.window, true);
+    check(true, false); // Explicit mute during failure survives recovery.
+
+    auto remoteMic = receiver.room->remote_participants().at("PA_WINDOW")
+        ->get_publication("TR_MIC_STATE")->track();
+    receiver.room->SetAudioOutputMuted(true);
+    TEST_CHECK(remoteMic->muted() && remoteMic->playout_muted());
+    receiver.room->SetAudioOutputMuted(false);
+    TEST_CHECK(remoteMic->muted() && !remoteMic->playout_muted());
+    sender.coordinator->setLocalAudioMuted(false);
+    sender.pump(); receiver.pump();
+    receiver.room->SetParticipantMuted("window-peer", true);
+    receiver.room->SetAudioOutputMuted(true);
+    receiver.room->SetAudioOutputMuted(false);
+    receiver.room->SetParticipantVolume("window-peer", 0.5);
+    TEST_CHECK(!remoteMic->muted() && remoteMic->playout_muted());
+    receiver.room->SetParticipantMuted("window-peer", false);
+    TEST_CHECK(!remoteMic->muted() && !remoteMic->playout_muted());
+    receiver.room->UpdateParticipantsForTesting(roster); receiver.pump();
+    TEST_CHECK(!receiverModel->findParticipantById("window-peer").isAudioMuted);
+    ParticipantWindowTestAccess::checkFailedSpeaker(*sender.window);
+    std::cout << "LOCAL_MEDIA_STATE intent/device/list/tile/mute_signaling/playout_isolation=PASS sfu=NOT_RUN\n";
+}
+
+void MeetingModerationContract() {
+    // Exercise the real Coordinator sender and Room's in-memory data transport.
+    // The payload observed here has already crossed both protobuf wire layers.
+    WindowFixture sender(true, true);
+    sender.room->UpdateParticipantsForTesting(WindowParticipant("camera-on"));
+    sender.room->UpdateParticipantsForTesting(WindowParticipant(
+        "camera-off", true, false, "PA_OTHER", "TR_OTHER", "other-peer"));
+    sender.pump();
+    OpenMeeting::MeetingCoordinatorTestAccess::installLocalTracks(*sender.coordinator, {}, {});
+    TEST_CHECK(sender.coordinator->participants().size() == 3);
+    const auto captureOutbound = [&](const auto &send) {
+        sender.observer->events.clear();
+        send();
+        sender.pump();
+        std::vector<livekit::ParticipantEvent> packets;
+        for (const auto &event : sender.observer->events) {
+            if (event.kind == livekit::ParticipantEventKind::DataReceived) packets.push_back(event);
+        }
+        TEST_CHECK(packets.size() == 1);
+        openmeeting::meeting::NotifyMeetingData parsed;
+        TEST_CHECK(parsed.ParseFromArray(packets.front().data.data(),
+            static_cast<int>(packets.front().data.size())));
+        TEST_CHECK(parsed.has_streamoperatedata());
+        TEST_CHECK(parsed.operatoruserid() == "local-user");
+        return parsed;
+    };
+    for (bool mute : {true, false}) {
+        const auto parsed = captureOutbound([&] { sender.coordinator->muteAllParticipants(mute); });
+        TEST_CHECK(parsed.streamoperatedata().operation_size() == 2);
+        for (const auto &operation : parsed.streamoperatedata().operation()) {
+            TEST_CHECK(operation.userid() == "window-peer" || operation.userid() == "other-peer");
+            TEST_CHECK(!operation.has_cameraonentry());
+            TEST_CHECK(operation.has_microphoneonentry());
+            TEST_CHECK(operation.microphoneonentry() == !mute);
+        }
+    }
+    for (bool isVideo : {false, true}) {
+        for (bool mute : {false, true}) {
+            const auto parsed = captureOutbound([&] {
+                sender.coordinator->requestParticipantMute("window-peer", isVideo, mute);
+            });
+            TEST_CHECK(parsed.streamoperatedata().operation_size() == 1);
+            const auto &operation = parsed.streamoperatedata().operation(0);
+            TEST_CHECK(operation.userid() == "window-peer");
+            TEST_CHECK(operation.has_cameraonentry() == isVideo);
+            TEST_CHECK(operation.has_microphoneonentry() == !isVideo);
+            TEST_CHECK((isVideo ? operation.cameraonentry() : operation.microphoneonentry()) == !mute);
+        }
+    }
+
+    // Receive through real Room sender resolution -> session strand -> queued Qt
+    // delivery, rather than calling the UI slot or protobuf parser directly.
+    WindowFixture receiver;
+    const auto nickname = QString::fromUtf8("主持人测试");
+    receiver.room->UpdateParticipantsForTesting(WindowParticipant(nickname.toStdString(),
+        true, false, "PA_MODERATOR", "TR_MODERATOR", "00000004"));
+    receiver.pump();
+    struct Request { bool isVideo; bool muted; QString operatorId; };
+    std::vector<Request> received;
+    QObject signalObserver;
+    QObject::connect(receiver.coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteMuteRequested,
+        &signalObserver, [&](bool isVideo, bool muted, const QString &operatorId) {
+            received.push_back({isVideo, muted, operatorId});
+        });
+    const auto deliver = [&](const openmeeting::meeting::UserOperationData &operation) {
+        openmeeting::meeting::NotifyMeetingData notify;
+        notify.set_operatoruserid("00000004");
+        *notify.mutable_streamoperatedata()->add_operation() = operation;
+        livekit::proto::DataPacket packet;
+        packet.set_kind(livekit::proto::DataPacket::RELIABLE);
+        packet.set_participant_sid("PA_MODERATOR");
+        packet.set_participant_identity("00000004");
+        packet.mutable_user()->set_payload(notify.SerializeAsString());
+        const auto bytes = packet.SerializeAsString();
+        receiver.room->OnIncomingDataPacket({bytes.begin(), bytes.end()}, "", "");
+        receiver.pump();
+    };
+    for (bool isVideo : {false, true}) {
+        for (bool enable : {false, true}) {
+            openmeeting::meeting::UserOperationData operation;
+            operation.set_userid("local-user");
+            if (isVideo) operation.set_cameraonentry(enable);
+            else operation.set_microphoneonentry(enable);
+            received.clear();
+            deliver(operation);
+            TEST_CHECK(received.size() == 1);
+            TEST_CHECK(received.front().isVideo == isVideo && received.front().muted == !enable);
+            TEST_CHECK(received.front().operatorId == "00000004");
+        }
+    }
+    received.clear();
+    openmeeting::meeting::UserOperationData empty;
+    empty.set_userid("local-user");
+    deliver(empty);
+    TEST_CHECK(received.empty());
+    openmeeting::meeting::UserOperationData other;
+    other.set_userid("other-user");
+    other.set_cameraonentry(true);
+    other.set_microphoneonentry(false);
+    deliver(other);
+    TEST_CHECK(received.empty());
+
+    // Also inspect real invitation dialogs. Decline them automatically: this
+    // verifies the rendered name without opening a microphone or camera.
+    receiver.open();
+    struct Prompt { QString title; QString text; };
+    std::vector<Prompt> prompts;
+    QTimer dismissPrompts;
+    QObject::connect(&dismissPrompts, &QTimer::timeout, [&] {
+        for (auto *widget : QApplication::topLevelWidgets()) {
+            auto *dialog = qobject_cast<QMessageBox *>(widget);
+            if (!dialog || !dialog->isVisible()) continue;
+            prompts.push_back({dialog->windowTitle(), dialog->text()});
+            dialog->done(QMessageBox::No);
+        }
+    });
+    dismissPrompts.start(0);
+    openmeeting::meeting::UserOperationData disableBoth;
+    disableBoth.set_userid("local-user");
+    disableBoth.set_cameraonentry(false);
+    disableBoth.set_microphoneonentry(false);
+    deliver(disableBoth);
+    TEST_CHECK(prompts.empty());
+    ParticipantWindowTestAccess::checkLocalMediaUi(*receiver.window, true, false);
+    for (bool isVideo : {false, true}) {
+        prompts.clear();
+        openmeeting::meeting::UserOperationData operation;
+        operation.set_userid("local-user");
+        if (isVideo) operation.set_cameraonentry(true);
+        else operation.set_microphoneonentry(true);
+        deliver(operation);
+        TEST_CHECK(prompts.size() == 1);
+        TEST_CHECK(prompts.front().title == QCoreApplication::translate("MeetingUI",
+            isVideo ? "Request to Enable Camera" : "Request to Unmute"));
+        TEST_CHECK(prompts.front().text.contains(nickname));
+        TEST_CHECK(!prompts.front().text.contains("00000004"));
+        ParticipantWindowTestAccess::checkLocalMediaUi(*receiver.window, true, false);
+    }
+    dismissPrompts.stop();
+    std::cout << "MODERATION_CONTRACT outbound_presence/media_isolation/target_filter/nickname_dialog=PASS sfu=NOT_RUN\n";
+}
+
+void MeetingEntryMediaContract() {
+    QTemporaryDir settingsDirectory;
+    TEST_CHECK(settingsDirectory.isValid());
+    OpenMeeting::OpenMeetingHttpClient httpClient;
+    auto session = OpenMeeting::SessionManagerTestAccess::create(
+        std::make_unique<QSettings>(settingsDirectory.filePath("entry.ini"), QSettings::IniFormat),
+        &httpClient);
+    std::shared_ptr<livekit::AudioSource> retiredAudio;
+    std::shared_ptr<livekit::VideoSource> retiredVideo;
+    const std::array<const char *, 4> scenarios{
+        "ordinary-join", "rejoin-after-leave", "manual-direct", "already-starting"};
+    for (const auto *scenario : scenarios) {
+        // Match the entry owner: every new meeting window gets a fresh
+        // Coordinator; the injected account/settings remain unchanged.
+        asio::io_context io;
+        auto coordinator = OpenMeeting::MeetingCoordinatorTestAccess::create(*session);
+        auto audioSource = coordinator->localAudioSource();
+        auto videoSource = coordinator->localVideoSource();
+        TEST_CHECK(audioSource && videoSource);
+        TEST_CHECK(audioSource != retiredAudio && videoSource != retiredVideo);
+        auto delivered = std::make_shared<std::array<int, 2>>();
+        std::shared_ptr<livekit::LocalAudioTrack> audioTrack;
+        std::shared_ptr<livekit::LocalVideoTrack> videoTrack;
+        int starts = 0;
+        OpenMeeting::MeetingCoordinatorTestAccess::setRoomStartHook(*coordinator,
+            [&](const QString &url, const QString &token) {
+                ++starts;
+                TEST_CHECK(url == QStringLiteral("wss://entry.test"));
+                TEST_CHECK(token == QStringLiteral("entry-test-token"));
+                TEST_CHECK(coordinator->localAudioSource() == audioSource);
+                TEST_CHECK(coordinator->localVideoSource() == videoSource);
+                // The hook replaces transport admission only. Real local-track
+                // factories exercise source delivery without opening devices,
+                // connecting to an SFU, or claiming encoder/RTP coverage.
+                audioTrack = livekit::LocalAudioTrack::createLocalAudioTrack(
+                    "entry-audio", coordinator->localAudioSource());
+                videoTrack = livekit::LocalVideoTrack::createLocalVideoTrack(
+                    "entry-video", coordinator->localVideoSource());
+                audioTrack->addAudioSink([delivered](const livekit::AudioFrame &) {
+                    ++(*delivered)[0];
+                });
+                videoTrack->addVideoSink([delivered](const livekit::VideoFrame &,
+                        const livekit::VideoCaptureOptions &) {
+                    ++(*delivered)[1];
+                });
+                OpenMeeting::MeetingCoordinatorTestAccess::establishLocalMediaSession(
+                    *coordinator, io, audioTrack, videoTrack);
+            });
+        MeetingUI::MeetingRoomWindow::Config config;
+        config.serverUrl = QStringLiteral("wss://entry.test");
+        config.token = QStringLiteral("entry-test-token");
+        config.meetingId = QStringLiteral("entry-meeting");
+        config.displayName = QString::fromLatin1(scenario);
+        const bool manual = std::string(scenario) == "manual-direct";
+        config.invitationMode = manual ? MeetingUI::InvitationMode::Disabled
+                                      : MeetingUI::InvitationMode::BusinessMeetingId;
+        OpenMeeting::MediaPreferences preferences;
+        preferences.enableMicrophone = true;
+        preferences.enableVideo = true;
+        const auto startFromEntryOwner = [&] {
+            coordinator->connectDirectlyAsync(config.serverUrl, config.token,
+                config.meetingId, config.displayName, preferences);
+        };
+        const bool startedBeforeWindow = std::string(scenario) == "already-starting";
+        if (startedBeforeWindow) startFromEntryOwner();
+        auto window = ParticipantWindowTestAccess::create(coordinator, config);
+        WindowDrainQt();
+        TEST_CHECK(starts == (startedBeforeWindow ? 1 : 0));
+        TEST_CHECK(ParticipantWindowTestAccess::audioSource(*window) == audioSource);
+        TEST_CHECK(ParticipantWindowTestAccess::videoSource(*window) == videoSource);
+        if (!startedBeforeWindow) startFromEntryOwner();
+        WindowDrainQt();
+        TEST_CHECK(starts == 1);
+        TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::sessionGeneration(*coordinator) == 1);
+        TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::sessionRunning(*coordinator));
+        TEST_CHECK(audioTrack->source() == ParticipantWindowTestAccess::audioSource(*window));
+        TEST_CHECK(videoTrack->source() == ParticipantWindowTestAccess::videoSource(*window));
+
+        auto audioFrame = livekit::AudioFrame::create(48000, 2, 480);
+        auto videoFrame = livekit::VideoFrame::create(4, 4, livekit::VideoBufferType::RGBA);
+        std::fill(audioFrame.data().begin(), audioFrame.data().end(), int16_t(1024));
+        std::memset(videoFrame.data(), 128, videoFrame.dataSize());
+        if (retiredAudio) retiredAudio->captureFrame(audioFrame);
+        if (retiredVideo) retiredVideo->captureFrame(videoFrame);
+        TEST_CHECK((*delivered)[0] == 0 && (*delivered)[1] == 0);
+        ParticipantWindowTestAccess::audioSource(*window)->captureFrame(audioFrame);
+        ParticipantWindowTestAccess::videoSource(*window)->captureFrame(videoFrame);
+        TEST_CHECK((*delivered)[0] == 1 && (*delivered)[1] == 1);
+        TEST_CHECK(videoTrack->frame_diagnostics().source_frames == 1);
+
+        // Destruction follows the real window -> leave -> session cleanup path.
+        // No test-only source assignment is used by the window at any point.
+        // As in WindowFixture, detach presentation callbacks before destruction:
+        // meetingLeft must not re-enter closeEvent's account-singleton path.
+        QObject::disconnect(coordinator.get(), nullptr, window.get(), nullptr);
+        window.reset();
+        WindowDrainNative(io);
+        WindowDrainQt();
+        TEST_CHECK(coordinator->state() == OpenMeeting::MeetingState::Idle);
+        TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::sessionRunning(*coordinator));
+        TEST_CHECK(!coordinator->room());
+        TEST_CHECK(!coordinator->localAudioSource() && !coordinator->localVideoSource());
+        TEST_CHECK(starts == 1);
+        retiredAudio = std::move(audioSource);
+        retiredVideo = std::move(videoSource);
+        std::cout << "ENTRY_MEDIA_CONTRACT " << scenario
+                  << " starts=1 source_identity_and_delivery=PASS" << std::endl;
+    }
+    std::cout << "ENTRY_MEDIA_CONTRACT device_free=PASS sfu_publish=NOT_RUN" << std::endl;
 }
 
 // All server/client operations are driven on this test's GUI thread. This is
@@ -3681,9 +4153,19 @@ int WindowAcceptanceMain(int argc, char **argv) {
     QSettings probe(settingsDirectory.filePath("explicit.ini"), QSettings::IniFormat);
     TEST_CHECK(probe.format() == QSettings::IniFormat &&
         QDir::cleanPath(probe.fileName()).startsWith(QDir::cleanPath(settingsDirectory.path()) + "/"));
-    // No Notify or account callback is emitted by this target. All Coordinator
-    // instances above use explicitly injected temporary SessionManager objects.
-    if (application.arguments().contains("--whiteboard-collaboration")) {
+    // Coordinator instances use explicitly injected temporary SessionManager
+    // objects, including the in-memory moderation and account-notify fixtures.
+    if (application.arguments().contains("--moderation-contract")) {
+        MeetingModerationContract();
+    } else if (application.arguments().contains("--local-media-state")) {
+        MeetingLocalMediaStateContract();
+    } else if (application.arguments().contains("--audio-preferences-contract")) {
+        MeetingAudioPreferencesContract();
+    } else if (application.arguments().contains("--entry-media-contract")) {
+        MeetingEntryMediaContract();
+        AkWindowAliveLate();
+        AkWindowRetiredPresentation(false);
+    } else if (application.arguments().contains("--whiteboard-collaboration")) {
         MeetingUI::AppTheme::install(application);
         WindowFixture fixture;
         OpenMeeting::MeetingCoordinatorTestAccess::configureWhiteboard(*fixture.coordinator);
@@ -4141,6 +4623,10 @@ public:
     static void detach(Room &room, RemoteTrackPublication *publication, uint64_t serial) {
         room.DetachRemotePublicationMedia(publication, false, serial);
     }
+    static void installSignal(Room &room, std::shared_ptr<SignalClient> signal) {
+        std::lock_guard lock(room.room_mutex_);
+        room.signal_client_ = std::move(signal);
+    }
     static proto::SyncState syncState(Room &room) { return room.BuildSyncState(); }
     static void pauseParticipantDrain(Room &room) {
         std::lock_guard lock(room.room_mutex_);
@@ -4240,6 +4726,8 @@ public:
         coordinator._localVideoTrack.reset();
         coordinator._audioMuted = audioMuted;
         coordinator._videoEnabled = videoEnabled;
+        coordinator._requestedAudioMuted = audioMuted;
+        coordinator._requestedVideoEnabled = videoEnabled;
         coordinator._participants.clear();
         coordinator.ensureLocalParticipant();
     }
@@ -6502,6 +6990,39 @@ void AkCoreRegression() {
     std::cout << "AK_CORE_EXECUTED=" << executed << " PASS (A-E/I/J first batch; F/H/K not claimed)" << std::endl;
 }
 
+void LateJoinPublicationWaitsForMediaSectionsRequirement() {
+    asio::io_context io;
+    auto room = livekit::Room::Create(io.get_executor());
+    livekit::SignalOptions options;
+    auto signal = std::make_shared<livekit::SignalClient>(
+        "wss://late-join.test", "test-token", options, true,
+        std::make_shared<livekit::proto::JoinResponse>(),
+        livekit::SignalEventHandler{}, io.get_executor());
+    livekit::ParticipantSnapshotRoomTestAccess::installSignal(*room, signal);
+
+    std::vector<std::string> signalTags;
+    room->SetLogHandler([&](const std::string &category,
+                           const std::string &tag,
+                           const std::string &) {
+        if (category == "SIGNAL") signalTags.push_back(tag);
+    });
+
+    auto update = MakeParticipantUpdate(
+        "PA_LATE", "late-peer", "late-peer",
+        livekit::proto::ParticipantInfo::ACTIVE);
+    auto *audio = update.mutable_participants(0)->add_tracks();
+    audio->set_sid("TR_PA_LATE_AUDIO");
+    audio->set_name("microphone");
+    audio->set_type(livekit::proto::TrackType::AUDIO);
+    audio->set_muted(false);
+    room->UpdateParticipantsForTesting(update);
+
+    TEST_CHECK(room->remote_participants().at("PA_LATE")->tracks().size() == 2);
+    TEST_CHECK(std::find(signalTags.begin(), signalTags.end(), "NEW_TRACK_RENEG") ==
+        signalTags.end());
+    std::cout << "LATE_JOIN_NEGOTIATION server-media-sections-driven PASS" << std::endl;
+}
+
 void VerifyOpenMeetingInitialMediaProjection() {
     OpenMeeting::MediaPreferences requested;
     requested.enableMicrophone = true;
@@ -6644,6 +7165,11 @@ int main(int argc, char **argv) {
         OwnerTerminalRegression();
         return 0;
     }
+    if (application.arguments().contains(QStringLiteral("--late-join-negotiation"))) {
+        LateJoinPublicationWaitsForMediaSectionsRequirement();
+        return 0;
+    }
+    LateJoinPublicationWaitsForMediaSectionsRequirement();
     VerifyOpenMeetingInitialMediaProjection();
     Fixture fixture;
 

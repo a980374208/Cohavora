@@ -127,6 +127,47 @@ void TestTypedSummaries() {
     TEST_CHECK(summary.find("other=1") != std::string::npos);
     TEST_CHECK(summary.find(kSdpSecret) == std::string::npos);
 
+    constexpr const char* kCandidateAddress = "192.0.2.44";
+    constexpr const char* kFingerprint = "AA:BB:CC:DD";
+    const std::string detailed_sdp =
+        "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\n"
+        "a=group:BUNDLE 0 1\r\n"
+        "m=audio 9 UDP/TLS/RTP/SAVPF 111 0\r\n"
+        "c=IN IP4 " + std::string(kCandidateAddress) + "\r\n"
+        "a=mid:0\r\na=recvonly\r\na=setup:actpass\r\n"
+        "a=rtpmap:111 opus/48000/2\r\na=rtpmap:0 PCMU/8000\r\n"
+        "a=msid:PA_REMOTE TR_AUDIO\r\na=ssrc:1234 cname:test\r\n"
+        "a=rtcp-mux\r\na=ice-ufrag:user\r\na=ice-pwd:" +
+        std::string(kSdpSecret) + "\r\n"
+        "a=fingerprint:sha-256 " + std::string(kFingerprint) + "\r\n"
+        "a=candidate:1 1 UDP 1 " + std::string(kCandidateAddress) +
+        " 50000 typ host\r\n"
+        "m=video 0 UDP/TLS/RTP/SAVPF 96\r\n"
+        "a=mid:1\r\na=inactive\r\na=rtpmap:96 VP8/90000\r\n"
+        "a=rid:f recv\r\na=simulcast:recv f\r\n";
+    const auto details = livekit::secure_log::SdpNegotiationDetails(
+        "remote_answer", detailed_sdp);
+    TEST_CHECK(details.size() == 3);
+    TEST_CHECK(details[0].find("media_sections=2") != std::string::npos);
+    TEST_CHECK(details[0].find("bundle=0|1") != std::string::npos);
+    TEST_CHECK(details[1].find("media=audio") != std::string::npos);
+    TEST_CHECK(details[1].find("mid=0") != std::string::npos);
+    TEST_CHECK(details[1].find("direction=recvonly") != std::string::npos);
+    TEST_CHECK(details[1].find("111:opus/48000/2") != std::string::npos);
+    TEST_CHECK(details[1].find("msids=pa_remote/tr_audio") != std::string::npos);
+    TEST_CHECK(details[1].find("ssrc_lines=1") != std::string::npos);
+    TEST_CHECK(details[2].find("media=video") != std::string::npos);
+    TEST_CHECK(details[2].find("rejected=yes") != std::string::npos);
+    TEST_CHECK(details[2].find("direction=inactive") != std::string::npos);
+    TEST_CHECK(details[2].find("rid_lines=1") != std::string::npos);
+    TEST_CHECK(details[2].find("simulcast=yes") != std::string::npos);
+    for (const auto& detail : details) {
+        TEST_CHECK(detail.find(kSdpSecret) == std::string::npos);
+        TEST_CHECK(detail.find(kCandidateAddress) == std::string::npos);
+        TEST_CHECK(detail.find(kFingerprint) == std::string::npos);
+        TEST_CHECK(livekit::secure_log::SanitizeForOutput(detail) == detail);
+    }
+
     const auto error = livekit::secure_log::ErrorCodeSummary(
         "websocket_upgrade", 401, "websocket_http");
     TEST_CHECK(error.find("stage=websocket_upgrade") != std::string::npos);

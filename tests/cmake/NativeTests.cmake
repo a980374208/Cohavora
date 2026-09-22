@@ -319,3 +319,11 @@ add_executable(test_meeting_ui_grid
     ${LIVEKIT_TEST_SOURCE_DIR}/test_meeting_ui_grid.cpp
 )
 target_include_directories(test_meeting_ui_grid PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+
+# Server-driven Single-PC negotiation, including zero additional media sections.
+add_executable(test_single_pc_negotiation
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_single_pc_negotiation.cpp)
+target_include_directories(test_single_pc_negotiation PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_single_pc_negotiation PRIVATE cohavora_core)
+add_test(NAME single_pc_negotiation_test COMMAND test_single_pc_negotiation)
+set_tests_properties(single_pc_negotiation_test PROPERTIES TIMEOUT 30 LABELS "CORE_REGRESSION")

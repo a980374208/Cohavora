@@ -3,6 +3,7 @@
 // Original SHA256: 46067f2975d3785b65f9dc2d62766c7075040082afa5e9dd52182efd3d0fba20
 // Provenance and exact adaptations: tests/remediation/restored/PROVENANCE.json
 // Adaptation: provenance comments only; original active checks retained.
+// Later regression: device-independent default/explicit playout selection.
 
 #include <iostream>
 #include <vector>
@@ -10,9 +11,13 @@
 #include <thread>
 #include <atomic>
 #include <cstdlib>
+#include <condition_variable>
+#include <mutex>
 
 #include "media/audio_apm.h"
 #include "rtc/webrtc_manager.h"
+#include "rtc/audio_playout_device_selection.h"
+#include "media/wasapi_capture.h"
 
 #define TEST_ASSERT(cond) do { \
     if (!(cond)) { \
@@ -23,8 +28,188 @@
 
 using namespace livekit;
 
+namespace {
+
+void TestCaptureStartupFailureContract() {
+    auto capture = WasapiAudioCapture::Create();
+    auto source = std::make_shared<AudioSource>(48000, 2);
+    WasapiCaptureConfig config;
+    // Explicitly invalid endpoint: this regression never opens a real microphone.
+    config.device_id = "cohavora-invalid-endpoint-startup-regression";
+    config.auto_reconnect = false;
+    TEST_ASSERT(capture->Init(config, source));
+
+    std::mutex callback_mutex;
+    std::condition_variable callback_condition;
+    unsigned callback_count = 0;
+    capture->SetCaptureStateCallback([&](bool running) {
+        TEST_ASSERT(!running);
+        TEST_ASSERT(!capture->IsRunning());
+        TEST_ASSERT(capture->GetConfig().device_id == config.device_id);
+        {
+            std::lock_guard<std::mutex> lock(callback_mutex);
+            ++callback_count;
+        }
+        callback_condition.notify_all();
+    });
+
+    TEST_ASSERT(!capture->Start());
+    TEST_ASSERT(!capture->IsRunning());
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex);
+        TEST_ASSERT(callback_count == 1);
+    }
+    // Failed startup keeps its watcher. Retrying Start must not replace a
+    // joinable thread, or report success simply because that thread exists.
+    TEST_ASSERT(!capture->Start());
+    TEST_ASSERT(!capture->Init(config, source));
+    TEST_ASSERT(capture->SwitchDevice(config.device_id));
+    {
+        std::unique_lock<std::mutex> lock(callback_mutex);
+        TEST_ASSERT(callback_condition.wait_for(lock, std::chrono::seconds(2),
+                                                [&] { return callback_count == 2; }));
+    }
+    capture->SetCaptureStateCallback({});
+    capture->Stop();
+    TEST_ASSERT(!capture->IsRunning());
+    TEST_ASSERT(capture->Init(config, source));
+    TEST_ASSERT(!capture->Start());
+    capture->Stop();
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex);
+        TEST_ASSERT(callback_count == 2);
+    }
+    std::cout << "[TEST] WASAPI startup failure, callback and watcher lifecycle passed.\n";
+}
+
+struct FakePlayoutDevice {
+    std::vector<std::string> ids = {"endpoint-b", "endpoint-a"};
+    std::vector<std::string> calls;
+    bool playing = true;
+    bool initialized = true;
+    int stop_result = 0;
+    int select_result = 0;
+    int init_result = 0;
+    int selected_index = -1;
+    std::optional<webrtc::AudioDeviceModule::WindowsDeviceType> selected_role;
+
+    bool Playing() const { return playing; }
+    bool PlayoutIsInitialized() const { return initialized; }
+    int16_t PlayoutDevices() { return static_cast<int16_t>(ids.size()); }
+    int32_t PlayoutDeviceName(uint16_t index, char*, char* guid) {
+        std::memcpy(guid, ids[index].c_str(), ids[index].size() + 1);
+        return 0;
+    }
+    int32_t StopPlayout() {
+        calls.push_back("stop");
+        if (stop_result == 0) {
+            playing = false;
+            initialized = false;
+        }
+        return stop_result;
+    }
+    int32_t SetPlayoutDevice(uint16_t index) {
+        calls.push_back("select-index");
+        if (select_result == 0) selected_index = index;
+        return select_result;
+    }
+    int32_t SetPlayoutDevice(webrtc::AudioDeviceModule::WindowsDeviceType role) {
+        calls.push_back("select-role");
+        if (select_result == 0) selected_role = role;
+        return select_result;
+    }
+    int32_t InitSpeaker() {
+        calls.push_back("speaker");
+        return 0;
+    }
+    int32_t InitPlayout() {
+        calls.push_back("init");
+        initialized = init_result == 0;
+        return init_result;
+    }
+    int32_t StartPlayout() {
+        calls.push_back("start");
+        playing = true;
+        return 0;
+    }
+};
+
+void TestPlayoutSelection() {
+    {
+        FakePlayoutDevice device;
+        int resets = 0;
+        TEST_ASSERT(detail::SelectPlayoutDeviceById(device, "", [&] { ++resets; }));
+        TEST_ASSERT(device.selected_role == webrtc::AudioDeviceModule::kDefaultDevice);
+        TEST_ASSERT(device.selected_index == -1);
+        TEST_ASSERT(device.playing && device.initialized && resets == 1);
+        TEST_ASSERT((device.calls == std::vector<std::string>{"stop", "select-role", "speaker", "init", "start"}));
+    }
+    // The UI order is unrelated to the ADM order. Resolve the stable endpoint
+    // identity on each switch, including after the native list is reordered.
+    for (const auto& ids : std::vector<std::vector<std::string>>{
+            {"endpoint-b", "endpoint-a"}, {"endpoint-a", "endpoint-b"}}) {
+        FakePlayoutDevice device;
+        device.ids = ids;
+        TEST_ASSERT(detail::SelectPlayoutDeviceById(device, "ENDPOINT-A", [] {}));
+        TEST_ASSERT(device.ids[device.selected_index] == "endpoint-a");
+        TEST_ASSERT(!device.selected_role.has_value());
+        TEST_ASSERT(device.playing);
+    }
+    {
+        FakePlayoutDevice device;
+        int resets = 0;
+        TEST_ASSERT(!detail::SelectPlayoutDeviceById(device, "removed-endpoint", [&] { ++resets; }));
+        TEST_ASSERT(device.calls.empty());
+        TEST_ASSERT(device.playing && device.initialized && resets == 0);
+    }
+    {
+        FakePlayoutDevice device;
+        device.playing = false;
+        TEST_ASSERT(detail::SelectPlayoutDeviceById(device, "", [] {}));
+        TEST_ASSERT(!device.playing && device.initialized);
+        TEST_ASSERT((device.calls == std::vector<std::string>{"stop", "select-role", "speaker", "init"}));
+    }
+    {
+        FakePlayoutDevice device;
+        device.playing = false;
+        device.initialized = false;
+        TEST_ASSERT(detail::SelectPlayoutDeviceById(device, "", [] {}));
+        TEST_ASSERT(!device.playing && !device.initialized);
+        TEST_ASSERT((device.calls == std::vector<std::string>{"select-role"}));
+    }
+    {
+        FakePlayoutDevice device;
+        device.stop_result = -1;
+        int resets = 0;
+        TEST_ASSERT(!detail::SelectPlayoutDeviceById(device, "endpoint-a", [&] { ++resets; }));
+        TEST_ASSERT((device.calls == std::vector<std::string>{"stop"}));
+        TEST_ASSERT(device.playing && device.initialized && resets == 0);
+    }
+    {
+        FakePlayoutDevice device;
+        device.select_result = -1;
+        int resets = 0;
+        TEST_ASSERT(!detail::SelectPlayoutDeviceById(device, "endpoint-a", [&] { ++resets; }));
+        TEST_ASSERT(device.selected_index == -1);
+        TEST_ASSERT(device.playing && device.initialized && resets == 0);
+        TEST_ASSERT((device.calls == std::vector<std::string>{"stop", "select-index", "speaker", "init", "start"}));
+    }
+    {
+        FakePlayoutDevice device;
+        device.init_result = -1;
+        TEST_ASSERT(!detail::SelectPlayoutDeviceById(device, "", [] {}));
+        TEST_ASSERT(!device.playing);
+        TEST_ASSERT((device.calls == std::vector<std::string>{"stop", "select-role", "speaker", "init"}));
+    }
+    std::cout << "[TEST] Playout default, endpoint identity and switch lifecycle passed." << std::endl;
+}
+
+} // namespace
+
 int main() {
     std::cout << "[TEST] Starting Audio Render Reference APM Tests..." << std::endl;
+    TestCaptureStartupFailureContract();
+    TestPlayoutSelection();
 
     // -------------------------------------------------------------
     // Test 1: Normal 10ms Playout Frame Ingestion & Diagnostic State

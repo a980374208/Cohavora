@@ -85,13 +85,14 @@ void WasapiAudioCapture::SetVolume(float volume) noexcept {
 }
 
 WasapiCaptureConfig WasapiAudioCapture::GetConfig() const {
-    std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(state_mutex_));
+    std::lock_guard<std::mutex> lock(state_mutex_);
     return config_;
 }
 
 bool WasapiAudioCapture::Init(const WasapiCaptureConfig& config, std::shared_ptr<AudioSource> audio_source) {
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (is_running_.load()) {
+    if (capture_thread_.joinable()) {
         spdlog::warn("[WasapiAudioCapture] Cannot Init while running. Call Stop() first.");
         return false;
     }
@@ -106,6 +107,7 @@ bool WasapiAudioCapture::Init(const WasapiCaptureConfig& config, std::shared_ptr
 
 bool WasapiAudioCapture::InitializeAudioClient() {
     CleanupAudioClient();
+    const auto config = GetConfig();
 
     if (!enumerator_) {
         HRESULT hr = CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
@@ -116,29 +118,27 @@ bool WasapiAudioCapture::InitializeAudioClient() {
         }
 
         // 注册全局热插拔监听 (即使暂无麦克风，也能监听后续插入事件)
-        if (config_.auto_reconnect) {
+        if (config.auto_reconnect) {
             notify_client_ = Microsoft::WRL::Make<WasapiNotificationClient>(weak_from_this());
             enumerator_->RegisterEndpointNotificationCallback(notify_client_.Get());
         }
     }
 
-    EDataFlow data_flow = (config_.type == WasapiCaptureType::Microphone) ? eCapture : eRender;
+    EDataFlow data_flow = (config.type == WasapiCaptureType::Microphone) ? eCapture : eRender;
     HRESULT hr = S_OK;
 
-    if (config_.device_id.empty()) {
-        // 会议通话场景优先选择 eCommunications (插入耳机/耳麦时 Windows 默认分配给耳机麦克风)
-        hr = enumerator_->GetDefaultAudioEndpoint(data_flow, eCommunications, &device_);
-        if (FAILED(hr) || !device_) {
-            hr = enumerator_->GetDefaultAudioEndpoint(data_flow, eConsole, &device_);
-        }
+    if (config.device_id.empty()) {
+        // “系统默认”与 Windows 默认设备一致，不优先选择默认通信设备。
+        hr = enumerator_->GetDefaultAudioEndpoint(data_flow, eConsole, &device_);
         if (FAILED(hr) || !device_) {
             hr = enumerator_->GetDefaultAudioEndpoint(data_flow, eMultimedia, &device_);
         }
     } else {
         // 使用指定设备 ID
-        int len = MultiByteToWideChar(CP_UTF8, 0, config_.device_id.c_str(), -1, nullptr, 0);
+        int len = MultiByteToWideChar(CP_UTF8, 0, config.device_id.c_str(), -1, nullptr, 0);
+        if (len <= 0) return false;
         std::wstring w_id(len, L'\0');
-        MultiByteToWideChar(CP_UTF8, 0, config_.device_id.c_str(), -1, &w_id[0], len);
+        MultiByteToWideChar(CP_UTF8, 0, config.device_id.c_str(), -1, &w_id[0], len);
         hr = enumerator_->GetDevice(w_id.c_str(), &device_);
     }
 
@@ -160,12 +160,12 @@ bool WasapiAudioCapture::InitializeAudioClient() {
     }
 
     DWORD stream_flags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
-    if (config_.type == WasapiCaptureType::DesktopLoopback) {
+    if (config.type == WasapiCaptureType::DesktopLoopback) {
         stream_flags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
     }
 
     // 默认请求 200ms 的环形缓冲区大小
-    REFERENCE_TIME requested_duration = static_cast<REFERENCE_TIME>(config_.buffer_duration_ms) * 10000;
+    REFERENCE_TIME requested_duration = static_cast<REFERENCE_TIME>(config.buffer_duration_ms) * 10000;
     if (requested_duration < 200000) requested_duration = 200000;
 
     hr = audio_client_->Initialize(
@@ -198,7 +198,6 @@ bool WasapiAudioCapture::InitializeAudioClient() {
 }
 
 void WasapiAudioCapture::CleanupAudioClient() {
-    std::lock_guard<std::mutex> lock(state_mutex_);
     if (audio_client_) {
         audio_client_->Stop();
         audio_client_.Reset();
@@ -222,7 +221,7 @@ void WasapiAudioCapture::OnDeviceChangedNotification() {
 
 bool WasapiAudioCapture::SwitchDevice(const std::string& device_id) {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (config_.device_id == device_id) return true;
+    if (config_.device_id == device_id && is_running_.load()) return true;
     config_.device_id = device_id;
     spdlog::info("[WasapiAudioCapture] Switching microphone device to ID: {}", device_id.empty() ? "(Default)" : device_id);
     OnDeviceChangedNotification();
@@ -230,29 +229,31 @@ bool WasapiAudioCapture::SwitchDevice(const std::string& device_id) {
 }
 
 bool WasapiAudioCapture::Start() {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    if (is_running_.load()) return true;
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+    if (capture_thread_.joinable()) return is_running_.load();
+    if (!audio_event_ || !stop_event_ || !audio_source_) return false;
 
+    ResetEvent(audio_event_);
     ResetEvent(stop_event_);
     stop_requested_.store(false);
+    device_changed_.store(false);
+    std::unique_lock<std::mutex> startup_lock(startup_mutex_);
+    startup_complete_ = false;
 
     capture_thread_ = std::thread(&WasapiAudioCapture::CaptureThreadLoop, this);
-    is_running_.store(true);
-    return true;
+    if (!startup_condition_.wait_for(startup_lock, std::chrono::seconds(3),
+                                     [this] { return startup_complete_; })) {
+        spdlog::warn("[WasapiAudioCapture] Initial device startup timed out; awaiting device state notification.");
+        return false;
+    }
+    return is_running_.load();
 }
 
 void WasapiAudioCapture::Stop() {
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        stop_requested_.store(true);
-        if (stop_event_) {
-            SetEvent(stop_event_);
-        }
-        if (enumerator_ && notify_client_) {
-            enumerator_->UnregisterEndpointNotificationCallback(notify_client_.Get());
-            notify_client_.Reset();
-        }
-        enumerator_.Reset();
+    std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+    stop_requested_.store(true);
+    if (stop_event_) {
+        SetEvent(stop_event_);
     }
 
     if (capture_thread_.joinable()) {
@@ -261,8 +262,38 @@ void WasapiAudioCapture::Stop() {
     is_running_.store(false);
 }
 
+void WasapiAudioCapture::SetCaptureStateCallback(std::function<void(bool)> callback) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    capture_state_callback_ = std::move(callback);
+}
+
+void WasapiAudioCapture::SetCaptureRunning(bool running, bool force_notification) {
+    const bool changed = is_running_.exchange(running) != running;
+    if (!changed && !force_notification) return;
+    std::function<void(bool)> callback;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        callback = capture_state_callback_;
+    }
+    if (callback) callback(running);
+}
+
 void WasapiAudioCapture::CaptureThreadLoop() {
     HRESULT hr_co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    const auto config = GetConfig();
+    auto complete_startup = [this]() {
+        {
+            std::lock_guard<std::mutex> lock(startup_mutex_);
+            startup_complete_ = true;
+        }
+        startup_condition_.notify_all();
+    };
+    if (FAILED(hr_co)) {
+        spdlog::error("[WasapiAudioCapture] COM initialization failed, hr=0x{:08x}", static_cast<uint32_t>(hr_co));
+        SetCaptureRunning(false, true);
+        complete_startup();
+        return;
+    }
 
     // MMCSS 注册高优先级专业音频捕获调度
     DWORD task_index = 0;
@@ -282,6 +313,8 @@ void WasapiAudioCapture::CaptureThreadLoop() {
                 DWORD staleFlags = 0;
                 if (SUCCEEDED(capture_client_->GetBuffer(&pStale, &staleFrames, &staleFlags, nullptr, nullptr))) {
                     capture_client_->ReleaseBuffer(staleFrames);
+                } else {
+                    break;
                 }
                 if (FAILED(capture_client_->GetNextPacketSize(&stale_packets))) break;
             }
@@ -289,22 +322,38 @@ void WasapiAudioCapture::CaptureThreadLoop() {
     };
 
     std::vector<int16_t> fifo_buffer;
-    const int frames_per_10ms = config_.target_sample_rate / 100;
-    const size_t samples_per_10ms = static_cast<size_t>(frames_per_10ms * config_.target_channels);
+    const int frames_per_10ms = config.target_sample_rate / 100;
+    const size_t samples_per_10ms = static_cast<size_t>(frames_per_10ms * config.target_channels);
     const uint64_t warmup_total_frames = std::max<uint64_t>(
-        1, static_cast<uint64_t>(config_.target_sample_rate) * 200 / 1000);
+        1, static_cast<uint64_t>(config.target_sample_rate) * 200 / 1000);
     uint64_t warmup_frames_processed = 0;
+    auto last_packet_time = std::chrono::steady_clock::now();
+    auto restart_audio_client = [&]() {
+        SetCaptureRunning(false);
+        fifo_buffer.clear();
+        warmup_frames_processed = 0;
+        bool started = false;
+        if (!stop_requested_.load() && InitializeAudioClient()) {
+            flush_stale_packets();
+            const HRESULT hr = audio_client_->Start();
+            started = SUCCEEDED(hr);
+            if (!started) {
+                spdlog::error("[WasapiAudioCapture] IAudioClient::Start failed, hr=0x{:08x}", static_cast<uint32_t>(hr));
+            }
+        }
+        if (!started) CleanupAudioClient();
+        last_packet_time = std::chrono::steady_clock::now();
+        SetCaptureRunning(started, true);
+        return started;
+    };
 
     // 尝试初次初始化 (若当前未插麦克风也不会退出线程，而是保持后台监听等待插入)
-    if (InitializeAudioClient()) {
-        flush_stale_packets();
-        audio_client_->Start();
-    } else {
+    if (!restart_audio_client()) {
         spdlog::info("[WasapiAudioCapture] No audio device on startup. Background watcher is listening for hotplug...");
     }
+    complete_startup();
 
     HANDLE wait_handles[2] = { stop_event_, audio_event_ };
-    auto last_packet_time = std::chrono::steady_clock::now();
 
     while (!stop_requested_.load()) {
         DWORD wait_res = WaitForMultipleObjects(2, wait_handles, FALSE, 20); // 20ms timeout
@@ -313,17 +362,16 @@ void WasapiAudioCapture::CaptureThreadLoop() {
             // Stop requested
             break;
         }
+        if (wait_res == WAIT_FAILED) {
+            spdlog::error("[WasapiAudioCapture] Capture event wait failed, error={}", GetLastError());
+            break;
+        }
 
         if (device_changed_.exchange(false)) {
             spdlog::info("[WasapiAudioCapture] Device changed event triggered. Re-initializing audio client to new default device...");
             std::this_thread::sleep_for(std::chrono::milliseconds(150));
-            if (InitializeAudioClient()) {
-                fifo_buffer.clear();
-                flush_stale_packets();
-                warmup_frames_processed = 0;
-                if (SUCCEEDED(audio_client_->Start())) {
-                    spdlog::info("[WasapiAudioCapture] Audio client successfully restarted on newly plugged/selected device!");
-                }
+            if (restart_audio_client()) {
+                spdlog::info("[WasapiAudioCapture] Audio client successfully restarted on newly plugged/selected device!");
             }
             continue;
         }
@@ -336,16 +384,14 @@ void WasapiAudioCapture::CaptureThreadLoop() {
         HRESULT hr = capture_client_->GetNextPacketSize(&next_packet_size);
 
         if (FAILED(hr)) {
+            SetCaptureRunning(false);
             // 设备可能断开或需要重置
-            if (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_RESOURCES_INVALIDATED || hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
+            if (config.auto_reconnect && (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_RESOURCES_INVALIDATED || hr == AUDCLNT_E_SERVICE_NOT_RUNNING)) {
                 spdlog::warn("[WasapiAudioCapture] Audio device invalidated (hr=0x{:08x}). Attempting to re-initialize...", static_cast<uint32_t>(hr));
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                if (InitializeAudioClient()) {
-                    fifo_buffer.clear();
-                    flush_stale_packets();
-                    warmup_frames_processed = 0;
-                    audio_client_->Start();
-                }
+                restart_audio_client();
+            } else {
+                CleanupAudioClient();
             }
             continue;
         }
@@ -372,8 +418,8 @@ void WasapiAudioCapture::CaptureThreadLoop() {
                         pData,
                         numFramesAvailable,
                         mix_format_,
-                        config_.target_sample_rate,
-                        config_.target_channels,
+                        config.target_sample_rate,
+                        config.target_channels,
                         pcm_out
                     );
 
@@ -389,15 +435,15 @@ void WasapiAudioCapture::CaptureThreadLoop() {
                 } else {
                     // 静音模式下填充 0
                     uint32_t target_frames = static_cast<uint32_t>(
-                        static_cast<uint64_t>(numFramesAvailable) * config_.target_sample_rate / mix_format_->nSamplesPerSec);
+                        static_cast<uint64_t>(numFramesAvailable) * config.target_sample_rate / mix_format_->nSamplesPerSec);
                     if (target_frames == 0) target_frames = 1;
-                    pcm_out.assign(target_frames * config_.target_channels, 0);
+                    pcm_out.assign(target_frames * config.target_channels, 0);
                 }
 
                 // 按实际音频帧计时，而不是按 WASAPI 包数计时。静音包同样推进
                 // 设备预热窗口，避免用户晚些开口时被错误地再次渐入。
                 if (!pcm_out.empty() && warmup_frames_processed < warmup_total_frames) {
-                    const size_t channels = std::max(1, config_.target_channels);
+                    const size_t channels = std::max(1, config.target_channels);
                     const size_t frames = pcm_out.size() / channels;
                     for (size_t frame = 0; frame < frames; ++frame) {
                         const uint64_t numerator = std::min(warmup_frames_processed,
@@ -419,11 +465,19 @@ void WasapiAudioCapture::CaptureThreadLoop() {
                     fifo_buffer.insert(fifo_buffer.end(), pcm_out.begin(), pcm_out.end());
                 }
 
-                capture_client_->ReleaseBuffer(numFramesAvailable);
+                hr = capture_client_->ReleaseBuffer(numFramesAvailable);
             }
+            if (FAILED(hr)) break;
 
             hr = capture_client_->GetNextPacketSize(&next_packet_size);
             if (FAILED(hr)) break;
+        }
+        if (FAILED(hr)) {
+            SetCaptureRunning(false);
+            CleanupAudioClient();
+            fifo_buffer.clear();
+            device_changed_.store(config.auto_reconnect);
+            continue;
         }
 
         // 统一按 10ms 切片投递给 APM 及 WebRTC AudioSource (WebRTC/APM 严格要求 10ms 帧长)
@@ -431,7 +485,7 @@ void WasapiAudioCapture::CaptureThreadLoop() {
             std::vector<int16_t> chunk(fifo_buffer.begin(), fifo_buffer.begin() + samples_per_10ms);
             fifo_buffer.erase(fifo_buffer.begin(), fifo_buffer.begin() + samples_per_10ms);
 
-            AudioFrame frame(std::move(chunk), config_.target_sample_rate, config_.target_channels, frames_per_10ms);
+            AudioFrame frame(std::move(chunk), config.target_sample_rate, config.target_channels, frames_per_10ms);
             if (apm_processor_) {
                 frame = apm_processor_->ProcessCaptureFrame(frame);
             }
@@ -439,27 +493,22 @@ void WasapiAudioCapture::CaptureThreadLoop() {
         }
 
         // 麦克风捕获守卫：若超过 1 秒完全未收到任何音频包（常见于插拔耳机导致驱动静默断流），自动热重连
-        if (!captured_any && config_.type == WasapiCaptureType::Microphone && config_.auto_reconnect) {
+        if (!captured_any && config.type == WasapiCaptureType::Microphone && config.auto_reconnect) {
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_packet_time).count();
             if (elapsed >= 1000) {
                 last_packet_time = now;
                 spdlog::warn("[WasapiAudioCapture] Microphone capture stalled (1s no data). Re-initializing device...");
                 std::cout << "[WASAPI WATCHDOG] Microphone stream stalled. Re-initializing default microphone..." << std::endl;
-                if (InitializeAudioClient()) {
-                    fifo_buffer.clear();
-                    flush_stale_packets();
-                    warmup_frames_processed = 0;
-                    if (SUCCEEDED(audio_client_->Start())) {
-                        std::cout << "[WASAPI WATCHDOG] Successfully recovered microphone stream!" << std::endl;
-                    }
+                if (restart_audio_client()) {
+                    std::cout << "[WASAPI WATCHDOG] Successfully recovered microphone stream!" << std::endl;
                 }
             }
         }
 
         // Loopback 模式下，当系统无任何应用播放声音时，WASAPI 不会产生音频包。
         // 参照 OBS 行为：若超过 40ms 无数据，自动注入 20ms 的静音帧以维持 WebRTC 时钟同步。
-        if (!captured_any && config_.type == WasapiCaptureType::DesktopLoopback) {
+        if (!captured_any && config.type == WasapiCaptureType::DesktopLoopback) {
             auto now = std::chrono::steady_clock::now();
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_packet_time).count();
             if (elapsed >= 40) {
@@ -470,7 +519,7 @@ void WasapiAudioCapture::CaptureThreadLoop() {
                     std::vector<int16_t> chunk(fifo_buffer.begin(), fifo_buffer.begin() + samples_per_10ms);
                     fifo_buffer.erase(fifo_buffer.begin(), fifo_buffer.begin() + samples_per_10ms);
 
-                    AudioFrame silent_frame(std::move(chunk), config_.target_sample_rate, config_.target_channels, frames_per_10ms);
+                    AudioFrame silent_frame(std::move(chunk), config.target_sample_rate, config.target_channels, frames_per_10ms);
                     audio_source_->captureFrame(silent_frame);
                 }
             }
@@ -478,6 +527,12 @@ void WasapiAudioCapture::CaptureThreadLoop() {
     }
 
     CleanupAudioClient();
+    SetCaptureRunning(false);
+    if (enumerator_ && notify_client_) {
+        enumerator_->UnregisterEndpointNotificationCallback(notify_client_.Get());
+        notify_client_.Reset();
+    }
+    enumerator_.Reset();
 
     if (mmcss_handle) {
         AvRevertMmThreadCharacteristics(mmcss_handle);

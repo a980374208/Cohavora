@@ -56,7 +56,7 @@ bool isChatSenderPlaceholderName(const QString &name) {
 		|| normalized == QStringLiteral("participant name");
 }
 
-QString resolveChatSenderDisplayName(
+QString resolveParticipantDisplayName(
 	const std::shared_ptr<OpenMeeting::MeetingCoordinator> &coordinator,
 	const QString &senderIdentity,
 	const QString &senderName) {
@@ -1292,9 +1292,14 @@ void RoomBottomBarWidget::showAudioDeviceMenu(const QPoint &globalPos) {
 	micHeader->setEnabled(false);
 
 	auto inputDevices = livekit::WasapiEnumerator::EnumerateInputDevices();
-	auto defInput = livekit::WasapiEnumerator::GetDefaultInputDevice();
-
 	QActionGroup *micGroup = new QActionGroup(&menu);
+	auto *defaultAction = menu.addAction(QCoreApplication::translate("MeetingUI", "System Default"));
+	defaultAction->setCheckable(true);
+	defaultAction->setChecked(_currentMicId.isEmpty());
+	micGroup->addAction(defaultAction);
+	connect(defaultAction, &QAction::triggered, this, [this] {
+		_micDeviceStream.fire_copy(QString());
+	});
 	for (const auto &dev : inputDevices) {
 		QString title = QString::fromStdString(dev.name);
 		if (dev.is_default) {
@@ -1302,43 +1307,13 @@ void RoomBottomBarWidget::showAudioDeviceMenu(const QPoint &globalPos) {
 		}
 		QAction *act = menu.addAction(title);
 		act->setCheckable(true);
-		if (_currentMicId.isEmpty()) {
-			if (dev.is_default) act->setChecked(true);
-		} else if (_currentMicId == QString::fromStdString(dev.id)) {
+		if (_currentMicId == QString::fromStdString(dev.id)) {
 			act->setChecked(true);
 		}
 		micGroup->addAction(act);
 
-		connect(act, &QAction::triggered, [this, devId = QString::fromStdString(dev.id)] {
-			_currentMicId = devId;
+		connect(act, &QAction::triggered, this, [this, devId = QString::fromStdString(dev.id)] {
 			_micDeviceStream.fire_copy(devId);
-		});
-	}
-
-	menu.addSeparator();
-
-	// 2. 扬声器输出设备
-	QAction *spkHeader = menu.addAction(QCoreApplication::translate("MeetingUI", "🔊 Select Speaker (Output)"));
-	spkHeader->setEnabled(false);
-
-	auto outputDevices = livekit::WasapiEnumerator::EnumerateOutputDevices();
-	QActionGroup *spkGroup = new QActionGroup(&menu);
-	for (size_t i = 0; i < outputDevices.size(); ++i) {
-		const auto &dev = outputDevices[i];
-		QString title = QString::fromStdString(dev.name);
-		if (dev.is_default) {
-			title += QCoreApplication::translate("MeetingUI", " (System Default)");
-		}
-		QAction *act = menu.addAction(title);
-		act->setCheckable(true);
-		if (static_cast<int>(i) == _currentSpeakerIndex) {
-			act->setChecked(true);
-		}
-		spkGroup->addAction(act);
-
-		connect(act, &QAction::triggered, [this, idx = static_cast<int>(i)] {
-			_currentSpeakerIndex = idx;
-			_speakerDeviceStream.fire_copy(idx);
 		});
 	}
 
@@ -1352,26 +1327,7 @@ void RoomBottomBarWidget::showSpeakerDeviceMenu(const QPoint &globalPos) {
 	QAction *spkHeader = menu.addAction(QCoreApplication::translate("MeetingUI", "🔊 Select Speaker (Output)"));
 	spkHeader->setEnabled(false);
 
-	auto outputDevices = livekit::WasapiEnumerator::EnumerateOutputDevices();
-	QActionGroup *spkGroup = new QActionGroup(&menu);
-	for (size_t i = 0; i < outputDevices.size(); ++i) {
-		const auto &dev = outputDevices[i];
-		QString title = QString::fromStdString(dev.name);
-		if (dev.is_default) {
-			title += QCoreApplication::translate("MeetingUI", " (System Default)");
-		}
-		QAction *act = menu.addAction(title);
-		act->setCheckable(true);
-		if (static_cast<int>(i) == _currentSpeakerIndex) {
-			act->setChecked(true);
-		}
-		spkGroup->addAction(act);
-
-		connect(act, &QAction::triggered, [this, idx = static_cast<int>(i)] {
-			_currentSpeakerIndex = idx;
-			_speakerDeviceStream.fire_copy(idx);
-		});
-	}
+	appendSpeakerDeviceActions(menu);
 
 	menu.addSeparator();
 
@@ -1383,6 +1339,27 @@ void RoomBottomBarWidget::showSpeakerDeviceMenu(const QPoint &globalPos) {
 	});
 
 	menu.exec(globalPos);
+}
+
+void RoomBottomBarWidget::appendSpeakerDeviceActions(QMenu &menu) {
+	auto *group = new QActionGroup(&menu);
+	const auto addDevice = [&](const QString &title, const QString &deviceId) {
+		auto *action = menu.addAction(title);
+		action->setCheckable(true);
+		action->setChecked(deviceId == _currentSpeakerId);
+		group->addAction(action);
+		connect(action, &QAction::triggered, this, [this, deviceId] {
+			_speakerDeviceStream.fire_copy(deviceId);
+		});
+	};
+	addDevice(QCoreApplication::translate("MeetingUI", "(System Default)"), QString());
+	for (const auto &device : livekit::WasapiEnumerator::EnumerateOutputDevices()) {
+		auto title = QString::fromStdString(device.name);
+		if (device.is_default) {
+			title += QCoreApplication::translate("MeetingUI", " (System Default)");
+		}
+		addDevice(title, QString::fromStdString(device.id));
+	}
 }
 
 void RoomBottomBarWidget::showVideoDeviceMenu(const QPoint &globalPos) {
@@ -1671,6 +1648,8 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 
 	initLayout();
 	setupCoordinatorBindings();
+	_coordinator->setLocalAudioMuted(_config.audioMuted);
+	_coordinator->setLocalVideoEnabled(_config.videoEnabled);
 	_remoteRenderSession = std::make_unique<livekit::render::VideoRenderSession>(
 		[this](const std::string &identity, const QImage &image) {
 			receiveRenderedVideoFrame(image, QString::fromStdString(identity));
@@ -1680,17 +1659,7 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	_remoteRenderTimer->start(33);
 
 	// 3. 复用 Coordinator 的本地音频与视频数据源，确保外设采集与 WebRTC 发送通道打通
-	if (_coordinator) {
-		_localAudioSource = _coordinator->localAudioSource();
-		_localVideoSource = _coordinator->localVideoSource();
-	}
-	if (!_localAudioSource) {
-		_localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
-	}
-	if (!_localVideoSource) {
-		_localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
-	}
-	if (_config.videoEnabled) _remoteRenderSession->AttachLocalSource(_localVideoSource);
+	bindLocalMediaSources();
 
 	_localAudioSource->addSink([this](const livekit::AudioFrame &frame) {
 		if (_config.audioMuted) return;
@@ -1715,9 +1684,9 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	// 4. 启动物理麦克风 WASAPI 采集
 	const auto mediaPreferences = OpenMeeting::SessionManager::instance().mediaPreferences();
 	_wasapiCap = livekit::WasapiAudioCapture::Create();
-	livekit::ApmConfig apmConfig;
-	apmConfig.enable_ans = mediaPreferences.noiseSuppression;
-	_wasapiCap->EnableApm(apmConfig);
+	_wasapiCap->EnableApm();
+	setupAudioPreferencesBinding(OpenMeeting::SessionManager::instance());
+	bindMicrophoneCaptureState();
 	livekit::WebRTCManager::Instance().SetApmProcessor(_wasapiCap->apm_processor());
 	livekit::WasapiCaptureConfig acfg;
 	acfg.type = livekit::WasapiCaptureType::Microphone;
@@ -1725,9 +1694,11 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	acfg.target_sample_rate = 48000;
 	acfg.target_channels = 2;
 	if (_wasapiCap->Init(acfg, _localAudioSource) && _wasapiCap->Start()) {
+		applyMicrophoneAvailability(true);
 		_wasapiCap->SetMute(_config.audioMuted);
 		LogToConsole(LogCategory::Media, "WASAPI", QCoreApplication::translate("MeetingUI", "Microphone capture started (48 kHz stereo, initial state: %1)").arg(_config.audioMuted ? QCoreApplication::translate("MeetingUI", "Mute") : QCoreApplication::translate("MeetingUI", "On")));
 	} else {
+		applyMicrophoneAvailability(false);
 		LogToConsole(LogCategory::Error, "WASAPI", QCoreApplication::translate("MeetingUI", "Unable to initialize or start the microphone"));
 	}
 
@@ -1786,11 +1757,12 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 		LogToConsole(LogCategory::Error, "DSHOW", QCoreApplication::translate("MeetingUI", "Camera initialization error: %1").arg(ex.what()));
 	}
 
+	_coordinator->setLocalVideoAvailable(_usingRealCamera);
 	_localTile->setVideoActive(_config.videoEnabled && _usingRealCamera);
 	_localTile->setAudioMuted(_config.audioMuted);
 	updateVideoLayout();
 
-	startLiveKitSession();
+	attachCoordinatorSession();
 
 	// 自动弹出控制台便于测试观察
 	MeetingLogConsoleWindow::Instance().show();
@@ -1827,10 +1799,11 @@ MeetingRoomWindow::MeetingRoomWindow(
 			receiveRenderedVideoFrame(image, QString::fromStdString(identity));
 		});
 	_remoteRenderSession->UseQtCpuBackend();
+	bindLocalMediaSources();
 	setupCoordinatorBindings();
 	resize(1120, 720);
 	_stageContainer->setGeometry(0, 56, 1120, 588);
-	startLiveKitSession();
+	attachCoordinatorSession();
 }
 
 MeetingRoomWindow::MeetingRoomWindow(
@@ -2111,50 +2084,22 @@ void MeetingRoomWindow::initLayout() {
 	_bottomBar->simulateScenarioRequested() | rpl::on_next(handleSimulate, lifetime());
 
 	_bottomBar->toggleAudioRequested() | rpl::on_next([this](bool muted) {
-		_config.audioMuted = muted;
-		_localTile->setAudioMuted(muted);
 		if (_coordinator) {
 			_coordinator->setLocalAudioMuted(muted);
 		}
-		if (_wasapiCap) {
-			_wasapiCap->SetMute(muted);
-		}
-		if (_localAudioTrack) {
-			_localAudioTrack->set_muted(muted);
-		}
-		if (_room) {
-			auto local = _room->local_participant();
-			if (local && _localAudioTrack) {
-				local->SetMuted(_localAudioTrack->sid(), muted);
-			}
-		}
-		LogToConsole(LogCategory::Media, "AUDIO", muted ? QCoreApplication::translate("MeetingUI", "User muted the microphone") : QCoreApplication::translate("MeetingUI", "User enabled or unmuted the microphone"));
+		LogToConsole(LogCategory::Media, "AUDIO", _config.audioMuted ? QCoreApplication::translate("MeetingUI", "User muted the microphone") : QCoreApplication::translate("MeetingUI", "User enabled or unmuted the microphone"));
 	}, lifetime());
 
 	_bottomBar->toggleSpeakerRequested() | rpl::on_next([this](bool muted) {
-		if (_room) {
-			_room->SetAudioOutputMuted(muted);
-		}
-		LogToConsole(LogCategory::Media, "SPEAKER", muted ? QCoreApplication::translate("MeetingUI", "User muted speaker output") : QCoreApplication::translate("MeetingUI", "User enabled speaker output"));
+		setSpeakerOutputMuted(muted);
+		LogToConsole(LogCategory::Media, "SPEAKER", _bottomBar->isSpeakerMuted() ? QCoreApplication::translate("MeetingUI", "User muted speaker output") : QCoreApplication::translate("MeetingUI", "User enabled speaker output"));
 	}, lifetime());
 
 	_bottomBar->toggleVideoRequested() | rpl::on_next([this](bool enabled) {
-		_config.videoEnabled = enabled;
-		_localTile->setVideoActive(enabled && _usingRealCamera);
 		if (_coordinator) {
 			_coordinator->setLocalVideoEnabled(enabled);
 		}
-		if (_localVideoTrack) {
-			_localVideoTrack->set_muted(!enabled);
-		}
-		if (_room) {
-			auto local = _room->local_participant();
-			if (local && _localVideoTrack) {
-				local->SetMuted(_localVideoTrack->sid(), !enabled);
-			}
-		}
-		updateVideoLayout();
-		LogToConsole(LogCategory::Media, "VIDEO", enabled ? QCoreApplication::translate("MeetingUI", "User enabled local video") : QCoreApplication::translate("MeetingUI", "User disabled local video"));
+		LogToConsole(LogCategory::Media, "VIDEO", _config.videoEnabled ? QCoreApplication::translate("MeetingUI", "User enabled local video") : QCoreApplication::translate("MeetingUI", "User disabled local video"));
 	}, lifetime());
 
 	setupInvitationBinding();
@@ -2172,7 +2117,7 @@ void MeetingRoomWindow::initLayout() {
 	if (_coordinator) {
 		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMessageReceived,
 			this, [this](const QString &senderIdentity, const QString &senderName, const QString &text, int64_t seq) {
-			const auto dispName = resolveChatSenderDisplayName(
+			const auto dispName = resolveParticipantDisplayName(
 				_coordinator, senderIdentity, senderName);
 
 			OpenMeeting::ChatMessageItem item;
@@ -2198,7 +2143,7 @@ void MeetingRoomWindow::initLayout() {
 		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMediaReceivingStarted,
 			this, [this](const QString &transferId, const QString &senderIdentity, const QString &senderName,
 						 const QString &mediaType, const QString &fileName, qint64 totalSize, int64_t seq) {
-			const auto dispName = resolveChatSenderDisplayName(
+			const auto dispName = resolveParticipantDisplayName(
 				_coordinator, senderIdentity, senderName);
 
 			if (_chatSidebar) {
@@ -2282,24 +2227,130 @@ void MeetingRoomWindow::initLayout() {
 	}, lifetime());
 
 	_bottomBar->microphoneDeviceChanged() | rpl::on_next([this](const QString &devId) {
-		if (_wasapiCap) {
-			_wasapiCap->SwitchDevice(devId.toStdString());
-			if (auto apm = _wasapiCap->apm_processor()) {
-				apm->Reset();
-			}
-			LogToConsole(LogCategory::Media, "DEVICE", QCoreApplication::translate("MeetingUI", "Microphone switched to: %1").arg(devId.isEmpty() ? QCoreApplication::translate("MeetingUI", "(System Default)") : devId));
+		auto &session = OpenMeeting::SessionManager::instance();
+		auto preferences = session.mediaPreferences();
+		if (preferences.microphoneDeviceId == devId) {
+			if (_wasapiCap) _wasapiCap->SwitchDevice(devId.toStdString());
+		} else {
+			preferences.microphoneDeviceId = devId;
+			session.setMediaPreferences(preferences);
 		}
 	}, lifetime());
 
-	_bottomBar->speakerDeviceChanged() | rpl::on_next([this](int idx) {
-		livekit::WebRTCManager::Instance().SetPlayoutDevice(static_cast<uint16_t>(idx));
-		LogToConsole(LogCategory::Media, "DEVICE", QCoreApplication::translate("MeetingUI", "Speaker output device switched to index: %1").arg(idx));
+	_bottomBar->speakerDeviceChanged() | rpl::on_next([this](const QString &deviceId) {
+		auto &session = OpenMeeting::SessionManager::instance();
+		auto preferences = session.mediaPreferences();
+		if (preferences.speakerDeviceId == deviceId) {
+			selectSpeakerDevice(deviceId);
+		} else {
+			preferences.speakerDeviceId = deviceId;
+			session.setMediaPreferences(preferences);
+		}
 	}, lifetime());
 
 	bindCameraDeviceChanges();
 
 	_localGenTimer = new QTimer(this);
 	connect(_localGenTimer, &QTimer::timeout, this, &MeetingRoomWindow::onLocalVideoGenerated);
+}
+
+void MeetingRoomWindow::applyAudioProcessingPreferences(
+		const OpenMeeting::MediaPreferences &preferences) {
+	if (!_wasapiCap) return;
+	const auto processor = _wasapiCap->apm_processor();
+	if (!processor) return;
+	auto config = processor->GetConfig();
+	if (config.enable_aec == preferences.echoCancellation
+		&& config.enable_ans == preferences.noiseSuppression
+		&& config.enable_agc == preferences.autoGainControl) return;
+	config.enable_aec = preferences.echoCancellation;
+	config.enable_ans = preferences.noiseSuppression;
+	config.enable_agc = preferences.autoGainControl;
+	// Keep the capture and render-reference paths on the same APM instance.
+	// ApplyConfig serializes changes with audio callbacks internally.
+	processor->ApplyConfig(config);
+}
+
+bool MeetingRoomWindow::selectSpeakerDevice(const QString &deviceId) {
+	auto &manager = livekit::WebRTCManager::Instance();
+	const bool selected = manager.SetPlayoutDeviceById(deviceId.toStdString());
+	_speakerAvailable = manager.EnsurePlayout();
+	if (!_speakerAvailable) setSpeakerOutputMuted(true);
+	if (!selected || !_speakerAvailable) {
+		LogToConsole(LogCategory::Error, "AUDIO_OUTPUT", "Unable to select speaker output device");
+		return false;
+	}
+	if (_bottomBar) _bottomBar->setSpeakerDeviceId(deviceId);
+	return true;
+}
+
+void MeetingRoomWindow::setSpeakerOutputMuted(bool muted) {
+	if (!muted) {
+		_speakerAvailable = livekit::WebRTCManager::Instance().EnsurePlayout();
+		muted = !_speakerAvailable;
+	}
+	if (_bottomBar) _bottomBar->setSpeakerMuted(muted);
+	if (_room) _room->SetAudioOutputMuted(muted);
+}
+
+void MeetingRoomWindow::applyMicrophoneAvailability(bool available) {
+	_microphoneAvailable = available;
+	if (_coordinator) _coordinator->setLocalAudioAvailable(available);
+}
+
+void MeetingRoomWindow::bindMicrophoneCaptureState() {
+	const std::weak_ptr<livekit::WasapiAudioCapture> capture = _wasapiCap;
+	const QPointer<MeetingRoomWindow> window(this);
+	_wasapiCap->SetCaptureStateCallback([window, capture](bool available) {
+		if (!window) return;
+		QMetaObject::invokeMethod(window, [window, capture, available] {
+			if (!window || !window->_sessionRunning || window->_closingForSessionInvalidation) return;
+			const auto source = capture.lock();
+			if (!source || window->_wasapiCap != source) return;
+			window->applyMicrophoneAvailability(available);
+		}, Qt::QueuedConnection);
+	});
+}
+
+void MeetingRoomWindow::setupAudioPreferencesBinding(
+		OpenMeeting::SessionManager &sessionManager) {
+	applyAudioProcessingPreferences(sessionManager.mediaPreferences());
+	if (_bottomBar) {
+		_bottomBar->setSpeakerDeviceId(sessionManager.mediaPreferences().speakerDeviceId);
+		_bottomBar->setMicrophoneDeviceId(sessionManager.mediaPreferences().microphoneDeviceId);
+	}
+	connect(&sessionManager, &OpenMeeting::SessionManager::preferencesChanged, this,
+		[this, session = QPointer<OpenMeeting::SessionManager>(&sessionManager),
+			previousMicrophone = sessionManager.mediaPreferences().microphoneDeviceId,
+			previousSpeaker = sessionManager.mediaPreferences().speakerDeviceId]
+		(const OpenMeeting::MediaPreferences &preferences) mutable {
+			applyAudioProcessingPreferences(preferences);
+			if (previousMicrophone != preferences.microphoneDeviceId) {
+				previousMicrophone = preferences.microphoneDeviceId;
+				if (_bottomBar) _bottomBar->setMicrophoneDeviceId(previousMicrophone);
+				if (_wasapiCap && !_wasapiCap->SwitchDevice(previousMicrophone.toStdString())) {
+					applyMicrophoneAvailability(false);
+				}
+			}
+			if (previousSpeaker != preferences.speakerDeviceId) {
+				if (_room && _coordinator
+					&& _coordinator->state() == OpenMeeting::MeetingState::InMeeting) {
+					if (!selectSpeakerDevice(preferences.speakerDeviceId)) {
+						// Restore the previous choice after the current settings commit
+						// finishes; never overwrite a newer user selection.
+						QMetaObject::invokeMethod(this,
+							[session, requested = preferences.speakerDeviceId, previousSpeaker] {
+								if (!session || session->mediaPreferences().speakerDeviceId != requested) return;
+								auto restored = session->mediaPreferences();
+								restored.speakerDeviceId = previousSpeaker;
+								session->setMediaPreferences(restored);
+							}, Qt::QueuedConnection);
+						return;
+					}
+				}
+				previousSpeaker = preferences.speakerDeviceId;
+			}
+		});
 }
 
 void MeetingRoomWindow::setupCameraCompletionOwner(
@@ -2412,6 +2463,7 @@ void MeetingRoomWindow::handleCameraSwitchResult(
 	QPointer<MeetingRoomWindow> guard(this);
 	if (success) {
 		_usingRealCamera = true;
+		if (_coordinator) _coordinator->setLocalVideoAvailable(true);
 		if (_localTile) {
 			_localTile->setVideoActive(_config.videoEnabled && _usingRealCamera);
 		}
@@ -3711,30 +3763,12 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		if (_wasapiCap) {
 			_wasapiCap->SetMute(muted);
 		}
-		if (_localAudioTrack) {
-			_localAudioTrack->set_muted(muted);
-		}
-		if (_room) {
-			auto local = _room->local_participant();
-			if (local && _localAudioTrack) {
-				local->SetMuted(_localAudioTrack->sid(), muted);
-			}
-		}
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
 	        this, [this](bool enabled) {
 		_config.videoEnabled = enabled;
 		_bottomBar->setVideoEnabled(enabled);
 		_localTile->setVideoActive(enabled && _usingRealCamera);
-		if (_localVideoTrack) {
-			_localVideoTrack->set_muted(!enabled);
-		}
-		if (_room) {
-			auto local = _room->local_participant();
-			if (local && _localVideoTrack) {
-				local->SetMuted(_localVideoTrack->sid(), !enabled);
-			}
-		}
 		updateVideoLayout();
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::kickedOff,
@@ -3765,22 +3799,11 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		if (state == OpenMeeting::MeetingState::InMeeting) {
 			_room = _coordinator->room();
 			const auto preferences = OpenMeeting::SessionManager::instance().mediaPreferences();
-			if (_bottomBar) {
-				_bottomBar->setSpeakerMuted(!preferences.enableSpeaker);
+			if (!selectSpeakerDevice(preferences.speakerDeviceId)
+				&& !preferences.speakerDeviceId.isEmpty()) {
+				selectSpeakerDevice(QString());
 			}
-			if (_room) {
-				_room->SetAudioOutputMuted(!preferences.enableSpeaker);
-			}
-			if (!preferences.speakerDeviceId.isEmpty()) {
-				const auto outputs = livekit::WasapiEnumerator::EnumerateOutputDevices();
-				for (size_t index = 0; index < outputs.size(); ++index) {
-					if (QString::fromStdString(outputs[index].id) == preferences.speakerDeviceId) {
-						livekit::WebRTCManager::Instance().SetPlayoutDevice(
-							static_cast<uint16_t>(index));
-						break;
-					}
-				}
-			}
+			setSpeakerOutputMuted(!preferences.enableSpeaker);
 			restoreParticipantPresentations();
 		}
 	});
@@ -3915,6 +3938,7 @@ void MeetingRoomWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationRea
 }
 
 void MeetingRoomWindow::onRemoteMuteRequested(bool isVideo, bool mute, const QString &operatorId) {
+	const auto operatorName = resolveParticipantDisplayName(_coordinator, operatorId, QString());
 	if (isVideo) {
 		if (mute) {
 			_bottomBar->setVideoEnabled(false);
@@ -3922,10 +3946,10 @@ void MeetingRoomWindow::onRemoteMuteRequested(bool isVideo, bool mute, const QSt
 			_localTile->setVideoActive(false);
 			if (_coordinator) _coordinator->setLocalVideoEnabled(false);
 			updateVideoLayout();
-			LogToConsole(LogCategory::Media, "VIDEO", QCoreApplication::translate("MeetingUI", "Host [%1] turned off your camera").arg(operatorId));
+			LogToConsole(LogCategory::Media, "VIDEO", QCoreApplication::translate("MeetingUI", "Host [%1] turned off your camera").arg(operatorName));
 		} else {
 			if (QMessageBox::question(this, QCoreApplication::translate("MeetingUI", "Request to Enable Camera"),
-				QCoreApplication::translate("MeetingUI", "Host [%1] would like you to turn on your camera. Allow?").arg(operatorId),
+				QCoreApplication::translate("MeetingUI", "Host [%1] would like you to turn on your camera. Allow?").arg(operatorName),
 				QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
 				_bottomBar->setVideoEnabled(true);
 				_config.videoEnabled = true;
@@ -3941,10 +3965,10 @@ void MeetingRoomWindow::onRemoteMuteRequested(bool isVideo, bool mute, const QSt
 			_localTile->setAudioMuted(true);
 			if (_wasapiCap) _wasapiCap->SetMute(true);
 			if (_coordinator) _coordinator->setLocalAudioMuted(true);
-			LogToConsole(LogCategory::Media, "AUDIO", QCoreApplication::translate("MeetingUI", "Host [%1] muted you").arg(operatorId));
+			LogToConsole(LogCategory::Media, "AUDIO", QCoreApplication::translate("MeetingUI", "Host [%1] muted you").arg(operatorName));
 		} else {
 			if (QMessageBox::question(this, QCoreApplication::translate("MeetingUI", "Request to Unmute"),
-				QCoreApplication::translate("MeetingUI", "Host [%1] would like you to unmute your microphone. Allow?").arg(operatorId),
+				QCoreApplication::translate("MeetingUI", "Host [%1] would like you to unmute your microphone. Allow?").arg(operatorName),
 				QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
 				_bottomBar->setAudioMuted(false);
 				_config.audioMuted = false;
@@ -4074,32 +4098,34 @@ void MeetingRoomWindow::showInvitationNotice(
 	}
 }
 
-void MeetingRoomWindow::startLiveKitSession() {
+void MeetingRoomWindow::bindLocalMediaSources() {
+	if (_coordinator) {
+		_localAudioSource = _coordinator->localAudioSource();
+		_localVideoSource = _coordinator->localVideoSource();
+	}
+	if (!_localAudioSource) {
+		_localAudioSource = std::make_shared<livekit::AudioSource>(48000, 2);
+	}
+	if (!_localVideoSource) {
+		_localVideoSource = std::make_shared<livekit::VideoSource>(1280, 720);
+	}
+	if (_remoteRenderSession && _config.videoEnabled) {
+		_remoteRenderSession->AttachLocalSource(_localVideoSource);
+	}
+}
+
+void MeetingRoomWindow::attachCoordinatorSession() {
 	if (!_coordinator) return;
 
+	// The entry owner starts the coordinator after constructing this window.
+	// Connecting here as well would restart that session, replace its sources,
+	// and leave the capture devices feeding only this window's old sources.
+	// Arm cleanup even before admission completes: capture is already running.
 	_sessionRunning = true;
-
-	if (_coordinator->state() != OpenMeeting::MeetingState::Idle) {
-		// Coordinator 已经在执行入会流程中 (Validating, ConnectingRoom, InMeeting 等)，
-		// 严禁在此处重复发起连接打断已有流程！
-		_room = _coordinator->room();
-		if (_coordinator->state() == OpenMeeting::MeetingState::InMeeting) {
-			restoreParticipantPresentations();
-		}
-		return;
-	}
-
-	if (_config.serverUrl.isEmpty()) {
-		LogToConsole(LogCategory::General, "SESSION", QCoreApplication::translate("MeetingUI", "No server URL specified. Running in local demo mode."));
-		return;
-	}
-
-	OpenMeeting::MediaPreferences prefs;
-	prefs.enableMicrophone = !_config.audioMuted;
-	prefs.enableVideo = _config.videoEnabled;
-
-	_coordinator->connectDirectlyAsync(_config.serverUrl, _config.token, "direct", _config.displayName, prefs);
 	_room = _coordinator->room();
+	if (_coordinator->state() == OpenMeeting::MeetingState::InMeeting) {
+		restoreParticipantPresentations();
+	}
 }
 
 void MeetingRoomWindow::stopLiveKitSession() {
@@ -4122,6 +4148,7 @@ void MeetingRoomWindow::stopLiveKitSession() {
 	}
 
 	if (_wasapiCap) {
+		_wasapiCap->SetCaptureStateCallback({});
 		_wasapiCap->Stop();
 		_wasapiCap.reset();
 	}

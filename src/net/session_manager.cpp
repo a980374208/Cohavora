@@ -13,8 +13,10 @@
 namespace OpenMeeting {
 namespace {
 constexpr auto kSettingsMigrationVersion = "migration/cohavoraSettingsVersion";
+constexpr auto kRegistrationBaseUrl = "network/registrationServerBaseUrl";
+constexpr auto kRegistrationServiceBinding = "network/registrationServiceBinding";
 constexpr int kCurrentSettingsMigrationVersion = 1;
-constexpr std::array<const char *, 20> kMigratedSettingsKeys = {
+constexpr std::array<const char *, 22> kMigratedSettingsKeys = {
     "network/serverBaseUrl",
     "media/enableMicrophone",
     "media/enableSpeaker",
@@ -22,7 +24,9 @@ constexpr std::array<const char *, 20> kMigratedSettingsKeys = {
     "media/videoMirroring",
     "media/videoMirrorMode",
     "media/pushToTalkWhenMuted",
+    "media/echoCancellation",
     "media/noiseSuppression",
+    "media/autoGainControl",
     "media/cameraDeviceId",
     "media/microphoneDeviceId",
     "media/speakerDeviceId",
@@ -210,6 +214,36 @@ void SessionManager::setVideoMirrorMode(VideoMirrorMode mode) {
     }
 }
 
+QString SessionManager::registrationServerBaseUrl(const QString &serviceUrl) const {
+    const auto policy = evaluateServiceEndpoint(serviceUrl.isNull() ? _serverBaseUrl : serviceUrl);
+    if (policy.canonicalUrl.isEmpty()) return {};
+    if (_settings->value(kRegistrationServiceBinding).toString() == policy.canonicalUrl) {
+        const auto configured = evaluateServiceEndpoint(_settings->value(kRegistrationBaseUrl).toString());
+        if (!configured.canonicalUrl.isEmpty()) return configured.canonicalUrl;
+    }
+    QUrl endpoint(policy.canonicalUrl);
+    // Only infer the stock direct deployment. Reverse-proxy prefixes and custom
+    // ports retain their configured address until explicitly overridden in the UI.
+    if (endpoint.port() == 11102 && (endpoint.path().isEmpty() || endpoint.path() == "/")) {
+        endpoint.setPort(11022);
+    }
+    return endpoint.toString(QUrl::FullyEncoded);
+}
+
+bool SessionManager::setRegistrationServerBaseUrl(const QString &url) {
+    if (url.trimmed().isEmpty()) {
+        _settings->remove(kRegistrationBaseUrl);
+        _settings->remove(kRegistrationServiceBinding);
+    } else {
+        const auto policy = evaluateServiceEndpoint(url);
+        if (!policy.requestAllowed() || !evaluateServiceEndpoint(_serverBaseUrl).requestAllowed()) return false;
+        _settings->setValue(kRegistrationBaseUrl, policy.canonicalUrl);
+        _settings->setValue(kRegistrationServiceBinding, _serverBaseUrl);
+    }
+    _settings->sync();
+    return true;
+}
+
 bool SessionManager::setServerBaseUrl(const QString &url) {
     const auto policy = evaluateServiceEndpoint(url);
     if (!policy.requestAllowed()) return false;
@@ -348,7 +382,7 @@ void SessionManager::registerUser(const QString &account,
         } else {
             if (callback) callback(false, err.message, UserInfo{});
         }
-    });
+    }, registrationServerBaseUrl());
 }
 
 void SessionManager::loginAsGuest(const QString &nickname, const QString &customUserId) {
@@ -440,8 +474,12 @@ void SessionManager::loadFromSettings() {
         _settings->value("general/stayInMeetingWhenLocked", true).toBool();
     _mediaPrefs.pushToTalkWhenMuted =
         _settings->value("media/pushToTalkWhenMuted", false).toBool();
+    _mediaPrefs.echoCancellation =
+        _settings->value("media/echoCancellation", true).toBool();
     _mediaPrefs.noiseSuppression =
         _settings->value("media/noiseSuppression", true).toBool();
+    _mediaPrefs.autoGainControl =
+        _settings->value("media/autoGainControl", true).toBool();
     _mediaPrefs.cameraDeviceId = _settings->value("media/cameraDeviceId").toString();
     _mediaPrefs.microphoneDeviceId = _settings->value("media/microphoneDeviceId").toString();
     _mediaPrefs.speakerDeviceId = _settings->value("media/speakerDeviceId").toString();
@@ -486,7 +524,9 @@ void SessionManager::saveToSettings() {
     _settings->setValue("general/showActiveSpeaker", _mediaPrefs.showActiveSpeaker);
     _settings->setValue("general/stayInMeetingWhenLocked", _mediaPrefs.stayInMeetingWhenLocked);
     _settings->setValue("media/pushToTalkWhenMuted", _mediaPrefs.pushToTalkWhenMuted);
+    _settings->setValue("media/echoCancellation", _mediaPrefs.echoCancellation);
     _settings->setValue("media/noiseSuppression", _mediaPrefs.noiseSuppression);
+    _settings->setValue("media/autoGainControl", _mediaPrefs.autoGainControl);
     _settings->setValue("media/cameraDeviceId", _mediaPrefs.cameraDeviceId);
     _settings->setValue("media/microphoneDeviceId", _mediaPrefs.microphoneDeviceId);
     _settings->setValue("media/speakerDeviceId", _mediaPrefs.speakerDeviceId);

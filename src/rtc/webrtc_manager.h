@@ -2,6 +2,7 @@
 
 #include <memory>
 #include <mutex>
+#include <string>
 #include <asio.hpp>
 #include "api/peer_connection_interface.h"
 #include "rtc_base/thread.h"
@@ -32,29 +33,13 @@ public:
     std::shared_ptr<AudioApmProcessor> apm_processor() const;
     void ResetApmProcessor();
 
-    bool SetPlayoutDevice(uint16_t index) {
-        if (!adm_ || !worker_thread_) return false;
-        return worker_thread_->BlockingCall([this, index]() {
-            if (adm_) {
-                const bool was_playing = adm_->Playing();
-                if (was_playing && adm_->StopPlayout() != 0) {
-                    return false;
-                }
-                if (adm_->SetPlayoutDevice(index) != 0) {
-                    return false;
-                }
-                ResetApmProcessor();
-                if (was_playing) {
-                    if (adm_->InitSpeaker() != 0 || adm_->InitPlayout() != 0) {
-                        return false;
-                    }
-                    return adm_->StartPlayout() == 0;
-                }
-                return true;
-            }
-            return false;
-        });
-    }
+    // The numeric overload accepts an ADM index, never a WASAPI enumeration index.
+    bool SetPlayoutDevice(uint16_t index);
+    // Empty ID restores the Windows default playback endpoint. Explicit IDs
+    // are matched against the ADM's endpoint GUIDs on its owning worker thread.
+    bool SetPlayoutDeviceById(const std::string& device_id);
+    // Success means that the output stream actually started, not just selected.
+    bool EnsurePlayout();
 
     // 跨线程安全 SDP 协商辅助函数
     void CreateOffer(

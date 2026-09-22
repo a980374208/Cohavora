@@ -29,6 +29,19 @@ struct VideoCaptureOptions {
     std::optional<VideoFrameMetadata> metadata;
 };
 
+// Counters describe frame delivery at the capture/RTC API boundary, not encoder
+// consumption. source_frames belongs to the shared VideoSource; RTC counters
+// belong to one bridge and can therefore start later than the source counter.
+// A concurrent snapshot may include a frame still being processed.
+struct VideoFrameDiagnostics {
+    bool source_available = false;
+    bool rtc_available = false;
+    std::uint64_t source_frames = 0;
+    std::uint64_t rtc_input_frames = 0;
+    std::uint64_t rtc_output_frames = 0;
+    std::uint64_t rtc_dropped_frames = 0;
+};
+
 class VideoSource {
 public:
     using FrameSink = std::function<void(const VideoFrame&, const VideoCaptureOptions&)>;
@@ -57,6 +70,9 @@ public:
 
     int width() const noexcept { return width_; }
     int height() const noexcept { return height_; }
+    std::uint64_t captured_frame_count() const noexcept {
+        return captured_frame_count_.load(std::memory_order_relaxed);
+    }
 
     void captureFrame(const VideoFrame& frame, const VideoCaptureOptions& options);
     void captureFrame(const VideoFrame& frame, std::int64_t timestamp_us = 0,
@@ -70,6 +86,7 @@ public:
 private:
     std::atomic<int> width_{0};
     std::atomic<int> height_{0};
+    std::atomic<std::uint64_t> captured_frame_count_{0};
     mutable std::mutex sink_mutex_;
     std::vector<FrameSink> sinks_;
     std::vector<std::weak_ptr<Subscription::State>> subscriptions_;

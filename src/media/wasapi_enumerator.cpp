@@ -86,7 +86,8 @@ static std::vector<WasapiDeviceInfo> EnumerateEndpoints(EDataFlow flow, WasapiCa
     // 获取当前默认设备的 ID 用于比较
     std::string default_id;
     ComPtr<IMMDevice> default_dev;
-    if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(flow, eMultimedia, &default_dev)) && default_dev) {
+    // Match capture's system default and ADM kDefaultDevice for playback.
+    if (SUCCEEDED(enumerator->GetDefaultAudioEndpoint(flow, eConsole, &default_dev)) && default_dev) {
         LPWSTR def_w_id = nullptr;
         if (SUCCEEDED(default_dev->GetId(&def_w_id)) && def_w_id) {
             default_id = WStringToString(def_w_id);

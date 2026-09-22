@@ -20,6 +20,8 @@ struct RtcStatsState {
     std::condition_variable cv;
     bool done{false};
     StatsReport report;
+    std::vector<RtpSenderDiagnostic> senders;
+    bool senders_available{false};
     std::function<void(std::optional<StatsReport>)> completion;
 };
 
@@ -38,6 +40,13 @@ private:
 };
 
 StatsReport ParseRtcStatsReport(const webrtc::RTCStatsReport& report);
+
+// Queue collection using the project's WebRTC task ABI boundary. The manager
+// must remain alive until its signaling queue drains. False means no task was
+// queued; the caller must complete or skip its wait. An expired state is ignored.
+bool RequestRtcStats(
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection,
+    std::shared_ptr<RtcStatsState> state);
 
 // Non-blocking bridge for Room::GetStats(). The timeout only completes the
 // awaiting coroutine; WebRTC may still deliver and release its callback later.

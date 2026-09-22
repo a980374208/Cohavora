@@ -164,6 +164,8 @@ public:
     // 本地媒体控制
     void setLocalAudioMuted(bool muted);
     void setLocalVideoEnabled(bool enabled);
+    void setLocalAudioAvailable(bool available);
+    void setLocalVideoAvailable(bool available);
     bool isLocalAudioMuted() const { return _audioMuted; }
     bool isLocalVideoEnabled() const { return _videoEnabled; }
     void requestScreenShareSources();
@@ -337,6 +339,9 @@ private:
     void setState(MeetingState s, const QString &detail = QString());
     void startRoomSession(const QString &url, const QString &token, uint64_t admissionGeneration);
     void stopRoomSession();
+    void publishLocalTrackMute(const std::shared_ptr<livekit::Track> &track, bool muted);
+    void applyLocalAudioState();
+    void applyLocalVideoState();
     void completeRoomStartupOnUiThread(uint64_t sessionGeneration,
                                        std::shared_ptr<livekit::LocalAudioTrack> audioTrack,
                                        std::shared_ptr<livekit::LocalVideoTrack> videoTrack,
@@ -413,6 +418,10 @@ private:
 
     bool _audioMuted = false;
     bool _videoEnabled = true;
+    bool _requestedAudioMuted = false;
+    bool _requestedVideoEnabled = true;
+    bool _localAudioAvailable = true;
+    bool _localVideoAvailable = true;
     livekit::ScreenShareSnapshot _screenShareSnapshot;
     uint64_t _screenSourceRequest = 0;
     // 全局账号会话被撤销后，忽略仍在途的 HTTP 入会回调，防止已经关闭的

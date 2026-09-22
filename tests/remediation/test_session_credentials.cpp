@@ -15,6 +15,7 @@
 #include <QtWidgets/QApplication>
 #include <QtPlugin>
 #include <cstdio>
+#include <utility>
 #include <vector>
 
 Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin)
@@ -71,6 +72,8 @@ void verifySettingsMigration() {
         auto legacy = settingsAt(legacyPath);
         legacy->setValue("network/serverBaseUrl", QStringLiteral("https://example.invalid/api"));
         legacy->setValue("media/enableVideo", true);
+        legacy->setValue("media/echoCancellation", false);
+        legacy->setValue("media/autoGainControl", false);
         legacy->setValue("general/showActiveSpeaker", false);
         legacy->setValue("auth/account", QStringLiteral("account"));
         legacy->setValue("auth/password", kPassword);
@@ -81,6 +84,10 @@ void verifySettingsMigration() {
     auto first = migrateCohavoraSettings(settingsAt(currentPath), settingsAt(legacyPath));
     TEST_CHECK(first.status == SettingsMigrationStatus::Migrated);
     TEST_CHECK(first.settings->value("media/enableVideo").toBool());
+    TEST_CHECK(first.settings->contains("media/echoCancellation"));
+    TEST_CHECK(!first.settings->value("media/echoCancellation").toBool());
+    TEST_CHECK(first.settings->contains("media/autoGainControl"));
+    TEST_CHECK(!first.settings->value("media/autoGainControl").toBool());
     TEST_CHECK(!first.settings->value("general/showActiveSpeaker").toBool());
     TEST_CHECK(first.settings->value("auth/account").toString() == QStringLiteral("account"));
     TEST_CHECK(!first.settings->contains("custom/unknown"));
@@ -150,6 +157,78 @@ void verifySettingsMigration() {
     TEST_CHECK(retry.status == SettingsMigrationStatus::Migrated);
     TEST_CHECK(retry.settings->value("migration/cohavoraSettingsVersion").toInt() == 1);
     std::puts("SETTINGS MIGRATION PASS: first, repeat, new-value priority, write fallback, encrypted session");
+}
+
+void verifyAudioPreferences() {
+    QTemporaryDir directory;
+    TEST_CHECK(directory.isValid());
+    OpenMeetingHttpClient client;
+    const auto path = directory.filePath("audio-preferences.ini");
+    auto session = SessionManagerTestAccess::create(settingsAt(path), client);
+    const auto defaults = session->mediaPreferences();
+    TEST_CHECK(defaults.echoCancellation && defaults.noiseSuppression && defaults.autoGainControl);
+    TEST_CHECK(defaults.speakerDeviceId.isEmpty());
+    session.reset();
+
+    // Upgrading an existing ANS-only preference must not disable the other 3A stages.
+    {
+        auto legacy = settingsAt(path);
+        legacy->setValue("media/noiseSuppression", false);
+        legacy->sync();
+    }
+    session = SessionManagerTestAccess::create(settingsAt(path), client);
+    const auto legacy = session->mediaPreferences();
+    TEST_CHECK(legacy.echoCancellation && !legacy.noiseSuppression && legacy.autoGainControl);
+    TEST_CHECK(legacy.speakerDeviceId.isEmpty());
+
+    auto prefs = legacy;
+    prefs.enableMicrophone = false;
+    prefs.enableSpeaker = false;
+    prefs.enableVideo = true;
+    prefs.mirrorMode = VideoMirrorMode::LocalOnly;
+    prefs.quitOnMainWindowClose = false;
+    prefs.showActiveSpeaker = false;
+    prefs.stayInMeetingWhenLocked = false;
+    prefs.pushToTalkWhenMuted = true;
+    prefs.cameraDeviceId = QStringLiteral("synthetic-camera");
+    prefs.microphoneDeviceId = QStringLiteral("synthetic-microphone");
+    prefs.videoCaptureWidth = 1280;
+    prefs.videoCaptureHeight = 720;
+    prefs.videoCaptureFps = 25;
+    for (unsigned int mask = 0; mask != 8; ++mask) {
+        prefs.echoCancellation = (mask & 1) != 0;
+        prefs.noiseSuppression = (mask & 2) != 0;
+        prefs.autoGainControl = (mask & 4) != 0;
+        // Alternate explicit playback and system default to exercise clearing a saved ID.
+        prefs.speakerDeviceId = (mask & 1) ? QString() : QStringLiteral("synthetic-speaker");
+        int changed = 0;
+        QObject::connect(session.get(), &SessionManager::preferencesChanged, session.get(),
+            [&](const MediaPreferences &value) {
+                TEST_CHECK(value.echoCancellation == prefs.echoCancellation);
+                TEST_CHECK(value.noiseSuppression == prefs.noiseSuppression);
+                TEST_CHECK(value.autoGainControl == prefs.autoGainControl);
+                TEST_CHECK(value.speakerDeviceId == prefs.speakerDeviceId);
+                ++changed;
+            });
+        session->setMediaPreferences(prefs);
+        TEST_CHECK(changed == 1);
+        session.reset();
+        session = SessionManagerTestAccess::create(settingsAt(path), client);
+        const auto restored = session->mediaPreferences();
+        TEST_CHECK(restored.echoCancellation == prefs.echoCancellation);
+        TEST_CHECK(restored.noiseSuppression == prefs.noiseSuppression);
+        TEST_CHECK(restored.autoGainControl == prefs.autoGainControl);
+        TEST_CHECK(restored.speakerDeviceId == prefs.speakerDeviceId);
+        TEST_CHECK(!restored.enableMicrophone && !restored.enableSpeaker && restored.enableVideo);
+        TEST_CHECK(restored.mirrorMode == VideoMirrorMode::LocalOnly);
+        TEST_CHECK(!restored.quitOnMainWindowClose && !restored.showActiveSpeaker);
+        TEST_CHECK(!restored.stayInMeetingWhenLocked && restored.pushToTalkWhenMuted);
+        TEST_CHECK(restored.cameraDeviceId == prefs.cameraDeviceId);
+        TEST_CHECK(restored.microphoneDeviceId == prefs.microphoneDeviceId);
+        TEST_CHECK(restored.videoCaptureWidth == 1280 && restored.videoCaptureHeight == 720);
+        TEST_CHECK(restored.videoCaptureFps == 25);
+    }
+    std::puts("AUDIO PREFERENCES PASS: defaults, legacy ANS, independent 3A combinations, default speaker restore");
 }
 
 void verifyStore() {
@@ -671,6 +750,173 @@ struct Fixture {
     SessionManagerTestAccess::Owner session;
 };
 
+void verifyRegistrationAndUi() {
+    for (const bool previouslyLoggedIn : {false, true}) {
+        Fixture f;
+        Server registrationServer;
+        if (previouslyLoggedIn) f.login();
+        const auto primaryRequests = f.server.requests.size();
+        const auto previousUser = f.client.currentUser().toJson();
+        const auto previousToken = f.session->token();
+        const auto previousGeneration = f.session->authGeneration();
+        const auto previousCipher = settingsAt(f.path())->value("auth/protectedSessionV2").toByteArray();
+        const auto previousSavedAccount = f.session->savedAccount();
+        int authSignals = 0;
+        QObject::connect(&f.client, &OpenMeetingHttpClient::userLoggedIn, f.session.get(),
+            [&](const UserInfo &) { ++authSignals; });
+        QObject::connect(&f.client, &OpenMeetingHttpClient::userLoggedOut, f.session.get(),
+            [&] { ++authSignals; });
+        QObject::connect(f.session.get(), &SessionManager::loggedIn, f.session.get(),
+            [&] { ++authSignals; });
+
+        MeetingUI::LoginDialog dialog(*f.session);
+        auto tabs = dialog.findChild<QTabWidget *>();
+        auto account = dialog.findChild<QLineEdit *>("registerAccount");
+        auto nickname = dialog.findChild<QLineEdit *>("registerNickname");
+        auto password = dialog.findChild<QLineEdit *>("registerPassword");
+        auto confirm = dialog.findChild<QLineEdit *>("registerConfirmPassword");
+        auto status = dialog.findChild<QLabel *>("loginStatus");
+        auto registrationUrl = dialog.findChild<QLineEdit *>("registrationServerBaseUrl");
+        TEST_CHECK(tabs && account && nickname && password && confirm && status && registrationUrl);
+        TEST_CHECK(registrationUrl->text() == f.server.url());
+        registrationUrl->setText(registrationServer.url());
+        tabs->setCurrentIndex(1);
+        auto submit = tabs->currentWidget()->findChild<QPushButton *>("primaryBtn");
+        TEST_CHECK(submit);
+        const auto registeredAccount = QStringLiteral("00010001");
+        const auto registeredNickname = QStringLiteral("\u6ce8\u518c\u56de\u5f52");
+        // Preserve password bytes, including whitespace; hashing belongs to the account service.
+        const auto registeredPassword = QStringLiteral("  synthetic-register-\u5bc6\u7801  ");
+        account->setText(" " + registeredAccount + " ");
+        nickname->setText(" " + registeredNickname + " ");
+        password->setText(registeredPassword);
+        confirm->setText(registeredPassword);
+
+        for (const int error : {1001, 0}) {
+            const auto requestIndex = registrationServer.requests.size();
+            submit->click();
+            TEST_CHECK(!submit->isEnabled() && !password->isEnabled());
+            registrationServer.received(requestIndex + 1);
+            const auto &request = *registrationServer.requests[requestIndex];
+            // /user/register creates meeting identities, not password-bearing accounts.
+            TEST_CHECK(request.path == "/admin/user/register");
+            TEST_CHECK(request.token.isEmpty() && !request.operationId.isEmpty());
+            TEST_CHECK(request.body.value("account").toString() == registeredAccount);
+            TEST_CHECK(request.body.value("password").toString() == registeredPassword);
+            TEST_CHECK(request.body.value("nickname").toString() == registeredNickname);
+            TEST_CHECK(!request.body.contains("users"));
+            // Account registration returns success without a login token or user object.
+            registrationServer.replyData(requestIndex, QJsonValue(QJsonValue::Null), error);
+            waitFor([&] { return submit->isEnabled() && password->isEnabled(); });
+            TEST_CHECK(!status->isHidden() && !status->text().isEmpty());
+            if (error) {
+                TEST_CHECK(tabs->currentIndex() == 1);
+                TEST_CHECK(status->text() == "controlled-denial");
+                TEST_CHECK(password->text() == registeredPassword && confirm->text() == registeredPassword);
+            } else {
+                TEST_CHECK(tabs->currentIndex() == 0);
+                TEST_CHECK(dialog.findChild<QLineEdit *>("loginAccount")->text() == registeredAccount);
+                TEST_CHECK(dialog.findChild<QLineEdit *>("loginPassword")->text() == registeredPassword);
+            }
+            TEST_CHECK(dialog.result() != QDialog::Accepted && authSignals == 0);
+            TEST_CHECK(f.session->isLoggedIn() == previouslyLoggedIn);
+            TEST_CHECK(f.client.isLoggedIn() == previouslyLoggedIn);
+            TEST_CHECK(f.session->token() == previousToken && f.client.currentUser().toJson() == previousUser);
+            TEST_CHECK(f.session->authGeneration() == previousGeneration);
+            TEST_CHECK(f.session->savedAccount() == previousSavedAccount);
+            TEST_CHECK(settingsAt(f.path())->value("auth/protectedSessionV2").toByteArray() == previousCipher);
+            TEST_CHECK(f.session->serverBaseUrl() == f.server.url() && f.client.baseUrl() == f.server.url());
+            TEST_CHECK(f.session->registrationServerBaseUrl() == registrationServer.url());
+            TEST_CHECK(dialog.findChild<QLineEdit *>("serverBaseUrl")->text() == f.server.url());
+            TEST_CHECK(f.server.requests.size() == primaryRequests);
+            TEST_CHECK(registrationServer.requests.size() == requestIndex + 1);
+        }
+    }
+    std::puts("REGISTRATION/UI PASS: account endpoint, raw credentials, retry, null success, no auth mutation");
+}
+
+void verifyRegistrationEndpointSelection() {
+    Fixture f;
+    const std::vector<std::pair<QString, QString>> defaults{
+        {"http://meeting.example.invalid:11102", "http://meeting.example.invalid:11022"},
+        {"https://meeting.example.invalid:11102/", "https://meeting.example.invalid:11022"},
+        {"https://meeting.example.invalid", "https://meeting.example.invalid"},
+        {"https://meeting.example.invalid:8443", "https://meeting.example.invalid:8443"},
+        {"https://meeting.example.invalid:11102/proxy/", "https://meeting.example.invalid:11102/proxy"},
+        {"https://meeting.example.invalid/proxy/api", "https://meeting.example.invalid/proxy/api"}
+    };
+    for (const auto &[service, registration] : defaults) {
+        TEST_CHECK(f.session->registrationServerBaseUrl(service) == registration);
+    }
+
+    const auto primary = QStringLiteral("https://meeting.example.invalid:11102");
+    const auto accounts = QStringLiteral("https://accounts.example.invalid/account-api");
+    const auto otherPrimary = QStringLiteral("https://other.example.invalid:11102");
+    TEST_CHECK(f.session->setServerBaseUrl(primary));
+    TEST_CHECK(f.session->setRegistrationServerBaseUrl(accounts));
+    TEST_CHECK(f.session->registrationServerBaseUrl() == accounts);
+    TEST_CHECK(f.session->serverBaseUrl() == primary && f.client.baseUrl() == primary);
+    f.restart();
+    TEST_CHECK(f.session->registrationServerBaseUrl() == accounts);
+    TEST_CHECK(f.session->serverBaseUrl() == primary && f.client.baseUrl() == primary);
+    for (const auto &invalid : {QStringLiteral("https://name:password@example.invalid"),
+                               QStringLiteral("https://example.invalid/?token=secret"),
+                               QStringLiteral("file:///registration")}) {
+        TEST_CHECK(!f.session->setRegistrationServerBaseUrl(invalid));
+        TEST_CHECK(f.session->registrationServerBaseUrl() == accounts);
+        TEST_CHECK(f.session->serverBaseUrl() == primary && f.client.baseUrl() == primary);
+    }
+    {
+        MeetingUI::LoginDialog dialog(*f.session);
+        auto mainUrl = dialog.findChild<QLineEdit *>("serverBaseUrl");
+        auto registrationUrl = dialog.findChild<QLineEdit *>("registrationServerBaseUrl");
+        TEST_CHECK(mainUrl && registrationUrl && registrationUrl->text() == accounts);
+        mainUrl->setText(otherPrimary);
+        TEST_CHECK(registrationUrl->text() == "https://other.example.invalid:11022");
+        mainUrl->setText(primary);
+        TEST_CHECK(registrationUrl->text() == accounts);
+    }
+    TEST_CHECK(f.session->setServerBaseUrl(otherPrimary));
+    TEST_CHECK(f.session->registrationServerBaseUrl() == "https://other.example.invalid:11022");
+    f.restart();
+    TEST_CHECK(f.session->registrationServerBaseUrl() == "https://other.example.invalid:11022");
+    TEST_CHECK(f.session->setRegistrationServerBaseUrl(accounts));
+    TEST_CHECK(f.session->setRegistrationServerBaseUrl({}));
+    TEST_CHECK(f.session->registrationServerBaseUrl() == "https://other.example.invalid:11022");
+    f.restart();
+    TEST_CHECK(f.session->registrationServerBaseUrl() == "https://other.example.invalid:11022");
+
+    // A single reverse proxy may serve both APIs; preserve its configured prefix.
+    Server gateway;
+    OpenMeetingHttpClient client;
+    const auto gatewayUrl = gateway.url() + "/gateway";
+    client.setBaseUrl(gatewayUrl);
+    const UserInfo previous{"synthetic-existing-token", "existing-user", "Existing", {}};
+    client.setCurrentUser(previous);
+    int completed = 0;
+    client.registerUser("new-account", kPassword, "New", [&](bool ok, const UserInfo &, const HttpError &error) {
+        TEST_CHECK(ok && error.code == 0);
+        ++completed;
+    });
+    gateway.received(1);
+    TEST_CHECK(gateway.requests[0]->path == "/gateway/admin/user/register");
+    TEST_CHECK(gateway.requests[0]->token.isEmpty());
+    gateway.replyData(0, QJsonValue(QJsonValue::Null));
+    waitFor([&] { return completed == 1; });
+    client.registerUser("another-account", kPassword, "Another", [&](bool ok, const UserInfo &, const HttpError &error) {
+        TEST_CHECK(ok && error.code == 0);
+        ++completed;
+    }, gateway.url() + "/accounts/v1");
+    gateway.received(2);
+    TEST_CHECK(gateway.requests[1]->path == "/accounts/v1/admin/user/register");
+    TEST_CHECK(gateway.requests[1]->token.isEmpty());
+    gateway.replyData(1, QJsonValue(QJsonValue::Null));
+    waitFor([&] { return completed == 2; });
+    TEST_CHECK(client.baseUrl() == gatewayUrl && client.currentUser().toJson() == previous.toJson());
+    TEST_CHECK(f.server.requests.empty());
+    std::puts("REGISTRATION ENDPOINT PASS: standard ports, gateway prefixes, saved override, service binding, validation");
+}
+
 void verifySessionInvalidLoginData() {
     for (const auto &data : std::vector<QJsonValue>{QJsonValue(QJsonValue::Null), QJsonArray{}}) {
         Fixture f;
@@ -909,12 +1155,15 @@ int main(int argc, char **argv) {
     TEST_CHECK(OpenMeeting::isDebugHttpTransportEnabled());
     app.setQuitOnLastWindowClosed(false);
     verifySettingsMigration();
+    verifyAudioPreferences();
     verifyPublicAuthContract();
     verifyPublicInvalidLoginData();
     verifyPublicAuthOrdering();
     verifyPublicLogoutBoundaries();
     verifyStore();
     verifyDebugHttpPersistenceAcrossStartupModes();
+    verifyRegistrationAndUi();
+    verifyRegistrationEndpointSelection();
     verifySessionInvalidLoginData();
     verifyMissingServerTokenInvalidatesSession();
     verifySessionAndUi();

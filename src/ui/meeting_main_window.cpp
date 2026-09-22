@@ -740,6 +740,7 @@ void MeetingMainWindow::openQuickMeeting(
 				roomWindow->requestDefaultScreenShare();
 			});
 	}
+	// This entry owns admission; constructing the window only prepares media.
 	coordinator->createAndJoinQuickMeetingAsync(
 		QCoreApplication::translate("MeetingUI", "%1's Instant Meeting").arg(session.nickname()), 3600, prefs);
 	roomWindow->show();
@@ -827,6 +828,7 @@ void MeetingMainWindow::openJoinMeetingDialog(
 				roomWindow->requestDefaultScreenShare();
 			});
 	}
+	// One admission after capture is bound to the coordinator's local sources.
 	coordinator->connectDirectlyAsync(
 		dialog.serverUrl(), dialog.token(), dialog.meetingId(), dialog.displayName(), preferences);
 	roomWindow->show();

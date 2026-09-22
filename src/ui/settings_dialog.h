@@ -136,7 +136,9 @@ private:
 	QCheckBox *_audioMicrophone = nullptr;
 	QCheckBox *_audioSpeaker = nullptr;
 	QCheckBox *_pushToTalk = nullptr;
+	QCheckBox *_echoCancellation = nullptr;
 	QCheckBox *_noiseSuppression = nullptr;
+	QCheckBox *_autoGainControl = nullptr;
 	AudioDeviceTestController *_audioTestController = nullptr;
 
 	QHash<QString, QVector<VideoFormat>> _cameraFormats;

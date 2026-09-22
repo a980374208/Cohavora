@@ -290,8 +290,9 @@ message StreamOperateData {
 
 message UserOperationData {
   string userID = 1;
-  bool cameraOnEntry = 2;
-  bool microphoneOnEntry = 3;
+  // Absent means leave this medium unchanged; explicit false means disable it.
+  optional bool cameraOnEntry = 2;
+  optional bool microphoneOnEntry = 3;
 }
 
 message MeetingHostData {
