@@ -29,6 +29,52 @@ QComboBox QAbstractItemView::item {
     border-radius: 5px;
 }
 
+/* Combo popups are reparented into a Qt::Popup window. The direct tone
+   selector keeps their colors independent from a dark dialog/meeting host. */
+QAbstractItemView[meetingUiTone="light"] {
+    background: #ffffff;
+    color: #1f2329;
+    border: 1px solid #dfe3e8;
+    outline: none;
+    selection-background-color: #eaf3ff;
+    selection-color: #1677ff;
+}
+
+QAbstractItemView[meetingUiTone="light"]::item {
+    min-height: 30px;
+    padding: 0 9px;
+    color: #1f2329;
+    background: #ffffff;
+}
+
+QAbstractItemView[meetingUiTone="light"]::item:hover,
+QAbstractItemView[meetingUiTone="light"]::item:selected {
+    color: #1677ff;
+    background: #eaf3ff;
+}
+
+QAbstractItemView[meetingUiTone="dark"] {
+    background: #242831;
+    color: #f3f4f6;
+    border: 1px solid #454c5a;
+    outline: none;
+    selection-background-color: #394252;
+    selection-color: #ffffff;
+}
+
+QAbstractItemView[meetingUiTone="dark"]::item {
+    min-height: 30px;
+    padding: 0 9px;
+    color: #f3f4f6;
+    background: #242831;
+}
+
+QAbstractItemView[meetingUiTone="dark"]::item:hover,
+QAbstractItemView[meetingUiTone="dark"]::item:selected {
+    color: #ffffff;
+    background: #394252;
+}
+
 QCalendarWidget {
     background: #ffffff;
     color: #1f2329;

@@ -1,5 +1,70 @@
 /* Application widget variants. Selected with AppTheme::setStyleVariant. */
 
+QWidget[uiStyle="whiteboard-panel"],
+[uiStyle="whiteboard-panel"] QScrollArea,
+[uiStyle="whiteboard-panel"] QScrollArea > QWidget > QWidget,
+[uiStyle="whiteboard-panel"] QWidget#whiteboardTextBox {
+    background: #f7f8fa;
+    color: #1f2329;
+    border: none;
+}
+[uiStyle="whiteboard-panel"] QLabel {
+    color: #4e5969;
+    background: transparent;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+[uiStyle="whiteboard-panel"] QLabel#whiteboardTitle {
+    color: #1f2329;
+    font-size: 16px;
+    font-weight: bold;
+}
+[uiStyle="whiteboard-panel"] QLabel#whiteboardLocalNotice {
+    color: #1677ff;
+    background: #eaf3ff;
+    border-radius: 6px;
+    padding: 4px 8px;
+}
+[uiStyle="whiteboard-panel"] QPushButton {
+    color: #1f2329;
+    background: #ffffff;
+    border: 1px solid #dfe3e8;
+    border-radius: 7px;
+    padding: 6px 10px;
+    min-height: 20px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+[uiStyle="whiteboard-panel"] QPushButton:hover {
+    color: #1677ff;
+    border-color: #91caff;
+    background: #f0f7ff;
+}
+[uiStyle="whiteboard-panel"] QPushButton:checked,
+[uiStyle="whiteboard-panel"] QPushButton:pressed {
+    color: #1677ff;
+    border-color: #1677ff;
+    background: #eaf3ff;
+}
+[uiStyle="whiteboard-panel"] QPushButton:disabled {
+    color: #a8abb2;
+    background: #f2f3f5;
+    border-color: #e5e8ec;
+}
+[uiStyle="whiteboard-panel"] QComboBox,
+[uiStyle="whiteboard-panel"] QSpinBox,
+[uiStyle="whiteboard-panel"] QPlainTextEdit {
+    color: #1f2329;
+    background: #ffffff;
+    border: 1px solid #dfe3e8;
+    border-radius: 7px;
+    padding: 6px 36px 6px 8px;
+    min-height: 20px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+[uiStyle="whiteboard-panel"] QPlainTextEdit { padding: 6px; }
+
 QDialog[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"],
 [uiStyle="login-dialog-this"] QDialog {
     background: transparent;

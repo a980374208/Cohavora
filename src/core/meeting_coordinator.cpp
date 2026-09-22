@@ -3,7 +3,12 @@
 #include "src/net/service_endpoint_policy.h"
 #include "src/ui/meeting_log_console.h"
 #include "src/telemetry/log_redaction.h"
+#include "src/core/whiteboard/whiteboard_protocol.h"
+#include "src/core/whiteboard/whiteboard_runtime.h"
+#include "src/core/whiteboard/whiteboard_transport.h"
 
+#include <QtCore/QCryptographicHash>
+#include <QtCore/QDateTime>
 #include <QtCore/QDebug>
 #include <QtCore/QJsonArray>
 #include <QtCore/QJsonObject>
@@ -15,6 +20,7 @@
 #include <exception>
 #include <future>
 #include <limits>
+#include <set>
 #include <utility>
 
 namespace OpenMeeting {
@@ -296,6 +302,42 @@ public:
     void OnParticipantEvent(const livekit::ParticipantEvent &event) override {
         auto *coordinator = _coordinator;
         if (!coordinator || _generation == 0) return;
+        if (event.kind == livekit::ParticipantEventKind::DataReceived &&
+            livekit::whiteboard::isWhiteboardTopic(event.topic)) {
+            auto session = _session.lock();
+            if (!session || event.sender.origin == livekit::SenderOrigin::Server ||
+                !livekit::IsParticipantTicketActive(event.sender.ticket, event.sender.key)) return;
+            coordinator->enqueueWhiteboardData(session, event.data, event.topic, event.sender);
+            return;
+        }
+        if (event.kind == livekit::ParticipantEventKind::Upsert ||
+            event.kind == livekit::ParticipantEventKind::Departure) {
+            if (auto session = _session.lock()) {
+                const auto key = event.participant.key;
+                const auto ticket = event.participant.ticket;
+                const bool departure = event.kind == livekit::ParticipantEventKind::Departure;
+                asio::post(session->strand(), [session, key, ticket, departure] {
+                    const std::string identity = key.identity.empty() ? key.sid : key.identity;
+                    auto &peers = session->whiteboardPeersOnStrand();
+                    auto &departures = session->whiteboardDeparturesOnStrand();
+                    if (departure) {
+                        const auto current = peers.find(identity);
+                        if (current == peers.end() || current->second == key) peers.erase(identity);
+                        departures[identity] = key;
+                        if (departures.size() > 512) departures.erase(departures.begin());
+                    } else if (livekit::IsParticipantTicketActive(ticket, key)) {
+                        peers[identity] = key;
+                        departures.erase(identity);
+                    } else return;
+                    auto runtime = session->whiteboardOnStrand();
+                    if (!runtime) return;
+                    livekit::whiteboard::PeerInstance peer{
+                        identity, key.native_room_generation, key.incarnation};
+                    if (departure) runtime->peerLeft(peer);
+                    else runtime->observePeer(peer);
+                });
+            }
+        }
         const auto generation = _generation;
         const auto authGeneration = _authGeneration;
         const auto localUserId = _localUserId;
@@ -337,6 +379,7 @@ public:
         if (auto session = _session.lock()) {
             asio::post(session->strand(), [session] {
                 if (auto share = session->screenShareOnStrand()) share->Shutdown();
+                if (auto board = session->whiteboardOnStrand()) board->setTransportReady(false, 0);
             });
         }
         auto *coordinator = _coordinator;
@@ -380,6 +423,7 @@ public:
         if (auto session = _session.lock()) {
             asio::post(session->strand(), [session] {
                 if (auto share = session->screenShareOnStrand()) share->SetTransportReady(false);
+                if (auto board = session->whiteboardOnStrand()) board->setTransportReady(false, 0);
             });
         }
         auto *coordinator = _coordinator;
@@ -408,6 +452,9 @@ public:
         if (auto session = _session.lock()) {
             asio::post(session->strand(), [session] {
                 if (auto share = session->screenShareOnStrand()) share->SetTransportReady(true);
+                if (auto board = session->whiteboardOnStrand()) {
+                    board->setTransportReady(true, static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch()));
+                }
             });
         }
         auto *coordinator = _coordinator;
@@ -1172,6 +1219,18 @@ MeetingCoordinator::MeetingCoordinator(SessionManager &sessionManager,
 
     _mediaSendTimer = new QTimer(this);
     connect(_mediaSendTimer, &QTimer::timeout, this, &MeetingCoordinator::processNextMediaSendChunk);
+    _whiteboardTickTimer = new QTimer(this);
+    // Asset packets are pumped in small batches. A short tick keeps large image
+    // pages responsive while heartbeat/retry work remains time-gated in Runtime.
+    _whiteboardTickTimer->setInterval(50);
+    connect(_whiteboardTickTimer, &QTimer::timeout, this, [this] {
+        auto session = _sessionRuntime;
+        if (!session || !_sessionRunning.load(std::memory_order_acquire)) return;
+        const auto now = static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
+        asio::post(session->strand(), [session, now] {
+            if (auto board = session->whiteboardOnStrand()) board->tick(now);
+        });
+    });
 
     // 全局账号状态由 SessionManager 统一裁决。这里不发 meetingLeft，避免
     // MeetingRoomWindow 按普通离会逻辑继续调用业务 HTTP 接口。
@@ -1889,6 +1948,7 @@ void MeetingCoordinator::stopRoomSession() {
     _startupCommitted = false;
     _startupReconnectPending = false;
     _startupListenOnly = false;
+    if (_whiteboardTickTimer) _whiteboardTickTimer->stop();
     const bool was_running = _sessionRunning.exchange(false);
     if (!was_running) {
         return;
@@ -1922,6 +1982,10 @@ void MeetingCoordinator::stopRoomSession() {
                 if (auto &share = session->screenShareOnStrand()) {
                     share->Shutdown();
                     share.reset();
+                }
+                if (auto &board = session->whiteboardOnStrand()) {
+                    board->retire();
+                    board.reset();
                 }
 
                 std::vector<QString> failed;
@@ -2000,6 +2064,17 @@ void MeetingCoordinator::stopRoomSession() {
     _remoteVideoTracks.clear();
     _participantEventSequences.clear();
     _nativeRoomGeneration = 0;
+    _whiteboardSnapshot.clear();
+    _whiteboardSequence = 0;
+    _whiteboardState = static_cast<int>(livekit::whiteboard::CollaborationState::Retired);
+    _whiteboardAuthority.clear();
+    _whiteboardLocalActor.clear();
+    _whiteboardLocked = false;
+    _whiteboardWritersOpen = true;
+    _whiteboardCanEdit = false;
+    _whiteboardCanAdmin = false;
+    _whiteboardAssets.clear();
+    _whiteboardStatus.clear();
 
     // Finish resource cleanup before notifications can synchronously delete
     // the owner or start another session. Never clean up that successor.
@@ -2531,6 +2606,199 @@ void MeetingCoordinator::parseRoomMetadata(const std::string &metadata) {
     if (!current()) return;
     const auto updatedDetail = owner->_meetingDetail;
     emit owner->meetingDetailUpdated(updatedDetail);
+    if (owner && owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
+        owner->configureWhiteboardRuntimeOnUiThread();
+    }
+}
+
+void MeetingCoordinator::configureWhiteboardRuntimeOnUiThread() {
+    Q_ASSERT(QThread::currentThread() == thread());
+    auto session = _sessionRuntime;
+    auto room = _room;
+    if (!session || !room || !_sessionRunning.load(std::memory_order_acquire)) return;
+    const QString authority = !_meetingDetail.hostUserId.isEmpty()
+        ? _meetingDetail.hostUserId : _meetingDetail.creatorUserId;
+    QString localIdentity = session->localUserId();
+    if (localIdentity.isEmpty() && room->local_participant())
+        localIdentity = QString::fromStdString(room->local_participant()->identity());
+    if (authority.isEmpty() || localIdentity.isEmpty()) return;
+    const QByteArray boardKey = (_currentMeetingId + QLatin1Char('|') + _roomInfo.sid).toUtf8();
+    const QString documentId = QStringLiteral("board-") + QString::fromLatin1(
+        QCryptographicHash::hash(boardKey, QCryptographicHash::Sha256).toHex().left(32));
+    const auto generation = session->generation();
+    std::vector<livekit::whiteboard::PeerInstance> peers;
+    peers.reserve(_participants.size());
+    for (const auto &[identity, participant] : _participants) {
+        if (participant.participantKey.incarnation == 0) continue;
+        peers.push_back({identity.toStdString(),
+            participant.participantKey.native_room_generation,
+            participant.participantKey.incarnation});
+    }
+    auto transport = std::make_shared<livekit::whiteboard::RoomTransport>(room);
+    livekit::whiteboard::RuntimeConfig config{
+        documentId.toStdString(), localIdentity.toStdString(), authority.toStdString(),
+        localIdentity == authority};
+    const auto now = static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
+    asio::post(session->strand(), [this, session, generation, config = std::move(config),
+                                   peers = std::move(peers), transport, now]() mutable {
+        if (!session->acceptsDataOnStrand() || session->whiteboardOnStrand()) return;
+        auto projectedAssetIds = std::make_shared<std::set<std::string>>();
+        auto project = [this, generation, projectedAssetIds](livekit::whiteboard::Projection value) mutable {
+            QByteArray snapshot(value.snapshot.data(), static_cast<int>(value.snapshot.size()));
+            const auto sequence = static_cast<quint64>(value.sequence);
+            const auto state = static_cast<int>(value.state);
+            QString authorityIdentity = QString::fromStdString(value.authorityIdentity);
+            QString localActor = QString::fromStdString(value.localIdentity);
+            QString status = QString::fromStdString(value.status);
+            QVariantMap assets;
+            for (const auto &asset : value.assets) {
+                if (!asset || !projectedAssetIds->insert(asset->id).second) continue;
+                assets.insert(QString::fromStdString(asset->id),
+                    QByteArray(asset->bytes.data(), static_cast<int>(asset->bytes.size())));
+            }
+            QMetaObject::invokeMethod(this,
+                [this, generation, snapshot = std::move(snapshot), sequence, state,
+                 authorityIdentity = std::move(authorityIdentity), localActor = std::move(localActor),
+                 locked = value.locked, writersOpen = value.writersOpen,
+                 canEdit = value.canEdit, canAdmin = value.canAdmin,
+                 assets = std::move(assets),
+                 status = std::move(status)]() mutable {
+                    projectWhiteboardOnUiThread(generation, std::move(snapshot), sequence, state,
+                        std::move(authorityIdentity), std::move(localActor), locked, writersOpen,
+                        canEdit, canAdmin, std::move(assets), std::move(status));
+                }, Qt::QueuedConnection);
+        };
+        auto send = [transport](std::string_view topic, std::string_view payload,
+                                const std::vector<std::string> &destinations) {
+            return transport->send(topic, payload, destinations);
+        };
+        const auto authorityIdentity = config.authorityIdentity;
+        auto runtime = std::make_shared<livekit::whiteboard::Runtime>(
+            std::move(config), std::move(send), std::move(project));
+        for (const auto &peer : peers) runtime->observePeer(peer);
+        for (const auto &[identity, key] : session->whiteboardPeersOnStrand()) {
+            runtime->observePeer({identity, key.native_room_generation, key.incarnation});
+        }
+        session->whiteboardOnStrand() = runtime;
+        runtime->start(now);
+        for (const auto &[identity, key] : session->whiteboardDeparturesOnStrand()) {
+            if (identity == authorityIdentity)
+                runtime->peerLeft({identity, key.native_room_generation, key.incarnation});
+        }
+    });
+    if (!_whiteboardTickTimer->isActive()) _whiteboardTickTimer->start();
+}
+
+void MeetingCoordinator::activateWhiteboard() {
+    Q_ASSERT(QThread::currentThread() == thread());
+    configureWhiteboardRuntimeOnUiThread();
+    if (_whiteboardSnapshot.isEmpty()) return;
+    emit whiteboardProjectionChanged(_whiteboardSnapshot, _whiteboardSequence, _whiteboardState,
+        _whiteboardAuthority, _whiteboardLocalActor, _whiteboardLocked, _whiteboardWritersOpen,
+        _whiteboardCanEdit, _whiteboardCanAdmin, _whiteboardAssets, _whiteboardStatus);
+}
+
+void MeetingCoordinator::submitWhiteboardCommand(const livekit::whiteboard::Command &command) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    auto session = _sessionRuntime;
+    if (!session || !_sessionRunning.load(std::memory_order_acquire)) return;
+    const auto now = static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
+    asio::post(session->strand(), [session, command, now] {
+        if (!session->acceptsDataOnStrand()) return;
+        if (auto board = session->whiteboardOnStrand()) board->propose(command, now);
+    });
+}
+
+void MeetingCoordinator::submitWhiteboardImage(
+    const QByteArray &png, const QString &assetId, int width, int height,
+    const QString &pageId, bool replaceCurrent) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    auto session = _sessionRuntime;
+    if (!session || !_sessionRunning.load(std::memory_order_acquire) || png.isEmpty()) return;
+    livekit::whiteboard::Asset asset;
+    asset.id = assetId.toStdString();
+    asset.mime = "image/png";
+    asset.width = static_cast<std::uint32_t>(std::max(0, width));
+    asset.height = static_cast<std::uint32_t>(std::max(0, height));
+    asset.bytes.assign(png.constData(), static_cast<std::size_t>(png.size()));
+    const auto commandId = "image-op-" + asset.id.substr(0, 16) + "-" + pageId.toStdString();
+    const auto now = static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
+    asio::post(session->strand(),
+        [session, asset = std::move(asset), commandId, pageId = pageId.toStdString(),
+         replaceCurrent, now]() mutable {
+            if (!session->acceptsDataOnStrand()) return;
+            if (auto board = session->whiteboardOnStrand())
+                board->importImage(std::move(asset), commandId, pageId, replaceCurrent, now);
+        });
+}
+
+void MeetingCoordinator::setWhiteboardLocked(bool locked) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    auto session = _sessionRuntime;
+    if (!session || !_sessionRunning.load(std::memory_order_acquire)) return;
+    const auto now = static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
+    asio::post(session->strand(), [session, locked, now] {
+        if (auto board = session->whiteboardOnStrand()) board->setLocked(locked, now);
+    });
+}
+
+void MeetingCoordinator::setWhiteboardWritersOpen(bool open) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    auto session = _sessionRuntime;
+    if (!session || !_sessionRunning.load(std::memory_order_acquire)) return;
+    const auto now = static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
+    asio::post(session->strand(), [session, open, now] {
+        if (auto board = session->whiteboardOnStrand()) board->setWriters(open, {}, now);
+    });
+}
+
+void MeetingCoordinator::enqueueWhiteboardData(
+    const std::shared_ptr<MeetingSessionRuntime> &session,
+    const std::vector<uint8_t> &data,
+    const std::string &topic,
+    const livekit::SenderContext &sender) {
+    if (!session || !_sessionRunning.load(std::memory_order_acquire) ||
+        !livekit::whiteboard::isWhiteboardTopic(topic)) return;
+    const auto now = static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
+    asio::post(session->strand(), [session, data, topic, sender, now] {
+        if (!session->acceptsDataOnStrand() ||
+            !livekit::IsParticipantTicketActive(sender.ticket, sender.key)) return;
+        livekit::whiteboard::PeerInstance peer{
+            sender.key.identity.empty() ? sender.key.sid : sender.key.identity,
+            sender.key.native_room_generation,
+            sender.key.incarnation};
+        session->whiteboardPeersOnStrand()[peer.identity] = sender.key;
+        session->whiteboardDeparturesOnStrand().erase(peer.identity);
+        auto board = session->whiteboardOnStrand();
+        if (!board) return;
+        board->observePeer(peer);
+        board->receive(topic,
+            std::string_view(reinterpret_cast<const char *>(data.data()), data.size()), peer, now);
+    });
+}
+
+void MeetingCoordinator::projectWhiteboardOnUiThread(
+    uint64_t sessionGeneration, QByteArray snapshot, quint64 sequence,
+    int collaborationState, QString authorityIdentity, QString localActor,
+    bool locked, bool writersOpen, bool canEdit, bool canAdmin,
+    QVariantMap assets, QString status) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
+    _whiteboardSnapshot = std::move(snapshot);
+    _whiteboardSequence = sequence;
+    _whiteboardState = collaborationState;
+    _whiteboardAuthority = std::move(authorityIdentity);
+    _whiteboardLocalActor = std::move(localActor);
+    _whiteboardLocked = locked;
+    _whiteboardWritersOpen = writersOpen;
+    _whiteboardCanEdit = canEdit;
+    _whiteboardCanAdmin = canAdmin;
+    for (auto it = assets.begin(); it != assets.end(); ++it)
+        _whiteboardAssets.insert(it.key(), it.value());
+    _whiteboardStatus = std::move(status);
+    emit whiteboardProjectionChanged(_whiteboardSnapshot, _whiteboardSequence, _whiteboardState,
+        _whiteboardAuthority, _whiteboardLocalActor, _whiteboardLocked, _whiteboardWritersOpen,
+        _whiteboardCanEdit, _whiteboardCanAdmin, _whiteboardAssets, _whiteboardStatus);
 }
 
 void MeetingCoordinator::enqueueDataReceived(const std::shared_ptr<MeetingSessionRuntime> &session,

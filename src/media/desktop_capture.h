@@ -1,20 +1,14 @@
 #pragma once
 
 #include "video_frame.h"
+#include "screen_binding.h"
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <string>
+#include <optional>
 #include <vector>
 
 namespace livekit {
-
-enum class DesktopSourceKind { Screen, Window };
-struct DesktopSource {
-    DesktopSourceKind kind = DesktopSourceKind::Screen;
-    intptr_t id = 0;
-    std::string title;
-};
 
 class IDesktopCapture {
 public:
@@ -29,5 +23,9 @@ public:
 
 std::vector<DesktopSource> EnumerateDesktopSources();
 std::unique_ptr<IDesktopCapture> CreateDesktopCapture();
+std::optional<ScreenBinding> ResolveScreenBinding(
+    const DesktopSource &source, std::uint64_t sourceEpoch,
+    std::string shareSessionId);
+bool ValidateScreenBinding(const ScreenBinding &binding);
 
 } // namespace livekit

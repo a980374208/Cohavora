@@ -1,10 +1,28 @@
 #include "screen_share_session.h"
 #include "room.h"
+#include <array>
 #include <atomic>
+#include <chrono>
 #include <mutex>
+#include <random>
 
 namespace livekit {
 using namespace std::chrono_literals;
+namespace {
+std::string NewShareSessionId() {
+    std::array<unsigned char, 16> bytes{};
+    std::random_device random;
+    for (auto &byte : bytes) byte = static_cast<unsigned char>(random());
+    constexpr char digits[] = "0123456789abcdef";
+    std::string result = "share-";
+    result.reserve(6 + bytes.size() * 2);
+    for (const auto byte : bytes) {
+        result.push_back(digits[byte >> 4]);
+        result.push_back(digits[byte & 0xf]);
+    }
+    return result;
+}
+}
 
 struct ScreenShareSession::Run {
     explicit Run(asio::any_io_executor executor, uint64_t id)
@@ -17,6 +35,8 @@ struct ScreenShareSession::Run {
     std::shared_ptr<LocalVideoTrack> track;
     std::shared_ptr<render::VideoRenderRouter> preview;
     std::string source_title;
+    DesktopSourceKind source_kind = DesktopSourceKind::Window;
+    std::optional<ScreenBinding> annotation_binding;
     std::mutex delivery;
     bool accepting = true; // delivery mutex; Stop is a frame barrier
     std::atomic<bool> first_frame{false};
@@ -68,6 +88,8 @@ void ScreenShareSession::SetState(ScreenShareState state, ScreenShareError error
     snapshot_ = {state, error};
     if (run_) {
         snapshot_.source_title = run_->source_title;
+        snapshot_.source_kind = run_->source_kind;
+        snapshot_.annotation_binding = run_->annotation_binding;
         if (state == ScreenShareState::Active) snapshot_.preview = run_->preview;
     }
     if (!closed_ && observer_) observer_(snapshot_);
@@ -89,6 +111,15 @@ void ScreenShareSession::Start(DesktopSource source) {
     if (closed_ || run_ || !transport_ready_ || !backend_.connected()) return;
     auto run = std::make_shared<Run>(strand_, ++next_run_);
     run->source_title = source.title;
+    run->source_kind = source.kind;
+    if (source.kind == DesktopSourceKind::Screen && backend_.resolve_screen_binding) {
+        try {
+            run->annotation_binding = backend_.resolve_screen_binding(
+                source, run->id, NewShareSessionId());
+        } catch (...) {
+            run->annotation_binding.reset();
+        }
+    }
     run_ = run;
     SetState(ScreenShareState::Starting);
     run->driving = true;
@@ -165,7 +196,20 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
                 if (!self->closed_ && !run->stopping && !run->ended.load())
                     self->SetState(ScreenShareState::Active);
             }
+            auto nextGeometryCheck = std::chrono::steady_clock::now();
             while (!self->closed_ && !run->stopping && !run->ended.load()) {
+                if (run->annotation_binding && self->backend_.validate_screen_binding &&
+                    std::chrono::steady_clock::now() >= nextGeometryCheck) {
+                    bool valid = false;
+                    try { valid = self->backend_.validate_screen_binding(*run->annotation_binding); }
+                    catch (...) { valid = false; }
+                    if (!valid) {
+                        failure = ScreenShareError::Capture;
+                        break;
+                    }
+                    nextGeometryCheck = std::chrono::steady_clock::now() +
+                        self->backend_.geometry_check_interval;
+                }
                 run->timer.expires_after(20ms);
                 std::error_code error;
                 co_await run->timer.async_wait(asio::redirect_error(asio::use_awaitable, error));

@@ -3,12 +3,15 @@
 #include "modules/desktop_capture/desktop_capturer.h"
 #include "modules/desktop_capture/desktop_capture_options.h"
 #include "modules/desktop_capture/desktop_frame.h"
+#include "modules/desktop_capture/win/screen_capture_utils.h"
 #include "libyuv/convert.h"
 #include <windows.h>
 #include <objbase.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cmath>
 #include <mutex>
 #include <thread>
 
@@ -143,4 +146,63 @@ std::vector<DesktopSource> EnumerateDesktopSources() {
 }
 
 std::unique_ptr<IDesktopCapture> CreateDesktopCapture() { return std::make_unique<DesktopCapture>(); }
+
+std::optional<ScreenBinding> ResolveScreenBinding(
+        const DesktopSource &source, std::uint64_t sourceEpoch,
+        std::string shareSessionId) {
+    if (source.kind != DesktopSourceKind::Screen || sourceEpoch == 0 ||
+        shareSessionId.empty()) return std::nullopt;
+    webrtc::DesktopCapturer::SourceList screens;
+    std::vector<std::string> deviceNames;
+    if (!webrtc::GetScreenList(&screens, &deviceNames) ||
+        screens.size() != deviceNames.size()) return std::nullopt;
+    std::optional<std::size_t> matched;
+    for (std::size_t index = 0; index < screens.size(); ++index) {
+        if (screens[index].id != source.id) continue;
+        if (matched) return std::nullopt;
+        matched = index;
+    }
+    if (!matched) return std::nullopt;
+
+    HMONITOR monitor = nullptr;
+    std::wstring deviceKey;
+    if (!webrtc::GetHmonitorFromDeviceIndex(source.id, &monitor) || !monitor ||
+        !webrtc::IsMonitorValid(monitor) ||
+        !webrtc::IsScreenValid(source.id, &deviceKey)) return std::nullopt;
+    const auto rect = webrtc::GetScreenRect(source.id, deviceKey);
+    if (rect.is_empty()) return std::nullopt;
+    const int width = rect.width();
+    const int height = rect.height();
+    if (width < 320 || height < 180 || width > 16384 || height > 16384) return std::nullopt;
+    const double scale = std::min(1.0, 4096.0 / std::max(width, height));
+
+    ScreenBinding result;
+    result.share_session_id = std::move(shareSessionId);
+    result.source_epoch = sourceEpoch;
+    result.source_id = source.id;
+    result.display_name = deviceNames[*matched];
+    result.device_key = std::move(deviceKey);
+    result.physical_x = rect.left();
+    result.physical_y = rect.top();
+    result.physical_width = width;
+    result.physical_height = height;
+    result.canonical_width = std::max(320, static_cast<int>(std::lround(width * scale)));
+    result.canonical_height = std::max(180, static_cast<int>(std::lround(height * scale)));
+    return result;
+}
+
+bool ValidateScreenBinding(const ScreenBinding &binding) {
+    if (binding.source_epoch == 0 || binding.share_session_id.empty() ||
+        binding.device_key.empty()) return false;
+    HMONITOR monitor = nullptr;
+    std::wstring currentKey;
+    if (!webrtc::GetHmonitorFromDeviceIndex(binding.source_id, &monitor) || !monitor ||
+        !webrtc::IsMonitorValid(monitor) ||
+        !webrtc::IsScreenValid(binding.source_id, &currentKey) ||
+        currentKey != binding.device_key) return false;
+    const auto rect = webrtc::GetScreenRect(binding.source_id, binding.device_key);
+    return !rect.is_empty() &&
+        rect.left() == binding.physical_x && rect.top() == binding.physical_y &&
+        rect.width() == binding.physical_width && rect.height() == binding.physical_height;
+}
 } // namespace livekit

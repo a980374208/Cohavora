@@ -6,12 +6,16 @@
 
 #include <cstdint>
 #include <map>
+#include <string>
 #include <utility>
 #include <tuple>
 
 #include "participant_event.h"
 
-namespace livekit { class ScreenShareSession; }
+namespace livekit {
+class ScreenShareSession;
+namespace whiteboard { class Runtime; }
+}
 
 namespace OpenMeeting {
 
@@ -113,6 +117,21 @@ public:
         return _screenShare;
     }
 
+    std::shared_ptr<livekit::whiteboard::Runtime> &whiteboardOnStrand() {
+        assertOnStrand();
+        return _whiteboard;
+    }
+
+    std::map<std::string, livekit::ParticipantKey> &whiteboardPeersOnStrand() {
+        assertOnStrand();
+        return _whiteboardPeers;
+    }
+
+    std::map<std::string, livekit::ParticipantKey> &whiteboardDeparturesOnStrand() {
+        assertOnStrand();
+        return _whiteboardDepartures;
+    }
+
 private:
     Strand _strand;
     const uint64_t _generation;
@@ -120,6 +139,9 @@ private:
     bool _acceptingData = true;
     std::map<InboundTransferKey, InboundMediaTransfer> _inboundMediaTransfers;
     std::shared_ptr<livekit::ScreenShareSession> _screenShare;
+    std::shared_ptr<livekit::whiteboard::Runtime> _whiteboard;
+    std::map<std::string, livekit::ParticipantKey> _whiteboardPeers;
+    std::map<std::string, livekit::ParticipantKey> _whiteboardDepartures;
 };
 
 } // namespace OpenMeeting
