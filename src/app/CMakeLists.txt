@@ -48,6 +48,7 @@ add_executable(cohavora_app
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_ui_integration.h
     ${PROJECT_SOURCE_DIR}/src/core/meeting_coordinator.h
     ${PROJECT_SOURCE_DIR}/src/core/meeting_coordinator.cpp
+    ${PROJECT_SOURCE_DIR}/src/core/whiteboard/whiteboard_transport.h
     ${PROJECT_SOURCE_DIR}/src/render/qt_cpu_video_renderer.h
     ${PROJECT_SOURCE_DIR}/src/render/qt_cpu_video_renderer.cpp
     ${PROJECT_SOURCE_DIR}/src/render/video_render_session.h
@@ -96,6 +97,7 @@ target_include_directories(cohavora_app BEFORE PRIVATE
     ${TDESKTOP_LIBS_DIR}/zlib/include)
 
 target_link_libraries(cohavora_app PRIVATE
+    cohavora_whiteboard_ui
     cohavora_ui_theme
     cohavora_ui_translations
     ${CMAKE_DL_LIBS}

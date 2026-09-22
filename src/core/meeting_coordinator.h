@@ -7,6 +7,7 @@
 #include <QtCore/QByteArray>
 #include <QtCore/QMetaType>
 #include <QtCore/QTimer>
+#include <QtCore/QVariantMap>
 
 #include <memory>
 #include <cstdint>
@@ -24,6 +25,7 @@
 #include "src/core/meeting_session_runtime.h"
 #include "src/core/meeting_startup_transaction.h"
 #include "src/core/screen_share_session.h"
+#include "src/core/whiteboard/whiteboard_document.h"
 #include "src/rtc/video_frame.h"
 #include "src/media/wasapi_capture.h"
 #include "src/media/dshow_capture.h"
@@ -197,6 +199,19 @@ public:
     std::shared_ptr<livekit::AudioSource> localAudioSource() const { return _localAudioSource; }
     std::shared_ptr<livekit::VideoSource> localVideoSource() const { return _localVideoSource; }
 
+    // Whiteboard commands are proposals. Only the session-strand authority
+    // runtime can turn them into ordered commits.
+    void activateWhiteboard();
+    void submitWhiteboardCommand(const livekit::whiteboard::Command &command);
+    void submitWhiteboardImage(const QByteArray &png,
+                               const QString &assetId,
+                               int width,
+                               int height,
+                               const QString &pageId,
+                               bool replaceCurrent);
+    void setWhiteboardLocked(bool locked);
+    void setWhiteboardWritersOpen(bool open);
+
     // 现代数据流发送工厂方法 (DataStream Writers)
     std::shared_ptr<livekit::TextStreamWriter> createTextStreamWriter(
         const QString &topic = QString(),
@@ -278,6 +293,20 @@ signals:
     void textStreamReceived(std::shared_ptr<livekit::TextStreamReader> reader, const QString &senderIdentity);
     void byteStreamReceived(std::shared_ptr<livekit::ByteStreamReader> reader, const QString &senderIdentity);
 
+    // Immutable UI projection. Snapshot bytes are parsed into a value-only
+    // Document on the Qt thread; no runtime or Room lifetime crosses this signal.
+    void whiteboardProjectionChanged(const QByteArray &snapshot,
+                                     quint64 sequence,
+                                     int collaborationState,
+                                     const QString &authorityIdentity,
+                                     const QString &localActor,
+                                     bool locked,
+                                     bool writersOpen,
+                                     bool canEdit,
+                                     bool canAdmin,
+                                     const QVariantMap &assets,
+                                     const QString &status);
+
 private:
     struct AdmissionBackend {
         std::function<void(const QString &, const QString &, ResultCallback<bool>)> joinMeeting;
@@ -335,6 +364,23 @@ private:
     void handleDataReceivedOnSessionStrand(const std::shared_ptr<MeetingSessionRuntime> &session,
                                            const std::vector<uint8_t> &data,
                                            const livekit::SenderContext &sender);
+    void configureWhiteboardRuntimeOnUiThread();
+    void enqueueWhiteboardData(const std::shared_ptr<MeetingSessionRuntime> &session,
+                               const std::vector<uint8_t> &data,
+                               const std::string &topic,
+                               const livekit::SenderContext &sender);
+    void projectWhiteboardOnUiThread(uint64_t sessionGeneration,
+                                     QByteArray snapshot,
+                                     quint64 sequence,
+                                     int collaborationState,
+                                     QString authorityIdentity,
+                                     QString localActor,
+                                     bool locked,
+                                     bool writersOpen,
+                                     bool canEdit,
+                                     bool canAdmin,
+                                     QVariantMap assets,
+                                     QString status);
     void cancelInboundTransfersForParticipant(const livekit::ParticipantKey &participantKey);
     void applyParticipantEventOnUiThread(uint64_t coordinatorGeneration,
                                          const livekit::ParticipantEvent &event);
@@ -416,6 +462,18 @@ private:
     bool _startupCommitted = false;
     bool _startupReconnectPending = false;
     bool _startupListenOnly = false;
+    QTimer *_whiteboardTickTimer = nullptr;
+    QByteArray _whiteboardSnapshot;
+    quint64 _whiteboardSequence = 0;
+    int _whiteboardState = 0;
+    QString _whiteboardAuthority;
+    QString _whiteboardLocalActor;
+    bool _whiteboardLocked = false;
+    bool _whiteboardWritersOpen = true;
+    bool _whiteboardCanEdit = false;
+    bool _whiteboardCanAdmin = false;
+    QVariantMap _whiteboardAssets;
+    QString _whiteboardStatus;
 
     // 本地媒体源与轨道
     std::shared_ptr<livekit::WasapiAudioCapture> _wasapiCap;

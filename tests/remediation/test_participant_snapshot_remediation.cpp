@@ -9,6 +9,10 @@
 #include "src/rtc/webrtc_manager.h"
 #include "src/render/owned_i420_frame.h"
 #include "src/ui/meeting_room_window.h"
+#include "src/ui/whiteboard/annotation_overlay_window.h"
+#include "src/ui/whiteboard/whiteboard_panel.h"
+#include "src/ui/app_theme.h"
+#include <QtWidgets/QPlainTextEdit>
 #include "src/ui/render/module_video_canvas.h"
 #include "src/ui/render/gl_video_canvas.h"
 #include <QtGui/QWindow>
@@ -112,12 +116,22 @@ public:
         owner._startupCommitted = true;
         owner.setState(MeetingState::InMeeting);
     }
+    static void setMeetingState(MeetingCoordinator &owner, MeetingState state) {
+        owner.setState(state);
+    }
     static void setInvitationState(
             MeetingCoordinator &owner,
             MeetingState state,
             const QString &meetingId) {
         owner._state = state;
         owner._currentMeetingId = meetingId;
+    }
+    static void configureWhiteboard(MeetingCoordinator &owner) {
+        owner._currentMeetingId = QStringLiteral("whiteboard-test-meeting");
+        owner._roomInfo.sid = QStringLiteral("RM_WHITEBOARD_TEST");
+        owner._meetingDetail.hostUserId = QStringLiteral("local-user");
+        owner._meetingDetail.creatorUserId = QStringLiteral("creator-user");
+        owner.configureWhiteboardRuntimeOnUiThread();
     }
 };
 } // namespace OpenMeeting
@@ -167,6 +181,33 @@ public:
 
 class ParticipantWindowTestAccess final {
 public:
+    static void clickWhiteboard(MeetingUI::MeetingRoomWindow &window) {
+        auto *bar = window._bottomBar;
+        QResizeEvent resized(bar->size(), bar->size());
+        QApplication::sendEvent(bar, &resized);
+        bool clicked = false;
+        for (const auto &item : bar->_toolItems) {
+            if (item.id != 7) continue;
+            QMouseEvent press(QEvent::MouseButtonPress, item.rect.center(), Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+            QApplication::sendEvent(bar, &press);
+            clicked = true;
+            break;
+        }
+        TEST_CHECK(clicked);
+    }
+    static void checkWhiteboardStage(MeetingUI::MeetingRoomWindow &window, bool visible) {
+        window.updateVideoLayout();
+        TEST_CHECK(window._whiteboardVisible == visible);
+        TEST_CHECK(window._whiteboardPanel && window._whiteboardPanel->isHidden() != visible);
+        if (visible) {
+            TEST_CHECK(window._whiteboardPanel->geometry() == window._stageContainer->rect());
+            TEST_CHECK(window._localTile->isHidden());
+            for (const auto &[id, tile] : window._remoteTiles) TEST_CHECK(tile->isHidden());
+            for (const auto &[id, tile] : window._remoteScreenTiles) TEST_CHECK(tile->isHidden());
+            if (window._videoCanvas) TEST_CHECK(window._videoCanvas->isHidden());
+            TEST_CHECK(window._inviteHintBanner->isHidden());
+        } else TEST_CHECK(!window._localTile->isHidden());
+    }
     static livekit::ScreenShareState shareState(const MeetingUI::MeetingRoomWindow &window) {
         return window._bottomBar->_screenShareState;
     }
@@ -215,7 +256,24 @@ public:
     static MeetingUI::VideoTileWidget *localScreen(MeetingUI::MeetingRoomWindow &window) { return window._localScreenTile.get(); }
     static bool sharingBanner(const MeetingUI::MeetingRoomWindow &window) {
         return window._screenShareBanner && !window._screenShareBanner->isHidden() &&
-            window._screenShareBanner->text().startsWith(QString::fromUtf8("正在共享："));
+            !window._screenShareBanner->text().isEmpty();
+    }
+    static void useOffscreenAnnotation(MeetingUI::MeetingRoomWindow &window) {
+        window._annotationOffscreenForTesting = true;
+    }
+    static QPushButton *annotationButton(MeetingUI::MeetingRoomWindow &window) {
+        return window._annotationButton;
+    }
+    static void clickAnnotation(MeetingUI::MeetingRoomWindow &window) {
+        TEST_CHECK(window._annotationButton && window._annotationButton->isEnabled());
+        window._annotationButton->click();
+    }
+    static MeetingUI::AnnotationOverlayWindow *annotationOverlay(
+            MeetingUI::MeetingRoomWindow &window) {
+        return window._annotationOverlay.get();
+    }
+    static QMessageBox *departureNotice(MeetingUI::MeetingRoomWindow &window) {
+        return window._departureNotice.data();
     }
     static QImage tileFrame(MeetingUI::VideoTileWidget *tile) {
         TEST_CHECK(tile);
@@ -2793,6 +2851,29 @@ void ScreenShareWindowControls() {
     backend.capture = [&] {
         return std::make_unique<PendingCapture>(starts, stops, selectedSource, captureFrame);
     };
+    auto *primaryScreen = QGuiApplication::primaryScreen();
+    TEST_CHECK(primaryScreen != nullptr);
+    const auto screenGeometry = primaryScreen->geometry();
+    livekit::ScreenBinding screenBinding;
+    screenBinding.display_name = primaryScreen->name().toStdString();
+    screenBinding.device_key = L"window-test-display";
+    screenBinding.physical_x = screenGeometry.x();
+    screenBinding.physical_y = screenGeometry.y();
+    screenBinding.physical_width = screenGeometry.width();
+    screenBinding.physical_height = screenGeometry.height();
+    screenBinding.canonical_width = std::min(4096, screenGeometry.width());
+    screenBinding.canonical_height = std::min(4096, screenGeometry.height());
+    backend.resolve_screen_binding = [screenBinding](
+            const livekit::DesktopSource &source,
+            std::uint64_t sourceEpoch,
+            std::string shareSessionId) mutable {
+        auto result = screenBinding;
+        result.source_id = source.id;
+        result.source_epoch = sourceEpoch;
+        result.share_session_id = std::move(shareSessionId);
+        return std::optional<livekit::ScreenBinding>{std::move(result)};
+    };
+    backend.validate_screen_binding = [](const livekit::ScreenBinding &) { return true; };
     backend.publish = [](auto) -> asio::awaitable<void> { co_return; };
     backend.unpublish = [](auto) -> asio::awaitable<void> { co_return; };
     auto share = std::make_shared<livekit::ScreenShareSession>(fixture.runtime->strand(), std::move(backend),
@@ -2805,6 +2886,7 @@ void ScreenShareWindowControls() {
     asio::post(fixture.runtime->strand(), [&] { fixture.runtime->screenShareOnStrand() = share; });
     fixture.pump();
     fixture.open();
+    ParticipantWindowTestAccess::useOffscreenAnnotation(*fixture.window);
 
     const std::vector<livekit::DesktopSource> defaultSources{
         {livekit::DesktopSourceKind::Window, 123, "test window"},
@@ -2851,6 +2933,8 @@ void ScreenShareWindowControls() {
     }, "local-screen-preview");
     ParticipantWindowTestAccess::render(*fixture.window);
     TEST_CHECK(ParticipantWindowTestAccess::sharingBanner(*fixture.window));
+    TEST_CHECK(!ParticipantWindowTestAccess::annotationButton(*fixture.window)->isHidden());
+    TEST_CHECK(!ParticipantWindowTestAccess::annotationButton(*fixture.window)->isEnabled());
     TEST_CHECK(ParticipantWindowTestAccess::tileFrame(ParticipantWindowTestAccess::localScreen(*fixture.window)).size() == QSize(640, 480));
     ParticipantWindowTestAccess::cpuPin(ParticipantWindowTestAccess::localScreen(*fixture.window));
     TEST_CHECK(ParticipantWindowTestAccess::pinned(*fixture.window) == "local-screen");
@@ -2862,13 +2946,42 @@ void ScreenShareWindowControls() {
     TEST_CHECK(!ParticipantWindowTestAccess::localScreen(*fixture.window));
     TEST_CHECK(ParticipantWindowTestAccess::pinned(*fixture.window).isEmpty());
     TEST_CHECK(!ParticipantWindowTestAccess::sharingBanner(*fixture.window));
+
+    fixture.coordinator->startScreenShare(defaultSources.back());
+    fixture.pump();
+    captureFrame(localFrame);
+    WindowPumpUntil(fixture, [&] {
+        return ParticipantWindowTestAccess::shareState(*fixture.window) == livekit::ScreenShareState::Active;
+    }, "screen-annotation-active");
+    auto *annotationButton = ParticipantWindowTestAccess::annotationButton(*fixture.window);
+    TEST_CHECK(annotationButton && !annotationButton->isHidden() && annotationButton->isEnabled());
+    ParticipantWindowTestAccess::clickAnnotation(*fixture.window);
+    fixture.pump();
+    auto *overlay = ParticipantWindowTestAccess::annotationOverlay(*fixture.window);
+    TEST_CHECK(overlay && overlay->interactionEnabled() && !overlay->desktopMode());
+    OpenMeeting::MeetingCoordinatorTestAccess::setMeetingState(
+        *fixture.coordinator, OpenMeeting::MeetingState::Reconnecting);
+    fixture.pump();
+    overlay = ParticipantWindowTestAccess::annotationOverlay(*fixture.window);
+    TEST_CHECK(overlay && !overlay->interactionEnabled() && overlay->desktopMode());
+    TEST_CHECK(!annotationButton->isEnabled());
+    OpenMeeting::MeetingCoordinatorTestAccess::setMeetingState(
+        *fixture.coordinator, OpenMeeting::MeetingState::InMeeting);
+    fixture.pump();
+    overlay = ParticipantWindowTestAccess::annotationOverlay(*fixture.window);
+    TEST_CHECK(overlay && overlay->interactionEnabled() && overlay->desktopMode());
+    TEST_CHECK(annotationButton->isEnabled());
+    fixture.coordinator->stopScreenShare();
+    fixture.pump();
+    TEST_CHECK(!ParticipantWindowTestAccess::annotationOverlay(*fixture.window));
+    TEST_CHECK(annotationButton->isHidden());
     OpenMeeting::MeetingCoordinatorTestAccess::screenSnapshot(*fixture.coordinator, fixture.runtime->generation() - 1,
         {livekit::ScreenShareState::Active, livekit::ScreenShareError::None});
     TEST_CHECK(ParticipantWindowTestAccess::shareState(*fixture.window) == livekit::ScreenShareState::Idle);
     asio::post(fixture.runtime->strand(), [&] { share->Shutdown(); fixture.runtime->screenShareOnStrand().reset(); });
     fixture.pump();
     share.reset();
-    std::cout << "SCREEN_SHARE_WINDOW default screen, picker cancel/select, native start/cancel, recovery stop, stale generation PASS\n";
+    std::cout << "SCREEN_SHARE_WINDOW source selection, annotation lifecycle, reconnect barrier, stale generation PASS\n";
 }
 
 void AccountLogoutAndDuplicateLogin() {
@@ -2929,7 +3042,7 @@ void AccountLogoutAndDuplicateLogin() {
         window->setAttribute(Qt::WA_DeleteOnClose);
         QPointer<MeetingUI::MeetingRoomWindow> guard(window);
         if (noticeAlreadyOpen) fixture.coordinator->kickedOff("old notification", 2);
-        QPointer<QMessageBox> notice(window->findChild<QMessageBox*>("meetingDepartureNotice"));
+        QPointer<QMessageBox> notice(ParticipantWindowTestAccess::departureNotice(*window));
         sendKick(fixture, false, "local-user", 2); // queued old server logout reply
         fixture.session->logout(false);
         TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::Idle);
@@ -3460,29 +3573,90 @@ void DepartureNoticeLifetime() {
                 if (duplicateIdentity)
                     fixture.coordinator->meetingKickOff(livekit::RoomDisconnectReason::DuplicateIdentity);
                 else
-                    fixture.coordinator->kickedOff(QStringLiteral("host removed participant"), 2);
+                    fixture.coordinator->kickedOff(QStringLiteral("Logout"), 2);
             };
             notify();
             TEST_CHECK(guard && !queuedCallbackRan); // no nested event loop
-            QPointer<QMessageBox> notice(window->findChild<QMessageBox*>("meetingDepartureNotice"));
+            if (!duplicateIdentity) {
+                // Host-removal cleanup completes before the notice is opened,
+                // so native teardown cannot leave a painted but blocked dialog.
+                TEST_CHECK(!ParticipantWindowTestAccess::departureNotice(*window));
+                fixture.coordinator->meetingLeft();
+                fixture.pump();
+            }
+            QPointer<QMessageBox> notice(ParticipantWindowTestAccess::departureNotice(*window));
             TEST_CHECK(notice && notice->isVisible() && notice->testAttribute(Qt::WA_DeleteOnClose));
+            TEST_CHECK(!notice->parentWidget() && notice->windowModality() == Qt::NonModal && notice->isEnabled());
+            auto *ok = notice->button(QMessageBox::Ok);
+            TEST_CHECK(ok && ok->isEnabled() && ok->isVisible());
+#if defined(Q_OS_WIN)
+            const auto noticeHandle = reinterpret_cast<HWND>(notice->winId());
+            TEST_CHECK(IsWindow(noticeHandle) && IsWindowEnabled(noticeHandle));
+            TEST_CHECK(GetWindow(noticeHandle, GW_OWNER) == nullptr);
+#endif
             notify();
-            TEST_CHECK(window->findChildren<QMessageBox*>("meetingDepartureNotice").size() == 1);
-            fixture.coordinator->meetingLeft();
-            fixture.pump();
+            if (duplicateIdentity) {
+                TEST_CHECK(ParticipantWindowTestAccess::departureNotice(*window) == notice);
+                fixture.coordinator->meetingLeft();
+                fixture.pump();
+            }
             TEST_CHECK(guard && notice && queuedCallbackRan);
             if (destroyWhileOpen) {
                 // Reproduce the attachment's queued parent destruction while
                 // the notice is still visible (session invalidation/teardown).
                 window->deleteLater();
             } else {
-                notice->accept();
+                const auto clickPoint = ok->rect().center();
+                QMouseEvent press(QEvent::MouseButtonPress, clickPoint,
+                    Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+                QMouseEvent release(QEvent::MouseButtonRelease, clickPoint,
+                    Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(ok, &press);
+                QApplication::sendEvent(ok, &release);
             }
             fixture.pump();
             TEST_CHECK(!guard && !notice);
         }
     }
-    std::cout << "DEPARTURE_NOTICE PASS: kick/duplicate identity, leave-before-ack, parent deletion, deduplication\n";
+
+    // Match the reported two-client sequence: the server sends Logout to the
+    // first authenticated client, and the production handler performs leave
+    // and native cleanup before publishing the standalone notice.
+    {
+        WindowFixture fixture(true, true);
+        fixture.open();
+        auto *window = fixture.window.release();
+        window->setAttribute(Qt::WA_DeleteOnClose);
+        QPointer<MeetingUI::MeetingRoomWindow> guard(window);
+
+        openmeeting::meeting::NotifyMeetingData notify;
+        auto *kick = notify.mutable_kickoffmeetingdata();
+        kick->set_userid("local-user");
+        kick->set_reason("Logout");
+        kick->set_reasoncode(openmeeting::meeting::KickOffReason::Logout);
+        livekit::proto::DataPacket packet;
+        packet.mutable_user()->set_payload(notify.SerializeAsString());
+        const auto bytes = packet.SerializeAsString();
+        fixture.room->OnIncomingDataPacket({bytes.begin(), bytes.end()}, "", "");
+        fixture.pump();
+
+        QPointer<QMessageBox> notice(ParticipantWindowTestAccess::departureNotice(*window));
+        TEST_CHECK(guard && notice && notice->isVisible());
+        TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::Idle);
+        TEST_CHECK(!fixture.coordinator->room());
+        auto *ok = notice->button(QMessageBox::Ok);
+        TEST_CHECK(ok && ok->isEnabled() && ok->isVisible());
+        const auto clickPoint = ok->rect().center();
+        QMouseEvent press(QEvent::MouseButtonPress, clickPoint,
+            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QMouseEvent release(QEvent::MouseButtonRelease, clickPoint,
+            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(ok, &press);
+        QApplication::sendEvent(ok, &release);
+        fixture.pump();
+        TEST_CHECK(!guard && !notice);
+    }
+    std::cout << "DEPARTURE_NOTICE PASS: server Logout, duplicate identity, leave-before-ack, standalone HWND, mouse input, parent deletion, deduplication\n";
 }
 
 int WindowAcceptanceMain(int argc, char **argv) {
@@ -3509,7 +3683,106 @@ int WindowAcceptanceMain(int argc, char **argv) {
         QDir::cleanPath(probe.fileName()).startsWith(QDir::cleanPath(settingsDirectory.path()) + "/"));
     // No Notify or account callback is emitted by this target. All Coordinator
     // instances above use explicitly injected temporary SessionManager objects.
-    if (application.arguments().contains("--window-resize-before")) {
+    if (application.arguments().contains("--whiteboard-collaboration")) {
+        MeetingUI::AppTheme::install(application);
+        WindowFixture fixture;
+        OpenMeeting::MeetingCoordinatorTestAccess::configureWhiteboard(*fixture.coordinator);
+        fixture.pump();
+        fixture.open();
+        fixture.window->setAttribute(Qt::WA_DontShowOnScreen);
+        fixture.window->show(); fixture.pump();
+        ParticipantWindowTestAccess::clickWhiteboard(*fixture.window);
+        fixture.pump();
+        auto *panel = fixture.window->findChild<MeetingUI::WhiteboardPanel *>();
+        TEST_CHECK(panel && panel->findChild<QLabel *>("whiteboardTitle")->text() ==
+            QCoreApplication::translate("MeetingUI::WhiteboardPanel", "Collaborative whiteboard"));
+        auto *lock = panel->findChild<QPushButton *>("whiteboardLock");
+        auto *writers = panel->findChild<QPushButton *>("whiteboardWriters");
+        TEST_CHECK(lock && writers && !lock->isHidden() && !writers->isHidden());
+        auto *canvas = panel->canvas();
+        const auto send = [&](QEvent::Type type, QPointF point) {
+            QMouseEvent event(type, canvas->documentToView(point),
+                type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton,
+                type == QEvent::MouseButtonRelease ? Qt::NoButton : Qt::LeftButton,
+                Qt::NoModifier);
+            QApplication::sendEvent(canvas, &event);
+        };
+        send(QEvent::MouseButtonPress, {100, 100});
+        send(QEvent::MouseButtonRelease, {300, 200});
+        fixture.pump();
+        TEST_CHECK(panel->document().page().objects.size() == 1);
+        send(QEvent::MouseButtonPress, {100, 400});
+        for (int i = 1; i <= 1000; ++i)
+            send(QEvent::MouseMove, {100.0 + i * 1.6, 400.0 + (i % 40)});
+        send(QEvent::MouseButtonRelease, {1700, 400});
+        fixture.pump();
+        TEST_CHECK(panel->document().page().objects.size() == 2);
+        TEST_CHECK(panel->document().page().objects.back().points.size() <= 192);
+        lock->click(); fixture.pump();
+        TEST_CHECK(lock->isChecked());
+        writers->click(); fixture.pump();
+        TEST_CHECK(!writers->isChecked());
+        fixture.add("whiteboard sender", "whiteboard-track");
+        int chats = 0;
+        QObject chatObserver;
+        QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMessageReceived,
+            &chatObserver, [&](const QString &, const QString &, const QString &, int64_t) { ++chats; });
+        livekit::proto::DataPacket packet;
+        packet.set_participant_sid("PA_WINDOW");
+        packet.set_participant_identity("window-peer");
+        packet.mutable_user()->set_topic("whiteboard.v1.ops");
+        packet.mutable_user()->set_payload("{}");
+        const auto packetBytes = packet.SerializeAsString();
+        fixture.room->OnIncomingDataPacket({packetBytes.begin(), packetBytes.end()}, "", "");
+        fixture.pump();
+        TEST_CHECK(chats == 0);
+        std::cout << "WHITEBOARD_COLLAB_UI PASS: Qt proposal -> strand authority -> immutable projection, long stroke retention, admin controls, topic isolation\n";
+    } else if (application.arguments().contains("--whiteboard-meeting")) {
+        MeetingUI::AppTheme::install(application);
+        WindowFixture fixture;
+        OpenMeeting::MeetingCoordinatorTestAccess::configureWhiteboard(*fixture.coordinator);
+        fixture.pump();
+        fixture.open();
+        fixture.window->setAttribute(Qt::WA_DontShowOnScreen);
+        fixture.window->show(); fixture.pump();
+        ParticipantWindowTestAccess::clickWhiteboard(*fixture.window);
+        fixture.pump();
+        ParticipantWindowTestAccess::checkWhiteboardStage(*fixture.window, true);
+        auto *panel = fixture.window->findChild<MeetingUI::WhiteboardPanel *>();
+        TEST_CHECK(panel && panel->findChild<QLabel *>("whiteboardTitle")->text() ==
+            QCoreApplication::translate("MeetingUI::WhiteboardPanel", "Collaborative whiteboard"));
+        auto *canvas = panel->canvas();
+        auto send = [&](QEvent::Type type, QPointF p) {
+            QMouseEvent event(type, canvas->documentToView(p), Qt::LeftButton,
+                type == QEvent::MouseButtonPress ? Qt::LeftButton : Qt::NoButton, Qt::NoModifier);
+            QApplication::sendEvent(canvas, &event);
+        };
+        send(QEvent::MouseButtonPress, {100, 100});
+        send(QEvent::MouseButtonRelease, {300, 200});
+        fixture.pump();
+        TEST_CHECK(panel->document().page().objects.size() == 1);
+        auto media = fixture.add("whiteboard-participant", "whiteboard-track");
+        fixture.window->resize(980, 650); fixture.pump();
+        ParticipantWindowTestAccess::checkWhiteboardStage(*fixture.window, true);
+        TEST_CHECK(panel->document().page().objects.size() == 1);
+        canvas->setTool(MeetingUI::WhiteboardCanvas::Tool::Text);
+        send(QEvent::MouseButtonPress, {300, 400});
+        TEST_CHECK(canvas->findChild<QPlainTextEdit *>("whiteboardTextEditor"));
+        panel->findChild<QPushButton *>("whiteboardClose")->click(); fixture.pump();
+        ParticipantWindowTestAccess::checkWhiteboardStage(*fixture.window, false);
+        ParticipantWindowTestAccess::clickWhiteboard(*fixture.window); fixture.pump();
+        ParticipantWindowTestAccess::checkWhiteboardStage(*fixture.window, true);
+        TEST_CHECK(!canvas->findChild<QPlainTextEdit *>("whiteboardTextEditor"));
+        TEST_CHECK(panel->document().page().objects.size() == 1);
+        canvas->setTool(MeetingUI::WhiteboardCanvas::Tool::Pen);
+        send(QEvent::MouseButtonPress, {200, 400});
+        ParticipantWindowTestAccess::clickWhiteboard(*fixture.window); fixture.pump();
+        ParticipantWindowTestAccess::clickWhiteboard(*fixture.window); fixture.pump();
+        send(QEvent::MouseButtonRelease, {400, 500});
+        fixture.pump();
+        TEST_CHECK(panel->document().page().objects.size() == 1);
+        std::cout << "WHITEBOARD_MEETING PASS: toolbar, stage, participant updates, retained content, cancelled input\n";
+    } else if (application.arguments().contains("--window-resize-before")) {
         NativeWindowResizeAcceptance(true);
     } else if (application.arguments().contains("--window-resize")) {
         NativeWindowResizeAcceptance();

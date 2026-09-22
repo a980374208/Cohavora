@@ -28,6 +28,8 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/RenderTests.cmake)
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/ApplicationTests.cmake)
 
+include(${CMAKE_CURRENT_LIST_DIR}/cmake/WhiteboardTests.cmake)
+
 # Keep test binaries and module fixtures in the established top-level output
 # directory even though their target definitions now live in this subdirectory.
 get_property(LIVEKIT_TEST_TARGETS DIRECTORY PROPERTY BUILDSYSTEM_TARGETS)

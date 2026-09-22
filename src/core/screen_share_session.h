@@ -6,6 +6,7 @@
 #include "render/video_render_router.h"
 #include <functional>
 #include <memory>
+#include <optional>
 
 namespace livekit {
 class Room;
@@ -18,6 +19,8 @@ struct ScreenShareSnapshot {
     // Bounded frame mailbox only; the UI never owns capture/Track resources.
     std::shared_ptr<render::VideoRenderRouter> preview;
     std::string source_title;
+    DesktopSourceKind source_kind = DesktopSourceKind::Window;
+    std::optional<ScreenBinding> annotation_binding;
 };
 
 // Mirrors Flutter's serialized setSourceEnabled(screenShareVideo): capture,
@@ -31,7 +34,13 @@ public:
         std::function<bool()> connected;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>)> publish;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>)> unpublish;
+        std::function<std::optional<ScreenBinding>(
+            const DesktopSource &, std::uint64_t, std::string)> resolve_screen_binding =
+                ResolveScreenBinding;
+        std::function<bool(const ScreenBinding &)> validate_screen_binding =
+            ValidateScreenBinding;
         std::chrono::milliseconds first_frame_timeout{5000};
+        std::chrono::milliseconds geometry_check_interval{500};
     };
     using Observer = std::function<void(ScreenShareSnapshot)>;
     static Backend ForRoom(const std::shared_ptr<Room>& room);

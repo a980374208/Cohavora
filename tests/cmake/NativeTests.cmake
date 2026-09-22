@@ -243,6 +243,14 @@ target_link_libraries(test_desktop_capture_runtime PRIVATE cohavora_core)
 add_executable(test_screen_share_runtime ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_screen_share_runtime.cpp)
 target_include_directories(test_screen_share_runtime PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
 target_link_libraries(test_screen_share_runtime PRIVATE cohavora_core)
+
+# Opt-in M0 probe for native annotation overlays. It opens real desktop
+# windows, moves the pointer inside an owned fixture, and captures one screen,
+# so it is built for explicit runtime use but never registered in CTest.
+add_executable(test_annotation_overlay_runtime
+    ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_annotation_overlay_runtime.cpp)
+livekit_configure_qt_test(test_annotation_overlay_runtime)
+target_compile_options(test_annotation_overlay_runtime PRIVATE /utf-8)
 # Opt-in desktop interaction; deliberately not part of device-free CTest.
 
 # VP8 Simulcast Test

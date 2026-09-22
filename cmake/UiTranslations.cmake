@@ -15,6 +15,8 @@ function(livekit_add_ui_translations target)
         "${source_root}/src/ui/*.cpp"
         "${source_root}/src/ui/*.h"
         "${source_root}/src/ui/render/*.cpp"
+        "${source_root}/src/ui/whiteboard/*.cpp"
+        "${source_root}/src/ui/whiteboard/*.h"
         "${source_root}/src/net/*.cpp"
         "${source_root}/src/net/*.h")
     list(APPEND ui_translation_sources

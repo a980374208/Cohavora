@@ -42,6 +42,7 @@
 #include <mutex>
 #include <cstring>
 #include <functional>
+#include <optional>
 
 #include <mmdeviceapi.h>
 #include <audioclient.h>
@@ -58,6 +59,9 @@ class CameraOwnerTestAccess;
 class ParticipantWindowTestAccess;
 
 namespace MeetingUI {
+
+class WhiteboardPanel;
+class AnnotationOverlayWindow;
 
 enum class VideoViewMode {
 	Auto,       // 根据参会人数自动选择
@@ -295,6 +299,7 @@ public:
 	rpl::producer<> inviteClicked() const { return _inviteStream.events(); }
 	rpl::producer<> participantsClicked() const { return _participantsStream.events(); }
 	rpl::producer<> chatClicked() const { return _chatStream.events(); }
+	rpl::producer<> whiteboardClicked() const { return _whiteboardStream.events(); }
 	rpl::producer<> endMeetingClicked() const { return _endMeetingStream.events(); }
 	rpl::producer<QString> sendChatRequested() const { return _sendChatStream.events(); }
 	rpl::producer<QString> microphoneDeviceChanged() const { return _micDeviceStream.events(); }
@@ -359,6 +364,7 @@ private:
 	rpl::event_stream<> _inviteStream;
 	rpl::event_stream<> _participantsStream;
 	rpl::event_stream<> _chatStream;
+	rpl::event_stream<> _whiteboardStream;
 	rpl::event_stream<> _endMeetingStream;
 	rpl::event_stream<QString> _sendChatStream;
 	rpl::event_stream<QString> _micDeviceStream;
@@ -463,6 +469,11 @@ private:
 	bool _nativeResizeFilterInstalled = false;
 	void initLayout();
 	void updateVideoLayout();
+	void setupWhiteboardBinding();
+	void setWhiteboardVisible(bool visible);
+	void openAnnotationOverlay();
+	void closeAnnotationOverlay();
+	void setAnnotationInteractionEnabled(bool enabled);
 	void tryActivateGpuBackend();
 	void receiveRenderedVideoFrame(const QImage&, const QString&);
 	void receiveGpuVideoFrame(const std::string&, livekit::render::VideoRenderFrame::Ptr);
@@ -516,6 +527,8 @@ private:
 	bool _closeRequested = false;
 	bool _closingForSessionInvalidation = false;
 	QPointer<QMessageBox> _departureNotice;
+	QString _pendingDepartureTitle;
+	QString _pendingDepartureMessage;
 	VideoViewMode _viewMode = VideoViewMode::Grid;
 
 	// 参会状态
@@ -542,12 +555,18 @@ private:
 	std::unique_ptr<VideoTileWidget> _localScreenTile;
 	std::shared_ptr<livekit::render::VideoRenderRouter> _localScreenPreview;
 	QLabel *_screenShareBanner = nullptr;
+	QPushButton *_annotationButton = nullptr;
+	std::unique_ptr<AnnotationOverlayWindow> _annotationOverlay;
+	std::optional<livekit::ScreenBinding> _annotationBinding;
+	bool _annotationOffscreenForTesting = false;
 	bool _defaultScreenSharePending = false;
 	QLabel *_inviteHintBanner = nullptr;
 	QLabel *_recoveryBanner = nullptr;
 	QTimer *_recoveryBannerFadeTimer = nullptr;
 	bool _wasReconnecting = false;
 	RoomBottomBarWidget *_bottomBar = nullptr;
+	WhiteboardPanel *_whiteboardPanel = nullptr;
+	bool _whiteboardVisible = false;
 	OpenMeeting::ParticipantsSidebarWidget *_participantsSidebar = nullptr;
 	OpenMeeting::MeetingChatSidebarWidget *_chatSidebar = nullptr;
 	ActiveSidebar _activeSidebar = ActiveSidebar::None;

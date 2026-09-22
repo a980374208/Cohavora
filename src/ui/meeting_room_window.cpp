@@ -1,6 +1,8 @@
 #include <QtCore/QCoreApplication>
 #include "src/ui/meeting_room_window.h"
 #include "src/ui/app_theme.h"
+#include "src/ui/whiteboard/annotation_overlay_window.h"
+#include "src/ui/whiteboard/whiteboard_panel.h"
 #include "src/ui/meeting_log_console.h"
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
@@ -20,6 +22,7 @@
 #include <QtCore/QThread>
 #include <algorithm>
 #include <cmath>
+#include <exception>
 
 #if defined(Q_OS_WIN)
 #include <windows.h>
@@ -1046,6 +1049,7 @@ void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 		{ 4, QCoreApplication::translate("MeetingUI", "Invite"), QCoreApplication::translate("MeetingUI", "Invite"), QRect(), true },
 		{ 5, QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(_participantCount), QCoreApplication::translate("MeetingUI", "Participants (%1)").arg(_participantCount), QRect(), false },
 		{ 6, QCoreApplication::translate("MeetingUI", "Chat"), QCoreApplication::translate("MeetingUI", "Chat"), QRect(), false },
+		{ 7, QCoreApplication::translate("MeetingUI", "Whiteboard"), QCoreApplication::translate("MeetingUI", "Whiteboard"), QRect(), false },
 		{ 10, QCoreApplication::translate("MeetingUI", "Simulate Scenario"), QCoreApplication::translate("MeetingUI", "Simulate Scenario"), QRect(), true },
 	};
 
@@ -1190,6 +1194,12 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 				}
 				p.restore();
 			}
+		} else if (item.id == 7) {
+			p.setPen(QPen(QColor(0x16, 0x77, 0xff), 1.6, Qt::SolidLine, Qt::RoundCap));
+			p.setBrush(Qt::NoBrush);
+			p.drawRoundedRect(QRect(cx - 9, cy - 7, 18, 13), 2, 2);
+			p.drawLine(cx - 5, cy + 2, cx + 4, cy - 3);
+			p.drawLine(cx, cy + 6, cx, cy + 10);
 		} else if (item.id == 10) {
 			const QColor bugCol = hovered ? QColor(0x16, 0x77, 0xff) : QColor(0x1f, 0x23, 0x29);
 			p.setPen(QPen(bugCol, 1.6, Qt::SolidLine, Qt::RoundCap));
@@ -1562,6 +1572,9 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 				case 6:
 					_chatStream.fire({});
 					break;
+				case 7:
+					_whiteboardStream.fire({});
+					break;
 				case 10:
 					showSimulateScenarioMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
 					break;
@@ -1808,6 +1821,7 @@ MeetingRoomWindow::MeetingRoomWindow(
 	_recoveryBanner = new QLabel(_stageContainer);
 	_recoveryBanner->hide();
 	setupInvitationBinding();
+	setupWhiteboardBinding();
 	_remoteRenderSession = std::make_unique<livekit::render::VideoRenderSession>(
 		[this](const std::string &identity, const QImage &image) {
 			receiveRenderedVideoFrame(image, QString::fromStdString(identity));
@@ -1845,6 +1859,13 @@ MeetingRoomWindow::MeetingRoomWindow(
 
 MeetingRoomWindow::~MeetingRoomWindow() {
 	if (_nativeResizeFilterInstalled && qApp) qApp->removeNativeEventFilter(this);
+	if (_departureNotice) {
+		// The notice is intentionally not parented to the meeting window.  Close
+		// it explicitly when another teardown path destroys the window first.
+		QObject::disconnect(_departureNotice, nullptr, this, nullptr);
+		_departureNotice->close();
+		_departureNotice.clear();
+	}
 	invalidateCameraCompletion();
 	stopLiveKitSession();
 }
@@ -2137,6 +2158,8 @@ void MeetingRoomWindow::initLayout() {
 	}, lifetime());
 
 	setupInvitationBinding();
+
+	setupWhiteboardBinding();
 
 	_bottomBar->participantsClicked() | rpl::on_next([this] {
 		switchSidebar(ActiveSidebar::Participants);
@@ -2469,6 +2492,13 @@ void MeetingRoomWindow::switchSidebar(ActiveSidebar target) {
 }
 
 void MeetingRoomWindow::updateRecoveryStateUi(OpenMeeting::MeetingState state, const QString &detail) {
+	if (state == OpenMeeting::MeetingState::Reconnecting) {
+		setAnnotationInteractionEnabled(false);
+	} else if (state == OpenMeeting::MeetingState::InMeeting) {
+		setAnnotationInteractionEnabled(true);
+	} else {
+		closeAnnotationOverlay();
+	}
 	if (!_recoveryBanner) return;
 
 	const int stageW = _stageContainer ? _stageContainer->width() : width();
@@ -2553,6 +2583,18 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 	const int stageTop = topBarH + shareBannerH;
 	const int stageH = std::max(0, h - stageTop - bottomBarH);
 	if (_screenShareBanner) _screenShareBanner->setGeometry(0, topBarH, w, shareBannerH);
+	if (_annotationButton && _annotationButton->isVisible() && shareBannerH > 0) {
+		_annotationButton->adjustSize();
+		const auto hint = _annotationButton->sizeHint();
+		const int buttonHeight = std::min(hint.height(), std::max(1, shareBannerH - 8));
+		const int buttonWidth = std::min(hint.width(), std::max(1, w - 24));
+		_annotationButton->setGeometry(
+			std::max(12, w - buttonWidth - 12),
+			std::max(0, (shareBannerH - buttonHeight) / 2),
+			buttonWidth,
+			buttonHeight);
+		_annotationButton->raise();
+	}
 
 	_stageContainer->setGeometry(0, stageTop, stageW, stageH);
 
@@ -2785,7 +2827,7 @@ void MeetingRoomWindow::updateActiveSpeakers(const std::vector<livekit::ActiveSp
 }
 
 void MeetingRoomWindow::tryActivateGpuBackend() {
-	if (!_videoCanvas || !_remoteRenderSession || !_remoteRenderSession->active() ||
+	if (_whiteboardVisible || !_videoCanvas || !_remoteRenderSession || !_remoteRenderSession->active() ||
         _usingGpuBackend.load(std::memory_order_acquire)) return;
     if (_gpuBackendActivationAttempted) {
         if (!_videoCanvas->rendererReady()) return;
@@ -2838,7 +2880,7 @@ void MeetingRoomWindow::fallBackToQtCpuBackend() {
 }
 
 void MeetingRoomWindow::syncVideoCanvasLayout(const std::vector<VideoTileWidget*> &tiles) {
-	if (!_usingGpuBackend.load(std::memory_order_acquire) || !_videoCanvas) {
+	if (_whiteboardVisible || !_usingGpuBackend.load(std::memory_order_acquire) || !_videoCanvas) {
 		return;
 	}
 
@@ -2912,6 +2954,43 @@ void MeetingRoomWindow::togglePinForRenderKey(const QString &renderKey) {
 	for (const auto &[sid, tile] : _remoteScreenTiles) if (toggle(tile.get())) return;
 }
 
+void MeetingRoomWindow::setupWhiteboardBinding() {
+	_bottomBar->whiteboardClicked() | rpl::on_next([this] {
+		setWhiteboardVisible(!_whiteboardVisible);
+	}, lifetime());
+}
+
+void MeetingRoomWindow::setWhiteboardVisible(bool visible) {
+	if (visible && !_whiteboardPanel) {
+		_whiteboardPanel = new WhiteboardPanel(_stageContainer);
+		connect(_whiteboardPanel, &WhiteboardPanel::closeRequested, this, [this] {
+			setWhiteboardVisible(false);
+		});
+		if (_coordinator) {
+			connect(_whiteboardPanel, &WhiteboardPanel::commandProposed,
+				_coordinator.get(), &OpenMeeting::MeetingCoordinator::submitWhiteboardCommand);
+			connect(_whiteboardPanel, &WhiteboardPanel::imageProposed,
+				_coordinator.get(), &OpenMeeting::MeetingCoordinator::submitWhiteboardImage);
+			connect(_whiteboardPanel, &WhiteboardPanel::lockRequested,
+				_coordinator.get(), &OpenMeeting::MeetingCoordinator::setWhiteboardLocked);
+			connect(_whiteboardPanel, &WhiteboardPanel::writersOpenRequested,
+				_coordinator.get(), &OpenMeeting::MeetingCoordinator::setWhiteboardWritersOpen);
+			connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::whiteboardProjectionChanged,
+				_whiteboardPanel, &WhiteboardPanel::applyProjection);
+			if (_coordinator->state() == OpenMeeting::MeetingState::InMeeting ||
+				_coordinator->state() == OpenMeeting::MeetingState::Reconnecting) {
+				_whiteboardPanel->enableCollaboration();
+				_coordinator->activateWhiteboard();
+			}
+		}
+	}
+	_whiteboardVisible = visible;
+	if (!visible && _whiteboardPanel) _whiteboardPanel->hide();
+	updateVideoLayout();
+	if (visible) _whiteboardPanel->canvas()->setFocus(Qt::OtherFocusReason);
+	else tryActivateGpuBackend();
+}
+
 void MeetingRoomWindow::updateVideoLayout() {
     if (_remoteRenderSession && _localVideoSource) {
         if (_config.videoEnabled) {
@@ -2937,6 +3016,20 @@ void MeetingRoomWindow::updateVideoLayout() {
 	}
 	if (_localScreenTile) allTiles.push_back(_localScreenTile.get());
 	for (auto &[sid, tile] : _remoteScreenTiles) allTiles.push_back(tile.get());
+	if (_whiteboardVisible && _whiteboardPanel) {
+		for (auto *tile : allTiles) if (tile) tile->hide();
+		if (_videoCanvas) _videoCanvas->hide();
+		if (_inviteHintBanner) _inviteHintBanner->hide();
+		_whiteboardPanel->setGeometry(_stageContainer->rect());
+		_whiteboardPanel->show();
+		_whiteboardPanel->raise();
+		if (_recoveryBanner && _recoveryBanner->isVisible()) {
+			const auto size = bannerSize(*_recoveryBanner, stageW, 420);
+			_recoveryBanner->setGeometry((stageW - size.width()) / 2, 16, size.width(), size.height());
+			_recoveryBanner->raise();
+		}
+		return;
+	}
 	if (std::none_of(allTiles.begin(), allTiles.end(), [this](const auto *tile) {
 		return tile->renderKey() == _pinnedRenderKey;
 	})) _pinnedRenderKey.clear();
@@ -3411,8 +3504,22 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		_screenShareBanner->setWordWrap(true);
 		_screenShareBanner->setAlignment(Qt::AlignCenter);
 		MeetingUI::AppTheme::setStyleVariant(*_screenShareBanner, "meeting-room-window-screensharebanner");
+		_annotationButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Annotate"), _screenShareBanner);
+		_annotationButton->setObjectName(QStringLiteral("screenShareAnnotation"));
+		connect(_annotationButton, &QPushButton::clicked,
+			this, &MeetingRoomWindow::openAnnotationOverlay);
 	}
 	const bool active = snapshot.state == State::Active;
+	std::optional<livekit::ScreenBinding> nextBinding;
+	if (active && snapshot.source_kind == livekit::DesktopSourceKind::Screen &&
+		snapshot.annotation_binding) {
+		nextBinding = snapshot.annotation_binding;
+	}
+	if (_annotationOverlay && (!nextBinding || !_annotationBinding ||
+		*nextBinding != *_annotationBinding)) {
+		closeAnnotationOverlay();
+	}
+	_annotationBinding = std::move(nextBinding);
 	_screenShareBanner->setText(active ? QCoreApplication::translate("MeetingUI", "Sharing: %1").arg(
 		QString::fromStdString(snapshot.source_title).isEmpty() ? QCoreApplication::translate("MeetingUI", "Screen") :
 		QString::fromStdString(snapshot.source_title)) :
@@ -3421,6 +3528,19 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		QCoreApplication::translate("MeetingUI", "Stopping screen sharing..."));
 	_screenShareBanner->setVisible(active || snapshot.state == State::Starting ||
 		snapshot.state == State::Stopping || snapshot.state == State::StopFailed);
+	_annotationButton->setVisible(active);
+	if (active && snapshot.source_kind == livekit::DesktopSourceKind::Window) {
+		_annotationButton->setToolTip(QCoreApplication::translate(
+			"MeetingUI", "Only full-screen sharing can be annotated."));
+	} else if (active && !_annotationBinding) {
+		_annotationButton->setToolTip(QCoreApplication::translate(
+			"MeetingUI", "The shared screen could not be mapped reliably."));
+	} else {
+		_annotationButton->setToolTip(QCoreApplication::translate(
+			"MeetingUI", "Annotate the shared screen"));
+	}
+	setAnnotationInteractionEnabled(
+		_coordinator && _coordinator->state() == OpenMeeting::MeetingState::InMeeting);
 	_localScreenPreview = active ? snapshot.preview : nullptr;
 	if (active && !_localScreenTile) {
 		_localScreenTile = std::make_unique<VideoTileWidget>(QCoreApplication::translate("MeetingUI", "My Screen Share"), true, _stageContainer, true);
@@ -3434,6 +3554,58 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 	}
 	QResizeEvent layout(size(), size());
 	resizeEvent(&layout);
+}
+
+void MeetingRoomWindow::openAnnotationOverlay() {
+	if (_annotationOverlay || !_annotationBinding || !_coordinator ||
+		_coordinator->state() != OpenMeeting::MeetingState::InMeeting) {
+		return;
+	}
+	try {
+		auto overlay = std::make_unique<AnnotationOverlayWindow>(
+			*_annotationBinding, !_annotationOffscreenForTesting);
+		auto *raw = overlay.get();
+		const QPointer<AnnotationOverlayWindow> guard(raw);
+		connect(raw, &AnnotationOverlayWindow::closeRequested, this, [this, guard] {
+			QMetaObject::invokeMethod(this, [this, guard] {
+				if (_annotationOverlay.get() == guard.data()) closeAnnotationOverlay();
+			}, Qt::QueuedConnection);
+		});
+		connect(raw, &AnnotationOverlayWindow::bindingInvalidated, this, [this, guard] {
+			if (_annotationOverlay.get() != guard.data()) return;
+			auto retired = std::move(_annotationOverlay);
+			retired.release()->deleteLater();
+			_annotationBinding.reset();
+			if (_annotationButton) {
+				_annotationButton->setEnabled(false);
+				_annotationButton->setToolTip(QCoreApplication::translate(
+					"MeetingUI", "The shared screen could not be mapped reliably."));
+			}
+			if (_coordinator) _coordinator->stopScreenShare();
+		});
+		_annotationOverlay = std::move(overlay);
+	} catch (const std::exception &) {
+		_annotationBinding.reset();
+		if (_annotationButton) {
+			_annotationButton->setEnabled(false);
+			_annotationButton->setToolTip(QCoreApplication::translate(
+				"MeetingUI", "The shared screen could not be mapped reliably."));
+		}
+		QMessageBox::warning(this,
+			QCoreApplication::translate("MeetingUI", "Screen annotation"),
+			QCoreApplication::translate("MeetingUI", "The shared screen could not be mapped reliably."));
+	}
+}
+
+void MeetingRoomWindow::closeAnnotationOverlay() {
+	if (!_annotationOverlay) return;
+	_annotationOverlay->closeOverlay();
+	_annotationOverlay.reset();
+}
+
+void MeetingRoomWindow::setAnnotationInteractionEnabled(bool enabled) {
+	if (_annotationOverlay) _annotationOverlay->setInteractionEnabled(enabled);
+	if (_annotationButton) _annotationButton->setEnabled(enabled && _annotationBinding.has_value());
 }
 
 void MeetingRoomWindow::setupCoordinatorBindings() {
@@ -3630,6 +3802,18 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingLeft,
 	        this, [this]() {
 		invalidateCameraCompletion();
+		if (!_pendingDepartureTitle.isEmpty()) {
+			// The host-removal signal is delivered before synchronous native
+			// teardown. Show the notice only after teardown returns so its button
+			// is backed by a running UI event loop.
+			stopLiveKitSession();
+			const auto title = _pendingDepartureTitle;
+			const auto message = _pendingDepartureMessage;
+			_pendingDepartureTitle.clear();
+			_pendingDepartureMessage.clear();
+			showDepartureNotice(title, message);
+			return;
+		}
 		if (_departureNotice) {
 			// Media must stop immediately, even while the user reads the notice.
 			stopLiveKitSession();
@@ -3649,18 +3833,32 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 void MeetingRoomWindow::showDepartureNotice(const QString &title, const QString &message,
 		QMessageBox::Icon icon) {
 	if (_departureNotice) return;
-	// exec()/the static QMessageBox helpers use a nested event loop. A queued
-	// meetingLeft or account invalidation can delete their parent (and a stack
-	// dialog) inside that loop. Heap ownership + open() allows normal teardown.
-	auto *notice = new QMessageBox(icon, title, message, QMessageBox::Ok, this);
+	// A screen-sized TOPMOST annotation surface can otherwise remain above the
+	// meeting-owned dialog during the short kick/leave transition.
+	closeAnnotationOverlay();
+	_annotationBinding.reset();
+	// Do not retain the retired meeting HWND as the native owner.  In particular,
+	// QDialog::open() creates a window-modal owner chain while Room teardown is
+	// changing that owner's native state.  A standalone non-modal notice keeps
+	// its input HWND enabled and still avoids a nested event loop.
+	auto *notice = new QMessageBox(icon, title, message, QMessageBox::Ok, nullptr);
 	notice->setObjectName("meetingDepartureNotice");
 	notice->setAttribute(Qt::WA_DeleteOnClose);
+	notice->setAttribute(Qt::WA_QuitOnClose, false);
+	notice->setWindowModality(Qt::NonModal);
+	notice->setWindowFlag(Qt::WindowStaysOnTopHint, true);
+	notice->setMinimumSize(460, 180);
+	AppTheme::setTone(*notice, AppTheme::Tone::Light);
 	_departureNotice = notice;
 	connect(notice, &QDialog::finished, this, [this]() {
 		_departureNotice.clear();
+		_pendingDepartureTitle.clear();
+		_pendingDepartureMessage.clear();
 		close();
 	});
-	notice->open();
+	notice->show();
+	notice->raise();
+	notice->activateWindow();
 }
 
 void MeetingRoomWindow::onKickedOff(const QString &reason, int reasonCode) {
@@ -3669,9 +3867,13 @@ void MeetingRoomWindow::onKickedOff(const QString &reason, int reasonCode) {
 		return;
 	}
 	invalidateCameraCompletion();
-	showDepartureNotice(QCoreApplication::translate("MeetingUI", "Remove from Meeting"),
-	                     QCoreApplication::translate("MeetingUI", "You were removed from the meeting by the host.\nReason: %1 (code: %2)")
-	                     .arg(reason.isEmpty() ? QCoreApplication::translate("MeetingUI", "Not Specified") : reason).arg(reasonCode));
+	if (_pendingDepartureTitle.isEmpty()) {
+		_pendingDepartureTitle = QCoreApplication::translate("MeetingUI", "Remove from Meeting");
+		_pendingDepartureMessage = QCoreApplication::translate(
+			"MeetingUI", "You were removed from the meeting by the host.\nReason: %1 (code: %2)")
+			.arg(reason.isEmpty() ? QCoreApplication::translate("MeetingUI", "Not Specified") : reason)
+			.arg(reasonCode);
+	}
 }
 
 void MeetingRoomWindow::onMeetingKickOff(livekit::RoomDisconnectReason reason) {
@@ -3902,6 +4104,8 @@ void MeetingRoomWindow::startLiveKitSession() {
 
 void MeetingRoomWindow::stopLiveKitSession() {
 	invalidateCameraCompletion();
+	closeAnnotationOverlay();
+	_annotationBinding.reset();
 	_localScreenPreview.reset();
 	if (_remoteRenderSession) _remoteRenderSession->Deactivate();
 	if (!_sessionRunning.exchange(false)) {

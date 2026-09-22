@@ -3,6 +3,7 @@
 #include "room.h"
 #include "rtc_video_source.h"
 #include "livekit_rtc.pb.h"
+#include <atomic>
 #include <iostream>
 #include <future>
 #include <thread>
@@ -77,7 +78,9 @@ struct Fixture {
     livekit::proto::SignalRequest wire;
     std::vector<livekit::ScreenShareSnapshot> states;
 
-    Fixture() {
+    explicit Fixture(
+            std::optional<livekit::ScreenBinding> resolvedBinding = std::nullopt,
+            std::shared_ptr<std::atomic<bool>> bindingValid = {}) {
         publish_gate.expires_at(asio::steady_timer::time_point::max());
         stop_gate.expires_at(asio::steady_timer::time_point::max());
         livekit::RoomUnpublishTestAccess::Install(*room, local, [this] { return NegotiateStop(); });
@@ -90,7 +93,22 @@ struct Fixture {
         local->add_publication(std::make_shared<livekit::TrackPublication>(camera, "TR_CAMERA", "camera"));
         auto backend = livekit::ScreenShareSession::ForRoom(room);
         backend.capture = [this] { return std::make_unique<FakeCapture>(capture); };
+        backend.resolve_screen_binding = [binding = std::move(resolvedBinding)](
+                const livekit::DesktopSource &source,
+                std::uint64_t sourceEpoch,
+                std::string shareSessionId) mutable {
+            if (!binding) return std::optional<livekit::ScreenBinding>{};
+            auto result = *binding;
+            result.source_id = source.id;
+            result.source_epoch = sourceEpoch;
+            result.share_session_id = std::move(shareSessionId);
+            return std::optional<livekit::ScreenBinding>{std::move(result)};
+        };
+        backend.validate_screen_binding = [bindingValid](const livekit::ScreenBinding &) {
+            return !bindingValid || bindingValid->load(std::memory_order_acquire);
+        };
         backend.first_frame_timeout = 80ms;
+        backend.geometry_check_interval = 1ms;
         share = std::make_shared<livekit::ScreenShareSession>(strand, std::move(backend),
             [this](auto state) { states.push_back(state); });
     }
@@ -147,6 +165,8 @@ void NormalAndRepeat() {
     Fixture f;
     f.Start();
     f.Until([&] { return f.State() == ScreenShareState::Active; });
+    TEST_CHECK(f.states.back().source_kind == livekit::DesktopSourceKind::Screen);
+    TEST_CHECK(!f.states.back().annotation_binding);
     TEST_CHECK(f.wire.add_track().source() == livekit::proto::SCREEN_SHARE);
     TEST_CHECK(f.wire.add_track().width() == 1920 && f.wire.add_track().height() == 1080);
     TEST_CHECK(f.wire.add_track().layers_size() == 2);
@@ -174,6 +194,42 @@ void NormalAndRepeat() {
     f.Until([&] { return f.State() == ScreenShareState::Active; });
     old_callback(livekit::VideoFrame::create(8, 8, livekit::VideoBufferType::I420));
     TEST_CHECK(f.source->width() == 1920 && f.publishes == 2);
+}
+
+void ScreenBindingLifecycle() {
+    livekit::ScreenBinding binding;
+    binding.display_name = "DISPLAY1";
+    binding.device_key = L"DISPLAY1";
+    binding.physical_width = 1920;
+    binding.physical_height = 1080;
+    binding.canonical_width = 1920;
+    binding.canonical_height = 1080;
+    auto valid = std::make_shared<std::atomic<bool>>(true);
+    Fixture f(binding, valid);
+    const livekit::DesktopSource screen{livekit::DesktopSourceKind::Screen, 77, "bound screen"};
+    f.Do([&] { f.share->Start(screen); });
+    f.capture->Emit();
+    f.Until([&] { return f.State() == ScreenShareState::Active; });
+    const auto active = f.states.back();
+    TEST_CHECK(active.annotation_binding.has_value());
+    TEST_CHECK(active.source_kind == livekit::DesktopSourceKind::Screen);
+    TEST_CHECK(active.annotation_binding->source_id == 77);
+    TEST_CHECK(active.annotation_binding->source_epoch == 1);
+    TEST_CHECK(active.annotation_binding->share_session_id.rfind("share-", 0) == 0);
+    TEST_CHECK(active.annotation_binding->share_session_id.size() == 38);
+    valid->store(false, std::memory_order_release);
+    f.Until([&] { return f.State() == ScreenShareState::Failed; });
+    TEST_CHECK(f.states.back().error == ScreenShareError::Capture);
+    TEST_CHECK(!f.states.back().annotation_binding);
+    TEST_CHECK(f.capture->stops == 1 && f.unpublishes == 1);
+
+    Fixture window(binding, std::make_shared<std::atomic<bool>>(true));
+    window.Do([&] { window.share->Start(
+        {livekit::DesktopSourceKind::Window, 88, "window"}); });
+    window.capture->Emit();
+    window.Until([&] { return window.State() == ScreenShareState::Active; });
+    TEST_CHECK(window.states.back().source_kind == livekit::DesktopSourceKind::Window);
+    TEST_CHECK(!window.states.back().annotation_binding);
 }
 
 void CancelPublishAndLeave() {
@@ -272,7 +328,7 @@ void FrameBridgeLifetime() {
     TEST_CHECK(!camera->is_screencast());
     static_cast<webrtc::VideoTrackSourceInterface*>(camera.get())->AddOrUpdateSink(&sink, webrtc::VideoSinkWants{});
     source->captureFrame(frame);
-    TEST_CHECK(sink.width == 1280 && sink.height == 720 && sink.frames == 2);
+    TEST_CHECK(sink.width == 1920 && sink.height == 1080 && sink.frames == 2);
     static_cast<webrtc::VideoTrackSourceInterface*>(camera.get())->RemoveSink(&sink);
 }
 
@@ -405,6 +461,7 @@ void DynacastPublicationIsolation() {
 
 int main() {
     NormalAndRepeat();
+    ScreenBindingLifecycle();
     CancelPublishAndLeave();
     FailuresAndEnded();
     ReconnectAndConfirmation();

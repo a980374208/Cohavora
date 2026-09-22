@@ -3,10 +3,14 @@
 #include <QtCore/QEvent>
 #include <QtCore/QFile>
 #include <QtCore/QObject>
+#include <QtCore/QPointer>
+#include <QtCore/QTimer>
 #include <QtCore/QVariant>
 #include <QtGui/QCursor>
 #include <QtGui/QGuiApplication>
+#include <QtGui/QPalette>
 #include <QtGui/QScreen>
+#include <QtWidgets/QAbstractItemView>
 #include <QtWidgets/QAbstractButton>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QComboBox>
@@ -269,7 +273,17 @@ protected:
 				}
 			}
 			if (box && event->type() == QEvent::Show) {
+				// QMessageBox::showEvent recalculates and can replace a minimum
+				// requested by the caller. Restore it after Qt finishes that layout.
+				const auto requestedMinimum = box->minimumSize().expandedTo(QSize(460, 0));
 				box->adjustSize();
+				QPointer<QMessageBox> guard(box);
+				QTimer::singleShot(0, box, [guard, requestedMinimum] {
+					if (!guard) return;
+					guard->setMinimumSize(requestedMinimum);
+					guard->resize(guard->size().expandedTo(requestedMinimum));
+					centerOnParentOrScreen(*guard);
+				});
 			}
 		} else if (event->type() == QEvent::Show
 			&& !dialog->property(kToneProperty).isValid()) {
@@ -350,8 +364,41 @@ void setTone(QWidget &widget, Tone tone) {
 	refreshStyle(widget);
 }
 
+void applyChoiceSurface(QWidget &surface, Tone tone) {
+	auto palette = surface.palette();
+	const auto light = tone == Tone::Light;
+	palette.setColor(QPalette::Window, light ? QColor("#ffffff") : QColor("#242831"));
+	palette.setColor(QPalette::WindowText, light ? QColor("#1f2329") : QColor("#f3f4f6"));
+	palette.setColor(QPalette::Base, light ? QColor("#ffffff") : QColor("#242831"));
+	palette.setColor(QPalette::AlternateBase, light ? QColor("#f7f8fa") : QColor("#2b303a"));
+	palette.setColor(QPalette::Text, light ? QColor("#1f2329") : QColor("#f3f4f6"));
+	palette.setColor(QPalette::Highlight, light ? QColor("#eaf3ff") : QColor("#394252"));
+	palette.setColor(QPalette::HighlightedText, light ? QColor("#1677ff") : QColor("#ffffff"));
+	surface.setPalette(palette);
+	surface.setAutoFillBackground(true);
+	setTone(surface, tone);
+}
+
 void styleChoiceControls(QWidget &widget, Tone tone) {
 	setTone(widget, tone);
+	auto choices = widget.findChildren<QComboBox *>();
+	if (auto *choice = qobject_cast<QComboBox *>(&widget)) {
+		choices.push_front(choice);
+	}
+	for (auto *choice : choices) {
+		setTone(*choice, tone);
+		auto *view = choice->view();
+		if (!view || !view->viewport()) continue;
+		applyChoiceSurface(*view, tone);
+		applyChoiceSurface(*view->viewport(), tone);
+		// Qt reparents the list beneath a private Qt::Popup container. Style that
+		// container directly so a dark meeting-window ancestor cannot leak in.
+		auto *popup = view->window();
+		if (popup && popup != choice->window()
+				&& popup->windowFlags().testFlag(Qt::Popup)) {
+			applyChoiceSurface(*popup, tone);
+		}
+	}
 }
 
 void styleMenu(QMenu &menu, Tone tone) {

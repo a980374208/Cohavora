@@ -3,6 +3,7 @@
 <TS version="2.1" language="zh_CN" sourcelanguage="en_US">
     <context>
         <name>MeetingUI</name>
+        <message><source>Whiteboard</source><translation>白板</translation></message>
         <message>
             <source>Join Meeting</source>
             <translation>加入会议</translation>
@@ -1581,6 +1582,11 @@ Reason: %1</source>
             <source>Sharing: %1</source>
             <translation>正在共享：%1</translation>
         </message>
+        <message><source>Annotate</source><translation>批注</translation></message>
+        <message><source>Only full-screen sharing can be annotated.</source><translation>仅全屏幕共享支持批注。</translation></message>
+        <message><source>The shared screen could not be mapped reliably.</source><translation>无法可靠映射当前共享屏幕，批注已禁用。</translation></message>
+        <message><source>Annotate the shared screen</source><translation>批注当前共享屏幕</translation></message>
+        <message><source>Screen annotation</source><translation>屏幕批注</translation></message>
         <message>
             <source>Starting screen sharing...</source>
             <translation>正在启动屏幕共享…</translation>
@@ -2635,5 +2641,134 @@ Sign in with your own account in a client configured for the same meeting servic
             <source>; </source>
             <translation>；</translation>
         </message>
+    </context>
+    <context>
+        <name>MeetingUI::AnnotationOverlayWindow</name>
+        <message><source>Draw</source><translation>绘制</translation></message>
+        <message><source>Switch between drawing and operating the shared desktop</source><translation>在绘制和操作共享桌面之间切换</translation></message>
+        <message><source>Pen</source><translation>画笔</translation></message>
+        <message><source>Highlighter</source><translation>荧光笔</translation></message>
+        <message><source>Line</source><translation>直线</translation></message>
+        <message><source>Rectangle</source><translation>矩形</translation></message>
+        <message><source>Ellipse</source><translation>椭圆</translation></message>
+        <message><source>Arrow</source><translation>箭头</translation></message>
+        <message><source>Text</source><translation>文字</translation></message>
+        <message><source>Eraser</source><translation>橡皮</translation></message>
+        <message><source>Laser</source><translation>激光笔</translation></message>
+        <message><source>Ink color</source><translation>画笔颜色</translation></message>
+        <message><source>Black</source><translation>黑色</translation></message>
+        <message><source>Red</source><translation>红色</translation></message>
+        <message><source>Blue</source><translation>蓝色</translation></message>
+        <message><source>Green</source><translation>绿色</translation></message>
+        <message><source>Orange</source><translation>橙色</translation></message>
+        <message><source>Width</source><translation>笔宽</translation></message>
+        <message><source>Text size</source><translation>字号</translation></message>
+        <message><source>Undo</source><translation>撤销</translation></message>
+        <message><source>Redo</source><translation>重做</translation></message>
+        <message><source>Clear</source><translation>清空</translation></message>
+        <message><source>Clear annotations</source><translation>清空批注</translation></message>
+        <message><source>Remove all annotations from the shared screen?</source><translation>确定移除共享屏幕上的全部批注吗？</translation></message>
+        <message><source>Export layer</source><translation>导出图层</translation></message>
+        <message><source>Close annotations</source><translation>关闭批注</translation></message>
+        <message><source>Desktop mode</source><translation>操作桌面</translation></message>
+        <message><source>Drawing on shared screen</source><translation>正在批注共享屏幕</translation></message>
+        <message><source>Paused while reconnecting</source><translation>重连期间已暂停</translation></message>
+        <message><source>Export annotation layer</source><translation>导出批注图层</translation></message>
+        <message><source>PNG image (*.png)</source><translation>PNG 图片 (*.png)</translation></message>
+        <message><source>Unable to export the annotation layer.</source><translation>无法导出批注图层。</translation></message>
+    </context>
+    <context>
+        <name>MeetingUI::WhiteboardPanel</name>
+        <message><source>Local whiteboard</source><translation>本地白板</translation></message>
+        <message><source>Only visible to you</source><translation>仅自己可见</translation></message>
+        <message><source>Collaborative whiteboard</source><translation>协作白板</translation></message>
+        <message><source>Connecting...</source><translation>正在连接...</translation></message>
+        <message><source>Lock board</source><translation>锁定白板</translation></message>
+        <message><source>Participants can draw</source><translation>允许参会者绘制</translation></message>
+        <message><source>The whiteboard state could not be restored.</source><translation>无法恢复白板状态。</translation></message>
+        <message><source>Locked</source><translation>已锁定</translation></message>
+        <message><source>Synced</source><translation>已同步</translation></message>
+        <message><source>Synchronizing...</source><translation>正在同步...</translation></message>
+        <message><source>Connection interrupted - read-only</source><translation>连接中断 - 只读</translation></message>
+        <message><source>Host left - board frozen</source><translation>主持人已离会 - 白板已冻结</translation></message>
+        <message><source>Whiteboard closed</source><translation>白板已关闭</translation></message>
+        <message><source>Authority: %1</source><translation>协作主持人：%1</translation></message>
+        <message><source>Host controlled</source><translation>由主持人管理</translation></message>
+        <message><source>%1 - revision %2</source><translation>%1 - 版本 %2</translation></message>
+        <message><source>Back to meeting</source><translation>返回会议</translation></message>
+        <message><source>Pen</source><translation>画笔</translation></message>
+        <message><source>Highlighter</source><translation>荧光笔</translation></message>
+        <message><source>Line</source><translation>直线</translation></message>
+        <message><source>Rectangle</source><translation>矩形</translation></message>
+        <message><source>Ellipse</source><translation>椭圆</translation></message>
+        <message><source>Arrow</source><translation>箭头</translation></message>
+        <message><source>Text</source><translation>文字</translation></message>
+        <message><source>Eraser</source><translation>橡皮</translation></message>
+        <message><source>Laser</source><translation>激光笔</translation></message>
+        <message><source>Pan</source><translation>平移</translation></message>
+        <message><source>Erase whole objects (cannot be undone)</source><translation>擦除整个对象（不可撤销）</translation></message>
+        <message><source>Temporary pointer; not included in exports</source><translation>临时指示，不包含在导出图片中</translation></message>
+        <message><source>Ink color</source><translation>画笔颜色</translation></message>
+        <message><source>Black</source><translation>黑色</translation></message>
+        <message><source>Red</source><translation>红色</translation></message>
+        <message><source>Blue</source><translation>蓝色</translation></message>
+        <message><source>Green</source><translation>绿色</translation></message>
+        <message><source>Orange</source><translation>橙色</translation></message>
+        <message><source>Purple</source><translation>紫色</translation></message>
+        <message><source>Width</source><translation>笔宽</translation></message>
+        <message><source>Ink width</source><translation>画笔宽度</translation></message>
+        <message><source>Text size</source><translation>字号</translation></message>
+        <message><source>Undo</source><translation>撤销</translation></message>
+        <message><source>Redo</source><translation>重做</translation></message>
+        <message><source>Undo your last created object (Ctrl+Z)</source><translation>撤销自己最近创建的对象（Ctrl+Z）</translation></message>
+        <message><source>Redo your last undone object (Ctrl+Y)</source><translation>重做自己最近撤销的对象（Ctrl+Y）</translation></message>
+        <message><source>Clear page</source><translation>清空本页</translation></message>
+        <message><source>Page</source><translation>页面</translation></message>
+        <message><source>Add page</source><translation>添加页面</translation></message>
+        <message><source>Import image</source><translation>导入图片</translation></message>
+        <message><source>Import PNG or JPEG as a new image page (Ctrl+O)</source><translation>将 PNG 或 JPEG 导入为新图片页（Ctrl+O）</translation></message>
+        <message><source>Zoom relative to page fit</source><translation>相对于适合页面的缩放比例</translation></message>
+        <message><source>Fit page</source><translation>适合页面</translation></message>
+        <message><source>Export PNG</source><translation>导出 PNG</translation></message>
+        <message><source>Content is kept only for this meeting window. Export before leaving.</source><translation>内容仅保留在当前会议窗口内，离开前请导出。</translation></message>
+        <message><source>Page %1</source><translation>第 %1 页</translation></message>
+        <message><source>Image %1</source><translation>图片 %1</translation></message>
+        <message><source>%1 (loading)</source><translation>%1（加载中）</translation></message>
+        <message><source>Loading image - read-only</source><translation>正在加载图片 - 只读</translation></message>
+        <message><source>Remove all objects on this page? This cannot be undone.</source><translation>确定清空本页的所有对象？此操作不可撤销。</translation></message>
+        <message><source>Export current page</source><translation>导出当前页</translation></message>
+        <message><source>PNG image (*.png)</source><translation>PNG 图片 (*.png)</translation></message>
+        <message><source>Exporting page...</source><translation>正在导出页面…</translation></message>
+        <message><source>Page exported.</source><translation>页面已导出。</translation></message>
+        <message><source>Export failed. Check the destination and try again.</source><translation>导出失败，请检查保存位置后重试。</translation></message>
+        <message><source>Replace background</source><translation>替换背景</translation></message>
+        <message><source>The page limit is reached. Importing will replace the current background and remove all annotations on this page.</source><translation>已达到页面上限。继续导入将替换当前背景，并移除本页全部批注。</translation></message>
+        <message><source>Import image page</source><translation>导入图片页</translation></message>
+        <message><source>PNG or JPEG image (*.png *.jpg *.jpeg)</source><translation>PNG 或 JPEG 图片 (*.png *.jpg *.jpeg)</translation></message>
+        <message><source>Importing image...</source><translation>正在导入图片...</translation></message>
+        <message><source>Only the host can import image pages.</source><translation>只有主持人可以导入图片页。</translation></message>
+        <message><source>Uploading image page...</source><translation>正在上传图片页...</translation></message>
+        <message><source>Image page imported.</source><translation>图片页已导入。</translation></message>
+        <message><source>The image page could not be added.</source><translation>无法添加图片页。</translation></message>
+        <message><source>The image background failed integrity validation.</source><translation>图片背景完整性校验失败。</translation></message>
+        <message><source>The image file exceeds the 8 MiB limit.</source><translation>图片文件超过 8 MiB 上限。</translation></message>
+        <message><source>Only PNG and JPEG image content is supported.</source><translation>仅支持实际内容为 PNG 或 JPEG 的图片。</translation></message>
+        <message><source>The image dimensions are unsupported (320x180 to 4096x4096, at most 16 MP).</source><translation>图片尺寸不受支持（320x180 至 4096x4096，最多 1600 万像素）。</translation></message>
+        <message><source>The standardized PNG exceeds the 8 MiB limit.</source><translation>标准化后的 PNG 超过 8 MiB 上限。</translation></message>
+        <message><source>The image failed integrity validation.</source><translation>图片完整性校验失败。</translation></message>
+        <message><source>The image could not be decoded.</source><translation>无法解码图片。</translation></message>
+        <message><source>The image file could not be read.</source><translation>无法读取图片文件。</translation></message>
+    </context>
+    <context>
+        <name>MeetingUI::WhiteboardCanvas</name>
+        <message><source>Whiteboard limit reached. Export this page or clear some content.</source><translation>已达到白板上限，请导出本页或清理部分内容。</translation></message>
+        <message><source>This object is invalid or too large. Shorten it and try again.</source><translation>对象无效或过大，请缩减内容后重试。</translation></message>
+        <message><source>The page changed. The unfinished input was cancelled.</source><translation>页面已变化，未完成的输入已取消。</translation></message>
+        <message><source>This stroke is full. Release the mouse and start a new stroke.</source><translation>本条笔迹已达到上限，请松开鼠标后重新落笔。</translation></message>
+        <message><source>Choose a text position farther from the page edge.</source><translation>请在距离页面边缘更远的位置输入文字。</translation></message>
+        <message><source>Enter text (Ctrl+Enter to apply, Esc to cancel)</source><translation>输入文字（Ctrl+Enter 确认，Esc 取消）</translation></message>
+        <message><source>Apply text</source><translation>确认文字</translation></message>
+        <message><source>Cancel</source><translation>取消</translation></message>
+        <message><source>Text is limited to 2,000 characters.</source><translation>文字最多支持 2,000 个字符。</translation></message>
     </context>
 </TS>

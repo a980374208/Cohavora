@@ -94,6 +94,7 @@ target_include_directories(test_http_admission_owner BEFORE PRIVATE
 )
 target_link_libraries(test_http_admission_owner PRIVATE
     cohavora_core
+    cohavora_whiteboard_model
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Widgets.lib
@@ -212,6 +213,7 @@ target_include_directories(test_participant_snapshot_remediation BEFORE PRIVATE
 )
 target_link_libraries(test_participant_snapshot_remediation PRIVATE
     cohavora_core
+    cohavora_whiteboard_model
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Widgets.lib
