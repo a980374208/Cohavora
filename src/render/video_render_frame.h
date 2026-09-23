@@ -1,5 +1,7 @@
 #pragma once
 
+#include <chrono>
+
 #include "render/api/render_backend_api.h"
 #include "render/owned_i420_frame.h"
 
@@ -16,6 +18,16 @@ public:
     const lk_render_frame_view& view() const noexcept { return view_; }
     const OwnedI420Frame::Ptr& i420Owner() const noexcept { return i420_; }
     RenderColorSpace colorSpace() const noexcept;
+    const RenderFrameMetadata& renderMetadata() const noexcept;
+    void SetRenderExpected(
+        bool expected,
+        RenderExpectationReason reason = RenderExpectationReason::SurfaceVisible,
+        std::chrono::steady_clock::time_point source_time =
+            std::chrono::steady_clock::now()) const;
+    void NotifyRendered(
+        const char* measurement_point,
+        std::chrono::steady_clock::time_point source_time =
+            std::chrono::steady_clock::now()) const;
     VideoRenderFrame(const VideoRenderFrame&) = delete;
     VideoRenderFrame& operator=(const VideoRenderFrame&) = delete;
 private:

@@ -184,7 +184,11 @@ set(LIVEKIT_SOURCES
     src/e2ee/frame_cryptor.cpp
     src/telemetry/crash_handler.cpp
     src/telemetry/log_redaction.cpp
+    src/telemetry/process_resource_sampler.cpp
+    src/telemetry/stability_ledger.cpp
     src/telemetry/stats_collector.cpp
+    src/telemetry/session_telemetry.cpp
+    src/telemetry/telemetry_report.cpp
 )
 
 if(MSVC)
@@ -239,9 +243,13 @@ set(LIVEKIT_HEADERS
     src/rpc/chat_message.h
     src/telemetry/stats.h
     src/telemetry/stats_collector.h
+    src/telemetry/session_telemetry.h
     src/telemetry/telemetry.h
     src/telemetry/crash_handler.h
     src/telemetry/log_redaction.h
+    src/telemetry/process_resource_sampler.h
+    src/telemetry/stability_ledger.h
+    src/telemetry/telemetry_report.h
     src/telemetry/safe_spawn.h
     src/telemetry/coro_allocator.h
 )

@@ -3,6 +3,9 @@
 #include "src/net/service_endpoint_policy.h"
 #include "src/ui/meeting_log_console.h"
 #include "src/telemetry/log_redaction.h"
+#include "src/telemetry/process_resource_sampler.h"
+#include "src/telemetry/stability_ledger.h"
+#include "src/telemetry/telemetry_report.h"
 #include "src/core/whiteboard/whiteboard_protocol.h"
 #include "src/core/whiteboard/whiteboard_runtime.h"
 #include "src/core/whiteboard/whiteboard_transport.h"
@@ -24,6 +27,558 @@
 #include <utility>
 
 namespace OpenMeeting {
+
+QVariantMap ProjectTelemetrySnapshot(
+    const livekit::telemetry::Snapshot &snapshot) {
+    QVariantMap result;
+    result.insert(QStringLiteral("sessionGeneration"),
+                  QVariant::fromValue<qulonglong>(snapshot.session_generation));
+    result.insert(QStringLiteral("schemaVersion"),
+                  livekit::telemetry::kTelemetryReportSchemaVersion);
+    result.insert(QStringLiteral("definitionVersion"),
+                  livekit::telemetry::kTelemetryDefinitionVersion);
+    result.insert(QStringLiteral("revision"),
+                  QVariant::fromValue<qulonglong>(snapshot.revision));
+    result.insert(QStringLiteral("sessionComplete"), snapshot.session_complete);
+    result.insert(QStringLiteral("availability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.availability)));
+    result.insert(QStringLiteral("reason"), QString::fromStdString(snapshot.reason));
+    result.insert(QStringLiteral("sampleAgeMs"), snapshot.sample_age_ms);
+    result.insert(QStringLiteral("coverage"), snapshot.coverage);
+    result.insert(QStringLiteral("queueCapacity"),
+                  QVariant::fromValue<qulonglong>(snapshot.queue_capacity));
+    result.insert(QStringLiteral("queueDepth"),
+                  QVariant::fromValue<qulonglong>(snapshot.queue_depth));
+    result.insert(QStringLiteral("queueHighWater"),
+                  QVariant::fromValue<qulonglong>(snapshot.queue_high_water));
+    result.insert(QStringLiteral("capacityDrops"),
+                  QVariant::fromValue<qulonglong>(snapshot.capacity_drops));
+    result.insert(QStringLiteral("stoppedDrops"),
+                  QVariant::fromValue<qulonglong>(snapshot.stopped_drops));
+    result.insert(QStringLiteral("staleGenerationDrops"),
+                  QVariant::fromValue<qulonglong>(snapshot.stale_generation_drops));
+    result.insert(QStringLiteral("outOfOrderDrops"),
+                  QVariant::fromValue<qulonglong>(snapshot.out_of_order_drops));
+    result.insert(QStringLiteral("lateCallbacks"),
+                  QVariant::fromValue<qulonglong>(snapshot.late_callbacks));
+    result.insert(QStringLiteral("mappingFailures"),
+                  QVariant::fromValue<qulonglong>(snapshot.mapping_failures));
+    result.insert(QStringLiteral("counterResets"),
+                  QVariant::fromValue<qulonglong>(snapshot.counter_resets));
+    result.insert(QStringLiteral("validSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.valid_samples));
+    result.insert(QStringLiteral("unavailableSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.unavailable_samples));
+    result.insert(QStringLiteral("eventQueueLagAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.event_queue_lag_availability)));
+    result.insert(QStringLiteral("eventQueueLagReason"),
+                  QString::fromStdString(snapshot.event_queue_lag_reason));
+    result.insert(QStringLiteral("eventQueueLagSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.event_queue_lag_samples));
+    result.insert(QStringLiteral("lastEventQueueLagMs"),
+                  snapshot.last_event_queue_lag_ms);
+    result.insert(QStringLiteral("maximumEventQueueLagMs"),
+                  snapshot.maximum_event_queue_lag_ms);
+    result.insert(QStringLiteral("resourceAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.resource_availability)));
+    result.insert(QStringLiteral("resourceReason"),
+                  QString::fromStdString(snapshot.resource_reason));
+    result.insert(QStringLiteral("resourceSampleAgeMs"),
+                  snapshot.resource_sample_age_ms);
+    result.insert(QStringLiteral("resourceSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.resource_samples));
+    result.insert(QStringLiteral("resourceSampleFailures"),
+                  QVariant::fromValue<qulonglong>(snapshot.resource_sample_failures));
+    result.insert(QStringLiteral("lastResourceSampleUs"),
+                  snapshot.last_resource_sample_us);
+    result.insert(QStringLiteral("cpuAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.cpu_availability)));
+    result.insert(QStringLiteral("cpuReason"),
+                  QString::fromStdString(snapshot.cpu_reason));
+    result.insert(QStringLiteral("processCpuPercent"),
+                  snapshot.process_cpu_percent);
+    result.insert(QStringLiteral("logicalProcessorCount"),
+                  snapshot.logical_processor_count);
+    result.insert(QStringLiteral("memoryAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.memory_availability)));
+    result.insert(QStringLiteral("memoryReason"),
+                  QString::fromStdString(snapshot.memory_reason));
+    result.insert(QStringLiteral("workingSetBytes"),
+                  QVariant::fromValue<qulonglong>(snapshot.working_set_bytes));
+    result.insert(QStringLiteral("peakWorkingSetBytes"),
+                  QVariant::fromValue<qulonglong>(snapshot.peak_working_set_bytes));
+    result.insert(QStringLiteral("privateBytes"),
+                  QVariant::fromValue<qulonglong>(snapshot.private_bytes));
+    result.insert(QStringLiteral("threadCountAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.thread_count_availability)));
+    result.insert(QStringLiteral("threadCountReason"),
+                  QString::fromStdString(snapshot.thread_count_reason));
+    result.insert(QStringLiteral("processThreadCount"),
+                  snapshot.process_thread_count);
+    result.insert(QStringLiteral("threadCountSampleAgeMs"),
+                  snapshot.thread_count_sample_age_ms);
+    result.insert(QStringLiteral("handleCountAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.handle_count_availability)));
+    result.insert(QStringLiteral("handleCountReason"),
+                  QString::fromStdString(snapshot.handle_count_reason));
+    result.insert(QStringLiteral("processHandleCount"),
+                  snapshot.process_handle_count);
+    result.insert(QStringLiteral("gpuResourceAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.gpu_resource_availability)));
+    result.insert(QStringLiteral("gpuResourceReason"),
+                  QString::fromStdString(snapshot.gpu_resource_reason));
+    result.insert(QStringLiteral("resourceTrendAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.resource_trend_availability)));
+    result.insert(QStringLiteral("resourceTrendReason"),
+                  QString::fromStdString(snapshot.resource_trend_reason));
+    result.insert(QStringLiteral("resourceTrendSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.resource_trend_samples));
+    result.insert(QStringLiteral("resourceTrendSpanMs"),
+                  snapshot.resource_trend_span_ms);
+    result.insert(QStringLiteral("resourceTrendCoverage"),
+                  snapshot.resource_trend_coverage);
+    result.insert(QStringLiteral("minimumWorkingSetBytes"),
+                  QVariant::fromValue<qulonglong>(snapshot.minimum_working_set_bytes));
+    result.insert(QStringLiteral("maximumWorkingSetBytes"),
+                  QVariant::fromValue<qulonglong>(snapshot.maximum_working_set_bytes));
+    result.insert(QStringLiteral("minimumPrivateBytes"),
+                  QVariant::fromValue<qulonglong>(snapshot.minimum_private_bytes));
+    result.insert(QStringLiteral("maximumPrivateBytes"),
+                  QVariant::fromValue<qulonglong>(snapshot.maximum_private_bytes));
+    result.insert(QStringLiteral("minimumThreadCount"),
+                  snapshot.minimum_thread_count);
+    result.insert(QStringLiteral("maximumThreadCount"),
+                  snapshot.maximum_thread_count);
+    result.insert(QStringLiteral("minimumHandleCount"),
+                  snapshot.minimum_handle_count);
+    result.insert(QStringLiteral("maximumHandleCount"),
+                  snapshot.maximum_handle_count);
+    result.insert(QStringLiteral("privateBytesGrowthMibPerMinute"),
+                  snapshot.private_bytes_growth_mib_per_minute);
+    result.insert(QStringLiteral("threadGrowthPerHour"),
+                  snapshot.thread_growth_per_hour);
+    result.insert(QStringLiteral("handleGrowthPerHour"),
+                  snapshot.handle_growth_per_hour);
+    result.insert(QStringLiteral("resourceSessionDeltaAvailability"),
+                  QString::fromLatin1(livekit::telemetry::AvailabilityName(
+                      snapshot.resource_session_delta_availability)));
+    result.insert(QStringLiteral("resourceSessionDeltaReason"),
+                  QString::fromStdString(snapshot.resource_session_delta_reason));
+    result.insert(QStringLiteral("workingSetDeltaBytes"),
+                  snapshot.working_set_delta_bytes);
+    result.insert(QStringLiteral("privateBytesDelta"),
+                  snapshot.private_bytes_delta);
+    result.insert(QStringLiteral("threadCountDelta"),
+                  snapshot.thread_count_delta);
+    result.insert(QStringLiteral("handleCountDelta"),
+                  snapshot.handle_count_delta);
+    result.insert(QStringLiteral("resourceFinalDeltaAvailability"),
+                  QString::fromLatin1(livekit::telemetry::AvailabilityName(
+                      snapshot.resource_final_delta_availability)));
+    result.insert(QStringLiteral("resourceFinalDeltaReason"),
+                  QString::fromStdString(snapshot.resource_final_delta_reason));
+    result.insert(QStringLiteral("resourceReturnAvailability"),
+                  QString::fromLatin1(livekit::telemetry::AvailabilityName(
+                      snapshot.resource_return_availability)));
+    result.insert(QStringLiteral("resourceReturnReason"),
+                  QString::fromStdString(snapshot.resource_return_reason));
+    result.insert(QStringLiteral("telemetryCostAvailability"),
+                  QString::fromLatin1(livekit::telemetry::AvailabilityName(
+                      snapshot.telemetry_cost_availability)));
+    result.insert(QStringLiteral("telemetryCostReason"),
+                  QString::fromStdString(snapshot.telemetry_cost_reason));
+    result.insert(QStringLiteral("telemetrySnapshotPublications"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.telemetry_snapshot_publications));
+    result.insert(QStringLiteral("totalResourceSampleUs"),
+                  snapshot.total_resource_sample_us);
+    result.insert(QStringLiteral("maximumResourceSampleUs"),
+                  snapshot.maximum_resource_sample_us);
+    result.insert(QStringLiteral("averageResourceSampleUs"),
+                  snapshot.average_resource_sample_us);
+    result.insert(QStringLiteral("lastSnapshotBuildUs"),
+                  snapshot.last_snapshot_build_us);
+    result.insert(QStringLiteral("maximumSnapshotBuildUs"),
+                  snapshot.maximum_snapshot_build_us);
+    result.insert(QStringLiteral("totalSnapshotBuildUs"),
+                  snapshot.total_snapshot_build_us);
+    result.insert(QStringLiteral("lastSnapshotCallbackUs"),
+                  snapshot.last_snapshot_callback_us);
+    result.insert(QStringLiteral("maximumSnapshotCallbackUs"),
+                  snapshot.maximum_snapshot_callback_us);
+    result.insert(QStringLiteral("totalSnapshotCallbackUs"),
+                  snapshot.total_snapshot_callback_us);
+    result.insert(QStringLiteral("telemetryObservedCostRatio"),
+                  snapshot.telemetry_observed_cost_ratio);
+    result.insert(QStringLiteral("telemetryAbAvailability"),
+                  QString::fromLatin1(livekit::telemetry::AvailabilityName(
+                      snapshot.telemetry_ab_availability)));
+    result.insert(QStringLiteral("telemetryAbReason"),
+                  QString::fromStdString(snapshot.telemetry_ab_reason));
+    if (const auto ledger = livekit::telemetry::InstalledStabilityLedger()) {
+        const auto stability = ledger->Summary();
+        result.insert(QStringLiteral("stabilityLedgerAvailability"),
+                      QString::fromStdString(stability.ledger_availability));
+        result.insert(QStringLiteral("stabilityLedgerReason"),
+                      QString::fromStdString(stability.ledger_reason));
+        result.insert(QStringLiteral("confirmedCrashAvailability"),
+                      QString::fromStdString(
+                          stability.confirmed_crash_availability));
+        result.insert(QStringLiteral("confirmedCrashReason"),
+                      QString::fromStdString(stability.confirmed_crash_reason));
+        result.insert(QStringLiteral("unknownTerminationAvailability"),
+                      QString::fromStdString(
+                          stability.unknown_termination_availability));
+        result.insert(QStringLiteral("unknownTerminationReason"),
+                      QString::fromStdString(
+                          stability.unknown_termination_reason));
+        result.insert(QStringLiteral("processRunsStarted"),
+                      QVariant::fromValue<qulonglong>(
+                          stability.process_runs_started));
+        result.insert(QStringLiteral("processRunsTerminal"),
+                      QVariant::fromValue<qulonglong>(
+                          stability.process_runs_terminal));
+        result.insert(QStringLiteral("cleanProcessExits"),
+                      QVariant::fromValue<qulonglong>(
+                          stability.clean_process_exits));
+        result.insert(QStringLiteral("unknownProcessTerminations"),
+                      QVariant::fromValue<qulonglong>(
+                          stability.unknown_process_terminations));
+        result.insert(QStringLiteral("confirmedProcessCrashes"),
+                      QVariant::fromValue<qulonglong>(
+                          stability.confirmed_process_crashes));
+        result.insert(QStringLiteral("sessionsStarted"),
+                      QVariant::fromValue<qulonglong>(stability.sessions_started));
+        result.insert(QStringLiteral("sessionsTerminal"),
+                      QVariant::fromValue<qulonglong>(stability.sessions_terminal));
+        result.insert(QStringLiteral("unknownSessionTerminations"),
+                      QVariant::fromValue<qulonglong>(
+                          stability.unknown_session_terminations));
+        result.insert(QStringLiteral("stabilityCorruptInputs"),
+                      QVariant::fromValue<qulonglong>(stability.corrupt_inputs));
+        result.insert(QStringLiteral("stabilityWriteFailures"),
+                      QVariant::fromValue<qulonglong>(stability.write_failures));
+        result.insert(QStringLiteral("stabilityDuplicateTerminals"),
+                      QVariant::fromValue<qulonglong>(
+                          stability.duplicate_terminals));
+        result.insert(QStringLiteral("unknownProcessTerminationRatio"),
+                      stability.unknown_process_termination_ratio);
+        result.insert(QStringLiteral("confirmedProcessCrashRatio"),
+                      stability.confirmed_process_crash_ratio);
+    } else {
+        result.insert(QStringLiteral("stabilityLedgerAvailability"),
+                      QStringLiteral("UNSUPPORTED"));
+        result.insert(QStringLiteral("stabilityLedgerReason"),
+                      QStringLiteral("process_ledger_not_installed"));
+        result.insert(QStringLiteral("confirmedCrashAvailability"),
+                      QStringLiteral("UNSUPPORTED"));
+        result.insert(QStringLiteral("confirmedCrashReason"),
+                      QStringLiteral("crash_evidence_provider_not_configured"));
+        result.insert(QStringLiteral("unknownTerminationAvailability"),
+                      QStringLiteral("UNKNOWN"));
+        result.insert(QStringLiteral("unknownTerminationReason"),
+                      QStringLiteral("process_ledger_not_installed"));
+    }
+    result.insert(QStringLiteral("strandLagAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.strand_lag_availability)));
+    result.insert(QStringLiteral("strandLagReason"),
+                  QString::fromStdString(snapshot.strand_lag_reason));
+    result.insert(QStringLiteral("strandLagSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.strand_lag_samples));
+    result.insert(QStringLiteral("lastStrandLagMs"), snapshot.last_strand_lag_ms);
+    result.insert(QStringLiteral("maximumStrandLagMs"),
+                  snapshot.maximum_strand_lag_ms);
+    result.insert(QStringLiteral("uiLagAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.ui_lag_availability)));
+    result.insert(QStringLiteral("uiLagReason"),
+                  QString::fromStdString(snapshot.ui_lag_reason));
+    result.insert(QStringLiteral("uiLagSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.ui_lag_samples));
+    result.insert(QStringLiteral("lastUiLagMs"), snapshot.last_ui_lag_ms);
+    result.insert(QStringLiteral("maximumUiLagMs"), snapshot.maximum_ui_lag_ms);
+    result.insert(QStringLiteral("uiProbeTimeouts"),
+                  QVariant::fromValue<qulonglong>(snapshot.ui_probe_timeouts));
+    result.insert(QStringLiteral("uiProbeSkipped"),
+                  QVariant::fromValue<qulonglong>(snapshot.ui_probe_skipped));
+    result.insert(QStringLiteral("uiProbeLateCallbacks"),
+                  QVariant::fromValue<qulonglong>(snapshot.ui_probe_late_callbacks));
+    result.insert(QStringLiteral("uiProbeInFlight"), snapshot.ui_probe_in_flight);
+    result.insert(QStringLiteral("statsInFlight"), snapshot.stats_in_flight);
+    result.insert(QStringLiteral("actualPcCount"), snapshot.actual_pc_count);
+    result.insert(QStringLiteral("successfulPcCount"), snapshot.successful_pc_count);
+    result.insert(QStringLiteral("statsRequestsStarted"),
+                  QVariant::fromValue<qulonglong>(snapshot.stats_requests_started));
+    result.insert(QStringLiteral("statsRequestsCompleted"),
+                  QVariant::fromValue<qulonglong>(snapshot.stats_requests_completed));
+    result.insert(QStringLiteral("statsRequestTimeouts"),
+                  QVariant::fromValue<qulonglong>(snapshot.stats_request_timeouts));
+    result.insert(QStringLiteral("statsRequestRejections"),
+                  QVariant::fromValue<qulonglong>(snapshot.stats_request_rejections));
+    result.insert(QStringLiteral("statsRequestsSkipped"),
+                  QVariant::fromValue<qulonglong>(snapshot.stats_requests_skipped));
+    result.insert(QStringLiteral("lastStatsRequestMs"), snapshot.last_stats_request_ms);
+    result.insert(QStringLiteral("operationsStarted"),
+                  QVariant::fromValue<qulonglong>(snapshot.operations_started));
+    result.insert(QStringLiteral("operationsTerminal"),
+                  QVariant::fromValue<qulonglong>(snapshot.operations_terminal));
+    result.insert(QStringLiteral("operationsInflight"),
+                  QVariant::fromValue<qulonglong>(snapshot.operations_inflight));
+    result.insert(QStringLiteral("operationsMissingStart"),
+                  QVariant::fromValue<qulonglong>(snapshot.operations_missing_start));
+    result.insert(QStringLiteral("operationsDuplicateTerminal"),
+                  QVariant::fromValue<qulonglong>(snapshot.operations_duplicate_terminal));
+    result.insert(QStringLiteral("operationsKindMismatch"),
+                  QVariant::fromValue<qulonglong>(snapshot.operations_kind_mismatch));
+    QVariantList operationSummaries;
+    operationSummaries.reserve(static_cast<qsizetype>(snapshot.operation_summaries.size()));
+    for (const auto &summary : snapshot.operation_summaries) {
+        QVariantMap item;
+        item.insert(QStringLiteral("kind"), QString::fromLatin1(
+            livekit::telemetry::OperationKindName(summary.kind)));
+        item.insert(QStringLiteral("started"),
+                    QVariant::fromValue<qulonglong>(summary.started));
+        item.insert(QStringLiteral("terminal"),
+                    QVariant::fromValue<qulonglong>(summary.terminal));
+        item.insert(QStringLiteral("success"),
+                    QVariant::fromValue<qulonglong>(summary.success));
+        item.insert(QStringLiteral("degradedSuccess"),
+                    QVariant::fromValue<qulonglong>(summary.degraded_success));
+        item.insert(QStringLiteral("failure"),
+                    QVariant::fromValue<qulonglong>(summary.failure));
+        item.insert(QStringLiteral("timeout"),
+                    QVariant::fromValue<qulonglong>(summary.timeout));
+        item.insert(QStringLiteral("cancelled"),
+                    QVariant::fromValue<qulonglong>(summary.cancelled));
+        item.insert(QStringLiteral("inflight"),
+                    QVariant::fromValue<qulonglong>(summary.inflight));
+        item.insert(QStringLiteral("lastDurationMs"), summary.last_duration_ms);
+        operationSummaries.push_back(std::move(item));
+    }
+    result.insert(QStringLiteral("operationSummaries"), operationSummaries);
+    result.insert(QStringLiteral("firstVideoAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.remote_video_first_frame_availability)));
+    result.insert(QStringLiteral("firstVideoReason"),
+                  QString::fromStdString(snapshot.remote_video_first_frame_reason));
+    result.insert(QStringLiteral("firstVideoMeasurementPoint"),
+                  QString::fromStdString(
+                      snapshot.remote_video_first_frame_measurement_point));
+    result.insert(QStringLiteral("remoteVideoBindings"),
+                  QVariant::fromValue<qulonglong>(snapshot.remote_video_bindings));
+    result.insert(QStringLiteral("remoteVideoFirstFrames"),
+                  QVariant::fromValue<qulonglong>(snapshot.remote_video_first_frames));
+    result.insert(QStringLiteral("staleBindingFrameDrops"),
+                  QVariant::fromValue<qulonglong>(snapshot.stale_binding_frame_drops));
+    result.insert(QStringLiteral("roomConnectToFirstDecodedMs"),
+                  snapshot.room_connect_to_first_decoded_ms);
+    result.insert(QStringLiteral("lastConnectToFirstDecodedMs"),
+                  snapshot.last_connect_to_first_decoded_ms);
+    result.insert(QStringLiteral("lastSubscribeToFirstDecodedMs"),
+                  snapshot.last_subscribe_to_first_decoded_ms);
+    result.insert(QStringLiteral("lastDecodedWidth"), snapshot.last_decoded_width);
+    result.insert(QStringLiteral("lastDecodedHeight"), snapshot.last_decoded_height);
+    result.insert(QStringLiteral("nativeVideoFreezeAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.native_video_freeze_availability)));
+    result.insert(QStringLiteral("nativeVideoFreezeReason"),
+                  QString::fromStdString(snapshot.native_video_freeze_reason));
+    result.insert(QStringLiteral("nativeVideoFreezeMeasurementPoint"),
+                  QString::fromStdString(
+                      snapshot.native_video_freeze_measurement_point));
+    result.insert(QStringLiteral("nativeVideoStreams"),
+                  QVariant::fromValue<qulonglong>(snapshot.native_video_streams));
+    result.insert(QStringLiteral("nativeVideoFreezeCount"),
+                  QVariant::fromValue<qulonglong>(snapshot.native_video_freeze_count));
+    result.insert(QStringLiteral("nativeVideoFreezeDurationMs"),
+                  snapshot.native_video_freeze_duration_ms);
+    result.insert(QStringLiteral("reconnectVideoAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.reconnect_video_availability)));
+    result.insert(QStringLiteral("reconnectVideoReason"),
+                  QString::fromStdString(snapshot.reconnect_video_reason));
+    result.insert(QStringLiteral("reconnectVideoMeasurementPoint"),
+                  QString::fromStdString(
+                      snapshot.reconnect_video_measurement_point));
+    result.insert(QStringLiteral("reconnectVideoExpected"),
+                  QVariant::fromValue<qulonglong>(snapshot.reconnect_video_expected));
+    result.insert(QStringLiteral("reconnectVideoRecovered"),
+                  QVariant::fromValue<qulonglong>(snapshot.reconnect_video_recovered));
+    result.insert(QStringLiteral("reconnectExpectationChanges"),
+                  QVariant::fromValue<qulonglong>(snapshot.reconnect_expectation_changes));
+    result.insert(QStringLiteral("reconnectMediaTimeouts"),
+                  QVariant::fromValue<qulonglong>(snapshot.reconnect_media_timeouts));
+    result.insert(QStringLiteral("lastReconnectSignalingMs"),
+                  snapshot.last_reconnect_signaling_ms);
+    result.insert(QStringLiteral("lastReconnectFirstVideoMs"),
+                  snapshot.last_reconnect_first_video_ms);
+    result.insert(QStringLiteral("lastReconnectStableVideoMs"),
+                  snapshot.last_reconnect_stable_video_ms);
+    result.insert(QStringLiteral("lastReconnectMediaInterruptionMs"),
+                  snapshot.last_reconnect_media_interruption_ms);
+    result.insert(QStringLiteral("firstAudioAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.remote_audio_first_frame_availability)));
+    result.insert(QStringLiteral("firstAudioReason"),
+                  QString::fromStdString(snapshot.remote_audio_first_frame_reason));
+    result.insert(QStringLiteral("firstAudioMeasurementPoint"),
+                  QString::fromStdString(
+                      snapshot.remote_audio_first_frame_measurement_point));
+    result.insert(QStringLiteral("remoteAudioBindings"),
+                  QVariant::fromValue<qulonglong>(snapshot.remote_audio_bindings));
+    result.insert(QStringLiteral("remoteAudioFirstFrames"),
+                  QVariant::fromValue<qulonglong>(snapshot.remote_audio_first_frames));
+    result.insert(QStringLiteral("staleAudioBindingDrops"),
+                  QVariant::fromValue<qulonglong>(snapshot.stale_audio_binding_drops));
+    result.insert(QStringLiteral("lastSubscribeToFirstPcmMs"),
+                  snapshot.last_subscribe_to_first_pcm_ms);
+    result.insert(QStringLiteral("lastAudioSampleRate"), snapshot.last_audio_sample_rate);
+    result.insert(QStringLiteral("lastAudioChannels"), snapshot.last_audio_channels);
+    result.insert(QStringLiteral("audioQualityAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.audio_quality_availability)));
+    result.insert(QStringLiteral("audioQualityReason"),
+                  QString::fromStdString(snapshot.audio_quality_reason));
+    result.insert(QStringLiteral("audioQualityMeasurementPoint"),
+                  QString::fromStdString(snapshot.audio_quality_measurement_point));
+    result.insert(QStringLiteral("audioConcealmentAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.audio_concealment_availability)));
+    result.insert(QStringLiteral("audioConcealmentReason"),
+                  QString::fromStdString(snapshot.audio_concealment_reason));
+    result.insert(QStringLiteral("audioJitterBufferAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.audio_jitter_buffer_availability)));
+    result.insert(QStringLiteral("audioJitterBufferReason"),
+                  QString::fromStdString(snapshot.audio_jitter_buffer_reason));
+    result.insert(QStringLiteral("audioTimeStretchAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.audio_time_stretch_availability)));
+    result.insert(QStringLiteral("audioTimeStretchReason"),
+                  QString::fromStdString(snapshot.audio_time_stretch_reason));
+    result.insert(QStringLiteral("audioStreams"),
+                  QVariant::fromValue<qulonglong>(snapshot.audio_streams));
+    result.insert(QStringLiteral("audioWindowSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.audio_window_samples));
+    result.insert(QStringLiteral("audioWindowConcealedSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.audio_window_concealed_samples));
+    result.insert(QStringLiteral("audioWindowSilentConcealedSamples"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.audio_window_silent_concealed_samples));
+    result.insert(QStringLiteral("audioWindowConcealmentEvents"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.audio_window_concealment_events));
+    result.insert(QStringLiteral("audioConcealedRatio"), snapshot.audio_concealed_ratio);
+    result.insert(QStringLiteral("audioNonSilentConcealedRatio"),
+                  snapshot.audio_non_silent_concealed_ratio);
+    result.insert(QStringLiteral("audioJitterBufferDelayMs"),
+                  snapshot.audio_jitter_buffer_delay_ms);
+    result.insert(QStringLiteral("audioJitterBufferTargetDelayMs"),
+                  snapshot.audio_jitter_buffer_target_delay_ms);
+    result.insert(QStringLiteral("audioJitterBufferMinimumDelayMs"),
+                  snapshot.audio_jitter_buffer_minimum_delay_ms);
+    result.insert(QStringLiteral("audioInsertedSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.audio_inserted_samples));
+    result.insert(QStringLiteral("audioRemovedSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.audio_removed_samples));
+    result.insert(QStringLiteral("audioInsertedRatio"), snapshot.audio_inserted_ratio);
+    result.insert(QStringLiteral("audioRemovedRatio"), snapshot.audio_removed_ratio);
+    result.insert(QStringLiteral("reconnectAudioAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.reconnect_audio_availability)));
+    result.insert(QStringLiteral("reconnectAudioReason"),
+                  QString::fromStdString(snapshot.reconnect_audio_reason));
+    result.insert(QStringLiteral("reconnectAudioExpected"),
+                  QVariant::fromValue<qulonglong>(snapshot.reconnect_audio_expected));
+    result.insert(QStringLiteral("reconnectAudioRecovered"),
+                  QVariant::fromValue<qulonglong>(snapshot.reconnect_audio_recovered));
+    result.insert(QStringLiteral("lastReconnectFirstAudioMs"),
+                  snapshot.last_reconnect_first_audio_ms);
+    result.insert(QStringLiteral("lastReconnectStableAudioMs"),
+                  snapshot.last_reconnect_stable_audio_ms);
+    result.insert(QStringLiteral("lastReconnectAudioInterruptionMs"),
+                  snapshot.last_reconnect_audio_interruption_ms);
+    result.insert(QStringLiteral("renderFirstFrameAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.render_first_frame_availability)));
+    result.insert(QStringLiteral("renderFirstFrameReason"),
+                  QString::fromStdString(snapshot.render_first_frame_reason));
+    result.insert(QStringLiteral("renderMeasurementPoint"),
+                  QString::fromStdString(snapshot.render_first_frame_measurement_point));
+    result.insert(QStringLiteral("renderBindings"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_bindings));
+    result.insert(QStringLiteral("uniqueRenderSubmits"),
+                  QVariant::fromValue<qulonglong>(snapshot.unique_render_submits));
+    result.insert(QStringLiteral("staleRenderBindingDrops"),
+                  QVariant::fromValue<qulonglong>(snapshot.stale_render_binding_drops));
+    result.insert(QStringLiteral("lastDecodeToRenderMs"), snapshot.last_decode_to_render_ms);
+    result.insert(QStringLiteral("lastSubscribeToFirstRenderMs"),
+                  snapshot.last_subscribe_to_first_render_ms);
+    result.insert(QStringLiteral("lastConnectToFirstRenderMs"),
+                  snapshot.last_connect_to_first_render_ms);
+    result.insert(QStringLiteral("renderAverageIntervalMs"),
+                  snapshot.render_average_interval_ms);
+    result.insert(QStringLiteral("renderMaximumIntervalMs"),
+                  snapshot.render_maximum_interval_ms);
+    result.insert(QStringLiteral("renderStallAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.render_stall_availability)));
+    result.insert(QStringLiteral("renderStallReason"),
+                  QString::fromStdString(snapshot.render_stall_reason));
+    result.insert(QStringLiteral("renderStallAlgorithm"),
+                  QString::fromStdString(snapshot.render_stall_algorithm));
+    result.insert(QStringLiteral("renderStallCount"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_stall_count));
+    result.insert(QStringLiteral("renderStallDurationMs"),
+                  snapshot.render_stall_duration_ms);
+    result.insert(QStringLiteral("renderLongestStallMs"),
+                  snapshot.render_longest_stall_ms);
+    result.insert(QStringLiteral("renderExpectedDurationMs"),
+                  snapshot.render_expected_duration_ms);
+    result.insert(QStringLiteral("renderStallRatio"), snapshot.render_stall_ratio);
+    result.insert(QStringLiteral("renderStallActive"), snapshot.render_stall_active);
+    result.insert(QStringLiteral("reconnectRenderAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.reconnect_render_availability)));
+    result.insert(QStringLiteral("reconnectRenderReason"),
+                  QString::fromStdString(snapshot.reconnect_render_reason));
+    result.insert(QStringLiteral("reconnectRenderExpected"),
+                  QVariant::fromValue<qulonglong>(snapshot.reconnect_render_expected));
+    result.insert(QStringLiteral("reconnectRenderRecovered"),
+                  QVariant::fromValue<qulonglong>(snapshot.reconnect_render_recovered));
+    result.insert(QStringLiteral("lastReconnectFirstRenderMs"),
+                  snapshot.last_reconnect_first_render_ms);
+    result.insert(QStringLiteral("lastReconnectStableRenderMs"),
+                  snapshot.last_reconnect_stable_render_ms);
+    result.insert(QStringLiteral("lastReconnectRenderInterruptionMs"),
+                  snapshot.last_reconnect_render_interruption_ms);
+    if (const auto store = livekit::telemetry::InstalledTelemetryHistoryStore()) {
+        const auto status = store->Status();
+        result.insert(QStringLiteral("telemetryStorageAvailability"),
+                      QString::fromLatin1(livekit::telemetry::AvailabilityName(
+                          status->availability)));
+        result.insert(QStringLiteral("telemetryStorageReason"),
+                      QString::fromStdString(status->reason));
+        result.insert(QStringLiteral("telemetryHistoryEnabled"),
+                      status->history_enabled);
+        result.insert(QStringLiteral("telemetryHistoryRecords"),
+                      QVariant::fromValue<qulonglong>(status->reports.size()));
+        result.insert(QStringLiteral("telemetryHistoryMemoryBuckets"),
+                      QVariant::fromValue<qulonglong>(status->memory_records));
+        result.insert(QStringLiteral("telemetryHistoryQueueDrops"),
+                      QVariant::fromValue<qulonglong>(status->queue_drops));
+        result.insert(QStringLiteral("telemetryHistoryWriteFailures"),
+                      QVariant::fromValue<qulonglong>(status->write_failures));
+        result.insert(QStringLiteral("telemetryHistoryCorruptReports"),
+                      QVariant::fromValue<qulonglong>(status->corrupt_reports));
+    } else {
+        result.insert(QStringLiteral("telemetryStorageAvailability"),
+                      QStringLiteral("UNSUPPORTED"));
+        result.insert(QStringLiteral("telemetryStorageReason"),
+                      QStringLiteral("history_store_not_installed"));
+        result.insert(QStringLiteral("telemetryHistoryEnabled"), false);
+    }
+    return result;
+}
 
 // 从 LiveKit Participant 中提取真实用户昵称 (优先解析 OpenMeeting metadata 中的 JSON userInfo.nickname)
 static QString ResolveParticipantNickname(const livekit::ParticipantStateSnapshot &state) {
@@ -1273,15 +1828,163 @@ bool MeetingCoordinator::isHost() const {
 }
 
 uint64_t MeetingCoordinator::beginAdmission(AdmissionStage stage) {
+    if (!_admissionTelemetry.terminal) {
+        finishAdmissionTelemetry(
+            _admissionTelemetry.generation,
+            livekit::telemetry::OperationOutcome::Cancelled);
+    }
     ++_admissionGeneration;
     _admissionStage = stage;
+    _admissionTelemetry = AdmissionTelemetryRecord{};
+    _admissionTelemetry.generation = _admissionGeneration;
+    _admissionTelemetry.startedAt = std::chrono::steady_clock::now();
+    _admissionTelemetry.terminal = false;
+    _admissionTelemetry.stabilityLedger =
+        livekit::telemetry::InstalledStabilityLedger();
+    if (_admissionTelemetry.stabilityLedger) {
+        _admissionTelemetry.stabilitySessionId =
+            _admissionTelemetry.stabilityLedger->BeginSession();
+    }
     return _admissionGeneration;
 }
 
 uint64_t MeetingCoordinator::invalidateAdmission() {
+    if (!_admissionTelemetry.terminal) {
+        finishAdmissionTelemetry(
+            _admissionTelemetry.generation,
+            livekit::telemetry::OperationOutcome::Cancelled);
+    }
     ++_admissionGeneration;
     _admissionStage = AdmissionStage::None;
     return _admissionGeneration;
+}
+
+void MeetingCoordinator::attachAdmissionTelemetry(
+    const std::shared_ptr<livekit::telemetry::SessionTelemetry> &telemetry) {
+    if (!telemetry || _admissionTelemetry.terminal ||
+        _admissionTelemetry.generation != _admissionGeneration) {
+        return;
+    }
+    _admissionTelemetry.telemetry = telemetry;
+    _admissionTelemetry.operationId = telemetry->StartOperation(
+        livekit::telemetry::OperationKind::Admission,
+        "admission",
+        _admissionTelemetry.startedAt);
+}
+
+void MeetingCoordinator::finishAdmissionTelemetry(
+    uint64_t admissionGeneration,
+    livekit::telemetry::OperationOutcome outcome) {
+    if (_admissionTelemetry.terminal ||
+        _admissionTelemetry.generation != admissionGeneration) {
+        return;
+    }
+    const auto finishedAt = std::chrono::steady_clock::now();
+    _admissionTelemetry.terminal = true;
+    if (const auto telemetry = _admissionTelemetry.telemetry.lock();
+        telemetry && !_admissionTelemetry.operationId.empty()) {
+        telemetry->FinishOperation(
+            _admissionTelemetry.operationId,
+            livekit::telemetry::OperationKind::Admission,
+            outcome,
+            finishedAt);
+    } else {
+        publishDetachedAdmissionTelemetry(outcome, finishedAt);
+    }
+    auto stability = _admissionTelemetry.stabilityLedger;
+    auto stabilitySessionId = std::move(
+        _admissionTelemetry.stabilitySessionId);
+    _admissionTelemetry.stabilityLedger.reset();
+    if (stability && !stabilitySessionId.empty()) {
+        if (outcome == livekit::telemetry::OperationOutcome::Success ||
+            outcome == livekit::telemetry::OperationOutcome::DegradedSuccess) {
+            if (!_activeStabilitySessionId.empty()) {
+                finishActiveStabilitySession();
+            }
+            _activeStabilityLedger = std::move(stability);
+            _activeStabilitySessionId = std::move(stabilitySessionId);
+        } else {
+            using Terminal = livekit::telemetry::StabilitySessionTerminal;
+            const auto terminal = outcome == livekit::telemetry::OperationOutcome::Timeout
+                ? Terminal::Timeout
+                : outcome == livekit::telemetry::OperationOutcome::Cancelled
+                    ? Terminal::Cancelled
+                    : Terminal::AdmissionFailure;
+            stability->FinishSession(stabilitySessionId, terminal);
+        }
+    }
+}
+
+void MeetingCoordinator::finishActiveStabilitySession() {
+    if (_activeStabilityLedger && !_activeStabilitySessionId.empty()) {
+        _activeStabilityLedger->FinishSession(
+            _activeStabilitySessionId,
+            livekit::telemetry::StabilitySessionTerminal::Stopped);
+    }
+    _activeStabilitySessionId.clear();
+    _activeStabilityLedger.reset();
+}
+
+void MeetingCoordinator::finishStartupTelemetry(
+    livekit::telemetry::OperationOutcome outcome) {
+    if (_startupTelemetryOperationId.empty()) return;
+    if (const auto telemetry = _startupTelemetry.lock()) {
+        telemetry->FinishOperation(
+            _startupTelemetryOperationId,
+            livekit::telemetry::OperationKind::Startup,
+            outcome);
+    }
+    _startupTelemetryOperationId.clear();
+    _startupTelemetry.reset();
+}
+
+void MeetingCoordinator::publishDetachedAdmissionTelemetry(
+    livekit::telemetry::OperationOutcome outcome,
+    std::chrono::steady_clock::time_point finishedAt) {
+    const auto durationMs = (std::max)(qint64{0},
+        static_cast<qint64>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            finishedAt - _admissionTelemetry.startedAt).count()));
+    QVariantMap summary;
+    summary.insert(QStringLiteral("kind"), QStringLiteral("admission"));
+    summary.insert(QStringLiteral("started"), QVariant::fromValue<qulonglong>(1));
+    summary.insert(QStringLiteral("terminal"), QVariant::fromValue<qulonglong>(1));
+    summary.insert(QStringLiteral("success"), QVariant::fromValue<qulonglong>(
+        outcome == livekit::telemetry::OperationOutcome::Success ? 1 : 0));
+    summary.insert(QStringLiteral("degradedSuccess"), QVariant::fromValue<qulonglong>(
+        outcome == livekit::telemetry::OperationOutcome::DegradedSuccess ? 1 : 0));
+    summary.insert(QStringLiteral("failure"), QVariant::fromValue<qulonglong>(
+        outcome == livekit::telemetry::OperationOutcome::Failure ? 1 : 0));
+    summary.insert(QStringLiteral("timeout"), QVariant::fromValue<qulonglong>(
+        outcome == livekit::telemetry::OperationOutcome::Timeout ? 1 : 0));
+    summary.insert(QStringLiteral("cancelled"), QVariant::fromValue<qulonglong>(
+        outcome == livekit::telemetry::OperationOutcome::Cancelled ? 1 : 0));
+    summary.insert(QStringLiteral("inflight"), QVariant::fromValue<qulonglong>(0));
+    summary.insert(QStringLiteral("lastDurationMs"), durationMs);
+
+    QVariantMap projection;
+    projection.insert(QStringLiteral("sessionGeneration"),
+                      QVariant::fromValue<qulonglong>(0));
+    projection.insert(QStringLiteral("revision"),
+                      QVariant::fromValue<qulonglong>(++_detachedTelemetryRevision));
+    projection.insert(QStringLiteral("availability"), QStringLiteral("UNKNOWN"));
+    projection.insert(QStringLiteral("reason"), QStringLiteral("admission_pre_room_terminal"));
+    projection.insert(QStringLiteral("sampleAgeMs"), -1);
+    projection.insert(QStringLiteral("coverage"), 0.0);
+    projection.insert(QStringLiteral("operationsStarted"),
+                      QVariant::fromValue<qulonglong>(1));
+    projection.insert(QStringLiteral("operationsTerminal"),
+                      QVariant::fromValue<qulonglong>(1));
+    projection.insert(QStringLiteral("operationsInflight"),
+                      QVariant::fromValue<qulonglong>(0));
+    projection.insert(QStringLiteral("operationsMissingStart"),
+                      QVariant::fromValue<qulonglong>(0));
+    projection.insert(QStringLiteral("operationsDuplicateTerminal"),
+                      QVariant::fromValue<qulonglong>(0));
+    projection.insert(QStringLiteral("operationsKindMismatch"),
+                      QVariant::fromValue<qulonglong>(0));
+    projection.insert(QStringLiteral("operationSummaries"),
+                      QVariantList{summary});
+    emit telemetrySnapshotChanged(projection);
 }
 
 bool MeetingCoordinator::canBeginAdmission() const {
@@ -1355,6 +2058,8 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
             const QString detail = err.message;
             const QString message = detail.isEmpty()
                 ? QCoreApplication::translate("MeetingUI", "The meeting does not exist or the password is incorrect") : detail;
+            owner->finishAdmissionTelemetry(
+                generation, livekit::telemetry::OperationOutcome::Failure);
             owner->_admissionStage = AdmissionStage::None;
             owner->setState(MeetingState::Failed, detail);
             if (!owner || owner->_admissionGeneration != generation ||
@@ -1383,6 +2088,8 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
                 const QString detail = tokenErr.message;
                 const QString message = detail.isEmpty()
                     ? QCoreApplication::translate("MeetingUI", "Unable to obtain LiveKit room credentials") : detail;
+                owner->finishAdmissionTelemetry(
+                    generation, livekit::telemetry::OperationOutcome::Failure);
                 owner->_admissionStage = AdmissionStage::None;
                 owner->setState(MeetingState::Failed, detail);
                 if (!owner || owner->_admissionGeneration != generation ||
@@ -1451,6 +2158,8 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
             const QString detail = err.message;
             const QString message = detail.isEmpty()
                 ? QCoreApplication::translate("MeetingUI", "The server could not allocate a meeting room") : detail;
+            owner->finishAdmissionTelemetry(
+                generation, livekit::telemetry::OperationOutcome::Failure);
             owner->_admissionStage = AdmissionStage::None;
             owner->setState(MeetingState::Failed, detail);
             if (!owner || owner->_admissionGeneration != generation ||
@@ -1658,11 +2367,68 @@ void MeetingCoordinator::startRoomSession(const QString &url,
         _sessionManager.userId());
 
     _room = livekit::Room::Create(_ioContext->get_executor());
+    attachAdmissionTelemetry(_sessionRuntime->telemetry());
+    _startupTelemetry = _sessionRuntime->telemetry();
+    _startupTelemetryOperationId = _sessionRuntime->telemetry()->StartOperation(
+        livekit::telemetry::OperationKind::Startup);
+    _room->SetSessionTelemetry(_sessionRuntime->telemetry());
     {
         auto session = _sessionRuntime;
         auto room = _room;
         const auto generation = session->generation();
         asio::post(session->strand(), [this, session, room, generation] {
+            auto telemetry = session->telemetry();
+            telemetry->SetSnapshotCallbackOnStrand(
+                [this, generation](livekit::telemetry::SessionTelemetry::SnapshotPtr snapshot) {
+                    if (const auto store =
+                            livekit::telemetry::InstalledTelemetryHistoryStore()) {
+                        const auto ledger =
+                            livekit::telemetry::InstalledStabilityLedger();
+                        store->SubmitSnapshot(
+                            snapshot, ledger ? ledger->Summary()
+                                             : livekit::telemetry::StabilitySummary{});
+                    }
+                    QMetaObject::invokeMethod(this,
+                        [this, generation, snapshot = std::move(snapshot)] {
+                            if (!isCurrentSessionGenerationOnUiThread(generation)) return;
+                            const auto projection = ProjectTelemetrySnapshot(*snapshot);
+                            emit telemetrySnapshotChanged(projection);
+                        },
+                        Qt::QueuedConnection);
+                });
+            telemetry->StartStatsSamplingOnStrand(
+                [weak_room = std::weak_ptr<livekit::Room>(room)](
+                    livekit::telemetry::SessionTelemetry::LateCompletion late_completion)
+                    -> asio::awaitable<livekit::RoomStatsReport> {
+                    if (auto current = weak_room.lock()) {
+                        co_return co_await current->GetStats(std::move(late_completion));
+                    }
+                    co_return livekit::RoomStatsReport{};
+                });
+            auto process_resource_sampler =
+                std::make_shared<livekit::telemetry::ProcessResourceSampler>();
+            telemetry->StartRuntimeSamplingOnStrand(
+                [process_resource_sampler] {
+                    return process_resource_sampler->Sample();
+                },
+                [this, weak_telemetry =
+                           std::weak_ptr<livekit::telemetry::SessionTelemetry>(telemetry)](
+                    std::uint64_t telemetry_generation,
+                    std::uint64_t probe_id,
+                    livekit::telemetry::SessionTelemetry::Clock::time_point) {
+                    QMetaObject::invokeMethod(this,
+                        [this, weak_telemetry, telemetry_generation, probe_id] {
+                            if (!isCurrentSessionGenerationOnUiThread(
+                                    telemetry_generation)) {
+                                return;
+                            }
+                            if (const auto current = weak_telemetry.lock()) {
+                                current->CompleteUiLagProbe(
+                                    telemetry_generation, probe_id);
+                            }
+                        },
+                        Qt::QueuedConnection);
+                });
             session->screenShareOnStrand() = std::make_shared<livekit::ScreenShareSession>(
                 session->strand(), livekit::ScreenShareSession::ForRoom(room),
                 [this, generation](livekit::ScreenShareSnapshot snapshot) {
@@ -1858,6 +2624,9 @@ void MeetingCoordinator::completeRoomStartupOnUiThread(
     publishLocalTrackMute(_localVideoTrack, !_videoEnabled);
     _startupListenOnly = false;
     _startupCommitted = true;
+    finishStartupTelemetry(livekit::telemetry::OperationOutcome::Success);
+    finishAdmissionTelemetry(
+        _admissionGeneration, livekit::telemetry::OperationOutcome::Success);
     ensureLocalParticipant();
     for (auto &[_, participant] : _participants) {
         if (!participant.isLocal) continue;
@@ -1902,6 +2671,11 @@ void MeetingCoordinator::completeRoomStartupDegradedOnUiThread(
         break;
     }
     _startupCommitted = true;
+    finishStartupTelemetry(
+        livekit::telemetry::OperationOutcome::DegradedSuccess);
+    finishAdmissionTelemetry(
+        _admissionGeneration,
+        livekit::telemetry::OperationOutcome::DegradedSuccess);
     if (!tryCommitOperationalStateOnUiThread(
             sessionGeneration, QCoreApplication::translate("MeetingUI", "Local media is unavailable. Switched to receive-only mode."))) {
         return;
@@ -1948,6 +2722,10 @@ void MeetingCoordinator::failRoomStartupOnUiThread(
         return;
     }
 
+    finishStartupTelemetry(livekit::telemetry::OperationOutcome::Failure);
+    finishAdmissionTelemetry(
+        _admissionGeneration, livekit::telemetry::OperationOutcome::Failure);
+
     // The target protocol has no local media-Unpublish request.  A full Room
     // disconnect is therefore the only server-visible rollback that cannot
     // leave an audio-only or video-only startup publication behind.
@@ -1958,6 +2736,7 @@ void MeetingCoordinator::failRoomStartupOnUiThread(
 }
 
 void MeetingCoordinator::stopRoomSession() {
+    finishStartupTelemetry(livekit::telemetry::OperationOutcome::Cancelled);
     ++_screenSourceRequest;
     _screenShareSnapshot = {};
     _startupCommitted = false;
@@ -1966,6 +2745,7 @@ void MeetingCoordinator::stopRoomSession() {
     if (_whiteboardTickTimer) _whiteboardTickTimer->stop();
     const bool was_running = _sessionRunning.exchange(false);
     if (!was_running) {
+        finishActiveStabilitySession();
         return;
     }
     QPointer<MeetingCoordinator> owner(this);
@@ -1991,29 +2771,31 @@ void MeetingCoordinator::stopRoomSession() {
         auto cleanup = std::make_shared<std::promise<std::vector<QString>>>();
         auto completed = cleanup->get_future();
         asio::post(session->strand(), [session, cleanup]() {
-            try {
-                session->assertOnStrand();
-                session->stopAcceptingDataOnStrand();
-                if (auto &share = session->screenShareOnStrand()) {
-                    share->Shutdown();
-                    share.reset();
-                }
-                if (auto &board = session->whiteboardOnStrand()) {
-                    board->retire();
-                    board.reset();
-                }
+            session->assertOnStrand();
+            session->stopAcceptingDataOnStrand([session, cleanup] {
+                try {
+                    session->assertOnStrand();
+                    if (auto &share = session->screenShareOnStrand()) {
+                        share->Shutdown();
+                        share.reset();
+                    }
+                    if (auto &board = session->whiteboardOnStrand()) {
+                        board->retire();
+                        board.reset();
+                    }
 
-                std::vector<QString> failed;
-                auto &transfers = session->transfersOnStrand();
-                failed.reserve(transfers.size());
-                for (const auto &[transferId, _] : transfers) {
-                    failed.push_back(transferId.uiTransferId());
+                    std::vector<QString> failed;
+                    auto &transfers = session->transfersOnStrand();
+                    failed.reserve(transfers.size());
+                    for (const auto &[transferId, _] : transfers) {
+                        failed.push_back(transferId.uiTransferId());
+                    }
+                    transfers.clear();
+                    cleanup->set_value(std::move(failed));
+                } catch (...) {
+                    cleanup->set_exception(std::current_exception());
                 }
-                transfers.clear();
-                cleanup->set_value(std::move(failed));
-            } catch (...) {
-                cleanup->set_exception(std::current_exception());
-            }
+            });
         });
         try {
             failedInboundTransfers = completed.get();
@@ -2090,6 +2872,7 @@ void MeetingCoordinator::stopRoomSession() {
     _whiteboardCanAdmin = false;
     _whiteboardAssets.clear();
     _whiteboardStatus.clear();
+    finishActiveStabilitySession();
 
     // Finish resource cleanup before notifications can synchronously delete
     // the owner or start another session. Never clean up that successor.

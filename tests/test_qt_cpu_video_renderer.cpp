@@ -70,7 +70,8 @@ bool LocalFrameAcceptance() {
     auto replacement = std::make_shared<VideoSource>(3, 5);
     int gpu = 0, cpu = 0;
     VideoRenderFrame::Ptr received;
-    VideoRenderSession session([&](const std::string& key, const QImage& image) {
+    VideoRenderSession session([&](const std::string& key, const QImage& image,
+                                   VideoRenderFrame::Ptr) {
         if (key == "local" && !image.isNull()) ++cpu;
     });
     session.AttachLocalSource(first);
@@ -139,7 +140,9 @@ int main() {
     std::string delivered_identity;
     QImage delivered_image;
     livekit::render::VideoRenderSession session(
-        [&delivered, &delivered_identity, &delivered_image](const std::string& identity, const QImage& image) {
+        [&delivered, &delivered_identity, &delivered_image](
+                const std::string& identity, const QImage& image,
+                livekit::render::VideoRenderFrame::Ptr) {
             ++delivered;
             delivered_identity = identity;
             delivered_image = image;
@@ -168,7 +171,8 @@ int main() {
     std::string gpu_identity;
     livekit::render::VideoRenderFrame::Ptr gpu_frame;
     livekit::render::VideoRenderSession backend_session(
-        [&cpu_delivered](const std::string&, const QImage&) {
+        [&cpu_delivered](const std::string&, const QImage&,
+                         livekit::render::VideoRenderFrame::Ptr) {
             ++cpu_delivered;
         });
     auto backend_track = std::make_shared<livekit::Track>("TR_DX11", "dx11", livekit::TrackKind::Video);

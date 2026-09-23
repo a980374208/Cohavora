@@ -1,4 +1,5 @@
 #include <iostream>
+#include <algorithm>
 #include <thread>
 #include <mutex>
 #include <chrono>
@@ -15,6 +16,7 @@
 #include "participant.h"
 #include "track.h"
 #include "webrtc_manager.h"
+#include "session_telemetry.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 
@@ -868,6 +870,16 @@ public:
     }
 };
 
+const livekit::telemetry::OperationSummary* FindTelemetryOperation(
+        const livekit::telemetry::SessionTelemetry::SnapshotPtr& snapshot,
+        livekit::telemetry::OperationKind kind) {
+    if (!snapshot) return nullptr;
+    const auto found = std::find_if(
+        snapshot->operation_summaries.begin(), snapshot->operation_summaries.end(),
+        [kind](const auto& summary) { return summary.kind == kind; });
+    return found == snapshot->operation_summaries.end() ? nullptr : &*found;
+}
+
 asio::awaitable<void> TestAsyncPublishContract() {
     std::cout << "Running TestAsyncPublishContract..." << std::endl;
 
@@ -931,6 +943,17 @@ asio::awaitable<void> TestRoomStateMachine() {
     opts.timeouts.publish = std::chrono::milliseconds(100);
 
     auto room = livekit::Room::Create(executor);
+    auto telemetry_strand = asio::make_strand(server_io);
+    auto telemetry = std::make_shared<livekit::telemetry::SessionTelemetry>(
+        telemetry_strand, 91);
+    livekit::telemetry::SessionTelemetry::SnapshotPtr telemetry_snapshot;
+    asio::post(telemetry_strand, [telemetry, &telemetry_snapshot] {
+        telemetry->SetSnapshotCallbackOnStrand(
+            [&telemetry_snapshot](auto snapshot) {
+                telemetry_snapshot = std::move(snapshot);
+            });
+    });
+    room->SetSessionTelemetry(telemetry);
     auto listener = std::make_shared<TestRoomListener>();
     room->AddListener(listener);
 
@@ -966,6 +989,12 @@ asio::awaitable<void> TestRoomStateMachine() {
     TEST_ASSERT(listener->connected_participant->sid() == "remote_bob_456", "Incorrect remote participant SID");
     TEST_ASSERT(listener->connected_participant->identity() == "bob", "Incorrect remote participant identity");
     TEST_ASSERT(room->remote_participants().size() == 1, "Incorrect remote participant size");
+    const auto* connect_telemetry = FindTelemetryOperation(
+        telemetry_snapshot, livekit::telemetry::OperationKind::Connect);
+    TEST_ASSERT(connect_telemetry && connect_telemetry->started == 1 &&
+                connect_telemetry->terminal == 1 && connect_telemetry->success == 1 &&
+                connect_telemetry->inflight == 0,
+                "Connect telemetry did not commit one successful terminal");
     std::cout << "[STEP] Remote participant joined event processed and verified." << std::endl;
 
     // 3. 未收到 TrackPublished ACK 时必须超时失败，且不能提交伪 publication
@@ -980,6 +1009,15 @@ asio::awaitable<void> TestRoomStateMachine() {
     TEST_ASSERT(publish_timed_out, "PublishTrackAsync reported success without TrackPublished ACK");
     TEST_ASSERT(room->local_participant()->tracks().empty(),
                 "Failed publish left a provisional publication behind");
+    asio::steady_timer telemetry_timer(executor);
+    telemetry_timer.expires_after(std::chrono::milliseconds(1));
+    co_await telemetry_timer.async_wait(asio::use_awaitable);
+    const auto* publish_telemetry = FindTelemetryOperation(
+        telemetry_snapshot, livekit::telemetry::OperationKind::PublishTrack);
+    TEST_ASSERT(publish_telemetry && publish_telemetry->started == 1 &&
+                publish_telemetry->terminal == 1 && publish_telemetry->timeout == 1 &&
+                publish_telemetry->success == 0 && publish_telemetry->inflight == 0,
+                "Publish timeout telemetry did not preserve its unique terminal");
 
     {
         std::lock_guard<std::mutex> lock(server->req_mutex);
@@ -1214,6 +1252,80 @@ public:
     }
 };
 
+class DisconnectOnReconnectListener final : public livekit::RoomListener {
+public:
+    std::weak_ptr<livekit::Room> room;
+    bool reconnecting_called = false;
+
+    void OnReconnecting() override {
+        reconnecting_called = true;
+        if (const auto owner = room.lock()) {
+            owner->Disconnect();
+        }
+    }
+};
+
+asio::awaitable<void> TestReconnectCancelledBeforeAttemptStarts() {
+    std::cout << "Running TestReconnectCancelledBeforeAttemptStarts..." << std::endl;
+    auto executor = co_await asio::this_coro::executor;
+    auto& server_io = static_cast<asio::io_context&>(executor.context());
+
+    auto server = std::make_shared<MockServer>(server_io);
+    g_keep_alive_servers.push_back(server);
+    server->SetMockJoinSids("participant_reconnect_cancelled");
+    server->StartAccept();
+
+    const std::string url =
+        "ws://127.0.0.1:" + std::to_string(server->port());
+    livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
+    opts.single_peer_connection = false;
+    opts.create_webrtc_pc = false;
+
+    auto room = livekit::Room::Create(executor);
+    auto telemetry_strand = asio::make_strand(server_io);
+    auto telemetry = std::make_shared<livekit::telemetry::SessionTelemetry>(
+        telemetry_strand, 91);
+    livekit::telemetry::SessionTelemetry::SnapshotPtr telemetry_snapshot;
+    asio::post(telemetry_strand, [telemetry, &telemetry_snapshot] {
+        telemetry->SetSnapshotCallbackOnStrand(
+            [&telemetry_snapshot](auto snapshot) {
+                telemetry_snapshot = std::move(snapshot);
+            });
+    });
+    room->SetSessionTelemetry(telemetry);
+    auto listener = std::make_shared<DisconnectOnReconnectListener>();
+    listener->room = room;
+    room->AddListener(listener);
+
+    const bool ok = co_await room->Connect(url, "test-token", opts);
+    TEST_ASSERT(ok, "Room connection failed");
+
+    server->CloseActiveConnections();
+    server->Stop();
+
+    asio::steady_timer timer(executor);
+    timer.expires_after(std::chrono::milliseconds(250));
+    co_await timer.async_wait(asio::use_awaitable);
+
+    TEST_ASSERT(listener->reconnecting_called,
+                "Reconnect cancellation test did not enter OnReconnecting");
+    TEST_ASSERT(room->connection_state() == livekit::ConnectionState::Disconnected,
+                "Listener-owned Disconnect did not terminate reconnect");
+    const auto* episode = FindTelemetryOperation(
+        telemetry_snapshot, livekit::telemetry::OperationKind::ReconnectEpisode);
+    const auto* attempts = FindTelemetryOperation(
+        telemetry_snapshot, livekit::telemetry::OperationKind::ReconnectAttempt);
+    TEST_ASSERT(episode && episode->started == 1 && episode->terminal == 1 &&
+                episode->cancelled == 1 && episode->inflight == 0,
+                "Pre-attempt reconnect cancellation left the episode unterminated");
+    TEST_ASSERT(attempts == nullptr || attempts->started == 0,
+                "A reconnect attempt started after synchronous cancellation");
+    TEST_ASSERT(telemetry_snapshot->operations_duplicate_terminal == 0,
+                "Reconnect cancellation emitted more than one terminal outcome");
+    std::cout << "TestReconnectCancelledBeforeAttemptStarts PASSED!" << std::endl;
+}
+
 asio::awaitable<void> TestRoomReconnectAndTrackRecovery() {
     std::cout << "Running TestRoomReconnectAndTrackRecovery..." << std::endl;
     auto executor = co_await asio::this_coro::executor;
@@ -1231,6 +1343,17 @@ asio::awaitable<void> TestRoomReconnectAndTrackRecovery() {
     opts.create_webrtc_pc = false;
 
     auto room = livekit::Room::Create(executor);
+    auto telemetry_strand = asio::make_strand(server_io);
+    auto telemetry = std::make_shared<livekit::telemetry::SessionTelemetry>(
+        telemetry_strand, 92);
+    livekit::telemetry::SessionTelemetry::SnapshotPtr telemetry_snapshot;
+    asio::post(telemetry_strand, [telemetry, &telemetry_snapshot] {
+        telemetry->SetSnapshotCallbackOnStrand(
+            [&telemetry_snapshot](auto snapshot) {
+                telemetry_snapshot = std::move(snapshot);
+            });
+    });
+    room->SetSessionTelemetry(telemetry);
     auto listener = std::make_shared<TestReconnectListener>();
     room->AddListener(listener);
 
@@ -1271,6 +1394,17 @@ asio::awaitable<void> TestRoomReconnectAndTrackRecovery() {
                 "Resume reconnect emitted a full-restart republish callback");
     TEST_ASSERT(room->local_participant()->tracks().size() == 1,
                 "Resume reconnect did not preserve the local publication state");
+    const auto* episode = FindTelemetryOperation(
+        telemetry_snapshot, livekit::telemetry::OperationKind::ReconnectEpisode);
+    const auto* attempts = FindTelemetryOperation(
+        telemetry_snapshot, livekit::telemetry::OperationKind::ReconnectAttempt);
+    TEST_ASSERT(episode && episode->started == 1 && episode->terminal == 1 &&
+                episode->success == 1 && episode->inflight == 0,
+                "Resume reconnect telemetry did not produce one successful episode");
+    TEST_ASSERT(attempts && attempts->started >= 1 &&
+                attempts->terminal == attempts->started && attempts->success == 1 &&
+                attempts->inflight == 0,
+                "Resume reconnect attempts were not independently terminal");
     {
         std::lock_guard<std::mutex> lock(server2->req_mutex);
         const livekit::proto::SyncState* sync = nullptr;
@@ -1311,6 +1445,17 @@ asio::awaitable<void> TestRoomReconnectExhaustion() {
     opts.timeouts.reconnect_total = std::chrono::seconds(5);
 
     auto room = livekit::Room::Create(executor);
+    auto telemetry_strand = asio::make_strand(server_io);
+    auto telemetry = std::make_shared<livekit::telemetry::SessionTelemetry>(
+        telemetry_strand, 93);
+    livekit::telemetry::SessionTelemetry::SnapshotPtr telemetry_snapshot;
+    asio::post(telemetry_strand, [telemetry, &telemetry_snapshot] {
+        telemetry->SetSnapshotCallbackOnStrand(
+            [&telemetry_snapshot](auto snapshot) {
+                telemetry_snapshot = std::move(snapshot);
+            });
+    });
+    room->SetSessionTelemetry(telemetry);
     auto listener = std::make_shared<TestRoomListener>();
     room->AddListener(listener);
 
@@ -1333,6 +1478,17 @@ asio::awaitable<void> TestRoomReconnectExhaustion() {
                 "Reconnect exhaustion replaced its business detail: " + listener->disconnected_detail);
     TEST_ASSERT(listener->disconnected_detail.find("error{stage=") == std::string::npos,
                 "Reconnect business detail was replaced by a diagnostic summary");
+    const auto* episode = FindTelemetryOperation(
+        telemetry_snapshot, livekit::telemetry::OperationKind::ReconnectEpisode);
+    const auto* attempts = FindTelemetryOperation(
+        telemetry_snapshot, livekit::telemetry::OperationKind::ReconnectAttempt);
+    TEST_ASSERT(episode && episode->started == 1 && episode->terminal == 1 &&
+                episode->success == 0 && episode->inflight == 0,
+                "Reconnect exhaustion telemetry did not close one failed episode");
+    TEST_ASSERT(attempts && attempts->started >= 1 &&
+                attempts->terminal == attempts->started && attempts->success == 0 &&
+                attempts->inflight == 0,
+                "Reconnect exhaustion attempts were not independently terminal");
 
     room->Disconnect();
     std::cout << "TestRoomReconnectExhaustion PASSED!" << std::endl;
@@ -1362,6 +1518,7 @@ int main() {
             co_await TestWebRTCIntegration();
             co_await TestConnectWaitsForMediaReadiness();
             co_await TestEventReadyHandshake();
+            co_await TestReconnectCancelledBeforeAttemptStarts();
             co_await TestRoomReconnectAndTrackRecovery();
             co_await TestRoomReconnectExhaustion();
             std::cout << "All tests PASSED!" << std::endl;

@@ -66,6 +66,7 @@ QString Dx11DriverDescription(BackendDevice& device) {
 struct ModuleVideoCanvas::Scene {
     uint64_t sequence = 0;
     lk_render_frame_target target{};
+    std::string measurement_point;
     std::vector<Resource> resources;
     std::vector<lk_render_draw_command> commands;
 };
@@ -154,6 +155,19 @@ struct ModuleVideoCanvas::Worker {
                     // Publish failure BEFORE destruction: driver cleanup can hang too.
                     if (result != LK_RENDER_OK) { failure.store(Failure(result)); break; }
                     if (stop.load()) break;
+                    std::set<uint64_t> submitted_resources;
+                    for (const auto& command : scene->commands) {
+                        if (command.resource.value != 0) {
+                            submitted_resources.insert(command.resource.value);
+                        }
+                    }
+                    const auto submitted_at = std::chrono::steady_clock::now();
+                    for (const auto& resource : scene->resources) {
+                        if (resource.frame && submitted_resources.contains(resource.id.value)) {
+                            resource.frame->NotifyRendered(
+                                scene->measurement_point.c_str(), submitted_at);
+                        }
+                    }
                     if (task) task(*device);
                     if (stop.load()) break;
                     presentedScene.store(scene->sequence);
@@ -350,6 +364,7 @@ bool ModuleVideoCanvas::beginFrame(QSize& pixels) {
     building_ = std::make_shared<Scene>();
     building_->sequence = ++submitted_;
     building_->target = target_;
+    building_->measurement_point = "dx11_module_present";
     building_->target.pixel_width = pixels.width(); building_->target.pixel_height = pixels.height();
     for (const auto& [_, resource] : videos_) building_->resources.push_back(resource);
     return true;
@@ -361,8 +376,10 @@ void ModuleVideoCanvas::AddCommand(const VideoTileRect& tile, lk_render_resource
         {0, 0, building_->target.pixel_width, building_->target.pixel_height}, {r, g, b, 1}});
 }
 void ModuleVideoCanvas::drawSolid(const VideoTileRect& tile, float r, float g, float b) { AddCommand(tile, {}, r, g, b); }
-void ModuleVideoCanvas::drawVideo(const VideoTileRect& tile) {
-    if (!failed_) AddCommand(tile, videos_.at(tile.identity).id);
+bool ModuleVideoCanvas::drawVideo(const VideoTileRect& tile) {
+    if (failed_ || !building_) return false;
+    AddCommand(tile, videos_.at(tile.identity).id);
+    return !failed_;
 }
 bool ModuleVideoCanvas::drawDecoration(const VideoTileRect& tile, const QImage& input) {
     if (failed_ || !building_) return false;

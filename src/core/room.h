@@ -32,9 +32,22 @@
 
 namespace livekit {
 
+namespace telemetry {
+class SessionTelemetry;
+struct VideoActivityProbe;
+struct AudioActivityProbe;
+struct RenderActivityProbe;
+enum class OperationOutcome;
+}
+
+namespace render {
+class RenderSubmitObserver;
+}
+
 struct RoomStatsReport;
 class RemoteTrackPublication;
 struct RemotePublicationControlRequest;
+class SubscriptionTelemetryOperation;
 enum class RemotePublicationControlDispatch;
 
 enum class ConnectionState {
@@ -211,6 +224,7 @@ public:
 
     void AddListener(std::shared_ptr<RoomListener> listener);
     void RemoveListener(std::shared_ptr<RoomListener> listener);
+    void SetSessionTelemetry(std::weak_ptr<telemetry::SessionTelemetry> telemetry);
 
     asio::any_io_executor executor() const { return executor_; }
 
@@ -248,7 +262,8 @@ public:
     void OnIncomingRpcPacket(const RpcPacket& packet);
 
     // === 新增：RTCStats 实时质量与统计报表采集 ===
-    asio::awaitable<RoomStatsReport> GetStats();
+    asio::awaitable<RoomStatsReport> GetStats(
+        std::function<void()> late_completion = {});
     RoomStatsReport GetStatsSync();
 
     // === 远端参会人独立音量与静音管理 ===
@@ -483,10 +498,13 @@ private:
         bool subscribed = true;
         uint64_t revision = 0;
         uint64_t last_request_sequence = 0;
+        std::chrono::steady_clock::time_point accepted_at{};
     };
     struct PendingSubscriptionUpdate {
         bool subscribed = true;
         uint64_t revision = 0;
+        bool in_flight = false;
+        std::shared_ptr<SubscriptionTelemetryOperation> telemetry_operation;
     };
     struct SubscriptionSyncSnapshot {
         uint64_t logical_session = 0;
@@ -501,6 +519,10 @@ private:
     const RemoteSubscriptionIntent* FindSubscriptionIntentLocked(
         const SubscriptionIntentKey& key) const;
     void QueueSubscriptionUpdateLocked(const SubscriptionIntentKey& key);
+    void FinishSubscriptionOperationLocked(
+        const PendingSubscriptionUpdate& update,
+        telemetry::OperationOutcome outcome);
+    void CancelPendingSubscriptionUpdateLocked(const SubscriptionIntentKey& key);
     void ScheduleSubscriptionDrainLocked();
     asio::awaitable<void> DrainSubscriptionUpdates(
         uint64_t logical_session,
@@ -683,6 +705,10 @@ private:
         TrackKey track_key;
         uint64_t binding_serial = 0;
         std::shared_ptr<MediaBindingState> media_binding;
+        std::shared_ptr<telemetry::VideoActivityProbe> telemetry_probe;
+        std::shared_ptr<telemetry::AudioActivityProbe> audio_telemetry_probe;
+        std::shared_ptr<telemetry::RenderActivityProbe> render_telemetry_probe;
+        std::shared_ptr<render::RenderSubmitObserver> render_telemetry_observer;
         std::string rtc_track_id;
         RemoteTrackSinkThread detach_thread;
         // Keeps both the WebRTC track and its native sink alive. Calling this
@@ -727,6 +753,7 @@ private:
 
     std::unordered_map<std::string,
         std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>>> pending_track_publishes_;
+    std::set<const Track*> reconnect_republish_tracks_;
     // A media sender is changed before the remote SDP answer can commit the
     // public map mutation. Keep that intent through recovery so a failed
     // renegotiation never republishes a track the user removed.
@@ -739,6 +766,7 @@ private:
     std::vector<std::shared_ptr<proto::SignalResponse>> deferred_room_messages_;
 
     std::atomic<uint64_t> operation_sequence_{1};
+    std::weak_ptr<telemetry::SessionTelemetry> session_telemetry_;
     std::atomic<uint64_t> session_generation_{0};
     // Identifies the Connect attempt that installed the current shared
     // Signal/Room/WebRTC bundle. Validity may advance before cleanup runs, so
@@ -811,7 +839,10 @@ private:
     static void ApplySimulcastParameters(webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender, const VideoPublishOptions& opts);
 
     // 内部私有方法
-    asio::awaitable<void> AttemptReconnect(uint64_t owner_generation);
+    asio::awaitable<void> AttemptReconnect(
+        uint64_t owner_generation,
+        std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner,
+        std::string telemetry_operation_id);
     asio::awaitable<void> RepublishLocalTracks(uint64_t generation);
     asio::awaitable<void> RestartIceConnections(
         std::shared_ptr<proto::ReconnectResponse> reconnect_response,

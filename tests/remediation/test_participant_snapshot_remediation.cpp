@@ -9,10 +9,21 @@
 #include "src/rtc/webrtc_manager.h"
 #include "src/render/owned_i420_frame.h"
 #include "src/ui/meeting_room_window.h"
+#include "src/ui/telemetry_dialogs.h"
 #include "src/ui/whiteboard/annotation_overlay_window.h"
 #include "src/ui/whiteboard/whiteboard_panel.h"
 #include "src/ui/app_theme.h"
+#include "src/telemetry/telemetry_report.h"
 #include <QtWidgets/QPlainTextEdit>
+#include <QtWidgets/QCheckBox>
+#include <QtWidgets/QDialog>
+#include <QtWidgets/QDialogButtonBox>
+#include <QtWidgets/QListWidget>
+#include <QtWidgets/QPushButton>
+#include <QtWidgets/QScrollBar>
+#include <QtWidgets/QTableWidget>
+#include <QtWidgets/QTabBar>
+#include <QtWidgets/QTabWidget>
 #include "src/ui/render/module_video_canvas.h"
 #include "src/ui/render/gl_video_canvas.h"
 #include <QtGui/QWindow>
@@ -56,6 +67,7 @@ void RunOpenGlContract();
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QInputDialog>
 #include <QtGui/QMouseEvent>
+#include <QtGui/QKeyEvent>
 
 #include <algorithm>
 #include <array>
@@ -63,6 +75,8 @@ void RunOpenGlContract();
 #include <condition_variable>
 #include <cstring>
 #include <deque>
+#include <filesystem>
+#include <functional>
 #include <future>
 #include <iostream>
 #include <memory>
@@ -208,8 +222,671 @@ public:
 };
 } // namespace livekit
 
+class PaintBoundaryObserver final : public livekit::render::RenderSubmitObserver {
+public:
+    void SetExpected(bool expected,
+                     livekit::render::RenderExpectationReason reason,
+                     Clock::time_point) override {
+        lastExpected = expected;
+        ++expectationChanges;
+        if (reason == livekit::render::RenderExpectationReason::BindingEnded) {
+            ++bindingEnds;
+        }
+    }
+
+    void OnSubmitted(const livekit::render::RenderFrameMetadata& metadata,
+                     const char *measurementPoint,
+                     Clock::time_point) override {
+        ++submits;
+        token = metadata.frame_token;
+        point = measurementPoint ? measurementPoint : "";
+    }
+
+    int expectationChanges = 0;
+    int bindingEnds = 0;
+    int submits = 0;
+    bool lastExpected = false;
+    std::uint64_t token = 0;
+    std::string point;
+};
+
+class BindingContinuityCanvas final : public livekit::render::VideoCanvas {
+public:
+    bool rendererReady() const override { return true; }
+    QString backendName() const override { return QStringLiteral("test"); }
+
+protected:
+    void submitFrame(const std::string&, livekit::render::VideoRenderFrame::Ptr) override {}
+    void removeFrame(const std::string&) override {}
+    void clearBackend() override {}
+    void releaseRenderer() override {}
+    void removeDecorationTexture(const std::string&) override {}
+    livekit::render::VideoFrameGeometry frameGeometry(const std::string&) const override {
+        return {};
+    }
+    bool beginFrame(QSize&) override { return false; }
+    void drawSolid(const livekit::render::VideoTileRect&, float, float, float) override {}
+    bool drawVideo(const livekit::render::VideoTileRect&) override { return true; }
+    bool drawDecoration(const livekit::render::VideoTileRect&, const QImage&) override {
+        return true;
+    }
+    bool endFrame() override { return true; }
+};
+
 class ParticipantWindowTestAccess final {
 public:
+    static void checkCpuPaintTelemetryBoundary() {
+        auto observer = std::make_shared<PaintBoundaryObserver>();
+        livekit::render::RenderFrameMetadata metadata;
+        metadata.series_key = "remote_render/test/paint";
+        metadata.room_generation = 1;
+        metadata.binding_epoch = 2;
+        metadata.frame_token = 3;
+        metadata.decoded_at = std::chrono::steady_clock::now();
+        metadata.observer = observer;
+        const std::uint8_t y[] = {235, 235, 235, 235};
+        const std::uint8_t uv[] = {128};
+        auto owned = livekit::render::OwnedI420Frame::CopyFromPlanes(
+            2, 2, y, 2, uv, 1, uv, 1, 0,
+            livekit::VideoRotation::VIDEO_ROTATION_0, {}, metadata);
+        auto renderFrame = livekit::render::VideoRenderFrame::FromI420(owned);
+        TEST_CHECK(renderFrame);
+
+        MeetingUI::VideoTileWidget tile(QStringLiteral("paint-boundary"), false);
+        tile.resize(160, 90);
+        tile.setHardwareCanvasMode(false);
+        tile.setVideoActive(true);
+        QImage decoded(2, 2, QImage::Format_RGB32);
+        decoded.fill(Qt::white);
+        tile.setFrame(decoded, renderFrame);
+        TEST_CHECK(observer->submits == 0);
+
+        QImage target(tile.size(), QImage::Format_RGB32);
+        target.fill(Qt::black);
+        {
+            QPainter painter(&target);
+            tile.drawVideoFrame(painter, target.rect());
+        }
+        TEST_CHECK(observer->submits == 1);
+        TEST_CHECK(observer->token == 3);
+        TEST_CHECK(observer->point == "qt_cpu_paint");
+
+        metadata.frame_token = 4;
+        auto sameBinding = livekit::render::VideoRenderFrame::FromI420(
+            livekit::render::OwnedI420Frame::CopyFromPlanes(
+                2, 2, y, 2, uv, 1, uv, 1, 0,
+                livekit::VideoRotation::VIDEO_ROTATION_0, {}, metadata));
+        tile.setFrame(decoded, sameBinding);
+        TEST_CHECK(observer->bindingEnds == 0);
+
+        auto replacementObserver = std::make_shared<PaintBoundaryObserver>();
+        metadata.binding_epoch = 5;
+        metadata.frame_token = 1;
+        metadata.observer = replacementObserver;
+        auto replacement = livekit::render::VideoRenderFrame::FromI420(
+            livekit::render::OwnedI420Frame::CopyFromPlanes(
+                2, 2, y, 2, uv, 1, uv, 1, 0,
+                livekit::VideoRotation::VIDEO_ROTATION_0, {}, metadata));
+        tile.setFrame(decoded, replacement);
+        TEST_CHECK(observer->bindingEnds == 1);
+
+        auto canvasObserver = std::make_shared<PaintBoundaryObserver>();
+        metadata.binding_epoch = 7;
+        metadata.frame_token = 1;
+        metadata.observer = canvasObserver;
+        auto canvasFirst = livekit::render::VideoRenderFrame::FromI420(
+            livekit::render::OwnedI420Frame::CopyFromPlanes(
+                2, 2, y, 2, uv, 1, uv, 1, 0,
+                livekit::VideoRotation::VIDEO_ROTATION_0, {}, metadata));
+        metadata.frame_token = 2;
+        auto canvasSecond = livekit::render::VideoRenderFrame::FromI420(
+            livekit::render::OwnedI420Frame::CopyFromPlanes(
+                2, 2, y, 2, uv, 1, uv, 1, 0,
+                livekit::VideoRotation::VIDEO_ROTATION_0, {}, metadata));
+        BindingContinuityCanvas canvas;
+        canvas.updateFrame("paint", canvasFirst);
+        canvas.updateFrame("paint", canvasSecond);
+        TEST_CHECK(canvasObserver->bindingEnds == 0);
+        metadata.binding_epoch = 8;
+        metadata.frame_token = 1;
+        metadata.observer = std::make_shared<PaintBoundaryObserver>();
+        canvas.updateFrame("paint", livekit::render::VideoRenderFrame::FromI420(
+            livekit::render::OwnedI420Frame::CopyFromPlanes(
+                2, 2, y, 2, uv, 1, uv, 1, 0,
+                livekit::VideoRotation::VIDEO_ROTATION_0, {}, metadata)));
+        TEST_CHECK(canvasObserver->bindingEnds == 1);
+    }
+
+    static void checkTelemetryTopBar() {
+        MeetingUI::RoomTopBarWidget bar;
+        bar.resize(980, 44);
+        QResizeEvent resized(bar.size(), bar.size());
+        QApplication::sendEvent(&bar, &resized);
+
+        QVariantMap snapshot;
+        snapshot.insert(QStringLiteral("sessionGeneration"), 9);
+        snapshot.insert(QStringLiteral("revision"), 7);
+        snapshot.insert(QStringLiteral("availability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("reason"), QStringLiteral("stats_complete"));
+        snapshot.insert(QStringLiteral("sampleAgeMs"), 32);
+        snapshot.insert(QStringLiteral("coverage"), 1.0);
+        snapshot.insert(QStringLiteral("actualPcCount"), 1);
+        snapshot.insert(QStringLiteral("successfulPcCount"), 1);
+        snapshot.insert(QStringLiteral("queueCapacity"), 256);
+        snapshot.insert(QStringLiteral("queueDepth"), 2);
+        snapshot.insert(QStringLiteral("queueHighWater"), 8);
+        snapshot.insert(QStringLiteral("capacityDrops"), 0);
+        snapshot.insert(QStringLiteral("eventQueueLagAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("lastEventQueueLagMs"), 2);
+        snapshot.insert(QStringLiteral("maximumEventQueueLagMs"), 9);
+        snapshot.insert(QStringLiteral("resourceAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("resourceSampleAgeMs"), 120);
+        snapshot.insert(QStringLiteral("lastResourceSampleUs"), 180);
+        snapshot.insert(QStringLiteral("resourceSampleFailures"), 0);
+        snapshot.insert(QStringLiteral("cpuAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("processCpuPercent"), 12.5);
+        snapshot.insert(QStringLiteral("logicalProcessorCount"), 8);
+        snapshot.insert(QStringLiteral("memoryAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("workingSetBytes"), 64 * 1024 * 1024);
+        snapshot.insert(QStringLiteral("privateBytes"), 48 * 1024 * 1024);
+        snapshot.insert(QStringLiteral("peakWorkingSetBytes"), 96 * 1024 * 1024);
+        snapshot.insert(QStringLiteral("threadCountAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("processThreadCount"), 17);
+        snapshot.insert(QStringLiteral("handleCountAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("processHandleCount"), 81);
+        snapshot.insert(QStringLiteral("strandLagAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("lastStrandLagMs"), 3);
+        snapshot.insert(QStringLiteral("maximumStrandLagMs"), 11);
+        snapshot.insert(QStringLiteral("uiLagAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("lastUiLagMs"), 7);
+        snapshot.insert(QStringLiteral("maximumUiLagMs"), 24);
+        snapshot.insert(QStringLiteral("uiProbeTimeouts"), 0);
+        snapshot.insert(QStringLiteral("uiProbeSkipped"), 1);
+        snapshot.insert(QStringLiteral("uiProbeLateCallbacks"), 0);
+        snapshot.insert(QStringLiteral("gpuResourceAvailability"), QStringLiteral("UNSUPPORTED"));
+        snapshot.insert(QStringLiteral("gpuResourceReason"),
+                        QStringLiteral("gpu_process_provider_not_configured"));
+        snapshot.insert(QStringLiteral("resourceTrendAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("resourceTrendSamples"), 120);
+        snapshot.insert(QStringLiteral("resourceTrendSpanMs"), 119000);
+        snapshot.insert(QStringLiteral("resourceTrendCoverage"), 1.0);
+        snapshot.insert(QStringLiteral("minimumWorkingSetBytes"), 60 * 1024 * 1024);
+        snapshot.insert(QStringLiteral("maximumWorkingSetBytes"), 68 * 1024 * 1024);
+        snapshot.insert(QStringLiteral("minimumPrivateBytes"), 46 * 1024 * 1024);
+        snapshot.insert(QStringLiteral("maximumPrivateBytes"), 50 * 1024 * 1024);
+        snapshot.insert(QStringLiteral("privateBytesGrowthMibPerMinute"), 0.25);
+        snapshot.insert(QStringLiteral("threadGrowthPerHour"), 0.0);
+        snapshot.insert(QStringLiteral("handleGrowthPerHour"), 1.5);
+        snapshot.insert(QStringLiteral("resourceSessionDeltaAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("privateBytesDelta"), 2 * 1024 * 1024);
+        snapshot.insert(QStringLiteral("workingSetDeltaBytes"), 4 * 1024 * 1024);
+        snapshot.insert(QStringLiteral("resourceReturnAvailability"), QStringLiteral("UNKNOWN"));
+        snapshot.insert(QStringLiteral("resourceReturnReason"),
+                        QStringLiteral("post_stop_stable_window_not_observed"));
+        snapshot.insert(QStringLiteral("telemetryCostAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("telemetryObservedCostRatio"), 0.0012);
+        snapshot.insert(QStringLiteral("averageResourceSampleUs"), 180.0);
+        snapshot.insert(QStringLiteral("maximumSnapshotBuildUs"), 75);
+        snapshot.insert(QStringLiteral("maximumSnapshotCallbackUs"), 42);
+        snapshot.insert(QStringLiteral("telemetryAbAvailability"), QStringLiteral("NOT_EXPECTED"));
+        snapshot.insert(QStringLiteral("telemetryAbReason"),
+                        QStringLiteral("controlled_enabled_disabled_run_not_executed"));
+        snapshot.insert(QStringLiteral("stabilityLedgerAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("processRunsStarted"), 3);
+        snapshot.insert(QStringLiteral("processRunsTerminal"), 2);
+        snapshot.insert(QStringLiteral("sessionsStarted"), 5);
+        snapshot.insert(QStringLiteral("sessionsTerminal"), 4);
+        snapshot.insert(QStringLiteral("unknownTerminationAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("unknownProcessTerminations"), 1);
+        snapshot.insert(QStringLiteral("unknownProcessTerminationRatio"), 0.5);
+        snapshot.insert(QStringLiteral("confirmedCrashAvailability"), QStringLiteral("UNSUPPORTED"));
+        snapshot.insert(QStringLiteral("confirmedProcessCrashes"), 0);
+        snapshot.insert(QStringLiteral("confirmedProcessCrashRatio"), -1.0);
+        snapshot.insert(QStringLiteral("remoteVideoBindings"), 1);
+        snapshot.insert(QStringLiteral("remoteAudioBindings"), 1);
+        snapshot.insert(QStringLiteral("renderBindings"), 1);
+        snapshot.insert(QStringLiteral("statsRequestTimeouts"), 0);
+        snapshot.insert(QStringLiteral("statsRequestsSkipped"), 1);
+        snapshot.insert(QStringLiteral("lateCallbacks"), 0);
+        snapshot.insert(QStringLiteral("lastStatsRequestMs"), 14);
+        snapshot.insert(QStringLiteral("mappingFailures"), 0);
+        snapshot.insert(QStringLiteral("counterResets"), 0);
+        snapshot.insert(QStringLiteral("operationsStarted"), 2);
+        snapshot.insert(QStringLiteral("operationsTerminal"), 2);
+        snapshot.insert(QStringLiteral("operationsInflight"), 0);
+        snapshot.insert(QStringLiteral("operationsMissingStart"), 0);
+        snapshot.insert(QStringLiteral("firstVideoAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("firstVideoReason"), QStringLiteral("decoded_frame_received"));
+        snapshot.insert(QStringLiteral("firstVideoMeasurementPoint"),
+                        QStringLiteral("native_video_sink_onframe_entry"));
+        snapshot.insert(QStringLiteral("roomConnectToFirstDecodedMs"), 84);
+        snapshot.insert(QStringLiteral("lastSubscribeToFirstDecodedMs"), 31);
+        snapshot.insert(QStringLiteral("nativeVideoFreezeAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("nativeVideoFreezeCount"), 2);
+        snapshot.insert(QStringLiteral("nativeVideoFreezeDurationMs"), 625);
+        snapshot.insert(QStringLiteral("nativeVideoFreezeMeasurementPoint"),
+                        QStringLiteral("rtc_inbound_video_sink"));
+        snapshot.insert(QStringLiteral("reconnectVideoAvailability"), QStringLiteral("WARMING_UP"));
+        snapshot.insert(QStringLiteral("reconnectVideoRecovered"), 1);
+        snapshot.insert(QStringLiteral("reconnectVideoExpected"), 2);
+        snapshot.insert(QStringLiteral("reconnectVideoReason"),
+                        QStringLiteral("signaling_restored_waiting_for_video"));
+        snapshot.insert(QStringLiteral("lastReconnectSignalingMs"), 120);
+        snapshot.insert(QStringLiteral("lastReconnectStableVideoMs"), -1);
+        snapshot.insert(QStringLiteral("firstAudioAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("firstAudioReason"), QStringLiteral("pcm_received"));
+        snapshot.insert(QStringLiteral("audioConcealmentAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("audioConcealedRatio"), 0.025);
+        snapshot.insert(QStringLiteral("audioNonSilentConcealedRatio"), 0.01);
+        snapshot.insert(QStringLiteral("audioWindowConcealmentEvents"), 3);
+        snapshot.insert(QStringLiteral("audioJitterBufferAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("audioJitterBufferDelayMs"), 24.5);
+        snapshot.insert(QStringLiteral("audioJitterBufferTargetDelayMs"), 30.0);
+        snapshot.insert(QStringLiteral("audioJitterBufferMinimumDelayMs"), 12.0);
+        snapshot.insert(QStringLiteral("audioTimeStretchAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("audioInsertedRatio"), 0.004);
+        snapshot.insert(QStringLiteral("audioRemovedRatio"), 0.002);
+        snapshot.insert(QStringLiteral("reconnectAudioAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("lastReconnectStableAudioMs"), 410);
+        snapshot.insert(QStringLiteral("renderFirstFrameAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("renderMeasurementPoint"), QStringLiteral("qt_cpu_paint"));
+        snapshot.insert(QStringLiteral("renderStallAlgorithm"), QStringLiteral("render-stall-v1"));
+        snapshot.insert(QStringLiteral("renderStallAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("renderStallCount"), 1);
+        snapshot.insert(QStringLiteral("renderStallDurationMs"), 240);
+        snapshot.insert(QStringLiteral("renderLongestStallMs"), 240);
+        snapshot.insert(QStringLiteral("renderStallRatio"), 0.08);
+        snapshot.insert(QStringLiteral("reconnectRenderAvailability"), QStringLiteral("VALID"));
+        snapshot.insert(QStringLiteral("lastReconnectStableRenderMs"), 460);
+        snapshot.insert(QStringLiteral("lastReconnectRenderInterruptionMs"), 520);
+        bar.setTelemetrySnapshot(snapshot);
+        TEST_CHECK(bar._telemetrySnapshot.value(QStringLiteral("revision")).toInt() == 7);
+        TEST_CHECK(bar._qualityRect.size() == QSize(20, 28));
+
+        QImage rendered(bar.size(), QImage::Format_ARGB32_Premultiplied);
+        rendered.fill(Qt::transparent);
+        bar.render(&rendered);
+        const QPoint activePixel(
+            bar._qualityRect.left() + 4,
+            bar._qualityRect.center().y() + 4);
+        TEST_CHECK(rendered.pixelColor(activePixel) == QColor(0x00, 0x9a, 0x29));
+
+        QMouseEvent hover(QEvent::MouseMove, bar._qualityRect.center(),
+            Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(&bar, &hover);
+        TEST_CHECK(bar.toolTip().contains(QStringLiteral("VALID")));
+        TEST_CHECK(bar.toolTip().contains(QStringLiteral("32")));
+        TEST_CHECK(bar.toolTip().contains(QStringLiteral("1/2")));
+        TEST_CHECK(bar._telemetrySnapshot.value(
+            QStringLiteral("audioJitterBufferDelayMs")).toDouble() == 24.5);
+        TEST_CHECK(bar._telemetrySnapshot.value(
+            QStringLiteral("renderStallAlgorithm")).toString() ==
+            QStringLiteral("render-stall-v1"));
+
+        auto unavailableProjection = snapshot;
+        unavailableProjection.insert(
+            QStringLiteral("revision"), 8);
+        unavailableProjection.insert(
+            QStringLiteral("firstAudioAvailability"), QStringLiteral("NOT_EXPECTED"));
+        unavailableProjection.insert(
+            QStringLiteral("firstAudioReason"), QStringLiteral("no_remote_audio_expected"));
+        unavailableProjection.insert(QStringLiteral("lastSubscribeToFirstPcmMs"), 52);
+        unavailableProjection.insert(
+            QStringLiteral("audioConcealmentAvailability"), QStringLiteral("NOT_EXPECTED"));
+        unavailableProjection.insert(QStringLiteral("audioConcealedRatio"), 0.025);
+        unavailableProjection.insert(QStringLiteral("audioNonSilentConcealedRatio"), 0.01);
+        unavailableProjection.insert(QStringLiteral("audioWindowConcealmentEvents"), 3);
+        unavailableProjection.insert(
+            QStringLiteral("audioJitterBufferAvailability"), QStringLiteral("NOT_EXPECTED"));
+        unavailableProjection.insert(
+            QStringLiteral("audioTimeStretchAvailability"), QStringLiteral("NOT_EXPECTED"));
+        bar.setTelemetrySnapshot(unavailableProjection);
+        QStringList telemetryRows;
+        QTimer::singleShot(0, [&telemetryRows] {
+            auto *menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
+            TEST_CHECK(menu != nullptr);
+            for (const auto *action : menu->actions()) {
+                telemetryRows.push_back(action->text());
+            }
+            menu->close();
+        });
+        bar.showTelemetryMenu(bar.mapToGlobal(bar._qualityRect.bottomLeft()));
+        const auto firstAudioRow = std::find_if(
+            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
+                return row.contains(QStringLiteral("First remote PCM"));
+            });
+        TEST_CHECK(firstAudioRow != telemetryRows.end());
+        TEST_CHECK(!firstAudioRow->contains(QStringLiteral("52 ms")));
+        const auto concealmentRow = std::find_if(
+            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
+                return row.contains(QStringLiteral("Audio concealment"));
+            });
+        TEST_CHECK(concealmentRow != telemetryRows.end());
+        TEST_CHECK(!concealmentRow->contains(QStringLiteral("2.50%")));
+        TEST_CHECK(!concealmentRow->contains(QStringLiteral("3 events")));
+        const auto cpuRow = std::find_if(
+            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
+                return row.contains(QStringLiteral("Process CPU"));
+            });
+        TEST_CHECK(cpuRow != telemetryRows.end());
+        TEST_CHECK(cpuRow->contains(QStringLiteral("12.50%")));
+        const auto memoryRow = std::find_if(
+            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
+                return row.contains(QStringLiteral("Process memory"));
+            });
+        TEST_CHECK(memoryRow != telemetryRows.end());
+        TEST_CHECK(memoryRow->contains(QStringLiteral("64.0 MiB")));
+        TEST_CHECK(memoryRow->contains(QStringLiteral("48.0 MiB")));
+        const auto lagRow = std::find_if(
+            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
+                return row.contains(QStringLiteral("Strand / UI lag"));
+            });
+        TEST_CHECK(lagRow != telemetryRows.end());
+        TEST_CHECK(lagRow->contains(QStringLiteral("3 ms / 11 ms")));
+        TEST_CHECK(lagRow->contains(QStringLiteral("7 ms / 24 ms")));
+        const auto trendRow = std::find_if(
+            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
+                return row.contains(QStringLiteral("Resource trend window"));
+            });
+        TEST_CHECK(trendRow != telemetryRows.end());
+        TEST_CHECK(trendRow->contains(QStringLiteral("N=120")));
+        const auto crashRow = std::find_if(
+            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
+                return row.contains(QStringLiteral("Confirmed process crashes"));
+            });
+        TEST_CHECK(crashRow != telemetryRows.end());
+        TEST_CHECK(crashRow->contains(QStringLiteral("UNSUPPORTED")));
+        TEST_CHECK(!crashRow->contains(QStringLiteral("0.00%")));
+        TEST_CHECK(std::any_of(
+            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
+                return row.contains(QStringLiteral("Open telemetry details"));
+            }));
+        TEST_CHECK(std::any_of(
+            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
+                return row.contains(QStringLiteral("Export report"));
+            }));
+
+        auto staleProjection = snapshot;
+        staleProjection.insert(QStringLiteral("revision"), 6);
+        staleProjection.insert(QStringLiteral("availability"), QStringLiteral("TIMEOUT"));
+        bar.setTelemetrySnapshot(staleProjection);
+        TEST_CHECK(bar._telemetrySnapshot.value(QStringLiteral("availability")).toString() ==
+            QStringLiteral("VALID"));
+
+        bar.setMeetingId(QString(160, QLatin1Char('9')));
+        TEST_CHECK(!bar._qualityRect.intersects(bar._meetingIdRect));
+    }
+
+    static void checkTelemetryS7Acceptance() {
+        using livekit::telemetry::Availability;
+        using livekit::telemetry::OperationKind;
+
+        QTemporaryDir historyDirectory;
+        TEST_CHECK(historyDirectory.isValid());
+        auto store = std::make_shared<livekit::telemetry::TelemetryHistoryStore>(
+            std::filesystem::path(historyDirectory.path().toStdWString()));
+        livekit::telemetry::InstallTelemetryHistoryStore(store);
+
+        auto native = std::make_shared<livekit::telemetry::Snapshot>();
+        native->session_generation = 7001;
+        native->revision = 19;
+        native->session_complete = true;
+        native->availability = Availability::Valid;
+        native->reason = "stats_complete_" + std::string(220, 'r');
+        native->coverage = 1.0;
+        native->queue_capacity = 256;
+        native->queue_depth = 0;
+        native->cpu_availability = Availability::Valid;
+        native->cpu_reason = "process_cpu_sample_valid";
+        native->process_cpu_percent = 0.0;
+        native->memory_availability = Availability::Valid;
+        native->memory_reason = "process_memory_sample_valid";
+        native->private_bytes = 48 * 1024 * 1024;
+        native->minimum_private_bytes = 47 * 1024 * 1024;
+        native->maximum_private_bytes = 49 * 1024 * 1024;
+        native->thread_count_availability = Availability::Valid;
+        native->process_thread_count = 17;
+        native->handle_count_availability = Availability::Valid;
+        native->process_handle_count = 81;
+        native->resource_trend_availability = Availability::Valid;
+        native->resource_trend_samples = 1;
+        native->resource_trend_coverage = 1.0;
+        native->operations_started = 1;
+        native->operations_terminal = 1;
+        native->operations_inflight = 0;
+        native->operation_summaries.push_back({
+            OperationKind::Subscribe, 1, 1, 1, 0, 0, 0, 0, 0, 18});
+        native->remote_video_first_frame_availability = Availability::Valid;
+        native->remote_video_first_frame_reason = "decoded_frame_received";
+        native->remote_video_first_frame_measurement_point =
+            "native_video_sink_onframe_entry_" + std::string(160, 'm');
+        native->remote_video_bindings = 1;
+        native->remote_video_first_frames = 1;
+        native->last_subscribe_to_first_decoded_ms = 31;
+        native->native_video_freeze_availability = Availability::Valid;
+        native->native_video_freeze_count = 0;
+        native->native_video_freeze_duration_ms = 0;
+        native->remote_audio_first_frame_availability = Availability::WarmingUp;
+        native->last_subscribe_to_first_pcm_ms = -1;
+        native->audio_concealment_availability = Availability::Valid;
+        native->audio_concealment_reason = "concealment_window_valid";
+        native->audio_concealed_ratio = 0.0;
+        native->audio_jitter_buffer_availability = Availability::Valid;
+        native->audio_jitter_buffer_reason = "jitter_buffer_window_valid";
+        native->audio_jitter_buffer_delay_ms = 24.5;
+        native->render_first_frame_availability = Availability::Valid;
+        native->render_first_frame_reason = "visible_render_observed";
+        native->render_first_frame_measurement_point = "qt_cpu_paint";
+        native->render_bindings = 1;
+        native->unique_render_submits = 1;
+        native->last_subscribe_to_first_render_ms = 47;
+        native->render_stall_availability = Availability::Valid;
+        native->render_stall_reason = "render_window_valid";
+        native->render_stall_algorithm = "render-stall-v1";
+        native->render_stall_count = 0;
+        native->render_stall_duration_ms = 0;
+        native->render_stall_ratio = 0.0;
+        native->reconnect_video_availability = Availability::NotExpected;
+        native->reconnect_audio_availability = Availability::NotExpected;
+        native->reconnect_render_availability = Availability::NotExpected;
+
+        TEST_CHECK(store->SubmitSnapshot(native));
+        const auto waitFor = [](const std::function<bool()> &ready, int timeoutMs = 3000) {
+            QElapsedTimer timer;
+            timer.start();
+            while (!ready() && timer.elapsed() < timeoutMs) {
+                QApplication::processEvents(QEventLoop::AllEvents, 10);
+                QThread::msleep(5);
+            }
+            return ready();
+        };
+        TEST_CHECK(waitFor([&] {
+            const auto status = store->Status();
+            return status && status->snapshots_accepted == 1 &&
+                !status->reports.empty() && store->CurrentRecords().size() == 1;
+        }));
+
+        auto projection = OpenMeeting::ProjectTelemetrySnapshot(*native);
+        projection.insert(QStringLiteral("rawUrl"), QStringLiteral("https://secret.invalid/room"));
+        projection.insert(QStringLiteral("authToken"), QStringLiteral("token-s7-secret"));
+        projection.insert(QStringLiteral("iceCandidate"), QStringLiteral("candidate:s7-secret"));
+        projection.insert(QStringLiteral("sessionSdp"), QStringLiteral("v=0 s7-secret"));
+        projection.insert(QStringLiteral("capturePath"), QStringLiteral("C:\\secret\\capture.txt"));
+        projection.insert(QStringLiteral("participantIdentity"), QStringLiteral("identity-s7-secret"));
+        projection.insert(QStringLiteral("rawDetail"), QStringLiteral("https://secret.invalid/raw"));
+
+        const auto sendKey = [](QWidget *target, int key, Qt::KeyboardModifiers modifiers = {}) {
+            TEST_CHECK(target != nullptr);
+            QKeyEvent press(QEvent::KeyPress, key, modifiers);
+            QKeyEvent release(QEvent::KeyRelease, key, modifiers);
+            QApplication::sendEvent(target, &press);
+            QApplication::sendEvent(target, &release);
+            QApplication::processEvents();
+        };
+        const auto tableText = [](const QTableWidget &table) {
+            QString result;
+            for (auto row = 0; row != table.rowCount(); ++row) {
+                for (auto column = 0; column != table.columnCount(); ++column) {
+                    if (const auto *item = table.item(row, column)) {
+                        result += item->text() + QLatin1Char('\n');
+                    }
+                }
+            }
+            return result;
+        };
+        const auto checkRendered = [](QWidget &widget) {
+            QImage image(widget.size(), QImage::Format_ARGB32_Premultiplied);
+            TEST_CHECK(!image.isNull());
+            image.fill(Qt::transparent);
+            widget.render(&image);
+            int opaque = 0;
+            int minimumLuminance = 255;
+            int maximumLuminance = 0;
+            for (auto y = 0; y != image.height(); ++y) {
+                const auto *line = reinterpret_cast<const QRgb*>(image.constScanLine(y));
+                for (auto x = 0; x != image.width(); ++x) {
+                    if (qAlpha(line[x]) == 0) continue;
+                    ++opaque;
+                    const auto luminance = qGray(line[x]);
+                    minimumLuminance = std::min(minimumLuminance, luminance);
+                    maximumLuminance = std::max(maximumLuminance, luminance);
+                }
+            }
+            TEST_CHECK(opaque > image.width() * image.height() / 2);
+            TEST_CHECK(maximumLuminance - minimumLuminance >= 40);
+        };
+
+        QPointer<QDialog> details(
+            MeetingUI::OpenTelemetryDetailsDialog(nullptr, projection));
+        TEST_CHECK(details);
+        details->resize(680, 480);
+        details->show();
+        details->raise();
+        details->activateWindow();
+        QApplication::processEvents();
+        TEST_CHECK(details->property("meetingUiTone").toByteArray() == "dark");
+        const auto expectedScale = qEnvironmentVariable("QT_SCALE_FACTOR", "1.0").toDouble();
+        TEST_CHECK(details->devicePixelRatioF() + 0.01 >= expectedScale);
+
+        auto *tabs = details->findChild<QTabWidget*>(QStringLiteral("telemetryTabs"));
+        TEST_CHECK(tabs && tabs->count() == 7);
+        const QStringList expectedTabs = {
+            QStringLiteral("Overview"), QStringLiteral("Media QoE"),
+            QStringLiteral("Operations"), QStringLiteral("Resources"),
+            QStringLiteral("Timeline"), QStringLiteral("All metrics"),
+            QStringLiteral("Reports")};
+        TEST_CHECK([&] {
+            for (const auto &title : expectedTabs) {
+                bool found = false;
+                for (auto index = 0; index != tabs->count(); ++index) {
+                    found = found || tabs->tabText(index) == title;
+                }
+                if (!found) return false;
+            }
+            return true;
+        }());
+        for (auto index = 0; index != tabs->count(); ++index) {
+            tabs->setCurrentIndex(index);
+            QApplication::processEvents();
+            TEST_CHECK(tabs->widget(index)->isVisible());
+            const auto tabRect = tabs->tabBar()->tabRect(index);
+            TEST_CHECK(tabRect.width() + 2 >=
+                tabs->tabBar()->fontMetrics().horizontalAdvance(tabs->tabText(index)));
+            checkRendered(*details);
+        }
+
+        auto *overview = details->findChild<QTableWidget*>(QStringLiteral("telemetryOverview"));
+        auto *allMetrics = details->findChild<QTableWidget*>(QStringLiteral("telemetryAllMetrics"));
+        auto *timeline = details->findChild<QTableWidget*>(QStringLiteral("telemetryTimeline"));
+        auto *trend = details->findChild<QWidget*>(QStringLiteral("telemetryTrend"));
+        TEST_CHECK(overview && allMetrics && timeline && trend);
+        const auto overviewText = tableText(*overview);
+        const auto allText = tableText(*allMetrics);
+        TEST_CHECK(overviewText.contains(QStringLiteral("31 ms")));
+        TEST_CHECK(overviewText.contains(QStringLiteral("47 ms")));
+        TEST_CHECK(overviewText.contains(QStringLiteral("--")));
+        TEST_CHECK(overviewText.contains(QString(80, QLatin1Char('r'))));
+        TEST_CHECK(allText.contains(QStringLiteral("operationsInflight\n0\n")));
+        TEST_CHECK(!allText.contains(QStringLiteral("secret.invalid")));
+        TEST_CHECK(!allText.contains(QStringLiteral("token-s7-secret")));
+        TEST_CHECK(!allText.contains(QStringLiteral("candidate:s7-secret")));
+        TEST_CHECK(!allText.contains(QStringLiteral("identity-s7-secret")));
+        TEST_CHECK(overview->horizontalScrollBarPolicy() != Qt::ScrollBarAlwaysOff);
+        TEST_CHECK(overview->verticalScrollBarPolicy() != Qt::ScrollBarAlwaysOff);
+        TEST_CHECK([&] {
+            for (auto row = 0; row != overview->rowCount(); ++row) {
+                for (auto column = 0; column != overview->columnCount(); ++column) {
+                    const auto *item = overview->item(row, column);
+                    if (item && item->text().contains(QString(80, QLatin1Char('r')))) {
+                        return item->toolTip() == item->text() &&
+                            overview->visualItemRect(item).intersected(
+                                overview->viewport()->rect()) ==
+                            overview->visualItemRect(item);
+                    }
+                }
+            }
+            return false;
+        }());
+        TEST_CHECK(timeline->rowCount() == 1);
+
+        tabs->setFocus(Qt::TabFocusReason);
+        QApplication::processEvents();
+        auto *forwardFrom = QApplication::focusWidget();
+        sendKey(forwardFrom, Qt::Key_Tab);
+        auto *forwardTo = QApplication::focusWidget();
+        TEST_CHECK(forwardTo && forwardTo != forwardFrom);
+        sendKey(forwardTo, Qt::Key_Tab, Qt::ShiftModifier);
+        TEST_CHECK(QApplication::focusWidget() != nullptr);
+
+        sendKey(details, Qt::Key_Escape);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QApplication::processEvents();
+        TEST_CHECK(!details);
+
+        QPointer<QDialog> post(MeetingUI::OpenPostMeetingTelemetryDialog(nullptr));
+        TEST_CHECK(post);
+        post->resize(620, 440);
+        post->show();
+        post->raise();
+        post->activateWindow();
+        QApplication::processEvents();
+        TEST_CHECK(post->property("meetingUiTone").toByteArray() == "light");
+        TEST_CHECK(post->devicePixelRatioF() + 0.01 >= expectedScale);
+        auto *summary = post->findChild<QTableWidget*>(QStringLiteral("telemetryPostSummary"));
+        auto *historyEnabled = post->findChild<QCheckBox*>(QStringLiteral("telemetryHistoryEnabled"));
+        auto *reports = post->findChild<QListWidget*>(QStringLiteral("telemetryReports"));
+        auto *exportButton = post->findChild<QPushButton*>(QStringLiteral("telemetryExport"));
+        auto *clearButton = post->findChild<QPushButton*>(QStringLiteral("telemetryClearSelected"));
+        auto *postButtons = post->findChild<QDialogButtonBox*>(QStringLiteral("telemetryPostButtons"));
+        TEST_CHECK(summary && historyEnabled && reports && exportButton && clearButton && postButtons);
+        TEST_CHECK(tableText(*summary).contains(QStringLiteral("31 ms / 47 ms")));
+        TEST_CHECK(tableText(*summary).contains(QStringLiteral("COMPLETE")));
+        TEST_CHECK(historyEnabled->isChecked() && reports->count() == 1);
+        TEST_CHECK(exportButton->isVisible() && exportButton->height() >= 24);
+        TEST_CHECK(clearButton->isVisible() && clearButton->height() >= 24);
+        const auto exportRect = QRect(exportButton->mapTo(post, QPoint()), exportButton->size());
+        const auto clearRect = QRect(clearButton->mapTo(post, QPoint()), clearButton->size());
+        TEST_CHECK(!exportRect.intersects(clearRect));
+        reports->setCurrentRow(0);
+        QApplication::processEvents();
+        TEST_CHECK(clearButton->isEnabled());
+        checkRendered(*post);
+
+        auto *close = postButtons->button(QDialogButtonBox::Close);
+        TEST_CHECK(close && close->isVisible());
+        close->setFocus(Qt::TabFocusReason);
+        sendKey(close, Qt::Key_Return);
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QApplication::processEvents();
+        TEST_CHECK(!post);
+
+        livekit::telemetry::InstallTelemetryHistoryStore({});
+        store.reset();
+        std::cout << "TELEMETRY_S7_ACCEPTANCE PASS scale="
+                  << qEnvironmentVariable("QT_SCALE_FACTOR", "1.0").toStdString()
+                  << " dpi, theme, tabs, long text, missing/zero, keyboard, render, history, safe fields\n";
+    }
+
     static void captureAvailability(MeetingUI::MeetingRoomWindow &window, bool available) {
         window.applyMicrophoneAvailability(available);
         window._usingRealCamera = available;
@@ -226,6 +903,28 @@ public:
         // This fixture never initializes the native ADM: selection/start fails.
         TEST_CHECK(!window.selectSpeakerDevice("unavailable-output-for-test"));
         TEST_CHECK(window._bottomBar->isSpeakerMuted());
+    }
+    static void exerciseDeviceSwitchLedger(MeetingUI::MeetingRoomWindow &window) {
+        const auto firstCamera = window.beginDeviceSwitchTelemetry(
+            window._cameraSwitchTelemetry,
+            livekit::telemetry::OperationKind::CameraDeviceSwitch);
+        const auto secondCamera = window.beginDeviceSwitchTelemetry(
+            window._cameraSwitchTelemetry,
+            livekit::telemetry::OperationKind::CameraDeviceSwitch);
+        TEST_CHECK(secondCamera > firstCamera);
+        window.finishDeviceSwitchTelemetry(
+            window._cameraSwitchTelemetry, secondCamera,
+            livekit::telemetry::OperationOutcome::Success);
+        window.finishDeviceSwitchTelemetry(
+            window._cameraSwitchTelemetry, secondCamera,
+            livekit::telemetry::OperationOutcome::Failure);
+
+        const auto microphone = window.beginDeviceSwitchTelemetry(
+            window._microphoneSwitchTelemetry,
+            livekit::telemetry::OperationKind::MicrophoneDeviceSwitch);
+        window.finishDeviceSwitchTelemetry(
+            window._microphoneSwitchTelemetry, microphone,
+            livekit::telemetry::OperationOutcome::Timeout);
     }
     static std::shared_ptr<livekit::AudioApmProcessor> bindAudioPreferences(
             MeetingUI::MeetingRoomWindow &window, OpenMeeting::SessionManager &session) {
@@ -1644,6 +2343,35 @@ void MeetingLocalMediaStateContract() {
     receiver.room->UpdateParticipantsForTesting(roster); receiver.pump();
     TEST_CHECK(!receiverModel->findParticipantById("window-peer").isAudioMuted);
     ParticipantWindowTestAccess::checkFailedSpeaker(*sender.window);
+    ParticipantWindowTestAccess::exerciseDeviceSwitchLedger(*sender.window);
+    sender.pump();
+    livekit::telemetry::SessionTelemetry::SnapshotPtr telemetrySnapshot;
+    asio::post(sender.runtime->strand(), [&] {
+        telemetrySnapshot = sender.runtime->telemetry()->SnapshotOnStrand();
+    });
+    sender.pump();
+    TEST_CHECK(telemetrySnapshot);
+    const auto operation = [&](livekit::telemetry::OperationKind kind) {
+        const auto found = std::find_if(
+            telemetrySnapshot->operation_summaries.begin(),
+            telemetrySnapshot->operation_summaries.end(),
+            [kind](const auto &summary) { return summary.kind == kind; });
+        TEST_CHECK(found != telemetrySnapshot->operation_summaries.end());
+        return *found;
+    };
+    const auto cameraSwitch = operation(
+        livekit::telemetry::OperationKind::CameraDeviceSwitch);
+    TEST_CHECK(cameraSwitch.started == 2 && cameraSwitch.terminal == 2);
+    TEST_CHECK(cameraSwitch.success == 1 && cameraSwitch.cancelled == 1);
+    TEST_CHECK(cameraSwitch.failure == 0 && cameraSwitch.inflight == 0);
+    const auto microphoneSwitch = operation(
+        livekit::telemetry::OperationKind::MicrophoneDeviceSwitch);
+    TEST_CHECK(microphoneSwitch.started == 1 && microphoneSwitch.terminal == 1);
+    TEST_CHECK(microphoneSwitch.timeout == 1 && microphoneSwitch.inflight == 0);
+    const auto speakerSwitch = operation(
+        livekit::telemetry::OperationKind::SpeakerDeviceSwitch);
+    TEST_CHECK(speakerSwitch.started == 1 && speakerSwitch.terminal == 1);
+    TEST_CHECK(speakerSwitch.failure == 1 && speakerSwitch.inflight == 0);
     std::cout << "LOCAL_MEDIA_STATE intent/device/list/tile/mute_signaling/playout_isolation=PASS sfu=NOT_RUN\n";
 }
 
@@ -2663,6 +3391,83 @@ void GapWindowOrderedSenderAndResumeSnapshot() {
     livekit::ParticipantSnapshotRoomTestAccess::clearSubscriptionHooks(*fixture.room);
     TEST_CHECK(!server->protocolFailure);
     std::cout << "GAP_P1_03_CASE_6 sender-order/SyncState-snapshot/latest-revision PASS" << std::endl;
+}
+
+void GapWindowSubscriptionTelemetryInFlightResumeCommit() {
+    WindowFixture fixture(false);
+    fixture.room->SetSessionTelemetry(fixture.runtime->telemetry());
+    auto server = std::make_shared<WindowLoopbackServer>(fixture.io);
+    WindowServerGuard stop{server};
+    server->start();
+    WindowConnect(fixture, server);
+    const auto publication = fixture.room->remote_participants()
+        .at("PA_WINDOW")->get_remote_publication("TR_PA_WINDOW");
+    TEST_CHECK(publication && publication->is_subscribed());
+
+    const auto snapshotTelemetry = [&] {
+        livekit::telemetry::SessionTelemetry::SnapshotPtr snapshot;
+        asio::post(fixture.runtime->strand(), [&] {
+            snapshot = fixture.runtime->telemetry()->SnapshotOnStrand();
+        });
+        WindowDrainNative(fixture.io);
+        TEST_CHECK(snapshot);
+        return snapshot;
+    };
+    const auto findOperation = [](const livekit::telemetry::Snapshot &snapshot,
+                                  livekit::telemetry::OperationKind kind) {
+        const auto found = std::find_if(
+            snapshot.operation_summaries.begin(),
+            snapshot.operation_summaries.end(),
+            [kind](const auto &summary) { return summary.kind == kind; });
+        return found == snapshot.operation_summaries.end() ? nullptr : &*found;
+    };
+
+    asio::steady_timer sendGate(fixture.io);
+    sendGate.expires_at(std::chrono::steady_clock::time_point::max());
+    bool sendEntered = false;
+    livekit::ParticipantSnapshotRoomTestAccess::setSubscriptionHooks(
+        *fixture.room,
+        [&](bool, uint64_t) -> asio::awaitable<void> {
+            sendEntered = true;
+            std::error_code ignored;
+            co_await sendGate.async_wait(
+                asio::redirect_error(asio::use_awaitable, ignored));
+        },
+        {});
+
+    TEST_CHECK(publication->SetSubscribed(false));
+    WindowPumpUntil(fixture, [&] { return sendEntered; },
+                    "subscription-telemetry-send-entered");
+    auto snapshot = snapshotTelemetry();
+    const auto *beforeResume = findOperation(
+        *snapshot, livekit::telemetry::OperationKind::Unsubscribe);
+    TEST_CHECK(beforeResume && beforeResume->started == 1 &&
+               beforeResume->terminal == 0 && beforeResume->inflight == 1);
+
+    server->closeActive();
+    WindowPumpUntil(fixture, [&] {
+        return fixture.observer->reconnected == 1 && server->syncStates == 1;
+    }, "subscription-telemetry-resume-commit");
+    TEST_CHECK(!server->syncStateMessages.back().subscription().subscribe());
+    TEST_CHECK(SubscriptionContains(server->syncStateMessages.back().subscription(),
+                                    "PA_WINDOW", "TR_PA_WINDOW"));
+
+    snapshot = snapshotTelemetry();
+    const auto *afterResume = findOperation(
+        *snapshot, livekit::telemetry::OperationKind::Unsubscribe);
+    TEST_CHECK(afterResume && afterResume->started == 1 &&
+               afterResume->terminal == 1 && afterResume->success == 1 &&
+               afterResume->cancelled == 0 && afterResume->inflight == 0);
+
+    std::error_code ignored;
+    sendGate.cancel(ignored);
+    fixture.pump();
+    snapshot = snapshotTelemetry();
+    TEST_CHECK(snapshot->operations_duplicate_terminal == 0);
+    livekit::ParticipantSnapshotRoomTestAccess::clearSubscriptionHooks(*fixture.room);
+    TEST_CHECK(!server->protocolFailure);
+    std::cout << "S2_SUBSCRIPTION_TELEMETRY in-flight/resume-SyncState-success/unique-terminal PASS"
+              << std::endl;
 }
 
 void GapWindowDefaultFalseSoftResume() {
@@ -4132,6 +4937,12 @@ void DepartureNoticeLifetime() {
 }
 
 int WindowAcceptanceMain(int argc, char **argv) {
+	for (auto index = 1; index != argc; ++index) {
+		const auto argument = QByteArray(argv[index]);
+		if (argument == "--scale-100") qputenv("QT_SCALE_FACTOR", "1.0");
+		else if (argument == "--scale-150") qputenv("QT_SCALE_FACTOR", "1.5");
+		else if (argument == "--scale-200") qputenv("QT_SCALE_FACTOR", "2.0");
+	}
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
@@ -4157,6 +4968,12 @@ int WindowAcceptanceMain(int argc, char **argv) {
     // objects, including the in-memory moderation and account-notify fixtures.
     if (application.arguments().contains("--moderation-contract")) {
         MeetingModerationContract();
+    } else if (application.arguments().contains("--telemetry-s7-acceptance")) {
+        MeetingUI::AppTheme::install(application);
+        ParticipantWindowTestAccess::checkTelemetryS7Acceptance();
+    } else if (application.arguments().contains("--telemetry-ui")) {
+        ParticipantWindowTestAccess::checkTelemetryTopBar();
+        ParticipantWindowTestAccess::checkCpuPaintTelemetryBoundary();
     } else if (application.arguments().contains("--local-media-state")) {
         MeetingLocalMediaStateContract();
     } else if (application.arguments().contains("--audio-preferences-contract")) {
@@ -4406,7 +5223,9 @@ int WindowAcceptanceMain(int argc, char **argv) {
         TEST_CHECK(legacyModulePath.filename() == L"livekit-render-dx11.dll");
         TEST_CHECK(QDir().mkpath(QString::fromStdWString(modulePath.parent_path().wstring())));
 
-        livekit::render::VideoRenderSession session([](const std::string&, const QImage&) {});
+        livekit::render::VideoRenderSession session([](
+            const std::string&, const QImage&,
+            livekit::render::VideoRenderFrame::Ptr) {});
         livekit::render::RenderDiagnostics diagnostics;
         TEST_CHECK(session.backend() == livekit::render::VideoRenderSession::Backend::QtCpu);
         qunsetenv("COHAVORA_RENDER_BACKEND");
@@ -4502,6 +5321,8 @@ int WindowAcceptanceMain(int argc, char **argv) {
         GapWindowFullRestartIdentityBoundaries();
     } else if (application.arguments().contains("--gap-video-lease")) {
         GapWindowQueuedVideoBindingLease();
+    } else if (application.arguments().contains("--subscription-telemetry-reconnect")) {
+        GapWindowSubscriptionTelemetryInFlightResumeCommit();
     } else if (application.arguments().contains("--ak-window-late")) {
         AkWindowRetiredPresentation(false);
         std::cout << "AK_WINDOW_LATE_EXECUTED=1 PASSED=1 FAILED=0" << std::endl;
@@ -4515,10 +5336,11 @@ int WindowAcceptanceMain(int argc, char **argv) {
         GapWindowSoftResumeUnsubscribe();
         GapWindowFullRestartUnsubscribe();
         GapWindowOrderedSenderAndResumeSnapshot();
+        GapWindowSubscriptionTelemetryInFlightResumeCommit();
         GapWindowDefaultFalseSoftResume();
         GapWindowFullRestartIdentityBoundaries();
         GapWindowDisconnectInvalidatesOldSender();
-        std::cout << "AK_WINDOW_NETWORK_EXECUTED=9 PASSED=9 FAILED=0" << std::endl;
+        std::cout << "AK_WINDOW_NETWORK_EXECUTED=10 PASSED=10 FAILED=0" << std::endl;
     } else {
         std::cout << "AK_WINDOW_PLANNED=15 (PR-SEC-005 invitation; F4/F5 and GAP video lease local precondition; F1/F2/F3 and GAP recovery real loopback)" << std::endl;
         PrSec005InvitationContract();
@@ -4532,11 +5354,12 @@ int WindowAcceptanceMain(int argc, char **argv) {
         GapWindowSoftResumeUnsubscribe();
         GapWindowFullRestartUnsubscribe();
         GapWindowOrderedSenderAndResumeSnapshot();
+        GapWindowSubscriptionTelemetryInFlightResumeCommit();
         GapWindowDefaultFalseSoftResume();
         GapWindowFullRestartIdentityBoundaries();
         GapWindowDisconnectInvalidatesOldSender();
         GapWindowQueuedVideoBindingLease();
-        std::cout << "AK_WINDOW_EXECUTED=15 PASSED=15 FAILED=0" << std::endl;
+        std::cout << "AK_WINDOW_EXECUTED=16 PASSED=16 FAILED=0" << std::endl;
         ScreenShareWindowControls();
         ScreenShareCameraCoexistence();
         DepartureNoticeLifetime();
@@ -4744,6 +5567,32 @@ public:
                 sessionGeneration, {}, {}, target->_audioMuted, target->_videoEnabled,
                 target->_audioMuted, target->_videoEnabled);
         }, Qt::QueuedConnection);
+    }
+
+    static std::unique_ptr<MeetingCoordinator> createAdmissionFailure(
+            SessionManager &session) {
+        MeetingCoordinator::AdmissionBackend backend;
+        backend.joinMeeting = [](const QString &, const QString &,
+                                 ResultCallback<bool> callback) {
+            HttpError error;
+            error.code = static_cast<int>(ErrorCode::NetworkError);
+            error.message = QStringLiteral("admission rejected");
+            callback(false, false, error);
+        };
+        return std::unique_ptr<MeetingCoordinator>(
+            new MeetingCoordinator(session, std::move(backend), nullptr));
+    }
+
+    static std::unique_ptr<MeetingCoordinator> createPendingAdmission(
+            SessionManager &session,
+            ResultCallback<bool> *pending) {
+        MeetingCoordinator::AdmissionBackend backend;
+        backend.joinMeeting = [pending](const QString &, const QString &,
+                                        ResultCallback<bool> callback) {
+            *pending = std::move(callback);
+        };
+        return std::unique_ptr<MeetingCoordinator>(
+            new MeetingCoordinator(session, std::move(backend), nullptr));
     }
 
     static void parseMetadata(MeetingCoordinator &coordinator, const std::string &metadata) {
@@ -6623,6 +7472,60 @@ void GapSubscriptionReentrantAndRepeatedCleanup() {
     std::cout << "GAP_P1_03_CASE_10 listener-reentry/repeated-false/no-double-cleanup PASS" << std::endl;
 }
 
+livekit::telemetry::SessionTelemetry::SnapshotPtr TelemetrySnapshot(Fixture &fixture) {
+    livekit::telemetry::SessionTelemetry::SnapshotPtr snapshot;
+    asio::post(fixture.runtime->strand(), [&fixture, &snapshot] {
+        snapshot = fixture.runtime->telemetry()->SnapshotOnStrand();
+    });
+    DrainNative(fixture.io);
+    TEST_CHECK(snapshot);
+    return snapshot;
+}
+
+const livekit::telemetry::OperationSummary *FindOperationSummary(
+        const livekit::telemetry::Snapshot &snapshot,
+        livekit::telemetry::OperationKind kind) {
+    const auto found = std::find_if(
+        snapshot.operation_summaries.begin(), snapshot.operation_summaries.end(),
+        [kind](const auto &summary) { return summary.kind == kind; });
+    return found == snapshot.operation_summaries.end() ? nullptr : &*found;
+}
+
+void GapSubscriptionTelemetryWaitsForCommit() {
+    AttachFixture fixture;
+    fixture.room->SetSessionTelemetry(fixture.runtime->telemetry());
+
+    TEST_CHECK(fixture.publicationA->SetSubscribed(false));
+    PumpPipeline(fixture);
+    auto snapshot = TelemetrySnapshot(fixture);
+    const auto *unsubscribe = FindOperationSummary(
+        *snapshot, livekit::telemetry::OperationKind::Unsubscribe);
+    TEST_CHECK(unsubscribe && unsubscribe->started == 1);
+    TEST_CHECK(unsubscribe->terminal == 0 && unsubscribe->inflight == 1);
+
+    TEST_CHECK(fixture.publicationA->SetSubscribed(true));
+    PumpPipeline(fixture);
+    snapshot = TelemetrySnapshot(fixture);
+    unsubscribe = FindOperationSummary(
+        *snapshot, livekit::telemetry::OperationKind::Unsubscribe);
+    const auto *subscribe = FindOperationSummary(
+        *snapshot, livekit::telemetry::OperationKind::Subscribe);
+    TEST_CHECK(unsubscribe && unsubscribe->terminal == 1 &&
+               unsubscribe->cancelled == 1 && unsubscribe->inflight == 0);
+    TEST_CHECK(subscribe && subscribe->started == 1 &&
+               subscribe->terminal == 0 && subscribe->inflight == 1);
+
+    fixture.room->Disconnect();
+    PumpPipeline(fixture);
+    snapshot = TelemetrySnapshot(fixture);
+    subscribe = FindOperationSummary(
+        *snapshot, livekit::telemetry::OperationKind::Subscribe);
+    TEST_CHECK(subscribe && subscribe->terminal == 1 &&
+               subscribe->cancelled == 1 && subscribe->inflight == 0);
+    std::cout << "S2_SUBSCRIPTION_TELEMETRY queued-not-success/replaced-cancel/session-cancel PASS"
+              << std::endl;
+}
+
 struct OwnedStopWitness {
     std::weak_ptr<OpenMeeting::MeetingSessionRuntime> runtime;
     std::shared_ptr<std::atomic<bool>> workerExited = std::make_shared<std::atomic<bool>>(false);
@@ -6974,7 +7877,8 @@ void AkAttachRegression() {
     GapSubscriptionAcquireInterleave();
     GapSubscriptionQueuedDeliveryAndStaleCleanup();
     GapSubscriptionReentrantAndRepeatedCleanup();
-    std::cout << "AK_ATTACH_EXECUTED=11 PASS (resolved-attach local precondition; no F Connect claim)" << std::endl;
+    GapSubscriptionTelemetryWaitsForCommit();
+    std::cout << "AK_ATTACH_EXECUTED=12 PASS (resolved-attach local precondition; no F Connect claim)" << std::endl;
 }
 
 void AkCoreRegression() {
@@ -7118,6 +8022,66 @@ void VerifyOpenMeetingInitialMediaProjection() {
     TEST_CHECK(metadataFixture.coordinator->meetingDetail().hostUserId ==
         QStringLiteral("legacy-host"));
     std::cout << "P4_METADATA_MEDIA_POLICY PASS" << std::endl;
+}
+
+void AdmissionTelemetryPreRoomTerminals() {
+    QTemporaryDir settingsDirectory;
+    TEST_CHECK(settingsDirectory.isValid());
+    auto session = OpenMeeting::SessionManagerTestAccess::create(
+        std::make_unique<QSettings>(settingsDirectory.filePath("admission.ini"),
+                                    QSettings::IniFormat));
+    OpenMeeting::MediaPreferences preferences;
+    auto stabilityLedger = std::make_shared<livekit::telemetry::StabilityLedger>(
+        std::filesystem::path(settingsDirectory.filePath(
+            "stability-ledger-v1.json").toStdWString()));
+    livekit::telemetry::ScopedProcessRun processRun(stabilityLedger);
+    TEST_CHECK(processRun.started());
+    livekit::telemetry::InstallStabilityLedger(stabilityLedger);
+
+    const auto checkTerminal = [](const QVariantMap &snapshot,
+                                  const char *outcome) {
+        TEST_CHECK(snapshot.value(QStringLiteral("sessionGeneration")).toULongLong() == 0);
+        TEST_CHECK(snapshot.value(QStringLiteral("operationsStarted")).toULongLong() == 1);
+        TEST_CHECK(snapshot.value(QStringLiteral("operationsTerminal")).toULongLong() == 1);
+        const auto operations = snapshot.value(QStringLiteral("operationSummaries")).toList();
+        TEST_CHECK(operations.size() == 1);
+        const auto admission = operations.front().toMap();
+        TEST_CHECK(admission.value(QStringLiteral("kind")).toString() ==
+                   QStringLiteral("admission"));
+        TEST_CHECK(admission.value(QString::fromLatin1(outcome)).toULongLong() == 1);
+        TEST_CHECK(admission.value(QStringLiteral("inflight")).toULongLong() == 0);
+        TEST_CHECK(admission.value(QStringLiteral("lastDurationMs")).toLongLong() >= 0);
+    };
+
+    QVariantMap failedSnapshot;
+    auto failed = OpenMeeting::MeetingCoordinatorTestAccess::createAdmissionFailure(*session);
+    QObject::connect(failed.get(), &OpenMeeting::MeetingCoordinator::telemetrySnapshotChanged,
+                     failed.get(), [&](const QVariantMap &snapshot) {
+                         failedSnapshot = snapshot;
+                     });
+    failed->joinMeetingAsync(QStringLiteral("meeting"), QStringLiteral("password"),
+                             QStringLiteral("user"), preferences);
+    checkTerminal(failedSnapshot, "failure");
+
+    OpenMeeting::ResultCallback<bool> pending;
+    QVariantMap cancelledSnapshot;
+    auto cancelled = OpenMeeting::MeetingCoordinatorTestAccess::createPendingAdmission(
+        *session, &pending);
+    QObject::connect(cancelled.get(), &OpenMeeting::MeetingCoordinator::telemetrySnapshotChanged,
+                     cancelled.get(), [&](const QVariantMap &snapshot) {
+                         cancelledSnapshot = snapshot;
+                     });
+    cancelled->joinMeetingAsync(QStringLiteral("meeting"), QStringLiteral("password"),
+                                QStringLiteral("user"), preferences);
+    TEST_CHECK(static_cast<bool>(pending));
+    cancelled->leaveMeetingAsync(false);
+    checkTerminal(cancelledSnapshot, "cancelled");
+    const auto stability = stabilityLedger->Summary();
+    TEST_CHECK(stability.sessions_started == 2);
+    TEST_CHECK(stability.sessions_terminal == 2);
+    TEST_CHECK(stability.unknown_session_terminations == 0);
+    livekit::telemetry::InstallStabilityLedger({});
+    std::cout << "S2_ADMISSION_TELEMETRY pre-room-failure/pre-room-cancel PASS" << std::endl;
 }
 
 } // namespace
@@ -7394,6 +8358,7 @@ int main(int argc, char **argv) {
     OwnerTerminalRegression();
     ListenerOwnerRegression();
     StartupReconnectRegression();
+    AdmissionTelemetryPreRoomTerminals();
     AkCoreRegression();
     AkAttachRegression();
     AkShutdownRegression();

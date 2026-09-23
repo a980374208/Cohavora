@@ -7,6 +7,8 @@
 #include <QtWidgets/QApplication>
 #include <QtGui/QIcon>
 #include <QtCore/QDir>
+#include <QtCore/QStandardPaths>
+#include <QtCore/QSettings>
 #include <QtPlugin>
 #include "crl/crl.h"
 #include <rpl/rpl.h>
@@ -21,7 +23,10 @@
 #include "src/net/session_manager.h"
 #include "src/rtc/webrtc_manager.h"
 #include "src/app/debug_login_options.h"
+#include "src/telemetry/stability_ledger.h"
+#include "src/telemetry/telemetry_report.h"
 
+#include <filesystem>
 #include <memory>
 
 // 静态链接 Qt 必须显式导入平台与图像插件
@@ -93,16 +98,35 @@ int main(int argc, char *argv[]) {
 
 	QApplication app(argc, argv);
 	app.setApplicationName(MeetingUI::AppBranding::name());
-	app.setWindowIcon(QIcon(QStringLiteral(":/meeting-ui/icons/cohavora.svg")));
 	app.setApplicationVersion(QStringLiteral(COHAVORA_VERSION));
-	MeetingUI::AppTranslation::install(app,
-		MeetingUI::AppTranslation::startupLocale(app.arguments()));
 	app.setApplicationDisplayName(MeetingUI::AppBranding::displayName());
+	const auto stabilityPath = QDir(
+		QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+		.filePath(QStringLiteral("telemetry/stability-ledger-v1.json"));
+	auto stabilityLedger = std::make_shared<livekit::telemetry::StabilityLedger>(
+		std::filesystem::path(stabilityPath.toStdWString()));
+	livekit::telemetry::ScopedProcessRun processRun(stabilityLedger);
+	livekit::telemetry::InstallStabilityLedger(stabilityLedger);
+	if (!processRun.started()) {
+		qWarning() << "The local stability ledger is unavailable.";
+	}
+	const auto telemetryRoot = QDir(
+		QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+		.filePath(QStringLiteral("telemetry/reports"));
+	auto telemetryHistory =
+		std::make_shared<livekit::telemetry::TelemetryHistoryStore>(
+			std::filesystem::path(telemetryRoot.toStdWString()));
+	livekit::telemetry::InstallTelemetryHistoryStore(telemetryHistory);
+	telemetryHistory->SetHistoryEnabled(
+		QSettings().value(QStringLiteral("telemetry/historyEnabled"), true).toBool());
 	auto debugLogin = MeetingApp::ParseDebugLoginOptions(app.arguments());
 	if (debugLogin.status == MeetingApp::DebugLoginOptionStatus::Invalid) {
 		qCritical().noquote() << debugLogin.error;
 		return 2;
 	}
+	app.setWindowIcon(QIcon(QStringLiteral(":/meeting-ui/icons/cohavora.svg")));
+	MeetingUI::AppTranslation::install(app,
+		MeetingUI::AppTranslation::startupLocale(app.arguments()));
 	OpenMeeting::initializeServiceEndpointPolicy(
 		debugLogin.debugEnabled);
 

@@ -50,6 +50,7 @@ protected:
     void render();
     virtual void requestRender() { render(); }
     bool eventFilter(QObject*, QEvent*) override;
+    bool event(QEvent*) override;
     void notifyRendererUnavailable();
     void stopRendering();
     void initializeModuleDiagnostics(RenderBackend backend, uint32_t abiVersion);
@@ -63,9 +64,13 @@ protected:
     virtual VideoFrameGeometry frameGeometry(const std::string&) const = 0;
     virtual bool beginFrame(QSize& physicalSize) = 0;
     virtual void drawSolid(const VideoTileRect&, float r, float g, float b) = 0;
-    virtual void drawVideo(const VideoTileRect&) = 0;
+    virtual bool drawVideo(const VideoTileRect&) = 0;
     virtual bool drawDecoration(const VideoTileRect&, const QImage&) = 0;
     virtual bool endFrame() = 0;
+    virtual bool reportsSubmitAsynchronously() const { return false; }
+    virtual const char* submitMeasurementPoint() const {
+        return "gpu_present";
+    }
     void mouseDoubleClickEvent(QMouseEvent*) override;
     void mouseMoveEvent(QMouseEvent*) override;
     void mousePressEvent(QMouseEvent*) override;
@@ -85,11 +90,13 @@ private:
     bool stage_dirty_ = true, painting_stage_ = false;
     std::vector<VideoTileRect> tiles_;
     std::map<std::string, Decoration> decorations_;
+    std::map<std::string, VideoRenderFrame::Ptr> telemetry_frames_;
     std::string hovered_tile_, pressed_pin_;
     QTimer* fps_timer_ = nullptr;
     std::atomic<bool> frame_dirty_{false};
     bool renderer_unavailable_emitted_ = false;
     std::unique_ptr<RenderDiagnostics> diagnostics_;
+    void updateRenderExpectations();
 };
 
 VideoCanvas* CreateVideoCanvas(QWidget* parent, RenderDiagnostics* initialDiagnostics = nullptr);

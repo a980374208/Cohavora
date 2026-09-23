@@ -1,4 +1,5 @@
 #include "room.h"
+#include "session_telemetry.h"
 #include "webrtc_manager.h"
 #include "stats_collector.h"
 #include "local_audio_track.h"
@@ -23,6 +24,124 @@
 #include "api/video/video_sink_interface.h"
 
 namespace livekit {
+
+class SubscriptionTelemetryOperation final {
+public:
+    SubscriptionTelemetryOperation(
+        std::shared_ptr<telemetry::SessionTelemetry> telemetry,
+        telemetry::OperationKind kind)
+        : telemetry_(std::move(telemetry)), kind_(kind) {
+        if (telemetry_) {
+            id_ = telemetry_->StartOperation(kind_);
+        }
+    }
+
+    ~SubscriptionTelemetryOperation() {
+        Finish(telemetry::OperationOutcome::Cancelled);
+    }
+
+    void Finish(telemetry::OperationOutcome outcome) {
+        bool expected = false;
+        if (!terminal_.compare_exchange_strong(
+                expected, true, std::memory_order_acq_rel)) {
+            return;
+        }
+        if (telemetry_ && !id_.empty()) {
+            telemetry_->FinishOperation(id_, kind_, outcome);
+        }
+    }
+
+private:
+    std::shared_ptr<telemetry::SessionTelemetry> telemetry_;
+    telemetry::OperationKind kind_ = telemetry::OperationKind::Unknown;
+    std::string id_;
+    std::atomic<bool> terminal_{false};
+};
+
+namespace {
+
+telemetry::OperationOutcome TelemetryOutcome(std::exception_ptr error) {
+    if (!error) return telemetry::OperationOutcome::Failure;
+    try {
+        std::rethrow_exception(std::move(error));
+    } catch (const OperationError& operation_error) {
+        switch (operation_error.code()) {
+        case OperationErrorCode::Cancelled:
+        case OperationErrorCode::SessionInvalid:
+            return telemetry::OperationOutcome::Cancelled;
+        case OperationErrorCode::JoinTimeout:
+        case OperationErrorCode::PeerConnectionTimeout:
+        case OperationErrorCode::TrackPublishTimeout:
+        case OperationErrorCode::TrackUnpublishTimeout:
+            return telemetry::OperationOutcome::Timeout;
+        default:
+            return telemetry::OperationOutcome::Failure;
+        }
+    } catch (...) {
+        return telemetry::OperationOutcome::Failure;
+    }
+}
+
+class TelemetryOperationSpan final {
+public:
+    TelemetryOperationSpan() = default;
+    TelemetryOperationSpan(
+        std::shared_ptr<telemetry::SessionTelemetry> telemetry,
+        telemetry::OperationKind kind,
+        std::string prefix = {})
+        : telemetry_(std::move(telemetry)), kind_(kind) {
+        if (telemetry_) {
+            id_ = telemetry_->StartOperation(kind_, std::move(prefix));
+        }
+    }
+    TelemetryOperationSpan(
+        std::shared_ptr<telemetry::SessionTelemetry> telemetry,
+        telemetry::OperationKind kind,
+        std::string operation_id,
+        bool adopt_existing)
+        : telemetry_(std::move(telemetry)),
+          id_(adopt_existing ? std::move(operation_id) : std::string{}),
+          kind_(kind) {
+        if (telemetry_ && id_.empty() && !adopt_existing) {
+            id_ = telemetry_->StartOperation(kind_);
+        }
+    }
+
+    ~TelemetryOperationSpan() { Finish(telemetry::OperationOutcome::Cancelled); }
+    TelemetryOperationSpan(const TelemetryOperationSpan&) = delete;
+    TelemetryOperationSpan& operator=(const TelemetryOperationSpan&) = delete;
+    TelemetryOperationSpan(TelemetryOperationSpan&& other) noexcept
+        : telemetry_(std::move(other.telemetry_)),
+          id_(std::move(other.id_)), kind_(other.kind_), finished_(other.finished_) {
+        other.finished_ = true;
+    }
+    TelemetryOperationSpan& operator=(TelemetryOperationSpan&& other) noexcept {
+        if (this == &other) return *this;
+        Finish(telemetry::OperationOutcome::Cancelled);
+        telemetry_ = std::move(other.telemetry_);
+        id_ = std::move(other.id_);
+        kind_ = other.kind_;
+        finished_ = other.finished_;
+        other.finished_ = true;
+        return *this;
+    }
+
+    void Finish(telemetry::OperationOutcome outcome) {
+        if (finished_) return;
+        finished_ = true;
+        if (telemetry_ && !id_.empty()) {
+            telemetry_->FinishOperation(id_, kind_, outcome);
+        }
+    }
+
+private:
+    std::shared_ptr<telemetry::SessionTelemetry> telemetry_;
+    std::string id_;
+    telemetry::OperationKind kind_ = telemetry::OperationKind::Unknown;
+    bool finished_ = false;
+};
+
+} // namespace
 
 namespace {
 
@@ -543,6 +662,135 @@ void Room::RemoveListener(std::shared_ptr<RoomListener> listener) {
     listeners_.erase(std::remove(listeners_.begin(), listeners_.end(), listener), listeners_.end());
 }
 
+std::string RemoteVideoTelemetryKey(
+    std::string_view participant_sid,
+    std::string_view track_sid) {
+    return "remote_video/" + std::string(participant_sid) + "/" +
+        std::string(track_sid);
+}
+
+std::string RemoteAudioTelemetryKey(
+    std::string_view participant_sid,
+    std::string_view track_sid) {
+    return "remote_audio/" + std::string(participant_sid) + "/" +
+        std::string(track_sid);
+}
+
+std::string RemoteVideoRenderTelemetryKey(
+    std::string_view participant_sid,
+    std::string_view track_sid) {
+    return "remote_render/" + std::string(participant_sid) + "/" +
+        std::string(track_sid);
+}
+
+bool IsRemoteMediaExpected(const TrackPublication::StateSnapshot& snapshot) {
+    if (!snapshot.track || snapshot.muted ||
+        snapshot.stream_state != TrackPublication::StreamState::Active ||
+        !snapshot.subscription_allowed) {
+        return false;
+    }
+    return snapshot.kind != TrackKind::Audio ||
+        (!snapshot.track->playout_muted() && snapshot.track->volume() > 0.001);
+}
+
+telemetry::MediaExpectationReason ToTelemetryRenderReason(
+        render::RenderExpectationReason reason) {
+    switch (reason) {
+    case render::RenderExpectationReason::SurfaceVisible:
+        return telemetry::MediaExpectationReason::SurfaceVisible;
+    case render::RenderExpectationReason::WindowMinimized:
+        return telemetry::MediaExpectationReason::WindowMinimized;
+    case render::RenderExpectationReason::StreamPaused:
+        return telemetry::MediaExpectationReason::StreamPaused;
+    case render::RenderExpectationReason::BindingEnded:
+        return telemetry::MediaExpectationReason::RenderBindingEnded;
+    case render::RenderExpectationReason::SurfaceHidden:
+        return telemetry::MediaExpectationReason::SurfaceHidden;
+    }
+    return telemetry::MediaExpectationReason::SurfaceHidden;
+}
+
+class TelemetryRenderSubmitObserver final : public render::RenderSubmitObserver {
+public:
+    TelemetryRenderSubmitObserver(
+        std::weak_ptr<telemetry::SessionTelemetry> telemetry,
+        std::string series_key,
+        std::uint64_t room_generation,
+        std::uint64_t binding_epoch,
+        std::shared_ptr<telemetry::RenderActivityProbe> probe)
+        : telemetry_(std::move(telemetry))
+        , series_key_(std::move(series_key))
+        , room_generation_(room_generation)
+        , binding_epoch_(binding_epoch)
+        , probe_(std::move(probe)) {}
+
+    void SetExpected(
+            bool expected,
+            render::RenderExpectationReason reason,
+            Clock::time_point source_time) override {
+        if (!probe_ || !probe_->active.load(std::memory_order_acquire)) return;
+        const bool previous = probe_->expected.exchange(
+            expected, std::memory_order_acq_rel);
+        if (previous == expected) return;
+        // A hidden interval must never be charged as a visible render stall.
+        probe_->last_submit_ns.store(0, std::memory_order_release);
+        if (const auto telemetry = telemetry_.lock()) {
+            telemetry->SetRemoteVideoRenderExpected(
+                series_key_, room_generation_, binding_epoch_, probe_, expected,
+                ToTelemetryRenderReason(reason), source_time);
+        }
+    }
+
+    void OnSubmitted(
+            const render::RenderFrameMetadata& metadata,
+            const char* measurement_point,
+            Clock::time_point source_time) override {
+        if (!probe_ || !probe_->active.load(std::memory_order_acquire) ||
+            metadata.series_key != series_key_ ||
+            metadata.room_generation != room_generation_ ||
+            metadata.binding_epoch != binding_epoch_) {
+            return;
+        }
+        if (const auto telemetry = telemetry_.lock()) {
+            telemetry->RecordRemoteVideoRenderSubmit(
+                series_key_, room_generation_, binding_epoch_,
+                metadata.frame_token, metadata.decoded_at,
+                measurement_point ? measurement_point : "render_submit",
+                probe_, source_time);
+        }
+    }
+
+private:
+    std::weak_ptr<telemetry::SessionTelemetry> telemetry_;
+    std::string series_key_;
+    std::uint64_t room_generation_ = 0;
+    std::uint64_t binding_epoch_ = 0;
+    std::shared_ptr<telemetry::RenderActivityProbe> probe_;
+};
+
+void SetRemoteMediaExpected(
+    const std::shared_ptr<telemetry::SessionTelemetry>& telemetry_owner,
+    TrackKind kind,
+    std::string_view participant_sid,
+    std::string_view track_sid,
+    bool expected,
+    telemetry::MediaExpectationReason reason) {
+    if (!telemetry_owner) return;
+    if (kind == TrackKind::Video) {
+        telemetry_owner->SetRemoteVideoExpected(
+            RemoteVideoTelemetryKey(participant_sid, track_sid), expected, reason);
+    } else if (kind == TrackKind::Audio) {
+        telemetry_owner->SetRemoteAudioExpected(
+            RemoteAudioTelemetryKey(participant_sid, track_sid), expected, reason);
+    }
+}
+
+void Room::SetSessionTelemetry(
+    std::weak_ptr<telemetry::SessionTelemetry> telemetry) {
+    std::lock_guard lock(room_mutex_);
+    session_telemetry_ = std::move(telemetry);
+}
+
 std::shared_ptr<MembershipState> Room::EnsureMembershipLocked(
     const std::shared_ptr<Participant>& participant,
     bool is_local) {
@@ -845,6 +1093,7 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
 
 asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::string& token, const SignalOptions& opts) {
     auto self = shared_from_this();
+    std::chrono::steady_clock::time_point connect_accepted_at;
     const std::string attempt_url = url;
     const std::string attempt_token = token;
     const SignalOptions attempt_options = opts;
@@ -853,6 +1102,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
     bool restart_connect = false;
     std::shared_ptr<SignalClient> attempt_signal;
     std::shared_ptr<ConnectAttemptTestHooks> test_hooks;
+    std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner;
     {
         std::lock_guard lock(room_mutex_);
         if (connection_state_ != ConnectionState::Disconnected ||
@@ -882,10 +1132,18 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             ResetSubscriptionSessionLocked(attempt_options.auto_subscribe);
         }
         generation = session_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+        connect_accepted_at = std::chrono::steady_clock::now();
         operation_timeouts_ = attempt_options.timeouts;
         require_media_connection_ = attempt_options.create_webrtc_pc;
         test_hooks = connect_attempt_test_hooks_;
+        telemetry_owner = session_telemetry_.lock();
     }
+    if (telemetry_owner) {
+        telemetry_owner->RecordRoomConnectAccepted(generation, connect_accepted_at);
+    }
+    TelemetryOperationSpan connect_operation(
+        restart_connect ? nullptr : std::move(telemetry_owner),
+        telemetry::OperationKind::Connect);
 
     try {
         auto conn_res = co_await SignalClient::Connect(
@@ -1192,8 +1450,10 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
     // racing ahead of OnConnected while still preserving real post-Join deltas.
     FlushDeferredRoomMessages(generation);
 
+        connect_operation.Finish(telemetry::OperationOutcome::Success);
         co_return;
     } catch (...) {
+        const auto operation_outcome = TelemetryOutcome(std::current_exception());
         std::shared_ptr<SignalClient> signal;
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> subscriber;
@@ -1282,6 +1542,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         publisher_observer.reset();
         subscriber_observer.reset();
         data_channel_observers.clear();
+        connect_operation.Finish(operation_outcome);
         throw;
     }
 }
@@ -3265,7 +3526,10 @@ namespace {
 
 class NativeAudioTrackSink : public webrtc::AudioTrackSinkInterface {
 public:
-    explicit NativeAudioTrackSink(std::function<void(const AudioFrame&)> callback)
+    using Clock = std::chrono::steady_clock;
+
+    explicit NativeAudioTrackSink(
+        std::function<void(Clock::time_point, const AudioFrame&)> callback)
         : callback_(std::move(callback)) {}
 
     void OnData(const void* audio_data,
@@ -3273,9 +3537,18 @@ public:
                 int sample_rate,
                 size_t number_of_channels,
                 size_t number_of_frames) override {
-        if (!callback_) return;
+        if (!callback_ || !audio_data || bits_per_sample != 16 ||
+            sample_rate <= 0 || number_of_channels == 0 || number_of_frames == 0 ||
+            number_of_channels > static_cast<size_t>((std::numeric_limits<int>::max)()) ||
+            number_of_frames > static_cast<size_t>((std::numeric_limits<int>::max)()) ||
+            number_of_frames > static_cast<size_t>((std::numeric_limits<int>::max)()) /
+                number_of_channels) {
+            return;
+        }
+        const auto source_time = Clock::now();
 
-        int num_samples = static_cast<int>(number_of_frames * number_of_channels);
+        const auto num_samples = static_cast<int>(
+            number_of_frames * number_of_channels);
 
         AudioFrame frame = AudioFrame::create(sample_rate, static_cast<int>(number_of_channels), static_cast<int>(number_of_frames));
         const int16_t* pcm_data = static_cast<const int16_t*>(audio_data);
@@ -3297,31 +3570,59 @@ public:
 
 
 
-        callback_(frame);
+        callback_(source_time, frame);
     }
 
 private:
-    std::function<void(const AudioFrame&)> callback_;
+    std::function<void(Clock::time_point, const AudioFrame&)> callback_;
 };
 
 class NativeVideoTrackSink : public webrtc::VideoSinkInterface<webrtc::VideoFrame> {
 public:
-    explicit NativeVideoTrackSink(std::function<void(render::OwnedI420Frame::Ptr)> callback)
-        : callback_(std::move(callback)) {}
+    using Clock = std::chrono::steady_clock;
+    using MetadataFactory =
+        std::function<render::RenderFrameMetadata(Clock::time_point)>;
+
+    explicit NativeVideoTrackSink(
+        std::function<void(Clock::time_point, render::OwnedI420Frame::Ptr)> callback,
+        MetadataFactory metadata_factory = {})
+        : callback_(std::move(callback))
+        , metadata_factory_(std::move(metadata_factory)) {}
 
     void OnFrame(const webrtc::VideoFrame& rtc_frame) override {
         if (!callback_) return;
+        const auto source_time = Clock::now();
 
         // Do not run an I420-to-RGBA pixel loop on WebRTC's media worker.
         // CopyFrom preserves stride-correct planes and metadata in a frame that
         // can safely outlive the decoder buffer.
-        if (auto frame = render::OwnedI420Frame::CopyFrom(rtc_frame)) {
-            callback_(std::move(frame));
+        auto metadata = metadata_factory_
+            ? metadata_factory_(source_time) : render::RenderFrameMetadata{};
+        if (auto frame = render::OwnedI420Frame::CopyFrom(
+                rtc_frame, std::move(metadata))) {
+            callback_(source_time, std::move(frame));
         }
     }
 
 private:
-    std::function<void(render::OwnedI420Frame::Ptr)> callback_;
+    std::function<void(Clock::time_point, render::OwnedI420Frame::Ptr)> callback_;
+    MetadataFactory metadata_factory_;
+};
+
+struct VideoFrameTelemetryGate {
+    std::atomic<bool> first_frame_submitted{false};
+    std::atomic<std::uint64_t> recovery_epoch{0};
+    std::atomic<std::int64_t> recovery_first_ns{0};
+    std::atomic<std::int64_t> recovery_last_good_ns{0};
+    std::atomic<bool> recovery_stable_submitted{false};
+};
+
+struct AudioFrameTelemetryGate {
+    std::atomic<bool> first_frame_submitted{false};
+    std::atomic<std::uint64_t> recovery_epoch{0};
+    std::atomic<std::int64_t> recovery_first_ns{0};
+    std::atomic<std::int64_t> recovery_last_good_ns{0};
+    std::atomic<bool> recovery_stable_submitted{false};
 };
 
 } // namespace
@@ -3330,6 +3631,21 @@ void Room::DetachRemoteTrackSinks(std::vector<RemoteTrackSinkBinding> bindings) 
     for (auto& binding : bindings) {
         if (binding.media_binding) {
             binding.media_binding->active.store(false, std::memory_order_release);
+        }
+        if (binding.telemetry_probe) {
+            binding.telemetry_probe->active.store(false, std::memory_order_release);
+        }
+        if (binding.audio_telemetry_probe) {
+            binding.audio_telemetry_probe->active.store(false, std::memory_order_release);
+        }
+        if (binding.render_telemetry_observer) {
+            binding.render_telemetry_observer->SetExpected(
+                false,
+                render::RenderExpectationReason::BindingEnded,
+                std::chrono::steady_clock::now());
+        }
+        if (binding.render_telemetry_probe) {
+            binding.render_telemetry_probe->active.store(false, std::memory_order_release);
         }
         if (!binding.detach) continue;
         try {
@@ -3423,6 +3739,9 @@ Room::RemoteSubscriptionIntent& Room::EnsureSubscriptionIntentLocked(
     if (inserted) {
         it->second.subscribed = session_auto_subscribe_;
         it->second.revision = next_subscription_revision_++;
+        if (it->second.subscribed) {
+            it->second.accepted_at = std::chrono::steady_clock::now();
+        }
     }
     return it->second;
 }
@@ -3436,8 +3755,38 @@ const Room::RemoteSubscriptionIntent* Room::FindSubscriptionIntentLocked(
 void Room::QueueSubscriptionUpdateLocked(const SubscriptionIntentKey& key) {
     const auto* intent = FindSubscriptionIntentLocked(key);
     if (!intent) return;
-    pending_subscription_updates_[key] = {intent->subscribed, intent->revision};
+    const auto existing = pending_subscription_updates_.find(key);
+    if (existing != pending_subscription_updates_.end()) {
+        if (existing->second.subscribed == intent->subscribed &&
+            existing->second.revision == intent->revision) {
+            ScheduleSubscriptionDrainLocked();
+            return;
+        }
+        FinishSubscriptionOperationLocked(
+            existing->second, telemetry::OperationOutcome::Cancelled);
+    }
+    pending_subscription_updates_[key] = {
+        intent->subscribed, intent->revision, false, {}};
     ScheduleSubscriptionDrainLocked();
+}
+
+void Room::FinishSubscriptionOperationLocked(
+    const PendingSubscriptionUpdate& update,
+    telemetry::OperationOutcome outcome) {
+    if (update.telemetry_operation) {
+        update.telemetry_operation->Finish(outcome);
+    }
+}
+
+void Room::CancelPendingSubscriptionUpdateLocked(
+    const SubscriptionIntentKey& key) {
+    const auto pending = pending_subscription_updates_.find(key);
+    if (pending == pending_subscription_updates_.end()) return;
+    if (!pending->second.in_flight) {
+        FinishSubscriptionOperationLocked(
+            pending->second, telemetry::OperationOutcome::Cancelled);
+    }
+    pending_subscription_updates_.erase(pending);
 }
 
 void Room::ScheduleSubscriptionDrainLocked() {
@@ -3491,11 +3840,14 @@ asio::awaitable<void> Room::DrainSubscriptionUpdates(
             }
             auto pending = pending_subscription_updates_.begin();
             key = pending->first;
+            pending->second.in_flight = true;
             update = pending->second;
-            pending_subscription_updates_.erase(pending);
             const auto* intent = FindSubscriptionIntentLocked(key);
             if (!intent || intent->revision != update.revision ||
                 intent->subscribed != update.subscribed) {
+                FinishSubscriptionOperationLocked(
+                    update, telemetry::OperationOutcome::Cancelled);
+                pending_subscription_updates_.erase(pending);
                 continue;
             }
             test_hooks = connect_attempt_test_hooks_;
@@ -3525,16 +3877,44 @@ asio::awaitable<void> Room::DrainSubscriptionUpdates(
                 }
             }
             co_await signal->SendAsync(request);
+            {
+                std::lock_guard lock(room_mutex_);
+                FinishSubscriptionOperationLocked(
+                    update, telemetry::OperationOutcome::Success);
+                const auto pending = pending_subscription_updates_.find(key);
+                if (pending != pending_subscription_updates_.end() &&
+                    pending->second.revision == update.revision &&
+                    pending->second.telemetry_operation ==
+                        update.telemetry_operation) {
+                    pending_subscription_updates_.erase(pending);
+                }
+            }
         } catch (...) {
             std::lock_guard lock(room_mutex_);
+            FinishSubscriptionOperationLocked(
+                update, TelemetryOutcome(std::current_exception()));
             if (logical_session == subscription_session_generation_ &&
                 subscription_sender_active_ &&
                 subscription_sender_session_ == logical_session &&
                 subscription_sender_operation_ == sender_operation &&
                 signal_client_ == signal) {
-                if (const auto* current = FindSubscriptionIntentLocked(key)) {
-                    pending_subscription_updates_[key] = {
-                        current->subscribed, current->revision};
+                const auto pending = pending_subscription_updates_.find(key);
+                const bool newer_update_pending =
+                    pending != pending_subscription_updates_.end() &&
+                    (pending->second.revision != update.revision ||
+                     pending->second.telemetry_operation !=
+                         update.telemetry_operation);
+                if (!newer_update_pending) {
+                    if (pending != pending_subscription_updates_.end()) {
+                        pending_subscription_updates_.erase(pending);
+                    }
+                }
+                if (!newer_update_pending) {
+                    const auto* current = FindSubscriptionIntentLocked(key);
+                    if (current) {
+                        pending_subscription_updates_[key] = {
+                            current->subscribed, current->revision, false, {}};
+                    }
                 }
                 subscription_sender_active_ = false;
             }
@@ -3548,7 +3928,7 @@ void Room::PauseSubscriptionSendingLocked() {
     subscription_sender_active_ = false;
     subscription_sender_operation_ = next_subscription_sender_operation_++;
     for (const auto& [key, intent] : subscription_intents_) {
-        pending_subscription_updates_[key] = {intent.subscribed, intent.revision};
+        QueueSubscriptionUpdateLocked(key);
     }
 }
 
@@ -3566,6 +3946,8 @@ void Room::FinishSubscriptionRecoveryLocked(
             current->second.revision == revision &&
             pending != pending_subscription_updates_.end() &&
             pending->second.revision == revision) {
+            FinishSubscriptionOperationLocked(
+                pending->second, telemetry::OperationOutcome::Success);
             pending_subscription_updates_.erase(pending);
         }
     }
@@ -3573,6 +3955,10 @@ void Room::FinishSubscriptionRecoveryLocked(
 }
 
 void Room::ResetSubscriptionSessionLocked(bool auto_subscribe) {
+    for (const auto& [_, update] : pending_subscription_updates_) {
+        FinishSubscriptionOperationLocked(
+            update, telemetry::OperationOutcome::Cancelled);
+    }
     ++subscription_session_generation_;
     next_subscription_revision_ = 1;
     session_auto_subscribe_ = auto_subscribe;
@@ -3595,7 +3981,7 @@ void Room::PruneSubscriptionIntentsLocked() {
         if (participant == remote_participants_.end() || !participant->second ||
             participant->second->identity() != it->first.participant_identity ||
             !participant->second->get_publication(it->first.track_sid)) {
-            pending_subscription_updates_.erase(it->first);
+            CancelPendingSubscriptionUpdateLocked(it->first);
             it = subscription_intents_.erase(it);
         } else {
             ++it;
@@ -3679,9 +4065,31 @@ RemotePublicationControlDispatch Room::QueueRemotePublicationControl(
             intent.last_request_sequence = request.sequence;
             intent.subscribed = *request.subscribed;
             intent.revision = next_subscription_revision_++;
+            intent.accepted_at = intent.subscribed
+                ? std::chrono::steady_clock::now()
+                : std::chrono::steady_clock::time_point{};
             canonical->CommitControl(request);
 
+            CancelPendingSubscriptionUpdateLocked(key);
+            std::shared_ptr<SubscriptionTelemetryOperation> telemetry_operation;
+            if (const auto sink = session_telemetry_.lock()) {
+                telemetry_operation =
+                    std::make_shared<SubscriptionTelemetryOperation>(
+                        sink,
+                        intent.subscribed ? telemetry::OperationKind::Subscribe
+                                          : telemetry::OperationKind::Unsubscribe);
+            }
+            pending_subscription_updates_[key] = {
+                intent.subscribed, intent.revision, false,
+                std::move(telemetry_operation)};
+
             if (!intent.subscribed) {
+                if (canonical->track()) {
+                    SetRemoteMediaExpected(
+                        session_telemetry_.lock(), canonical->track()->kind(),
+                        participant_sid, canonical->sid(), false,
+                        telemetry::MediaExpectationReason::Unsubscribed);
+                }
                 const auto current = current_remote_binding_serials_.find(canonical.get());
                 if (current != current_remote_binding_serials_.end()) {
                     binding_serial = current->second;
@@ -3690,7 +4098,7 @@ RemotePublicationControlDispatch Room::QueueRemotePublicationControl(
                     }
                 }
             }
-            QueueSubscriptionUpdateLocked(key);
+            ScheduleSubscriptionDrainLocked();
         }
 
         if (binding_serial != 0) {
@@ -4353,6 +4761,8 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
     std::shared_ptr<LocalParticipant> local;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
     OperationTimeouts timeouts;
+    std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner;
+    bool reconnect_republish = false;
     auto ack = std::make_shared<AwaitableState<proto::TrackPublishedResponse>>(executor_);
     {
         std::lock_guard lock(room_mutex_);
@@ -4374,7 +4784,12 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         publisher = publisher_pc_;
         timeouts = operation_timeouts_;
         pending_track_publishes_[cid] = ack;
+        reconnect_republish = reconnect_republish_tracks_.erase(track.get()) != 0;
+        telemetry_owner = session_telemetry_.lock();
     }
+    TelemetryOperationSpan publish_operation(
+        reconnect_republish ? nullptr : std::move(telemetry_owner),
+        telemetry::OperationKind::PublishTrack);
     const auto release_ack = [&]() {
         std::lock_guard lock(room_mutex_);
         const auto found = pending_track_publishes_.find(cid);
@@ -4421,8 +4836,10 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             local->add_publication(publication);
         }
         if (track->kind() == TrackKind::Video) SchedulePublisherMediaDiagnostic(generation);
+        publish_operation.Finish(telemetry::OperationOutcome::Success);
         co_return publication;
     } catch (...) {
+        const auto operation_outcome = TelemetryOutcome(std::current_exception());
         release_ack();
         if (sender && WebRTCManager::Instance().signaling_thread()) {
             WebRTCManager::Instance().signaling_thread()->BlockingCall([publisher, sender]() {
@@ -4434,6 +4851,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
                 "Local transaction failed after TrackPublished ACK; removed the sender and requested Publisher SDP renegotiation to reconcile server tracks");
             NegotiatePublisher(generation);
         }
+        publish_operation.Finish(operation_outcome);
         throw;
     }
 }
@@ -4501,6 +4919,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
     };
     std::vector<PendingAckInfo> pending_acks;
     pending_acks.reserve(items.size());
+    std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner;
 
     {
         std::lock_guard lock(room_mutex_);
@@ -4525,6 +4944,16 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
         }
         signal = signal_client_;
         local = local_participant_;
+        telemetry_owner = session_telemetry_.lock();
+    }
+
+    TelemetryOperationSpan batch_operation(
+        telemetry_owner, telemetry::OperationKind::PublishBatch);
+    std::vector<TelemetryOperationSpan> member_operations;
+    member_operations.reserve(items.size());
+    for (std::size_t index = 0; index < items.size(); ++index) {
+        member_operations.emplace_back(
+            telemetry_owner, telemetry::OperationKind::PublishTrack);
     }
 
     std::vector<webrtc::scoped_refptr<webrtc::RtpSenderInterface>> senders;
@@ -4592,8 +5021,13 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
         Log("TRACK", "BATCH_PUBLISHED",
             "Local audio/video batch published: " + std::to_string(publications.size()) + " tracks in a single SDP negotiation");
         SchedulePublisherMediaDiagnostic(generation);
+        for (auto& operation : member_operations) {
+            operation.Finish(telemetry::OperationOutcome::Success);
+        }
+        batch_operation.Finish(telemetry::OperationOutcome::Success);
         co_return publications;
     } catch (...) {
+        const auto operation_outcome = TelemetryOutcome(std::current_exception());
         {
             std::lock_guard lock(room_mutex_);
             for (const auto& pa : pending_acks) {
@@ -4619,6 +5053,10 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 "Batch publication failed; rolled back local senders and requested Publisher SDP renegotiation to reconcile server tracks");
             NegotiatePublisher();
         }
+        for (auto& operation : member_operations) {
+            operation.Finish(operation_outcome);
+        }
+        batch_operation.Finish(operation_outcome);
         throw;
     }
 }
@@ -4868,6 +5306,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
     std::shared_ptr<TrackPublication> publication;
     std::shared_ptr<Track> track;
     std::shared_ptr<LocalUnpublishTestHooks> test_hooks;
+    std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner;
     {
         std::lock_guard lock(room_mutex_);
         if (connection_state_ != ConnectionState::Connected ||
@@ -4895,7 +5334,10 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
         pending_local_unpublishes_.emplace(track_sid,
                                             PendingLocalUnpublish{generation, publication, false});
         test_hooks = local_unpublish_test_hooks_;
+        telemetry_owner = session_telemetry_.lock();
     }
+    TelemetryOperationSpan unpublish_operation(
+        std::move(telemetry_owner), telemetry::OperationKind::Unpublish);
 
     bool sender_removed = false;
     try {
@@ -4961,8 +5403,10 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
         track->set_sid("");
         Log("TRACK", "LOCAL_UNPUBLISHED",
             "Publisher SDP Answer confirmed local track unpublication: " + track_sid);
+        unpublish_operation.Finish(telemetry::OperationOutcome::Success);
         co_return publication;
     } catch (const std::exception& error) {
+        const auto operation_outcome = TelemetryOutcome(std::current_exception());
         bool state_uncertain = false;
         {
             std::lock_guard lock(room_mutex_);
@@ -4978,12 +5422,14 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
             Log("ERROR", "UNPUBLISH_STATE_UNCERTAIN",
                 "Local sender removed without SDP Answer; recovery will reconcile with server state; " +
                     secure_log::ExceptionSummary("unpublish_negotiate"));
+            unpublish_operation.Finish(telemetry::OperationOutcome::Failure);
             throw OperationError(OperationKind::UnpublishTrack,
                                  OperationErrorCode::StateUncertain,
                                  "unpublish_negotiate",
                                  "publisher sender was removed before unpublish negotiation completed",
                                  true);
         }
+        unpublish_operation.Finish(operation_outcome);
         throw;
     }
 }
@@ -5277,6 +5723,7 @@ void Room::AttachRemoteTrackToParticipant(
     uint64_t binding_serial = 0;
     SubscriptionIntentKey subscription_key;
     uint64_t subscription_revision = 0;
+    std::chrono::steady_clock::time_point subscription_accepted_at;
     std::shared_ptr<MediaBindingState> media_binding;
     std::shared_ptr<SignalClient> signal;
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> retired_rtc_track;
@@ -5340,6 +5787,7 @@ void Room::AttachRemoteTrackToParticipant(
             return;
         }
         subscription_revision = subscription_intent.revision;
+        subscription_accepted_at = subscription_intent.accepted_at;
         binding_serial = next_remote_track_binding_serial_++;
         media_binding = std::make_shared<MediaBindingState>(
             MediaBindingKey{track_key, binding_serial});
@@ -5400,6 +5848,48 @@ void Room::AttachRemoteTrackToParticipant(
         }
         processed_remote_track_ids_.insert(rtc_track_id);
         signal = signal_client_;
+        if (kind == TrackKind::Video && binding.telemetry_probe) {
+            const bool expected_receive = subscription_intent->subscribed &&
+                !r_track->muted() &&
+                pub->stream_state() == TrackPublication::StreamState::Active &&
+                pub->subscription_allowed();
+            if (const auto telemetry_owner = session_telemetry_.lock()) {
+                telemetry_owner->RegisterRemoteVideoBinding(
+                    RemoteVideoTelemetryKey(participant->sid(), track_id),
+                    track_key.participant.native_room_generation,
+                    binding_serial,
+                    subscription_accepted_at,
+                    expected_receive,
+                    r_track->source() != TrackSource::ScreenShareVideo,
+                    binding.telemetry_probe);
+                if (binding.render_telemetry_probe) {
+                    telemetry_owner->RegisterRemoteVideoRenderBinding(
+                        RemoteVideoRenderTelemetryKey(participant->sid(), track_id),
+                        track_key.participant.native_room_generation,
+                        binding_serial,
+                        subscription_accepted_at,
+                        false,
+                        r_track->source() != TrackSource::ScreenShareVideo,
+                        std::chrono::milliseconds(33),
+                        binding.render_telemetry_probe);
+                }
+            }
+        } else if (kind == TrackKind::Audio && binding.audio_telemetry_probe) {
+            const bool expected_receive = subscription_intent->subscribed &&
+                !r_track->muted() && !r_track->playout_muted() &&
+                native_volume > 0.001 &&
+                pub->stream_state() == TrackPublication::StreamState::Active &&
+                pub->subscription_allowed();
+            if (const auto telemetry_owner = session_telemetry_.lock()) {
+                telemetry_owner->RegisterRemoteAudioBinding(
+                    RemoteAudioTelemetryKey(participant->sid(), track_id),
+                    track_key.participant.native_room_generation,
+                    binding_serial,
+                    subscription_accepted_at,
+                    expected_receive,
+                    binding.audio_telemetry_probe);
+            }
+        }
         media_binding->active.store(true, std::memory_order_release);
         remote_track_sinks_.push_back(std::move(binding));
         if (remote_publication) {
@@ -5438,9 +5928,90 @@ void Room::AttachRemoteTrackToParticipant(
         }
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
         auto last_voice_log_time = std::make_shared<std::chrono::steady_clock::time_point>(std::chrono::steady_clock::now());
+        auto audio_telemetry_probe = std::make_shared<telemetry::AudioActivityProbe>();
+        auto audio_telemetry_gate = std::make_shared<AudioFrameTelemetryGate>();
+        const auto audio_telemetry_key =
+            RemoteAudioTelemetryKey(participant->sid(), track_id);
+        std::weak_ptr<telemetry::SessionTelemetry> weak_telemetry = session_telemetry_;
+        const auto telemetry_room_generation =
+            track_key.participant.native_room_generation;
         std::weak_ptr<Room> weak_room = weak_from_this();
-        auto sink = std::make_shared<NativeAudioTrackSink>([r_track, has_logged, last_voice_log_time, weak_room, participant, media_binding](const AudioFrame& frame) {
+        auto sink = std::make_shared<NativeAudioTrackSink>(
+            [r_track, has_logged, last_voice_log_time, weak_room, participant,
+             media_binding, audio_telemetry_probe, audio_telemetry_gate,
+             weak_telemetry, audio_telemetry_key, telemetry_room_generation,
+             binding_serial](std::chrono::steady_clock::time_point source_time,
+                             const AudioFrame& frame) {
             if (!media_binding->active.load(std::memory_order_acquire)) return;
+            const auto frame_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                source_time.time_since_epoch()).count();
+            const auto previous_frame_ns = audio_telemetry_probe->last_frame_ns.exchange(
+                frame_ns, std::memory_order_acq_rel);
+            audio_telemetry_probe->sample_rate.store(
+                static_cast<std::uint32_t>((std::max)(0, frame.sampleRate())),
+                std::memory_order_release);
+            audio_telemetry_probe->channels.store(
+                static_cast<std::uint32_t>((std::max)(0, frame.numChannels())),
+                std::memory_order_release);
+            if (const auto telemetry_owner = weak_telemetry.lock()) {
+                const bool first_frame = !audio_telemetry_gate->first_frame_submitted.load(
+                    std::memory_order_acquire);
+                const auto recovery_epoch = telemetry_owner->ActiveRecoveryEpoch();
+                const auto observed_epoch = audio_telemetry_gate->recovery_epoch.load(
+                    std::memory_order_acquire);
+                if (recovery_epoch != observed_epoch) {
+                    audio_telemetry_gate->recovery_epoch.store(
+                        recovery_epoch, std::memory_order_release);
+                    audio_telemetry_gate->recovery_first_ns.store(
+                        0, std::memory_order_release);
+                    audio_telemetry_gate->recovery_last_good_ns.store(
+                        previous_frame_ns, std::memory_order_release);
+                    audio_telemetry_gate->recovery_stable_submitted.store(
+                        false, std::memory_order_release);
+                }
+                const auto recovery_first_ns =
+                    audio_telemetry_gate->recovery_first_ns.load(
+                        std::memory_order_acquire);
+                const bool recovery_first = recovery_epoch != 0 && recovery_first_ns == 0;
+                const bool recovery_stable = recovery_epoch != 0 &&
+                    recovery_first_ns != 0 &&
+                    !audio_telemetry_gate->recovery_stable_submitted.load(
+                        std::memory_order_acquire) &&
+                    frame_ns - recovery_first_ns >=
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            telemetry::SessionTelemetry::kRecoveryStableWindow).count();
+                if ((first_frame || recovery_first || recovery_stable) &&
+                    telemetry_owner->RecordRemoteAudioFrame(
+                        audio_telemetry_key,
+                        telemetry_room_generation,
+                        binding_serial,
+                        recovery_epoch,
+                        recovery_stable,
+                        static_cast<std::uint32_t>((std::max)(0, frame.sampleRate())),
+                        static_cast<std::uint32_t>((std::max)(0, frame.numChannels())),
+                        source_time,
+                        recovery_first &&
+                                audio_telemetry_gate->recovery_last_good_ns.load(
+                                    std::memory_order_acquire) > 0
+                            ? std::chrono::steady_clock::time_point(
+                                std::chrono::nanoseconds(
+                                    audio_telemetry_gate->recovery_last_good_ns.load(
+                                        std::memory_order_acquire)))
+                            : std::chrono::steady_clock::time_point{})) {
+                    if (first_frame) {
+                        audio_telemetry_gate->first_frame_submitted.store(
+                            true, std::memory_order_release);
+                    }
+                    if (recovery_first) {
+                        audio_telemetry_gate->recovery_first_ns.store(
+                            frame_ns, std::memory_order_release);
+                    }
+                    if (recovery_stable) {
+                        audio_telemetry_gate->recovery_stable_submitted.store(
+                            true, std::memory_order_release);
+                    }
+                }
+            }
             if (r_track) {
                 r_track->notifyAudioFrame(frame);
             }
@@ -5474,6 +6045,10 @@ void Room::AttachRemoteTrackToParticipant(
             track_key,
             binding_serial,
             media_binding,
+            {},
+            audio_telemetry_probe,
+            {},
+            {},
             track->id(),
             RemoteTrackSinkThread::Signaling,
             [track, sink]() {
@@ -5496,9 +6071,100 @@ void Room::AttachRemoteTrackToParticipant(
     } else {
         auto video_track = static_cast<webrtc::VideoTrackInterface*>(track.get());
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
+        auto telemetry_probe = std::make_shared<telemetry::VideoActivityProbe>();
+        auto render_telemetry_probe =
+            std::make_shared<telemetry::RenderActivityProbe>();
+        auto telemetry_gate = std::make_shared<VideoFrameTelemetryGate>();
+        const auto telemetry_key = RemoteVideoTelemetryKey(participant->sid(), track_id);
+        const auto render_telemetry_key =
+            RemoteVideoRenderTelemetryKey(participant->sid(), track_id);
+        std::weak_ptr<telemetry::SessionTelemetry> weak_telemetry = session_telemetry_;
+        const auto telemetry_room_generation =
+            track_key.participant.native_room_generation;
+        auto render_telemetry_observer =
+            std::make_shared<TelemetryRenderSubmitObserver>(
+                weak_telemetry,
+                render_telemetry_key,
+                telemetry_room_generation,
+                binding_serial,
+                render_telemetry_probe);
+        auto render_frame_token = std::make_shared<std::atomic<std::uint64_t>>(0);
         std::weak_ptr<Room> weak_room = weak_from_this();
-        auto sink = std::make_shared<NativeVideoTrackSink>([r_track, has_logged, weak_room, media_binding](render::OwnedI420Frame::Ptr frame) {
+        auto sink = std::make_shared<NativeVideoTrackSink>(
+            [r_track, has_logged, weak_room, media_binding, telemetry_probe,
+             telemetry_gate, weak_telemetry, telemetry_key,
+             telemetry_room_generation, binding_serial](
+                std::chrono::steady_clock::time_point source_time,
+                render::OwnedI420Frame::Ptr frame) {
             if (!media_binding->active.load(std::memory_order_acquire)) return;
+            const auto frame_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                source_time.time_since_epoch()).count();
+            const auto previous_frame_ns = telemetry_probe->last_frame_ns.exchange(
+                frame_ns, std::memory_order_acq_rel);
+            telemetry_probe->width.store(
+                static_cast<std::uint32_t>(frame->width()), std::memory_order_release);
+            telemetry_probe->height.store(
+                static_cast<std::uint32_t>(frame->height()), std::memory_order_release);
+
+            if (const auto telemetry_owner = weak_telemetry.lock()) {
+                const bool first_frame =
+                    !telemetry_gate->first_frame_submitted.load(std::memory_order_acquire);
+                const auto recovery_epoch = telemetry_owner->ActiveRecoveryEpoch();
+                auto observed_epoch = telemetry_gate->recovery_epoch.load(
+                    std::memory_order_acquire);
+                if (recovery_epoch != observed_epoch) {
+                    telemetry_gate->recovery_epoch.store(
+                        recovery_epoch, std::memory_order_release);
+                    telemetry_gate->recovery_first_ns.store(0, std::memory_order_release);
+                    telemetry_gate->recovery_last_good_ns.store(
+                        previous_frame_ns, std::memory_order_release);
+                    telemetry_gate->recovery_stable_submitted.store(
+                        false, std::memory_order_release);
+                    observed_epoch = recovery_epoch;
+                }
+
+                const auto recovery_first_ns = telemetry_gate->recovery_first_ns.load(
+                    std::memory_order_acquire);
+                const bool recovery_first = recovery_epoch != 0 && recovery_first_ns == 0;
+                const bool recovery_stable = recovery_epoch != 0 &&
+                    recovery_first_ns != 0 &&
+                    !telemetry_gate->recovery_stable_submitted.load(
+                        std::memory_order_acquire) &&
+                    frame_ns - recovery_first_ns >=
+                        std::chrono::duration_cast<std::chrono::nanoseconds>(
+                            telemetry::SessionTelemetry::kRecoveryStableWindow).count();
+                if ((first_frame || recovery_first || recovery_stable) &&
+                    telemetry_owner->RecordRemoteVideoFrame(
+                        telemetry_key,
+                        telemetry_room_generation,
+                        binding_serial,
+                        recovery_epoch,
+                        recovery_stable,
+                        static_cast<std::uint32_t>(frame->width()),
+                        static_cast<std::uint32_t>(frame->height()),
+                        source_time,
+                        recovery_first &&
+                                telemetry_gate->recovery_last_good_ns.load(
+                                    std::memory_order_acquire) > 0
+                            ? std::chrono::steady_clock::time_point(
+                                std::chrono::nanoseconds(
+                                    telemetry_gate->recovery_last_good_ns.load(
+                                        std::memory_order_acquire)))
+                            : std::chrono::steady_clock::time_point{})) {
+                    if (first_frame) {
+                        telemetry_gate->first_frame_submitted.store(
+                            true, std::memory_order_release);
+                    }
+                    if (recovery_first) {
+                        telemetry_gate->recovery_first_ns.store(
+                            frame_ns, std::memory_order_release);
+                    }
+                    if (recovery_stable) {
+                        telemetry_gate->recovery_stable_submitted.store(
+                            true, std::memory_order_release);
+                    }
+                }
+            }
             if (r_track) {
                 r_track->notifyI420VideoFrame(frame);
             }
@@ -5509,12 +6175,29 @@ void Room::AttachRemoteTrackToParticipant(
                 }
                 Telemetry::Instance().OnFirstRemoteFrameReceived("video");
             }
-        });
+        },
+            [render_telemetry_key, telemetry_room_generation, binding_serial,
+             render_telemetry_observer, render_frame_token](
+                    std::chrono::steady_clock::time_point decoded_at) {
+                render::RenderFrameMetadata metadata;
+                metadata.series_key = render_telemetry_key;
+                metadata.room_generation = telemetry_room_generation;
+                metadata.binding_epoch = binding_serial;
+                metadata.frame_token = render_frame_token->fetch_add(
+                    1, std::memory_order_relaxed) + 1;
+                metadata.decoded_at = decoded_at;
+                metadata.observer = render_telemetry_observer;
+                return metadata;
+            });
         video_track->AddOrUpdateSink(sink.get(), webrtc::VideoSinkWants());
         RemoteTrackSinkBinding binding{
             track_key,
             binding_serial,
             media_binding,
+            telemetry_probe,
+            {},
+            render_telemetry_probe,
+            render_telemetry_observer,
             track->id(),
             RemoteTrackSinkThread::MediaWorker,
             [track, sink]() {
@@ -5740,6 +6423,8 @@ void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation
         bool connect_failed = false;
         bool server_disconnect_finalizing = false;
         uint64_t reconnect_generation = 0;
+        std::shared_ptr<telemetry::SessionTelemetry> reconnect_telemetry;
+        std::string reconnect_episode_id;
         std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
         PendingOperationCleanup connect_pending;
         {
@@ -5757,6 +6442,12 @@ void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation
                     connection_state_ = ConnectionState::Reconnecting;
                     reconnect_attempts_++;
                     PauseSubscriptionSendingLocked();
+                    reconnect_telemetry = session_telemetry_.lock();
+                    if (reconnect_telemetry) {
+                        reconnect_episode_id = reconnect_telemetry->StartOperation(
+                            telemetry::OperationKind::ReconnectEpisode,
+                            "reconnect_episode");
+                    }
                     should_reconnect = true;
                     reconnect_generation = session_generation_.load(std::memory_order_acquire);
                 } else if (connection_state_ == ConnectionState::Connecting) {
@@ -5789,8 +6480,15 @@ void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation
             delivery.required_state = ConnectionState::Reconnecting;
             delivery.listeners = listeners_snapshot;
             DeliverLifecycleListenerEvent(std::move(delivery));
-            livekit::safe_co_spawn(executor_, [self = shared_from_this(), reconnect_generation]() -> asio::awaitable<void> {
-                co_await self->AttemptReconnect(reconnect_generation);
+            livekit::safe_co_spawn(executor_,
+                [self = shared_from_this(), reconnect_generation,
+                 reconnect_telemetry = std::move(reconnect_telemetry),
+                 reconnect_episode_id = std::move(reconnect_episode_id)]()
+                    -> asio::awaitable<void> {
+                co_await self->AttemptReconnect(
+                    reconnect_generation,
+                    reconnect_telemetry,
+                    reconnect_episode_id);
             });
         } else {
             bool notify_disconnect = false;
@@ -6120,6 +6818,8 @@ void Room::UpdateParticipants(
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::shared_ptr<SignalClient> signal_snapshot;
     std::vector<TrackKey> removed_track_keys;
+    std::vector<std::string> removed_video_telemetry_keys;
+    std::vector<std::string> removed_audio_telemetry_keys;
     std::vector<std::shared_ptr<Track>> removed_tracks;
 
     {
@@ -6179,10 +6879,19 @@ void Room::UpdateParticipants(
                         const auto intent_key = MakeSubscriptionIntentKeyLocked(
                             it->second->sid(), it->second->identity(), sid);
                         subscription_intents_.erase(intent_key);
-                        pending_subscription_updates_.erase(intent_key);
+                        CancelPendingSubscriptionUpdateLocked(intent_key);
                         if (publication) {
                             if (const auto track = publication->track()) {
                                 removed_tracks.push_back(track);
+                                if (track->kind() == TrackKind::Video) {
+                                    removed_video_telemetry_keys.push_back(
+                                        RemoteVideoTelemetryKey(
+                                            it->second->sid(), sid));
+                                } else if (track->kind() == TrackKind::Audio) {
+                                    removed_audio_telemetry_keys.push_back(
+                                        RemoteAudioTelemetryKey(
+                                            it->second->sid(), sid));
+                                }
                             }
                             const auto track_membership =
                                 track_memberships_.find(publication.get());
@@ -6305,8 +7014,17 @@ void Room::UpdateParticipants(
                         const auto intent_key = MakeSubscriptionIntentKeyLocked(
                             remote->sid(), remote->identity(), sid);
                         subscription_intents_.erase(intent_key);
-                        pending_subscription_updates_.erase(intent_key);
+                        CancelPendingSubscriptionUpdateLocked(intent_key);
                         if (pub && pub->track()) removed_tracks.push_back(pub->track());
+                        if (pub && pub->track() &&
+                            pub->track()->kind() == TrackKind::Video) {
+                            removed_video_telemetry_keys.push_back(
+                                RemoteVideoTelemetryKey(remote->sid(), sid));
+                        } else if (pub && pub->track() &&
+                                   pub->track()->kind() == TrackKind::Audio) {
+                            removed_audio_telemetry_keys.push_back(
+                                RemoteAudioTelemetryKey(remote->sid(), sid));
+                        }
                         if (const auto remote_publication =
                                 std::dynamic_pointer_cast<RemoteTrackPublication>(pub)) {
                             const auto current =
@@ -6340,6 +7058,35 @@ void Room::UpdateParticipants(
         }
     }
 
+    if (const auto telemetry_owner = session_telemetry_.lock()) {
+        for (const auto& key : removed_video_telemetry_keys) {
+            telemetry_owner->SetRemoteVideoExpected(
+                key,
+                false,
+                telemetry::MediaExpectationReason::PublicationEnded);
+        }
+        for (const auto& key : removed_audio_telemetry_keys) {
+            telemetry_owner->SetRemoteAudioExpected(
+                key,
+                false,
+                telemetry::MediaExpectationReason::PublicationEnded);
+        }
+        for (const auto& change : changed_mute_events) {
+            if (!change.publication || !change.publication->track()) {
+                continue;
+            }
+            const auto snapshot = change.publication->SnapshotState();
+            const auto track = change.publication->track();
+            SetRemoteMediaExpected(
+                telemetry_owner,
+                track->kind(),
+                change.participant->sid(), change.publication->sid(),
+                IsRemoteMediaExpected(snapshot),
+                change.muted
+                    ? telemetry::MediaExpectationReason::Muted
+                    : telemetry::MediaExpectationReason::Unmuted);
+        }
+    }
     DetachRemoteTrackSinks(TakeRemoteTrackSinksForTrackKeys(removed_track_keys));
     RemoveRemoteMediaTrackReferences(removed_tracks);
 
@@ -6484,6 +7231,19 @@ void Room::UpdateTrackMute(
     }
 
     if (target_participant && target_pub) {
+        if (target_participant != local_participant_ && target_pub->track()) {
+            const auto snapshot = target_pub->SnapshotState();
+            if (const auto telemetry_owner = session_telemetry_.lock()) {
+                SetRemoteMediaExpected(
+                    telemetry_owner,
+                    snapshot.kind,
+                    target_participant->sid(), target_pub->sid(),
+                    IsRemoteMediaExpected(snapshot),
+                    mute.muted()
+                        ? telemetry::MediaExpectationReason::Muted
+                        : telemetry::MediaExpectationReason::Unmuted);
+            }
+        }
         for (const auto& listener : listeners_snapshot) {
             DeliverListener({event_generation}, listener, [&](RoomListener& target) {
                 target.OnTrackMuted(target_participant, target_pub, mute.muted());
@@ -7318,7 +8078,13 @@ proto::SyncState Room::BuildSyncState(SubscriptionSyncSnapshot* snapshot) const 
     return state;
 }
 
-asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
+asio::awaitable<void> Room::AttemptReconnect(
+    uint64_t owner_generation,
+    std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner,
+    std::string reconnect_episode_id) {
+    TelemetryOperationSpan reconnect_episode(
+        telemetry_owner, telemetry::OperationKind::ReconnectEpisode,
+        std::move(reconnect_episode_id), true);
     std::string reconnect_url;
     std::string reconnect_token;
     SignalOptions reconnect_options;
@@ -7389,6 +8155,8 @@ asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
         const auto attempt_budget = std::min(
             operation_timeouts_.reconnect_attempt, remaining_total);
         const auto attempt_deadline = std::chrono::steady_clock::now() + attempt_budget;
+        TelemetryOperationSpan reconnect_attempt(
+            telemetry_owner, telemetry::OperationKind::ReconnectAttempt);
 
         if (!full_restart) {
             try {
@@ -7492,6 +8260,8 @@ asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
                     reconnected_delivery.listeners = listeners_;
                 }
                 DeliverLifecycleListenerEvent(std::move(reconnected_delivery));
+                reconnect_attempt.Finish(telemetry::OperationOutcome::Success);
+                reconnect_episode.Finish(telemetry::OperationOutcome::Success);
                 co_return;
             } catch (const std::exception& error) {
                 last_error = error.what();
@@ -7700,8 +8470,11 @@ asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
                     reconnected_delivery.listeners = listeners;
                 }
                 DeliverLifecycleListenerEvent(std::move(reconnected_delivery));
+                reconnect_attempt.Finish(telemetry::OperationOutcome::Success);
+                reconnect_episode.Finish(telemetry::OperationOutcome::Success);
                 co_return;
             } catch (const std::exception& error) {
+                const auto operation_outcome = TelemetryOutcome(std::current_exception());
                 last_error = error.what();
                 Log("WARNING", "FULL_RESTART_FAILED",
                     secure_log::ExceptionSummary("full_restart"));
@@ -7735,6 +8508,7 @@ asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
                     co_return;
                 }
                 suppress_next_connected_event_ = false;
+                reconnect_attempt.Finish(operation_outcome);
             }
         }
     }
@@ -7836,6 +8610,10 @@ asio::awaitable<void> Room::AttemptReconnect(uint64_t owner_generation) {
     delivery.detail = "Reconnect failed: " + last_error;
     delivery.listeners = std::move(listeners_snapshot);
     DeliverLifecycleListenerEvent(std::move(delivery));
+    reconnect_episode.Finish(
+        std::chrono::steady_clock::now() >= reconnect_deadline
+            ? telemetry::OperationOutcome::Timeout
+            : telemetry::OperationOutcome::Failure);
 }
 
 void Room::UpdateRoomInfo(const proto::Room& room, uint64_t event_generation) {
@@ -8012,6 +8790,20 @@ void Room::UpdateTrackStreamStates(
     }
 
     for (const auto& change : changes) {
+        if (change.publication && change.publication->track() &&
+            change.participant != local_participant_) {
+            const auto snapshot = change.publication->SnapshotState();
+            if (const auto telemetry_owner = session_telemetry_.lock()) {
+                SetRemoteMediaExpected(
+                    telemetry_owner,
+                    snapshot.kind,
+                    change.participant->sid(), change.publication->sid(),
+                    IsRemoteMediaExpected(snapshot),
+                    change.state == TrackPublication::StreamState::Paused
+                        ? telemetry::MediaExpectationReason::StreamPaused
+                        : telemetry::MediaExpectationReason::StreamActive);
+            }
+        }
         for (const auto& listener : listeners_snapshot) {
             DeliverListener({event_generation}, listener, [&](RoomListener& target) {
                 target.OnTrackStreamStateChanged(change.participant,
@@ -8069,6 +8861,20 @@ void Room::UpdateTrackSubscriptionPermission(
         listeners_snapshot = listeners_;
     }
 
+    if (participant && participant != local_participant_ && publication &&
+        publication->track()) {
+        const auto snapshot = publication->SnapshotState();
+        if (const auto telemetry_owner = session_telemetry_.lock()) {
+            SetRemoteMediaExpected(
+                telemetry_owner,
+                snapshot.kind,
+                participant->sid(), publication->sid(),
+                IsRemoteMediaExpected(snapshot),
+                permission.allowed
+                    ? telemetry::MediaExpectationReason::PermissionAllowed
+                    : telemetry::MediaExpectationReason::PermissionDenied);
+        }
+    }
     for (const auto& listener : listeners_snapshot) {
         DeliverListener({event_generation}, listener, [&](RoomListener& target) {
             target.OnTrackSubscriptionPermissionChanged(permission,
@@ -8119,8 +8925,16 @@ asio::awaitable<void> Room::RepublishLocalTracks(
             std::lock_guard lock(room_mutex_);
             if (!IsNativeGenerationCurrentLocked(generation) ||
                 !reconnect_active_ || reconnect_disabled_) co_return;
+            reconnect_republish_tracks_.insert(record.track.get());
         }
-        auto new_pub = co_await local->PublishTrackAsync(record.track);
+        std::shared_ptr<TrackPublication> new_pub;
+        try {
+            new_pub = co_await local->PublishTrackAsync(record.track);
+        } catch (...) {
+            std::lock_guard lock(room_mutex_);
+            reconnect_republish_tracks_.erase(record.track.get());
+            throw;
+        }
         DeliverRepublishedTrack(generation, record.previous_sid, std::move(new_pub));
     }
 }
@@ -8219,32 +9033,47 @@ namespace {
 
 void AppendStatsReport(RoomStatsReport& room_report,
                        const StatsReport& stats,
-                       bool publisher) {
+                       bool publisher_role,
+                       bool subscriber_role) {
     for (const auto& candidate_pair : stats.candidate_pairs) {
         if (!candidate_pair.current_pair) {
             continue;
         }
-        if (publisher) {
+        if (publisher_role) {
             room_report.publisher_rtt_ms =
                 candidate_pair.current_round_trip_time * 1000.0;
             room_report.available_outgoing_bitrate =
                 candidate_pair.available_outgoing_bitrate;
-        } else {
+        }
+        if (subscriber_role) {
             room_report.subscriber_rtt_ms =
                 candidate_pair.current_round_trip_time * 1000.0;
         }
     }
 
-    if (publisher) {
-        for (const auto& outbound : stats.outbound_rtp) {
-            room_report.total_bytes_sent += outbound.bytes_sent;
-        }
-    } else {
-        for (const auto& inbound : stats.inbound_rtp) {
-            room_report.total_bytes_received += inbound.bytes_received;
-        }
+    for (const auto& outbound : stats.outbound_rtp) {
+        room_report.total_bytes_sent += outbound.bytes_sent;
+    }
+    for (const auto& inbound : stats.inbound_rtp) {
+        room_report.total_bytes_received += inbound.bytes_received;
     }
     room_report.reports.push_back(stats);
+}
+
+void CountStatsResult(RoomStatsReport& room_report,
+                      RtcStatsCollectionStatus status) {
+    switch (status) {
+    case RtcStatsCollectionStatus::Success:
+        ++room_report.successful_peer_connection_count;
+        break;
+    case RtcStatsCollectionStatus::Timeout:
+        ++room_report.timed_out_peer_connection_count;
+        break;
+    case RtcStatsCollectionStatus::Rejected:
+    case RtcStatsCollectionStatus::Failed:
+        ++room_report.rejected_peer_connection_count;
+        break;
+    }
 }
 
 } // namespace
@@ -8263,32 +9092,48 @@ RoomStatsReport Room::GetStatsSync() {
         sub_pc = subscriber_pc_;
     }
 
-    if (pub_pc) {
+    const auto collect = [&room_report](
+        const webrtc::scoped_refptr<webrtc::PeerConnectionInterface>& peer,
+        bool publisher_role,
+        bool subscriber_role) {
+        if (!peer) return;
+        ++room_report.actual_peer_connection_count;
         auto state = std::make_shared<RtcStatsState>();
-        if (RequestRtcStats(pub_pc, state)) {
+        if (RequestRtcStats(peer, state)) {
             std::unique_lock<std::mutex> lock(state->mutex);
             if (state->cv.wait_for(lock, std::chrono::milliseconds(1500), [&]() { return state->done; })) {
-                AppendStatsReport(room_report, state->report, /*publisher=*/true);
+                const auto status = state->status;
+                const auto report = state->report;
+                lock.unlock();
+                CountStatsResult(room_report, status);
+                if (status == RtcStatsCollectionStatus::Success) {
+                    AppendStatsReport(
+                        room_report, report, publisher_role, subscriber_role);
+                }
+            } else {
+                state->done = true;
+                state->timed_out = true;
+                state->status = RtcStatsCollectionStatus::Timeout;
+                lock.unlock();
+                CountStatsResult(room_report, RtcStatsCollectionStatus::Timeout);
             }
-            state->done = true;
+        } else {
+            CountStatsResult(room_report, RtcStatsCollectionStatus::Rejected);
         }
-    }
+    };
 
-    if (sub_pc) {
-        auto state = std::make_shared<RtcStatsState>();
-        if (RequestRtcStats(sub_pc, state)) {
-            std::unique_lock<std::mutex> lock(state->mutex);
-            if (state->cv.wait_for(lock, std::chrono::milliseconds(1500), [&]() { return state->done; })) {
-                AppendStatsReport(room_report, state->report, /*publisher=*/false);
-            }
-            state->done = true;
-        }
+    if (pub_pc && pub_pc.get() == sub_pc.get()) {
+        collect(pub_pc, true, true);
+    } else {
+        collect(pub_pc, true, false);
+        collect(sub_pc, false, true);
     }
 
     return room_report;
 }
 
-asio::awaitable<RoomStatsReport> Room::GetStats() {
+asio::awaitable<RoomStatsReport> Room::GetStats(
+    std::function<void()> late_completion) {
     RoomStatsReport room_report;
     room_report.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
@@ -8301,22 +9146,52 @@ asio::awaitable<RoomStatsReport> Room::GetStats() {
         subscriber = subscriber_pc_;
     }
 
-    using namespace asio::experimental::awaitable_operators;
-    auto [publisher_stats, subscriber_stats] = co_await (
-        CollectRtcStats(publisher, executor_) &&
-        CollectRtcStats(subscriber, executor_));
+    const auto append = [&room_report](RtcStatsCollectionResult result,
+                                      bool publisher_role,
+                                      bool subscriber_role) {
+        CountStatsResult(room_report, result.status);
+        if (result.status == RtcStatsCollectionStatus::Success && result.report) {
+            AppendStatsReport(
+                room_report, *result.report, publisher_role, subscriber_role);
+        }
+    };
 
-    if (publisher_stats) {
-        AppendStatsReport(room_report, *publisher_stats, /*publisher=*/true);
-    }
-    if (subscriber_stats) {
-        AppendStatsReport(room_report, *subscriber_stats, /*publisher=*/false);
+    if (publisher && publisher.get() == subscriber.get()) {
+        room_report.actual_peer_connection_count = 1;
+        append(co_await CollectRtcStatsDetailed(
+                   publisher, executor_, std::chrono::milliseconds(1500),
+                   std::move(late_completion)),
+               true, true);
+    } else if (publisher && subscriber) {
+        room_report.actual_peer_connection_count = 2;
+        using namespace asio::experimental::awaitable_operators;
+        auto [publisher_result, subscriber_result] = co_await (
+            CollectRtcStatsDetailed(
+                publisher, executor_, std::chrono::milliseconds(1500), late_completion) &&
+            CollectRtcStatsDetailed(
+                subscriber, executor_, std::chrono::milliseconds(1500), late_completion));
+        append(std::move(publisher_result), true, false);
+        append(std::move(subscriber_result), false, true);
+    } else if (publisher) {
+        room_report.actual_peer_connection_count = 1;
+        append(co_await CollectRtcStatsDetailed(
+                   publisher, executor_, std::chrono::milliseconds(1500),
+                   std::move(late_completion)),
+               true, false);
+    } else if (subscriber) {
+        room_report.actual_peer_connection_count = 1;
+        append(co_await CollectRtcStatsDetailed(
+                   subscriber, executor_, std::chrono::milliseconds(1500),
+                   std::move(late_completion)),
+               false, true);
     }
     co_return room_report;
 }
 
 void Room::SetParticipantVolume(const std::string& identity_or_sid, double volume) {
     std::string changed_identity;
+    std::vector<std::pair<std::shared_ptr<Participant>,
+                          std::shared_ptr<TrackPublication>>> changed;
     {
         std::lock_guard lock(room_mutex_);
         for (auto& [sid, p] : remote_participants_) {
@@ -8325,9 +9200,22 @@ void Room::SetParticipantVolume(const std::string& identity_or_sid, double volum
                     if (pub && pub->track() && pub->track()->kind() == TrackKind::Audio) {
                         pub->track()->set_volume(volume);
                         changed_identity = p->identity();
+                        changed.emplace_back(p, pub);
                     }
                 }
             }
+        }
+    }
+    if (const auto telemetry_owner = session_telemetry_.lock()) {
+        for (const auto& [participant, publication] : changed) {
+            const auto snapshot = publication->SnapshotState();
+            SetRemoteMediaExpected(
+                telemetry_owner, TrackKind::Audio,
+                participant->sid(), publication->sid(),
+                IsRemoteMediaExpected(snapshot),
+                volume > 0.001
+                    ? telemetry::MediaExpectationReason::VolumeAudible
+                    : telemetry::MediaExpectationReason::VolumeZero);
         }
     }
     if (!changed_identity.empty()) {
@@ -8337,6 +9225,8 @@ void Room::SetParticipantVolume(const std::string& identity_or_sid, double volum
 
 void Room::SetParticipantMuted(const std::string& identity_or_sid, bool muted) {
     std::string changed_identity;
+    std::vector<std::pair<std::shared_ptr<Participant>,
+                          std::shared_ptr<TrackPublication>>> changed;
     {
         std::lock_guard lock(room_mutex_);
         for (auto& [sid, p] : remote_participants_) {
@@ -8345,9 +9235,21 @@ void Room::SetParticipantMuted(const std::string& identity_or_sid, bool muted) {
                     if (pub && pub->track() && pub->track()->kind() == TrackKind::Audio) {
                         pub->track()->set_playout_muted(muted);
                         changed_identity = p->identity();
+                        changed.emplace_back(p, pub);
                     }
                 }
             }
+        }
+    }
+    if (const auto telemetry_owner = session_telemetry_.lock()) {
+        for (const auto& [participant, publication] : changed) {
+            const auto snapshot = publication->SnapshotState();
+            SetRemoteMediaExpected(
+                telemetry_owner, TrackKind::Audio,
+                participant->sid(), publication->sid(),
+                IsRemoteMediaExpected(snapshot),
+                muted ? telemetry::MediaExpectationReason::Muted
+                      : telemetry::MediaExpectationReason::Unmuted);
         }
     }
     if (!changed_identity.empty()) {
@@ -8356,6 +9258,8 @@ void Room::SetParticipantMuted(const std::string& identity_or_sid, bool muted) {
 }
 
 void Room::SetAudioOutputMuted(bool muted) {
+    std::vector<std::pair<std::shared_ptr<Participant>,
+                          std::shared_ptr<TrackPublication>>> changed;
     {
         std::lock_guard lock(room_mutex_);
         audio_output_muted_ = muted;
@@ -8363,8 +9267,20 @@ void Room::SetAudioOutputMuted(bool muted) {
             for (auto& [tsid, pub] : p->tracks()) {
                 if (pub && pub->track() && pub->track()->kind() == TrackKind::Audio) {
                     pub->track()->set_output_muted(muted);
+                    changed.emplace_back(p, pub);
                 }
             }
+        }
+    }
+    if (const auto telemetry_owner = session_telemetry_.lock()) {
+        for (const auto& [participant, publication] : changed) {
+            const auto snapshot = publication->SnapshotState();
+            SetRemoteMediaExpected(
+                telemetry_owner, TrackKind::Audio,
+                participant->sid(), publication->sid(),
+                IsRemoteMediaExpected(snapshot),
+                muted ? telemetry::MediaExpectationReason::OutputMuted
+                      : telemetry::MediaExpectationReason::OutputUnmuted);
         }
     }
     Log("MEDIA", "SPEAKER_MUTE", "Set room audio output mute=" + std::string(muted ? "true" : "false"));

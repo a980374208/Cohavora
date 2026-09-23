@@ -4,6 +4,8 @@
 #include <QtGui/QPainter>
 #include <QtCore/QThread>
 #include <algorithm>
+#include <chrono>
+#include <set>
 #include <utility>
 
 namespace livekit::render {
@@ -17,7 +19,12 @@ VideoCanvas::VideoCanvas(QWidget* parent)
     });
     fps_timer_->start();
 }
-VideoCanvas::~VideoCanvas() { stopRendering(); }
+VideoCanvas::~VideoCanvas() {
+    stopRendering();
+    for (const auto& [_, frame] : telemetry_frames_) {
+        frame->SetRenderExpected(false, RenderExpectationReason::BindingEnded);
+    }
+}
 void VideoCanvas::stopRendering() { fps_timer_->stop(); }
 void VideoCanvas::shutdownRenderer() {
     Q_ASSERT(QThread::currentThread() == thread());
@@ -33,11 +40,26 @@ void VideoCanvas::shutdownRenderer() {
 void VideoCanvas::updateFrame(const std::string& key, VideoRenderFrame::Ptr frame) {
     Q_ASSERT(QThread::currentThread() == thread());
     if (!frame || key.empty() || renderer_unavailable_emitted_) return;
+    const auto previous = telemetry_frames_.find(key);
+    if (previous != telemetry_frames_.end() && previous->second != frame &&
+        !previous->second->renderMetadata().same_binding_as(
+            frame->renderMetadata())) {
+        previous->second->SetRenderExpected(
+            false, RenderExpectationReason::BindingEnded);
+    }
+    telemetry_frames_[key] = frame;
     submitFrame(key, std::move(frame));
+    updateRenderExpectations();
     frame_dirty_.store(true, std::memory_order_release);
 }
 void VideoCanvas::removeUser(const std::string& key) {
     Q_ASSERT(QThread::currentThread() == thread());
+    if (const auto frame = telemetry_frames_.find(key);
+        frame != telemetry_frames_.end()) {
+        frame->second->SetRenderExpected(
+            false, RenderExpectationReason::BindingEnded);
+        telemetry_frames_.erase(frame);
+    }
     removeFrame(key);
     removeDecorationTexture(key);
     decorations_.erase(key);
@@ -45,6 +67,10 @@ void VideoCanvas::removeUser(const std::string& key) {
 }
 void VideoCanvas::clearUsers() {
     Q_ASSERT(QThread::currentThread() == thread());
+    for (const auto& [_, frame] : telemetry_frames_) {
+        frame->SetRenderExpected(false, RenderExpectationReason::BindingEnded);
+    }
+    telemetry_frames_.clear();
     clearBackend();
     decorations_.clear(); hovered_tile_.clear(); pressed_pin_.clear();
     frame_dirty_.store(true, std::memory_order_release);
@@ -56,6 +82,7 @@ void VideoCanvas::notifyRendererUnavailable() {
             RenderFallbackReason::GpuRuntimeFailed);
     }
     renderer_unavailable_emitted_ = true;
+    updateRenderExpectations();
     stopRendering();
     emit rendererUnavailable();
 }
@@ -84,10 +111,12 @@ void VideoCanvas::markRendererFailure(RenderGpuFailure failure, RenderFallbackRe
 }
 void VideoCanvas::render() {
     Q_ASSERT(QThread::currentThread() == thread());
+    updateRenderExpectations();
     if (renderer_unavailable_emitted_ || !isVisible() || width() <= 0 || height() <= 0) return;
     QSize physical;
     if (!beginFrame(physical)) { notifyRendererUnavailable(); return; }
     if (physical.isEmpty()) return;
+    std::vector<VideoRenderFrame::Ptr> submitted_frames;
     for (const auto& logical : tiles_) {
         auto tile = ScaleVideoTile(logical, width(), height(), physical.width(), physical.height());
         if (tile.width <= 0 || tile.height <= 0) continue;
@@ -100,7 +129,12 @@ void VideoCanvas::render() {
             content.width = std::max(1, content.width - 4);
             content.height = std::max(1, content.height - 4);
             drawSolid(content, 0, 0, 0);
-            drawVideo(FitVideoTile(content, geometry));
+            if (drawVideo(FitVideoTile(content, geometry))) {
+                if (const auto frame = telemetry_frames_.find(tile.identity);
+                    frame != telemetry_frames_.end() && frame->second) {
+                    submitted_frames.push_back(frame->second);
+                }
+            }
         }
         auto decoration = decorations_.find(tile.identity);
         if (decoration != decorations_.end() && decoration->second.painter) {
@@ -127,7 +161,16 @@ void VideoCanvas::render() {
         const auto tile = ScaleVideoTile(logical, width(), height(), physical.width(), physical.height());
         if (!drawDecoration(tile, stage_image_)) { notifyRendererUnavailable(); return; }
     }
-    if (!endFrame()) notifyRendererUnavailable();
+    if (!endFrame()) {
+        notifyRendererUnavailable();
+        return;
+    }
+    if (!reportsSubmitAsynchronously()) {
+        const auto submitted_at = std::chrono::steady_clock::now();
+        for (const auto& frame : submitted_frames) {
+            frame->NotifyRendered(submitMeasurementPoint(), submitted_at);
+        }
+    }
 }
 void VideoCanvas::setStageOverlay(QWidget* widget) {
     if (stage_overlay_) stage_overlay_->removeEventFilter(this);
@@ -146,6 +189,43 @@ bool VideoCanvas::eventFilter(QObject* object, QEvent* event) {
     }
     return QWidget::eventFilter(object, event);
 }
+
+bool VideoCanvas::event(QEvent* event) {
+    const bool result = QWidget::event(event);
+    switch (event->type()) {
+    case QEvent::Show:
+    case QEvent::Hide:
+    case QEvent::WindowStateChange:
+    case QEvent::ParentChange:
+        updateRenderExpectations();
+        break;
+    default:
+        break;
+    }
+    return result;
+}
+
+void VideoCanvas::updateRenderExpectations() {
+    const bool minimized = window() && window()->isMinimized();
+    const bool surface_visible = isVisible() && !minimized &&
+        width() > 0 && height() > 0 && !renderer_unavailable_emitted_;
+    std::set<std::string> visible_keys;
+    if (surface_visible) {
+        for (const auto& tile : tiles_) {
+            if (tile.hasVideo && tile.width > 0 && tile.height > 0) {
+                visible_keys.insert(tile.identity);
+            }
+        }
+    }
+    for (const auto& [key, frame] : telemetry_frames_) {
+        const bool expected = visible_keys.contains(key);
+        frame->SetRenderExpected(
+            expected,
+            expected ? RenderExpectationReason::SurfaceVisible
+                     : minimized ? RenderExpectationReason::WindowMinimized
+                                 : RenderExpectationReason::SurfaceHidden);
+    }
+}
 void VideoCanvas::setTilesLayout(const std::vector<VideoTileRect>& tiles) {
     Q_ASSERT(QThread::currentThread() == thread());
     tiles_ = tiles;
@@ -159,6 +239,7 @@ void VideoCanvas::setTilesLayout(const std::vector<VideoTileRect>& tiles) {
     pressed_pin_.clear();
     hovered_tile_ = underMouse() ? hitTest(mapFromGlobal(QCursor::pos())) : std::string();
     frame_dirty_.store(true, std::memory_order_release);
+    updateRenderExpectations();
 }
 
 void VideoCanvas::setTileDecoration(const std::string& identity,

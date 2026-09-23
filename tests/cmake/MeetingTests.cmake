@@ -143,6 +143,8 @@ set_tests_properties(http_owner_remediation_test PROPERTIES TIMEOUT 60)
 add_executable(test_meeting_session_runtime
     ${LIVEKIT_TEST_SOURCE_DIR}/remediation/restored/test_meeting_session_runtime.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/meeting_session_runtime.h
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/telemetry/session_telemetry.cpp
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/telemetry/session_telemetry.h
 )
 target_include_directories(test_meeting_session_runtime BEFORE PRIVATE
     ${LIVEKIT_PROJECT_SOURCE_DIR}
@@ -183,6 +185,7 @@ set_target_properties(test_meeting_session_runtime PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded"
 )
 add_test(NAME meeting_session_runtime_test COMMAND test_meeting_session_runtime)
+set_tests_properties(meeting_session_runtime_test PROPERTIES LABELS "TELEMETRY_S1")
 
 # IDA2-P0-001: immutable participant snapshots, incarnation tickets, ordered
 # Room delivery, and delayed Qt projection rejection for retired instances.
@@ -288,6 +291,28 @@ add_test(NAME meeting_local_media_state_test
     COMMAND test_participant_window_remediation --local-media-state)
 set_tests_properties(meeting_local_media_state_test PROPERTIES
     TIMEOUT 30 LABELS "CORE_REGRESSION")
+add_test(NAME meeting_telemetry_ui_test
+    COMMAND test_participant_window_remediation --telemetry-ui)
+set_tests_properties(meeting_telemetry_ui_test PROPERTIES
+    TIMEOUT 30 LABELS "TELEMETRY_S1;TELEMETRY_S7")
+add_test(NAME meeting_telemetry_s7_ui_100_test
+    COMMAND test_participant_window_remediation --telemetry-s7-acceptance --scale-100)
+add_test(NAME meeting_telemetry_s7_ui_150_test
+    COMMAND test_participant_window_remediation --telemetry-s7-acceptance --scale-150)
+add_test(NAME meeting_telemetry_s7_ui_200_test
+    COMMAND test_participant_window_remediation --telemetry-s7-acceptance --scale-200)
+set_tests_properties(
+    meeting_telemetry_s7_ui_100_test
+    meeting_telemetry_s7_ui_150_test
+    meeting_telemetry_s7_ui_200_test
+    PROPERTIES
+        TIMEOUT 30
+        RUN_SERIAL TRUE
+        LABELS "TELEMETRY_S7_ACCEPTANCE")
+add_test(NAME meeting_subscription_telemetry_reconnect_test
+    COMMAND test_participant_window_remediation --subscription-telemetry-reconnect)
+set_tests_properties(meeting_subscription_telemetry_reconnect_test PROPERTIES
+    TIMEOUT 30 LABELS "TELEMETRY_S2")
 add_test(NAME meeting_moderation_contract_test
     COMMAND test_participant_window_remediation --moderation-contract)
 set_tests_properties(meeting_moderation_contract_test PROPERTIES

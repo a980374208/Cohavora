@@ -13,6 +13,27 @@
 #include "api/stats/rtcstats_objects.h"
 #include "api/notifier.h"
 
+namespace livekit {
+
+class RoomSinglePcTestAccess final {
+public:
+    static void Install(
+        Room &room,
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer) {
+        std::lock_guard lock(room.room_mutex_);
+        room.publisher_pc_ = peer;
+        room.subscriber_pc_ = std::move(peer);
+    }
+
+    static void Clear(Room &room) {
+        std::lock_guard lock(room.room_mutex_);
+        room.publisher_pc_ = nullptr;
+        room.subscriber_pc_ = nullptr;
+    }
+};
+
+} // namespace livekit
+
 namespace {
 
 using namespace std::chrono_literals;
@@ -98,6 +119,40 @@ void ParsedOutboundStatsDistinguishMissingZeroAndPositive() {
     TEST_CHECK(present_audio.packets_sent_available && present_audio.packets_sent == 0);
     TEST_CHECK(!present_audio.frames_encoded_available);
     TEST_CHECK(!present_audio.mid_available && !present_audio.rid_available);
+}
+
+void ParsedInboundFreezeFieldsPreserveAvailability() {
+    const auto timestamp = webrtc::Timestamp::Millis(2234);
+    auto native = webrtc::RTCStatsReport::Create(timestamp);
+    native->AddStats(std::make_unique<webrtc::RTCInboundRtpStreamStats>(
+        "missing", timestamp));
+    auto present = std::make_unique<webrtc::RTCInboundRtpStreamStats>(
+        "video", timestamp);
+    present->kind = "video";
+    present->frames_decoded = 300;
+    present->frames_dropped = 4;
+    present->frame_width = 1280;
+    present->frame_height = 720;
+    present->frames_per_second = 29.5;
+    present->freeze_count = 2;
+    present->total_freezes_duration = 0.625;
+    present->total_decode_time = 0.75;
+    native->AddStats(std::move(present));
+
+    const auto parsed = livekit::ParseRtcStatsReport(*native);
+    TEST_CHECK(parsed.inbound_rtp.size() == 2);
+    const auto &missing = parsed.inbound_rtp[0];
+    const auto &video = parsed.inbound_rtp[1];
+    TEST_CHECK(!missing.kind_available);
+    TEST_CHECK(!missing.freeze_count_available);
+    TEST_CHECK(!missing.total_freezes_duration_available);
+    TEST_CHECK(video.kind_available && video.kind == "video");
+    TEST_CHECK(video.frames_decoded_available && video.frames_decoded == 300);
+    TEST_CHECK(video.frames_dropped_available && video.frames_dropped == 4);
+    TEST_CHECK(video.freeze_count_available && video.freeze_count == 2);
+    TEST_CHECK(video.total_freezes_duration_available &&
+               video.total_freezes_duration == 0.625);
+    TEST_CHECK(video.total_decode_time_available && video.total_decode_time == 0.75);
 }
 
 struct StatsPeerObserver final : webrtc::PeerConnectionObserver {
@@ -275,12 +330,16 @@ void TimedOutStatsSurviveQueuedCloseAndOwnerRelease() {
     StatsPeerFixture fixture;
     SignalingQueueGate gate;
     int completions = 0;
+    int late_completions = 0;
     asio::co_spawn(
         fixture.io,
-        livekit::CollectRtcStats(fixture.peer, fixture.io.get_executor(), 40ms),
-        [&](std::exception_ptr error, std::optional<livekit::StatsReport> report) {
+        livekit::CollectRtcStatsDetailed(
+            fixture.peer, fixture.io.get_executor(), 40ms,
+            [&late_completions] { ++late_completions; }),
+        [&](std::exception_ptr error, livekit::RtcStatsCollectionResult result) {
             TEST_CHECK(!error);
-            TEST_CHECK(!report.has_value());
+            TEST_CHECK(result.status == livekit::RtcStatsCollectionStatus::Timeout);
+            TEST_CHECK(!result.report.has_value());
             ++completions;
         });
     // The signaling task cannot run until ReleaseAndClose, so a null report
@@ -296,6 +355,50 @@ void TimedOutStatsSurviveQueuedCloseAndOwnerRelease() {
     fixture.io.restart();
     fixture.io.poll();
     TEST_CHECK(completions == 1);
+    TEST_CHECK(late_completions == 0);
+}
+
+void LateCallbackIsReportedOnceWithoutCompletingExpiredRequest() {
+    auto state = std::make_shared<livekit::RtcStatsState>();
+    int late_completions = 0;
+    {
+        std::lock_guard lock(state->mutex);
+        state->done = true;
+        state->timed_out = true;
+        state->status = livekit::RtcStatsCollectionStatus::Timeout;
+        state->late_completion = [&late_completions] { ++late_completions; };
+    }
+    auto bridge = livekit::RtcStatsCollectorBridge::Create(state);
+    bridge->OnStatsDelivered(nullptr);
+    bridge->OnStatsDelivered(nullptr);
+    TEST_CHECK(late_completions == 1);
+    TEST_CHECK(state->status == livekit::RtcStatsCollectionStatus::Timeout);
+    TEST_CHECK(!state->report.senders_available);
+}
+
+void SinglePcRoomStatsRequestIsDeduplicated() {
+    StatsPeerFixture fixture;
+    auto room = livekit::Room::Create(fixture.io.get_executor());
+    livekit::RoomSinglePcTestAccess::Install(*room, fixture.peer);
+
+    bool completed = false;
+    fixture.io.restart();
+    asio::co_spawn(
+        fixture.io,
+        room->GetStats(),
+        [&](std::exception_ptr error, livekit::RoomStatsReport report) {
+            TEST_CHECK(!error);
+            TEST_CHECK(report.actual_peer_connection_count == 1);
+            TEST_CHECK(report.successful_peer_connection_count == 1);
+            TEST_CHECK(report.timed_out_peer_connection_count == 0);
+            TEST_CHECK(report.rejected_peer_connection_count == 0);
+            TEST_CHECK(report.reports.size() == 1);
+            completed = true;
+        });
+    fixture.io.run();
+    TEST_CHECK(completed);
+    livekit::RoomSinglePcTestAccess::Clear(*room);
+    room.reset();
 }
 
 } // namespace
@@ -401,8 +504,11 @@ int main() {
     RealPeerStatsPreservePeerAndCompleteOnce();
     std::cout << "  -> [Test 4 PASSED] Real GetStats preserves PC ownership and completes once!\n\n";
     TimedOutStatsSurviveQueuedCloseAndOwnerRelease();
+    LateCallbackIsReportedOnceWithoutCompletingExpiredRequest();
+    SinglePcRoomStatsRequestIsDeduplicated();
     std::cout << "  -> [Test 5 PASSED] Timed-out stats safely release a closed peer after queue delay!\n\n";
     ParsedOutboundStatsDistinguishMissingZeroAndPositive();
+    ParsedInboundFreezeFieldsPreserveAvailability();
     std::cout << "  -> [Test 6 PASSED] Native outbound stats distinguish missing fields, zero and positive counters!\n\n";
     SenderDiagnosticsRemainPlainDataAndReflectTrackState();
     std::cout << "  -> [Test 7 PASSED] Sender snapshots preserve direction and track enabled state!\n\n";

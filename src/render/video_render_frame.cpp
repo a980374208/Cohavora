@@ -103,4 +103,28 @@ VideoRenderFrame::Ptr VideoRenderFrame::CopyFrom(const VideoFrame& frame, const 
 RenderColorSpace VideoRenderFrame::colorSpace() const noexcept {
     return {static_cast<RenderColorMatrix>(view_.color_matrix), static_cast<RenderColorRange>(view_.color_range)};
 }
+
+const RenderFrameMetadata& VideoRenderFrame::renderMetadata() const noexcept {
+    static const RenderFrameMetadata empty;
+    return i420_ ? i420_->render_metadata() : empty;
+}
+
+void VideoRenderFrame::SetRenderExpected(
+        bool expected,
+        RenderExpectationReason reason,
+        std::chrono::steady_clock::time_point source_time) const {
+    const auto& metadata = renderMetadata();
+    if (metadata.valid()) {
+        metadata.observer->SetExpected(expected, reason, source_time);
+    }
+}
+
+void VideoRenderFrame::NotifyRendered(
+        const char* measurement_point,
+        std::chrono::steady_clock::time_point source_time) const {
+    const auto& metadata = renderMetadata();
+    if (metadata.valid() && measurement_point && *measurement_point) {
+        metadata.observer->OnSubmitted(metadata, measurement_point, source_time);
+    }
+}
 } // namespace livekit::render

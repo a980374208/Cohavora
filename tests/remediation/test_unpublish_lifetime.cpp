@@ -19,6 +19,7 @@
 #include "operation.h"
 #include "participant.h"
 #include "room.h"
+#include "session_telemetry.h"
 #include "tests/support/test_check.h"
 
 namespace unpublish_test {
@@ -192,6 +193,9 @@ struct Listener : livekit::RoomListener {
 struct Fixture {
     explicit Fixture(std::string target = "TR_LOCAL", bool inject_boundaries = true)
         : sid(std::move(target)),
+          telemetry_strand(io.get_executor()),
+          telemetry(std::make_shared<livekit::telemetry::SessionTelemetry>(
+              telemetry_strand, 77)),
           room(livekit::Room::Create(io.get_executor())),
           local(std::make_shared<livekit::LocalParticipant>(
               "PA_LOCAL", "local", [](const livekit::proto::SignalRequest&) {})),
@@ -206,6 +210,7 @@ struct Fixture {
               kRemoteSid, "remote")),
           boundaries(std::make_shared<unpublish_test::Boundaries>(io.get_executor())),
           listener(std::make_shared<Listener>()) {
+        room->SetSessionTelemetry(telemetry);
         local->add_publication(publication);
         local->add_publication(sentinel);
         remote->add_publication(remote_publication);
@@ -238,6 +243,8 @@ struct Fixture {
 
     std::string sid;
     asio::io_context io;
+    livekit::telemetry::SessionTelemetry::Strand telemetry_strand;
+    std::shared_ptr<livekit::telemetry::SessionTelemetry> telemetry;
     std::shared_ptr<livekit::Room> room;
     std::shared_ptr<livekit::LocalParticipant> local;
     std::shared_ptr<livekit::RemoteParticipant> remote;
@@ -248,6 +255,22 @@ struct Fixture {
     std::shared_ptr<unpublish_test::Boundaries> boundaries;
     std::shared_ptr<Listener> listener;
 };
+
+livekit::telemetry::OperationSummary UnpublishSummary(Fixture& fixture) {
+    livekit::telemetry::SessionTelemetry::SnapshotPtr snapshot;
+    asio::post(fixture.telemetry_strand, [&fixture, &snapshot] {
+        snapshot = fixture.telemetry->SnapshotOnStrand();
+    });
+    fixture.pump();
+    TEST_CHECK(snapshot);
+    const auto found = std::find_if(
+        snapshot->operation_summaries.begin(), snapshot->operation_summaries.end(),
+        [](const auto& summary) {
+            return summary.kind == livekit::telemetry::OperationKind::Unpublish;
+        });
+    TEST_CHECK(found != snapshot->operation_summaries.end());
+    return *found;
+}
 
 // Ordinary forwarding function, deliberately no early copy: tests-first must
 // expose the real public coroutine signatures rather than fix them in a wrapper.
@@ -344,6 +367,11 @@ void FinishSuccess(Fixture& fixture, PublicationFuture& result, std::string* mut
     TEST_CHECK(state.recovery_sids == std::vector<std::string>{kSentinelSid});
     fixture.pump();
     TEST_CHECK(fixture.listener->calls == 1);
+    const auto telemetry = UnpublishSummary(fixture);
+    TEST_CHECK(telemetry.started == 1 && telemetry.terminal == 1);
+    TEST_CHECK(telemetry.success == 1 && telemetry.failure == 0 &&
+               telemetry.timeout == 0 && telemetry.cancelled == 0 &&
+               telemetry.inflight == 0);
 }
 
 void TestLiveMutation(Entry entry) {
@@ -466,6 +494,10 @@ void TestBoundaryFailures() {
         const auto state = Access::Inspect(*fixture.room, fixture.sid);
         TEST_CHECK(state.pending_count == 1 && state.has_pending && state.sender_removed);
         TEST_CHECK(state.pending_publication == fixture.publication);
+        const auto telemetry = UnpublishSummary(fixture);
+        TEST_CHECK(telemetry.started == 1 && telemetry.terminal == 1);
+        TEST_CHECK(telemetry.failure == 1 && telemetry.success == 0 &&
+                   telemetry.inflight == 0);
     }
 }
 

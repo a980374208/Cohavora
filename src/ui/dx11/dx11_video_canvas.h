@@ -24,9 +24,12 @@ protected:
     render::VideoFrameGeometry frameGeometry(const std::string&) const override;
     bool beginFrame(QSize&) override;
     void drawSolid(const render::VideoTileRect&, float, float, float) override;
-    void drawVideo(const render::VideoTileRect&) override;
+    bool drawVideo(const render::VideoTileRect&) override;
     bool drawDecoration(const render::VideoTileRect&, const QImage&) override;
     bool endFrame() override;
+    const char* submitMeasurementPoint() const override {
+        return "legacy_dx11_present";
+    }
 private:
     friend class ::ParticipantWindowTestAccess;
     bool EnsureRenderer();

@@ -27,9 +27,10 @@ protected:
     VideoFrameGeometry frameGeometry(const std::string&) const override;
     bool beginFrame(QSize&) override;
     void drawSolid(const VideoTileRect&, float, float, float) override;
-    void drawVideo(const VideoTileRect&) override;
+    bool drawVideo(const VideoTileRect&) override;
     bool drawDecoration(const VideoTileRect&, const QImage&) override;
     bool endFrame() override;
+    bool reportsSubmitAsynchronously() const override { return true; }
 private:
     friend class ::ParticipantWindowTestAccess;
     class Surface;

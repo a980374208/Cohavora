@@ -25,7 +25,10 @@ public:
         Gpu,
     };
 
-    using FrameReadyCallback = std::function<void(const std::string& identity, const QImage& image)>;
+    using FrameReadyCallback = std::function<void(
+        const std::string& identity,
+        const QImage& image,
+        VideoRenderFrame::Ptr frame)>;
     using GpuFrameReadyCallback = std::function<void(const std::string& render_key, VideoRenderFrame::Ptr frame)>;
 
     // These counters are intended for UI diagnostics and stress-test assertions.

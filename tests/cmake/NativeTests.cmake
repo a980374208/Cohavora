@@ -98,6 +98,55 @@ target_link_libraries(test_stats_system PRIVATE
     cohavora_core
 )
 
+add_executable(test_session_telemetry
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_session_telemetry.cpp
+)
+target_include_directories(test_session_telemetry PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_session_telemetry PRIVATE
+    cohavora_core
+)
+add_test(NAME session_telemetry_test COMMAND test_session_telemetry)
+set_tests_properties(session_telemetry_test PROPERTIES
+    TIMEOUT 30
+    LABELS "TELEMETRY_S1;TELEMETRY_S6;TELEMETRY_S7")
+
+add_executable(test_stability_ledger
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_stability_ledger.cpp
+)
+target_include_directories(test_stability_ledger PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_stability_ledger PRIVATE
+    cohavora_core
+)
+add_test(NAME stability_ledger_test COMMAND test_stability_ledger)
+set_tests_properties(stability_ledger_test PROPERTIES
+    TIMEOUT 30
+    LABELS "TELEMETRY_S6;CORE_REGRESSION")
+
+add_executable(test_telemetry_report
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_telemetry_report.cpp
+)
+target_include_directories(test_telemetry_report PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_telemetry_report PRIVATE cohavora_core)
+add_test(NAME telemetry_report_test COMMAND test_telemetry_report)
+set_tests_properties(telemetry_report_test PROPERTIES
+    TIMEOUT 30
+    LABELS "TELEMETRY_S7;TELEMETRY_S7_ACCEPTANCE;CORE_REGRESSION;SECURITY_REGRESSION")
+
+# S0 telemetry capability probe: validates the packaged WebRTC stats ABI,
+# endpoint codec capabilities, and the frozen renderer completion boundary.
+# It is device-free and does not connect to an external LiveKit service.
+add_executable(test_telemetry_capability_probe
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_telemetry_capability_probe.cpp
+)
+target_include_directories(test_telemetry_capability_probe PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_telemetry_capability_probe PRIVATE
+    cohavora_core
+)
+add_test(NAME telemetry_capability_probe_test COMMAND test_telemetry_capability_probe)
+set_tests_properties(telemetry_capability_probe_test PROPERTIES
+    TIMEOUT 30
+    LABELS "TELEMETRY_S0")
+
 # Server room-state delta contract: room metadata, connection quality, stream
 # state, and subscription permissions must commit before listener delivery.
 add_executable(test_room_state_events

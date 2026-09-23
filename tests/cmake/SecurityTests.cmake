@@ -16,6 +16,8 @@ set(LIVEKIT_WINDOW_FIXTURE_SOURCES
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/camera_switch_completion_owner.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/meeting_room_window.h
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/meeting_room_window.cpp
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/telemetry_dialogs.h
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/telemetry_dialogs.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/meeting_log_console.h
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/meeting_log_console.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/audio_visualizer_widget.h
@@ -139,6 +141,7 @@ add_test(NAME stream_writer_lifetime_remediation_test COMMAND test_stream_writer
 add_test(NAME stream_delivery_remediation_test COMMAND test_stream_delivery_remediation)
 add_test(NAME media_streaming_test COMMAND test_media_streaming)
 add_test(NAME stats_system_test COMMAND test_stats_system)
+set_tests_properties(stats_system_test PROPERTIES LABELS "TELEMETRY_S1")
 add_test(NAME audio_playout_warmup_test COMMAND test_audio_playout_warmup)
 add_test(NAME simulcast_test COMMAND test_simulcast)
 add_test(NAME stress_lifecycle_test COMMAND test_stress_lifecycle)

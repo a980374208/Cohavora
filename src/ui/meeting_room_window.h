@@ -89,7 +89,7 @@ class VideoTileWidget : public Ui::RpWidget {
 public:
 	explicit VideoTileWidget(const QString &displayName, bool isLocal, QWidget *parent = nullptr,
 		bool isScreenShare = false);
-	~VideoTileWidget() override = default;
+	~VideoTileWidget() override;
 
 	void setDisplayName(const QString &name);
 	QString displayName() const { return _displayName; }
@@ -108,7 +108,9 @@ public:
 	bool isSpeaking() const { return _isSpeaking; }
 	float audioLevel() const { return _audioLevel; }
 
-	void setFrame(const QImage &image);
+	void setFrame(
+		const QImage &image,
+		livekit::render::VideoRenderFrame::Ptr renderFrame = {});
 
 	// 远端独立音量与静音管理
 	float remoteVolume() const { return _remoteVolume; }
@@ -128,7 +130,7 @@ public:
 	bool isPipMode() const { return _isPip; }
 
 	// DX11 硬件加速模式支持
-	void setHardwareCanvasMode(bool enabled) { _useHardwareCanvas = enabled; update(); }
+	void setHardwareCanvasMode(bool enabled);
 	bool isHardwareCanvasMode() const { return _useHardwareCanvas; }
 	// UI-thread-only decoration cache. Video pixels never pass through this image.
 	QImage hardwareDecoration(const QSize &pixels, bool hasFrame, bool hovered);
@@ -145,6 +147,9 @@ signals:
 protected:
 	void paintEvent(QPaintEvent *e) override;
 	void resizeEvent(QResizeEvent *e) override;
+	void showEvent(QShowEvent *e) override;
+	void hideEvent(QHideEvent *e) override;
+	void changeEvent(QEvent *e) override;
 	void mousePressEvent(QMouseEvent *e) override;
 	void mouseDoubleClickEvent(QMouseEvent *e) override;
 	void enterEventHook(QEnterEvent *e) override;
@@ -160,6 +165,7 @@ private:
 	void paintCard(QPainter &p, bool decorationOnly, bool hasFrame, bool hovered);
 	void invalidatePresentation();
 	void setupVolumeControls();
+	void updateRenderExpectation();
 
 	QString _identity;
 	QString _renderKey;
@@ -190,6 +196,7 @@ private:
 	AudioVisualizerWidget *_visualizer = nullptr;
 
 	QImage _currentFrame;
+	livekit::render::VideoRenderFrame::Ptr _currentRenderFrame;
 	std::mutex _frameMutex;
 	bool _hasLoggedFirstPaint = false;
 	QImage _hardwareDecoration;
@@ -211,6 +218,7 @@ public:
 	void updateDuration(int seconds);
 	void setActiveSpeaker(const QString &speakerName);
 	void setMeetingId(const QString &meetingId);
+	void setTelemetrySnapshot(const QVariantMap &snapshot);
 
 	rpl::producer<VideoViewMode> viewModeChanged() const { return _viewModeStream.events(); }
 	rpl::producer<> consoleClicked() const { return _consoleStream.events(); }
@@ -220,6 +228,7 @@ public:
 	rpl::producer<livekit::SimulateScenarioType> simulateScenarioRequested() const { return _simulateScenarioStream.events(); }
 
 	void showSimulateScenarioMenu(const QPoint &globalPos);
+	void showTelemetryMenu(const QPoint &globalPos);
 
 signals:
 	// Native child HWNDs (such as Dx11VideoCanvas) may prevent the top-level
@@ -235,18 +244,21 @@ protected:
 	void leaveEventHook(QEvent *e) override;
 
 private:
+	friend class ::ParticipantWindowTestAccess;
 	enum class HoverBtn {
-		None, Layout, Console, Simulate, Min, Max, Close
+		None, Quality, Layout, Console, Simulate, Min, Max, Close
 	};
 
 	HoverBtn _hoverBtn = HoverBtn::None;
 	int _durationSeconds = 0;
 	QString _speakerName;
 	QString _meetingId;
+	QVariantMap _telemetrySnapshot;
 	bool _copiedAnim = false;
 	VideoViewMode _currentViewMode = VideoViewMode::Grid;
 
 	QRect _layoutRect;
+	QRect _qualityRect;
 	QRect _consoleRect;
 	QRect _simulateRect;
 	QRect _minRect;
@@ -406,8 +418,13 @@ public:
 	void requestDefaultScreenShare();
 	~MeetingRoomWindow() override;
 
-	void receiveRemoteVideoFrame(const QImage &frame, const QString &user);
-	void receiveLocalVideoFrame(const QImage &frame);
+	void receiveRemoteVideoFrame(
+		const QImage &frame,
+		const QString &user,
+		livekit::render::VideoRenderFrame::Ptr renderFrame = {});
+	void receiveLocalVideoFrame(
+		const QImage &frame,
+		livekit::render::VideoRenderFrame::Ptr renderFrame = {});
 
 	void onRemoteParticipantJoined(const QString &identity, const QString &name = QString());
 	void onRemoteParticipantLeft(const QString &identity);
@@ -480,7 +497,10 @@ private:
 	void closeAnnotationOverlay();
 	void setAnnotationInteractionEnabled(bool enabled);
 	void tryActivateGpuBackend();
-	void receiveRenderedVideoFrame(const QImage&, const QString&);
+	void receiveRenderedVideoFrame(
+		const QImage&,
+		const QString&,
+		livekit::render::VideoRenderFrame::Ptr);
 	void receiveGpuVideoFrame(const std::string&, livekit::render::VideoRenderFrame::Ptr);
 	void fallBackToQtCpuBackend();
 	void syncVideoCanvasLayout(const std::vector<VideoTileWidget*> &tiles);
@@ -510,6 +530,7 @@ private:
 	void setupAudioPreferencesBinding(OpenMeeting::SessionManager &sessionManager);
 	void applyAudioProcessingPreferences(const OpenMeeting::MediaPreferences &preferences);
 	bool selectSpeakerDevice(const QString &deviceId);
+	void requestMicrophoneSwitch(const QString &deviceId);
 	void applyMicrophoneAvailability(bool available);
 	void bindMicrophoneCaptureState();
 	void setSpeakerOutputMuted(bool muted);
@@ -521,6 +542,21 @@ private:
 		bool success,
 		const std::string &error);
 	void invalidateCameraCompletion();
+	struct DeviceSwitchTelemetry {
+		std::weak_ptr<livekit::telemetry::SessionTelemetry> telemetry;
+		std::string operationId;
+		livekit::telemetry::OperationKind kind =
+			livekit::telemetry::OperationKind::Unknown;
+		std::uint64_t serial = 0;
+	};
+	std::uint64_t beginDeviceSwitchTelemetry(
+		DeviceSwitchTelemetry &operation,
+		livekit::telemetry::OperationKind kind);
+	void finishDeviceSwitchTelemetry(
+		DeviceSwitchTelemetry &operation,
+		std::uint64_t serial,
+		livekit::telemetry::OperationOutcome outcome);
+	void cancelDeviceSwitchTelemetry();
 	void stopCameraCapture();
 	void bindLocalMediaSources();
 	void attachCoordinatorSession();
@@ -595,6 +631,10 @@ private:
 	CameraWarningEffect _cameraWarningEffect;
 	InvitationNoticeEffect _invitationNoticeEffect;
 	QString _currentCameraPath;
+	DeviceSwitchTelemetry _cameraSwitchTelemetry;
+	DeviceSwitchTelemetry _microphoneSwitchTelemetry;
+	DeviceSwitchTelemetry _speakerSwitchTelemetry;
+	std::uint64_t _pendingMicrophoneDeviceGeneration = 0;
 	bool _usingRealCamera = false;
 	QTimer *_localGenTimer = nullptr;
 	int _localFrameStep = 0;

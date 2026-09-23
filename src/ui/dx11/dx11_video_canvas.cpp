@@ -47,15 +47,16 @@ void Dx11VideoCanvas::drawSolid(const render::VideoTileRect& tile, float r, floa
     renderer_.SetViewport(tile.x, tile.y, tile.width, tile.height);
     renderer_.DrawSolidQuad(r, g, b);
 }
-void Dx11VideoCanvas::drawVideo(const render::VideoTileRect& tile) {
+bool Dx11VideoCanvas::drawVideo(const render::VideoTileRect& tile) {
     const auto* res = texture_pool_.GetUserResource(tile.identity);
-    if (!res) return;
+    if (!res) return false;
     renderer_.SetViewport(tile.x, tile.y, tile.width, tile.height);
     renderer_.SetRotation(res->rotation);
     if (res->format == PixelFormatType::I420 || res->format == PixelFormatType::NV12)
         renderer_.SetYuvColorSpace(res->color_space);
     ID3D11ShaderResourceView* srvs[3] = {res->srvs[0].Get(), res->srvs[1].Get(), res->srvs[2].Get()};
     renderer_.DrawQuad(res->format, srvs, res->srv_count);
+    return true;
 }
 bool Dx11VideoCanvas::drawDecoration(const render::VideoTileRect& tile, const QImage& image) {
     auto& decoration = decoration_textures_[tile.identity];

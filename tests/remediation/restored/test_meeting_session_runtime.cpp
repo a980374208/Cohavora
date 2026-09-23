@@ -38,6 +38,8 @@ int main() {
     asio::io_context context;
     auto guard = asio::make_work_guard(context);
     auto runtime = std::make_shared<OpenMeeting::MeetingSessionRuntime>(context, 7, QStringLiteral("local-user"));
+    Require(runtime->telemetry() && runtime->telemetry()->generation() == 7,
+            "session runtime did not own generation-scoped telemetry");
 
     constexpr int kProducerCount = 4;
     constexpr int kTasksPerProducer = 128;
@@ -98,6 +100,12 @@ int main() {
 
     Require(stoppedFuture.wait_for(std::chrono::seconds(5)) == std::future_status::ready,
             "session strand stop barrier timed out");
+    livekit::telemetry::Event postStop;
+    postStop.kind = livekit::telemetry::EventKind::GaugeSample;
+    postStop.session_generation = runtime->generation();
+    postStop.availability = livekit::telemetry::Availability::Valid;
+    Require(!runtime->telemetry()->Submit(std::move(postStop)),
+            "telemetry producer was accepted after the session stop barrier");
     guard.reset();
     workerA.join();
     workerB.join();

@@ -98,6 +98,9 @@ bool WasapiAudioCapture::Init(const WasapiCaptureConfig& config, std::shared_ptr
     }
 
     config_ = config;
+    requested_device_generation_.store(1, std::memory_order_release);
+    active_device_generation_.store(0, std::memory_order_release);
+    notified_device_generation_.store(0, std::memory_order_release);
     audio_source_ = audio_source;
     if (!apm_processor_) {
         apm_processor_ = AudioApmProcessor::Create();
@@ -220,12 +223,21 @@ void WasapiAudioCapture::OnDeviceChangedNotification() {
 }
 
 bool WasapiAudioCapture::SwitchDevice(const std::string& device_id) {
+    return SwitchDeviceTracked(device_id) != 0;
+}
+
+std::uint64_t WasapiAudioCapture::SwitchDeviceTracked(
+        const std::string& device_id) {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    if (config_.device_id == device_id && is_running_.load()) return true;
+    if (config_.device_id == device_id && is_running_.load()) {
+        return active_device_generation_.load(std::memory_order_acquire);
+    }
     config_.device_id = device_id;
+    const auto generation = requested_device_generation_.fetch_add(
+        1, std::memory_order_acq_rel) + 1;
     spdlog::info("[WasapiAudioCapture] Switching microphone device to ID: {}", device_id.empty() ? "(Default)" : device_id);
     OnDeviceChangedNotification();
-    return true;
+    return generation;
 }
 
 bool WasapiAudioCapture::Start() {
@@ -260,11 +272,35 @@ void WasapiAudioCapture::Stop() {
         capture_thread_.join();
     }
     is_running_.store(false);
+    active_device_generation_.store(0, std::memory_order_release);
 }
 
 void WasapiAudioCapture::SetCaptureStateCallback(std::function<void(bool)> callback) {
     std::lock_guard<std::mutex> lock(callback_mutex_);
     capture_state_callback_ = std::move(callback);
+}
+
+void WasapiAudioCapture::SetDeviceFrameCallback(
+        std::function<void(std::uint64_t)> callback) {
+    std::lock_guard<std::mutex> lock(callback_mutex_);
+    device_frame_callback_ = std::move(callback);
+}
+
+void WasapiAudioCapture::NotifyFirstDeviceFrame() {
+    const auto generation = active_device_generation_.load(std::memory_order_acquire);
+    if (generation == 0) return;
+    auto notified = notified_device_generation_.load(std::memory_order_acquire);
+    while (generation > notified &&
+           !notified_device_generation_.compare_exchange_weak(
+               notified, generation, std::memory_order_acq_rel)) {
+    }
+    if (generation <= notified) return;
+    std::function<void(std::uint64_t)> callback;
+    {
+        std::lock_guard<std::mutex> lock(callback_mutex_);
+        callback = device_frame_callback_;
+    }
+    if (callback) callback(generation);
 }
 
 void WasapiAudioCapture::SetCaptureRunning(bool running, bool force_notification) {
@@ -329,7 +365,10 @@ void WasapiAudioCapture::CaptureThreadLoop() {
     uint64_t warmup_frames_processed = 0;
     auto last_packet_time = std::chrono::steady_clock::now();
     auto restart_audio_client = [&]() {
+        const auto restart_generation = requested_device_generation_.load(
+            std::memory_order_acquire);
         SetCaptureRunning(false);
+        active_device_generation_.store(0, std::memory_order_release);
         fifo_buffer.clear();
         warmup_frames_processed = 0;
         bool started = false;
@@ -342,6 +381,10 @@ void WasapiAudioCapture::CaptureThreadLoop() {
             }
         }
         if (!started) CleanupAudioClient();
+        if (started) {
+            active_device_generation_.store(
+                restart_generation, std::memory_order_release);
+        }
         last_packet_time = std::chrono::steady_clock::now();
         SetCaptureRunning(started, true);
         return started;
@@ -490,6 +533,7 @@ void WasapiAudioCapture::CaptureThreadLoop() {
                 frame = apm_processor_->ProcessCaptureFrame(frame);
             }
             audio_source_->captureFrame(frame);
+            NotifyFirstDeviceFrame();
         }
 
         // 麦克风捕获守卫：若超过 1 秒完全未收到任何音频包（常见于插拔耳机导致驱动静默断流），自动热重连

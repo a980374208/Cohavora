@@ -15,14 +15,32 @@
 
 namespace livekit {
 
+enum class RtcStatsCollectionStatus {
+    Success,
+    Timeout,
+    Rejected,
+    Failed,
+};
+
+struct RtcStatsCollectionResult {
+    RtcStatsCollectionStatus status{RtcStatsCollectionStatus::Failed};
+    std::optional<StatsReport> report;
+};
+
+using RtcStatsLateCompletion = std::function<void()>;
+
 struct RtcStatsState {
     std::mutex mutex;
     std::condition_variable cv;
     bool done{false};
+    bool timed_out{false};
+    bool late_reported{false};
     StatsReport report;
     std::vector<RtpSenderDiagnostic> senders;
     bool senders_available{false};
-    std::function<void(std::optional<StatsReport>)> completion;
+    RtcStatsCollectionStatus status{RtcStatsCollectionStatus::Failed};
+    std::function<void(RtcStatsCollectionResult)> completion;
+    RtcStatsLateCompletion late_completion;
 };
 
 class RtcStatsCollectorBridge : public webrtc::RTCStatsCollectorCallback {
@@ -54,5 +72,15 @@ asio::awaitable<std::optional<StatsReport>> CollectRtcStats(
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection,
     asio::any_io_executor executor,
     std::chrono::milliseconds timeout = std::chrono::milliseconds(1500));
+
+// Detailed collection keeps timeout/rejection distinct and reports a native
+// callback arriving after timeout exactly once. The late callback runs on the
+// native delivery thread, so it must remain bounded and thread-safe; it never
+// completes or mutates the expired request result.
+asio::awaitable<RtcStatsCollectionResult> CollectRtcStatsDetailed(
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection,
+    asio::any_io_executor executor,
+    std::chrono::milliseconds timeout = std::chrono::milliseconds(1500),
+    RtcStatsLateCompletion late_completion = {});
 
 } // namespace livekit

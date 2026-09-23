@@ -30,6 +30,57 @@ struct InboundRtpStreamStats {
     std::uint32_t frame_width{0};
     std::uint32_t frame_height{0};
     double frames_per_second{0.0};
+
+    // A missing native member is not a measured zero.
+    bool kind_available{false};
+    bool frames_decoded_available{false};
+    bool frames_dropped_available{false};
+    bool frame_width_available{false};
+    bool frame_height_available{false};
+    bool frames_per_second_available{false};
+    std::uint32_t freeze_count{0};
+    double total_freezes_duration{0.0};
+    double total_decode_time{0.0};
+    bool freeze_count_available{false};
+    bool total_freezes_duration_available{false};
+    bool total_decode_time_available{false};
+
+    // Audio-only cumulative counters. Consumers must take deltas per stats ID
+    // before calculating ratios or average jitter-buffer delay.
+    std::uint64_t total_samples_received{0};
+    std::uint64_t concealed_samples{0};
+    std::uint64_t silent_concealed_samples{0};
+    std::uint64_t concealment_events{0};
+    std::uint64_t inserted_samples_for_deceleration{0};
+    std::uint64_t removed_samples_for_acceleration{0};
+    double jitter_buffer_delay{0.0};
+    double jitter_buffer_target_delay{0.0};
+    double jitter_buffer_minimum_delay{0.0};
+    std::uint64_t jitter_buffer_emitted_count{0};
+    double audio_level{0.0};
+    bool total_samples_received_available{false};
+    bool concealed_samples_available{false};
+    bool silent_concealed_samples_available{false};
+    bool concealment_events_available{false};
+    bool inserted_samples_for_deceleration_available{false};
+    bool removed_samples_for_acceleration_available{false};
+    bool jitter_buffer_delay_available{false};
+    bool jitter_buffer_target_delay_available{false};
+    bool jitter_buffer_minimum_delay_available{false};
+    bool jitter_buffer_emitted_count_available{false};
+    bool audio_level_available{false};
+};
+
+struct AudioPlayoutStats {
+    std::string id;
+    std::uint64_t synthesized_samples_events{0};
+    double synthesized_samples_duration{0.0};
+    double total_playout_delay{0.0};
+    std::uint64_t total_samples_count{0};
+    bool synthesized_samples_events_available{false};
+    bool synthesized_samples_duration_available{false};
+    bool total_playout_delay_available{false};
+    bool total_samples_count_available{false};
 };
 
 /// @brief 上行/发送 RTP 媒体流统计 (Outbound RTP)
@@ -95,6 +146,7 @@ struct StatsReport {
     std::vector<OutboundRtpStreamStats> outbound_rtp;
     std::vector<RemoteInboundRtpStreamStats> remote_inbound_rtp;
     std::vector<CandidatePairStats> candidate_pairs;
+    std::vector<AudioPlayoutStats> audio_playout;
     std::vector<RtpSenderDiagnostic> senders;
     bool senders_available{false};
 };
@@ -108,6 +160,12 @@ struct RoomStatsReport {
     std::uint64_t total_bytes_received{0};
     double available_outgoing_bitrate{0.0};
     std::vector<StatsReport> reports;
+    // Counts physical PeerConnection instances, not publisher/subscriber
+    // logical roles. In Single-PC mode publisher and subscriber count once.
+    std::uint32_t actual_peer_connection_count{0};
+    std::uint32_t successful_peer_connection_count{0};
+    std::uint32_t timed_out_peer_connection_count{0};
+    std::uint32_t rejected_peer_connection_count{0};
 };
 
 } // namespace livekit
