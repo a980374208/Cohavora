@@ -4,11 +4,25 @@
 #include "src/ui/whiteboard/annotation_overlay_window.h"
 #include "src/ui/whiteboard/whiteboard_panel.h"
 #include "src/ui/meeting_log_console.h"
+#include "src/ui/telemetry_dialogs.h"
+#include "src/telemetry/telemetry_report.h"
+#include <QtWidgets/QCheckBox>
+#include <QtWidgets/QDialog>
+#include <QtWidgets/QDialogButtonBox>
+#include <QtWidgets/QFileDialog>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
+#include <QtWidgets/QHeaderView>
+#include <QtWidgets/QLabel>
+#include <QtWidgets/QListWidget>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QInputDialog>
+#include <QtWidgets/QPushButton>
+#include <QtWidgets/QProgressDialog>
+#include <QtWidgets/QScrollArea>
+#include <QtWidgets/QTabWidget>
+#include <QtWidgets/QTableWidget>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QIcon>
@@ -19,6 +33,7 @@
 #include <QtCore/QDateTime>
 #include <QtCore/QDebug>
 #include <QtCore/QPointer>
+#include <QtCore/QSettings>
 #include <QtCore/QThread>
 #include <algorithm>
 #include <cmath>
@@ -46,6 +61,460 @@ constexpr int kBottomBarPadding = 12;
 constexpr int kBottomBarGap = 6;
 constexpr int kBottomBarEndWidth = 88;
 constexpr int kBottomBarPreferredToolWidth = 76;
+
+class TelemetryTrendWidget final : public QWidget {
+public:
+	explicit TelemetryTrendWidget(
+			std::vector<livekit::telemetry::SafeTelemetryRecordPtr> records,
+			QWidget *parent = nullptr)
+		: QWidget(parent)
+		, _records(std::move(records)) {
+		setMinimumHeight(180);
+		setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+		setAccessibleName(QCoreApplication::translate(
+			"MeetingUI", "CPU and private memory trend"));
+	}
+
+protected:
+	void paintEvent(QPaintEvent *) override {
+		QPainter painter(this);
+		painter.setRenderHint(QPainter::Antialiasing);
+		const auto plot = rect().adjusted(44, 18, -18, -30);
+		painter.setPen(QColor(0x68, 0x70, 0x7a));
+		painter.drawRect(plot);
+		painter.drawText(8, 20, QCoreApplication::translate("MeetingUI", "CPU"));
+		painter.drawText(
+			8, height() - 8, QCoreApplication::translate("MeetingUI", "Memory"));
+		if (_records.size() < 2 || plot.width() < 2 || plot.height() < 2) return;
+
+		double maximumCpu = 1.0;
+		std::uint64_t maximumMemory = 1;
+		for (const auto &record : _records) {
+			if (!record) continue;
+			maximumCpu = std::max(maximumCpu, record->snapshot.process_cpu_percent);
+			maximumMemory = std::max(maximumMemory, record->snapshot.private_bytes);
+		}
+		const auto pointAt = [&](std::size_t index, double ratio) {
+			const auto x = plot.left() + qRound(
+				static_cast<double>(plot.width()) * index /
+				static_cast<double>(_records.size() - 1));
+			const auto y = plot.bottom() - qRound(
+				std::clamp(ratio, 0.0, 1.0) * plot.height());
+			return QPoint(x, y);
+		};
+		QPolygon cpu;
+		QPolygon memory;
+		for (std::size_t i = 0; i != _records.size(); ++i) {
+			const auto &snapshot = _records[i]->snapshot;
+			cpu.push_back(pointAt(i,
+				snapshot.process_cpu_percent < 0.0
+					? 0.0 : snapshot.process_cpu_percent / maximumCpu));
+			memory.push_back(pointAt(i,
+				static_cast<double>(snapshot.private_bytes) /
+				static_cast<double>(maximumMemory)));
+		}
+		painter.setPen(QPen(QColor(0x2f, 0xc4, 0x77), 2));
+		painter.drawPolyline(cpu);
+		painter.setPen(QPen(QColor(0x42, 0x9b, 0xe8), 2));
+		painter.drawPolyline(memory);
+	}
+
+private:
+	std::vector<livekit::telemetry::SafeTelemetryRecordPtr> _records;
+};
+
+QTableWidget *MakeTelemetryTable(QWidget *parent, const QStringList &headers) {
+	auto *table = new QTableWidget(parent);
+	table->setColumnCount(headers.size());
+	table->setHorizontalHeaderLabels(headers);
+	table->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+	table->horizontalHeader()->setStretchLastSection(true);
+	table->verticalHeader()->setVisible(false);
+	table->setEditTriggers(QAbstractItemView::NoEditTriggers);
+	table->setSelectionBehavior(QAbstractItemView::SelectRows);
+	table->setAlternatingRowColors(true);
+	return table;
+}
+
+void AddTelemetryRow(QTableWidget *table, const QStringList &values) {
+	const auto row = table->rowCount();
+	table->insertRow(row);
+	for (auto column = 0; column != values.size(); ++column) {
+		auto *item = new QTableWidgetItem(values[column]);
+		item->setToolTip(values[column]);
+		table->setItem(row, column, item);
+	}
+}
+
+QString TelemetryValue(const QVariantMap &snapshot, const char *key, const char *unit = "") {
+	const auto value = snapshot.value(QString::fromLatin1(key));
+	if (!value.isValid() || value.isNull()) return QStringLiteral("--");
+	if ((value.type() == QVariant::Int || value.type() == QVariant::LongLong) &&
+		value.toLongLong() < 0) {
+		return QStringLiteral("--");
+	}
+	auto result = value.toString();
+	if (*unit && result != QStringLiteral("--")) {
+		result += QStringLiteral(" ") + QString::fromLatin1(unit);
+	}
+	return result;
+}
+
+QString TelemetryRatioPercent(const QVariantMap &snapshot, const char *key) {
+	const auto value = snapshot.value(QString::fromLatin1(key), -1.0).toDouble();
+	return value < 0.0
+		? QStringLiteral("--")
+		: QString::number(value * 100.0, 'f', 2) + QStringLiteral(" %");
+}
+
+QString TelemetryDisplayVariant(const QVariant &value) {
+	if (!value.isValid() || value.isNull()) return QStringLiteral("--");
+	if (value.type() == QVariant::Int || value.type() == QVariant::LongLong) {
+		return value.toLongLong() < 0 ? QStringLiteral("--") : value.toString();
+	}
+	if (value.type() == QVariant::Double) {
+		return value.toDouble() < 0.0 ? QStringLiteral("--") : value.toString();
+	}
+	return value.toString();
+}
+
+bool IsSafeTelemetryDisplayEntry(const QString &key, const QVariant &value) {
+	const auto normalizedKey = key.toCaseFolded();
+	static const auto sensitiveKeyParts = std::array{
+		QStringLiteral("url"), QStringLiteral("token"), QStringLiteral("ice"),
+		QStringLiteral("sdp"), QStringLiteral("path"), QStringLiteral("identity"),
+		QStringLiteral("password"), QStringLiteral("secret"),
+		QStringLiteral("credential")};
+	for (const auto &part : sensitiveKeyParts) {
+		if (normalizedKey.contains(part)) return false;
+	}
+	const auto text = value.toString().trimmed();
+	const auto folded = text.toCaseFolded();
+	if (folded.contains(QStringLiteral("://")) ||
+		folded.startsWith(QStringLiteral("candidate:")) ||
+		folded.startsWith(QStringLiteral("v=0")) ||
+		folded.contains(QStringLiteral("bearer "))) {
+		return false;
+	}
+	return text.size() < 3 || text[1] != QLatin1Char(':') ||
+		(text[2] != QLatin1Char('\\') && text[2] != QLatin1Char('/'));
+}
+
+void ShowTelemetryExport(QWidget *parent) {
+	const auto store = livekit::telemetry::InstalledTelemetryHistoryStore();
+	if (!store) return;
+	const auto directory = QFileDialog::getExistingDirectory(
+		parent,
+		QCoreApplication::translate("MeetingUI", "Export telemetry report"));
+	if (directory.isEmpty()) return;
+	const QPointer<QWidget> guard(parent);
+	auto cancelled = std::make_shared<std::atomic_bool>(false);
+	auto *progress = new QProgressDialog(
+		QCoreApplication::translate("MeetingUI", "Exporting telemetry report..."),
+		QCoreApplication::translate("MeetingUI", "Cancel"), 0, 0, parent);
+	progress->setAttribute(Qt::WA_DeleteOnClose);
+	progress->setWindowModality(Qt::WindowModal);
+	progress->setMinimumDuration(0);
+	progress->show();
+	const QPointer<QProgressDialog> progressGuard(progress);
+	QObject::connect(progress, &QProgressDialog::canceled, progress,
+		[cancelled] { cancelled->store(true, std::memory_order_release); });
+	const auto accepted = store->ExportCurrent(
+		std::filesystem::path(directory.toStdWString()),
+		[guard, progressGuard](livekit::telemetry::TelemetryExportResult result) {
+			QMetaObject::invokeMethod(qApp, [guard, progressGuard, result = std::move(result)] {
+				if (progressGuard) progressGuard->close();
+				if (!guard) return;
+				QMessageBox message(guard);
+				message.setWindowTitle(QCoreApplication::translate(
+					"MeetingUI", "Telemetry export"));
+				message.setIcon(result.success
+					? QMessageBox::Information : QMessageBox::Warning);
+				message.setText(result.success
+					? QCoreApplication::translate("MeetingUI", "Report exported")
+					: QCoreApplication::translate("MeetingUI", "Export failed: %1")
+						.arg(QString::fromStdString(result.reason)));
+				if (result.success) {
+					message.setInformativeText(QString::fromStdWString(
+						result.report_directory.wstring()));
+				}
+				AppTheme::setTone(message, AppTheme::Tone::Dark);
+				message.exec();
+			}, Qt::QueuedConnection);
+		}, cancelled);
+	if (!accepted) {
+		progress->close();
+		QMessageBox::warning(
+			parent,
+			QCoreApplication::translate("MeetingUI", "Telemetry export"),
+			QCoreApplication::translate("MeetingUI", "Export queue is full"));
+	}
+}
+
+} // namespace
+
+QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot) {
+	auto *dialog = new QDialog(parent);
+	dialog->setObjectName(QStringLiteral("telemetryDetailsDialog"));
+	dialog->setAttribute(Qt::WA_DeleteOnClose);
+	dialog->setWindowTitle(QCoreApplication::translate("MeetingUI", "Meeting telemetry"));
+	dialog->resize(900, 640);
+	dialog->setMinimumSize(680, 480);
+	AppTheme::setTone(*dialog, AppTheme::Tone::Dark);
+
+	auto *layout = new QVBoxLayout(dialog);
+	layout->setContentsMargins(16, 16, 16, 16);
+	layout->setSpacing(12);
+	auto *tabs = new QTabWidget(dialog);
+	tabs->setObjectName(QStringLiteral("telemetryTabs"));
+	layout->addWidget(tabs, 1);
+
+	const auto addSummaryPage = [&](const QString &title,
+			const std::vector<std::array<QString, 4>> &rows) {
+		auto *table = MakeTelemetryTable(tabs, {
+			QCoreApplication::translate("MeetingUI", "Metric"),
+			QCoreApplication::translate("MeetingUI", "Value"),
+			QCoreApplication::translate("MeetingUI", "Availability"),
+			QCoreApplication::translate("MeetingUI", "Reason / boundary")});
+		for (const auto &row : rows) AddTelemetryRow(table, {row[0], row[1], row[2], row[3]});
+		tabs->addTab(table, title);
+	};
+
+	addSummaryPage(QCoreApplication::translate("MeetingUI", "Overview"), {
+		{QCoreApplication::translate("MeetingUI", "Session"),
+		 TelemetryValue(snapshot, "sessionGeneration"),
+		 snapshot.value(QStringLiteral("availability")).toString(),
+		 snapshot.value(QStringLiteral("reason")).toString()},
+		{QCoreApplication::translate("MeetingUI", "Coverage"),
+		 QString::number(snapshot.value(QStringLiteral("coverage")).toDouble() * 100.0, 'f', 1) + QStringLiteral(" %"),
+		 snapshot.value(QStringLiteral("availability")).toString(), QString()},
+		{QCoreApplication::translate("MeetingUI", "Schema / definition"),
+		 QStringLiteral("%1 / %2").arg(
+			snapshot.value(QStringLiteral("schemaVersion")).toString(),
+			snapshot.value(QStringLiteral("definitionVersion")).toString()),
+		 QStringLiteral("VALID"), QStringLiteral("local-safe-snapshot")},
+		{QCoreApplication::translate("MeetingUI", "First decoded video"),
+		 TelemetryValue(snapshot, "lastSubscribeToFirstDecodedMs", "ms"),
+		 snapshot.value(QStringLiteral("firstVideoAvailability")).toString(),
+		 snapshot.value(QStringLiteral("firstVideoMeasurementPoint")).toString()},
+		{QCoreApplication::translate("MeetingUI", "First visible render"),
+		 TelemetryValue(snapshot, "lastSubscribeToFirstRenderMs", "ms"),
+		 snapshot.value(QStringLiteral("renderFirstFrameAvailability")).toString(),
+		 snapshot.value(QStringLiteral("renderMeasurementPoint")).toString()},
+		{QCoreApplication::translate("MeetingUI", "First remote PCM"),
+		 TelemetryValue(snapshot, "lastSubscribeToFirstPcmMs", "ms"),
+		 snapshot.value(QStringLiteral("firstAudioAvailability")).toString(),
+		 snapshot.value(QStringLiteral("firstAudioMeasurementPoint")).toString()},
+		{QCoreApplication::translate("MeetingUI", "Active operations"),
+		 TelemetryValue(snapshot, "operationsInflight"),
+		 snapshot.value(QStringLiteral("availability")).toString(), QString()},
+	});
+
+	addSummaryPage(QCoreApplication::translate("MeetingUI", "Media QoE"), {
+		{QCoreApplication::translate("MeetingUI", "Native video freezes"),
+		 TelemetryValue(snapshot, "nativeVideoFreezeCount"),
+		 snapshot.value(QStringLiteral("nativeVideoFreezeAvailability")).toString(),
+		 TelemetryValue(snapshot, "nativeVideoFreezeDurationMs", "ms")},
+		{QCoreApplication::translate("MeetingUI", "Visible render stalls"),
+		 TelemetryValue(snapshot, "renderStallCount"),
+		 snapshot.value(QStringLiteral("renderStallAvailability")).toString(),
+		 TelemetryValue(snapshot, "renderStallDurationMs", "ms") + QStringLiteral(" / ") +
+		 snapshot.value(QStringLiteral("renderStallAlgorithm")).toString()},
+		{QCoreApplication::translate("MeetingUI", "Audio concealment"),
+		 TelemetryRatioPercent(snapshot, "audioConcealedRatio"),
+		 snapshot.value(QStringLiteral("audioConcealmentAvailability")).toString(),
+		 snapshot.value(QStringLiteral("audioConcealmentReason")).toString()},
+		{QCoreApplication::translate("MeetingUI", "Jitter buffer delay"),
+		 TelemetryValue(snapshot, "audioJitterBufferDelayMs", "ms"),
+		 snapshot.value(QStringLiteral("audioJitterBufferAvailability")).toString(),
+		 snapshot.value(QStringLiteral("audioJitterBufferReason")).toString()},
+		{QCoreApplication::translate("MeetingUI", "Reconnect video / audio / render"),
+		 TelemetryValue(snapshot, "lastReconnectStableVideoMs", "ms") + QStringLiteral(" / ") +
+		 TelemetryValue(snapshot, "lastReconnectStableAudioMs", "ms") + QStringLiteral(" / ") +
+		 TelemetryValue(snapshot, "lastReconnectStableRenderMs", "ms"),
+		 snapshot.value(QStringLiteral("reconnectRenderAvailability")).toString(),
+		 snapshot.value(QStringLiteral("reconnectRenderReason")).toString()},
+	});
+	tabs->widget(0)->setObjectName(QStringLiteral("telemetryOverview"));
+	tabs->widget(1)->setObjectName(QStringLiteral("telemetryMediaQoe"));
+
+	auto *operations = MakeTelemetryTable(tabs, {
+		QCoreApplication::translate("MeetingUI", "Operation"),
+		QCoreApplication::translate("MeetingUI", "Started / terminal"),
+		QCoreApplication::translate("MeetingUI", "Success / failure / timeout / cancelled"),
+		QCoreApplication::translate("MeetingUI", "Last duration")});
+	for (const auto &value : snapshot.value(QStringLiteral("operationSummaries")).toList()) {
+		const auto item = value.toMap();
+		AddTelemetryRow(operations, {
+			item.value(QStringLiteral("kind")).toString(),
+			QStringLiteral("%1 / %2").arg(item.value(QStringLiteral("started")).toString(),
+				item.value(QStringLiteral("terminal")).toString()),
+			QStringLiteral("%1 / %2 / %3 / %4").arg(
+				item.value(QStringLiteral("success")).toString(),
+				item.value(QStringLiteral("failure")).toString(),
+				item.value(QStringLiteral("timeout")).toString(),
+				item.value(QStringLiteral("cancelled")).toString()),
+			TelemetryValue(item, "lastDurationMs", "ms")});
+	}
+	operations->setObjectName(QStringLiteral("telemetryOperations"));
+	tabs->addTab(operations, QCoreApplication::translate("MeetingUI", "Operations"));
+
+	auto *resourcePage = new QWidget(tabs);
+	auto *resourceLayout = new QVBoxLayout(resourcePage);
+	const auto store = livekit::telemetry::InstalledTelemetryHistoryStore();
+	auto *trend = new TelemetryTrendWidget(
+		store ? store->CurrentRecords()
+		      : std::vector<livekit::telemetry::SafeTelemetryRecordPtr>{}, resourcePage);
+	trend->setObjectName(QStringLiteral("telemetryTrend"));
+	resourceLayout->addWidget(trend);
+	auto *resources = MakeTelemetryTable(resourcePage, {
+		QCoreApplication::translate("MeetingUI", "Metric"),
+		QCoreApplication::translate("MeetingUI", "Current"),
+		QCoreApplication::translate("MeetingUI", "Window"),
+		QCoreApplication::translate("MeetingUI", "Availability")});
+	AddTelemetryRow(resources, {QCoreApplication::translate("MeetingUI", "Process CPU"),
+		TelemetryValue(snapshot, "processCpuPercent", "%"), QString(),
+		snapshot.value(QStringLiteral("cpuAvailability")).toString()});
+	AddTelemetryRow(resources, {QCoreApplication::translate("MeetingUI", "Private memory"),
+		snapshot.value(QStringLiteral("memoryAvailability")).toString() == QStringLiteral("VALID")
+			? QString::number(snapshot.value(QStringLiteral("privateBytes")).toULongLong() / 1048576.0, 'f', 1) + QStringLiteral(" MiB")
+			: QStringLiteral("--"),
+		QStringLiteral("%1 - %2 MiB").arg(
+			snapshot.value(QStringLiteral("minimumPrivateBytes")).toULongLong() / 1048576.0, 0, 'f', 1).arg(
+			snapshot.value(QStringLiteral("maximumPrivateBytes")).toULongLong() / 1048576.0, 0, 'f', 1),
+		snapshot.value(QStringLiteral("memoryAvailability")).toString()});
+	AddTelemetryRow(resources, {QCoreApplication::translate("MeetingUI", "Threads / handles"),
+		QStringLiteral("%1 / %2").arg(
+			snapshot.value(QStringLiteral("processThreadCount")).toString(),
+			snapshot.value(QStringLiteral("processHandleCount")).toString()),
+		QStringLiteral("N=%1, %2%").arg(
+			snapshot.value(QStringLiteral("resourceTrendSamples")).toString(),
+			QString::number(snapshot.value(QStringLiteral("resourceTrendCoverage")).toDouble() * 100.0, 'f', 1)),
+		snapshot.value(QStringLiteral("resourceTrendAvailability")).toString()});
+	resourceLayout->addWidget(resources, 1);
+	resources->setObjectName(QStringLiteral("telemetryResources"));
+	tabs->addTab(resourcePage, QCoreApplication::translate("MeetingUI", "Resources"));
+
+	auto *timeline = MakeTelemetryTable(tabs, {
+		QCoreApplication::translate("MeetingUI", "Time"),
+		QCoreApplication::translate("MeetingUI", "Revision"),
+		QCoreApplication::translate("MeetingUI", "Status"),
+		QCoreApplication::translate("MeetingUI", "Video / audio / render")});
+	if (store) {
+		for (const auto &record : store->CurrentRecords()) {
+			if (!record) continue;
+			const auto &s = record->snapshot;
+			AddTelemetryRow(timeline, {
+				QDateTime::fromMSecsSinceEpoch(record->captured_utc_ms).toString(QStringLiteral("HH:mm:ss")),
+				QString::number(s.revision),
+				QString::fromLatin1(livekit::telemetry::AvailabilityName(s.availability)),
+				QStringLiteral("%1 / %2 / %3").arg(
+					QString::fromLatin1(livekit::telemetry::AvailabilityName(s.remote_video_first_frame_availability)),
+					QString::fromLatin1(livekit::telemetry::AvailabilityName(s.audio_quality_availability)),
+					QString::fromLatin1(livekit::telemetry::AvailabilityName(s.render_stall_availability)))});
+		}
+	}
+	timeline->setObjectName(QStringLiteral("telemetryTimeline"));
+	tabs->addTab(timeline, QCoreApplication::translate("MeetingUI", "Timeline"));
+
+	auto *all = MakeTelemetryTable(tabs, {
+		QCoreApplication::translate("MeetingUI", "Field"),
+		QCoreApplication::translate("MeetingUI", "Value")});
+	for (auto it = snapshot.cbegin(); it != snapshot.cend(); ++it) {
+		if (it.value().type() == QVariant::List || it.value().type() == QVariant::Map) continue;
+		if (!IsSafeTelemetryDisplayEntry(it.key(), it.value())) continue;
+		AddTelemetryRow(all, {it.key(), TelemetryDisplayVariant(it.value())});
+	}
+	all->setObjectName(QStringLiteral("telemetryAllMetrics"));
+	tabs->addTab(all, QCoreApplication::translate("MeetingUI", "All metrics"));
+
+	auto *historyPage = new QWidget(tabs);
+	auto *historyLayout = new QVBoxLayout(historyPage);
+	const auto status = store ? store->Status() : nullptr;
+	auto *historyEnabled = new QCheckBox(
+		QCoreApplication::translate("MeetingUI", "Keep local telemetry history"), historyPage);
+	historyEnabled->setObjectName(QStringLiteral("telemetryHistoryEnabled"));
+	historyEnabled->setChecked(status && status->history_enabled);
+	historyEnabled->setEnabled(store != nullptr);
+	historyLayout->addWidget(historyEnabled);
+	auto *historyStatus = new QLabel(status
+		? QStringLiteral("%1 / %2 / MET-06 drops=%3 writes=%4").arg(
+			QString::fromLatin1(livekit::telemetry::AvailabilityName(status->availability)),
+			QString::fromStdString(status->reason),
+			QString::number(status->queue_drops),
+			QString::number(status->write_failures))
+		: QStringLiteral("UNSUPPORTED / history_store_not_installed"), historyPage);
+	historyStatus->setWordWrap(true);
+	historyLayout->addWidget(historyStatus);
+	auto *reports = new QListWidget(historyPage);
+	reports->setObjectName(QStringLiteral("telemetryReports"));
+	if (status) {
+		for (const auto &entry : status->reports) {
+			auto *item = new QListWidgetItem(
+				QStringLiteral("%1  %2 KiB  N=%3").arg(
+					QDateTime::fromMSecsSinceEpoch(entry.created_utc_ms).toString(Qt::ISODate),
+					QString::number(entry.size_bytes / 1024),
+					QString::number(entry.record_count)), reports);
+			item->setData(Qt::UserRole, QString::fromStdString(entry.record_id));
+		}
+	}
+	historyLayout->addWidget(reports, 1);
+	auto *historyButtons = new QHBoxLayout();
+	auto *exportButton = new QPushButton(
+		dialog->style()->standardIcon(QStyle::SP_DialogSaveButton),
+		QCoreApplication::translate("MeetingUI", "Export"), historyPage);
+	exportButton->setObjectName(QStringLiteral("telemetryExport"));
+	auto *clearButton = new QPushButton(
+		dialog->style()->standardIcon(QStyle::SP_TrashIcon),
+		QCoreApplication::translate("MeetingUI", "Clear selected"), historyPage);
+	clearButton->setObjectName(QStringLiteral("telemetryClearSelected"));
+	clearButton->setEnabled(reports->currentItem() != nullptr);
+	historyButtons->addWidget(exportButton);
+	historyButtons->addWidget(clearButton);
+	historyButtons->addStretch();
+	historyLayout->addLayout(historyButtons);
+	tabs->addTab(historyPage, QCoreApplication::translate("MeetingUI", "Reports"));
+
+	QObject::connect(reports, &QListWidget::currentItemChanged, clearButton,
+		[clearButton](QListWidgetItem *current) { clearButton->setEnabled(current != nullptr); });
+	QObject::connect(historyEnabled, &QCheckBox::toggled, dialog, [store](bool enabled) {
+		if (store) store->SetHistoryEnabled(enabled);
+		QSettings().setValue(QStringLiteral("telemetry/historyEnabled"), enabled);
+	});
+	QObject::connect(exportButton, &QPushButton::clicked, dialog,
+		[dialog] { ShowTelemetryExport(dialog); });
+	QObject::connect(clearButton, &QPushButton::clicked, dialog,
+		[store, reports, clearButton] {
+			const auto *item = reports->currentItem();
+			if (!store || !item) return;
+			const auto id = item->data(Qt::UserRole).toString().toStdString();
+			clearButton->setEnabled(false);
+			const QPointer<QListWidget> listGuard(reports);
+			store->ClearReport(id, [listGuard, id](bool removed, std::string) {
+				QMetaObject::invokeMethod(qApp, [listGuard, id, removed] {
+					if (!listGuard || !removed) return;
+					for (auto row = 0; row != listGuard->count(); ++row) {
+						if (listGuard->item(row)->data(Qt::UserRole).toString().toStdString() == id) {
+							delete listGuard->takeItem(row);
+							break;
+						}
+					}
+				}, Qt::QueuedConnection);
+			});
+		});
+
+	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, dialog);
+	buttons->setObjectName(QStringLiteral("telemetryDetailsButtons"));
+	buttons->button(QDialogButtonBox::Close)->setIcon(
+		dialog->style()->standardIcon(QStyle::SP_DialogCloseButton));
+	QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+	layout->addWidget(buttons);
+	AppTheme::makeDialogAdaptive(*dialog, QSize(900, 640));
+	dialog->open();
+	return dialog;
+}
+
+namespace {
 
 bool isChatSenderPlaceholderName(const QString &name) {
 	const auto normalized = name.trimmed().toCaseFolded();
@@ -218,10 +687,19 @@ void VideoTileWidget::setDisplayName(const QString &name) {
 void VideoTileWidget::setVideoActive(bool active) {
 	if (_isVideoActive == active) return;
 	_isVideoActive = active;
+	livekit::render::VideoRenderFrame::Ptr retired;
 	if (!active) {
-		std::lock_guard<std::mutex> lock(_frameMutex);
-		_currentFrame = QImage();
+		{
+			std::lock_guard<std::mutex> lock(_frameMutex);
+			_currentFrame = QImage();
+			retired = std::exchange(_currentRenderFrame, {});
+		}
+		if (retired) {
+			retired->SetRenderExpected(
+				false, livekit::render::RenderExpectationReason::BindingEnded);
+		}
 	}
+	updateRenderExpectation();
 	invalidatePresentation();
 }
 
@@ -248,7 +726,20 @@ void VideoTileWidget::setConnectionQuality(livekit::ConnectionQuality quality) {
 void VideoTileWidget::setVideoStreamPaused(bool paused) {
 	if (_isVideoStreamPaused == paused) return;
 	_isVideoStreamPaused = paused;
+	updateRenderExpectation();
 	invalidatePresentation();
+}
+
+VideoTileWidget::~VideoTileWidget() {
+	livekit::render::VideoRenderFrame::Ptr retired;
+	{
+		std::lock_guard<std::mutex> lock(_frameMutex);
+		retired = std::exchange(_currentRenderFrame, {});
+	}
+	if (retired) {
+		retired->SetRenderExpected(
+			false, livekit::render::RenderExpectationReason::BindingEnded);
+	}
 }
 
 void VideoTileWidget::setSpeaking(bool speaking, float level) {
@@ -309,12 +800,70 @@ QImage VideoTileWidget::hardwareDecoration(const QSize &pixels, bool hasFrame, b
 	return _hardwareDecoration;
 }
 
-void VideoTileWidget::setFrame(const QImage &image) {
+void VideoTileWidget::setHardwareCanvasMode(bool enabled) {
+	if (_useHardwareCanvas == enabled) return;
+	_useHardwareCanvas = enabled;
+	updateRenderExpectation();
+	update();
+}
+
+void VideoTileWidget::setFrame(
+		const QImage &image,
+		livekit::render::VideoRenderFrame::Ptr renderFrame) {
+	livekit::render::VideoRenderFrame::Ptr retired;
+	livekit::render::VideoRenderFrame::Ptr current;
 	{
 		std::lock_guard<std::mutex> lock(_frameMutex);
 		_currentFrame = image;
+		retired = std::exchange(_currentRenderFrame, std::move(renderFrame));
+		current = _currentRenderFrame;
 	}
+	if (retired && retired != current &&
+		(!current || !retired->renderMetadata().same_binding_as(
+			current->renderMetadata()))) {
+		retired->SetRenderExpected(
+			false, livekit::render::RenderExpectationReason::BindingEnded);
+	}
+	updateRenderExpectation();
 	update();
+}
+
+void VideoTileWidget::updateRenderExpectation() {
+	livekit::render::VideoRenderFrame::Ptr frame;
+	{
+		std::lock_guard<std::mutex> lock(_frameMutex);
+		frame = _currentRenderFrame;
+	}
+	if (!frame) return;
+	const bool minimized = window() && window()->isMinimized();
+	const bool expected = !_useHardwareCanvas && _isVideoActive &&
+		!_isVideoStreamPaused && isVisible() && !minimized &&
+		width() > 0 && height() > 0;
+	frame->SetRenderExpected(
+		expected,
+		expected ? livekit::render::RenderExpectationReason::SurfaceVisible
+			: minimized ? livekit::render::RenderExpectationReason::WindowMinimized
+				: _isVideoStreamPaused
+					? livekit::render::RenderExpectationReason::StreamPaused
+					: livekit::render::RenderExpectationReason::SurfaceHidden);
+}
+
+void VideoTileWidget::showEvent(QShowEvent *e) {
+	Ui::RpWidget::showEvent(e);
+	updateRenderExpectation();
+}
+
+void VideoTileWidget::hideEvent(QHideEvent *e) {
+	Ui::RpWidget::hideEvent(e);
+	updateRenderExpectation();
+}
+
+void VideoTileWidget::changeEvent(QEvent *e) {
+	Ui::RpWidget::changeEvent(e);
+	if (e->type() == QEvent::WindowStateChange ||
+		e->type() == QEvent::ParentChange) {
+		updateRenderExpectation();
+	}
 }
 
 void VideoTileWidget::paintEvent(QPaintEvent *e) {
@@ -536,9 +1085,11 @@ void VideoTileWidget::drawVideoPlaceholder(QPainter &p, const QRect &r) {
 void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
 
 	QImage frameCopy;
+	livekit::render::VideoRenderFrame::Ptr renderFrame;
 	{
 		std::lock_guard<std::mutex> lock(_frameMutex);
 		frameCopy = _currentFrame;
+		renderFrame = _currentRenderFrame;
 	}
 
 	if (_isVideoStreamPaused || frameCopy.isNull()) {
@@ -558,6 +1109,9 @@ void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
 	const int x = r.x() + (r.width() - scaled.width()) / 2;
 	const int y = r.y() + (r.height() - scaled.height()) / 2;
 	p.drawImage(x, y, scaled);
+	if (renderFrame && p.isActive()) {
+		renderFrame->NotifyRendered("qt_cpu_paint");
+	}
 }
 
 void VideoTileWidget::drawBottomNameTag(QPainter &p, const QRect &r) {
@@ -641,6 +1195,18 @@ void RoomTopBarWidget::setMeetingId(const QString &meetingId) {
 	update();
 }
 
+void RoomTopBarWidget::setTelemetrySnapshot(const QVariantMap &snapshot) {
+	if (!snapshot.isEmpty() && !_telemetrySnapshot.isEmpty() &&
+		snapshot.value(QStringLiteral("sessionGeneration")).toULongLong() ==
+			_telemetrySnapshot.value(QStringLiteral("sessionGeneration")).toULongLong() &&
+		snapshot.value(QStringLiteral("revision")).toULongLong() <
+			_telemetrySnapshot.value(QStringLiteral("revision")).toULongLong()) {
+		return;
+	}
+	_telemetrySnapshot = snapshot;
+	update();
+}
+
 int RoomTopBarWidget::heightForWidth(int width) const {
  const QFontMetrics metrics(QFont("Microsoft YaHei", 9));
  const int toolsWidth = metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "Picture-in-Picture"))
@@ -677,6 +1243,7 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
  rightX -= layoutW + 4;
  const int leftInfoRight = QFontMetrics(QFont("Microsoft YaHei", 10)).horizontalAdvance(
      QCoreApplication::translate("MeetingUI", "Meetings")) + 116;
+ _qualityRect = QRect(leftInfoRight - 22, 8, 20, 28);
  if (!_meetingId.isEmpty()) {
   auto idFont = QFont("Microsoft YaHei", 9); idFont.setBold(true);
   const int desired = QFontMetrics(idFont).horizontalAdvance(
@@ -739,13 +1306,32 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	p.setPen(QColor(0x1f, 0x23, 0x29));
 	p.drawText(QRect(logoX + 24 + nameWidth, 0, 60, 44), Qt::AlignVCenter | Qt::AlignLeft, timeStr);
 
-	const int sigX = logoX + 88 + nameWidth;
-	const int sigY = 25;
+	const QString availability = _telemetrySnapshot.value(
+		QStringLiteral("availability"), QStringLiteral("UNKNOWN")).toString();
+	QColor qualityColor(0x86, 0x90, 0x9c);
+	if (availability == QStringLiteral("VALID")) qualityColor = QColor(0x00, 0x9a, 0x29);
+	else if (availability == QStringLiteral("WARMING_UP")) qualityColor = QColor(0x16, 0x77, 0xff);
+	else if (availability == QStringLiteral("STALE")) qualityColor = QColor(0xd4, 0x88, 0x06);
+	else if (availability == QStringLiteral("TIMEOUT") ||
+		availability == QStringLiteral("INVALID")) qualityColor = QColor(0xd9, 0x36, 0x3e);
+	else if (availability == QStringLiteral("UNSUPPORTED")) qualityColor = QColor(0xa6, 0x1d, 0x24);
+	if (_hoverBtn == HoverBtn::Quality) {
+		p.setPen(Qt::NoPen);
+		p.setBrush(QColor(0xf2, 0xf3, 0xf5));
+		p.drawRoundedRect(_qualityRect, 4, 4);
+	}
+	const double coverage = _telemetrySnapshot.value(QStringLiteral("coverage"), 0.0).toDouble();
+	const int activeBars = availability == QStringLiteral("VALID")
+		? (coverage >= 0.66 ? 3 : (coverage >= 0.33 ? 2 : 1))
+		: (availability == QStringLiteral("WARMING_UP") ? 1 : 0);
+	const int sigX = _qualityRect.left() + 4;
+	const int sigY = _qualityRect.center().y() + 5;
 	p.setPen(Qt::NoPen);
-	p.setBrush(QColor(0x00, 0xb4, 0x2a));
-	p.drawRect(sigX, sigY - 4, 2, 4);
-	p.drawRect(sigX + 4, sigY - 7, 2, 7);
-	p.drawRect(sigX + 8, sigY - 10, 2, 10);
+	for (int bar = 0; bar != 3; ++bar) {
+		p.setBrush(bar < activeBars ? qualityColor : QColor(0xd8, 0xdc, 0xe3));
+		const int barHeight = 4 + bar * 3;
+		p.drawRect(sigX + bar * 4, sigY - barHeight, 2, barHeight);
+	}
 
 	p.restore();
 
@@ -832,6 +1418,7 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	if (_closeRect.contains(pos)) next = HoverBtn::Close;
 	else if (_maxRect.contains(pos)) next = HoverBtn::Max;
 	else if (_minRect.contains(pos)) next = HoverBtn::Min;
+	else if (_qualityRect.contains(pos)) next = HoverBtn::Quality;
 	else if (_simulateRect.contains(pos)) next = HoverBtn::Simulate;
 	else if (_consoleRect.contains(pos)) next = HoverBtn::Console;
 	else if (_layoutRect.contains(pos)) next = HoverBtn::Layout;
@@ -839,6 +1426,27 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	if (!_meetingIdRect.isEmpty() && _meetingIdRect.contains(pos)) {
 		setCursor(Qt::PointingHandCursor);
 		setToolTip(QCoreApplication::translate("MeetingUI", "Click to copy meeting ID: %1").arg(_meetingId));
+	} else if (next == HoverBtn::Quality) {
+		setCursor(Qt::PointingHandCursor);
+		const auto availability = _telemetrySnapshot.value(
+			QStringLiteral("availability"), QStringLiteral("UNKNOWN")).toString();
+		const auto age = _telemetrySnapshot.value(
+			QStringLiteral("sampleAgeMs"), -1).toLongLong();
+		QString tooltip = age >= 0
+			? QCoreApplication::translate("MeetingUI", "Telemetry: %1, age %2 ms")
+				.arg(availability).arg(age)
+			: QCoreApplication::translate("MeetingUI", "Telemetry: %1").arg(availability);
+		const auto reconnectVideo = _telemetrySnapshot.value(
+			QStringLiteral("reconnectVideoAvailability"), QStringLiteral("UNKNOWN")).toString();
+		if (reconnectVideo == QStringLiteral("WARMING_UP") ||
+			reconnectVideo == QStringLiteral("TIMEOUT")) {
+			tooltip += QStringLiteral("\n") +
+				QCoreApplication::translate("MeetingUI", "Video recovery: %1 (%2/%3 stable)")
+					.arg(reconnectVideo,
+						 _telemetrySnapshot.value(QStringLiteral("reconnectVideoRecovered")).toString(),
+						 _telemetrySnapshot.value(QStringLiteral("reconnectVideoExpected")).toString());
+		}
+		setToolTip(tooltip);
 	} else if (next != HoverBtn::None) {
 		setCursor(Qt::PointingHandCursor);
 		setToolTip(QString());
@@ -867,7 +1475,10 @@ void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 			}
 			return;
 		}
-		if (_minRect.contains(e->pos())) {
+		if (_qualityRect.contains(e->pos())) {
+			showTelemetryMenu(mapToGlobal(QPoint(
+				_qualityRect.left(), _qualityRect.bottom() + 4)));
+		} else if (_minRect.contains(e->pos())) {
 			_minStream.fire({});
 		} else if (_maxRect.contains(e->pos())) {
 			_maxStream.fire({});
@@ -888,6 +1499,348 @@ void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 		}
 	}
 	Ui::RpWidget::mousePressEvent(e);
+}
+
+void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
+	QMenu menu(this);
+	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
+	const auto text = [this](const char *key, const QString &fallback = QStringLiteral("-")) {
+		const auto value = _telemetrySnapshot.value(QString::fromLatin1(key));
+		return value.isValid() ? value.toString() : fallback;
+	};
+	const auto addValue = [&menu](const QString &label, const QString &value) {
+		auto *action = menu.addAction(label + QStringLiteral(": ") + value);
+		action->setEnabled(false);
+	};
+	const auto duration = [this](const char *key) {
+		const auto value = _telemetrySnapshot.value(QString::fromLatin1(key), -1).toLongLong();
+		return value >= 0 ? QStringLiteral("%1 ms").arg(value)
+			: QCoreApplication::translate("MeetingUI", "Not available");
+	};
+	const auto decimalMs = [this](const char *key) {
+		const auto value = _telemetrySnapshot.value(QString::fromLatin1(key), -1.0).toDouble();
+		return value >= 0.0 ? QStringLiteral("%1 ms").arg(value, 0, 'f', 2)
+			: QCoreApplication::translate("MeetingUI", "Not available");
+	};
+	const auto ratio = [this](const char *key) {
+		const auto value = _telemetrySnapshot.value(QString::fromLatin1(key), -1.0).toDouble();
+		return value >= 0.0 ? QStringLiteral("%1%").arg(value * 100.0, 0, 'f', 2)
+			: QCoreApplication::translate("MeetingUI", "Not available");
+	};
+	const auto percent = [this](const char *key) {
+		const auto value = _telemetrySnapshot.value(QString::fromLatin1(key), -1.0).toDouble();
+		return value >= 0.0 ? QStringLiteral("%1%").arg(value, 0, 'f', 2)
+			: QCoreApplication::translate("MeetingUI", "Not available");
+	};
+	const auto mebibytes = [this](const char *key) {
+		const auto value = _telemetrySnapshot.value(
+			QString::fromLatin1(key)).toULongLong();
+		return QStringLiteral("%1 MiB").arg(
+			static_cast<double>(value) / (1024.0 * 1024.0), 0, 'f', 1);
+	};
+	const auto signedMebibytes = [this](const char *key) {
+		const auto value = _telemetrySnapshot.value(
+			QString::fromLatin1(key)).toLongLong();
+		return QStringLiteral("%1 MiB").arg(
+			static_cast<double>(value) / (1024.0 * 1024.0), 0, 'f', 1);
+	};
+	const auto valid = [this](const char *availabilityKey) {
+		return _telemetrySnapshot.value(QString::fromLatin1(availabilityKey)).toString() ==
+			QStringLiteral("VALID");
+	};
+	const auto unavailable = [] {
+		return QCoreApplication::translate("MeetingUI", "Not available");
+	};
+	const auto durationWhenValid = [&](const char *availabilityKey, const char *key) {
+		return valid(availabilityKey) ? duration(key) : unavailable();
+	};
+	const auto decimalMsWhenValid = [&](const char *availabilityKey, const char *key) {
+		return valid(availabilityKey) ? decimalMs(key) : unavailable();
+	};
+	const auto ratioWhenValid = [&](const char *availabilityKey, const char *key) {
+		return valid(availabilityKey) ? ratio(key) : unavailable();
+	};
+	const auto textWhenValid = [&](const char *availabilityKey, const char *key) {
+		return valid(availabilityKey) ? text(key) : unavailable();
+	};
+
+	auto *header = menu.addAction(QCoreApplication::translate("MeetingUI", "Telemetry"));
+	header->setEnabled(false);
+	menu.addSeparator();
+	addValue(QCoreApplication::translate("MeetingUI", "Availability"),
+		text("availability") + QStringLiteral(" / ") + text("reason"));
+	addValue(QCoreApplication::translate("MeetingUI", "Age / coverage"),
+		QStringLiteral("%1 ms / %2%").arg(text("sampleAgeMs"))
+			.arg(_telemetrySnapshot.value(QStringLiteral("coverage")).toDouble() * 100.0,
+				0, 'f', 0));
+	addValue(QCoreApplication::translate("MeetingUI", "Peer connections"),
+		QStringLiteral("%1 / %2").arg(text("successfulPcCount"), text("actualPcCount")));
+	addValue(QCoreApplication::translate("MeetingUI", "Request"),
+		QStringLiteral("%1 ms, timeout %2, skip %3, late %4")
+			.arg(text("lastStatsRequestMs"), text("statsRequestTimeouts"),
+				text("statsRequestsSkipped"), text("lateCallbacks")));
+	addValue(QCoreApplication::translate("MeetingUI", "Queue"),
+		QStringLiteral("%1 / %2, high %3, drop %4")
+			.arg(text("queueDepth"), text("queueCapacity"),
+				text("queueHighWater"), text("capacityDrops")));
+	addValue(QCoreApplication::translate("MeetingUI", "Queue delivery lag"),
+		QStringLiteral("%1 / last %2 / max %3")
+			.arg(text("eventQueueLagAvailability"),
+				durationWhenValid("eventQueueLagAvailability", "lastEventQueueLagMs"),
+				durationWhenValid("eventQueueLagAvailability", "maximumEventQueueLagMs")));
+	addValue(QCoreApplication::translate("MeetingUI", "Mapping / reset"),
+		QStringLiteral("%1 / %2").arg(text("mappingFailures"), text("counterResets")));
+	addValue(QCoreApplication::translate("MeetingUI", "Operations"),
+		QStringLiteral("%1 started, %2 terminal, %3 inflight, %4 incomplete")
+			.arg(text("operationsStarted"), text("operationsTerminal"),
+				text("operationsInflight"), text("operationsMissingStart")));
+	menu.addSeparator();
+	addValue(QCoreApplication::translate("MeetingUI", "Process CPU"),
+		QStringLiteral("%1 / %2 / %3 logical CPUs")
+			.arg(text("cpuAvailability"),
+				valid("cpuAvailability") ? percent("processCpuPercent") : unavailable(),
+				text("logicalProcessorCount")));
+	addValue(QCoreApplication::translate("MeetingUI", "Process memory working / private / peak"),
+		valid("memoryAvailability")
+			? QStringLiteral("%1 / %2 / %3 / %4")
+				.arg(text("memoryAvailability"), mebibytes("workingSetBytes"),
+					mebibytes("privateBytes"), mebibytes("peakWorkingSetBytes"))
+			: text("memoryAvailability") + QStringLiteral(" / ") + unavailable());
+	addValue(QCoreApplication::translate("MeetingUI", "Process threads / handles"),
+		QStringLiteral("%1 / %2")
+			.arg(valid("threadCountAvailability")
+				? text("processThreadCount") : unavailable(),
+				valid("handleCountAvailability")
+					? text("processHandleCount") : unavailable()));
+	addValue(QCoreApplication::translate("MeetingUI", "Strand / UI lag last / max"),
+		QStringLiteral("%1: %2 / %3; %4: %5 / %6")
+			.arg(text("strandLagAvailability"),
+				durationWhenValid("strandLagAvailability", "lastStrandLagMs"),
+				durationWhenValid("strandLagAvailability", "maximumStrandLagMs"),
+				text("uiLagAvailability"),
+				durationWhenValid("uiLagAvailability", "lastUiLagMs"),
+				durationWhenValid("uiLagAvailability", "maximumUiLagMs")));
+	addValue(QCoreApplication::translate("MeetingUI", "Runtime sampler"),
+		QStringLiteral("%1 / age %2 ms / %3 us / %4 failures")
+			.arg(text("resourceAvailability"), text("resourceSampleAgeMs"),
+				text("lastResourceSampleUs"), text("resourceSampleFailures")));
+	addValue(QCoreApplication::translate("MeetingUI", "UI probes timeout / skipped / late"),
+		QStringLiteral("%1 / %2 / %3")
+			.arg(text("uiProbeTimeouts"), text("uiProbeSkipped"),
+				text("uiProbeLateCallbacks")));
+	addValue(QCoreApplication::translate("MeetingUI", "GPU process metrics"),
+		text("gpuResourceAvailability") + QStringLiteral(" / ") +
+		text("gpuResourceReason"));
+	addValue(QCoreApplication::translate("MeetingUI", "Resource trend window"),
+		QStringLiteral("%1 / N=%2 / %3 ms / %4%")
+			.arg(text("resourceTrendAvailability"), text("resourceTrendSamples"),
+				text("resourceTrendSpanMs"))
+			.arg(_telemetrySnapshot.value(
+				QStringLiteral("resourceTrendCoverage")).toDouble() * 100.0,
+				0, 'f', 0));
+	addValue(QCoreApplication::translate("MeetingUI", "Working set min / current / max"),
+		valid("resourceTrendAvailability")
+			? QStringLiteral("%1 / %2 / %3")
+				.arg(mebibytes("minimumWorkingSetBytes"),
+					mebibytes("workingSetBytes"),
+					mebibytes("maximumWorkingSetBytes"))
+			: unavailable());
+	addValue(QCoreApplication::translate("MeetingUI", "Private bytes min / current / max"),
+		valid("resourceTrendAvailability")
+			? QStringLiteral("%1 / %2 / %3")
+				.arg(mebibytes("minimumPrivateBytes"),
+					mebibytes("privateBytes"),
+					mebibytes("maximumPrivateBytes"))
+			: unavailable());
+	addValue(QCoreApplication::translate("MeetingUI", "Growth signals (not leak confirmation)"),
+		valid("resourceTrendAvailability")
+			? QStringLiteral("%1 MiB/min / %2 threads/h / %3 handles/h")
+				.arg(_telemetrySnapshot.value(
+					QStringLiteral("privateBytesGrowthMibPerMinute")).toDouble(),
+					0, 'f', 2)
+				.arg(_telemetrySnapshot.value(
+					QStringLiteral("threadGrowthPerHour")).toDouble(), 0, 'f', 2)
+				.arg(_telemetrySnapshot.value(
+					QStringLiteral("handleGrowthPerHour")).toDouble(), 0, 'f', 2)
+			: unavailable());
+	addValue(QCoreApplication::translate("MeetingUI", "Session resource delta private / working"),
+		valid("resourceSessionDeltaAvailability")
+			? QStringLiteral("%1 / %2")
+				.arg(signedMebibytes("privateBytesDelta"),
+					signedMebibytes("workingSetDeltaBytes"))
+			: text("resourceSessionDeltaAvailability") +
+				QStringLiteral(" / ") + text("resourceSessionDeltaReason"));
+	addValue(QCoreApplication::translate("MeetingUI", "Post-stop resource return"),
+		text("resourceReturnAvailability") + QStringLiteral(" / ") +
+		text("resourceReturnReason"));
+	addValue(QCoreApplication::translate("MeetingUI", "Telemetry observed cost"),
+		QStringLiteral("%1 / %2% / sampler avg %3 us / build max %4 us / callback max %5 us")
+			.arg(text("telemetryCostAvailability"))
+			.arg(_telemetrySnapshot.value(
+				QStringLiteral("telemetryObservedCostRatio"), -1.0).toDouble() * 100.0,
+				0, 'f', 3)
+			.arg(_telemetrySnapshot.value(
+				QStringLiteral("averageResourceSampleUs"), -1.0).toDouble(),
+				0, 'f', 1)
+			.arg(text("maximumSnapshotBuildUs"),
+				text("maximumSnapshotCallbackUs")));
+	addValue(QCoreApplication::translate("MeetingUI", "Controlled telemetry A/B"),
+		text("telemetryAbAvailability") + QStringLiteral(" / ") +
+		text("telemetryAbReason"));
+	addValue(QCoreApplication::translate("MeetingUI", "Stability ledger"),
+		QStringLiteral("%1 / runs %2 terminal %3 / sessions %4 terminal %5")
+			.arg(text("stabilityLedgerAvailability"), text("processRunsStarted"),
+				text("processRunsTerminal"), text("sessionsStarted"),
+				text("sessionsTerminal")));
+	addValue(QCoreApplication::translate("MeetingUI", "Unknown process terminations"),
+		QStringLiteral("%1 / %2 / %3")
+			.arg(text("unknownTerminationAvailability"),
+				text("unknownProcessTerminations"),
+				ratioWhenValid("unknownTerminationAvailability",
+					"unknownProcessTerminationRatio")));
+	addValue(QCoreApplication::translate("MeetingUI", "Confirmed process crashes"),
+		QStringLiteral("%1 / %2 / %3")
+			.arg(text("confirmedCrashAvailability"),
+				text("confirmedProcessCrashes"),
+				ratioWhenValid("confirmedCrashAvailability",
+					"confirmedProcessCrashRatio")));
+	addValue(QCoreApplication::translate("MeetingUI", "Active video / audio / render bindings"),
+		QStringLiteral("%1 / %2 / %3")
+			.arg(text("remoteVideoBindings"), text("remoteAudioBindings"),
+				text("renderBindings")));
+	menu.addSeparator();
+	addValue(QCoreApplication::translate("MeetingUI", "First decoded video"),
+		text("firstVideoAvailability") + QStringLiteral(" / ") +
+		text("firstVideoReason"));
+	addValue(QCoreApplication::translate("MeetingUI", "Room to decoded frame"),
+		durationWhenValid("firstVideoAvailability", "roomConnectToFirstDecodedMs"));
+	addValue(QCoreApplication::translate("MeetingUI", "Subscription to decoded frame"),
+		durationWhenValid("firstVideoAvailability", "lastSubscribeToFirstDecodedMs"));
+	addValue(QCoreApplication::translate("MeetingUI", "Decoded endpoint"),
+		text("firstVideoMeasurementPoint"));
+	addValue(QCoreApplication::translate("MeetingUI", "Native video freeze"),
+		QStringLiteral("%1 / %2 events, %3")
+			.arg(text("nativeVideoFreezeAvailability"),
+				textWhenValid("nativeVideoFreezeAvailability", "nativeVideoFreezeCount"),
+				durationWhenValid("nativeVideoFreezeAvailability",
+					"nativeVideoFreezeDurationMs")));
+	addValue(QCoreApplication::translate("MeetingUI", "Freeze boundary"),
+		text("nativeVideoFreezeMeasurementPoint"));
+	addValue(QCoreApplication::translate("MeetingUI", "Reconnect video recovery"),
+		QStringLiteral("%1 / %2 of %3 stable / %4")
+			.arg(text("reconnectVideoAvailability"),
+				text("reconnectVideoRecovered"),
+				text("reconnectVideoExpected"),
+				text("reconnectVideoReason")));
+	addValue(QCoreApplication::translate("MeetingUI", "Reconnect signaling / video"),
+		duration("lastReconnectSignalingMs") + QStringLiteral(" / ") +
+		durationWhenValid("reconnectVideoAvailability", "lastReconnectStableVideoMs"));
+	menu.addSeparator();
+	addValue(QCoreApplication::translate("MeetingUI", "First remote PCM"),
+		text("firstAudioAvailability") + QStringLiteral(" / ") +
+		text("firstAudioReason") + QStringLiteral(" / ") +
+		durationWhenValid("firstAudioAvailability", "lastSubscribeToFirstPcmMs"));
+	addValue(QCoreApplication::translate("MeetingUI", "Audio concealment"),
+		QStringLiteral("%1 / all %2 / non-silent %3 / %4 events")
+			.arg(text("audioConcealmentAvailability"),
+				ratioWhenValid("audioConcealmentAvailability", "audioConcealedRatio"),
+				ratioWhenValid("audioConcealmentAvailability",
+					"audioNonSilentConcealedRatio"),
+				textWhenValid("audioConcealmentAvailability",
+					"audioWindowConcealmentEvents")));
+	addValue(QCoreApplication::translate("MeetingUI", "Jitter buffer actual / target / minimum"),
+		QStringLiteral("%1 / %2 / %3 / %4")
+			.arg(text("audioJitterBufferAvailability"),
+				decimalMsWhenValid("audioJitterBufferAvailability",
+					"audioJitterBufferDelayMs"),
+				decimalMsWhenValid("audioJitterBufferAvailability",
+					"audioJitterBufferTargetDelayMs"),
+				decimalMsWhenValid("audioJitterBufferAvailability",
+					"audioJitterBufferMinimumDelayMs")));
+	addValue(QCoreApplication::translate("MeetingUI", "Audio time stretch insert / remove"),
+		QStringLiteral("%1 / %2 / %3")
+			.arg(text("audioTimeStretchAvailability"),
+				ratioWhenValid("audioTimeStretchAvailability", "audioInsertedRatio"),
+				ratioWhenValid("audioTimeStretchAvailability", "audioRemovedRatio")));
+	addValue(QCoreApplication::translate("MeetingUI", "Reconnect audio recovery"),
+		QStringLiteral("%1 / %2 of %3 / %4")
+			.arg(text("reconnectAudioAvailability"),
+				text("reconnectAudioRecovered"), text("reconnectAudioExpected"),
+				text("reconnectAudioReason")));
+	addValue(QCoreApplication::translate("MeetingUI", "Reconnect audio first / stable / interruption"),
+		durationWhenValid("reconnectAudioAvailability", "lastReconnectFirstAudioMs") +
+		QStringLiteral(" / ") +
+		durationWhenValid("reconnectAudioAvailability", "lastReconnectStableAudioMs") +
+		QStringLiteral(" / ") +
+		durationWhenValid("reconnectAudioAvailability",
+			"lastReconnectAudioInterruptionMs"));
+	menu.addSeparator();
+	addValue(QCoreApplication::translate("MeetingUI", "First visible render submit"),
+		text("renderFirstFrameAvailability") + QStringLiteral(" / ") +
+		text("renderFirstFrameReason"));
+	addValue(QCoreApplication::translate("MeetingUI", "Decode / subscription to render"),
+		durationWhenValid("renderFirstFrameAvailability", "lastDecodeToRenderMs") +
+		QStringLiteral(" / ") +
+		durationWhenValid("renderFirstFrameAvailability",
+			"lastSubscribeToFirstRenderMs"));
+	addValue(QCoreApplication::translate("MeetingUI", "Render submit boundary"),
+		text("renderMeasurementPoint"));
+	addValue(QCoreApplication::translate("MeetingUI", "Visible render stall"),
+		QStringLiteral("%1 / %2 / active %3 / count %4 / total %5 / longest %6 / ratio %7")
+			.arg(text("renderStallAlgorithm"), text("renderStallAvailability"),
+				textWhenValid("renderStallAvailability", "renderStallActive"),
+				textWhenValid("renderStallAvailability", "renderStallCount"),
+				durationWhenValid("renderStallAvailability", "renderStallDurationMs"),
+				durationWhenValid("renderStallAvailability", "renderLongestStallMs"),
+				ratioWhenValid("renderStallAvailability", "renderStallRatio")));
+	addValue(QCoreApplication::translate("MeetingUI", "Reconnect render recovery"),
+		QStringLiteral("%1 / %2 of %3 / %4")
+			.arg(text("reconnectRenderAvailability"),
+				text("reconnectRenderRecovered"), text("reconnectRenderExpected"),
+				text("reconnectRenderReason")));
+	addValue(QCoreApplication::translate("MeetingUI", "Reconnect render first / stable / interruption"),
+		durationWhenValid("reconnectRenderAvailability", "lastReconnectFirstRenderMs") +
+		QStringLiteral(" / ") +
+		durationWhenValid("reconnectRenderAvailability", "lastReconnectStableRenderMs") +
+		QStringLiteral(" / ") +
+		durationWhenValid("reconnectRenderAvailability",
+			"lastReconnectRenderInterruptionMs"));
+	const auto operationSummaries = _telemetrySnapshot.value(
+		QStringLiteral("operationSummaries")).toList();
+	if (!operationSummaries.isEmpty()) {
+		menu.addSeparator();
+		for (const auto &entry : operationSummaries) {
+			const auto operation = entry.toMap();
+			addValue(operation.value(QStringLiteral("kind")).toString(),
+				QStringLiteral("%1/%2 ok, %3 degraded, %4 failed, %5 timeout, %6 cancelled, %7 inflight, %8 ms")
+					.arg(operation.value(QStringLiteral("success")).toString(),
+						 operation.value(QStringLiteral("terminal")).toString(),
+						 operation.value(QStringLiteral("degradedSuccess")).toString(),
+						 operation.value(QStringLiteral("failure")).toString(),
+						 operation.value(QStringLiteral("timeout")).toString(),
+						 operation.value(QStringLiteral("cancelled")).toString(),
+						 operation.value(QStringLiteral("inflight")).toString(),
+						 operation.value(QStringLiteral("lastDurationMs")).toString()));
+		}
+	}
+	menu.addSeparator();
+	addValue(QCoreApplication::translate("MeetingUI", "Local report store"),
+		text("telemetryStorageAvailability") + QStringLiteral(" / ") +
+		text("telemetryStorageReason"));
+	auto *detailsAction = menu.addAction(
+		style()->standardIcon(QStyle::SP_FileDialogDetailedView),
+		QCoreApplication::translate("MeetingUI", "Open telemetry details"));
+	auto *exportAction = menu.addAction(
+		style()->standardIcon(QStyle::SP_DialogSaveButton),
+		QCoreApplication::translate("MeetingUI", "Export report"));
+	exportAction->setEnabled(
+		livekit::telemetry::InstalledTelemetryHistoryStore() != nullptr);
+	const auto *selected = menu.exec(globalPos);
+	if (selected == detailsAction) {
+		OpenTelemetryDetailsDialog(this, _telemetrySnapshot);
+	} else if (selected == exportAction) {
+		ShowTelemetryExport(this);
+	}
 }
 
 void RoomTopBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {
@@ -1651,8 +2604,10 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	_coordinator->setLocalAudioMuted(_config.audioMuted);
 	_coordinator->setLocalVideoEnabled(_config.videoEnabled);
 	_remoteRenderSession = std::make_unique<livekit::render::VideoRenderSession>(
-		[this](const std::string &identity, const QImage &image) {
-			receiveRenderedVideoFrame(image, QString::fromStdString(identity));
+		[this](const std::string &identity, const QImage &image,
+		       livekit::render::VideoRenderFrame::Ptr frame) {
+			receiveRenderedVideoFrame(
+				image, QString::fromStdString(identity), std::move(frame));
 		});
 	_remoteRenderTimer = new QTimer(this);
 	connect(_remoteRenderTimer, &QTimer::timeout, this, &MeetingRoomWindow::onRemoteRenderTick);
@@ -1795,8 +2750,10 @@ MeetingRoomWindow::MeetingRoomWindow(
 	setupInvitationBinding();
 	setupWhiteboardBinding();
 	_remoteRenderSession = std::make_unique<livekit::render::VideoRenderSession>(
-		[this](const std::string &identity, const QImage &image) {
-			receiveRenderedVideoFrame(image, QString::fromStdString(identity));
+		[this](const std::string &identity, const QImage &image,
+		       livekit::render::VideoRenderFrame::Ptr frame) {
+			receiveRenderedVideoFrame(
+				image, QString::fromStdString(identity), std::move(frame));
 		});
 	_remoteRenderSession->UseQtCpuBackend();
 	bindLocalMediaSources();
@@ -2230,7 +3187,7 @@ void MeetingRoomWindow::initLayout() {
 		auto &session = OpenMeeting::SessionManager::instance();
 		auto preferences = session.mediaPreferences();
 		if (preferences.microphoneDeviceId == devId) {
-			if (_wasapiCap) _wasapiCap->SwitchDevice(devId.toStdString());
+			requestMicrophoneSwitch(devId);
 		} else {
 			preferences.microphoneDeviceId = devId;
 			session.setMediaPreferences(preferences);
@@ -2271,17 +3228,107 @@ void MeetingRoomWindow::applyAudioProcessingPreferences(
 	processor->ApplyConfig(config);
 }
 
+std::uint64_t MeetingRoomWindow::beginDeviceSwitchTelemetry(
+		DeviceSwitchTelemetry &operation,
+		livekit::telemetry::OperationKind kind) {
+	if (!operation.operationId.empty()) {
+		finishDeviceSwitchTelemetry(
+			operation, operation.serial,
+			livekit::telemetry::OperationOutcome::Cancelled);
+	}
+	++operation.serial;
+	operation.kind = kind;
+	operation.telemetry = _coordinator
+		? _coordinator->sessionTelemetry()
+		: std::weak_ptr<livekit::telemetry::SessionTelemetry>{};
+	if (const auto telemetry = operation.telemetry.lock()) {
+		operation.operationId = telemetry->StartOperation(kind);
+	}
+	return operation.serial;
+}
+
+void MeetingRoomWindow::finishDeviceSwitchTelemetry(
+		DeviceSwitchTelemetry &operation,
+		std::uint64_t serial,
+		livekit::telemetry::OperationOutcome outcome) {
+	if (serial == 0 || operation.serial != serial) return;
+	if (const auto telemetry = operation.telemetry.lock();
+		telemetry && !operation.operationId.empty()) {
+		telemetry->FinishOperation(operation.operationId, operation.kind, outcome);
+	}
+	operation.operationId.clear();
+	operation.telemetry.reset();
+}
+
+void MeetingRoomWindow::cancelDeviceSwitchTelemetry() {
+	finishDeviceSwitchTelemetry(
+		_cameraSwitchTelemetry, _cameraSwitchTelemetry.serial,
+		livekit::telemetry::OperationOutcome::Cancelled);
+	finishDeviceSwitchTelemetry(
+		_microphoneSwitchTelemetry, _microphoneSwitchTelemetry.serial,
+		livekit::telemetry::OperationOutcome::Cancelled);
+	finishDeviceSwitchTelemetry(
+		_speakerSwitchTelemetry, _speakerSwitchTelemetry.serial,
+		livekit::telemetry::OperationOutcome::Cancelled);
+	_pendingMicrophoneDeviceGeneration = 0;
+}
+
 bool MeetingRoomWindow::selectSpeakerDevice(const QString &deviceId) {
+	const auto operation = beginDeviceSwitchTelemetry(
+		_speakerSwitchTelemetry,
+		livekit::telemetry::OperationKind::SpeakerDeviceSwitch);
 	auto &manager = livekit::WebRTCManager::Instance();
 	const bool selected = manager.SetPlayoutDeviceById(deviceId.toStdString());
 	_speakerAvailable = manager.EnsurePlayout();
 	if (!_speakerAvailable) setSpeakerOutputMuted(true);
 	if (!selected || !_speakerAvailable) {
+		finishDeviceSwitchTelemetry(
+			_speakerSwitchTelemetry, operation,
+			livekit::telemetry::OperationOutcome::Failure);
 		LogToConsole(LogCategory::Error, "AUDIO_OUTPUT", "Unable to select speaker output device");
 		return false;
 	}
 	if (_bottomBar) _bottomBar->setSpeakerDeviceId(deviceId);
+	finishDeviceSwitchTelemetry(
+		_speakerSwitchTelemetry, operation,
+		livekit::telemetry::OperationOutcome::Success);
 	return true;
+}
+
+void MeetingRoomWindow::requestMicrophoneSwitch(const QString &deviceId) {
+	const auto operation = beginDeviceSwitchTelemetry(
+		_microphoneSwitchTelemetry,
+		livekit::telemetry::OperationKind::MicrophoneDeviceSwitch);
+	if (!_wasapiCap) {
+		finishDeviceSwitchTelemetry(
+			_microphoneSwitchTelemetry, operation,
+			livekit::telemetry::OperationOutcome::Failure);
+		return;
+	}
+	const auto generation = _wasapiCap->SwitchDeviceTracked(deviceId.toStdString());
+	if (generation == 0) {
+		finishDeviceSwitchTelemetry(
+			_microphoneSwitchTelemetry, operation,
+			livekit::telemetry::OperationOutcome::Failure);
+		return;
+	}
+	_pendingMicrophoneDeviceGeneration = generation;
+	if (_wasapiCap->IsRunning() &&
+		_wasapiCap->activeDeviceGeneration() == generation) {
+		finishDeviceSwitchTelemetry(
+			_microphoneSwitchTelemetry, operation,
+			livekit::telemetry::OperationOutcome::Success);
+		_pendingMicrophoneDeviceGeneration = 0;
+		return;
+	}
+	QPointer<MeetingRoomWindow> owner(this);
+	QTimer::singleShot(5000, this, [owner, operation, generation] {
+		if (!owner || owner->_pendingMicrophoneDeviceGeneration != generation) return;
+		owner->_pendingMicrophoneDeviceGeneration = 0;
+		owner->finishDeviceSwitchTelemetry(
+			owner->_microphoneSwitchTelemetry, operation,
+			livekit::telemetry::OperationOutcome::Timeout);
+	});
 }
 
 void MeetingRoomWindow::setSpeakerOutputMuted(bool muted) {
@@ -2310,6 +3357,21 @@ void MeetingRoomWindow::bindMicrophoneCaptureState() {
 			window->applyMicrophoneAvailability(available);
 		}, Qt::QueuedConnection);
 	});
+	_wasapiCap->SetDeviceFrameCallback([window, capture](std::uint64_t generation) {
+		if (!window) return;
+		QMetaObject::invokeMethod(window, [window, capture, generation] {
+			if (!window || !window->_sessionRunning ||
+				window->_closingForSessionInvalidation) return;
+			const auto source = capture.lock();
+			if (!source || window->_wasapiCap != source ||
+				window->_pendingMicrophoneDeviceGeneration != generation) return;
+			window->_pendingMicrophoneDeviceGeneration = 0;
+			window->finishDeviceSwitchTelemetry(
+				window->_microphoneSwitchTelemetry,
+				window->_microphoneSwitchTelemetry.serial,
+				livekit::telemetry::OperationOutcome::Success);
+		}, Qt::QueuedConnection);
+	});
 }
 
 void MeetingRoomWindow::setupAudioPreferencesBinding(
@@ -2328,9 +3390,7 @@ void MeetingRoomWindow::setupAudioPreferencesBinding(
 			if (previousMicrophone != preferences.microphoneDeviceId) {
 				previousMicrophone = preferences.microphoneDeviceId;
 				if (_bottomBar) _bottomBar->setMicrophoneDeviceId(previousMicrophone);
-				if (_wasapiCap && !_wasapiCap->SwitchDevice(previousMicrophone.toStdString())) {
-					applyMicrophoneAvailability(false);
-				}
+				requestMicrophoneSwitch(previousMicrophone);
 			}
 			if (previousSpeaker != preferences.speakerDeviceId) {
 				if (_room && _coordinator
@@ -2418,8 +3478,14 @@ void MeetingRoomWindow::requestCameraSwitch(const QString &devicePath) {
 	}
 
 	_currentCameraPath = devicePath;
+	const auto telemetryOperation = beginDeviceSwitchTelemetry(
+		_cameraSwitchTelemetry,
+		livekit::telemetry::OperationKind::CameraDeviceSwitch);
 	const auto ticket = _cameraCompletionOwner->beginRequest(devicePath);
 	if (!ticket) {
+		finishDeviceSwitchTelemetry(
+			_cameraSwitchTelemetry, telemetryOperation,
+			livekit::telemetry::OperationOutcome::Failure);
 		return;
 	}
 	auto manager = _cameraManager;
@@ -2431,6 +3497,9 @@ void MeetingRoomWindow::requestCameraSwitch(const QString &devicePath) {
 			QCoreApplication::translate("MeetingUI", "Switching camera to: %1 ...").arg(devicePath));
 	}
 	if (!guard || !ticket.isCurrent()) {
+		finishDeviceSwitchTelemetry(
+			_cameraSwitchTelemetry, telemetryOperation,
+			livekit::telemetry::OperationOutcome::Cancelled);
 		return;
 	}
 	if (!guard->_cameraSessionManager
@@ -2462,6 +3531,9 @@ void MeetingRoomWindow::handleCameraSwitchResult(
 	const auto warningEffect = _cameraWarningEffect;
 	QPointer<MeetingRoomWindow> guard(this);
 	if (success) {
+		finishDeviceSwitchTelemetry(
+			_cameraSwitchTelemetry, _cameraSwitchTelemetry.serial,
+			livekit::telemetry::OperationOutcome::Success);
 		_usingRealCamera = true;
 		if (_coordinator) _coordinator->setLocalVideoAvailable(true);
 		if (_localTile) {
@@ -2475,6 +3547,11 @@ void MeetingRoomWindow::handleCameraSwitchResult(
 	}
 
 	const auto errorText = QString::fromStdString(error);
+	finishDeviceSwitchTelemetry(
+		_cameraSwitchTelemetry, _cameraSwitchTelemetry.serial,
+		errorText.contains(QStringLiteral("timeout"), Qt::CaseInsensitive)
+			? livekit::telemetry::OperationOutcome::Timeout
+			: livekit::telemetry::OperationOutcome::Failure);
 	if (logEffect) {
 		logEffect(true, "CAMERA_SWITCH",
 			QCoreApplication::translate("MeetingUI", "Camera switch failed. The previous device was restored: %1").arg(errorText));
@@ -2496,6 +3573,9 @@ void MeetingRoomWindow::invalidateCameraCompletion() {
 	if (_cameraCompletionOwner) {
 		_cameraCompletionOwner->invalidate();
 	}
+	finishDeviceSwitchTelemetry(
+		_cameraSwitchTelemetry, _cameraSwitchTelemetry.serial,
+		livekit::telemetry::OperationOutcome::Cancelled);
 }
 
 void MeetingRoomWindow::stopCameraCapture() {
@@ -3245,13 +4325,16 @@ void MeetingRoomWindow::paintEvent(QPaintEvent *e) {
 	p.fillRect(rect(), QColor(0x12, 0x14, 0x1a));
 }
 
-void MeetingRoomWindow::receiveRenderedVideoFrame(const QImage& image, const QString& key) {
+void MeetingRoomWindow::receiveRenderedVideoFrame(
+		const QImage& image,
+		const QString& key,
+		livekit::render::VideoRenderFrame::Ptr renderFrame) {
     if (key == QStringLiteral("local")) {
-        if (_config.videoEnabled) receiveLocalVideoFrame(image);
+        if (_config.videoEnabled) receiveLocalVideoFrame(image, std::move(renderFrame));
     } else if (_localScreenTile && key == _localScreenTile->renderKey()) {
-        _localScreenTile->setFrame(image);
+        _localScreenTile->setFrame(image, std::move(renderFrame));
     } else {
-        receiveRemoteVideoFrame(image, key);
+        receiveRemoteVideoFrame(image, key, std::move(renderFrame));
     }
 }
 
@@ -3272,10 +4355,13 @@ void MeetingRoomWindow::receiveGpuVideoFrame(const std::string& key, livekit::re
     if (tile) _videoCanvas->updateFrame(tile->renderKey().toStdString(), std::move(frame));
 }
 
-void MeetingRoomWindow::receiveRemoteVideoFrame(const QImage &frame, const QString &trackSid) {
+void MeetingRoomWindow::receiveRemoteVideoFrame(
+		const QImage &frame,
+		const QString &trackSid,
+		livekit::render::VideoRenderFrame::Ptr renderFrame) {
 	if (frame.isNull() || !canRenderRemoteVideo(trackSid)) return;
 	if (auto *tile = remoteVideoTile(trackSid)) {
-		tile->setFrame(frame);
+		tile->setFrame(frame, std::move(renderFrame));
 		if (!tile->isVideoActive()) {
 			tile->setVideoActive(true);
 			updateVideoLayout();
@@ -3283,9 +4369,11 @@ void MeetingRoomWindow::receiveRemoteVideoFrame(const QImage &frame, const QStri
 	}
 }
 
-void MeetingRoomWindow::receiveLocalVideoFrame(const QImage &frame) {
+void MeetingRoomWindow::receiveLocalVideoFrame(
+		const QImage &frame,
+		livekit::render::VideoRenderFrame::Ptr renderFrame) {
 	if (_localTile) {
-		_localTile->setFrame(frame);
+		_localTile->setFrame(frame, std::move(renderFrame));
 	}
 }
 
@@ -3662,6 +4750,10 @@ void MeetingRoomWindow::setAnnotationInteractionEnabled(bool enabled) {
 
 void MeetingRoomWindow::setupCoordinatorBindings() {
 	if (!_coordinator) return;
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::telemetrySnapshotChanged,
+		this, [this](const QVariantMap &snapshot) {
+			_topBar->setTelemetrySnapshot(snapshot);
+		});
 	_bottomBar->shareScreenClicked() | rpl::on_next([this] { requestScreenShare(); }, lifetime());
 	applyScreenShareSnapshot(_coordinator->screenShareSnapshot());
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::screenShareChanged,
@@ -4130,6 +5222,7 @@ void MeetingRoomWindow::attachCoordinatorSession() {
 
 void MeetingRoomWindow::stopLiveKitSession() {
 	invalidateCameraCompletion();
+	cancelDeviceSwitchTelemetry();
 	closeAnnotationOverlay();
 	_annotationBinding.reset();
 	_localScreenPreview.reset();

@@ -10,19 +10,23 @@
 #include "src/ui/login_dialog.h"
 #include "src/ui/settings_dialog.h"
 #include "src/ui/shadow_helper.h"
+#include "src/ui/telemetry_dialogs.h"
 #include "src/core/meeting_catalog_controller.h"
 #include "src/core/meeting_coordinator.h"
 #include "src/net/session_manager.h"
+#include "src/telemetry/telemetry_report.h"
 #include "styles/style_widgets.h"
 #include <QtCore/QPointer>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
+#include <QtWidgets/QCheckBox>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QMessageBox>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QAction>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QProgressDialog>
+#include <QtWidgets/QPushButton>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QFont>
@@ -604,9 +608,18 @@ void MeetingMainWindow::initLayout() {
 
 		auto *switchAction = menu.addAction(QCoreApplication::translate("MeetingUI", "Switch Account / Sign In"));
 		auto *logoutAction = menu.addAction(QCoreApplication::translate("MeetingUI", "Sign Out"));
+		const auto reportCount = livekit::telemetry::InstalledTelemetryHistoryStore()
+			? livekit::telemetry::InstalledTelemetryHistoryStore()->Status()->reports.size()
+			: 0;
+		auto *telemetryAction = menu.addAction(
+			style()->standardIcon(QStyle::SP_FileDialogDetailedView),
+			QCoreApplication::translate("MeetingUI", "Telemetry reports on this device (%1)")
+				.arg(reportCount));
 
 		QAction *selected = menu.exec(QCursor::pos());
-		if (selected == switchAction || selected == logoutAction) {
+		if (selected == telemetryAction) {
+			OpenPostMeetingTelemetryDialog(this);
+		} else if (selected == switchAction || selected == logoutAction) {
 			handleUserLogout();
 		}
 	}, lifetime());

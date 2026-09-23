@@ -79,7 +79,8 @@ OwnedI420Frame::OwnedI420Frame(int width,
                                size_t u_size,
                                int64_t timestamp_us,
                                VideoRotation rotation,
-                               RenderColorSpace color_space)
+                               RenderColorSpace color_space,
+                               RenderFrameMetadata render_metadata)
     : width_(width),
       height_(height),
       chroma_width_(chroma_width),
@@ -92,9 +93,12 @@ OwnedI420Frame::OwnedI420Frame(int width,
       timestamp_us_(timestamp_us),
       rotation_(rotation),
       color_space_(color_space),
+      render_metadata_(std::move(render_metadata)),
       storage_(y_size + u_size + u_size) {}
 
-OwnedI420Frame::Ptr OwnedI420Frame::CopyFrom(const webrtc::VideoFrame& frame) {
+OwnedI420Frame::Ptr OwnedI420Frame::CopyFrom(
+        const webrtc::VideoFrame& frame,
+        RenderFrameMetadata render_metadata) {
     const auto buffer = frame.video_frame_buffer();
     if (!buffer) {
         return nullptr;
@@ -115,7 +119,8 @@ OwnedI420Frame::Ptr OwnedI420Frame::CopyFrom(const webrtc::VideoFrame& frame) {
                           i420_buffer->StrideV(),
                           frame.timestamp_us(),
                           ToVideoRotation(frame.rotation()),
-                          ToRenderColorSpace(frame.color_space()));
+                          ToRenderColorSpace(frame.color_space()),
+                          std::move(render_metadata));
 }
 
 OwnedI420Frame::Ptr OwnedI420Frame::CopyFromPlanes(int width,
@@ -128,7 +133,8 @@ OwnedI420Frame::Ptr OwnedI420Frame::CopyFromPlanes(int width,
                                                     int stride_v,
                                                     int64_t timestamp_us,
                                                     VideoRotation rotation,
-                                                    RenderColorSpace color_space) {
+                                                    RenderColorSpace color_space,
+                                                    RenderFrameMetadata render_metadata) {
     if (width <= 0 || height <= 0 || !data_y || !data_u || !data_v) {
         return nullptr;
     }
@@ -156,7 +162,8 @@ OwnedI420Frame::Ptr OwnedI420Frame::CopyFromPlanes(int width,
                                                                        chroma_size,
                                                                        timestamp_us,
                                                                        rotation,
-                                                                       color_space));
+                                                                       color_space,
+                                                                       std::move(render_metadata)));
 
     for (int row = 0; row < height; ++row) {
         std::memcpy(result->storage_.data() + static_cast<size_t>(row) * result->stride_y_,

@@ -63,23 +63,37 @@ void RtcStatsCollectorBridge::OnStatsDelivered(const webrtc::scoped_refptr<const
         parsed = ParseRtcStatsReport(*report);
     }
 
-    std::function<void(std::optional<StatsReport>)> completion;
+    std::function<void(RtcStatsCollectionResult)> completion;
+    RtcStatsLateCompletion late_completion;
+    RtcStatsCollectionResult result;
     {
         std::lock_guard<std::mutex> lock(state_->mutex);
         if (state_->done) {
-            return;
+            if (state_->timed_out && !state_->late_reported) {
+                state_->late_reported = true;
+                late_completion = state_->late_completion;
+            }
+        } else {
+            if (parsed) {
+                parsed->senders = state_->senders;
+                parsed->senders_available = state_->senders_available;
+                state_->report = *parsed;
+                state_->status = RtcStatsCollectionStatus::Success;
+            } else {
+                state_->status = RtcStatsCollectionStatus::Failed;
+            }
+            state_->done = true;
+            result.status = state_->status;
+            result.report = std::move(parsed);
+            completion = std::move(state_->completion);
         }
-        if (parsed) {
-            parsed->senders = state_->senders;
-            parsed->senders_available = state_->senders_available;
-            state_->report = *parsed;
-        }
-        state_->done = true;
-        completion = std::move(state_->completion);
     }
     state_->cv.notify_all();
     if (completion) {
-        completion(std::move(parsed));
+        completion(std::move(result));
+    }
+    if (late_completion) {
+        late_completion();
     }
 }
 
@@ -92,17 +106,87 @@ StatsReport ParseRtcStatsReport(const webrtc::RTCStatsReport& report) {
             const auto& inbound = static_cast<const webrtc::RTCInboundRtpStreamStats&>(stats);
             InboundRtpStreamStats item;
             item.id = inbound.id();
-            if (inbound.kind.has_value()) item.kind = *inbound.kind;
+            item.kind_available = inbound.kind.has_value();
+            item.frames_decoded_available = inbound.frames_decoded.has_value();
+            item.frames_dropped_available = inbound.frames_dropped.has_value();
+            item.frame_width_available = inbound.frame_width.has_value();
+            item.frame_height_available = inbound.frame_height.has_value();
+            item.frames_per_second_available = inbound.frames_per_second.has_value();
+            item.freeze_count_available = inbound.freeze_count.has_value();
+            item.total_freezes_duration_available =
+                inbound.total_freezes_duration.has_value();
+            item.total_decode_time_available = inbound.total_decode_time.has_value();
+            item.total_samples_received_available =
+                inbound.total_samples_received.has_value();
+            item.concealed_samples_available = inbound.concealed_samples.has_value();
+            item.silent_concealed_samples_available =
+                inbound.silent_concealed_samples.has_value();
+            item.concealment_events_available = inbound.concealment_events.has_value();
+            item.inserted_samples_for_deceleration_available =
+                inbound.inserted_samples_for_deceleration.has_value();
+            item.removed_samples_for_acceleration_available =
+                inbound.removed_samples_for_acceleration.has_value();
+            item.jitter_buffer_delay_available = inbound.jitter_buffer_delay.has_value();
+            item.jitter_buffer_target_delay_available =
+                inbound.jitter_buffer_target_delay.has_value();
+            item.jitter_buffer_minimum_delay_available =
+                inbound.jitter_buffer_minimum_delay.has_value();
+            item.jitter_buffer_emitted_count_available =
+                inbound.jitter_buffer_emitted_count.has_value();
+            item.audio_level_available = inbound.audio_level.has_value();
+            if (item.kind_available) item.kind = *inbound.kind;
             if (inbound.ssrc.has_value()) item.ssrc = std::to_string(*inbound.ssrc);
             if (inbound.bytes_received.has_value()) item.bytes_received = *inbound.bytes_received;
             if (inbound.packets_received.has_value()) item.packets_received = *inbound.packets_received;
             if (inbound.packets_lost.has_value()) item.packets_lost = *inbound.packets_lost;
             if (inbound.jitter.has_value()) item.jitter = *inbound.jitter;
-            if (inbound.frames_decoded.has_value()) item.frames_decoded = *inbound.frames_decoded;
-            if (inbound.frames_dropped.has_value()) item.frames_dropped = *inbound.frames_dropped;
-            if (inbound.frame_width.has_value()) item.frame_width = *inbound.frame_width;
-            if (inbound.frame_height.has_value()) item.frame_height = *inbound.frame_height;
-            if (inbound.frames_per_second.has_value()) item.frames_per_second = *inbound.frames_per_second;
+            if (item.frames_decoded_available) item.frames_decoded = *inbound.frames_decoded;
+            if (item.frames_dropped_available) item.frames_dropped = *inbound.frames_dropped;
+            if (item.frame_width_available) item.frame_width = *inbound.frame_width;
+            if (item.frame_height_available) item.frame_height = *inbound.frame_height;
+            if (item.frames_per_second_available) {
+                item.frames_per_second = *inbound.frames_per_second;
+            }
+            if (item.freeze_count_available) item.freeze_count = *inbound.freeze_count;
+            if (item.total_freezes_duration_available) {
+                item.total_freezes_duration = *inbound.total_freezes_duration;
+            }
+            if (item.total_decode_time_available) {
+                item.total_decode_time = *inbound.total_decode_time;
+            }
+            if (item.total_samples_received_available) {
+                item.total_samples_received = *inbound.total_samples_received;
+            }
+            if (item.concealed_samples_available) {
+                item.concealed_samples = *inbound.concealed_samples;
+            }
+            if (item.silent_concealed_samples_available) {
+                item.silent_concealed_samples = *inbound.silent_concealed_samples;
+            }
+            if (item.concealment_events_available) {
+                item.concealment_events = *inbound.concealment_events;
+            }
+            if (item.inserted_samples_for_deceleration_available) {
+                item.inserted_samples_for_deceleration =
+                    *inbound.inserted_samples_for_deceleration;
+            }
+            if (item.removed_samples_for_acceleration_available) {
+                item.removed_samples_for_acceleration =
+                    *inbound.removed_samples_for_acceleration;
+            }
+            if (item.jitter_buffer_delay_available) {
+                item.jitter_buffer_delay = *inbound.jitter_buffer_delay;
+            }
+            if (item.jitter_buffer_target_delay_available) {
+                item.jitter_buffer_target_delay = *inbound.jitter_buffer_target_delay;
+            }
+            if (item.jitter_buffer_minimum_delay_available) {
+                item.jitter_buffer_minimum_delay = *inbound.jitter_buffer_minimum_delay;
+            }
+            if (item.jitter_buffer_emitted_count_available) {
+                item.jitter_buffer_emitted_count = *inbound.jitter_buffer_emitted_count;
+            }
+            if (item.audio_level_available) item.audio_level = *inbound.audio_level;
 
             result.inbound_rtp.push_back(item);
         } else if (stats.type() == webrtc::RTCOutboundRtpStreamStats::kType) {
@@ -134,6 +218,32 @@ StatsReport ParseRtcStatsReport(const webrtc::RTCStatsReport& report) {
             if (remote_inbound.fraction_lost.has_value()) item.fraction_lost = *remote_inbound.fraction_lost;
 
             result.remote_inbound_rtp.push_back(item);
+        } else if (stats.type() == webrtc::RTCAudioPlayoutStats::kType) {
+            const auto& playout =
+                static_cast<const webrtc::RTCAudioPlayoutStats&>(stats);
+            AudioPlayoutStats item;
+            item.id = playout.id();
+            item.synthesized_samples_events_available =
+                playout.synthesized_samples_events.has_value();
+            item.synthesized_samples_duration_available =
+                playout.synthesized_samples_duration.has_value();
+            item.total_playout_delay_available =
+                playout.total_playout_delay.has_value();
+            item.total_samples_count_available =
+                playout.total_samples_count.has_value();
+            if (item.synthesized_samples_events_available) {
+                item.synthesized_samples_events = *playout.synthesized_samples_events;
+            }
+            if (item.synthesized_samples_duration_available) {
+                item.synthesized_samples_duration = *playout.synthesized_samples_duration;
+            }
+            if (item.total_playout_delay_available) {
+                item.total_playout_delay = *playout.total_playout_delay;
+            }
+            if (item.total_samples_count_available) {
+                item.total_samples_count = *playout.total_samples_count;
+            }
+            result.audio_playout.push_back(std::move(item));
         } else if (stats.type() == webrtc::RTCIceCandidatePairStats::kType) {
             const auto& pair = static_cast<const webrtc::RTCIceCandidatePairStats&>(stats);
             CandidatePairStats item;
@@ -203,29 +313,34 @@ bool RequestRtcStats(
     return true;
 }
 
-asio::awaitable<std::optional<StatsReport>> CollectRtcStats(
+asio::awaitable<RtcStatsCollectionResult> CollectRtcStatsDetailed(
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection,
     asio::any_io_executor executor,
-    std::chrono::milliseconds timeout) {
+    std::chrono::milliseconds timeout,
+    RtcStatsLateCompletion late_completion) {
     if (!peer_connection) {
-        co_return std::nullopt;
+        co_return RtcStatsCollectionResult{
+            RtcStatsCollectionStatus::Rejected, std::nullopt};
     }
 
     co_return co_await asio::async_initiate<
         decltype(asio::use_awaitable),
-        void(std::optional<StatsReport>)>(
-        [peer_connection = std::move(peer_connection), executor, timeout](auto handler) mutable {
+        void(RtcStatsCollectionResult)>(
+        [peer_connection = std::move(peer_connection), executor, timeout,
+         late_completion = std::move(late_completion)](auto handler) mutable {
             using Handler = decltype(handler);
             auto handler_ptr = std::make_shared<Handler>(std::move(handler));
             auto state = std::make_shared<RtcStatsState>();
             auto timer = std::make_shared<asio::steady_timer>(executor, timeout);
 
-            state->completion = [executor, timer, handler_ptr](
-                                    std::optional<StatsReport> report) mutable {
-                asio::post(executor, [timer, handler_ptr, report = std::move(report)]() mutable {
+            if (late_completion) {
+                state->late_completion = std::move(late_completion);
+            }
+            state->completion = [executor, timer, handler_ptr](RtcStatsCollectionResult result) mutable {
+                asio::post(executor, [timer, handler_ptr, result = std::move(result)]() mutable {
                     std::error_code ignored;
                     timer->cancel(ignored);
-                    (*handler_ptr)(std::move(report));
+                    (*handler_ptr)(std::move(result));
                 });
             };
 
@@ -239,18 +354,44 @@ asio::awaitable<std::optional<StatsReport>> CollectRtcStats(
                         return;
                     }
                     state->done = true;
+                    state->timed_out = true;
+                    state->status = RtcStatsCollectionStatus::Timeout;
                     state->completion = {};
                 }
-                (*handler_ptr)(std::nullopt);
+                (*handler_ptr)(RtcStatsCollectionResult{
+                    RtcStatsCollectionStatus::Timeout, std::nullopt});
             });
 
             if (!RequestRtcStats(std::move(peer_connection), state)) {
-                // Use the same single-completion path, including cancellation
-                // of the timeout, when the signaling thread is unavailable.
-                RtcStatsCollectorBridge::Create(state)->OnStatsDelivered(nullptr);
+                std::function<void(RtcStatsCollectionResult)> completion;
+                {
+                    std::lock_guard lock(state->mutex);
+                    if (!state->done) {
+                        state->done = true;
+                        state->status = RtcStatsCollectionStatus::Rejected;
+                        completion = std::move(state->completion);
+                    }
+                }
+                state->cv.notify_all();
+                if (completion) {
+                    completion(RtcStatsCollectionResult{
+                        RtcStatsCollectionStatus::Rejected, std::nullopt});
+                }
             }
         },
         asio::use_awaitable);
+}
+
+asio::awaitable<std::optional<StatsReport>> CollectRtcStats(
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection,
+    asio::any_io_executor executor,
+    std::chrono::milliseconds timeout) {
+    auto result = co_await CollectRtcStatsDetailed(
+        std::move(peer_connection), executor, timeout);
+    if (result.status != RtcStatsCollectionStatus::Success) {
+        co_return std::nullopt;
+    }
+    co_return std::move(result.report);
 }
 
 } // namespace livekit

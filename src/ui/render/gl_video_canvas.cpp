@@ -62,6 +62,7 @@ bool RetiredOwnerTimedOut(int64_t now) {
 struct GlVideoCanvas::Scene {
     uint64_t sequence = 0;
     lk_render_frame_target target{};
+    std::string measurement_point;
     std::vector<Resource> resources;
     std::vector<lk_render_draw_command> commands;
 };
@@ -196,6 +197,19 @@ struct GlVideoCanvas::Worker {
             if (stop.load()) break;
             context.swapBuffers(surface);
             if (!healthy() || stop.load()) break;
+            std::set<uint64_t> submitted_resources;
+            for (const auto& command : scene->commands) {
+                if (command.resource.value != 0) {
+                    submitted_resources.insert(command.resource.value);
+                }
+            }
+            const auto submitted_at = Clock::now();
+            for (const auto& resource : scene->resources) {
+                if (resource.frame && submitted_resources.contains(resource.id.value)) {
+                    resource.frame->NotifyRendered(
+                        scene->measurement_point.c_str(), submitted_at);
+                }
+            }
             if (!moduleInfoQueried) {
                 moduleInfoQueried = true;
                 lk_render_module_info_v1 moduleInfo{};
@@ -429,6 +443,7 @@ bool GlVideoCanvas::beginFrame(QSize& pixels) {
     pixels = QSize(qRound(surface_->width()*dpr), qRound(surface_->height()*dpr));
     building_ = std::make_shared<Scene>(); building_->target = target_;
     building_->sequence = ++submitted_;
+    building_->measurement_point = "opengl_swap_buffers";
     building_->target.pixel_width = pixels.width(); building_->target.pixel_height = pixels.height();
     for (const auto& [_, resource] : videos_) building_->resources.push_back(resource);
     return true;
@@ -438,7 +453,11 @@ void GlVideoCanvas::addCommand(const VideoTileRect& tile, lk_render_resource_id 
         {0, 0, building_->target.pixel_width, building_->target.pixel_height}, {r, g, b, 1}});
 }
 void GlVideoCanvas::drawSolid(const VideoTileRect& tile, float r, float g, float b) { addCommand(tile, {}, r, g, b); }
-void GlVideoCanvas::drawVideo(const VideoTileRect& tile) { addCommand(tile, videos_.at(tile.identity).id); }
+bool GlVideoCanvas::drawVideo(const VideoTileRect& tile) {
+    if (!building_) return false;
+    addCommand(tile, videos_.at(tile.identity).id);
+    return true;
+}
 bool GlVideoCanvas::drawDecoration(const VideoTileRect& tile, const QImage& input) {
     if (!overlays_.count(tile.identity) && videos_.size() + overlays_.size() >= kMaxResources) return false;
     auto& resource = overlays_[tile.identity];

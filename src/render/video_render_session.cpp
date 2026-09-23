@@ -134,7 +134,7 @@ void VideoRenderSession::RenderFrame(const std::string& key, VideoRenderFrame::P
     } else if (frame_ready_callback_) {
         const auto image = cpu_renderer_.Convert(*frame);
         if (!image.isNull()) {
-            frame_ready_callback_(key, image);
+            frame_ready_callback_(key, image, std::move(frame));
             state->delivered_to_qt_cpu.fetch_add(1, std::memory_order_relaxed);
         } else {
             state->qt_cpu_conversion_failures.fetch_add(1, std::memory_order_relaxed);

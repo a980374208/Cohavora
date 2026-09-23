@@ -35,6 +35,8 @@ add_executable(cohavora_app
     ${PROJECT_SOURCE_DIR}/src/ui/schedule_widget.h
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_main_window.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_main_window.h
+    ${PROJECT_SOURCE_DIR}/src/ui/telemetry_dialogs.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/telemetry_dialogs.h
     ${PROJECT_SOURCE_DIR}/src/ui/settings_dialog.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/settings_dialog.h
     ${PROJECT_SOURCE_DIR}/src/ui/audio_device_test_controller.cpp

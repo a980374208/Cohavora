@@ -45,6 +45,9 @@ public:
     // 捕获线程通知实际设备状态；回调不得阻塞或直接调用 Start/Stop。
     // Qt 调用方须排队回到会话/UI owner，并校验会话是否仍有效。
     void SetCaptureStateCallback(std::function<void(bool)> callback);
+    // Fires once for the first real 10 ms PCM frame produced by each selected
+    // device generation. Synthetic loopback keepalive frames do not qualify.
+    void SetDeviceFrameCallback(std::function<void(std::uint64_t)> callback);
 
     // 静音与音量调节
     void SetMute(bool mute) noexcept { is_muted_.store(mute); }
@@ -66,12 +69,17 @@ public:
 
     // 动态热切换输入音频设备 (空字符串表示使用系统默认麦克风)
     bool SwitchDevice(const std::string& device_id);
+    std::uint64_t SwitchDeviceTracked(const std::string& device_id);
+    std::uint64_t activeDeviceGeneration() const noexcept {
+        return active_device_generation_.load(std::memory_order_acquire);
+    }
 
 private:
     bool InitializeAudioClient();
     void CleanupAudioClient();
     void CaptureThreadLoop();
     void SetCaptureRunning(bool running, bool force_notification = false);
+    void NotifyFirstDeviceFrame();
 
     WasapiCaptureConfig config_;
     std::shared_ptr<AudioSource> audio_source_;
@@ -90,6 +98,10 @@ private:
     bool startup_complete_{false};
     std::mutex callback_mutex_;
     std::function<void(bool)> capture_state_callback_;
+    std::function<void(std::uint64_t)> device_frame_callback_;
+    std::atomic<std::uint64_t> requested_device_generation_{1};
+    std::atomic<std::uint64_t> active_device_generation_{0};
+    std::atomic<std::uint64_t> notified_device_generation_{0};
 
     // Windows Core Audio COM 接口
     Microsoft::WRL::ComPtr<IMMDeviceEnumerator> enumerator_;

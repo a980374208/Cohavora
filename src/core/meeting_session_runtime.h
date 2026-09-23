@@ -5,12 +5,15 @@
 #include <asio.hpp>
 
 #include <cstdint>
+#include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <utility>
 #include <tuple>
 
 #include "participant_event.h"
+#include "src/telemetry/session_telemetry.h"
 
 namespace livekit {
 class ScreenShareSession;
@@ -86,12 +89,17 @@ public:
                           QString localUserId)
         : _strand(context.get_executor())
         , _generation(generation)
-        , _localUserId(std::move(localUserId)) {
+        , _localUserId(std::move(localUserId))
+        , _telemetry(std::make_shared<livekit::telemetry::SessionTelemetry>(
+              _strand, generation)) {
     }
 
     Strand &strand() { return _strand; }
     uint64_t generation() const { return _generation; }
     const QString &localUserId() const { return _localUserId; }
+    const std::shared_ptr<livekit::telemetry::SessionTelemetry> &telemetry() const {
+        return _telemetry;
+    }
 
     void assertOnStrand() const {
         Q_ASSERT(_strand.running_in_this_thread());
@@ -102,9 +110,10 @@ public:
         return _acceptingData;
     }
 
-    void stopAcceptingDataOnStrand() {
+    void stopAcceptingDataOnStrand(std::function<void()> onStopped = {}) {
         assertOnStrand();
         _acceptingData = false;
+        _telemetry->StopOnStrand(std::move(onStopped));
     }
 
     std::map<InboundTransferKey, InboundMediaTransfer> &transfersOnStrand() {
@@ -136,6 +145,7 @@ private:
     Strand _strand;
     const uint64_t _generation;
     const QString _localUserId;
+    std::shared_ptr<livekit::telemetry::SessionTelemetry> _telemetry;
     bool _acceptingData = true;
     std::map<InboundTransferKey, InboundMediaTransfer> _inboundMediaTransfers;
     std::shared_ptr<livekit::ScreenShareSession> _screenShare;

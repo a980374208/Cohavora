@@ -16,6 +16,7 @@
 #include <deque>
 #include <thread>
 #include <atomic>
+#include <chrono>
 
 #include <asio.hpp>
 #include "src/core/room.h"
@@ -31,9 +32,13 @@
 #include "src/media/dshow_capture.h"
 #include "src/net/http_types.h"
 #include "src/net/session_manager.h"
+#include "src/telemetry/stability_ledger.h"
 #include "openmeeting_meeting.pb.h"
 
 namespace OpenMeeting {
+
+QVariantMap ProjectTelemetrySnapshot(
+    const livekit::telemetry::Snapshot &snapshot);
 
 enum class MeetingState {
     Idle,               // 闲置/已就绪
@@ -200,6 +205,12 @@ public:
     std::shared_ptr<livekit::Room> room() const { return _room; }
     std::shared_ptr<livekit::AudioSource> localAudioSource() const { return _localAudioSource; }
     std::shared_ptr<livekit::VideoSource> localVideoSource() const { return _localVideoSource; }
+    std::weak_ptr<livekit::telemetry::SessionTelemetry> sessionTelemetry() const {
+        return _sessionRuntime
+            ? std::weak_ptr<livekit::telemetry::SessionTelemetry>(
+                _sessionRuntime->telemetry())
+            : std::weak_ptr<livekit::telemetry::SessionTelemetry>{};
+    }
 
     // Whiteboard commands are proposals. Only the session-strand authority
     // runtime can turn them into ordered commits.
@@ -271,6 +282,7 @@ signals:
     void localVideoEnableChanged(bool enabled);
     void screenShareSourcesReady(const std::vector<livekit::DesktopSource> &sources);
     void screenShareChanged(livekit::ScreenShareSnapshot snapshot);
+    void telemetrySnapshotChanged(const QVariantMap &snapshot);
 
     // 业务信令事件 (从 DataChannel NotifyMeetingData 解包)
     void kickedOff(const QString &reason, int reasonCode);
@@ -334,6 +346,16 @@ private:
                        QObject *parent);
     uint64_t beginAdmission(AdmissionStage stage);
     uint64_t invalidateAdmission();
+    void attachAdmissionTelemetry(
+        const std::shared_ptr<livekit::telemetry::SessionTelemetry> &telemetry);
+    void finishAdmissionTelemetry(
+        uint64_t admissionGeneration,
+        livekit::telemetry::OperationOutcome outcome);
+    void finishStartupTelemetry(livekit::telemetry::OperationOutcome outcome);
+    void finishActiveStabilitySession();
+    void publishDetachedAdmissionTelemetry(
+        livekit::telemetry::OperationOutcome outcome,
+        std::chrono::steady_clock::time_point finishedAt);
     bool canBeginAdmission() const;
     bool isAdmissionCurrent(uint64_t generation, AdmissionStage stage) const;
     void setState(MeetingState s, const QString &detail = QString());
@@ -407,6 +429,21 @@ private:
     RoomStartHook _roomStartHook;
     uint64_t _admissionGeneration = 0;
     AdmissionStage _admissionStage = AdmissionStage::None;
+    struct AdmissionTelemetryRecord {
+        uint64_t generation = 0;
+        std::chrono::steady_clock::time_point startedAt{};
+        std::string operationId;
+        std::weak_ptr<livekit::telemetry::SessionTelemetry> telemetry;
+        std::shared_ptr<livekit::telemetry::StabilityLedger> stabilityLedger;
+        std::string stabilitySessionId;
+        bool terminal = true;
+    };
+    AdmissionTelemetryRecord _admissionTelemetry;
+    uint64_t _detachedTelemetryRevision = 0;
+    std::string _startupTelemetryOperationId;
+    std::weak_ptr<livekit::telemetry::SessionTelemetry> _startupTelemetry;
+    std::shared_ptr<livekit::telemetry::StabilityLedger> _activeStabilityLedger;
+    std::string _activeStabilitySessionId;
 
     MeetingState _state = MeetingState::Idle;
     QString _currentMeetingId;

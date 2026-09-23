@@ -1,8 +1,10 @@
 #pragma once
 
 #include <cstddef>
+#include <chrono>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "rtc/video_source.h"
@@ -12,6 +14,52 @@ class VideoFrame;
 }
 
 namespace livekit::render {
+
+enum class RenderExpectationReason {
+    SurfaceVisible,
+    SurfaceHidden,
+    WindowMinimized,
+    StreamPaused,
+    BindingEnded,
+};
+
+struct RenderFrameMetadata;
+
+class RenderSubmitObserver {
+public:
+    using Clock = std::chrono::steady_clock;
+    virtual ~RenderSubmitObserver() = default;
+    virtual void SetExpected(
+        bool expected,
+        RenderExpectationReason reason,
+        Clock::time_point source_time) = 0;
+    virtual void OnSubmitted(
+        const RenderFrameMetadata& metadata,
+        const char* measurement_point,
+        Clock::time_point source_time) = 0;
+};
+
+struct RenderFrameMetadata {
+    using Clock = std::chrono::steady_clock;
+
+    std::string series_key;
+    std::uint64_t room_generation = 0;
+    std::uint64_t binding_epoch = 0;
+    std::uint64_t frame_token = 0;
+    Clock::time_point decoded_at{};
+    std::shared_ptr<RenderSubmitObserver> observer;
+
+    bool valid() const noexcept {
+        return !series_key.empty() && room_generation != 0 &&
+            binding_epoch != 0 && frame_token != 0 && observer;
+    }
+
+    bool same_binding_as(const RenderFrameMetadata& other) const noexcept {
+        return valid() && other.valid() && series_key == other.series_key &&
+            room_generation == other.room_generation &&
+            binding_epoch == other.binding_epoch && observer == other.observer;
+    }
+};
 
 // Rendering-facing colour metadata. It intentionally records only the values
 // needed to select a YUV-to-RGB conversion; WebRTC-specific types do not leak
@@ -41,7 +89,9 @@ class OwnedI420Frame final {
 public:
     using Ptr = std::shared_ptr<const OwnedI420Frame>;
 
-    static Ptr CopyFrom(const webrtc::VideoFrame& frame);
+    static Ptr CopyFrom(
+        const webrtc::VideoFrame& frame,
+        RenderFrameMetadata render_metadata = {});
 
     static Ptr CopyFromPlanes(int width,
                               int height,
@@ -53,7 +103,8 @@ public:
                               int stride_v,
                               int64_t timestamp_us = 0,
                               VideoRotation rotation = VideoRotation::VIDEO_ROTATION_0,
-                              RenderColorSpace color_space = {});
+                              RenderColorSpace color_space = {},
+                              RenderFrameMetadata render_metadata = {});
 
     int width() const noexcept { return width_; }
     int height() const noexcept { return height_; }
@@ -70,6 +121,9 @@ public:
     int64_t timestamp_us() const noexcept { return timestamp_us_; }
     VideoRotation rotation() const noexcept { return rotation_; }
     const RenderColorSpace& color_space() const noexcept { return color_space_; }
+    const RenderFrameMetadata& render_metadata() const noexcept {
+        return render_metadata_;
+    }
 
 private:
     OwnedI420Frame(int width,
@@ -80,7 +134,8 @@ private:
                    size_t u_size,
                    int64_t timestamp_us,
                    VideoRotation rotation,
-                   RenderColorSpace color_space);
+                   RenderColorSpace color_space,
+                   RenderFrameMetadata render_metadata);
 
     int width_ = 0;
     int height_ = 0;
@@ -94,6 +149,7 @@ private:
     int64_t timestamp_us_ = 0;
     VideoRotation rotation_ = VideoRotation::VIDEO_ROTATION_0;
     RenderColorSpace color_space_;
+    RenderFrameMetadata render_metadata_;
     std::vector<uint8_t> storage_;
 };
 
