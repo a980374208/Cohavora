@@ -542,15 +542,17 @@ public:
             QStringLiteral("audioTimeStretchAvailability"), QStringLiteral("NOT_EXPECTED"));
         bar.setTelemetrySnapshot(unavailableProjection);
         QStringList telemetryRows;
-        QTimer::singleShot(0, [&telemetryRows] {
-            auto *menu = qobject_cast<QMenu*>(QApplication::activePopupWidget());
-            TEST_CHECK(menu != nullptr);
-            for (const auto *action : menu->actions()) {
-                telemetryRows.push_back(action->text());
-            }
-            menu->close();
-        });
         bar.showTelemetryMenu(bar.mapToGlobal(bar._qualityRect.bottomLeft()));
+        auto *menu = bar.findChild<QMenu*>(
+            QStringLiteral("telemetrySummaryMenu"), Qt::FindDirectChildrenOnly);
+        TEST_CHECK(menu != nullptr);
+        TEST_CHECK(menu->windowModality() == Qt::NonModal);
+        for (const auto *action : menu->actions()) {
+            telemetryRows.push_back(action->text());
+        }
+        menu->close();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        QApplication::processEvents();
         const auto firstAudioRow = std::find_if(
             telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
                 return row.contains(QStringLiteral("First remote PCM"));
@@ -759,6 +761,8 @@ public:
         QPointer<QDialog> details(
             MeetingUI::OpenTelemetryDetailsDialog(nullptr, projection));
         TEST_CHECK(details);
+        TEST_CHECK(!details->isModal());
+        TEST_CHECK(details->windowModality() == Qt::NonModal);
         details->resize(680, 480);
         details->show();
         details->raise();

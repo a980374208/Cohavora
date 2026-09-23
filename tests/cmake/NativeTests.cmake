@@ -147,6 +147,28 @@ set_tests_properties(telemetry_capability_probe_test PROPERTIES
     TIMEOUT 30
     LABELS "TELEMETRY_S0")
 
+# S8a controlled-peer protocol, capability downgrade, and bounded clock mapping.
+add_executable(test_e2e_measurement
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_e2e_measurement.cpp
+)
+target_include_directories(test_e2e_measurement PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_e2e_measurement PRIVATE cohavora_core)
+add_test(NAME e2e_measurement_test COMMAND test_e2e_measurement)
+set_tests_properties(e2e_measurement_test PROPERTIES
+    TIMEOUT 30
+    LABELS "TELEMETRY_S8A;CORE_REGRESSION")
+
+# S8b controlled media marker and decode-to-render-submit acknowledgement gate.
+add_executable(test_e2e_media_correlation
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_e2e_media_correlation.cpp
+)
+target_include_directories(test_e2e_media_correlation PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_e2e_media_correlation PRIVATE cohavora_core)
+add_test(NAME e2e_media_correlation_test COMMAND test_e2e_media_correlation)
+set_tests_properties(e2e_media_correlation_test PROPERTIES
+    TIMEOUT 30
+    LABELS "TELEMETRY_S8B;CORE_REGRESSION")
+
 # Server room-state delta contract: room metadata, connection quality, stream
 # state, and subscription permissions must commit before listener delivery.
 add_executable(test_room_state_events
@@ -251,6 +273,15 @@ if(LIVEKIT_BUILD_EXTERNAL_TESTS)
     target_link_libraries(test_stream_delivery_runtime PRIVATE
         cohavora_core
     )
+
+    # S8b controlled two-peer media marker harness. It is built on demand but
+    # never registered with CTest because it requires real service tokens.
+    add_executable(test_e2e_media_runtime
+        ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_e2e_media_runtime.cpp
+    )
+    target_include_directories(test_e2e_media_runtime PRIVATE
+        ${LIVEKIT_PROJECT_SOURCE_DIR})
+    target_link_libraries(test_e2e_media_runtime PRIVATE cohavora_core)
 endif()
 
 if(LIVEKIT_BUILD_HARDWARE_TESTS)

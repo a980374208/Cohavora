@@ -66,6 +66,19 @@ int main(int argc, char **argv) {
 	TEST_CHECK(QCoreApplication::translate("MeetingUI", "Settings") == QString::fromUtf8("设置"));
 	TEST_CHECK(QCoreApplication::translate("MeetingUI", "Meeting ID %1").arg(123) == QString::fromUtf8("会议号 123"));
 	TEST_CHECK(QCoreApplication::translate("MeetingUI", "Join Meeting") == QString::fromUtf8("加入会议"));
+	TEST_CHECK(QCoreApplication::translate("MeetingUI", "Meeting telemetry") ==
+		QString::fromUtf8("会议遥测"));
+	TEST_CHECK(QCoreApplication::translate("MeetingUI", "Visible render stall") ==
+		QString::fromUtf8("用户可见画面冻结"));
+	TEST_CHECK(QCoreApplication::translate("TelemetryDisplay", "VALID") ==
+		QString::fromUtf8("有效"));
+	TEST_CHECK(QCoreApplication::translate(
+		"TelemetryDisplay", "signaling_restored_waiting_for_video") ==
+		QString::fromUtf8("信令已恢复，等待视频稳定"));
+	TEST_CHECK(QCoreApplication::translate(
+		"MeetingUI", "Telemetry: %1, age %2 ms")
+			.arg(QString::fromUtf8("有效"), QStringLiteral("32")) ==
+		QString::fromUtf8("遥测：有效，数据时效 32 ms"));
 	TEST_CHECK(QCoreApplication::translate("QPlatformTheme", "Cancel") == QString::fromUtf8("取消"));
 	const auto translatorCount = app.findChildren<QTranslator *>().size();
 	TEST_CHECK(translatorCount > 0);

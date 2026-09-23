@@ -186,6 +186,7 @@ void CodecCapabilityProbe() {
         PrintCodecs("audio_receive_codecs", audio_receive);
 
         TEST_CHECK(HasCodec(video_send, "VP8"));
+        TEST_CHECK(HasCodec(video_send, "H264"));
         TEST_CHECK(HasCodec(video_receive, "VP8"));
         TEST_CHECK(HasCodec(video_receive, "VP9"));
         TEST_CHECK(HasCodec(audio_send, "OPUS"));

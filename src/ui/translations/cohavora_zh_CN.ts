@@ -2669,7 +2669,231 @@ Sign in with your own account in a client configured for the same meeting servic
             <source>; </source>
             <translation>；</translation>
         </message>
+		<message><source>Telemetry reports on this device (%1)</source><translation>本机遥测报告（%1）</translation></message>
+		<message><source>CPU and private memory trend</source><translation>CPU 与专用内存趋势</translation></message>
+		<message><source>CPU</source><translation>CPU</translation></message>
+		<message><source>Memory</source><translation>内存</translation></message>
+		<message><source>Export telemetry report</source><translation>导出遥测报告</translation></message>
+		<message><source>Exporting telemetry report...</source><translation>正在导出遥测报告...</translation></message>
+		<message><source>Telemetry export</source><translation>遥测报告导出</translation></message>
+		<message><source>Report exported</source><translation>报告已导出</translation></message>
+		<message><source>Report exported to %1</source><translation>报告已导出到 %1</translation></message>
+		<message><source>Export failed: %1</source><translation>导出失败：%1</translation></message>
+		<message><source>Export queue is full</source><translation>导出队列已满</translation></message>
+		<message><source>Meeting telemetry</source><translation>会议遥测</translation></message>
+		<message><source>Metric</source><translation>指标</translation></message>
+		<message><source>Value</source><translation>值</translation></message>
+		<message><source>Availability</source><translation>可用性</translation></message>
+		<message><source>Reason / boundary</source><translation>原因 / 采集边界</translation></message>
+		<message><source>Overview</source><translation>概览</translation></message>
+		<message><source>Session</source><translation>会话</translation></message>
+		<message><source>Coverage</source><translation>覆盖率</translation></message>
+		<message><source>Schema / definition</source><translation>架构 / 定义版本</translation></message>
+		<message><source>First decoded video</source><translation>首个解码视频帧</translation></message>
+		<message><source>First visible render</source><translation>首次可见渲染</translation></message>
+		<message><source>First remote PCM</source><translation>首个远端 PCM 音频帧</translation></message>
+		<message><source>Active operations</source><translation>进行中的操作</translation></message>
+		<message><source>Media QoE</source><translation>媒体体验质量</translation></message>
+		<message><source>Native video freezes</source><translation>原生视频冻结</translation></message>
+		<message><source>Visible render stalls</source><translation>用户可见画面冻结</translation></message>
+		<message><source>Audio concealment</source><translation>音频丢包补偿</translation></message>
+		<message><source>Jitter buffer delay</source><translation>抖动缓冲延迟</translation></message>
+		<message><source>Reconnect video / audio / render</source><translation>重连视频 / 音频 / 渲染恢复</translation></message>
+		<message><source>Operation</source><translation>操作</translation></message>
+		<message><source>Started / terminal</source><translation>开始 / 已终止</translation></message>
+		<message><source>Success / failure / timeout / cancelled</source><translation>成功 / 失败 / 超时 / 已取消</translation></message>
+		<message><source>Last duration</source><translation>最近耗时</translation></message>
+		<message><source>Operations</source><translation>操作</translation></message>
+		<message><source>Current</source><translation>当前值</translation></message>
+		<message><source>Process CPU</source><translation>进程 CPU</translation></message>
+		<message><source>Private memory</source><translation>专用内存</translation></message>
+		<message><source>Threads / handles</source><translation>线程 / 句柄</translation></message>
+		<message><source>samples=%1, coverage=%2%</source><translation>样本数=%1，覆盖率=%2%</translation></message>
+		<message><source>Resources</source><translation>资源</translation></message>
+		<message><source>Time</source><translation>时间</translation></message>
+		<message><source>Revision</source><translation>修订号</translation></message>
+		<message><source>Video / audio / render</source><translation>视频 / 音频 / 渲染</translation></message>
+		<message><source>Timeline</source><translation>时间线</translation></message>
+		<message><source>Field</source><translation>字段</translation></message>
+		<message><source>All metrics</source><translation>原始指标</translation></message>
+		<message><source>Keep local telemetry history</source><translation>保留本地遥测历史</translation></message>
+		<message><source>%1 / %2 / MET-06 drops=%3, write failures=%4</source><translation>%1 / %2 / MET-06 丢弃=%3，写入失败=%4</translation></message>
+		<message><source>%1  %2 KiB  records=%3</source><translation>%1  %2 KiB  记录数=%3</translation></message>
+		<message><source>Export</source><translation>导出</translation></message>
+		<message><source>Clear selected</source><translation>清除所选报告</translation></message>
+		<message><source>Reports</source><translation>报告</translation></message>
+		<message><source>Telemetry: %1, age %2 ms</source><translation>遥测：%1，数据时效 %2 ms</translation></message>
+		<message><source>Telemetry: %1</source><translation>遥测：%1</translation></message>
+		<message><source>Video recovery: %1 (%2/%3 stable)</source><translation>视频恢复：%1（%2/%3 已稳定）</translation></message>
+		<message><source>Not available</source><translation>不可用</translation></message>
+		<message><source>Telemetry</source><translation>遥测</translation></message>
+		<message><source>Age / coverage</source><translation>数据时效 / 覆盖率</translation></message>
+		<message><source>Peer connections</source><translation>PeerConnection 连接</translation></message>
+		<message><source>Request</source><translation>采样请求</translation></message>
+		<message><source>%1 ms, timeouts %2, skipped %3, late %4</source><translation>%1 ms，超时 %2，跳过 %3，迟到回调 %4</translation></message>
+		<message><source>Queue</source><translation>事件队列</translation></message>
+		<message><source>%1 / %2, high-water %3, drops %4</source><translation>%1 / %2，峰值 %3，丢弃 %4</translation></message>
+		<message><source>Queue delivery lag</source><translation>事件队列投递延迟</translation></message>
+		<message><source>%1 / last %2 / maximum %3</source><translation>%1 / 最近 %2 / 最大 %3</translation></message>
+		<message><source>Mapping / reset</source><translation>映射失败 / 计数器重置</translation></message>
+		<message><source>%1 started, %2 terminal, %3 in flight, %4 incomplete</source><translation>已开始 %1，已终止 %2，进行中 %3，不完整 %4</translation></message>
+		<message><source>%1 / %2 / %3 logical CPUs</source><translation>%1 / %2 / %3 个逻辑处理器</translation></message>
+		<message><source>Process memory working / private / peak</source><translation>进程内存：工作集 / 专用 / 峰值</translation></message>
+		<message><source>Process threads / handles</source><translation>进程线程 / 句柄</translation></message>
+		<message><source>Strand / UI lag last / max</source><translation>会话串行队列 / UI 延迟：最近 / 最大</translation></message>
+		<message><source>Runtime sampler</source><translation>运行时采样器</translation></message>
+		<message><source>%1 / age %2 ms / %3 us / %4 failures</source><translation>%1 / 数据时效 %2 ms / 耗时 %3 us / 失败 %4</translation></message>
+		<message><source>UI probes timeout / skipped / late</source><translation>UI 探针：超时 / 跳过 / 迟到回调</translation></message>
+		<message><source>GPU process metrics</source><translation>GPU 进程指标</translation></message>
+		<message><source>Resource trend window</source><translation>资源趋势窗口</translation></message>
+		<message><source>Working set min / current / max</source><translation>工作集：最小 / 当前 / 最大</translation></message>
+		<message><source>Private bytes min / current / max</source><translation>专用内存：最小 / 当前 / 最大</translation></message>
+		<message><source>Growth signals (not leak confirmation)</source><translation>增长信号（不代表已确认泄漏）</translation></message>
+		<message><source>%1 MiB/min / %2 threads/h / %3 handles/h</source><translation>%1 MiB/分钟 / %2 线程/小时 / %3 句柄/小时</translation></message>
+		<message><source>Session resource delta private / working</source><translation>会话资源增量：专用内存 / 工作集</translation></message>
+		<message><source>Post-stop resource return</source><translation>停止后的资源回收</translation></message>
+		<message><source>Telemetry observed cost</source><translation>遥测观测开销</translation></message>
+		<message><source>%1 / %2% / sampler average %3 us / build maximum %4 us / callback maximum %5 us</source><translation>%1 / %2% / 采样平均 %3 us / 构建最大 %4 us / 回调最大 %5 us</translation></message>
+		<message><source>Controlled telemetry A/B</source><translation>受控遥测 A/B 对照</translation></message>
+		<message><source>Stability ledger</source><translation>稳定性账本</translation></message>
+		<message><source>%1 / runs %2, terminal %3 / sessions %4, terminal %5</source><translation>%1 / 运行 %2，已终止 %3 / 会话 %4，已终止 %5</translation></message>
+		<message><source>Unknown process terminations</source><translation>未知进程终止</translation></message>
+		<message><source>Confirmed process crashes</source><translation>已确认进程崩溃</translation></message>
+		<message><source>Active video / audio / render bindings</source><translation>活动视频 / 音频 / 渲染绑定</translation></message>
+		<message><source>Room to decoded frame</source><translation>进房到首个解码帧</translation></message>
+		<message><source>Subscription to decoded frame</source><translation>订阅到首个解码帧</translation></message>
+		<message><source>Decoded endpoint</source><translation>解码采集点</translation></message>
+		<message><source>Native video freeze</source><translation>原生视频冻结</translation></message>
+		<message><source>%1 / %2 events, %3</source><translation>%1 / %2 次，%3</translation></message>
+		<message><source>Freeze boundary</source><translation>冻结采集边界</translation></message>
+		<message><source>Reconnect video recovery</source><translation>重连视频恢复</translation></message>
+		<message><source>%1 / %2 of %3 stable / %4</source><translation>%1 / %2/%3 已稳定 / %4</translation></message>
+		<message><source>Reconnect signaling / video</source><translation>重连信令 / 视频恢复耗时</translation></message>
+		<message><source>%1 / all %2 / non-silent %3 / %4 events</source><translation>%1 / 总补偿率 %2 / 非静音补偿率 %3 / %4 次事件</translation></message>
+		<message><source>Jitter buffer actual / target / minimum</source><translation>抖动缓冲：实际 / 目标 / 最小</translation></message>
+		<message><source>Audio time stretch insert / remove</source><translation>音频时长调整：插入 / 移除</translation></message>
+		<message><source>Reconnect audio recovery</source><translation>重连音频恢复</translation></message>
+		<message><source>%1 / %2 of %3 / %4</source><translation>%1 / %2/%3 / %4</translation></message>
+		<message><source>Reconnect audio first / stable / interruption</source><translation>重连音频：首帧 / 稳定 / 中断时长</translation></message>
+		<message><source>First visible render submit</source><translation>首次可见渲染提交</translation></message>
+		<message><source>Decode / subscription to render</source><translation>解码 / 订阅到渲染</translation></message>
+		<message><source>Render submit boundary</source><translation>渲染提交边界</translation></message>
+		<message><source>Visible render stall</source><translation>用户可见画面冻结</translation></message>
+		<message><source>%1 / %2 / active %3 / count %4 / total %5 / longest %6 / ratio %7</source><translation>%1 / %2 / 当前冻结 %3 / 次数 %4 / 总时长 %5 / 最长 %6 / 占比 %7</translation></message>
+		<message><source>Reconnect render recovery</source><translation>重连渲染恢复</translation></message>
+		<message><source>Reconnect render first / stable / interruption</source><translation>重连渲染：首次 / 稳定 / 中断时长</translation></message>
+		<message><source>%1/%2 succeeded, %3 degraded, %4 failed, %5 timed out, %6 cancelled, %7 in flight, %8 ms</source><translation>成功 %1/%2，降级成功 %3，失败 %4，超时 %5，已取消 %6，进行中 %7，最近 %8 ms</translation></message>
+		<message><source>Local report store</source><translation>本地报告存储</translation></message>
+		<message><source>Open telemetry details</source><translation>打开遥测详情</translation></message>
+		<message><source>Export report</source><translation>导出报告</translation></message>
+		<message><source>Telemetry reports on this device</source><translation>本机遥测报告</translation></message>
+		<message><source>Latest session</source><translation>最近会话</translation></message>
+		<message><source>Observed at</source><translation>采集时间</translation></message>
+		<message><source>Completion</source><translation>完成状态</translation></message>
+		<message><source>Availability / coverage</source><translation>可用性 / 覆盖率</translation></message>
+		<message><source>First decoded / visible video</source><translation>首个解码帧 / 首次可见渲染</translation></message>
+		<message><source>Visible stalls</source><translation>用户可见画面冻结</translation></message>
+		<message><source>Operations terminal / inflight</source><translation>已终止操作 / 进行中操作</translation></message>
+		<message><source>No local session summary</source><translation>暂无本地会话摘要</translation></message>
+		<message><source>Export latest</source><translation>导出最新报告</translation></message>
     </context>
+	<context>
+		<name>TelemetryDisplay</name>
+		<message><source>VALID</source><translation>有效</translation></message>
+		<message><source>WARMING_UP</source><translation>预热中</translation></message>
+		<message><source>NOT_EXPECTED</source><translation>无需采集</translation></message>
+		<message><source>UNSUPPORTED</source><translation>不支持</translation></message>
+		<message><source>TIMEOUT</source><translation>超时</translation></message>
+		<message><source>STALE</source><translation>数据过期</translation></message>
+		<message><source>INVALID</source><translation>无效</translation></message>
+		<message><source>UNKNOWN</source><translation>未知</translation></message>
+		<message><source>COMPLETE</source><translation>已完成</translation></message>
+		<message><source>IN_PROGRESS</source><translation>进行中</translation></message>
+		<message><source>true</source><translation>是</translation></message>
+		<message><source>false</source><translation>否</translation></message>
+		<message><source>admission</source><translation>准入</translation></message>
+		<message><source>connect</source><translation>连接房间</translation></message>
+		<message><source>startup</source><translation>启动本地媒体</translation></message>
+		<message><source>publish_batch</source><translation>批量发布</translation></message>
+		<message><source>publish_track</source><translation>发布轨道</translation></message>
+		<message><source>subscribe</source><translation>订阅轨道</translation></message>
+		<message><source>unsubscribe</source><translation>取消订阅</translation></message>
+		<message><source>unpublish</source><translation>取消发布</translation></message>
+		<message><source>reconnect_episode</source><translation>重连过程</translation></message>
+		<message><source>reconnect_attempt</source><translation>重连尝试</translation></message>
+		<message><source>camera_device_switch</source><translation>切换摄像头</translation></message>
+		<message><source>microphone_device_switch</source><translation>切换麦克风</translation></message>
+		<message><source>speaker_device_switch</source><translation>切换扬声器</translation></message>
+		<message><source>unknown</source><translation>未知操作</translation></message>
+		<message><source>not_sampled</source><translation>尚未采样</translation></message>
+		<message><source>stats_complete</source><translation>统计采集完成</translation></message>
+		<message><source>stats_partial_coverage</source><translation>统计覆盖不完整</translation></message>
+		<message><source>stats_timeout</source><translation>统计采集超时</translation></message>
+		<message><source>sample_stale</source><translation>采样数据已过期</translation></message>
+		<message><source>no_peer_connection</source><translation>没有可采样的 PeerConnection</translation></message>
+		<message><source>decoded_frame_received</source><translation>已收到解码视频帧</translation></message>
+		<message><source>waiting_for_decoded_frame</source><translation>等待解码视频帧</translation></message>
+		<message><source>all_expected_bindings_decoded</source><translation>所有预期视频绑定均已解码</translation></message>
+		<message><source>no_remote_video_expected</source><translation>当前无需远端视频</translation></message>
+		<message><source>no_remote_video_binding</source><translation>没有远端视频绑定</translation></message>
+		<message><source>no_inbound_video_stats</source><translation>没有入站视频统计</translation></message>
+		<message><source>native_freeze_fields_missing</source><translation>缺少原生视频冻结字段</translation></message>
+		<message><source>pcm_received</source><translation>已收到 PCM 音频帧</translation></message>
+		<message><source>waiting_for_pcm</source><translation>等待 PCM 音频帧</translation></message>
+		<message><source>all_expected_bindings_delivered_pcm</source><translation>所有预期音频绑定均已输出 PCM</translation></message>
+		<message><source>no_remote_audio_expected</source><translation>当前无需远端音频</translation></message>
+		<message><source>no_remote_audio_binding</source><translation>没有远端音频绑定</translation></message>
+		<message><source>no_inbound_audio_stats</source><translation>没有入站音频统计</translation></message>
+		<message><source>audio_quality_fields_missing</source><translation>缺少音频质量字段</translation></message>
+		<message><source>audio_delta_baseline_warming_up</source><translation>音频增量基线预热中</translation></message>
+		<message><source>concealment_window_valid</source><translation>音频丢包补偿窗口有效</translation></message>
+		<message><source>jitter_buffer_window_valid</source><translation>抖动缓冲窗口有效</translation></message>
+		<message><source>time_stretch_window_valid</source><translation>音频时长调整窗口有效</translation></message>
+		<message><source>first_unique_frame_submitted</source><translation>首个唯一视频帧已提交渲染</translation></message>
+		<message><source>visible_render_observed</source><translation>已观测到可见渲染</translation></message>
+		<message><source>waiting_for_visible_submit</source><translation>等待可见渲染提交</translation></message>
+		<message><source>all_expected_surfaces_submitted</source><translation>所有预期表面均已提交渲染</translation></message>
+		<message><source>no_visible_render_expected</source><translation>当前无需可见渲染</translation></message>
+		<message><source>no_expected_render_binding</source><translation>没有预期渲染绑定</translation></message>
+		<message><source>waiting_for_first_submit</source><translation>等待首次渲染提交</translation></message>
+		<message><source>static_content_not_classified</source><translation>静态内容不计为冻结</translation></message>
+		<message><source>visible_render_stall_active</source><translation>当前存在用户可见画面冻结</translation></message>
+		<message><source>render_stall_window_valid</source><translation>可见画面冻结统计窗口有效</translation></message>
+		<message><source>render_window_valid</source><translation>渲染统计窗口有效</translation></message>
+		<message><source>no_reconnect_episode</source><translation>尚未发生重连</translation></message>
+		<message><source>signaling_restored_waiting_for_video</source><translation>信令已恢复，等待视频稳定</translation></message>
+		<message><source>signaling_restored_waiting_for_audio</source><translation>信令已恢复，等待音频稳定</translation></message>
+		<message><source>signaling_restored_waiting_for_render</source><translation>信令已恢复，等待可见渲染稳定</translation></message>
+		<message><source>decoded_video_stably_recovered</source><translation>解码视频已稳定恢复</translation></message>
+		<message><source>pcm_stably_recovered</source><translation>PCM 音频已稳定恢复</translation></message>
+		<message><source>visible_render_stably_recovered</source><translation>可见渲染已稳定恢复</translation></message>
+		<message><source>expectation_changed_during_recovery</source><translation>恢复期间媒体预期发生变化</translation></message>
+		<message><source>no_remote_video_expected_at_outage</source><translation>中断时无需远端视频</translation></message>
+		<message><source>no_remote_audio_expected_at_outage</source><translation>中断时无需远端音频</translation></message>
+		<message><source>no_visible_render_expected_at_outage</source><translation>中断时无需可见渲染</translation></message>
+		<message><source>process_times_window_valid</source><translation>进程 CPU 采样窗口有效</translation></message>
+		<message><source>process_memory_query_valid</source><translation>进程内存采样有效</translation></message>
+		<message><source>process_thread_count_valid</source><translation>进程线程数采样有效</translation></message>
+		<message><source>process_handle_count_valid</source><translation>进程句柄数采样有效</translation></message>
+		<message><source>gpu_process_provider_not_configured</source><translation>未配置 GPU 进程指标提供器</translation></message>
+		<message><source>resource_trend_not_started</source><translation>资源趋势采样尚未开始</translation></message>
+		<message><source>resource_trend_minimum_window_not_met</source><translation>资源趋势尚未达到最小窗口</translation></message>
+		<message><source>post_stop_stable_window_not_observed</source><translation>尚未观测到停止后的稳定窗口</translation></message>
+		<message><source>observed_sampler_snapshot_cost_valid</source><translation>采样与快照开销统计有效</translation></message>
+		<message><source>controlled_enabled_disabled_run_not_executed</source><translation>尚未执行启用/禁用遥测的受控对照</translation></message>
+		<message><source>bounded_history_valid</source><translation>有界本地历史有效</translation></message>
+		<message><source>history_store_not_installed</source><translation>未启用本地历史存储</translation></message>
+		<message><source>native_video_sink_onframe_entry</source><translation>原生视频接收器 OnFrame 入口</translation></message>
+		<message><source>rtc_inbound_video_sink</source><translation>RTC 入站视频接收端</translation></message>
+		<message><source>native_video_sink_stable_delivery</source><translation>原生视频接收端稳定输出</translation></message>
+		<message><source>native_audio_sink_ondata_entry</source><translation>原生音频接收器 OnData 入口</translation></message>
+		<message><source>rtc_inbound_audio_stats</source><translation>RTC 入站音频统计</translation></message>
+		<message><source>native_audio_sink_stable_pcm_delivery</source><translation>原生音频接收端稳定输出 PCM</translation></message>
+		<message><source>render_submit_not_registered</source><translation>尚未注册渲染提交点</translation></message>
+		<message><source>visible_render_submit</source><translation>可见渲染提交</translation></message>
+		<message><source>qt_cpu_paint</source><translation>Qt CPU 绘制</translation></message>
+		<message><source>local-safe-snapshot</source><translation>本地安全快照</translation></message>
+	</context>
     <context>
         <name>MeetingUI::AnnotationOverlayWindow</name>
         <message><source>Draw</source><translation>绘制</translation></message>

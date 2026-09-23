@@ -35,31 +35,48 @@ namespace livekit {
 
 namespace {
 
-class SingleStreamVp8EncoderFactory : public webrtc::VideoEncoderFactory {
+class SingleStreamVideoEncoderFactory : public webrtc::VideoEncoderFactory {
 public:
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
-        return { webrtc::SdpVideoFormat("VP8") };
+        std::vector<webrtc::SdpVideoFormat> formats{
+            webrtc::SdpVideoFormat("VP8")};
+        if (webrtc::H264Encoder::IsSupported()) {
+            auto h264 = webrtc::SupportedH264Codecs();
+            formats.insert(formats.end(), h264.begin(), h264.end());
+        }
+        return formats;
     }
 
     CodecSupport QueryCodecSupport(
         const webrtc::SdpVideoFormat& format,
         std::optional<std::string> scalability_mode) const override {
         CodecSupport support;
-        support.is_supported = true;
+        support.is_supported = _stricmp(format.name.c_str(), "VP8") == 0 ||
+            (_stricmp(format.name.c_str(), "H264") == 0 &&
+             webrtc::H264Encoder::IsSupported());
         return support;
     }
 
     std::unique_ptr<webrtc::VideoEncoder> Create(
         const webrtc::Environment& env,
         const webrtc::SdpVideoFormat& format) override {
-        return webrtc::CreateVp8Encoder(env);
+        if (_stricmp(format.name.c_str(), "VP8") == 0) {
+            return webrtc::CreateVp8Encoder(env);
+        }
+        if (_stricmp(format.name.c_str(), "H264") == 0 &&
+            webrtc::H264Encoder::IsSupported()) {
+            return webrtc::CreateH264Encoder(
+                env, webrtc::H264EncoderSettings::Parse(format));
+        }
+        return nullptr;
     }
 };
 
 class CustomVideoEncoderFactory : public webrtc::VideoEncoderFactory {
 public:
     CustomVideoEncoderFactory()
-        : internal_factory_(std::make_unique<SingleStreamVp8EncoderFactory>()) {}
+        : internal_factory_(
+            std::make_unique<SingleStreamVideoEncoderFactory>()) {}
 
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
         return internal_factory_->GetSupportedFormats();
@@ -74,11 +91,12 @@ public:
     std::unique_ptr<webrtc::VideoEncoder> Create(
         const webrtc::Environment& env,
         const webrtc::SdpVideoFormat& format) override {
-        return std::make_unique<webrtc::SimulcastEncoderAdapter>(env, internal_factory_.get(), nullptr, format);
+        return std::make_unique<webrtc::SimulcastEncoderAdapter>(
+            env, internal_factory_.get(), nullptr, format);
     }
 
 private:
-    std::unique_ptr<SingleStreamVp8EncoderFactory> internal_factory_;
+    std::unique_ptr<webrtc::VideoEncoderFactory> internal_factory_;
 };
 
 class CustomVideoDecoderFactory : public webrtc::VideoDecoderFactory {
