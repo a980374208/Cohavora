@@ -1,4 +1,15 @@
 # PR-SEC-002: isolated credential storage, auth response ordering, and real login UI.
+add_executable(test_debug_login_options
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_debug_login_options.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/app/debug_login_options.cpp
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/app/debug_login_options.h
+)
+livekit_configure_qt_test(test_debug_login_options)
+add_test(NAME debug_login_options_test COMMAND test_debug_login_options)
+set_tests_properties(debug_login_options_test PROPERTIES
+    TIMEOUT 30 LABELS "PR_SEC_004_FOCUSED;CORE_REGRESSION")
+
 add_executable(test_session_credentials
     ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_session_credentials.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
