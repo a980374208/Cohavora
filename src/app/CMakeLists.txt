@@ -1,5 +1,7 @@
 add_executable(cohavora_app
     main_meeting_app.cpp
+    debug_login_options.cpp
+    debug_login_options.h
     ${PROJECT_SOURCE_DIR}/src/net/http_types.h
     ${PROJECT_SOURCE_DIR}/src/net/meeting_types.h
     ${PROJECT_SOURCE_DIR}/src/net/meeting_types.cpp

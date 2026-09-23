@@ -1,4 +1,8 @@
 #include <QtCore/QCoreApplication>
+#include <QtCore/QDebug>
+#include <QtCore/QEventLoop>
+#include <QtCore/QPointer>
+#include <QtCore/QTimer>
 #include "base/basic_types.h"
 #include <QtWidgets/QApplication>
 #include <QtGui/QIcon>
@@ -16,6 +20,9 @@
 #include "src/net/service_endpoint_policy.h"
 #include "src/net/session_manager.h"
 #include "src/rtc/webrtc_manager.h"
+#include "src/app/debug_login_options.h"
+
+#include <memory>
 
 // 静态链接 Qt 必须显式导入平台与图像插件
 Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin)
@@ -31,6 +38,49 @@ rpl::producer<> on_main_update_requests() {
 	return rpl::never<>();
 }
 } // namespace crl
+
+namespace {
+
+constexpr auto kDebugLoginTimeout = 30000;
+
+struct DebugLoginCompletion {
+	bool completed = false;
+	bool success = false;
+};
+
+bool LoginWithDebugCredentials(
+		OpenMeeting::SessionManager &session,
+		const QString &account,
+		const QString &password) {
+	QEventLoop loop;
+	QTimer timeout;
+	timeout.setSingleShot(true);
+	const auto completion = std::make_shared<DebugLoginCompletion>();
+	const QPointer<QEventLoop> loopGuard(&loop);
+
+	QObject::connect(&timeout, &QTimer::timeout, &loop, [&] {
+		session.cancelPendingLogin();
+		loop.quit();
+	});
+	session.loginWithPassword(
+		account,
+		password,
+		false,
+		false,
+		[completion, loopGuard](bool success, const QString &) {
+			completion->completed = true;
+			completion->success = success;
+			if (loopGuard) loopGuard->quit();
+		});
+
+	if (!completion->completed) {
+		timeout.start(kDebugLoginTimeout);
+		loop.exec();
+	}
+	return completion->completed && completion->success;
+}
+
+} // namespace
 
 int main(int argc, char *argv[]) {
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
@@ -48,8 +98,13 @@ int main(int argc, char *argv[]) {
 	MeetingUI::AppTranslation::install(app,
 		MeetingUI::AppTranslation::startupLocale(app.arguments()));
 	app.setApplicationDisplayName(MeetingUI::AppBranding::displayName());
+	auto debugLogin = MeetingApp::ParseDebugLoginOptions(app.arguments());
+	if (debugLogin.status == MeetingApp::DebugLoginOptionStatus::Invalid) {
+		qCritical().noquote() << debugLogin.error;
+		return 2;
+	}
 	OpenMeeting::initializeServiceEndpointPolicy(
-		app.arguments().contains(QStringLiteral("--debug")));
+		debugLogin.debugEnabled);
 
 	// 设置 UI 抽象层 Integration
 	MeetingUI::MeetingUiIntegration integration;
@@ -61,10 +116,23 @@ int main(int argc, char *argv[]) {
 
 	// 初始化会话与用户认证
 	auto &session = OpenMeeting::SessionManager::instance();
-	session.resumeSavedSession(true);
+	if (debugLogin.status == MeetingApp::DebugLoginOptionStatus::Enabled) {
+		const bool loggedIn = LoginWithDebugCredentials(
+			session, debugLogin.account, debugLogin.password);
+		debugLogin.clearPassword();
+		if (!loggedIn) {
+			qCritical() << "Automated debug sign-in failed or timed out.";
+			style::StopManager();
+			return 3;
+		}
+	} else {
+		session.resumeSavedSession(true);
+	}
 
 	// Only a successfully restored, explicitly enabled session skips login.
-	if (!session.isLoggedIn() || !session.isAutoLogin()) {
+	if (!session.isLoggedIn() ||
+		(debugLogin.status != MeetingApp::DebugLoginOptionStatus::Enabled &&
+		 !session.isAutoLogin())) {
 		MeetingUI::LoginDialog loginDlg;
 		if (loginDlg.exec() != QDialog::Accepted) {
 			// 用户主动退出登录对话框，直接退出程序
