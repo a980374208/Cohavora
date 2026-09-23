@@ -175,7 +175,7 @@ QString TelemetryDisplayVariant(const QVariant &value) {
 	if (value.type() == QVariant::Double) {
 		return value.toDouble() < 0.0 ? QStringLiteral("--") : value.toString();
 	}
-	return value.toString();
+	return LocalizeTelemetryDisplayText(value.toString());
 }
 
 bool IsSafeTelemetryDisplayEntry(const QString &key, const QVariant &value) {
@@ -283,57 +283,58 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 	addSummaryPage(QCoreApplication::translate("MeetingUI", "Overview"), {
 		{QCoreApplication::translate("MeetingUI", "Session"),
 		 TelemetryValue(snapshot, "sessionGeneration"),
-		 snapshot.value(QStringLiteral("availability")).toString(),
-		 snapshot.value(QStringLiteral("reason")).toString()},
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("availability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("reason")).toString())},
 		{QCoreApplication::translate("MeetingUI", "Coverage"),
 		 QString::number(snapshot.value(QStringLiteral("coverage")).toDouble() * 100.0, 'f', 1) + QStringLiteral(" %"),
-		 snapshot.value(QStringLiteral("availability")).toString(), QString()},
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("availability")).toString()), QString()},
 		{QCoreApplication::translate("MeetingUI", "Schema / definition"),
 		 QStringLiteral("%1 / %2").arg(
 			snapshot.value(QStringLiteral("schemaVersion")).toString(),
 			snapshot.value(QStringLiteral("definitionVersion")).toString()),
-		 QStringLiteral("VALID"), QStringLiteral("local-safe-snapshot")},
+		 LocalizeTelemetryDisplayText(QStringLiteral("VALID")),
+		 LocalizeTelemetryDisplayText(QStringLiteral("local-safe-snapshot"))},
 		{QCoreApplication::translate("MeetingUI", "First decoded video"),
 		 TelemetryValue(snapshot, "lastSubscribeToFirstDecodedMs", "ms"),
-		 snapshot.value(QStringLiteral("firstVideoAvailability")).toString(),
-		 snapshot.value(QStringLiteral("firstVideoMeasurementPoint")).toString()},
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("firstVideoAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("firstVideoMeasurementPoint")).toString())},
 		{QCoreApplication::translate("MeetingUI", "First visible render"),
 		 TelemetryValue(snapshot, "lastSubscribeToFirstRenderMs", "ms"),
-		 snapshot.value(QStringLiteral("renderFirstFrameAvailability")).toString(),
-		 snapshot.value(QStringLiteral("renderMeasurementPoint")).toString()},
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("renderFirstFrameAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("renderMeasurementPoint")).toString())},
 		{QCoreApplication::translate("MeetingUI", "First remote PCM"),
 		 TelemetryValue(snapshot, "lastSubscribeToFirstPcmMs", "ms"),
-		 snapshot.value(QStringLiteral("firstAudioAvailability")).toString(),
-		 snapshot.value(QStringLiteral("firstAudioMeasurementPoint")).toString()},
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("firstAudioAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("firstAudioMeasurementPoint")).toString())},
 		{QCoreApplication::translate("MeetingUI", "Active operations"),
 		 TelemetryValue(snapshot, "operationsInflight"),
-		 snapshot.value(QStringLiteral("availability")).toString(), QString()},
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("availability")).toString()), QString()},
 	});
 
 	addSummaryPage(QCoreApplication::translate("MeetingUI", "Media QoE"), {
 		{QCoreApplication::translate("MeetingUI", "Native video freezes"),
 		 TelemetryValue(snapshot, "nativeVideoFreezeCount"),
-		 snapshot.value(QStringLiteral("nativeVideoFreezeAvailability")).toString(),
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("nativeVideoFreezeAvailability")).toString()),
 		 TelemetryValue(snapshot, "nativeVideoFreezeDurationMs", "ms")},
 		{QCoreApplication::translate("MeetingUI", "Visible render stalls"),
 		 TelemetryValue(snapshot, "renderStallCount"),
-		 snapshot.value(QStringLiteral("renderStallAvailability")).toString(),
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("renderStallAvailability")).toString()),
 		 TelemetryValue(snapshot, "renderStallDurationMs", "ms") + QStringLiteral(" / ") +
 		 snapshot.value(QStringLiteral("renderStallAlgorithm")).toString()},
 		{QCoreApplication::translate("MeetingUI", "Audio concealment"),
 		 TelemetryRatioPercent(snapshot, "audioConcealedRatio"),
-		 snapshot.value(QStringLiteral("audioConcealmentAvailability")).toString(),
-		 snapshot.value(QStringLiteral("audioConcealmentReason")).toString()},
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("audioConcealmentAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("audioConcealmentReason")).toString())},
 		{QCoreApplication::translate("MeetingUI", "Jitter buffer delay"),
 		 TelemetryValue(snapshot, "audioJitterBufferDelayMs", "ms"),
-		 snapshot.value(QStringLiteral("audioJitterBufferAvailability")).toString(),
-		 snapshot.value(QStringLiteral("audioJitterBufferReason")).toString()},
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("audioJitterBufferAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("audioJitterBufferReason")).toString())},
 		{QCoreApplication::translate("MeetingUI", "Reconnect video / audio / render"),
 		 TelemetryValue(snapshot, "lastReconnectStableVideoMs", "ms") + QStringLiteral(" / ") +
 		 TelemetryValue(snapshot, "lastReconnectStableAudioMs", "ms") + QStringLiteral(" / ") +
 		 TelemetryValue(snapshot, "lastReconnectStableRenderMs", "ms"),
-		 snapshot.value(QStringLiteral("reconnectRenderAvailability")).toString(),
-		 snapshot.value(QStringLiteral("reconnectRenderReason")).toString()},
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("reconnectRenderAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("reconnectRenderReason")).toString())},
 	});
 	tabs->widget(0)->setObjectName(QStringLiteral("telemetryOverview"));
 	tabs->widget(1)->setObjectName(QStringLiteral("telemetryMediaQoe"));
@@ -346,7 +347,7 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 	for (const auto &value : snapshot.value(QStringLiteral("operationSummaries")).toList()) {
 		const auto item = value.toMap();
 		AddTelemetryRow(operations, {
-			item.value(QStringLiteral("kind")).toString(),
+			LocalizeTelemetryDisplayText(item.value(QStringLiteral("kind")).toString()),
 			QStringLiteral("%1 / %2").arg(item.value(QStringLiteral("started")).toString(),
 				item.value(QStringLiteral("terminal")).toString()),
 			QStringLiteral("%1 / %2 / %3 / %4").arg(
@@ -374,7 +375,7 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 		QCoreApplication::translate("MeetingUI", "Availability")});
 	AddTelemetryRow(resources, {QCoreApplication::translate("MeetingUI", "Process CPU"),
 		TelemetryValue(snapshot, "processCpuPercent", "%"), QString(),
-		snapshot.value(QStringLiteral("cpuAvailability")).toString()});
+		LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("cpuAvailability")).toString())});
 	AddTelemetryRow(resources, {QCoreApplication::translate("MeetingUI", "Private memory"),
 		snapshot.value(QStringLiteral("memoryAvailability")).toString() == QStringLiteral("VALID")
 			? QString::number(snapshot.value(QStringLiteral("privateBytes")).toULongLong() / 1048576.0, 'f', 1) + QStringLiteral(" MiB")
@@ -382,15 +383,15 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 		QStringLiteral("%1 - %2 MiB").arg(
 			snapshot.value(QStringLiteral("minimumPrivateBytes")).toULongLong() / 1048576.0, 0, 'f', 1).arg(
 			snapshot.value(QStringLiteral("maximumPrivateBytes")).toULongLong() / 1048576.0, 0, 'f', 1),
-		snapshot.value(QStringLiteral("memoryAvailability")).toString()});
+		LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("memoryAvailability")).toString())});
 	AddTelemetryRow(resources, {QCoreApplication::translate("MeetingUI", "Threads / handles"),
 		QStringLiteral("%1 / %2").arg(
 			snapshot.value(QStringLiteral("processThreadCount")).toString(),
 			snapshot.value(QStringLiteral("processHandleCount")).toString()),
-		QStringLiteral("N=%1, %2%").arg(
+		QCoreApplication::translate("MeetingUI", "samples=%1, coverage=%2%").arg(
 			snapshot.value(QStringLiteral("resourceTrendSamples")).toString(),
 			QString::number(snapshot.value(QStringLiteral("resourceTrendCoverage")).toDouble() * 100.0, 'f', 1)),
-		snapshot.value(QStringLiteral("resourceTrendAvailability")).toString()});
+		LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("resourceTrendAvailability")).toString())});
 	resourceLayout->addWidget(resources, 1);
 	resources->setObjectName(QStringLiteral("telemetryResources"));
 	tabs->addTab(resourcePage, QCoreApplication::translate("MeetingUI", "Resources"));
@@ -407,11 +408,12 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 			AddTelemetryRow(timeline, {
 				QDateTime::fromMSecsSinceEpoch(record->captured_utc_ms).toString(QStringLiteral("HH:mm:ss")),
 				QString::number(s.revision),
-				QString::fromLatin1(livekit::telemetry::AvailabilityName(s.availability)),
+				LocalizeTelemetryDisplayText(QString::fromLatin1(
+					livekit::telemetry::AvailabilityName(s.availability))),
 				QStringLiteral("%1 / %2 / %3").arg(
-					QString::fromLatin1(livekit::telemetry::AvailabilityName(s.remote_video_first_frame_availability)),
-					QString::fromLatin1(livekit::telemetry::AvailabilityName(s.audio_quality_availability)),
-					QString::fromLatin1(livekit::telemetry::AvailabilityName(s.render_stall_availability)))});
+					LocalizeTelemetryDisplayText(QString::fromLatin1(livekit::telemetry::AvailabilityName(s.remote_video_first_frame_availability))),
+					LocalizeTelemetryDisplayText(QString::fromLatin1(livekit::telemetry::AvailabilityName(s.audio_quality_availability))),
+					LocalizeTelemetryDisplayText(QString::fromLatin1(livekit::telemetry::AvailabilityName(s.render_stall_availability))))});
 		}
 	}
 	timeline->setObjectName(QStringLiteral("telemetryTimeline"));
@@ -438,12 +440,16 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 	historyEnabled->setEnabled(store != nullptr);
 	historyLayout->addWidget(historyEnabled);
 	auto *historyStatus = new QLabel(status
-		? QStringLiteral("%1 / %2 / MET-06 drops=%3 writes=%4").arg(
-			QString::fromLatin1(livekit::telemetry::AvailabilityName(status->availability)),
-			QString::fromStdString(status->reason),
+		? QCoreApplication::translate(
+			"MeetingUI", "%1 / %2 / MET-06 drops=%3, write failures=%4").arg(
+			LocalizeTelemetryDisplayText(QString::fromLatin1(
+				livekit::telemetry::AvailabilityName(status->availability))),
+			LocalizeTelemetryDisplayText(QString::fromStdString(status->reason)),
 			QString::number(status->queue_drops),
 			QString::number(status->write_failures))
-		: QStringLiteral("UNSUPPORTED / history_store_not_installed"), historyPage);
+		: QStringLiteral("%1 / %2").arg(
+			LocalizeTelemetryDisplayText(QStringLiteral("UNSUPPORTED")),
+			LocalizeTelemetryDisplayText(QStringLiteral("history_store_not_installed"))), historyPage);
 	historyStatus->setWordWrap(true);
 	historyLayout->addWidget(historyStatus);
 	auto *reports = new QListWidget(historyPage);
@@ -451,7 +457,7 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 	if (status) {
 		for (const auto &entry : status->reports) {
 			auto *item = new QListWidgetItem(
-				QStringLiteral("%1  %2 KiB  N=%3").arg(
+				QCoreApplication::translate("MeetingUI", "%1  %2 KiB  records=%3").arg(
 					QDateTime::fromMSecsSinceEpoch(entry.created_utc_ms).toString(Qt::ISODate),
 					QString::number(entry.size_bytes / 1024),
 					QString::number(entry.record_count)), reports);
@@ -510,7 +516,11 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 	QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
 	layout->addWidget(buttons);
 	AppTheme::makeDialogAdaptive(*dialog, QSize(900, 640));
-	dialog->open();
+	dialog->setModal(false);
+	dialog->setWindowModality(Qt::NonModal);
+	dialog->show();
+	dialog->raise();
+	dialog->activateWindow();
 	return dialog;
 }
 
@@ -1434,15 +1444,16 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 			QStringLiteral("sampleAgeMs"), -1).toLongLong();
 		QString tooltip = age >= 0
 			? QCoreApplication::translate("MeetingUI", "Telemetry: %1, age %2 ms")
-				.arg(availability).arg(age)
-			: QCoreApplication::translate("MeetingUI", "Telemetry: %1").arg(availability);
+				.arg(LocalizeTelemetryDisplayText(availability)).arg(age)
+			: QCoreApplication::translate("MeetingUI", "Telemetry: %1")
+				.arg(LocalizeTelemetryDisplayText(availability));
 		const auto reconnectVideo = _telemetrySnapshot.value(
 			QStringLiteral("reconnectVideoAvailability"), QStringLiteral("UNKNOWN")).toString();
 		if (reconnectVideo == QStringLiteral("WARMING_UP") ||
 			reconnectVideo == QStringLiteral("TIMEOUT")) {
 			tooltip += QStringLiteral("\n") +
 				QCoreApplication::translate("MeetingUI", "Video recovery: %1 (%2/%3 stable)")
-					.arg(reconnectVideo,
+					.arg(LocalizeTelemetryDisplayText(reconnectVideo),
 						 _telemetrySnapshot.value(QStringLiteral("reconnectVideoRecovered")).toString(),
 						 _telemetrySnapshot.value(QStringLiteral("reconnectVideoExpected")).toString());
 		}
@@ -1502,14 +1513,21 @@ void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 }
 
 void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
-	QMenu menu(this);
-	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
+	if (auto *existing = findChild<QMenu*>(
+			QStringLiteral("telemetrySummaryMenu"), Qt::FindDirectChildrenOnly)) {
+		existing->close();
+	}
+	auto *menu = new QMenu(this);
+	menu->setObjectName(QStringLiteral("telemetrySummaryMenu"));
+	menu->setWindowModality(Qt::NonModal);
+	AppTheme::styleMenu(*menu, AppTheme::Tone::Dark);
+	QObject::connect(menu, &QMenu::aboutToHide, menu, &QObject::deleteLater);
 	const auto text = [this](const char *key, const QString &fallback = QStringLiteral("-")) {
 		const auto value = _telemetrySnapshot.value(QString::fromLatin1(key));
-		return value.isValid() ? value.toString() : fallback;
+		return value.isValid() ? LocalizeTelemetryDisplayText(value.toString()) : fallback;
 	};
-	const auto addValue = [&menu](const QString &label, const QString &value) {
-		auto *action = menu.addAction(label + QStringLiteral(": ") + value);
+	const auto addValue = [menu](const QString &label, const QString &value) {
+		auto *action = menu->addAction(label + QStringLiteral(": ") + value);
 		action->setEnabled(false);
 	};
 	const auto duration = [this](const char *key) {
@@ -1564,9 +1582,9 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 		return valid(availabilityKey) ? text(key) : unavailable();
 	};
 
-	auto *header = menu.addAction(QCoreApplication::translate("MeetingUI", "Telemetry"));
+	auto *header = menu->addAction(QCoreApplication::translate("MeetingUI", "Telemetry"));
 	header->setEnabled(false);
-	menu.addSeparator();
+	menu->addSeparator();
 	addValue(QCoreApplication::translate("MeetingUI", "Availability"),
 		text("availability") + QStringLiteral(" / ") + text("reason"));
 	addValue(QCoreApplication::translate("MeetingUI", "Age / coverage"),
@@ -1576,27 +1594,27 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 	addValue(QCoreApplication::translate("MeetingUI", "Peer connections"),
 		QStringLiteral("%1 / %2").arg(text("successfulPcCount"), text("actualPcCount")));
 	addValue(QCoreApplication::translate("MeetingUI", "Request"),
-		QStringLiteral("%1 ms, timeout %2, skip %3, late %4")
+		QCoreApplication::translate("MeetingUI", "%1 ms, timeouts %2, skipped %3, late %4")
 			.arg(text("lastStatsRequestMs"), text("statsRequestTimeouts"),
 				text("statsRequestsSkipped"), text("lateCallbacks")));
 	addValue(QCoreApplication::translate("MeetingUI", "Queue"),
-		QStringLiteral("%1 / %2, high %3, drop %4")
+		QCoreApplication::translate("MeetingUI", "%1 / %2, high-water %3, drops %4")
 			.arg(text("queueDepth"), text("queueCapacity"),
 				text("queueHighWater"), text("capacityDrops")));
 	addValue(QCoreApplication::translate("MeetingUI", "Queue delivery lag"),
-		QStringLiteral("%1 / last %2 / max %3")
+		QCoreApplication::translate("MeetingUI", "%1 / last %2 / maximum %3")
 			.arg(text("eventQueueLagAvailability"),
 				durationWhenValid("eventQueueLagAvailability", "lastEventQueueLagMs"),
 				durationWhenValid("eventQueueLagAvailability", "maximumEventQueueLagMs")));
 	addValue(QCoreApplication::translate("MeetingUI", "Mapping / reset"),
 		QStringLiteral("%1 / %2").arg(text("mappingFailures"), text("counterResets")));
 	addValue(QCoreApplication::translate("MeetingUI", "Operations"),
-		QStringLiteral("%1 started, %2 terminal, %3 inflight, %4 incomplete")
+		QCoreApplication::translate("MeetingUI", "%1 started, %2 terminal, %3 in flight, %4 incomplete")
 			.arg(text("operationsStarted"), text("operationsTerminal"),
 				text("operationsInflight"), text("operationsMissingStart")));
-	menu.addSeparator();
+	menu->addSeparator();
 	addValue(QCoreApplication::translate("MeetingUI", "Process CPU"),
-		QStringLiteral("%1 / %2 / %3 logical CPUs")
+		QCoreApplication::translate("MeetingUI", "%1 / %2 / %3 logical CPUs")
 			.arg(text("cpuAvailability"),
 				valid("cpuAvailability") ? percent("processCpuPercent") : unavailable(),
 				text("logicalProcessorCount")));
@@ -1621,7 +1639,7 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 				durationWhenValid("uiLagAvailability", "lastUiLagMs"),
 				durationWhenValid("uiLagAvailability", "maximumUiLagMs")));
 	addValue(QCoreApplication::translate("MeetingUI", "Runtime sampler"),
-		QStringLiteral("%1 / age %2 ms / %3 us / %4 failures")
+		QCoreApplication::translate("MeetingUI", "%1 / age %2 ms / %3 us / %4 failures")
 			.arg(text("resourceAvailability"), text("resourceSampleAgeMs"),
 				text("lastResourceSampleUs"), text("resourceSampleFailures")));
 	addValue(QCoreApplication::translate("MeetingUI", "UI probes timeout / skipped / late"),
@@ -1654,7 +1672,7 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 			: unavailable());
 	addValue(QCoreApplication::translate("MeetingUI", "Growth signals (not leak confirmation)"),
 		valid("resourceTrendAvailability")
-			? QStringLiteral("%1 MiB/min / %2 threads/h / %3 handles/h")
+			? QCoreApplication::translate("MeetingUI", "%1 MiB/min / %2 threads/h / %3 handles/h")
 				.arg(_telemetrySnapshot.value(
 					QStringLiteral("privateBytesGrowthMibPerMinute")).toDouble(),
 					0, 'f', 2)
@@ -1674,7 +1692,7 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 		text("resourceReturnAvailability") + QStringLiteral(" / ") +
 		text("resourceReturnReason"));
 	addValue(QCoreApplication::translate("MeetingUI", "Telemetry observed cost"),
-		QStringLiteral("%1 / %2% / sampler avg %3 us / build max %4 us / callback max %5 us")
+		QCoreApplication::translate("MeetingUI", "%1 / %2% / sampler average %3 us / build maximum %4 us / callback maximum %5 us")
 			.arg(text("telemetryCostAvailability"))
 			.arg(_telemetrySnapshot.value(
 				QStringLiteral("telemetryObservedCostRatio"), -1.0).toDouble() * 100.0,
@@ -1688,7 +1706,7 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 		text("telemetryAbAvailability") + QStringLiteral(" / ") +
 		text("telemetryAbReason"));
 	addValue(QCoreApplication::translate("MeetingUI", "Stability ledger"),
-		QStringLiteral("%1 / runs %2 terminal %3 / sessions %4 terminal %5")
+		QCoreApplication::translate("MeetingUI", "%1 / runs %2, terminal %3 / sessions %4, terminal %5")
 			.arg(text("stabilityLedgerAvailability"), text("processRunsStarted"),
 				text("processRunsTerminal"), text("sessionsStarted"),
 				text("sessionsTerminal")));
@@ -1708,7 +1726,7 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 		QStringLiteral("%1 / %2 / %3")
 			.arg(text("remoteVideoBindings"), text("remoteAudioBindings"),
 				text("renderBindings")));
-	menu.addSeparator();
+	menu->addSeparator();
 	addValue(QCoreApplication::translate("MeetingUI", "First decoded video"),
 		text("firstVideoAvailability") + QStringLiteral(" / ") +
 		text("firstVideoReason"));
@@ -1719,7 +1737,7 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 	addValue(QCoreApplication::translate("MeetingUI", "Decoded endpoint"),
 		text("firstVideoMeasurementPoint"));
 	addValue(QCoreApplication::translate("MeetingUI", "Native video freeze"),
-		QStringLiteral("%1 / %2 events, %3")
+		QCoreApplication::translate("MeetingUI", "%1 / %2 events, %3")
 			.arg(text("nativeVideoFreezeAvailability"),
 				textWhenValid("nativeVideoFreezeAvailability", "nativeVideoFreezeCount"),
 				durationWhenValid("nativeVideoFreezeAvailability",
@@ -1727,7 +1745,7 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 	addValue(QCoreApplication::translate("MeetingUI", "Freeze boundary"),
 		text("nativeVideoFreezeMeasurementPoint"));
 	addValue(QCoreApplication::translate("MeetingUI", "Reconnect video recovery"),
-		QStringLiteral("%1 / %2 of %3 stable / %4")
+		QCoreApplication::translate("MeetingUI", "%1 / %2 of %3 stable / %4")
 			.arg(text("reconnectVideoAvailability"),
 				text("reconnectVideoRecovered"),
 				text("reconnectVideoExpected"),
@@ -1735,13 +1753,13 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 	addValue(QCoreApplication::translate("MeetingUI", "Reconnect signaling / video"),
 		duration("lastReconnectSignalingMs") + QStringLiteral(" / ") +
 		durationWhenValid("reconnectVideoAvailability", "lastReconnectStableVideoMs"));
-	menu.addSeparator();
+	menu->addSeparator();
 	addValue(QCoreApplication::translate("MeetingUI", "First remote PCM"),
 		text("firstAudioAvailability") + QStringLiteral(" / ") +
 		text("firstAudioReason") + QStringLiteral(" / ") +
 		durationWhenValid("firstAudioAvailability", "lastSubscribeToFirstPcmMs"));
 	addValue(QCoreApplication::translate("MeetingUI", "Audio concealment"),
-		QStringLiteral("%1 / all %2 / non-silent %3 / %4 events")
+		QCoreApplication::translate("MeetingUI", "%1 / all %2 / non-silent %3 / %4 events")
 			.arg(text("audioConcealmentAvailability"),
 				ratioWhenValid("audioConcealmentAvailability", "audioConcealedRatio"),
 				ratioWhenValid("audioConcealmentAvailability",
@@ -1763,7 +1781,7 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 				ratioWhenValid("audioTimeStretchAvailability", "audioInsertedRatio"),
 				ratioWhenValid("audioTimeStretchAvailability", "audioRemovedRatio")));
 	addValue(QCoreApplication::translate("MeetingUI", "Reconnect audio recovery"),
-		QStringLiteral("%1 / %2 of %3 / %4")
+		QCoreApplication::translate("MeetingUI", "%1 / %2 of %3 / %4")
 			.arg(text("reconnectAudioAvailability"),
 				text("reconnectAudioRecovered"), text("reconnectAudioExpected"),
 				text("reconnectAudioReason")));
@@ -1774,7 +1792,7 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 		QStringLiteral(" / ") +
 		durationWhenValid("reconnectAudioAvailability",
 			"lastReconnectAudioInterruptionMs"));
-	menu.addSeparator();
+	menu->addSeparator();
 	addValue(QCoreApplication::translate("MeetingUI", "First visible render submit"),
 		text("renderFirstFrameAvailability") + QStringLiteral(" / ") +
 		text("renderFirstFrameReason"));
@@ -1786,7 +1804,7 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 	addValue(QCoreApplication::translate("MeetingUI", "Render submit boundary"),
 		text("renderMeasurementPoint"));
 	addValue(QCoreApplication::translate("MeetingUI", "Visible render stall"),
-		QStringLiteral("%1 / %2 / active %3 / count %4 / total %5 / longest %6 / ratio %7")
+		QCoreApplication::translate("MeetingUI", "%1 / %2 / active %3 / count %4 / total %5 / longest %6 / ratio %7")
 			.arg(text("renderStallAlgorithm"), text("renderStallAvailability"),
 				textWhenValid("renderStallAvailability", "renderStallActive"),
 				textWhenValid("renderStallAvailability", "renderStallCount"),
@@ -1794,7 +1812,7 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 				durationWhenValid("renderStallAvailability", "renderLongestStallMs"),
 				ratioWhenValid("renderStallAvailability", "renderStallRatio")));
 	addValue(QCoreApplication::translate("MeetingUI", "Reconnect render recovery"),
-		QStringLiteral("%1 / %2 of %3 / %4")
+		QCoreApplication::translate("MeetingUI", "%1 / %2 of %3 / %4")
 			.arg(text("reconnectRenderAvailability"),
 				text("reconnectRenderRecovered"), text("reconnectRenderExpected"),
 				text("reconnectRenderReason")));
@@ -1808,11 +1826,11 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 	const auto operationSummaries = _telemetrySnapshot.value(
 		QStringLiteral("operationSummaries")).toList();
 	if (!operationSummaries.isEmpty()) {
-		menu.addSeparator();
+		menu->addSeparator();
 		for (const auto &entry : operationSummaries) {
 			const auto operation = entry.toMap();
 			addValue(operation.value(QStringLiteral("kind")).toString(),
-				QStringLiteral("%1/%2 ok, %3 degraded, %4 failed, %5 timeout, %6 cancelled, %7 inflight, %8 ms")
+				QCoreApplication::translate("MeetingUI", "%1/%2 succeeded, %3 degraded, %4 failed, %5 timed out, %6 cancelled, %7 in flight, %8 ms")
 					.arg(operation.value(QStringLiteral("success")).toString(),
 						 operation.value(QStringLiteral("terminal")).toString(),
 						 operation.value(QStringLiteral("degradedSuccess")).toString(),
@@ -1823,24 +1841,25 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 						 operation.value(QStringLiteral("lastDurationMs")).toString()));
 		}
 	}
-	menu.addSeparator();
+	menu->addSeparator();
 	addValue(QCoreApplication::translate("MeetingUI", "Local report store"),
 		text("telemetryStorageAvailability") + QStringLiteral(" / ") +
 		text("telemetryStorageReason"));
-	auto *detailsAction = menu.addAction(
+	auto *detailsAction = menu->addAction(
 		style()->standardIcon(QStyle::SP_FileDialogDetailedView),
 		QCoreApplication::translate("MeetingUI", "Open telemetry details"));
-	auto *exportAction = menu.addAction(
+	auto *exportAction = menu->addAction(
 		style()->standardIcon(QStyle::SP_DialogSaveButton),
 		QCoreApplication::translate("MeetingUI", "Export report"));
 	exportAction->setEnabled(
 		livekit::telemetry::InstalledTelemetryHistoryStore() != nullptr);
-	const auto *selected = menu.exec(globalPos);
-	if (selected == detailsAction) {
+	QObject::connect(detailsAction, &QAction::triggered, this, [this] {
 		OpenTelemetryDetailsDialog(this, _telemetrySnapshot);
-	} else if (selected == exportAction) {
+	});
+	QObject::connect(exportAction, &QAction::triggered, this, [this] {
 		ShowTelemetryExport(this);
-	}
+	});
+	menu->popup(globalPos);
 }
 
 void RoomTopBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {

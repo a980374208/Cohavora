@@ -182,6 +182,8 @@ set(LIVEKIT_SOURCES
     src/e2ee/key_provider.cpp
     src/e2ee/frame_cryptor.cpp
     src/telemetry/crash_handler.cpp
+    src/telemetry/e2e_media_marker.cpp
+    src/telemetry/e2e_measurement.cpp
     src/telemetry/log_redaction.cpp
     src/telemetry/process_resource_sampler.cpp
     src/telemetry/stability_ledger.cpp
@@ -245,6 +247,8 @@ set(LIVEKIT_HEADERS
     src/telemetry/session_telemetry.h
     src/telemetry/telemetry.h
     src/telemetry/crash_handler.h
+    src/telemetry/e2e_media_marker.h
+    src/telemetry/e2e_measurement.h
     src/telemetry/log_redaction.h
     src/telemetry/process_resource_sampler.h
     src/telemetry/stability_ledger.h
