@@ -1,0 +1,140 @@
+name: Windows Telemetry S7 Acceptance
+
+on:
+  pull_request:
+    branches:
+      - main
+  merge_group:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-telemetry-s7-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  telemetry-s7-acceptance:
+    name: TELEMETRY_S7_ACCEPTANCE / Windows
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+    timeout-minutes: 60
+    env:
+      BUILD_DIR: build-ci-telemetry-s7
+      COHAVORA_CI_DEPS_DIR: ${{ vars.COHAVORA_WINDOWS_DEPS_DIR }}
+      CTEST_OUTPUT_ON_FAILURE: "1"
+
+    steps:
+      - name: Check out source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          clean: true
+
+      - name: Configure MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Validate runner dependencies
+        shell: pwsh
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:COHAVORA_CI_DEPS_DIR)) {
+            throw 'Repository variable COHAVORA_WINDOWS_DEPS_DIR must point to the pre-provisioned deps directory.'
+          }
+
+          $deps = (Resolve-Path -LiteralPath $env:COHAVORA_CI_DEPS_DIR -ErrorAction Stop).Path
+          $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path
+          $workspacePrefix = $workspace.TrimEnd('\', '/') + [System.IO.Path]::DirectorySeparatorChar
+          if ($deps.Equals($workspace, [System.StringComparison]::OrdinalIgnoreCase) -or
+              $deps.StartsWith($workspacePrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            throw 'COHAVORA_WINDOWS_DEPS_DIR must be outside GITHUB_WORKSPACE so checkout cleanup cannot delete it.'
+          }
+
+          $required = @(
+            'webrtc/include/api/peer_connection_interface.h',
+            'webrtc/lib/Debug/webrtc.lib',
+            'Libraries/win64/Qt-5.15.18/lib/Qt5Core.lib',
+            'Libraries/win64/Qt-5.15.18/plugins/platforms/qwindows.lib',
+            'Libraries/win64/tg_angle/out/Release/tg_angle.lib'
+          )
+          foreach ($relative in $required) {
+            $candidate = Join-Path $deps $relative
+            if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+              throw "Required Windows CI dependency is missing: $candidate"
+            }
+          }
+
+          $vcpkg = $env:VCPKG_ROOT
+          if ([string]::IsNullOrWhiteSpace($vcpkg) -and (Test-Path -LiteralPath 'C:\vcpkg')) {
+            $vcpkg = 'C:\vcpkg'
+          }
+          if ([string]::IsNullOrWhiteSpace($vcpkg) -or
+              -not (Test-Path -LiteralPath (Join-Path $vcpkg 'scripts/buildsystems/vcpkg.cmake') -PathType Leaf)) {
+            throw 'VCPKG_ROOT must identify a vcpkg installation containing scripts/buildsystems/vcpkg.cmake.'
+          }
+
+          "COHAVORA_RESOLVED_DEPS_DIR=$deps" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "VCPKG_ROOT=$vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Configure S7 acceptance build
+        shell: pwsh
+        run: |
+          cmake -S . -B $env:BUILD_DIR -A x64 `
+            "-DDEPS_DIR=$env:COHAVORA_RESOLVED_DEPS_DIR" `
+            "-DWEBRTC_ROOT=$env:COHAVORA_RESOLVED_DEPS_DIR/webrtc" `
+            "-DTDESKTOP_LIBS_DIR=$env:COHAVORA_RESOLVED_DEPS_DIR/Libraries/win64" `
+            -DCOHAVORA_BUILD_SAMPLES=OFF `
+            -DCOHAVORA_BUILD_MEETING_APP=ON `
+            -DBUILD_TESTING=ON `
+            -DLIVEKIT_BUILD_EXTENDED_TESTS=OFF `
+            -DLIVEKIT_BUILD_HARDWARE_TESTS=OFF `
+            -DLIVEKIT_BUILD_EXTERNAL_TESTS=OFF `
+            -DLIVEKIT_BUILD_RENDERER_RUNTIME_TESTS=OFF
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build application and S7 acceptance targets
+        shell: pwsh
+        run: |
+          cmake --build $env:BUILD_DIR --config Debug `
+            --target cohavora_app test_telemetry_report test_participant_window_remediation `
+            --parallel 2 -- /clp:ErrorsOnly /nologo
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify S7 gate discovery
+        shell: pwsh
+        run: |
+          $raw = (& ctest --test-dir $env:BUILD_DIR -C Debug `
+            -N -L TELEMETRY_S7_ACCEPTANCE --show-only=json-v1) -join "`n"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $discovery = $raw | ConvertFrom-Json
+          $actual = @($discovery.tests | ForEach-Object { $_.name } | Sort-Object)
+          $expected = @(
+            'meeting_telemetry_s7_ui_100_test',
+            'meeting_telemetry_s7_ui_150_test',
+            'meeting_telemetry_s7_ui_200_test',
+            'telemetry_report_test'
+          ) | Sort-Object
+          if (($actual -join "`n") -ne ($expected -join "`n")) {
+            Write-Error "Expected: $($expected -join ', '); actual: $($actual -join ', ')"
+            throw "TELEMETRY_S7_ACCEPTANCE discovery mismatch; expected exactly $($expected.Count) tests."
+          }
+
+      - name: Run TELEMETRY_S7_ACCEPTANCE merge gate
+        shell: pwsh
+        run: |
+          ctest --test-dir $env:BUILD_DIR -C Debug `
+            -L TELEMETRY_S7_ACCEPTANCE --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload CTest diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: telemetry-s7-acceptance-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ env.BUILD_DIR }}/Testing/Temporary/LastTest.log
+            ${{ env.BUILD_DIR }}/Testing/Temporary/LastTestsFailed.log
+          if-no-files-found: ignore
+          retention-days: 14
