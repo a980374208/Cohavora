@@ -55,6 +55,12 @@ struct TrackMembershipState {
 
 using TrackTicket = std::weak_ptr<const TrackMembershipState>;
 
+struct PublicationSnapshotEvent {
+    TrackKey key;
+    TrackTicket ticket;
+    TrackPublication::StateSnapshot state;
+};
+
 struct MediaBindingKey {
     TrackKey track;
     uint64_t serial = 0;
@@ -110,6 +116,7 @@ struct ParticipantSnapshotEvent {
     ParticipantKey key;
     ParticipantTicket ticket;
     ParticipantStateSnapshot state;
+    std::vector<PublicationSnapshotEvent> publications;
     bool is_local = false;
 };
 

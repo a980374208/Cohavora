@@ -24,6 +24,7 @@ enum class RenderExpectationReason {
 };
 
 struct RenderFrameMetadata;
+class CanvasRenderTimingObserver;
 
 class RenderSubmitObserver {
 public:
@@ -42,6 +43,10 @@ public:
         const char*,
         std::chrono::microseconds,
         Clock::time_point) {}
+    // A shared session sink, returned only for a currently valid binding.
+    // Canvas operations must be deduplicated by this sink, not by video frame.
+    virtual std::shared_ptr<CanvasRenderTimingObserver> CanvasTimingObserver(
+        const RenderFrameMetadata&) { return {}; }
 };
 
 struct RenderFrameMetadata {

@@ -25,9 +25,14 @@ std::string NewShareSessionId() {
 }
 
 struct ScreenShareSession::Run {
-    explicit Run(asio::any_io_executor executor, uint64_t id)
-        : timer(executor), id(id), source(std::make_shared<VideoSource>(0, 0)),
+    explicit Run(asio::any_io_executor executor, uint64_t id,
+                 std::shared_ptr<void> executor_lifetime)
+        : executor_lifetime(std::move(executor_lifetime)), timer(executor), id(id),
+          source(std::make_shared<VideoSource>(0, 0)),
           preview(std::make_shared<render::VideoRenderRouter>(id, 1)) {}
+    // Capture callbacks can retain Run independently of ScreenShareSession.
+    // In particular the timer must be destroyed before its context lease.
+    const std::shared_ptr<void> executor_lifetime;
     asio::steady_timer timer;
     const uint64_t id;
     std::unique_ptr<IDesktopCapture> capture;
@@ -77,8 +82,10 @@ ScreenShareSession::Backend ScreenShareSession::ForRoom(const std::shared_ptr<Ro
     return backend;
 }
 
-ScreenShareSession::ScreenShareSession(asio::any_io_executor strand, Backend backend, Observer observer)
-    : strand_(std::move(strand)), backend_(std::move(backend)), observer_(std::move(observer)) {}
+ScreenShareSession::ScreenShareSession(asio::any_io_executor strand, Backend backend,
+                                     Observer observer, std::shared_ptr<void> executor_lifetime)
+    : executor_lifetime_(std::move(executor_lifetime)), strand_(std::move(strand)),
+      backend_(std::move(backend)), observer_(std::move(observer)) {}
 
 ScreenShareSession::~ScreenShareSession() {
     if (run_) StopFrames(run_);
@@ -109,7 +116,7 @@ void ScreenShareSession::StopFrames(const std::shared_ptr<Run>& run) {
 
 void ScreenShareSession::Start(DesktopSource source) {
     if (closed_ || run_ || !transport_ready_ || !backend_.connected()) return;
-    auto run = std::make_shared<Run>(strand_, ++next_run_);
+    auto run = std::make_shared<Run>(strand_, ++next_run_, executor_lifetime_);
     run->source_title = source.title;
     run->source_kind = source.kind;
     if (source.kind == DesktopSourceKind::Screen && backend_.resolve_screen_binding) {
@@ -140,15 +147,27 @@ void ScreenShareSession::Stop() {
 }
 
 void ScreenShareSession::Shutdown() {
+    auto capture = TakeCaptureForShutdown();
+    if (capture) capture->Stop();
+}
+
+std::unique_ptr<IDesktopCapture> ScreenShareSession::TakeCaptureForShutdown() {
     closed_ = true;
     observer_ = {};
+    std::unique_ptr<IDesktopCapture> capture;
     if (run_) {
         run_->stopping = true;
-        StopFrames(run_);
+        {
+            std::lock_guard lock(run_->delivery);
+            run_->accepting = false;
+            run_->preview->Deactivate(run_->id);
+        }
+        capture = std::move(run_->capture);
         run_->timer.cancel();
         run_.reset();
     }
     snapshot_ = {};
+    return capture;
 }
 
 asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSession> self,

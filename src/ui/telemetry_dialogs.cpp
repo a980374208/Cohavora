@@ -467,6 +467,13 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 			QStringLiteral("%1 / %2 ms / %3").arg(snapshot.render_stall_count)
 				.arg(snapshot.render_stall_duration_ms)
 				.arg(QString::fromStdString(snapshot.render_stall_algorithm)));
+		addSummary(QCoreApplication::translate(
+			"MeetingUI", "Video policy requested / selected / actual / bound"),
+			QStringLiteral("%1 / %2 / %3 / %4")
+				.arg(snapshot.video_policy_requested)
+				.arg(snapshot.video_policy_selected)
+				.arg(snapshot.video_policy_actual)
+				.arg(snapshot.video_policy_bound));
 		addSummary(QCoreApplication::translate("MeetingUI", "Operations terminal / inflight"),
 			QStringLiteral("%1 / %2").arg(snapshot.operations_terminal)
 				.arg(snapshot.operations_inflight));
@@ -474,7 +481,7 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 		addSummary(QCoreApplication::translate("MeetingUI", "Latest session"),
 			QCoreApplication::translate("MeetingUI", "No local session summary"));
 	}
-	summary->setMaximumHeight(230);
+	summary->setMaximumHeight(260);
 	layout->addWidget(summary);
 
 	const auto status = store ? store->Status() : nullptr;

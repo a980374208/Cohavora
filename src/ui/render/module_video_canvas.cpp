@@ -1,4 +1,5 @@
 #include "module_video_canvas.h"
+#include "render/canvas_render_timing.h"
 #include "render/api/render_backend_dx11_native.h"
 #include "render/api/render_backend_module_info.h"
 #include <QtGui/QWindow>
@@ -173,15 +174,17 @@ struct ModuleVideoCanvas::Worker {
                         }
                     }
                     const auto submitted_at = std::chrono::steady_clock::now();
+                    CanvasRenderTimingBatch canvas_timing;
                     for (const auto& resource : scene->resources) {
                         if (resource.frame && submitted_resources.contains(resource.id.value)) {
-                            resource.frame->NotifyRenderStage(
-                                "dx11_render_present_block",
-                                render_present_duration, submitted_at);
+                            canvas_timing.Add(resource.frame->renderMetadata());
                             resource.frame->NotifyRendered(
                                 scene->measurement_point.c_str(), submitted_at);
                         }
                     }
+                    // The frozen DX11 module ABI exposes Render+Present as one call.
+                    canvas_timing.Notify(
+                        CanvasRenderStage::PresentBlock, render_present_duration);
                     if (task) task(*device);
                     if (stop.load()) break;
                     presentedScene.store(scene->sequence);

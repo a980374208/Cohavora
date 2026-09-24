@@ -13,6 +13,7 @@
 #include "src/media/wasapi_enumerator.h"
 #include "src/media/wasapi_capture.h"
 #include "src/core/meeting_coordinator.h"
+#include "src/core/session_shutdown_service.h"
 #include "src/render/video_render_session.h"
 #include "src/ui/participants_sidebar_widget.h"
 #include "src/ui/meeting_chat_sidebar_widget.h"
@@ -23,6 +24,8 @@
 #include <QtWidgets/QWidget>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QToolButton>
+#include <QtWidgets/QComboBox>
 #include <QtWidgets/QLineEdit>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QMessageBox>
@@ -444,6 +447,8 @@ protected:
 	void resizeEvent(QResizeEvent *e) override;
 	void paintEvent(QPaintEvent *e) override;
 	void showEvent(QShowEvent *e) override;
+	void hideEvent(QHideEvent *e) override;
+	void changeEvent(QEvent *e) override;
 	void closeEvent(QCloseEvent *e) override;
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
@@ -492,7 +497,19 @@ private:
 	void initLayout();
 	void updateVideoLayout();
 	void setupWhiteboardBinding();
+	void setupVideoPagingControls();
 	void setWhiteboardVisible(bool visible);
+	void scheduleViewportIntent(bool immediate = false);
+	void submitViewportIntent();
+	void applyAcceptedVideoDemandPlan(livekit::VideoDemandPlan plan);
+	void syncVisibleRemoteTiles();
+	void reconcileRemoteRenderSelection();
+	bool isVideoStageVisible() const;
+	bool isTrackVisible(const livekit::TrackKey &key) const;
+	std::optional<livekit::TrackKey> trackKeyForRenderKey(const QString &renderKey) const;
+	VideoTileWidget *ensureRemoteCameraTile(const QString &identity, const QString &name);
+	VideoTileWidget *ensureRemoteScreenTile(const livekit::VideoSeat &seat, const QString &name);
+	VideoTileWidget *remoteVideoTile(const livekit::TrackKey &key) const;
 	void openAnnotationOverlay();
 	void closeAnnotationOverlay();
 	void setAnnotationInteractionEnabled(bool enabled);
@@ -557,10 +574,10 @@ private:
 		std::uint64_t serial,
 		livekit::telemetry::OperationOutcome outcome);
 	void cancelDeviceSwitchTelemetry();
-	void stopCameraCapture();
+	void retireLocalCapture();
 	void bindLocalMediaSources();
 	void attachCoordinatorSession();
-	void stopLiveKitSession();
+	void stopLiveKitSession(bool requestLeave = true);
 
 	std::shared_ptr<OpenMeeting::MeetingCoordinator> _coordinator;
 
@@ -579,10 +596,23 @@ private:
 	QString _pendingDepartureTitle;
 	QString _pendingDepartureMessage;
 	VideoViewMode _viewMode = VideoViewMode::Grid;
+	livekit::VideoDemandPlan _acceptedVideoPlan;
+	std::optional<livekit::ViewportIntent> _lastViewportIntent;
+	uint64_t _viewportRevision = 0;
+	uint32_t _videoPage = 0;
+	uint32_t _videoPageSize = 9;
+	bool _logicalWindowVisible = true;
+	QTimer *_viewportIntentTimer = nullptr;
+	QWidget *_videoPagingControls = nullptr;
+	QToolButton *_previousVideoPage = nullptr;
+	QToolButton *_nextVideoPage = nullptr;
+	QComboBox *_videoPageSizeControl = nullptr;
+	QLabel *_videoPageLabel = nullptr;
 
 	// 参会状态
 	int _participantCount = 1;
 	QString _pinnedRenderKey;
+	std::optional<livekit::TrackKey> _pinnedTrackKey;
 
 	// UI 组件
 	RoomTopBarWidget *_topBar = nullptr;
@@ -590,16 +620,20 @@ private:
 	livekit::render::VideoCanvas *_videoCanvas = nullptr;
 	VideoTileWidget *_localTile = nullptr;
 	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteTiles;
+	std::map<QString, QString> _remoteParticipantNames;
 	struct RemoteVideoBinding {
 		QString identity;
 		bool screen = false;
 		std::weak_ptr<livekit::Track> track;
+		livekit::TrackKey key;
+		livekit::TrackTicket ticket;
 		livekit::MediaBindingKey mediaBindingKey;
 		livekit::MediaBindingTicket mediaBindingTicket;
 		bool muted = false;
 		bool paused = false;
 	};
 	std::map<QString, RemoteVideoBinding> _remoteVideoBindings;
+	std::map<QString, livekit::MediaBindingKey> _activeRemoteRenderLeases;
 	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteScreenTiles;
 	std::unique_ptr<VideoTileWidget> _localScreenTile;
 	std::shared_ptr<livekit::render::VideoRenderRouter> _localScreenPreview;
@@ -642,6 +676,7 @@ private:
 
 	// 本地麦克风采集
 	std::shared_ptr<livekit::WasapiAudioCapture> _wasapiCap;
+	std::shared_ptr<OpenMeeting::QtCallbackGate<MeetingRoomWindow>> _captureUiCallbacks;
 	bool _microphoneAvailable = false;
 	bool _speakerAvailable = false;
 

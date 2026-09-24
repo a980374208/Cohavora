@@ -24,6 +24,8 @@
 #include "src/core/local_audio_track.h"
 #include "src/core/local_video_track.h"
 #include "src/core/meeting_session_runtime.h"
+#include "src/core/meeting_session_owner.h"
+#include "src/core/session_shutdown_service.h"
 #include "src/core/meeting_startup_transaction.h"
 #include "src/core/screen_share_session.h"
 #include "src/core/whiteboard/whiteboard_document.h"
@@ -39,6 +41,8 @@ namespace OpenMeeting {
 
 QVariantMap ProjectTelemetrySnapshot(
     const livekit::telemetry::Snapshot &snapshot);
+livekit::SignalOptions ProductionMeetingSignalOptions(
+    bool allowInsecureTransport);
 
 enum class MeetingState {
     Idle,               // 闲置/已就绪
@@ -200,6 +204,9 @@ public:
     std::vector<ParticipantPresentation> participantPresentations() const;
     bool isParticipantPresentationCurrent(const ParticipantPresentation &presentation,
         const RemoteVideoTrackPresentation *track = nullptr) const;
+    void submitViewportIntent(livekit::ViewportIntent intent);
+    void reportVideoRenderSelection(
+        livekit::VideoRenderSelectionObservation observation);
 
     // 底层 LiveKit 房间与媒体源访问
     std::shared_ptr<livekit::Room> room() const { return _room; }
@@ -244,6 +251,10 @@ public:
         const std::vector<std::string> &destinationIdentities = {});
 
 signals:
+    // Direct UI listeners revoke/move capture resources before native teardown.
+    void sessionStopping();
+    void sessionShutdownFinished();
+    void sessionShutdownSlow();
     // 状态流转与全局通知
     void stateChanged(MeetingState newState, const QString &detail);
     void errorOccurred(const QString &title, const QString &message);
@@ -276,6 +287,7 @@ signals:
                                             const QString &trackSid,
                                             bool allowed);
     void activeSpeakersChanged(const std::vector<livekit::ActiveSpeakerInfo> &speakers);
+    void videoDemandPlanAccepted(livekit::VideoDemandPlan plan);
 
     // 本地媒体状态变动（供 UI 底栏与视频画框联动）
     void localAudioMuteChanged(bool muted);
@@ -360,7 +372,8 @@ private:
     bool isAdmissionCurrent(uint64_t generation, AdmissionStage stage) const;
     void setState(MeetingState s, const QString &detail = QString());
     void startRoomSession(const QString &url, const QString &token, uint64_t admissionGeneration);
-    void stopRoomSession();
+    void stopRoomSession(std::function<void()> completion = {});
+    void beginRoomSession(const QString &url, const QString &token, uint64_t admissionGeneration);
     void publishLocalTrackMute(const std::shared_ptr<livekit::Track> &track, bool muted);
     void applyLocalAudioState();
     void applyLocalVideoState();
@@ -388,11 +401,13 @@ private:
     void enqueueDataReceived(const std::shared_ptr<MeetingSessionRuntime> &session,
                              const std::vector<uint8_t> &data,
                              const livekit::SenderContext &sender);
-    void handleDataReceivedOnSessionStrand(const std::shared_ptr<MeetingSessionRuntime> &session,
+    static void handleDataReceivedOnSessionStrand(
+                                           const std::shared_ptr<QtCallbackGate<MeetingCoordinator>> &gate,
+                                           const std::shared_ptr<MeetingSessionRuntime> &session,
                                            const std::vector<uint8_t> &data,
                                            const livekit::SenderContext &sender);
     void configureWhiteboardRuntimeOnUiThread();
-    void enqueueWhiteboardData(const std::shared_ptr<MeetingSessionRuntime> &session,
+    static void enqueueWhiteboardData(const std::shared_ptr<MeetingSessionRuntime> &session,
                                const std::vector<uint8_t> &data,
                                const std::string &topic,
                                const livekit::SenderContext &sender);
@@ -417,6 +432,15 @@ private:
     bool isCurrentSessionGenerationOnUiThread(uint64_t sessionGeneration) const;
     void applyScreenShareSnapshotOnUiThread(uint64_t generation, livekit::ScreenShareSnapshot snapshot);
     bool isSenderContextCurrentOnUiThread(const livekit::SenderContext &sender) const;
+    static void applyRemoteMediaDemandOnStrand(
+        const std::shared_ptr<QtCallbackGate<MeetingCoordinator>> &gate,
+        const std::shared_ptr<MeetingSessionRuntime> &session,
+        const std::weak_ptr<livekit::Room> &room);
+    void replayLatestViewportIntentForCurrentSession();
+    void projectAcceptedVideoDemandOnUiThread(
+        uint64_t sessionGeneration,
+        livekit::VideoDemandPlan plan,
+        const livekit::ControlApplyResult &result);
 
     class CoordinatorRoomListener;
     friend class CoordinatorRoomListener;
@@ -470,6 +494,8 @@ private:
     std::map<QString, uint64_t> _participantEventSequences;
     std::map<QString, std::pair<InboundTransferKey, bool>> _inboundTransferLedger;
     uint64_t _nativeRoomGeneration = 0;
+    std::optional<livekit::ViewportIntent> _latestViewportIntent;
+    livekit::VideoDemandPlan _acceptedVideoDemandPlan;
     void ensureLocalParticipant();
     void updateParticipantListAndNotify();
 
@@ -493,15 +519,19 @@ private:
     std::atomic<int64_t> _msgSequenceCounter{0};
 
     // LiveKit 异步通信与媒体资源
-    std::unique_ptr<asio::io_context> _ioContext;
-    std::unique_ptr<asio::executor_work_guard<asio::io_context::executor_type>> _workGuard;
+    std::shared_ptr<MeetingSessionOwner> _sessionOwner;
+    std::shared_ptr<asio::io_context> _ioContext; // Qt-only alias; lifetime owned by the session.
+    std::shared_ptr<QtCallbackGate<MeetingCoordinator>> _uiGate;
+    std::shared_ptr<QtCallbackGate<MeetingCoordinator>> _sessionUiGate;
+    bool _stopPending = false;
+    uint64_t _stopSerial = 0;
+    std::function<void()> _stopCompletion; // Latest still-authorized UI intent.
     // The Qt thread owns this pointer. Callback-owned transfer state inside the
     // runtime is accessed only through its ASIO strand.
     std::shared_ptr<MeetingSessionRuntime> _sessionRuntime;
     uint64_t _nextSessionGeneration = 0;
     std::shared_ptr<livekit::Room> _room;
     std::shared_ptr<CoordinatorRoomListener> _roomListener;
-    std::thread _ioThread;
     std::atomic<bool> _sessionRunning{false};
     // Qt-thread owned session state. Startup and transport recovery complete on
     // separate callbacks, so neither may independently clear Reconnecting.

@@ -81,6 +81,7 @@ asio::awaitable<RtcStatsCollectionResult> CollectRtcStatsDetailed(
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection,
     asio::any_io_executor executor,
     std::chrono::milliseconds timeout = std::chrono::milliseconds(1500),
-    RtcStatsLateCompletion late_completion = {});
+    RtcStatsLateCompletion late_completion = {},
+    std::shared_ptr<void> executor_lifetime = {});
 
 } // namespace livekit

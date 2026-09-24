@@ -10,6 +10,7 @@
 namespace livekit {
 
 class AudioApmProcessor;
+class ExecutorCallbackGate;
 
 class WebRTCManager {
 public:
@@ -46,26 +47,30 @@ public:
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
         asio::any_io_executor executor,
         std::function<void(const std::string& sdp, const std::string& error)> callback,
-        bool ice_restart = false);
+        bool ice_restart = false,
+        std::shared_ptr<ExecutorCallbackGate> callback_gate = {});
 
     void CreateAnswer(
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
         asio::any_io_executor executor,
-        std::function<void(const std::string& sdp, const std::string& error)> callback);
+        std::function<void(const std::string& sdp, const std::string& error)> callback,
+        std::shared_ptr<ExecutorCallbackGate> callback_gate = {});
 
     void SetRemoteDescription(
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
         const std::string& type,
         const std::string& sdp,
         asio::any_io_executor executor,
-        std::function<void(const std::string& error)> callback);
+        std::function<void(const std::string& error)> callback,
+        std::shared_ptr<ExecutorCallbackGate> callback_gate = {});
 
     void SetLocalDescription(
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
         const std::string& type,
         const std::string& sdp,
         asio::any_io_executor executor,
-        std::function<void(const std::string& error)> callback);
+        std::function<void(const std::string& error)> callback,
+        std::shared_ptr<ExecutorCallbackGate> callback_gate = {});
 
 private:
     WebRTCManager() = default;

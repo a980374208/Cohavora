@@ -1,4 +1,5 @@
 #include "gl_video_canvas.h"
+#include "render/canvas_render_timing.h"
 #include "render/api/render_backend_module_info.h"
 #include <QtGui/QWindow>
 #include <QtGui/QOpenGLContext>
@@ -217,16 +218,16 @@ struct GlVideoCanvas::Worker {
                 }
             }
             const auto submitted_at = Clock::now();
+            CanvasRenderTimingBatch canvas_timing;
             for (const auto& resource : scene->resources) {
                 if (resource.frame && submitted_resources.contains(resource.id.value)) {
-                    resource.frame->NotifyRenderStage(
-                        "opengl_render_cpu_submit", render_duration, submitted_at);
-                    resource.frame->NotifyRenderStage(
-                        "opengl_swap_block", swap_duration, submitted_at);
+                    canvas_timing.Add(resource.frame->renderMetadata());
                     resource.frame->NotifyRendered(
                         scene->measurement_point.c_str(), submitted_at);
                 }
             }
+            canvas_timing.Notify(CanvasRenderStage::DrawSubmit, render_duration);
+            canvas_timing.Notify(CanvasRenderStage::PresentBlock, swap_duration);
             if (!moduleInfoQueried) {
                 moduleInfoQueried = true;
                 lk_render_module_info_v1 moduleInfo{};

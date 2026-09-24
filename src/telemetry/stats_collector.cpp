@@ -557,7 +557,8 @@ asio::awaitable<RtcStatsCollectionResult> CollectRtcStatsDetailed(
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> peer_connection,
     asio::any_io_executor executor,
     std::chrono::milliseconds timeout,
-    RtcStatsLateCompletion late_completion) {
+    RtcStatsLateCompletion late_completion,
+    std::shared_ptr<void> executor_lifetime) {
     if (!peer_connection) {
         co_return RtcStatsCollectionResult{
             RtcStatsCollectionStatus::Rejected, std::nullopt};
@@ -567,24 +568,35 @@ asio::awaitable<RtcStatsCollectionResult> CollectRtcStatsDetailed(
         decltype(asio::use_awaitable),
         void(RtcStatsCollectionResult)>(
         [peer_connection = std::move(peer_connection), executor, timeout,
-         late_completion = std::move(late_completion)](auto handler) mutable {
+         late_completion = std::move(late_completion),
+         executor_lifetime = std::move(executor_lifetime)](auto handler) mutable {
             using Handler = decltype(handler);
-            auto handler_ptr = std::make_shared<Handler>(std::move(handler));
+            struct CompletionOwner {
+                // Native delivery may retain this after Room has disconnected.
+                // Handler/timer/executor must all die before the context lease.
+                std::shared_ptr<void> lifetime;
+                asio::any_io_executor executor;
+                std::shared_ptr<asio::steady_timer> timer;
+                Handler handler;
+            };
+            auto owner = std::make_shared<CompletionOwner>(CompletionOwner{
+                std::move(executor_lifetime), executor,
+                std::make_shared<asio::steady_timer>(executor, timeout),
+                std::move(handler)});
             auto state = std::make_shared<RtcStatsState>();
-            auto timer = std::make_shared<asio::steady_timer>(executor, timeout);
 
             if (late_completion) {
                 state->late_completion = std::move(late_completion);
             }
-            state->completion = [executor, timer, handler_ptr](RtcStatsCollectionResult result) mutable {
-                asio::post(executor, [timer, handler_ptr, result = std::move(result)]() mutable {
+            state->completion = [owner](RtcStatsCollectionResult result) mutable {
+                asio::post(owner->executor, [owner, result = std::move(result)]() mutable {
                     std::error_code ignored;
-                    timer->cancel(ignored);
-                    (*handler_ptr)(std::move(result));
+                    owner->timer->cancel(ignored);
+                    owner->handler(std::move(result));
                 });
             };
 
-            timer->async_wait([state, handler_ptr](const std::error_code& error) mutable {
+            owner->timer->async_wait([state, owner](const std::error_code& error) mutable {
                 if (error) {
                     return;
                 }
@@ -598,7 +610,7 @@ asio::awaitable<RtcStatsCollectionResult> CollectRtcStatsDetailed(
                     state->status = RtcStatsCollectionStatus::Timeout;
                     state->completion = {};
                 }
-                (*handler_ptr)(RtcStatsCollectionResult{
+                owner->handler(RtcStatsCollectionResult{
                     RtcStatsCollectionStatus::Timeout, std::nullopt});
             });
 

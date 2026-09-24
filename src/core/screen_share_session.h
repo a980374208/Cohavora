@@ -44,17 +44,24 @@ public:
     };
     using Observer = std::function<void(ScreenShareSnapshot)>;
     static Backend ForRoom(const std::shared_ptr<Room>& room);
-    ScreenShareSession(asio::any_io_executor strand, Backend backend, Observer observer);
+    ScreenShareSession(asio::any_io_executor strand, Backend backend, Observer observer,
+                       std::shared_ptr<void> executor_lifetime = {});
     ~ScreenShareSession();
     void Start(DesktopSource source);
     void Stop();
     // Revokes capture synchronously on the strand before Room disconnect and
     // executor teardown. Room disconnect owns the network rollback on leave.
     void Shutdown();
+    // Strand-only revocation. The returned capture must be stopped/released by
+    // the shutdown worker while the strand continues draining its coroutine.
+    std::unique_ptr<IDesktopCapture> TakeCaptureForShutdown();
     void SetTransportReady(bool ready) { transport_ready_ = ready; }
     ScreenShareSnapshot snapshot() const { return snapshot_; } // strand only
 
 private:
+    // Retained share owners may outlive SessionRuntime. Destroy their strand,
+    // backend callbacks and runs before releasing the execution context.
+    const std::shared_ptr<void> executor_lifetime_;
     struct Run;
     static asio::awaitable<void> Drive(std::shared_ptr<ScreenShareSession> self,
                                        std::shared_ptr<Run> run, DesktopSource source);

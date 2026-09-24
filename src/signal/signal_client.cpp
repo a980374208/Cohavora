@@ -451,10 +451,10 @@ void SignalClient::SendUpdateTrackSettings(const std::string& track_sid,
     settings->add_track_sids(track_sid);
     settings->set_disabled(disabled);
     settings->set_quality(quality);
-    if (width > 0) settings->set_width(width);
-    if (height > 0) settings->set_height(height);
-    if (fps > 0) settings->set_fps(fps);
-    if (priority > 0) settings->set_priority(priority);
+    settings->set_width(width);
+    settings->set_height(height);
+    settings->set_fps(fps);
+    settings->set_priority(priority);
 
     std::cout << "[ADAPTIVE STREAM] Sent UpdateTrackSettings: sid=" << track_sid
               << ", disabled=" << (disabled ? "true" : "false")

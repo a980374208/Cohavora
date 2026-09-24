@@ -1,6 +1,7 @@
 #pragma once
 
 #include "stats.h"
+#include "render/canvas_render_timing.h"
 
 #include <asio.hpp>
 
@@ -185,10 +186,22 @@ struct RenderActivityProbe {
     std::atomic<bool> recovery_stable_submitted{false};
     StageAccumulator cpu_convert;
     StageAccumulator upload_submit;
+    // Per-tile Qt CPU paint. Shared GPU scene draws use CanvasRenderProbe.
     StageAccumulator draw_submit;
-    StageAccumulator present_block;
     std::int64_t target_interval_ns = 0;
     bool continuous_video = true;
+};
+
+// Session-owned cumulative costs, independent of any individual stream binding.
+// Retained scenes may hold this pure counter object after teardown; it owns no
+// executor, Qt object or native resource and rejects timings after session stop.
+struct CanvasRenderProbe final : render::CanvasRenderTimingObserver {
+    std::atomic<bool> active{true};
+    RenderActivityProbe::StageAccumulator draw_submit;
+    RenderActivityProbe::StageAccumulator present_block;
+
+    void OnCanvasStageTiming(
+        render::CanvasRenderStage stage, std::chrono::microseconds duration) override;
 };
 
 struct RenderPipelineSample {
@@ -207,6 +220,25 @@ struct RenderPipelineSample {
     std::string actual_backend = "qt-cpu";
     std::string gpu_failure = "none";
     std::string fallback_reason = "none";
+};
+
+struct VideoPolicySample {
+    std::uint64_t coordinator_session = 0;
+    std::uint64_t native_room_generation = 0;
+    std::uint64_t catalog_revision = 0;
+    std::uint64_t policy_revision = 0;
+    std::string stage_content = "video";
+    std::string policy_reason = "hidden";
+    bool retired = false;
+    std::uint64_t requested = 0;
+    std::uint64_t selected = 0;
+    std::uint64_t actual = 0;
+    std::uint64_t bound = 0;
+    std::uint64_t selected_not_requested = 0;
+    std::uint64_t selected_not_actual = 0;
+    std::uint64_t actual_not_selected = 0;
+    std::uint64_t selected_not_bound = 0;
+    std::uint64_t bound_not_selected = 0;
 };
 
 enum class LocalMediaKind {
@@ -873,6 +905,28 @@ struct Snapshot {
     std::uint64_t render_backend_failures = 0;
     std::uint64_t render_backend_fallbacks = 0;
 
+    Availability video_policy_availability = Availability::Unknown;
+    std::string video_policy_reason = "video_policy_not_observed";
+    std::string video_policy_measurement_point =
+        "session_video_policy_convergence";
+    std::uint64_t video_policy_coordinator_session = 0;
+    std::uint64_t video_policy_native_room_generation = 0;
+    std::uint64_t video_policy_catalog_revision = 0;
+    std::uint64_t video_policy_revision = 0;
+    std::string video_policy_stage_content = "video";
+    std::string video_policy_selection_reason = "hidden";
+    bool video_policy_retired = false;
+    std::uint64_t video_policy_requested = 0;
+    std::uint64_t video_policy_selected = 0;
+    std::uint64_t video_policy_actual = 0;
+    std::uint64_t video_policy_bound = 0;
+    std::uint64_t video_policy_selected_not_requested = 0;
+    std::uint64_t video_policy_selected_not_actual = 0;
+    std::uint64_t video_policy_actual_not_selected = 0;
+    std::uint64_t video_policy_selected_not_bound = 0;
+    std::uint64_t video_policy_bound_not_selected = 0;
+    std::uint64_t video_policy_stale_updates = 0;
+
     Availability render_stall_availability = Availability::Unknown;
     std::string render_stall_reason = "no_expected_render_binding";
     std::string render_stall_algorithm = "render-stall-v1";
@@ -886,6 +940,9 @@ struct Snapshot {
     Availability render_stage_availability = Availability::Unknown;
     std::string render_stage_reason = "no_render_stage_samples";
     std::string render_stage_measurement_point = "render_cpu_submission_spans";
+    // Convert/upload are per-resource CPU spans. Draw is a Qt tile paint or a
+    // single GPU canvas draw. Present is one GL swap / DX11 Render+Present call
+    // per participating session, never multiplied by its video resource count.
     std::uint64_t render_convert_samples = 0;
     std::int64_t render_convert_total_us = 0;
     std::int64_t render_convert_max_us = -1;
@@ -957,7 +1014,8 @@ public:
     SessionTelemetry(Strand strand,
                      std::uint64_t session_generation,
                      std::size_t queue_capacity = kDefaultQueueCapacity,
-                     Clock::time_point session_started_at = Clock::now());
+                     Clock::time_point session_started_at = Clock::now(),
+                     std::shared_ptr<void> executor_lifetime = {});
 
     SessionTelemetry(const SessionTelemetry&) = delete;
     SessionTelemetry& operator=(const SessionTelemetry&) = delete;
@@ -1072,6 +1130,7 @@ public:
     bool RecordRenderPipelineSample(
         RenderPipelineSample sample,
         Clock::time_point source_time = Clock::now());
+    bool RecordVideoPolicySampleOnStrand(VideoPolicySample sample);
     std::uint64_t ActiveRecoveryEpoch() const noexcept {
         return active_recovery_epoch_.load(std::memory_order_acquire);
     }
@@ -1095,6 +1154,11 @@ public:
     void RefreshOnStrand(Clock::time_point now = Clock::now());
     void StopOnStrand(std::function<void()> on_stopped = {});
     SnapshotPtr SnapshotOnStrand(Clock::time_point now = Clock::now());
+
+    // Immutable pointer identity; safe to obtain from render producer threads.
+    std::shared_ptr<CanvasRenderProbe> canvasRenderProbe() const {
+        return canvas_render_probe_;
+    }
 
 private:
     struct SeriesState {
@@ -1322,6 +1386,8 @@ private:
     void PublishSnapshotOnStrand(Clock::time_point now);
     Snapshot BuildSnapshotOnStrand(Clock::time_point now) const;
 
+    // Declared first so timers/strand die before the shared executor lease.
+    const std::shared_ptr<void> executor_lifetime_;
     Strand strand_;
     const std::uint64_t session_generation_;
     const std::size_t queue_capacity_;
@@ -1345,6 +1411,8 @@ private:
     std::map<std::string, MediaState> media_;
     std::map<std::string, AudioMediaState> audio_media_;
     std::map<std::string, RenderState> render_media_;
+    const std::shared_ptr<CanvasRenderProbe> canvas_render_probe_ =
+        std::make_shared<CanvasRenderProbe>();
     std::map<std::string, LocalPublicationState> local_publications_;
     std::map<std::string, AudioStatsBaseline> audio_stats_baselines_;
     std::map<std::string, NetworkStatsBaseline> inbound_network_baselines_;
