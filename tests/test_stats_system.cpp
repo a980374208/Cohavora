@@ -1,4 +1,6 @@
 #include <iostream>
+#include <algorithm>
+#include <map>
 #include "tests/support/test_check.h"
 #include <thread>
 #include <chrono>
@@ -153,6 +155,185 @@ void ParsedInboundFreezeFieldsPreserveAvailability() {
     TEST_CHECK(video.total_freezes_duration_available &&
                video.total_freezes_duration == 0.625);
     TEST_CHECK(video.total_decode_time_available && video.total_decode_time == 0.75);
+}
+
+void ParsedRecoveryPathAndQualityFieldsPreserveNativeSemantics() {
+    const auto timestamp = webrtc::Timestamp::Millis(3234);
+    auto native = webrtc::RTCStatsReport::Create(timestamp);
+
+    auto inbound = std::make_unique<webrtc::RTCInboundRtpStreamStats>(
+        "inbound-video", timestamp);
+    inbound->kind = "video";
+    inbound->bytes_received = 100000;
+    inbound->packets_received = 1000;
+    inbound->packets_lost = 7;
+    inbound->jitter = 0.006;
+    inbound->retransmitted_packets_received = 12;
+    inbound->retransmitted_bytes_received = 4096;
+    inbound->fec_packets_received = 8;
+    inbound->fec_bytes_received = 2048;
+    inbound->fec_packets_discarded = 1;
+    inbound->nack_count = 4;
+    inbound->pli_count = 2;
+    inbound->fir_count = 1;
+    inbound->codec_id = "codec-vp8";
+    inbound->frames_received = 980;
+    inbound->decoder_implementation = "libvpx";
+    inbound->power_efficient_decoder = false;
+    native->AddStats(std::move(inbound));
+
+    auto outbound = std::make_unique<webrtc::RTCOutboundRtpStreamStats>(
+        "outbound-video", timestamp);
+    outbound->kind = "video";
+    outbound->bytes_sent = 90000;
+    outbound->packets_sent = 900;
+    outbound->retransmitted_packets_sent = 9;
+    outbound->retransmitted_bytes_sent = 3000;
+    outbound->nack_count = 5;
+    outbound->pli_count = 3;
+    outbound->fir_count = 2;
+    outbound->frame_width = 1280;
+    outbound->frame_height = 720;
+    outbound->frames_per_second = 29.0;
+    outbound->quality_limitation_reason = "bandwidth";
+    outbound->quality_limitation_durations =
+        std::map<std::string, double>{{"none", 8.0}, {"bandwidth", 2.5}};
+    outbound->quality_limitation_resolution_changes = 3;
+    outbound->codec_id = "codec-vp8";
+    outbound->frames_encoded = 870;
+    outbound->frames_sent = 865;
+    outbound->total_encode_time = 1.25;
+    outbound->encoder_implementation = "libvpx";
+    outbound->power_efficient_encoder = false;
+    outbound->scalability_mode = "L1T3";
+    native->AddStats(std::move(outbound));
+
+    auto codec = std::make_unique<webrtc::RTCCodecStats>("codec-vp8", timestamp);
+    codec->mime_type = "video/VP8";
+    codec->clock_rate = 90000;
+    codec->payload_type = 96;
+    native->AddStats(std::move(codec));
+
+    auto remote_inbound =
+        std::make_unique<webrtc::RTCRemoteInboundRtpStreamStats>(
+            "remote-inbound-video", timestamp);
+    remote_inbound->local_id = "outbound-video";
+    remote_inbound->round_trip_time = 0.045;
+    remote_inbound->fraction_lost = 0.02;
+    remote_inbound->total_round_trip_time = 0.75;
+    remote_inbound->round_trip_time_measurements = 3;
+    native->AddStats(std::move(remote_inbound));
+
+    auto nominated_only = std::make_unique<webrtc::RTCIceCandidatePairStats>(
+        "nominated-only", timestamp);
+    nominated_only->nominated = true;
+    native->AddStats(std::move(nominated_only));
+    auto selected = std::make_unique<webrtc::RTCIceCandidatePairStats>(
+        "selected-pair", timestamp);
+    selected->transport_id = "transport-1";
+    selected->local_candidate_id = "local-1";
+    selected->remote_candidate_id = "remote-1";
+    selected->current_round_trip_time = 0.025;
+    selected->available_outgoing_bitrate = 2500000.0;
+    selected->available_incoming_bitrate = 3500000.0;
+    selected->packets_sent = 900;
+    selected->packets_received = 1000;
+    selected->bytes_sent = 90000;
+    selected->bytes_received = 100000;
+    native->AddStats(std::move(selected));
+    auto transport = std::make_unique<webrtc::RTCTransportStats>(
+        "transport-1", timestamp);
+    transport->selected_candidate_pair_id = "selected-pair";
+    transport->selected_candidate_pair_changes = 2;
+    transport->dtls_state = "connected";
+    transport->ice_role = "controlling";
+    transport->ice_state = "connected";
+    transport->bytes_sent = 95000;
+    transport->bytes_received = 105000;
+    transport->packets_sent = 920;
+    transport->packets_received = 1020;
+    native->AddStats(std::move(transport));
+    auto local = std::make_unique<webrtc::RTCLocalIceCandidateStats>(
+        "local-1", timestamp);
+    local->candidate_type = "relay";
+    local->network_type = "wifi";
+    local->protocol = "udp";
+    local->relay_protocol = "tls";
+    native->AddStats(std::move(local));
+    auto remote = std::make_unique<webrtc::RTCRemoteIceCandidateStats>(
+        "remote-1", timestamp);
+    remote->candidate_type = "host";
+    remote->protocol = "udp";
+    native->AddStats(std::move(remote));
+
+    const auto parsed = livekit::ParseRtcStatsReport(*native);
+    TEST_CHECK(parsed.inbound_rtp.size() == 1);
+    TEST_CHECK(parsed.inbound_rtp[0].retransmitted_packets_received_available &&
+               parsed.inbound_rtp[0].retransmitted_packets_received == 12);
+    TEST_CHECK(parsed.inbound_rtp[0].bytes_received_available &&
+               parsed.inbound_rtp[0].bytes_received == 100000);
+    TEST_CHECK(parsed.inbound_rtp[0].packets_lost_available &&
+               parsed.inbound_rtp[0].packets_lost == 7);
+    TEST_CHECK(parsed.inbound_rtp[0].jitter_available &&
+               parsed.inbound_rtp[0].jitter == 0.006);
+    TEST_CHECK(parsed.inbound_rtp[0].fec_packets_received_available &&
+               parsed.inbound_rtp[0].fec_packets_received == 8);
+    TEST_CHECK(parsed.inbound_rtp[0].codec_id_available &&
+               parsed.inbound_rtp[0].codec_id == "codec-vp8");
+    TEST_CHECK(parsed.inbound_rtp[0].frames_received_available &&
+               parsed.inbound_rtp[0].frames_received == 980);
+    TEST_CHECK(parsed.inbound_rtp[0].decoder_implementation_available &&
+               parsed.inbound_rtp[0].decoder_implementation == "libvpx");
+    TEST_CHECK(parsed.inbound_rtp[0].power_efficient_decoder_available &&
+               !parsed.inbound_rtp[0].power_efficient_decoder);
+    TEST_CHECK(parsed.outbound_rtp.size() == 1);
+    TEST_CHECK(parsed.outbound_rtp[0].quality_limitation_reason_available &&
+               parsed.outbound_rtp[0].quality_limitation_reason == "bandwidth");
+    TEST_CHECK(parsed.outbound_rtp[0].quality_limitation_durations.at("bandwidth") == 2.5);
+    TEST_CHECK(parsed.outbound_rtp[0].frames_sent_available &&
+               parsed.outbound_rtp[0].frames_sent == 865);
+    TEST_CHECK(parsed.outbound_rtp[0].total_encode_time_available &&
+               parsed.outbound_rtp[0].total_encode_time == 1.25);
+    TEST_CHECK(parsed.outbound_rtp[0].encoder_implementation_available &&
+               parsed.outbound_rtp[0].scalability_mode_available);
+    TEST_CHECK(parsed.codecs.size() == 1 &&
+               parsed.codecs[0].mime_type_available &&
+               parsed.codecs[0].mime_type == "video/VP8");
+    TEST_CHECK(parsed.remote_inbound_rtp.size() == 1);
+    TEST_CHECK(parsed.remote_inbound_rtp[0].local_id_available &&
+               parsed.remote_inbound_rtp[0].local_id == "outbound-video");
+    TEST_CHECK(parsed.remote_inbound_rtp[0].round_trip_time_available &&
+               parsed.remote_inbound_rtp[0].round_trip_time == 0.045);
+    TEST_CHECK(parsed.remote_inbound_rtp[0].total_round_trip_time_available &&
+               parsed.remote_inbound_rtp[0].total_round_trip_time == 0.75);
+    TEST_CHECK(parsed.remote_inbound_rtp[0].round_trip_time_measurements_available &&
+               parsed.remote_inbound_rtp[0].round_trip_time_measurements == 3);
+    TEST_CHECK(parsed.transports.size() == 1 &&
+               parsed.transports[0].selected_candidate_pair_changes == 2);
+    TEST_CHECK(parsed.ice_candidates.size() == 2);
+    const auto nominated = std::find_if(parsed.candidate_pairs.begin(),
+        parsed.candidate_pairs.end(), [](const auto& item) {
+            return item.id == "nominated-only";
+        });
+    const auto actual = std::find_if(parsed.candidate_pairs.begin(),
+        parsed.candidate_pairs.end(), [](const auto& item) {
+            return item.id == "selected-pair";
+        });
+    TEST_CHECK(nominated != parsed.candidate_pairs.end() &&
+               !nominated->current_pair && !nominated->selected_relationship_available);
+    TEST_CHECK(actual != parsed.candidate_pairs.end() && actual->current_pair &&
+               actual->selected_relationship_available);
+    TEST_CHECK(actual->current_round_trip_time_available &&
+               actual->current_round_trip_time == 0.025);
+    TEST_CHECK(actual->available_outgoing_bitrate_available &&
+               actual->available_outgoing_bitrate == 2500000.0);
+    TEST_CHECK(actual->bytes_received_available && actual->bytes_received == 100000);
+    TEST_CHECK(parsed.transports[0].bytes_sent_available &&
+               parsed.transports[0].bytes_sent == 95000);
+    TEST_CHECK(parsed.transports[0].dtls_state_available &&
+               parsed.transports[0].dtls_state == "connected");
+    TEST_CHECK(parsed.transports[0].ice_role_available &&
+               parsed.transports[0].ice_role == "controlling");
 }
 
 struct StatsPeerObserver final : webrtc::PeerConnectionObserver {
@@ -509,6 +690,7 @@ int main() {
     std::cout << "  -> [Test 5 PASSED] Timed-out stats safely release a closed peer after queue delay!\n\n";
     ParsedOutboundStatsDistinguishMissingZeroAndPositive();
     ParsedInboundFreezeFieldsPreserveAvailability();
+    ParsedRecoveryPathAndQualityFieldsPreserveNativeSemantics();
     std::cout << "  -> [Test 6 PASSED] Native outbound stats distinguish missing fields, zero and positive counters!\n\n";
     SenderDiagnosticsRemainPlainDataAndReflectTrackState();
     std::cout << "  -> [Test 7 PASSED] Sender snapshots preserve direction and track enabled state!\n\n";

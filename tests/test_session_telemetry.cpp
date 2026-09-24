@@ -716,6 +716,485 @@ void AudioStatsPreserveAvailabilityDeltasResetsAndStaleness() {
     context.run_for(100ms);
 }
 
+void NetworkPathRecoveryAndQualityUseWindowedNativeCounters() {
+    asio::io_context context;
+    auto strand = asio::make_strand(context);
+    auto telemetry = std::make_shared<SessionTelemetry>(strand, 113, 64);
+    SessionTelemetry::SnapshotPtr snapshot;
+    std::deque<livekit::RoomStatsReport> reports;
+    const auto make_report = [](std::uint64_t inbound_packets,
+                                std::uint64_t inbound_retransmitted,
+                                std::int64_t inbound_packets_lost,
+                                std::uint64_t outbound_packets,
+                                std::uint64_t outbound_retransmitted,
+                                double total_round_trip_time,
+                                std::uint64_t round_trip_time_measurements,
+                                double bandwidth_duration,
+                                std::uint32_t path_changes) {
+        livekit::RoomStatsReport room;
+        room.actual_peer_connection_count = 1;
+        room.successful_peer_connection_count = 1;
+        livekit::StatsReport pc;
+        livekit::InboundRtpStreamStats inbound;
+        inbound.id = "video-in";
+        inbound.kind = "video";
+        inbound.kind_available = true;
+        inbound.packets_received = inbound_packets;
+        inbound.packets_received_available = true;
+        inbound.bytes_received = inbound_packets * 100;
+        inbound.bytes_received_available = true;
+        inbound.packets_lost = inbound_packets_lost;
+        inbound.packets_lost_available = true;
+        inbound.jitter = static_cast<double>(path_changes) / 1000.0;
+        inbound.jitter_available = true;
+        inbound.retransmitted_packets_received = inbound_retransmitted;
+        inbound.retransmitted_packets_received_available = true;
+        inbound.fec_packets_received = inbound_retransmitted / 2;
+        inbound.fec_packets_received_available = true;
+        inbound.nack_count = static_cast<std::uint32_t>(inbound_retransmitted);
+        inbound.nack_count_available = true;
+        inbound.pli_count = 2;
+        inbound.pli_count_available = true;
+        inbound.fir_count = 1;
+        inbound.fir_count_available = true;
+        inbound.codec_id = "codec-vp8";
+        inbound.codec_id_available = true;
+        inbound.frames_received = static_cast<std::uint32_t>(inbound_packets);
+        inbound.frames_received_available = true;
+        inbound.frames_decoded = static_cast<std::uint32_t>(inbound_packets - 20);
+        inbound.frames_decoded_available = true;
+        inbound.frames_dropped = path_changes;
+        inbound.frames_dropped_available = true;
+        inbound.total_decode_time = static_cast<double>(inbound_packets) * 0.001;
+        inbound.total_decode_time_available = true;
+        inbound.frame_width = 1280;
+        inbound.frame_height = 720;
+        inbound.frames_per_second = 30.0;
+        inbound.frame_width_available = true;
+        inbound.frame_height_available = true;
+        inbound.frames_per_second_available = true;
+        inbound.decoder_implementation = "libvpx";
+        inbound.decoder_implementation_available = true;
+        inbound.power_efficient_decoder = false;
+        inbound.power_efficient_decoder_available = true;
+        pc.inbound_rtp.push_back(inbound);
+
+        livekit::OutboundRtpStreamStats outbound;
+        outbound.id = "video-out";
+        outbound.kind = "video";
+        outbound.kind_available = true;
+        outbound.packets_sent = outbound_packets;
+        outbound.packets_sent_available = true;
+        outbound.bytes_sent = outbound_packets * 100;
+        outbound.bytes_sent_available = true;
+        outbound.retransmitted_packets_sent = outbound_retransmitted;
+        outbound.retransmitted_packets_sent_available = true;
+        outbound.nack_count = static_cast<std::uint32_t>(outbound_retransmitted);
+        outbound.nack_count_available = true;
+        outbound.pli_count = 3;
+        outbound.pli_count_available = true;
+        outbound.fir_count = 2;
+        outbound.fir_count_available = true;
+        outbound.frame_width = 1280;
+        outbound.frame_height = 720;
+        outbound.frames_per_second = 30.0;
+        outbound.frame_width_available = true;
+        outbound.frame_height_available = true;
+        outbound.frames_per_second_available = true;
+        outbound.quality_limitation_reason = "bandwidth";
+        outbound.quality_limitation_reason_available = true;
+        outbound.quality_limitation_durations = {
+            {"none", 10.0}, {"bandwidth", bandwidth_duration}};
+        outbound.quality_limitation_durations_available = true;
+        outbound.quality_limitation_resolution_changes = path_changes;
+        outbound.quality_limitation_resolution_changes_available = true;
+        outbound.codec_id = "codec-vp8";
+        outbound.codec_id_available = true;
+        outbound.frames_encoded = static_cast<std::uint32_t>(outbound_packets);
+        outbound.frames_encoded_available = true;
+        outbound.frames_sent = static_cast<std::uint32_t>(outbound_packets - 5);
+        outbound.frames_sent_available = true;
+        outbound.total_encode_time = static_cast<double>(outbound_packets) * 0.002;
+        outbound.total_encode_time_available = true;
+        outbound.encoder_implementation = "libvpx";
+        outbound.encoder_implementation_available = true;
+        outbound.power_efficient_encoder = false;
+        outbound.power_efficient_encoder_available = true;
+        outbound.scalability_mode = "L1T3";
+        outbound.scalability_mode_available = true;
+        pc.outbound_rtp.push_back(outbound);
+
+        livekit::CodecStats codec;
+        codec.id = "codec-vp8";
+        codec.mime_type = "video/VP8";
+        codec.mime_type_available = true;
+        codec.clock_rate = 90000;
+        codec.clock_rate_available = true;
+        pc.codecs.push_back(codec);
+
+        livekit::RemoteInboundRtpStreamStats remote_inbound;
+        remote_inbound.id = "remote-video-in";
+        remote_inbound.local_id = "video-out";
+        remote_inbound.local_id_available = true;
+        remote_inbound.round_trip_time =
+            static_cast<double>(path_changes) / 100.0;
+        remote_inbound.round_trip_time_available = true;
+        remote_inbound.fraction_lost =
+            static_cast<double>(inbound_packets_lost) / 100.0;
+        remote_inbound.fraction_lost_available = true;
+        remote_inbound.total_round_trip_time = total_round_trip_time;
+        remote_inbound.total_round_trip_time_available = true;
+        remote_inbound.round_trip_time_measurements =
+            round_trip_time_measurements;
+        remote_inbound.round_trip_time_measurements_available = true;
+        pc.remote_inbound_rtp.push_back(remote_inbound);
+
+        livekit::TransportStats transport;
+        transport.id = "transport";
+        transport.selected_candidate_pair_id = "selected";
+        transport.selected_candidate_pair_id_available = true;
+        transport.selected_candidate_pair_changes = path_changes;
+        transport.selected_candidate_pair_changes_available = true;
+        transport.bytes_sent = outbound_packets * 200;
+        transport.bytes_sent_available = true;
+        transport.bytes_received = inbound_packets * 150;
+        transport.bytes_received_available = true;
+        transport.packets_sent = outbound_packets;
+        transport.packets_sent_available = true;
+        transport.packets_received = inbound_packets;
+        transport.packets_received_available = true;
+        transport.dtls_state = "connected";
+        transport.dtls_state_available = true;
+        transport.ice_state = "connected";
+        transport.ice_state_available = true;
+        transport.ice_role = "controlling";
+        transport.ice_role_available = true;
+        pc.transports.push_back(transport);
+        livekit::CandidatePairStats pair;
+        pair.id = "selected";
+        pair.transport_id = "transport";
+        pair.local_candidate_id = "local";
+        pair.remote_candidate_id = "remote";
+        pair.current_pair = true;
+        pair.selected_relationship_available = true;
+        pair.current_round_trip_time =
+            static_cast<double>(path_changes) / 100.0;
+        pair.current_round_trip_time_available = true;
+        pair.available_outgoing_bitrate =
+            1000000.0 + static_cast<double>(outbound_packets) * 1000.0;
+        pair.available_outgoing_bitrate_available = true;
+        pair.available_incoming_bitrate =
+            2000000.0 + static_cast<double>(inbound_packets) * 1000.0;
+        pair.available_incoming_bitrate_available = true;
+        pc.candidate_pairs.push_back(pair);
+        livekit::IceCandidateStats local;
+        local.id = "local";
+        local.candidate_type = "relay";
+        local.candidate_type_available = true;
+        local.network_type = "wifi";
+        local.network_type_available = true;
+        local.protocol = "udp";
+        local.protocol_available = true;
+        local.relay_protocol = "tls";
+        local.relay_protocol_available = true;
+        pc.ice_candidates.push_back(local);
+        livekit::IceCandidateStats remote;
+        remote.id = "remote";
+        remote.remote = true;
+        remote.candidate_type = "host";
+        remote.candidate_type_available = true;
+        remote.protocol = "udp";
+        remote.protocol_available = true;
+        pc.ice_candidates.push_back(remote);
+        room.reports.push_back(std::move(pc));
+        return room;
+    };
+
+    reports.push_back(make_report(1000, 10, 5, 800, 8, 0.4, 2, 2.0, 3));
+    asio::post(strand, [telemetry, &snapshot, &reports] {
+        telemetry->SetSnapshotCallbackOnStrand(
+            [&snapshot](SessionTelemetry::SnapshotPtr value) {
+                snapshot = std::move(value);
+            });
+        telemetry->StartStatsSamplingOnStrand(
+            [&reports](SessionTelemetry::LateCompletion)
+                -> asio::awaitable<livekit::RoomStatsReport> {
+                TEST_CHECK(!reports.empty());
+                auto report = std::move(reports.front());
+                reports.pop_front();
+                co_return report;
+            }, 1h);
+    });
+    context.run_for(100ms);
+    TEST_CHECK(snapshot);
+    TEST_CHECK(snapshot->network_recovery_availability == Availability::WarmingUp);
+    TEST_CHECK(snapshot->inbound_rtp_traffic_availability == Availability::WarmingUp);
+    TEST_CHECK(snapshot->outbound_rtp_traffic_availability == Availability::WarmingUp);
+    TEST_CHECK(snapshot->inbound_packet_loss_availability == Availability::WarmingUp);
+    TEST_CHECK(snapshot->inbound_jitter_availability == Availability::Valid);
+    TEST_CHECK(snapshot->remote_rtcp_availability == Availability::Valid);
+    TEST_CHECK(snapshot->transport_traffic_availability == Availability::WarmingUp);
+    TEST_CHECK(snapshot->transport_state_availability == Availability::Valid);
+    TEST_CHECK(snapshot->media_path_availability == Availability::Valid);
+    TEST_CHECK(snapshot->media_path_switches == 0);
+    TEST_CHECK(snapshot->local_candidate_types == "relay");
+    TEST_CHECK(snapshot->local_network_types == "wifi");
+    TEST_CHECK(snapshot->video_quality_limitation_current == "bandwidth");
+    TEST_CHECK(snapshot->window_video_quality_bandwidth_duration_ms == -1);
+    TEST_CHECK(snapshot->video_pipeline_availability == Availability::WarmingUp);
+    TEST_CHECK(snapshot->video_codec_availability == Availability::Valid);
+    TEST_CHECK(snapshot->inbound_video_codecs == "video/vp8");
+    TEST_CHECK(snapshot->outbound_video_layers == "l1t3");
+    TEST_CHECK(snapshot->video_processing_availability == Availability::WarmingUp);
+
+    reports.push_back(make_report(1200, 14, 7, 900, 11, 0.9, 4, 2.75, 4));
+    context.restart();
+    asio::post(strand, [telemetry] { telemetry->RequestStatsSampleOnStrand(); });
+    context.run_for(100ms);
+    TEST_CHECK(snapshot->network_recovery_availability == Availability::Valid);
+    TEST_CHECK(snapshot->inbound_rtp_traffic_availability == Availability::Valid);
+    TEST_CHECK(snapshot->outbound_rtp_traffic_availability == Availability::Valid);
+    TEST_CHECK(snapshot->window_inbound_rtp_bytes == 20000);
+    TEST_CHECK(snapshot->window_outbound_rtp_bytes == 10000);
+    TEST_CHECK(snapshot->inbound_rtp_bitrate_bps > 0.0);
+    TEST_CHECK(snapshot->outbound_rtp_bitrate_bps > 0.0);
+    TEST_CHECK(snapshot->inbound_packet_loss_availability == Availability::Valid);
+    TEST_CHECK(snapshot->window_inbound_packets_lost == 2);
+    TEST_CHECK(snapshot->window_inbound_packets_received == 200);
+    TEST_CHECK(std::abs(snapshot->inbound_packet_loss_ratio -
+                        (2.0 / 202.0)) < 1e-9);
+    TEST_CHECK(snapshot->inbound_jitter_max_ms == 4.0);
+    TEST_CHECK(snapshot->remote_rtcp_availability == Availability::Valid);
+    TEST_CHECK(snapshot->remote_rtcp_current_rtt_max_ms == 40.0);
+    TEST_CHECK(std::abs(snapshot->remote_rtcp_window_average_rtt_ms - 250.0) <
+               1e-9);
+    TEST_CHECK(snapshot->remote_rtcp_fraction_lost_max == 0.07);
+    TEST_CHECK(snapshot->window_inbound_packets == 200);
+    TEST_CHECK(snapshot->window_inbound_retransmitted_packets == 4);
+    TEST_CHECK(std::abs(snapshot->inbound_retransmitted_packet_ratio - 0.02) < 1e-9);
+    TEST_CHECK(snapshot->window_outbound_packets == 100);
+    TEST_CHECK(snapshot->window_outbound_retransmitted_packets == 3);
+    TEST_CHECK(std::abs(snapshot->outbound_retransmitted_packet_ratio - 0.03) < 1e-9);
+    TEST_CHECK(snapshot->media_path_switches == 1);
+    TEST_CHECK(snapshot->media_path_rtt_availability == Availability::Valid);
+    TEST_CHECK(snapshot->media_path_rtt_max_ms == 40.0);
+    TEST_CHECK(snapshot->media_bandwidth_availability == Availability::Valid);
+    TEST_CHECK(snapshot->media_available_outgoing_bitrate_bps == 1900000.0);
+    TEST_CHECK(snapshot->media_available_incoming_bitrate_bps == 3200000.0);
+    TEST_CHECK(snapshot->transport_traffic_availability == Availability::Valid);
+    TEST_CHECK(snapshot->window_transport_bytes_sent == 20000);
+    TEST_CHECK(snapshot->window_transport_bytes_received == 30000);
+    TEST_CHECK(snapshot->window_transport_packets_sent == 100);
+    TEST_CHECK(snapshot->window_transport_packets_received == 200);
+    TEST_CHECK(snapshot->transport_dtls_states == "connected");
+    TEST_CHECK(snapshot->transport_connectivity_states == "connected");
+    TEST_CHECK(snapshot->transport_roles == "controlling");
+    TEST_CHECK(snapshot->video_quality_limitation_availability == Availability::Valid);
+    TEST_CHECK(snapshot->window_video_quality_bandwidth_duration_ms == 750);
+    TEST_CHECK(snapshot->window_video_quality_resolution_changes == 1);
+    TEST_CHECK(snapshot->outbound_video_width == 1280);
+    TEST_CHECK(snapshot->outbound_video_height == 720);
+    TEST_CHECK(snapshot->video_pipeline_availability == Availability::Valid);
+    TEST_CHECK(snapshot->window_inbound_video_frames_received == 200);
+    TEST_CHECK(snapshot->window_inbound_video_frames_decoded == 200);
+    TEST_CHECK(snapshot->window_inbound_video_frames_dropped == 1);
+    TEST_CHECK(snapshot->window_outbound_video_frames_encoded == 100);
+    TEST_CHECK(snapshot->window_outbound_video_frames_sent == 100);
+    TEST_CHECK(std::abs(snapshot->inbound_video_frame_drop_ratio - 0.005) < 1e-9);
+    TEST_CHECK(snapshot->video_processing_availability == Availability::Valid);
+    TEST_CHECK(std::abs(snapshot->video_decode_ms_per_frame - 1.0) < 1e-9);
+    TEST_CHECK(std::abs(snapshot->video_encode_ms_per_frame - 2.0) < 1e-9);
+
+    reports.push_back(make_report(1300, 16, 6, 950, 12, 1.15, 5, 2.9, 4));
+    context.restart();
+    asio::post(strand, [telemetry] { telemetry->RequestStatsSampleOnStrand(); });
+    context.run_for(100ms);
+    TEST_CHECK(snapshot->inbound_packet_loss_availability == Availability::Invalid);
+    TEST_CHECK(snapshot->inbound_packet_loss_reason ==
+               "inbound_loss_late_packet_correction");
+    TEST_CHECK(snapshot->window_inbound_packets_lost == -1);
+    TEST_CHECK(snapshot->window_inbound_packets_received == 100);
+    TEST_CHECK(snapshot->inbound_packet_loss_ratio < 0.0);
+
+    context.restart();
+    asio::post(strand, [telemetry] { telemetry->StopOnStrand(); });
+    context.run();
+}
+
+void MissingRecoveryAndQualityCountersRemainUnavailable() {
+    asio::io_context context;
+    auto strand = asio::make_strand(context);
+    auto telemetry = std::make_shared<SessionTelemetry>(strand, 115, 64);
+    SessionTelemetry::SnapshotPtr snapshot;
+
+    livekit::RoomStatsReport report;
+    report.actual_peer_connection_count = 1;
+    report.successful_peer_connection_count = 1;
+    livekit::StatsReport pc;
+    livekit::InboundRtpStreamStats inbound;
+    inbound.id = "video-in-missing-recovery";
+    inbound.kind = "video";
+    inbound.kind_available = true;
+    inbound.packets_received = 100;
+    inbound.packets_received_available = true;
+    pc.inbound_rtp.push_back(inbound);
+    livekit::OutboundRtpStreamStats outbound;
+    outbound.id = "video-out-reason-only";
+    outbound.kind = "video";
+    outbound.kind_available = true;
+    outbound.packets_sent = 80;
+    outbound.packets_sent_available = true;
+    outbound.quality_limitation_reason = "cpu";
+    outbound.quality_limitation_reason_available = true;
+    pc.outbound_rtp.push_back(outbound);
+    livekit::RemoteInboundRtpStreamStats remote_inbound;
+    remote_inbound.id = "remote-inbound-missing-feedback";
+    pc.remote_inbound_rtp.push_back(remote_inbound);
+    livekit::TransportStats transport;
+    transport.id = "transport-missing-fields";
+    pc.transports.push_back(transport);
+    report.reports.push_back(std::move(pc));
+
+    asio::post(strand, [telemetry, &snapshot, report = std::move(report)]() mutable {
+        telemetry->SetSnapshotCallbackOnStrand(
+            [&snapshot](SessionTelemetry::SnapshotPtr value) {
+                snapshot = std::move(value);
+            });
+        telemetry->StartStatsSamplingOnStrand(
+            [report = std::move(report)](SessionTelemetry::LateCompletion) mutable
+                -> asio::awaitable<livekit::RoomStatsReport> {
+                co_return std::move(report);
+            }, 1h);
+    });
+    context.run_for(100ms);
+
+    TEST_CHECK(snapshot);
+    TEST_CHECK(snapshot->network_recovery_availability ==
+               Availability::Unsupported);
+    TEST_CHECK(snapshot->inbound_rtp_traffic_availability ==
+               Availability::Unsupported);
+    TEST_CHECK(snapshot->outbound_rtp_traffic_availability ==
+               Availability::Unsupported);
+    TEST_CHECK(snapshot->inbound_packet_loss_availability ==
+               Availability::Unsupported);
+    TEST_CHECK(snapshot->inbound_jitter_availability ==
+               Availability::Unsupported);
+    TEST_CHECK(snapshot->remote_rtcp_availability == Availability::Unsupported);
+    TEST_CHECK(snapshot->transport_traffic_availability ==
+               Availability::Unsupported);
+    TEST_CHECK(snapshot->transport_state_availability ==
+               Availability::Unsupported);
+    TEST_CHECK(snapshot->inbound_rtp_bitrate_bps < 0.0);
+    TEST_CHECK(snapshot->outbound_rtp_bitrate_bps < 0.0);
+    TEST_CHECK(snapshot->inbound_packet_loss_ratio < 0.0);
+    TEST_CHECK(snapshot->inbound_retransmission_availability ==
+               Availability::Unsupported);
+    TEST_CHECK(snapshot->outbound_retransmission_availability ==
+               Availability::Unsupported);
+    TEST_CHECK(snapshot->inbound_retransmitted_packet_ratio == -1.0);
+    TEST_CHECK(snapshot->outbound_retransmitted_packet_ratio == -1.0);
+    TEST_CHECK(snapshot->video_quality_limitation_availability ==
+               Availability::Valid);
+    TEST_CHECK(snapshot->video_quality_limitation_current == "cpu");
+    TEST_CHECK(snapshot->video_quality_cpu_duration_ms == -1);
+    TEST_CHECK(snapshot->window_video_quality_cpu_duration_ms == -1);
+    TEST_CHECK(snapshot->video_quality_resolution_changes == -1);
+    TEST_CHECK(snapshot->window_video_quality_resolution_changes == -1);
+
+    context.restart();
+    asio::post(strand, [telemetry] { telemetry->StopOnStrand(); });
+    context.run();
+}
+
+void LocalDeviceContinuityUsesPublicationEpochAndRunningIntent() {
+    asio::io_context context;
+    auto strand = asio::make_strand(context);
+    auto telemetry = std::make_shared<SessionTelemetry>(strand, 114, 64);
+    auto video = std::make_shared<livekit::telemetry::LocalVideoActivityProbe>();
+    const auto base = SessionTelemetry::Clock::now();
+    TEST_CHECK(telemetry->RegisterLocalPublication(
+        "local_publish/device-video", 12, 5,
+        livekit::telemetry::LocalMediaKind::Video,
+        "device-video", base, true, video, base));
+    context.run();
+
+    video->frame_count.store(10, std::memory_order_relaxed);
+    video->last_frame_ns.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            (base + 100ms).time_since_epoch()).count(),
+        std::memory_order_release);
+    video->format_changes.store(2, std::memory_order_relaxed);
+    video->clock_resets.store(1, std::memory_order_relaxed);
+    video->width.store(1280, std::memory_order_relaxed);
+    video->height.store(720, std::memory_order_relaxed);
+    SessionTelemetry::SnapshotPtr snapshot;
+    context.restart();
+    asio::post(strand, [telemetry, &snapshot, base] {
+        snapshot = telemetry->SnapshotOnStrand(base + 200ms);
+    });
+    context.run();
+    TEST_CHECK(snapshot->local_device_continuity_availability == Availability::Valid);
+    TEST_CHECK(snapshot->active_local_device_streams == 1);
+    TEST_CHECK(snapshot->local_device_format_changes == 2);
+    TEST_CHECK(snapshot->local_device_clock_resets == 1);
+    TEST_CHECK(snapshot->device_open_availability == Availability::Unsupported);
+    TEST_CHECK(snapshot->device_hotplug_availability == Availability::Unsupported);
+    TEST_CHECK(snapshot->device_state_availability == Availability::Valid);
+    TEST_CHECK(snapshot->camera_requested && snapshot->camera_effective);
+    TEST_CHECK(snapshot->actual_capture_width == 1280);
+    TEST_CHECK(snapshot->actual_capture_height == 720);
+
+    context.restart();
+    asio::post(strand, [telemetry, &snapshot, base] {
+        snapshot = telemetry->SnapshotOnStrand(base + 1600ms);
+    });
+    context.run();
+    TEST_CHECK(snapshot->local_device_unexpected_stops == 1);
+    TEST_CHECK(snapshot->active_local_device_streams == 0);
+    TEST_CHECK(snapshot->local_device_interruption_duration_ms == 500);
+
+    video->last_frame_ns.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            (base + 1700ms).time_since_epoch()).count(),
+        std::memory_order_release);
+    video->frame_count.store(11, std::memory_order_relaxed);
+    context.restart();
+    asio::post(strand, [telemetry, &snapshot, base] {
+        snapshot = telemetry->SnapshotOnStrand(base + 1800ms);
+    });
+    context.run();
+    TEST_CHECK(snapshot->active_local_device_streams == 1);
+    TEST_CHECK(snapshot->local_device_unexpected_stops == 1);
+    TEST_CHECK(snapshot->local_device_interruption_duration_ms == 600);
+
+    auto replacement =
+        std::make_shared<livekit::telemetry::LocalVideoActivityProbe>();
+    replacement->frame_count.store(1, std::memory_order_relaxed);
+    replacement->last_frame_ns.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            (base + 1950ms).time_since_epoch()).count(),
+        std::memory_order_release);
+    replacement->format_changes.store(3, std::memory_order_relaxed);
+    replacement->clock_resets.store(2, std::memory_order_relaxed);
+    TEST_CHECK(telemetry->RegisterLocalPublication(
+        "local_publish/device-video", 12, 6,
+        livekit::telemetry::LocalMediaKind::Video,
+        "device-video-replacement", base + 1900ms, true, replacement,
+        base + 1900ms));
+    context.restart();
+    asio::post(strand, [telemetry, &snapshot, base] {
+        snapshot = telemetry->SnapshotOnStrand(base + 2000ms);
+    });
+    context.run();
+    TEST_CHECK(!video->active.load(std::memory_order_acquire));
+    TEST_CHECK(replacement->active.load(std::memory_order_acquire));
+    TEST_CHECK(snapshot->active_local_device_streams == 1);
+    TEST_CHECK(snapshot->local_device_unexpected_stops == 1);
+    TEST_CHECK(snapshot->local_device_interruption_duration_ms == 600);
+    TEST_CHECK(snapshot->local_device_format_changes == 5);
+    TEST_CHECK(snapshot->local_device_clock_resets == 3);
+}
+
 void AudioQoeFollowsExpectedMediaState() {
     asio::io_context context;
     auto strand = asio::make_strand(context);
@@ -995,6 +1474,27 @@ void RenderSubmitDedupesAndExcludesHiddenIntervals() {
     TEST_CHECK(telemetry->RecordRemoteVideoRenderSubmit(
         "remote_render/p/t", 7, 1, 2, base + 790ms,
         "qt_cpu_paint", probe, base + 800ms));
+    livekit::telemetry::RenderPipelineSample pipeline;
+    pipeline.router_submitted = 10;
+    pipeline.router_replaced_before_render = 3;
+    pipeline.router_dropped_capacity = 1;
+    pipeline.delivered_to_qt_cpu = 6;
+    pipeline.qt_cpu_conversion_failures = 1;
+    pipeline.attached_track_count = 1;
+    pipeline.requested_backend = "dx11";
+    pipeline.actual_backend = "qt-cpu";
+    pipeline.gpu_failure = "device-lost";
+    pipeline.fallback_reason = "gpu-device-lost";
+    TEST_CHECK(telemetry->RecordRenderPipelineSample(pipeline, base + 810ms));
+    probe->cpu_convert.samples.store(2, std::memory_order_relaxed);
+    probe->cpu_convert.total_us.store(90, std::memory_order_relaxed);
+    probe->cpu_convert.maximum_us.store(50, std::memory_order_relaxed);
+    probe->draw_submit.samples.store(2, std::memory_order_relaxed);
+    probe->draw_submit.total_us.store(150, std::memory_order_relaxed);
+    probe->draw_submit.maximum_us.store(90, std::memory_order_relaxed);
+    probe->present_block.samples.store(1, std::memory_order_relaxed);
+    probe->present_block.total_us.store(120, std::memory_order_relaxed);
+    probe->present_block.maximum_us.store(120, std::memory_order_relaxed);
     context.run();
     context.restart();
     asio::post(strand, [telemetry, base] {
@@ -1009,6 +1509,30 @@ void RenderSubmitDedupesAndExcludesHiddenIntervals() {
     TEST_CHECK(snapshot->render_stall_duration_ms == 300);
     TEST_CHECK(snapshot->render_longest_stall_ms == 200);
     TEST_CHECK(snapshot->render_stall_active);
+    TEST_CHECK(snapshot->render_stage_availability == Availability::Valid);
+    TEST_CHECK(snapshot->render_convert_samples == 2);
+    TEST_CHECK(snapshot->render_convert_total_us == 90);
+    TEST_CHECK(snapshot->render_convert_max_us == 50);
+    TEST_CHECK(snapshot->render_draw_samples == 2);
+    TEST_CHECK(snapshot->render_present_block_samples == 1);
+    TEST_CHECK(snapshot->render_present_block_max_us == 120);
+    TEST_CHECK(snapshot->render_gpu_execution_availability ==
+               Availability::Unsupported);
+    TEST_CHECK(snapshot->render_interval_p50_ms == 1000.0);
+    TEST_CHECK(snapshot->render_interval_p95_ms == 1000.0);
+    TEST_CHECK(snapshot->render_interval_p99_ms == 1000.0);
+    TEST_CHECK(snapshot->render_frame_age_availability == Availability::Valid);
+    TEST_CHECK(snapshot->render_average_frame_age_ms == 10.0);
+    TEST_CHECK(snapshot->render_maximum_frame_age_ms == 10);
+    TEST_CHECK(snapshot->render_target_interval_ms == 33);
+    TEST_CHECK(snapshot->render_pipeline_availability == Availability::Valid);
+    TEST_CHECK(snapshot->render_router_replaced == 3);
+    TEST_CHECK(snapshot->render_router_dropped_capacity == 1);
+    TEST_CHECK(snapshot->render_actual_backend == "qt-cpu");
+    TEST_CHECK(snapshot->render_backend_failures == 1);
+    TEST_CHECK(snapshot->render_backend_fallbacks == 1);
+    TEST_CHECK(snapshot->router_queue_availability == Availability::Valid);
+    TEST_CHECK(snapshot->active_router_slots == 1);
 
     context.restart();
     TEST_CHECK(telemetry->SetRemoteVideoRenderExpected(
@@ -1303,9 +1827,271 @@ void ResourceTrendIsBoundedAndExitReturnStaysHonest() {
     asio::post(strand, [telemetry] { telemetry->StopOnStrand(); });
     context.poll();
     TEST_CHECK(snapshot->resource_final_delta_availability == Availability::Valid);
-    TEST_CHECK(snapshot->resource_return_availability == Availability::Unknown);
+    TEST_CHECK(snapshot->resource_return_availability == Availability::Unsupported);
     TEST_CHECK(snapshot->resource_return_reason ==
-               "post_stop_stable_window_not_observed");
+               "post_stop_sampler_not_owned_after_session_teardown");
+}
+
+void SessionDurationsAndDisconnectHaveOneTerminal() {
+    asio::io_context context;
+    auto strand = asio::make_strand(context);
+    const auto base = Event::Clock::now();
+    auto telemetry = std::make_shared<SessionTelemetry>(strand, 201, 64, base);
+    SessionTelemetry::SnapshotPtr snapshot;
+    asio::post(strand, [telemetry, &snapshot] {
+        telemetry->SetSnapshotCallbackOnStrand(
+            [&snapshot](SessionTelemetry::SnapshotPtr value) {
+                snapshot = std::move(value);
+            });
+    });
+
+    const auto connect = telemetry->StartOperation(
+        OperationKind::Connect, {}, base + 100ms);
+    TEST_CHECK(telemetry->FinishOperation(
+        connect, OperationKind::Connect, OperationOutcome::Success,
+        base + 200ms));
+    const auto reconnect = telemetry->StartOperation(
+        OperationKind::ReconnectEpisode, {}, base + 1200ms);
+    TEST_CHECK(telemetry->FinishOperation(
+        reconnect, OperationKind::ReconnectEpisode, OperationOutcome::Success,
+        base + 1500ms));
+    const auto disconnect = telemetry->StartOperation(
+        OperationKind::Disconnect, {}, base + 2000ms);
+    TEST_CHECK(telemetry->FinishOperation(
+        disconnect, OperationKind::Disconnect, OperationOutcome::Success,
+        base + 2050ms));
+    TEST_CHECK(telemetry->FinishOperation(
+        disconnect, OperationKind::Disconnect, OperationOutcome::Failure,
+        base + 2100ms));
+    asio::post(strand, [telemetry, &snapshot, base] {
+        snapshot = telemetry->SnapshotOnStrand(base + 2200ms);
+    });
+    context.run();
+
+    TEST_CHECK(snapshot);
+    TEST_CHECK(snapshot->session_duration_availability == Availability::Valid);
+    TEST_CHECK(snapshot->session_duration_ms == 2200);
+    TEST_CHECK(snapshot->usable_duration_availability == Availability::Valid);
+    TEST_CHECK(snapshot->usable_duration_ms == 1500);
+    const auto* summary = FindOperation(*snapshot, OperationKind::Disconnect);
+    TEST_CHECK(summary);
+    TEST_CHECK(summary->started == 1);
+    TEST_CHECK(summary->terminal == 1);
+    TEST_CHECK(summary->success == 1);
+    TEST_CHECK(summary->last_duration_ms == 50);
+    TEST_CHECK(snapshot->operations_duplicate_terminal == 1);
+}
+
+void LocalPublishPipelinePreservesWarmingTimeoutAndMapping() {
+    asio::io_context context;
+    auto strand = asio::make_strand(context);
+    auto telemetry = std::make_shared<SessionTelemetry>(strand, 202, 64);
+    SessionTelemetry::SnapshotPtr snapshot;
+    const auto now = Event::Clock::now();
+    auto probe = std::make_shared<livekit::telemetry::LocalVideoActivityProbe>();
+    TEST_CHECK(!probe->active.load(std::memory_order_acquire));
+    probe->first_injected_ns.store(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            (now - 150ms).time_since_epoch()).count(),
+        std::memory_order_release);
+    TEST_CHECK(telemetry->RegisterLocalPublication(
+        "local_publish/rtc-video", 7, 1,
+        livekit::telemetry::LocalMediaKind::Video,
+        "rtc-video", now - 200ms, true, probe, now - 100ms));
+    TEST_CHECK(probe->active.load(std::memory_order_acquire));
+
+    livekit::RoomStatsReport report;
+    report.actual_peer_connection_count = 1;
+    report.successful_peer_connection_count = 1;
+    livekit::StatsReport publisher;
+    publisher.senders_available = true;
+    livekit::RtpSenderDiagnostic sender;
+    sender.track_id = "rtc-video";
+    sender.kind = "video";
+    sender.mid = "0";
+    sender.mid_available = true;
+    sender.track_enabled = true;
+    publisher.senders.push_back(sender);
+    livekit::OutboundRtpStreamStats outbound;
+    outbound.kind = "video";
+    outbound.kind_available = true;
+    outbound.mid = "0";
+    outbound.mid_available = true;
+    outbound.frames_encoded = 1;
+    outbound.frames_encoded_available = true;
+    outbound.packets_sent = 1;
+    outbound.packets_sent_available = true;
+    publisher.outbound_rtp.push_back(outbound);
+    report.reports.push_back(publisher);
+
+    asio::post(strand, [telemetry, &snapshot, report = std::move(report)]() mutable {
+        telemetry->SetSnapshotCallbackOnStrand(
+            [&snapshot](SessionTelemetry::SnapshotPtr value) {
+                snapshot = std::move(value);
+            });
+        telemetry->StartStatsSamplingOnStrand(
+            [report = std::move(report)](SessionTelemetry::LateCompletion) mutable
+                -> asio::awaitable<livekit::RoomStatsReport> {
+                co_return std::move(report);
+            }, 1s);
+    });
+    context.run_for(100ms);
+
+    TEST_CHECK(snapshot);
+    TEST_CHECK(snapshot->local_publish_media_availability == Availability::Valid);
+    TEST_CHECK(snapshot->local_video_injection_availability == Availability::Valid);
+    TEST_CHECK(snapshot->local_video_encode_availability == Availability::Valid);
+    TEST_CHECK(snapshot->local_rtp_send_availability == Availability::Valid);
+    TEST_CHECK(snapshot->local_video_first_injections == 1);
+    TEST_CHECK(snapshot->local_video_first_encodes == 1);
+    TEST_CHECK(snapshot->local_first_rtp_sends == 1);
+    TEST_CHECK(snapshot->local_publish_no_media == 0);
+    TEST_CHECK(snapshot->local_publish_stats_uncertainty_ms == 1000);
+
+    context.restart();
+    TEST_CHECK(telemetry->RecordLocalVideoFrameInjected(
+        "local_publish/rtc-video", 7, 99, Event::Clock::now()));
+    context.run_for(100ms);
+    TEST_CHECK(snapshot->stale_local_publication_drops == 1);
+    asio::post(strand, [telemetry] { telemetry->StopOnStrand(); });
+    context.run_for(100ms);
+
+    asio::io_context bounded_context;
+    auto bounded_strand = asio::make_strand(bounded_context);
+    auto bounded_telemetry = std::make_shared<SessionTelemetry>(
+        bounded_strand, 204, 1);
+    Event queued;
+    queued.kind = EventKind::GaugeSample;
+    queued.session_generation = 204;
+    TEST_CHECK(bounded_telemetry->Submit(std::move(queued)));
+    auto rejected_probe =
+        std::make_shared<livekit::telemetry::LocalVideoActivityProbe>();
+    TEST_CHECK(!bounded_telemetry->RegisterLocalPublication(
+        "local_publish/rejected", 9, 1,
+        livekit::telemetry::LocalMediaKind::Video,
+        "rejected", now, true, rejected_probe, now));
+    TEST_CHECK(!rejected_probe->active.load(std::memory_order_acquire));
+
+    asio::io_context timeout_context;
+    auto timeout_strand = asio::make_strand(timeout_context);
+    auto timeout_telemetry = std::make_shared<SessionTelemetry>(
+        timeout_strand, 203, 64);
+    SessionTelemetry::SnapshotPtr timed_out;
+    auto missing_probe =
+        std::make_shared<livekit::telemetry::LocalVideoActivityProbe>();
+    const auto expired = Event::Clock::now() - 6s;
+    TEST_CHECK(timeout_telemetry->RegisterLocalPublication(
+        "local_publish/missing", 8, 1,
+        livekit::telemetry::LocalMediaKind::Video,
+        "missing", expired, true, missing_probe, expired + 10ms));
+    livekit::RoomStatsReport timeout_report;
+    timeout_report.actual_peer_connection_count = 1;
+    timeout_report.successful_peer_connection_count = 1;
+    livekit::StatsReport timeout_pc;
+    timeout_pc.senders_available = true;
+    livekit::RtpSenderDiagnostic timeout_sender;
+    timeout_sender.track_id = "missing";
+    timeout_sender.kind = "video";
+    timeout_sender.mid = "timeout-mid";
+    timeout_sender.mid_available = true;
+    timeout_sender.track_enabled = true;
+    timeout_pc.senders.push_back(timeout_sender);
+    livekit::OutboundRtpStreamStats timeout_outbound;
+    timeout_outbound.kind = "video";
+    timeout_outbound.kind_available = true;
+    timeout_outbound.mid = "timeout-mid";
+    timeout_outbound.mid_available = true;
+    timeout_outbound.frames_encoded_available = true;
+    timeout_outbound.packets_sent_available = true;
+    timeout_pc.outbound_rtp.push_back(timeout_outbound);
+    timeout_report.reports.push_back(timeout_pc);
+    asio::post(timeout_strand,
+        [timeout_telemetry, &timed_out,
+         report = std::move(timeout_report)]() mutable {
+        timeout_telemetry->SetSnapshotCallbackOnStrand(
+            [&timed_out](SessionTelemetry::SnapshotPtr value) {
+                timed_out = std::move(value);
+            });
+        timeout_telemetry->StartStatsSamplingOnStrand(
+            [report = std::move(report)](SessionTelemetry::LateCompletion) mutable
+                -> asio::awaitable<livekit::RoomStatsReport> {
+                co_return std::move(report);
+            }, 1s);
+    });
+    timeout_context.run_for(100ms);
+    TEST_CHECK(timed_out);
+    TEST_CHECK(timed_out->local_publish_media_availability == Availability::Timeout);
+    TEST_CHECK(timed_out->local_video_injection_availability == Availability::Timeout);
+    TEST_CHECK(timed_out->local_video_encode_availability == Availability::Timeout);
+    TEST_CHECK(timed_out->local_rtp_send_availability == Availability::Timeout);
+    TEST_CHECK(timed_out->local_publish_no_media == 1);
+    asio::post(timeout_strand,
+        [timeout_telemetry] { timeout_telemetry->StopOnStrand(); });
+    timeout_context.restart();
+    timeout_context.run();
+
+    asio::io_context collision_context;
+    auto collision_strand = asio::make_strand(collision_context);
+    auto collision_telemetry = std::make_shared<SessionTelemetry>(
+        collision_strand, 205, 64);
+    SessionTelemetry::SnapshotPtr collision_snapshot;
+    auto collision_probe =
+        std::make_shared<livekit::telemetry::LocalVideoActivityProbe>();
+    TEST_CHECK(collision_telemetry->RegisterLocalPublication(
+        "local_publish/collision", 10, 1,
+        livekit::telemetry::LocalMediaKind::Video,
+        "collision", expired, true, collision_probe, expired + 10ms));
+    livekit::RoomStatsReport collision_report;
+    collision_report.actual_peer_connection_count = 2;
+    collision_report.successful_peer_connection_count = 2;
+    livekit::StatsReport sender_pc;
+    sender_pc.senders_available = true;
+    livekit::RtpSenderDiagnostic collision_sender;
+    collision_sender.track_id = "collision";
+    collision_sender.kind = "video";
+    collision_sender.mid = "shared-mid";
+    collision_sender.mid_available = true;
+    collision_sender.track_enabled = true;
+    sender_pc.senders.push_back(collision_sender);
+    livekit::StatsReport unrelated_pc;
+    livekit::OutboundRtpStreamStats unrelated_outbound;
+    unrelated_outbound.kind = "video";
+    unrelated_outbound.kind_available = true;
+    unrelated_outbound.mid = "shared-mid";
+    unrelated_outbound.mid_available = true;
+    unrelated_outbound.frames_encoded = 1;
+    unrelated_outbound.frames_encoded_available = true;
+    unrelated_outbound.packets_sent = 1;
+    unrelated_outbound.packets_sent_available = true;
+    unrelated_pc.outbound_rtp.push_back(unrelated_outbound);
+    collision_report.reports.push_back(std::move(sender_pc));
+    collision_report.reports.push_back(std::move(unrelated_pc));
+    asio::post(collision_strand,
+        [collision_telemetry, &collision_snapshot,
+         report = std::move(collision_report)]() mutable {
+        collision_telemetry->SetSnapshotCallbackOnStrand(
+            [&collision_snapshot](SessionTelemetry::SnapshotPtr value) {
+                collision_snapshot = std::move(value);
+            });
+        collision_telemetry->StartStatsSamplingOnStrand(
+            [report = std::move(report)](SessionTelemetry::LateCompletion) mutable
+                -> asio::awaitable<livekit::RoomStatsReport> {
+                co_return std::move(report);
+            }, 1s);
+    });
+    collision_context.run_for(100ms);
+    TEST_CHECK(collision_snapshot);
+    TEST_CHECK(collision_snapshot->local_video_encode_availability ==
+               Availability::Unknown);
+    TEST_CHECK(collision_snapshot->local_rtp_send_availability ==
+               Availability::Unknown);
+    TEST_CHECK(collision_snapshot->local_publish_media_availability ==
+               Availability::Unknown);
+    TEST_CHECK(collision_snapshot->local_publish_no_media == 0);
+    asio::post(collision_strand,
+        [collision_telemetry] { collision_telemetry->StopOnStrand(); });
+    collision_context.restart();
+    collision_context.run();
 }
 
 } // namespace
@@ -1323,6 +2109,9 @@ int main() {
     ReconnectTimeoutAndExpectationChangeAreNotMediaSuccess();
     NativeFreezeStatsPreserveMissingAndMeasuredZero();
     AudioStatsPreserveAvailabilityDeltasResetsAndStaleness();
+    NetworkPathRecoveryAndQualityUseWindowedNativeCounters();
+    MissingRecoveryAndQualityCountersRemainUnavailable();
+    LocalDeviceContinuityUsesPublicationEpochAndRunningIntent();
     AudioQoeFollowsExpectedMediaState();
     AudioFirstFrameRejectsLateBindingCallbacks();
     ReconnectWaitsForAudioAndVisibleRender();
@@ -1331,5 +2120,7 @@ int main() {
     ProcessResourceSamplerUsesNormalizedCpuAndTypedAvailability();
     RuntimeSamplingMeasuresLagAndRejectsLateUiProbes();
     ResourceTrendIsBoundedAndExitReturnStaysHonest();
+    SessionDurationsAndDisconnectHaveOneTerminal();
+    LocalPublishPipelinePreservesWarmingTimeoutAndMapping();
     return 0;
 }

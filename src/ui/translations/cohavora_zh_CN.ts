@@ -2694,6 +2694,44 @@ Sign in with your own account in a client configured for the same meeting servic
 		<message><source>First remote PCM</source><translation>首个远端 PCM 音频帧</translation></message>
 		<message><source>Active operations</source><translation>进行中的操作</translation></message>
 		<message><source>Media QoE</source><translation>媒体体验质量</translation></message>
+		<message><source>Video quality limitation</source><translation>视频质量受限</translation></message>
+		<message><source>Video pipeline frames</source><translation>视频流水线帧计数</translation></message>
+		<message><source>receive %1 / decode %2 / drop %3; encode %4 / send %5</source><translation>接收 %1 / 解码 %2 / 丢弃 %3；编码 %4 / 发送 %5</translation></message>
+		<message><source>Inbound drop %1</source><translation>下行丢帧率 %1</translation></message>
+		<message><source>Video codec / implementation / layers</source><translation>视频编解码器 / 实现 / 分层</translation></message>
+		<message><source>decoder %1; encoder %2; layers %3</source><translation>解码器 %1；编码器 %2；分层 %3</translation></message>
+		<message><source>Video processing average</source><translation>视频编解码平均耗时</translation></message>
+		<message><source>decode %1 ms/frame / encode %2 ms/frame</source><translation>解码 %1 ms/帧 / 编码 %2 ms/帧</translation></message>
+		<message><source>CPU %1 ms / bandwidth %2 ms</source><translation>CPU %1 ms / 带宽 %2 ms</translation></message>
+		<message><source>Render CPU stages</source><translation>渲染 CPU 阶段耗时</translation></message>
+		<message><source>convert %1 / upload %2 / draw %3 / present block %4</source><translation>转换 %1 / 上传 %2 / 绘制 %3 / 呈现阻塞 %4</translation></message>
+		<message><source>Render cadence / frame age</source><translation>渲染节拍 / 帧龄</translation></message>
+		<message><source>%1 fps; P50/P95/P99 %2 / %3 / %4 ms; age %5 / %6 ms</source><translation>%1 fps；P50/P95/P99 %2 / %3 / %4 ms；平均/最大帧龄 %5 / %6 ms</translation></message>
+		<message><source>target %1 ms; visible %2, hidden %3, minimized %4</source><translation>目标 %1 ms；可见 %2，隐藏 %3，最小化 %4</translation></message>
+		<message><source>Render backend / router drops</source><translation>渲染后端 / 路由丢弃</translation></message>
+		<message><source>replace %1; capacity %2; invalid %3; conversion %4; fallback %5</source><translation>最新帧替换 %1；容量拒绝 %2；无效帧 %3；转换失败 %4；回退 %5</translation></message>
+		<message><source>Network and devices</source><translation>网络与设备</translation></message>
+		<message><source>RTP media bitrate inbound / outbound</source><translation>RTP 媒体下行 / 上行码率</translation></message>
+		<message><source>Inbound RTP loss / jitter</source><translation>RTP 下行丢包 / 抖动</translation></message>
+		<message><source>Remote RTCP RTT / loss</source><translation>远端 RTCP RTT / 丢包反馈</translation></message>
+		<message><source>Retransmission inbound / outbound</source><translation>下行 / 上行重传率</translation></message>
+		<message><source>FEC / NACK / PLI / FIR window</source><translation>窗口 FEC / NACK / PLI / FIR</translation></message>
+		<message><source>Selected media path</source><translation>实际选中媒体路径</translation></message>
+		<message><source>switches %1; signaling transport excluded</source><translation>切换 %1 次；不含信令传输</translation></message>
+		<message><source>TURN relay / TCP mode</source><translation>TURN 中继协议 / TCP 模式</translation></message>
+		<message><source>Selected path RTT / available bandwidth</source><translation>选中路径 RTT / 可用带宽估计</translation></message>
+		<message><source>Transport traffic window</source><translation>Transport 层流量窗口</translation></message>
+		<message><source>send %1 B / receive %2 B; %3 / %4 packets</source><translation>发送 %1 B / 接收 %2 B；%3 / %4 个包</translation></message>
+		<message><source>Transport DTLS / connectivity / role</source><translation>Transport DTLS / 连接状态 / 角色</translation></message>
+		<message><source>Local device continuity</source><translation>本地设备供流连续性</translation></message>
+		<message><source>%1 active / %2 expected; %3 stops, %4 ms</source><translation>%1 路正常 / %2 路应供流；异常停流 %3 次，共 %4 ms</translation></message>
+		<message><source>Device format / video clock reset</source><translation>设备格式变化 / 视频时钟重置</translation></message>
+		<message><source>Native device open / OS hotplug</source><translation>原生设备打开 / 系统热插拔</translation></message>
+		<message><source>Requested / effective local media</source><translation>请求 / 实际本地媒体状态</translation></message>
+		<message><source>microphone %1/%2; camera %3/%4</source><translation>麦克风 %1/%2；摄像头 %3/%4</translation></message>
+		<message><source>%1x%2 / %3 Hz / %4 channels</source><translation>%1x%2 / %3 Hz / %4 声道</translation></message>
+		<message><source>Device switch outcomes</source><translation>设备切换终态</translation></message>
+		<message><source>%1 attempts / %2 success / %3 failure / %4 timeout</source><translation>尝试 %1 / 成功 %2 / 失败 %3 / 超时 %4</translation></message>
 		<message><source>Native video freezes</source><translation>原生视频冻结</translation></message>
 		<message><source>Visible render stalls</source><translation>用户可见画面冻结</translation></message>
 		<message><source>Audio concealment</source><translation>音频丢包补偿</translation></message>
@@ -2708,6 +2746,9 @@ Sign in with your own account in a client configured for the same meeting servic
 		<message><source>Process CPU</source><translation>进程 CPU</translation></message>
 		<message><source>Private memory</source><translation>专用内存</translation></message>
 		<message><source>Threads / handles</source><translation>线程 / 句柄</translation></message>
+		<message><source>Internal bindings / local streams / router slots</source><translation>内部绑定 / 本地媒体流 / 路由槽位</translation></message>
+		<message><source>Router submitted / replaced / capacity drops</source><translation>路由提交 / 最新帧替换 / 容量丢弃</translation></message>
+		<message><source>Export queue / post-stop return</source><translation>导出队列 / 退会资源回落</translation></message>
 		<message><source>samples=%1, coverage=%2%</source><translation>样本数=%1，覆盖率=%2%</translation></message>
 		<message><source>Resources</source><translation>资源</translation></message>
 		<message><source>Time</source><translation>时间</translation></message>
@@ -2792,6 +2833,10 @@ Sign in with your own account in a client configured for the same meeting servic
 		<message><source>Completion</source><translation>完成状态</translation></message>
 		<message><source>Availability / coverage</source><translation>可用性 / 覆盖率</translation></message>
 		<message><source>First decoded / visible video</source><translation>首个解码帧 / 首次可见渲染</translation></message>
+		<message><source>Session / usable duration</source><translation>会话时长 / 可用时长</translation></message>
+		<message><source>Local publish media</source><translation>本地发布媒体</translation></message>
+		<message><source>Publish to injection / encode / send</source><translation>发布至注入 / 编码 / 发送</translation></message>
+		<message><source>%1 / %2 active, %3 expected, %4 no-media</source><translation>%1 / %2 个活跃，%3 个应发送，%4 个无媒体</translation></message>
 		<message><source>Visible stalls</source><translation>用户可见画面冻结</translation></message>
 		<message><source>Operations terminal / inflight</source><translation>已终止操作 / 进行中操作</translation></message>
 		<message><source>No local session summary</source><translation>暂无本地会话摘要</translation></message>
@@ -2819,6 +2864,7 @@ Sign in with your own account in a client configured for the same meeting servic
 		<message><source>subscribe</source><translation>订阅轨道</translation></message>
 		<message><source>unsubscribe</source><translation>取消订阅</translation></message>
 		<message><source>unpublish</source><translation>取消发布</translation></message>
+		<message><source>disconnect</source><translation>退出房间</translation></message>
 		<message><source>reconnect_episode</source><translation>重连过程</translation></message>
 		<message><source>reconnect_attempt</source><translation>重连尝试</translation></message>
 		<message><source>camera_device_switch</source><translation>切换摄像头</translation></message>
@@ -2893,6 +2939,174 @@ Sign in with your own account in a client configured for the same meeting servic
 		<message><source>visible_render_submit</source><translation>可见渲染提交</translation></message>
 		<message><source>qt_cpu_paint</source><translation>Qt CPU 绘制</translation></message>
 		<message><source>local-safe-snapshot</source><translation>本地安全快照</translation></message>
+		<message><source>session_duration_in_progress</source><translation>会话时长持续累计中</translation></message>
+		<message><source>session_duration_complete</source><translation>会话时长统计完成</translation></message>
+		<message><source>room_usable_duration_in_progress</source><translation>房间可用时长持续累计中</translation></message>
+		<message><source>room_usable_duration_complete</source><translation>房间可用时长统计完成</translation></message>
+		<message><source>room_never_became_usable</source><translation>房间未曾进入可用状态</translation></message>
+		<message><source>waiting_for_connect_success</source><translation>等待房间连接成功</translation></message>
+		<message><source>local_video_injection_timeout</source><translation>本地视频注入超时</translation></message>
+		<message><source>waiting_for_local_video_injection</source><translation>等待本地视频注入</translation></message>
+		<message><source>local_video_injection_observed</source><translation>已观测到本地视频注入</translation></message>
+		<message><source>local_video_ended_before_observation</source><translation>本地视频在完成观测前结束</translation></message>
+		<message><source>local_video_encode_timeout</source><translation>本地视频编码超时</translation></message>
+		<message><source>outbound_video_mapping_unavailable</source><translation>无法可靠关联上行视频统计</translation></message>
+		<message><source>waiting_for_local_video_encode</source><translation>等待本地视频编码</translation></message>
+		<message><source>local_video_encode_observed</source><translation>已观测到本地视频编码</translation></message>
+		<message><source>local_video_ended_before_encode_observation</source><translation>本地视频在编码观测完成前结束</translation></message>
+		<message><source>no_local_video_expected</source><translation>当前不要求发送本地视频</translation></message>
+		<message><source>local_rtp_send_timeout</source><translation>本地 RTP 发送超时</translation></message>
+		<message><source>outbound_rtp_mapping_unavailable</source><translation>无法可靠关联上行 RTP 统计</translation></message>
+		<message><source>waiting_for_local_rtp_send</source><translation>等待本地 RTP 发送</translation></message>
+		<message><source>local_rtp_send_observed</source><translation>已观测到本地 RTP 发送</translation></message>
+		<message><source>local_publication_ended_before_send_observation</source><translation>本地发布在发送观测完成前结束</translation></message>
+		<message><source>no_local_publication_expected</source><translation>当前没有应发送的本地发布</translation></message>
+		<message><source>local_publication_no_media_timeout</source><translation>本地发布后未产生媒体并超时</translation></message>
+		<message><source>local_publication_mapping_unavailable</source><translation>本地发布媒体关联不可用</translation></message>
+		<message><source>local_publication_media_warming_up</source><translation>本地发布媒体观察窗预热中</translation></message>
+		<message><source>all_expected_local_publications_sending</source><translation>所有应发送的本地发布均已发送媒体</translation></message>
+		<message><source>local_publications_ended_after_media_observed</source><translation>本地发布已结束且已观测到媒体</translation></message>
+		<message><source>local_publication_ended_before_media_observation</source><translation>本地发布在媒体观测完成前结束</translation></message>
+		<message><source>local_publications_not_expected_to_send</source><translation>本地发布当前不要求发送媒体</translation></message>
+		<message><source>no_local_publication</source><translation>没有本地发布</translation></message>
+		<message><source>session_telemetry_lifetime</source><translation>会话遥测生命周期</translation></message>
+		<message><source>connect_success_to_reconnect_or_disconnect</source><translation>连接成功至重连或退会的可用区间</translation></message>
+		<message><source>publish-media-v1</source><translation>发布媒体判定 v1</translation></message>
+		<message><source>rtc_local_video_source_onframe_submission</source><translation>本地视频提交至 WebRTC 源</translation></message>
+		<message><source>webrtc_outbound_rtp_frames_encoded_sample</source><translation>WebRTC 上行 RTP 已编码帧采样</translation></message>
+		<message><source>webrtc_outbound_rtp_packets_sent_sample</source><translation>WebRTC 上行 RTP 已发送包采样</translation></message>
+		<message><source>no_inbound_rtp_stats</source><translation>没有下行 RTP 统计</translation></message>
+		<message><source>inbound_rtp_bytes_missing</source><translation>下行 RTP 字节计数不可用</translation></message>
+		<message><source>inbound_rtp_bitrate_baseline_warming_up</source><translation>下行 RTP 码率基线预热中</translation></message>
+		<message><source>inbound_rtp_bitrate_window_valid</source><translation>下行 RTP 码率窗口有效</translation></message>
+		<message><source>inbound_rtp_bitrate_partial_coverage</source><translation>下行 RTP 码率仅部分流可测</translation></message>
+		<message><source>no_outbound_rtp_stats</source><translation>没有上行 RTP 统计</translation></message>
+		<message><source>outbound_rtp_bytes_missing</source><translation>上行 RTP 字节计数不可用</translation></message>
+		<message><source>outbound_rtp_bitrate_baseline_warming_up</source><translation>上行 RTP 码率基线预热中</translation></message>
+		<message><source>outbound_rtp_bitrate_window_valid</source><translation>上行 RTP 码率窗口有效</translation></message>
+		<message><source>outbound_rtp_bitrate_partial_coverage</source><translation>上行 RTP 码率仅部分流可测</translation></message>
+		<message><source>inbound_loss_fields_missing</source><translation>下行丢包统计字段不可用</translation></message>
+		<message><source>inbound_loss_baseline_warming_up</source><translation>下行丢包窗口基线预热中</translation></message>
+		<message><source>inbound_loss_window_valid</source><translation>下行丢包窗口有效</translation></message>
+		<message><source>inbound_loss_partial_coverage</source><translation>下行丢包统计仅部分流可测</translation></message>
+		<message><source>inbound_loss_late_packet_correction</source><translation>存在晚到包修正，窗口丢包率不可判定</translation></message>
+		<message><source>inbound_jitter_field_missing</source><translation>下行 RTP 抖动字段不可用</translation></message>
+		<message><source>inbound_jitter_current_valid</source><translation>当前下行 RTP 抖动有效</translation></message>
+		<message><source>inbound_jitter_partial_coverage</source><translation>下行 RTP 抖动仅部分流可测</translation></message>
+		<message><source>no_remote_inbound_rtcp_stats</source><translation>没有远端 RTCP 接收反馈</translation></message>
+		<message><source>remote_rtcp_fields_missing</source><translation>远端 RTCP RTT 与丢包字段不可用</translation></message>
+		<message><source>remote_rtcp_baseline_warming_up</source><translation>远端 RTCP 累计 RTT 基线预热中</translation></message>
+		<message><source>remote_rtcp_feedback_valid</source><translation>远端 RTCP 反馈有效</translation></message>
+		<message><source>remote_rtcp_feedback_partial_coverage</source><translation>远端 RTCP 反馈仅部分覆盖</translation></message>
+		<message><source>no_rtp_stats</source><translation>没有 RTP 统计</translation></message>
+		<message><source>recovery_counters_missing</source><translation>重传与恢复计数器不可用</translation></message>
+		<message><source>recovery_counter_baseline_warming_up</source><translation>重传与恢复窗口基线预热中</translation></message>
+		<message><source>recovery_counter_window_valid</source><translation>重传与恢复窗口有效</translation></message>
+		<message><source>recovery_counter_partial_coverage</source><translation>重传与恢复计数器仅部分覆盖</translation></message>
+		<message><source>network_category_no_streams</source><translation>没有对应方向的 RTP 流</translation></message>
+		<message><source>network_category_fields_missing</source><translation>该类原生网络字段不可用</translation></message>
+		<message><source>network_category_baseline_warming_up</source><translation>该类网络窗口基线预热中</translation></message>
+		<message><source>network_category_window_valid</source><translation>该类网络窗口有效</translation></message>
+		<message><source>network_category_partial_coverage</source><translation>该类网络字段仅部分覆盖</translation></message>
+		<message><source>no_transport_stats</source><translation>没有媒体传输统计</translation></message>
+		<message><source>selected_candidate_pair_id_missing</source><translation>原生统计未提供选中候选对标识</translation></message>
+		<message><source>selected_candidate_pair_not_resolved</source><translation>选中候选对无法关联</translation></message>
+		<message><source>selected_media_path_valid</source><translation>实际选中媒体路径有效</translation></message>
+		<message><source>selected_media_path_partial_coverage</source><translation>实际媒体路径仅部分覆盖</translation></message>
+		<message><source>selected_path_rtt_field_missing</source><translation>选中媒体路径 RTT 字段不可用</translation></message>
+		<message><source>selected_path_rtt_valid</source><translation>选中媒体路径 RTT 有效</translation></message>
+		<message><source>selected_path_rtt_partial_coverage</source><translation>选中媒体路径 RTT 仅部分覆盖</translation></message>
+		<message><source>selected_path_bandwidth_fields_missing</source><translation>选中媒体路径带宽估计不可用</translation></message>
+		<message><source>selected_path_bandwidth_valid</source><translation>选中媒体路径带宽估计有效</translation></message>
+		<message><source>selected_path_bandwidth_partial_coverage</source><translation>选中媒体路径带宽估计仅部分覆盖</translation></message>
+		<message><source>transport_traffic_fields_missing</source><translation>Transport 层流量字段不可用</translation></message>
+		<message><source>transport_traffic_baseline_warming_up</source><translation>Transport 层流量窗口基线预热中</translation></message>
+		<message><source>transport_traffic_window_valid</source><translation>Transport 层流量窗口有效</translation></message>
+		<message><source>transport_traffic_partial_coverage</source><translation>Transport 层流量仅部分连接可测</translation></message>
+		<message><source>transport_state_fields_missing</source><translation>Transport 状态字段不可用</translation></message>
+		<message><source>transport_state_valid</source><translation>Transport 状态有效</translation></message>
+		<message><source>transport_state_partial_coverage</source><translation>Transport 状态仅部分连接可见</translation></message>
+		<message><source>no_outbound_video_stats</source><translation>没有上行视频统计</translation></message>
+		<message><source>quality_limitation_fields_missing</source><translation>原生质量受限字段不可用</translation></message>
+		<message><source>quality_limitation_native_window_valid</source><translation>原生质量受限窗口有效</translation></message>
+		<message><source>quality_limitation_native_partial_coverage</source><translation>原生质量受限字段仅部分覆盖</translation></message>
+		<message><source>no_local_device_running_intent</source><translation>当前没有本地设备供流意图</translation></message>
+		<message><source>local_device_first_frame_warming_up</source><translation>等待本地设备首次有效供流</translation></message>
+		<message><source>local_device_unexpected_stop_active</source><translation>本地设备当前存在意外停流</translation></message>
+		<message><source>local_device_continuity_valid</source><translation>本地设备供流连续性有效</translation></message>
+		<message><source>local_device_probe_missing</source><translation>本地设备供流探针未接入</translation></message>
+		<message><source>no_render_stage_samples</source><translation>没有渲染阶段耗时样本</translation></message>
+		<message><source>render_cpu_stage_spans_valid</source><translation>渲染 CPU 阶段耗时有效</translation></message>
+		<message><source>waiting_for_render_stage_sample</source><translation>等待渲染阶段耗时样本</translation></message>
+		<message><source>gpu_timestamp_query_not_available</source><translation>未接入 GPU 时间戳查询，不提供 GPU 执行耗时</translation></message>
+		<message><source>no_video_rtp_stats</source><translation>没有视频 RTP 统计</translation></message>
+		<message><source>video_frame_counters_missing</source><translation>视频帧计数器不可用</translation></message>
+		<message><source>video_counter_baseline_warming_up</source><translation>视频计数窗口基线预热中</translation></message>
+		<message><source>video_pipeline_window_valid</source><translation>视频流水线统计窗口有效</translation></message>
+		<message><source>video_pipeline_partial_coverage</source><translation>视频流水线统计仅部分流可测</translation></message>
+		<message><source>codec_implementation_fields_missing</source><translation>编解码器实现字段不可用</translation></message>
+		<message><source>codec_id_implementation_and_layer_join_valid</source><translation>编解码器、实现与分层关联有效</translation></message>
+		<message><source>codec_details_partial_coverage</source><translation>编解码器详情仅部分流可见</translation></message>
+		<message><source>total_encode_decode_time_missing</source><translation>编解码累计耗时字段不可用</translation></message>
+		<message><source>processing_counter_baseline_warming_up</source><translation>编解码耗时窗口基线预热中</translation></message>
+		<message><source>counter_delta_ms_per_frame_valid</source><translation>按累计计数差分计算的每帧耗时有效</translation></message>
+		<message><source>same_clock_decode_to_submit_samples_valid</source><translation>同一时钟域的解码到提交帧龄有效</translation></message>
+		<message><source>waiting_for_decode_to_submit_sample</source><translation>等待解码到实际提交样本</translation></message>
+		<message><source>no_render_binding</source><translation>没有渲染绑定</translation></message>
+		<message><source>render_pipeline_not_sampled</source><translation>尚未采样渲染流水线</translation></message>
+		<message><source>render_pipeline_statistics_valid</source><translation>渲染流水线统计有效</translation></message>
+		<message><source>render_pipeline_statistics_with_typed_backend_failure</source><translation>渲染流水线统计有效，存在已分类后端故障</translation></message>
+		<message><source>bounded_latest_frame_router_observed</source><translation>有界最新帧路由统计有效</translation></message>
+		<message><source>native_device_open_milestone_not_exposed</source><translation>当前原生设备提供方未暴露设备打开里程碑</translation></message>
+		<message><source>os_device_change_provider_not_installed</source><translation>未接入操作系统设备热插拔与默认设备变化通知</translation></message>
+		<message><source>no_device_switch_operation</source><translation>本会话没有设备切换操作</translation></message>
+		<message><source>operation_outcome_valid_native_failure_category_not_exposed</source><translation>设备切换终态有效，但原生失败类别未暴露</translation></message>
+		<message><source>device_switch_operation_inflight</source><translation>设备切换操作进行中</translation></message>
+		<message><source>device_switch_terminal_outcomes_valid</source><translation>设备切换唯一终态统计有效</translation></message>
+		<message><source>requested_source_waiting_for_samples</source><translation>已请求本地媒体，正在等待实际供数</translation></message>
+		<message><source>requested_effective_state_and_actual_format_valid</source><translation>请求状态、实际供数状态与实际格式有效</translation></message>
+		<message><source>session_owned_binding_and_publication_counts_valid</source><translation>会话持有的绑定与发布资源计数有效</translation></message>
+		<message><source>history_export_queue_depth_not_exposed</source><translation>历史导出器未暴露队列深度</translation></message>
+		<message><source>post_stop_sampler_not_owned_after_session_teardown</source><translation>会话销毁后未保留采样器，无法验证稳定窗口资源回落</translation></message>
+		<message><source>rtc_rtp_stats_window</source><translation>WebRTC RTP 统计窗口</translation></message>
+		<message><source>rtc_rtp_payload_stats_window</source><translation>WebRTC RTP 负载统计窗口</translation></message>
+		<message><source>rtc_inbound_rtp_received_and_lost_window</source><translation>WebRTC 下行 RTP 接收与丢包窗口</translation></message>
+		<message><source>rtc_remote_inbound_rtcp_feedback</source><translation>WebRTC 远端入站 RTCP 反馈</translation></message>
+		<message><source>rtc_transport_stats_window</source><translation>WebRTC Transport 层统计窗口</translation></message>
+		<message><source>rtc_transport_selected_candidate_pair_id</source><translation>WebRTC transport 选中候选对</translation></message>
+		<message><source>rtc_outbound_video_quality_limitation</source><translation>WebRTC 上行视频原生质量受限统计</translation></message>
+		<message><source>rtc_local_source_submission_probe</source><translation>本地音视频源提交探针</translation></message>
+		<message><source>render_cpu_submission_spans</source><translation>渲染 CPU 提交阶段耗时</translation></message>
+		<message><source>rtp_packets_including_retransmissions</source><translation>RTP 包总数（包含重传包）</translation></message>
+		<message><source>device-continuity-v1</source><translation>设备连续性算法 v1</translation></message>
+		<message><source>none</source><translation>无受限</translation></message>
+		<message><source>cpu</source><translation>CPU</translation></message>
+		<message><source>bandwidth</source><translation>带宽</translation></message>
+		<message><source>other</source><translation>其他</translation></message>
+		<message><source>host</source><translation>主机候选</translation></message>
+		<message><source>srflx</source><translation>服务器反射候选</translation></message>
+		<message><source>prflx</source><translation>对端反射候选</translation></message>
+		<message><source>relay</source><translation>中继候选</translation></message>
+		<message><source>ethernet</source><translation>以太网</translation></message>
+		<message><source>wifi</source><translation>Wi-Fi</translation></message>
+		<message><source>cellular</source><translation>蜂窝网络</translation></message>
+		<message><source>vpn</source><translation>VPN</translation></message>
+		<message><source>udp</source><translation>UDP</translation></message>
+		<message><source>tcp</source><translation>TCP</translation></message>
+		<message><source>tls</source><translation>TLS</translation></message>
+		<message><source>active</source><translation>主动 TCP</translation></message>
+		<message><source>passive</source><translation>被动 TCP</translation></message>
+		<message><source>so</source><translation>同时开放 TCP</translation></message>
+		<message><source>new</source><translation>新建</translation></message>
+		<message><source>checking</source><translation>检查中</translation></message>
+		<message><source>connecting</source><translation>连接中</translation></message>
+		<message><source>connected</source><translation>已连接</translation></message>
+		<message><source>completed</source><translation>已完成</translation></message>
+		<message><source>disconnected</source><translation>已断开</translation></message>
+		<message><source>closed</source><translation>已关闭</translation></message>
+		<message><source>failed</source><translation>失败</translation></message>
+		<message><source>controlling</source><translation>控制方</translation></message>
+		<message><source>controlled</source><translation>被控制方</translation></message>
 	</context>
     <context>
         <name>MeetingUI::AnnotationOverlayWindow</name>

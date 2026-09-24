@@ -618,7 +618,9 @@ private:
     asio::awaitable<void> FinalizeServerDisconnectAsync(
         RoomDisconnectReason reason,
         std::string detail,
-        uint64_t event_generation);
+        uint64_t event_generation,
+        std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner,
+        std::string telemetry_operation_id);
     asio::awaitable<void> WaitForPrimaryPeerConnection(
         std::chrono::milliseconds timeout,
         uint64_t generation);
@@ -766,6 +768,7 @@ private:
     std::vector<std::shared_ptr<proto::SignalResponse>> deferred_room_messages_;
 
     std::atomic<uint64_t> operation_sequence_{1};
+    std::atomic<uint64_t> local_publication_epoch_{1};
     std::weak_ptr<telemetry::SessionTelemetry> session_telemetry_;
     std::atomic<uint64_t> session_generation_{0};
     // Identifies the Connect attempt that installed the current shared

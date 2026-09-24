@@ -132,7 +132,12 @@ void VideoRenderSession::RenderFrame(const std::string& key, VideoRenderFrame::P
             state->delivered_to_gpu.fetch_add(1, std::memory_order_relaxed);
         }
     } else if (frame_ready_callback_) {
+        const auto convert_started_at = std::chrono::steady_clock::now();
         const auto image = cpu_renderer_.Convert(*frame);
+        frame->NotifyRenderStage(
+            "qt_cpu_convert",
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - convert_started_at));
         if (!image.isNull()) {
             frame_ready_callback_(key, image, std::move(frame));
             state->delivered_to_qt_cpu.fetch_add(1, std::memory_order_relaxed);

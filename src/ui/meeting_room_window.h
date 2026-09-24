@@ -572,6 +572,7 @@ private:
 	std::atomic<bool> _usingGpuBackend{false};
 	bool _gpuBackendActivationAttempted = false;
 	livekit::render::RenderDiagnostics _renderDiagnostics;
+	qint64 _lastRenderTelemetrySampleMs = 0;
 	bool _closeRequested = false;
 	bool _closingForSessionInvalidation = false;
 	QPointer<QMessageBox> _departureNotice;

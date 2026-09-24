@@ -11,6 +11,8 @@
 
 namespace livekit {
 
+namespace telemetry { struct LocalAudioActivityProbe; }
+
 class RtcAudioSource : public webrtc::Notifier<webrtc::AudioSourceInterface> {
 public:
     static webrtc::scoped_refptr<RtcAudioSource> Create(std::shared_ptr<AudioSource> source);
@@ -25,6 +27,8 @@ public:
     // webrtc::AudioSourceInterface impl
     void AddSink(webrtc::AudioTrackSinkInterface* sink) override;
     void RemoveSink(webrtc::AudioTrackSinkInterface* sink) override;
+    void SetTelemetryProbe(
+        std::shared_ptr<telemetry::LocalAudioActivityProbe> probe) noexcept;
 
 private:
     void OnAudioFrame(const AudioFrame& frame);
@@ -32,6 +36,7 @@ private:
     std::shared_ptr<AudioSource> lk_source_;
     std::mutex sink_mutex_;
     std::vector<webrtc::AudioTrackSinkInterface*> sinks_;
+    std::shared_ptr<telemetry::LocalAudioActivityProbe> telemetry_probe_;
 };
 
 } // namespace livekit

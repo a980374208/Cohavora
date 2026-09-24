@@ -113,6 +113,11 @@ public:
     void stopAcceptingDataOnStrand(std::function<void()> onStopped = {}) {
         assertOnStrand();
         _acceptingData = false;
+        if (onStopped) onStopped();
+    }
+
+    void stopTelemetryOnStrand(std::function<void()> onStopped = {}) {
+        assertOnStrand();
         _telemetry->StopOnStrand(std::move(onStopped));
     }
 

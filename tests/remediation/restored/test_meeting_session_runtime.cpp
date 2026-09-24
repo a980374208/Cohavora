@@ -91,10 +91,12 @@ int main() {
         runtime->stopAcceptingDataOnStrand();
         Require(!runtime->acceptsDataOnStrand(), "stop barrier did not reject later data");
         runtime->transfersOnStrand().clear();
-        asio::post(runtime->strand(), [runtime, &stopped]() {
-            Require(!runtime->acceptsDataOnStrand(), "post-stop task was admitted");
-            Require(runtime->transfersOnStrand().empty(), "post-stop cleanup retained transfer state");
-            stopped.set_value();
+        runtime->stopTelemetryOnStrand([runtime, &stopped]() {
+            asio::post(runtime->strand(), [runtime, &stopped]() {
+                Require(!runtime->acceptsDataOnStrand(), "post-stop task was admitted");
+                Require(runtime->transfersOnStrand().empty(), "post-stop cleanup retained transfer state");
+                stopped.set_value();
+            });
         });
     });
 

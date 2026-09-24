@@ -132,8 +132,14 @@ struct ModuleVideoCanvas::Worker {
                         const auto it = uploaded.find(resource.id.value);
                         if (it != uploaded.end() && it->second.frame == resource.frame &&
                             it->second.image.cacheKey() == resource.image.cacheKey()) continue;
-                        if (resource.frame) result = device->Upload(resource.id, resource.frame->view());
-                        else {
+                        if (resource.frame) {
+                            const auto upload_started_at = std::chrono::steady_clock::now();
+                            result = device->Upload(resource.id, resource.frame->view());
+                            resource.frame->NotifyRenderStage(
+                                "dx11_upload_cpu_submit",
+                                std::chrono::duration_cast<std::chrono::microseconds>(
+                                    std::chrono::steady_clock::now() - upload_started_at));
+                        } else {
                             const auto& image = resource.image;
                             lk_render_frame_view view{};
                             view.struct_size = sizeof(view); view.format = LK_RENDER_RGBA8;
@@ -147,10 +153,15 @@ struct ModuleVideoCanvas::Worker {
                         uploaded[resource.id.value] = resource;
                     }
                     if (stop.load()) break;
+                    std::chrono::microseconds render_present_duration{-1};
                     if (result == LK_RENDER_OK) {
                         const lk_render_scene_view view{sizeof(view), uint32_t(scene->commands.size()),
                             scene->commands.data(), {0.0706f, 0.0784f, 0.1020f, 1}};
+                        const auto render_started_at = std::chrono::steady_clock::now();
                         result = device->Render(scene->target, view); // Includes Present.
+                        render_present_duration =
+                            std::chrono::duration_cast<std::chrono::microseconds>(
+                                std::chrono::steady_clock::now() - render_started_at);
                     }
                     // Publish failure BEFORE destruction: driver cleanup can hang too.
                     if (result != LK_RENDER_OK) { failure.store(Failure(result)); break; }
@@ -164,6 +175,9 @@ struct ModuleVideoCanvas::Worker {
                     const auto submitted_at = std::chrono::steady_clock::now();
                     for (const auto& resource : scene->resources) {
                         if (resource.frame && submitted_resources.contains(resource.id.value)) {
+                            resource.frame->NotifyRenderStage(
+                                "dx11_render_present_block",
+                                render_present_duration, submitted_at);
                             resource.frame->NotifyRendered(
                                 scene->measurement_point.c_str(), submitted_at);
                         }

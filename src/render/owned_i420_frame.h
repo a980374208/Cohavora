@@ -37,6 +37,11 @@ public:
         const RenderFrameMetadata& metadata,
         const char* measurement_point,
         Clock::time_point source_time) = 0;
+    virtual void OnStageTiming(
+        const RenderFrameMetadata&,
+        const char*,
+        std::chrono::microseconds,
+        Clock::time_point) {}
 };
 
 struct RenderFrameMetadata {

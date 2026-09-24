@@ -167,6 +167,13 @@ QString TelemetryRatioPercent(const QVariantMap &snapshot, const char *key) {
 		: QString::number(value * 100.0, 'f', 2) + QStringLiteral(" %");
 }
 
+QString TelemetryRateMbps(const QVariantMap &snapshot, const char *key) {
+	const auto value = snapshot.value(QString::fromLatin1(key), -1.0).toDouble();
+	return value < 0.0
+		? QStringLiteral("--")
+		: QString::number(value / 1'000'000.0, 'f', 2) + QStringLiteral(" Mbps");
+}
+
 QString TelemetryDisplayVariant(const QVariant &value) {
 	if (!value.isValid() || value.isNull()) return QStringLiteral("--");
 	if (value.type() == QVariant::Int || value.type() == QVariant::LongLong) {
@@ -176,6 +183,14 @@ QString TelemetryDisplayVariant(const QVariant &value) {
 		return value.toDouble() < 0.0 ? QStringLiteral("--") : value.toString();
 	}
 	return LocalizeTelemetryDisplayText(value.toString());
+}
+
+QString TelemetryDisplayList(const QVariantMap &snapshot, const char *key) {
+	const auto raw = snapshot.value(QString::fromLatin1(key)).toString();
+	if (raw.isEmpty()) return QStringLiteral("--");
+	auto values = raw.split(QLatin1Char(','), Qt::SkipEmptyParts);
+	for (auto &value : values) value = LocalizeTelemetryDisplayText(value.trimmed());
+	return values.join(QStringLiteral(", "));
 }
 
 bool IsSafeTelemetryDisplayEntry(const QString &key, const QVariant &value) {
@@ -288,6 +303,13 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 		{QCoreApplication::translate("MeetingUI", "Coverage"),
 		 QString::number(snapshot.value(QStringLiteral("coverage")).toDouble() * 100.0, 'f', 1) + QStringLiteral(" %"),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("availability")).toString()), QString()},
+		{QCoreApplication::translate("MeetingUI", "Session / usable duration"),
+		 TelemetryValue(snapshot, "sessionDurationMs", "ms") + QStringLiteral(" / ") +
+		 TelemetryValue(snapshot, "usableDurationMs", "ms"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("usableDurationAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("usableDurationReason")).toString())},
 		{QCoreApplication::translate("MeetingUI", "Schema / definition"),
 		 QStringLiteral("%1 / %2").arg(
 			snapshot.value(QStringLiteral("schemaVersion")).toString(),
@@ -312,15 +334,100 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 	});
 
 	addSummaryPage(QCoreApplication::translate("MeetingUI", "Media QoE"), {
+		{QCoreApplication::translate("MeetingUI", "Local publish media"),
+		 TelemetryValue(snapshot, "localPublishNoMedia"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("localPublishMediaAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("localPublishMediaReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Publish to injection / encode / send"),
+		 TelemetryValue(snapshot, "lastPublishToVideoInjectionMs", "ms") + QStringLiteral(" / ") +
+		 TelemetryValue(snapshot, "lastPublishToVideoEncodeMs", "ms") + QStringLiteral(" / ") +
+		 TelemetryValue(snapshot, "lastPublishToRtpSendMs", "ms"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("localRtpSendAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("localRtpSendReason")).toString())},
 		{QCoreApplication::translate("MeetingUI", "Native video freezes"),
 		 TelemetryValue(snapshot, "nativeVideoFreezeCount"),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("nativeVideoFreezeAvailability")).toString()),
 		 TelemetryValue(snapshot, "nativeVideoFreezeDurationMs", "ms")},
+		{QCoreApplication::translate("MeetingUI", "Video quality limitation"),
+		 TelemetryDisplayList(snapshot, "videoQualityLimitationCurrent"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("videoQualityLimitationAvailability")).toString()),
+		 QCoreApplication::translate("MeetingUI", "CPU %1 ms / bandwidth %2 ms")
+			 .arg(TelemetryValue(snapshot, "windowVideoQualityCpuDurationMs"),
+				  TelemetryValue(snapshot, "windowVideoQualityBandwidthDurationMs"))},
+		{QCoreApplication::translate("MeetingUI", "Video pipeline frames"),
+		 QCoreApplication::translate("MeetingUI", "receive %1 / decode %2 / drop %3; encode %4 / send %5")
+			 .arg(TelemetryValue(snapshot, "windowInboundVideoFramesReceived"),
+				  TelemetryValue(snapshot, "windowInboundVideoFramesDecoded"),
+				  TelemetryValue(snapshot, "windowInboundVideoFramesDropped"),
+				  TelemetryValue(snapshot, "windowOutboundVideoFramesEncoded"),
+				  TelemetryValue(snapshot, "windowOutboundVideoFramesSent")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("videoPipelineAvailability")).toString()),
+		 QCoreApplication::translate("MeetingUI", "Inbound drop %1")
+			 .arg(TelemetryRatioPercent(snapshot, "inboundVideoFrameDropRatio"))},
+		{QCoreApplication::translate("MeetingUI", "Video codec / implementation / layers"),
+		 TelemetryDisplayList(snapshot, "inboundVideoCodecs") + QStringLiteral(" / ") +
+			 TelemetryDisplayList(snapshot, "outboundVideoCodecs"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("videoCodecAvailability")).toString()),
+		 QCoreApplication::translate("MeetingUI", "decoder %1; encoder %2; layers %3")
+			 .arg(TelemetryDisplayList(snapshot, "decoderImplementations"),
+				  TelemetryDisplayList(snapshot, "encoderImplementations"),
+				  TelemetryDisplayList(snapshot, "outboundVideoLayers"))},
+		{QCoreApplication::translate("MeetingUI", "Video processing average"),
+		 QCoreApplication::translate("MeetingUI", "decode %1 ms/frame / encode %2 ms/frame")
+			 .arg(TelemetryValue(snapshot, "videoDecodeMsPerFrame"),
+				  TelemetryValue(snapshot, "videoEncodeMsPerFrame")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("videoProcessingAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("videoProcessingReason")).toString())},
 		{QCoreApplication::translate("MeetingUI", "Visible render stalls"),
 		 TelemetryValue(snapshot, "renderStallCount"),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("renderStallAvailability")).toString()),
 		 TelemetryValue(snapshot, "renderStallDurationMs", "ms") + QStringLiteral(" / ") +
 		 snapshot.value(QStringLiteral("renderStallAlgorithm")).toString()},
+		{QCoreApplication::translate("MeetingUI", "Render CPU stages"),
+		 QCoreApplication::translate("MeetingUI", "convert %1 / upload %2 / draw %3 / present block %4")
+			 .arg(TelemetryValue(snapshot, "renderConvertMaxUs", "us"),
+				  TelemetryValue(snapshot, "renderUploadMaxUs", "us"),
+				  TelemetryValue(snapshot, "renderDrawMaxUs", "us"),
+				  TelemetryValue(snapshot, "renderPresentBlockMaxUs", "us")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("renderStageAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("renderGpuExecutionReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Render cadence / frame age"),
+		 QCoreApplication::translate("MeetingUI", "%1 fps; P50/P95/P99 %2 / %3 / %4 ms; age %5 / %6 ms")
+			 .arg(TelemetryValue(snapshot, "renderSubmitFps"),
+				  TelemetryValue(snapshot, "renderIntervalP50Ms"),
+				  TelemetryValue(snapshot, "renderIntervalP95Ms"),
+				  TelemetryValue(snapshot, "renderIntervalP99Ms"),
+				  TelemetryValue(snapshot, "renderAverageFrameAgeMs"),
+				  TelemetryValue(snapshot, "renderMaximumFrameAgeMs")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("renderFrameAgeAvailability")).toString()),
+		 QCoreApplication::translate("MeetingUI", "target %1 ms; visible %2, hidden %3, minimized %4")
+			 .arg(TelemetryValue(snapshot, "renderTargetIntervalMs"),
+				  TelemetryValue(snapshot, "renderExpectedBindings"),
+				  TelemetryValue(snapshot, "renderHiddenBindings"),
+				  TelemetryValue(snapshot, "renderMinimizedBindings"))},
+		{QCoreApplication::translate("MeetingUI", "Render backend / router drops"),
+		 TelemetryDisplayList(snapshot, "renderRequestedBackend") + QStringLiteral(" -> ") +
+			 TelemetryDisplayList(snapshot, "renderActualBackend"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("renderPipelineAvailability")).toString()),
+		 QCoreApplication::translate("MeetingUI", "replace %1; capacity %2; invalid %3; conversion %4; fallback %5")
+			 .arg(TelemetryValue(snapshot, "renderRouterReplaced"),
+				  TelemetryValue(snapshot, "renderRouterDroppedCapacity"),
+				  TelemetryValue(snapshot, "renderRouterDroppedInvalid"),
+				  TelemetryValue(snapshot, "renderQtConversionFailures"),
+				  TelemetryDisplayList(snapshot, "renderFallbackReason"))},
 		{QCoreApplication::translate("MeetingUI", "Audio concealment"),
 		 TelemetryRatioPercent(snapshot, "audioConcealedRatio"),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("audioConcealmentAvailability")).toString()),
@@ -338,6 +445,160 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 	});
 	tabs->widget(0)->setObjectName(QStringLiteral("telemetryOverview"));
 	tabs->widget(1)->setObjectName(QStringLiteral("telemetryMediaQoe"));
+
+	addSummaryPage(QCoreApplication::translate("MeetingUI", "Network and devices"), {
+		{QCoreApplication::translate("MeetingUI", "RTP media bitrate inbound / outbound"),
+		 TelemetryRateMbps(snapshot, "inboundRtpBitrateBps") +
+			 QStringLiteral(" / ") +
+			 TelemetryRateMbps(snapshot, "outboundRtpBitrateBps"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("inboundRtpTrafficAvailability")).toString()) +
+			 QStringLiteral(" / ") + LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("outboundRtpTrafficAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("inboundRtpTrafficReason")).toString()) +
+			 QStringLiteral(" / ") + LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("outboundRtpTrafficReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Inbound RTP loss / jitter"),
+		 TelemetryRatioPercent(snapshot, "inboundPacketLossRatio") +
+			 QStringLiteral(" / ") + TelemetryValue(snapshot, "inboundJitterMaxMs", "ms"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("inboundPacketLossAvailability")).toString()) +
+			 QStringLiteral(" / ") + LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("inboundJitterAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("inboundPacketLossReason")).toString()) +
+			 QStringLiteral(" / ") + LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("inboundJitterReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Remote RTCP RTT / loss"),
+		 TelemetryValue(snapshot, "remoteRtcpCurrentRttMaxMs", "ms") +
+			 QStringLiteral(" / ") +
+			 TelemetryValue(snapshot, "remoteRtcpWindowAverageRttMs", "ms") +
+			 QStringLiteral(" / ") +
+			 TelemetryRatioPercent(snapshot, "remoteRtcpFractionLostMax"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("remoteRtcpAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("remoteRtcpReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Retransmission inbound / outbound"),
+		 TelemetryRatioPercent(snapshot, "inboundRetransmittedPacketRatio") +
+			 QStringLiteral(" / ") +
+			 TelemetryRatioPercent(snapshot, "outboundRetransmittedPacketRatio"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("networkRecoveryAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("networkRetransmitRatioDenominator")).toString())},
+		{QCoreApplication::translate("MeetingUI", "FEC / NACK / PLI / FIR window"),
+		 QStringLiteral("%1 / %2 / %3 / %4").arg(
+			 TelemetryValue(snapshot, "windowInboundFecPackets"),
+			 TelemetryValue(snapshot, "inboundNackCount"),
+			 TelemetryValue(snapshot, "inboundPliCount"),
+			 TelemetryValue(snapshot, "inboundFirCount")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("networkRecoveryAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("networkRecoveryReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Selected media path"),
+		 QStringLiteral("%1 / %2 / %3").arg(
+			 TelemetryDisplayList(snapshot, "localCandidateTypes"),
+			 TelemetryDisplayList(snapshot, "localNetworkTypes"),
+			 TelemetryDisplayList(snapshot, "mediaProtocols")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("mediaPathAvailability")).toString()),
+		 QCoreApplication::translate("MeetingUI", "switches %1; signaling transport excluded")
+			 .arg(TelemetryValue(snapshot, "mediaPathSwitches"))},
+		{QCoreApplication::translate("MeetingUI", "TURN relay / TCP mode"),
+		 TelemetryDisplayList(snapshot, "relayProtocols") + QStringLiteral(" / ") +
+			 TelemetryDisplayList(snapshot, "tcpTypes"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("mediaPathAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("mediaPathReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Selected path RTT / available bandwidth"),
+		 TelemetryValue(snapshot, "mediaPathRttMaxMs", "ms") + QStringLiteral(" / ") +
+			 TelemetryRateMbps(snapshot, "mediaAvailableOutgoingBitrateBps") +
+			 QStringLiteral(" / ") +
+			 TelemetryRateMbps(snapshot, "mediaAvailableIncomingBitrateBps"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("mediaPathRttAvailability")).toString()) +
+			 QStringLiteral(" / ") + LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("mediaBandwidthAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("mediaPathRttReason")).toString()) +
+			 QStringLiteral(" / ") + LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("mediaBandwidthReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Transport traffic window"),
+		 QCoreApplication::translate("MeetingUI", "send %1 B / receive %2 B; %3 / %4 packets")
+			 .arg(TelemetryValue(snapshot, "windowTransportBytesSent"),
+				  TelemetryValue(snapshot, "windowTransportBytesReceived"),
+				  TelemetryValue(snapshot, "windowTransportPacketsSent"),
+				  TelemetryValue(snapshot, "windowTransportPacketsReceived")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("transportTrafficAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("transportTrafficReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Transport DTLS / connectivity / role"),
+		 TelemetryDisplayList(snapshot, "transportDtlsStates") + QStringLiteral(" / ") +
+			 TelemetryDisplayList(snapshot, "transportConnectivityStates") +
+			 QStringLiteral(" / ") + TelemetryDisplayList(snapshot, "transportRoles"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("transportStateAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("transportStateReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Local device continuity"),
+		 QCoreApplication::translate("MeetingUI", "%1 active / %2 expected; %3 stops, %4 ms")
+			 .arg(TelemetryValue(snapshot, "activeLocalDeviceStreams"),
+				  TelemetryValue(snapshot, "expectedLocalDeviceStreams"),
+				  TelemetryValue(snapshot, "localDeviceUnexpectedStops"),
+				  TelemetryValue(snapshot, "localDeviceInterruptionDurationMs")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("localDeviceContinuityAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("localDeviceContinuityReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Device format / video clock reset"),
+		 QStringLiteral("%1 / %2").arg(
+			 TelemetryValue(snapshot, "localDeviceFormatChanges"),
+			 TelemetryValue(snapshot, "localDeviceClockResets")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("localDeviceContinuityAvailability")).toString()),
+		 snapshot.value(QStringLiteral("localDeviceContinuityAlgorithm")).toString()},
+		{QCoreApplication::translate("MeetingUI", "Native device open / OS hotplug"),
+		 QStringLiteral("%1 / %2").arg(
+			 LocalizeTelemetryDisplayText(snapshot.value(
+				 QStringLiteral("deviceOpenAvailability")).toString()),
+			 LocalizeTelemetryDisplayText(snapshot.value(
+				 QStringLiteral("deviceHotplugAvailability")).toString())),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("deviceStateAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("deviceOpenReason")).toString()) + QStringLiteral(" / ") +
+			 LocalizeTelemetryDisplayText(snapshot.value(
+				 QStringLiteral("deviceHotplugReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Requested / effective local media"),
+		 QCoreApplication::translate("MeetingUI", "microphone %1/%2; camera %3/%4")
+			 .arg(TelemetryValue(snapshot, "microphoneRequested"),
+				  TelemetryValue(snapshot, "microphoneEffective"),
+				  TelemetryValue(snapshot, "cameraRequested"),
+				  TelemetryValue(snapshot, "cameraEffective")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("deviceStateAvailability")).toString()),
+		 QCoreApplication::translate("MeetingUI", "%1x%2 / %3 Hz / %4 channels")
+			 .arg(TelemetryValue(snapshot, "actualCaptureWidth"),
+				  TelemetryValue(snapshot, "actualCaptureHeight"),
+				  TelemetryValue(snapshot, "actualCaptureSampleRate"),
+				  TelemetryValue(snapshot, "actualCaptureChannels"))},
+		{QCoreApplication::translate("MeetingUI", "Device switch outcomes"),
+		 QCoreApplication::translate("MeetingUI", "%1 attempts / %2 success / %3 failure / %4 timeout")
+			 .arg(TelemetryValue(snapshot, "deviceSwitchAttempts"),
+				  TelemetryValue(snapshot, "deviceSwitchSuccesses"),
+				  TelemetryValue(snapshot, "deviceSwitchFailures"),
+				  TelemetryValue(snapshot, "deviceSwitchTimeouts")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("deviceFailureAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("deviceFailureReason")).toString())},
+	});
+	tabs->widget(2)->setObjectName(QStringLiteral("telemetryNetworkDevices"));
 
 	auto *operations = MakeTelemetryTable(tabs, {
 		QCoreApplication::translate("MeetingUI", "Operation"),
@@ -392,6 +653,27 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 			snapshot.value(QStringLiteral("resourceTrendSamples")).toString(),
 			QString::number(snapshot.value(QStringLiteral("resourceTrendCoverage")).toDouble() * 100.0, 'f', 1)),
 		LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("resourceTrendAvailability")).toString())});
+	AddTelemetryRow(resources, {QCoreApplication::translate("MeetingUI", "Internal bindings / local streams / router slots"),
+		QStringLiteral("%1 / %2 / %3").arg(
+			TelemetryValue(snapshot, "activeNativeBindings"),
+			TelemetryValue(snapshot, "activeLocalMediaStreams"),
+			TelemetryValue(snapshot, "activeRouterSlots")),
+		QString(), LocalizeTelemetryDisplayText(snapshot.value(
+			QStringLiteral("internalResourceAvailability")).toString())});
+	AddTelemetryRow(resources, {QCoreApplication::translate("MeetingUI", "Router submitted / replaced / capacity drops"),
+		QStringLiteral("%1 / %2 / %3").arg(
+			TelemetryValue(snapshot, "routerFramesSubmitted"),
+			TelemetryValue(snapshot, "routerFramesReplaced"),
+			TelemetryValue(snapshot, "routerCapacityDrops")),
+		QString(), LocalizeTelemetryDisplayText(snapshot.value(
+			QStringLiteral("routerQueueAvailability")).toString())});
+	AddTelemetryRow(resources, {QCoreApplication::translate("MeetingUI", "Export queue / post-stop return"),
+		LocalizeTelemetryDisplayText(snapshot.value(
+			QStringLiteral("exportQueueAvailability")).toString()) + QStringLiteral(" / ") +
+			LocalizeTelemetryDisplayText(snapshot.value(
+				QStringLiteral("resourceReturnAvailability")).toString()),
+		QString(), LocalizeTelemetryDisplayText(snapshot.value(
+			QStringLiteral("resourceReturnReason")).toString())});
 	resourceLayout->addWidget(resources, 1);
 	resources->setObjectName(QStringLiteral("telemetryResources"));
 	tabs->addTab(resourcePage, QCoreApplication::translate("MeetingUI", "Resources"));
@@ -1113,6 +1395,7 @@ void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
 			.arg(_displayName).arg(frameCopy.width()).arg(frameCopy.height()).arg(r.width()).arg(r.height()));
 	}
 
+	const auto paintStartedAt = std::chrono::steady_clock::now();
 	p.fillRect(r, QColor(0x0e, 0x10, 0x14));
 
 	QImage scaled = frameCopy.scaled(r.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
@@ -1120,6 +1403,10 @@ void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
 	const int y = r.y() + (r.height() - scaled.height()) / 2;
 	p.drawImage(x, y, scaled);
 	if (renderFrame && p.isActive()) {
+		renderFrame->NotifyRenderStage(
+			"qt_cpu_paint",
+			std::chrono::duration_cast<std::chrono::microseconds>(
+				std::chrono::steady_clock::now() - paintStartedAt));
 		renderFrame->NotifyRendered("qt_cpu_paint");
 	}
 }
@@ -1591,6 +1878,10 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 		QStringLiteral("%1 ms / %2%").arg(text("sampleAgeMs"))
 			.arg(_telemetrySnapshot.value(QStringLiteral("coverage")).toDouble() * 100.0,
 				0, 'f', 0));
+	addValue(QCoreApplication::translate("MeetingUI", "Session / usable duration"),
+		durationWhenValid("sessionDurationAvailability", "sessionDurationMs") +
+		QStringLiteral(" / ") +
+		durationWhenValid("usableDurationAvailability", "usableDurationMs"));
 	addValue(QCoreApplication::translate("MeetingUI", "Peer connections"),
 		QStringLiteral("%1 / %2").arg(text("successfulPcCount"), text("actualPcCount")));
 	addValue(QCoreApplication::translate("MeetingUI", "Request"),
@@ -1612,6 +1903,18 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 		QCoreApplication::translate("MeetingUI", "%1 started, %2 terminal, %3 in flight, %4 incomplete")
 			.arg(text("operationsStarted"), text("operationsTerminal"),
 				text("operationsInflight"), text("operationsMissingStart")));
+	addValue(QCoreApplication::translate("MeetingUI", "Local publish media"),
+		QCoreApplication::translate("MeetingUI", "%1 / %2 active, %3 expected, %4 no-media")
+			.arg(text("localPublishMediaAvailability"),
+				 text("activeLocalPublications"),
+				 text("expectedLocalPublications"),
+				 text("localPublishNoMedia")));
+	addValue(QCoreApplication::translate("MeetingUI", "Publish to injection / encode / send"),
+		durationWhenValid("localVideoInjectionAvailability",
+			"lastPublishToVideoInjectionMs") + QStringLiteral(" / ") +
+		durationWhenValid("localVideoEncodeAvailability",
+			"lastPublishToVideoEncodeMs") + QStringLiteral(" / ") +
+		durationWhenValid("localRtpSendAvailability", "lastPublishToRtpSendMs"));
 	menu->addSeparator();
 	addValue(QCoreApplication::translate("MeetingUI", "Process CPU"),
 		QCoreApplication::translate("MeetingUI", "%1 / %2 / %3 logical CPUs")
@@ -3616,6 +3919,41 @@ void MeetingRoomWindow::onTimerTick() {
 void MeetingRoomWindow::onRemoteRenderTick() {
 	if (_remoteRenderSession) {
 		_remoteRenderSession->RenderLatestFrames();
+		const auto nowMs = QDateTime::currentMSecsSinceEpoch();
+		if (nowMs - _lastRenderTelemetrySampleMs >= 1000) {
+			_lastRenderTelemetrySampleMs = nowMs;
+			if (const auto telemetry = _coordinator
+					? _coordinator->sessionTelemetry().lock() : nullptr) {
+				const auto statistics = _remoteRenderSession->statistics();
+				if (_videoCanvas) _renderDiagnostics = _videoCanvas->renderDiagnostics();
+				livekit::telemetry::RenderPipelineSample sample;
+				sample.router_submitted = statistics.router.submitted;
+				sample.router_replaced_before_render =
+					statistics.router.replaced_before_render;
+				sample.router_rejected_generation =
+					statistics.router.rejected_generation;
+				sample.router_rejected_binding =
+					statistics.router.rejected_binding;
+				sample.router_dropped_invalid = statistics.router.dropped_invalid;
+				sample.router_dropped_capacity = statistics.router.dropped_capacity;
+				sample.delivered_to_gpu = statistics.delivered_to_gpu;
+				sample.delivered_to_qt_cpu = statistics.delivered_to_qt_cpu;
+				sample.qt_cpu_conversion_failures =
+					statistics.qt_cpu_conversion_failures;
+				sample.rejected_track_attachments =
+					statistics.rejected_track_attachments;
+				sample.attached_track_count = statistics.attached_track_count;
+				sample.requested_backend = livekit::render::RenderBackendName(
+					_renderDiagnostics.requested_backend).toStdString();
+				sample.actual_backend = livekit::render::RenderBackendName(
+					_renderDiagnostics.actual_backend).toStdString();
+				sample.gpu_failure = livekit::render::RenderGpuFailureName(
+					_renderDiagnostics.gpu_failure).toStdString();
+				sample.fallback_reason = livekit::render::RenderFallbackReasonName(
+					_renderDiagnostics.fallback_reason).toStdString();
+				telemetry->RecordRenderPipelineSample(std::move(sample));
+			}
+		}
 	}
 	if (_localScreenTile && _localScreenPreview) {
 		auto frame = _localScreenPreview->TakeLatest("screen", _localScreenPreview->generation());

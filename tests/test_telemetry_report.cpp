@@ -8,6 +8,7 @@
 #include <filesystem>
 #include <fstream>
 #include <mutex>
+#include <sstream>
 #include <string>
 #include <thread>
 
@@ -55,12 +56,98 @@ SafeTelemetryRecordPtr Record(
     record->snapshot.cpu_availability = Availability::Valid;
     record->snapshot.cpu_reason = "process_cpu_sample_valid";
     record->snapshot.last_stats_request_ms = -1;
+    record->snapshot.session_duration_availability = Availability::Valid;
+    record->snapshot.session_duration_reason = "session_duration_complete";
+    record->snapshot.session_duration_ms = 4321;
+    record->snapshot.usable_duration_availability = Availability::Valid;
+    record->snapshot.usable_duration_reason = "room_usable_duration_complete";
+    record->snapshot.usable_duration_ms = 4000;
+    record->snapshot.local_publish_media_availability = Availability::Valid;
+    record->snapshot.local_publish_media_reason =
+        "all_expected_local_publications_sending";
+    record->snapshot.local_publications = 1;
+    record->snapshot.local_publish_no_media = 0;
+    record->snapshot.local_video_injection_availability = Availability::Valid;
+    record->snapshot.local_video_injection_reason =
+        "local_video_injection_observed";
+    record->snapshot.local_video_first_injections = 1;
+    record->snapshot.last_publish_to_video_injection_ms = 12;
+    record->snapshot.local_video_encode_availability = Availability::Unknown;
+    record->snapshot.local_video_encode_reason =
+        "outbound_video_mapping_unavailable";
+    record->snapshot.last_publish_to_video_encode_ms = -1;
+    record->snapshot.local_rtp_send_availability = Availability::Valid;
+    record->snapshot.local_rtp_send_reason = "local_rtp_send_observed";
+    record->snapshot.local_first_rtp_sends = 1;
+    record->snapshot.last_publish_to_rtp_send_ms = 44;
     record->snapshot.render_stall_availability = Availability::Valid;
     record->snapshot.render_stall_reason = "render_window_valid";
     record->snapshot.render_stall_algorithm = "render-stall-v1";
     record->snapshot.render_stall_count = 0;
     record->snapshot.render_stall_duration_ms = 0;
     record->snapshot.render_stall_ratio = 0.0;
+    record->snapshot.inbound_rtp_traffic_availability = Availability::Valid;
+    record->snapshot.inbound_rtp_traffic_reason =
+        "inbound_rtp_bitrate_window_valid";
+    record->snapshot.inbound_rtp_bitrate_bps = 800000.0;
+    record->snapshot.window_inbound_rtp_bytes = 10000;
+    record->snapshot.outbound_rtp_traffic_availability = Availability::Unsupported;
+    record->snapshot.outbound_rtp_traffic_reason = "outbound_rtp_bytes_missing";
+    record->snapshot.outbound_rtp_bitrate_bps = 123456.0;
+    record->snapshot.inbound_packet_loss_availability = Availability::Invalid;
+    record->snapshot.inbound_packet_loss_reason =
+        "inbound_loss_late_packet_correction";
+    record->snapshot.inbound_packets_lost = 6;
+    record->snapshot.window_inbound_packets_lost = -1;
+    record->snapshot.window_inbound_packets_received = 100;
+    record->snapshot.inbound_packet_loss_ratio = -1.0;
+    record->snapshot.inbound_jitter_availability = Availability::Valid;
+    record->snapshot.inbound_jitter_reason = "inbound_jitter_current_valid";
+    record->snapshot.inbound_jitter_max_ms = 4.0;
+    record->snapshot.remote_rtcp_availability = Availability::Valid;
+    record->snapshot.remote_rtcp_reason = "remote_rtcp_feedback_valid";
+    record->snapshot.remote_rtcp_current_rtt_max_ms = 40.0;
+    record->snapshot.remote_rtcp_window_average_rtt_ms = 250.0;
+    record->snapshot.remote_rtcp_fraction_lost_max = 0.02;
+    record->snapshot.network_recovery_availability = Availability::Valid;
+    record->snapshot.network_recovery_reason = "recovery_counter_window_valid";
+    record->snapshot.window_inbound_packets = 100;
+    record->snapshot.window_inbound_retransmitted_packets = 2;
+    record->snapshot.inbound_retransmitted_packet_ratio = 0.02;
+    record->snapshot.media_path_availability = Availability::Valid;
+    record->snapshot.media_path_reason = "selected_media_path_valid";
+    record->snapshot.selected_media_transports = 1;
+    record->snapshot.local_candidate_types = "relay";
+    record->snapshot.media_protocols = "udp";
+    record->snapshot.media_path_rtt_availability = Availability::Valid;
+    record->snapshot.media_path_rtt_reason = "selected_media_path_rtt_valid";
+    record->snapshot.media_path_rtt_max_ms = 25.0;
+    record->snapshot.media_bandwidth_availability = Availability::Valid;
+    record->snapshot.media_bandwidth_reason =
+        "selected_media_path_bandwidth_valid";
+    record->snapshot.media_available_outgoing_bitrate_bps = 2500000.0;
+    record->snapshot.transport_traffic_availability = Availability::Valid;
+    record->snapshot.transport_traffic_reason = "transport_traffic_window_valid";
+    record->snapshot.transport_stats_count = 1;
+    record->snapshot.window_transport_bytes_sent = 20000;
+    record->snapshot.window_transport_bytes_received = 30000;
+    record->snapshot.transport_state_availability = Availability::Valid;
+    record->snapshot.transport_state_reason = "transport_state_valid";
+    record->snapshot.transport_dtls_states = "connected";
+    record->snapshot.video_quality_limitation_availability = Availability::Valid;
+    record->snapshot.video_quality_limitation_reason =
+        "quality_limitation_native_window_valid";
+    record->snapshot.video_quality_limitation_current = "bandwidth";
+    record->snapshot.window_video_quality_bandwidth_duration_ms = 250;
+    record->snapshot.local_device_continuity_availability = Availability::Valid;
+    record->snapshot.local_device_continuity_reason =
+        "local_device_continuity_valid";
+    record->snapshot.local_device_format_changes = 1;
+    record->snapshot.render_stage_availability = Availability::Valid;
+    record->snapshot.render_stage_reason = "render_cpu_stage_spans_valid";
+    record->snapshot.render_convert_samples = 2;
+    record->snapshot.render_convert_total_us = 100;
+    record->snapshot.render_convert_max_us = 60;
     record->snapshot.telemetry_cost_availability = Availability::Valid;
     record->snapshot.telemetry_cost_reason = "observed_sampler_snapshot_cost_valid";
     record->stability.ledger_availability = "VALID";
@@ -84,6 +171,18 @@ std::filesystem::path OnlyReportDirectory(const std::filesystem::path& root) {
 std::string ReadAll(const std::filesystem::path& path) {
     std::ifstream input(path, std::ios::binary);
     return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
+}
+
+nlohmann::json FindMetric(const std::string& jsonl, const std::string& key) {
+    std::istringstream input(jsonl);
+    std::string line;
+    while (std::getline(input, line)) {
+        if (line.empty()) continue;
+        auto row = nlohmann::json::parse(line);
+        if (row.value("key", std::string{}) == key) return row;
+    }
+    TEST_CHECK(false && "metric key not found");
+    return {};
 }
 
 void JsonCsvShareValuesAndPreserveMissing() {
@@ -110,8 +209,55 @@ void JsonCsvShareValuesAndPreserveMissing() {
     TEST_CHECK(jsonl.find("\"key\":\"resource.cpu\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"stats.last_request_duration\",\"measurement_point\":\"\",\"reason\":\"stats_complete\",\"revision\":2,\"session_generation\":42,\"unit\":\"ms\",\"value\":null") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"render.stall.count\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"session.duration\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"publish.video.accepted_to_encode\",\"measurement_point\":\"webrtc_outbound_rtp_frames_encoded_sample\",\"reason\":\"outbound_video_mapping_unavailable\",\"revision\":2,\"session_generation\":42,\"unit\":\"ms\",\"value\":null") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"publish.rtp.accepted_to_send\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"network.inbound.retransmitted_packet_ratio\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"network.path.local_candidate_types\"") != std::string::npos);
+    TEST_CHECK(FindMetric(jsonl, "network.rtp.inbound.bitrate").at("value") ==
+               800000.0);
+    TEST_CHECK(FindMetric(jsonl, "network.rtp.outbound.bitrate")
+                   .at("value").is_null());
+    const auto corrected_loss =
+        FindMetric(jsonl, "network.inbound.loss.window");
+    TEST_CHECK(corrected_loss.at("availability") == "INVALID");
+    TEST_CHECK(corrected_loss.at("value") == -1);
+    TEST_CHECK(FindMetric(jsonl, "network.remote_rtcp.window_rtt.average")
+                   .at("value") == 250.0);
+    TEST_CHECK(FindMetric(jsonl, "network.path.rtt.maximum").at("value") ==
+               25.0);
+    TEST_CHECK(FindMetric(jsonl, "network.transport.bytes_sent.window")
+                   .at("value") == 20000);
+    const auto confirmed_crashes =
+        FindMetric(jsonl, "stability.confirmed_process_crashes");
+    TEST_CHECK(confirmed_crashes.at("availability") == "UNSUPPORTED");
+    TEST_CHECK(confirmed_crashes.at("reason") ==
+               "crash_evidence_provider_not_configured");
+    TEST_CHECK(confirmed_crashes.at("value").is_null());
+    const auto confirmed_crash_ratio =
+        FindMetric(jsonl, "stability.confirmed_process_crash_ratio");
+    TEST_CHECK(confirmed_crash_ratio.at("availability") == "UNSUPPORTED");
+    TEST_CHECK(confirmed_crash_ratio.at("value").is_null());
+    TEST_CHECK(FindMetric(jsonl, "stability.unknown_process_terminations")
+                   .at("availability") == "WARMING_UP");
+    TEST_CHECK(jsonl.find("\"key\":\"video.quality.window.bandwidth\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"video.pipeline.inbound_received\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"video.codec.inbound\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"video.processing.decode_average\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"device.local.format_changes\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"device.open\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"device.hotplug\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"render.stage.convert.maximum\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"render.stage.gpu_execution\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"render.interval.p99\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"render.frame_age.average\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"render.pipeline.actual_backend\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"resource.internal.native_bindings\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"resource.queue.router.replaced\"") != std::string::npos);
+    TEST_CHECK(jsonl.find("\"key\":\"resource.queue.export\"") != std::string::npos);
     TEST_CHECK(csv.find("\"resource.cpu\",\"0\",\"percent\",\"VALID\"") != std::string::npos);
     TEST_CHECK(csv.find("\"stats.last_request_duration\",\"\",\"ms\",\"VALID\"") != std::string::npos);
+    TEST_CHECK(csv.find("\"session.duration\",\"4321\",\"ms\",\"VALID\"") != std::string::npos);
 }
 
 void UnsafeTextAndCsvFormulaAreContained() {

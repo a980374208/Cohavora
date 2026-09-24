@@ -1,5 +1,6 @@
 #include "rtc_video_source.h"
 #include "telemetry.h"
+#include "../telemetry/session_telemetry.h"
 #include "api/scoped_refptr.h"
 #include "api/video/i420_buffer.h"
 #include "api/video/video_frame.h"
@@ -28,6 +29,14 @@ RtcVideoSource::RtcVideoSource(std::shared_ptr<VideoSource> source, bool screenc
 
 RtcVideoSource::~RtcVideoSource() {
     if (subscription_) subscription_->disconnect();
+    SetTelemetryProbe({});
+}
+
+void RtcVideoSource::SetTelemetryProbe(
+    std::shared_ptr<telemetry::LocalVideoActivityProbe> probe) noexcept {
+    auto previous = std::atomic_exchange_explicit(
+        &telemetry_probe_, std::move(probe), std::memory_order_acq_rel);
+    if (previous) previous->active.store(false, std::memory_order_release);
 }
 
 VideoFrameDiagnostics RtcVideoSource::frame_diagnostics() const noexcept {
@@ -182,6 +191,48 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
     Telemetry::Instance().OnFirstVideoFrameInjected();
     // This counts API submissions, even when the bridge has no encoder sink.
     output_frames_.fetch_add(1, std::memory_order_relaxed);
+    if (const auto probe = std::atomic_load_explicit(
+            &telemetry_probe_, std::memory_order_acquire);
+        probe && probe->active.load(std::memory_order_acquire)) {
+        const auto injected_at = telemetry::SessionTelemetry::Clock::now();
+        const auto injected_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            injected_at.time_since_epoch()).count();
+        const auto submitted_width = static_cast<std::uint32_t>(rtc_frame.width());
+        const auto submitted_height = static_cast<std::uint32_t>(rtc_frame.height());
+        const auto previous_width = probe->width.exchange(
+            submitted_width, std::memory_order_acq_rel);
+        const auto previous_height = probe->height.exchange(
+            submitted_height, std::memory_order_acq_rel);
+        if (previous_width != 0 && previous_height != 0 &&
+            (previous_width != submitted_width ||
+             previous_height != submitted_height)) {
+            probe->format_changes.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (options.timestamp_us > 0) {
+            const auto previous_timestamp = probe->capture_timestamp_us.exchange(
+                options.timestamp_us, std::memory_order_acq_rel);
+            if (previous_timestamp > 0 && options.timestamp_us < previous_timestamp) {
+                probe->clock_resets.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+        probe->last_frame_ns.store(injected_ns, std::memory_order_release);
+        probe->frame_count.fetch_add(1, std::memory_order_relaxed);
+        auto unset = std::int64_t{0};
+        if (probe->first_injected_ns.compare_exchange_strong(
+                unset, injected_ns, std::memory_order_acq_rel)) {
+            bool not_submitted = false;
+            if (probe->first_event_submitted.compare_exchange_strong(
+                    not_submitted, true, std::memory_order_acq_rel)) {
+                if (const auto owner = probe->telemetry.lock()) {
+                    owner->RecordLocalVideoFrameInjected(
+                        probe->series_key,
+                        probe->room_generation,
+                        probe->publication_epoch,
+                        injected_at);
+                }
+            }
+        }
+    }
     OnFrame(rtc_frame);
 }
 

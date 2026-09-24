@@ -676,6 +676,38 @@ std::string RemoteAudioTelemetryKey(
         std::string(track_sid);
 }
 
+std::string LocalPublishTelemetryKey(std::string_view rtc_track_id) {
+    return rtc_track_id.empty()
+        ? std::string{}
+        : "local_publish/" + std::string(rtc_track_id);
+}
+
+std::shared_ptr<telemetry::LocalVideoActivityProbe> MakeLocalVideoActivityProbe(
+    const std::shared_ptr<telemetry::SessionTelemetry>& telemetry_owner,
+    std::string series_key,
+    std::uint64_t room_generation,
+    std::uint64_t publication_epoch) {
+    if (!telemetry_owner || series_key.empty() || room_generation == 0 ||
+        publication_epoch == 0) {
+        return {};
+    }
+    auto probe = std::make_shared<telemetry::LocalVideoActivityProbe>();
+    probe->telemetry = telemetry_owner;
+    probe->series_key = std::move(series_key);
+    probe->room_generation = room_generation;
+    probe->publication_epoch = publication_epoch;
+    probe->active.store(true, std::memory_order_release);
+    return probe;
+}
+
+std::shared_ptr<telemetry::LocalAudioActivityProbe> MakeLocalAudioActivityProbe(
+    const std::shared_ptr<telemetry::SessionTelemetry>& telemetry_owner) {
+    if (!telemetry_owner) return {};
+    auto probe = std::make_shared<telemetry::LocalAudioActivityProbe>();
+    probe->active.store(true, std::memory_order_release);
+    return probe;
+}
+
 std::string RemoteVideoRenderTelemetryKey(
     std::string_view participant_sid,
     std::string_view track_sid) {
@@ -757,6 +789,37 @@ public:
                 metadata.frame_token, metadata.decoded_at,
                 measurement_point ? measurement_point : "render_submit",
                 probe_, source_time);
+        }
+    }
+
+    void OnStageTiming(
+            const render::RenderFrameMetadata& metadata,
+            const char* measurement_point,
+            std::chrono::microseconds duration,
+            Clock::time_point) override {
+        if (!probe_ || !probe_->active.load(std::memory_order_acquire) ||
+            metadata.series_key != series_key_ ||
+            metadata.room_generation != room_generation_ ||
+            metadata.binding_epoch != binding_epoch_ || !measurement_point ||
+            duration.count() < 0) {
+            return;
+        }
+        auto* target = &probe_->draw_submit;
+        const std::string_view point(measurement_point);
+        if (point == "qt_cpu_convert") {
+            target = &probe_->cpu_convert;
+        } else if (point.find("upload") != std::string_view::npos) {
+            target = &probe_->upload_submit;
+        } else if (point.find("present") != std::string_view::npos ||
+                   point.find("swap") != std::string_view::npos) {
+            target = &probe_->present_block;
+        }
+        target->samples.fetch_add(1, std::memory_order_relaxed);
+        target->total_us.fetch_add(duration.count(), std::memory_order_relaxed);
+        auto maximum = target->maximum_us.load(std::memory_order_relaxed);
+        while (duration.count() > maximum &&
+               !target->maximum_us.compare_exchange_weak(
+                   maximum, duration.count(), std::memory_order_relaxed)) {
         }
     }
 
@@ -1548,6 +1611,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
 }
 
 void Room::Disconnect() {
+    const auto disconnect_accepted_at = std::chrono::steady_clock::now();
     std::deque<QueuedParticipantEvent> retired_events;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::shared_ptr<SignalClient> signal;
@@ -1559,6 +1623,7 @@ void Room::Disconnect() {
     std::vector<std::shared_ptr<webrtc::DataChannelObserver>> data_channel_observers;
     std::vector<RemoteTrackSinkBinding> track_sinks;
     PendingOperationCleanup pending;
+    std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner;
     uint64_t disconnected_generation = 0;
     {
         std::lock_guard lock(room_mutex_);
@@ -1607,7 +1672,20 @@ void Room::Disconnect() {
         deferred_room_messages_.clear();
         ClearSubscriptionSessionLocked();
         pending = TakePendingOperationsLocked();
+        telemetry_owner = session_telemetry_.lock();
     }
+
+    const auto telemetry_operation_id = telemetry_owner
+        ? telemetry_owner->StartOperation(
+              telemetry::OperationKind::Disconnect,
+              "disconnect",
+              disconnect_accepted_at)
+        : std::string{};
+    TelemetryOperationSpan disconnect_operation(
+        telemetry_owner,
+        telemetry::OperationKind::Disconnect,
+        telemetry_operation_id,
+        true);
 
     retired_events.clear();
 
@@ -1664,9 +1742,11 @@ void Room::Disconnect() {
     delivery.detail = "Client Initiated Disconnect";
     delivery.listeners = std::move(listeners_snapshot);
     DeliverLifecycleListenerEvent(std::move(delivery));
+    disconnect_operation.Finish(telemetry::OperationOutcome::Success);
 }
 
 asio::awaitable<void> Room::DisconnectAsync() {
+    const auto disconnect_accepted_at = std::chrono::steady_clock::now();
     std::deque<QueuedParticipantEvent> retired_events;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::shared_ptr<SignalClient> signal;
@@ -1678,6 +1758,7 @@ asio::awaitable<void> Room::DisconnectAsync() {
     std::vector<std::shared_ptr<webrtc::DataChannelObserver>> data_channel_observers;
     std::vector<RemoteTrackSinkBinding> track_sinks;
     PendingOperationCleanup pending;
+    std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner;
     uint64_t disconnected_generation = 0;
     {
         std::lock_guard lock(room_mutex_);
@@ -1726,7 +1807,20 @@ asio::awaitable<void> Room::DisconnectAsync() {
         deferred_room_messages_.clear();
         ClearSubscriptionSessionLocked();
         pending = TakePendingOperationsLocked();
+        telemetry_owner = session_telemetry_.lock();
     }
+
+    const auto telemetry_operation_id = telemetry_owner
+        ? telemetry_owner->StartOperation(
+              telemetry::OperationKind::Disconnect,
+              "disconnect",
+              disconnect_accepted_at)
+        : std::string{};
+    TelemetryOperationSpan disconnect_operation(
+        telemetry_owner,
+        telemetry::OperationKind::Disconnect,
+        telemetry_operation_id,
+        true);
 
     retired_events.clear();
 
@@ -1789,6 +1883,7 @@ asio::awaitable<void> Room::DisconnectAsync() {
     delivery.detail = "Client Initiated Disconnect";
     delivery.listeners = std::move(listeners_snapshot);
     DeliverLifecycleListenerEvent(std::move(delivery));
+    disconnect_operation.Finish(telemetry::OperationOutcome::Success);
 }
 
 void Room::BeginServerDisconnect(
@@ -1796,6 +1891,7 @@ void Room::BeginServerDisconnect(
     std::string detail,
     uint64_t event_generation) {
     bool should_finalize = false;
+    std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner;
     {
         std::lock_guard lock(room_mutex_);
         if (!IsSignalGenerationCurrentLocked(event_generation) ||
@@ -1806,6 +1902,7 @@ void Room::BeginServerDisconnect(
         disconnect_reason_ = reason;
         reconnect_disabled_ = true;
         server_disconnect_finalizing_ = true;
+        telemetry_owner = session_telemetry_.lock();
         should_finalize = true;
     }
 
@@ -1814,17 +1911,32 @@ void Room::BeginServerDisconnect(
     Log("SIGNAL", "LEAVE_DISCONNECT",
         "[Room] Server requested leave: reason=" + std::string(ToString(reason)) +
         ", detail=" + detail);
+    const auto telemetry_operation_id = telemetry_owner
+        ? telemetry_owner->StartOperation(
+              telemetry::OperationKind::Disconnect, "server_disconnect")
+        : std::string{};
     livekit::safe_co_spawn(executor_,
-        [self = shared_from_this(), reason, detail = std::move(detail), event_generation]()
+        [self = shared_from_this(), reason, detail = std::move(detail), event_generation,
+         telemetry_owner = std::move(telemetry_owner),
+         telemetry_operation_id]()
             -> asio::awaitable<void> {
-            co_await self->FinalizeServerDisconnectAsync(reason, detail, event_generation);
+            co_await self->FinalizeServerDisconnectAsync(
+                reason, detail, event_generation,
+                std::move(telemetry_owner), telemetry_operation_id);
         });
 }
 
 asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
     RoomDisconnectReason reason,
     std::string detail,
-    uint64_t event_generation) {
+    uint64_t event_generation,
+    std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner,
+    std::string telemetry_operation_id) {
+    TelemetryOperationSpan disconnect_operation(
+        std::move(telemetry_owner),
+        telemetry::OperationKind::Disconnect,
+        std::move(telemetry_operation_id),
+        true);
     std::deque<QueuedParticipantEvent> retired_events;
     std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
     std::shared_ptr<SignalClient> signal;
@@ -1913,6 +2025,7 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
     delivery.detail = std::move(detail);
     delivery.listeners = std::move(listeners_snapshot);
     DeliverLifecycleListenerEvent(std::move(delivery));
+    disconnect_operation.Finish(telemetry::OperationOutcome::Success);
 }
 
 bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
@@ -4763,6 +4876,10 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
     OperationTimeouts timeouts;
     std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner;
     bool reconnect_republish = false;
+    std::shared_ptr<telemetry::LocalVideoActivityProbe> local_video_probe;
+    std::shared_ptr<telemetry::LocalAudioActivityProbe> local_audio_probe;
+    std::uint64_t local_publication_epoch = 0;
+    const auto publish_accepted_at = std::chrono::steady_clock::now();
     auto ack = std::make_shared<AwaitableState<proto::TrackPublishedResponse>>(executor_);
     {
         std::lock_guard lock(room_mutex_);
@@ -4787,8 +4904,24 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         reconnect_republish = reconnect_republish_tracks_.erase(track.get()) != 0;
         telemetry_owner = session_telemetry_.lock();
     }
+    if (telemetry_owner) {
+        local_publication_epoch = local_publication_epoch_.fetch_add(
+            1, std::memory_order_relaxed);
+        if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(track)) {
+            const auto rtc_track = track->rtc_track();
+            local_video_probe = MakeLocalVideoActivityProbe(
+                telemetry_owner,
+                LocalPublishTelemetryKey(rtc_track ? rtc_track->id() : std::string{}),
+                generation,
+                local_publication_epoch);
+            video->set_publish_telemetry_probe(local_video_probe);
+        } else if (auto audio = std::dynamic_pointer_cast<LocalAudioTrack>(track)) {
+            local_audio_probe = MakeLocalAudioActivityProbe(telemetry_owner);
+            audio->set_publish_telemetry_probe(local_audio_probe);
+        }
+    }
     TelemetryOperationSpan publish_operation(
-        reconnect_republish ? nullptr : std::move(telemetry_owner),
+        reconnect_republish ? nullptr : telemetry_owner,
         telemetry::OperationKind::PublishTrack);
     const auto release_ack = [&]() {
         std::lock_guard lock(room_mutex_);
@@ -4835,11 +4968,40 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             track->set_sid(response.track().sid());
             local->add_publication(publication);
         }
+        if (telemetry_owner && local_publication_epoch != 0) {
+            const auto rtc_track = track->rtc_track();
+            const auto rtc_track_id = rtc_track ? rtc_track->id() : std::string{};
+            telemetry_owner->RegisterLocalPublication(
+                LocalPublishTelemetryKey(rtc_track_id),
+                generation,
+                local_publication_epoch,
+                track->kind() == TrackKind::Video
+                    ? telemetry::LocalMediaKind::Video
+                    : telemetry::LocalMediaKind::Audio,
+                rtc_track_id,
+                publish_accepted_at,
+                !track->muted(),
+                local_video_probe,
+                std::chrono::steady_clock::now(),
+                local_audio_probe);
+        }
         if (track->kind() == TrackKind::Video) SchedulePublisherMediaDiagnostic(generation);
         publish_operation.Finish(telemetry::OperationOutcome::Success);
         co_return publication;
     } catch (...) {
         const auto operation_outcome = TelemetryOutcome(std::current_exception());
+        if (local_video_probe) {
+            local_video_probe->active.store(false, std::memory_order_release);
+            if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(track)) {
+                video->set_publish_telemetry_probe({});
+            }
+        }
+        if (local_audio_probe) {
+            local_audio_probe->active.store(false, std::memory_order_release);
+            if (auto audio = std::dynamic_pointer_cast<LocalAudioTrack>(track)) {
+                audio->set_publish_telemetry_probe({});
+            }
+        }
         release_ack();
         if (sender && WebRTCManager::Instance().signaling_thread()) {
             WebRTCManager::Instance().signaling_thread()->BlockingCall([publisher, sender]() {
@@ -4920,6 +5082,12 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
     std::vector<PendingAckInfo> pending_acks;
     pending_acks.reserve(items.size());
     std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner;
+    std::vector<std::shared_ptr<telemetry::LocalVideoActivityProbe>>
+        local_video_probes(items.size());
+    std::vector<std::shared_ptr<telemetry::LocalAudioActivityProbe>>
+        local_audio_probes(items.size());
+    std::vector<std::uint64_t> local_publication_epochs(items.size(), 0);
+    const auto publish_accepted_at = std::chrono::steady_clock::now();
 
     {
         std::lock_guard lock(room_mutex_);
@@ -4945,6 +5113,28 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
         signal = signal_client_;
         local = local_participant_;
         telemetry_owner = session_telemetry_.lock();
+    }
+
+    if (telemetry_owner) {
+        for (std::size_t index = 0; index < items.size(); ++index) {
+            local_publication_epochs[index] = local_publication_epoch_.fetch_add(
+                1, std::memory_order_relaxed);
+            if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(
+                    items[index].track)) {
+                const auto rtc_track = items[index].track->rtc_track();
+                local_video_probes[index] = MakeLocalVideoActivityProbe(
+                    telemetry_owner,
+                    LocalPublishTelemetryKey(
+                        rtc_track ? rtc_track->id() : std::string{}),
+                    generation,
+                    local_publication_epochs[index]);
+                video->set_publish_telemetry_probe(local_video_probes[index]);
+            } else if (auto audio = std::dynamic_pointer_cast<LocalAudioTrack>(
+                           items[index].track)) {
+                local_audio_probes[index] = MakeLocalAudioActivityProbe(telemetry_owner);
+                audio->set_publish_telemetry_probe(local_audio_probes[index]);
+            }
+        }
     }
 
     TelemetryOperationSpan batch_operation(
@@ -5018,6 +5208,27 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
             }
         }
 
+        if (telemetry_owner) {
+            const auto committed_at = std::chrono::steady_clock::now();
+            for (std::size_t index = 0; index < items.size(); ++index) {
+                const auto rtc_track = items[index].track->rtc_track();
+                const auto rtc_track_id = rtc_track
+                    ? rtc_track->id() : std::string{};
+                telemetry_owner->RegisterLocalPublication(
+                    LocalPublishTelemetryKey(rtc_track_id),
+                    generation,
+                    local_publication_epochs[index],
+                    items[index].track->kind() == TrackKind::Video
+                        ? telemetry::LocalMediaKind::Video
+                        : telemetry::LocalMediaKind::Audio,
+                    rtc_track_id,
+                    publish_accepted_at,
+                    !items[index].track->muted(),
+                    local_video_probes[index],
+                    committed_at,
+                    local_audio_probes[index]);
+            }
+        }
         Log("TRACK", "BATCH_PUBLISHED",
             "Local audio/video batch published: " + std::to_string(publications.size()) + " tracks in a single SDP negotiation");
         SchedulePublisherMediaDiagnostic(generation);
@@ -5028,6 +5239,22 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
         co_return publications;
     } catch (...) {
         const auto operation_outcome = TelemetryOutcome(std::current_exception());
+        for (std::size_t index = 0; index < local_video_probes.size(); ++index) {
+            if (!local_video_probes[index]) continue;
+            local_video_probes[index]->active.store(false, std::memory_order_release);
+            if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(
+                    items[index].track)) {
+                video->set_publish_telemetry_probe({});
+            }
+        }
+        for (std::size_t index = 0; index < local_audio_probes.size(); ++index) {
+            if (!local_audio_probes[index]) continue;
+            local_audio_probes[index]->active.store(false, std::memory_order_release);
+            if (auto audio = std::dynamic_pointer_cast<LocalAudioTrack>(
+                    items[index].track)) {
+                audio->set_publish_telemetry_probe({});
+            }
+        }
         {
             std::lock_guard lock(room_mutex_);
             for (const auto& pa : pending_acks) {
@@ -5307,6 +5534,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
     std::shared_ptr<Track> track;
     std::shared_ptr<LocalUnpublishTestHooks> test_hooks;
     std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner;
+    std::string local_publish_telemetry_key;
     {
         std::lock_guard lock(room_mutex_);
         if (connection_state_ != ConnectionState::Connected ||
@@ -5335,9 +5563,12 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
                                             PendingLocalUnpublish{generation, publication, false});
         test_hooks = local_unpublish_test_hooks_;
         telemetry_owner = session_telemetry_.lock();
+        if (const auto rtc_track = track->rtc_track()) {
+            local_publish_telemetry_key = LocalPublishTelemetryKey(rtc_track->id());
+        }
     }
     TelemetryOperationSpan unpublish_operation(
-        std::move(telemetry_owner), telemetry::OperationKind::Unpublish);
+        telemetry_owner, telemetry::OperationKind::Unpublish);
 
     bool sender_removed = false;
     try {
@@ -5400,6 +5631,12 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
             });
         }
         publication->set_track(nullptr);
+        if (telemetry_owner && !local_publish_telemetry_key.empty()) {
+            telemetry_owner->EndLocalPublication(local_publish_telemetry_key);
+        }
+        if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(track)) {
+            video->set_publish_telemetry_probe({});
+        }
         track->set_sid("");
         Log("TRACK", "LOCAL_UNPUBLISHED",
             "Publisher SDP Answer confirmed local track unpublication: " + track_sid);

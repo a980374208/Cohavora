@@ -1076,6 +1076,23 @@ asio::awaitable<void> TestRoomStateMachine() {
     std::cout << "[STEP] Remote participant disconnect event verified." << std::endl;
 
     room->Disconnect();
+    telemetry_timer.expires_after(std::chrono::milliseconds(1));
+    co_await telemetry_timer.async_wait(asio::use_awaitable);
+    const auto* disconnect_telemetry = FindTelemetryOperation(
+        telemetry_snapshot, livekit::telemetry::OperationKind::Disconnect);
+    TEST_ASSERT(disconnect_telemetry && disconnect_telemetry->started == 1 &&
+                disconnect_telemetry->terminal == 1 &&
+                disconnect_telemetry->success == 1 &&
+                disconnect_telemetry->inflight == 0,
+                "Disconnect telemetry did not commit one successful terminal");
+    room->Disconnect();
+    telemetry_timer.expires_after(std::chrono::milliseconds(1));
+    co_await telemetry_timer.async_wait(asio::use_awaitable);
+    disconnect_telemetry = FindTelemetryOperation(
+        telemetry_snapshot, livekit::telemetry::OperationKind::Disconnect);
+    TEST_ASSERT(disconnect_telemetry && disconnect_telemetry->started == 1 &&
+                disconnect_telemetry->terminal == 1,
+                "No-op Disconnect created another telemetry attempt");
     server->Stop();
     std::cout << "TestRoomStateMachine PASSED!" << std::endl;
 }

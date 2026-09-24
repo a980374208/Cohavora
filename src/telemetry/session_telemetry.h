@@ -5,6 +5,7 @@
 #include <asio.hpp>
 
 #include <atomic>
+#include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -18,6 +19,8 @@
 #include <vector>
 
 namespace livekit::telemetry {
+
+class SessionTelemetry;
 
 enum class Availability {
     Valid,
@@ -54,6 +57,10 @@ enum class EventKind {
     RemoteVideoRenderBinding,
     RemoteVideoRenderExpectation,
     RemoteVideoRenderSubmit,
+    LocalPublicationBinding,
+    LocalPublicationEnded,
+    LocalVideoFrameInjected,
+    RenderPipelineSample,
     UiLagProbeCompleted,
 };
 
@@ -67,6 +74,7 @@ enum class OperationKind {
     Subscribe,
     Unsubscribe,
     Unpublish,
+    Disconnect,
     ReconnectEpisode,
     ReconnectAttempt,
     CameraDeviceSwitch,
@@ -128,6 +136,13 @@ struct AudioActivityProbe {
 // milestones enter the bounded event queue; cumulative stall counters remain
 // lock-free producer data sampled by the session strand.
 struct RenderActivityProbe {
+    static constexpr std::size_t kIntervalHistogramBuckets = 9;
+    struct StageAccumulator {
+        std::atomic<std::uint64_t> samples{0};
+        std::atomic<std::int64_t> total_us{0};
+        std::atomic<std::int64_t> maximum_us{0};
+    };
+
     std::atomic<bool> active{true};
     std::atomic<bool> expected{false};
     std::atomic<std::uint64_t> last_token{0};
@@ -140,13 +155,80 @@ struct RenderActivityProbe {
     std::atomic<std::int64_t> interval_sum_ns{0};
     std::atomic<std::int64_t> maximum_interval_ns{0};
     std::atomic<std::uint64_t> interval_count{0};
+    std::array<std::atomic<std::uint64_t>, kIntervalHistogramBuckets>
+        interval_histogram{};
+    std::atomic<std::int64_t> frame_age_sum_ns{0};
+    std::atomic<std::int64_t> maximum_frame_age_ns{0};
+    std::atomic<std::uint64_t> frame_age_count{0};
+    std::atomic<MediaExpectationReason> expectation_reason{
+        MediaExpectationReason::SurfaceHidden};
     std::atomic<bool> first_event_submitted{false};
     std::atomic<std::uint64_t> recovery_epoch{0};
     std::atomic<std::int64_t> recovery_first_ns{0};
     std::atomic<std::int64_t> recovery_last_good_ns{0};
     std::atomic<bool> recovery_stable_submitted{false};
+    StageAccumulator cpu_convert;
+    StageAccumulator upload_submit;
+    StageAccumulator draw_submit;
+    StageAccumulator present_block;
     std::int64_t target_interval_ns = 0;
     bool continuous_video = true;
+};
+
+struct RenderPipelineSample {
+    std::uint64_t router_submitted = 0;
+    std::uint64_t router_replaced_before_render = 0;
+    std::uint64_t router_rejected_generation = 0;
+    std::uint64_t router_rejected_binding = 0;
+    std::uint64_t router_dropped_invalid = 0;
+    std::uint64_t router_dropped_capacity = 0;
+    std::uint64_t delivered_to_gpu = 0;
+    std::uint64_t delivered_to_qt_cpu = 0;
+    std::uint64_t qt_cpu_conversion_failures = 0;
+    std::uint64_t rejected_track_attachments = 0;
+    std::uint64_t attached_track_count = 0;
+    std::string requested_backend = "none";
+    std::string actual_backend = "qt-cpu";
+    std::string gpu_failure = "none";
+    std::string fallback_reason = "none";
+};
+
+enum class LocalMediaKind {
+    Unknown,
+    Audio,
+    Video,
+};
+
+// Written on the local capture bridge and sampled on the session strand. The
+// first accepted frame also submits one typed event; later frames stay lock-free.
+struct LocalVideoActivityProbe {
+    std::atomic<bool> active{false};
+    std::atomic<std::int64_t> first_injected_ns{0};
+    std::atomic<bool> first_event_submitted{false};
+    std::atomic<std::int64_t> last_frame_ns{0};
+    std::atomic<std::uint64_t> frame_count{0};
+    std::atomic<std::uint32_t> width{0};
+    std::atomic<std::uint32_t> height{0};
+    std::atomic<std::int64_t> capture_timestamp_us{0};
+    std::atomic<std::uint64_t> format_changes{0};
+    std::atomic<std::uint64_t> clock_resets{0};
+    std::weak_ptr<SessionTelemetry> telemetry;
+    std::string series_key;
+    std::uint64_t room_generation = 0;
+    std::uint64_t publication_epoch = 0;
+};
+
+// Audio capture counterpart to LocalVideoActivityProbe. AudioFrame has no
+// device timestamp, so cadence and format are observable but clock resets are
+// explicitly reported as only partially covered by DEV-06.
+struct LocalAudioActivityProbe {
+    std::atomic<bool> active{false};
+    std::atomic<std::int64_t> last_frame_ns{0};
+    std::atomic<std::uint64_t> frame_count{0};
+    std::atomic<std::uint32_t> sample_rate{0};
+    std::atomic<std::uint32_t> channels{0};
+    std::atomic<std::uint32_t> samples_per_channel{0};
+    std::atomic<std::uint64_t> format_changes{0};
 };
 
 struct Event {
@@ -183,10 +265,16 @@ struct Event {
     std::uint64_t frame_token = 0;
     std::int64_t target_interval_ms = 0;
     std::string measurement_point;
+    std::string rtc_track_id;
+    LocalMediaKind local_media_kind = LocalMediaKind::Unknown;
+    std::uint64_t publication_epoch = 0;
     MediaExpectationReason expectation_reason = MediaExpectationReason::BindingActive;
     std::shared_ptr<VideoActivityProbe> video_probe;
     std::shared_ptr<AudioActivityProbe> audio_probe;
     std::shared_ptr<RenderActivityProbe> render_probe;
+    std::shared_ptr<LocalVideoActivityProbe> local_video_probe;
+    std::shared_ptr<LocalAudioActivityProbe> local_audio_probe;
+    RenderPipelineSample render_pipeline;
 };
 
 struct OperationSummary {
@@ -241,6 +329,16 @@ struct Snapshot {
     Clock::time_point last_sample_at{};
     std::int64_t sample_age_ms = -1;
     double coverage = 0.0;
+
+    Availability session_duration_availability = Availability::Unknown;
+    std::string session_duration_reason = "session_not_started";
+    std::string session_duration_measurement_point = "session_telemetry_lifetime";
+    std::int64_t session_duration_ms = -1;
+    Availability usable_duration_availability = Availability::Unknown;
+    std::string usable_duration_reason = "room_not_connected";
+    std::string usable_duration_measurement_point =
+        "connect_success_to_reconnect_or_disconnect";
+    std::int64_t usable_duration_ms = -1;
 
     std::size_t queue_capacity = 0;
     std::size_t queue_depth = 0;
@@ -315,6 +413,19 @@ struct Snapshot {
     Availability resource_return_availability = Availability::Unknown;
     std::string resource_return_reason = "session_not_stopped";
 
+    Availability internal_resource_availability = Availability::Unknown;
+    std::string internal_resource_reason = "not_sampled";
+    std::uint64_t active_native_bindings = 0;
+    std::uint64_t active_local_media_streams = 0;
+    std::uint64_t active_router_slots = 0;
+    Availability router_queue_availability = Availability::Unknown;
+    std::string router_queue_reason = "render_pipeline_not_sampled";
+    std::uint64_t router_frames_submitted = 0;
+    std::uint64_t router_frames_replaced = 0;
+    std::uint64_t router_capacity_drops = 0;
+    Availability export_queue_availability = Availability::Unsupported;
+    std::string export_queue_reason = "history_export_queue_depth_not_exposed";
+
     Availability telemetry_cost_availability = Availability::Unknown;
     std::string telemetry_cost_reason = "telemetry_cost_not_sampled";
     std::uint64_t telemetry_snapshot_publications = 0;
@@ -363,6 +474,243 @@ struct Snapshot {
     std::uint64_t operations_duplicate_terminal = 0;
     std::uint64_t operations_kind_mismatch = 0;
     std::vector<OperationSummary> operation_summaries;
+
+    Availability local_publish_media_availability = Availability::Unknown;
+    std::string local_publish_media_reason = "no_local_publication";
+    std::string local_publish_media_algorithm = "publish-media-v1";
+    std::uint64_t local_publications = 0;
+    std::uint64_t active_local_publications = 0;
+    std::uint64_t expected_local_publications = 0;
+    std::uint64_t local_publish_no_media = 0;
+    std::uint64_t stale_local_publication_drops = 0;
+    Availability local_video_injection_availability = Availability::Unknown;
+    std::string local_video_injection_reason = "no_local_video_publication";
+    std::string local_video_injection_measurement_point =
+        "rtc_local_video_source_onframe_submission";
+    std::uint64_t local_video_first_injections = 0;
+    std::int64_t last_publish_to_video_injection_ms = -1;
+    Availability local_video_encode_availability = Availability::Unknown;
+    std::string local_video_encode_reason = "no_local_video_publication";
+    std::string local_video_encode_measurement_point =
+        "webrtc_outbound_rtp_frames_encoded_sample";
+    std::uint64_t local_video_first_encodes = 0;
+    std::int64_t last_publish_to_video_encode_ms = -1;
+    Availability local_rtp_send_availability = Availability::Unknown;
+    std::string local_rtp_send_reason = "no_local_publication";
+    std::string local_rtp_send_measurement_point =
+        "webrtc_outbound_rtp_packets_sent_sample";
+    std::uint64_t local_first_rtp_sends = 0;
+    std::int64_t last_publish_to_rtp_send_ms = -1;
+    std::int64_t local_publish_stats_uncertainty_ms = -1;
+
+    Availability inbound_rtp_traffic_availability = Availability::Unknown;
+    std::string inbound_rtp_traffic_reason = "not_sampled";
+    Availability outbound_rtp_traffic_availability = Availability::Unknown;
+    std::string outbound_rtp_traffic_reason = "not_sampled";
+    std::string rtp_traffic_measurement_point = "rtc_rtp_payload_stats_window";
+    std::uint64_t inbound_rtp_streams = 0;
+    std::uint64_t outbound_rtp_streams = 0;
+    std::uint64_t inbound_rtp_bytes = 0;
+    std::uint64_t outbound_rtp_bytes = 0;
+    std::uint64_t window_inbound_rtp_bytes = 0;
+    std::uint64_t window_outbound_rtp_bytes = 0;
+    double inbound_rtp_bitrate_bps = -1.0;
+    double outbound_rtp_bitrate_bps = -1.0;
+
+    Availability inbound_packet_loss_availability = Availability::Unknown;
+    std::string inbound_packet_loss_reason = "not_sampled";
+    std::string inbound_packet_loss_measurement_point =
+        "rtc_inbound_rtp_received_and_lost_window";
+    std::int64_t inbound_packets_lost = 0;
+    std::int64_t window_inbound_packets_lost = 0;
+    std::uint64_t window_inbound_packets_received = 0;
+    double inbound_packet_loss_ratio = -1.0;
+    Availability inbound_jitter_availability = Availability::Unknown;
+    std::string inbound_jitter_reason = "not_sampled";
+    double inbound_jitter_max_ms = -1.0;
+
+    Availability remote_rtcp_availability = Availability::Unknown;
+    std::string remote_rtcp_reason = "not_sampled";
+    std::string remote_rtcp_measurement_point =
+        "rtc_remote_inbound_rtcp_feedback";
+    std::uint64_t remote_rtcp_streams = 0;
+    double remote_rtcp_current_rtt_max_ms = -1.0;
+    double remote_rtcp_window_average_rtt_ms = -1.0;
+    double remote_rtcp_fraction_lost_max = -1.0;
+
+    Availability network_recovery_availability = Availability::Unknown;
+    std::string network_recovery_reason = "not_sampled";
+    std::string network_recovery_measurement_point = "rtc_rtp_stats_window";
+    std::string network_retransmit_ratio_denominator =
+        "rtp_packets_including_retransmissions";
+    Availability inbound_retransmission_availability = Availability::Unknown;
+    std::string inbound_retransmission_reason = "not_sampled";
+    Availability inbound_fec_availability = Availability::Unknown;
+    std::string inbound_fec_reason = "not_sampled";
+    Availability inbound_feedback_availability = Availability::Unknown;
+    std::string inbound_feedback_reason = "not_sampled";
+    Availability outbound_retransmission_availability = Availability::Unknown;
+    std::string outbound_retransmission_reason = "not_sampled";
+    Availability outbound_feedback_availability = Availability::Unknown;
+    std::string outbound_feedback_reason = "not_sampled";
+    std::uint64_t network_recovery_streams = 0;
+    std::uint64_t inbound_retransmitted_packets = 0;
+    std::uint64_t inbound_retransmitted_bytes = 0;
+    std::uint64_t inbound_fec_packets = 0;
+    std::uint64_t inbound_fec_bytes = 0;
+    std::uint64_t inbound_fec_discarded_packets = 0;
+    std::uint64_t inbound_nack_count = 0;
+    std::uint64_t inbound_pli_count = 0;
+    std::uint64_t inbound_fir_count = 0;
+    std::uint64_t outbound_retransmitted_packets = 0;
+    std::uint64_t outbound_retransmitted_bytes = 0;
+    std::uint64_t outbound_nack_count = 0;
+    std::uint64_t outbound_pli_count = 0;
+    std::uint64_t outbound_fir_count = 0;
+    std::uint64_t window_inbound_packets = 0;
+    std::uint64_t window_inbound_retransmitted_packets = 0;
+    std::uint64_t window_inbound_fec_packets = 0;
+    std::uint64_t window_inbound_nack_count = 0;
+    std::uint64_t window_inbound_pli_count = 0;
+    std::uint64_t window_inbound_fir_count = 0;
+    std::uint64_t window_outbound_packets = 0;
+    std::uint64_t window_outbound_retransmitted_packets = 0;
+    std::uint64_t window_outbound_nack_count = 0;
+    std::uint64_t window_outbound_pli_count = 0;
+    std::uint64_t window_outbound_fir_count = 0;
+    double inbound_retransmitted_packet_ratio = -1.0;
+    double outbound_retransmitted_packet_ratio = -1.0;
+
+    Availability media_path_availability = Availability::Unknown;
+    std::string media_path_reason = "not_sampled";
+    std::string media_path_measurement_point =
+        "rtc_transport_selected_candidate_pair_id";
+    std::uint64_t selected_media_transports = 0;
+    std::uint64_t media_path_switches = 0;
+    std::string local_candidate_types;
+    std::string remote_candidate_types;
+    std::string local_network_types;
+    std::string media_protocols;
+    std::string relay_protocols;
+    std::string tcp_types;
+
+    Availability media_path_rtt_availability = Availability::Unknown;
+    std::string media_path_rtt_reason = "not_sampled";
+    double media_path_rtt_max_ms = -1.0;
+    Availability media_bandwidth_availability = Availability::Unknown;
+    std::string media_bandwidth_reason = "not_sampled";
+    double media_available_outgoing_bitrate_bps = -1.0;
+    double media_available_incoming_bitrate_bps = -1.0;
+
+    Availability transport_traffic_availability = Availability::Unknown;
+    std::string transport_traffic_reason = "not_sampled";
+    std::string transport_traffic_measurement_point = "rtc_transport_stats_window";
+    std::uint64_t transport_stats_count = 0;
+    std::uint64_t transport_bytes_sent = 0;
+    std::uint64_t transport_bytes_received = 0;
+    std::uint64_t transport_packets_sent = 0;
+    std::uint64_t transport_packets_received = 0;
+    std::uint64_t window_transport_bytes_sent = 0;
+    std::uint64_t window_transport_bytes_received = 0;
+    std::uint64_t window_transport_packets_sent = 0;
+    std::uint64_t window_transport_packets_received = 0;
+    Availability transport_state_availability = Availability::Unknown;
+    std::string transport_state_reason = "not_sampled";
+    std::string transport_dtls_states;
+    std::string transport_connectivity_states;
+    std::string transport_roles;
+
+    Availability video_quality_limitation_availability = Availability::Unknown;
+    std::string video_quality_limitation_reason = "not_sampled";
+    std::string video_quality_limitation_measurement_point =
+        "rtc_outbound_video_quality_limitation";
+    std::uint64_t outbound_video_streams = 0;
+    std::string video_quality_limitation_current;
+    std::int64_t video_quality_none_duration_ms = -1;
+    std::int64_t video_quality_cpu_duration_ms = -1;
+    std::int64_t video_quality_bandwidth_duration_ms = -1;
+    std::int64_t video_quality_other_duration_ms = -1;
+    std::int64_t window_video_quality_none_duration_ms = -1;
+    std::int64_t window_video_quality_cpu_duration_ms = -1;
+    std::int64_t window_video_quality_bandwidth_duration_ms = -1;
+    std::int64_t window_video_quality_other_duration_ms = -1;
+    std::int64_t video_quality_resolution_changes = -1;
+    std::int64_t window_video_quality_resolution_changes = -1;
+    std::uint32_t outbound_video_width = 0;
+    std::uint32_t outbound_video_height = 0;
+    double outbound_video_fps = -1.0;
+
+    Availability video_pipeline_availability = Availability::Unknown;
+    std::string video_pipeline_reason = "not_sampled";
+    std::string video_pipeline_measurement_point = "rtc_video_stats_window";
+    std::uint64_t inbound_video_frames_received = 0;
+    std::uint64_t inbound_video_frames_decoded = 0;
+    std::uint64_t inbound_video_frames_dropped = 0;
+    std::uint64_t outbound_video_frames_encoded = 0;
+    std::uint64_t outbound_video_frames_sent = 0;
+    std::uint64_t window_inbound_video_frames_received = 0;
+    std::uint64_t window_inbound_video_frames_decoded = 0;
+    std::uint64_t window_inbound_video_frames_dropped = 0;
+    std::uint64_t window_outbound_video_frames_encoded = 0;
+    std::uint64_t window_outbound_video_frames_sent = 0;
+    double inbound_video_frame_drop_ratio = -1.0;
+    std::uint32_t inbound_video_width = 0;
+    std::uint32_t inbound_video_height = 0;
+    double inbound_video_fps = -1.0;
+
+    Availability video_codec_availability = Availability::Unknown;
+    std::string video_codec_reason = "not_sampled";
+    std::string video_codec_measurement_point = "rtc_codec_id_join";
+    std::string inbound_video_codecs;
+    std::string outbound_video_codecs;
+    std::string decoder_implementations;
+    std::string encoder_implementations;
+    std::string decoder_power_efficiency;
+    std::string encoder_power_efficiency;
+    std::string outbound_video_layers;
+
+    Availability video_processing_availability = Availability::Unknown;
+    std::string video_processing_reason = "not_sampled";
+    std::string video_processing_measurement_point =
+        "rtc_total_processing_time_counter_delta";
+    double video_decode_ms_per_frame = -1.0;
+    double video_encode_ms_per_frame = -1.0;
+
+    Availability local_device_continuity_availability = Availability::Unknown;
+    std::string local_device_continuity_reason = "no_local_publication";
+    std::string local_device_continuity_measurement_point =
+        "rtc_local_source_submission_probe";
+    std::string local_device_continuity_algorithm = "device-continuity-v1";
+    std::uint64_t expected_local_device_streams = 0;
+    std::uint64_t active_local_device_streams = 0;
+    std::uint64_t local_device_unexpected_stops = 0;
+    std::int64_t local_device_interruption_duration_ms = 0;
+    std::uint64_t local_device_format_changes = 0;
+    std::uint64_t local_device_clock_resets = 0;
+
+    Availability device_open_availability = Availability::Unsupported;
+    std::string device_open_reason = "native_device_open_milestone_not_exposed";
+    std::string device_open_measurement_point = "native_capture_provider";
+    Availability device_hotplug_availability = Availability::Unsupported;
+    std::string device_hotplug_reason = "os_device_change_provider_not_installed";
+    std::string device_hotplug_measurement_point = "os_device_notification";
+    Availability device_failure_availability = Availability::Unknown;
+    std::string device_failure_reason = "no_device_switch_operation";
+    std::uint64_t device_switch_attempts = 0;
+    std::uint64_t device_switch_successes = 0;
+    std::uint64_t device_switch_failures = 0;
+    std::uint64_t device_switch_timeouts = 0;
+    Availability device_state_availability = Availability::Unknown;
+    std::string device_state_reason = "no_local_publication";
+    std::string device_state_measurement_point = "rtc_local_source_submission_probe";
+    bool microphone_requested = false;
+    bool microphone_effective = false;
+    bool camera_requested = false;
+    bool camera_effective = false;
+    std::uint32_t actual_capture_width = 0;
+    std::uint32_t actual_capture_height = 0;
+    std::uint32_t actual_capture_sample_rate = 0;
+    std::uint32_t actual_capture_channels = 0;
 
     Availability remote_video_first_frame_availability = Availability::Unknown;
     std::string remote_video_first_frame_reason = "no_remote_video_binding";
@@ -454,6 +802,43 @@ struct Snapshot {
     std::int64_t last_connect_to_first_render_ms = -1;
     double render_average_interval_ms = -1.0;
     std::int64_t render_maximum_interval_ms = -1;
+    double render_interval_p50_ms = -1.0;
+    double render_interval_p95_ms = -1.0;
+    double render_interval_p99_ms = -1.0;
+    double render_submit_fps = -1.0;
+    Availability render_frame_age_availability = Availability::Unknown;
+    std::string render_frame_age_reason = "no_render_submit";
+    std::string render_frame_age_measurement_point =
+        "native_decode_to_actual_render_submit";
+    double render_average_frame_age_ms = -1.0;
+    std::int64_t render_maximum_frame_age_ms = -1;
+    std::int64_t render_target_interval_ms = -1;
+    std::uint64_t render_expected_bindings = 0;
+    std::uint64_t render_hidden_bindings = 0;
+    std::uint64_t render_minimized_bindings = 0;
+    std::uint64_t render_policy_skipped_frames = 0;
+
+    Availability render_pipeline_availability = Availability::Unknown;
+    std::string render_pipeline_reason = "render_pipeline_not_sampled";
+    std::string render_pipeline_measurement_point =
+        "video_render_session_and_router_statistics";
+    std::uint64_t render_router_submitted = 0;
+    std::uint64_t render_router_replaced = 0;
+    std::uint64_t render_router_rejected_generation = 0;
+    std::uint64_t render_router_rejected_binding = 0;
+    std::uint64_t render_router_dropped_invalid = 0;
+    std::uint64_t render_router_dropped_capacity = 0;
+    std::uint64_t render_delivered_to_gpu = 0;
+    std::uint64_t render_delivered_to_qt_cpu = 0;
+    std::uint64_t render_qt_conversion_failures = 0;
+    std::uint64_t render_rejected_track_attachments = 0;
+    std::uint64_t render_attached_track_count = 0;
+    std::string render_requested_backend = "none";
+    std::string render_actual_backend = "qt-cpu";
+    std::string render_gpu_failure = "none";
+    std::string render_fallback_reason = "none";
+    std::uint64_t render_backend_failures = 0;
+    std::uint64_t render_backend_fallbacks = 0;
 
     Availability render_stall_availability = Availability::Unknown;
     std::string render_stall_reason = "no_expected_render_binding";
@@ -464,6 +849,24 @@ struct Snapshot {
     std::int64_t render_expected_duration_ms = 0;
     double render_stall_ratio = -1.0;
     bool render_stall_active = false;
+
+    Availability render_stage_availability = Availability::Unknown;
+    std::string render_stage_reason = "no_render_stage_samples";
+    std::string render_stage_measurement_point = "render_cpu_submission_spans";
+    std::uint64_t render_convert_samples = 0;
+    std::int64_t render_convert_total_us = 0;
+    std::int64_t render_convert_max_us = -1;
+    std::uint64_t render_upload_samples = 0;
+    std::int64_t render_upload_total_us = 0;
+    std::int64_t render_upload_max_us = -1;
+    std::uint64_t render_draw_samples = 0;
+    std::int64_t render_draw_total_us = 0;
+    std::int64_t render_draw_max_us = -1;
+    std::uint64_t render_present_block_samples = 0;
+    std::int64_t render_present_block_total_us = 0;
+    std::int64_t render_present_block_max_us = -1;
+    Availability render_gpu_execution_availability = Availability::Unsupported;
+    std::string render_gpu_execution_reason = "gpu_timestamp_query_not_available";
 
     Availability reconnect_render_availability = Availability::Unknown;
     std::string reconnect_render_reason = "no_reconnect_episode";
@@ -497,10 +900,13 @@ public:
     static constexpr std::size_t kResourceTrendMinimumSamples = 20;
     static constexpr std::chrono::milliseconds kRecoveryStableWindow{250};
     static constexpr std::chrono::seconds kRecoveryObservationWindow{10};
+    static constexpr std::chrono::seconds kLocalPublishObservationWindow{5};
+    static constexpr std::chrono::seconds kLocalDeviceStallThreshold{1};
 
     SessionTelemetry(Strand strand,
                      std::uint64_t session_generation,
-                     std::size_t queue_capacity = kDefaultQueueCapacity);
+                     std::size_t queue_capacity = kDefaultQueueCapacity,
+                     Clock::time_point session_started_at = Clock::now());
 
     SessionTelemetry(const SessionTelemetry&) = delete;
     SessionTelemetry& operator=(const SessionTelemetry&) = delete;
@@ -593,6 +999,28 @@ public:
         std::string measurement_point,
         std::shared_ptr<RenderActivityProbe> probe,
         Clock::time_point source_time = Clock::now());
+    bool RegisterLocalPublication(
+        std::string series_key,
+        std::uint64_t room_generation,
+        std::uint64_t publication_epoch,
+        LocalMediaKind media_kind,
+        std::string rtc_track_id,
+        Clock::time_point publish_accepted_at,
+        bool expected_send,
+        std::shared_ptr<LocalVideoActivityProbe> video_probe = {},
+        Clock::time_point committed_at = Clock::now(),
+        std::shared_ptr<LocalAudioActivityProbe> audio_probe = {});
+    bool EndLocalPublication(
+        std::string series_key,
+        Clock::time_point source_time = Clock::now());
+    bool RecordLocalVideoFrameInjected(
+        std::string series_key,
+        std::uint64_t room_generation,
+        std::uint64_t publication_epoch,
+        Clock::time_point source_time = Clock::now());
+    bool RecordRenderPipelineSample(
+        RenderPipelineSample sample,
+        Clock::time_point source_time = Clock::now());
     std::uint64_t ActiveRecoveryEpoch() const noexcept {
         return active_recovery_epoch_.load(std::memory_order_acquire);
     }
@@ -682,6 +1110,89 @@ private:
         bool time_stretch_initialized = false;
     };
 
+    struct NetworkStatsBaseline {
+        std::uint64_t bytes = 0;
+        std::uint64_t packets = 0;
+        std::int64_t packets_lost = 0;
+        std::uint64_t retransmitted_packets = 0;
+        std::uint64_t retransmitted_bytes = 0;
+        std::uint64_t fec_packets = 0;
+        std::uint64_t fec_bytes = 0;
+        std::uint64_t fec_discarded = 0;
+        std::uint64_t nack = 0;
+        std::uint64_t pli = 0;
+        std::uint64_t fir = 0;
+        std::uint32_t availability_mask = 0;
+        Clock::time_point observed_at{};
+        bool initialized = false;
+    };
+
+    struct RemoteRtcpBaseline {
+        double total_round_trip_time = 0.0;
+        std::uint64_t round_trip_time_measurements = 0;
+        bool initialized = false;
+    };
+
+    struct VideoQualityBaseline {
+        std::unordered_map<std::string, double> durations;
+        std::uint32_t resolution_changes = 0;
+        bool resolution_changes_available = false;
+        bool initialized = false;
+    };
+
+    struct VideoStatsBaseline {
+        std::uint64_t primary_frames = 0;
+        std::uint64_t secondary_frames = 0;
+        std::uint64_t dropped_frames = 0;
+        double processing_seconds = 0.0;
+        Clock::time_point observed_at{};
+        std::uint32_t availability_mask = 0;
+        bool initialized = false;
+    };
+
+    struct TransportBaseline {
+        std::string selected_pair_id;
+        std::uint32_t selected_pair_changes = 0;
+        std::uint64_t bytes_sent = 0;
+        std::uint64_t bytes_received = 0;
+        std::uint64_t packets_sent = 0;
+        std::uint64_t packets_received = 0;
+        std::uint32_t traffic_availability_mask = 0;
+        Clock::time_point observed_at{};
+        bool traffic_initialized = false;
+        bool initialized = false;
+        bool changes_available = false;
+    };
+
+    struct LocalPublicationState {
+        std::uint64_t room_generation = 0;
+        std::uint64_t publication_epoch = 0;
+        LocalMediaKind media_kind = LocalMediaKind::Unknown;
+        std::string rtc_track_id;
+        bool active = true;
+        bool expected_send = true;
+        bool was_expected = true;
+        bool sender_observed = false;
+        bool sender_enabled = true;
+        bool outbound_mapping_observed = false;
+        bool encode_counter_observed = false;
+        bool send_counter_observed = false;
+        bool injection_timeout = false;
+        bool encode_timeout = false;
+        bool send_timeout = false;
+        bool no_media_reported = false;
+        Clock::time_point publish_accepted_at{};
+        Clock::time_point committed_at{};
+        Clock::time_point first_injected_at{};
+        Clock::time_point first_encoded_at{};
+        Clock::time_point first_sent_at{};
+        std::shared_ptr<LocalVideoActivityProbe> video_probe;
+        std::shared_ptr<LocalAudioActivityProbe> audio_probe;
+        bool device_stall_active = false;
+        Clock::time_point device_stall_started_at{};
+        std::chrono::nanoseconds device_stall_accumulated{0};
+    };
+
     struct RecoveryTrackState {
         Clock::time_point last_good_at{};
         Clock::time_point first_recovered_at{};
@@ -726,9 +1237,18 @@ private:
     void UpdateAudioFirstFrameAvailabilityOnStrand();
     void ReconcileAudioQualityExpectationOnStrand(bool reset_window);
     void UpdateRenderAvailabilityOnStrand(Clock::time_point now);
+    void UpdateLocalPublishAvailabilityOnStrand(Clock::time_point now);
+    void UpdateLocalPublishStatsOnStrand(
+        const RoomStatsReport& report,
+        Clock::time_point received_at);
+    void CloseUsableIntervalOnStrand(Clock::time_point now);
     void UpdateVideoStatsOnStrand(
         const RoomStatsReport& report,
         Clock::time_point received_at);
+    void UpdateNetworkStatsOnStrand(
+        const RoomStatsReport& report,
+        Clock::time_point received_at);
+    void UpdateLocalDeviceStatsOnStrand(Clock::time_point now);
     void UpdateAudioStatsOnStrand(
         const RoomStatsReport& report,
         Clock::time_point received_at);
@@ -773,7 +1293,17 @@ private:
     std::map<std::string, MediaState> media_;
     std::map<std::string, AudioMediaState> audio_media_;
     std::map<std::string, RenderState> render_media_;
+    std::map<std::string, LocalPublicationState> local_publications_;
     std::map<std::string, AudioStatsBaseline> audio_stats_baselines_;
+    std::map<std::string, NetworkStatsBaseline> inbound_network_baselines_;
+    std::map<std::string, NetworkStatsBaseline> outbound_network_baselines_;
+    std::map<std::string, RemoteRtcpBaseline> remote_rtcp_baselines_;
+    std::map<std::string, VideoQualityBaseline> video_quality_baselines_;
+    std::map<std::string, VideoStatsBaseline> video_stats_baselines_;
+    std::map<std::string, TransportBaseline> transport_baselines_;
+    std::uint64_t retired_device_format_changes_ = 0;
+    std::uint64_t retired_device_clock_resets_ = 0;
+    std::chrono::nanoseconds retired_device_interruption_{0};
     RecoveryState recovery_;
     SnapshotCallback snapshot_callback_;
     SnapshotPtr latest_snapshot_;
@@ -796,6 +1326,11 @@ private:
     std::deque<ResourceTrendSample> resource_trend_;
     std::optional<ResourceTrendSample> resource_baseline_;
     Clock::time_point resource_observation_started_at_{};
+    Clock::time_point session_started_at_{};
+    Clock::time_point session_stopped_at_{};
+    Clock::time_point usable_since_{};
+    std::chrono::milliseconds usable_accumulated_{0};
+    bool room_was_usable_ = false;
     bool stopping_ = false;
     bool stop_finalized_ = false;
     std::vector<std::function<void()>> stop_callbacks_;
