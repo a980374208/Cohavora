@@ -1,4 +1,5 @@
 #include "src/ui/app_theme.h"
+#include "src/ui/app_branding.h"
 #include "src/ui/app_translation.h"
 #include "src/ui/meeting_list_model.h"
 #include "tests/support/test_check.h"
@@ -68,6 +69,9 @@ int main(int argc, char **argv) {
 	TEST_CHECK(QCoreApplication::translate("MeetingUI", "Join Meeting") == QString::fromUtf8("加入会议"));
 	TEST_CHECK(QCoreApplication::translate("MeetingUI", "Meeting telemetry") ==
 		QString::fromUtf8("会议遥测"));
+	app.setApplicationDisplayName(AppBranding::displayName());
+	TEST_CHECK(app.applicationDisplayName() ==
+		QString::fromUtf8("Cohavora · 开源音视频会议客户端"));
 	TEST_CHECK(QCoreApplication::translate("MeetingUI", "Visible render stall") ==
 		QString::fromUtf8("用户可见画面冻结"));
 	TEST_CHECK(QCoreApplication::translate("MeetingUI", "Capability boundaries") ==

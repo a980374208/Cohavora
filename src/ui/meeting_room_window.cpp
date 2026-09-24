@@ -272,6 +272,7 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 	auto *dialog = new QDialog(parent);
 	dialog->setObjectName(QStringLiteral("telemetryDetailsDialog"));
 	dialog->setAttribute(Qt::WA_DeleteOnClose);
+	AppTheme::configureModelessWindow(*dialog);
 	dialog->setWindowTitle(QCoreApplication::translate("MeetingUI", "Meeting telemetry"));
 	dialog->resize(900, 640);
 	dialog->setMinimumSize(680, 480);
@@ -758,7 +759,13 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 	for (auto it = snapshot.cbegin(); it != snapshot.cend(); ++it) {
 		if (it.value().type() == QVariant::List || it.value().type() == QVariant::Map) continue;
 		if (!IsSafeTelemetryDisplayEntry(it.key(), it.value())) continue;
-		AddTelemetryRow(all, {it.key(), TelemetryDisplayVariant(it.value())});
+		AddTelemetryRow(all, {
+			LocalizeTelemetryFieldName(it.key()),
+			TelemetryDisplayVariant(it.value())});
+		auto *field = all->item(all->rowCount() - 1, 0);
+		field->setData(Qt::UserRole, it.key());
+		field->setToolTip(QCoreApplication::translate(
+			"MeetingUI", "Internal field: %1").arg(it.key()));
 	}
 	all->setObjectName(QStringLiteral("telemetryAllMetrics"));
 	tabs->addTab(all, QCoreApplication::translate("MeetingUI", "All metrics"));
@@ -849,8 +856,6 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 	QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
 	layout->addWidget(buttons);
 	AppTheme::makeDialogAdaptive(*dialog, QSize(900, 640));
-	dialog->setModal(false);
-	dialog->setWindowModality(Qt::NonModal);
 	dialog->show();
 	dialog->raise();
 	dialog->activateWindow();

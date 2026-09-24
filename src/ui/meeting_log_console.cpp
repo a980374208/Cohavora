@@ -22,6 +22,7 @@ void LogToConsole(LogCategory cat, const QString &tag, const QString &msg) {
 
 MeetingLogConsoleWindow::MeetingLogConsoleWindow(QWidget *parent)
 	: QDialog(parent) {
+	AppTheme::configureModelessWindow(*this);
 	AppTheme::setTone(*this, AppTheme::Tone::Dark);
 	setWindowTitle(QCoreApplication::translate("MeetingUI", "Cohavora Console / Debug Logs"));
 	resize(780, 520);

@@ -276,6 +276,8 @@ target_include_directories(test_participant_window_remediation BEFORE PRIVATE
     ${WEBRTC_ROOT}/include/out-x64-release/gen/third_party/perfetto/build_config
 )
 livekit_configure_qt_test(test_participant_window_remediation)
+target_link_libraries(test_participant_window_remediation PRIVATE
+    cohavora_ui_translations)
 target_compile_definitions(test_participant_window_remediation PRIVATE IDA2_WINDOW_ACCEPTANCE)
 # Entry ownership and capture/publication source identity use synthetic media;
 # keep this regression in the default suite without enabling device/GPU tests.

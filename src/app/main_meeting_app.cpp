@@ -99,7 +99,6 @@ int main(int argc, char *argv[]) {
 	QApplication app(argc, argv);
 	app.setApplicationName(MeetingUI::AppBranding::name());
 	app.setApplicationVersion(QStringLiteral(COHAVORA_VERSION));
-	app.setApplicationDisplayName(MeetingUI::AppBranding::displayName());
 	const auto stabilityPath = QDir(
 		QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
 		.filePath(QStringLiteral("telemetry/stability-ledger-v1.json"));
@@ -127,6 +126,9 @@ int main(int argc, char *argv[]) {
 	app.setWindowIcon(QIcon(QStringLiteral(":/meeting-ui/icons/cohavora.svg")));
 	MeetingUI::AppTranslation::install(app,
 		MeetingUI::AppTranslation::startupLocale(app.arguments()));
+	// Windows appends this value to owned top-level window captions. Resolve it
+	// only after translators are installed so diagnostic titles stay localized.
+	app.setApplicationDisplayName(MeetingUI::AppBranding::displayName());
 	OpenMeeting::initializeServiceEndpointPolicy(
 		debugLogin.debugEnabled);
 

@@ -7,6 +7,7 @@
 #include <QtCore/QDateTime>
 #include <QtCore/QHash>
 #include <QtCore/QPointer>
+#include <QtCore/QRegularExpression>
 #include <QtCore/QSettings>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QApplication>
@@ -302,11 +303,112 @@ QString LocalizeTelemetryDisplayText(const QString &value) {
 	return found == translations.cend() ? value : *found;
 }
 
+QString LocalizeTelemetryFieldName(const QString &field) {
+	static const auto lexicon = [] {
+		QHash<QString, QString> result;
+		// Translators preserve the stable key before '=' and localize only the
+		// display fragment after it; acceptance tests cover every projected key.
+		const auto add = [&result](const QString &serialized) {
+			for (const auto &entry : serialized.split(QLatin1Char(';'), Qt::SkipEmptyParts)) {
+				const auto separator = entry.indexOf(QLatin1Char('='));
+				if (separator <= 0) continue;
+				result.insert(entry.left(separator), entry.mid(separator + 1));
+			}
+		};
+		add(QCoreApplication::translate("TelemetryFieldLexicon",
+			"ab=A/B;active=Active;actual=Actual;admission=Admission;age=Age;algorithm=Algorithm;"
+			"anomalies=Anomalies;anomaly=Anomaly;attached=Attached;attachments=Attachments;attempts=Attempts;"
+			"audio=Audio;availability=Availability;available=Available;average=Average;backend=Backend;"
+			"bandwidth=Bandwidth;binding=Binding;bindings=Bindings;bitrate=Bitrate;block=Block;bps=bps;"
+			"buckets=Buckets;buffer=Buffer;build=Build;bytes=Bytes;callback=Callback;callbacks=Callbacks;"
+			"camera=Camera;candidate=Candidate;capacity=Capacity;capture=Capture;chains=Chains;changes=Changes;"
+			"channels=Channels;clean=Clean;clock=Clock;codec=Codec;codecs=Codecs;complete=Complete;"
+			"completed=Completed;concealed=Concealed;concealment=Concealment;confirmed=Confirmed;connect=Connect;"
+			"connectivity=Connectivity;continuity=Continuity;conversion=Conversion;convert=Convert;corrupt=Corrupt;"
+			"cost=Cost;count=Count;counter=Counter;coverage=Coverage;cpu=CPU;crash=Crash;crashes=Crashes;"
+			"current=Current;decode=Decode;decoded=Decoded;decoder=Decoder;definition=Definition;delay=Delay;"
+			"delivered=Delivered;delta=Delta;denominator=Denominator;density=Density;depth=Depth;device=Device;"
+			"draw=Draw;drop=Drop;dropped=Dropped;drops=Drops"));
+		add(QCoreApplication::translate("TelemetryFieldLexicon",
+			"dtls=DTLS;duplicate=Duplicate;duration=Duration;effective=Effective;efficiency=Efficiency;enabled=Enabled;"
+			"encode=Encode;encoded=Encoded;encoder=Encoder;encodes=Encodes;episodes=Episodes;event=Event;events=Events;"
+			"execution=Execution;exits=Exits;expectation=Expectation;expected=Expected;export=Export;failure=Failure;"
+			"failures=Failures;fallback=Fallback;fallbacks=Fallbacks;fec=FEC;feedback=Feedback;final=Final;fir=FIR;"
+			"first=First;flight=Flight;format=Format;fps=FPS;fraction=Fraction;frame=Frame;frames=Frames;freeze=Freeze;"
+			"generation=Generation;gpu=GPU;growth=Growth;handle=Handle;height=Height;hidden=Hidden;high=High;"
+			"history=History;hotplug=Hotplug;hour=Hour;implementations=Implementations;in=In;inbound=Inbound;"
+			"incoming=Incoming;inflight=In flight;injection=Injection;injections=Injections;inputs=Inputs;"
+			"inserted=Inserted;internal=Internal;interruption=Interruption;interruptions=Interruptions;interval=Interval;"
+			"invalid=Invalid;jitter=Jitter;kind=Kind;lag=Lag;last=Last;late=Late;layers=Layers;ledger=Ledger;"
+			"limitation=Limitation;local=Local;logical=Logical;longest=Longest;loss=Loss;lost=Lost;mapping=Mapping;"
+			"max=Maximum;maximum=Maximum"));
+		add(QCoreApplication::translate("TelemetryFieldLexicon",
+			"measurement=Measurement;media=Media;memory=Memory;metric=Metric;mib=MiB;microphone=Microphone;"
+			"minimized=Minimized;minimum=Minimum;minute=Minute;mismatch=Mismatch;missing=Missing;ms=ms;nack=NACK;"
+			"native=Native;network=Network;no=No;non=Non;none=None;observed=Observed;of=Of;open=Open;"
+			"operation=Operation;operations=Operations;order=Order;other=Other;out=Out;outbound=Outbound;"
+			"outgoing=Outgoing;p=P;packet=Packet;packets=Packets;path=Path;pc=PC;pcm=PCM;peak=Peak;per=Per;"
+			"percent=Percent;pipeline=Pipeline;pli=PLI;point=Point;policy=Policy;power=Power;present=Present;"
+			"private=Private;probe=Probe;process=Process;processing=Processing;processor=Processor;product=Product;"
+			"protocols=Protocols;publication=Publication;publications=Publications;publish=Publish;qt=Qt;quality=Quality;"
+			"queue=Queue;rate=Rate;ratio=Ratio;reason=Reason;received=Received;reconnect=Reconnect;records=Records;"
+			"recovered=Recovered;recovery=Recovery;rejected=Rejected;rejections=Rejections;relay=Relay;remote=Remote;"
+			"removed=Removed;render=Render;replaced=Replaced;reports=Reports;request=Request;requested=Requested;"
+			"requests=Requests;resets=Resets;resolution=Resolution;resource=Resource;retransmission=Retransmission;"
+			"retransmit=Retransmit;retransmitted=Retransmitted;return=Return;revision=Revision;roles=Roles;room=Room;"
+			"router=Router;rtcp=RTCP;rtp=RTP;rtt=RTT;runs=Runs;sample=Sample;sampler=Sampler;samples=Samples;"
+			"schema=Schema;selected=Selected;send=Send;sends=Sends;sent=Sent;session=Session;sessions=Sessions;"
+			"set=Set;signaling=Signaling;silent=Silent;skipped=Skipped;slots=Slots;snapshot=Snapshot;span=Span;"
+			"stability=Stability;stable=Stable;stage=Stage;stale=Stale;stall=Stall;start=Start;started=Started;"
+			"state=State;states=States;stats=Stats;stopped=Stopped"));
+		add(QCoreApplication::translate("TelemetryFieldLexicon",
+			"stops=Stops;storage=Storage;strand=Strand;streams=Streams;stretch=Stretch;submit=Submit;submits=Submits;"
+			"submitted=Submitted;subscribe=Subscribe;subscription=Subscription;subscriptions=Subscriptions;"
+			"successes=Successes;successful=Successful;summaries=Summaries;switch=Switch;switches=Switches;"
+			"target=Target;tcp=TCP;telemetry=Telemetry;terminal=Terminal;terminals=Terminals;termination=Termination;"
+			"terminations=Terminations;thread=Thread;time=Time;timeouts=Timeouts;to=To;total=Total;track=Track;"
+			"traffic=Traffic;transport=Transport;transports=Transports;trend=Trend;types=Types;ui=UI;"
+			"unavailable=Unavailable;uncertainty=Uncertainty;unexpected=Unexpected;unique=Unique;unknown=Unknown;"
+			"upload=Upload;us=us;usable=Usable;valid=Valid;version=Version;video=Video;wait=Wait;water=Water;"
+			"width=Width;window=Window;working=Working;write=Write"));
+		return result;
+	}();
+	static const QRegularExpression tokenPattern(QStringLiteral(
+		"[A-Z]+(?=[A-Z][a-z]|[0-9]|$)|[A-Z]?[a-z]+|[0-9]+"));
+	QStringList words;
+	const auto localized = lexicon.value(QStringLiteral("active")) !=
+		QStringLiteral("Active");
+	auto matches = tokenPattern.globalMatch(field);
+	while (matches.hasNext()) {
+		const auto token = matches.next().captured();
+		if (token.front().isDigit()) {
+			words.push_back(token);
+			continue;
+		}
+		const auto key = token.toCaseFolded();
+		const auto found = lexicon.constFind(key);
+		if (found == lexicon.cend()) {
+			words.push_back(QCoreApplication::translate(
+				"TelemetryFieldLexicon", "Other"));
+			continue;
+		}
+		words.push_back(*found);
+	}
+	if (words.isEmpty()) {
+		return QCoreApplication::translate("TelemetryFieldLexicon", "Other");
+	}
+	if (localized) return words.join(QString());
+	auto result = words.join(QLatin1Char(' '));
+	result[0] = result[0].toUpper();
+	return result;
+}
+
 QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 	const auto store = livekit::telemetry::InstalledTelemetryHistoryStore();
 	auto *dialog = new QDialog(parent);
 	dialog->setObjectName(QStringLiteral("telemetryPostMeetingDialog"));
 	dialog->setAttribute(Qt::WA_DeleteOnClose);
+	AppTheme::configureModelessWindow(*dialog);
 	dialog->setWindowTitle(QCoreApplication::translate(
 		"MeetingUI", "Telemetry reports on this device"));
 	dialog->resize(760, 560);
@@ -498,7 +600,9 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 		}
 	});
 	AppTheme::makeDialogAdaptive(*dialog, QSize(760, 560));
-	dialog->open();
+	dialog->show();
+	dialog->raise();
+	dialog->activateWindow();
 	return dialog;
 }
 

@@ -9,7 +9,10 @@
 #include "src/rtc/webrtc_manager.h"
 #include "src/render/owned_i420_frame.h"
 #include "src/ui/meeting_room_window.h"
+#include "src/ui/meeting_log_console.h"
 #include "src/ui/telemetry_dialogs.h"
+#include "src/ui/app_branding.h"
+#include "src/ui/app_translation.h"
 #include "src/ui/whiteboard/annotation_overlay_window.h"
 #include "src/ui/whiteboard/whiteboard_panel.h"
 #include "src/ui/app_theme.h"
@@ -765,8 +768,13 @@ public:
         QPointer<QDialog> details(
             MeetingUI::OpenTelemetryDetailsDialog(nullptr, projection));
         TEST_CHECK(details);
+        TEST_CHECK(details->windowTitle() == QString::fromUtf8("会议遥测"));
         TEST_CHECK(!details->isModal());
         TEST_CHECK(details->windowModality() == Qt::NonModal);
+        TEST_CHECK((details->windowFlags() & Qt::WindowType_Mask) == Qt::Window);
+        TEST_CHECK(details->windowFlags().testFlag(Qt::WindowTitleHint));
+        TEST_CHECK(details->windowFlags().testFlag(Qt::WindowSystemMenuHint));
+        TEST_CHECK(!details->windowFlags().testFlag(Qt::FramelessWindowHint));
         details->resize(680, 480);
         details->show();
         details->raise();
@@ -779,12 +787,15 @@ public:
         auto *tabs = details->findChild<QTabWidget*>(QStringLiteral("telemetryTabs"));
         TEST_CHECK(tabs && tabs->count() == 9);
         const QStringList expectedTabs = {
-            QStringLiteral("Overview"), QStringLiteral("Media QoE"),
-            QStringLiteral("Network and devices"),
-            QStringLiteral("Operations"), QStringLiteral("Capability boundaries"),
-            QStringLiteral("Resources"),
-            QStringLiteral("Timeline"), QStringLiteral("All metrics"),
-            QStringLiteral("Reports")};
+            QCoreApplication::translate("MeetingUI", "Overview"),
+            QCoreApplication::translate("MeetingUI", "Media QoE"),
+            QCoreApplication::translate("MeetingUI", "Network and devices"),
+            QCoreApplication::translate("MeetingUI", "Operations"),
+            QCoreApplication::translate("MeetingUI", "Capability boundaries"),
+            QCoreApplication::translate("MeetingUI", "Resources"),
+            QCoreApplication::translate("MeetingUI", "Timeline"),
+            QCoreApplication::translate("MeetingUI", "All metrics"),
+            QCoreApplication::translate("MeetingUI", "Reports")};
         TEST_CHECK([&] {
             for (const auto &title : expectedTabs) {
                 bool found = false;
@@ -824,7 +835,32 @@ public:
         TEST_CHECK(productChainText.contains(QStringLiteral("SES-03")));
         TEST_CHECK(productChainText.contains(MeetingUI::LocalizeTelemetryDisplayText(
             QStringLiteral("IMPLEMENTED_DETERMINISTIC"))));
-        TEST_CHECK(allText.contains(QStringLiteral("operationsInflight\n0\n")));
+        TEST_CHECK(allText.contains(
+            MeetingUI::LocalizeTelemetryFieldName(QStringLiteral("operationsInflight")) +
+            QStringLiteral("\n0\n")));
+        TEST_CHECK(!allText.contains(QStringLiteral("operationsInflight")));
+        TEST_CHECK(MeetingUI::LocalizeTelemetryFieldName(
+            QStringLiteral("activeLocalMediaStreams")) ==
+            QString::fromUtf8("活跃本地媒体流数"));
+        TEST_CHECK(MeetingUI::LocalizeTelemetryFieldName(
+            QStringLiteral("actualCaptureHeight")) ==
+            QString::fromUtf8("实际采集高度"));
+        TEST_CHECK(MeetingUI::LocalizeTelemetryFieldName(
+            QStringLiteral("admissionToUsableAvailability")) ==
+            QString::fromUtf8("准入至可用状态"));
+        TEST_CHECK(MeetingUI::LocalizeTelemetryFieldName(
+            QStringLiteral("audioConcealedRatio")) ==
+            QString::fromUtf8("音频丢包补偿比例"));
+        for (auto row = 0; row != allMetrics->rowCount(); ++row) {
+            const auto *field = allMetrics->item(row, 0);
+            TEST_CHECK(field != nullptr);
+            const auto internalName = field->data(Qt::UserRole).toString();
+            TEST_CHECK(!internalName.isEmpty());
+            TEST_CHECK(field->text() ==
+                MeetingUI::LocalizeTelemetryFieldName(internalName));
+            TEST_CHECK(field->text() != internalName);
+            TEST_CHECK(field->toolTip().contains(internalName));
+        }
         TEST_CHECK(!allText.contains(QStringLiteral("secret.invalid")));
         TEST_CHECK(!allText.contains(QStringLiteral("token-s7-secret")));
         TEST_CHECK(!allText.contains(QStringLiteral("candidate:s7-secret")));
@@ -863,6 +899,12 @@ public:
 
         QPointer<QDialog> post(MeetingUI::OpenPostMeetingTelemetryDialog(nullptr));
         TEST_CHECK(post);
+        TEST_CHECK(post->windowTitle() == QString::fromUtf8("本机遥测报告"));
+        TEST_CHECK(!post->isModal());
+        TEST_CHECK(post->windowModality() == Qt::NonModal);
+        TEST_CHECK((post->windowFlags() & Qt::WindowType_Mask) == Qt::Window);
+        TEST_CHECK(post->windowFlags().testFlag(Qt::WindowTitleHint));
+        TEST_CHECK(!post->windowFlags().testFlag(Qt::FramelessWindowHint));
         post->resize(620, 440);
         post->show();
         post->raise();
@@ -878,7 +920,8 @@ public:
         auto *postButtons = post->findChild<QDialogButtonBox*>(QStringLiteral("telemetryPostButtons"));
         TEST_CHECK(summary && historyEnabled && reports && exportButton && clearButton && postButtons);
         TEST_CHECK(tableText(*summary).contains(QStringLiteral("31 ms / 47 ms")));
-        TEST_CHECK(tableText(*summary).contains(QStringLiteral("COMPLETE")));
+        TEST_CHECK(tableText(*summary).contains(
+            MeetingUI::LocalizeTelemetryDisplayText(QStringLiteral("COMPLETE"))));
         TEST_CHECK(historyEnabled->isChecked() && reports->count() == 1);
         TEST_CHECK(exportButton->isVisible() && exportButton->height() >= 24);
         TEST_CHECK(clearButton->isVisible() && clearButton->height() >= 24);
@@ -897,6 +940,16 @@ public:
         QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
         QApplication::processEvents();
         TEST_CHECK(!post);
+
+        auto &console = MeetingUI::MeetingLogConsoleWindow::Instance();
+        TEST_CHECK(!console.isModal());
+        TEST_CHECK(console.windowModality() == Qt::NonModal);
+        TEST_CHECK((console.windowFlags() & Qt::WindowType_Mask) == Qt::Window);
+        TEST_CHECK(console.windowFlags().testFlag(Qt::WindowTitleHint));
+        TEST_CHECK(!console.windowFlags().testFlag(Qt::FramelessWindowHint));
+        TEST_CHECK(console.windowTitle() ==
+            QString::fromUtf8("Cohavora 实时控制台 / 调试日志"));
+        console.hide();
 
         livekit::telemetry::InstallTelemetryHistoryStore({});
         store.reset();
@@ -4987,6 +5040,10 @@ int WindowAcceptanceMain(int argc, char **argv) {
     if (application.arguments().contains("--moderation-contract")) {
         MeetingModerationContract();
     } else if (application.arguments().contains("--telemetry-s7-acceptance")) {
+        MeetingUI::AppTranslation::install(application, QLocale(QStringLiteral("zh_CN")));
+        application.setApplicationDisplayName(MeetingUI::AppBranding::displayName());
+        TEST_CHECK(application.applicationDisplayName() ==
+            QString::fromUtf8("Cohavora · 开源音视频会议客户端"));
         MeetingUI::AppTheme::install(application);
         ParticipantWindowTestAccess::checkTelemetryS7Acceptance();
     } else if (application.arguments().contains("--telemetry-ui")) {

@@ -9,6 +9,7 @@ class QWidget;
 namespace MeetingUI {
 
 QString LocalizeTelemetryDisplayText(const QString &value);
+QString LocalizeTelemetryFieldName(const QString &field);
 QDialog *OpenTelemetryDetailsDialog(
 	QWidget *parent,
 	const QVariantMap &snapshot);
