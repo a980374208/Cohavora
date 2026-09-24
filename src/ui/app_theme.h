@@ -34,6 +34,9 @@ void setTone(QWidget &widget, Tone tone);
 void styleChoiceControls(QWidget &widget, Tone tone);
 void styleMenu(QMenu &menu, Tone tone);
 void centerOnScreen(QWidget &window);
+// Use a real top-level window so modeless diagnostic surfaces keep the native
+// movable title bar even when they have an owning meeting window.
+void configureModelessWindow(QDialog &dialog);
 // Grow to the content on opening; retain scrolling when it exceeds the screen.
 void makeDialogAdaptive(QDialog &dialog, QSize preferredSize);
 

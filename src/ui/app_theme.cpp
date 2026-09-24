@@ -311,6 +311,17 @@ protected:
 
 } // namespace
 
+void configureModelessWindow(QDialog &dialog) {
+	dialog.setWindowFlags(
+		Qt::Window
+		| Qt::WindowTitleHint
+		| Qt::WindowSystemMenuHint
+		| Qt::WindowMinMaxButtonsHint
+		| Qt::WindowCloseButtonHint);
+	dialog.setModal(false);
+	dialog.setWindowModality(Qt::NonModal);
+}
+
 void makeDialogAdaptive(QDialog &dialog, QSize preferredSize) {
 	if (!dialog.layout() || dialog.property("meetingUiAdaptive").toBool()) return;
 	dialog.setProperty("meetingUiAdaptive", true);
