@@ -622,6 +622,7 @@ public:
     static void checkTelemetryS7Acceptance() {
         using livekit::telemetry::Availability;
         using livekit::telemetry::OperationKind;
+        using livekit::telemetry::ProductChainStatus;
 
         QTemporaryDir historyDirectory;
         TEST_CHECK(historyDirectory.isValid());
@@ -658,6 +659,9 @@ public:
         native->operations_inflight = 0;
         native->operation_summaries.push_back({
             OperationKind::Subscribe, 1, 1, 1, 0, 0, 0, 0, 0, 18});
+        native->metric_product_chains.push_back({
+            "SES-03", ProductChainStatus::Implemented,
+            "admission_to_startup_terminal_chain_implemented"});
         native->remote_video_first_frame_availability = Availability::Valid;
         native->remote_video_first_frame_reason = "decoded_frame_received";
         native->remote_video_first_frame_measurement_point =
@@ -773,10 +777,11 @@ public:
         TEST_CHECK(details->devicePixelRatioF() + 0.01 >= expectedScale);
 
         auto *tabs = details->findChild<QTabWidget*>(QStringLiteral("telemetryTabs"));
-        TEST_CHECK(tabs && tabs->count() == 7);
+        TEST_CHECK(tabs && tabs->count() == 8);
         const QStringList expectedTabs = {
             QStringLiteral("Overview"), QStringLiteral("Media QoE"),
-            QStringLiteral("Operations"), QStringLiteral("Resources"),
+            QStringLiteral("Operations"), QStringLiteral("Capability boundaries"),
+            QStringLiteral("Resources"),
             QStringLiteral("Timeline"), QStringLiteral("All metrics"),
             QStringLiteral("Reports")};
         TEST_CHECK([&] {
@@ -800,16 +805,24 @@ public:
         }
 
         auto *overview = details->findChild<QTableWidget*>(QStringLiteral("telemetryOverview"));
+        auto *productChains = details->findChild<QTableWidget*>(
+            QStringLiteral("telemetryProductChains"));
         auto *allMetrics = details->findChild<QTableWidget*>(QStringLiteral("telemetryAllMetrics"));
         auto *timeline = details->findChild<QTableWidget*>(QStringLiteral("telemetryTimeline"));
         auto *trend = details->findChild<QWidget*>(QStringLiteral("telemetryTrend"));
-        TEST_CHECK(overview && allMetrics && timeline && trend);
+        TEST_CHECK(overview && productChains && allMetrics && timeline && trend);
         const auto overviewText = tableText(*overview);
+        const auto productChainText = tableText(*productChains);
         const auto allText = tableText(*allMetrics);
         TEST_CHECK(overviewText.contains(QStringLiteral("31 ms")));
         TEST_CHECK(overviewText.contains(QStringLiteral("47 ms")));
         TEST_CHECK(overviewText.contains(QStringLiteral("--")));
         TEST_CHECK(overviewText.contains(QString(80, QLatin1Char('r'))));
+        TEST_CHECK(productChains->columnCount() == 3);
+        TEST_CHECK(productChains->rowCount() == 1);
+        TEST_CHECK(productChainText.contains(QStringLiteral("SES-03")));
+        TEST_CHECK(productChainText.contains(MeetingUI::LocalizeTelemetryDisplayText(
+            QStringLiteral("IMPLEMENTED_DETERMINISTIC"))));
         TEST_CHECK(allText.contains(QStringLiteral("operationsInflight\n0\n")));
         TEST_CHECK(!allText.contains(QStringLiteral("secret.invalid")));
         TEST_CHECK(!allText.contains(QStringLiteral("token-s7-secret")));

@@ -63,6 +63,13 @@ QVariantMap ProjectTelemetrySnapshot(
                   QString::fromStdString(
                       snapshot.usable_duration_measurement_point));
     result.insert(QStringLiteral("usableDurationMs"), snapshot.usable_duration_ms);
+    result.insert(QStringLiteral("admissionToUsableAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.admission_to_usable_availability)));
+    result.insert(QStringLiteral("admissionToUsableReason"),
+                  QString::fromStdString(snapshot.admission_to_usable_reason));
+    result.insert(QStringLiteral("admissionToUsableMs"),
+                  snapshot.admission_to_usable_ms);
     result.insert(QStringLiteral("queueCapacity"),
                   QVariant::fromValue<qulonglong>(snapshot.queue_capacity));
     result.insert(QStringLiteral("queueDepth"),
@@ -402,6 +409,20 @@ QVariantMap ProjectTelemetrySnapshot(
         operationSummaries.push_back(std::move(item));
     }
     result.insert(QStringLiteral("operationSummaries"), operationSummaries);
+    QVariantList productChains;
+    productChains.reserve(
+        static_cast<qsizetype>(snapshot.metric_product_chains.size()));
+    for (const auto &capability : snapshot.metric_product_chains) {
+        QVariantMap item;
+        item.insert(QStringLiteral("metricId"),
+                    QString::fromStdString(capability.metric_id));
+        item.insert(QStringLiteral("status"), QString::fromLatin1(
+            livekit::telemetry::ProductChainStatusName(capability.status)));
+        item.insert(QStringLiteral("reason"),
+                    QString::fromStdString(capability.reason));
+        productChains.push_back(std::move(item));
+    }
+    result.insert(QStringLiteral("metricProductChains"), productChains);
     result.insert(QStringLiteral("localPublishMediaAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.local_publish_media_availability)));
@@ -457,6 +478,22 @@ QVariantMap ProjectTelemetrySnapshot(
                   snapshot.last_publish_to_rtp_send_ms);
     result.insert(QStringLiteral("localPublishStatsUncertaintyMs"),
                   snapshot.local_publish_stats_uncertainty_ms);
+    result.insert(QStringLiteral("subscriptionMediaAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.subscription_media_availability)));
+    result.insert(QStringLiteral("subscriptionMediaReason"),
+                  QString::fromStdString(snapshot.subscription_media_reason));
+    result.insert(QStringLiteral("expectedRemoteSubscriptions"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.expected_remote_subscriptions));
+    result.insert(QStringLiteral("deliveredRemoteSubscriptions"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.delivered_remote_subscriptions));
+    result.insert(QStringLiteral("remoteSubscriptionNoMedia"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.remote_subscription_no_media));
+    result.insert(QStringLiteral("longestSubscriptionMediaWaitMs"),
+                  snapshot.longest_subscription_media_wait_ms);
     result.insert(QStringLiteral("inboundRtpTrafficAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.inbound_rtp_traffic_availability)));
@@ -926,6 +963,8 @@ QVariantMap ProjectTelemetrySnapshot(
                   snapshot.last_subscribe_to_first_render_ms);
     result.insert(QStringLiteral("lastConnectToFirstRenderMs"),
                   snapshot.last_connect_to_first_render_ms);
+    result.insert(QStringLiteral("lastAdmissionToFirstRenderMs"),
+                  snapshot.last_admission_to_first_render_ms);
     result.insert(QStringLiteral("renderAverageIntervalMs"),
                   snapshot.render_average_interval_ms);
     result.insert(QStringLiteral("renderMaximumIntervalMs"),
@@ -1049,6 +1088,38 @@ QVariantMap ProjectTelemetrySnapshot(
                   snapshot.last_reconnect_stable_render_ms);
     result.insert(QStringLiteral("lastReconnectRenderInterruptionMs"),
                   snapshot.last_reconnect_render_interruption_ms);
+    result.insert(QStringLiteral("reconnectDensityAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.reconnect_density_availability)));
+    result.insert(QStringLiteral("reconnectDensityReason"),
+                  QString::fromStdString(snapshot.reconnect_density_reason));
+    result.insert(QStringLiteral("reconnectEpisodes"),
+                  QVariant::fromValue<qulonglong>(snapshot.reconnect_episodes));
+    result.insert(QStringLiteral("reconnectEpisodesPerHour"),
+                  snapshot.reconnect_episodes_per_hour);
+    result.insert(QStringLiteral("stabilityAnomalyDensityAvailability"),
+                  QString::fromLatin1(livekit::telemetry::AvailabilityName(
+                      snapshot.stability_anomaly_density_availability)));
+    result.insert(QStringLiteral("stabilityAnomalyDensityReason"),
+                  QString::fromStdString(
+                      snapshot.stability_anomaly_density_reason));
+    result.insert(QStringLiteral("stabilityAnomalyDensityAlgorithm"),
+                  QString::fromStdString(
+                      snapshot.stability_anomaly_density_algorithm));
+    result.insert(QStringLiteral("stabilityOperationFailures"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.stability_operation_failures));
+    result.insert(QStringLiteral("stabilitySamplerInterruptions"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.stability_sampler_interruptions));
+    result.insert(QStringLiteral("stabilityDeviceStops"),
+                  QVariant::fromValue<qulonglong>(snapshot.stability_device_stops));
+    result.insert(QStringLiteral("stabilityMediaFailures"),
+                  QVariant::fromValue<qulonglong>(snapshot.stability_media_failures));
+    result.insert(QStringLiteral("stabilityAnomalies"),
+                  QVariant::fromValue<qulonglong>(snapshot.stability_anomalies));
+    result.insert(QStringLiteral("stabilityAnomaliesPerHour"),
+                  snapshot.stability_anomalies_per_hour);
     if (const auto store = livekit::telemetry::InstalledTelemetryHistoryStore()) {
         const auto status = store->Status();
         result.insert(QStringLiteral("telemetryStorageAvailability"),

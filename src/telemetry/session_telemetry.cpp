@@ -140,6 +140,81 @@ void SaturatingAddUnsigned(T& target, T value) {
     target = value > limit - target ? limit : target + value;
 }
 
+const std::vector<MetricProductChainStatus>& FifthBatchProductChains() {
+    static const std::vector<MetricProductChainStatus> entries{
+        {"SES-03", ProductChainStatus::Implemented,
+         "admission_to_startup_terminal_chain_implemented"},
+        {"PUB-04", ProductChainStatus::Implemented,
+         "subscription_first_media_observation_window_implemented"},
+        {"FF-07", ProductChainStatus::Implemented,
+         "admission_connect_subscription_to_render_chain_implemented"},
+        {"REC-01", ProductChainStatus::Implemented,
+         "reconnect_episode_density_implemented"},
+        {"STB-05", ProductChainStatus::Implemented,
+         "typed_anomaly_density_implemented"},
+
+        {"SES-02", ProductChainStatus::Partial,
+         "fine_grained_session_stages_not_instrumented"},
+        {"SES-06", ProductChainStatus::Partial,
+         "typed_operation_failure_reason_not_exposed"},
+        {"PUB-06", ProductChainStatus::Partial,
+         "remote_control_ack_not_exposed"},
+        {"REC-03", ProductChainStatus::Partial,
+         "recovery_transport_subscription_share_stages_not_exposed"},
+        {"REC-06", ProductChainStatus::Partial,
+         "typed_reconnect_strategy_not_exposed"},
+        {"AUD-04", ProductChainStatus::Partial,
+         "audio_cadence_provider_partial"},
+        {"AUD-05", ProductChainStatus::Partial,
+         "audio_device_underrun_provider_not_exposed"},
+        {"AUD-06", ProductChainStatus::Partial,
+         "audio_level_clipping_provider_not_exposed"},
+        {"AUD-07", ProductChainStatus::Partial,
+         "apm_effective_state_provider_not_exposed"},
+        {"AUD-08", ProductChainStatus::Partial,
+         "playout_delay_provider_not_exposed"},
+        {"DEV-04", ProductChainStatus::Partial,
+         "native_device_failure_category_not_exposed"},
+        {"DEV-05", ProductChainStatus::Partial,
+         "device_selection_category_not_projected"},
+        {"RES-05", ProductChainStatus::Partial,
+         "history_export_queue_depth_not_exposed"},
+        {"RES-06", ProductChainStatus::Partial,
+         "post_stop_sampler_not_owned_after_session_teardown"},
+        {"MET-05", ProductChainStatus::Partial,
+         "controlled_enabled_disabled_run_not_executed"},
+
+        {"FF-06", ProductChainStatus::Unsupported,
+         "native_device_open_milestone_not_exposed"},
+        {"DEV-01", ProductChainStatus::Unsupported,
+         "native_device_open_milestone_not_exposed"},
+        {"DEV-03", ProductChainStatus::Unsupported,
+         "os_device_change_provider_not_installed"},
+        {"RES-02", ProductChainStatus::Unsupported,
+         "process_gpu_provider_not_configured"},
+        {"STB-01", ProductChainStatus::Unsupported,
+         "crash_evidence_provider_not_configured"},
+        {"STB-03", ProductChainStatus::Unsupported,
+         "independent_process_watchdog_not_installed"},
+
+        {"E2E-01", ProductChainStatus::ControlledHarnessOnly,
+         "controlled_peer_harness_only"},
+        {"E2E-02", ProductChainStatus::ControlledHarnessOnly,
+         "controlled_peer_harness_only"},
+        {"E2E-03", ProductChainStatus::ControlledHarnessOnly,
+         "controlled_peer_harness_only"},
+        {"E2E-07", ProductChainStatus::ControlledHarnessOnly,
+         "controlled_peer_harness_only"},
+        {"E2E-04", ProductChainStatus::DeferredExternal,
+         "external_optical_environment_required"},
+        {"E2E-05", ProductChainStatus::DeferredExternal,
+         "external_acoustic_environment_required"},
+        {"E2E-06", ProductChainStatus::DeferredExternal,
+         "external_av_sync_environment_required"},
+    };
+    return entries;
+}
+
 } // namespace
 
 const char* AvailabilityName(Availability availability) noexcept {
@@ -187,6 +262,17 @@ const char* OperationOutcomeName(OperationOutcome outcome) noexcept {
     case OperationOutcome::None: return "none";
     }
     return "none";
+}
+
+const char* ProductChainStatusName(ProductChainStatus status) noexcept {
+    switch (status) {
+    case ProductChainStatus::Implemented: return "IMPLEMENTED_DETERMINISTIC";
+    case ProductChainStatus::Partial: return "PARTIAL_PRODUCT_CHAIN";
+    case ProductChainStatus::Unsupported: return "UNSUPPORTED_CURRENT_PROVIDER";
+    case ProductChainStatus::ControlledHarnessOnly: return "CONTROLLED_HARNESS_ONLY";
+    case ProductChainStatus::DeferredExternal: return "DEFERRED_EXTERNAL";
+    }
+    return "PARTIAL_PRODUCT_CHAIN";
 }
 
 const char* MediaExpectationReasonName(MediaExpectationReason reason) noexcept {
@@ -1224,6 +1310,13 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         }
         ++summary->started;
         ++summary->inflight;
+        if (event.operation_kind == OperationKind::Admission) {
+            latest_admission_accepted_at_ = event.source_time;
+            state_.admission_to_usable_availability = Availability::WarmingUp;
+            state_.admission_to_usable_reason = "waiting_for_startup_terminal";
+            state_.admission_to_usable_ms = -1;
+            state_.last_admission_to_first_render_ms = -1;
+        }
         if (event.operation_kind == OperationKind::ReconnectEpisode ||
             event.operation_kind == OperationKind::Disconnect) {
             CloseUsableIntervalOnStrand(event.source_time);
@@ -1578,6 +1671,7 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         }
         if (!media->second.first_frame_seen) {
             media->second.first_frame_seen = true;
+            media->second.first_frame_at = event.source_time;
             ++state_.remote_audio_first_frames;
             state_.last_audio_sample_rate = event.sample_rate;
             state_.last_audio_channels = event.channels;
@@ -1714,6 +1808,11 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
                 event.source_time >= connect->second) {
                 state_.last_connect_to_first_render_ms = MillisecondsBetween(
                     connect->second, event.source_time);
+            }
+            if (latest_admission_accepted_at_ != Clock::time_point{} &&
+                event.source_time >= latest_admission_accepted_at_) {
+                state_.last_admission_to_first_render_ms = MillisecondsBetween(
+                    latest_admission_accepted_at_, event.source_time);
             }
         }
         if (!recovery_.active || event.recovery_epoch == 0 ||
@@ -1946,6 +2045,32 @@ void SessionTelemetry::FinishOperationOnStrand(
     }
     summary->last_duration_ms = MillisecondsBetween(
         operation.started_at, finished_at);
+    if (operation.kind == OperationKind::Startup) {
+        if ((operation.outcome == OperationOutcome::Success ||
+             operation.outcome == OperationOutcome::DegradedSuccess) &&
+            latest_admission_accepted_at_ != Clock::time_point{} &&
+            finished_at >= latest_admission_accepted_at_) {
+            state_.admission_to_usable_availability = Availability::Valid;
+            state_.admission_to_usable_reason = operation.outcome ==
+                    OperationOutcome::DegradedSuccess
+                ? "admission_to_degraded_startup_terminal_valid"
+                : "admission_to_startup_terminal_valid";
+            state_.admission_to_usable_ms = MillisecondsBetween(
+                latest_admission_accepted_at_, finished_at);
+        } else if (operation.outcome == OperationOutcome::Timeout) {
+            state_.admission_to_usable_availability = Availability::Timeout;
+            state_.admission_to_usable_reason = "startup_terminal_timeout";
+            state_.admission_to_usable_ms = -1;
+        } else if (operation.outcome == OperationOutcome::Failure) {
+            state_.admission_to_usable_availability = Availability::Invalid;
+            state_.admission_to_usable_reason = "startup_terminal_failure";
+            state_.admission_to_usable_ms = -1;
+        } else if (operation.outcome == OperationOutcome::Cancelled) {
+            state_.admission_to_usable_availability = Availability::NotExpected;
+            state_.admission_to_usable_reason = "startup_cancelled";
+            state_.admission_to_usable_ms = -1;
+        }
+    }
     if ((operation.kind == OperationKind::Connect ||
          operation.kind == OperationKind::ReconnectEpisode) &&
         (operation.outcome == OperationOutcome::Success ||
@@ -4928,6 +5053,7 @@ Snapshot SessionTelemetry::BuildSnapshotOnStrand(Clock::time_point now) const {
             ? "room_never_became_usable" : "waiting_for_connect_success";
         snapshot.usable_duration_ms = -1;
     }
+    snapshot.metric_product_chains = FifthBatchProductChains();
     {
         std::lock_guard lock(queue_mutex_);
         snapshot.queue_depth = queue_.size();
@@ -4954,6 +5080,120 @@ Snapshot SessionTelemetry::BuildSnapshotOnStrand(Clock::time_point now) const {
             return item.second.probe &&
                 item.second.probe->active.load(std::memory_order_acquire);
         }));
+    bool subscription_origin_missing = false;
+    const auto observe_subscription = [&](bool expected, bool delivered,
+                                          Clock::time_point accepted_at,
+                                          Clock::time_point delivered_at) {
+        if (!expected) return;
+        ++snapshot.expected_remote_subscriptions;
+        if (accepted_at == Clock::time_point{} || now < accepted_at) {
+            subscription_origin_missing = true;
+            return;
+        }
+        if (delivered && delivered_at != Clock::time_point{} &&
+            delivered_at >= accepted_at) {
+            ++snapshot.delivered_remote_subscriptions;
+        } else if (delivered) {
+            subscription_origin_missing = true;
+            return;
+        }
+        const auto wait_end = delivered ? delivered_at : now;
+        const auto wait_ms = MillisecondsBetween(accepted_at, wait_end);
+        snapshot.longest_subscription_media_wait_ms = (std::max)(
+            snapshot.longest_subscription_media_wait_ms, wait_ms);
+        if (!delivered && now - accepted_at >= kSubscriptionMediaObservationWindow) {
+            ++snapshot.remote_subscription_no_media;
+        }
+    };
+    for (const auto& [_, media] : media_) {
+        observe_subscription(media.expected_receive, media.first_frame_seen,
+                             media.subscription_accepted, media.first_frame_at);
+    }
+    for (const auto& [_, media] : audio_media_) {
+        observe_subscription(media.expected_receive, media.first_frame_seen,
+                             media.subscription_accepted, media.first_frame_at);
+    }
+    if (snapshot.expected_remote_subscriptions == 0) {
+        snapshot.subscription_media_availability =
+            media_.empty() && audio_media_.empty()
+            ? Availability::Unknown : Availability::NotExpected;
+        snapshot.subscription_media_reason = media_.empty() && audio_media_.empty()
+            ? "no_remote_media_binding" : "no_remote_media_expected";
+    } else if (snapshot.delivered_remote_subscriptions ==
+               snapshot.expected_remote_subscriptions) {
+        snapshot.subscription_media_availability = Availability::Valid;
+        snapshot.subscription_media_reason =
+            "all_expected_subscriptions_delivered_media";
+    } else if (snapshot.remote_subscription_no_media > 0) {
+        snapshot.subscription_media_availability = Availability::Timeout;
+        snapshot.subscription_media_reason =
+            "expected_subscription_media_timeout";
+    } else if (subscription_origin_missing) {
+        snapshot.subscription_media_availability = Availability::Unknown;
+        snapshot.subscription_media_reason =
+            "subscription_observation_origin_missing";
+    } else {
+        snapshot.subscription_media_availability = Availability::WarmingUp;
+        snapshot.subscription_media_reason =
+            "waiting_for_expected_subscription_media";
+    }
+
+    for (const auto& summary : snapshot.operation_summaries) {
+        if (summary.kind == OperationKind::ReconnectEpisode) {
+            snapshot.reconnect_episodes = summary.started;
+            SaturatingAddUnsigned(snapshot.stability_operation_failures,
+                summary.failure);
+            continue;
+        }
+        SaturatingAddUnsigned(snapshot.stability_operation_failures,
+            summary.failure);
+        SaturatingAddUnsigned(snapshot.stability_operation_failures,
+            summary.timeout);
+    }
+    SaturatingAddUnsigned(snapshot.stability_sampler_interruptions,
+        snapshot.stats_request_timeouts);
+    SaturatingAddUnsigned(snapshot.stability_sampler_interruptions,
+        snapshot.stats_request_rejections);
+    SaturatingAddUnsigned(snapshot.stability_sampler_interruptions,
+        snapshot.resource_sample_failures);
+    snapshot.stability_device_stops = snapshot.local_device_unexpected_stops;
+    SaturatingAddUnsigned(snapshot.stability_media_failures,
+        snapshot.reconnect_media_timeouts);
+    SaturatingAddUnsigned(snapshot.stability_media_failures,
+        snapshot.local_publish_no_media);
+    SaturatingAddUnsigned(snapshot.stability_media_failures,
+        snapshot.remote_subscription_no_media);
+    snapshot.stability_anomalies = snapshot.stability_operation_failures;
+    SaturatingAddUnsigned(snapshot.stability_anomalies,
+        snapshot.stability_sampler_interruptions);
+    SaturatingAddUnsigned(snapshot.stability_anomalies,
+        snapshot.stability_device_stops);
+    SaturatingAddUnsigned(snapshot.stability_anomalies,
+        snapshot.stability_media_failures);
+    if (snapshot.usable_duration_availability == Availability::Valid &&
+        snapshot.usable_duration_ms > 0) {
+        const auto hours = static_cast<double>(snapshot.usable_duration_ms) /
+            3'600'000.0;
+        snapshot.reconnect_density_availability = Availability::Valid;
+        snapshot.reconnect_density_reason =
+            "reconnect_episode_density_valid";
+        snapshot.reconnect_episodes_per_hour =
+            static_cast<double>(snapshot.reconnect_episodes) / hours;
+        snapshot.stability_anomaly_density_availability = Availability::Valid;
+        snapshot.stability_anomaly_density_reason =
+            "typed_anomaly_density_valid";
+        snapshot.stability_anomalies_per_hour =
+            static_cast<double>(snapshot.stability_anomalies) / hours;
+    } else {
+        const auto unavailable = stop_finalized_
+            ? Availability::NotExpected : Availability::WarmingUp;
+        snapshot.reconnect_density_availability = unavailable;
+        snapshot.reconnect_density_reason = stop_finalized_
+            ? "session_never_became_usable" : "usable_duration_warming_up";
+        snapshot.stability_anomaly_density_availability = unavailable;
+        snapshot.stability_anomaly_density_reason =
+            snapshot.reconnect_density_reason;
+    }
     snapshot.internal_resource_availability = Availability::Valid;
     snapshot.internal_resource_reason =
         "session_owned_binding_and_publication_counts_valid";

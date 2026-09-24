@@ -70,8 +70,13 @@ int main(int argc, char **argv) {
 		QString::fromUtf8("会议遥测"));
 	TEST_CHECK(QCoreApplication::translate("MeetingUI", "Visible render stall") ==
 		QString::fromUtf8("用户可见画面冻结"));
+	TEST_CHECK(QCoreApplication::translate("MeetingUI", "Capability boundaries") ==
+		QString::fromUtf8("能力边界"));
 	TEST_CHECK(QCoreApplication::translate("TelemetryDisplay", "VALID") ==
 		QString::fromUtf8("有效"));
+	TEST_CHECK(QCoreApplication::translate(
+		"TelemetryDisplay", "IMPLEMENTED_DETERMINISTIC") ==
+		QString::fromUtf8("已实现且可确定测量"));
 	TEST_CHECK(QCoreApplication::translate(
 		"TelemetryDisplay", "signaling_restored_waiting_for_video") ==
 		QString::fromUtf8("信令已恢复，等待视频稳定"));

@@ -310,6 +310,12 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 			 QStringLiteral("usableDurationAvailability")).toString()),
 		 LocalizeTelemetryDisplayText(snapshot.value(
 			 QStringLiteral("usableDurationReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Admission to usable meeting"),
+		 TelemetryValue(snapshot, "admissionToUsableMs", "ms"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("admissionToUsableAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("admissionToUsableReason")).toString())},
 		{QCoreApplication::translate("MeetingUI", "Schema / definition"),
 		 QStringLiteral("%1 / %2").arg(
 			snapshot.value(QStringLiteral("schemaVersion")).toString(),
@@ -321,7 +327,9 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("firstVideoAvailability")).toString()),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("firstVideoMeasurementPoint")).toString())},
 		{QCoreApplication::translate("MeetingUI", "First visible render"),
-		 TelemetryValue(snapshot, "lastSubscribeToFirstRenderMs", "ms"),
+		 QCoreApplication::translate("MeetingUI", "admission %1 / subscription %2")
+			 .arg(TelemetryValue(snapshot, "lastAdmissionToFirstRenderMs", "ms"),
+				  TelemetryValue(snapshot, "lastSubscribeToFirstRenderMs", "ms")),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("renderFirstFrameAvailability")).toString()),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("renderMeasurementPoint")).toString())},
 		{QCoreApplication::translate("MeetingUI", "First remote PCM"),
@@ -348,6 +356,15 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 			 QStringLiteral("localRtpSendAvailability")).toString()),
 		 LocalizeTelemetryDisplayText(snapshot.value(
 			 QStringLiteral("localRtpSendReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Subscribed media delivery"),
+		 QCoreApplication::translate("MeetingUI", "%1 delivered / %2 expected; %3 timeout")
+			 .arg(TelemetryValue(snapshot, "deliveredRemoteSubscriptions"),
+				  TelemetryValue(snapshot, "expectedRemoteSubscriptions"),
+				  TelemetryValue(snapshot, "remoteSubscriptionNoMedia")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("subscriptionMediaAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("subscriptionMediaReason")).toString())},
 		{QCoreApplication::translate("MeetingUI", "Native video freezes"),
 		 TelemetryValue(snapshot, "nativeVideoFreezeCount"),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("nativeVideoFreezeAvailability")).toString()),
@@ -442,6 +459,14 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 		 TelemetryValue(snapshot, "lastReconnectStableRenderMs", "ms"),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("reconnectRenderAvailability")).toString()),
 		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("reconnectRenderReason")).toString())},
+		{QCoreApplication::translate("MeetingUI", "Reconnect episode density"),
+		 QCoreApplication::translate("MeetingUI", "%1 episodes / %2 per hour")
+			 .arg(TelemetryValue(snapshot, "reconnectEpisodes"),
+				  TelemetryValue(snapshot, "reconnectEpisodesPerHour")),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("reconnectDensityAvailability")).toString()),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("reconnectDensityReason")).toString())},
 	});
 	tabs->widget(0)->setObjectName(QStringLiteral("telemetryOverview"));
 	tabs->widget(1)->setObjectName(QStringLiteral("telemetryMediaQoe"));
@@ -621,6 +646,21 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 	operations->setObjectName(QStringLiteral("telemetryOperations"));
 	tabs->addTab(operations, QCoreApplication::translate("MeetingUI", "Operations"));
 
+	auto *productChains = MakeTelemetryTable(tabs, {
+		QCoreApplication::translate("MeetingUI", "Metric ID"),
+		QCoreApplication::translate("MeetingUI", "Product-chain status"),
+		QCoreApplication::translate("MeetingUI", "Reason / boundary")});
+	for (const auto &value : snapshot.value(QStringLiteral("metricProductChains")).toList()) {
+		const auto item = value.toMap();
+		AddTelemetryRow(productChains, {
+			item.value(QStringLiteral("metricId")).toString(),
+			LocalizeTelemetryDisplayText(item.value(QStringLiteral("status")).toString()),
+			LocalizeTelemetryDisplayText(item.value(QStringLiteral("reason")).toString())});
+	}
+	productChains->setObjectName(QStringLiteral("telemetryProductChains"));
+	tabs->addTab(productChains,
+		QCoreApplication::translate("MeetingUI", "Capability boundaries"));
+
 	auto *resourcePage = new QWidget(tabs);
 	auto *resourceLayout = new QVBoxLayout(resourcePage);
 	const auto store = livekit::telemetry::InstalledTelemetryHistoryStore();
@@ -674,6 +714,17 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 				QStringLiteral("resourceReturnAvailability")).toString()),
 		QString(), LocalizeTelemetryDisplayText(snapshot.value(
 			QStringLiteral("resourceReturnReason")).toString())});
+	AddTelemetryRow(resources, {QCoreApplication::translate("MeetingUI", "Typed anomaly density"),
+		QCoreApplication::translate("MeetingUI", "%1 events / %2 per hour")
+			.arg(TelemetryValue(snapshot, "stabilityAnomalies"),
+				 TelemetryValue(snapshot, "stabilityAnomaliesPerHour")),
+		QCoreApplication::translate("MeetingUI", "operation %1 / sampler %2 / device %3 / media %4")
+			.arg(TelemetryValue(snapshot, "stabilityOperationFailures"),
+				 TelemetryValue(snapshot, "stabilitySamplerInterruptions"),
+				 TelemetryValue(snapshot, "stabilityDeviceStops"),
+				 TelemetryValue(snapshot, "stabilityMediaFailures")),
+		LocalizeTelemetryDisplayText(snapshot.value(
+			QStringLiteral("stabilityAnomalyDensityAvailability")).toString())});
 	resourceLayout->addWidget(resources, 1);
 	resources->setObjectName(QStringLiteral("telemetryResources"));
 	tabs->addTab(resourcePage, QCoreApplication::translate("MeetingUI", "Resources"));

@@ -16,6 +16,7 @@ namespace {
 
 using namespace std::chrono_literals;
 using livekit::telemetry::Availability;
+using livekit::telemetry::ProductChainStatus;
 using livekit::telemetry::SafeTelemetryRecord;
 using livekit::telemetry::SafeTelemetryRecordPtr;
 using livekit::telemetry::TelemetryHistoryStore;
@@ -62,6 +63,13 @@ SafeTelemetryRecordPtr Record(
     record->snapshot.usable_duration_availability = Availability::Valid;
     record->snapshot.usable_duration_reason = "room_usable_duration_complete";
     record->snapshot.usable_duration_ms = 4000;
+    record->snapshot.admission_to_usable_availability = Availability::Valid;
+    record->snapshot.admission_to_usable_reason =
+        "admission_to_startup_terminal_valid";
+    record->snapshot.admission_to_usable_ms = 700;
+    record->snapshot.metric_product_chains.push_back({
+        "SES-03", ProductChainStatus::Implemented,
+        "admission_to_startup_terminal_chain_implemented"});
     record->snapshot.local_publish_media_availability = Availability::Valid;
     record->snapshot.local_publish_media_reason =
         "all_expected_local_publications_sending";
@@ -80,12 +88,20 @@ SafeTelemetryRecordPtr Record(
     record->snapshot.local_rtp_send_reason = "local_rtp_send_observed";
     record->snapshot.local_first_rtp_sends = 1;
     record->snapshot.last_publish_to_rtp_send_ms = 44;
+    record->snapshot.subscription_media_availability = Availability::Valid;
+    record->snapshot.subscription_media_reason =
+        "all_expected_subscriptions_delivered_media";
+    record->snapshot.expected_remote_subscriptions = 2;
+    record->snapshot.delivered_remote_subscriptions = 2;
+    record->snapshot.remote_subscription_no_media = 0;
+    record->snapshot.longest_subscription_media_wait_ms = 52;
     record->snapshot.render_stall_availability = Availability::Valid;
     record->snapshot.render_stall_reason = "render_window_valid";
     record->snapshot.render_stall_algorithm = "render-stall-v1";
     record->snapshot.render_stall_count = 0;
     record->snapshot.render_stall_duration_ms = 0;
     record->snapshot.render_stall_ratio = 0.0;
+    record->snapshot.last_admission_to_first_render_ms = 88;
     record->snapshot.inbound_rtp_traffic_availability = Availability::Valid;
     record->snapshot.inbound_rtp_traffic_reason =
         "inbound_rtp_bitrate_window_valid";
@@ -150,6 +166,21 @@ SafeTelemetryRecordPtr Record(
     record->snapshot.render_convert_max_us = 60;
     record->snapshot.telemetry_cost_availability = Availability::Valid;
     record->snapshot.telemetry_cost_reason = "observed_sampler_snapshot_cost_valid";
+    record->snapshot.reconnect_density_availability = Availability::Valid;
+    record->snapshot.reconnect_density_reason =
+        "reconnect_episode_density_valid";
+    record->snapshot.reconnect_episodes = 1;
+    record->snapshot.reconnect_episodes_per_hour = 0.5;
+    record->snapshot.stability_anomaly_density_availability =
+        Availability::Valid;
+    record->snapshot.stability_anomaly_density_reason =
+        "typed_anomaly_density_valid";
+    record->snapshot.stability_operation_failures = 1;
+    record->snapshot.stability_sampler_interruptions = 2;
+    record->snapshot.stability_device_stops = 3;
+    record->snapshot.stability_media_failures = 4;
+    record->snapshot.stability_anomalies = 10;
+    record->snapshot.stability_anomalies_per_hour = 5.0;
     record->stability.ledger_availability = "VALID";
     record->stability.ledger_reason = "atomic_bounded_ledger_valid";
     return record;
@@ -210,8 +241,18 @@ void JsonCsvShareValuesAndPreserveMissing() {
     TEST_CHECK(jsonl.find("\"key\":\"stats.last_request_duration\",\"measurement_point\":\"\",\"reason\":\"stats_complete\",\"revision\":2,\"session_generation\":42,\"unit\":\"ms\",\"value\":null") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"render.stall.count\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"session.duration\"") != std::string::npos);
+    TEST_CHECK(FindMetric(jsonl, "session.admission_to_usable").at("value") ==
+               700);
+    const auto product_chain = FindMetric(jsonl, "product_chain.SES-03");
+    TEST_CHECK(product_chain.at("value") == "IMPLEMENTED_DETERMINISTIC");
+    TEST_CHECK(product_chain.at("availability") == "VALID");
+    TEST_CHECK(product_chain.at("reason") ==
+               "admission_to_startup_terminal_chain_implemented");
     TEST_CHECK(jsonl.find("\"key\":\"publish.video.accepted_to_encode\",\"measurement_point\":\"webrtc_outbound_rtp_frames_encoded_sample\",\"reason\":\"outbound_video_mapping_unavailable\",\"revision\":2,\"session_generation\":42,\"unit\":\"ms\",\"value\":null") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"publish.rtp.accepted_to_send\"") != std::string::npos);
+    TEST_CHECK(FindMetric(jsonl, "subscribe.media.delivered").at("value") == 2);
+    TEST_CHECK(FindMetric(jsonl, "subscribe.media.longest_wait").at("value") ==
+               52);
     TEST_CHECK(jsonl.find("\"key\":\"network.inbound.retransmitted_packet_ratio\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"network.path.local_candidate_types\"") != std::string::npos);
     TEST_CHECK(FindMetric(jsonl, "network.rtp.inbound.bitrate").at("value") ==
@@ -250,11 +291,17 @@ void JsonCsvShareValuesAndPreserveMissing() {
     TEST_CHECK(jsonl.find("\"key\":\"render.stage.convert.maximum\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"render.stage.gpu_execution\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"render.interval.p99\"") != std::string::npos);
+    TEST_CHECK(FindMetric(jsonl, "render.admission_to_first").at("value") == 88);
     TEST_CHECK(jsonl.find("\"key\":\"render.frame_age.average\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"render.pipeline.actual_backend\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"resource.internal.native_bindings\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"resource.queue.router.replaced\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"resource.queue.export\"") != std::string::npos);
+    TEST_CHECK(FindMetric(jsonl, "reconnect.episodes_per_hour").at("value") ==
+               0.5);
+    TEST_CHECK(FindMetric(jsonl, "stability.anomaly.total").at("value") == 10);
+    TEST_CHECK(FindMetric(jsonl, "stability.anomaly.per_hour").at("value") ==
+               5.0);
     TEST_CHECK(csv.find("\"resource.cpu\",\"0\",\"percent\",\"VALID\"") != std::string::npos);
     TEST_CHECK(csv.find("\"stats.last_request_duration\",\"\",\"ms\",\"VALID\"") != std::string::npos);
     TEST_CHECK(csv.find("\"session.duration\",\"4321\",\"ms\",\"VALID\"") != std::string::npos);

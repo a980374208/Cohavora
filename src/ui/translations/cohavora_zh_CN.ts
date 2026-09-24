@@ -2742,6 +2742,18 @@ Sign in with your own account in a client configured for the same meeting servic
 		<message><source>Success / failure / timeout / cancelled</source><translation>成功 / 失败 / 超时 / 已取消</translation></message>
 		<message><source>Last duration</source><translation>最近耗时</translation></message>
 		<message><source>Operations</source><translation>操作</translation></message>
+		<message><source>Admission to usable meeting</source><translation>准入至会议可用</translation></message>
+		<message><source>admission %1 / subscription %2</source><translation>准入 %1 / 订阅 %2</translation></message>
+		<message><source>Subscribed media delivery</source><translation>订阅媒体交付</translation></message>
+		<message><source>%1 delivered / %2 expected; %3 timeout</source><translation>已交付 %1 / 应交付 %2；超时 %3</translation></message>
+		<message><source>Reconnect episode density</source><translation>重连过程密度</translation></message>
+		<message><source>%1 episodes / %2 per hour</source><translation>%1 次 / 每小时 %2 次</translation></message>
+		<message><source>Metric ID</source><translation>指标 ID</translation></message>
+		<message><source>Product-chain status</source><translation>产品链状态</translation></message>
+		<message><source>Capability boundaries</source><translation>能力边界</translation></message>
+		<message><source>Typed anomaly density</source><translation>分类异常密度</translation></message>
+		<message><source>%1 events / %2 per hour</source><translation>%1 个事件 / 每小时 %2 个</translation></message>
+		<message><source>operation %1 / sampler %2 / device %3 / media %4</source><translation>操作 %1 / 采样器 %2 / 设备 %3 / 媒体 %4</translation></message>
 		<message><source>Current</source><translation>当前值</translation></message>
 		<message><source>Process CPU</source><translation>进程 CPU</translation></message>
 		<message><source>Private memory</source><translation>专用内存</translation></message>
@@ -2852,6 +2864,11 @@ Sign in with your own account in a client configured for the same meeting servic
 		<message><source>STALE</source><translation>数据过期</translation></message>
 		<message><source>INVALID</source><translation>无效</translation></message>
 		<message><source>UNKNOWN</source><translation>未知</translation></message>
+		<message><source>IMPLEMENTED_DETERMINISTIC</source><translation>已实现且可确定测量</translation></message>
+		<message><source>PARTIAL_PRODUCT_CHAIN</source><translation>产品链部分贯通</translation></message>
+		<message><source>UNSUPPORTED_CURRENT_PROVIDER</source><translation>当前提供方不支持</translation></message>
+		<message><source>CONTROLLED_HARNESS_ONLY</source><translation>仅受控测试环境可测</translation></message>
+		<message><source>DEFERRED_EXTERNAL</source><translation>等待外部环境验证</translation></message>
 		<message><source>COMPLETE</source><translation>已完成</translation></message>
 		<message><source>IN_PROGRESS</source><translation>进行中</translation></message>
 		<message><source>true</source><translation>是</translation></message>
@@ -2927,6 +2944,30 @@ Sign in with your own account in a client configured for the same meeting servic
 		<message><source>post_stop_stable_window_not_observed</source><translation>尚未观测到停止后的稳定窗口</translation></message>
 		<message><source>observed_sampler_snapshot_cost_valid</source><translation>采样与快照开销统计有效</translation></message>
 		<message><source>controlled_enabled_disabled_run_not_executed</source><translation>尚未执行启用/禁用遥测的受控对照</translation></message>
+		<message><source>admission_to_startup_terminal_chain_implemented</source><translation>准入接受至启动唯一终态链已实现</translation></message>
+		<message><source>subscription_first_media_observation_window_implemented</source><translation>订阅至首媒体观察窗已实现</translation></message>
+		<message><source>admission_connect_subscription_to_render_chain_implemented</source><translation>准入、连接、订阅至真实渲染提交链已实现</translation></message>
+		<message><source>reconnect_episode_density_implemented</source><translation>重连过程及可用时长密度已实现</translation></message>
+		<message><source>typed_anomaly_density_implemented</source><translation>分类异常及可用时长密度已实现</translation></message>
+		<message><source>fine_grained_session_stages_not_instrumented</source><translation>会话细分阶段尚未全部埋点</translation></message>
+		<message><source>typed_operation_failure_reason_not_exposed</source><translation>尚未暴露操作失败的分类原因</translation></message>
+		<message><source>remote_control_ack_not_exposed</source><translation>尚未暴露远端控制确认</translation></message>
+		<message><source>recovery_transport_subscription_share_stages_not_exposed</source><translation>恢复链的传输、订阅和共享阶段尚未暴露</translation></message>
+		<message><source>typed_reconnect_strategy_not_exposed</source><translation>尚未暴露分类重连策略</translation></message>
+		<message><source>audio_cadence_provider_partial</source><translation>音频节拍提供方仅部分可测</translation></message>
+		<message><source>audio_device_underrun_provider_not_exposed</source><translation>音频设备欠载提供方未暴露</translation></message>
+		<message><source>audio_level_clipping_provider_not_exposed</source><translation>音频电平削波提供方未暴露</translation></message>
+		<message><source>apm_effective_state_provider_not_exposed</source><translation>音频处理模块实际状态未暴露</translation></message>
+		<message><source>playout_delay_provider_not_exposed</source><translation>播放延迟提供方未暴露</translation></message>
+		<message><source>native_device_failure_category_not_exposed</source><translation>原生设备失败类别未暴露</translation></message>
+		<message><source>device_selection_category_not_projected</source><translation>设备选择类别尚未投影到产品层</translation></message>
+		<message><source>process_gpu_provider_not_configured</source><translation>未配置进程 GPU 指标提供方</translation></message>
+		<message><source>crash_evidence_provider_not_configured</source><translation>未配置崩溃证据提供方</translation></message>
+		<message><source>independent_process_watchdog_not_installed</source><translation>未安装独立进程看门狗</translation></message>
+		<message><source>controlled_peer_harness_only</source><translation>仅能在受控双端测试环境中测量</translation></message>
+		<message><source>external_optical_environment_required</source><translation>需要外部光学测量环境</translation></message>
+		<message><source>external_acoustic_environment_required</source><translation>需要外部声学测量环境</translation></message>
+		<message><source>external_av_sync_environment_required</source><translation>需要外部音视频同步测量环境</translation></message>
 		<message><source>bounded_history_valid</source><translation>有界本地历史有效</translation></message>
 		<message><source>history_store_not_installed</source><translation>未启用本地历史存储</translation></message>
 		<message><source>native_video_sink_onframe_entry</source><translation>原生视频接收器 OnFrame 入口</translation></message>
@@ -2945,6 +2986,28 @@ Sign in with your own account in a client configured for the same meeting servic
 		<message><source>room_usable_duration_complete</source><translation>房间可用时长统计完成</translation></message>
 		<message><source>room_never_became_usable</source><translation>房间未曾进入可用状态</translation></message>
 		<message><source>waiting_for_connect_success</source><translation>等待房间连接成功</translation></message>
+		<message><source>admission_not_observed</source><translation>尚未观测到准入操作</translation></message>
+		<message><source>waiting_for_startup_terminal</source><translation>等待启动操作唯一终态</translation></message>
+		<message><source>admission_to_startup_terminal_valid</source><translation>准入接受至启动成功终态耗时有效</translation></message>
+		<message><source>admission_to_degraded_startup_terminal_valid</source><translation>准入接受至启动降级成功终态耗时有效</translation></message>
+		<message><source>startup_terminal_timeout</source><translation>启动操作以超时终止</translation></message>
+		<message><source>startup_terminal_failure</source><translation>启动操作以失败终止</translation></message>
+		<message><source>startup_cancelled</source><translation>启动操作已取消</translation></message>
+		<message><source>no_remote_media_binding</source><translation>没有远端媒体绑定</translation></message>
+		<message><source>no_remote_media_expected</source><translation>当前无需接收远端媒体</translation></message>
+		<message><source>all_expected_subscriptions_delivered_media</source><translation>所有预期订阅均已交付媒体</translation></message>
+		<message><source>expected_subscription_media_timeout</source><translation>预期订阅未在观察窗内交付媒体</translation></message>
+		<message><source>subscription_observation_origin_missing</source><translation>订阅媒体观察起点或交付时点缺失</translation></message>
+		<message><source>waiting_for_expected_subscription_media</source><translation>等待预期订阅交付首个媒体帧</translation></message>
+		<message><source>reconnect_episode_density_valid</source><translation>重连过程密度有效</translation></message>
+		<message><source>typed_anomaly_density_valid</source><translation>分类异常密度有效</translation></message>
+		<message><source>session_never_became_usable</source><translation>会话未曾进入可用状态</translation></message>
+		<message><source>usable_duration_warming_up</source><translation>可用时长仍在预热</translation></message>
+		<message><source>usable_duration_not_available</source><translation>可用时长不可用</translation></message>
+		<message><source>admission_accept_to_startup_terminal</source><translation>准入接受至启动唯一终态</translation></message>
+		<message><source>subscription_intent_to_first_media</source><translation>订阅意图至首个媒体帧</translation></message>
+		<message><source>stability-anomaly-density-v1</source><translation>稳定性异常密度算法 v1</translation></message>
+		<message><source>s9b_fifth_batch_audit</source><translation>S9b 第五批能力审计</translation></message>
 		<message><source>local_video_injection_timeout</source><translation>本地视频注入超时</translation></message>
 		<message><source>waiting_for_local_video_injection</source><translation>等待本地视频注入</translation></message>
 		<message><source>local_video_injection_observed</source><translation>已观测到本地视频注入</translation></message>

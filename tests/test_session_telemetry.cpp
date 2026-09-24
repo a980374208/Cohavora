@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <deque>
 #include <memory>
+#include <set>
 #include <thread>
 #include <vector>
 
@@ -24,6 +25,7 @@ using livekit::telemetry::OperationKind;
 using livekit::telemetry::OperationOutcome;
 using livekit::telemetry::ProcessResourceSample;
 using livekit::telemetry::ProcessResourceSampler;
+using livekit::telemetry::ProductChainStatus;
 using livekit::telemetry::SessionTelemetry;
 
 Event Counter(std::uint64_t generation,
@@ -2094,6 +2096,187 @@ void LocalPublishPipelinePreservesWarmingTimeoutAndMapping() {
     collision_context.run();
 }
 
+void FifthBatchProductChainsAndDensitiesAreDeterministic() {
+    asio::io_context context;
+    auto strand = asio::make_strand(context);
+    const auto base = Event::Clock::now();
+    auto telemetry = std::make_shared<SessionTelemetry>(strand, 301, 128, base);
+    SessionTelemetry::SnapshotPtr snapshot;
+
+    const auto admission = telemetry->StartOperation(
+        OperationKind::Admission, "admission", base + 100ms);
+    const auto startup = telemetry->StartOperation(
+        OperationKind::Startup, "startup", base + 200ms);
+    auto video = std::make_shared<livekit::telemetry::VideoActivityProbe>();
+    auto audio = std::make_shared<livekit::telemetry::AudioActivityProbe>();
+    auto render = std::make_shared<livekit::telemetry::RenderActivityProbe>();
+    TEST_CHECK(telemetry->RegisterRemoteVideoBinding(
+        "remote_video/fifth/video", 1, 1, base + 300ms,
+        true, true, video, base + 300ms));
+    TEST_CHECK(telemetry->RegisterRemoteAudioBinding(
+        "remote_audio/fifth/audio", 1, 1, base + 350ms,
+        true, audio, base + 350ms));
+    TEST_CHECK(telemetry->RegisterRemoteVideoRenderBinding(
+        "remote_render/fifth/video", 1, 1, base + 300ms,
+        true, true, 33ms, render, base + 300ms));
+    TEST_CHECK(telemetry->RecordRemoteVideoFrame(
+        "remote_video/fifth/video", 1, 1, 0, false,
+        1280, 720, base + 450ms));
+    TEST_CHECK(telemetry->RecordRemoteVideoRenderSubmit(
+        "remote_render/fifth/video", 1, 1, 1, base + 490ms,
+        "qt_cpu_paint", render, base + 500ms));
+    context.run();
+
+    context.restart();
+    asio::post(strand, [telemetry, &snapshot, base] {
+        snapshot = telemetry->SnapshotOnStrand(base + 600ms);
+    });
+    context.run();
+    TEST_CHECK(snapshot);
+    TEST_CHECK(snapshot->admission_to_usable_availability ==
+               Availability::WarmingUp);
+    TEST_CHECK(snapshot->subscription_media_availability ==
+               Availability::WarmingUp);
+    TEST_CHECK(snapshot->expected_remote_subscriptions == 2);
+    TEST_CHECK(snapshot->delivered_remote_subscriptions == 1);
+    TEST_CHECK(snapshot->longest_subscription_media_wait_ms == 250);
+    TEST_CHECK(snapshot->last_admission_to_first_render_ms == 400);
+
+    context.restart();
+    TEST_CHECK(telemetry->FinishOperation(
+        startup, OperationKind::Startup, OperationOutcome::Success,
+        base + 700ms));
+    TEST_CHECK(telemetry->FinishOperation(
+        admission, OperationKind::Admission, OperationOutcome::Success,
+        base + 710ms));
+    TEST_CHECK(telemetry->RecordRemoteAudioFrame(
+        "remote_audio/fifth/audio", 1, 1, 0, false,
+        48000, 2, base + 750ms));
+    asio::post(strand, [telemetry, &snapshot, base] {
+        snapshot = telemetry->SnapshotOnStrand(base + 800ms);
+    });
+    context.run();
+    TEST_CHECK(snapshot->admission_to_usable_availability == Availability::Valid);
+    TEST_CHECK(snapshot->admission_to_usable_ms == 600);
+    TEST_CHECK(snapshot->subscription_media_availability == Availability::Valid);
+    TEST_CHECK(snapshot->delivered_remote_subscriptions == 2);
+    TEST_CHECK(snapshot->remote_subscription_no_media == 0);
+    TEST_CHECK(snapshot->longest_subscription_media_wait_ms == 400);
+
+    context.restart();
+    auto missing = std::make_shared<livekit::telemetry::VideoActivityProbe>();
+    TEST_CHECK(telemetry->RegisterRemoteVideoBinding(
+        "remote_video/fifth/missing", 1, 2, base + 900ms,
+        true, true, missing, base + 900ms));
+    asio::post(strand, [telemetry, &snapshot, base] {
+        snapshot = telemetry->SnapshotOnStrand(base + 5901ms);
+    });
+    context.run();
+    TEST_CHECK(snapshot->subscription_media_availability == Availability::Timeout);
+    TEST_CHECK(snapshot->expected_remote_subscriptions == 3);
+    TEST_CHECK(snapshot->delivered_remote_subscriptions == 2);
+    TEST_CHECK(snapshot->remote_subscription_no_media == 1);
+    TEST_CHECK(snapshot->longest_subscription_media_wait_ms == 5001);
+
+    std::set<std::string> metric_ids;
+    std::size_t implemented = 0;
+    std::size_t partial = 0;
+    std::size_t unsupported = 0;
+    std::size_t harness_only = 0;
+    std::size_t deferred = 0;
+    for (const auto& product_chain : snapshot->metric_product_chains) {
+        TEST_CHECK(metric_ids.insert(product_chain.metric_id).second);
+        switch (product_chain.status) {
+        case ProductChainStatus::Implemented: ++implemented; break;
+        case ProductChainStatus::Partial: ++partial; break;
+        case ProductChainStatus::Unsupported: ++unsupported; break;
+        case ProductChainStatus::ControlledHarnessOnly: ++harness_only; break;
+        case ProductChainStatus::DeferredExternal: ++deferred; break;
+        }
+    }
+    TEST_CHECK(metric_ids.size() == 33);
+    TEST_CHECK(implemented == 5);
+    TEST_CHECK(partial == 15);
+    TEST_CHECK(unsupported == 6);
+    TEST_CHECK(harness_only == 4);
+    TEST_CHECK(deferred == 3);
+    TEST_CHECK(metric_ids.contains("SES-03"));
+    TEST_CHECK(metric_ids.contains("E2E-06"));
+
+    context.restart();
+    const auto failed_admission = telemetry->StartOperation(
+        OperationKind::Admission, "admission-failed", base + 6000ms);
+    const auto failed_startup = telemetry->StartOperation(
+        OperationKind::Startup, "startup-failed", base + 6100ms);
+    TEST_CHECK(!failed_admission.empty());
+    TEST_CHECK(telemetry->FinishOperation(
+        failed_startup, OperationKind::Startup, OperationOutcome::Failure,
+        base + 6300ms));
+    asio::post(strand, [telemetry, &snapshot, base] {
+        snapshot = telemetry->SnapshotOnStrand(base + 6400ms);
+    });
+    context.run();
+    TEST_CHECK(snapshot->admission_to_usable_availability == Availability::Invalid);
+    TEST_CHECK(snapshot->admission_to_usable_reason == "startup_terminal_failure");
+    TEST_CHECK(snapshot->admission_to_usable_ms == -1);
+    TEST_CHECK(snapshot->last_admission_to_first_render_ms == -1);
+
+    asio::io_context density_context;
+    auto density_strand = asio::make_strand(density_context);
+    const auto density_base = base + 1h;
+    auto density = std::make_shared<SessionTelemetry>(
+        density_strand, 302, 64, density_base);
+    SessionTelemetry::SnapshotPtr density_snapshot;
+    const auto connect = density->StartOperation(
+        OperationKind::Connect, "connect", density_base);
+    TEST_CHECK(density->FinishOperation(
+        connect, OperationKind::Connect, OperationOutcome::Success,
+        density_base + 100ms));
+    const auto publish = density->StartOperation(
+        OperationKind::PublishTrack, "publish", density_base + 200ms);
+    TEST_CHECK(density->FinishOperation(
+        publish, OperationKind::PublishTrack, OperationOutcome::Failure,
+        density_base + 250ms));
+    Event stats_timeout;
+    stats_timeout.kind = EventKind::StatsRequestTimeout;
+    stats_timeout.session_generation = 302;
+    stats_timeout.source_time = density_base + 300ms;
+    TEST_CHECK(density->Submit(std::move(stats_timeout)));
+    Event stats_rejected;
+    stats_rejected.kind = EventKind::StatsRequestRejected;
+    stats_rejected.session_generation = 302;
+    stats_rejected.source_time = density_base + 400ms;
+    TEST_CHECK(density->Submit(std::move(stats_rejected)));
+    auto no_media = std::make_shared<livekit::telemetry::VideoActivityProbe>();
+    TEST_CHECK(density->RegisterRemoteVideoBinding(
+        "remote_video/density/missing", 2, 1, density_base + 500ms,
+        true, true, no_media, density_base + 500ms));
+    const auto reconnect = density->StartOperation(
+        OperationKind::ReconnectEpisode, "reconnect",
+        density_base + 3600100ms);
+    TEST_CHECK(!reconnect.empty());
+    asio::post(density_strand, [density, &density_snapshot, density_base] {
+        density_snapshot = density->SnapshotOnStrand(
+            density_base + 3600100ms);
+    });
+    density_context.run();
+
+    TEST_CHECK(density_snapshot);
+    TEST_CHECK(density_snapshot->usable_duration_ms == 3600000);
+    TEST_CHECK(density_snapshot->reconnect_density_availability ==
+               Availability::Valid);
+    TEST_CHECK(density_snapshot->reconnect_episodes == 1);
+    TEST_CHECK(std::abs(density_snapshot->reconnect_episodes_per_hour - 1.0) <
+               1e-9);
+    TEST_CHECK(density_snapshot->stability_operation_failures == 1);
+    TEST_CHECK(density_snapshot->stability_sampler_interruptions == 2);
+    TEST_CHECK(density_snapshot->stability_device_stops == 0);
+    TEST_CHECK(density_snapshot->stability_media_failures == 1);
+    TEST_CHECK(density_snapshot->stability_anomalies == 4);
+    TEST_CHECK(std::abs(density_snapshot->stability_anomalies_per_hour - 4.0) <
+               1e-9);
+}
+
 } // namespace
 
 int main() {
@@ -2122,5 +2305,6 @@ int main() {
     ResourceTrendIsBoundedAndExitReturnStaysHonest();
     SessionDurationsAndDisconnectHaveOneTerminal();
     LocalPublishPipelinePreservesWarmingTimeoutAndMapping();
+    FifthBatchProductChainsAndDensitiesAreDeterministic();
     return 0;
 }

@@ -169,6 +169,18 @@ Availability ParseAvailability(const std::string& value) {
     return Availability::Unknown;
 }
 
+Availability ProductChainAvailability(ProductChainStatus status) {
+    switch (status) {
+    case ProductChainStatus::Implemented: return Availability::Valid;
+    case ProductChainStatus::Partial: return Availability::Unknown;
+    case ProductChainStatus::Unsupported: return Availability::Unsupported;
+    case ProductChainStatus::ControlledHarnessOnly:
+    case ProductChainStatus::DeferredExternal:
+        return Availability::NotExpected;
+    }
+    return Availability::Unknown;
+}
+
 std::uint64_t DirectoryKnownSize(const std::filesystem::path& directory) {
     std::uint64_t total = 0;
     std::error_code error;
@@ -231,7 +243,7 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     const SafeTelemetryRecord& record) {
     const auto& s = record.snapshot;
     std::vector<SafeMetricRow> rows;
-    rows.reserve(270);
+    rows.reserve(320);
     const auto base = [&](std::string key, MetricValue value, std::string unit = {}) {
         AddMetric(rows, std::move(key), std::move(value), std::move(unit),
                   s.availability, s.reason);
@@ -251,6 +263,15 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("session.usable_duration", Signed(s.usable_duration_ms), "ms",
           s.usable_duration_availability, s.usable_duration_reason,
           s.usable_duration_measurement_point);
+    group("session.admission_to_usable", Signed(s.admission_to_usable_ms), "ms",
+          s.admission_to_usable_availability, s.admission_to_usable_reason,
+          s.admission_to_usable_measurement_point);
+    for (const auto& capability : s.metric_product_chains) {
+        const auto availability = ProductChainAvailability(capability.status);
+        group("product_chain." + capability.metric_id,
+              std::string(ProductChainStatusName(capability.status)), "status",
+              availability, capability.reason, "s9b_fifth_batch_audit");
+    }
     base("queue.capacity", static_cast<std::uint64_t>(s.queue_capacity), "events");
     base("queue.depth", static_cast<std::uint64_t>(s.queue_depth), "events");
     base("queue.high_water", static_cast<std::uint64_t>(s.queue_high_water), "events");
@@ -441,6 +462,19 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
           Signed(s.local_publish_stats_uncertainty_ms), "ms",
           s.local_rtp_send_availability, s.local_rtp_send_reason,
           s.local_rtp_send_measurement_point);
+    group("subscribe.media.expected", s.expected_remote_subscriptions,
+          "subscriptions", s.subscription_media_availability,
+          s.subscription_media_reason, s.subscription_media_measurement_point);
+    group("subscribe.media.delivered", s.delivered_remote_subscriptions,
+          "subscriptions", s.subscription_media_availability,
+          s.subscription_media_reason, s.subscription_media_measurement_point);
+    group("subscribe.media.no_media", s.remote_subscription_no_media,
+          "subscriptions", s.subscription_media_availability,
+          s.subscription_media_reason, s.subscription_media_measurement_point);
+    group("subscribe.media.longest_wait",
+          Signed(s.longest_subscription_media_wait_ms), "ms",
+          s.subscription_media_availability, s.subscription_media_reason,
+          s.subscription_media_measurement_point);
 
     group("network.rtp.inbound.streams", s.inbound_rtp_streams, "streams",
           s.inbound_rtp_traffic_availability, s.inbound_rtp_traffic_reason,
@@ -1078,6 +1112,10 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("render.connect_to_first", Signed(s.last_connect_to_first_render_ms), "ms",
           s.render_first_frame_availability, s.render_first_frame_reason,
           s.render_first_frame_measurement_point);
+    group("render.admission_to_first",
+          Signed(s.last_admission_to_first_render_ms), "ms",
+          s.render_first_frame_availability, s.render_first_frame_reason,
+          s.render_first_frame_measurement_point);
     group("render.interval.average", Ratio(s.render_average_interval_ms), "ms",
           s.render_first_frame_availability, s.render_first_frame_reason,
           s.render_first_frame_measurement_point);
@@ -1249,6 +1287,38 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("reconnect.render.interruption", Signed(s.last_reconnect_render_interruption_ms), "ms",
           s.reconnect_render_availability, s.reconnect_render_reason,
           s.reconnect_render_measurement_point);
+    group("reconnect.episodes", s.reconnect_episodes, "episodes",
+          s.reconnect_density_availability, s.reconnect_density_reason);
+    group("reconnect.episodes_per_hour", Ratio(s.reconnect_episodes_per_hour),
+          "episodes/hour", s.reconnect_density_availability,
+          s.reconnect_density_reason);
+
+    group("stability.anomaly.operation_failures",
+          s.stability_operation_failures, "events",
+          s.stability_anomaly_density_availability,
+          s.stability_anomaly_density_reason,
+          s.stability_anomaly_density_algorithm);
+    group("stability.anomaly.sampler_interruptions",
+          s.stability_sampler_interruptions, "events",
+          s.stability_anomaly_density_availability,
+          s.stability_anomaly_density_reason,
+          s.stability_anomaly_density_algorithm);
+    group("stability.anomaly.device_stops", s.stability_device_stops, "events",
+          s.stability_anomaly_density_availability,
+          s.stability_anomaly_density_reason,
+          s.stability_anomaly_density_algorithm);
+    group("stability.anomaly.media_failures", s.stability_media_failures, "events",
+          s.stability_anomaly_density_availability,
+          s.stability_anomaly_density_reason,
+          s.stability_anomaly_density_algorithm);
+    group("stability.anomaly.total", s.stability_anomalies, "events",
+          s.stability_anomaly_density_availability,
+          s.stability_anomaly_density_reason,
+          s.stability_anomaly_density_algorithm);
+    group("stability.anomaly.per_hour", Ratio(s.stability_anomalies_per_hour),
+          "events/hour", s.stability_anomaly_density_availability,
+          s.stability_anomaly_density_reason,
+          s.stability_anomaly_density_algorithm);
 
     group("telemetry.snapshot_publications", s.telemetry_snapshot_publications, "snapshots",
           s.telemetry_cost_availability, s.telemetry_cost_reason);

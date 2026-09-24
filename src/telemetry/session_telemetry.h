@@ -95,6 +95,22 @@ enum class OperationOutcome {
 
 const char* OperationOutcomeName(OperationOutcome outcome) noexcept;
 
+enum class ProductChainStatus {
+    Implemented,
+    Partial,
+    Unsupported,
+    ControlledHarnessOnly,
+    DeferredExternal,
+};
+
+const char* ProductChainStatusName(ProductChainStatus status) noexcept;
+
+struct MetricProductChainStatus {
+    std::string metric_id;
+    ProductChainStatus status = ProductChainStatus::Partial;
+    std::string reason;
+};
+
 enum class MediaExpectationReason {
     BindingActive,
     Subscribed,
@@ -339,6 +355,11 @@ struct Snapshot {
     std::string usable_duration_measurement_point =
         "connect_success_to_reconnect_or_disconnect";
     std::int64_t usable_duration_ms = -1;
+    Availability admission_to_usable_availability = Availability::Unknown;
+    std::string admission_to_usable_reason = "admission_not_observed";
+    std::string admission_to_usable_measurement_point =
+        "admission_accept_to_startup_terminal";
+    std::int64_t admission_to_usable_ms = -1;
 
     std::size_t queue_capacity = 0;
     std::size_t queue_depth = 0;
@@ -352,6 +373,8 @@ struct Snapshot {
     std::uint64_t counter_resets = 0;
     std::uint64_t valid_samples = 0;
     std::uint64_t unavailable_samples = 0;
+
+    std::vector<MetricProductChainStatus> metric_product_chains;
 
     Availability event_queue_lag_availability = Availability::Unknown;
     std::string event_queue_lag_reason = "no_queued_event_sample";
@@ -502,6 +525,15 @@ struct Snapshot {
     std::uint64_t local_first_rtp_sends = 0;
     std::int64_t last_publish_to_rtp_send_ms = -1;
     std::int64_t local_publish_stats_uncertainty_ms = -1;
+
+    Availability subscription_media_availability = Availability::Unknown;
+    std::string subscription_media_reason = "no_remote_media_binding";
+    std::string subscription_media_measurement_point =
+        "subscription_intent_to_first_media";
+    std::uint64_t expected_remote_subscriptions = 0;
+    std::uint64_t delivered_remote_subscriptions = 0;
+    std::uint64_t remote_subscription_no_media = 0;
+    std::int64_t longest_subscription_media_wait_ms = -1;
 
     Availability inbound_rtp_traffic_availability = Availability::Unknown;
     std::string inbound_rtp_traffic_reason = "not_sampled";
@@ -800,6 +832,7 @@ struct Snapshot {
     std::int64_t last_decode_to_render_ms = -1;
     std::int64_t last_subscribe_to_first_render_ms = -1;
     std::int64_t last_connect_to_first_render_ms = -1;
+    std::int64_t last_admission_to_first_render_ms = -1;
     double render_average_interval_ms = -1.0;
     std::int64_t render_maximum_interval_ms = -1;
     double render_interval_p50_ms = -1.0;
@@ -876,6 +909,23 @@ struct Snapshot {
     std::int64_t last_reconnect_first_render_ms = -1;
     std::int64_t last_reconnect_stable_render_ms = -1;
     std::int64_t last_reconnect_render_interruption_ms = -1;
+
+    Availability reconnect_density_availability = Availability::Unknown;
+    std::string reconnect_density_reason = "usable_duration_not_available";
+    std::uint64_t reconnect_episodes = 0;
+    double reconnect_episodes_per_hour = -1.0;
+
+    Availability stability_anomaly_density_availability = Availability::Unknown;
+    std::string stability_anomaly_density_reason =
+        "usable_duration_not_available";
+    std::string stability_anomaly_density_algorithm =
+        "stability-anomaly-density-v1";
+    std::uint64_t stability_operation_failures = 0;
+    std::uint64_t stability_sampler_interruptions = 0;
+    std::uint64_t stability_device_stops = 0;
+    std::uint64_t stability_media_failures = 0;
+    std::uint64_t stability_anomalies = 0;
+    double stability_anomalies_per_hour = -1.0;
 };
 
 class SessionTelemetry final : public std::enable_shared_from_this<SessionTelemetry> {
@@ -901,6 +951,7 @@ public:
     static constexpr std::chrono::milliseconds kRecoveryStableWindow{250};
     static constexpr std::chrono::seconds kRecoveryObservationWindow{10};
     static constexpr std::chrono::seconds kLocalPublishObservationWindow{5};
+    static constexpr std::chrono::seconds kSubscriptionMediaObservationWindow{5};
     static constexpr std::chrono::seconds kLocalDeviceStallThreshold{1};
 
     SessionTelemetry(Strand strand,
@@ -1079,6 +1130,7 @@ private:
         bool expected_receive = false;
         bool first_frame_seen = false;
         Clock::time_point subscription_accepted{};
+        Clock::time_point first_frame_at{};
         std::shared_ptr<AudioActivityProbe> probe;
     };
 
@@ -1327,6 +1379,7 @@ private:
     std::optional<ResourceTrendSample> resource_baseline_;
     Clock::time_point resource_observation_started_at_{};
     Clock::time_point session_started_at_{};
+    Clock::time_point latest_admission_accepted_at_{};
     Clock::time_point session_stopped_at_{};
     Clock::time_point usable_since_{};
     std::chrono::milliseconds usable_accumulated_{0};
