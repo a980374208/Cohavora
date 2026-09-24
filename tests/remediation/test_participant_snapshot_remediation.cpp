@@ -777,9 +777,10 @@ public:
         TEST_CHECK(details->devicePixelRatioF() + 0.01 >= expectedScale);
 
         auto *tabs = details->findChild<QTabWidget*>(QStringLiteral("telemetryTabs"));
-        TEST_CHECK(tabs && tabs->count() == 8);
+        TEST_CHECK(tabs && tabs->count() == 9);
         const QStringList expectedTabs = {
             QStringLiteral("Overview"), QStringLiteral("Media QoE"),
+            QStringLiteral("Network and devices"),
             QStringLiteral("Operations"), QStringLiteral("Capability boundaries"),
             QStringLiteral("Resources"),
             QStringLiteral("Timeline"), QStringLiteral("All metrics"),
