@@ -143,11 +143,17 @@ set_tests_properties(http_owner_remediation_test PROPERTIES TIMEOUT 60)
 add_executable(test_meeting_session_runtime
     ${LIVEKIT_TEST_SOURCE_DIR}/remediation/restored/test_meeting_session_runtime.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/meeting_session_runtime.h
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/publication_catalog.cpp
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/publication_catalog.h
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/video_demand_policy.cpp
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/video_demand_policy.h
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/video_demand_types.h
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/telemetry/session_telemetry.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/telemetry/session_telemetry.h
 )
 target_include_directories(test_meeting_session_runtime BEFORE PRIVATE
     ${LIVEKIT_PROJECT_SOURCE_DIR}
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/rtc
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/rpc
     ${WEBRTC_ROOT}/include
@@ -156,6 +162,7 @@ target_include_directories(test_meeting_session_runtime BEFORE PRIVATE
 )
 target_link_libraries(test_meeting_session_runtime PRIVATE
     asio::asio
+    ole32
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
     ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
     netapi32
@@ -185,7 +192,8 @@ set_target_properties(test_meeting_session_runtime PROPERTIES
     MSVC_RUNTIME_LIBRARY "MultiThreaded"
 )
 add_test(NAME meeting_session_runtime_test COMMAND test_meeting_session_runtime)
-set_tests_properties(meeting_session_runtime_test PROPERTIES LABELS "TELEMETRY_S1")
+set_tests_properties(meeting_session_runtime_test PROPERTIES
+    LABELS "TELEMETRY_S1;CORE_REGRESSION")
 
 # IDA2-P0-001: immutable participant snapshots, incarnation tickets, ordered
 # Room delivery, and delayed Qt projection rejection for retired instances.
@@ -314,7 +322,15 @@ set_tests_properties(
 add_test(NAME meeting_subscription_telemetry_reconnect_test
     COMMAND test_participant_window_remediation --subscription-telemetry-reconnect)
 set_tests_properties(meeting_subscription_telemetry_reconnect_test PROPERTIES
-    TIMEOUT 30 LABELS "TELEMETRY_S2")
+    TIMEOUT 30 LABELS "TELEMETRY_S2;CORE_REGRESSION")
+add_test(NAME meeting_remote_media_plan_test
+    COMMAND test_participant_window_remediation --phase-c-room)
+set_tests_properties(meeting_remote_media_plan_test PROPERTIES
+    TIMEOUT 30 LABELS "CORE_REGRESSION")
+add_test(NAME meeting_video_viewport_render_lease_test
+    COMMAND test_participant_window_remediation --phase-d-window)
+set_tests_properties(meeting_video_viewport_render_lease_test PROPERTIES
+    TIMEOUT 60 LABELS "CORE_REGRESSION")
 add_test(NAME meeting_moderation_contract_test
     COMMAND test_participant_window_remediation --moderation-contract)
 set_tests_properties(meeting_moderation_contract_test PROPERTIES

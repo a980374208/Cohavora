@@ -304,7 +304,7 @@ public:
     void OnDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> data_channel) override {
         if (!data_channel) return;
         if (auto room = room_.lock()) {
-            asio::post(room->executor(), [room, data_channel, generation = generation_]() {
+            room->callback_gate_->Post([room, data_channel, generation = generation_]() {
                 room->OnRemoteDataChannel(data_channel, generation);
             });
         }
@@ -312,7 +312,7 @@ public:
     
     void OnRenegotiationNeeded() override {
         if (auto room = room_.lock()) {
-            asio::post(room->executor(), [room, type = pc_type_, generation = generation_]() {
+            room->callback_gate_->Post([room, type = pc_type_, generation = generation_]() {
                 room->OnRenegotiationNeeded(type, generation);
             });
         }
@@ -334,7 +334,7 @@ public:
             room->Log("WEBRTC", "ICE_STATE", "PC (" + std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") + ") ICE state changed to: " + state_str);
             if (new_state == webrtc::PeerConnectionInterface::kIceConnectionConnected ||
                 new_state == webrtc::PeerConnectionInterface::kIceConnectionCompleted) {
-                asio::post(room->executor(), [room, generation = generation_]() {
+                room->callback_gate_->Post([room, generation = generation_]() {
                     room->OnIceConnected(generation);
                 });
             }
@@ -353,7 +353,7 @@ public:
                 default: break;
             }
             room->Log("WEBRTC", "PC_STATE", "PC (" + std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") + ") transport state changed to: " + state_str);
-            asio::post(room->executor(), [room, type = pc_type_, new_state, generation = generation_]() {
+            room->callback_gate_->Post([room, type = pc_type_, new_state, generation = generation_]() {
                 room->OnPeerConnectionStateChanged(type, new_state, generation);
             });
         }
@@ -371,7 +371,7 @@ public:
             room->Log("SIGNAL", "LOCAL_ICE", "Local ICE candidate collected: target=" +
                 std::string(pc_type_ == 0 ? "Publisher" : "Subscriber") +
                 ", detail=[omitted]");
-            asio::post(room->executor(), [room, sdp, sdp_mid, sdp_mline_index, type = pc_type_, generation = generation_]() {
+            room->callback_gate_->Post([room, sdp, sdp_mid, sdp_mline_index, type = pc_type_, generation = generation_]() {
                 room->OnLocalIceCandidate(sdp, sdp_mid, sdp_mline_index, type, generation);
             });
         }
@@ -417,7 +417,7 @@ public:
         if (!channel_) return;
         const auto state = channel_->state();
         if (auto room = room_.lock()) {
-            asio::post(room->executor(),
+            room->callback_gate_->Post(
                 [room, reliable = reliable_, state, generation = generation_,
                  channel = channel_]() {
                     room->OnDataChannelStateChanged(
@@ -429,7 +429,7 @@ public:
     void OnMessage(const webrtc::DataBuffer& buffer) override {
         if (auto room = room_.lock()) {
             std::vector<uint8_t> payload(buffer.data.data(), buffer.data.data() + buffer.data.size());
-            asio::post(room->executor(), [room, payload, generation = generation_]() {
+            room->callback_gate_->Post([room, payload, generation = generation_]() {
                 room->OnIncomingDataPacket(payload, "", "", generation);
             });
         }
@@ -437,7 +437,7 @@ public:
 
     void OnBufferedAmountChange(uint64_t previous_amount) override {
         if (auto room = room_.lock()) {
-            asio::post(room->executor(), [room, previous_amount, reliable = reliable_, generation = generation_]() {
+            room->callback_gate_->Post([room, previous_amount, reliable = reliable_, generation = generation_]() {
                 room->OnDataChannelBufferedAmountLow(previous_amount, reliable, generation);
             });
         }
@@ -464,14 +464,14 @@ std::shared_ptr<webrtc::DataChannelObserver> Room::CreateDataChannelObserver(
 
 void Room::PostRemoteTrack(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
                            webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, uint64_t generation) {
-    asio::post(executor_, [weak = weak_from_this(), receiver, track, generation]() {
+    callback_gate_->Post([weak = weak_from_this(), receiver, track, generation]() {
         if (auto room = weak.lock()) room->OnRemoteTrackAdded(receiver, track, generation);
     });
 }
 
 bool Room::IsNativeGenerationCurrentLocked(uint64_t generation) const {
     // Zero is retained only for legacy synchronous API/test callers before Connect.
-    return generation == session_generation_.load(std::memory_order_acquire) &&
+    return !retired() && generation == session_generation_.load(std::memory_order_acquire) &&
         generation == installed_session_generation_;
 }
 
@@ -479,7 +479,7 @@ bool Room::AdmitListener(const ListenerDeliveryContext& context,
                          const std::shared_ptr<RoomListener>& listener) const {
     std::lock_guard lock(room_mutex_);
     // Zero is an actual pre-Connect generation here, never a wildcard.
-    return listener &&
+    return !retired() && listener &&
         context.generation == session_generation_.load(std::memory_order_acquire) &&
         (!context.require_installed_owner || context.generation == installed_session_generation_) &&
         (!context.required_state || connection_state_ == *context.required_state) &&
@@ -544,12 +544,16 @@ RoomDisconnectReason Room::ToRoomDisconnectReason(proto::DisconnectReason reason
     }
 }
 
-Room::Room(asio::any_io_executor executor)
-    : executor_(executor) {
+Room::Room(asio::any_io_executor executor, std::shared_ptr<void> executor_lifetime)
+    : executor_lifetime_(std::move(executor_lifetime))
+    , callback_gate_(std::make_shared<ExecutorCallbackGate>(executor, executor_lifetime_))
+    , executor_(executor) {
     CrashHandler::InstallSignalHandlers();
 }
 
 void Room::Log(const std::string& cat, const std::string& tag, const std::string& msg) {
+    auto admission = callback_gate_->Enter();
+    if (!admission) return;
     LogHandler h;
     {
         std::lock_guard lock(room_mutex_);
@@ -604,6 +608,27 @@ Room::~Room() {
     Disconnect();
 }
 
+void Room::Retire() {
+    // Serialize repeated worker requests, but never hold room_mutex_ while
+    // waiting for I/O callbacks or WebRTC proxy/owner-thread operations.
+    std::unique_lock retire_lock(retirement_mutex_);
+    retired_.store(true, std::memory_order_release);
+    callback_gate_->Close();
+    Disconnect();
+    // Also cover a pre-connect/test Room whose Disconnect fast path has no
+    // installed transport but still owns pending timers or receive buffers.
+    CancelPendingOperations(OperationErrorCode::Cancelled, "retire", "room is retired");
+    callback_gate_->WaitForDrain();
+    std::vector<std::shared_ptr<RoomListener>> listeners;
+    LogHandler log;
+    {
+        std::lock_guard lock(room_mutex_);
+        listeners.swap(listeners_);
+        log = std::move(log_handler_);
+    }
+    retire_lock.unlock(); // Application-owned callback destructors run unlocked.
+}
+
 ConnectionState Room::connection_state() const {
     std::lock_guard lock(room_mutex_);
     return connection_state_;
@@ -652,7 +677,7 @@ std::vector<std::shared_ptr<RoomListener>> Room::GetListenersSnapshot() const {
 
 void Room::AddListener(std::shared_ptr<RoomListener> listener) {
     std::lock_guard lock(room_mutex_);
-    if (listener) {
+    if (!retired() && listener) {
         listeners_.push_back(listener);
     }
 }
@@ -810,9 +835,9 @@ public:
             target = &probe_->cpu_convert;
         } else if (point.find("upload") != std::string_view::npos) {
             target = &probe_->upload_submit;
-        } else if (point.find("present") != std::string_view::npos ||
-                   point.find("swap") != std::string_view::npos) {
-            target = &probe_->present_block;
+        } else if (point != "qt_cpu_paint") {
+            // Whole-scene GPU draw/present costs use the session canvas sink.
+            return;
         }
         target->samples.fetch_add(1, std::memory_order_relaxed);
         target->total_us.fetch_add(duration.count(), std::memory_order_relaxed);
@@ -821,6 +846,20 @@ public:
                !target->maximum_us.compare_exchange_weak(
                    maximum, duration.count(), std::memory_order_relaxed)) {
         }
+    }
+
+    std::shared_ptr<render::CanvasRenderTimingObserver> CanvasTimingObserver(
+            const render::RenderFrameMetadata& metadata) override {
+        if (!probe_ || !probe_->active.load(std::memory_order_acquire) ||
+            metadata.series_key != series_key_ ||
+            metadata.room_generation != room_generation_ ||
+            metadata.binding_epoch != binding_epoch_) {
+            return {};
+        }
+        if (const auto telemetry = telemetry_.lock()) {
+            return telemetry->canvasRenderProbe();
+        }
+        return {};
     }
 
 private:
@@ -852,6 +891,366 @@ void Room::SetSessionTelemetry(
     std::weak_ptr<telemetry::SessionTelemetry> telemetry) {
     std::lock_guard lock(room_mutex_);
     session_telemetry_ = std::move(telemetry);
+}
+
+void Room::SetRemoteMediaRecoveryHandler(RemoteMediaRecoveryHandler handler) {
+    std::lock_guard lock(room_mutex_);
+    remote_media_recovery_handler_ = std::move(handler);
+}
+
+std::optional<RemoteMediaRecoveryRequest> Room::remote_media_recovery_request() const {
+    std::lock_guard lock(room_mutex_);
+    if (!remote_media_recovery_pending_) return std::nullopt;
+    return RemoteMediaRecoveryRequest{
+        remote_media_coordinator_session_,
+        installed_session_generation_,
+        remote_media_catalog_revision_,
+        remote_media_recovery_epoch_,
+        remote_media_recovery_token_};
+}
+
+ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
+    ControlApplyResult result;
+    result.coordinator_session = plan.coordinator_session;
+    result.native_room_generation = plan.native_room_generation;
+    result.catalog_revision = plan.catalog_revision;
+    result.policy_revision = plan.policy_revision;
+    result.recovery_epoch = plan.recovery_epoch;
+    result.recovery_token = plan.recovery_token;
+
+    {
+        std::lock_guard lock(room_mutex_);
+        const auto current_generation =
+            session_generation_.load(std::memory_order_acquire);
+        if (retired()) {
+            result.reason = ControlRejectionReason::Retired;
+            return result;
+        }
+        if (plan.native_room_generation == 0 ||
+            plan.native_room_generation != current_generation ||
+            plan.native_room_generation != installed_session_generation_) {
+            result.reason = ControlRejectionReason::StaleRoomGeneration;
+            return result;
+        }
+        if (remote_media_plan_active_ &&
+            plan.coordinator_session != remote_media_coordinator_session_) {
+            result.reason = ControlRejectionReason::StaleSession;
+            return result;
+        }
+        if (remote_media_native_generation_ != 0 &&
+            plan.native_room_generation < remote_media_native_generation_) {
+            result.reason = ControlRejectionReason::StaleRoomGeneration;
+            return result;
+        }
+        const bool new_native_generation =
+            remote_media_native_generation_ != 0 &&
+            plan.native_room_generation != remote_media_native_generation_;
+        const auto catalog_floor = new_native_generation
+            ? uint64_t{0} : remote_media_catalog_revision_;
+        const auto policy_floor = new_native_generation
+            ? uint64_t{0} : remote_media_policy_revision_;
+        if (plan.catalog_revision < catalog_floor) {
+            result.reason = ControlRejectionReason::StaleCatalog;
+            return result;
+        }
+        if (plan.policy_revision < policy_floor) {
+            result.reason = ControlRejectionReason::StalePolicy;
+            return result;
+        }
+        if (remote_media_recovery_pending_) {
+            if (plan.recovery_epoch != remote_media_recovery_epoch_ ||
+                plan.recovery_token != remote_media_recovery_token_) {
+                result.reason = ControlRejectionReason::StaleRecovery;
+                return result;
+            }
+        } else if (plan.recovery_epoch != 0 || !plan.recovery_token.empty()) {
+            result.reason = ControlRejectionReason::StaleRecovery;
+            return result;
+        }
+        if (plan.video.size() > 16) {
+            result.reason = ControlRejectionReason::InvalidDemand;
+            return result;
+        }
+
+        struct ResolvedPublication {
+            TrackKey track_key;
+            SubscriptionIntentKey key;
+            std::shared_ptr<RemoteTrackPublication> publication;
+        };
+        struct ResolvedDemand {
+            const RemoteTrackDemand* demand = nullptr;
+            SubscriptionIntentKey key;
+            std::shared_ptr<RemoteTrackPublication> publication;
+        };
+        std::vector<ResolvedPublication> known;
+        std::vector<ResolvedDemand> video;
+        std::vector<ResolvedDemand> audio;
+        known.reserve(plan.known_publications.size());
+        const auto resolve_known = [&](const TrackKey& track_key) {
+            const auto participant = remote_participants_.find(
+                track_key.participant.sid);
+            if (participant == remote_participants_.end() ||
+                !participant->second ||
+                participant->second->identity() != track_key.participant.identity) {
+                result.rejected.push_back(track_key);
+                if (result.reason == ControlRejectionReason::None)
+                    result.reason = ControlRejectionReason::MissingPublication;
+                return;
+            }
+            const auto publication = participant->second->get_remote_publication(
+                track_key.publication_sid);
+            const auto membership = publication
+                ? track_memberships_.find(publication.get())
+                : track_memberships_.end();
+            if (!publication || !publication->track() ||
+                membership == track_memberships_.end() ||
+                !membership->second || membership->second->key != track_key ||
+                !membership->second->active.load(std::memory_order_acquire)) {
+                result.rejected.push_back(track_key);
+                if (result.reason == ControlRejectionReason::None)
+                    result.reason = ControlRejectionReason::MissingPublication;
+                return;
+            }
+            known.push_back({
+                track_key,
+                MakeSubscriptionIntentKeyLocked(
+                    participant->first, participant->second->identity(),
+                    publication->sid()),
+                publication});
+        };
+        for (const auto& key : plan.known_publications) {
+            if (std::any_of(known.begin(), known.end(), [&](const auto& current) {
+                    return current.track_key == key;
+                })) {
+                result.rejected.push_back(key);
+                result.reason = ControlRejectionReason::InvalidDemand;
+                continue;
+            }
+            resolve_known(key);
+        }
+        if (!result.rejected.empty()) return result;
+
+        const auto find_known = [&](const TrackKey& key) {
+            return std::find_if(known.begin(), known.end(), [&](const auto& current) {
+                return current.track_key == key;
+            });
+        };
+        const auto resolve_selected = [&](const TrackKey& track_key,
+                                          TrackKind expected_kind,
+                                          const RemoteTrackDemand* demand,
+                                          std::vector<ResolvedDemand>& target) {
+            const auto resolved = find_known(track_key);
+            if (resolved == known.end() ||
+                resolved->publication->track()->kind() != expected_kind) {
+                result.rejected.push_back(track_key);
+                result.reason = ControlRejectionReason::InvalidDemand;
+                return;
+            }
+            if (!resolved->publication->subscription_allowed()) {
+                result.rejected.push_back(track_key);
+                result.reason = ControlRejectionReason::PermissionDenied;
+                return;
+            }
+            target.push_back({
+                demand,
+                resolved->key,
+                resolved->publication});
+        };
+
+        for (const auto& demand : plan.video) {
+            if (!demand.subscribed || !demand.enabled ||
+                demand.quality == VideoQualityTier::None ||
+                demand.width == 0 || demand.height == 0 ||
+                std::any_of(video.begin(), video.end(), [&](const auto& current) {
+                    return current.demand && current.demand->key == demand.key;
+                })) {
+                result.rejected.push_back(demand.key);
+                result.reason = ControlRejectionReason::InvalidDemand;
+                continue;
+            }
+            resolve_selected(demand.key, TrackKind::Video, &demand, video);
+        }
+        for (const auto& key : plan.audio) {
+            if (std::any_of(audio.begin(), audio.end(), [&](const auto& current) {
+                    return current.publication &&
+                        track_memberships_.at(current.publication.get())->key == key;
+                })) {
+                result.rejected.push_back(key);
+                result.reason = ControlRejectionReason::InvalidDemand;
+                continue;
+            }
+            resolve_selected(key, TrackKind::Audio, nullptr, audio);
+        }
+        if (!result.rejected.empty()) return result;
+
+        const auto contains_key = [](const auto& values,
+                                     const SubscriptionIntentKey& key) {
+            return std::any_of(values.begin(), values.end(), [&](const auto& value) {
+                return value.key.participant_sid == key.participant_sid &&
+                    value.key.participant_identity == key.participant_identity &&
+                    value.key.track_sid == key.track_sid;
+            });
+        };
+        const bool repeated_revision = remote_media_plan_active_ &&
+            !new_native_generation &&
+            plan.policy_revision == remote_media_policy_revision_;
+        bool changed = false;
+
+        for (const auto& scoped : known) {
+            const auto& publication = scoped.publication;
+            const auto& key = scoped.key;
+            auto& intent = EnsureSubscriptionIntentLocked(key);
+            const bool is_video =
+                publication->track()->kind() == TrackKind::Video;
+            const bool selected = is_video
+                ? contains_key(video, key) : contains_key(audio, key);
+            bool enabled = intent.enabled;
+            auto quality = intent.quality;
+            uint32_t width = intent.width;
+            uint32_t height = intent.height;
+            uint32_t max_fps = intent.max_fps;
+            uint32_t priority = intent.priority;
+            if (is_video) {
+                if (selected) {
+                    const auto found = std::find_if(
+                        video.begin(), video.end(), [&](const auto& value) {
+                            return value.key.participant_sid == key.participant_sid &&
+                                value.key.participant_identity == key.participant_identity &&
+                                value.key.track_sid == key.track_sid;
+                        });
+                    const auto& demand = *found->demand;
+                    enabled = demand.enabled;
+                    quality = VideoQualityForTier(demand.quality);
+                    width = demand.width;
+                    height = demand.height;
+                    max_fps = demand.max_fps.value_or(0);
+                    priority = demand.priority;
+                } else {
+                    enabled = false;
+                    quality = proto::VideoQuality::OFF;
+                    width = 0;
+                    height = 0;
+                    max_fps = 0;
+                    priority = 0;
+                }
+            }
+            const bool subscription_changed = intent.subscribed != selected;
+            const bool settings_changed = is_video && !IsVideoSettingsEqual(
+                intent, enabled, quality, width, height, max_fps, priority);
+            changed = changed || subscription_changed || settings_changed;
+            if (repeated_revision && (subscription_changed || settings_changed)) {
+                result.reason = ControlRejectionReason::StalePolicy;
+                return result;
+            }
+        }
+
+        remote_media_plan_active_ = true;
+        remote_media_coordinator_session_ = plan.coordinator_session;
+        remote_media_native_generation_ = plan.native_room_generation;
+        remote_media_catalog_revision_ = plan.catalog_revision;
+        remote_media_policy_revision_ = plan.policy_revision;
+
+        if (!repeated_revision || changed) {
+            for (const auto& scoped : known) {
+                const auto& publication = scoped.publication;
+                const auto& key = scoped.key;
+                auto& intent = EnsureSubscriptionIntentLocked(key);
+                const bool is_video =
+                    publication->track()->kind() == TrackKind::Video;
+                const bool selected = is_video
+                    ? contains_key(video, key) : contains_key(audio, key);
+                bool enabled = intent.enabled;
+                auto quality = intent.quality;
+                uint32_t width = intent.width;
+                uint32_t height = intent.height;
+                uint32_t max_fps = intent.max_fps;
+                uint32_t priority = intent.priority;
+                if (is_video) {
+                    if (selected) {
+                        const auto found = std::find_if(
+                            video.begin(), video.end(), [&](const auto& value) {
+                                return value.key.participant_sid == key.participant_sid &&
+                                    value.key.participant_identity == key.participant_identity &&
+                                    value.key.track_sid == key.track_sid;
+                            });
+                        const auto& demand = *found->demand;
+                        enabled = demand.enabled;
+                        quality = VideoQualityForTier(demand.quality);
+                        width = demand.width;
+                        height = demand.height;
+                        max_fps = demand.max_fps.value_or(0);
+                        priority = demand.priority;
+                    } else {
+                        enabled = false;
+                        quality = proto::VideoQuality::OFF;
+                        width = height = max_fps = priority = 0;
+                    }
+                }
+                const bool subscription_changed = intent.subscribed != selected;
+                const bool settings_changed = is_video && !IsVideoSettingsEqual(
+                    intent, enabled, quality, width, height, max_fps, priority);
+                if (!subscription_changed && !settings_changed) continue;
+
+                const bool subscription_dirty =
+                    subscription_changed || intent.subscription_dirty ||
+                    !intent.sent_subscribed.has_value() ||
+                    *intent.sent_subscribed != selected;
+                const bool settings_dirty = is_video &&
+                    (settings_changed || intent.settings_dirty);
+
+                intent.subscribed = selected;
+                intent.enabled = enabled;
+                intent.quality = quality;
+                intent.width = width;
+                intent.height = height;
+                intent.max_fps = max_fps;
+                intent.priority = priority;
+                intent.revision = next_subscription_revision_++;
+                intent.policy_revision = plan.policy_revision;
+                intent.subscription_dirty = subscription_dirty;
+                intent.settings_dirty = settings_dirty;
+                intent.accepted_at = selected
+                    ? std::chrono::steady_clock::now()
+                    : std::chrono::steady_clock::time_point{};
+
+                std::shared_ptr<SubscriptionTelemetryOperation> operation;
+                if (subscription_changed) {
+                    if (const auto sink = session_telemetry_.lock()) {
+                        operation = std::make_shared<SubscriptionTelemetryOperation>(
+                            sink, selected ? telemetry::OperationKind::Subscribe
+                                           : telemetry::OperationKind::Unsubscribe);
+                    }
+                }
+                QueueSubscriptionUpdateLocked(key);
+                auto pending = pending_subscription_updates_.find(key);
+                if (subscription_changed &&
+                    pending != pending_subscription_updates_.end()) {
+                    pending->second.telemetry_operation = std::move(operation);
+                }
+
+                RemotePublicationControlRequest control;
+                control.sequence = 0;
+                control.kind = RemotePublicationControlRequest::Kind::Subscription;
+                control.subscribed = selected;
+                control.enabled = enabled;
+                control.quality = quality;
+                control.width = width;
+                control.height = height;
+                control.priority = priority;
+                publication->CommitControl(control);
+
+            }
+        }
+        if (remote_media_recovery_pending_) CompleteRemoteMediaRecoveryLocked();
+        result.accepted = true;
+        result.pending_reconnect =
+            connection_state_ == ConnectionState::Reconnecting ||
+            reconnect_active_;
+        result.pending_send = !pending_subscription_updates_.empty();
+        ScheduleSubscriptionDrainLocked();
+    }
+
+    return result;
 }
 
 std::shared_ptr<MembershipState> Room::EnsureMembershipLocked(
@@ -934,9 +1333,20 @@ ParticipantEvent Room::MakeParticipantEventLocked(
     event.kind = kind;
     auto state = EnsureMembershipLocked(participant, is_local);
     if (!state) return event;
+    event.native_room_generation = state->key.native_room_generation;
     event.participant.key = state->key;
     event.participant.ticket = state;
     event.participant.state = participant->SnapshotState();
+    const auto publications = participant->tracks();
+    event.participant.publications.reserve(publications.size());
+    for (const auto& [_, publication] : publications) {
+        auto publication_state = EnsureTrackMembershipLocked(participant, publication);
+        if (!publication_state || !publication) continue;
+        event.participant.publications.push_back({
+            publication_state->key,
+            publication_state,
+            publication->SnapshotState()});
+    }
     event.participant.is_local = is_local;
     return event;
 }
@@ -997,7 +1407,7 @@ void Room::EnqueueParticipantEventLocked(ParticipantEvent event,
 
     participant_event_drain_scheduled_ = true;
     std::weak_ptr<Room> weak = weak_from_this();
-    asio::post(executor_, [weak] {
+    callback_gate_->Post([weak] {
         if (auto room = weak.lock()) room->DrainParticipantEvents();
     });
 }
@@ -1086,7 +1496,7 @@ void Room::DrainParticipantEvents() {
         return;
     }
     std::weak_ptr<Room> weak = weak_from_this();
-    asio::post(executor_, [weak] {
+    callback_gate_->Post([weak] {
         if (auto room = weak.lock()) room->DrainParticipantEvents();
     });
 }
@@ -1155,6 +1565,7 @@ asio::awaitable<bool> Room::Connect(const std::string& url, const std::string& t
 }
 
 asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::string& token, const SignalOptions& opts) {
+    auto operation_admission = AdmitOperation(OperationKind::Connect, "ConnectAsync");
     auto self = shared_from_this();
     std::chrono::steady_clock::time_point connect_accepted_at;
     const std::string attempt_url = url;
@@ -1168,6 +1579,10 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
     std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner;
     {
         std::lock_guard lock(room_mutex_);
+        if (retired()) {
+            throw OperationError(OperationKind::Connect, OperationErrorCode::SessionClosed,
+                                 "connect_start", "room is retired");
+        }
         if (connection_state_ != ConnectionState::Disconnected ||
             installed_session_generation_ != 0) {
             throw OperationError(OperationKind::Connect,
@@ -2469,6 +2884,7 @@ std::shared_ptr<ByteStreamWriter> Room::CreateByteStreamWriter(
 }
 
 asio::awaitable<std::string> Room::SendRpcRequest(const RpcPacket& packet) {
+    auto operation_admission = AdmitOperation(OperationKind::SendData, "SendRpcRequest");
     auto self = shared_from_this();
     auto pending = std::make_shared<PendingRpcCall>();
     pending->timer = std::make_shared<asio::steady_timer>(
@@ -2487,38 +2903,35 @@ asio::awaitable<std::string> Room::SendRpcRequest(const RpcPacket& packet) {
     RpcPacket response_packet = co_await asio::async_initiate<decltype(asio::use_awaitable), void(RpcPacket)>(
         [self, pending, packet, data](auto handler) mutable {
             auto handler_ptr = std::make_shared<decltype(handler)>(std::move(handler));
-            
-            pending->completion_cb = [self, pending, request_id = packet.request_id, handler_ptr](const RpcPacket& resp) {
-                bool should_call = false;
-                {
-                    std::lock_guard<std::mutex> lock(self->pending_rpc_mutex_);
-                    if (!pending->finished) {
+            RpcPacket cancelled;
+            cancelled.has_error = true;
+            cancelled.error_code = static_cast<int>(RpcErrorCode::NETWORK_ERROR);
+            cancelled.error_message = "Room session closed";
+            using Completion = CancellableExecutorCallback<RpcPacket>;
+            auto completion = Completion::Create(self->callback_gate_,
+                [self, pending, handler_ptr](RpcPacket resp) {
+                    {
+                        std::lock_guard lock(self->pending_rpc_mutex_);
                         pending->finished = true;
-                        should_call = true;
+                        pending->completion_cb = {};
                     }
-                }
-                if (should_call) {
                     std::error_code ec;
                     pending->timer->cancel(ec);
                     (*handler_ptr)(resp);
-                }
-            };
-
-            pending->timer->async_wait([self, pending, request_id = packet.request_id, handler_ptr](const std::error_code& ec) {
-                bool should_call = false;
-                {
-                    std::lock_guard<std::mutex> lock(self->pending_rpc_mutex_);
-                    if (!pending->finished) {
-                        pending->finished = true;
-                        should_call = true;
-                    }
-                }
-                if (should_call && !ec) {
+                }, std::move(cancelled));
+            {
+                std::lock_guard lock(self->pending_rpc_mutex_);
+                pending->completion_cb = [weak = std::weak_ptr<Completion>(completion)](const RpcPacket& resp) {
+                    if (auto live = weak.lock()) live->Complete(resp);
+                };
+            }
+            pending->timer->async_wait([completion](const std::error_code& ec) {
+                if (!ec) {
                     RpcPacket timeout_resp;
                     timeout_resp.has_error = true;
                     timeout_resp.error_code = static_cast<int>(RpcErrorCode::TIMEOUT);
                     timeout_resp.error_message = "RPC call timed out";
-                    (*handler_ptr)(timeout_resp);
+                    completion->Complete(std::move(timeout_resp));
                 }
             });
 
@@ -2547,6 +2960,7 @@ void Room::OnIncomingRpcPacket(const RpcPacket& packet) {
 void Room::OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation) {
     if (packet.type == RpcPacketType::Response) {
         std::shared_ptr<PendingRpcCall> pending;
+        std::function<void(const RpcPacket&)> completion;
         {
             std::lock_guard room_lock(room_mutex_);
             if (!IsNativeGenerationCurrentLocked(generation)) return;
@@ -2554,16 +2968,11 @@ void Room::OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation) {
             auto it = pending_rpc_calls_.find(packet.request_id);
             if (it != pending_rpc_calls_.end()) {
                 pending = it->second;
+                completion = pending->completion_cb;
                 pending_rpc_calls_.erase(it);
             }
         }
-        if (pending) {
-            std::error_code ec;
-            pending->timer->cancel(ec);
-            if (pending->completion_cb) {
-                pending->completion_cb(packet);
-            }
-        }
+        if (completion) completion(packet);
     } else if (packet.type == RpcPacketType::Request) {
         std::shared_ptr<LocalParticipant> local;
         {
@@ -3314,12 +3723,9 @@ void Room::OnIceConnected() {
 
 void Room::OnIceConnected(uint64_t generation) {
     BeforeNativeEventCommit(generation);
-    std::shared_ptr<SignalClient> signal;
-    std::map<std::string, std::vector<std::string>> videos;
     {
         std::lock_guard lock(room_mutex_);
         if (!IsNativeGenerationCurrentLocked(generation)) return;
-        signal = signal_client_;
         for (const auto& kv : remote_participants_) {
             if (kv.second) {
                 for (const auto& pub_kv : kv.second->tracks()) {
@@ -3331,16 +3737,11 @@ void Room::OnIceConnected(uint64_t generation) {
                         kv.first, kv.second->identity(), pub_kv.first);
                     auto& intent = EnsureSubscriptionIntentLocked(key);
                     if (intent.subscribed) {
-                        videos[kv.first].push_back(pub_kv.first);
+                        if (remote_media_plan_active_) intent.settings_dirty = true;
                         QueueSubscriptionUpdateLocked(key);
                     }
                 }
             }
-        }
-    }
-    if (signal) {
-        for (const auto& [sid, tracks] : videos) {
-            for (const auto& track : tracks) signal->SendUpdateTrackSettings(track, false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
         }
     }
 }
@@ -3852,6 +4253,7 @@ Room::RemoteSubscriptionIntent& Room::EnsureSubscriptionIntentLocked(
     if (inserted) {
         it->second.subscribed = session_auto_subscribe_;
         it->second.revision = next_subscription_revision_++;
+        it->second.sent_subscribed = session_auto_subscribe_;
         if (it->second.subscribed) {
             it->second.accepted_at = std::chrono::steady_clock::now();
         }
@@ -3865,21 +4267,73 @@ const Room::RemoteSubscriptionIntent* Room::FindSubscriptionIntentLocked(
     return it == subscription_intents_.end() ? nullptr : &it->second;
 }
 
+proto::VideoQuality Room::VideoQualityForTier(VideoQualityTier quality) {
+    switch (quality) {
+    case VideoQualityTier::None: return proto::VideoQuality::OFF;
+    case VideoQualityTier::P180: return proto::VideoQuality::LOW;
+    case VideoQualityTier::P360: return proto::VideoQuality::MEDIUM;
+    case VideoQualityTier::P720:
+    case VideoQualityTier::P1080: return proto::VideoQuality::HIGH;
+    }
+    return proto::VideoQuality::OFF;
+}
+
+bool Room::IsVideoSettingsEqual(
+    const RemoteSubscriptionIntent& intent,
+    bool enabled,
+    proto::VideoQuality quality,
+    uint32_t width,
+    uint32_t height,
+    uint32_t max_fps,
+    uint32_t priority) {
+    return intent.enabled == enabled && intent.quality == quality &&
+        intent.width == width && intent.height == height &&
+        intent.max_fps == max_fps && intent.priority == priority;
+}
+
 void Room::QueueSubscriptionUpdateLocked(const SubscriptionIntentKey& key) {
     const auto* intent = FindSubscriptionIntentLocked(key);
-    if (!intent) return;
+    if (!intent || (!intent->subscription_dirty && !intent->settings_dirty)) return;
+    std::shared_ptr<SubscriptionTelemetryOperation> preserved_operation;
     const auto existing = pending_subscription_updates_.find(key);
     if (existing != pending_subscription_updates_.end()) {
         if (existing->second.subscribed == intent->subscribed &&
+            existing->second.enabled == intent->enabled &&
+            existing->second.quality == intent->quality &&
+            existing->second.width == intent->width &&
+            existing->second.height == intent->height &&
+            existing->second.max_fps == intent->max_fps &&
+            existing->second.priority == intent->priority &&
             existing->second.revision == intent->revision) {
+            existing->second.subscription_dirty =
+                existing->second.subscription_dirty || intent->subscription_dirty;
+            existing->second.settings_dirty =
+                existing->second.settings_dirty || intent->settings_dirty;
             ScheduleSubscriptionDrainLocked();
             return;
+        }
+        if (!existing->second.in_flight && intent->subscription_dirty &&
+            existing->second.subscribed == intent->subscribed) {
+            preserved_operation =
+                std::move(existing->second.telemetry_operation);
         }
         FinishSubscriptionOperationLocked(
             existing->second, telemetry::OperationOutcome::Cancelled);
     }
-    pending_subscription_updates_[key] = {
-        intent->subscribed, intent->revision, false, {}};
+    PendingSubscriptionUpdate update;
+    update.subscribed = intent->subscribed;
+    update.enabled = intent->enabled;
+    update.quality = intent->quality;
+    update.width = intent->width;
+    update.height = intent->height;
+    update.max_fps = intent->max_fps;
+    update.priority = intent->priority;
+    update.revision = intent->revision;
+    update.policy_revision = intent->policy_revision;
+    update.subscription_dirty = intent->subscription_dirty;
+    update.settings_dirty = intent->settings_dirty;
+    update.telemetry_operation = std::move(preserved_operation);
+    pending_subscription_updates_[key] = std::move(update);
     ScheduleSubscriptionDrainLocked();
 }
 
@@ -3915,7 +4369,7 @@ void Room::ScheduleSubscriptionDrainLocked() {
     const auto sender_operation = subscription_sender_operation_;
     const auto signal = signal_client_;
     std::weak_ptr<Room> weak = weak_from_this();
-    asio::post(executor_, [weak, logical_session, sender_operation, signal] {
+    callback_gate_->Post([weak, logical_session, sender_operation, signal] {
         if (const auto room = weak.lock()) {
             livekit::safe_co_spawn(room->executor_,
                 [room, logical_session, sender_operation, signal]() -> asio::awaitable<void> {
@@ -3933,6 +4387,7 @@ asio::awaitable<void> Room::DrainSubscriptionUpdates(
     for (;;) {
         SubscriptionIntentKey key;
         PendingSubscriptionUpdate update;
+        int send_phase = 5;
         std::shared_ptr<ConnectAttemptTestHooks> test_hooks;
         {
             std::lock_guard lock(room_mutex_);
@@ -3951,13 +4406,45 @@ asio::awaitable<void> Room::DrainSubscriptionUpdates(
                 subscription_sender_active_ = false;
                 co_return;
             }
-            auto pending = pending_subscription_updates_.begin();
+            const auto phase = [&](const SubscriptionIntentKey& candidate_key,
+                                   const PendingSubscriptionUpdate& candidate) {
+                if (!candidate.subscribed && candidate.settings_dirty) return 0;
+                if (!candidate.subscribed && candidate.subscription_dirty) return 1;
+                const auto current = FindSubscriptionIntentLocked(candidate_key);
+                const bool retained = current && current->sent_subscribed.value_or(
+                    session_auto_subscribe_);
+                if (candidate.subscribed && candidate.settings_dirty && retained) return 2;
+                if (candidate.subscribed && candidate.settings_dirty) return 3;
+                if (candidate.subscribed && candidate.subscription_dirty) return 4;
+                return 5;
+            };
+            auto pending = pending_subscription_updates_.end();
+            int selected_phase = 6;
+            for (auto candidate = pending_subscription_updates_.begin();
+                 candidate != pending_subscription_updates_.end(); ++candidate) {
+                const auto candidate_phase = phase(candidate->first, candidate->second);
+                if (candidate_phase < selected_phase) {
+                    selected_phase = candidate_phase;
+                    pending = candidate;
+                }
+            }
+            if (pending == pending_subscription_updates_.end() || selected_phase == 5) {
+                subscription_sender_active_ = false;
+                co_return;
+            }
             key = pending->first;
+            send_phase = selected_phase;
             pending->second.in_flight = true;
             update = pending->second;
             const auto* intent = FindSubscriptionIntentLocked(key);
             if (!intent || intent->revision != update.revision ||
-                intent->subscribed != update.subscribed) {
+                intent->subscribed != update.subscribed ||
+                intent->enabled != update.enabled ||
+                intent->quality != update.quality ||
+                intent->width != update.width ||
+                intent->height != update.height ||
+                intent->max_fps != update.max_fps ||
+                intent->priority != update.priority) {
                 FinishSubscriptionOperationLocked(
                     update, telemetry::OperationOutcome::Cancelled);
                 pending_subscription_updates_.erase(pending);
@@ -3966,15 +4453,28 @@ asio::awaitable<void> Room::DrainSubscriptionUpdates(
             test_hooks = connect_attempt_test_hooks_;
         }
 
+        const bool send_settings =
+            send_phase == 0 || send_phase == 2 || send_phase == 3;
         proto::SignalRequest request;
-        auto* subscription = request.mutable_subscription();
-        subscription->set_subscribe(update.subscribed);
-        subscription->add_track_sids(key.track_sid);
-        auto* participant_tracks = subscription->add_participant_tracks();
-        participant_tracks->set_participant_sid(key.participant_sid);
-        participant_tracks->add_track_sids(key.track_sid);
+        if (send_settings) {
+            auto* settings = request.mutable_track_setting();
+            settings->add_track_sids(key.track_sid);
+            settings->set_disabled(!update.enabled);
+            settings->set_quality(update.quality);
+            settings->set_width(update.width);
+            settings->set_height(update.height);
+            settings->set_fps(update.max_fps);
+            settings->set_priority(update.priority);
+        } else {
+            auto* subscription = request.mutable_subscription();
+            subscription->set_subscribe(update.subscribed);
+            subscription->add_track_sids(key.track_sid);
+            auto* participant_tracks = subscription->add_participant_tracks();
+            participant_tracks->set_participant_sid(key.participant_sid);
+            participant_tracks->add_track_sids(key.track_sid);
+        }
         try {
-            if (test_hooks && test_hooks->before_subscription_send) {
+            if (!send_settings && test_hooks && test_hooks->before_subscription_send) {
                 co_await test_hooks->before_subscription_send(
                     update.subscribed, update.revision);
             }
@@ -3992,20 +4492,49 @@ asio::awaitable<void> Room::DrainSubscriptionUpdates(
             co_await signal->SendAsync(request);
             {
                 std::lock_guard lock(room_mutex_);
-                FinishSubscriptionOperationLocked(
-                    update, telemetry::OperationOutcome::Success);
                 const auto pending = pending_subscription_updates_.find(key);
-                if (pending != pending_subscription_updates_.end() &&
+                const bool current_pending =
+                    pending != pending_subscription_updates_.end() &&
                     pending->second.revision == update.revision &&
                     pending->second.telemetry_operation ==
-                        update.telemetry_operation) {
-                    pending_subscription_updates_.erase(pending);
+                        update.telemetry_operation;
+                if (!send_settings) {
+                    FinishSubscriptionOperationLocked(
+                        update, telemetry::OperationOutcome::Success);
+                } else if (!current_pending && update.telemetry_operation) {
+                    FinishSubscriptionOperationLocked(
+                        update, telemetry::OperationOutcome::Cancelled);
+                }
+                if (current_pending) {
+                    auto intent = subscription_intents_.find(key);
+                    if (send_settings) {
+                        pending->second.settings_dirty = false;
+                        if (intent != subscription_intents_.end() &&
+                            intent->second.revision == update.revision) {
+                            intent->second.settings_dirty = false;
+                        }
+                    } else {
+                        pending->second.subscription_dirty = false;
+                        pending->second.telemetry_operation.reset();
+                        if (intent != subscription_intents_.end() &&
+                            intent->second.revision == update.revision) {
+                            intent->second.subscription_dirty = false;
+                            intent->second.sent_subscribed = update.subscribed;
+                        }
+                    }
+                    pending->second.in_flight = false;
+                    if (!pending->second.settings_dirty &&
+                        !pending->second.subscription_dirty) {
+                        pending_subscription_updates_.erase(pending);
+                    }
                 }
             }
         } catch (...) {
             std::lock_guard lock(room_mutex_);
-            FinishSubscriptionOperationLocked(
-                update, TelemetryOutcome(std::current_exception()));
+            if (update.telemetry_operation) {
+                FinishSubscriptionOperationLocked(
+                    update, TelemetryOutcome(std::current_exception()));
+            }
             if (logical_session == subscription_session_generation_ &&
                 subscription_sender_active_ &&
                 subscription_sender_session_ == logical_session &&
@@ -4025,8 +4554,7 @@ asio::awaitable<void> Room::DrainSubscriptionUpdates(
                 if (!newer_update_pending) {
                     const auto* current = FindSubscriptionIntentLocked(key);
                     if (current) {
-                        pending_subscription_updates_[key] = {
-                            current->subscribed, current->revision, false, {}};
+                        QueueSubscriptionUpdateLocked(key);
                     }
                 }
                 subscription_sender_active_ = false;
@@ -4040,9 +4568,39 @@ void Room::PauseSubscriptionSendingLocked() {
     subscription_recovery_barrier_ = true;
     subscription_sender_active_ = false;
     subscription_sender_operation_ = next_subscription_sender_operation_++;
-    for (const auto& [key, intent] : subscription_intents_) {
+    for (auto& [key, intent] : subscription_intents_) {
+        intent.subscription_dirty = true;
+        const auto participant = remote_participants_.find(key.participant_sid);
+        const auto publication = participant != remote_participants_.end() &&
+                participant->second
+            ? participant->second->get_publication(key.track_sid) : nullptr;
+        if (publication && publication->track() &&
+            publication->track()->kind() == TrackKind::Video) {
+            intent.settings_dirty = true;
+        }
         QueueSubscriptionUpdateLocked(key);
     }
+}
+
+RemoteMediaRecoveryRequest Room::BeginRemoteMediaRecoveryLocked() {
+    ++remote_media_recovery_epoch_;
+    if (remote_media_recovery_epoch_ == 0) ++remote_media_recovery_epoch_;
+    remote_media_recovery_token_ =
+        std::to_string(subscription_session_generation_) + ":" +
+        std::to_string(installed_session_generation_) + ":" +
+        std::to_string(remote_media_recovery_epoch_);
+    remote_media_recovery_pending_ = true;
+    return RemoteMediaRecoveryRequest{
+        remote_media_coordinator_session_,
+        installed_session_generation_,
+        remote_media_catalog_revision_,
+        remote_media_recovery_epoch_,
+        remote_media_recovery_token_};
+}
+
+void Room::CompleteRemoteMediaRecoveryLocked() {
+    remote_media_recovery_pending_ = false;
+    remote_media_recovery_token_.clear();
 }
 
 void Room::FinishSubscriptionRecoveryLocked(
@@ -4059,9 +4617,18 @@ void Room::FinishSubscriptionRecoveryLocked(
             current->second.revision == revision &&
             pending != pending_subscription_updates_.end() &&
             pending->second.revision == revision) {
-            FinishSubscriptionOperationLocked(
-                pending->second, telemetry::OperationOutcome::Success);
-            pending_subscription_updates_.erase(pending);
+            if (pending->second.subscription_dirty) {
+                FinishSubscriptionOperationLocked(
+                    pending->second, telemetry::OperationOutcome::Success);
+                current->second.subscription_dirty = false;
+                current->second.sent_subscribed = current->second.subscribed;
+                pending->second.subscription_dirty = false;
+                pending->second.telemetry_operation.reset();
+            }
+            pending->second.in_flight = false;
+            if (!pending->second.settings_dirty) {
+                pending_subscription_updates_.erase(pending);
+            }
         }
     }
     subscription_recovery_barrier_ = false;
@@ -4082,6 +4649,14 @@ void Room::ResetSubscriptionSessionLocked(bool auto_subscribe) {
     subscription_sender_active_ = false;
     subscription_sender_session_ = subscription_session_generation_;
     subscription_sender_operation_ = next_subscription_sender_operation_++;
+    remote_media_native_generation_ = 0;
+    remote_media_coordinator_session_ = 0;
+    remote_media_catalog_revision_ = 0;
+    remote_media_policy_revision_ = 0;
+    remote_media_recovery_epoch_ = 0;
+    remote_media_plan_active_ = false;
+    remote_media_recovery_pending_ = false;
+    remote_media_recovery_token_.clear();
 }
 
 void Room::ClearSubscriptionSessionLocked() {
@@ -4136,9 +4711,18 @@ std::shared_ptr<RemoteTrackPublication> Room::CreateRemoteTrackPublication(
     // belong to each publication object. The successor starts at sequence 1;
     // generation and canonical-pointer checks still reject the old controller.
     intent.last_request_sequence = 0;
-    return std::make_shared<RemoteTrackPublication>(
+    auto publication = std::make_shared<RemoteTrackPublication>(
         std::move(track), track_sid, name, type, generation,
         std::move(controller), intent.subscribed);
+    RemotePublicationControlRequest restored;
+    restored.kind = RemotePublicationControlRequest::Kind::Settings;
+    restored.enabled = intent.enabled;
+    restored.quality = intent.quality;
+    restored.width = intent.width;
+    restored.height = intent.height;
+    restored.priority = intent.priority;
+    publication->CommitControl(restored);
+    return publication;
 }
 
 RemotePublicationControlDispatch Room::QueueRemotePublicationControl(
@@ -4177,11 +4761,17 @@ RemotePublicationControlDispatch Room::QueueRemotePublicationControl(
             }
             intent.last_request_sequence = request.sequence;
             intent.subscribed = *request.subscribed;
+            const bool is_video = canonical->track() &&
+                canonical->track()->kind() == TrackKind::Video;
+            if (is_video) {
+                intent.enabled = intent.subscribed;
+                intent.settings_dirty = true;
+            }
             intent.revision = next_subscription_revision_++;
+            intent.subscription_dirty = true;
             intent.accepted_at = intent.subscribed
                 ? std::chrono::steady_clock::now()
                 : std::chrono::steady_clock::time_point{};
-            canonical->CommitControl(request);
 
             CancelPendingSubscriptionUpdateLocked(key);
             std::shared_ptr<SubscriptionTelemetryOperation> telemetry_operation;
@@ -4192,9 +4782,16 @@ RemotePublicationControlDispatch Room::QueueRemotePublicationControl(
                         intent.subscribed ? telemetry::OperationKind::Subscribe
                                           : telemetry::OperationKind::Unsubscribe);
             }
-            pending_subscription_updates_[key] = {
-                intent.subscribed, intent.revision, false,
-                std::move(telemetry_operation)};
+            QueueSubscriptionUpdateLocked(key);
+            const auto pending = pending_subscription_updates_.find(key);
+            if (pending != pending_subscription_updates_.end()) {
+                pending->second.telemetry_operation =
+                    std::move(telemetry_operation);
+            }
+
+            auto committed = request;
+            if (is_video) committed.enabled = intent.enabled;
+            canonical->CommitControl(committed);
 
             if (!intent.subscribed) {
                 if (canonical->track()) {
@@ -4221,62 +4818,41 @@ RemotePublicationControlDispatch Room::QueueRemotePublicationControl(
         return RemotePublicationControlDispatch::Queued;
     }
 
-    std::shared_ptr<RemoteTrackPublication> canonical;
-    {
-        std::lock_guard lock(room_mutex_);
-        if (connection_state_ != ConnectionState::Connected ||
-            generation != session_generation_.load(std::memory_order_acquire) ||
-            !signal_client_) {
-            return RemotePublicationControlDispatch::Rejected;
-        }
-        const auto participant = remote_participants_.find(participant_sid);
-        if (participant == remote_participants_.end()) {
-            return RemotePublicationControlDispatch::Rejected;
-        }
-        canonical = participant->second->get_remote_publication(publication->sid());
-        if (!canonical || canonical.get() != publication ||
-            canonical->session_generation() != generation) {
-            return RemotePublicationControlDispatch::Rejected;
-        }
+    std::lock_guard lock(room_mutex_);
+    if ((connection_state_ != ConnectionState::Connected &&
+         connection_state_ != ConnectionState::Reconnecting) ||
+        generation != session_generation_.load(std::memory_order_acquire)) {
+        return RemotePublicationControlDispatch::Rejected;
+    }
+    const auto participant = remote_participants_.find(participant_sid);
+    if (participant == remote_participants_.end() || !participant->second) {
+        return RemotePublicationControlDispatch::Rejected;
+    }
+    const auto canonical =
+        participant->second->get_remote_publication(publication->sid());
+    if (!canonical || canonical.get() != publication ||
+        canonical->session_generation() != generation || !canonical->track() ||
+        canonical->track()->kind() != TrackKind::Video) {
+        return RemotePublicationControlDispatch::Rejected;
     }
 
-    // All live controls flow through the Room executor. The delayed task
-    // repeats ownership/generation validation, so an unpublish/disconnect in
-    // between cannot send a request or mutate a stale publication.
-    std::weak_ptr<Room> weak_room = weak_from_this();
-    std::weak_ptr<RemoteTrackPublication> weak_publication = canonical;
-    asio::post(executor_, [weak_room, weak_publication, participant_sid, generation, request]() {
-        const auto room = weak_room.lock();
-        const auto canonical = weak_publication.lock();
-        if (!room || !canonical) return;
-
-        std::shared_ptr<SignalClient> signal;
-        {
-            std::lock_guard lock(room->room_mutex_);
-            if (room->connection_state_ != ConnectionState::Connected ||
-                generation != room->session_generation_.load(std::memory_order_acquire) ||
-                !room->signal_client_) {
-                return;
-            }
-            const auto participant = room->remote_participants_.find(participant_sid);
-            if (participant == room->remote_participants_.end() ||
-                participant->second->get_remote_publication(canonical->sid()) != canonical ||
-                canonical->session_generation() != generation) {
-                return;
-            }
-            signal = room->signal_client_;
-        }
-
-        signal->SendUpdateTrackSettings(
-            canonical->sid(),
-            !request.enabled.value_or(canonical->is_enabled()),
-            request.quality.value_or(canonical->current_quality()),
-            request.width.value_or(canonical->current_width()),
-            request.height.value_or(canonical->current_height()),
-            0,
-            request.priority.value_or(canonical->priority()));
-        canonical->CommitControl(request);
-    });
+    const auto key = MakeSubscriptionIntentKeyLocked(
+        participant_sid, participant->second->identity(), canonical->sid());
+    auto& intent = EnsureSubscriptionIntentLocked(key);
+    if (request.sequence <= intent.last_request_sequence) {
+        return RemotePublicationControlDispatch::Rejected;
+    }
+    intent.last_request_sequence = request.sequence;
+    intent.enabled = request.enabled.value_or(intent.enabled);
+    intent.quality = request.quality.value_or(intent.quality);
+    intent.width = request.width.value_or(intent.width);
+    intent.height = request.height.value_or(intent.height);
+    intent.priority = request.priority.value_or(intent.priority);
+    intent.revision = next_subscription_revision_++;
+    intent.settings_dirty = true;
+    QueueSubscriptionUpdateLocked(key);
+    canonical->CommitControl(request);
+    ScheduleSubscriptionDrainLocked();
     return RemotePublicationControlDispatch::Queued;
 }
 
@@ -4415,6 +4991,8 @@ void Room::DetachRemotePublicationMedia(RemoteTrackPublication* publication,
 }
 
 void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
+    auto operation_admission = callback_gate_->Enter();
+    if (!operation_admission) return;
     if (!track) return;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
     std::string stream_id;
@@ -4549,10 +5127,14 @@ void Room::ApplySimulcastParameters(webrtc::scoped_refptr<webrtc::RtpSenderInter
 }
 
 void Room::NegotiatePublisher() {
+    auto operation_admission = callback_gate_->Enter();
+    if (!operation_admission) return;
     NegotiatePublisher(session_generation_.load(std::memory_order_acquire));
 }
 
 void Room::NegotiatePublisher(uint64_t generation) {
+    auto operation_admission = callback_gate_->Enter();
+    if (!operation_admission) return;
     std::chrono::milliseconds timeout;
     {
         std::lock_guard lock(room_mutex_);
@@ -4571,6 +5153,7 @@ void Room::NegotiatePublisher(uint64_t generation) {
 
 asio::awaitable<webrtc::scoped_refptr<webrtc::RtpSenderInterface>>
 Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation) {
+    auto operation_admission = AdmitOperation(OperationKind::PublishTrack, "AddTrackToPublisherAsync");
     if (!track) {
         throw OperationError(OperationKind::PublishTrack,
                              OperationErrorCode::InvalidState,
@@ -4636,6 +5219,14 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
 
     auto completion = std::make_shared<AwaitableState<
         webrtc::scoped_refptr<webrtc::RtpSenderInterface>>>(executor_);
+    auto cancel_native = callback_gate_->CancelWhenClosed(
+        [weak = std::weak_ptr(completion)] {
+            if (auto pending = weak.lock()) {
+                FailAwaitable(pending, std::make_exception_ptr(OperationError(
+                    OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                    "install_sender", "room is retired")));
+            }
+        });
     // WebRTC is linked with a static CRT and PostTask type-erases the closure
     // inside webrtc::Thread. Keep the closure trivially destructible: putting
     // std::string/std::vector directly in it can make absl::AnyInvocable free
@@ -4820,12 +5411,14 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
 asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
     std::shared_ptr<Track> track,
     const proto::SignalRequest& request) {
+    auto operation_admission = AdmitOperation(OperationKind::PublishTrack, "PublishLocalTrackAsync");
     co_return co_await PublishLocalTrackAsync(std::move(track), request,
         session_generation_.load(std::memory_order_acquire));
 }
 
 asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
     std::shared_ptr<Track> track, const proto::SignalRequest& request, uint64_t generation) {
+    auto operation_admission = AdmitOperation(OperationKind::PublishTrack, "PublishLocalTrackAsync");
     if (!track || !request.has_add_track()) {
         throw OperationError(OperationKind::PublishTrack,
                              OperationErrorCode::InvalidState,
@@ -5020,6 +5613,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
 
 asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLocalTracksBatchAsync(
     std::vector<LocalParticipant::BatchTrackItem> items) {
+    auto operation_admission = AdmitOperation(OperationKind::PublishTrack, "PublishLocalTracksBatchAsync");
     if (items.empty()) {
         co_return std::vector<std::shared_ptr<TrackPublication>>{};
     }
@@ -5422,6 +6016,7 @@ void Room::SchedulePublisherMediaDiagnostic(uint64_t generation) {
 asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
     std::shared_ptr<Track> track,
     uint64_t generation) {
+    auto operation_admission = AdmitOperation(OperationKind::UnpublishTrack, "RemoveLocalTrackFromPublisherAsync");
     if (!track || !track->rtc_track()) {
         throw OperationError(OperationKind::UnpublishTrack,
                              OperationErrorCode::InvalidState,
@@ -5449,6 +6044,14 @@ asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
     }
 
     auto completion = std::make_shared<AwaitableState<void>>(executor_);
+    auto cancel_native = callback_gate_->CancelWhenClosed(
+        [weak = std::weak_ptr(completion)] {
+            if (auto pending = weak.lock()) {
+                FailAwaitable(pending, std::make_exception_ptr(OperationError(
+                    OperationKind::UnpublishTrack, OperationErrorCode::Cancelled,
+                    "remove_sender", "room is retired")));
+            }
+        });
     struct RemoveTrackTaskParams {
         std::shared_ptr<Room> room;
         std::shared_ptr<AwaitableState<void>> completion;
@@ -5521,6 +6124,7 @@ void Room::BindLocalUnpublishHandler() {
 
 asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsync(
     std::string track_sid) {
+    auto operation_admission = AdmitOperation(OperationKind::UnpublishTrack, "UnpublishLocalTrackAsync");
     if (track_sid.empty()) {
         throw OperationError(OperationKind::UnpublishTrack,
                              OperationErrorCode::InvalidState,
@@ -5679,6 +6283,7 @@ asio::awaitable<void> Room::NegotiatePublisherAsync(
     std::chrono::milliseconds timeout,
     uint64_t generation,
     bool ice_restart) {
+    auto operation_admission = AdmitOperation(OperationKind::Negotiate, "NegotiatePublisherAsync");
     std::shared_ptr<AwaitableState<void>> completion;
     bool should_start = false;
     {
@@ -5748,6 +6353,8 @@ void Room::CompleteNegotiation(
 }
 
 void Room::ExecuteNegotiatePublisher(uint64_t generation) {
+    auto operation_admission = callback_gate_->Enter();
+    if (!operation_admission) return;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pub_pc;
     std::shared_ptr<SignalClient> client;
     bool ice_restart = false;
@@ -5893,11 +6500,13 @@ void Room::ExecuteNegotiatePublisher(uint64_t generation) {
                               secure_log::SdpSummary("publisher_offer_sent", sdp));
                     LogSdpNegotiationDetails(
                         *self, "SDP_OFFER_DETAIL", "publisher_offer_sent", sdp);
-                });
-        }, ice_restart);
+                }, self->callback_gate_);
+        }, ice_restart, callback_gate_);
 }
 
 void Room::SendPublishOffer() {
+    auto operation_admission = callback_gate_->Enter();
+    if (!operation_admission) return;
     NegotiatePublisher();
 }
 
@@ -6454,8 +7063,7 @@ void Room::AttachRemoteTrackToParticipant(
         Log("WEBRTC", "VIDEO_ATTACH", "Remote video track attached to participant [" + participant->identity() + "], Track SID=" + track_id);
 
         if (signal) {
-            signal->SendUpdateTrackSettings(track_id, false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
-            Log("SIGNAL", "TRACK_ACTIVE", "SFU downstream video subscription reconciled: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
+            Log("SIGNAL", "TRACK_ACTIVE", "SFU downstream video binding uses the current Room media plan: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
         }
     }
 
@@ -6633,6 +7241,8 @@ void Room::OnRenegotiationNeeded(int pc_type, uint64_t generation) {
 }
 
 void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation) {
+    auto operation_admission = callback_gate_->Enter();
+    if (!operation_admission) return;
     std::shared_ptr<ConnectAttemptTestHooks> test_hooks;
     bool stale_event_at_admission = false;
     {
@@ -6660,6 +7270,8 @@ void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation
         bool connect_failed = false;
         bool server_disconnect_finalizing = false;
         uint64_t reconnect_generation = 0;
+        std::optional<RemoteMediaRecoveryRequest> media_recovery_request;
+        RemoteMediaRecoveryHandler media_recovery_handler;
         std::shared_ptr<telemetry::SessionTelemetry> reconnect_telemetry;
         std::string reconnect_episode_id;
         std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
@@ -6679,6 +7291,11 @@ void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation
                     connection_state_ = ConnectionState::Reconnecting;
                     reconnect_attempts_++;
                     PauseSubscriptionSendingLocked();
+                    if (remote_media_plan_active_ &&
+                        remote_media_recovery_handler_) {
+                        media_recovery_request = BeginRemoteMediaRecoveryLocked();
+                        media_recovery_handler = remote_media_recovery_handler_;
+                    }
                     reconnect_telemetry = session_telemetry_.lock();
                     if (reconnect_telemetry) {
                         reconnect_episode_id = reconnect_telemetry->StartOperation(
@@ -6717,6 +7334,14 @@ void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation
             delivery.required_state = ConnectionState::Reconnecting;
             delivery.listeners = listeners_snapshot;
             DeliverLifecycleListenerEvent(std::move(delivery));
+            if (media_recovery_request && media_recovery_handler) {
+                try {
+                    media_recovery_handler(*media_recovery_request);
+                } catch (...) {
+                    Log("WARNING", "MEDIA_RECOVERY_HANDLER",
+                        "Remote media recovery handler failed; waiting for timeout");
+                }
+            }
             livekit::safe_co_spawn(executor_,
                 [self = shared_from_this(), reconnect_generation,
                  reconnect_telemetry = std::move(reconnect_telemetry),
@@ -6758,8 +7383,8 @@ void Room::HandleSignalEvent(const SignalEvent& event, uint64_t event_generation
 }
 
 bool Room::IsSignalGenerationCurrentLocked(uint64_t event_generation) const {
-    return event_generation == 0 ||
-        event_generation == session_generation_.load(std::memory_order_acquire);
+    return !retired() && (event_generation == 0 ||
+        event_generation == session_generation_.load(std::memory_order_acquire));
 }
 
 void Room::HandleSignalMessage(
@@ -7338,15 +7963,6 @@ void Room::UpdateParticipants(
 
     for (const auto& [p, pub] : newly_published_tracks) {
         FlushPendingTracks(p->sid(), event_generation);
-        if (signal_snapshot && pub->track() &&
-            pub->track()->kind() == TrackKind::Video) {
-            const auto remote_publication =
-                std::dynamic_pointer_cast<RemoteTrackPublication>(pub);
-            if (remote_publication && remote_publication->is_subscribed()) {
-                signal_snapshot->SendUpdateTrackSettings(
-                    pub->sid(), false, proto::VideoQuality::HIGH, 1280, 720, 30, 0);
-            }
-        }
         for (const auto& listener : listeners_snapshot) {
             DeliverListener({event_generation}, listener, [&](RoomListener& target) {
                 target.OnTrackPublished(p, pub);
@@ -7754,9 +8370,9 @@ void Room::HandleOfferSignal(
                                     self->PostRemoteTrack(t->receiver(), r_track, event_generation);
                                 }
                             }
-                        });
-                });
-        });
+                        }, self->callback_gate_);
+                }, self->callback_gate_);
+        }, callback_gate_);
 }
 
 static std::vector<std::string> ExtractSdpMLines(const std::string& sdp) {
@@ -7865,7 +8481,7 @@ void Room::HandleAnswerSignal(
                         }
                     }
                 }
-            });
+            }, callback_gate_);
         return;
     }
 
@@ -7970,7 +8586,7 @@ void Room::HandleAnswerSignal(
                         }
                     }
                 }
-            });
+            }, callback_gate_);
         return;
     }
 
@@ -8025,7 +8641,7 @@ void Room::HandleAnswerSignal(
             } else if (err.empty()) {
                 self->CompleteNegotiation("", event_generation);
             }
-        });
+        }, callback_gate_);
 }
 
 void Room::HandleTrickleSignal(
@@ -8315,13 +8931,111 @@ proto::SyncState Room::BuildSyncState(SubscriptionSyncSnapshot* snapshot) const 
     return state;
 }
 
+asio::awaitable<void> Room::WaitForRemoteMediaRecoveryHandshake(
+    uint64_t owner_generation,
+    std::chrono::steady_clock::time_point deadline) {
+    for (;;) {
+        {
+            std::lock_guard lock(room_mutex_);
+            if (!IsSignalGenerationCurrentLocked(owner_generation) ||
+                installed_session_generation_ != owner_generation ||
+                !remote_media_recovery_pending_) {
+                co_return;
+            }
+        }
+        if (std::chrono::steady_clock::now() >= deadline) {
+            std::vector<std::pair<std::shared_ptr<RemoteTrackPublication>, uint64_t>>
+                detach;
+            {
+                std::lock_guard lock(room_mutex_);
+                if (IsSignalGenerationCurrentLocked(owner_generation) &&
+                    installed_session_generation_ == owner_generation &&
+                    remote_media_recovery_pending_) {
+                    for (const auto& [participant_sid, participant] :
+                         remote_participants_) {
+                        if (!participant) continue;
+                        for (const auto& [track_sid, base_publication] :
+                             participant->tracks()) {
+                            const auto publication =
+                                std::dynamic_pointer_cast<RemoteTrackPublication>(
+                                    base_publication);
+                            if (!publication || !publication->track() ||
+                                publication->track()->kind() != TrackKind::Video) {
+                                continue;
+                            }
+                            const auto key = MakeSubscriptionIntentKeyLocked(
+                                participant_sid, participant->identity(), track_sid);
+                            auto& intent = EnsureSubscriptionIntentLocked(key);
+                            const bool subscription_changed = intent.subscribed;
+                            const bool settings_changed = intent.enabled ||
+                                intent.quality != proto::VideoQuality::OFF ||
+                                intent.width != 0 || intent.height != 0 ||
+                                intent.max_fps != 0 || intent.priority != 0;
+                            if (!subscription_changed && !settings_changed) continue;
+                            intent.subscribed = false;
+                            intent.enabled = false;
+                            intent.quality = proto::VideoQuality::OFF;
+                            intent.width = intent.height = 0;
+                            intent.max_fps = intent.priority = 0;
+                            intent.revision = next_subscription_revision_++;
+                            intent.subscription_dirty =
+                                intent.subscription_dirty ||
+                                !intent.sent_subscribed.has_value() ||
+                                *intent.sent_subscribed;
+                            intent.settings_dirty = true;
+                            intent.accepted_at = {};
+                            QueueSubscriptionUpdateLocked(key);
+
+                            RemotePublicationControlRequest control;
+                            control.kind =
+                                RemotePublicationControlRequest::Kind::Subscription;
+                            control.subscribed = false;
+                            control.enabled = false;
+                            control.quality = proto::VideoQuality::OFF;
+                            control.width = control.height = control.priority = 0;
+                            publication->CommitControl(control);
+                            const auto binding =
+                                current_remote_binding_serials_.find(publication.get());
+                            if (binding != current_remote_binding_serials_.end()) {
+                                if (const auto media =
+                                        FindMediaBindingLocked(binding->second)) {
+                                    media->active.store(false,
+                                        std::memory_order_release);
+                                }
+                                detach.push_back({publication, binding->second});
+                            }
+                        }
+                    }
+                    CompleteRemoteMediaRecoveryLocked();
+                }
+            }
+            for (const auto& [publication, binding] : detach) {
+                DetachRemotePublicationMedia(
+                    publication.get(), /*notify_listener=*/true, binding);
+            }
+            Log("WARNING", "MEDIA_RECOVERY_TIMEOUT",
+                "Remote media plan recovery timed out; video demand is held empty");
+            co_return;
+        }
+        asio::steady_timer timer(executor_, std::chrono::milliseconds(5));
+        std::error_code error;
+        co_await timer.async_wait(
+            asio::redirect_error(asio::use_awaitable, error));
+        if (error && error != asio::error::operation_aborted) co_return;
+    }
+}
+
 asio::awaitable<void> Room::AttemptReconnect(
     uint64_t owner_generation,
     std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner,
     std::string reconnect_episode_id) {
+    auto operation_admission = callback_gate_->Enter();
     TelemetryOperationSpan reconnect_episode(
         telemetry_owner, telemetry::OperationKind::ReconnectEpisode,
         std::move(reconnect_episode_id), true);
+    // The episode was accepted by HandleSignalEvent before this coroutine was
+    // scheduled. Even a retirement-time rejection must close that old span.
+    if (!operation_admission) co_return;
     std::string reconnect_url;
     std::string reconnect_token;
     SignalOptions reconnect_options;
@@ -8422,6 +9136,12 @@ asio::awaitable<void> Room::AttemptReconnect(
                                                            : "ReconnectResponse is missing",
                                          true);
                 }
+
+                co_await WaitForRemoteMediaRecoveryHandshake(
+                    reconnect_generation,
+                    std::min(attempt_deadline,
+                        std::chrono::steady_clock::now() +
+                            std::chrono::milliseconds(250)));
 
                 SubscriptionSyncSnapshot subscription_snapshot;
                 proto::SignalRequest sync_request;
@@ -8594,6 +9314,8 @@ asio::awaitable<void> Room::AttemptReconnect(
 
                 std::shared_ptr<LocalParticipant> local;
                 std::vector<std::shared_ptr<RoomListener>> listeners;
+                std::optional<RemoteMediaRecoveryRequest> media_recovery_request;
+                RemoteMediaRecoveryHandler media_recovery_handler;
                 {
                     std::lock_guard lock(room_mutex_);
                     if (!IsSignalGenerationCurrentLocked(restart_connect_generation) ||
@@ -8609,12 +9331,30 @@ asio::awaitable<void> Room::AttemptReconnect(
                     reconnect_generation = restart_connect_generation;
                     local = local_participant_;
                     listeners = listeners_;
+                    if (remote_media_plan_active_ &&
+                        remote_media_recovery_handler_) {
+                        media_recovery_request = BeginRemoteMediaRecoveryLocked();
+                        media_recovery_handler = remote_media_recovery_handler_;
+                    }
                 }
                 if (!local) {
                     throw OperationError(OperationKind::Reconnect,
                                          OperationErrorCode::StateUncertain,
                                          "full_restart_republish",
                                          "local participant is missing after full restart");
+                }
+                if (media_recovery_request && media_recovery_handler) {
+                    try {
+                        media_recovery_handler(*media_recovery_request);
+                    } catch (...) {
+                        Log("WARNING", "MEDIA_RECOVERY_HANDLER",
+                            "Remote media full-restart handler failed; waiting for timeout");
+                    }
+                    co_await WaitForRemoteMediaRecoveryHandshake(
+                        reconnect_generation,
+                        std::min(attempt_deadline,
+                            std::chrono::steady_clock::now() +
+                                std::chrono::milliseconds(250)));
                 }
 
                 co_await RepublishLocalTracks(reconnect_generation);
@@ -9372,6 +10112,8 @@ RoomStatsReport Room::GetStatsSync() {
 asio::awaitable<RoomStatsReport> Room::GetStats(
     std::function<void()> late_completion) {
     RoomStatsReport room_report;
+    auto operation_admission = callback_gate_->Enter();
+    if (!operation_admission) co_return room_report;
     room_report.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
 
@@ -9397,29 +10139,29 @@ asio::awaitable<RoomStatsReport> Room::GetStats(
         room_report.actual_peer_connection_count = 1;
         append(co_await CollectRtcStatsDetailed(
                    publisher, executor_, std::chrono::milliseconds(1500),
-                   std::move(late_completion)),
+                   std::move(late_completion), executor_lifetime_),
                true, true);
     } else if (publisher && subscriber) {
         room_report.actual_peer_connection_count = 2;
         using namespace asio::experimental::awaitable_operators;
         auto [publisher_result, subscriber_result] = co_await (
             CollectRtcStatsDetailed(
-                publisher, executor_, std::chrono::milliseconds(1500), late_completion) &&
+                publisher, executor_, std::chrono::milliseconds(1500), late_completion, executor_lifetime_) &&
             CollectRtcStatsDetailed(
-                subscriber, executor_, std::chrono::milliseconds(1500), late_completion));
+                subscriber, executor_, std::chrono::milliseconds(1500), late_completion, executor_lifetime_));
         append(std::move(publisher_result), true, false);
         append(std::move(subscriber_result), false, true);
     } else if (publisher) {
         room_report.actual_peer_connection_count = 1;
         append(co_await CollectRtcStatsDetailed(
                    publisher, executor_, std::chrono::milliseconds(1500),
-                   std::move(late_completion)),
+                   std::move(late_completion), executor_lifetime_),
                true, false);
     } else if (subscriber) {
         room_report.actual_peer_connection_count = 1;
         append(co_await CollectRtcStatsDetailed(
                    subscriber, executor_, std::chrono::milliseconds(1500),
-                   std::move(late_completion)),
+                   std::move(late_completion), executor_lifetime_),
                false, true);
     }
     co_return room_report;
@@ -9524,6 +10266,8 @@ void Room::SetAudioOutputMuted(bool muted) {
 }
 
 void Room::SimulateScenario(SimulateScenarioType scenario) {
+    auto operation_admission = callback_gate_->Enter();
+    if (!operation_admission) return;
     auto self = shared_from_this();
     livekit::safe_co_spawn(executor_, [self, scenario]() -> asio::awaitable<void> {
         co_await self->SimulateScenarioAsync(scenario);
@@ -9531,6 +10275,7 @@ void Room::SimulateScenario(SimulateScenarioType scenario) {
 }
 
 asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario) {
+    auto operation_admission = AdmitOperation(OperationKind::SendData, "SimulateScenarioAsync");
     std::shared_ptr<SignalClient> signal;
     std::shared_ptr<LocalParticipant> local;
     std::shared_ptr<E2eeManager> e2ee;

@@ -299,12 +299,28 @@ const char* MediaExpectationReasonName(MediaExpectationReason reason) noexcept {
     return "binding_active";
 }
 
+void CanvasRenderProbe::OnCanvasStageTiming(
+        render::CanvasRenderStage stage, std::chrono::microseconds duration) {
+    if (!active.load(std::memory_order_acquire) || duration.count() < 0) return;
+    auto& target = stage == render::CanvasRenderStage::DrawSubmit
+        ? draw_submit : present_block;
+    target.samples.fetch_add(1, std::memory_order_relaxed);
+    target.total_us.fetch_add(duration.count(), std::memory_order_relaxed);
+    auto maximum = target.maximum_us.load(std::memory_order_relaxed);
+    while (duration.count() > maximum &&
+           !target.maximum_us.compare_exchange_weak(
+               maximum, duration.count(), std::memory_order_relaxed)) {
+    }
+}
+
 SessionTelemetry::SessionTelemetry(
     Strand strand,
     std::uint64_t session_generation,
     std::size_t queue_capacity,
-    Clock::time_point session_started_at)
-    : strand_(std::move(strand))
+    Clock::time_point session_started_at,
+    std::shared_ptr<void> executor_lifetime)
+    : executor_lifetime_(std::move(executor_lifetime))
+    , strand_(std::move(strand))
     , session_generation_(session_generation)
     , queue_capacity_((std::max)(std::size_t{1}, queue_capacity))
     , stats_timer_(strand_)
@@ -334,7 +350,6 @@ bool SessionTelemetry::Submit(Event event) {
         event.enqueued_at = Clock::now();
     }
 
-    bool should_post = false;
     {
         std::lock_guard lock(queue_mutex_);
         if (!accepting_.load(std::memory_order_relaxed)) {
@@ -354,11 +369,11 @@ bool SessionTelemetry::Submit(Event event) {
         }
         if (!drain_posted_) {
             drain_posted_ = true;
-            should_post = true;
+            // Serialize admission through the actual post. StopOnStrand's
+            // queue drain cannot finish while an accepted producer still has
+            // an executor submission left to make.
+            ScheduleDrain();
         }
-    }
-    if (should_post) {
-        ScheduleDrain();
     }
     return true;
 }
@@ -845,6 +860,51 @@ bool SessionTelemetry::RecordRenderPipelineSample(
     return Submit(std::move(event));
 }
 
+bool SessionTelemetry::RecordVideoPolicySampleOnStrand(VideoPolicySample sample) {
+    AssertOnStrand();
+    if (stopping_ || stop_finalized_) return false;
+    const bool has_policy = state_.video_policy_coordinator_session != 0;
+    const bool successor_room = has_policy &&
+        sample.native_room_generation >
+            state_.video_policy_native_room_generation;
+    const bool stale = sample.coordinator_session != session_generation_ ||
+        (has_policy &&
+         (sample.coordinator_session != state_.video_policy_coordinator_session ||
+          sample.native_room_generation <
+              state_.video_policy_native_room_generation ||
+          (!successor_room &&
+           (sample.catalog_revision < state_.video_policy_catalog_revision ||
+            sample.policy_revision < state_.video_policy_revision))));
+    if (stale) {
+        ++state_.video_policy_stale_updates;
+        PublishSnapshotOnStrand(Clock::now());
+        return false;
+    }
+
+    state_.video_policy_availability = sample.retired
+        ? Availability::NotExpected : Availability::Valid;
+    state_.video_policy_reason = sample.retired
+        ? "video_policy_retired" : "video_policy_snapshot_valid";
+    state_.video_policy_coordinator_session = sample.coordinator_session;
+    state_.video_policy_native_room_generation = sample.native_room_generation;
+    state_.video_policy_catalog_revision = sample.catalog_revision;
+    state_.video_policy_revision = sample.policy_revision;
+    state_.video_policy_stage_content = std::move(sample.stage_content);
+    state_.video_policy_selection_reason = std::move(sample.policy_reason);
+    state_.video_policy_retired = sample.retired;
+    state_.video_policy_requested = sample.requested;
+    state_.video_policy_selected = sample.selected;
+    state_.video_policy_actual = sample.actual;
+    state_.video_policy_bound = sample.bound;
+    state_.video_policy_selected_not_requested = sample.selected_not_requested;
+    state_.video_policy_selected_not_actual = sample.selected_not_actual;
+    state_.video_policy_actual_not_selected = sample.actual_not_selected;
+    state_.video_policy_selected_not_bound = sample.selected_not_bound;
+    state_.video_policy_bound_not_selected = sample.bound_not_selected;
+    PublishSnapshotOnStrand(Clock::now());
+    return true;
+}
+
 void SessionTelemetry::SetSnapshotCallbackOnStrand(SnapshotCallback callback) {
     AssertOnStrand();
     snapshot_callback_ = std::move(callback);
@@ -1044,6 +1104,7 @@ void SessionTelemetry::StopOnStrand(std::function<void()> on_stopped) {
         CloseUsableIntervalOnStrand(session_stopped_at_);
     }
     accepting_.store(false, std::memory_order_release);
+    canvas_render_probe_->active.store(false, std::memory_order_release);
     active_recovery_epoch_.store(0, std::memory_order_release);
     stats_started_ = false;
     stats_provider_ = {};
@@ -2224,28 +2285,32 @@ void SessionTelemetry::UpdateRenderAvailabilityOnStrand(Clock::time_point now) {
     std::int64_t present_total_us = 0;
     std::int64_t present_max_us = 0;
 
+    const auto collect_stage = [](const RenderActivityProbe::StageAccumulator& stage,
+                                  std::uint64_t& samples,
+                                  std::int64_t& total,
+                                  std::int64_t& maximum) {
+        samples += stage.samples.load(std::memory_order_relaxed);
+        total += stage.total_us.load(std::memory_order_relaxed);
+        maximum = (std::max)(maximum,
+            stage.maximum_us.load(std::memory_order_relaxed));
+    };
+    // Shared canvas costs are sampled once per session, not once per binding.
+    // Do not drop already observed costs when a video binding is retired.
+    collect_stage(canvas_render_probe_->draw_submit, draw_samples,
+                  draw_total_us, draw_max_us);
+    collect_stage(canvas_render_probe_->present_block, present_samples,
+                  present_total_us, present_max_us);
     for (const auto& [_, render] : render_media_) {
         if (!render.probe || !render.probe->active.load(std::memory_order_acquire)) {
             continue;
         }
         const auto& probe = *render.probe;
-        const auto collect_stage = [](const RenderActivityProbe::StageAccumulator& stage,
-                                      std::uint64_t& samples,
-                                      std::int64_t& total,
-                                      std::int64_t& maximum) {
-            samples += stage.samples.load(std::memory_order_relaxed);
-            total += stage.total_us.load(std::memory_order_relaxed);
-            maximum = (std::max)(maximum,
-                stage.maximum_us.load(std::memory_order_relaxed));
-        };
         collect_stage(probe.cpu_convert, convert_samples,
                       convert_total_us, convert_max_us);
         collect_stage(probe.upload_submit, upload_samples,
                       upload_total_us, upload_max_us);
         collect_stage(probe.draw_submit, draw_samples,
                       draw_total_us, draw_max_us);
-        collect_stage(probe.present_block, present_samples,
-                      present_total_us, present_max_us);
         unique_submits += probe.unique_submits.load(std::memory_order_relaxed);
         interval_sum_ns += probe.interval_sum_ns.load(std::memory_order_relaxed);
         interval_count += probe.interval_count.load(std::memory_order_relaxed);

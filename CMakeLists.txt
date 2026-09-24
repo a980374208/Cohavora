@@ -155,6 +155,8 @@ set(LIVEKIT_SOURCES
     src/core/local_video_track.cpp
     src/core/screen_share_session.cpp
     src/core/remote_track_publication.cpp
+    src/core/publication_catalog.cpp
+    src/core/video_demand_policy.cpp
     src/core/adaptive_stream_manager.cpp
     src/core/data_stream_assembler.cpp
     src/core/data_stream.cpp
@@ -218,6 +220,9 @@ set(LIVEKIT_HEADERS
     src/core/local_audio_track.h
     src/core/local_video_track.h
     src/core/remote_track_publication.h
+    src/core/publication_catalog.h
+    src/core/video_demand_policy.h
+    src/core/video_demand_types.h
     src/core/adaptive_stream_manager.h
     src/core/data_stream_assembler.h
     src/rtc/webrtc_manager.h

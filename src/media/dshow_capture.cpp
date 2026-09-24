@@ -1,4 +1,5 @@
 #include "dshow_capture.h"
+#include "dshow_graph_owner.h"
 #include "dshow_enumerator.h"
 #include "media_converters.h"
 #include <windows.h>
@@ -183,10 +184,15 @@ std::shared_ptr<DShowVideoCapture> DShowVideoCapture::Create() {
     return std::make_shared<DShowVideoCapture>();
 }
 
-DShowVideoCapture::DShowVideoCapture() = default;
+DShowVideoCapture::DShowVideoCapture()
+    : graph_owner_(std::make_unique<DShowGraphOwner>([this] {
+          StopOnGraphThread();
+      })) {}
 
 DShowVideoCapture::~DShowVideoCapture() {
-    Stop();
+    // The owner's finalizer releases every COM member on its creating thread,
+    // including partially built graphs left by an exceptional Start operation.
+    graph_owner_.reset();
 }
 
 double DShowVideoCapture::GetActualFps() const noexcept {
@@ -203,17 +209,19 @@ DShowCaptureConfig DShowVideoCapture::GetConfig() const {
 }
 
 bool DShowVideoCapture::Init(const DShowCaptureConfig& config, std::shared_ptr<VideoSource> video_source) {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    if (is_running_.load()) {
-        spdlog::warn("[DShowVideoCapture] Cannot Init while running. Call Stop() first.");
-        return false;
-    }
-    config_ = config;
-    video_source_ = video_source;
-    actual_width_ = 0;
-    actual_height_ = 0;
-    flip_vertically_ = config.flip_vertically;
-    return true;
+    return graph_owner_->Invoke([this, config, video_source = std::move(video_source)] {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (is_running_.load()) {
+            spdlog::warn("[DShowVideoCapture] Cannot Init while running. Call Stop() first.");
+            return false;
+        }
+        config_ = config;
+        video_source_ = video_source;
+        actual_width_ = 0;
+        actual_height_ = 0;
+        flip_vertically_ = config.flip_vertically;
+        return true;
+    });
 }
 
 static ComPtr<IPin> GetFilterPin(IBaseFilter* filter, PIN_DIRECTION dir) {
@@ -467,15 +475,26 @@ void DShowVideoCapture::TeardownFilterGraph() {
 }
 
 bool DShowVideoCapture::Start() {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    if (is_running_.load()) return true;
+    return graph_owner_->Invoke([this] {
+        try {
+            return StartOnGraphThread();
+        } catch (...) {
+            StopOnGraphThread();
+            throw;
+        }
+    });
+}
 
-    HRESULT hr_co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+bool DShowVideoCapture::StartOnGraphThread() {
+    if (is_running_.load()) return true;
+    if (FAILED(graph_owner_->comResult())) {
+        spdlog::error("[DShowVideoCapture] Graph owner COM initialization failed.");
+        return false;
+    }
 
     if (!BuildFilterGraph()) {
         spdlog::error("[DShowVideoCapture] BuildFilterGraph failed.");
         TeardownFilterGraph();
-        if (SUCCEEDED(hr_co)) CoUninitialize();
         return false;
     }
 
@@ -489,7 +508,6 @@ bool DShowVideoCapture::Start() {
         if (FAILED(hr)) {
             spdlog::error("[DShowVideoCapture] MediaControl->Run() failed, hr=0x{:08x}", static_cast<uint32_t>(hr));
             TeardownFilterGraph();
-            if (SUCCEEDED(hr_co)) CoUninitialize();
             return false;
         }
     }
@@ -501,9 +519,10 @@ bool DShowVideoCapture::Start() {
 }
 
 void DShowVideoCapture::Stop() {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    if (!is_running_.load()) return;
+    graph_owner_->Invoke([this] { StopOnGraphThread(); });
+}
 
+void DShowVideoCapture::StopOnGraphThread() {
     TeardownFilterGraph();
     is_running_.store(false);
 }

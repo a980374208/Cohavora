@@ -28,9 +28,97 @@ livekit::render::OwnedI420Frame::Ptr MakeFrame(uint8_t y_value) {
     return livekit::render::OwnedI420Frame::CopyFromPlanes(2, 2, y, 2, u, 1, v, 1);
 }
 
+struct RenderLeaseFixture {
+    std::shared_ptr<livekit::MembershipState> participant_state;
+    std::shared_ptr<livekit::TrackMembershipState> track_state;
+    std::shared_ptr<livekit::MediaBindingState> binding_state;
+    livekit::render::VideoRenderSession::RemoteTrackSelection selection;
+};
+
+RenderLeaseFixture MakeSelection(const std::string& sid,
+                                 const std::string& identity,
+                                 uint64_t serial) {
+    RenderLeaseFixture result;
+    livekit::ParticipantKey participant_key{
+        31, serial, "PA_" + identity, identity};
+    result.participant_state =
+        std::make_shared<livekit::MembershipState>(participant_key);
+    livekit::TrackKey track_key{participant_key, serial, sid};
+    result.track_state =
+        std::make_shared<livekit::TrackMembershipState>(track_key);
+    livekit::MediaBindingKey binding_key{track_key, serial};
+    result.binding_state =
+        std::make_shared<livekit::MediaBindingState>(binding_key);
+    result.binding_state->active.store(true, std::memory_order_release);
+    result.selection.key = track_key;
+    result.selection.ticket = result.track_state;
+    result.selection.media_binding_key = binding_key;
+    result.selection.media_binding_ticket = result.binding_state;
+    result.selection.track = std::make_shared<livekit::Track>(
+        sid, sid, livekit::TrackKind::Video, livekit::TrackSource::Camera);
+    result.selection.identity = identity;
+    result.selection.render_key = sid;
+    return result;
+}
+
 } // namespace
 
 int main() {
+    {
+        std::map<std::string, int> delivered;
+        livekit::render::VideoRenderSession leased({}, 2);
+        leased.UseGpuBackend([&](const std::string& key,
+                                 livekit::render::VideoRenderFrame::Ptr frame) {
+            delivered[key] = frame->view().planes[0].data[0];
+        });
+        auto a = MakeSelection("TR_LEASE_A", "lease-a", 1);
+        auto b = MakeSelection("TR_LEASE_B", "lease-b", 2);
+        auto c = MakeSelection("TR_LEASE_C", "lease-c", 3);
+        auto applied = leased.ApplySelection(
+            9, 1, {a.selection, b.selection});
+        if (!Expect(applied.attached == 2 && applied.tracks.size() == 2 &&
+                        applied.tracks[0].second ==
+                            livekit::render::VideoRenderSession::AttachResult::Attached &&
+                        applied.tracks[1].second ==
+                            livekit::render::VideoRenderSession::AttachResult::Attached,
+                    "the first accepted plan must attach both render leases")) return 1;
+        a.selection.track->notifyI420VideoFrame(MakeFrame(30));
+        b.selection.track->notifyI420VideoFrame(MakeFrame(60));
+        leased.RenderLatestFrames();
+        if (!Expect(delivered.size() == 2,
+                    "both leases from the first plan must render")) return 1;
+
+        delivered.clear();
+        applied = leased.ApplySelection(9, 2, {b.selection, c.selection});
+        if (!Expect(applied.attached == 2 &&
+                        leased.statistics().attached_track_count == 2 &&
+                        leased.statistics().rejected_track_attachments == 0,
+                    "selection changes must release A before admitting C")) return 1;
+        a.selection.track->notifyI420VideoFrame(MakeFrame(90));
+        b.selection.track->notifyI420VideoFrame(MakeFrame(120));
+        c.selection.track->notifyI420VideoFrame(MakeFrame(150));
+        leased.RenderLatestFrames();
+        if (!Expect(delivered.size() == 2 && !delivered.count("TR_LEASE_A") &&
+                        delivered["TR_LEASE_B"] == 120 &&
+                        delivered["TR_LEASE_C"] == 150,
+                    "a retired page lease must reject late frames")) return 1;
+
+        delivered.clear();
+        b.binding_state->active.store(false, std::memory_order_release);
+        b.selection.track->notifyI420VideoFrame(MakeFrame(180));
+        c.selection.track->notifyI420VideoFrame(MakeFrame(210));
+        leased.RenderLatestFrames();
+        if (!Expect(delivered.size() == 1 && delivered["TR_LEASE_C"] == 210,
+                    "an inactive media binding ticket must reject frames before render")) return 1;
+
+        const auto stale = leased.ApplySelection(9, 1, {a.selection});
+        if (!Expect(stale.tracks.size() == 1 &&
+                        stale.tracks.front().second ==
+                            livekit::render::VideoRenderSession::AttachResult::StaleSelection &&
+                        stale.attached == 2,
+                    "an old policy revision must not replace the current selection")) return 1;
+    }
+
     // A producer remains alive while the UI retires/rebinds its local mailbox.
     // Delivery is UI-owned; the worker never captures the session or a canvas.
     {

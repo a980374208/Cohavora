@@ -70,7 +70,7 @@ public:
     static bool hasRoomArtifacts(const MeetingCoordinator &coordinator) {
         return coordinator._sessionRunning.load() || coordinator._ioContext ||
                coordinator._sessionRuntime || coordinator._room ||
-               coordinator._roomListener || coordinator._ioThread.joinable();
+               coordinator._roomListener || coordinator._sessionOwner || coordinator._stopPending;
     }
 
     static void markRoomSessionRunningForCleanup(MeetingCoordinator &coordinator) {

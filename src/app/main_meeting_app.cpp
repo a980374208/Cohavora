@@ -5,6 +5,7 @@
 #include <QtCore/QTimer>
 #include "base/basic_types.h"
 #include <QtWidgets/QApplication>
+#include <QtWidgets/QDialog>
 #include <QtGui/QIcon>
 #include <QtCore/QDir>
 #include <QtCore/QStandardPaths>
@@ -18,11 +19,14 @@
 #include "src/ui/app_branding.h"
 #include "src/ui/app_translation.h"
 #include "src/ui/meeting_main_window.h"
+#include "src/ui/meeting_room_window.h"
 #include "src/ui/login_dialog.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/net/session_manager.h"
 #include "src/rtc/webrtc_manager.h"
 #include "src/app/debug_login_options.h"
+#include "src/app/async_shutdown_guard.h"
+#include "src/core/session_shutdown_service.h"
 #include "src/telemetry/stability_ledger.h"
 #include "src/telemetry/telemetry_report.h"
 
@@ -104,9 +108,9 @@ int main(int argc, char *argv[]) {
 		.filePath(QStringLiteral("telemetry/stability-ledger-v1.json"));
 	auto stabilityLedger = std::make_shared<livekit::telemetry::StabilityLedger>(
 		std::filesystem::path(stabilityPath.toStdWString()));
-	livekit::telemetry::ScopedProcessRun processRun(stabilityLedger);
+	auto processRun = std::make_shared<livekit::telemetry::ScopedProcessRun>(stabilityLedger);
 	livekit::telemetry::InstallStabilityLedger(stabilityLedger);
-	if (!processRun.started()) {
+	if (!processRun->started()) {
 		qWarning() << "The local stability ledger is unavailable.";
 	}
 	const auto telemetryRoot = QDir(
@@ -168,8 +172,45 @@ int main(int argc, char *argv[]) {
 	}
 
 	// 创建并展示现代会议主界面
-	MeetingUI::MeetingMainWindow mainWindow;
-	mainWindow.show();
+	auto mainWindow = std::make_unique<MeetingUI::MeetingMainWindow>();
+	mainWindow->show();
+	app.setQuitOnLastWindowClosed(false);
+	auto& shutdownService = OpenMeeting::SessionShutdownService::Instance();
+	MeetingApp::AsyncShutdownGuard shutdownGuard(app,
+		[&](std::function<void()> finished) {
+			// Close producers before closing cleanup admission. Meeting windows
+			// are heap-owned, WA_DeleteOnClose widgets; explicitly destroy any
+			// remaining hidden ones so their coordinators cannot enqueue later.
+			if (mainWindow) mainWindow->close();
+			for (auto* widget : QApplication::topLevelWidgets()) {
+				if (auto* room = qobject_cast<MeetingUI::MeetingRoomWindow*>(widget)) {
+					room->close();
+					delete room;
+				}
+			}
+			mainWindow.reset();
+			shutdownService.DrainAsync([&, finished = std::move(finished)]() mutable {
+				shutdownService.SubmitCleanup(
+					[history = std::move(telemetryHistory), run = std::move(processRun)]() mutable {
+						// All final session snapshots have entered the history queue.
+						history->Close();
+						livekit::telemetry::InstallTelemetryHistoryStore({});
+						history.reset();
+						run.reset();
+						livekit::telemetry::InstallStabilityLedger({});
+					});
+				shutdownService.ShutdownAsync(std::move(finished));
+			});
+		}, [] {
+			// Reject the current modal without deleting its parent. The guard
+			// resumes shutdown only after all nested exec() calls have returned.
+			if (auto* modal = QApplication::activeModalWidget()) {
+				if (auto* dialog = qobject_cast<QDialog*>(modal)) dialog->reject();
+				else modal->close();
+			}
+		});
+	QObject::connect(&app, &QGuiApplication::lastWindowClosed,
+		&shutdownGuard, [&] { shutdownGuard.Request(); });
 
 	const int result = app.exec();
 

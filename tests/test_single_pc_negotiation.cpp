@@ -30,6 +30,7 @@ public:
         room.installed_session_generation_ = generation;
         room.connection_state_ = ConnectionState::Connected;
         room.publisher_pc_ = std::move(publisher);
+        room.ResetSubscriptionSessionLocked(signal->options().auto_subscribe);
         room.signal_client_ = std::move(signal);
         return generation;
     }
@@ -91,7 +92,9 @@ struct Fixture {
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
     uint64_t generation = 0;
 
-    explicit Fixture(bool single_pc = true) { Install(single_pc); }
+    explicit Fixture(bool single_pc = true, bool auto_subscribe = true) {
+        Install(single_pc, auto_subscribe);
+    }
 
     ~Fixture() {
         room->Disconnect();
@@ -100,7 +103,7 @@ struct Fixture {
         room.reset();
     }
 
-    void Install(bool single_pc = true) {
+    void Install(bool single_pc = true, bool auto_subscribe = true) {
         room->SetLogHandler([this](const std::string&, const std::string& tag,
                                    const std::string& message) {
             if (tag == "MID_TRACK_BIND") track_bindings.push_back(message);
@@ -113,8 +116,10 @@ struct Fixture {
         publisher = created.MoveValue();
         // No external transport is opened. These tests cover offer construction,
         // merge decisions and session isolation, not server acceptance or media.
+        livekit::SignalOptions options;
+        options.auto_subscribe = auto_subscribe;
         auto signal = std::make_shared<livekit::SignalClient>(
-            "wss://single-pc.test", "test-token", livekit::SignalOptions{}, single_pc,
+            "wss://single-pc.test", "test-token", options, single_pc,
             std::make_shared<livekit::proto::JoinResponse>(),
             livekit::SignalEventHandler{}, io.get_executor());
         generation = Access::Install(*room, publisher, std::move(signal));
@@ -178,6 +183,27 @@ struct Fixture {
         });
     }
 };
+
+void AutoSubscribeFalseDoesNotGateEmptyVideoDemandOffer() {
+    Fixture f(true, false);
+    livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
+        webrtc::DataChannelInit init;
+        const auto channel = f.publisher->CreateDataChannelOrError(
+            "_reliable", &init);
+        TEST_CHECK(channel.ok());
+    });
+    f.Requirement(0, 0);
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (f.LocalOffer().empty() && std::chrono::steady_clock::now() < deadline) {
+        f.io.restart();
+        f.io.run_one_for(10ms);
+    }
+    const auto offer = f.LocalOffer();
+    TEST_CHECK(offer.find("m=application ") != std::string::npos);
+    TEST_CHECK(offer.find("m=audio ") == std::string::npos);
+    TEST_CHECK(offer.find("m=video ") == std::string::npos);
+    f.CheckReceivers(0, 0);
+}
 
 void ZeroSectionsCreatesOfferForExistingTransceiver() {
     Fixture f;
@@ -383,6 +409,7 @@ void SenderTrackIdOverridesRetainedSdpMsid() {
 
 int main() {
     TEST_CHECK(livekit::WebRTCManager::Instance().Initialize());
+    AutoSubscribeFalseDoesNotGateEmptyVideoDemandOffer();
     ZeroSectionsCreatesOfferForExistingTransceiver();
     ZeroSectionsWhileOfferInFlightQueuesRetry();
     RepeatedCountsAreAdditionalSections();
@@ -391,6 +418,6 @@ int main() {
     LocalPublicationDoesNotReuseDownstreamTransceivers();
     SenderTrackIdOverridesRetainedSdpMsid();
     livekit::WebRTCManager::Instance().Deinitialize();
-    std::cout << "Single-PC media-section negotiation and publication: 7 cases PASS\n";
+    std::cout << "Single-PC media-section negotiation and publication: 8 cases PASS\n";
     return 0;
 }

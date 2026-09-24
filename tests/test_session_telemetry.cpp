@@ -1,5 +1,6 @@
 #include "tests/support/test_check.h"
 
+#include "src/render/canvas_render_timing.h"
 #include "src/telemetry/process_resource_sampler.h"
 #include "src/telemetry/session_telemetry.h"
 
@@ -27,6 +28,83 @@ using livekit::telemetry::ProcessResourceSample;
 using livekit::telemetry::ProcessResourceSampler;
 using livekit::telemetry::ProductChainStatus;
 using livekit::telemetry::SessionTelemetry;
+
+// Exercise canvas attribution with real session probes, without requiring a
+// WebRTC track or a GPU. Binding retirement still uses the real activity probe.
+class CanvasTestBindingObserver final : public livekit::render::RenderSubmitObserver {
+public:
+    CanvasTestBindingObserver(
+        const livekit::render::RenderFrameMetadata& metadata,
+        std::shared_ptr<livekit::telemetry::RenderActivityProbe> binding,
+        std::shared_ptr<livekit::telemetry::CanvasRenderProbe> canvas)
+        : series_key_(metadata.series_key)
+        , room_generation_(metadata.room_generation)
+        , binding_epoch_(metadata.binding_epoch)
+        , binding_(std::move(binding))
+        , canvas_(std::move(canvas)) {}
+
+    void SetExpected(bool, livekit::render::RenderExpectationReason,
+                     Clock::time_point) override {}
+    void OnSubmitted(const livekit::render::RenderFrameMetadata&, const char*,
+                     Clock::time_point) override {}
+
+    std::shared_ptr<livekit::render::CanvasRenderTimingObserver> CanvasTimingObserver(
+        const livekit::render::RenderFrameMetadata& metadata) override {
+        if (!binding_->active.load(std::memory_order_acquire) ||
+            metadata.series_key != series_key_ ||
+            metadata.room_generation != room_generation_ ||
+            metadata.binding_epoch != binding_epoch_) {
+            return {};
+        }
+        return canvas_;
+    }
+
+private:
+    const std::string series_key_;
+    const std::uint64_t room_generation_;
+    const std::uint64_t binding_epoch_;
+    const std::shared_ptr<livekit::telemetry::RenderActivityProbe> binding_;
+    const std::shared_ptr<livekit::telemetry::CanvasRenderProbe> canvas_;
+};
+
+struct CanvasTestBinding {
+    livekit::render::RenderFrameMetadata metadata;
+    std::shared_ptr<livekit::telemetry::RenderActivityProbe> probe;
+};
+
+CanvasTestBinding RegisterCanvasTestBinding(
+    const std::shared_ptr<SessionTelemetry>& telemetry,
+    const std::string& series_key,
+    std::uint64_t binding_epoch = 1) {
+    CanvasTestBinding binding;
+    binding.probe = std::make_shared<livekit::telemetry::RenderActivityProbe>();
+    binding.metadata.series_key = series_key;
+    binding.metadata.room_generation = 8;
+    binding.metadata.binding_epoch = binding_epoch;
+    binding.metadata.frame_token = 1;
+    binding.metadata.decoded_at = Event::Clock::now();
+    binding.metadata.observer = std::make_shared<CanvasTestBindingObserver>(
+        binding.metadata, binding.probe, telemetry->canvasRenderProbe());
+    TEST_CHECK(telemetry->RegisterRemoteVideoRenderBinding(
+        series_key, binding.metadata.room_generation, binding_epoch,
+        binding.metadata.decoded_at, true, true, 33ms, binding.probe,
+        binding.metadata.decoded_at));
+    return binding;
+}
+
+SessionTelemetry::SnapshotPtr ReadCanvasTestSnapshot(
+    asio::io_context& context,
+    const SessionTelemetry::Strand& strand,
+    const std::shared_ptr<SessionTelemetry>& telemetry) {
+    SessionTelemetry::SnapshotPtr snapshot;
+    context.restart();
+    asio::post(strand, [&snapshot, telemetry] {
+        snapshot = telemetry->SnapshotOnStrand();
+    });
+    context.run();
+    TEST_CHECK(snapshot);
+    return snapshot;
+}
 
 Event Counter(std::uint64_t generation,
               std::uint64_t sequence,
@@ -1494,9 +1572,8 @@ void RenderSubmitDedupesAndExcludesHiddenIntervals() {
     probe->draw_submit.samples.store(2, std::memory_order_relaxed);
     probe->draw_submit.total_us.store(150, std::memory_order_relaxed);
     probe->draw_submit.maximum_us.store(90, std::memory_order_relaxed);
-    probe->present_block.samples.store(1, std::memory_order_relaxed);
-    probe->present_block.total_us.store(120, std::memory_order_relaxed);
-    probe->present_block.maximum_us.store(120, std::memory_order_relaxed);
+    telemetry->canvasRenderProbe()->OnCanvasStageTiming(
+        livekit::render::CanvasRenderStage::PresentBlock, 120us);
     context.run();
     context.restart();
     asio::post(strand, [telemetry, base] {
@@ -1516,7 +1593,10 @@ void RenderSubmitDedupesAndExcludesHiddenIntervals() {
     TEST_CHECK(snapshot->render_convert_total_us == 90);
     TEST_CHECK(snapshot->render_convert_max_us == 50);
     TEST_CHECK(snapshot->render_draw_samples == 2);
+    TEST_CHECK(snapshot->render_draw_total_us == 150);
+    TEST_CHECK(snapshot->render_draw_max_us == 90);
     TEST_CHECK(snapshot->render_present_block_samples == 1);
+    TEST_CHECK(snapshot->render_present_block_total_us == 120);
     TEST_CHECK(snapshot->render_present_block_max_us == 120);
     TEST_CHECK(snapshot->render_gpu_execution_availability ==
                Availability::Unsupported);
@@ -1583,6 +1663,259 @@ void RenderSubmitDedupesAndExcludesHiddenIntervals() {
         "qt_cpu_paint", probe, base + 3320ms));
     context.run();
     TEST_CHECK(snapshot->stale_render_binding_drops == 1);
+}
+
+void CanvasTimingCountsOperationsInsteadOfVideoResources() {
+    using livekit::render::CanvasRenderStage;
+    using livekit::render::CanvasRenderTimingBatch;
+    asio::io_context context;
+    auto strand = asio::make_strand(context);
+    auto telemetry = std::make_shared<SessionTelemetry>(strand, 142, 128);
+    std::vector<CanvasTestBinding> videos;
+    CanvasRenderTimingBatch grid;
+    for (int i = 0; i != 9; ++i) {
+        videos.push_back(RegisterCanvasTestBinding(
+            telemetry, "remote_render/grid/" + std::to_string(i)));
+        const auto& video = videos.back();
+        grid.Add(video.metadata);
+        TEST_CHECK(telemetry->RecordRemoteVideoRenderSubmit(
+            video.metadata.series_key, video.metadata.room_generation,
+            video.metadata.binding_epoch, video.metadata.frame_token,
+            video.metadata.decoded_at, "opengl_swap_buffers", video.probe,
+            video.metadata.decoded_at + 10ms));
+    }
+    // One stream may occur in several scene items. Neither stream count nor
+    // duplicate metadata changes the one measured draw/Present operation.
+    grid.Add(videos.front().metadata);
+    grid.Add(videos.front().metadata);
+    grid.Notify(CanvasRenderStage::DrawSubmit, 80us);
+    grid.Notify(CanvasRenderStage::PresentBlock, 120us);
+    auto snapshot = ReadCanvasTestSnapshot(context, strand, telemetry);
+    TEST_CHECK(snapshot->unique_render_submits == 9);
+    TEST_CHECK(snapshot->render_draw_samples == 1);
+    TEST_CHECK(snapshot->render_draw_total_us == 80);
+    TEST_CHECK(snapshot->render_draw_max_us == 80);
+    TEST_CHECK(snapshot->render_present_block_samples == 1);
+    TEST_CHECK(snapshot->render_present_block_total_us == 120);
+    TEST_CHECK(snapshot->render_present_block_max_us == 120);
+
+    // A static scene can really be presented again without new frame tokens.
+    CanvasRenderTimingBatch redraw;
+    for (const auto& video : videos) redraw.Add(video.metadata);
+    redraw.Notify(CanvasRenderStage::DrawSubmit, 40us);
+    redraw.Notify(CanvasRenderStage::PresentBlock, 30us);
+    snapshot = ReadCanvasTestSnapshot(context, strand, telemetry);
+    TEST_CHECK(snapshot->unique_render_submits == 9);
+    TEST_CHECK(snapshot->render_draw_samples == 2);
+    TEST_CHECK(snapshot->render_draw_total_us == 120);
+    TEST_CHECK(snapshot->render_present_block_samples == 2);
+    TEST_CHECK(snapshot->render_present_block_total_us == 150);
+
+    // The same frame appearing in another canvas incurs another operation.
+    CanvasRenderTimingBatch picture_in_picture;
+    picture_in_picture.Add(videos.front().metadata);
+    picture_in_picture.Notify(CanvasRenderStage::DrawSubmit, 10us);
+    picture_in_picture.Notify(CanvasRenderStage::PresentBlock, 25us);
+    snapshot = ReadCanvasTestSnapshot(context, strand, telemetry);
+    TEST_CHECK(snapshot->render_draw_samples == 3);
+    TEST_CHECK(snapshot->render_draw_total_us == 130);
+    TEST_CHECK(snapshot->render_draw_max_us == 80);
+    TEST_CHECK(snapshot->render_present_block_samples == 3);
+    TEST_CHECK(snapshot->render_present_block_total_us == 175);
+    TEST_CHECK(snapshot->render_present_block_max_us == 120);
+}
+
+void CanvasTimingAttributesMixedSessionsIndependently() {
+    using livekit::render::CanvasRenderStage;
+    using livekit::render::CanvasRenderTimingBatch;
+    asio::io_context context;
+    auto strand = asio::make_strand(context);
+    auto first = std::make_shared<SessionTelemetry>(strand, 143, 32);
+    auto second = std::make_shared<SessionTelemetry>(strand, 144, 32);
+    const auto first_video = RegisterCanvasTestBinding(first, "remote_render/mixed/a");
+    const auto first_other = RegisterCanvasTestBinding(first, "remote_render/mixed/b");
+    // Equal room/binding generations across sessions must not merge sinks.
+    const auto second_video = RegisterCanvasTestBinding(second, "remote_render/mixed/a");
+    CanvasRenderTimingBatch mixed;
+    mixed.Add(first_video.metadata);
+    mixed.Add(second_video.metadata);
+    mixed.Add(first_other.metadata);
+    mixed.Add(second_video.metadata);
+    mixed.Notify(CanvasRenderStage::DrawSubmit, 55us);
+    mixed.Notify(CanvasRenderStage::PresentBlock, 90us);
+    for (const auto& session : {first, second}) {
+        const auto snapshot = ReadCanvasTestSnapshot(context, strand, session);
+        TEST_CHECK(snapshot->render_draw_samples == 1);
+        TEST_CHECK(snapshot->render_draw_total_us == 55);
+        TEST_CHECK(snapshot->render_present_block_samples == 1);
+        TEST_CHECK(snapshot->render_present_block_total_us == 90);
+    }
+}
+
+void CanvasTimingSurvivesBindingReplacementAndStopsWithSession() {
+    using livekit::render::CanvasRenderStage;
+    using livekit::render::CanvasRenderTimingBatch;
+    asio::io_context context;
+    auto strand = asio::make_strand(context);
+    auto telemetry = std::make_shared<SessionTelemetry>(strand, 145, 64);
+    const auto original = RegisterCanvasTestBinding(telemetry, "remote_render/lifetime/a");
+    CanvasRenderTimingBatch retained;
+    retained.Add(original.metadata);
+    retained.Notify(CanvasRenderStage::DrawSubmit, 10us);
+    retained.Notify(CanvasRenderStage::PresentBlock, 100us);
+    auto snapshot = ReadCanvasTestSnapshot(context, strand, telemetry);
+    TEST_CHECK(snapshot->render_present_block_total_us == 100);
+
+    const auto replacement = RegisterCanvasTestBinding(
+        telemetry, original.metadata.series_key, 2);
+    snapshot = ReadCanvasTestSnapshot(context, strand, telemetry);
+    TEST_CHECK(!original.probe->active.load(std::memory_order_acquire));
+    TEST_CHECK(snapshot->render_draw_samples == 1);
+    TEST_CHECK(snapshot->render_draw_total_us == 10);
+    TEST_CHECK(snapshot->render_present_block_samples == 1);
+    TEST_CHECK(snapshot->render_present_block_total_us == 100);
+
+    CanvasRenderTimingBatch invalid;
+    invalid.Add({});
+    invalid.Add(original.metadata); // Retired observer has the same session sink.
+    auto wrong_binding = replacement.metadata;
+    ++wrong_binding.binding_epoch;
+    invalid.Add(wrong_binding);
+    auto wrong_generation = replacement.metadata;
+    ++wrong_generation.room_generation;
+    invalid.Add(wrong_generation);
+    auto missing_token = replacement.metadata;
+    missing_token.frame_token = 0;
+    invalid.Add(missing_token);
+    invalid.Notify(CanvasRenderStage::DrawSubmit, 999us);
+    invalid.Notify(CanvasRenderStage::PresentBlock, 999us);
+    snapshot = ReadCanvasTestSnapshot(context, strand, telemetry);
+    TEST_CHECK(snapshot->render_draw_total_us == 10);
+    TEST_CHECK(snapshot->render_present_block_total_us == 100);
+
+    // Invalid/retired resources appearing first cannot suppress the later
+    // valid binding, even though they belong to the same session.
+    invalid.Add(replacement.metadata);
+    invalid.Add(replacement.metadata);
+    invalid.Notify(CanvasRenderStage::DrawSubmit, 20us);
+    invalid.Notify(CanvasRenderStage::PresentBlock, 60us);
+    invalid.Notify(CanvasRenderStage::DrawSubmit, -1us);
+    invalid.Notify(CanvasRenderStage::PresentBlock, -1us);
+    telemetry->canvasRenderProbe()->OnCanvasStageTiming(
+        CanvasRenderStage::DrawSubmit, -1us);
+    telemetry->canvasRenderProbe()->OnCanvasStageTiming(
+        CanvasRenderStage::PresentBlock, -1us);
+    snapshot = ReadCanvasTestSnapshot(context, strand, telemetry);
+    TEST_CHECK(snapshot->render_draw_samples == 2);
+    TEST_CHECK(snapshot->render_draw_total_us == 30);
+    TEST_CHECK(snapshot->render_draw_max_us == 20);
+    TEST_CHECK(snapshot->render_present_block_samples == 2);
+    TEST_CHECK(snapshot->render_present_block_total_us == 160);
+    TEST_CHECK(snapshot->render_present_block_max_us == 100);
+
+    // Room invalidates the activity probe when a binding exits. Canvas totals
+    // belong to the session and must survive losing every active binding.
+    replacement.probe->active.store(false, std::memory_order_release);
+    snapshot = ReadCanvasTestSnapshot(context, strand, telemetry);
+    TEST_CHECK(snapshot->render_bindings == 0);
+    TEST_CHECK(snapshot->render_draw_total_us == 30);
+    TEST_CHECK(snapshot->render_present_block_total_us == 160);
+    context.restart();
+    asio::post(strand, [telemetry] { telemetry->StopOnStrand(); });
+    context.run();
+    TEST_CHECK(!telemetry->canvasRenderProbe()->active.load(std::memory_order_acquire));
+
+    // Already collected work can outlive the old session. It must be rejected,
+    // and a new session with the same metadata must start from its own totals.
+    retained.Notify(CanvasRenderStage::DrawSubmit, 999us);
+    retained.Notify(CanvasRenderStage::PresentBlock, 999us);
+    auto next_session = std::make_shared<SessionTelemetry>(strand, 146, 32);
+    const auto next = RegisterCanvasTestBinding(
+        next_session, original.metadata.series_key);
+    CanvasRenderTimingBatch next_canvas;
+    next_canvas.Add(original.metadata);
+    next_canvas.Add(next.metadata);
+    next_canvas.Notify(CanvasRenderStage::DrawSubmit, 30us);
+    next_canvas.Notify(CanvasRenderStage::PresentBlock, 40us);
+    snapshot = ReadCanvasTestSnapshot(context, strand, telemetry);
+    TEST_CHECK(snapshot->session_complete);
+    TEST_CHECK(snapshot->render_draw_samples == 2);
+    TEST_CHECK(snapshot->render_draw_total_us == 30);
+    TEST_CHECK(snapshot->render_present_block_samples == 2);
+    TEST_CHECK(snapshot->render_present_block_total_us == 160);
+    const auto next_snapshot = ReadCanvasTestSnapshot(context, strand, next_session);
+    TEST_CHECK(!next_snapshot->session_complete);
+    TEST_CHECK(next_snapshot->render_draw_samples == 1);
+    TEST_CHECK(next_snapshot->render_draw_total_us == 30);
+    TEST_CHECK(next_snapshot->render_present_block_samples == 1);
+    TEST_CHECK(next_snapshot->render_present_block_total_us == 40);
+}
+
+void VideoPolicyRevisionAndRetirementAreSessionScoped() {
+    asio::io_context context;
+    auto strand = asio::make_strand(context);
+    auto telemetry = std::make_shared<SessionTelemetry>(strand, 147, 32);
+    SessionTelemetry::SnapshotPtr snapshot;
+    asio::post(strand, [&] {
+        livekit::telemetry::VideoPolicySample sample;
+        sample.coordinator_session = 147;
+        sample.native_room_generation = 8;
+        sample.catalog_revision = 12;
+        sample.policy_revision = 4;
+        sample.stage_content = "video";
+        sample.policy_reason = "visible";
+        sample.requested = 4;
+        sample.selected = 3;
+        sample.actual = 2;
+        sample.bound = 1;
+        sample.selected_not_actual = 1;
+        sample.selected_not_bound = 2;
+        TEST_CHECK(telemetry->RecordVideoPolicySampleOnStrand(sample));
+
+        auto stale = sample;
+        stale.policy_revision = 3;
+        stale.requested = 16;
+        TEST_CHECK(!telemetry->RecordVideoPolicySampleOnStrand(stale));
+        snapshot = telemetry->SnapshotOnStrand();
+    });
+    context.run();
+    TEST_CHECK(snapshot);
+    TEST_CHECK(snapshot->video_policy_availability == Availability::Valid);
+    TEST_CHECK(snapshot->video_policy_revision == 4);
+    TEST_CHECK(snapshot->video_policy_requested == 4);
+    TEST_CHECK(snapshot->video_policy_selected == 3);
+    TEST_CHECK(snapshot->video_policy_actual == 2);
+    TEST_CHECK(snapshot->video_policy_bound == 1);
+    TEST_CHECK(snapshot->video_policy_selected_not_actual == 1);
+    TEST_CHECK(snapshot->video_policy_selected_not_bound == 2);
+    TEST_CHECK(snapshot->video_policy_stale_updates == 1);
+
+    context.restart();
+    asio::post(strand, [&] {
+        livekit::telemetry::VideoPolicySample successor;
+        successor.coordinator_session = 147;
+        successor.native_room_generation = 9;
+        successor.catalog_revision = 1;
+        successor.policy_revision = 1;
+        successor.stage_content = "whiteboard";
+        successor.policy_reason = "whiteboard";
+        TEST_CHECK(telemetry->RecordVideoPolicySampleOnStrand(successor));
+        successor.retired = true;
+        TEST_CHECK(telemetry->RecordVideoPolicySampleOnStrand(successor));
+        telemetry->StopOnStrand();
+        snapshot = telemetry->SnapshotOnStrand();
+        TEST_CHECK(!telemetry->RecordVideoPolicySampleOnStrand(successor));
+    });
+    context.run();
+    TEST_CHECK(snapshot->session_complete);
+    TEST_CHECK(snapshot->video_policy_availability == Availability::NotExpected);
+    TEST_CHECK(snapshot->video_policy_reason == "video_policy_retired");
+    TEST_CHECK(snapshot->video_policy_native_room_generation == 9);
+    TEST_CHECK(snapshot->video_policy_retired);
+    TEST_CHECK(snapshot->video_policy_requested == 0);
+    TEST_CHECK(snapshot->video_policy_selected == 0);
+    TEST_CHECK(snapshot->video_policy_actual == 0);
+    TEST_CHECK(snapshot->video_policy_bound == 0);
 }
 
 void ProcessResourceSamplerUsesNormalizedCpuAndTypedAvailability() {
@@ -2300,6 +2633,10 @@ int main() {
     ReconnectWaitsForAudioAndVisibleRender();
     ReconnectTimeoutPreservesRecoveredMedia();
     RenderSubmitDedupesAndExcludesHiddenIntervals();
+    CanvasTimingCountsOperationsInsteadOfVideoResources();
+    CanvasTimingAttributesMixedSessionsIndependently();
+    CanvasTimingSurvivesBindingReplacementAndStopsWithSession();
+    VideoPolicyRevisionAndRetirementAreSessionScoped();
     ProcessResourceSamplerUsesNormalizedCpuAndTypedAvailability();
     RuntimeSamplingMeasuresLagAndRejectsLateUiProbes();
     ResourceTrendIsBoundedAndExitReturnStaysHonest();

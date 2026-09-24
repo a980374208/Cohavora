@@ -164,6 +164,26 @@ SafeTelemetryRecordPtr Record(
     record->snapshot.render_convert_samples = 2;
     record->snapshot.render_convert_total_us = 100;
     record->snapshot.render_convert_max_us = 60;
+    record->snapshot.render_draw_samples = 3;
+    record->snapshot.render_draw_total_us = 240;
+    record->snapshot.render_draw_max_us = 110;
+    record->snapshot.render_present_block_samples = 2;
+    record->snapshot.render_present_block_total_us = 160;
+    record->snapshot.render_present_block_max_us = 90;
+    record->snapshot.video_policy_availability = Availability::Valid;
+    record->snapshot.video_policy_reason = "video_policy_snapshot_valid";
+    record->snapshot.video_policy_coordinator_session = 42;
+    record->snapshot.video_policy_native_room_generation = 8;
+    record->snapshot.video_policy_catalog_revision = 12;
+    record->snapshot.video_policy_revision = 4;
+    record->snapshot.video_policy_stage_content = "video";
+    record->snapshot.video_policy_selection_reason = "visible";
+    record->snapshot.video_policy_requested = 4;
+    record->snapshot.video_policy_selected = 3;
+    record->snapshot.video_policy_actual = 2;
+    record->snapshot.video_policy_bound = 1;
+    record->snapshot.video_policy_selected_not_actual = 1;
+    record->snapshot.video_policy_selected_not_bound = 2;
     record->snapshot.telemetry_cost_availability = Availability::Valid;
     record->snapshot.telemetry_cost_reason = "observed_sampler_snapshot_cost_valid";
     record->snapshot.reconnect_density_availability = Availability::Valid;
@@ -289,11 +309,43 @@ void JsonCsvShareValuesAndPreserveMissing() {
     TEST_CHECK(jsonl.find("\"key\":\"device.open\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"device.hotplug\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"render.stage.convert.maximum\"") != std::string::npos);
+    const auto check_stage_metric = [&jsonl](
+            const char* key, std::int64_t expected, const char* measurement_point) {
+        const auto metric = FindMetric(jsonl, key);
+        TEST_CHECK(metric.at("value") == expected);
+        TEST_CHECK(metric.at("measurement_point") == measurement_point);
+        TEST_CHECK(metric.at("availability") == "VALID");
+    };
+    constexpr auto draw_point = "qt_tile_paint_or_canvas_draw_cpu_span_v2";
+    constexpr auto present_point = "canvas_gl_swap_or_dx11_render_present_cpu_span_v2";
+    check_stage_metric("render.stage.draw.samples", 3, draw_point);
+    check_stage_metric("render.stage.draw.total", 240, draw_point);
+    check_stage_metric("render.stage.draw.maximum", 110, draw_point);
+    check_stage_metric("render.stage.present_block.samples", 2, present_point);
+    check_stage_metric("render.stage.present_block.total", 160, present_point);
+    check_stage_metric("render.stage.present_block.maximum", 90, present_point);
+    for (const char* key : {
+            "render.stage.convert.samples", "render.stage.convert.total",
+            "render.stage.convert.maximum", "render.stage.upload.samples",
+            "render.stage.upload.total", "render.stage.upload.maximum"}) {
+        TEST_CHECK(FindMetric(jsonl, key).at("measurement_point") ==
+                   "render_cpu_submission_spans");
+    }
     TEST_CHECK(jsonl.find("\"key\":\"render.stage.gpu_execution\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"render.interval.p99\"") != std::string::npos);
     TEST_CHECK(FindMetric(jsonl, "render.admission_to_first").at("value") == 88);
     TEST_CHECK(jsonl.find("\"key\":\"render.frame_age.average\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"render.pipeline.actual_backend\"") != std::string::npos);
+    TEST_CHECK(FindMetric(jsonl, "video.policy.requested").at("value") == 4);
+    TEST_CHECK(FindMetric(jsonl, "video.policy.selected").at("value") == 3);
+    TEST_CHECK(FindMetric(jsonl, "video.policy.actual").at("value") == 2);
+    TEST_CHECK(FindMetric(jsonl, "video.policy.bound").at("value") == 1);
+    TEST_CHECK(FindMetric(jsonl, "video.policy.selected_not_actual").at("value") == 1);
+    TEST_CHECK(FindMetric(jsonl, "video.policy.selected_not_bound").at("value") == 2);
+    TEST_CHECK(FindMetric(jsonl, "video.policy.revision").at("value") == 4);
+    TEST_CHECK(FindMetric(jsonl, "video.policy.stage_content").at("value") == "video");
+    TEST_CHECK(FindMetric(jsonl, "video.policy.requested").at("measurement_point") ==
+               "session_video_policy_convergence");
     TEST_CHECK(jsonl.find("\"key\":\"resource.internal.native_bindings\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"resource.queue.router.replaced\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"resource.queue.export\"") != std::string::npos);

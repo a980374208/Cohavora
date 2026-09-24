@@ -1196,24 +1196,24 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
           s.render_stage_measurement_point);
     group("render.stage.draw.samples", s.render_draw_samples, "samples",
           s.render_stage_availability, s.render_stage_reason,
-          s.render_stage_measurement_point);
+          "qt_tile_paint_or_canvas_draw_cpu_span_v2");
     group("render.stage.draw.total", s.render_draw_total_us, "us",
           s.render_stage_availability, s.render_stage_reason,
-          s.render_stage_measurement_point);
+          "qt_tile_paint_or_canvas_draw_cpu_span_v2");
     group("render.stage.draw.maximum", Signed(s.render_draw_max_us), "us",
           s.render_stage_availability, s.render_stage_reason,
-          s.render_stage_measurement_point);
+          "qt_tile_paint_or_canvas_draw_cpu_span_v2");
     group("render.stage.present_block.samples",
           s.render_present_block_samples, "samples",
           s.render_stage_availability, s.render_stage_reason,
-          s.render_stage_measurement_point);
+          "canvas_gl_swap_or_dx11_render_present_cpu_span_v2");
     group("render.stage.present_block.total", s.render_present_block_total_us, "us",
           s.render_stage_availability, s.render_stage_reason,
-          s.render_stage_measurement_point);
+          "canvas_gl_swap_or_dx11_render_present_cpu_span_v2");
     group("render.stage.present_block.maximum",
           Signed(s.render_present_block_max_us), "us",
           s.render_stage_availability, s.render_stage_reason,
-          s.render_stage_measurement_point);
+          "canvas_gl_swap_or_dx11_render_present_cpu_span_v2");
     group("render.stage.gpu_execution", std::monostate{}, "us",
           s.render_gpu_execution_availability,
           s.render_gpu_execution_reason,
@@ -1272,6 +1272,64 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("render.pipeline.backend_fallbacks", s.render_backend_fallbacks, "events",
           s.render_pipeline_availability, s.render_pipeline_reason,
           s.render_pipeline_measurement_point);
+    group("video.policy.coordinator_session", s.video_policy_coordinator_session,
+          "generation", s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.native_room_generation",
+          s.video_policy_native_room_generation, "generation",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.catalog_revision", s.video_policy_catalog_revision,
+          "revision", s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.revision", s.video_policy_revision, "revision",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.stage_content", SafeText(s.video_policy_stage_content),
+          "state", s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.selection_reason",
+          SafeText(s.video_policy_selection_reason), "reason",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.retired", s.video_policy_retired, "bool",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.requested", s.video_policy_requested, "tracks",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.selected", s.video_policy_selected, "tracks",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.actual", s.video_policy_actual, "tracks",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.bound", s.video_policy_bound, "tracks",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.selected_not_requested",
+          s.video_policy_selected_not_requested, "tracks",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.selected_not_actual",
+          s.video_policy_selected_not_actual, "tracks",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.actual_not_selected",
+          s.video_policy_actual_not_selected, "tracks",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.selected_not_bound",
+          s.video_policy_selected_not_bound, "tracks",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.bound_not_selected",
+          s.video_policy_bound_not_selected, "tracks",
+          s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
+    group("video.policy.stale_updates", s.video_policy_stale_updates,
+          "updates", s.video_policy_availability, s.video_policy_reason,
+          s.video_policy_measurement_point);
     group("reconnect.render.expected", s.reconnect_render_expected, "recoveries",
           s.reconnect_render_availability, s.reconnect_render_reason,
           s.reconnect_render_measurement_point);
@@ -1586,6 +1644,11 @@ TelemetryHistoryStore::TelemetryHistoryStore(
 }
 
 TelemetryHistoryStore::~TelemetryHistoryStore() {
+    Close();
+}
+
+void TelemetryHistoryStore::Close() {
+    std::lock_guard close_lock(close_mutex_);
     {
         std::lock_guard lock(mutex_);
         stopping_ = true;

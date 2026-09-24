@@ -14,9 +14,11 @@
 #include <optional>
 #include <tuple>
 #include <asio.hpp>
+#include "executor_lifetime.h"
 #include "signal_client.h"
 #include "participant.h"
 #include "participant_event.h"
+#include "video_demand_types.h"
 #include "crash_handler.h"
 #include "safe_spawn.h"
 #include "chat_message.h"
@@ -186,18 +188,29 @@ class RoomDataChannelObserver;
 class RoomStreamDeliveryTestAccess;
 
 class Room : public std::enable_shared_from_this<Room> {
+private:
+    // First-declared, last-destroyed: even test hooks may retain timer owners.
+    const std::shared_ptr<void> executor_lifetime_;
+    const std::shared_ptr<ExecutorCallbackGate> callback_gate_;
 public:
-    static std::shared_ptr<Room> Create(asio::any_io_executor executor) {
-        return std::make_shared<Room>(executor);
+    static std::shared_ptr<Room> Create(asio::any_io_executor executor,
+                                       std::shared_ptr<void> executor_lifetime = {}) {
+        return std::make_shared<Room>(executor, std::move(executor_lifetime));
     }
 
-    Room(asio::any_io_executor executor);
+    Room(asio::any_io_executor executor, std::shared_ptr<void> executor_lifetime = {});
     ~Room();
 
     asio::awaitable<bool> Connect(const std::string& url, const std::string& token, const SignalOptions& opts);
     asio::awaitable<void> ConnectAsync(const std::string& url, const std::string& token, const SignalOptions& opts);
     void Disconnect();
     asio::awaitable<void> DisconnectAsync();
+    // Permanent shutdown, called only by a shutdown worker while I/O is running.
+    // Cancels native completion bridges and drains admitted callback/listener
+    // invocations. The owner must then finalize telemetry, release its work
+    // guard and join the naturally drained I/O runner before releasing context.
+    void Retire();
+    bool retired() const noexcept { return retired_.load(std::memory_order_acquire); }
 
     ConnectionState connection_state() const;
     std::shared_ptr<LocalParticipant> local_participant() const;
@@ -225,8 +238,18 @@ public:
     void AddListener(std::shared_ptr<RoomListener> listener);
     void RemoveListener(std::shared_ptr<RoomListener> listener);
     void SetSessionTelemetry(std::weak_ptr<telemetry::SessionTelemetry> telemetry);
+    using RemoteMediaRecoveryHandler =
+        std::function<void(const RemoteMediaRecoveryRequest&)>;
+    ControlApplyResult ApplyRemoteMediaPlan(const RemoteMediaPlan& plan);
+    void SetRemoteMediaRecoveryHandler(RemoteMediaRecoveryHandler handler);
+    std::optional<RemoteMediaRecoveryRequest> remote_media_recovery_request() const;
 
-    asio::any_io_executor executor() const { return executor_; }
+    // Compatibility borrow: callers must retain Room for the entire executor
+    // use and must not initiate work after Retire. Never owns the context alone.
+    asio::any_io_executor executor() const {
+        if (retired()) throw std::logic_error("room is retired");
+        return executor_;
+    }
 
     // === 场景模拟 (Simulate Scenario - 对标 Flutter sendSimulateScenario) ===
     void SimulateScenario(SimulateScenarioType scenario);
@@ -310,11 +333,20 @@ public:
     using LogHandler = std::function<void(const std::string& cat, const std::string& tag, const std::string& msg)>;
     void SetLogHandler(LogHandler handler) {
         std::lock_guard lock(room_mutex_);
+        if (retired() && handler) return;
         log_handler_ = std::move(handler);
     }
     void Log(const std::string& cat, const std::string& tag, const std::string& msg);
 
 private:
+    ExecutorCallbackGate::Ticket AdmitOperation(OperationKind kind, const char* stage) {
+        auto admission = callback_gate_->Enter();
+        if (!admission) {
+            throw OperationError(kind, OperationErrorCode::SessionClosed,
+                                 stage, "room is retired");
+        }
+        return admission;
+    }
     void SchedulePublisherMediaDiagnostic(uint64_t generation);
     friend class RoomPeerConnectionObserver;
     friend class RoomDataChannelObserver;
@@ -385,7 +417,8 @@ private:
     void DeliverListener(const ListenerDeliveryContext& context,
                          const std::shared_ptr<RoomListener>& listener,
                          Callback&& callback, bool legacy_only = false) {
-        if (!AdmitListener(context, listener)) return;
+        auto admission = callback_gate_->Enter();
+        if (!admission || !AdmitListener(context, listener)) return;
         // This virtual query is also application code: never hold room_mutex_,
         // and re-admit after it in case it removed a listener or replaced Room.
         if (legacy_only) {
@@ -496,13 +529,32 @@ private:
     };
     struct RemoteSubscriptionIntent {
         bool subscribed = true;
+        bool enabled = true;
+        proto::VideoQuality quality = proto::VideoQuality::HIGH;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t max_fps = 0;
+        uint32_t priority = 0;
         uint64_t revision = 0;
+        uint64_t policy_revision = 0;
         uint64_t last_request_sequence = 0;
+        std::optional<bool> sent_subscribed;
+        bool subscription_dirty = false;
+        bool settings_dirty = false;
         std::chrono::steady_clock::time_point accepted_at{};
     };
     struct PendingSubscriptionUpdate {
         bool subscribed = true;
+        bool enabled = true;
+        proto::VideoQuality quality = proto::VideoQuality::HIGH;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        uint32_t max_fps = 0;
+        uint32_t priority = 0;
         uint64_t revision = 0;
+        uint64_t policy_revision = 0;
+        bool subscription_dirty = false;
+        bool settings_dirty = false;
         bool in_flight = false;
         std::shared_ptr<SubscriptionTelemetryOperation> telemetry_operation;
     };
@@ -518,6 +570,15 @@ private:
         const SubscriptionIntentKey& key);
     const RemoteSubscriptionIntent* FindSubscriptionIntentLocked(
         const SubscriptionIntentKey& key) const;
+    static proto::VideoQuality VideoQualityForTier(VideoQualityTier quality);
+    static bool IsVideoSettingsEqual(
+        const RemoteSubscriptionIntent& intent,
+        bool enabled,
+        proto::VideoQuality quality,
+        uint32_t width,
+        uint32_t height,
+        uint32_t max_fps,
+        uint32_t priority);
     void QueueSubscriptionUpdateLocked(const SubscriptionIntentKey& key);
     void FinishSubscriptionOperationLocked(
         const PendingSubscriptionUpdate& update,
@@ -535,6 +596,8 @@ private:
     void ResetSubscriptionSessionLocked(bool auto_subscribe);
     void ClearSubscriptionSessionLocked();
     void PruneSubscriptionIntentsLocked();
+    RemoteMediaRecoveryRequest BeginRemoteMediaRecoveryLocked();
+    void CompleteRemoteMediaRecoveryLocked();
     std::shared_ptr<MediaBindingState> FindMediaBindingLocked(
         uint64_t binding_serial) const;
     std::shared_ptr<RemoteTrackPublication> CreateRemoteTrackPublication(
@@ -643,6 +706,10 @@ private:
     void CancelPendingOperations(OperationErrorCode code, const std::string& stage, const std::string& message);
     void FlushDeferredRoomMessages(uint64_t generation);
 
+    // Must be declared before every member that owns an executor/timer/bridge.
+    // External retired Room/participant references may outlive the I/O runner.
+    std::atomic<bool> retired_{false};
+    std::mutex retirement_mutex_;
     asio::any_io_executor executor_;
     std::shared_ptr<SignalClient> signal_client_;
     std::shared_ptr<proto::JoinResponse> join_response_;
@@ -786,6 +853,15 @@ private:
     bool subscription_sender_active_ = false;
     uint64_t subscription_sender_session_ = 0;
     uint64_t subscription_sender_operation_ = 0;
+    uint64_t remote_media_coordinator_session_ = 0;
+    uint64_t remote_media_native_generation_ = 0;
+    uint64_t remote_media_catalog_revision_ = 0;
+    uint64_t remote_media_policy_revision_ = 0;
+    uint64_t remote_media_recovery_epoch_ = 0;
+    bool remote_media_plan_active_ = false;
+    bool remote_media_recovery_pending_ = false;
+    std::string remote_media_recovery_token_;
+    RemoteMediaRecoveryHandler remote_media_recovery_handler_;
     OperationTimeouts operation_timeouts_;
     int primary_pc_type_ = 0;
     bool require_media_connection_ = true;
@@ -846,6 +922,9 @@ private:
         uint64_t owner_generation,
         std::shared_ptr<telemetry::SessionTelemetry> telemetry_owner,
         std::string telemetry_operation_id);
+    asio::awaitable<void> WaitForRemoteMediaRecoveryHandshake(
+        uint64_t owner_generation,
+        std::chrono::steady_clock::time_point deadline);
     asio::awaitable<void> RepublishLocalTracks(uint64_t generation);
     asio::awaitable<void> RestartIceConnections(
         std::shared_ptr<proto::ReconnectResponse> reconnect_response,

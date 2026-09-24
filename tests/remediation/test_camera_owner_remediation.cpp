@@ -165,6 +165,11 @@ public:
 	void Stop() override {
 		_running.store(false);
 		_stopCount.fetch_add(1);
+		if (_stopHook) _stopHook();
+	}
+
+	void setStopHook(std::function<void()> hook) {
+		_stopHook = std::move(hook);
 	}
 
 	bool IsRunning() const noexcept override {
@@ -197,6 +202,7 @@ private:
 	bool _startOk = true;
 	std::atomic<bool> _running{false};
 	std::atomic<int> _stopCount{0};
+	std::function<void()> _stopHook;
 	livekit::DShowCaptureConfig _config;
 	std::shared_ptr<livekit::VideoSource> _source;
 };
@@ -217,6 +223,22 @@ void drainEvents() {
 		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
 		QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
 	}
+}
+
+bool pumpUntil(const std::function<bool()> &ready) {
+	const auto deadline = std::chrono::steady_clock::now() + 10s;
+	while (!ready() && std::chrono::steady_clock::now() < deadline) {
+		QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+		QCoreApplication::processEvents(QEventLoop::AllEvents, 25);
+		std::this_thread::yield();
+	}
+	return ready();
+}
+
+void drainCaptureRetirement() {
+	bool drained = false;
+	OpenMeeting::SessionShutdownService::Instance().DrainAsync([&] { drained = true; });
+	TEST_CHECK(pumpUntil([&] { return drained; }));
 }
 
 struct Fixture final {
@@ -274,6 +296,7 @@ struct Fixture final {
 
 	~Fixture() {
 		window.reset();
+		drainCaptureRetirement();
 		manager->Stop();
 		session->logout(false);
 		drainEvents();
@@ -367,7 +390,7 @@ void verifyDeleteAfterTerminalSelection() {
 		}
 		fixture.effects->requestLogs = 0;
 		fixture.window.reset();
-		TEST_CHECK(fixture.captures.front()->stopCount() > 0);
+		TEST_CHECK(pumpUntil([&] { return fixture.captures.front()->stopCount() > 0; }));
 		{
 			std::lock_guard<std::mutex> lock(mutex);
 			resume = true;
@@ -492,6 +515,47 @@ void verifyNewerRequestWins() {
 	});
 }
 
+void verifyWindowDeletionDoesNotWaitForCaptureStop() {
+	runCase("capture Stop stays owned while deleted Window leaves Qt responsive", [] {
+		Fixture fixture;
+		struct StopControl {
+			std::mutex mutex;
+			std::condition_variable wake;
+			std::atomic<bool> entered{false};
+			std::atomic<bool> usedUiThread{false};
+			bool released = false;
+		};
+		const auto control = std::make_shared<StopControl>();
+		const auto uiThread = std::this_thread::get_id();
+		fixture.captures.front()->setStopHook([control, uiThread] {
+			control->usedUiThread.store(std::this_thread::get_id() == uiThread);
+			std::unique_lock lock(control->mutex);
+			control->entered.store(true);
+			TEST_CHECK(control->wake.wait_for(lock, 10s, [&] { return control->released; }));
+		});
+
+		fixture.window.reset();
+		TEST_CHECK(pumpUntil([&] { return control->entered.load(); }));
+		TEST_CHECK(!control->usedUiThread.load());
+		TEST_CHECK(OpenMeeting::SessionShutdownService::Instance().busy());
+		bool drained = false;
+		OpenMeeting::SessionShutdownService::Instance().DrainAsync([&] { drained = true; });
+		bool uiProgress = false;
+		QMetaObject::invokeMethod(QCoreApplication::instance(), [&] {
+			uiProgress = true;
+		}, Qt::QueuedConnection);
+		TEST_CHECK(pumpUntil([&] { return uiProgress; }));
+		TEST_CHECK(!drained);
+		{
+			std::lock_guard lock(control->mutex);
+			control->released = true;
+		}
+		control->wake.notify_one();
+		TEST_CHECK(pumpUntil([&] { return drained; }));
+		TEST_CHECK(!fixture.manager->IsRunning());
+	});
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -516,10 +580,11 @@ int main(int argc, char *argv[]) {
 	verifyQueuedBeforeSessionInvalidation();
 	verifySessionInvalidationBeforeTimeout();
 	verifyNewerRequestWins();
+	verifyWindowDeletionDoesNotWaitForCaptureStop();
 
 	style::StopManager();
-	TEST_CHECK(executed == 9);
-	std::cout << "CPPQT002_CASES_PLANNED=9 EXECUTED=" << executed
+	TEST_CHECK(executed == 10);
+	std::cout << "CPPQT002_CASES_PLANNED=10 EXECUTED=" << executed
 	          << " PASSED=" << executed << " FAILED=0" << std::endl;
 	return 0;
 }

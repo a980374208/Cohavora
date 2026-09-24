@@ -6,6 +6,7 @@
 #include "dshow_types.h"
 #include "dshow_enumerator.h"
 #include "dshow_capture.h"
+#include "dshow_graph_owner.h"
 #include "media_converters.h"
 #include "video_source.h"
 #include "local_video_track.h"
@@ -24,10 +25,111 @@ public:
     static bool connected(DShowVideoCapture& capture, const AM_MEDIA_TYPE& type) {
         return capture.ApplyConnectedFormat(type);
     }
+    static void installControl(DShowVideoCapture& capture,
+                               const std::function<IMediaControl*()>& create) {
+        capture.graph_owner_->Invoke([&] {
+            TEST_CHECK(capture.graph_owner_->Invoke([] { return true; }));
+            capture.media_control_.Attach(create());
+            capture.is_running_.store(true);
+        });
+    }
 };
 }
 
 namespace {
+struct GraphThreadRecord {
+    std::thread::id created;
+    std::thread::id stopped;
+    std::thread::id released;
+    int stops = 0;
+    int releases = 0;
+};
+
+class OwnerMediaControl final : public IMediaControl {
+public:
+    explicit OwnerMediaControl(std::shared_ptr<GraphThreadRecord> record)
+        : record_(std::move(record)) {
+        APTTYPE apartment;
+        APTTYPEQUALIFIER qualifier;
+        TEST_CHECK(SUCCEEDED(CoGetApartmentType(&apartment, &qualifier)));
+        TEST_CHECK(apartment == APTTYPE_MTA);
+        record_->created = std::this_thread::get_id();
+    }
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** value) override {
+        if (!value) return E_POINTER;
+        *value = nullptr;
+        if (iid != IID_IUnknown && iid != IID_IDispatch && iid != IID_IMediaControl) {
+            return E_NOINTERFACE;
+        }
+        *value = static_cast<IMediaControl*>(this);
+        AddRef();
+        return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override { return ++references_; }
+    ULONG STDMETHODCALLTYPE Release() override {
+        const auto remaining = --references_;
+        if (!remaining) {
+            record_->released = std::this_thread::get_id();
+            ++record_->releases;
+            delete this;
+        }
+        return remaining;
+    }
+    HRESULT STDMETHODCALLTYPE GetTypeInfoCount(UINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetTypeInfo(UINT, LCID, ITypeInfo**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE GetIDsOfNames(REFIID, LPOLESTR*, UINT, LCID, DISPID*) override {
+        return E_NOTIMPL;
+    }
+    HRESULT STDMETHODCALLTYPE Invoke(DISPID, REFIID, LCID, WORD, DISPPARAMS*,
+                                     VARIANT*, EXCEPINFO*, UINT*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE Run() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE Pause() override { return S_OK; }
+    HRESULT STDMETHODCALLTYPE Stop() override {
+        record_->stopped = std::this_thread::get_id();
+        ++record_->stops;
+        return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE GetState(LONG, OAFilterState*) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE RenderFile(BSTR) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE AddSourceFilter(BSTR, IDispatch**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE get_FilterCollection(IDispatch**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE get_RegFilterCollection(IDispatch**) override { return E_NOTIMPL; }
+    HRESULT STDMETHODCALLTYPE StopWhenReady() override { return Stop(); }
+
+private:
+    std::atomic<ULONG> references_{1};
+    std::shared_ptr<GraphThreadRecord> record_;
+};
+
+void CheckGraphOwnerLifetime() {
+    auto capture = livekit::DShowVideoCapture::Create();
+    const auto first = std::make_shared<GraphThreadRecord>();
+    livekit::DShowCaptureTestAccess::installControl(*capture, [first] {
+        return new OwnerMediaControl(first);
+    });
+    TEST_CHECK(first->created != std::this_thread::get_id());
+    std::thread retiring([capture] { capture->Stop(); });
+    retiring.join();
+    TEST_CHECK(!capture->IsRunning());
+    TEST_CHECK(first->stops == 1 && first->releases == 1);
+    TEST_CHECK(first->stopped == first->created);
+    TEST_CHECK(first->released == first->created);
+
+    // A later graph reuses the same owner. Destruction must release it there
+    // even when no caller explicitly stopped capture before dropping ownership.
+    const auto second = std::make_shared<GraphThreadRecord>();
+    livekit::DShowCaptureTestAccess::installControl(*capture, [second] {
+        return new OwnerMediaControl(second);
+    });
+    std::thread deleting([capture = std::move(capture)]() mutable { capture.reset(); });
+    deleting.join();
+    TEST_CHECK(second->created == first->created);
+    TEST_CHECK(second->stops == 1 && second->releases == 1);
+    TEST_CHECK(second->stopped == second->created);
+    TEST_CHECK(second->released == second->created);
+    std::cout << "DSHOW_GRAPH_OWNER PASS: one MTA creates, stops and releases COM graph interfaces\n";
+}
+
 class FormatDevice final : public IAMStreamConfig {
 public:
     FormatDevice() {
@@ -149,7 +251,10 @@ void CheckCaptureFormatContract() {
 int main(int argc, char** argv) {
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const bool runtime = argc > 1 && std::string(argv[1]) == "--camera-runtime";
-    if (!runtime) CheckCaptureFormatContract();
+    if (!runtime) {
+        CheckCaptureFormatContract();
+        CheckGraphOwnerLifetime();
+    }
     std::cout << "==================================================\n";
     std::cout << " Running DirectShow Video Capture Tests           \n";
     std::cout << "==================================================\n";

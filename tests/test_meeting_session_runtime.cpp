@@ -21,6 +21,41 @@ void Require(bool condition, const char *message) {
     }
 }
 
+struct CatalogEventFixture {
+    std::shared_ptr<livekit::MembershipState> participant;
+    std::shared_ptr<livekit::TrackMembershipState> track;
+    livekit::ParticipantEvent event;
+};
+
+CatalogEventFixture RemoteVideoEvent(uint64_t nativeGeneration,
+                                     uint64_t incarnation,
+                                     std::string trackSid) {
+    CatalogEventFixture result;
+    livekit::ParticipantKey participantKey{
+        nativeGeneration, incarnation, "PA_RUNTIME", "runtime-peer"};
+    livekit::TrackKey trackKey{participantKey, incarnation, std::move(trackSid)};
+    result.participant =
+        std::make_shared<livekit::MembershipState>(participantKey);
+    result.track = std::make_shared<livekit::TrackMembershipState>(trackKey);
+    result.event.kind = livekit::ParticipantEventKind::Upsert;
+    result.event.native_room_generation = nativeGeneration;
+    result.event.participant.key = participantKey;
+    result.event.participant.ticket = result.participant;
+    result.event.participant.state.sid = participantKey.sid;
+    result.event.participant.state.identity = participantKey.identity;
+    result.event.participant.state.name = "Runtime peer";
+    livekit::PublicationSnapshotEvent publication;
+    publication.key = trackKey;
+    publication.ticket = result.track;
+    publication.state.sid = trackKey.publication_sid;
+    publication.state.name = "Runtime camera";
+    publication.state.kind = livekit::TrackKind::Video;
+    publication.state.source = livekit::TrackSource::Camera;
+    publication.state.subscription_allowed = true;
+    result.event.participant.publications.push_back(std::move(publication));
+    return result;
+}
+
 } // namespace
 
 int main() {
@@ -80,6 +115,72 @@ int main() {
                 "stop barrier ran before already-posted transfer work");
         Require(runtime->transfersOnStrand().size() == kTaskCount,
                 "serialized transfer state lost an update");
+
+        auto catalog = RemoteVideoEvent(11, 1, "TR_RUNTIME");
+        Require(!runtime->hasViewportIntentOnStrand(),
+                "runtime reported a viewport before the first UI intent");
+        Require(runtime->updatePublicationCatalogOnStrand(catalog.event) ==
+                    livekit::CatalogApplyResult::Applied,
+                "runtime catalog did not accept the initial generation");
+        livekit::ViewportIntent viewport;
+        viewport.coordinator_session = runtime->generation();
+        viewport.view_revision = 1;
+        viewport.catalog_revision =
+            runtime->publicationCatalogOnStrand().catalog_revision;
+        viewport.mode = livekit::VideoLayoutMode::Auto;
+        viewport.stage_rect = {0, 0, 640, 360};
+        Require(runtime->updateViewportIntentOnStrand(viewport),
+                "runtime viewport was not accepted");
+        Require(runtime->hasViewportIntentOnStrand(),
+                "runtime did not remember the accepted UI viewport");
+        const auto projected = runtime->buildRemoteMediaPlanOnStrand();
+        Require(projected.coordinator_session == 7 &&
+                    projected.native_room_generation == 11 &&
+                    projected.known_publications.size() == 1 &&
+                    projected.known_publications.front().publication_sid ==
+                        "TR_RUNTIME" &&
+                    projected.video.size() == 1 &&
+                    projected.video.front().key.publication_sid == "TR_RUNTIME" &&
+                    projected.video.front().subscribed &&
+                    projected.video.front().enabled &&
+                    projected.video.front().width == 320 &&
+                    projected.video.front().height == 360 &&
+                    projected.video.front().max_fps == 30,
+                "runtime did not project complete video settings");
+
+        livekit::RemoteMediaRecoveryRequest immediateRequest{
+            7, 11, projected.catalog_revision, 1, "recovery-current"};
+        bool immediate = false;
+        runtime->requestRemoteMediaRecoveryOnStrand(
+            immediateRequest,
+            [&](livekit::RemoteMediaPlan plan) {
+                immediate = plan.native_room_generation == 11 &&
+                    plan.recovery_epoch == 1 &&
+                    plan.recovery_token == "recovery-current";
+            });
+        Require(immediate, "current-generation recovery was not completed immediately");
+
+        livekit::RemoteMediaRecoveryRequest deferredRequest{
+            7, 12, projected.catalog_revision, 2, "recovery-successor"};
+        bool deferred = false;
+        runtime->requestRemoteMediaRecoveryOnStrand(
+            deferredRequest,
+            [&](livekit::RemoteMediaPlan plan) {
+                deferred = plan.native_room_generation == 12 &&
+                    plan.video.size() == 1 &&
+                    plan.video.front().key.participant.native_room_generation == 12 &&
+                    plan.recovery_epoch == 2 &&
+                    plan.recovery_token == "recovery-successor";
+            });
+        Require(!deferred,
+                "successor recovery completed before its catalog generation arrived");
+        auto successor = RemoteVideoEvent(12, 2, "TR_RUNTIME");
+        Require(runtime->updatePublicationCatalogOnStrand(successor.event) ==
+                    livekit::CatalogApplyResult::Applied,
+                "runtime catalog did not accept the successor generation");
+        Require(deferred,
+                "successor recovery did not complete after catalog alignment");
+
         runtime->stopAcceptingDataOnStrand();
         Require(!runtime->acceptsDataOnStrand(), "stop barrier did not reject later data");
         runtime->transfersOnStrand().clear();

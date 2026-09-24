@@ -15,6 +15,7 @@
 namespace livekit {
 
 class DShowSampleGrabberCallback;
+class DShowGraphOwner;
 
 class DShowVideoCapture : public std::enable_shared_from_this<DShowVideoCapture> {
 public:
@@ -58,6 +59,8 @@ private:
     bool ApplyConnectedFormat(const AM_MEDIA_TYPE& media_type);
     bool BuildFilterGraph();
     void TeardownFilterGraph();
+    bool StartOnGraphThread();
+    void StopOnGraphThread();
 
     DShowCaptureConfig config_;
     std::shared_ptr<VideoSource> video_source_;
@@ -84,6 +87,9 @@ private:
     DShowPixelFormat negotiated_format_{DShowPixelFormat::RGB24};
 
     Microsoft::WRL::ComPtr<DShowSampleGrabberCallback> grabber_callback_;
+
+    // Explicitly reset in the destructor while all graph members still live.
+    std::unique_ptr<DShowGraphOwner> graph_owner_;
 };
 
 } // namespace livekit

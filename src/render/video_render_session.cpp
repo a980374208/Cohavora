@@ -15,20 +15,102 @@ VideoRenderSession::~VideoRenderSession() {
     Deactivate();
 }
 
-void VideoRenderSession::AttachRemoteTrack(const std::shared_ptr<Track>& track,
-                                           const std::string& identity,
-                                           const std::string& render_key) {
+VideoRenderSession::AttachResult VideoRenderSession::AttachRemoteTrack(
+        const std::shared_ptr<Track>& track,
+        const std::string& identity,
+        const std::string& render_key) {
+    RemoteTrackSelection selection;
+    selection.track = track;
+    selection.identity = identity;
+    selection.render_key = render_key;
+    return AttachSelection(selection, false);
+}
+
+VideoRenderSession::SelectionResult VideoRenderSession::ApplySelection(
+        uint64_t coordinator_session,
+        uint64_t policy_revision,
+        const std::vector<RemoteTrackSelection>& selection) {
+    SelectionResult result;
+    result.coordinator_session = coordinator_session;
+    result.policy_revision = policy_revision;
+    result.requested = selection.size();
+
+    const auto state = state_;
+    if (!state || !state->active.load(std::memory_order_acquire)) {
+        for (const auto& value : selection) {
+            result.tracks.emplace_back(value.key.publication_sid, AttachResult::Inactive);
+        }
+        return result;
+    }
+    if (selection_coordinator_session_ != 0 &&
+        (selection_coordinator_session_ != coordinator_session ||
+         policy_revision < selection_policy_revision_)) {
+        for (const auto& value : selection) {
+            result.tracks.emplace_back(
+                value.key.publication_sid, AttachResult::StaleSelection);
+        }
+        result.attached = tracks_.size();
+        return result;
+    }
+
+    std::unordered_map<std::string, const RemoteTrackSelection*> requested;
+    requested.reserve(selection.size());
+    for (const auto& value : selection) {
+        if (!value.key.publication_sid.empty()) {
+            requested.emplace(value.key.publication_sid, &value);
+        }
+    }
+
+    std::vector<std::string> removed;
+    removed.reserve(tracks_.size());
+    for (const auto& [track_id, binding] : tracks_) {
+        const auto desired = requested.find(track_id);
+        if (desired == requested.end() || !binding.validates_lease ||
+            binding.key != desired->second->key ||
+            binding.media_binding_key != desired->second->media_binding_key ||
+            binding.track.lock() != desired->second->track) {
+            removed.push_back(track_id);
+        }
+    }
+    for (const auto& track_id : removed) RemoveTrack(track_id);
+
+    selection_coordinator_session_ = coordinator_session;
+    selection_policy_revision_ = policy_revision;
+    result.tracks.reserve(selection.size());
+    for (const auto& value : selection) {
+        const auto attach = AttachSelection(value, true);
+        result.tracks.emplace_back(value.key.publication_sid, attach);
+    }
+    result.attached = tracks_.size();
+    return result;
+}
+
+VideoRenderSession::AttachResult VideoRenderSession::AttachSelection(
+        const RemoteTrackSelection& selection,
+        bool validates_lease) {
+    const auto& track = selection.track;
+    const auto& identity = selection.identity;
+    const auto& render_key = selection.render_key;
     if (!track || track->kind() != TrackKind::Video || identity.empty()) {
-        return;
+        return AttachResult::InvalidTrack;
+    }
+    if (validates_lease &&
+        (selection.key.publication_sid.empty() ||
+         selection.key.publication_sid != track->sid() ||
+         selection.media_binding_key.track != selection.key ||
+         !IsTrackTicketActive(selection.ticket, selection.key) ||
+         !IsMediaBindingTicketActive(
+             selection.media_binding_ticket, selection.media_binding_key))) {
+        return AttachResult::StaleBinding;
     }
     const auto state = state_;
     if (!state || !state->active.load(std::memory_order_acquire)) {
-        return;
+        return AttachResult::Inactive;
     }
 
     const std::string track_id = track->sid();
     if (track_id.empty()) {
-        return;
+        return AttachResult::InvalidTrack;
     }
 
     // A full Room reconnect can recreate the Track object while preserving its
@@ -37,14 +119,20 @@ void VideoRenderSession::AttachRemoteTrack(const std::shared_ptr<Track>& track,
     // repeated control-plane notifications for the same object stay idempotent.
     const auto existing = tracks_.find(track_id);
     if (existing != tracks_.end()) {
-        if (existing->second.track.lock() == track) {
-            return;
+        if (existing->second.track.lock() == track &&
+            existing->second.render_key == (render_key.empty() ? identity : render_key) &&
+            existing->second.validates_lease == validates_lease &&
+            (!validates_lease ||
+             (existing->second.key == selection.key &&
+              existing->second.media_binding_key == selection.media_binding_key &&
+              BindingLeaseActive(existing->second)))) {
+            return AttachResult::AlreadyBound;
         }
         state->router->RemoveTrack(track_id, state->generation);
         tracks_.erase(existing);
     } else if (tracks_.size() >= max_active_tracks_) {
         state->rejected_track_attachments.fetch_add(1, std::memory_order_relaxed);
-        return;
+        return AttachResult::CapacityExceeded;
     }
 
     const uint64_t generation = state->generation;
@@ -52,24 +140,38 @@ void VideoRenderSession::AttachRemoteTrack(const std::shared_ptr<Track>& track,
         1, std::memory_order_relaxed);
     if (!state->router->RegisterTrackBinding(track_id, generation, binding_generation)) {
         state->rejected_track_attachments.fetch_add(1, std::memory_order_relaxed);
-        return;
+        return AttachResult::CapacityExceeded;
     }
     std::weak_ptr<State> weak_state = state;
+    const auto track_key = selection.key;
+    const auto track_ticket = selection.ticket;
+    const auto media_binding_key = selection.media_binding_key;
+    const auto media_binding_ticket = selection.media_binding_ticket;
     auto subscription = track->subscribeI420VideoFrames(
-        [weak_state, track_id, generation, binding_generation](OwnedI420Frame::Ptr frame) {
+        [weak_state, track_id, generation, binding_generation, validates_lease,
+         track_key, track_ticket, media_binding_key, media_binding_ticket](OwnedI420Frame::Ptr frame) {
             const auto state = weak_state.lock();
             if (!state || !state->active.load(std::memory_order_acquire)) {
+                return;
+            }
+            if (validates_lease &&
+                (!IsTrackTicketActive(track_ticket, track_key) ||
+                 !IsMediaBindingTicketActive(
+                     media_binding_ticket, media_binding_key))) {
                 return;
             }
             state->router->SubmitBound(track_id, generation, binding_generation, std::move(frame));
         });
     if (!subscription.active()) {
         state->router->RemoveTrack(track_id, generation);
-        return;
+        return AttachResult::InvalidTrack;
     }
 
     tracks_.emplace(track_id, TrackBinding{identity, render_key.empty() ? identity : render_key,
-        track, binding_generation, std::move(subscription)});
+        track, selection.key, selection.ticket, selection.media_binding_key,
+        selection.media_binding_ticket, validates_lease, binding_generation,
+        std::move(subscription)});
+    return AttachResult::Attached;
 }
 
 void VideoRenderSession::RemoveTrack(const std::string& track_id) {
@@ -101,6 +203,9 @@ void VideoRenderSession::RenderLatestFrames() {
     }
 
     for (const auto& [track_id, binding] : tracks_) {
+        if (!BindingLeaseActive(binding)) {
+            continue;
+        }
         auto frame = state->router->TakeLatest(track_id, state->generation);
         const auto track = binding.track.lock();
         if (!frame || !track || track->muted()) {
@@ -109,6 +214,13 @@ void VideoRenderSession::RenderLatestFrames() {
         RenderFrame(binding.render_key, VideoRenderFrame::FromI420(std::move(frame)));
     }
     if (auto local = local_input_.TakeLatest()) RenderFrame(local_render_key_, std::move(local));
+}
+
+bool VideoRenderSession::BindingLeaseActive(const TrackBinding& binding) const {
+    return !binding.validates_lease ||
+        (IsTrackTicketActive(binding.ticket, binding.key) &&
+         IsMediaBindingTicketActive(
+             binding.media_binding_ticket, binding.media_binding_key));
 }
 
 void VideoRenderSession::AttachLocalSource(const std::shared_ptr<VideoSource>& source, const std::string& key) {
@@ -173,6 +285,8 @@ void VideoRenderSession::Deactivate() {
     state->active.store(false, std::memory_order_release);
     state->router->Deactivate(state->generation);
     tracks_.clear();
+    selection_coordinator_session_ = 0;
+    selection_policy_revision_ = 0;
     frame_ready_callback_ = {};
     gpu_frame_ready_callback_ = {};
 }

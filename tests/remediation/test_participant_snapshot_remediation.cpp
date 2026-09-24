@@ -194,6 +194,14 @@ public:
         std::lock_guard lock(room.room_mutex_);
         room.connection_state_ = ConnectionState::Connected;
     }
+    static void establishRemoteMediaPlanPrecondition(Room &room,
+                                                     uint64_t generation) {
+        std::lock_guard lock(room.room_mutex_);
+        room.connection_state_ = ConnectionState::Connected;
+        room.session_generation_.store(generation, std::memory_order_release);
+        room.installed_session_generation_ = generation;
+        room.subscription_session_generation_ = generation;
+    }
     static void attach(Room &room, const std::shared_ptr<RemoteParticipant> &participant,
         webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, const std::string &sid) {
         room.AttachRemoteTrackToParticipant(participant, std::move(track), nullptr, sid);
@@ -201,6 +209,18 @@ public:
     static std::size_t bindingCount(Room &room) {
         std::lock_guard lock(room.room_mutex_);
         return room.remote_track_sinks_.size();
+    }
+    static TrackKey trackKey(Room &room,
+            const std::string &participantSid,
+            const std::string &trackSid) {
+        std::lock_guard lock(room.room_mutex_);
+        const auto participant = room.remote_participants_.find(participantSid);
+        TEST_CHECK(participant != room.remote_participants_.end() && participant->second);
+        const auto publication = participant->second->get_publication(trackSid);
+        TEST_CHECK(publication);
+        const auto membership = room.track_memberships_.find(publication.get());
+        TEST_CHECK(membership != room.track_memberships_.end() && membership->second);
+        return membership->second->key;
     }
     static void setSubscriptionHooks(
             Room &room,
@@ -1084,6 +1104,55 @@ public:
     }
     static std::size_t tileCount(const MeetingUI::MeetingRoomWindow &window) { return window._remoteTiles.size(); }
     static std::size_t screenCount(const MeetingUI::MeetingRoomWindow &window) { return window._remoteScreenTiles.size(); }
+    static const livekit::VideoDemandPlan &acceptedVideoPlan(
+            const MeetingUI::MeetingRoomWindow &window) {
+        return window._acceptedVideoPlan;
+    }
+    static std::size_t activeRenderLeaseCount(
+            const MeetingUI::MeetingRoomWindow &window) {
+        return window._activeRemoteRenderLeases.size();
+    }
+    static std::vector<QString> activeRenderLeaseSids(
+            const MeetingUI::MeetingRoomWindow &window) {
+        std::vector<QString> result;
+        result.reserve(window._activeRemoteRenderLeases.size());
+        for (const auto &[sid, _] : window._activeRemoteRenderLeases) {
+            result.push_back(sid);
+        }
+        return result;
+    }
+    static void setVideoPageSize(MeetingUI::MeetingRoomWindow &window,
+                                 uint32_t pageSize) {
+        TEST_CHECK(window._videoPageSizeControl);
+        const auto index = window._videoPageSizeControl->findData(
+            static_cast<int>(pageSize));
+        TEST_CHECK(index >= 0);
+        window._videoPageSizeControl->setCurrentIndex(index);
+    }
+    static void nextVideoPage(MeetingUI::MeetingRoomWindow &window) {
+        TEST_CHECK(window._nextVideoPage && window._nextVideoPage->isEnabled());
+        window._nextVideoPage->click();
+    }
+    static void setPinnedTrack(MeetingUI::MeetingRoomWindow &window,
+                               const livekit::TrackKey &key,
+                               bool pinned) {
+        auto *tile = window.remoteVideoTile(key);
+        TEST_CHECK(tile);
+        window.setPinnedTile(tile->renderKey(), pinned);
+    }
+    static void setWhiteboardVisible(MeetingUI::MeetingRoomWindow &window,
+                                     bool visible) {
+        window.setWhiteboardVisible(visible);
+    }
+    static void useTestGpuBackend(MeetingUI::MeetingRoomWindow &window) {
+        TEST_CHECK(window._remoteRenderSession);
+        window._remoteRenderSession->UseGpuBackend(
+            [](const std::string &, livekit::render::VideoRenderFrame::Ptr) {});
+    }
+    static void useCpuBackend(MeetingUI::MeetingRoomWindow &window) {
+        TEST_CHECK(window._remoteRenderSession);
+        window._remoteRenderSession->UseQtCpuBackend();
+    }
     static MeetingUI::VideoTileWidget *screen(MeetingUI::MeetingRoomWindow &window, const QString &sid) {
         const auto it = window._remoteScreenTiles.find(sid);
         return it == window._remoteScreenTiles.end() ? nullptr : it->second.get();
@@ -1932,6 +2001,27 @@ livekit::proto::ParticipantUpdate WindowParticipant(
     return update;
 }
 
+livekit::proto::ParticipantUpdate LargeWindowRoster(int participantCount) {
+    livekit::proto::ParticipantUpdate update;
+    for (int index = 0; index != participantCount; ++index) {
+        const auto suffix = std::to_string(index);
+        auto *participant = update.add_participants();
+        participant->set_sid("PA_PHASE_D_" + suffix);
+        participant->set_identity("phase-d-user-" + suffix);
+        participant->set_name("Phase D user " + suffix);
+        participant->set_state(livekit::proto::ParticipantInfo::ACTIVE);
+        participant->mutable_permission()->set_can_subscribe(true);
+        participant->mutable_permission()->set_can_publish(true);
+        participant->mutable_permission()->set_can_publish_data(true);
+        auto *track = participant->add_tracks();
+        track->set_sid("TR_PHASE_D_" + suffix);
+        track->set_name("phase-d-camera-" + suffix);
+        track->set_type(livekit::proto::TrackType::VIDEO);
+        track->set_source(livekit::proto::TrackSource::CAMERA);
+    }
+    return update;
+}
+
 class WindowValueObserver final : public livekit::RoomListener {
 public:
     bool ConsumesParticipantEvents() const override { return true; }
@@ -1987,7 +2077,8 @@ public:
         TEST_CHECK(settingsDirectory.isValid());
         if (authenticated) session->loginAsGuest("Account fixture", "local-user");
         if (localConnectedPrecondition) {
-            livekit::ParticipantSnapshotRoomTestAccess::establishLocalConnectedPrecondition(*room);
+            livekit::ParticipantSnapshotRoomTestAccess::establishRemoteMediaPlanPrecondition(
+                *room, 1);
         }
         listener = OpenMeeting::MeetingCoordinatorTestAccess::bind(*coordinator, room, runtime);
         if (!localConnectedPrecondition) {
@@ -2369,7 +2460,9 @@ void MeetingLocalMediaStateContract() {
         TEST_CHECK(localInfo.isAudioMuted == muted && localInfo.isVideoEnabled == enabled);
         TEST_CHECK(remoteInfo.isAudioMuted == muted && remoteInfo.isVideoEnabled == enabled);
         auto *tile = ParticipantWindowTestAccess::tile(*receiver.window, "window-peer");
-        TEST_CHECK(tile && tile->isAudioMuted() == muted && tile->isVideoActive() == enabled);
+        TEST_CHECK(tile);
+        TEST_CHECK(tile->isAudioMuted() == muted);
+        TEST_CHECK(tile->isVideoActive() == enabled);
         TEST_CHECK(audio->muted() == muted && video->muted() == !enabled);
     };
     sender.coordinator->setLocalAudioMuted(false);
@@ -2757,7 +2850,9 @@ public:
     int syncStates = 0;
     std::vector<livekit::proto::SyncState> syncStateMessages;
     std::vector<livekit::proto::UpdateSubscription> subscriptionMessages;
+    std::vector<livekit::proto::UpdateTrackSettings> trackSettingsMessages;
     std::vector<std::string> subscriptionWireOrder;
+    std::vector<std::string> mediaWireOrder;
 private:
     void send(const std::shared_ptr<Connection> &connection, const livekit::proto::SignalResponse &response) {
         std::string payload;
@@ -2890,11 +2985,22 @@ private:
                 syncStateMessages.push_back(signal.sync_state());
                 subscriptionWireOrder.push_back(std::string("sync:") +
                     (signal.sync_state().subscription().subscribe() ? "true" : "false"));
+                mediaWireOrder.push_back("sync");
             }
             if (signal.has_subscription()) {
                 subscriptionMessages.push_back(signal.subscription());
                 subscriptionWireOrder.push_back(std::string("update:") +
                     (signal.subscription().subscribe() ? "true" : "false"));
+                mediaWireOrder.push_back(std::string("subscription:") +
+                    (signal.subscription().subscribe() ? "true:" : "false:") +
+                    (signal.subscription().track_sids().empty()
+                        ? std::string{} : signal.subscription().track_sids(0)));
+            }
+            if (signal.has_track_setting()) {
+                trackSettingsMessages.push_back(signal.track_setting());
+                mediaWireOrder.push_back(std::string("settings:") +
+                    (signal.track_setting().track_sids().empty()
+                        ? std::string{} : signal.track_setting().track_sids(0)));
             }
             if (signal.has_ping_req()) {
                 livekit::proto::SignalResponse pong;
@@ -2963,7 +3069,7 @@ void AkWindowAliveLate() {
     WindowPhase("alive-late-begin");
     WindowFixture fixture;
     auto media = fixture.add("first-window-peer", "window-live");
-    fixture.open(); CheckWindowPeer(fixture, "first-window-peer");
+    fixture.open(); fixture.pump(); CheckWindowPeer(fixture, "first-window-peer");
     const auto before = ParticipantWindowTestAccess::statistics(*fixture.window).delivered_to_qt_cpu;
     media.source->push(80, 1000);
     ParticipantWindowTestAccess::render(*fixture.window);
@@ -3258,6 +3364,244 @@ bool HasSubscriptionSince(
             return message.subscribe() == subscribed &&
                 SubscriptionContains(message, participantSid, trackSid);
         });
+}
+
+livekit::TrackKey WindowTrackKey(
+        const WindowValueObserver &observer,
+        const std::string &trackSid) {
+    for (auto event = observer.events.rbegin(); event != observer.events.rend(); ++event) {
+        if (event->kind != livekit::ParticipantEventKind::Upsert ||
+            event->participant.is_local) continue;
+        const auto publication = std::find_if(
+            event->participant.publications.begin(),
+            event->participant.publications.end(),
+            [&](const auto &candidate) {
+                return candidate.key.publication_sid == trackSid;
+            });
+        if (publication != event->participant.publications.end()) {
+            return publication->key;
+        }
+    }
+    TEST_CHECK(false);
+    return {};
+}
+
+livekit::RemoteMediaPlan WindowMediaPlan(
+        const livekit::TrackKey &selected,
+        uint64_t policyRevision,
+        uint64_t catalogRevision,
+        uint32_t width,
+        uint32_t height,
+        uint32_t fps,
+        uint32_t priority,
+        std::vector<livekit::TrackKey> known = {}) {
+    livekit::RemoteMediaPlan plan;
+    plan.coordinator_session = 71;
+    plan.native_room_generation = selected.participant.native_room_generation;
+    plan.catalog_revision = catalogRevision;
+    plan.policy_revision = policyRevision;
+    plan.known_publications = known.empty()
+        ? std::vector<livekit::TrackKey>{selected}
+        : std::move(known);
+    livekit::RemoteTrackDemand demand;
+    demand.key = selected;
+    demand.policy_revision = policyRevision;
+    demand.subscribed = true;
+    demand.enabled = true;
+    demand.width = width;
+    demand.height = height;
+    demand.quality = height <= 180
+        ? livekit::VideoQualityTier::P180
+        : height <= 360
+            ? livekit::VideoQualityTier::P360
+            : livekit::VideoQualityTier::P720;
+    demand.max_fps = fps;
+    demand.priority = priority;
+    plan.video.push_back(std::move(demand));
+    return plan;
+}
+
+bool HasTrackSettingsSince(
+        const WindowLoopbackServer &server,
+        std::size_t begin,
+        const std::string &trackSid,
+        bool disabled,
+        uint32_t width,
+        uint32_t height,
+        uint32_t fps,
+        uint32_t priority) {
+    return std::any_of(
+        server.trackSettingsMessages.begin() +
+            std::min(begin, server.trackSettingsMessages.size()),
+        server.trackSettingsMessages.end(),
+        [&](const auto &settings) {
+            return !settings.track_sids().empty() &&
+                settings.track_sids(0) == trackSid &&
+                settings.disabled() == disabled && settings.width() == width &&
+                settings.height() == height && settings.fps() == fps &&
+                settings.priority() == priority;
+        });
+}
+
+void PhaseCRoomMediaPlanAndRecovery() {
+    WindowFixture fixture(false);
+    auto server = std::make_shared<WindowLoopbackServer>(fixture.io);
+    WindowServerGuard stop{server};
+    server->start();
+
+    WindowConnect(fixture, server, false);
+    const auto first = WindowTrackKey(*fixture.observer, "TR_PA_WINDOW");
+    const auto firstPublication = fixture.room->remote_participants()
+        .at("PA_WINDOW")->get_remote_publication("TR_PA_WINDOW");
+    TEST_CHECK(firstPublication && !firstPublication->is_subscribed());
+    TEST_CHECK(server->subscriptionMessages.empty());
+    TEST_CHECK(server->trackSettingsMessages.empty());
+
+    auto firstPlan = WindowMediaPlan(first, 1, 1, 640, 360, 15, 100);
+    auto applied = fixture.room->ApplyRemoteMediaPlan(firstPlan);
+    TEST_CHECK(applied.accepted && applied.pending_send);
+    WindowPumpUntil(fixture, [&] {
+        return HasTrackSettingsSince(*server, 0, "TR_PA_WINDOW",
+                   false, 640, 360, 15, 100) &&
+            HasSubscriptionSince(*server, 0, "PA_WINDOW", "TR_PA_WINDOW", true);
+    }, "phase-c-first-selection");
+    const auto firstSettingsOrder = std::find(
+        server->mediaWireOrder.begin(), server->mediaWireOrder.end(),
+        "settings:TR_PA_WINDOW");
+    const auto firstSubscribeOrder = std::find(
+        server->mediaWireOrder.begin(), server->mediaWireOrder.end(),
+        "subscription:true:TR_PA_WINDOW");
+    TEST_CHECK(firstSettingsOrder != server->mediaWireOrder.end() &&
+        firstSubscribeOrder != server->mediaWireOrder.end() &&
+        firstSettingsOrder < firstSubscribeOrder);
+
+    server->sendParticipants(WindowParticipant(
+        "window-peer-b", true, true,
+        "PA_WINDOW_B", "TR_PA_WINDOW_B", "window-peer-b"));
+    WindowPumpUntil(fixture, [&] {
+        return fixture.room->remote_participants().contains("PA_WINDOW_B");
+    }, "phase-c-second-publication");
+    const auto second = WindowTrackKey(*fixture.observer, "TR_PA_WINDOW_B");
+
+    const auto switchWireBegin = server->mediaWireOrder.size();
+    const auto switchSettingsBegin = server->trackSettingsMessages.size();
+    const auto switchSubscriptionBegin = server->subscriptionMessages.size();
+    auto secondPlan = WindowMediaPlan(
+        second, 2, 2, 1280, 720, 30, 400, {first, second});
+    applied = fixture.room->ApplyRemoteMediaPlan(secondPlan);
+    TEST_CHECK(applied.accepted && applied.pending_send);
+    WindowPumpUntil(fixture, [&] {
+        return HasTrackSettingsSince(*server, switchSettingsBegin,
+                   "TR_PA_WINDOW", true, 0, 0, 0, 0) &&
+            HasSubscriptionSince(*server, switchSubscriptionBegin,
+                   "PA_WINDOW", "TR_PA_WINDOW", false) &&
+            HasTrackSettingsSince(*server, switchSettingsBegin,
+                   "TR_PA_WINDOW_B", false, 1280, 720, 30, 400) &&
+            HasSubscriptionSince(*server, switchSubscriptionBegin,
+                   "PA_WINDOW_B", "TR_PA_WINDOW_B", true);
+    }, "phase-c-differential-switch");
+    const std::vector<std::string> switchOrder(
+        server->mediaWireOrder.begin() + switchWireBegin,
+        server->mediaWireOrder.end());
+    TEST_CHECK(switchOrder.size() >= 4);
+    TEST_CHECK(switchOrder[0] == "settings:TR_PA_WINDOW");
+    TEST_CHECK(switchOrder[1] == "subscription:false:TR_PA_WINDOW");
+    TEST_CHECK(switchOrder[2] == "settings:TR_PA_WINDOW_B");
+    TEST_CHECK(switchOrder[3] == "subscription:true:TR_PA_WINDOW_B");
+
+    // B is replaced before the queued sender runs. No B selection may escape;
+    // the wire converges directly to the latest C (the original first track).
+    const auto rapidWireBegin = server->mediaWireOrder.size();
+    auto rapidB = WindowMediaPlan(
+        second, 3, 3, 320, 180, 10, 80, {first, second});
+    auto rapidC = WindowMediaPlan(
+        first, 4, 3, 960, 540, 24, 300, {first, second});
+    TEST_CHECK(fixture.room->ApplyRemoteMediaPlan(rapidB).accepted);
+    TEST_CHECK(fixture.room->ApplyRemoteMediaPlan(rapidC).accepted);
+    fixture.pump();
+    TEST_CHECK(std::find(
+        server->mediaWireOrder.begin() + rapidWireBegin,
+        server->mediaWireOrder.end(),
+        "settings:TR_PA_WINDOW_B") != server->mediaWireOrder.end());
+    TEST_CHECK(!HasTrackSettingsSince(*server, switchSettingsBegin,
+        "TR_PA_WINDOW_B", false, 320, 180, 10, 80));
+
+    std::optional<livekit::RemoteMediaPlan> staleRecovery;
+    livekit::ControlApplyResult staleResult;
+    int recoveryRequests = 0;
+    fixture.room->SetRemoteMediaRecoveryHandler(
+        [&](const livekit::RemoteMediaRecoveryRequest &request) {
+            ++recoveryRequests;
+            auto stale = rapidC;
+            stale.policy_revision = rapidC.policy_revision + recoveryRequests;
+            stale.video.clear();
+            stale.recovery_epoch = request.recovery_epoch;
+            stale.recovery_token = request.recovery_token + "-stale";
+            staleResult = fixture.room->ApplyRemoteMediaPlan(stale);
+            staleRecovery = stale;
+
+            auto recovered = rapidC;
+            recovered.policy_revision = stale.policy_revision;
+            if (recovered.native_room_generation != request.native_room_generation) {
+                const auto successorKey =
+                    livekit::ParticipantSnapshotRoomTestAccess::trackKey(
+                        *fixture.room, "PA_WINDOW", "TR_PA_WINDOW");
+                recovered.native_room_generation = request.native_room_generation;
+                recovered.catalog_revision = rapidC.catalog_revision + 1;
+                recovered.video.front().key = successorKey;
+                recovered.video.front().policy_revision = recovered.policy_revision;
+                recovered.known_publications = {successorKey};
+            }
+            recovered.recovery_epoch = request.recovery_epoch;
+            recovered.recovery_token = request.recovery_token;
+            const auto result = fixture.room->ApplyRemoteMediaPlan(recovered);
+            TEST_CHECK(result.accepted && result.pending_reconnect);
+            rapidC = std::move(recovered);
+        });
+
+    const auto resumeSettingsBegin = server->trackSettingsMessages.size();
+    const auto resumeWireBegin = server->mediaWireOrder.size();
+    server->closeActive();
+    WindowPumpUntil(fixture, [&] {
+        return fixture.observer->reconnected == 1 &&
+            HasTrackSettingsSince(*server, resumeSettingsBegin,
+                "TR_PA_WINDOW", false, 960, 540, 24, 300);
+    }, "phase-c-soft-recovery-settings");
+    TEST_CHECK(recoveryRequests == 1);
+    TEST_CHECK(!staleResult.accepted &&
+        staleResult.reason == livekit::ControlRejectionReason::StaleRecovery);
+    const auto syncOrder = std::find(
+        server->mediaWireOrder.begin() + resumeWireBegin,
+        server->mediaWireOrder.end(), "sync");
+    const auto replayOrder = std::find(
+        server->mediaWireOrder.begin() + resumeWireBegin,
+        server->mediaWireOrder.end(), "settings:TR_PA_WINDOW");
+    TEST_CHECK(syncOrder != server->mediaWireOrder.end() &&
+        replayOrder != server->mediaWireOrder.end() && syncOrder < replayOrder);
+    TEST_CHECK(staleRecovery.has_value());
+    const auto late = fixture.room->ApplyRemoteMediaPlan(*staleRecovery);
+    TEST_CHECK(!late.accepted &&
+        late.reason == livekit::ControlRejectionReason::StaleRecovery);
+
+    const auto restartSettingsBegin = server->trackSettingsMessages.size();
+    server->rejectResume = true;
+    server->closeActive();
+    WindowPumpUntil(fixture, [&] {
+        return server->joins == 2 && fixture.observer->reconnected == 2 &&
+            HasTrackSettingsSince(*server, restartSettingsBegin,
+                "TR_PA_WINDOW", false, 960, 540, 24, 300);
+    }, "phase-c-full-restart-settings");
+    const auto successor = fixture.room->remote_participants()
+        .at("PA_WINDOW")->get_remote_publication("TR_PA_WINDOW");
+    TEST_CHECK(recoveryRequests == 3);
+    TEST_CHECK(successor && successor->is_subscribed() && successor->is_enabled());
+    TEST_CHECK(successor->current_width() == 960 &&
+        successor->current_height() == 540 && successor->priority() == 300);
+    TEST_CHECK(!server->protocolFailure);
+    fixture.room->SetRemoteMediaRecoveryHandler({});
+    std::cout << "PHASE_C_ROOM auto-subscribe-false/empty-connect/settings-before-subscribe/"
+                 "deselect-before-select/zero-reset/latest-revision/soft+full-recovery PASS "
+                 "external-sfu=NOT_RUN" << std::endl;
 }
 
 void GapWindowSoftResumeUnsubscribe() {
@@ -3792,6 +4136,7 @@ void ScreenShareCameraCoexistence() {
     auto camera = fixture.attachExisting("camera-rtc");
     auto screen = fixture.attachExisting("screen-rtc", true, "TR_WINDOW_SCREEN");
     fixture.open(); // Late-open hydration must reconstruct both views.
+    fixture.pump();
     TEST_CHECK(ParticipantWindowTestAccess::tileCount(*fixture.window) == 1);
     TEST_CHECK(ParticipantWindowTestAccess::screenCount(*fixture.window) == 1);
     camera.source->push(50, 1000);
@@ -4330,6 +4675,187 @@ void ScreenShareWindowControls() {
     fixture.pump();
     share.reset();
     std::cout << "SCREEN_SHARE_WINDOW source selection, annotation lifecycle, reconnect barrier, stale generation PASS\n";
+}
+
+void PhaseDWindowViewportAndRenderLease() {
+    constexpr int kParticipantCount = 100;
+    WindowFixture fixture;
+    livekit::ParticipantSnapshotRoomTestAccess::establishRemoteMediaPlanPrecondition(
+        *fixture.room, 1);
+    fixture.room->UpdateParticipantsForTesting(
+        LargeWindowRoster(kParticipantCount));
+
+    std::vector<WindowMedia> media;
+    media.reserve(kParticipantCount);
+    for (int index = 0; index != kParticipantCount; ++index) {
+        const auto suffix = std::to_string(index);
+        media.push_back(fixture.attachExisting(
+            "phase-d-rtc-" + suffix,
+            false,
+            "TR_PHASE_D_" + suffix,
+            "PA_PHASE_D_" + suffix));
+    }
+
+    fixture.open();
+    fixture.pump();
+    const auto checkBounded = [&](std::size_t expected) {
+        const auto &plan = ParticipantWindowTestAccess::acceptedVideoPlan(
+            *fixture.window);
+        TEST_CHECK(plan.visible_seats.size() == expected);
+        TEST_CHECK(plan.selected_video.size() == expected);
+        TEST_CHECK(ParticipantWindowTestAccess::tileCount(*fixture.window) == expected);
+        TEST_CHECK(ParticipantWindowTestAccess::activeRenderLeaseCount(
+            *fixture.window) == expected);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(
+            *fixture.window).attached_track_count == expected);
+        TEST_CHECK(expected <= 16);
+    };
+
+    checkBounded(9);
+    TEST_CHECK(ParticipantWindowTestAccess::acceptedVideoPlan(
+        *fixture.window).page_count == 12);
+    ParticipantWindowTestAccess::setVideoPageSize(*fixture.window, 4);
+    fixture.pump();
+    checkBounded(4);
+    TEST_CHECK(ParticipantWindowTestAccess::acceptedVideoPlan(
+        *fixture.window).page_count == 25);
+    ParticipantWindowTestAccess::setVideoPageSize(*fixture.window, 16);
+    fixture.pump();
+    checkBounded(16);
+    TEST_CHECK(ParticipantWindowTestAccess::acceptedVideoPlan(
+        *fixture.window).page_count == 7);
+
+    ParticipantWindowTestAccess::setVideoPageSize(*fixture.window, 9);
+    fixture.pump();
+    const auto oldPage = ParticipantWindowTestAccess::acceptedVideoPlan(
+        *fixture.window).selected_video;
+    TEST_CHECK(oldPage.size() == 9);
+    const auto oldSid = oldPage.front().publication_sid;
+    const auto oldIndex = std::stoi(
+        oldSid.substr(std::string("TR_PHASE_D_").size()));
+    media.at(static_cast<std::size_t>(oldIndex)).source->push(50, 1000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    const auto deliveredBeforePage = ParticipantWindowTestAccess::statistics(
+        *fixture.window).delivered_to_qt_cpu;
+    TEST_CHECK(deliveredBeforePage > 0);
+
+    ParticipantWindowTestAccess::nextVideoPage(*fixture.window);
+    fixture.pump();
+    checkBounded(9);
+    const auto &pageOne = ParticipantWindowTestAccess::acceptedVideoPlan(
+        *fixture.window);
+    TEST_CHECK(pageOne.page == 1);
+    TEST_CHECK(std::none_of(
+        pageOne.selected_video.begin(), pageOne.selected_video.end(),
+        [&](const auto &key) { return key.publication_sid == oldSid; }));
+    media.at(static_cast<std::size_t>(oldIndex)).source->push(90, 2000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(
+        *fixture.window).delivered_to_qt_cpu == deliveredBeforePage);
+
+    const auto pinnedKey = pageOne.selected_video.front();
+    ParticipantWindowTestAccess::setPinnedTrack(
+        *fixture.window, pinnedKey, true);
+    fixture.pump();
+    const auto &pinned = ParticipantWindowTestAccess::acceptedVideoPlan(
+        *fixture.window);
+    TEST_CHECK(pinned.mode == livekit::VideoLayoutMode::Speaker);
+    TEST_CHECK(pinned.focused && *pinned.focused == pinnedKey);
+    TEST_CHECK(!pinned.visible_seats.empty() &&
+               pinned.visible_seats.front().key == pinnedKey &&
+               pinned.visible_seats.front().reason ==
+                   livekit::VideoDemandReason::Pinned);
+    TEST_CHECK(ParticipantWindowTestAccess::activeRenderLeaseCount(
+        *fixture.window) == pinned.selected_video.size());
+
+    ParticipantWindowTestAccess::setPinnedTrack(
+        *fixture.window, pinnedKey, false);
+    fixture.pump();
+    checkBounded(9);
+    TEST_CHECK(ParticipantWindowTestAccess::acceptedVideoPlan(
+        *fixture.window).page == 1);
+
+    const auto leasesBeforeBackend =
+        ParticipantWindowTestAccess::activeRenderLeaseSids(*fixture.window);
+    ParticipantWindowTestAccess::useTestGpuBackend(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::activeRenderLeaseSids(
+        *fixture.window) == leasesBeforeBackend);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(
+        *fixture.window).attached_track_count == 9);
+    ParticipantWindowTestAccess::useCpuBackend(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::activeRenderLeaseSids(
+        *fixture.window) == leasesBeforeBackend);
+
+    const auto audioBeforeWhiteboard =
+        ParticipantWindowTestAccess::acceptedVideoPlan(
+            *fixture.window).selected_audio;
+    const auto localVideoBeforeWhiteboard =
+        fixture.coordinator->isLocalVideoEnabled();
+    int localVideoChanges = 0;
+    QObject localVideoObserver;
+    QObject::connect(
+        fixture.coordinator.get(),
+        &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
+        &localVideoObserver,
+        [&](bool) { ++localVideoChanges; });
+    ParticipantWindowTestAccess::setWhiteboardVisible(*fixture.window, true);
+    fixture.pump();
+    const auto &whiteboard = ParticipantWindowTestAccess::acceptedVideoPlan(
+        *fixture.window);
+    TEST_CHECK(whiteboard.stage_content == livekit::StageContent::Whiteboard);
+    TEST_CHECK(whiteboard.selected_video.empty());
+    TEST_CHECK(whiteboard.selected_audio == audioBeforeWhiteboard);
+    TEST_CHECK(ParticipantWindowTestAccess::tileCount(*fixture.window) == 0);
+    TEST_CHECK(ParticipantWindowTestAccess::screenCount(*fixture.window) == 0);
+    TEST_CHECK(ParticipantWindowTestAccess::activeRenderLeaseCount(
+        *fixture.window) == 0);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(
+        *fixture.window).attached_track_count == 0);
+    TEST_CHECK(fixture.coordinator->isLocalVideoEnabled() ==
+               localVideoBeforeWhiteboard);
+    TEST_CHECK(localVideoChanges == 0);
+
+    ParticipantWindowTestAccess::setWhiteboardVisible(*fixture.window, false);
+    fixture.pump();
+    checkBounded(9);
+    TEST_CHECK(ParticipantWindowTestAccess::acceptedVideoPlan(
+        *fixture.window).page == 1);
+    TEST_CHECK(ParticipantWindowTestAccess::acceptedVideoPlan(
+        *fixture.window).selected_audio == audioBeforeWhiteboard);
+    TEST_CHECK(fixture.coordinator->isLocalVideoEnabled() ==
+               localVideoBeforeWhiteboard);
+    TEST_CHECK(localVideoChanges == 0);
+
+    livekit::telemetry::SessionTelemetry::SnapshotPtr policyTelemetry;
+    asio::post(fixture.runtime->strand(), [&] {
+        policyTelemetry = fixture.runtime->telemetry()->SnapshotOnStrand();
+    });
+    fixture.pump();
+    TEST_CHECK(policyTelemetry);
+    TEST_CHECK(policyTelemetry->video_policy_availability ==
+               livekit::telemetry::Availability::Valid);
+    TEST_CHECK(policyTelemetry->video_policy_requested == 9);
+    TEST_CHECK(policyTelemetry->video_policy_selected == 9);
+    TEST_CHECK(policyTelemetry->video_policy_actual == 9);
+    TEST_CHECK(policyTelemetry->video_policy_bound == 9);
+    TEST_CHECK(policyTelemetry->video_policy_selected_not_requested == 0);
+    TEST_CHECK(policyTelemetry->video_policy_selected_not_actual == 0);
+    TEST_CHECK(policyTelemetry->video_policy_actual_not_selected == 0);
+    TEST_CHECK(policyTelemetry->video_policy_selected_not_bound == 0);
+    TEST_CHECK(policyTelemetry->video_policy_bound_not_selected == 0);
+    const auto projectedTelemetry =
+        OpenMeeting::ProjectTelemetrySnapshot(*policyTelemetry);
+    TEST_CHECK(projectedTelemetry.value(
+        QStringLiteral("videoPolicyRequested")).toULongLong() == 9);
+    TEST_CHECK(projectedTelemetry.value(
+        QStringLiteral("videoPolicySelected")).toULongLong() == 9);
+    TEST_CHECK(projectedTelemetry.value(
+        QStringLiteral("videoPolicyActual")).toULongLong() == 9);
+    TEST_CHECK(projectedTelemetry.value(
+        QStringLiteral("videoPolicyBound")).toULongLong() == 9);
+
+    std::cout << "PHASE_D_WINDOW PASS: 100 publications, 4/9/16 paging, pin, "
+                 "whiteboard visibility, backend-stable render leases, policy telemetry\n";
 }
 
 void AccountLogoutAndDuplicateLogin() {
@@ -5024,6 +5550,11 @@ int WindowAcceptanceMain(int argc, char **argv) {
     // process-static caches are destroyed, not from an atexit application.
     QApplication application(argc, argv);
     application.setApplicationName(QStringLiteral("IDA2ParticipantWindowAcceptance"));
+    const auto productionOptions =
+        OpenMeeting::ProductionMeetingSignalOptions(false);
+    TEST_CHECK(!productionOptions.auto_subscribe &&
+        productionOptions.adaptive_stream &&
+        !productionOptions.allow_insecure_transport);
     MeetingUI::MeetingUiIntegration integration;
     Ui::Integration::Set(&integration);
     style::StartManager(100);
@@ -5396,6 +5927,10 @@ int WindowAcceptanceMain(int argc, char **argv) {
         GapWindowFullRestartIdentityBoundaries();
     } else if (application.arguments().contains("--gap-video-lease")) {
         GapWindowQueuedVideoBindingLease();
+    } else if (application.arguments().contains("--phase-c-room")) {
+        PhaseCRoomMediaPlanAndRecovery();
+    } else if (application.arguments().contains("--phase-d-window")) {
+        PhaseDWindowViewportAndRenderLease();
     } else if (application.arguments().contains("--subscription-telemetry-reconnect")) {
         GapWindowSubscriptionTelemetryInFlightResumeCommit();
     } else if (application.arguments().contains("--ak-window-late")) {
@@ -5504,6 +6039,15 @@ public:
         room.ResetSubscriptionSessionLocked(autoSubscribe);
         room.connection_state_ = ConnectionState::Connected;
     }
+    static void establishRemoteMediaPlanPrecondition(Room &room,
+                                                     uint64_t generation) {
+        std::lock_guard lock(room.room_mutex_);
+        room.ResetSubscriptionSessionLocked(false);
+        room.connection_state_ = ConnectionState::Connected;
+        room.session_generation_.store(generation, std::memory_order_release);
+        room.installed_session_generation_ = generation;
+        room.subscription_session_generation_ = generation;
+    }
     static void attach(Room &room, const std::shared_ptr<RemoteParticipant> &participant,
                        webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track,
                        const std::string &sid) {
@@ -5555,6 +6099,9 @@ public:
         return std::any_of(room.listeners_.begin(), room.listeners_.end(),
             [listener](const auto &current) { return current.get() == listener; });
     }
+    static std::shared_ptr<ExecutorCallbackGate> callbackGate(Room &room) {
+        return room.callback_gate_;
+    }
 };
 
 } // namespace livekit
@@ -5584,10 +6131,29 @@ public:
     static void bindSession(MeetingCoordinator &coordinator,
                             const std::shared_ptr<livekit::Room> &room,
                             const std::shared_ptr<MeetingSessionRuntime> &runtime) {
+        coordinator._sessionUiGate = QtCallbackGate<MeetingCoordinator>::Create(
+            &coordinator);
         coordinator._room = room;
         coordinator._sessionRuntime = runtime;
         coordinator._nextSessionGeneration = runtime->generation();
         coordinator._sessionRunning.store(true, std::memory_order_release);
+        coordinator.replayLatestViewportIntentForCurrentSession();
+    }
+
+    static void retireSessionForReplacement(MeetingCoordinator &coordinator) {
+        coordinator._sessionRunning.store(false, std::memory_order_release);
+        coordinator._sessionUiGate->Revoke();
+        if (coordinator._sessionRuntime) {
+            coordinator._sessionRuntime->revokeCallbacks();
+        }
+        coordinator._room.reset();
+        coordinator._sessionRuntime.reset();
+        coordinator._acceptedVideoDemandPlan = {};
+    }
+
+    static const livekit::VideoDemandPlan &acceptedVideoDemandPlan(
+            const MeetingCoordinator &coordinator) {
+        return coordinator._acceptedVideoDemandPlan;
     }
 
     static void apply(MeetingCoordinator &coordinator,
@@ -5724,37 +6290,44 @@ public:
             !coordinator._sessionRuntime && coordinator._inboundTransferLedger.empty();
     }
     static std::shared_ptr<livekit::RoomListener> createOwnedSession(MeetingCoordinator &coordinator) {
-        TEST_CHECK(!coordinator._ioContext && !coordinator._ioThread.joinable());
-        coordinator._ioContext = std::make_unique<asio::io_context>();
-        coordinator._workGuard = std::make_unique<asio::executor_work_guard<asio::io_context::executor_type>>(
-            coordinator._ioContext->get_executor());
+        TEST_CHECK(!coordinator._ioContext && !coordinator._sessionOwner && !coordinator._stopPending);
+        coordinator._sessionOwner = std::make_shared<MeetingSessionOwner>();
+        coordinator._ioContext = coordinator._sessionOwner->context;
         coordinator._sessionRuntime = std::make_shared<MeetingSessionRuntime>(
-            *coordinator._ioContext, 61, QStringLiteral("local-user"));
-        coordinator._room = livekit::Room::Create(coordinator._ioContext->get_executor());
+            *coordinator._ioContext, 61, QStringLiteral("local-user"), coordinator._ioContext);
+        coordinator._room = livekit::Room::Create(
+            coordinator._ioContext->get_executor(), coordinator._ioContext);
+        coordinator._sessionOwner->runtime = coordinator._sessionRuntime;
+        coordinator._sessionOwner->room = coordinator._room;
         coordinator._nextSessionGeneration = coordinator._sessionRuntime->generation();
         coordinator._sessionRunning.store(true, std::memory_order_release);
         coordinator._state = MeetingState::InMeeting;
         auto listener = coordinator.participantEventListenerForTesting(coordinator._sessionRuntime, true);
+        coordinator._sessionOwner->listener = listener;
         coordinator._room->AddListener(listener);
         return listener;
     }
     static asio::io_context &ownedContext(MeetingCoordinator &coordinator) { return *coordinator._ioContext; }
+    static std::weak_ptr<asio::io_context> ownedContextLease(MeetingCoordinator &coordinator) {
+        return coordinator._ioContext;
+    }
     static std::weak_ptr<MeetingSessionRuntime> ownedRuntime(MeetingCoordinator &coordinator) {
         return coordinator._sessionRuntime;
     }
     static std::weak_ptr<livekit::Room> ownedRoom(MeetingCoordinator &coordinator) { return coordinator._room; }
     static void startOwnedWorker(MeetingCoordinator &coordinator, std::shared_ptr<std::atomic<bool>> exited) {
-        auto *context = coordinator._ioContext.get();
-        coordinator._ioThread = std::thread([context, room = coordinator._room,
+        auto context = coordinator._ioContext;
+        coordinator._sessionOwner->thread = std::thread([context, room = coordinator._room,
             runtime = coordinator._sessionRuntime, exited = std::move(exited)] {
             context->run();
             exited->store(true, std::memory_order_release);
         });
     }
     static bool ownedSessionReleased(const MeetingCoordinator &coordinator) {
-        return sessionReleased(coordinator) && !coordinator._ioContext && !coordinator._workGuard &&
-            !coordinator._roomListener && !coordinator._ioThread.joinable();
+        return sessionReleased(coordinator) && !coordinator._ioContext && !coordinator._sessionOwner &&
+            !coordinator._roomListener && !coordinator._stopPending;
     }
+    static bool stopPending(const MeetingCoordinator &coordinator) { return coordinator._stopPending; }
     static void stopAgain(MeetingCoordinator &coordinator) { coordinator.stopRoomSession(); }
     static void cancel(MeetingCoordinator &coordinator, const livekit::ParticipantKey &key) {
         coordinator.cancelInboundTransfersForParticipant(key);
@@ -5906,6 +6479,100 @@ public:
     std::shared_ptr<ValueBridge> bridge;
     std::shared_ptr<livekit::RoomListener> listener;
 };
+
+void ViewportIntentBeforeRuntimeRegression() {
+    QTemporaryDir settingsDirectory;
+    TEST_CHECK(settingsDirectory.isValid());
+    auto session = OpenMeeting::SessionManagerTestAccess::create(
+        std::make_unique<QSettings>(
+            settingsDirectory.filePath("settings.ini"), QSettings::IniFormat));
+    auto coordinator = OpenMeeting::MeetingCoordinatorTestAccess::create(*session);
+
+    livekit::ViewportIntent initial;
+    initial.coordinator_session = 999;
+    initial.view_revision = 7;
+    initial.catalog_revision = 777;
+    initial.mode = livekit::VideoLayoutMode::Grid;
+    initial.page_size = 4;
+    initial.stage_rect = {0, 0, 1280, 720};
+    coordinator->submitViewportIntent(initial);
+
+    asio::io_context io;
+    auto firstRoom = livekit::Room::Create(io.get_executor());
+    livekit::ParticipantSnapshotRoomTestAccess::establishRemoteMediaPlanPrecondition(
+        *firstRoom, 1);
+    auto firstRuntime = std::make_shared<OpenMeeting::MeetingSessionRuntime>(
+        io, 101, QStringLiteral("local-user"));
+    OpenMeeting::MeetingCoordinatorTestAccess::bindSession(
+        *coordinator, firstRoom, firstRuntime);
+    auto firstListener =
+        OpenMeeting::MeetingCoordinatorTestAccess::listener(*coordinator, firstRuntime);
+    firstRoom->AddListener(firstListener);
+    DrainNative(io);
+
+    firstRoom->UpdateParticipantsForTesting(MakeParticipantUpdate(
+        "PA_VIEWPORT_FIRST", "viewport-first", "viewport-first",
+        livekit::proto::ParticipantInfo::ACTIVE));
+    DrainNative(io);
+    DrainQt();
+    const auto firstPlan =
+        OpenMeeting::MeetingCoordinatorTestAccess::acceptedVideoDemandPlan(
+            *coordinator);
+    TEST_CHECK(firstPlan.coordinator_session == firstRuntime->generation());
+    TEST_CHECK(firstPlan.catalog_revision != 0);
+    TEST_CHECK(firstPlan.page_size == 4);
+    TEST_CHECK(firstPlan.selected_video.size() == 1);
+
+    livekit::ViewportIntent replacement = initial;
+    replacement.view_revision = 8;
+    replacement.page_size = 9;
+    coordinator->submitViewportIntent(replacement);
+
+    firstRoom->RemoveListener(firstListener);
+    OpenMeeting::MeetingCoordinatorTestAccess::retireSessionForReplacement(
+        *coordinator);
+
+    auto secondRoom = livekit::Room::Create(io.get_executor());
+    livekit::ParticipantSnapshotRoomTestAccess::establishRemoteMediaPlanPrecondition(
+        *secondRoom, 2);
+    auto secondRuntime = std::make_shared<OpenMeeting::MeetingSessionRuntime>(
+        io, 102, QStringLiteral("local-user"));
+    OpenMeeting::MeetingCoordinatorTestAccess::bindSession(
+        *coordinator, secondRoom, secondRuntime);
+    auto secondListener =
+        OpenMeeting::MeetingCoordinatorTestAccess::listener(*coordinator, secondRuntime);
+    secondRoom->AddListener(secondListener);
+    DrainNative(io);
+
+    livekit::VideoDemandPlan oldPlanAfterReplacement;
+    asio::post(firstRuntime->strand(), [&] {
+        oldPlanAfterReplacement = firstRuntime->videoDemandPlanOnStrand();
+    });
+    DrainNative(io);
+    TEST_CHECK(oldPlanAfterReplacement.coordinator_session ==
+        firstRuntime->generation());
+    TEST_CHECK(oldPlanAfterReplacement.page_size == 4);
+
+    secondRoom->UpdateParticipantsForTesting(MakeParticipantUpdate(
+        "PA_VIEWPORT_SECOND", "viewport-second", "viewport-second",
+        livekit::proto::ParticipantInfo::ACTIVE));
+    DrainNative(io);
+    DrainQt();
+    const auto secondPlan =
+        OpenMeeting::MeetingCoordinatorTestAccess::acceptedVideoDemandPlan(
+            *coordinator);
+    TEST_CHECK(secondPlan.coordinator_session == secondRuntime->generation());
+    TEST_CHECK(secondPlan.coordinator_session != initial.coordinator_session);
+    TEST_CHECK(secondPlan.page_size == 9);
+    TEST_CHECK(secondPlan.selected_video.size() == 1);
+
+    secondRoom->RemoveListener(secondListener);
+    OpenMeeting::MeetingCoordinatorTestAccess::retireSessionForReplacement(
+        *coordinator);
+    coordinator.reset();
+    std::cout << "PHASE_E_VIEWPORT_REPLAY pre-runtime intent/publication-after-runtime/"
+                 "successor-generation/stale-runtime-rejection PASS" << std::endl;
+}
 
 std::vector<uint8_t> JsonPayload(const QJsonObject &object) {
     const QByteArray bytes = QJsonDocument(object).toJson(QJsonDocument::Compact);
@@ -6073,7 +6740,13 @@ void TransferReentry(TransferEffect boundary, ReentryAction action) {
         boundary == TransferEffect::Completed || boundary == TransferEffect::Message;
     TEST_CHECK(started == 1);
     TEST_CHECK(completed == (successful ? 1 : 0));
-    TEST_CHECK(failed == (successful ? 0 : 1));
+    if (action == ReentryAction::Destroy) {
+        // The independent observer remains connected during destruction. A
+        // revoked UI gate suppresses destruction-time business notifications.
+        TEST_CHECK(failed == 0);
+    } else {
+        TEST_CHECK(failed == (successful ? 0 : 1));
+    }
     TEST_CHECK(messages == ((action == ReentryAction::None || boundary == TransferEffect::Message) ? 1 : 0));
     if (action != ReentryAction::None) TEST_CHECK(acted);
     if (fixture.coordinator) {
@@ -7606,7 +8279,8 @@ struct OwnedStopWitness {
     std::shared_ptr<std::atomic<bool>> workerExited = std::make_shared<std::atomic<bool>>(false);
     int contextShutdowns = 0;
     int contextDestructions = 0;
-    int disconnectObservations = 0;
+    int retirementObservations = 0;
+    int lateDisconnectCallbacks = 0;
     bool runtimeExpiredAtContextShutdown = true;
     bool workerExitedAtContextShutdown = true;
     bool transfersEmptyAfterBarrier = false;
@@ -7645,8 +8319,11 @@ class StopBarrierObserver final : public livekit::RoomListener {
 public:
     explicit StopBarrierObserver(std::shared_ptr<OwnedStopWitness> value) : witness(std::move(value)) {}
     void OnDisconnected(livekit::RoomDisconnectReason, const std::string &) override {
-        // Disconnect happens after the production cleanup barrier and before
-        // io_context::stop. The worker remains free to execute this observation.
+        ++witness->lateDisconnectCallbacks;
+    }
+    ~StopBarrierObserver() override {
+        // Retire revokes business callbacks, then releases listeners after its
+        // native drain. The executor must still run after the cleanup barrier.
         auto runtime = witness->runtime.lock();
         TEST_CHECK(runtime);
         std::promise<void> checked;
@@ -7655,7 +8332,7 @@ public:
             runtime->assertOnStrand();
             witness->transfersEmptyAfterBarrier = runtime->transfersOnStrand().empty();
             witness->admissionClosedAfterBarrier = !runtime->acceptsDataOnStrand();
-            ++witness->disconnectObservations;
+            ++witness->retirementObservations;
             checked.set_value();
         });
         WaitBounded(future); future.get();
@@ -7671,11 +8348,12 @@ public:
               std::make_unique<QSettings>(settingsDirectory.filePath("settings.ini"), QSettings::IniFormat))),
           coordinator(OpenMeeting::MeetingCoordinatorTestAccess::create(*session)),
           witness(std::make_shared<OwnedStopWitness>()),
-          bridge(std::make_shared<ValueBridge>()), observer(std::make_shared<StopBarrierObserver>(witness)) {
+          bridge(std::make_shared<ValueBridge>()) {
         TEST_CHECK(settingsDirectory.isValid());
         listener = OpenMeeting::MeetingCoordinatorTestAccess::createOwnedSession(*coordinator);
         room = OpenMeeting::MeetingCoordinatorTestAccess::ownedRoom(*coordinator);
         runtime = OpenMeeting::MeetingCoordinatorTestAccess::ownedRuntime(*coordinator);
+        contextLease = OpenMeeting::MeetingCoordinatorTestAccess::ownedContextLease(*coordinator);
         witness->runtime = runtime;
         auto &context = OpenMeeting::MeetingCoordinatorTestAccess::ownedContext(*coordinator);
         asio::use_service<OwnedContextWitnessService>(context).witness = witness;
@@ -7685,15 +8363,25 @@ public:
             // Local connected precondition only: no claim of network Connect.
             livekit::ParticipantSnapshotRoomTestAccess::establishConnectedAttachPrecondition(*owner);
             owner->AddListener(bridge);
-            owner->AddListener(observer);
+            owner->AddListener(std::make_shared<StopBarrierObserver>(witness));
         }
         OpenMeeting::MeetingCoordinatorTestAccess::startOwnedWorker(*coordinator, witness->workerExited);
         nativeBarrier();
     }
     ~OwnedShutdownFixture() {
         coordinator.reset();
+        waitNativeStop();
         bridge->clear();
         DrainQt();
+    }
+    void waitNativeStop() {
+        // A worker sentinel preserves pending Qt payloads for K2 while proving
+        // that the preceding cleanup job and its owner captures were released.
+        auto reached = std::make_shared<std::promise<void>>();
+        auto future = reached->get_future();
+        TEST_CHECK(OpenMeeting::SessionShutdownService::Instance().SubmitCleanup(
+            [reached] { reached->set_value(); }));
+        WaitBounded(future); future.get();
     }
     void nativeBarrier() {
         std::promise<void> reached;
@@ -7712,7 +8400,7 @@ public:
         });
         WaitBounded(future); future.get();
     }
-    void deliverQt() { QCoreApplication::sendPostedEvents(coordinator.get(), QEvent::MetaCall); }
+    void deliverQt() { QCoreApplication::sendPostedEvents(QCoreApplication::instance(), QEvent::MetaCall); }
     void pump() {
         nativeBarrier(); deliverQt();
         onStrand([](auto &) {}); deliverQt();
@@ -7730,13 +8418,23 @@ public:
         auto participant = value->remote_participants().at("PA_SHUTDOWN");
         return participant->get_publication("TR_PA_SHUTDOWN")->track();
     }
-    void stop() {
+    void beginStop() {
         coordinator->leaveMeetingAsync(false);
+        TEST_CHECK(coordinator->state() == OpenMeeting::MeetingState::Leaving);
+        TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::stopPending(*coordinator));
+    }
+    void finishStop() {
+        DrainQt();
         TEST_CHECK(coordinator->state() == OpenMeeting::MeetingState::Idle);
         TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::ownedSessionReleased(*coordinator));
     }
-    void checkStopOrder() const {
-        std::cout << "AK_STOP_WITNESS disconnect=" << witness->disconnectObservations
+    void stop() {
+        beginStop();
+        waitNativeStop();
+        finishStop();
+    }
+    void checkStopOrder(bool contextRetained = false) const {
+        std::cout << "AK_STOP_WITNESS retired=" << witness->retirementObservations
                   << " map-empty=" << witness->transfersEmptyAfterBarrier
                   << " admission-closed=" << witness->admissionClosedAfterBarrier
                   << " service-shutdowns=" << witness->contextShutdowns
@@ -7744,11 +8442,13 @@ public:
                   << " worker-exited-at-shutdown=" << witness->workerExitedAtContextShutdown
                   << " runtime-expired-at-shutdown=" << witness->runtimeExpiredAtContextShutdown
                   << " runtime-expired-now=" << runtime.expired() << std::endl;
-        TEST_CHECK(witness->disconnectObservations == 1);
+        TEST_CHECK(witness->retirementObservations == 1 && witness->lateDisconnectCallbacks == 0);
         TEST_CHECK(witness->transfersEmptyAfterBarrier && witness->admissionClosedAfterBarrier);
         // This bundled ASIO invokes shutdown in io_context::~io_context and
         // execution_context::~execution_context; service destruction is once.
-        TEST_CHECK(witness->contextShutdowns == 2 && witness->contextDestructions == 1);
+        TEST_CHECK(witness->contextShutdowns == (contextRetained ? 0 : 2));
+        TEST_CHECK(witness->contextDestructions == (contextRetained ? 0 : 1));
+        TEST_CHECK(contextLease.expired() != contextRetained);
         TEST_CHECK(witness->workerExitedAtContextShutdown && witness->runtimeExpiredAtContextShutdown);
         TEST_CHECK(runtime.expired());
     }
@@ -7758,7 +8458,7 @@ public:
     std::unique_ptr<OpenMeeting::MeetingCoordinator> coordinator;
     std::shared_ptr<OwnedStopWitness> witness;
     std::shared_ptr<ValueBridge> bridge;
-    std::shared_ptr<StopBarrierObserver> observer;
+    std::weak_ptr<asio::io_context> contextLease;
     std::weak_ptr<livekit::Room> room;
     std::weak_ptr<OpenMeeting::MeetingSessionRuntime> runtime;
     std::weak_ptr<livekit::RoomListener> listener;
@@ -7782,7 +8482,8 @@ void AkShutdownQtPending(bool destroyOwner) {
     fixture.bridge->clear(); // Do not let our observation history retain Track.
     TEST_CHECK(joins == 0 && updates == 0);
     if (destroyOwner) fixture.coordinator.reset();
-    else fixture.stop();
+    else fixture.beginStop();
+    fixture.waitNativeStop();
     fixture.checkStopOrder();
     TEST_CHECK(fixture.room.expired() && fixture.listener.expired());
     if (!destroyOwner) TEST_CHECK(!track.expired()); // Only the unconsumed Qt payload now retains it.
@@ -7790,6 +8491,7 @@ void AkShutdownQtPending(bool destroyOwner) {
     DrainQt();
     TEST_CHECK(joins == 0 && updates == updatesAtStop);
     TEST_CHECK(track.expired());
+    if (!destroyOwner) fixture.finishStop();
     std::cout << "AK_CASE_K2 Qt-pending/destroy-owner=" << destroyOwner
               << " runtime-before-context/no-business-effect/payload-released PASS" << std::endl;
 }
@@ -7834,7 +8536,7 @@ void AkShutdownTransfers() {
     }
     WaitBounded(enteredFuture);
     fixture.deliverQt(); // Real DataReceived routes the chunk behind the controlled gate.
-    release.set_value(); // Release BEFORE stop can wait on the same strand.
+    release.set_value(); // Finish aggregation before testing the shutdown boundary.
     fixture.onStrand([](auto &runtime) {
         TEST_CHECK(runtime.transfersOnStrand().size() == 1);
         TEST_CHECK(runtime.transfersOnStrand().begin()->first.wireTransferId == "receiving");
@@ -7909,7 +8611,12 @@ void AkShutdownNativePending() {
     const auto *listenerAddress = fixture.listener.lock().get();
     TEST_CHECK(listenerAddress && livekit::ParticipantSnapshotRoomTestAccess::containsListener(*externalRoom, listenerAddress));
     TEST_CHECK(fixture.bridge->events().empty() && !track.expired());
-    fixture.stop(); fixture.checkStopOrder();
+    fixture.stop(); fixture.checkStopOrder(true);
+    TEST_CHECK(externalRoom->retired());
+    bool borrowedExecutorRejected = false;
+    try { (void)externalRoom->executor(); }
+    catch (const std::logic_error &) { borrowedExecutorRejected = true; }
+    TEST_CHECK(borrowedExecutorRejected);
     const auto queuedAfterStop = livekit::ParticipantSnapshotRoomTestAccess::pendingParticipantEvents(*externalRoom);
     const bool payloadReleased = track.expired();
     const bool listenerStillRegistered = livekit::ParticipantSnapshotRoomTestAccess::containsListener(*externalRoom, listenerAddress);
@@ -7921,6 +8628,7 @@ void AkShutdownNativePending() {
     // Do not call the retained raw-owner bridge after owner destruction to
     // manufacture a UAF. Release our external Room safely before assertions.
     externalRoom.reset();
+    fixture.checkStopOrder();
     TEST_CHECK(fixture.room.expired() && fixture.listener.expired() && track.expired());
     DrainQt();
     TEST_CHECK(queuedAfterStop == 0);
@@ -7929,15 +8637,131 @@ void AkShutdownNativePending() {
     std::cout << "AK_CASE_K1 external-Room/native-pending/payload+bridge-released PASS" << std::endl;
 }
 
+void AkShutdownUiRemainsResponsive() {
+    OwnedShutdownFixture fixture;
+    std::promise<void> ioEntered, releaseIo, uiResponsive;
+    auto entered = ioEntered.get_future();
+    auto release = releaseIo.get_future().share();
+    auto responsive = uiResponsive.get_future();
+    {
+        auto runtime = fixture.runtime.lock();
+        asio::post(runtime->strand(), [&] {
+            ioEntered.set_value();
+            WaitBounded(release);
+        });
+    }
+    WaitBounded(entered);
+    std::atomic<bool> releasedBeforeUiResponse{false};
+    // A regression can unblock and fail cleanly instead of hanging the test:
+    // the I/O blocker is released only after a real Qt timer, or this deadline.
+    std::thread watchdog([&] {
+        if (responsive.wait_for(std::chrono::seconds(3)) != std::future_status::ready)
+            releasedBeforeUiResponse.store(true, std::memory_order_release);
+        releaseIo.set_value();
+    });
+    int finished = 0, left = 0;
+    QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::sessionShutdownFinished,
+        fixture.coordinator.get(), [&] {
+            ++finished;
+            TEST_CHECK(finished == 1 && fixture.coordinator);
+            TEST_CHECK(fixture.witness->workerExited->load(std::memory_order_acquire));
+            TEST_CHECK(fixture.runtime.expired() && fixture.room.expired() && fixture.contextLease.expired());
+            TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::ownedSessionReleased(*fixture.coordinator));
+        });
+    QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingLeft,
+        fixture.coordinator.get(), [&] { ++left; });
+    fixture.beginStop();
+    fixture.coordinator->leaveMeetingAsync(false); // Repeated leave shares one terminal.
+    bool qtTimerRan = false;
+    QTimer::singleShot(0, fixture.coordinator.get(), [&] {
+        TEST_CHECK(!releasedBeforeUiResponse.load(std::memory_order_acquire));
+        TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::stopPending(*fixture.coordinator));
+        TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::Leaving);
+        TEST_CHECK(!fixture.runtime.expired() && !fixture.room.expired() && !fixture.contextLease.expired());
+        TEST_CHECK(!fixture.witness->workerExited->load(std::memory_order_acquire));
+        TEST_CHECK(finished == 0 && left == 0);
+        qtTimerRan = true;
+        uiResponsive.set_value();
+    });
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!qtTimerRan && std::chrono::steady_clock::now() < deadline) {
+        DrainQt();
+        QThread::msleep(1);
+    }
+    watchdog.join();
+    TEST_CHECK(qtTimerRan && !releasedBeforeUiResponse.load(std::memory_order_acquire));
+    fixture.waitNativeStop();
+    fixture.finishStop();
+    fixture.checkStopOrder();
+    TEST_CHECK(finished == 1 && left == 1);
+    // Destroy while the observation captures still exist. Destruction of an
+    // already stopped Coordinator must not emit a second business terminal.
+    fixture.coordinator.reset();
+    DrainQt();
+    TEST_CHECK(finished == 1 && left == 1);
+    std::cout << "AK_CASE_K5 blocked-IO/Qt-responsive/owner-retained-until-complete/one-terminal PASS" << std::endl;
+}
+
+void AkShutdownNativeCompletion(bool raceSuccess) {
+    OwnedShutdownFixture fixture;
+    std::atomic<int> calls{0}, value{0};
+    const auto uiThread = std::this_thread::get_id();
+    auto nativeCallback = livekit::CancellableExecutorCallback<int>::Create(
+        livekit::ParticipantSnapshotRoomTestAccess::callbackGate(*fixture.room.lock()),
+        [room = fixture.room.lock(), &calls, &value, uiThread](int result) {
+            TEST_CHECK(room && std::this_thread::get_id() != uiThread);
+            value.store(result, std::memory_order_relaxed);
+            calls.fetch_add(1, std::memory_order_release);
+        }, -1);
+    std::thread native;
+    std::promise<void> complete;
+    auto completeReady = complete.get_future();
+    if (raceSuccess) {
+        native = std::thread([&] {
+            WaitBounded(completeReady);
+            nativeCallback->Complete(42);
+        });
+    }
+    fixture.beginStop();
+    if (raceSuccess) {
+        complete.set_value();
+        native.join();
+    }
+    fixture.waitNativeStop();
+    fixture.finishStop();
+    fixture.checkStopOrder(true);
+    TEST_CHECK(fixture.room.expired() && fixture.runtime.expired());
+    TEST_CHECK(calls.load(std::memory_order_acquire) == 1);
+    TEST_CHECK(value.load() == -1 || (raceSuccess && value.load() == 42));
+    // A native observer may survive the joined executor. Late delivery must
+    // be a no-op while its executor object still retains the context lease.
+    std::thread late([&] { nativeCallback->Complete(99); });
+    late.join();
+    TEST_CHECK(calls.load(std::memory_order_acquire) == 1);
+    {
+        auto context = fixture.contextLease.lock();
+        TEST_CHECK(context);
+        context->restart();
+        TEST_CHECK(context->poll() == 0);
+    }
+    nativeCallback.reset();
+    fixture.checkStopOrder();
+    std::cout << "AK_CASE_K6 native-completion/race-success=" << raceSuccess
+              << "/one-terminal/late-delivery-rejected/context-lease PASS" << std::endl;
+}
+
 void AkShutdownRegression() {
-    std::cout << "AK_SHUTDOWN_PLANNED=6 (real owned Coordinator stop; local Connected precondition)" << std::endl;
+    std::cout << "AK_SHUTDOWN_PLANNED=9 (real owned Coordinator stop; local Connected precondition)" << std::endl;
     AkShutdownQtPending(false);
     AkShutdownQtPending(true);
     AkShutdownTransfers();
     AkShutdownTickets(false);
     AkShutdownTickets(true);
-    AkShutdownNativePending(); // Preserve the FIFO/listener candidate for safe RED last.
-    std::cout << "AK_SHUTDOWN_EXECUTED=6 PASSED=6 FAILED=0" << std::endl;
+    AkShutdownNativePending();
+    AkShutdownUiRemainsResponsive();
+    AkShutdownNativeCompletion(false);
+    AkShutdownNativeCompletion(true);
+    std::cout << "AK_SHUTDOWN_EXECUTED=9 PASSED=9 FAILED=0" << std::endl;
 }
 
 void AkAttachRegression() {
@@ -8151,6 +8975,19 @@ void AdmissionTelemetryPreRoomTerminals() {
     TEST_CHECK(static_cast<bool>(pending));
     cancelled->leaveMeetingAsync(false);
     checkTerminal(cancelledSnapshot, "cancelled");
+    // Admission telemetry is projected immediately, while the durable session
+    // terminal is completed by the shutdown worker. Observe its actual drain
+    // before asserting the exact ledger counts or removing the temporary file.
+    bool shutdownDrained = false;
+    OpenMeeting::SessionShutdownService::Instance().DrainAsync([&] {
+        shutdownDrained = true;
+    });
+    const auto shutdownDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!shutdownDrained && std::chrono::steady_clock::now() < shutdownDeadline) {
+        DrainQt();
+        QThread::msleep(1);
+    }
+    TEST_CHECK(shutdownDrained);
     const auto stability = stabilityLedger->Summary();
     TEST_CHECK(stability.sessions_started == 2);
     TEST_CHECK(stability.sessions_terminal == 2);
@@ -8163,6 +9000,11 @@ void AdmissionTelemetryPreRoomTerminals() {
 
 int main(int argc, char **argv) {
     QCoreApplication application(argc, argv);
+    const auto productionOptions =
+        OpenMeeting::ProductionMeetingSignalOptions(false);
+    TEST_CHECK(!productionOptions.auto_subscribe &&
+        productionOptions.adaptive_stream &&
+        !productionOptions.allow_insecure_transport);
     // Validate the explicit temporary IniFormat storage used by our injected
     // fixtures. Native singleton settings cannot be redirected by Qt's
     // setDefaultFormat; singleton entry paths are prohibited instead.
@@ -8210,6 +9052,7 @@ int main(int argc, char **argv) {
     }
     LateJoinPublicationWaitsForMediaSectionsRequirement();
     VerifyOpenMeetingInitialMediaProjection();
+    ViewportIntentBeforeRuntimeRegression();
     Fixture fixture;
 
     std::vector<QString> projectedNames;

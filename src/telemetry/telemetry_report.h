@@ -108,6 +108,10 @@ public:
         std::chrono::hours retention = kDefaultRetention);
     ~TelemetryHistoryStore();
 
+    // Stop admission, persist accepted records, and join. Call on the managed
+    // cleanup worker before application exit; retained readers remain valid.
+    void Close();
+
     TelemetryHistoryStore(const TelemetryHistoryStore&) = delete;
     TelemetryHistoryStore& operator=(const TelemetryHistoryStore&) = delete;
 
@@ -153,6 +157,7 @@ private:
     const std::uint64_t maximum_bytes_;
     const std::chrono::hours retention_;
 
+    std::mutex close_mutex_;
     mutable std::mutex mutex_;
     std::condition_variable condition_;
     std::deque<Job> jobs_;

@@ -189,6 +189,18 @@ target_link_libraries(test_remote_publication_lifecycle PRIVATE
     cohavora_core
 )
 
+add_executable(test_publication_catalog
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_publication_catalog.cpp
+)
+target_include_directories(test_publication_catalog PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_publication_catalog PRIVATE cohavora_core)
+
+add_executable(test_video_demand_policy
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_video_demand_policy.cpp
+)
+target_include_directories(test_video_demand_policy PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_video_demand_policy PRIVATE cohavora_core)
+
 # Local media unpublish is committed by publisher SDP answer, not by a guessed
 # SignalRequest. This locks down the protocol gate and public API validation.
 add_executable(test_local_unpublish_transaction
@@ -292,7 +304,11 @@ if(LIVEKIT_BUILD_HARDWARE_TESTS)
     target_link_libraries(test_wasapi_capture PRIVATE
         cohavora_core
     )
+endif()
 
+if(WIN32)
+    # The default invocation uses fake COM interfaces and opens no devices.
+    # Real capture remains an explicit --camera-runtime invocation.
     add_executable(test_dshow_capture
         ${LIVEKIT_TEST_SOURCE_DIR}/test_dshow_capture.cpp
     )

@@ -293,6 +293,7 @@ public:
         std::string name;
         std::shared_ptr<Track> track;
         TrackKind kind = TrackKind::Unknown;
+        TrackSource source = TrackSource::Unknown;
         bool muted = false;
         StreamState stream_state = StreamState::Active;
         bool subscription_allowed = true;
@@ -375,6 +376,7 @@ public:
         }
         if (snapshot.track) {
             snapshot.kind = snapshot.track->kind();
+            snapshot.source = snapshot.track->source();
             snapshot.muted = snapshot.track->muted();
         }
         return snapshot;
