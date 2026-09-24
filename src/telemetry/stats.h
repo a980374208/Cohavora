@@ -30,6 +30,33 @@ struct InboundRtpStreamStats {
     std::uint32_t frame_width{0};
     std::uint32_t frame_height{0};
     double frames_per_second{0.0};
+    std::string codec_id;
+    std::uint32_t frames_received{0};
+    std::string decoder_implementation;
+    bool power_efficient_decoder{false};
+
+    // NET-07 cumulative counters. A missing native field remains distinct
+    // from a measured zero; window deltas are computed by SessionTelemetry.
+    std::uint64_t fec_packets_received{0};
+    std::uint64_t fec_bytes_received{0};
+    std::uint64_t fec_packets_discarded{0};
+    std::uint64_t retransmitted_packets_received{0};
+    std::uint64_t retransmitted_bytes_received{0};
+    std::uint32_t fir_count{0};
+    std::uint32_t pli_count{0};
+    std::uint32_t nack_count{0};
+    bool packets_received_available{false};
+    bool bytes_received_available{false};
+    bool packets_lost_available{false};
+    bool jitter_available{false};
+    bool fec_packets_received_available{false};
+    bool fec_bytes_received_available{false};
+    bool fec_packets_discarded_available{false};
+    bool retransmitted_packets_received_available{false};
+    bool retransmitted_bytes_received_available{false};
+    bool fir_count_available{false};
+    bool pli_count_available{false};
+    bool nack_count_available{false};
 
     // A missing native member is not a measured zero.
     bool kind_available{false};
@@ -38,6 +65,10 @@ struct InboundRtpStreamStats {
     bool frame_width_available{false};
     bool frame_height_available{false};
     bool frames_per_second_available{false};
+    bool codec_id_available{false};
+    bool frames_received_available{false};
+    bool decoder_implementation_available{false};
+    bool power_efficient_decoder_available{false};
     std::uint32_t freeze_count{0};
     double total_freezes_duration{0.0};
     double total_decode_time{0.0};
@@ -92,6 +123,42 @@ struct OutboundRtpStreamStats {
     std::uint64_t packets_sent{0};
     std::uint32_t frames_encoded{0};
     double frames_per_second{0.0};
+    std::string codec_id;
+    std::uint32_t frames_sent{0};
+    double total_encode_time{0.0};
+    std::string encoder_implementation;
+    bool power_efficient_encoder{false};
+    std::string scalability_mode;
+
+    // NET-07 and VID-07 cumulative/native values. The reason and duration
+    // labels are WebRTC-defined categories, not application root-cause claims.
+    std::uint64_t retransmitted_packets_sent{0};
+    std::uint64_t retransmitted_bytes_sent{0};
+    std::uint32_t fir_count{0};
+    std::uint32_t pli_count{0};
+    std::uint32_t nack_count{0};
+    std::uint32_t frame_width{0};
+    std::uint32_t frame_height{0};
+    std::string quality_limitation_reason;
+    std::unordered_map<std::string, double> quality_limitation_durations;
+    std::uint32_t quality_limitation_resolution_changes{0};
+    bool retransmitted_packets_sent_available{false};
+    bool retransmitted_bytes_sent_available{false};
+    bool fir_count_available{false};
+    bool pli_count_available{false};
+    bool nack_count_available{false};
+    bool frame_width_available{false};
+    bool frame_height_available{false};
+    bool frames_per_second_available{false};
+    bool quality_limitation_reason_available{false};
+    bool quality_limitation_durations_available{false};
+    bool quality_limitation_resolution_changes_available{false};
+    bool codec_id_available{false};
+    bool frames_sent_available{false};
+    bool total_encode_time_available{false};
+    bool encoder_implementation_available{false};
+    bool power_efficient_encoder_available{false};
+    bool scalability_mode_available{false};
 
     // Preserve the numeric defaults for existing consumers, but diagnostic
     // consumers must check availability before interpreting a value as zero.
@@ -109,18 +176,90 @@ struct OutboundRtpStreamStats {
 struct RemoteInboundRtpStreamStats {
     std::string id;
     std::string ssrc;
+    std::string local_id;
     double round_trip_time{0.0}; // RTT 单位：秒
     double fraction_lost{0.0};   // 丢包百分比 (0.0 - 1.0)
+    double total_round_trip_time{0.0};
+    std::uint64_t round_trip_time_measurements{0};
+    bool local_id_available{false};
+    bool round_trip_time_available{false};
+    bool fraction_lost_available{false};
+    bool total_round_trip_time_available{false};
+    bool round_trip_time_measurements_available{false};
 };
 
 /// @brief ICE 候选者对与网络连接质量统计 (Candidate Pair)
 struct CandidatePairStats {
     std::string id;
     std::string state;
+    std::string transport_id;
+    std::string local_candidate_id;
+    std::string remote_candidate_id;
     bool current_pair{false};
+    bool selected_relationship_available{false};
     double current_round_trip_time{0.0}; // RTT 单位：秒
     double available_outgoing_bitrate{0.0}; // 可用上行估计码率 (bps)
     double available_incoming_bitrate{0.0}; // 可用下行估计码率 (bps)
+    std::uint64_t packets_sent{0};
+    std::uint64_t packets_received{0};
+    std::uint64_t bytes_sent{0};
+    std::uint64_t bytes_received{0};
+    bool current_round_trip_time_available{false};
+    bool available_outgoing_bitrate_available{false};
+    bool available_incoming_bitrate_available{false};
+    bool packets_sent_available{false};
+    bool packets_received_available{false};
+    bool bytes_sent_available{false};
+    bool bytes_received_available{false};
+};
+
+struct IceCandidateStats {
+    std::string id;
+    bool remote{false};
+    std::string network_type;
+    std::string protocol;
+    std::string relay_protocol;
+    std::string candidate_type;
+    std::string tcp_type;
+    bool network_type_available{false};
+    bool protocol_available{false};
+    bool relay_protocol_available{false};
+    bool candidate_type_available{false};
+    bool tcp_type_available{false};
+};
+
+struct TransportStats {
+    std::string id;
+    std::string selected_candidate_pair_id;
+    std::string dtls_state;
+    std::string ice_role;
+    std::string ice_state;
+    std::uint64_t bytes_sent{0};
+    std::uint64_t packets_sent{0};
+    std::uint64_t bytes_received{0};
+    std::uint64_t packets_received{0};
+    std::uint32_t selected_candidate_pair_changes{0};
+    bool selected_candidate_pair_id_available{false};
+    bool selected_candidate_pair_changes_available{false};
+    bool dtls_state_available{false};
+    bool ice_role_available{false};
+    bool ice_state_available{false};
+    bool bytes_sent_available{false};
+    bool packets_sent_available{false};
+    bool bytes_received_available{false};
+    bool packets_received_available{false};
+};
+
+struct CodecStats {
+    std::string id;
+    std::string mime_type;
+    std::uint32_t clock_rate{0};
+    std::uint32_t channels{0};
+    std::uint32_t payload_type{0};
+    bool mime_type_available{false};
+    bool clock_rate_available{false};
+    bool channels_available{false};
+    bool payload_type_available{false};
 };
 
 // Plain-data sender state captured on WebRTC's signaling thread. No native
@@ -146,6 +285,9 @@ struct StatsReport {
     std::vector<OutboundRtpStreamStats> outbound_rtp;
     std::vector<RemoteInboundRtpStreamStats> remote_inbound_rtp;
     std::vector<CandidatePairStats> candidate_pairs;
+    std::vector<IceCandidateStats> ice_candidates;
+    std::vector<TransportStats> transports;
+    std::vector<CodecStats> codecs;
     std::vector<AudioPlayoutStats> audio_playout;
     std::vector<RtpSenderDiagnostic> senders;
     bool senders_available{false};

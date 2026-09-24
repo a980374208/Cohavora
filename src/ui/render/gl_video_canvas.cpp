@@ -170,8 +170,14 @@ struct GlVideoCanvas::Worker {
             for (const auto& resource : scene->resources) {
                 const auto it = uploaded.find(resource.id.value);
                 if (it != uploaded.end() && it->second.frame == resource.frame && it->second.image.cacheKey() == resource.image.cacheKey()) continue;
-                if (resource.frame) result = device->Upload(resource.id, resource.frame->view());
-                else {
+                if (resource.frame) {
+                    const auto upload_started_at = Clock::now();
+                    result = device->Upload(resource.id, resource.frame->view());
+                    resource.frame->NotifyRenderStage(
+                        "opengl_upload_cpu_submit",
+                        std::chrono::duration_cast<std::chrono::microseconds>(
+                            Clock::now() - upload_started_at));
+                } else {
                     const auto& image = resource.image;
                     lk_render_frame_view view{};
                     view.struct_size = sizeof(view); view.format = LK_RENDER_RGBA8;
@@ -183,9 +189,13 @@ struct GlVideoCanvas::Worker {
                 if (result != LK_RENDER_OK) break;
                 uploaded[resource.id.value] = resource;
             }
+            std::chrono::microseconds render_duration{-1};
             if (result == LK_RENDER_OK) {
                 const lk_render_scene_view view{sizeof(view), uint32_t(scene->commands.size()), scene->commands.data(), {0.0706f, 0.0784f, 0.1020f, 1}};
+                const auto render_started_at = Clock::now();
                 result = device->Render(target, view);
+                render_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                    Clock::now() - render_started_at);
             }
             if (result != LK_RENDER_OK) {
                 lost = true;
@@ -195,7 +205,10 @@ struct GlVideoCanvas::Worker {
             if (!healthy() || stop.load()) break;
             if (hook) hook(); // Deterministic blocking injection at the present boundary.
             if (stop.load()) break;
+            const auto swap_started_at = Clock::now();
             context.swapBuffers(surface);
+            const auto swap_duration = std::chrono::duration_cast<std::chrono::microseconds>(
+                Clock::now() - swap_started_at);
             if (!healthy() || stop.load()) break;
             std::set<uint64_t> submitted_resources;
             for (const auto& command : scene->commands) {
@@ -206,6 +219,10 @@ struct GlVideoCanvas::Worker {
             const auto submitted_at = Clock::now();
             for (const auto& resource : scene->resources) {
                 if (resource.frame && submitted_resources.contains(resource.id.value)) {
+                    resource.frame->NotifyRenderStage(
+                        "opengl_render_cpu_submit", render_duration, submitted_at);
+                    resource.frame->NotifyRenderStage(
+                        "opengl_swap_block", swap_duration, submitted_at);
                     resource.frame->NotifyRendered(
                         scene->measurement_point.c_str(), submitted_at);
                 }

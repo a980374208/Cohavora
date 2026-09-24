@@ -45,6 +45,24 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("reason"), QString::fromStdString(snapshot.reason));
     result.insert(QStringLiteral("sampleAgeMs"), snapshot.sample_age_ms);
     result.insert(QStringLiteral("coverage"), snapshot.coverage);
+    result.insert(QStringLiteral("sessionDurationAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.session_duration_availability)));
+    result.insert(QStringLiteral("sessionDurationReason"),
+                  QString::fromStdString(snapshot.session_duration_reason));
+    result.insert(QStringLiteral("sessionDurationMeasurementPoint"),
+                  QString::fromStdString(
+                      snapshot.session_duration_measurement_point));
+    result.insert(QStringLiteral("sessionDurationMs"), snapshot.session_duration_ms);
+    result.insert(QStringLiteral("usableDurationAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.usable_duration_availability)));
+    result.insert(QStringLiteral("usableDurationReason"),
+                  QString::fromStdString(snapshot.usable_duration_reason));
+    result.insert(QStringLiteral("usableDurationMeasurementPoint"),
+                  QString::fromStdString(
+                      snapshot.usable_duration_measurement_point));
+    result.insert(QStringLiteral("usableDurationMs"), snapshot.usable_duration_ms);
     result.insert(QStringLiteral("queueCapacity"),
                   QVariant::fromValue<qulonglong>(snapshot.queue_capacity));
     result.insert(QStringLiteral("queueDepth"),
@@ -187,6 +205,30 @@ QVariantMap ProjectTelemetrySnapshot(
                       snapshot.resource_return_availability)));
     result.insert(QStringLiteral("resourceReturnReason"),
                   QString::fromStdString(snapshot.resource_return_reason));
+    result.insert(QStringLiteral("internalResourceAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.internal_resource_availability)));
+    result.insert(QStringLiteral("internalResourceReason"),
+                  QString::fromStdString(snapshot.internal_resource_reason));
+    result.insert(QStringLiteral("activeNativeBindings"),
+                  QVariant::fromValue<qulonglong>(snapshot.active_native_bindings));
+    result.insert(QStringLiteral("activeLocalMediaStreams"),
+                  QVariant::fromValue<qulonglong>(snapshot.active_local_media_streams));
+    result.insert(QStringLiteral("activeRouterSlots"),
+                  QVariant::fromValue<qulonglong>(snapshot.active_router_slots));
+    result.insert(QStringLiteral("routerQueueAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.router_queue_availability)));
+    result.insert(QStringLiteral("routerQueueReason"),
+                  QString::fromStdString(snapshot.router_queue_reason));
+    result.insert(QStringLiteral("routerFramesSubmitted"),
+                  QVariant::fromValue<qulonglong>(snapshot.router_frames_submitted));
+    result.insert(QStringLiteral("routerFramesReplaced"),
+                  QVariant::fromValue<qulonglong>(snapshot.router_frames_replaced));
+    result.insert(QStringLiteral("routerCapacityDrops"),
+                  QVariant::fromValue<qulonglong>(snapshot.router_capacity_drops));
+    result.insert(QStringLiteral("exportQueueAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.export_queue_availability)));
+    result.insert(QStringLiteral("exportQueueReason"),
+                  QString::fromStdString(snapshot.export_queue_reason));
     result.insert(QStringLiteral("telemetryCostAvailability"),
                   QString::fromLatin1(livekit::telemetry::AvailabilityName(
                       snapshot.telemetry_cost_availability)));
@@ -360,6 +402,292 @@ QVariantMap ProjectTelemetrySnapshot(
         operationSummaries.push_back(std::move(item));
     }
     result.insert(QStringLiteral("operationSummaries"), operationSummaries);
+    result.insert(QStringLiteral("localPublishMediaAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.local_publish_media_availability)));
+    result.insert(QStringLiteral("localPublishMediaReason"),
+                  QString::fromStdString(snapshot.local_publish_media_reason));
+    result.insert(QStringLiteral("localPublishMediaAlgorithm"),
+                  QString::fromStdString(snapshot.local_publish_media_algorithm));
+    result.insert(QStringLiteral("localPublications"),
+                  QVariant::fromValue<qulonglong>(snapshot.local_publications));
+    result.insert(QStringLiteral("activeLocalPublications"),
+                  QVariant::fromValue<qulonglong>(snapshot.active_local_publications));
+    result.insert(QStringLiteral("expectedLocalPublications"),
+                  QVariant::fromValue<qulonglong>(snapshot.expected_local_publications));
+    result.insert(QStringLiteral("localPublishNoMedia"),
+                  QVariant::fromValue<qulonglong>(snapshot.local_publish_no_media));
+    result.insert(QStringLiteral("staleLocalPublicationDrops"),
+                  QVariant::fromValue<qulonglong>(snapshot.stale_local_publication_drops));
+    result.insert(QStringLiteral("localVideoInjectionAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.local_video_injection_availability)));
+    result.insert(QStringLiteral("localVideoInjectionReason"),
+                  QString::fromStdString(snapshot.local_video_injection_reason));
+    result.insert(QStringLiteral("localVideoInjectionMeasurementPoint"),
+                  QString::fromStdString(
+                      snapshot.local_video_injection_measurement_point));
+    result.insert(QStringLiteral("localVideoFirstInjections"),
+                  QVariant::fromValue<qulonglong>(snapshot.local_video_first_injections));
+    result.insert(QStringLiteral("lastPublishToVideoInjectionMs"),
+                  snapshot.last_publish_to_video_injection_ms);
+    result.insert(QStringLiteral("localVideoEncodeAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.local_video_encode_availability)));
+    result.insert(QStringLiteral("localVideoEncodeReason"),
+                  QString::fromStdString(snapshot.local_video_encode_reason));
+    result.insert(QStringLiteral("localVideoEncodeMeasurementPoint"),
+                  QString::fromStdString(
+                      snapshot.local_video_encode_measurement_point));
+    result.insert(QStringLiteral("localVideoFirstEncodes"),
+                  QVariant::fromValue<qulonglong>(snapshot.local_video_first_encodes));
+    result.insert(QStringLiteral("lastPublishToVideoEncodeMs"),
+                  snapshot.last_publish_to_video_encode_ms);
+    result.insert(QStringLiteral("localRtpSendAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.local_rtp_send_availability)));
+    result.insert(QStringLiteral("localRtpSendReason"),
+                  QString::fromStdString(snapshot.local_rtp_send_reason));
+    result.insert(QStringLiteral("localRtpSendMeasurementPoint"),
+                  QString::fromStdString(
+                      snapshot.local_rtp_send_measurement_point));
+    result.insert(QStringLiteral("localFirstRtpSends"),
+                  QVariant::fromValue<qulonglong>(snapshot.local_first_rtp_sends));
+    result.insert(QStringLiteral("lastPublishToRtpSendMs"),
+                  snapshot.last_publish_to_rtp_send_ms);
+    result.insert(QStringLiteral("localPublishStatsUncertaintyMs"),
+                  snapshot.local_publish_stats_uncertainty_ms);
+    result.insert(QStringLiteral("inboundRtpTrafficAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.inbound_rtp_traffic_availability)));
+    result.insert(QStringLiteral("inboundRtpTrafficReason"),
+                  QString::fromStdString(snapshot.inbound_rtp_traffic_reason));
+    result.insert(QStringLiteral("outboundRtpTrafficAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.outbound_rtp_traffic_availability)));
+    result.insert(QStringLiteral("outboundRtpTrafficReason"),
+                  QString::fromStdString(snapshot.outbound_rtp_traffic_reason));
+    result.insert(QStringLiteral("inboundRtpBitrateBps"),
+                  snapshot.inbound_rtp_bitrate_bps);
+    result.insert(QStringLiteral("outboundRtpBitrateBps"),
+                  snapshot.outbound_rtp_bitrate_bps);
+    result.insert(QStringLiteral("windowInboundRtpBytes"),
+                  QVariant::fromValue<qulonglong>(snapshot.window_inbound_rtp_bytes));
+    result.insert(QStringLiteral("windowOutboundRtpBytes"),
+                  QVariant::fromValue<qulonglong>(snapshot.window_outbound_rtp_bytes));
+    result.insert(QStringLiteral("inboundPacketLossAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.inbound_packet_loss_availability)));
+    result.insert(QStringLiteral("inboundPacketLossReason"),
+                  QString::fromStdString(snapshot.inbound_packet_loss_reason));
+    result.insert(QStringLiteral("inboundPacketsLost"),
+                  snapshot.inbound_packets_lost);
+    result.insert(QStringLiteral("windowInboundPacketsLost"),
+                  snapshot.window_inbound_packets_lost);
+    result.insert(QStringLiteral("inboundPacketLossRatio"),
+                  snapshot.inbound_packet_loss_ratio);
+    result.insert(QStringLiteral("inboundJitterAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.inbound_jitter_availability)));
+    result.insert(QStringLiteral("inboundJitterReason"),
+                  QString::fromStdString(snapshot.inbound_jitter_reason));
+    result.insert(QStringLiteral("inboundJitterMaxMs"),
+                  snapshot.inbound_jitter_max_ms);
+    result.insert(QStringLiteral("remoteRtcpAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.remote_rtcp_availability)));
+    result.insert(QStringLiteral("remoteRtcpReason"),
+                  QString::fromStdString(snapshot.remote_rtcp_reason));
+    result.insert(QStringLiteral("remoteRtcpCurrentRttMaxMs"),
+                  snapshot.remote_rtcp_current_rtt_max_ms);
+    result.insert(QStringLiteral("remoteRtcpWindowAverageRttMs"),
+                  snapshot.remote_rtcp_window_average_rtt_ms);
+    result.insert(QStringLiteral("remoteRtcpFractionLostMax"),
+                  snapshot.remote_rtcp_fraction_lost_max);
+    result.insert(QStringLiteral("networkRecoveryAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.network_recovery_availability)));
+    result.insert(QStringLiteral("networkRecoveryReason"),
+                  QString::fromStdString(snapshot.network_recovery_reason));
+    result.insert(QStringLiteral("networkRecoveryMeasurementPoint"),
+                  QString::fromStdString(snapshot.network_recovery_measurement_point));
+    result.insert(QStringLiteral("networkRetransmitRatioDenominator"),
+                  QString::fromStdString(snapshot.network_retransmit_ratio_denominator));
+    result.insert(QStringLiteral("inboundRetransmissionAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.inbound_retransmission_availability)));
+    result.insert(QStringLiteral("inboundRetransmissionReason"),
+                  QString::fromStdString(snapshot.inbound_retransmission_reason));
+    result.insert(QStringLiteral("inboundFecAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.inbound_fec_availability)));
+    result.insert(QStringLiteral("inboundFecReason"),
+                  QString::fromStdString(snapshot.inbound_fec_reason));
+    result.insert(QStringLiteral("inboundFeedbackAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.inbound_feedback_availability)));
+    result.insert(QStringLiteral("inboundFeedbackReason"),
+                  QString::fromStdString(snapshot.inbound_feedback_reason));
+    result.insert(QStringLiteral("outboundRetransmissionAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.outbound_retransmission_availability)));
+    result.insert(QStringLiteral("outboundRetransmissionReason"),
+                  QString::fromStdString(snapshot.outbound_retransmission_reason));
+    result.insert(QStringLiteral("outboundFeedbackAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.outbound_feedback_availability)));
+    result.insert(QStringLiteral("outboundFeedbackReason"),
+                  QString::fromStdString(snapshot.outbound_feedback_reason));
+    result.insert(QStringLiteral("networkRecoveryStreams"),
+                  QVariant::fromValue<qulonglong>(snapshot.network_recovery_streams));
+    result.insert(QStringLiteral("inboundRetransmittedPackets"),
+                  QVariant::fromValue<qulonglong>(snapshot.inbound_retransmitted_packets));
+    result.insert(QStringLiteral("inboundFecPackets"),
+                  QVariant::fromValue<qulonglong>(snapshot.inbound_fec_packets));
+    result.insert(QStringLiteral("inboundNackCount"),
+                  QVariant::fromValue<qulonglong>(snapshot.inbound_nack_count));
+    result.insert(QStringLiteral("inboundPliCount"),
+                  QVariant::fromValue<qulonglong>(snapshot.inbound_pli_count));
+    result.insert(QStringLiteral("inboundFirCount"),
+                  QVariant::fromValue<qulonglong>(snapshot.inbound_fir_count));
+    result.insert(QStringLiteral("outboundRetransmittedPackets"),
+                  QVariant::fromValue<qulonglong>(snapshot.outbound_retransmitted_packets));
+    result.insert(QStringLiteral("outboundNackCount"),
+                  QVariant::fromValue<qulonglong>(snapshot.outbound_nack_count));
+    result.insert(QStringLiteral("outboundPliCount"),
+                  QVariant::fromValue<qulonglong>(snapshot.outbound_pli_count));
+    result.insert(QStringLiteral("outboundFirCount"),
+                  QVariant::fromValue<qulonglong>(snapshot.outbound_fir_count));
+    result.insert(QStringLiteral("windowInboundPackets"),
+                  QVariant::fromValue<qulonglong>(snapshot.window_inbound_packets));
+    result.insert(QStringLiteral("windowInboundRetransmittedPackets"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.window_inbound_retransmitted_packets));
+    result.insert(QStringLiteral("windowInboundFecPackets"),
+                  QVariant::fromValue<qulonglong>(snapshot.window_inbound_fec_packets));
+    result.insert(QStringLiteral("windowOutboundPackets"),
+                  QVariant::fromValue<qulonglong>(snapshot.window_outbound_packets));
+    result.insert(QStringLiteral("windowOutboundRetransmittedPackets"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.window_outbound_retransmitted_packets));
+    result.insert(QStringLiteral("inboundRetransmittedPacketRatio"),
+                  snapshot.inbound_retransmitted_packet_ratio);
+    result.insert(QStringLiteral("outboundRetransmittedPacketRatio"),
+                  snapshot.outbound_retransmitted_packet_ratio);
+    result.insert(QStringLiteral("mediaPathAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.media_path_availability)));
+    result.insert(QStringLiteral("mediaPathReason"),
+                  QString::fromStdString(snapshot.media_path_reason));
+    result.insert(QStringLiteral("mediaPathMeasurementPoint"),
+                  QString::fromStdString(snapshot.media_path_measurement_point));
+    result.insert(QStringLiteral("selectedMediaTransports"),
+                  QVariant::fromValue<qulonglong>(snapshot.selected_media_transports));
+    result.insert(QStringLiteral("mediaPathSwitches"),
+                  QVariant::fromValue<qulonglong>(snapshot.media_path_switches));
+    result.insert(QStringLiteral("localCandidateTypes"),
+                  QString::fromStdString(snapshot.local_candidate_types));
+    result.insert(QStringLiteral("remoteCandidateTypes"),
+                  QString::fromStdString(snapshot.remote_candidate_types));
+    result.insert(QStringLiteral("localNetworkTypes"),
+                  QString::fromStdString(snapshot.local_network_types));
+    result.insert(QStringLiteral("mediaProtocols"),
+                  QString::fromStdString(snapshot.media_protocols));
+    result.insert(QStringLiteral("relayProtocols"),
+                  QString::fromStdString(snapshot.relay_protocols));
+    result.insert(QStringLiteral("tcpTypes"),
+                  QString::fromStdString(snapshot.tcp_types));
+    result.insert(QStringLiteral("mediaPathRttAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.media_path_rtt_availability)));
+    result.insert(QStringLiteral("mediaPathRttReason"),
+                  QString::fromStdString(snapshot.media_path_rtt_reason));
+    result.insert(QStringLiteral("mediaPathRttMaxMs"),
+                  snapshot.media_path_rtt_max_ms);
+    result.insert(QStringLiteral("mediaBandwidthAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.media_bandwidth_availability)));
+    result.insert(QStringLiteral("mediaBandwidthReason"),
+                  QString::fromStdString(snapshot.media_bandwidth_reason));
+    result.insert(QStringLiteral("mediaAvailableOutgoingBitrateBps"),
+                  snapshot.media_available_outgoing_bitrate_bps);
+    result.insert(QStringLiteral("mediaAvailableIncomingBitrateBps"),
+                  snapshot.media_available_incoming_bitrate_bps);
+    result.insert(QStringLiteral("transportTrafficAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.transport_traffic_availability)));
+    result.insert(QStringLiteral("transportTrafficReason"),
+                  QString::fromStdString(snapshot.transport_traffic_reason));
+    result.insert(QStringLiteral("windowTransportBytesSent"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.window_transport_bytes_sent));
+    result.insert(QStringLiteral("windowTransportBytesReceived"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.window_transport_bytes_received));
+    result.insert(QStringLiteral("windowTransportPacketsSent"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.window_transport_packets_sent));
+    result.insert(QStringLiteral("windowTransportPacketsReceived"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.window_transport_packets_received));
+    result.insert(QStringLiteral("transportStateAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.transport_state_availability)));
+    result.insert(QStringLiteral("transportStateReason"),
+                  QString::fromStdString(snapshot.transport_state_reason));
+    result.insert(QStringLiteral("transportDtlsStates"),
+                  QString::fromStdString(snapshot.transport_dtls_states));
+    result.insert(QStringLiteral("transportConnectivityStates"),
+                  QString::fromStdString(snapshot.transport_connectivity_states));
+    result.insert(QStringLiteral("transportRoles"),
+                  QString::fromStdString(snapshot.transport_roles));
+    result.insert(QStringLiteral("localDeviceContinuityAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.local_device_continuity_availability)));
+    result.insert(QStringLiteral("localDeviceContinuityReason"),
+                  QString::fromStdString(snapshot.local_device_continuity_reason));
+    result.insert(QStringLiteral("localDeviceContinuityAlgorithm"),
+                  QString::fromStdString(snapshot.local_device_continuity_algorithm));
+    result.insert(QStringLiteral("expectedLocalDeviceStreams"),
+                  QVariant::fromValue<qulonglong>(snapshot.expected_local_device_streams));
+    result.insert(QStringLiteral("activeLocalDeviceStreams"),
+                  QVariant::fromValue<qulonglong>(snapshot.active_local_device_streams));
+    result.insert(QStringLiteral("localDeviceUnexpectedStops"),
+                  QVariant::fromValue<qulonglong>(snapshot.local_device_unexpected_stops));
+    result.insert(QStringLiteral("localDeviceInterruptionDurationMs"),
+                  snapshot.local_device_interruption_duration_ms);
+    result.insert(QStringLiteral("localDeviceFormatChanges"),
+                  QVariant::fromValue<qulonglong>(snapshot.local_device_format_changes));
+    result.insert(QStringLiteral("localDeviceClockResets"),
+                  QVariant::fromValue<qulonglong>(snapshot.local_device_clock_resets));
+    result.insert(QStringLiteral("deviceOpenAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.device_open_availability)));
+    result.insert(QStringLiteral("deviceOpenReason"),
+                  QString::fromStdString(snapshot.device_open_reason));
+    result.insert(QStringLiteral("deviceHotplugAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.device_hotplug_availability)));
+    result.insert(QStringLiteral("deviceHotplugReason"),
+                  QString::fromStdString(snapshot.device_hotplug_reason));
+    result.insert(QStringLiteral("deviceFailureAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.device_failure_availability)));
+    result.insert(QStringLiteral("deviceFailureReason"),
+                  QString::fromStdString(snapshot.device_failure_reason));
+    result.insert(QStringLiteral("deviceSwitchAttempts"),
+                  QVariant::fromValue<qulonglong>(snapshot.device_switch_attempts));
+    result.insert(QStringLiteral("deviceSwitchSuccesses"),
+                  QVariant::fromValue<qulonglong>(snapshot.device_switch_successes));
+    result.insert(QStringLiteral("deviceSwitchFailures"),
+                  QVariant::fromValue<qulonglong>(snapshot.device_switch_failures));
+    result.insert(QStringLiteral("deviceSwitchTimeouts"),
+                  QVariant::fromValue<qulonglong>(snapshot.device_switch_timeouts));
+    result.insert(QStringLiteral("deviceStateAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.device_state_availability)));
+    result.insert(QStringLiteral("deviceStateReason"),
+                  QString::fromStdString(snapshot.device_state_reason));
+    result.insert(QStringLiteral("microphoneRequested"), snapshot.microphone_requested);
+    result.insert(QStringLiteral("microphoneEffective"), snapshot.microphone_effective);
+    result.insert(QStringLiteral("cameraRequested"), snapshot.camera_requested);
+    result.insert(QStringLiteral("cameraEffective"), snapshot.camera_effective);
+    result.insert(QStringLiteral("actualCaptureWidth"), snapshot.actual_capture_width);
+    result.insert(QStringLiteral("actualCaptureHeight"), snapshot.actual_capture_height);
+    result.insert(QStringLiteral("actualCaptureSampleRate"),
+                  snapshot.actual_capture_sample_rate);
+    result.insert(QStringLiteral("actualCaptureChannels"),
+                  snapshot.actual_capture_channels);
     result.insert(QStringLiteral("firstVideoAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.remote_video_first_frame_availability)));
@@ -396,6 +724,87 @@ QVariantMap ProjectTelemetrySnapshot(
                   QVariant::fromValue<qulonglong>(snapshot.native_video_freeze_count));
     result.insert(QStringLiteral("nativeVideoFreezeDurationMs"),
                   snapshot.native_video_freeze_duration_ms);
+    result.insert(QStringLiteral("videoQualityLimitationAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.video_quality_limitation_availability)));
+    result.insert(QStringLiteral("videoQualityLimitationReason"),
+                  QString::fromStdString(snapshot.video_quality_limitation_reason));
+    result.insert(QStringLiteral("videoQualityLimitationCurrent"),
+                  QString::fromStdString(snapshot.video_quality_limitation_current));
+    result.insert(QStringLiteral("videoQualityNoneDurationMs"),
+                  snapshot.video_quality_none_duration_ms);
+    result.insert(QStringLiteral("videoQualityCpuDurationMs"),
+                  snapshot.video_quality_cpu_duration_ms);
+    result.insert(QStringLiteral("videoQualityBandwidthDurationMs"),
+                  snapshot.video_quality_bandwidth_duration_ms);
+    result.insert(QStringLiteral("videoQualityOtherDurationMs"),
+                  snapshot.video_quality_other_duration_ms);
+    result.insert(QStringLiteral("windowVideoQualityCpuDurationMs"),
+                  snapshot.window_video_quality_cpu_duration_ms);
+    result.insert(QStringLiteral("windowVideoQualityBandwidthDurationMs"),
+                  snapshot.window_video_quality_bandwidth_duration_ms);
+    result.insert(QStringLiteral("videoQualityResolutionChanges"),
+                  snapshot.video_quality_resolution_changes);
+    result.insert(QStringLiteral("windowVideoQualityResolutionChanges"),
+                  snapshot.window_video_quality_resolution_changes);
+    result.insert(QStringLiteral("outboundVideoWidth"), snapshot.outbound_video_width);
+    result.insert(QStringLiteral("outboundVideoHeight"), snapshot.outbound_video_height);
+    result.insert(QStringLiteral("outboundVideoFps"), snapshot.outbound_video_fps);
+    result.insert(QStringLiteral("videoPipelineAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.video_pipeline_availability)));
+    result.insert(QStringLiteral("videoPipelineReason"),
+                  QString::fromStdString(snapshot.video_pipeline_reason));
+    result.insert(QStringLiteral("inboundVideoFramesReceived"),
+                  QVariant::fromValue<qulonglong>(snapshot.inbound_video_frames_received));
+    result.insert(QStringLiteral("inboundVideoFramesDecoded"),
+                  QVariant::fromValue<qulonglong>(snapshot.inbound_video_frames_decoded));
+    result.insert(QStringLiteral("inboundVideoFramesDropped"),
+                  QVariant::fromValue<qulonglong>(snapshot.inbound_video_frames_dropped));
+    result.insert(QStringLiteral("outboundVideoFramesEncoded"),
+                  QVariant::fromValue<qulonglong>(snapshot.outbound_video_frames_encoded));
+    result.insert(QStringLiteral("outboundVideoFramesSent"),
+                  QVariant::fromValue<qulonglong>(snapshot.outbound_video_frames_sent));
+    result.insert(QStringLiteral("windowInboundVideoFramesReceived"),
+                  QVariant::fromValue<qulonglong>(snapshot.window_inbound_video_frames_received));
+    result.insert(QStringLiteral("windowInboundVideoFramesDecoded"),
+                  QVariant::fromValue<qulonglong>(snapshot.window_inbound_video_frames_decoded));
+    result.insert(QStringLiteral("windowInboundVideoFramesDropped"),
+                  QVariant::fromValue<qulonglong>(snapshot.window_inbound_video_frames_dropped));
+    result.insert(QStringLiteral("windowOutboundVideoFramesEncoded"),
+                  QVariant::fromValue<qulonglong>(snapshot.window_outbound_video_frames_encoded));
+    result.insert(QStringLiteral("windowOutboundVideoFramesSent"),
+                  QVariant::fromValue<qulonglong>(snapshot.window_outbound_video_frames_sent));
+    result.insert(QStringLiteral("inboundVideoFrameDropRatio"),
+                  snapshot.inbound_video_frame_drop_ratio);
+    result.insert(QStringLiteral("inboundVideoWidth"), snapshot.inbound_video_width);
+    result.insert(QStringLiteral("inboundVideoHeight"), snapshot.inbound_video_height);
+    result.insert(QStringLiteral("inboundVideoFps"), snapshot.inbound_video_fps);
+    result.insert(QStringLiteral("videoCodecAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.video_codec_availability)));
+    result.insert(QStringLiteral("videoCodecReason"),
+                  QString::fromStdString(snapshot.video_codec_reason));
+    result.insert(QStringLiteral("inboundVideoCodecs"),
+                  QString::fromStdString(snapshot.inbound_video_codecs));
+    result.insert(QStringLiteral("outboundVideoCodecs"),
+                  QString::fromStdString(snapshot.outbound_video_codecs));
+    result.insert(QStringLiteral("decoderImplementations"),
+                  QString::fromStdString(snapshot.decoder_implementations));
+    result.insert(QStringLiteral("encoderImplementations"),
+                  QString::fromStdString(snapshot.encoder_implementations));
+    result.insert(QStringLiteral("decoderPowerEfficiency"),
+                  QString::fromStdString(snapshot.decoder_power_efficiency));
+    result.insert(QStringLiteral("encoderPowerEfficiency"),
+                  QString::fromStdString(snapshot.encoder_power_efficiency));
+    result.insert(QStringLiteral("outboundVideoLayers"),
+                  QString::fromStdString(snapshot.outbound_video_layers));
+    result.insert(QStringLiteral("videoProcessingAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.video_processing_availability)));
+    result.insert(QStringLiteral("videoProcessingReason"),
+                  QString::fromStdString(snapshot.video_processing_reason));
+    result.insert(QStringLiteral("videoDecodeMsPerFrame"),
+                  snapshot.video_decode_ms_per_frame);
+    result.insert(QStringLiteral("videoEncodeMsPerFrame"),
+                  snapshot.video_encode_ms_per_frame);
     result.insert(QStringLiteral("reconnectVideoAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.reconnect_video_availability)));
@@ -521,6 +930,28 @@ QVariantMap ProjectTelemetrySnapshot(
                   snapshot.render_average_interval_ms);
     result.insert(QStringLiteral("renderMaximumIntervalMs"),
                   snapshot.render_maximum_interval_ms);
+    result.insert(QStringLiteral("renderIntervalP50Ms"), snapshot.render_interval_p50_ms);
+    result.insert(QStringLiteral("renderIntervalP95Ms"), snapshot.render_interval_p95_ms);
+    result.insert(QStringLiteral("renderIntervalP99Ms"), snapshot.render_interval_p99_ms);
+    result.insert(QStringLiteral("renderSubmitFps"), snapshot.render_submit_fps);
+    result.insert(QStringLiteral("renderFrameAgeAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.render_frame_age_availability)));
+    result.insert(QStringLiteral("renderFrameAgeReason"),
+                  QString::fromStdString(snapshot.render_frame_age_reason));
+    result.insert(QStringLiteral("renderAverageFrameAgeMs"),
+                  snapshot.render_average_frame_age_ms);
+    result.insert(QStringLiteral("renderMaximumFrameAgeMs"),
+                  snapshot.render_maximum_frame_age_ms);
+    result.insert(QStringLiteral("renderTargetIntervalMs"),
+                  snapshot.render_target_interval_ms);
+    result.insert(QStringLiteral("renderExpectedBindings"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_expected_bindings));
+    result.insert(QStringLiteral("renderHiddenBindings"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_hidden_bindings));
+    result.insert(QStringLiteral("renderMinimizedBindings"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_minimized_bindings));
+    result.insert(QStringLiteral("renderPolicySkippedFrames"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_policy_skipped_frames));
     result.insert(QStringLiteral("renderStallAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(snapshot.render_stall_availability)));
     result.insert(QStringLiteral("renderStallReason"),
@@ -537,6 +968,73 @@ QVariantMap ProjectTelemetrySnapshot(
                   snapshot.render_expected_duration_ms);
     result.insert(QStringLiteral("renderStallRatio"), snapshot.render_stall_ratio);
     result.insert(QStringLiteral("renderStallActive"), snapshot.render_stall_active);
+    result.insert(QStringLiteral("renderStageAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.render_stage_availability)));
+    result.insert(QStringLiteral("renderStageReason"),
+                  QString::fromStdString(snapshot.render_stage_reason));
+    result.insert(QStringLiteral("renderConvertSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_convert_samples));
+    result.insert(QStringLiteral("renderConvertTotalUs"), snapshot.render_convert_total_us);
+    result.insert(QStringLiteral("renderConvertMaxUs"), snapshot.render_convert_max_us);
+    result.insert(QStringLiteral("renderUploadSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_upload_samples));
+    result.insert(QStringLiteral("renderUploadTotalUs"), snapshot.render_upload_total_us);
+    result.insert(QStringLiteral("renderUploadMaxUs"), snapshot.render_upload_max_us);
+    result.insert(QStringLiteral("renderDrawSamples"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_draw_samples));
+    result.insert(QStringLiteral("renderDrawTotalUs"), snapshot.render_draw_total_us);
+    result.insert(QStringLiteral("renderDrawMaxUs"), snapshot.render_draw_max_us);
+    result.insert(QStringLiteral("renderPresentBlockSamples"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.render_present_block_samples));
+    result.insert(QStringLiteral("renderPresentBlockTotalUs"),
+                  snapshot.render_present_block_total_us);
+    result.insert(QStringLiteral("renderPresentBlockMaxUs"),
+                  snapshot.render_present_block_max_us);
+    result.insert(QStringLiteral("renderGpuExecutionAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.render_gpu_execution_availability)));
+    result.insert(QStringLiteral("renderGpuExecutionReason"),
+                  QString::fromStdString(snapshot.render_gpu_execution_reason));
+    result.insert(QStringLiteral("renderPipelineAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.render_pipeline_availability)));
+    result.insert(QStringLiteral("renderPipelineReason"),
+                  QString::fromStdString(snapshot.render_pipeline_reason));
+    result.insert(QStringLiteral("renderRouterSubmitted"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_router_submitted));
+    result.insert(QStringLiteral("renderRouterReplaced"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_router_replaced));
+    result.insert(QStringLiteral("renderRouterRejectedGeneration"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_router_rejected_generation));
+    result.insert(QStringLiteral("renderRouterRejectedBinding"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_router_rejected_binding));
+    result.insert(QStringLiteral("renderRouterDroppedInvalid"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_router_dropped_invalid));
+    result.insert(QStringLiteral("renderRouterDroppedCapacity"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_router_dropped_capacity));
+    result.insert(QStringLiteral("renderQtConversionFailures"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_qt_conversion_failures));
+    result.insert(QStringLiteral("renderDeliveredToGpu"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_delivered_to_gpu));
+    result.insert(QStringLiteral("renderDeliveredToQtCpu"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_delivered_to_qt_cpu));
+    result.insert(QStringLiteral("renderRejectedTrackAttachments"),
+                  QVariant::fromValue<qulonglong>(
+                      snapshot.render_rejected_track_attachments));
+    result.insert(QStringLiteral("renderAttachedTrackCount"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_attached_track_count));
+    result.insert(QStringLiteral("renderRequestedBackend"),
+                  QString::fromStdString(snapshot.render_requested_backend));
+    result.insert(QStringLiteral("renderActualBackend"),
+                  QString::fromStdString(snapshot.render_actual_backend));
+    result.insert(QStringLiteral("renderGpuFailure"),
+                  QString::fromStdString(snapshot.render_gpu_failure));
+    result.insert(QStringLiteral("renderFallbackReason"),
+                  QString::fromStdString(snapshot.render_fallback_reason));
+    result.insert(QStringLiteral("renderBackendFailures"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_backend_failures));
+    result.insert(QStringLiteral("renderBackendFallbacks"),
+                  QVariant::fromValue<qulonglong>(snapshot.render_backend_fallbacks));
     result.insert(QStringLiteral("reconnectRenderAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(snapshot.reconnect_render_availability)));
     result.insert(QStringLiteral("reconnectRenderReason"),
@@ -2832,6 +3330,20 @@ void MeetingCoordinator::stopRoomSession() {
         // still completes any listener batch already taken by the dispatcher.
         if (_roomListener) _room->RemoveListener(_roomListener);
         _room->Disconnect();
+    }
+
+    if (session && _ioContext && _ioThread.joinable()) {
+        auto stopped = std::make_shared<std::promise<void>>();
+        auto completed = stopped->get_future();
+        asio::post(session->strand(), [session, stopped] {
+            session->stopTelemetryOnStrand([stopped] {
+                try {
+                    stopped->set_value();
+                } catch (...) {
+                }
+            });
+        });
+        completed.wait();
     }
 
     if (_workGuard) {

@@ -127,4 +127,16 @@ void VideoRenderFrame::NotifyRendered(
         metadata.observer->OnSubmitted(metadata, measurement_point, source_time);
     }
 }
+
+void VideoRenderFrame::NotifyRenderStage(
+        const char* measurement_point,
+        std::chrono::microseconds duration,
+        std::chrono::steady_clock::time_point source_time) const {
+    const auto& metadata = renderMetadata();
+    if (metadata.valid() && measurement_point && *measurement_point &&
+        duration.count() >= 0) {
+        metadata.observer->OnStageTiming(
+            metadata, measurement_point, duration, source_time);
+    }
+}
 } // namespace livekit::render

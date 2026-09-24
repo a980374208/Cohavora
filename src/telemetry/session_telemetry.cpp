@@ -1,6 +1,7 @@
 #include "session_telemetry.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <limits>
 #include <set>
@@ -27,6 +28,87 @@ std::int64_t MillisecondsBetween(
         std::chrono::duration_cast<std::chrono::milliseconds>(end - begin).count());
 }
 
+std::string JoinValues(const std::set<std::string>& values) {
+    std::string result;
+    for (const auto& value : values) {
+        if (!result.empty()) result += ',';
+        result += value;
+    }
+    return result;
+}
+
+std::string ControlledValue(
+        const std::string& value,
+        std::initializer_list<std::string_view> allowed) {
+    for (const auto candidate : allowed) {
+        if (value == candidate) return value;
+    }
+    return value.empty() ? std::string{} : "other";
+}
+
+std::string QualityReason(const std::string& value) {
+    return ControlledValue(value, {"none", "cpu", "bandwidth", "other"});
+}
+
+std::string LowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return value;
+}
+
+std::string VideoCodecName(const std::string& value) {
+    return ControlledValue(LowerAscii(value),
+        {"video/vp8", "video/vp9", "video/h264", "video/av1"});
+}
+
+std::string VideoImplementationName(const std::string& value) {
+    const auto lower = LowerAscii(value);
+    if (lower.empty()) return {};
+    if (lower.find("libvpx") != std::string::npos) return "libvpx";
+    if (lower.find("openh264") != std::string::npos) return "openh264";
+    if (lower.find("ffmpeg") != std::string::npos) return "ffmpeg";
+    if (lower.find("intel") != std::string::npos) return "intel";
+    if (lower.find("nvidia") != std::string::npos) return "nvidia";
+    if (lower.find("amd") != std::string::npos) return "amd";
+    if (lower.find("external") != std::string::npos) return "external";
+    return "other";
+}
+
+std::size_t RenderIntervalBucket(std::int64_t interval_ns) {
+    constexpr std::array<std::int64_t, 8> bounds_ms{
+        16, 25, 34, 50, 100, 250, 500, 1000};
+    const auto interval_ms = interval_ns / 1'000'000.0;
+    for (std::size_t i = 0; i < bounds_ms.size(); ++i) {
+        if (interval_ms <= static_cast<double>(bounds_ms[i])) return i;
+    }
+    return bounds_ms.size();
+}
+
+double RenderIntervalPercentile(
+        const std::array<std::uint64_t,
+            RenderActivityProbe::kIntervalHistogramBuckets>& histogram,
+        double percentile,
+        std::int64_t maximum_interval_ns) {
+    constexpr std::array<double, 8> bounds_ms{
+        16.0, 25.0, 34.0, 50.0, 100.0, 250.0, 500.0, 1000.0};
+    std::uint64_t count = 0;
+    for (const auto value : histogram) count += value;
+    if (count == 0) return -1.0;
+    const auto rank = static_cast<std::uint64_t>(
+        std::ceil(percentile * static_cast<double>(count)));
+    std::uint64_t accumulated = 0;
+    for (std::size_t i = 0; i < histogram.size(); ++i) {
+        accumulated += histogram[i];
+        if (accumulated < (std::max)(std::uint64_t{1}, rank)) continue;
+        if (i < bounds_ms.size()) return bounds_ms[i];
+        return maximum_interval_ns > 0
+            ? static_cast<double>(maximum_interval_ns) / 1'000'000.0
+            : bounds_ms.back();
+    }
+    return -1.0;
+}
+
 template <typename T>
 void AtomicMaximum(std::atomic<T>& target, T value) {
     auto current = target.load(std::memory_order_relaxed);
@@ -49,6 +131,13 @@ std::int64_t SaturatingSignedDelta(T current, T baseline) {
     return delta > positive_limit
         ? (std::numeric_limits<std::int64_t>::min)()
         : -static_cast<std::int64_t>(delta);
+}
+
+template <typename T>
+void SaturatingAddUnsigned(T& target, T value) {
+    static_assert(std::is_unsigned_v<T>);
+    const auto limit = (std::numeric_limits<T>::max)();
+    target = value > limit - target ? limit : target + value;
 }
 
 } // namespace
@@ -77,6 +166,7 @@ const char* OperationKindName(OperationKind kind) noexcept {
     case OperationKind::Subscribe: return "subscribe";
     case OperationKind::Unsubscribe: return "unsubscribe";
     case OperationKind::Unpublish: return "unpublish";
+    case OperationKind::Disconnect: return "disconnect";
     case OperationKind::ReconnectEpisode: return "reconnect_episode";
     case OperationKind::ReconnectAttempt: return "reconnect_attempt";
     case OperationKind::CameraDeviceSwitch: return "camera_device_switch";
@@ -126,12 +216,15 @@ const char* MediaExpectationReasonName(MediaExpectationReason reason) noexcept {
 SessionTelemetry::SessionTelemetry(
     Strand strand,
     std::uint64_t session_generation,
-    std::size_t queue_capacity)
+    std::size_t queue_capacity,
+    Clock::time_point session_started_at)
     : strand_(std::move(strand))
     , session_generation_(session_generation)
     , queue_capacity_((std::max)(std::size_t{1}, queue_capacity))
     , stats_timer_(strand_)
-    , runtime_timer_(strand_) {
+    , runtime_timer_(strand_)
+    , session_started_at_(session_started_at == Clock::time_point{}
+          ? Clock::now() : session_started_at) {
     state_.session_generation = session_generation_;
     state_.queue_capacity = queue_capacity_;
     latest_snapshot_ = std::make_shared<const Snapshot>(state_);
@@ -390,6 +483,10 @@ bool SessionTelemetry::RegisterRemoteVideoRenderBinding(
         return false;
     }
     probe->expected.store(expected_render, std::memory_order_release);
+    probe->expectation_reason.store(
+        expected_render ? MediaExpectationReason::SurfaceVisible
+                        : MediaExpectationReason::SurfaceHidden,
+        std::memory_order_release);
     probe->continuous_video = continuous_video;
     probe->target_interval_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
         (std::max)(std::chrono::milliseconds(1), target_interval)).count();
@@ -421,6 +518,7 @@ bool SessionTelemetry::SetRemoteVideoRenderExpected(
     }
     const bool previous = probe->expected.exchange(
         expected_render, std::memory_order_acq_rel);
+    probe->expectation_reason.store(reason, std::memory_order_release);
     if (previous != expected_render) {
         // The interval while a surface is hidden or minimized is outside the
         // render-stall denominator and cannot bridge two visible intervals.
@@ -474,6 +572,8 @@ bool SessionTelemetry::RecordRemoteVideoRenderSubmit(
         probe->interval_sum_ns.fetch_add(interval, std::memory_order_relaxed);
         probe->interval_count.fetch_add(1, std::memory_order_relaxed);
         AtomicMaximum(probe->maximum_interval_ns, interval);
+        probe->interval_histogram[RenderIntervalBucket(interval)].fetch_add(
+            1, std::memory_order_relaxed);
         if (probe->continuous_video) {
             const auto threshold = (std::max)(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -487,6 +587,13 @@ bool SessionTelemetry::RecordRemoteVideoRenderSubmit(
                 AtomicMaximum(probe->longest_stall_duration_ns, stall);
             }
         }
+    }
+    if (decoded_at != Clock::time_point{} && source_time >= decoded_at) {
+        const auto age_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            source_time - decoded_at).count();
+        probe->frame_age_sum_ns.fetch_add(age_ns, std::memory_order_relaxed);
+        probe->frame_age_count.fetch_add(1, std::memory_order_relaxed);
+        AtomicMaximum(probe->maximum_frame_age_ns, age_ns);
     }
 
     const auto recovery_epoch = ActiveRecoveryEpoch();
@@ -531,6 +638,125 @@ bool SessionTelemetry::RecordRemoteVideoRenderSubmit(
         probe->recovery_stable_submitted.store(true, std::memory_order_release);
     }
     return true;
+}
+
+bool SessionTelemetry::RegisterLocalPublication(
+    std::string series_key,
+    std::uint64_t room_generation,
+    std::uint64_t publication_epoch,
+    LocalMediaKind media_kind,
+    std::string rtc_track_id,
+    Clock::time_point publish_accepted_at,
+    bool expected_send,
+    std::shared_ptr<LocalVideoActivityProbe> video_probe,
+    Clock::time_point committed_at,
+    std::shared_ptr<LocalAudioActivityProbe> audio_probe) {
+    if (series_key.empty() || room_generation == 0 || publication_epoch == 0 ||
+        media_kind == LocalMediaKind::Unknown || rtc_track_id.empty() ||
+        publish_accepted_at == Clock::time_point{} ||
+        (media_kind == LocalMediaKind::Video && !video_probe)) {
+        return false;
+    }
+    if (video_probe) {
+        if (!video_probe->active.load(std::memory_order_acquire)) {
+            video_probe->telemetry = weak_from_this();
+            video_probe->series_key = series_key;
+            video_probe->room_generation = room_generation;
+            video_probe->publication_epoch = publication_epoch;
+            video_probe->active.store(true, std::memory_order_release);
+        } else {
+            const auto owner = video_probe->telemetry.lock();
+            if (owner.get() != this || video_probe->series_key != series_key ||
+                video_probe->room_generation != room_generation ||
+                video_probe->publication_epoch != publication_epoch) {
+                return false;
+            }
+        }
+    }
+    if (audio_probe) {
+        audio_probe->active.store(true, std::memory_order_release);
+    }
+    Event event;
+    event.kind = EventKind::LocalPublicationBinding;
+    event.session_generation = session_generation_;
+    event.series_key = std::move(series_key);
+    event.room_generation = room_generation;
+    event.publication_epoch = publication_epoch;
+    event.local_media_kind = media_kind;
+    event.rtc_track_id = std::move(rtc_track_id);
+    event.related_time = publish_accepted_at;
+    event.expected = expected_send;
+    event.local_video_probe = video_probe;
+    event.local_audio_probe = audio_probe;
+    event.source_time = committed_at;
+    const bool submitted = Submit(std::move(event));
+    if (!submitted && video_probe) {
+        video_probe->active.store(false, std::memory_order_release);
+    }
+    if (!submitted && audio_probe) {
+        audio_probe->active.store(false, std::memory_order_release);
+    }
+    return submitted;
+}
+
+bool SessionTelemetry::EndLocalPublication(
+    std::string series_key,
+    Clock::time_point source_time) {
+    if (series_key.empty()) return false;
+    Event event;
+    event.kind = EventKind::LocalPublicationEnded;
+    event.session_generation = session_generation_;
+    event.series_key = std::move(series_key);
+    event.source_time = source_time;
+    return Submit(std::move(event));
+}
+
+bool SessionTelemetry::RecordLocalVideoFrameInjected(
+    std::string series_key,
+    std::uint64_t room_generation,
+    std::uint64_t publication_epoch,
+    Clock::time_point source_time) {
+    if (series_key.empty() || room_generation == 0 || publication_epoch == 0) {
+        return false;
+    }
+    Event event;
+    event.kind = EventKind::LocalVideoFrameInjected;
+    event.session_generation = session_generation_;
+    event.series_key = std::move(series_key);
+    event.room_generation = room_generation;
+    event.publication_epoch = publication_epoch;
+    event.source_time = source_time;
+    return Submit(std::move(event));
+}
+
+bool SessionTelemetry::RecordRenderPipelineSample(
+    RenderPipelineSample sample,
+    Clock::time_point source_time) {
+    sample.requested_backend = ControlledValue(sample.requested_backend,
+        {"none", "qt-cpu", "dx11", "opengl"});
+    sample.actual_backend = ControlledValue(sample.actual_backend,
+        {"none", "qt-cpu", "dx11", "opengl"});
+    sample.gpu_failure = ControlledValue(sample.gpu_failure, {
+        "none", "invalid-backend-selection", "remote-session-policy",
+        "invalid-module-path", "module-open-failed", "module-entry-missing",
+        "module-identity-mismatch", "module-abi-mismatch",
+        "module-capabilities-mismatch", "module-selection-locked",
+        "module-load-exception", "threaded-gl-unavailable",
+        "context-create-failed", "device-create-failed", "graphics-reset",
+        "make-current-failed", "surface-lost", "device-lost", "out-of-memory",
+        "resource-limit", "presentation-timeout", "renderer-startup-timeout",
+        "module-device-failed", "render-owner-exception",
+        "unknown-renderer-failure"});
+    sample.fallback_reason = ControlledValue(sample.fallback_reason, {
+        "none", "user-selected-cpu", "remote-session-policy",
+        "invalid-configuration", "module-load-failed",
+        "gpu-initialization-failed", "gpu-device-lost", "gpu-runtime-failed"});
+    Event event;
+    event.kind = EventKind::RenderPipelineSample;
+    event.session_generation = session_generation_;
+    event.source_time = source_time;
+    event.render_pipeline = std::move(sample);
+    return Submit(std::move(event));
 }
 
 void SessionTelemetry::SetSnapshotCallbackOnStrand(SnapshotCallback callback) {
@@ -727,6 +953,10 @@ void SessionTelemetry::StopOnStrand(std::function<void()> on_stopped) {
         return;
     }
     stopping_ = true;
+    if (session_stopped_at_ == Clock::time_point{}) {
+        session_stopped_at_ = Clock::now();
+        CloseUsableIntervalOnStrand(session_stopped_at_);
+    }
     accepting_.store(false, std::memory_order_release);
     active_recovery_epoch_.store(0, std::memory_order_release);
     stats_started_ = false;
@@ -748,6 +978,8 @@ void SessionTelemetry::StopOnStrand(std::function<void()> on_stopped) {
 SessionTelemetry::SnapshotPtr SessionTelemetry::SnapshotOnStrand(Clock::time_point now) {
     AssertOnStrand();
     UpdateRenderAvailabilityOnStrand(now);
+    UpdateLocalPublishAvailabilityOnStrand(now);
+    UpdateLocalDeviceStatsOnStrand(now);
     const auto build_started_at = Clock::now();
     auto snapshot = BuildSnapshotOnStrand(now);
     const auto build_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -992,6 +1224,24 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         }
         ++summary->started;
         ++summary->inflight;
+        if (event.operation_kind == OperationKind::ReconnectEpisode ||
+            event.operation_kind == OperationKind::Disconnect) {
+            CloseUsableIntervalOnStrand(event.source_time);
+        }
+        if (event.operation_kind == OperationKind::Disconnect) {
+            for (auto& [_, publication] : local_publications_) {
+                publication.active = false;
+                publication.expected_send = false;
+                if (publication.video_probe) {
+                    publication.video_probe->active.store(
+                        false, std::memory_order_release);
+                }
+                if (publication.audio_probe) {
+                    publication.audio_probe->active.store(
+                        false, std::memory_order_release);
+                }
+            }
+        }
         if (event.operation_kind == OperationKind::ReconnectEpisode) {
             recovery_ = RecoveryState{};
             recovery_.active = true;
@@ -1501,6 +1751,144 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         UpdateRenderAvailabilityOnStrand(event.source_time);
         break;
     }
+    case EventKind::LocalPublicationBinding: {
+        if (event.series_key.empty() || event.room_generation == 0 ||
+            event.publication_epoch == 0 ||
+            event.local_media_kind == LocalMediaKind::Unknown ||
+            event.rtc_track_id.empty() ||
+            event.related_time == Clock::time_point{} ||
+            event.source_time < event.related_time ||
+            (event.local_media_kind == LocalMediaKind::Video &&
+             !event.local_video_probe)) {
+            ++state_.mapping_failures;
+            break;
+        }
+        auto found = local_publications_.find(event.series_key);
+        if (found == local_publications_.end() &&
+            local_publications_.size() >= kMaxSeries) {
+            ++state_.capacity_drops;
+            break;
+        }
+        if (found != local_publications_.end() && found->second.video_probe) {
+            retired_device_format_changes_ +=
+                found->second.video_probe->format_changes.load(
+                    std::memory_order_relaxed);
+            retired_device_clock_resets_ +=
+                found->second.video_probe->clock_resets.load(
+                    std::memory_order_relaxed);
+            found->second.video_probe->active.store(false, std::memory_order_release);
+        }
+        if (found != local_publications_.end() && found->second.audio_probe) {
+            retired_device_format_changes_ +=
+                found->second.audio_probe->format_changes.load(
+                    std::memory_order_relaxed);
+            found->second.audio_probe->active.store(false, std::memory_order_release);
+        }
+        if (found != local_publications_.end()) {
+            auto& previous = found->second;
+            retired_device_interruption_ += previous.device_stall_accumulated;
+            if (previous.device_stall_active &&
+                event.source_time >= previous.device_stall_started_at) {
+                retired_device_interruption_ +=
+                    event.source_time - previous.device_stall_started_at;
+            }
+        }
+        LocalPublicationState publication;
+        publication.room_generation = event.room_generation;
+        publication.publication_epoch = event.publication_epoch;
+        publication.media_kind = event.local_media_kind;
+        publication.rtc_track_id = event.rtc_track_id;
+        publication.expected_send = event.expected;
+        publication.was_expected = event.expected;
+        publication.sender_enabled = event.expected;
+        publication.publish_accepted_at = event.related_time;
+        publication.committed_at = event.source_time;
+        publication.video_probe = event.local_video_probe;
+        publication.audio_probe = event.local_audio_probe;
+        local_publications_[event.series_key] = std::move(publication);
+        ++state_.local_publications;
+        UpdateLocalPublishAvailabilityOnStrand(event.source_time);
+        break;
+    }
+    case EventKind::LocalPublicationEnded: {
+        const auto found = local_publications_.find(event.series_key);
+        if (found == local_publications_.end()) {
+            ++state_.stale_local_publication_drops;
+            break;
+        }
+        found->second.active = false;
+        found->second.expected_send = false;
+        if (found->second.video_probe) {
+            found->second.video_probe->active.store(false, std::memory_order_release);
+        }
+        if (found->second.audio_probe) {
+            found->second.audio_probe->active.store(false, std::memory_order_release);
+        }
+        UpdateLocalPublishAvailabilityOnStrand(event.source_time);
+        break;
+    }
+    case EventKind::LocalVideoFrameInjected: {
+        const auto found = local_publications_.find(event.series_key);
+        if (found == local_publications_.end() ||
+            found->second.room_generation != event.room_generation ||
+            found->second.publication_epoch != event.publication_epoch ||
+            found->second.media_kind != LocalMediaKind::Video ||
+            !found->second.video_probe ||
+            !found->second.video_probe->active.load(std::memory_order_acquire)) {
+            ++state_.stale_local_publication_drops;
+            break;
+        }
+        if (found->second.first_injected_at == Clock::time_point{}) {
+            found->second.first_injected_at = event.source_time;
+            ++state_.local_video_first_injections;
+            state_.last_publish_to_video_injection_ms = MillisecondsBetween(
+                found->second.publish_accepted_at, event.source_time);
+        }
+        UpdateLocalPublishAvailabilityOnStrand(event.source_time);
+        break;
+    }
+    case EventKind::RenderPipelineSample: {
+        const auto& sample = event.render_pipeline;
+        if (sample.gpu_failure != "none" &&
+            sample.gpu_failure != state_.render_gpu_failure) {
+            ++state_.render_backend_failures;
+        }
+        if (sample.fallback_reason != "none" &&
+            sample.fallback_reason != state_.render_fallback_reason) {
+            ++state_.render_backend_fallbacks;
+        }
+        state_.render_router_submitted = sample.router_submitted;
+        state_.render_router_replaced = sample.router_replaced_before_render;
+        state_.render_router_rejected_generation =
+            sample.router_rejected_generation;
+        state_.render_router_rejected_binding = sample.router_rejected_binding;
+        state_.render_router_dropped_invalid = sample.router_dropped_invalid;
+        state_.render_router_dropped_capacity = sample.router_dropped_capacity;
+        state_.render_delivered_to_gpu = sample.delivered_to_gpu;
+        state_.render_delivered_to_qt_cpu = sample.delivered_to_qt_cpu;
+        state_.render_qt_conversion_failures =
+            sample.qt_cpu_conversion_failures;
+        state_.render_rejected_track_attachments =
+            sample.rejected_track_attachments;
+        state_.render_attached_track_count = sample.attached_track_count;
+        state_.render_requested_backend = sample.requested_backend;
+        state_.render_actual_backend = sample.actual_backend;
+        state_.render_gpu_failure = sample.gpu_failure;
+        state_.render_fallback_reason = sample.fallback_reason;
+        state_.render_pipeline_availability = Availability::Valid;
+        state_.render_pipeline_reason = sample.gpu_failure == "none"
+            ? "render_pipeline_statistics_valid"
+            : "render_pipeline_statistics_with_typed_backend_failure";
+        state_.render_policy_skipped_frames = sample.router_replaced_before_render;
+
+        state_.router_queue_availability = Availability::Valid;
+        state_.router_queue_reason = "bounded_latest_frame_router_observed";
+        state_.router_frames_submitted = sample.router_submitted;
+        state_.router_frames_replaced = sample.router_replaced_before_render;
+        state_.router_capacity_drops = sample.router_dropped_capacity;
+        state_.active_router_slots = sample.attached_track_count;
+        break;
+    }
     case EventKind::UiLagProbeCompleted:
         if (ui_probe_in_flight_id_ == 0 ||
             event.epoch != ui_probe_in_flight_id_) {
@@ -1558,6 +1946,23 @@ void SessionTelemetry::FinishOperationOnStrand(
     }
     summary->last_duration_ms = MillisecondsBetween(
         operation.started_at, finished_at);
+    if ((operation.kind == OperationKind::Connect ||
+         operation.kind == OperationKind::ReconnectEpisode) &&
+        (operation.outcome == OperationOutcome::Success ||
+         operation.outcome == OperationOutcome::DegradedSuccess)) {
+        if (usable_since_ == Clock::time_point{}) usable_since_ = finished_at;
+        room_was_usable_ = true;
+    }
+}
+
+void SessionTelemetry::CloseUsableIntervalOnStrand(Clock::time_point now) {
+    AssertOnStrand();
+    if (usable_since_ == Clock::time_point{}) return;
+    if (now >= usable_since_) {
+        usable_accumulated_ += std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - usable_since_);
+    }
+    usable_since_ = {};
 }
 
 void SessionTelemetry::UpdateFirstFrameAvailabilityOnStrand() {
@@ -1670,17 +2075,63 @@ void SessionTelemetry::UpdateRenderAvailabilityOnStrand(Clock::time_point now) {
     std::int64_t interval_sum_ns = 0;
     std::uint64_t interval_count = 0;
     std::int64_t maximum_interval_ns = 0;
+    std::array<std::uint64_t,
+        RenderActivityProbe::kIntervalHistogramBuckets> interval_histogram{};
+    std::int64_t frame_age_sum_ns = 0;
+    std::int64_t maximum_frame_age_ns = 0;
+    std::uint64_t frame_age_count = 0;
+    std::int64_t target_interval_ns = 0;
+    std::uint64_t expected_bindings = 0;
+    std::uint64_t hidden_bindings = 0;
+    std::uint64_t minimized_bindings = 0;
     std::chrono::nanoseconds expected_duration{0};
     bool active_stall = false;
+    std::uint64_t convert_samples = 0;
+    std::int64_t convert_total_us = 0;
+    std::int64_t convert_max_us = 0;
+    std::uint64_t upload_samples = 0;
+    std::int64_t upload_total_us = 0;
+    std::int64_t upload_max_us = 0;
+    std::uint64_t draw_samples = 0;
+    std::int64_t draw_total_us = 0;
+    std::int64_t draw_max_us = 0;
+    std::uint64_t present_samples = 0;
+    std::int64_t present_total_us = 0;
+    std::int64_t present_max_us = 0;
 
     for (const auto& [_, render] : render_media_) {
         if (!render.probe || !render.probe->active.load(std::memory_order_acquire)) {
             continue;
         }
         const auto& probe = *render.probe;
+        const auto collect_stage = [](const RenderActivityProbe::StageAccumulator& stage,
+                                      std::uint64_t& samples,
+                                      std::int64_t& total,
+                                      std::int64_t& maximum) {
+            samples += stage.samples.load(std::memory_order_relaxed);
+            total += stage.total_us.load(std::memory_order_relaxed);
+            maximum = (std::max)(maximum,
+                stage.maximum_us.load(std::memory_order_relaxed));
+        };
+        collect_stage(probe.cpu_convert, convert_samples,
+                      convert_total_us, convert_max_us);
+        collect_stage(probe.upload_submit, upload_samples,
+                      upload_total_us, upload_max_us);
+        collect_stage(probe.draw_submit, draw_samples,
+                      draw_total_us, draw_max_us);
+        collect_stage(probe.present_block, present_samples,
+                      present_total_us, present_max_us);
         unique_submits += probe.unique_submits.load(std::memory_order_relaxed);
         interval_sum_ns += probe.interval_sum_ns.load(std::memory_order_relaxed);
         interval_count += probe.interval_count.load(std::memory_order_relaxed);
+        for (std::size_t i = 0; i < interval_histogram.size(); ++i) {
+            interval_histogram[i] += probe.interval_histogram[i].load(
+                std::memory_order_relaxed);
+        }
+        frame_age_sum_ns += probe.frame_age_sum_ns.load(std::memory_order_relaxed);
+        frame_age_count += probe.frame_age_count.load(std::memory_order_relaxed);
+        maximum_frame_age_ns = (std::max)(maximum_frame_age_ns,
+            probe.maximum_frame_age_ns.load(std::memory_order_relaxed));
         maximum_interval_ns = (std::max)(maximum_interval_ns,
             probe.maximum_interval_ns.load(std::memory_order_relaxed));
         stalls += probe.closed_stalls.load(std::memory_order_relaxed);
@@ -1688,7 +2139,18 @@ void SessionTelemetry::UpdateRenderAvailabilityOnStrand(Clock::time_point now) {
         longest_stall_ns = (std::max)(longest_stall_ns,
             probe.longest_stall_duration_ns.load(std::memory_order_relaxed));
         expected_duration += render.expected_accumulated;
-        if (!render.expected_render) continue;
+        if (!render.expected_render) {
+            const auto reason = probe.expectation_reason.load(
+                std::memory_order_acquire);
+            hidden_bindings += reason == MediaExpectationReason::SurfaceHidden;
+            minimized_bindings += reason == MediaExpectationReason::WindowMinimized;
+            continue;
+        }
+        ++expected_bindings;
+        if (probe.target_interval_ns > 0 &&
+            (target_interval_ns == 0 || probe.target_interval_ns < target_interval_ns)) {
+            target_interval_ns = probe.target_interval_ns;
+        }
         has_expected = true;
         has_waiting |= !render.first_submit_seen;
         has_continuous |= render.continuous_video;
@@ -1718,6 +2180,36 @@ void SessionTelemetry::UpdateRenderAvailabilityOnStrand(Clock::time_point now) {
             static_cast<double>(interval_count) / 1'000'000.0;
     state_.render_maximum_interval_ms = maximum_interval_ns == 0 ? -1
         : maximum_interval_ns / 1'000'000;
+    state_.render_interval_p50_ms = RenderIntervalPercentile(
+        interval_histogram, 0.50, maximum_interval_ns);
+    state_.render_interval_p95_ms = RenderIntervalPercentile(
+        interval_histogram, 0.95, maximum_interval_ns);
+    state_.render_interval_p99_ms = RenderIntervalPercentile(
+        interval_histogram, 0.99, maximum_interval_ns);
+    state_.render_submit_fps = state_.render_average_interval_ms > 0.0
+        ? 1000.0 / state_.render_average_interval_ms : -1.0;
+    state_.render_average_frame_age_ms = frame_age_count == 0 ? -1.0
+        : static_cast<double>(frame_age_sum_ns) /
+            static_cast<double>(frame_age_count) / 1'000'000.0;
+    state_.render_maximum_frame_age_ms = frame_age_count == 0 ? -1
+        : maximum_frame_age_ns / 1'000'000;
+    state_.render_target_interval_ms = target_interval_ns == 0 ? -1
+        : target_interval_ns / 1'000'000;
+    state_.render_expected_bindings = expected_bindings;
+    state_.render_hidden_bindings = hidden_bindings;
+    state_.render_minimized_bindings = minimized_bindings;
+    if (frame_age_count > 0) {
+        state_.render_frame_age_availability = Availability::Valid;
+        state_.render_frame_age_reason = "same_clock_decode_to_submit_samples_valid";
+    } else if (has_expected) {
+        state_.render_frame_age_availability = Availability::WarmingUp;
+        state_.render_frame_age_reason = "waiting_for_decode_to_submit_sample";
+    } else {
+        state_.render_frame_age_availability = render_media_.empty()
+            ? Availability::Unknown : Availability::NotExpected;
+        state_.render_frame_age_reason = render_media_.empty()
+            ? "no_render_binding" : "no_visible_render_expected";
+    }
     state_.render_stall_count = stalls;
     state_.render_stall_duration_ms = stall_ns / 1'000'000;
     state_.render_longest_stall_ms = longest_stall_ns / 1'000'000;
@@ -1727,6 +2219,32 @@ void SessionTelemetry::UpdateRenderAvailabilityOnStrand(Clock::time_point now) {
         ? static_cast<double>(stall_ns) / static_cast<double>(expected_duration.count())
         : -1.0;
     state_.render_stall_active = active_stall;
+    state_.render_convert_samples = convert_samples;
+    state_.render_convert_total_us = convert_total_us;
+    state_.render_convert_max_us = convert_samples == 0 ? -1 : convert_max_us;
+    state_.render_upload_samples = upload_samples;
+    state_.render_upload_total_us = upload_total_us;
+    state_.render_upload_max_us = upload_samples == 0 ? -1 : upload_max_us;
+    state_.render_draw_samples = draw_samples;
+    state_.render_draw_total_us = draw_total_us;
+    state_.render_draw_max_us = draw_samples == 0 ? -1 : draw_max_us;
+    state_.render_present_block_samples = present_samples;
+    state_.render_present_block_total_us = present_total_us;
+    state_.render_present_block_max_us = present_samples == 0 ? -1 : present_max_us;
+    const auto render_stage_samples = convert_samples + upload_samples +
+        draw_samples + present_samples;
+    if (render_stage_samples > 0) {
+        state_.render_stage_availability = Availability::Valid;
+        state_.render_stage_reason = "render_cpu_stage_spans_valid";
+    } else if (has_expected) {
+        state_.render_stage_availability = Availability::WarmingUp;
+        state_.render_stage_reason = "waiting_for_render_stage_sample";
+    } else {
+        state_.render_stage_availability = render_media_.empty()
+            ? Availability::Unknown : Availability::NotExpected;
+        state_.render_stage_reason = render_media_.empty()
+            ? "no_render_stage_samples" : "no_visible_render_expected";
+    }
 
     if (has_waiting) {
         state_.render_first_frame_availability = Availability::WarmingUp;
@@ -1897,6 +2415,443 @@ void SessionTelemetry::MaybeFinishReconnectOnStrand(Clock::time_point now) {
     }
 }
 
+void SessionTelemetry::UpdateLocalPublishAvailabilityOnStrand(
+    Clock::time_point now) {
+    AssertOnStrand();
+    const auto timed_out = [&](const LocalPublicationState& publication) {
+        return publication.publish_accepted_at != Clock::time_point{} &&
+            now >= publication.publish_accepted_at &&
+            now - publication.publish_accepted_at >= kLocalPublishObservationWindow;
+    };
+
+    state_.active_local_publications = 0;
+    state_.expected_local_publications = 0;
+    bool active_expected = false;
+    bool media_warming = false;
+    bool media_unknown = false;
+    bool media_timeout = false;
+    bool video_expected = false;
+    bool injection_warming = false;
+    bool injection_timeout = false;
+    bool encode_warming = false;
+    bool encode_unknown = false;
+    bool encode_timeout = false;
+    bool send_warming = false;
+    bool send_unknown = false;
+    bool send_timeout = false;
+    bool historical_expected = false;
+    bool historical_video = false;
+
+    for (auto& [_, publication] : local_publications_) {
+        historical_expected |= publication.was_expected;
+        historical_video |= publication.was_expected &&
+            publication.media_kind == LocalMediaKind::Video;
+        if (publication.media_kind == LocalMediaKind::Video &&
+            publication.first_injected_at == Clock::time_point{} &&
+            publication.video_probe) {
+            const auto first_ns = publication.video_probe->first_injected_ns.load(
+                std::memory_order_acquire);
+            if (first_ns > 0) {
+                publication.first_injected_at = FromNanoseconds(first_ns);
+                ++state_.local_video_first_injections;
+                state_.last_publish_to_video_injection_ms = MillisecondsBetween(
+                    publication.publish_accepted_at, publication.first_injected_at);
+            }
+        }
+
+        if (!publication.active) continue;
+        ++state_.active_local_publications;
+        if (!publication.expected_send) continue;
+        publication.was_expected = true;
+        ++state_.expected_local_publications;
+        active_expected = true;
+        const bool expired = timed_out(publication);
+
+        if (publication.media_kind == LocalMediaKind::Video) {
+            video_expected = true;
+            if (publication.first_injected_at == Clock::time_point{}) {
+                if (expired) {
+                    publication.injection_timeout = true;
+                    injection_timeout = true;
+                } else {
+                    injection_warming = true;
+                    media_warming = true;
+                }
+            }
+            if (publication.first_encoded_at == Clock::time_point{}) {
+                if (!expired) {
+                    encode_warming = true;
+                    media_warming = true;
+                } else if (publication.outbound_mapping_observed &&
+                           publication.encode_counter_observed) {
+                    publication.encode_timeout = true;
+                    encode_timeout = true;
+                    media_timeout = true;
+                } else {
+                    encode_unknown = true;
+                    media_unknown = true;
+                }
+            }
+        }
+
+        if (publication.first_sent_at == Clock::time_point{}) {
+            if (!expired) {
+                send_warming = true;
+                media_warming = true;
+            } else if (publication.outbound_mapping_observed &&
+                       publication.send_counter_observed) {
+                publication.send_timeout = true;
+                send_timeout = true;
+                media_timeout = true;
+            } else {
+                send_unknown = true;
+                media_unknown = true;
+            }
+        }
+
+        if (expired && !publication.no_media_reported &&
+            (publication.encode_timeout || publication.send_timeout)) {
+            publication.no_media_reported = true;
+            ++state_.local_publish_no_media;
+        }
+    }
+
+    for (const auto& [_, publication] : local_publications_) {
+        injection_timeout |= publication.injection_timeout;
+        encode_timeout |= publication.encode_timeout;
+        send_timeout |= publication.send_timeout;
+        media_timeout |= publication.no_media_reported;
+    }
+
+    if (video_expected || historical_video) {
+        if (injection_timeout) {
+            state_.local_video_injection_availability = Availability::Timeout;
+            state_.local_video_injection_reason = "local_video_injection_timeout";
+        } else if (injection_warming) {
+            state_.local_video_injection_availability = Availability::WarmingUp;
+            state_.local_video_injection_reason = "waiting_for_local_video_injection";
+        } else if (state_.local_video_first_injections > 0) {
+            state_.local_video_injection_availability = Availability::Valid;
+            state_.local_video_injection_reason = "local_video_injection_observed";
+        } else {
+            state_.local_video_injection_availability = Availability::Unknown;
+            state_.local_video_injection_reason = "local_video_ended_before_observation";
+        }
+
+        if (encode_timeout) {
+            state_.local_video_encode_availability = Availability::Timeout;
+            state_.local_video_encode_reason = "local_video_encode_timeout";
+        } else if (encode_unknown) {
+            state_.local_video_encode_availability = Availability::Unknown;
+            state_.local_video_encode_reason = "outbound_video_mapping_unavailable";
+        } else if (encode_warming) {
+            state_.local_video_encode_availability = Availability::WarmingUp;
+            state_.local_video_encode_reason = "waiting_for_local_video_encode";
+        } else if (state_.local_video_first_encodes > 0) {
+            state_.local_video_encode_availability = Availability::Valid;
+            state_.local_video_encode_reason = "local_video_encode_observed";
+        } else {
+            state_.local_video_encode_availability = Availability::Unknown;
+            state_.local_video_encode_reason = "local_video_ended_before_encode_observation";
+        }
+    } else {
+        state_.local_video_injection_availability = Availability::NotExpected;
+        state_.local_video_injection_reason = "no_local_video_expected";
+        state_.local_video_encode_availability = Availability::NotExpected;
+        state_.local_video_encode_reason = "no_local_video_expected";
+    }
+
+    if (active_expected || historical_expected) {
+        if (send_timeout) {
+            state_.local_rtp_send_availability = Availability::Timeout;
+            state_.local_rtp_send_reason = "local_rtp_send_timeout";
+        } else if (send_unknown) {
+            state_.local_rtp_send_availability = Availability::Unknown;
+            state_.local_rtp_send_reason = "outbound_rtp_mapping_unavailable";
+        } else if (send_warming) {
+            state_.local_rtp_send_availability = Availability::WarmingUp;
+            state_.local_rtp_send_reason = "waiting_for_local_rtp_send";
+        } else if (state_.local_first_rtp_sends > 0) {
+            state_.local_rtp_send_availability = Availability::Valid;
+            state_.local_rtp_send_reason = "local_rtp_send_observed";
+        } else {
+            state_.local_rtp_send_availability = Availability::Unknown;
+            state_.local_rtp_send_reason = "local_publication_ended_before_send_observation";
+        }
+    } else {
+        state_.local_rtp_send_availability = Availability::NotExpected;
+        state_.local_rtp_send_reason = "no_local_publication_expected";
+    }
+
+    if (media_timeout) {
+        state_.local_publish_media_availability = Availability::Timeout;
+        state_.local_publish_media_reason = "local_publication_no_media_timeout";
+    } else if (media_unknown) {
+        state_.local_publish_media_availability = Availability::Unknown;
+        state_.local_publish_media_reason = "local_publication_mapping_unavailable";
+    } else if (media_warming) {
+        state_.local_publish_media_availability = Availability::WarmingUp;
+        state_.local_publish_media_reason = "local_publication_media_warming_up";
+    } else if (historical_expected && state_.local_first_rtp_sends > 0) {
+        state_.local_publish_media_availability = Availability::Valid;
+        state_.local_publish_media_reason = active_expected
+            ? "all_expected_local_publications_sending"
+            : "local_publications_ended_after_media_observed";
+    } else if (historical_expected) {
+        state_.local_publish_media_availability = Availability::Unknown;
+        state_.local_publish_media_reason =
+            "local_publication_ended_before_media_observation";
+    } else if (!local_publications_.empty()) {
+        state_.local_publish_media_availability = Availability::NotExpected;
+        state_.local_publish_media_reason = "local_publications_not_expected_to_send";
+    } else {
+        state_.local_publish_media_availability = Availability::Unknown;
+        state_.local_publish_media_reason = "no_local_publication";
+    }
+}
+
+void SessionTelemetry::UpdateLocalDeviceStatsOnStrand(Clock::time_point now) {
+    AssertOnStrand();
+    std::uint64_t expected = 0;
+    std::uint64_t active = 0;
+    std::uint64_t format_changes = retired_device_format_changes_;
+    std::uint64_t clock_resets = retired_device_clock_resets_;
+    bool waiting_for_first_frame = false;
+    bool missing_probe = false;
+    std::chrono::nanoseconds interruption_duration = retired_device_interruption_;
+    state_.microphone_requested = false;
+    state_.microphone_effective = false;
+    state_.camera_requested = false;
+    state_.camera_effective = false;
+    state_.actual_capture_width = 0;
+    state_.actual_capture_height = 0;
+    state_.actual_capture_sample_rate = 0;
+    state_.actual_capture_channels = 0;
+
+    for (auto& [_, publication] : local_publications_) {
+        std::int64_t last_frame_ns = 0;
+        std::uint64_t frames = 0;
+        if (publication.video_probe) {
+            last_frame_ns = publication.video_probe->last_frame_ns.load(
+                std::memory_order_acquire);
+            frames = publication.video_probe->frame_count.load(
+                std::memory_order_relaxed);
+            format_changes += publication.video_probe->format_changes.load(
+                std::memory_order_relaxed);
+            clock_resets += publication.video_probe->clock_resets.load(
+                std::memory_order_relaxed);
+            if (publication.active) {
+                state_.camera_requested |= publication.expected_send;
+                state_.camera_effective |= frames > 0;
+                const auto width = publication.video_probe->width.load(
+                    std::memory_order_relaxed);
+                const auto height = publication.video_probe->height.load(
+                    std::memory_order_relaxed);
+                if (static_cast<std::uint64_t>(width) * height >
+                    static_cast<std::uint64_t>(state_.actual_capture_width) *
+                        state_.actual_capture_height) {
+                    state_.actual_capture_width = width;
+                    state_.actual_capture_height = height;
+                }
+            }
+        } else if (publication.audio_probe) {
+            last_frame_ns = publication.audio_probe->last_frame_ns.load(
+                std::memory_order_acquire);
+            frames = publication.audio_probe->frame_count.load(
+                std::memory_order_relaxed);
+            format_changes += publication.audio_probe->format_changes.load(
+                std::memory_order_relaxed);
+            if (publication.active) {
+                state_.microphone_requested |= publication.expected_send;
+                state_.microphone_effective |= frames > 0;
+                state_.actual_capture_sample_rate = (std::max)(
+                    state_.actual_capture_sample_rate,
+                    publication.audio_probe->sample_rate.load(
+                        std::memory_order_relaxed));
+                state_.actual_capture_channels = (std::max)(
+                    state_.actual_capture_channels,
+                    publication.audio_probe->channels.load(
+                        std::memory_order_relaxed));
+            }
+        }
+        const auto last_frame = last_frame_ns > 0
+            ? FromNanoseconds(last_frame_ns) : Clock::time_point{};
+        const bool running_intent = publication.active &&
+            publication.expected_send &&
+            ((publication.video_probe && publication.video_probe->active.load(
+                std::memory_order_acquire)) ||
+             (publication.audio_probe && publication.audio_probe->active.load(
+                std::memory_order_acquire)));
+        if (publication.active && publication.expected_send &&
+            !publication.video_probe && !publication.audio_probe) {
+            missing_probe = true;
+        }
+        if (!running_intent) {
+            if (publication.device_stall_active) {
+                publication.device_stall_accumulated +=
+                    now - publication.device_stall_started_at;
+                publication.device_stall_active = false;
+                publication.device_stall_started_at = {};
+            }
+            interruption_duration += publication.device_stall_accumulated;
+            continue;
+        }
+        ++expected;
+        if (frames == 0 || last_frame == Clock::time_point{}) {
+            waiting_for_first_frame = true;
+            interruption_duration += publication.device_stall_accumulated;
+            continue;
+        }
+        if (publication.device_stall_active &&
+            last_frame > publication.device_stall_started_at) {
+            publication.device_stall_accumulated +=
+                last_frame - publication.device_stall_started_at;
+            publication.device_stall_active = false;
+            publication.device_stall_started_at = {};
+        }
+        if (!publication.device_stall_active && now >= last_frame &&
+            now - last_frame >= kLocalDeviceStallThreshold) {
+            publication.device_stall_active = true;
+            publication.device_stall_started_at =
+                last_frame + kLocalDeviceStallThreshold;
+            ++state_.local_device_unexpected_stops;
+        }
+        if (!publication.device_stall_active) ++active;
+        interruption_duration += publication.device_stall_accumulated;
+        if (publication.device_stall_active &&
+            now >= publication.device_stall_started_at) {
+            interruption_duration += now - publication.device_stall_started_at;
+        }
+    }
+
+    state_.expected_local_device_streams = expected;
+    state_.active_local_device_streams = active;
+    state_.local_device_interruption_duration_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            interruption_duration).count();
+    state_.local_device_format_changes = format_changes;
+    state_.local_device_clock_resets = clock_resets;
+    state_.device_switch_attempts = 0;
+    state_.device_switch_successes = 0;
+    state_.device_switch_failures = 0;
+    state_.device_switch_timeouts = 0;
+    for (const auto& summary : state_.operation_summaries) {
+        if (summary.kind != OperationKind::CameraDeviceSwitch &&
+            summary.kind != OperationKind::MicrophoneDeviceSwitch &&
+            summary.kind != OperationKind::SpeakerDeviceSwitch) {
+            continue;
+        }
+        state_.device_switch_attempts += summary.started;
+        state_.device_switch_successes += summary.success + summary.degraded_success;
+        state_.device_switch_failures += summary.failure;
+        state_.device_switch_timeouts += summary.timeout;
+    }
+    if (state_.device_switch_attempts == 0) {
+        state_.device_failure_availability = Availability::NotExpected;
+        state_.device_failure_reason = "no_device_switch_operation";
+    } else if (state_.device_switch_failures > 0 ||
+               state_.device_switch_timeouts > 0) {
+        state_.device_failure_availability = Availability::Unsupported;
+        state_.device_failure_reason =
+            "operation_outcome_valid_native_failure_category_not_exposed";
+    } else if (state_.device_switch_successes < state_.device_switch_attempts) {
+        state_.device_failure_availability = Availability::WarmingUp;
+        state_.device_failure_reason = "device_switch_operation_inflight";
+    } else {
+        state_.device_failure_availability = Availability::Valid;
+        state_.device_failure_reason = "device_switch_terminal_outcomes_valid";
+    }
+
+    if (local_publications_.empty()) {
+        state_.device_state_availability = Availability::Unknown;
+        state_.device_state_reason = "no_local_publication";
+    } else if ((state_.camera_requested && !state_.camera_effective) ||
+               (state_.microphone_requested && !state_.microphone_effective)) {
+        state_.device_state_availability = Availability::WarmingUp;
+        state_.device_state_reason = "requested_source_waiting_for_samples";
+    } else {
+        state_.device_state_availability = Availability::Valid;
+        state_.device_state_reason =
+            "requested_effective_state_and_actual_format_valid";
+    }
+    if (missing_probe) {
+        state_.local_device_continuity_availability = Availability::Unsupported;
+        state_.local_device_continuity_reason = "local_device_probe_missing";
+    } else if (expected == 0) {
+        state_.local_device_continuity_availability =
+            local_publications_.empty() ? Availability::Unknown
+                                        : Availability::NotExpected;
+        state_.local_device_continuity_reason = local_publications_.empty()
+            ? "no_local_publication" : "no_local_device_running_intent";
+    } else if (waiting_for_first_frame && active == 0) {
+        state_.local_device_continuity_availability = Availability::WarmingUp;
+        state_.local_device_continuity_reason =
+            "local_device_first_frame_warming_up";
+    } else {
+        state_.local_device_continuity_availability = Availability::Valid;
+        state_.local_device_continuity_reason = active < expected
+            ? "local_device_unexpected_stop_active"
+            : "local_device_continuity_valid";
+    }
+}
+
+void SessionTelemetry::UpdateLocalPublishStatsOnStrand(
+    const RoomStatsReport& report,
+    Clock::time_point received_at) {
+    AssertOnStrand();
+    for (auto& [_, publication] : local_publications_) {
+        if (!publication.active || publication.rtc_track_id.empty()) continue;
+        bool sender_observed = false;
+        bool sender_enabled = false;
+        for (const auto& pc_report : report.reports) {
+            if (!pc_report.senders_available) continue;
+            std::set<std::string> mids;
+            for (const auto& sender : pc_report.senders) {
+                if (sender.track_id != publication.rtc_track_id) continue;
+                sender_observed = true;
+                sender_enabled |= sender.track_enabled;
+                if (sender.mid_available && !sender.mid.empty()) mids.insert(sender.mid);
+            }
+            if (mids.empty()) continue;
+            for (const auto& stream : pc_report.outbound_rtp) {
+                if (!stream.mid_available || !mids.contains(stream.mid)) continue;
+                publication.outbound_mapping_observed = true;
+                if (publication.media_kind == LocalMediaKind::Video &&
+                    stream.frames_encoded_available) {
+                    publication.encode_counter_observed = true;
+                    if (stream.frames_encoded > 0 &&
+                        publication.first_encoded_at == Clock::time_point{}) {
+                        publication.first_encoded_at = received_at;
+                        ++state_.local_video_first_encodes;
+                        state_.last_publish_to_video_encode_ms = MillisecondsBetween(
+                            publication.publish_accepted_at, received_at);
+                    }
+                }
+                if (stream.packets_sent_available || stream.bytes_sent_available) {
+                    publication.send_counter_observed = true;
+                    const bool sent =
+                        (stream.packets_sent_available && stream.packets_sent > 0) ||
+                        (stream.bytes_sent_available && stream.bytes_sent > 0);
+                    if (sent && publication.first_sent_at == Clock::time_point{}) {
+                        publication.first_sent_at = received_at;
+                        ++state_.local_first_rtp_sends;
+                        state_.last_publish_to_rtp_send_ms = MillisecondsBetween(
+                            publication.publish_accepted_at, received_at);
+                    }
+                }
+            }
+        }
+        if (sender_observed) {
+            publication.sender_observed = true;
+            publication.sender_enabled = sender_enabled;
+            publication.expected_send = sender_enabled;
+            publication.was_expected |= sender_enabled;
+        }
+    }
+    state_.local_publish_stats_uncertainty_ms = stats_interval_.count();
+    UpdateLocalPublishAvailabilityOnStrand(received_at);
+}
+
 void SessionTelemetry::UpdateVideoStatsOnStrand(
     const RoomStatsReport& report,
     Clock::time_point received_at) {
@@ -1940,6 +2895,1404 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
         state_.native_video_freeze_count = freeze_count;
         state_.native_video_freeze_duration_ms = static_cast<std::int64_t>(
             std::llround(freeze_duration_seconds * 1000.0));
+    }
+    state_.last_sample_at = received_at;
+
+    std::uint64_t outbound_streams = 0;
+    std::uint64_t quality_supported = 0;
+    std::uint64_t quality_warmed = 0;
+    std::uint64_t duration_supported = 0;
+    std::uint64_t duration_warmed = 0;
+    std::uint64_t resolution_supported = 0;
+    std::uint64_t resolution_warmed = 0;
+    std::set<std::string> current_reasons;
+    std::set<std::string> quality_seen;
+    double cumulative_none = 0.0;
+    double cumulative_cpu = 0.0;
+    double cumulative_bandwidth = 0.0;
+    double cumulative_other = 0.0;
+    double window_none = 0.0;
+    double window_cpu = 0.0;
+    double window_bandwidth = 0.0;
+    double window_other = 0.0;
+    std::uint64_t resolution_changes = 0;
+    std::uint64_t window_resolution_changes = 0;
+    std::uint32_t representative_width = 0;
+    std::uint32_t representative_height = 0;
+    double representative_fps = -1.0;
+    std::size_t pc_index = 0;
+    for (const auto& pc_report : report.reports) {
+        for (const auto& stream : pc_report.outbound_rtp) {
+            if (!stream.kind_available || stream.kind != "video") continue;
+            ++outbound_streams;
+            if (stream.frame_width_available && stream.frame_height_available &&
+                static_cast<std::uint64_t>(stream.frame_width) * stream.frame_height >
+                    static_cast<std::uint64_t>(representative_width) *
+                        representative_height) {
+                representative_width = stream.frame_width;
+                representative_height = stream.frame_height;
+            }
+            if (stream.frames_per_second_available &&
+                std::isfinite(stream.frames_per_second) &&
+                stream.frames_per_second >= 0.0) {
+                representative_fps = (std::max)(
+                    representative_fps, stream.frames_per_second);
+            }
+            if (stream.quality_limitation_reason_available) {
+                current_reasons.insert(QualityReason(
+                    stream.quality_limitation_reason));
+            }
+            const bool durations_valid =
+                stream.quality_limitation_durations_available &&
+                !stream.quality_limitation_durations.empty() &&
+                std::all_of(
+                    stream.quality_limitation_durations.begin(),
+                    stream.quality_limitation_durations.end(),
+                    [](const auto& entry) {
+                        return std::isfinite(entry.second) && entry.second >= 0.0;
+                    });
+            const bool supported = stream.quality_limitation_reason_available ||
+                durations_valid ||
+                stream.quality_limitation_resolution_changes_available;
+            if (!supported) continue;
+            ++quality_supported;
+            if (durations_valid) ++duration_supported;
+            if (stream.quality_limitation_resolution_changes_available) {
+                ++resolution_supported;
+            }
+            const auto key = std::to_string(pc_index) + "/" +
+                (stream.id.empty() ? stream.ssrc : stream.id);
+            quality_seen.insert(key);
+            auto& baseline = video_quality_baselines_[key];
+            std::unordered_map<std::string, double> current_durations;
+            if (durations_valid) {
+                for (const auto& [native_reason, duration] :
+                     stream.quality_limitation_durations) {
+                    current_durations[QualityReason(native_reason)] += duration;
+                }
+            }
+            const auto add_duration = [&](const std::string& reason, double value) {
+                if (reason == "none") cumulative_none += value;
+                else if (reason == "cpu") cumulative_cpu += value;
+                else if (reason == "bandwidth") cumulative_bandwidth += value;
+                else cumulative_other += value;
+            };
+            for (const auto& [reason, duration] : current_durations) {
+                add_duration(reason, duration);
+            }
+            if (stream.quality_limitation_resolution_changes_available) {
+                resolution_changes += stream.quality_limitation_resolution_changes;
+            }
+            bool reset = false;
+            if (baseline.initialized) {
+                for (const auto& [reason, duration] : current_durations) {
+                    const auto previous = baseline.durations.find(reason);
+                    if (previous != baseline.durations.end() &&
+                        duration < previous->second) {
+                        reset = true;
+                        break;
+                    }
+                }
+                if (baseline.resolution_changes_available &&
+                    stream.quality_limitation_resolution_changes_available &&
+                    stream.quality_limitation_resolution_changes <
+                        baseline.resolution_changes) {
+                    reset = true;
+                }
+            }
+            if (reset) {
+                baseline.initialized = false;
+                ++state_.counter_resets;
+            }
+            if (baseline.initialized) {
+                ++quality_warmed;
+                bool has_duration_delta = false;
+                for (const auto& [reason, duration] : current_durations) {
+                    const auto previous = baseline.durations.find(reason);
+                    if (previous == baseline.durations.end()) continue;
+                    has_duration_delta = true;
+                    const auto delta = duration - previous->second;
+                    if (reason == "none") window_none += delta;
+                    else if (reason == "cpu") window_cpu += delta;
+                    else if (reason == "bandwidth") window_bandwidth += delta;
+                    else window_other += delta;
+                }
+                if (has_duration_delta) ++duration_warmed;
+                if (baseline.resolution_changes_available &&
+                    stream.quality_limitation_resolution_changes_available) {
+                    ++resolution_warmed;
+                    window_resolution_changes +=
+                        stream.quality_limitation_resolution_changes -
+                        baseline.resolution_changes;
+                }
+            }
+            baseline.durations = std::move(current_durations);
+            baseline.resolution_changes =
+                stream.quality_limitation_resolution_changes;
+            baseline.resolution_changes_available =
+                stream.quality_limitation_resolution_changes_available;
+            baseline.initialized = true;
+        }
+        ++pc_index;
+    }
+    for (auto it = video_quality_baselines_.begin();
+         it != video_quality_baselines_.end();) {
+        if (!quality_seen.contains(it->first)) it = video_quality_baselines_.erase(it);
+        else ++it;
+    }
+    state_.outbound_video_streams = outbound_streams;
+    state_.video_quality_limitation_current = JoinValues(current_reasons);
+    state_.video_quality_none_duration_ms = duration_supported == 0 ? -1
+        : static_cast<std::int64_t>(std::llround(cumulative_none * 1000.0));
+    state_.video_quality_cpu_duration_ms = duration_supported == 0 ? -1
+        : static_cast<std::int64_t>(std::llround(cumulative_cpu * 1000.0));
+    state_.video_quality_bandwidth_duration_ms = duration_supported == 0 ? -1
+        : static_cast<std::int64_t>(std::llround(cumulative_bandwidth * 1000.0));
+    state_.video_quality_other_duration_ms = duration_supported == 0 ? -1
+        : static_cast<std::int64_t>(std::llround(cumulative_other * 1000.0));
+    state_.window_video_quality_none_duration_ms = duration_warmed == 0 ? -1
+        : static_cast<std::int64_t>(std::llround(window_none * 1000.0));
+    state_.window_video_quality_cpu_duration_ms = duration_warmed == 0 ? -1
+        : static_cast<std::int64_t>(std::llround(window_cpu * 1000.0));
+    state_.window_video_quality_bandwidth_duration_ms = duration_warmed == 0 ? -1
+        : static_cast<std::int64_t>(std::llround(window_bandwidth * 1000.0));
+    state_.window_video_quality_other_duration_ms = duration_warmed == 0 ? -1
+        : static_cast<std::int64_t>(std::llround(window_other * 1000.0));
+    state_.video_quality_resolution_changes = resolution_supported == 0 ? -1
+        : static_cast<std::int64_t>(resolution_changes);
+    state_.window_video_quality_resolution_changes = resolution_warmed == 0 ? -1
+        : static_cast<std::int64_t>(window_resolution_changes);
+    state_.outbound_video_width = representative_width;
+    state_.outbound_video_height = representative_height;
+    state_.outbound_video_fps = representative_fps;
+    if (outbound_streams == 0) {
+        state_.video_quality_limitation_availability = Availability::Unknown;
+        state_.video_quality_limitation_reason = "no_outbound_video_stats";
+    } else if (quality_supported == 0) {
+        state_.video_quality_limitation_availability = Availability::Unsupported;
+        state_.video_quality_limitation_reason =
+            "quality_limitation_fields_missing";
+    } else {
+        state_.video_quality_limitation_availability = Availability::Valid;
+        state_.video_quality_limitation_reason =
+            quality_supported == outbound_streams && quality_warmed > 0
+            ? "quality_limitation_native_window_valid"
+            : "quality_limitation_native_partial_coverage";
+    }
+
+    enum : std::uint32_t {
+        kVideoPrimaryFrames = 1u << 0,
+        kVideoSecondaryFrames = 1u << 1,
+        kVideoDroppedFrames = 1u << 2,
+        kVideoProcessingTime = 1u << 3,
+    };
+    state_.inbound_video_frames_received = 0;
+    state_.inbound_video_frames_decoded = 0;
+    state_.inbound_video_frames_dropped = 0;
+    state_.outbound_video_frames_encoded = 0;
+    state_.outbound_video_frames_sent = 0;
+    state_.window_inbound_video_frames_received = 0;
+    state_.window_inbound_video_frames_decoded = 0;
+    state_.window_inbound_video_frames_dropped = 0;
+    state_.window_outbound_video_frames_encoded = 0;
+    state_.window_outbound_video_frames_sent = 0;
+    state_.inbound_video_frame_drop_ratio = -1.0;
+    state_.inbound_video_width = 0;
+    state_.inbound_video_height = 0;
+    state_.inbound_video_fps = -1.0;
+    state_.video_decode_ms_per_frame = -1.0;
+    state_.video_encode_ms_per_frame = -1.0;
+
+    std::set<std::string> inbound_codecs;
+    std::set<std::string> outbound_codecs;
+    std::set<std::string> decoder_implementations;
+    std::set<std::string> encoder_implementations;
+    std::set<std::string> decoder_efficiency;
+    std::set<std::string> encoder_efficiency;
+    std::set<std::string> outbound_layers;
+    std::set<std::string> video_seen;
+    std::uint64_t pipeline_streams = 0;
+    std::uint64_t pipeline_supported = 0;
+    std::uint64_t pipeline_warmed = 0;
+    std::uint64_t codec_supported = 0;
+    std::uint64_t processing_supported = 0;
+    std::uint64_t processing_warmed = 0;
+    double decode_seconds_delta = 0.0;
+    double encode_seconds_delta = 0.0;
+    std::uint64_t decoded_delta_for_time = 0;
+    std::uint64_t encoded_delta_for_time = 0;
+
+    std::size_t video_pc_index = 0;
+    for (const auto& pc_report : report.reports) {
+        const auto codec_name = [&](const std::string& id) {
+            const auto codec = std::find_if(
+                pc_report.codecs.begin(), pc_report.codecs.end(),
+                [&](const CodecStats& candidate) { return candidate.id == id; });
+            return codec != pc_report.codecs.end() && codec->mime_type_available
+                ? VideoCodecName(codec->mime_type) : std::string{};
+        };
+        for (const auto& stream : pc_report.inbound_rtp) {
+            if (!stream.kind_available || stream.kind != "video") continue;
+            ++pipeline_streams;
+            std::uint32_t mask = 0;
+            if (stream.frames_received_available) mask |= kVideoPrimaryFrames;
+            if (stream.frames_decoded_available) mask |= kVideoSecondaryFrames;
+            if (stream.frames_dropped_available) mask |= kVideoDroppedFrames;
+            if (stream.total_decode_time_available &&
+                std::isfinite(stream.total_decode_time) &&
+                stream.total_decode_time >= 0.0) {
+                mask |= kVideoProcessingTime;
+            }
+            if ((mask & (kVideoPrimaryFrames | kVideoSecondaryFrames)) != 0) {
+                ++pipeline_supported;
+            }
+            if (stream.frames_received_available) {
+                state_.inbound_video_frames_received += stream.frames_received;
+            }
+            if (stream.frames_decoded_available) {
+                state_.inbound_video_frames_decoded += stream.frames_decoded;
+            }
+            if (stream.frames_dropped_available) {
+                state_.inbound_video_frames_dropped += stream.frames_dropped;
+            }
+            if (stream.frame_width_available && stream.frame_height_available &&
+                static_cast<std::uint64_t>(stream.frame_width) * stream.frame_height >
+                    static_cast<std::uint64_t>(state_.inbound_video_width) *
+                        state_.inbound_video_height) {
+                state_.inbound_video_width = stream.frame_width;
+                state_.inbound_video_height = stream.frame_height;
+            }
+            if (stream.frames_per_second_available &&
+                std::isfinite(stream.frames_per_second) &&
+                stream.frames_per_second >= 0.0) {
+                state_.inbound_video_fps = (std::max)(
+                    state_.inbound_video_fps, stream.frames_per_second);
+            }
+            bool has_codec_detail = false;
+            if (stream.codec_id_available) {
+                const auto name = codec_name(stream.codec_id);
+                if (!name.empty()) {
+                    inbound_codecs.insert(name);
+                    has_codec_detail = true;
+                }
+            }
+            if (stream.decoder_implementation_available) {
+                const auto implementation = VideoImplementationName(
+                    stream.decoder_implementation);
+                if (!implementation.empty()) {
+                    decoder_implementations.insert(implementation);
+                    has_codec_detail = true;
+                }
+            }
+            if (stream.power_efficient_decoder_available) {
+                decoder_efficiency.insert(
+                    stream.power_efficient_decoder ? "true" : "false");
+                has_codec_detail = true;
+            }
+            codec_supported += has_codec_detail;
+
+            const auto key = "in/" + std::to_string(video_pc_index) + "/" +
+                (stream.id.empty() ? stream.ssrc : stream.id);
+            video_seen.insert(key);
+            auto& baseline = video_stats_baselines_[key];
+            VideoStatsBaseline current;
+            current.primary_frames = stream.frames_received;
+            current.secondary_frames = stream.frames_decoded;
+            current.dropped_frames = stream.frames_dropped;
+            current.processing_seconds = stream.total_decode_time;
+            current.observed_at = received_at;
+            current.availability_mask = mask;
+            const bool availability_changed = baseline.initialized &&
+                baseline.availability_mask != current.availability_mask;
+            const bool regressed = baseline.initialized && !availability_changed &&
+                (((mask & kVideoPrimaryFrames) != 0 &&
+                  current.primary_frames < baseline.primary_frames) ||
+                 ((mask & kVideoSecondaryFrames) != 0 &&
+                  current.secondary_frames < baseline.secondary_frames) ||
+                 ((mask & kVideoDroppedFrames) != 0 &&
+                  current.dropped_frames < baseline.dropped_frames) ||
+                 ((mask & kVideoProcessingTime) != 0 &&
+                  current.processing_seconds < baseline.processing_seconds));
+            if (availability_changed || regressed) {
+                baseline.initialized = false;
+                if (regressed) ++state_.counter_resets;
+            }
+            if (baseline.initialized && baseline.observed_at != Clock::time_point{} &&
+                received_at > baseline.observed_at) {
+                ++pipeline_warmed;
+                if ((mask & kVideoPrimaryFrames) != 0) {
+                    state_.window_inbound_video_frames_received +=
+                        current.primary_frames - baseline.primary_frames;
+                }
+                if ((mask & kVideoSecondaryFrames) != 0) {
+                    const auto delta = current.secondary_frames -
+                        baseline.secondary_frames;
+                    state_.window_inbound_video_frames_decoded += delta;
+                    if ((mask & kVideoProcessingTime) != 0) {
+                        decode_seconds_delta += current.processing_seconds -
+                            baseline.processing_seconds;
+                        decoded_delta_for_time += delta;
+                        if (delta > 0) ++processing_warmed;
+                    }
+                }
+                if ((mask & kVideoDroppedFrames) != 0) {
+                    state_.window_inbound_video_frames_dropped +=
+                        current.dropped_frames - baseline.dropped_frames;
+                }
+            }
+            if ((mask & (kVideoSecondaryFrames | kVideoProcessingTime)) ==
+                (kVideoSecondaryFrames | kVideoProcessingTime)) {
+                ++processing_supported;
+            }
+            baseline = current;
+            baseline.initialized = true;
+        }
+        for (const auto& stream : pc_report.outbound_rtp) {
+            if (!stream.kind_available || stream.kind != "video") continue;
+            ++pipeline_streams;
+            std::uint32_t mask = 0;
+            if (stream.frames_encoded_available) mask |= kVideoPrimaryFrames;
+            if (stream.frames_sent_available) mask |= kVideoSecondaryFrames;
+            if (stream.total_encode_time_available &&
+                std::isfinite(stream.total_encode_time) &&
+                stream.total_encode_time >= 0.0) {
+                mask |= kVideoProcessingTime;
+            }
+            if ((mask & (kVideoPrimaryFrames | kVideoSecondaryFrames)) != 0) {
+                ++pipeline_supported;
+            }
+            if (stream.frames_encoded_available) {
+                state_.outbound_video_frames_encoded += stream.frames_encoded;
+            }
+            if (stream.frames_sent_available) {
+                state_.outbound_video_frames_sent += stream.frames_sent;
+            }
+            bool has_codec_detail = false;
+            if (stream.codec_id_available) {
+                const auto name = codec_name(stream.codec_id);
+                if (!name.empty()) {
+                    outbound_codecs.insert(name);
+                    has_codec_detail = true;
+                }
+            }
+            if (stream.encoder_implementation_available) {
+                const auto implementation = VideoImplementationName(
+                    stream.encoder_implementation);
+                if (!implementation.empty()) {
+                    encoder_implementations.insert(implementation);
+                    has_codec_detail = true;
+                }
+            }
+            if (stream.power_efficient_encoder_available) {
+                encoder_efficiency.insert(
+                    stream.power_efficient_encoder ? "true" : "false");
+                has_codec_detail = true;
+            }
+            if (stream.scalability_mode_available) {
+                const auto layer = ControlledValue(
+                    LowerAscii(stream.scalability_mode),
+                    {"l1t1", "l1t2", "l1t3", "l2t1", "l2t2", "l2t3",
+                     "l3t1", "l3t2", "l3t3", "l2t2_key", "l3t3_key"});
+                if (!layer.empty()) {
+                    outbound_layers.insert(layer);
+                    has_codec_detail = true;
+                }
+            } else if (stream.rid_available) {
+                outbound_layers.insert("rid-present");
+                has_codec_detail = true;
+            }
+            codec_supported += has_codec_detail;
+
+            const auto key = "out/" + std::to_string(video_pc_index) + "/" +
+                (stream.id.empty() ? stream.ssrc : stream.id);
+            video_seen.insert(key);
+            auto& baseline = video_stats_baselines_[key];
+            VideoStatsBaseline current;
+            current.primary_frames = stream.frames_encoded;
+            current.secondary_frames = stream.frames_sent;
+            current.processing_seconds = stream.total_encode_time;
+            current.observed_at = received_at;
+            current.availability_mask = mask;
+            const bool availability_changed = baseline.initialized &&
+                baseline.availability_mask != current.availability_mask;
+            const bool regressed = baseline.initialized && !availability_changed &&
+                (((mask & kVideoPrimaryFrames) != 0 &&
+                  current.primary_frames < baseline.primary_frames) ||
+                 ((mask & kVideoSecondaryFrames) != 0 &&
+                  current.secondary_frames < baseline.secondary_frames) ||
+                 ((mask & kVideoProcessingTime) != 0 &&
+                  current.processing_seconds < baseline.processing_seconds));
+            if (availability_changed || regressed) {
+                baseline.initialized = false;
+                if (regressed) ++state_.counter_resets;
+            }
+            if (baseline.initialized && baseline.observed_at != Clock::time_point{} &&
+                received_at > baseline.observed_at) {
+                ++pipeline_warmed;
+                if ((mask & kVideoPrimaryFrames) != 0) {
+                    const auto delta = current.primary_frames -
+                        baseline.primary_frames;
+                    state_.window_outbound_video_frames_encoded += delta;
+                    if ((mask & kVideoProcessingTime) != 0) {
+                        encode_seconds_delta += current.processing_seconds -
+                            baseline.processing_seconds;
+                        encoded_delta_for_time += delta;
+                        if (delta > 0) ++processing_warmed;
+                    }
+                }
+                if ((mask & kVideoSecondaryFrames) != 0) {
+                    state_.window_outbound_video_frames_sent +=
+                        current.secondary_frames - baseline.secondary_frames;
+                }
+            }
+            if ((mask & (kVideoPrimaryFrames | kVideoProcessingTime)) ==
+                (kVideoPrimaryFrames | kVideoProcessingTime)) {
+                ++processing_supported;
+            }
+            baseline = current;
+            baseline.initialized = true;
+        }
+        ++video_pc_index;
+    }
+    for (auto it = video_stats_baselines_.begin();
+         it != video_stats_baselines_.end();) {
+        if (!video_seen.contains(it->first)) it = video_stats_baselines_.erase(it);
+        else ++it;
+    }
+    const auto inbound_drop_denominator =
+        state_.window_inbound_video_frames_received;
+    if (inbound_drop_denominator > 0) {
+        state_.inbound_video_frame_drop_ratio =
+            static_cast<double>(state_.window_inbound_video_frames_dropped) /
+            static_cast<double>(inbound_drop_denominator);
+    }
+    if (decoded_delta_for_time > 0) {
+        state_.video_decode_ms_per_frame = decode_seconds_delta * 1000.0 /
+            static_cast<double>(decoded_delta_for_time);
+    }
+    if (encoded_delta_for_time > 0) {
+        state_.video_encode_ms_per_frame = encode_seconds_delta * 1000.0 /
+            static_cast<double>(encoded_delta_for_time);
+    }
+    state_.inbound_video_codecs = JoinValues(inbound_codecs);
+    state_.outbound_video_codecs = JoinValues(outbound_codecs);
+    state_.decoder_implementations = JoinValues(decoder_implementations);
+    state_.encoder_implementations = JoinValues(encoder_implementations);
+    state_.decoder_power_efficiency = JoinValues(decoder_efficiency);
+    state_.encoder_power_efficiency = JoinValues(encoder_efficiency);
+    state_.outbound_video_layers = JoinValues(outbound_layers);
+    if (pipeline_streams == 0) {
+        state_.video_pipeline_availability = Availability::Unknown;
+        state_.video_pipeline_reason = "no_video_rtp_stats";
+    } else if (pipeline_supported == 0) {
+        state_.video_pipeline_availability = Availability::Unsupported;
+        state_.video_pipeline_reason = "video_frame_counters_missing";
+    } else if (pipeline_warmed == 0) {
+        state_.video_pipeline_availability = Availability::WarmingUp;
+        state_.video_pipeline_reason = "video_counter_baseline_warming_up";
+    } else {
+        state_.video_pipeline_availability = Availability::Valid;
+        state_.video_pipeline_reason = pipeline_supported == pipeline_streams
+            ? "video_pipeline_window_valid"
+            : "video_pipeline_partial_coverage";
+    }
+    if (pipeline_streams == 0) {
+        state_.video_codec_availability = Availability::Unknown;
+        state_.video_codec_reason = "no_video_rtp_stats";
+    } else if (codec_supported == 0) {
+        state_.video_codec_availability = Availability::Unsupported;
+        state_.video_codec_reason = "codec_implementation_fields_missing";
+    } else {
+        state_.video_codec_availability = Availability::Valid;
+        state_.video_codec_reason = codec_supported == pipeline_streams
+            ? "codec_id_implementation_and_layer_join_valid"
+            : "codec_details_partial_coverage";
+    }
+    if (pipeline_streams == 0) {
+        state_.video_processing_availability = Availability::Unknown;
+        state_.video_processing_reason = "no_video_rtp_stats";
+    } else if (processing_supported == 0) {
+        state_.video_processing_availability = Availability::Unsupported;
+        state_.video_processing_reason = "total_encode_decode_time_missing";
+    } else if (processing_warmed == 0) {
+        state_.video_processing_availability = Availability::WarmingUp;
+        state_.video_processing_reason = "processing_counter_baseline_warming_up";
+    } else {
+        state_.video_processing_availability = Availability::Valid;
+        state_.video_processing_reason = "counter_delta_ms_per_frame_valid";
+    }
+}
+
+void SessionTelemetry::UpdateNetworkStatsOnStrand(
+    const RoomStatsReport& report,
+    Clock::time_point received_at) {
+    AssertOnStrand();
+    enum : std::uint32_t {
+        kPackets = 1u << 0, kRetransmittedPackets = 1u << 1,
+        kRetransmittedBytes = 1u << 2, kFecPackets = 1u << 3,
+        kFecBytes = 1u << 4, kFecDiscarded = 1u << 5,
+        kNack = 1u << 6, kPli = 1u << 7, kFir = 1u << 8,
+        kBytes = 1u << 9, kPacketsLost = 1u << 10,
+    };
+    state_.inbound_rtp_streams = 0;
+    state_.outbound_rtp_streams = 0;
+    state_.inbound_rtp_bytes = 0;
+    state_.outbound_rtp_bytes = 0;
+    state_.window_inbound_rtp_bytes = 0;
+    state_.window_outbound_rtp_bytes = 0;
+    state_.inbound_rtp_bitrate_bps = -1.0;
+    state_.outbound_rtp_bitrate_bps = -1.0;
+    state_.inbound_packets_lost = 0;
+    state_.window_inbound_packets_lost = 0;
+    state_.window_inbound_packets_received = 0;
+    state_.inbound_packet_loss_ratio = -1.0;
+    state_.inbound_jitter_max_ms = -1.0;
+    state_.remote_rtcp_streams = 0;
+    state_.remote_rtcp_current_rtt_max_ms = -1.0;
+    state_.remote_rtcp_window_average_rtt_ms = -1.0;
+    state_.remote_rtcp_fraction_lost_max = -1.0;
+    state_.network_recovery_streams = 0;
+    state_.inbound_retransmitted_packets = 0;
+    state_.inbound_retransmitted_bytes = 0;
+    state_.inbound_fec_packets = 0;
+    state_.inbound_fec_bytes = 0;
+    state_.inbound_fec_discarded_packets = 0;
+    state_.inbound_nack_count = 0;
+    state_.inbound_pli_count = 0;
+    state_.inbound_fir_count = 0;
+    state_.outbound_retransmitted_packets = 0;
+    state_.outbound_retransmitted_bytes = 0;
+    state_.outbound_nack_count = 0;
+    state_.outbound_pli_count = 0;
+    state_.outbound_fir_count = 0;
+    state_.window_inbound_packets = 0;
+    state_.window_inbound_retransmitted_packets = 0;
+    state_.window_inbound_fec_packets = 0;
+    state_.window_inbound_nack_count = 0;
+    state_.window_inbound_pli_count = 0;
+    state_.window_inbound_fir_count = 0;
+    state_.window_outbound_packets = 0;
+    state_.window_outbound_retransmitted_packets = 0;
+    state_.window_outbound_nack_count = 0;
+    state_.window_outbound_pli_count = 0;
+    state_.window_outbound_fir_count = 0;
+    std::uint64_t supported_streams = 0;
+    std::uint64_t warmed_streams = 0;
+    std::uint64_t inbound_streams = 0;
+    std::uint64_t outbound_streams = 0;
+    std::uint64_t inbound_retransmission_supported = 0;
+    std::uint64_t inbound_retransmission_warmed = 0;
+    std::uint64_t inbound_fec_supported = 0;
+    std::uint64_t inbound_fec_warmed = 0;
+    std::uint64_t inbound_feedback_supported = 0;
+    std::uint64_t inbound_feedback_warmed = 0;
+    std::uint64_t outbound_retransmission_supported = 0;
+    std::uint64_t outbound_retransmission_warmed = 0;
+    std::uint64_t outbound_feedback_supported = 0;
+    std::uint64_t outbound_feedback_warmed = 0;
+    std::uint64_t inbound_traffic_supported = 0;
+    std::uint64_t inbound_traffic_warmed = 0;
+    std::uint64_t outbound_traffic_supported = 0;
+    std::uint64_t outbound_traffic_warmed = 0;
+    std::uint64_t inbound_loss_supported = 0;
+    std::uint64_t inbound_loss_warmed = 0;
+    std::uint64_t inbound_jitter_supported = 0;
+    bool inbound_loss_late_correction = false;
+    std::set<std::string> inbound_seen;
+    std::set<std::string> outbound_seen;
+
+    const auto update_baseline = [&](NetworkStatsBaseline& baseline,
+            const NetworkStatsBaseline& current,
+            bool inbound) {
+        bool reset = false;
+        const auto common = baseline.availability_mask & current.availability_mask;
+        const auto regressed = [&](std::uint32_t bit, std::uint64_t now,
+                                   std::uint64_t before) {
+            return (common & bit) != 0 && now < before;
+        };
+        if (baseline.initialized) {
+            reset = regressed(kBytes, current.bytes, baseline.bytes) ||
+                regressed(kPackets, current.packets, baseline.packets) ||
+                regressed(kRetransmittedPackets, current.retransmitted_packets,
+                          baseline.retransmitted_packets) ||
+                regressed(kRetransmittedBytes, current.retransmitted_bytes,
+                          baseline.retransmitted_bytes) ||
+                regressed(kFecPackets, current.fec_packets, baseline.fec_packets) ||
+                regressed(kFecBytes, current.fec_bytes, baseline.fec_bytes) ||
+                regressed(kFecDiscarded, current.fec_discarded,
+                          baseline.fec_discarded) ||
+                regressed(kNack, current.nack, baseline.nack) ||
+                regressed(kPli, current.pli, baseline.pli) ||
+                regressed(kFir, current.fir, baseline.fir);
+        }
+        if (reset) {
+            baseline.initialized = false;
+            ++state_.counter_resets;
+        }
+        if (baseline.initialized && baseline.observed_at != Clock::time_point{} &&
+            received_at > baseline.observed_at) {
+            const auto elapsed = std::chrono::duration<double>(
+                received_at - baseline.observed_at).count();
+            if ((common & kBytes) != 0) {
+                const auto bytes_delta = current.bytes - baseline.bytes;
+                if (inbound) {
+                    ++inbound_traffic_warmed;
+                    SaturatingAddUnsigned(
+                        state_.window_inbound_rtp_bytes, bytes_delta);
+                    state_.inbound_rtp_bitrate_bps =
+                        (std::max)(0.0, state_.inbound_rtp_bitrate_bps) +
+                        static_cast<double>(bytes_delta) * 8.0 / elapsed;
+                } else {
+                    ++outbound_traffic_warmed;
+                    SaturatingAddUnsigned(
+                        state_.window_outbound_rtp_bytes, bytes_delta);
+                    state_.outbound_rtp_bitrate_bps =
+                        (std::max)(0.0, state_.outbound_rtp_bitrate_bps) +
+                        static_cast<double>(bytes_delta) * 8.0 / elapsed;
+                }
+            }
+            if (inbound && (common & (kPackets | kPacketsLost)) ==
+                               (kPackets | kPacketsLost)) {
+                ++inbound_loss_warmed;
+                const auto received_delta = current.packets - baseline.packets;
+                // Native packetsLost is int32; widening before subtraction
+                // preserves legitimate negative late-packet corrections.
+                const auto lost_delta =
+                    current.packets_lost - baseline.packets_lost;
+                SaturatingAddUnsigned(
+                    state_.window_inbound_packets_received, received_delta);
+                if ((lost_delta > 0 && state_.window_inbound_packets_lost >
+                        (std::numeric_limits<std::int64_t>::max)() - lost_delta) ||
+                    (lost_delta < 0 && state_.window_inbound_packets_lost <
+                        (std::numeric_limits<std::int64_t>::min)() - lost_delta)) {
+                    state_.window_inbound_packets_lost = lost_delta > 0
+                        ? (std::numeric_limits<std::int64_t>::max)()
+                        : (std::numeric_limits<std::int64_t>::min)();
+                } else {
+                    state_.window_inbound_packets_lost += lost_delta;
+                }
+                inbound_loss_late_correction |= lost_delta < 0;
+            }
+        }
+        const auto recovery_common = common &
+            (kRetransmittedPackets | kRetransmittedBytes | kFecPackets |
+             kFecBytes | kFecDiscarded | kNack | kPli | kFir);
+        if (baseline.initialized && recovery_common != 0) {
+            ++warmed_streams;
+            if (inbound) {
+                if ((common & (kRetransmittedPackets | kRetransmittedBytes)) != 0) {
+                    ++inbound_retransmission_warmed;
+                }
+                if ((common & (kFecPackets | kFecBytes | kFecDiscarded)) != 0) {
+                    ++inbound_fec_warmed;
+                }
+                if ((common & (kNack | kPli | kFir)) != 0) {
+                    ++inbound_feedback_warmed;
+                }
+            } else {
+                if ((common & (kRetransmittedPackets | kRetransmittedBytes)) != 0) {
+                    ++outbound_retransmission_warmed;
+                }
+                if ((common & (kNack | kPli | kFir)) != 0) {
+                    ++outbound_feedback_warmed;
+                }
+            }
+            const auto delta = [&](std::uint32_t bit, std::uint64_t now,
+                                   std::uint64_t before) {
+                return (common & bit) != 0 ? now - before : std::uint64_t{0};
+            };
+            if (inbound) {
+                state_.window_inbound_packets +=
+                    delta(kPackets, current.packets, baseline.packets);
+                state_.window_inbound_retransmitted_packets += delta(
+                    kRetransmittedPackets, current.retransmitted_packets,
+                    baseline.retransmitted_packets);
+                state_.window_inbound_fec_packets +=
+                    delta(kFecPackets, current.fec_packets, baseline.fec_packets);
+                state_.window_inbound_nack_count +=
+                    delta(kNack, current.nack, baseline.nack);
+                state_.window_inbound_pli_count +=
+                    delta(kPli, current.pli, baseline.pli);
+                state_.window_inbound_fir_count +=
+                    delta(kFir, current.fir, baseline.fir);
+            } else {
+                state_.window_outbound_packets +=
+                    delta(kPackets, current.packets, baseline.packets);
+                state_.window_outbound_retransmitted_packets += delta(
+                    kRetransmittedPackets, current.retransmitted_packets,
+                    baseline.retransmitted_packets);
+                state_.window_outbound_nack_count +=
+                    delta(kNack, current.nack, baseline.nack);
+                state_.window_outbound_pli_count +=
+                    delta(kPli, current.pli, baseline.pli);
+                state_.window_outbound_fir_count +=
+                    delta(kFir, current.fir, baseline.fir);
+            }
+        }
+        baseline = current;
+        baseline.observed_at = received_at;
+        baseline.initialized = true;
+    };
+
+    std::size_t pc_index = 0;
+    for (const auto& pc_report : report.reports) {
+        for (const auto& stream : pc_report.inbound_rtp) {
+            ++inbound_streams;
+            NetworkStatsBaseline current;
+            if (stream.bytes_received_available) current.availability_mask |= kBytes;
+            if (stream.packets_received_available) current.availability_mask |= kPackets;
+            if (stream.packets_lost_available) current.availability_mask |= kPacketsLost;
+            if (stream.retransmitted_packets_received_available) current.availability_mask |= kRetransmittedPackets;
+            if (stream.retransmitted_bytes_received_available) current.availability_mask |= kRetransmittedBytes;
+            if (stream.fec_packets_received_available) current.availability_mask |= kFecPackets;
+            if (stream.fec_bytes_received_available) current.availability_mask |= kFecBytes;
+            if (stream.fec_packets_discarded_available) current.availability_mask |= kFecDiscarded;
+            if (stream.nack_count_available) current.availability_mask |= kNack;
+            if (stream.pli_count_available) current.availability_mask |= kPli;
+            if (stream.fir_count_available) current.availability_mask |= kFir;
+            current.bytes = stream.bytes_received;
+            current.packets = stream.packets_received;
+            current.packets_lost = stream.packets_lost;
+            current.retransmitted_packets = stream.retransmitted_packets_received;
+            current.retransmitted_bytes = stream.retransmitted_bytes_received;
+            current.fec_packets = stream.fec_packets_received;
+            current.fec_bytes = stream.fec_bytes_received;
+            current.fec_discarded = stream.fec_packets_discarded;
+            current.nack = stream.nack_count;
+            current.pli = stream.pli_count;
+            current.fir = stream.fir_count;
+            ++state_.network_recovery_streams;
+            if (stream.bytes_received_available) {
+                ++inbound_traffic_supported;
+                SaturatingAddUnsigned(
+                    state_.inbound_rtp_bytes, stream.bytes_received);
+            }
+            if (stream.packets_received_available && stream.packets_lost_available) {
+                ++inbound_loss_supported;
+                if ((stream.packets_lost > 0 && state_.inbound_packets_lost >
+                        (std::numeric_limits<std::int64_t>::max)() -
+                            stream.packets_lost) ||
+                    (stream.packets_lost < 0 && state_.inbound_packets_lost <
+                        (std::numeric_limits<std::int64_t>::min)() -
+                            stream.packets_lost)) {
+                    state_.inbound_packets_lost = stream.packets_lost > 0
+                        ? (std::numeric_limits<std::int64_t>::max)()
+                        : (std::numeric_limits<std::int64_t>::min)();
+                } else {
+                    state_.inbound_packets_lost += stream.packets_lost;
+                }
+            }
+            if (stream.jitter_available && std::isfinite(stream.jitter) &&
+                stream.jitter >= 0.0) {
+                ++inbound_jitter_supported;
+                state_.inbound_jitter_max_ms = (std::max)(
+                    state_.inbound_jitter_max_ms, stream.jitter * 1000.0);
+            }
+            const auto recovery_mask = current.availability_mask & ~kPackets;
+            const auto recovery_fields = recovery_mask &
+                (kRetransmittedPackets | kRetransmittedBytes | kFecPackets |
+                 kFecBytes | kFecDiscarded | kNack | kPli | kFir);
+            if (recovery_fields != 0) {
+                ++supported_streams;
+                if ((recovery_fields &
+                     (kRetransmittedPackets | kRetransmittedBytes)) != 0) {
+                    ++inbound_retransmission_supported;
+                }
+                if ((recovery_fields &
+                     (kFecPackets | kFecBytes | kFecDiscarded)) != 0) {
+                    ++inbound_fec_supported;
+                }
+                if ((recovery_fields & (kNack | kPli | kFir)) != 0) {
+                    ++inbound_feedback_supported;
+                }
+                state_.inbound_retransmitted_packets += current.retransmitted_packets;
+                state_.inbound_retransmitted_bytes += current.retransmitted_bytes;
+                state_.inbound_fec_packets += current.fec_packets;
+                state_.inbound_fec_bytes += current.fec_bytes;
+                state_.inbound_fec_discarded_packets += current.fec_discarded;
+                state_.inbound_nack_count += current.nack;
+                state_.inbound_pli_count += current.pli;
+                state_.inbound_fir_count += current.fir;
+            }
+            const auto key = std::to_string(pc_index) + "/" +
+                (stream.id.empty() ? stream.ssrc : stream.id);
+            inbound_seen.insert(key);
+            update_baseline(inbound_network_baselines_[key], current, true);
+        }
+        for (const auto& stream : pc_report.outbound_rtp) {
+            ++outbound_streams;
+            NetworkStatsBaseline current;
+            if (stream.bytes_sent_available) current.availability_mask |= kBytes;
+            if (stream.packets_sent_available) current.availability_mask |= kPackets;
+            if (stream.retransmitted_packets_sent_available) current.availability_mask |= kRetransmittedPackets;
+            if (stream.retransmitted_bytes_sent_available) current.availability_mask |= kRetransmittedBytes;
+            if (stream.nack_count_available) current.availability_mask |= kNack;
+            if (stream.pli_count_available) current.availability_mask |= kPli;
+            if (stream.fir_count_available) current.availability_mask |= kFir;
+            current.bytes = stream.bytes_sent;
+            current.packets = stream.packets_sent;
+            current.retransmitted_packets = stream.retransmitted_packets_sent;
+            current.retransmitted_bytes = stream.retransmitted_bytes_sent;
+            current.nack = stream.nack_count;
+            current.pli = stream.pli_count;
+            current.fir = stream.fir_count;
+            ++state_.network_recovery_streams;
+            if (stream.bytes_sent_available) {
+                ++outbound_traffic_supported;
+                SaturatingAddUnsigned(state_.outbound_rtp_bytes, stream.bytes_sent);
+            }
+            const auto recovery_mask = current.availability_mask & ~kPackets;
+            const auto recovery_fields = recovery_mask &
+                (kRetransmittedPackets | kRetransmittedBytes | kNack | kPli | kFir);
+            if (recovery_fields != 0) {
+                ++supported_streams;
+                if ((recovery_fields &
+                     (kRetransmittedPackets | kRetransmittedBytes)) != 0) {
+                    ++outbound_retransmission_supported;
+                }
+                if ((recovery_fields & (kNack | kPli | kFir)) != 0) {
+                    ++outbound_feedback_supported;
+                }
+                state_.outbound_retransmitted_packets += current.retransmitted_packets;
+                state_.outbound_retransmitted_bytes += current.retransmitted_bytes;
+                state_.outbound_nack_count += current.nack;
+                state_.outbound_pli_count += current.pli;
+                state_.outbound_fir_count += current.fir;
+            }
+            const auto key = std::to_string(pc_index) + "/" +
+                (stream.id.empty() ? stream.ssrc : stream.id);
+            outbound_seen.insert(key);
+            update_baseline(outbound_network_baselines_[key], current, false);
+        }
+        ++pc_index;
+    }
+    for (auto it = inbound_network_baselines_.begin();
+         it != inbound_network_baselines_.end();) {
+        if (!inbound_seen.contains(it->first)) it = inbound_network_baselines_.erase(it);
+        else ++it;
+    }
+    for (auto it = outbound_network_baselines_.begin();
+         it != outbound_network_baselines_.end();) {
+        if (!outbound_seen.contains(it->first)) it = outbound_network_baselines_.erase(it);
+        else ++it;
+    }
+    state_.inbound_rtp_streams = inbound_streams;
+    state_.outbound_rtp_streams = outbound_streams;
+    const auto set_window_category = [](
+            std::uint64_t streams,
+            std::uint64_t supported,
+            std::uint64_t warmed,
+            Availability& availability,
+            std::string& reason,
+            const char* no_streams,
+            const char* fields_missing,
+            const char* warming,
+            const char* valid,
+            const char* partial) {
+        if (streams == 0) {
+            availability = Availability::Unknown;
+            reason = no_streams;
+        } else if (supported == 0) {
+            availability = Availability::Unsupported;
+            reason = fields_missing;
+        } else if (warmed == 0) {
+            availability = Availability::WarmingUp;
+            reason = warming;
+        } else {
+            availability = Availability::Valid;
+            reason = supported == streams && warmed == supported ? valid : partial;
+        }
+    };
+    set_window_category(inbound_streams, inbound_traffic_supported,
+        inbound_traffic_warmed, state_.inbound_rtp_traffic_availability,
+        state_.inbound_rtp_traffic_reason, "no_inbound_rtp_stats",
+        "inbound_rtp_bytes_missing", "inbound_rtp_bitrate_baseline_warming_up",
+        "inbound_rtp_bitrate_window_valid", "inbound_rtp_bitrate_partial_coverage");
+    set_window_category(outbound_streams, outbound_traffic_supported,
+        outbound_traffic_warmed, state_.outbound_rtp_traffic_availability,
+        state_.outbound_rtp_traffic_reason, "no_outbound_rtp_stats",
+        "outbound_rtp_bytes_missing", "outbound_rtp_bitrate_baseline_warming_up",
+        "outbound_rtp_bitrate_window_valid", "outbound_rtp_bitrate_partial_coverage");
+    set_window_category(inbound_streams, inbound_loss_supported,
+        inbound_loss_warmed, state_.inbound_packet_loss_availability,
+        state_.inbound_packet_loss_reason, "no_inbound_rtp_stats",
+        "inbound_loss_fields_missing", "inbound_loss_baseline_warming_up",
+        "inbound_loss_window_valid", "inbound_loss_partial_coverage");
+    if (inbound_loss_warmed > 0 && inbound_loss_late_correction) {
+        state_.inbound_packet_loss_availability = Availability::Invalid;
+        state_.inbound_packet_loss_reason = "inbound_loss_late_packet_correction";
+    } else if (inbound_loss_warmed > 0 &&
+               state_.window_inbound_packets_lost >= 0) {
+        const auto denominator =
+            static_cast<double>(state_.window_inbound_packets_received) +
+            static_cast<double>(state_.window_inbound_packets_lost);
+        if (denominator > 0.0) {
+            state_.inbound_packet_loss_ratio =
+                static_cast<double>(state_.window_inbound_packets_lost) /
+                denominator;
+        }
+    }
+    if (inbound_streams == 0) {
+        state_.inbound_jitter_availability = Availability::Unknown;
+        state_.inbound_jitter_reason = "no_inbound_rtp_stats";
+    } else if (inbound_jitter_supported == 0) {
+        state_.inbound_jitter_availability = Availability::Unsupported;
+        state_.inbound_jitter_reason = "inbound_jitter_field_missing";
+    } else {
+        state_.inbound_jitter_availability = Availability::Valid;
+        state_.inbound_jitter_reason = inbound_jitter_supported == inbound_streams
+            ? "inbound_jitter_current_valid"
+            : "inbound_jitter_partial_coverage";
+    }
+    state_.inbound_retransmitted_packet_ratio =
+        inbound_retransmission_warmed == 0 ||
+        state_.window_inbound_packets == 0 ? -1.0
+        : static_cast<double>(state_.window_inbound_retransmitted_packets) /
+            static_cast<double>(state_.window_inbound_packets);
+    state_.outbound_retransmitted_packet_ratio =
+        outbound_retransmission_warmed == 0 ||
+        state_.window_outbound_packets == 0 ? -1.0
+        : static_cast<double>(state_.window_outbound_retransmitted_packets) /
+            static_cast<double>(state_.window_outbound_packets);
+    if (state_.network_recovery_streams == 0) {
+        state_.network_recovery_availability = Availability::Unknown;
+        state_.network_recovery_reason = "no_rtp_stats";
+    } else if (supported_streams == 0) {
+        state_.network_recovery_availability = Availability::Unsupported;
+        state_.network_recovery_reason = "recovery_counters_missing";
+    } else if (warmed_streams == 0) {
+        state_.network_recovery_availability = Availability::WarmingUp;
+        state_.network_recovery_reason = "recovery_counter_baseline_warming_up";
+    } else {
+        state_.network_recovery_availability = Availability::Valid;
+        state_.network_recovery_reason = supported_streams == state_.network_recovery_streams
+            ? "recovery_counter_window_valid"
+            : "recovery_counter_partial_coverage";
+    }
+    const auto set_category = [](
+            std::uint64_t streams,
+            std::uint64_t supported,
+            std::uint64_t warmed,
+            Availability& availability,
+            std::string& reason) {
+        if (streams == 0) {
+            availability = Availability::Unknown;
+            reason = "network_category_no_streams";
+        } else if (supported == 0) {
+            availability = Availability::Unsupported;
+            reason = "network_category_fields_missing";
+        } else if (warmed == 0) {
+            availability = Availability::WarmingUp;
+            reason = "network_category_baseline_warming_up";
+        } else {
+            availability = Availability::Valid;
+            reason = supported == streams && warmed == supported
+                ? "network_category_window_valid"
+                : "network_category_partial_coverage";
+        }
+    };
+    set_category(inbound_streams, inbound_retransmission_supported,
+        inbound_retransmission_warmed,
+        state_.inbound_retransmission_availability,
+        state_.inbound_retransmission_reason);
+    set_category(inbound_streams, inbound_fec_supported,
+        inbound_fec_warmed, state_.inbound_fec_availability,
+        state_.inbound_fec_reason);
+    set_category(inbound_streams, inbound_feedback_supported,
+        inbound_feedback_warmed, state_.inbound_feedback_availability,
+        state_.inbound_feedback_reason);
+    set_category(outbound_streams, outbound_retransmission_supported,
+        outbound_retransmission_warmed,
+        state_.outbound_retransmission_availability,
+        state_.outbound_retransmission_reason);
+    set_category(outbound_streams, outbound_feedback_supported,
+        outbound_feedback_warmed, state_.outbound_feedback_availability,
+        state_.outbound_feedback_reason);
+
+    std::uint64_t remote_rtcp_supported = 0;
+    std::uint64_t remote_rtcp_immediate_supported = 0;
+    std::uint64_t remote_rtcp_window_supported = 0;
+    std::uint64_t remote_rtcp_window_warmed = 0;
+    double remote_rtcp_window_total_seconds = 0.0;
+    std::uint64_t remote_rtcp_window_measurements = 0;
+    std::set<std::string> remote_rtcp_seen;
+    pc_index = 0;
+    for (const auto& pc_report : report.reports) {
+        for (const auto& stream : pc_report.remote_inbound_rtp) {
+            ++state_.remote_rtcp_streams;
+            const bool current_rtt_valid = stream.round_trip_time_available &&
+                std::isfinite(stream.round_trip_time) &&
+                stream.round_trip_time >= 0.0;
+            const bool fraction_lost_valid = stream.fraction_lost_available &&
+                std::isfinite(stream.fraction_lost) &&
+                stream.fraction_lost >= 0.0 && stream.fraction_lost <= 1.0;
+            const bool window_fields_valid =
+                stream.total_round_trip_time_available &&
+                stream.round_trip_time_measurements_available &&
+                std::isfinite(stream.total_round_trip_time) &&
+                stream.total_round_trip_time >= 0.0;
+            if (current_rtt_valid || fraction_lost_valid || window_fields_valid) {
+                ++remote_rtcp_supported;
+            }
+            if (current_rtt_valid || fraction_lost_valid) {
+                ++remote_rtcp_immediate_supported;
+            }
+            if (current_rtt_valid) {
+                state_.remote_rtcp_current_rtt_max_ms = (std::max)(
+                    state_.remote_rtcp_current_rtt_max_ms,
+                    stream.round_trip_time * 1000.0);
+            }
+            if (fraction_lost_valid) {
+                state_.remote_rtcp_fraction_lost_max = (std::max)(
+                    state_.remote_rtcp_fraction_lost_max,
+                    stream.fraction_lost);
+            }
+            const auto key = std::to_string(pc_index) + "/" +
+                (stream.id.empty() ? stream.ssrc : stream.id);
+            if (!window_fields_valid) continue;
+            ++remote_rtcp_window_supported;
+            remote_rtcp_seen.insert(key);
+            auto& baseline = remote_rtcp_baselines_[key];
+            if (baseline.initialized &&
+                (stream.total_round_trip_time < baseline.total_round_trip_time ||
+                 stream.round_trip_time_measurements <
+                     baseline.round_trip_time_measurements)) {
+                baseline.initialized = false;
+                ++state_.counter_resets;
+            }
+            if (baseline.initialized) {
+                const auto measurements = stream.round_trip_time_measurements -
+                    baseline.round_trip_time_measurements;
+                const auto total = stream.total_round_trip_time -
+                    baseline.total_round_trip_time;
+                if (measurements > 0 && total >= 0.0) {
+                    ++remote_rtcp_window_warmed;
+                    SaturatingAddUnsigned(
+                        remote_rtcp_window_measurements, measurements);
+                    remote_rtcp_window_total_seconds += total;
+                }
+            }
+            baseline.total_round_trip_time = stream.total_round_trip_time;
+            baseline.round_trip_time_measurements =
+                stream.round_trip_time_measurements;
+            baseline.initialized = true;
+        }
+        ++pc_index;
+    }
+    for (auto it = remote_rtcp_baselines_.begin();
+         it != remote_rtcp_baselines_.end();) {
+        if (!remote_rtcp_seen.contains(it->first)) {
+            it = remote_rtcp_baselines_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    if (remote_rtcp_window_measurements > 0) {
+        state_.remote_rtcp_window_average_rtt_ms =
+            remote_rtcp_window_total_seconds * 1000.0 /
+            static_cast<double>(remote_rtcp_window_measurements);
+    }
+    if (state_.remote_rtcp_streams == 0) {
+        state_.remote_rtcp_availability = Availability::Unknown;
+        state_.remote_rtcp_reason = "no_remote_inbound_rtcp_stats";
+    } else if (remote_rtcp_supported == 0) {
+        state_.remote_rtcp_availability = Availability::Unsupported;
+        state_.remote_rtcp_reason = "remote_rtcp_fields_missing";
+    } else if (remote_rtcp_immediate_supported == 0 &&
+               remote_rtcp_window_supported > 0 &&
+               remote_rtcp_window_warmed == 0) {
+        state_.remote_rtcp_availability = Availability::WarmingUp;
+        state_.remote_rtcp_reason = "remote_rtcp_baseline_warming_up";
+    } else {
+        state_.remote_rtcp_availability = Availability::Valid;
+        state_.remote_rtcp_reason =
+            remote_rtcp_supported == state_.remote_rtcp_streams &&
+                    (remote_rtcp_window_supported == 0 ||
+                     remote_rtcp_window_warmed == remote_rtcp_window_supported)
+                ? "remote_rtcp_feedback_valid"
+                : "remote_rtcp_feedback_partial_coverage";
+    }
+
+    std::set<std::string> local_types;
+    std::set<std::string> remote_types;
+    std::set<std::string> networks;
+    std::set<std::string> protocols;
+    std::set<std::string> relay_protocols;
+    std::set<std::string> tcp_types;
+    std::set<std::string> dtls_states;
+    std::set<std::string> connectivity_states;
+    std::set<std::string> transport_roles;
+    std::set<std::string> transports_seen;
+    enum : std::uint32_t {
+        kTransportBytesSent = 1u << 0,
+        kTransportBytesReceived = 1u << 1,
+        kTransportPacketsSent = 1u << 2,
+        kTransportPacketsReceived = 1u << 3,
+    };
+    constexpr std::uint32_t kCompleteTransportTraffic =
+        kTransportBytesSent | kTransportBytesReceived |
+        kTransportPacketsSent | kTransportPacketsReceived;
+    state_.transport_stats_count = 0;
+    state_.transport_bytes_sent = 0;
+    state_.transport_bytes_received = 0;
+    state_.transport_packets_sent = 0;
+    state_.transport_packets_received = 0;
+    state_.window_transport_bytes_sent = 0;
+    state_.window_transport_bytes_received = 0;
+    state_.window_transport_packets_sent = 0;
+    state_.window_transport_packets_received = 0;
+    state_.media_path_rtt_max_ms = -1.0;
+    state_.media_available_outgoing_bitrate_bps = -1.0;
+    state_.media_available_incoming_bitrate_bps = -1.0;
+    std::uint64_t transport_count = 0;
+    std::uint64_t transport_traffic_supported = 0;
+    std::uint64_t transport_traffic_warmed = 0;
+    std::uint64_t transport_state_supported = 0;
+    std::uint64_t selected_available = 0;
+    std::uint64_t resolved = 0;
+    std::uint64_t detailed = 0;
+    std::uint64_t path_rtt_supported = 0;
+    std::uint64_t bandwidth_supported = 0;
+    pc_index = 0;
+    for (const auto& pc_report : report.reports) {
+        for (const auto& transport : pc_report.transports) {
+            ++transport_count;
+            const auto key = std::to_string(pc_index) + "/" + transport.id;
+            transports_seen.insert(key);
+            auto& baseline = transport_baselines_[key];
+            std::uint32_t traffic_mask = 0;
+            if (transport.bytes_sent_available) {
+                traffic_mask |= kTransportBytesSent;
+            }
+            if (transport.bytes_received_available) {
+                traffic_mask |= kTransportBytesReceived;
+            }
+            if (transport.packets_sent_available) {
+                traffic_mask |= kTransportPacketsSent;
+            }
+            if (transport.packets_received_available) {
+                traffic_mask |= kTransportPacketsReceived;
+            }
+            if (traffic_mask == kCompleteTransportTraffic) {
+                ++transport_traffic_supported;
+                SaturatingAddUnsigned(
+                    state_.transport_bytes_sent, transport.bytes_sent);
+                SaturatingAddUnsigned(
+                    state_.transport_bytes_received, transport.bytes_received);
+                SaturatingAddUnsigned(
+                    state_.transport_packets_sent, transport.packets_sent);
+                SaturatingAddUnsigned(
+                    state_.transport_packets_received, transport.packets_received);
+                if (baseline.traffic_initialized &&
+                    (transport.bytes_sent < baseline.bytes_sent ||
+                     transport.bytes_received < baseline.bytes_received ||
+                     transport.packets_sent < baseline.packets_sent ||
+                     transport.packets_received < baseline.packets_received)) {
+                    baseline.traffic_initialized = false;
+                    ++state_.counter_resets;
+                }
+                if (baseline.traffic_initialized &&
+                    baseline.observed_at != Clock::time_point{} &&
+                    received_at > baseline.observed_at) {
+                    ++transport_traffic_warmed;
+                    SaturatingAddUnsigned(state_.window_transport_bytes_sent,
+                        transport.bytes_sent - baseline.bytes_sent);
+                    SaturatingAddUnsigned(state_.window_transport_bytes_received,
+                        transport.bytes_received - baseline.bytes_received);
+                    SaturatingAddUnsigned(state_.window_transport_packets_sent,
+                        transport.packets_sent - baseline.packets_sent);
+                    SaturatingAddUnsigned(state_.window_transport_packets_received,
+                        transport.packets_received - baseline.packets_received);
+                }
+                baseline.bytes_sent = transport.bytes_sent;
+                baseline.bytes_received = transport.bytes_received;
+                baseline.packets_sent = transport.packets_sent;
+                baseline.packets_received = transport.packets_received;
+                baseline.traffic_availability_mask = traffic_mask;
+                baseline.observed_at = received_at;
+                baseline.traffic_initialized = true;
+            } else {
+                baseline.traffic_availability_mask = traffic_mask;
+                baseline.traffic_initialized = false;
+            }
+            const bool has_transport_state = transport.dtls_state_available ||
+                transport.ice_state_available || transport.ice_role_available;
+            if (has_transport_state) ++transport_state_supported;
+            if (transport.dtls_state_available) {
+                dtls_states.insert(ControlledValue(transport.dtls_state,
+                    {"new", "connecting", "connected", "closed", "failed"}));
+            }
+            if (transport.ice_state_available) {
+                connectivity_states.insert(ControlledValue(transport.ice_state,
+                    {"new", "checking", "connected", "completed",
+                     "disconnected", "failed", "closed"}));
+            }
+            if (transport.ice_role_available) {
+                transport_roles.insert(ControlledValue(transport.ice_role,
+                    {"controlling", "controlled"}));
+            }
+            if (!transport.selected_candidate_pair_id_available ||
+                transport.selected_candidate_pair_id.empty()) {
+                baseline.initialized = false;
+                continue;
+            }
+            ++selected_available;
+            if (baseline.initialized) {
+                if (transport.selected_candidate_pair_changes_available &&
+                    baseline.changes_available) {
+                    if (transport.selected_candidate_pair_changes >=
+                        baseline.selected_pair_changes) {
+                        state_.media_path_switches +=
+                            transport.selected_candidate_pair_changes -
+                            baseline.selected_pair_changes;
+                    } else {
+                        ++state_.counter_resets;
+                    }
+                } else if (transport.selected_candidate_pair_id !=
+                           baseline.selected_pair_id) {
+                    ++state_.media_path_switches;
+                }
+            }
+            baseline.selected_pair_id = transport.selected_candidate_pair_id;
+            baseline.selected_pair_changes = transport.selected_candidate_pair_changes;
+            baseline.changes_available =
+                transport.selected_candidate_pair_changes_available;
+            baseline.initialized = true;
+            const auto pair = std::find_if(
+                pc_report.candidate_pairs.begin(), pc_report.candidate_pairs.end(),
+                [&](const auto& item) {
+                    return item.id == transport.selected_candidate_pair_id &&
+                        item.current_pair && item.selected_relationship_available;
+                });
+            if (pair == pc_report.candidate_pairs.end()) continue;
+            ++resolved;
+            if (pair->current_round_trip_time_available &&
+                std::isfinite(pair->current_round_trip_time) &&
+                pair->current_round_trip_time >= 0.0) {
+                ++path_rtt_supported;
+                state_.media_path_rtt_max_ms = (std::max)(
+                    state_.media_path_rtt_max_ms,
+                    pair->current_round_trip_time * 1000.0);
+            }
+            bool has_bandwidth = false;
+            if (pair->available_outgoing_bitrate_available &&
+                std::isfinite(pair->available_outgoing_bitrate) &&
+                pair->available_outgoing_bitrate >= 0.0) {
+                has_bandwidth = true;
+                state_.media_available_outgoing_bitrate_bps = (std::max)(
+                    state_.media_available_outgoing_bitrate_bps,
+                    pair->available_outgoing_bitrate);
+            }
+            if (pair->available_incoming_bitrate_available &&
+                std::isfinite(pair->available_incoming_bitrate) &&
+                pair->available_incoming_bitrate >= 0.0) {
+                has_bandwidth = true;
+                state_.media_available_incoming_bitrate_bps = (std::max)(
+                    state_.media_available_incoming_bitrate_bps,
+                    pair->available_incoming_bitrate);
+            }
+            if (has_bandwidth) ++bandwidth_supported;
+            const auto find_candidate = [&](const std::string& id) {
+                return std::find_if(
+                    pc_report.ice_candidates.begin(), pc_report.ice_candidates.end(),
+                    [&](const auto& item) { return item.id == id; });
+            };
+            const auto local = find_candidate(pair->local_candidate_id);
+            const auto remote = find_candidate(pair->remote_candidate_id);
+            if (local != pc_report.ice_candidates.end() &&
+                remote != pc_report.ice_candidates.end()) {
+                ++detailed;
+            }
+            if (local != pc_report.ice_candidates.end()) {
+                if (local->candidate_type_available) local_types.insert(
+                    ControlledValue(local->candidate_type,
+                        {"host", "srflx", "prflx", "relay"}));
+                if (local->network_type_available) networks.insert(
+                    ControlledValue(local->network_type,
+                        {"ethernet", "wifi", "cellular", "vpn", "unknown"}));
+                if (local->protocol_available) protocols.insert(
+                    ControlledValue(local->protocol, {"udp", "tcp"}));
+                if (local->relay_protocol_available) relay_protocols.insert(
+                    ControlledValue(local->relay_protocol, {"udp", "tcp", "tls"}));
+                if (local->tcp_type_available) tcp_types.insert(
+                    ControlledValue(local->tcp_type,
+                        {"active", "passive", "so"}));
+            }
+            if (remote != pc_report.ice_candidates.end()) {
+                if (remote->candidate_type_available) remote_types.insert(
+                    ControlledValue(remote->candidate_type,
+                        {"host", "srflx", "prflx", "relay"}));
+                if (remote->protocol_available) protocols.insert(
+                    ControlledValue(remote->protocol, {"udp", "tcp"}));
+            }
+        }
+        ++pc_index;
+    }
+    for (auto it = transport_baselines_.begin(); it != transport_baselines_.end();) {
+        if (!transports_seen.contains(it->first)) it = transport_baselines_.erase(it);
+        else ++it;
+    }
+    state_.selected_media_transports = resolved;
+    state_.local_candidate_types = JoinValues(local_types);
+    state_.remote_candidate_types = JoinValues(remote_types);
+    state_.local_network_types = JoinValues(networks);
+    state_.media_protocols = JoinValues(protocols);
+    state_.relay_protocols = JoinValues(relay_protocols);
+    state_.tcp_types = JoinValues(tcp_types);
+    state_.transport_stats_count = transport_count;
+    state_.transport_dtls_states = JoinValues(dtls_states);
+    state_.transport_connectivity_states = JoinValues(connectivity_states);
+    state_.transport_roles = JoinValues(transport_roles);
+    set_window_category(transport_count, transport_traffic_supported,
+        transport_traffic_warmed, state_.transport_traffic_availability,
+        state_.transport_traffic_reason, "no_transport_stats",
+        "transport_traffic_fields_missing",
+        "transport_traffic_baseline_warming_up",
+        "transport_traffic_window_valid", "transport_traffic_partial_coverage");
+    if (transport_count == 0) {
+        state_.transport_state_availability = Availability::Unknown;
+        state_.transport_state_reason = "no_transport_stats";
+    } else if (transport_state_supported == 0) {
+        state_.transport_state_availability = Availability::Unsupported;
+        state_.transport_state_reason = "transport_state_fields_missing";
+    } else {
+        state_.transport_state_availability = Availability::Valid;
+        state_.transport_state_reason = transport_state_supported == transport_count
+            ? "transport_state_valid" : "transport_state_partial_coverage";
+    }
+    if (transport_count == 0) {
+        state_.media_path_availability = Availability::Unknown;
+        state_.media_path_reason = "no_transport_stats";
+    } else if (selected_available == 0) {
+        state_.media_path_availability = Availability::Unknown;
+        state_.media_path_reason = "selected_candidate_pair_id_missing";
+    } else if (resolved == 0) {
+        state_.media_path_availability = Availability::Unknown;
+        state_.media_path_reason = "selected_candidate_pair_not_resolved";
+    } else {
+        state_.media_path_availability = Availability::Valid;
+        state_.media_path_reason = resolved == transport_count && detailed == resolved
+            ? "selected_media_path_valid" : "selected_media_path_partial_coverage";
+    }
+    if (resolved == 0) {
+        state_.media_path_rtt_availability = Availability::Unknown;
+        state_.media_path_rtt_reason = "selected_candidate_pair_not_resolved";
+        state_.media_bandwidth_availability = Availability::Unknown;
+        state_.media_bandwidth_reason = "selected_candidate_pair_not_resolved";
+    } else {
+        state_.media_path_rtt_availability = path_rtt_supported == 0
+            ? Availability::Unsupported : Availability::Valid;
+        state_.media_path_rtt_reason = path_rtt_supported == 0
+            ? "selected_path_rtt_field_missing"
+            : path_rtt_supported == resolved
+                ? "selected_path_rtt_valid" : "selected_path_rtt_partial_coverage";
+        state_.media_bandwidth_availability = bandwidth_supported == 0
+            ? Availability::Unsupported : Availability::Valid;
+        state_.media_bandwidth_reason = bandwidth_supported == 0
+            ? "selected_path_bandwidth_fields_missing"
+            : bandwidth_supported == resolved
+                ? "selected_path_bandwidth_valid"
+                : "selected_path_bandwidth_partial_coverage";
     }
     state_.last_sample_at = received_at;
 }
@@ -2209,7 +4562,9 @@ void SessionTelemetry::CompleteStatsOnStrand(
     completed.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         now - request_started).count();
     if (!provider_failed) {
+        UpdateLocalPublishStatsOnStrand(report, now);
         UpdateVideoStatsOnStrand(report, now);
+        UpdateNetworkStatsOnStrand(report, now);
         UpdateAudioStatsOnStrand(report, now);
     }
     ApplyOnStrand(completed);
@@ -2430,8 +4785,9 @@ void SessionTelemetry::FinalizeResourceSessionOnStrand() {
         state_.resource_final_delta_reason =
             "pre_stop_resource_sample_unavailable";
     }
-    state_.resource_return_availability = Availability::Unknown;
-    state_.resource_return_reason = "post_stop_stable_window_not_observed";
+    state_.resource_return_availability = Availability::Unsupported;
+    state_.resource_return_reason =
+        "post_stop_sampler_not_owned_after_session_teardown";
 }
 
 void SessionTelemetry::PopulateTelemetryCostOnSnapshot(
@@ -2514,6 +4870,8 @@ void SessionTelemetry::FinalizeStopOnStrand() {
 void SessionTelemetry::PublishSnapshotOnStrand(Clock::time_point now) {
     AssertOnStrand();
     UpdateRenderAvailabilityOnStrand(now);
+    UpdateLocalPublishAvailabilityOnStrand(now);
+    UpdateLocalDeviceStatsOnStrand(now);
     ++state_.revision;
     const auto build_started_at = Clock::now();
     auto snapshot = BuildSnapshotOnStrand(now);
@@ -2545,6 +4903,31 @@ Snapshot SessionTelemetry::BuildSnapshotOnStrand(Clock::time_point now) const {
     snapshot.session_complete = stop_finalized_;
     snapshot.stats_in_flight = stats_in_flight_;
     snapshot.revision = state_.revision;
+    const auto duration_end = session_stopped_at_ == Clock::time_point{}
+        ? now : session_stopped_at_;
+    snapshot.session_duration_availability = Availability::Valid;
+    snapshot.session_duration_reason = session_stopped_at_ == Clock::time_point{}
+        ? "session_duration_in_progress" : "session_duration_complete";
+    snapshot.session_duration_ms = MillisecondsBetween(
+        session_started_at_, duration_end);
+    const auto usable_tail = usable_since_ != Clock::time_point{} &&
+        duration_end >= usable_since_
+        ? std::chrono::duration_cast<std::chrono::milliseconds>(
+              duration_end - usable_since_)
+        : std::chrono::milliseconds::zero();
+    if (room_was_usable_) {
+        snapshot.usable_duration_availability = Availability::Valid;
+        snapshot.usable_duration_reason = session_stopped_at_ == Clock::time_point{}
+            ? "room_usable_duration_in_progress" : "room_usable_duration_complete";
+        snapshot.usable_duration_ms =
+            (usable_accumulated_ + usable_tail).count();
+    } else {
+        snapshot.usable_duration_availability = stop_finalized_
+            ? Availability::NotExpected : Availability::WarmingUp;
+        snapshot.usable_duration_reason = stop_finalized_
+            ? "room_never_became_usable" : "waiting_for_connect_success";
+        snapshot.usable_duration_ms = -1;
+    }
     {
         std::lock_guard lock(queue_mutex_);
         snapshot.queue_depth = queue_.size();
@@ -2571,6 +4954,12 @@ Snapshot SessionTelemetry::BuildSnapshotOnStrand(Clock::time_point now) const {
             return item.second.probe &&
                 item.second.probe->active.load(std::memory_order_acquire);
         }));
+    snapshot.internal_resource_availability = Availability::Valid;
+    snapshot.internal_resource_reason =
+        "session_owned_binding_and_publication_counts_valid";
+    snapshot.active_native_bindings = snapshot.remote_video_bindings +
+        snapshot.remote_audio_bindings + snapshot.render_bindings;
+    snapshot.active_local_media_streams = snapshot.active_local_publications;
     if (snapshot.last_resource_sample_at != Clock::time_point{}) {
         snapshot.resource_sample_age_ms = (std::max)(std::int64_t{0},
             std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -2633,6 +5022,70 @@ Snapshot SessionTelemetry::BuildSnapshotOnStrand(Clock::time_point now) const {
             if (snapshot.audio_time_stretch_availability == Availability::Valid) {
                 snapshot.audio_time_stretch_availability = Availability::Stale;
                 snapshot.audio_time_stretch_reason = "stats_sample_stale";
+            }
+            if (snapshot.network_recovery_availability == Availability::Valid) {
+                snapshot.network_recovery_availability = Availability::Stale;
+                snapshot.network_recovery_reason = "stats_sample_stale";
+            }
+            const auto stale_network = [](Availability& availability,
+                                           std::string& reason) {
+                if (availability == Availability::Valid) {
+                    availability = Availability::Stale;
+                    reason = "stats_sample_stale";
+                }
+            };
+            stale_network(snapshot.inbound_rtp_traffic_availability,
+                          snapshot.inbound_rtp_traffic_reason);
+            stale_network(snapshot.outbound_rtp_traffic_availability,
+                          snapshot.outbound_rtp_traffic_reason);
+            stale_network(snapshot.inbound_packet_loss_availability,
+                          snapshot.inbound_packet_loss_reason);
+            stale_network(snapshot.inbound_jitter_availability,
+                          snapshot.inbound_jitter_reason);
+            stale_network(snapshot.remote_rtcp_availability,
+                          snapshot.remote_rtcp_reason);
+            stale_network(snapshot.inbound_retransmission_availability,
+                          snapshot.inbound_retransmission_reason);
+            stale_network(snapshot.inbound_fec_availability,
+                          snapshot.inbound_fec_reason);
+            stale_network(snapshot.inbound_feedback_availability,
+                          snapshot.inbound_feedback_reason);
+            stale_network(snapshot.outbound_retransmission_availability,
+                          snapshot.outbound_retransmission_reason);
+            stale_network(snapshot.outbound_feedback_availability,
+                          snapshot.outbound_feedback_reason);
+            if (snapshot.media_path_availability == Availability::Valid) {
+                snapshot.media_path_availability = Availability::Stale;
+                snapshot.media_path_reason = "stats_sample_stale";
+            }
+            stale_network(snapshot.media_path_rtt_availability,
+                          snapshot.media_path_rtt_reason);
+            stale_network(snapshot.media_bandwidth_availability,
+                          snapshot.media_bandwidth_reason);
+            stale_network(snapshot.transport_traffic_availability,
+                          snapshot.transport_traffic_reason);
+            stale_network(snapshot.transport_state_availability,
+                          snapshot.transport_state_reason);
+            if (snapshot.video_quality_limitation_availability ==
+                Availability::Valid) {
+                snapshot.video_quality_limitation_availability = Availability::Stale;
+                snapshot.video_quality_limitation_reason = "stats_sample_stale";
+            }
+            stale_network(snapshot.video_pipeline_availability,
+                          snapshot.video_pipeline_reason);
+            stale_network(snapshot.video_codec_availability,
+                          snapshot.video_codec_reason);
+            stale_network(snapshot.video_processing_availability,
+                          snapshot.video_processing_reason);
+            if (snapshot.local_video_encode_availability == Availability::Valid &&
+                snapshot.expected_local_publications > 0) {
+                snapshot.local_video_encode_availability = Availability::Stale;
+                snapshot.local_video_encode_reason = "stats_sample_stale";
+            }
+            if (snapshot.local_rtp_send_availability == Availability::Valid &&
+                snapshot.expected_local_publications > 0) {
+                snapshot.local_rtp_send_availability = Availability::Stale;
+                snapshot.local_rtp_send_reason = "stats_sample_stale";
             }
         }
     }

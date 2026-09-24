@@ -28,6 +28,11 @@ public:
         const char* measurement_point,
         std::chrono::steady_clock::time_point source_time =
             std::chrono::steady_clock::now()) const;
+    void NotifyRenderStage(
+        const char* measurement_point,
+        std::chrono::microseconds duration,
+        std::chrono::steady_clock::time_point source_time =
+            std::chrono::steady_clock::now()) const;
     VideoRenderFrame(const VideoRenderFrame&) = delete;
     VideoRenderFrame& operator=(const VideoRenderFrame&) = delete;
 private:

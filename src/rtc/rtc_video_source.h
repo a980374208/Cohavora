@@ -10,6 +10,8 @@
 
 namespace livekit {
 
+namespace telemetry { struct LocalVideoActivityProbe; }
+
 class RtcVideoSource : public webrtc::AdaptedVideoTrackSource {
 public:
     static webrtc::scoped_refptr<RtcVideoSource> Create(std::shared_ptr<VideoSource> source, bool screencast = false);
@@ -24,6 +26,8 @@ public:
     std::optional<bool> needs_denoising() const override { return false; }
 
     VideoFrameDiagnostics frame_diagnostics() const noexcept;
+    void SetTelemetryProbe(
+        std::shared_ptr<telemetry::LocalVideoActivityProbe> probe) noexcept;
 
 private:
     void OnVideoFrame(const VideoFrame& frame, const VideoCaptureOptions& options);
@@ -36,6 +40,7 @@ private:
     std::atomic<std::uint64_t> input_frames_{0};
     std::atomic<std::uint64_t> output_frames_{0};
     std::atomic<std::uint64_t> dropped_frames_{0};
+    std::shared_ptr<telemetry::LocalVideoActivityProbe> telemetry_probe_;
     std::shared_ptr<VideoSource::Subscription> subscription_;
 };
 

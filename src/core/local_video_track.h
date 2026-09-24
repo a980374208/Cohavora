@@ -10,6 +10,7 @@
 namespace livekit {
 
 class RtcVideoSource;
+namespace telemetry { struct LocalVideoActivityProbe; }
 
 class LocalVideoTrack : public Track {
 public:
@@ -27,6 +28,8 @@ public:
     VideoFrameDiagnostics frame_diagnostics() const noexcept;
     // Bind the exact native bridge at normal or delayed RTC-track creation.
     void set_rtc_source_for_diagnostics(webrtc::scoped_refptr<RtcVideoSource> source);
+    void set_publish_telemetry_probe(
+        std::shared_ptr<telemetry::LocalVideoActivityProbe> probe);
 
     void set_publish_options(const VideoPublishOptions& options) { publish_options_ = options; }
     VideoPublishOptions publish_options() const { return publish_options_; }
@@ -42,6 +45,7 @@ private:
     std::shared_ptr<VideoSource> source_;
     mutable std::mutex rtc_source_mutex_;
     webrtc::scoped_refptr<RtcVideoSource> rtc_source_;
+    std::shared_ptr<telemetry::LocalVideoActivityProbe> publish_telemetry_probe_;
     VideoPublishOptions publish_options_;
 };
 

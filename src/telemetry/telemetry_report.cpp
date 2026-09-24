@@ -113,6 +113,62 @@ MetricValue Ratio(double value) {
     return value < 0.0 ? MetricValue{std::monostate{}} : MetricValue{value};
 }
 
+MetricValue RatioWhenSupported(double value, Availability availability) {
+    return availability == Availability::Unsupported ||
+           availability == Availability::Unknown ||
+           availability == Availability::NotExpected
+        ? MetricValue{std::monostate{}}
+        : Ratio(value);
+}
+
+MetricValue ValueWhenSupported(std::uint64_t value, Availability availability) {
+    return availability == Availability::Unsupported ||
+           availability == Availability::Unknown ||
+           availability == Availability::NotExpected
+        ? MetricValue{std::monostate{}}
+        : MetricValue{value};
+}
+
+MetricValue SignedValueWhenSupported(std::int64_t value, Availability availability) {
+    return availability == Availability::Unsupported ||
+           availability == Availability::Unknown ||
+           availability == Availability::NotExpected
+        ? MetricValue{std::monostate{}}
+        : MetricValue{value};
+}
+
+MetricValue WindowValue(std::uint64_t value, Availability availability) {
+    return availability == Availability::Valid || availability == Availability::Stale
+        ? MetricValue{value} : MetricValue{std::monostate{}};
+}
+
+MetricValue SignedWindowValue(std::int64_t value, Availability availability) {
+    return availability == Availability::Valid ||
+           availability == Availability::Stale ||
+           availability == Availability::Invalid
+        ? MetricValue{value} : MetricValue{std::monostate{}};
+}
+
+MetricValue CorrectableWindowValue(
+        std::uint64_t value,
+        Availability availability) {
+    return availability == Availability::Valid ||
+           availability == Availability::Stale ||
+           availability == Availability::Invalid
+        ? MetricValue{value} : MetricValue{std::monostate{}};
+}
+
+Availability ParseAvailability(const std::string& value) {
+    if (value == "VALID") return Availability::Valid;
+    if (value == "WARMING_UP") return Availability::WarmingUp;
+    if (value == "NOT_EXPECTED") return Availability::NotExpected;
+    if (value == "UNSUPPORTED") return Availability::Unsupported;
+    if (value == "TIMEOUT") return Availability::Timeout;
+    if (value == "STALE") return Availability::Stale;
+    if (value == "INVALID") return Availability::Invalid;
+    return Availability::Unknown;
+}
+
 std::uint64_t DirectoryKnownSize(const std::filesystem::path& directory) {
     std::uint64_t total = 0;
     std::error_code error;
@@ -175,7 +231,7 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     const SafeTelemetryRecord& record) {
     const auto& s = record.snapshot;
     std::vector<SafeMetricRow> rows;
-    rows.reserve(150);
+    rows.reserve(270);
     const auto base = [&](std::string key, MetricValue value, std::string unit = {}) {
         AddMetric(rows, std::move(key), std::move(value), std::move(unit),
                   s.availability, s.reason);
@@ -189,6 +245,12 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
 
     base("coverage", s.coverage, "ratio");
     base("sample_age", Signed(s.sample_age_ms), "ms");
+    group("session.duration", Signed(s.session_duration_ms), "ms",
+          s.session_duration_availability, s.session_duration_reason,
+          s.session_duration_measurement_point);
+    group("session.usable_duration", Signed(s.usable_duration_ms), "ms",
+          s.usable_duration_availability, s.usable_duration_reason,
+          s.usable_duration_measurement_point);
     base("queue.capacity", static_cast<std::uint64_t>(s.queue_capacity), "events");
     base("queue.depth", static_cast<std::uint64_t>(s.queue_depth), "events");
     base("queue.high_water", static_cast<std::uint64_t>(s.queue_high_water), "events");
@@ -276,6 +338,27 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
           s.resource_final_delta_availability, s.resource_final_delta_reason);
     group("resource.return", std::monostate{}, "",
           s.resource_return_availability, s.resource_return_reason);
+    group("resource.internal.native_bindings", s.active_native_bindings, "bindings",
+          s.internal_resource_availability, s.internal_resource_reason,
+          "session_owned_lifecycle_registry");
+    group("resource.internal.local_media_streams", s.active_local_media_streams,
+          "streams", s.internal_resource_availability, s.internal_resource_reason,
+          "session_owned_lifecycle_registry");
+    group("resource.internal.router_slots", s.active_router_slots, "slots",
+          s.router_queue_availability, s.router_queue_reason,
+          "bounded_latest_frame_router");
+    group("resource.queue.router.submitted", s.router_frames_submitted, "frames",
+          s.router_queue_availability, s.router_queue_reason,
+          "bounded_latest_frame_router");
+    group("resource.queue.router.replaced", s.router_frames_replaced, "frames",
+          s.router_queue_availability, s.router_queue_reason,
+          "bounded_latest_frame_router");
+    group("resource.queue.router.capacity_drops", s.router_capacity_drops, "frames",
+          s.router_queue_availability, s.router_queue_reason,
+          "bounded_latest_frame_router");
+    group("resource.queue.export", std::monostate{}, "items",
+          s.export_queue_availability, s.export_queue_reason,
+          "telemetry_history_exporter");
 
     group("runtime.strand_lag.samples", s.strand_lag_samples, "samples",
           s.strand_lag_availability, s.strand_lag_reason);
@@ -314,6 +397,411 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     base("operations.duplicate_terminal", s.operations_duplicate_terminal, "operations");
     base("operations.kind_mismatch", s.operations_kind_mismatch, "operations");
 
+    group("publish.media.publications", s.local_publications, "publications",
+          s.local_publish_media_availability, s.local_publish_media_reason,
+          s.local_publish_media_algorithm);
+    group("publish.media.active", s.active_local_publications, "publications",
+          s.local_publish_media_availability, s.local_publish_media_reason,
+          s.local_publish_media_algorithm);
+    group("publish.media.expected", s.expected_local_publications, "publications",
+          s.local_publish_media_availability, s.local_publish_media_reason,
+          s.local_publish_media_algorithm);
+    group("publish.media.no_media", s.local_publish_no_media, "publications",
+          s.local_publish_media_availability, s.local_publish_media_reason,
+          s.local_publish_media_algorithm);
+    group("publish.media.stale_callback_drops", s.stale_local_publication_drops,
+          "callbacks", s.local_publish_media_availability,
+          s.local_publish_media_reason, s.local_publish_media_algorithm);
+    group("publish.video.first_injections", s.local_video_first_injections, "frames",
+          s.local_video_injection_availability,
+          s.local_video_injection_reason,
+          s.local_video_injection_measurement_point);
+    group("publish.video.accepted_to_injection",
+          Signed(s.last_publish_to_video_injection_ms), "ms",
+          s.local_video_injection_availability,
+          s.local_video_injection_reason,
+          s.local_video_injection_measurement_point);
+    group("publish.video.first_encodes", s.local_video_first_encodes, "frames",
+          s.local_video_encode_availability,
+          s.local_video_encode_reason,
+          s.local_video_encode_measurement_point);
+    group("publish.video.accepted_to_encode",
+          Signed(s.last_publish_to_video_encode_ms), "ms",
+          s.local_video_encode_availability,
+          s.local_video_encode_reason,
+          s.local_video_encode_measurement_point);
+    group("publish.rtp.first_sends", s.local_first_rtp_sends, "streams",
+          s.local_rtp_send_availability, s.local_rtp_send_reason,
+          s.local_rtp_send_measurement_point);
+    group("publish.rtp.accepted_to_send",
+          Signed(s.last_publish_to_rtp_send_ms), "ms",
+          s.local_rtp_send_availability, s.local_rtp_send_reason,
+          s.local_rtp_send_measurement_point);
+    group("publish.stats.uncertainty",
+          Signed(s.local_publish_stats_uncertainty_ms), "ms",
+          s.local_rtp_send_availability, s.local_rtp_send_reason,
+          s.local_rtp_send_measurement_point);
+
+    group("network.rtp.inbound.streams", s.inbound_rtp_streams, "streams",
+          s.inbound_rtp_traffic_availability, s.inbound_rtp_traffic_reason,
+          s.rtp_traffic_measurement_point);
+    group("network.rtp.inbound.bytes.cumulative",
+          ValueWhenSupported(s.inbound_rtp_bytes,
+              s.inbound_rtp_traffic_availability), "bytes",
+          s.inbound_rtp_traffic_availability, s.inbound_rtp_traffic_reason,
+          s.rtp_traffic_measurement_point);
+    group("network.rtp.inbound.bytes.window",
+          WindowValue(s.window_inbound_rtp_bytes,
+              s.inbound_rtp_traffic_availability), "bytes",
+          s.inbound_rtp_traffic_availability, s.inbound_rtp_traffic_reason,
+          s.rtp_traffic_measurement_point);
+    group("network.rtp.inbound.bitrate",
+          RatioWhenSupported(s.inbound_rtp_bitrate_bps,
+              s.inbound_rtp_traffic_availability), "bps",
+          s.inbound_rtp_traffic_availability, s.inbound_rtp_traffic_reason,
+          s.rtp_traffic_measurement_point);
+    group("network.rtp.outbound.streams", s.outbound_rtp_streams, "streams",
+          s.outbound_rtp_traffic_availability, s.outbound_rtp_traffic_reason,
+          s.rtp_traffic_measurement_point);
+    group("network.rtp.outbound.bytes.cumulative",
+          ValueWhenSupported(s.outbound_rtp_bytes,
+              s.outbound_rtp_traffic_availability), "bytes",
+          s.outbound_rtp_traffic_availability, s.outbound_rtp_traffic_reason,
+          s.rtp_traffic_measurement_point);
+    group("network.rtp.outbound.bytes.window",
+          WindowValue(s.window_outbound_rtp_bytes,
+              s.outbound_rtp_traffic_availability), "bytes",
+          s.outbound_rtp_traffic_availability, s.outbound_rtp_traffic_reason,
+          s.rtp_traffic_measurement_point);
+    group("network.rtp.outbound.bitrate",
+          RatioWhenSupported(s.outbound_rtp_bitrate_bps,
+              s.outbound_rtp_traffic_availability), "bps",
+          s.outbound_rtp_traffic_availability, s.outbound_rtp_traffic_reason,
+          s.rtp_traffic_measurement_point);
+    group("network.inbound.loss.cumulative",
+          SignedValueWhenSupported(s.inbound_packets_lost,
+              s.inbound_packet_loss_availability), "packets",
+          s.inbound_packet_loss_availability, s.inbound_packet_loss_reason,
+          s.inbound_packet_loss_measurement_point);
+    group("network.inbound.loss.window",
+          SignedWindowValue(s.window_inbound_packets_lost,
+              s.inbound_packet_loss_availability), "packets",
+          s.inbound_packet_loss_availability, s.inbound_packet_loss_reason,
+          s.inbound_packet_loss_measurement_point);
+    group("network.inbound.received.window",
+          CorrectableWindowValue(s.window_inbound_packets_received,
+              s.inbound_packet_loss_availability), "packets",
+          s.inbound_packet_loss_availability,
+          s.inbound_packet_loss_reason, s.inbound_packet_loss_measurement_point);
+    group("network.inbound.loss.ratio",
+          RatioWhenSupported(s.inbound_packet_loss_ratio,
+              s.inbound_packet_loss_availability), "ratio",
+          s.inbound_packet_loss_availability, s.inbound_packet_loss_reason,
+          s.inbound_packet_loss_measurement_point);
+    group("network.inbound.jitter.maximum",
+          RatioWhenSupported(s.inbound_jitter_max_ms,
+              s.inbound_jitter_availability), "ms",
+          s.inbound_jitter_availability, s.inbound_jitter_reason,
+          "rtc_inbound_rtp_jitter_current");
+    group("network.remote_rtcp.streams", s.remote_rtcp_streams, "streams",
+          s.remote_rtcp_availability, s.remote_rtcp_reason,
+          s.remote_rtcp_measurement_point);
+    group("network.remote_rtcp.current_rtt.maximum",
+          RatioWhenSupported(s.remote_rtcp_current_rtt_max_ms,
+              s.remote_rtcp_availability), "ms",
+          s.remote_rtcp_availability, s.remote_rtcp_reason,
+          s.remote_rtcp_measurement_point);
+    group("network.remote_rtcp.window_rtt.average",
+          RatioWhenSupported(s.remote_rtcp_window_average_rtt_ms,
+              s.remote_rtcp_availability), "ms",
+          s.remote_rtcp_availability, s.remote_rtcp_reason,
+          s.remote_rtcp_measurement_point);
+    group("network.remote_rtcp.fraction_lost.maximum",
+          RatioWhenSupported(s.remote_rtcp_fraction_lost_max,
+              s.remote_rtcp_availability), "ratio",
+          s.remote_rtcp_availability, s.remote_rtcp_reason,
+          s.remote_rtcp_measurement_point);
+
+    group("network.recovery.streams", s.network_recovery_streams, "streams",
+          s.network_recovery_availability, s.network_recovery_reason,
+          s.network_recovery_measurement_point);
+    group("network.recovery.ratio_denominator",
+          SafeText(s.network_retransmit_ratio_denominator), "definition",
+          s.network_recovery_availability, s.network_recovery_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.retransmitted_packets.cumulative",
+          ValueWhenSupported(s.inbound_retransmitted_packets,
+              s.inbound_retransmission_availability), "packets",
+          s.inbound_retransmission_availability, s.inbound_retransmission_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.retransmitted_bytes.cumulative",
+          ValueWhenSupported(s.inbound_retransmitted_bytes,
+              s.inbound_retransmission_availability), "bytes",
+          s.inbound_retransmission_availability, s.inbound_retransmission_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.fec_packets.cumulative",
+          ValueWhenSupported(s.inbound_fec_packets, s.inbound_fec_availability), "packets",
+          s.inbound_fec_availability, s.inbound_fec_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.fec_bytes.cumulative",
+          ValueWhenSupported(s.inbound_fec_bytes, s.inbound_fec_availability), "bytes",
+          s.inbound_fec_availability, s.inbound_fec_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.fec_discarded.cumulative",
+          ValueWhenSupported(s.inbound_fec_discarded_packets,
+              s.inbound_fec_availability), "packets",
+          s.inbound_fec_availability, s.inbound_fec_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.nack.cumulative",
+          ValueWhenSupported(s.inbound_nack_count, s.inbound_feedback_availability), "events",
+          s.inbound_feedback_availability, s.inbound_feedback_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.pli.cumulative",
+          ValueWhenSupported(s.inbound_pli_count, s.inbound_feedback_availability), "events",
+          s.inbound_feedback_availability, s.inbound_feedback_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.fir.cumulative",
+          ValueWhenSupported(s.inbound_fir_count, s.inbound_feedback_availability), "events",
+          s.inbound_feedback_availability, s.inbound_feedback_reason,
+          s.network_recovery_measurement_point);
+    group("network.outbound.retransmitted_packets.cumulative",
+          ValueWhenSupported(s.outbound_retransmitted_packets,
+              s.outbound_retransmission_availability), "packets",
+          s.outbound_retransmission_availability, s.outbound_retransmission_reason,
+          s.network_recovery_measurement_point);
+    group("network.outbound.retransmitted_bytes.cumulative",
+          ValueWhenSupported(s.outbound_retransmitted_bytes,
+              s.outbound_retransmission_availability), "bytes",
+          s.outbound_retransmission_availability, s.outbound_retransmission_reason,
+          s.network_recovery_measurement_point);
+    group("network.outbound.nack.cumulative",
+          ValueWhenSupported(s.outbound_nack_count, s.outbound_feedback_availability), "events",
+          s.outbound_feedback_availability, s.outbound_feedback_reason,
+          s.network_recovery_measurement_point);
+    group("network.outbound.pli.cumulative",
+          ValueWhenSupported(s.outbound_pli_count, s.outbound_feedback_availability), "events",
+          s.outbound_feedback_availability, s.outbound_feedback_reason,
+          s.network_recovery_measurement_point);
+    group("network.outbound.fir.cumulative",
+          ValueWhenSupported(s.outbound_fir_count, s.outbound_feedback_availability), "events",
+          s.outbound_feedback_availability, s.outbound_feedback_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.packets.window",
+          WindowValue(s.window_inbound_packets, s.inbound_retransmission_availability), "packets",
+          s.inbound_retransmission_availability, s.inbound_retransmission_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.retransmitted_packets.window",
+          WindowValue(s.window_inbound_retransmitted_packets,
+              s.inbound_retransmission_availability), "packets",
+          s.inbound_retransmission_availability, s.inbound_retransmission_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.fec_packets.window",
+          WindowValue(s.window_inbound_fec_packets, s.inbound_fec_availability), "packets",
+          s.inbound_fec_availability, s.inbound_fec_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.nack.window",
+          WindowValue(s.window_inbound_nack_count, s.inbound_feedback_availability), "events",
+          s.inbound_feedback_availability, s.inbound_feedback_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.pli.window",
+          WindowValue(s.window_inbound_pli_count, s.inbound_feedback_availability), "events",
+          s.inbound_feedback_availability, s.inbound_feedback_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.fir.window",
+          WindowValue(s.window_inbound_fir_count, s.inbound_feedback_availability), "events",
+          s.inbound_feedback_availability, s.inbound_feedback_reason,
+          s.network_recovery_measurement_point);
+    group("network.inbound.retransmitted_packet_ratio",
+          Ratio(s.inbound_retransmitted_packet_ratio), "ratio",
+          s.inbound_retransmission_availability, s.inbound_retransmission_reason,
+          s.network_recovery_measurement_point);
+    group("network.outbound.packets.window",
+          WindowValue(s.window_outbound_packets, s.outbound_retransmission_availability), "packets",
+          s.outbound_retransmission_availability, s.outbound_retransmission_reason,
+          s.network_recovery_measurement_point);
+    group("network.outbound.retransmitted_packets.window",
+          WindowValue(s.window_outbound_retransmitted_packets,
+              s.outbound_retransmission_availability), "packets",
+          s.outbound_retransmission_availability, s.outbound_retransmission_reason,
+          s.network_recovery_measurement_point);
+    group("network.outbound.nack.window",
+          WindowValue(s.window_outbound_nack_count, s.outbound_feedback_availability), "events",
+          s.outbound_feedback_availability, s.outbound_feedback_reason,
+          s.network_recovery_measurement_point);
+    group("network.outbound.pli.window",
+          WindowValue(s.window_outbound_pli_count, s.outbound_feedback_availability), "events",
+          s.outbound_feedback_availability, s.outbound_feedback_reason,
+          s.network_recovery_measurement_point);
+    group("network.outbound.fir.window",
+          WindowValue(s.window_outbound_fir_count, s.outbound_feedback_availability), "events",
+          s.outbound_feedback_availability, s.outbound_feedback_reason,
+          s.network_recovery_measurement_point);
+    group("network.outbound.retransmitted_packet_ratio",
+          Ratio(s.outbound_retransmitted_packet_ratio), "ratio",
+          s.outbound_retransmission_availability, s.outbound_retransmission_reason,
+          s.network_recovery_measurement_point);
+
+    group("network.path.selected_transports", s.selected_media_transports, "transports",
+          s.media_path_availability, s.media_path_reason,
+          s.media_path_measurement_point);
+    group("network.path.switches", s.media_path_switches, "switches",
+          s.media_path_availability, s.media_path_reason,
+          s.media_path_measurement_point);
+    group("network.path.local_candidate_types", SafeText(s.local_candidate_types), "types",
+          s.media_path_availability, s.media_path_reason,
+          s.media_path_measurement_point);
+    group("network.path.remote_candidate_types", SafeText(s.remote_candidate_types), "types",
+          s.media_path_availability, s.media_path_reason,
+          s.media_path_measurement_point);
+    group("network.path.local_network_types", SafeText(s.local_network_types), "types",
+          s.media_path_availability, s.media_path_reason,
+          s.media_path_measurement_point);
+    group("network.path.media_protocols", SafeText(s.media_protocols), "protocols",
+          s.media_path_availability, s.media_path_reason,
+          s.media_path_measurement_point);
+    group("network.path.relay_protocols", SafeText(s.relay_protocols), "protocols",
+          s.media_path_availability, s.media_path_reason,
+          s.media_path_measurement_point);
+    group("network.path.tcp_types", SafeText(s.tcp_types), "types",
+          s.media_path_availability, s.media_path_reason,
+          s.media_path_measurement_point);
+    group("network.path.rtt.maximum",
+          RatioWhenSupported(s.media_path_rtt_max_ms,
+              s.media_path_rtt_availability), "ms",
+          s.media_path_rtt_availability, s.media_path_rtt_reason,
+          s.media_path_measurement_point);
+    group("network.path.available_outgoing_bitrate.maximum",
+          RatioWhenSupported(s.media_available_outgoing_bitrate_bps,
+              s.media_bandwidth_availability), "bps",
+          s.media_bandwidth_availability, s.media_bandwidth_reason,
+          s.media_path_measurement_point);
+    group("network.path.available_incoming_bitrate.maximum",
+          RatioWhenSupported(s.media_available_incoming_bitrate_bps,
+              s.media_bandwidth_availability), "bps",
+          s.media_bandwidth_availability, s.media_bandwidth_reason,
+          s.media_path_measurement_point);
+    group("network.transport.count", s.transport_stats_count, "transports",
+          s.transport_traffic_availability, s.transport_traffic_reason,
+          s.transport_traffic_measurement_point);
+    group("network.transport.bytes_sent.cumulative",
+          ValueWhenSupported(s.transport_bytes_sent,
+              s.transport_traffic_availability), "bytes",
+          s.transport_traffic_availability, s.transport_traffic_reason,
+          s.transport_traffic_measurement_point);
+    group("network.transport.bytes_received.cumulative",
+          ValueWhenSupported(s.transport_bytes_received,
+              s.transport_traffic_availability), "bytes",
+          s.transport_traffic_availability, s.transport_traffic_reason,
+          s.transport_traffic_measurement_point);
+    group("network.transport.packets_sent.cumulative",
+          ValueWhenSupported(s.transport_packets_sent,
+              s.transport_traffic_availability), "packets",
+          s.transport_traffic_availability, s.transport_traffic_reason,
+          s.transport_traffic_measurement_point);
+    group("network.transport.packets_received.cumulative",
+          ValueWhenSupported(s.transport_packets_received,
+              s.transport_traffic_availability), "packets",
+          s.transport_traffic_availability, s.transport_traffic_reason,
+          s.transport_traffic_measurement_point);
+    group("network.transport.bytes_sent.window",
+          WindowValue(s.window_transport_bytes_sent,
+              s.transport_traffic_availability), "bytes",
+          s.transport_traffic_availability, s.transport_traffic_reason,
+          s.transport_traffic_measurement_point);
+    group("network.transport.bytes_received.window",
+          WindowValue(s.window_transport_bytes_received,
+              s.transport_traffic_availability), "bytes",
+          s.transport_traffic_availability, s.transport_traffic_reason,
+          s.transport_traffic_measurement_point);
+    group("network.transport.packets_sent.window",
+          WindowValue(s.window_transport_packets_sent,
+              s.transport_traffic_availability), "packets",
+          s.transport_traffic_availability, s.transport_traffic_reason,
+          s.transport_traffic_measurement_point);
+    group("network.transport.packets_received.window",
+          WindowValue(s.window_transport_packets_received,
+              s.transport_traffic_availability), "packets",
+          s.transport_traffic_availability, s.transport_traffic_reason,
+          s.transport_traffic_measurement_point);
+    group("network.transport.dtls_states", SafeText(s.transport_dtls_states),
+          "states", s.transport_state_availability, s.transport_state_reason,
+          s.transport_traffic_measurement_point);
+    group("network.transport.connectivity_states",
+          SafeText(s.transport_connectivity_states), "states",
+          s.transport_state_availability, s.transport_state_reason,
+          s.transport_traffic_measurement_point);
+    group("network.transport.roles", SafeText(s.transport_roles), "roles",
+          s.transport_state_availability, s.transport_state_reason,
+          s.transport_traffic_measurement_point);
+
+    group("device.local.expected_streams", s.expected_local_device_streams, "streams",
+          s.local_device_continuity_availability,
+          s.local_device_continuity_reason,
+          s.local_device_continuity_measurement_point);
+    group("device.local.active_streams", s.active_local_device_streams, "streams",
+          s.local_device_continuity_availability,
+          s.local_device_continuity_reason,
+          s.local_device_continuity_measurement_point);
+    group("device.local.unexpected_stops", s.local_device_unexpected_stops, "events",
+          s.local_device_continuity_availability,
+          s.local_device_continuity_reason,
+          s.local_device_continuity_algorithm);
+    group("device.local.interruption_duration",
+          s.local_device_interruption_duration_ms, "ms",
+          s.local_device_continuity_availability,
+          s.local_device_continuity_reason,
+          s.local_device_continuity_algorithm);
+    group("device.local.format_changes", s.local_device_format_changes, "events",
+          s.local_device_continuity_availability,
+          s.local_device_continuity_reason,
+          s.local_device_continuity_measurement_point);
+    group("device.local.video_clock_resets", s.local_device_clock_resets, "events",
+          s.local_device_continuity_availability,
+          s.local_device_continuity_reason,
+          "rtc_local_video_capture_timestamp");
+    group("device.open", std::monostate{}, "operations",
+          s.device_open_availability, s.device_open_reason,
+          s.device_open_measurement_point);
+    group("device.hotplug", std::monostate{}, "events",
+          s.device_hotplug_availability, s.device_hotplug_reason,
+          s.device_hotplug_measurement_point);
+    group("device.switch.attempts", s.device_switch_attempts, "operations",
+          s.device_failure_availability, s.device_failure_reason,
+          "typed_device_switch_operation_ledger");
+    group("device.switch.successes", s.device_switch_successes, "operations",
+          s.device_failure_availability, s.device_failure_reason,
+          "typed_device_switch_operation_ledger");
+    group("device.switch.failures", s.device_switch_failures, "operations",
+          s.device_failure_availability, s.device_failure_reason,
+          "typed_device_switch_operation_ledger");
+    group("device.switch.timeouts", s.device_switch_timeouts, "operations",
+          s.device_failure_availability, s.device_failure_reason,
+          "typed_device_switch_operation_ledger");
+    group("device.state.microphone_requested", s.microphone_requested, "bool",
+          s.device_state_availability, s.device_state_reason,
+          s.device_state_measurement_point);
+    group("device.state.microphone_effective", s.microphone_effective, "bool",
+          s.device_state_availability, s.device_state_reason,
+          s.device_state_measurement_point);
+    group("device.state.camera_requested", s.camera_requested, "bool",
+          s.device_state_availability, s.device_state_reason,
+          s.device_state_measurement_point);
+    group("device.state.camera_effective", s.camera_effective, "bool",
+          s.device_state_availability, s.device_state_reason,
+          s.device_state_measurement_point);
+    group("device.state.capture_width", static_cast<std::uint64_t>(s.actual_capture_width),
+          "pixels", s.device_state_availability, s.device_state_reason,
+          s.device_state_measurement_point);
+    group("device.state.capture_height", static_cast<std::uint64_t>(s.actual_capture_height),
+          "pixels", s.device_state_availability, s.device_state_reason,
+          s.device_state_measurement_point);
+    group("device.state.sample_rate", static_cast<std::uint64_t>(s.actual_capture_sample_rate),
+          "Hz", s.device_state_availability, s.device_state_reason,
+          s.device_state_measurement_point);
+    group("device.state.channels", static_cast<std::uint64_t>(s.actual_capture_channels),
+          "channels", s.device_state_availability, s.device_state_reason,
+          s.device_state_measurement_point);
+
     group("video.first_frame.bindings", s.remote_video_bindings, "bindings",
           s.remote_video_first_frame_availability, s.remote_video_first_frame_reason,
           s.remote_video_first_frame_measurement_point);
@@ -347,6 +835,129 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("video.native_freeze.duration", Signed(s.native_video_freeze_duration_ms), "ms",
           s.native_video_freeze_availability, s.native_video_freeze_reason,
           s.native_video_freeze_measurement_point);
+    group("video.quality.streams", s.outbound_video_streams, "streams",
+          s.video_quality_limitation_availability,
+          s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.current_reasons",
+          SafeText(s.video_quality_limitation_current), "native_reasons",
+          s.video_quality_limitation_availability,
+          s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.duration.none", Signed(s.video_quality_none_duration_ms), "ms",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.duration.cpu", Signed(s.video_quality_cpu_duration_ms), "ms",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.duration.bandwidth", Signed(s.video_quality_bandwidth_duration_ms), "ms",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.duration.other", Signed(s.video_quality_other_duration_ms), "ms",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.window.none", Signed(s.window_video_quality_none_duration_ms), "ms",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.window.cpu", Signed(s.window_video_quality_cpu_duration_ms), "ms",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.window.bandwidth", Signed(s.window_video_quality_bandwidth_duration_ms), "ms",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.window.other", Signed(s.window_video_quality_other_duration_ms), "ms",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.resolution_changes", Signed(s.video_quality_resolution_changes), "changes",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.window_resolution_changes",
+          Signed(s.window_video_quality_resolution_changes), "changes",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.output_width", static_cast<std::uint64_t>(s.outbound_video_width), "pixels",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.output_height", static_cast<std::uint64_t>(s.outbound_video_height), "pixels",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.quality.output_fps", Ratio(s.outbound_video_fps), "frames/s",
+          s.video_quality_limitation_availability, s.video_quality_limitation_reason,
+          s.video_quality_limitation_measurement_point);
+    group("video.pipeline.inbound_received", s.inbound_video_frames_received, "frames",
+          s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.inbound_decoded", s.inbound_video_frames_decoded, "frames",
+          s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.inbound_dropped", s.inbound_video_frames_dropped, "frames",
+          s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.outbound_encoded", s.outbound_video_frames_encoded, "frames",
+          s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.outbound_sent", s.outbound_video_frames_sent, "frames",
+          s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.window_inbound_received",
+          s.window_inbound_video_frames_received, "frames",
+          s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.window_inbound_decoded",
+          s.window_inbound_video_frames_decoded, "frames",
+          s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.window_inbound_dropped",
+          s.window_inbound_video_frames_dropped, "frames",
+          s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.window_outbound_encoded",
+          s.window_outbound_video_frames_encoded, "frames",
+          s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.window_outbound_sent",
+          s.window_outbound_video_frames_sent, "frames",
+          s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.inbound_drop_ratio", Ratio(s.inbound_video_frame_drop_ratio),
+          "ratio", s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.inbound_width", static_cast<std::uint64_t>(s.inbound_video_width),
+          "pixels", s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.inbound_height", static_cast<std::uint64_t>(s.inbound_video_height),
+          "pixels", s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.pipeline.inbound_fps", Ratio(s.inbound_video_fps), "frames/s",
+          s.video_pipeline_availability, s.video_pipeline_reason,
+          s.video_pipeline_measurement_point);
+    group("video.codec.inbound", SafeText(s.inbound_video_codecs), "codecs",
+          s.video_codec_availability, s.video_codec_reason,
+          s.video_codec_measurement_point);
+    group("video.codec.outbound", SafeText(s.outbound_video_codecs), "codecs",
+          s.video_codec_availability, s.video_codec_reason,
+          s.video_codec_measurement_point);
+    group("video.codec.decoders", SafeText(s.decoder_implementations), "implementations",
+          s.video_codec_availability, s.video_codec_reason,
+          s.video_codec_measurement_point);
+    group("video.codec.encoders", SafeText(s.encoder_implementations), "implementations",
+          s.video_codec_availability, s.video_codec_reason,
+          s.video_codec_measurement_point);
+    group("video.codec.decoder_power_efficient", SafeText(s.decoder_power_efficiency),
+          "states", s.video_codec_availability, s.video_codec_reason,
+          s.video_codec_measurement_point);
+    group("video.codec.encoder_power_efficient", SafeText(s.encoder_power_efficiency),
+          "states", s.video_codec_availability, s.video_codec_reason,
+          s.video_codec_measurement_point);
+    group("video.codec.layers", SafeText(s.outbound_video_layers), "layers",
+          s.video_codec_availability, s.video_codec_reason,
+          s.video_codec_measurement_point);
+    group("video.processing.decode_average", Ratio(s.video_decode_ms_per_frame),
+          "ms/frame", s.video_processing_availability, s.video_processing_reason,
+          s.video_processing_measurement_point);
+    group("video.processing.encode_average", Ratio(s.video_encode_ms_per_frame),
+          "ms/frame", s.video_processing_availability, s.video_processing_reason,
+          s.video_processing_measurement_point);
 
     group("reconnect.video.expected", s.reconnect_video_expected, "recoveries",
           s.reconnect_video_availability, s.reconnect_video_reason,
@@ -473,6 +1084,39 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("render.interval.maximum", Signed(s.render_maximum_interval_ms), "ms",
           s.render_first_frame_availability, s.render_first_frame_reason,
           s.render_first_frame_measurement_point);
+    group("render.interval.p50", Ratio(s.render_interval_p50_ms), "ms",
+          s.render_first_frame_availability, s.render_first_frame_reason,
+          s.render_first_frame_measurement_point);
+    group("render.interval.p95", Ratio(s.render_interval_p95_ms), "ms",
+          s.render_first_frame_availability, s.render_first_frame_reason,
+          s.render_first_frame_measurement_point);
+    group("render.interval.p99", Ratio(s.render_interval_p99_ms), "ms",
+          s.render_first_frame_availability, s.render_first_frame_reason,
+          s.render_first_frame_measurement_point);
+    group("render.submit_fps", Ratio(s.render_submit_fps), "frames/s",
+          s.render_first_frame_availability, s.render_first_frame_reason,
+          s.render_first_frame_measurement_point);
+    group("render.frame_age.average", Ratio(s.render_average_frame_age_ms), "ms",
+          s.render_frame_age_availability, s.render_frame_age_reason,
+          s.render_frame_age_measurement_point);
+    group("render.frame_age.maximum", Signed(s.render_maximum_frame_age_ms), "ms",
+          s.render_frame_age_availability, s.render_frame_age_reason,
+          s.render_frame_age_measurement_point);
+    group("render.policy.target_interval", Signed(s.render_target_interval_ms), "ms",
+          s.render_first_frame_availability, s.render_first_frame_reason,
+          "render_binding_target_cadence");
+    group("render.policy.expected_bindings", s.render_expected_bindings, "bindings",
+          s.render_first_frame_availability, s.render_first_frame_reason,
+          "render_visibility_expectation");
+    group("render.policy.hidden_bindings", s.render_hidden_bindings, "bindings",
+          s.render_first_frame_availability, s.render_first_frame_reason,
+          "render_visibility_expectation");
+    group("render.policy.minimized_bindings", s.render_minimized_bindings, "bindings",
+          s.render_first_frame_availability, s.render_first_frame_reason,
+          "render_visibility_expectation");
+    group("render.policy.latest_frame_replacements", s.render_policy_skipped_frames,
+          "frames", s.router_queue_availability, s.router_queue_reason,
+          "bounded_latest_frame_router");
     group("render.stall.algorithm", SafeText(s.render_stall_algorithm), "version",
           s.render_stall_availability, s.render_stall_reason,
           s.render_first_frame_measurement_point);
@@ -494,6 +1138,102 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("render.stall.active", s.render_stall_active, "bool",
           s.render_stall_availability, s.render_stall_reason,
           s.render_first_frame_measurement_point);
+    group("render.stage.convert.samples", s.render_convert_samples, "samples",
+          s.render_stage_availability, s.render_stage_reason,
+          s.render_stage_measurement_point);
+    group("render.stage.convert.total", s.render_convert_total_us, "us",
+          s.render_stage_availability, s.render_stage_reason,
+          s.render_stage_measurement_point);
+    group("render.stage.convert.maximum", Signed(s.render_convert_max_us), "us",
+          s.render_stage_availability, s.render_stage_reason,
+          s.render_stage_measurement_point);
+    group("render.stage.upload.samples", s.render_upload_samples, "samples",
+          s.render_stage_availability, s.render_stage_reason,
+          s.render_stage_measurement_point);
+    group("render.stage.upload.total", s.render_upload_total_us, "us",
+          s.render_stage_availability, s.render_stage_reason,
+          s.render_stage_measurement_point);
+    group("render.stage.upload.maximum", Signed(s.render_upload_max_us), "us",
+          s.render_stage_availability, s.render_stage_reason,
+          s.render_stage_measurement_point);
+    group("render.stage.draw.samples", s.render_draw_samples, "samples",
+          s.render_stage_availability, s.render_stage_reason,
+          s.render_stage_measurement_point);
+    group("render.stage.draw.total", s.render_draw_total_us, "us",
+          s.render_stage_availability, s.render_stage_reason,
+          s.render_stage_measurement_point);
+    group("render.stage.draw.maximum", Signed(s.render_draw_max_us), "us",
+          s.render_stage_availability, s.render_stage_reason,
+          s.render_stage_measurement_point);
+    group("render.stage.present_block.samples",
+          s.render_present_block_samples, "samples",
+          s.render_stage_availability, s.render_stage_reason,
+          s.render_stage_measurement_point);
+    group("render.stage.present_block.total", s.render_present_block_total_us, "us",
+          s.render_stage_availability, s.render_stage_reason,
+          s.render_stage_measurement_point);
+    group("render.stage.present_block.maximum",
+          Signed(s.render_present_block_max_us), "us",
+          s.render_stage_availability, s.render_stage_reason,
+          s.render_stage_measurement_point);
+    group("render.stage.gpu_execution", std::monostate{}, "us",
+          s.render_gpu_execution_availability,
+          s.render_gpu_execution_reason,
+          "gpu_timestamp_query");
+    group("render.pipeline.router_submitted", s.render_router_submitted, "frames",
+          s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.router_replaced", s.render_router_replaced, "frames",
+          s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.router_rejected_generation",
+          s.render_router_rejected_generation, "frames",
+          s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.router_rejected_binding",
+          s.render_router_rejected_binding, "frames",
+          s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.router_dropped_invalid", s.render_router_dropped_invalid,
+          "frames", s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.router_dropped_capacity", s.render_router_dropped_capacity,
+          "frames", s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.qt_conversion_failures", s.render_qt_conversion_failures,
+          "frames", s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.delivered_gpu", s.render_delivered_to_gpu, "frames",
+          s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.delivered_qt_cpu", s.render_delivered_to_qt_cpu, "frames",
+          s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.rejected_track_attachments",
+          s.render_rejected_track_attachments, "bindings",
+          s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.attached_tracks", s.render_attached_track_count, "bindings",
+          s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.requested_backend", SafeText(s.render_requested_backend),
+          "backend", s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.actual_backend", SafeText(s.render_actual_backend),
+          "backend", s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.gpu_failure", SafeText(s.render_gpu_failure), "reason",
+          s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.fallback_reason", SafeText(s.render_fallback_reason),
+          "reason", s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.backend_failures", s.render_backend_failures, "events",
+          s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
+    group("render.pipeline.backend_fallbacks", s.render_backend_fallbacks, "events",
+          s.render_pipeline_availability, s.render_pipeline_reason,
+          s.render_pipeline_measurement_point);
     group("reconnect.render.expected", s.reconnect_render_expected, "recoveries",
           s.reconnect_render_availability, s.reconnect_render_reason,
           s.reconnect_render_measurement_point);
@@ -538,6 +1278,10 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     const auto& st = record.stability;
     const auto availability = st.ledger_availability == "VALID"
         ? Availability::Valid : Availability::Invalid;
+    const auto unknown_termination_availability =
+        ParseAvailability(st.unknown_termination_availability);
+    const auto confirmed_crash_availability =
+        ParseAvailability(st.confirmed_crash_availability);
     group("stability.process_runs_started", st.process_runs_started, "runs",
           availability, st.ledger_reason);
     group("stability.process_runs_terminal", st.process_runs_terminal, "runs",
@@ -545,21 +1289,26 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("stability.clean_process_exits", st.clean_process_exits, "runs",
           availability, st.ledger_reason);
     group("stability.unknown_process_terminations", st.unknown_process_terminations,
-          "runs", availability, st.unknown_termination_reason);
-    group("stability.confirmed_process_crashes", st.confirmed_process_crashes,
-          "runs", availability, st.confirmed_crash_reason);
+          "runs", unknown_termination_availability,
+          st.unknown_termination_reason);
+    group("stability.confirmed_process_crashes",
+          ValueWhenSupported(st.confirmed_process_crashes,
+                             confirmed_crash_availability),
+          "runs", confirmed_crash_availability, st.confirmed_crash_reason);
     group("stability.sessions_started", st.sessions_started, "sessions",
           availability, st.ledger_reason);
     group("stability.sessions_terminal", st.sessions_terminal, "sessions",
           availability, st.ledger_reason);
     group("stability.unknown_session_terminations", st.unknown_session_terminations,
-          "sessions", availability, st.unknown_termination_reason);
+          "sessions", unknown_termination_availability,
+          st.unknown_termination_reason);
     group("stability.unknown_process_termination_ratio",
           Ratio(st.unknown_process_termination_ratio), "ratio",
-          availability, st.unknown_termination_reason);
+          unknown_termination_availability, st.unknown_termination_reason);
     group("stability.confirmed_process_crash_ratio",
-          Ratio(st.confirmed_process_crash_ratio), "ratio",
-          availability, st.confirmed_crash_reason);
+          RatioWhenSupported(st.confirmed_process_crash_ratio,
+                             confirmed_crash_availability),
+          "ratio", confirmed_crash_availability, st.confirmed_crash_reason);
     group("stability.corrupt_inputs", st.corrupt_inputs, "records",
           availability, st.ledger_reason);
     group("stability.write_failures", st.write_failures, "writes",
@@ -664,6 +1413,20 @@ TelemetryExportResult WriteTelemetryReportAtomically(
         {"availability", AvailabilityName(final_record.snapshot.availability)},
         {"reason", SafeText(final_record.snapshot.reason)},
         {"coverage", final_record.snapshot.coverage},
+        {"session_duration_ms", final_record.snapshot.session_duration_ms >= 0
+            ? Json(final_record.snapshot.session_duration_ms) : Json(nullptr)},
+        {"usable_duration_ms", final_record.snapshot.usable_duration_ms >= 0
+            ? Json(final_record.snapshot.usable_duration_ms) : Json(nullptr)},
+        {"local_publish_media", {
+            {"availability", AvailabilityName(
+                final_record.snapshot.local_publish_media_availability)},
+            {"reason", SafeText(
+                final_record.snapshot.local_publish_media_reason)},
+            {"algorithm", SafeText(
+                final_record.snapshot.local_publish_media_algorithm)},
+            {"publications", final_record.snapshot.local_publications},
+            {"no_media", final_record.snapshot.local_publish_no_media},
+        }},
         {"operations", std::move(operations)},
     };
 

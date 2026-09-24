@@ -36,12 +36,28 @@ VideoFrameDiagnostics LocalVideoTrack::frame_diagnostics() const noexcept {
 }
 
 void LocalVideoTrack::set_rtc_source_for_diagnostics(webrtc::scoped_refptr<RtcVideoSource> source) {
+    std::shared_ptr<telemetry::LocalVideoActivityProbe> telemetry_probe;
+    webrtc::scoped_refptr<RtcVideoSource> installed;
     {
         std::lock_guard lock(rtc_source_mutex_);
         rtc_source_.swap(source);
+        installed = rtc_source_;
+        telemetry_probe = publish_telemetry_probe_;
     }
+    if (installed) installed->SetTelemetryProbe(std::move(telemetry_probe));
     // Release a replaced source outside the lock: disconnect can wait for a
     // frame already being delivered to WebRTC.
+}
+
+void LocalVideoTrack::set_publish_telemetry_probe(
+    std::shared_ptr<telemetry::LocalVideoActivityProbe> probe) {
+    webrtc::scoped_refptr<RtcVideoSource> source;
+    {
+        std::lock_guard lock(rtc_source_mutex_);
+        publish_telemetry_probe_ = probe;
+        source = rtc_source_;
+    }
+    if (source) source->SetTelemetryProbe(std::move(probe));
 }
 
 namespace {
