@@ -115,6 +115,7 @@ find_package(Protobuf REQUIRED)
 find_package(spdlog CONFIG REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(OpenSSL REQUIRED)
+find_package(WebP CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
 add_compile_definitions(
@@ -381,24 +382,23 @@ target_include_directories(cohavora_core BEFORE PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/telemetry
     ${CMAKE_CURRENT_SOURCE_DIR}/src/app
     ${GEN_DIR}
-    ${WEBRTC_ROOT}/include/third_party/boringssl/src/include
     ${WEBRTC_ROOT}/include
     ${WEBRTC_ROOT}/include/third_party/libyuv/include
 )
 
-# WebRTC Library Multi-Config Resolution (Debug vs Release)
-if(EXISTS "${WEBRTC_ROOT}/lib/Debug/webrtc.lib")
-    set(WEBRTC_DEBUG_LIB "${WEBRTC_ROOT}/lib/Debug/webrtc.lib")
-elseif(EXISTS "${WEBRTC_ROOT}/lib/webrtc_d.lib")
-    set(WEBRTC_DEBUG_LIB "${WEBRTC_ROOT}/lib/webrtc_d.lib")
-else()
-    set(WEBRTC_DEBUG_LIB "${WEBRTC_ROOT}/lib/webrtc.lib")
-endif()
+set(WEBRTC_DEBUG_LIB "${WEBRTC_ROOT}/lib/Debug/webrtc.lib")
+set(WEBRTC_RELEASE_LIB "${WEBRTC_ROOT}/lib/Release/webrtc.lib")
+set(WEBRTC_DEBUG_PREFIX_DIR "${WEBRTC_ROOT}/include/boringssl-prefix/Debug")
+set(WEBRTC_RELEASE_PREFIX_DIR "${WEBRTC_ROOT}/include/boringssl-prefix/Release")
+set(WEBRTC_DEBUG_GENERATED_DIR "${WEBRTC_ROOT}/include/out-x64-debug/gen")
+set(WEBRTC_RELEASE_GENERATED_DIR "${WEBRTC_ROOT}/include/out-x64-release/gen")
 
-if(EXISTS "${WEBRTC_ROOT}/lib/Release/webrtc.lib")
-    set(WEBRTC_RELEASE_LIB "${WEBRTC_ROOT}/lib/Release/webrtc.lib")
+if(COHAVORA_DEBUG_DEPENDENCY_ABI STREQUAL "Debug")
+    set(WEBRTC_SELECTED_DEBUG_LIB "${WEBRTC_DEBUG_LIB}")
+    set(WEBRTC_SELECTED_DEBUG_GENERATED_DIR "${WEBRTC_DEBUG_GENERATED_DIR}")
 else()
-    set(WEBRTC_RELEASE_LIB "${WEBRTC_ROOT}/lib/webrtc.lib")
+    set(WEBRTC_SELECTED_DEBUG_LIB "${WEBRTC_RELEASE_LIB}")
+    set(WEBRTC_SELECTED_DEBUG_GENERATED_DIR "${WEBRTC_RELEASE_GENERATED_DIR}")
 endif()
 
 set(WEBRTC_REQUIRED_PATHS
@@ -406,6 +406,10 @@ set(WEBRTC_REQUIRED_PATHS
     "${WEBRTC_ROOT}/include/api/video/i420_buffer.h"
     "${WEBRTC_ROOT}/include/third_party/libyuv/include/libyuv.h"
     "${WEBRTC_ROOT}/include/third_party/boringssl/src/include/openssl/ssl.h"
+    "${WEBRTC_DEBUG_PREFIX_DIR}/boringssl_prefix_symbols.h"
+    "${WEBRTC_RELEASE_PREFIX_DIR}/boringssl_prefix_symbols.h"
+    "${WEBRTC_DEBUG_GENERATED_DIR}/build/chromeos_buildflags.h"
+    "${WEBRTC_RELEASE_GENERATED_DIR}/build/chromeos_buildflags.h"
     "${WEBRTC_DEBUG_LIB}"
     "${WEBRTC_RELEASE_LIB}")
 set(WEBRTC_MISSING_PATHS)
@@ -422,28 +426,22 @@ endif()
 
 message(STATUS "[WebRTC] Using Debug Library   : ${WEBRTC_DEBUG_LIB}")
 message(STATUS "[WebRTC] Using Release Library : ${WEBRTC_RELEASE_LIB}")
+message(STATUS
+    "[WebRTC] Debug configuration selects: ${WEBRTC_SELECTED_DEBUG_LIB}")
 
-# The packaged WebRTC archive contains BoringSSL. All OpenSSL-compatible code
-# in a process that links WebRTC must use those headers and symbols; linking a
-# second static OpenSSL implementation produces thousands of duplicate symbols
-# and leaves the selected implementation dependent on link order.
+# The packaged WebRTC archive already prefixes its internal BoringSSL symbols.
+# Consumers must keep using the application's OpenSSL headers because public
+# ASIO SSL objects cross target boundaries. The prefix kit remains a required
+# package artifact for rebuilding WebRTC, but is not a consumer compile option.
 add_library(cohavora_webrtc_sdk INTERFACE)
 target_include_directories(cohavora_webrtc_sdk SYSTEM BEFORE INTERFACE
-    "${WEBRTC_ROOT}/include/third_party/boringssl/src/include"
+    "$<$<CONFIG:Debug>:${WEBRTC_SELECTED_DEBUG_GENERATED_DIR}>"
+    "$<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_GENERATED_DIR}>"
     "${WEBRTC_ROOT}/include"
     "${WEBRTC_ROOT}/include/third_party/libyuv/include")
 target_link_libraries(cohavora_webrtc_sdk INTERFACE
-    $<$<CONFIG:Debug>:${WEBRTC_DEBUG_LIB}>
+    $<$<CONFIG:Debug>:${WEBRTC_SELECTED_DEBUG_LIB}>
     $<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_LIB}>)
-
-# Static QtNetwork requires OpenSSL APIs that WebRTC's bundled BoringSSL does
-# not provide. Only final binaries that intentionally combine both providers
-# inherit this MSVC compatibility switch; unrelated targets retain duplicate
-# symbol diagnostics.
-add_library(cohavora_dual_tls_link_compat INTERFACE)
-if(MSVC)
-    target_link_options(cohavora_dual_tls_link_compat INTERFACE /FORCE:MULTIPLE)
-endif()
 
 add_compile_definitions(
     WEBRTC_WIN
@@ -453,9 +451,12 @@ add_compile_definitions(
     RTC_NO_UNIQUE_ADDRESS=
 )
 
+target_link_libraries(cohavora_core PRIVATE
+    cohavora_webrtc_sdk)
 target_link_libraries(cohavora_core PUBLIC
-    cohavora_webrtc_sdk
     asio::asio
+    OpenSSL::SSL
+    OpenSSL::Crypto
     protobuf::libprotobuf
     spdlog::spdlog
     ZLIB::ZLIB

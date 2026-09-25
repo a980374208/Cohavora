@@ -1578,7 +1578,7 @@ void TestPacketCryptorBoundaries() {
     provider->SetKey(EncryptedStreamPeer::kIdentity, 3, {});
     check_error(good, Error::MissingKey);
 
-    options.key_derivation_algorithm = livekit::KeyDerivationAlgorithm::HKDF;
+    options.key_derivation_algorithm = livekit::KeyDerivationAlgorithm::Hkdf;
     options.ratchet_salt = "packet-test-salt";
     auto hkdf_provider = std::make_shared<livekit::KeyProvider>(options);
     hkdf_provider->SetKey(EncryptedStreamPeer::kIdentity, 3, EncryptedStreamPeer::KeyMaterial());

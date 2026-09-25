@@ -5,7 +5,6 @@ if(COHAVORA_BUILD_QT_TESTS)
         ${GEN_DIR}
         ${WEBRTC_ROOT}/include/third_party/libyuv/include)
     target_link_libraries(cohavora_qt_test_environment INTERFACE
-        cohavora_dual_tls_link_compat
         cohavora::desktop_ui_runtime
         cohavora_core)
     target_compile_definitions(cohavora_qt_test_environment INTERFACE

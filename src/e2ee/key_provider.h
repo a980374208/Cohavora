@@ -11,7 +11,7 @@ namespace livekit {
 
 enum class KeyDerivationAlgorithm {
     PBKDF2,
-    HKDF
+    Hkdf
 };
 
 struct KeyProviderOptions {

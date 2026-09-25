@@ -702,7 +702,7 @@ void TestOutboundBounds() {
     }
     // HKDF and a non-default salt must also interoperate with the native backend.
     livekit::KeyProviderOptions options;
-    options.key_derivation_algorithm = livekit::KeyDerivationAlgorithm::HKDF;
+    options.key_derivation_algorithm = livekit::KeyDerivationAlgorithm::Hkdf;
     options.ratchet_salt = "outbound-test-salt";
     auto keys = std::make_shared<livekit::KeyProvider>(options);
     const std::vector<uint8_t> material(32, 0x61);

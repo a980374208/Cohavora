@@ -2,6 +2,7 @@ import os
 import sys
 import subprocess
 import argparse
+import json
 import re
 import shutil
 from pathlib import Path
@@ -144,8 +145,8 @@ def main():
         "--libraries-src", type=str,
         help="Complete Qt/Libraries directory passed to dependency preparation")
     parser.add_argument(
-        "--webrtc-debug-archive", type=str,
-        help="Debug WebRTC ZIP, directory, or .lib passed to dependency preparation")
+        "--webrtc-archive", type=str,
+        help="Pinned dual-config WebRTC ZIP passed to dependency preparation")
 
     args, extra_cmake_args = parser.parse_known_args()
     if any(
@@ -156,7 +157,7 @@ def main():
             "--tdesktop-dir was removed because the project always uses the "
             "in-tree TDesktop sources.")
     preparation_inputs = (
-        args.qt_archive, args.libraries_src, args.webrtc_debug_archive)
+        args.qt_archive, args.libraries_src, args.webrtc_archive)
     if any(preparation_inputs) and not args.prepare_deps:
         configuration_error(
             "Dependency archive/source options require --prepare-deps.")
@@ -171,17 +172,17 @@ def main():
     libraries_source = (
         Path(args.libraries_src).expanduser().resolve()
         if args.libraries_src else None)
-    webrtc_debug = (
-        Path(args.webrtc_debug_archive).expanduser().resolve()
-        if args.webrtc_debug_archive else None)
+    webrtc_archive = (
+        Path(args.webrtc_archive).expanduser().resolve()
+        if args.webrtc_archive else None)
     if qt_archive and not qt_archive.is_file():
         configuration_error(f"Qt archive does not exist: {qt_archive}")
     if libraries_source and not libraries_source.is_dir():
         configuration_error(
             f"Libraries source directory does not exist: {libraries_source}")
-    if webrtc_debug and not webrtc_debug.exists():
+    if webrtc_archive and not webrtc_archive.is_file():
         configuration_error(
-            f"Debug WebRTC source does not exist: {webrtc_debug}")
+            f"WebRTC package does not exist: {webrtc_archive}")
 
     cache_path = build_dir / "CMakeCache.txt"
     cached_definitions = read_cmake_cache(cache_path)
@@ -265,6 +266,10 @@ def main():
     local_deps_dir = (project_root / "deps").resolve()
     local_webrtc_root = local_deps_dir / "webrtc"
     local_tdesktop_libs = local_deps_dir / "Libraries" / "win64"
+    webrtc_metadata = json.loads((
+        project_root / "build" / "prepare" / "webrtc-package.json"
+    ).read_text(encoding="utf-8"))
+    webrtc_required_files = tuple(webrtc_metadata["required_files"])
     libraries_manifest = project_root / "build" / "prepare" / "libraries-required.txt"
     libraries_required_files = []
     for raw_line in libraries_manifest.read_text(encoding="utf-8").splitlines():
@@ -279,16 +284,10 @@ def main():
             for relative in libraries_required_files)
 
     def missing_dependencies():
-        webrtc_root_lib = webrtc_root / "lib" / "webrtc.lib"
-        has_webrtc_release = (
-            (webrtc_root / "lib" / "Release" / "webrtc.lib").is_file()
-            or webrtc_root_lib.is_file())
-        has_webrtc_debug = (
-            (webrtc_root / "lib" / "Debug" / "webrtc.lib").is_file()
-            or (webrtc_root / "lib" / "webrtc_d.lib").is_file()
-            or webrtc_root_lib.is_file())
         missing = []
-        if not (webrtc_root / "include").is_dir() or not (has_webrtc_release and has_webrtc_debug):
+        if not all(
+                (webrtc_root / relative).is_file()
+                for relative in webrtc_required_files):
             missing.append(("WebRTC", webrtc_root, webrtc_root == local_webrtc_root))
         libraries_complete = libraries_are_complete(tdesktop_libs_dir)
         if needs_qt and not libraries_complete:
@@ -318,8 +317,8 @@ def main():
             prep_cmd.extend(["--qt-archive", str(qt_archive)])
         if libraries_source:
             prep_cmd.extend(["--libraries-src", str(libraries_source)])
-        if webrtc_debug:
-            prep_cmd.extend(["--webrtc-debug-archive", str(webrtc_debug)])
+        if webrtc_archive:
+            prep_cmd.extend(["--webrtc-archive", str(webrtc_archive)])
         print("\n[INFO] Preparing project-local dependencies:")
         print(f"  {format_command(prep_cmd)}\n")
         sys.stdout.flush()

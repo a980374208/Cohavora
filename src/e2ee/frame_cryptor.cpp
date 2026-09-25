@@ -212,7 +212,7 @@ DataPacketCryptor::EncryptPacket(std::string_view sender_identity, int key_index
             native_options.key_ring_size = ring_size;
             native_options.ratchet_salt.assign(options.ratchet_salt.begin(), options.ratchet_salt.end());
             native_options.key_derivation_algorithm =
-                options.key_derivation_algorithm == KeyDerivationAlgorithm::HKDF
+                options.key_derivation_algorithm == KeyDerivationAlgorithm::Hkdf
                     ? webrtc::kHKDF : webrtc::kPBKDF2;
             native_options.ratchet_window_size = 0;
             auto provider = webrtc::make_ref_counted<webrtc::DefaultKeyProviderImpl>(native_options);
@@ -282,7 +282,7 @@ DataPacketCryptor::DecryptPacket(std::string_view sender_identity,
             native_options.ratchet_salt.assign(
                 options.ratchet_salt.begin(), options.ratchet_salt.end());
             native_options.key_derivation_algorithm =
-                options.key_derivation_algorithm == KeyDerivationAlgorithm::HKDF
+                options.key_derivation_algorithm == KeyDerivationAlgorithm::Hkdf
                     ? webrtc::kHKDF : webrtc::kPBKDF2;
             // Packet reception uses explicitly installed slots. Do not silently
             // adopt the frame backend's different automatic ratchet semantics.

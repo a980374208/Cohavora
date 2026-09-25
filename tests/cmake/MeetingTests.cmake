@@ -6,7 +6,6 @@ target_include_directories(test_openmeeting_http BEFORE PRIVATE
     ${LIVEKIT_PROJECT_SOURCE_DIR}
     ${GEN_DIR})
 target_link_libraries(test_openmeeting_http PRIVATE
-    cohavora_dual_tls_link_compat
     cohavora_meeting_network
     cohavora_core
     cohavora::qt_network_runtime)
@@ -123,8 +122,10 @@ add_executable(test_participant_window_remediation
 )
 target_include_directories(test_participant_window_remediation BEFORE PRIVATE
     ${WEBRTC_ROOT}/include/third_party/perfetto/include
-    ${WEBRTC_ROOT}/include/out-x64-release/gen/third_party/perfetto
-    ${WEBRTC_ROOT}/include/out-x64-release/gen/third_party/perfetto/build_config
+    $<$<CONFIG:Debug>:${WEBRTC_SELECTED_DEBUG_GENERATED_DIR}/third_party/perfetto>
+    $<$<CONFIG:Debug>:${WEBRTC_SELECTED_DEBUG_GENERATED_DIR}/third_party/perfetto/build_config>
+    $<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_GENERATED_DIR}/third_party/perfetto>
+    $<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_GENERATED_DIR}/third_party/perfetto/build_config>
 )
 livekit_configure_qt_test(test_participant_window_remediation)
 target_link_libraries(test_participant_window_remediation PRIVATE

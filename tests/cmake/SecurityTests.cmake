@@ -69,6 +69,7 @@ add_executable(test_always_active_checks
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
 )
 target_include_directories(test_always_active_checks PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_compile_definitions(test_always_active_checks PRIVATE NDEBUG)
 set_target_properties(test_always_active_checks PROPERTIES AUTOMOC OFF)
 add_test(NAME always_active_checks_test
     COMMAND ${CMAKE_COMMAND}
