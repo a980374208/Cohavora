@@ -22,13 +22,16 @@ include(${CMAKE_CURRENT_LIST_DIR}/cmake/NativeTests.cmake)
 
 include(${CMAKE_CURRENT_LIST_DIR}/cmake/SecurityTests.cmake)
 
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/MeetingTests.cmake)
+if(COHAVORA_BUILD_QT_TESTS)
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/MeetingTests.cmake)
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/RenderTests.cmake)
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/ApplicationTests.cmake)
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/WhiteboardTests.cmake)
+endif()
 
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/RenderTests.cmake)
-
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/ApplicationTests.cmake)
-
-include(${CMAKE_CURRENT_LIST_DIR}/cmake/WhiteboardTests.cmake)
+# A wedged test must not consume the enclosing CI job indefinitely. Individual
+# stress, hardware, and external tests override this budget where necessary.
+livekit_apply_default_test_timeout(60)
 
 # Keep test binaries and module fixtures in the established top-level output
 # directory even though their target definitions now live in this subdirectory.

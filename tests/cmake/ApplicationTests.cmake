@@ -13,21 +13,11 @@ set_tests_properties(debug_login_options_test PROPERTIES
 add_executable(test_session_credentials
     ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_session_credentials.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/credential_store.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/credential_store.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/service_endpoint_policy.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/service_endpoint_policy.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/session_manager.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/session_manager.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/meeting_types.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/meeting_types.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/openmeeting_http_client.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/openmeeting_http_client.h
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/login_dialog.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/login_dialog.h
 )
 livekit_configure_qt_test(test_session_credentials)
-target_link_libraries(test_session_credentials PRIVATE crypt32)
+target_link_libraries(test_session_credentials PRIVATE cohavora_meeting_network)
 add_test(NAME session_credentials_test COMMAND test_session_credentials --debug)
 set_tests_properties(session_credentials_test PROPERTIES
     TIMEOUT 60 LABELS "CORE_REGRESSION")
@@ -42,43 +32,17 @@ add_executable(test_meeting_catalog
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/meeting_list_model.h
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/meeting_catalog_controller.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/meeting_catalog_controller.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/meeting_types.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/meeting_types.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/credential_store.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/credential_store.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/service_endpoint_policy.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/service_endpoint_policy.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/session_manager.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/session_manager.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/openmeeting_http_client.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/openmeeting_http_client.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/http_types.h
 )
 target_include_directories(test_meeting_catalog BEFORE PRIVATE
-    ${LIVEKIT_PROJECT_SOURCE_DIR}
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtNetwork
-)
+    ${LIVEKIT_PROJECT_SOURCE_DIR})
 target_link_libraries(test_meeting_catalog PRIVATE
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Network.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
-    OpenSSL::SSL OpenSSL::Crypto
-    netapi32 userenv version ws2_32 crypt32 dnsapi iphlpapi secur32 winmm
-)
+    cohavora_meeting_network
+    cohavora::qt_network_runtime)
 target_compile_definitions(test_meeting_catalog PRIVATE
     WIN32 _WINDOWS WIN32_LEAN_AND_MEAN NOMINMAX
-    _WINSOCK_DEPRECATED_NO_WARNINGS NDEBUG _ITERATOR_DEBUG_LEVEL=0
-    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
-    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
-)
+    _WINSOCK_DEPRECATED_NO_WARNINGS)
 target_compile_options(test_meeting_catalog PRIVATE /utf-8)
-target_link_options(test_meeting_catalog PRIVATE
-    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
-    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
-)
-set_target_properties(test_meeting_catalog PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
+set_target_properties(test_meeting_catalog PROPERTIES AUTOMOC ON)
 add_test(NAME meeting_catalog_test COMMAND test_meeting_catalog)
 set_tests_properties(meeting_catalog_test PROPERTIES TIMEOUT 60 LABELS "CORE_REGRESSION")
 
@@ -88,45 +52,19 @@ foreach(_policy_variant strict dev)
     add_executable(${_policy_target}
         ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_http_transport_policy.cpp
         ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
-        ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/credential_store.cpp
-        ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/credential_store.h
-        ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/service_endpoint_policy.cpp
-        ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/service_endpoint_policy.h
-        ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/session_manager.cpp
-        ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/session_manager.h
-        ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/meeting_types.cpp
-        ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/meeting_types.h
-        ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/openmeeting_http_client.cpp
-        ${LIVEKIT_PROJECT_SOURCE_DIR}/src/net/openmeeting_http_client.h
     )
     target_include_directories(${_policy_target} BEFORE PRIVATE
-        ${LIVEKIT_PROJECT_SOURCE_DIR}
-        ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
-        ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
-        ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtNetwork
-    )
+        ${LIVEKIT_PROJECT_SOURCE_DIR})
     target_link_libraries(${_policy_target} PRIVATE
-        ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
-        ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Network.lib
-        ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
-        OpenSSL::SSL OpenSSL::Crypto
-        netapi32 userenv version ws2_32 crypt32 dnsapi iphlpapi secur32 winmm
-    )
+        cohavora_meeting_network
+        cohavora::qt_network_runtime)
     target_compile_definitions(${_policy_target} PRIVATE
         WIN32 _WINDOWS WIN32_LEAN_AND_MEAN NOMINMAX
-        _WINSOCK_DEPRECATED_NO_WARNINGS NDEBUG _ITERATOR_DEBUG_LEVEL=0
-        $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
-        $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
-    )
+        _WINSOCK_DEPRECATED_NO_WARNINGS)
     target_compile_options(${_policy_target} PRIVATE /utf-8)
     if(_policy_variant STREQUAL "dev")
         target_compile_definitions(${_policy_target} PRIVATE LIVEKIT_EXPECT_DEBUG_HTTP)
     endif()
-    target_link_options(${_policy_target} PRIVATE
-        $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
-        $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
-    )
-    set_target_properties(${_policy_target} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
     if(_policy_variant STREQUAL "dev")
         add_test(NAME http_transport_policy_${_policy_variant}_test COMMAND ${_policy_target} --debug)
     else()
@@ -139,8 +77,12 @@ endforeach()
 # Deploy whichever modules exist on this platform. The loader itself stays
 # portable; on Unix its consumers link CMAKE_DL_LIBS above (also inherited by
 # test_participant_window_remediation from test_camera_owner_remediation).
-livekit_deploy_renderer(test_camera_owner_remediation)
-livekit_deploy_renderer(test_participant_window_remediation)
+livekit_deploy_renderer(test_camera_owner_remediation
+    GROUP tests
+    DESTINATION "${CMAKE_BINARY_DIR}/$<CONFIG>")
+livekit_deploy_renderer(test_participant_window_remediation
+    GROUP tests
+    DESTINATION "${CMAKE_BINARY_DIR}/$<CONFIG>")
 
 # These contracts and the production-window fixture use HWND/Win32 APIs.
 # Keep their fixtures, D3D links and target-file expressions out of Unix builds.
@@ -173,7 +115,9 @@ foreach(variant missing_entry wrong_version missing_function wrong_capabilities 
     target_compile_definitions(render_fixture_${variant} PRIVATE LK_RENDER_MODULE_BUILD FIXTURE_${variant})
     add_dependencies(test_render_module render_fixture_${variant})
 endforeach()
-livekit_deploy_renderer(test_render_module)
+livekit_deploy_renderer(test_render_module
+    GROUP tests
+    DESTINATION "${CMAKE_BINARY_DIR}/$<CONFIG>")
 add_dependencies(test_participant_window_remediation render_fixture_wrong_version render_fixture_create_failure)
 add_test(NAME render_module_fallback_test COMMAND test_participant_window_remediation --module-fallback
     $<TARGET_FILE:render_fixture_wrong_version> $<TARGET_FILE:render_fixture_create_failure>)
@@ -241,7 +185,9 @@ foreach(ui_theme_consumer IN ITEMS test_camera_owner_remediation
     target_link_libraries(${ui_theme_consumer} PRIVATE cohavora_ui_theme)
 endforeach()
 
-if(LIVEKIT_LRELEASE_EXECUTABLE)
+get_target_property(cohavora_has_embedded_translations
+    cohavora_ui_translations COHAVORA_HAS_EMBEDDED_TRANSLATIONS)
+if(cohavora_has_embedded_translations)
     add_executable(test_ui_presentation
         ${LIVEKIT_TEST_SOURCE_DIR}/test_ui_presentation.cpp)
     livekit_configure_qt_test(test_ui_presentation)

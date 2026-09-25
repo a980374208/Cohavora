@@ -1,0 +1,122 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-vs2026-base",
+      "hidden": true,
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static"
+      }
+    },
+    {
+      "name": "windows-vs2026-dev",
+      "displayName": "Windows VS 2026 - Development",
+      "inherits": "windows-vs2026-base",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "COHAVORA_BUILD_MEETING_APP": "ON",
+        "COHAVORA_BUILD_SAMPLES": "ON"
+      }
+    },
+    {
+      "name": "windows-vs2026-core",
+      "displayName": "Windows VS 2026 - Core Regression",
+      "inherits": "windows-vs2026-base",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "COHAVORA_BUILD_MEETING_APP": "OFF",
+        "COHAVORA_BUILD_SAMPLES": "OFF"
+      }
+    },
+    {
+      "name": "windows-vs2026-native",
+      "displayName": "Windows VS 2026 - Native Tests Only",
+      "inherits": "windows-vs2026-base",
+      "cacheVariables": {
+        "BUILD_TESTING": "ON",
+        "COHAVORA_BUILD_MEETING_APP": "OFF",
+        "COHAVORA_BUILD_QT_TESTS": "OFF",
+        "COHAVORA_BUILD_RUNTIME_TOOLS": "OFF",
+        "COHAVORA_BUILD_SAMPLES": "OFF"
+      }
+    },
+    {
+      "name": "windows-vs2026-release",
+      "displayName": "Windows VS 2026 - Release",
+      "inherits": "windows-vs2026-base",
+      "cacheVariables": {
+        "BUILD_TESTING": "OFF",
+        "COHAVORA_BUILD_MEETING_APP": "ON",
+        "COHAVORA_BUILD_SAMPLES": "OFF",
+        "COHAVORA_REQUIRE_UI_TRANSLATIONS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev-debug",
+      "configurePreset": "windows-vs2026-dev",
+      "configuration": "Debug",
+      "targets": ["cohavora_app"]
+    },
+    {
+      "name": "all-debug",
+      "configurePreset": "windows-vs2026-dev",
+      "configuration": "Debug",
+      "targets": ["ALL_BUILD"]
+    },
+    {
+      "name": "core-debug",
+      "configurePreset": "windows-vs2026-core",
+      "configuration": "Debug"
+    },
+    {
+      "name": "native-debug",
+      "configurePreset": "windows-vs2026-native",
+      "configuration": "Debug"
+    },
+    {
+      "name": "release",
+      "configurePreset": "windows-vs2026-release",
+      "configuration": "Release",
+      "targets": ["cohavora_app"]
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "full-debug",
+      "configurePreset": "windows-vs2026-dev",
+      "configuration": "Debug",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "stopOnFailure": true
+      }
+    },
+    {
+      "name": "core-debug",
+      "configurePreset": "windows-vs2026-core",
+      "configuration": "Debug",
+      "filter": {
+        "include": {
+          "label": "CORE_REGRESSION"
+        }
+      },
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "stopOnFailure": true
+      }
+    }
+  ]
+}

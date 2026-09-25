@@ -13,9 +13,6 @@ add_executable(test_signaling_url_policy
 )
 target_include_directories(test_signaling_url_policy PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
 target_link_libraries(test_signaling_url_policy PRIVATE cohavora_core)
-set_target_properties(test_signaling_url_policy PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded"
-)
 
 # Panic Guard Test
 add_executable(test_panic_guard
@@ -279,7 +276,7 @@ if(LIVEKIT_BUILD_EXTERNAL_TESTS)
 
     # Manual L3 harness. It is intentionally not registered with CTest because
     # it requires two real-service participants and operator-controlled faults.
-    add_executable(test_stream_delivery_runtime
+    add_executable(test_stream_delivery_runtime EXCLUDE_FROM_ALL
         ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_stream_delivery_runtime.cpp
     )
     target_link_libraries(test_stream_delivery_runtime PRIVATE
@@ -288,7 +285,7 @@ if(LIVEKIT_BUILD_EXTERNAL_TESTS)
 
     # S8b controlled two-peer media marker harness. It is built on demand but
     # never registered with CTest because it requires real service tokens.
-    add_executable(test_e2e_media_runtime
+    add_executable(test_e2e_media_runtime EXCLUDE_FROM_ALL
         ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_e2e_media_runtime.cpp
     )
     target_include_directories(test_e2e_media_runtime PRIVATE
@@ -327,27 +324,34 @@ target_link_libraries(test_audio_playout_warmup PRIVATE
     cohavora_core
 )
 
-# Screen-share lifecycle regression and opt-in real Windows capture probe.
+# Screen-share lifecycle regression and opt-in real Windows capture probes.
 add_executable(test_screen_share_session ${LIVEKIT_TEST_SOURCE_DIR}/test_screen_share_session.cpp)
 target_include_directories(test_screen_share_session PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
 target_link_libraries(test_screen_share_session PRIVATE cohavora_core)
 add_test(NAME screen_share_session_test COMMAND test_screen_share_session)
 set_tests_properties(screen_share_session_test PROPERTIES TIMEOUT 30 LABELS "CORE_REGRESSION")
-add_executable(test_desktop_capture_runtime ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_desktop_capture_runtime.cpp)
-target_include_directories(test_desktop_capture_runtime PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
-target_link_libraries(test_desktop_capture_runtime PRIVATE cohavora_core)
-add_executable(test_screen_share_runtime ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_screen_share_runtime.cpp)
-target_include_directories(test_screen_share_runtime PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
-target_link_libraries(test_screen_share_runtime PRIVATE cohavora_core)
+if(COHAVORA_BUILD_RUNTIME_TOOLS)
+    add_executable(test_desktop_capture_runtime EXCLUDE_FROM_ALL
+        ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_desktop_capture_runtime.cpp)
+    target_include_directories(test_desktop_capture_runtime PRIVATE
+        ${LIVEKIT_PROJECT_SOURCE_DIR})
+    target_link_libraries(test_desktop_capture_runtime PRIVATE cohavora_core)
 
-# Opt-in M0 probe for native annotation overlays. It opens real desktop
-# windows, moves the pointer inside an owned fixture, and captures one screen,
-# so it is built for explicit runtime use but never registered in CTest.
-add_executable(test_annotation_overlay_runtime
-    ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_annotation_overlay_runtime.cpp)
-livekit_configure_qt_test(test_annotation_overlay_runtime)
-target_compile_options(test_annotation_overlay_runtime PRIVATE /utf-8)
-# Opt-in desktop interaction; deliberately not part of device-free CTest.
+    add_executable(test_screen_share_runtime EXCLUDE_FROM_ALL
+        ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_screen_share_runtime.cpp)
+    target_include_directories(test_screen_share_runtime PRIVATE
+        ${LIVEKIT_PROJECT_SOURCE_DIR})
+    target_link_libraries(test_screen_share_runtime PRIVATE cohavora_core)
+
+    # This M0 probe opens real desktop windows and captures one screen. It is
+    # available only with both runtime tools and the Qt/UI test stack enabled.
+    if(COHAVORA_BUILD_QT_TESTS)
+        add_executable(test_annotation_overlay_runtime EXCLUDE_FROM_ALL
+            ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_annotation_overlay_runtime.cpp)
+        livekit_configure_qt_test(test_annotation_overlay_runtime)
+        target_compile_options(test_annotation_overlay_runtime PRIVATE /utf-8)
+    endif()
+endif()
 
 # VP8 Simulcast Test
 add_executable(test_simulcast

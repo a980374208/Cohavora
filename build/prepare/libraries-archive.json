@@ -1,0 +1,14 @@
+{
+  "archive": "cohavora-libraries-win64-qt-5.15.18-20260925.zip",
+  "archive_prefix": "Libraries/win64",
+  "file_count": 7654,
+  "required_files_sha256": "a6db127be4101cfcf2b79c979b07dbc0b706583c2a276c99f2660dc0eed26e45",
+  "required_manifest_sha256": "c72ceb791271efe5217373a2e87aeff50e08f254379dbe439f61d679a7332b2f",
+  "schema_version": 1,
+  "sha256": "491853cce06a78cee7427c243a9e21930ea8ed08af399fe60c6af258db650215",
+  "size": 1217880494,
+  "source_build_guide": "cohavora-libraries-win64-qt-5.15.18-20260925-source-build.md",
+  "source_build_guide_sha256": "7bc278c88206c7fb3d3ebcf20e972f3e4c7540abb1c7309f4d56821f2575f546",
+  "source_build_guide_url": "https://github.com/a980374208/Cohavora/releases/download/dependencies-qt-5.15.18-20260925/cohavora-libraries-win64-qt-5.15.18-20260925-source-build.md",
+  "url": "https://github.com/a980374208/Cohavora/releases/download/dependencies-qt-5.15.18-20260925/cohavora-libraries-win64-qt-5.15.18-20260925.zip"
+}

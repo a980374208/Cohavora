@@ -1,23 +1,51 @@
-cmake_minimum_required(VERSION 3.20)
+cmake_minimum_required(VERSION 3.25)
+
+# Select MSVC debug information before enabling C/C++ so CMake does not inject
+# legacy flags into every configuration. Debug keeps cache-friendly embedded
+# symbols, RelWithDebInfo emits a PDB, and release configurations stay lean.
+if(NOT DEFINED CMAKE_MSVC_DEBUG_INFORMATION_FORMAT)
+    set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT
+        "$<$<CONFIG:Debug>:Embedded>$<$<CONFIG:RelWithDebInfo>:ProgramDatabase>")
+endif()
 
 # A vcpkg manifest is activated only when its toolchain is loaded before the
 # first project() call. Keep explicit toolchains authoritative, and make the
 # documented bare configure command work when VCPKG_ROOT is available.
-if(CMAKE_HOST_WIN32
-        AND (NOT DEFINED VCPKG_TARGET_TRIPLET OR VCPKG_TARGET_TRIPLET STREQUAL ""))
-    string(TOLOWER "${CMAKE_GENERATOR_PLATFORM}" cohavora_generator_platform)
-    if(cohavora_generator_platform STREQUAL "win32"
-            OR cohavora_generator_platform STREQUAL "x86")
-        set(cohavora_vcpkg_triplet "x86-windows-static")
-    elseif(cohavora_generator_platform MATCHES "^(arm64|aarch64)$")
-        set(cohavora_vcpkg_triplet "arm64-windows-static")
-    else()
-        set(cohavora_vcpkg_triplet "x64-windows-static")
+if(CMAKE_HOST_WIN32)
+    set(COHAVORA_DEPENDENCY_ARCHITECTURE "x64" CACHE STRING
+        "Architecture of the bundled WebRTC and Qt dependency set")
+    set_property(CACHE COHAVORA_DEPENDENCY_ARCHITECTURE PROPERTY STRINGS x64)
+
+    set(cohavora_requested_architecture "${CMAKE_GENERATOR_PLATFORM}")
+    if(cohavora_requested_architecture STREQUAL ""
+            AND DEFINED ENV{VSCMD_ARG_TGT_ARCH})
+        set(cohavora_requested_architecture "$ENV{VSCMD_ARG_TGT_ARCH}")
     endif()
-    set(VCPKG_TARGET_TRIPLET "${cohavora_vcpkg_triplet}"
-        CACHE STRING "vcpkg target triplet")
-    unset(cohavora_vcpkg_triplet)
-    unset(cohavora_generator_platform)
+    if(cohavora_requested_architecture STREQUAL "")
+        set(cohavora_requested_architecture "x64")
+    endif()
+    string(TOLOWER "${cohavora_requested_architecture}"
+        cohavora_requested_architecture)
+    if(cohavora_requested_architecture MATCHES "^(amd64|x86_64)$")
+        set(cohavora_requested_architecture "x64")
+    endif()
+    if(NOT cohavora_requested_architecture STREQUAL
+            COHAVORA_DEPENDENCY_ARCHITECTURE)
+        message(FATAL_ERROR
+            "The bundled WebRTC and Qt dependencies support x64 only; "
+            "requested generator/toolchain architecture is "
+            "'${cohavora_requested_architecture}'.")
+    endif()
+
+    if(NOT DEFINED VCPKG_TARGET_TRIPLET OR VCPKG_TARGET_TRIPLET STREQUAL "")
+        set(VCPKG_TARGET_TRIPLET "x64-windows-static"
+            CACHE STRING "vcpkg target triplet")
+    elseif(NOT VCPKG_TARGET_TRIPLET MATCHES "^x64-")
+        message(FATAL_ERROR
+            "VCPKG_TARGET_TRIPLET='${VCPKG_TARGET_TRIPLET}' does not match "
+            "the x64 WebRTC and Qt dependency set.")
+    endif()
+    unset(cohavora_requested_architecture)
 endif()
 
 if((NOT DEFINED CMAKE_TOOLCHAIN_FILE OR CMAKE_TOOLCHAIN_FILE STREQUAL "")
@@ -37,6 +65,19 @@ project(Cohavora VERSION 0.1.0
     DESCRIPTION "Cohavora - Open-source Audio and Video Meeting Client"
     LANGUAGES C CXX)
 set(COHAVORA_DISPLAY_NAME "Cohavora · 开源音视频会议客户端")
+
+if(CMAKE_HOST_WIN32)
+    if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+        message(FATAL_ERROR
+            "The selected compiler is not targeting the required 64-bit ABI.")
+    endif()
+    if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID
+            AND NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "^(x64|X64|AMD64)$")
+        message(FATAL_ERROR
+            "Compiler architecture '${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}' "
+            "does not match the x64 WebRTC and Qt dependency set.")
+    endif()
+endif()
 
 function(cohavora_compat_option current legacy description default_value)
     if(DEFINED CACHE{${current}})
@@ -58,17 +99,15 @@ cohavora_compat_option(COHAVORA_BUILD_SAMPLES LIVEKIT_BUILD_SAMPLES
 cohavora_compat_option(COHAVORA_BUILD_MEETING_APP LIVEKIT_BUILD_MEETING_APP
     "Build the Qt meeting application" ON)
 option(BUILD_TESTING "Build the test targets" ON)
+option(COHAVORA_BUILD_QT_TESTS
+    "Build the test groups that require the Qt/UI dependency stack" ON)
+option(COHAVORA_BUILD_RUNTIME_TOOLS
+    "Create manual runtime harness targets (excluded from ALL_BUILD)" OFF)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded" CACHE STRING "" FORCE)
-
-set(CMAKE_MAP_IMPORTED_CONFIG_DEBUG "Release;None")
-
-if(MSVC)
-    add_link_options(/FORCE:MULTIPLE)
-endif()
+include(cmake/CohavoraAbi.cmake)
 
 # Find Packages via CMake / Vcpkg
 find_package(asio CONFIG REQUIRED)
@@ -89,12 +128,6 @@ add_compile_definitions(
     ASIO_STANDALONE
 )
 
-if(MSVC)
-    add_compile_options(/FS /Z7)
-    string(REPLACE "/Zi" "/Z7" CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG}")
-    string(REPLACE "/Zi" "/Z7" CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG}")
-endif()
-
 # Protobuf Generation Setup
 set(PROTO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/protos)
 set(PROTO_FILES
@@ -110,10 +143,50 @@ file(MAKE_DIRECTORY ${GEN_DIR})
 
 # Get protoc executable
 if(TARGET protobuf::protoc)
-  set(PROTOC_EXE "$<TARGET_FILE:protobuf::protoc>")
+    set(PROTOC_EXE "$<TARGET_FILE:protobuf::protoc>")
+    set(PROTOC_DEPENDENCY protobuf::protoc)
 else()
-  find_program(PROTOC_EXE NAMES protoc REQUIRED)
+    find_program(PROTOC_EXE NAMES protoc REQUIRED)
+    set(PROTOC_DEPENDENCY "${PROTOC_EXE}")
 endif()
+
+# Track well-known schemas as file dependencies and pass their roots explicitly
+# to protoc. A tool or imported-schema update must invalidate generated output.
+set(PROTOBUF_IMPORT_CANDIDATES ${Protobuf_INCLUDE_DIRS})
+if(TARGET protobuf::libprotobuf)
+    get_target_property(PROTOBUF_TARGET_INCLUDE_DIRS
+        protobuf::libprotobuf INTERFACE_INCLUDE_DIRECTORIES)
+    if(PROTOBUF_TARGET_INCLUDE_DIRS
+            AND NOT PROTOBUF_TARGET_INCLUDE_DIRS MATCHES "-NOTFOUND$")
+        list(APPEND PROTOBUF_IMPORT_CANDIDATES ${PROTOBUF_TARGET_INCLUDE_DIRS})
+    endif()
+endif()
+
+set(PROTOBUF_IMPORT_DIRS)
+set(PROTOBUF_IMPORT_FILES)
+foreach(PROTOBUF_IMPORT_CANDIDATE IN LISTS PROTOBUF_IMPORT_CANDIDATES)
+    if(PROTOBUF_IMPORT_CANDIDATE MATCHES "^\\$<BUILD_INTERFACE:(.*)>$")
+        set(PROTOBUF_IMPORT_CANDIDATE "${CMAKE_MATCH_1}")
+    endif()
+    if(EXISTS "${PROTOBUF_IMPORT_CANDIDATE}/google/protobuf/descriptor.proto"
+            AND EXISTS "${PROTOBUF_IMPORT_CANDIDATE}/google/protobuf/timestamp.proto")
+        list(APPEND PROTOBUF_IMPORT_DIRS "${PROTOBUF_IMPORT_CANDIDATE}")
+        list(APPEND PROTOBUF_IMPORT_FILES
+            "${PROTOBUF_IMPORT_CANDIDATE}/google/protobuf/descriptor.proto"
+            "${PROTOBUF_IMPORT_CANDIDATE}/google/protobuf/timestamp.proto")
+    endif()
+endforeach()
+list(REMOVE_DUPLICATES PROTOBUF_IMPORT_DIRS)
+list(REMOVE_DUPLICATES PROTOBUF_IMPORT_FILES)
+if(NOT PROTOBUF_IMPORT_FILES)
+    message(FATAL_ERROR
+        "Protobuf well-known schemas descriptor.proto and timestamp.proto were not found")
+endif()
+
+set(PROTOC_IMPORT_ARGUMENTS)
+foreach(PROTOBUF_IMPORT_DIR IN LISTS PROTOBUF_IMPORT_DIRS)
+    list(APPEND PROTOC_IMPORT_ARGUMENTS "--proto_path=${PROTOBUF_IMPORT_DIR}")
+endforeach()
 
 # Custom command to generate protobuf sources
 set(PROTO_SRCS
@@ -135,9 +208,10 @@ add_custom_command(
     OUTPUT ${PROTO_SRCS} ${PROTO_HDRS}
     COMMAND ${PROTOC_EXE}
         --proto_path=${PROTO_DIR}
+        ${PROTOC_IMPORT_ARGUMENTS}
         --cpp_out=${GEN_DIR}
         ${PROTO_FILES}
-    DEPENDS ${PROTO_FILES}
+    DEPENDS ${PROTO_FILES} ${PROTOBUF_IMPORT_FILES} ${PROTOC_DEPENDENCY}
     COMMENT "Generating C++ Protobuf files from options, metrics, models, and rtc schemas"
     VERBATIM
 )
@@ -327,28 +401,64 @@ else()
     set(WEBRTC_RELEASE_LIB "${WEBRTC_ROOT}/lib/webrtc.lib")
 endif()
 
+set(WEBRTC_REQUIRED_PATHS
+    "${WEBRTC_ROOT}/include/api/peer_connection_interface.h"
+    "${WEBRTC_ROOT}/include/api/video/i420_buffer.h"
+    "${WEBRTC_ROOT}/include/third_party/libyuv/include/libyuv.h"
+    "${WEBRTC_ROOT}/include/third_party/boringssl/src/include/openssl/ssl.h"
+    "${WEBRTC_DEBUG_LIB}"
+    "${WEBRTC_RELEASE_LIB}")
+set(WEBRTC_MISSING_PATHS)
+foreach(WEBRTC_REQUIRED_PATH IN LISTS WEBRTC_REQUIRED_PATHS)
+    if(NOT EXISTS "${WEBRTC_REQUIRED_PATH}")
+        list(APPEND WEBRTC_MISSING_PATHS "${WEBRTC_REQUIRED_PATH}")
+    endif()
+endforeach()
+if(WEBRTC_MISSING_PATHS)
+    list(JOIN WEBRTC_MISSING_PATHS "\n  - " WEBRTC_MISSING_DETAILS)
+    message(FATAL_ERROR
+        "The selected WebRTC SDK is incomplete:\n  - ${WEBRTC_MISSING_DETAILS}")
+endif()
+
 message(STATUS "[WebRTC] Using Debug Library   : ${WEBRTC_DEBUG_LIB}")
 message(STATUS "[WebRTC] Using Release Library : ${WEBRTC_RELEASE_LIB}")
+
+# The packaged WebRTC archive contains BoringSSL. All OpenSSL-compatible code
+# in a process that links WebRTC must use those headers and symbols; linking a
+# second static OpenSSL implementation produces thousands of duplicate symbols
+# and leaves the selected implementation dependent on link order.
+add_library(cohavora_webrtc_sdk INTERFACE)
+target_include_directories(cohavora_webrtc_sdk SYSTEM BEFORE INTERFACE
+    "${WEBRTC_ROOT}/include/third_party/boringssl/src/include"
+    "${WEBRTC_ROOT}/include"
+    "${WEBRTC_ROOT}/include/third_party/libyuv/include")
+target_link_libraries(cohavora_webrtc_sdk INTERFACE
+    $<$<CONFIG:Debug>:${WEBRTC_DEBUG_LIB}>
+    $<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_LIB}>)
+
+# Static QtNetwork requires OpenSSL APIs that WebRTC's bundled BoringSSL does
+# not provide. Only final binaries that intentionally combine both providers
+# inherit this MSVC compatibility switch; unrelated targets retain duplicate
+# symbol diagnostics.
+add_library(cohavora_dual_tls_link_compat INTERFACE)
+if(MSVC)
+    target_link_options(cohavora_dual_tls_link_compat INTERFACE /FORCE:MULTIPLE)
+endif()
 
 add_compile_definitions(
     WEBRTC_WIN
     NOMINMAX
-    NDEBUG
     RTC_DISABLE_CHECK_MSG=1
     RTC_DISABLE_CHECKING=1
     RTC_NO_UNIQUE_ADDRESS=
-    _ITERATOR_DEBUG_LEVEL=0
 )
 
 target_link_libraries(cohavora_core PUBLIC
-    $<$<CONFIG:Debug>:${WEBRTC_DEBUG_LIB}>
-    $<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_LIB}>
+    cohavora_webrtc_sdk
     asio::asio
     protobuf::libprotobuf
     spdlog::spdlog
     ZLIB::ZLIB
-    OpenSSL::SSL
-    OpenSSL::Crypto
     nlohmann_json::nlohmann_json
     ws2_32
     winmm
@@ -374,7 +484,7 @@ if(COHAVORA_BUILD_SAMPLES)
     add_subdirectory(samples)
 endif()
 
-if(COHAVORA_BUILD_MEETING_APP OR BUILD_TESTING)
+if(COHAVORA_BUILD_MEETING_APP OR (BUILD_TESTING AND COHAVORA_BUILD_QT_TESTS))
 if(NOT DEFINED TDESKTOP_LIBS_DIR)
     if(DEFINED ENV{TDESKTOP_LIBS_DIR})
         set(TDESKTOP_LIBS_DIR "$ENV{TDESKTOP_LIBS_DIR}")
@@ -384,71 +494,38 @@ if(NOT DEFINED TDESKTOP_LIBS_DIR)
 endif()
 
 set(QT_PATH "${TDESKTOP_LIBS_DIR}/Qt-5.15.18")
-if(NOT EXISTS "${QT_PATH}")
-    message(FATAL_ERROR "\n[ERROR] Qt 5.15.18 library not found in project dependencies: ${QT_PATH}\n"
-                        "Please run 'win.bat' (or 'prepare.bat') first to deploy dependencies to ./deps!\n")
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/build/prepare/libraries-required.txt"
+    COHAVORA_LIBRARIES_REQUIRED_FILES REGEX "^[^#].+")
+set(COHAVORA_LIBRARIES_MISSING_PATHS)
+foreach(COHAVORA_LIBRARY_REQUIRED_FILE IN LISTS COHAVORA_LIBRARIES_REQUIRED_FILES)
+    if(NOT EXISTS "${TDESKTOP_LIBS_DIR}/${COHAVORA_LIBRARY_REQUIRED_FILE}")
+        list(APPEND COHAVORA_LIBRARIES_MISSING_PATHS
+            "${TDESKTOP_LIBS_DIR}/${COHAVORA_LIBRARY_REQUIRED_FILE}")
+    endif()
+endforeach()
+if(COHAVORA_LIBRARIES_MISSING_PATHS)
+    list(JOIN COHAVORA_LIBRARIES_MISSING_PATHS
+        "\n  - " COHAVORA_LIBRARIES_MISSING_DETAILS)
+    message(FATAL_ERROR
+        "The selected Qt/third-party dependency tree is incomplete:\n"
+        "  - ${COHAVORA_LIBRARIES_MISSING_DETAILS}\n"
+        "Run build/prepare/win.bat with --qt-archive or --libraries-src to repair it.")
 endif()
 
-list(APPEND CMAKE_PREFIX_PATH "${QT_PATH}")
-file(GLOB livekit_qt_package_dirs LIST_DIRECTORIES TRUE
-    "${QT_PATH}/lib/cmake/Qt5*")
-foreach(livekit_qt_package_dir IN LISTS livekit_qt_package_dirs)
-    if(IS_DIRECTORY "${livekit_qt_package_dir}")
-        get_filename_component(livekit_qt_package "${livekit_qt_package_dir}" NAME)
-        set(${livekit_qt_package}_DIR "${livekit_qt_package_dir}"
-            CACHE PATH "${livekit_qt_package} directory" FORCE)
-    endif()
-endforeach()
-find_package(Qt5 REQUIRED COMPONENTS Core Gui Widgets Svg Network)
-
-# The bundled Qt libraries are release-only and the whole project uses the
-# matching release CRT ABI in every CMake configuration. Qt 5's static package
-# embeds configuration expressions in its link interface, so mapping the
-# imported location alone would still pull debug support libraries into Debug.
-get_property(livekit_imported_targets DIRECTORY PROPERTY IMPORTED_TARGETS)
-foreach(livekit_imported_target IN LISTS livekit_imported_targets)
-    if(livekit_imported_target MATCHES "^Qt5::")
-        set_property(TARGET ${livekit_imported_target}
-            PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
-
-        foreach(livekit_imported_property IN ITEMS LOCATION IMPLIB SONAME)
-            get_target_property(livekit_qt_release_value
-                ${livekit_imported_target}
-                IMPORTED_${livekit_imported_property}_RELEASE)
-            if(livekit_qt_release_value
-                    AND NOT livekit_qt_release_value MATCHES "-NOTFOUND$")
-                set_property(TARGET ${livekit_imported_target}
-                    PROPERTY IMPORTED_${livekit_imported_property}_DEBUG
-                    "${livekit_qt_release_value}")
-            endif()
-        endforeach()
-
-        get_target_property(livekit_qt_release_dependencies
-            ${livekit_imported_target}
-            IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE)
-        if(livekit_qt_release_dependencies
-                AND NOT livekit_qt_release_dependencies MATCHES "-NOTFOUND$")
-            set_property(TARGET ${livekit_imported_target}
-                PROPERTY INTERFACE_LINK_LIBRARIES
-                "${livekit_qt_release_dependencies}")
-        endif()
-    endif()
-endforeach()
-
-foreach(_tool rcc moc uic qmake)
-    if(TARGET Qt5::${_tool})
-        set_property(TARGET Qt5::${_tool} PROPERTY IMPORTED_LOCATION_DEBUG "${QT_PATH}/bin/${_tool}.exe")
-        set_property(TARGET Qt5::${_tool} PROPERTY IMPORTED_LOCATION_RELEASE "${QT_PATH}/bin/${_tool}.exe")
-        set_property(TARGET Qt5::${_tool} PROPERTY IMPORTED_LOCATION "${QT_PATH}/bin/${_tool}.exe")
-    endif()
-endforeach()
-
-set(CMAKE_AUTOMOC ON)
+include(cmake/CohavoraQtDependencies.cmake)
+cohavora_configure_qt_dependencies(
+    QT_ROOT "${QT_PATH}"
+    LIBRARIES_ROOT "${TDESKTOP_LIBS_DIR}")
 
 # Add UI support libraries and generated resources.
 add_subdirectory(src/ui)
+cohavora_define_desktop_ui_runtime()
+
+include(cmake/CohavoraMeetingTargets.cmake)
 
 add_subdirectory(src/render)
+
+include(cmake/CohavoraMeetingUiTargets.cmake)
 
 if(COHAVORA_BUILD_MEETING_APP)
     add_subdirectory(src/app)

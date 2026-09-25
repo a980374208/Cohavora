@@ -8,31 +8,14 @@ add_executable(test_gpu_converter
 )
 
 target_include_directories(test_gpu_converter BEFORE PRIVATE
-    ${LIVEKIT_PROJECT_SOURCE_DIR}
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui
-)
+    ${LIVEKIT_PROJECT_SOURCE_DIR})
 
 target_link_libraries(test_gpu_converter PRIVATE
     cohavora_core
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtfreetype.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtharfbuzz.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtlibpng.lib
+    cohavora::qt_gui_runtime
     d3d11
     dxgi
     d3dcompiler
-    imm32
-    winmm
-    wtsapi32
-    version
-    netapi32
-    userenv
-    ws2_32
-    crypt32
 )
 
 target_compile_definitions(test_gpu_converter PRIVATE
@@ -41,22 +24,20 @@ target_compile_definitions(test_gpu_converter PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
     _WINSOCK_DEPRECATED_NO_WARNINGS
-    NDEBUG
-    _ITERATOR_DEBUG_LEVEL=0
-    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
-    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
     LIVEKIT_DX11_TESTING
 )
-
-target_link_options(test_gpu_converter PRIVATE
-    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
-    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
-)
-
-set_target_properties(test_gpu_converter PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded"
-)
-add_test(NAME gpu_converter_test COMMAND test_gpu_converter)
+add_test(NAME gpu_converter_test COMMAND test_gpu_converter --deterministic)
+set_tests_properties(gpu_converter_test PROPERTIES
+    TIMEOUT 30
+    LABELS "RENDER_DETERMINISTIC")
+if(LIVEKIT_BUILD_RENDERER_RUNTIME_TESTS)
+    add_test(NAME gpu_converter_hardware_test COMMAND test_gpu_converter --hardware)
+    set_tests_properties(gpu_converter_hardware_test PROPERTIES
+        TIMEOUT 120
+        RUN_SERIAL TRUE
+        SKIP_RETURN_CODE 77
+        LABELS "RENDER_RUNTIME;GPU_RUNTIME")
+endif()
 
 # DX11 renderer lifecycle test. It uses deterministic failure injection, so it
 # does not require a GPU, a desktop session, or a visible native window.
@@ -95,9 +76,6 @@ if(MSVC)
     target_compile_options(test_dx11_renderer_lifecycle PRIVATE /utf-8)
 endif()
 
-set_target_properties(test_dx11_renderer_lifecycle PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded"
-)
 add_test(NAME dx11_renderer_lifecycle_test COMMAND test_dx11_renderer_lifecycle)
 
 # Shader-side colour-policy test. It is deterministic and does not need a
@@ -115,9 +93,6 @@ target_link_libraries(test_dx11_color_conversion PRIVATE
     cohavora_core
 )
 
-set_target_properties(test_dx11_color_conversion PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded"
-)
 add_test(NAME dx11_color_conversion_test COMMAND test_dx11_color_conversion)
 
 # Compile the embedded HLSL without creating a device or native window. This
@@ -139,9 +114,6 @@ if(MSVC)
     target_compile_options(test_dx11_shaders PRIVATE /utf-8)
 endif()
 
-set_target_properties(test_dx11_shaders PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded"
-)
 add_test(NAME dx11_shaders_test COMMAND test_dx11_shaders)
 
 # Owned I420 frame and cancellable render subscription contract test.
@@ -153,9 +125,6 @@ target_link_libraries(test_owned_i420_frame PRIVATE
     cohavora_core
 )
 
-set_target_properties(test_owned_i420_frame PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded"
-)
 add_test(NAME owned_i420_frame_test COMMAND test_owned_i420_frame)
 
 add_executable(test_video_render_router
@@ -166,65 +135,27 @@ target_link_libraries(test_video_render_router PRIVATE
     cohavora_core
 )
 
-set_target_properties(test_video_render_router PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded"
-)
 add_test(NAME video_render_router_test COMMAND test_video_render_router)
 
 add_executable(test_qt_cpu_video_renderer
     ${LIVEKIT_TEST_SOURCE_DIR}/test_qt_cpu_video_renderer.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/render/qt_cpu_video_renderer.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/render/qt_cpu_video_renderer.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/render/video_render_session.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/render/video_render_session.cpp
 )
 
 target_include_directories(test_qt_cpu_video_renderer BEFORE PRIVATE
     ${LIVEKIT_PROJECT_SOURCE_DIR}
-    ${WEBRTC_ROOT}/include/third_party/libyuv/include
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui
-)
+    ${WEBRTC_ROOT}/include/third_party/libyuv/include)
 
 target_link_libraries(test_qt_cpu_video_renderer PRIVATE
+    cohavora_qt_video_render
     cohavora_core
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtfreetype.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtharfbuzz.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtlibpng.lib
-    imm32
-    winmm
-    wtsapi32
-    version
-    netapi32
-    userenv
-    ws2_32
-    crypt32
-)
+    cohavora::qt_gui_runtime)
 
 target_compile_definitions(test_qt_cpu_video_renderer PRIVATE
     WIN32
     _WINDOWS
     WIN32_LEAN_AND_MEAN
     NOMINMAX
-    _WINSOCK_DEPRECATED_NO_WARNINGS
-    NDEBUG
-    _ITERATOR_DEBUG_LEVEL=0
-    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
-    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
-)
-
-target_link_options(test_qt_cpu_video_renderer PRIVATE
-    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
-    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
-)
-
-set_target_properties(test_qt_cpu_video_renderer PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded"
-)
+    _WINSOCK_DEPRECATED_NO_WARNINGS)
 add_test(NAME qt_cpu_video_renderer_test COMMAND test_qt_cpu_video_renderer)
 
 # Concurrent nine-stream latest-wins/teardown test.  It shares the CPU
@@ -232,59 +163,25 @@ add_test(NAME qt_cpu_video_renderer_test COMMAND test_qt_cpu_video_renderer)
 # though this test selects DX11's I420 callback path only.
 add_executable(test_video_render_session_stress
     ${LIVEKIT_TEST_SOURCE_DIR}/test_video_render_session_stress.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/render/qt_cpu_video_renderer.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/render/qt_cpu_video_renderer.cpp
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/render/video_render_session.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/render/video_render_session.cpp
 )
 
 target_include_directories(test_video_render_session_stress BEFORE PRIVATE
     ${LIVEKIT_PROJECT_SOURCE_DIR}
-    ${WEBRTC_ROOT}/include/third_party/libyuv/include
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtCore
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/include/QtGui
-)
+    ${WEBRTC_ROOT}/include/third_party/libyuv/include)
 
 target_link_libraries(test_video_render_session_stress PRIVATE
+    cohavora_qt_video_render
     cohavora_core
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Core.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/Qt5Gui.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtpcre2.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtfreetype.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtharfbuzz.lib
-    ${TDESKTOP_LIBS_DIR}/Qt-5.15.18/lib/qtlibpng.lib
-    imm32
-    winmm
-    wtsapi32
-    version
-    netapi32
-    userenv
-    ws2_32
-    crypt32
-)
+    cohavora::qt_gui_runtime)
 
 target_compile_definitions(test_video_render_session_stress PRIVATE
     WIN32
     _WINDOWS
     WIN32_LEAN_AND_MEAN
     NOMINMAX
-    _WINSOCK_DEPRECATED_NO_WARNINGS
-    NDEBUG
-    _ITERATOR_DEBUG_LEVEL=0
-    $<$<CONFIG:Debug>:_ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH>
-    $<$<CONFIG:Debug>:_ALLOW_RUNTIME_LIBRARY_MISMATCH>
-)
-
-target_link_options(test_video_render_session_stress PRIVATE
-    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcpmtd.lib>
-    $<$<CONFIG:Debug>:/NODEFAULTLIB:libcmtd.lib>
-)
-
-set_target_properties(test_video_render_session_stress PROPERTIES
-    MSVC_RUNTIME_LIBRARY "MultiThreaded"
-)
+    _WINSOCK_DEPRECATED_NO_WARNINGS)
 add_test(NAME video_render_session_stress_test COMMAND test_video_render_session_stress)
+set_tests_properties(video_render_session_stress_test PROPERTIES TIMEOUT 120)
 
 set_tests_properties(
     always_active_checks_test

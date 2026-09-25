@@ -23,9 +23,10 @@ jobs:
       - X64
     timeout-minutes: 60
     env:
-      BUILD_DIR: build-ci-telemetry-s7
+      BUILD_DIR: ${{ runner.temp }}/cohavora-build/telemetry-s7
       COHAVORA_CI_DEPS_DIR: ${{ vars.COHAVORA_WINDOWS_DEPS_DIR }}
       CTEST_OUTPUT_ON_FAILURE: "1"
+      SCCACHE_GHA_ENABLED: "true"
 
     steps:
       - name: Check out source and submodules
@@ -34,8 +35,13 @@ jobs:
           submodules: recursive
           clean: true
 
-      - name: Configure MSBuild
-        uses: microsoft/setup-msbuild@v2
+      - name: Configure MSVC environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure compiler cache
+        uses: mozilla-actions/sccache-action@v0.0.9
 
       - name: Validate runner dependencies
         shell: pwsh
@@ -75,13 +81,75 @@ jobs:
             throw 'VCPKG_ROOT must identify a vcpkg installation containing scripts/buildsystems/vcpkg.cmake.'
           }
 
+          $ninja = Get-Command ninja.exe -ErrorAction SilentlyContinue
+          if (-not $ninja -and -not [string]::IsNullOrWhiteSpace($env:VSINSTALLDIR)) {
+            $candidate = Join-Path $env:VSINSTALLDIR 'Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe'
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+              Split-Path -Parent $candidate | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+              $ninja = Get-Item -LiteralPath $candidate
+            }
+          }
+          if (-not $ninja) {
+            throw 'Ninja is required for the sccache-backed Windows build.'
+          }
+
           "COHAVORA_RESOLVED_DEPS_DIR=$deps" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "VCPKG_ROOT=$vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Compute compiler cache identity
+        id: compiler-cache-identity
+        shell: pwsh
+        run: |
+          $workspace = (Resolve-Path -LiteralPath $env:GITHUB_WORKSPACE).Path
+          $deps = (Resolve-Path -LiteralPath $env:COHAVORA_RESOLVED_DEPS_DIR).Path
+          $cl = (Get-Command cl.exe -ErrorAction Stop).Source
+          $ninja = (Get-Command ninja.exe -ErrorAction Stop).Source
+          $vcpkgToolchain = Join-Path $env:VCPKG_ROOT 'scripts/buildsystems/vcpkg.cmake'
+
+          $identity = @(
+            'schema=1',
+            'architecture=x64',
+            'configuration=Debug',
+            'msvc-runtime=MultiThreaded',
+            "compiler=$cl|$((Get-Item -LiteralPath $cl).VersionInfo.FileVersion)",
+            "cmake=$((& cmake --version | Select-Object -First 1).Trim())",
+            "ninja=$((& $ninja --version | Select-Object -First 1).Trim())",
+            "vcpkg-toolchain=$((Get-FileHash -Algorithm SHA256 -LiteralPath $vcpkgToolchain).Hash.ToLowerInvariant())",
+            "vcpkg-manifest=$((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $workspace 'vcpkg.json')).Hash.ToLowerInvariant())",
+            "webrtc-debug=$((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $deps 'webrtc/lib/Debug/webrtc.lib')).Hash.ToLowerInvariant())"
+          )
+
+          $requiredManifest = Join-Path $workspace 'build/prepare/libraries-required.txt'
+          $requiredLibraries = Get-Content -LiteralPath $requiredManifest |
+            ForEach-Object { $_.Trim() } |
+            Where-Object { $_ -and -not $_.StartsWith('#') }
+          foreach ($relative in $requiredLibraries) {
+            $path = Join-Path (Join-Path $deps 'Libraries/win64') $relative
+            $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant()
+            $identity += "library=$relative|$hash"
+          }
+
+          $hasher = [System.Security.Cryptography.SHA256]::Create()
+          try {
+            $bytes = [System.Text.Encoding]::UTF8.GetBytes(($identity -join "`n"))
+            $fingerprint = -join ($hasher.ComputeHash($bytes) |
+              ForEach-Object { $_.ToString('x2') })
+          } finally {
+            $hasher.Dispose()
+          }
+          "SCCACHE_C_CUSTOM_CACHE_BUSTER=$fingerprint" |
+            Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "fingerprint=$fingerprint" |
+            Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+          Write-Host "Compiler cache identity: $fingerprint"
 
       - name: Configure S7 acceptance build
         shell: pwsh
         run: |
-          cmake -S . -B $env:BUILD_DIR -A x64 `
+          cmake -S . -B $env:BUILD_DIR -G Ninja `
+            -DCMAKE_BUILD_TYPE=Debug `
+            -DCMAKE_C_COMPILER_LAUNCHER=sccache `
+            -DCMAKE_CXX_COMPILER_LAUNCHER=sccache `
             "-DDEPS_DIR=$env:COHAVORA_RESOLVED_DEPS_DIR" `
             "-DWEBRTC_ROOT=$env:COHAVORA_RESOLVED_DEPS_DIR/webrtc" `
             "-DTDESKTOP_LIBS_DIR=$env:COHAVORA_RESOLVED_DEPS_DIR/Libraries/win64" `
@@ -97,15 +165,21 @@ jobs:
       - name: Build application and S7 acceptance targets
         shell: pwsh
         run: |
-          cmake --build $env:BUILD_DIR --config Debug `
+          cmake --build $env:BUILD_DIR `
             --target cohavora_app test_telemetry_report test_participant_window_remediation `
-            --parallel 2 -- /clp:ErrorsOnly /nologo
+            --parallel 2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Report compiler cache statistics
+        if: always()
+        continue-on-error: true
+        shell: pwsh
+        run: sccache --show-stats
 
       - name: Verify S7 gate discovery
         shell: pwsh
         run: |
-          $raw = (& ctest --test-dir $env:BUILD_DIR -C Debug `
+          $raw = (& ctest --test-dir $env:BUILD_DIR `
             -N -L TELEMETRY_S7_ACCEPTANCE --show-only=json-v1) -join "`n"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $discovery = $raw | ConvertFrom-Json
@@ -124,7 +198,7 @@ jobs:
       - name: Run TELEMETRY_S7_ACCEPTANCE merge gate
         shell: pwsh
         run: |
-          ctest --test-dir $env:BUILD_DIR -C Debug `
+          ctest --test-dir $env:BUILD_DIR `
             -L TELEMETRY_S7_ACCEPTANCE --output-on-failure
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

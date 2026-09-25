@@ -13,9 +13,9 @@ cmake --build build-debug --config Debug --target update_ui_translations
 python tests/verify_ui_translations.py
 ```
 
-CMake 查找 `lupdate` 和 `lrelease`；SDK 未附带这些工具时，可设置 `LIVEKIT_LUPDATE_EXECUTABLE`、`LIVEKIT_LRELEASE_EXECUTABLE`。构建时将 TS 编译成 QM 并嵌入客户端。缺少 Linguist 工具时保留英文源文案显示。
+CMake 只在当前 Qt SDK 的 `bin` 目录自动查找 `lupdate` 和 `lrelease`，并校验工具版本与 SDK 一致；SDK 未附带这些工具时，可设置 `COHAVORA_LUPDATE_EXECUTABLE`、`COHAVORA_LRELEASE_EXECUTABLE`。构建时将 TS 编译成 QM 并嵌入客户端。开发配置缺少 Linguist 工具时保留英文源文案显示。
 
-构建时同时从 Qt SDK 或 Linguist 工具的 `translations` 目录查找并嵌入 Qt 简体中文资源，供标准按钮、文件对话框使用；可通过 `LIVEKIT_QT_ZH_CN_TRANSLATION` 指定资源路径。
+构建时同时从当前 Qt SDK 的 `translations` 目录查找并嵌入 Qt 简体中文资源，供标准按钮、文件对话框使用；可通过 `COHAVORA_QT_ZH_CN_TRANSLATION` 指定资源路径。正式发布配置设置 `COHAVORA_REQUIRE_UI_TRANSLATIONS=ON`，缺少匹配工具、应用目录或 Qt 中文资源时配置失败。
 
 可执行文件旁 `translations` 目录中的 `cohavora_<locale>.qm` 优先于内置目录；新文件不存在时，可兼容加载外部 `livekit_meeting_<locale>.qm`。内置资源只包含 Cohavora 文件名。Qt 标准控件的 `qt_<locale>.qm` / `qtbase_<locale>.qm` 及其依赖也可放在此目录。缺失条目回退到英文源文案。
 

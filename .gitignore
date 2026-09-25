@@ -28,6 +28,7 @@ AGENTS.md
 # CMake artifacts
 /CMakeFiles/
 /CMakeCache.txt
+/CMakeUserPresets.json
 Makefile
 cmake_install.cmake
 compile_commands.json

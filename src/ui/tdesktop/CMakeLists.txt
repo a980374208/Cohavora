@@ -16,9 +16,12 @@ target_include_directories(desktop_lz4 PUBLIC
 )
 
 # --- 2. desktop_lib_crl (Concurrency Runtime Library) ---
-file(GLOB_RECURSE CRL_COMMON_SOURCES "lib_crl/crl/common/*.cpp")
-file(GLOB_RECURSE CRL_DISPATCH_SOURCES "lib_crl/crl/dispatch/*.cpp")
-file(GLOB_RECURSE CRL_WINAPI_SOURCES "lib_crl/crl/winapi/*.cpp")
+file(GLOB_RECURSE CRL_COMMON_SOURCES CONFIGURE_DEPENDS
+    "lib_crl/crl/common/*.cpp")
+file(GLOB_RECURSE CRL_DISPATCH_SOURCES CONFIGURE_DEPENDS
+    "lib_crl/crl/dispatch/*.cpp")
+file(GLOB_RECURSE CRL_WINAPI_SOURCES CONFIGURE_DEPENDS
+    "lib_crl/crl/winapi/*.cpp")
 
 add_library(desktop_lib_crl STATIC
     ${CRL_COMMON_SOURCES}
@@ -46,13 +49,14 @@ target_compile_definitions(desktop_lib_crl PUBLIC
 )
 
 # --- 3. desktop_lib_base (Base Utilities & Win Platform) ---
-file(GLOB BASE_SOURCES "lib_base/base/*.cpp")
+file(GLOB BASE_SOURCES CONFIGURE_DEPENDS "lib_base/base/*.cpp")
 list(FILTER BASE_SOURCES EXCLUDE REGEX "crash_report_.*\\.cpp$")
 list(FILTER BASE_SOURCES EXCLUDE REGEX "_tests?\\.cpp$")
 list(FILTER BASE_SOURCES EXCLUDE REGEX "tests_.*\\.cpp$")
 list(FILTER BASE_SOURCES EXCLUDE REGEX ".*_posix\\.cpp$")
 
-file(GLOB BASE_WIN_SOURCES "lib_base/base/platform/win/*.cpp")
+file(GLOB BASE_WIN_SOURCES CONFIGURE_DEPENDS
+    "lib_base/base/platform/win/*.cpp")
 
 add_library(desktop_lib_base STATIC
     ${BASE_SOURCES}
@@ -91,18 +95,17 @@ target_compile_definitions(desktop_lib_base PUBLIC
     _UNICODE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
-    _ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH
-    _ALLOW_RUNTIME_LIBRARY_MISMATCH
 )
 
 # --- 4. desktop_lib_ui (UI Widgets, Styles & Palette) ---
-file(GLOB_RECURSE UI_SOURCES "lib_ui/ui/*.cpp")
-file(GLOB_RECURSE UI_EMOJI_SOURCES "lib_ui/emoji_suggestions/*.cpp")
+file(GLOB_RECURSE UI_SOURCES CONFIGURE_DEPENDS "lib_ui/ui/*.cpp")
+file(GLOB_RECURSE UI_EMOJI_SOURCES CONFIGURE_DEPENDS
+    "lib_ui/emoji_suggestions/*.cpp")
 list(FILTER UI_SOURCES EXCLUDE REGEX "tests_.*\\.cpp$")
 list(FILTER UI_SOURCES EXCLUDE REGEX "ui/platform/linux/.*")
 list(FILTER UI_SOURCES EXCLUDE REGEX "ui/platform/mac/.*")
 
-file(GLOB_RECURSE UI_GEN_SOURCES "gen/*.cpp")
+file(GLOB_RECURSE UI_GEN_SOURCES CONFIGURE_DEPENDS "gen/*.cpp")
 
 # Qt Resources (fonts and windows theme icons)
 set(UI_RESOURCES
@@ -167,6 +170,4 @@ target_compile_definitions(desktop_lib_ui PUBLIC
     _UNICODE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
-    _ALLOW_ITERATOR_DEBUG_LEVEL_MISMATCH
-    _ALLOW_RUNTIME_LIBRARY_MISMATCH
 )

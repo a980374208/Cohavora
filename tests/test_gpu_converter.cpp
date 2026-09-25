@@ -2,10 +2,17 @@
 #include <vector>
 #include <chrono>
 #include <cassert>
+#include <string_view>
 #include "src/ui/dx11/gpu_video_converter.h"
 #include "src/rtc/video_frame.h"
 
 int main(int argc, char* argv[]) {
+    const auto mode = argc == 2 ? std::string_view(argv[1]) : std::string_view("--deterministic");
+    if (mode != "--deterministic" && mode != "--hardware") {
+        std::cerr << "Usage: test_gpu_converter [--deterministic|--hardware]" << std::endl;
+        return 2;
+    }
+
     std::cout << "[TestGpuConverter] Starting GPU Video Converter Test..." << std::endl;
 
 	// Exercise the exact fallback branch that previously attempted to lock the
@@ -24,11 +31,14 @@ int main(int argc, char* argv[]) {
 		converter.Cleanup();
 	}
 	livekit::dx11::GpuVideoConverter::SetForceInitializationFailureForTesting(false);
+	if (mode == "--deterministic") {
+		std::cout << "[TestGpuConverter] Deterministic fallback lifecycle test passed." << std::endl;
+		return 0;
+	}
 
     if (!converter.Initialize()) {
-        std::cerr << "[TestGpuConverter] Warning: GPU DX11 device initialization failed (no compatible GPU or headless environment)." << std::endl;
-		std::cout << "[TestGpuConverter] Forced-failure lifecycle test passed; skipping hardware-only conversion checks." << std::endl;
-		return 0;
+        std::cerr << "[TestGpuConverter] SKIP: no compatible DX11 GPU or interactive adapter." << std::endl;
+		return 77;
     }
 
     // 1. 测试 1920x1080 I420 转码
@@ -80,5 +90,6 @@ int main(int argc, char* argv[]) {
     std::cout << "[TestGpuConverter] 30-frame 1080p stream simulation completed! Avg GPU conversion time: " << avg_cost << " ms/frame" << std::endl;
 
     std::cout << "[TestGpuConverter] ALL GPU VIDEO CONVERTER TESTS PASSED!" << std::endl;
+    converter.Cleanup();
     return 0;
 }

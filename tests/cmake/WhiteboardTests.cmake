@@ -28,7 +28,9 @@ set_tests_properties(whiteboard_document_test whiteboard_ui_test whiteboard_meet
 set_tests_properties(whiteboard_collaboration_test PROPERTIES
     TIMEOUT 60 LABELS "WHITEBOARD_COLLAB_FOCUSED")
 set_tests_properties(whiteboard_ui_test whiteboard_collaboration_ui_test PROPERTIES
-    TIMEOUT 60 LABELS "WHITEBOARD_COLLAB_FOCUSED" RUN_SERIAL TRUE ENVIRONMENT "QT_SCALE_FACTOR=1")
+    TIMEOUT 60 RUN_SERIAL TRUE ENVIRONMENT "QT_SCALE_FACTOR=1")
+set_property(TEST whiteboard_ui_test whiteboard_collaboration_ui_test
+    APPEND PROPERTY LABELS "WHITEBOARD_COLLAB_FOCUSED")
 set_tests_properties(whiteboard_ui_test whiteboard_meeting_test PROPERTIES
     RUN_SERIAL TRUE ENVIRONMENT "QT_SCALE_FACTOR=1")
 set_tests_properties(screen_annotation_window_test PROPERTIES

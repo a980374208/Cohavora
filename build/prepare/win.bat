@@ -1,23 +1,21 @@
 @echo off
 setlocal
 
-set "SCRIPT_DIR=%~dp0"
-pushd "%SCRIPT_DIR%"
-
 where python >nul 2>&1
-if %ERRORLEVEL% neq 0 (
-    echo [ERROR] Python is not found in system PATH.
-    echo Please install Python 3.8+ and ensure python is available.
-    popd
-    exit /b 1
-)
+if errorlevel 1 goto python_missing
 
-python prepare.py %*
-if %ERRORLEVEL% neq 0 (
-    echo [ERROR] Dependencies preparation and build failed.
-    popd
-    exit /b 1
-)
+python -c "import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)"
+if errorlevel 1 goto python_version
 
-popd
-exit /b 0
+python "%~dp0prepare.py" %*
+set "EXIT_CODE=%ERRORLEVEL%"
+if not "%EXIT_CODE%"=="0" echo [ERROR] Dependency preparation failed with exit code %EXIT_CODE%.
+exit /b %EXIT_CODE%
+
+:python_missing
+echo [ERROR] Python was not found in PATH. Install Python 3.8 or newer.
+exit /b 9009
+
+:python_version
+echo [ERROR] Python 3.8 or newer is required.
+exit /b 1
