@@ -18,12 +18,12 @@ from pathlib import Path
 
 
 ARCHIVE_PREFIX = "cohavora-webrtc-win-x64"
-PACKAGE_ID = "webrtc-51ef663-cohavora-bssl-dual-v2"
+PACKAGE_ID = "webrtc-51ef663-cohavora-bssl-dual-v3"
 PREFIX_NAME = "cohavora_bssl"
-FIXED_ZIP_TIME = (2026, 9, 25, 0, 0, 0)
+FIXED_ZIP_TIME = (2026, 9, 26, 0, 0, 0)
 EXPECTED_LIBRARY_HASHES = {
     "Release": "5f0cf912e593c9a279ee61a7e41400e38d633d0a8921216bed76cfd00d8b9022",
-    "Debug": "e85d3418a4a169631118d30f21e0935e3a8160b449c6dd855490ca36536a61e2",
+    "Debug": "a6502024b585ad604c18cc1071c26a8ef6d75a565b97da824a700c67888ca2d5",
 }
 EXPECTED_ARGS_HASHES = {
     "Release": "b7832d4226d1a2e9e9f9de1ca70c6e27fd3536766fab086880e4d1a015b55b19",
@@ -357,6 +357,19 @@ def build_package(args):
         add_file(entries, f"metadata/patches/livekit/{patch.name}", patch)
         patch_hashes[patch.name] = file_hash(patch)
 
+    upstream_patch_names = {
+        "0001-fix-audio-copy-red-iterator-underflow.patch",
+    }
+    upstream_patches = tuple(sorted(args.upstream_patches_dir.glob("*.patch")))
+    selected_upstream_patches = [
+        path for path in upstream_patches if path.name in upstream_patch_names
+    ]
+    if {path.name for path in selected_upstream_patches} != upstream_patch_names:
+        raise ValueError("The AudioEncoderCopyRed upstream backport is missing")
+    for patch in selected_upstream_patches:
+        add_file(entries, f"metadata/patches/upstream/{patch.name}", patch)
+        patch_hashes[f"upstream/{patch.name}"] = file_hash(patch)
+
     boringssl_diff = git_diff(source_root / "third_party", "boringssl/BUILD.gn")
     compiler_diff = git_diff(source_root / "build", "config/compiler/BUILD.gn")
     if not boringssl_diff:
@@ -459,6 +472,9 @@ def build_package(args):
             "boringssl": git_revision(source_root / "third_party/boringssl/src"),
             "livekit_patch_source": "client-sdk-rust@71e3a03e53205b65c6ca04f21339a58fc1a40eae",
             "livekit_tag": "webrtc-51ef663",
+            "upstream_backports": [
+                "765f70d55483e2a5bafd11cbf9d8deb5f1a99b19",
+            ],
         },
         "toolchain": {
             "clang": "llvmorg-22-init-14273-gea10026b-2",
@@ -532,6 +548,7 @@ def parse_args():
     parser.add_argument("--release-work", type=Path, required=True)
     parser.add_argument("--debug-work", type=Path, required=True)
     parser.add_argument("--patches-dir", type=Path, required=True)
+    parser.add_argument("--upstream-patches-dir", type=Path, required=True)
     parser.add_argument("--prefix-kit", type=Path, required=True)
     parser.add_argument("--depot-tools", type=Path, required=True)
     parser.add_argument("--python", type=Path, default=Path(sys.executable))

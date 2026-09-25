@@ -9,9 +9,13 @@ import zipfile
 from pathlib import Path
 
 
-PACKAGE_ID = "webrtc-51ef663-cohavora-bssl-dual-v2-build-support"
-ARCHIVE_ROOT = "cohavora-webrtc-build-support-aaeeee8-cohavora-bssl-dual-v2"
-FIXED_ZIP_TIME = (2026, 9, 25, 0, 0, 0)
+PACKAGE_ID = "webrtc-51ef663-cohavora-bssl-dual-v3-build-support"
+SDK_PACKAGE_ID = "webrtc-51ef663-cohavora-bssl-dual-v3"
+ARCHIVE_ROOT = "cohavora-webrtc-build-support-aaeeee8-cohavora-bssl-dual-v3"
+FIXED_ZIP_TIME = (2026, 9, 26, 0, 0, 0)
+UPSTREAM_PATCHES = {
+    "0001-fix-audio-copy-red-iterator-underflow.patch",
+}
 REVISIONS = {
     "webrtc": "aaeeee8077eb0a4cad1c9494e9c6433c751ef663",
     "build": "be1a8f6dcd7df7e46320192c5e2f364e50d79bbf",
@@ -50,8 +54,10 @@ def zip_info(name: str) -> zipfile.ZipInfo:
 def build(args):
     source = args.source_root.resolve()
     patches = args.patches_dir.resolve()
+    upstream_patches = args.upstream_patches_dir.resolve()
     prefix_kit = args.prefix_kit.resolve()
     project = args.project_root.resolve()
+    package_metadata = args.package_metadata.resolve()
     output = args.output.resolve()
 
     repositories = {
@@ -64,6 +70,10 @@ def build(args):
         name: checked_revision(repositories[name], revision)
         for name, revision in REVISIONS.items()
     }
+    package_data = json.loads(package_metadata.read_text(encoding="utf-8"))
+    if package_data.get("package_id") != SDK_PACKAGE_ID:
+        raise ValueError(
+            f"Unexpected SDK metadata package_id: expected {SDK_PACKAGE_ID}")
 
     entries = {}
 
@@ -86,6 +96,14 @@ def build(args):
 
     for patch in sorted(patches.glob("*.patch")):
         add_file(f"patches/livekit/{patch.name}", patch)
+    selected_upstream_patches = [
+        patch for patch in sorted(upstream_patches.glob("*.patch"))
+        if patch.name in UPSTREAM_PATCHES
+    ]
+    if {patch.name for patch in selected_upstream_patches} != UPSTREAM_PATCHES:
+        raise ValueError("The AudioEncoderCopyRed upstream backport is missing")
+    for patch in selected_upstream_patches:
+        add_file(f"patches/upstream/{patch.name}", patch)
 
     add_bytes("patches/checkout/webrtc-root.patch", git(source, "diff", "--binary"))
     add_bytes(
@@ -104,7 +122,7 @@ def build(args):
     add_file("configs/Release/args.gn", source / "out/ReleasePrefixed/args.gn")
     add_file("configs/Debug/args.gn", source / "out/DebugPrefixed/args.gn")
     add_file("packaging/package_webrtc.py", project / "build/prepare/package_webrtc.py")
-    add_file("packaging/webrtc-package.json", project / "build/prepare/webrtc-package.json")
+    add_file("packaging/webrtc-package.json", package_metadata)
     add_file("packaging/package_webrtc_support.py", Path(__file__).resolve())
 
     content_hashes = {name: sha256(content) for name, content in sorted(entries.items())}
@@ -118,6 +136,9 @@ def build(args):
         ),
         "revisions": observed_revisions,
         "boringssl_prefix": "cohavora_bssl",
+        "upstream_backports": [
+            "765f70d55483e2a5bafd11cbf9d8deb5f1a99b19",
+        ],
         "configurations": {
             "Release": {"runtime_library": "MT", "iterator_debug_level": 0},
             "Debug": {"runtime_library": "MTd", "iterator_debug_level": 2},
@@ -158,8 +179,10 @@ def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source-root", type=Path, required=True)
     parser.add_argument("--patches-dir", type=Path, required=True)
+    parser.add_argument("--upstream-patches-dir", type=Path, required=True)
     parser.add_argument("--prefix-kit", type=Path, required=True)
     parser.add_argument("--project-root", type=Path, required=True)
+    parser.add_argument("--package-metadata", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
