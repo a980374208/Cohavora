@@ -106,6 +106,10 @@ public:
 	void setConnectionQuality(livekit::ConnectionQuality quality);
 	void setVideoStreamPaused(bool paused);
 	bool isVideoStreamPaused() const { return _isVideoStreamPaused; }
+	void setVideoSubscriptionError(livekit::TrackPublication::SubscriptionError error);
+	livekit::TrackPublication::SubscriptionError videoSubscriptionError() const {
+		return _videoSubscriptionError;
+	}
 
 	void setSpeaking(bool speaking, float level = 0.0f);
 	bool isSpeaking() const { return _isSpeaking; }
@@ -178,6 +182,8 @@ private:
 	bool _isVideoActive = false;
 	bool _isAudioMuted = false;
 	bool _isVideoStreamPaused = false;
+	livekit::TrackPublication::SubscriptionError _videoSubscriptionError =
+		livekit::TrackPublication::SubscriptionError::None;
 	livekit::ConnectionQuality _connectionQuality = livekit::ConnectionQuality::Unknown;
 	bool _isSpeaking = false;
 	bool _isPinned = false;
@@ -538,6 +544,8 @@ private:
 	void removeRemoteVideo(const QString &trackSid);
 	VideoTileWidget *remoteVideoTile(const QString &trackSid) const;
 	bool canRenderRemoteVideo(const QString &trackSid) const;
+	livekit::TrackPublication::SubscriptionError remoteVideoSubscriptionError(
+		const livekit::TrackKey &key) const;
 	void refreshRemoteVideoPresentations();
 	void applyScreenShareSnapshot(livekit::ScreenShareSnapshot snapshot);
 	void handleScreenShareSources(const std::vector<livekit::DesktopSource> &sources);

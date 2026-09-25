@@ -430,7 +430,9 @@ private:
         const std::vector<livekit::VideoSeat>& seats) {
         std::vector<livekit::TrackKey> result;
         result.reserve(seats.size());
-        for (const auto& seat : seats) result.push_back(seat.key);
+        for (const auto& seat : seats) {
+            if (!seat.IsParticipantPlaceholder()) result.push_back(seat.key);
+        }
         return UniqueKeys(result);
     }
 

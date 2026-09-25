@@ -114,7 +114,7 @@ void ScreenShareSession::StopFrames(const std::shared_ptr<Run>& run) {
     }
 }
 
-void ScreenShareSession::Start(DesktopSource source) {
+void ScreenShareSession::Start(DesktopSource source, VideoPublishOptions options) {
     if (closed_ || run_ || !transport_ready_ || !backend_.connected()) return;
     auto run = std::make_shared<Run>(strand_, ++next_run_, executor_lifetime_);
     run->source_title = source.title;
@@ -130,7 +130,9 @@ void ScreenShareSession::Start(DesktopSource source) {
     run_ = run;
     SetState(ScreenShareState::Starting);
     run->driving = true;
-    asio::co_spawn(strand_, Drive(shared_from_this(), run, std::move(source)), asio::detached);
+    options.source = TrackSource::ScreenShareVideo;
+    asio::co_spawn(strand_, Drive(
+        shared_from_this(), run, std::move(source), std::move(options)), asio::detached);
 }
 
 void ScreenShareSession::Stop() {
@@ -142,7 +144,8 @@ void ScreenShareSession::Stop() {
     SetState(ScreenShareState::Stopping);
     if (!run->driving) {
         run->driving = true;
-        asio::co_spawn(strand_, Drive(shared_from_this(), run, {}), asio::detached);
+        asio::co_spawn(strand_, Drive(
+            shared_from_this(), run, {}, VideoPublishOptions{}), asio::detached);
     }
 }
 
@@ -171,7 +174,8 @@ std::unique_ptr<IDesktopCapture> ScreenShareSession::TakeCaptureForShutdown() {
 }
 
 asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSession> self,
-                                               std::shared_ptr<Run> run, DesktopSource target) {
+                                               std::shared_ptr<Run> run, DesktopSource target,
+                                               VideoPublishOptions options) {
     ScreenShareError failure = ScreenShareError::None;
     try {
         if (!run->stopping && !self->closed_) {
@@ -208,7 +212,8 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
                 if (run->ended.load()) throw std::runtime_error("screen capture ended before publish");
                 failure = ScreenShareError::Publish;
                 run->track = LocalVideoTrack::createLocalVideoTrack(
-                    "screen_video_" + std::to_string(run->id), run->source, TrackSource::ScreenShareVideo);
+                    "screen_video_" + std::to_string(run->id), run->source,
+                    TrackSource::ScreenShareVideo, options);
                 co_await self->backend_.publish(run->track);
                 run->published = true;
                 failure = ScreenShareError::None;

@@ -751,7 +751,8 @@ bool SessionTelemetry::RegisterLocalPublication(
     bool expected_send,
     std::shared_ptr<LocalVideoActivityProbe> video_probe,
     Clock::time_point committed_at,
-    std::shared_ptr<LocalAudioActivityProbe> audio_probe) {
+    std::shared_ptr<LocalAudioActivityProbe> audio_probe,
+    LocalVideoPublishDescriptor video_publish) {
     if (series_key.empty() || room_generation == 0 || publication_epoch == 0 ||
         media_kind == LocalMediaKind::Unknown || rtc_track_id.empty() ||
         publish_accepted_at == Clock::time_point{} ||
@@ -789,6 +790,7 @@ bool SessionTelemetry::RegisterLocalPublication(
     event.expected = expected_send;
     event.local_video_probe = video_probe;
     event.local_audio_probe = audio_probe;
+    event.local_video_publish = std::move(video_publish);
     event.source_time = committed_at;
     const bool submitted = Submit(std::move(event));
     if (!submitted && video_probe) {
@@ -1965,8 +1967,15 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         publication.committed_at = event.source_time;
         publication.video_probe = event.local_video_probe;
         publication.audio_probe = event.local_audio_probe;
+        publication.video_publish = event.local_video_publish;
         local_publications_[event.series_key] = std::move(publication);
         ++state_.local_publications;
+        if (event.local_media_kind == LocalMediaKind::Video) {
+            state_.video_publish_observed_codecs.clear();
+            state_.video_publish_observed_profiles = "pending";
+            state_.video_publish_encoder_implementations.clear();
+            state_.video_publish_observed_scalability.clear();
+        }
         UpdateLocalPublishAvailabilityOnStrand(event.source_time);
         break;
     }
@@ -2798,6 +2807,67 @@ void SessionTelemetry::UpdateLocalPublishAvailabilityOnStrand(
         state_.local_publish_media_availability = Availability::Unknown;
         state_.local_publish_media_reason = "no_local_publication";
     }
+    UpdateVideoPublishPlanOnStrand();
+}
+
+void SessionTelemetry::UpdateVideoPublishPlanOnStrand() {
+    AssertOnStrand();
+    std::set<std::string> requested;
+    std::set<std::string> effective;
+    std::set<std::string> fallback_reasons;
+    std::set<std::string> sources;
+    std::set<std::string> generations;
+    std::set<std::string> modes;
+    std::set<std::string> profiles;
+    std::set<std::string> scalability;
+    bool has_video = false;
+    bool has_descriptor = false;
+    for (const auto& [_, publication] : local_publications_) {
+        if (!publication.active || publication.media_kind != LocalMediaKind::Video) continue;
+        has_video = true;
+        const auto& descriptor = publication.video_publish;
+        if (descriptor.requested_codec.empty() || descriptor.effective_codec.empty()) continue;
+        has_descriptor = true;
+        requested.insert(descriptor.requested_codec);
+        effective.insert(descriptor.effective_codec);
+        if (!descriptor.fallback_reason.empty()) {
+            fallback_reasons.insert(descriptor.fallback_reason);
+        }
+        if (!descriptor.source.empty()) sources.insert(descriptor.source);
+        generations.insert(std::to_string(publication.room_generation));
+        if (!descriptor.mode.empty()) modes.insert(descriptor.mode);
+        if (!descriptor.resolved_profile.empty()) profiles.insert(descriptor.resolved_profile);
+        if (!descriptor.resolved_scalability.empty()) {
+            scalability.insert(descriptor.resolved_scalability);
+        }
+    }
+    state_.video_publish_requested_codecs = JoinValues(requested);
+    state_.video_publish_effective_codecs = JoinValues(effective);
+    state_.video_publish_fallback_reasons = fallback_reasons.empty()
+        ? "none" : JoinValues(fallback_reasons);
+    state_.video_publish_sources = JoinValues(sources);
+    state_.video_publish_direction = has_video ? "send" : std::string{};
+    state_.video_publish_generations = JoinValues(generations);
+    state_.video_publish_modes = JoinValues(modes);
+    state_.video_publish_resolved_profiles = JoinValues(profiles);
+    state_.video_publish_resolved_scalability = JoinValues(scalability);
+    if (!has_video) {
+        state_.video_publish_plan_availability = Availability::Unknown;
+        state_.video_publish_plan_reason = "no_local_video_publication";
+        state_.video_publish_observed_codecs.clear();
+        state_.video_publish_observed_profiles = "pending";
+        state_.video_publish_encoder_implementations.clear();
+        state_.video_publish_observed_scalability.clear();
+    } else if (!has_descriptor) {
+        state_.video_publish_plan_availability = Availability::Unknown;
+        state_.video_publish_plan_reason = "resolved_publish_descriptor_unavailable";
+    } else if (state_.video_publish_observed_codecs.empty()) {
+        state_.video_publish_plan_availability = Availability::WarmingUp;
+        state_.video_publish_plan_reason = "waiting_for_outbound_rtp_codec_stats";
+    } else {
+        state_.video_publish_plan_availability = Availability::Valid;
+        state_.video_publish_plan_reason = "outbound_rtp_codec_observed";
+    }
 }
 
 void SessionTelemetry::UpdateLocalDeviceStatsOnStrand(Clock::time_point now) {
@@ -3300,6 +3370,9 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
     std::set<std::string> decoder_efficiency;
     std::set<std::string> encoder_efficiency;
     std::set<std::string> outbound_layers;
+    std::set<std::string> publish_observed_codecs;
+    std::set<std::string> publish_encoder_implementations;
+    std::set<std::string> publish_observed_scalability;
     std::set<std::string> video_seen;
     std::uint64_t pipeline_streams = 0;
     std::uint64_t pipeline_supported = 0;
@@ -3314,6 +3387,24 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
 
     std::size_t video_pc_index = 0;
     for (const auto& pc_report : report.reports) {
+        std::map<std::string, const LocalPublicationState*> publication_by_mid;
+        if (pc_report.senders_available) {
+            for (const auto& sender : pc_report.senders) {
+                if (sender.kind != "video" || !sender.mid_available) continue;
+                for (const auto& [_, publication] : local_publications_) {
+                    if (!publication.active ||
+                        publication.media_kind != LocalMediaKind::Video) {
+                        continue;
+                    }
+                    const auto& ids = publication.video_publish.sender_track_ids;
+                    if (sender.track_id == publication.rtc_track_id ||
+                        std::find(ids.begin(), ids.end(), sender.track_id) != ids.end()) {
+                        publication_by_mid[sender.mid] = &publication;
+                        break;
+                    }
+                }
+            }
+        }
         const auto codec_name = [&](const std::string& id) {
             const auto codec = std::find_if(
                 pc_report.codecs.begin(), pc_report.codecs.end(),
@@ -3458,10 +3549,16 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
                 state_.outbound_video_frames_sent += stream.frames_sent;
             }
             bool has_codec_detail = false;
+            const bool matches_local_publication = stream.mid_available &&
+                publication_by_mid.contains(stream.mid);
             if (stream.codec_id_available) {
                 const auto name = codec_name(stream.codec_id);
                 if (!name.empty()) {
                     outbound_codecs.insert(name);
+                    if (matches_local_publication) {
+                        publish_observed_codecs.insert(
+                            name.starts_with("video/") ? name.substr(6) : name);
+                    }
                     has_codec_detail = true;
                 }
             }
@@ -3470,6 +3567,9 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
                     stream.encoder_implementation);
                 if (!implementation.empty()) {
                     encoder_implementations.insert(implementation);
+                    if (matches_local_publication) {
+                        publish_encoder_implementations.insert(implementation);
+                    }
                     has_codec_detail = true;
                 }
             }
@@ -3485,6 +3585,9 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
                      "l3t1", "l3t2", "l3t3", "l2t2_key", "l3t3_key"});
                 if (!layer.empty()) {
                     outbound_layers.insert(layer);
+                    if (matches_local_publication) {
+                        publish_observed_scalability.insert(layer);
+                    }
                     has_codec_detail = true;
                 }
             } else if (stream.rid_available) {
@@ -3571,6 +3674,15 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
     state_.decoder_power_efficiency = JoinValues(decoder_efficiency);
     state_.encoder_power_efficiency = JoinValues(encoder_efficiency);
     state_.outbound_video_layers = JoinValues(outbound_layers);
+    if (!publish_observed_codecs.empty()) {
+        state_.video_publish_observed_codecs = JoinValues(publish_observed_codecs);
+        state_.video_publish_observed_profiles = "unknown";
+        state_.video_publish_encoder_implementations =
+            JoinValues(publish_encoder_implementations);
+        state_.video_publish_observed_scalability =
+            JoinValues(publish_observed_scalability);
+    }
+    UpdateVideoPublishPlanOnStrand();
     if (pipeline_streams == 0) {
         state_.video_pipeline_availability = Availability::Unknown;
         state_.video_pipeline_reason = "no_video_rtp_stats";

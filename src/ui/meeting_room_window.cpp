@@ -420,6 +420,16 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 			 .arg(TelemetryDisplayList(snapshot, "decoderImplementations"),
 				  TelemetryDisplayList(snapshot, "encoderImplementations"),
 				  TelemetryDisplayList(snapshot, "outboundVideoLayers"))},
+		{QCoreApplication::translate("MeetingUI", "Video publish requested / effective / observed"),
+		 TelemetryDisplayList(snapshot, "videoPublishRequestedCodecs") + QStringLiteral(" / ") +
+			 TelemetryDisplayList(snapshot, "videoPublishEffectiveCodecs") + QStringLiteral(" / ") +
+			 TelemetryDisplayList(snapshot, "videoPublishObservedCodecs"),
+		 LocalizeTelemetryDisplayText(snapshot.value(
+			 QStringLiteral("videoPublishPlanAvailability")).toString()),
+		 QCoreApplication::translate("MeetingUI", "source %1; mode %2; fallback %3")
+			 .arg(TelemetryDisplayList(snapshot, "videoPublishSources"),
+				  TelemetryDisplayList(snapshot, "videoPublishModes"),
+				  TelemetryDisplayList(snapshot, "videoPublishFallbackReasons"))},
 		{QCoreApplication::translate("MeetingUI", "Video processing average"),
 		 QCoreApplication::translate("MeetingUI", "decode %1 ms/frame / encode %2 ms/frame")
 			 .arg(TelemetryValue(snapshot, "videoDecodeMsPerFrame"),
@@ -1101,6 +1111,15 @@ void VideoTileWidget::setVideoStreamPaused(bool paused) {
 	invalidatePresentation();
 }
 
+void VideoTileWidget::setVideoSubscriptionError(
+		livekit::TrackPublication::SubscriptionError error) {
+	if (_videoSubscriptionError == error) return;
+	_videoSubscriptionError = error;
+	if (error != livekit::TrackPublication::SubscriptionError::None) setFrame({});
+	updateRenderExpectation();
+	invalidatePresentation();
+}
+
 VideoTileWidget::~VideoTileWidget() {
 	livekit::render::VideoRenderFrame::Ptr retired;
 	{
@@ -1208,6 +1227,7 @@ void VideoTileWidget::updateRenderExpectation() {
 	if (!frame) return;
 	const bool minimized = window() && window()->isMinimized();
 	const bool expected = !_useHardwareCanvas && _isVideoActive &&
+		_videoSubscriptionError == livekit::TrackPublication::SubscriptionError::None &&
 		!_isVideoStreamPaused && isVisible() && !minimized &&
 		width() > 0 && height() > 0;
 	frame->SetRenderExpected(
@@ -1256,7 +1276,9 @@ void VideoTileWidget::paintCard(QPainter &p, bool decorationOnly, bool hasFrame,
 		p.fillPath(path, QColor(0x1a, 0x1d, 0x24));
 	}
 
-	if (_isVideoActive) {
+	if (_videoSubscriptionError != livekit::TrackPublication::SubscriptionError::None) {
+		drawVideoPlaceholder(p, r);
+	} else if (_isVideoActive) {
 		if (!decorationOnly) drawVideoFrame(p, r);
 		else if (_isVideoStreamPaused || !hasFrame) drawVideoPlaceholder(p, r);
 	} else {
@@ -1444,11 +1466,28 @@ void VideoTileWidget::drawNetworkQualityBadge(QPainter &p, const QRect &r) {
 }
 
 void VideoTileWidget::drawVideoPlaceholder(QPainter &p, const QRect &r) {
+	using Error = livekit::TrackPublication::SubscriptionError;
 	p.fillRect(r, QColor(0x14, 0x16, 0x1d));
-	p.setPen(_isVideoStreamPaused ? QColor(0xe6, 0x7e, 0x22) : QColor(0x86, 0x90, 0x9c));
+	p.setPen(_isVideoStreamPaused || _videoSubscriptionError != Error::None
+		? QColor(0xe6, 0x7e, 0x22) : QColor(0x86, 0x90, 0x9c));
 	p.setFont(QFont("Microsoft YaHei", 12));
-	const auto label = _isVideoStreamPaused ? QCoreApplication::translate("MeetingUI", "Video paused due to network congestion") :
-		QCoreApplication::translate("MeetingUI", "Waiting for video...");
+	QString label;
+	switch (_videoSubscriptionError) {
+	case Error::CodecUnsupported:
+		label = QCoreApplication::translate("MeetingUI", "Cannot receive this video format");
+		break;
+	case Error::TrackNotFound:
+		label = QCoreApplication::translate("MeetingUI", "Video is no longer available");
+		break;
+	case Error::Unknown:
+		label = QCoreApplication::translate("MeetingUI", "Video subscription failed");
+		break;
+	case Error::None:
+		label = _isVideoStreamPaused
+			? QCoreApplication::translate("MeetingUI", "Video paused due to network congestion")
+			: QCoreApplication::translate("MeetingUI", "Waiting for video...");
+		break;
+	}
 	p.drawText(r.adjusted(12, 0, -12, 0), Qt::AlignCenter,
 		p.fontMetrics().elidedText(label, Qt::ElideRight, std::max(0, r.width() - 24)));
 }
@@ -1491,7 +1530,8 @@ void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
 }
 
 void VideoTileWidget::drawBottomNameTag(QPainter &p, const QRect &r) {
-	if (!_isVideoActive) return;
+	if (!_isVideoActive &&
+		_videoSubscriptionError == livekit::TrackPublication::SubscriptionError::None) return;
 
 	const int tagH = 24;
 	const int margin = 12;
@@ -4344,6 +4384,8 @@ void MeetingRoomWindow::applyRemoteParticipantJoined(const QString &identity, co
 		for (const auto &participant : participants) {
 			if (participant.identity != identity) continue;
 			if (!current() || !tile) return;
+			tile->setAudioMuted(participant.isAudioMuted);
+			if (!current() || !tile) return;
 			tile->setConnectionQuality(participant.connectionQuality);
 			if (!current() || !tile) return;
 			break;
@@ -5308,10 +5350,18 @@ void MeetingRoomWindow::syncVisibleRemoteTiles() {
 		if (seat.source == livekit::TrackSource::ScreenShareVideo) {
 			const auto sid = QString::fromStdString(seat.key.publication_sid);
 			screenSids.insert(sid);
-			ensureRemoteScreenTile(seat, name);
+			if (auto *tile = ensureRemoteScreenTile(seat, name)) {
+				tile->setVideoSubscriptionError(seat.subscription_error);
+			}
 		} else {
 			cameraIdentities.insert(identity);
-			ensureRemoteCameraTile(identity, name);
+			auto *tile = ensureRemoteCameraTile(identity, name);
+			if (tile) tile->setVideoSubscriptionError(seat.subscription_error);
+			if (tile && seat.IsParticipantPlaceholder()) {
+				tile->setFrame({});
+				tile->setVideoActive(false);
+				tile->setVideoStreamPaused(false);
+			}
 		}
 	}
 
@@ -5349,7 +5399,8 @@ void MeetingRoomWindow::reconcileRemoteRenderSelection() {
 		const auto sid = QString::fromStdString(key.publication_sid);
 		const auto binding = _remoteVideoBindings.find(sid);
 		if (binding == _remoteVideoBindings.end() || binding->second.key != key ||
-			binding->second.muted || binding->second.paused) {
+			binding->second.muted || binding->second.paused ||
+			remoteVideoSubscriptionError(key) != livekit::TrackPublication::SubscriptionError::None) {
 			continue;
 		}
 		const auto track = binding->second.track.lock();
@@ -5432,7 +5483,16 @@ bool MeetingRoomWindow::canRenderRemoteVideo(const QString &trackSid) const {
 	}
 	const auto track = binding.track.lock();
 	return track && !track->muted() && !binding.muted && !binding.paused &&
+		remoteVideoSubscriptionError(binding.key) == livekit::TrackPublication::SubscriptionError::None &&
 		livekit::IsMediaBindingTicketActive(binding.mediaBindingTicket, binding.mediaBindingKey);
+}
+
+livekit::TrackPublication::SubscriptionError MeetingRoomWindow::remoteVideoSubscriptionError(
+		const livekit::TrackKey &key) const {
+	for (const auto &seat : _acceptedVideoPlan.visible_seats) {
+		if (seat.key == key) return seat.subscription_error;
+	}
+	return livekit::TrackPublication::SubscriptionError::None;
 }
 
 void MeetingRoomWindow::refreshRemoteVideoPresentations() {
@@ -5496,6 +5556,7 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 	if (tile) {
 		tile->setVideoActive(!value.muted);
 		tile->setVideoStreamPaused(!value.muted && value.paused);
+		tile->setVideoSubscriptionError(remoteVideoSubscriptionError(value.key));
 		tile->setConnectionQuality(presentation.participant.connectionQuality);
 		if (screen) tile->setDisplayName(QCoreApplication::translate("MeetingUI", "%1 · Screen Share").arg(presentation.participant.name));
 	}
@@ -5732,6 +5793,7 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 				if (!p.name.isEmpty() && it->second->displayName() != p.name) {
 					it->second->setDisplayName(p.name);
 				}
+				it->second->setAudioMuted(p.isAudioMuted);
 				it->second->setConnectionQuality(p.connectionQuality);
 			}
 		}

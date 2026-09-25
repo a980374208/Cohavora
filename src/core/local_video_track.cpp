@@ -3,8 +3,10 @@
 #include "rtc_video_source.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
+#include <set>
 
 namespace livekit {
 
@@ -14,12 +16,22 @@ LocalVideoTrack::LocalVideoTrack(const std::string& sid, const std::string& name
     : Track(sid, name, TrackKind::Video, source_type), source_(source) {
     int w = source_ ? source_->width() : 1280;
     int h = source_ ? source_->height() : 720;
-    VideoPublishOptions effective_opts = options;
-    effective_opts.source = source_type;
-    publish_options_ = ComputeMultiCodecSimulcastOptions(w, h, effective_opts);
+    requested_publish_options_ = options;
+    requested_publish_options_.source = source_type;
+    publish_options_ = ComputeMultiCodecSimulcastOptions(
+        w, h, requested_publish_options_);
 }
 
 LocalVideoTrack::~LocalVideoTrack() = default;
+
+void LocalVideoTrack::set_publish_options(const VideoPublishOptions& options) {
+    requested_publish_options_ = options;
+    requested_publish_options_.source = Track::source();
+    const int width = source_ && source_->width() > 0 ? source_->width() : 1280;
+    const int height = source_ && source_->height() > 0 ? source_->height() : 720;
+    publish_options_ = ComputeMultiCodecSimulcastOptions(
+        width, height, requested_publish_options_);
+}
 
 VideoFrameDiagnostics LocalVideoTrack::frame_diagnostics() const noexcept {
     webrtc::scoped_refptr<RtcVideoSource> rtc_source;
@@ -96,7 +108,18 @@ VideoPreset EncodingPreset(const VideoPreset (&presets)[N], int size) {
 
 std::string CodecName(std::string codec) {
     for (auto& c : codec) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    constexpr char kVideoPrefix[] = "video/";
+    if (codec.rfind(kVideoPrefix, 0) == 0) codec.erase(0, sizeof(kVideoPrefix) - 1);
     return codec;
+}
+
+std::set<std::string> CodecSet(const std::vector<std::string>& codecs) {
+    std::set<std::string> result;
+    for (const auto& codec : codecs) {
+        const auto normalized = CodecName(codec);
+        if (!normalized.empty()) result.insert(normalized);
+    }
+    return result;
 }
 
 } // namespace
@@ -184,6 +207,139 @@ VideoPublishOptions LocalVideoTrack::ComputeMultiCodecSimulcastOptions(int width
     }
 
     return opts;
+}
+
+int LocalVideoTrack::SpatialLayersFromScalabilityMode(const std::string& mode) {
+    if (mode.size() < 2 || (mode[0] != 'L' && mode[0] != 'l')) return 1;
+    int layers = 0;
+    for (size_t index = 1; index < mode.size(); ++index) {
+        if (!std::isdigit(static_cast<unsigned char>(mode[index]))) break;
+        layers = layers * 10 + (mode[index] - '0');
+    }
+    return std::max(1, layers);
+}
+
+std::vector<VideoLayerSetting> LocalVideoTrack::ComputeSignalLayers(
+    const SimulcastCodecSpec& spec) {
+    const int spatial_layers = SpatialLayersFromScalabilityMode(
+        spec.scalability_mode);
+    if (spatial_layers <= 1 || spec.layers.size() != 1) return spec.layers;
+
+    const auto& source = spec.layers.front();
+    std::vector<VideoLayerSetting> result;
+    result.reserve(static_cast<size_t>(spatial_layers));
+    for (int index = 0; index < spatial_layers; ++index) {
+        const int scale = 1 << (spatial_layers - 1 - index);
+        result.push_back({
+            std::max(1, source.width / scale),
+            std::max(1, source.height / scale),
+            source.max_bitrate_bps / spatial_layers,
+            source.max_fps,
+            {},
+            static_cast<double>(scale),
+        });
+    }
+    return result;
+}
+
+ResolvedVideoPublishPlan LocalVideoTrack::ResolvePublishPlan(
+    int width,
+    int height,
+    const VideoPublishOptions& requested_options,
+    const std::vector<std::string>& local_sender_codecs,
+    const std::vector<std::string>& server_enabled_codecs) {
+    ResolvedVideoPublishPlan plan;
+    plan.requested = requested_options;
+    plan.requested_codec = CodecName(requested_options.video_codec);
+    if (plan.requested_codec.empty()) plan.requested_codec = "auto";
+
+    const auto local = CodecSet(local_sender_codecs);
+    const auto server = CodecSet(server_enabled_codecs);
+    const auto allowed = [&](const std::string& codec) {
+        return local.contains(codec) &&
+            (server_enabled_codecs.empty() || server.contains(codec));
+    };
+
+    constexpr std::array<const char*, 4> kFallbackOrder{
+        "vp8", "h264", "vp9", "av1"};
+    plan.effective_codec = plan.requested_codec;
+    if (plan.requested_codec == "auto") {
+        const auto selected = std::find_if(
+            kFallbackOrder.begin(), kFallbackOrder.end(),
+            [&](const char* codec) { return allowed(codec); });
+        if (selected == kFallbackOrder.end()) {
+            plan.error = "no video codec is available in the local/server publish intersection";
+            return plan;
+        }
+        plan.effective_codec = *selected;
+    } else if (!allowed(plan.effective_codec)) {
+        const auto fallback = std::find_if(
+            kFallbackOrder.begin(), kFallbackOrder.end(),
+            [&](const char* codec) { return allowed(codec); });
+        if (fallback == kFallbackOrder.end()) {
+            plan.error = "no video codec is available in the local/server publish intersection";
+            return plan;
+        }
+        plan.effective_codec = *fallback;
+        plan.fallback_reason = "requested codec " + plan.requested_codec +
+            " is unavailable in the local/server publish intersection";
+    }
+
+    plan.effective = requested_options;
+    plan.effective.video_codec = plan.effective_codec;
+    if (plan.requested_codec != "auto" && plan.used_fallback()) {
+        plan.effective.scalability_mode.clear();
+    }
+
+    if (!plan.effective.scalability_mode.empty()) {
+        const bool svc_codec = plan.effective_codec == "vp9" ||
+            plan.effective_codec == "av1";
+        if (!svc_codec || !IsVideoEncoderFormatSupported(
+                plan.effective_codec, plan.effective.scalability_mode)) {
+            plan.error = "scalability mode " + plan.effective.scalability_mode +
+                " is not supported for " + plan.effective_codec;
+            return plan;
+        }
+    }
+
+    const bool wants_backup = plan.effective.simulcast &&
+        (plan.effective_codec == "vp9" || plan.effective_codec == "av1") &&
+        (requested_options.auto_backup_codec || requested_options.backup_codec.has_value());
+    std::optional<std::string> backup;
+    if (wants_backup && requested_options.backup_codec.has_value()) {
+        const auto explicit_backup = CodecName(*requested_options.backup_codec);
+        if (explicit_backup == plan.effective_codec || !allowed(explicit_backup)) {
+            plan.error = "requested backup codec is not a distinct codec in the local/server publish intersection";
+            return plan;
+        }
+        backup = explicit_backup;
+    } else if (wants_backup) {
+        for (const auto* candidate : {"vp8", "h264"}) {
+            if (plan.effective_codec != candidate && allowed(candidate)) {
+                backup = candidate;
+                break;
+            }
+        }
+    }
+
+    plan.effective.backup_codec.reset();
+    plan.effective.auto_backup_codec = false;
+    plan.effective = ComputeMultiCodecSimulcastOptions(
+        width, height, plan.effective);
+    if (backup.has_value()) {
+        VideoPublishOptions backup_options = requested_options;
+        backup_options.video_codec = *backup;
+        backup_options.scalability_mode.clear();
+        backup_options.backup_codec.reset();
+        backup_options.auto_backup_codec = false;
+        const auto computed = ComputeSimulcastOptions(
+            width, height, backup_options);
+        plan.effective.simulcast_codecs.push_back({
+            *backup, {}, {}, computed.layers});
+        plan.effective.backup_codec = *backup;
+    }
+    plan.effective.auto_backup_codec = requested_options.auto_backup_codec;
+    return plan;
 }
 
 VideoPublishOptions LocalVideoTrack::DefaultVp8SimulcastOptions(int width, int height) {

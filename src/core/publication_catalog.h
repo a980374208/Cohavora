@@ -18,6 +18,8 @@ struct RemotePublicationInfo {
     bool muted = false;
     TrackPublication::StreamState stream_state = TrackPublication::StreamState::Active;
     bool subscription_allowed = true;
+    TrackPublication::SubscriptionError subscription_error =
+        TrackPublication::SubscriptionError::None;
     bool media_available = false;
     uint32_t source_width = 0;
     uint32_t source_height = 0;

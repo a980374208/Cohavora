@@ -16,7 +16,7 @@ constexpr auto kSettingsMigrationVersion = "migration/cohavoraSettingsVersion";
 constexpr auto kRegistrationBaseUrl = "network/registrationServerBaseUrl";
 constexpr auto kRegistrationServiceBinding = "network/registrationServiceBinding";
 constexpr int kCurrentSettingsMigrationVersion = 1;
-constexpr std::array<const char *, 22> kMigratedSettingsKeys = {
+constexpr std::array<const char *, 24> kMigratedSettingsKeys = {
     "network/serverBaseUrl",
     "media/enableMicrophone",
     "media/enableSpeaker",
@@ -30,6 +30,8 @@ constexpr std::array<const char *, 22> kMigratedSettingsKeys = {
     "media/cameraDeviceId",
     "media/microphoneDeviceId",
     "media/speakerDeviceId",
+    "media/cameraVideoCodec",
+    "media/screenShareVideoCodec",
     "media/videoCaptureWidth",
     "media/videoCaptureHeight",
     "media/videoCaptureFps",
@@ -62,6 +64,16 @@ std::unique_ptr<QSettings> makeApplicationSettings() {
     return std::move(selected.settings);
 }
 } // namespace
+
+QString normalizeVideoCodecPreference(const QString &codec) {
+    const auto normalized = codec.trimmed().toLower();
+    static const std::array<QString, 5> supported{
+        QStringLiteral("auto"), QStringLiteral("vp8"),
+        QStringLiteral("h264"), QStringLiteral("vp9"),
+        QStringLiteral("av1")};
+    return std::find(supported.begin(), supported.end(), normalized) != supported.end()
+        ? normalized : QStringLiteral("auto");
+}
 
 SettingsMigrationSelection migrateCohavoraSettings(
         std::unique_ptr<QSettings> current, std::unique_ptr<QSettings> legacy) {
@@ -178,6 +190,10 @@ QString SessionManager::nickname() const {
 
 void SessionManager::setMediaPreferences(const MediaPreferences &prefs) {
     _mediaPrefs = prefs;
+    _mediaPrefs.cameraVideoCodec = normalizeVideoCodecPreference(
+        _mediaPrefs.cameraVideoCodec);
+    _mediaPrefs.screenShareVideoCodec = normalizeVideoCodecPreference(
+        _mediaPrefs.screenShareVideoCodec);
     saveToSettings();
     emit preferencesChanged(_mediaPrefs);
 }
@@ -483,6 +499,10 @@ void SessionManager::loadFromSettings() {
     _mediaPrefs.cameraDeviceId = _settings->value("media/cameraDeviceId").toString();
     _mediaPrefs.microphoneDeviceId = _settings->value("media/microphoneDeviceId").toString();
     _mediaPrefs.speakerDeviceId = _settings->value("media/speakerDeviceId").toString();
+    _mediaPrefs.cameraVideoCodec = normalizeVideoCodecPreference(
+        _settings->value("media/cameraVideoCodec", QStringLiteral("auto")).toString());
+    _mediaPrefs.screenShareVideoCodec = normalizeVideoCodecPreference(
+        _settings->value("media/screenShareVideoCodec", QStringLiteral("auto")).toString());
     _mediaPrefs.videoCaptureWidth =
         std::max(0, _settings->value("media/videoCaptureWidth", 0).toInt());
     _mediaPrefs.videoCaptureHeight =
@@ -530,6 +550,8 @@ void SessionManager::saveToSettings() {
     _settings->setValue("media/cameraDeviceId", _mediaPrefs.cameraDeviceId);
     _settings->setValue("media/microphoneDeviceId", _mediaPrefs.microphoneDeviceId);
     _settings->setValue("media/speakerDeviceId", _mediaPrefs.speakerDeviceId);
+    _settings->setValue("media/cameraVideoCodec", _mediaPrefs.cameraVideoCodec);
+    _settings->setValue("media/screenShareVideoCodec", _mediaPrefs.screenShareVideoCodec);
     _settings->setValue("media/videoCaptureWidth", _mediaPrefs.videoCaptureWidth);
     _settings->setValue("media/videoCaptureHeight", _mediaPrefs.videoCaptureHeight);
     _settings->setValue("media/videoCaptureFps", _mediaPrefs.videoCaptureFps);

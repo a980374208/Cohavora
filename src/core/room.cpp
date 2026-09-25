@@ -141,6 +141,53 @@ private:
     bool finished_ = false;
 };
 
+std::vector<std::string> LocalVideoSenderCodecs() {
+    std::vector<std::string> result;
+    const auto factory = WebRTCManager::Instance().factory();
+    if (!factory) return result;
+    const auto capabilities = factory->GetRtpSenderCapabilities(
+        webrtc::MediaType::VIDEO);
+    for (const auto& codec : capabilities.codecs) {
+        if (codec.IsMediaCodec()) result.push_back(codec.name);
+    }
+    return result;
+}
+
+std::vector<std::string> LocalAudioSenderCodecs() {
+    std::vector<std::string> result;
+    const auto factory = WebRTCManager::Instance().factory();
+    if (!factory) return result;
+    const auto capabilities = factory->GetRtpSenderCapabilities(
+        webrtc::MediaType::AUDIO);
+    for (const auto& codec : capabilities.codecs) {
+        if (codec.IsMediaCodec()) result.push_back(codec.name);
+    }
+    return result;
+}
+
+ResolvedVideoPublishPlan ResolveVideoPublishPlan(
+    const std::shared_ptr<LocalVideoTrack>& track,
+    const std::vector<std::string>& enabled_codecs) {
+    const auto source = track ? track->source() : nullptr;
+    const int width = source && source->width() > 0 ? source->width() : 1280;
+    const int height = source && source->height() > 0 ? source->height() : 720;
+    return LocalVideoTrack::ResolvePublishPlan(
+        width,
+        height,
+        track->requested_publish_options(),
+        LocalVideoSenderCodecs(),
+        enabled_codecs);
+}
+
+ResolvedAudioPublishPlan ResolveAudioPublishPlan(
+    const std::shared_ptr<LocalAudioTrack>& track,
+    bool media_encryption_enabled) {
+    return LocalAudioTrack::ResolvePublishPlan(
+        track->requested_publish_policy(),
+        LocalAudioSenderCodecs(),
+        media_encryption_enabled);
+}
+
 } // namespace
 
 namespace {
@@ -454,6 +501,27 @@ std::shared_ptr<webrtc::PeerConnectionObserver> Room::CreatePeerConnectionObserv
     return std::make_shared<RoomPeerConnectionObserver>(shared_from_this(), pc_type, generation);
 }
 
+void Room::InitializePeerConnectionCapabilities(
+    webrtc::PeerConnectionInterface* publisher, bool single_pc_mode) {
+    if (!single_pc_mode) return;
+
+    // LiveKit 1.13.6's Pion MediaEngine keeps the codecs from the first video
+    // m-line when MediaEngine copying is disabled. Advertise the complete
+    // capability set before any strictly codec-limited local publication.
+    // Inactive avoids allocating a downstream track without an MSID; Pion also
+    // excludes a remote-inactive transceiver from AddTrack reuse. Actual media
+    // keeps its own sendonly/recvonly transceivers and publication preferences.
+    webrtc::RtpTransceiverInit init;
+    init.direction = webrtc::RtpTransceiverDirection::kInactive;
+    const auto result = publisher->AddTransceiver(webrtc::MediaType::VIDEO, init);
+    if (!result.ok()) {
+        throw OperationError(OperationKind::Connect,
+                             OperationErrorCode::PeerConnectionCreateFailed,
+                             "create_video_capability_transceiver",
+                             result.error().message());
+    }
+}
+
 std::shared_ptr<webrtc::DataChannelObserver> Room::CreateDataChannelObserver(
     bool reliable,
     uint64_t generation,
@@ -743,7 +811,8 @@ std::string RemoteVideoRenderTelemetryKey(
 bool IsRemoteMediaExpected(const TrackPublication::StateSnapshot& snapshot) {
     if (!snapshot.track || snapshot.muted ||
         snapshot.stream_state != TrackPublication::StreamState::Active ||
-        !snapshot.subscription_allowed) {
+        !snapshot.subscription_allowed ||
+        snapshot.subscription_error != TrackPublication::SubscriptionError::None) {
         return false;
     }
     return snapshot.kind != TrackKind::Audio ||
@@ -1238,6 +1307,12 @@ ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
                 control.height = height;
                 control.priority = priority;
                 publication->CommitControl(control);
+                // A real unsubscribe -> subscribe transition is a new attempt.
+                // Settings-only policy revisions must preserve server failures.
+                if (subscription_changed && selected) {
+                    ClearTrackSubscriptionErrorLocked(
+                        remote_participants_.at(key.participant_sid), publication);
+                }
 
             }
         }
@@ -1796,6 +1871,8 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                 auto pub_res = WebRTCManager::Instance().factory()->CreatePeerConnectionOrError(config, std::move(pub_deps));
                 if (pub_res.ok()) {
                     native.publisher = pub_res.MoveValue();
+                    InitializePeerConnectionCapabilities(
+                        native.publisher.get(), attempt_signal->is_single_pc_mode_active());
 
                     webrtc::DataChannelInit rel_init;
                     rel_init.ordered = true;
@@ -3960,6 +4037,7 @@ Room::PendingOperationCleanup Room::TakePendingOperationsLocked() {
         pending.publish_states.push_back(state);
     }
     pending_track_publishes_.clear();
+    published_sender_track_ids_.clear();
     return pending;
 }
 
@@ -4792,6 +4870,11 @@ RemotePublicationControlDispatch Room::QueueRemotePublicationControl(
             auto committed = request;
             if (is_video) committed.enabled = intent.enabled;
             canonical->CommitControl(committed);
+            if (intent.subscribed) {
+                // An explicit SetSubscribed(true), including a retry of the
+                // same intent, starts a fresh attempt on this publication.
+                ClearTrackSubscriptionErrorLocked(participant->second, canonical);
+            }
 
             if (!intent.subscribed) {
                 if (canonical->track()) {
@@ -5151,8 +5234,22 @@ void Room::NegotiatePublisher(uint64_t generation) {
     });
 }
 
-asio::awaitable<webrtc::scoped_refptr<webrtc::RtpSenderInterface>>
-Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation) {
+void Room::RollbackPublishedSenderBundle(
+    const webrtc::scoped_refptr<webrtc::PeerConnectionInterface>& pc,
+    const PublishedSenderBundle& bundle) {
+    if (!pc) return;
+    for (auto sender = bundle.senders.rbegin();
+         sender != bundle.senders.rend(); ++sender) {
+        if (*sender) pc->RemoveTrackOrError(*sender);
+    }
+}
+
+asio::awaitable<PublishedSenderBundle>
+Room::AddTrackToPublisherAsync(
+    std::shared_ptr<Track> track,
+    uint64_t generation,
+    std::optional<VideoPublishOptions> video_publish_options,
+    std::optional<AudioPublishPolicy> audio_publish_policy) {
     auto operation_admission = AdmitOperation(OperationKind::PublishTrack, "AddTrackToPublisherAsync");
     if (!track) {
         throw OperationError(OperationKind::PublishTrack,
@@ -5214,11 +5311,16 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
 
     VideoPublishOptions publish_options;
     if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(track)) {
-        publish_options = video->publish_options();
+        publish_options = video_publish_options.has_value()
+            ? *video_publish_options : video->publish_options();
+    }
+    AudioPublishPolicy resolved_audio_policy;
+    if (auto audio = std::dynamic_pointer_cast<LocalAudioTrack>(track)) {
+        resolved_audio_policy = audio_publish_policy.has_value()
+            ? *audio_publish_policy : audio->requested_publish_policy();
     }
 
-    auto completion = std::make_shared<AwaitableState<
-        webrtc::scoped_refptr<webrtc::RtpSenderInterface>>>(executor_);
+    auto completion = std::make_shared<AwaitableState<PublishedSenderBundle>>(executor_);
     auto cancel_native = callback_gate_->CancelWhenClosed(
         [weak = std::weak_ptr(completion)] {
             if (auto pending = weak.lock()) {
@@ -5233,16 +5335,18 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
     // their storage through a different CRT at task teardown.
     struct AddTrackTaskParams {
         std::shared_ptr<Room> room;
-        std::shared_ptr<AwaitableState<webrtc::scoped_refptr<webrtc::RtpSenderInterface>>> completion;
+        std::shared_ptr<AwaitableState<PublishedSenderBundle>> completion;
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
         webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track;
         std::string stream_id;
         VideoPublishOptions publish_options;
+        AudioPublishPolicy audio_publish_policy;
         uint64_t generation = 0;
     };
     auto* params = new AddTrackTaskParams{
         shared_from_this(), completion, pc, rtc_track, stream_id,
-        std::move(publish_options), generation};
+        std::move(publish_options), std::move(resolved_audio_policy),
+        generation};
     WebRTCManager::Instance().signaling_thread()->PostTask(
         [params]() {
             // Destruction happens in this translation unit rather than in the
@@ -5258,6 +5362,7 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
                 return;
             }
 
+            PublishedSenderBundle bundle;
             webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender;
             webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver;
             std::string error;
@@ -5268,24 +5373,38 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
             init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
             init.stream_ids = {task.stream_id};
             if (task.rtc_track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind &&
-                task.publish_options.simulcast && !task.publish_options.layers.empty()) {
+                !task.publish_options.layers.empty()) {
+                const bool primary_active =
+                    task.publish_options.simulcast_codecs.size() <= 1 ||
+                    task.publish_options.backup_codec_policy != BackupCodecPolicy::Regression;
                 for (const auto& layer : task.publish_options.layers) {
                     webrtc::RtpEncodingParameters encoding;
-                    encoding.active = true;
+                    encoding.active = primary_active;
                     encoding.rid = layer.rid;
                     encoding.scale_resolution_down_by = layer.scale_resolution_down_by;
                     encoding.max_bitrate_bps = layer.max_bitrate_bps;
                     encoding.max_framerate = layer.max_fps;
-                    if (!task.publish_options.scalability_mode.empty()) {
-                        encoding.scalability_mode = task.publish_options.scalability_mode;
-                    }
                     init.send_encodings.push_back(std::move(encoding));
                 }
+            } else if (task.rtc_track->kind() ==
+                           webrtc::MediaStreamTrackInterface::kAudioKind &&
+                       task.audio_publish_policy.max_bitrate_bps > 0) {
+                webrtc::RtpEncodingParameters encoding;
+                encoding.max_bitrate_bps =
+                    task.audio_publish_policy.max_bitrate_bps;
+                init.send_encodings.push_back(std::move(encoding));
             }
             auto result = task.pc->AddTransceiver(task.rtc_track, init);
             if (result.ok()) {
                 transceiver = result.MoveValue();
                 sender = transceiver->sender();
+                if (sender) {
+                    bundle.primary = sender;
+                    bundle.senders.push_back(sender);
+                    bundle.scalability_modes.push_back(
+                        task.publish_options.scalability_mode);
+                    bundle.track_ids.push_back(task.rtc_track->id());
+                }
             } else {
                 error = result.error().message();
             }
@@ -5341,30 +5460,46 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
                 };
 
                 auto preferences = get_prefs(task.publish_options.video_codec);
-                if (!preferences.empty()) {
-                    auto codec_status = transceiver->SetCodecPreferences(preferences);
-                    if (!codec_status.ok()) {
-                        task.pc->RemoveTrackOrError(sender);
-                        FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
-                            OperationKind::PublishTrack,
-                            OperationErrorCode::StateUncertain,
-                            "apply_join_codec_policy",
-                            codec_status.message(),
-                            true)));
-                        return;
-                    }
+                if (preferences.empty()) {
+                    RollbackPublishedSenderBundle(task.pc, bundle);
+                    FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                        OperationKind::PublishTrack,
+                        OperationErrorCode::InvalidState,
+                        "apply_join_codec_policy",
+                        "resolved primary codec has no sender preference")));
+                    return;
                 }
-
+                auto codec_status = transceiver->SetCodecPreferences(preferences);
+                if (!codec_status.ok()) {
+                    RollbackPublishedSenderBundle(task.pc, bundle);
+                    FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                        OperationKind::PublishTrack,
+                        OperationErrorCode::StateUncertain,
+                        "apply_join_codec_policy",
+                        codec_status.message(),
+                        true)));
+                    return;
+                }
                 // GAP-03: Multi-Codec Simulcast & Backup Codecs Transceiver
-                if (task.publish_options.simulcast && task.publish_options.simulcast_codecs.size() > 1) {
+                if (task.publish_options.simulcast_codecs.size() > 1) {
                     for (size_t c_idx = 1; c_idx < task.publish_options.simulcast_codecs.size(); ++c_idx) {
                         const auto& backup_spec = task.publish_options.simulcast_codecs[c_idx];
-                        if (backup_spec.layers.empty()) continue;
+                        if (backup_spec.layers.empty()) {
+                            RollbackPublishedSenderBundle(task.pc, bundle);
+                            FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                                OperationKind::PublishTrack,
+                                OperationErrorCode::InvalidState,
+                                "install_backup_sender",
+                                "resolved backup codec has no RTP encodings")));
+                            return;
+                        }
 
                         webrtc::RtpTransceiverInit backup_init;
                         backup_init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
                         backup_init.stream_ids = {task.stream_id};
-                        bool is_active = (task.publish_options.backup_codec_policy == BackupCodecPolicy::Simulcast);
+                        const bool is_active =
+                            task.publish_options.backup_codec_policy !=
+                            BackupCodecPolicy::PreferRegression;
 
                         for (const auto& layer : backup_spec.layers) {
                             webrtc::RtpEncodingParameters encoding;
@@ -5373,39 +5508,221 @@ Room::AddTrackToPublisherAsync(std::shared_ptr<Track> track, uint64_t generation
                             encoding.scale_resolution_down_by = layer.scale_resolution_down_by;
                             encoding.max_bitrate_bps = layer.max_bitrate_bps;
                             encoding.max_framerate = layer.max_fps;
-                            if (!backup_spec.scalability_mode.empty()) {
-                                encoding.scalability_mode = backup_spec.scalability_mode;
-                            }
                             backup_init.send_encodings.push_back(std::move(encoding));
                         }
 
-                        auto backup_res = task.pc->AddTransceiver(task.rtc_track, backup_init);
-                        if (backup_res.ok()) {
-                            auto backup_transceiver = backup_res.MoveValue();
-                            auto backup_prefs = get_prefs(backup_spec.codec);
-                            if (!backup_prefs.empty()) {
-                                backup_transceiver->SetCodecPreferences(backup_prefs);
-                            }
-                            std::cout << "[BACKUP CODEC] Added Backup Transceiver for codec=" << backup_spec.codec
-                                      << " (layers=" << backup_spec.layers.size()
-                                      << ", active=" << (is_active ? "ON" : "OFF (on-demand)") << ")\n";
-                            task.room->Log("TRACK", "BACKUP_CODEC_ATTACH",
-                                           "Attached backup codec transceiver to video track: Codec=" + backup_spec.codec +
-                                           ", Layers=" + std::to_string(backup_spec.layers.size()) +
-                                           ", Policy=" + (is_active ? "Simulcast" : "PreferRegression"));
+                        const auto backup_cid = backup_spec.cid.empty()
+                            ? task.rtc_track->id() + "_backup" +
+                                (c_idx == 1 ? std::string{} : "_" + std::to_string(c_idx))
+                            : backup_spec.cid;
+                        auto* source_track = static_cast<webrtc::VideoTrackInterface*>(
+                            task.rtc_track.get());
+                        webrtc::scoped_refptr<webrtc::VideoTrackSourceInterface>
+                            backup_source(source_track->GetSource());
+                        auto backup_track = WebRTCManager::Instance().factory()->CreateVideoTrack(
+                            std::move(backup_source), backup_cid);
+                        if (!backup_track) {
+                            RollbackPublishedSenderBundle(task.pc, bundle);
+                            FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                                OperationKind::PublishTrack,
+                                OperationErrorCode::StateUncertain,
+                                "install_backup_sender",
+                                "failed to create the backup native video track",
+                                true)));
+                            return;
                         }
+                        backup_track->set_enabled(task.rtc_track->enabled());
+                        auto backup_res = task.pc->AddTransceiver(
+                            backup_track, backup_init);
+                        if (!backup_res.ok()) {
+                            RollbackPublishedSenderBundle(task.pc, bundle);
+                            FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                                OperationKind::PublishTrack,
+                                OperationErrorCode::StateUncertain,
+                                "install_backup_sender",
+                                backup_res.error().message(),
+                                true)));
+                            return;
+                        }
+                        auto backup_transceiver = backup_res.MoveValue();
+                        auto backup_sender = backup_transceiver->sender();
+                        if (!backup_sender) {
+                            RollbackPublishedSenderBundle(task.pc, bundle);
+                            FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                                OperationKind::PublishTrack,
+                                OperationErrorCode::StateUncertain,
+                                "install_backup_sender",
+                                "WebRTC did not return a backup RTP sender",
+                                true)));
+                            return;
+                        }
+                        bundle.senders.push_back(backup_sender);
+                        bundle.scalability_modes.push_back(
+                            backup_spec.scalability_mode);
+                        bundle.track_ids.push_back(backup_cid);
+
+                        auto backup_prefs = get_prefs(backup_spec.codec);
+                        if (backup_prefs.empty()) {
+                            RollbackPublishedSenderBundle(task.pc, bundle);
+                            FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                                OperationKind::PublishTrack,
+                                OperationErrorCode::InvalidState,
+                                "apply_backup_codec_policy",
+                                "resolved backup codec has no sender preference")));
+                            return;
+                        }
+                        const auto backup_status =
+                            backup_transceiver->SetCodecPreferences(backup_prefs);
+                        if (!backup_status.ok()) {
+                            RollbackPublishedSenderBundle(task.pc, bundle);
+                            FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                                OperationKind::PublishTrack,
+                                OperationErrorCode::StateUncertain,
+                                "apply_backup_codec_policy",
+                                backup_status.message(),
+                                true)));
+                            return;
+                        }
+                        std::cout << "[BACKUP CODEC] Added Backup Transceiver for codec=" << backup_spec.codec
+                                  << " (layers=" << backup_spec.layers.size()
+                                  << ", active=" << (is_active ? "ON" : "OFF (on-demand)") << ")\n";
+                        task.room->Log("TRACK", "BACKUP_CODEC_ATTACH",
+                                       "Attached backup codec transceiver to video track: Codec=" + backup_spec.codec +
+                                       ", Layers=" + std::to_string(backup_spec.layers.size()) +
+                                       ", Policy=" + (is_active ? "active" : "prefer-regression"));
                     }
                 }
             }
-            CompleteAwaitable(task.completion, std::move(sender));
+            if (task.generation != task.room->session_generation_.load(std::memory_order_acquire)) {
+                RollbackPublishedSenderBundle(task.pc, bundle);
+                FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                    OperationKind::PublishTrack,
+                    OperationErrorCode::Cancelled,
+                    "install_sender",
+                    "session changed during sender installation")));
+                return;
+            }
+            PublishedSenderBundle completed = bundle;
+            if (!CompleteAwaitable(task.completion, std::move(completed))) {
+                RollbackPublishedSenderBundle(task.pc, bundle);
+            }
         });
 
-    co_return co_await WaitAwaitable<webrtc::scoped_refptr<webrtc::RtpSenderInterface>>(
+    co_return co_await WaitAwaitable<PublishedSenderBundle>(
         completion,
         operation_timeouts_.publish,
         OperationKind::PublishTrack,
         OperationErrorCode::TrackPublishTimeout,
         "install_sender");
+}
+
+asio::awaitable<void> Room::ApplyPublishedSenderScalabilityModesAsync(
+    PublishedSenderBundle bundle,
+    uint64_t generation) {
+    if (bundle.senders.size() != bundle.scalability_modes.size() ||
+        bundle.senders.size() != bundle.track_ids.size()) {
+        throw OperationError(OperationKind::PublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "apply_scalability_mode",
+                             "sender bundle metadata is inconsistent");
+    }
+    if (std::none_of(
+            bundle.scalability_modes.begin(),
+            bundle.scalability_modes.end(),
+            [](const std::string& mode) { return !mode.empty(); })) {
+        co_return;
+    }
+
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::Cancelled,
+                                 "apply_scalability_mode",
+                                 "room session changed before applying SVC mode");
+        }
+        pc = publisher_pc_;
+    }
+    if (!pc || !WebRTCManager::Instance().signaling_thread()) {
+        throw OperationError(OperationKind::PublishTrack,
+                             OperationErrorCode::InvalidState,
+                             "apply_scalability_mode",
+                             "publisher peer connection is unavailable");
+    }
+
+    auto completion = std::make_shared<AwaitableState<void>>(executor_);
+    auto cancel_native = callback_gate_->CancelWhenClosed(
+        [weak = std::weak_ptr(completion)] {
+            if (auto pending = weak.lock()) {
+                FailAwaitable(pending, std::make_exception_ptr(OperationError(
+                    OperationKind::PublishTrack,
+                    OperationErrorCode::Cancelled,
+                    "apply_scalability_mode",
+                    "room is retired")));
+            }
+        });
+    struct ApplyScalabilityTaskParams {
+        std::shared_ptr<Room> room;
+        std::shared_ptr<AwaitableState<void>> completion;
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+        PublishedSenderBundle bundle;
+        uint64_t generation = 0;
+    };
+    auto* params = new ApplyScalabilityTaskParams{
+        shared_from_this(), completion, pc, std::move(bundle), generation};
+    WebRTCManager::Instance().signaling_thread()->PostTask([params]() {
+        std::unique_ptr<ApplyScalabilityTaskParams> owned(params);
+        auto& task = *owned;
+        if (task.generation != task.room->session_generation_.load(
+                std::memory_order_acquire)) {
+            FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                OperationKind::PublishTrack,
+                OperationErrorCode::Cancelled,
+                "apply_scalability_mode",
+                "session changed before applying SVC mode")));
+            return;
+        }
+
+        for (size_t index = 0; index < task.bundle.senders.size(); ++index) {
+            const auto& mode = task.bundle.scalability_modes[index];
+            if (mode.empty()) continue;
+            const auto& sender = task.bundle.senders[index];
+            if (!sender || !sender->track()) {
+                FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                    OperationKind::PublishTrack,
+                    OperationErrorCode::StateUncertain,
+                    "apply_scalability_mode",
+                    "sender was removed before applying SVC mode",
+                    true)));
+                return;
+            }
+            auto parameters = sender->GetParameters();
+            for (auto& encoding : parameters.encodings) {
+                encoding.scalability_mode = mode;
+            }
+            const auto status = sender->SetParameters(parameters);
+            if (!status.ok()) {
+                FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                    OperationKind::PublishTrack,
+                    OperationErrorCode::StateUncertain,
+                    "apply_scalability_mode",
+                    status.message(),
+                    true)));
+                return;
+            }
+        }
+        if (!CompleteAwaitable(task.completion)) {
+            RollbackPublishedSenderBundle(task.pc, task.bundle);
+        }
+    });
+
+    co_await WaitAwaitable<void>(
+        completion,
+        operation_timeouts_.publish,
+        OperationKind::PublishTrack,
+        OperationErrorCode::TrackPublishTimeout,
+        "apply_scalability_mode");
 }
 
 asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
@@ -5427,38 +5744,65 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
     }
 
     proto::SignalRequest effective_request(request);
+    std::optional<ResolvedVideoPublishPlan> video_plan;
+    std::optional<ResolvedAudioPublishPlan> audio_plan;
     if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(track)) {
         std::vector<std::string> enabled_codecs;
+        std::shared_ptr<LocalParticipant> planning_local;
         {
             std::lock_guard lock(room_mutex_);
             enabled_codecs = enabled_publish_codecs_;
+            planning_local = local_participant_;
         }
-        if (!enabled_codecs.empty()) {
-            auto options = video->publish_options();
-            std::string requested = options.video_codec;
-            std::transform(requested.begin(), requested.end(), requested.begin(),
-                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-            const auto is_requested = [&requested](const std::string& mime) {
-                return mime == requested || mime == "video/" + requested;
-            };
-            if (std::none_of(enabled_codecs.begin(), enabled_codecs.end(), is_requested)) {
-                const auto fallback = std::find_if(
-                    enabled_codecs.begin(), enabled_codecs.end(),
-                    [](const std::string& mime) { return mime.rfind("video/", 0) == 0; });
-                if (fallback == enabled_codecs.end()) {
-                    throw OperationError(OperationKind::PublishTrack,
-                                         OperationErrorCode::PermissionDenied,
-                                         "join_publish_codecs",
-                                         "server did not enable a video publish codec");
-                }
-                options.video_codec = fallback->substr(6);
-                video->set_publish_options(options);
-                for (auto& codec : *effective_request.mutable_add_track()->mutable_simulcast_codecs()) {
-                    codec.set_codec(options.video_codec);
-                }
-                Log("SIGNAL", "PUBLISH_CODEC_FALLBACK",
-                    "Server did not enable the requested codec " + requested + "; using " + options.video_codec);
-            }
+        if (!planning_local) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::InvalidState,
+                                 "resolve_publish_plan",
+                                 "local participant is unavailable");
+        }
+        video_plan = ResolveVideoPublishPlan(video, enabled_codecs);
+        if (!video_plan->ok()) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::TrackPublishRejected,
+                                 "resolve_publish_plan",
+                                 video_plan->error);
+        }
+        effective_request = planning_local->BuildTrackPublishRequest(
+            track, &video_plan->effective);
+        if (video_plan->used_fallback()) {
+            Log("SIGNAL", "PUBLISH_CODEC_FALLBACK",
+                video_plan->fallback_reason + "; using " +
+                    video_plan->effective_codec);
+        }
+    } else if (auto audio = std::dynamic_pointer_cast<LocalAudioTrack>(track)) {
+        std::shared_ptr<LocalParticipant> planning_local;
+        std::shared_ptr<E2eeManager> e2ee;
+        {
+            std::lock_guard lock(room_mutex_);
+            planning_local = local_participant_;
+            e2ee = e2ee_manager_;
+        }
+        if (!planning_local) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::InvalidState,
+                                 "resolve_audio_publish_plan",
+                                 "local participant is unavailable");
+        }
+        const bool media_encryption_enabled = e2ee && e2ee->enabled() &&
+            e2ee->encryption_type() != EncryptionType::NONE;
+        audio_plan = ResolveAudioPublishPlan(
+            audio, media_encryption_enabled);
+        if (!audio_plan->ok()) {
+            throw OperationError(OperationKind::PublishTrack,
+                                 OperationErrorCode::TrackPublishRejected,
+                                 "resolve_audio_publish_plan",
+                                 audio_plan->error);
+        }
+        effective_request = planning_local->BuildTrackPublishRequest(
+            track, nullptr, &audio_plan->effective);
+        if (audio_plan->red_disabled_for_encryption) {
+            Log("SIGNAL", "PUBLISH_AUDIO_RED_DISABLED",
+                "Audio RED disabled because media encryption is configured");
         }
     }
 
@@ -5524,7 +5868,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         }
     };
 
-    webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender;
+    PublishedSenderBundle sender_bundle;
     bool server_acknowledged = false;
     try {
         co_await signal->SendAsync(effective_request);
@@ -5538,8 +5882,18 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
 
         release_ack();
 
-        sender = co_await AddTrackToPublisherAsync(track, generation);
+        sender_bundle = co_await AddTrackToPublisherAsync(
+            track,
+            generation,
+            video_plan.has_value()
+                ? std::optional<VideoPublishOptions>{video_plan->effective}
+                : std::nullopt,
+            audio_plan.has_value()
+                ? std::optional<AudioPublishPolicy>{audio_plan->effective}
+                : std::nullopt);
         co_await NegotiatePublisherAsync(timeouts.negotiation, generation);
+        co_await ApplyPublishedSenderScalabilityModesAsync(
+            sender_bundle, generation);
 
         if (generation != session_generation_.load(std::memory_order_acquire)) {
             throw OperationError(OperationKind::PublishTrack,
@@ -5560,10 +5914,29 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             }
             track->set_sid(response.track().sid());
             local->add_publication(publication);
+            published_sender_track_ids_[track.get()] = sender_bundle.track_ids;
         }
         if (telemetry_owner && local_publication_epoch != 0) {
             const auto rtc_track = track->rtc_track();
             const auto rtc_track_id = rtc_track ? rtc_track->id() : std::string{};
+            telemetry::LocalVideoPublishDescriptor video_publish;
+            if (video_plan.has_value()) {
+                video_publish.requested_codec = video_plan->requested_codec;
+                video_publish.effective_codec = video_plan->effective_codec;
+                video_publish.fallback_reason = video_plan->fallback_reason;
+                video_publish.source = track->source() == TrackSource::ScreenShareVideo
+                    ? "screen" : "camera";
+                video_publish.mode = !video_plan->effective.scalability_mode.empty()
+                    ? "svc"
+                    : (video_plan->effective.simulcast &&
+                       video_plan->effective.layers.size() > 1 ? "simulcast" : "single");
+                video_publish.resolved_profile = video_plan->effective_codec == "av1"
+                    ? "profile0" : "negotiated";
+                video_publish.resolved_scalability =
+                    video_plan->effective.scalability_mode.empty()
+                        ? "none" : video_plan->effective.scalability_mode;
+                video_publish.sender_track_ids = sender_bundle.track_ids;
+            }
             telemetry_owner->RegisterLocalPublication(
                 LocalPublishTelemetryKey(rtc_track_id),
                 generation,
@@ -5576,7 +5949,8 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
                 !track->muted(),
                 local_video_probe,
                 std::chrono::steady_clock::now(),
-                local_audio_probe);
+                local_audio_probe,
+                std::move(video_publish));
         }
         if (track->kind() == TrackKind::Video) SchedulePublisherMediaDiagnostic(generation);
         publish_operation.Finish(telemetry::OperationOutcome::Success);
@@ -5596,9 +5970,9 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             }
         }
         release_ack();
-        if (sender && WebRTCManager::Instance().signaling_thread()) {
-            WebRTCManager::Instance().signaling_thread()->BlockingCall([publisher, sender]() {
-                if (publisher) publisher->RemoveTrackOrError(sender);
+        if (!sender_bundle.empty() && WebRTCManager::Instance().signaling_thread()) {
+            WebRTCManager::Instance().signaling_thread()->BlockingCall([publisher, sender_bundle]() {
+                RollbackPublishedSenderBundle(publisher, sender_bundle);
             });
         }
         if (server_acknowledged) {
@@ -5620,13 +5994,22 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
 
     std::vector<proto::SignalRequest> effective_requests;
     effective_requests.reserve(items.size());
+    std::vector<std::optional<ResolvedVideoPublishPlan>> video_plans(
+        items.size());
+    std::vector<std::optional<ResolvedAudioPublishPlan>> audio_plans(
+        items.size());
     std::vector<std::string> enabled_codecs;
+    std::shared_ptr<LocalParticipant> planning_local;
+    std::shared_ptr<E2eeManager> planning_e2ee;
     {
         std::lock_guard lock(room_mutex_);
         enabled_codecs = enabled_publish_codecs_;
+        planning_local = local_participant_;
+        planning_e2ee = e2ee_manager_;
     }
 
-    for (auto& item : items) {
+    for (size_t index = 0; index < items.size(); ++index) {
+        auto& item = items[index];
         if (!item.track || !item.request || !item.request->has_add_track()) {
             throw OperationError(OperationKind::PublishTrack,
                                  OperationErrorCode::InvalidState,
@@ -5635,32 +6018,50 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
         }
         proto::SignalRequest eff_req(*item.request);
         if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(item.track)) {
-            if (!enabled_codecs.empty()) {
-                auto options = video->publish_options();
-                std::string requested = options.video_codec;
-                std::transform(requested.begin(), requested.end(), requested.begin(),
-                               [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
-                const auto is_requested = [&requested](const std::string& mime) {
-                    return mime == requested || mime == "video/" + requested;
-                };
-                if (std::none_of(enabled_codecs.begin(), enabled_codecs.end(), is_requested)) {
-                    const auto fallback = std::find_if(
-                        enabled_codecs.begin(), enabled_codecs.end(),
-                        [](const std::string& mime) { return mime.rfind("video/", 0) == 0; });
-                    if (fallback == enabled_codecs.end()) {
-                        throw OperationError(OperationKind::PublishTrack,
-                                             OperationErrorCode::PermissionDenied,
-                                             "join_publish_codecs",
-                                             "server did not enable a video publish codec");
-                    }
-                    options.video_codec = fallback->substr(6);
-                    video->set_publish_options(options);
-                    for (auto& codec : *eff_req.mutable_add_track()->mutable_simulcast_codecs()) {
-                        codec.set_codec(options.video_codec);
-                    }
-                    Log("SIGNAL", "PUBLISH_CODEC_FALLBACK",
-                        "Server did not enable the requested codec " + requested + "; using " + options.video_codec);
-                }
+            if (!planning_local) {
+                throw OperationError(OperationKind::PublishTrack,
+                                     OperationErrorCode::InvalidState,
+                                     "resolve_publish_plan",
+                                     "local participant is unavailable");
+            }
+            video_plans[index] = ResolveVideoPublishPlan(video, enabled_codecs);
+            if (!video_plans[index]->ok()) {
+                throw OperationError(OperationKind::PublishTrack,
+                                     OperationErrorCode::TrackPublishRejected,
+                                     "resolve_publish_plan",
+                                     video_plans[index]->error);
+            }
+            eff_req = planning_local->BuildTrackPublishRequest(
+                item.track, &video_plans[index]->effective);
+            if (video_plans[index]->used_fallback()) {
+                Log("SIGNAL", "PUBLISH_CODEC_FALLBACK",
+                    video_plans[index]->fallback_reason + "; using " +
+                        video_plans[index]->effective_codec);
+            }
+        } else if (auto audio =
+                       std::dynamic_pointer_cast<LocalAudioTrack>(item.track)) {
+            if (!planning_local) {
+                throw OperationError(OperationKind::PublishTrack,
+                                     OperationErrorCode::InvalidState,
+                                     "resolve_audio_publish_plan",
+                                     "local participant is unavailable");
+            }
+            const bool media_encryption_enabled = planning_e2ee &&
+                planning_e2ee->enabled() &&
+                planning_e2ee->encryption_type() != EncryptionType::NONE;
+            audio_plans[index] = ResolveAudioPublishPlan(
+                audio, media_encryption_enabled);
+            if (!audio_plans[index]->ok()) {
+                throw OperationError(OperationKind::PublishTrack,
+                                     OperationErrorCode::TrackPublishRejected,
+                                     "resolve_audio_publish_plan",
+                                     audio_plans[index]->error);
+            }
+            eff_req = planning_local->BuildTrackPublishRequest(
+                item.track, nullptr, &audio_plans[index]->effective);
+            if (audio_plans[index]->red_disabled_for_encryption) {
+                Log("SIGNAL", "PUBLISH_AUDIO_RED_DISABLED",
+                    "Audio RED disabled because media encryption is configured");
             }
         }
         effective_requests.push_back(std::move(eff_req));
@@ -5740,7 +6141,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
             telemetry_owner, telemetry::OperationKind::PublishTrack);
     }
 
-    std::vector<webrtc::scoped_refptr<webrtc::RtpSenderInterface>> senders;
+    std::vector<PublishedSenderBundle> sender_bundles;
     std::vector<proto::TrackPublishedResponse> responses;
     responses.reserve(items.size());
     bool server_acknowledged_any = false;
@@ -5768,13 +6169,26 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
             }
         }
 
-        for (const auto& item : items) {
-            auto sender = co_await AddTrackToPublisherAsync(item.track, generation);
-            senders.push_back(sender);
+        for (size_t index = 0; index < items.size(); ++index) {
+            sender_bundles.push_back(co_await AddTrackToPublisherAsync(
+                items[index].track,
+                generation,
+                video_plans[index].has_value()
+                    ? std::optional<VideoPublishOptions>{
+                        video_plans[index]->effective}
+                    : std::nullopt,
+                audio_plans[index].has_value()
+                    ? std::optional<AudioPublishPolicy>{
+                        audio_plans[index]->effective}
+                    : std::nullopt));
         }
 
         // 单次全量 SDP 重协商
         co_await NegotiatePublisherAsync(operation_timeouts_.negotiation, generation);
+        for (const auto& bundle : sender_bundles) {
+            co_await ApplyPublishedSenderScalabilityModesAsync(
+                bundle, generation);
+        }
 
         if (generation != session_generation_.load(std::memory_order_acquire)) {
             throw OperationError(OperationKind::PublishTrack,
@@ -5798,6 +6212,8 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 auto pub = std::make_shared<TrackPublication>(
                     items[i].track, responses[i].track().sid(), responses[i].track().name());
                 local->add_publication(pub);
+                published_sender_track_ids_[items[i].track.get()] =
+                    sender_bundles[i].track_ids;
                 publications.push_back(pub);
             }
         }
@@ -5808,6 +6224,26 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 const auto rtc_track = items[index].track->rtc_track();
                 const auto rtc_track_id = rtc_track
                     ? rtc_track->id() : std::string{};
+                telemetry::LocalVideoPublishDescriptor video_publish;
+                if (video_plans[index].has_value()) {
+                    const auto& plan = *video_plans[index];
+                    video_publish.requested_codec = plan.requested_codec;
+                    video_publish.effective_codec = plan.effective_codec;
+                    video_publish.fallback_reason = plan.fallback_reason;
+                    video_publish.source =
+                        items[index].track->source() == TrackSource::ScreenShareVideo
+                            ? "screen" : "camera";
+                    video_publish.mode = !plan.effective.scalability_mode.empty()
+                        ? "svc"
+                        : (plan.effective.simulcast && plan.effective.layers.size() > 1
+                            ? "simulcast" : "single");
+                    video_publish.resolved_profile = plan.effective_codec == "av1"
+                        ? "profile0" : "negotiated";
+                    video_publish.resolved_scalability =
+                        plan.effective.scalability_mode.empty()
+                            ? "none" : plan.effective.scalability_mode;
+                    video_publish.sender_track_ids = sender_bundles[index].track_ids;
+                }
                 telemetry_owner->RegisterLocalPublication(
                     LocalPublishTelemetryKey(rtc_track_id),
                     generation,
@@ -5820,7 +6256,8 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                     !items[index].track->muted(),
                     local_video_probes[index],
                     committed_at,
-                    local_audio_probes[index]);
+                    local_audio_probes[index],
+                    std::move(video_publish));
             }
         }
         Log("TRACK", "BATCH_PUBLISHED",
@@ -5855,16 +6292,17 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 pending_track_publishes_.erase(pa.cid);
             }
         }
-        if (!senders.empty() && WebRTCManager::Instance().signaling_thread()) {
+        if (!sender_bundles.empty() && WebRTCManager::Instance().signaling_thread()) {
             webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
             {
                 std::lock_guard lock(room_mutex_);
                 pc = publisher_pc_;
             }
-            WebRTCManager::Instance().signaling_thread()->BlockingCall([pc, senders]() {
+            WebRTCManager::Instance().signaling_thread()->BlockingCall([pc, sender_bundles]() {
                 if (pc) {
-                    for (const auto& sender : senders) {
-                        if (sender) pc->RemoveTrackOrError(sender);
+                    for (auto bundle = sender_bundles.rbegin();
+                         bundle != sender_bundles.rend(); ++bundle) {
+                        RollbackPublishedSenderBundle(pc, *bundle);
                     }
                 }
             });
@@ -6025,6 +6463,7 @@ asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
     }
 
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    std::vector<std::string> sender_track_ids;
     {
         std::lock_guard lock(room_mutex_);
         if (generation != session_generation_.load(std::memory_order_acquire) ||
@@ -6035,6 +6474,10 @@ asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
                                  "room session changed while unpublishing");
         }
         pc = publisher_pc_;
+        const auto owned = published_sender_track_ids_.find(track.get());
+        if (owned != published_sender_track_ids_.end()) {
+            sender_track_ids = owned->second;
+        }
     }
     if (!pc || !WebRTCManager::Instance().signaling_thread()) {
         throw OperationError(OperationKind::UnpublishTrack,
@@ -6057,10 +6500,12 @@ asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
         std::shared_ptr<AwaitableState<void>> completion;
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
         webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track;
+        std::vector<std::string> sender_track_ids;
         uint64_t generation = 0;
     };
     auto* params = new RemoveTrackTaskParams{
-        shared_from_this(), completion, pc, track->rtc_track(), generation};
+        shared_from_this(), completion, pc, track->rtc_track(),
+        std::move(sender_track_ids), generation};
     WebRTCManager::Instance().signaling_thread()->PostTask([params]() {
         std::unique_ptr<RemoveTrackTaskParams> owned(params);
         auto& task = *owned;
@@ -6077,7 +6522,10 @@ asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
         for (const auto& sender : task.pc->GetSenders()) {
             if (!sender || !sender->track()) continue;
             if (sender->track() == task.rtc_track ||
-                sender->track()->id() == task.rtc_track->id()) {
+                sender->track()->id() == task.rtc_track->id() ||
+                std::find(task.sender_track_ids.begin(),
+                          task.sender_track_ids.end(),
+                          sender->track()->id()) != task.sender_track_ids.end()) {
                 senders.push_back(sender);
             }
         }
@@ -6111,6 +6559,12 @@ asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
         OperationKind::UnpublishTrack,
         OperationErrorCode::TrackUnpublishTimeout,
         "remove_sender");
+    {
+        std::lock_guard lock(room_mutex_);
+        if (IsNativeGenerationCurrentLocked(generation)) {
+            published_sender_track_ids_.erase(track.get());
+        }
+    }
 }
 
 void Room::BindLocalUnpublishHandler() {
@@ -6629,6 +7083,7 @@ void Room::AttachRemoteTrackToParticipant(
             participant->sid(), participant->identity(), track_id);
         auto& subscription_intent = EnsureSubscriptionIntentLocked(subscription_key);
         if (!subscription_intent.subscribed ||
+            pub->subscription_error() != TrackPublication::SubscriptionError::None ||
             (remote_publication && !remote_publication->is_subscribed())) {
             return;
         }
@@ -6673,6 +7128,7 @@ void Room::AttachRemoteTrackToParticipant(
             !track_membership->second->active.load(std::memory_order_acquire) ||
             !subscription_intent || !subscription_intent->subscribed ||
             subscription_intent->revision != subscription_revision ||
+            pub->subscription_error() != TrackPublication::SubscriptionError::None ||
             !remote_publication || !remote_publication->is_subscribed()) {
             return false;
         }
@@ -7087,6 +7543,7 @@ void Room::AttachRemoteTrackToParticipant(
             track_membership->second->active.load(std::memory_order_acquire) &&
             subscription_intent && subscription_intent->subscribed &&
             subscription_intent->revision == subscription_revision &&
+            pub->subscription_error() == TrackPublication::SubscriptionError::None &&
             media_binding->active.load(std::memory_order_acquire) &&
             (!remote_publication ||
              (current_remote_binding_serials_.contains(remote_publication.get()) &&
@@ -7511,9 +7968,10 @@ void Room::HandleSignalMessage(
         switch (sr.err()) {
             case proto::SE_TRACK_NOTFOUND: err_str = "SE_TRACK_NOTFOUND (2)"; break;
             case proto::SE_CODEC_UNSUPPORTED: err_str = "SE_CODEC_UNSUPPORTED (1)"; break;
-            default: err_str = "SE_UNKNOWN (0) - subscription succeeded or status unknown"; break;
+            default: err_str = "SE_UNKNOWN - subscription failed"; break;
         }
         Log("SIGNAL", "SUB_RESP", "SubscriptionResponse received: Track=" + sr.track_sid() + ", Err=" + err_str);
+        UpdateTrackSubscriptionError(sr, event_generation);
     } else if (msg->has_subscription_permission_update()) {
         Log("SIGNAL", "SUB_PERM_UPDATE", "SubscriptionPermissionUpdate received (Allowed: " + std::string(msg->subscription_permission_update().allowed() ? "YES" : "NO") + ")");
         UpdateTrackSubscriptionPermission(
@@ -7552,13 +8010,21 @@ void Room::HandleSignalMessage(
         webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> quality_track;
         std::shared_ptr<TrackPublication> quality_publication;
         std::shared_ptr<Track> quality_local_track;
+        std::vector<std::string> quality_sender_track_ids;
         {
             std::lock_guard lock(room_mutex_);
             if (!IsSignalGenerationCurrentLocked(event_generation)) return;
             pub_pc = publisher_pc_;
             quality_publication = local_participant_ ? local_participant_->get_publication(track_sid) : nullptr;
             quality_local_track = quality_publication ? quality_publication->track() : nullptr;
-            if (quality_local_track) quality_track = quality_local_track->rtc_track();
+            if (quality_local_track) {
+                quality_track = quality_local_track->rtc_track();
+                const auto owned = published_sender_track_ids_.find(
+                    quality_local_track.get());
+                if (owned != published_sender_track_ids_.end()) {
+                    quality_sender_track_ids = owned->second;
+                }
+            }
         }
 
         // Flutter dispatches a quality update to its publication's local track.
@@ -7584,8 +8050,17 @@ void Room::HandleSignalMessage(
                 // read/modify/write in one signaling task so a stats snapshot
                 // cannot invalidate it between separate proxy calls.
                 for (const auto& sender : pub_pc->GetSenders()) {
-                    if (!sender || sender->track() != quality_track ||
+                    if (!sender || !sender->track() ||
                         quality_track->kind() != webrtc::MediaStreamTrackInterface::kVideoKind) {
+                        continue;
+                    }
+                    const auto& sender_track = sender->track();
+                    const bool owns_sender = sender_track == quality_track ||
+                        std::find(quality_sender_track_ids.begin(),
+                                  quality_sender_track_ids.end(),
+                                  sender_track->id()) !=
+                            quality_sender_track_ids.end();
+                    if (!owns_sender) {
                         continue;
                     }
 
@@ -7603,7 +8078,21 @@ void Room::HandleSignalMessage(
                     }
 
                     bool params_changed = false;
+                    const bool single_svc_encoding =
+                        parameters.encodings.size() == 1 &&
+                        parameters.encodings.front().scalability_mode.has_value();
+                    if (single_svc_encoding && !target_qualities->empty()) {
+                        const bool any_layer_enabled = std::any_of(
+                            target_qualities->begin(), target_qualities->end(),
+                            [](const auto& quality) { return quality.second; });
+                        auto& encoding = parameters.encodings.front();
+                        if (encoding.active != any_layer_enabled) {
+                            encoding.active = any_layer_enabled;
+                            params_changed = true;
+                        }
+                    }
                     for (auto& enc : parameters.encodings) {
+                        if (single_svc_encoding) break;
                         // Flutter treats an omitted RID as q/LOW; a lone q
                         // layer must not also receive the HIGH setting.
                         const auto quality = enc.rid.empty() || enc.rid == "q" ? proto::VideoQuality::LOW
@@ -9788,6 +10277,65 @@ void Room::UpdateTrackStreamStates(
                                                     change.state);
             }, true);
         }
+    }
+}
+
+void Room::ClearTrackSubscriptionErrorLocked(
+    const std::shared_ptr<RemoteParticipant>& participant,
+    const std::shared_ptr<RemoteTrackPublication>& publication) {
+    if (!participant || !publication ||
+        publication->subscription_error() == TrackPublication::SubscriptionError::None) {
+        return;
+    }
+    publication->set_subscription_error(TrackPublication::SubscriptionError::None);
+    EnqueueParticipantEventLocked(MakeTrackEventLocked(
+        ParticipantEventKind::TrackSubscriptionError, participant, publication, false));
+}
+
+void Room::UpdateTrackSubscriptionError(
+    const proto::SubscriptionResponse& response,
+    uint64_t event_generation) {
+    using Error = TrackPublication::SubscriptionError;
+    // SubscriptionResponse carries SubscriptionError, not a success ACK.
+    // In particular, SE_UNKNOWN must not clear a previous failure.
+    Error error = Error::Unknown;
+    if (response.err() == proto::SE_CODEC_UNSUPPORTED) error = Error::CodecUnsupported;
+    else if (response.err() == proto::SE_TRACK_NOTFOUND) error = Error::TrackNotFound;
+
+    std::shared_ptr<RemoteTrackPublication> publication;
+    uint64_t binding_serial = 0;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        for (const auto& [participant_sid, participant] : remote_participants_) {
+            if (!participant) continue;
+            auto candidate = participant->get_remote_publication(response.track_sid());
+            if (!candidate) continue;
+            const auto key = MakeSubscriptionIntentKeyLocked(
+                participant_sid, participant->identity(), candidate->sid());
+            const auto* intent = FindSubscriptionIntentLocked(key);
+            if (!intent || !intent->subscribed || !candidate->is_subscribed()) return;
+            publication = std::move(candidate);
+            const auto binding = current_remote_binding_serials_.find(publication.get());
+            if (binding != current_remote_binding_serials_.end()) {
+                binding_serial = binding->second;
+                // Invalidate queued TrackAvailable and frame callbacks before
+                // releasing Room ownership or detaching the physical sink.
+                if (const auto state = FindMediaBindingLocked(binding_serial)) {
+                    state->active.store(false, std::memory_order_release);
+                }
+            }
+            if (publication->subscription_error() != error) {
+                publication->set_subscription_error(error);
+                EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                    ParticipantEventKind::TrackSubscriptionError,
+                    participant, publication, false));
+            }
+            break;
+        }
+    }
+    if (publication && binding_serial != 0) {
+        DetachRemotePublicationMedia(publication.get(), true, binding_serial);
     }
 }
 

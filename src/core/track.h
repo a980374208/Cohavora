@@ -36,6 +36,23 @@ enum class TrackSource {
     ScreenShareAudio
 };
 
+struct AudioPublishPolicy {
+    std::string codec = "opus";
+    // Zero preserves the existing unconstrained WebRTC sender bitrate.
+    int max_bitrate_bps = 0;
+    bool dtx = true;
+    bool red = true;
+};
+
+struct ResolvedAudioPublishPlan {
+    AudioPublishPolicy requested;
+    AudioPublishPolicy effective;
+    bool red_disabled_for_encryption = false;
+    std::string error;
+
+    bool ok() const { return error.empty(); }
+};
+
 struct VideoPreset {
     int width = 0;
     int height = 0;
@@ -77,6 +94,21 @@ struct VideoPublishOptions {
     BackupCodecPolicy backup_codec_policy = BackupCodecPolicy::PreferRegression;
     std::vector<SimulcastCodecSpec> simulcast_codecs;
     bool auto_backup_codec = true;
+};
+
+struct ResolvedVideoPublishPlan {
+    VideoPublishOptions requested;
+    VideoPublishOptions effective;
+    std::string requested_codec;
+    std::string effective_codec;
+    std::string fallback_reason;
+    std::string error;
+
+    bool ok() const { return error.empty(); }
+    bool used_fallback() const {
+        return ok() && requested_codec != "auto" &&
+            requested_codec != effective_codec;
+    }
 };
 
 class Track {
@@ -283,6 +315,13 @@ inline void Track::I420VideoFrameSubscription::reset() noexcept {
 
 class TrackPublication {
 public:
+    enum class SubscriptionError {
+        None,
+        CodecUnsupported,
+        TrackNotFound,
+        Unknown,
+    };
+
     enum class StreamState {
         Active,
         Paused,
@@ -297,6 +336,7 @@ public:
         bool muted = false;
         StreamState stream_state = StreamState::Active;
         bool subscription_allowed = true;
+        SubscriptionError subscription_error = SubscriptionError::None;
     };
 
     TrackPublication(std::shared_ptr<Track> track, const std::string& sid, const std::string& name)
@@ -308,6 +348,7 @@ public:
         name_ = snapshot.name;
         stream_state_ = snapshot.stream_state;
         subscription_allowed_ = snapshot.subscription_allowed;
+        subscription_error_ = snapshot.subscription_error;
     }
     TrackPublication& operator=(const TrackPublication& other) {
         if (this == &other) return *this;
@@ -318,6 +359,7 @@ public:
         name_ = snapshot.name;
         stream_state_ = snapshot.stream_state;
         subscription_allowed_ = snapshot.subscription_allowed;
+        subscription_error_ = snapshot.subscription_error;
         return *this;
     }
     virtual ~TrackPublication() = default;
@@ -364,6 +406,15 @@ public:
         subscription_allowed_ = allowed;
     }
 
+    SubscriptionError subscription_error() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return subscription_error_;
+    }
+    void set_subscription_error(SubscriptionError error) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        subscription_error_ = error;
+    }
+
     StateSnapshot SnapshotState() const {
         StateSnapshot snapshot;
         {
@@ -373,6 +424,7 @@ public:
             snapshot.track = track_;
             snapshot.stream_state = stream_state_;
             snapshot.subscription_allowed = subscription_allowed_;
+            snapshot.subscription_error = subscription_error_;
         }
         if (snapshot.track) {
             snapshot.kind = snapshot.track->kind();
@@ -389,6 +441,7 @@ private:
     std::string name_;
     StreamState stream_state_{StreamState::Active};
     bool subscription_allowed_{true};
+    SubscriptionError subscription_error_{SubscriptionError::None};
 };
 
 } // namespace livekit

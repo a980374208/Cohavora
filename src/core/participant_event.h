@@ -105,6 +105,7 @@ enum class ParticipantEventKind {
     TrackMuted,
     TrackStreamState,
     TrackSubscriptionPermission,
+    TrackSubscriptionError,
     ConnectionQuality,
     ActiveSpeakers,
     DataReceived,

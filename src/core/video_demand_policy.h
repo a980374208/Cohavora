@@ -64,32 +64,40 @@ private:
         FocusOrigin origin = FocusOrigin::None;
     };
 
+    struct SeatCandidate {
+        TrackKey key;
+        TrackSource source = TrackSource::Unknown;
+        const RemotePublicationInfo* publication = nullptr;
+    };
+
     const RemotePublicationInfo* Find(const TrackKey& key) const;
     std::vector<const RemotePublicationInfo*> OrderedVideo() const;
+    std::vector<SeatCandidate> OrderedSeats() const;
     std::vector<TrackKey> SelectedAudio() const;
     std::optional<TrackKey> ResolveSpeakerCamera() const;
     std::optional<TrackKey> ResolveIntentTrack(
         const std::optional<TrackKey>& key,
         std::optional<TrackSource> required_source = std::nullopt) const;
+    std::optional<TrackKey> ResolveIntentSeat(const std::optional<TrackKey>& key) const;
     bool IsAutoShare(const TrackKey& key) const;
     bool IsDemandable(const RemotePublicationInfo& publication) const;
     void AdvanceSpeaker(TimePoint now);
     void RefreshAutoShare();
-    FocusChoice ChooseFocus(const std::vector<const RemotePublicationInfo*>& videos,
+    FocusChoice ChooseFocus(const std::vector<SeatCandidate>& videos,
                             bool allow_auto_share,
                             TimePoint now);
     VideoDemandPlan BuildPlan(TimePoint now);
     void BuildGrid(VideoDemandPlan& plan,
-                   const std::vector<const RemotePublicationInfo*>& videos,
+                   const std::vector<SeatCandidate>& videos,
                    uint32_t page_size,
                    bool use_paging);
     void BuildFocused(VideoDemandPlan& plan,
-                      const std::vector<const RemotePublicationInfo*>& videos,
+                      const std::vector<SeatCandidate>& videos,
                       VideoLayoutMode mode,
                       bool allow_auto_share,
                       TimePoint now);
     void AddSeat(VideoDemandPlan& plan,
-                 const RemotePublicationInfo& publication,
+                 const SeatCandidate& candidate,
                  VideoSeatRole role,
                  SeatExtent extent,
                  FocusOrigin origin = FocusOrigin::None);

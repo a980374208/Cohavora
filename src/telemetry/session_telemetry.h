@@ -247,6 +247,17 @@ enum class LocalMediaKind {
     Video,
 };
 
+struct LocalVideoPublishDescriptor {
+    std::string requested_codec;
+    std::string effective_codec;
+    std::string fallback_reason;
+    std::string source;
+    std::string mode;
+    std::string resolved_profile;
+    std::string resolved_scalability;
+    std::vector<std::string> sender_track_ids;
+};
+
 // Written on the local capture bridge and sampled on the session strand. The
 // first accepted frame also submits one typed event; later frames stay lock-free.
 struct LocalVideoActivityProbe {
@@ -322,6 +333,7 @@ struct Event {
     std::shared_ptr<RenderActivityProbe> render_probe;
     std::shared_ptr<LocalVideoActivityProbe> local_video_probe;
     std::shared_ptr<LocalAudioActivityProbe> local_audio_probe;
+    LocalVideoPublishDescriptor local_video_publish;
     RenderPipelineSample render_pipeline;
 };
 
@@ -733,6 +745,24 @@ struct Snapshot {
     std::string encoder_power_efficiency;
     std::string outbound_video_layers;
 
+    Availability video_publish_plan_availability = Availability::Unknown;
+    std::string video_publish_plan_reason = "no_local_video_publication";
+    std::string video_publish_plan_measurement_point =
+        "resolved_publish_plan_and_outbound_rtp_stats";
+    std::string video_publish_requested_codecs;
+    std::string video_publish_effective_codecs;
+    std::string video_publish_observed_codecs;
+    std::string video_publish_fallback_reasons = "none";
+    std::string video_publish_sources;
+    std::string video_publish_direction;
+    std::string video_publish_generations;
+    std::string video_publish_modes;
+    std::string video_publish_resolved_profiles;
+    std::string video_publish_observed_profiles = "pending";
+    std::string video_publish_encoder_implementations;
+    std::string video_publish_resolved_scalability;
+    std::string video_publish_observed_scalability;
+
     Availability video_processing_availability = Availability::Unknown;
     std::string video_processing_reason = "not_sampled";
     std::string video_processing_measurement_point =
@@ -1118,7 +1148,8 @@ public:
         bool expected_send,
         std::shared_ptr<LocalVideoActivityProbe> video_probe = {},
         Clock::time_point committed_at = Clock::now(),
-        std::shared_ptr<LocalAudioActivityProbe> audio_probe = {});
+        std::shared_ptr<LocalAudioActivityProbe> audio_probe = {},
+        LocalVideoPublishDescriptor video_publish = {});
     bool EndLocalPublication(
         std::string series_key,
         Clock::time_point source_time = Clock::now());
@@ -1304,6 +1335,7 @@ private:
         Clock::time_point first_sent_at{};
         std::shared_ptr<LocalVideoActivityProbe> video_probe;
         std::shared_ptr<LocalAudioActivityProbe> audio_probe;
+        LocalVideoPublishDescriptor video_publish;
         bool device_stall_active = false;
         Clock::time_point device_stall_started_at{};
         std::chrono::nanoseconds device_stall_accumulated{0};
@@ -1354,6 +1386,7 @@ private:
     void ReconcileAudioQualityExpectationOnStrand(bool reset_window);
     void UpdateRenderAvailabilityOnStrand(Clock::time_point now);
     void UpdateLocalPublishAvailabilityOnStrand(Clock::time_point now);
+    void UpdateVideoPublishPlanOnStrand();
     void UpdateLocalPublishStatsOnStrand(
         const RoomStatsReport& report,
         Clock::time_point received_at);
