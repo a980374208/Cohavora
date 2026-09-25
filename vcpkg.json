@@ -4,6 +4,7 @@
   "builtin-baseline": "0d61518465fb561a1350ded112bc80964b097c04",
   "dependencies": [
     "asio",
+    "libwebp",
     "openssl",
     "protobuf",
     "spdlog",

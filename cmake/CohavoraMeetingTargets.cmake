@@ -32,7 +32,6 @@ target_include_directories(cohavora_meeting_runtime PUBLIC
     ${PROJECT_SOURCE_DIR}
     ${GEN_DIR})
 target_link_libraries(cohavora_meeting_runtime PUBLIC
-    cohavora_dual_tls_link_compat
     cohavora_core
     cohavora_meeting_network
     cohavora_whiteboard_model

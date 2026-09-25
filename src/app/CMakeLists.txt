@@ -39,7 +39,6 @@ target_include_directories(cohavora_app BEFORE PRIVATE
     ${WEBRTC_ROOT}/include/third_party/libyuv/include)
 
 target_link_libraries(cohavora_app PRIVATE
-    cohavora_dual_tls_link_compat
     cohavora::desktop_ui_runtime
     cohavora_meeting_widgets
     cohavora_video_canvas_ui

@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import zipfile
 from contextlib import contextmanager
@@ -28,27 +29,91 @@ deps_dir = root_dir / "deps"
 cache_keys_dir = root_dir / ".cache_keys"
 cache_keys_dir.mkdir(parents=True, exist_ok=True)
 
-WEBRTC_RELEASE_URL = (
-    "https://github.com/livekit/rust-sdks/releases/download/"
-    "webrtc-51ef663/webrtc-win-x64-release.zip"
+WEBRTC_PACKAGE_METADATA_PATH = script_dir / "webrtc-package.json"
+
+
+def load_webrtc_package_metadata(path: Path):
+    try:
+        metadata = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exception:
+        raise ValueError(
+            f"Unable to read WebRTC package metadata {path}: {exception}"
+        ) from exception
+    required_keys = {
+        "schema_version",
+        "package_id",
+        "archive",
+        "download_url",
+        "archive_prefix",
+        "size",
+        "sha256",
+        "file_count",
+        "manifest_sha256",
+        "required_files",
+        "required_files_sha256",
+        "boringssl_prefix",
+        "source",
+        "configurations",
+    }
+    missing = sorted(required_keys - metadata.keys())
+    if missing:
+        raise ValueError(
+            f"WebRTC package metadata is missing: {', '.join(missing)}")
+    if metadata["schema_version"] != 1:
+        raise ValueError("Unsupported WebRTC package metadata schema")
+    if (not isinstance(metadata["archive"], str)
+            or Path(metadata["archive"]).name != metadata["archive"]
+            or not metadata["archive"].endswith(".zip")):
+        raise ValueError("WebRTC package metadata has an invalid archive name")
+    if (not isinstance(metadata["archive_prefix"], str)
+            or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*",
+                                metadata["archive_prefix"])):
+        raise ValueError("WebRTC package metadata has an invalid archive prefix")
+    download_url = metadata["download_url"]
+    if not isinstance(download_url, str):
+        raise ValueError("WebRTC package metadata has an invalid download URL")
+    parsed_url = urllib.parse.urlparse(download_url)
+    if (parsed_url.scheme != "https"
+            or parsed_url.netloc != "github.com"
+            or not parsed_url.path.endswith("/" + metadata["archive"])):
+        raise ValueError("WebRTC package metadata has an invalid download URL")
+    for field in ("sha256", "manifest_sha256", "required_files_sha256"):
+        if (not isinstance(metadata[field], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", metadata[field])):
+            raise ValueError(
+                f"WebRTC package metadata has an invalid {field}")
+    if not isinstance(metadata["size"], int) or metadata["size"] <= 0:
+        raise ValueError("WebRTC package metadata has an invalid size")
+    if not isinstance(metadata["file_count"], int) or metadata["file_count"] <= 0:
+        raise ValueError("WebRTC package metadata has an invalid file count")
+    if metadata["boringssl_prefix"] != "cohavora_bssl":
+        raise ValueError("WebRTC package metadata has an unexpected symbol prefix")
+    if set(metadata["configurations"]) != {"Debug", "Release"}:
+        raise ValueError("WebRTC package must contain Debug and Release configurations")
+    required_files = metadata["required_files"]
+    if (not isinstance(required_files, list) or not required_files
+            or len(required_files) != len(set(required_files))):
+        raise ValueError("WebRTC package metadata has invalid required files")
+    for relative in required_files:
+        candidate = Path(relative)
+        if (not isinstance(relative, str) or candidate.is_absolute()
+                or ".." in candidate.parts or "\\" in relative):
+            raise ValueError(
+                f"WebRTC package metadata has an unsafe path: {relative}")
+    return metadata
+
+
+WEBRTC_PACKAGE_METADATA = load_webrtc_package_metadata(
+    WEBRTC_PACKAGE_METADATA_PATH)
+WEBRTC_PACKAGE_ARCHIVE = WEBRTC_PACKAGE_METADATA["archive"]
+WEBRTC_PACKAGE_URL = WEBRTC_PACKAGE_METADATA["download_url"]
+WEBRTC_PACKAGE_SHA256 = WEBRTC_PACKAGE_METADATA["sha256"]
+WEBRTC_PACKAGE_SIZE = WEBRTC_PACKAGE_METADATA["size"]
+WEBRTC_PACKAGE_CACHE_ID = (
+    f"v4:{WEBRTC_PACKAGE_METADATA['package_id']}:{WEBRTC_PACKAGE_SHA256}"
 )
-WEBRTC_RELEASE_SHA256 = (
-    "0a56a5c91b3b7b4222082b8a09388d16a802cde22d67295beb24c55700755b30"
-)
-WEBRTC_RELEASE_ARCHIVE = (
-    f"webrtc-win-x64-release-{WEBRTC_RELEASE_SHA256[:12]}.zip"
-)
-WEBRTC_RELEASE_CACHE_ID = (
-    f"v3:{WEBRTC_RELEASE_URL}:{WEBRTC_RELEASE_SHA256}"
-)
-WEBRTC_REQUIRED_FILES = (
-    "include/api/peer_connection_interface.h",
-    "include/api/video/i420_buffer.h",
-    "include/third_party/libyuv/include/libyuv.h",
-    "include/third_party/boringssl/src/include/openssl/ssl.h",
-    "lib/Release/webrtc.lib",
-    "lib/Debug/webrtc.lib",
-)
+WEBRTC_REQUIRED_FILES = tuple(WEBRTC_PACKAGE_METADATA["required_files"])
+_validated_webrtc_archives = set()
 
 
 def load_required_manifest(path: Path):
@@ -346,72 +411,114 @@ def download_libraries_archive() -> Path:
         f"Failed to download and verify {LIBRARIES_ARCHIVE_URL}: {last_error}")
 
 
-def validate_debug_webrtc_source(path: Path):
-    if path.is_dir():
-        find_webrtc_library(path)
+def validate_webrtc_archive(path: Path):
+    stat = path.stat()
+    identity = (str(path.resolve()), stat.st_size, stat.st_mtime_ns)
+    if identity in _validated_webrtc_archives:
         return
-    if path.suffix.lower() == ".lib":
-        return
-    if path.suffix.lower() != ".zip":
+    if stat.st_size != WEBRTC_PACKAGE_SIZE:
         raise ValueError(
-            "Debug WebRTC source must be a directory, .lib, or ZIP archive: "
-            f"{path}"
-        )
-    validate_zip(path)
-    if not any(
-        member.rsplit("/", 1)[-1] == "webrtc.lib"
-        for member in normalized_zip_files(path)
-    ):
-        raise ValueError(f"Debug WebRTC archive contains no webrtc.lib: {path}")
+            f"WebRTC package size mismatch for {path}: expected "
+            f"{WEBRTC_PACKAGE_SIZE}, got {stat.st_size}")
+    validate_zip(path, WEBRTC_PACKAGE_SHA256)
+    archive_files = normalized_zip_files(path)
+    if len(archive_files) != WEBRTC_PACKAGE_METADATA["file_count"]:
+        raise ValueError(
+            f"WebRTC package file count mismatch for {path}: expected "
+            f"{WEBRTC_PACKAGE_METADATA['file_count']}, got {len(archive_files)}")
+    prefix = WEBRTC_PACKAGE_METADATA["archive_prefix"].lower() + "/"
+    required = {
+        prefix + relative.lower() for relative in WEBRTC_REQUIRED_FILES
+    }
+    manifest_name = prefix + "metadata/package.json"
+    missing = sorted(required - archive_files)
+    if manifest_name not in archive_files:
+        missing.append(manifest_name)
+    if missing:
+        raise ValueError(
+            "WebRTC package is missing required artifacts:\n  - "
+            + "\n  - ".join(missing))
+    with zipfile.ZipFile(path, "r") as archive:
+        manifest_bytes = archive.read(
+            WEBRTC_PACKAGE_METADATA["archive_prefix"] + "/metadata/package.json")
+    manifest_hash = hashlib.sha256(manifest_bytes).hexdigest()
+    if manifest_hash != WEBRTC_PACKAGE_METADATA["manifest_sha256"]:
+        raise ValueError("WebRTC package manifest hash does not match metadata")
+    try:
+        manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exception:
+        raise ValueError("WebRTC package manifest is invalid") from exception
+    for field in ("package_id", "archive_prefix", "boringssl_prefix",
+                  "source", "configurations", "required_files",
+                  "required_files_sha256"):
+        if manifest.get(field) != WEBRTC_PACKAGE_METADATA[field]:
+            raise ValueError(
+                f"WebRTC package manifest disagrees with metadata: {field}")
+    _validated_webrtc_archives.add(identity)
 
 
-def download_release_archive() -> Path:
-    archive_path = cache_keys_dir / WEBRTC_RELEASE_ARCHIVE
-    if archive_path.exists():
+def cache_webrtc_archive(source_path: Path) -> Path:
+    validate_webrtc_archive(source_path)
+    archive_path = cache_keys_dir / WEBRTC_PACKAGE_ARCHIVE
+    if source_path.resolve() == archive_path.resolve():
+        return archive_path
+    cache_keys_dir.mkdir(parents=True, exist_ok=True)
+    part_path = cache_keys_dir / f".{WEBRTC_PACKAGE_ARCHIVE}.{os.getpid()}.part"
+    part_path.unlink(missing_ok=True)
+    try:
+        shutil.copy2(source_path, part_path)
+        validate_webrtc_archive(part_path)
+        os.replace(part_path, archive_path)
+    finally:
+        part_path.unlink(missing_ok=True)
+    return archive_path
+
+
+def download_webrtc_archive() -> Path:
+    archive_path = cache_keys_dir / WEBRTC_PACKAGE_ARCHIVE
+    if archive_path.is_file():
         try:
-            validate_zip(archive_path, WEBRTC_RELEASE_SHA256)
+            validate_webrtc_archive(archive_path)
             return archive_path
         except (OSError, ValueError, zipfile.BadZipFile):
             archive_path.unlink(missing_ok=True)
-            print("[CACHE] Removed an invalid cached WebRTC archive.")
-
-    legacy_archive = cache_keys_dir / "webrtc-windows-x64.zip"
-    if legacy_archive.is_file():
-        try:
-            validate_zip(legacy_archive, WEBRTC_RELEASE_SHA256)
-            shutil.copy2(legacy_archive, archive_path)
-            return archive_path
-        except (OSError, ValueError, zipfile.BadZipFile):
-            print("[CACHE] Ignoring the legacy WebRTC archive because validation failed.")
+            print("[CACHE] Removed an invalid WebRTC archive.")
 
     last_error = None
     for attempt in range(1, 4):
         part_path = cache_keys_dir / (
-            f".{WEBRTC_RELEASE_ARCHIVE}.{os.getpid()}.{attempt}.part"
+            f".{WEBRTC_PACKAGE_ARCHIVE}.{os.getpid()}.{attempt}.part"
         )
         part_path.unlink(missing_ok=True)
         print(
-            f"[DOWNLOAD] Downloading {WEBRTC_RELEASE_URL} -> {archive_path} "
-            f"(attempt {attempt}/3)..."
+            f"[DOWNLOAD] Downloading {WEBRTC_PACKAGE_URL} -> "
+            f"{archive_path} (attempt {attempt}/3)..."
         )
         try:
             request = urllib.request.Request(
-                WEBRTC_RELEASE_URL,
+                WEBRTC_PACKAGE_URL,
                 headers={"User-Agent": "Cohavora-dependency-preparer/1"},
             )
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with urllib.request.urlopen(request, timeout=60) as response:
                 with part_path.open("wb") as destination:
                     shutil.copyfileobj(response, destination, 1024 * 1024)
-            validate_zip(part_path, WEBRTC_RELEASE_SHA256)
+            validate_webrtc_archive(part_path)
             os.replace(part_path, archive_path)
             return archive_path
-        except (OSError, ValueError, urllib.error.URLError, zipfile.BadZipFile) as exc:
-            last_error = exc
+        except (OSError, ValueError, urllib.error.URLError,
+                zipfile.BadZipFile) as exception:
+            last_error = exception
             part_path.unlink(missing_ok=True)
             if attempt < 3:
                 time.sleep(attempt)
 
-    error(f"Failed to download and verify {WEBRTC_RELEASE_URL}: {last_error}")
+    error(f"Failed to download and verify {WEBRTC_PACKAGE_URL}: {last_error}")
+
+
+def resolve_webrtc_archive(package_path: Path = None) -> Path:
+    if package_path:
+        return cache_webrtc_archive(package_path)
+    return download_webrtc_archive()
 
 
 def safe_extract_zip(archive_path: Path, extract_to: Path):
@@ -450,98 +557,35 @@ def atomic_replace_directory(staged_dir: Path, target_dir: Path):
             shutil.rmtree(backup_dir)
 
 
-def find_webrtc_library(source_dir: Path) -> Path:
-    candidates = sorted(source_dir.glob("**/webrtc.lib"))
-    if not candidates:
-        error(f"No webrtc.lib found in {source_dir}")
-    return candidates[0]
-
-
 def find_webrtc_payload(extract_root: Path) -> Path:
-    candidates = (extract_root, extract_root / "win-x64-release")
-    for candidate in candidates:
-        if (candidate / "include/api/peer_connection_interface.h").is_file():
-            return candidate
-    for header in extract_root.glob("**/include/api/peer_connection_interface.h"):
-        return header.parents[2]
-    error(f"WebRTC archive has no recognizable SDK root: {extract_root}")
+    candidate = extract_root / WEBRTC_PACKAGE_METADATA["archive_prefix"]
+    if (candidate / "metadata/package.json").is_file():
+        return candidate
+    raise ValueError(f"WebRTC package has no expected SDK root: {extract_root}")
 
 
-def debug_source_fingerprint(source_path: Path) -> str:
-    if source_path.is_dir():
-        return compute_file_hash(find_webrtc_library(source_path))
-    if source_path.is_file():
-        return compute_file_hash(source_path)
-    error(f"Debug WebRTC source does not exist: {source_path}")
+def webrtc_install_is_valid(target_dir: Path) -> bool:
+    if missing_required_files(target_dir, WEBRTC_REQUIRED_FILES):
+        return False
+    return (
+        required_files_fingerprint(target_dir, WEBRTC_REQUIRED_FILES)
+        == WEBRTC_PACKAGE_METADATA["required_files_sha256"]
+    )
 
 
-def install_debug_webrtc(source_path: Path, target_lib: Path):
-    target_lib.parent.mkdir(parents=True, exist_ok=True)
-    if source_path.is_dir():
-        shutil.copy2(find_webrtc_library(source_path), target_lib)
-        return
-    if source_path.suffix.lower() == ".lib":
-        shutil.copy2(source_path, target_lib)
-        return
-    validate_zip(source_path)
-    with tempfile.TemporaryDirectory(
-        prefix="webrtc-debug-", dir=cache_keys_dir
-    ) as temp_dir:
-        safe_extract_zip(source_path, Path(temp_dir))
-        shutil.copy2(find_webrtc_library(Path(temp_dir)), target_lib)
-
-
-def normalize_webrtc_layout(candidate: Path):
-    release_dir = candidate / "lib/Release"
-    debug_dir = candidate / "lib/Debug"
-    release_dir.mkdir(parents=True, exist_ok=True)
-    debug_dir.mkdir(parents=True, exist_ok=True)
-    root_lib = candidate / "lib/webrtc.lib"
-    release_lib = release_dir / "webrtc.lib"
-    if root_lib.is_file():
-        shutil.copy2(root_lib, release_lib)
-    if not release_lib.is_file():
-        error(f"WebRTC release library is missing from staged SDK: {candidate}")
-
-
-def prepare_webrtc(debug_archive_path: Path = None):
+def prepare_webrtc(package_archive_path: Path = None):
     stage_name = "webrtc"
     target_dir = deps_dir / "webrtc"
-    release_key = compute_string_hash(WEBRTC_RELEASE_CACHE_ID)
-    debug_key = None
-    if debug_archive_path:
-        debug_key = compute_string_hash(
-            f"v3:{debug_source_fingerprint(debug_archive_path)}"
-        )
-
-    missing = missing_required_files(target_dir, WEBRTC_REQUIRED_FILES)
-    release_needs_install = (
-        check_cache_key(stage_name, release_key) != "Good" or bool(missing)
-    )
-    debug_needs_install = bool(
-        debug_archive_path
-        and (
-            check_cache_key("webrtc-debug", debug_key) != "Good"
-            or not (target_dir / "lib/Debug/webrtc.lib").is_file()
-        )
-    )
-    if not release_needs_install and not debug_needs_install:
-        print("[STAGE: WebRTC] OK (verified Release and Debug SDK artifacts)")
+    expected_key = compute_string_hash(WEBRTC_PACKAGE_CACHE_ID)
+    if (check_cache_key(stage_name, expected_key) == "Good"
+            and webrtc_install_is_valid(target_dir)):
+        print("[STAGE: WebRTC] OK (verified dual-config prefixed SDK)")
         return target_dir
 
+    archive_path = resolve_webrtc_archive(package_archive_path)
     with stage_lock(stage_name):
-        missing = missing_required_files(target_dir, WEBRTC_REQUIRED_FILES)
-        release_needs_install = (
-            check_cache_key(stage_name, release_key) != "Good" or bool(missing)
-        )
-        debug_needs_install = bool(
-            debug_archive_path
-            and (
-                check_cache_key("webrtc-debug", debug_key) != "Good"
-                or not (target_dir / "lib/Debug/webrtc.lib").is_file()
-            )
-        )
-        if not release_needs_install and not debug_needs_install:
+        if (check_cache_key(stage_name, expected_key) == "Good"
+                and webrtc_install_is_valid(target_dir)):
             return target_dir
 
         target_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -550,41 +594,22 @@ def prepare_webrtc(debug_archive_path: Path = None):
         ) as temp_dir:
             temp_root = Path(temp_dir)
             candidate = temp_root / "candidate"
-            if release_needs_install:
-                archive_path = download_release_archive()
-                extracted = temp_root / "extracted"
-                print(f"[EXTRACT] Extracting {archive_path.name} into staging...")
-                safe_extract_zip(archive_path, extracted)
-                shutil.copytree(find_webrtc_payload(extracted), candidate)
-            else:
-                shutil.copytree(target_dir, candidate)
-
-            normalize_webrtc_layout(candidate)
-            debug_target = candidate / "lib/Debug/webrtc.lib"
-            if debug_archive_path:
-                print(
-                    f"[INSTALL] Staging Debug WebRTC library from "
-                    f"{debug_archive_path}..."
-                )
-                install_debug_webrtc(debug_archive_path, debug_target)
-            elif (target_dir / "lib/Debug/webrtc.lib").is_file():
-                # A release refresh must not erase a user-provided Debug build.
-                shutil.copy2(target_dir / "lib/Debug/webrtc.lib", debug_target)
-            elif not debug_target.is_file():
-                shutil.copy2(candidate / "lib/Release/webrtc.lib", debug_target)
-                print(" -> Initialized Debug WebRTC with the Release ABI binary")
-
-            missing = missing_required_files(candidate, WEBRTC_REQUIRED_FILES)
-            if missing:
-                error(format_missing(candidate, missing))
+            extracted = temp_root / "extracted"
+            print(f"[EXTRACT] Extracting {archive_path.name} into staging...")
+            safe_extract_zip(archive_path, extracted)
+            shutil.copytree(find_webrtc_payload(extracted), candidate)
+            if not webrtc_install_is_valid(candidate):
+                raise ValueError(
+                    "Staged WebRTC package content fingerprint does not match "
+                    "the pinned dual-config package")
 
             atomic_replace_directory(candidate, target_dir)
 
-        write_cache_key(stage_name, release_key)
-        if debug_key:
-            write_cache_key("webrtc-debug", debug_key)
+        write_cache_key(stage_name, expected_key)
 
-    print(f" -> WebRTC C++ deployed transactionally and verified in {target_dir}")
+    print(
+        f" -> Dual-config prefixed WebRTC deployed transactionally and verified "
+        f"in {target_dir}")
     return target_dir
 
 
@@ -620,7 +645,7 @@ def find_libraries_root(source_root: Path) -> Path:
 def preflight_inputs(
         qt_archive_path: Path = None,
         libraries_source: Path = None,
-        debug_archive_path: Path = None):
+        webrtc_archive_path: Path = None):
     target_libraries = deps_dir / "Libraries/win64"
     if qt_archive_path:
         validate_libraries_archive(qt_archive_path)
@@ -634,8 +659,10 @@ def preflight_inputs(
         # prepare_libraries(). Preflight remains side-effect free.
         pass
 
-    if debug_archive_path:
-        validate_debug_webrtc_source(debug_archive_path)
+    if webrtc_archive_path:
+        validate_webrtc_archive(webrtc_archive_path)
+    elif not webrtc_install_is_valid(deps_dir / "webrtc"):
+        resolve_webrtc_archive()
 
 
 def prepare_libraries(qt_archive_path: Path = None, libraries_source: Path = None):
@@ -727,9 +754,9 @@ def main():
         help="Path to a complete external Libraries directory",
     )
     parser.add_argument(
-        "--webrtc-debug-archive",
+        "--webrtc-archive",
         type=str,
-        help="Path to a custom Debug webrtc ZIP, directory, or .lib",
+        help=f"Path to pinned dual-config {WEBRTC_PACKAGE_ARCHIVE}",
     )
     args = parser.parse_args()
 
@@ -751,22 +778,22 @@ def main():
     libraries_source = (
         Path(args.libraries_src).resolve() if args.libraries_src else None
     )
-    webrtc_debug = (
-        Path(args.webrtc_debug_archive).resolve()
-        if args.webrtc_debug_archive
+    webrtc_archive = (
+        Path(args.webrtc_archive).resolve()
+        if args.webrtc_archive
         else None
     )
     if qt_archive and not qt_archive.is_file():
         error(f"Qt archive does not exist: {qt_archive}")
     if libraries_source and not libraries_source.is_dir():
         error(f"Libraries source directory does not exist: {libraries_source}")
-    if webrtc_debug and not webrtc_debug.exists():
-        error(f"Debug WebRTC source does not exist: {webrtc_debug}")
+    if webrtc_archive and not webrtc_archive.is_file():
+        error(f"WebRTC package does not exist: {webrtc_archive}")
 
-    preflight_inputs(qt_archive, libraries_source, webrtc_debug)
+    preflight_inputs(qt_archive, libraries_source, webrtc_archive)
     deps_dir.mkdir(parents=True, exist_ok=True)
 
-    prepare_webrtc(webrtc_debug)
+    prepare_webrtc(webrtc_archive)
     prepare_libraries(qt_archive, libraries_source)
 
     print("\n==================================================")

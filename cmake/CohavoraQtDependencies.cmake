@@ -2,21 +2,29 @@ include_guard(GLOBAL)
 
 set(COHAVORA_QT_VERSION "5.15.18")
 
-function(cohavora_import_release_archive target location)
+function(cohavora_import_configured_archive target release_location debug_location)
     if(TARGET ${target})
         return()
     endif()
-    if(NOT EXISTS "${location}")
-        message(FATAL_ERROR
-            "The prebuilt dependency for ${target} is missing: ${location}")
+    foreach(location IN ITEMS "${release_location}" "${debug_location}")
+        if(NOT EXISTS "${location}")
+            message(FATAL_ERROR
+                "The prebuilt dependency for ${target} is missing: ${location}")
+        endif()
+    endforeach()
+
+    if(COHAVORA_DEBUG_DEPENDENCY_ABI STREQUAL "Debug")
+        set(selected_debug_location "${debug_location}")
+    else()
+        set(selected_debug_location "${release_location}")
     endif()
 
     add_library(${target} STATIC IMPORTED GLOBAL)
     set_target_properties(${target} PROPERTIES
-        IMPORTED_CONFIGURATIONS Release
-        IMPORTED_LOCATION "${location}"
-        IMPORTED_LOCATION_RELEASE "${location}"
-        MAP_IMPORTED_CONFIG_DEBUG Release
+        IMPORTED_CONFIGURATIONS "Debug;Release"
+        IMPORTED_LOCATION "${release_location}"
+        IMPORTED_LOCATION_DEBUG "${selected_debug_location}"
+        IMPORTED_LOCATION_RELEASE "${release_location}"
         MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release
         MAP_IMPORTED_CONFIG_MINSIZEREL Release)
 endfunction()
@@ -34,27 +42,63 @@ function(cohavora_copy_qt_compile_usage target qt_target)
     endforeach()
 endfunction()
 
-function(cohavora_map_qt_target_to_release target)
-    set_property(TARGET ${target} PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
-    set_property(TARGET ${target} PROPERTY MAP_IMPORTED_CONFIG_RELWITHDEBINFO Release)
-    set_property(TARGET ${target} PROPERTY MAP_IMPORTED_CONFIG_MINSIZEREL Release)
-
-    foreach(property IN ITEMS LOCATION IMPLIB SONAME)
-        get_target_property(release_value ${target} IMPORTED_${property}_RELEASE)
-        if(release_value AND NOT release_value MATCHES "-NOTFOUND$")
-            set_property(TARGET ${target} PROPERTY
-                IMPORTED_${property}_DEBUG "${release_value}")
+function(cohavora_sanitize_qt_link_archives target qt_root)
+    foreach(property IN ITEMS
+            INTERFACE_LINK_LIBRARIES
+            IMPORTED_LINK_INTERFACE_LIBRARIES_DEBUG
+            IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE)
+        get_target_property(value ${target} ${property})
+        if(NOT value OR value MATCHES "-NOTFOUND$")
+            continue()
         endif()
+        string(REPLACE "\\" "/" value "${value}")
+        string(REGEX REPLACE "/+" "/" value "${value}")
+        foreach(separator IN ITEMS "/lib/" "/lib//")
+            string(REPLACE "${qt_root}${separator}libEGL.lib"
+                "cohavora_dep_angle" value "${value}")
+            string(REPLACE "${qt_root}${separator}libGLESv2.lib"
+                "cohavora_dep_angle" value "${value}")
+        endforeach()
+        string(REGEX REPLACE
+            "[A-Za-z]:/+[^;>]*/libwebp/out/[^/;>]+/x64/lib/(lib)?webp\\.lib"
+            "WebP::webp" value "${value}")
+        string(REGEX REPLACE
+            "[A-Za-z]:/+[^;>]*/libwebp/out/[^/;>]+/x64/lib/(lib)?webpdemux\\.lib"
+            "WebP::webpdemux" value "${value}")
+        string(REGEX REPLACE
+            "[A-Za-z]:/+[^;>]*/libwebp/out/[^/;>]+/x64/lib/(lib)?webpmux\\.lib"
+            "WebP::libwebpmux" value "${value}")
+        string(REGEX REPLACE
+            "[A-Za-z]:/+[^;>]*/mozjpeg/(Debug|Release)/jpeg-static\\.lib"
+            "cohavora_dep_mozjpeg" value "${value}")
+        string(REGEX REPLACE
+            "[A-Za-z]:/+[^;>]*/openssl3/(out|out\\.dbg)/libssl\\.lib"
+            "OpenSSL::SSL" value "${value}")
+        string(REGEX REPLACE
+            "[A-Za-z]:/+[^;>]*/openssl3/(out|out\\.dbg)/libcrypto\\.lib"
+            "OpenSSL::Crypto" value "${value}")
+        set_property(TARGET ${target} PROPERTY ${property} "${value}")
     endforeach()
 
-    # Qt 5's static package embeds explicit CONFIG:Debug expressions in its
-    # interfaces. The project deliberately consumes the Release ABI in every
-    # configuration, so use the package's own Release dependency closure.
-    get_target_property(release_dependencies ${target}
-        IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE)
-    if(release_dependencies AND NOT release_dependencies MATCHES "-NOTFOUND$")
-        set_property(TARGET ${target} PROPERTY
-            INTERFACE_LINK_LIBRARIES "${release_dependencies}")
+    if(COHAVORA_DEBUG_DEPENDENCY_ABI STREQUAL "Release")
+        set_property(TARGET ${target} PROPERTY MAP_IMPORTED_CONFIG_DEBUG Release)
+        foreach(property IN ITEMS LOCATION IMPLIB SONAME)
+            get_target_property(release_value ${target} IMPORTED_${property}_RELEASE)
+            if(release_value AND NOT release_value MATCHES "-NOTFOUND$")
+                set_property(TARGET ${target} PROPERTY
+                    IMPORTED_${property}_DEBUG "${release_value}")
+            endif()
+        endforeach()
+
+        # Qt 5's static package embeds explicit CONFIG:Debug expressions in
+        # INTERFACE_LINK_LIBRARIES. Use its sanitized Release closure when the
+        # project Debug configuration intentionally selects Release dependencies.
+        get_target_property(release_dependencies ${target}
+            IMPORTED_LINK_INTERFACE_LIBRARIES_RELEASE)
+        if(release_dependencies AND NOT release_dependencies MATCHES "-NOTFOUND$")
+            set_property(TARGET ${target} PROPERTY
+                INTERFACE_LINK_LIBRARIES "${release_dependencies}")
+        endif()
     endif()
 endfunction()
 
@@ -74,7 +118,15 @@ macro(cohavora_configure_qt_dependencies)
             "Qt ${COHAVORA_QT_VERSION} package metadata is missing: ${qt_package_dir}")
     endif()
 
-    get_property(imported_before DIRECTORY PROPERTY IMPORTED_TARGETS)
+    cohavora_import_configured_archive(cohavora_dep_angle
+        "${qt_LIBRARIES_ROOT}/tg_angle/out/Release/tg_angle.lib"
+        "${qt_LIBRARIES_ROOT}/tg_angle/out/Debug/tg_angle.lib")
+    cohavora_import_configured_archive(cohavora_dep_zlib
+        "${qt_LIBRARIES_ROOT}/zlib/Release/zlibstatic.lib"
+        "${qt_LIBRARIES_ROOT}/zlib/Debug/zlibstaticd.lib")
+    cohavora_import_configured_archive(cohavora_dep_mozjpeg
+        "${qt_LIBRARIES_ROOT}/mozjpeg/release/jpeg-static.lib"
+        "${qt_LIBRARIES_ROOT}/mozjpeg/Debug/jpeg-static.lib")
     find_package(Qt5 ${COHAVORA_QT_VERSION} EXACT CONFIG REQUIRED
         COMPONENTS Core Gui Widgets Svg Network
         PATHS "${qt_package_dir}"
@@ -83,11 +135,12 @@ macro(cohavora_configure_qt_dependencies)
         message(FATAL_ERROR
             "Expected Qt ${COHAVORA_QT_VERSION}, found ${Qt5Core_VERSION} at ${Qt5_DIR}")
     endif()
-    get_property(imported_after DIRECTORY PROPERTY IMPORTED_TARGETS)
-    list(REMOVE_ITEM imported_after ${imported_before})
-    foreach(imported_target IN LISTS imported_after)
+    get_property(imported_targets DIRECTORY PROPERTY IMPORTED_TARGETS)
+    foreach(imported_target IN LISTS imported_targets)
         if(imported_target MATCHES "^Qt5::")
-            cohavora_map_qt_target_to_release(${imported_target})
+            # This static Qt package's .prl files retain build-machine paths and
+            # Release-only filenames. Redirect them to configured dependencies.
+            cohavora_sanitize_qt_link_archives(${imported_target} "${qt_QT_ROOT}")
         endif()
     endforeach()
 
@@ -101,67 +154,78 @@ macro(cohavora_configure_qt_dependencies)
         endif()
     endforeach()
 
-    cohavora_import_release_archive(cohavora_dep_angle
-        "${qt_LIBRARIES_ROOT}/tg_angle/out/Release/tg_angle.lib")
-    cohavora_import_release_archive(cohavora_dep_zlib
-        "${qt_LIBRARIES_ROOT}/zlib/Release/zlibstatic.lib")
-    cohavora_import_release_archive(cohavora_dep_mozjpeg
-        "${qt_LIBRARIES_ROOT}/mozjpeg/release/jpeg-static.lib")
-
-    cohavora_import_release_archive(cohavora_dep_qt_core
-        "${qt_QT_ROOT}/lib/Qt5Core.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_gui
-        "${qt_QT_ROOT}/lib/Qt5Gui.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_widgets
-        "${qt_QT_ROOT}/lib/Qt5Widgets.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_network
-        "${qt_QT_ROOT}/lib/Qt5Network.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_svg
-        "${qt_QT_ROOT}/lib/Qt5Svg.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_font_database_support
-        "${qt_QT_ROOT}/lib/Qt5FontDatabaseSupport.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_event_dispatcher_support
-        "${qt_QT_ROOT}/lib/Qt5EventDispatcherSupport.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_theme_support
-        "${qt_QT_ROOT}/lib/Qt5ThemeSupport.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_windows_ui_automation_support
-        "${qt_QT_ROOT}/lib/Qt5WindowsUIAutomationSupport.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_accessibility_support
-        "${qt_QT_ROOT}/lib/Qt5AccessibilitySupport.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_device_discovery_support
-        "${qt_QT_ROOT}/lib/Qt5DeviceDiscoverySupport.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_edid_support
-        "${qt_QT_ROOT}/lib/Qt5EdidSupport.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_freetype
-        "${qt_QT_ROOT}/lib/qtfreetype.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_harfbuzz
-        "${qt_QT_ROOT}/lib/qtharfbuzz.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_png
-        "${qt_QT_ROOT}/lib/qtlibpng.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_pcre2
-        "${qt_QT_ROOT}/lib/qtpcre2.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_windows_plugin
-        "${qt_QT_ROOT}/plugins/platforms/qwindows.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_windows_vista_style_plugin
-        "${qt_QT_ROOT}/plugins/styles/qwindowsvistastyle.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_svg_plugin
-        "${qt_QT_ROOT}/plugins/imageformats/qsvg.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_ico_plugin
-        "${qt_QT_ROOT}/plugins/imageformats/qico.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_jpeg_plugin
-        "${qt_QT_ROOT}/plugins/imageformats/qjpeg.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_gif_plugin
-        "${qt_QT_ROOT}/plugins/imageformats/qgif.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_tga_plugin
-        "${qt_QT_ROOT}/plugins/imageformats/qtga.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_tiff_plugin
-        "${qt_QT_ROOT}/plugins/imageformats/qtiff.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_wbmp_plugin
-        "${qt_QT_ROOT}/plugins/imageformats/qwbmp.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_webp_plugin
-        "${qt_QT_ROOT}/plugins/imageformats/qwebp.lib")
-    cohavora_import_release_archive(cohavora_dep_qt_svg_icon_plugin
-        "${qt_QT_ROOT}/plugins/iconengines/qsvgicon.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_core
+        "${qt_QT_ROOT}/lib/Qt5Core.lib" "${qt_QT_ROOT}/lib/Qt5Cored.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_gui
+        "${qt_QT_ROOT}/lib/Qt5Gui.lib" "${qt_QT_ROOT}/lib/Qt5Guid.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_widgets
+        "${qt_QT_ROOT}/lib/Qt5Widgets.lib" "${qt_QT_ROOT}/lib/Qt5Widgetsd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_network
+        "${qt_QT_ROOT}/lib/Qt5Network.lib" "${qt_QT_ROOT}/lib/Qt5Networkd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_svg
+        "${qt_QT_ROOT}/lib/Qt5Svg.lib" "${qt_QT_ROOT}/lib/Qt5Svgd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_font_database_support
+        "${qt_QT_ROOT}/lib/Qt5FontDatabaseSupport.lib"
+        "${qt_QT_ROOT}/lib/Qt5FontDatabaseSupportd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_event_dispatcher_support
+        "${qt_QT_ROOT}/lib/Qt5EventDispatcherSupport.lib"
+        "${qt_QT_ROOT}/lib/Qt5EventDispatcherSupportd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_theme_support
+        "${qt_QT_ROOT}/lib/Qt5ThemeSupport.lib"
+        "${qt_QT_ROOT}/lib/Qt5ThemeSupportd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_windows_ui_automation_support
+        "${qt_QT_ROOT}/lib/Qt5WindowsUIAutomationSupport.lib"
+        "${qt_QT_ROOT}/lib/Qt5WindowsUIAutomationSupportd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_accessibility_support
+        "${qt_QT_ROOT}/lib/Qt5AccessibilitySupport.lib"
+        "${qt_QT_ROOT}/lib/Qt5AccessibilitySupportd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_device_discovery_support
+        "${qt_QT_ROOT}/lib/Qt5DeviceDiscoverySupport.lib"
+        "${qt_QT_ROOT}/lib/Qt5DeviceDiscoverySupportd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_edid_support
+        "${qt_QT_ROOT}/lib/Qt5EdidSupport.lib"
+        "${qt_QT_ROOT}/lib/Qt5EdidSupportd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_freetype
+        "${qt_QT_ROOT}/lib/qtfreetype.lib" "${qt_QT_ROOT}/lib/qtfreetyped.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_harfbuzz
+        "${qt_QT_ROOT}/lib/qtharfbuzz.lib" "${qt_QT_ROOT}/lib/qtharfbuzzd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_png
+        "${qt_QT_ROOT}/lib/qtlibpng.lib" "${qt_QT_ROOT}/lib/qtlibpngd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_pcre2
+        "${qt_QT_ROOT}/lib/qtpcre2.lib" "${qt_QT_ROOT}/lib/qtpcre2d.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_windows_plugin
+        "${qt_QT_ROOT}/plugins/platforms/qwindows.lib"
+        "${qt_QT_ROOT}/plugins/platforms/qwindowsd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_windows_vista_style_plugin
+        "${qt_QT_ROOT}/plugins/styles/qwindowsvistastyle.lib"
+        "${qt_QT_ROOT}/plugins/styles/qwindowsvistastyled.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_svg_plugin
+        "${qt_QT_ROOT}/plugins/imageformats/qsvg.lib"
+        "${qt_QT_ROOT}/plugins/imageformats/qsvgd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_ico_plugin
+        "${qt_QT_ROOT}/plugins/imageformats/qico.lib"
+        "${qt_QT_ROOT}/plugins/imageformats/qicod.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_jpeg_plugin
+        "${qt_QT_ROOT}/plugins/imageformats/qjpeg.lib"
+        "${qt_QT_ROOT}/plugins/imageformats/qjpegd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_gif_plugin
+        "${qt_QT_ROOT}/plugins/imageformats/qgif.lib"
+        "${qt_QT_ROOT}/plugins/imageformats/qgifd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_tga_plugin
+        "${qt_QT_ROOT}/plugins/imageformats/qtga.lib"
+        "${qt_QT_ROOT}/plugins/imageformats/qtgad.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_tiff_plugin
+        "${qt_QT_ROOT}/plugins/imageformats/qtiff.lib"
+        "${qt_QT_ROOT}/plugins/imageformats/qtiffd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_wbmp_plugin
+        "${qt_QT_ROOT}/plugins/imageformats/qwbmp.lib"
+        "${qt_QT_ROOT}/plugins/imageformats/qwbmpd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_webp_plugin
+        "${qt_QT_ROOT}/plugins/imageformats/qwebp.lib"
+        "${qt_QT_ROOT}/plugins/imageformats/qwebpd.lib")
+    cohavora_import_configured_archive(cohavora_dep_qt_svg_icon_plugin
+        "${qt_QT_ROOT}/plugins/iconengines/qsvgicon.lib"
+        "${qt_QT_ROOT}/plugins/iconengines/qsvgicond.lib")
 
     add_library(cohavora_qt_core_runtime INTERFACE)
     add_library(cohavora::qt_core_runtime ALIAS cohavora_qt_core_runtime)
@@ -229,12 +293,16 @@ macro(cohavora_configure_qt_dependencies)
         cohavora_dep_qt_tiff_plugin
         cohavora_dep_qt_wbmp_plugin
         cohavora_dep_qt_webp_plugin
+        WebP::webpdemux
+        WebP::libwebpmux
+        WebP::webp
         cohavora_dep_qt_svg_icon_plugin
         cohavora_dep_mozjpeg
         Dwmapi UxTheme d3d9 dxgi d3d11 d3dcompiler dxguid)
 
     message(STATUS
-        "[Qt] Using pinned ${COHAVORA_QT_VERSION} Release ABI package: ${qt_QT_ROOT}")
+        "[Qt] Using pinned ${COHAVORA_QT_VERSION} package "
+        "(Debug ABI: ${COHAVORA_DEBUG_DEPENDENCY_ABI}): ${qt_QT_ROOT}")
 endmacro()
 
 function(cohavora_define_desktop_ui_runtime)
