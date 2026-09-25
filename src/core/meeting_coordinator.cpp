@@ -844,6 +844,40 @@ QVariantMap ProjectTelemetrySnapshot(
                   QString::fromStdString(snapshot.encoder_power_efficiency));
     result.insert(QStringLiteral("outboundVideoLayers"),
                   QString::fromStdString(snapshot.outbound_video_layers));
+    result.insert(QStringLiteral("videoPublishPlanAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(
+            snapshot.video_publish_plan_availability)));
+    result.insert(QStringLiteral("videoPublishPlanReason"),
+                  QString::fromStdString(snapshot.video_publish_plan_reason));
+    result.insert(QStringLiteral("videoPublishRequestedCodecs"),
+                  QString::fromStdString(snapshot.video_publish_requested_codecs));
+    result.insert(QStringLiteral("videoPublishEffectiveCodecs"),
+                  QString::fromStdString(snapshot.video_publish_effective_codecs));
+    result.insert(QStringLiteral("videoPublishObservedCodecs"),
+                  QString::fromStdString(snapshot.video_publish_observed_codecs));
+    result.insert(QStringLiteral("videoPublishFallbackReasons"),
+                  QString::fromStdString(snapshot.video_publish_fallback_reasons));
+    result.insert(QStringLiteral("videoPublishSources"),
+                  QString::fromStdString(snapshot.video_publish_sources));
+    result.insert(QStringLiteral("videoPublishDirection"),
+                  QString::fromStdString(snapshot.video_publish_direction));
+    result.insert(QStringLiteral("videoPublishGenerations"),
+                  QString::fromStdString(snapshot.video_publish_generations));
+    result.insert(QStringLiteral("videoPublishModes"),
+                  QString::fromStdString(snapshot.video_publish_modes));
+    result.insert(QStringLiteral("videoPublishResolvedProfiles"),
+                  QString::fromStdString(snapshot.video_publish_resolved_profiles));
+    result.insert(QStringLiteral("videoPublishObservedProfiles"),
+                  QString::fromStdString(snapshot.video_publish_observed_profiles));
+    result.insert(QStringLiteral("videoPublishEncoderImplementations"),
+                  QString::fromStdString(
+                      snapshot.video_publish_encoder_implementations));
+    result.insert(QStringLiteral("videoPublishResolvedScalability"),
+                  QString::fromStdString(
+                      snapshot.video_publish_resolved_scalability));
+    result.insert(QStringLiteral("videoPublishObservedScalability"),
+                  QString::fromStdString(
+                      snapshot.video_publish_observed_scalability));
     result.insert(QStringLiteral("videoProcessingAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(snapshot.video_processing_availability)));
     result.insert(QStringLiteral("videoProcessingReason"),
@@ -2242,7 +2276,8 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
         event.kind == livekit::ParticipantEventKind::ConnectionQuality ||
         event.kind == livekit::ParticipantEventKind::TrackMuted ||
         event.kind == livekit::ParticipantEventKind::TrackStreamState ||
-        event.kind == livekit::ParticipantEventKind::TrackSubscriptionPermission) {
+        event.kind == livekit::ParticipantEventKind::TrackSubscriptionPermission ||
+        event.kind == livekit::ParticipantEventKind::TrackSubscriptionError) {
         const auto existing = _participants.find(identity);
         const bool replacing = existing != _participants.end() &&
             existing->second.participantKey != key;
@@ -3173,11 +3208,15 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
     const bool videoEnabled = _requestedVideoEnabled;
     const bool audioAvailable = _localAudioAvailable;
     const bool videoAvailable = _localVideoAvailable;
+    const std::string cameraVideoCodec =
+        OpenMeeting::normalizeVideoCodecPreference(
+            _mediaPrefs.cameraVideoCodec).toStdString();
     const bool allowInsecureTransport = isDebugHttpTransportEnabled();
 
     _sessionOwner->thread = std::thread([gate = _sessionUiGate, ioContext, room = std::move(room), session = std::move(session),
                              audioSource = std::move(audioSource), videoSource = std::move(videoSource),
-                             audioMuted, videoEnabled, audioAvailable, videoAvailable, allowInsecureTransport,
+                             audioMuted, videoEnabled, audioAvailable, videoAvailable,
+                             cameraVideoCodec, allowInsecureTransport,
                              urlStr, tokenStr, sessionGeneration] {
         const auto opts = ProductionMeetingSignalOptions(
             allowInsecureTransport);
@@ -3186,6 +3225,7 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
                         [gate, room = std::move(room), session = std::move(session),
                          audioSource = std::move(audioSource), videoSource = std::move(videoSource),
                          audioMuted, videoEnabled, audioAvailable, videoAvailable,
+                         cameraVideoCodec,
                          urlStr, tokenStr, opts, sessionGeneration]() mutable -> asio::awaitable<void> {
             MeetingStartupTransaction startup;
             try {
@@ -3238,7 +3278,7 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
                 audioTrack->set_muted(effectiveAudioMuted || !audioAvailable);
 
                 livekit::VideoPublishOptions vopts;
-                vopts.video_codec = "vp8";
+                vopts.video_codec = cameraVideoCodec;
                 auto videoTrack = livekit::LocalVideoTrack::createLocalVideoTrack(
                     "camera_video", videoSource, livekit::TrackSource::Camera, vopts);
                 videoTrack->set_muted(!effectiveVideoEnabled || !videoAvailable);
@@ -3674,9 +3714,15 @@ void MeetingCoordinator::requestScreenShareSources() {
 void MeetingCoordinator::startScreenShare(livekit::DesktopSource source) {
     if (!_sessionRuntime || !_sessionRunning || _state != MeetingState::InMeeting || !_startupCommitted) return;
     auto session = _sessionRuntime;
-    session->post( [session, source = std::move(source)] {
+    livekit::VideoPublishOptions options;
+    options.source = livekit::TrackSource::ScreenShareVideo;
+    options.video_codec = OpenMeeting::normalizeVideoCodecPreference(
+        _mediaPrefs.screenShareVideoCodec).toStdString();
+    session->post( [session, source = std::move(source), options = std::move(options)] {
         if (!session->acceptsDataOnStrand()) return;
-        if (auto share = session->screenShareOnStrand()) share->Start(source);
+        if (auto share = session->screenShareOnStrand()) {
+            share->Start(source, options);
+        }
     });
 }
 

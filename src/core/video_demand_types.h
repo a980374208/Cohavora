@@ -72,6 +72,8 @@ struct ViewportIntent {
 };
 
 struct VideoSeat {
+    // A participant without video still occupies a display seat. Its key keeps
+    // the participant lifetime, but has no publication and must not request media.
     TrackKey key;
     TrackSource source = TrackSource::Unknown;
     VideoSeatRole role = VideoSeatRole::Grid;
@@ -80,6 +82,10 @@ struct VideoSeat {
     VideoQualityTier quality = VideoQualityTier::None;
     uint32_t priority = 0;
     VideoDemandReason reason = VideoDemandReason::Visible;
+    TrackPublication::SubscriptionError subscription_error =
+        TrackPublication::SubscriptionError::None;
+
+    bool IsParticipantPlaceholder() const { return key.publication_sid.empty(); }
 };
 
 struct VideoDemandPlan {

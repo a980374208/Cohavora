@@ -30,10 +30,14 @@
 #include <QtWidgets/QStackedWidget>
 #include <QtWidgets/QStyle>
 #include <QtWidgets/QVBoxLayout>
+#include <QtGui/QStandardItemModel>
+#include "src/rtc/webrtc_manager.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace MeetingUI {
 namespace {
@@ -112,6 +116,33 @@ int findData(const QComboBox *combo, const QString &value) {
 		}
 	}
 	return -1;
+}
+
+void populateVideoCodecChoices(QComboBox *combo) {
+	const auto add = [combo](const QString &label, const QString &value,
+			bool available, const QString &reason = {}) {
+		combo->addItem(label, value);
+		const auto index = combo->count() - 1;
+		if (!available) {
+			combo->setItemData(index, reason, Qt::ToolTipRole);
+			if (auto *model = qobject_cast<QStandardItemModel*>(combo->model())) {
+				if (auto *item = model->item(index)) item->setEnabled(false);
+			}
+		}
+	};
+	add(QCoreApplication::translate("MeetingUI", "Auto (VP8 preferred)"),
+		QStringLiteral("auto"), true);
+	for (const auto &entry : std::array<std::pair<const char*, const char*>, 4>{
+			std::pair{"VP8", "vp8"}, std::pair{"H.264", "h264"},
+			std::pair{"VP9", "vp9"}, std::pair{"AV1", "av1"}}) {
+		const auto available = livekit::IsVideoEncoderFormatSupported(entry.second);
+		add(QString::fromLatin1(entry.first), QString::fromLatin1(entry.second), available,
+			QCoreApplication::translate(
+				"MeetingUI", "This codec is unavailable in the current WebRTC package."));
+	}
+	if (livekit::IsVideoEncoderFormatSupported("h265")) {
+		add(QStringLiteral("H.265"), QStringLiteral("h265"), true);
+	}
 }
 
 } // namespace
@@ -342,6 +373,19 @@ QWidget *SettingsDialog::buildVideoPage() {
 	resolutionHint->setObjectName(QStringLiteral("hintLabel"));
 	resolutionHint->setWordWrap(true);
 	layout->addWidget(resolutionHint);
+
+	layout->addWidget(makeSectionTitle(
+		QCoreApplication::translate("MeetingUI", "Publishing codec"), content));
+	layout->addWidget(new QLabel(
+		QCoreApplication::translate("MeetingUI", "Camera"), content));
+	_cameraCodecCombo = new QComboBox(content);
+	populateVideoCodecChoices(_cameraCodecCombo);
+	layout->addWidget(_cameraCodecCombo);
+	layout->addWidget(new QLabel(
+		QCoreApplication::translate("MeetingUI", "Screen share"), content));
+	_screenShareCodecCombo = new QComboBox(content);
+	populateVideoCodecChoices(_screenShareCodecCombo);
+	layout->addWidget(_screenShareCodecCombo);
 
 	_mirrorEnabled = new QCheckBox(QCoreApplication::translate("MeetingUI", "Mirror Video"), content);
 	layout->addWidget(_mirrorEnabled);
@@ -689,6 +733,13 @@ void SettingsDialog::connectPreferenceControls() {
 			emitCameraSelection();
 			requestPreviewIfVisible();
 		});
+	for (auto *combo : {_cameraCodecCombo, _screenShareCodecCombo}) {
+		connect(combo,
+			static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+			this, [this](int) {
+				if (!_updatingUi) commitPreferences();
+			});
+	}
 	connect(
 		_cameraCombo,
 		static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
@@ -761,6 +812,10 @@ OpenMeeting::MediaPreferences SettingsDialog::preferences() const {
 	value.cameraDeviceId = selectedCameraDeviceId();
 	value.microphoneDeviceId = selectedMicrophoneDeviceId();
 	value.speakerDeviceId = selectedSpeakerDeviceId();
+	value.cameraVideoCodec = _cameraCodecCombo
+		? _cameraCodecCombo->currentData().toString() : QStringLiteral("auto");
+	value.screenShareVideoCodec = _screenShareCodecCombo
+		? _screenShareCodecCombo->currentData().toString() : QStringLiteral("auto");
 
 	if (!_mirrorEnabled || !_mirrorEnabled->isChecked()) {
 		value.mirrorMode = OpenMeeting::VideoMirrorMode::Off;
@@ -799,6 +854,16 @@ void SettingsDialog::setPreferences(const OpenMeeting::MediaPreferences &value) 
 	_echoCancellation->setChecked(value.echoCancellation);
 	_noiseSuppression->setChecked(value.noiseSuppression);
 	_autoGainControl->setChecked(value.autoGainControl);
+	if (_cameraCodecCombo) {
+		const auto selected = findData(
+			_cameraCodecCombo, OpenMeeting::normalizeVideoCodecPreference(value.cameraVideoCodec));
+		_cameraCodecCombo->setCurrentIndex(selected >= 0 ? selected : 0);
+	}
+	if (_screenShareCodecCombo) {
+		const auto selected = findData(_screenShareCodecCombo,
+			OpenMeeting::normalizeVideoCodecPreference(value.screenShareVideoCodec));
+		_screenShareCodecCombo->setCurrentIndex(selected >= 0 ? selected : 0);
+	}
 	if (_microphoneCombo && _microphoneCombo->count() > 0) {
 		if (_microphoneCombo->itemData(0, kDevicePendingRole).toBool()) {
 			_microphoneCombo->setItemData(0, value.microphoneDeviceId, kDeviceIdRole);

@@ -31,14 +31,24 @@ public:
     void set_publish_telemetry_probe(
         std::shared_ptr<telemetry::LocalVideoActivityProbe> probe);
 
-    void set_publish_options(const VideoPublishOptions& options) { publish_options_ = options; }
+    void set_publish_options(const VideoPublishOptions& options);
     VideoPublishOptions publish_options() const { return publish_options_; }
+    VideoPublishOptions requested_publish_options() const { return requested_publish_options_; }
 
     void mute() { set_muted(true); }
     void unmute() { set_muted(false); }
 
     static VideoPublishOptions ComputeSimulcastOptions(int width, int height, const VideoPublishOptions& input_options);
     static VideoPublishOptions ComputeMultiCodecSimulcastOptions(int width, int height, const VideoPublishOptions& input_options);
+    static ResolvedVideoPublishPlan ResolvePublishPlan(
+        int width,
+        int height,
+        const VideoPublishOptions& requested_options,
+        const std::vector<std::string>& local_sender_codecs,
+        const std::vector<std::string>& server_enabled_codecs);
+    static std::vector<VideoLayerSetting> ComputeSignalLayers(
+        const SimulcastCodecSpec& spec);
+    static int SpatialLayersFromScalabilityMode(const std::string& mode);
     static VideoPublishOptions DefaultVp8SimulcastOptions(int width, int height);
 
 private:
@@ -46,6 +56,7 @@ private:
     mutable std::mutex rtc_source_mutex_;
     webrtc::scoped_refptr<RtcVideoSource> rtc_source_;
     std::shared_ptr<telemetry::LocalVideoActivityProbe> publish_telemetry_probe_;
+    VideoPublishOptions requested_publish_options_;
     VideoPublishOptions publish_options_;
 };
 

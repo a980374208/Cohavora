@@ -11,6 +11,7 @@
 #include "rtc/webrtc_manager.h"
 #include "telemetry/e2e_measurement.h"
 #include "telemetry/e2e_media_marker.h"
+#include "telemetry/stats.h"
 
 #include <asio.hpp>
 
@@ -25,6 +26,7 @@
 #include <memory>
 #include <optional>
 #include <random>
+#include <set>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -49,6 +51,14 @@ struct Config {
     std::string remote_peer_id;
     std::string phase_id = "s8c";
     std::string codec = "vp8";
+    std::string expected_codec;
+    std::string receiver_publish_codec;
+    std::string source = "camera";
+    std::string scalability_mode;
+    std::string backup_codec;
+    livekit::BackupCodecPolicy backup_policy =
+        livekit::BackupCodecPolicy::PreferRegression;
+    bool auto_backup_codec = false;
     int width = 1280;
     int height = 720;
     bool simulcast = true;
@@ -75,6 +85,15 @@ const char* QualityName(livekit::proto::VideoQuality quality) {
     }
 }
 
+const char* BackupPolicyName(livekit::BackupCodecPolicy policy) {
+    switch (policy) {
+    case livekit::BackupCodecPolicy::PreferRegression: return "prefer-regression";
+    case livekit::BackupCodecPolicy::Simulcast: return "simulcast";
+    case livekit::BackupCodecPolicy::Regression: return "regression";
+    }
+    return "prefer-regression";
+}
+
 const char* ClockStateName(livekit::telemetry::ClockCalibrationState state) {
     using State = livekit::telemetry::ClockCalibrationState;
     switch (state) {
@@ -93,7 +112,13 @@ void Usage(const char* executable) {
         << " --role publisher|receiver --url <ws-url>"
         << " (--token <jwt> | --token-env <name>)"
         << " --session <id> --local-peer <identity> --remote-peer <identity>"
-        << " [--phase-id <id>] [--codec vp8|h264]"
+        << " [--phase-id <id>] [--codec auto|vp8|h264|vp9|av1]"
+        << " [--expected-codec vp8|h264|vp9|av1]"
+        << " [--receiver-publish-codec vp8|h264|vp9|av1]"
+        << " [--source camera|screen] [--scalability-mode <mode>]"
+        << " [--backup-codec none|vp8|h264]"
+        << " [--backup-policy prefer-regression|simulcast|regression]"
+        << " [--auto-backup true|false]"
         << " [--width <pixels>] [--height <pixels>]"
         << " [--simulcast true|false] [--quality high|medium|low]"
         << " [--probes <1..64>] [--probe-timeout-ms <1000..15000>]"
@@ -103,7 +128,8 @@ void Usage(const char* executable) {
         << "Run the receiver first with the same matrix settings. Tokens are"
         << " never printed. The shared-clock option is valid only for two"
         << " processes on the same Windows host. This target is opt-in and is"
-        << " not registered with CTest.\n";
+        << " not registered with CTest. Use --list-codecs or --self-test for"
+        << " deterministic local checks that do not require a server.\n";
 }
 
 std::optional<int> ParseInt(std::string_view value) {
@@ -150,6 +176,29 @@ std::optional<Config> Parse(int argc, char** argv) {
         else if (argument == "--remote-peer") config.remote_peer_id = value;
         else if (argument == "--phase-id") config.phase_id = value;
         else if (argument == "--codec") config.codec = Lower(value);
+        else if (argument == "--expected-codec") config.expected_codec = Lower(value);
+        else if (argument == "--receiver-publish-codec") config.receiver_publish_codec = Lower(value);
+        else if (argument == "--source") config.source = Lower(value);
+        else if (argument == "--scalability-mode") config.scalability_mode = value;
+        else if (argument == "--backup-codec") {
+            config.backup_codec = Lower(value);
+            if (config.backup_codec == "none") config.backup_codec.clear();
+        } else if (argument == "--backup-policy") {
+            const auto policy = Lower(value);
+            if (policy == "prefer-regression") {
+                config.backup_policy = livekit::BackupCodecPolicy::PreferRegression;
+            } else if (policy == "simulcast") {
+                config.backup_policy = livekit::BackupCodecPolicy::Simulcast;
+            } else if (policy == "regression") {
+                config.backup_policy = livekit::BackupCodecPolicy::Regression;
+            } else {
+                return std::nullopt;
+            }
+        } else if (argument == "--auto-backup") {
+            const auto parsed = ParseBool(value);
+            if (!parsed) return std::nullopt;
+            config.auto_backup_codec = *parsed;
+        }
         else if (argument == "--width") {
             const auto parsed = ParseInt(value);
             if (!parsed) return std::nullopt;
@@ -203,7 +252,19 @@ std::optional<Config> Parse(int argc, char** argv) {
     if (config.url.empty() || config.token.empty() || config.session_id.empty() ||
         config.local_peer_id.empty() || config.remote_peer_id.empty() ||
         config.local_peer_id == config.remote_peer_id || config.phase_id.empty() ||
-        (config.codec != "vp8" && config.codec != "h264") ||
+        (config.codec != "auto" && config.codec != "vp8" &&
+         config.codec != "h264" && config.codec != "vp9" &&
+         config.codec != "av1") ||
+        (!config.expected_codec.empty() && config.expected_codec != "vp8" &&
+         config.expected_codec != "h264" && config.expected_codec != "vp9" &&
+         config.expected_codec != "av1") ||
+        (!config.receiver_publish_codec.empty() &&
+         (config.role != Role::Receiver ||
+          (config.receiver_publish_codec != "vp8" && config.receiver_publish_codec != "h264" &&
+           config.receiver_publish_codec != "vp9" && config.receiver_publish_codec != "av1"))) ||
+        (config.source != "camera" && config.source != "screen") ||
+        (!config.backup_codec.empty() && config.backup_codec != "vp8" &&
+         config.backup_codec != "h264") ||
         config.width < 160 || config.width > 3840 ||
         config.height < 90 || config.height > 2160 ||
         (config.width % 2) != 0 || (config.height % 2) != 0 ||
@@ -273,6 +334,98 @@ bool CodecMatches(std::string value, std::string_view codec) {
     return value == codec;
 }
 
+std::vector<std::string> CodecNames(
+        const webrtc::RtpCapabilities& capabilities) {
+    std::set<std::string> unique;
+    for (const auto& codec : capabilities.codecs) {
+        if (!codec.IsMediaCodec()) continue;
+        auto name = Lower(codec.name);
+        const auto slash = name.find('/');
+        if (slash != std::string::npos) name.erase(0, slash + 1);
+        if (!name.empty()) unique.insert(std::move(name));
+    }
+    return {unique.begin(), unique.end()};
+}
+
+std::string Join(const std::vector<std::string>& values) {
+    std::string result;
+    for (const auto& value : values) {
+        if (!result.empty()) result += ',';
+        result += value;
+    }
+    return result;
+}
+
+int RunLocalMode(bool self_test) {
+    auto& manager = livekit::WebRTCManager::Instance();
+    if (!manager.Initialize() || !manager.factory()) {
+        std::cout << "CODEC_RUNTIME_LOCAL FAIL reason=webrtc_initialization_failed\n";
+        return EXIT_FAILURE;
+    }
+    const auto sender = CodecNames(manager.factory()->GetRtpSenderCapabilities(
+        webrtc::MediaType::VIDEO));
+    const auto receiver = CodecNames(manager.factory()->GetRtpReceiverCapabilities(
+        webrtc::MediaType::VIDEO));
+    std::cout << "CODEC_RUNTIME_CAPABILITIES send=" << Join(sender)
+              << " receive=" << Join(receiver)
+              << " h265_provider="
+              << (livekit::IsVideoEncoderFormatSupported("h265") ? "available" : "unavailable")
+              << '\n';
+    bool passed = true;
+    if (self_test) {
+        livekit::VideoPublishOptions automatic;
+        automatic.video_codec = "auto";
+        automatic.auto_backup_codec = false;
+        const auto auto_plan = livekit::LocalVideoTrack::ResolvePublishPlan(
+            1280, 720, automatic, sender, {});
+        passed = auto_plan.ok() && auto_plan.requested_codec == "auto" &&
+            auto_plan.effective_codec == "vp8" && !auto_plan.used_fallback();
+
+        livekit::VideoPublishOptions vp9;
+        vp9.video_codec = "vp9";
+        vp9.simulcast = false;
+        vp9.scalability_mode = "L3T3_KEY";
+        vp9.auto_backup_codec = false;
+        const auto vp9_plan = livekit::LocalVideoTrack::ResolvePublishPlan(
+            1280, 720, vp9, sender, {});
+        passed = passed && vp9_plan.ok() &&
+            vp9_plan.effective.scalability_mode == "L3T3_KEY";
+
+        livekit::VideoPublishOptions av1;
+        av1.video_codec = "av1";
+        av1.simulcast = false;
+        av1.scalability_mode = "L1T1";
+        av1.auto_backup_codec = false;
+        const auto av1_plan = livekit::LocalVideoTrack::ResolvePublishPlan(
+            1280, 720, av1, sender, {});
+        av1.scalability_mode = "L2T1";
+        const auto rejected_av1 = livekit::LocalVideoTrack::ResolvePublishPlan(
+            1280, 720, av1, sender, {});
+        passed = passed && av1_plan.ok() && !rejected_av1.ok();
+
+        auto frame = livekit::VideoFrame::create(
+            160, 90, livekit::VideoBufferType::I420);
+        const livekit::telemetry::E2eMediaMarker marker{42, 7};
+        const bool embedded = livekit::telemetry::EmbedE2eMediaMarker(frame, marker);
+        const auto decoded = livekit::telemetry::DecodeE2eMediaMarker(frame);
+        passed = passed && embedded && decoded && decoded->probe_id == marker.probe_id &&
+            decoded->sequence == marker.sequence &&
+            std::find(sender.begin(), sender.end(), "h265") == sender.end() &&
+            std::find(receiver.begin(), receiver.end(), "h265") == receiver.end() &&
+            !livekit::IsVideoEncoderFormatSupported("h265");
+        std::cout << "CODEC_RUNTIME_SELF_TEST auto_effective="
+                  << (auto_plan.ok() ? auto_plan.effective_codec : "unavailable")
+                  << " vp9_svc=" << (vp9_plan.ok() ? "supported" : "unsupported")
+                  << " av1_l1t1=" << (av1_plan.ok() ? "supported" : "unsupported")
+                  << " av1_l2t1=" << (rejected_av1.ok() ? "unexpected" : "rejected")
+                  << " marker_roundtrip=" << (embedded && decoded ? "pass" : "fail")
+                  << '\n';
+    }
+    manager.Deinitialize();
+    std::cout << "CODEC_RUNTIME_LOCAL " << (passed ? "PASS" : "FAIL") << '\n';
+    return passed ? EXIT_SUCCESS : EXIT_FAILURE;
+}
+
 struct ProbeRecord {
     std::size_t index = 0;
     std::int64_t publication_start_us = 0;
@@ -321,7 +474,15 @@ public:
 
     void OnConnected() override {
         asio::post(strand_, [self = shared_from_this()] {
+            ++self->connection_events_;
             self->connected_ = true;
+            if (!self->config_.receiver_publish_codec.empty() && !self->receiver_publish_started_) {
+                self->receiver_publish_started_ = true;
+                asio::co_spawn(self->strand_,
+                    [self]() -> asio::awaitable<void> {
+                        co_await self->PublishReceiverVideo();
+                    }, asio::detached);
+            }
             self->SendCapabilities();
         });
     }
@@ -338,6 +499,14 @@ public:
             std::shared_ptr<livekit::RemoteParticipant> participant) override {
         if (!participant || participant->identity() != config_.remote_peer_id) return;
         PostPeerLeft();
+    }
+
+    void OnLocalTrackRepublished(
+            const std::string&,
+            std::shared_ptr<livekit::TrackPublication>) override {
+        asio::post(strand_, [self = shared_from_this()] {
+            ++self->republish_events_;
+        });
     }
 
     void OnDataReceived(const std::vector<std::uint8_t>& payload,
@@ -489,6 +658,7 @@ private:
 
     void SendCapabilities() {
         if (!connected_) return;
+        if (!config_.receiver_publish_codec.empty() && !receiver_publish_ready_) return;
         const auto encoded = livekit::telemetry::EncodeE2eMessage(
             measurement_.BuildCapabilities(next_sequence_++));
         if (encoded) SendBytes(*encoded);
@@ -642,17 +812,148 @@ private:
             }, asio::detached);
     }
 
-    bool RequestedCodecAvailable() const {
+    livekit::VideoPublishOptions RequestedVideoOptions() const {
+        livekit::VideoPublishOptions options;
+        options.source = config_.source == "screen"
+            ? livekit::TrackSource::ScreenShareVideo
+            : livekit::TrackSource::Camera;
+        options.video_codec = config_.codec;
+        options.simulcast = config_.simulcast;
+        options.scalability_mode = config_.scalability_mode;
+        options.auto_backup_codec = config_.auto_backup_codec;
+        options.backup_codec_policy = config_.backup_policy;
+        if (!config_.backup_codec.empty()) options.backup_codec = config_.backup_codec;
+        return options;
+    }
+
+    livekit::ResolvedVideoPublishPlan ResolveRequestedPlan() const {
         const auto factory = livekit::WebRTCManager::Instance().factory();
-        if (!factory) return false;
+        if (!factory) {
+            livekit::ResolvedVideoPublishPlan plan;
+            plan.error = "peer connection factory unavailable";
+            return plan;
+        }
         const auto capabilities = factory->GetRtpSenderCapabilities(webrtc::MediaType::VIDEO);
-        const bool local_supported = std::any_of(
-            capabilities.codecs.begin(), capabilities.codecs.end(),
-            [this](const auto& codec) { return CodecMatches(codec.name, config_.codec); });
-        if (!local_supported) return false;
-        const auto enabled = room_->enabled_publish_codecs();
-        return enabled.empty() || std::any_of(enabled.begin(), enabled.end(),
-            [this](const auto& codec) { return CodecMatches(codec, config_.codec); });
+        std::vector<std::string> local;
+        for (const auto& codec : capabilities.codecs) {
+            if (codec.IsMediaCodec()) local.push_back(codec.name);
+        }
+        return livekit::LocalVideoTrack::ResolvePublishPlan(
+            config_.width, config_.height, RequestedVideoOptions(), local,
+            room_->enabled_publish_codecs());
+    }
+
+    // Exercise the production single-PC ordering: finish a local publication
+    // before allowing the other peer to publish a different codec downstream.
+    asio::awaitable<void> PublishReceiverVideo() {
+        try {
+            auto source = std::make_shared<livekit::VideoSource>(320, 180);
+            livekit::VideoPublishOptions options;
+            options.video_codec = config_.receiver_publish_codec;
+            options.simulcast = false;
+            options.auto_backup_codec = false;
+            if (options.video_codec == "vp9" || options.video_codec == "av1") {
+                options.scalability_mode = "L1T1";
+            }
+            const auto local = room_->local_participant();
+            if (!local) {
+                Finish(false, "receiver_local_participant_unavailable");
+                co_return;
+            }
+            auto track = livekit::LocalVideoTrack::createLocalVideoTrack(
+                "mixed-codec-uplink", source, livekit::TrackSource::Camera, options);
+            const auto publication = co_await local->PublishTrackAsync(track);
+            if (!publication) {
+                Finish(false, "receiver_uplink_publish_failed");
+                co_return;
+            }
+            receiver_publish_ready_ = true;
+            std::cout << "E2E_RECEIVER_PUBLISHED codec="
+                      << config_.receiver_publish_codec << std::endl;
+            SendCapabilities();
+            auto frame = livekit::VideoFrame::create(320, 180, livekit::VideoBufferType::I420);
+            std::fill(frame.data(), frame.data() + frame.dataSize(), 128);
+            int frames = 0;
+            while (!finished_) {
+                livekit::VideoCaptureOptions capture;
+                capture.timestamp_us = NowUs();
+                source->captureFrame(frame, capture);
+                if (++frames % 30 == 0 && !receiver_uplink_verified_) {
+                    const auto report = co_await room_->GetStats();
+                    for (const auto& peer : report.reports) {
+                        for (const auto& stream : peer.outbound_rtp) {
+                            if (!stream.kind_available || stream.kind != "video" ||
+                                !stream.codec_id_available || !stream.packets_sent_available ||
+                                stream.packets_sent == 0) continue;
+                            for (const auto& codec : peer.codecs) {
+                                if (codec.id == stream.codec_id && codec.mime_type_available &&
+                                    CodecMatches(codec.mime_type, config_.receiver_publish_codec)) {
+                                    receiver_uplink_verified_ = true;
+                                }
+                            }
+                        }
+                    }
+                }
+                co_await Delay(33ms);
+            }
+        } catch (const std::exception&) {
+            Finish(false, "receiver_uplink_failed");
+        }
+    }
+
+    asio::awaitable<bool> CollectPublisherStats() {
+        const auto report = co_await room_->GetStats();
+        std::set<std::string> codecs;
+        std::set<std::string> implementations;
+        std::set<std::string> scalability;
+        encoded_frames_ = 0;
+        sent_frames_ = 0;
+        sent_packets_ = 0;
+        for (const auto& peer : report.reports) {
+            const auto codec_name = [&peer](const std::string& id) {
+                const auto found = std::find_if(
+                    peer.codecs.begin(), peer.codecs.end(),
+                    [&](const livekit::CodecStats& codec) { return codec.id == id; });
+                if (found == peer.codecs.end() || !found->mime_type_available) {
+                    return std::string{};
+                }
+                auto name = Lower(found->mime_type);
+                const auto slash = name.find('/');
+                if (slash != std::string::npos) name.erase(0, slash + 1);
+                return name;
+            };
+            for (const auto& stream : peer.outbound_rtp) {
+                if (!stream.kind_available || stream.kind != "video") continue;
+                if (stream.codec_id_available) {
+                    const auto name = codec_name(stream.codec_id);
+                    if (!name.empty()) codecs.insert(name);
+                }
+                if (stream.encoder_implementation_available &&
+                    !stream.encoder_implementation.empty()) {
+                    implementations.insert(stream.encoder_implementation);
+                }
+                if (stream.scalability_mode_available &&
+                    !stream.scalability_mode.empty()) {
+                    scalability.insert(stream.scalability_mode);
+                } else if (stream.rid_available) {
+                    scalability.insert("rid-present");
+                }
+                if (stream.frames_encoded_available) {
+                    encoded_frames_ += stream.frames_encoded;
+                }
+                if (stream.frames_sent_available) sent_frames_ += stream.frames_sent;
+                if (stream.packets_sent_available) sent_packets_ += stream.packets_sent;
+            }
+        }
+        observed_codecs_.assign(codecs.begin(), codecs.end());
+        observed_implementations_.assign(
+            implementations.begin(), implementations.end());
+        observed_scalability_.assign(scalability.begin(), scalability.end());
+        const bool codec_observed = std::find(
+            observed_codecs_.begin(), observed_codecs_.end(),
+            resolved_effective_codec_) != observed_codecs_.end();
+        co_return report.successful_peer_connection_count > 0 && codec_observed &&
+            encoded_frames_ > 0 && sent_packets_ > 0;
     }
 
     livekit::VideoFrame MakeFrame(
@@ -682,10 +983,34 @@ private:
 
     asio::awaitable<void> RunPublisher() {
         try {
-            if (!RequestedCodecAvailable()) {
-                Finish(false, "requested_codec_unavailable");
+            const auto plan = ResolveRequestedPlan();
+            if (!plan.ok()) {
+                Finish(false, "publish_plan_unavailable");
                 co_return;
             }
+            resolved_requested_codec_ = plan.requested_codec;
+            resolved_effective_codec_ = plan.effective_codec;
+            fallback_reason_ = plan.fallback_reason;
+            resolved_mode_ = !plan.effective.scalability_mode.empty()
+                ? "svc"
+                : (plan.effective.simulcast && plan.effective.layers.size() > 1
+                    ? "simulcast" : "single");
+            if (!config_.expected_codec.empty() &&
+                config_.expected_codec != resolved_effective_codec_) {
+                Finish(false, "unexpected_effective_codec");
+                co_return;
+            }
+            std::cout << "E2E_PLAN phase_id=" << config_.phase_id
+                      << " requested_codec=" << resolved_requested_codec_
+                      << " effective_codec=" << resolved_effective_codec_
+                      << " fallback=" << (fallback_reason_.empty() ? "none" : "applied")
+                      << " source=" << config_.source
+                      << " mode=" << resolved_mode_
+                      << " scalability=" << (plan.effective.scalability_mode.empty()
+                            ? "none" : plan.effective.scalability_mode)
+                      << " backup_policy=" << BackupPolicyName(config_.backup_policy)
+                      << " backup_codec=" << (plan.effective.backup_codec
+                            ? *plan.effective.backup_codec : "none") << '\n';
             const auto participant = room_->local_participant();
             if (!participant) {
                 Finish(false, "local_participant_unavailable");
@@ -693,13 +1018,10 @@ private:
             }
             video_source_ = std::make_shared<livekit::VideoSource>(
                 config_.width, config_.height);
-            livekit::VideoPublishOptions options;
-            options.video_codec = config_.codec;
-            options.simulcast = config_.simulcast;
-            options.auto_backup_codec = false;
+            auto options = RequestedVideoOptions();
             auto track = livekit::LocalVideoTrack::createLocalVideoTrack(
                 "e2e-controlled-marker", video_source_,
-                livekit::TrackSource::Camera, options);
+                options.source, options);
             const auto publication_started_us = NowUs();
             const auto publication = co_await participant->PublishTrackAsync(track);
             if (!publication || publication->sid().empty()) {
@@ -794,9 +1116,11 @@ private:
             }
 
             if (finished_) co_return;
+            const bool stats_complete = co_await CollectPublisherStats();
             PrintPublisherSummary();
             const bool complete = acknowledged_probes_.size() == config_.probes &&
                 clock_valid_measurements_ == config_.probes &&
+                stats_complete &&
                 (!config_.shared_clock_ground_truth ||
                     (e2e02_error_us_.size() == config_.probes &&
                      e2e03_error_us_.size() == config_.probes));
@@ -872,6 +1196,26 @@ private:
                   << "E2E_SUMMARY role=publisher"
                   << " phase_id=" << config_.phase_id
                   << " codec=" << config_.codec
+                  << " requested_codec=" << resolved_requested_codec_
+                  << " effective_codec=" << resolved_effective_codec_
+                  << " observed_codecs=" << (observed_codecs_.empty()
+                        ? "UNAVAILABLE" : Join(observed_codecs_))
+                  << " fallback_reason=" << (fallback_reason_.empty()
+                        ? "none" : "local_server_intersection")
+                  << " source=" << config_.source
+                  << " mode=" << resolved_mode_
+                  << " scalability=" << (observed_scalability_.empty()
+                        ? "UNAVAILABLE" : Join(observed_scalability_))
+                  << " encoder_implementations=" << (observed_implementations_.empty()
+                        ? "UNAVAILABLE" : Join(observed_implementations_))
+                  << " backup_policy=" << BackupPolicyName(config_.backup_policy)
+                  << " encoded_frames=" << encoded_frames_
+                  << " sent_frames=" << sent_frames_
+                  << " sent_packets=" << sent_packets_
+                  << " connection_events=" << connection_events_
+                  << " republish_events=" << republish_events_
+                  << " reconnect_state=" << (republish_events_ > 0
+                        ? "republished" : "not_observed")
                   << " source_width=" << config_.width
                   << " source_height=" << config_.height
                   << " simulcast=" << (config_.simulcast ? "true" : "false")
@@ -915,12 +1259,17 @@ private:
         std::cout << "E2E_SUMMARY role=receiver"
                   << " phase_id=" << config_.phase_id
                   << " codec=" << config_.codec
+                  << " source=" << config_.source
                   << " simulcast=" << (config_.simulcast ? "true" : "false")
                   << " quality=" << QualityName(config_.quality)
                   << " probes_expected=" << config_.probes
                   << " probe_announcements=" << probe_announcements_accepted_
                   << " announcement_duplicates=" << probe_announcement_duplicates_
                   << " decoded_frames=" << decoded_frames_
+                  << " first_frame_detected=" << (decoded_frames_ > 0 ? "true" : "false")
+                  << " local_publish_codec=" << (config_.receiver_publish_codec.empty()
+                        ? "none" : config_.receiver_publish_codec)
+                  << " local_uplink_verified=" << (receiver_uplink_verified_ ? "true" : "false")
                   << " markers_decoded=" << markers_decoded_
                   << " markers_matched=" << markers_matched_
                   << " marker_duplicates_or_unknown=" << marker_duplicates_or_unknown_
@@ -934,6 +1283,10 @@ private:
 
     void Finish(bool success, std::string reason) {
         if (finished_) return;
+        if (success && !config_.receiver_publish_codec.empty() && !receiver_uplink_verified_) {
+            success = false;
+            reason = "receiver_uplink_not_verified";
+        }
         finished_ = true;
         success_.store(success);
         if (config_.role == Role::Receiver) PrintReceiverSummary();
@@ -967,6 +1320,13 @@ private:
     std::vector<std::int64_t> ack_rtt_us_, uncertainty_us_, e2e02_us_, e2e03_us_;
     std::vector<std::int64_t> e2e02_error_us_, e2e03_error_us_;
     std::vector<std::int64_t> received_widths_, received_heights_;
+    std::vector<std::string> observed_codecs_;
+    std::vector<std::string> observed_implementations_;
+    std::vector<std::string> observed_scalability_;
+    std::string resolved_requested_codec_;
+    std::string resolved_effective_codec_;
+    std::string fallback_reason_;
+    std::string resolved_mode_;
     std::uint64_t next_sequence_ = 1;
     std::uint64_t next_render_token_ = 1;
     std::size_t clock_responses_ = 0;
@@ -984,11 +1344,19 @@ private:
     std::size_t marker_duplicates_or_unknown_ = 0;
     std::size_t marker_invalid_context_ = 0;
     std::size_t acks_sent_ = 0;
+    std::uint64_t encoded_frames_ = 0;
+    std::uint64_t sent_frames_ = 0;
+    std::uint64_t sent_packets_ = 0;
+    std::size_t connection_events_ = 0;
+    std::size_t republish_events_ = 0;
     int last_received_width_ = 0;
     int last_received_height_ = 0;
     bool connected_ = false;
     bool quality_control_accepted_ = false;
     bool publisher_started_ = false;
+    bool receiver_publish_started_ = false;
+    bool receiver_publish_ready_ = false;
+    bool receiver_uplink_verified_ = false;
     bool finished_ = false;
     std::atomic<bool> success_{false};
 };
@@ -996,6 +1364,12 @@ private:
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--list-codecs") {
+        return RunLocalMode(false);
+    }
+    if (argc == 2 && std::string_view(argv[1]) == "--self-test") {
+        return RunLocalMode(true);
+    }
     if (argc == 2 && (std::string_view(argv[1]) == "--help" ||
                       std::string_view(argv[1]) == "-h")) {
         Usage(argv[0]);

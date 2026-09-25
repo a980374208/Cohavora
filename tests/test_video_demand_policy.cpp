@@ -180,6 +180,97 @@ void TestBoundedGridPaginationAndAudioIndependence() {
     }
 }
 
+void TestParticipantPlaceholderSeats() {
+    constexpr uint64_t session = 301;
+    Policy policy(session);
+    auto catalog = Catalog(session, 91, 0, 18);
+    catalog.participants.front().publications.clear(); // Neither camera nor microphone.
+    policy.UpdateCatalog(catalog);
+    auto view = Viewport(session, 1, livekit::VideoLayoutMode::Grid, 0, 16);
+    policy.UpdateViewport(view, At(0ms));
+    const auto initial = policy.Reconcile(At(0ms));
+    Require(initial.visible_seats.size() == 16 && initial.page_count == 2 &&
+                initial.selected_video.empty() && initial.selected_audio.size() == 17,
+            "participants without video lost their bounded display seats or requested video");
+    for (const auto& seat : initial.visible_seats) {
+        Require(seat.IsParticipantPlaceholder() && seat.key.publication_incarnation == 0 &&
+                    seat.key.participant.native_room_generation == 91 &&
+                    seat.width == 0 && seat.height == 0 &&
+                    seat.quality == livekit::VideoQualityTier::None,
+                "participant placeholder invented a publication or media demand");
+    }
+    view.view_revision = 2;
+    view.page = 1;
+    policy.UpdateViewport(view, At(1ms));
+    Require(policy.Reconcile(At(1ms)).visible_seats.size() == 2,
+            "participants without video were omitted from later pages");
+
+    view.view_revision = 3;
+    view.page = 0;
+    view.pinned = initial.visible_seats.front().key;
+    policy.UpdateViewport(view, At(2ms));
+    const auto pinned = policy.Reconcile(At(2ms));
+    Require(pinned.focused == view.pinned && pinned.visible_seats.size() == 5 &&
+                pinned.visible_seats.front().IsParticipantPlaceholder() &&
+                pinned.selected_video.empty(),
+            "pinning a participant without video requested a nonexistent publication");
+
+    view.view_revision = 4;
+    view.pinned.reset();
+    policy.UpdateViewport(view, At(3ms));
+    auto& participant = catalog.participants.front();
+    participant.publications.push_back(Publication(
+        participant.key, 500, "CAM_STARTED", livekit::TrackKind::Video,
+        livekit::TrackSource::Camera));
+    ++catalog.catalog_revision;
+    policy.UpdateCatalog(catalog);
+    const auto started = policy.Reconcile(At(3ms));
+    Require(started.visible_seats.size() == 16 && started.selected_video.size() == 1 &&
+                !started.visible_seats.front().IsParticipantPlaceholder() &&
+                started.visible_seats.front().key == participant.publications.front().key,
+            "camera publication did not replace its participant placeholder");
+
+    participant.publications.clear();
+    ++catalog.catalog_revision;
+    policy.UpdateCatalog(catalog);
+    const auto stopped = policy.Reconcile(At(4ms));
+    Require(stopped.visible_seats.size() == 16 && stopped.selected_video.empty() &&
+                stopped.visible_seats.front().key == initial.visible_seats.front().key,
+            "camera unpublish removed the participant display seat");
+
+    const auto departed = participant.key;
+    catalog.participants.erase(catalog.participants.begin());
+    ++catalog.catalog_revision;
+    policy.UpdateCatalog(catalog);
+    const auto remaining = policy.Reconcile(At(5ms));
+    Require(std::none_of(remaining.visible_seats.begin(), remaining.visible_seats.end(),
+                [&](const auto& seat) { return seat.key.participant == departed; }),
+            "departed participant left a display placeholder");
+    view.view_revision = 5;
+    view.window_visible = false;
+    policy.UpdateViewport(view, At(6ms));
+    Require(policy.Reconcile(At(6ms)).visible_seats.empty(),
+            "hidden window retained participant display seats");
+
+    Policy focused_policy(session + 1);
+    auto focused_catalog = Catalog(session + 1, 92, 0, 2);
+    auto& speaker = focused_catalog.participants.back();
+    speaker.publications.push_back(Publication(
+        speaker.key, 501, "CAM_SPEAKER", livekit::TrackKind::Video,
+        livekit::TrackSource::Camera));
+    focused_policy.UpdateCatalog(focused_catalog);
+    focused_policy.UpdateViewport(
+        Viewport(session + 1, 1, livekit::VideoLayoutMode::Speaker), At(0ms));
+    Require(focused_policy.Reconcile(At(0ms)).visible_seats.front().IsParticipantPlaceholder(),
+            "initial focused participant without video lost its display seat");
+    focused_policy.UpdateSpeakers({Speaker(focused_catalog, 1)}, At(1ms));
+    focused_policy.Reconcile(At(1001ms));
+    Require(focused_policy.NextReconcileAt(At(1001ms)) == At(3000ms),
+            "placeholder focus blocked the timer for a new active speaker");
+    Require(focused_policy.Reconcile(At(3000ms)).focused == speaker.publications.back().key,
+            "active speaker failed to replace the placeholder focus");
+}
+
 void TestStablePageAnchorAndSourceOrder() {
     constexpr uint64_t session = 82;
     Policy policy(session);
@@ -441,6 +532,43 @@ void TestVisibilityPermissionAndIdempotence() {
             "whiteboard stage retained video or dropped audio demand");
 }
 
+void TestSubscriptionErrorProjectionKeepsDemandStable() {
+    constexpr uint64_t session = 302;
+    Policy policy(session);
+    auto catalog = Catalog(session, 93, 1);
+    policy.UpdateCatalog(catalog);
+    policy.UpdateViewport(Viewport(session, 1, livekit::VideoLayoutMode::Grid), At(0ms));
+    const auto initial = policy.Reconcile(At(0ms));
+    Require(initial.visible_seats.size() == 1 && initial.selected_video.size() == 1 &&
+                initial.visible_seats.front().subscription_error ==
+                    livekit::TrackPublication::SubscriptionError::None,
+            "healthy publication started with a subscription failure");
+
+    auto& publication = catalog.participants.front().publications.front();
+    publication.subscription_error =
+        livekit::TrackPublication::SubscriptionError::CodecUnsupported;
+    ++catalog.catalog_revision;
+    policy.UpdateCatalog(catalog);
+    const auto failed = policy.Reconcile(At(1ms));
+    Require(failed.policy_revision > initial.policy_revision &&
+                failed.visible_seats.front().subscription_error ==
+                    livekit::TrackPublication::SubscriptionError::CodecUnsupported &&
+                failed.selected_video == initial.selected_video,
+            "subscription failure was hidden or changed demand into a resubscribe loop");
+    Require(policy.Reconcile(At(2ms)).policy_revision == failed.policy_revision,
+            "unchanged subscription failure repeatedly advanced the policy");
+
+    publication.subscription_error = livekit::TrackPublication::SubscriptionError::None;
+    ++catalog.catalog_revision;
+    policy.UpdateCatalog(catalog);
+    const auto recovered = policy.Reconcile(At(3ms));
+    Require(recovered.policy_revision > failed.policy_revision &&
+                recovered.visible_seats.front().subscription_error ==
+                    livekit::TrackPublication::SubscriptionError::None &&
+                recovered.selected_video == initial.selected_video,
+            "subscription recovery did not clear the displayed error with stable demand");
+}
+
 void TestGenerationReplacementAndQualityCaps() {
     constexpr uint64_t session = 88;
     Policy policy(session);
@@ -501,12 +629,14 @@ void TestGenerationReplacementAndQualityCaps() {
 
 int main() {
     TestBoundedGridPaginationAndAudioIndependence();
+    TestParticipantPlaceholderSeats();
     TestStablePageAnchorAndSourceOrder();
     TestSharePriorityAndExplicitSelection();
     TestPinPlaceholderAndRestore();
     TestSpeakerHysteresisAndFocusedLayouts();
     TestGridSpeakerDoesNotMovePage();
     TestVisibilityPermissionAndIdempotence();
+    TestSubscriptionErrorProjectionKeepsDemandStable();
     TestGenerationReplacementAndQualityCaps();
     std::cout << "video demand policy contract tests passed" << std::endl;
     return 0;

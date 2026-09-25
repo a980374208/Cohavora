@@ -159,6 +159,10 @@ public:
 
     // Legacy synchronous helper kept for isolated/offline tests. A participant
     // attached to a Room must use PublishTrackAsync so success cannot be faked.
+    proto::SignalRequest BuildTrackPublishRequest(
+        const std::shared_ptr<Track>& track,
+        const VideoPublishOptions* video_options = nullptr,
+        const AudioPublishPolicy* audio_policy = nullptr) const;
     void PublishTrack(std::shared_ptr<Track> track);
     asio::awaitable<std::shared_ptr<TrackPublication>> PublishTrackAsync(
         std::shared_ptr<Track> track);

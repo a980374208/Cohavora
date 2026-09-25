@@ -21,6 +21,11 @@ namespace livekit {
 // all requirements run through the production signaling dispatcher and handler.
 class RoomSinglePcTestAccess final {
 public:
+    static void InitializeCapabilities(
+        webrtc::PeerConnectionInterface* publisher, bool single_pc) {
+        Room::InitializePeerConnectionCapabilities(publisher, single_pc);
+    }
+
     static uint64_t Install(
         Room& room,
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher,
@@ -65,10 +70,39 @@ public:
         return room.negotiation_waiters_.size();
     }
 
-    static asio::awaitable<webrtc::scoped_refptr<webrtc::RtpSenderInterface>> InstallSender(
+    static asio::awaitable<PublishedSenderBundle> InstallSender(
         Room& room, std::shared_ptr<Track> track, uint64_t generation) {
         return room.AddTrackToPublisherAsync(std::move(track), generation);
     }
+
+    static void RememberSenderBundle(
+        Room& room,
+        const std::shared_ptr<Track>& track,
+        const PublishedSenderBundle& bundle,
+        const std::string& sid) {
+        std::shared_ptr<LocalParticipant> local;
+        {
+            std::lock_guard lock(room.room_mutex_);
+            if (!room.local_participant_) {
+                room.local_participant_ = std::make_shared<LocalParticipant>(
+                    "PA_LOCAL", "local", [](const proto::SignalRequest&) {});
+            }
+            local = room.local_participant_;
+            room.published_sender_track_ids_[track.get()] = bundle.track_ids;
+        }
+        track->set_sid(sid);
+        local->add_publication(std::make_shared<TrackPublication>(
+            track, sid, track->name()));
+    }
+
+    static asio::awaitable<void> RemoveSenderBundle(
+        Room& room,
+        std::shared_ptr<Track> track,
+        uint64_t generation) {
+        co_await room.RemoveLocalTrackFromPublisherAsync(
+            std::move(track), generation);
+    }
+
 };
 
 } // namespace livekit
@@ -91,6 +125,7 @@ struct Fixture {
     std::shared_ptr<livekit::Room> room = livekit::Room::Create(io.get_executor());
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
     uint64_t generation = 0;
+    bool single_pc_mode = false;
 
     explicit Fixture(bool single_pc = true, bool auto_subscribe = true) {
         Install(single_pc, auto_subscribe);
@@ -104,6 +139,7 @@ struct Fixture {
     }
 
     void Install(bool single_pc = true, bool auto_subscribe = true) {
+        single_pc_mode = single_pc;
         room->SetLogHandler([this](const std::string&, const std::string& tag,
                                    const std::string& message) {
             if (tag == "MID_TRACK_BIND") track_bindings.push_back(message);
@@ -114,6 +150,9 @@ struct Fixture {
             config, webrtc::PeerConnectionDependencies(&observer));
         TEST_CHECK(created.ok());
         publisher = created.MoveValue();
+        livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
+            Access::InitializeCapabilities(publisher.get(), single_pc);
+        });
         // No external transport is opened. These tests cover offer construction,
         // merge decisions and session isolation, not server acceptance or media.
         livekit::SignalOptions options;
@@ -135,16 +174,16 @@ struct Fixture {
         Drain();
     }
 
-    webrtc::scoped_refptr<webrtc::RtpSenderInterface> InstallSender(
+    livekit::PublishedSenderBundle InstallSenderBundle(
         const std::shared_ptr<livekit::Track>& track) {
         bool done = false;
         std::exception_ptr error;
-        webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender;
+        livekit::PublishedSenderBundle bundle;
         asio::co_spawn(io, Access::InstallSender(*room, track, generation),
             [&](std::exception_ptr failure,
-                webrtc::scoped_refptr<webrtc::RtpSenderInterface> result) {
+                livekit::PublishedSenderBundle result) {
                 error = failure;
-                sender = std::move(result);
+                bundle = std::move(result);
                 done = true;
             });
         const auto deadline = std::chrono::steady_clock::now() + 3s;
@@ -154,8 +193,31 @@ struct Fixture {
         }
         TEST_CHECK(done);
         if (error) std::rethrow_exception(error);
-        TEST_CHECK(sender);
-        return sender;
+        TEST_CHECK(bundle.primary);
+        return bundle;
+    }
+
+    webrtc::scoped_refptr<webrtc::RtpSenderInterface> InstallSender(
+        const std::shared_ptr<livekit::Track>& track) {
+        return InstallSenderBundle(track).primary;
+    }
+
+    void RemoveSenderBundle(const std::shared_ptr<livekit::Track>& track) {
+        bool done = false;
+        std::exception_ptr error;
+        asio::co_spawn(io,
+            Access::RemoveSenderBundle(*room, track, generation),
+            [&](std::exception_ptr failure) {
+                error = failure;
+                done = true;
+            });
+        const auto deadline = std::chrono::steady_clock::now() + 3s;
+        while (!done && std::chrono::steady_clock::now() < deadline) {
+            io.restart();
+            io.run_one_for(10ms);
+        }
+        TEST_CHECK(done);
+        if (error) std::rethrow_exception(error);
     }
 
     std::string LocalOffer() const {
@@ -172,14 +234,21 @@ struct Fixture {
 
     void CheckReceivers(std::size_t expected_audio, std::size_t expected_video) const {
         livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
-            std::size_t audio = 0, video = 0;
+            std::size_t audio = 0, video = 0, inactive = 0;
             for (const auto& transceiver : publisher->GetTransceivers()) {
+                if (transceiver->direction() == webrtc::RtpTransceiverDirection::kInactive) {
+                    TEST_CHECK(transceiver->media_type() == webrtc::MediaType::VIDEO);
+                    TEST_CHECK(!transceiver->sender()->track());
+                    ++inactive;
+                    continue;
+                }
                 TEST_CHECK(transceiver->direction() == webrtc::RtpTransceiverDirection::kRecvOnly);
                 if (transceiver->media_type() == webrtc::MediaType::AUDIO) ++audio;
                 else if (transceiver->media_type() == webrtc::MediaType::VIDEO) ++video;
             }
             TEST_CHECK(audio == expected_audio);
             TEST_CHECK(video == expected_video);
+            TEST_CHECK(inactive == (single_pc_mode ? 1 : 0));
         });
     }
 };
@@ -201,7 +270,11 @@ void AutoSubscribeFalseDoesNotGateEmptyVideoDemandOffer() {
     const auto offer = f.LocalOffer();
     TEST_CHECK(offer.find("m=application ") != std::string::npos);
     TEST_CHECK(offer.find("m=audio ") == std::string::npos);
-    TEST_CHECK(offer.find("m=video ") == std::string::npos);
+    TEST_CHECK(offer.find("m=video ") != std::string::npos);
+    TEST_CHECK(offer.find("a=inactive\r\n") != std::string::npos);
+    TEST_CHECK(offer.find(" VP8/90000\r\n") != std::string::npos);
+    TEST_CHECK(offer.find(" H264/90000\r\n") != std::string::npos);
+    TEST_CHECK(offer.find("a=recvonly\r\n") == std::string::npos);
     f.CheckReceivers(0, 0);
 }
 
@@ -318,16 +391,20 @@ void LocalPublicationDoesNotReuseDownstreamTransceivers() {
 
     livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
         const auto transceivers = f.publisher->GetTransceivers();
-        TEST_CHECK(transceivers.size() == 5);
+        TEST_CHECK(transceivers.size() == 6);
         for (std::size_t i = 0; i < transceivers.size(); ++i) {
-            if (i < 2) {
+            if (i == 0) {
+                TEST_CHECK(transceivers[i]->direction() ==
+                    webrtc::RtpTransceiverDirection::kInactive);
+                TEST_CHECK(!transceivers[i]->sender()->track());
+            } else if (i < 3) {
                 TEST_CHECK(transceivers[i]->direction() ==
                     webrtc::RtpTransceiverDirection::kRecvOnly);
                 TEST_CHECK(!transceivers[i]->sender()->track());
             } else {
                 TEST_CHECK(transceivers[i]->direction() ==
                     webrtc::RtpTransceiverDirection::kSendOnly);
-                TEST_CHECK(transceivers[i]->sender() == senders[i - 2]);
+                TEST_CHECK(transceivers[i]->sender() == senders[i - 3]);
             }
         }
         const auto parameters = senders[2]->GetParameters();
@@ -357,12 +434,25 @@ void LocalPublicationDoesNotReuseDownstreamTransceivers() {
             TEST_CHECK(mid_offset != std::string::npos);
             const auto section_end = offer.find("\r\nm=", mid_offset);
             const auto section = offer.substr(mid_offset, section_end - mid_offset);
+            if (transceiver->direction() == webrtc::RtpTransceiverDirection::kInactive) {
+                TEST_CHECK(section.find("a=inactive") != std::string::npos);
+                TEST_CHECK(section.find(" H264/90000\r\n") != std::string::npos);
+                continue;
+            }
             if (!transceiver->sender()->track()) {
                 TEST_CHECK(section.find("a=recvonly") != std::string::npos);
+                if (transceiver->media_type() == webrtc::MediaType::VIDEO) {
+                    TEST_CHECK(section.find(" H264/90000\r\n") != std::string::npos);
+                }
                 continue;
             }
             const auto cid = transceiver->sender()->track()->id();
             TEST_CHECK(section.find("a=sendonly") != std::string::npos);
+            if (transceiver->media_type() == webrtc::MediaType::VIDEO) {
+                TEST_CHECK(section.find(" VP8/90000\r\n") != std::string::npos);
+                TEST_CHECK(section.find(" H264/90000\r\n") == std::string::npos);
+                TEST_CHECK(section.find(" VP9/90000\r\n") == std::string::npos);
+            }
             TEST_CHECK(section.find("a=msid:livekit_stream_local " + cid + "\r\n") !=
                 std::string::npos);
             const auto binding = "mid=" + mid + ", cid=" + cid;
@@ -398,11 +488,160 @@ void SenderTrackIdOverridesRetainedSdpMsid() {
         std::string::npos);
     livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
         const auto transceivers = f.publisher->GetTransceivers();
-        TEST_CHECK(transceivers.size() == 1);
-        TEST_CHECK(transceivers[0]->mid());
+        TEST_CHECK(transceivers.size() == 2);
+        TEST_CHECK(transceivers[1]->mid());
         TEST_CHECK(f.track_bindings[0] ==
-            "mid=" + *transceivers[0]->mid() + ", cid=current_audio");
+            "mid=" + *transceivers[1]->mid() + ", cid=current_audio");
     });
+}
+
+void SingleStreamSvcStaysInSenderTransaction() {
+    Fixture f;
+    livekit::VideoPublishOptions options;
+    options.video_codec = "vp9";
+    options.simulcast = false;
+    options.scalability_mode = "L1T1";
+    options.auto_backup_codec = false;
+    auto track = livekit::LocalVideoTrack::createLocalVideoTrack(
+        "svc_video",
+        std::make_shared<livekit::VideoSource>(640, 480),
+        livekit::TrackSource::Camera,
+        options);
+    const auto bundle = f.InstallSenderBundle(track);
+    TEST_CHECK(bundle.scalability_modes.size() == 1);
+    TEST_CHECK(bundle.scalability_modes[0] == "L1T1");
+    livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
+        const auto parameters = bundle.primary->GetParameters();
+        TEST_CHECK(parameters.encodings.size() == 1);
+    });
+}
+
+void AudioPublishPolicyClosesSignalAndSenderLoop() {
+    livekit::AudioPublishPolicy requested;
+    requested.max_bitrate_bps = 64000;
+    requested.dtx = false;
+    requested.red = true;
+
+    const auto encrypted = livekit::LocalAudioTrack::ResolvePublishPlan(
+        requested, {"audio/opus"}, true);
+    TEST_CHECK(encrypted.ok());
+    TEST_CHECK(encrypted.requested.red);
+    TEST_CHECK(!encrypted.effective.red);
+    TEST_CHECK(encrypted.red_disabled_for_encryption);
+    TEST_CHECK(encrypted.effective.max_bitrate_bps == 64000);
+
+    auto invalid_codec = requested;
+    invalid_codec.codec = "aac";
+    TEST_CHECK(!livekit::LocalAudioTrack::ResolvePublishPlan(
+        invalid_codec, {"opus"}, false).ok());
+    auto invalid_bitrate = requested;
+    invalid_bitrate.max_bitrate_bps = 1000;
+    TEST_CHECK(!livekit::LocalAudioTrack::ResolvePublishPlan(
+        invalid_bitrate, {"opus"}, false).ok());
+
+    auto track = livekit::LocalAudioTrack::createLocalAudioTrack(
+        "policy_audio", std::make_shared<livekit::AudioSource>(48000, 1),
+        requested);
+    livekit::LocalParticipant participant(
+        "PA_AUDIO", "audio_identity", [](const auto&) {});
+    const auto request = participant.BuildTrackPublishRequest(track);
+    TEST_CHECK(request.add_track().disable_dtx());
+    TEST_CHECK(!request.add_track().disable_red());
+    TEST_CHECK(request.add_track().audio_features_size() == 1);
+    TEST_CHECK(request.add_track().audio_features(0) ==
+        livekit::proto::AudioTrackFeature::TF_NO_DTX);
+    TEST_CHECK(track->requested_publish_policy().red);
+
+    Fixture f;
+    const auto bundle = f.InstallSenderBundle(track);
+    TEST_CHECK(bundle.senders.size() == 1);
+    livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
+        const auto parameters = bundle.primary->GetParameters();
+        TEST_CHECK(parameters.encodings.size() == 1);
+        TEST_CHECK(parameters.encodings.front().max_bitrate_bps.has_value());
+        TEST_CHECK(*parameters.encodings.front().max_bitrate_bps == 64000);
+    });
+}
+
+void BackupSenderBundleRollsBackAsOneTransaction() {
+    struct PolicyCase {
+        livekit::BackupCodecPolicy policy;
+        bool primary_active;
+        bool backup_active;
+        const char* track_name;
+    };
+    const PolicyCase cases[] = {
+        {livekit::BackupCodecPolicy::PreferRegression, true, false,
+         "backup_prefer"},
+        {livekit::BackupCodecPolicy::Simulcast, true, true,
+         "backup_simulcast"},
+        {livekit::BackupCodecPolicy::Regression, false, true,
+         "backup_regression"},
+    };
+
+    for (const auto& policy_case : cases) {
+        Fixture f;
+        livekit::VideoPublishOptions options;
+        options.video_codec = "vp9";
+        options.simulcast = true;
+        options.backup_codec = "vp8";
+        options.backup_codec_policy = policy_case.policy;
+        auto track = livekit::LocalVideoTrack::createLocalVideoTrack(
+            policy_case.track_name,
+            std::make_shared<livekit::VideoSource>(1280, 720),
+            livekit::TrackSource::Camera,
+            options);
+        const auto bundle = f.InstallSenderBundle(track);
+        TEST_CHECK(bundle.senders.size() == 2);
+        TEST_CHECK(bundle.track_ids.size() == 2);
+        TEST_CHECK(bundle.primary == bundle.senders.front());
+        TEST_CHECK(bundle.track_ids[0] == policy_case.track_name);
+        TEST_CHECK(bundle.track_ids[1] ==
+            std::string(policy_case.track_name) + "_backup");
+
+        livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
+            const auto primary = bundle.senders[0]->GetParameters();
+            const auto backup = bundle.senders[1]->GetParameters();
+            TEST_CHECK(!primary.encodings.empty());
+            TEST_CHECK(!backup.encodings.empty());
+            TEST_CHECK(std::all_of(primary.encodings.begin(), primary.encodings.end(),
+                [&](const auto& encoding) {
+                    return encoding.active == policy_case.primary_active;
+                }));
+            TEST_CHECK(std::all_of(backup.encodings.begin(), backup.encodings.end(),
+                [&](const auto& encoding) {
+                    return encoding.active == policy_case.backup_active;
+                }));
+            TEST_CHECK(bundle.senders[0]->track()->id() == bundle.track_ids[0]);
+            TEST_CHECK(bundle.senders[1]->track()->id() == bundle.track_ids[1]);
+        });
+        const std::string sid = std::string("TR_") + policy_case.track_name;
+        Access::RememberSenderBundle(*f.room, track, bundle, sid);
+        if (policy_case.policy == livekit::BackupCodecPolicy::PreferRegression) {
+            livekit::proto::SignalResponse message;
+            auto* quality = message.mutable_subscribed_quality_update();
+            quality->set_track_sid(sid);
+            for (const auto level : {
+                     livekit::proto::VideoQuality::LOW,
+                     livekit::proto::VideoQuality::MEDIUM,
+                     livekit::proto::VideoQuality::HIGH}) {
+                auto* layer = quality->add_subscribed_qualities();
+                layer->set_quality(level);
+                layer->set_enabled(true);
+            }
+            f.room->HandleSignalMessageForTesting(message);
+            livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
+                const auto backup = bundle.senders[1]->GetParameters();
+                TEST_CHECK(std::all_of(
+                    backup.encodings.begin(), backup.encodings.end(),
+                    [](const auto& encoding) { return encoding.active; }));
+            });
+        }
+        f.RemoveSenderBundle(track);
+        livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
+            for (const auto& sender : bundle.senders) TEST_CHECK(!sender->track());
+        });
+    }
 }
 
 } // namespace
@@ -417,7 +656,10 @@ int main() {
     DisconnectAndReplacementRejectOldRequirementAndQueuedNegotiation();
     LocalPublicationDoesNotReuseDownstreamTransceivers();
     SenderTrackIdOverridesRetainedSdpMsid();
+    SingleStreamSvcStaysInSenderTransaction();
+    AudioPublishPolicyClosesSignalAndSenderLoop();
+    BackupSenderBundleRollsBackAsOneTransaction();
     livekit::WebRTCManager::Instance().Deinitialize();
-    std::cout << "Single-PC media-section negotiation and publication: 8 cases PASS\n";
+    std::cout << "Single-PC media-section negotiation and publication: 11 cases PASS\n";
     return 0;
 }

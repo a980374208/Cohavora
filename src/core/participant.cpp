@@ -1,9 +1,11 @@
 #include "participant.h"
 #include "telemetry.h"
+#include "local_audio_track.h"
 #include "local_video_track.h"
 #include "remote_track_publication.h"
 #include "video_source.h"
 #include "livekit_rtc.pb.h"
+#include <algorithm>
 #include <iostream>
 #include <chrono>
 #include <sstream>
@@ -159,7 +161,9 @@ static int64_t CurrentEpochMs() {
 }
 
 static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& track,
-                                                 const std::string& identity) {
+                                                 const std::string& identity,
+                                                 const VideoPublishOptions* video_options,
+                                                 const AudioPublishPolicy* audio_policy) {
     proto::SignalRequest req;
     auto* add_track = req.mutable_add_track();
     add_track->set_cid(track->name()); 
@@ -174,6 +178,15 @@ static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& t
             add_track->set_source(proto::TrackSource::SCREEN_SHARE_AUDIO);
         } else {
             add_track->set_source(proto::TrackSource::MICROPHONE);
+        }
+        const auto audio = std::dynamic_pointer_cast<LocalAudioTrack>(track);
+        const auto policy = audio_policy
+            ? *audio_policy
+            : audio ? audio->requested_publish_policy() : AudioPublishPolicy{};
+        add_track->set_disable_dtx(!policy.dtx);
+        add_track->set_disable_red(!policy.red);
+        if (!policy.dtx) {
+            add_track->add_audio_features(proto::AudioTrackFeature::TF_NO_DTX);
         }
     } else if (track->kind() == TrackKind::Video) {
         add_track->set_type(proto::TrackType::VIDEO);
@@ -190,7 +203,8 @@ static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& t
             if (vid_track->source()->height() > 0) h = vid_track->source()->height();
         }
         if (vid_track) {
-            auto pub_opts = vid_track->publish_options();
+            auto pub_opts = video_options
+                ? *video_options : vid_track->publish_options();
             if (pub_opts.simulcast && !pub_opts.layers.empty()) {
                 w = pub_opts.layers[0].width;
                 h = pub_opts.layers[0].height;
@@ -200,7 +214,8 @@ static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& t
         add_track->set_height(h);
 
         if (vid_track) {
-            auto pub_opts = vid_track->publish_options();
+            auto pub_opts = video_options
+                ? *video_options : vid_track->publish_options();
 
             // GAP-03: Set BackupCodecPolicy
             proto::BackupCodecPolicy proto_policy = proto::BackupCodecPolicy::PREFER_REGRESSION;
@@ -211,32 +226,61 @@ static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& t
             }
             add_track->set_backup_codec_policy(proto_policy);
 
-            if (pub_opts.simulcast && !pub_opts.simulcast_codecs.empty()) {
+            const bool has_svc = std::any_of(
+                pub_opts.simulcast_codecs.begin(),
+                pub_opts.simulcast_codecs.end(),
+                [](const SimulcastCodecSpec& spec) {
+                    return !spec.scalability_mode.empty();
+                });
+            if ((pub_opts.simulcast || has_svc) &&
+                !pub_opts.simulcast_codecs.empty()) {
                 for (size_t c_idx = 0; c_idx < pub_opts.simulcast_codecs.size(); ++c_idx) {
                     const auto& spec = pub_opts.simulcast_codecs[c_idx];
                     auto* sim_codec = add_track->add_simulcast_codecs();
                     sim_codec->set_codec(spec.codec);
-                    std::string codec_cid = spec.cid.empty() ? (c_idx == 0 ? add_track->cid() : add_track->cid() + "_backup") : spec.cid;
+                    std::string codec_cid = spec.cid.empty()
+                        ? (c_idx == 0
+                            ? add_track->cid()
+                            : add_track->cid() + "_backup" +
+                                (c_idx == 1 ? std::string{} : "_" + std::to_string(c_idx)))
+                        : spec.cid;
                     sim_codec->set_cid(codec_cid);
-                    sim_codec->set_video_layer_mode(proto::VideoLayer::ONE_SPATIAL_LAYER_PER_STREAM);
+                    const int svc_spatial_layers =
+                        LocalVideoTrack::SpatialLayersFromScalabilityMode(
+                            spec.scalability_mode);
+                    sim_codec->set_video_layer_mode(svc_spatial_layers > 1
+                        ? proto::VideoLayer::MULTIPLE_SPATIAL_LAYERS_PER_STREAM
+                        : proto::VideoLayer::ONE_SPATIAL_LAYER_PER_STREAM);
 
                     // Order layers ascending (q:0, h:1, f:2)
-                    std::vector<VideoLayerSetting> ordered_layers = spec.layers;
-                    std::sort(ordered_layers.begin(), ordered_layers.end(), [](const VideoLayerSetting& a, const VideoLayerSetting& b) {
-                        auto get_idx = [](const std::string& r) {
-                            if (r == "q") return 0;
-                            if (r == "h") return 1;
-                            return 2;
-                        };
-                        return get_idx(a.rid) < get_idx(b.rid);
-                    });
+                    std::vector<VideoLayerSetting> ordered_layers =
+                        LocalVideoTrack::ComputeSignalLayers(spec);
+                    if (svc_spatial_layers <= 1) {
+                        std::sort(ordered_layers.begin(), ordered_layers.end(), [](const VideoLayerSetting& a, const VideoLayerSetting& b) {
+                            auto get_idx = [](const std::string& r) {
+                                if (r == "q") return 0;
+                                if (r == "h") return 1;
+                                return 2;
+                            };
+                            return get_idx(a.rid) < get_idx(b.rid);
+                        });
+                    }
 
-                    for (const auto& layer_setting : ordered_layers) {
+                    for (size_t layer_index = 0;
+                         layer_index < ordered_layers.size(); ++layer_index) {
+                        const auto& layer_setting = ordered_layers[layer_index];
                         auto* sim_layer = sim_codec->add_layers();
 
                         proto::VideoQuality q = proto::VideoQuality::HIGH;
                         int spatial_idx = 2;
-                        if (layer_setting.rid == "q") {
+                        if (svc_spatial_layers > 1) {
+                            spatial_idx = static_cast<int>(layer_index);
+                            q = layer_index == 0
+                                ? proto::VideoQuality::LOW
+                                : layer_index + 1 == ordered_layers.size()
+                                    ? proto::VideoQuality::HIGH
+                                    : proto::VideoQuality::MEDIUM;
+                        } else if (layer_setting.rid == "q") {
                             q = proto::VideoQuality::LOW;
                             spatial_idx = 0;
                         } else if (layer_setting.rid == "h") {
@@ -330,6 +374,14 @@ static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& t
     return req;
 }
 
+proto::SignalRequest LocalParticipant::BuildTrackPublishRequest(
+    const std::shared_ptr<Track>& track,
+    const VideoPublishOptions* video_options,
+    const AudioPublishPolicy* audio_policy) const {
+    return BuildAddTrackRequest(
+        track, identity(), video_options, audio_policy);
+}
+
 void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
     if (!track) return;
     if (async_publish_track_handler_) {
@@ -344,7 +396,7 @@ void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
     }
     Telemetry::Instance().RecordPublishStart();
 
-    auto req = BuildAddTrackRequest(track, identity());
+    auto req = BuildTrackPublishRequest(track);
     auto pub = std::make_shared<TrackPublication>(track, track->name(), track->name());
     add_publication(pub);
 
@@ -379,7 +431,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> LocalParticipant::PublishTrac
     }
 
     Telemetry::Instance().RecordPublishStart();
-    auto req = BuildAddTrackRequest(track, identity());
+    auto req = BuildTrackPublishRequest(track);
     co_return co_await async_publish_track_handler_(std::move(track), req);
 }
 
@@ -416,7 +468,8 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> LocalParticipant
     items.reserve(tracks.size());
     for (auto& track : tracks) {
         Telemetry::Instance().RecordPublishStart();
-        auto req = std::make_shared<proto::SignalRequest>(BuildAddTrackRequest(track, identity()));
+        auto req = std::make_shared<proto::SignalRequest>(
+            BuildTrackPublishRequest(track));
         items.push_back({std::move(track), std::move(req)});
     }
     co_return co_await async_publish_tracks_batch_handler_(std::move(items));

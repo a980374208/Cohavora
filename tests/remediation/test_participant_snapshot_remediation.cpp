@@ -1696,6 +1696,13 @@ public:
         std::lock_guard lock(value->_frameMutex);
         return value->_currentFrame.copy();
     }
+    static QImage cpuCardImage(MeetingUI::VideoTileWidget &tile) {
+        QImage image(tile.size(), QImage::Format_RGBA8888_Premultiplied);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        tile.paintCard(painter, false, false, false);
+        return image;
+    }
     static livekit::render::VideoRenderSession::Statistics statistics(const MeetingUI::MeetingRoomWindow &window) {
         TEST_CHECK(window._remoteRenderSession);
         return window._remoteRenderSession->statistics();
@@ -4123,6 +4130,163 @@ void GapWindowQueuedVideoBindingLease() {
     std::cout << "GAP_P1_03_CASE_11 Room-drain/revoke/Qt-drain/video-lease/presentation/successor PASS" << std::endl;
 }
 
+void ParticipantWithoutVideoWindow() {
+    WindowFixture fixture;
+    fixture.room->UpdateParticipantsForTesting(WindowParticipant("Camera off", true, false));
+    fixture.pump();
+    fixture.open(); // A late-open window must hydrate a participant with no tracks.
+    fixture.pump();
+    const auto checkPlaceholder = [&] {
+        const auto& plan = ParticipantWindowTestAccess::acceptedVideoPlan(*fixture.window);
+        TEST_CHECK(plan.visible_seats.size() == 1);
+        TEST_CHECK(plan.visible_seats.front().IsParticipantPlaceholder());
+        TEST_CHECK(plan.selected_video.empty());
+        TEST_CHECK(ParticipantWindowTestAccess::tileCount(*fixture.window) == 1);
+        auto *tile = ParticipantWindowTestAccess::tile(*fixture.window, "window-peer");
+        TEST_CHECK(tile && !tile->isHidden() && !tile->isVideoActive());
+        TEST_CHECK(tile->isAudioMuted() && !ParticipantWindowTestAccess::paused(tile));
+        TEST_CHECK(ParticipantWindowTestAccess::tileFrame(tile).isNull());
+        TEST_CHECK(ParticipantWindowTestAccess::activeRenderLeaseCount(*fixture.window) == 0);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*fixture.window).attached_track_count == 0);
+        asio::post(fixture.runtime->strand(), [&] {
+            const auto mediaPlan = fixture.runtime->buildRemoteMediaPlanOnStrand();
+            TEST_CHECK(mediaPlan.video.empty() && mediaPlan.known_publications.empty());
+            const auto snapshot = fixture.runtime->telemetry()->SnapshotOnStrand();
+            TEST_CHECK(snapshot->video_policy_requested == 0 && snapshot->video_policy_selected == 0);
+        });
+        fixture.pump();
+    };
+    checkPlaceholder();
+    auto *tile = ParticipantWindowTestAccess::tile(*fixture.window, "window-peer");
+    const auto originalParticipant = ParticipantWindowTestAccess::acceptedVideoPlan(
+        *fixture.window).visible_seats.front().key.participant;
+
+    auto media = fixture.add("Camera on", "placeholder-camera-started");
+    fixture.pump();
+    TEST_CHECK(ParticipantWindowTestAccess::tile(*fixture.window, "window-peer") == tile);
+    TEST_CHECK(tile->isVideoActive());
+    TEST_CHECK(ParticipantWindowTestAccess::acceptedVideoPlan(
+        *fixture.window).selected_video.size() == 1);
+    media.source->push(160, 1000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(!ParticipantWindowTestAccess::tileFrame(tile).isNull());
+
+    fixture.room->UpdateParticipantsForTesting(WindowParticipant("Camera off again", true, false));
+    fixture.pump();
+    checkPlaceholder();
+    TEST_CHECK(ParticipantWindowTestAccess::tile(*fixture.window, "window-peer") == tile);
+    TEST_CHECK(tile->displayName() == "Camera off again");
+    media.source->push(200, 2000); // Retired media cannot replace the avatar.
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(tile).isNull());
+
+    fixture.room->UpdateParticipantsForTesting(WindowParticipant("Left", false, false));
+    fixture.pump();
+    TEST_CHECK(ParticipantWindowTestAccess::tileCount(*fixture.window) == 0);
+    fixture.room->UpdateParticipantsForTesting(WindowParticipant("Joined without camera", true, false));
+    fixture.pump(); // A normal live join needs the same placeholder as late hydration.
+    checkPlaceholder();
+    TEST_CHECK(ParticipantWindowTestAccess::acceptedVideoPlan(*fixture.window)
+        .visible_seats.front().key.participant != originalParticipant);
+    TEST_CHECK(ParticipantWindowTestAccess::tile(*fixture.window, "window-peer")
+        ->displayName() == "Joined without camera");
+    std::cout << "PARTICIPANT_PLACEHOLDER PASS: no-media join/hydration, publish/unpublish, late frame, departure/rejoin, no media demand\n";
+}
+
+void VideoSubscriptionFailureWindow() {
+    using Error = livekit::TrackPublication::SubscriptionError;
+    WindowFixture fixture;
+    fixture.room->UpdateParticipantsForTesting(WindowParticipant("Subscription failure peer"));
+    fixture.pump();
+    fixture.open();
+    fixture.pump();
+    auto participant = fixture.room->remote_participants().at("PA_WINDOW");
+    auto publication = participant->get_remote_publication("TR_PA_WINDOW");
+    TEST_CHECK(publication);
+    auto *tile = ParticipantWindowTestAccess::tile(*fixture.window, "window-peer");
+    TEST_CHECK(tile && !tile->isVideoActive()); // No receiver/first frame exists yet.
+    const auto cpuBefore = ParticipantWindowTestAccess::cpuCardImage(*tile);
+    const auto decorationBefore = tile->hardwareDecoration(tile->size(), true, false);
+    const auto selected = ParticipantWindowTestAccess::acceptedVideoPlan(*fixture.window).selected_video;
+    TEST_CHECK(selected.size() == 1);
+    const auto fail = [&] {
+        livekit::proto::SignalResponse response;
+        auto *failure = response.mutable_subscription_response();
+        failure->set_track_sid("TR_PA_WINDOW");
+        failure->set_err(livekit::proto::SE_CODEC_UNSUPPORTED);
+        fixture.room->HandleSignalMessageForTesting(response);
+    };
+    const auto checkFailed = [&] {
+        TEST_CHECK(publication->subscription_error() == Error::CodecUnsupported);
+        TEST_CHECK(tile->videoSubscriptionError() == Error::CodecUnsupported);
+        const auto& plan = ParticipantWindowTestAccess::acceptedVideoPlan(*fixture.window);
+        TEST_CHECK(plan.visible_seats.size() == 1 &&
+            plan.visible_seats.front().subscription_error == Error::CodecUnsupported);
+        TEST_CHECK(plan.selected_video == selected);
+        TEST_CHECK(ParticipantWindowTestAccess::activeRenderLeaseCount(*fixture.window) == 0);
+        TEST_CHECK(ParticipantWindowTestAccess::statistics(*fixture.window).attached_track_count == 0);
+        TEST_CHECK(ParticipantWindowTestAccess::tileFrame(tile).isNull());
+    };
+    fail();
+    fixture.pump();
+    checkFailed();
+    TEST_CHECK(!tile->isVideoActive());
+    const auto cpuError = ParticipantWindowTestAccess::cpuCardImage(*tile);
+    const auto decorationError = tile->hardwareDecoration(tile->size(), true, false);
+    const QRect messageBand(12, tile->height() / 2 - 20, tile->width() - 24, 40);
+    // Both production paint paths must display the error before OnTrack, even
+    // if the GPU claims an older cached frame. No GPU/device is needed here.
+    TEST_CHECK(cpuError.copy(messageBand) != cpuBefore.copy(messageBand));
+    TEST_CHECK(decorationError.copy(messageBand) != decorationBefore.copy(messageBand));
+    TEST_CHECK(cpuError.copy(messageBand) == decorationError.copy(messageBand));
+
+    auto lateSource = webrtc::make_ref_counted<WindowMemoryVideoSource>();
+    auto lateRtc = webrtc::VideoTrack::Create("failure-late-receiver", lateSource,
+        webrtc::Thread::Current());
+    livekit::ParticipantSnapshotRoomTestAccess::attach(
+        *fixture.room, participant, lateRtc, "TR_PA_WINDOW");
+    fixture.pump();
+    checkFailed();
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room) == 0);
+    lateSource->push(200, 1000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(tile).isNull());
+
+    TEST_CHECK(publication->SetSubscribed(true)); // An explicit retry clears the sticky failure.
+    fixture.pump();
+    TEST_CHECK(tile->videoSubscriptionError() == Error::None);
+    auto playing = fixture.attachExisting("failure-explicit-retry");
+    TEST_CHECK(tile->isVideoActive());
+    playing.source->push(100, 2000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(!ParticipantWindowTestAccess::tileFrame(tile).isNull());
+    TEST_CHECK(ParticipantWindowTestAccess::activeRenderLeaseCount(*fixture.window) == 1);
+    const auto active = fixture.observer->latest(livekit::ParticipantEventKind::TrackAvailable);
+    TEST_CHECK(livekit::IsMediaBindingTicketActive(active.media_binding_ticket,
+        active.media_binding_key));
+    const auto delivered = ParticipantWindowTestAccess::statistics(*fixture.window).delivered_to_qt_cpu;
+    fail();
+    TEST_CHECK(!livekit::IsMediaBindingTicketActive(active.media_binding_ticket,
+        active.media_binding_key));
+    fixture.pump();
+    checkFailed();
+    playing.source->push(220, 3000);
+    lateSource->push(230, 3001);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(ParticipantWindowTestAccess::statistics(*fixture.window).delivered_to_qt_cpu == delivered);
+    TEST_CHECK(ParticipantWindowTestAccess::tileFrame(tile).isNull());
+
+    TEST_CHECK(publication->SetSubscribed(true));
+    fixture.pump();
+    TEST_CHECK(tile->videoSubscriptionError() == Error::None);
+    auto recovered = fixture.attachExisting("failure-recovered-receiver");
+    recovered.source->push(160, 4000);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    TEST_CHECK(!ParticipantWindowTestAccess::tileFrame(tile).isNull());
+    TEST_CHECK(ParticipantWindowTestAccess::activeRenderLeaseCount(*fixture.window) == 1);
+    std::cout << "SUBSCRIPTION_FAILURE_WINDOW PASS: typed pre-OnTrack error, CPU/GPU decoration, late attach rejection, explicit retry, lease revocation, stale frames\n";
+}
+
 void ScreenShareCameraCoexistence() {
     WindowFixture fixture;
     auto update = WindowParticipant("camera-and-screen");
@@ -5930,6 +6094,8 @@ int WindowAcceptanceMain(int argc, char **argv) {
     } else if (application.arguments().contains("--phase-c-room")) {
         PhaseCRoomMediaPlanAndRecovery();
     } else if (application.arguments().contains("--phase-d-window")) {
+        ParticipantWithoutVideoWindow();
+        VideoSubscriptionFailureWindow();
         PhaseDWindowViewportAndRenderLease();
     } else if (application.arguments().contains("--subscription-telemetry-reconnect")) {
         GapWindowSubscriptionTelemetryInFlightResumeCommit();
@@ -5971,6 +6137,8 @@ int WindowAcceptanceMain(int argc, char **argv) {
         GapWindowQueuedVideoBindingLease();
         std::cout << "AK_WINDOW_EXECUTED=16 PASSED=16 FAILED=0" << std::endl;
         ScreenShareWindowControls();
+        ParticipantWithoutVideoWindow();
+        VideoSubscriptionFailureWindow();
         ScreenShareCameraCoexistence();
         DepartureNoticeLifetime();
         AccountLogoutAndDuplicateLogin();

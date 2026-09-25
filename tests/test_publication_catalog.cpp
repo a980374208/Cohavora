@@ -160,6 +160,71 @@ void TestRetiredCatalogRejectsNewDemandInputs() {
             "retired catalog accepted new input");
 }
 
+void TestSubscriptionFailureBeforeMediaAndRetry() {
+    using Error = livekit::TrackPublication::SubscriptionError;
+    livekit::PublicationCatalog catalog(75);
+    const auto values = Values(9, 1, 1);
+    Require(catalog.Apply(Upsert(values)) == livekit::CatalogApplyResult::Applied,
+            "failure catalog setup failed");
+    auto failure = TrackEvent(livekit::ParticipantEventKind::TrackSubscriptionError, values);
+    failure.publication.subscription_error = Error::CodecUnsupported;
+    Require(catalog.Apply(failure) == livekit::CatalogApplyResult::Applied,
+            "first subscription failure without a media binding was lost");
+    auto* publication = catalog.Find(values.track->key);
+    Require(publication && publication->subscription_error == Error::CodecUnsupported &&
+                publication->subscription_allowed && !publication->media_available,
+            "codec error was conflated with permission or media availability");
+    Require(catalog.Apply(failure) == livekit::CatalogApplyResult::NoChange,
+            "duplicate subscription failure advanced the catalog");
+
+    // Metadata refreshes retain the frozen error carried by native snapshots.
+    auto roster = Upsert(values);
+    roster.participant.publications.front().state.subscription_error = Error::CodecUnsupported;
+    Require(catalog.Apply(roster) == livekit::CatalogApplyResult::NoChange,
+            "roster refresh changed a persistent subscription failure");
+
+    failure.publication.subscription_error = Error::TrackNotFound;
+    Require(catalog.Apply(failure) == livekit::CatalogApplyResult::Applied &&
+                catalog.Find(values.track->key)->subscription_error == Error::TrackNotFound,
+            "track-not-found subscription error was not distinguished");
+    failure.publication.subscription_error = Error::None;
+    Require(catalog.Apply(failure) == livekit::CatalogApplyResult::Applied,
+            "explicit retry did not clear the publication error");
+    Require(!catalog.Find(values.track->key)->media_available,
+            "retry falsely claimed that remote media was already bound");
+    Require(catalog.Apply(TrackEvent(livekit::ParticipantEventKind::TrackAvailable, values)) ==
+                livekit::CatalogApplyResult::Applied,
+            "successful media after retry was rejected");
+
+    failure.publication.subscription_error = Error::Unknown;
+    Require(catalog.Apply(failure) == livekit::CatalogApplyResult::Applied &&
+                !catalog.Find(values.track->key)->media_available,
+            "failure after media availability did not revoke availability");
+
+    values.track->active.store(false, std::memory_order_release);
+    const auto successor = Values(9, 1, 2);
+    Require(catalog.Apply(Upsert(successor)) == livekit::CatalogApplyResult::Applied,
+            "replacement publication was rejected");
+    Require(catalog.Apply(failure) == livekit::CatalogApplyResult::RejectedStale &&
+                catalog.Find(successor.track->key)->subscription_error == Error::None,
+            "late failure polluted the replacement publication lifetime");
+}
+
+void TestSubscriptionErrorSnapshotCopy() {
+    using Error = livekit::TrackPublication::SubscriptionError;
+    livekit::TrackPublication publication(nullptr, "TR_ERROR", "camera");
+    publication.set_subscription_error(Error::CodecUnsupported);
+    auto frozen = publication.SnapshotState();
+    livekit::TrackPublication copied(publication);
+    publication.set_subscription_error(Error::TrackNotFound);
+    livekit::TrackPublication assigned(nullptr, "TR_OTHER", "other");
+    assigned = publication;
+    Require(frozen.subscription_error == Error::CodecUnsupported &&
+                copied.subscription_error() == Error::CodecUnsupported &&
+                assigned.SnapshotState().subscription_error == Error::TrackNotFound,
+            "subscription errors were lost or mutated across frozen snapshots/copies");
+}
+
 } // namespace
 
 int main() {
@@ -167,6 +232,8 @@ int main() {
     TestMediaUnavailablePreservesPublication();
     TestOldKeysCannotAffectSuccessors();
     TestRetiredCatalogRejectsNewDemandInputs();
+    TestSubscriptionFailureBeforeMediaAndRetry();
+    TestSubscriptionErrorSnapshotCopy();
     std::cout << "publication catalog contract tests passed" << std::endl;
     return 0;
 }

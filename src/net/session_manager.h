@@ -36,6 +36,8 @@ enum class VideoMirrorMode {
     LocalAndRemote = 2,
 };
 
+QString normalizeVideoCodecPreference(const QString &codec);
+
 struct MediaPreferences {
     bool enableMicrophone = true;
     bool enableSpeaker = true;
@@ -51,6 +53,8 @@ struct MediaPreferences {
     QString cameraDeviceId;
     QString microphoneDeviceId;
     QString speakerDeviceId;
+    QString cameraVideoCodec = QStringLiteral("auto");
+    QString screenShareVideoCodec = QStringLiteral("auto");
     // A zero size means "choose the best device mode around 1080p".
     int videoCaptureWidth = 0;
     int videoCaptureHeight = 0;

@@ -234,6 +234,43 @@ int main() {
         }
     }
 
+    // A single RTP encoding can carry multiple SVC spatial layers even when
+    // simulcast is disabled. The sender plan stays single-encoding while the
+    // AddTrack request describes the switchable spatial layers to the SFU.
+    {
+        auto source = std::make_shared<livekit::VideoSource>(1280, 720);
+        livekit::VideoPublishOptions options;
+        options.video_codec = "vp9";
+        options.simulcast = false;
+        options.scalability_mode = "L3T3_KEY";
+        options.auto_backup_codec = false;
+        auto track = livekit::LocalVideoTrack::createLocalVideoTrack(
+            "svc_camera", source, livekit::TrackSource::Camera, options);
+        TEST_CHECK(track->publish_options().layers.size() == 1);
+
+        livekit::proto::SignalRequest sent;
+        auto participant = std::make_shared<livekit::LocalParticipant>(
+            "PA_SVC", "svc_identity",
+            [&sent](const livekit::proto::SignalRequest& request) {
+                sent = request;
+            });
+        participant->PublishTrack(track);
+
+        TEST_CHECK(sent.add_track().layers_size() == 3);
+        TEST_CHECK(sent.add_track().simulcast_codecs_size() == 1);
+        const auto& codec = sent.add_track().simulcast_codecs(0);
+        TEST_CHECK(codec.video_layer_mode() ==
+            livekit::proto::VideoLayer::MULTIPLE_SPATIAL_LAYERS_PER_STREAM);
+        TEST_CHECK(codec.layers_size() == 3);
+        for (int index = 0; index < codec.layers_size(); ++index) {
+            TEST_CHECK(codec.layers(index).rid().empty());
+            TEST_CHECK(codec.layers(index).spatial_layer() == index);
+        }
+        TEST_CHECK(codec.layers(0).width() == 320);
+        TEST_CHECK(codec.layers(1).width() == 640);
+        TEST_CHECK(codec.layers(2).width() == 1280);
+    }
+
     std::cout << "[SUCCESS] Rust encoding policy and publication serialization tests passed!" << std::endl;
     return 0;
 }

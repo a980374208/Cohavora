@@ -1205,6 +1205,18 @@ Meeting ID: %2</source>
             <translation>正在等待视频画面...</translation>
         </message>
         <message>
+            <source>Cannot receive this video format</source>
+            <translation>无法接收此视频编码格式</translation>
+        </message>
+        <message>
+            <source>Video is no longer available</source>
+            <translation>该视频已不可用</translation>
+        </message>
+        <message>
+            <source>Video subscription failed</source>
+            <translation>视频订阅失败</translation>
+        </message>
+        <message>
             <source>VideoTileWidget [%1] frame rendered (image: %2x%3, viewport: %4x%5)</source>
             <translation>VideoTileWidget [%1] 画面成功上屏绘制 (图像: %2x%3, 视口: %4x%5)</translation>
         </message>

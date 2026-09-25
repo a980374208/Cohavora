@@ -52,6 +52,15 @@ struct RemotePublicationControlRequest;
 class SubscriptionTelemetryOperation;
 enum class RemotePublicationControlDispatch;
 
+struct PublishedSenderBundle {
+    webrtc::scoped_refptr<webrtc::RtpSenderInterface> primary;
+    std::vector<webrtc::scoped_refptr<webrtc::RtpSenderInterface>> senders;
+    std::vector<std::string> scalability_modes;
+    std::vector<std::string> track_ids;
+
+    bool empty() const { return senders.empty(); }
+};
+
 enum class ConnectionState {
     Disconnected,
     Connecting,
@@ -299,9 +308,11 @@ public:
     std::shared_ptr<E2eeManager> e2ee_manager() const { return e2ee_manager_; }
 
     void AddTrackToPublisher(std::shared_ptr<Track> track);
-    asio::awaitable<webrtc::scoped_refptr<webrtc::RtpSenderInterface>> AddTrackToPublisherAsync(
+    asio::awaitable<PublishedSenderBundle> AddTrackToPublisherAsync(
         std::shared_ptr<Track> track,
-        uint64_t generation);
+        uint64_t generation,
+        std::optional<VideoPublishOptions> video_publish_options = std::nullopt,
+        std::optional<AudioPublishPolicy> audio_publish_policy = std::nullopt);
     asio::awaitable<std::shared_ptr<TrackPublication>> PublishLocalTrackAsync(
         std::shared_ptr<Track> track,
         const proto::SignalRequest& request);
@@ -431,6 +442,8 @@ private:
     }
     void BeforeNativeEventCommit(uint64_t generation);
     std::shared_ptr<webrtc::PeerConnectionObserver> CreatePeerConnectionObserver(int pc_type, uint64_t generation);
+    static void InitializePeerConnectionCapabilities(
+        webrtc::PeerConnectionInterface* publisher, bool single_pc_mode);
     std::shared_ptr<webrtc::DataChannelObserver> CreateDataChannelObserver(
         bool reliable,
         uint64_t generation,
@@ -490,6 +503,12 @@ private:
     void NegotiatePublisher(uint64_t generation);
     asio::awaitable<std::shared_ptr<TrackPublication>> PublishLocalTrackAsync(
         std::shared_ptr<Track> track, const proto::SignalRequest& request, uint64_t generation);
+    static void RollbackPublishedSenderBundle(
+        const webrtc::scoped_refptr<webrtc::PeerConnectionInterface>& pc,
+        const PublishedSenderBundle& bundle);
+    asio::awaitable<void> ApplyPublishedSenderScalabilityModesAsync(
+        PublishedSenderBundle bundle,
+        uint64_t generation);
     void HandleSignalEvent(const SignalEvent& event, uint64_t event_generation = 0);
     void HandleSignalMessage(
         std::shared_ptr<proto::SignalResponse> msg,
@@ -517,6 +536,12 @@ private:
     void UpdateTrackSubscriptionPermission(
         const proto::SubscriptionPermissionUpdate& update,
         uint64_t event_generation = 0);
+    void UpdateTrackSubscriptionError(
+        const proto::SubscriptionResponse& response,
+        uint64_t event_generation);
+    void ClearTrackSubscriptionErrorLocked(
+        const std::shared_ptr<RemoteParticipant>& participant,
+        const std::shared_ptr<RemoteTrackPublication>& publication);
     struct SubscriptionIntentKey {
         std::string participant_sid;
         std::string participant_identity;
@@ -822,6 +847,8 @@ private:
 
     std::unordered_map<std::string,
         std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>>> pending_track_publishes_;
+    std::unordered_map<const Track*, std::vector<std::string>>
+        published_sender_track_ids_;
     std::set<const Track*> reconnect_republish_tracks_;
     // A media sender is changed before the remote SDP answer can commit the
     // public map mutation. Keep that intent through recovery so a failed

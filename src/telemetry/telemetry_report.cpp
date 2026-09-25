@@ -986,6 +986,50 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("video.codec.layers", SafeText(s.outbound_video_layers), "layers",
           s.video_codec_availability, s.video_codec_reason,
           s.video_codec_measurement_point);
+    group("video.publish.requested", SafeText(s.video_publish_requested_codecs),
+          "codecs", s.video_publish_plan_availability,
+          s.video_publish_plan_reason, s.video_publish_plan_measurement_point);
+    group("video.publish.effective", SafeText(s.video_publish_effective_codecs),
+          "codecs", s.video_publish_plan_availability,
+          s.video_publish_plan_reason, s.video_publish_plan_measurement_point);
+    group("video.publish.observed", SafeText(s.video_publish_observed_codecs),
+          "codecs", s.video_publish_plan_availability,
+          s.video_publish_plan_reason, s.video_publish_plan_measurement_point);
+    group("video.publish.fallback", SafeText(s.video_publish_fallback_reasons),
+          "reason", s.video_publish_plan_availability,
+          s.video_publish_plan_reason, s.video_publish_plan_measurement_point);
+    group("video.publish.source", SafeText(s.video_publish_sources), "source",
+          s.video_publish_plan_availability, s.video_publish_plan_reason,
+          s.video_publish_plan_measurement_point);
+    group("video.publish.direction", SafeText(s.video_publish_direction), "direction",
+          s.video_publish_plan_availability, s.video_publish_plan_reason,
+          s.video_publish_plan_measurement_point);
+    group("video.publish.generation", SafeText(s.video_publish_generations), "generation",
+          s.video_publish_plan_availability, s.video_publish_plan_reason,
+          s.video_publish_plan_measurement_point);
+    group("video.publish.mode", SafeText(s.video_publish_modes), "mode",
+          s.video_publish_plan_availability, s.video_publish_plan_reason,
+          s.video_publish_plan_measurement_point);
+    group("video.publish.resolved_profile",
+          SafeText(s.video_publish_resolved_profiles), "profile",
+          s.video_publish_plan_availability, s.video_publish_plan_reason,
+          s.video_publish_plan_measurement_point);
+    group("video.publish.observed_profile",
+          SafeText(s.video_publish_observed_profiles), "profile",
+          s.video_publish_plan_availability, s.video_publish_plan_reason,
+          s.video_publish_plan_measurement_point);
+    group("video.publish.encoder_implementation",
+          SafeText(s.video_publish_encoder_implementations), "implementations",
+          s.video_publish_plan_availability, s.video_publish_plan_reason,
+          s.video_publish_plan_measurement_point);
+    group("video.publish.resolved_scalability",
+          SafeText(s.video_publish_resolved_scalability), "mode",
+          s.video_publish_plan_availability, s.video_publish_plan_reason,
+          s.video_publish_plan_measurement_point);
+    group("video.publish.observed_scalability",
+          SafeText(s.video_publish_observed_scalability), "mode",
+          s.video_publish_plan_availability, s.video_publish_plan_reason,
+          s.video_publish_plan_measurement_point);
     group("video.processing.decode_average", Ratio(s.video_decode_ms_per_frame),
           "ms/frame", s.video_processing_availability, s.video_processing_reason,
           s.video_processing_measurement_point);

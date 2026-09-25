@@ -74,6 +74,8 @@ void verifySettingsMigration() {
         legacy->setValue("media/enableVideo", true);
         legacy->setValue("media/echoCancellation", false);
         legacy->setValue("media/autoGainControl", false);
+        legacy->setValue("media/cameraVideoCodec", QStringLiteral("VP9"));
+        legacy->setValue("media/screenShareVideoCodec", QStringLiteral("av1"));
         legacy->setValue("general/showActiveSpeaker", false);
         legacy->setValue("auth/account", QStringLiteral("account"));
         legacy->setValue("auth/password", kPassword);
@@ -88,6 +90,8 @@ void verifySettingsMigration() {
     TEST_CHECK(!first.settings->value("media/echoCancellation").toBool());
     TEST_CHECK(first.settings->contains("media/autoGainControl"));
     TEST_CHECK(!first.settings->value("media/autoGainControl").toBool());
+    TEST_CHECK(first.settings->value("media/cameraVideoCodec").toString() == QStringLiteral("VP9"));
+    TEST_CHECK(first.settings->value("media/screenShareVideoCodec").toString() == QStringLiteral("av1"));
     TEST_CHECK(!first.settings->value("general/showActiveSpeaker").toBool());
     TEST_CHECK(first.settings->value("auth/account").toString() == QStringLiteral("account"));
     TEST_CHECK(!first.settings->contains("custom/unknown"));
@@ -168,6 +172,8 @@ void verifyAudioPreferences() {
     const auto defaults = session->mediaPreferences();
     TEST_CHECK(defaults.echoCancellation && defaults.noiseSuppression && defaults.autoGainControl);
     TEST_CHECK(defaults.speakerDeviceId.isEmpty());
+    TEST_CHECK(defaults.cameraVideoCodec == QStringLiteral("auto"));
+    TEST_CHECK(defaults.screenShareVideoCodec == QStringLiteral("auto"));
     session.reset();
 
     // Upgrading an existing ANS-only preference must not disable the other 3A stages.
@@ -192,6 +198,8 @@ void verifyAudioPreferences() {
     prefs.pushToTalkWhenMuted = true;
     prefs.cameraDeviceId = QStringLiteral("synthetic-camera");
     prefs.microphoneDeviceId = QStringLiteral("synthetic-microphone");
+    prefs.cameraVideoCodec = QStringLiteral("VP9");
+    prefs.screenShareVideoCodec = QStringLiteral("av1");
     prefs.videoCaptureWidth = 1280;
     prefs.videoCaptureHeight = 720;
     prefs.videoCaptureFps = 25;
@@ -225,9 +233,16 @@ void verifyAudioPreferences() {
         TEST_CHECK(!restored.stayInMeetingWhenLocked && restored.pushToTalkWhenMuted);
         TEST_CHECK(restored.cameraDeviceId == prefs.cameraDeviceId);
         TEST_CHECK(restored.microphoneDeviceId == prefs.microphoneDeviceId);
+        TEST_CHECK(restored.cameraVideoCodec == QStringLiteral("vp9"));
+        TEST_CHECK(restored.screenShareVideoCodec == QStringLiteral("av1"));
         TEST_CHECK(restored.videoCaptureWidth == 1280 && restored.videoCaptureHeight == 720);
         TEST_CHECK(restored.videoCaptureFps == 25);
     }
+    prefs.cameraVideoCodec = QStringLiteral("h265");
+    prefs.screenShareVideoCodec = QStringLiteral("not-a-codec");
+    session->setMediaPreferences(prefs);
+    TEST_CHECK(session->mediaPreferences().cameraVideoCodec == QStringLiteral("auto"));
+    TEST_CHECK(session->mediaPreferences().screenShareVideoCodec == QStringLiteral("auto"));
     std::puts("AUDIO PREFERENCES PASS: defaults, legacy ANS, independent 3A combinations, default speaker restore");
 }
 

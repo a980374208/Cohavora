@@ -47,7 +47,8 @@ public:
     ScreenShareSession(asio::any_io_executor strand, Backend backend, Observer observer,
                        std::shared_ptr<void> executor_lifetime = {});
     ~ScreenShareSession();
-    void Start(DesktopSource source);
+    void Start(DesktopSource source,
+               VideoPublishOptions options = VideoPublishOptions());
     void Stop();
     // Revokes capture synchronously on the strand before Room disconnect and
     // executor teardown. Room disconnect owns the network rollback on leave.
@@ -64,7 +65,8 @@ private:
     const std::shared_ptr<void> executor_lifetime_;
     struct Run;
     static asio::awaitable<void> Drive(std::shared_ptr<ScreenShareSession> self,
-                                       std::shared_ptr<Run> run, DesktopSource source);
+                                       std::shared_ptr<Run> run, DesktopSource source,
+                                       VideoPublishOptions options);
     void SetState(ScreenShareState state, ScreenShareError error = ScreenShareError::None);
     void StopFrames(const std::shared_ptr<Run>& run);
     asio::any_io_executor strand_;

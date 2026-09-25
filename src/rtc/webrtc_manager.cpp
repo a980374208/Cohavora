@@ -23,6 +23,9 @@
 #include "modules/video_coding/codecs/vp8/include/vp8.h"
 #include "modules/video_coding/codecs/vp9/include/vp9.h"
 #include "modules/video_coding/codecs/h264/include/h264.h"
+#include "modules/video_coding/codecs/av1/dav1d_decoder.h"
+#include "modules/video_coding/codecs/av1/libaom_av1_encoder.h"
+#include "modules/video_coding/svc/scalability_mode_util.h"
 #include "media/engine/simulcast_encoder_adapter.h"
 #include <objbase.h>
 
@@ -76,28 +79,88 @@ public:
 class CustomVideoEncoderFactory : public webrtc::VideoEncoderFactory {
 public:
     CustomVideoEncoderFactory()
-        : internal_factory_(
-            std::make_unique<SingleStreamVideoEncoderFactory>()) {}
+        : simulcast_factory_(std::make_unique<SingleStreamVideoEncoderFactory>()) {}
 
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
-        return internal_factory_->GetSupportedFormats();
+        std::vector<webrtc::SdpVideoFormat> formats;
+
+        // Preserve the established VP8/H264 preference order. VP9 and AV1 use
+        // their native encoder SVC implementation instead of the simulcast adapter.
+        const auto legacy_formats = simulcast_factory_->GetSupportedFormats();
+        AppendFormatsNamed(formats, legacy_formats, "VP8");
+        AppendFormatsNamed(formats, legacy_formats, "H264");
+        const auto vp9_formats = webrtc::SupportedVP9Codecs(false);
+        formats.insert(formats.end(), vp9_formats.begin(), vp9_formats.end());
+        formats.push_back(webrtc::SdpVideoFormat::AV1Profile0());
+        return formats;
     }
 
     CodecSupport QueryCodecSupport(
         const webrtc::SdpVideoFormat& format,
         std::optional<std::string> scalability_mode) const override {
-        return internal_factory_->QueryCodecSupport(format, scalability_mode);
+        if (CodecNameEquals(format, "VP8") || CodecNameEquals(format, "H264")) {
+            return simulcast_factory_->QueryCodecSupport(format, scalability_mode);
+        }
+        if (CodecNameEquals(format, "VP9")) {
+            const auto supported_formats = webrtc::SupportedVP9Codecs(false);
+            if (!format.IsCodecInList(supported_formats)) return {};
+            if (!scalability_mode.has_value()) return {.is_supported = true};
+            const auto parsed_mode = webrtc::ScalabilityModeFromString(*scalability_mode);
+            return {.is_supported = parsed_mode.has_value() &&
+                webrtc::VP9Encoder::SupportsScalabilityMode(*parsed_mode)};
+        }
+        if (CodecNameEquals(format, "AV1")) {
+            const std::vector<webrtc::SdpVideoFormat> supported{
+                webrtc::SdpVideoFormat::AV1Profile0()};
+            return {
+                .is_supported = format.IsCodecInList(supported) &&
+                    (!scalability_mode.has_value() || *scalability_mode == "L1T1")};
+        }
+        return {};
     }
 
     std::unique_ptr<webrtc::VideoEncoder> Create(
         const webrtc::Environment& env,
         const webrtc::SdpVideoFormat& format) override {
-        return std::make_unique<webrtc::SimulcastEncoderAdapter>(
-            env, internal_factory_.get(), nullptr, format);
+        if (CodecNameEquals(format, "VP8") || CodecNameEquals(format, "H264")) {
+            return std::make_unique<webrtc::SimulcastEncoderAdapter>(
+                env, simulcast_factory_.get(), nullptr, format);
+        }
+        if (CodecNameEquals(format, "AV1")) {
+            const std::vector<webrtc::SdpVideoFormat> supported{
+                webrtc::SdpVideoFormat::AV1Profile0()};
+            if (!format.IsCodecInList(supported)) return nullptr;
+            return webrtc::CreateLibaomAv1Encoder(env);
+        }
+        if (CodecNameEquals(format, "VP9")) {
+            const auto supported_formats = webrtc::SupportedVP9Codecs(false);
+            if (!format.IsCodecInList(supported_formats)) return nullptr;
+            const auto profile = webrtc::ParseSdpForVP9Profile(format.parameters)
+                .value_or(webrtc::VP9Profile::kProfile0);
+            return webrtc::CreateVp9Encoder(env, {.profile = profile});
+        }
+        return nullptr;
     }
 
 private:
-    std::unique_ptr<webrtc::VideoEncoderFactory> internal_factory_;
+    static bool CodecNameEquals(
+        const webrtc::SdpVideoFormat& format,
+        const char* expected) {
+        return _stricmp(format.name.c_str(), expected) == 0;
+    }
+
+    static void AppendFormatsNamed(
+        std::vector<webrtc::SdpVideoFormat>& destination,
+        const std::vector<webrtc::SdpVideoFormat>& source,
+        const char* codec_name) {
+        for (const auto& format : source) {
+            if (CodecNameEquals(format, codec_name)) {
+                destination.push_back(format);
+            }
+        }
+    }
+
+    std::unique_ptr<webrtc::VideoEncoderFactory> simulcast_factory_;
 };
 
 class CustomVideoDecoderFactory : public webrtc::VideoDecoderFactory {
@@ -105,12 +168,16 @@ public:
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
         std::vector<webrtc::SdpVideoFormat> formats;
         formats.push_back(webrtc::SdpVideoFormat("VP8"));
-        formats.push_back(webrtc::SdpVideoFormat("VP9"));
+        for (const auto& format : webrtc::SupportedVP9DecoderCodecs()) {
+            formats.push_back(format);
+        }
         if (webrtc::H264Decoder::IsSupported()) {
             for (const auto& f : webrtc::SupportedH264DecoderCodecs()) {
                 formats.push_back(f);
             }
         }
+        formats.push_back(webrtc::SdpVideoFormat::AV1Profile0());
+        formats.push_back(webrtc::SdpVideoFormat::AV1Profile1());
         return formats;
     }
 
@@ -121,10 +188,19 @@ public:
             return webrtc::CreateVp8Decoder(env);
         }
         if (_stricmp(format.name.c_str(), "VP9") == 0) {
+            const auto supported_formats = webrtc::SupportedVP9DecoderCodecs();
+            if (!format.IsCodecInList(supported_formats)) return nullptr;
             return webrtc::VP9Decoder::Create();
         }
         if (_stricmp(format.name.c_str(), "H264") == 0) {
             return webrtc::H264Decoder::Create();
+        }
+        if (_stricmp(format.name.c_str(), "AV1") == 0) {
+            const std::vector<webrtc::SdpVideoFormat> supported{
+                webrtc::SdpVideoFormat::AV1Profile0(),
+                webrtc::SdpVideoFormat::AV1Profile1()};
+            if (!format.IsCodecInList(supported)) return nullptr;
+            return webrtc::CreateDav1dDecoder(env);
         }
         return nullptr;
     }
@@ -412,6 +488,29 @@ private:
 
 } // namespace
 
+std::unique_ptr<webrtc::VideoEncoderFactory> CreateVideoEncoderFactory() {
+    return std::make_unique<CustomVideoEncoderFactory>();
+}
+
+std::unique_ptr<webrtc::VideoDecoderFactory> CreateVideoDecoderFactory() {
+    return std::make_unique<CustomVideoDecoderFactory>();
+}
+
+bool IsVideoEncoderFormatSupported(
+    const std::string& codec_name,
+    const std::string& scalability_mode) {
+    auto factory = CreateVideoEncoderFactory();
+    const auto formats = factory->GetSupportedFormats();
+    for (const auto& format : formats) {
+        if (_stricmp(format.name.c_str(), codec_name.c_str()) != 0) continue;
+        const auto mode = scalability_mode.empty()
+            ? std::optional<std::string>{}
+            : std::optional<std::string>{scalability_mode};
+        if (factory->QueryCodecSupport(format, mode).is_supported) return true;
+    }
+    return false;
+}
+
 WebRTCManager& WebRTCManager::Instance() {
     static WebRTCManager instance;
     return instance;
@@ -453,8 +552,8 @@ bool WebRTCManager::Initialize() {
 
     auto audio_encoder_factory = webrtc::CreateBuiltinAudioEncoderFactory();
     auto audio_decoder_factory = webrtc::CreateBuiltinAudioDecoderFactory();
-    auto video_encoder_factory = std::make_unique<CustomVideoEncoderFactory>();
-    auto video_decoder_factory = std::make_unique<CustomVideoDecoderFactory>();
+    auto video_encoder_factory = CreateVideoEncoderFactory();
+    auto video_decoder_factory = CreateVideoDecoderFactory();
 
     auto env = webrtc::CreateEnvironment();
     auto raw_adm = webrtc::CreateAudioDeviceModule(env, webrtc::AudioDeviceModule::kPlatformDefaultAudio);

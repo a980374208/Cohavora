@@ -121,6 +121,8 @@ private:
 	CameraPreviewWidget *_cameraPreview = nullptr;
 	QComboBox *_cameraCombo = nullptr;
 	QComboBox *_resolutionCombo = nullptr;
+	QComboBox *_cameraCodecCombo = nullptr;
+	QComboBox *_screenShareCodecCombo = nullptr;
 	QCheckBox *_videoCamera = nullptr;
 	QCheckBox *_highDefinition = nullptr;
 	QCheckBox *_mirrorEnabled = nullptr;

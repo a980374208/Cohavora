@@ -7,10 +7,21 @@
 #include "api/peer_connection_interface.h"
 #include "rtc_base/thread.h"
 
+namespace webrtc {
+class VideoDecoderFactory;
+class VideoEncoderFactory;
+}
+
 namespace livekit {
 
 class AudioApmProcessor;
 class ExecutorCallbackGate;
+
+std::unique_ptr<webrtc::VideoEncoderFactory> CreateVideoEncoderFactory();
+std::unique_ptr<webrtc::VideoDecoderFactory> CreateVideoDecoderFactory();
+bool IsVideoEncoderFormatSupported(
+    const std::string& codec_name,
+    const std::string& scalability_mode = {});
 
 class WebRTCManager {
 public:

@@ -2224,6 +2224,14 @@ void LocalPublishPipelinePreservesWarmingTimeoutAndMapping() {
     SessionTelemetry::SnapshotPtr snapshot;
     const auto now = Event::Clock::now();
     auto probe = std::make_shared<livekit::telemetry::LocalVideoActivityProbe>();
+    livekit::telemetry::LocalVideoPublishDescriptor publish;
+    publish.requested_codec = "auto";
+    publish.effective_codec = "vp9";
+    publish.source = "camera";
+    publish.mode = "svc";
+    publish.resolved_profile = "negotiated";
+    publish.resolved_scalability = "L3T3_KEY";
+    publish.sender_track_ids = {"rtc-video", "rtc-video-backup"};
     TEST_CHECK(!probe->active.load(std::memory_order_acquire));
     probe->first_injected_ns.store(
         std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2232,7 +2240,7 @@ void LocalPublishPipelinePreservesWarmingTimeoutAndMapping() {
     TEST_CHECK(telemetry->RegisterLocalPublication(
         "local_publish/rtc-video", 7, 1,
         livekit::telemetry::LocalMediaKind::Video,
-        "rtc-video", now - 200ms, true, probe, now - 100ms));
+        "rtc-video", now - 200ms, true, probe, now - 100ms, {}, publish));
     TEST_CHECK(probe->active.load(std::memory_order_acquire));
 
     livekit::RoomStatsReport report;
@@ -2252,11 +2260,22 @@ void LocalPublishPipelinePreservesWarmingTimeoutAndMapping() {
     outbound.kind_available = true;
     outbound.mid = "0";
     outbound.mid_available = true;
+    outbound.codec_id = "video-codec";
+    outbound.codec_id_available = true;
+    outbound.encoder_implementation = "libvpx";
+    outbound.encoder_implementation_available = true;
+    outbound.scalability_mode = "L3T3_KEY";
+    outbound.scalability_mode_available = true;
     outbound.frames_encoded = 1;
     outbound.frames_encoded_available = true;
     outbound.packets_sent = 1;
     outbound.packets_sent_available = true;
     publisher.outbound_rtp.push_back(outbound);
+    livekit::CodecStats codec;
+    codec.id = "video-codec";
+    codec.mime_type = "video/VP9";
+    codec.mime_type_available = true;
+    publisher.codecs.push_back(codec);
     report.reports.push_back(publisher);
 
     asio::post(strand, [telemetry, &snapshot, report = std::move(report)]() mutable {
@@ -2282,6 +2301,17 @@ void LocalPublishPipelinePreservesWarmingTimeoutAndMapping() {
     TEST_CHECK(snapshot->local_first_rtp_sends == 1);
     TEST_CHECK(snapshot->local_publish_no_media == 0);
     TEST_CHECK(snapshot->local_publish_stats_uncertainty_ms == 1000);
+    TEST_CHECK(snapshot->video_publish_plan_availability == Availability::Valid);
+    TEST_CHECK(snapshot->video_publish_requested_codecs == "auto");
+    TEST_CHECK(snapshot->video_publish_effective_codecs == "vp9");
+    TEST_CHECK(snapshot->video_publish_observed_codecs == "vp9");
+    TEST_CHECK(snapshot->video_publish_sources == "camera");
+    TEST_CHECK(snapshot->video_publish_direction == "send");
+    TEST_CHECK(snapshot->video_publish_generations == "7");
+    TEST_CHECK(snapshot->video_publish_modes == "svc");
+    TEST_CHECK(snapshot->video_publish_encoder_implementations == "libvpx");
+    TEST_CHECK(snapshot->video_publish_resolved_scalability == "L3T3_KEY");
+    TEST_CHECK(snapshot->video_publish_observed_scalability == "l3t3_key");
 
     context.restart();
     TEST_CHECK(telemetry->RecordLocalVideoFrameInjected(

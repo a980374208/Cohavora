@@ -19,6 +19,7 @@ bool SamePublicationState(const RemotePublicationInfo& left,
         left.kind == right.kind && left.source == right.source &&
         left.muted == right.muted && left.stream_state == right.stream_state &&
         left.subscription_allowed == right.subscription_allowed &&
+        left.subscription_error == right.subscription_error &&
         left.media_available == right.media_available &&
         left.source_width == right.source_width &&
         left.source_height == right.source_height;
@@ -54,6 +55,7 @@ bool PublicationCatalog::Consumes(ParticipantEventKind kind) {
     case ParticipantEventKind::TrackMuted:
     case ParticipantEventKind::TrackStreamState:
     case ParticipantEventKind::TrackSubscriptionPermission:
+    case ParticipantEventKind::TrackSubscriptionError:
         return true;
     default:
         return false;
@@ -230,7 +232,9 @@ RemotePublicationInfo PublicationCatalog::Project(
     result.muted = publication.state.muted;
     result.stream_state = publication.state.stream_state;
     result.subscription_allowed = publication.state.subscription_allowed;
-    result.media_available = media_available;
+    result.subscription_error = publication.state.subscription_error;
+    result.media_available = media_available &&
+        result.subscription_error == TrackPublication::SubscriptionError::None;
     return result;
 }
 

@@ -14,6 +14,18 @@ int main() {
 
     // Test 1: AV1 Primary + Auto VP8 Backup Codec calculation
     {
+        livekit::VideoPublishOptions requested;
+        requested.video_codec = "auto";
+        requested.auto_backup_codec = false;
+        const auto plan = livekit::LocalVideoTrack::ResolvePublishPlan(
+            1280, 720, requested, {"AV1", "VP9", "VP8"}, {"VP9", "VP8"});
+        TEST_CHECK(plan.ok());
+        TEST_CHECK(plan.requested_codec == "auto");
+        TEST_CHECK(plan.effective_codec == "vp8");
+        TEST_CHECK(!plan.used_fallback());
+        TEST_CHECK(plan.fallback_reason.empty());
+    }
+    {
         std::cout << "  -> Test 1: AV1 Primary + Auto VP8 Backup Codec calculation..." << std::endl;
         livekit::VideoPublishOptions av1_opts;
         av1_opts.video_codec = "av1";
@@ -138,6 +150,64 @@ int main() {
         TEST_CHECK(sent_req.add_track().backup_codec_policy() == livekit::proto::BackupCodecPolicy::SIMULCAST);
 
         std::cout << "     [PASS] SIMULCAST policy correctly serialized in AddTrackRequest." << std::endl;
+    }
+
+    // Test 5: Resolve against the local/server intersection and recompute the
+    // complete effective plan without overwriting the requested intent.
+    {
+        livekit::VideoPublishOptions requested;
+        requested.video_codec = "av1";
+        requested.scalability_mode = "L1T1";
+        requested.simulcast = true;
+
+        const auto plan = livekit::LocalVideoTrack::ResolvePublishPlan(
+            1280, 720, requested,
+            {"vp8", "h264"},
+            {"video/av1", "video/h264"});
+        TEST_CHECK(plan.ok());
+        TEST_CHECK(plan.used_fallback());
+        TEST_CHECK(plan.requested_codec == "av1");
+        TEST_CHECK(plan.effective_codec == "h264");
+        TEST_CHECK(plan.requested.scalability_mode == "L1T1");
+        TEST_CHECK(plan.effective.scalability_mode.empty());
+        TEST_CHECK(plan.effective.layers.size() == 3);
+        TEST_CHECK(plan.effective.layers.front().max_bitrate_bps == 3000000);
+        TEST_CHECK(plan.effective.simulcast_codecs.size() == 1);
+        TEST_CHECK(plan.effective.simulcast_codecs.front().codec == "h264");
+
+        auto source = std::make_shared<livekit::VideoSource>(1280, 720);
+        auto track = livekit::LocalVideoTrack::createLocalVideoTrack(
+            "requested_av1", source, livekit::TrackSource::Camera, requested);
+        TEST_CHECK(track->requested_publish_options().video_codec == "av1");
+        TEST_CHECK(track->publish_options().video_codec == "av1");
+    }
+
+    // Test 6: Resolution fails before sender creation when the intersection is
+    // empty or an explicitly requested mode/backup cannot be honored.
+    {
+        livekit::VideoPublishOptions requested;
+        requested.video_codec = "vp8";
+        auto no_intersection = livekit::LocalVideoTrack::ResolvePublishPlan(
+            640, 480, requested,
+            {"vp8", "h264"},
+            {"video/av1"});
+        TEST_CHECK(!no_intersection.ok());
+
+        requested.video_codec = "av1";
+        requested.scalability_mode = "L2T1";
+        auto unsupported_mode = livekit::LocalVideoTrack::ResolvePublishPlan(
+            640, 480, requested,
+            {"av1", "vp8"},
+            {"video/av1", "video/vp8"});
+        TEST_CHECK(!unsupported_mode.ok());
+
+        requested.scalability_mode = "L1T1";
+        requested.backup_codec = "av1";
+        auto duplicate_backup = livekit::LocalVideoTrack::ResolvePublishPlan(
+            640, 480, requested,
+            {"av1", "vp8"},
+            {"video/av1", "video/vp8"});
+        TEST_CHECK(!duplicate_backup.ok());
     }
 
     std::cout << "[SUCCESS] ALL Backup Codecs & Multi-Codec Unit Tests Passed!" << std::endl;

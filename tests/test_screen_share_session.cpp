@@ -198,6 +198,20 @@ void NormalAndRepeat() {
     TEST_CHECK(f.source->width() == 1920 && f.publishes == 2);
 }
 
+void CodecPreferenceSnapshot() {
+    Fixture f;
+    livekit::VideoPublishOptions options;
+    options.video_codec = "vp9";
+    options.scalability_mode = "L3T3_KEY";
+    f.Do([&] { f.share->Start({}, options); });
+    f.capture->Emit();
+    f.Until([&] { return f.State() == ScreenShareState::Active; });
+    const auto track = f.track.lock();
+    TEST_CHECK(track);
+    TEST_CHECK(track->requested_publish_options().video_codec == "vp9");
+    TEST_CHECK(track->requested_publish_options().scalability_mode == "L3T3_KEY");
+}
+
 void ScreenBindingLifecycle() {
     livekit::ScreenBinding binding;
     binding.display_name = "DISPLAY1";
@@ -620,6 +634,7 @@ void DynacastPublicationIsolation() {
 int main() {
     FrameTimestampAlignment();
     NormalAndRepeat();
+    CodecPreferenceSnapshot();
     ScreenBindingLifecycle();
     CancelPublishAndLeave();
     FailuresAndEnded();

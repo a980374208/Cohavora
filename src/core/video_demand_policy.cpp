@@ -197,7 +197,7 @@ VideoDemandPolicy::NextReconcileAt(TimePoint now) const {
         current_focus_origin_ == FocusOrigin::SelectedShare ||
         current_focus_origin_ == FocusOrigin::AutoShare;
     if (stable && current_focus_ && *stable != *current_focus_ &&
-        Find(*current_focus_) && !override_focus && focus_since_) {
+        ResolveIntentSeat(current_focus_) && !override_focus && focus_since_) {
         consider(*focus_since_ + config_.focus_minimum_residence);
     }
     return next;
@@ -248,8 +248,17 @@ const RemotePublicationInfo* VideoDemandPolicy::Find(const TrackKey& key) const 
 
 std::vector<const RemotePublicationInfo*> VideoDemandPolicy::OrderedVideo() const {
     std::vector<const RemotePublicationInfo*> result;
+    for (const auto& candidate : OrderedSeats()) {
+        if (candidate.publication) result.push_back(candidate.publication);
+    }
+    return result;
+}
+
+std::vector<VideoDemandPolicy::SeatCandidate> VideoDemandPolicy::OrderedSeats() const {
+    std::vector<SeatCandidate> result;
     if (!catalog_) return result;
     for (const auto& participant : catalog_->participants) {
+        if (participant.key.native_room_generation != catalog_->native_room_generation) continue;
         std::vector<const RemotePublicationInfo*> publications;
         for (const auto& publication : participant.publications) {
             if (publication.kind == TrackKind::Video &&
@@ -265,7 +274,12 @@ std::vector<const RemotePublicationInfo*> VideoDemandPolicy::OrderedVideo() cons
                 if (left_order != right_order) return left_order < right_order;
                 return left->key.publication_sid < right->key.publication_sid;
             });
-        result.insert(result.end(), publications.begin(), publications.end());
+        for (const auto* publication : publications) {
+            result.push_back({publication->key, publication->source, publication});
+        }
+        if (publications.empty()) {
+            result.push_back({{participant.key, 0, {}}, TrackSource::Camera, nullptr});
+        }
     }
     return result;
 }
@@ -316,6 +330,16 @@ std::optional<TrackKey> VideoDemandPolicy::ResolveIntentTrack(
     return publication->key;
 }
 
+std::optional<TrackKey> VideoDemandPolicy::ResolveIntentSeat(
+    const std::optional<TrackKey>& key) const {
+    if (!key) return std::nullopt;
+    if (!key->publication_sid.empty()) return ResolveIntentTrack(key);
+    for (const auto& candidate : OrderedSeats()) {
+        if (candidate.key == *key) return candidate.key;
+    }
+    return std::nullopt;
+}
+
 bool VideoDemandPolicy::IsAutoShare(const TrackKey& key) const {
     const auto* publication = Find(key);
     return publication && publication->source == TrackSource::ScreenShareVideo &&
@@ -360,10 +384,10 @@ void VideoDemandPolicy::RefreshAutoShare() {
 }
 
 VideoDemandPolicy::FocusChoice VideoDemandPolicy::ChooseFocus(
-    const std::vector<const RemotePublicationInfo*>& videos,
+    const std::vector<SeatCandidate>& videos,
     bool allow_auto_share,
     TimePoint now) {
-    const auto pinned = ResolveIntentTrack(viewport_.pinned);
+    const auto pinned = ResolveIntentSeat(viewport_.pinned);
     const auto selected_share = ResolveIntentTrack(
         viewport_.selected_share, TrackSource::ScreenShareVideo);
     const auto auto_share = allow_auto_share && current_auto_share_ &&
@@ -389,7 +413,7 @@ VideoDemandPolicy::FocusChoice VideoDemandPolicy::ChooseFocus(
         current_focus_origin_ == FocusOrigin::Pinned ||
         current_focus_origin_ == FocusOrigin::SelectedShare ||
         current_focus_origin_ == FocusOrigin::AutoShare;
-    const bool current_valid = current_focus_ && Find(*current_focus_);
+    const bool current_valid = ResolveIntentSeat(current_focus_).has_value();
     const auto stable = ResolveIntentTrack(stable_speaker_, TrackSource::Camera);
     if (stable) {
         if (current_focus_ && *current_focus_ == *stable) {
@@ -407,7 +431,7 @@ VideoDemandPolicy::FocusChoice VideoDemandPolicy::ChooseFocus(
         return {current_focus_, current_focus_origin_};
     }
     if (!videos.empty()) {
-        return set_focus(videos.front()->key, FocusOrigin::Fallback);
+        return set_focus(videos.front().key, FocusOrigin::Fallback);
     }
     return set_focus(std::nullopt, FocusOrigin::None);
 }
@@ -438,8 +462,8 @@ VideoDemandPlan VideoDemandPolicy::BuildPlan(TimePoint now) {
         return result;
     }
 
-    const auto videos = OrderedVideo();
-    const bool pinned = ResolveIntentTrack(viewport_.pinned).has_value();
+    const auto videos = OrderedSeats();
+    const bool pinned = ResolveIntentSeat(viewport_.pinned).has_value();
     const bool selected_share = ResolveIntentTrack(
         viewport_.selected_share, TrackSource::ScreenShareVideo).has_value();
     const bool auto_share = current_auto_share_ && IsAutoShare(*current_auto_share_);
@@ -468,7 +492,7 @@ VideoDemandPlan VideoDemandPolicy::BuildPlan(TimePoint now) {
 
 void VideoDemandPolicy::BuildGrid(
     VideoDemandPlan& plan,
-    const std::vector<const RemotePublicationInfo*>& videos,
+    const std::vector<SeatCandidate>& videos,
     uint32_t page_size,
     bool use_paging) {
     page_size = std::max<uint32_t>(1, page_size);
@@ -488,8 +512,8 @@ void VideoDemandPolicy::BuildGrid(
         grid_page_.page_size = page_size;
         if (grid_page_.anchor) {
             const auto found = std::find_if(videos.begin(), videos.end(),
-                [&](const auto* publication) {
-                    return publication->key == *grid_page_.anchor;
+                [&](const auto& candidate) {
+                    return candidate.key == *grid_page_.anchor;
                 });
             if (found != videos.end()) {
                 start = static_cast<std::size_t>(found - videos.begin());
@@ -498,7 +522,7 @@ void VideoDemandPolicy::BuildGrid(
             }
         }
         if (!grid_page_.anchor && start < videos.size()) {
-            grid_page_.anchor = videos[start]->key;
+            grid_page_.anchor = videos[start].key;
         }
     }
 
@@ -506,14 +530,14 @@ void VideoDemandPolicy::BuildGrid(
     const std::size_t limit = std::min<std::size_t>(
         videos.size(), start + std::min(page_size, config_.video_budget));
     for (std::size_t index = start; index < limit; ++index) {
-        AddSeat(plan, *videos[index], VideoSeatRole::Grid, extent);
+        AddSeat(plan, videos[index], VideoSeatRole::Grid, extent);
     }
     plan.reason = VideoDemandReason::Visible;
 }
 
 void VideoDemandPolicy::BuildFocused(
     VideoDemandPlan& plan,
-    const std::vector<const RemotePublicationInfo*>& videos,
+    const std::vector<SeatCandidate>& videos,
     VideoLayoutMode mode,
     bool allow_auto_share,
     TimePoint now) {
@@ -524,12 +548,13 @@ void VideoDemandPolicy::BuildFocused(
         plan.reason = VideoDemandReason::Visible;
         return;
     }
-    const auto* main = Find(*focus.key);
-    if (!main) return;
+    const auto main = std::find_if(videos.begin(), videos.end(),
+        [&](const auto& candidate) { return candidate.key == *focus.key; });
+    if (main == videos.end()) return;
 
-    std::vector<const RemotePublicationInfo*> other;
-    for (const auto* publication : videos) {
-        if (publication->key != main->key) other.push_back(publication);
+    std::vector<SeatCandidate> other;
+    for (const auto& candidate : videos) {
+        if (candidate.key != main->key) other.push_back(candidate);
     }
 
     if (mode == VideoLayoutMode::PictureInPicture) {
@@ -537,7 +562,7 @@ void VideoDemandPolicy::BuildFocused(
         AddSeat(plan, *main, VideoSeatRole::Main,
                 MainExtent(false), focus.origin);
         if (has_pip) {
-            AddSeat(plan, *other.front(), VideoSeatRole::PictureInPicture,
+            AddSeat(plan, other.front(), VideoSeatRole::PictureInPicture,
                     PictureInPictureExtent());
         }
         plan.page = 0;
@@ -559,8 +584,8 @@ void VideoDemandPolicy::BuildFocused(
         sidebar_page_.page_size = side_limit;
         if (sidebar_page_.anchor) {
             const auto found = std::find_if(other.begin(), other.end(),
-                [&](const auto* publication) {
-                    return publication->key == *sidebar_page_.anchor;
+                [&](const auto& candidate) {
+                    return candidate.key == *sidebar_page_.anchor;
                 });
             if (found != other.end()) {
                 start = static_cast<std::size_t>(found - other.begin());
@@ -569,7 +594,7 @@ void VideoDemandPolicy::BuildFocused(
             }
         }
         if (!sidebar_page_.anchor && start < other.size()) {
-            sidebar_page_.anchor = other[start]->key;
+            sidebar_page_.anchor = other[start].key;
         }
         const auto remaining = start < other.size() ? other.size() - start : 0;
         const uint32_t side_count = static_cast<uint32_t>(
@@ -578,7 +603,7 @@ void VideoDemandPolicy::BuildFocused(
                 MainExtent(side_count != 0), focus.origin);
         const auto side_extent = SidebarExtent(side_count);
         for (uint32_t index = 0; index != side_count; ++index) {
-            AddSeat(plan, *other[start + index], VideoSeatRole::Sidebar,
+            AddSeat(plan, other[start + index], VideoSeatRole::Sidebar,
                     side_extent);
         }
     }
@@ -587,16 +612,22 @@ void VideoDemandPolicy::BuildFocused(
 }
 
 void VideoDemandPolicy::AddSeat(VideoDemandPlan& plan,
-                                const RemotePublicationInfo& publication,
+                                const SeatCandidate& candidate,
                                 VideoSeatRole role,
                                 SeatExtent extent,
                                 FocusOrigin origin) {
     if (plan.visible_seats.size() >= config_.video_budget) return;
     VideoSeat seat;
-    seat.key = publication.key;
-    seat.source = publication.source;
+    seat.key = candidate.key;
+    seat.source = candidate.source;
     seat.role = role;
-    seat.reason = ReasonForFocus(origin, publication.source);
+    seat.reason = ReasonForFocus(origin, candidate.source);
+    if (!candidate.publication) {
+        plan.visible_seats.push_back(seat);
+        return;
+    }
+    const auto& publication = *candidate.publication;
+    seat.subscription_error = publication.subscription_error;
     if (!publication.subscription_allowed) {
         seat.reason = VideoDemandReason::PermissionDenied;
     } else if (publication.muted) {
@@ -738,7 +769,7 @@ bool VideoDemandPolicy::SamePlan(const VideoDemandPlan& left,
             lhs.role != rhs.role ||
             lhs.width != rhs.width || lhs.height != rhs.height ||
             lhs.quality != rhs.quality || lhs.priority != rhs.priority ||
-            lhs.reason != rhs.reason) {
+            lhs.reason != rhs.reason || lhs.subscription_error != rhs.subscription_error) {
             return false;
         }
     }
