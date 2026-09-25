@@ -1,0 +1,73 @@
+From 765f70d55483e2a5bafd11cbf9d8deb5f1a99b19 Mon Sep 17 00:00:00 2001
+From: Nfrederiksen <nicholas.frederiksen@eyevinn.se>
+Date: Mon, 15 Dec 2025 14:56:40 +0100
+Subject: [PATCH] Fix AudioEncoderCopyRed decrementing past begin()
+
+Backport the upstream WebRTC fix from commit
+765f70d55483e2a5bafd11cbf9d8deb5f1a99b19.
+
+The post-decrement in the loop condition decrements begin() after the
+comparison. MSVC debug iterators correctly reject that undefined operation.
+Check the boundary first and decrement only when an element is available.
+---
+ .../codecs/red/audio_encoder_copy_red.cc           |  3 ++-
+ .../codecs/red/audio_encoder_copy_red_unittest.cc  | 30 ++++++++++++++++++++++
+ 2 files changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/modules/audio_coding/codecs/red/audio_encoder_copy_red.cc b/modules/audio_coding/codecs/red/audio_encoder_copy_red.cc
+index ae0382c129..b40a1918cb 100644
+--- a/modules/audio_coding/codecs/red/audio_encoder_copy_red.cc
++++ b/modules/audio_coding/codecs/red/audio_encoder_copy_red.cc
+@@ -153,7 +153,8 @@ AudioEncoder::EncodedInfo AudioEncoderCopyRed::EncodeImpl(
+
+   // Iterate backwards and append the data.
+   size_t header_offset = 0;
+-  while (it-- != redundant_encodings_.begin()) {
++  while (it != redundant_encodings_.begin()) {
++    --it;
+     encoded->AppendData(it->second);
+
+     const uint32_t timestamp_delta =
+diff --git a/modules/audio_coding/codecs/red/audio_encoder_copy_red_unittest.cc b/modules/audio_coding/codecs/red/audio_encoder_copy_red_unittest.cc
+index 017ec78f1c..b1805f4459 100644
+--- a/modules/audio_coding/codecs/red/audio_encoder_copy_red_unittest.cc
++++ b/modules/audio_coding/codecs/red/audio_encoder_copy_red_unittest.cc
+@@ -651,6 +651,36 @@ TEST_F(AudioEncoderCopyRedTest, AvoidRedundantNonSpeechEncoding) {
+   EXPECT_EQ(encoded_.size(), 5u + 100u + 200u);
+ }
+
++TEST_F(AudioEncoderCopyRedTest, SingleRedundantPathNoIteratorUnderflow) {
++  const int primary_payload_type = red_payload_type_ + 1;
++  AudioEncoder::EncodedInfo info;
++  info.payload_type = primary_payload_type;
++  info.encoded_bytes = 10;
++  info.encoded_timestamp = timestamp_;
++
++  // First encode seeds the redundancy list so the next encode has exactly one
++  // older payload to include as redundancy.
++  EXPECT_CALL(*mock_encoder_, EncodeImpl(_, _, _))
++      .WillOnce(MockAudioEncoder::FakeEncoding(info));
++  Encode();
++
++  // Second encode yields a primary payload plus that single redundant payload.
++  // Running this path makes sure we handle the iterator safely in stricter
++  // STL builds.
++  timestamp_ += 960;
++  info.encoded_timestamp = timestamp_;
++  EXPECT_CALL(*mock_encoder_, EncodeImpl(_, _, _))
++      .WillOnce(MockAudioEncoder::FakeEncoding(info));
++  Encode();
++
++  EXPECT_FALSE(encoded_.empty());
++  EXPECT_EQ(encoded_.size(), encoded_info_.encoded_bytes);
++  ASSERT_EQ(encoded_info_.redundant.size(), 2u);
++  EXPECT_EQ(encoded_info_.payload_type, red_payload_type_);
++  EXPECT_EQ(encoded_info_.redundant[0].payload_type, primary_payload_type);
++  EXPECT_EQ(encoded_info_.redundant[1].payload_type, primary_payload_type);
++}
++
+ #if GTEST_HAS_DEATH_TEST && !defined(WEBRTC_ANDROID)
+
+ // This test fixture tests various error conditions that makes the
+--
+2.51.0.windows.1
