@@ -1,4 +1,5 @@
 set(LIVEKIT_PROJECT_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../..")
+set(CMAKE_AUTOMOC ON)
 
 add_subdirectory(tdesktop)
 foreach(livekit_desktop_target IN ITEMS
@@ -15,11 +16,10 @@ add_library(cohavora_ui_theme OBJECT
     app_theme.h
     ${cohavora_ui_theme_resources})
 target_include_directories(cohavora_ui_theme PUBLIC "${LIVEKIT_PROJECT_SOURCE_DIR}")
-target_include_directories(cohavora_ui_theme PRIVATE
-    ${QT_PATH}/include
-    ${QT_PATH}/include/QtCore
-    ${QT_PATH}/include/QtGui
-    ${QT_PATH}/include/QtWidgets)
+target_link_libraries(cohavora_ui_theme PRIVATE
+    Qt5::Core
+    Qt5::Gui
+    Qt5::Widgets)
 set_target_properties(cohavora_ui_theme PROPERTIES AUTOMOC OFF FOLDER "resources")
 
 include("${LIVEKIT_PROJECT_SOURCE_DIR}/cmake/UiTranslations.cmake")
@@ -37,7 +37,9 @@ add_library(cohavora_whiteboard_model STATIC
     ../core/whiteboard/whiteboard_runtime.cpp
     ../core/whiteboard/whiteboard_runtime.h)
 target_include_directories(cohavora_whiteboard_model PUBLIC "${LIVEKIT_PROJECT_SOURCE_DIR}")
-target_link_libraries(cohavora_whiteboard_model PRIVATE nlohmann_json::nlohmann_json OpenSSL::Crypto)
+target_link_libraries(cohavora_whiteboard_model PRIVATE
+    OpenSSL::Crypto
+    nlohmann_json::nlohmann_json)
 set_target_properties(cohavora_whiteboard_model PROPERTIES AUTOMOC OFF FOLDER "whiteboard")
 
 add_library(cohavora_whiteboard_ui STATIC
@@ -54,7 +56,5 @@ set_target_properties(cohavora_whiteboard_ui PROPERTIES AUTOMOC ON FOLDER "white
 if(MSVC)
     foreach(target IN ITEMS cohavora_whiteboard_model cohavora_whiteboard_ui)
         target_compile_options(${target} PRIVATE /utf-8)
-        target_compile_definitions(${target} PUBLIC _ITERATOR_DEBUG_LEVEL=0)
-        set_target_properties(${target} PROPERTIES MSVC_RUNTIME_LIBRARY "MultiThreaded")
     endforeach()
 endif()

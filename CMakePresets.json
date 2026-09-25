@@ -1,0 +1,65 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 25,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-vs2026-base",
+      "hidden": true,
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/out/build/${presetName}",
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static"
+      }
+    },
+    {
+      "name": "windows-vs2026-dev",
+      "displayName": "Windows VS 2026 - Development",
+      "inherits": "windows-vs2026-base",
+      "cacheVariables": {
+        "COHAVORA_BUILD_MEETING_APP": "ON",
+        "COHAVORA_BUILD_SAMPLES": "ON"
+      }
+    },
+    {
+      "name": "windows-vs2026-release",
+      "displayName": "Windows VS 2026 - Release",
+      "inherits": "windows-vs2026-base",
+      "cacheVariables": {
+        "COHAVORA_BUILD_MEETING_APP": "ON",
+        "COHAVORA_BUILD_SAMPLES": "OFF",
+        "COHAVORA_REQUIRE_UI_TRANSLATIONS": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "dev-debug",
+      "configurePreset": "windows-vs2026-dev",
+      "configuration": "Debug",
+      "targets": [
+        "cohavora_app"
+      ]
+    },
+    {
+      "name": "all-debug",
+      "configurePreset": "windows-vs2026-dev",
+      "configuration": "Debug",
+      "targets": [
+        "ALL_BUILD"
+      ]
+    },
+    {
+      "name": "release",
+      "configurePreset": "windows-vs2026-release",
+      "configuration": "Release",
+      "targets": [
+        "cohavora_app"
+      ]
+    }
+  ]
+}

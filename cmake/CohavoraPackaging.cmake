@@ -43,7 +43,7 @@ set(CPACK_NSIS_UNINSTALL_NAME "Uninstall Cohavora")
 set(CPACK_NSIS_MODIFY_PATH OFF)
 set(CPACK_NSIS_ENABLE_UNINSTALL_BEFORE_INSTALL ON)
 
-# Keep Debug/RelWithDebInfo artifacts distinct from the Release distribution.
+# Make the single-config selection available to the per-generator CPack hook.
 if(NOT CMAKE_CONFIGURATION_TYPES AND CMAKE_BUILD_TYPE)
     set(CPACK_BUILD_CONFIG "${CMAKE_BUILD_TYPE}")
 endif()
