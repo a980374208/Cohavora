@@ -137,6 +137,9 @@ const char* MediaExpectationReasonName(MediaExpectationReason reason) noexcept;
 
 struct VideoActivityProbe {
     std::atomic<bool> active{true};
+    std::atomic<std::uint64_t> on_frame_count{0};
+    std::atomic<std::uint64_t> delivered_frame_count{0};
+    std::atomic<std::int64_t> last_on_frame_ns{0};
     std::atomic<std::int64_t> last_frame_ns{0};
     std::atomic<std::uint32_t> width{0};
     std::atomic<std::uint32_t> height{0};

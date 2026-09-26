@@ -107,6 +107,8 @@ StatsReport ParseRtcStatsReport(const webrtc::RTCStatsReport& report) {
             InboundRtpStreamStats item;
             item.id = inbound.id();
             item.kind_available = inbound.kind.has_value();
+            item.track_identifier_available = inbound.track_identifier.has_value();
+            item.mid_available = inbound.mid.has_value();
             item.frames_decoded_available = inbound.frames_decoded.has_value();
             item.frames_dropped_available = inbound.frames_dropped.has_value();
             item.frame_width_available = inbound.frame_width.has_value();
@@ -155,6 +157,8 @@ StatsReport ParseRtcStatsReport(const webrtc::RTCStatsReport& report) {
                 inbound.jitter_buffer_emitted_count.has_value();
             item.audio_level_available = inbound.audio_level.has_value();
             if (item.kind_available) item.kind = *inbound.kind;
+            if (item.track_identifier_available) item.track_identifier = *inbound.track_identifier;
+            if (item.mid_available) item.mid = *inbound.mid;
             if (inbound.ssrc.has_value()) item.ssrc = std::to_string(*inbound.ssrc);
             if (inbound.bytes_received.has_value()) item.bytes_received = *inbound.bytes_received;
             if (inbound.packets_received.has_value()) item.packets_received = *inbound.packets_received;

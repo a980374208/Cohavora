@@ -20,6 +20,8 @@ struct RtcStatsData {
 struct InboundRtpStreamStats {
     std::string id;
     std::string kind; // "audio" or "video"
+    std::string track_identifier;
+    std::string mid;
     std::string ssrc;
     std::uint64_t bytes_received{0};
     std::uint64_t packets_received{0};
@@ -60,6 +62,8 @@ struct InboundRtpStreamStats {
 
     // A missing native member is not a measured zero.
     bool kind_available{false};
+    bool track_identifier_available{false};
+    bool mid_available{false};
     bool frames_decoded_available{false};
     bool frames_dropped_available{false};
     bool frame_width_available{false};

@@ -70,6 +70,8 @@ public:
         uint64_t delivered_to_qt_cpu = 0;
         uint64_t qt_cpu_conversion_failures = 0;
         uint64_t rejected_track_attachments = 0;
+        uint64_t track_frames_received = 0;
+        uint64_t lease_rejected_frames = 0;
         size_t attached_track_count = 0;
         Backend backend = Backend::QtCpu;
     };
@@ -117,6 +119,8 @@ private:
         std::atomic<uint64_t> delivered_to_qt_cpu{0};
         std::atomic<uint64_t> qt_cpu_conversion_failures{0};
         std::atomic<uint64_t> rejected_track_attachments{0};
+        std::atomic<uint64_t> track_frames_received{0};
+        std::atomic<uint64_t> lease_rejected_frames{0};
         std::atomic<uint64_t> next_track_binding_generation{1};
     };
 
