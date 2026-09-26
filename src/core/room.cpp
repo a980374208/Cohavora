@@ -22,6 +22,7 @@
 #include <algorithm>
 #include "api/jsep.h"
 #include "api/video/video_sink_interface.h"
+#include "pc/session_description.h"
 
 namespace livekit {
 
@@ -7046,7 +7047,7 @@ void Room::AttachRemoteTrackToParticipant(
         }
         // 查找已有 publication
         pub = participant->get_publication(track_id);
-        if (!pub) {
+        if (!pub && track_id.rfind("TR_", 0) != 0) {
             // 尝试按类型查找未绑定 rtc_track 的已有 publication
             for (const auto& [sid, p] : participant->tracks()) {
                 if (p && p->track() && p->track()->kind() == kind && !p->track()->rtc_track()) {
@@ -7401,6 +7402,8 @@ void Room::AttachRemoteTrackToParticipant(
             if (!media_binding->active.load(std::memory_order_acquire)) return;
             const auto frame_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 source_time.time_since_epoch()).count();
+            telemetry_probe->delivered_frame_count.fetch_add(
+                1, std::memory_order_relaxed);
             const auto previous_frame_ns = telemetry_probe->last_frame_ns.exchange(
                 frame_ns, std::memory_order_acq_rel);
             telemetry_probe->width.store(
@@ -7479,7 +7482,7 @@ void Room::AttachRemoteTrackToParticipant(
             }
         },
             [render_telemetry_key, telemetry_room_generation, binding_serial,
-             render_telemetry_observer, render_frame_token](
+             render_telemetry_observer, render_frame_token, telemetry_probe](
                     std::chrono::steady_clock::time_point decoded_at) {
                 render::RenderFrameMetadata metadata;
                 metadata.series_key = render_telemetry_key;
@@ -7487,6 +7490,12 @@ void Room::AttachRemoteTrackToParticipant(
                 metadata.binding_epoch = binding_serial;
                 metadata.frame_token = render_frame_token->fetch_add(
                     1, std::memory_order_relaxed) + 1;
+                telemetry_probe->on_frame_count.store(
+                    metadata.frame_token, std::memory_order_relaxed);
+                telemetry_probe->last_on_frame_ns.store(
+                    std::chrono::duration_cast<std::chrono::nanoseconds>(
+                        decoded_at.time_since_epoch()).count(),
+                    std::memory_order_release);
                 metadata.decoded_at = decoded_at;
                 metadata.observer = render_telemetry_observer;
                 return metadata;
@@ -7614,11 +7623,33 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
     if (!track) return;
     
     std::string track_id = track->id();
+    std::function<void(bool)> duplicate_probe;
+    bool duplicate = false;
+    bool same_track_object = false;
     {
         std::lock_guard lock(room_mutex_);
         if (processed_remote_track_ids_.find(track_id) != processed_remote_track_ids_.end()) {
-            return; // 已经成功挂载并处理过这个 track
+            duplicate = true;
+            if (connect_attempt_test_hooks_) {
+                duplicate_probe = connect_attempt_test_hooks_->on_remote_track_duplicate;
+                if (duplicate_probe) {
+                    for (const auto& [_, participant] : remote_participants_) {
+                        if (!participant) continue;
+                        for (const auto& [sid, publication] : participant->tracks()) {
+                            (void)sid;
+                            if (publication && publication->track()) {
+                                same_track_object |=
+                                    publication->track()->rtc_track().get() == track.get();
+                            }
+                        }
+                    }
+                }
+            }
         }
+    }
+    if (duplicate) {
+        if (duplicate_probe) duplicate_probe(same_track_object);
+        return;
     }
 
     // 从 receiver 的 stream_ids 解包 (msid: <participantSid>|<trackSid>)
@@ -7642,7 +7673,43 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
         track_sid = track_id;
     }
 
-    Log("WEBRTC", "ON_TRACK_RESOLVE", "Downstream track resolved: StreamID=" + stream_id + ", ParticipantSID=" + participant_sid + ", TrackSID=" + track_sid + ", Kind=" + std::string(track->kind()));
+    OnRemoteTrackResolved(receiver, track, std::move(participant_sid),
+                          std::move(track_sid), generation);
+}
+
+void Room::OnRemoteTrackResolved(
+    webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+    webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track,
+    std::string participant_sid, std::string track_sid, uint64_t generation) {
+    if (!track || participant_sid.empty()) return;
+    if (track_sid.empty()) track_sid = track->id();
+
+    std::vector<std::pair<std::shared_ptr<RemoteTrackPublication>, uint64_t>> old_bindings;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation)) return;
+        for (const auto& [owner_sid, owner] : remote_participants_) {
+            if (!owner) continue;
+            for (const auto& [sid, publication] : owner->tracks()) {
+                auto remote = std::dynamic_pointer_cast<RemoteTrackPublication>(publication);
+                if (!remote || !remote->has_media_binding() ||
+                    remote->media_track_id() != track->id()) continue;
+                if (owner_sid == participant_sid && sid == track_sid &&
+                    remote->track() && remote->track()->rtc_track().get() == track.get()) {
+                    return;
+                }
+                const auto current = current_remote_binding_serials_.find(remote.get());
+                if (current != current_remote_binding_serials_.end()) {
+                    old_bindings.emplace_back(std::move(remote), current->second);
+                }
+            }
+        }
+    }
+    for (const auto& [publication, serial] : old_bindings) {
+        DetachRemotePublicationMedia(publication.get(), true, serial);
+    }
+
+    Log("WEBRTC", "ON_TRACK_RESOLVE", "Downstream track resolved: ParticipantSID=" + participant_sid + ", TrackSID=" + track_sid + ", Kind=" + std::string(track->kind()));
 
     std::shared_ptr<RemoteParticipant> participant;
     BeforeNativeEventCommit(generation);
@@ -8771,6 +8838,7 @@ void Room::HandleOfferSignal(
 
             std::cout << "[WebRTC] SetRemoteDescription offer succeeded. Generating SDP Answer..." << std::endl;
             self->Log("SIGNAL", "OFFER_APPLIED", "Server Offer applied. Generating SDP Answer...");
+            self->ReconcileRemoteReceivers(pc, event_generation);
             WebRTCManager::Instance().CreateAnswer(pc, self->executor_,
                 [self, client, pc, event_generation](
                     const std::string& sdp,
@@ -8918,6 +8986,7 @@ void Room::HandleAnswerSignal(
                     self->CompleteNegotiation(err, event_generation);
                 } else {
                     self->Log("SIGNAL", "PUB_STABLE", "Publisher PC negotiation completed (Answer applied)");
+                    self->ReconcileRemoteReceivers(pub_pc, event_generation);
                     std::vector<PendingIceCandidate> pending_cands;
                     bool need_retry = false;
                     {
@@ -9052,6 +9121,7 @@ void Room::HandleAnswerSignal(
                               secure_log::SdpSummary("failed_subscriber_answer", answer_sdp));
                 } else {
                     self->Log("WEBRTC", "SUB_STABLE", "Subscriber RemoteDescription (Answer) applied; signaling state is STABLE");
+                    self->ReconcileRemoteReceivers(sub_pc, event_generation);
 
                     // 在锁外部安全重放早期候选，彻底避免死锁
                     if (!pending_cands.empty()) {
@@ -10290,6 +10360,61 @@ void Room::ClearTrackSubscriptionErrorLocked(
     publication->set_subscription_error(TrackPublication::SubscriptionError::None);
     EnqueueParticipantEventLocked(MakeTrackEventLocked(
         ParticipantEventKind::TrackSubscriptionError, participant, publication, false));
+}
+
+namespace {
+
+struct NegotiatedRemoteTrack {
+    webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver;
+    webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track;
+    std::string stream_id;
+};
+
+std::vector<NegotiatedRemoteTrack> SnapshotNegotiatedRemoteTracks(
+    const webrtc::scoped_refptr<webrtc::PeerConnectionInterface>& pc) {
+    std::vector<NegotiatedRemoteTrack> result;
+    if (!pc) return result;
+    auto* signaling_thread = WebRTCManager::Instance().signaling_thread();
+    if (!signaling_thread) return result;
+    signaling_thread->BlockingCall([&] {
+        const auto* remote = pc->remote_description();
+        const auto* description = remote ? remote->description() : nullptr;
+        if (!description) return;
+        for (const auto& transceiver : pc->GetTransceivers()) {
+            if (!transceiver || !transceiver->receiver() || !transceiver->mid()) continue;
+            const auto* content = description->GetContentByName(*transceiver->mid());
+            if (!content || content->rejected || !content->media_description()) continue;
+            const auto& streams = content->media_description()->streams();
+            if (streams.size() != 1 || streams.front().first_stream_id().empty()) continue;
+            auto track = transceiver->receiver()->track();
+            if (track) {
+                result.push_back({transceiver->receiver(), std::move(track),
+                                  streams.front().first_stream_id()});
+            }
+        }
+    });
+    return result;
+}
+
+} // namespace
+
+void Room::ReconcileRemoteReceivers(
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
+    uint64_t generation) {
+    for (auto& negotiated : SnapshotNegotiatedRemoteTracks(pc)) {
+        auto [participant_sid, track_sid] = UnpackStreamId(negotiated.stream_id);
+        if (participant_sid.empty()) continue;
+        callback_gate_->Post(
+            [weak = weak_from_this(), receiver = std::move(negotiated.receiver),
+             track = std::move(negotiated.track), participant_sid = std::move(participant_sid),
+             track_sid = std::move(track_sid), generation]() mutable {
+                if (auto room = weak.lock()) {
+                    room->OnRemoteTrackResolved(
+                        std::move(receiver), std::move(track),
+                        std::move(participant_sid), std::move(track_sid), generation);
+                }
+            });
+    }
 }
 
 void Room::UpdateTrackSubscriptionError(

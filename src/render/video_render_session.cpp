@@ -154,10 +154,12 @@ VideoRenderSession::AttachResult VideoRenderSession::AttachSelection(
             if (!state || !state->active.load(std::memory_order_acquire)) {
                 return;
             }
+            state->track_frames_received.fetch_add(1, std::memory_order_relaxed);
             if (validates_lease &&
                 (!IsTrackTicketActive(track_ticket, track_key) ||
                  !IsMediaBindingTicketActive(
                      media_binding_ticket, media_binding_key))) {
+                state->lease_rejected_frames.fetch_add(1, std::memory_order_relaxed);
                 return;
             }
             state->router->SubmitBound(track_id, generation, binding_generation, std::move(frame));
@@ -310,6 +312,8 @@ VideoRenderSession::Statistics VideoRenderSession::statistics() const noexcept {
         state->delivered_to_qt_cpu.load(std::memory_order_relaxed),
         state->qt_cpu_conversion_failures.load(std::memory_order_relaxed),
         state->rejected_track_attachments.load(std::memory_order_relaxed),
+        state->track_frames_received.load(std::memory_order_relaxed),
+        state->lease_rejected_frames.load(std::memory_order_relaxed),
         tracks_.size(),
         backend_,
     };

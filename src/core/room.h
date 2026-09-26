@@ -382,6 +382,7 @@ private:
         std::function<void(uint64_t, ConnectionState)> before_lifecycle_listener_delivery;
         std::function<void(uint64_t)> before_native_event_commit;
         std::function<void(uint64_t)> before_republish_listener_delivery;
+        std::function<void(bool)> on_remote_track_duplicate;
     };
     std::shared_ptr<ConnectAttemptTestHooks> connect_attempt_test_hooks_;
     struct StreamDeliveryTestHooks {
@@ -452,6 +453,13 @@ private:
                          webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, uint64_t generation);
     void OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
                             webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, uint64_t generation);
+    void OnRemoteTrackResolved(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+                               webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track,
+                               std::string participant_sid, std::string track_sid,
+                               uint64_t generation);
+    void ReconcileRemoteReceivers(
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
+        uint64_t generation);
     void OnRemoteDataChannel(webrtc::scoped_refptr<webrtc::DataChannelInterface> channel, uint64_t generation);
     void OnLocalIceCandidate(const std::string& sdp, const std::string& mid, int index, int pc_type, uint64_t generation);
     void OnIceConnected(uint64_t generation);

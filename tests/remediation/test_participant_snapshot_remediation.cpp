@@ -8,6 +8,7 @@
 #include "src/net/service_endpoint_policy.h"
 #include "src/rtc/webrtc_manager.h"
 #include "src/render/owned_i420_frame.h"
+#include "src/telemetry/stats.h"
 #include "src/ui/meeting_room_window.h"
 #include "src/ui/meeting_log_console.h"
 #include "src/ui/telemetry_dialogs.h"
@@ -17,6 +18,7 @@
 #include "src/ui/whiteboard/whiteboard_panel.h"
 #include "src/ui/app_theme.h"
 #include "src/telemetry/telemetry_report.h"
+#include "tests/runtime/meeting_soak_adapter.h"
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QDialog>
@@ -104,6 +106,14 @@ rpl::producer<> on_main_update_requests() { return rpl::never<>(); }
 }
 
 namespace OpenMeeting {
+struct SoakStatsCache {
+    std::mutex mutex;
+    livekit::RoomStatsReport report;
+    std::chrono::steady_clock::time_point updated{};
+    std::weak_ptr<livekit::Room> source_room;
+    quint64 sequence = 0;
+    std::atomic<bool> pending{false};
+};
 class SessionManagerTestAccess final {
 public:
     using ScopedSession = std::unique_ptr<SessionManager, void (*)(SessionManager *)>;
@@ -113,6 +123,71 @@ public:
 };
 class MeetingCoordinatorTestAccess final {
 public:
+    static void soakCatalogCount(MeetingCoordinator &owner,
+            const std::shared_ptr<std::atomic<quint64>> &count,
+            const std::shared_ptr<std::atomic<bool>> &pending) {
+        auto session = owner._sessionRuntime;
+        if (!session || pending->exchange(true)) return;
+        if (!session->post([session, count, pending] {
+            quint64 videos = 0;
+            for (const auto &participant : session->publicationCatalogOnStrand().participants)
+                for (const auto &publication : participant.publications)
+                    if (publication.kind == livekit::TrackKind::Video
+                        && !publication.muted && publication.subscription_allowed) ++videos;
+            count->store(videos);
+            pending->store(false);
+        })) pending->store(false);
+    }
+    static void soakStats(MeetingCoordinator &owner,
+            const std::shared_ptr<SoakStatsCache> &cache) {
+        auto session = owner._sessionRuntime;
+        auto room = owner._room;
+        if (!session || !room || owner._state != MeetingState::InMeeting
+            || cache->pending.exchange(true)) return;
+        {
+            std::lock_guard lock(cache->mutex);
+            if (cache->source_room.lock() != room) {
+                cache->source_room = room;
+                cache->report = {};
+                cache->updated = {};
+                cache->sequence = 0;
+            }
+        }
+        if (!session->post([session, room, cache] {
+            asio::co_spawn(session->strand(), room->GetStats(),
+                [session, room, cache](std::exception_ptr error,
+                        livekit::RoomStatsReport report) {
+                    if (!error) {
+                        std::lock_guard lock(cache->mutex);
+                        if (cache->source_room.lock() == room) {
+                            cache->report = std::move(report);
+                            cache->updated = std::chrono::steady_clock::now();
+                            ++cache->sequence;
+                        }
+                    }
+                    cache->pending.store(false);
+                });
+        })) cache->pending.store(false);
+    }
+    static bool soakReconnect(MeetingCoordinator &owner, bool full,
+            std::function<void(bool)> completion) {
+        auto session = owner._sessionRuntime;
+        auto room = owner._room;
+        auto gate = owner._uiGate;
+        if (!session || !room || owner._state != MeetingState::InMeeting) return false;
+        return session->post([session, room, gate, full, completion = std::move(completion)] {
+            if (!session->acceptsDataOnStrand()) {
+                gate->Post([completion](MeetingCoordinator *) { completion(false); });
+                return;
+            }
+            asio::co_spawn(session->strand(), room->SimulateScenarioAsync(full
+                ? livekit::SimulateScenarioType::FullReconnect
+                : livekit::SimulateScenarioType::SignalReconnect),
+                [session, room, gate, completion](std::exception_ptr failure) {
+                    gate->Post([completion, ok = !failure](MeetingCoordinator *) { completion(ok); });
+                });
+        });
+    }
     static std::shared_ptr<MeetingCoordinator> create(SessionManager &session) {
         return std::shared_ptr<MeetingCoordinator>(new MeetingCoordinator(session, {}, nullptr));
     }
@@ -206,6 +281,26 @@ public:
         webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, const std::string &sid) {
         room.AttachRemoteTrackToParticipant(participant, std::move(track), nullptr, sid);
     }
+    static void scanReusedReceiver(Room &room,
+            webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver) {
+        room.OnRemoteTrackAdded(receiver, receiver->track(), 1);
+    }
+    static void resolveReusedReceiver(Room &room,
+            webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
+            const std::string &participantSid, const std::string &trackSid) {
+        room.OnRemoteTrackResolved(receiver, receiver->track(),
+            participantSid, trackSid, 1);
+    }
+    static std::shared_ptr<telemetry::VideoActivityProbe> videoProbe(
+            Room &room, const std::string &trackSid) {
+        std::lock_guard lock(room.room_mutex_);
+        for (const auto &binding : room.remote_track_sinks_) {
+            if (binding.track_key.publication_sid == trackSid) {
+                return binding.telemetry_probe;
+            }
+        }
+        return {};
+    }
     static std::size_t bindingCount(Room &room) {
         std::lock_guard lock(room.room_mutex_);
         return room.remote_track_sinks_.size();
@@ -241,6 +336,236 @@ public:
         if (!room.connect_attempt_test_hooks_) return;
         room.connect_attempt_test_hooks_->before_subscription_send = {};
         room.connect_attempt_test_hooks_->before_subscription_sync_send = {};
+    }
+    static void soakDuplicateProbe(Room &room,
+            const std::shared_ptr<std::atomic<quint64>> &same,
+            const std::shared_ptr<std::atomic<quint64>> &replacement) {
+        std::lock_guard lock(room.room_mutex_);
+        if (!room.connect_attempt_test_hooks_)
+            room.connect_attempt_test_hooks_ =
+                std::make_shared<Room::ConnectAttemptTestHooks>();
+        room.connect_attempt_test_hooks_->on_remote_track_duplicate =
+            [same, replacement](bool sameTrack) {
+                (sameTrack ? same : replacement)->fetch_add(1, std::memory_order_relaxed);
+            };
+    }
+    static std::pair<quint64, quint64> soakSelectedNativeFrames(
+            Room &room, const std::vector<TrackKey> &selected) {
+        const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const auto recent = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::seconds(3)).count();
+        quint64 active = 0, fresh = 0;
+        std::lock_guard lock(room.room_mutex_);
+        for (const auto &binding : room.remote_track_sinks_) {
+            if (std::find(selected.begin(), selected.end(), binding.track_key) == selected.end()
+                || !binding.media_binding || !binding.media_binding->active.load()
+                || !binding.telemetry_probe || !binding.telemetry_probe->active.load()) continue;
+            ++active;
+            const auto last = binding.telemetry_probe->last_frame_ns.load();
+            fresh += last > 0 && now >= last && now - last < recent;
+        }
+        return {active, fresh};
+    }
+    static QJsonArray soakSelectedTrackProbes(
+            Room &room, const std::vector<TrackKey> &selected,
+            const RoomStatsReport *stats) {
+        const auto digest = [](const std::string &value) {
+            return QString::fromLatin1(QCryptographicHash::hash(
+                QByteArray::fromStdString(value), QCryptographicHash::Sha256)
+                    .toHex().left(16));
+        };
+        const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        QJsonArray result;
+        for (const auto &key : selected) {
+            std::shared_ptr<RemoteTrackPublication> publication;
+            std::shared_ptr<telemetry::VideoActivityProbe> sinkProbe;
+            std::optional<bool> sentSubscribed;
+            bool intentPresent = false, intentSubscribed = false;
+            bool subscriptionDirty = false, settingsDirty = false;
+            bool sinkActive = false;
+            quint64 intentPolicyRevision = 0;
+            quint64 currentBindingSerial = 0, sinkBindingSerial = 0;
+            quint64 sinkBindingCount = 0;
+            std::string rtcTrackId;
+            std::string bindingRtcTrackId;
+            std::string publicationMediaTrackId;
+            {
+                std::lock_guard lock(room.room_mutex_);
+                const auto participant = room.remote_participants_.find(key.participant.sid);
+                if (participant != room.remote_participants_.end() && participant->second) {
+                    auto candidate = participant->second->get_remote_publication(
+                        key.publication_sid);
+                    const auto membership = candidate
+                        ? room.track_memberships_.find(candidate.get())
+                        : room.track_memberships_.end();
+                    if (membership != room.track_memberships_.end() &&
+                        membership->second && membership->second->key == key) {
+                        publication = std::move(candidate);
+                    }
+                }
+                const auto intentKey = room.MakeSubscriptionIntentKeyLocked(
+                    key.participant.sid, key.participant.identity, key.publication_sid);
+                if (const auto *intent = room.FindSubscriptionIntentLocked(intentKey)) {
+                    intentPresent = true;
+                    intentSubscribed = intent->subscribed;
+                    sentSubscribed = intent->sent_subscribed;
+                    subscriptionDirty = intent->subscription_dirty;
+                    settingsDirty = intent->settings_dirty;
+                    intentPolicyRevision = intent->policy_revision;
+                }
+                if (publication) {
+                    publicationMediaTrackId = publication->media_track_id();
+                    const auto current = room.current_remote_binding_serials_.find(
+                        publication.get());
+                    if (current != room.current_remote_binding_serials_.end()) {
+                        currentBindingSerial = current->second;
+                    }
+                }
+                for (const auto &binding : room.remote_track_sinks_) {
+                    if (binding.track_key != key) continue;
+                    ++sinkBindingCount;
+                    if (sinkProbe && binding.binding_serial != currentBindingSerial) continue;
+                    sinkProbe = binding.telemetry_probe;
+                    sinkActive = binding.media_binding && binding.media_binding->active.load()
+                        && sinkProbe && sinkProbe->active.load();
+                    sinkBindingSerial = binding.binding_serial;
+                    bindingRtcTrackId = binding.rtc_track_id;
+                }
+            }
+            rtcTrackId = bindingRtcTrackId.empty()
+                ? publicationMediaTrackId : bindingRtcTrackId;
+            const auto lastFrame = sinkProbe ? sinkProbe->last_frame_ns.load() : 0;
+            const auto sinkAgeMs = lastFrame > 0 && now >= lastFrame
+                ? (now - lastFrame) / 1000000 : -1;
+            const auto lastOnFrame = sinkProbe ? sinkProbe->last_on_frame_ns.load() : 0;
+            const auto onFrameAgeMs = lastOnFrame > 0 && now >= lastOnFrame
+                ? (now - lastOnFrame) / 1000000 : -1;
+            quint64 bytes = 0, packets = 0, decoded = 0, received = 0;
+            quint64 matches = 0;
+            bool bytesAvailable = true, packetsAvailable = true;
+            bool decodedAvailable = true, receivedAvailable = true;
+            QCryptographicHash statsIds(QCryptographicHash::Sha256);
+            if (stats && !rtcTrackId.empty()) {
+                for (const auto &report : stats->reports) {
+                    for (const auto &stream : report.inbound_rtp) {
+                        if (!stream.kind_available || stream.kind != "video" ||
+                            !stream.track_identifier_available ||
+                            stream.track_identifier != rtcTrackId) continue;
+                        ++matches;
+                        statsIds.addData(QByteArray::fromStdString(stream.id));
+                        statsIds.addData(QByteArray(1, '\0'));
+                        bytesAvailable &= stream.bytes_received_available;
+                        packetsAvailable &= stream.packets_received_available;
+                        decodedAvailable &= stream.frames_decoded_available;
+                        receivedAvailable &= stream.frames_received_available;
+                        bytes += stream.bytes_received;
+                        packets += stream.packets_received;
+                        decoded += stream.frames_decoded;
+                        received += stream.frames_received;
+                    }
+                }
+            }
+            QJsonObject item{
+                {"sid_hash", digest(key.publication_sid)},
+                {"intent_present", intentPresent},
+                {"intent_subscribed", intentSubscribed},
+                {"sent_subscribed", sentSubscribed
+                    ? QJsonValue(*sentSubscribed) : QJsonValue(QJsonValue::Null)},
+                {"subscription_dirty", subscriptionDirty},
+                {"settings_dirty", settingsDirty},
+                {"intent_policy_revision", static_cast<double>(intentPolicyRevision)},
+                {"current_binding_serial", static_cast<double>(currentBindingSerial)},
+                {"sink_binding_serial", static_cast<double>(sinkBindingSerial)},
+                {"sink_binding_count", static_cast<double>(sinkBindingCount)},
+                {"sink_on_frame_count", static_cast<double>(sinkProbe
+                    ? sinkProbe->on_frame_count.load() : 0)},
+                {"sink_delivered_frame_count", static_cast<double>(sinkProbe
+                    ? sinkProbe->delivered_frame_count.load() : 0)},
+                {"sink_on_frame_age_ms", static_cast<double>(onFrameAgeMs)},
+                {"publication_present", static_cast<bool>(publication)},
+                {"publication_subscribed", publication && publication->is_subscribed()},
+                {"publication_enabled", publication && publication->is_enabled()},
+                {"subscription_error", publication &&
+                    publication->subscription_error() != TrackPublication::SubscriptionError::None},
+                {"rtc_track_hash", rtcTrackId.empty() ? QString{} : digest(rtcTrackId)},
+                {"binding_rtc_track_hash", bindingRtcTrackId.empty()
+                    ? QString{} : digest(bindingRtcTrackId)},
+                {"publication_media_track_hash", publicationMediaTrackId.empty()
+                    ? QString{} : digest(publicationMediaTrackId)},
+                {"sink_active", sinkActive},
+                {"sink_frame_age_ms", static_cast<double>(sinkAgeMs)},
+                {"stats_match_count", static_cast<double>(matches)},
+                {"stats_stream_hash", matches
+                    ? QString::fromLatin1(statsIds.result().toHex().left(16)) : QString{}},
+                {"stats_bytes", static_cast<double>(bytes)},
+                {"stats_packets", static_cast<double>(packets)},
+                {"stats_decoded", static_cast<double>(decoded)},
+                {"stats_received", static_cast<double>(received)},
+                {"stats_bytes_available", matches > 0 && bytesAvailable},
+                {"stats_packets_available", matches > 0 && packetsAvailable},
+                {"stats_decoded_available", matches > 0 && decodedAvailable},
+                {"stats_received_available", matches > 0 && receivedAvailable},
+            };
+            result.append(item);
+        }
+        return result;
+    }
+    static QJsonObject soakInboundBindingProbe(
+            Room &room, const std::string &trackIdentifier) {
+        const auto digest = [](const std::string &value) {
+            return value.empty() ? QString{} : QString::fromLatin1(
+                QCryptographicHash::hash(QByteArray::fromStdString(value),
+                    QCryptographicHash::Sha256).toHex().left(16));
+        };
+        std::shared_ptr<telemetry::VideoActivityProbe> sinkProbe;
+        std::string mappedSid;
+        quint64 bindingSerial = 0, bindingCount = 0;
+        bool sinkActive = false, bindingCurrent = false;
+        {
+            std::lock_guard lock(room.room_mutex_);
+            for (const auto &binding : room.remote_track_sinks_) {
+                if (trackIdentifier.empty() || binding.rtc_track_id != trackIdentifier ||
+                    !binding.telemetry_probe) continue;
+                ++bindingCount;
+                if (bindingSerial > binding.binding_serial) continue;
+                bindingSerial = binding.binding_serial;
+                mappedSid = binding.track_key.publication_sid;
+                sinkProbe = binding.telemetry_probe;
+                sinkActive = binding.media_binding && binding.media_binding->active.load()
+                    && sinkProbe->active.load();
+                bindingCurrent = false;
+                const auto participant = room.remote_participants_.find(
+                    binding.track_key.participant.sid);
+                const auto publication = participant != room.remote_participants_.end() &&
+                        participant->second
+                    ? participant->second->get_remote_publication(mappedSid) : nullptr;
+                if (publication) {
+                    const auto current = room.current_remote_binding_serials_.find(
+                        publication.get());
+                    bindingCurrent = current != room.current_remote_binding_serials_.end() &&
+                        current->second == bindingSerial;
+                }
+            }
+        }
+        const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        const auto lastFrame = sinkProbe ? sinkProbe->last_frame_ns.load() : 0;
+        const auto frameAgeMs = lastFrame > 0 && now >= lastFrame
+            ? (now - lastFrame) / 1000000 : -1;
+        return {
+            {"mapped_sid_hash", digest(mappedSid)},
+            {"mapped_binding_serial", static_cast<double>(bindingSerial)},
+            {"mapped_binding_count", static_cast<double>(bindingCount)},
+            {"mapped_binding_current", bindingCurrent},
+            {"mapped_sink_active", sinkActive},
+            {"mapped_sink_on_frame_count", static_cast<double>(sinkProbe
+                ? sinkProbe->on_frame_count.load() : 0)},
+            {"mapped_sink_delivered_frame_count", static_cast<double>(sinkProbe
+                ? sinkProbe->delivered_frame_count.load() : 0)},
+            {"mapped_sink_frame_age_ms", static_cast<double>(frameAgeMs)},
+        };
     }
 };
 } // namespace livekit
@@ -1143,6 +1468,112 @@ public:
     static void setWhiteboardVisible(MeetingUI::MeetingRoomWindow &window,
                                      bool visible) {
         window.setWhiteboardVisible(visible);
+    }
+    static void startSoakRenderTimer(MeetingUI::MeetingRoomWindow &window) {
+        // The acceptance fixture normally advances rendering manually. A soak
+        // needs the same continuous 33 ms render tick as the production window.
+        window._remoteRenderTimer = new QTimer(&window);
+        QObject::connect(window._remoteRenderTimer, &QTimer::timeout,
+            &window, &MeetingUI::MeetingRoomWindow::onRemoteRenderTick);
+        window._remoteRenderTimer->start(33);
+    }
+    static QString soakRenderBackend(const MeetingUI::MeetingRoomWindow &window) {
+        if (!window._usingGpuBackend.load()) return QStringLiteral("qt_cpu");
+        return window._videoCanvas ? window._videoCanvas->backendName().toLower()
+                                   : QStringLiteral("unknown");
+    }
+    static meeting_soak::RenderPathProbe soakRenderPath(
+            const MeetingUI::MeetingRoomWindow &window) {
+        meeting_soak::RenderPathProbe result;
+        const auto &plan = window._acceptedVideoPlan;
+        result.page = plan.page;
+        result.page_size = plan.page_size;
+        result.page_count = plan.page_count;
+        QCryptographicHash selectedHash(QCryptographicHash::Sha256);
+        for (const auto &key : plan.selected_video) {
+            selectedHash.addData(QByteArray::fromStdString(key.publication_sid));
+            selectedHash.addData(QByteArray(1, '\0'));
+        }
+        result.selected_fingerprint = QString::fromLatin1(selectedHash.result().toHex());
+        if (window._remoteRenderSession) {
+            const auto stats = window._remoteRenderSession->statistics();
+            result.router_submitted = stats.router.submitted;
+            result.router_rejected_binding = stats.router.rejected_binding;
+            result.delivered_to_gpu = stats.delivered_to_gpu;
+            result.attached_tracks = stats.attached_track_count;
+            result.track_frames_received = stats.track_frames_received;
+            result.lease_rejected_frames = stats.lease_rejected_frames;
+        }
+        for (const auto &key : window._acceptedVideoPlan.selected_video) {
+            const auto sid = QString::fromStdString(key.publication_sid);
+            const auto binding = window._remoteVideoBindings.find(sid);
+            const auto lease = window._activeRemoteRenderLeases.find(sid);
+            if (binding != window._remoteVideoBindings.end()
+                && lease != window._activeRemoteRenderLeases.end()
+                && lease->second == binding->second.mediaBindingKey
+                && livekit::IsTrackTicketActive(binding->second.ticket, key)
+                && livekit::IsMediaBindingTicketActive(
+                    binding->second.mediaBindingTicket,
+                    binding->second.mediaBindingKey)) ++result.selected_active_leases;
+        }
+        result.timer_active = window._remoteRenderTimer && window._remoteRenderTimer->isActive();
+        result.stage_visible = window.isVideoStageVisible();
+        result.canvas_visible = window._videoCanvas && window._videoCanvas->isVisible();
+        result.renderer_ready = window._videoCanvas && window._videoCanvas->rendererReady();
+        return result;
+    }
+    static std::function<bool()> soakViewport(MeetingUI::MeetingRoomWindow &window,
+                                               const QString &action) {
+        if (action == "grid4" || action == "grid9" || action == "grid16") {
+            const auto size = action.mid(4).toUInt();
+            window._viewMode = MeetingUI::VideoViewMode::Grid;
+            window._videoPageSize = size;
+            window._videoPage = 0;
+            window.scheduleViewportIntent(true);
+            return [&window, size] {
+                return window._acceptedVideoPlan.requested_mode == livekit::VideoLayoutMode::Grid
+                    && window._acceptedVideoPlan.page_size == size;
+            };
+        }
+        if (action == "next_page") {
+            if (window._acceptedVideoPlan.page_count < 2
+                || window._acceptedVideoPlan.mode != livekit::VideoLayoutMode::Grid) return {};
+            // A schedule cycles the roster; wrap after the final page.
+            const auto page = (window._videoPage + 1) % window._acceptedVideoPlan.page_count;
+            window._videoPage = page;
+            window.scheduleViewportIntent(true);
+            return [&window, page] { return window._acceptedVideoPlan.page == page; };
+        }
+        if (action == "pin") {
+            for (const auto &key : window._acceptedVideoPlan.selected_video) {
+                auto *tile = window.remoteVideoTile(key);
+                if (!tile) continue;
+                window.setPinnedTile(tile->renderKey(), true);
+                return [&window, key] {
+                    return window._acceptedVideoPlan.focused == key
+                        && window._acceptedVideoPlan.reason == livekit::VideoDemandReason::Pinned;
+                };
+            }
+            return {};
+        }
+        if (action == "unpin") {
+            if (!window._pinnedRenderKey.isEmpty())
+                window.setPinnedTile(window._pinnedRenderKey, false);
+            return [&window] {
+                return !window._pinnedTrackKey
+                    && window._acceptedVideoPlan.reason != livekit::VideoDemandReason::Pinned;
+            };
+        }
+        if (action == "whiteboard_on" || action == "whiteboard_off") {
+            const bool visible = action == "whiteboard_on";
+            window.setWhiteboardVisible(visible);
+            return [&window, visible] {
+                return window._whiteboardVisible == visible
+                    && window._acceptedVideoPlan.stage_content == (visible
+                        ? livekit::StageContent::Whiteboard : livekit::StageContent::Video);
+            };
+        }
+        return {};
     }
     static void useTestGpuBackend(MeetingUI::MeetingRoomWindow &window) {
         TEST_CHECK(window._remoteRenderSession);
@@ -2064,6 +2495,27 @@ public:
         std::memset(buffer->MutableDataV(), 128, buffer->StrideV() * 2);
         OnFrame(webrtc::VideoFrame::Builder().set_video_frame_buffer(buffer).set_timestamp_us(timestamp).build());
     }
+};
+
+class ReusedVideoReceiver : public webrtc::RtpReceiverInterface {
+public:
+    ReusedVideoReceiver(
+            webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track,
+            std::string streamId)
+        : track_(std::move(track)), stream_id_(std::move(streamId)) {}
+    webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track() const override {
+        return track_;
+    }
+    std::vector<std::string> stream_ids() const override { return {stream_id_}; }
+    webrtc::MediaType media_type() const override { return webrtc::MediaType::VIDEO; }
+    std::string id() const override { return track_->id(); }
+    webrtc::RtpParameters GetParameters() const override { return {}; }
+    void SetObserver(webrtc::RtpReceiverObserverInterface*) override {}
+    void SetJitterBufferMinimumDelay(std::optional<double>) override {}
+    void setStreamId(std::string value) { stream_id_ = std::move(value); }
+private:
+    webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track_;
+    std::string stream_id_;
 };
 
 struct WindowMedia {
@@ -3609,6 +4061,63 @@ void PhaseCRoomMediaPlanAndRecovery() {
     std::cout << "PHASE_C_ROOM auto-subscribe-false/empty-connect/settings-before-subscribe/"
                  "deselect-before-select/zero-reset/latest-revision/soft+full-recovery PASS "
                  "external-sfu=NOT_RUN" << std::endl;
+}
+
+void ReceiverSidRebindRegression() {
+    WindowFixture fixture;
+    auto roster = WindowParticipant("receiver-reuse");
+    auto *next = roster.mutable_participants(0)->add_tracks();
+    next->set_sid("TR_PA_WINDOW_NEXT");
+    next->set_name("next-video");
+    next->set_type(livekit::proto::TrackType::VIDEO);
+    fixture.room->UpdateParticipantsForTesting(roster);
+
+    auto source = webrtc::make_ref_counted<WindowMemoryVideoSource>();
+    auto rtc = webrtc::VideoTrack::Create(
+        "rtc-reused-receiver", source, webrtc::Thread::Current());
+    TEST_CHECK(rtc);
+    auto receiver = webrtc::make_ref_counted<ReusedVideoReceiver>(
+        rtc, "PA_WINDOW|TR_PA_WINDOW");
+    livekit::ParticipantSnapshotRoomTestAccess::scanReusedReceiver(
+        *fixture.room, receiver);
+    auto oldProbe = livekit::ParticipantSnapshotRoomTestAccess::videoProbe(
+        *fixture.room, "TR_PA_WINDOW");
+    TEST_CHECK(oldProbe);
+    source->push(90, 1000);
+    TEST_CHECK(oldProbe->on_frame_count.load() > 0);
+    const auto oldFrames = oldProbe->on_frame_count.load();
+
+    receiver->setStreamId("PA_WINDOW|TR_PA_WINDOW_NEXT");
+    livekit::ParticipantSnapshotRoomTestAccess::scanReusedReceiver(
+        *fixture.room, receiver);
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::videoProbe(
+        *fixture.room, "TR_PA_WINDOW") == oldProbe);
+    livekit::ParticipantSnapshotRoomTestAccess::resolveReusedReceiver(
+        *fixture.room, receiver, "PA_WINDOW", "TR_PA_WINDOW_NEXT");
+    auto nextProbe = livekit::ParticipantSnapshotRoomTestAccess::videoProbe(
+        *fixture.room, "TR_PA_WINDOW_NEXT");
+    TEST_CHECK(nextProbe && nextProbe != oldProbe);
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room) == 1);
+    TEST_CHECK(!fixture.room->remote_participants().at("PA_WINDOW")
+        ->get_remote_publication("TR_PA_WINDOW")->has_media_binding());
+    source->push(140, 2000);
+    TEST_CHECK(oldProbe->on_frame_count.load() == oldFrames);
+    TEST_CHECK(nextProbe->on_frame_count.load() > 0);
+
+    const auto nextFrames = nextProbe->on_frame_count.load();
+    livekit::ParticipantSnapshotRoomTestAccess::resolveReusedReceiver(
+        *fixture.room, receiver, "PA_WINDOW", "TR_PA_WINDOW_NEXT");
+    livekit::ParticipantSnapshotRoomTestAccess::scanReusedReceiver(
+        *fixture.room, receiver);
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room) == 1);
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::videoProbe(
+        *fixture.room, "TR_PA_WINDOW_NEXT") == nextProbe);
+    source->push(170, 3000);
+    TEST_CHECK(oldProbe->on_frame_count.load() == oldFrames);
+    TEST_CHECK(nextProbe->on_frame_count.load() > nextFrames);
+    fixture.pump();
+    std::cout << "RECEIVER_SID_REBIND reused-rtc-id/old-sink-retired/new-sink-frames/idempotent PASS"
+              << std::endl;
 }
 
 void GapWindowSoftResumeUnsubscribe() {
@@ -5697,6 +6206,147 @@ void DepartureNoticeLifetime() {
     std::cout << "DEPARTURE_NOTICE PASS: server Logout, duplicate identity, leave-before-ack, standalone HWND, mouse input, parent deletion, deduplication\n";
 }
 
+int RunMeetingSoak(QApplication &application) {
+    const auto index = application.arguments().indexOf("--soak-directory");
+    if (index < 0 || index + 1 >= application.arguments().size()) return 3;
+    meeting_soak::Protocol protocol(application.arguments()[index + 1]);
+    if (!protocol.Open()) return 3;
+    const auto url = qEnvironmentVariable("LIVEKIT_URL");
+    const auto token = qEnvironmentVariable("LIVEKIT_SOAK_TOKEN");
+    if (url.isEmpty() || token.isEmpty()) {
+        protocol.Publish({{"state", "failed"}, {"error_code", "credentials_missing"}});
+        return 3;
+    }
+    application.setQuitOnLastWindowClosed(false);
+    MeetingUI::AppTheme::install(application);
+    OpenMeeting::initializeServiceEndpointPolicy(
+        qEnvironmentVariable("LIVEKIT_SOAK_ALLOW_INSECURE") == "1");
+    QTemporaryDir settings;
+    if (!settings.isValid()) return 3;
+    auto session = OpenMeeting::SessionManagerTestAccess::create(
+        std::make_unique<QSettings>(settings.filePath("soak.ini"), QSettings::IniFormat));
+    auto coordinator = OpenMeeting::MeetingCoordinatorTestAccess::create(*session);
+    std::unique_ptr<MeetingUI::MeetingRoomWindow> window;
+    meeting_soak::Hooks hooks;
+    hooks.viewport = [&](const QString &action) {
+        return window ? ParticipantWindowTestAccess::soakViewport(*window, action)
+                      : std::function<bool()>{};
+    };
+    hooks.policyRevision = [&] {
+        return window ? ParticipantWindowTestAccess::acceptedVideoPlan(*window).policy_revision : 0;
+    };
+    const auto catalogCount = std::make_shared<std::atomic<quint64>>(0);
+    const auto catalogPending = std::make_shared<std::atomic<bool>>(false);
+    hooks.remoteVideoCount = [&]() -> quint64 {
+        OpenMeeting::MeetingCoordinatorTestAccess::soakCatalogCount(
+            *coordinator, catalogCount, catalogPending);
+        return catalogCount->load();
+    };
+    hooks.renderBackend = [&] {
+        return window ? ParticipantWindowTestAccess::soakRenderBackend(*window)
+                      : QStringLiteral("unknown");
+    };
+    const auto duplicateSame = std::make_shared<std::atomic<quint64>>(0);
+    const auto duplicateNew = std::make_shared<std::atomic<quint64>>(0);
+    const auto statsCache = std::make_shared<OpenMeeting::SoakStatsCache>();
+    std::weak_ptr<livekit::Room> observedRoom;
+    hooks.renderPath = [&] {
+        auto result = window ? ParticipantWindowTestAccess::soakRenderPath(*window)
+                             : meeting_soak::RenderPathProbe{};
+        const auto room = coordinator->room();
+        if (room && observedRoom.lock() != room) {
+            livekit::ParticipantSnapshotRoomTestAccess::soakDuplicateProbe(
+                *room, duplicateSame, duplicateNew);
+            observedRoom = room;
+        }
+        if (room && window) {
+            OpenMeeting::MeetingCoordinatorTestAccess::soakStats(*coordinator, statsCache);
+            livekit::RoomStatsReport stats;
+            bool statsAvailable = false;
+            {
+                std::lock_guard lock(statsCache->mutex);
+                if (statsCache->sequence > 0 && statsCache->source_room.lock() == room) {
+                    stats = statsCache->report;
+                    statsAvailable = true;
+                    result.stats_sample_seq = statsCache->sequence;
+                    result.stats_age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - statsCache->updated).count();
+                }
+            }
+            for (std::size_t reportIndex = 0; reportIndex < stats.reports.size(); ++reportIndex) {
+                const auto &report = stats.reports[reportIndex];
+                for (const auto &stream : report.inbound_rtp) {
+                    if (!stream.kind_available || stream.kind != "video") continue;
+                    ++result.stats_video_streams;
+                    result.stats_track_ids_available += stream.track_identifier_available;
+                    const auto hash = [](const std::string &value) {
+                        return value.empty() ? QString{} : QString::fromLatin1(
+                            QCryptographicHash::hash(QByteArray::fromStdString(value),
+                                QCryptographicHash::Sha256).toHex().left(16));
+                    };
+                    auto streamProbe =
+                        livekit::ParticipantSnapshotRoomTestAccess::soakInboundBindingProbe(
+                            *room, stream.track_identifier);
+                    streamProbe.insert("report_index", static_cast<double>(reportIndex));
+                    streamProbe.insert("track_hash", hash(stream.track_identifier));
+                    streamProbe.insert("ssrc_hash", hash(stream.ssrc));
+                    streamProbe.insert("mid_hash", hash(stream.mid));
+                    streamProbe.insert("stats_id_hash", hash(stream.id));
+                    streamProbe.insert("bytes", static_cast<double>(stream.bytes_received));
+                    streamProbe.insert("packets", static_cast<double>(stream.packets_received));
+                    streamProbe.insert("decoded", static_cast<double>(stream.frames_decoded));
+                    streamProbe.insert("received", static_cast<double>(stream.frames_received));
+                    streamProbe.insert("bytes_available", stream.bytes_received_available);
+                    streamProbe.insert("packets_available", stream.packets_received_available);
+                    streamProbe.insert("decoded_available", stream.frames_decoded_available);
+                    streamProbe.insert("received_available", stream.frames_received_available);
+                    result.inbound_streams.append(streamProbe);
+                }
+            }
+            result.selected_tracks =
+                livekit::ParticipantSnapshotRoomTestAccess::soakSelectedTrackProbes(
+                    *room, ParticipantWindowTestAccess::acceptedVideoPlan(*window).selected_video,
+                    statsAvailable ? &stats : nullptr);
+            const auto [active, recent] =
+                livekit::ParticipantSnapshotRoomTestAccess::soakSelectedNativeFrames(
+                    *room, ParticipantWindowTestAccess::acceptedVideoPlan(*window).selected_video);
+            result.selected_native_sinks = active;
+            result.selected_native_recent = recent;
+        }
+        result.duplicate_same_track = duplicateSame->load();
+        result.duplicate_new_track = duplicateNew->load();
+        return result;
+    };
+    hooks.reconnect = [&](bool full, std::function<void(bool)> completion) {
+        return OpenMeeting::MeetingCoordinatorTestAccess::soakReconnect(
+            *coordinator, full, std::move(completion));
+    };
+    meeting_soak::Adapter adapter(protocol, *coordinator, std::move(hooks));
+    const int result = adapter.Run([&] {
+        OpenMeeting::MediaPreferences preferences;
+        preferences.enableMicrophone = false;
+        preferences.enableVideo = false;
+        // This enters the same startRoomSession/ProductionMeetingSignalOptions
+        // path as the shipping direct-connect UI. Credentials stay in memory.
+        coordinator->connectDirectlyAsync(url, token, protocol.runId(),
+            QStringLiteral("soak-observer"), preferences);
+        MeetingUI::MeetingRoomWindow::Config config;
+        config.audioMuted = true;
+        config.videoEnabled = false;
+        config.displayName = QStringLiteral("Long-running meeting observer");
+        window = ParticipantWindowTestAccess::create(coordinator, std::move(config));
+        ParticipantWindowTestAccess::startSoakRenderTimer(*window);
+        // Use the actual renderer selection/fallback; never inject a fake GPU.
+        ParticipantWindowTestAccess::startGpu(*window, true);
+        window->show();
+    });
+    const bool noRoom = !coordinator->room();
+    window.reset();
+    livekit::WebRTCManager::Instance().Deinitialize();
+    if (!adapter.Finalize(noRoom)) return 3;
+    return result;
+}
+
 int WindowAcceptanceMain(int argc, char **argv) {
 	for (auto index = 1; index != argc; ++index) {
 		const auto argument = QByteArray(argv[index]);
@@ -5732,7 +6382,13 @@ int WindowAcceptanceMain(int argc, char **argv) {
         QDir::cleanPath(probe.fileName()).startsWith(QDir::cleanPath(settingsDirectory.path()) + "/"));
     // Coordinator instances use explicitly injected temporary SessionManager
     // objects, including the in-memory moderation and account-notify fixtures.
-    if (application.arguments().contains("--moderation-contract")) {
+    int result = 0;
+    if (application.arguments().contains("--meeting-soak-protocol-selftest")) {
+        TEST_CHECK(meeting_soak::ProtocolSelfTest());
+        std::cout << "MEETING_SOAK_PROTOCOL PASS: atomic status, run isolation, ordered commands, event-loop heartbeat\n";
+    } else if (application.arguments().contains("--meeting-soak")) {
+        result = RunMeetingSoak(application);
+    } else if (application.arguments().contains("--moderation-contract")) {
         MeetingModerationContract();
     } else if (application.arguments().contains("--telemetry-s7-acceptance")) {
         MeetingUI::AppTranslation::install(application, QLocale(QStringLiteral("zh_CN")));
@@ -6097,6 +6753,8 @@ int WindowAcceptanceMain(int argc, char **argv) {
         ParticipantWithoutVideoWindow();
         VideoSubscriptionFailureWindow();
         PhaseDWindowViewportAndRenderLease();
+    } else if (application.arguments().contains("--receiver-sid-rebind")) {
+        ReceiverSidRebindRegression();
     } else if (application.arguments().contains("--subscription-telemetry-reconnect")) {
         GapWindowSubscriptionTelemetryInFlightResumeCommit();
     } else if (application.arguments().contains("--ak-window-late")) {
@@ -6152,7 +6810,7 @@ int WindowAcceptanceMain(int argc, char **argv) {
     }
     if (wrappedThread) webrtc::ThreadManager::Instance()->UnwrapCurrentThread();
     style::StopManager();
-    return 0;
+    return result;
 }
 
 } // namespace

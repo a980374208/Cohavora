@@ -137,6 +137,9 @@ target_link_libraries(test_participant_window_remediation PRIVATE
     cohavora_ui_translations)
 set_target_properties(test_participant_window_remediation PROPERTIES AUTOMOC OFF)
 target_compile_definitions(test_participant_window_remediation PRIVATE IDA2_WINDOW_ACCEPTANCE)
+if(MSVC)
+    target_compile_options(test_participant_window_remediation PRIVATE /bigobj)
+endif()
 # Entry ownership and capture/publication source identity use synthetic media;
 # keep this regression in the default suite without enabling device/GPU tests.
 add_test(NAME meeting_entry_media_contract_test
@@ -181,6 +184,10 @@ add_test(NAME meeting_video_viewport_render_lease_test
     COMMAND test_participant_window_remediation --phase-d-window)
 set_tests_properties(meeting_video_viewport_render_lease_test PROPERTIES
     TIMEOUT 60 LABELS "CORE_REGRESSION")
+add_test(NAME meeting_receiver_sid_rebind_test
+    COMMAND test_participant_window_remediation --receiver-sid-rebind)
+set_tests_properties(meeting_receiver_sid_rebind_test PROPERTIES
+    TIMEOUT 30 LABELS "CORE_REGRESSION")
 add_test(NAME meeting_moderation_contract_test
     COMMAND test_participant_window_remediation --moderation-contract)
 set_tests_properties(meeting_moderation_contract_test PROPERTIES
