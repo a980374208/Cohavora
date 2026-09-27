@@ -268,7 +268,9 @@ private:
 
 	QRect _layoutRect;
 	QRect _qualityRect;
+	QPushButton *_uiaTelemetry = nullptr;
 	QRect _consoleRect;
+	QPushButton *_uiaConsole = nullptr;
 	QRect _simulateRect;
 	QRect _minRect;
 	QRect _maxRect;
@@ -349,6 +351,8 @@ private:
 	friend class ::CameraOwnerTestAccess;
 	friend class ::ParticipantWindowTestAccess;
 	void appendSpeakerDeviceActions(QMenu &menu);
+	void toggleAudio();
+	void toggleVideo();
 	bool canStopScreenShare() const {
 		using State = livekit::ScreenShareState;
 		return _screenShareState == State::Starting || _screenShareState == State::Active ||
@@ -376,6 +380,10 @@ private:
 	QPushButton *_uiaParticipants = nullptr;
 	QPushButton *_uiaChat = nullptr;
 	QPushButton *_uiaWhiteboard = nullptr;
+	QPushButton *_uiaAudio = nullptr;
+	QPushButton *_uiaVideo = nullptr;
+	QPushButton *_uiaShare = nullptr;
+	QPushButton *_uiaEnd = nullptr;
 
 	std::vector<ToolItem> _toolItems;
 	QRect _endMeetingRect;

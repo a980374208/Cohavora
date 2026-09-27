@@ -5,6 +5,7 @@
 #include "ui/widgets/shadow.h"
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
+#include <QtWidgets/QPushButton>
 #include <memory>
 
 namespace MeetingUI {
@@ -40,6 +41,7 @@ public:
 
 protected:
 	void paintEvent(QPaintEvent *e) override;
+	void resizeEvent(QResizeEvent *e) override;
 	void mouseMoveEvent(QMouseEvent *e) override;
 	void mousePressEvent(QMouseEvent *e) override;
 	void mouseReleaseEvent(QMouseEvent *e) override;
@@ -59,6 +61,7 @@ private:
 
 	QRect _cardRect;
 	QRect _dropdownRect;
+	QPushButton *_accessibleButton = nullptr;
 
 	std::unique_ptr<Ui::BoxShadow> _normalShadow;
 	std::unique_ptr<Ui::BoxShadow> _hoverShadow;

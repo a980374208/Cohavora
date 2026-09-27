@@ -10,6 +10,13 @@ SidebarWidget::SidebarWidget(QWidget *parent)
 	: Ui::RpWidget(parent) {
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
+	_accessibleAvatar = new QPushButton(this);
+	_accessibleAvatar->setObjectName(QStringLiteral("mainAccountMenu"));
+	_accessibleAvatar->setAccessibleName(QCoreApplication::translate("MeetingUI", "Account menu"));
+	_accessibleAvatar->setFlat(true);
+	_accessibleAvatar->setAttribute(Qt::WA_TransparentForMouseEvents);
+	_accessibleAvatar->setStyleSheet(QStringLiteral("QPushButton { background: transparent; border: 0; }"));
+	connect(_accessibleAvatar, &QPushButton::clicked, this, [this] { _avatarClicks.fire({}); });
 }
 
 void SidebarWidget::setActiveNav(NavItemType type) {
@@ -34,6 +41,7 @@ void SidebarWidget::updateLayout() {
 	// 顶部头像位置
 	const int avatarSize = 40;
 	_avatarRect = QRect((w - avatarSize) / 2, 24, avatarSize, avatarSize);
+	_accessibleAvatar->setGeometry(_avatarRect);
 
 	// 中间导航项
 	_navItems.clear();

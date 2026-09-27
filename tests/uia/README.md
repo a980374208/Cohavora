@@ -277,3 +277,58 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/uia/test_meeting.p
 | 白板文件，中英文 | [中文](../../out/uia-oversized/20260927-222810-978-whiteboard_files-zh_CN-37836/result.json)、[英文](../../out/uia-oversized/20260927-222938-820-whiteboard_files-en_US-17888/result.json)：各 410 项 PASS | `run_desktop.ps1`、`UiaTests.cmake` 已变，保留原版本 PASS；复用需增量核对。JPEG、不可读文件、页数上限替换、远端上传、慢盘及断电仍 NOT_RUN |
 
 较早的失败保留。日志控制台、白板工具栏和清空流程也有历史 PASS，但公共 runner/CMake 或白板源码已有变化，不由本次盘点自动刷新为当前全套 PASS。入会/设置/会议不再登记为“尚未纳入 UIA”；其中设置应登记为已执行 FAIL。
+
+## 真实产品长稳编排
+
+`product_desktop.ps1` 只在专用、保持解锁的交互式 Default 桌面直接运行产品
+`Cohavora.exe`，不注册到默认 CTest。`-ProbeOnly` 使用本地访客入口探测登录页、
+主界面和账号菜单，不入会，结果为 `PROBED`。正式执行需要服务账号、会议号、
+至少两页远端视频、可用的音视频设备、共享来源及接收端；缺任一先决条件不得
+将 UIA 结果视作媒体成功。
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/uia/product_desktop.ps1 `
+  -Executable out/build/windows-vs2026-dev/src/app/Debug/Cohavora.exe `
+  -OutputDirectory out/product-probe-unique -ProbeOnly
+
+$env:LIVEKIT_UIA_DEDICATED_DESKTOP = '1'
+$env:LIVEKIT_UIA_ACCOUNT = '<dedicated-account>'
+$env:LIVEKIT_UIA_PASSWORD = '<secret>'
+$env:LIVEKIT_UIA_SERVICE_URL = '<service-url>'
+$env:LIVEKIT_UIA_MEETING_ID = '<meeting-id>'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/uia/product_desktop.ps1 `
+  -Executable out/build/windows-vs2026-dev/src/app/Debug/Cohavora.exe `
+  -OutputDirectory out/product-run-unique
+```
+
+每次运行必须使用新的输出目录。正式 profile 固定为同一 PID 的 100 次完整
+入会、共享、离会与会后导出循环，至少 28800 秒，每轮共享至少 60 秒，
+日志关闭及开启各至少 30 秒；共享停止与离会后各保留至少 10 秒的资源观察窗。
+`uia-actions.jsonl` 逐动作保存 run/cycle/operation
+ID、PID、请求及 UIA 观察时间；`uia-log-windows.jsonl` 保存开/关时间窗。
+脚本每次按 PID 重查控件树，要求唯一 ID 后缀、角色、Name、可用/可见状态和
+所需 Pattern；缺 Pattern 或超时直接 FAIL，不使用坐标、SendInput、截图或 OCR。
+进程异常退出或重启也直接 FAIL，不把失败轮次计入 100 次。`uia-resources.jsonl`
+只提供旁观的私有内存、句柄和线程采样；其中 GPU 与队列字段为空，不参与验收。
+
+最终判定另需运行 `tests/runtime/verify_product_acceptance.py`，传入 `--uia`、
+`--witnesses`、`--resources`、`--diagnostics`、`--review`、`--performance`、
+`--limits` 和 `--output`。`--witnesses` 是独立 Room/SFU/接收端/capture 采集器的
+JSONL：每条含 `collector=external`、run/cycle/operation ID、UTC、source、event、
+value。它必须证明入退会、共享发布/取消、接收端帧/RTP/解码/活跃路数、
+DXGI/WGC/GDI 实际 backend、连续音频区间，以及每轮遥测存储/诊断 writer
+的零丢失与零写失败计数。产品只在发生持久化丢失时写 loss 摘要，因此支持包
+标记 `persistent_loss_summary` 缺失时必须由上述独立计数覆盖。`--resources` 是独立采集器的
+JSONL：同一 PID 的 `active` 连续样本间隔不得超过 10 秒，并有每轮的 `joined`、
+`share_stopped`、`room_released` 与最终 `final_exit` 样本。每条包含私有内存、
+GPU local/nonlocal 显存、句柄、线程、队列深度、WGC 句柄数/归属 PID和布局；
+这些字段缺失则判定不完整，不能用 UIA 的空值填充。`--limits` 由验收方根据
+批准的同门基线提供增长、停止态、队列、音频间隙及日志性能阈值。
+
+会后 UIA 导出的是已完成会话的诊断支持包。验收器逐份核对 manifest 文件列表、
+大小和 SHA-256、session 完成状态、损失与缺口；`--diagnostics` 指向该运行
+profile 的原始诊断目录，检查分段和配额。`--review` 是独立复盘结论及已审查的
+序列缺口，`--performance` 必须由同负载外部采集器提供每轮日志开/关的 CPU 与
+视频帧耗时配对数据，并落在 UIA 实际时间窗内。缺少任一独立证据，结果为
+`INCONCLUSIVE` 而非 PASS。慢盘、断电、真实崩溃恢复、Release 符号复盘仍需
+另外执行；UIA 也不能证明视频像素/音频质量、真实 codec/RTP 或物理多屏坐标。

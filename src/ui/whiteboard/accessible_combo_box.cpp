@@ -196,11 +196,14 @@ QAccessibleInterface *choicesFactory(const QString &, QObject *object) {
 }
 } // namespace
 
-QComboBox *createAccessibleComboBox(QWidget *parent) {
+void configureAccessibleComboBox(QComboBox *combo) {
     static const bool installed = [] { QAccessible::installFactory(choicesFactory); return true; }();
     Q_UNUSED(installed);
-    auto *combo = new QComboBox(parent);
     combo->setView(new WhiteboardSelectionView(combo));
+}
+QComboBox *createAccessibleComboBox(QWidget *parent) {
+    auto *combo = new QComboBox(parent);
+    configureAccessibleComboBox(combo);
     return combo;
 }
 QComboBox *createAccessibleWhiteboardComboBox(QWidget *parent) {
