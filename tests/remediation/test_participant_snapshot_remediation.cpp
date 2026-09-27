@@ -1460,6 +1460,12 @@ public:
             const MeetingUI::MeetingRoomWindow &window) {
         return window._acceptedVideoPlan;
     }
+    static bool whiteboardVisible(const MeetingUI::MeetingRoomWindow &window) {
+        return window._whiteboardVisible;
+    }
+    static int activeSidebar(const MeetingUI::MeetingRoomWindow &window) {
+        return static_cast<int>(window._activeSidebar);
+    }
     static std::size_t activeRenderLeaseCount(
             const MeetingUI::MeetingRoomWindow &window) {
         return window._activeRemoteRenderLeases.size();
@@ -6432,6 +6438,54 @@ int RunMeetingSoak(QApplication &application) {
     return result;
 }
 
+int RunMeetingUiaFixture(QApplication &application) {
+    const auto args = application.arguments();
+    const auto stateArg = args.indexOf(QStringLiteral("--state-file"));
+    if (stateArg < 0 || stateArg + 1 >= args.size()) return 2;
+    const auto statePath = args[stateArg + 1];
+    MeetingUI::AppTranslation::install(application,
+        MeetingUI::AppTranslation::startupLocale(args));
+    MeetingUI::AppTheme::install(application);
+    WindowFixture fixture;
+    livekit::ParticipantSnapshotRoomTestAccess::establishRemoteMediaPlanPrecondition(*fixture.room, 1);
+    fixture.room->UpdateParticipantsForTesting(LargeWindowRoster(12));
+    std::vector<WindowMedia> media;
+    media.reserve(12);
+    for (int index = 0; index != 12; ++index) {
+        const auto suffix = std::to_string(index);
+        media.push_back(fixture.attachExisting("uia-rtc-" + suffix, false,
+            "TR_UIA_" + suffix, "PA_PHASE_D_" + suffix));
+    }
+    fixture.window = ParticipantWindowTestAccess::createChatPrivacy(fixture.coordinator);
+    fixture.window->resize(1280, 800);
+    fixture.window->show();
+    fixture.pump();
+    int sample = 0;
+    QTimer observer;
+    const auto observe = [&] {
+        fixture.pump();
+        const auto &plan = ParticipantWindowTestAccess::acceptedVideoPlan(*fixture.window);
+        QJsonObject state;
+        state["pid"] = static_cast<double>(QCoreApplication::applicationPid());
+        state["sample"] = ++sample;
+        state["page"] = static_cast<int>(plan.page);
+        state["pages"] = static_cast<int>(plan.page_count);
+        state["pageSize"] = static_cast<int>(plan.page_size);
+        state["selectedVideos"] = static_cast<int>(plan.selected_video.size());
+        state["whiteboard"] = ParticipantWindowTestAccess::whiteboardVisible(*fixture.window);
+        state["sidebar"] = ParticipantWindowTestAccess::activeSidebar(*fixture.window);
+        QSaveFile file(statePath + QStringLiteral(".%1").arg(sample, 8, 10, QLatin1Char('0')));
+        const auto bytes = QJsonDocument(state).toJson();
+        if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit())
+            application.exit(2);
+    };
+    QObject::connect(&observer, &QTimer::timeout, &application, observe);
+    observer.start(200);
+    QTimer::singleShot(0, &application, observe);
+    QTimer::singleShot(90000, &application, [&application] { application.exit(3); });
+    return application.exec();
+}
+
 int WindowAcceptanceMain(int argc, char **argv) {
 	for (auto index = 1; index != argc; ++index) {
 		const auto argument = QByteArray(argv[index]);
@@ -6468,7 +6522,9 @@ int WindowAcceptanceMain(int argc, char **argv) {
     // Coordinator instances use explicitly injected temporary SessionManager
     // objects, including the in-memory moderation and account-notify fixtures.
     int result = 0;
-    if (application.arguments().contains("--meeting-soak-protocol-selftest")) {
+    if (application.arguments().contains("--uia-meeting-fixture")) {
+        result = RunMeetingUiaFixture(application);
+    } else if (application.arguments().contains("--meeting-soak-protocol-selftest")) {
         TEST_CHECK(meeting_soak::ProtocolSelfTest());
         std::cout << "MEETING_SOAK_PROTOCOL PASS: atomic status, run isolation, ordered commands, event-loop heartbeat\n";
     } else if (application.arguments().contains("--meeting-soak")) {

@@ -43,6 +43,7 @@ target_link_libraries(cohavora_whiteboard_model PRIVATE
 set_target_properties(cohavora_whiteboard_model PROPERTIES AUTOMOC OFF FOLDER "whiteboard")
 
 add_library(cohavora_whiteboard_ui STATIC
+    whiteboard/accessible_combo_box.cpp whiteboard/accessible_combo_box.h
     whiteboard/whiteboard_image_loader.cpp whiteboard/whiteboard_image_loader.h
     whiteboard/whiteboard_renderer.cpp whiteboard/whiteboard_renderer.h
     whiteboard/whiteboard_canvas.cpp whiteboard/whiteboard_canvas.h

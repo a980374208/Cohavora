@@ -1,5 +1,6 @@
 #include <QtCore/QCoreApplication>
 #include "src/ui/meeting_room_window.h"
+#include "src/ui/whiteboard/accessible_combo_box.h"
 #include "src/ui/app_theme.h"
 #include "src/ui/whiteboard/annotation_overlay_window.h"
 #include "src/ui/whiteboard/whiteboard_panel.h"
@@ -2439,6 +2440,19 @@ RoomBottomBarWidget::RoomBottomBarWidget(QWidget *parent)
 
 	_chatInput->hide();
 	_handBtn->hide();
+	const auto accessibleTool = [this](const char *id, const QString &name,
+			rpl::event_stream<> &stream) {
+		auto *button = new QPushButton(this);
+		button->setObjectName(QString::fromLatin1(id));
+		button->setAccessibleName(name);
+		button->setFlat(true);
+		button->setStyleSheet(QStringLiteral("QPushButton { background: transparent; border: 0; }"));
+		connect(button, &QPushButton::clicked, this, [streamPtr = &stream] { streamPtr->fire({}); });
+		return button;
+	};
+	_uiaParticipants = accessibleTool("meetingParticipants", QCoreApplication::translate("MeetingUI", "Participants"), _participantsStream);
+	_uiaChat = accessibleTool("meetingChat", QCoreApplication::translate("MeetingUI", "Chat"), _chatStream);
+	_uiaWhiteboard = accessibleTool("meetingWhiteboard", QCoreApplication::translate("MeetingUI", "Whiteboard"), _whiteboardStream);
 }
 
 void RoomBottomBarWidget::setAudioMuted(bool muted) {
@@ -2474,6 +2488,7 @@ void RoomBottomBarWidget::setChatUnreadCount(int count) {
 void RoomBottomBarWidget::setInRecovery(bool inRecovery) {
 	if (_inRecovery == inRecovery) return;
 	_inRecovery = inRecovery;
+	for (auto *button : {_uiaParticipants, _uiaChat, _uiaWhiteboard}) button->setEnabled(!inRecovery);
 	update();
 }
 
@@ -2543,6 +2558,12 @@ void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 	for (size_t i = 0; i < _toolItems.size(); ++i) {
 		_toolItems[i].rect = QRect(toolsLeft + static_cast<int>(i) * (toolWidth + kBottomBarGap),
 			5, toolWidth, kBottomBarHeight - 10);
+		switch (_toolItems[i].id) {
+		case 5: _uiaParticipants->setGeometry(_toolItems[i].rect); break;
+		case 6: _uiaChat->setGeometry(_toolItems[i].rect); break;
+		case 7: _uiaWhiteboard->setGeometry(_toolItems[i].rect); break;
+		default: break;
+		}
 	}
 }
 
@@ -4764,6 +4785,7 @@ void MeetingRoomWindow::setupVideoPagingControls() {
 	_previousVideoPage->setAccessibleName(_previousVideoPage->toolTip());
 
 	_videoPageLabel = new QLabel(QStringLiteral("1 / 1"), _videoPagingControls);
+	_videoPageLabel->setObjectName(QStringLiteral("videoPageIndicator"));
 	_videoPageLabel->setAlignment(Qt::AlignCenter);
 	_videoPageLabel->setMinimumWidth(54);
 
@@ -4775,7 +4797,7 @@ void MeetingRoomWindow::setupVideoPagingControls() {
 		QCoreApplication::translate("MeetingUI", "Next video page"));
 	_nextVideoPage->setAccessibleName(_nextVideoPage->toolTip());
 
-	_videoPageSizeControl = new QComboBox(_videoPagingControls);
+	_videoPageSizeControl = createAccessibleComboBox(_videoPagingControls);
 	_videoPageSizeControl->setObjectName(QStringLiteral("videoPageSize"));
 	_videoPageSizeControl->setToolTip(
 		QCoreApplication::translate("MeetingUI", "Videos per page"));

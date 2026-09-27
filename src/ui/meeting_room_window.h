@@ -373,6 +373,9 @@ private:
 
 	QLineEdit *_chatInput = nullptr;
 	QPushButton *_handBtn = nullptr;
+	QPushButton *_uiaParticipants = nullptr;
+	QPushButton *_uiaChat = nullptr;
+	QPushButton *_uiaWhiteboard = nullptr;
 
 	std::vector<ToolItem> _toolItems;
 	QRect _endMeetingRect;

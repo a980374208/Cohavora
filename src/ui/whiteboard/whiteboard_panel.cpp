@@ -1,10 +1,14 @@
+#include <QtWidgets/QDialogButtonBox>
 #include "whiteboard_panel.h"
+#include "accessible_combo_box.h"
 #include "src/ui/app_theme.h"
 #include "src/core/whiteboard/whiteboard_runtime.h"
+#include <QtCore/QEvent>
 #include <QtCore/QSaveFile>
 #include <QtCore/QSignalBlocker>
 #include <QtCore/QThread>
 #include <QtCore/QUuid>
+#include <QtWidgets/QApplication>
 #include <QtWidgets/QButtonGroup>
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QFileDialog>
@@ -20,6 +24,35 @@
 namespace MeetingUI {
 namespace wb = livekit::whiteboard;
 namespace {
+// Qt creates the overwrite box internally. Scope this observer to the live save
+// dialog; leave QFileDialog's validation, confirmation and accept logic intact.
+class ExportConfirmationAccessibility final : public QObject {
+public:
+    explicit ExportConfirmationAccessibility(QFileDialog &dialog) : dialog_(dialog) {
+        qApp->installEventFilter(this);
+    }
+    ~ExportConfirmationAccessibility() override { qApp->removeEventFilter(this); }
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override {
+        if (event->type() == QEvent::Show) {
+            auto *box = qobject_cast<QMessageBox *>(object);
+            bool owned = false;
+            for (auto *parent = object->parent(); parent; parent = parent->parent()) {
+                if (parent == &dialog_) { owned = true; break; }
+            }
+            if (box && owned &&
+                box->standardButtons() == (QMessageBox::Yes | QMessageBox::No)) {
+                box->setObjectName(QStringLiteral("whiteboardOverwriteConfirmation"));
+                box->button(QMessageBox::Yes)->setObjectName(QStringLiteral("whiteboardOverwriteConfirm"));
+                box->button(QMessageBox::No)->setObjectName(QStringLiteral("whiteboardOverwriteCancel"));
+                AppTheme::setTone(*box, AppTheme::Tone::Light);
+            }
+        }
+        return false;
+    }
+private:
+    QFileDialog &dialog_;
+};
 QHBoxLayout *toolbar(QVBoxLayout *outer, QWidget *parent) {
     auto *scroll = new QScrollArea(parent);
     scroll->setWidgetResizable(true);
@@ -69,9 +102,13 @@ WhiteboardPanel::WhiteboardPanel(QWidget *parent)
     auto *tools = toolbar(layout, this);
     const QStringList names{tr("Pen"), tr("Highlighter"), tr("Line"), tr("Rectangle"), tr("Ellipse"),
         tr("Arrow"), tr("Text"), tr("Eraser"), tr("Laser"), tr("Pan")};
+    const char *const toolNames[]{"whiteboardToolPen", "whiteboardToolHighlighter",
+        "whiteboardToolLine", "whiteboardToolRectangle", "whiteboardToolEllipse",
+        "whiteboardToolArrow", "whiteboardToolText", "whiteboardToolEraser",
+        "whiteboardToolLaser", "whiteboardToolPan"};
     auto *group = new QButtonGroup(this);
     for (int i = 0; i < names.size(); ++i) {
-        auto *item = button(tools, names[i], "whiteboardTool");
+        auto *item = button(tools, names[i], toolNames[i]);
         item->setProperty("toolId", i);
         item->setCheckable(true);
         item->setChecked(i == 0);
@@ -83,7 +120,8 @@ WhiteboardPanel::WhiteboardPanel(QWidget *parent)
     tools->addStretch();
 
     auto *options = toolbar(layout, this);
-    auto *colors = new QComboBox(this);
+    auto *colors = createAccessibleWhiteboardComboBox(this);
+    colors->setObjectName(QStringLiteral("whiteboardInkColor"));
     colors->setAccessibleName(tr("Ink color"));
     const std::pair<QString, QRgb> palette[]{{tr("Black"), 0x1f2329}, {tr("Red"), 0xf53f3f},
         {tr("Blue"), 0x1677ff}, {tr("Green"), 0x00a870}, {tr("Orange"), 0xff9f1a}, {tr("Purple"), 0x722ed1}};
@@ -98,6 +136,7 @@ WhiteboardPanel::WhiteboardPanel(QWidget *parent)
     });
     options->addWidget(new QLabel(tr("Width"), this));
     auto *width = new QSpinBox(this);
+    width->setObjectName(QStringLiteral("whiteboardInkWidth"));
     width->setRange(1, 32);
     width->setValue(4);
     width->setAccessibleName(tr("Ink width"));
@@ -105,6 +144,7 @@ WhiteboardPanel::WhiteboardPanel(QWidget *parent)
     connect(width, qOverload<int>(&QSpinBox::valueChanged), canvas_, &WhiteboardCanvas::setInkWidth);
     options->addWidget(new QLabel(tr("Text size"), this));
     auto *font = new QSpinBox(this);
+    font->setObjectName(QStringLiteral("whiteboardTextSize"));
     font->setRange(8, 96);
     font->setValue(28);
     font->setAccessibleName(tr("Text size"));
@@ -131,7 +171,7 @@ WhiteboardPanel::WhiteboardPanel(QWidget *parent)
 
     layout->addWidget(canvas_, 1);
     auto *footer = toolbar(layout, this);
-    pages_ = new QComboBox(this);
+    pages_ = createAccessibleWhiteboardComboBox(this);
     pages_->setObjectName(QStringLiteral("whiteboardPages"));
     pages_->setAccessibleName(tr("Page"));
     footer->addWidget(pages_);
@@ -145,7 +185,8 @@ WhiteboardPanel::WhiteboardPanel(QWidget *parent)
     import_->setShortcut(QKeySequence::Open);
     import_->setToolTip(tr("Import PNG or JPEG as a new image page (Ctrl+O)"));
     connect(import_, &QPushButton::clicked, this, &WhiteboardPanel::importImage);
-    zoom_ = new QComboBox(this);
+    zoom_ = createAccessibleWhiteboardComboBox(this);
+    zoom_->setObjectName(QStringLiteral("whiteboardZoom"));
     zoom_->setAccessibleName(tr("Zoom relative to page fit"));
     for (const auto percent : {50, 75, 100, 125, 150, 200}) zoom_->addItem(QString::number(percent) + '%', percent / 100.0);
     zoom_->setCurrentIndex(2);
@@ -274,6 +315,9 @@ void WhiteboardPanel::confirmClear() {
     canvas_->cancelInput();
     QMessageBox box(QMessageBox::Question, tr("Clear page"), tr("Remove all objects on this page? This cannot be undone."),
         QMessageBox::Yes | QMessageBox::Cancel, this);
+    box.setObjectName(QStringLiteral("whiteboardClearConfirmation"));
+    box.button(QMessageBox::Yes)->setObjectName(QStringLiteral("whiteboardClearConfirm"));
+    box.button(QMessageBox::Cancel)->setObjectName(QStringLiteral("whiteboardClearCancel"));
     box.setDefaultButton(QMessageBox::Cancel);
     box.setMinimumSize(460, 180);
     AppTheme::setTone(box, AppTheme::Tone::Light);
@@ -283,9 +327,17 @@ void WhiteboardPanel::exportPng() {
     if (exportWorker_) return;
     canvas_->cancelInput();
     QFileDialog dialog(this, tr("Export current page"));
+    dialog.setObjectName(QStringLiteral("whiteboardExportDialog"));
+    ExportConfirmationAccessibility confirmationAccessibility(dialog);
     dialog.setOption(QFileDialog::DontUseNativeDialog);
     dialog.setAcceptMode(QFileDialog::AcceptSave);
     dialog.setNameFilter(tr("PNG image (*.png)"));
+    if (auto *buttons = dialog.findChild<QDialogButtonBox *>()) {
+        if (auto *accept = buttons->button(QDialogButtonBox::Save))
+            accept->setObjectName(QStringLiteral("whiteboardFileAccept"));
+        if (auto *cancel = buttons->button(QDialogButtonBox::Cancel))
+            cancel->setObjectName(QStringLiteral("whiteboardFileCancel"));
+    }
     dialog.setDefaultSuffix(QStringLiteral("png"));
     dialog.selectFile(QStringLiteral("whiteboard-page-%1.png").arg(document_.activePageIndex() + 1));
     AppTheme::setTone(dialog, AppTheme::Tone::Light);
@@ -330,10 +382,17 @@ void WhiteboardPanel::importImage() {
         if (box.exec() != QMessageBox::Yes) return;
     }
     QFileDialog dialog(this, tr("Import image page"));
+    dialog.setObjectName(QStringLiteral("whiteboardImportDialog"));
     dialog.setOption(QFileDialog::DontUseNativeDialog);
     dialog.setAcceptMode(QFileDialog::AcceptOpen);
     dialog.setFileMode(QFileDialog::ExistingFile);
     dialog.setNameFilter(tr("PNG or JPEG image (*.png *.jpg *.jpeg)"));
+    if (auto *buttons = dialog.findChild<QDialogButtonBox *>()) {
+        if (auto *accept = buttons->button(QDialogButtonBox::Open))
+            accept->setObjectName(QStringLiteral("whiteboardFileAccept"));
+        if (auto *cancel = buttons->button(QDialogButtonBox::Cancel))
+            cancel->setObjectName(QStringLiteral("whiteboardFileCancel"));
+    }
     AppTheme::setTone(dialog, AppTheme::Tone::Light);
     AppTheme::styleChoiceControls(dialog, AppTheme::Tone::Light);
     AppTheme::makeDialogAdaptive(dialog, {760, 520});

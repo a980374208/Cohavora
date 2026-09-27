@@ -1,4 +1,5 @@
 #include "src/ui/whiteboard/whiteboard_panel.h"
+#include "src/ui/whiteboard/accessible_combo_box.h"
 #include "src/ui/whiteboard/whiteboard_image_loader.h"
 #include "src/ui/whiteboard/annotation_overlay_window.h"
 #include "src/core/whiteboard/whiteboard_runtime.h"
@@ -11,6 +12,7 @@
 #include <QtCore/QThread>
 #include <QtCore/QTimer>
 #include <QtGui/QInputMethodEvent>
+#include <QtGui/QAccessible>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QScreen>
 #include <QtWidgets/QApplication>
@@ -25,6 +27,7 @@
 #include <QtPlugin>
 #include <algorithm>
 #include <iostream>
+#include <memory>
 
 Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin)
 Q_IMPORT_PLUGIN(QWindowsVistaStylePlugin)
@@ -40,6 +43,61 @@ void messages(QtMsgType, const QMessageLogContext &, const QString &text) {
     if (text.contains("style sheet", Qt::CaseInsensitive) || text.contains("Unknown property")) styleWarning = true;
 }
 void flush() { QApplication::processEvents(); QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete); }
+void accessibleComboCommit() {
+    auto combo = std::unique_ptr<QComboBox>(MeetingUI::createAccessibleWhiteboardComboBox(nullptr));
+    combo->addItems({QStringLiteral("one"), QStringLiteral("two"), QStringLiteral("three")});
+    auto *list = QAccessible::queryAccessibleInterface(combo->view());
+    auto *selection = list->tableInterface();
+    TEST_CHECK(selection && selection->isRowSelected(0));
+    int changes = 0, activations = 0;
+    QObject::connect(combo.get(), qOverload<int>(&QComboBox::currentIndexChanged), [&] { ++changes; });
+    QObject::connect(combo.get(), qOverload<int>(&QComboBox::activated), [&] { ++activations; });
+    // Ordinary popup highlighting must not become a committed user selection.
+    combo->view()->setCurrentIndex(combo->model()->index(1, 0));
+    flush();
+    TEST_CHECK(combo->currentIndex() == 0 && changes == 0);
+    list->child(1)->actionInterface()->doAction(QAccessibleActionInterface::toggleAction());
+    list->child(0)->actionInterface()->doAction(QAccessibleActionInterface::toggleAction());
+    TEST_CHECK(combo->currentIndex() == 0); // Commit leaves the accessibility call stack.
+    flush();
+    TEST_CHECK(combo->currentIndex() == 1 && selection->isRowSelected(1));
+    TEST_CHECK(changes == 1 && activations == 1);
+    list->child(2)->actionInterface()->doAction(QAccessibleActionInterface::pressAction());
+    flush();
+    TEST_CHECK(combo->currentIndex() == 2 && changes == 2 && activations == 2);
+    TEST_CHECK(!selection->selectRow(-1) && !selection->selectRow(3));
+    TEST_CHECK(selection->selectRow(0));
+    combo->setEnabled(false);
+    flush();
+    TEST_CHECK(combo->currentIndex() == 2 && changes == 2);
+    TEST_CHECK(!selection->selectRow(0));
+    combo->setEnabled(true);
+    TEST_CHECK(selection->selectRow(1));
+    combo->clear(); // A queued choice must not select a replacement row with the same number.
+    combo->addItems({QStringLiteral("replacement one"), QStringLiteral("replacement two")});
+    flush();
+    TEST_CHECK(combo->currentIndex() == 0);
+    TEST_CHECK(list->child(1)->text(QAccessible::Name) == QStringLiteral("replacement two"));
+    TEST_CHECK(selection->selectRow(1));
+    combo.reset();
+    flush(); // QObject context cancels pending work when the view is destroyed.
+
+    WhiteboardPanel panel;
+    auto *pages = panel.findChild<QComboBox *>("whiteboardPages");
+    panel.canvas()->execute(wb::CommandKind::AddPage);
+    TEST_CHECK(panel.document().activePageIndex() == 1);
+    auto *pageList = QAccessible::queryAccessibleInterface(pages->view());
+    TEST_CHECK(pageList->tableInterface()->selectRow(0));
+    flush(); // SelectPage synchronously refreshes (clears/refills) the combo model.
+    TEST_CHECK(panel.document().activePageIndex() == 0 && pages->currentIndex() == 0);
+    TEST_CHECK(pageList->tableInterface()->selectRow(1));
+    flush();
+    TEST_CHECK(panel.document().activePageIndex() == 1 && pages->currentIndex() == 1);
+    auto *zoom = panel.findChild<QComboBox *>("whiteboardZoom");
+    TEST_CHECK(QAccessible::queryAccessibleInterface(zoom->view())->tableInterface()->selectRow(4));
+    flush();
+    TEST_CHECK(panel.canvas()->zoom() == 1.5);
+}
 void mouse(WhiteboardCanvas &canvas, QEvent::Type type, QPointF point, bool document = true) {
     if (document) point = canvas.documentToView(point);
     const auto button = type == QEvent::MouseMove ? Qt::NoButton : Qt::LeftButton;
@@ -431,6 +489,7 @@ int main(int argc, char **argv) {
     qInstallMessageHandler(messages);
     MeetingUI::AppTranslation::install(app, QLocale("zh_CN"));
     MeetingUI::AppTheme::install(app);
+    accessibleComboCommit();
     WhiteboardPanel panel;
     panel.resize(1120, 700);
     const bool interactive = app.arguments().contains("--interactive");

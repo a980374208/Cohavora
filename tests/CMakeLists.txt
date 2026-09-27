@@ -27,6 +27,7 @@ if(COHAVORA_BUILD_QT_TESTS)
     include(${CMAKE_CURRENT_LIST_DIR}/cmake/RenderTests.cmake)
     include(${CMAKE_CURRENT_LIST_DIR}/cmake/ApplicationTests.cmake)
     include(${CMAKE_CURRENT_LIST_DIR}/cmake/WhiteboardTests.cmake)
+    include(${CMAKE_CURRENT_LIST_DIR}/cmake/UiaTests.cmake)
 endif()
 
 set_property(TEST diagnostic_pipeline_test camera_owner_remediation_test

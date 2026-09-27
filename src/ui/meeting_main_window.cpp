@@ -130,10 +130,13 @@ void WindowControlsWidget::leaveEventHook(QEvent *e) {
 JoinMeetingDialog::JoinMeetingDialog(
 		QWidget *parent,
 		const QString &initialMeetingId,
-		std::optional<OpenMeeting::MeetingSettings> meetingSettings)
+		std::optional<OpenMeeting::MeetingSettings> meetingSettings,
+		OpenMeeting::SessionManager *session)
 	: QDialog(parent)
-	, _meetingSettings(std::move(meetingSettings)) {
+	, _meetingSettings(std::move(meetingSettings))
+	, _session(session ? session : &OpenMeeting::SessionManager::instance()) {
 	setWindowTitle(QCoreApplication::translate("MeetingUI", "Join Meeting"));
+	setObjectName(QStringLiteral("joinMeetingDialog"));
 	resize(460, 560);
 	setWindowFlags(windowFlags() | Qt::FramelessWindowHint);
 	setAttribute(Qt::WA_TranslucentBackground, true);
@@ -162,6 +165,8 @@ JoinMeetingDialog::JoinMeetingDialog(
 	titleLayout->addStretch();
 
 	_closeBtn = new QPushButton(QString::fromUtf8("✕"), container);
+	_closeBtn->setObjectName(QStringLiteral("joinCloseButton"));
+	_closeBtn->setAccessibleName(QCoreApplication::translate("MeetingUI", "Close"));
 	MeetingUI::AppTheme::setStyleVariant(*_closeBtn, "meeting-main-window-closebtn");
 	_closeBtn->setFixedSize(24, 24);
 	connect(_closeBtn, &QPushButton::clicked, this, &QDialog::reject);
@@ -174,6 +179,8 @@ JoinMeetingDialog::JoinMeetingDialog(
 	mainLayout->addWidget(idLabel);
 
 	_meetingIdInput = new QLineEdit(container);
+	_meetingIdInput->setObjectName(QStringLiteral("joinMeetingId"));
+	_meetingIdInput->setAccessibleName(idLabel->text());
 	_meetingIdInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "9-digit meeting ID (e.g. 847-123-456)"));
 	_meetingIdInput->setText(initialMeetingId);
 	_meetingIdInput->setReadOnly(!initialMeetingId.trimmed().isEmpty());
@@ -185,6 +192,8 @@ JoinMeetingDialog::JoinMeetingDialog(
 	mainLayout->addWidget(pwdLabel);
 
 	_passwordInput = new QLineEdit(container);
+	_passwordInput->setObjectName(QStringLiteral("joinPassword"));
+	_passwordInput->setAccessibleName(pwdLabel->text());
 	_passwordInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Enter the password if required"));
 	_passwordInput->setEchoMode(QLineEdit::Password);
 	mainLayout->addWidget(_passwordInput);
@@ -195,17 +204,20 @@ JoinMeetingDialog::JoinMeetingDialog(
 	mainLayout->addWidget(nameLabel);
 
 	_displayNameInput = new QLineEdit(container);
+	_displayNameInput->setObjectName(QStringLiteral("joinDisplayName"));
+	_displayNameInput->setAccessibleName(nameLabel->text());
 	_displayNameInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Name shown in the meeting"));
-	auto &session = OpenMeeting::SessionManager::instance();
-	_displayNameInput->setText(session.nickname());
+	_displayNameInput->setText(_session->nickname());
 	mainLayout->addWidget(_displayNameInput);
 
 	// 入会音视频设置
 	auto optLayout = new QHBoxLayout();
 	_audioMuteBox = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable microphone on joining"), container);
-	_audioMuteBox->setChecked(session.mediaPreferences().enableMicrophone);
+	_audioMuteBox->setObjectName(QStringLiteral("joinMicrophone"));
+	_audioMuteBox->setChecked(_session->mediaPreferences().enableMicrophone);
 	_videoMuteBox = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable camera on joining"), container);
-	_videoMuteBox->setChecked(session.mediaPreferences().enableVideo);
+	_videoMuteBox->setObjectName(QStringLiteral("joinCamera"));
+	_videoMuteBox->setChecked(_session->mediaPreferences().enableVideo);
 	optLayout->addWidget(_audioMuteBox);
 	optLayout->addWidget(_videoMuteBox);
 	mainLayout->addLayout(optLayout);
@@ -229,6 +241,7 @@ JoinMeetingDialog::JoinMeetingDialog(
 	// 手动/高级直连设置折叠栏
 	_manualToggleBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "⚙ Advanced LiveKit Connection ▾"), container);
 	_manualToggleBtn->setObjectName("linkBtn");
+	_manualToggleBtn->setAccessibleName(QCoreApplication::translate("MeetingUI", "Advanced LiveKit Connection"));
 	connect(_manualToggleBtn, &QPushButton::clicked, this, &JoinMeetingDialog::toggleManualServer);
 	mainLayout->addWidget(_manualToggleBtn);
 	_manualToggleBtn->setVisible(initialMeetingId.trimmed().isEmpty());
@@ -239,10 +252,14 @@ JoinMeetingDialog::JoinMeetingDialog(
 	manLayout->setSpacing(4);
 
 	_serverUrlInput = new QLineEdit(_manualWidget);
+	_serverUrlInput->setObjectName(QStringLiteral("joinServerUrl"));
+	_serverUrlInput->setAccessibleName(QCoreApplication::translate("MeetingUI", "Server URL"));
 	_serverUrlInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Server URL (e.g. ws://127.0.0.1:7880)"));
 	_serverUrlInput->setText("ws://127.0.0.1:7880");
 
 	_tokenInput = new QLineEdit(_manualWidget);
+	_tokenInput->setObjectName(QStringLiteral("joinToken"));
+	_tokenInput->setAccessibleName(QCoreApplication::translate("MeetingUI", "Custom LiveKit Token"));
 	_tokenInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Custom LiveKit Token (Optional)"));
 
 	manLayout->addWidget(_serverUrlInput);
@@ -252,6 +269,7 @@ JoinMeetingDialog::JoinMeetingDialog(
 
 	// 状态/错误提示
 	_statusLabel = new QLabel(container);
+	_statusLabel->setObjectName(QStringLiteral("joinStatus"));
 	MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-main-window-statuslabel");
 	_statusLabel->setAlignment(Qt::AlignCenter);
 	_statusLabel->setWordWrap(true);
@@ -358,7 +376,7 @@ void JoinMeetingDialog::onJoinClicked() {
 	}
 
 	const QString password = _passwordInput ? _passwordInput->text() : QString();
-	auto &session = OpenMeeting::SessionManager::instance();
+	auto &session = *_session;
 
 	setLoading(true, QCoreApplication::translate("MeetingUI", "Checking meeting access..."));
 
@@ -382,7 +400,7 @@ void JoinMeetingDialog::onJoinClicked() {
 		self->setLoading(true, QCoreApplication::translate("MeetingUI", "Requesting LiveKit credentials..."));
 
 		// 第二阶段：换取 LiveKit Token 与 URL
-		auto &sess = OpenMeeting::SessionManager::instance();
+		auto &sess = *self->_session;
 		sess.httpClient().getMeetingToken(self->_cleanMeetingId, [self](bool tokenOk, const OpenMeeting::LiveKitAuthInfo &auth, const OpenMeeting::HttpError &tokenErr) {
 			if (!self || self->_isCancelled) {
 				return;
@@ -403,7 +421,7 @@ void JoinMeetingDialog::onJoinClicked() {
 }
 
 void JoinMeetingDialog::persistMediaPreferences() {
-	auto &session = OpenMeeting::SessionManager::instance();
+	auto &session = *_session;
 	if (_audioMuteBox) session.setEnableMicrophone(_audioMuteBox->isChecked());
 	if (_videoMuteBox) session.setEnableVideo(_videoMuteBox->isChecked());
 }
