@@ -92,9 +92,10 @@ constexpr VideoPreset kCamera43[] = {
     {1920, 1440, 3500000, 30},
 };
 constexpr VideoPreset kScreenShare[] = {
-    {640, 360, 200000, 3}, {1280, 720, 400000, 5},
-    {1280, 720, 1000000, 15}, {1920, 1080, 1500000, 15},
-    {1920, 1080, 3000000, 30},
+    // Application policy: match the desktop capture target (15 FPS), including
+    // small windows. Avoid duplicate size entries hiding the faster preset.
+    {640, 360, 500000, 15}, {1280, 720, 1000000, 15},
+    {1920, 1080, 1500000, 15}, {3840, 2160, 3000000, 15},
 };
 
 template <size_t N>

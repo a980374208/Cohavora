@@ -8,7 +8,7 @@
 #include "participant.h"
 #include "livekit_rtc.pb.h"
 
-// Expected outputs from client-sdk-cpp's unmodified Rust calculation bodies.
+// Camera outputs follow the reference Rust policy; screen outputs exercise the application 15 FPS policy.
 // Rust HEAD: a0c91f5ae2309f3911c4a5d5843f385e6f20846a
 // livekit/src/room/options.rs SHA256:
 // ed535f7cc5266319d8a7fdd0b911d4034cb76007eb7f44ed5debc8e813518a41
@@ -38,7 +38,7 @@ void CheckLayers(const std::vector<livekit::VideoLayerSetting>& actual,
     }
 }
 
-void TestRustEncodingPolicy() {
+void TestEncodingPolicy() {
     using Source = livekit::TrackSource;
     const EncodingCase cases[] = {
         {320, 240, Source::Camera, "vp8", true, "",
@@ -84,32 +84,32 @@ void TestRustEncodingPolicy() {
         {1280, 720, Source::Camera, "av1", true, "",
             {{1280, 720, 2100000, 30, "f", 1.0}, {640, 360, 450000, 20, "h", 2.0}, {320, 180, 160000, 15, "q", 4.0}}},
         {320, 240, Source::ScreenShareVideo, "vp8", true, "",
-            {{320, 240, 200000, 3, "q", 1.0}}},
+            {{320, 240, 500000, 15, "q", 1.0}}},
         {640, 480, Source::ScreenShareVideo, "vp8", true, "",
-            {{640, 480, 400000, 5, "h", 1.0}, {320, 240, 150000, 3, "q", 2.0}}},
+            {{640, 480, 1000000, 15, "h", 1.0}, {320, 240, 150000, 3, "q", 2.0}}},
         {1280, 720, Source::ScreenShareVideo, "vp8", true, "",
             {{1280, 720, 1500000, 15, "h", 1.0}, {640, 360, 150000, 3, "q", 2.0}}},
         {1281, 721, Source::ScreenShareVideo, "vp8", true, "",
             {{1281, 721, 1500000, 15, "h", 1.0}, {639, 360, 150000, 3, "q", 2.0027777777777778}}},
         {1920, 1080, Source::ScreenShareVideo, "vp8", true, "",
-            {{1920, 1080, 3000000, 30, "h", 1.0}, {960, 540, 150000, 3, "q", 2.0}}},
+            {{1920, 1080, 3000000, 15, "h", 1.0}, {960, 540, 150000, 3, "q", 2.0}}},
         {3840, 2160, Source::ScreenShareVideo, "vp8", true, "",
-            {{3840, 2160, 3000000, 30, "h", 1.0}, {1920, 1080, 150000, 3, "q", 2.0}}},
+            {{3840, 2160, 3000000, 15, "h", 1.0}, {1920, 1080, 150000, 3, "q", 2.0}}},
         {1920, 1080, Source::ScreenShareVideo, "av1", true, "",
-            {{1920, 1080, 2100000, 30, "h", 1.0}, {960, 540, 150000, 3, "q", 2.0}}},
+            {{1920, 1080, 2100000, 15, "h", 1.0}, {960, 540, 150000, 3, "q", 2.0}}},
         {640, 480, Source::Camera, "vp8", false, "",
             {{640, 480, 450000, 25, "q", 1.0}}},
         {1280, 720, Source::Camera, "av1", false, "",
             {{1280, 720, 2100000, 30, "q", 1.0}}},
         {1920, 1080, Source::ScreenShareVideo, "vp8", false, "",
-            {{1920, 1080, 3000000, 30, "q", 1.0}}},
+            {{1920, 1080, 3000000, 15, "q", 1.0}}},
         {1280, 720, Source::Camera, "av1", true, "L3T3_KEY",
             {{1280, 720, 2100000, 30, "q", 1.0}}},
         {1920, 1080, Source::ScreenShareVideo, "vp9", true, "L1T3",
-            {{1920, 1080, 2550000, 30, "q", 1.0}}},
+            {{1920, 1080, 2550000, 15, "q", 1.0}}},
     };
     for (const auto& c : cases) {
-        std::cout << "[Rust policy] " << c.width << "x" << c.height << " " << c.codec
+        std::cout << "[Encoding policy] " << c.width << "x" << c.height << " " << c.codec
                   << " source=" << static_cast<int>(c.source) << " simulcast=" << c.simulcast
                   << " mode=" << c.mode << std::endl;
         livekit::VideoPublishOptions input;
@@ -136,7 +136,7 @@ void TestRustEncodingPolicy() {
 } // namespace
 
 int main() {
-    TestRustEncodingPolicy();
+    TestEncodingPolicy();
 
     // Test 3: LocalParticipant PublishTrack Protobuf layers serialization
     {
@@ -271,6 +271,6 @@ int main() {
         TEST_CHECK(codec.layers(2).width() == 1280);
     }
 
-    std::cout << "[SUCCESS] Rust encoding policy and publication serialization tests passed!" << std::endl;
+    std::cout << "[SUCCESS] Encoding policy and publication serialization tests passed!" << std::endl;
     return 0;
 }
