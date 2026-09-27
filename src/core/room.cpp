@@ -5478,11 +5478,12 @@ Room::AddTrackToPublisherAsync(
         VideoPublishOptions publish_options;
         AudioPublishPolicy audio_publish_policy;
         uint64_t generation = 0;
+        bool screen_share = false;
     };
     auto* params = new AddTrackTaskParams{
         shared_from_this(), completion, pc, rtc_track, stream_id,
         std::move(publish_options), std::move(resolved_audio_policy),
-        generation};
+        generation, track->source() == TrackSource::ScreenShareVideo};
     WebRTCManager::Instance().signaling_thread()->PostTask(
         [params]() {
             // Destruction happens in this translation unit rather than in the
@@ -5499,12 +5500,12 @@ Room::AddTrackToPublisherAsync(
             }
 
             PublishedSenderBundle bundle;
+            bundle.screen_share = task.screen_share;
             webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender;
             webrtc::scoped_refptr<webrtc::RtpTransceiverInterface> transceiver;
             std::string error;
-            // Match the official SDK's publishing flow: a local publication
-            // owns a sendonly transceiver. AddTrack can reuse a recvonly
-            // transceiver in Single-PC mode and retain its previous MSID.
+            // Reuse only senders retired by this room's screen publications.
+            // AddTrack could instead take a downstream recvonly transceiver.
             webrtc::RtpTransceiverInit init;
             init.direction = webrtc::RtpTransceiverDirection::kSendOnly;
             init.stream_ids = {task.stream_id};
@@ -5530,19 +5531,21 @@ Room::AddTrackToPublisherAsync(
                     task.audio_publish_policy.max_bitrate_bps;
                 init.send_encodings.push_back(std::move(encoding));
             }
-            auto result = task.pc->AddTransceiver(task.rtc_track, init);
-            if (result.ok()) {
-                transceiver = result.MoveValue();
-                sender = transceiver->sender();
-                if (sender) {
-                    bundle.primary = sender;
-                    bundle.senders.push_back(sender);
-                    bundle.scalability_modes.push_back(
-                        task.publish_options.scalability_mode);
-                    bundle.track_ids.push_back(task.rtc_track->id());
+            if (error.empty()) {
+                auto result = task.pc->AddTransceiver(task.rtc_track, init);
+                if (result.ok()) {
+                    transceiver = result.MoveValue();
+                    sender = transceiver->sender();
+                } else {
+                    error = result.error().message();
                 }
-            } else {
-                error = result.error().message();
+            }
+            if (sender) {
+                bundle.primary = sender;
+                bundle.senders.push_back(sender);
+                bundle.scalability_modes.push_back(
+                    task.publish_options.scalability_mode);
+                bundle.track_ids.push_back(task.rtc_track->id());
             }
 
             if (!sender) {
@@ -5597,7 +5600,7 @@ Room::AddTrackToPublisherAsync(
 
                 auto preferences = get_prefs(task.publish_options.video_codec);
                 if (preferences.empty()) {
-                    RollbackPublishedSenderBundle(task.pc, bundle);
+                    task.room->RollbackPublishedSenderBundle(task.pc, bundle);
                     FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
                         OperationKind::PublishTrack,
                         OperationErrorCode::InvalidState,
@@ -5607,7 +5610,7 @@ Room::AddTrackToPublisherAsync(
                 }
                 auto codec_status = transceiver->SetCodecPreferences(preferences);
                 if (!codec_status.ok()) {
-                    RollbackPublishedSenderBundle(task.pc, bundle);
+                    task.room->RollbackPublishedSenderBundle(task.pc, bundle);
                     FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
                         OperationKind::PublishTrack,
                         OperationErrorCode::StateUncertain,
@@ -5621,7 +5624,7 @@ Room::AddTrackToPublisherAsync(
                     for (size_t c_idx = 1; c_idx < task.publish_options.simulcast_codecs.size(); ++c_idx) {
                         const auto& backup_spec = task.publish_options.simulcast_codecs[c_idx];
                         if (backup_spec.layers.empty()) {
-                            RollbackPublishedSenderBundle(task.pc, bundle);
+                            task.room->RollbackPublishedSenderBundle(task.pc, bundle);
                             FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
                                 OperationKind::PublishTrack,
                                 OperationErrorCode::InvalidState,
@@ -5658,7 +5661,7 @@ Room::AddTrackToPublisherAsync(
                         auto backup_track = WebRTCManager::Instance().factory()->CreateVideoTrack(
                             std::move(backup_source), backup_cid);
                         if (!backup_track) {
-                            RollbackPublishedSenderBundle(task.pc, bundle);
+                            task.room->RollbackPublishedSenderBundle(task.pc, bundle);
                             FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
                                 OperationKind::PublishTrack,
                                 OperationErrorCode::StateUncertain,
@@ -5671,7 +5674,7 @@ Room::AddTrackToPublisherAsync(
                         auto backup_res = task.pc->AddTransceiver(
                             backup_track, backup_init);
                         if (!backup_res.ok()) {
-                            RollbackPublishedSenderBundle(task.pc, bundle);
+                            task.room->RollbackPublishedSenderBundle(task.pc, bundle);
                             FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
                                 OperationKind::PublishTrack,
                                 OperationErrorCode::StateUncertain,
@@ -5683,7 +5686,7 @@ Room::AddTrackToPublisherAsync(
                         auto backup_transceiver = backup_res.MoveValue();
                         auto backup_sender = backup_transceiver->sender();
                         if (!backup_sender) {
-                            RollbackPublishedSenderBundle(task.pc, bundle);
+                            task.room->RollbackPublishedSenderBundle(task.pc, bundle);
                             FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
                                 OperationKind::PublishTrack,
                                 OperationErrorCode::StateUncertain,
@@ -5699,7 +5702,7 @@ Room::AddTrackToPublisherAsync(
 
                         auto backup_prefs = get_prefs(backup_spec.codec);
                         if (backup_prefs.empty()) {
-                            RollbackPublishedSenderBundle(task.pc, bundle);
+                            task.room->RollbackPublishedSenderBundle(task.pc, bundle);
                             FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
                                 OperationKind::PublishTrack,
                                 OperationErrorCode::InvalidState,
@@ -5710,7 +5713,7 @@ Room::AddTrackToPublisherAsync(
                         const auto backup_status =
                             backup_transceiver->SetCodecPreferences(backup_prefs);
                         if (!backup_status.ok()) {
-                            RollbackPublishedSenderBundle(task.pc, bundle);
+                            task.room->RollbackPublishedSenderBundle(task.pc, bundle);
                             FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
                                 OperationKind::PublishTrack,
                                 OperationErrorCode::StateUncertain,
@@ -5719,9 +5722,6 @@ Room::AddTrackToPublisherAsync(
                                 true)));
                             return;
                         }
-                        std::cout << "[BACKUP CODEC] Added Backup Transceiver for codec=" << backup_spec.codec
-                                  << " (layers=" << backup_spec.layers.size()
-                                  << ", active=" << (is_active ? "ON" : "OFF (on-demand)") << ")\n";
                         task.room->Log("TRACK", "BACKUP_CODEC_ATTACH",
                                        "Attached backup codec transceiver to video track: Codec=" + backup_spec.codec +
                                        ", Layers=" + std::to_string(backup_spec.layers.size()) +
@@ -5730,7 +5730,7 @@ Room::AddTrackToPublisherAsync(
                 }
             }
             if (task.generation != task.room->session_generation_.load(std::memory_order_acquire)) {
-                RollbackPublishedSenderBundle(task.pc, bundle);
+                task.room->RollbackPublishedSenderBundle(task.pc, bundle);
                 FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
                     OperationKind::PublishTrack,
                     OperationErrorCode::Cancelled,
@@ -5740,7 +5740,7 @@ Room::AddTrackToPublisherAsync(
             }
             PublishedSenderBundle completed = bundle;
             if (!CompleteAwaitable(task.completion, std::move(completed))) {
-                RollbackPublishedSenderBundle(task.pc, bundle);
+                task.room->RollbackPublishedSenderBundle(task.pc, bundle);
             }
         });
 
@@ -5849,7 +5849,7 @@ asio::awaitable<void> Room::ApplyPublishedSenderScalabilityModesAsync(
             }
         }
         if (!CompleteAwaitable(task.completion)) {
-            RollbackPublishedSenderBundle(task.pc, task.bundle);
+            task.room->RollbackPublishedSenderBundle(task.pc, task.bundle);
         }
     });
 
@@ -6123,7 +6123,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         }
         release_ack();
         if (!sender_bundle.empty() && WebRTCManager::Instance().signaling_thread()) {
-            WebRTCManager::Instance().signaling_thread()->BlockingCall([publisher, sender_bundle]() {
+            WebRTCManager::Instance().signaling_thread()->BlockingCall([this, publisher, sender_bundle]() {
                 RollbackPublishedSenderBundle(publisher, sender_bundle);
             });
         }
@@ -6471,7 +6471,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 std::lock_guard lock(room_mutex_);
                 pc = publisher_pc_;
             }
-            WebRTCManager::Instance().signaling_thread()->BlockingCall([pc, sender_bundles]() {
+            WebRTCManager::Instance().signaling_thread()->BlockingCall([this, pc, sender_bundles]() {
                 if (pc) {
                     for (auto bundle = sender_bundles.rbegin();
                          bundle != sender_bundles.rend(); ++bundle) {
@@ -6681,10 +6681,12 @@ asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
         webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> rtc_track;
         std::vector<std::string> sender_track_ids;
         uint64_t generation = 0;
+        bool screen_share = false;
     };
     auto* params = new RemoveTrackTaskParams{
         shared_from_this(), completion, pc, track->rtc_track(),
-        std::move(sender_track_ids), generation};
+        std::move(sender_track_ids), generation,
+        track->source() == TrackSource::ScreenShareVideo};
     WebRTCManager::Instance().signaling_thread()->PostTask([params]() {
         std::unique_ptr<RemoveTrackTaskParams> owned(params);
         auto& task = *owned;
@@ -6727,6 +6729,30 @@ asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
                     result.message(),
                     true)));
                 return;
+            }
+            if (task.screen_share) {
+                bool found = false;
+                for (const auto& transceiver : task.pc->GetTransceivers()) {
+                    if (!transceiver || transceiver->sender() != sender) continue;
+                    found = true;
+                    const auto stopped = transceiver->StopStandard();
+                    if (!stopped.ok()) {
+                        FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                            OperationKind::UnpublishTrack,
+                            OperationErrorCode::StateUncertain,
+                            "retire_screen_transceiver", stopped.message(), true)));
+                        return;
+                    }
+                    break;
+                }
+                if (!found) {
+                    FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                        OperationKind::UnpublishTrack,
+                        OperationErrorCode::StateUncertain,
+                        "retire_screen_transceiver",
+                        "screen sender has no transceiver", true)));
+                    return;
+                }
             }
         }
         CompleteAwaitable(task.completion);
@@ -11219,6 +11245,26 @@ asio::awaitable<RoomStatsReport> Room::GetStats(
                false, true);
     }
     co_return room_report;
+}
+
+PublisherMediaObjectCounts Room::GetPublisherMediaObjectCounts() const {
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher;
+    {
+        std::lock_guard lock(room_mutex_);
+        publisher = publisher_pc_;
+    }
+    PublisherMediaObjectCounts result;
+    auto* signaling = WebRTCManager::Instance().signaling_thread();
+    if (!publisher || !signaling) return result;
+    signaling->BlockingCall([&] {
+        result.transceivers = publisher->GetTransceivers().size();
+        for (const auto& sender : publisher->GetSenders()) {
+            if (!sender) continue;
+            if (sender->track()) ++result.senders_with_track;
+            else ++result.senders_without_track;
+        }
+    });
+    return result;
 }
 
 void Room::SetParticipantVolume(const std::string& identity_or_sid, double volume) {

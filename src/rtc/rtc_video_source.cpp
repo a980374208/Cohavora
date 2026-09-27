@@ -13,6 +13,12 @@
 
 namespace livekit {
 
+namespace { std::atomic<std::uint64_t> live_rtc_video_sources{0}; }
+
+std::uint64_t RtcVideoSource::LiveInstanceCount() noexcept {
+    return live_rtc_video_sources.load(std::memory_order_relaxed);
+}
+
 webrtc::scoped_refptr<RtcVideoSource> RtcVideoSource::Create(std::shared_ptr<VideoSource> source, bool screencast) {
     return webrtc::make_ref_counted<RtcVideoSource>(source, screencast);
 }
@@ -24,11 +30,13 @@ RtcVideoSource::RtcVideoSource(std::shared_ptr<VideoSource> source, bool screenc
             OnVideoFrame(frame, options);
         });
     }
+    live_rtc_video_sources.fetch_add(1, std::memory_order_relaxed);
 }
 
 RtcVideoSource::~RtcVideoSource() {
     if (subscription_) subscription_->disconnect();
     SetTelemetryProbe({});
+    live_rtc_video_sources.fetch_sub(1, std::memory_order_relaxed);
 }
 
 void RtcVideoSource::SetTelemetryProbe(
