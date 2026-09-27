@@ -1,6 +1,7 @@
 #pragma once
 
 #include <memory>
+#include <cstdint>
 #include "media/base/adapted_video_track_source.h"
 #include "api/video/video_frame.h"
 #include "api/video/i420_buffer.h"
@@ -18,6 +19,7 @@ public:
 
     explicit RtcVideoSource(std::shared_ptr<VideoSource> source, bool screencast = false);
     ~RtcVideoSource() override;
+    static std::uint64_t LiveInstanceCount() noexcept;
 
     // webrtc::MediaSourceInterface impl
     SourceState state() const override { return kLive; }

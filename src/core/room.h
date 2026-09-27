@@ -61,8 +61,15 @@ struct PublishedSenderBundle {
     std::vector<webrtc::scoped_refptr<webrtc::RtpSenderInterface>> senders;
     std::vector<std::string> scalability_modes;
     std::vector<std::string> track_ids;
+    bool screen_share = false;
 
     bool empty() const { return senders.empty(); }
+};
+
+struct PublisherMediaObjectCounts {
+    std::size_t transceivers = 0;
+    std::size_t senders_with_track = 0;
+    std::size_t senders_without_track = 0;
 };
 
 enum class ConnectionState {
@@ -302,6 +309,8 @@ public:
     asio::awaitable<RoomStatsReport> GetStats(
         std::function<void()> late_completion = {});
     RoomStatsReport GetStatsSync();
+    // Object-lifetime diagnostics; sampled on the WebRTC signaling thread.
+    PublisherMediaObjectCounts GetPublisherMediaObjectCounts() const;
 
     // === 远端参会人独立音量与静音管理 ===
     void SetParticipantVolume(const std::string& identity_or_sid, double volume);
@@ -517,7 +526,7 @@ private:
     void NegotiatePublisher(uint64_t generation);
     asio::awaitable<std::shared_ptr<TrackPublication>> PublishLocalTrackAsync(
         std::shared_ptr<Track> track, const proto::SignalRequest& request, uint64_t generation);
-    static void RollbackPublishedSenderBundle(
+    void RollbackPublishedSenderBundle(
         const webrtc::scoped_refptr<webrtc::PeerConnectionInterface>& pc,
         const PublishedSenderBundle& bundle);
     asio::awaitable<void> ApplyPublishedSenderScalabilityModesAsync(

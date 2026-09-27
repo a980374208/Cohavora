@@ -11,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <string>
+#include <tuple>
 #include <vector>
 
 using namespace std::chrono_literals;
@@ -102,6 +103,7 @@ public:
         co_await room.RemoveLocalTrackFromPublisherAsync(
             std::move(track), generation);
     }
+
 
 };
 
@@ -495,6 +497,61 @@ void SenderTrackIdOverridesRetainedSdpMsid() {
     });
 }
 
+void RepeatedScreenShareRetiresSendersWithoutTouchingCamera() {
+    Fixture f;
+    livekit::VideoPublishOptions options;
+    options.simulcast = false;
+    options.video_codec = "vp8";
+    auto camera = livekit::LocalVideoTrack::createLocalVideoTrack(
+        "persistent_camera", std::make_shared<livekit::VideoSource>(320, 180),
+        livekit::TrackSource::Camera, options);
+    const auto camera_sender = f.InstallSender(camera);
+    for (int cycle = 0; cycle < 12; ++cycle) {
+        auto screen = livekit::LocalVideoTrack::createLocalVideoTrack(
+            "repeated_screen_" + std::to_string(cycle),
+            std::make_shared<livekit::VideoSource>(640, 360),
+            livekit::TrackSource::ScreenShareVideo, options);
+        const auto bundle = f.InstallSenderBundle(screen);
+        const auto installed = livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
+            const auto transceivers = f.publisher->GetTransceivers();
+            return std::tuple{
+                transceivers.size(),
+                std::count_if(transceivers.begin(), transceivers.end(),
+                    [](const auto& item) { return item->stopping(); }),
+                bundle.primary->track() == screen->rtc_track(),
+                camera_sender->track() == camera->rtc_track()};
+        });
+        TEST_CHECK(std::get<0>(installed) == std::size_t(3 + cycle));
+        TEST_CHECK(std::get<1>(installed) == cycle);
+        TEST_CHECK(std::get<2>(installed));
+        TEST_CHECK(std::get<3>(installed));
+        Access::RememberSenderBundle(*f.room, screen, bundle,
+            "TR_repeated_screen_" + std::to_string(cycle));
+        f.RemoveSenderBundle(screen);
+        const auto removed = livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
+            const auto transceivers = f.publisher->GetTransceivers();
+            return std::tuple{transceivers.size(),
+                std::count_if(transceivers.begin(), transceivers.end(),
+                    [](const auto& item) { return item->stopping(); }),
+                !bundle.primary->track(),
+                camera_sender->track() == camera->rtc_track(),
+                bundle.primary->GetParameters().encodings.size()};
+        });
+        TEST_CHECK(std::get<0>(removed) == std::size_t(3 + cycle));
+        TEST_CHECK(std::get<1>(removed) == cycle + 1);
+        TEST_CHECK(std::get<2>(removed));
+        TEST_CHECK(std::get<3>(removed));
+    }
+    auto second_camera = livekit::LocalVideoTrack::createLocalVideoTrack(
+        "second_camera", std::make_shared<livekit::VideoSource>(320, 180),
+        livekit::TrackSource::Camera, options);
+    const auto second_camera_sender = f.InstallSender(second_camera);
+    livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
+        TEST_CHECK(f.publisher->GetTransceivers().size() == 15);
+        TEST_CHECK(second_camera_sender != camera_sender);
+    });
+}
+
 void SingleStreamSvcStaysInSenderTransaction() {
     Fixture f;
     livekit::VideoPublishOptions options;
@@ -656,10 +713,11 @@ int main() {
     DisconnectAndReplacementRejectOldRequirementAndQueuedNegotiation();
     LocalPublicationDoesNotReuseDownstreamTransceivers();
     SenderTrackIdOverridesRetainedSdpMsid();
+    RepeatedScreenShareRetiresSendersWithoutTouchingCamera();
     SingleStreamSvcStaysInSenderTransaction();
     AudioPublishPolicyClosesSignalAndSenderLoop();
     BackupSenderBundleRollsBackAsOneTransaction();
     livekit::WebRTCManager::Instance().Deinitialize();
-    std::cout << "Single-PC media-section negotiation and publication: 11 cases PASS\n";
+    std::cout << "Single-PC media-section negotiation and publication: 12 cases PASS\n";
     return 0;
 }

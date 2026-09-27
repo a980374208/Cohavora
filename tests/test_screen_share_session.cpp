@@ -45,13 +45,14 @@ using livekit::ScreenShareError;
 struct CaptureState {
     livekit::IDesktopCapture::FrameCallback frame;
     livekit::IDesktopCapture::EndCallback ended;
-    int starts = 0, stops = 0;
+    int starts = 0, stops = 0, live = 0;
     bool fail = false;
     void Emit() { frame(livekit::VideoFrame::create(1920, 1080, livekit::VideoBufferType::I420)); }
 };
 class FakeCapture final : public livekit::IDesktopCapture {
 public:
-    explicit FakeCapture(std::shared_ptr<CaptureState> state) : state_(std::move(state)) {}
+    explicit FakeCapture(std::shared_ptr<CaptureState> state) : state_(std::move(state)) { ++state_->live; }
+    ~FakeCapture() override { --state_->live; }
     void Start(livekit::DesktopSource, FrameCallback frame, EndCallback ended) override {
         ++state_->starts;
         state_->frame = std::move(frame);
@@ -196,6 +197,31 @@ void NormalAndRepeat() {
     f.Until([&] { return f.State() == ScreenShareState::Active; });
     old_callback(livekit::VideoFrame::create(8, 8, livekit::VideoBufferType::I420));
     TEST_CHECK(f.source->width() == 1920 && f.publishes == 2);
+}
+
+void ObjectReleaseCycles() {
+    Fixture f;
+    const auto initial_rtc_sources = livekit::RtcVideoSource::LiveInstanceCount();
+    for (int cycle = 0; cycle < 8; ++cycle) {
+        const auto capture = f.capture;
+        f.Start();
+        f.Until([&] { return f.State() == ScreenShareState::Active; });
+        const auto track = f.track;
+        const std::weak_ptr<livekit::VideoSource> source = f.source;
+        const std::weak_ptr<livekit::render::VideoRenderRouter> preview = f.states.back().preview;
+        TEST_CHECK(capture->live == 1);
+        f.Do([&] { f.share->Stop(); });
+        f.Until([&] { return f.State() == ScreenShareState::Idle; });
+        f.states.clear();
+        f.source.reset();
+        f.Until([&] {
+            return capture->live == 0 && track.expired() && source.expired() &&
+                preview.expired() &&
+                livekit::RtcVideoSource::LiveInstanceCount() == initial_rtc_sources;
+        });
+        TEST_CHECK(capture->stops == 1);
+        f.capture = std::make_shared<CaptureState>();
+    }
 }
 
 void CodecPreferenceSnapshot() {
@@ -634,6 +660,7 @@ void DynacastPublicationIsolation() {
 int main() {
     FrameTimestampAlignment();
     NormalAndRepeat();
+    ObjectReleaseCycles();
     CodecPreferenceSnapshot();
     ScreenBindingLifecycle();
     CancelPublishAndLeave();
