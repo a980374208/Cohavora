@@ -9866,7 +9866,7 @@ asio::awaitable<void> Room::AttemptReconnect(
 
     RecordPublishedTracks();
 
-    int attempts = 0;
+    std::uint32_t attempts = 0;
     bool full_restart = false;
     {
         std::lock_guard lock(room_mutex_);
@@ -9878,14 +9878,19 @@ asio::awaitable<void> Room::AttemptReconnect(
     const auto reconnect_deadline = std::chrono::steady_clock::now() +
         operation_timeouts_.reconnect_total;
 
-    while (attempts < kMaxReconnectAttempts &&
+    while (attempts < (std::numeric_limits<std::uint32_t>::max)() &&
            std::chrono::steady_clock::now() < reconnect_deadline) {
         attempts++;
-        auto delay = kBaseReconnectDelay * (1 << (attempts - 1));
+        auto delay = kBaseReconnectDelay * (1 << (std::min)(attempts - 1, 4u));
         if (delay > kMaxReconnectDelay) delay = kMaxReconnectDelay;
         // Deterministic operation id based jitter avoids synchronized reconnect storms.
         delay += std::chrono::milliseconds(
             static_cast<int>(operation_sequence_.fetch_add(1, std::memory_order_relaxed) % 75));
+
+        delay = (std::min)(delay,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                reconnect_deadline - std::chrono::steady_clock::now()));
+        if (delay <= std::chrono::milliseconds::zero()) break;
 
         asio::steady_timer timer(executor_, delay);
         std::error_code ec;

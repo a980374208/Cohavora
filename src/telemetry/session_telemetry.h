@@ -1217,6 +1217,7 @@ private:
     struct MediaState {
         std::uint64_t room_generation = 0;
         std::uint64_t binding_epoch = 0;
+        std::string endpoint_id;
         bool expected_receive = false;
         bool continuous_video = true;
         bool first_frame_seen = false;
@@ -1228,6 +1229,7 @@ private:
     struct AudioMediaState {
         std::uint64_t room_generation = 0;
         std::uint64_t binding_epoch = 0;
+        std::string endpoint_id;
         bool expected_receive = false;
         bool first_frame_seen = false;
         Clock::time_point subscription_accepted{};
@@ -1238,6 +1240,7 @@ private:
     struct RenderState {
         std::uint64_t room_generation = 0;
         std::uint64_t binding_epoch = 0;
+        std::string endpoint_id;
         bool expected_render = false;
         bool continuous_video = true;
         bool first_submit_seen = false;
@@ -1348,6 +1351,7 @@ private:
     };
 
     struct RecoveryTrackState {
+        std::string previous_endpoint_id;
         Clock::time_point last_good_at{};
         Clock::time_point first_recovered_at{};
         Clock::time_point stable_recovered_at{};
