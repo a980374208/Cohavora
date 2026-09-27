@@ -616,30 +616,34 @@ void MeetingMainWindow::initLayout() {
 	// 侧边栏用户头像点击菜单
 	_sidebar->avatarClicked() | rpl::on_next([this] {
 		auto &session = OpenMeeting::SessionManager::instance();
-		QMenu menu(this);
-		AppTheme::styleMenu(menu, AppTheme::Tone::Light);
+		auto *menu = new QMenu(this);
+		menu->setAttribute(Qt::WA_DeleteOnClose);
+		AppTheme::styleMenu(*menu, AppTheme::Tone::Light);
 		QString statusStr = session.isLoggedIn()
 			? QCoreApplication::translate("MeetingUI", "Current User: %1 (%2)").arg(session.nickname(), session.userId())
 			: QCoreApplication::translate("MeetingUI", "Not Signed In");
-		menu.addAction(statusStr)->setEnabled(false);
-		menu.addSeparator();
+		menu->addAction(statusStr)->setEnabled(false);
+		menu->addSeparator();
 
-		auto *switchAction = menu.addAction(QCoreApplication::translate("MeetingUI", "Switch Account / Sign In"));
-		auto *logoutAction = menu.addAction(QCoreApplication::translate("MeetingUI", "Sign Out"));
+		auto *switchAction = menu->addAction(QCoreApplication::translate("MeetingUI", "Switch Account / Sign In"));
+		auto *logoutAction = menu->addAction(QCoreApplication::translate("MeetingUI", "Sign Out"));
 		const auto reportCount = livekit::telemetry::InstalledTelemetryHistoryStore()
 			? livekit::telemetry::InstalledTelemetryHistoryStore()->Status()->reports.size()
 			: 0;
-		auto *telemetryAction = menu.addAction(
+		auto *telemetryAction = menu->addAction(
 			style()->standardIcon(QStyle::SP_FileDialogDetailedView),
 			QCoreApplication::translate("MeetingUI", "Telemetry reports on this device (%1)")
 				.arg(reportCount));
+		telemetryAction->setObjectName(QStringLiteral("mainPostMeetingTelemetry"));
 
-		QAction *selected = menu.exec(QCursor::pos());
-		if (selected == telemetryAction) {
+		connect(telemetryAction, &QAction::triggered, this, [this] {
 			OpenPostMeetingTelemetryDialog(this);
-		} else if (selected == switchAction || selected == logoutAction) {
-			handleUserLogout();
-		}
+		}, Qt::QueuedConnection);
+		connect(switchAction, &QAction::triggered, this,
+			[this] { handleUserLogout(); }, Qt::QueuedConnection);
+		connect(logoutAction, &QAction::triggered, this,
+			[this] { handleUserLogout(); }, Qt::QueuedConnection);
+		menu->popup(_sidebar->mapToGlobal(QPoint(_sidebar->width(), 24)));
 	}, lifetime());
 }
 

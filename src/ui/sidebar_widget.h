@@ -5,6 +5,7 @@
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
 #include <QtCore/QVector>
+#include <QtWidgets/QPushButton>
 
 namespace MeetingUI {
 
@@ -70,6 +71,7 @@ private:
 	bool _avatarHovered = false;
 
 	QRect _avatarRect;
+	QPushButton *_accessibleAvatar = nullptr;
 	QVector<NavItem> _navItems;
 	QVector<BottomItem> _bottomItems;
 	int _cornerRadius = 14;

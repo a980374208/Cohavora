@@ -246,10 +246,22 @@ void ShowTelemetryExport(QWidget *parent, std::string record_id = {},
                          std::int64_t last_utc_ms = 0) {
 	const auto store = livekit::telemetry::InstalledTelemetryHistoryStore();
 	if (!store) return;
-	const auto directory = QFileDialog::getExistingDirectory(
-		parent,
-		QCoreApplication::translate("MeetingUI", "Export telemetry report"));
-	if (directory.isEmpty()) return;
+	QFileDialog dialog(parent, QCoreApplication::translate("MeetingUI", "Export telemetry report"));
+	dialog.setObjectName(QStringLiteral("telemetryExportDirectory"));
+	dialog.setOption(QFileDialog::DontUseNativeDialog);
+	dialog.setOption(QFileDialog::ShowDirsOnly);
+	dialog.setFileMode(QFileDialog::Directory);
+	if (auto *buttons = dialog.findChild<QDialogButtonBox *>()) {
+		if (auto *accept = buttons->button(QDialogButtonBox::Open))
+			accept->setObjectName(QStringLiteral("telemetryExportAccept"));
+		if (auto *cancel = buttons->button(QDialogButtonBox::Cancel))
+			cancel->setObjectName(QStringLiteral("telemetryExportCancel"));
+	}
+	AppTheme::setTone(dialog, AppTheme::Tone::Light);
+	AppTheme::styleChoiceControls(dialog, AppTheme::Tone::Light);
+	AppTheme::makeDialogAdaptive(dialog, {760, 520});
+	if (dialog.exec() != QDialog::Accepted || dialog.selectedFiles().isEmpty()) return;
+	const auto directory = dialog.selectedFiles().front();
 	const QPointer<QWidget> guard(parent);
 	auto cancelled = std::make_shared<std::atomic_bool>(false);
 	auto *progress = new QProgressDialog(
@@ -268,6 +280,7 @@ void ShowTelemetryExport(QWidget *parent, std::string record_id = {},
 				if (progressGuard) progressGuard->close();
 				if (!guard) return;
 				QMessageBox message(guard);
+				message.setObjectName(QStringLiteral("meetingTelemetryExportResult"));
 				message.setWindowTitle(QCoreApplication::translate(
 					"MeetingUI", "Telemetry export"));
 				message.setIcon(result.success
@@ -281,6 +294,9 @@ void ShowTelemetryExport(QWidget *parent, std::string record_id = {},
 						result.report_directory.wstring()));
 				}
 				AppTheme::setTone(message, AppTheme::Tone::Dark);
+				message.setStandardButtons(QMessageBox::Ok);
+				if (auto *dismiss = message.button(QMessageBox::Ok))
+					dismiss->setObjectName(QStringLiteral("meetingTelemetryExportDismiss"));
 				message.exec();
 			}, Qt::QueuedConnection);
 		};
@@ -1661,6 +1677,22 @@ RoomTopBarWidget::RoomTopBarWidget(QWidget *parent)
 	setMinimumHeight(44);
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
+	_uiaConsole = new QPushButton(this);
+	_uiaConsole->setObjectName(QStringLiteral("meetingConsole"));
+	_uiaConsole->setAccessibleName(QCoreApplication::translate("MeetingUI", "Console"));
+	_uiaConsole->setFlat(true);
+	_uiaConsole->setAttribute(Qt::WA_TransparentForMouseEvents);
+	_uiaConsole->setStyleSheet(QStringLiteral("QPushButton { background: transparent; border: 0; }"));
+	connect(_uiaConsole, &QPushButton::clicked, this, [this] { _consoleStream.fire({}); });
+	_uiaTelemetry = new QPushButton(this);
+	_uiaTelemetry->setObjectName(QStringLiteral("meetingTelemetry"));
+	_uiaTelemetry->setAccessibleName(QCoreApplication::translate("MeetingUI", "Meeting telemetry"));
+	_uiaTelemetry->setFlat(true);
+	_uiaTelemetry->setAttribute(Qt::WA_TransparentForMouseEvents);
+	_uiaTelemetry->setStyleSheet(QStringLiteral("QPushButton { background: transparent; border: 0; }"));
+	connect(_uiaTelemetry, &QPushButton::clicked, this, [this] {
+		showTelemetryMenu(mapToGlobal(QPoint(_qualityRect.left(), _qualityRect.bottom() + 4)));
+	});
 }
 
 void RoomTopBarWidget::updateDuration(int seconds) {
@@ -1727,12 +1759,14 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
  _simulateRect = QRect(rightX - simulateW, rowY, simulateW, 28);
  rightX -= simulateW + 4;
  _consoleRect = QRect(rightX - consoleW, rowY, consoleW, 28);
+	_uiaConsole->setGeometry(_consoleRect);
  rightX -= consoleW + 4;
  _layoutRect = QRect(rightX - layoutW, rowY, layoutW, 28);
  rightX -= layoutW + 4;
  const int leftInfoRight = QFontMetrics(QFont("Microsoft YaHei", 10)).horizontalAdvance(
      QCoreApplication::translate("MeetingUI", "Meetings")) + 116;
  _qualityRect = QRect(leftInfoRight - 22, 8, 20, 28);
+	_uiaTelemetry->setGeometry(_qualityRect);
  if (!_meetingId.isEmpty()) {
   auto idFont = QFont("Microsoft YaHei", 9); idFont.setBold(true);
   const int desired = QFontMetrics(idFont).horizontalAdvance(
@@ -2351,9 +2385,11 @@ void RoomTopBarWidget::showTelemetryMenu(const QPoint &globalPos) {
 	auto *detailsAction = menu->addAction(
 		style()->standardIcon(QStyle::SP_FileDialogDetailedView),
 		QCoreApplication::translate("MeetingUI", "Open telemetry details"));
+	detailsAction->setObjectName(QStringLiteral("meetingTelemetryDetails"));
 	auto *exportAction = menu->addAction(
 		style()->standardIcon(QStyle::SP_DialogSaveButton),
 		QCoreApplication::translate("MeetingUI", "Export report"));
+	exportAction->setObjectName(QStringLiteral("meetingTelemetryExport"));
 	exportAction->setEnabled(
 		livekit::telemetry::InstalledTelemetryHistoryStore() != nullptr);
 	QObject::connect(detailsAction, &QAction::triggered, this, [this] {
@@ -2440,23 +2476,38 @@ RoomBottomBarWidget::RoomBottomBarWidget(QWidget *parent)
 
 	_chatInput->hide();
 	_handBtn->hide();
-	const auto accessibleTool = [this](const char *id, const QString &name,
-			rpl::event_stream<> &stream) {
+	const auto accessibleTool = [this](const char *id, const QString &name) {
 		auto *button = new QPushButton(this);
 		button->setObjectName(QString::fromLatin1(id));
 		button->setAccessibleName(name);
 		button->setFlat(true);
+		button->setAttribute(Qt::WA_TransparentForMouseEvents);
 		button->setStyleSheet(QStringLiteral("QPushButton { background: transparent; border: 0; }"));
-		connect(button, &QPushButton::clicked, this, [streamPtr = &stream] { streamPtr->fire({}); });
 		return button;
 	};
-	_uiaParticipants = accessibleTool("meetingParticipants", QCoreApplication::translate("MeetingUI", "Participants"), _participantsStream);
-	_uiaChat = accessibleTool("meetingChat", QCoreApplication::translate("MeetingUI", "Chat"), _chatStream);
-	_uiaWhiteboard = accessibleTool("meetingWhiteboard", QCoreApplication::translate("MeetingUI", "Whiteboard"), _whiteboardStream);
+	_uiaParticipants = accessibleTool("meetingParticipants", QCoreApplication::translate("MeetingUI", "Participants"));
+	_uiaChat = accessibleTool("meetingChat", QCoreApplication::translate("MeetingUI", "Chat"));
+	_uiaWhiteboard = accessibleTool("meetingWhiteboard", QCoreApplication::translate("MeetingUI", "Whiteboard"));
+	_uiaAudio = accessibleTool("meetingMicrophone", QCoreApplication::translate("MeetingUI", "Microphone"));
+	_uiaVideo = accessibleTool("meetingCamera", QCoreApplication::translate("MeetingUI", "Camera"));
+	_uiaShare = accessibleTool("meetingShareScreen", QCoreApplication::translate("MeetingUI", "Share Screen"));
+	_uiaEnd = accessibleTool("meetingLeave", QCoreApplication::translate("MeetingUI", "Leave Meeting"));
+	for (auto *button : {_uiaAudio, _uiaVideo, _uiaShare}) button->setCheckable(true);
+	_uiaAudio->setChecked(!_audioMuted);
+	_uiaVideo->setChecked(_videoEnabled);
+	connect(_uiaParticipants, &QPushButton::clicked, this, [this] { _participantsStream.fire({}); });
+	connect(_uiaChat, &QPushButton::clicked, this, [this] { _chatStream.fire({}); });
+	connect(_uiaWhiteboard, &QPushButton::clicked, this, [this] { _whiteboardStream.fire({}); });
+	connect(_uiaAudio, &QPushButton::clicked, this, &RoomBottomBarWidget::toggleAudio);
+	connect(_uiaVideo, &QPushButton::clicked, this, &RoomBottomBarWidget::toggleVideo);
+	connect(_uiaShare, &QPushButton::clicked, this, [this] { _shareScreenStream.fire({}); });
+	connect(_uiaEnd, &QPushButton::clicked, this, [this] { _endMeetingStream.fire({}); });
 }
 
 void RoomBottomBarWidget::setAudioMuted(bool muted) {
 	_audioMuted = muted;
+	_uiaAudio->setChecked(!muted);
+	_uiaAudio->setAccessibleName(QCoreApplication::translate("MeetingUI", muted ? "Unmute" : "Mute"));
 	update();
 }
 
@@ -2467,12 +2518,42 @@ void RoomBottomBarWidget::setSpeakerMuted(bool muted) {
 
 void RoomBottomBarWidget::setVideoEnabled(bool enabled) {
 	_videoEnabled = enabled;
+	_uiaVideo->setChecked(enabled);
+	_uiaVideo->setAccessibleName(QCoreApplication::translate("MeetingUI", enabled ? "Stop Video" : "Start Video"));
 	update();
 }
 
 void RoomBottomBarWidget::setScreenShareState(livekit::ScreenShareState state) {
 	_screenShareState = state;
+	_uiaShare->setChecked(canStopScreenShare());
+	_uiaShare->setAccessibleName(QCoreApplication::translate("MeetingUI",
+		canStopScreenShare() ? "Stop Sharing" : "Share Screen"));
+	_uiaShare->setEnabled(!_inRecovery || canStopScreenShare());
 	update();
+}
+
+void RoomBottomBarWidget::toggleAudio() {
+	if (_inRecovery) { _uiaAudio->setChecked(!_audioMuted); return; }
+	if (_audioMuted && !HasAvailableAudioDevice()) {
+		_uiaAudio->setChecked(false);
+		QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Microphone Unavailable"),
+			QCoreApplication::translate("MeetingUI", "No microphone input device is available. The microphone cannot be enabled."));
+		return;
+	}
+	setAudioMuted(!_audioMuted);
+	_toggleAudioStream.fire_copy(_audioMuted);
+}
+
+void RoomBottomBarWidget::toggleVideo() {
+	if (_inRecovery) { _uiaVideo->setChecked(_videoEnabled); return; }
+	if (!_videoEnabled && !HasAvailableVideoDevice()) {
+		_uiaVideo->setChecked(false);
+		QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Camera Unavailable"),
+			QCoreApplication::translate("MeetingUI", "No camera device is available. Video cannot be enabled."));
+		return;
+	}
+	setVideoEnabled(!_videoEnabled);
+	_toggleVideoStream.fire_copy(_videoEnabled);
 }
 
 void RoomBottomBarWidget::setParticipantCount(int count) {
@@ -2488,7 +2569,9 @@ void RoomBottomBarWidget::setChatUnreadCount(int count) {
 void RoomBottomBarWidget::setInRecovery(bool inRecovery) {
 	if (_inRecovery == inRecovery) return;
 	_inRecovery = inRecovery;
-	for (auto *button : {_uiaParticipants, _uiaChat, _uiaWhiteboard}) button->setEnabled(!inRecovery);
+	for (auto *button : {_uiaParticipants, _uiaChat, _uiaWhiteboard, _uiaAudio, _uiaVideo})
+		button->setEnabled(!inRecovery);
+	_uiaShare->setEnabled(!inRecovery || canStopScreenShare());
 	update();
 }
 
@@ -2545,6 +2628,7 @@ void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 	const int endWidth = std::min(kBottomBarEndWidth, std::max(64, w / 5));
 	_endMeetingRect = QRect(w - kBottomBarPadding - endWidth, 5, endWidth,
 		kBottomBarHeight - 10);
+	_uiaEnd->setGeometry(_endMeetingRect);
 	const int controlsLeft = kBottomBarPadding;
 	const int controlsRight = _endMeetingRect.left() - kBottomBarGap;
 	const int controlsWidth = std::max(0, controlsRight - controlsLeft);
@@ -2559,6 +2643,9 @@ void RoomBottomBarWidget::resizeEvent(QResizeEvent *e) {
 		_toolItems[i].rect = QRect(toolsLeft + static_cast<int>(i) * (toolWidth + kBottomBarGap),
 			5, toolWidth, kBottomBarHeight - 10);
 		switch (_toolItems[i].id) {
+		case 1: _uiaAudio->setGeometry(_toolItems[i].rect); break;
+		case 2: _uiaVideo->setGeometry(_toolItems[i].rect); break;
+		case 3: _uiaShare->setGeometry(_toolItems[i].rect); break;
 		case 5: _uiaParticipants->setGeometry(_toolItems[i].rect); break;
 		case 6: _uiaChat->setGeometry(_toolItems[i].rect); break;
 		case 7: _uiaWhiteboard->setGeometry(_toolItems[i].rect); break;
@@ -2977,18 +3064,7 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 						showAudioDeviceMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
 						break;
 					}
-					if (_audioMuted) {
-						if (!HasAvailableAudioDevice()) {
-							QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Microphone Unavailable"),
-								QCoreApplication::translate("MeetingUI", "No microphone input device is available. The microphone cannot be enabled."));
-							break;
-						}
-						_audioMuted = false;
-					} else {
-						_audioMuted = true;
-					}
-					_toggleAudioStream.fire_copy(_audioMuted);
-					update();
+					toggleAudio();
 					break;
 				}
 				case 11: {
@@ -3017,19 +3093,7 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 						showVideoDeviceMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
 						break;
 					}
-					if (!_videoEnabled) {
-						// 准备开启视频，先检查是否有可用摄像头
-						if (!HasAvailableVideoDevice()) {
-							QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Camera Unavailable"),
-								QCoreApplication::translate("MeetingUI", "No camera device is available. Video cannot be enabled."));
-							break;
-						}
-						_videoEnabled = true;
-					} else {
-						_videoEnabled = false;
-					}
-					_toggleVideoStream.fire_copy(_videoEnabled);
-					update();
+					toggleVideo();
 					break;
 				}
 				case 3:
@@ -5327,6 +5391,17 @@ void MeetingRoomWindow::handleScreenShareSources(
 	}
 	dialog->setComboBoxItems(choices);
 	dialog->setComboBoxEditable(false);
+	if (auto *combo = dialog->findChild<QComboBox *>()) {
+		configureAccessibleComboBox(combo);
+		combo->setObjectName(QStringLiteral("screenShareSource"));
+		combo->setAccessibleName(QCoreApplication::translate("MeetingUI", "Share source"));
+	}
+	if (auto *buttons = dialog->findChild<QDialogButtonBox *>()) {
+		if (auto *accept = buttons->button(QDialogButtonBox::Ok))
+			accept->setObjectName(QStringLiteral("screenShareAccept"));
+		if (auto *cancel = buttons->button(QDialogButtonBox::Cancel))
+			cancel->setObjectName(QStringLiteral("screenShareCancel"));
+	}
 	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
 	const std::weak_ptr<livekit::Room> room = _coordinator->room();
 	connect(dialog, &QInputDialog::textValueSelected, this,
@@ -6178,11 +6253,15 @@ void MeetingRoomWindow::onHostRoleChanged(const QString &newHostId, const QStrin
 void MeetingRoomWindow::handleEndMeetingClicked() {
 	if (_coordinator && _coordinator->isHost()) {
 		QMessageBox box(this);
+		box.setObjectName(QStringLiteral("meetingLeaveConfirmation"));
 		box.setWindowTitle(QCoreApplication::translate("MeetingUI", "End Meeting"));
 		box.setText(QCoreApplication::translate("MeetingUI", "You are the host. How would you like to leave?"));
 		auto *leaveBtn = box.addButton(QCoreApplication::translate("MeetingUI", "Leave Only"), QMessageBox::ActionRole);
 		auto *endBtn = box.addButton(QCoreApplication::translate("MeetingUI", "End for Everyone"), QMessageBox::DestructiveRole);
 		auto *cancelBtn = box.addButton(QCoreApplication::translate("MeetingUI", "Cancel"), QMessageBox::RejectRole);
+		leaveBtn->setObjectName(QStringLiteral("meetingLeaveConfirm"));
+		endBtn->setObjectName(QStringLiteral("meetingEndForEveryone"));
+		cancelBtn->setObjectName(QStringLiteral("meetingLeaveCancel"));
 		box.exec();
 		if (box.clickedButton() == leaveBtn) {
 			QPointer<MeetingRoomWindow> guard(this);
@@ -6198,9 +6277,14 @@ void MeetingRoomWindow::handleEndMeetingClicked() {
 			if (guard) guard->close();
 		}
 	} else {
-		if (QMessageBox::question(this, QCoreApplication::translate("MeetingUI", "Leave Meeting"),
+		QMessageBox box(QMessageBox::Question,
+			QCoreApplication::translate("MeetingUI", "Leave Meeting"),
 			QCoreApplication::translate("MeetingUI", "Are you sure you want to leave this meeting?"),
-			QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
+			QMessageBox::Yes | QMessageBox::No, this);
+		box.setObjectName(QStringLiteral("meetingLeaveConfirmation"));
+		box.button(QMessageBox::Yes)->setObjectName(QStringLiteral("meetingLeaveConfirm"));
+		box.button(QMessageBox::No)->setObjectName(QStringLiteral("meetingLeaveCancel"));
+		if (box.exec() == QMessageBox::Yes) {
 			QPointer<MeetingRoomWindow> guard(this);
 			stopLiveKitSession(false);
 			if (!guard) return;

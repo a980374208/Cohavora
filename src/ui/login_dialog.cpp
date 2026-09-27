@@ -119,11 +119,13 @@ void LoginDialog::initUI() {
 
     _accountInput = new QLineEdit(accountTab);
     _accountInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Phone number or account"));
+    _accountInput->setAccessibleName(_accountInput->placeholderText());
     accLayout->addWidget(_accountInput);
 
     auto pwdLayout = new QHBoxLayout();
     _passwordInput = new QLineEdit(accountTab);
     _passwordInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Password"));
+    _passwordInput->setAccessibleName(_passwordInput->placeholderText());
     _passwordInput->setEchoMode(QLineEdit::Password);
     pwdLayout->addWidget(_passwordInput);
 
@@ -243,6 +245,7 @@ void LoginDialog::initUI() {
 
     _guestNicknameInput = new QLineEdit(guestTab);
     _guestNicknameInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Display name (e.g. Alice)"));
+    _guestNicknameInput->setAccessibleName(_guestNicknameInput->placeholderText());
     guestLayout->addWidget(_guestNicknameInput);
 
     guestLayout->addSpacing(10);
@@ -261,7 +264,7 @@ void LoginDialog::initUI() {
     auto advToggleLayout = new QHBoxLayout();
     advToggleLayout->addStretch();
     _advancedToggleBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "⚙ Server Settings ▾"), card);
-    _advancedToggleBtn->setObjectName("linkBtn");
+    _advancedToggleBtn->setObjectName("serverSettingsToggle");
     MeetingUI::AppTheme::setStyleVariant(*_advancedToggleBtn, "login-dialog-advancedtogglebtn");
     connect(_advancedToggleBtn, &QPushButton::clicked, this, &LoginDialog::toggleAdvancedSettings);
     advToggleLayout->addWidget(_advancedToggleBtn);
@@ -276,6 +279,7 @@ void LoginDialog::initUI() {
     MeetingUI::AppTheme::setStyleVariant(*advLabel, "login-dialog-advlabel");
     _serverUrlInput = new QLineEdit(_advancedWidget);
     _serverUrlInput->setPlaceholderText(QString::fromUtf8("https://api.example.com"));
+    _serverUrlInput->setAccessibleName(QCoreApplication::translate("MeetingUI", "Meeting service"));
     advLayout->addWidget(advLabel, 0, 0);
     advLayout->addWidget(_serverUrlInput, 0, 1);
 

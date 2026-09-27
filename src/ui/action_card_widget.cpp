@@ -31,6 +31,22 @@ ActionCardWidget::ActionCardWidget(
 	, _hasDropdown(hasDropdown) {
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
+	_accessibleButton = new QPushButton(this);
+	const auto id = [type] {
+		switch (type) {
+		case ActionCardType::JoinMeeting: return "mainJoinMeeting";
+		case ActionCardType::QuickMeeting: return "mainQuickMeeting";
+		case ActionCardType::ScheduleMeeting: return "mainScheduleMeeting";
+		case ActionCardType::ShareScreen: return "mainShareScreen";
+		}
+		return "mainAction";
+	}();
+	_accessibleButton->setObjectName(QString::fromLatin1(id));
+	_accessibleButton->setAccessibleName(title);
+	_accessibleButton->setFlat(true);
+	_accessibleButton->setAttribute(Qt::WA_TransparentForMouseEvents);
+	_accessibleButton->setStyleSheet(QStringLiteral("QPushButton { background: transparent; border: 0; }"));
+	connect(_accessibleButton, &QPushButton::clicked, this, [this] { _clicks.fire_copy(_type); });
 
 	// 100% 复用 TDeskTop 内部 Ui::BoxShadow 九宫格高斯模糊烘焙阴影
 	_normalShadow = std::make_unique<Ui::BoxShadow>(style::BoxShadow{
@@ -44,6 +60,11 @@ ActionCardWidget::ActionCardWidget(
 		.offset = QPoint(0, 7),
 		.opacity = 0.42,
 	});
+}
+
+void ActionCardWidget::resizeEvent(QResizeEvent *e) {
+	Ui::RpWidget::resizeEvent(e);
+	_accessibleButton->setGeometry(rect());
 }
 
 QSize ActionCardWidget::sizeHint() const {

@@ -89,6 +89,7 @@ MeetingLogConsoleWindow::sharedQueue() {
 
 MeetingLogConsoleWindow::MeetingLogConsoleWindow(QWidget *parent)
 	: QDialog(parent) {
+	setObjectName(QStringLiteral("meetingLogConsole"));
 	AppTheme::configureModelessWindow(*this);
 	AppTheme::setTone(*this, AppTheme::Tone::Dark);
 	setWindowTitle(QCoreApplication::translate("MeetingUI", "Cohavora Console / Debug Logs"));

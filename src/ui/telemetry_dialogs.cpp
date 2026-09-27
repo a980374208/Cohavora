@@ -525,6 +525,7 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 		dialog->style()->standardIcon(QStyle::SP_DialogSaveButton),
 		QCoreApplication::translate("MeetingUI", "Export latest"), dialog);
 	exportButton->setObjectName(QStringLiteral("telemetryExport"));
+	exportButton->setEnabled(reports->count() != 0);
 	auto *clearButton = new QPushButton(
 		dialog->style()->standardIcon(QStyle::SP_TrashIcon),
 		QCoreApplication::translate("MeetingUI", "Clear selected"), dialog);
@@ -538,6 +539,7 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 	buttons->setObjectName(QStringLiteral("telemetryPostButtons"));
 	buttons->button(QDialogButtonBox::Close)->setIcon(
 		dialog->style()->standardIcon(QStyle::SP_DialogCloseButton));
+	buttons->button(QDialogButtonBox::Close)->setObjectName(QStringLiteral("telemetryPostClose"));
 	layout->addWidget(buttons);
 
 	QObject::connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
@@ -566,11 +568,27 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 				}, Qt::QueuedConnection);
 			});
 		});
-	QObject::connect(exportButton, &QPushButton::clicked, dialog, [store, dialog] {
+	QObject::connect(exportButton, &QPushButton::clicked, dialog, [store, dialog, reports] {
 		if (!store) return;
-		const auto destination = QFileDialog::getExistingDirectory(
-			dialog, QCoreApplication::translate("MeetingUI", "Export telemetry report"));
-		if (destination.isEmpty()) return;
+		const auto *selected = reports->item(0);
+		if (!selected) return;
+		const auto recordId = selected->data(Qt::UserRole).toString().toStdString();
+		QFileDialog chooser(dialog, QCoreApplication::translate("MeetingUI", "Export telemetry report"));
+		chooser.setObjectName(QStringLiteral("telemetryExportDirectory"));
+		chooser.setOption(QFileDialog::DontUseNativeDialog);
+		chooser.setOption(QFileDialog::ShowDirsOnly);
+		chooser.setFileMode(QFileDialog::Directory);
+		if (auto *controls = chooser.findChild<QDialogButtonBox *>()) {
+			if (auto *accept = controls->button(QDialogButtonBox::Open))
+				accept->setObjectName(QStringLiteral("telemetryExportAccept"));
+			if (auto *cancel = controls->button(QDialogButtonBox::Cancel))
+				cancel->setObjectName(QStringLiteral("telemetryExportCancel"));
+		}
+		AppTheme::setTone(chooser, AppTheme::Tone::Light);
+		AppTheme::styleChoiceControls(chooser, AppTheme::Tone::Light);
+		AppTheme::makeDialogAdaptive(chooser, {760, 520});
+		if (chooser.exec() != QDialog::Accepted || chooser.selectedFiles().isEmpty()) return;
+		const auto destination = chooser.selectedFiles().front();
 		const QPointer<QDialog> guard(dialog);
 		auto cancelled = std::make_shared<std::atomic_bool>(false);
 		auto *progress = new QProgressDialog(
@@ -583,20 +601,25 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 		const QPointer<QProgressDialog> progressGuard(progress);
 		QObject::connect(progress, &QProgressDialog::canceled, progress,
 			[cancelled] { cancelled->store(true, std::memory_order_release); });
-		if (!store->ExportCurrent(
+		if (!store->ExportReport(recordId,
 				std::filesystem::path(destination.toStdWString()),
 				[guard, progressGuard](livekit::telemetry::TelemetryExportResult result) {
 					QMetaObject::invokeMethod(qApp, [guard, progressGuard, result = std::move(result)] {
 						if (progressGuard) progressGuard->close();
 						if (!guard) return;
-						QMessageBox::information(
-							guard,
-							QCoreApplication::translate("MeetingUI", "Telemetry export"),
-							result.success
-								? QCoreApplication::translate("MeetingUI", "Report exported to %1")
-									.arg(QString::fromStdWString(result.report_directory.wstring()))
-								: QCoreApplication::translate("MeetingUI", "Export failed: %1")
-									.arg(QString::fromStdString(result.reason)));
+						QMessageBox message(guard);
+						message.setObjectName(QStringLiteral("meetingTelemetryExportResult"));
+						message.setWindowTitle(QCoreApplication::translate("MeetingUI", "Telemetry export"));
+						message.setIcon(result.success ? QMessageBox::Information : QMessageBox::Warning);
+						message.setText(result.success
+							? QCoreApplication::translate("MeetingUI", "Report exported to %1")
+								.arg(QString::fromStdWString(result.report_directory.wstring()))
+							: QCoreApplication::translate("MeetingUI", "Export failed: %1")
+								.arg(QString::fromStdString(result.reason)));
+						message.setStandardButtons(QMessageBox::Ok);
+						if (auto *dismiss = message.button(QMessageBox::Ok))
+							dismiss->setObjectName(QStringLiteral("meetingTelemetryExportDismiss"));
+						message.exec();
 					}, Qt::QueuedConnection);
 				}, cancelled)) {
 			progress->close();
