@@ -916,6 +916,102 @@ asio::awaitable<void> TestCase3_HardReconnectFallback(asio::any_io_executor exec
     std::cout << "[PASS] Test 3: Hard Reconnect Fallback Verified!" << std::endl;
 }
 
+asio::awaitable<void> TestCase3_ServerRequestedFullReconnect(asio::any_io_executor executor) {
+    auto& io_ctx = static_cast<asio::io_context&>(executor.context());
+    auto server = std::make_shared<StressMockServer>(io_ctx);
+    g_keep_alive_servers.push_back(server);
+    server->StartAccept();
+
+    livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
+    opts.create_webrtc_pc = false;
+    opts.timeouts.reconnect_total = std::chrono::seconds(5);
+    auto room = livekit::Room::Create(executor);
+    auto listener = std::make_shared<StressRoomListener>();
+    room->AddListener(listener);
+    const auto url = "ws://127.0.0.1:" + std::to_string(server->port());
+    TEST_ASSERT(co_await room->Connect(url, "server-full-reconnect", opts), "Initial join failed");
+    const auto previous_local = room->local_participant();
+
+    livekit::proto::SignalResponse response;
+    auto* leave = response.mutable_leave();
+    leave->set_action(livekit::proto::LeaveRequest_Action_RECONNECT);
+    leave->set_can_reconnect(true);
+    room->HandleSignalMessageForTesting(response);
+
+    asio::steady_timer timer(executor);
+    for (int attempt = 0; attempt < 50; ++attempt) {
+        if (listener->reconnected_count.load() > 0 &&
+            room->connection_state() == livekit::ConnectionState::Connected &&
+            room->local_participant() != previous_local) break;
+        timer.expires_after(std::chrono::milliseconds(100));
+        co_await timer.async_wait(asio::use_awaitable);
+    }
+    TEST_ASSERT(listener->reconnecting_count.load() == 1 &&
+                listener->reconnected_count.load() == 1 &&
+                room->local_participant() != previous_local,
+                "Server RECONNECT action did not replace the native session");
+    room->Disconnect();
+    server->CloseActiveConnections();
+    server->Stop();
+    std::cout << "[PASS] Server RECONNECT action forced full restart." << std::endl;
+}
+
+asio::awaitable<void> TestCase3_RemoteIdentityReplacement(asio::any_io_executor executor) {
+    auto& io_ctx = static_cast<asio::io_context&>(executor.context());
+    auto server = std::make_shared<StressMockServer>(io_ctx);
+    g_keep_alive_servers.push_back(server);
+    server->StartAccept();
+
+    livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
+    opts.create_webrtc_pc = false;
+    auto room = livekit::Room::Create(executor);
+    const auto url = "ws://127.0.0.1:" + std::to_string(server->port());
+    TEST_ASSERT(co_await room->Connect(url, "identity-replacement", opts), "Initial join failed");
+
+    livekit::proto::ParticipantUpdate old_update;
+    auto* old = old_update.add_participants();
+    old->set_sid("PA_OLD");
+    old->set_identity("rejoining-peer");
+    old->set_state(livekit::proto::ParticipantInfo::ACTIVE);
+    old->set_joined_at_ms(1000);
+    auto* track = old->add_tracks();
+    track->set_sid("TR_OLD_SCREEN");
+    track->set_type(livekit::proto::VIDEO);
+    track->set_source(livekit::proto::SCREEN_SHARE);
+    room->UpdateParticipantsForTesting(old_update);
+    TEST_ASSERT(room->remote_participants().at("PA_OLD")->get_publication("TR_OLD_SCREEN"),
+                "Old screen publication was not admitted");
+
+    livekit::proto::ParticipantUpdate replacement;
+    auto* next = replacement.add_participants();
+    next->set_sid("PA_NEW");
+    next->set_identity("rejoining-peer");
+    next->set_state(livekit::proto::ParticipantInfo::ACTIVE);
+    next->set_joined_at_ms(2000);
+    room->UpdateParticipantsForTesting(replacement);
+    TEST_ASSERT(room->remote_participants().size() == 1 &&
+                room->remote_participants().contains("PA_NEW") &&
+                !room->remote_participants().contains("PA_OLD"),
+                "New SID did not retire the previous same-identity participant");
+
+    room->UpdateParticipantsForTesting(old_update);
+    TEST_ASSERT(room->remote_participants().size() == 1 &&
+                room->remote_participants().contains("PA_NEW"),
+                "Late older SID resurrected a replaced participant");
+    old->set_state(livekit::proto::ParticipantInfo::DISCONNECTED);
+    room->UpdateParticipantsForTesting(old_update);
+    TEST_ASSERT(room->remote_participants().size() == 1 &&
+                room->remote_participants().contains("PA_NEW"),
+                "Late old-SID departure removed the successor");
+
+    room->Disconnect();
+    server->CloseActiveConnections();
+    server->Stop();
+    std::cout << "[PASS] Same-identity SID replacement retired old media and rejected late updates." << std::endl;
+}
+
 // ============================================================================
 // Case 4: 并发多线程事件密集投递与析构竞态测试
 // ============================================================================
@@ -1810,6 +1906,8 @@ int main(int argc, char** argv) {
             co_await TestCase2_SuddenDropAndSoftReconnect(executor);
             co_await TestCase2_RecoveryAfterFastConnectFailures(executor);
             co_await TestCase3_HardReconnectFallback(executor);
+            co_await TestCase3_ServerRequestedFullReconnect(executor);
+            co_await TestCase3_RemoteIdentityReplacement(executor);
             co_await TestCase4_ConcurrentEventAndDestructionRace(executor);
             co_await TestCase5_StaleConnectRollbackOwnership(executor);
             co_await TestCase6_StaleSignalEventsCannotMutateReplacement(executor);
