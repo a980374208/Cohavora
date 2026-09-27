@@ -1777,6 +1777,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         room_info_ = RoomInfo{};
         track_subscription_permissions_.clear();
         if (!reconnect_active_) {
+            full_reconnect_requested_ = false;
             reconnect_disabled_ = false;
             server_disconnect_finalizing_ = false;
             ResetSubscriptionSessionLocked(attempt_options.auto_subscribe);
@@ -2150,6 +2151,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                 pending_local_unpublishes_.clear();
                 ClearRemotePublicationMediaBindingsLocked();
                 remote_participants_.clear();
+                remote_participant_joined_at_ms_.clear();
                 publisher = std::move(publisher_pc_);
                 subscriber = std::move(subscriber_pc_);
                 publisher_observer = std::move(publisher_observer_);
@@ -2261,6 +2263,7 @@ void Room::Disconnect() {
         pending_local_unpublishes_.clear();
         ClearRemotePublicationMediaBindingsLocked();
         remote_participants_.clear();
+        remote_participant_joined_at_ms_.clear();
         if (reliable_dc_) {
             data_channels.push_back(reliable_dc_);
             reliable_dc_ = nullptr;
@@ -2396,6 +2399,7 @@ asio::awaitable<void> Room::DisconnectAsync() {
         pending_local_unpublishes_.clear();
         ClearRemotePublicationMediaBindingsLocked();
         remote_participants_.clear();
+        remote_participant_joined_at_ms_.clear();
         if (reliable_dc_) {
             data_channels.push_back(reliable_dc_);
             reliable_dc_ = nullptr;
@@ -2587,6 +2591,7 @@ asio::awaitable<void> Room::FinalizeServerDisconnectAsync(
         pending_local_unpublishes_.clear();
         ClearRemotePublicationMediaBindingsLocked();
         remote_participants_.clear();
+        remote_participant_joined_at_ms_.clear();
         if (reliable_dc_) {
             data_channels.push_back(reliable_dc_);
             reliable_dc_ = nullptr;
@@ -8223,6 +8228,25 @@ void Room::HandleSignalMessage(
         if (reason == RoomDisconnectReason::DuplicateIdentity ||
             server_requests_disconnect) {
             BeginServerDisconnect(reason, detail, event_generation);
+        } else if (leave.action() == proto::LeaveRequest_Action_RECONNECT) {
+            bool start_reconnect = false;
+            {
+                std::lock_guard lock(room_mutex_);
+                if (IsSignalGenerationCurrentLocked(event_generation) &&
+                    !reconnect_disabled_ &&
+                    (connection_state_ == ConnectionState::Connected ||
+                     connection_state_ == ConnectionState::Reconnecting)) {
+                    full_reconnect_requested_ = true;
+                    start_reconnect = connection_state_ == ConnectionState::Connected;
+                }
+            }
+            if (start_reconnect) {
+                asio::post(executor_, [self = shared_from_this(), event_generation] {
+                    self->HandleSignalEvent(
+                        SignalEvent{SignalEvent::Close, nullptr, "server requested full reconnect"},
+                        event_generation);
+                });
+            }
         }
         return;
     }
@@ -8472,6 +8496,55 @@ void Room::UpdateParticipants(
             listeners_snapshot = listeners_;
         }
 
+        const auto retire_remote = [&](auto it) {
+            const auto remote = it->second;
+            for (const auto& [sid, publication] : remote->tracks()) {
+                const auto intent_key = MakeSubscriptionIntentKeyLocked(
+                    remote->sid(), remote->identity(), sid);
+                subscription_intents_.erase(intent_key);
+                CancelPendingSubscriptionUpdateLocked(intent_key);
+                if (publication) {
+                    if (const auto track = publication->track()) {
+                        removed_tracks.push_back(track);
+                        if (track->kind() == TrackKind::Video) {
+                            removed_video_telemetry_keys.push_back(
+                                RemoteVideoTelemetryKey(remote->sid(), sid));
+                        } else if (track->kind() == TrackKind::Audio) {
+                            removed_audio_telemetry_keys.push_back(
+                                RemoteAudioTelemetryKey(remote->sid(), sid));
+                        }
+                    }
+                    const auto track_membership = track_memberships_.find(publication.get());
+                    if (track_membership != track_memberships_.end()) {
+                        removed_track_keys.push_back(track_membership->second->key);
+                    }
+                }
+                if (const auto remote_publication =
+                        std::dynamic_pointer_cast<RemoteTrackPublication>(publication)) {
+                    const auto current =
+                        current_remote_binding_serials_.find(remote_publication.get());
+                    if (current != current_remote_binding_serials_.end()) {
+                        if (const auto media_binding = FindMediaBindingLocked(current->second)) {
+                            media_binding->active.store(false, std::memory_order_release);
+                        }
+                    }
+                    current_remote_binding_serials_.erase(remote_publication.get());
+                    remote_publication->ClearMediaBinding();
+                }
+            }
+            auto departure = MakeParticipantEventLocked(
+                ParticipantEventKind::Departure, remote, false);
+            disconnected.push_back(remote);
+            if (RetireIncomingReadersForParticipantLocked(
+                    remote, kDataStreamSenderDisconnected) != 0) {
+                ScheduleIncomingStreamCleanupLocked(event_generation);
+            }
+            RetireParticipantLocked(remote);
+            remote_participant_joined_at_ms_.erase(it->first);
+            remote_participants_.erase(it);
+            EnqueueParticipantEventLocked(std::move(departure));
+        };
+
         for (const auto& p_info : participants) {
             std::map<std::string, std::string> new_attrs(p_info.attributes().begin(), p_info.attributes().end());
             ParticipantPermission new_perm;
@@ -8516,56 +8589,39 @@ void Room::UpdateParticipants(
             auto it = remote_participants_.find(p_info.sid());
             if (p_info.state() == proto::ParticipantInfo::DISCONNECTED) {
                 if (it != remote_participants_.end()) {
-                    for (const auto& [sid, publication] : it->second->tracks()) {
-                        const auto intent_key = MakeSubscriptionIntentKeyLocked(
-                            it->second->sid(), it->second->identity(), sid);
-                        subscription_intents_.erase(intent_key);
-                        CancelPendingSubscriptionUpdateLocked(intent_key);
-                        if (publication) {
-                            if (const auto track = publication->track()) {
-                                removed_tracks.push_back(track);
-                                if (track->kind() == TrackKind::Video) {
-                                    removed_video_telemetry_keys.push_back(
-                                        RemoteVideoTelemetryKey(
-                                            it->second->sid(), sid));
-                                } else if (track->kind() == TrackKind::Audio) {
-                                    removed_audio_telemetry_keys.push_back(
-                                        RemoteAudioTelemetryKey(
-                                            it->second->sid(), sid));
-                                }
-                            }
-                            const auto track_membership =
-                                track_memberships_.find(publication.get());
-                            if (track_membership != track_memberships_.end()) {
-                                removed_track_keys.push_back(
-                                    track_membership->second->key);
-                            }
-                        }
-                        if (const auto remote_publication =
-                                std::dynamic_pointer_cast<RemoteTrackPublication>(publication)) {
-                            const auto current =
-                                current_remote_binding_serials_.find(remote_publication.get());
-                            if (current != current_remote_binding_serials_.end()) {
-                                if (const auto media_binding = FindMediaBindingLocked(current->second)) {
-                                    media_binding->active.store(false, std::memory_order_release);
-                                }
-                            }
-                            current_remote_binding_serials_.erase(remote_publication.get());
-                            remote_publication->ClearMediaBinding();
-                        }
-                    }
-                    auto departure = MakeParticipantEventLocked(
-                        ParticipantEventKind::Departure, it->second, false);
-                    disconnected.push_back(it->second);
-                    if (RetireIncomingReadersForParticipantLocked(
-                            it->second, kDataStreamSenderDisconnected) != 0) {
-                        ScheduleIncomingStreamCleanupLocked(event_generation);
-                    }
-                    RetireParticipantLocked(it->second);
-                    remote_participants_.erase(it);
-                    EnqueueParticipantEventLocked(std::move(departure));
+                    retire_remote(it);
                 }
             } else {
+                const std::int64_t joined_at_ms = p_info.joined_at_ms() > 0
+                    ? p_info.joined_at_ms() : p_info.joined_at() * 1000;
+                if (!p_info.identity().empty()) {
+                    bool stale_instance = false;
+                    for (const auto& [sid, existing] : remote_participants_) {
+                        if (sid == p_info.sid() || !existing ||
+                            existing->identity() != p_info.identity()) continue;
+                        const auto joined = remote_participant_joined_at_ms_.find(sid);
+                        if (joined != remote_participant_joined_at_ms_.end() &&
+                            joined->second > 0 && joined_at_ms > 0 &&
+                            joined_at_ms < joined->second) {
+                            stale_instance = true;
+                            break;
+                        }
+                    }
+                    if (stale_instance) continue;
+                    for (auto previous = remote_participants_.begin();
+                         previous != remote_participants_.end();) {
+                        if (previous->first != p_info.sid() && previous->second &&
+                            previous->second->identity() == p_info.identity()) {
+                            retire_remote(previous++);
+                        } else {
+                            ++previous;
+                        }
+                    }
+                }
+                if (joined_at_ms > 0) {
+                    auto& recorded = remote_participant_joined_at_ms_[p_info.sid()];
+                    recorded = std::max(recorded, joined_at_ms);
+                }
                 std::shared_ptr<RemoteParticipant> remote;
                 if (it == remote_participants_.end()) {
                     remote = std::make_shared<RemoteParticipant>(p_info.sid(), p_info.identity());
@@ -9870,9 +9926,11 @@ asio::awaitable<void> Room::AttemptReconnect(
     bool full_restart = false;
     {
         std::lock_guard lock(room_mutex_);
-        full_restart = join_response_ && join_response_->has_client_configuration() &&
-            join_response_->client_configuration().resume_connection() ==
-                proto::ClientConfigSetting::DISABLED;
+        full_restart = full_reconnect_requested_ ||
+            (join_response_ && join_response_->has_client_configuration() &&
+             join_response_->client_configuration().resume_connection() ==
+                 proto::ClientConfigSetting::DISABLED);
+        full_reconnect_requested_ = false;
     }
     std::string last_error = "reconnect attempts exhausted";
     const auto reconnect_deadline = std::chrono::steady_clock::now() +
@@ -10120,6 +10178,7 @@ asio::awaitable<void> Room::AttemptReconnect(
                     pending_local_unpublishes_.clear();
                     ClearRemotePublicationMediaBindingsLocked();
                     remote_participants_.clear();
+                    remote_participant_joined_at_ms_.clear();
                     if (reliable_dc_) {
                         old_data_channels.push_back(reliable_dc_);
                         reliable_dc_ = nullptr;
@@ -10389,6 +10448,7 @@ asio::awaitable<void> Room::AttemptReconnect(
         pending_local_unpublishes_.clear();
         ClearRemotePublicationMediaBindingsLocked();
         remote_participants_.clear();
+        remote_participant_joined_at_ms_.clear();
         if (reliable_dc_) {
             data_channels.push_back(reliable_dc_);
             reliable_dc_ = nullptr;
@@ -11290,11 +11350,22 @@ asio::awaitable<void> Room::SimulateScenarioAsync(SimulateScenarioType scenario)
     }
     case SimulateScenarioType::FullReconnect: {
         Log("SIMULATE", "FULL_RECONNECT", "Simulating hard reconnect / full restart");
+        {
+            std::lock_guard lock(room_mutex_);
+            if (connection_state_ == ConnectionState::Connected && !reconnect_disabled_) {
+                full_reconnect_requested_ = true;
+            }
+        }
         if (signal) {
             proto::SignalRequest req;
             auto* sim = req.mutable_simulate();
             sim->set_leave_request_full_reconnect(true);
-            signal->Send(req);
+            try {
+                co_await signal->SendAsync(req);
+            } catch (...) {
+                Log("WARNING", "SIMULATE_SEND_FAILED",
+                    secure_log::ExceptionSummary("simulate_full_reconnect"));
+            }
         }
         HandleSignalEvent(SignalEvent{SignalEvent::Close, nullptr, "simulated full reconnect"});
         break;

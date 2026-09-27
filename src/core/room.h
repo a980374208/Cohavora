@@ -758,6 +758,7 @@ private:
     ConnectionState connection_state_ = ConnectionState::Disconnected;
     std::shared_ptr<LocalParticipant> local_participant_;
     std::map<std::string, std::shared_ptr<RemoteParticipant>> remote_participants_;
+    std::map<std::string, std::int64_t> remote_participant_joined_at_ms_;
     std::vector<std::shared_ptr<RoomListener>> listeners_;
     uint64_t next_participant_incarnation_ = 1;
     uint64_t next_publication_incarnation_ = 1;
@@ -921,6 +922,7 @@ private:
     static constexpr std::chrono::milliseconds kBaseReconnectDelay{100};
     static constexpr std::chrono::milliseconds kMaxReconnectDelay{1000};
     bool reconnect_active_ = false;
+    bool full_reconnect_requested_ = false;
     // A server-issued LeaveRequest with DISCONNECT is authoritative. It must
     // not be mistaken for a transient signal socket close and retried.
     bool reconnect_disabled_ = false;
