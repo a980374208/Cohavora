@@ -444,6 +444,7 @@ public:
             const auto onFrameAgeMs = lastOnFrame > 0 && now >= lastOnFrame
                 ? (now - lastOnFrame) / 1000000 : -1;
             quint64 bytes = 0, packets = 0, decoded = 0, received = 0;
+            qint64 lost = 0;
             quint64 matches = 0;
             bool bytesAvailable = true, packetsAvailable = true;
             bool lostAvailable = true;
@@ -460,10 +461,12 @@ public:
                         statsIds.addData(QByteArray(1, '\0'));
                         bytesAvailable &= stream.bytes_received_available;
                         packetsAvailable &= stream.packets_received_available;
+                        lostAvailable &= stream.packets_lost_available;
                         decodedAvailable &= stream.frames_decoded_available;
                         receivedAvailable &= stream.frames_received_available;
                         bytes += stream.bytes_received;
                         packets += stream.packets_received;
+                        lost += stream.packets_lost;
                         decoded += stream.frames_decoded;
                         received += stream.frames_received;
                     }
@@ -503,10 +506,12 @@ public:
                     ? QString::fromLatin1(statsIds.result().toHex().left(16)) : QString{}},
                 {"stats_bytes", static_cast<double>(bytes)},
                 {"stats_packets", static_cast<double>(packets)},
+                {"stats_lost", static_cast<double>(lost)},
                 {"stats_decoded", static_cast<double>(decoded)},
                 {"stats_received", static_cast<double>(received)},
                 {"stats_bytes_available", matches > 0 && bytesAvailable},
                 {"stats_packets_available", matches > 0 && packetsAvailable},
+                {"stats_lost_available", matches > 0 && lostAvailable},
                 {"stats_decoded_available", matches > 0 && decodedAvailable},
                 {"stats_received_available", matches > 0 && receivedAvailable},
             };
@@ -6372,10 +6377,12 @@ int RunMeetingSoak(QApplication &application) {
                     streamProbe.insert("stats_id_hash", hash(stream.id));
                     streamProbe.insert("bytes", static_cast<double>(stream.bytes_received));
                     streamProbe.insert("packets", static_cast<double>(stream.packets_received));
+                    streamProbe.insert("lost", static_cast<double>(stream.packets_lost));
                     streamProbe.insert("decoded", static_cast<double>(stream.frames_decoded));
                     streamProbe.insert("received", static_cast<double>(stream.frames_received));
                     streamProbe.insert("bytes_available", stream.bytes_received_available);
                     streamProbe.insert("packets_available", stream.packets_received_available);
+                    streamProbe.insert("lost_available", stream.packets_lost_available);
                     streamProbe.insert("decoded_available", stream.frames_decoded_available);
                     streamProbe.insert("received_available", stream.frames_received_available);
                     result.inbound_streams.append(streamProbe);

@@ -31,7 +31,8 @@ MAX_WALL_SECONDS = 480
 TRACK_BOOL_FIELDS = ("intent_present", "intent_subscribed", "subscription_dirty",
     "settings_dirty", "publication_present", "publication_subscribed",
     "publication_enabled", "subscription_error", "sink_active",
-    "stats_bytes_available", "stats_packets_available", "stats_decoded_available",
+    "stats_bytes_available", "stats_packets_available", "stats_lost_available",
+    "stats_decoded_available",
     "stats_received_available")
 TRACK_COUNT_FIELDS = ("intent_policy_revision", "current_binding_serial",
     "sink_binding_serial", "sink_binding_count", "sink_on_frame_count",
@@ -72,6 +73,10 @@ def validate_track_probes(value: object) -> list[dict]:
             if type(count) is not int or not 0 <= count <= 2**53:
                 raise soak.StopRun("invalid_selected_track_counter")
             safe[name] = count
+        lost = item.get("stats_lost")
+        if type(lost) is not int or not -(2**53) <= lost <= 2**53:
+            raise soak.StopRun("invalid_selected_track_loss")
+        safe["stats_lost"] = lost
         for name in ("sink_frame_age_ms", "sink_on_frame_age_ms"):
             age = item.get(name)
             if type(age) is not int or not -1 <= age <= 2**53:
@@ -124,11 +129,32 @@ def validate_inbound_streams(value: object) -> list[dict]:
             if type(available) is not bool:
                 raise soak.StopRun("invalid_inbound_stream_availability")
             safe[name + "_available"] = available
+        lost = item.get("lost")
+        if type(lost) is not int or not -(2**53) <= lost <= 2**53:
+            raise soak.StopRun("invalid_inbound_stream_loss")
+        if type(item.get("lost_available")) is not bool:
+            raise soak.StopRun("invalid_inbound_stream_loss_availability")
+        safe["lost"] = lost
+        safe["lost_available"] = item["lost_available"]
         result.append(safe)
     return result
 
 
-def build_steps() -> list[dict]:
+def build_steps(grid16_transport=False, grid16_transition=False) -> list[dict]:
+    if grid16_transition:
+        return [
+            {"cycle": 1, "action": "grid9", "page_size": 9,
+             "page": 0, "page_count": 2, "selected": 9, "observe_seconds": 45},
+            {"cycle": 1, "action": "grid16", "page_size": 16,
+             "page": 0, "page_count": 2, "selected": 16, "observe_seconds": 60},
+            {"cycle": 1, "action": "pin", "page_size": None,
+             "page": None, "page_count": None, "selected": None, "observe_seconds": 45},
+            {"cycle": 1, "action": "unpin", "page_size": 16,
+             "page": 0, "page_count": 2, "selected": 16, "observe_seconds": 120},
+        ]
+    if grid16_transport:
+        return [{"cycle": 1, "action": "grid16", "page_size": 16,
+                 "page": 0, "page_count": 2, "selected": 16}]
     actions = [("grid9", 9, 0), ("next_page", 9, 1),
                ("grid4", 4, 0), ("next_page", 4, 1),
                ("grid9", 9, 0), ("next_page", 9, 1),
@@ -141,24 +167,35 @@ def build_steps() -> list[dict]:
             for action, size, page in actions]
 
 
-def run(output: Path, executable: Path) -> dict:
+def run(output: Path, executable: Path, grid16_transport=False,
+        grid16_transition=False) -> dict:
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     run_id = uuid.uuid4().hex
     soak.atomic_json(output / "run.json", {
-        "schema": 1, "run_id": run_id, "kind": "targeted_render_probe",
+        "schema": 1, "run_id": run_id,
+        "kind": "grid16_transition_probe" if grid16_transition else
+            "grid16_transport_probe" if grid16_transport else "targeted_render_probe",
         "started_utc": soak.utc_now(), "binary_sha256": soak.sha256(executable),
         "source_inputs": soak.source_fingerprint(),
         "probe_sha256": soak.sha256(Path(__file__)),
     })
-    steps = build_steps()
+    steps = build_steps(grid16_transport, grid16_transition)
+    observe_seconds = 300 if grid16_transport else OBSERVE_SECONDS
+    stall_seconds = 20 if grid16_transport or grid16_transition else STALL_SECONDS
+    max_wall_seconds = (520 if grid16_transition else 420 if grid16_transport
+                        else MAX_WALL_SECONDS)
     soak.atomic_json(output / "plan.json", steps)
     soak.atomic_json(output / "profile.json", {"schema": 1,
         "minimum_remote_videos": REMOTE_VIDEOS, "cycles": CYCLES,
-        "observation_seconds_per_step": OBSERVE_SECONDS,
-        "stall_seconds": STALL_SECONDS, "settle_seconds": SETTLE_SECONDS,
-        "maximum_wall_seconds": MAX_WALL_SECONDS})
-    summary = {"schema": 1, "run_id": run_id, "kind": "targeted_render_probe",
+        "observation_seconds_per_step": None if grid16_transition else observe_seconds,
+        "step_observation_seconds": [step.get("observe_seconds", observe_seconds)
+                                     for step in steps],
+        "stall_seconds": stall_seconds, "settle_seconds": SETTLE_SECONDS,
+        "maximum_wall_seconds": max_wall_seconds})
+    summary = {"schema": 1, "run_id": run_id,
+        "kind": "grid16_transition_probe" if grid16_transition else
+            "grid16_transport_probe" if grid16_transport else "targeted_render_probe",
         "result": "INCONCLUSIVE", "status": "INCONCLUSIVE", "reason": "not_started",
         "formal_soak_status": "NOT_RUN", "exit_code": None,
         "planned_steps": len(steps), "completed_steps": 0, "step_results": []}
@@ -249,7 +286,7 @@ def run(output: Path, executable: Path) -> dict:
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             event("process_started", pid=process.pid)
-            while time.monotonic() - start < MAX_WALL_SECONDS:
+            while time.monotonic() - start < max_wall_seconds:
                 time.sleep(1)
                 now = time.monotonic()
                 if process.poll() is not None:
@@ -304,11 +341,16 @@ def run(output: Path, executable: Path) -> dict:
                         raise RuntimeError("step_settle_timeout")
                     if status["command_seq"] != sequence or \
                             status["command_status"] != "applied" or \
-                            status["page"] != target["page"] or \
-                            status["page_size"] != target["page_size"] or \
-                            status["page_count"] != target["page_count"] or \
-                            status["selected"] != target["selected"] or \
-                            status["bound"] != target["selected"] or \
+                            (target["page"] is not None and
+                             status["page"] != target["page"]) or \
+                            (target["page_size"] is not None and
+                             status["page_size"] != target["page_size"]) or \
+                            (target["page_count"] is not None and
+                             status["page_count"] != target["page_count"]) or \
+                            (target["selected"] is not None and
+                             status["selected"] != target["selected"]) or \
+                            status["selected"] == 0 or \
+                            status["bound"] != status["selected"] or \
                             not status["selected_fingerprint"] or \
                             status["selected_fingerprint"] == previous_fingerprint:
                         continue
@@ -330,16 +372,17 @@ def run(output: Path, executable: Path) -> dict:
                 if status["render_router_submitted"] > last_router:
                     last_router = status["render_router_submitted"]
                     last_router_at = now
-                if now - last_router_at >= STALL_SECONDS:
+                if now - last_router_at >= stall_seconds:
                     summary.update(result="STALLED", reason="router_no_frames_on_step",
                                    stalled_step={"seq": sequence, **target})
                     finish_step("STALLED")
                     break
-                if now - step_ready_at >= OBSERVE_SECONDS:
+                if now - step_ready_at >= target.get("observe_seconds", observe_seconds):
                     finish_step("PROGRESSED")
                     if step_index + 1 == len(steps):
                         summary.update(result="NOT_REPRODUCED",
-                                       reason="all_page_and_grid_steps_progressed")
+                                       reason="all_steps_progressed" if grid16_transition
+                                           else "all_page_and_grid_steps_progressed")
                         break
                     begin_step(step_index + 1, now)
             else:
@@ -372,12 +415,15 @@ def run(output: Path, executable: Path) -> dict:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--grid16-transport", action="store_true")
+    parser.add_argument("--grid16-transition", action="store_true")
     parser.add_argument("--executable", type=Path, default=soak.ROOT /
         "out/build/windows-vs2026-dev/Debug/test_participant_window_remediation.exe")
     args = parser.parse_args()
     if not args.executable.is_file() or not all(os.environ.get(name) for name in
             ("LIVEKIT_URL", "LIVEKIT_SOAK_TOKEN")):
         parser.error("existing executable and in-memory service credentials required")
-    result = run(args.output, args.executable.resolve())
+    result = run(args.output, args.executable.resolve(), args.grid16_transport,
+                 args.grid16_transition)
     print(f"{result['result']}: {result['reason']}; evidence={args.output.resolve()}")
     raise SystemExit(1 if result["result"] == "INCONCLUSIVE" else 0)
