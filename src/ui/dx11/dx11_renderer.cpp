@@ -2,7 +2,6 @@
 #include "dx11_shaders.h"
 #include <atomic>
 #include <cstring>
-#include <iostream>
 
 namespace livekit {
 namespace dx11 {
@@ -45,14 +44,11 @@ bool Dx11Renderer::InitializeLocked(HWND hwnd, int width, int height) {
     CleanupLocked();
 
     if (!hwnd || width <= 0 || height <= 0) {
-        std::cerr << "[Dx11Renderer] Invalid init parameters: hwnd=" << hwnd
-                  << " w=" << width << " h=" << height << std::endl;
         return false;
     }
 
 #if defined(LIVEKIT_DX11_TESTING)
     if (g_force_initialization_failure.load(std::memory_order_relaxed)) {
-        std::cerr << "[Dx11Renderer] Forced initialization failure for test" << std::endl;
         return false;
     }
 #endif
@@ -78,7 +74,6 @@ bool Dx11Renderer::InitializeLocked(HWND hwnd, int width, int height) {
 
     initialized_ = true;
     last_present_result_ = S_OK;
-    std::cout << "[Dx11Renderer] Initialized successfully (" << width << "x" << height << ")" << std::endl;
     return true;
 }
 
@@ -192,7 +187,6 @@ bool Dx11Renderer::CreateDeviceAndSwapChain(HWND hwnd, int width, int height) {
     }
 
     if (FAILED(hr)) {
-        std::cerr << "[Dx11Renderer] D3D11CreateDeviceAndSwapChain failed: hr=0x" << std::hex << hr << std::endl;
         return false;
     }
 
@@ -203,13 +197,11 @@ bool Dx11Renderer::CreateRenderTarget() {
     ComPtr<ID3D11Texture2D> backBuffer;
     HRESULT hr = swap_chain_->GetBuffer(0, IID_PPV_ARGS(backBuffer.GetAddressOf()));
     if (FAILED(hr)) {
-        std::cerr << "[Dx11Renderer] Failed to get back buffer from swap chain: 0x" << std::hex << hr << std::endl;
         return false;
     }
 
     hr = device_->CreateRenderTargetView(backBuffer.Get(), nullptr, render_target_view_.GetAddressOf());
     if (FAILED(hr)) {
-        std::cerr << "[Dx11Renderer] Failed to create render target view: 0x" << std::hex << hr << std::endl;
         return false;
     }
 
@@ -349,7 +341,6 @@ bool Dx11Renderer::Resize(int width, int height) {
 
     HRESULT hr = swap_chain_->ResizeBuffers(0, static_cast<UINT>(width), static_cast<UINT>(height), DXGI_FORMAT_UNKNOWN, 0);
     if (FAILED(hr)) {
-        std::cerr << "[Dx11Renderer] ResizeBuffers failed: 0x" << std::hex << hr << std::endl;
         CleanupLocked();
         return false;
     }
@@ -514,7 +505,6 @@ bool Dx11Renderer::EndFrame(bool vsync) {
     if (SUCCEEDED(hr)) hr = swap_chain_->Present(vsync ? 1 : 0, 0);
     last_present_result_ = hr;
     if (FAILED(hr)) {
-        std::cerr << "[Dx11Renderer] Present failed: 0x" << std::hex << hr << std::endl;
         // Report the typed failure before cleanup, which may itself block in
         // the driver. The owner retains all COM resources until its teardown.
         initialized_ = false;

@@ -32,6 +32,12 @@ void DrainEvents() {
 
 int main(int argc, char** argv) {
     QApplication app(argc, argv);
+    std::thread early([] {
+        MeetingUI::LogToConsole(MeetingUI::LogCategory::General,
+            QStringLiteral("EARLY"), QStringLiteral("private early log 3172"));
+    });
+    early.join();
+    TEST_CHECK(QApplication::topLevelWidgets().empty());
     auto& console = MeetingUI::MeetingLogConsoleWindow::Instance();
     console.clearLogs();
 
@@ -44,6 +50,7 @@ int main(int argc, char** argv) {
     });
     producer.join();
     DrainEvents();
+    console.drainPending();
 
     auto* view = console.findChild<QPlainTextEdit*>();
     TEST_CHECK(view != nullptr);
@@ -65,6 +72,7 @@ int main(int argc, char** argv) {
         QStringLiteral("HEARTBEAT_FAILURE"),
         QStringLiteral("heartbeat timer error: Authorization: Bearer synthetic-heartbeat-ui-secret"));
     DrainEvents();
+    console.drainPending();
 
     const auto heartbeat_rendered = view->toPlainText().toStdString();
     TEST_CHECK(heartbeat_rendered.find(kHeartbeatSecret) == std::string::npos);
@@ -73,6 +81,38 @@ int main(int argc, char** argv) {
     TEST_CHECK(view->toPlainText().isEmpty());
     console.onFilterChanged(QStringLiteral("redacted"));
     TEST_CHECK(view->toPlainText().contains(QStringLiteral("sensitive log field")));
+
+    console.clearLogs();
+    console.onFilterChanged({});
+    MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant,
+        QStringLiteral("CHAT_TEXT_SENT"), QStringLiteral("bytes=21"));
+    MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection,
+        QStringLiteral("HANDSHAKE_FAILURE"), QStringLiteral("private ordinary name 9281"));
+    console.drainPending();
+    TEST_CHECK(view->toPlainText().contains(QStringLiteral("bytes=21")));
+    TEST_CHECK(!view->toPlainText().contains(QStringLiteral("private ordinary name 9281")));
+    TEST_CHECK(view->toPlainText().contains(QStringLiteral("unregistered diagnostic")));
+
+    console.clearLogs();
+    MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection,
+        QStringLiteral("HANDSHAKE_FAILURE"),
+        QStringLiteral("private participant 4827 access_token=synthetic-secret"));
+    console.drainPending();
+    TEST_CHECK(!view->toPlainText().contains(QStringLiteral("private participant 4827")));
+    TEST_CHECK(view->toPlainText().contains(QStringLiteral("sensitive log field")));
+
+    console.clearLogs();
+    std::thread flood([] {
+        for (int i = 0; i < 10000; ++i) {
+            MeetingUI::LogToConsole(MeetingUI::LogCategory::General,
+                QStringLiteral("FLOOD"), QStringLiteral("safe fixed event"));
+        }
+    });
+    flood.join();
+    console.drainPending();
+    auto *status = console.findChild<QLabel*>(QStringLiteral("consoleLossStatus"));
+    TEST_CHECK(status && status->text().contains(QStringLiteral("UI loss=")));
+    TEST_CHECK(!status->text().contains(QStringLiteral("UI loss=0,")));
 
     console.clearLogs();
     return 0;

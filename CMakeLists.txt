@@ -260,6 +260,13 @@ set(LIVEKIT_SOURCES
     src/e2ee/key_provider.cpp
     src/e2ee/frame_cryptor.cpp
     src/telemetry/crash_handler.cpp
+    src/telemetry/crash_evidence_provider.cpp
+    src/telemetry/build_identity.cpp
+    src/telemetry/diagnostic_event.cpp
+    src/telemetry/diagnostic_file_sink.cpp
+    src/telemetry/diagnostic_pipeline.cpp
+    src/telemetry/diagnostic_bundle.cpp
+    src/telemetry/diagnostic_spdlog_bridge.cpp
     src/telemetry/e2e_media_marker.cpp
     src/telemetry/e2e_measurement.cpp
     src/telemetry/log_redaction.cpp
@@ -267,6 +274,8 @@ set(LIVEKIT_SOURCES
     src/telemetry/stability_ledger.cpp
     src/telemetry/stats_collector.cpp
     src/telemetry/session_telemetry.cpp
+    src/telemetry/telemetry_checkpoint.cpp
+    src/telemetry/telemetry_operation_timeline.cpp
     src/telemetry/telemetry_report.cpp
 )
 
@@ -328,11 +337,21 @@ set(LIVEKIT_HEADERS
     src/telemetry/session_telemetry.h
     src/telemetry/telemetry.h
     src/telemetry/crash_handler.h
+    src/telemetry/crash_evidence_provider.h
+    src/telemetry/build_identity.h
+    src/telemetry/bounded_callback.h
+    src/telemetry/diagnostic_event.h
+    src/telemetry/diagnostic_file_sink.h
+    src/telemetry/diagnostic_pipeline.h
+    src/telemetry/diagnostic_bundle.h
+    src/telemetry/diagnostic_spdlog_bridge.h
     src/telemetry/e2e_media_marker.h
     src/telemetry/e2e_measurement.h
     src/telemetry/log_redaction.h
     src/telemetry/process_resource_sampler.h
     src/telemetry/stability_ledger.h
+    src/telemetry/telemetry_checkpoint.h
+    src/telemetry/telemetry_operation_timeline.h
     src/telemetry/telemetry_report.h
     src/telemetry/safe_spawn.h
     src/telemetry/coro_allocator.h
@@ -465,6 +484,7 @@ target_link_libraries(cohavora_core PUBLIC
     winmm
     secur32
     crypt32
+    advapi32
     iphlpapi
     dmoguids
     msdmo
@@ -479,6 +499,7 @@ target_link_libraries(cohavora_core PUBLIC
     dxgi
     dwmapi
     shcore
+    shell32
 )
 
 if(COHAVORA_BUILD_SAMPLES)

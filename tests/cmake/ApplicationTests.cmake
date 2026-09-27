@@ -181,7 +181,8 @@ endif()
 
 # All Qt consumers use the same compiled startup theme target.
 foreach(ui_theme_consumer IN ITEMS test_camera_owner_remediation
-        test_participant_window_remediation test_session_credentials test_qt_log_redaction)
+        test_participant_window_remediation test_session_credentials test_qt_log_redaction
+        test_diagnostic_qt_bridge)
     target_link_libraries(${ui_theme_consumer} PRIVATE cohavora_ui_theme)
 endforeach()
 

@@ -3,6 +3,7 @@
 #include <string>
 #include <memory>
 #include <cstdint>
+#include <cstddef>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -10,6 +11,8 @@
 #include <deque>
 #include <mutex>
 #include <chrono>
+#include <array>
+#include <atomic>
 #include <functional>
 #include <optional>
 #include <tuple>
@@ -27,6 +30,7 @@
 #include "data_stream_assembler.h"
 #include "data_stream.h"
 #include "operation.h"
+#include "telemetry/diagnostic_event.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include "api/peer_connection_interface.h"
@@ -247,6 +251,7 @@ public:
     void AddListener(std::shared_ptr<RoomListener> listener);
     void RemoveListener(std::shared_ptr<RoomListener> listener);
     void SetSessionTelemetry(std::weak_ptr<telemetry::SessionTelemetry> telemetry);
+    void SetDiagnosticContext(diagnostic::Context context);
     using RemoteMediaRecoveryHandler =
         std::function<void(const RemoteMediaRecoveryRequest&)>;
     ControlApplyResult ApplyRemoteMediaPlan(const RemoteMediaPlan& plan);
@@ -359,6 +364,7 @@ private:
         return admission;
     }
     void SchedulePublisherMediaDiagnostic(uint64_t generation);
+    void EmitDiagnostic(diagnostic::Event event) const noexcept;
     friend class RoomPeerConnectionObserver;
     friend class RoomDataChannelObserver;
     friend class RoomUnpublishTestAccess;
@@ -840,6 +846,8 @@ private:
 
     // 线程安全锁
     mutable std::recursive_mutex room_mutex_;
+    diagnostic::Context diagnostic_context_;
+    std::array<std::atomic<std::uint32_t>, 4> signal_message_counts_{};
 
     struct PendingPeerConnectionWait {
         uint64_t generation = 0;

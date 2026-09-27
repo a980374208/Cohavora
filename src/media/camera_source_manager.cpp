@@ -1,14 +1,62 @@
 #include "camera_source_manager.h"
 #include "dshow_enumerator.h"
+#include "telemetry/diagnostic_pipeline.h"
 #include <algorithm>
 #include <cstdint>
-#include <iostream>
 #include <tuple>
-#include <spdlog/spdlog.h>
 
 namespace livekit {
 
+struct CameraSourceManager::DeviceSwitchSpan final {
+    DeviceSwitchSpan()
+        : started_at(std::chrono::steady_clock::now()),
+          operation_id(diagnostic::NewCorrelationId()) {
+        diagnostic::Event event;
+        event.kind = diagnostic::EventKind::DeviceSwitchStarted;
+        event.thread_role = diagnostic::ThreadRole::Media;
+        event.context.operation_id = operation_id;
+        diagnostic::EmitBusinessEvent(event);
+    }
+
+    ~DeviceSwitchSpan() {
+        Finish(diagnostic::Outcome::Cancelled,
+               diagnostic::DeviceSwitchReason::Superseded);
+    }
+
+    void Finish(diagnostic::Outcome outcome,
+                diagnostic::DeviceSwitchReason reason) noexcept {
+        bool expected = false;
+        if (!terminal.compare_exchange_strong(expected, true,
+                std::memory_order_acq_rel)) return;
+        diagnostic::Event event;
+        event.kind = diagnostic::EventKind::DeviceSwitchTerminal;
+        event.thread_role = diagnostic::ThreadRole::Media;
+        event.context.operation_id = operation_id;
+        event.outcome = outcome;
+        event.device_switch_reason = reason;
+        event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started_at).count();
+        diagnostic::EmitBusinessEvent(event);
+    }
+
+    std::chrono::steady_clock::time_point started_at;
+    diagnostic::OpaqueId operation_id;
+    std::atomic<bool> terminal{false};
+};
+
 namespace {
+
+void EmitCaptureTerminal(diagnostic::Outcome outcome,
+                         diagnostic::DeviceSwitchReason reason,
+                         diagnostic::OpaqueId parent = {}) noexcept {
+    diagnostic::Event event;
+    event.kind = diagnostic::EventKind::DeviceCaptureTerminal;
+    event.thread_role = diagnostic::ThreadRole::Media;
+    event.context.parent_operation_id = parent;
+    event.outcome = outcome;
+    event.device_switch_reason = reason;
+    diagnostic::EmitBusinessEvent(event);
+}
 
 constexpr int kFullHdWidth = 1920;
 constexpr int kFullHdHeight = 1080;
@@ -128,7 +176,8 @@ bool CameraSourceManager::Start(const DShowCaptureConfig& config) {
 
         new_cap = factory_();
         if (!new_cap) {
-            spdlog::error("[CameraSourceManager] Failed to instantiate capturer from factory");
+            EmitCaptureTerminal(diagnostic::Outcome::Failure,
+                diagnostic::DeviceSwitchReason::FactoryFailed);
             return false;
         }
 
@@ -142,8 +191,14 @@ bool CameraSourceManager::Start(const DShowCaptureConfig& config) {
             }
         });
 
-        if (!new_cap->Init(config, relay_source) || !new_cap->Start()) {
-            spdlog::error("[CameraSourceManager] Failed to initialize or start capturer for device: {}", config.device_path);
+        if (!new_cap->Init(config, relay_source)) {
+            EmitCaptureTerminal(diagnostic::Outcome::Failure,
+                diagnostic::DeviceSwitchReason::InitFailed);
+            return false;
+        }
+        if (!new_cap->Start()) {
+            EmitCaptureTerminal(diagnostic::Outcome::Failure,
+                diagnostic::DeviceSwitchReason::StartFailed);
             return false;
         }
 
@@ -153,7 +208,8 @@ bool CameraSourceManager::Start(const DShowCaptureConfig& config) {
     if (old_cap) {
         old_cap->Stop();
     }
-    spdlog::info("[CameraSourceManager] Successfully started active camera: {}", config.device_path);
+    EmitCaptureTerminal(diagnostic::Outcome::Success,
+        diagnostic::DeviceSwitchReason::Completed);
     return true;
 }
 
@@ -303,11 +359,14 @@ void CameraSourceManager::SwitchDeviceAsync(const std::string& target_device_pat
 void CameraSourceManager::ReconfigureAsync(const DShowCaptureConfig& target_config,
                                            int timeout_ms,
                                            SwitchCallback callback) {
+    auto switch_span = std::make_shared<DeviceSwitchSpan>();
     if (timeout_ms <= 0) {
         timeout_ms = 3000;
     }
 
     if (target_config.width <= 0 || target_config.height <= 0 || target_config.fps <= 0) {
+        switch_span->Finish(diagnostic::Outcome::Failure,
+            diagnostic::DeviceSwitchReason::InvalidConfiguration);
         DeliverSwitchResult(std::move(callback), false, "Invalid camera capture configuration");
         return;
     }
@@ -319,15 +378,13 @@ void CameraSourceManager::ReconfigureAsync(const DShowCaptureConfig& target_conf
     DShowCaptureConfig probe_config;
     bool has_immediate_result = false;
     bool immediate_success = false;
+    auto immediate_reason = diagnostic::DeviceSwitchReason::AlreadyActive;
     std::string immediate_error;
 
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (SameCaptureConfig(target_config, current_config_) &&
             active_capturer_ && active_capturer_->IsRunning()) {
-            spdlog::info("[CameraSourceManager] Target camera configuration is already active: {} {}x{}@{}",
-                         target_config.device_path, target_config.width, target_config.height,
-                         target_config.fps);
             if (probing_capturer_) {
                 ++switch_generation_;
                 old_probe = std::move(probing_capturer_);
@@ -348,15 +405,16 @@ void CameraSourceManager::ReconfigureAsync(const DShowCaptureConfig& target_conf
             new_probe = factory_();
             if (!new_probe) {
                 switch_state_ = CameraSwitchState::Aborted;
-                spdlog::error("[CameraSourceManager] Factory returned null capturer during switch");
                 has_immediate_result = true;
                 immediate_error = "Factory failed to create capturer";
+                immediate_reason = diagnostic::DeviceSwitchReason::FactoryFailed;
             } else {
                 auto probe_source = std::make_shared<VideoSource>(probe_config.width, probe_config.height);
                 auto first_frame_handled = std::make_shared<std::atomic<bool>>(false);
                 std::weak_ptr<CameraSourceManager> weak_self = shared_from_this();
 
-                probe_source->addSink([weak_self, gen, new_probe, probe_config, callback, first_frame_handled]
+                probe_source->addSink([weak_self, gen, new_probe, probe_config,
+                                       callback, switch_span, first_frame_handled]
                                       (const VideoFrame& frame, const VideoCaptureOptions& options) {
                     if (first_frame_handled->exchange(true)) {
                         if (auto self = weak_self.lock()) {
@@ -376,17 +434,16 @@ void CameraSourceManager::ReconfigureAsync(const DShowCaptureConfig& target_conf
                     }
                     if (auto self = weak_self.lock()) {
                         self->HandleProbeFrameReceived(
-                            gen, new_probe, probe_config, frame, options, callback);
+                            gen, new_probe, probe_config, frame, options,
+                            callback, switch_span);
                     }
                 });
 
                 if (!new_probe->Init(probe_config, probe_source)) {
                     switch_state_ = CameraSwitchState::Aborted;
-                    spdlog::error("[CameraSourceManager] Failed to initialize probe capturer for: {} {}x{}@{}",
-                                  probe_config.device_path, probe_config.width,
-                                  probe_config.height, probe_config.fps);
                     has_immediate_result = true;
                     immediate_error = "Failed to initialize replacement camera configuration";
+                    immediate_reason = diagnostic::DeviceSwitchReason::InitFailed;
                 } else {
                     probing_capturer_ = new_probe;
                     if (active_capturer_ && active_capturer_->IsRunning() &&
@@ -404,6 +461,8 @@ void CameraSourceManager::ReconfigureAsync(const DShowCaptureConfig& target_conf
     }
 
     if (has_immediate_result) {
+        switch_span->Finish(immediate_success ? diagnostic::Outcome::Success
+            : diagnostic::Outcome::Failure, immediate_reason);
         DeliverSwitchResult(std::move(callback), immediate_success, immediate_error);
         return;
     }
@@ -443,29 +502,28 @@ void CameraSourceManager::ReconfigureAsync(const DShowCaptureConfig& target_conf
         if (probe_started) {
             new_probe->Stop();
         }
+        switch_span->Finish(diagnostic::Outcome::Cancelled,
+            diagnostic::DeviceSwitchReason::Superseded);
         return;
     }
     if (!probe_started) {
-        spdlog::error("[CameraSourceManager] Failed to start probe capturer for: {} {}x{}@{}",
-                      probe_config.device_path, probe_config.width,
-                      probe_config.height, probe_config.fps);
         new_probe->Stop();
         if (active_to_resume && !active_to_resume->Start()) {
-            spdlog::error("[CameraSourceManager] Failed to restore previous camera after reconfiguration failure");
+            EmitCaptureTerminal(diagnostic::Outcome::Failure,
+                diagnostic::DeviceSwitchReason::StartFailed, switch_span->operation_id);
         }
+        switch_span->Finish(diagnostic::Outcome::Failure,
+            diagnostic::DeviceSwitchReason::StartFailed);
         DeliverSwitchResult(
             std::move(callback), false, "Failed to start replacement camera configuration");
         return;
     }
 
-    spdlog::info("[CameraSourceManager] Probing replacement camera: {} {}x{}@{} (timeout: {}ms, gen: {})",
-                 probe_config.device_path, probe_config.width, probe_config.height,
-                 probe_config.fps, timeout_ms, gen);
 
     std::weak_ptr<CameraSourceManager> weak_self = shared_from_this();
-    ScheduleTimeout(timeout_ms, [weak_self, gen, callback]() mutable {
+    ScheduleTimeout(timeout_ms, [weak_self, gen, callback, switch_span]() mutable {
         if (auto self = weak_self.lock()) {
-            self->HandleProbeTimeout(gen, std::move(callback));
+            self->HandleProbeTimeout(gen, std::move(callback), switch_span);
         }
     });
 }
@@ -475,20 +533,18 @@ void CameraSourceManager::HandleProbeFrameReceived(uint64_t generation,
                                                    const DShowCaptureConfig& target_config,
                                                    const VideoFrame& frame,
                                                    const VideoCaptureOptions& options,
-                                                   SwitchCallback callback) {
+                                                   SwitchCallback callback,
+                                                   std::shared_ptr<DeviceSwitchSpan> switch_span) {
     std::shared_ptr<ICameraCapturer> old_active;
     std::shared_ptr<VideoSource> out_src;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (switch_generation_.load() != generation || switch_state_ != CameraSwitchState::Probing) {
-            spdlog::warn("[CameraSourceManager] Ignore stale probe frame (gen: {}, cur: {})",
-                         generation, switch_generation_.load());
+            switch_span->Finish(diagnostic::Outcome::Cancelled,
+                diagnostic::DeviceSwitchReason::Superseded);
             return;
         }
 
-        spdlog::info("[CameraSourceManager] Verified first usable frame from target: {} {}x{}@{} (gen: {}). Committing switch.",
-                     target_config.device_path, target_config.width, target_config.height,
-                     target_config.fps, generation);
 
         old_active = std::move(active_capturer_);
         active_capturer_ = std::move(probe_capturer);
@@ -512,20 +568,24 @@ void CameraSourceManager::HandleProbeFrameReceived(uint64_t generation,
         });
     }
 
+    switch_span->Finish(diagnostic::Outcome::Success,
+        diagnostic::DeviceSwitchReason::Completed);
     DeliverSwitchResult(std::move(callback), true, "");
 }
 
-void CameraSourceManager::HandleProbeTimeout(uint64_t generation, SwitchCallback callback) {
+void CameraSourceManager::HandleProbeTimeout(uint64_t generation,
+                                             SwitchCallback callback,
+                                             std::shared_ptr<DeviceSwitchSpan> switch_span) {
     std::shared_ptr<ICameraCapturer> timed_out_probe;
     std::shared_ptr<ICameraCapturer> active_to_resume;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (switch_generation_.load() != generation || switch_state_ != CameraSwitchState::Probing) {
+            switch_span->Finish(diagnostic::Outcome::Cancelled,
+                diagnostic::DeviceSwitchReason::Superseded);
             return; // 已经完成提交或已被新代际取代
         }
 
-        spdlog::warn("[CameraSourceManager] Camera switch timed out (gen: {}). Rolling back to active capturer.",
-                     generation);
 
         switch_state_ = CameraSwitchState::Aborted;
         timed_out_probe = std::move(probing_capturer_);
@@ -543,8 +603,12 @@ void CameraSourceManager::HandleProbeTimeout(uint64_t generation, SwitchCallback
         });
     }
     if (active_to_resume && !active_to_resume->Start()) {
-        spdlog::error("[CameraSourceManager] Failed to restore previous camera after probe timeout");
+        EmitCaptureTerminal(diagnostic::Outcome::Failure,
+            diagnostic::DeviceSwitchReason::StartFailed, switch_span->operation_id);
     }
+
+    switch_span->Finish(diagnostic::Outcome::Timeout,
+        diagnostic::DeviceSwitchReason::ProbeTimeout);
 
     DeliverSwitchResult(
         std::move(callback),

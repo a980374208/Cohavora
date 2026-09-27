@@ -1,4 +1,17 @@
 # Unit/Integration Tests
+add_executable(test_diagnostic_pipeline
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_diagnostic_pipeline.cpp)
+target_include_directories(test_diagnostic_pipeline PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_diagnostic_pipeline PRIVATE cohavora_core)
+add_test(NAME diagnostic_pipeline_test COMMAND test_diagnostic_pipeline)
+set_tests_properties(diagnostic_pipeline_test PROPERTIES
+    TIMEOUT 30 LABELS "LOGGING_LG2;LOGGING_LG4;LOGGING_LG5;LOGGING_LG7")
+
+add_executable(diagnostic_tryemit_probe
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_diagnostic_tryemit_probe.cpp)
+target_include_directories(diagnostic_tryemit_probe PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(diagnostic_tryemit_probe PRIVATE cohavora_core)
+
 add_executable(cohavora_core_tests
     ${LIVEKIT_TEST_SOURCE_DIR}/main.cpp
 )
@@ -117,7 +130,16 @@ target_link_libraries(test_stability_ledger PRIVATE
 add_test(NAME stability_ledger_test COMMAND test_stability_ledger)
 set_tests_properties(stability_ledger_test PROPERTIES
     TIMEOUT 30
-    LABELS "TELEMETRY_S6;CORE_REGRESSION")
+    LABELS "TELEMETRY_S6;CORE_REGRESSION;LOGGING_LG5")
+
+add_executable(test_crash_evidence_provider
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_crash_evidence_provider.cpp
+)
+target_include_directories(test_crash_evidence_provider PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_crash_evidence_provider PRIVATE cohavora_core dbghelp)
+add_test(NAME crash_evidence_provider_test COMMAND test_crash_evidence_provider)
+set_tests_properties(crash_evidence_provider_test PROPERTIES
+    TIMEOUT 90 LABELS "LOGGING_LG5")
 
 add_executable(test_telemetry_report
     ${LIVEKIT_TEST_SOURCE_DIR}/test_telemetry_report.cpp
@@ -126,8 +148,8 @@ target_include_directories(test_telemetry_report PRIVATE ${LIVEKIT_PROJECT_SOURC
 target_link_libraries(test_telemetry_report PRIVATE cohavora_core)
 add_test(NAME telemetry_report_test COMMAND test_telemetry_report)
 set_tests_properties(telemetry_report_test PROPERTIES
-    TIMEOUT 30
-    LABELS "TELEMETRY_S7;TELEMETRY_S7_ACCEPTANCE;CORE_REGRESSION;SECURITY_REGRESSION")
+    TIMEOUT 60
+    LABELS "TELEMETRY_S7;TELEMETRY_S7_ACCEPTANCE;CORE_REGRESSION;SECURITY_REGRESSION;LOGGING_LG1;LOGGING_LG4;LOGGING_LG5;LOGGING_LG6")
 
 # S0 telemetry capability probe: validates the packaged WebRTC stats ABI,
 # endpoint codec capabilities, and the frozen renderer completion boundary.

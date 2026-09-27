@@ -314,7 +314,8 @@ bool DShowVideoCapture::BuildFilterGraph() {
     }
 
     if (!source_filter_) {
-        spdlog::error("[DShowVideoCapture] Device not found: {}", config_.device_path);
+        spdlog::error("[DShowVideoCapture] Device not found (device={})",
+                      config_.device_path.empty() ? "default" : "selected");
         return false;
     }
 

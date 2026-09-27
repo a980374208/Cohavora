@@ -118,10 +118,7 @@ FailureCaseResult RunFailureCase(bool token_in_query) {
     TEST_CHECK(output.find("GET /rtc") == std::string::npos);
     TEST_CHECK(output.find("Authorization: Bearer") == std::string::npos);
     TEST_CHECK(output.find("Set-Cookie:") == std::string::npos);
-    TEST_CHECK(output.find("stage=websocket_upgrade") != std::string::npos);
-    TEST_CHECK(output.find("category=websocket_http") != std::string::npos);
-    TEST_CHECK(output.find("code=401") != std::string::npos);
-    TEST_CHECK(output.find("endpoint{scheme=ws,route=rtc_v1") != std::string::npos);
+    TEST_CHECK(output.empty());
 
     return {error, captured_request, output};
 }

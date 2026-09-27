@@ -218,6 +218,7 @@ public:
                 _sessionRuntime->telemetry())
             : std::weak_ptr<livekit::telemetry::SessionTelemetry>{};
     }
+    livekit::diagnostic::Context diagnosticContext() const;
 
     // Whiteboard commands are proposals. Only the session-strand authority
     // runtime can turn them into ordered commits.
@@ -340,6 +341,11 @@ private:
         std::function<void(const QString &, int, ResultCallback<LiveKitAuthInfo>)> createImmediateMeeting;
         std::function<void(const QString &, ResultCallback<bool>)> leaveMeeting;
         std::function<void(const QString &, ResultCallback<bool>)> endMeeting;
+        std::function<void(const QString &, const QString &, ResultCallback<bool>, HttpRequestContext)> joinMeetingWithContext;
+        std::function<void(const QString &, ResultCallback<LiveKitAuthInfo>, HttpRequestContext)> getMeetingTokenWithContext;
+        std::function<void(const QString &, int, ResultCallback<LiveKitAuthInfo>, HttpRequestContext)> createImmediateMeetingWithContext;
+        std::function<void(const QString &, ResultCallback<bool>, HttpRequestContext)> leaveMeetingWithContext;
+        std::function<void(const QString &, ResultCallback<bool>, HttpRequestContext)> endMeetingWithContext;
     };
     using RoomStartHook = std::function<void(const QString &, const QString &)>;
     enum class AdmissionStage {
@@ -365,6 +371,7 @@ private:
         livekit::telemetry::OperationOutcome outcome);
     void finishStartupTelemetry(livekit::telemetry::OperationOutcome outcome);
     void finishActiveStabilitySession();
+    HttpRequestContext admissionHttpContext() const;
     void publishDetachedAdmissionTelemetry(
         livekit::telemetry::OperationOutcome outcome,
         std::chrono::steady_clock::time_point finishedAt);
@@ -457,6 +464,8 @@ private:
         uint64_t generation = 0;
         std::chrono::steady_clock::time_point startedAt{};
         std::string operationId;
+        QString diagnosticOperationId;
+        QString anonymousSessionId;
         std::weak_ptr<livekit::telemetry::SessionTelemetry> telemetry;
         std::shared_ptr<livekit::telemetry::StabilityLedger> stabilityLedger;
         std::string stabilitySessionId;
@@ -530,6 +539,7 @@ private:
     // runtime is accessed only through its ASIO strand.
     std::shared_ptr<MeetingSessionRuntime> _sessionRuntime;
     uint64_t _nextSessionGeneration = 0;
+    mutable std::atomic<std::uint32_t> _staleUiCallbackCount{0};
     std::shared_ptr<livekit::Room> _room;
     std::shared_ptr<CoordinatorRoomListener> _roomListener;
     std::atomic<bool> _sessionRunning{false};

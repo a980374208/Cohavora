@@ -2,6 +2,10 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <filesystem>
+#include <fstream>
+#include <set>
+#include <nlohmann/json.hpp>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDir>
 #include <QtCore/QEventLoop>
@@ -15,6 +19,7 @@
 #include "src/net/openmeeting_http_client.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/net/session_manager.h"
+#include "src/telemetry/diagnostic_pipeline.h"
 #include "tests/support/test_check.h"
 
 namespace OpenMeeting {
@@ -72,7 +77,8 @@ static_assert(!std::is_destructible_v<OpenMeeting::SessionManager>);
 
 class LoopbackLoginFixture {
 public:
-    explicit LoopbackLoginFixture(bool withholdResponse) : withholdResponse_(withholdResponse) {
+    explicit LoopbackLoginFixture(bool withholdResponse, bool malformedDto = false)
+        : withholdResponse_(withholdResponse), malformedDto_(malformedDto) {
         TEST_CHECK(server_.listen(QHostAddress::LocalHost, 0));
         QObject::connect(&server_, &QTcpServer::newConnection, &server_, [this]() {
             TEST_CHECK(socket_ == nullptr);
@@ -143,8 +149,11 @@ private:
         if (withholdResponse_) {
             return;
         }
-        const QByteArray body = R"({"errCode":4107,"errMsg":"controlled-login-denied","data":null})";
-        const QByteArray response = "HTTP/1.1 403 Forbidden\r\nContent-Type: application/json\r\nContent-Length: "
+        const QByteArray body = malformedDto_
+            ? QByteArray(R"({"errCode":0,"data":{"userID":"fixture_user"}})")
+            : QByteArray(R"({"errCode":4107,"errMsg":"controlled-login-denied","data":null})");
+        const QByteArray response = (malformedDto_ ? "HTTP/1.1 200 OK\r\n" :
+            "HTTP/1.1 403 Forbidden\r\n") + QByteArray("Content-Type: application/json\r\nContent-Length: ")
             + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
         TEST_CHECK(socket_->write(response) == response.size());
         socket_->disconnectFromHost();
@@ -156,10 +165,20 @@ private:
     QByteArray operationId_;
     int requestCount_ = 0;
     bool withholdResponse_;
+    bool malformedDto_;
 };
 
-void verifyLocalHttp(bool withholdResponse) {
-    LoopbackLoginFixture fixture(withholdResponse);
+void verifyLocalHttp(bool withholdResponse, bool malformedDto = false) {
+    LoopbackLoginFixture fixture(withholdResponse, malformedDto);
+    QTemporaryDir diagnosticDirectory;
+    auto diagnostics = std::make_shared<livekit::diagnostic::DiagnosticPipeline>();
+    const auto diagnosticRoot = std::filesystem::path(
+        diagnosticDirectory.path().toStdWString());
+    if (!withholdResponse) {
+        TEST_CHECK(diagnosticDirectory.isValid());
+        livekit::diagnostic::InstallBusinessPipeline(diagnostics);
+        TEST_CHECK(diagnostics->StartWriter(diagnosticRoot));
+    }
     OpenMeeting::OpenMeetingHttpClient client;
     client.setBaseUrl(fixture.baseUrl());
     QEventLoop loop;
@@ -180,10 +199,17 @@ void verifyLocalHttp(bool withholdResponse) {
             TEST_CHECK(callbacks == 1);
             TEST_CHECK(!ok);
             TEST_CHECK(user.userId.isEmpty());
-            TEST_CHECK(error.code == 4107);
-            TEST_CHECK(error.message == "controlled-login-denied");
+            TEST_CHECK(error.code == (malformedDto
+                ? static_cast<int>(OpenMeeting::ErrorCode::ParseError) : 4107));
+            if (!malformedDto)
+                TEST_CHECK(error.message == "controlled-login-denied");
             TEST_CHECK(error.operationId == fixture.operationId());
             TEST_CHECK(!error.operationId.isEmpty());
+            TEST_CHECK(error.requestId.size() == 32);
+            TEST_CHECK(error.httpStatus == (malformedDto ? 200 : 403));
+            TEST_CHECK(error.businessCode == (malformedDto ? 0 : 4107));
+            TEST_CHECK(error.failureLayer == (malformedDto
+                ? OpenMeeting::HttpFailureLayer::Parse : OpenMeeting::HttpFailureLayer::Business));
             loop.quit();
         });
     loop.exec();
@@ -195,6 +221,66 @@ void verifyLocalHttp(bool withholdResponse) {
     TEST_CHECK(callbacks == 1);
     TEST_CHECK(!client.isLoggedIn());
     TEST_CHECK(client.token().isEmpty());
+    TEST_CHECK(diagnostics->Close() == livekit::diagnostic::DrainResult::Completed);
+    livekit::diagnostic::InstallBusinessPipeline({});
+    int started = 0, completed = 0, decodeFailed = 0;
+    QString requestId;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(diagnosticRoot)) {
+        if (entry.path().extension() != ".jsonl") continue;
+        std::ifstream input(entry.path(), std::ios::binary);
+        std::string line;
+        while (std::getline(input, line)) {
+            TEST_CHECK(line.find("fixture_account") == std::string::npos);
+            TEST_CHECK(line.find("fixture_password") == std::string::npos);
+            const auto event = nlohmann::json::parse(line);
+            const auto name = event.at("event_name").get<std::string>();
+            if (name == "http.request.started" || name == "http.request.completed" ||
+                name == "http.response.decode_failed") {
+                if (name != "http.response.decode_failed")
+                    TEST_CHECK(event.at("attributes").at("route") == "login");
+                TEST_CHECK(event.at("legacy_operation_id") ==
+                    fixture.operationId().toStdString());
+                const auto id = QString::fromStdString(
+                    event.at("request_id").get<std::string>());
+                if (requestId.isEmpty()) requestId = id;
+                TEST_CHECK(id == requestId);
+                if (name == "http.request.started") ++started;
+                else if (name == "http.response.decode_failed") {
+                    ++decodeFailed;
+                    TEST_CHECK(event.at("error_layer") == "parse");
+                } else {
+                    ++completed;
+                    if (!malformedDto)
+                        TEST_CHECK(event.at("error_layer") == "business");
+                    TEST_CHECK(event.at("attributes").at("http_status") == (malformedDto ? 200 : 403));
+                    if (malformedDto)
+                        TEST_CHECK(!event.at("attributes").contains("business_error"));
+                    else
+                        TEST_CHECK(event.at("attributes").at("business_error") == "unknown");
+                    TEST_CHECK(!event.at("attributes").contains("business_code"));
+                }
+            }
+        }
+    }
+    TEST_CHECK(started == 1 && completed == 1 && decodeFailed == (malformedDto ? 1 : 0));
+}
+
+void verifyConcurrentLocalIds() {
+    OpenMeeting::OpenMeetingHttpClient client;
+    std::set<QString> ids;
+    int completed = 0;
+    constexpr int requests = 256;
+    for (int i = 0; i < requests; ++i) {
+        client.login("fixture_account", "fixture_password",
+            [&](bool, const OpenMeeting::UserInfo&, const OpenMeeting::HttpError& error) {
+                TEST_CHECK(error.requestId.size() == 32);
+                TEST_CHECK(ids.insert(error.requestId).second);
+                ++completed;
+            });
+    }
+    for (int i = 0; i < 100 && completed < requests; ++i)
+        QCoreApplication::processEvents();
+    TEST_CHECK(completed == requests);
 }
 
 } // namespace
@@ -268,7 +354,9 @@ int main(int argc, char *argv[]) {
     // -------------------------------------------------------------
     {
         std::cout << "[TEST 2] Testing loopback HTTP request and controlled error dispatch..." << std::endl;
-        verifyLocalHttp(false);
+    verifyLocalHttp(false);
+    verifyLocalHttp(false, true);
+    verifyConcurrentLocalIds();
         std::cout << "[TEST 2] PASS: Local request, controlled error and exactly one callback verified." << std::endl;
     }
 

@@ -2,7 +2,6 @@
 #include "dx11_types.h"
 #include "dx11_shaders.h"
 #include <atomic>
-#include <iostream>
 
 namespace livekit {
 namespace dx11 {
@@ -40,7 +39,6 @@ bool GpuVideoConverter::InitializeLocked() {
 
 #if defined(LIVEKIT_DX11_TESTING)
     if (g_force_initialization_failure.load(std::memory_order_relaxed)) {
-        std::cerr << "[GpuVideoConverter] Forced initialization failure for test" << std::endl;
         return false;
     }
 #endif
@@ -87,7 +85,6 @@ bool GpuVideoConverter::InitializeLocked() {
     }
 
     if (FAILED(hr)) {
-        std::cerr << "[GpuVideoConverter] D3D11CreateDevice failed: 0x" << std::hex << hr << std::endl;
         CleanupLocked();
         return false;
     }
@@ -98,7 +95,6 @@ bool GpuVideoConverter::InitializeLocked() {
     }
 
     initialized_ = true;
-    std::cout << "[GpuVideoConverter] Initialized GPU hardware color-space converter successfully!" << std::endl;
     return true;
 }
 

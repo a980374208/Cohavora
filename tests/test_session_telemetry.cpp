@@ -2,6 +2,7 @@
 
 #include "src/render/canvas_render_timing.h"
 #include "src/telemetry/process_resource_sampler.h"
+#include "src/telemetry/diagnostic_pipeline.h"
 #include "src/telemetry/session_telemetry.h"
 
 #include <asio.hpp>
@@ -11,6 +12,7 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <filesystem>
 #include <memory>
 #include <set>
 #include <thread>
@@ -551,7 +553,9 @@ void FirstDecodedFrameUsesGenerationAndBindingEpoch() {
 void ReconnectWaitsForStableExpectedVideo() {
     asio::io_context context;
     auto strand = asio::make_strand(context);
-    auto telemetry = std::make_shared<SessionTelemetry>(strand, 91, 64);
+    auto telemetry = std::make_shared<SessionTelemetry>(
+        strand, 91, 64, SessionTelemetry::Clock::now(), nullptr,
+        std::string(32, 'a'));
     SessionTelemetry::SnapshotPtr snapshot;
     asio::post(strand, [telemetry, &snapshot] {
         telemetry->SetSnapshotCallbackOnStrand(
@@ -569,10 +573,12 @@ void ReconnectWaitsForStableExpectedVideo() {
         OperationKind::ReconnectEpisode, "reconnect", base + 1000ms);
     const auto recovery_epoch = telemetry->ActiveRecoveryEpoch();
     TEST_CHECK(recovery_epoch != 0);
-    probe->last_frame_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(
-        (base + 1200ms).time_since_epoch()).count());
+    auto replacement = std::make_shared<livekit::telemetry::VideoActivityProbe>();
+    TEST_CHECK(telemetry->RegisterRemoteVideoBinding(
+        "remote_video/p/t", 6, 4, base + 1100ms, true, true,
+        replacement, base + 1100ms));
     TEST_CHECK(telemetry->RecordRemoteVideoFrame(
-        "remote_video/p/t", 5, 3, recovery_epoch, false,
+        "remote_video/p/t", 6, 4, recovery_epoch, false,
         1280, 720, base + 1200ms, base + 900ms));
     TEST_CHECK(telemetry->FinishOperation(
         episode, OperationKind::ReconnectEpisode,
@@ -587,7 +593,7 @@ void ReconnectWaitsForStableExpectedVideo() {
 
     context.restart();
     TEST_CHECK(telemetry->RecordRemoteVideoFrame(
-        "remote_video/p/t", 5, 3, recovery_epoch, true,
+        "remote_video/p/t", 6, 4, recovery_epoch, true,
         1280, 720, base + 1450ms));
     context.run();
     const auto *recovered = FindOperation(*snapshot, OperationKind::ReconnectEpisode);
@@ -2651,8 +2657,50 @@ int main() {
     StatsCompletionReturnsToOwningStrand();
     StopWaitsForTheOnlyInFlightSample();
     FirstDecodedFrameUsesGenerationAndBindingEpoch();
+    const auto diagnosticRoot = std::filesystem::temp_directory_path() /
+        ("cohavora-recovery-events-" + std::string(
+            livekit::diagnostic::NewCorrelationId().View()));
+    auto diagnostics = std::make_shared<livekit::diagnostic::DiagnosticPipeline>();
+    std::vector<livekit::diagnostic::Event> recoveryEvents;
+    diagnostics->SetMirror([&](const livekit::diagnostic::Event& event) {
+        recoveryEvents.push_back(event);
+    });
+    TEST_CHECK(diagnostics->StartWriter(diagnosticRoot));
+    livekit::diagnostic::InstallBusinessPipeline(diagnostics);
     ReconnectWaitsForStableExpectedVideo();
     ReconnectTimeoutAndExpectationChangeAreNotMediaSuccess();
+    livekit::diagnostic::InstallBusinessPipeline({});
+    TEST_CHECK(diagnostics->Close() == livekit::diagnostic::DrainResult::Completed);
+    bool milestone = false, timeout = false, endpoint = false;
+    for (const auto& event : recoveryEvents) {
+        if (event.kind == livekit::diagnostic::EventKind::MediaRecoveryMilestone) {
+            milestone = true;
+            TEST_CHECK(event.context.recovery_epoch != 0);
+            TEST_CHECK(!event.context.operation_id.View().empty());
+            if (event.context.session_generation == 91) {
+                TEST_CHECK(event.context.anonymous_session_id.View() ==
+                    std::string(32, 'a'));
+                TEST_CHECK(event.batch_track_count == 1);
+            }
+        }
+        if (event.kind == livekit::diagnostic::EventKind::MediaRecoveryTimeout)
+            timeout = true;
+        if (event.kind == livekit::diagnostic::EventKind::MediaEndpointRecovered &&
+            event.context.session_generation == 91) {
+            endpoint = true;
+            TEST_CHECK(event.context.anonymous_session_id.View() ==
+                std::string(32, 'a'));
+            TEST_CHECK(event.context.room_generation == 6);
+            TEST_CHECK(event.context.recovery_epoch != 0);
+            TEST_CHECK(event.media_endpoint_id.View().size() == 32);
+            TEST_CHECK(event.previous_media_endpoint_id.View().size() == 32);
+            TEST_CHECK(event.media_endpoint_id.View() !=
+                event.previous_media_endpoint_id.View());
+        }
+    }
+    TEST_CHECK(milestone && timeout && endpoint);
+    std::error_code ignored;
+    std::filesystem::remove_all(diagnosticRoot, ignored);
     NativeFreezeStatsPreserveMissingAndMeasuredZero();
     AudioStatsPreserveAvailabilityDeltasResetsAndStaleness();
     NetworkPathRecoveryAndQualityUseWindowedNativeCounters();

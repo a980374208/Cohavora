@@ -1,6 +1,7 @@
 #include <winsock2.h>
 #include <asio.hpp>
 #include "webrtc_manager.h"
+#include "telemetry/diagnostic_pipeline.h"
 #include "core/executor_lifetime.h"
 #include "audio_playout_device_selection.h"
 #include "audio_playout_warmup.h"
@@ -15,7 +16,6 @@
 #include "api/video_codecs/builtin_video_decoder_factory.h"
 #include "api/video_codecs/sdp_video_format.h"
 #include "api/sequence_checker.h"
-#include <iostream>
 
 #include "api/environment/environment_factory.h"
 #include "api/audio/audio_device.h"
@@ -38,6 +38,14 @@ namespace webrtc_checks_impl {
 namespace livekit {
 
 namespace {
+
+void EmitRtcLifecycle(diagnostic::RtcStatus status) noexcept {
+    diagnostic::Event event;
+    event.kind = diagnostic::EventKind::RtcLifecycle;
+    event.thread_role = diagnostic::ThreadRole::Rtc;
+    event.rtc_status = status;
+    diagnostic::EmitBusinessEvent(event);
+}
 
 class SingleStreamVideoEncoderFactory : public webrtc::VideoEncoderFactory {
 public:
@@ -534,9 +542,9 @@ bool WebRTCManager::Initialize() {
     webrtc::LogMessage::LogToDebug(webrtc::LS_NONE);
     webrtc::LogMessage::SetLogToStderr(false);
 
-    std::cout << "WebRTCManager: Initializing SSL and starting threads..." << std::endl;
+    EmitRtcLifecycle(diagnostic::RtcStatus::Starting);
     if (!webrtc::InitializeSSL()) {
-        std::cerr << "WebRTCManager: Failed to initialize SSL" << std::endl;
+        EmitRtcLifecycle(diagnostic::RtcStatus::SslFailed);
         return false;
     }
 
@@ -545,7 +553,7 @@ bool WebRTCManager::Initialize() {
     signaling_thread_ = webrtc::Thread::Create();
 
     if (!network_thread_->Start() || !worker_thread_->Start() || !signaling_thread_->Start()) {
-        std::cerr << "WebRTCManager: Failed to start WebRTC helper threads" << std::endl;
+        EmitRtcLifecycle(diagnostic::RtcStatus::ThreadsFailed);
         webrtc::CleanupSSL();
         return false;
     }
@@ -565,11 +573,10 @@ bool WebRTCManager::Initialize() {
                 // Use the same Windows default playback role as settings and
                 // speaker testing, rather than the separate communications role.
                 if (adm_->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultDevice) != 0) {
-                    std::cerr << "WebRTCManager: Failed to select system default playout device" << std::endl;
+                    EmitRtcLifecycle(diagnostic::RtcStatus::PlayoutDeviceFailed);
                 }
             }
         });
-        std::cout << "WebRTCManager: Native Platform Audio Device Module initialized; playout remains media-driven." << std::endl;
     }
 
     factory_ = webrtc::CreatePeerConnectionFactory(
@@ -586,7 +593,7 @@ bool WebRTCManager::Initialize() {
     );
 
     if (!factory_) {
-        std::cerr << "WebRTCManager: Failed to create PeerConnectionFactory" << std::endl;
+        EmitRtcLifecycle(diagnostic::RtcStatus::FactoryFailed);
         Deinitialize();
         return false;
     }
@@ -601,15 +608,13 @@ bool WebRTCManager::Initialize() {
             const int32_t playout_result = adm_->InitPlayout();
             const int32_t start_result = adm_->Playing() ? 0 : adm_->StartPlayout();
             if (speaker_result != 0 || playout_result != 0 || start_result != 0) {
-                std::cerr << "WebRTCManager: Failed to start ADM playout (speaker="
-                          << speaker_result << ", init=" << playout_result
-                          << ", start=" << start_result << ")" << std::endl;
+                EmitRtcLifecycle(diagnostic::RtcStatus::PlayoutStartFailed);
             }
         });
     }
 
     initialized_ = true;
-    std::cout << "WebRTCManager: Initialized successfully with Audio/Video pipelines!" << std::endl;
+    EmitRtcLifecycle(diagnostic::RtcStatus::Ready);
     return true;
 }
 
@@ -710,7 +715,7 @@ void WebRTCManager::Deinitialize() {
 
     webrtc::CleanupSSL();
     initialized_ = false;
-    std::cout << "WebRTCManager: Deinitialized successfully." << std::endl;
+    EmitRtcLifecycle(diagnostic::RtcStatus::Stopped);
 }
 
 using CreateSdpCompletion = CancellableExecutorCallback<std::string, std::string>;
@@ -719,13 +724,16 @@ using SetSdpCompletion = CancellableExecutorCallback<std::string>;
 class CreateSdpObserverProxy : public webrtc::CreateSessionDescriptionObserver {
 public:
     static webrtc::scoped_refptr<CreateSdpObserverProxy> Create(
-        std::shared_ptr<CreateSdpCompletion> completion) {
-        return webrtc::make_ref_counted<CreateSdpObserverProxy>(std::move(completion));
+        std::shared_ptr<CreateSdpCompletion> completion,
+        diagnostic::Stage stage) {
+        return webrtc::make_ref_counted<CreateSdpObserverProxy>(
+            std::move(completion), stage);
     }
 
     CreateSdpObserverProxy(
-        std::shared_ptr<CreateSdpCompletion> completion)
-        : completion_(std::move(completion)) {}
+        std::shared_ptr<CreateSdpCompletion> completion,
+        diagnostic::Stage stage)
+        : completion_(std::move(completion)), stage_(stage) {}
 
     void OnSuccess(webrtc::SessionDescriptionInterface* desc) override {
         std::string sdp;
@@ -735,36 +743,55 @@ public:
     }
 
     void OnFailure(webrtc::RTCError error) override {
+        diagnostic::Event event;
+        event.kind = diagnostic::EventKind::RtcSdpFailed;
+        event.thread_role = diagnostic::ThreadRole::Rtc;
+        event.stage = stage_;
+        event.error_layer = diagnostic::ErrorLayer::Rtc;
+        event.rtc_error_type = static_cast<int>(error.type());
+        diagnostic::EmitBusinessEvent(event);
         std::string err_msg = error.message();
         completion_->Complete("", std::move(err_msg));
     }
 
 private:
     std::shared_ptr<CreateSdpCompletion> completion_;
+    diagnostic::Stage stage_;
 };
 
 class SetSdpObserverProxy : public webrtc::SetSessionDescriptionObserver {
 public:
     static webrtc::scoped_refptr<SetSdpObserverProxy> Create(
-        std::shared_ptr<SetSdpCompletion> completion) {
-        return webrtc::make_ref_counted<SetSdpObserverProxy>(std::move(completion));
+        std::shared_ptr<SetSdpCompletion> completion,
+        diagnostic::Stage stage) {
+        return webrtc::make_ref_counted<SetSdpObserverProxy>(
+            std::move(completion), stage);
     }
 
     SetSdpObserverProxy(
-        std::shared_ptr<SetSdpCompletion> completion)
-        : completion_(std::move(completion)) {}
+        std::shared_ptr<SetSdpCompletion> completion,
+        diagnostic::Stage stage)
+        : completion_(std::move(completion)), stage_(stage) {}
 
     void OnSuccess() override {
         completion_->Complete("");
     }
 
     void OnFailure(webrtc::RTCError error) override {
+        diagnostic::Event event;
+        event.kind = diagnostic::EventKind::RtcSdpFailed;
+        event.thread_role = diagnostic::ThreadRole::Rtc;
+        event.stage = stage_;
+        event.error_layer = diagnostic::ErrorLayer::Rtc;
+        event.rtc_error_type = static_cast<int>(error.type());
+        diagnostic::EmitBusinessEvent(event);
         std::string err_msg = error.message();
         completion_->Complete(std::move(err_msg));
     }
 
 private:
     std::shared_ptr<SetSdpCompletion> completion_;
+    diagnostic::Stage stage_;
 };
 
 void WebRTCManager::CreateOffer(
@@ -786,7 +813,8 @@ void WebRTCManager::CreateOffer(
     signaling_thread_->PostTask([p]() {
         std::unique_ptr<TaskParams> owned(p);
         if (!p->completion->pending()) return;
-        auto observer = CreateSdpObserverProxy::Create(p->completion);
+        auto observer = CreateSdpObserverProxy::Create(
+            p->completion, diagnostic::Stage::CreateOffer);
         webrtc::PeerConnectionInterface::RTCOfferAnswerOptions options;
         options.ice_restart = p->ice_restart;
         p->pc->CreateOffer(observer.get(), options);
@@ -810,7 +838,8 @@ void WebRTCManager::CreateAnswer(
     signaling_thread_->PostTask([p]() {
         std::unique_ptr<TaskParams> owned(p);
         if (!p->completion->pending()) return;
-        auto observer = CreateSdpObserverProxy::Create(p->completion);
+        auto observer = CreateSdpObserverProxy::Create(
+            p->completion, diagnostic::Stage::CreateAnswer);
         webrtc::PeerConnectionInterface::RTCOfferAnswerOptions options;
         p->pc->CreateAnswer(observer.get(), options);
     });
@@ -848,7 +877,8 @@ void WebRTCManager::SetRemoteDescription(
             return;
         }
 
-        auto observer = SetSdpObserverProxy::Create(p->completion);
+        auto observer = SetSdpObserverProxy::Create(
+            p->completion, diagnostic::Stage::SetLocalDescription);
         p->pc->SetRemoteDescription(observer.get(), session_desc.release());
     });
 }
@@ -885,7 +915,8 @@ void WebRTCManager::SetLocalDescription(
             return;
         }
 
-        auto observer = SetSdpObserverProxy::Create(p->completion);
+        auto observer = SetSdpObserverProxy::Create(
+            p->completion, diagnostic::Stage::SetRemoteDescription);
         p->pc->SetLocalDescription(observer.get(), session_desc.release());
     });
 }

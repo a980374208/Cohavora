@@ -29,6 +29,18 @@ if(COHAVORA_BUILD_QT_TESTS)
     include(${CMAKE_CURRENT_LIST_DIR}/cmake/WhiteboardTests.cmake)
 endif()
 
+set_property(TEST diagnostic_pipeline_test camera_owner_remediation_test
+    camera_switch_transaction_test local_unpublish_transaction_test
+    unpublish_lifetime_remediation_test APPEND PROPERTY LABELS LOGGING_LG3)
+if(COHAVORA_BUILD_QT_TESTS)
+    set_property(TEST openmeeting_http_test http_owner_remediation_test
+        participant_snapshot_remediation_test meeting_startup_transaction_test
+        meeting_subscription_telemetry_reconnect_test
+        APPEND PROPERTY LABELS LOGGING_LG3)
+    set_property(TEST participant_snapshot_remediation_test
+        APPEND PROPERTY LABELS LOGGING_LG6)
+endif()
+
 # A wedged test must not consume the enclosing CI job indefinitely. Individual
 # stress, hardware, and external tests override this budget where necessary.
 livekit_apply_default_test_timeout(60)

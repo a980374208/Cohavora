@@ -21,6 +21,7 @@
 #include "tests/runtime/meeting_soak_adapter.h"
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QCheckBox>
+#include <QtWidgets/QDateTimeEdit>
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QListWidget>
@@ -445,6 +446,7 @@ public:
             quint64 bytes = 0, packets = 0, decoded = 0, received = 0;
             quint64 matches = 0;
             bool bytesAvailable = true, packetsAvailable = true;
+            bool lostAvailable = true;
             bool decodedAvailable = true, receivedAvailable = true;
             QCryptographicHash statsIds(QCryptographicHash::Sha256);
             if (stats && !rtcTrackId.empty()) {
@@ -1131,6 +1133,16 @@ public:
 
         auto *tabs = details->findChild<QTabWidget*>(QStringLiteral("telemetryTabs"));
         TEST_CHECK(tabs && tabs->count() == 9);
+        auto *limitRange = details->findChild<QCheckBox*>(
+            QStringLiteral("telemetryRangeEnabled"));
+        auto *rangeStart = details->findChild<QDateTimeEdit*>(
+            QStringLiteral("telemetryRangeStart"));
+        auto *rangeEnd = details->findChild<QDateTimeEdit*>(
+            QStringLiteral("telemetryRangeEnd"));
+        TEST_CHECK(limitRange && rangeStart && rangeEnd);
+        TEST_CHECK(!rangeStart->isEnabled() && !rangeEnd->isEnabled());
+        limitRange->setChecked(true);
+        TEST_CHECK(rangeStart->isEnabled() && rangeEnd->isEnabled());
         const QStringList expectedTabs = {
             QCoreApplication::translate("MeetingUI", "Overview"),
             QCoreApplication::translate("MeetingUI", "Media QoE"),
@@ -1426,6 +1438,16 @@ public:
         config.audioMuted = true; config.videoEnabled = false;
         return std::unique_ptr<MeetingUI::MeetingRoomWindow>(new MeetingUI::MeetingRoomWindow(
             MeetingUI::MeetingRoomWindow::ParticipantWindowTestTag{}, config, coordinator));
+    }
+    static OpenMeeting::MeetingChatSidebarWidget *chatSidebar(
+            MeetingUI::MeetingRoomWindow &window) { return window._chatSidebar; }
+    static std::unique_ptr<MeetingUI::MeetingRoomWindow> createChatPrivacy(
+            const std::shared_ptr<OpenMeeting::MeetingCoordinator> &coordinator) {
+        MeetingUI::MeetingRoomWindow::Config config;
+        config.audioMuted = true; config.videoEnabled = false;
+        config.displayName = QStringLiteral("Chat Privacy Test");
+        return std::unique_ptr<MeetingUI::MeetingRoomWindow>(new MeetingUI::MeetingRoomWindow(
+            MeetingUI::MeetingRoomWindow::ParticipantWindowTestTag{}, config, coordinator, true));
     }
     static std::size_t tileCount(const MeetingUI::MeetingRoomWindow &window) { return window._remoteTiles.size(); }
     static std::size_t screenCount(const MeetingUI::MeetingRoomWindow &window) { return window._remoteScreenTiles.size(); }
@@ -2618,6 +2640,62 @@ public:
     std::shared_ptr<livekit::RoomListener> listener;
     std::unique_ptr<MeetingUI::MeetingRoomWindow> window;
 };
+
+void MeetingChatLogPrivacy() {
+    WindowFixture fixture;
+    fixture.window = ParticipantWindowTestAccess::createChatPrivacy(fixture.coordinator);
+    auto *sidebar = ParticipantWindowTestAccess::chatSidebar(*fixture.window);
+    TEST_CHECK(sidebar);
+    auto &console = MeetingUI::MeetingLogConsoleWindow::Instance();
+    console.clearLogs();
+
+    const QString text = QStringLiteral("ordinary private chat sentence 9173");
+    const QString name = QStringLiteral("private participant name 8264");
+    const QString fileName = QStringLiteral("private medical file 7355.txt");
+    const QString imageName = QStringLiteral("private image 5812.png");
+    const QString reason = QStringLiteral("private transfer failure 6442");
+    sidebar->messageSent(text);
+    sidebar->imageSent(imageName, QByteArray("image", 5));
+    sidebar->fileSent(fileName, QByteArray("test", 4));
+    fixture.coordinator->chatMessageReceived(
+        QStringLiteral("private-identity"), name, text, 1);
+    fixture.coordinator->chatMediaReceivingStarted(
+        QStringLiteral("private-transfer"), QStringLiteral("private-identity"), name,
+        QStringLiteral("file"), fileName, 4, 2);
+    fixture.coordinator->chatMediaReceivingCompleted(
+        QStringLiteral("private-transfer"), QStringLiteral("private-identity"), name,
+        QStringLiteral("file"), fileName, QByteArray("test", 4));
+    fixture.coordinator->chatMediaReceivingFailed(
+        QStringLiteral("private-transfer"), reason);
+    WindowDrainQt();
+    auto *view = console.findChild<QPlainTextEdit *>();
+    TEST_CHECK(view);
+    for (int batch = 0; batch < 50 &&
+         !view->toPlainText().contains(QStringLiteral("CHAT_MEDIA_FAILED")); ++batch)
+        console.drainPending();
+    const auto visible = view->toPlainText();
+    for (const auto &secret : {text, name, fileName, imageName, reason}) {
+        TEST_CHECK(!visible.contains(secret));
+    }
+    TEST_CHECK(visible.contains(QStringLiteral("CHAT_TEXT_SENT")));
+    TEST_CHECK(visible.contains(QStringLiteral("CHAT_TEXT_RECEIVED")));
+    TEST_CHECK(visible.contains(QStringLiteral("CHAT_IMAGE_SENT")));
+    TEST_CHECK(visible.contains(QStringLiteral("CHAT_FILE_SENT")));
+    TEST_CHECK(visible.contains(QStringLiteral("CHAT_MEDIA_RECEIVING")));
+    TEST_CHECK(visible.contains(QStringLiteral("CHAT_MEDIA_RECEIVED")));
+    TEST_CHECK(visible.contains(QStringLiteral("CHAT_MEDIA_FAILED")));
+    TEST_CHECK(visible.contains(QStringLiteral("bytes=4")));
+
+    console.copyAllLogs();
+    const auto copied = QApplication::clipboard()->text();
+    for (const auto &secret : {text, name, fileName, imageName, reason}) {
+        TEST_CHECK(!copied.contains(secret));
+        console.onFilterChanged(secret);
+        TEST_CHECK(view->toPlainText().isEmpty());
+    }
+    console.onFilterChanged({});
+    console.clearLogs();
+}
 
 class ClipboardSnapshot final {
 public:
@@ -6400,6 +6478,8 @@ int WindowAcceptanceMain(int argc, char **argv) {
     } else if (application.arguments().contains("--telemetry-ui")) {
         ParticipantWindowTestAccess::checkTelemetryTopBar();
         ParticipantWindowTestAccess::checkCpuPaintTelemetryBoundary();
+    } else if (application.arguments().contains("--chat-log-privacy")) {
+        MeetingChatLogPrivacy();
     } else if (application.arguments().contains("--local-media-state")) {
         MeetingLocalMediaStateContract();
     } else if (application.arguments().contains("--audio-preferences-contract")) {

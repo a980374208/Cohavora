@@ -28,7 +28,12 @@
 #include "src/app/async_shutdown_guard.h"
 #include "src/core/session_shutdown_service.h"
 #include "src/telemetry/stability_ledger.h"
+#include "src/telemetry/crash_evidence_provider.h"
+#include "src/telemetry/build_identity.h"
 #include "src/telemetry/telemetry_report.h"
+#include "src/telemetry/diagnostic_pipeline.h"
+#include "src/telemetry/diagnostic_spdlog_bridge.h"
+#include "src/ui/diagnostic_qt_bridge.h"
 
 #include <filesystem>
 #include <memory>
@@ -55,6 +60,13 @@ constexpr auto kDebugLoginTimeout = 30000;
 struct DebugLoginCompletion {
 	bool completed = false;
 	bool success = false;
+};
+
+struct DiagnosticCloseGuard final {
+	std::shared_ptr<livekit::diagnostic::DiagnosticPipeline> pipeline;
+	livekit::diagnostic::ShutdownReason reason =
+		livekit::diagnostic::ShutdownReason::UserExit;
+	~DiagnosticCloseGuard() { if (pipeline) pipeline->Close(reason); }
 };
 
 bool LoginWithDebugCredentials(
@@ -92,6 +104,31 @@ bool LoginWithDebugCredentials(
 } // namespace
 
 int main(int argc, char *argv[]) {
+	auto diagnostics = std::make_shared<livekit::diagnostic::DiagnosticPipeline>();
+	const auto buildId = livekit::telemetry::CurrentExecutableBuildId();
+	const auto crashRoot = livekit::telemetry::CrashEvidenceProvider::DefaultRoot();
+	const auto crashEnabled =
+		livekit::telemetry::CrashEvidenceProvider::CollectionEnabled(crashRoot);
+	auto crashScan = livekit::telemetry::CrashEvidenceProvider::Scan(
+		crashRoot, crashEnabled);
+	auto crashProvider = livekit::telemetry::CrashEvidenceProvider::Install(
+		crashRoot, std::string(diagnostics->run_id()), buildId, crashEnabled);
+	crashScan.recovery.provider_configured = crashProvider->installed();
+	std::shared_ptr<livekit::telemetry::StabilityLedger> stabilityLedger;
+	std::shared_ptr<livekit::telemetry::ScopedProcessRun> processRun;
+	if (!crashRoot.empty()) {
+		stabilityLedger = std::make_shared<livekit::telemetry::StabilityLedger>(
+			crashRoot.parent_path() / L"telemetry" / L"stability-ledger-v1.json");
+		processRun = std::make_shared<livekit::telemetry::ScopedProcessRun>(
+			stabilityLedger, crashScan.recovery,
+			std::string(diagnostics->run_id()), buildId);
+		livekit::telemetry::InstallStabilityLedger(stabilityLedger);
+	}
+	DiagnosticCloseGuard diagnosticClose{diagnostics};
+	livekit::diagnostic::InstallBusinessPipeline(diagnostics);
+	diagnostics->TryEmit(livekit::diagnostic::Event::Started(
+		buildId, livekit::telemetry::CurrentExecutablePdbIdentity()));
+	if (!livekit::diagnostic::InstallSafeSpdlogAdapter(diagnostics)) return 4;
 #if QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
 	QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
 	QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
@@ -103,13 +140,27 @@ int main(int argc, char *argv[]) {
 	QApplication app(argc, argv);
 	app.setApplicationName(MeetingUI::AppBranding::name());
 	app.setApplicationVersion(QStringLiteral(COHAVORA_VERSION));
-	const auto stabilityPath = QDir(
+	MeetingUI::DiagnosticQtBridge diagnosticQtBridge(diagnostics);
+	const auto diagnosticRoot = QDir(
 		QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
-		.filePath(QStringLiteral("telemetry/stability-ledger-v1.json"));
-	auto stabilityLedger = std::make_shared<livekit::telemetry::StabilityLedger>(
-		std::filesystem::path(stabilityPath.toStdWString()));
-	auto processRun = std::make_shared<livekit::telemetry::ScopedProcessRun>(stabilityLedger);
-	livekit::telemetry::InstallStabilityLedger(stabilityLedger);
+		.filePath(QStringLiteral("diagnostics"));
+	QSettings diagnosticSettings;
+	const bool requestedLogRetention = diagnosticSettings.value(
+		QStringLiteral("diagnostics/historyEnabled"), true).toBool();
+	diagnostics->SetRetentionEnabled(
+		diagnosticSettings.status() == QSettings::NoError && requestedLogRetention);
+	diagnostics->StartWriter(std::filesystem::path(diagnosticRoot.toStdWString()));
+	if (!processRun) {
+		const auto stabilityPath = QDir(
+			QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+			.filePath(QStringLiteral("telemetry/stability-ledger-v1.json"));
+		stabilityLedger = std::make_shared<livekit::telemetry::StabilityLedger>(
+			std::filesystem::path(stabilityPath.toStdWString()));
+		processRun = std::make_shared<livekit::telemetry::ScopedProcessRun>(
+			stabilityLedger, std::move(crashScan.recovery),
+			std::string(diagnostics->run_id()), buildId);
+		livekit::telemetry::InstallStabilityLedger(stabilityLedger);
+	}
 	if (!processRun->started()) {
 		qWarning() << "The local stability ledger is unavailable.";
 	}
@@ -118,13 +169,16 @@ int main(int argc, char *argv[]) {
 		.filePath(QStringLiteral("telemetry/reports"));
 	auto telemetryHistory =
 		std::make_shared<livekit::telemetry::TelemetryHistoryStore>(
-			std::filesystem::path(telemetryRoot.toStdWString()));
+			std::filesystem::path(telemetryRoot.toStdWString()),
+			std::string(diagnostics->run_id()),
+			std::filesystem::path(diagnosticRoot.toStdWString()));
 	livekit::telemetry::InstallTelemetryHistoryStore(telemetryHistory);
 	telemetryHistory->SetHistoryEnabled(
 		QSettings().value(QStringLiteral("telemetry/historyEnabled"), true).toBool());
 	auto debugLogin = MeetingApp::ParseDebugLoginOptions(app.arguments());
 	if (debugLogin.status == MeetingApp::DebugLoginOptionStatus::Invalid) {
-		qCritical().noquote() << debugLogin.error;
+		qCritical() << "Invalid debug sign-in options.";
+		diagnosticClose.reason = livekit::diagnostic::ShutdownReason::LoginRejected;
 		return 2;
 	}
 	app.setWindowIcon(QIcon(QStringLiteral(":/meeting-ui/icons/cohavora.svg")));
@@ -152,6 +206,7 @@ int main(int argc, char *argv[]) {
 		debugLogin.clearPassword();
 		if (!loggedIn) {
 			qCritical() << "Automated debug sign-in failed or timed out.";
+			diagnosticClose.reason = livekit::diagnostic::ShutdownReason::LoginRejected;
 			style::StopManager();
 			return 3;
 		}
@@ -191,13 +246,15 @@ int main(int argc, char *argv[]) {
 			mainWindow.reset();
 			shutdownService.DrainAsync([&, finished = std::move(finished)]() mutable {
 				shutdownService.SubmitCleanup(
-					[history = std::move(telemetryHistory), run = std::move(processRun)]() mutable {
+					[history = std::move(telemetryHistory), run = std::move(processRun),
+					 diagnostics]() mutable {
 						// All final session snapshots have entered the history queue.
 						history->Close();
 						livekit::telemetry::InstallTelemetryHistoryStore({});
 						history.reset();
 						run.reset();
 						livekit::telemetry::InstallStabilityLedger({});
+						diagnostics->Close(livekit::diagnostic::ShutdownReason::UserExit);
 					});
 				shutdownService.ShutdownAsync(std::move(finished));
 			});

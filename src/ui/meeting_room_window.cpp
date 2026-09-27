@@ -6,7 +6,9 @@
 #include "src/ui/meeting_log_console.h"
 #include "src/ui/telemetry_dialogs.h"
 #include "src/telemetry/telemetry_report.h"
+#include "src/telemetry/diagnostic_pipeline.h"
 #include <QtWidgets/QCheckBox>
+#include <QtWidgets/QDateTimeEdit>
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QFileDialog>
@@ -238,7 +240,9 @@ bool IsSafeTelemetryDisplayEntry(const QString &key, const QVariant &value) {
 		(text[2] != QLatin1Char('\\') && text[2] != QLatin1Char('/'));
 }
 
-void ShowTelemetryExport(QWidget *parent) {
+void ShowTelemetryExport(QWidget *parent, std::string record_id = {},
+                         std::int64_t first_utc_ms = 0,
+                         std::int64_t last_utc_ms = 0) {
 	const auto store = livekit::telemetry::InstalledTelemetryHistoryStore();
 	if (!store) return;
 	const auto directory = QFileDialog::getExistingDirectory(
@@ -257,9 +261,8 @@ void ShowTelemetryExport(QWidget *parent) {
 	const QPointer<QProgressDialog> progressGuard(progress);
 	QObject::connect(progress, &QProgressDialog::canceled, progress,
 		[cancelled] { cancelled->store(true, std::memory_order_release); });
-	const auto accepted = store->ExportCurrent(
-		std::filesystem::path(directory.toStdWString()),
-		[guard, progressGuard](livekit::telemetry::TelemetryExportResult result) {
+	const auto destination = std::filesystem::path(directory.toStdWString());
+	auto completion = [guard, progressGuard](livekit::telemetry::TelemetryExportResult result) {
 			QMetaObject::invokeMethod(qApp, [guard, progressGuard, result = std::move(result)] {
 				if (progressGuard) progressGuard->close();
 				if (!guard) return;
@@ -279,14 +282,12 @@ void ShowTelemetryExport(QWidget *parent) {
 				AppTheme::setTone(message, AppTheme::Tone::Dark);
 				message.exec();
 			}, Qt::QueuedConnection);
-		}, cancelled);
-	if (!accepted) {
-		progress->close();
-		QMessageBox::warning(
-			parent,
-			QCoreApplication::translate("MeetingUI", "Telemetry export"),
-			QCoreApplication::translate("MeetingUI", "Export queue is full"));
-	}
+		};
+	if (record_id.empty())
+		store->ExportCurrent(destination, std::move(completion), cancelled);
+	else
+		store->ExportReport(std::move(record_id), destination,
+			std::move(completion), cancelled, first_utc_ms, last_utc_ms);
 }
 
 } // namespace
@@ -835,14 +836,47 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 					QString::number(entry.size_bytes / 1024),
 					QString::number(entry.record_count)), reports);
 			item->setData(Qt::UserRole, QString::fromStdString(entry.record_id));
+			item->setData(Qt::UserRole + 1, entry.created_utc_ms);
+			item->setData(Qt::UserRole + 2, static_cast<qulonglong>(entry.size_bytes));
 		}
 	}
 	historyLayout->addWidget(reports, 1);
+	auto *rangeRow = new QHBoxLayout();
+	auto *limitRange = new QCheckBox(
+		QCoreApplication::translate("MeetingUI", "Time range"), historyPage);
+	limitRange->setObjectName(QStringLiteral("telemetryRangeEnabled"));
+	auto *rangeStart = new QDateTimeEdit(historyPage);
+	auto *rangeEnd = new QDateTimeEdit(historyPage);
+	rangeStart->setObjectName(QStringLiteral("telemetryRangeStart"));
+	rangeEnd->setObjectName(QStringLiteral("telemetryRangeEnd"));
+	for (auto *edit : {rangeStart, rangeEnd}) {
+		edit->setDisplayFormat(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+		edit->setTimeSpec(Qt::UTC);
+		edit->setCalendarPopup(true);
+		edit->setEnabled(false);
+	}
+	rangeRow->addWidget(limitRange);
+	rangeRow->addWidget(new QLabel(
+		QCoreApplication::translate("MeetingUI", "UTC from"), historyPage));
+	rangeRow->addWidget(rangeStart);
+	rangeRow->addWidget(new QLabel(
+		QCoreApplication::translate("MeetingUI", "to"), historyPage));
+	rangeRow->addWidget(rangeEnd);
+	historyLayout->addLayout(rangeRow);
+	auto *selectionStatus = new QLabel(historyPage);
+	selectionStatus->setWordWrap(true);
+	historyLayout->addWidget(selectionStatus);
+	QObject::connect(limitRange, &QCheckBox::toggled, dialog,
+		[rangeStart, rangeEnd](bool enabled) {
+			rangeStart->setEnabled(enabled);
+			rangeEnd->setEnabled(enabled);
+		});
 	auto *historyButtons = new QHBoxLayout();
 	auto *exportButton = new QPushButton(
 		dialog->style()->standardIcon(QStyle::SP_DialogSaveButton),
 		QCoreApplication::translate("MeetingUI", "Export"), historyPage);
 	exportButton->setObjectName(QStringLiteral("telemetryExport"));
+	exportButton->setEnabled(reports->currentItem() != nullptr);
 	auto *clearButton = new QPushButton(
 		dialog->style()->standardIcon(QStyle::SP_TrashIcon),
 		QCoreApplication::translate("MeetingUI", "Clear selected"), historyPage);
@@ -854,14 +888,52 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 	historyLayout->addLayout(historyButtons);
 	tabs->addTab(historyPage, QCoreApplication::translate("MeetingUI", "Reports"));
 
-	QObject::connect(reports, &QListWidget::currentItemChanged, clearButton,
-		[clearButton](QListWidgetItem *current) { clearButton->setEnabled(current != nullptr); });
+	QObject::connect(reports, &QListWidget::currentItemChanged, dialog,
+		[clearButton, exportButton, rangeStart, rangeEnd, selectionStatus]
+			(QListWidgetItem *current) {
+			clearButton->setEnabled(current != nullptr);
+			exportButton->setEnabled(current != nullptr);
+			if (!current) {
+				selectionStatus->clear();
+				return;
+			}
+			const auto end = QDateTime::fromMSecsSinceEpoch(
+				current->data(Qt::UserRole + 1).toLongLong(), Qt::UTC);
+			rangeEnd->setDateTime(end);
+			rangeStart->setDateTime(end.addSecs(-3600));
+			const auto legacy = current->data(Qt::UserRole).toString()
+				.startsWith(QStringLiteral("cohavora-telemetry-v1-"));
+			selectionStatus->setText(QCoreApplication::translate(
+				"MeetingUI", "Estimated %1 KiB; %2").arg(
+				QString::number(current->data(Qt::UserRole + 2)
+					.toULongLong() / 1024),
+				legacy ? QCoreApplication::translate("MeetingUI",
+					"Legacy report: run identity unavailable")
+					: QCoreApplication::translate("MeetingUI",
+					"Includes metrics, events and available stability evidence")));
+		});
 	QObject::connect(historyEnabled, &QCheckBox::toggled, dialog, [store](bool enabled) {
 		if (store) store->SetHistoryEnabled(enabled);
 		QSettings().setValue(QStringLiteral("telemetry/historyEnabled"), enabled);
 	});
 	QObject::connect(exportButton, &QPushButton::clicked, dialog,
-		[dialog] { ShowTelemetryExport(dialog); });
+		[dialog, reports, limitRange, rangeStart, rangeEnd] {
+			const auto *item = reports->currentItem();
+			if (!item) return;
+			const auto first = limitRange->isChecked()
+				? rangeStart->dateTime().toMSecsSinceEpoch() : 0;
+			const auto last = limitRange->isChecked()
+				? rangeEnd->dateTime().toMSecsSinceEpoch() : 0;
+			if (first > last) {
+				QMessageBox::warning(dialog,
+					QCoreApplication::translate("MeetingUI", "Telemetry export"),
+					QCoreApplication::translate("MeetingUI", "Invalid time range"));
+				return;
+			}
+			ShowTelemetryExport(dialog,
+				item->data(Qt::UserRole).toString().toStdString(),
+				first, last);
+		});
 	QObject::connect(clearButton, &QPushButton::clicked, dialog,
 		[store, reports, clearButton] {
 			const auto *item = reports->currentItem();
@@ -1509,8 +1581,8 @@ void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
 
 	if (!_hasLoggedFirstPaint) {
 		_hasLoggedFirstPaint = true;
-		LogToConsole(LogCategory::WebRTC, "PAINT_FRAME", QCoreApplication::translate("MeetingUI", "VideoTileWidget [%1] frame rendered (image: %2x%3, viewport: %4x%5)")
-			.arg(_displayName).arg(frameCopy.width()).arg(frameCopy.height()).arg(r.width()).arg(r.height()));
+		LogToConsole(LogCategory::WebRTC, "PAINT_FRAME", QStringLiteral("first_frame image=%1x%2 viewport=%3x%4")
+			.arg(frameCopy.width()).arg(frameCopy.height()).arg(r.width()).arg(r.height()));
 	}
 
 	const auto paintStartedAt = std::chrono::steady_clock::now();
@@ -3154,13 +3226,12 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 				_usingRealCamera = true;
 				_currentCameraPath = QString::fromStdString(selectedDevice.path);
 				LogToConsole(LogCategory::Media, "DSHOW",
-					QCoreApplication::translate("MeetingUI", "Camera started: %1 (%2x%3@%4fps NV12)")
-						.arg(QString::fromStdString(selectedDevice.name))
+					QStringLiteral("camera_started %1x%2@%3fps")
 						.arg(vcfg.width).arg(vcfg.height).arg(vcfg.fps));
 			}
 		}
-	} catch (const std::exception &ex) {
-		LogToConsole(LogCategory::Error, "DSHOW", QCoreApplication::translate("MeetingUI", "Camera initialization error: %1").arg(ex.what()));
+	} catch (const std::exception &) {
+		LogToConsole(LogCategory::Error, "DSHOW", QStringLiteral("camera_initialization_failed"));
 	}
 
 	_coordinator->setLocalVideoAvailable(_usingRealCamera);
@@ -3180,6 +3251,7 @@ MeetingRoomWindow::MeetingRoomWindow(
 		ParticipantWindowTestTag,
 		const Config &config,
 		std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator,
+		bool fullLayoutForChatPrivacy,
 		QWidget *parent)
 :	Ui::RpWidget(parent),
 	_coordinator(std::move(coordinator)),
@@ -3188,20 +3260,24 @@ MeetingRoomWindow::MeetingRoomWindow(
 	// renderer are production paths; no device capture or account singleton.
 	setObjectName("MeetingRoomWindowParticipantFixture");
 	AppTheme::setTone(*this, AppTheme::Tone::Dark);
-	_topBar = new RoomTopBarWidget(this);
-	_stageContainer = new QWidget(this);
-	_bottomBar = new RoomBottomBarWidget(this);
-	_localTile = new VideoTileWidget(_config.displayName, true, _stageContainer);
-	_localTile->setIdentity("local");
-	bindTileInteractions(_localTile);
-	_localTile->setAudioMuted(true);
-	_localTile->setVideoActive(false);
-	_inviteHintBanner = new QLabel(_stageContainer);
-	_recoveryBanner = new QLabel(_stageContainer);
-	_recoveryBanner->hide();
-	setupInvitationBinding();
-	setupWhiteboardBinding();
-	setupVideoPagingControls();
+	if (fullLayoutForChatPrivacy) {
+		initLayout();
+	} else {
+		_topBar = new RoomTopBarWidget(this);
+		_stageContainer = new QWidget(this);
+		_bottomBar = new RoomBottomBarWidget(this);
+		_localTile = new VideoTileWidget(_config.displayName, true, _stageContainer);
+		_localTile->setIdentity("local");
+		bindTileInteractions(_localTile);
+		_localTile->setAudioMuted(true);
+		_localTile->setVideoActive(false);
+		_inviteHintBanner = new QLabel(_stageContainer);
+		_recoveryBanner = new QLabel(_stageContainer);
+		_recoveryBanner->hide();
+		setupInvitationBinding();
+		setupWhiteboardBinding();
+		setupVideoPagingControls();
+	}
 	_remoteRenderSession = std::make_unique<livekit::render::VideoRenderSession>(
 		[this](const std::string &identity, const QImage &image,
 		       livekit::render::VideoRenderFrame::Ptr frame) {
@@ -3367,7 +3443,8 @@ void MeetingRoomWindow::initLayout() {
 		if (_coordinator) {
 			_coordinator->sendChatMessage(text, msgId, seq);
 		}
-		LogToConsole(LogCategory::Participant, "CHAT", QCoreApplication::translate("MeetingUI", "Me: %1").arg(text));
+		LogToConsole(LogCategory::Participant, "CHAT_TEXT_SENT",
+			QStringLiteral("bytes=%1").arg(text.toUtf8().size()));
 	});
 
 	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::imageSent, this, [this](const QString &fileName, const QByteArray &data) {
@@ -3391,7 +3468,8 @@ void MeetingRoomWindow::initLayout() {
 		if (_coordinator) {
 			_coordinator->sendChatMediaMessage(msgId, "image", fileName, data, seq);
 		}
-		LogToConsole(LogCategory::Participant, "CHAT", QCoreApplication::translate("MeetingUI", "I sent an image: %1 (%2)").arg(fileName).arg(OpenMeeting::ChatBubbleWidget::formatFileSize(data.size())));
+		LogToConsole(LogCategory::Participant, "CHAT_IMAGE_SENT",
+			QStringLiteral("bytes=%1").arg(data.size()));
 	});
 
 	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::fileSent, this, [this](const QString &fileName, const QByteArray &data) {
@@ -3415,7 +3493,8 @@ void MeetingRoomWindow::initLayout() {
 		if (_coordinator) {
 			_coordinator->sendChatMediaMessage(msgId, "file", fileName, data, seq);
 		}
-		LogToConsole(LogCategory::Participant, "CHAT", QCoreApplication::translate("MeetingUI", "I sent a file: %1 (%2)").arg(fileName).arg(OpenMeeting::ChatBubbleWidget::formatFileSize(data.size())));
+		LogToConsole(LogCategory::Participant, "CHAT_FILE_SENT",
+			QStringLiteral("bytes=%1").arg(data.size()));
 	});
 
 	connect(_chatSidebar, &OpenMeeting::MeetingChatSidebarWidget::retryRequested, this, [this](const QString &msgId) {
@@ -3563,7 +3642,8 @@ void MeetingRoomWindow::initLayout() {
 				_bottomBar->setChatUnreadCount(_bottomBar->chatUnreadCount() + 1);
 			}
 
-			LogToConsole(LogCategory::Participant, "CHAT", QString("%1: %2").arg(dispName).arg(text));
+			LogToConsole(LogCategory::Participant, "CHAT_TEXT_RECEIVED",
+				QStringLiteral("bytes=%1").arg(text.toUtf8().size()));
 		});
 
 		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMediaReceivingStarted,
@@ -3580,11 +3660,10 @@ void MeetingRoomWindow::initLayout() {
 				_bottomBar->setChatUnreadCount(_bottomBar->chatUnreadCount() + 1);
 			}
 
-			LogToConsole(LogCategory::Participant, "CHAT", QCoreApplication::translate("MeetingUI", "Receiving %2 from %1: %3 (%4)...")
-				.arg(dispName)
-				.arg(mediaType == "image" ? QCoreApplication::translate("MeetingUI", "image") : QCoreApplication::translate("MeetingUI", "file"))
-				.arg(fileName)
-				.arg(OpenMeeting::ChatBubbleWidget::formatFileSize(totalSize)));
+			LogToConsole(LogCategory::Participant, "CHAT_MEDIA_RECEIVING",
+				QStringLiteral("type=%1 bytes=%2")
+					.arg(mediaType == QStringLiteral("image") ? QStringLiteral("image") : QStringLiteral("file"))
+					.arg(totalSize));
 		});
 
 		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMediaReceivingProgress,
@@ -3601,13 +3680,10 @@ void MeetingRoomWindow::initLayout() {
 				_chatSidebar->completeReceivingMedia(transferId, mediaType, fileName, data);
 			}
 
-			QString dispName = senderName.trimmed();
-			if (dispName.isEmpty() || dispName.startsWith("PA_")) dispName = senderIdentity;
-			LogToConsole(LogCategory::Participant, "CHAT", QCoreApplication::translate("MeetingUI", "Received %2 from %1: %3 (%4)")
-				.arg(dispName)
-				.arg(mediaType == "image" ? QCoreApplication::translate("MeetingUI", "image") : QCoreApplication::translate("MeetingUI", "file"))
-				.arg(fileName)
-				.arg(OpenMeeting::ChatBubbleWidget::formatFileSize(data.size())));
+			LogToConsole(LogCategory::Participant, "CHAT_MEDIA_RECEIVED",
+				QStringLiteral("type=%1 bytes=%2")
+					.arg(mediaType == QStringLiteral("image") ? QStringLiteral("image") : QStringLiteral("file"))
+					.arg(data.size()));
 		});
 
 		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMediaReceivingFailed,
@@ -3615,7 +3691,8 @@ void MeetingRoomWindow::initLayout() {
 			if (_chatSidebar) {
 				_chatSidebar->failReceivingMedia(transferId, reason);
 			}
-			LogToConsole(LogCategory::Participant, "CHAT", QCoreApplication::translate("MeetingUI", "Media transfer interrupted: %1").arg(reason));
+			LogToConsole(LogCategory::Participant, "CHAT_MEDIA_FAILED",
+				QStringLiteral("transfer_interrupted"));
 		});
 
 		connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::chatMessageSendProgress,
@@ -3646,7 +3723,8 @@ void MeetingRoomWindow::initLayout() {
 
 	_bottomBar->sendChatRequested() | rpl::on_next([this](const QString &text) {
 		_topBar->setActiveSpeaker(QString::fromUtf8("%1: %2").arg(_config.displayName).arg(text));
-		LogToConsole(LogCategory::Participant, "CHAT", QString("%1: %2").arg(_config.displayName).arg(text));
+		LogToConsole(LogCategory::Participant, "CHAT_TEXT_SENT",
+			QStringLiteral("bytes=%1").arg(text.toUtf8().size()));
 		if (_coordinator) {
 			_coordinator->sendChatMessage(text);
 		}
@@ -3964,7 +4042,8 @@ void MeetingRoomWindow::requestCameraSwitch(const QString &devicePath) {
 	QPointer<MeetingRoomWindow> guard(this);
 	if (logEffect) {
 		logEffect(false, "CAMERA_SWITCH",
-			QCoreApplication::translate("MeetingUI", "Switching camera to: %1 ...").arg(devicePath));
+			QStringLiteral("camera_switch_requested device=%1")
+				.arg(devicePath.isEmpty() ? QStringLiteral("default") : QStringLiteral("selected")));
 	}
 	if (!guard || !ticket.isCurrent()) {
 		finishDeviceSwitchTelemetry(
@@ -4011,7 +4090,8 @@ void MeetingRoomWindow::handleCameraSwitchResult(
 		}
 		if (logEffect) {
 			logEffect(false, "CAMERA_SWITCH",
-				QCoreApplication::translate("MeetingUI", "Camera switched successfully: %1").arg(devicePath));
+				QStringLiteral("camera_switch_succeeded device=%1")
+					.arg(devicePath.isEmpty() ? QStringLiteral("default") : QStringLiteral("selected")));
 		}
 		return;
 	}
@@ -4024,7 +4104,7 @@ void MeetingRoomWindow::handleCameraSwitchResult(
 			: livekit::telemetry::OperationOutcome::Failure);
 	if (logEffect) {
 		logEffect(true, "CAMERA_SWITCH",
-			QCoreApplication::translate("MeetingUI", "Camera switch failed. The previous device was restored: %1").arg(errorText));
+			QStringLiteral("camera_switch_failed previous_device_restored"));
 	}
 	if (!guard || !ticket.isCurrent() || !guard->_cameraSessionManager
 		|| guard->_cameraSessionManager->isSessionInvalidating()) {
@@ -4519,6 +4599,14 @@ void MeetingRoomWindow::tryActivateGpuBackend() {
 		_videoCanvas->hide();
 		_remoteRenderSession->UseQtCpuBackend();
 		_renderDiagnostics = _videoCanvas->renderDiagnostics();
+		livekit::diagnostic::Event event;
+		event.kind = livekit::diagnostic::EventKind::RenderBackendChanged;
+		event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+		event.from_render_backend = livekit::diagnostic::RenderBackend::Gpu;
+		event.to_render_backend = livekit::diagnostic::RenderBackend::QtCpu;
+		event.render_reason = livekit::diagnostic::RenderReason::InitializationFailed;
+		if (_coordinator) event.context = _coordinator->diagnosticContext();
+		livekit::diagnostic::EmitBusinessEvent(event);
 		LogToConsole(LogCategory::WebRTC, "RENDER", QCoreApplication::translate("MeetingUI", "GPU canvas initialization failed. Using the Qt CPU video backend: ") +
 			livekit::render::RenderDiagnosticsSafeSummary(_renderDiagnostics));
 		return;
@@ -4530,6 +4618,14 @@ void MeetingRoomWindow::tryActivateGpuBackend() {
         });
 	_usingGpuBackend.store(true, std::memory_order_release);
 	_renderDiagnostics = _videoCanvas->renderDiagnostics();
+	livekit::diagnostic::Event event;
+	event.kind = livekit::diagnostic::EventKind::RenderBackendChanged;
+	event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+	event.from_render_backend = livekit::diagnostic::RenderBackend::QtCpu;
+	event.to_render_backend = livekit::diagnostic::RenderBackend::Gpu;
+	event.render_reason = livekit::diagnostic::RenderReason::GpuReady;
+	if (_coordinator) event.context = _coordinator->diagnosticContext();
+	livekit::diagnostic::EmitBusinessEvent(event);
 	LogToConsole(LogCategory::WebRTC, "RENDER", QCoreApplication::translate("MeetingUI", "GPU video backend enabled: ") +
 		livekit::render::RenderDiagnosticsSafeSummary(_renderDiagnostics));
 	updateVideoLayout();
@@ -4547,6 +4643,14 @@ void MeetingRoomWindow::fallBackToQtCpuBackend() {
 		_renderDiagnostics = _videoCanvas->renderDiagnostics();
 	}
 	if (was_using_gpu) {
+		livekit::diagnostic::Event event;
+		event.kind = livekit::diagnostic::EventKind::RenderBackendChanged;
+		event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+		event.from_render_backend = livekit::diagnostic::RenderBackend::Gpu;
+		event.to_render_backend = livekit::diagnostic::RenderBackend::QtCpu;
+		event.render_reason = livekit::diagnostic::RenderReason::DeviceFailure;
+		if (_coordinator) event.context = _coordinator->diagnosticContext();
+		livekit::diagnostic::EmitBusinessEvent(event);
 		LogToConsole(LogCategory::Error, "RENDER", QCoreApplication::translate("MeetingUI", "GPU presentation or device failure. Switched to the Qt CPU video backend: ") +
 			livekit::render::RenderDiagnosticsSafeSummary(_renderDiagnostics));
 	}

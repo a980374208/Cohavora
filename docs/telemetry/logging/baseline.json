@@ -1,0 +1,72 @@
+{
+  "stage": "LG0",
+  "status": "CONTRACT_FROZEN",
+  "date_local": "2026-09-26",
+  "source_head": "745af69d2ce2c154a17e72890a81784b21b4de67",
+  "source_branch": "main",
+  "initial_tracked_worktree": "clean",
+  "source_hash_algorithm": "SHA256",
+  "source_hashes_before_lg1": {
+    "src/ui/meeting_room_window.cpp": "6B56CE1B888096E1A691B3BCC037D945847731A5D81D65F25B69FCE34BE23F6C",
+    "src/media/camera_source_manager.cpp": "39FC3AE31B005097A0193F462537941E15008512E496718C1376CC1373D76D07",
+    "src/media/wasapi_capture.cpp": "F98B1FBEFBDC145595AB60F291ECA732FD9FF1B3D2867518987D8052D7AAA118",
+    "src/media/dshow_capture.cpp": "BBBA0CBEC822966CC3F9F9B30DD7F6B5A2CE690DB93557CCC84C8BBBF0E596BB",
+    "src/telemetry/telemetry_report.cpp": "EFF2DEF03906679220E144FBD7698752393CB1073AC94A9EF4454A3AE8C383F8",
+    "src/telemetry/log_redaction.cpp": "9C904EF6E3113096E7B15B8A0CD167A19A50A2404B05F54624D62BD993152352",
+    "src/telemetry/session_telemetry.cpp": "018BFC94E83A66D841B50E38C5E2F9B40852D45D55E7A7EC7086F13A71EAD1EA"
+  },
+  "test_and_build_metadata_hashes": {
+    "CMakeLists.txt": "2BCED40C3882FB9A18856F4261AACCBCE0370BCA00BFE17E6E95BCFB64DDB97E",
+    "tests/cmake/MeetingTests.cmake": "BAFAA1373D752FCC166BA31CFFD0A0C9923D9B79906243C77CF6CC79824A7B0F",
+    "tests/cmake/NativeTests.cmake": "A6796163E4C7746E723EFAC24D8E485D5915FD9D4B58F2CC38EC7EAA1DB9CC35",
+    "tests/cmake/SecurityTests.cmake": "BF8490696789A716F6A21F867610A89B91B506CEB21F6B339787850725F8583E",
+    "tests/test_telemetry_report.cpp": "018DF469B5A91714EDA9C65D6211CC9105AB8B588A7C12CAA1F856543C70B3FC",
+    "tests/remediation/test_qt_log_redaction.cpp": "BC3E5929187AE70415BE05ADA646D19495F5B70CF9F4751C3FECAE9E95EA74BE"
+  },
+  "logging_inventory": {
+    "scan_scope": "src/**/*.cpp and src/**/*.h excluding src/ui/tdesktop",
+    "scan_regex": "LogToConsole\\(|spdlog::|qDebug\\(|qInfo\\(|qWarning\\(|qCritical\\(|std::cout|std::cerr|printf\\(|fprintf\\(",
+    "pattern_hits": 255,
+    "files_with_hits": 30,
+    "interpretation": "text pattern hits including definitions; not a runtime event count",
+    "inventory_file": "migration-map.csv"
+  },
+  "build_tree_observed": {
+    "path": "build-debug",
+    "generator": "Visual Studio 18 2026",
+    "configurations": "Debug;Release;MinSizeRel;RelWithDebInfo",
+    "BUILD_TESTING": true,
+    "COHAVORA_BUILD_MEETING_APP": true,
+    "COHAVORA_BUILD_QT_TESTS": true,
+    "configured_for_source_directory": "E:/vsSource/WebRTC/live-kit-test",
+    "validity_after_changes": "recheck_before_build"
+  },
+  "existing_evidence": {
+    "latest_related_telemetry_checkpoint": "docs/telemetry/evidence/s9c-20260924/S9C_ACCEPTANCE.md",
+    "checkpoint_head": "f2124fa8240751a274a445f0c8c13461161f7326",
+    "checkpoint_build_and_ctest": "historical_PASS_at_checkpoint_only",
+    "lg0_build_ctest": "NOT_RUN",
+    "lg0_runtime": "NOT_RUN"
+  },
+  "reference_machine": "NOT_RECORDED",
+  "current_cpu_memory_callback_cost": "NOT_RUN",
+  "media_load_baseline": "NOT_RUN",
+  "disk_failure_baseline": "NOT_RUN",
+  "real_crash_baseline": "NOT_RUN",
+  "lg2_lg7_measurement_recipe": [
+    "Record OS build, CPU, RAM, GPU, storage type, build configuration and dependency versions.",
+    "Pair runs at identical audio/video workload with normal diagnostic level on and new diagnostic producer/persistence disabled; keep core SessionTelemetry unchanged.",
+    "Warm up and collect at least three paired runs; retain p50/p95/p99 callback duration, process CPU, incremental working set, writer disk throughput, queue high water and drop counters.",
+    "Run separate UI block, slow/unwritable disk and long meeting scenarios; record unavailable hardware or services as DEFERRED."
+  ],
+  "contract_bindings": {
+    "room_log_handler": "preserve_callback_time_thread_lifetime_and_safe_text_adapter",
+    "panic_callback": "preserve_business_callback_semantics_and_typed_safe_summary",
+    "session_telemetry_operation_id": "reuse_with_run_and_session_context",
+    "http_legacy_operationID_header": "unchanged_until_server_contract_verified",
+    "telemetry_history_off": "clears_known_reports_as_current_behavior",
+    "future_plain_log_off": "stops_new_writes; explicit_clear_separate",
+    "unknown_outcome": "unknown_not_zero_or_success",
+    "future_schema_version": "unsupported_preserve_no_delete"
+  }
+}

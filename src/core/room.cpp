@@ -1,5 +1,6 @@
 #include "room.h"
 #include "session_telemetry.h"
+#include "telemetry/diagnostic_pipeline.h"
 #include "webrtc_manager.h"
 #include "stats_collector.h"
 #include "local_audio_track.h"
@@ -8,7 +9,6 @@
 #include "rtc_audio_source.h"
 #include "rtc_video_source.h"
 #include "render/owned_i420_frame.h"
-#include "telemetry.h"
 #include "log_redaction.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
@@ -18,7 +18,6 @@
 #include <future>
 #include <cctype>
 #include <limits>
-#include <iostream>
 #include <algorithm>
 #include "api/jsep.h"
 #include "api/video/video_sink_interface.h"
@@ -83,6 +82,51 @@ telemetry::OperationOutcome TelemetryOutcome(std::exception_ptr error) {
     }
 }
 
+diagnostic::Outcome DiagnosticOutcome(telemetry::OperationOutcome outcome) noexcept {
+    using Source = telemetry::OperationOutcome;
+    using Target = diagnostic::Outcome;
+    switch (outcome) {
+    case Source::Success: return Target::Success;
+    case Source::DegradedSuccess: return Target::DegradedSuccess;
+    case Source::Timeout: return Target::Timeout;
+    case Source::Cancelled: return Target::Cancelled;
+    default: return Target::Failure;
+    }
+}
+
+void ProjectOperationError(std::exception_ptr error,
+                           diagnostic::Event& event) noexcept {
+    event.error_layer = diagnostic::ErrorLayer::Native;
+    event.error_code = diagnostic::ErrorCode::Unknown;
+    if (!error) return;
+    try {
+        std::rethrow_exception(error);
+    } catch (const OperationError& native) {
+        using N = OperationErrorCode;
+        using D = diagnostic::ErrorCode;
+        switch (native.code()) {
+        case N::InvalidState: event.error_code = D::InvalidState; break;
+        case N::Cancelled: event.error_code = D::Cancelled; break;
+        case N::SignalConnectFailed: event.error_code = D::SignalConnectFailed; break;
+        case N::JoinTimeout: event.error_code = D::JoinTimeout; break;
+        case N::JoinRejected: event.error_code = D::JoinRejected; break;
+        case N::PeerConnectionCreateFailed: event.error_code = D::PeerConnectionCreateFailed; break;
+        case N::NegotiationFailed: event.error_code = D::NegotiationFailed; break;
+        case N::PeerConnectionTimeout: event.error_code = D::PeerConnectionTimeout; break;
+        case N::PermissionDenied: event.error_code = D::PermissionDenied; break;
+        case N::TrackPublishTimeout: event.error_code = D::TrackPublishTimeout; break;
+        case N::TrackPublishRejected: event.error_code = D::TrackPublishRejected; break;
+        case N::TrackUnpublishTimeout: event.error_code = D::TrackUnpublishTimeout; break;
+        case N::ReconnectExhausted: event.error_code = D::ReconnectExhausted; break;
+        case N::SessionClosed: event.error_code = D::SessionClosed; break;
+        case N::StateUncertain: event.error_code = D::StateUncertain; break;
+        case N::SessionInvalid: event.error_code = D::SessionInvalid; break;
+        default: break;
+        }
+        event.retryable = native.retryable();
+    } catch (...) {}
+}
+
 class TelemetryOperationSpan final {
 public:
     TelemetryOperationSpan() = default;
@@ -113,7 +157,8 @@ public:
     TelemetryOperationSpan& operator=(const TelemetryOperationSpan&) = delete;
     TelemetryOperationSpan(TelemetryOperationSpan&& other) noexcept
         : telemetry_(std::move(other.telemetry_)),
-          id_(std::move(other.id_)), kind_(other.kind_), finished_(other.finished_) {
+          id_(std::move(other.id_)), kind_(other.kind_),
+          on_terminal_(std::move(other.on_terminal_)), finished_(other.finished_) {
         other.finished_ = true;
     }
     TelemetryOperationSpan& operator=(TelemetryOperationSpan&& other) noexcept {
@@ -122,6 +167,7 @@ public:
         telemetry_ = std::move(other.telemetry_);
         id_ = std::move(other.id_);
         kind_ = other.kind_;
+        on_terminal_ = std::move(other.on_terminal_);
         finished_ = other.finished_;
         other.finished_ = true;
         return *this;
@@ -133,12 +179,21 @@ public:
         if (telemetry_ && !id_.empty()) {
             telemetry_->FinishOperation(id_, kind_, outcome);
         }
+        try {
+            if (on_terminal_) on_terminal_(outcome);
+        } catch (...) {}
+    }
+
+    const std::string& id() const noexcept { return id_; }
+    void OnTerminal(std::function<void(telemetry::OperationOutcome)> callback) {
+        on_terminal_ = std::move(callback);
     }
 
 private:
     std::shared_ptr<telemetry::SessionTelemetry> telemetry_;
     std::string id_;
     telemetry::OperationKind kind_ = telemetry::OperationKind::Unknown;
+    std::function<void(telemetry::OperationOutcome)> on_terminal_;
     bool finished_ = false;
 };
 
@@ -981,6 +1036,7 @@ std::optional<RemoteMediaRecoveryRequest> Room::remote_media_recovery_request() 
 
 ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
     ControlApplyResult result;
+    std::array<bool, 4> subscription_changes{};
     result.coordinator_session = plan.coordinator_session;
     result.native_room_generation = plan.native_room_generation;
     result.catalog_revision = plan.catalog_revision;
@@ -1257,6 +1313,10 @@ ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
                     }
                 }
                 const bool subscription_changed = intent.subscribed != selected;
+                if (subscription_changed) {
+                    const auto index = (is_video ? 2u : 0u) + (selected ? 1u : 0u);
+                    subscription_changes[index] = true;
+                }
                 const bool settings_changed = is_video && !IsVideoSettingsEqual(
                     intent, enabled, quality, width, height, max_fps, priority);
                 if (!subscription_changed && !settings_changed) continue;
@@ -1326,7 +1386,43 @@ ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
         ScheduleSubscriptionDrainLocked();
     }
 
+    if (result.accepted) {
+        for (std::size_t index = 0; index < subscription_changes.size(); ++index) {
+            if (!subscription_changes[index]) continue;
+            diagnostic::Event event;
+            event.kind = diagnostic::EventKind::MediaSubscriptionChanged;
+            event.media_kind = index >= 2 ? diagnostic::MediaKind::Video
+                                          : diagnostic::MediaKind::Audio;
+            event.subscription_state = index % 2 == 1
+                ? diagnostic::SubscriptionState::Subscribed
+                : diagnostic::SubscriptionState::Unsubscribed;
+            EmitDiagnostic(event);
+        }
+    }
+
     return result;
+}
+
+void Room::SetDiagnosticContext(diagnostic::Context context) {
+    std::lock_guard lock(room_mutex_);
+    diagnostic_context_ = context;
+}
+
+void Room::EmitDiagnostic(diagnostic::Event event) const noexcept {
+    {
+        std::lock_guard lock(room_mutex_);
+        event.context.anonymous_session_id =
+            diagnostic_context_.anonymous_session_id;
+        if (event.context.parent_operation_id.View().empty())
+            event.context.parent_operation_id =
+                diagnostic_context_.parent_operation_id;
+        event.context.session_generation =
+            diagnostic_context_.session_generation;
+        event.context.has_session_generation =
+            diagnostic_context_.has_session_generation;
+    }
+    event.thread_role = diagnostic::ThreadRole::Session;
+    diagnostic::EmitBusinessEvent(event);
 }
 
 std::shared_ptr<MembershipState> Room::EnsureMembershipLocked(
@@ -1698,6 +1794,14 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
     TelemetryOperationSpan connect_operation(
         restart_connect ? nullptr : std::move(telemetry_owner),
         telemetry::OperationKind::Connect);
+    diagnostic::Event connect_event;
+    connect_event.kind = diagnostic::EventKind::RoomConnectStarted;
+    connect_event.context.room_generation = generation;
+    connect_event.context.has_room_generation = true;
+    connect_event.context.operation_id.Assign(connect_operation.id().empty()
+        ? "room_connect_" + std::to_string(generation) : connect_operation.id());
+    connect_event.stage = diagnostic::Stage::ConnectingRoom;
+    EmitDiagnostic(connect_event);
 
     try {
         auto conn_res = co_await SignalClient::Connect(
@@ -2007,6 +2111,11 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
     FlushDeferredRoomMessages(generation);
 
         connect_operation.Finish(telemetry::OperationOutcome::Success);
+        connect_event.kind = diagnostic::EventKind::RoomConnectTerminal;
+        connect_event.outcome = diagnostic::Outcome::Success;
+        connect_event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - connect_accepted_at).count();
+        EmitDiagnostic(connect_event);
         co_return;
     } catch (...) {
         const auto operation_outcome = TelemetryOutcome(std::current_exception());
@@ -2099,6 +2208,12 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         subscriber_observer.reset();
         data_channel_observers.clear();
         connect_operation.Finish(operation_outcome);
+        connect_event.kind = diagnostic::EventKind::RoomConnectTerminal;
+        connect_event.outcome = DiagnosticOutcome(operation_outcome);
+        connect_event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - connect_accepted_at).count();
+        ProjectOperationError(std::current_exception(), connect_event);
+        EmitDiagnostic(connect_event);
         throw;
     }
 }
@@ -4254,11 +4369,11 @@ void Room::DetachRemoteTrackSinks(std::vector<RemoteTrackSinkBinding> bindings) 
                 binding.detach();
             }
         } catch (const std::exception&) {
-            std::cerr << "[WEBRTC] Failed to detach remote track sink: "
-                      << secure_log::ExceptionSummary("detach_remote_track_sink") << std::endl;
+            diagnostic::EmitBusinessEvent(
+                diagnostic::Event::Issue(diagnostic::IssueCode::NativeCleanupFailed));
         } catch (...) {
-            std::cerr << "[WEBRTC] Failed to detach remote track sink: unknown error"
-                      << std::endl;
+            diagnostic::EmitBusinessEvent(
+                diagnostic::Event::Issue(diagnostic::IssueCode::NativeCleanupFailed));
         }
     }
 }
@@ -5148,19 +5263,20 @@ void Room::AddTrackToPublisher(std::shared_ptr<Track> track) {
                     }
 
                     auto transceiver_res = p->pc->AddTransceiver(p->track, init);
-                    if (transceiver_res.ok()) {
-                        std::cout << "[SIMULCAST TRANSCEIVER] Added Simulcast Transceiver for video track with " 
-                                  << p->publish_opts.layers.size() << " layers!\n";
-                    } else {
-                        std::cerr << "[SIMULCAST TRANSCEIVER] AddTransceiver failed: "
-                                  << secure_log::OpaqueSummary("add_transceiver") << "\n";
+                    if (!transceiver_res.ok()) {
+                        diagnostic::Event fallback;
+                        fallback.kind = diagnostic::EventKind::MediaFallback;
+                        fallback.media_kind = diagnostic::MediaKind::Video;
+                        fallback.media_fallback_reason =
+                            diagnostic::MediaFallbackReason::AddTransceiverFailed;
+                        p->room->EmitDiagnostic(fallback);
                         p->pc->AddTrack(p->track, { p->stream_id });
                     }
                 } else {
                     p->pc->AddTrack(p->track, { p->stream_id });
                 }
-                std::cout << "[WebRTC] Added native track (" << p->track->kind() << ") to Publisher PeerConnection." << std::endl;
-                p->room->Log("TRACK", "PUB_ATTACH", "Added Track [" + p->track->id() + "] (" + p->track->kind() + ") to the Publisher PeerConnection");
+                p->room->Log("TRACK", "PUB_ATTACH",
+                    "Added a local media track to the Publisher PeerConnection");
                 p->room->SendPublishOffer();
             }
             delete p;
@@ -5172,7 +5288,12 @@ void Room::ApplySimulcastParameters(webrtc::scoped_refptr<webrtc::RtpSenderInter
     if (!sender) return;
     webrtc::RtpParameters parameters = sender->GetParameters();
     if (parameters.encodings.empty()) {
-        std::cout << "[SIMULCAST SET_PARAMS] Warning: RtpSender has no encodings to configure.\n";
+        diagnostic::Event fallback;
+        fallback.kind = diagnostic::EventKind::MediaFallback;
+        fallback.media_kind = diagnostic::MediaKind::Video;
+        fallback.media_fallback_reason =
+            diagnostic::MediaFallbackReason::NoEncodings;
+        diagnostic::EmitBusinessEvent(fallback);
         return;
     }
 
@@ -5200,12 +5321,13 @@ void Room::ApplySimulcastParameters(webrtc::scoped_refptr<webrtc::RtpSenderInter
 
     if (updated) {
         auto status = sender->SetParameters(parameters);
-        if (status.ok()) {
-            std::cout << "[SIMULCAST SET_PARAMS] Successfully applied RtpParameters for " 
-                      << parameters.encodings.size() << " encodings!\n";
-        } else {
-            std::cerr << "[SIMULCAST SET_PARAMS] SetParameters failed: "
-                      << secure_log::OpaqueSummary("set_rtp_parameters") << "\n";
+        if (!status.ok()) {
+            diagnostic::Event fallback;
+            fallback.kind = diagnostic::EventKind::MediaFallback;
+            fallback.media_kind = diagnostic::MediaKind::Video;
+            fallback.media_fallback_reason =
+                diagnostic::MediaFallbackReason::SenderParametersFailed;
+            diagnostic::EmitBusinessEvent(fallback);
         }
     }
 }
@@ -5241,7 +5363,15 @@ void Room::RollbackPublishedSenderBundle(
     if (!pc) return;
     for (auto sender = bundle.senders.rbegin();
          sender != bundle.senders.rend(); ++sender) {
-        if (*sender) pc->RemoveTrackOrError(*sender);
+        if (!*sender || !pc->RemoveTrackOrError(*sender).ok() || !bundle.screen_share) {
+            continue;
+        }
+        for (const auto& transceiver : pc->GetTransceivers()) {
+            if (transceiver && transceiver->sender() == *sender) {
+                transceiver->StopStandard();
+                break;
+            }
+        }
     }
 }
 
@@ -5861,6 +5991,17 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
     TelemetryOperationSpan publish_operation(
         reconnect_republish ? nullptr : telemetry_owner,
         telemetry::OperationKind::PublishTrack);
+    diagnostic::Event publish_event;
+    publish_event.kind = diagnostic::EventKind::MediaPublishStarted;
+    publish_event.context.room_generation = generation;
+    publish_event.context.has_room_generation = true;
+    publish_event.context.operation_id.Assign(publish_operation.id().empty()
+        ? "publish_" + std::to_string(generation) + "_" +
+            std::to_string(publish_accepted_at.time_since_epoch().count())
+        : publish_operation.id());
+    publish_event.media_kind = track->kind() == TrackKind::Video
+        ? diagnostic::MediaKind::Video : diagnostic::MediaKind::Audio;
+    EmitDiagnostic(publish_event);
     const auto release_ack = [&]() {
         std::lock_guard lock(room_mutex_);
         const auto found = pending_track_publishes_.find(cid);
@@ -5955,6 +6096,11 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         }
         if (track->kind() == TrackKind::Video) SchedulePublisherMediaDiagnostic(generation);
         publish_operation.Finish(telemetry::OperationOutcome::Success);
+        publish_event.kind = diagnostic::EventKind::MediaPublishTerminal;
+        publish_event.outcome = diagnostic::Outcome::Success;
+        publish_event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - publish_accepted_at).count();
+        EmitDiagnostic(publish_event);
         co_return publication;
     } catch (...) {
         const auto operation_outcome = TelemetryOutcome(std::current_exception());
@@ -5982,6 +6128,12 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             NegotiatePublisher(generation);
         }
         publish_operation.Finish(operation_outcome);
+        publish_event.kind = diagnostic::EventKind::MediaPublishTerminal;
+        publish_event.outcome = DiagnosticOutcome(operation_outcome);
+        publish_event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - publish_accepted_at).count();
+        ProjectOperationError(std::current_exception(), publish_event);
+        EmitDiagnostic(publish_event);
         throw;
     }
 }
@@ -6135,6 +6287,16 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
 
     TelemetryOperationSpan batch_operation(
         telemetry_owner, telemetry::OperationKind::PublishBatch);
+    diagnostic::Event batch_event;
+    batch_event.kind = diagnostic::EventKind::MediaPublishBatchStarted;
+    batch_event.context.room_generation = generation;
+    batch_event.context.has_room_generation = true;
+    batch_event.context.operation_id = batch_operation.id().empty()
+        ? diagnostic::NewCorrelationId() : diagnostic::OpaqueId{};
+    if (!batch_operation.id().empty())
+        batch_event.context.operation_id.Assign(batch_operation.id());
+    batch_event.batch_track_count = static_cast<std::uint32_t>(items.size());
+    EmitDiagnostic(batch_event);
     std::vector<TelemetryOperationSpan> member_operations;
     member_operations.reserve(items.size());
     for (std::size_t index = 0; index < items.size(); ++index) {
@@ -6268,6 +6430,11 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
             operation.Finish(telemetry::OperationOutcome::Success);
         }
         batch_operation.Finish(telemetry::OperationOutcome::Success);
+        batch_event.kind = diagnostic::EventKind::MediaPublishBatchTerminal;
+        batch_event.outcome = diagnostic::Outcome::Success;
+        batch_event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - publish_accepted_at).count();
+        EmitDiagnostic(batch_event);
         co_return publications;
     } catch (...) {
         const auto operation_outcome = TelemetryOutcome(std::current_exception());
@@ -6317,6 +6484,12 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
             operation.Finish(operation_outcome);
         }
         batch_operation.Finish(operation_outcome);
+        batch_event.kind = diagnostic::EventKind::MediaPublishBatchTerminal;
+        batch_event.outcome = DiagnosticOutcome(operation_outcome);
+        batch_event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - publish_accepted_at).count();
+        ProjectOperationError(std::current_exception(), batch_event);
+        EmitDiagnostic(batch_event);
         throw;
     }
 }
@@ -6628,6 +6801,18 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
     }
     TelemetryOperationSpan unpublish_operation(
         telemetry_owner, telemetry::OperationKind::Unpublish);
+    const auto unpublish_started_at = std::chrono::steady_clock::now();
+    diagnostic::Event unpublish_event;
+    unpublish_event.kind = diagnostic::EventKind::MediaUnpublishStarted;
+    unpublish_event.context.room_generation = generation;
+    unpublish_event.context.has_room_generation = true;
+    unpublish_event.context.operation_id = unpublish_operation.id().empty()
+        ? diagnostic::NewCorrelationId() : diagnostic::OpaqueId{};
+    if (!unpublish_operation.id().empty())
+        unpublish_event.context.operation_id.Assign(unpublish_operation.id());
+    unpublish_event.media_kind = track->kind() == TrackKind::Video
+        ? diagnostic::MediaKind::Video : diagnostic::MediaKind::Audio;
+    EmitDiagnostic(unpublish_event);
 
     bool sender_removed = false;
     try {
@@ -6698,8 +6883,13 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
         }
         track->set_sid("");
         Log("TRACK", "LOCAL_UNPUBLISHED",
-            "Publisher SDP Answer confirmed local track unpublication: " + track_sid);
+            "Publisher SDP Answer confirmed local track unpublication");
         unpublish_operation.Finish(telemetry::OperationOutcome::Success);
+        unpublish_event.kind = diagnostic::EventKind::MediaUnpublishTerminal;
+        unpublish_event.outcome = diagnostic::Outcome::Success;
+        unpublish_event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - unpublish_started_at).count();
+        EmitDiagnostic(unpublish_event);
         co_return publication;
     } catch (const std::exception& error) {
         const auto operation_outcome = TelemetryOutcome(std::current_exception());
@@ -6719,6 +6909,13 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
                 "Local sender removed without SDP Answer; recovery will reconcile with server state; " +
                     secure_log::ExceptionSummary("unpublish_negotiate"));
             unpublish_operation.Finish(telemetry::OperationOutcome::Failure);
+            unpublish_event.kind = diagnostic::EventKind::MediaUnpublishTerminal;
+            unpublish_event.outcome = diagnostic::Outcome::Failure;
+            unpublish_event.error_code = diagnostic::ErrorCode::StateUncertain;
+            unpublish_event.retryable = true;
+            unpublish_event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - unpublish_started_at).count();
+            EmitDiagnostic(unpublish_event);
             throw OperationError(OperationKind::UnpublishTrack,
                                  OperationErrorCode::StateUncertain,
                                  "unpublish_negotiate",
@@ -6726,6 +6923,12 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
                                  true);
         }
         unpublish_operation.Finish(operation_outcome);
+        unpublish_event.kind = diagnostic::EventKind::MediaUnpublishTerminal;
+        unpublish_event.outcome = DiagnosticOutcome(operation_outcome);
+        unpublish_event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - unpublish_started_at).count();
+        ProjectOperationError(std::current_exception(), unpublish_event);
+        EmitDiagnostic(unpublish_event);
         throw;
     }
 }
@@ -6862,8 +7065,6 @@ void Room::ExecuteNegotiatePublisher(uint64_t generation) {
                 if (!self->IsSignalGenerationCurrentLocked(generation)) return;
             }
             if (!err.empty()) {
-                std::cerr << "[WebRTC] CreateOffer error: "
-                          << secure_log::OpaqueSummary("create_offer") << std::endl;
                 self->Log("ERROR", "OFFER_FAIL", secure_log::OpaqueSummary("create_offer"));
                 self->OnNegotiationFailed(generation);
                 return;
@@ -6876,8 +7077,6 @@ void Room::ExecuteNegotiatePublisher(uint64_t generation) {
                         if (!self->IsSignalGenerationCurrentLocked(generation)) return;
                     }
                     if (!set_local_err.empty()) {
-                        std::cerr << "[WebRTC] SetLocalDescription offer error: "
-                                  << secure_log::OpaqueSummary("set_local_offer") << std::endl;
                         self->Log("ERROR", "LOCAL_DESC_FAIL",
                                   secure_log::OpaqueSummary("set_local_offer"));
                         self->OnNegotiationFailed(generation);
@@ -6950,7 +7149,6 @@ void Room::ExecuteNegotiatePublisher(uint64_t generation) {
                             self->CompleteNegotiation(error.what(), generation);
                         }
                     });
-                    std::cout << "[WebRTC] -> Sent publisher SDP Offer to LiveKit server with mid_to_track_id mapping!" << std::endl;
                     self->Log("SIGNAL", "SDP_OFFER_SENT",
                               secure_log::SdpSummary("publisher_offer_sent", sdp));
                     LogSdpNegotiationDetails(
@@ -7319,7 +7517,6 @@ void Room::AttachRemoteTrackToParticipant(
                 r_track->notifyAudioFrame(frame);
             }
             if (!has_logged->exchange(true)) {
-                std::cout << "[RECV AUDIO] Started receiving audio PCM stream for track " << r_track->sid() << ", sample_rate=" << frame.sampleRate() << "Hz, channels=" << frame.numChannels() << std::endl;
                 if (auto room = weak_room.lock()) {
                     room->Log("WEBRTC", "AUDIO_FRAME", "First remote audio frame received (sample rate: " + std::to_string(frame.sampleRate()) + "Hz, channels: " + std::to_string(frame.numChannels()) + ", samples per frame: " + std::to_string(frame.totalSamples()) + ")");
                 }
@@ -7337,7 +7534,7 @@ void Room::AttachRemoteTrackToParticipant(
                     if (std::chrono::duration_cast<std::chrono::milliseconds>(now - *last_voice_log_time).count() > 2500) {
                         *last_voice_log_time = now;
                         if (auto room = weak_room.lock()) {
-                            room->Log("MEDIA", "AUDIO_VOICE", "Participant [" + participant->identity() + "] is speaking (PCM RMS energy=" + std::to_string(static_cast<int>(rms)) + ", mixing at 48 kHz)");
+                            room->Log("MEDIA", "AUDIO_VOICE", "Remote audio activity detected");
                         }
                     }
                 }
@@ -7368,9 +7565,9 @@ void Room::AttachRemoteTrackToParticipant(
             DetachRemoteTrackSinks(
                 TakeRemoteTrackSinkForBindingSerial(superseded_binding_serial));
         }
-        Log("WEBRTC", "AUDIO_ATTACH", "Remote audio track attached to participant [" + participant->identity() + "], Track SID=" + track_id + ", NativeAudioTrackSink attached");
+        Log("WEBRTC", "AUDIO_ATTACH", "Remote audio track sink attached");
 
-        Log("SIGNAL", "AUDIO_TRACK_ACTIVE", "SFU downstream audio subscription reconciled: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
+        Log("SIGNAL", "AUDIO_TRACK_ACTIVE", "SFU downstream audio subscription reconciled");
     } else {
         auto video_track = static_cast<webrtc::VideoTrackInterface*>(track.get());
         auto has_logged = std::make_shared<std::atomic<bool>>(false);
@@ -7474,11 +7671,9 @@ void Room::AttachRemoteTrackToParticipant(
                 r_track->notifyI420VideoFrame(frame);
             }
             if (!has_logged->exchange(true)) {
-                std::cout << "[RECV VIDEO] Receiving video stream for track " << r_track->sid() << ", resolution=" << frame->width() << "x" << frame->height() << std::endl;
                 if (auto room = weak_room.lock()) {
                     room->Log("WEBRTC", "VIDEO_FRAME", "WebRTC decoder started producing remote video (" + std::to_string(frame->width()) + "x" + std::to_string(frame->height()) + ")");
                 }
-                Telemetry::Instance().OnFirstRemoteFrameReceived("video");
             }
         },
             [render_telemetry_key, telemetry_room_generation, binding_serial,
@@ -7525,10 +7720,10 @@ void Room::AttachRemoteTrackToParticipant(
             DetachRemoteTrackSinks(
                 TakeRemoteTrackSinkForBindingSerial(superseded_binding_serial));
         }
-        Log("WEBRTC", "VIDEO_ATTACH", "Remote video track attached to participant [" + participant->identity() + "], Track SID=" + track_id);
+        Log("WEBRTC", "VIDEO_ATTACH", "Remote video track sink attached");
 
         if (signal) {
-            Log("SIGNAL", "TRACK_ACTIVE", "SFU downstream video binding uses the current Room media plan: Track SID=" + track_id + " (Participant: " + participant->identity() + ")");
+            Log("SIGNAL", "TRACK_ACTIVE", "SFU downstream video binding uses the current Room media plan");
         }
     }
 
@@ -7608,7 +7803,8 @@ void Room::FlushPendingTracks(const std::string& participant_sid, uint64_t gener
     }
 
     if (!pending_to_flush.empty()) {
-        Log("TRACK", "FLUSH_PENDING", "Flushing participant [" + participant->identity() + "]'s " + std::to_string(pending_to_flush.size()) + " pending media tracks");
+        Log("TRACK", "FLUSH_PENDING", "Flushing " +
+            std::to_string(pending_to_flush.size()) + " pending media tracks");
         for (const auto& item : pending_to_flush) {
             AttachRemoteTrackToParticipant(participant, item.track, item.receiver, item.track_sid, item.generation);
         }
@@ -7709,7 +7905,8 @@ void Room::OnRemoteTrackResolved(
         DetachRemotePublicationMedia(publication.get(), true, serial);
     }
 
-    Log("WEBRTC", "ON_TRACK_RESOLVE", "Downstream track resolved: ParticipantSID=" + participant_sid + ", TrackSID=" + track_sid + ", Kind=" + std::string(track->kind()));
+    Log("WEBRTC", "ON_TRACK_RESOLVE", "Downstream track resolved: Kind=" +
+        std::string(track->kind()));
 
     std::shared_ptr<RemoteParticipant> participant;
     BeforeNativeEventCommit(generation);
@@ -7735,7 +7932,7 @@ void Room::OnRemoteTrackResolved(
         }
     }
     if (!participant) {
-        Log("TRACK", "ENQUEUE_PENDING", "Participant [" + participant_sid + "] is not ready; media track saved in PendingTrackQueue (Track SID=" + track_sid + ")");
+        Log("TRACK", "ENQUEUE_PENDING", "Participant is not ready; media track saved in pending queue");
         return;
     }
 
@@ -7965,6 +8162,32 @@ void Room::HandleSignalMessage(
         else if (msg->has_refresh_token())           type_tag = "REFRESH_TOKEN";
         else if (msg->has_room_moved())              type_tag = "ROOM_MOVED";
 
+        const auto category =
+            msg->has_pong() || msg->has_pong_resp() ||
+            msg->has_speakers_changed() || msg->has_connection_quality() ||
+            msg->has_stream_state_update()
+                ? diagnostic::SignalCategory::Periodic
+                : msg->has_track_published() || msg->has_track_unpublished() ||
+                    msg->has_track_subscribed() || msg->has_subscribed_quality_update()
+                    ? diagnostic::SignalCategory::Media
+                    : type_tag == "UNKNOWN"
+                        ? diagnostic::SignalCategory::Unknown
+                        : diagnostic::SignalCategory::Control;
+        const auto count = signal_message_counts_[static_cast<std::size_t>(
+            category)].fetch_add(1, std::memory_order_relaxed) + 1;
+        const bool window_sample = count % 16 == 0 && count % 64 != 0 &&
+            diagnostic::DiagnosticWindowActive();
+        if (count == 1 || count % 64 == 0 || window_sample) {
+            diagnostic::Event summary;
+            summary.kind = diagnostic::EventKind::SignalMessageSummary;
+            summary.context.room_generation = event_generation;
+            summary.context.has_room_generation = true;
+            summary.signal_category = category;
+            summary.signal_message_count = count;
+            summary.window_sample = window_sample;
+            EmitDiagnostic(summary);
+        }
+
         if (type_tag == "UNKNOWN") {
             Log("SIGNAL", "RAW_MSG", "[Signal] Unknown server message received (Case=" +
                 std::to_string(msg->message_case()) + ", detail=[omitted])");
@@ -8008,7 +8231,7 @@ void Room::HandleSignalMessage(
         Log("SIGNAL", "PARTICIPANT_UPDATE", "ParticipantUpdate received (updated participants: " + std::to_string(msg->update().participants_size()) + ")");
         UpdateParticipants(msg->update().participants(), event_generation);
     } else if (msg->has_mute()) {
-        Log("SIGNAL", "MUTE_UPDATE", "Track mute update received: SID=" + msg->mute().sid());
+        Log("SIGNAL", "MUTE_UPDATE", "Track mute update received");
         UpdateTrackMute(msg->mute(), event_generation);
     } else if (msg->has_speakers_changed()) {
         HandleActiveSpeakerUpdate(msg->speakers_changed(), event_generation);
@@ -8020,7 +8243,7 @@ void Room::HandleSignalMessage(
         HandleTrickleSignal(msg->trickle(), event_generation);
     } else if (msg->has_track_published()) {
         const auto& tp = msg->track_published();
-        Log("SIGNAL", "TRACK_PUB_ACK", "TrackPublished ACK received: cid=" + tp.cid() + ", track_sid=" + tp.track().sid());
+        Log("SIGNAL", "TRACK_PUB_ACK", "TrackPublished ACK received");
         std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>> pending;
         {
             std::lock_guard lock(room_mutex_);
@@ -8037,7 +8260,7 @@ void Room::HandleSignalMessage(
             case proto::SE_CODEC_UNSUPPORTED: err_str = "SE_CODEC_UNSUPPORTED (1)"; break;
             default: err_str = "SE_UNKNOWN - subscription failed"; break;
         }
-        Log("SIGNAL", "SUB_RESP", "SubscriptionResponse received: Track=" + sr.track_sid() + ", Err=" + err_str);
+        Log("SIGNAL", "SUB_RESP", "SubscriptionResponse received: Err=" + err_str);
         UpdateTrackSubscriptionError(sr, event_generation);
     } else if (msg->has_subscription_permission_update()) {
         Log("SIGNAL", "SUB_PERM_UPDATE", "SubscriptionPermissionUpdate received (Allowed: " + std::string(msg->subscription_permission_update().allowed() ? "YES" : "NO") + ")");
@@ -8055,7 +8278,7 @@ void Room::HandleSignalMessage(
     } else if (msg->has_subscribed_quality_update()) {
         const auto& squ = msg->subscribed_quality_update();
         std::string track_sid = squ.track_sid();
-        Log("SIGNAL", "QUALITY_UPDATE", "SFU Dynacast quality request received: Track SID=" + track_sid);
+        Log("SIGNAL", "QUALITY_UPDATE", "SFU Dynacast quality request received");
 
         std::map<std::string, std::map<livekit::proto::VideoQuality, bool>> codec_quality_map;
         std::map<livekit::proto::VideoQuality, bool> fallback_quality_states;
@@ -8406,7 +8629,9 @@ void Room::UpdateParticipants(
                         EnsureSubscriptionIntentLocked(intent_key);
                         QueueSubscriptionUpdateLocked(intent_key);
                         newly_published_tracks.push_back({remote, pub});
-                        Log("TRACK", "NEW_TRACK", "Participant [" + remote->identity() + "] published track: " + t_info.name() + " (" + (kind == TrackKind::Video ? "VIDEO" : "AUDIO") + ", SID: " + t_info.sid() + ", Muted: " + (t_info.muted() ? "true" : "false") + ")");
+                        Log("TRACK", "NEW_TRACK", "Remote track published: kind=" +
+                            std::string(kind == TrackKind::Video ? "video" : "audio") +
+                            ", muted=" + (t_info.muted() ? "true" : "false"));
                     } else {
                         // Metadata can arrive after an early RTC binding. Its
                         // source is projected to the same track read by render.
@@ -8420,7 +8645,8 @@ void Room::UpdateParticipants(
                                 remote,
                                 pub,
                                 false));
-                            Log("TRACK", "MUTE_CHANGED", "Participant [" + remote->identity() + "] Track [" + t_info.sid() + "] state changed to: " + (t_info.muted() ? "muted/off" : "on"));
+                            Log("TRACK", "MUTE_CHANGED", "Remote track state changed to: " +
+                                std::string(t_info.muted() ? "muted/off" : "on"));
                         }
                     }
                 }
@@ -8467,7 +8693,7 @@ void Room::UpdateParticipants(
                         remote->remove_publication(sid);
                         EnqueueParticipantEventLocked(std::move(unavailable));
                         unpublished_tracks.push_back({remote, pub});
-                        Log("TRACK", "UNPUBLISHED", "Participant [" + remote->identity() + "] unpublished track: " + sid);
+                        Log("TRACK", "UNPUBLISHED", "Remote track unpublished");
                     }
                 }
                 EnqueueParticipantEventLocked(MakeParticipantEventLocked(
@@ -8813,12 +9039,10 @@ void Room::HandleOfferSignal(
     }
 
     if (!pc || !client) {
-        std::cerr << "Room::HandleOfferSignal: warning, PeerConnection or SignalClient is null" << std::endl;
         Log("ERROR", "SDP_ERR", "HandleOfferSignal: PeerConnection or SignalClient is null");
         return;
     }
 
-    std::cout << "[WebRTC] Received SDP Offer from server, setting RemoteDescription..." << std::endl;
     Log("SIGNAL", "SDP_OFFER_RECV",
         secure_log::SdpSummary("subscriber_offer_received", offer.sdp()));
     auto self = shared_from_this();
@@ -8829,14 +9053,11 @@ void Room::HandleOfferSignal(
                 if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
             }
             if (!set_remote_err.empty()) {
-                std::cerr << "Room: SetRemoteDescription offer error: "
-                          << secure_log::OpaqueSummary("set_remote_offer") << std::endl;
                 self->Log("ERROR", "SET_REMOTE_ERR",
                           secure_log::OpaqueSummary("set_remote_offer"));
                 return;
             }
 
-            std::cout << "[WebRTC] SetRemoteDescription offer succeeded. Generating SDP Answer..." << std::endl;
             self->Log("SIGNAL", "OFFER_APPLIED", "Server Offer applied. Generating SDP Answer...");
             self->ReconcileRemoteReceivers(pc, event_generation);
             WebRTCManager::Instance().CreateAnswer(pc, self->executor_,
@@ -8848,14 +9069,11 @@ void Room::HandleOfferSignal(
                         if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
                     }
                     if (!create_ans_err.empty()) {
-                        std::cerr << "Room: CreateAnswer error: "
-                                  << secure_log::OpaqueSummary("create_answer") << std::endl;
                         self->Log("ERROR", "CREATE_ANS_ERR",
                                   secure_log::OpaqueSummary("create_answer"));
                         return;
                     }
 
-                    std::cout << "[WebRTC] CreateAnswer succeeded. Setting LocalDescription..." << std::endl;
                     WebRTCManager::Instance().SetLocalDescription(pc, "answer", sdp, self->executor_,
                         [self, client, pc, sdp, event_generation](
                             const std::string& set_local_err) {
@@ -8867,8 +9085,6 @@ void Room::HandleOfferSignal(
                                 }
                             }
                             if (!set_local_err.empty()) {
-                                std::cerr << "Room: SetLocalDescription answer error: "
-                                          << secure_log::OpaqueSummary("set_local_answer") << std::endl;
                                 self->Log("ERROR", "SET_LOCAL_ANS_ERR",
                                           secure_log::OpaqueSummary("set_local_answer"));
                                 return;
@@ -8890,7 +9106,6 @@ void Room::HandleOfferSignal(
                             answer_msg->set_type("answer");
                             answer_msg->set_sdp(sdp);
                             client->Send(req);
-                            std::cout << "[WebRTC] -> Successfully created and sent SDP Answer back to LiveKit Server!" << std::endl;
                             self->Log("SIGNAL", "SDP_ANSWER_SENT",
                                       secure_log::SdpSummary("subscriber_answer_sent", sdp));
                             LogSdpNegotiationDetails(
@@ -9171,13 +9386,10 @@ void Room::HandleAnswerSignal(
             }
 
             if (!err.empty()) {
-                std::cerr << "Room: SetRemoteDescription answer error: "
-                          << secure_log::OpaqueSummary("set_publisher_remote_answer") << std::endl;
                 self->Log("ERROR", "ANS_ERR",
                           secure_log::OpaqueSummary("set_publisher_remote_answer"));
                 self->CompleteNegotiation(err, event_generation);
             } else {
-                std::cout << "[WebRTC] Publisher remote description applied successfully! PC signaling state is STABLE." << std::endl;
                 self->Log("WEBRTC", "PUB_STABLE", "Publisher RemoteDescription applied; signaling state is STABLE");
 
                 // 在锁外部安全重放早期候选
@@ -9300,7 +9512,13 @@ void Room::HandleTrickleSignal(
             }
         });
     } catch (...) {
-        std::cerr << "Room: Failed to parse trickle candidate JSON" << std::endl;
+        diagnostic::Event issue;
+        issue.kind = diagnostic::EventKind::SignalIssue;
+        issue.context.room_generation = event_generation;
+        issue.context.has_room_generation = true;
+        issue.error_layer = diagnostic::ErrorLayer::Parse;
+        issue.error_code = diagnostic::ErrorCode::InvalidResponse;
+        EmitDiagnostic(issue);
     }
 }
 
@@ -9618,6 +9836,34 @@ asio::awaitable<void> Room::AttemptReconnect(
         }
     }
 
+    const auto episode_started_at = std::chrono::steady_clock::now();
+    diagnostic::Event episode_event;
+    episode_event.kind = diagnostic::EventKind::ReconnectEpisodeStarted;
+    episode_event.context.room_generation = reconnect_generation;
+    episode_event.context.has_room_generation = true;
+    episode_event.context.operation_id.Assign(reconnect_episode.id().empty()
+        ? "reconnect_" + std::to_string(reconnect_generation) + "_" +
+            std::to_string(episode_started_at.time_since_epoch().count())
+        : reconnect_episode.id());
+    EmitDiagnostic(episode_event);
+    reconnect_episode.OnTerminal(
+        [weak = weak_from_this(), episode_event, episode_started_at](
+            telemetry::OperationOutcome outcome) mutable {
+            if (const auto room = weak.lock()) {
+                episode_event.kind = diagnostic::EventKind::ReconnectEpisodeTerminal;
+                episode_event.outcome = DiagnosticOutcome(outcome);
+                episode_event.duration_ms =
+                    std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - episode_started_at).count();
+                if (outcome == telemetry::OperationOutcome::Failure ||
+                    outcome == telemetry::OperationOutcome::Timeout) {
+                    episode_event.error_layer = diagnostic::ErrorLayer::Native;
+                    episode_event.error_code = diagnostic::ErrorCode::ReconnectExhausted;
+                }
+                room->EmitDiagnostic(episode_event);
+            }
+        });
+
     RecordPublishedTracks();
 
     int attempts = 0;
@@ -9667,6 +9913,42 @@ asio::awaitable<void> Room::AttemptReconnect(
         const auto attempt_deadline = std::chrono::steady_clock::now() + attempt_budget;
         TelemetryOperationSpan reconnect_attempt(
             telemetry_owner, telemetry::OperationKind::ReconnectAttempt);
+        const auto attempt_started_at = std::chrono::steady_clock::now();
+        auto attempt_mode = std::make_shared<diagnostic::Stage>(
+            full_restart ? diagnostic::Stage::FullRestart : diagnostic::Stage::Resume);
+        auto attempt_error = std::make_shared<diagnostic::Event>();
+        diagnostic::Event attempt_event;
+        attempt_event.kind = diagnostic::EventKind::ReconnectAttemptStarted;
+        attempt_event.context.room_generation = reconnect_generation;
+        attempt_event.context.has_room_generation = true;
+        attempt_event.context.operation_id.Assign(reconnect_attempt.id().empty()
+            ? "reconnect_attempt_" + std::to_string(reconnect_generation) + "_" +
+                std::to_string(attempts) : reconnect_attempt.id());
+        attempt_event.context.parent_operation_id = episode_event.context.operation_id;
+        attempt_event.attempt = attempts;
+        attempt_event.stage = *attempt_mode;
+        EmitDiagnostic(attempt_event);
+        reconnect_attempt.OnTerminal(
+            [weak = weak_from_this(), attempt_event, attempt_mode, attempt_error,
+             attempt_started_at](telemetry::OperationOutcome outcome) mutable {
+                if (const auto room = weak.lock()) {
+                    attempt_event.kind = diagnostic::EventKind::ReconnectAttemptTerminal;
+                    attempt_event.stage = *attempt_mode;
+                    attempt_event.outcome = DiagnosticOutcome(outcome);
+                    if (outcome != telemetry::OperationOutcome::Success) {
+                        attempt_event.error_layer = diagnostic::ErrorLayer::Native;
+                        attempt_event.error_code = attempt_error->error_code ==
+                            diagnostic::ErrorCode::None
+                            ? diagnostic::ErrorCode::Cancelled
+                            : attempt_error->error_code;
+                        attempt_event.retryable = attempt_error->retryable;
+                    }
+                    attempt_event.duration_ms =
+                        std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now() - attempt_started_at).count();
+                    room->EmitDiagnostic(attempt_event);
+                }
+            });
 
         if (!full_restart) {
             try {
@@ -9780,11 +10062,20 @@ asio::awaitable<void> Room::AttemptReconnect(
                 reconnect_episode.Finish(telemetry::OperationOutcome::Success);
                 co_return;
             } catch (const std::exception& error) {
+                ProjectOperationError(std::current_exception(), *attempt_error);
                 last_error = error.what();
                 Log("WARNING", "RESUME_FAILED",
                     secure_log::ExceptionSummary("resume_reconnect") +
                         "; switching to full restart");
                 full_restart = true;
+                *attempt_mode = diagnostic::Stage::FullRestart;
+                auto mode_event = attempt_event;
+                mode_event.kind = diagnostic::EventKind::ReconnectModeChanged;
+                mode_event.stage = diagnostic::Stage::FullRestart;
+                mode_event.error_layer = attempt_error->error_layer;
+                mode_event.error_code = attempt_error->error_code;
+                mode_event.retryable = attempt_error->retryable;
+                EmitDiagnostic(mode_event);
             }
         }
 
@@ -10011,6 +10302,7 @@ asio::awaitable<void> Room::AttemptReconnect(
                 co_return;
             } catch (const std::exception& error) {
                 const auto operation_outcome = TelemetryOutcome(std::current_exception());
+                ProjectOperationError(std::current_exception(), *attempt_error);
                 last_error = error.what();
                 Log("WARNING", "FULL_RESTART_FAILED",
                     secure_log::ExceptionSummary("full_restart"));
@@ -10429,6 +10721,7 @@ void Room::UpdateTrackSubscriptionError(
 
     std::shared_ptr<RemoteTrackPublication> publication;
     uint64_t binding_serial = 0;
+    bool changed = false;
     {
         std::lock_guard lock(room_mutex_);
         if (!IsSignalGenerationCurrentLocked(event_generation)) return;
@@ -10451,6 +10744,7 @@ void Room::UpdateTrackSubscriptionError(
                 }
             }
             if (publication->subscription_error() != error) {
+                changed = true;
                 publication->set_subscription_error(error);
                 EnqueueParticipantEventLocked(MakeTrackEventLocked(
                     ParticipantEventKind::TrackSubscriptionError,
@@ -10461,6 +10755,19 @@ void Room::UpdateTrackSubscriptionError(
     }
     if (publication && binding_serial != 0) {
         DetachRemotePublicationMedia(publication.get(), true, binding_serial);
+    }
+    if (changed && publication && publication->track()) {
+        diagnostic::Event event;
+        event.kind = diagnostic::EventKind::MediaSubscriptionChanged;
+        event.media_kind = publication->track()->kind() == TrackKind::Audio
+            ? diagnostic::MediaKind::Audio : diagnostic::MediaKind::Video;
+        event.subscription_state = diagnostic::SubscriptionState::Blocked;
+        event.error_code = error == Error::CodecUnsupported
+            ? diagnostic::ErrorCode::CodecUnsupported
+            : error == Error::TrackNotFound
+                ? diagnostic::ErrorCode::TrackNotFound
+                : diagnostic::ErrorCode::Unknown;
+        EmitDiagnostic(event);
     }
 }
 
@@ -10513,6 +10820,15 @@ void Room::UpdateTrackSubscriptionPermission(
 
     if (participant && participant != local_participant_ && publication &&
         publication->track()) {
+        if (!permission.allowed) {
+            diagnostic::Event event;
+            event.kind = diagnostic::EventKind::MediaSubscriptionChanged;
+            event.media_kind = publication->track()->kind() == TrackKind::Audio
+                ? diagnostic::MediaKind::Audio : diagnostic::MediaKind::Video;
+            event.subscription_state = diagnostic::SubscriptionState::Blocked;
+            event.error_code = diagnostic::ErrorCode::PermissionDenied;
+            EmitDiagnostic(event);
+        }
         const auto snapshot = publication->SnapshotState();
         if (const auto telemetry_owner = session_telemetry_.lock()) {
             SetRemoteMediaExpected(
@@ -10871,7 +11187,8 @@ void Room::SetParticipantVolume(const std::string& identity_or_sid, double volum
         }
     }
     if (!changed_identity.empty()) {
-        Log("MEDIA", "VOLUME_SET", "Set participant [" + changed_identity + "] volume to " + std::to_string(static_cast<int>(volume * 100)) + "%");
+        Log("MEDIA", "VOLUME_SET", "Set remote participant volume to " +
+            std::to_string(static_cast<int>(volume * 100)) + "%");
     }
 }
 
@@ -10905,7 +11222,8 @@ void Room::SetParticipantMuted(const std::string& identity_or_sid, bool muted) {
         }
     }
     if (!changed_identity.empty()) {
-        Log("MEDIA", "MUTE_SET", "Set participant [" + changed_identity + "] local mute=" + (muted ? "true" : "false"));
+        Log("MEDIA", "MUTE_SET", "Set remote participant local mute=" +
+            std::string(muted ? "true" : "false"));
     }
 }
 

@@ -13,7 +13,19 @@ target_link_libraries(test_camera_owner_remediation PRIVATE
     cohavora_qt_video_render)
 set_target_properties(test_camera_owner_remediation PROPERTIES AUTOMOC OFF)
 add_test(NAME camera_owner_remediation_test COMMAND test_camera_owner_remediation)
-set_tests_properties(camera_owner_remediation_test PROPERTIES TIMEOUT 60)
+set_tests_properties(camera_owner_remediation_test PROPERTIES
+    TIMEOUT 60 LABELS "LOGGING_LG1")
+endif()
+
+if(COHAVORA_BUILD_QT_TESTS)
+add_executable(test_diagnostic_qt_bridge
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_diagnostic_qt_bridge.cpp
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/diagnostic_qt_bridge.cpp
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/meeting_log_console.cpp)
+livekit_configure_qt_test(test_diagnostic_qt_bridge)
+add_test(NAME diagnostic_qt_bridge_test COMMAND test_diagnostic_qt_bridge)
+set_tests_properties(diagnostic_qt_bridge_test PROPERTIES
+    TIMEOUT 30 LABELS "LOGGING_LG2;LOGGING_LG5;LOGGING_LG6;LOGGING_LG7")
 endif()
 
 # PR-SEC-001: typed safe summaries, production output boundary, and
@@ -34,7 +46,8 @@ add_executable(test_connection_log_redaction
 target_include_directories(test_connection_log_redaction PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
 target_link_libraries(test_connection_log_redaction PRIVATE cohavora_core)
 add_test(NAME connection_log_redaction_test COMMAND test_connection_log_redaction)
-set_tests_properties(connection_log_redaction_test PROPERTIES TIMEOUT 60)
+set_tests_properties(connection_log_redaction_test PROPERTIES
+    TIMEOUT 60 LABELS "LOGGING_LG7")
 
 # PR-SEC-003: real loopback TLS handshakes must authenticate the endpoint
 # before either query or header credentials reach the WebSocket server.
@@ -59,7 +72,8 @@ add_executable(test_qt_log_redaction
 )
 livekit_configure_qt_test(test_qt_log_redaction)
 add_test(NAME qt_log_redaction_test COMMAND test_qt_log_redaction)
-set_tests_properties(qt_log_redaction_test PROPERTIES TIMEOUT 60)
+set_tests_properties(qt_log_redaction_test PROPERTIES
+    TIMEOUT 60 LABELS "LOGGING_LG2;LOGGING_LG7;SECURITY_REGRESSION")
 endif()
 
 # This verifier proves checks execute under the same inherited NDEBUG flags as
@@ -82,6 +96,8 @@ add_test(NAME signaling_url_policy_test COMMAND test_signaling_url_policy)
 set_tests_properties(signaling_url_policy_test PROPERTIES
     TIMEOUT 30)
 add_test(NAME panic_guard_test COMMAND test_panic_guard)
+set_tests_properties(panic_guard_test PROPERTIES
+    TIMEOUT 30 LABELS "LOGGING_LG5")
 add_test(NAME advanced_communication_test COMMAND test_advanced_communication)
 add_test(NAME chunking_simulcast_test COMMAND test_chunking_simulcast)
 add_test(NAME data_stream_assembler_test COMMAND test_data_stream_assembler)

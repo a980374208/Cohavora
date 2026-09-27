@@ -5,8 +5,21 @@
 #include "crash_handler.h"
 #include "log_redaction.h"
 #include "safe_spawn.h"
+#include "diagnostic_pipeline.h"
+#include <filesystem>
+#include <vector>
 
 int main() {
+    const auto diagnosticRoot = std::filesystem::temp_directory_path() /
+        ("cohavora-panic-events-" + std::string(
+            livekit::diagnostic::NewCorrelationId().View()));
+    auto diagnostics = std::make_shared<livekit::diagnostic::DiagnosticPipeline>();
+    std::vector<livekit::diagnostic::Event> panicEvents;
+    diagnostics->SetMirror([&](const livekit::diagnostic::Event& event) {
+        panicEvents.push_back(event);
+    });
+    TEST_CHECK(diagnostics->StartWriter(diagnosticRoot));
+    livekit::diagnostic::InstallBusinessPipeline(diagnostics);
     std::cout << "=========================================\n";
     std::cout << " Running Panic Guard & Safe Spawn Tests \n";
     std::cout << "=========================================\n";
@@ -69,6 +82,15 @@ int main() {
     TEST_CHECK(panic_callback_count == 2);
     TEST_CHECK(captured_panic_msg == livekit::secure_log::OpaqueSummary("panic"));
     TEST_CHECK(captured_panic_msg.find("synthetic-unhandled-secret") == std::string::npos);
+    livekit::diagnostic::InstallBusinessPipeline({});
+    TEST_CHECK(diagnostics->Close() == livekit::diagnostic::DrainResult::Completed);
+    int typedPanics = 0;
+    for (const auto& event : panicEvents)
+        typedPanics += event.kind == livekit::diagnostic::EventKind::ProcessIssue &&
+            event.issue_code == livekit::diagnostic::IssueCode::PanicTriggered;
+    TEST_CHECK(typedPanics == 2);
+    std::error_code ignored;
+    std::filesystem::remove_all(diagnosticRoot, ignored);
 
     std::cout << "=========================================\n";
     std::cout << " ALL PANIC GUARD TESTS PASSED SUCCESSFULLY! \n";

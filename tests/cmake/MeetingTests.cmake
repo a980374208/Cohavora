@@ -59,7 +59,6 @@ add_executable(test_meeting_session_runtime
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/video_demand_policy.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/video_demand_policy.h
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/video_demand_types.h
-    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/telemetry/session_telemetry.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/telemetry/session_telemetry.h
 )
 target_include_directories(test_meeting_session_runtime BEFORE PRIVATE
@@ -70,6 +69,7 @@ target_include_directories(test_meeting_session_runtime BEFORE PRIVATE
     ${WEBRTC_ROOT}/include
 )
 target_link_libraries(test_meeting_session_runtime PRIVATE
+    cohavora_core
     asio::asio
     ole32
     cohavora::qt_core_runtime)
@@ -158,6 +158,10 @@ add_test(NAME meeting_telemetry_ui_test
     COMMAND test_participant_window_remediation --telemetry-ui)
 set_tests_properties(meeting_telemetry_ui_test PROPERTIES
     TIMEOUT 30 LABELS "TELEMETRY_S1;TELEMETRY_S7")
+add_test(NAME meeting_chat_log_privacy_test
+    COMMAND test_participant_window_remediation --chat-log-privacy)
+set_tests_properties(meeting_chat_log_privacy_test PROPERTIES
+    TIMEOUT 30 LABELS "LOGGING_LG1;SECURITY_REGRESSION")
 add_test(NAME meeting_telemetry_s7_ui_100_test
     COMMAND test_participant_window_remediation --telemetry-s7-acceptance --scale-100)
 add_test(NAME meeting_telemetry_s7_ui_150_test

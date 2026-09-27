@@ -1,5 +1,4 @@
 #include "rtc_video_source.h"
-#include "telemetry.h"
 #include "../telemetry/session_telemetry.h"
 #include "api/scoped_refptr.h"
 #include "api/video/i420_buffer.h"
@@ -188,7 +187,6 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
                                        .set_timestamp_us(timestamp_us)
                                        .build();
 
-    Telemetry::Instance().OnFirstVideoFrameInjected();
     // This counts API submissions, even when the bridge has no encoder sink.
     output_frames_.fetch_add(1, std::memory_order_relaxed);
     if (const auto probe = std::atomic_load_explicit(

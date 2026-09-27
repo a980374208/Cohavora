@@ -14,6 +14,7 @@ add_library(cohavora_meeting_network STATIC
 target_include_directories(cohavora_meeting_network PUBLIC
     ${PROJECT_SOURCE_DIR})
 target_link_libraries(cohavora_meeting_network PUBLIC
+    cohavora_core
     cohavora::qt_network_runtime
     OpenSSL::SSL
     OpenSSL::Crypto)

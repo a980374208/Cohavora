@@ -52,13 +52,16 @@ public:
     void logout(ResultCallback<bool> callback = nullptr);
 
     // 3. 创建即时会议 (返回 LiveKit url 与 token)
-    void createImmediateMeeting(const QString &title, int durationSeconds, ResultCallback<LiveKitAuthInfo> callback);
+    void createImmediateMeeting(const QString &title, int durationSeconds, ResultCallback<LiveKitAuthInfo> callback,
+                                HttpRequestContext context = {});
 
     // 4. 加入会议 (第一阶段：业务校验)
-    void joinMeeting(const QString &meetingId, const QString &password, ResultCallback<bool> callback);
+    void joinMeeting(const QString &meetingId, const QString &password, ResultCallback<bool> callback,
+                     HttpRequestContext context = {});
 
     // 5. 换取会议 LiveKit Token (第二阶段：凭据获取)
-    void getMeetingToken(const QString &meetingId, ResultCallback<LiveKitAuthInfo> callback);
+    void getMeetingToken(const QString &meetingId, ResultCallback<LiveKitAuthInfo> callback,
+                         HttpRequestContext context = {});
 
     // 6. 查询会议列表
     void getMeetings(const std::vector<MeetingStatus> &statusList, ResultCallback<MeetingList> callback);
@@ -72,10 +75,12 @@ public:
     void cancelMeeting(const QString &meetingId, ResultCallback<bool> callback);
 
     // 8. 离开会议
-    void leaveMeeting(const QString &meetingId, ResultCallback<bool> callback);
+    void leaveMeeting(const QString &meetingId, ResultCallback<bool> callback,
+                      HttpRequestContext context = {});
 
     // 9. 结束全员会议 (主持人)
-    void endMeeting(const QString &meetingId, ResultCallback<bool> callback);
+    void endMeeting(const QString &meetingId, ResultCallback<bool> callback,
+                    HttpRequestContext context = {});
 
 signals:
     void tokenExpired();
@@ -96,12 +101,14 @@ private:
     void sendPost(const QString &path,
                   const QJsonObject &body,
                   std::function<void(bool ok, const QJsonValue &data, const HttpError &err)> cb,
-                  bool authenticated = true);
+                  bool authenticated = true,
+                  HttpRequestContext context = {});
     void sendPostToEndpoint(const QString &endpointBaseUrl,
                             const QString &path,
                             const QJsonObject &body,
                             std::function<void(bool ok, const QJsonValue &data, const HttpError &err)> cb,
-                            bool authenticated);
+                            bool authenticated,
+                            HttpRequestContext context = {});
 
     QString _baseUrl;
     QString _token;

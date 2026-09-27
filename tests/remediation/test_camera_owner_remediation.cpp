@@ -135,6 +135,7 @@ struct Effects final {
 	int requestLogs = 0;
 	int resultLogs = 0;
 	int warnings = 0;
+	std::vector<QString> logMessages;
 	std::thread::id lastResultThread;
 };
 
@@ -281,7 +282,8 @@ struct Fixture final {
 		window = CameraOwnerTestAccess::createWindow(manager, *session);
 		CameraOwnerTestAccess::setEffects(
 			*window,
-			[effects = effects](bool error, const QString &, const QString &) {
+			[effects = effects](bool error, const QString &, const QString &message) {
+				effects->logMessages.push_back(message);
 				if (error) {
 					++effects->resultLogs;
 					effects->lastResultThread = std::this_thread::get_id();
@@ -320,7 +322,8 @@ void runCase(const char *name, Callback &&callback) {
 void verifyAliveTimeout() {
 	runCase("A alive timeout reaches GUI once", [] {
 		Fixture fixture;
-		CameraOwnerTestAccess::request(*fixture.window, QStringLiteral("camera-b"));
+		const QString devicePath = QStringLiteral("private-device-camera-8264");
+		CameraOwnerTestAccess::request(*fixture.window, devicePath);
 		TEST_CHECK(fixture.timeouts.size() == 1);
 		auto timeout = fixture.takeTimeout();
 		std::thread worker([&] { timeout(); });
@@ -330,6 +333,9 @@ void verifyAliveTimeout() {
 		TEST_CHECK(fixture.effects->resultLogs == 1);
 		TEST_CHECK(fixture.effects->warnings == 1);
 		TEST_CHECK(fixture.effects->lastResultThread == std::this_thread::get_id());
+		for (const auto &message : fixture.effects->logMessages) {
+			TEST_CHECK(!message.contains(devicePath));
+		}
 		TEST_CHECK(fixture.manager->GetSwitchState() == livekit::CameraSwitchState::Aborted);
 	});
 }
@@ -337,7 +343,8 @@ void verifyAliveTimeout() {
 void verifyAliveFirstFrame() {
 	runCase("A first frame success reaches GUI once", [] {
 		Fixture fixture;
-		CameraOwnerTestAccess::request(*fixture.window, QStringLiteral("camera-b"));
+		const QString devicePath = QStringLiteral("private-device-camera-7342");
+		CameraOwnerTestAccess::request(*fixture.window, devicePath);
 		TEST_CHECK(fixture.captures.size() == 2);
 		std::thread producer([capture = fixture.captures[1]] { capture->produceFrame(); });
 		producer.join();
@@ -345,6 +352,9 @@ void verifyAliveFirstFrame() {
 		TEST_CHECK(fixture.effects->requestLogs == 2);
 		TEST_CHECK(fixture.effects->resultLogs == 0);
 		TEST_CHECK(fixture.effects->warnings == 0);
+		for (const auto &message : fixture.effects->logMessages) {
+			TEST_CHECK(!message.contains(devicePath));
+		}
 		TEST_CHECK(fixture.manager->GetSwitchState() == livekit::CameraSwitchState::Committed);
 	});
 }

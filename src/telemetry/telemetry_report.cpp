@@ -1,4 +1,6 @@
 #include "telemetry_report.h"
+#include "telemetry_checkpoint.h"
+#include "diagnostic_bundle.h"
 
 #include <nlohmann/json.hpp>
 
@@ -12,6 +14,13 @@
 #include <system_error>
 #include <type_traits>
 
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <Windows.h>
+#endif
+
 namespace livekit::telemetry {
 namespace {
 
@@ -19,6 +28,18 @@ using Json = nlohmann::json;
 
 constexpr std::array<const char*, 4> kReportFiles = {
     "manifest.json", "session.json", "metrics.jsonl", "metrics.csv"};
+constexpr std::array<const char*, 4> kReportTemporaryFiles = {
+    "manifest.json.tmp", "session.json.tmp", "metrics.jsonl.tmp",
+    "metrics.csv.tmp"};
+
+bool IsLegacyTemporaryDirectory(std::string_view name) {
+    constexpr std::string_view prefix = ".cohavora-telemetry-tmp-";
+    if (!name.starts_with(prefix) || name.size() != prefix.size() + 32)
+        return false;
+    return std::all_of(name.begin() + prefix.size(), name.end(),
+        [](char ch) { return (ch >= '0' && ch <= '9') ||
+            (ch >= 'a' && ch <= 'f'); });
+}
 
 std::mutex g_installed_mutex;
 std::weak_ptr<TelemetryHistoryStore> g_installed_store;
@@ -26,6 +47,10 @@ std::weak_ptr<TelemetryHistoryStore> g_installed_store;
 std::int64_t UtcNowMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
+std::size_t PendingCharge(const TelemetryCheckpointRecord& record) {
+    return 2 * (sizeof(record) + record.jsonl.capacity() + 64);
 }
 
 std::string SafeText(std::string value) {
@@ -193,6 +218,15 @@ std::uint64_t DirectoryKnownSize(const std::filesystem::path& directory) {
         total += std::filesystem::file_size(path, error);
         if (error) error.clear();
     }
+    for (const auto* name : kReportTemporaryFiles) {
+        const auto path = directory / name;
+        if (!std::filesystem::is_regular_file(path, error) || error) {
+            error.clear();
+            continue;
+        }
+        total += std::filesystem::file_size(path, error);
+        if (error) error.clear();
+    }
     return total;
 }
 
@@ -200,11 +234,29 @@ bool RemoveKnownReport(const std::filesystem::path& directory) {
     std::error_code error;
     const bool recognized = std::filesystem::is_regular_file(
         directory / "manifest.json", error) && !error;
+#if defined(_WIN32)
+    HANDLE handle = nullptr;
+    if (recognized) {
+        handle = CreateFileW((directory / L"manifest.json").c_str(),
+            GENERIC_READ, FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle == INVALID_HANDLE_VALUE) return false;
+    }
+    auto close = std::unique_ptr<void, decltype(&CloseHandle)>(
+        handle, &CloseHandle);
+#endif
     error.clear();
     for (const auto* name : kReportFiles) {
         std::filesystem::remove(directory / name, error);
         error.clear();
     }
+    for (const auto* name : kReportTemporaryFiles) {
+        std::filesystem::remove(directory / name, error);
+        error.clear();
+    }
+#if defined(_WIN32)
+    close.reset();
+#endif
     std::filesystem::remove(directory, error);
     error.clear();
     const auto known_files_gone = std::all_of(
@@ -266,7 +318,10 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("session.admission_to_usable", Signed(s.admission_to_usable_ms), "ms",
           s.admission_to_usable_availability, s.admission_to_usable_reason,
           s.admission_to_usable_measurement_point);
-    for (const auto& capability : s.metric_product_chains) {
+    for (std::size_t index = 0;
+         index < s.metric_product_chains.size() && index < 64; ++index) {
+        const auto& capability = s.metric_product_chains[index];
+        if (!IsKnownMetricProductChain(capability)) continue;
         const auto availability = ProductChainAvailability(capability.status);
         group("product_chain." + capability.metric_id,
               std::string(ProductChainStatusName(capability.status)), "status",
@@ -1490,6 +1545,30 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     return rows;
 }
 
+std::string SerializeSafeTelemetryCheckpointRecord(
+    const SafeTelemetryRecord& record) {
+    std::string output;
+    for (const auto& metric : BuildSafeMetricRows(record)) {
+        Json line{
+            {"source_utc_ms", record.source_utc_ms != 0
+                ? record.source_utc_ms : record.captured_utc_ms},
+            {"source_monotonic_us", record.source_monotonic_us},
+            {"session_generation", record.snapshot.session_generation},
+            {"revision", record.snapshot.revision},
+            {"key", metric.key},
+            {"value", JsonValue(metric.value)},
+            {"unit", metric.unit},
+            {"availability", metric.availability},
+            {"reason", metric.reason},
+            {"measurement_point", metric.measurement_point},
+            {"definition_version", record.definition_version},
+        };
+        output += line.dump();
+        output.push_back('\n');
+    }
+    return output;
+}
+
 TelemetryExportResult WriteTelemetryReportAtomically(
     const std::vector<SafeTelemetryRecordPtr>& records,
     const std::filesystem::path& destination_root,
@@ -1676,16 +1755,33 @@ TelemetryHistoryStore::TelemetryHistoryStore(
     std::size_t memory_buckets,
     std::size_t queue_capacity,
     std::uint64_t maximum_bytes,
-    std::chrono::hours retention)
+    std::chrono::hours retention,
+    std::size_t queue_byte_capacity,
+    std::string process_run_id,
+    std::filesystem::path diagnostic_root)
     : root_(std::move(root))
+    , diagnostic_root_(std::move(diagnostic_root))
+    , process_run_id_(std::move(process_run_id))
     , memory_buckets_((std::max)(std::size_t{1}, memory_buckets))
-    , queue_capacity_((std::max)(std::size_t{4}, queue_capacity))
+    , queue_capacity_((std::clamp)(queue_capacity,
+        std::size_t{4}, kDefaultQueueCapacity))
+    , queue_byte_capacity_((std::clamp)(queue_byte_capacity,
+        std::size_t{4096}, kDefaultQueueBytes))
     , maximum_bytes_((std::max)(std::uint64_t{1024 * 1024}, maximum_bytes))
     , retention_(retention) {
     status_.queue_capacity = queue_capacity_;
+    status_.queue_byte_capacity = queue_byte_capacity_;
     status_cache_ = std::make_shared<const TelemetryStoreStatus>(status_);
     worker_ = std::thread([this] { Run(); });
 }
+
+TelemetryHistoryStore::TelemetryHistoryStore(
+    std::filesystem::path root, std::string process_run_id,
+    std::filesystem::path diagnostic_root)
+    : TelemetryHistoryStore(std::move(root), kDefaultMemoryBuckets,
+        kDefaultQueueCapacity, kDefaultMaximumBytes, kDefaultRetention,
+        kDefaultQueueBytes, std::move(process_run_id),
+        std::move(diagnostic_root)) {}
 
 TelemetryHistoryStore::~TelemetryHistoryStore() {
     Close();
@@ -1699,18 +1795,98 @@ void TelemetryHistoryStore::Close() {
     }
     condition_.notify_one();
     if (worker_.joinable()) worker_.join();
+    run_lease_.reset();
 }
 
 bool TelemetryHistoryStore::SubmitSnapshot(
     SessionTelemetry::SnapshotPtr snapshot,
-    StabilitySummary stability) {
+    StabilitySummary stability,
+    std::string anonymous_session_id) {
     if (!snapshot) return false;
-    const bool terminal = snapshot->session_complete;
-    Job job;
-    job.kind = JobKind::Snapshot;
-    job.snapshot = std::move(snapshot);
-    job.stability = std::move(stability);
-    return Enqueue(std::move(job), terminal);
+    if (snapshot->metric_product_chains.size() > 64 ||
+        snapshot->operation_summaries.size() > 64) return false;
+    if (!anonymous_session_id.empty() &&
+        (anonymous_session_id.size() != 32 ||
+         !std::all_of(anonymous_session_id.begin(), anonymous_session_id.end(),
+             [](char ch) { return (ch >= '0' && ch <= '9') ||
+                 (ch >= 'a' && ch <= 'f'); }))) return false;
+    bool admitted = false;
+    try {
+        std::lock_guard submit_lock(submit_mutex_);
+        const auto generation = snapshot->session_generation;
+        bool new_session = false;
+        {
+            std::lock_guard lock(mutex_);
+            if (stopping_) return false;
+            new_session = current_session_id_.empty() ||
+                current_generation_ != generation;
+            if (anonymous_session_id.empty() && !new_session)
+                anonymous_session_id = current_session_id_;
+            else if (!new_session &&
+                       anonymous_session_id != current_session_id_) {
+                ++status_.queue_drops;
+                status_.availability = Availability::Invalid;
+                status_.reason = "met_06_session_id_mismatch";
+                PublishStatusLocked();
+                return false;
+            }
+        }
+        if (anonymous_session_id.empty()) anonymous_session_id = NewOpaqueId();
+        const auto submitted_at = Snapshot::Clock::now();
+        const auto source_at = snapshot->generated_at ==
+                Snapshot::Clock::time_point{} ||
+            snapshot->generated_at > submitted_at
+            ? submitted_at : snapshot->generated_at;
+        const auto elapsed = std::chrono::duration_cast<
+            std::chrono::milliseconds>(submitted_at - source_at);
+        Job job;
+        job.kind = JobKind::Snapshot;
+        job.snapshot = std::move(snapshot);
+        job.stability = std::move(stability);
+        job.captured_utc_ms = UtcNowMs();
+        job.source_monotonic_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(
+                source_at.time_since_epoch()).count();
+        job.checkpoint.generation = generation;
+        job.checkpoint.revision = job.snapshot->revision;
+        job.checkpoint.source_utc_ms = job.captured_utc_ms - elapsed.count();
+        job.checkpoint.complete = job.snapshot->session_complete;
+        job.anonymous_session_id = anonymous_session_id;
+        const bool terminal = job.checkpoint.complete;
+        std::lock_guard lock(mutex_);
+        if (!EnqueueLocked(std::move(job), terminal))
+            return false;
+        admitted = true;
+        if (new_session) {
+            current_records_.clear();
+            current_record_bytes_ = 0;
+            current_session_id_ = anonymous_session_id;
+            current_generation_ = generation;
+            status_.memory_records = 0;
+            status_.memory_bytes = 0;
+        }
+        ++status_.snapshots_accepted;
+        if (status_.availability != Availability::Invalid) {
+            status_.availability = Availability::Valid;
+            status_.reason = status_.history_enabled
+                ? "bounded_history_valid" : "history_disabled_by_user";
+        }
+        if (terminal && !status_.history_enabled) {
+            current_records_.clear();
+            current_record_bytes_ = 0;
+            status_.memory_records = 0;
+            status_.memory_bytes = 0;
+        }
+        PublishStatusLocked();
+        return true;
+    } catch (...) {
+        std::lock_guard lock(mutex_);
+        if (!admitted) ++status_.queue_drops;
+        status_.availability = Availability::Invalid;
+        status_.reason = "met_06_snapshot_admission_failed";
+        PublishStatusLocked();
+        return admitted;
+    }
 }
 
 bool TelemetryHistoryStore::ExportCurrent(
@@ -1720,22 +1896,94 @@ bool TelemetryHistoryStore::ExportCurrent(
     Job job;
     job.kind = JobKind::Export;
     job.destination = std::move(destination_root);
-    job.export_callback = std::move(callback);
+    job.export_callback = callback;
     job.cancelled = std::move(cancelled);
-    return Enqueue(std::move(job), true);
+    if (Enqueue(std::move(job), true)) return true;
+    try { if (callback) callback({false, false, "export_rejected", {}}); }
+    catch (...) {}
+    return false;
+}
+
+bool TelemetryHistoryStore::ExportReport(
+    std::string record_id,
+    std::filesystem::path destination_root,
+    ExportCallback callback,
+    std::shared_ptr<std::atomic_bool> cancelled,
+    std::int64_t first_utc_ms,
+    std::int64_t last_utc_ms) {
+    constexpr std::string_view v2 = "cohavora-telemetry-v2-";
+    constexpr std::string_view v1 = "cohavora-telemetry-v1-";
+    const auto suffix = record_id.starts_with(v2)
+        ? std::string_view(record_id).substr(v2.size())
+        : record_id.starts_with(v1)
+            ? std::string_view(record_id).substr(v1.size())
+            : std::string_view{};
+    const auto legacy_dash = suffix.find('-');
+    const bool valid_v1 = record_id.starts_with(v1) &&
+        legacy_dash != std::string_view::npos && legacy_dash > 0 &&
+        std::all_of(suffix.begin(), suffix.begin() + legacy_dash,
+            [](char ch) { return ch >= '0' && ch <= '9'; }) &&
+        suffix.size() == legacy_dash + 1 + 32;
+    const auto session = valid_v1
+        ? suffix.substr(legacy_dash + 1) : suffix;
+    if ((!record_id.starts_with(v2) && !valid_v1) ||
+        session.size() != 32 ||
+        !std::all_of(session.begin(), session.end(),
+            [](char ch) { return (ch >= '0' && ch <= '9') ||
+                (ch >= 'a' && ch <= 'f'); }) ||
+        first_utc_ms < 0 || last_utc_ms < 0 ||
+        (first_utc_ms && last_utc_ms && first_utc_ms > last_utc_ms)) {
+        try { if (callback) callback({false, false, "invalid_report_id", {}}); }
+        catch (...) {}
+        return false;
+    }
+    Job job;
+    job.kind = JobKind::ExportReport;
+    job.record_id = std::move(record_id);
+    job.first_utc_ms = first_utc_ms;
+    job.last_utc_ms = last_utc_ms;
+    job.destination = std::move(destination_root);
+    job.export_callback = callback;
+    job.cancelled = std::move(cancelled);
+    if (Enqueue(std::move(job), true)) return true;
+    try { if (callback) callback({false, false, "export_rejected", {}}); }
+    catch (...) {}
+    return false;
 }
 
 bool TelemetryHistoryStore::ClearReport(
     std::string record_id,
     MutationCallback callback) {
     if (record_id.empty() || record_id.find_first_of("/\\") != std::string::npos) {
+        try { if (callback) callback(false, "invalid_report_id"); }
+        catch (...) {}
         return false;
     }
     Job job;
     job.kind = JobKind::ClearReport;
     job.record_id = std::move(record_id);
-    job.mutation_callback = std::move(callback);
-    return Enqueue(std::move(job), true);
+    job.mutation_callback = callback;
+    if (Enqueue(std::move(job), true)) return true;
+    try { if (callback) callback(false, "clear_rejected"); }
+    catch (...) {}
+    return false;
+}
+
+bool TelemetryHistoryStore::RetryCheckpoint(
+    std::string record_id, MutationCallback callback) {
+    if (record_id.empty() || record_id.find_first_of("/\\") != std::string::npos) {
+        try { if (callback) callback(false, "invalid_report_id"); }
+        catch (...) {}
+        return false;
+    }
+    Job job;
+    job.kind = JobKind::RetryCheckpoint;
+    job.record_id = std::move(record_id);
+    job.mutation_callback = callback;
+    if (Enqueue(std::move(job), true)) return true;
+    try { if (callback) callback(false, "retry_rejected"); }
+    catch (...) {}
+    return false;
 }
 
 void TelemetryHistoryStore::SetHistoryEnabled(bool enabled) {
@@ -1751,22 +1999,60 @@ std::shared_ptr<const TelemetryStoreStatus> TelemetryHistoryStore::Status() cons
 
 std::vector<SafeTelemetryRecordPtr> TelemetryHistoryStore::CurrentRecords() const {
     std::lock_guard lock(mutex_);
-    return {current_records_.begin(), current_records_.end()};
+    std::vector<SafeTelemetryRecordPtr> result;
+    result.reserve(current_records_.size());
+    for (const auto& item : current_records_)
+        result.push_back(item.record);
+    return result;
 }
 
 bool TelemetryHistoryStore::Enqueue(Job job, bool terminal_priority) {
-    std::lock_guard lock(mutex_);
+    try {
+        std::lock_guard lock(mutex_);
+        return EnqueueLocked(std::move(job), terminal_priority);
+    } catch (...) {
+        return false;
+    }
+}
+
+bool TelemetryHistoryStore::EnqueueLocked(Job job, bool terminal_priority) {
     if (stopping_) return false;
-    if (jobs_.size() >= queue_capacity_) {
+    const bool export_job = job.kind == JobKind::Export ||
+        job.kind == JobKind::ExportReport;
+    if (export_job && export_jobs_ >= 2) return false;
+    constexpr std::size_t kSnapshotReservation = 1024 * 1024;
+    constexpr std::size_t kControlCallbackReservation = 4096;
+    job.charge = sizeof(Job) + job.checkpoint.jsonl.capacity() +
+        (job.kind == JobKind::Snapshot ? kSnapshotReservation : 0) +
+        (job.export_callback || job.mutation_callback
+            ? kControlCallbackReservation : 0) +
+        job.anonymous_session_id.capacity() + job.record_id.capacity() +
+        job.destination.native().capacity() *
+            sizeof(std::filesystem::path::value_type);
+    if (job.charge > queue_byte_capacity_) {
+        if (job.kind == JobKind::Snapshot)
+            RecordLossLocked(job.anonymous_session_id, job.checkpoint);
+        ++status_.queue_drops;
+        status_.availability = Availability::Invalid;
+        status_.reason = "met_06_queue_bytes_exceeded";
+        PublishStatusLocked();
+        return false;
+    }
+    while (jobs_.size() + inflight_jobs_ >= queue_capacity_ ||
+           status_.queue_bytes > queue_byte_capacity_ - job.charge) {
         if (terminal_priority) {
             const auto found = std::find_if(jobs_.begin(), jobs_.end(), [](const Job& queued) {
-                return queued.kind == JobKind::Snapshot && queued.snapshot &&
-                    !queued.snapshot->session_complete;
+                return queued.kind == JobKind::Snapshot &&
+                    !queued.checkpoint.complete;
             });
             if (found != jobs_.end()) {
+                RecordLossLocked(found->anonymous_session_id, found->checkpoint);
+                status_.queue_bytes -= found->charge;
                 jobs_.erase(found);
                 ++status_.queue_drops;
             } else {
+                if (job.kind == JobKind::Snapshot)
+                    RecordLossLocked(job.anonymous_session_id, job.checkpoint);
                 ++status_.queue_drops;
                 status_.availability = Availability::Invalid;
                 status_.reason = "met_06_queue_capacity_exceeded";
@@ -1774,6 +2060,8 @@ bool TelemetryHistoryStore::Enqueue(Job job, bool terminal_priority) {
                 return false;
             }
         } else {
+            if (job.kind == JobKind::Snapshot)
+                RecordLossLocked(job.anonymous_session_id, job.checkpoint);
             ++status_.queue_drops;
             status_.availability = Availability::Invalid;
             status_.reason = "met_06_queue_capacity_exceeded";
@@ -1781,7 +2069,10 @@ bool TelemetryHistoryStore::Enqueue(Job job, bool terminal_priority) {
             return false;
         }
     }
+    const auto charge = job.charge;
     jobs_.push_back(std::move(job));
+    if (export_job) ++export_jobs_;
+    status_.queue_bytes += charge;
     status_.queue_depth = jobs_.size();
     PublishStatusLocked();
     condition_.notify_one();
@@ -1792,20 +2083,37 @@ void TelemetryHistoryStore::Run() {
     RefreshAndPruneReports();
     while (true) {
         Job job;
+        bool has_job = false;
+        bool stopping = false;
         {
             std::unique_lock lock(mutex_);
-            condition_.wait(lock, [this] { return stopping_ || !jobs_.empty(); });
-            if (jobs_.empty() && stopping_) break;
-            job = std::move(jobs_.front());
-            jobs_.pop_front();
-            status_.queue_depth = jobs_.size();
-            PublishStatusLocked();
+            condition_.wait_for(lock, std::chrono::seconds(1),
+                                [this] { return stopping_ || !jobs_.empty(); });
+            stopping = stopping_;
+            if (jobs_.empty() && stopping) break;
+            if (!jobs_.empty()) {
+                job = std::move(jobs_.front());
+                jobs_.pop_front();
+                ++inflight_jobs_;
+                status_.inflight_jobs = inflight_jobs_;
+                has_job = true;
+                status_.queue_depth = jobs_.size();
+                PublishStatusLocked();
+            }
         }
+        const auto completed_charge = job.charge;
         try {
+            if (!has_job) {
+                FlushPendingReports(false);
+                FlushLossRanges(false);
+                continue;
+            }
             switch (job.kind) {
             case JobKind::Snapshot: HandleSnapshot(std::move(job)); break;
             case JobKind::Export: HandleExport(std::move(job)); break;
+            case JobKind::ExportReport: HandleExport(std::move(job)); break;
             case JobKind::ClearReport: HandleClear(std::move(job)); break;
+            case JobKind::RetryCheckpoint: HandleRetry(std::move(job)); break;
             case JobKind::SetHistoryEnabled: {
                 std::vector<std::string> report_ids;
                 {
@@ -1813,23 +2121,42 @@ void TelemetryHistoryStore::Run() {
                     status_.history_enabled = job.enabled;
                     if (!job.enabled) {
                         current_records_.clear();
+                        current_record_bytes_ = 0;
+                        pending_reports_.clear();
+                        loss_ranges_pending_.clear();
+                        status_.loss_ranges_pending = 0;
                         for (const auto& entry : status_.reports) {
                             report_ids.push_back(entry.record_id);
                         }
                     }
                     status_.memory_records = current_records_.size();
+                    status_.memory_bytes = current_record_bytes_;
                     status_.availability = Availability::Valid;
                     status_.reason = job.enabled
                         ? "history_enabled" : "history_disabled_by_user";
                     PublishStatusLocked();
                 }
                 if (!job.enabled) {
-                    for (const auto& id : report_ids) RemoveKnownReport(root_ / id);
+                    for (const auto& id : report_ids) {
+                        if (id.starts_with("cohavora-telemetry-v2-"))
+                            RemoveTelemetryCheckpoint(root_ / id);
+                        else
+                            RemoveKnownReport(root_ / id);
+                    }
+                    if (!ClearTelemetryLossSummary(root_)) {
+                        std::lock_guard lock(mutex_);
+                        ++status_.write_failures;
+                        status_.availability = Availability::Invalid;
+                        status_.reason = "met_06_loss_summary_clear_failed";
+                        PublishStatusLocked();
+                    }
                     RefreshAndPruneReports();
                 }
                 break;
             }
             }
+            FlushPendingReports(stopping);
+            FlushLossRanges(stopping);
         } catch (...) {
             std::lock_guard lock(mutex_);
             ++status_.write_failures;
@@ -1837,79 +2164,337 @@ void TelemetryHistoryStore::Run() {
             status_.reason = "met_06_worker_exception";
             PublishStatusLocked();
         }
+        {
+            std::lock_guard lock(mutex_);
+            status_.queue_bytes -= completed_charge;
+            --inflight_jobs_;
+            status_.inflight_jobs = inflight_jobs_;
+            PublishStatusLocked();
+        }
     }
+    FlushPendingReports(true);
+    FlushLossRanges(true);
+}
+
+void TelemetryHistoryStore::RecordLossLocked(
+    const std::string& session_id,
+    const TelemetryCheckpointRecord& record) {
+    try {
+        if (session_id.size() != 32 || record.revision == 0) return;
+        if (!loss_ranges_pending_.empty() &&
+            loss_ranges_pending_.back().anonymous_session_id == session_id) {
+            auto& last = loss_ranges_pending_.back();
+            ++last.dropped_records;
+            last.first_revision = (std::min)(last.first_revision, record.revision);
+            last.last_revision = (std::max)(last.last_revision, record.revision);
+            last.first_source_utc_ms = (std::min)(
+                last.first_source_utc_ms, record.source_utc_ms);
+            last.last_source_utc_ms = (std::max)(
+                last.last_source_utc_ms, record.source_utc_ms);
+        } else if (loss_ranges_pending_.size() < 256) {
+            loss_ranges_pending_.push_back({session_id, 1, record.revision,
+                record.revision, record.source_utc_ms, record.source_utc_ms});
+        } else {
+            ++status_.loss_ranges_omitted;
+        }
+        status_.loss_ranges_pending = loss_ranges_pending_.size();
+    } catch (...) { ++status_.loss_ranges_omitted; }
+}
+
+void TelemetryHistoryStore::FlushLossRanges(bool force) {
+    const auto now = std::chrono::steady_clock::now();
+    if (!force && now < loss_next_attempt_) return;
+    std::deque<TelemetryLossRange> pending;
+    {
+        std::lock_guard lock(mutex_);
+        if (loss_ranges_pending_.empty()) return;
+        pending.swap(loss_ranges_pending_);
+        status_.loss_ranges_pending = 0;
+        PublishStatusLocked();
+    }
+    bool persisted = false;
+    try {
+        RefreshAndPruneReports(64 * 1024);
+        const std::vector<TelemetryLossRange> batch(
+            pending.begin(), pending.end());
+        persisted = PersistTelemetryLossRanges(root_, batch, maximum_bytes_);
+    } catch (...) {}
+    if (persisted) {
+        loss_retry_count_ = 0;
+        loss_first_failure_ = {};
+        loss_next_attempt_ = {};
+        std::lock_guard lock(mutex_);
+        status_.loss_ranges_persisted += pending.size();
+        PublishStatusLocked();
+        return;
+    }
+    ++loss_retry_count_;
+    if (loss_first_failure_ == std::chrono::steady_clock::time_point{})
+        loss_first_failure_ = now;
+    constexpr std::array delays{1, 5, 30, 60};
+    loss_next_attempt_ = now + std::chrono::seconds(delays[(std::min)(
+        loss_retry_count_ - 1, static_cast<unsigned>(delays.size() - 1))]);
+    if (now - loss_first_failure_ >= std::chrono::minutes(5))
+        loss_next_attempt_ = std::chrono::steady_clock::time_point::max();
+    std::lock_guard lock(mutex_);
+    while (!pending.empty()) {
+        if (loss_ranges_pending_.size() == 256) {
+            status_.loss_ranges_omitted += pending.size();
+            break;
+        }
+        loss_ranges_pending_.push_front(std::move(pending.back()));
+        pending.pop_back();
+    }
+    status_.loss_ranges_pending = loss_ranges_pending_.size();
+    ++status_.loss_persist_failures;
+    status_.availability = Availability::Invalid;
+    status_.reason = "met_06_loss_summary_write_failed";
+    PublishStatusLocked();
 }
 
 void TelemetryHistoryStore::HandleSnapshot(Job job) {
-    const auto captured = UtcNowMs();
-    std::vector<SafeTelemetryRecordPtr> completed;
-    {
-        std::lock_guard lock(mutex_);
-        if (!job.snapshot) return;
-        if (current_generation_ != job.snapshot->session_generation) {
-            current_records_.clear();
-            current_session_id_ = NewOpaqueId();
-            current_generation_ = job.snapshot->session_generation;
-            current_persisted_ = false;
-        }
-        if (current_session_id_.empty()) current_session_id_ = NewOpaqueId();
+    if (!job.snapshot) return;
+    try {
         auto record = std::make_shared<SafeTelemetryRecord>();
-        record->anonymous_session_id = current_session_id_;
-        record->captured_utc_ms = captured;
-        record->complete = job.snapshot->session_complete;
+        record->anonymous_session_id = job.anonymous_session_id;
+        record->captured_utc_ms = job.captured_utc_ms;
+        record->source_utc_ms = job.checkpoint.source_utc_ms;
+        record->source_monotonic_us = job.source_monotonic_us;
+        record->complete = job.checkpoint.complete;
         record->snapshot = *job.snapshot;
         record->stability = std::move(job.stability);
-        const auto bucket = captured / 1000;
-        if (!current_records_.empty() &&
-            current_records_.back()->captured_utc_ms / 1000 == bucket) {
-            current_records_.back() = std::move(record);
-            ++status_.one_second_buckets_coalesced;
-        } else {
-            current_records_.push_back(std::move(record));
-        }
-        while (current_records_.size() > memory_buckets_) {
-            current_records_.pop_front();
-        }
-        ++status_.snapshots_accepted;
-        status_.memory_records = current_records_.size();
-        status_.availability = Availability::Valid;
-        status_.reason = status_.history_enabled
-            ? "bounded_history_valid" : "history_disabled_by_user";
-        if (job.snapshot->session_complete && status_.history_enabled &&
-            !current_persisted_) {
-            completed.assign(current_records_.begin(), current_records_.end());
-            current_persisted_ = true;
-        } else if (job.snapshot->session_complete && !status_.history_enabled) {
-            current_records_.clear();
-            status_.memory_records = 0;
-        }
-        PublishStatusLocked();
-    }
-    if (!completed.empty()) {
-        const auto result = WriteTelemetryReportAtomically(
-            completed, root_, true, {});
+        job.checkpoint = MakeTelemetryCheckpointRecord(*record);
         {
             std::lock_guard lock(mutex_);
-            if (!result.success) {
-                ++status_.write_failures;
-                status_.availability = Availability::Invalid;
-                status_.reason = "met_06_" + result.reason;
+            if (job.anonymous_session_id == current_session_id_ &&
+                (status_.history_enabled || !job.checkpoint.complete) &&
+                job.checkpoint.generation == current_generation_) {
+                const auto bucket = record->source_utc_ms / 1000;
+                const auto charge = sizeof(SafeTelemetryRecord) +
+                    PendingCharge(job.checkpoint);
+                if (!current_records_.empty() &&
+                    current_records_.back().record->source_utc_ms / 1000 == bucket) {
+                    current_record_bytes_ -= current_records_.back().charge;
+                    current_records_.back() = {std::move(record), charge};
+                    current_record_bytes_ += charge;
+                    ++status_.one_second_buckets_coalesced;
+                } else {
+                    current_records_.push_back({std::move(record), charge});
+                    current_record_bytes_ += charge;
+                }
+                while (current_records_.size() > memory_buckets_ ||
+                       current_record_bytes_ > kDefaultMemoryBytes) {
+                    current_record_bytes_ -= current_records_.front().charge;
+                    current_records_.pop_front();
+                    ++status_.memory_records_evicted;
+                }
+                status_.memory_records = current_records_.size();
+                status_.memory_bytes = current_record_bytes_;
             }
             PublishStatusLocked();
         }
-        RefreshAndPruneReports();
+    } catch (...) {
+        std::lock_guard lock(mutex_);
+        RecordLossLocked(job.anonymous_session_id, job.checkpoint);
+        ++status_.queue_drops;
+        status_.availability = Availability::Invalid;
+        status_.reason = "met_06_snapshot_projection_failed";
+        PublishStatusLocked();
+        return;
     }
+    if (job.checkpoint.jsonl.empty()) return;
+    {
+        std::lock_guard lock(mutex_);
+        if (!status_.history_enabled) return;
+    }
+    const auto found = std::find_if(pending_reports_.begin(), pending_reports_.end(),
+        [&](const PendingReport& report) {
+            return report.id == job.anonymous_session_id;
+        });
+    if (found == pending_reports_.end()) {
+        if (pending_reports_.size() >= 4) {
+            const auto& oldest = pending_reports_.front();
+            std::lock_guard lock(mutex_);
+            for (const auto& lost : oldest.records)
+                RecordLossLocked(oldest.id, lost);
+            status_.pending_records_dropped += oldest.records.size();
+            ++status_.pending_reports_dropped;
+            pending_reports_.pop_front();
+        }
+        pending_reports_.push_back(PendingReport{
+            .id = job.anonymous_session_id,
+            .generation = job.checkpoint.generation,
+            .next_attempt = std::chrono::steady_clock::now() +
+                std::chrono::seconds(15)});
+    }
+    auto& report = *std::find_if(pending_reports_.begin(), pending_reports_.end(),
+        [&](const PendingReport& item) {
+            return item.id == job.anonymous_session_id;
+        });
+    auto compact = std::move(job.checkpoint);
+    const bool terminal = compact.complete;
+    const auto bytes = PendingCharge(compact);
+    std::size_t total = 0;
+    for (const auto& item : pending_reports_) total += item.bytes;
+    const auto same_revision = std::find_if(report.records.begin(),
+        report.records.end(), [&](const auto& record) {
+            return record.revision == compact.revision;
+        });
+    const auto replaced_bytes = same_revision == report.records.end()
+        ? std::size_t{0} : PendingCharge(*same_revision);
+    if (bytes > 8 * 1024 * 1024 ||
+        total - replaced_bytes + bytes > 8 * 1024 * 1024) {
+        std::lock_guard lock(mutex_);
+        RecordLossLocked(job.anonymous_session_id, compact);
+        ++status_.pending_records_dropped;
+        status_.availability = Availability::Invalid;
+        status_.reason = "met_06_pending_capacity_exceeded";
+        PublishStatusLocked();
+        return;
+    }
+    if (same_revision != report.records.end()) {
+        report.bytes -= replaced_bytes;
+        *same_revision = std::move(compact);
+    } else {
+        report.records.push_back(std::move(compact));
+    }
+    report.bytes += bytes;
+    report.terminal = report.terminal || terminal;
+    if (report.terminal && report.retry_count == 0)
+        report.next_attempt = std::chrono::steady_clock::now();
+    PublishPendingStatus();
+}
+
+void TelemetryHistoryStore::PublishPendingStatus() {
+    std::size_t bytes = 0;
+    for (const auto& report : pending_reports_) bytes += report.bytes;
+    std::lock_guard lock(mutex_);
+    status_.pending_reports = pending_reports_.size();
+    status_.pending_bytes = bytes;
+    status_.pending_report_ids.clear();
+    for (const auto& report : pending_reports_)
+        status_.pending_report_ids.push_back(report.id);
+    PublishStatusLocked();
+}
+
+void TelemetryHistoryStore::FlushPendingReports(bool force) {
+    if (!pending_reports_.empty() && !process_run_id_.empty() &&
+        (!run_lease_ || !run_lease_->acquired())) {
+        run_lease_ = std::make_unique<TelemetryRunLease>(root_, process_run_id_);
+        if (!run_lease_->acquired()) {
+            std::lock_guard lock(mutex_);
+            ++status_.write_failures;
+            status_.availability = Availability::Invalid;
+            status_.reason = "met_06_run_lease_unavailable";
+            PublishStatusLocked();
+            return;
+        }
+    }
+    const auto now = std::chrono::steady_clock::now();
+    bool changed = false;
+    for (auto it = pending_reports_.begin(); it != pending_reports_.end();) {
+        bool superseded = false;
+        {
+            std::lock_guard lock(mutex_);
+            superseded = it->generation != current_generation_;
+        }
+        if (it->records.empty() && superseded) {
+            it = pending_reports_.erase(it);
+            continue;
+        }
+        if (it->records.empty() || (!force && now < it->next_attempt)) {
+            ++it;
+            continue;
+        }
+        std::uint64_t reserve_bytes = 16384;
+        for (const auto& record : it->records)
+            reserve_bytes += record.jsonl.size();
+        RefreshAndPruneReports(reserve_bytes);
+        const auto result = AppendTelemetryCheckpoint(
+            root_, it->id, it->records,
+            (std::min)(maximum_bytes_ / 2, 64ull * 1024ull * 1024ull),
+            process_run_id_, maximum_bytes_);
+        if (result.success) {
+            const auto watermark = result.status.last_committed_revision;
+            it->committed_revision = watermark;
+            it->retry_count = 0;
+            it->first_failure = {};
+            for (const auto& record : it->records) {
+                if (record.revision <= watermark) {
+                    it->bytes -= PendingCharge(record);
+                }
+            }
+            it->records.erase(std::remove_if(it->records.begin(), it->records.end(),
+                [watermark](const auto& record) {
+                    return record.revision <= watermark;
+                }), it->records.end());
+            {
+                std::lock_guard lock(mutex_);
+                status_.checkpoint_revision = watermark;
+                status_.availability = Availability::Valid;
+                status_.reason = "checkpoint_committed";
+                PublishStatusLocked();
+            }
+            changed = true;
+            if (it->terminal && it->records.empty()) {
+                it = pending_reports_.erase(it);
+                continue;
+            }
+            it->next_attempt = now + std::chrono::seconds(15);
+        } else {
+            ++it->retry_count;
+            if (it->first_failure == std::chrono::steady_clock::time_point{})
+                it->first_failure = now;
+            constexpr std::array delays{1, 5, 30, 60};
+            const auto delay = delays[(std::min)(it->retry_count - 1,
+                static_cast<unsigned>(delays.size() - 1))];
+            it->next_attempt = now + std::chrono::seconds(delay);
+            if (now - it->first_failure >= std::chrono::minutes(5))
+                it->next_attempt = std::chrono::steady_clock::time_point::max();
+            std::lock_guard lock(mutex_);
+            ++status_.write_failures;
+            status_.availability = Availability::Invalid;
+            status_.reason = "met_06_" + result.reason;
+            PublishStatusLocked();
+        }
+        ++it;
+    }
+    PublishPendingStatus();
+    if (changed) RefreshAndPruneReports();
 }
 
 void TelemetryHistoryStore::HandleExport(Job job) {
-    std::vector<SafeTelemetryRecordPtr> records;
-    {
-        std::lock_guard lock(mutex_);
-        records.assign(current_records_.begin(), current_records_.end());
+    TelemetryExportResult result;
+    try {
+        if (job.kind == JobKind::ExportReport) {
+            std::optional<TelemetryReportEntry> selected;
+            {
+                std::lock_guard lock(mutex_);
+                const auto found = std::find_if(status_.reports.begin(),
+                    status_.reports.end(), [&](const auto& entry) {
+                        return entry.record_id == job.record_id;
+                    });
+                if (found != status_.reports.end()) selected = *found;
+            }
+            if (selected) result = WriteTelemetryDiagnosticBundle(
+                root_, *selected, diagnostic_root_, job.destination,
+                job.cancelled, {job.first_utc_ms, job.last_utc_ms});
+            else result.reason = "report_not_indexed";
+        } else {
+            std::vector<SafeTelemetryRecordPtr> records;
+            {
+                std::lock_guard lock(mutex_);
+                records.reserve(current_records_.size());
+                for (const auto& item : current_records_)
+                    records.push_back(item.record);
+            }
+            result = WriteTelemetryReportAtomically(
+                records, job.destination, false, job.cancelled);
+        }
+    } catch (...) {
+        result.reason = "export_exception";
     }
-    auto result = WriteTelemetryReportAtomically(
-        records, job.destination, false, job.cancelled);
-    {
+    try {
         std::lock_guard lock(mutex_);
         if (result.success) {
             ++status_.exports_succeeded;
@@ -1924,42 +2509,145 @@ void TelemetryHistoryStore::HandleExport(Job job) {
             status_.reason = "met_06_" + result.reason;
         }
         PublishStatusLocked();
+    } catch (...) {}
+    try { if (job.export_callback) job.export_callback(std::move(result)); }
+    catch (...) {}
+    {
+        std::lock_guard lock(mutex_);
+        if (export_jobs_ != 0) --export_jobs_;
     }
-    if (job.export_callback) job.export_callback(std::move(result));
 }
 
 void TelemetryHistoryStore::HandleClear(Job job) {
     bool removed = false;
-    {
-        std::lock_guard lock(mutex_);
-        const auto found = std::find_if(
-            status_.reports.begin(), status_.reports.end(), [&](const auto& entry) {
-                return entry.record_id == job.record_id;
-            });
-        if (found != status_.reports.end()) {
-            removed = RemoveKnownReport(root_ / found->record_id);
+    std::string reason = "report_not_removed";
+    try {
+        bool indexed = false;
+        {
+            std::lock_guard lock(mutex_);
+            indexed = std::any_of(status_.reports.begin(), status_.reports.end(),
+                [&](const auto& entry) { return entry.record_id == job.record_id; });
         }
+        if (indexed) {
+            removed = job.record_id.starts_with("cohavora-telemetry-v2-")
+                ? RemoveTelemetryCheckpoint(root_ / job.record_id)
+                : RemoveKnownReport(root_ / job.record_id);
+            if (removed) reason = "report_cleared";
+        }
+        RefreshAndPruneReports();
+    } catch (...) {
+        reason = "clear_exception";
     }
-    RefreshAndPruneReports();
-    if (job.mutation_callback) {
-        job.mutation_callback(removed, removed ? "report_cleared" : "report_not_removed");
-    }
+    try { if (job.mutation_callback) job.mutation_callback(removed, reason); }
+    catch (...) {}
 }
 
-void TelemetryHistoryStore::RefreshAndPruneReports() {
-    struct Candidate { TelemetryReportEntry entry; std::filesystem::path path; };
+void TelemetryHistoryStore::HandleRetry(Job job) {
+    bool success = false;
+    std::string reason = "report_not_pending";
+    try {
+        const auto found = std::find_if(pending_reports_.begin(),
+            pending_reports_.end(), [&](const auto& report) {
+                return report.id == job.record_id && !report.records.empty();
+            });
+        if (found != pending_reports_.end()) {
+            found->retry_count = 0;
+            found->first_failure = {};
+            found->next_attempt = std::chrono::steady_clock::now();
+            FlushPendingReports(false);
+            const auto remaining = std::find_if(pending_reports_.begin(),
+                pending_reports_.end(), [&](const auto& report) {
+                    return report.id == job.record_id;
+                });
+            success = remaining == pending_reports_.end() || remaining->records.empty();
+            reason = success ? "checkpoint_committed" : "checkpoint_retry_failed";
+        }
+    } catch (...) {
+        reason = "retry_exception";
+    }
+    try { if (job.mutation_callback) job.mutation_callback(success, reason); }
+    catch (...) {}
+}
+
+void TelemetryHistoryStore::RefreshAndPruneReports(
+    std::uint64_t reserve_bytes) {
+    struct Candidate {
+        TelemetryReportEntry entry;
+        std::filesystem::path path;
+        bool active_run = false;
+    };
+    struct CorruptCandidate {
+        std::filesystem::path path;
+        std::uint64_t bytes = 0;
+        std::filesystem::file_time_type modified{};
+    };
+    struct LegacyTemporary {
+        std::filesystem::path path;
+        std::filesystem::file_time_type modified{};
+    };
     std::vector<Candidate> candidates;
+    std::vector<CorruptCandidate> corrupt_candidates;
+    std::vector<LegacyTemporary> legacy_temporary;
     std::uint64_t corrupt = 0;
+    std::uint64_t unsupported = 0;
+    std::uint64_t corrupt_bytes = 0;
+    std::uint64_t corrupt_pruned = 0;
     std::error_code error;
     std::filesystem::create_directories(root_, error);
     if (!error) {
         for (std::filesystem::directory_iterator it(root_, error), end;
              !error && it != end; it.increment(error)) {
+            if (it->is_symlink(error) || error) {
+                error.clear();
+                continue;
+            }
             if (!it->is_directory(error) || error) {
                 error.clear();
                 continue;
             }
             const auto id = it->path().filename().string();
+            if (IsLegacyTemporaryDirectory(id)) {
+                const auto modified = it->last_write_time(error);
+                if (!error) legacy_temporary.push_back({it->path(), modified});
+                error.clear();
+                continue;
+            }
+            if (id.starts_with("cohavora-telemetry-v2-")) {
+                PruneTelemetryCheckpointOrphans(it->path());
+                const auto lock_path = it->path() / "writer.lock";
+                const bool has_lock = std::filesystem::exists(lock_path, error);
+                if (error) {
+                    error.clear();
+                    continue;
+                }
+                TelemetryCheckpointReadLease reader(it->path());
+                if (has_lock && !reader.acquired()) continue;
+                const auto inspected = InspectTelemetryCheckpoint(it->path());
+                if (!inspected.valid) {
+                    if (inspected.reason == "unsupported_version")
+                        ++unsupported;
+                    else {
+                        const auto bytes = TelemetryCheckpointArtifactBytes(it->path());
+                        if (bytes == 0) continue;
+                        ++corrupt;
+                        const auto modified = it->last_write_time(error);
+                        if (error) error.clear();
+                        corrupt_candidates.push_back({it->path(), bytes, modified});
+                        corrupt_bytes += bytes;
+                    }
+                    continue;
+                }
+                TelemetryReportEntry entry;
+                entry.record_id = id;
+                entry.created_utc_ms = inspected.created_utc_ms;
+                entry.record_count = inspected.record_count;
+                entry.complete = inspected.session_complete;
+                entry.size_bytes = inspected.size_bytes;
+                const bool active_run = !entry.complete &&
+                    IsTelemetryRunActive(root_, inspected.process_run_id);
+                candidates.push_back({std::move(entry), it->path(), active_run});
+                continue;
+            }
             if (!id.starts_with("cohavora-telemetry-v1-")) continue;
             try {
                 const auto manifest_path = it->path() / "manifest.json";
@@ -1990,17 +2678,53 @@ void TelemetryHistoryStore::RefreshAndPruneReports() {
             }
         }
     }
+    std::sort(corrupt_candidates.begin(), corrupt_candidates.end(),
+        [](const auto& a, const auto& b) { return a.modified < b.modified; });
+    constexpr std::uint64_t kCorruptBudget = 8ull * 1024ull * 1024ull;
+    const auto corrupt_cutoff = std::filesystem::file_time_type::clock::now() -
+        retention_;
+    for (const auto& item : legacy_temporary) {
+        if (item.modified < corrupt_cutoff)
+            RemoveKnownReport(item.path);
+    }
+    for (const auto& item : corrupt_candidates) {
+        if (corrupt_bytes <= kCorruptBudget &&
+            item.modified >= corrupt_cutoff) break;
+        if (DiscardCorruptTelemetryCheckpointArtifacts(item.path)) {
+            corrupt_bytes -= (std::min)(corrupt_bytes, item.bytes);
+            ++corrupt_pruned;
+        }
+    }
     std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
         return a.entry.created_utc_ms < b.entry.created_utc_ms;
     });
-    std::uint64_t total = 0;
-    for (const auto& item : candidates) total += item.entry.size_bytes;
+    const auto owned_bytes = TelemetryHistoryOwnedBytes(root_);
+    std::uint64_t total = owned_bytes.value_or(0);
+    bool accounting_failed = !owned_bytes;
     const auto cutoff = UtcNowMs() -
         std::chrono::duration_cast<std::chrono::milliseconds>(retention_).count();
     for (auto& item : candidates) {
-        if (item.entry.created_utc_ms >= cutoff && total <= maximum_bytes_) continue;
-        if (RemoveKnownReport(item.path)) {
-            total -= (std::min)(total, item.entry.size_bytes);
+        if (accounting_failed) break;
+        // An in-flight session owns its checkpoint even when its first sample
+        // predates the retention window; per-report rolling bounds its size.
+        if (item.active_run ||
+            std::any_of(pending_reports_.begin(), pending_reports_.end(),
+                [&](const PendingReport& pending) {
+                    return item.entry.record_id ==
+                        "cohavora-telemetry-v2-" + pending.id;
+                })) continue;
+        if (item.entry.created_utc_ms >= cutoff &&
+            total <= maximum_bytes_ &&
+            reserve_bytes <= maximum_bytes_ - total) continue;
+        const bool removed = item.entry.record_id.starts_with("cohavora-telemetry-v2-")
+            ? RemoveTelemetryCheckpoint(item.path)
+            : RemoveKnownReport(item.path);
+        if (removed) {
+            // Other runs may have written since the scan, and the index size
+            // need not equal the owned bytes actually removed.
+            const auto remaining = TelemetryHistoryOwnedBytes(root_);
+            if (!remaining) accounting_failed = true;
+            else total = *remaining;
             item.entry.record_id.clear();
         }
     }
@@ -2010,7 +2734,9 @@ void TelemetryHistoryStore::RefreshAndPruneReports() {
         if (!it->entry.record_id.empty()) status_.reports.push_back(it->entry);
     }
     status_.corrupt_reports = corrupt;
-    if (error) {
+    status_.unsupported_reports = unsupported;
+    status_.corrupt_artifacts_pruned += corrupt_pruned;
+    if (error || accounting_failed) {
         ++status_.write_failures;
         status_.availability = Availability::Invalid;
         status_.reason = "met_06_history_scan_failed";
@@ -2022,10 +2748,12 @@ void TelemetryHistoryStore::RefreshAndPruneReports() {
 }
 
 void TelemetryHistoryStore::PublishStatusLocked() {
-    std::atomic_store_explicit(
-        &status_cache_,
-        std::make_shared<const TelemetryStoreStatus>(status_),
-        std::memory_order_release);
+    try {
+        std::atomic_store_explicit(
+            &status_cache_,
+            std::make_shared<const TelemetryStoreStatus>(status_),
+            std::memory_order_release);
+    } catch (...) {}
 }
 
 std::string TelemetryHistoryStore::NewOpaqueId() {

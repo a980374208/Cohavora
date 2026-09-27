@@ -14,6 +14,7 @@ namespace livekit::telemetry {
 struct ConfirmedCrashEvidence {
     std::string process_run_id;
     std::string source;
+    std::string build_id;
 };
 
 struct StabilityRecoveryEvidence {
@@ -69,9 +70,11 @@ public:
         std::size_t max_serialized_bytes = kMaxSerializedBytes);
     ~StabilityLedger();
 
-    bool BeginProcessRun(const StabilityRecoveryEvidence& evidence = {});
+    bool BeginProcessRun(const StabilityRecoveryEvidence& evidence = {},
+                         std::string process_run_id = {},
+                         std::string build_id = {});
     bool FinishProcessRunClean();
-    std::string BeginSession();
+    std::string BeginSession(std::string anonymous_session_id = {});
     bool FinishSession(
         const std::string& session_id,
         StabilitySessionTerminal terminal);
@@ -100,7 +103,9 @@ class ScopedProcessRun final {
 public:
     explicit ScopedProcessRun(
         std::shared_ptr<StabilityLedger> ledger,
-        StabilityRecoveryEvidence evidence = {});
+        StabilityRecoveryEvidence evidence = {},
+        std::string process_run_id = {},
+        std::string build_id = {});
     ~ScopedProcessRun();
 
     ScopedProcessRun(const ScopedProcessRun&) = delete;

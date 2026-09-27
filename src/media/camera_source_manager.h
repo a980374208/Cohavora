@@ -112,6 +112,7 @@ public:
 
 private:
     friend class ::CameraOwnerTestAccess;
+    struct DeviceSwitchSpan;
 
     using ScheduledTask = std::function<void()>;
     using TimeoutScheduler = std::function<void(int timeout_ms, ScheduledTask task)>;
@@ -122,10 +123,12 @@ private:
                                   const DShowCaptureConfig& target_config,
                                   const VideoFrame& frame,
                                   const VideoCaptureOptions& options,
-                                  SwitchCallback callback);
+                                  SwitchCallback callback,
+                                  std::shared_ptr<DeviceSwitchSpan> diagnostic);
 
     void HandleProbeTimeout(uint64_t generation,
-                            SwitchCallback callback);
+                            SwitchCallback callback,
+                            std::shared_ptr<DeviceSwitchSpan> diagnostic);
     void DeliverSwitchResult(SwitchCallback callback,
                              bool success,
                              const std::string& error_message);

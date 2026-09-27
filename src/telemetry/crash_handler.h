@@ -3,7 +3,6 @@
 #include <string>
 #include <functional>
 #include <csignal>
-#include <iostream>
 #include <mutex>
 
 namespace livekit {
@@ -18,7 +17,7 @@ public:
     static void InstallSignalHandlers();
 
     // 触发 Panic（类似 client-sdk-cpp 收到 FFI Panic）
-    // 强制 Flush 所有日志并发出 SIGTERM / 优雅退出
+    // 通知受控诊断与回调；按调用参数决定是否发出 SIGTERM。
     static void TriggerPanic(const std::string& message, bool raise_sigterm = true);
 
     // 设置全局 Panic 发生时的紧急通知回调

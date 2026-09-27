@@ -146,6 +146,30 @@ void LedgerRemainsBoundedWithoutEvictingTheActiveRun() {
     TEST_CHECK(next.FinishProcessRunClean());
 }
 
+void ExplicitDiagnosticRunIdIsPreserved() {
+    TemporaryLedgerDirectory directory;
+    StabilityLedger ledger(directory.ledger_path());
+    TEST_CHECK(!ledger.BeginProcessRun({}, "invalid-run-id"));
+    TEST_CHECK(!std::filesystem::exists(directory.ledger_path()));
+    const std::string diagnostic_run_id(32, 'a');
+    TEST_CHECK(ledger.BeginProcessRun({}, diagnostic_run_id));
+    TEST_CHECK(ledger.process_run_id() == diagnostic_run_id);
+    TEST_CHECK(ledger.FinishProcessRunClean());
+}
+
+void SuppliedAnonymousSessionIdIsValidatedAndUnique() {
+    TemporaryLedgerDirectory directory;
+    StabilityLedger ledger(directory.ledger_path());
+    TEST_CHECK(ledger.BeginProcessRun());
+    TEST_CHECK(ledger.BeginSession("unsafe-session").empty());
+    const std::string anonymous_session_id(32, 'b');
+    TEST_CHECK(ledger.BeginSession(anonymous_session_id) == anonymous_session_id);
+    TEST_CHECK(ledger.BeginSession(anonymous_session_id).empty());
+    TEST_CHECK(ledger.FinishSession(anonymous_session_id,
+        StabilitySessionTerminal::AdmissionFailure));
+    TEST_CHECK(ledger.FinishProcessRunClean());
+}
+
 } // namespace
 
 int main() {
@@ -153,5 +177,7 @@ int main() {
     MissingTerminalIsUnknownUnlessEvidenceConfirmsCrash();
     UnconfirmedMissingTerminalAndCorruptionStaySeparate();
     LedgerRemainsBoundedWithoutEvictingTheActiveRun();
+    ExplicitDiagnosticRunIdIsPreserved();
+    SuppliedAnonymousSessionIdIsValidatedAndUnique();
     return 0;
 }

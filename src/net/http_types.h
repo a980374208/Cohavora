@@ -22,10 +22,24 @@ enum class ErrorCode {
     UnknownError = -999
 };
 
+enum class HttpFailureLayer { None, Policy, Http, Network, Business, Parse };
+
+struct HttpRequestContext {
+    QString anonymousSessionId;
+    QString parentOperationId;
+};
+
 struct HttpError {
     int code = 0;
     QString message;
     QString operationId;
+    QString requestId;
+    QString parentOperationId;
+    QString anonymousSessionId;
+    int httpStatus = 0;
+    int networkError = 0;
+    int businessCode = 0;
+    HttpFailureLayer failureLayer = HttpFailureLayer::None;
 
     bool isTokenExpired() const {
         return code == static_cast<int>(ErrorCode::TokenExpired) ||

@@ -476,6 +476,7 @@ private:
 		ParticipantWindowTestTag,
 		const Config &config,
 		std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator,
+		bool fullLayoutForChatPrivacy = false,
 		QWidget *parent = nullptr);
 
 	struct CameraOwnerTestTag final {};
