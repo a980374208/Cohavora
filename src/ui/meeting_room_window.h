@@ -476,6 +476,7 @@ private:
 		ParticipantWindowInjectionTag,
 		const Config &config,
 		std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator,
+		bool fullLayoutForChatPrivacy = false,
 		QWidget *parent = nullptr);
 
 	struct CameraOwnerInjectionTag final {};

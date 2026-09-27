@@ -93,7 +93,8 @@ public:
     MeetingSessionRuntime(asio::io_context &context,
                           uint64_t generation,
                           QString localUserId,
-                          std::shared_ptr<void> executorLifetime = {})
+                          std::shared_ptr<void> executorLifetime = {},
+                          std::string anonymousSessionId = {})
         : _executorLifetime(std::move(executorLifetime))
         , _strand(context.get_executor())
         , _videoDemandTimer(_strand)
@@ -104,7 +105,8 @@ public:
         , _telemetry(std::make_shared<livekit::telemetry::SessionTelemetry>(
               _strand, generation,
               livekit::telemetry::SessionTelemetry::kDefaultQueueCapacity,
-              livekit::telemetry::SessionTelemetry::Clock::now(), _executorLifetime)) {
+              livekit::telemetry::SessionTelemetry::Clock::now(), _executorLifetime,
+              std::move(anonymousSessionId))) {
     }
 
     Strand &strand() { return _strand; }

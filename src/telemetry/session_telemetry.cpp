@@ -1,4 +1,5 @@
 #include "session_telemetry.h"
+#include "diagnostic_pipeline.h"
 
 #include <algorithm>
 #include <cctype>
@@ -217,6 +218,15 @@ const std::vector<MetricProductChainStatus>& FifthBatchProductChains() {
 
 } // namespace
 
+bool IsKnownMetricProductChain(const MetricProductChainStatus& item) noexcept {
+    const auto& catalog = FifthBatchProductChains();
+    return std::any_of(catalog.begin(), catalog.end(),
+        [&](const MetricProductChainStatus& known) {
+            return item.metric_id == known.metric_id &&
+                item.status == known.status && item.reason == known.reason;
+        });
+}
+
 const char* AvailabilityName(Availability availability) noexcept {
     switch (availability) {
     case Availability::Valid: return "VALID";
@@ -318,11 +328,19 @@ SessionTelemetry::SessionTelemetry(
     std::uint64_t session_generation,
     std::size_t queue_capacity,
     Clock::time_point session_started_at,
-    std::shared_ptr<void> executor_lifetime)
+    std::shared_ptr<void> executor_lifetime,
+    std::string anonymous_session_id)
     : executor_lifetime_(std::move(executor_lifetime))
     , strand_(std::move(strand))
     , session_generation_(session_generation)
     , queue_capacity_((std::max)(std::size_t{1}, queue_capacity))
+    , anonymous_session_id_([&anonymous_session_id] {
+          const auto valid = anonymous_session_id.size() == 32 &&
+              std::all_of(anonymous_session_id.begin(), anonymous_session_id.end(),
+                  [](char ch) { return (ch >= '0' && ch <= '9') ||
+                      (ch >= 'a' && ch <= 'f'); });
+          return valid ? std::move(anonymous_session_id) : std::string{};
+      }())
     , stats_timer_(strand_)
     , runtime_timer_(strand_)
     , session_started_at_(session_started_at == Clock::time_point{}
@@ -2520,6 +2538,33 @@ void SessionTelemetry::MaybeFinishReconnectOnStrand(Clock::time_point now) {
     const auto video_finished_at = latest_stable(recovery_.tracks);
     const auto audio_finished_at = latest_stable(recovery_.audio_tracks);
     const auto render_finished_at = latest_stable(recovery_.render_tracks);
+    const auto emit_recovery = [&](diagnostic::EventKind kind,
+                                   diagnostic::MediaKind media,
+                                   diagnostic::RecoveryMeasurement point,
+                                   Clock::time_point observed_at) {
+        diagnostic::Event event;
+        event.kind = kind;
+        event.thread_role = diagnostic::ThreadRole::Session;
+        event.context.anonymous_session_id.Assign(anonymous_session_id_);
+        event.context.operation_id.Assign(recovery_.operation_id);
+        event.context.session_generation = session_generation_;
+        event.context.has_session_generation = true;
+        event.context.recovery_epoch = recovery_.epoch;
+        event.context.has_recovery_epoch = true;
+        event.media_kind = media;
+        event.recovery_measurement = point;
+        event.batch_track_count = static_cast<std::uint32_t>(
+            point == diagnostic::RecoveryMeasurement::DecodedVideoStable
+                ? recovery_.tracks.size()
+                : point == diagnostic::RecoveryMeasurement::PcmAudioStable
+                    ? recovery_.audio_tracks.size()
+                    : recovery_.render_tracks.size());
+        event.outcome = kind == diagnostic::EventKind::MediaRecoveryTimeout
+            ? diagnostic::Outcome::Timeout : diagnostic::Outcome::Success;
+        event.duration_ms = static_cast<std::uint64_t>(MillisecondsBetween(
+            recovery_.outage_started_at, observed_at));
+        diagnostic::EmitBusinessEvent(event);
+    };
 
     const auto settle_video = [&](bool observation_timed_out) {
         if (state_.reconnect_video_expected == 0) {
@@ -2586,6 +2631,18 @@ void SessionTelemetry::MaybeFinishReconnectOnStrand(Clock::time_point now) {
         settle_video(false);
         settle_audio(false);
         settle_render(false);
+        if (state_.reconnect_video_availability == Availability::Valid)
+            emit_recovery(diagnostic::EventKind::MediaRecoveryMilestone,
+                diagnostic::MediaKind::Video,
+                diagnostic::RecoveryMeasurement::DecodedVideoStable, video_finished_at);
+        if (state_.reconnect_audio_availability == Availability::Valid)
+            emit_recovery(diagnostic::EventKind::MediaRecoveryMilestone,
+                diagnostic::MediaKind::Audio,
+                diagnostic::RecoveryMeasurement::PcmAudioStable, audio_finished_at);
+        if (state_.reconnect_render_availability == Availability::Valid)
+            emit_recovery(diagnostic::EventKind::MediaRecoveryMilestone,
+                diagnostic::MediaKind::Video,
+                diagnostic::RecoveryMeasurement::VisibleRenderStable, render_finished_at);
         auto finished_at = (std::max)(
             video_finished_at, (std::max)(audio_finished_at, render_finished_at));
         if (recovery_.expectation_changed) {
@@ -2606,6 +2663,18 @@ void SessionTelemetry::MaybeFinishReconnectOnStrand(Clock::time_point now) {
         settle_video(true);
         settle_audio(true);
         settle_render(true);
+        if (state_.reconnect_video_availability == Availability::Timeout)
+            emit_recovery(diagnostic::EventKind::MediaRecoveryTimeout,
+                diagnostic::MediaKind::Video,
+                diagnostic::RecoveryMeasurement::DecodedVideoStable, now);
+        if (state_.reconnect_audio_availability == Availability::Timeout)
+            emit_recovery(diagnostic::EventKind::MediaRecoveryTimeout,
+                diagnostic::MediaKind::Audio,
+                diagnostic::RecoveryMeasurement::PcmAudioStable, now);
+        if (state_.reconnect_render_availability == Availability::Timeout)
+            emit_recovery(diagnostic::EventKind::MediaRecoveryTimeout,
+                diagnostic::MediaKind::Video,
+                diagnostic::RecoveryMeasurement::VisibleRenderStable, now);
         ++state_.reconnect_media_timeouts;
         FinishOperationOnStrand(
             operation->second, OperationOutcome::Timeout, now);

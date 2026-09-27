@@ -112,6 +112,8 @@ struct MetricProductChainStatus {
     std::string reason;
 };
 
+bool IsKnownMetricProductChain(const MetricProductChainStatus& item) noexcept;
+
 enum class MediaExpectationReason {
     BindingActive,
     Subscribed,
@@ -1048,7 +1050,8 @@ public:
                      std::uint64_t session_generation,
                      std::size_t queue_capacity = kDefaultQueueCapacity,
                      Clock::time_point session_started_at = Clock::now(),
-                     std::shared_ptr<void> executor_lifetime = {});
+                     std::shared_ptr<void> executor_lifetime = {},
+                     std::string anonymous_session_id = {});
 
     SessionTelemetry(const SessionTelemetry&) = delete;
     SessionTelemetry& operator=(const SessionTelemetry&) = delete;
@@ -1427,6 +1430,7 @@ private:
     Strand strand_;
     const std::uint64_t session_generation_;
     const std::size_t queue_capacity_;
+    const std::string anonymous_session_id_;
 
     mutable std::mutex queue_mutex_;
     std::deque<Event> queue_;

@@ -1,17 +1,26 @@
 #include "participant.h"
-#include "telemetry.h"
 #include "local_audio_track.h"
 #include "local_video_track.h"
 #include "remote_track_publication.h"
 #include "video_source.h"
 #include "livekit_rtc.pb.h"
+#include "telemetry/diagnostic_pipeline.h"
 #include <algorithm>
-#include <iostream>
 #include <chrono>
 #include <sstream>
 #include <random>
 
 namespace livekit {
+
+namespace {
+void EmitParticipantIssue(diagnostic::ParticipantIssueReason reason) noexcept {
+    diagnostic::Event event;
+    event.kind = diagnostic::EventKind::ParticipantIssue;
+    event.thread_role = diagnostic::ThreadRole::Session;
+    event.participant_issue_reason = reason;
+    diagnostic::EmitBusinessEvent(event);
+}
+} // namespace
 
 Participant::Participant(const Participant& other) {
     std::lock_guard<std::mutex> lock(other.state_mutex_);
@@ -310,9 +319,6 @@ static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& t
                         }
                     }
                 }
-                std::cout << "[SIMULCAST SIGNAL] Serialized " << add_track->simulcast_codecs_size() 
-                          << " codecs (Primary=" << (add_track->simulcast_codecs_size() > 0 ? add_track->simulcast_codecs(0).codec() : "") 
-                          << ", Policy=" << add_track->backup_codec_policy() << ") into AddTrackRequest (cid=" << add_track->cid() << ")\n";
             } else if (pub_opts.simulcast && !pub_opts.layers.empty()) {
                 auto* sim_codec = add_track->add_simulcast_codecs();
                 sim_codec->set_codec(pub_opts.video_codec);
@@ -391,10 +397,9 @@ void LocalParticipant::PublishTrack(std::shared_ptr<Track> track) {
                              "Room participants must use PublishTrackAsync");
     }
     if (!permission().can_publish) {
-        std::cerr << "[LocalParticipant] Permission denied: cannot publish track (can_publish is false).\n";
+        EmitParticipantIssue(diagnostic::ParticipantIssueReason::PublishTrackDenied);
         return;
     }
-    Telemetry::Instance().RecordPublishStart();
 
     auto req = BuildTrackPublishRequest(track);
     auto pub = std::make_shared<TrackPublication>(track, track->name(), track->name());
@@ -430,7 +435,6 @@ asio::awaitable<std::shared_ptr<TrackPublication>> LocalParticipant::PublishTrac
                              "participant is not attached to an active Room");
     }
 
-    Telemetry::Instance().RecordPublishStart();
     auto req = BuildTrackPublishRequest(track);
     co_return co_await async_publish_track_handler_(std::move(track), req);
 }
@@ -467,7 +471,6 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> LocalParticipant
     std::vector<BatchTrackItem> items;
     items.reserve(tracks.size());
     for (auto& track : tracks) {
-        Telemetry::Instance().RecordPublishStart();
         auto req = std::make_shared<proto::SignalRequest>(
             BuildTrackPublishRequest(track));
         items.push_back({std::move(track), std::move(req)});
@@ -533,13 +536,13 @@ void LocalParticipant::SetMuted(const std::string& track_sid, bool muted) {
 void LocalParticipant::PublishData(const std::vector<uint8_t>& payload, bool reliable,
                                     const std::vector<std::string>& destination_identities, const std::string& topic) {
     if (!permission().can_publish_data) {
-        std::cerr << "[LocalParticipant] Permission denied: cannot publish data (can_publish_data is false).\n";
+        EmitParticipantIssue(diagnostic::ParticipantIssueReason::PublishDataDenied);
         return;
     }
     if (publish_data_handler_) {
         publish_data_handler_(payload, reliable, destination_identities, topic);
     } else {
-        std::cout << "LocalParticipant::PublishData: warning, publish_data_handler_ is not set" << std::endl;
+        EmitParticipantIssue(diagnostic::ParticipantIssueReason::PublishDataHandlerMissing);
     }
 }
 
@@ -550,7 +553,7 @@ void LocalParticipant::SetAttributes(const std::map<std::string, std::string>& a
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (!permission_.can_update_metadata) {
-            std::cerr << "[LocalParticipant] Permission denied: cannot update metadata/attributes (can_update_metadata is false).\n";
+            EmitParticipantIssue(diagnostic::ParticipantIssueReason::UpdateMetadataDenied);
             return;
         }
         for (const auto& kv : attributes) attributes_[kv.first] = kv.second;

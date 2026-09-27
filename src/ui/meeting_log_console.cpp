@@ -2,12 +2,68 @@
 #include "src/ui/meeting_log_console.h"
 #include "src/ui/app_theme.h"
 #include "src/telemetry/log_redaction.h"
+#include "src/telemetry/crash_evidence_provider.h"
+#include "src/telemetry/diagnostic_pipeline.h"
+#include <QtCore/QDir>
+#include <QtCore/QElapsedTimer>
+#include <QtCore/QSettings>
+#include <QtCore/QSignalBlocker>
+#include <QtCore/QStandardPaths>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QApplication>
+#include <QtWidgets/QStyle>
 #include <QtGui/QClipboard>
+#include <QtGui/QIcon>
 #include <QtGui/QTextCursor>
 #include <QtGui/QFont>
+#include <atomic>
+
+namespace {
+
+std::atomic<MeetingUI::MeetingLogConsoleWindow*> g_activeConsole{nullptr};
+
+QString SafeLegacyMessage(const QString &tag, const QString &message) {
+	const auto scrubbed = QString::fromStdString(
+		livekit::secure_log::SanitizeForOutput(message.toStdString()));
+	if (scrubbed != message)
+		return QStringLiteral("[redacted: sensitive log field]");
+	if ((tag == QStringLiteral("SHUTDOWN") &&
+		 message == QStringLiteral("native_cleanup_failed")) ||
+		(tag == QStringLiteral("SESSION") &&
+		 message == QStringLiteral("session_invalidated")) ||
+		(tag == QStringLiteral("LOGIN") &&
+		 (message == QStringLiteral("debug_login_options_invalid") ||
+		  message == QStringLiteral("debug_login_failed")))) return message;
+	if (tag.startsWith(QStringLiteral("CHAT_"))) {
+		if (message == QStringLiteral("transfer_interrupted")) return message;
+		const auto parts = message.split(' ');
+		bool sizeOk = false;
+		if (parts.size() == 1 && parts[0].startsWith(QStringLiteral("bytes="))) {
+			const auto size = parts[0].mid(6).toULongLong(&sizeOk);
+			if (sizeOk) return QStringLiteral("bytes=%1").arg(size);
+		}
+		if (parts.size() == 2 &&
+			(parts[0] == QStringLiteral("type=image") ||
+			 parts[0] == QStringLiteral("type=file")) &&
+			parts[1].startsWith(QStringLiteral("bytes="))) {
+			const auto size = parts[1].mid(6).toULongLong(&sizeOk);
+			if (sizeOk) return QStringLiteral("%1 bytes=%2").arg(parts[0]).arg(size);
+		}
+	}
+	return QStringLiteral("[suppressed: unregistered diagnostic]");
+}
+
+QString SafeTag(const QString &tag) {
+	if (tag.isEmpty() || tag.size() > 64) return QStringLiteral("UNKNOWN");
+	for (const auto ch : tag) {
+		if (!ch.isUpper() && !ch.isDigit() && ch != '_')
+			return QStringLiteral("UNKNOWN");
+	}
+	return tag;
+}
+
+} // namespace
 
 namespace MeetingUI {
 
@@ -17,7 +73,18 @@ MeetingLogConsoleWindow& MeetingLogConsoleWindow::Instance() {
 }
 
 void LogToConsole(LogCategory cat, const QString &tag, const QString &msg) {
-	MeetingLogConsoleWindow::Instance().appendLog(cat, tag, msg);
+	MeetingLogConsoleWindow::enqueueLog(cat, tag, msg);
+}
+
+MeetingLogConsoleWindow *MeetingLogConsoleWindow::Active() noexcept {
+	return g_activeConsole.load(std::memory_order_acquire);
+}
+
+std::shared_ptr<MeetingLogConsoleWindow::SharedQueue>
+MeetingLogConsoleWindow::sharedQueue() {
+	static auto* queue = new std::shared_ptr<SharedQueue>(
+		std::make_shared<SharedQueue>());
+	return *queue;
 }
 
 MeetingLogConsoleWindow::MeetingLogConsoleWindow(QWidget *parent)
@@ -29,6 +96,15 @@ MeetingLogConsoleWindow::MeetingLogConsoleWindow(QWidget *parent)
 	setMinimumSize(600, 380);
 	initUi();
 	AppTheme::makeDialogAdaptive(*this, QSize(780, 520));
+	g_activeConsole.store(this, std::memory_order_release);
+	_drainTimer = new QTimer(this);
+	_drainTimer->setInterval(50);
+	connect(_drainTimer, &QTimer::timeout, this, &MeetingLogConsoleWindow::drainPending);
+	_drainTimer->start();
+}
+
+MeetingLogConsoleWindow::~MeetingLogConsoleWindow() {
+	g_activeConsole.store(nullptr, std::memory_order_release);
 }
 
 void MeetingLogConsoleWindow::initUi() {
@@ -41,6 +117,7 @@ void MeetingLogConsoleWindow::initUi() {
 	// 顶部工具条
 	auto topLayout = new QHBoxLayout();
 	_statusLabel = new QLabel(QCoreApplication::translate("MeetingUI", "● Console Ready"), this);
+	_statusLabel->setObjectName(QStringLiteral("consoleLossStatus"));
 	MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-log-console-statuslabel");
 	topLayout->addWidget(_statusLabel);
 
@@ -56,90 +133,384 @@ void MeetingLogConsoleWindow::initUi() {
 	_autoScrollBox->setChecked(true);
 	topLayout->addWidget(_autoScrollBox);
 
-	_copyBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Copy All"), this);
+	_copyScope = new QComboBox(this);
+	_copyScope->setObjectName(QStringLiteral("consoleCopyScope"));
+	_copyScope->addItem(QCoreApplication::translate("MeetingUI", "Visible results"));
+	_copyScope->addItem(QCoreApplication::translate("MeetingUI", "Selection"));
+	_copyBtn = new QPushButton(QIcon::fromTheme(QStringLiteral("edit-copy")),
+		QCoreApplication::translate("MeetingUI", "Copy"), this);
 	_clearBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Clear"), this);
+	topLayout->addWidget(_copyScope);
 	topLayout->addWidget(_copyBtn);
 	topLayout->addWidget(_clearBtn);
 
 	mainLayout->addLayout(topLayout);
+	auto *filters = new QHBoxLayout();
+	_severityFilter = new QComboBox(this);
+	_severityFilter->setObjectName(QStringLiteral("consoleSeverityFilter"));
+	_severityFilter->addItems({
+		QCoreApplication::translate("MeetingUI", "All levels"),
+		QStringLiteral("trace"), QStringLiteral("debug"),
+		QStringLiteral("info"), QStringLiteral("warning"),
+		QStringLiteral("error"), QStringLiteral("fatal")});
+	_componentFilter = new QComboBox(this);
+	_componentFilter->setObjectName(QStringLiteral("consoleComponentFilter"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "All components"));
+	for (const auto *name : {"legacy", "app", "diagnostic_pipeline",
+		"net", "meeting_coordinator", "room", "participant",
+		"session_runtime", "session_telemetry", "meeting_ui", "media",
+		"render", "rtc"})
+		_componentFilter->addItem(QString::fromLatin1(name));
+	_sessionInput = new QLineEdit(this);
+	_sessionInput->setObjectName(QStringLiteral("consoleSessionFilter"));
+	_sessionInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Session ID"));
+	_sessionInput->setClearButtonEnabled(true);
+	_operationInput = new QLineEdit(this);
+	_operationInput->setObjectName(QStringLiteral("consoleOperationFilter"));
+	_operationInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Operation ID"));
+	_operationInput->setClearButtonEnabled(true);
+	filters->addWidget(_severityFilter);
+	filters->addWidget(_componentFilter);
+	filters->addWidget(_sessionInput);
+	filters->addWidget(_operationInput);
+	mainLayout->addLayout(filters);
+	auto *retention = new QHBoxLayout();
+	const auto pipeline = livekit::diagnostic::InstalledBusinessPipeline();
+	const std::weak_ptr<livekit::diagnostic::DiagnosticPipeline> weakPipeline =
+		pipeline;
+	_saveLogsBox = new QCheckBox(
+		QCoreApplication::translate("MeetingUI", "Save local logs"), this);
+	_saveLogsBox->setObjectName(QStringLiteral("consoleSaveLogs"));
+	_saveLogsBox->setChecked(pipeline && pipeline->GetStatus().retention_enabled);
+	_saveLogsBox->setEnabled(pipeline != nullptr);
+	retention->addWidget(_saveLogsBox);
+	_clearSavedBtn = new QPushButton(
+		QCoreApplication::translate("MeetingUI", "Clear previous logs"), this);
+	_clearSavedBtn->setObjectName(QStringLiteral("consoleClearPreviousLogs"));
+	retention->addWidget(_clearSavedBtn);
+	_crashCollectionBox = new QCheckBox(
+		QCoreApplication::translate("MeetingUI", "Crash metadata next run"), this);
+	_crashCollectionBox->setObjectName(QStringLiteral("consoleCrashCollection"));
+	const auto crashRoot = livekit::telemetry::CrashEvidenceProvider::DefaultRoot();
+	_crashCollectionBox->setChecked(!crashRoot.empty() &&
+		livekit::telemetry::CrashEvidenceProvider::CollectionEnabled(crashRoot));
+	_crashCollectionBox->setEnabled(!crashRoot.empty());
+	retention->addWidget(_crashCollectionBox);
+	_diagnosticModeBox = new QCheckBox(
+		QCoreApplication::translate("MeetingUI", "Diagnostic mode"), this);
+	_diagnosticModeBox->setObjectName(QStringLiteral("consoleDiagnosticMode"));
+	_diagnosticModeBox->setChecked(pipeline && pipeline->DiagnosticWindowActive());
+	_diagnosticModeBox->setEnabled(pipeline != nullptr);
+	retention->addWidget(_diagnosticModeBox);
+	retention->addStretch();
+	mainLayout->addLayout(retention);
+	_storageStatusLabel = new QLabel(
+		QCoreApplication::translate("MeetingUI",
+			"Capture: all levels and components"), this);
+	_storageStatusLabel->setWordWrap(true);
+	mainLayout->addWidget(_storageStatusLabel);
+	connect(_saveLogsBox, &QCheckBox::toggled, this,
+		[this, weakPipeline](bool enabled) {
+			if (const auto active = weakPipeline.lock()) {
+				QSettings settings;
+				settings.setValue(QStringLiteral("diagnostics/historyEnabled"), enabled);
+				settings.sync();
+				if (settings.status() != QSettings::NoError) {
+					const QSignalBlocker blocked(_saveLogsBox);
+					_saveLogsBox->setChecked(!enabled);
+					showStorageMessage(QCoreApplication::translate(
+						"MeetingUI", "Log retention setting could not be saved"));
+					return;
+				}
+				active->SetRetentionEnabled(enabled);
+			}
+		});
+	connect(_clearSavedBtn, &QPushButton::clicked, this, [this] {
+		if (_queue->clearFuture.valid()) return;
+		const auto root = std::filesystem::path(QDir(
+			QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+			.filePath(QStringLiteral("diagnostics")).toStdWString());
+		try {
+			_queue->clearFuture = std::async(std::launch::async, [root] {
+				return livekit::diagnostic::DiagnosticFileSink::ClearInactiveHistory(root);
+			});
+			_clearSavedBtn->setEnabled(false);
+			showStorageMessage(QCoreApplication::translate(
+				"MeetingUI", "Clearing previous logs..."));
+		} catch (...) {
+			showStorageMessage(QCoreApplication::translate(
+				"MeetingUI", "Log cleanup could not start"));
+		}
+	});
+	connect(_crashCollectionBox, &QCheckBox::toggled, this,
+		[this, crashRoot](bool enabled) {
+			if (livekit::telemetry::CrashEvidenceProvider::SetCollectionEnabled(
+					crashRoot, enabled)) return;
+			const QSignalBlocker blocked(_crashCollectionBox);
+			_crashCollectionBox->setChecked(!enabled);
+			showStorageMessage(QCoreApplication::translate(
+				"MeetingUI", "Crash metadata setting could not be saved"));
+		});
+	connect(_diagnosticModeBox, &QCheckBox::toggled, this,
+		[weakPipeline](bool enabled) {
+			if (const auto active = weakPipeline.lock())
+				active->OpenDiagnosticWindow(enabled
+					? std::chrono::minutes(10) : std::chrono::milliseconds::zero());
+		});
 
 	// 控制台文本区
 	_logView = new QPlainTextEdit(this);
 	_logView->setReadOnly(true);
-	_logView->setMaximumBlockCount(3000); // 限制最多保留 3000 行
+	_logView->setMaximumBlockCount(3000);
 	mainLayout->addWidget(_logView);
 
 	connect(_filterInput, &QLineEdit::textChanged, this, &MeetingLogConsoleWindow::onFilterChanged);
+	connect(_sessionInput, &QLineEdit::textChanged, this,
+		[this] { rebuildLogView(); });
+	connect(_operationInput, &QLineEdit::textChanged, this,
+		[this] { rebuildLogView(); });
+	connect(_severityFilter, QOverload<int>::of(&QComboBox::currentIndexChanged),
+		this, [this] { rebuildLogView(); });
+	connect(_componentFilter, QOverload<int>::of(&QComboBox::currentIndexChanged),
+		this, [this] { rebuildLogView(); });
 	connect(_clearBtn, &QPushButton::clicked, this, &MeetingLogConsoleWindow::clearLogs);
 	connect(_copyBtn, &QPushButton::clicked, this, &MeetingLogConsoleWindow::copyAllLogs);
 
-	// 欢迎信息
-	appendLog(LogCategory::General, "SYSTEM", QCoreApplication::translate("MeetingUI", "Cohavora console started. Listening for signaling, WebRTC media, and device events..."));
 }
 
 void MeetingLogConsoleWindow::appendLog(LogCategory category, const QString &tag, const QString &message) {
-	const QString timeStr = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
-	const QString safeTag = QString::fromStdString(
-		livekit::secure_log::SanitizeForOutput(tag.toStdString()));
-	const QString safeMessage = QString::fromStdString(
-		livekit::secure_log::SanitizeForOutput(message.toStdString()));
-	QString catName;
-	const QString formatted = formatLogHtml(timeStr, category, safeTag, safeMessage, &catName);
+	enqueueLog(category, tag, message);
+}
 
-	LogEntry entry;
-	entry.timeStr = timeStr;
+void MeetingLogConsoleWindow::enqueueLog(LogCategory category, const QString &tag,
+		const QString &message) {
+	PendingEntry entry;
 	entry.category = category;
-	entry.tag = safeTag;
-	entry.message = safeMessage;
-	entry.catName = catName;
-	entry.formattedHtml = formatted;
-	entry.fullText = QString("[%1] [%2] [%3] %4").arg(timeStr, catName, safeTag, safeMessage);
+	entry.tag = SafeTag(tag);
+	entry.message = SafeLegacyMessage(entry.tag, message);
+	entry.timeStr = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
+	entry.severity = category == LogCategory::Error
+		? QStringLiteral("error") : QStringLiteral("info");
+	entry.component = QStringLiteral("legacy");
+	offer(sharedQueue(), std::move(entry));
+}
 
-	QMetaObject::invokeMethod(this, [this, entry = std::move(entry)]() {
-		QMutexLocker locker(&_mutex);
-		_logEntries.push_back(entry);
-		if (_logEntries.size() > kMaxLogEntries) {
-			_logEntries.erase(_logEntries.begin());
+void MeetingLogConsoleWindow::offer(const std::shared_ptr<SharedQueue> &queue,
+		PendingEntry entry) {
+	entry.chargeBytes = sizeof(PendingEntry) +
+		2 * (entry.tag.capacity() + entry.message.capacity() +
+		entry.timeStr.capacity() + entry.severity.capacity() +
+		entry.component.capacity() + entry.sessionId.capacity() +
+		entry.operationId.capacity());
+	std::lock_guard lock(queue->mutex);
+	if (queue->closed || entry.chargeBytes > kMaxPendingBytes) {
+		++queue->dropped;
+		return;
+	}
+	while (!queue->pending.empty() &&
+		(queue->pending.size() >= kMaxPendingEntries ||
+		 queue->pendingBytes + entry.chargeBytes > kMaxPendingBytes)) {
+		queue->pendingBytes -= queue->pending.front().chargeBytes;
+		queue->pending.pop_front();
+		++queue->dropped;
+	}
+	queue->pendingBytes += entry.chargeBytes;
+	queue->pending.push_back(std::move(entry));
+}
+
+std::function<void(const livekit::diagnostic::Event&)>
+MeetingLogConsoleWindow::diagnosticMirror() {
+	return [](const livekit::diagnostic::Event &event) {
+		const auto queue = sharedQueue();
+		PendingEntry entry;
+		entry.category = event.kind == livekit::diagnostic::EventKind::SinkFailed
+			? LogCategory::Error : LogCategory::General;
+		const auto name = livekit::diagnostic::EventName(event.kind);
+		entry.tag = QString::fromLatin1(name.data(), static_cast<int>(name.size()));
+		const auto component = livekit::diagnostic::ComponentName(event.kind);
+		entry.component = QString::fromLatin1(component.data(),
+			static_cast<int>(component.size()));
+		const auto severity = livekit::diagnostic::SeverityName(
+			livekit::diagnostic::EventSeverity(event));
+		entry.severity = QString::fromLatin1(severity.data(),
+			static_cast<int>(severity.size()));
+		const auto session = event.context.anonymous_session_id.View();
+		entry.sessionId = QString::fromLatin1(session.data(),
+			static_cast<int>(session.size()));
+		const auto operation = event.context.operation_id.View();
+		entry.operationId = QString::fromLatin1(operation.data(),
+			static_cast<int>(operation.size()));
+		entry.timeStr = QDateTime::fromMSecsSinceEpoch(event.occurred_at_utc_ms)
+			.toString("hh:mm:ss.zzz");
+		switch (event.kind) {
+		case livekit::diagnostic::EventKind::ProcessStarted:
+			entry.message = QStringLiteral("build=%1").arg(event.build_id.data()); break;
+		case livekit::diagnostic::EventKind::ProcessStopping:
+			entry.message = QString::fromLatin1(livekit::diagnostic::ShutdownReasonName(
+				event.shutdown_reason).data()); break;
+		case livekit::diagnostic::EventKind::ProcessTerminal:
+			entry.message = QStringLiteral("outcome=%1 drain=%2")
+				.arg(QString::fromLatin1(livekit::diagnostic::OutcomeName(event.outcome).data()))
+				.arg(QString::fromLatin1(livekit::diagnostic::DrainResultName(event.drain_result).data()));
+			break;
+		case livekit::diagnostic::EventKind::QueueSummary:
+			entry.message = QStringLiteral("accepted=%1 dropped=%2 high_water=%3")
+				.arg(event.accepted).arg(event.dropped).arg(event.queue_high_water); break;
+		case livekit::diagnostic::EventKind::SinkFailed:
+			entry.message = QString::fromLatin1(livekit::diagnostic::FailureReasonName(
+				event.failure_reason).data()); break;
+		case livekit::diagnostic::EventKind::SinkRecovered:
+			entry.message = QStringLiteral("sink_recovered"); break;
+		case livekit::diagnostic::EventKind::ChatReceived:
+			entry.message = QStringLiteral("type=%1 bytes=%2")
+				.arg(QString::fromLatin1(livekit::diagnostic::ChatKindName(event.chat_kind).data()))
+				.arg(event.bytes); break;
+		case livekit::diagnostic::EventKind::ProcessIssue:
+			entry.category = LogCategory::Error;
+			entry.message = QString::fromLatin1(
+				livekit::diagnostic::IssueCodeName(event.issue_code).data());
+			break;
 		}
-
-		bool match = true;
-		if (!_currentFilter.isEmpty()) {
-			match = entry.fullText.contains(_currentFilter, Qt::CaseInsensitive);
+		if (event.kind == livekit::diagnostic::EventKind::QueueSummary) {
+			std::lock_guard lock(queue->mutex);
+			queue->pipelineDropped = event.dropped;
 		}
+		offer(queue, std::move(entry));
+	};
+}
 
-		if (match && _logView) {
-			_logView->appendHtml(entry.formattedHtml);
-			if (_autoScrollBox && _autoScrollBox->isChecked()) {
-				_logView->moveCursor(QTextCursor::End);
+bool MeetingLogConsoleWindow::appendVisible(PendingEntry pending) {
+	LogEntry entry;
+	entry.timeStr = std::move(pending.timeStr);
+	entry.category = pending.category;
+	entry.tag = std::move(pending.tag);
+	entry.message = std::move(pending.message);
+	entry.severity = std::move(pending.severity);
+	entry.component = std::move(pending.component);
+	entry.sessionId = std::move(pending.sessionId);
+	entry.operationId = std::move(pending.operationId);
+	const auto context = QStringLiteral(" session=%1 operation=%2")
+		.arg(entry.sessionId.isEmpty() ? QStringLiteral("unknown") : entry.sessionId,
+			entry.operationId.isEmpty() ? QStringLiteral("unknown") : entry.operationId);
+	entry.formattedHtml = formatLogHtml(entry.timeStr, entry.category,
+		entry.tag, entry.message + context, &entry.catName);
+	entry.fullText = QString("[%1] [%2] [%3] %4%5")
+		.arg(entry.timeStr, entry.catName, entry.tag, entry.message, context);
+	entry.chargeBytes = sizeof(LogEntry) + 2 * (entry.timeStr.capacity() +
+		entry.tag.capacity() + entry.message.capacity() + entry.catName.capacity() +
+		entry.formattedHtml.capacity() + entry.fullText.capacity() +
+		entry.severity.capacity() + entry.component.capacity() +
+		entry.sessionId.capacity() + entry.operationId.capacity());
+	_cacheBytes += entry.chargeBytes;
+	_logEntries.push_back(std::move(entry));
+	bool evicted_by_bytes = false;
+	while (_logEntries.size() > kMaxLogEntries || _cacheBytes > kMaxCacheBytes) {
+		if (_cacheBytes > kMaxCacheBytes) evicted_by_bytes = true;
+		_cacheBytes -= _logEntries.front().chargeBytes;
+		_logEntries.pop_front();
+	}
+	const auto &stored = _logEntries.back();
+	if (!evicted_by_bytes && matchesFilter(stored) && _logView) {
+		_logView->appendHtml(stored.formattedHtml);
+		++_visibleCount;
+		if (_autoScrollBox && _autoScrollBox->isChecked())
+			_logView->moveCursor(QTextCursor::End);
+	}
+	return evicted_by_bytes;
+}
+
+void MeetingLogConsoleWindow::drainPending() {
+	if (_queue->clearFuture.valid() && _queue->clearFuture.wait_for(
+			std::chrono::milliseconds::zero()) == std::future_status::ready) {
+		const auto result = _queue->clearFuture.get();
+		_clearSavedBtn->setEnabled(true);
+		showStorageMessage(result.success
+			? QCoreApplication::translate("MeetingUI",
+				"Cleared %1 saved segments; %2 active runs kept")
+				.arg(result.removed_segments).arg(result.active_runs_skipped)
+			: QCoreApplication::translate("MeetingUI", "Log cleanup failed: %1")
+				.arg(QString::fromStdString(result.reason)));
+	}
+	if (_diagnosticModeBox) {
+		if (const auto pipeline = livekit::diagnostic::InstalledBusinessPipeline()) {
+			const bool active = pipeline->DiagnosticWindowActive();
+			if (_diagnosticModeBox->isChecked() != active) {
+				const QSignalBlocker blocked(_diagnosticModeBox);
+				_diagnosticModeBox->setChecked(active);
 			}
+			if (active && !_queue->clearFuture.valid() &&
+				std::chrono::steady_clock::now() >= _storageMessageUntil)
+				_storageStatusLabel->setText(QCoreApplication::translate(
+					"MeetingUI", "Diagnostic mode: %1 min remaining")
+					.arg((pipeline->DiagnosticWindowRemaining().count() + 59999) /
+						60000));
 		}
-	}, Qt::QueuedConnection);
+	}
+	QElapsedTimer elapsed;
+	elapsed.start();
+	bool evicted = false;
+	for (int count = 0; count < 128 && elapsed.elapsed() < 4; ++count) {
+		PendingEntry entry;
+		{
+			std::lock_guard lock(_queue->mutex);
+			if (_queue->pending.empty()) break;
+			entry = std::move(_queue->pending.front());
+			_queue->pendingBytes -= entry.chargeBytes;
+			_queue->pending.pop_front();
+		}
+		evicted |= appendVisible(std::move(entry));
+	}
+	if (evicted) rebuildLogView();
+	if (_statusLabel) {
+		quint64 dropped, pipelineDropped;
+		{
+			std::lock_guard lock(_queue->mutex);
+			dropped = _queue->dropped;
+			pipelineDropped = _queue->pipelineDropped;
+		}
+		_statusLabel->setText(QCoreApplication::translate("MeetingUI",
+			"%1/%2 matched; UI loss=%3, pipeline loss=%4")
+			.arg(_visibleCount).arg(_logEntries.size()).arg(dropped).arg(pipelineDropped));
+	}
+}
+
+void MeetingLogConsoleWindow::showStorageMessage(QString message) {
+	_storageStatusLabel->setText(std::move(message));
+	_storageMessageUntil = std::chrono::steady_clock::now() +
+		std::chrono::seconds(8);
 }
 
 void MeetingLogConsoleWindow::onFilterChanged(const QString &filterText) {
-	QMutexLocker locker(&_mutex);
 	_currentFilter = filterText.trimmed();
 	rebuildLogView();
+}
+
+bool MeetingLogConsoleWindow::matchesFilter(const LogEntry &entry) const {
+	if (!_currentFilter.isEmpty() &&
+		!entry.fullText.contains(_currentFilter, Qt::CaseInsensitive)) return false;
+	if (_severityFilter && _severityFilter->currentIndex() > 0 &&
+		entry.severity != _severityFilter->currentText()) return false;
+	if (_componentFilter && _componentFilter->currentIndex() > 0 &&
+		entry.component != _componentFilter->currentText()) return false;
+	if (_sessionInput && !_sessionInput->text().trimmed().isEmpty() &&
+		!entry.sessionId.contains(_sessionInput->text().trimmed(),
+			Qt::CaseInsensitive)) return false;
+	if (_operationInput && !_operationInput->text().trimmed().isEmpty() &&
+		!entry.operationId.contains(_operationInput->text().trimmed(),
+			Qt::CaseInsensitive)) return false;
+	return true;
 }
 
 void MeetingLogConsoleWindow::rebuildLogView() {
 	if (!_logView) return;
 
 	_logView->clear();
-	int matchedCount = 0;
+	_visibleCount = 0;
 
 	for (const auto &entry : _logEntries) {
-		if (_currentFilter.isEmpty() || entry.fullText.contains(_currentFilter, Qt::CaseInsensitive)) {
+		if (matchesFilter(entry)) {
 			_logView->appendHtml(entry.formattedHtml);
-			matchedCount++;
-		}
-	}
-
-	if (_statusLabel) {
-		if (_currentFilter.isEmpty()) {
-			_statusLabel->setText(QCoreApplication::translate("MeetingUI", "● Console Ready (%1 entries)").arg(_logEntries.size()));
-		} else {
-			_statusLabel->setText(QCoreApplication::translate("MeetingUI", "● Filtered: %1/%2 entries").arg(matchedCount).arg(_logEntries.size()));
+			++_visibleCount;
 		}
 	}
 
@@ -184,8 +555,14 @@ QString MeetingLogConsoleWindow::formatLogHtml(const QString &timeStr, LogCatego
 }
 
 void MeetingLogConsoleWindow::clearLogs() {
-	QMutexLocker locker(&_mutex);
+	{
+		std::lock_guard lock(_queue->mutex);
+		_queue->pending.clear();
+		_queue->pendingBytes = 0;
+	}
 	_logEntries.clear();
+	_cacheBytes = 0;
+	_visibleCount = 0;
 	if (_logView) {
 		_logView->clear();
 	}
@@ -195,10 +572,14 @@ void MeetingLogConsoleWindow::clearLogs() {
 }
 
 void MeetingLogConsoleWindow::copyAllLogs() {
-	QMutexLocker locker(&_mutex);
-	if (_logView) {
-		QApplication::clipboard()->setText(_logView->toPlainText());
+	if (!_logView) return;
+	if (_copyScope && _copyScope->currentIndex() == 1) {
+		const auto selected = _logView->textCursor().selectedText()
+			.replace(QChar::ParagraphSeparator, QLatin1Char('\n'));
+		if (!selected.isEmpty()) QApplication::clipboard()->setText(selected);
+		return;
 	}
+	QApplication::clipboard()->setText(_logView->toPlainText());
 }
 
 void MeetingLogConsoleWindow::resizeEvent(QResizeEvent *e) {

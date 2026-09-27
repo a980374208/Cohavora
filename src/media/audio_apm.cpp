@@ -1,7 +1,6 @@
 #include "audio_apm.h"
 #include "api/audio/builtin_audio_processing_builder.h"
 #include "api/environment/environment_factory.h"
-#include <iostream>
 #include <algorithm>
 
 namespace livekit {
@@ -70,10 +69,6 @@ void AudioApmProcessor::ApplyConfig(const ApmConfig& config) {
     apm_cfg.high_pass_filter.enabled = config.enable_hpf;
 
     apm_->ApplyConfig(apm_cfg);
-    std::cout << "[APM 3A] Applied Config: AEC=" << (config.enable_aec ? "ON" : "OFF")
-              << ", ANS=" << (config.enable_ans ? "ON" : "OFF")
-              << ", AGC=" << (config.enable_agc ? "ON" : "OFF")
-              << ", HPF=" << (config.enable_hpf ? "ON" : "OFF") << std::endl;
 }
 
 ApmConfig AudioApmProcessor::GetConfig() const {

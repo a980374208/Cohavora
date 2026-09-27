@@ -6,6 +6,7 @@
 #include "src/telemetry/process_resource_sampler.h"
 #include "src/telemetry/stability_ledger.h"
 #include "src/telemetry/telemetry_report.h"
+#include "src/telemetry/diagnostic_pipeline.h"
 #include "src/core/whiteboard/whiteboard_protocol.h"
 #include "src/core/whiteboard/whiteboard_runtime.h"
 #include "src/core/whiteboard/whiteboard_transport.h"
@@ -19,6 +20,7 @@
 #include <QtCore/QMetaObject>
 #include <QtCore/QPointer>
 #include <QtCore/QThread>
+#include <QtCore/QUuid>
 
 #include <exception>
 #include <future>
@@ -27,6 +29,66 @@
 #include <utility>
 
 namespace OpenMeeting {
+
+namespace {
+livekit::diagnostic::Outcome DiagnosticOutcome(
+    livekit::telemetry::OperationOutcome outcome) noexcept {
+    using Source = livekit::telemetry::OperationOutcome;
+    using Target = livekit::diagnostic::Outcome;
+    switch (outcome) {
+    case Source::Success: return Target::Success;
+    case Source::DegradedSuccess: return Target::DegradedSuccess;
+    case Source::Timeout: return Target::Timeout;
+    case Source::Cancelled: return Target::Cancelled;
+    default: return Target::Failure;
+    }
+}
+
+livekit::diagnostic::ErrorLayer DiagnosticLayer(HttpFailureLayer layer) noexcept {
+    using Target = livekit::diagnostic::ErrorLayer;
+    switch (layer) {
+    case HttpFailureLayer::Policy: return Target::Policy;
+    case HttpFailureLayer::Http: return Target::Http;
+    case HttpFailureLayer::Network: return Target::Network;
+    case HttpFailureLayer::Business: return Target::Business;
+    case HttpFailureLayer::Parse: return Target::Parse;
+    default: return Target::None;
+    }
+}
+
+void EmitChatSendTerminal(livekit::diagnostic::Context context,
+                          livekit::diagnostic::Outcome outcome,
+                          std::uint64_t bytes) noexcept {
+    livekit::diagnostic::Event event;
+    event.kind = livekit::diagnostic::EventKind::ChatSendTerminal;
+    event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+    event.context = context;
+    event.chat_kind = livekit::diagnostic::ChatKind::Text;
+    event.outcome = outcome;
+    event.bytes = bytes;
+    livekit::diagnostic::EmitBusinessEvent(event);
+}
+
+void EmitTransferTerminal(livekit::diagnostic::Context context,
+                          const QString& mediaType,
+                          livekit::diagnostic::TransferDirection direction,
+                          livekit::diagnostic::Outcome outcome,
+                          std::uint64_t bytes) noexcept {
+    livekit::diagnostic::Event event;
+    event.kind = livekit::diagnostic::EventKind::TransferTerminal;
+    event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+    event.context = context;
+    event.transfer_kind = mediaType == QStringLiteral("image")
+        ? livekit::diagnostic::TransferKind::Image
+        : mediaType == QStringLiteral("file")
+            ? livekit::diagnostic::TransferKind::File
+            : livekit::diagnostic::TransferKind::Unknown;
+    event.transfer_direction = direction;
+    event.outcome = outcome;
+    event.bytes = bytes;
+    livekit::diagnostic::EmitBusinessEvent(event);
+}
+}
 
 livekit::SignalOptions ProductionMeetingSignalOptions(
         bool allowInsecureTransport) {
@@ -2438,6 +2500,31 @@ MeetingCoordinator::AdmissionBackend MeetingCoordinator::makeDefaultAdmissionBac
                                            ResultCallback<bool> callback) {
         sessionManager.httpClient().endMeeting(meetingId, std::move(callback));
     };
+    backend.joinMeetingWithContext = [&sessionManager](const QString &meetingId,
+        const QString &password, ResultCallback<bool> callback, HttpRequestContext context) {
+        sessionManager.httpClient().joinMeeting(meetingId, password,
+            std::move(callback), std::move(context));
+    };
+    backend.getMeetingTokenWithContext = [&sessionManager](const QString &meetingId,
+        ResultCallback<LiveKitAuthInfo> callback, HttpRequestContext context) {
+        sessionManager.httpClient().getMeetingToken(meetingId,
+            std::move(callback), std::move(context));
+    };
+    backend.createImmediateMeetingWithContext = [&sessionManager](const QString &title,
+        int durationSeconds, ResultCallback<LiveKitAuthInfo> callback, HttpRequestContext context) {
+        sessionManager.httpClient().createImmediateMeeting(title, durationSeconds,
+            std::move(callback), std::move(context));
+    };
+    backend.leaveMeetingWithContext = [&sessionManager](const QString &meetingId,
+        ResultCallback<bool> callback, HttpRequestContext context) {
+        sessionManager.httpClient().leaveMeeting(meetingId,
+            std::move(callback), std::move(context));
+    };
+    backend.endMeetingWithContext = [&sessionManager](const QString &meetingId,
+        ResultCallback<bool> callback, HttpRequestContext context) {
+        sessionManager.httpClient().endMeeting(meetingId,
+            std::move(callback), std::move(context));
+    };
     return backend;
 }
 
@@ -2523,15 +2610,51 @@ uint64_t MeetingCoordinator::beginAdmission(AdmissionStage stage) {
     _admissionStage = stage;
     _admissionTelemetry = AdmissionTelemetryRecord{};
     _admissionTelemetry.generation = _admissionGeneration;
+    _admissionTelemetry.diagnosticOperationId =
+        QUuid::createUuid().toString(QUuid::Id128);
+    _admissionTelemetry.anonymousSessionId =
+        QUuid::createUuid().toString(QUuid::Id128);
     _admissionTelemetry.startedAt = std::chrono::steady_clock::now();
     _admissionTelemetry.terminal = false;
     _admissionTelemetry.stabilityLedger =
         livekit::telemetry::InstalledStabilityLedger();
     if (_admissionTelemetry.stabilityLedger) {
         _admissionTelemetry.stabilitySessionId =
-            _admissionTelemetry.stabilityLedger->BeginSession();
+            _admissionTelemetry.stabilityLedger->BeginSession(
+                _admissionTelemetry.anonymousSessionId.toStdString());
     }
+    livekit::diagnostic::Event event;
+    event.kind = livekit::diagnostic::EventKind::AdmissionStarted;
+    event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+    event.context.operation_id.Assign(
+        _admissionTelemetry.diagnosticOperationId.toStdString());
+    event.context.anonymous_session_id.Assign(
+        _admissionTelemetry.anonymousSessionId.toStdString());
+    event.context.session_generation = _admissionGeneration;
+    event.context.has_session_generation = true;
+    event.stage = stage == AdmissionStage::Joining
+        ? livekit::diagnostic::Stage::Joining
+        : stage == AdmissionStage::Creating
+            ? livekit::diagnostic::Stage::Creating
+            : livekit::diagnostic::Stage::StartingRoom;
+    livekit::diagnostic::EmitBusinessEvent(event);
     return _admissionGeneration;
+}
+
+HttpRequestContext MeetingCoordinator::admissionHttpContext() const {
+    return {_admissionTelemetry.anonymousSessionId,
+            _admissionTelemetry.diagnosticOperationId};
+}
+
+livekit::diagnostic::Context MeetingCoordinator::diagnosticContext() const {
+    livekit::diagnostic::Context context;
+    context.anonymous_session_id.Assign(
+        _admissionTelemetry.anonymousSessionId.toStdString());
+    if (_nextSessionGeneration != 0) {
+        context.session_generation = _nextSessionGeneration;
+        context.has_session_generation = true;
+    }
+    return context;
 }
 
 uint64_t MeetingCoordinator::invalidateAdmission() {
@@ -2567,6 +2690,19 @@ void MeetingCoordinator::finishAdmissionTelemetry(
     }
     const auto finishedAt = std::chrono::steady_clock::now();
     _admissionTelemetry.terminal = true;
+    livekit::diagnostic::Event event;
+    event.kind = livekit::diagnostic::EventKind::AdmissionTerminal;
+    event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+    event.context.operation_id.Assign(
+        _admissionTelemetry.diagnosticOperationId.toStdString());
+    event.context.anonymous_session_id.Assign(
+        _admissionTelemetry.anonymousSessionId.toStdString());
+    event.context.session_generation = admissionGeneration;
+    event.context.has_session_generation = true;
+    event.outcome = DiagnosticOutcome(outcome);
+    event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        finishedAt - _admissionTelemetry.startedAt).count();
+    livekit::diagnostic::EmitBusinessEvent(event);
     if (const auto telemetry = _admissionTelemetry.telemetry.lock();
         telemetry && !_admissionTelemetry.operationId.empty()) {
         telemetry->FinishOperation(
@@ -2618,6 +2754,19 @@ void MeetingCoordinator::finishActiveStabilitySession() {
 void MeetingCoordinator::finishStartupTelemetry(
     livekit::telemetry::OperationOutcome outcome) {
     if (_startupTelemetryOperationId.empty()) return;
+    livekit::diagnostic::Event event;
+    event.kind = livekit::diagnostic::EventKind::StartupTerminal;
+    event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+    event.context.anonymous_session_id.Assign(
+        _admissionTelemetry.anonymousSessionId.toStdString());
+    event.context.operation_id.Assign(_startupTelemetryOperationId);
+    event.context.parent_operation_id.Assign(
+        _admissionTelemetry.diagnosticOperationId.toStdString());
+    event.context.session_generation = _nextSessionGeneration;
+    event.context.has_session_generation = true;
+    event.stage = livekit::diagnostic::Stage::StartingMedia;
+    event.outcome = DiagnosticOutcome(outcome);
+    livekit::diagnostic::EmitBusinessEvent(event);
     if (const auto telemetry = _startupTelemetry.lock()) {
         telemetry->FinishOperation(
             _startupTelemetryOperationId,
@@ -2738,8 +2887,7 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
     }
 
     // 第一阶段：向后端鉴权校验密码与会议有效性
-    auto joinRequest = owner->_admissionBackend.joinMeeting;
-    joinRequest(requestedMeetingId, requestedPassword,
+    ResultCallback<bool> joined =
                 [owner, generation, requestedMeetingId](bool ok, bool, const HttpError &err) {
         if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::Joining)) {
             return;
@@ -2762,13 +2910,22 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
 
         // 第二阶段：换取 LiveKit 令牌与网关 URL
         owner->_admissionStage = AdmissionStage::FetchingToken;
+        livekit::diagnostic::Event stageEvent;
+        stageEvent.kind = livekit::diagnostic::EventKind::AdmissionStageChanged;
+        stageEvent.thread_role = livekit::diagnostic::ThreadRole::Ui;
+        stageEvent.context.operation_id.Assign(
+            owner->_admissionTelemetry.diagnosticOperationId.toStdString());
+        stageEvent.context.anonymous_session_id.Assign(
+            owner->_admissionTelemetry.anonymousSessionId.toStdString());
+        stageEvent.stage = livekit::diagnostic::Stage::FetchingToken;
+        livekit::diagnostic::EmitBusinessEvent(stageEvent);
         owner->setState(MeetingState::FetchingCredentials,
                         QCoreApplication::translate("MeetingUI", "Requesting an audio/video session token..."));
         if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::FetchingToken)) {
             return;
         }
-        auto tokenRequest = owner->_admissionBackend.getMeetingToken;
-        tokenRequest(requestedMeetingId, [owner, generation](bool tokenOk,
+        ResultCallback<LiveKitAuthInfo> tokenReceived =
+            [owner, generation](bool tokenOk,
                                                             const LiveKitAuthInfo &auth,
                                                             const HttpError &tokenErr) {
             if (!owner || !owner->isAdmissionCurrent(generation, AdmissionStage::FetchingToken)) {
@@ -2795,8 +2952,20 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
             const QString token = auth.token;
             owner->_admissionStage = AdmissionStage::ReadyToStart;
             owner->startRoomSession(url, token, generation);
-        });
-    });
+        };
+        if (owner->_admissionBackend.getMeetingTokenWithContext)
+            owner->_admissionBackend.getMeetingTokenWithContext(
+                requestedMeetingId, std::move(tokenReceived), owner->admissionHttpContext());
+        else
+            owner->_admissionBackend.getMeetingToken(
+                requestedMeetingId, std::move(tokenReceived));
+    };
+    if (owner->_admissionBackend.joinMeetingWithContext)
+        owner->_admissionBackend.joinMeetingWithContext(requestedMeetingId,
+            requestedPassword, std::move(joined), owner->admissionHttpContext());
+    else
+        owner->_admissionBackend.joinMeeting(requestedMeetingId,
+            requestedPassword, std::move(joined));
 }
 
 void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
@@ -2836,8 +3005,7 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
         return;
     }
 
-    auto createRequest = owner->_admissionBackend.createImmediateMeeting;
-    createRequest(requestedTitle, requestedDurationSeconds,
+    ResultCallback<LiveKitAuthInfo> created =
                   [owner, generation, requestedTitle](bool ok,
                                                       const LiveKitAuthInfo &auth,
                                                       const HttpError &err) {
@@ -2880,7 +3048,14 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
             QCoreApplication::translate("MeetingUI", "Instant meeting created! Meeting ID: %1 (others can join using this 9-digit ID)").arg(meetingId));
 
         owner->startRoomSession(url, token, generation);
-    });
+    };
+    if (owner->_admissionBackend.createImmediateMeetingWithContext)
+        owner->_admissionBackend.createImmediateMeetingWithContext(
+            requestedTitle, requestedDurationSeconds, std::move(created),
+            owner->admissionHttpContext());
+    else
+        owner->_admissionBackend.createImmediateMeeting(
+            requestedTitle, requestedDurationSeconds, std::move(created));
 }
 
 void MeetingCoordinator::connectDirectlyAsync(const QString &url,
@@ -2916,6 +3091,8 @@ void MeetingCoordinator::connectDirectlyAsync(const QString &url,
 }
 
 void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
+    const auto leaveContext = admissionHttpContext();
+    const auto leavingGeneration = _nextSessionGeneration;
     invalidateAdmission();
     if (_state == MeetingState::Idle || _state == MeetingState::Leaving) {
         return;
@@ -2928,20 +3105,64 @@ void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
         ? _admissionBackend.endMeeting : _admissionBackend.leaveMeeting;
     QPointer<MeetingCoordinator> owner(this);
 
+    livekit::diagnostic::Event requested;
+    requested.kind = livekit::diagnostic::EventKind::MeetingLeaveRequested;
+    requested.thread_role = livekit::diagnostic::ThreadRole::Ui;
+    requested.context.anonymous_session_id.Assign(
+        leaveContext.anonymousSessionId.toStdString());
+    requested.context.parent_operation_id.Assign(
+        leaveContext.parentOperationId.toStdString());
+    requested.context.session_generation = leavingGeneration;
+    requested.context.has_session_generation = true;
+    requested.route = shouldEndMeeting
+        ? livekit::diagnostic::Route::EndMeeting
+        : livekit::diagnostic::Route::LeaveMeeting;
+    livekit::diagnostic::EmitBusinessEvent(requested);
+
     setState(MeetingState::Leaving, QCoreApplication::translate("MeetingUI", "Leaving the meeting safely..."));
     if (!owner || owner->_state != MeetingState::Leaving ||
         owner->_admissionStage != AdmissionStage::None || owner->_sessionInvalidated) {
         return;
     }
     if (notifyBackend) {
-        backendRequest(meetingId, [](bool, bool, const HttpError &) {});
+        auto notified = [leaveContext, leavingGeneration, shouldEndMeeting](
+            bool ok, bool, const HttpError &error) {
+            livekit::diagnostic::Event event;
+            event.kind = livekit::diagnostic::EventKind::MeetingBackendNotificationCompleted;
+            event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+            event.context.anonymous_session_id.Assign(
+                leaveContext.anonymousSessionId.toStdString());
+            event.context.parent_operation_id.Assign(
+                leaveContext.parentOperationId.toStdString());
+            event.context.request_id.Assign(error.requestId.toStdString());
+            event.context.session_generation = leavingGeneration;
+            event.context.has_session_generation = true;
+            event.route = shouldEndMeeting
+                ? livekit::diagnostic::Route::EndMeeting
+                : livekit::diagnostic::Route::LeaveMeeting;
+            event.outcome = ok ? livekit::diagnostic::Outcome::Success
+                               : livekit::diagnostic::Outcome::Failure;
+            event.error_layer = DiagnosticLayer(error.failureLayer);
+            event.http_status = error.httpStatus;
+            event.network_error = error.networkError;
+            event.business_code = error.businessCode;
+            if (!ok) event.error_code = livekit::diagnostic::ErrorCode::Unknown;
+            livekit::diagnostic::EmitBusinessEvent(event);
+        };
+        auto contextualRequest = shouldEndMeeting
+            ? _admissionBackend.endMeetingWithContext
+            : _admissionBackend.leaveMeetingWithContext;
+        if (contextualRequest)
+            contextualRequest(meetingId, std::move(notified), leaveContext);
+        else
+            backendRequest(meetingId, std::move(notified));
         if (!owner || owner->_state != MeetingState::Leaving ||
             owner->_admissionStage != AdmissionStage::None || owner->_sessionInvalidated) {
             return;
         }
     }
 
-    owner->stopRoomSession([owner] {
+    owner->stopRoomSession([owner, leaveContext, leavingGeneration] {
     if (!owner || owner->_state != MeetingState::Leaving ||
         owner->_admissionStage != AdmissionStage::None || owner->_sessionInvalidated) {
         return;
@@ -2952,6 +3173,15 @@ void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
         owner->_admissionStage != AdmissionStage::None || owner->_sessionInvalidated) {
         return;
     }
+    livekit::diagnostic::Event stopped;
+    stopped.kind = livekit::diagnostic::EventKind::SessionStopped;
+    stopped.thread_role = livekit::diagnostic::ThreadRole::Ui;
+    stopped.context.anonymous_session_id.Assign(
+        leaveContext.anonymousSessionId.toStdString());
+    stopped.context.session_generation = leavingGeneration;
+    stopped.context.has_session_generation = true;
+    stopped.outcome = livekit::diagnostic::Outcome::Success;
+    livekit::diagnostic::EmitBusinessEvent(stopped);
     emit owner->meetingLeft();
     });
 }
@@ -3058,6 +3288,15 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
         return;
     }
     owner->_admissionStage = AdmissionStage::Consumed;
+    livekit::diagnostic::Event stageEvent;
+    stageEvent.kind = livekit::diagnostic::EventKind::AdmissionStageChanged;
+    stageEvent.thread_role = livekit::diagnostic::ThreadRole::Ui;
+    stageEvent.context.operation_id.Assign(
+        owner->_admissionTelemetry.diagnosticOperationId.toStdString());
+    stageEvent.context.anonymous_session_id.Assign(
+        owner->_admissionTelemetry.anonymousSessionId.toStdString());
+    stageEvent.stage = livekit::diagnostic::Stage::ConnectingRoom;
+    livekit::diagnostic::EmitBusinessEvent(stageEvent);
     owner->_startupCommitted = false;
     owner->_startupReconnectPending = false;
     owner->_startupListenOnly = false;
@@ -3074,10 +3313,19 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
     _sessionRuntime = std::make_shared<MeetingSessionRuntime>(
         *_ioContext,
         ++_nextSessionGeneration,
-        _sessionManager.userId(), _ioContext);
+        _sessionManager.userId(), _ioContext,
+        _admissionTelemetry.anonymousSessionId.toStdString());
     _sessionOwner->runtime = _sessionRuntime;
 
     _room = livekit::Room::Create(_ioContext->get_executor(), _ioContext);
+    livekit::diagnostic::Context roomDiagnosticContext;
+    roomDiagnosticContext.anonymous_session_id.Assign(
+        _admissionTelemetry.anonymousSessionId.toStdString());
+    roomDiagnosticContext.parent_operation_id.Assign(
+        _admissionTelemetry.diagnosticOperationId.toStdString());
+    roomDiagnosticContext.session_generation = _nextSessionGeneration;
+    roomDiagnosticContext.has_session_generation = true;
+    _room->SetDiagnosticContext(roomDiagnosticContext);
     _sessionOwner->room = _room;
     attachAdmissionTelemetry(_sessionRuntime->telemetry());
     _startupTelemetry = _sessionRuntime->telemetry();
@@ -3113,19 +3361,30 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
         auto session = _sessionRuntime;
         auto room = _room;
         const auto generation = session->generation();
-        session->post([gate = _sessionUiGate, session, room, generation] {
+        const auto diagnosticSessionId =
+            _admissionTelemetry.anonymousSessionId.toStdString();
+        session->post([gate = _sessionUiGate, session, room, generation,
+                       diagnosticSessionId] {
             auto telemetry = session->telemetry();
             telemetry->SetSnapshotCallbackOnStrand(
-                [gate, generation](livekit::telemetry::SessionTelemetry::SnapshotPtr snapshot) {
+                [gate, generation, diagnosticSessionId](
+                    livekit::telemetry::SessionTelemetry::SnapshotPtr snapshot) {
                     if (const auto store =
                             livekit::telemetry::InstalledTelemetryHistoryStore()) {
                         const auto ledger =
                             livekit::telemetry::InstalledStabilityLedger();
                         const bool accepted = store->SubmitSnapshot(
                             snapshot, ledger ? ledger->Summary()
-                                             : livekit::telemetry::StabilitySummary{});
-                        if (!accepted && snapshot->session_complete)
-                            qWarning() << "[Coordinator] Final telemetry snapshot was not queued.";
+                                             : livekit::telemetry::StabilitySummary{},
+                            diagnosticSessionId);
+                        if (!accepted && snapshot->session_complete) {
+                            auto event = livekit::diagnostic::Event::Issue(
+                                livekit::diagnostic::IssueCode::FinalSnapshotNotQueued);
+                            event.thread_role = livekit::diagnostic::ThreadRole::Session;
+                            event.context.session_generation = generation;
+                            event.context.has_session_generation = true;
+                            livekit::diagnostic::EmitBusinessEvent(event);
+                        }
                     }
                     gate->Post([generation, snapshot = std::move(snapshot)](MeetingCoordinator* self) {
                             if (!self->isCurrentSessionGenerationOnUiThread(generation)) return;
@@ -3335,7 +3594,10 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
                 ioContext->run();
                 break;
             } catch (...) {
-                qWarning() << "[Coordinator] Session handler failed; continuing executor drain.";
+                auto event = livekit::diagnostic::Event::Issue(
+                    livekit::diagnostic::IssueCode::SessionHandlerFailed);
+                event.thread_role = livekit::diagnostic::ThreadRole::Session;
+                livekit::diagnostic::EmitBusinessEvent(event);
             }
         }
     });
@@ -3513,11 +3775,22 @@ void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
     std::vector<QString> failedOutbound;
     std::vector<QString> failedInbound;
     if (_mediaSendTimer) _mediaSendTimer->stop();
-    for (const auto& task : _mediaSendQueue)
+    for (const auto& task : _mediaSendQueue) {
+        EmitTransferTerminal(diagnosticContext(), task.mediaType,
+            livekit::diagnostic::TransferDirection::Send,
+            livekit::diagnostic::Outcome::Cancelled,
+            static_cast<std::uint64_t>(task.totalSize));
         if (!task.messageId.isEmpty()) failedOutbound.push_back(task.messageId);
+    }
     _mediaSendQueue.clear();
-    for (const auto& [id, entry] : _inboundTransferLedger)
-        if (!entry.second) failedInbound.push_back(id);
+    for (const auto& [id, entry] : _inboundTransferLedger) {
+        if (!entry.second) {
+            failedInbound.push_back(id);
+            EmitTransferTerminal(diagnosticContext(), {},
+                livekit::diagnostic::TransferDirection::Receive,
+                livekit::diagnostic::Outcome::Cancelled, 0);
+        }
+    }
     _inboundTransferLedger.clear();
 
     auto audioCapture = std::move(_wasapiCap);
@@ -3830,6 +4103,8 @@ int64_t MeetingCoordinator::nextSequenceNumber() {
 void MeetingCoordinator::sendChatMessage(const QString &content, const QString &messageId, int64_t seq) {
     if (content.isEmpty()) return;
     if (!_room || _state != MeetingState::InMeeting) {
+        EmitChatSendTerminal(diagnosticContext(), livekit::diagnostic::Outcome::Failure,
+                             static_cast<std::uint64_t>(content.toUtf8().size()));
         if (!messageId.isEmpty()) {
             emit chatMessageSendFailed(messageId, QCoreApplication::translate("MeetingUI", "Not connected to a meeting room"));
         }
@@ -3850,6 +4125,10 @@ void MeetingCoordinator::sendChatMessage(const QString &content, const QString &
     std::vector<uint8_t> payload(jsonBytes.begin(), jsonBytes.end());
     try {
         bool ok = _room->PublishData(payload, true, {}, "chat");
+        EmitChatSendTerminal(diagnosticContext(), ok
+            ? livekit::diagnostic::Outcome::Success
+            : livekit::diagnostic::Outcome::Failure,
+            static_cast<std::uint64_t>(content.toUtf8().size()));
         if (ok) {
             if (!messageId.isEmpty()) {
                 _sessionUiGate->Post([messageId](MeetingCoordinator* self) {
@@ -3863,6 +4142,8 @@ void MeetingCoordinator::sendChatMessage(const QString &content, const QString &
             }
         }
     } catch (const std::exception &) {
+        EmitChatSendTerminal(diagnosticContext(), livekit::diagnostic::Outcome::Failure,
+                             static_cast<std::uint64_t>(content.toUtf8().size()));
         if (!messageId.isEmpty()) {
             emit chatMessageSendFailed(
                 messageId,
@@ -3870,6 +4151,8 @@ void MeetingCoordinator::sendChatMessage(const QString &content, const QString &
                     livekit::secure_log::ExceptionSummary("chat_send")));
         }
     } catch (...) {
+        EmitChatSendTerminal(diagnosticContext(), livekit::diagnostic::Outcome::Failure,
+                             static_cast<std::uint64_t>(content.toUtf8().size()));
         if (!messageId.isEmpty()) {
             emit chatMessageSendFailed(messageId, QCoreApplication::translate("MeetingUI", "An unknown error occurred while sending"));
         }
@@ -3878,12 +4161,19 @@ void MeetingCoordinator::sendChatMessage(const QString &content, const QString &
 
 void MeetingCoordinator::sendChatMediaMessage(const QString &messageId, const QString &mediaType, const QString &fileName, const QByteArray &data, int64_t seq) {
     if (data.isEmpty()) {
+        EmitTransferTerminal(diagnosticContext(), mediaType,
+            livekit::diagnostic::TransferDirection::Send,
+            livekit::diagnostic::Outcome::Failure, 0);
         if (!messageId.isEmpty()) {
             emit chatMessageSendFailed(messageId, QCoreApplication::translate("MeetingUI", "No data to send"));
         }
         return;
     }
     if (!_room || _state != MeetingState::InMeeting) {
+        EmitTransferTerminal(diagnosticContext(), mediaType,
+            livekit::diagnostic::TransferDirection::Send,
+            livekit::diagnostic::Outcome::Failure,
+            static_cast<std::uint64_t>(data.size()));
         if (!messageId.isEmpty()) {
             emit chatMessageSendFailed(messageId, QCoreApplication::translate("MeetingUI", "Not connected to a meeting room"));
         }
@@ -3950,6 +4240,10 @@ void MeetingCoordinator::processNextMediaSendChunk() {
         while (!_mediaSendQueue.empty()) {
             auto task = _mediaSendQueue.front();
             _mediaSendQueue.pop_front();
+            EmitTransferTerminal(diagnosticContext(), task.mediaType,
+                livekit::diagnostic::TransferDirection::Send,
+                livekit::diagnostic::Outcome::Failure,
+                static_cast<std::uint64_t>(task.totalSize));
             if (!task.messageId.isEmpty()) {
                 emit chatMessageSendFailed(task.messageId, QCoreApplication::translate("MeetingUI", "Network disconnected"));
             }
@@ -3989,8 +4283,14 @@ void MeetingCoordinator::processNextMediaSendChunk() {
     try {
         ok = _room->PublishData(payload, true, {}, "chat");
     } catch (const std::exception &) {
+        const auto mediaType = task.mediaType;
+        const auto totalSize = task.totalSize;
         QString msgId = task.messageId;
         _mediaSendQueue.pop_front();
+        EmitTransferTerminal(diagnosticContext(), mediaType,
+            livekit::diagnostic::TransferDirection::Send,
+            livekit::diagnostic::Outcome::Failure,
+            static_cast<std::uint64_t>(totalSize));
         if (!msgId.isEmpty()) {
             emit chatMessageSendFailed(
                 msgId,
@@ -3999,8 +4299,14 @@ void MeetingCoordinator::processNextMediaSendChunk() {
         }
         return;
     } catch (...) {
+        const auto mediaType = task.mediaType;
+        const auto totalSize = task.totalSize;
         QString msgId = task.messageId;
         _mediaSendQueue.pop_front();
+        EmitTransferTerminal(diagnosticContext(), mediaType,
+            livekit::diagnostic::TransferDirection::Send,
+            livekit::diagnostic::Outcome::Failure,
+            static_cast<std::uint64_t>(totalSize));
         if (!msgId.isEmpty()) {
             emit chatMessageSendFailed(msgId, QCoreApplication::translate("MeetingUI", "An unknown error occurred while delivering the packet"));
         }
@@ -4019,8 +4325,14 @@ void MeetingCoordinator::processNextMediaSendChunk() {
     }
 
     if (task.currentChunk >= task.totalChunks) {
+        const auto mediaType = task.mediaType;
+        const auto totalSize = task.totalSize;
         QString msgId = task.messageId;
         _mediaSendQueue.pop_front();
+        EmitTransferTerminal(diagnosticContext(), mediaType,
+            livekit::diagnostic::TransferDirection::Send,
+            livekit::diagnostic::Outcome::Success,
+            static_cast<std::uint64_t>(totalSize));
         if (!msgId.isEmpty()) {
             emit chatMessageSendSuccess(msgId);
         }
@@ -4542,11 +4854,26 @@ void MeetingCoordinator::enqueueDataReceived(const std::shared_ptr<MeetingSessio
 }
 
 bool MeetingCoordinator::isCurrentSessionGenerationOnUiThread(uint64_t sessionGeneration) const {
-    return sessionGeneration != 0 &&
+    const bool current = sessionGeneration != 0 &&
         _sessionRunning.load(std::memory_order_acquire) &&
         _sessionRuntime &&
         _nextSessionGeneration == sessionGeneration &&
         _sessionRuntime->generation() == sessionGeneration;
+    if (!current && sessionGeneration != 0) {
+        const auto count = _staleUiCallbackCount.fetch_add(
+            1, std::memory_order_relaxed) + 1;
+        if (count == 1 || count % 64 == 0) {
+            livekit::diagnostic::Event event;
+            event.kind = livekit::diagnostic::EventKind::CallbackRejectedSummary;
+            event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+            event.context.session_generation = sessionGeneration;
+            event.context.has_session_generation = true;
+            event.current_generation = _nextSessionGeneration;
+            event.signal_message_count = count;
+            livekit::diagnostic::EmitBusinessEvent(event);
+        }
+    }
+    return current;
 }
 
 bool MeetingCoordinator::isSenderContextCurrentOnUiThread(
@@ -4578,17 +4905,22 @@ void MeetingCoordinator::cancelInboundTransfersForParticipant(
         }
 
         std::vector<QString> failedTransfers;
+        std::map<QString, std::pair<QString, std::uint64_t>> failedDetails;
         auto &transfers = session->transfersOnStrand();
         for (auto it = transfers.begin(); it != transfers.end();) {
             if (it->second.senderKey == participantKey) {
-                failedTransfers.push_back(it->first.uiTransferId());
+                const auto id = it->first.uiTransferId();
+                failedTransfers.push_back(id);
+                failedDetails.emplace(id, std::make_pair(it->second.mediaType,
+                    static_cast<std::uint64_t>((std::max)(qint64{0}, it->second.totalSize))));
                 it = transfers.erase(it);
             } else {
                 ++it;
             }
         }
         gate->Post([sessionGeneration, participantKey,
-                                         failedTransfers = std::move(failedTransfers)](MeetingCoordinator* self) mutable {
+                    failedTransfers = std::move(failedTransfers),
+                    failedDetails = std::move(failedDetails)](MeetingCoordinator* self) mutable {
             if (!self->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
                 return;
             }
@@ -4611,6 +4943,12 @@ void MeetingCoordinator::cancelInboundTransfersForParticipant(
                 }
             }
             for (const auto &transferId : failedTransfers) {
+                const auto detail = failedDetails.find(transferId);
+                EmitTransferTerminal(owner->diagnosticContext(),
+                    detail == failedDetails.end() ? QString{} : detail->second.first,
+                    livekit::diagnostic::TransferDirection::Receive,
+                    livekit::diagnostic::Outcome::Failure,
+                    detail == failedDetails.end() ? 0 : detail->second.second);
                 emit owner->chatMediaReceivingFailed(transferId, QCoreApplication::translate("MeetingUI", "The sender has left the meeting"));
                 if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
             }
@@ -4802,6 +5140,13 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
                         // Completion is the terminal linearization point. A
                         // synchronous leave/retire must not report failure too.
                         owner->_inboundTransferLedger.at(uiTransferId).second = true;
+                        if (mType == QStringLiteral("image") ||
+                            mType == QStringLiteral("file")) {
+                            EmitTransferTerminal(owner->diagnosticContext(), mType,
+                                livekit::diagnostic::TransferDirection::Receive,
+                                livekit::diagnostic::Outcome::Success,
+                                static_cast<std::uint64_t>(completeData.size()));
+                        }
                         emit owner->chatMediaReceivingCompleted(uiTransferId, id, name, mType, fName, completeData);
                         if (!valid(true)) return;
                         owner->_inboundTransferLedger.erase(uiTransferId);

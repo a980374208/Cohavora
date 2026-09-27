@@ -1,6 +1,6 @@
 #include "signal_stream.h"
 #include "livekit_rtc.pb.h"
-#include <iostream>
+#include "telemetry/diagnostic_pipeline.h"
 
 namespace livekit {
 
@@ -100,7 +100,12 @@ void SignalStream::SetupCallbacks() {
             }
             if (callback) callback(resp);
         } else {
-            std::cout << "SignalStream::SetupCallbacks: Failed to parse SignalResponse!" << std::endl;
+            diagnostic::Event issue;
+            issue.kind = diagnostic::EventKind::SignalIssue;
+            issue.thread_role = diagnostic::ThreadRole::Session;
+            issue.error_layer = diagnostic::ErrorLayer::Parse;
+            issue.error_code = diagnostic::ErrorCode::InvalidResponse;
+            diagnostic::EmitBusinessEvent(issue);
         }
     });
 

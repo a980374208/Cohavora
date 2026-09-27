@@ -1,8 +1,7 @@
 #include "websocket_client.h"
 #include "safe_spawn.h"
-#include "log_redaction.h"
 #include <random>
-#include <iostream>
+#include <istream>
 #include <sstream>
 #include <istream>
 #include <ostream>
@@ -188,9 +187,7 @@ asio::awaitable<std::error_code> WebSocketClient::ConnectOnOwner(
     std::string token,
     std::chrono::milliseconds timeout,
     CredentialUrlPolicy policy) {
-    std::cout << "WebSocketClient::Connect: 1 (shared_from_this)" << std::endl;
     auto self = shared_from_this();
-    std::cout << "WebSocketClient::Connect: 2" << std::endl;
     if (abort_started_) {
         co_return asio::error::operation_aborted;
     }
@@ -203,7 +200,6 @@ asio::awaitable<std::error_code> WebSocketClient::ConnectOnOwner(
     closed_by_us_ = false;
 
     auto executor = co_await asio::this_coro::executor;
-    std::cout << "WebSocketClient::Connect: 3" << std::endl;
     auto timer = std::make_shared<asio::steady_timer>(executor);
     timer->expires_after(timeout);
     
@@ -216,11 +212,8 @@ asio::awaitable<std::error_code> WebSocketClient::ConnectOnOwner(
     });
 
     try {
-        std::cout << "WebSocketClient::Connect: 4 (try connect)" << std::endl;
         auto proxy_env = GetProxyFromEnv(is_ssl_);
-        std::cout << "WebSocketClient::Connect: 4.1 (proxy env checked)" << std::endl;
         if (proxy_env) {
-            std::cout << "WebSocketClient::Connect: 4.1.1 (using proxy)" << std::endl;
             auto proxy = ParseProxyEndpoint(*proxy_env);
             if (!proxy) {
                 throw std::system_error(std::make_error_code(std::errc::invalid_argument));
@@ -239,20 +232,14 @@ asio::awaitable<std::error_code> WebSocketClient::ConnectOnOwner(
             if (!auth_hdr.empty()) auth_opt = auth_hdr;
             co_await AsyncHttpProxyConnect(url.host, url.port, url.host, url.port, auth_opt);
         } else {
-            std::cout << "WebSocketClient::Connect: 4.1.2 (direct connection)" << std::endl;
             co_await AsyncConnectSocket(url.host, url.port);
         }
-        std::cout << "WebSocketClient::Connect: 4.2 (socket connected)" << std::endl;
 
         if (is_ssl_) {
-            std::cout << "WebSocketClient::Connect: 4.3 (SSL handshake starting)" << std::endl;
             co_await AsyncSslHandshake(url.host);
-            std::cout << "WebSocketClient::Connect: 4.4 (SSL handshake completed)" << std::endl;
         }
 
-        std::cout << "WebSocketClient::Connect: 4.5 (WS handshake starting)" << std::endl;
         co_await AsyncWsHandshake(url, std::move(token));
-        std::cout << "WebSocketClient::Connect: 4.6 (WS handshake completed)" << std::endl;
         
         connect_done->store(true);
         timer->cancel();
@@ -273,24 +260,15 @@ asio::awaitable<std::error_code> WebSocketClient::ConnectOnOwner(
 }
 
 void WebSocketClient::StartRead() {
-    std::cout << "WebSocketClient::StartRead: posting ReadLoop spawn" << std::endl;
     asio::post(strand_, [self = this->shared_from_this()]() {
         if (self->abort_started_ ||
             !self->connected_.load(std::memory_order_acquire)) {
             return;
         }
-        std::cout << "WebSocketClient::StartRead: spawning ReadLoop via post" << std::endl;
         livekit::safe_co_spawn(self->strand_, [self]() -> asio::awaitable<void> {
-            std::cout << "WebSocketClient::ReadLoop: coroutine started" << std::endl;
             try {
                 co_await self->ReadLoop();
-                std::cout << "WebSocketClient::ReadLoop: coroutine exited cleanly" << std::endl;
-            } catch (const std::exception&) {
-                std::cout << "WebSocketClient::ReadLoop: coroutine exited with exception: "
-                          << secure_log::ExceptionSummary("websocket_read_loop") << std::endl;
-            } catch (...) {
-                std::cout << "WebSocketClient::ReadLoop: coroutine exited with unknown exception" << std::endl;
-            }
+            } catch (...) {}
         });
     });
 }
@@ -565,10 +543,7 @@ void WebSocketClient::ResetWritingState() {
 }
 
 asio::awaitable<void> WebSocketClient::AsyncConnectSocket(std::string host, std::string port) {
-    std::cout << "WebSocketClient::AsyncConnectSocket: 1 ("
-              << secure_log::EndpointSummary("ws://" + host + ":" + port) << ")" << std::endl;
     auto executor = co_await asio::this_coro::executor;
-    std::cout << "WebSocketClient::AsyncConnectSocket: 2" << std::endl;
     
     auto socket = std::make_unique<asio::ip::tcp::socket>(executor);
     auto* socket_raw = socket.get();
@@ -577,19 +552,14 @@ asio::awaitable<void> WebSocketClient::AsyncConnectSocket(std::string host, std:
     std::error_code ec;
     auto addr = asio::ip::make_address(host, ec);
     if (!ec) {
-        std::cout << "WebSocketClient::AsyncConnectSocket: IP address detected, connecting directly" << std::endl;
         unsigned short port_num = static_cast<unsigned short>(std::stoi(port));
         asio::ip::tcp::endpoint ep(addr, port_num);
         co_await socket_raw->async_connect(ep, asio::use_awaitable);
     } else {
         asio::ip::tcp::resolver resolver(executor);
-        std::cout << "WebSocketClient::AsyncConnectSocket: 3 (resolving)" << std::endl;
         auto results = co_await resolver.async_resolve(host, port, asio::use_awaitable);
-        std::cout << "WebSocketClient::AsyncConnectSocket: 4 (resolved)" << std::endl;
-        std::cout << "WebSocketClient::AsyncConnectSocket: 5 (connecting)" << std::endl;
         co_await asio::async_connect(*socket_raw, results, asio::use_awaitable);
     }
-    std::cout << "WebSocketClient::AsyncConnectSocket: 6 (connected)" << std::endl;
     
     if (is_ssl_) {
         auto socket_ptr = std::move(std::get<SocketPtr>(stream_));
@@ -636,7 +606,6 @@ asio::awaitable<void> WebSocketClient::AsyncSslHandshake(std::string host) {
 }
 
 asio::awaitable<void> WebSocketClient::AsyncWsHandshake(Url url, std::string token) {
-    std::cout << "WebSocketClient::AsyncWsHandshake: 1" << std::endl;
     std::string path_query = url.path;
     if (!url.query.empty()) {
         path_query += "?" + url.query;
@@ -656,37 +625,14 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(Url url, std::string tok
     }
     req += "\r\n";
 
-    const std::string endpoint = FormatCredentialUrl(url);
-    std::cout << "WebSocketClient::AsyncWsHandshake: request "
-              << secure_log::EndpointSummary(endpoint)
-              << ", authorization="
-              << ((!token.empty() && url.query.find("access_token=") == std::string::npos) ? "present" : "query")
-              << std::endl;
-
-    std::cout << "WebSocketClient::AsyncWsHandshake: 2 (writing request...)" << std::endl;
     co_await async_write_stream(asio::buffer(req));
-    std::cout << "WebSocketClient::AsyncWsHandshake: 3 (request written, reading response...)" << std::endl;
-
-    std::cout << "WebSocketClient::AsyncWsHandshake: 4" << std::endl;
-    try {
-        std::cout << "WebSocketClient::AsyncWsHandshake: 4.1 (entering read_until)" << std::endl;
-        if (std::holds_alternative<SocketPtr>(stream_)) {
-            co_await asio::async_read_until(*std::get<SocketPtr>(stream_), response_buf_, "\r\n\r\n", asio::use_awaitable);
-        } else if (std::holds_alternative<SslStreamPtr>(stream_)) {
-            co_await asio::async_read_until(*std::get<SslStreamPtr>(stream_), response_buf_, "\r\n\r\n", asio::use_awaitable);
-        } else {
-            throw std::system_error(asio::error::not_connected);
-        }
-        std::cout << "WebSocketClient::AsyncWsHandshake: 4.2 (read_until finished)" << std::endl;
-    } catch (const std::exception&) {
-        std::cout << "WebSocketClient::AsyncWsHandshake: 4.3 exception: "
-                  << secure_log::ExceptionSummary("websocket_handshake_read") << std::endl;
-        throw;
-    } catch (...) {
-        std::cout << "WebSocketClient::AsyncWsHandshake: 4.4 unknown exception" << std::endl;
-        throw;
+    if (std::holds_alternative<SocketPtr>(stream_)) {
+        co_await asio::async_read_until(*std::get<SocketPtr>(stream_), response_buf_, "\r\n\r\n", asio::use_awaitable);
+    } else if (std::holds_alternative<SslStreamPtr>(stream_)) {
+        co_await asio::async_read_until(*std::get<SslStreamPtr>(stream_), response_buf_, "\r\n\r\n", asio::use_awaitable);
+    } else {
+        throw std::system_error(asio::error::not_connected);
     }
-    std::cout << "WebSocketClient::AsyncWsHandshake: 5 (response read)" << std::endl;
 
     std::istream response_stream(&response_buf_);
     std::string http_version;
@@ -696,22 +642,13 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(Url url, std::string tok
     if (status_code != 101) {
         std::string status_msg;
         std::getline(response_stream, status_msg);
-        std::cout << "WebSocketClient::AsyncWsHandshake: Handshake failed, "
-                  << secure_log::ErrorCodeSummary(
-                         "websocket_upgrade", static_cast<int>(status_code), "websocket_http")
-                  << std::endl;
-
         std::string line;
         while (std::getline(response_stream, line) && line != "\r" && !line.empty()) {
         }
 
-        std::string body;
         if (response_buf_.size() > 0) {
-            body = std::string(asio::buffers_begin(response_buf_.data()), asio::buffers_end(response_buf_.data()));
             response_buf_.consume(response_buf_.size());
         }
-        std::cout << "WebSocketClient::AsyncWsHandshake: response headers=[omitted], body="
-                  << (body.empty() ? "absent" : "present") << std::endl;
 
         throw std::system_error(MakeWebSocketHttpError(status_code));
     }
@@ -739,16 +676,12 @@ asio::awaitable<void> WebSocketClient::AsyncWsHandshake(Url url, std::string tok
                 val.erase(val.find_last_not_of(" \t") + 1);
                 if (val == expected_accept) {
                     accept_verified = true;
-                } else {
-                    std::cout << "WebSocketClient::AsyncWsHandshake: Sec-WebSocket-Accept mismatch"
-                              << std::endl;
                 }
             }
         }
     }
     
     if (!accept_verified) {
-        std::cout << "WebSocketClient::AsyncWsHandshake: Sec-WebSocket-Accept header was NOT verified!" << std::endl;
         throw std::system_error(std::make_error_code(std::errc::connection_refused));
     }
 }

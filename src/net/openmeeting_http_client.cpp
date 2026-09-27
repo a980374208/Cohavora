@@ -1,10 +1,12 @@
 #include <QtCore/QCoreApplication>
 #include "openmeeting_http_client.h"
 #include "src/net/service_endpoint_policy.h"
+#include "src/telemetry/diagnostic_pipeline.h"
 #include <QtCore/QUrl>
 #include <QtCore/QDebug>
 #include <QtCore/QPointer>
 #include <QtCore/QTimer>
+#include <QtCore/QUuid>
 #include <QtNetwork/QNetworkProxy>
 #include <QtNetwork/QSslConfiguration>
 #include <QtNetwork/QSslSocket>
@@ -16,7 +18,50 @@ HttpError parseError(const HttpError &source, const QString &message) {
     auto error = source;
     error.code = static_cast<int>(ErrorCode::ParseError);
     error.message = message;
+    error.failureLayer = HttpFailureLayer::Parse;
+    if (!source.requestId.isEmpty()) {
+        livekit::diagnostic::Event event;
+        event.kind = livekit::diagnostic::EventKind::HttpResponseDecodeFailed;
+        event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+        event.error_layer = livekit::diagnostic::ErrorLayer::Parse;
+        event.outcome = livekit::diagnostic::Outcome::Failure;
+        event.http_status = source.httpStatus;
+        event.context.request_id.Assign(source.requestId.toStdString());
+        event.context.legacy_operation_id.Assign(source.operationId.toStdString());
+        event.context.parent_operation_id.Assign(source.parentOperationId.toStdString());
+        event.context.anonymous_session_id.Assign(source.anonymousSessionId.toStdString());
+        livekit::diagnostic::EmitBusinessEvent(event);
+    }
     return error;
+}
+
+livekit::diagnostic::Route DiagnosticRoute(const QString &path) noexcept {
+    using Route = livekit::diagnostic::Route;
+    if (path == QStringLiteral("/user/login")) return Route::Login;
+    if (path == QStringLiteral("/user/logout")) return Route::Logout;
+    if (path == QStringLiteral("/admin/user/register")) return Route::Register;
+    if (path == QStringLiteral("/meeting/create_immediate_meeting")) return Route::CreateMeeting;
+    if (path == QStringLiteral("/meeting/join_meeting")) return Route::JoinMeeting;
+    if (path == QStringLiteral("/meeting/get_meeting_token")) return Route::GetMeetingToken;
+    if (path == QStringLiteral("/meeting/get_meetings")) return Route::GetMeetings;
+    if (path == QStringLiteral("/meeting/get_meeting")) return Route::GetMeeting;
+    if (path == QStringLiteral("/meeting/book_meeting")) return Route::BookMeeting;
+    if (path == QStringLiteral("/meeting/update_meeting")) return Route::UpdateMeeting;
+    if (path == QStringLiteral("/meeting/end_meeting")) return Route::EndMeeting;
+    if (path == QStringLiteral("/meeting/leave_meeting")) return Route::LeaveMeeting;
+    return Route::Unknown;
+}
+
+livekit::diagnostic::ErrorLayer DiagnosticLayer(HttpFailureLayer layer) noexcept {
+    using Layer = livekit::diagnostic::ErrorLayer;
+    switch (layer) {
+    case HttpFailureLayer::Policy: return Layer::Policy;
+    case HttpFailureLayer::Http: return Layer::Http;
+    case HttpFailureLayer::Network: return Layer::Network;
+    case HttpFailureLayer::Business: return Layer::Business;
+    case HttpFailureLayer::Parse: return Layer::Parse;
+    default: return Layer::None;
+    }
 }
 
 } // namespace
@@ -72,8 +117,9 @@ void OpenMeetingHttpClient::sendPost(
     const QString &path,
     const QJsonObject &body,
     std::function<void(bool ok, const QJsonValue &data, const HttpError &err)> cb,
-    bool authenticated) {
-    sendPostToEndpoint(_baseUrl, path, body, std::move(cb), authenticated);
+    bool authenticated, HttpRequestContext context) {
+    sendPostToEndpoint(_baseUrl, path, body, std::move(cb), authenticated,
+                       std::move(context));
 }
 
 void OpenMeetingHttpClient::sendPostToEndpoint(
@@ -81,9 +127,47 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
     const QString &path,
     const QJsonObject &body,
     std::function<void(bool ok, const QJsonValue &data, const HttpError &err)> cb,
-    bool authenticated) {
+    bool authenticated, HttpRequestContext context) {
 
     const auto opId = QString::number(QDateTime::currentMSecsSinceEpoch());
+    const auto requestId = QUuid::createUuid().toString(QUuid::Id128);
+    const auto startedAt = std::chrono::steady_clock::now();
+    const auto route = DiagnosticRoute(path);
+    livekit::diagnostic::Context diagnosticContext;
+    diagnosticContext.request_id.Assign(requestId.toStdString());
+    diagnosticContext.legacy_operation_id.Assign(opId.toStdString());
+    diagnosticContext.parent_operation_id.Assign(context.parentOperationId.toStdString());
+    diagnosticContext.anonymous_session_id.Assign(context.anonymousSessionId.toStdString());
+    auto started = livekit::diagnostic::Event{};
+    started.kind = livekit::diagnostic::EventKind::HttpRequestStarted;
+    started.thread_role = livekit::diagnostic::ThreadRole::Ui;
+    started.context = diagnosticContext;
+    started.route = route;
+    livekit::diagnostic::EmitBusinessEvent(started);
+    auto finish = [cb = std::move(cb), requestId, opId,
+                   context = std::move(context), diagnosticContext,
+                   startedAt, route](bool ok, const QJsonValue &data,
+                                     HttpError error) {
+        error.operationId = opId;
+        error.requestId = requestId;
+        error.parentOperationId = context.parentOperationId;
+        error.anonymousSessionId = context.anonymousSessionId;
+        auto completed = livekit::diagnostic::Event{};
+        completed.kind = livekit::diagnostic::EventKind::HttpRequestCompleted;
+        completed.thread_role = livekit::diagnostic::ThreadRole::Ui;
+        completed.context = diagnosticContext;
+        completed.route = route;
+        completed.outcome = ok ? livekit::diagnostic::Outcome::Success
+                               : livekit::diagnostic::Outcome::Failure;
+        completed.error_layer = DiagnosticLayer(error.failureLayer);
+        completed.http_status = error.httpStatus;
+        completed.network_error = error.networkError;
+        completed.business_code = error.businessCode;
+        completed.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - startedAt).count();
+        livekit::diagnostic::EmitBusinessEvent(completed);
+        if (cb) cb(ok, data, error);
+    };
     const auto basePolicy = evaluateServiceEndpoint(endpointBaseUrl);
     const bool internalPath = path.startsWith('/') && !path.startsWith("//") &&
         !path.contains('?') && !path.contains('#');
@@ -109,8 +193,9 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
             error.message = QCoreApplication::translate("MeetingUI", "The request URL does not belong to the configured server.");
         }
         error.operationId = opId;
-        QTimer::singleShot(0, this, [cb = std::move(cb), error]() {
-            if (cb) cb(false, QJsonValue(), error);
+        error.failureLayer = HttpFailureLayer::Policy;
+        QTimer::singleShot(0, this, [finish = std::move(finish), error]() {
+            finish(false, QJsonValue(), error);
         });
         return;
     }
@@ -145,19 +230,20 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
             emit self->tokenExpired();
         }
     };
-    connect(reply, &QNetworkReply::finished, this, [reply, opId, cb, expireCurrent]() {
+    connect(reply, &QNetworkReply::finished, this, [reply, finish, expireCurrent]() {
         reply->deleteLater();
 
         HttpError err;
-        err.operationId = opId;
-
         int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        err.httpStatus = httpStatus;
+        err.networkError = static_cast<int>(reply->error());
         QByteArray responseData = reply->readAll();
 
         if (httpStatus >= 300 && httpStatus < 400) {
             err.code = static_cast<int>(ErrorCode::RedirectRejected);
+            err.failureLayer = HttpFailureLayer::Http;
             err.message = QCoreApplication::translate("MeetingUI", "The server returned a disallowed redirect.");
-            if (cb) cb(false, QJsonValue(), err);
+            finish(false, QJsonValue(), err);
             return;
         }
 
@@ -167,20 +253,23 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
         if (parseErr.error == QJsonParseError::NoError && doc.isObject()) {
             QJsonObject root = doc.object();
             int errCode = root.value("errCode").toInt(-1);
+            err.businessCode = errCode;
             QString errMsg = root.value("errMsg").toString();
             QJsonValue dataVal = root.value("data");
 
             if (errCode == 0 && reply->error() == QNetworkReply::NoError) {
                 err.code = 0;
-                if (cb) cb(true, dataVal, err);
+                finish(true, dataVal, err);
                 return;
             } else if (!errMsg.isEmpty() || errCode != -1) {
                 err.code = (errCode != -1) ? errCode : static_cast<int>(ErrorCode::NetworkError);
                 err.message = errMsg;
+                err.failureLayer = errCode != -1
+                    ? HttpFailureLayer::Business : HttpFailureLayer::Network;
                 if (err.isTokenExpired()) {
                     expireCurrent();
                 }
-                if (cb) cb(false, dataVal, err);
+                finish(false, dataVal, err);
                 return;
             }
         }
@@ -188,6 +277,7 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
         // 处理网络/网关/协议层错误
         if (reply->error() != QNetworkReply::NoError) {
             err.code = static_cast<int>(ErrorCode::NetworkError);
+            err.failureLayer = HttpFailureLayer::Network;
             QString rawErr = reply->errorString();
             if (httpStatus == 502 || rawErr.contains("Bad Gateway", Qt::CaseInsensitive)) {
                 err.message = QCoreApplication::translate("MeetingUI", "502 Bad Gateway: The OpenMeeting server is not running. Run mage start on the server.");
@@ -204,32 +294,35 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
             } else {
                 err.message = rawErr;
             }
-            if (cb) cb(false, QJsonValue(), err);
+            finish(false, QJsonValue(), err);
             return;
         }
 
         if (parseErr.error != QJsonParseError::NoError || !doc.isObject()) {
             err.code = static_cast<int>(ErrorCode::ParseError);
+            err.failureLayer = HttpFailureLayer::Parse;
             err.message = "Failed to parse response JSON: " + parseErr.errorString();
-            if (cb) cb(false, QJsonValue(), err);
+            finish(false, QJsonValue(), err);
             return;
         }
 
         QJsonObject root = doc.object();
         int errCode = root.value("errCode").toInt(-1);
+        err.businessCode = errCode;
         QString errMsg = root.value("errMsg").toString();
         QJsonValue dataVal = root.value("data");
 
         if (errCode == 0) {
             err.code = 0;
-            if (cb) cb(true, dataVal, err);
+            finish(true, dataVal, err);
         } else {
             err.code = errCode;
             err.message = errMsg;
+            err.failureLayer = HttpFailureLayer::Business;
             if (err.isTokenExpired()) {
                 expireCurrent();
             }
-            if (cb) cb(false, dataVal, err);
+            finish(false, dataVal, err);
         }
     });
 }
@@ -257,9 +350,8 @@ void OpenMeetingHttpClient::login(const QString &account, const QString &passwor
             return;
         }
         if (user.token.isEmpty() || user.userId.isEmpty()) {
-            auto error = err;
-            error.code = static_cast<int>(ErrorCode::ParseError);
-            error.message = QCoreApplication::translate("MeetingUI", "The sign-in response is missing required credentials.");
+            auto error = parseError(err, QCoreApplication::translate(
+                "MeetingUI", "The sign-in response is missing required credentials."));
             if (callback) callback(false, UserInfo{}, error);
             return;
         }
@@ -285,9 +377,8 @@ void OpenMeetingHttpClient::requestLogin(const QString &account, const QString &
             return;
         }
         if (!data.isObject()) {
-            auto error = err;
-            error.code = static_cast<int>(ErrorCode::ParseError);
-            error.message = QCoreApplication::translate("MeetingUI", "The sign-in response contains invalid data.");
+            auto error = parseError(err, QCoreApplication::translate(
+                "MeetingUI", "The sign-in response contains invalid data."));
             if (callback) callback(false, UserInfo{}, error);
             return;
         }
@@ -349,7 +440,8 @@ void OpenMeetingHttpClient::requestLogout(ResultCallback<bool> callback) {
 void OpenMeetingHttpClient::createImmediateMeeting(
     const QString &title,
     int durationSeconds,
-    ResultCallback<LiveKitAuthInfo> callback) {
+    ResultCallback<LiveKitAuthInfo> callback,
+    HttpRequestContext context) {
 
     QJsonObject definedInfo;
     definedInfo["title"] = title;
@@ -391,10 +483,11 @@ void OpenMeetingHttpClient::createImmediateMeeting(
         }
 
         if (callback) callback(true, auth, err);
-    });
+    }, true, std::move(context));
 }
 
-void OpenMeetingHttpClient::joinMeeting(const QString &meetingId, const QString &password, ResultCallback<bool> callback) {
+void OpenMeetingHttpClient::joinMeeting(const QString &meetingId, const QString &password,
+                                        ResultCallback<bool> callback, HttpRequestContext context) {
     QJsonObject body;
     body["userID"] = _currentUser.userId;
     body["meetingID"] = meetingId;
@@ -404,10 +497,12 @@ void OpenMeetingHttpClient::joinMeeting(const QString &meetingId, const QString 
 
     sendPost("/meeting/join_meeting", body, [callback](bool ok, const QJsonValue &, const HttpError &err) {
         if (callback) callback(ok, ok, err);
-    });
+    }, true, std::move(context));
 }
 
-void OpenMeetingHttpClient::getMeetingToken(const QString &meetingId, ResultCallback<LiveKitAuthInfo> callback) {
+void OpenMeetingHttpClient::getMeetingToken(const QString &meetingId,
+                                            ResultCallback<LiveKitAuthInfo> callback,
+                                            HttpRequestContext context) {
     QJsonObject body;
     body["meetingID"] = meetingId;
     body["userID"] = _currentUser.userId;
@@ -428,7 +523,7 @@ void OpenMeetingHttpClient::getMeetingToken(const QString &meetingId, ResultCall
         }
 
         if (callback) callback(true, auth, err);
-    });
+    }, true, std::move(context));
 }
 
 void OpenMeetingHttpClient::getMeetings(
@@ -563,17 +658,21 @@ void OpenMeetingHttpClient::cancelMeeting(
         });
 }
 
-void OpenMeetingHttpClient::leaveMeeting(const QString &meetingId, ResultCallback<bool> callback) {
+void OpenMeetingHttpClient::leaveMeeting(const QString &meetingId,
+                                         ResultCallback<bool> callback,
+                                         HttpRequestContext context) {
     QJsonObject body;
     body["meetingID"] = meetingId;
     body["userID"] = _currentUser.userId;
 
     sendPost("/meeting/leave_meeting", body, [callback](bool ok, const QJsonValue &, const HttpError &err) {
         if (callback) callback(ok, ok, err);
-    });
+    }, true, std::move(context));
 }
 
-void OpenMeetingHttpClient::endMeeting(const QString &meetingId, ResultCallback<bool> callback) {
+void OpenMeetingHttpClient::endMeeting(const QString &meetingId,
+                                       ResultCallback<bool> callback,
+                                       HttpRequestContext context) {
     QJsonObject body;
     body["meetingID"] = meetingId;
     body["userID"] = _currentUser.userId;
@@ -581,7 +680,7 @@ void OpenMeetingHttpClient::endMeeting(const QString &meetingId, ResultCallback<
 
     sendPost("/meeting/end_meeting", body, [callback](bool ok, const QJsonValue &, const HttpError &err) {
         if (callback) callback(ok, ok, err);
-    });
+    }, true, std::move(context));
 }
 
 } // namespace OpenMeeting

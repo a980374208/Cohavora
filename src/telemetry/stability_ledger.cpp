@@ -48,7 +48,14 @@ const char* SessionTerminalName(StabilitySessionTerminal terminal) noexcept {
 }
 
 bool IsConfirmedEvidenceSource(const std::string& source) {
-    return source == "windows_wer" || source == "external_supervisor";
+    return source == "windows_wer" || source == "external_supervisor" ||
+        source == "windows_seh_metadata";
+}
+
+bool IsOpaqueRunId(const std::string& value) {
+    return value.size() == 32 && std::all_of(value.begin(), value.end(),
+        [](char ch) { return (ch >= '0' && ch <= '9') ||
+            (ch >= 'a' && ch <= 'f'); });
 }
 
 Json EmptyDocument() {
@@ -176,15 +183,24 @@ bool StabilityLedger::LoadAndRecoverLocked(
         IncrementDiagnostic(impl_->document, "corrupt_inputs");
     }
 
-    std::unordered_map<std::string, std::string> confirmed;
+    std::unordered_map<std::string, ConfirmedCrashEvidence> confirmed;
     if (evidence.provider_configured) {
         for (const auto& item : evidence.confirmed_crashes) {
             if (!item.process_run_id.empty() &&
                 IsConfirmedEvidenceSource(item.source)) {
-                confirmed.emplace(item.process_run_id, item.source);
+                confirmed.emplace(item.process_run_id, item);
             }
         }
     }
+
+    const auto matches_build = [](const Json& record,
+                                  const ConfirmedCrashEvidence& item) {
+        const auto recorded = record.value("build_id", std::string{});
+        return recorded == item.build_id &&
+            (recorded.empty() ||
+             (recorded.size() == 64 && IsOpaqueRunId(recorded.substr(0, 32)) &&
+              IsOpaqueRunId(recorded.substr(32, 32))));
+    };
 
     const auto recovered_at = UtcNowMs();
     for (auto& record : impl_->document["records"]) {
@@ -195,9 +211,9 @@ bool StabilityLedger::LoadAndRecoverLocked(
             evidence.provider_configured) {
             const auto id = record.value("id", std::string{});
             const auto found = confirmed.find(id);
-            if (found != confirmed.end()) {
+            if (found != confirmed.end() && matches_build(record, found->second)) {
                 record["status"] = "CONFIRMED_CRASH";
-                record["evidence_source"] = found->second;
+                record["evidence_source"] = found->second.source;
             }
             record["crash_evidence_checked"] = true;
             continue;
@@ -206,9 +222,9 @@ bool StabilityLedger::LoadAndRecoverLocked(
         if (kind == "process") {
             const auto id = record.value("id", std::string{});
             const auto found = confirmed.find(id);
-            if (found != confirmed.end()) {
+            if (found != confirmed.end() && matches_build(record, found->second)) {
                 record["status"] = "CONFIRMED_CRASH";
-                record["evidence_source"] = found->second;
+                record["evidence_source"] = found->second.source;
                 record["crash_evidence_checked"] = true;
             } else {
                 record["status"] = "UNKNOWN_TERMINATION";
@@ -225,12 +241,20 @@ bool StabilityLedger::LoadAndRecoverLocked(
 }
 
 bool StabilityLedger::BeginProcessRun(
-    const StabilityRecoveryEvidence& evidence) {
+    const StabilityRecoveryEvidence& evidence,
+    std::string process_run_id,
+    std::string build_id) {
     std::lock_guard lock(mutex_);
     if (impl_->process_started && !impl_->process_terminal) return false;
+    if ((!process_run_id.empty() && !IsOpaqueRunId(process_run_id)) ||
+        (!build_id.empty() &&
+         (build_id.size() != 64 ||
+          !IsOpaqueRunId(build_id.substr(0, 32)) ||
+          !IsOpaqueRunId(build_id.substr(32, 32))))) return false;
     LoadAndRecoverLocked(evidence);
 
-    impl_->process_run_id = NewOpaqueId();
+    impl_->process_run_id = process_run_id.empty()
+        ? NewOpaqueId() : std::move(process_run_id);
     impl_->process_started_at = Clock::now();
     impl_->process_started = true;
     impl_->process_terminal = false;
@@ -238,6 +262,7 @@ bool StabilityLedger::BeginProcessRun(
     impl_->document["records"].push_back({
         {"kind", "process"},
         {"id", impl_->process_run_id},
+        {"build_id", build_id},
         {"status", "STARTED"},
         {"started_utc_ms", UtcNowMs()},
         {"crash_evidence_checked", false},
@@ -293,10 +318,17 @@ bool StabilityLedger::FinishProcessRunClean() {
     return persisted;
 }
 
-std::string StabilityLedger::BeginSession() {
+std::string StabilityLedger::BeginSession(std::string anonymous_session_id) {
     std::lock_guard lock(mutex_);
     if (!impl_->process_started || impl_->process_terminal) return {};
-    const auto id = NewOpaqueId();
+    if (!anonymous_session_id.empty() &&
+        !IsOpaqueRunId(anonymous_session_id)) return {};
+    const auto id = anonymous_session_id.empty()
+        ? NewOpaqueId() : std::move(anonymous_session_id);
+    for (const auto& record : impl_->document["records"]) {
+        if (record.is_object() && record.value("kind", std::string{}) == "session" &&
+            record.value("id", std::string{}) == id) return {};
+    }
     impl_->session_started_at[id] = Clock::now();
     impl_->document["records"].push_back({
         {"kind", "session"},
@@ -497,9 +529,12 @@ StabilitySummary StabilityLedger::Summary() const {
 
 ScopedProcessRun::ScopedProcessRun(
     std::shared_ptr<StabilityLedger> ledger,
-    StabilityRecoveryEvidence evidence)
+    StabilityRecoveryEvidence evidence,
+    std::string process_run_id,
+    std::string build_id)
     : ledger_(std::move(ledger)) {
-    started_ = ledger_ && ledger_->BeginProcessRun(evidence);
+    started_ = ledger_ && ledger_->BeginProcessRun(
+        evidence, std::move(process_run_id), std::move(build_id));
 }
 
 ScopedProcessRun::~ScopedProcessRun() {

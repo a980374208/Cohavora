@@ -1,4 +1,5 @@
 #include "wasapi_capture.h"
+#include "telemetry/diagnostic_pipeline.h"
 #include "media_converters.h"
 #include "wasapi_enumerator.h"
 #include <windows.h>
@@ -8,7 +9,6 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <iostream>
 
 namespace livekit {
 
@@ -235,7 +235,8 @@ std::uint64_t WasapiAudioCapture::SwitchDeviceTracked(
     config_.device_id = device_id;
     const auto generation = requested_device_generation_.fetch_add(
         1, std::memory_order_acq_rel) + 1;
-    spdlog::info("[WasapiAudioCapture] Switching microphone device to ID: {}", device_id.empty() ? "(Default)" : device_id);
+    spdlog::info("[WasapiAudioCapture] Switching microphone device (device={})",
+                 device_id.empty() ? "default" : "selected");
     OnDeviceChangedNotification();
     return generation;
 }
@@ -317,6 +318,16 @@ void WasapiAudioCapture::SetCaptureRunning(bool running, bool force_notification
 void WasapiAudioCapture::CaptureThreadLoop() {
     HRESULT hr_co = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
     const auto config = GetConfig();
+    const auto emit_capture_state = [](diagnostic::Outcome outcome,
+                                       diagnostic::DeviceSwitchReason reason) {
+        diagnostic::Event event;
+        event.kind = diagnostic::EventKind::DeviceCaptureTerminal;
+        event.thread_role = diagnostic::ThreadRole::Media;
+        event.media_kind = diagnostic::MediaKind::Audio;
+        event.outcome = outcome;
+        event.device_switch_reason = reason;
+        diagnostic::EmitBusinessEvent(event);
+    };
     auto complete_startup = [this]() {
         {
             std::lock_guard<std::mutex> lock(startup_mutex_);
@@ -542,10 +553,11 @@ void WasapiAudioCapture::CaptureThreadLoop() {
             auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_packet_time).count();
             if (elapsed >= 1000) {
                 last_packet_time = now;
-                spdlog::warn("[WasapiAudioCapture] Microphone capture stalled (1s no data). Re-initializing device...");
-                std::cout << "[WASAPI WATCHDOG] Microphone stream stalled. Re-initializing default microphone..." << std::endl;
+                emit_capture_state(diagnostic::Outcome::Failure,
+                    diagnostic::DeviceSwitchReason::CaptureStalled);
                 if (restart_audio_client()) {
-                    std::cout << "[WASAPI WATCHDOG] Successfully recovered microphone stream!" << std::endl;
+                    emit_capture_state(diagnostic::Outcome::Success,
+                        diagnostic::DeviceSwitchReason::Completed);
                 }
             }
         }

@@ -30,6 +30,8 @@ add_library(cohavora_meeting_widgets OBJECT
     ${PROJECT_SOURCE_DIR}/src/ui/telemetry_dialogs.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_log_console.h
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_log_console.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/diagnostic_qt_bridge.h
+    ${PROJECT_SOURCE_DIR}/src/ui/diagnostic_qt_bridge.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/audio_visualizer_widget.h
     ${PROJECT_SOURCE_DIR}/src/ui/audio_visualizer_widget.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/participants_list_model.h

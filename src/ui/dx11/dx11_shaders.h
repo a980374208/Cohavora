@@ -3,8 +3,8 @@
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <wrl/client.h>
+#include <cstring>
 #include <string>
-#include <iostream>
 
 namespace livekit {
 namespace dx11 {
@@ -168,12 +168,7 @@ inline bool CompileShader(const char* source, const char* entryPoint, const char
         errorBlob.GetAddressOf()
     );
 
-    if (FAILED(hr)) {
-        if (errorBlob) {
-            std::cerr << "[DX11 Shader Error] " << static_cast<const char*>(errorBlob->GetBufferPointer()) << std::endl;
-        }
-        return false;
-    }
+    if (FAILED(hr)) return false;
     return true;
 }
 

@@ -1,13 +1,11 @@
 #include "signal_client.h"
 #include "region_provider.h"
 #include "safe_spawn.h"
-#include "log_redaction.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include "logger/options.pb.h"
 #include <sstream>
 #include <algorithm>
-#include <iostream>
 #include <zlib.h>
 
 namespace livekit {
@@ -250,7 +248,6 @@ asio::awaitable<ConnectResult> SignalClient::Connect(
         co_return ConnectResult{nullptr, nullptr, admission_error};
     }
 
-    std::cout << "SignalClient::Connect: Creating SignalClient instance" << std::endl;
     auto client = std::make_shared<SignalClient>(
         FormatCredentialUrl(*initial_url), token, options, options.single_peer_connection,
         nullptr, event_handler, executor);
@@ -261,7 +258,6 @@ asio::awaitable<ConnectResult> SignalClient::Connect(
     client->ssl_ctx_->set_verify_mode(asio::ssl::verify_peer);
     
     try {
-        std::cout << "SignalClient::Connect: executing ConnectInternal" << std::endl;
         std::shared_ptr<proto::JoinResponse> join_res = nullptr;
         std::error_code ec;
         try {
@@ -275,14 +271,6 @@ asio::awaitable<ConnectResult> SignalClient::Connect(
         }
 
         if (ec) {
-            std::cout << "SignalClient::Connect: ConnectInternal completed, "
-                      << secure_log::ErrorCodeSummary("signal_connect", ec.value(), "system")
-                      << std::endl;
-        } else {
-            std::cout << "SignalClient::Connect: ConnectInternal completed, result=success" << std::endl;
-        }
-        
-        if (ec) {
             client->Close();
             co_return ConnectResult{nullptr, nullptr, ec};
         }
@@ -294,7 +282,6 @@ asio::awaitable<ConnectResult> SignalClient::Connect(
         // (e.g., SFU Subscriber SDP Offer) are dispatched after the PC is ready.
         co_return ConnectResult{client, join_res, {}};
     } catch (...) {
-        std::cout << "SignalClient::Connect: Unknown exception" << std::endl;
         client->Close();
         co_return ConnectResult{nullptr, nullptr, std::make_error_code(std::errc::connection_aborted)};
     }
@@ -456,10 +443,6 @@ void SignalClient::SendUpdateTrackSettings(const std::string& track_sid,
     settings->set_fps(fps);
     settings->set_priority(priority);
 
-    std::cout << "[ADAPTIVE STREAM] Sent UpdateTrackSettings: sid=" << track_sid
-              << ", disabled=" << (disabled ? "true" : "false")
-              << ", quality=" << quality
-              << ", dim=" << width << "x" << height << std::endl;
     Send(req);
 }
 
@@ -478,8 +461,6 @@ void SignalClient::SendUpdateSubscription(const std::vector<std::string>& track_
         }
     }
 
-    std::cout << "[ADAPTIVE STREAM] Sent UpdateSubscription: subscribe=" << (subscribe ? "true" : "false")
-              << ", count=" << track_sids.size() << std::endl;
     Send(req);
 }
 
@@ -782,15 +763,13 @@ asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::Reconne
                 std::lock_guard lock(wait_state->mutex);
                 wait_state->response = std::make_shared<proto::ReconnectResponse>(msg->reconnect());
             }
-            auto n = timer->cancel();
-            std::cout << "SignalClient::ReconnectInternal: timer->cancel() returned: " << n << std::endl;
+            timer->cancel();
         } else if (msg->has_leave()) {
             {
                 std::lock_guard lock(wait_state->mutex);
                 wait_state->got_leave = true;
             }
-            auto n = timer->cancel();
-            std::cout << "SignalClient::ReconnectInternal: leave timer->cancel() returned: " << n << std::endl;
+            timer->cancel();
         } else {
             if (!event_ready_.load(std::memory_order_acquire)) {
                 if (!msg->has_refresh_token() && !msg->has_pong_resp()) {
@@ -806,8 +785,7 @@ asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::Reconne
             std::lock_guard lock(wait_state->mutex);
             wait_state->close_reason = reason;
         }
-        auto n = timer->cancel();
-        std::cout << "SignalClient::ReconnectInternal: SetOnClose timer->cancel() returned: " << n << std::endl;
+        timer->cancel();
     });
     
     stream->StartRead();
@@ -856,8 +834,6 @@ asio::awaitable<std::shared_ptr<proto::ReconnectResponse>> SignalClient::Reconne
 }
 
 asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::TryConnectInternal(const std::string& connect_url) {
-    std::cout << "SignalClient::TryConnectInternal: Connect endpoint: "
-              << secure_log::EndpointSummary(connect_url) << std::endl;
     auto connect_res = co_await SignalStream::Connect(
         *ssl_ctx_, connect_url, token_, options_.connect_timeout,
         CredentialUrlPolicy{
@@ -866,24 +842,20 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::TryConnectIn
         throw std::system_error(connect_res.error);
     }
     auto stream = connect_res.stream;
-    std::cout << "SignalClient::TryConnectInternal: Connected stream, waiting for join" << std::endl;
     
     auto executor = co_await asio::this_coro::executor;
     auto timer = std::make_shared<asio::steady_timer>(executor);
     timer->expires_after(options_.connect_timeout);
-    std::cout << "SignalClient::TryConnectInternal: Created timer address: " << timer.get() << std::endl;
     
     auto wait_state = std::make_shared<JoinWaitState>();
     
     stream->SetOnMessage([this, timer, wait_state](std::shared_ptr<proto::SignalResponse> msg) {
-        std::cout << "SignalClient::TryConnectInternal: SetOnMessage callback, has_join=" << msg->has_join() << " timer address: " << timer.get() << std::endl;
         if (msg->has_join()) {
             {
                 std::lock_guard lock(wait_state->mutex);
                 wait_state->response = std::make_shared<proto::JoinResponse>(msg->join());
             }
-            auto n = timer->cancel();
-            std::cout << "SignalClient::TryConnectInternal: timer->cancel() returned: " << n << std::endl;
+            timer->cancel();
         } else {
             if (!event_ready_.load(std::memory_order_acquire)) {
                 if (!msg->has_refresh_token() && !msg->has_pong_resp()) {
@@ -899,22 +871,16 @@ asio::awaitable<std::shared_ptr<proto::JoinResponse>> SignalClient::TryConnectIn
             std::lock_guard lock(wait_state->mutex);
             wait_state->close_reason = reason;
         }
-        auto n = timer->cancel();
-        std::cout << "SignalClient::TryConnectInternal: SetOnClose timer->cancel() returned: " << n << " timer address: " << timer.get() << std::endl;
+        timer->cancel();
     });
     
     stream->StartRead();
     
     try {
-        std::cout << "SignalClient::TryConnectInternal: co_awaiting timer address: " << timer.get() << std::endl;
         co_await timer->async_wait(asio::use_awaitable);
-        std::cout << "SignalClient::TryConnectInternal: timer wait ended normally (no exception)" << std::endl;
         stream->Abort();
         throw std::system_error(std::make_error_code(std::errc::timed_out));
     } catch (const std::system_error& e) {
-        std::cout << "SignalClient::TryConnectInternal: caught system_error: "
-                  << secure_log::ErrorCodeSummary("signal_wait_join", e.code().value(), "system")
-                  << std::endl;
         if (e.code() == asio::error::operation_aborted) {
             std::shared_ptr<proto::JoinResponse> join_res;
             std::string close_reason;
