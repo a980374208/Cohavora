@@ -241,6 +241,7 @@ void SettingsDialog::buildUi() {
 	closeButton->setObjectName(QStringLiteral("closeButton"));
 	closeButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
 	closeButton->setToolTip(QCoreApplication::translate("MeetingUI", "Close"));
+	closeButton->setAccessibleName(closeButton->toolTip());
 	closeButton->setFixedSize(28, 28);
 	titleLayout->addWidget(closeButton);
 	connect(closeButton, &QPushButton::clicked, this, &QDialog::accept);
@@ -252,6 +253,7 @@ void SettingsDialog::buildUi() {
 
 	_navigation = new QListWidget(surface);
 	_navigation->setObjectName(QStringLiteral("settingsNavigation"));
+	_navigation->setAccessibleName(QCoreApplication::translate("MeetingUI", "Settings sections"));
 	_navigation->setMinimumWidth(150);
 	_navigation->setSizePolicy(QSizePolicy::Minimum, QSizePolicy::Expanding);
 	_navigation->setWordWrap(true);
@@ -299,6 +301,12 @@ void SettingsDialog::buildUi() {
 			emit microphoneTestStopped();
 		}
 	});
+	connect(_navigation, &QListWidget::itemSelectionChanged, this, [this] {
+		const auto selected = _navigation->selectedItems();
+		if (!selected.isEmpty() && _navigation->currentItem() != selected.front()) {
+			_navigation->setCurrentItem(selected.front());
+		}
+	});
 	_navigation->setCurrentRow(static_cast<int>(Page::General));
 }
 
@@ -311,11 +319,16 @@ QWidget *SettingsDialog::buildGeneralPage() {
 	layout->addSpacing(6);
 
 	_generalCamera = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable camera on joining"), content);
+	_generalCamera->setObjectName(QStringLiteral("settingsJoinCamera"));
 	_generalMicrophone = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable microphone on joining"), content);
+	_generalMicrophone->setObjectName(QStringLiteral("settingsJoinMicrophone"));
 	_generalSpeaker = new QCheckBox(QCoreApplication::translate("MeetingUI", "Use computer audio when joining"), content);
 	_quitOnClose = new QCheckBox(QCoreApplication::translate("MeetingUI", "Quit when the main window is closed"), content);
+	_quitOnClose->setObjectName(QStringLiteral("settingsQuitOnClose"));
 	_showActiveSpeaker = new QCheckBox(QCoreApplication::translate("MeetingUI", "Show the active speaker"), content);
+	_showActiveSpeaker->setObjectName(QStringLiteral("settingsShowActiveSpeaker"));
 	_stayWhenLocked = new QCheckBox(QCoreApplication::translate("MeetingUI", "Stay in the meeting when the screen is locked"), content);
+	_stayWhenLocked->setObjectName(QStringLiteral("settingsStayWhenLocked"));
 
 	layout->addWidget(_generalCamera);
 	layout->addWidget(_generalMicrophone);

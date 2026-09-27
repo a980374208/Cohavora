@@ -20,6 +20,7 @@
 namespace OpenMeeting {
 enum class SessionInvalidationReason;
 class MeetingCatalogController;
+class SessionManager;
 }
 
 namespace MeetingUI {
@@ -58,7 +59,8 @@ public:
 	explicit JoinMeetingDialog(
 		QWidget *parent = nullptr,
 		const QString &initialMeetingId = QString(),
-		std::optional<OpenMeeting::MeetingSettings> meetingSettings = std::nullopt);
+		std::optional<OpenMeeting::MeetingSettings> meetingSettings = std::nullopt,
+		OpenMeeting::SessionManager *session = nullptr);
 	~JoinMeetingDialog() override = default;
 
 	QString serverUrl() const;
@@ -110,6 +112,7 @@ private:
 	bool _isCancelled = false;
 	bool _isManualConnection = false;
 	std::optional<OpenMeeting::MeetingSettings> _meetingSettings;
+	OpenMeeting::SessionManager *_session = nullptr;
 
 	QPoint _dragPosition;
 	bool _isDragging = false;

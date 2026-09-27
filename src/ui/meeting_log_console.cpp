@@ -124,22 +124,28 @@ void MeetingLogConsoleWindow::initUi() {
 	topLayout->addStretch();
 
 	_filterInput = new QLineEdit(this);
+	_filterInput->setObjectName(QStringLiteral("consoleTextFilter"));
+	_filterInput->setAccessibleName(QCoreApplication::translate("MeetingUI", "Search or filter logs..."));
 	_filterInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Search or filter logs..."));
 	_filterInput->setClearButtonEnabled(true);
 	_filterInput->setMinimumWidth(200);
 	topLayout->addWidget(_filterInput);
 
 	_autoScrollBox = new QCheckBox(QCoreApplication::translate("MeetingUI", "Auto-scroll"), this);
+	_autoScrollBox->setObjectName(QStringLiteral("consoleAutoScroll"));
 	_autoScrollBox->setChecked(true);
 	topLayout->addWidget(_autoScrollBox);
 
 	_copyScope = new QComboBox(this);
 	_copyScope->setObjectName(QStringLiteral("consoleCopyScope"));
+	_copyScope->setAccessibleName(QCoreApplication::translate("MeetingUI", "Copy scope"));
 	_copyScope->addItem(QCoreApplication::translate("MeetingUI", "Visible results"));
 	_copyScope->addItem(QCoreApplication::translate("MeetingUI", "Selection"));
 	_copyBtn = new QPushButton(QIcon::fromTheme(QStringLiteral("edit-copy")),
 		QCoreApplication::translate("MeetingUI", "Copy"), this);
 	_clearBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Clear"), this);
+	_copyBtn->setObjectName(QStringLiteral("consoleCopy"));
+	_clearBtn->setObjectName(QStringLiteral("consoleClear"));
 	topLayout->addWidget(_copyScope);
 	topLayout->addWidget(_copyBtn);
 	topLayout->addWidget(_clearBtn);
@@ -148,6 +154,7 @@ void MeetingLogConsoleWindow::initUi() {
 	auto *filters = new QHBoxLayout();
 	_severityFilter = new QComboBox(this);
 	_severityFilter->setObjectName(QStringLiteral("consoleSeverityFilter"));
+	_severityFilter->setAccessibleName(QCoreApplication::translate("MeetingUI", "Severity filter"));
 	_severityFilter->addItems({
 		QCoreApplication::translate("MeetingUI", "All levels"),
 		QStringLiteral("trace"), QStringLiteral("debug"),
@@ -155,6 +162,7 @@ void MeetingLogConsoleWindow::initUi() {
 		QStringLiteral("error"), QStringLiteral("fatal")});
 	_componentFilter = new QComboBox(this);
 	_componentFilter->setObjectName(QStringLiteral("consoleComponentFilter"));
+	_componentFilter->setAccessibleName(QCoreApplication::translate("MeetingUI", "Component filter"));
 	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "All components"));
 	for (const auto *name : {"legacy", "app", "diagnostic_pipeline",
 		"net", "meeting_coordinator", "room", "participant",
@@ -163,10 +171,12 @@ void MeetingLogConsoleWindow::initUi() {
 		_componentFilter->addItem(QString::fromLatin1(name));
 	_sessionInput = new QLineEdit(this);
 	_sessionInput->setObjectName(QStringLiteral("consoleSessionFilter"));
+	_sessionInput->setAccessibleName(QCoreApplication::translate("MeetingUI", "Session ID"));
 	_sessionInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Session ID"));
 	_sessionInput->setClearButtonEnabled(true);
 	_operationInput = new QLineEdit(this);
 	_operationInput->setObjectName(QStringLiteral("consoleOperationFilter"));
+	_operationInput->setAccessibleName(QCoreApplication::translate("MeetingUI", "Operation ID"));
 	_operationInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Operation ID"));
 	_operationInput->setClearButtonEnabled(true);
 	filters->addWidget(_severityFilter);
@@ -260,6 +270,8 @@ void MeetingLogConsoleWindow::initUi() {
 
 	// 控制台文本区
 	_logView = new QPlainTextEdit(this);
+	_logView->setObjectName(QStringLiteral("consoleLogView"));
+	_logView->setAccessibleName(QCoreApplication::translate("MeetingUI", "Debug Logs"));
 	_logView->setReadOnly(true);
 	_logView->setMaximumBlockCount(3000);
 	mainLayout->addWidget(_logView);
