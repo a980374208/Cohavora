@@ -254,6 +254,7 @@ set(LIVEKIT_SOURCES
     src/media/dshow_enumerator.cpp
     src/media/dshow_capture.cpp
     src/media/desktop_capture.cpp
+    src/media/wgc_window_capture.cpp
     src/media/camera_source_manager.cpp
     src/media/audio_vad.cpp
     src/media/audio_apm.cpp

@@ -4,9 +4,15 @@
 #include "modules/desktop_capture/desktop_capture_options.h"
 #include "modules/desktop_capture/desktop_frame.h"
 #include "modules/desktop_capture/win/screen_capture_utils.h"
+#include "modules/desktop_capture/win/wgc_capturer_win.h"
+#include "modules/desktop_capture/win/screen_capturer_win_directx.h"
+#include "screen_capture_fallback.h"
 #include "libyuv/convert.h"
 #include <windows.h>
 #include <objbase.h>
+#include "wgc_window_capture.h"
+#include <roapi.h>
+#pragma comment(lib, "runtimeobject.lib")
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -19,52 +25,82 @@ namespace livekit {
 namespace {
 using namespace std::chrono_literals;
 
-webrtc::DesktopCaptureOptions Options() {
+webrtc::DesktopCaptureOptions Options(bool allow_wgc_window = false) {
     auto options = webrtc::DesktopCaptureOptions::CreateDefault();
     // A session shutdown may wait for the worker; never enumerate or send
     // synchronous window messages back into this process's waiting Qt thread.
     options.set_enumerate_current_process_windows(false);
     options.set_allow_cropping_window_capturer(false);
-    options.set_allow_directx_capturer(true);
-    options.set_allow_wgc_screen_capturer(true);
-    options.set_allow_wgc_window_capturer(true);
+    options.set_allow_directx_capturer(false);
+    options.set_allow_wgc_screen_capturer(false);
+    // Enumeration and unsupported capture use GDI. Window WGC is owned below.
+    options.set_allow_wgc_window_capturer(allow_wgc_window);
     options.set_wgc_require_border(true);
     options.set_disable_effects(false);
     options.set_prefer_cursor_embedded(true);
     return options;
 }
 
-auto MakeCapturer(DesktopSourceKind kind) {
+auto MakeCapturer(DesktopSourceKind kind, bool allow_wgc_window = false) {
     return kind == DesktopSourceKind::Screen
         ? webrtc::DesktopCapturer::CreateScreenCapturer(Options())
-        : webrtc::DesktopCapturer::CreateWindowCapturer(Options());
+        : webrtc::DesktopCapturer::CreateWindowCapturer(Options(allow_wgc_window));
 }
 
 class ComScope {
 public:
-    ComScope() : result_(CoInitializeEx(nullptr, COINIT_MULTITHREADED)) {}
-    ~ComScope() { if (SUCCEEDED(result_)) CoUninitialize(); }
+    ComScope() : result_(RoInitialize(RO_INIT_MULTITHREADED)) {}
+    ~ComScope() { if (SUCCEEDED(result_)) RoUninitialize(); }
 private:
     HRESULT result_;
 };
 
 class DesktopCapture final : public IDesktopCapture, private webrtc::DesktopCapturer::Callback {
 public:
+    explicit DesktopCapture(DesktopCaptureProbeOptions probe) : probe_(std::move(probe)) {}
     ~DesktopCapture() override { Stop(); }
     void Start(DesktopSource source, FrameCallback frame, EndCallback ended) override {
         Stop();
         frame_ = std::move(frame);
         ended_ = std::move(ended);
+        backend_seen_ = false;
+        backend_id_ = 0;
         stopped_ = false;
         worker_ = std::thread([this, source = std::move(source)] {
             ComScope com;
             try {
-                auto capturer = MakeCapturer(source.kind);
+                const bool window = source.kind == DesktopSourceKind::Window;
+                const bool wgc_supported = !probe_.simulate_wgc_unsupported &&
+                    (!window || probe_.allow_wgc_window) && (window
+                        ? webrtc::IsWgcSupported(webrtc::CaptureType::kWindow) : IsOwnedWgcSupported());
+                auto capturer = window && wgc_supported &&
+                    !probe_.use_legacy_wgc_window
+                    ? CreateOwnedWgcWindowCapturer([this](auto phase) { Notify(phase); })
+                    : (window ? MakeCapturer(source.kind, wgc_supported) : nullptr);
+                if (!window) {
+                    capturer = std::make_unique<ScreenCaptureFallback>(
+                        std::vector<ScreenCaptureFallback::Backend>{
+                            {[this]() -> std::unique_ptr<webrtc::DesktopCapturer> {
+                                if (probe_.simulate_dxgi_unsupported ||
+                                    !webrtc::ScreenCapturerWinDirectx::IsSupported()) return nullptr;
+                                return std::make_unique<webrtc::ScreenCapturerWinDirectx>(Options());
+                            }},
+                            {[this, wgc_supported]() -> std::unique_ptr<webrtc::DesktopCapturer> {
+                                return wgc_supported
+                                    ? CreateOwnedWgcScreenCapturer([this](auto phase) { Notify(phase); }) : nullptr;
+                            }, true},
+                            {[] { return MakeCapturer(DesktopSourceKind::Screen); }, true}
+                        });
+                }
+                if (capturer) Notify(DesktopCaptureProbePhase::Created);
                 if (!capturer || !capturer->SelectSource(source.id)) {
+                    capturer.reset();
+                    Notify(DesktopCaptureProbePhase::Destroyed);
                     Fail();
                     return;
                 }
                 capturer->Start(this);
+                Notify(DesktopCaptureProbePhase::Started);
                 capturer->SetMaxFrameRate(15);
                 last_frame_ = std::chrono::steady_clock::now();
                 while (!stopped_.load(std::memory_order_acquire)) {
@@ -77,10 +113,12 @@ public:
                         break;
                     }
                     capturer->CaptureFrame();
-                    if (std::chrono::steady_clock::now() - last_frame_ > 5s) Fail();
+                    if (window && std::chrono::steady_clock::now() - last_frame_ > 5s) Fail();
                     std::unique_lock lock(wait_mutex_);
                     wake_.wait_for(lock, 66ms, [this] { return stopped_.load(); });
                 }
+                capturer.reset();
+                Notify(DesktopCaptureProbePhase::Destroyed);
             } catch (...) {
                 Fail();
             }
@@ -89,11 +127,19 @@ public:
     void Stop() override {
         stopped_.store(true, std::memory_order_release);
         wake_.notify_all();
-        if (worker_.joinable()) worker_.join();
+        if (worker_.joinable()) {
+            worker_.join();
+            Notify(DesktopCaptureProbePhase::Joined);
+        }
         frame_ = {};
         ended_ = {};
     }
 private:
+    void Notify(DesktopCaptureProbePhase phase, std::uint32_t capturer_id = 0) noexcept {
+        if (!probe_.on_event) return;
+        try { probe_.on_event({phase, capturer_id, GetCurrentThreadId()}); }
+        catch (...) {}
+    }
     void Fail() {
         if (!stopped_.exchange(true) && ended_) ended_();
     }
@@ -105,6 +151,11 @@ private:
             return;
         }
         if (result != webrtc::DesktopCapturer::Result::SUCCESS || !frame) return;
+        if (!backend_seen_ || frame->capturer_id() != backend_id_) {
+            backend_seen_ = true;
+            backend_id_ = frame->capturer_id();
+            Notify(DesktopCaptureProbePhase::BackendFrame, backend_id_);
+        }
         const int w = frame->size().width(), h = frame->size().height();
         if (w <= 0 || h <= 0 || w > 16384 || h > 16384 || frame->stride() < w * 4) {
             Fail();
@@ -130,6 +181,9 @@ private:
     FrameCallback frame_;
     EndCallback ended_;
     std::chrono::steady_clock::time_point last_frame_;
+    DesktopCaptureProbeOptions probe_;
+    std::uint32_t backend_id_ = 0;
+    bool backend_seen_ = false;
 };
 } // namespace
 
@@ -145,7 +199,13 @@ std::vector<DesktopSource> EnumerateDesktopSources() {
     return result;
 }
 
-std::unique_ptr<IDesktopCapture> CreateDesktopCapture() { return std::make_unique<DesktopCapture>(); }
+std::unique_ptr<IDesktopCapture> CreateDesktopCapture() {
+    return CreateDesktopCaptureForProbe(DesktopCaptureProbeOptions{});
+}
+
+std::unique_ptr<IDesktopCapture> CreateDesktopCaptureForProbe(DesktopCaptureProbeOptions probe) {
+    return std::make_unique<DesktopCapture>(std::move(probe));
+}
 
 std::optional<ScreenBinding> ResolveScreenBinding(
         const DesktopSource &source, std::uint64_t sourceEpoch,
