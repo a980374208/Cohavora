@@ -502,6 +502,9 @@ void SampleShareObjects(const Peer& sender, int cycle, const char* phase) {
     const auto native = sender.room->GetPublisherMediaObjectCounts();
     const auto& objects = *sender.share_objects;
     std::cout << "[LIFECYCLE] {\"cycle\":" << cycle
+              << ",\"pid\":" << GetCurrentProcessId()
+              << ",\"epoch_ms\":" << std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count()
               << ",\"phase\":\"" << phase << "\""
               << ",\"private_bytes\":" << memory.PrivateUsage
               << ",\"handles\":" << handles
@@ -769,7 +772,10 @@ asio::awaitable<void> LifecycleMatrix(Peer& sender, Peer& receiver) {
     const auto baseline_native = sender.room->GetPublisherMediaObjectCounts();
     const auto baseline_sources = livekit::RtcVideoSource::LiveInstanceCount();
     SampleShareObjects(sender, 0, "baseline");
-    for (int cycle = 1; cycle <= 12; ++cycle) {
+    const char* requested_cycles = std::getenv("LIVEKIT_TEST_SHARE_CYCLES");
+    const int cycles = requested_cycles ? std::atoi(requested_cycles) : 12;
+    Require(cycles >= 1 && cycles <= 30, "invalid_lifecycle_cycles");
+    for (int cycle = 1; cycle <= cycles; ++cycle) {
         {
             auto screen = co_await StartScreen(sender, receiver, window);
             co_await Delay(1500ms);
@@ -793,7 +799,7 @@ asio::awaitable<void> LifecycleMatrix(Peer& sender, Peer& receiver) {
         SampleShareObjects(sender, cycle, "stopped");
     }
     co_await Delay(10s);
-    SampleShareObjects(sender, 12, "settled");
+    SampleShareObjects(sender, cycles, "settled");
 }
 
 asio::awaitable<void> PublisherLifecycleMatrix(Peer& sender, bool direct_track) {
@@ -807,7 +813,7 @@ asio::awaitable<void> PublisherLifecycleMatrix(Peer& sender, bool direct_track) 
     int cycles = 12;
     if (const char* requested = std::getenv("LIVEKIT_TEST_SHARE_CYCLES")) {
         const int value = std::atoi(requested);
-        if (value >= 1 && value <= 12) cycles = value;
+        if (value >= 1 && value <= 30) cycles = value;
     }
     SampleShareObjects(sender, 0, "baseline");
     for (int cycle = 1; cycle <= cycles; ++cycle) {
