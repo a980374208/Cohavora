@@ -813,6 +813,52 @@ asio::awaitable<void> TestCase2_SuddenDropAndSoftReconnect(asio::any_io_executor
     std::cout << "[PASS] Test 2: Sudden Drop & Soft Reconnect (SyncState) Successfully Verified!" << std::endl;
 }
 
+asio::awaitable<void> TestCase2_RecoveryAfterFastConnectFailures(
+    asio::any_io_executor executor) {
+    auto& io_ctx = static_cast<asio::io_context&>(executor.context());
+    auto server = std::make_shared<StressMockServer>(io_ctx);
+    g_keep_alive_servers.push_back(server);
+    server->StartAccept();
+    const auto port = server->port();
+    livekit::SignalOptions opts;
+    opts.allow_insecure_transport = true;
+    opts.create_webrtc_pc = false;
+    opts.timeouts.reconnect_attempt = std::chrono::milliseconds(500);
+    opts.timeouts.reconnect_total = std::chrono::seconds(8);
+
+    auto room = livekit::Room::Create(executor);
+    auto listener = std::make_shared<StressRoomListener>();
+    room->AddListener(listener);
+    const auto url = "ws://127.0.0.1:" + std::to_string(port);
+    TEST_ASSERT(co_await room->Connect(url, "fast-failure-recovery", opts),
+        "Initial connection failed");
+    server->CloseActiveConnections();
+    server->Stop();
+
+    asio::steady_timer timer(executor, std::chrono::milliseconds(3200));
+    co_await timer.async_wait(asio::use_awaitable);
+    TEST_ASSERT(listener->disconnected_count.load() == 0,
+        "Fast connection failures ended reconnect before the total deadline");
+    TEST_ASSERT(listener->reconnecting_count.load() == 1,
+        "Reconnect episode was restarted after fast connection failures");
+
+    auto restored = std::make_shared<StressMockServer>(io_ctx, port);
+    g_keep_alive_servers.push_back(restored);
+    restored->StartAccept();
+    for (int wait_idx = 0; wait_idx < 50; ++wait_idx) {
+        if (room->connection_state() == livekit::ConnectionState::Connected &&
+            listener->reconnected_count.load() == 1) break;
+        timer.expires_after(std::chrono::milliseconds(100));
+        co_await timer.async_wait(asio::use_awaitable);
+    }
+    TEST_ASSERT(room->connection_state() == livekit::ConnectionState::Connected &&
+        listener->reconnected_count.load() == 1,
+        "Room did not recover when service returned within reconnect_total");
+    room->Disconnect();
+    restored->CloseActiveConnections();
+    restored->Stop();
+}
+
 // ============================================================================
 // Case 3: 连续断网扰动与硬重连降级 (Hard Reconnect Fallback)
 // ============================================================================
@@ -1762,6 +1808,7 @@ int main(int argc, char** argv) {
             if (!native_only && !delivery_only && !owner_only) {
             co_await TestCase1_RapidConnectDisconnect100Cycles(executor);
             co_await TestCase2_SuddenDropAndSoftReconnect(executor);
+            co_await TestCase2_RecoveryAfterFastConnectFailures(executor);
             co_await TestCase3_HardReconnectFallback(executor);
             co_await TestCase4_ConcurrentEventAndDestructionRace(executor);
             co_await TestCase5_StaleConnectRollbackOwnership(executor);

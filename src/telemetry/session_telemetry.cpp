@@ -1228,6 +1228,36 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         return;
     }
 
+    const auto emit_recovered_endpoint = [this](
+            diagnostic::MediaKind media_kind,
+            diagnostic::RecoveryMeasurement measurement,
+            const RecoveryTrackState& track,
+            const std::string& endpoint_id,
+            std::uint64_t room_generation,
+            Clock::time_point observed_at) {
+        if (endpoint_id.empty() || room_generation == 0) return;
+        diagnostic::Event diagnostic_event;
+        diagnostic_event.kind = diagnostic::EventKind::MediaEndpointRecovered;
+        diagnostic_event.thread_role = diagnostic::ThreadRole::Session;
+        diagnostic_event.context.anonymous_session_id.Assign(anonymous_session_id_);
+        diagnostic_event.context.operation_id.Assign(recovery_.operation_id);
+        diagnostic_event.context.session_generation = session_generation_;
+        diagnostic_event.context.has_session_generation = true;
+        diagnostic_event.context.room_generation = room_generation;
+        diagnostic_event.context.has_room_generation = true;
+        diagnostic_event.context.recovery_epoch = recovery_.epoch;
+        diagnostic_event.context.has_recovery_epoch = true;
+        diagnostic_event.media_endpoint_id.Assign(endpoint_id);
+        diagnostic_event.previous_media_endpoint_id.Assign(
+            track.previous_endpoint_id);
+        diagnostic_event.media_kind = media_kind;
+        diagnostic_event.recovery_measurement = measurement;
+        diagnostic_event.outcome = diagnostic::Outcome::Success;
+        diagnostic_event.duration_ms = static_cast<std::uint64_t>(
+            MillisecondsBetween(recovery_.outage_started_at, observed_at));
+        diagnostic::EmitBusinessEvent(diagnostic_event);
+    };
+
     switch (event.kind) {
     case EventKind::GaugeSample:
         state_.last_sample_at = event.source_time;
@@ -1428,6 +1458,7 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
                     continue;
                 }
                 RecoveryTrackState track;
+                track.previous_endpoint_id = media.endpoint_id;
                 const auto last_ns = media.probe->last_frame_ns.load(
                     std::memory_order_acquire);
                 if (last_ns > 0) {
@@ -1444,6 +1475,7 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
                     continue;
                 }
                 RecoveryTrackState track;
+                track.previous_endpoint_id = media.endpoint_id;
                 const auto last_ns = media.probe->last_frame_ns.load(
                     std::memory_order_acquire);
                 if (last_ns > 0) {
@@ -1458,6 +1490,7 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
                     continue;
                 }
                 RecoveryTrackState track;
+                track.previous_endpoint_id = media.endpoint_id;
                 const auto last_ns = media.probe->last_submit_ns.load(
                     std::memory_order_acquire);
                 if (last_ns > 0) {
@@ -1580,6 +1613,7 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         MediaState media;
         media.room_generation = event.room_generation;
         media.binding_epoch = event.binding_epoch;
+        media.endpoint_id = std::string(diagnostic::NewCorrelationId().View());
         media.expected_receive = event.expected;
         media.continuous_video = event.continuous_video;
         media.subscription_accepted = event.related_time;
@@ -1680,6 +1714,10 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             track.recovered = true;
             track.stable_recovered_at = event.source_time;
             ++state_.reconnect_video_recovered;
+            emit_recovered_endpoint(diagnostic::MediaKind::Video,
+                diagnostic::RecoveryMeasurement::DecodedVideoStable,
+                track, media->second.endpoint_id,
+                media->second.room_generation, event.source_time);
             MaybeFinishReconnectOnStrand(event.source_time);
         }
         break;
@@ -1701,6 +1739,7 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         AudioMediaState media;
         media.room_generation = event.room_generation;
         media.binding_epoch = event.binding_epoch;
+        media.endpoint_id = std::string(diagnostic::NewCorrelationId().View());
         media.expected_receive = event.expected;
         media.subscription_accepted = event.related_time;
         media.probe = event.audio_probe;
@@ -1789,6 +1828,10 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             track.recovered = true;
             track.stable_recovered_at = event.source_time;
             ++state_.reconnect_audio_recovered;
+            emit_recovered_endpoint(diagnostic::MediaKind::Audio,
+                diagnostic::RecoveryMeasurement::PcmAudioStable,
+                track, media->second.endpoint_id,
+                media->second.room_generation, event.source_time);
             MaybeFinishReconnectOnStrand(event.source_time);
         }
         break;
@@ -1810,6 +1853,7 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         RenderState render;
         render.room_generation = event.room_generation;
         render.binding_epoch = event.binding_epoch;
+        render.endpoint_id = std::string(diagnostic::NewCorrelationId().View());
         render.expected_render = event.expected;
         render.continuous_video = event.continuous_video;
         render.subscription_accepted = event.related_time;
@@ -1926,6 +1970,10 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             track.recovered = true;
             track.stable_recovered_at = event.source_time;
             ++state_.reconnect_render_recovered;
+            emit_recovered_endpoint(diagnostic::MediaKind::Video,
+                diagnostic::RecoveryMeasurement::VisibleRenderStable,
+                track, render.endpoint_id,
+                render.room_generation, event.source_time);
             MaybeFinishReconnectOnStrand(event.source_time);
         }
         UpdateRenderAvailabilityOnStrand(event.source_time);
