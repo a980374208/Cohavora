@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <random>
 #include <string>
+#include <vector>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -82,15 +83,73 @@ bool DiagnosticWindowActive() noexcept {
     return pipeline && pipeline->DiagnosticWindowActive();
 }
 
-DiagnosticPipeline::DiagnosticPipeline()
+struct DiagnosticPipeline::WriterContext final {
+    WriterContext();
+    bool TryEmit(Event event) noexcept;
+    void OpenDiagnosticWindow(std::chrono::milliseconds duration) noexcept;
+    bool DiagnosticWindowActive() noexcept;
+    std::chrono::milliseconds DiagnosticWindowRemaining() const noexcept;
+    void SetMirror(Mirror mirror);
+    void SetRetentionEnabled(bool enabled) noexcept;
+    // Explicit, time-bounded external benchmark only. Never persisted as a
+    // user preference; zero/expiry restores normal production automatically.
+    void PauseProductionForBenchmark(std::chrono::milliseconds duration) noexcept;
+    bool ProductionPausedForBenchmark() const noexcept;
+    std::uint64_t BenchmarkSuppressed() const noexcept;
+    void CountSuppressed() noexcept;
+    void RetryNow() noexcept;
+    Status GetStatus() const noexcept;
+    std::string_view run_id() const noexcept { return {run_id_.data(), 32}; }
+    struct PendingEvent final {
+        Event event;
+        bool persist = true;
+    };
+    void Run(std::filesystem::path root) noexcept;
+    bool Pop(PendingEvent& event) noexcept;
+    Event Stamp(Event event) noexcept;
+
+    static constexpr std::size_t kOrdinaryCapacity = kOrdinaryEvents;
+    static constexpr std::size_t kCriticalCapacity = kCriticalEvents;
+    std::unique_ptr<PendingEvent[]> ordinary_;
+    std::unique_ptr<PendingEvent[]> critical_;
+    std::size_t ordinary_head_ = 0;
+    std::size_t ordinary_tail_ = 0;
+    std::size_t ordinary_count_ = 0;
+    std::size_t critical_head_ = 0;
+    std::size_t critical_tail_ = 0;
+    std::size_t critical_count_ = 0;
+    mutable std::mutex mutex_;
+    std::condition_variable wake_;
+    std::condition_variable writer_done_;
+    std::shared_ptr<const Mirror> mirror_;
+    Status status_;
+    bool stopping_ = false;
+    bool started_ = false;
+    bool writer_finished_ = false;
+    bool retry_requested_ = false;
+    std::atomic<bool> abort_{false};
+    bool retention_enabled_ = true;
+    DrainResult drain_result_ = DrainResult::Unknown;
+    std::array<char, 33> run_id_{};
+    std::chrono::steady_clock::time_point started_at_;
+    std::atomic<std::uint64_t> next_sequence_{0};
+    std::atomic<std::int64_t> diagnostic_deadline_ticks_{0};
+    std::atomic<std::uint64_t> diagnostic_window_bytes_{0};
+    std::atomic<std::int64_t> benchmark_pause_until_{0};
+    std::atomic<std::uint64_t> benchmark_suppressed_{0};
+    bool frozen_ = false;
+    Status closed_status_;
+};
+
+DiagnosticPipeline::WriterContext::WriterContext()
     : ordinary_(std::make_unique<PendingEvent[]>(kOrdinaryCapacity)),
       critical_(std::make_unique<PendingEvent[]>(kCriticalCapacity)),
       run_id_(NewRunId()),
       started_at_(std::chrono::steady_clock::now()) {}
 
-DiagnosticPipeline::~DiagnosticPipeline() { Close(); }
 
-Event DiagnosticPipeline::Stamp(Event event) noexcept {
+
+Event DiagnosticPipeline::WriterContext::Stamp(Event event) noexcept {
     const auto wall = std::chrono::system_clock::now().time_since_epoch();
     event.occurred_at_utc_ms = std::chrono::duration_cast<std::chrono::milliseconds>(wall).count();
     event.monotonic_us = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -103,7 +162,7 @@ Event DiagnosticPipeline::Stamp(Event event) noexcept {
     return event;
 }
 
-bool DiagnosticPipeline::TryEmit(Event event) noexcept {
+bool DiagnosticPipeline::WriterContext::TryEmit(Event event) noexcept {
     try {
         if (event.kind != EventKind::RetentionChanged && ProductionPausedForBenchmark()) {
             benchmark_suppressed_.fetch_add(1, std::memory_order_relaxed);
@@ -162,7 +221,7 @@ bool DiagnosticPipeline::TryEmit(Event event) noexcept {
     }
 }
 
-void DiagnosticPipeline::PauseProductionForBenchmark(std::chrono::milliseconds duration) noexcept {
+void DiagnosticPipeline::WriterContext::PauseProductionForBenchmark(std::chrono::milliseconds duration) noexcept {
     duration = (std::clamp)(duration, std::chrono::milliseconds::zero(),
                            std::chrono::milliseconds(60000));
     benchmark_pause_until_.store(duration.count() ?
@@ -170,16 +229,16 @@ void DiagnosticPipeline::PauseProductionForBenchmark(std::chrono::milliseconds d
         std::memory_order_release);
 }
 
-bool DiagnosticPipeline::ProductionPausedForBenchmark() const noexcept {
+bool DiagnosticPipeline::WriterContext::ProductionPausedForBenchmark() const noexcept {
     const auto until = benchmark_pause_until_.load(std::memory_order_acquire);
     return until && std::chrono::steady_clock::now().time_since_epoch().count() < until;
 }
 
-std::uint64_t DiagnosticPipeline::BenchmarkSuppressed() const noexcept {
+std::uint64_t DiagnosticPipeline::WriterContext::BenchmarkSuppressed() const noexcept {
     return benchmark_suppressed_.load(std::memory_order_relaxed);
 }
 
-void DiagnosticPipeline::OpenDiagnosticWindow(
+void DiagnosticPipeline::WriterContext::OpenDiagnosticWindow(
     std::chrono::milliseconds duration) noexcept {
     const auto maximum = std::chrono::minutes(10);
     if (duration > maximum) duration = maximum;
@@ -203,7 +262,7 @@ void DiagnosticPipeline::OpenDiagnosticWindow(
     TryEmit(event);
 }
 
-bool DiagnosticPipeline::DiagnosticWindowActive() noexcept {
+bool DiagnosticPipeline::WriterContext::DiagnosticWindowActive() noexcept {
     auto deadline = diagnostic_deadline_ticks_.load(std::memory_order_acquire);
     if (deadline == 0) return false;
     if (std::chrono::steady_clock::now().time_since_epoch().count() < deadline)
@@ -218,7 +277,7 @@ bool DiagnosticPipeline::DiagnosticWindowActive() noexcept {
     return false;
 }
 
-std::chrono::milliseconds DiagnosticPipeline::DiagnosticWindowRemaining() const noexcept {
+std::chrono::milliseconds DiagnosticPipeline::WriterContext::DiagnosticWindowRemaining() const noexcept {
     const auto deadline = diagnostic_deadline_ticks_.load(
         std::memory_order_acquire);
     if (deadline == 0) return std::chrono::milliseconds::zero();
@@ -228,18 +287,7 @@ std::chrono::milliseconds DiagnosticPipeline::DiagnosticWindowRemaining() const 
         std::chrono::duration_cast<std::chrono::milliseconds>(remaining));
 }
 
-bool DiagnosticPipeline::StartWriter(std::filesystem::path root) {
-    std::lock_guard lock(mutex_);
-    if (started_ || stopping_ || root.empty()) return false;
-    writer_ = std::thread([this, root = std::move(root)]() mutable {
-        Run(std::move(root));
-    });
-    started_ = true;
-    wake_.notify_one();
-    return true;
-}
-
-bool DiagnosticPipeline::Pop(PendingEvent& event) noexcept {
+bool DiagnosticPipeline::WriterContext::Pop(PendingEvent& event) noexcept {
     if (ordinary_count_ == 0 && critical_count_ == 0) return false;
     const bool from_critical = critical_count_ != 0 &&
         (ordinary_count_ == 0 ||
@@ -257,12 +305,13 @@ bool DiagnosticPipeline::Pop(PendingEvent& event) noexcept {
     return true;
 }
 
-void DiagnosticPipeline::Run(std::filesystem::path root) noexcept {
+void DiagnosticPipeline::WriterContext::Run(std::filesystem::path root) noexcept {
     try {
-    DiagnosticFileSink sink(std::move(root), std::string(run_id()));
+    DiagnosticFileSink sink(std::move(root), std::string(run_id()), &abort_);
     PendingEvent pending;
+    std::vector<PendingEvent> batch;
+    std::vector<Event> persisted;
     bool has_pending = false;
-    bool pending_critical = false;
     bool pending_mirrored = false;
     bool was_failed = false;
     FailureReason last_failure = FailureReason::Unknown;
@@ -271,7 +320,7 @@ void DiagnosticPipeline::Run(std::filesystem::path root) noexcept {
     std::uint64_t reported_dropped = 0;
     while (true) {
         if (abort_.load(std::memory_order_relaxed)) break;
-        Mirror mirror;
+        std::shared_ptr<const Mirror> mirror;
         {
             std::unique_lock lock(mutex_);
             if (!has_pending && !Pop(pending)) {
@@ -293,42 +342,62 @@ void DiagnosticPipeline::Run(std::filesystem::path root) noexcept {
             }
             if (!has_pending) {
                 pending_mirrored = false;
-                pending_critical = IsCritical(pending.event.kind);
+                batch.clear();
+                persisted.clear();
+                batch.push_back(pending);
+                // Drain only events already queued: sparse traffic must not
+                // wait to fill a batch. Backlog still amortizes quota/flush
+                // work across at most 64 events without delaying new writes.
+                PendingEvent next;
+                while (batch.size() < 64 && Pop(next)) batch.push_back(next);
             }
             has_pending = true;
             if (!pending_mirrored) mirror = mirror_;
         }
         if (!pending_mirrored) {
-            try { if (mirror) mirror(pending.event); } catch (...) {}
+            for (const auto& item : batch) {
+                if (abort_.load(std::memory_order_acquire)) break;
+                try { if (mirror) (*mirror)(item.event); } catch (...) {}
+                if (item.persist) persisted.push_back(item.event);
+            }
             pending_mirrored = true;
         }
-        if (!pending.persist) {
+        if (abort_.load(std::memory_order_acquire)) break;
+        if (persisted.empty()) {
             has_pending = false;
             continue;
         }
-        if (sink.Write(pending.event)) {
+        const auto committed = sink.WriteBatch(persisted);
+        if (abort_.load(std::memory_order_acquire)) break;
+        {
+            std::lock_guard lock(mutex_);
+            status_.written += committed;
+            status_.last_committed_sequence = sink.last_committed_sequence();
+        }
+        persisted.erase(persisted.begin(), persisted.begin() + committed);
+        if (persisted.empty()) {
             std::uint64_t accepted = 0;
             std::uint64_t dropped = 0;
             std::uint64_t high_water = 0;
             {
                 std::lock_guard lock(mutex_);
-                ++status_.written;
                 status_.last_committed_sequence = sink.last_committed_sequence();
                 status_.sink_available = true;
                 accepted = status_.accepted;
                 dropped = status_.dropped_ordinary + status_.dropped_critical;
                 high_water = status_.queue_high_water;
             }
-            if (was_failed &&
+            if (!abort_.load(std::memory_order_acquire) && was_failed &&
                 sink.Write(Stamp(Event::FileFailed(
                     last_failure, sink.last_committed_sequence()))) &&
+                !abort_.load(std::memory_order_acquire) &&
                 sink.Write(Stamp(Event::FileRecovered(
                     sink.last_committed_sequence())))) {
                 was_failed = false;
                 failures = 0;
                 failure_since = {};
             }
-            if (dropped != reported_dropped) {
+            if (!abort_.load(std::memory_order_acquire) && dropped != reported_dropped) {
                 if (sink.Write(Stamp(Event::QueueHealth(accepted, dropped, high_water)))) {
                     reported_dropped = dropped;
                 }
@@ -372,34 +441,38 @@ void DiagnosticPipeline::Run(std::filesystem::path root) noexcept {
     if (has_pending || abort_.load(std::memory_order_relaxed)) {
         std::lock_guard lock(mutex_);
         if (has_pending) {
-            if (pending_critical) ++status_.dropped_critical;
-            else ++status_.dropped_ordinary;
+            for (const auto& event : persisted) {
+                if (IsCritical(event.kind)) ++status_.dropped_critical;
+                else ++status_.dropped_ordinary;
+            }
         }
         status_.dropped_critical += critical_count_;
         status_.dropped_ordinary += ordinary_count_;
         critical_count_ = ordinary_count_ = 0;
         status_.pending = 0;
     }
-    auto terminal = Stamp(Event::Terminal(
-        (has_pending || abort_.load(std::memory_order_relaxed))
-            ? Outcome::Failure : Outcome::Success,
-        abort_.load(std::memory_order_relaxed) ? DrainResult::TimedOut :
-        has_pending ? DrainResult::Failed : DrainResult::Completed));
-    bool retention;
-    {
-        std::lock_guard lock(mutex_);
-        retention = retention_enabled_;
-    }
-    if (retention && !sink.Write(terminal)) {
-        std::lock_guard lock(mutex_);
-        ++status_.sink_failures;
-        status_.sink_available = false;
-        drain_result_ = DrainResult::Failed;
-    } else {
-        std::lock_guard lock(mutex_);
-        drain_result_ = abort_.load(std::memory_order_relaxed)
-            ? DrainResult::TimedOut :
-            has_pending ? DrainResult::Failed : DrainResult::Completed;
+    if (!abort_.load(std::memory_order_acquire)) {
+        auto terminal = Stamp(Event::Terminal(
+            (has_pending || abort_.load(std::memory_order_relaxed))
+                ? Outcome::Failure : Outcome::Success,
+            abort_.load(std::memory_order_relaxed) ? DrainResult::TimedOut :
+            has_pending ? DrainResult::Failed : DrainResult::Completed));
+        bool retention;
+        {
+            std::lock_guard lock(mutex_);
+            retention = retention_enabled_;
+        }
+        if (retention && !sink.Write(terminal)) {
+            std::lock_guard lock(mutex_);
+            ++status_.sink_failures;
+            status_.sink_available = false;
+            drain_result_ = DrainResult::Failed;
+        } else {
+            std::lock_guard lock(mutex_);
+            drain_result_ = abort_.load(std::memory_order_relaxed)
+                ? DrainResult::TimedOut :
+                has_pending ? DrainResult::Failed : DrainResult::Completed;
+        }
     }
     sink.Close();
     } catch (...) {
@@ -414,65 +487,19 @@ void DiagnosticPipeline::Run(std::filesystem::path root) noexcept {
     }
     {
         std::lock_guard lock(mutex_);
+        if (abort_.load(std::memory_order_acquire)) drain_result_ = DrainResult::TimedOut;
         writer_finished_ = true;
     }
     writer_done_.notify_all();
 }
 
-DrainResult DiagnosticPipeline::Close(ShutdownReason reason) noexcept {
-    try {
-        std::lock_guard close_lock(close_mutex_);
-        bool timed_out = false;
-        {
-            std::lock_guard lock(mutex_);
-            if (stopping_) return drain_result_;
-        }
-        TryEmit(Event::Stopping(reason));
-        {
-            std::lock_guard lock(mutex_);
-            status_.accepting = false;
-            stopping_ = true;
-            if (!started_) {
-                status_.dropped_critical += critical_count_;
-                status_.dropped_ordinary += ordinary_count_;
-                status_.pending = 0;
-                drain_result_ = DrainResult::Failed;
-            }
-        }
-        wake_.notify_all();
-        if (writer_.joinable()) {
-            std::unique_lock lock(mutex_);
-            if (!writer_done_.wait_for(lock, std::chrono::seconds(5),
-                                       [this] { return writer_finished_; })) {
-                timed_out = true;
-                abort_.store(true, std::memory_order_relaxed);
-                lock.unlock();
-#if defined(_WIN32)
-                CancelSynchronousIo(static_cast<HANDLE>(writer_.native_handle()));
-#endif
-                lock.lock();
-                drain_result_ = DrainResult::TimedOut;
-                lock.unlock();
-                wake_.notify_all();
-            }
-        }
-        if (writer_.joinable()) writer_.join();
-        if (timed_out) {
-            std::lock_guard lock(mutex_);
-            drain_result_ = DrainResult::TimedOut;
-        }
-        return drain_result_;
-    } catch (...) {
-        return DrainResult::Failed;
-    }
-}
-
-void DiagnosticPipeline::SetMirror(Mirror mirror) {
+void DiagnosticPipeline::WriterContext::SetMirror(Mirror mirror) {
+    auto replacement = mirror ? std::make_shared<const Mirror>(std::move(mirror)) : nullptr;
     std::lock_guard lock(mutex_);
-    mirror_ = std::move(mirror);
+    if (!stopping_) mirror_.swap(replacement);
 }
 
-void DiagnosticPipeline::SetRetentionEnabled(bool enabled) noexcept {
+void DiagnosticPipeline::WriterContext::SetRetentionEnabled(bool enabled) noexcept {
     bool changed = false;
     bool started = false;
     {
@@ -491,20 +518,91 @@ void DiagnosticPipeline::SetRetentionEnabled(bool enabled) noexcept {
     }
 }
 
-void DiagnosticPipeline::CountSuppressed() noexcept {
+void DiagnosticPipeline::WriterContext::CountSuppressed() noexcept {
     std::lock_guard lock(mutex_);
     ++status_.suppressed;
 }
 
-void DiagnosticPipeline::RetryNow() noexcept {
+void DiagnosticPipeline::WriterContext::RetryNow() noexcept {
     std::lock_guard lock(mutex_);
     retry_requested_ = true;
     wake_.notify_one();
 }
 
-Status DiagnosticPipeline::GetStatus() const noexcept {
+Status DiagnosticPipeline::WriterContext::GetStatus() const noexcept {
     std::lock_guard lock(mutex_);
-    return status_;
+    return frozen_ ? closed_status_ : status_;
+}
+
+DiagnosticPipeline::DiagnosticPipeline() : context_(std::make_shared<WriterContext>()) {}
+DiagnosticPipeline::~DiagnosticPipeline() { Close(); }
+std::string_view DiagnosticPipeline::run_id() const noexcept { return context_->run_id(); }
+bool DiagnosticPipeline::TryEmit(Event event) noexcept { return context_->TryEmit(event); }
+void DiagnosticPipeline::OpenDiagnosticWindow(std::chrono::milliseconds d) noexcept { context_->OpenDiagnosticWindow(d); }
+bool DiagnosticPipeline::DiagnosticWindowActive() noexcept { return context_->DiagnosticWindowActive(); }
+std::chrono::milliseconds DiagnosticPipeline::DiagnosticWindowRemaining() const noexcept { return context_->DiagnosticWindowRemaining(); }
+void DiagnosticPipeline::SetMirror(Mirror mirror) { context_->SetMirror(std::move(mirror)); }
+void DiagnosticPipeline::SetRetentionEnabled(bool e) noexcept { context_->SetRetentionEnabled(e); }
+void DiagnosticPipeline::PauseProductionForBenchmark(std::chrono::milliseconds d) noexcept { context_->PauseProductionForBenchmark(d); }
+bool DiagnosticPipeline::ProductionPausedForBenchmark() const noexcept { return context_->ProductionPausedForBenchmark(); }
+std::uint64_t DiagnosticPipeline::BenchmarkSuppressed() const noexcept { return context_->BenchmarkSuppressed(); }
+void DiagnosticPipeline::CountSuppressed() noexcept { context_->CountSuppressed(); }
+void DiagnosticPipeline::RetryNow() noexcept { context_->RetryNow(); }
+Status DiagnosticPipeline::GetStatus() const noexcept { return context_->GetStatus(); }
+
+bool DiagnosticPipeline::StartWriter(std::filesystem::path root) {
+    std::lock_guard close_lock(close_mutex_);
+    const auto& c = context_;
+    std::lock_guard lock(c->mutex_);
+    if (c->started_ || c->stopping_ || root.empty()) return false;
+    writer_ = std::thread([context = c, root = std::move(root)]() mutable {
+        context->Run(std::move(root));
+    });
+    c->started_ = true;
+    c->wake_.notify_one();
+    return true;
+}
+
+DrainResult DiagnosticPipeline::Close(ShutdownReason reason) noexcept {
+    std::lock_guard close_lock(close_mutex_);
+    const auto& c = context_;
+    std::shared_ptr<const Mirror> retired_mirror;
+    {
+        std::lock_guard lock(c->mutex_);
+        if (c->stopping_) return c->frozen_ ? DrainResult::TimedOut : c->drain_result_;
+    }
+    c->TryEmit(Event::Stopping(reason));
+    std::unique_lock lock(c->mutex_);
+    c->status_.accepting = false;
+    c->stopping_ = true;
+    c->wake_.notify_all();
+    if (!c->started_) {
+        c->status_.dropped_critical += c->critical_count_;
+        c->status_.dropped_ordinary += c->ordinary_count_;
+        c->critical_count_ = c->ordinary_count_ = 0;
+        c->status_.pending = 0;
+        c->drain_result_ = DrainResult::Failed;
+    } else if (!c->writer_done_.wait_for(lock, std::chrono::seconds(5),
+                                        [&] { return c->writer_finished_; })) {
+        // Keep callback captures in the context: their destructors also belong
+        // to the late worker, not to this bounded return path.
+        c->abort_.store(true, std::memory_order_release);
+        c->drain_result_ = DrainResult::TimedOut;
+        c->status_.sink_available = false;
+        c->closed_status_ = c->status_;
+        c->frozen_ = true;
+        lock.unlock();
+        c->wake_.notify_all();
+        // No cancellation/cleanup call here may make the caller wait for I/O.
+        // The worker alone owns its sink and stack buffers until it unwinds.
+        writer_.detach();
+        return DrainResult::TimedOut;
+    }
+    retired_mirror.swap(c->mirror_);
+    const auto result = c->drain_result_;
+    lock.unlock();
+    if (writer_.joinable()) writer_.join();
+    return result;
 }
 
 } // namespace livekit::diagnostic

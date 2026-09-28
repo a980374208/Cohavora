@@ -7,6 +7,7 @@
 #include <cwchar>
 #include <cwctype>
 #include <memory>
+#include <limits>
 #include <system_error>
 #include <vector>
 
@@ -39,6 +40,102 @@ bool IsOwnedRun(const std::filesystem::path& path) {
 }
 
 #if defined(_WIN32)
+bool ReadActualFileSize(const std::filesystem::path& path,
+                        std::uint64_t& bytes) noexcept {
+    const auto file = CreateFileW(path.c_str(), FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    LARGE_INTEGER size{};
+    const bool success = GetFileSizeEx(file, &size) && size.QuadPart >= 0;
+    CloseHandle(file);
+    if (success) bytes = static_cast<std::uint64_t>(size.QuadPart);
+    return success;
+}
+
+enum class QuotaScan { WithinLimit, ReclaimRequired, Failed };
+
+// Called with the quota mutex held. Closed history uses enumeration metadata;
+// live files require a fresh size query (NTFS directory sizes may lag appends).
+// Recompute at segment admission; same-segment appends deliberately skip quota
+// checks. There is no shared usage estimate or reserved space to recover.
+QuotaScan ScanQuotaUsage(const std::filesystem::path& root,
+                        const std::filesystem::path& current_run,
+                        std::uint32_t segment_index,
+                        std::uint64_t limit, const std::atomic<bool>* abandoned) {
+    struct Leases {
+        std::vector<HANDLE> handles;
+        ~Leases() { for (auto h : handles) CloseHandle(h); }
+    } leases;
+    FILETIME now{};
+    GetSystemTimeAsFileTime(&now);
+    const auto ticks = [](FILETIME t) {
+        return (std::uint64_t(t.dwHighDateTime) << 32) | t.dwLowDateTime;
+    };
+    const auto expiry = ticks(now) - 7ULL * 24 * 60 * 60 * 10000000;
+    wchar_t current_name[32]{};
+    std::swprintf(current_name, 32, L"segment-%06u.jsonl", segment_index);
+    std::uint64_t total = 0;
+    std::size_t reclaimable = 0;
+    std::error_code error;
+    for (std::filesystem::directory_iterator runs(root, error), end;
+         !error && runs != end; runs.increment(error)) {
+        if (!runs->is_directory(error) || error || !IsOwnedRun(runs->path()) ||
+            runs->is_symlink(error)) {
+            error.clear();
+            continue;
+        }
+        if (abandoned && abandoned->load(std::memory_order_acquire)) return QuotaScan::Failed;
+        const bool own = runs->path() == current_run;
+        bool active = own;
+        if (!own) {
+            auto lease = CreateFileW((runs->path() / L"active.lock").c_str(),
+                GENERIC_READ, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (lease == INVALID_HANDLE_VALUE) active = true;
+            else {
+                auto guard = std::unique_ptr<void, decltype(&CloseHandle)>(lease, &CloseHandle);
+                leases.handles.push_back(lease);
+                guard.release();
+            }
+        }
+        WIN32_FIND_DATAW entry{};
+        const auto find = FindFirstFileExW((runs->path() / L"*").c_str(),
+            FindExInfoBasic, &entry, FindExSearchNameMatch, nullptr, 0);
+        if (find == INVALID_HANDLE_VALUE)
+            return GetLastError() == ERROR_FILE_NOT_FOUND
+                ? QuotaScan::ReclaimRequired : QuotaScan::Failed;
+        const auto close_find = std::unique_ptr<void, decltype(&FindClose)>(find, &FindClose);
+        do {
+            if (abandoned && abandoned->load(std::memory_order_acquire)) return QuotaScan::Failed;
+            const std::wstring_view name(entry.cFileName);
+            if (name.size() != 20 || !name.starts_with(L"segment-") ||
+                !name.ends_with(L".jsonl") ||
+                !std::all_of(name.begin() + 8, name.begin() + 14,
+                    [](wchar_t c) { return c >= L'0' && c <= L'9'; })) continue;
+            // Let the existing slow path apply its file-type policy to any
+            // reparse points rather than trusting enumerated target metadata.
+            if (entry.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)
+                return QuotaScan::ReclaimRequired;
+            if (entry.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            std::uint64_t bytes = (std::uint64_t(entry.nFileSizeHigh) << 32) |
+                                  entry.nFileSizeLow;
+            if (active) {
+                if (!ReadActualFileSize(runs->path() / entry.cFileName, bytes))
+                    return QuotaScan::Failed;
+            }
+            if (bytes > limit - total) return QuotaScan::ReclaimRequired;
+            total += bytes;
+            if ((!active || own) && !(own && name == current_name)) {
+                if (++reclaimable > 1024) return QuotaScan::Failed;
+                if (ticks(entry.ftLastWriteTime) < expiry)
+                    return QuotaScan::ReclaimRequired;
+            }
+        } while (FindNextFileW(find, &entry));
+        if (GetLastError() != ERROR_NO_MORE_FILES) return QuotaScan::Failed;
+    }
+    return error ? QuotaScan::Failed : QuotaScan::WithinLimit;
+}
+
 bool IsPrivateDirectory(const std::filesystem::path& path) {
     PSID owner = nullptr;
     PACL acl = nullptr;
@@ -111,8 +208,9 @@ void AddContext(nlohmann::json& value, const Context& context) {
 } // namespace
 
 DiagnosticFileSink::DiagnosticFileSink(std::filesystem::path root,
-                                       std::string run_id)
-    : root_(std::move(root)),
+                                       std::string run_id,
+                                       const std::atomic<bool>* abandoned)
+    : abandoned_(abandoned), root_(std::move(root)),
       run_directory_(root_ / ("run-" + run_id)),
       valid_run_id_(IsRunId(run_id)) {}
 
@@ -217,6 +315,7 @@ DiagnosticClearResult DiagnosticFileSink::ClearInactiveHistory(
 
 bool DiagnosticFileSink::OpenSegment() noexcept {
     try {
+        if (Stopped()) return false;
         if (!valid_run_id_) {
             failure_reason_ = FailureReason::DirectoryUnavailable;
             return false;
@@ -238,6 +337,7 @@ bool DiagnosticFileSink::OpenSegment() noexcept {
             return false;
         }
 #endif
+        if (Stopped()) return false;
         std::filesystem::create_directories(run_directory_, error);
         if (error) {
             failure_reason_ = FailureReason::DirectoryUnavailable;
@@ -248,6 +348,7 @@ bool DiagnosticFileSink::OpenSegment() noexcept {
             failure_reason_ = FailureReason::DirectoryUnavailable;
             return false;
         }
+        if (Stopped()) return false;
         if (!run_lease_) {
             const auto lease_path = run_directory_ / L"active.lock";
             auto handle = CreateFileW(lease_path.c_str(), GENERIC_READ, 0, nullptr,
@@ -262,15 +363,48 @@ bool DiagnosticFileSink::OpenSegment() noexcept {
         char name[32]{};
         std::snprintf(name, sizeof(name), "segment-%06u.jsonl", segment_index_);
         const auto path = run_directory_ / name;
+        if (Stopped()) return false;
+#if defined(_WIN32)
+        auto file = CreateFileW(path.c_str(), FILE_APPEND_DATA | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (file == INVALID_HANDLE_VALUE) {
+            failure_reason_ = FailureReason::OpenFailed;
+            return false;
+        }
+        file_ = file;
+        quota_checked_segment_ = false;
+        if (Stopped()) { CloseSegment(); return false; }
+        std::uint64_t size = 0;
+        if (!read_size_(file_, size)) {
+            CloseSegment();
+            failure_reason_ = FailureReason::DirectoryUnavailable;
+            return false;
+        }
+        segment_bytes_ = size;
+        if (Stopped()) { CloseSegment(); return false; }
+#else
         output_.open(path, std::ios::binary | std::ios::app);
         if (!output_) {
             failure_reason_ = FailureReason::OpenFailed;
             output_.clear();
             return false;
         }
-        segment_bytes_ = std::filesystem::file_size(path, error);
-        if (error) segment_bytes_ = 0;
-        last_flush_ = std::chrono::steady_clock::now();
+        quota_checked_segment_ = false;
+        // Query the opened stream itself, not a separately resolved pathname.
+        // app only guarantees seeking before writes, so explicitly seek here.
+        output_.seekp(0, std::ios::end);
+        const auto size = static_cast<std::streamoff>(output_.tellp());
+        if (!output_ || size < 0) {
+            // An open stream is not an admitted segment. Never let a retry
+            // bypass this failed size query by finding output_ still open.
+            output_.close();
+            output_.clear();
+            failure_reason_ = FailureReason::DirectoryUnavailable;
+            return false;
+        }
+        segment_bytes_ = static_cast<std::uint64_t>(size);
+#endif
         return true;
     } catch (...) {
         failure_reason_ = FailureReason::DirectoryUnavailable;
@@ -280,6 +414,21 @@ bool DiagnosticFileSink::OpenSegment() noexcept {
 
 bool DiagnosticFileSink::CheckQuota(std::uint64_t incoming_bytes) noexcept {
     try {
+        if (Stopped()) return false;
+        if (incoming_bytes > kTotalBytes) {
+            failure_reason_ = FailureReason::QuotaExceeded;
+            return false;
+        }
+#if defined(_WIN32)
+        const auto scan = ScanQuotaUsage(root_, run_directory_, segment_index_,
+                                        kTotalBytes - incoming_bytes, abandoned_);
+        if (Stopped()) return false;
+        if (scan == QuotaScan::WithinLimit) return true;
+        if (scan == QuotaScan::Failed) {
+            failure_reason_ = FailureReason::DirectoryUnavailable;
+            return false;
+        }
+#endif
         struct Segment {
             std::filesystem::path path;
             std::uint64_t bytes;
@@ -309,6 +458,7 @@ bool DiagnosticFileSink::CheckQuota(std::uint64_t incoming_bytes) noexcept {
                 error.clear();
                 continue;
             }
+            if (Stopped()) return false;
             bool active = runs->path() == run_directory_;
 #if defined(_WIN32)
             if (!active) {
@@ -321,10 +471,26 @@ bool DiagnosticFileSink::CheckQuota(std::uint64_t incoming_bytes) noexcept {
 #endif
             for (std::filesystem::directory_iterator files(runs->path(), error);
                  !error && files != end; files.increment(error)) {
+                if (Stopped()) return false;
                 if (files->is_regular_file(error) && !files->is_symlink(error) && !error &&
                     IsOwnedSegment(files->path())) {
-                    const auto bytes = files->file_size(error);
-                    if (error) break;
+                    std::uint64_t bytes = 0;
+#if defined(_WIN32)
+                    if (active) {
+                        if (!ReadActualFileSize(files->path(), bytes)) {
+                            failure_reason_ = FailureReason::DirectoryUnavailable;
+                            return false;
+                        }
+                    } else
+#endif
+                    {
+                        bytes = files->file_size(error);
+                        if (error) break;
+                    }
+                    if (bytes > (std::numeric_limits<std::uint64_t>::max)() - total) {
+                        failure_reason_ = FailureReason::DirectoryUnavailable;
+                        return false;
+                    }
                     total += bytes;
                     if (!active || runs->path() == run_directory_) {
                         if (files->path() != current_path) {
@@ -355,6 +521,7 @@ bool DiagnosticFileSink::CheckQuota(std::uint64_t incoming_bytes) noexcept {
         for (const auto& segment : reclaimable) {
             if (segment.modified >= expiry &&
                 total <= kTotalBytes - incoming_bytes) break;
+            if (Stopped()) return false;
             std::filesystem::remove(segment.path, error);
             if (error) {
                 failure_reason_ = FailureReason::DirectoryUnavailable;
@@ -607,68 +774,157 @@ std::string DiagnosticFileSink::Serialize(const Event& event) const {
 }
 
 bool DiagnosticFileSink::Write(const Event& event) noexcept {
+    return WriteBatch(std::span<const Event>(&event, 1)) == 1;
+}
+
+std::size_t DiagnosticFileSink::WriteBatch(std::span<const Event> events) noexcept {
+    std::size_t committed = 0;
     try {
-        if (!IsValidEvent(event)) {
+        if (events.size() > 64) {
             failure_reason_ = FailureReason::WriteFailed;
-            return false;
+            return 0;
         }
-        auto line = Serialize(event);
-        if (line.size() > kMaximumEventBytes) {
-            failure_reason_ = FailureReason::WriteFailed;
-            return false;
+        std::vector<std::string> lines;
+        lines.reserve(events.size());
+        for (const auto& event : events) {
+            if (!IsValidEvent(event)) {
+                failure_reason_ = FailureReason::WriteFailed;
+                return 0;
+            }
+            auto line = Serialize(event);
+            if (line.size() > kMaximumEventBytes) {
+                failure_reason_ = FailureReason::WriteFailed;
+                return 0;
+            }
+            lines.push_back(std::move(line));
         }
-        if (!output_.is_open() && !OpenSegment()) return false;
-        if (segment_bytes_ + line.size() > kSegmentBytes) {
-            if (!Flush()) return false;
-            output_.close();
-            ++segment_index_;
-            if (!OpenSegment()) return false;
+        while (committed < events.size()) {
+            if (Stopped()) return committed;
+            if (!IsOpen() && !OpenSegment()) return committed;
+            if (Stopped()) return committed;
+            if (segment_bytes_ + lines[committed].size() > kSegmentBytes) {
+                if (!Flush()) return committed;
+                CloseSegment();
+                ++segment_index_;
+                if (!OpenSegment()) return committed;
+            }
+            std::string payload;
+            auto end = committed;
+            while (end < lines.size() &&
+                   segment_bytes_ + payload.size() + lines[end].size() <= kSegmentBytes)
+                payload += lines[end++];
+            if (!quota_checked_segment_) {
+                if (Stopped() || !LockQuota()) return committed;
+                struct Unlock {
+                    DiagnosticFileSink& sink;
+                    ~Unlock() { sink.UnlockQuota(); }
+                } unlock{*this};
+                if (Stopped() || !CheckQuota(payload.size()) || Stopped()) return committed;
+                quota_checked_segment_ = true;
+            } // Never hold the root mutex across data writes or flushes.
+            if (Stopped()) return committed;
+#if defined(_WIN32)
+            std::size_t offset = 0;
+            while (offset < payload.size()) {
+                if (Stopped()) return committed;
+                std::uint32_t written = 0;
+                const auto remaining = static_cast<std::uint32_t>(payload.size() - offset);
+                if (!write_(file_, payload.data() + offset, remaining, written) ||
+                    written == 0 || written > remaining) {
+                    failure_reason_ = FailureReason::WriteFailed;
+                    CloseSegment();
+                    ++segment_index_;
+                    return committed;
+                }
+                offset += written;
+            }
+#else
+            output_.write(payload.data(), static_cast<std::streamsize>(payload.size()));
+            if (!output_) {
+                failure_reason_ = FailureReason::WriteFailed;
+                CloseSegment();
+                ++segment_index_;
+                return committed;
+            }
+#endif
+            if (Stopped()) return committed;
+            segment_bytes_ += payload.size();
+            last_written_sequence_ = events[end - 1].event_sequence;
+            if (!Flush()) return committed;
+            committed = end;
         }
-        if (!LockQuota()) return false;
-        const bool quota_ok = CheckQuota(line.size());
-        if (!quota_ok) {
-            UnlockQuota();
-            return false;
-        }
-        output_.write(line.data(), static_cast<std::streamsize>(line.size()));
-        if (!output_) {
-            UnlockQuota();
-            failure_reason_ = FailureReason::WriteFailed;
-            output_.close();
-            ++segment_index_;
-            return false;
-        }
-        segment_bytes_ += line.size();
-        last_written_sequence_ = event.event_sequence;
-        const bool flushed = Flush();
-        UnlockQuota();
-        if (!flushed) return false;
         failure_reason_ = FailureReason::Unknown;
-        return true;
+        return committed;
     } catch (...) {
         failure_reason_ = FailureReason::WriteFailed;
-        return false;
+        return committed;
     }
 }
 
+bool DiagnosticFileSink::Stopped() const noexcept {
+    return abandoned_ && abandoned_->load(std::memory_order_acquire);
+}
+
+bool DiagnosticFileSink::IsOpen() const noexcept {
+#if defined(_WIN32)
+    return file_ != nullptr;
+#else
+    return output_.is_open();
+#endif
+}
+
+void DiagnosticFileSink::CloseSegment() noexcept {
+#if defined(_WIN32)
+    if (file_) CloseHandle(static_cast<HANDLE>(file_));
+    file_ = nullptr;
+#else
+    if (output_.is_open()) output_.close();
+    output_.clear();
+#endif
+    quota_checked_segment_ = false;
+}
+
+#if defined(_WIN32)
+bool DiagnosticFileSink::NativeSize(void* file, std::uint64_t& bytes) noexcept {
+    LARGE_INTEGER size{};
+    if (!GetFileSizeEx(static_cast<HANDLE>(file), &size) || size.QuadPart < 0) return false;
+    bytes = static_cast<std::uint64_t>(size.QuadPart);
+    return true;
+}
+
+bool DiagnosticFileSink::NativeWrite(void* file, const char* data,
+        std::uint32_t size, std::uint32_t& written) noexcept {
+    DWORD count = 0;
+    const bool ok = WriteFile(static_cast<HANDLE>(file), data, size, &count, nullptr) != FALSE;
+    written = count;
+    return ok;
+}
+#endif
+
 bool DiagnosticFileSink::Flush() noexcept {
-    if (!output_.is_open()) return true;
+    if (Stopped()) return false;
+    if (!IsOpen()) return true;
+#if !defined(_WIN32)
     output_.flush();
     if (!output_) {
         failure_reason_ = FailureReason::FlushFailed;
-        output_.close();
+        CloseSegment();
         ++segment_index_;
         return false;
     }
+#endif
+    // Windows WriteFile already drained our user-space buffer. Do not add
+    // FlushFileBuffers: previous ostream::flush did not promise disk durability.
     last_committed_sequence_ = last_written_sequence_;
-    last_flush_ = std::chrono::steady_clock::now();
     failure_reason_ = FailureReason::Unknown;
     return true;
 }
 
 void DiagnosticFileSink::Close() noexcept {
-    Flush();
-    if (output_.is_open()) output_.close();
+#if !defined(_WIN32)
+    if (!Stopped()) Flush();
+#endif
+    CloseSegment();
 }
 
 } // namespace livekit::diagnostic

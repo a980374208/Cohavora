@@ -1,3 +1,4 @@
+#include "src/core/session_shutdown_service.h"
 #include "src/ui/telemetry_dialogs.h"
 
 #include "src/telemetry/telemetry_report.h"
@@ -556,8 +557,9 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 			const auto id = selected->data(Qt::UserRole).toString().toStdString();
 			clearButton->setEnabled(false);
 			const QPointer<QListWidget> guard(reports);
-			store->ClearReport(id, [guard, id](bool removed, std::string) {
-				QMetaObject::invokeMethod(qApp, [guard, id, removed] {
+			const auto dispatcher = OpenMeeting::detail::QtDispatchEndpoint::Create();
+			store->ClearReport(id, [dispatcher, guard, id](bool removed, std::string) {
+				if (dispatcher) dispatcher->Post( [guard, id, removed] {
 					if (!guard || !removed) return;
 					for (auto row = 0; row != guard->count(); ++row) {
 						if (guard->item(row)->data(Qt::UserRole).toString().toStdString() == id) {
@@ -565,7 +567,7 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 							break;
 						}
 					}
-				}, Qt::QueuedConnection);
+				});
 			});
 		});
 	QObject::connect(exportButton, &QPushButton::clicked, dialog, [store, dialog, reports] {
@@ -601,10 +603,11 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 		const QPointer<QProgressDialog> progressGuard(progress);
 		QObject::connect(progress, &QProgressDialog::canceled, progress,
 			[cancelled] { cancelled->store(true, std::memory_order_release); });
+		const auto dispatcher = OpenMeeting::detail::QtDispatchEndpoint::Create();
 		if (!store->ExportReport(recordId,
 				std::filesystem::path(destination.toStdWString()),
-				[guard, progressGuard](livekit::telemetry::TelemetryExportResult result) {
-					QMetaObject::invokeMethod(qApp, [guard, progressGuard, result = std::move(result)] {
+				[dispatcher, guard, progressGuard](livekit::telemetry::TelemetryExportResult result) {
+					if (dispatcher) dispatcher->Post( [guard, progressGuard, result = std::move(result)] {
 						if (progressGuard) progressGuard->close();
 						if (!guard) return;
 						QMessageBox message(guard);
@@ -620,7 +623,7 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 						if (auto *dismiss = message.button(QMessageBox::Ok))
 							dismiss->setObjectName(QStringLiteral("meetingTelemetryExportDismiss"));
 						message.exec();
-					}, Qt::QueuedConnection);
+					});
 				}, cancelled)) {
 			progress->close();
 			QMessageBox::warning(

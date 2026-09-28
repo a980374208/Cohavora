@@ -11,6 +11,14 @@
 
 namespace livekit::telemetry {
 
+namespace { std::atomic<bool> fine_render_statistics_enabled{false}; }
+void SetFineRenderStatisticsEnabled(bool enabled) noexcept {
+    fine_render_statistics_enabled.store(enabled, std::memory_order_relaxed);
+}
+bool FineRenderStatisticsEnabled() noexcept {
+    return fine_render_statistics_enabled.load(std::memory_order_relaxed);
+}
+
 namespace {
 
 std::int64_t ToNanoseconds(SessionTelemetry::Clock::time_point value) {
@@ -695,7 +703,8 @@ bool SessionTelemetry::RecordRemoteVideoRenderSubmit(
             1, std::memory_order_relaxed);
         const auto fine_bucket = static_cast<std::size_t>((std::min)(
             std::int64_t{1000}, interval / 1'000'000 + (interval % 1'000'000 != 0)));
-        probe->fine_interval_histogram[fine_bucket].fetch_add(1, std::memory_order_relaxed);
+        if (probe->fine_interval_histogram)
+            (*probe->fine_interval_histogram)[fine_bucket].fetch_add(1, std::memory_order_relaxed);
         if (probe->continuous_video) {
             const auto threshold = (std::max)(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2341,7 +2350,7 @@ void SessionTelemetry::UpdateRenderAvailabilityOnStrand(Clock::time_point now) {
     std::int64_t maximum_interval_ns = 0;
     std::array<std::uint64_t,
         RenderActivityProbe::kIntervalHistogramBuckets> interval_histogram{};
-    state_.render_fine_interval_histogram.fill(0);
+    state_.render_fine_interval_histogram.clear();
     std::int64_t frame_age_sum_ns = 0;
     std::int64_t maximum_frame_age_ns = 0;
     std::uint64_t frame_age_count = 0;
@@ -2397,9 +2406,12 @@ void SessionTelemetry::UpdateRenderAvailabilityOnStrand(Clock::time_point now) {
             interval_histogram[i] += probe.interval_histogram[i].load(
                 std::memory_order_relaxed);
         }
-        for (std::size_t i = 0; i < state_.render_fine_interval_histogram.size(); ++i)
-            state_.render_fine_interval_histogram[i] +=
-                probe.fine_interval_histogram[i].load(std::memory_order_relaxed);
+        if (probe.fine_interval_histogram) {
+            state_.render_fine_interval_histogram.resize(RenderActivityProbe::kFineIntervalHistogramBuckets);
+            for (std::size_t i = 0; i < state_.render_fine_interval_histogram.size(); ++i)
+                state_.render_fine_interval_histogram[i] +=
+                    (*probe.fine_interval_histogram)[i].load(std::memory_order_relaxed);
+        }
         frame_age_sum_ns += probe.frame_age_sum_ns.load(std::memory_order_relaxed);
         frame_age_count += probe.frame_age_count.load(std::memory_order_relaxed);
         maximum_frame_age_ns = (std::max)(maximum_frame_age_ns,

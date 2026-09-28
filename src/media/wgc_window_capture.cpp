@@ -1,4 +1,5 @@
 #include "wgc_window_capture.h"
+#include "desktop_frame_buffer_pool.h"
 #include "modules/desktop_capture/desktop_frame.h"
 #include "modules/desktop_capture/shared_desktop_frame.h"
 #include "modules/desktop_capture/desktop_capture_types.h"
@@ -75,9 +76,16 @@ public:
                 winrt::check_hresult(device_->CreateTexture2D(&description, nullptr, staging_.put()));
                 width_ = width; height_ = height;
             }
+            auto* output = buffers_.Acquire(webrtc::DesktopSize(width, height));
+            if (!output) {
+                // Both slots are pinned by readers. Drop this fresh frame
+                // without waiting for consumers or allocating spill buffers.
+                callback_->OnCaptureResult(latest_ ? Result::SUCCESS : Result::ERROR_TEMPORARY,
+                    latest_ ? latest_->Share() : nullptr);
+                return;
+            }
             D3D11_BOX box{0, 0, 0, static_cast<UINT>(width), static_cast<UINT>(height), 1};
             context_->CopySubresourceRegion(staging_.get(), 0, 0, 0, 0, texture.get(), 0, &box);
-            auto output = std::make_unique<webrtc::BasicDesktopFrame>(webrtc::DesktopSize(width, height));
             D3D11_MAPPED_SUBRESOURCE mapped{};
             winrt::check_hresult(context_->Map(staging_.get(), 0, D3D11_MAP_READ, 0, &mapped));
             for (int row = 0; row < height; ++row)
@@ -93,7 +101,7 @@ public:
                 pool_width_ = size.Width; pool_height_ = size.Height;
             }
             output->set_capturer_id(webrtc::DesktopCapturerId::kWgcCapturerWin);
-            latest_ = webrtc::SharedDesktopFrame::Wrap(std::move(output));
+            latest_ = output->Share();
             callback_->OnCaptureResult(Result::SUCCESS, latest_->Share());
         } catch (...) {
             Close();
@@ -146,6 +154,7 @@ private:
         }
         item_ = nullptr;
         latest_.reset();
+        buffers_.Clear();
         staging_ = nullptr;
         if (context_) { context_->ClearState(); context_->Flush(); }
         context_ = nullptr;
@@ -171,6 +180,7 @@ private:
     winrt::com_ptr<ID3D11DeviceContext> context_;
     winrt::com_ptr<ID3D11Texture2D> staging_;
     std::unique_ptr<webrtc::SharedDesktopFrame> latest_;
+    DesktopFrameBufferPool buffers_;
     int width_ = 0, height_ = 0, pool_width_ = 0, pool_height_ = 0;
 };
 }

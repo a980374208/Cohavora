@@ -18,11 +18,17 @@
 #include <QtGui/QClipboard>
 #include <QtGui/QIcon>
 #include <QtGui/QTextCursor>
+#include <QtGui/QTextBlock>
+#include <algorithm>
 #include <QtGui/QFont>
 #include <atomic>
 
 namespace {
 
+struct LogBlockId final : QTextBlockUserData {
+    explicit LogBlockId(quint64 value) : id(value) {}
+    quint64 id;
+};
 std::atomic<MeetingUI::MeetingLogConsoleWindow*> g_activeConsole{nullptr};
 
 QPointer<MeetingUI::MeetingLogConsoleWindow>& SingletonConsole() {
@@ -373,8 +379,7 @@ void MeetingLogConsoleWindow::offer(const std::shared_ptr<SharedQueue> &queue,
 
 std::function<void(const livekit::diagnostic::Event&)>
 MeetingLogConsoleWindow::diagnosticMirror() {
-	return [](const livekit::diagnostic::Event &event) {
-		const auto queue = sharedQueue();
+	return [queue = sharedQueue()](const livekit::diagnostic::Event &event) {
 		PendingEntry entry;
 		entry.category = event.kind == livekit::diagnostic::EventKind::SinkFailed
 			? LogCategory::Error : LogCategory::General;
@@ -432,8 +437,9 @@ MeetingLogConsoleWindow::diagnosticMirror() {
 	};
 }
 
-bool MeetingLogConsoleWindow::appendVisible(PendingEntry pending) {
+void MeetingLogConsoleWindow::appendVisible(PendingEntry pending) {
 	LogEntry entry;
+	entry.id = _nextEntryId++;
 	entry.timeStr = std::move(pending.timeStr);
 	entry.category = pending.category;
 	entry.tag = std::move(pending.tag);
@@ -456,20 +462,59 @@ bool MeetingLogConsoleWindow::appendVisible(PendingEntry pending) {
 		entry.sessionId.capacity() + entry.operationId.capacity());
 	_cacheBytes += entry.chargeBytes;
 	_logEntries.push_back(std::move(entry));
-	bool evicted_by_bytes = false;
 	while (_logEntries.size() > kMaxLogEntries || _cacheBytes > kMaxCacheBytes) {
-		if (_cacheBytes > kMaxCacheBytes) evicted_by_bytes = true;
 		_cacheBytes -= _logEntries.front().chargeBytes;
 		_logEntries.pop_front();
 	}
-	const auto &stored = _logEntries.back();
-	if (!evicted_by_bytes && matchesFilter(stored) && _logView) {
-		_logView->appendHtml(stored.formattedHtml);
-		++_visibleCount;
-		if (_autoScrollBox && _autoScrollBox->isChecked())
-			_logView->moveCursor(QTextCursor::End);
+	trimVisible();
+}
+
+// Block identity survives Qt's own block cap and multiline entries. Eviction
+// deletes only the expired prefix, never re-parses all retained HTML.
+void MeetingLogConsoleWindow::trimVisible() {
+	if (!_logView) return;
+	if (_logEntries.empty()) {
+		_logView->clear();
+		_visibleIds.clear();
+	} else {
+		auto block = _logView->document()->firstBlock();
+		while (block.isValid()) {
+			const auto *id = static_cast<LogBlockId*>(block.userData());
+			if (!id || id->id >= _logEntries.front().id) break;
+			block = block.next();
+		}
+		if (!block.isValid()) {
+			_logView->clear();
+			_visibleIds.clear();
+		} else if (block.position() > 0) {
+			const auto retainedId = static_cast<LogBlockId*>(block.userData())->id;
+			QTextCursor cursor(_logView->document());
+			cursor.setPosition(block.position(), QTextCursor::KeepAnchor);
+			cursor.removeSelectedText();
+			_logView->document()->firstBlock().setUserData(new LogBlockId(retainedId));
+		}
+		const auto *first = static_cast<LogBlockId*>(_logView->document()->firstBlock().userData());
+		if (first) while (!_visibleIds.empty() && _visibleIds.front() < first->id)
+			_visibleIds.pop_front();
 	}
-	return evicted_by_bytes;
+	_visibleCount = _visibleIds.size();
+}
+
+void MeetingLogConsoleWindow::renderVisible(QElapsedTimer &elapsed) {
+	if (!_logView) return;
+	auto it = std::lower_bound(_logEntries.begin(), _logEntries.end(), _nextVisibleId,
+		[](const LogEntry &entry, quint64 id) { return entry.id < id; });
+	for (int count = 0; it != _logEntries.end() && count < 128 && elapsed.elapsed() < 4; ++it, ++count) {
+		_nextVisibleId = it->id + 1;
+		if (!matchesFilter(*it)) continue;
+		_logView->appendHtml(it->formattedHtml);
+		for (auto block = _logView->document()->lastBlock(); block.isValid() && !block.userData(); block = block.previous())
+			block.setUserData(new LogBlockId(it->id));
+		_visibleIds.push_back(it->id);
+	}
+	trimVisible();
+	if (_autoScrollBox && _autoScrollBox->isChecked())
+		_logView->moveCursor(QTextCursor::End);
 }
 
 void MeetingLogConsoleWindow::drainPending() {
@@ -501,8 +546,7 @@ void MeetingLogConsoleWindow::drainPending() {
 	}
 	QElapsedTimer elapsed;
 	elapsed.start();
-	bool evicted = false;
-	for (int count = 0; count < 128 && elapsed.elapsed() < 4; ++count) {
+	for (int count = 0; count < 128 && elapsed.elapsed() < 2; ++count) {
 		PendingEntry entry;
 		{
 			std::lock_guard lock(_queue->mutex);
@@ -511,9 +555,9 @@ void MeetingLogConsoleWindow::drainPending() {
 			_queue->pendingBytes -= entry.chargeBytes;
 			_queue->pending.pop_front();
 		}
-		evicted |= appendVisible(std::move(entry));
+		appendVisible(std::move(entry));
 	}
-	if (evicted) rebuildLogView();
+	renderVisible(elapsed);
 	if (_statusLabel) {
 		quint64 dropped, pipelineDropped;
 		{
@@ -556,20 +600,13 @@ bool MeetingLogConsoleWindow::matchesFilter(const LogEntry &entry) const {
 
 void MeetingLogConsoleWindow::rebuildLogView() {
 	if (!_logView) return;
-
 	_logView->clear();
+	_visibleIds.clear();
 	_visibleCount = 0;
-
-	for (const auto &entry : _logEntries) {
-		if (matchesFilter(entry)) {
-			_logView->appendHtml(entry.formattedHtml);
-			++_visibleCount;
-		}
-	}
-
-	if (_autoScrollBox && _autoScrollBox->isChecked()) {
-		_logView->moveCursor(QTextCursor::End);
-	}
+	_nextVisibleId = _logEntries.empty() ? _nextEntryId : _logEntries.front().id;
+	QElapsedTimer elapsed;
+	elapsed.start();
+	renderVisible(elapsed); // Remaining work resumes on the regular drain timer.
 }
 
 QString MeetingLogConsoleWindow::formatLogHtml(const QString &timeStr, LogCategory category, const QString &tag, const QString &message, QString *outCatName) {
@@ -614,6 +651,8 @@ void MeetingLogConsoleWindow::clearLogs() {
 		_queue->pendingBytes = 0;
 	}
 	_logEntries.clear();
+	_visibleIds.clear();
+	_nextVisibleId = _nextEntryId;
 	_cacheBytes = 0;
 	_visibleCount = 0;
 	if (_logView) {
