@@ -649,6 +649,43 @@ void CheckpointAppendRetryAndIntegrity() {
     TEST_CHECK(!InspectTelemetryCheckpoint(terminal.report_directory).valid);
 }
 
+void MaximumSegmentHistoryRetainsIntegrity() {
+    TemporaryDirectory directory("cohavora-telemetry-max-segments");
+    const auto first = AppendTelemetryCheckpoint(directory.path(), {Record(1, false)});
+    TEST_CHECK(first.success);
+    const auto manifestPath = first.report_directory / "manifest.json";
+    auto manifest = nlohmann::json::parse(ReadAll(manifestPath));
+    auto& segments = manifest["segments"];
+    segments = nlohmann::json::array();
+    for (std::uint64_t revision = 1; revision <= 4096; ++revision) {
+        const auto payload = nlohmann::json{{"revision", revision},
+            {"session_generation", first.status.session_generation}}.dump() + "\n";
+        char name[48]{};
+        std::snprintf(name, sizeof(name), "segment-%020llu.jsonl",
+            static_cast<unsigned long long>(revision));
+        std::ofstream(first.report_directory / name, std::ios::binary) << payload;
+        segments.push_back({{"file", name}, {"first_revision", revision},
+            {"last_revision", revision}, {"record_count", 1},
+            {"size_bytes", payload.size()}, {"sha256", Sha256(payload)}});
+    }
+    manifest["record_count"] = 4096;
+    manifest["last_committed_revision"] = 4096;
+    TEST_CHECK(manifest.dump().size() < livekit::telemetry::kTelemetryCheckpointMaximumManifestBytes);
+    std::ofstream(manifestPath) << manifest.dump();
+    TEST_CHECK(InspectTelemetryCheckpoint(first.report_directory).valid);
+    TEST_CHECK(InspectTelemetryCheckpoint(first.report_directory).valid); // Warm all proofs.
+    const auto segment = first.report_directory / segments.back()["file"].get<std::string>();
+    const auto original = ReadAll(segment);
+    auto changed = original;
+    changed[changed.find("4096")] = '3'; // Same size, different hash.
+    const auto timestamp = std::filesystem::last_write_time(segment);
+    std::ofstream(segment, std::ios::binary | std::ios::trunc) << changed;
+    std::filesystem::last_write_time(segment, timestamp);
+    TEST_CHECK(InspectTelemetryCheckpoint(first.report_directory).reason == "segment_missing_or_corrupt");
+    std::ofstream(segment, std::ios::binary | std::ios::trunc) << original;
+    TEST_CHECK(InspectTelemetryCheckpoint(first.report_directory).valid);
+}
+
 void ManifestReplacementFailureKeepsCommittedRevision() {
     TemporaryDirectory directory("cohavora-telemetry-rename-failure");
     const auto root = directory.path() / "history";
@@ -1913,6 +1950,7 @@ int wmain(int argc, wchar_t** argv) {
     StoreCoalescesBucketsAndPreservesUnknownFiles();
     FailedAutomaticHistoryWriteCanRetrySameSession();
     CheckpointAppendRetryAndIntegrity();
+    MaximumSegmentHistoryRetainsIntegrity();
     ManifestReplacementFailureKeepsCommittedRevision();
     ManifestReplacementWaitsForTransientReader();
     PendingSessionsRecoverIndependently();
