@@ -155,6 +155,42 @@ Event Event::Issue(IssueCode code) noexcept {
     return event;
 }
 
+std::string_view SdpDescriptionName(SdpDescription value) noexcept {
+    constexpr std::string_view names[] = {"unknown", "offer", "answer"};
+    const auto index = static_cast<std::size_t>(value);
+    return index < std::size(names) ? names[index] : "unknown";
+}
+
+std::string_view SdpActionName(SdpAction value) noexcept {
+    constexpr std::string_view names[] = {"round", "create_offer", "create_answer", "set_local", "set_remote", "send_offer", "send_answer", "receive_offer", "receive_answer", "callback"};
+    const auto index = static_cast<std::size_t>(value);
+    return index < std::size(names) ? names[index] : "unknown";
+}
+
+std::string_view SdpPhaseName(SdpPhase value) noexcept {
+    constexpr std::string_view names[] = {"started", "completed", "failed", "cancelled", "rejected"};
+    const auto index = static_cast<std::size_t>(value);
+    return index < std::size(names) ? names[index] : "unknown";
+}
+
+std::string_view SdpRoleName(SdpRole value) noexcept {
+    constexpr std::string_view names[] = {"publisher", "subscriber"};
+    const auto index = static_cast<std::size_t>(value);
+    return index < std::size(names) ? names[index] : "unknown";
+}
+
+std::string_view SdpStateName(SdpState value) noexcept {
+    constexpr std::string_view names[] = {"unknown", "stable", "have_local_offer", "have_local_pranswer", "have_remote_offer", "have_remote_pranswer", "closed"};
+    const auto index = static_cast<std::size_t>(value);
+    return index < std::size(names) ? names[index] : "unknown";
+}
+
+std::string_view SdpReasonName(SdpReason value) noexcept {
+    constexpr std::string_view names[] = {"none", "rtc_error", "parse_error", "send_error", "generation_expired", "superseded", "timeout", "stopped", "unexpected_message"};
+    const auto index = static_cast<std::size_t>(value);
+    return index < std::size(names) ? names[index] : "unknown";
+}
+
 std::string_view EventName(EventKind kind) noexcept {
     switch (kind) {
     case EventKind::ProcessStarted: return "process.started";
@@ -201,6 +237,7 @@ std::string_view EventName(EventKind kind) noexcept {
     case EventKind::MeetingBackendNotificationCompleted: return "meeting.backend_notification.completed";
     case EventKind::SessionStopped: return "session.stopped";
     case EventKind::RtcSdpFailed: return "rtc.sdp.failed";
+    case EventKind::RtcSdpStep: return "rtc.sdp.step";
     case EventKind::RtcLifecycle: return "rtc.lifecycle";
     case EventKind::SignalMessageSummary: return "signal.message.summary";
     case EventKind::SignalIssue: return "signal.issue";
@@ -261,6 +298,7 @@ std::string_view ComponentName(EventKind kind) noexcept {
     case EventKind::ChatReceived:
     case EventKind::ChatSendTerminal:
     case EventKind::TransferTerminal: return "meeting_ui";
+    case EventKind::RtcSdpStep:
     case EventKind::RtcSdpFailed:
     case EventKind::RtcLifecycle: return "rtc";
     }
@@ -316,6 +354,12 @@ Severity EventSeverity(EventKind kind) noexcept {
 }
 
 Severity EventSeverity(const Event& event) noexcept {
+    if (event.kind == EventKind::RtcSdpStep) {
+        if (event.sdp_phase == SdpPhase::Failed) return Severity::Error;
+        if (event.sdp_phase == SdpPhase::Rejected || event.sdp_phase == SdpPhase::Cancelled)
+            return Severity::Warning;
+        return Severity::Info;
+    }
     if (event.kind == EventKind::ProcessIssue &&
         event.issue_code == IssueCode::QtFatal) return Severity::Fatal;
     if (event.kind == EventKind::MediaRecoveryTimeout) return Severity::Warning;
@@ -399,6 +443,7 @@ bool IsValidEvent(const Event& event) noexcept {
     case EventKind::MeetingLeaveRequested:
     case EventKind::MeetingBackendNotificationCompleted:
     case EventKind::SessionStopped:
+    case EventKind::RtcSdpStep:
     case EventKind::RtcSdpFailed:
     case EventKind::RtcLifecycle:
     case EventKind::SignalMessageSummary:
@@ -420,6 +465,11 @@ bool IsValidEvent(const Event& event) noexcept {
           !hex_id(event.previous_media_endpoint_id.View())) ||
          !event.context.has_recovery_epoch ||
          !event.context.has_room_generation)) return false;
+    if (event.kind == EventKind::RtcSdpStep &&
+        (event.context.operation_id.View().empty() || event.sdp_sequence == 0 || event.sdp_description > SdpDescription::Answer ||
+         event.sdp_action > SdpAction::Callback || event.sdp_phase > SdpPhase::Rejected ||
+         event.sdp_role > SdpRole::Subscriber || event.signaling_before > SdpState::Closed ||
+         event.signaling_after > SdpState::Closed || event.sdp_reason > SdpReason::UnexpectedMessage)) return false;
     return (!event.window_sample || event.kind == EventKind::SignalMessageSummary) &&
         event.http_status >= 0 && event.http_status <= 599 &&
         event.network_error >= 0 && event.network_error <= 1000 &&

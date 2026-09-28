@@ -1408,6 +1408,23 @@ void Room::SetDiagnosticContext(diagnostic::Context context) {
     diagnostic_context_ = context;
 }
 
+std::shared_ptr<diagnostic::SdpNegotiationTrace> Room::SdpTraceLocked(
+    diagnostic::SdpRole role, uint64_t generation, bool new_round, bool ice_restart) {
+    auto& current = role == diagnostic::SdpRole::Publisher
+        ? publisher_sdp_trace_ : subscriber_sdp_trace_;
+    if (current && !new_round) return current;
+    if (current) current->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::Superseded);
+    static std::atomic<uint64_t> next_round{0};
+    auto context = diagnostic_context_;
+    if (context.parent_operation_id.View().empty()) context.parent_operation_id = context.operation_id;
+    context.operation_id.Assign("sdp_" + std::to_string(++next_round));
+    context.room_generation = generation;
+    context.has_room_generation = true;
+    current = std::make_shared<diagnostic::SdpNegotiationTrace>(context, role, ice_restart);
+    if (!new_round) current->Finish(diagnostic::Outcome::Failure, diagnostic::SdpReason::UnexpectedMessage);
+    return current;
+}
+
 void Room::EmitDiagnostic(diagnostic::Event event) const noexcept {
     {
         std::lock_guard lock(room_mutex_);
@@ -4153,6 +4170,10 @@ Room::PendingOperationCleanup Room::TakePendingOperationsLocked() {
                                negotiation_waiters_.begin(),
                                negotiation_waiters_.end());
     negotiation_waiters_.clear();
+    if (publisher_sdp_trace_) publisher_sdp_trace_->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::Stopped);
+    if (subscriber_sdp_trace_) subscriber_sdp_trace_->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::Stopped);
+    publisher_sdp_trace_.reset();
+    subscriber_sdp_trace_.reset();
     negotiation_state_ = NegotiationState::Idle;
     for (const auto& [cid, state] : pending_track_publishes_) {
         pending.publish_states.push_back(state);
@@ -7009,9 +7030,19 @@ asio::awaitable<void> Room::NegotiatePublisherAsync(
                                      "publisher_negotiation");
     } catch (...) {
         std::lock_guard lock(room_mutex_);
+        // Completion/failure/cancellation removes waiters before waking them.
+        // A waiter still registered here expired in WaitAwaitable.
+        const bool timed_out = IsSignalGenerationCurrentLocked(generation) &&
+            std::find(negotiation_waiters_.begin(), negotiation_waiters_.end(), completion) != negotiation_waiters_.end();
         negotiation_waiters_.erase(
             std::remove(negotiation_waiters_.begin(), negotiation_waiters_.end(), completion),
             negotiation_waiters_.end());
+        if (timed_out && publisher_sdp_trace_) {
+            publisher_sdp_trace_->Record(diagnostic::SdpAction::Callback, diagnostic::SdpPhase::Failed,
+                diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown, diagnostic::SdpReason::Timeout);
+            if (negotiation_waiters_.empty())
+                publisher_sdp_trace_->Finish(diagnostic::Outcome::Timeout, diagnostic::SdpReason::Timeout);
+        }
         throw;
     }
 }
@@ -7048,6 +7079,7 @@ void Room::ExecuteNegotiatePublisher(uint64_t generation) {
     std::shared_ptr<SignalClient> client;
     bool ice_restart = false;
     bool unavailable = false;
+    std::shared_ptr<diagnostic::SdpNegotiationTrace> trace;
     {
         std::lock_guard lock(room_mutex_);
         if (!IsSignalGenerationCurrentLocked(generation)) return;
@@ -7088,12 +7120,22 @@ void Room::ExecuteNegotiatePublisher(uint64_t generation) {
         return;
     }
 
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(generation)) return;
+        trace = SdpTraceLocked(diagnostic::SdpRole::Publisher, generation, true, ice_restart);
+    }
     auto self = shared_from_this();
     WebRTCManager::Instance().CreateOffer(pub_pc, executor_,
-        [self, client, pub_pc, generation](const std::string& sdp, const std::string& err) {
+        [self, client, pub_pc, generation, trace](const std::string& sdp, const std::string& err) {
             {
                 std::lock_guard lock(self->room_mutex_);
-                if (!self->IsSignalGenerationCurrentLocked(generation)) return;
+                if (!self->IsSignalGenerationCurrentLocked(generation)) {
+                    trace->Record(diagnostic::SdpAction::Callback, diagnostic::SdpPhase::Rejected,
+                        diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown, diagnostic::SdpReason::GenerationExpired);
+                    trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
+                    return;
+                }
             }
             if (!err.empty()) {
                 self->Log("ERROR", "OFFER_FAIL", secure_log::OpaqueSummary("create_offer"));
@@ -7102,10 +7144,15 @@ void Room::ExecuteNegotiatePublisher(uint64_t generation) {
             }
 
             WebRTCManager::Instance().SetLocalDescription(pub_pc, "offer", sdp, self->executor_,
-                [self, client, pub_pc, sdp, generation](const std::string& set_local_err) {
+                [self, client, pub_pc, sdp, generation, trace](const std::string& set_local_err) {
                     {
                         std::lock_guard lock(self->room_mutex_);
-                        if (!self->IsSignalGenerationCurrentLocked(generation)) return;
+                        if (!self->IsSignalGenerationCurrentLocked(generation)) {
+                            trace->Record(diagnostic::SdpAction::Callback, diagnostic::SdpPhase::Rejected,
+                                diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown, diagnostic::SdpReason::GenerationExpired);
+                            trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
+                            return;
+                        }
                     }
                     if (!set_local_err.empty()) {
                         self->Log("ERROR", "LOCAL_DESC_FAIL",
@@ -7173,19 +7220,17 @@ void Room::ExecuteNegotiatePublisher(uint64_t generation) {
                             ", cid=" + MediaDiagnosticToken(cid));
                     }
 
-                    livekit::safe_co_spawn(self->executor_, [self, client, req = std::move(req), generation]() -> asio::awaitable<void> {
+                    livekit::safe_co_spawn(self->executor_, [self, client, req = std::move(req), generation, trace]() -> asio::awaitable<void> {
                         try {
-                            co_await client->SendAsync(req);
+                            co_await client->SendAsync(req, trace);
                         } catch (const std::exception& error) {
                             self->CompleteNegotiation(error.what(), generation);
                         }
                     });
-                    self->Log("SIGNAL", "SDP_OFFER_SENT",
-                              secure_log::SdpSummary("publisher_offer_sent", sdp));
                     LogSdpNegotiationDetails(
-                        *self, "SDP_OFFER_DETAIL", "publisher_offer_sent", sdp);
-                }, self->callback_gate_);
-        }, ice_restart, callback_gate_);
+                        *self, "SDP_OFFER_DETAIL", "publisher_offer_prepared", sdp);
+                }, self->callback_gate_, trace);
+        }, ice_restart, callback_gate_, trace);
 }
 
 void Room::SendPublishOffer() {
@@ -9106,6 +9151,7 @@ void Room::HandleOfferSignal(
         secure_log::SdpSummary("remote_offer_received", offer.sdp()));
     LogSdpNegotiationDetails(
         *this, "SDP_OFFER_DETAIL", "subscriber_offer_received", offer.sdp());
+    std::shared_ptr<diagnostic::SdpNegotiationTrace> trace;
     std::shared_ptr<SignalClient> client;
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
     {
@@ -9113,14 +9159,19 @@ void Room::HandleOfferSignal(
         if (!IsSignalGenerationCurrentLocked(event_generation)) return;
         client = signal_client_;
         pc = (offer.type() == "offer" && subscriber_pc_) ? subscriber_pc_ : publisher_pc_;
+        trace = SdpTraceLocked(pc == subscriber_pc_ ? diagnostic::SdpRole::Subscriber
+            : diagnostic::SdpRole::Publisher, event_generation, true);
+        trace->Record(diagnostic::SdpAction::ReceiveOffer, diagnostic::SdpPhase::Completed);
         
         if (client && client->is_single_pc_mode_active()) {
+            trace->Finish(diagnostic::Outcome::Failure, diagnostic::SdpReason::UnexpectedMessage);
             Log("WARNING", "UNEXPECTED_OFFER", "Ignoring server Offer in Single PC mode");
             return;
         }
     }
 
     if (!pc || !client) {
+        trace->Finish(diagnostic::Outcome::Failure, diagnostic::SdpReason::Stopped);
         Log("ERROR", "SDP_ERR", "HandleOfferSignal: PeerConnection or SignalClient is null");
         return;
     }
@@ -9129,10 +9180,15 @@ void Room::HandleOfferSignal(
         secure_log::SdpSummary("subscriber_offer_received", offer.sdp()));
     auto self = shared_from_this();
     WebRTCManager::Instance().SetRemoteDescription(pc, offer.type(), offer.sdp(), executor_,
-        [self, client, pc, event_generation](const std::string& set_remote_err) {
+        [self, client, pc, event_generation, trace](const std::string& set_remote_err) {
             {
                 std::lock_guard lock(self->room_mutex_);
-                if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
+                if (!self->IsSignalGenerationCurrentLocked(event_generation)) {
+                    trace->Record(diagnostic::SdpAction::Callback, diagnostic::SdpPhase::Rejected,
+                        diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown, diagnostic::SdpReason::GenerationExpired);
+                    trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
+                    return;
+                }
             }
             if (!set_remote_err.empty()) {
                 self->Log("ERROR", "SET_REMOTE_ERR",
@@ -9143,12 +9199,17 @@ void Room::HandleOfferSignal(
             self->Log("SIGNAL", "OFFER_APPLIED", "Server Offer applied. Generating SDP Answer...");
             self->ReconcileRemoteReceivers(pc, event_generation);
             WebRTCManager::Instance().CreateAnswer(pc, self->executor_,
-                [self, client, pc, event_generation](
+                [self, client, pc, event_generation, trace](
                     const std::string& sdp,
                     const std::string& create_ans_err) {
                     {
                         std::lock_guard lock(self->room_mutex_);
-                        if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
+                        if (!self->IsSignalGenerationCurrentLocked(event_generation)) {
+                            trace->Record(diagnostic::SdpAction::Callback, diagnostic::SdpPhase::Rejected,
+                                diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown, diagnostic::SdpReason::GenerationExpired);
+                            trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
+                            return;
+                        }
                     }
                     if (!create_ans_err.empty()) {
                         self->Log("ERROR", "CREATE_ANS_ERR",
@@ -9157,12 +9218,14 @@ void Room::HandleOfferSignal(
                     }
 
                     WebRTCManager::Instance().SetLocalDescription(pc, "answer", sdp, self->executor_,
-                        [self, client, pc, sdp, event_generation](
+                        [self, client, pc, sdp, event_generation, trace](
                             const std::string& set_local_err) {
                             {
                                 std::lock_guard lock(self->room_mutex_);
-                                if (!self->IsSignalGenerationCurrentLocked(
-                                        event_generation)) {
+                                if (!self->IsSignalGenerationCurrentLocked(event_generation)) {
+                                    trace->Record(diagnostic::SdpAction::Callback, diagnostic::SdpPhase::Rejected,
+                                        diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown, diagnostic::SdpReason::GenerationExpired);
+                                    trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
                                     return;
                                 }
                             }
@@ -9175,8 +9238,10 @@ void Room::HandleOfferSignal(
                             std::vector<PendingIceCandidate> pending_cands;
                             {
                                 std::lock_guard lock(self->room_mutex_);
-                                if (!self->IsSignalGenerationCurrentLocked(
-                                        event_generation)) {
+                                if (!self->IsSignalGenerationCurrentLocked(event_generation)) {
+                                    trace->Record(diagnostic::SdpAction::Callback, diagnostic::SdpPhase::Rejected,
+                                        diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown, diagnostic::SdpReason::GenerationExpired);
+                                    trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
                                     return;
                                 }
                                 pending_cands =
@@ -9187,11 +9252,9 @@ void Room::HandleOfferSignal(
                             auto* answer_msg = req.mutable_answer();
                             answer_msg->set_type("answer");
                             answer_msg->set_sdp(sdp);
-                            client->Send(req);
-                            self->Log("SIGNAL", "SDP_ANSWER_SENT",
-                                      secure_log::SdpSummary("subscriber_answer_sent", sdp));
+                            client->Send(req, trace);
                             LogSdpNegotiationDetails(
-                                *self, "SDP_ANSWER_DETAIL", "subscriber_answer_sent", sdp);
+                                *self, "SDP_ANSWER_DETAIL", "subscriber_answer_prepared", sdp);
 
                             // 重放暂存的 Subscriber 早期 ICE 候选
                             if (!pending_cands.empty()) {
@@ -9224,9 +9287,9 @@ void Room::HandleOfferSignal(
                                     self->PostRemoteTrack(t->receiver(), r_track, event_generation);
                                 }
                             }
-                        }, self->callback_gate_);
-                }, self->callback_gate_);
-        }, callback_gate_);
+                        }, self->callback_gate_, trace);
+                }, self->callback_gate_, trace);
+        }, callback_gate_, trace);
 }
 
 static std::vector<std::string> ExtractSdpMLines(const std::string& sdp) {
@@ -9271,11 +9334,24 @@ void Room::HandleAnswerSignal(
     if (single_pc) {
         Log("SIGNAL", "SDP_ANS_ROUTING", "Single PC mode: routing Answer to publisher_pc_");
         auto self = shared_from_this();
+        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace;
+        {
+            std::lock_guard lock(room_mutex_);
+            if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+            trace = SdpTraceLocked(diagnostic::SdpRole::Publisher, event_generation);
+            trace->Record(diagnostic::SdpAction::ReceiveAnswer, diagnostic::SdpPhase::Completed);
+        }
         WebRTCManager::Instance().SetRemoteDescription(pub_pc, "answer", answer.sdp(), executor_,
-            [self, pub_pc, event_generation](const std::string& err) {
+            [self, pub_pc, event_generation, trace](const std::string& err) {
                 {
                     std::lock_guard lock(self->room_mutex_);
-                    if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
+                    if (!self->IsSignalGenerationCurrentLocked(event_generation)) {
+                        trace->Record(diagnostic::SdpAction::Callback, diagnostic::SdpPhase::Rejected,
+                            diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown, diagnostic::SdpReason::GenerationExpired);
+                        trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
+                        return;
+                    }
+                    if (err.empty()) trace->Finish(diagnostic::Outcome::Success);
                 }
                 if (!err.empty()) {
                     self->Log("ERROR", "PUB_REMOTE_ERR",
@@ -9288,7 +9364,12 @@ void Room::HandleAnswerSignal(
                     bool need_retry = false;
                     {
                         std::lock_guard lock(self->room_mutex_);
-                        if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
+                        if (!self->IsSignalGenerationCurrentLocked(event_generation)) {
+                            trace->Record(diagnostic::SdpAction::Callback, diagnostic::SdpPhase::Rejected,
+                                diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown, diagnostic::SdpReason::GenerationExpired);
+                            trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
+                            return;
+                        }
                         self->subscriber_negotiating_ = false;
                         if (self->negotiation_state_ == NegotiationState::PendingRetry) {
                             self->negotiation_state_ = NegotiationState::InProgress;
@@ -9336,7 +9417,7 @@ void Room::HandleAnswerSignal(
                         }
                     }
                 }
-            }, callback_gate_);
+            }, callback_gate_, trace);
         return;
     }
 
@@ -9399,12 +9480,25 @@ void Room::HandleAnswerSignal(
         // Subscriber Answer: 服务端回应我们发出的 Subscriber Offer
         Log("SIGNAL", "SUB_ANS_RECV", "Subscriber SDP Answer received (" + std::to_string(answer.sdp().length()) + " bytes, m-lines=" + std::to_string(answer_mlines.size()) + "); applying to Subscriber PC...");
         auto self = shared_from_this();
+        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace;
+        {
+            std::lock_guard lock(room_mutex_);
+            if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+            trace = SdpTraceLocked(diagnostic::SdpRole::Subscriber, event_generation);
+            trace->Record(diagnostic::SdpAction::ReceiveAnswer, diagnostic::SdpPhase::Completed);
+        }
         WebRTCManager::Instance().SetRemoteDescription(sub_pc, answer.type(), answer.sdp(), executor_,
-            [self, sub_pc, answer_sdp = answer.sdp(), event_generation](const std::string& err) {
+            [self, sub_pc, answer_sdp = answer.sdp(), event_generation, trace](const std::string& err) {
                 std::vector<PendingIceCandidate> pending_cands;
                 {
                     std::lock_guard lock(self->room_mutex_);
-                    if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
+                    if (!self->IsSignalGenerationCurrentLocked(event_generation)) {
+                        trace->Record(diagnostic::SdpAction::Callback, diagnostic::SdpPhase::Rejected,
+                            diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown, diagnostic::SdpReason::GenerationExpired);
+                        trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
+                        return;
+                    }
+                    if (err.empty()) trace->Finish(diagnostic::Outcome::Success);
                     self->subscriber_negotiating_ = false;
                     if (err.empty()) {
                         pending_cands = std::move(self->pending_sub_ice_candidates_);
@@ -9442,20 +9536,33 @@ void Room::HandleAnswerSignal(
                         }
                     }
                 }
-            }, callback_gate_);
+            }, callback_gate_, trace);
         return;
     }
 
     // Publisher Answer
     Log("SIGNAL", "SDP_ANSWER_RECV", "Remote Publisher SDP Answer received (" + std::to_string(answer.sdp().length()) + " bytes, m-lines=" + std::to_string(answer_mlines.size()) + ")");
     auto self = shared_from_this();
+    std::shared_ptr<diagnostic::SdpNegotiationTrace> trace;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsSignalGenerationCurrentLocked(event_generation)) return;
+        trace = SdpTraceLocked(diagnostic::SdpRole::Publisher, event_generation);
+        trace->Record(diagnostic::SdpAction::ReceiveAnswer, diagnostic::SdpPhase::Completed);
+    }
     WebRTCManager::Instance().SetRemoteDescription(pub_pc, answer.type(), answer.sdp(), executor_,
-        [self, pub_pc, event_generation](const std::string& err) {
+        [self, pub_pc, event_generation, trace](const std::string& err) {
             bool need_retry = false;
             std::vector<PendingIceCandidate> pending_cands;
             {
                 std::lock_guard lock(self->room_mutex_);
-                if (!self->IsSignalGenerationCurrentLocked(event_generation)) return;
+                if (!self->IsSignalGenerationCurrentLocked(event_generation)) {
+                    trace->Record(diagnostic::SdpAction::Callback, diagnostic::SdpPhase::Rejected,
+                        diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown, diagnostic::SdpReason::GenerationExpired);
+                    trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
+                    return;
+                }
+                if (err.empty()) trace->Finish(diagnostic::Outcome::Success);
                 if (self->negotiation_state_ == NegotiationState::PendingRetry) {
                     self->negotiation_state_ = NegotiationState::InProgress;
                     need_retry = true;
@@ -9494,7 +9601,7 @@ void Room::HandleAnswerSignal(
             } else if (err.empty()) {
                 self->CompleteNegotiation("", event_generation);
             }
-        }, callback_gate_);
+        }, callback_gate_, trace);
 }
 
 void Room::HandleTrickleSignal(

@@ -1,3 +1,4 @@
+#include "telemetry/sdp_negotiation_trace.h"
 #include "signal_client.h"
 #include "region_provider.h"
 #include "safe_spawn.h"
@@ -372,7 +373,11 @@ static bool is_pass_through(const proto::SignalRequest& req) {
            req.has_ping_req();
 }
 
-void SignalClient::Send(const proto::SignalRequest& req) {
+void SignalClient::Send(const proto::SignalRequest& req,
+                        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace) {
+    // Optional instrumentation is used only by SDP pass-through messages.
+    if (!req.has_offer() && !req.has_answer()) trace.reset();
+    auto send_trace = trace ? std::make_shared<diagnostic::SdpSendTrace>(trace, req.has_answer()) : nullptr;
     bool pass = is_pass_through(req);
     bool reconnecting = reconnecting_.load(std::memory_order_acquire);
 
@@ -394,36 +399,48 @@ void SignalClient::Send(const proto::SignalRequest& req) {
 
     if (stream && stream->IsConnected()) {
         auto self = shared_from_this();
-        livekit::safe_co_spawn(executor_, [self, this, stream, req, pass]() -> asio::awaitable<void> {
+        livekit::safe_co_spawn(executor_, [self, this, stream, req, pass, send_trace]() -> asio::awaitable<void> {
             try {
-                co_await stream->Send(req);
+                co_await stream->Send(req, send_trace);
             } catch (...) {
+                if (send_trace) send_trace->Fail();
                 if (!pass) {
                     std::lock_guard<std::mutex> lock(queue_mutex_);
                     queued_requests_.push_back(req);
                 }
             }
         });
-    } else if (!pass) {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        queued_requests_.push_back(req);
+    } else {
+        if (send_trace) send_trace->Fail();
+        if (!pass) {
+            std::lock_guard<std::mutex> lock(queue_mutex_);
+            queued_requests_.push_back(req);
+        }
     }
 }
 
-asio::awaitable<void> SignalClient::SendAsync(const proto::SignalRequest& req) {
+asio::awaitable<void> SignalClient::SendAsync(const proto::SignalRequest& req,
+    std::shared_ptr<diagnostic::SdpNegotiationTrace> trace) {
+    auto send_trace = trace ? std::make_shared<diagnostic::SdpSendTrace>(trace, req.has_answer()) : nullptr;
     std::shared_ptr<SignalStream> stream;
     {
         std::shared_lock<std::shared_mutex> lock(stream_mutex_);
         stream = stream_;
     }
     if (!stream || !stream->IsConnected()) {
+        if (send_trace) send_trace->Fail();
         throw OperationError(OperationKind::Connect,
                              OperationErrorCode::SessionClosed,
                              "signal_send",
                              "signal stream is not connected",
                              true);
     }
-    co_await stream->Send(req);
+    try {
+        co_await stream->Send(req, send_trace);
+    } catch (...) {
+        if (send_trace) send_trace->Fail();
+        throw;
+    }
 }
 
 void SignalClient::SendUpdateTrackSettings(const std::string& track_sid,

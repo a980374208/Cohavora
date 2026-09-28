@@ -1,4 +1,5 @@
 #include "websocket_client.h"
+#include "telemetry/sdp_negotiation_trace.h"
 #include "safe_spawn.h"
 #include <random>
 #include <istream>
@@ -273,12 +274,13 @@ void WebSocketClient::StartRead() {
     });
 }
 
-asio::awaitable<void> WebSocketClient::SendBinary(std::vector<uint8_t> data) {
+asio::awaitable<void> WebSocketClient::SendBinary(std::vector<uint8_t> data,
+    std::shared_ptr<diagnostic::SdpSendTrace> trace) {
     auto self = shared_from_this();
     co_await asio::co_spawn(
         strand_,
-        [self, data = std::move(data)]() -> asio::awaitable<void> {
-            co_await self->SendRawFrame(0x2, data);
+        [self, data = std::move(data), trace = std::move(trace)]() -> asio::awaitable<void> {
+            co_await self->SendRawFrame(0x2, data, trace);
         },
         asio::use_awaitable);
 }
@@ -448,7 +450,8 @@ asio::awaitable<void> WebSocketClient::HandleFrame(uint8_t opcode, bool fin, std
     }
 }
 
-asio::awaitable<void> WebSocketClient::SendRawFrame(uint8_t opcode, const std::vector<uint8_t>& payload) {
+asio::awaitable<void> WebSocketClient::SendRawFrame(uint8_t opcode, const std::vector<uint8_t>& payload,
+    std::shared_ptr<diagnostic::SdpSendTrace> trace) {
     std::vector<uint8_t> frame;
     frame.reserve(10 + payload.size());
     
@@ -488,7 +491,7 @@ asio::awaitable<void> WebSocketClient::SendRawFrame(uint8_t opcode, const std::v
     bool should_spawn = false;
     {
         std::lock_guard<std::mutex> lock(write_mutex_);
-        msg = std::make_shared<QueuedMessage>(QueuedMessage{std::move(frame)});
+        msg = std::make_shared<QueuedMessage>(QueuedMessage{std::move(trace), std::move(frame)});
         write_queue_.push(msg);
         
         if (!writing_) {
@@ -507,19 +510,23 @@ asio::awaitable<void> WebSocketClient::SendRawFrame(uint8_t opcode, const std::v
 
 asio::awaitable<void> WebSocketClient::WriteLoop() {
     auto self = shared_from_this();
+    std::shared_ptr<QueuedMessage> msg;
     try {
         while (true) {
-            auto msg = PopWriteQueue();
+            msg = PopWriteQueue();
             if (!msg) {
                 break;
             }
             
             co_await async_write_stream(asio::buffer(msg->data));
+            if (msg->trace) msg->trace->Complete();
         }
     } catch (const std::system_error& e) {
+        if (msg && msg->trace) msg->trace->Fail();
         ResetWritingState();
         handle_error(e.code());
     } catch (...) {
+        if (msg && msg->trace) msg->trace->Fail();
         ResetWritingState();
         std::error_code ec = asio::error::operation_aborted;
         handle_error(ec);

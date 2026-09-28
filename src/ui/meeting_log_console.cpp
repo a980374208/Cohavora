@@ -461,6 +461,18 @@ MeetingLogConsoleWindow::diagnosticMirror() {
 			entry.message = QString::fromLatin1(
 				livekit::diagnostic::IssueCodeName(event.issue_code).data());
 			break;
+		case EventKind::RtcSdpStep:
+			entry.message = QStringLiteral("%1 %2 pc=%3 seq=%4 type=%5 state=%6->%7 reason=%8 late=%9 rtc_error=%10")
+				.arg(QString::fromLatin1(SdpActionName(event.sdp_action).data()))
+				.arg(QString::fromLatin1(SdpPhaseName(event.sdp_phase).data()))
+				.arg(QString::fromLatin1(SdpRoleName(event.sdp_role).data()))
+				.arg(event.sdp_sequence)
+				.arg(QString::fromLatin1(SdpDescriptionName(event.sdp_description).data()))
+				.arg(QString::fromLatin1(SdpStateName(event.signaling_before).data()))
+				.arg(QString::fromLatin1(SdpStateName(event.signaling_after).data()))
+				.arg(QString::fromLatin1(SdpReasonName(event.sdp_reason).data()))
+				.arg(event.sdp_after_terminal).arg(event.rtc_error_type);
+			break;
 		case EventKind::RtcLifecycle:
 			entry.message = QStringLiteral("status=%1").arg(QString::fromLatin1(RtcStatusName(event.rtc_status).data()));
 			break;

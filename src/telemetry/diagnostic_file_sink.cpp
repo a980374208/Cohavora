@@ -762,6 +762,19 @@ std::string DiagnosticFileSink::Serialize(const Event& event) const {
         if (event.kind == EventKind::DeviceCaptureTerminal)
             attributes["media_kind"] = MediaKindName(event.media_kind);
         break;
+    case EventKind::RtcSdpStep:
+        attributes["description_type"] = SdpDescriptionName(event.sdp_description);
+        attributes["action"] = SdpActionName(event.sdp_action);
+        attributes["phase"] = SdpPhaseName(event.sdp_phase);
+        attributes["pc_role"] = SdpRoleName(event.sdp_role);
+        attributes["round_sequence"] = event.sdp_sequence;
+        attributes["signaling_before"] = SdpStateName(event.signaling_before);
+        attributes["signaling_after"] = SdpStateName(event.signaling_after);
+        attributes["reason"] = SdpReasonName(event.sdp_reason);
+        attributes["after_terminal"] = event.sdp_after_terminal;
+        attributes["ice_restart"] = event.sdp_ice_restart;
+        attributes["rtc_error_type"] = event.rtc_error_type;
+        break;
     case EventKind::RtcSdpFailed:
         attributes["rtc_error_type"] = event.rtc_error_type;
         break;

@@ -14,6 +14,8 @@ class VideoEncoderFactory;
 
 namespace livekit {
 
+namespace diagnostic { class SdpNegotiationTrace; }
+
 class AudioApmProcessor;
 class ExecutorCallbackGate;
 
@@ -59,13 +61,15 @@ public:
         asio::any_io_executor executor,
         std::function<void(const std::string& sdp, const std::string& error)> callback,
         bool ice_restart = false,
-        std::shared_ptr<ExecutorCallbackGate> callback_gate = {});
+        std::shared_ptr<ExecutorCallbackGate> callback_gate = {},
+        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace = {});
 
     void CreateAnswer(
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
         asio::any_io_executor executor,
         std::function<void(const std::string& sdp, const std::string& error)> callback,
-        std::shared_ptr<ExecutorCallbackGate> callback_gate = {});
+        std::shared_ptr<ExecutorCallbackGate> callback_gate = {},
+        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace = {});
 
     void SetRemoteDescription(
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
@@ -73,7 +77,8 @@ public:
         const std::string& sdp,
         asio::any_io_executor executor,
         std::function<void(const std::string& error)> callback,
-        std::shared_ptr<ExecutorCallbackGate> callback_gate = {});
+        std::shared_ptr<ExecutorCallbackGate> callback_gate = {},
+        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace = {});
 
     void SetLocalDescription(
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
@@ -81,7 +86,8 @@ public:
         const std::string& sdp,
         asio::any_io_executor executor,
         std::function<void(const std::string& error)> callback,
-        std::shared_ptr<ExecutorCallbackGate> callback_gate = {});
+        std::shared_ptr<ExecutorCallbackGate> callback_gate = {},
+        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace = {});
 
 private:
     WebRTCManager() = default;
