@@ -964,24 +964,8 @@ Meeting ID: %2</source>
         <translation>自动滚屏</translation>
     </message>
     <message>
-        <source>Copy All</source>
-        <translation>复制全部</translation>
-    </message>
-    <message>
         <source>Clear</source>
         <translation>清空</translation>
-    </message>
-    <message>
-        <source>Cohavora console started. Listening for signaling, WebRTC media, and device events...</source>
-        <translation>Cohavora 客户端控制台已启动，实时监听信令、WebRTC 媒体与设备事件...</translation>
-    </message>
-    <message>
-        <source>● Console Ready (%1 entries)</source>
-        <translation>● 控制台就绪 (%1条)</translation>
-    </message>
-    <message>
-        <source>● Filtered: %1/%2 entries</source>
-        <translation>● 筛选: %1/%2条</translation>
     </message>
     <message>
         <source>● Console Ready (0 entries)</source>
@@ -1216,10 +1200,6 @@ Meeting ID: %2</source>
         <translation>视频订阅失败</translation>
     </message>
     <message>
-        <source>VideoTileWidget [%1] frame rendered (image: %2x%3, viewport: %4x%5)</source>
-        <translation>VideoTileWidget [%1] 画面成功上屏绘制 (图像: %2x%3, 视口: %4x%5)</translation>
-    </message>
-    <message>
         <source>Meetings</source>
         <translation>会议</translation>
     </message>
@@ -1420,14 +1400,6 @@ Meeting ID: %2</source>
         <translation>物理麦克风初始化或启动失败</translation>
     </message>
     <message>
-        <source>Camera started: %1 (%2x%3@%4fps NV12)</source>
-        <translation>成功启动物理摄像头: %1 (%2x%3@%4fps NV12)</translation>
-    </message>
-    <message>
-        <source>Camera initialization error: %1</source>
-        <translation>摄像头初始化异常: %1</translation>
-    </message>
-    <message>
         <source>%1 (Me)</source>
         <translation>%1 (我)</translation>
     </message>
@@ -1438,18 +1410,6 @@ Meeting ID: %2</source>
     <message>
         <source>Qt CPU video backend: </source>
         <translation>Qt CPU 视频后端: </translation>
-    </message>
-    <message>
-        <source>Me: %1</source>
-        <translation>我: %1</translation>
-    </message>
-    <message>
-        <source>I sent an image: %1 (%2)</source>
-        <translation>我 发送了图片: %1 (%2)</translation>
-    </message>
-    <message>
-        <source>I sent a file: %1 (%2)</source>
-        <translation>我 发送了文件: %1 (%2)</translation>
     </message>
     <message>
         <source>Waiting for more participants...</source>
@@ -1484,40 +1444,8 @@ Meeting ID: %2</source>
         <translation>用户点击关闭本地视频</translation>
     </message>
     <message>
-        <source>Receiving %2 from %1: %3 (%4)...</source>
-        <translation>正在接收 %1 发送的%2: %3 (%4)...</translation>
-    </message>
-    <message>
-        <source>image</source>
-        <translation>图片</translation>
-    </message>
-    <message>
-        <source>file</source>
-        <translation>文件</translation>
-    </message>
-    <message>
-        <source>Received %2 from %1: %3 (%4)</source>
-        <translation>%1 发送的%2已接收完成: %3 (%4)</translation>
-    </message>
-    <message>
-        <source>Media transfer interrupted: %1</source>
-        <translation>多媒体接收中断: %1</translation>
-    </message>
-    <message>
         <source>(System Default)</source>
         <translation>(系统默认)</translation>
-    </message>
-    <message>
-        <source>Switching camera to: %1 ...</source>
-        <translation>正在平滑切换摄像头至: %1 ...</translation>
-    </message>
-    <message>
-        <source>Camera switched successfully: %1</source>
-        <translation>摄像头平滑切换成功: %1</translation>
-    </message>
-    <message>
-        <source>Camera switch failed. The previous device was restored: %1</source>
-        <translation>摄像头切换失败，已自动回滚原设备: %1</translation>
     </message>
     <message>
         <source>Camera Switch Failed</source>
@@ -3470,6 +3398,274 @@ Sign in with your own account in a client configured for the same meeting servic
     <message>
         <source>Media cleanup failed. The session remains closed while its resources are retained.</source>
         <translation>媒体清理失败。会话保持关闭，但其资源仍被保留。</translation>
+    </message>
+    <message>
+        <source>Signal reconnect</source>
+        <translation>信令重连</translation>
+    </message>
+    <message>
+        <source>Full reconnect</source>
+        <translation>完整重连</translation>
+    </message>
+    <message>
+        <source>Speaker update</source>
+        <translation>更新发言人</translation>
+    </message>
+    <message>
+        <source>Node failure</source>
+        <translation>节点故障</translation>
+    </message>
+    <message>
+        <source>Server migration</source>
+        <translation>服务器迁移</translation>
+    </message>
+    <message>
+        <source>Server disconnect</source>
+        <translation>服务器断开连接</translation>
+    </message>
+    <message>
+        <source>Switch ICE candidate</source>
+        <translation>切换 ICE 候选</translation>
+    </message>
+    <message>
+        <source>Rotate E2EE key</source>
+        <translation>轮换端到端加密密钥</translation>
+    </message>
+    <message>
+        <source>Update participant name</source>
+        <translation>更新参会者名称</translation>
+    </message>
+    <message>
+        <source>Update participant metadata</source>
+        <translation>更新参会者元数据</translation>
+    </message>
+    <message>
+        <source>Clear simulation</source>
+        <translation>清除模拟</translation>
+    </message>
+    <message>
+        <source>Legacy</source>
+        <translation>兼容日志</translation>
+    </message>
+    <message>
+        <source>Application</source>
+        <translation>应用</translation>
+    </message>
+    <message>
+        <source>Diagnostic pipeline</source>
+        <translation>诊断流水线</translation>
+    </message>
+    <message>
+        <source>Network</source>
+        <translation>网络</translation>
+    </message>
+    <message>
+        <source>Meeting coordinator</source>
+        <translation>会议协调器</translation>
+    </message>
+    <message>
+        <source>Room</source>
+        <translation>房间</translation>
+    </message>
+    <message>
+        <source>Session runtime</source>
+        <translation>会话运行时</translation>
+    </message>
+    <message>
+        <source>Session telemetry</source>
+        <translation>会话遥测</translation>
+    </message>
+    <message>
+        <source>Meeting UI</source>
+        <translation>会议界面</translation>
+    </message>
+    <message>
+        <source>Media</source>
+        <translation>媒体</translation>
+    </message>
+    <message>
+        <source>Render</source>
+        <translation>渲染</translation>
+    </message>
+    <message>
+        <source>RTC</source>
+        <translation>实时通信</translation>
+    </message>
+    <message>
+        <source>Trace</source>
+        <translation>跟踪</translation>
+    </message>
+    <message>
+        <source>Debug</source>
+        <translation>调试</translation>
+    </message>
+    <message>
+        <source>Info</source>
+        <translation>信息</translation>
+    </message>
+    <message>
+        <source>Error</source>
+        <translation>错误</translation>
+    </message>
+    <message>
+        <source>Fatal</source>
+        <translation>致命错误</translation>
+    </message>
+    <message>
+        <source>Meeting service</source>
+        <translation>会议服务</translation>
+    </message>
+    <message>
+        <source>Copy scope</source>
+        <translation>复制范围</translation>
+    </message>
+    <message>
+        <source>Visible results</source>
+        <translation>可见结果</translation>
+    </message>
+    <message>
+        <source>Selection</source>
+        <translation>选中内容</translation>
+    </message>
+    <message>
+        <source>Severity filter</source>
+        <translation>日志级别筛选</translation>
+    </message>
+    <message>
+        <source>All levels</source>
+        <translation>全部级别</translation>
+    </message>
+    <message>
+        <source>Component filter</source>
+        <translation>组件筛选</translation>
+    </message>
+    <message>
+        <source>All components</source>
+        <translation>全部组件</translation>
+    </message>
+    <message>
+        <source>Session ID</source>
+        <translation>会话 ID</translation>
+    </message>
+    <message>
+        <source>Operation ID</source>
+        <translation>操作 ID</translation>
+    </message>
+    <message>
+        <source>Save local logs</source>
+        <translation>保存本地日志</translation>
+    </message>
+    <message>
+        <source>Collect diagnostic events</source>
+        <translation>采集诊断事件</translation>
+    </message>
+    <message>
+        <source>Clear previous logs</source>
+        <translation>清理历史日志</translation>
+    </message>
+    <message>
+        <source>Crash metadata next run</source>
+        <translation>下次启动采集崩溃信息</translation>
+    </message>
+    <message>
+        <source>Diagnostic mode</source>
+        <translation>诊断模式</translation>
+    </message>
+    <message>
+        <source>Capture: all levels and components</source>
+        <translation>采集范围：全部级别和组件</translation>
+    </message>
+    <message>
+        <source>Log retention setting could not be saved</source>
+        <translation>无法保存日志留存设置</translation>
+    </message>
+    <message>
+        <source>Clearing previous logs...</source>
+        <translation>正在清理历史日志…</translation>
+    </message>
+    <message>
+        <source>Log cleanup could not start</source>
+        <translation>无法启动日志清理</translation>
+    </message>
+    <message>
+        <source>Crash metadata setting could not be saved</source>
+        <translation>无法保存崩溃信息采集设置</translation>
+    </message>
+    <message>
+        <source>Debug Logs</source>
+        <translation>调试日志</translation>
+    </message>
+    <message>
+        <source>Cleared %1 saved segments; %2 active runs kept</source>
+        <translation>已清理 %1 个日志分段；保留 %2 个活跃运行记录</translation>
+    </message>
+    <message>
+        <source>Log cleanup failed: %1</source>
+        <translation>日志清理失败：%1</translation>
+    </message>
+    <message>
+        <source>Diagnostic mode: %1 min remaining</source>
+        <translation>诊断模式：剩余 %1 分钟</translation>
+    </message>
+    <message>
+        <source>%1/%2 matched; UI loss=%3, pipeline loss=%4</source>
+        <translation>匹配 %1/%2 条；界面丢失=%3，流水线丢失=%4</translation>
+    </message>
+    <message>
+        <source>Advanced LiveKit Connection</source>
+        <translation>高级 LiveKit 连接</translation>
+    </message>
+    <message>
+        <source>Server URL</source>
+        <translation>服务器地址</translation>
+    </message>
+    <message>
+        <source>Custom LiveKit Token</source>
+        <translation>自定义 LiveKit 令牌</translation>
+    </message>
+    <message>
+        <source>Time range</source>
+        <translation>时间范围</translation>
+    </message>
+    <message>
+        <source>UTC from</source>
+        <translation>UTC 起始时间</translation>
+    </message>
+    <message>
+        <source>to</source>
+        <translation>至</translation>
+    </message>
+    <message>
+        <source>Estimated %1 KiB; %2</source>
+        <translation>预计 %1 KiB；%2</translation>
+    </message>
+    <message>
+        <source>Legacy report: run identity unavailable</source>
+        <translation>旧版报告：运行标识不可用</translation>
+    </message>
+    <message>
+        <source>Includes metrics, events and available stability evidence</source>
+        <translation>包含指标、事件及可用的稳定性证据</translation>
+    </message>
+    <message>
+        <source>Invalid time range</source>
+        <translation>时间范围无效</translation>
+    </message>
+    <message>
+        <source>Console</source>
+        <translation>控制台</translation>
+    </message>
+    <message>
+        <source>Share source</source>
+        <translation>共享源</translation>
+    </message>
+    <message>
+        <source>Settings sections</source>
+        <translation>设置分类</translation>
+    </message>
+    <message>
+        <source>Account menu</source>
+        <translation>账号菜单</translation>
     </message>
 </context>
 <context>

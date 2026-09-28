@@ -14,6 +14,9 @@
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QFont>
+#include <QtGui/QScreen>
+#include <QtWidgets/QScrollArea>
+#include <QtWidgets/QScrollBar>
 
 namespace MeetingUI {
 
@@ -369,6 +372,28 @@ void LoginDialog::toggleAdvancedSettings() {
     bool isVisible = _advancedWidget->isVisible();
     _advancedWidget->setVisible(!isVisible);
     _advancedToggleBtn->setText(!isVisible ? QCoreApplication::translate("MeetingUI", "⚙ Server Settings ▴") : QCoreApplication::translate("MeetingUI", "⚙ Server Settings ▾"));
+    // The adaptive wrapper sizes once on show. Refit after changing the form,
+    // before overflowing into scroll bars on an otherwise large enough screen.
+    auto *scroll = findChild<QScrollArea *>(QStringLiteral("adaptiveDialogScroll"));
+    if (!scroll || !scroll->widget()) return;
+    auto *content = scroll->widget();
+    _advancedWidget->parentWidget()->layout()->activate();
+    content->layout()->invalidate();
+    content->layout()->activate();
+    auto desired = QSize(460, 600).expandedTo(content->sizeHint());
+    auto *targetScreen = screen();
+    if (targetScreen) {
+        const auto available = targetScreen->availableGeometry().adjusted(16, 32, -16, -32);
+        // On small screens retain vertical scrolling without forcing a second,
+        // horizontal scroll bar merely to accommodate the vertical one.
+        if (desired.height() > available.height())
+            desired.rwidth() += scroll->verticalScrollBar()->sizeHint().width();
+        resize(desired.boundedTo(available.size()));
+        move(qBound(available.left(), x(), available.right() - width() + 1),
+             qBound(available.top(), y(), available.bottom() - height() + 1));
+    } else {
+        resize(desired);
+    }
 }
 
 void LoginDialog::togglePasswordVisibility() {

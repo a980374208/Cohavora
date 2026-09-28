@@ -22,7 +22,7 @@ Q_IMPORT_PLUGIN(QICOPlugin)
 namespace {
 
 void DrainEvents() {
-    for (int iteration = 0; iteration < 20; ++iteration) {
+    for (int iteration = 0; iteration < 100; ++iteration) {
         QCoreApplication::processEvents();
         QThread::msleep(2);
     }
@@ -61,8 +61,12 @@ int main(int argc, char** argv) {
     // Rebuild from the internal LogEntry cache. A raw secret retained only in
     // the cache would become visible when filtering by that secret.
     console.onFilterChanged(QString::fromLatin1(kSecret));
+    DrainEvents();
+    console.drainPending();
     TEST_CHECK(view->toPlainText().isEmpty());
     console.onFilterChanged(QStringLiteral("redacted"));
+    DrainEvents();
+    console.drainPending();
     TEST_CHECK(view->toPlainText().contains(QStringLiteral("sensitive log field")));
 
     console.clearLogs();
@@ -78,12 +82,18 @@ int main(int argc, char** argv) {
     TEST_CHECK(heartbeat_rendered.find(kHeartbeatSecret) == std::string::npos);
     TEST_CHECK(heartbeat_rendered.find("[redacted: sensitive log field]") != std::string::npos);
     console.onFilterChanged(QString::fromLatin1(kHeartbeatSecret));
+    DrainEvents();
+    console.drainPending();
     TEST_CHECK(view->toPlainText().isEmpty());
     console.onFilterChanged(QStringLiteral("redacted"));
+    DrainEvents();
+    console.drainPending();
     TEST_CHECK(view->toPlainText().contains(QStringLiteral("sensitive log field")));
 
     console.clearLogs();
     console.onFilterChanged({});
+    DrainEvents();
+    console.drainPending();
     MeetingUI::LogToConsole(MeetingUI::LogCategory::Participant,
         QStringLiteral("CHAT_TEXT_SENT"), QStringLiteral("bytes=21"));
     MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection,
@@ -91,7 +101,7 @@ int main(int argc, char** argv) {
     console.drainPending();
     TEST_CHECK(view->toPlainText().contains(QStringLiteral("bytes=21")));
     TEST_CHECK(!view->toPlainText().contains(QStringLiteral("private ordinary name 9281")));
-    TEST_CHECK(view->toPlainText().contains(QStringLiteral("unregistered diagnostic")));
+    TEST_CHECK(!view->toPlainText().contains(QStringLiteral("unregistered diagnostic")));
 
     console.clearLogs();
     MeetingUI::LogToConsole(MeetingUI::LogCategory::Connection,
@@ -105,7 +115,7 @@ int main(int argc, char** argv) {
     std::thread flood([] {
         for (int i = 0; i < 10000; ++i) {
             MeetingUI::LogToConsole(MeetingUI::LogCategory::General,
-                QStringLiteral("FLOOD"), QStringLiteral("safe fixed event"));
+                QStringLiteral("CHAT_TEXT"), QStringLiteral("bytes=17"));
         }
     });
     flood.join();

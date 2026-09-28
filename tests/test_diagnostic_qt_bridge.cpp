@@ -16,6 +16,7 @@
 #include <QtWidgets/QPlainTextEdit>
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QLineEdit>
+#include <QtWidgets/QScrollBar>
 #include <QtGui/QClipboard>
 #include <QtGui/QTextDocument>
 
@@ -28,6 +29,81 @@
 
 namespace MeetingUI {
 struct MeetingLogConsoleTestAccess {
+    static void CheckScrollFollowing(MeetingLogConsoleWindow &console) {
+        console.clearLogs();
+        console.show();
+        QCoreApplication::processEvents();
+        for (int i = 0; i < 100; ++i)
+            console.appendLog(LogCategory::General, QStringLiteral("CHAT_TEXT"),
+                QStringLiteral("bytes=%1").arg(200000 + i));
+        DrainUntilText(console, QStringLiteral("bytes=200099"));
+        auto *scroll = console._logView->verticalScrollBar();
+        TEST_CHECK(scroll->maximum() > 0);
+        TEST_CHECK(scroll->value() == scroll->maximum());
+        scroll->setValue(scroll->maximum() / 2);
+        const auto readingPosition = scroll->value();
+        auto selection = console._logView->textCursor();
+        selection.setPosition(0);
+        selection.setPosition(5, QTextCursor::KeepAnchor);
+        console._logView->setTextCursor(selection);
+        scroll->setValue(readingPosition);
+        for (int i = 0; i < 5; ++i) console.drainPending();
+        TEST_CHECK(scroll->value() == readingPosition);
+        TEST_CHECK(console._logView->textCursor().selectedText() == selection.selectedText());
+        selection.clearSelection();
+        console._logView->setTextCursor(selection);
+        scroll->setValue(readingPosition);
+        console.appendLog(LogCategory::General, QStringLiteral("CHAT_TEXT"), QStringLiteral("bytes=200100"));
+        DrainUntilText(console, QStringLiteral("bytes=200100"));
+        TEST_CHECK(scroll->value() == readingPosition);
+        scroll->setValue(scroll->maximum());
+        console.appendLog(LogCategory::General, QStringLiteral("CHAT_TEXT"), QStringLiteral("bytes=200101"));
+        DrainUntilText(console, QStringLiteral("bytes=200101"));
+        TEST_CHECK(scroll->value() == scroll->maximum());
+        console._autoScrollBox->setChecked(false);
+        const auto pausedPosition = scroll->value();
+        console.appendLog(LogCategory::General, QStringLiteral("CHAT_TEXT"), QStringLiteral("bytes=200102"));
+        DrainUntilText(console, QStringLiteral("bytes=200102"));
+        TEST_CHECK(scroll->value() == pausedPosition);
+        console._autoScrollBox->setChecked(true);
+        TEST_CHECK(scroll->value() == scroll->maximum());
+        console.hide();
+        console.clearLogs();
+    }
+    static void CheckNoiseFiltering(MeetingLogConsoleWindow &console) {
+        using namespace livekit::diagnostic;
+        console.clearLogs();
+        const auto dropped = console._queue->dropped;
+        for (int i = 0; i < 10000; ++i)
+            console.appendLog(LogCategory::Signal, QStringLiteral("RAW_MSG"),
+                QStringLiteral("private unregistered text"));
+        const auto mirror = MeetingLogConsoleWindow::diagnosticMirror();
+        Event signal;
+        signal.kind = EventKind::SignalMessageSummary;
+        signal.signal_message_count = 10;
+        mirror(signal);
+        mirror(Event::QueueHealth(100, 0, 10));
+        TEST_CHECK(console._queue->pending.empty());
+        TEST_CHECK(console._queue->dropped == dropped);
+
+        console.appendLog(LogCategory::Error, QStringLiteral("FAILURE"),
+            QStringLiteral("private error text"));
+        Event terminal;
+        terminal.kind = EventKind::RoomConnectTerminal;
+        terminal.outcome = Outcome::Timeout;
+        terminal.error_code = ErrorCode::JoinTimeout;
+        terminal.duration_ms = 5000;
+        mirror(terminal);
+        DrainUntilText(console, QStringLiteral("duration_ms=5000"));
+        const auto text = console._logView->toPlainText();
+        TEST_CHECK(text.contains(QStringLiteral("[FAILURE]")));
+        TEST_CHECK(text.contains(QStringLiteral("outcome=timeout")));
+        TEST_CHECK(text.contains(QStringLiteral("error=join_timeout")));
+        TEST_CHECK(!text.contains(QStringLiteral("private")));
+        TEST_CHECK(!text.contains(QStringLiteral("session=unknown")));
+        TEST_CHECK(!text.contains(QStringLiteral("operation=unknown")));
+        console.clearLogs();
+    }
     static void SettleFilter(MeetingLogConsoleWindow &console) {
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
         while (console._filterTimer->isActive() && std::chrono::steady_clock::now() < deadline) {
@@ -145,9 +221,14 @@ int main(int argc, char **argv) {
     TEST_CHECK(pipeline->GetStatus().suppressed == 1);
     qWarning() << "The local stability ledger is unavailable.";
     qCritical() << "Invalid debug sign-in options.";
+    livekit::diagnostic::Event signalSummary;
+    signalSummary.kind = livekit::diagnostic::EventKind::SignalMessageSummary;
+    signalSummary.signal_category = livekit::diagnostic::SignalCategory::Periodic;
+    signalSummary.signal_message_count = 42;
+    TEST_CHECK(pipeline->TryEmit(signalSummary));
     TEST_CHECK(pipeline->Close() == livekit::diagnostic::DrainResult::Completed);
 
-    bool ledger_failure = false, login_failure = false;
+    bool ledger_failure = false, login_failure = false, signal_saved = false;
     for (const auto& run : std::filesystem::directory_iterator(
              std::filesystem::path(directory.path().toStdWString()))) {
         for (const auto& file : std::filesystem::directory_iterator(run.path())) {
@@ -156,6 +237,9 @@ int main(int argc, char **argv) {
             std::string line;
             while (std::getline(input, line)) {
                 const auto record = nlohmann::json::parse(line);
+                if (record.at("event_name") == "signal.message.summary" &&
+                    record.at("attributes").value("count", 0) == 42)
+                    signal_saved = true;
                 if (record.at("event_name") == "diagnostics.sink.failed" &&
                     record.at("attributes").value("sink_kind", "") == "telemetry")
                     ledger_failure = true;
@@ -167,13 +251,16 @@ int main(int argc, char **argv) {
             }
         }
     }
-    TEST_CHECK(ledger_failure && login_failure);
+    TEST_CHECK(ledger_failure && login_failure && signal_saved);
 
     auto &console = MeetingUI::MeetingLogConsoleWindow::Instance();
     console.drainPending();
     auto *view = console.findChild<QPlainTextEdit*>();
     TEST_CHECK(view);
     TEST_CHECK(!view->toPlainText().contains(QStringLiteral("private unknown Qt canary 5934")));
+    TEST_CHECK(!view->toPlainText().contains(QStringLiteral("signal.message.summary")));
+    MeetingUI::MeetingLogConsoleTestAccess::CheckNoiseFiltering(console);
+    MeetingUI::MeetingLogConsoleTestAccess::CheckScrollFollowing(console);
     livekit::diagnostic::Event filtered = livekit::diagnostic::Event::Issue(
         livekit::diagnostic::IssueCode::InvalidSignInOptions);
     TEST_CHECK(filtered.context.anonymous_session_id.Assign(
@@ -213,8 +300,8 @@ int main(int argc, char **argv) {
         QStringLiteral("consoleCrashCollection")));
     TEST_CHECK(console.findChild<QCheckBox*>(
         QStringLiteral("consoleDiagnosticMode")));
-    severity->setCurrentText(QStringLiteral("error"));
-    component->setCurrentText(QStringLiteral("app"));
+    severity->setCurrentIndex(severity->findData(QStringLiteral("error")));
+    component->setCurrentIndex(component->findData(QStringLiteral("app")));
     session->setText(QStringLiteral("01234567"));
     operation->setText(QStringLiteral("room_connect_42"));
     TEST_CHECK(view->toPlainText().contains(QStringLiteral("process.issue")));
@@ -224,9 +311,9 @@ int main(int argc, char **argv) {
     failedChat.context = filtered.context;
     MeetingUI::MeetingLogConsoleWindow::diagnosticMirror()(failedChat);
     console.drainPending();
-    component->setCurrentText(QStringLiteral("meeting_ui"));
+    component->setCurrentIndex(component->findData(QStringLiteral("meeting_ui")));
     TEST_CHECK(view->toPlainText().contains(QStringLiteral("chat.send.terminal")));
-    component->setCurrentText(QStringLiteral("app"));
+    component->setCurrentIndex(component->findData(QStringLiteral("app")));
     const auto previousText = view->toPlainText();
     session->setText(QStringLiteral("nonmatch"));
     console.drainPending();
