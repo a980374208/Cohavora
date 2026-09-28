@@ -105,6 +105,10 @@ Event DiagnosticPipeline::Stamp(Event event) noexcept {
 
 bool DiagnosticPipeline::TryEmit(Event event) noexcept {
     try {
+        if (event.kind != EventKind::RetentionChanged && ProductionPausedForBenchmark()) {
+            benchmark_suppressed_.fetch_add(1, std::memory_order_relaxed);
+            return false; // deliberate benchmark suppression, before sequence allocation
+        }
         if (!IsValidEvent(event)) {
             CountSuppressed();
             return false;
@@ -156,6 +160,23 @@ bool DiagnosticPipeline::TryEmit(Event event) noexcept {
     } catch (...) {
         return false;
     }
+}
+
+void DiagnosticPipeline::PauseProductionForBenchmark(std::chrono::milliseconds duration) noexcept {
+    duration = (std::clamp)(duration, std::chrono::milliseconds::zero(),
+                           std::chrono::milliseconds(60000));
+    benchmark_pause_until_.store(duration.count() ?
+        (std::chrono::steady_clock::now() + duration).time_since_epoch().count() : 0,
+        std::memory_order_release);
+}
+
+bool DiagnosticPipeline::ProductionPausedForBenchmark() const noexcept {
+    const auto until = benchmark_pause_until_.load(std::memory_order_acquire);
+    return until && std::chrono::steady_clock::now().time_since_epoch().count() < until;
+}
+
+std::uint64_t DiagnosticPipeline::BenchmarkSuppressed() const noexcept {
+    return benchmark_suppressed_.load(std::memory_order_relaxed);
 }
 
 void DiagnosticPipeline::OpenDiagnosticWindow(

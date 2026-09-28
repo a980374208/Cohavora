@@ -693,6 +693,9 @@ bool SessionTelemetry::RecordRemoteVideoRenderSubmit(
         AtomicMaximum(probe->maximum_interval_ns, interval);
         probe->interval_histogram[RenderIntervalBucket(interval)].fetch_add(
             1, std::memory_order_relaxed);
+        const auto fine_bucket = static_cast<std::size_t>((std::min)(
+            std::int64_t{1000}, interval / 1'000'000 + (interval % 1'000'000 != 0)));
+        probe->fine_interval_histogram[fine_bucket].fetch_add(1, std::memory_order_relaxed);
         if (probe->continuous_video) {
             const auto threshold = (std::max)(
                 std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -2338,6 +2341,7 @@ void SessionTelemetry::UpdateRenderAvailabilityOnStrand(Clock::time_point now) {
     std::int64_t maximum_interval_ns = 0;
     std::array<std::uint64_t,
         RenderActivityProbe::kIntervalHistogramBuckets> interval_histogram{};
+    state_.render_fine_interval_histogram.fill(0);
     std::int64_t frame_age_sum_ns = 0;
     std::int64_t maximum_frame_age_ns = 0;
     std::uint64_t frame_age_count = 0;
@@ -2393,6 +2397,9 @@ void SessionTelemetry::UpdateRenderAvailabilityOnStrand(Clock::time_point now) {
             interval_histogram[i] += probe.interval_histogram[i].load(
                 std::memory_order_relaxed);
         }
+        for (std::size_t i = 0; i < state_.render_fine_interval_histogram.size(); ++i)
+            state_.render_fine_interval_histogram[i] +=
+                probe.fine_interval_histogram[i].load(std::memory_order_relaxed);
         frame_age_sum_ns += probe.frame_age_sum_ns.load(std::memory_order_relaxed);
         frame_age_count += probe.frame_age_count.load(std::memory_order_relaxed);
         maximum_frame_age_ns = (std::max)(maximum_frame_age_ns,
@@ -2449,6 +2456,7 @@ void SessionTelemetry::UpdateRenderAvailabilityOnStrand(Clock::time_point now) {
         interval_histogram, 0.50, maximum_interval_ns);
     state_.render_interval_p95_ms = RenderIntervalPercentile(
         interval_histogram, 0.95, maximum_interval_ns);
+    state_.render_interval_histogram = interval_histogram;
     state_.render_interval_p99_ms = RenderIntervalPercentile(
         interval_histogram, 0.99, maximum_interval_ns);
     state_.render_submit_fps = state_.render_average_interval_ms > 0.0
@@ -3465,6 +3473,9 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
     };
     state_.inbound_video_frames_received = 0;
     state_.inbound_video_frames_decoded = 0;
+    state_.inbound_video_rtp_streams = 0;
+    state_.inbound_video_active_decode_streams = 0;
+    bool decode_stream_coverage = true;
     state_.inbound_video_frames_dropped = 0;
     state_.outbound_video_frames_encoded = 0;
     state_.outbound_video_frames_sent = 0;
@@ -3531,6 +3542,7 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
         };
         for (const auto& stream : pc_report.inbound_rtp) {
             if (!stream.kind_available || stream.kind != "video") continue;
+            ++state_.inbound_video_rtp_streams;
             ++pipeline_streams;
             std::uint32_t mask = 0;
             if (stream.frames_received_available) mask |= kVideoPrimaryFrames;
@@ -3618,6 +3630,7 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
             if (baseline.initialized && baseline.observed_at != Clock::time_point{} &&
                 received_at > baseline.observed_at) {
                 ++pipeline_warmed;
+                if (!(mask & kVideoSecondaryFrames)) decode_stream_coverage = false;
                 if ((mask & kVideoPrimaryFrames) != 0) {
                     state_.window_inbound_video_frames_received +=
                         current.primary_frames - baseline.primary_frames;
@@ -3626,6 +3639,7 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
                     const auto delta = current.secondary_frames -
                         baseline.secondary_frames;
                     state_.window_inbound_video_frames_decoded += delta;
+                    if (delta > 0) ++state_.inbound_video_active_decode_streams;
                     if ((mask & kVideoProcessingTime) != 0) {
                         decode_seconds_delta += current.processing_seconds -
                             baseline.processing_seconds;
@@ -3637,6 +3651,8 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
                     state_.window_inbound_video_frames_dropped +=
                         current.dropped_frames - baseline.dropped_frames;
                 }
+            } else {
+                decode_stream_coverage = false;
             }
             if ((mask & (kVideoSecondaryFrames | kVideoProcessingTime)) ==
                 (kVideoSecondaryFrames | kVideoProcessingTime)) {
@@ -3771,6 +3787,8 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
     }
     const auto inbound_drop_denominator =
         state_.window_inbound_video_frames_received;
+    if (!decode_stream_coverage || state_.inbound_video_rtp_streams == 0)
+        state_.inbound_video_active_decode_streams = -1;
     if (inbound_drop_denominator > 0) {
         state_.inbound_video_frame_drop_ratio =
             static_cast<double>(state_.window_inbound_video_frames_dropped) /

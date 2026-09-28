@@ -68,6 +68,17 @@ constexpr int kBottomBarGap = 6;
 constexpr int kBottomBarEndWidth = 88;
 constexpr int kBottomBarPreferredToolWidth = 76;
 
+void ShowMeetingWarning(QWidget* parent, const char* id, const char* dismissId,
+                           const QString& title, const QString& text) {
+	auto* message = new QMessageBox(QMessageBox::Warning, title, text,
+		QMessageBox::Ok, parent);
+	message->setObjectName(QString::fromLatin1(id));
+	message->setAttribute(Qt::WA_DeleteOnClose);
+	AppTheme::setTone(*message, AppTheme::Tone::Dark);
+	message->button(QMessageBox::Ok)->setObjectName(QString::fromLatin1(dismissId));
+	message->open();
+}
+
 class TelemetryTrendWidget final : public QWidget {
 public:
 	explicit TelemetryTrendWidget(
@@ -2498,9 +2509,34 @@ RoomBottomBarWidget::RoomBottomBarWidget(QWidget *parent)
 	connect(_uiaParticipants, &QPushButton::clicked, this, [this] { _participantsStream.fire({}); });
 	connect(_uiaChat, &QPushButton::clicked, this, [this] { _chatStream.fire({}); });
 	connect(_uiaWhiteboard, &QPushButton::clicked, this, [this] { _whiteboardStream.fire({}); });
-	connect(_uiaAudio, &QPushButton::clicked, this, &RoomBottomBarWidget::toggleAudio);
-	connect(_uiaVideo, &QPushButton::clicked, this, &RoomBottomBarWidget::toggleVideo);
-	connect(_uiaShare, &QPushButton::clicked, this, [this] { _shareScreenStream.fire({}); });
+	// Qt 5's accessibility Toggle action calls QAbstractButton::toggle(),
+	// which emits toggled but not clicked. Commit the same business action for
+	// UIA and ordinary activation. State projection updates the model first,
+	// so its setChecked() notification must not submit another action.
+	connect(_uiaAudio, &QPushButton::toggled, this, [this](bool enabled) {
+		if (enabled == !_audioMuted) return;
+		// UIA Toggle enters synchronously through COM. Device enumeration and
+		// dialogs must run after that call returns, on the UI event loop.
+		QMetaObject::invokeMethod(this, [this, enabled] {
+			if (enabled != !_audioMuted) toggleAudio();
+		}, Qt::QueuedConnection);
+	});
+	connect(_uiaVideo, &QPushButton::toggled, this, [this](bool enabled) {
+		if (enabled == _videoEnabled) return;
+		QMetaObject::invokeMethod(this, [this, enabled] {
+			if (enabled != _videoEnabled) toggleVideo();
+		}, Qt::QueuedConnection);
+	});
+	connect(_uiaShare, &QPushButton::toggled, this, [this](bool enabled) {
+		if (enabled == canStopScreenShare()) return;
+		QMetaObject::invokeMethod(this, [this, enabled] {
+			if (!screenShareControlEnabled()) {
+				_uiaShare->setChecked(canStopScreenShare());
+				return;
+			}
+			if (enabled != canStopScreenShare()) _shareScreenStream.fire({});
+		}, Qt::QueuedConnection);
+	});
 	connect(_uiaEnd, &QPushButton::clicked, this, [this] { _endMeetingStream.fire({}); });
 }
 
@@ -2528,7 +2564,13 @@ void RoomBottomBarWidget::setScreenShareState(livekit::ScreenShareState state) {
 	_uiaShare->setChecked(canStopScreenShare());
 	_uiaShare->setAccessibleName(QCoreApplication::translate("MeetingUI",
 		canStopScreenShare() ? "Stop Sharing" : "Share Screen"));
-	_uiaShare->setEnabled(!_inRecovery || canStopScreenShare());
+	_uiaShare->setEnabled(screenShareControlEnabled());
+	update();
+}
+
+void RoomBottomBarWidget::setScreenShareAvailable(bool available) {
+	_screenShareAvailable = available;
+	_uiaShare->setEnabled(screenShareControlEnabled());
 	update();
 }
 
@@ -2536,7 +2578,8 @@ void RoomBottomBarWidget::toggleAudio() {
 	if (_inRecovery) { _uiaAudio->setChecked(!_audioMuted); return; }
 	if (_audioMuted && !HasAvailableAudioDevice()) {
 		_uiaAudio->setChecked(false);
-		QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Microphone Unavailable"),
+		ShowMeetingWarning(this, "meetingMicrophoneUnavailable", "meetingMicrophoneUnavailableDismiss",
+			QCoreApplication::translate("MeetingUI", "Microphone Unavailable"),
 			QCoreApplication::translate("MeetingUI", "No microphone input device is available. The microphone cannot be enabled."));
 		return;
 	}
@@ -2548,7 +2591,8 @@ void RoomBottomBarWidget::toggleVideo() {
 	if (_inRecovery) { _uiaVideo->setChecked(_videoEnabled); return; }
 	if (!_videoEnabled && !HasAvailableVideoDevice()) {
 		_uiaVideo->setChecked(false);
-		QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Camera Unavailable"),
+		ShowMeetingWarning(this, "meetingCameraUnavailable", "meetingCameraUnavailableDismiss",
+			QCoreApplication::translate("MeetingUI", "Camera Unavailable"),
 			QCoreApplication::translate("MeetingUI", "No camera device is available. Video cannot be enabled."));
 		return;
 	}
@@ -2571,7 +2615,7 @@ void RoomBottomBarWidget::setInRecovery(bool inRecovery) {
 	_inRecovery = inRecovery;
 	for (auto *button : {_uiaParticipants, _uiaChat, _uiaWhiteboard, _uiaAudio, _uiaVideo})
 		button->setEnabled(!inRecovery);
-	_uiaShare->setEnabled(!inRecovery || canStopScreenShare());
+	_uiaShare->setEnabled(screenShareControlEnabled());
 	update();
 }
 
@@ -2668,7 +2712,7 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 
 	for (const auto &item : _toolItems) {
 		const QRect r = item.rect;
-		const bool available = !_inRecovery || (item.id == 3 && canStopScreenShare());
+		const bool available = item.id == 3 ? screenShareControlEnabled() : !_inRecovery;
 		const bool hovered = available && (_hoveredId == item.id);
 
 		p.save();
@@ -2998,7 +3042,7 @@ void RoomBottomBarWidget::mouseMoveEvent(QMouseEvent *e) {
 
 	if (!_inRecovery || canStopScreenShare()) {
 		for (const auto &item : _toolItems) {
-			if ((!_inRecovery || item.id == 3) && item.rect.contains(pos)) {
+			if ((item.id == 3 ? screenShareControlEnabled() : !_inRecovery) && item.rect.contains(pos)) {
 				nextId = item.id;
 				break;
 			}
@@ -3097,7 +3141,7 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 					break;
 				}
 				case 3:
-					_shareScreenStream.fire({});
+					if (screenShareControlEnabled()) _shareScreenStream.fire({});
 					break;
 				case 4:
 					_inviteStream.fire({});
@@ -5396,12 +5440,6 @@ void MeetingRoomWindow::handleScreenShareSources(
 		combo->setObjectName(QStringLiteral("screenShareSource"));
 		combo->setAccessibleName(QCoreApplication::translate("MeetingUI", "Share source"));
 	}
-	if (auto *buttons = dialog->findChild<QDialogButtonBox *>()) {
-		if (auto *accept = buttons->button(QDialogButtonBox::Ok))
-			accept->setObjectName(QStringLiteral("screenShareAccept"));
-		if (auto *cancel = buttons->button(QDialogButtonBox::Cancel))
-			cancel->setObjectName(QStringLiteral("screenShareCancel"));
-	}
 	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
 	const std::weak_ptr<livekit::Room> room = _coordinator->room();
 	connect(dialog, &QInputDialog::textValueSelected, this,
@@ -5415,6 +5453,12 @@ void MeetingRoomWindow::handleScreenShareSources(
 			if (state != OpenMeeting::MeetingState::InMeeting) dialog->reject();
 		});
 	dialog->open();
+	if (auto *buttons = dialog->findChild<QDialogButtonBox *>()) {
+		if (auto *accept = buttons->button(QDialogButtonBox::Ok))
+			accept->setObjectName(QStringLiteral("screenShareAccept"));
+		if (auto *cancel = buttons->button(QDialogButtonBox::Cancel))
+			cancel->setObjectName(QStringLiteral("screenShareCancel"));
+	}
 }
 
 bool MeetingRoomWindow::isTrackVisible(const livekit::TrackKey &key) const {
@@ -5911,6 +5955,9 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 			_topBar->setTelemetrySnapshot(snapshot);
 		});
 	_bottomBar->shareScreenClicked() | rpl::on_next([this] { requestScreenShare(); }, lifetime());
+	_bottomBar->setScreenShareAvailable(_coordinator->canStartScreenShare());
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::screenShareAvailabilityChanged,
+		_bottomBar, &RoomBottomBarWidget::setScreenShareAvailable);
 	applyScreenShareSnapshot(_coordinator->screenShareSnapshot());
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::screenShareChanged,
 		this, [this](livekit::ScreenShareSnapshot snapshot) {
@@ -5922,7 +5969,8 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 			else if (snapshot.error == livekit::ScreenShareError::Publish)
 				message = QCoreApplication::translate("MeetingUI", "Unable to publish the screen share. Capture has stopped. Check your connection and publishing permissions, then try again.");
 			else message = QCoreApplication::translate("MeetingUI", "Local capture has stopped, but remote unpublishing is not yet confirmed. Try stopping again or leave the meeting.");
-			QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Screen Sharing"), message);
+			ShowMeetingWarning(this, "meetingScreenShareFailure", "meetingScreenShareFailureDismiss",
+				QCoreApplication::translate("MeetingUI", "Screen Sharing"), message);
 		});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::screenShareSourcesReady,
 		this, [this](const std::vector<livekit::DesktopSource> &sources) {
@@ -6036,6 +6084,7 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	        this, &MeetingRoomWindow::onMeetingDetailUpdated);
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
 	        this, [this](OpenMeeting::MeetingState state, const QString &detail) {
+		_bottomBar->setScreenShareAvailable(_coordinator->canStartScreenShare());
 		if (state != OpenMeeting::MeetingState::InMeeting) {
 			_defaultScreenSharePending = false;
 		}

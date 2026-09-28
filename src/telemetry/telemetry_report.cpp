@@ -49,6 +49,174 @@ std::int64_t UtcNowMs() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
+// Keep this retained-allocation census in sync with Snapshot's owning fields.
+// Charge capacities (including shared snapshots conservatively once per job),
+// not the serialized JSON scratch buffer that exists only on the worker.
+std::size_t SnapshotRetainedBytes(const Snapshot& snapshot) {
+    constexpr std::string Snapshot::* text_fields[] = {
+        &Snapshot::reason,
+        &Snapshot::session_duration_reason,
+        &Snapshot::session_duration_measurement_point,
+        &Snapshot::usable_duration_reason,
+        &Snapshot::usable_duration_measurement_point,
+        &Snapshot::admission_to_usable_reason,
+        &Snapshot::admission_to_usable_measurement_point,
+        &Snapshot::event_queue_lag_reason,
+        &Snapshot::resource_reason,
+        &Snapshot::cpu_reason,
+        &Snapshot::memory_reason,
+        &Snapshot::thread_count_reason,
+        &Snapshot::handle_count_reason,
+        &Snapshot::gpu_resource_reason,
+        &Snapshot::resource_trend_reason,
+        &Snapshot::resource_session_delta_reason,
+        &Snapshot::resource_final_delta_reason,
+        &Snapshot::resource_return_reason,
+        &Snapshot::internal_resource_reason,
+        &Snapshot::router_queue_reason,
+        &Snapshot::export_queue_reason,
+        &Snapshot::telemetry_cost_reason,
+        &Snapshot::telemetry_ab_reason,
+        &Snapshot::strand_lag_reason,
+        &Snapshot::ui_lag_reason,
+        &Snapshot::local_publish_media_reason,
+        &Snapshot::local_publish_media_algorithm,
+        &Snapshot::local_video_injection_reason,
+        &Snapshot::local_video_injection_measurement_point,
+        &Snapshot::local_video_encode_reason,
+        &Snapshot::local_video_encode_measurement_point,
+        &Snapshot::local_rtp_send_reason,
+        &Snapshot::local_rtp_send_measurement_point,
+        &Snapshot::subscription_media_reason,
+        &Snapshot::subscription_media_measurement_point,
+        &Snapshot::inbound_rtp_traffic_reason,
+        &Snapshot::outbound_rtp_traffic_reason,
+        &Snapshot::rtp_traffic_measurement_point,
+        &Snapshot::inbound_packet_loss_reason,
+        &Snapshot::inbound_packet_loss_measurement_point,
+        &Snapshot::inbound_jitter_reason,
+        &Snapshot::remote_rtcp_reason,
+        &Snapshot::remote_rtcp_measurement_point,
+        &Snapshot::network_recovery_reason,
+        &Snapshot::network_recovery_measurement_point,
+        &Snapshot::network_retransmit_ratio_denominator,
+        &Snapshot::inbound_retransmission_reason,
+        &Snapshot::inbound_fec_reason,
+        &Snapshot::inbound_feedback_reason,
+        &Snapshot::outbound_retransmission_reason,
+        &Snapshot::outbound_feedback_reason,
+        &Snapshot::media_path_reason,
+        &Snapshot::media_path_measurement_point,
+        &Snapshot::local_candidate_types,
+        &Snapshot::remote_candidate_types,
+        &Snapshot::local_network_types,
+        &Snapshot::media_protocols,
+        &Snapshot::relay_protocols,
+        &Snapshot::tcp_types,
+        &Snapshot::media_path_rtt_reason,
+        &Snapshot::media_bandwidth_reason,
+        &Snapshot::transport_traffic_reason,
+        &Snapshot::transport_traffic_measurement_point,
+        &Snapshot::transport_state_reason,
+        &Snapshot::transport_dtls_states,
+        &Snapshot::transport_connectivity_states,
+        &Snapshot::transport_roles,
+        &Snapshot::video_quality_limitation_reason,
+        &Snapshot::video_quality_limitation_measurement_point,
+        &Snapshot::video_quality_limitation_current,
+        &Snapshot::video_pipeline_reason,
+        &Snapshot::video_pipeline_measurement_point,
+        &Snapshot::video_codec_reason,
+        &Snapshot::video_codec_measurement_point,
+        &Snapshot::inbound_video_codecs,
+        &Snapshot::outbound_video_codecs,
+        &Snapshot::decoder_implementations,
+        &Snapshot::encoder_implementations,
+        &Snapshot::decoder_power_efficiency,
+        &Snapshot::encoder_power_efficiency,
+        &Snapshot::outbound_video_layers,
+        &Snapshot::video_publish_plan_reason,
+        &Snapshot::video_publish_plan_measurement_point,
+        &Snapshot::video_publish_requested_codecs,
+        &Snapshot::video_publish_effective_codecs,
+        &Snapshot::video_publish_observed_codecs,
+        &Snapshot::video_publish_fallback_reasons,
+        &Snapshot::video_publish_sources,
+        &Snapshot::video_publish_direction,
+        &Snapshot::video_publish_generations,
+        &Snapshot::video_publish_modes,
+        &Snapshot::video_publish_resolved_profiles,
+        &Snapshot::video_publish_observed_profiles,
+        &Snapshot::video_publish_encoder_implementations,
+        &Snapshot::video_publish_resolved_scalability,
+        &Snapshot::video_publish_observed_scalability,
+        &Snapshot::video_processing_reason,
+        &Snapshot::video_processing_measurement_point,
+        &Snapshot::local_device_continuity_reason,
+        &Snapshot::local_device_continuity_measurement_point,
+        &Snapshot::local_device_continuity_algorithm,
+        &Snapshot::device_open_reason,
+        &Snapshot::device_open_measurement_point,
+        &Snapshot::device_hotplug_reason,
+        &Snapshot::device_hotplug_measurement_point,
+        &Snapshot::device_failure_reason,
+        &Snapshot::device_state_reason,
+        &Snapshot::device_state_measurement_point,
+        &Snapshot::remote_video_first_frame_reason,
+        &Snapshot::remote_video_first_frame_measurement_point,
+        &Snapshot::native_video_freeze_reason,
+        &Snapshot::native_video_freeze_measurement_point,
+        &Snapshot::reconnect_video_reason,
+        &Snapshot::reconnect_video_measurement_point,
+        &Snapshot::remote_audio_first_frame_reason,
+        &Snapshot::remote_audio_first_frame_measurement_point,
+        &Snapshot::audio_quality_reason,
+        &Snapshot::audio_quality_measurement_point,
+        &Snapshot::audio_concealment_reason,
+        &Snapshot::audio_jitter_buffer_reason,
+        &Snapshot::audio_time_stretch_reason,
+        &Snapshot::reconnect_audio_reason,
+        &Snapshot::reconnect_audio_measurement_point,
+        &Snapshot::render_first_frame_reason,
+        &Snapshot::render_first_frame_measurement_point,
+        &Snapshot::render_frame_age_reason,
+        &Snapshot::render_frame_age_measurement_point,
+        &Snapshot::render_pipeline_reason,
+        &Snapshot::render_pipeline_measurement_point,
+        &Snapshot::render_requested_backend,
+        &Snapshot::render_actual_backend,
+        &Snapshot::render_gpu_failure,
+        &Snapshot::render_fallback_reason,
+        &Snapshot::video_policy_reason,
+        &Snapshot::video_policy_measurement_point,
+        &Snapshot::video_policy_stage_content,
+        &Snapshot::video_policy_selection_reason,
+        &Snapshot::render_stall_reason,
+        &Snapshot::render_stall_algorithm,
+        &Snapshot::render_stage_reason,
+        &Snapshot::render_stage_measurement_point,
+        &Snapshot::render_gpu_execution_reason,
+        &Snapshot::reconnect_render_reason,
+        &Snapshot::reconnect_render_measurement_point,
+        &Snapshot::reconnect_density_reason,
+        &Snapshot::stability_anomaly_density_reason,
+        &Snapshot::stability_anomaly_density_algorithm,
+    };
+    std::size_t bytes = sizeof(Snapshot) + 64;
+    for (const auto field : text_fields) bytes += (snapshot.*field).capacity() + 1;
+    bytes += snapshot.metric_product_chains.capacity() * sizeof(MetricProductChainStatus);
+    for (const auto& chain : snapshot.metric_product_chains)
+        bytes += chain.metric_id.capacity() + chain.reason.capacity() + 2;
+    bytes += snapshot.operation_summaries.capacity() * sizeof(OperationSummary);
+    return bytes;
+}
+
+std::size_t StabilityRetainedBytes(const StabilitySummary& stability) {
+    return stability.ledger_availability.capacity() + stability.ledger_reason.capacity() +
+        stability.confirmed_crash_availability.capacity() + stability.confirmed_crash_reason.capacity() +
+        stability.unknown_termination_availability.capacity() + stability.unknown_termination_reason.capacity() + 6;
+}
+
 std::size_t PendingCharge(const TelemetryCheckpointRecord& record) {
     return 2 * (sizeof(record) + record.jsonl.capacity() + 64);
 }
@@ -96,6 +264,32 @@ Json JsonValue(const MetricValue& value) {
         if constexpr (std::is_same_v<T, std::monostate>) return nullptr;
         else if constexpr (std::is_same_v<T, std::string>) return SafeText(item);
         else return item;
+    }, value);
+}
+
+void AppendJsonString(std::string& output, const std::string& value) {
+    // Typed metric names/reasons are usually printable ASCII. Only that
+    // escape-free subset can be appended directly; all other text still goes
+    // through the JSON library's escaping and UTF-8 validation.
+    if (std::all_of(value.begin(), value.end(), [](unsigned char c) {
+            return c >= 0x20 && c < 0x7f && c != '"' && c != '\\';
+        })) {
+        output.push_back('"');
+        output += value;
+        output.push_back('"');
+    } else {
+        output += Json(value).dump();
+    }
+}
+
+void AppendJsonValue(std::string& output, const MetricValue& value) {
+    std::visit([&](const auto& item) {
+        using T = std::decay_t<decltype(item)>;
+        if constexpr (std::is_same_v<T, std::monostate>) output += "null";
+        else if constexpr (std::is_same_v<T, bool>) output += item ? "true" : "false";
+        else if constexpr (std::is_same_v<T, std::string>) AppendJsonString(output, SafeText(item));
+        else if constexpr (std::is_integral_v<T>) output += std::to_string(item);
+        else output += Json(item).dump();
     }, value);
 }
 
@@ -979,6 +1173,12 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("video.pipeline.inbound_decoded", s.inbound_video_frames_decoded, "frames",
           s.video_pipeline_availability, s.video_pipeline_reason,
           s.video_pipeline_measurement_point);
+    group("video.pipeline.inbound_rtp_streams", s.inbound_video_rtp_streams, "streams",
+          s.video_pipeline_availability, s.video_pipeline_reason, "rtc_inbound_video_rtp");
+    group("video.pipeline.active_decode_streams", Signed(s.inbound_video_active_decode_streams), "streams",
+          s.inbound_video_active_decode_streams < 0 ? Availability::Unknown : s.video_pipeline_availability,
+          s.inbound_video_active_decode_streams < 0 ? "decode_stream_baseline_incomplete" : s.video_pipeline_reason,
+          "rtc_inbound_rtp_positive_frames_decoded_delta");
     group("video.pipeline.inbound_dropped", s.inbound_video_frames_dropped, "frames",
           s.video_pipeline_availability, s.video_pipeline_reason,
           s.video_pipeline_measurement_point);
@@ -1227,6 +1427,10 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("render.interval.p95", Ratio(s.render_interval_p95_ms), "ms",
           s.render_first_frame_availability, s.render_first_frame_reason,
           s.render_first_frame_measurement_point);
+    for (std::size_t i = 0; i < s.render_interval_histogram.size(); ++i)
+        group("render.interval.bucket." + std::to_string(i), s.render_interval_histogram[i], "intervals",
+              s.render_first_frame_availability, s.render_first_frame_reason,
+              s.render_first_frame_measurement_point);
     group("render.interval.p99", Ratio(s.render_interval_p99_ms), "ms",
           s.render_first_frame_availability, s.render_first_frame_reason,
           s.render_first_frame_measurement_point);
@@ -1547,24 +1751,32 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
 
 std::string SerializeSafeTelemetryCheckpointRecord(
     const SafeTelemetryRecord& record) {
+    // The metadata is identical for every metric in this snapshot. Avoid
+    // allocating an eleven-member JSON object for each row; the JSON library
+    // still owns string escaping, UTF-8 validation and typed value formatting.
+    const auto definition = ",\"definition_version\":" +
+        std::to_string(record.definition_version) + ",\"key\":";
+    const auto metadata = ",\"revision\":" + std::to_string(record.snapshot.revision) +
+        ",\"session_generation\":" + std::to_string(record.snapshot.session_generation) +
+        ",\"source_monotonic_us\":" + std::to_string(record.source_monotonic_us) +
+        ",\"source_utc_ms\":" + std::to_string(record.source_utc_ms != 0
+            ? record.source_utc_ms : record.captured_utc_ms) + ",\"unit\":";
     std::string output;
+    output.reserve(160 * 1024);
     for (const auto& metric : BuildSafeMetricRows(record)) {
-        Json line{
-            {"source_utc_ms", record.source_utc_ms != 0
-                ? record.source_utc_ms : record.captured_utc_ms},
-            {"source_monotonic_us", record.source_monotonic_us},
-            {"session_generation", record.snapshot.session_generation},
-            {"revision", record.snapshot.revision},
-            {"key", metric.key},
-            {"value", JsonValue(metric.value)},
-            {"unit", metric.unit},
-            {"availability", metric.availability},
-            {"reason", metric.reason},
-            {"measurement_point", metric.measurement_point},
-            {"definition_version", record.definition_version},
-        };
-        output += line.dump();
-        output.push_back('\n');
+        output += "{\"availability\":";
+        AppendJsonString(output, metric.availability);
+        output += definition;
+        AppendJsonString(output, metric.key);
+        output += ",\"measurement_point\":";
+        AppendJsonString(output, metric.measurement_point);
+        output += ",\"reason\":";
+        AppendJsonString(output, metric.reason);
+        output += metadata;
+        AppendJsonString(output, metric.unit);
+        output += ",\"value\":";
+        AppendJsonValue(output, metric.value);
+        output += "}\n";
     }
     return output;
 }
@@ -2020,16 +2232,18 @@ bool TelemetryHistoryStore::EnqueueLocked(Job job, bool terminal_priority) {
     const bool export_job = job.kind == JobKind::Export ||
         job.kind == JobKind::ExportReport;
     if (export_job && export_jobs_ >= 2) return false;
-    constexpr std::size_t kSnapshotReservation = 1024 * 1024;
     constexpr std::size_t kControlCallbackReservation = 4096;
     job.charge = sizeof(Job) + job.checkpoint.jsonl.capacity() +
-        (job.kind == JobKind::Snapshot ? kSnapshotReservation : 0) +
+        // Include the worker's SafeTelemetryRecord snapshot copy as well.
+        (job.snapshot ? 2 * SnapshotRetainedBytes(*job.snapshot) : 0) +
+        StabilityRetainedBytes(job.stability) +
         (job.export_callback || job.mutation_callback
             ? kControlCallbackReservation : 0) +
         job.anonymous_session_id.capacity() + job.record_id.capacity() +
         job.destination.native().capacity() *
             sizeof(std::filesystem::path::value_type);
     if (job.charge > queue_byte_capacity_) {
+        ++status_.queue_byte_limit_hits;
         if (job.kind == JobKind::Snapshot)
             RecordLossLocked(job.anonymous_session_id, job.checkpoint);
         ++status_.queue_drops;
@@ -2040,6 +2254,10 @@ bool TelemetryHistoryStore::EnqueueLocked(Job job, bool terminal_priority) {
     }
     while (jobs_.size() + inflight_jobs_ >= queue_capacity_ ||
            status_.queue_bytes > queue_byte_capacity_ - job.charge) {
+        if (jobs_.size() + inflight_jobs_ >= queue_capacity_)
+            ++status_.queue_job_limit_hits;
+        if (status_.queue_bytes > queue_byte_capacity_ - job.charge)
+            ++status_.queue_byte_limit_hits;
         if (terminal_priority) {
             const auto found = std::find_if(jobs_.begin(), jobs_.end(), [](const Job& queued) {
                 return queued.kind == JobKind::Snapshot &&
@@ -2073,6 +2291,9 @@ bool TelemetryHistoryStore::EnqueueLocked(Job job, bool terminal_priority) {
     jobs_.push_back(std::move(job));
     if (export_job) ++export_jobs_;
     status_.queue_bytes += charge;
+    status_.queue_peak_jobs = (std::max)(status_.queue_peak_jobs,
+        jobs_.size() + inflight_jobs_);
+    status_.queue_peak_bytes = (std::max)(status_.queue_peak_bytes, status_.queue_bytes);
     status_.queue_depth = jobs_.size();
     PublishStatusLocked();
     condition_.notify_one();
@@ -2109,7 +2330,16 @@ void TelemetryHistoryStore::Run() {
                 continue;
             }
             switch (job.kind) {
-            case JobKind::Snapshot: HandleSnapshot(std::move(job)); break;
+            case JobKind::Snapshot: {
+                const auto began = std::chrono::steady_clock::now();
+                HandleSnapshot(std::move(job));
+                const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - began).count();
+                std::lock_guard lock(mutex_);
+                status_.snapshot_max_us = (std::max)(status_.snapshot_max_us,
+                    static_cast<std::uint64_t>(elapsed));
+                break;
+            }
             case JobKind::Export: HandleExport(std::move(job)); break;
             case JobKind::ExportReport: HandleExport(std::move(job)); break;
             case JobKind::ClearReport: HandleClear(std::move(job)); break;
@@ -2214,7 +2444,12 @@ void TelemetryHistoryStore::FlushLossRanges(bool force) {
     }
     bool persisted = false;
     try {
-        RefreshAndPruneReports(64 * 1024);
+        // A loss burst must not trigger a full history scan after every
+        // consumed job and amplify the admission stall that caused it.
+        const auto owned = TelemetryHistoryOwnedBytes(root_);
+        if (!owned || *owned > maximum_bytes_ ||
+            64 * 1024 > maximum_bytes_ - *owned || now >= next_history_refresh_)
+            RefreshAndPruneReports(64 * 1024);
         const std::vector<TelemetryLossRange> batch(
             pending.begin(), pending.end());
         persisted = PersistTelemetryLossRanges(root_, batch, maximum_bytes_);
@@ -2222,7 +2457,7 @@ void TelemetryHistoryStore::FlushLossRanges(bool force) {
     if (persisted) {
         loss_retry_count_ = 0;
         loss_first_failure_ = {};
-        loss_next_attempt_ = {};
+        loss_next_attempt_ = now + std::chrono::seconds(1);
         std::lock_guard lock(mutex_);
         status_.loss_ranges_persisted += pending.size();
         PublishStatusLocked();
@@ -2271,7 +2506,8 @@ void TelemetryHistoryStore::HandleSnapshot(Job job) {
                 job.checkpoint.generation == current_generation_) {
                 const auto bucket = record->source_utc_ms / 1000;
                 const auto charge = sizeof(SafeTelemetryRecord) +
-                    PendingCharge(job.checkpoint);
+                    SnapshotRetainedBytes(record->snapshot) +
+                    StabilityRetainedBytes(record->stability) + PendingCharge(job.checkpoint);
                 if (!current_records_.empty() &&
                     current_records_.back().record->source_utc_ms / 1000 == bucket) {
                     current_record_bytes_ -= current_records_.back().charge;
@@ -2360,7 +2596,11 @@ void TelemetryHistoryStore::HandleSnapshot(Job job) {
     }
     report.bytes += bytes;
     report.terminal = report.terminal || terminal;
-    if (report.terminal && report.retry_count == 0)
+    // The time-based flush alone can fill the bounded pending buffer during
+    // normal high-frequency snapshots. Flush healthy storage at a low water
+    // mark, leaving headroom for the next record; retain backoff on IO failure.
+    if ((report.terminal || report.bytes >= kDefaultMemoryBytes / 4) &&
+        report.retry_count == 0)
         report.next_attempt = std::chrono::steady_clock::now();
     PublishPendingStatus();
 }
@@ -2391,7 +2631,6 @@ void TelemetryHistoryStore::FlushPendingReports(bool force) {
         }
     }
     const auto now = std::chrono::steady_clock::now();
-    bool changed = false;
     for (auto it = pending_reports_.begin(); it != pending_reports_.end();) {
         bool superseded = false;
         {
@@ -2407,13 +2646,38 @@ void TelemetryHistoryStore::FlushPendingReports(bool force) {
             continue;
         }
         std::uint64_t reserve_bytes = 16384;
+        // Atomic append retains the old manifest until its replacement commits.
+        // Include growth of an existing manifest instead of assuming 16 KiB;
+        // bounded allowance covers the new segment and new missing-range rows.
+        std::error_code manifest_error;
+        const auto manifest_bytes = std::filesystem::file_size(root_ /
+            ("cohavora-telemetry-v2-" + it->id) / "manifest.json", manifest_error);
+        if (!manifest_error) {
+            reserve_bytes = (std::max)(reserve_bytes,
+                (std::min)(static_cast<std::uint64_t>(kTelemetryCheckpointMaximumManifestBytes),
+                    manifest_bytes + 1024 + 512 * static_cast<std::uint64_t>(it->records.size())));
+        }
         for (const auto& record : it->records)
             reserve_bytes += record.jsonl.size();
-        RefreshAndPruneReports(reserve_bytes);
+        // Append performs its own locked quota check and full checkpoint
+        // integrity check. Scan unrelated reports only for retention/index
+        // refresh or when actual owned bytes require pruning for this write.
+        const auto owned = TelemetryHistoryOwnedBytes(root_);
+        if (!owned || *owned > maximum_bytes_ ||
+            reserve_bytes > maximum_bytes_ - *owned || now >= next_history_refresh_)
+            RefreshAndPruneReports(reserve_bytes);
+        const auto append_began = std::chrono::steady_clock::now();
         const auto result = AppendTelemetryCheckpoint(
             root_, it->id, it->records,
             (std::min)(maximum_bytes_ / 2, 64ull * 1024ull * 1024ull),
             process_run_id_, maximum_bytes_);
+        {
+            const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+                std::chrono::steady_clock::now() - append_began).count();
+            std::lock_guard lock(mutex_);
+            status_.checkpoint_max_us = (std::max)(status_.checkpoint_max_us,
+                static_cast<std::uint64_t>(elapsed));
+        }
         if (result.success) {
             const auto watermark = result.status.last_committed_revision;
             it->committed_revision = watermark;
@@ -2433,9 +2697,18 @@ void TelemetryHistoryStore::FlushPendingReports(bool force) {
                 status_.checkpoint_revision = watermark;
                 status_.availability = Availability::Valid;
                 status_.reason = "checkpoint_committed";
+                const auto& verified = result.status;
+                const auto id = result.report_directory.filename().string();
+                const auto entry = std::find_if(status_.reports.begin(), status_.reports.end(),
+                    [&](const auto& report) { return report.record_id == id; });
+                const TelemetryReportEntry updated{id, verified.created_utc_ms,
+                    verified.size_bytes, verified.record_count, verified.session_complete};
+                if (entry == status_.reports.end()) status_.reports.push_back(updated);
+                else *entry = updated;
+                std::sort(status_.reports.begin(), status_.reports.end(),
+                    [](const auto& a, const auto& b) { return a.created_utc_ms > b.created_utc_ms; });
                 PublishStatusLocked();
             }
-            changed = true;
             if (it->terminal && it->records.empty()) {
                 it = pending_reports_.erase(it);
                 continue;
@@ -2460,7 +2733,6 @@ void TelemetryHistoryStore::FlushPendingReports(bool force) {
         ++it;
     }
     PublishPendingStatus();
-    if (changed) RefreshAndPruneReports();
 }
 
 void TelemetryHistoryStore::HandleExport(Job job) {
@@ -2571,6 +2843,8 @@ void TelemetryHistoryStore::HandleRetry(Job job) {
 
 void TelemetryHistoryStore::RefreshAndPruneReports(
     std::uint64_t reserve_bytes) {
+    const auto refresh_began = std::chrono::steady_clock::now();
+    next_history_refresh_ = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     struct Candidate {
         TelemetryReportEntry entry;
         std::filesystem::path path;
@@ -2736,6 +3010,12 @@ void TelemetryHistoryStore::RefreshAndPruneReports(
     status_.corrupt_reports = corrupt;
     status_.unsupported_reports = unsupported;
     status_.corrupt_artifacts_pruned += corrupt_pruned;
+    ++status_.history_refresh_count;
+    status_.history_refresh_last_us = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - refresh_began).count());
+    status_.history_refresh_max_us = (std::max)(status_.history_refresh_max_us,
+        status_.history_refresh_last_us);
     if (error || accounting_failed) {
         ++status_.write_failures;
         status_.availability = Availability::Invalid;

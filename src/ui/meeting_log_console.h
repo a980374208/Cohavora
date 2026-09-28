@@ -36,6 +36,7 @@ class MeetingLogConsoleWindow : public QDialog {
 	Q_OBJECT
 public:
 	static MeetingLogConsoleWindow& Instance();
+	static void DestroyInstance();
 
 	explicit MeetingLogConsoleWindow(QWidget *parent = nullptr);
 	~MeetingLogConsoleWindow() override;

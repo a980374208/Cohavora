@@ -10,6 +10,10 @@
 
 namespace livekit::telemetry {
 
+// The atomic append temporarily retains both old and new manifests. Callers
+// reserving global history space must include this bound before pruning.
+inline constexpr std::size_t kTelemetryCheckpointMaximumManifestBytes = 1024 * 1024;
+
 struct TelemetryCheckpointStatus {
     bool valid = false;
     bool session_complete = false;

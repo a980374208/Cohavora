@@ -307,6 +307,7 @@ public:
 	void setVideoEnabled(bool enabled);
 	bool isVideoEnabled() const { return _videoEnabled; }
 	void setScreenShareState(livekit::ScreenShareState state);
+	void setScreenShareAvailable(bool available);
 
 	void setParticipantCount(int count);
 	void setChatUnreadCount(int count);
@@ -358,6 +359,9 @@ private:
 		return _screenShareState == State::Starting || _screenShareState == State::Active ||
 			_screenShareState == State::StopFailed;
 	}
+	bool screenShareControlEnabled() const {
+		return (!_inRecovery && _screenShareAvailable) || canStopScreenShare();
+	}
 
 	struct ToolItem {
 		int id;
@@ -372,6 +376,7 @@ private:
 	bool _speakerMuted = false;
 	bool _videoEnabled = true;
 	livekit::ScreenShareState _screenShareState = livekit::ScreenShareState::Idle;
+	bool _screenShareAvailable = true;
 	int _participantCount = 1;
 	int _chatUnreadCount = 0;
 
