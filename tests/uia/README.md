@@ -1,5 +1,91 @@
 # Windows UIA 控件回归
 
+## 产品 UIA 30 分钟稳态及 2 小时混合复测
+
+`tests/runtime/product_uia_retest.py` 为独立本机监督入口，复用
+`product_desktop.ps1` 的真实 UIA Pattern 操作及 `product_pilot_checkpoints.py`。
+原 Pilot/8 小时正式验收入口及其门槛不变。
+
+原入口不能直接证明本次目标：缺少独立的稳态阶段/时长证据，固定 400 秒动作超时
+不能区分长时间等待与驱动停滞，后台进程探针也不能证明 UI 消息循环响应。
+现有相关历史运行还存在会后导出菜单超时；本工具保留这类失败，不重试已提交动作，
+不宣称已修复产品或菜单问题。
+
+默认在同一个产品进程中执行：
+
+1. 入会后固定 UI 状态保持至少 1800 秒，再离会、导出。
+2. 12 个混合周期，每周期入会、分页、共享开始/停止、日志开关、在会等待、离会、导出。
+   各周期从入会完成后计时至少 600 秒，累计至少 7200 秒；超时不会补发或跳过周期。
+3. 正常关闭产品并核对退出码。启动、离会、导出开销不抵扣阶段时长，因此总运行时间超过 150 分钟。
+
+这是一组 **UI 生命周期混合动作**，不等价于 `meeting_soak.py` 的 SDK soft/full reconnect、
+Pin/Unpin、白板等混合矩阵。物理断网、远端 RTP/音质、服务端负载及 GPU 内存不在本入口的验收范围。
+
+前提：Windows 解锁交互桌面、Python 3.10+、Windows PowerShell、专用测试账号、
+有效会议和足够出现分页的远端视频参与者；可用摄像头/麦克风/共享源按产品原 UIA 条件检查。
+账号从现有 `LIVEKIT_UIA_ACCOUNT`、`LIVEKIT_UIA_PASSWORD`、`LIVEKIT_UIA_MEETING_ID`、
+`LIVEKIT_UIA_SERVICE_URL` 环境变量注入。不会创建账号、部署远端或上传上下文。
+执行二进制必须由调用者选择并确认来源；工具保存其 SHA-256，但
+`binary_source_provenance=NOT_VERIFIED`，不能仅凭文件哈希宣称二进制对应源码 HEAD。
+
+```powershell
+# 已提交产品构建：全量时长，默认 1800 + 7200 秒。
+python tests/runtime/product_uia_retest.py --mode retest `
+  --executable <committed-build>/Cohavora.exe --output out/<new-retest-run>
+
+# 相同真实会议操作，缩短等待；不是长期稳定性或内存通过证据。
+python tests/runtime/product_uia_retest.py --mode smoke `
+  --executable <committed-build>/Cohavora.exe --output out/<new-smoke-run>
+
+# 无会议、无媒体，仅产品访客 UIA 发现和本机窗口监督。
+python tests/runtime/product_uia_retest.py --mode probe `
+  --executable <committed-build>/Cohavora.exe --output out/<new-probe-run>
+
+# 无服务、无需产品二进制：回归及真实桌面故障注入。
+python tests/runtime/test_product_uia_retest.py -v
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/uia/test_retest_schedule.ps1
+python tests/runtime/test_product_uia_desktop.py --output out/<new-desktop-tests>
+```
+
+监督器独立于 UIA 线程：固定产品 PID、创建时间和镜像路径后持有进程句柄；仅终止本轮
+已核实身份的产品。每秒采集 Private Bytes、Working Set、句柄数，向可见顶层窗口发送
+有界 WM_NULL，连续 15 秒不响应判 UI 卡死。启动超时 120 秒、UIA 无动作进展 180 秒、
+原生探针无新序号 15 秒均失败；总时限独立生效。稳态/混合等待每 2 秒重新通过 UIA
+确认会议控件及离会提示，并记录心跳。锁屏、超过 10 秒的采样空洞、磁盘余量不足 1 GiB、
+采集器提前退出、产品日志丢弃/写入失败都不能通过。
+
+内存复用既有一分钟桶中位数/成对斜率算法：稳态排除前 5 分钟并要求至少 95% 采样覆盖；
+混合只比较每轮离会后的检查点中位数，要求所有周期都有检查点。增长限值 64 MiB，
+斜率限值 64 MiB/小时，均在启动前写入 profile。不足 3 个桶/120 秒跨度为
+`INSUFFICIENT_DATA`，完整复测不会通过；短测原样保留不足结论。
+
+每次必须使用新目录。`run.json` 保存 HEAD、脚本/二进制指纹，`events.jsonl` 保存动作和故障，
+`metrics.csv` 保存独立资源采样，`summary.json` 保存阶段实际时长、结果和内存趋势。
+这些白名单文件归档为同级 ZIP、manifest 和 ZIP SHA-256。产品 checkpoint 另存于
+`checkpoint-archive/`，逐段校验产品 manifest 的大小/SHA-256，预算 8 GiB；保留整个运行目录
+才能保留这部分证据及产品 UIA 导出包。环境变量、账号密码、profile 和任意 stdout/stderr
+不加入摘要 ZIP。监督器被强制结束时只留下 RUNNING，不能当作 PASS。
+
+`status=PASS` 仅表示声明的 UI 操作/监督范围完成，`l3_status` 和媒体验收始终为 `NOT_RUN`；
+完整媒体验收仍需既有独立旁证链。当前分支已完成实服 smoke，30 分钟＋2 小时长测仍 NOT_RUN。
+
+2026-09-28 短测记录：离线 14 项及实际 Run-Cycle 调度测试通过；真实 WPF 桌面 UIA 的
+正常操作、异常退出、动作停滞见 `out/uia-retest-desktop-07/desktop-checks.json`，
+真实 UI 线程卡死修正注入后见 `out/uia-retest-desktop-08/desktop-checks.json`（约 2.8 秒检出）。
+保留 01～07 的所有失败，特别是 07 中的旧卡死注入：PowerShell Start-Sleep 仍会泵送消息，
+它只能证明动作 watchdog；08 使用 Thread.Sleep 才验证独立窗口卡死判定。
+上述夹具均来自本分支，未使用主工作区未提交的产品实现。
+
+随后基于已提交 `0b4cc70ad443df37aa86c0174e742b78614ebbdf` 隔离构建产品并完成实服 smoke：
+约 121 秒完成 3 次入退会和导出、2 轮混合操作，退出码 0；115 份资源采样、178 个 checkpoint
+段及摘要 ZIP 完整性校验通过，远端测试负载正常停止。产品 SHA-256 为
+`cd191e0d7cfebde3343bfe7c5180bc7e53b3b852796ef98d65e584c76ad942d0`。
+本地证据为 `out/product-smoke-committed-01-control/smoke-verification.json`，构建来源为
+`out/committed-smoke-build/binary-provenance.json`；运行产物不随源码提交。
+长期内存趋势为 INSUFFICIENT_DATA，完整长测与音视频质量仍 NOT_RUN。
+
+## 控件夹具
+
 使用真实 `MeetingLogConsoleWindow` 和 `WhiteboardPanel`，复用现有 Qt 测试链接环境。
 fixture 只创建窗口、注入两条已注册的安全日志并运行事件循环，不创建 Room、
 不启动媒体或日志落盘 pipeline。所有受测操作均由独立 PowerShell 进程通过
