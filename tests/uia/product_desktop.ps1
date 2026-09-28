@@ -7,8 +7,16 @@ param(
     [int]$LogPairSeconds = 30,
     [int]$StopSettleSeconds = 10,
     [int]$RoomSettleSeconds = 10,
+    [ValidatePattern('^[0-9a-f]{32}$')][string]$RunId = [Guid]::NewGuid().ToString('N'),
     [switch]$ProbeOnly,
-    [switch]$Pilot
+    [switch]$Pilot,
+    [switch]$HeapDiagnostic,
+    [switch]$HeapDiagnosticNoShare,
+    [switch]$HeapCheckOnly,
+    [switch]$HeapDiagnosticNoExport,
+    [switch]$HeapPageCheck,
+    [switch]$CrashDiagnostic,
+    [switch]$IsolateUiaCycles
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
@@ -20,6 +28,13 @@ public static class ProductDesktop {
     [DllImport("user32.dll")] static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool GetUserObjectInformation(IntPtr h, int index, StringBuilder value, int length, out int needed);
     [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr h);
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
+    public static uint ExitCode(IntPtr handle) {
+        uint code;
+        if (!GetExitCodeProcess(handle, out code))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        return code;
+    }
     public static bool Unlocked() {
         var h = OpenInputDesktop(0, false, 1);
         if (h == IntPtr.Zero) return false;
@@ -33,12 +48,17 @@ if (Test-Path -LiteralPath $OutputDirectory) { throw 'Output directory must be n
 $Executable = (Resolve-Path -LiteralPath $Executable).Path
 $null = New-Item -ItemType Directory -Path $OutputDirectory
 $OutputDirectory = (Resolve-Path -LiteralPath $OutputDirectory).Path
-$script:runId = [Guid]::NewGuid().ToString('N')
+$script:runId = $RunId
 $script:cycle = 0
 $script:completed = 0
 $script:child = $null
+$script:rootCache = @{}
 $script:step = 'prerequisites'
 $script:operation = ''
+$script:cycleId = ''
+$script:nativeProcessRun = $null
+$script:nativeSession = $null
+$script:participantHash = $null
 $script:lastResourceSample = [DateTime]::MinValue
 $script:layout = 'unknown'
 $started = [DateTime]::UtcNow
@@ -46,12 +66,50 @@ $oldAppData = $env:APPDATA
 $oldLocalAppData = $env:LOCALAPPDATA
 $oldQtPlatform = $env:QT_QPA_PLATFORM
 $oldQtAccessibility = $env:QT_ACCESSIBILITY
+$oldSettingsRoot = $env:LIVEKIT_UIA_SETTINGS_ROOT
+if ($HeapDiagnosticNoShare -and !$HeapDiagnostic) { throw 'NO_SHARE_REQUIRES_HEAP_DIAGNOSTIC' }
+if ($HeapCheckOnly -and !$HeapDiagnostic) { throw 'HEAP_CHECK_REQUIRES_DIAGNOSTIC' }
+if ($HeapDiagnosticNoExport -and !$HeapDiagnostic) { throw 'NO_EXPORT_REQUIRES_HEAP_DIAGNOSTIC' }
+if ($HeapPageCheck -and (!$HeapDiagnostic -or $HeapCheckOnly)) { throw 'PAGE_CHECK_REQUIRES_EXCLUSIVE_HEAP_DIAGNOSTIC' }
+if ($CrashDiagnostic -and (!$HeapDiagnostic -or $HeapCheckOnly -or $HeapPageCheck)) { throw 'CRASH_DIAGNOSTIC_REQUIRES_EXCLUSIVE_MODE' }
+if ($IsolateUiaCycles -and !$HeapDiagnostic) {throw 'ISOLATED_CLIENT_EXPERIMENT_REQUIRES_DIAGNOSTIC'}
+if ($HeapDiagnostic) {
+    if (!$Pilot -or $ProbeOnly) { throw 'HEAP_DIAGNOSTIC_REQUIRES_PILOT' }
+    . (Join-Path $PSScriptRoot '../runtime/product_heap_diagnostic.ps1')
+}
 function Record([string]$Action, [string]$Phase) {
+    if ($env:LIVEKIT_UIA_REMOTE_CONTEXT -eq '1') { Sync-ObserverContext $Action $Phase }
     $row = [ordered]@{schema=1; run_id=$script:runId; cycle=$script:cycle;
+        cycle_id=$script:cycleId;process_run_id=$script:nativeProcessRun;
+        anonymous_session_id=$script:nativeSession;
+        participant_sha256=$script:participantHash;
         operation_id=$script:operation; action=$Action; phase=$Phase;
         pid=$(if ($script:child) { $script:child.Id } else { $null }); utc=[DateTime]::UtcNow.ToString('o')}
     [IO.File]::AppendAllText((Join-Path $OutputDirectory 'uia-actions.jsonl'),
         (($row | ConvertTo-Json -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
+}
+function Sync-ObserverContext([string]$Action, [string]$Phase) {
+    $probes = @(Get-Content -LiteralPath $env:LIVEKIT_UIA_PILOT_PROBE -Tail 3 | ForEach-Object {
+        try { $_ | ConvertFrom-Json } catch { }
+    })
+    if (!$probes.Count) { throw 'NATIVE_CONTEXT_MISSING' }
+    $probe = $probes[-1]
+    if ($probe.run_id -ne $script:runId) { throw 'NATIVE_CONTEXT_RUN_MISMATCH' }
+    $script:nativeProcessRun = $probe.process_run_id
+    $script:participantHash = $probe.participant_sha256
+    if ($Action -eq 'join' -and $Phase -eq 'uia_observed') {
+        if (!$probe.anonymous_session_id) { throw 'NATIVE_SESSION_CONTEXT_MISSING' }
+        $script:nativeSession = $probe.anonymous_session_id
+    }
+    $context = [ordered]@{run_id=$script:runId;cycle=$script:cycle;cycle_id=$script:cycleId;
+        operation_id=$script:operation;action=$Action;phase=$Phase;pid=$script:child.Id;
+        process_run_id=$script:nativeProcessRun;anonymous_session_id=$script:nativeSession;
+        participant_sha256=$script:participantHash}
+    $path = Join-Path $OutputDirectory 'current-operation.json'
+    $context | ConvertTo-Json -Compress | Set-Content ($path+'.tmp') -Encoding UTF8
+    Move-Item -LiteralPath ($path+'.tmp') -Destination $path -Force
+    & python (Join-Path $PSScriptRoot '../runtime/product_pilot_context.py') --file $path
+    if ($LASTEXITCODE -ne 0) { throw 'REMOTE_CONTEXT_FENCE_FAILED' }
 }
 function Save-Result([string]$Verdict, [string]$Reason) {
     [ordered]@{schema=1; run_id=$script:runId; verdict=$Verdict; reason=$Reason;
@@ -76,16 +134,79 @@ function Sample-Resource([string]$Phase) {
     [IO.File]::AppendAllText((Join-Path $OutputDirectory 'uia-resources.jsonl'),
         (($row | ConvertTo-Json -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
 }
-function Get-Nodes {
-    if (!$script:child -or $script:child.HasExited) { throw "Product exited during $script:step" }
+function New-TreeCacheRequest {
+    $request = [Windows.Automation.CacheRequest]::new()
+    $request.AutomationElementMode = [Windows.Automation.AutomationElementMode]::None
+    $request.TreeScope = [Windows.Automation.TreeScope]::Element
+    foreach ($property in @('AutomationId','ControlType','Name','ProcessId','IsEnabled','IsOffscreen','NativeWindowHandle','RuntimeId')) {
+        $request.Add([Windows.Automation.AutomationElement]::("${property}Property"))
+    }
+    return $request
+}
+function Get-ProcessRoots {
+    $condition = [Windows.Automation.PropertyCondition]::new(
+        [Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$script:child.Id)
+    # Obtain the desktop handle before activating cache-only mode. No other
+    # process's descendants are traversed.
+    $desktop = [Windows.Automation.AutomationElement]::RootElement
+    $scope = (New-TreeCacheRequest).Activate()
+    try { $roots = $desktop.FindAll([Windows.Automation.TreeScope]::Children, $condition) }
+    finally { $scope.Dispose() }
+    $next = @{}
+    foreach ($root in $roots) {
+        $info = $root.Cached
+        $runtimeId = $root.GetCachedPropertyValue([Windows.Automation.AutomationElement]::RuntimeIdProperty) -join '.'
+        $key = "$($script:child.Id):$($info.NativeWindowHandle):$runtimeId"
+        if (!$info.NativeWindowHandle) { throw 'UIA_ROOT_WINDOW_HANDLE_MISSING' }
+        $live = $script:rootCache[$key]
+        if (!$live) {
+            $live = [Windows.Automation.AutomationElement]::FromHandle([IntPtr]$info.NativeWindowHandle)
+        }
+        if ($live.Current.ProcessId -ne $script:child.Id) { throw 'UIA_ROOT_PROCESS_CHANGED' }
+        $next[$key] = $live
+        [pscustomobject]@{Element=$live;Current=$info}
+    }
+    $script:rootCache = $next
+}
+function Get-Nodes([switch]$Live) {
+    if (!$script:child) { throw "Product missing during $script:step" }
+    if ($script:child.HasExited) {
+        throw "PROCESS_EXIT: $script:step code=$($script:child.ExitCode)"
+    }
     $condition = New-Object Windows.Automation.PropertyCondition(
         [Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$script:child.Id)
-    return @([Windows.Automation.AutomationElement]::RootElement.FindAll(
-        [Windows.Automation.TreeScope]::Descendants, $condition))
+    for ($attempt = 0; $attempt -lt 10; ++$attempt) {
+        try {
+            $nodes = foreach ($root in Get-ProcessRoots) {
+                if ($Live) {
+                    $root.Element
+                    $root.Element.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)
+                } else {
+                    # Full FindAll results create native UiaNode references in
+                    # the product that survive managed client GC. Tree-only
+                    # discovery needs immutable property data, not live nodes.
+                    [pscustomobject]@{Current=$root.Current}
+                    $scope = (New-TreeCacheRequest).Activate()
+                    try { $children = $root.Element.FindAll([Windows.Automation.TreeScope]::Descendants, $condition) }
+                    finally { $scope.Dispose() }
+                    foreach ($node in $children) { [pscustomobject]@{Current=$node.Cached} }
+                }
+            }
+            return @($nodes)
+        } catch {
+            if ($script:child.HasExited) {
+                throw "PROCESS_EXIT: $script:step code=$($script:child.ExitCode)"
+            }
+            if ($attempt -eq 9) {
+                throw "UIA_TREE_UNAVAILABLE: pid=$($script:child.Id) $($_.Exception.Message)"
+            }
+            Start-Sleep -Milliseconds 200
+        }
+    }
 }
 function Save-Tree([string]$Name) {
     if (!$script:child -or $script:child.HasExited) { return }
-    $rows = foreach ($node in Get-Nodes) {
+    $rows = foreach ($node in Get-Nodes -Live) {
         try {
             $c = $node.Current
             [ordered]@{id=$c.AutomationId; role=$c.ControlType.ProgrammaticName;
@@ -97,12 +218,32 @@ function Save-Tree([string]$Name) {
     ConvertTo-Json -InputObject @($rows) -Depth 4 |
         Set-Content -LiteralPath (Join-Path $OutputDirectory "$Name.json") -Encoding UTF8
 }
+function Get-LiveNode([string]$Id, [Windows.Automation.ControlType]$Role, [switch]$Optional) {
+    $condition = [Windows.Automation.AndCondition]::new(
+        [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,[int]$script:child.Id),
+        [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::AutomationIdProperty,$Id))
+    $matches = @(foreach ($root in Get-ProcessRoots) {
+        if ($root.Current.AutomationId -eq $Id) { $root.Element }
+        $root.Element.FindAll([Windows.Automation.TreeScope]::Descendants,$condition)
+    })
+    if ($Optional -and !$matches.Count) { return $null }
+    if ($matches.Count -ne 1) { throw "CONTROL_COUNT: $Id=$($matches.Count) pid=$($script:child.Id)" }
+    $c = $matches[0].Current
+    if ($Optional -and $c.IsOffscreen) { return $null }
+    if ($c.ProcessId -ne $script:child.Id -or $c.ControlType -ne $Role -or
+        [string]::IsNullOrWhiteSpace($c.Name) -or $c.IsOffscreen) { throw "CONTROL_CONTRACT: $Id changed after discovery" }
+    return $matches[0]
+}
 function Find-Node([string]$Id, [Windows.Automation.ControlType]$Role, [switch]$Optional) {
     $script:step = "discover $Id"
-    $matches = @(Get-Nodes | Where-Object {
-        try { $c = $_.Current
-            $c.AutomationId -eq $Id -or $c.AutomationId.EndsWith(".$Id", [StringComparison]::Ordinal)
-        } catch [Windows.Automation.ElementNotAvailableException] { $false }
+    $matches = @(foreach ($node in Get-Nodes) {
+        try {
+            $c = $node.Current
+            $automationId = [string]$c.AutomationId
+            if ($automationId -eq $Id -or $automationId.EndsWith(".$Id", [StringComparison]::Ordinal)) {
+                [pscustomobject]@{Current=$c;Id=$automationId}
+            }
+        } catch [Windows.Automation.ElementNotAvailableException] { }
     })
     if ($Optional -and $matches.Count -eq 0) { return $null }
     if ($matches.Count -ne 1) { throw "CONTROL_COUNT: $Id=$($matches.Count) pid=$($script:child.Id)" }
@@ -111,17 +252,37 @@ function Find-Node([string]$Id, [Windows.Automation.ControlType]$Role, [switch]$
     if ($c.ControlType -ne $Role -or [string]::IsNullOrWhiteSpace($c.Name) -or $c.IsOffscreen) {
         throw "CONTROL_CONTRACT: $Id role=$($c.ControlType.ProgrammaticName) enabled=$($c.IsEnabled) offscreen=$($c.IsOffscreen)"
     }
-    return $matches[0]
+    return Get-LiveNode $matches[0].Id $Role -Optional:$Optional
 }
 function Wait-For([string]$Description, [scriptblock]$Condition, [int]$Seconds = 45) {
     $script:step = $Description
     $deadline = [DateTime]::UtcNow.AddSeconds($Seconds)
     do {
         if ($script:child.HasExited) { throw "PROCESS_EXIT: $Description code=$($script:child.ExitCode)" }
+        if (!$ProbeOnly) {
+            $notice = New-Object Windows.Automation.AndCondition(
+                (New-Object Windows.Automation.PropertyCondition(
+                    [Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$script:child.Id)),
+                (New-Object Windows.Automation.PropertyCondition(
+                    [Windows.Automation.AutomationElement]::AutomationIdProperty, 'meetingDepartureNotice')))
+            try {
+                $departure = @(Get-Nodes | Where-Object {
+                    $_.Current.AutomationId -eq 'meetingDepartureNotice' })
+            } catch {
+                if ($script:child.HasExited) {
+                    throw "PROCESS_EXIT: $Description code=$($script:child.ExitCode)"
+                }
+                Start-Sleep -Milliseconds 200
+                continue
+            }
+            if ($departure) {
+                throw "MEETING_DEPARTURE_NOTICE: $Description"
+            }
+        }
         Sample-Resource 'active'
         try { $value = & $Condition; if ($value) { return $value } }
         catch [Windows.Automation.ElementNotAvailableException] { }
-        Start-Sleep -Milliseconds 200
+        Start-Sleep -Seconds 1
     } while ([DateTime]::UtcNow -lt $deadline)
     throw "TIMEOUT: $Description"
 }
@@ -133,7 +294,9 @@ function Require-Pattern($Node, [Windows.Automation.AutomationPattern]$Id) {
     return $pattern
 }
 function Invoke([string]$Id, [Windows.Automation.ControlType]$Role = [Windows.Automation.ControlType]::Button) {
-    $node = Find-Node $Id $Role
+    # A layout update can briefly remove a provider. Retry discovery only;
+    # never repeat an action whose submission may already have succeeded.
+    $node = Wait-For "$Id available for invoke" { Find-Node $Id $Role -Optional } 15
     if (!$node.Current.IsEnabled) { throw "DISABLED_CONTROL: $Id" }
     (Require-Pattern $node ([Windows.Automation.InvokePattern]::Pattern)).Invoke()
 }
@@ -143,13 +306,27 @@ function Set-Value([string]$Id, [string]$Value) {
     $pattern.SetValue($Value)
 }
 function Toggle-To([string]$Id, [Windows.Automation.ToggleState]$Expected) {
-    $node = Find-Node $Id ([Windows.Automation.ControlType]::CheckBox)
+    $node = Wait-For "$Id available" {
+        Find-Node $Id ([Windows.Automation.ControlType]::CheckBox) -Optional
+    } 15
     $pattern = Require-Pattern $node ([Windows.Automation.TogglePattern]::Pattern)
     if ($pattern.Current.ToggleState -ne $Expected) { $pattern.Toggle() }
     $null = Wait-For "$Id toggle=$Expected" {
-        $current = Require-Pattern (Find-Node $Id ([Windows.Automation.ControlType]::CheckBox)) `
-            ([Windows.Automation.TogglePattern]::Pattern)
-        $current.Current.ToggleState -eq $Expected
+        if ($Id -eq 'meetingMicrophone' -and $Expected -eq [Windows.Automation.ToggleState]::On) {
+            $unavailable = Find-Node 'meetingMicrophoneUnavailable' ([Windows.Automation.ControlType]::Window) -Optional
+            if ($unavailable) {
+                Save-Tree ('cycle-{0:d4}-microphone-unavailable' -f $script:cycle)
+                Invoke 'meetingMicrophoneUnavailableDismiss'
+                [ordered]@{run_id=$script:runId;cycle=$script:cycle;operation_id=$script:operation;
+                    pid=$script:child.Id;utc=[DateTime]::UtcNow.ToString('o');device='microphone';
+                    result='DEFERRED';reason='product_reported_no_capture_endpoint'} |
+                    ConvertTo-Json -Compress | Add-Content (Join-Path $OutputDirectory 'uia-device-outcomes.jsonl') -Encoding UTF8
+                return $true # unavailable outcome is separately checked against OS evidence
+            }
+        }
+        $control = Find-Node $Id ([Windows.Automation.ControlType]::CheckBox) -Optional
+        if (!$control) { return $false }
+        (Require-Pattern $control ([Windows.Automation.TogglePattern]::Pattern)).Current.ToggleState -eq $Expected
     }
 }
 function Action([string]$Name, [scriptblock]$Body) {
@@ -160,27 +337,15 @@ function Action([string]$Name, [scriptblock]$Body) {
 }
 function Wait-Top([string]$Id) {
     return Wait-For "$Id window" {
-        $windows = @(Get-Nodes | Where-Object {
-                $_.Current.AutomationId -eq $Id -or
-                $_.Current.AutomationId.EndsWith(".$Id", [StringComparison]::Ordinal) })
-        if ($windows.Count -gt 1) { throw "AMBIGUOUS_WINDOW: $Id" }
-        if ($windows.Count -eq 1) {
-            $c = $windows[0].Current
-            if ($c.ControlType -ne [Windows.Automation.ControlType]::Window -or
-                [string]::IsNullOrWhiteSpace($c.Name) -or $c.IsOffscreen) {
-                throw "WINDOW_CONTRACT: $Id role=$($c.ControlType.ProgrammaticName)"
-            }
-            $null = Require-Pattern $windows[0] ([Windows.Automation.WindowPattern]::Pattern)
-            $windows[0]
+        $window = Find-Node $Id ([Windows.Automation.ControlType]::Window) -Optional
+        if ($window) {
+            $null = Require-Pattern $window ([Windows.Automation.WindowPattern]::Pattern)
+            $window
         }
     }
 }
 function Select-FirstShareSource {
     $combo = Find-Node 'screenShareSource' ([Windows.Automation.ControlType]::ComboBox)
-    $expand = $null
-    if ($combo.TryGetCurrentPattern([Windows.Automation.ExpandCollapsePattern]::Pattern, [ref]$expand)) {
-        $expand.Expand()
-    } else { (Require-Pattern $combo ([Windows.Automation.InvokePattern]::Pattern)).Invoke() }
     $list = Wait-For 'share source list' {
         $lists = @($combo.FindAll([Windows.Automation.TreeScope]::Descendants,
             [Windows.Automation.Condition]::TrueCondition) | Where-Object {
@@ -191,33 +356,60 @@ function Select-FirstShareSource {
         [Windows.Automation.Condition]::TrueCondition) | Where-Object {
             $_.Current.ControlType -eq [Windows.Automation.ControlType]::ListItem })
     if ($items.Count -lt 1) { throw 'NO_SHARE_SOURCE' }
-    (Require-Pattern $items[0] ([Windows.Automation.SelectionItemPattern]::Pattern)).Select()
+    $selectedName = $items[0].Current.Name
+    $selection = Require-Pattern $items[0] ([Windows.Automation.SelectionItemPattern]::Pattern)
+    if (!$selection.Current.IsSelected) { $selection.Select() }
     $null = Wait-For 'share source committed' {
-        $value = Require-Pattern (Find-Node 'screenShareSource' ([Windows.Automation.ControlType]::ComboBox)) `
-            ([Windows.Automation.ValuePattern]::Pattern)
-        $value.Current.Value -eq $items[0].Current.Name
+        $current = Find-Node 'screenShareSource' ([Windows.Automation.ControlType]::ComboBox) -Optional
+        if (!$current) { return $false }
+        $value = Require-Pattern $current ([Windows.Automation.ValuePattern]::Pattern)
+        $value.Current.Value -eq $selectedName
     }
     Invoke 'screenShareAccept'
 }
 function Share-State([Windows.Automation.ToggleState]$Expected) {
-    $node = Find-Node 'meetingShareScreen' ([Windows.Automation.ControlType]::CheckBox)
-    return (Require-Pattern $node ([Windows.Automation.TogglePattern]::Pattern)).Current.ToggleState -eq $Expected
+    if (Find-Node 'meetingScreenShareFailure' ([Windows.Automation.ControlType]::Window) -Optional) {
+        throw 'SCREEN_SHARE_FAILED: named product error dialog observed'
+    }
+    $node = Find-Node 'meetingShareScreen' ([Windows.Automation.ControlType]::CheckBox) -Optional
+    if (!$node) { return $false }
+    $stateMatches = (Require-Pattern $node ([Windows.Automation.TogglePattern]::Pattern)).Current.ToggleState -eq $Expected
+    if ($Expected -eq [Windows.Automation.ToggleState]::On) {
+        # Toggle On also represents Starting/StopFailed. The annotation control
+        # is visible only after the native projection reaches Active.
+        return $stateMatches -and ($null -ne (Find-Node 'screenShareAnnotation' ([Windows.Automation.ControlType]::Button) -Optional))
+    }
+    return $stateMatches
+}
+function Assert-ShareActive {
+    if (!(Share-State ([Windows.Automation.ToggleState]::On))) { throw 'SCREEN_SHARE_LOST_DURING_ACTIVE_WINDOW' }
 }
 function Start-Product {
     $profile = Join-Path $OutputDirectory 'profile'
     $env:APPDATA = Join-Path $profile 'Roaming'
     $env:LOCALAPPDATA = Join-Path $profile 'Local'
+    $env:LIVEKIT_UIA_SETTINGS_ROOT = Join-Path $profile 'Settings'
     $null = New-Item -ItemType Directory -Force -Path $env:APPDATA,$env:LOCALAPPDATA
     $env:QT_QPA_PLATFORM = 'windows'
     $env:QT_ACCESSIBILITY = '1'
-    $script:child = Start-Process -FilePath $Executable -WorkingDirectory (Split-Path $Executable) -PassThru
+    if ($HeapDiagnostic) {
+        Start-HeapDiagnosticProduct
+    } else {
+        $script:child = Start-Process -FilePath $Executable -ArgumentList '--debug' `
+        -WorkingDirectory (Split-Path $Executable) -PassThru `
+        -RedirectStandardOutput (Join-Path $OutputDirectory 'product.stdout.log') `
+        -RedirectStandardError (Join-Path $OutputDirectory 'product.stderr.log')
+    }
+    # Retain the native handle before exit. Windows PowerShell's Start-Process
+    # wrapper can otherwise return a null ExitCode even after WaitForExit.
+    $script:childHandle = $script:child.Handle
     $null = Wait-For 'product login or main window' {
             (Find-Node 'mainJoinMeeting' ([Windows.Automation.ControlType]::Button) -Optional) -or
             (Find-Node 'loginAccount' ([Windows.Automation.ControlType]::Edit) -Optional)
         }
         Save-Tree ("cycle-{0:d4}-initial" -f $script:cycle)
         if ($ProbeOnly) {
-            $tabs = @(Get-Nodes | Where-Object {
+            $tabs = @(Get-Nodes -Live | Where-Object {
                 $_.Current.ControlType -eq [Windows.Automation.ControlType]::TabItem })
             if ($tabs.Count -ne 3) { throw "GUEST_TAB_COUNT: $($tabs.Count)" }
             (Require-Pattern $tabs[2] ([Windows.Automation.InvokePattern]::Pattern)).Invoke()
@@ -242,7 +434,12 @@ function Start-Product {
                 Set-Value 'loginAccount' $env:LIVEKIT_UIA_ACCOUNT
                 Set-Value 'loginPassword' $env:LIVEKIT_UIA_PASSWORD
                 if ($env:LIVEKIT_UIA_SERVICE_URL) {
-                    Invoke 'serverSettingsToggle'
+                    if (!(Find-Node 'serverBaseUrl' ([Windows.Automation.ControlType]::Edit) -Optional)) {
+                        Invoke 'serverSettingsToggle'
+                    }
+                    $null = Wait-For 'server settings field' {
+                        Find-Node 'serverBaseUrl' ([Windows.Automation.ControlType]::Edit) -Optional
+                    }
                     Set-Value 'serverBaseUrl' $env:LIVEKIT_UIA_SERVICE_URL
                 }
                 Invoke 'primaryBtn'
@@ -262,28 +459,48 @@ function Run-Cycle {
             Toggle-To 'joinCamera' ([Windows.Automation.ToggleState]::On)
             Invoke 'joinBtn'
             $null = Wait-Top 'MeetingRoomWindow'
+            $null = Wait-For 'remote video paging controls' {
+                Find-Node 'videoPageSize' ([Windows.Automation.ControlType]::ComboBox) -Optional
+            } 90
             $layoutPattern = Require-Pattern `
                 (Find-Node 'videoPageSize' ([Windows.Automation.ControlType]::ComboBox)) `
                 ([Windows.Automation.ValuePattern]::Pattern)
             $script:layout = $layoutPattern.Current.Value
+            $null = Wait-For 'meeting local startup ready' {
+                $control = Find-Node 'meetingShareScreen' ([Windows.Automation.ControlType]::CheckBox) -Optional
+                $control -and $control.Current.IsEnabled
+            } 90
+            # Meeting policy can override the join preference and publish a
+            # muted microphone. Explicitly operate the product control and
+            # verify its Toggle state; SFU/RTP evidence verifies delivery.
+            Toggle-To 'meetingMicrophone' ([Windows.Automation.ToggleState]::On)
+            Save-Tree ('cycle-{0:d4}-meeting' -f $script:cycle)
             Sample-Resource 'joined'
         }
         Action 'page' {
             $null = Find-Node 'videoPageIndicator' ([Windows.Automation.ControlType]::Text)
-            if ((Find-Node 'previousVideoPage' ([Windows.Automation.ControlType]::Button)).Current.IsEnabled -or
-                !(Find-Node 'nextVideoPage' ([Windows.Automation.ControlType]::Button)).Current.IsEnabled) {
-                throw 'REMOTE_PAGE_UNAVAILABLE'
+            $null = Wait-For 'first video page ready' {
+                $previous = Find-Node 'previousVideoPage' ([Windows.Automation.ControlType]::Button) -Optional
+                $next = Find-Node 'nextVideoPage' ([Windows.Automation.ControlType]::Button) -Optional
+                $previous -and $next -and (-not $previous.Current.IsEnabled) -and $next.Current.IsEnabled
             }
             Invoke 'nextVideoPage'
             $null = Wait-For 'second video page' {
-                (Find-Node 'previousVideoPage' ([Windows.Automation.ControlType]::Button)).Current.IsEnabled
+                $previous = Find-Node 'previousVideoPage' ([Windows.Automation.ControlType]::Button) -Optional
+                $previous -and $previous.Current.IsEnabled
             }
             Invoke 'previousVideoPage'
             $null = Wait-For 'first video page restored' {
-                !(Find-Node 'previousVideoPage' ([Windows.Automation.ControlType]::Button)).Current.IsEnabled
+                $previous = Find-Node 'previousVideoPage' ([Windows.Automation.ControlType]::Button) -Optional
+                $previous -and (-not $previous.Current.IsEnabled)
             }
         }
+        if (!$HeapDiagnosticNoShare) {
         Action 'share_start' {
+            $null = Wait-For 'share control ready after local startup' {
+                $control = Find-Node 'meetingShareScreen' ([Windows.Automation.ControlType]::CheckBox) -Optional
+                $control -and $control.Current.IsEnabled
+            } 90
             Invoke 'meetingShareScreen' ([Windows.Automation.ControlType]::CheckBox)
             $null = Wait-Top 'screen-share-picker'
             Select-FirstShareSource
@@ -291,11 +508,13 @@ function Run-Cycle {
             $activeUntil = [DateTime]::UtcNow.AddSeconds($ShareSeconds)
             while ([DateTime]::UtcNow -lt $activeUntil) {
                 if ($script:child.HasExited) { throw 'PROCESS_EXIT_DURING_SHARE' }
+                Assert-ShareActive
                 Sample-Resource 'share_active'
                 Start-Sleep -Seconds 1
             }
         }
         Action 'share_stop' {
+            Assert-ShareActive # A failed share would turn this command into a new start.
             Invoke 'meetingShareScreen' ([Windows.Automation.ControlType]::CheckBox)
             $null = Wait-For 'share control idle' { Share-State ([Windows.Automation.ToggleState]::Off) } 90
             Sample-Resource 'share_stopped'
@@ -306,10 +525,14 @@ function Run-Cycle {
             Sample-Resource 'share_settled'
             Start-Sleep -Seconds 1
         }
+        }
         Action 'logging' {
             Invoke 'meetingConsole'
             $null = Wait-Top 'meetingLogConsole'
             Toggle-To 'consoleSaveLogs' ([Windows.Automation.ToggleState]::Off)
+            if ($env:LIVEKIT_UIA_LOG_PAIR -eq '1') {
+                Toggle-To 'consoleCollectDiagnostics' ([Windows.Automation.ToggleState]::Off)
+            }
             $offStart = [DateTime]::UtcNow
             while (([DateTime]::UtcNow - $offStart).TotalSeconds -lt $LogPairSeconds) {
                 if ($script:child.HasExited) { throw 'PROCESS_EXIT_DURING_LOG_PAIR' }
@@ -317,6 +540,9 @@ function Run-Cycle {
                 Start-Sleep -Seconds 1
             }
             $offEnd = [DateTime]::UtcNow
+            if ($env:LIVEKIT_UIA_LOG_PAIR -eq '1') {
+                Toggle-To 'consoleCollectDiagnostics' ([Windows.Automation.ToggleState]::On)
+            }
             Toggle-To 'consoleSaveLogs' ([Windows.Automation.ToggleState]::On)
             $onStart = [DateTime]::UtcNow
             while (([DateTime]::UtcNow - $onStart).TotalSeconds -lt $LogPairSeconds) {
@@ -326,6 +552,7 @@ function Run-Cycle {
             }
             $window = [ordered]@{run_id=$script:runId; cycle=$script:cycle;
                 operation_id=$script:operation; pid=$script:child.Id;
+                production_and_persistence=($env:LIVEKIT_UIA_LOG_PAIR -eq '1');
                 off_start_utc=$offStart.ToString('o'); off_end_utc=$offEnd.ToString('o');
                 on_start_utc=$onStart.ToString('o'); on_end_utc=[DateTime]::UtcNow.ToString('o')}
             [IO.File]::AppendAllText((Join-Path $OutputDirectory 'uia-log-windows.jsonl'),
@@ -352,6 +579,8 @@ function Run-Cycle {
             Sample-Resource 'room_settled'
             Start-Sleep -Seconds 1
         }
+        if ($HeapDiagnostic) { Save-HeapDiagnosticSnapshot }
+        if ($HeapDiagnosticNoExport) { return }
         Action 'export' {
             $reportDeadline = [DateTime]::UtcNow.AddSeconds(90)
             do {
@@ -387,16 +616,60 @@ function Stop-Product {
             $main = Wait-Top 'MeetingMainWindow'
             (Require-Pattern $main ([Windows.Automation.WindowPattern]::Pattern)).Close()
             if (!$script:child.WaitForExit(60000)) { throw 'PRODUCT_SHUTDOWN_TIMEOUT' }
-            if ($script:child.ExitCode -ne 0) { throw "PRODUCT_EXIT_CODE: $($script:child.ExitCode)" }
+            $exitCode = [ProductDesktop]::ExitCode($script:childHandle)
+            [ordered]@{pid=$script:child.Id;run_id=$script:runId;exit_code=$exitCode;
+                utc=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json |
+                Set-Content -LiteralPath (Join-Path $OutputDirectory 'process-exit.json') -Encoding UTF8
+            if ($exitCode -ne 0) { throw "PRODUCT_EXIT_CODE: $exitCode" }
         }
         Sample-Resource 'final_exit'
 }
+function Run-IsolatedCycle {
+    $directory=Join-Path $OutputDirectory 'cycle-workers'
+    $null=New-Item -ItemType Directory -Path $directory -Force
+    $prefix=Join-Path $directory ('cycle-{0:d4}' -f $script:cycle)
+    $configuration=[ordered]@{output_directory=$OutputDirectory;executable=$Executable;
+        started_utc=$started.ToString('o');cycles=$Cycles;minimum_seconds=$MinimumSeconds;
+        share_seconds=$ShareSeconds;log_pair_seconds=$LogPairSeconds;stop_settle_seconds=$StopSettleSeconds;
+        room_settle_seconds=$RoomSettleSeconds;heap_diagnostic=[bool]$HeapDiagnostic;no_share=[bool]$HeapDiagnosticNoShare;
+        no_export=[bool]$HeapDiagnosticNoExport;heap_check_only=[bool]$HeapCheckOnly;heap_page_check=[bool]$HeapPageCheck;
+        crash_diagnostic=[bool]$CrashDiagnostic;run_id=$script:runId;cycle=$script:cycle;cycle_id=$script:cycleId;
+        product_pid=$script:child.Id;product_start_ticks=$script:child.StartTime.ToUniversalTime().Ticks;result_path=($prefix+'.result.json')}
+    $configuration | ConvertTo-Json | Set-Content -LiteralPath ($prefix+'.config.json') -Encoding UTF8
+    $script:cycleWorker=Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @(
+        '-NoProfile','-ExecutionPolicy','Bypass','-File',('"'+(Join-Path $PSScriptRoot 'product_desktop_cycle.ps1')+'"'),
+        '-Configuration',('"'+$prefix+'.config.json"')) -RedirectStandardOutput ($prefix+'.stdout') -RedirectStandardError ($prefix+'.stderr')
+    $null=$script:cycleWorker.Handle
+    $deadline=[DateTime]::UtcNow.AddSeconds(600)
+    try {
+        while (!$script:cycleWorker.WaitForExit(1000)) {
+            if ($script:child.HasExited) {throw 'PRODUCT_EXIT_DURING_ISOLATED_CYCLE'}
+            if ([DateTime]::UtcNow -gt $deadline) {throw 'ISOLATED_CYCLE_TIMEOUT'}
+        }
+        $script:cycleWorker.Refresh()
+        $result=Get-Content -LiteralPath ($prefix+'.result.json') -Raw | ConvertFrom-Json
+        if ($result.run_id -ne $script:runId -or $result.cycle_id -ne $script:cycleId -or
+            $result.product_pid -ne $script:child.Id -or $result.client_pid -ne $script:cycleWorker.Id) {throw 'ISOLATED_CYCLE_RESULT_IDENTITY_MISMATCH'}
+        if ($script:cycleWorker.ExitCode -ne 0 -or $result.status -ne 'COMPLETE') {throw "ISOLATED_CYCLE_FAILED: $($result.reason)"}
+        $script:nativeProcessRun=$result.native_process_run
+        $script:nativeSession=$result.native_session
+        $script:participantHash=$result.participant_hash
+        $script:layout=$result.layout
+    } finally {
+        if (!$script:cycleWorker.HasExited) {$script:cycleWorker.Kill();$script:cycleWorker.WaitForExit()}
+        $script:cycleWorker.Dispose();$script:cycleWorker=$null
+    }
+}
 function Cleanup-Product {
+        if ($script:cycleWorker -and !$script:cycleWorker.HasExited) {$script:cycleWorker.Kill();$script:cycleWorker.WaitForExit()}
         if ($script:child -and !$script:child.HasExited) {
             $script:child.Kill()
             $script:child.WaitForExit()
         }
         if ($script:child) { $script:child.Dispose(); $script:child = $null }
+        if ($script:heapDebugger -and !$script:heapDebugger.WaitForExit(10000)) {
+            $script:heapDebugger.Kill()
+        }
 }
 try {
     if (![Environment]::UserInteractive -or ![ProductDesktop]::Unlocked()) {
@@ -407,21 +680,31 @@ try {
         !$env:LIVEKIT_UIA_MEETING_ID -or (!$Pilot -and $env:LIVEKIT_UIA_DEDICATED_DESKTOP -ne '1'))) {
         Save-Result 'NOT_RUN' 'dedicated_desktop_account_and_meeting_required'; exit 77
     }
-    if ($Pilot -and $Cycles -ne 1) { throw 'PILOT_PROFILE_REQUIRED: one cycle' }
+    if ($Pilot -and ($Cycles -lt 2 -or $MinimumSeconds -lt (240 * $Cycles))) {
+        throw 'PILOT_PROFILE_REQUIRED: at least two complete cycles in one process, 240 seconds per cycle'
+    }
     if (!$ProbeOnly -and !$Pilot -and ($Cycles -ne 100 -or $MinimumSeconds -lt 28800 -or
         $ShareSeconds -lt 60 -or $LogPairSeconds -lt 30 -or
         $StopSettleSeconds -lt 10 -or $RoomSettleSeconds -lt 10)) {
         throw 'FORMAL_PROFILE_REQUIRED: 100 complete cycles and at least 8 hours'
     }
     $script:cycle = 1
+    $script:cycleId = [guid]::NewGuid().ToString('N')
     Start-Product
+    if ($HeapDiagnostic) { Wait-HeapDiagnosticHistory }
     for ($index=1; $index -le $(if ($ProbeOnly) { 1 } else { $Cycles }); ++$index) {
         $script:cycle = $index
+        if ($index -gt 1) {
+            $script:cycleId = [guid]::NewGuid().ToString('N')
+            $script:nativeSession = $null
+        }
         if (!$ProbeOnly) {
             $due = $started.AddSeconds(($index - 1) * $MinimumSeconds / $Cycles)
             while ([DateTime]::UtcNow -lt $due) { Start-Sleep -Seconds 1 }
         }
-        if (!$ProbeOnly) { Run-Cycle }
+        if (!$ProbeOnly) {
+            if ($IsolateUiaCycles) {Run-IsolatedCycle} else {Run-Cycle}
+        }
         if (!$ProbeOnly) { ++$script:completed }
     }
     if (!$ProbeOnly) { Stop-Product }
@@ -431,7 +714,10 @@ try {
         Save-Result 'INCONCLUSIVE' 'duration_shorter_than_eight_hours'; exit 2
     } else { Save-Result 'UIA_COMPLETE' 'independent_witnesses_required' }
 } catch {
-    $failure = $_.ToString()
+    $failure = $_.ToString() + "`n" + $_.ScriptStackTrace
+    if ($HeapDiagnostic -and $script:child -and !$script:child.HasExited) {
+        try { Save-HeapDiagnosticSnapshot 'failure' } catch { }
+    }
     try { Save-Tree ("cycle-{0:d4}-failure" -f $script:cycle) } catch { }
     Save-Result 'FAIL' $failure
     Write-Error "FAIL at $script:step : $failure" -ErrorAction Continue
@@ -442,5 +728,6 @@ try {
     $env:LOCALAPPDATA = $oldLocalAppData
     $env:QT_QPA_PLATFORM = $oldQtPlatform
     $env:QT_ACCESSIBILITY = $oldQtAccessibility
+    $env:LIVEKIT_UIA_SETTINGS_ROOT = $oldSettingsRoot
 }
 exit 0

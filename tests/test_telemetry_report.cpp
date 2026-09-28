@@ -1,4 +1,5 @@
 #include "src/telemetry/telemetry_report.h"
+#include "src/core/meeting_session_generation.h"
 #include "src/telemetry/telemetry_checkpoint.h"
 #include "src/telemetry/build_identity.h"
 #include "src/telemetry/diagnostic_bundle.h"
@@ -392,6 +393,7 @@ void UnsafeTextAndCsvFormulaAreContained() {
     unsafe->snapshot.reason =
         "https://conference.invalid/join?token=super-secret-token";
     unsafe->snapshot.render_stall_algorithm = "=1+1";
+    unsafe->snapshot.decoder_implementations = "decoder\"quoted";
     unsafe->snapshot.audio_quality_reason = "candidate:1 1 udp 1 10.0.0.7";
     unsafe->snapshot.metric_product_chains.push_back({
         "privatecanary", ProductChainStatus::Implemented, "privatecanary"});
@@ -413,6 +415,19 @@ void UnsafeTextAndCsvFormulaAreContained() {
     }
     TEST_CHECK(csv.find("\"'=1+1\"") != std::string::npos);
     TEST_CHECK(csv.find("\"=1+1\"") == std::string::npos);
+    // Compare the optimized checkpoint encoding with the independent export
+    // serializer, including escaping, safe text, nulls and typed numbers.
+    std::istringstream exported_rows(jsonl), checkpoint_rows(checkpoint);
+    std::string exported_line, checkpoint_line;
+    while (std::getline(exported_rows, exported_line)) {
+        TEST_CHECK(static_cast<bool>(std::getline(checkpoint_rows, checkpoint_line)));
+        auto expected = nlohmann::json::parse(exported_line);
+        expected.erase("captured_utc_ms");
+        expected["source_utc_ms"] = unsafe->captured_utc_ms;
+        expected["source_monotonic_us"] = unsafe->source_monotonic_us;
+        TEST_CHECK(nlohmann::json::parse(checkpoint_line) == expected);
+    }
+    TEST_CHECK(!std::getline(checkpoint_rows, checkpoint_line));
 }
 
 void CancellationAndUnwritableDestinationAreBounded() {
@@ -573,6 +588,62 @@ void CheckpointAppendRetryAndIntegrity() {
     TEST_CHECK(!AppendTelemetryCheckpoint(directory.path(), {Record(4, true)}).success);
     std::ofstream(segment, std::ios::binary | std::ios::trunc) << original;
     TEST_CHECK(InspectTelemetryCheckpoint(terminal.report_directory).valid);
+    // A warm validation cache must never trust unchanged size/mtime or reuse
+    // validation against different manifest constraints.
+    auto altered_manifest = manifest;
+    altered_manifest["session_generation"] = 43;
+    std::ofstream(manifest_path) << altered_manifest.dump();
+    TEST_CHECK(InspectTelemetryCheckpoint(terminal.report_directory).reason ==
+        "segment_line_invalid");
+    altered_manifest = manifest;
+    altered_manifest["segments"][0]["first_revision"] = 2;
+    std::ofstream(manifest_path) << altered_manifest.dump();
+    TEST_CHECK(InspectTelemetryCheckpoint(terminal.report_directory).reason ==
+        "segment_line_invalid");
+    std::ofstream(manifest_path) << manifest.dump();
+    auto altered = original;
+    const auto revision = altered.find("\"revision\":1");
+    TEST_CHECK(revision != std::string::npos);
+    altered[revision + std::string("\"revision\":").size()] = '0';
+    const auto timestamp = std::filesystem::last_write_time(segment);
+    std::ofstream(segment, std::ios::binary | std::ios::trunc) << altered;
+    std::filesystem::last_write_time(segment, timestamp);
+    TEST_CHECK(InspectTelemetryCheckpoint(terminal.report_directory).reason ==
+        "segment_missing_or_corrupt");
+    altered_manifest = manifest;
+    altered_manifest["segments"][0]["sha256"] = Sha256(altered);
+    std::ofstream(manifest_path) << altered_manifest.dump();
+    TEST_CHECK(InspectTelemetryCheckpoint(terminal.report_directory).reason ==
+        "segment_line_invalid");
+    // Discarded metric fields still require full syntax and UTF-8 validation.
+    altered = original;
+    const auto availability = altered.find("\"availability\":\"");
+    TEST_CHECK(availability != std::string::npos);
+    altered[availability + std::string("\"availability\":\"").size()] = '\xff';
+    std::ofstream(segment, std::ios::binary | std::ios::trunc) << altered;
+    altered_manifest = manifest;
+    altered_manifest["segments"][0]["sha256"] = Sha256(altered);
+    std::ofstream(manifest_path) << altered_manifest.dump();
+    TEST_CHECK(InspectTelemetryCheckpoint(terminal.report_directory).reason ==
+        "checkpoint_parse_failed");
+    const auto first_newline = original.find('\n');
+    const auto first_row = nlohmann::json::parse(original.substr(0, first_newline));
+    for (const auto& invalid : nlohmann::json::array(
+             {nullptr, true, "1", -1, 1.5, nlohmann::json{{"revision", 1}}})) {
+        auto row = first_row;
+        row["revision"] = invalid;
+        altered = row.dump() + original.substr(first_newline);
+        std::ofstream(segment, std::ios::binary | std::ios::trunc) << altered;
+        altered_manifest = manifest;
+        altered_manifest["segments"][0]["size_bytes"] = altered.size();
+        altered_manifest["segments"][0]["sha256"] = Sha256(altered);
+        std::ofstream(manifest_path) << altered_manifest.dump();
+        TEST_CHECK(InspectTelemetryCheckpoint(terminal.report_directory).reason ==
+            "segment_line_invalid");
+    }
+    std::ofstream(segment, std::ios::binary | std::ios::trunc) << original;
+    std::ofstream(manifest_path) << manifest.dump();
+    TEST_CHECK(InspectTelemetryCheckpoint(terminal.report_directory).valid);
     std::filesystem::remove(segment);
     TEST_CHECK(!InspectTelemetryCheckpoint(terminal.report_directory).valid);
 }
@@ -639,6 +710,26 @@ void PendingSessionsRecoverIndependently() {
         TEST_CHECK(reopened.Status()->reports[0].complete);
         TEST_CHECK(reopened.Status()->reports[1].complete);
     }
+}
+
+void ManifestReplacementWaitsForTransientReader() {
+#if defined(_WIN32)
+    TemporaryDirectory directory("cohavora-telemetry-transient-reader");
+    const auto first = AppendTelemetryCheckpoint(directory.path(), {Record(1, false)});
+    TEST_CHECK(first.success);
+    const HANDLE reader = CreateFileW((first.report_directory / L"manifest.json").c_str(),
+        GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    TEST_CHECK(reader != INVALID_HANDLE_VALUE);
+    std::thread release([reader] {
+        std::this_thread::sleep_for(50ms);
+        CloseHandle(reader);
+    });
+    const auto result = AppendTelemetryCheckpoint(directory.path(), {Record(2, true)});
+    release.join();
+    TEST_CHECK(result.success);
+    TEST_CHECK(result.status.last_committed_revision == 2 && result.status.missing_revisions == 0);
+    TEST_CHECK(result.status.session_complete);
+#endif
 }
 
 void NonterminalCheckpointRunsWithoutNewJobs() {
@@ -784,6 +875,37 @@ void CorruptOwnedArtifactsRespectQuarantineBudget() {
     TEST_CHECK(store.Status()->corrupt_artifacts_pruned == 1);
     TEST_CHECK(!std::filesystem::exists(segment));
     TEST_CHECK(std::filesystem::exists(unknown));
+}
+
+void RecreatedMeetingOwnersKeepDistinctHistory() {
+    TemporaryDirectory directory("cohavora-telemetry-rejoin");
+    TelemetryHistoryStore store(directory.path());
+    std::uint64_t previous = 0;
+    for (char owner : {'a', 'b', 'c'}) {
+        // Each iteration represents a newly constructed coordinator. Allocation
+        // cannot restart at 1 while the process-level store is still alive.
+        const auto generation = OpenMeeting::NextMeetingSessionGeneration();
+        TEST_CHECK(generation > previous);
+        previous = generation;
+        for (std::uint64_t revision : {1ull, 2ull, 3ull}) {
+            auto snapshot = std::make_shared<livekit::telemetry::Snapshot>(
+                Record(revision, revision == 3)->snapshot);
+            snapshot->session_generation = generation;
+            TEST_CHECK(store.SubmitSnapshot(snapshot, {}, std::string(32, owner)));
+        }
+    }
+    store.Close();
+    const auto status = store.Status();
+    TEST_CHECK(status->queue_drops == 0);
+    TEST_CHECK(status->pending_records_dropped == 0);
+    TEST_CHECK(status->write_failures == 0);
+    TEST_CHECK(status->reports.size() == 3);
+    for (const auto& report : status->reports) {
+        const auto persisted = InspectTelemetryCheckpoint(directory.path() / report.record_id);
+        TEST_CHECK(persisted.valid && persisted.session_complete);
+        TEST_CHECK(persisted.last_committed_revision == 3);
+        TEST_CHECK(persisted.record_count == 3);
+    }
 }
 
 void SuppliedSessionIdIsUsedForHistory() {
@@ -936,6 +1058,54 @@ void FailedBudgetAccountingPreservesReports() {
     TEST_CHECK(store.Status()->availability == Availability::Invalid);
     TEST_CHECK(store.Status()->reason == "met_06_history_scan_failed");
     TEST_CHECK(InspectTelemetryCheckpoint(report.report_directory).valid);
+}
+
+void HistoryReserveIncludesGrowingManifest() {
+    TemporaryDirectory directory("cohavora-telemetry-manifest-reserve");
+    const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    std::vector<SafeTelemetryRecordPtr> old_records;
+    livekit::telemetry::TelemetryCheckpointResult previous;
+    for (std::uint64_t i = 1; i <= 80; ++i) {
+        auto old = std::make_shared<SafeTelemetryRecord>(*Record(i, i == 80, now - 1000));
+        old->source_utc_ms = now - 1000;
+        old->anonymous_session_id = std::string(32, 'b');
+        old_records.push_back(std::move(old));
+        if (i % 10 == 0) {
+            previous = AppendTelemetryCheckpoint(directory.path(), old_records);
+            TEST_CHECK(previous.success);
+            old_records.clear();
+        }
+    }
+    // Many small committed segments grow the manifest past the former 16 KiB
+    // reservation, while a completed report is available for quota pruning.
+    for (std::uint64_t i = 1; i <= 70; ++i) {
+        auto record = std::make_shared<SafeTelemetryRecord>(*Record(i, false, now));
+        record->source_utc_ms = now;
+        TEST_CHECK(AppendTelemetryCheckpoint(directory.path(),
+            {record}).success);
+    }
+    const auto current = directory.path() /
+        "cohavora-telemetry-v2-0123456789abcdef0123456789abcdef";
+    TEST_CHECK(std::filesystem::file_size(current / "manifest.json") > 20 * 1024);
+    auto next = std::make_shared<SafeTelemetryRecord>(*Record(71, true, now));
+    next->source_utc_ms = now;
+    next->source_monotonic_us = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count();
+    const auto payload = livekit::telemetry::MakeTelemetryCheckpointRecord(*next);
+    const auto budget = *livekit::telemetry::TelemetryHistoryOwnedBytes(directory.path()) +
+        payload.jsonl.size() + 17 * 1024;
+    TelemetryHistoryStore store(directory.path(), 300, 64, budget);
+    TEST_CHECK(store.SubmitSnapshot(
+        std::make_shared<livekit::telemetry::Snapshot>(next->snapshot), {},
+        next->anonymous_session_id));
+    store.Close();
+    TEST_CHECK(store.Status()->write_failures == 0);
+    const auto status = InspectTelemetryCheckpoint(current);
+    TEST_CHECK(status.valid && status.session_complete);
+    TEST_CHECK(status.last_committed_revision == 71 && status.missing_revisions == 0);
+    TEST_CHECK(!std::filesystem::exists(previous.report_directory));
+    TEST_CHECK(*livekit::telemetry::TelemetryHistoryOwnedBytes(directory.path()) <= budget);
 }
 
 void ActiveRunCheckpointSurvivesConcurrentPrune() {
@@ -1478,6 +1648,107 @@ void ManualRetryCommitsAfterStorageRecovery() {
         ("cohavora-telemetry-v2-" + id)).valid);
 }
 
+void PendingPressureFlushesWithoutRevisionLoss() {
+    TemporaryDirectory directory("cohavora-telemetry-pressure-flush");
+    const auto root = directory.path() / "history";
+    const std::string id = "0123456789abcdef0123456789abcdef";
+    TelemetryHistoryStore store(root);
+    // Drain admission between snapshots to isolate pending-buffer pressure
+    // from the separately tested admission-queue limit.
+    for (std::uint64_t revision = 1; revision <= 80; ++revision) {
+        auto snapshot = std::make_shared<livekit::telemetry::Snapshot>(
+            Record(revision, revision == 80)->snapshot);
+        TEST_CHECK(store.SubmitSnapshot(snapshot, {}, id));
+        for (int wait = 0; wait != 500; ++wait) {
+            const auto status = store.Status();
+            if (status->queue_depth == 0 && status->inflight_jobs == 0) break;
+            std::this_thread::sleep_for(1ms);
+        }
+        TEST_CHECK(store.Status()->queue_depth == 0);
+        TEST_CHECK(store.Status()->inflight_jobs == 0);
+    }
+    store.Close();
+    const auto status = store.Status();
+    TEST_CHECK(status->queue_drops == 0);
+    TEST_CHECK(status->pending_records_dropped == 0);
+    TEST_CHECK(status->write_failures == 0);
+    const auto checkpoint = InspectTelemetryCheckpoint(
+        root / ("cohavora-telemetry-v2-" + id));
+    TEST_CHECK(checkpoint.valid && checkpoint.session_complete);
+    TEST_CHECK(checkpoint.last_committed_revision == 80);
+    TEST_CHECK(checkpoint.missing_revisions == 0);
+    TEST_CHECK(checkpoint.record_count == 80);
+}
+
+void SustainedSnapshotsDoNotStarveAdmission() {
+    TemporaryDirectory directory("cohavora-telemetry-throughput");
+    const auto root = directory.path() / "history";
+    // Include about 50 MiB of completed history, as in the real product
+    // profile; a tiny empty-profile benchmark misses history scan stalls.
+    std::vector<SafeTelemetryRecordPtr> previous;
+    for (std::uint64_t i = 1; i <= 400; ++i) {
+        previous.push_back(Record(i, i == 400));
+        if (i % 2 == 0) {
+            TEST_CHECK(AppendTelemetryCheckpoint(root, previous).success);
+            previous.clear();
+        }
+    }
+    const std::string id = "fedcbafedcbafedcbafedcbafedcbafe";
+    const auto initialization = std::chrono::steady_clock::now();
+    TelemetryHistoryStore store(root);
+    // The product opens its history before login. Model that startup boundary
+    // separately; never wait for the consumer once the burst begins below.
+    for (int wait = 0; wait != 10000 &&
+         store.Status()->availability == Availability::WarmingUp; ++wait)
+        std::this_thread::sleep_for(1ms);
+    TEST_CHECK(store.Status()->availability == Availability::Valid);
+    std::fprintf(stdout, "history initialization_ms=%lld\n",
+        static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - initialization).count()));
+    const auto began = std::chrono::steady_clock::now();
+    std::uint64_t rejected = 0;
+    for (std::uint64_t i = 1; i <= 320; ++i) {
+        // Cross the 15-second history-maintenance deadline after enough
+        // new records to evict old entries from a shared validation cache.
+        // Admission must stay responsive while unrelated history is checked.
+        if (i == 241) std::this_thread::sleep_until(began + 15600ms);
+        auto snapshot = std::make_shared<livekit::telemetry::Snapshot>(
+            Record(i, i == 320)->snapshot);
+        snapshot->session_generation = 43;
+        if (!store.SubmitSnapshot(snapshot, {}, id)) ++rejected;
+        // Real page transitions emitted over 100 revisions in a 100 ms
+        // window. Replay 120 together, then paced traffic, without waiting
+        // for the consumer. The byte budget and zero-loss assertion stay fixed.
+        std::this_thread::sleep_until(began + (i <= 120 ? i * 0ms :
+            i <= 160 ? (i - 120) * 40ms :
+            i <= 240 ? 1600ms + (i - 160) * 50ms : 15600ms + (i - 240) * 40ms));
+    }
+    store.Close();
+    const auto status = store.Status();
+    std::fprintf(stdout, "throughput: rejected=%llu queue_drops=%llu pending_drops=%llu write_failures=%llu elapsed_ms=%lld\n",
+        static_cast<unsigned long long>(rejected),
+        static_cast<unsigned long long>(status->queue_drops),
+        static_cast<unsigned long long>(status->pending_records_dropped),
+        static_cast<unsigned long long>(status->write_failures),
+        static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - began).count()));
+    std::fflush(stdout);
+    std::fprintf(stdout, "worker timings: snapshot_us=%llu checkpoint_us=%llu history_refresh_us=%llu peak_jobs=%zu byte_limit_hits=%llu job_limit_hits=%llu\n",
+        static_cast<unsigned long long>(status->snapshot_max_us),
+        static_cast<unsigned long long>(status->checkpoint_max_us),
+        static_cast<unsigned long long>(status->history_refresh_max_us),
+        status->queue_peak_jobs,
+        static_cast<unsigned long long>(status->queue_byte_limit_hits),
+        static_cast<unsigned long long>(status->queue_job_limit_hits));
+    std::fflush(stdout);
+    TEST_CHECK(rejected == 0 && status->queue_drops == 0);
+    TEST_CHECK(status->pending_records_dropped == 0 && status->write_failures == 0);
+    const auto result = InspectTelemetryCheckpoint(root / ("cohavora-telemetry-v2-" + id));
+    TEST_CHECK(result.valid && result.session_complete);
+    TEST_CHECK(result.last_committed_revision == 320 && result.record_count == 320);
+    TEST_CHECK(result.missing_revisions == 0 && result.pruned_records == 0);
+}
+
 void QueueBytesRejectBeforeJobCount() {
     TemporaryDirectory directory("cohavora-telemetry-queue-bytes");
     const auto sample = Record(1, false);
@@ -1504,11 +1775,16 @@ void QueueBytesRejectBeforeJobCount() {
     }
     auto snapshot = std::make_shared<livekit::telemetry::Snapshot>(
         sample->snapshot);
+    // Large retained text must hit the byte limit before the 64-job limit.
+    // Serialized safe text is capped, so serialized size is not an admission
+    // memory measurement. Each queued reference is conservatively charged.
+    snapshot->reason.assign(200 * 1024, 'x');
     std::size_t accepted = 0;
     for (int i = 0; i != 64; ++i)
         if (store.SubmitSnapshot(snapshot)) ++accepted;
     const auto queued = store.Status();
     TEST_CHECK(accepted > 0 && accepted < 64);
+    TEST_CHECK(accepted + queued->inflight_jobs < queued->queue_capacity);
     TEST_CHECK(queued->queue_depth == accepted);
     TEST_CHECK(queued->queue_bytes <= queued->queue_byte_capacity);
     TEST_CHECK(queued->queue_byte_capacity == budget);
@@ -1578,6 +1854,31 @@ void CommittedCheckpointSurvivesForcedTermination(
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--manifest-transient-regression") {
+        ManifestReplacementWaitsForTransientReader();
+        return 0;
+    }
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--manifest-reserve-regression") {
+        HistoryReserveIncludesGrowingManifest();
+        return 0;
+    }
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--throughput-regression") {
+        SustainedSnapshotsDoNotStarveAdmission();
+        return 0;
+    }
+    if (argc == 3 && std::wstring_view(argv[1]) == L"--inspect-checkpoint") {
+        for (int i = 0; i != 3; ++i) {
+            const auto began = std::chrono::steady_clock::now();
+            const auto result = InspectTelemetryCheckpoint(std::filesystem::path(argv[2]));
+            std::fprintf(stdout, "inspect[%d]: valid=%d records=%llu bytes=%llu elapsed_ms=%lld\n",
+                i, result.valid, static_cast<unsigned long long>(result.record_count),
+                static_cast<unsigned long long>(result.size_bytes),
+                static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - began).count()));
+            TEST_CHECK(result.valid);
+        }
+        return 0;
+    }
 #if defined(_WIN32)
     if (argc == 4 && std::wstring_view(argv[1]) == L"--checkpoint-child") {
         const auto result = AppendTelemetryCheckpoint(
@@ -1602,7 +1903,9 @@ int wmain(int argc, wchar_t** argv) {
     FailedAutomaticHistoryWriteCanRetrySameSession();
     CheckpointAppendRetryAndIntegrity();
     ManifestReplacementFailureKeepsCommittedRevision();
+    ManifestReplacementWaitsForTransientReader();
     PendingSessionsRecoverIndependently();
+    RecreatedMeetingOwnersKeepDistinctHistory();
     NonterminalCheckpointRunsWithoutNewJobs();
     CheckpointRollsAndRecoversOrphanSegment();
     ControlCallbacksHaveOneTerminalResult();
@@ -1615,6 +1918,7 @@ int wmain(int argc, wchar_t** argv) {
     CheckpointPersistsRevisionLossRange();
     CheckpointBudgetIncludesOwnedOrphans();
     FailedBudgetAccountingPreservesReports();
+    HistoryReserveIncludesGrowingManifest();
     ActiveRunCheckpointSurvivesConcurrentPrune();
     BusyCheckpointIsNotClassifiedCorrupt();
     HistoricalBundleIsSafeAndVerifiable();
@@ -1624,6 +1928,7 @@ int wmain(int argc, wchar_t** argv) {
     LegacyTemporaryFilesCountAndExpire();
     DisablingHistoryRemovesLossSummary();
     ManualRetryCommitsAfterStorageRecovery();
+    PendingPressureFlushesWithoutRevisionLoss();
     QueueBytesRejectBeforeJobCount();
 #if defined(_WIN32)
     CommittedCheckpointSurvivesForcedTermination(executable);

@@ -147,6 +147,9 @@ add_executable(test_telemetry_report
 target_include_directories(test_telemetry_report PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
 target_link_libraries(test_telemetry_report PRIVATE cohavora_core)
 add_test(NAME telemetry_report_test COMMAND test_telemetry_report)
+add_test(NAME telemetry_throughput_test COMMAND test_telemetry_report --throughput-regression)
+set_tests_properties(telemetry_throughput_test PROPERTIES
+    TIMEOUT 60 LABELS "CORE_REGRESSION;LOGGING_LG4;TELEMETRY_S7_ACCEPTANCE")
 set_tests_properties(telemetry_report_test PROPERTIES
     TIMEOUT 60
     LABELS "TELEMETRY_S7;TELEMETRY_S7_ACCEPTANCE;CORE_REGRESSION;SECURITY_REGRESSION;LOGGING_LG1;LOGGING_LG4;LOGGING_LG5;LOGGING_LG6")
@@ -353,6 +356,12 @@ target_link_libraries(test_screen_share_session PRIVATE cohavora_core)
 add_test(NAME screen_share_session_test COMMAND test_screen_share_session)
 set_tests_properties(screen_share_session_test PROPERTIES TIMEOUT 30 LABELS "CORE_REGRESSION")
 if(COHAVORA_BUILD_RUNTIME_TOOLS)
+    # Manual, process-scoped audio witness; never a default/offscreen CTest.
+    if(WIN32)
+        add_executable(product_audio_loopback EXCLUDE_FROM_ALL
+            ${LIVEKIT_TEST_SOURCE_DIR}/runtime/product_audio_loopback.cpp)
+        target_link_libraries(product_audio_loopback PRIVATE ole32 mmdevapi)
+    endif()
     add_executable(test_desktop_capture_runtime EXCLUDE_FROM_ALL
         ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_desktop_capture_runtime.cpp)
     target_include_directories(test_desktop_capture_runtime PRIVATE

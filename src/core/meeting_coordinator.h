@@ -177,6 +177,10 @@ public:
     void setLocalVideoAvailable(bool available);
     bool isLocalAudioMuted() const { return _audioMuted; }
     bool isLocalVideoEnabled() const { return _videoEnabled; }
+    bool canStartScreenShare() const {
+        return _sessionRuntime && _sessionRunning && _startupCommitted &&
+            !_startupReconnectPending && _state == MeetingState::InMeeting;
+    }
     void requestScreenShareSources();
     void startScreenShare(livekit::DesktopSource source);
     void stopScreenShare();
@@ -295,6 +299,7 @@ signals:
     void localVideoEnableChanged(bool enabled);
     void screenShareSourcesReady(const std::vector<livekit::DesktopSource> &sources);
     void screenShareChanged(livekit::ScreenShareSnapshot snapshot);
+    void screenShareAvailabilityChanged(bool available);
     void telemetrySnapshotChanged(const QVariantMap &snapshot);
 
     // 业务信令事件 (从 DataChannel NotifyMeetingData 解包)

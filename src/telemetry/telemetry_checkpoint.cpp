@@ -9,9 +9,12 @@
 #include <fstream>
 #include <iomanip>
 #include <limits>
+#include <list>
+#include <map>
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <tuple>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -22,9 +25,108 @@ namespace {
 
 using Json = nlohmann::json;
 constexpr std::string_view kDirectoryPrefix = "cohavora-telemetry-v2-";
-constexpr std::size_t kMaximumManifestBytes = 1024 * 1024;
+constexpr std::size_t kMaximumManifestBytes = kTelemetryCheckpointMaximumManifestBytes;
 constexpr std::size_t kMaximumSegmentBytes = 4 * 1024 * 1024;
 constexpr std::size_t kMaximumSegments = 4096;
+
+using Validated = std::tuple<std::string, std::uint64_t,
+                             std::uint64_t, std::uint64_t>;
+class ValidationCache final {
+public:
+    bool Contains(const Validated& key) {
+        const auto found = index_.find(key);
+        if (found == index_.end()) return false;
+        recent_.splice(recent_.begin(), recent_, found->second);
+        return true;
+    }
+    void Remember(Validated key) {
+        if (Contains(key)) return;
+        if (index_.size() == 256) {
+            index_.erase(recent_.back());
+            recent_.pop_back();
+        }
+        recent_.push_front(std::move(key));
+        index_.emplace(recent_.front(), recent_.begin());
+    }
+private:
+    std::list<Validated> recent_;
+    std::map<Validated, std::list<Validated>::iterator> index_;
+};
+
+// Record proofs are short-lived and produced for every revision. Sharing
+// their LRU with immutable segment proofs evicts completed history every few
+// seconds, forcing a full JSON reparse on the persistence worker at the next
+// maintenance scan. Keep the two bounded working sets independent.
+ValidationCache& ValidatedRecords() {
+    static thread_local ValidationCache cache;
+    return cache;
+}
+
+ValidationCache& ValidatedSegments() {
+    static thread_local ValidationCache cache;
+    return cache;
+}
+
+// A checkpoint row only needs two integer fields for boundary validation.
+// SAX still validates every byte (syntax, escapes and UTF-8), without building
+// hundreds of metric object maps per snapshot on the persistence worker.
+class CheckpointRowValidator final : public nlohmann::json_sax<Json> {
+public:
+    bool null() override { return Scalar(); }
+    bool boolean(bool) override { return Scalar(); }
+    bool number_integer(number_integer_t value) override {
+        return value >= 0 ? Number(static_cast<std::uint64_t>(value)) : Scalar();
+    }
+    bool number_unsigned(number_unsigned_t value) override { return Number(value); }
+    bool number_float(number_float_t, const string_t&) override { return Scalar(); }
+    bool string(string_t&) override { return Scalar(); }
+    bool binary(binary_t&) override { return Scalar(); }
+    bool start_object(std::size_t) override {
+        if (depth_ == 0) object_ = true;
+        Scalar();
+        ++depth_;
+        return true;
+    }
+    bool end_object() override { --depth_; return true; }
+    bool start_array(std::size_t) override { Scalar(); ++depth_; return true; }
+    bool end_array() override { --depth_; return true; }
+    bool key(string_t& value) override {
+        if (depth_ == 1) {
+            field_ = value == "revision" ? 1 : value == "session_generation" ? 2 : 0;
+            if (field_ == 1) revision_valid_ = false;
+            if (field_ == 2) generation_valid_ = false;
+        }
+        return true;
+    }
+    bool parse_error(std::size_t, const std::string&,
+                     const nlohmann::detail::exception&) override { return false; }
+    bool Valid(std::uint64_t first, std::uint64_t last, std::uint64_t generation) const {
+        return object_ && revision_valid_ && generation_valid_ &&
+            revision_ >= first && revision_ <= last && generation_ == generation;
+    }
+private:
+    bool Scalar() {
+        if (depth_ == 1) {
+            if (field_ == 1) revision_valid_ = false;
+            if (field_ == 2) generation_valid_ = false;
+        }
+        return true;
+    }
+    bool Number(std::uint64_t value) {
+        if (depth_ == 1) {
+            if (field_ == 1) { revision_ = value; revision_valid_ = true; }
+            if (field_ == 2) { generation_ = value; generation_valid_ = true; }
+        }
+        return true;
+    }
+    unsigned depth_ = 0;
+    unsigned field_ = 0;
+    bool object_ = false;
+    bool revision_valid_ = false;
+    bool generation_valid_ = false;
+    std::uint64_t revision_ = 0;
+    std::uint64_t generation_ = 0;
+};
 
 bool IsOpaqueId(std::string_view value) noexcept {
     if (value.size() != 32) return false;
@@ -138,8 +240,18 @@ bool ReadBounded(const std::filesystem::path& path, std::size_t maximum,
 bool CommitManifest(const std::filesystem::path& temporary,
                     const std::filesystem::path& final) {
 #if defined(_WIN32)
-    return MoveFileExW(temporary.c_str(), final.c_str(),
-                       MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    // A read-only observer can briefly hold a handle that prevents replacement
+    // on Windows. Retry only access/share conflicts on the persistence worker;
+    // keep the old manifest and report failure if the bounded wait expires.
+    for (unsigned attempt = 0; attempt <= 25; ++attempt) {
+        if (MoveFileExW(temporary.c_str(), final.c_str(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
+        const auto failure = GetLastError();
+        if (attempt == 25 || (failure != ERROR_SHARING_VIOLATION &&
+            failure != ERROR_LOCK_VIOLATION && failure != ERROR_ACCESS_DENIED)) return false;
+        Sleep(10);
+    }
+    return false;
 #else
     std::error_code error;
     std::filesystem::rename(temporary, final, error);
@@ -274,13 +386,19 @@ bool IsTelemetryRunActive(const std::filesystem::path& root,
 
 TelemetryCheckpointRecord MakeTelemetryCheckpointRecord(
     const SafeTelemetryRecord& record) {
-    return {
+    TelemetryCheckpointRecord result{
         .generation = record.snapshot.session_generation,
         .revision = record.snapshot.revision,
         .source_utc_ms = record.source_utc_ms,
         .complete = record.complete,
         .jsonl = SerializeSafeTelemetryCheckpointRecord(record),
     };
+    // This typed serializer constructs every row with these exact integer
+    // bounds and validates string encoding. A caller changing either the bytes
+    // or metadata loses this proof; no public API can mark raw JSON trusted.
+    ValidatedRecords().Remember({Sha256(result.jsonl), result.revision,
+                                 result.revision, result.generation});
+    return result;
 }
 
 TelemetryCheckpointStatus InspectTelemetryCheckpoint(
@@ -352,17 +470,23 @@ TelemetryCheckpointStatus InspectTelemetryCheckpoint(
                 payload.size() != expected_size || payload.back() != '\n' ||
                 Sha256(payload) != expected_hash)
                 return Invalid("segment_missing_or_corrupt");
-            std::istringstream lines(payload);
-            std::string line;
-            while (std::getline(lines, line)) {
-                if (line.empty()) return Invalid("segment_line_invalid");
-                const auto row = Json::parse(line);
-                if (!row.is_object() ||
-                    row.at("revision").get<std::uint64_t>() < first ||
-                    row.at("revision").get<std::uint64_t>() > last ||
-                    row.at("session_generation").get<std::uint64_t>() !=
-                        result.session_generation)
-                    return Invalid("segment_line_invalid");
+            // Always reread and SHA-256 verify the bytes above. Only reuse the
+            // expensive JSON validation for the same verified content AND
+            // index constraints. File names, mtimes and sizes are not trust
+            // signals. This bounded per-reader cache retains no metric data.
+            const Validated validation{expected_hash, first, last, result.session_generation};
+            if (!ValidatedSegments().Contains(validation)) {
+                std::istringstream lines(payload);
+                std::string line;
+                while (std::getline(lines, line)) {
+                    if (line.empty()) return Invalid("segment_line_invalid");
+                    CheckpointRowValidator row;
+                    if (!Json::sax_parse(line, &row))
+                        return Invalid("checkpoint_parse_failed");
+                    if (!row.Valid(first, last, result.session_generation))
+                        return Invalid("segment_line_invalid");
+                }
+                ValidatedSegments().Remember(validation);
             }
             previous_revision = last;
             if (result.segment_count == 0)
@@ -527,6 +651,7 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
         std::int64_t first_source = 0;
         std::int64_t last_source = 0;
         std::uint64_t added_records = 0;
+        bool generated_records = true;
         std::vector<std::string> obsolete_segments;
         std::filesystem::path segment_path;
         std::filesystem::path segment_temp;
@@ -562,6 +687,8 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
             last_source = record.source_utc_ms;
             previous_source = record.source_utc_ms;
             ++added_records;
+            generated_records = generated_records && ValidatedRecords().Contains(
+                {Sha256(record.jsonl), record.revision, record.revision, record.generation});
             payload += record.jsonl;
             if (payload.size() > kMaximumSegmentBytes) {
                 result.reason = "segment_too_large";
@@ -577,6 +704,11 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
             segment_path = directory / name;
             segment_temp = directory / (name + ".tmp");
             const auto hash = Sha256(payload);
+            // Concatenating independently verified JSONL records preserves
+            // their row boundaries. Disk bytes are still reread and hashed by
+            // InspectTelemetryCheckpoint after the atomic commit.
+            if (generated_records)
+                ValidatedSegments().Remember({hash, first_revision, last_revision, final.generation});
             manifest["segments"].push_back({
                 {"file", name}, {"size_bytes", payload.size()}, {"sha256", hash},
                 {"first_revision", first_revision}, {"last_revision", last_revision},

@@ -7,6 +7,7 @@
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDir>
 #include <QtCore/QProcess>
+#include <QtCore/QPointer>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QTemporaryDir>
 #include <QtCore/QSettings>
@@ -41,6 +42,20 @@ Q_IMPORT_PLUGIN(QGifPlugin)
 Q_IMPORT_PLUGIN(QICOPlugin)
 
 int main(int argc, char **argv) {
+    if (argc == 2 && std::string_view(argv[1]) == "--console-lifetime-child") {
+        QPointer<MeetingUI::MeetingLogConsoleWindow> console;
+        {
+            QApplication application(argc, argv);
+            application.setOrganizationName(QStringLiteral("CohavoraTest"));
+            application.setApplicationName(QStringLiteral("ConsoleLifetime"));
+            console = &MeetingUI::MeetingLogConsoleWindow::Instance();
+            console->show();
+            application.processEvents();
+        }
+        // A surviving QWidget would be destroyed after the platform plugin.
+        // This checks ownership even when the late destructor happens not to crash.
+        return console.isNull() && !MeetingUI::MeetingLogConsoleWindow::Active() ? 0 : 92;
+    }
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("Cohavora"));
     const auto qt_data_root = std::filesystem::path(
@@ -218,5 +233,10 @@ int main(int argc, char **argv) {
     TEST_CHECK(child.exitStatus() == QProcess::CrashExit || child.exitCode() != 0);
     const auto output = child.readAllStandardError() + child.readAllStandardOutput();
     TEST_CHECK(!output.contains("private fatal canary 7753"));
+    child.setArguments({QStringLiteral("--console-lifetime-child")});
+    child.start();
+    TEST_CHECK(child.waitForStarted(5000));
+    TEST_CHECK(child.waitForFinished(10000));
+    TEST_CHECK(child.exitStatus() == QProcess::NormalExit && child.exitCode() == 0);
     return 0;
 }

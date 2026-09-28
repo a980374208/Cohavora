@@ -6,6 +6,7 @@
 #include "src/telemetry/process_resource_sampler.h"
 #include "src/telemetry/stability_ledger.h"
 #include "src/telemetry/telemetry_report.h"
+#include "src/core/meeting_session_generation.h"
 #include "src/telemetry/diagnostic_pipeline.h"
 #include "src/core/whiteboard/whiteboard_protocol.h"
 #include "src/core/whiteboard/whiteboard_runtime.h"
@@ -3312,7 +3313,7 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
     _ioContext = _sessionOwner->context;
     _sessionRuntime = std::make_shared<MeetingSessionRuntime>(
         *_ioContext,
-        ++_nextSessionGeneration,
+        (_nextSessionGeneration = NextMeetingSessionGeneration()),
         _sessionManager.userId(), _ioContext,
         _admissionTelemetry.anonymousSessionId.toStdString());
     _sessionOwner->runtime = _sessionRuntime;
@@ -3327,6 +3328,43 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
     roomDiagnosticContext.has_session_generation = true;
     _room->SetDiagnosticContext(roomDiagnosticContext);
     _sessionOwner->room = _room;
+    // Queue the snapshot sink before Admission/Startup can post their first
+    // drain. The same strand then persists revision 1 instead of starting at 2.
+    {
+        auto session = _sessionRuntime;
+        const auto generation = session->generation();
+        const auto diagnosticSessionId =
+            _admissionTelemetry.anonymousSessionId.toStdString();
+        session->post([gate = _sessionUiGate, session, generation, diagnosticSessionId] {
+            auto telemetry = session->telemetry();
+            telemetry->SetSnapshotCallbackOnStrand(
+                [gate, generation, diagnosticSessionId](
+                    livekit::telemetry::SessionTelemetry::SnapshotPtr snapshot) {
+                    if (const auto store =
+                            livekit::telemetry::InstalledTelemetryHistoryStore()) {
+                        const auto ledger =
+                            livekit::telemetry::InstalledStabilityLedger();
+                        const bool accepted = store->SubmitSnapshot(
+                            snapshot, ledger ? ledger->Summary()
+                                             : livekit::telemetry::StabilitySummary{},
+                            diagnosticSessionId);
+                        if (!accepted && snapshot->session_complete) {
+                            auto event = livekit::diagnostic::Event::Issue(
+                                livekit::diagnostic::IssueCode::FinalSnapshotNotQueued);
+                            event.thread_role = livekit::diagnostic::ThreadRole::Session;
+                            event.context.session_generation = generation;
+                            event.context.has_session_generation = true;
+                            livekit::diagnostic::EmitBusinessEvent(event);
+                        }
+                    }
+                    gate->Post([generation, snapshot = std::move(snapshot)](MeetingCoordinator* self) {
+                            if (!self->isCurrentSessionGenerationOnUiThread(generation)) return;
+                            const auto projection = ProjectTelemetrySnapshot(*snapshot);
+                            emit self->telemetrySnapshotChanged(projection);
+                        });
+                });
+        });
+    }
     attachAdmissionTelemetry(_sessionRuntime->telemetry());
     _startupTelemetry = _sessionRuntime->telemetry();
     _startupTelemetryOperationId = _sessionRuntime->telemetry()->StartOperation(
@@ -3361,37 +3399,8 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
         auto session = _sessionRuntime;
         auto room = _room;
         const auto generation = session->generation();
-        const auto diagnosticSessionId =
-            _admissionTelemetry.anonymousSessionId.toStdString();
-        session->post([gate = _sessionUiGate, session, room, generation,
-                       diagnosticSessionId] {
+        session->post([gate = _sessionUiGate, session, room, generation] {
             auto telemetry = session->telemetry();
-            telemetry->SetSnapshotCallbackOnStrand(
-                [gate, generation, diagnosticSessionId](
-                    livekit::telemetry::SessionTelemetry::SnapshotPtr snapshot) {
-                    if (const auto store =
-                            livekit::telemetry::InstalledTelemetryHistoryStore()) {
-                        const auto ledger =
-                            livekit::telemetry::InstalledStabilityLedger();
-                        const bool accepted = store->SubmitSnapshot(
-                            snapshot, ledger ? ledger->Summary()
-                                             : livekit::telemetry::StabilitySummary{},
-                            diagnosticSessionId);
-                        if (!accepted && snapshot->session_complete) {
-                            auto event = livekit::diagnostic::Event::Issue(
-                                livekit::diagnostic::IssueCode::FinalSnapshotNotQueued);
-                            event.thread_role = livekit::diagnostic::ThreadRole::Session;
-                            event.context.session_generation = generation;
-                            event.context.has_session_generation = true;
-                            livekit::diagnostic::EmitBusinessEvent(event);
-                        }
-                    }
-                    gate->Post([generation, snapshot = std::move(snapshot)](MeetingCoordinator* self) {
-                            if (!self->isCurrentSessionGenerationOnUiThread(generation)) return;
-                            const auto projection = ProjectTelemetrySnapshot(*snapshot);
-                            emit self->telemetrySnapshotChanged(projection);
-                        });
-                });
             telemetry->StartStatsSamplingOnStrand(
                 [weak_room = std::weak_ptr<livekit::Room>(room)](
                     livekit::telemetry::SessionTelemetry::LateCompletion late_completion)
@@ -3723,6 +3732,11 @@ bool MeetingCoordinator::tryCommitOperationalStateOnUiThread(
 
     QPointer<MeetingCoordinator> owner(this);
     setState(MeetingState::InMeeting, detail);
+    if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration) ||
+        owner->_state != MeetingState::InMeeting) return false;
+    // InMeeting may already expose remote media while local publication is
+    // pending. Publish command readiness even when the state enum is unchanged.
+    emit owner->screenShareAvailabilityChanged(owner->canStartScreenShare());
     return owner && owner->isCurrentSessionGenerationOnUiThread(sessionGeneration) &&
         owner->_state == MeetingState::InMeeting;
 }
@@ -3965,7 +3979,7 @@ void MeetingCoordinator::applyScreenShareSnapshotOnUiThread(uint64_t generation,
 }
 
 void MeetingCoordinator::requestScreenShareSources() {
-    if (!_sessionRuntime || !_sessionRunning || _state != MeetingState::InMeeting || !_startupCommitted) {
+    if (!canStartScreenShare()) {
         emit errorOccurred(QCoreApplication::translate("MeetingUI", "Screen Sharing"), QCoreApplication::translate("MeetingUI", "Wait for the connection and local media setup to complete"));
         return;
     }
@@ -3985,7 +3999,7 @@ void MeetingCoordinator::requestScreenShareSources() {
 }
 
 void MeetingCoordinator::startScreenShare(livekit::DesktopSource source) {
-    if (!_sessionRuntime || !_sessionRunning || _state != MeetingState::InMeeting || !_startupCommitted) return;
+    if (!canStartScreenShare()) return;
     auto session = _sessionRuntime;
     livekit::VideoPublishOptions options;
     options.source = livekit::TrackSource::ScreenShareVideo;

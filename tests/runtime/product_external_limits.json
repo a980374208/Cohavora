@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "private_growth_mib": 64,
+  "wddm_gpu_growth_mib": 32,
+  "share_stop_private_delta_mib": 64,
+  "share_stop_wddm_delta_mib": 32,
+  "handles_growth": 64,
+  "threads_growth": 8,
+  "telemetry_queue_jobs": 256,
+  "telemetry_queue_bytes": 16777216,
+  "native_cleanup_pending_after_release": 0,
+  "max_audio_gap_ms": 200,
+  "cpu_increase_percentage_points": 2,
+  "render_p95_increase_percent": 5,
+  "max_server_egress_bps": 3000000,
+  "formal_seconds": 28800,
+  "formal_cycles": 100,
+  "observer_timeout_seconds": 30000,
+  "archive_maximum_bytes": 34359738368,
+  "minimum_free_disk_bytes": 42949672960,
+  "notes": [
+    "Resource limits frozen before the formal run; do not adjust them after failure.",
+    "WDDM dedicated/shared bytes are measured; DXGI local/nonlocal budgets are separately DEFERRED.",
+    "WGC handle ownership is DEFERRED if WGC is selected; DXGI runs do not prove WGC release.",
+    "Private growth compares medians of the first and last ten completed room-release windows."
+  ]
+}

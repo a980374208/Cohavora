@@ -7,6 +7,8 @@
 #include <QtCore/QDir>
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QSettings>
+#include <QtCore/QPointer>
+#include <QtCore/QThread>
 #include <QtCore/QSignalBlocker>
 #include <QtCore/QStandardPaths>
 #include <QtWidgets/QVBoxLayout>
@@ -22,6 +24,11 @@
 namespace {
 
 std::atomic<MeetingUI::MeetingLogConsoleWindow*> g_activeConsole{nullptr};
+
+QPointer<MeetingUI::MeetingLogConsoleWindow>& SingletonConsole() {
+	static QPointer<MeetingUI::MeetingLogConsoleWindow> instance;
+	return instance;
+}
 
 QString SafeLegacyMessage(const QString &tag, const QString &message) {
 	const auto scrubbed = QString::fromStdString(
@@ -68,8 +75,20 @@ QString SafeTag(const QString &tag) {
 namespace MeetingUI {
 
 MeetingLogConsoleWindow& MeetingLogConsoleWindow::Instance() {
-	static MeetingLogConsoleWindow instance;
-	return instance;
+	Q_ASSERT(qApp && qApp->thread() == QThread::currentThread());
+	auto& instance = SingletonConsole();
+	if (!instance) {
+		instance = new MeetingLogConsoleWindow;
+		// QApplication calls post routines before accessibility/platform teardown.
+		// A function-static QWidget instead survives until CRT static teardown.
+		qAddPostRoutine(&MeetingLogConsoleWindow::DestroyInstance);
+	}
+	return *instance;
+}
+
+void MeetingLogConsoleWindow::DestroyInstance() {
+	qRemovePostRoutine(&MeetingLogConsoleWindow::DestroyInstance);
+	delete SingletonConsole().data();
 }
 
 void LogToConsole(LogCategory cat, const QString &tag, const QString &msg) {
@@ -195,6 +214,27 @@ void MeetingLogConsoleWindow::initUi() {
 	_saveLogsBox->setChecked(pipeline && pipeline->GetStatus().retention_enabled);
 	_saveLogsBox->setEnabled(pipeline != nullptr);
 	retention->addWidget(_saveLogsBox);
+	if (qApp->arguments().contains(QStringLiteral("--debug")) &&
+		qEnvironmentVariable("LIVEKIT_UIA_LOG_PAIR") == QStringLiteral("1")) {
+		auto* production = new QCheckBox(QCoreApplication::translate(
+			"MeetingUI", "Collect diagnostic events"), this);
+		production->setObjectName(QStringLiteral("consoleCollectDiagnostics"));
+		production->setChecked(true);
+		production->setEnabled(pipeline != nullptr);
+		retention->addWidget(production);
+		auto* restore = new QTimer(production);
+		restore->setSingleShot(true);
+		connect(restore, &QTimer::timeout, production, [production] { production->setChecked(true); });
+		connect(production, &QCheckBox::toggled, production, [weakPipeline, restore](bool enabled) {
+			if (const auto active = weakPipeline.lock())
+				active->PauseProductionForBenchmark(std::chrono::milliseconds(enabled ? 0 : 60000));
+			if (enabled) restore->stop(); else restore->start(60000);
+		});
+		connect(production, &QObject::destroyed, [weakPipeline] {
+			if (const auto active = weakPipeline.lock())
+				active->PauseProductionForBenchmark(std::chrono::milliseconds::zero());
+		});
+	}
 	_clearSavedBtn = new QPushButton(
 		QCoreApplication::translate("MeetingUI", "Clear previous logs"), this);
 	_clearSavedBtn->setObjectName(QStringLiteral("consoleClearPreviousLogs"));

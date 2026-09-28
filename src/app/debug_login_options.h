@@ -24,4 +24,7 @@ struct DebugLoginOptions {
 [[nodiscard]] DebugLoginOptions ParseDebugLoginOptions(
 	const QStringList &arguments);
 
+// Windows native QSettings uses the registry, independently of APPDATA.
+[[nodiscard]] bool ConfigureDebugSettingsRoot(bool debugEnabled, const QString &root);
+
 } // namespace MeetingApp

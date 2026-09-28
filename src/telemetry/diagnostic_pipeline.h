@@ -48,6 +48,11 @@ public:
     DrainResult Close(ShutdownReason reason = ShutdownReason::UserExit) noexcept;
     void SetMirror(Mirror mirror);
     void SetRetentionEnabled(bool enabled) noexcept;
+    // Explicit, time-bounded external benchmark only. Never persisted as a
+    // user preference; zero/expiry restores normal production automatically.
+    void PauseProductionForBenchmark(std::chrono::milliseconds duration) noexcept;
+    bool ProductionPausedForBenchmark() const noexcept;
+    std::uint64_t BenchmarkSuppressed() const noexcept;
     void CountSuppressed() noexcept;
     void RetryNow() noexcept;
     Status GetStatus() const noexcept;
@@ -91,6 +96,8 @@ private:
     std::atomic<std::uint64_t> next_sequence_{0};
     std::atomic<std::int64_t> diagnostic_deadline_ticks_{0};
     std::atomic<std::uint64_t> diagnostic_window_bytes_{0};
+    std::atomic<std::int64_t> benchmark_pause_until_{0};
+    std::atomic<std::uint64_t> benchmark_suppressed_{0};
 };
 
 void InstallBusinessPipeline(const std::shared_ptr<DiagnosticPipeline>& pipeline) noexcept;

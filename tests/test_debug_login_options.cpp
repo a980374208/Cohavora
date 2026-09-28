@@ -2,6 +2,10 @@
 #include "tests/support/test_check.h"
 
 #include <QtCore/QStringList>
+#include <QtCore/QCoreApplication>
+#include <QtCore/QSettings>
+#include <QtCore/QTemporaryDir>
+#include <QtCore/QDir>
 
 namespace {
 
@@ -90,10 +94,32 @@ void TestMalformedCredentialsAreRejected() {
 
 } // namespace
 
-int main() {
+int main(int argc, char **argv) {
+	QCoreApplication app(argc, argv);
+	app.setOrganizationName(QStringLiteral("Cohavora"));
+	app.setApplicationName(QStringLiteral("DebugSettingsRegression"));
 	TestDisabledWithoutCredentials();
 	TestShortCredentialsRequireDebug();
 	TestLongCredentialsAndUnrelatedArguments();
 	TestMalformedCredentialsAreRejected();
+	QTemporaryDir profile;
+	TEST_CHECK(profile.isValid());
+	const auto original = QSettings::defaultFormat();
+	TEST_CHECK(MeetingApp::ConfigureDebugSettingsRoot(false, profile.path()));
+	TEST_CHECK(QSettings::defaultFormat() == original);
+	TEST_CHECK(!MeetingApp::ConfigureDebugSettingsRoot(true, QStringLiteral("relative")));
+	const auto first = profile.filePath(QStringLiteral("first"));
+	TEST_CHECK(MeetingApp::ConfigureDebugSettingsRoot(true, first));
+	{
+		QSettings settings;
+		TEST_CHECK(QDir::cleanPath(settings.fileName()).startsWith(first + QLatin1Char('/')));
+		settings.setValue(QStringLiteral("diagnostics/historyEnabled"), false);
+		settings.sync();
+		TEST_CHECK(settings.status() == QSettings::NoError);
+	}
+	TEST_CHECK(MeetingApp::ConfigureDebugSettingsRoot(true, profile.filePath(QStringLiteral("second"))));
+	TEST_CHECK(QSettings().value(QStringLiteral("diagnostics/historyEnabled"), true).toBool());
+	TEST_CHECK(MeetingApp::ConfigureDebugSettingsRoot(true, first));
+	TEST_CHECK(!QSettings().value(QStringLiteral("diagnostics/historyEnabled"), true).toBool());
 	return 0;
 }

@@ -4,12 +4,14 @@
 #include <QtCore/QPointer>
 #include <QtCore/QTimer>
 #include "base/basic_types.h"
+#include "base/platform/win/base_windows_winrt.h"
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QDialog>
 #include <QtGui/QIcon>
 #include <QtCore/QDir>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QSettings>
+#include <QtCore/QCryptographicHash>
 #include <QtPlugin>
 #include "crl/crl.h"
 #include <rpl/rpl.h>
@@ -20,11 +22,13 @@
 #include "src/ui/app_translation.h"
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/meeting_room_window.h"
+#include "src/ui/meeting_log_console.h"
 #include "src/ui/login_dialog.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/net/session_manager.h"
 #include "src/rtc/webrtc_manager.h"
 #include "src/app/debug_login_options.h"
+#include "src/app/pilot_diagnostics_probe.h"
 #include "src/app/async_shutdown_guard.h"
 #include "src/core/session_shutdown_service.h"
 #include "src/telemetry/stability_ledger.h"
@@ -138,8 +142,23 @@ int main(int argc, char *argv[]) {
 	crl::details::init();
 
 	QApplication app(argc, argv);
+	// Capture can be the first WinRT caller on a worker thread; initialize the
+	// desktop toolkit's dynamic WinRT imports before meeting actions start.
+	if (!base::WinRT::Supported()) {
+		qCritical() << "Required Windows Runtime APIs are unavailable.";
+		return 4;
+	}
+	app.setOrganizationName(QStringLiteral("Cohavora"));
 	app.setApplicationName(MeetingUI::AppBranding::name());
 	app.setApplicationVersion(QStringLiteral(COHAVORA_VERSION));
+	auto debugLogin = MeetingApp::ParseDebugLoginOptions(app.arguments());
+	if (debugLogin.status == MeetingApp::DebugLoginOptionStatus::Invalid ||
+		!MeetingApp::ConfigureDebugSettingsRoot(debugLogin.debugEnabled,
+			qEnvironmentVariable("LIVEKIT_UIA_SETTINGS_ROOT"))) {
+		qCritical() << "Invalid debug options or settings root.";
+		diagnosticClose.reason = livekit::diagnostic::ShutdownReason::LoginRejected;
+		return 2;
+	}
 	MeetingUI::DiagnosticQtBridge diagnosticQtBridge(diagnostics);
 	const auto diagnosticRoot = QDir(
 		QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
@@ -175,11 +194,21 @@ int main(int argc, char *argv[]) {
 	livekit::telemetry::InstallTelemetryHistoryStore(telemetryHistory);
 	telemetryHistory->SetHistoryEnabled(
 		QSettings().value(QStringLiteral("telemetry/historyEnabled"), true).toBool());
-	auto debugLogin = MeetingApp::ParseDebugLoginOptions(app.arguments());
-	if (debugLogin.status == MeetingApp::DebugLoginOptionStatus::Invalid) {
-		qCritical() << "Invalid debug sign-in options.";
-		diagnosticClose.reason = livekit::diagnostic::ShutdownReason::LoginRejected;
-		return 2;
+	std::unique_ptr<MeetingApp::PilotDiagnosticsProbe> pilotProbe;
+	auto pilotParticipant = std::make_shared<std::atomic<std::shared_ptr<const std::string>>>();
+	auto& shutdownService = OpenMeeting::SessionShutdownService::Instance();
+	const auto pilotPath = qEnvironmentVariable("LIVEKIT_UIA_PILOT_PROBE");
+	const auto pilotRun = qEnvironmentVariable("LIVEKIT_UIA_RUN_ID");
+	if (debugLogin.debugEnabled && !pilotPath.isEmpty() && pilotRun.size() == 32 &&
+		std::all_of(pilotRun.begin(), pilotRun.end(), [](QChar c) {
+			return (c >= QLatin1Char('0') && c <= QLatin1Char('9')) ||
+				(c >= QLatin1Char('a') && c <= QLatin1Char('f')); })) {
+		pilotProbe = std::make_unique<MeetingApp::PilotDiagnosticsProbe>(
+			std::filesystem::path(pilotPath.toStdWString()), pilotRun.toStdString(),
+			telemetryHistory, diagnostics, std::filesystem::path(telemetryRoot.toStdWString()),
+			std::filesystem::path(diagnosticRoot.toStdWString()),
+			[&shutdownService] { return shutdownService.pending(); },
+			[pilotParticipant] { return pilotParticipant->load(std::memory_order_acquire); });
 	}
 	app.setWindowIcon(QIcon(QStringLiteral(":/meeting-ui/icons/cohavora.svg")));
 	MeetingUI::AppTranslation::install(app,
@@ -226,11 +255,19 @@ int main(int argc, char *argv[]) {
 		}
 	}
 
+	if (pilotProbe) {
+		// Bind the native authenticated account to the independent receiver
+		// without exporting the account ID or relying on a display-name override.
+		const auto fingerprint = QCryptographicHash::hash(
+			(pilotRun + QLatin1Char(':') + session.userId()).toUtf8(),
+			QCryptographicHash::Sha256).toHex().toStdString();
+		pilotParticipant->store(std::make_shared<const std::string>(fingerprint),
+			std::memory_order_release);
+	}
 	// 创建并展示现代会议主界面
 	auto mainWindow = std::make_unique<MeetingUI::MeetingMainWindow>();
 	mainWindow->show();
 	app.setQuitOnLastWindowClosed(false);
-	auto& shutdownService = OpenMeeting::SessionShutdownService::Instance();
 	MeetingApp::AsyncShutdownGuard shutdownGuard(app,
 		[&](std::function<void()> finished) {
 			// Close producers before closing cleanup admission. Meeting windows
@@ -244,6 +281,7 @@ int main(int argc, char *argv[]) {
 				}
 			}
 			mainWindow.reset();
+			MeetingUI::MeetingLogConsoleWindow::DestroyInstance();
 			shutdownService.DrainAsync([&, finished = std::move(finished)]() mutable {
 				shutdownService.SubmitCleanup(
 					[history = std::move(telemetryHistory), run = std::move(processRun),

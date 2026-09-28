@@ -558,6 +558,29 @@ void FrozenCatalogTerminalEventsStayTyped() {
     TEST_CHECK(names.contains("media.recovery.timeout"));
 }
 
+void BenchmarkPauseIsBoundedAndDoesNotCreateSequenceGaps() {
+    TemporaryDirectory directory;
+    DiagnosticPipeline pipeline;
+    TEST_CHECK(pipeline.StartWriter(directory.path));
+    TEST_CHECK(pipeline.TryEmit(Event::Started("test-build")));
+    pipeline.PauseProductionForBenchmark(20ms);
+    TEST_CHECK(pipeline.ProductionPausedForBenchmark());
+    TEST_CHECK(!pipeline.TryEmit(Event::Received(ChatKind::Text, 17)));
+    TEST_CHECK(pipeline.BenchmarkSuppressed() == 1);
+    std::this_thread::sleep_for(30ms);
+    TEST_CHECK(!pipeline.ProductionPausedForBenchmark());
+    TEST_CHECK(pipeline.TryEmit(Event::Received(ChatKind::Text, 17)));
+    pipeline.PauseProductionForBenchmark(60000ms);
+    pipeline.PauseProductionForBenchmark(0ms);
+    TEST_CHECK(!pipeline.ProductionPausedForBenchmark());
+    TEST_CHECK(pipeline.Close() == DrainResult::Completed);
+    auto events = ReadEvents(directory.path);
+    TEST_CHECK(events.size() == 4); // started, resumed event, stopping, terminal
+    for (std::size_t i = 0; i < events.size(); ++i)
+        TEST_CHECK(events[i]["event_sequence"] == i + 1);
+    TEST_CHECK(pipeline.GetStatus().dropped_ordinary == 0);
+}
+
 } // namespace
 
 int main() {
@@ -573,5 +596,6 @@ int main() {
     RetentionAndClearRemainIndependent();
     DisabledEventsDoNotBackfillAfterReenable();
     FrozenCatalogTerminalEventsStayTyped();
+    BenchmarkPauseIsBoundedAndDoesNotCreateSequenceGaps();
     return 0;
 }

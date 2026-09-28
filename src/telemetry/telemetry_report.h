@@ -108,6 +108,15 @@ struct TelemetryStoreStatus {
     std::size_t queue_capacity = 0;
     std::size_t queue_bytes = 0;
     std::size_t queue_byte_capacity = 0;
+    std::size_t queue_peak_jobs = 0;
+    std::size_t queue_peak_bytes = 0;
+    std::uint64_t queue_job_limit_hits = 0;
+    std::uint64_t queue_byte_limit_hits = 0;
+    std::uint64_t snapshot_max_us = 0;
+    std::uint64_t checkpoint_max_us = 0;
+    std::uint64_t history_refresh_max_us = 0;
+    std::uint64_t history_refresh_last_us = 0;
+    std::uint64_t history_refresh_count = 0;
     std::size_t memory_records = 0;
     std::size_t memory_bytes = 0;
     std::uint64_t memory_records_evicted = 0;
@@ -139,7 +148,10 @@ public:
 
     static constexpr std::size_t kDefaultMemoryBuckets = 300;
     static constexpr std::size_t kDefaultMemoryBytes = 8 * 1024 * 1024;
-    static constexpr std::size_t kDefaultQueueCapacity = 64;
+    // Real catalog/page transitions publish >100 revisions in 100 ms. Keep
+    // that burst within the existing retained-memory budget; the byte limit
+    // below remains authoritative for large snapshots and callbacks.
+    static constexpr std::size_t kDefaultQueueCapacity = 256;
     static constexpr std::size_t kDefaultQueueBytes = 16 * 1024 * 1024;
     static constexpr std::uint64_t kDefaultMaximumBytes = 100ull * 1024ull * 1024ull;
     static constexpr auto kDefaultRetention = std::chrono::hours(24 * 7);
@@ -262,6 +274,7 @@ private:
     std::size_t current_record_bytes_ = 0;
     // Worker-owned; previous sessions survive current_records_ replacement.
     std::deque<PendingReport> pending_reports_;
+    std::chrono::steady_clock::time_point next_history_refresh_{};
     std::deque<TelemetryLossRange> loss_ranges_pending_;
     unsigned loss_retry_count_ = 0;
     std::chrono::steady_clock::time_point loss_first_failure_{};

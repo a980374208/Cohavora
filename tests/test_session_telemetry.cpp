@@ -1028,6 +1028,8 @@ void NetworkPathRecoveryAndQualityUseWindowedNativeCounters() {
     TEST_CHECK(snapshot->video_quality_limitation_current == "bandwidth");
     TEST_CHECK(snapshot->window_video_quality_bandwidth_duration_ms == -1);
     TEST_CHECK(snapshot->video_pipeline_availability == Availability::WarmingUp);
+    TEST_CHECK(snapshot->inbound_video_rtp_streams == 1);
+    TEST_CHECK(snapshot->inbound_video_active_decode_streams == -1);
     TEST_CHECK(snapshot->video_codec_availability == Availability::Valid);
     TEST_CHECK(snapshot->inbound_video_codecs == "video/vp8");
     TEST_CHECK(snapshot->outbound_video_layers == "l1t3");
@@ -1083,6 +1085,8 @@ void NetworkPathRecoveryAndQualityUseWindowedNativeCounters() {
     TEST_CHECK(snapshot->video_pipeline_availability == Availability::Valid);
     TEST_CHECK(snapshot->window_inbound_video_frames_received == 200);
     TEST_CHECK(snapshot->window_inbound_video_frames_decoded == 200);
+    TEST_CHECK(snapshot->inbound_video_rtp_streams == 1);
+    TEST_CHECK(snapshot->inbound_video_active_decode_streams == 1);
     TEST_CHECK(snapshot->window_inbound_video_frames_dropped == 1);
     TEST_CHECK(snapshot->window_outbound_video_frames_encoded == 100);
     TEST_CHECK(snapshot->window_outbound_video_frames_sent == 100);
@@ -1101,6 +1105,20 @@ void NetworkPathRecoveryAndQualityUseWindowedNativeCounters() {
     TEST_CHECK(snapshot->window_inbound_packets_lost == -1);
     TEST_CHECK(snapshot->window_inbound_packets_received == 100);
     TEST_CHECK(snapshot->inbound_packet_loss_ratio < 0.0);
+
+    // A received RTP stream with unchanged framesDecoded is not an active
+    // decoding stream. Counter resets must warm up again instead of counting.
+    reports.push_back(make_report(1300, 16, 6, 950, 12, 1.15, 5, 2.9, 4));
+    context.restart();
+    asio::post(strand, [telemetry] { telemetry->RequestStatsSampleOnStrand(); });
+    context.run_for(100ms);
+    TEST_CHECK(snapshot->inbound_video_rtp_streams == 1);
+    TEST_CHECK(snapshot->inbound_video_active_decode_streams == 0);
+    reports.push_back(make_report(100, 1, 0, 100, 1, 0.1, 1, 0.1, 0));
+    context.restart();
+    asio::post(strand, [telemetry] { telemetry->RequestStatsSampleOnStrand(); });
+    context.run_for(100ms);
+    TEST_CHECK(snapshot->inbound_video_active_decode_streams == -1);
 
     context.restart();
     asio::post(strand, [telemetry] { telemetry->StopOnStrand(); });
@@ -1608,6 +1626,8 @@ void RenderSubmitDedupesAndExcludesHiddenIntervals() {
                Availability::Unsupported);
     TEST_CHECK(snapshot->render_interval_p50_ms == 1000.0);
     TEST_CHECK(snapshot->render_interval_p95_ms == 1000.0);
+    TEST_CHECK(snapshot->render_interval_histogram[7] == 1);
+    TEST_CHECK(snapshot->render_fine_interval_histogram[700] == 1);
     TEST_CHECK(snapshot->render_interval_p99_ms == 1000.0);
     TEST_CHECK(snapshot->render_frame_age_availability == Availability::Valid);
     TEST_CHECK(snapshot->render_average_frame_age_ms == 10.0);

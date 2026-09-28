@@ -39,6 +39,14 @@ struct DesktopCaptureProbeOptions {
     std::function<void(DesktopCaptureProbeEvent)> on_event;
 };
 
+// Process-wide diagnostics only: the backend is observed on a delivered frame,
+// not inferred from capability detection. It remains available after Stop().
+struct DesktopCaptureObservation {
+    const char* backend = "unknown";
+    std::uint64_t frames = 0;
+};
+DesktopCaptureObservation ObserveDesktopCapture();
+
 std::vector<DesktopSource> EnumerateDesktopSources();
 std::unique_ptr<IDesktopCapture> CreateDesktopCapture();
 std::unique_ptr<IDesktopCapture> CreateDesktopCaptureForProbe(DesktopCaptureProbeOptions probe);

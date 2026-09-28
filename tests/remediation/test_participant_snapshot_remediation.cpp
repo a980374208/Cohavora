@@ -33,6 +33,7 @@
 #include "src/ui/render/module_video_canvas.h"
 #include "src/ui/render/gl_video_canvas.h"
 #include <QtGui/QWindow>
+#include <QtGui/QAccessible>
 #include <QtGui/QOpenGLContext>
 #include <QtGui/QScreen>
 #include <QtCore/QElapsedTimer>
@@ -5278,6 +5279,48 @@ void TrackPresentationGpuAcceptance() {
     std::cout << "TRACK_PRESENTATION_GPU PASS: actual draw/readback, pause/mute isolation, replacement, cleanup\n";
 }
 
+void ScreenShareFailureAccessibility() {
+    WindowFixture fixture;
+    fixture.open();
+    bool returnedFromProjection = false;
+    bool timerObservedReturnedProjection = false;
+    QTimer::singleShot(0, [&] {
+        timerObservedReturnedProjection = returnedFromProjection;
+        if (!returnedFromProjection) {
+            // Bound the old nested exec path so the regression fails without hanging.
+            for (auto* widget : QApplication::topLevelWidgets()) {
+                if (auto* box = qobject_cast<QMessageBox*>(widget)) box->done(QMessageBox::Ok);
+            }
+        }
+    });
+    emit fixture.coordinator->screenShareChanged(
+        {livekit::ScreenShareState::Failed, livekit::ScreenShareError::Publish});
+    returnedFromProjection = true;
+    WindowDrainQt();
+    TEST_CHECK(timerObservedReturnedProjection);
+    QPointer<QMessageBox> notice(fixture.window->findChild<QMessageBox*>("meetingScreenShareFailure"));
+    TEST_CHECK(notice && notice->isVisible() && notice->testAttribute(Qt::WA_DeleteOnClose));
+    auto* dismiss = notice->findChild<QAbstractButton*>("meetingScreenShareFailureDismiss");
+    TEST_CHECK(dismiss);
+    auto* accessible = QAccessible::queryAccessibleInterface(dismiss);
+    TEST_CHECK(accessible && accessible->actionInterface() && !accessible->text(QAccessible::Name).isEmpty());
+    accessible->actionInterface()->doAction(QAccessibleActionInterface::pressAction());
+    QElapsedTimer dismissal;
+    dismissal.start();
+    while (notice && dismissal.elapsed() < 1000) {
+        QApplication::processEvents(QEventLoop::AllEvents, 20);
+        WindowDrainQt(); // QPushButton accessibility uses a timed animateClick.
+    }
+    TEST_CHECK(!notice);
+    // A late room departure can destroy the owner while the warning is open.
+    emit fixture.coordinator->screenShareChanged(
+        {livekit::ScreenShareState::Failed, livekit::ScreenShareError::Publish});
+    notice = fixture.window->findChild<QMessageBox*>("meetingScreenShareFailure");
+    TEST_CHECK(notice);
+    fixture.window.reset();
+    TEST_CHECK(!notice);
+}
+
 void ScreenShareWindowControls() {
     WindowFixture fixture;
     OpenMeeting::MeetingCoordinatorTestAccess::commitLocalStartupPrecondition(*fixture.coordinator);
@@ -6522,7 +6565,77 @@ int WindowAcceptanceMain(int argc, char **argv) {
     // Coordinator instances use explicitly injected temporary SessionManager
     // objects, including the in-memory moderation and account-notify fixtures.
     int result = 0;
-    if (application.arguments().contains("--uia-meeting-fixture")) {
+    if (application.arguments().contains("--toolbar-accessibility-contract")) {
+        MeetingUI::RoomBottomBarWidget bar;
+        rpl::lifetime lifetime;
+        int audioActions = 0, videoActions = 0, shareActions = 0;
+        bar.toggleAudioRequested() | rpl::on_next([&](bool muted) {
+            TEST_CHECK(muted); ++audioActions;
+        }, lifetime);
+        bar.toggleVideoRequested() | rpl::on_next([&](bool enabled) {
+            TEST_CHECK(!enabled); ++videoActions;
+        }, lifetime);
+        bar.shareScreenClicked() | rpl::on_next([&] { ++shareActions; }, lifetime);
+        const auto toggle = [&](const char* id) {
+            auto* button = bar.findChild<QPushButton*>(QString::fromLatin1(id));
+            TEST_CHECK(button);
+            auto* accessible = QAccessible::queryAccessibleInterface(button);
+            TEST_CHECK(accessible && accessible->actionInterface());
+            auto* action = accessible->actionInterface();
+            TEST_CHECK(action->actionNames().contains(QAccessibleActionInterface::toggleAction()));
+            action->doAction(QAccessibleActionInterface::toggleAction());
+        };
+        bar.setAudioMuted(false);
+        bar.setVideoEnabled(true);
+        TEST_CHECK(audioActions == 0 && videoActions == 0);
+        toggle("meetingMicrophone");
+        toggle("meetingCamera");
+        TEST_CHECK(audioActions == 0 && videoActions == 0);
+        application.processEvents(); // business work must not run inside the synchronous UIA call
+        TEST_CHECK(audioActions == 1 && videoActions == 1);
+        TEST_CHECK(!bar.findChild<QPushButton*>("meetingMicrophone")->isChecked());
+        TEST_CHECK(!bar.findChild<QPushButton*>("meetingCamera")->isChecked());
+        bar.setAudioMuted(false);
+        bar.findChild<QPushButton*>("meetingMicrophone")->click();
+        application.processEvents();
+        TEST_CHECK(audioActions == 2); // ordinary activation still commits once
+        toggle("meetingShareScreen");
+        application.processEvents();
+        TEST_CHECK(shareActions == 1);
+        bar.setScreenShareState(livekit::ScreenShareState::Active);
+        application.processEvents();
+        TEST_CHECK(shareActions == 1); // native projection is not a command
+        toggle("meetingShareScreen");
+        application.processEvents();
+        TEST_CHECK(shareActions == 2);
+        bar.setScreenShareState(livekit::ScreenShareState::Idle);
+        application.processEvents();
+        TEST_CHECK(shareActions == 2);
+        auto* share = bar.findChild<QPushButton*>("meetingShareScreen");
+        share->click(); // queued command loses readiness before delivery
+        bar.setScreenShareAvailable(false);
+        auto* shareAccessible = QAccessible::queryAccessibleInterface(share);
+        TEST_CHECK(!share->isEnabled() && shareAccessible->state().disabled);
+        TEST_CHECK(!shareAccessible->actionInterface()->actionNames().contains(
+            QAccessibleActionInterface::toggleAction()));
+        application.processEvents();
+        TEST_CHECK(shareActions == 2 && !share->isChecked());
+        bar.setScreenShareAvailable(true);
+        TEST_CHECK(share->isEnabled() && !shareAccessible->state().disabled);
+        share->click();
+        application.processEvents();
+        TEST_CHECK(shareActions == 3);
+        bar.setScreenShareState(livekit::ScreenShareState::Active);
+        bar.setScreenShareAvailable(false);
+        bar.setInRecovery(true);
+        TEST_CHECK(share->isEnabled()); // stop remains available during recovery
+        toggle("meetingShareScreen");
+        application.processEvents();
+        TEST_CHECK(shareActions == 4);
+        bar.setScreenShareState(livekit::ScreenShareState::Idle);
+        TEST_CHECK(!share->isEnabled());
+        ScreenShareFailureAccessibility();
+    } else if (application.arguments().contains("--uia-meeting-fixture")) {
         result = RunMeetingUiaFixture(application);
     } else if (application.arguments().contains("--meeting-soak-protocol-selftest")) {
         TEST_CHECK(meeting_soak::ProtocolSelfTest());
@@ -8072,11 +8185,14 @@ struct StartupReconnectSignals final {
     std::vector<OpenMeeting::MeetingState> states;
     std::vector<bool> audioMuted;
     std::vector<bool> videoEnabled;
+    std::vector<bool> shareAvailable;
     int errors = 0;
 };
 
 void ObserveStartupReconnect(Fixture &fixture, QObject &observer,
                              StartupReconnectSignals &observed) {
+    QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::screenShareAvailabilityChanged,
+        &observer, [&](bool available) { observed.shareAvailable.push_back(available); });
     QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
         &observer, [&](OpenMeeting::MeetingState state, const QString &) { observed.states.push_back(state); });
     QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::localAudioMuteChanged,
@@ -8094,11 +8210,13 @@ void StartupReconnectOrder(bool degraded, bool reconnectedFirst) {
     QObject observer;
     StartupReconnectSignals observed;
     ObserveStartupReconnect(fixture, observer, observed);
+    TEST_CHECK(!fixture.coordinator->canStartScreenShare());
 
     fixture.listener->OnReconnecting();
     DrainQt();
     TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::Reconnecting);
     TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::reconnectPending(*fixture.coordinator));
+    TEST_CHECK(!fixture.coordinator->canStartScreenShare());
 
     const auto queueTerminal = [&] {
         if (degraded) {
@@ -8127,6 +8245,8 @@ void StartupReconnectOrder(bool degraded, bool reconnectedFirst) {
     TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::InMeeting);
     TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::startupCommitted(*fixture.coordinator));
     TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::reconnectPending(*fixture.coordinator));
+    TEST_CHECK(fixture.coordinator->canStartScreenShare());
+    TEST_CHECK(observed.shareAvailable == std::vector<bool>{true});
     if (degraded) {
         TEST_CHECK(fixture.coordinator->isLocalAudioMuted());
         TEST_CHECK(!fixture.coordinator->isLocalVideoEnabled());
@@ -8157,6 +8277,9 @@ void StartupReconnectNormalSuccess() {
     QObject observer;
     StartupReconnectSignals observed;
     ObserveStartupReconnect(fixture, observer, observed);
+    // Remote media and the InMeeting enum can precede local publication.
+    TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::InMeeting);
+    TEST_CHECK(!fixture.coordinator->canStartScreenShare());
 
     OpenMeeting::MeetingCoordinatorTestAccess::queueSuccessfulStartup(*fixture.coordinator, generation);
     DrainQt();
@@ -8165,6 +8288,8 @@ void StartupReconnectNormalSuccess() {
     TEST_CHECK(OpenMeeting::MeetingCoordinatorTestAccess::startupCommitted(*fixture.coordinator));
     TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::reconnectPending(*fixture.coordinator));
     TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::startupListenOnly(*fixture.coordinator));
+    TEST_CHECK(fixture.coordinator->canStartScreenShare());
+    TEST_CHECK(observed.shareAvailable == std::vector<bool>{true});
     TEST_CHECK(observed.audioMuted == std::vector<bool>{true});
     TEST_CHECK(observed.videoEnabled == std::vector<bool>{false});
 }

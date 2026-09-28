@@ -159,6 +159,7 @@ struct AudioActivityProbe {
 // lock-free producer data sampled by the session strand.
 struct RenderActivityProbe {
     static constexpr std::size_t kIntervalHistogramBuckets = 9;
+    static constexpr std::size_t kFineIntervalHistogramBuckets = 1001;
     struct StageAccumulator {
         std::atomic<std::uint64_t> samples{0};
         std::atomic<std::int64_t> total_us{0};
@@ -179,6 +180,10 @@ struct RenderActivityProbe {
     std::atomic<std::uint64_t> interval_count{0};
     std::array<std::atomic<std::uint64_t>, kIntervalHistogramBuckets>
         interval_histogram{};
+    // Integer millisecond upper bounds 0..999; bucket 1000 is overflow.
+    // Allows independent window deltas without retaining frame timestamps.
+    std::array<std::atomic<std::uint64_t>, kFineIntervalHistogramBuckets>
+        fine_interval_histogram{};
     std::atomic<std::int64_t> frame_age_sum_ns{0};
     std::atomic<std::int64_t> maximum_frame_age_ns{0};
     std::atomic<std::uint64_t> frame_age_count{0};
@@ -726,6 +731,11 @@ struct Snapshot {
     std::string video_pipeline_measurement_point = "rtc_video_stats_window";
     std::uint64_t inbound_video_frames_received = 0;
     std::uint64_t inbound_video_frames_decoded = 0;
+    std::uint64_t inbound_video_rtp_streams = 0;
+    // -1 until every current inbound video stream has a comparable native
+    // framesDecoded baseline. This counts advancing streams, not codec names
+    // or allocated decoder objects.
+    std::int64_t inbound_video_active_decode_streams = -1;
     std::uint64_t inbound_video_frames_dropped = 0;
     std::uint64_t outbound_video_frames_encoded = 0;
     std::uint64_t outbound_video_frames_sent = 0;
@@ -904,6 +914,10 @@ struct Snapshot {
     std::int64_t render_maximum_interval_ms = -1;
     double render_interval_p50_ms = -1.0;
     double render_interval_p95_ms = -1.0;
+    std::array<std::uint64_t, RenderActivityProbe::kIntervalHistogramBuckets>
+        render_interval_histogram{};
+    std::array<std::uint64_t, RenderActivityProbe::kFineIntervalHistogramBuckets>
+        render_fine_interval_histogram{};
     double render_interval_p99_ms = -1.0;
     double render_submit_fps = -1.0;
     Availability render_frame_age_availability = Availability::Unknown;

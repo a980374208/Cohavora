@@ -332,3 +332,78 @@ profile 的原始诊断目录，检查分段和配额。`--review` 是独立复�
 视频帧耗时配对数据，并落在 UIA 实际时间窗内。缺少任一独立证据，结果为
 `INCONCLUSIVE` 而非 PASS。慢盘、断电、真实崩溃恢复、Release 符号复盘仍需
 另外执行；UIA 也不能证明视频像素/音频质量、真实 codec/RTP 或物理多屏坐标。
+
+### 短 PILOT 与独立采集（2026-09-28）
+
+PILOT 使用 `-Pilot -Cycles 1`，与正式 8 小时/100 轮门分离，不注册默认 CTest。
+产品始终带 `--debug`。下列采集器不会操作产品 UI：
+
+- `tests/runtime/product_pilot_remote.py`：在服务端隔离目录读取配置密钥，通过
+  Python LiveKit SDK 生成 10 路 160×90/5 fps/VP8/40 kbps 视频和一路 24 kbps
+  音频，关闭 simulcast；轮询 SFU 成员/轨道、采集独立接收端 PCM/视频帧与
+  RTCStats，以及主机出口/CPU/内存。只记录白名单字段，默认最多 600 秒；
+  `<output>/stop` 或 SIGTERM 正常退出全部本轮连接。依赖为 livekit 1.1.20、
+  livekit-api 1.2.1、numpy、PyYAML，安装在服务端测试目录，不修改系统 Python。
+- `tests/runtime/product_pilot_resources.ps1`：独立进程按 UIA 记录的 PID 采样
+  CPU、私有内存、句柄、线程与 WDDM DedicatedUsage/SharedUsage。缺失 GPU
+  instance 保留 null。WGC 句柄归属没有被猜测或用总句柄数替代。
+- 产品显式设置 `LIVEKIT_UIA_PILOT_PROBE=<new jsonl path>`、
+  `LIVEKIT_UIA_RUN_ID=<32 lowercase hex>` 且带 `--debug` 时，启动旁证线程。
+  输出标记为 `collector=in_process`，包含遥测队列/丢弃/写失败、diagnostic
+  writer、带 availability 的媒体指标及真实 capture frame 的 backend。
+  这些内部计数与外部 OS/SFU/接收端证据分别保留。
+- `tests/runtime/verify_product_pilot.py --root <run root>`：核对采集覆盖、run 与
+  序号、共享交付、音频 PCM、真实日志分段与支持包 SHA-256。生成
+  `pilot-review.json` 及 `correlated-witnesses.jsonl`；后者的 operation ID
+  是按 UIA UTC 时间窗关联，不能冒充服务端原生传播的 operation ID。
+
+本轮真实命令的 UIA 部分如下（账号密码从测试账户环境变量注入，不放 argv）：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/uia/product_desktop.ps1 `
+  -Executable out/build/windows-vs2026-dev/src/app/Debug/Cohavora.exe `
+  -OutputDirectory out/product-pilot-collected-20260928-023816/uia `
+  -RunId 44a5a387ab9f47da9aa8576ae738ab08 `
+  -Pilot -Cycles 1 -MinimumSeconds 240 -ShareSeconds 35 `
+  -LogPairSeconds 30 -StopSettleSeconds 10 -RoomSettleSeconds 10
+python tests/runtime/verify_product_pilot.py --root out/product-pilot-collected-20260928-023816
+```
+
+复跑必须换新 run ID 和输出目录。先启动外部采集、等待服务端 ready，再运行 UIA，
+结束后停止本轮远端采集器并下载白名单 JSONL。不得停止其他房间或复用其媒体作为
+本轮旁证。Windows 上 APPDATA/LOCALAPPDATA 环境变量不能隔离 QStandardPaths
+Known Folder 或 HKCU QSettings；应使用专用 Windows 账户。原始诊断目录以
+进程探针报告的实际路径为准，只归档匹配 process_run_id 的分段。
+
+本轮 [独立复盘](../../out/product-pilot-collected-20260928-023816/pilot-review.json)
+为 **FAIL**，保留原始 UIA 退出码不可用失败，不改写为 PASS。
+执行时输入指纹见同目录 `executed-inputs.json`。采集后的 runner 改为提前保留
+原生进程句柄并调用 GetExitCodeProcess，0/7 两种退出码直接验证 PASS；p95 字段名
+也已修正并构建，但这两项没有重跑桌面 PILOT。正式门仍需完整补证，尤其是产品
+下行音频、音频 RTPStats、活跃解码器数量、WGC 句柄归属及日志配对性能。
+
+
+### 产品长稳定位器直接回归
+
+`powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/uia/test_product_locator.ps1` 从产品 driver AST 载入实际定位/Pattern 合同函数，用 ScriptProperty 模拟窗口销毁时 AutomationId 从有效值变为 null。无需交互式桌面、不启动产品；它不能替代真实桌面 PILOT。覆盖单次 ID 读取、顶层窗口、控件消失、重复控件、错误角色和缺失 Pattern；始终保留 PID 树定位，不回退坐标。
+
+
+### 当前产品 PILOT 与堆诊断
+
+当前 `invoke_product_external.ps1` 的 Pilot 为同一个产品进程内两次完整生命周期、总时长至少 480 秒，按全局时间点以 240 秒/轮调度；上文单周期命令仅是历史失败的执行记录。当前正式门要求三次相同输入的完整 Pilot，任何诊断标记都会被 `release_product_acceptance.py` 拒绝。
+
+启动前通过 `product_meeting_fixture.ps1` 认证并核对测试会议归属及剩余有效期（覆盖采集器超时再加 300 秒）。会议号只接受 9 位数字，并从同一份 prepared 信息传给本机 UIA 和远端发布/接收端，不使用固定旧会议号。过期时可用 `-CreateNew` 在新目录准备一个 24 小时有效的测试会议，保留旧 prepared 和失败证据；密码仍为 DPAPI，token 只在内存中使用。
+
+多周期上行音频通过 `product_pilot_audio.py` 逐轮核对原生 session、经确认的远端 operation 上下文、参与者盐化哈希、麦克风音轨的订阅/取消发布、Opus RTP 计数增长和解码 PCM 回调间隔。Windows 设备和对应周期 UIA 同时证明无麦克风才可 DEFERRED；有设备且缺旁证时 FAIL。PCM 时序不代表主观音质。
+
+长时间使用实时 `FindAll` 遍历会在产品进程中累积 UIAutomationCore 的原生节点。实测客户端 GC 不释放这部分引用，客户端退出才释放。当前驱动用 `CacheRequest` 的 `AutomationElementMode.None` 取得树属性，只为实际操作取得实时控件；窗口根节点每次重新按 PID、窗口句柄及 UIA RuntimeId 核对。控件按本次观察到的完整 AutomationId 再定位，重复、错误角色、缺失 Pattern 仍明确失败。`Invoke` 只在提交前等待控件发现，不重试已提交动作。
+
+诊断示例（仍必须使用全新输出目录）：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/runtime/invoke_product_external.ps1 `
+  -Root out/<new-diagnostic-run> -PreparedDirectory out/<prepared-test-account> `
+  -HeapDiagnostic -HeapCheckOnly
+```
+
+`-HeapDiagnostic` 默认用 CDB 在 ntdll 初始化时对本轮产品启用 UST，并在离会稳定窗口用 UMDH 采集分配栈；`-HeapCheckOnly` 改用堆尾部/释放/参数校验，不采集全量分配栈；`-HeapPageCheck` 使用进程内标准 PageHeap，捕获 Verifier breakpoint，不声称 full guard-page 模式。三种模式互斥，不写 IFEO 注册表，也不修改系统设置。UST 开销显著，可能触发真实的队列、发布或导出超时，这些 FAIL 必须保留。仅定位时可指定 `-HeapDiagnosticNoShare` / `-HeapDiagnosticNoExport`，分别明确标记省略共享/导出，不能用于正式验收。界面交互仍只通过 UIA Pattern。产品级实验必须顺序执行，避免共享历史目录的读写 lease 干扰。

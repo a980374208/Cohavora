@@ -154,6 +154,10 @@ add_test(NAME meeting_local_media_state_test
     COMMAND test_participant_window_remediation --local-media-state)
 set_tests_properties(meeting_local_media_state_test PROPERTIES
     TIMEOUT 30 LABELS "CORE_REGRESSION")
+add_test(NAME meeting_toolbar_accessibility_test
+    COMMAND test_participant_window_remediation --toolbar-accessibility-contract)
+set_tests_properties(meeting_toolbar_accessibility_test PROPERTIES
+    TIMEOUT 30 LABELS "CORE_REGRESSION")
 add_test(NAME meeting_telemetry_ui_test
     COMMAND test_participant_window_remediation --telemetry-ui)
 set_tests_properties(meeting_telemetry_ui_test PROPERTIES

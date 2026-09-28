@@ -24,6 +24,8 @@
 namespace livekit {
 namespace {
 using namespace std::chrono_literals;
+std::atomic<std::uint32_t> observed_backend{0};
+std::atomic<std::uint64_t> observed_frames{0};
 
 webrtc::DesktopCaptureOptions Options(bool allow_wgc_window = false) {
     auto options = webrtc::DesktopCaptureOptions::CreateDefault();
@@ -151,6 +153,8 @@ private:
             return;
         }
         if (result != webrtc::DesktopCapturer::Result::SUCCESS || !frame) return;
+        observed_backend.store(frame->capturer_id(), std::memory_order_relaxed);
+        observed_frames.fetch_add(1, std::memory_order_relaxed);
         if (!backend_seen_ || frame->capturer_id() != backend_id_) {
             backend_seen_ = true;
             backend_id_ = frame->capturer_id();
@@ -186,6 +190,16 @@ private:
     bool backend_seen_ = false;
 };
 } // namespace
+
+DesktopCaptureObservation ObserveDesktopCapture() {
+    using namespace webrtc::DesktopCapturerId;
+    const auto id = observed_backend.load(std::memory_order_relaxed);
+    const char* backend = "unknown";
+    if (id == kWgcCapturerWin) backend = "wgc";
+    else if (id == kScreenCapturerWinDirectx) backend = "dxgi";
+    else if (id == kWindowCapturerWinGdi || id == kScreenCapturerWinGdi) backend = "gdi";
+    return {backend, observed_frames.load(std::memory_order_relaxed)};
+}
 
 std::vector<DesktopSource> EnumerateDesktopSources() {
     ComScope com;

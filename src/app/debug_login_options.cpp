@@ -1,8 +1,19 @@
 #include "src/app/debug_login_options.h"
 
 #include <QtCore/QChar>
+#include <QtCore/QDir>
+#include <QtCore/QSettings>
 
 namespace MeetingApp {
+bool ConfigureDebugSettingsRoot(bool debugEnabled, const QString &root) {
+	if (!debugEnabled || root.isEmpty()) return true;
+	if (!QDir::isAbsolutePath(root) || !QDir().mkpath(root)) return false;
+	QSettings::setDefaultFormat(QSettings::IniFormat);
+	QSettings::setPath(QSettings::IniFormat, QSettings::UserScope, root);
+	QSettings::setPath(QSettings::IniFormat, QSettings::SystemScope, root);
+	return true;
+}
+
 namespace {
 
 bool IsAccountOption(const QString &argument) {
