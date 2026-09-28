@@ -33,6 +33,7 @@ using Validated = std::tuple<std::string, std::uint64_t,
                              std::uint64_t, std::uint64_t>;
 class ValidationCache final {
 public:
+    explicit ValidationCache(std::size_t capacity) : capacity_(capacity) {}
     bool Contains(const Validated& key) {
         const auto found = index_.find(key);
         if (found == index_.end()) return false;
@@ -41,7 +42,7 @@ public:
     }
     void Remember(Validated key) {
         if (Contains(key)) return;
-        if (index_.size() == 256) {
+        if (index_.size() == capacity_) {
             index_.erase(recent_.back());
             recent_.pop_back();
         }
@@ -49,6 +50,7 @@ public:
         index_.emplace(recent_.front(), recent_.begin());
     }
 private:
+    const std::size_t capacity_;
     std::list<Validated> recent_;
     std::map<Validated, std::list<Validated>::iterator> index_;
 };
@@ -58,12 +60,16 @@ private:
 // seconds, forcing a full JSON reparse on the persistence worker at the next
 // maintenance scan. Keep the two bounded working sets independent.
 ValidationCache& ValidatedRecords() {
-    static thread_local ValidationCache cache;
+    static thread_local ValidationCache cache{256};
     return cache;
 }
 
 ValidationCache& ValidatedSegments() {
-    static thread_local ValidationCache cache;
+    // A sequential inspection must retain an entire supported report. A
+    // smaller LRU evicts the next proof before it can be reused on every scan.
+    // Entries contain only hashes and bounds; disk reads and SHA-256 remain
+    // mandatory even on a cache hit. Record proofs keep their smaller budget.
+    static thread_local ValidationCache cache{kMaximumSegments};
     return cache;
 }
 
