@@ -16,7 +16,11 @@ param(
     [switch]$HeapDiagnosticNoExport,
     [switch]$HeapPageCheck,
     [switch]$CrashDiagnostic,
-    [switch]$IsolateUiaCycles
+    [switch]$IsolateUiaCycles,
+    [switch]$Retest,
+    [switch]$RetestSmoke,
+    [int]$SteadySeconds = 1800,
+    [int]$MixedSeconds = 7200
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
@@ -62,6 +66,7 @@ $script:participantHash = $null
 $script:lastResourceSample = [DateTime]::MinValue
 $script:layout = 'unknown'
 $started = [DateTime]::UtcNow
+$script:runClock = [Diagnostics.Stopwatch]::StartNew()
 $oldAppData = $env:APPDATA
 $oldLocalAppData = $env:LOCALAPPDATA
 $oldQtPlatform = $env:QT_QPA_PLATFORM
@@ -84,7 +89,8 @@ function Record([string]$Action, [string]$Phase) {
         anonymous_session_id=$script:nativeSession;
         participant_sha256=$script:participantHash;
         operation_id=$script:operation; action=$Action; phase=$Phase;
-        pid=$(if ($script:child) { $script:child.Id } else { $null }); utc=[DateTime]::UtcNow.ToString('o')}
+        pid=$(if ($script:child) { $script:child.Id } else { $null }); utc=[DateTime]::UtcNow.ToString('o');
+        elapsed_seconds=$(if ($script:runClock) {$script:runClock.Elapsed.TotalSeconds} else {$null})}
     [IO.File]::AppendAllText((Join-Path $OutputDirectory 'uia-actions.jsonl'),
         (($row | ConvertTo-Json -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
 }
@@ -115,7 +121,8 @@ function Save-Result([string]$Verdict, [string]$Reason) {
     [ordered]@{schema=1; run_id=$script:runId; verdict=$Verdict; reason=$Reason;
         cycles_requested=$Cycles; cycles_completed=$script:completed;
         minimum_seconds=$MinimumSeconds; started_utc=$started.ToString('o');
-        finished_utc=[DateTime]::UtcNow.ToString('o'); ui_only=$true} |
+        finished_utc=[DateTime]::UtcNow.ToString('o'); ui_only=$true;
+        retest=[bool]$Retest; smoke=[bool]$RetestSmoke} |
         ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'uia-result.json') -Encoding UTF8
 }
 function Sample-Resource([string]$Phase) {
@@ -403,6 +410,11 @@ function Start-Product {
     # Retain the native handle before exit. Windows PowerShell's Start-Process
     # wrapper can otherwise return a null ExitCode even after WaitForExit.
     $script:childHandle = $script:child.Handle
+    # Publish identity before any UIA call: even first-window discovery can hang.
+    @{run_id=$script:runId;pid=$script:child.Id;executable=$Executable;
+        start_ticks=$script:child.StartTime.ToUniversalTime().Ticks} | ConvertTo-Json |
+        Set-Content (Join-Path $OutputDirectory 'product-identity.json.tmp') -Encoding UTF8
+    Move-Item (Join-Path $OutputDirectory 'product-identity.json.tmp') (Join-Path $OutputDirectory 'product-identity.json')
     $null = Wait-For 'product login or main window' {
             (Find-Node 'mainJoinMeeting' ([Windows.Automation.ControlType]::Button) -Optional) -or
             (Find-Node 'loginAccount' ([Windows.Automation.ControlType]::Edit) -Optional)
@@ -477,6 +489,13 @@ function Run-Cycle {
             Save-Tree ('cycle-{0:d4}-meeting' -f $script:cycle)
             Sample-Resource 'joined'
         }
+        $retestPhase = if ($script:cycle -eq 1) {'steady'} else {'mixed'}
+        if ($Retest) {
+            $phaseSeconds = if ($script:cycle -eq 1) {$SteadySeconds} else {$MixedSeconds / ($Cycles - 1)}
+            Record ('retest_' + $retestPhase) 'started'
+            $script:retestDeadline = [Diagnostics.Stopwatch]::StartNew()
+        }
+        if (!$Retest -or $script:cycle -gt 1) {
         Action 'page' {
             $null = Find-Node 'videoPageIndicator' ([Windows.Automation.ControlType]::Text)
             $null = Wait-For 'first video page ready' {
@@ -558,7 +577,25 @@ function Run-Cycle {
             [IO.File]::AppendAllText((Join-Path $OutputDirectory 'uia-log-windows.jsonl'),
                 (($window | ConvertTo-Json -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
         }
-        $releaseDue = $started.AddSeconds($script:cycle * $MinimumSeconds / $Cycles)
+        }
+        if ($Retest) {
+            # Dwell remains in the joined room. The external supervisor checks
+            # WM_NULL independently; these acknowledgements also prove UIA progress.
+            while ($script:retestDeadline.Elapsed.TotalSeconds -lt $phaseSeconds) {
+                if ($script:child.HasExited) {throw 'PROCESS_EXIT_DURING_RETEST'}
+                if (!(Find-Node 'meetingLeave' ([Windows.Automation.ControlType]::Button) -Optional)) {
+                    throw 'RETEST_MEETING_WINDOW_LOST'
+                }
+                if (Find-Node 'meetingDepartureNotice' ([Windows.Automation.ControlType]::Window) -Optional) {
+                    throw 'RETEST_MEETING_DEPARTED'
+                }
+                Sample-Resource ('retest_' + $retestPhase)
+                Record ('retest_' + $retestPhase) 'heartbeat'
+                Start-Sleep -Seconds 2
+            }
+            Record ('retest_' + $retestPhase) 'completed'
+        }
+        $releaseDue = if ($Retest) {[DateTime]::UtcNow} else {$started.AddSeconds($script:cycle * $MinimumSeconds / $Cycles)}
         while ([DateTime]::UtcNow -lt $releaseDue) {
             if ($script:child.HasExited) { throw 'PROCESS_EXIT_BEFORE_LEAVE' }
             Sample-Resource 'settled'
@@ -676,6 +713,13 @@ try {
         Save-Result 'NOT_RUN' 'unlocked_interactive_default_desktop_required'; exit 77
     }
     if ($ProbeOnly -and $Pilot) { throw 'Select either ProbeOnly or Pilot' }
+    if ($RetestSmoke -and !$Retest) {throw 'SMOKE_REQUIRES_RETEST'}
+    if ($Retest) {
+        if ($Pilot -or $ProbeOnly -or $HeapDiagnostic -or $IsolateUiaCycles) {throw 'RETEST_PROFILE_CONFLICT'}
+        if ($Cycles -lt 3 -or $SteadySeconds -lt 1 -or $MixedSeconds -lt 2) {throw 'INVALID_RETEST_PLAN'}
+        if (!$RetestSmoke -and ($SteadySeconds -lt 1800 -or $MixedSeconds -lt 7200)) {throw 'RETEST_DURATION_TOO_SHORT'}
+        $MinimumSeconds = $SteadySeconds + $MixedSeconds
+    }
     if (!$ProbeOnly -and (!$env:LIVEKIT_UIA_ACCOUNT -or !$env:LIVEKIT_UIA_PASSWORD -or
         !$env:LIVEKIT_UIA_MEETING_ID -or (!$Pilot -and $env:LIVEKIT_UIA_DEDICATED_DESKTOP -ne '1'))) {
         Save-Result 'NOT_RUN' 'dedicated_desktop_account_and_meeting_required'; exit 77
@@ -683,7 +727,7 @@ try {
     if ($Pilot -and ($Cycles -lt 2 -or $MinimumSeconds -lt (240 * $Cycles))) {
         throw 'PILOT_PROFILE_REQUIRED: at least two complete cycles in one process, 240 seconds per cycle'
     }
-    if (!$ProbeOnly -and !$Pilot -and ($Cycles -ne 100 -or $MinimumSeconds -lt 28800 -or
+    if (!$ProbeOnly -and !$Pilot -and !$Retest -and ($Cycles -ne 100 -or $MinimumSeconds -lt 28800 -or
         $ShareSeconds -lt 60 -or $LogPairSeconds -lt 30 -or
         $StopSettleSeconds -lt 10 -or $RoomSettleSeconds -lt 10)) {
         throw 'FORMAL_PROFILE_REQUIRED: 100 complete cycles and at least 8 hours'
@@ -698,7 +742,7 @@ try {
             $script:cycleId = [guid]::NewGuid().ToString('N')
             $script:nativeSession = $null
         }
-        if (!$ProbeOnly) {
+        if (!$ProbeOnly -and !$Retest) {
             $due = $started.AddSeconds(($index - 1) * $MinimumSeconds / $Cycles)
             while ([DateTime]::UtcNow -lt $due) { Start-Sleep -Seconds 1 }
         }
@@ -709,6 +753,7 @@ try {
     }
     if (!$ProbeOnly) { Stop-Product }
     if ($ProbeOnly) { Save-Result 'PROBED' 'tree_observation_only' }
+    elseif ($Retest) { Save-Result 'RETEST_COMPLETE' $(if ($RetestSmoke) {'short_smoke_only'} else {'ui_lifecycle_scope_independent_media_witnesses_required'}) }
     elseif ($Pilot) { Save-Result 'PILOT_COMPLETE' 'not_formal_acceptance' }
     elseif (([DateTime]::UtcNow - $started).TotalSeconds -lt $MinimumSeconds) {
         Save-Result 'INCONCLUSIVE' 'duration_shorter_than_eight_hours'; exit 2
