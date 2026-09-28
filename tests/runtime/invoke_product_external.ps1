@@ -5,6 +5,7 @@ param(
     [string]$AudioCollector='out/build/windows-vs2026-dev/Debug/product_audio_loopback.exe',
     [ValidateSet('Pilot','Formal')][string]$Mode='Pilot',
     [string]$ReleaseGate='',
+    [int]$DedicatedDesktopSessionId=0,
     [switch]$HeapDiagnostic,
     [switch]$HeapDiagnosticNoShare,
     [switch]$HeapCheckOnly,
@@ -22,6 +23,17 @@ $AudioCollector=(Resolve-Path -LiteralPath $AudioCollector).Path
 $PreparedDirectory=(Resolve-Path -LiteralPath $PreparedDirectory).Path
 $setup=Get-Content "$PreparedDirectory/setup.json" -Raw | ConvertFrom-Json
 if ($setup.status -ne 'PREPARED' -or $setup.meeting_id -cnotmatch '^[0-9]{9}$') {throw 'PREPARED_MEETING_INVALID'}
+$target=Get-Content (Join-Path $PSScriptRoot 'product_aliyun_target.json') -Raw | ConvertFrom-Json
+if ($setup.service_url.TrimEnd('/') -ne $target.service_url) {throw 'TEST_SERVICE_UNEXPECTED'}
+. (Join-Path $workspace 'tests/uia/product_desktop_evidence.ps1')
+if ($Mode -eq 'Formal' -or $DedicatedDesktopSessionId -gt 0) {
+    $desktopBaseline=Assert-DedicatedDesktop $DedicatedDesktopSessionId
+}
+function Invoke-TestRemote([string]$Command) {
+    $output=& python "$PSScriptRoot/product_aliyun_transport.py" $Command
+    if ($LASTEXITCODE) {throw 'ALIYUN_REMOTE_COMMAND_FAILED'}
+    return $output
+}
 $meetingId=$setup.meeting_id
 if(Test-Path -LiteralPath $Root){throw 'Run directory must be new'}
 if($HeapDiagnostic -and $Mode -ne 'Pilot'){throw 'HEAP_DIAGNOSTIC_REQUIRES_PILOT'}
@@ -45,23 +57,25 @@ if($Mode -eq 'Formal') {
 }
 $null=New-Item -ItemType Directory -Path $Root
 $Root=(Resolve-Path -LiteralPath $Root).Path
+if ($desktopBaseline) {$desktopBaseline | ConvertTo-Json | Set-Content "$Root/desktop-baseline.json" -Encoding UTF8}
 $run=[guid]::NewGuid().ToString('N')
 $cycles=if($Mode -eq 'Formal'){100}else{$DiagnosticCycles}
 $seconds=if($Mode -eq 'Formal'){28800}else{240*$cycles}
 $maximum=if($Mode -eq 'Formal'){[int]$limits.observer_timeout_seconds}else{$seconds+420}
 $archiveBudget=if($Mode -eq 'Formal'){[long]$limits.archive_maximum_bytes}else{[long]536870912*$cycles}
 $prefix=$run.Substring(0,8)
-$remote='/home/ubuntu/uia-acceptance-20260928'
+$remote=$target.remote_root
 $remoteRun="$remote/pilot-$prefix"
 $plan=[ordered]@{schema=2;run_id=$run;root=$Root;mode=$Mode;seconds=$seconds;cycles=$cycles;meeting_id=$meetingId;
     share_seconds=60;log_pair_seconds=35;requires_context=$true;explicit_microphone_unmute=$true;
-    server_cpu=2;server_memory_gib=2;server_bandwidth_mbps=3;
+    server_provider='aliyun';server_instance_id=$target.instance_id;
+    server_cpu=$target.server_cpu;server_memory_gib=$target.server_memory_gib;server_bandwidth_mbps=$target.server_bandwidth_mbps;
     load=@{video_publishers=10;width=160;height=90;fps=5;video_bps_each=40000;video_codec='VP8';audio_bps=24000;simulcast=$false}}
 $plan | ConvertTo-Json -Depth 6 | Set-Content "$Root/plan.json" -Encoding UTF8
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'product_external_limits.json') -Destination "$Root/limits.json"
 $hashes=[ordered]@{}
-$paths=@($Executable,$AudioCollector,(Join-Path $workspace 'tests/uia/product_desktop.ps1'),(Join-Path $workspace 'tests/uia/product_desktop_cycle.ps1')) +
-    @(Get-ChildItem $PSScriptRoot -File | Where-Object {$_.Name -match 'product_(pilot|audio|external|heap|meeting)|invoke_product_external|verify_product'} | Select-Object -ExpandProperty FullName)
+$paths=@($Executable,$AudioCollector,(Join-Path $workspace 'tests/uia/product_desktop.ps1'),(Join-Path $workspace 'tests/uia/product_desktop_cycle.ps1'),(Join-Path $workspace 'tests/uia/product_desktop_evidence.ps1')) +
+    @(Get-ChildItem $PSScriptRoot -File | Where-Object {$_.Name -match 'product_(pilot|audio|external|heap|meeting|aliyun)|invoke_product_external|verify_product'} | Select-Object -ExpandProperty FullName)
 foreach($path in $paths){$hashes[$path]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
 $hashes | ConvertTo-Json | Set-Content "$Root/executed-inputs.json" -Encoding UTF8
 $children=@();$uia=$null;$remoteStarted=$false;$failure=$null;$runExit=1
@@ -69,7 +83,7 @@ try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot/product_meeting_fixture.ps1" -PreparedDirectory $PreparedDirectory -OutputDirectory $Root -MinimumRemainingSeconds ($maximum+300)
     if($LASTEXITCODE){throw 'MEETING_PREFLIGHT_FAILED'}
     foreach($name in @('product_pilot_remote.py','product_pilot_context.py')) {
-        $remoteHash=ssh -o BatchMode=yes -o ClearAllForwardings=yes tencent "sha256sum $remote/$name"
+        $remoteHash=Invoke-TestRemote "sha256sum $remote/$name"
         if($LASTEXITCODE -or !$remoteHash -or ($remoteHash -split ' ')[0] -ne (Get-FileHash "$PSScriptRoot/$name" -Algorithm SHA256).Hash.ToLowerInvariant()) {
             throw 'REMOTE_COLLECTOR_INPUT_MISMATCH'
         }
@@ -77,12 +91,14 @@ try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/runtime/product_audio_devices.ps1 -Output "$Root/audio-devices.json" -RunId $run
     if($LASTEXITCODE){throw 'AUDIO_DEVICE_OBSERVER_FAILED'}
     $formalArg=if($Mode -eq 'Formal'){'--formal'}elseif($HeapDiagnostic){'--diagnostic'}else{''}
-    ssh -o BatchMode=yes -o ClearAllForwardings=yes tencent "nohup python3 $remote/product_pilot_remote.py --dependencies $remote/collector-python --config $remote/livekit-test.yaml --output $remoteRun --run-id $run --room $meetingId --seconds $maximum $formalArg > $remote/pilot-$prefix.stderr 2>&1 < /dev/null &"
+    Invoke-TestRemote "$remote/venv/bin/python --version; $remote/bootstrap/bin/uv pip freeze --python $remote/venv/bin/python" | Set-Content "$Root/remote-environment.txt" -Encoding UTF8
+    if ($desktopBaseline) {$null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $desktopBaseline}
+    Invoke-TestRemote "nohup $remote/venv/bin/python $remote/product_pilot_remote.py --dependencies $remote/collector-python --config $($target.livekit_config) --output $remoteRun --run-id $run --room $meetingId --seconds $maximum $formalArg > $remote/pilot-$prefix.stderr 2>&1 < /dev/null &"
     if($LASTEXITCODE){throw 'REMOTE_START_FAILED'}
     $remoteStarted=$true
     $ready=$false
     for($i=0;$i -lt 30;++$i){
-        $response=ssh -o BatchMode=yes -o ClearAllForwardings=yes tencent "test -f $remoteRun/ready.json && cat $remoteRun/ready.json" 2>$null
+        $response=Invoke-TestRemote "if test -f $remoteRun/ready.json; then cat $remoteRun/ready.json; else echo null; fi" 2>$null
         if($LASTEXITCODE -eq 0 -and ($response | ConvertFrom-Json).run_id -eq $run){$ready=$true;break}
         Start-Sleep -Seconds 1
     }
@@ -96,7 +112,7 @@ try {
     $env:LIVEKIT_UIA_REMOTE_CONTEXT='1'
     $env:LIVEKIT_UIA_LOG_PAIR='1'
     $env:LIVEKIT_UIA_PILOT_PROBE="$Root/process-probe.jsonl"
-    $env:LIVEKIT_UIA_DEDICATED_DESKTOP='1'
+    if ($desktopBaseline) {$null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $desktopBaseline}
     $resource=Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',"$PSScriptRoot/product_pilot_resources.ps1",'-UiaDirectory',"$Root/uia",'-Destination',"$Root/external-resources.jsonl",'-RunId',$run,'-MaximumSeconds',$maximum,'-AudioCollector',$AudioCollector) -RedirectStandardOutput "$Root/resources.stdout" -RedirectStandardError "$Root/resources.stderr"
     $children+=$resource
     $null=$resource.Handle
@@ -107,6 +123,7 @@ try {
     $children+=$diagnostic
     $null=$diagnostic.Handle
     $uiaArgs=@('-NoProfile','-ExecutionPolicy','Bypass','-File',"$workspace/tests/uia/product_desktop.ps1",'-Executable',$Executable,'-OutputDirectory',"$Root/uia",'-RunId',$run,'-Cycles',$cycles,'-MinimumSeconds',$seconds,'-ShareSeconds',60,'-LogPairSeconds',35,'-StopSettleSeconds',10,'-RoomSettleSeconds',10)
+    if ($DedicatedDesktopSessionId -gt 0) {$uiaArgs+=@('-DedicatedDesktopSessionId',$DedicatedDesktopSessionId)}
     if($Mode -eq 'Pilot'){$uiaArgs+='-Pilot'}
     if($HeapDiagnostic){$uiaArgs+='-HeapDiagnostic'}
     if($HeapDiagnosticNoShare){$uiaArgs+='-HeapDiagnosticNoShare'}
@@ -121,6 +138,10 @@ try {
     @{uia_pid=$uia.Id;resource_pid=$resource.Id;archive_pid=$archive.Id;diagnostic_pid=$diagnostic.Id;run_id=$run} | ConvertTo-Json | Set-Content "$Root/collectors.json" -Encoding UTF8
     $started=[DateTime]::UtcNow
     while(!$uia.WaitForExit(1000)) {
+        if ($desktopBaseline) {
+            Get-DesktopEvidenceState | ConvertTo-Json -Compress | Add-Content "$Root/desktop-observations.jsonl" -Encoding UTF8
+            $null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $desktopBaseline
+        }
         if(([DateTime]::UtcNow-$started).TotalSeconds -gt $maximum){throw 'RUN_WATCHDOG_TIMEOUT'}
         if((Get-PSDrive -Name ([IO.Path]::GetPathRoot($workspace).Substring(0,1))).Free -lt 5GB){throw 'EVIDENCE_DISK_RESERVE_EXHAUSTED'}
         if(Test-Path "$Root/uia/uia-result.json"){continue}
@@ -158,17 +179,20 @@ try {
 } finally {
     Remove-Item Env:LIVEKIT_UIA_PASSWORD -ErrorAction SilentlyContinue
     if($remoteStarted){
-        ssh -o BatchMode=yes -o ClearAllForwardings=yes tencent "test -d $remoteRun"
-        $remoteStarted=($LASTEXITCODE -eq 0)
-    }
-    if($remoteStarted){
-        ssh -o BatchMode=yes -o ClearAllForwardings=yes tencent "touch $remoteRun/stop"
-        for($i=0;$i -lt 15;++$i){
-            $last=ssh -o BatchMode=yes -o ClearAllForwardings=yes tencent "tail -n 1 $remoteRun/remote.jsonl" | ConvertFrom-Json
-            if($last.event -eq 'collector.stopped'){break}
-            Start-Sleep -Seconds 1
+        try {
+            Invoke-TestRemote "if test -d $remoteRun; then touch $remoteRun/stop; fi"
+            for($i=0;$i -lt 15;++$i){
+                $last=Invoke-TestRemote "if test -f $remoteRun/remote.jsonl; then tail -n 1 $remoteRun/remote.jsonl; else echo null; fi" | ConvertFrom-Json
+                if($last.event -eq 'collector.stopped'){break}
+                Start-Sleep -Seconds 1
+            }
+            if ($last.event -ne 'collector.stopped') {$runExit=1}
+            & workbench download "$remoteRun/remote.jsonl" "$Root/remote.jsonl" -i $target.instance_id -r $target.region
+            if ($LASTEXITCODE) {$runExit=1}
+        } catch {
+            $runExit=1
+            @{reason='REMOTE_CLEANUP_OR_EVIDENCE_FAILED';run_id=$run} | ConvertTo-Json | Set-Content "$Root/remote-cleanup-failure.json"
         }
-        scp -o BatchMode=yes -o ClearAllForwardings=yes "tencent:$remoteRun/remote.jsonl" "$Root/remote.jsonl"
     }
     $childResults=@(foreach($child in $children){
         $timedOut=!$child.WaitForExit(10000)

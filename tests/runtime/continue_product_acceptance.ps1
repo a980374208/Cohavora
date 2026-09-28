@@ -1,4 +1,5 @@
 param(
+    [Parameter(Mandatory=$true)][int]$DedicatedDesktopSessionId,
     [Parameter(Mandatory=$true)][string]$FirstPilot,
     [Parameter(Mandatory=$true)][string]$PilotPrefix,
     [Parameter(Mandatory=$true)][string]$PreparedDirectory,
@@ -20,13 +21,13 @@ if($result.verdict -ne 'EVIDENCE_COMPLETE' -or $result.exit_code -ne 0){throw 'F
 $pilots=@($FirstPilot)
 foreach($number in 2,3) {
     $path='{0}-{1:d2}' -f $PilotPrefix,$number
-    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot/invoke_product_external.ps1" -Root $path -PreparedDirectory $PreparedDirectory
+    & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot/invoke_product_external.ps1" -Root $path -PreparedDirectory $PreparedDirectory -DedicatedDesktopSessionId $DedicatedDesktopSessionId
     if($LASTEXITCODE -ne 0){throw "PILOT_FAILED: $path"}
     $pilots+=$path
 }
 & python "$PSScriptRoot/release_product_acceptance.py" --pilot $pilots[0] --pilot $pilots[1] --pilot $pilots[2] --validation $Validation --output $Gate
 if($LASTEXITCODE -ne 0){throw 'RELEASE_GATE_REJECTED'}
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot/invoke_product_external.ps1" -Root $FormalRoot -PreparedDirectory $PreparedDirectory -Mode Formal -ReleaseGate $Gate
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot/invoke_product_external.ps1" -Root $FormalRoot -PreparedDirectory $PreparedDirectory -DedicatedDesktopSessionId $DedicatedDesktopSessionId -Mode Formal -ReleaseGate $Gate
 $formalExit=$LASTEXITCODE
 & python "$PSScriptRoot/report_product_acceptance.py" --root $FormalRoot --gate $Gate
 if($LASTEXITCODE -ne 0){exit 1}

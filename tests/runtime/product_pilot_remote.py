@@ -1,4 +1,4 @@
-"""Bounded Tencent PILOT load + independent SFU/decoded-media evidence.
+"""Bounded PILOT load + independent SFU/decoded-media evidence.
 
 Run in an isolated Python environment with livekit, livekit-api and PyYAML.
 Credentials are read on the server, never written to evidence or argv.
@@ -50,6 +50,7 @@ async def run(args):
             api.VideoGrants(room_join=True, room=args.room)).to_jwt()
 
     tasks, rooms, tracks = [], [], {}
+    stream_tasks = {}
     prefix = "pilot-" + args.run_id[:8]
     receiver = rtc.Room()
     rooms.append(receiver)
@@ -123,12 +124,24 @@ async def run(args):
 
     @receiver.on("track_subscribed")
     def subscribed(track, publication, participant):
-        tasks.append(asyncio.create_task(consume(track, publication, participant)))
+        previous = stream_tasks.get(publication.sid)
+        if previous is not None:
+            previous.cancel()
+        task = asyncio.create_task(consume(track, publication, participant))
+        stream_tasks[publication.sid] = task
+        tasks.append(task)
+        def completed(done):
+            if stream_tasks.get(publication.sid) is done:
+                stream_tasks.pop(publication.sid, None)
+        task.add_done_callback(completed)
 
     @receiver.on("track_unsubscribed")
     def unsubscribed(track, publication, participant):
         if publication.sid in tracks:
             tracks[publication.sid]["active"] = False
+        task = stream_tasks.get(publication.sid)
+        if task is not None:
+            task.cancel()
         emit("receiver.track_unsubscribed", sid=publication.sid,
              participant=participant.identity, source=int(publication.source))
 

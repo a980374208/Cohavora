@@ -28,7 +28,16 @@
 
 namespace MeetingUI {
 struct MeetingLogConsoleTestAccess {
+    static void SettleFilter(MeetingLogConsoleWindow &console) {
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (console._filterTimer->isActive() && std::chrono::steady_clock::now() < deadline) {
+            QCoreApplication::processEvents();
+            Sleep(1);
+        }
+        TEST_CHECK(!console._filterTimer->isActive());
+    }
     static void DrainUntilText(MeetingLogConsoleWindow &console, const QString &text) {
+        SettleFilter(console);
         // Rendering is time-sliced (4ms), so a fixed number of calls is not a
         // completion condition on a slow/debug build. Keep the wait bounded.
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -218,7 +227,13 @@ int main(int argc, char **argv) {
     component->setCurrentText(QStringLiteral("meeting_ui"));
     TEST_CHECK(view->toPlainText().contains(QStringLiteral("chat.send.terminal")));
     component->setCurrentText(QStringLiteral("app"));
+    const auto previousText = view->toPlainText();
+    session->setText(QStringLiteral("nonmatch"));
+    console.drainPending();
+    TEST_CHECK(view->toPlainText() == previousText);
     session->setText(QStringLiteral("nonmatching"));
+    TEST_CHECK(view->toPlainText() == previousText);
+    MeetingUI::MeetingLogConsoleTestAccess::SettleFilter(console);
     TEST_CHECK(view->toPlainText().isEmpty());
     session->setText(QStringLiteral("01234567"));
     copyScope->setCurrentIndex(0);
@@ -271,7 +286,7 @@ int main(int argc, char **argv) {
     TEST_CHECK(view->toPlainText().contains(QStringLiteral("bytes=105999")));
     TEST_CHECK(!view->toPlainText().contains(QStringLiteral("bytes=100000")));
     console.onFilterChanged(QStringLiteral("CHAT_TEXT"));
-    TEST_CHECK(view->document()->blockCount() <= 128);
+    // Text changes defer rebuilding; DrainUntilText waits for the debounce.
     MeetingUI::MeetingLogConsoleTestAccess::DrainUntilText(
         console, QStringLiteral("bytes=105999"));
     TEST_CHECK(view->toPlainText().contains(QStringLiteral("bytes=105999")));

@@ -5,11 +5,10 @@ acknowledges the context before UIA continues. Native IDs come from the product
 probe and remain separate from the test driver's operation ID.
 """
 import argparse
+import base64
 import json
 from pathlib import Path
 import re
-import shlex
-import subprocess
 import sys
 
 
@@ -39,10 +38,11 @@ def validate_context(value, run):
 REMOTE_FENCE = r'''
 import json,sys,time
 from pathlib import Path
-c=json.load(sys.stdin)
+import base64
+c=json.loads(base64.b64decode(sys.argv[2]))
 run=c['run_id']
 assert len(run)==32 and all(x in '0123456789abcdef' for x in run)
-root=Path('/home/ubuntu/uia-acceptance-20260928')/('pilot-'+run[:8])
+root=Path(sys.argv[1])/('pilot-'+run[:8])
 assert json.loads((root/'ready.json').read_text())['run_id']==run
 temporary=root/'context.tmp'
 temporary.write_text(json.dumps(c))
@@ -62,12 +62,11 @@ sys.exit(3)
 def fence(path):
     context = json.loads(path.read_text(encoding="utf-8-sig"))
     validate_context(context, context["run_id"])
-    result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ClearAllForwardings=yes",
-        "-o", "ConnectTimeout=5", "tencent", "python3 -c " + shlex.quote(REMOTE_FENCE)],
-        input=json.dumps(context), capture_output=True, text=True, timeout=20)
-    if result.returncode:
-        raise RuntimeError("remote_context_not_acknowledged")
-    ack = json.loads(result.stdout)
+    from product_aliyun_transport import execute, target
+    import shlex
+    payload = base64.b64encode(json.dumps(context).encode()).decode()
+    ack = json.loads(execute("python3 -c " + shlex.quote(REMOTE_FENCE) + " "
+        + shlex.quote(target()["remote_root"]) + " " + shlex.quote(payload)))
     if ack.get("context") != context or type(ack.get("sequence")) is not int:
         raise ValueError("remote_context_ack_mismatch")
     with (path.parent / "context-acks.jsonl").open("a", encoding="utf-8") as output:

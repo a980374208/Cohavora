@@ -8,7 +8,8 @@ $ErrorActionPreference='Stop'
 $setup=Get-Content (Join-Path $PreparedDirectory 'setup.json') -Raw | ConvertFrom-Json
 if ($setup.status -ne 'PREPARED' -or $setup.meeting_id -cnotmatch '^[0-9]{9}$') { throw 'PREPARED_MEETING_INVALID' }
 $endpoint=[Uri]$setup.service_url
-if ($endpoint.AbsoluteUri.TrimEnd('/') -ne 'http://62.234.74.244:11102') { throw 'TEST_SERVICE_UNEXPECTED' }
+$target=Get-Content (Join-Path $PSScriptRoot 'product_aliyun_target.json') -Raw | ConvertFrom-Json
+if ($endpoint.AbsoluteUri.TrimEnd('/') -ne $target.service_url) { throw 'TEST_SERVICE_UNEXPECTED' }
 $secret=(Get-Content (Join-Path $PreparedDirectory 'password.dpapi') -Raw).Trim() | ConvertTo-SecureString
 $password=[Net.NetworkCredential]::new('', $secret).Password
 $token=$null

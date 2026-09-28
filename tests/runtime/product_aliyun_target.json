@@ -1,0 +1,11 @@
+{
+  "instance_id": "i-2zefof0rekjzkbyi8c7j",
+  "region": "cn-beijing",
+  "service_url": "http://123.56.225.164:11102",
+  "remote_root": "/root/livekit-product-acceptance",
+  "livekit_config": "/root/livekit.yaml",
+  "server_cpu": 2,
+  "server_memory_gib": 2,
+  "server_bandwidth_mbps": 3,
+  "bandwidth_source": "user_confirmed_2026-09-28"
+}

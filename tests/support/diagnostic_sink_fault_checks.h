@@ -4,6 +4,7 @@
 #include "tests/support/test_check.h"
 #include <nlohmann/json.hpp>
 #include <windows.h>
+#include <winioctl.h>
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -209,7 +210,7 @@ inline int ChildMain(const std::filesystem::path& root, const std::string& run) 
 
 class Child final {
 public:
-    Child(const std::filesystem::path& root, char run) {
+    Child(const std::filesystem::path& root, char run, const std::filesystem::path& cwd = {}) {
         SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE}; HANDLE input = nullptr, output = nullptr;
         TEST_CHECK(CreatePipe(&input, &write_, &sa, 0));
         TEST_CHECK(CreatePipe(&read_, &output, &sa, 0));
@@ -221,7 +222,7 @@ public:
         start.hStdInput = input; start.hStdOutput = output; start.hStdError = output;
         PROCESS_INFORMATION process{};
         TEST_CHECK(CreateProcessW(exe, command.data(), nullptr, nullptr, TRUE,
-            CREATE_NO_WINDOW, nullptr, nullptr, &start, &process));
+            CREATE_NO_WINDOW, nullptr, cwd.empty() ? nullptr : cwd.c_str(), &start, &process));
         process_ = process.hProcess; CloseHandle(process.hThread); CloseHandle(input); CloseHandle(output);
         TEST_CHECK(Read() == "ready");
     }
@@ -332,8 +333,8 @@ inline void AbandonBeforeQuota(const std::filesystem::path& root) {
     DiagnosticFileSink sink(root, std::string(32, 'b'), &abandoned);
     bool written = true;
     auto event = Event::Received(ChatKind::Text, 1); event.event_sequence = 1;
-    std::thread worker([&] { written = sink.Write(event); });
     const auto path = sink.run_directory() / "segment-000000.jsonl";
+    std::thread worker([&] { written = sink.Write(event); });
     const auto deadline = Clock::now() + std::chrono::seconds(2);
     while (!std::filesystem::exists(path) && Clock::now() < deadline) std::this_thread::yield();
     const bool opened = std::filesystem::exists(path);
@@ -360,7 +361,96 @@ inline void SameSegmentDoesNotWaitForRoot(const std::filesystem::path& root) {
     TEST_CHECK(completed_while_locked && written && sink.last_committed_sequence() == 2);
 }
 
+// Mount-point junctions need no symbolic-link privilege. Remove only the
+// reparse point, never traverse its target during fixture cleanup.
+struct Junction {
+    std::filesystem::path path;
+    Junction(std::filesystem::path link, const std::filesystem::path& target) : path(std::move(link)) {
+        TEST_CHECK(CreateDirectoryW(path.c_str(), nullptr));
+        const auto h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        TEST_CHECK(h != INVALID_HANDLE_VALUE);
+        struct Buffer { DWORD tag; WORD size, reserved, sub_offset, sub_size, print_offset, print_size; WCHAR text[2048]; } buffer{};
+        const auto sub = L"\\??\\" + target.wstring();
+        const auto print = target.wstring();
+        TEST_CHECK(sub.size()+print.size()+2 < 2048);
+        buffer.tag = IO_REPARSE_TAG_MOUNT_POINT;
+        buffer.sub_size = static_cast<WORD>(sub.size()*sizeof(wchar_t));
+        buffer.print_offset = buffer.sub_size + sizeof(wchar_t);
+        buffer.print_size = static_cast<WORD>(print.size()*sizeof(wchar_t));
+        buffer.size = 8 + buffer.print_offset + buffer.print_size + sizeof(wchar_t);
+        std::copy(sub.begin(),sub.end(),buffer.text);
+        std::copy(print.begin(),print.end(),buffer.text+sub.size()+1);
+        DWORD returned = 0;
+        const bool ok = DeviceIoControl(h, FSCTL_SET_REPARSE_POINT, &buffer, buffer.size+8,
+            nullptr,0,&returned,nullptr);
+        CloseHandle(h); TEST_CHECK(ok);
+    }
+    ~Junction() { TEST_CHECK(RemoveDirectoryW(path.c_str())); }
+};
+
+inline void RootAliasesShareAdmission(const std::filesystem::path& root) {
+    std::filesystem::create_directories(root);
+    const auto absolute = std::filesystem::absolute(root).lexically_normal();
+    Junction junction(absolute.parent_path() / "alias-junction", absolute.parent_path());
+    const std::vector<std::filesystem::path> aliases{
+        junction.path / absolute.filename(), absolute.filename(), absolute / L"." ,
+        std::filesystem::path(L"\\\\?\\" + absolute.wstring())};
+    DiagnosticFileSink gate(absolute, std::string(32, 'a'));
+    for (const auto& alias : aliases) {
+        Child writer(alias, 'b', absolute.parent_path());
+        TEST_CHECK(DiagnosticFileSinkTestAccess::Lock(gate));
+        writer.SendCount(1);
+        const auto blocked = writer.Reply();
+        DiagnosticFileSinkTestAccess::Unlock(gate);
+        TEST_CHECK(blocked["written"] == 0);
+        TEST_CHECK(writer.Write(1)["written"] == 1);
+    }
+}
+
+inline void ManySmallSegments(const std::filesystem::path& root) {
+    const auto closed = root / ("run-" + std::string(32, 'a'));
+    for (int i = 0; i < 2050; ++i) {
+        char name[32]{}; std::snprintf(name, sizeof(name), "segment-%06d.jsonl", i);
+        Segment(closed / name, 16);
+    }
+    // A large count alone must not reject an otherwise admissible write.
+    { DiagnosticFileSink sink(root, std::string(32, 'b'));
+      TEST_CHECK(sink.Write(Event::Received(ChatKind::Text, 1))); }
+    for (const auto& entry : std::filesystem::directory_iterator(closed))
+        if (entry.path().extension() == ".jsonl")
+            std::filesystem::last_write_time(entry.path(),
+                std::filesystem::file_time_type::clock::now() - std::chrono::hours(24 * 8));
+    DiagnosticFileSink active(root, std::string(32, 'c'));
+    TEST_CHECK(active.Write(Event::Received(ChatKind::Text, 1)));
+    for (const auto& entry : std::filesystem::directory_iterator(closed))
+        TEST_CHECK(entry.path().extension() != ".jsonl");
+    TEST_CHECK(Size(active.run_directory() / "segment-000000.jsonl") > 0);
+    for (int i = 0; i < 1025; ++i) {
+        char name[32]{}; std::snprintf(name, sizeof(name), "segment-%06d.jsonl", i);
+        Segment(closed / name, 16);
+    }
+    const auto cleared = DiagnosticFileSink::ClearInactiveHistory(root);
+    TEST_CHECK(cleared.success && cleared.removed_segments >= 1025 && cleared.active_runs_skipped == 1);
+
+    const auto quotaRoot = root / "over-quota";
+    const auto history = quotaRoot / ("run-" + std::string(32, 'd'));
+    const auto now = std::filesystem::file_time_type::clock::now();
+    for (int i = 0; i < 1600; ++i) {
+        char name[32]{}; std::snprintf(name, sizeof(name), "segment-%06d.jsonl", i);
+        Segment(history / name, 65536); // Exactly 100 MiB before admission.
+        std::filesystem::last_write_time(history / name, now - std::chrono::seconds(i));
+    }
+    DiagnosticFileSink admitted(quotaRoot, std::string(32, 'e'));
+    TEST_CHECK(admitted.Write(Event::Received(ChatKind::Text, 1)));
+    TEST_CHECK(!std::filesystem::exists(history / "segment-001599.jsonl"));
+    TEST_CHECK(std::filesystem::exists(history / "segment-001598.jsonl"));
+    TEST_CHECK(Total(quotaRoot) <= 100 * MiB);
+}
+
 inline void Run(const std::filesystem::path& root) {
+    RootAliasesShareAdmission(root / "aliases");
+    ManySmallSegments(root / "tiny-segments");
     AbandonBeforeQuota(root / "abandon-quota");
     SameSegmentDoesNotWaitForRoot(root / "no-root-wait");
     SizeFailureClosesAndRetries(root / "size-denied");

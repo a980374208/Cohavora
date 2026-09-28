@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory=$true)][string]$Executable,
     [Parameter(Mandatory=$true)][string]$OutputDirectory,
+    [int]$DedicatedDesktopSessionId = 0,
     [int]$Cycles = 100,
     [int]$MinimumSeconds = 28800,
     [int]$ShareSeconds = 60,
@@ -23,6 +24,7 @@ param(
     [int]$MixedSeconds = 7200
 )
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'product_desktop_evidence.ps1')
 Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
 Add-Type @'
 using System;
@@ -129,6 +131,11 @@ function Sample-Resource([string]$Phase) {
     if (!$script:child) { return }
     $now = [DateTime]::UtcNow
     if ($Phase -eq 'active' -and ($now - $script:lastResourceSample).TotalSeconds -lt 1) { return }
+    if ($script:desktopBaseline) {
+        $state=Get-DesktopEvidenceState
+        $state | ConvertTo-Json -Compress | Add-Content (Join-Path $OutputDirectory 'desktop-observations.jsonl') -Encoding UTF8
+        $null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $script:desktopBaseline
+    }
     $script:lastResourceSample = $now
     $process = Get-Process -Id $script:child.Id -ErrorAction SilentlyContinue
     $row = [ordered]@{schema=1; run_id=$script:runId; cycle=$script:cycle;
@@ -430,12 +437,7 @@ function Start-Product {
                 Find-Node 'mainJoinMeeting' ([Windows.Automation.ControlType]::Button) -Optional
             }
             Save-Tree 'probe-main'
-            Invoke 'mainAccountMenu'
-            $null = Wait-For 'probe account menu action' {
-                Find-Node 'mainPostMeetingTelemetry' ([Windows.Automation.ControlType]::MenuItem) -Optional
-            } 5
-            Save-Tree 'probe-account-menu'
-            Invoke 'mainPostMeetingTelemetry' ([Windows.Automation.ControlType]::MenuItem)
+            Invoke-AccountTelemetry -Seconds 5
             $null = Wait-Top 'telemetryPostMeetingDialog'
             Save-Tree 'probe-telemetry-dialog'
             Invoke 'telemetryPostClose'
@@ -621,11 +623,7 @@ function Run-Cycle {
         Action 'export' {
             $reportDeadline = [DateTime]::UtcNow.AddSeconds(90)
             do {
-                Invoke 'mainAccountMenu'
-                $null = Wait-For 'account menu export action' {
-                    Find-Node 'mainPostMeetingTelemetry' ([Windows.Automation.ControlType]::MenuItem) -Optional
-                }
-                Invoke 'mainPostMeetingTelemetry' ([Windows.Automation.ControlType]::MenuItem)
+                Invoke-AccountTelemetry
                 $null = Wait-Top 'telemetryPostMeetingDialog'
                 if ((Find-Node 'telemetryExport' ([Windows.Automation.ControlType]::Button)).Current.IsEnabled) {
                     break
@@ -667,6 +665,7 @@ function Run-IsolatedCycle {
     $prefix=Join-Path $directory ('cycle-{0:d4}' -f $script:cycle)
     $configuration=[ordered]@{output_directory=$OutputDirectory;executable=$Executable;
         started_utc=$started.ToString('o');cycles=$Cycles;minimum_seconds=$MinimumSeconds;
+        dedicated_session=$DedicatedDesktopSessionId;desktop_baseline=$script:desktopBaseline;
         share_seconds=$ShareSeconds;log_pair_seconds=$LogPairSeconds;stop_settle_seconds=$StopSettleSeconds;
         room_settle_seconds=$RoomSettleSeconds;heap_diagnostic=[bool]$HeapDiagnostic;no_share=[bool]$HeapDiagnosticNoShare;
         no_export=[bool]$HeapDiagnosticNoExport;heap_check_only=[bool]$HeapCheckOnly;heap_page_check=[bool]$HeapPageCheck;
@@ -721,7 +720,7 @@ try {
         $MinimumSeconds = $SteadySeconds + $MixedSeconds
     }
     if (!$ProbeOnly -and (!$env:LIVEKIT_UIA_ACCOUNT -or !$env:LIVEKIT_UIA_PASSWORD -or
-        !$env:LIVEKIT_UIA_MEETING_ID -or (!$Pilot -and $env:LIVEKIT_UIA_DEDICATED_DESKTOP -ne '1'))) {
+        !$env:LIVEKIT_UIA_MEETING_ID -or (!$Pilot -and $DedicatedDesktopSessionId -le 0))) {
         Save-Result 'NOT_RUN' 'dedicated_desktop_account_and_meeting_required'; exit 77
     }
     if ($Pilot -and ($Cycles -lt 2 -or $MinimumSeconds -lt (240 * $Cycles))) {
@@ -731,6 +730,10 @@ try {
         $ShareSeconds -lt 60 -or $LogPairSeconds -lt 30 -or
         $StopSettleSeconds -lt 10 -or $RoomSettleSeconds -lt 10)) {
         throw 'FORMAL_PROFILE_REQUIRED: 100 complete cycles and at least 8 hours'
+    }
+    if ($DedicatedDesktopSessionId -gt 0) {
+        $script:desktopBaseline=Assert-DedicatedDesktop $DedicatedDesktopSessionId
+        $script:desktopBaseline | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'desktop-baseline.json') -Encoding UTF8
     }
     $script:cycle = 1
     $script:cycleId = [guid]::NewGuid().ToString('N')

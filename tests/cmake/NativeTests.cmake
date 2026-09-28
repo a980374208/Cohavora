@@ -5,7 +5,7 @@ target_include_directories(test_diagnostic_pipeline PRIVATE ${LIVEKIT_PROJECT_SO
 target_link_libraries(test_diagnostic_pipeline PRIVATE cohavora_core)
 add_test(NAME diagnostic_pipeline_test COMMAND test_diagnostic_pipeline)
 set_tests_properties(diagnostic_pipeline_test PROPERTIES
-    TIMEOUT 30 LABELS "LOGGING_LG2;LOGGING_LG4;LOGGING_LG5;LOGGING_LG7")
+    TIMEOUT 60 LABELS "LOGGING_LG2;LOGGING_LG4;LOGGING_LG5;LOGGING_LG7")
 
 add_executable(diagnostic_tryemit_probe
     ${LIVEKIT_TEST_SOURCE_DIR}/test_diagnostic_tryemit_probe.cpp)

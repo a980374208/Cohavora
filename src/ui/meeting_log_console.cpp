@@ -323,11 +323,15 @@ void MeetingLogConsoleWindow::initUi() {
 	_logView->setMaximumBlockCount(3000);
 	mainLayout->addWidget(_logView);
 
+	_filterTimer = new QTimer(this);
+	_filterTimer->setSingleShot(true);
+	_filterTimer->setInterval(120);
+	connect(_filterTimer, &QTimer::timeout, this, &MeetingLogConsoleWindow::rebuildLogView);
 	connect(_filterInput, &QLineEdit::textChanged, this, &MeetingLogConsoleWindow::onFilterChanged);
 	connect(_sessionInput, &QLineEdit::textChanged, this,
-		[this] { rebuildLogView(); });
+		[this] { _filterTimer->start(); });
 	connect(_operationInput, &QLineEdit::textChanged, this,
-		[this] { rebuildLogView(); });
+		[this] { _filterTimer->start(); });
 	connect(_severityFilter, QOverload<int>::of(&QComboBox::currentIndexChanged),
 		this, [this] { rebuildLogView(); });
 	connect(_componentFilter, QOverload<int>::of(&QComboBox::currentIndexChanged),
@@ -501,7 +505,8 @@ void MeetingLogConsoleWindow::trimVisible() {
 }
 
 void MeetingLogConsoleWindow::renderVisible(QElapsedTimer &elapsed) {
-	if (!_logView) return;
+	// Preserve the previous projection until the text filter settles.
+	if (!_logView || (_filterTimer && _filterTimer->isActive())) return;
 	auto it = std::lower_bound(_logEntries.begin(), _logEntries.end(), _nextVisibleId,
 		[](const LogEntry &entry, quint64 id) { return entry.id < id; });
 	for (int count = 0; it != _logEntries.end() && count < 128 && elapsed.elapsed() < 4; ++it, ++count) {
@@ -579,7 +584,7 @@ void MeetingLogConsoleWindow::showStorageMessage(QString message) {
 
 void MeetingLogConsoleWindow::onFilterChanged(const QString &filterText) {
 	_currentFilter = filterText.trimmed();
-	rebuildLogView();
+	_filterTimer->start();
 }
 
 bool MeetingLogConsoleWindow::matchesFilter(const LogEntry &entry) const {
@@ -599,6 +604,7 @@ bool MeetingLogConsoleWindow::matchesFilter(const LogEntry &entry) const {
 }
 
 void MeetingLogConsoleWindow::rebuildLogView() {
+	if (_filterTimer) _filterTimer->stop();
 	if (!_logView) return;
 	_logView->clear();
 	_visibleIds.clear();
@@ -671,6 +677,7 @@ void MeetingLogConsoleWindow::copyAllLogs() {
 		if (!selected.isEmpty()) QApplication::clipboard()->setText(selected);
 		return;
 	}
+	if (_filterTimer && _filterTimer->isActive()) rebuildLogView();
 	QApplication::clipboard()->setText(_logView->toPlainText());
 }
 

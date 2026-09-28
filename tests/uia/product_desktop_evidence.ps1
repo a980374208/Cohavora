@@ -65,11 +65,13 @@ public sealed class ProductMenuObserver : IDisposable {
     readonly object sync = new object();
     readonly Queue<DesktopMenuEvent> events = new Queue<DesktopMenuEvent>();
     readonly Dictionary<IntPtr,long> popups = new Dictionary<IntPtr,long>();
+    readonly HashSet<long> shown = new HashSet<long>();
     readonly uint pid;
     readonly Thread worker;
     readonly ManualResetEvent ready = new ManualResetEvent(false);
     volatile bool stop, healthy = true, seen, closed;
     long sequence, nextToken, lost;
+    int disposed;
     public bool Healthy { get { return healthy; } }
     public bool PopupSeen { get { return seen; } }
     public bool PopupClosed { get { return closed; } }
@@ -99,11 +101,11 @@ public sealed class ProductMenuObserver : IDisposable {
                 if (name.ToString().IndexOf("QWindowPopup", StringComparison.Ordinal) < 0) return;
                 token = ++nextToken; popups[window] = token;
             }
-            if (kind == 6 || kind == 0x8002) { seen=true; Add("popup_shown", token); }
+            if (kind == 6 || kind == 0x8002) { shown.Add(token); seen=true; Add("popup_shown", token); }
             if (kind == 7 || kind == 0x8003 || kind == 0x8001) {
-                if (seen) closed=true;
+                if (shown.Contains(token)) closed=true;
                 Add(kind == 0x8001 ? "popup_destroyed" : "popup_hidden", token);
-                if(kind == 0x8001) popups.Remove(window);
+                if(kind == 0x8001) { popups.Remove(window); shown.Remove(token); }
             }
         } catch { healthy=false; }
     }
@@ -137,6 +139,7 @@ public sealed class ProductMenuObserver : IDisposable {
         lock(sync) { var result=events.ToArray(); events.Clear(); return result; }
     }
     public void Dispose() {
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         stop=true;
         if(!worker.Join(5000)) throw new InvalidOperationException("MENU_OBSERVER_STOP_TIMEOUT");
         ready.Dispose();
@@ -185,6 +188,7 @@ function Write-MenuPhase([string]$AttemptId,[string]$Phase) {
 function Invoke-AccountTelemetry([int]$Seconds=45) {
     $attempt=[guid]::NewGuid().ToString('N')
     $observer=Start-MenuObserver $script:child.Id
+    $primaryFailure=$null
     try {
         Write-MenuPhase $attempt 'open_requested'
         Invoke 'mainAccountMenu'
@@ -214,10 +218,16 @@ function Invoke-AccountTelemetry([int]$Seconds=45) {
         if ($observer.PopupSeen) { throw 'ACCOUNT_MENU_ITEM_NOT_AVAILABLE' }
         throw 'ACCOUNT_MENU_NOT_OBSERVED'
     } catch {
+        $primaryFailure=$_
         Write-MenuPhase $attempt $_.Exception.Message
         throw
     } finally {
-        $observer.Dispose()
-        Save-MenuObservation $observer $attempt
+        try {
+            $observer.Dispose()
+            Save-MenuObservation $observer $attempt
+        } catch {
+            Write-MenuPhase $attempt ('observer_cleanup_failed:'+$_.Exception.Message)
+            if (!$primaryFailure) {throw}
+        }
     }
 }

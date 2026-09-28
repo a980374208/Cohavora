@@ -76,7 +76,6 @@ QuotaScan ScanQuotaUsage(const std::filesystem::path& root,
     wchar_t current_name[32]{};
     std::swprintf(current_name, 32, L"segment-%06u.jsonl", segment_index);
     std::uint64_t total = 0;
-    std::size_t reclaimable = 0;
     std::error_code error;
     for (std::filesystem::directory_iterator runs(root, error), end;
          !error && runs != end; runs.increment(error)) {
@@ -126,7 +125,6 @@ QuotaScan ScanQuotaUsage(const std::filesystem::path& root,
             if (bytes > limit - total) return QuotaScan::ReclaimRequired;
             total += bytes;
             if ((!active || own) && !(own && name == current_name)) {
-                if (++reclaimable > 1024) return QuotaScan::Failed;
                 if (ticks(entry.ftLastWriteTime) < expiry)
                     return QuotaScan::ReclaimRequired;
             }
@@ -210,7 +208,7 @@ void AddContext(nlohmann::json& value, const Context& context) {
 DiagnosticFileSink::DiagnosticFileSink(std::filesystem::path root,
                                        std::string run_id,
                                        const std::atomic<bool>* abandoned)
-    : abandoned_(abandoned), root_(std::move(root)),
+    : abandoned_(abandoned), root_(std::filesystem::absolute(root).lexically_normal()),
       run_directory_(root_ / ("run-" + run_id)),
       valid_run_id_(IsRunId(run_id)) {}
 
@@ -219,6 +217,7 @@ DiagnosticFileSink::~DiagnosticFileSink() {
 #if defined(_WIN32)
     if (run_lease_) CloseHandle(static_cast<HANDLE>(run_lease_));
     if (quota_mutex_) CloseHandle(static_cast<HANDLE>(quota_mutex_));
+    if (root_identity_) CloseHandle(static_cast<HANDLE>(root_identity_));
 #endif
 }
 
@@ -253,7 +252,7 @@ DiagnosticClearResult DiagnosticFileSink::ClearInactiveHistory(
             ~Unlock() { sink.UnlockQuota(); }
         } unlock{gate};
         std::size_t inspected = 0;
-        for (std::filesystem::directory_iterator runs(root, error), end;
+        for (std::filesystem::directory_iterator runs(gate.root_, error), end;
              !error && runs != end; runs.increment(error)) {
             if (++inspected > 4096) {
                 result.reason = "history_scan_limit";
@@ -280,11 +279,10 @@ DiagnosticClearResult DiagnosticFileSink::ClearInactiveHistory(
             const auto lease = std::unique_ptr<void, decltype(&CloseHandle)>(
                 handle, &CloseHandle);
 #endif
-            std::size_t segments = 0;
             for (std::filesystem::directory_iterator files(runs->path(), error);
                  !error && files != end; files.increment(error)) {
                 if (!IsOwnedSegment(files->path())) continue;
-                if (++segments > 1024 || files->is_symlink(error) || error ||
+                if (files->is_symlink(error) || error ||
                     !files->is_regular_file(error) || error) {
                     result.reason = "history_segment_invalid";
                     return result;
@@ -337,7 +335,7 @@ bool DiagnosticFileSink::OpenSegment() noexcept {
             return false;
         }
 #endif
-        if (Stopped()) return false;
+        if (Stopped() || !BindQuotaIdentity()) return false;
         std::filesystem::create_directories(run_directory_, error);
         if (error) {
             failure_reason_ = FailureReason::DirectoryUnavailable;
@@ -414,6 +412,7 @@ bool DiagnosticFileSink::OpenSegment() noexcept {
 
 bool DiagnosticFileSink::CheckQuota(std::uint64_t incoming_bytes) noexcept {
     try {
+      for (;;) {
         if (Stopped()) return false;
         if (incoming_bytes > kTotalBytes) {
             failure_reason_ = FailureReason::QuotaExceeded;
@@ -436,6 +435,10 @@ bool DiagnosticFileSink::CheckQuota(std::uint64_t incoming_bytes) noexcept {
         };
         std::vector<Segment> reclaimable;
         constexpr std::size_t kMaximumTrackedSegments = 1024;
+        bool truncated = false;
+        const auto older = [](const Segment& a, const Segment& b) {
+            return a.modified < b.modified;
+        };
 #if defined(_WIN32)
         struct HeldLeases {
             ~HeldLeases() {
@@ -496,11 +499,18 @@ bool DiagnosticFileSink::CheckQuota(std::uint64_t incoming_bytes) noexcept {
                         if (files->path() != current_path) {
                             const auto modified = files->last_write_time(error);
                             if (error) break;
-                            if (reclaimable.size() == kMaximumTrackedSegments) {
-                                failure_reason_ = FailureReason::DirectoryUnavailable;
-                                return false;
+                            Segment candidate{files->path(), bytes, modified};
+                            if (reclaimable.size() < kMaximumTrackedSegments) {
+                                reclaimable.push_back(std::move(candidate));
+                                std::push_heap(reclaimable.begin(), reclaimable.end(), older);
+                            } else {
+                                truncated = true;
+                                if (older(candidate, reclaimable.front())) {
+                                    std::pop_heap(reclaimable.begin(), reclaimable.end(), older);
+                                    reclaimable.back() = std::move(candidate);
+                                    std::push_heap(reclaimable.begin(), reclaimable.end(), older);
+                                }
                             }
-                            reclaimable.push_back({files->path(), bytes, modified});
                         }
                     }
                 }
@@ -518,6 +528,7 @@ bool DiagnosticFileSink::CheckQuota(std::uint64_t incoming_bytes) noexcept {
                   });
         const auto expiry = std::filesystem::file_time_type::clock::now() -
                             std::chrono::hours(24 * 7);
+        std::size_t removed = 0;
         for (const auto& segment : reclaimable) {
             if (segment.modified >= expiry &&
                 total <= kTotalBytes - incoming_bytes) break;
@@ -528,36 +539,77 @@ bool DiagnosticFileSink::CheckQuota(std::uint64_t incoming_bytes) noexcept {
                 return false;
             }
             total -= segment.bytes;
+            ++removed;
         }
+        // Re-scan after a bounded oldest-first batch. This also handles more
+        // than 1024 expired tiny files without retaining an unbounded list.
+        if (truncated && removed != 0) continue;
         if (total > kTotalBytes - incoming_bytes) {
             failure_reason_ = FailureReason::QuotaExceeded;
             return false;
         }
         return true;
+      }
     } catch (...) {
         failure_reason_ = FailureReason::DirectoryUnavailable;
         return false;
     }
 }
 
-bool DiagnosticFileSink::LockQuota() noexcept {
+bool DiagnosticFileSink::BindQuotaIdentity() noexcept {
+    try {
 #if defined(_WIN32)
     if (!quota_mutex_) {
-        const auto name = root_.lexically_normal().wstring();
-        std::uint64_t hash = 14695981039346656037ULL;
-        for (wchar_t ch : name) {
-            hash ^= static_cast<std::uint64_t>(std::towlower(ch));
-            hash *= 1099511628211ULL;
+        // Bind all aliases to the directory object, not its spelling. Keep the
+        // handle without delete sharing so this identity cannot be replaced
+        // while the sink is using its mutex. Final symlink policy is unchanged.
+        auto directory = CreateFileW(root_.c_str(), FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        if (directory == INVALID_HANDLE_VALUE) {
+            failure_reason_ = FailureReason::DirectoryUnavailable;
+            return false;
         }
-        wchar_t mutex_name[64]{};
-        std::swprintf(mutex_name, 64, L"Local\\CohavoraDiagnostic-%016llx", hash);
-        auto handle = CreateMutexW(nullptr, FALSE, mutex_name);
+        auto guard = std::unique_ptr<void, decltype(&CloseHandle)>(directory, &CloseHandle);
+        FILE_ID_INFO identity{};
+        if (!GetFileInformationByHandleEx(directory, FileIdInfo, &identity, sizeof(identity))) {
+            failure_reason_ = FailureReason::DirectoryUnavailable;
+            return false;
+        }
+        // Freeze the resolved path too: future segment opens must not follow
+        // a junction alias that has been redirected after admission.
+        const auto length = GetFinalPathNameByHandleW(directory, nullptr, 0, FILE_NAME_NORMALIZED);
+        if (!length) { failure_reason_ = FailureReason::DirectoryUnavailable; return false; }
+        std::wstring resolved(length, L'\0');
+        const auto written = GetFinalPathNameByHandleW(directory, resolved.data(), length, FILE_NAME_NORMALIZED);
+        if (!written || written >= length) { failure_reason_ = FailureReason::DirectoryUnavailable; return false; }
+        resolved.resize(written);
+        wchar_t prefix[64]{};
+        std::swprintf(prefix, 64, L"Local\\CohavoraDiagnostic-v2-%016llx-", identity.VolumeSerialNumber);
+        std::wstring mutex_name(prefix);
+        constexpr wchar_t hex[] = L"0123456789abcdef";
+        for (const auto byte : identity.FileId.Identifier) {
+            mutex_name += hex[byte >> 4]; mutex_name += hex[byte & 15];
+        }
+        const auto run_name = run_directory_.filename();
+        root_ = std::filesystem::path(resolved);
+        run_directory_ = root_ / run_name;
+        auto handle = CreateMutexW(nullptr, FALSE, mutex_name.c_str());
         if (!handle) {
             failure_reason_ = FailureReason::DirectoryUnavailable;
             return false;
         }
         quota_mutex_ = handle;
+        root_identity_ = guard.release();
     }
+#endif
+        return true;
+    } catch (...) { failure_reason_ = FailureReason::DirectoryUnavailable; return false; }
+}
+
+bool DiagnosticFileSink::LockQuota() noexcept {
+#if defined(_WIN32)
+    if (!BindQuotaIdentity()) return false;
     const auto result = WaitForSingleObject(static_cast<HANDLE>(quota_mutex_), 5000);
     if (result != WAIT_OBJECT_0 && result != WAIT_ABANDONED) {
         failure_reason_ = FailureReason::DirectoryUnavailable;

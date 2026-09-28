@@ -18,6 +18,8 @@ $HeapCheckOnly=[bool]$config.heap_check_only
 $HeapPageCheck=[bool]$config.heap_page_check
 $CrashDiagnostic=[bool]$config.crash_diagnostic
 $ProbeOnly=$false
+$DedicatedDesktopSessionId=[int]$config.dedicated_session
+$script:desktopBaseline=$config.desktop_baseline
 $script:runId=$config.run_id
 $script:cycle=[int]$config.cycle
 $script:cycleId=$config.cycle_id
@@ -37,6 +39,7 @@ try {
     if ($script:child.Path -ne $Executable -or $script:child.StartTime.ToUniversalTime().Ticks -ne [long]$config.product_start_ticks) {
         throw 'ISOLATED_CYCLE_PRODUCT_IDENTITY_CHANGED'
     }
+    . (Join-Path $PSScriptRoot 'product_desktop_evidence.ps1')
     # Reuse the actual driver functions; the child performs only one cycle.
     # It never starts, closes, or kills the product owned by the supervisor.
     $tokens=$null;$parseErrors=$null
