@@ -202,7 +202,8 @@ std::size_t SnapshotRetainedBytes(const Snapshot& snapshot) {
         &Snapshot::stability_anomaly_density_reason,
         &Snapshot::stability_anomaly_density_algorithm,
     };
-    std::size_t bytes = sizeof(Snapshot) + 64;
+    std::size_t bytes = sizeof(Snapshot) + 64 +
+        snapshot.render_fine_interval_histogram.capacity() * sizeof(std::uint64_t);
     for (const auto field : text_fields) bytes += (snapshot.*field).capacity() + 1;
     bytes += snapshot.metric_product_chains.capacity() * sizeof(MetricProductChainStatus);
     for (const auto& chain : snapshot.metric_product_chains)
@@ -1962,7 +1963,132 @@ TelemetryExportResult WriteTelemetryReportAtomically(
     return result;
 }
 
-TelemetryHistoryStore::TelemetryHistoryStore(
+struct TelemetryHistoryStore::WorkerContext final {
+    using ExportCallback = TelemetryHistoryStore::ExportCallback;
+    using MutationCallback = TelemetryHistoryStore::MutationCallback;
+    WorkerContext(std::filesystem::path root, std::size_t memory_buckets,
+        std::size_t queue_capacity, std::uint64_t maximum_bytes,
+        std::chrono::hours retention, std::size_t queue_byte_capacity,
+        std::string process_run_id, std::filesystem::path diagnostic_root,
+        std::shared_ptr<TelemetryCheckpointControl> control);
+    bool SubmitSnapshot(
+        SessionTelemetry::SnapshotPtr snapshot,
+        StabilitySummary stability = {},
+        std::string anonymous_session_id = {});
+    bool ExportCurrent(
+        std::filesystem::path destination_root,
+        ExportCallback callback,
+        std::shared_ptr<std::atomic_bool> cancelled = {});
+    bool ExportReport(
+        std::string record_id,
+        std::filesystem::path destination_root,
+        ExportCallback callback,
+        std::shared_ptr<std::atomic_bool> cancelled = {},
+        std::int64_t first_utc_ms = 0,
+        std::int64_t last_utc_ms = 0);
+    bool ClearReport(std::string record_id, MutationCallback callback = {});
+    bool RetryCheckpoint(std::string record_id, MutationCallback callback = {});
+    void SetHistoryEnabled(bool enabled);
+
+    std::shared_ptr<const TelemetryStoreStatus> Status() const;
+    std::vector<SafeTelemetryRecordPtr> CurrentRecords() const;
+
+    struct PendingReport {
+        std::string id;
+        std::uint64_t generation = 0;
+        std::vector<TelemetryCheckpointRecord> records;
+        std::size_t bytes = 0;
+        bool terminal = false;
+        std::uint64_t committed_revision = 0;
+        unsigned retry_count = 0;
+        std::chrono::steady_clock::time_point first_failure{};
+        std::chrono::steady_clock::time_point next_attempt{};
+    };
+
+    struct CurrentRecord {
+        SafeTelemetryRecordPtr record;
+        std::size_t charge = 0;
+    };
+
+    enum class JobKind { Snapshot, Export, ExportReport, ClearReport, RetryCheckpoint,
+                         SetHistoryEnabled };
+    struct Job {
+        JobKind kind = JobKind::Snapshot;
+        SessionTelemetry::SnapshotPtr snapshot;
+        StabilitySummary stability;
+        TelemetryCheckpointRecord checkpoint;
+        std::string anonymous_session_id;
+        std::filesystem::path destination;
+        std::string record_id;
+        std::int64_t first_utc_ms = 0;
+        std::int64_t last_utc_ms = 0;
+        ExportCallback export_callback;
+        MutationCallback mutation_callback;
+        std::shared_ptr<std::atomic_bool> cancelled;
+        bool enabled = true;
+        std::int64_t captured_utc_ms = 0;
+        std::uint64_t source_monotonic_us = 0;
+        std::size_t charge = 0;
+    };
+
+    void Run();
+    void RunLoop();
+    void HandleSnapshot(Job job);
+    void HandleExport(Job job);
+    void HandleClear(Job job);
+    void HandleRetry(Job job);
+    void RefreshAndPruneReports(std::uint64_t reserve_bytes = 0);
+    void FlushPendingReports(bool force);
+    void FlushLossRanges(bool force);
+    void RecordLossLocked(const std::string& session_id,
+                          const TelemetryCheckpointRecord& record);
+    void PublishPendingStatus();
+    void PublishStatusLocked();
+    bool Enqueue(Job job, bool terminal_priority);
+    bool EnqueueLocked(Job job, bool terminal_priority);
+    static std::string NewOpaqueId();
+
+    const std::filesystem::path root_;
+    const std::filesystem::path diagnostic_root_;
+    const std::string process_run_id_;
+    const std::size_t memory_buckets_;
+    const std::size_t queue_capacity_;
+    const std::size_t queue_byte_capacity_;
+    const std::uint64_t maximum_bytes_;
+    const std::chrono::hours retention_;
+
+    std::mutex submit_mutex_;
+    mutable std::mutex mutex_;
+    std::condition_variable condition_;
+    std::deque<Job> jobs_;
+    std::size_t inflight_jobs_ = 0;
+    std::size_t export_jobs_ = 0;
+    std::deque<CurrentRecord> current_records_;
+    std::size_t current_record_bytes_ = 0;
+    // Worker-owned; previous sessions survive current_records_ replacement.
+    std::deque<PendingReport> pending_reports_;
+    std::chrono::steady_clock::time_point next_history_refresh_{};
+    std::deque<TelemetryLossRange> loss_ranges_pending_;
+    unsigned loss_retry_count_ = 0;
+    std::chrono::steady_clock::time_point loss_first_failure_{};
+    std::chrono::steady_clock::time_point loss_next_attempt_{};
+    std::unique_ptr<TelemetryRunLease> run_lease_;
+    std::string current_session_id_;
+    std::uint64_t current_generation_ = 0;
+    bool stopping_ = false;
+    TelemetryStoreStatus status_;
+    mutable std::shared_ptr<const TelemetryStoreStatus> status_cache_;
+
+    const std::shared_ptr<TelemetryCheckpointControl> control_;
+    std::condition_variable done_;
+    bool finished_ = false;
+    bool worker_failed_ = false;
+    bool unconfirmed_commit_ = false;
+    bool status_frozen_ = false;
+    bool Stopped() const noexcept { return control_->abandoned.load(std::memory_order_acquire); }
+};
+
+TelemetryHistoryStore::WorkerContext::WorkerContext(
     std::filesystem::path root,
     std::size_t memory_buckets,
     std::size_t queue_capacity,
@@ -1970,7 +2096,8 @@ TelemetryHistoryStore::TelemetryHistoryStore(
     std::chrono::hours retention,
     std::size_t queue_byte_capacity,
     std::string process_run_id,
-    std::filesystem::path diagnostic_root)
+    std::filesystem::path diagnostic_root,
+    std::shared_ptr<TelemetryCheckpointControl> control)
     : root_(std::move(root))
     , diagnostic_root_(std::move(diagnostic_root))
     , process_run_id_(std::move(process_run_id))
@@ -1980,37 +2107,13 @@ TelemetryHistoryStore::TelemetryHistoryStore(
     , queue_byte_capacity_((std::clamp)(queue_byte_capacity,
         std::size_t{4096}, kDefaultQueueBytes))
     , maximum_bytes_((std::max)(std::uint64_t{1024 * 1024}, maximum_bytes))
-    , retention_(retention) {
+    , retention_(retention), control_(std::move(control)) {
     status_.queue_capacity = queue_capacity_;
     status_.queue_byte_capacity = queue_byte_capacity_;
     status_cache_ = std::make_shared<const TelemetryStoreStatus>(status_);
-    worker_ = std::thread([this] { Run(); });
 }
 
-TelemetryHistoryStore::TelemetryHistoryStore(
-    std::filesystem::path root, std::string process_run_id,
-    std::filesystem::path diagnostic_root)
-    : TelemetryHistoryStore(std::move(root), kDefaultMemoryBuckets,
-        kDefaultQueueCapacity, kDefaultMaximumBytes, kDefaultRetention,
-        kDefaultQueueBytes, std::move(process_run_id),
-        std::move(diagnostic_root)) {}
-
-TelemetryHistoryStore::~TelemetryHistoryStore() {
-    Close();
-}
-
-void TelemetryHistoryStore::Close() {
-    std::lock_guard close_lock(close_mutex_);
-    {
-        std::lock_guard lock(mutex_);
-        stopping_ = true;
-    }
-    condition_.notify_one();
-    if (worker_.joinable()) worker_.join();
-    run_lease_.reset();
-}
-
-bool TelemetryHistoryStore::SubmitSnapshot(
+bool TelemetryHistoryStore::WorkerContext::SubmitSnapshot(
     SessionTelemetry::SnapshotPtr snapshot,
     StabilitySummary stability,
     std::string anonymous_session_id) {
@@ -2101,7 +2204,7 @@ bool TelemetryHistoryStore::SubmitSnapshot(
     }
 }
 
-bool TelemetryHistoryStore::ExportCurrent(
+bool TelemetryHistoryStore::WorkerContext::ExportCurrent(
     std::filesystem::path destination_root,
     ExportCallback callback,
     std::shared_ptr<std::atomic_bool> cancelled) {
@@ -2116,7 +2219,7 @@ bool TelemetryHistoryStore::ExportCurrent(
     return false;
 }
 
-bool TelemetryHistoryStore::ExportReport(
+bool TelemetryHistoryStore::WorkerContext::ExportReport(
     std::string record_id,
     std::filesystem::path destination_root,
     ExportCallback callback,
@@ -2163,7 +2266,7 @@ bool TelemetryHistoryStore::ExportReport(
     return false;
 }
 
-bool TelemetryHistoryStore::ClearReport(
+bool TelemetryHistoryStore::WorkerContext::ClearReport(
     std::string record_id,
     MutationCallback callback) {
     if (record_id.empty() || record_id.find_first_of("/\\") != std::string::npos) {
@@ -2181,7 +2284,7 @@ bool TelemetryHistoryStore::ClearReport(
     return false;
 }
 
-bool TelemetryHistoryStore::RetryCheckpoint(
+bool TelemetryHistoryStore::WorkerContext::RetryCheckpoint(
     std::string record_id, MutationCallback callback) {
     if (record_id.empty() || record_id.find_first_of("/\\") != std::string::npos) {
         try { if (callback) callback(false, "invalid_report_id"); }
@@ -2198,18 +2301,18 @@ bool TelemetryHistoryStore::RetryCheckpoint(
     return false;
 }
 
-void TelemetryHistoryStore::SetHistoryEnabled(bool enabled) {
+void TelemetryHistoryStore::WorkerContext::SetHistoryEnabled(bool enabled) {
     Job job;
     job.kind = JobKind::SetHistoryEnabled;
     job.enabled = enabled;
     Enqueue(std::move(job), true);
 }
 
-std::shared_ptr<const TelemetryStoreStatus> TelemetryHistoryStore::Status() const {
+std::shared_ptr<const TelemetryStoreStatus> TelemetryHistoryStore::WorkerContext::Status() const {
     return std::atomic_load_explicit(&status_cache_, std::memory_order_acquire);
 }
 
-std::vector<SafeTelemetryRecordPtr> TelemetryHistoryStore::CurrentRecords() const {
+std::vector<SafeTelemetryRecordPtr> TelemetryHistoryStore::WorkerContext::CurrentRecords() const {
     std::lock_guard lock(mutex_);
     std::vector<SafeTelemetryRecordPtr> result;
     result.reserve(current_records_.size());
@@ -2218,7 +2321,7 @@ std::vector<SafeTelemetryRecordPtr> TelemetryHistoryStore::CurrentRecords() cons
     return result;
 }
 
-bool TelemetryHistoryStore::Enqueue(Job job, bool terminal_priority) {
+bool TelemetryHistoryStore::WorkerContext::Enqueue(Job job, bool terminal_priority) {
     try {
         std::lock_guard lock(mutex_);
         return EnqueueLocked(std::move(job), terminal_priority);
@@ -2227,7 +2330,7 @@ bool TelemetryHistoryStore::Enqueue(Job job, bool terminal_priority) {
     }
 }
 
-bool TelemetryHistoryStore::EnqueueLocked(Job job, bool terminal_priority) {
+bool TelemetryHistoryStore::WorkerContext::EnqueueLocked(Job job, bool terminal_priority) {
     if (stopping_) return false;
     const bool export_job = job.kind == JobKind::Export ||
         job.kind == JobKind::ExportReport;
@@ -2300,7 +2403,7 @@ bool TelemetryHistoryStore::EnqueueLocked(Job job, bool terminal_priority) {
     return true;
 }
 
-void TelemetryHistoryStore::Run() {
+void TelemetryHistoryStore::WorkerContext::RunLoop() {
     RefreshAndPruneReports();
     while (true) {
         Job job;
@@ -2311,7 +2414,7 @@ void TelemetryHistoryStore::Run() {
             condition_.wait_for(lock, std::chrono::seconds(1),
                                 [this] { return stopping_ || !jobs_.empty(); });
             stopping = stopping_;
-            if (jobs_.empty() && stopping) break;
+            if (Stopped() || (jobs_.empty() && stopping)) break;
             if (!jobs_.empty()) {
                 job = std::move(jobs_.front());
                 jobs_.pop_front();
@@ -2385,12 +2488,13 @@ void TelemetryHistoryStore::Run() {
                 break;
             }
             }
-            FlushPendingReports(stopping);
-            FlushLossRanges(stopping);
+            if (!Stopped()) FlushPendingReports(false);
+            if (!Stopped()) FlushLossRanges(false);
         } catch (...) {
             std::lock_guard lock(mutex_);
             ++status_.write_failures;
             status_.availability = Availability::Invalid;
+            worker_failed_ = true;
             status_.reason = "met_06_worker_exception";
             PublishStatusLocked();
         }
@@ -2402,11 +2506,11 @@ void TelemetryHistoryStore::Run() {
             PublishStatusLocked();
         }
     }
-    FlushPendingReports(true);
-    FlushLossRanges(true);
+    if (!Stopped()) FlushPendingReports(true);
+    if (!Stopped()) FlushLossRanges(true);
 }
 
-void TelemetryHistoryStore::RecordLossLocked(
+void TelemetryHistoryStore::WorkerContext::RecordLossLocked(
     const std::string& session_id,
     const TelemetryCheckpointRecord& record) {
     try {
@@ -2431,7 +2535,8 @@ void TelemetryHistoryStore::RecordLossLocked(
     } catch (...) { ++status_.loss_ranges_omitted; }
 }
 
-void TelemetryHistoryStore::FlushLossRanges(bool force) {
+void TelemetryHistoryStore::WorkerContext::FlushLossRanges(bool force) {
+    if (Stopped()) return;
     const auto now = std::chrono::steady_clock::now();
     if (!force && now < loss_next_attempt_) return;
     std::deque<TelemetryLossRange> pending;
@@ -2440,6 +2545,7 @@ void TelemetryHistoryStore::FlushLossRanges(bool force) {
         if (loss_ranges_pending_.empty()) return;
         pending.swap(loss_ranges_pending_);
         status_.loss_ranges_pending = 0;
+        status_.loss_ranges_inflight = pending.size();
         PublishStatusLocked();
     }
     bool persisted = false;
@@ -2452,13 +2558,14 @@ void TelemetryHistoryStore::FlushLossRanges(bool force) {
             RefreshAndPruneReports(64 * 1024);
         const std::vector<TelemetryLossRange> batch(
             pending.begin(), pending.end());
-        persisted = PersistTelemetryLossRanges(root_, batch, maximum_bytes_);
+        if (!Stopped()) persisted = PersistTelemetryLossRanges(root_, batch, maximum_bytes_);
     } catch (...) {}
     if (persisted) {
         loss_retry_count_ = 0;
         loss_first_failure_ = {};
         loss_next_attempt_ = now + std::chrono::seconds(1);
         std::lock_guard lock(mutex_);
+        status_.loss_ranges_inflight = 0;
         status_.loss_ranges_persisted += pending.size();
         PublishStatusLocked();
         return;
@@ -2472,6 +2579,7 @@ void TelemetryHistoryStore::FlushLossRanges(bool force) {
     if (now - loss_first_failure_ >= std::chrono::minutes(5))
         loss_next_attempt_ = std::chrono::steady_clock::time_point::max();
     std::lock_guard lock(mutex_);
+    status_.loss_ranges_inflight = 0;
     while (!pending.empty()) {
         if (loss_ranges_pending_.size() == 256) {
             status_.loss_ranges_omitted += pending.size();
@@ -2487,7 +2595,7 @@ void TelemetryHistoryStore::FlushLossRanges(bool force) {
     PublishStatusLocked();
 }
 
-void TelemetryHistoryStore::HandleSnapshot(Job job) {
+void TelemetryHistoryStore::WorkerContext::HandleSnapshot(Job job) {
     if (!job.snapshot) return;
     try {
         auto record = std::make_shared<SafeTelemetryRecord>();
@@ -2605,10 +2713,12 @@ void TelemetryHistoryStore::HandleSnapshot(Job job) {
     PublishPendingStatus();
 }
 
-void TelemetryHistoryStore::PublishPendingStatus() {
+void TelemetryHistoryStore::WorkerContext::PublishPendingStatus() {
     std::size_t bytes = 0;
     for (const auto& report : pending_reports_) bytes += report.bytes;
     std::lock_guard lock(mutex_);
+    status_.pending_records = 0;
+    for (const auto& report : pending_reports_) status_.pending_records += report.records.size();
     status_.pending_reports = pending_reports_.size();
     status_.pending_bytes = bytes;
     status_.pending_report_ids.clear();
@@ -2617,7 +2727,8 @@ void TelemetryHistoryStore::PublishPendingStatus() {
     PublishStatusLocked();
 }
 
-void TelemetryHistoryStore::FlushPendingReports(bool force) {
+void TelemetryHistoryStore::WorkerContext::FlushPendingReports(bool force) {
+    if (Stopped()) return;
     if (!pending_reports_.empty() && !process_run_id_.empty() &&
         (!run_lease_ || !run_lease_->acquired())) {
         run_lease_ = std::make_unique<TelemetryRunLease>(root_, process_run_id_);
@@ -2632,6 +2743,7 @@ void TelemetryHistoryStore::FlushPendingReports(bool force) {
     }
     const auto now = std::chrono::steady_clock::now();
     for (auto it = pending_reports_.begin(); it != pending_reports_.end();) {
+        if (Stopped()) return;
         bool superseded = false;
         {
             std::lock_guard lock(mutex_);
@@ -2666,11 +2778,12 @@ void TelemetryHistoryStore::FlushPendingReports(bool force) {
         if (!owned || *owned > maximum_bytes_ ||
             reserve_bytes > maximum_bytes_ - *owned || now >= next_history_refresh_)
             RefreshAndPruneReports(reserve_bytes);
+        if (Stopped()) return;
         const auto append_began = std::chrono::steady_clock::now();
         const auto result = AppendTelemetryCheckpoint(
             root_, it->id, it->records,
             (std::min)(maximum_bytes_ / 2, 64ull * 1024ull * 1024ull),
-            process_run_id_, maximum_bytes_);
+            process_run_id_, maximum_bytes_, control_.get());
         {
             const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - append_began).count();
@@ -2695,6 +2808,14 @@ void TelemetryHistoryStore::FlushPendingReports(bool force) {
             {
                 std::lock_guard lock(mutex_);
                 status_.checkpoint_revision = watermark;
+                const auto commit = std::find_if(status_.confirmed_commits.begin(),
+                    status_.confirmed_commits.end(), [&](const auto& v) { return v.session_id == it->id; });
+                if (commit != status_.confirmed_commits.end()) commit->revision = watermark;
+                else {
+                    // Bounded confirmation history, newest sessions retained.
+                    if (status_.confirmed_commits.size() == 256) status_.confirmed_commits.erase(status_.confirmed_commits.begin());
+                    status_.confirmed_commits.push_back({it->id, it->generation, watermark});
+                }
                 status_.availability = Availability::Valid;
                 status_.reason = "checkpoint_committed";
                 const auto& verified = result.status;
@@ -2728,6 +2849,7 @@ void TelemetryHistoryStore::FlushPendingReports(bool force) {
             ++status_.write_failures;
             status_.availability = Availability::Invalid;
             status_.reason = "met_06_" + result.reason;
+            unconfirmed_commit_ = unconfirmed_commit_ || result.manifest_replaced;
             PublishStatusLocked();
         }
         ++it;
@@ -2735,7 +2857,7 @@ void TelemetryHistoryStore::FlushPendingReports(bool force) {
     PublishPendingStatus();
 }
 
-void TelemetryHistoryStore::HandleExport(Job job) {
+void TelemetryHistoryStore::WorkerContext::HandleExport(Job job) {
     TelemetryExportResult result;
     try {
         if (job.kind == JobKind::ExportReport) {
@@ -2782,7 +2904,7 @@ void TelemetryHistoryStore::HandleExport(Job job) {
         }
         PublishStatusLocked();
     } catch (...) {}
-    try { if (job.export_callback) job.export_callback(std::move(result)); }
+    try { if (!Stopped() && job.export_callback) job.export_callback(std::move(result)); }
     catch (...) {}
     {
         std::lock_guard lock(mutex_);
@@ -2790,7 +2912,7 @@ void TelemetryHistoryStore::HandleExport(Job job) {
     }
 }
 
-void TelemetryHistoryStore::HandleClear(Job job) {
+void TelemetryHistoryStore::WorkerContext::HandleClear(Job job) {
     bool removed = false;
     std::string reason = "report_not_removed";
     try {
@@ -2810,11 +2932,11 @@ void TelemetryHistoryStore::HandleClear(Job job) {
     } catch (...) {
         reason = "clear_exception";
     }
-    try { if (job.mutation_callback) job.mutation_callback(removed, reason); }
+    try { if (!Stopped() && job.mutation_callback) job.mutation_callback(removed, reason); }
     catch (...) {}
 }
 
-void TelemetryHistoryStore::HandleRetry(Job job) {
+void TelemetryHistoryStore::WorkerContext::HandleRetry(Job job) {
     bool success = false;
     std::string reason = "report_not_pending";
     try {
@@ -2837,12 +2959,13 @@ void TelemetryHistoryStore::HandleRetry(Job job) {
     } catch (...) {
         reason = "retry_exception";
     }
-    try { if (job.mutation_callback) job.mutation_callback(success, reason); }
+    try { if (!Stopped() && job.mutation_callback) job.mutation_callback(success, reason); }
     catch (...) {}
 }
 
-void TelemetryHistoryStore::RefreshAndPruneReports(
+void TelemetryHistoryStore::WorkerContext::RefreshAndPruneReports(
     std::uint64_t reserve_bytes) {
+    if (Stopped()) return;
     const auto refresh_began = std::chrono::steady_clock::now();
     next_history_refresh_ = std::chrono::steady_clock::now() + std::chrono::seconds(15);
     struct Candidate {
@@ -2871,6 +2994,7 @@ void TelemetryHistoryStore::RefreshAndPruneReports(
     if (!error) {
         for (std::filesystem::directory_iterator it(root_, error), end;
              !error && it != end; it.increment(error)) {
+            if (Stopped()) return;
             if (it->is_symlink(error) || error) {
                 error.clear();
                 continue;
@@ -2958,10 +3082,12 @@ void TelemetryHistoryStore::RefreshAndPruneReports(
     const auto corrupt_cutoff = std::filesystem::file_time_type::clock::now() -
         retention_;
     for (const auto& item : legacy_temporary) {
+        if (Stopped()) return;
         if (item.modified < corrupt_cutoff)
             RemoveKnownReport(item.path);
     }
     for (const auto& item : corrupt_candidates) {
+        if (Stopped()) return;
         if (corrupt_bytes <= kCorruptBudget &&
             item.modified >= corrupt_cutoff) break;
         if (DiscardCorruptTelemetryCheckpointArtifacts(item.path)) {
@@ -2978,6 +3104,7 @@ void TelemetryHistoryStore::RefreshAndPruneReports(
     const auto cutoff = UtcNowMs() -
         std::chrono::duration_cast<std::chrono::milliseconds>(retention_).count();
     for (auto& item : candidates) {
+        if (Stopped()) return;
         if (accounting_failed) break;
         // An in-flight session owns its checkpoint even when its first sample
         // predates the retention window; per-report rolling bounds its size.
@@ -3027,7 +3154,8 @@ void TelemetryHistoryStore::RefreshAndPruneReports(
     PublishStatusLocked();
 }
 
-void TelemetryHistoryStore::PublishStatusLocked() {
+void TelemetryHistoryStore::WorkerContext::PublishStatusLocked() {
+    if (status_frozen_) return;
     try {
         std::atomic_store_explicit(
             &status_cache_,
@@ -3036,7 +3164,7 @@ void TelemetryHistoryStore::PublishStatusLocked() {
     } catch (...) {}
 }
 
-std::string TelemetryHistoryStore::NewOpaqueId() {
+std::string TelemetryHistoryStore::WorkerContext::NewOpaqueId() {
     std::array<std::uint64_t, 2> words{};
     std::random_device source;
     for (auto& word : words) {
@@ -3048,6 +3176,91 @@ std::string TelemetryHistoryStore::NewOpaqueId() {
            << std::setw(16) << words[1];
     return output.str();
 }
+
+TelemetryHistoryStore::TelemetryHistoryStore(std::filesystem::path root,
+    std::size_t memory_buckets, std::size_t queue_capacity, std::uint64_t maximum_bytes,
+    std::chrono::hours retention, std::size_t queue_byte_capacity,
+    std::string process_run_id, std::filesystem::path diagnostic_root)
+    : control_(std::make_shared<TelemetryCheckpointControl>()),
+      context_(std::make_shared<WorkerContext>(std::move(root), memory_buckets,
+          queue_capacity, maximum_bytes, retention, queue_byte_capacity,
+          std::move(process_run_id), std::move(diagnostic_root), control_)),
+      worker_([context = context_] { context->Run(); }) {}
+TelemetryHistoryStore::TelemetryHistoryStore(std::filesystem::path root,
+    std::string run, std::filesystem::path diagnostics)
+    : TelemetryHistoryStore(std::move(root), kDefaultMemoryBuckets, kDefaultQueueCapacity,
+        kDefaultMaximumBytes, kDefaultRetention, kDefaultQueueBytes,
+        std::move(run), std::move(diagnostics)) {}
+TelemetryHistoryStore::~TelemetryHistoryStore() { Close(); }
+
+void TelemetryHistoryStore::WorkerContext::Run() {
+    try { RunLoop(); }
+    catch (...) {
+        std::lock_guard lock(mutex_);
+        ++status_.write_failures;
+        status_.availability = Availability::Invalid;
+        worker_failed_ = true;
+        status_.reason = "met_06_worker_exception";
+        PublishStatusLocked();
+    }
+    // Lease destruction belongs to this worker even after owner timeout/destruction.
+    run_lease_.reset();
+    {
+        std::lock_guard lock(mutex_);
+        finished_ = true;
+    }
+    done_.notify_all();
+}
+
+TelemetryCloseResult TelemetryHistoryStore::Close(std::chrono::milliseconds budget) {
+    std::lock_guard closing(close_mutex_);
+    if (closed_) return close_result_;
+    const auto& c = context_;
+    std::unique_lock lock(c->mutex_);
+    c->stopping_ = true;
+    c->condition_.notify_all();
+    const bool finished = c->done_.wait_for(lock, (std::max)(budget, std::chrono::milliseconds::zero()),
+        [&] { return c->finished_; });
+    if (!finished) {
+        control_->abandoned.store(true, std::memory_order_release);
+        c->status_.reason = "history_close_timed_out";
+        c->status_.availability = Availability::Invalid;
+        c->PublishStatusLocked();
+        close_result_.state = TelemetryCloseState::TimedOut;
+        close_result_.disk_outcome_unknown = true;
+    } else {
+        close_result_.state = c->worker_failed_ || c->status_.pending_records ||
+            c->status_.loss_ranges_pending || c->status_.loss_ranges_inflight || c->status_.queue_depth || c->status_.inflight_jobs ||
+            c->status_.queue_drops || c->status_.pending_records_dropped || c->status_.loss_ranges_omitted
+            ? TelemetryCloseState::Failed : TelemetryCloseState::Completed;
+        // Failure after replacement cannot be reported as proof of no disk commit.
+        close_result_.disk_outcome_unknown = close_result_.state == TelemetryCloseState::Failed &&
+            c->unconfirmed_commit_;
+    }
+    close_result_.status = c->Status();
+    c->status_frozen_ = true;
+    closed_ = true;
+    lock.unlock();
+    if (finished) worker_.join();
+    else { c->condition_.notify_all(); worker_.detach(); }
+    return close_result_;
+}
+
+bool TelemetryHistoryStore::SubmitSnapshot(SessionTelemetry::SnapshotPtr s, StabilitySummary b, std::string id) {
+    return context_->SubmitSnapshot(std::move(s), std::move(b), std::move(id));
+}
+bool TelemetryHistoryStore::ExportCurrent(std::filesystem::path p, ExportCallback f, std::shared_ptr<std::atomic_bool> c) {
+    return context_->ExportCurrent(std::move(p), std::move(f), std::move(c));
+}
+bool TelemetryHistoryStore::ExportReport(std::string id, std::filesystem::path p, ExportCallback f,
+    std::shared_ptr<std::atomic_bool> c, std::int64_t first, std::int64_t last) {
+    return context_->ExportReport(std::move(id), std::move(p), std::move(f), std::move(c), first, last);
+}
+bool TelemetryHistoryStore::ClearReport(std::string id, MutationCallback f) { return context_->ClearReport(std::move(id), std::move(f)); }
+bool TelemetryHistoryStore::RetryCheckpoint(std::string id, MutationCallback f) { return context_->RetryCheckpoint(std::move(id), std::move(f)); }
+void TelemetryHistoryStore::SetHistoryEnabled(bool enabled) { context_->SetHistoryEnabled(enabled); }
+std::shared_ptr<const TelemetryStoreStatus> TelemetryHistoryStore::Status() const { return context_->Status(); }
+std::vector<SafeTelemetryRecordPtr> TelemetryHistoryStore::CurrentRecords() const { return context_->CurrentRecords(); }
 
 void InstallTelemetryHistoryStore(std::shared_ptr<TelemetryHistoryStore> store) {
     std::lock_guard lock(g_installed_mutex);

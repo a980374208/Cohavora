@@ -23,6 +23,7 @@
 namespace livekit::telemetry {
 
 class TelemetryRunLease;
+struct TelemetryCheckpointControl;
 struct TelemetryExportRange;
 
 inline constexpr char kTelemetryReportSchema[] = "cohavora-telemetry-report";
@@ -80,6 +81,12 @@ struct TelemetryReportEntry {
     bool complete = false;
 };
 
+struct TelemetryCommitWatermark {
+    std::string session_id;
+    std::uint64_t generation = 0;
+    std::uint64_t revision = 0;
+};
+
 struct TelemetryStoreStatus {
     Availability availability = Availability::WarmingUp;
     std::string reason = "history_store_starting";
@@ -100,6 +107,10 @@ struct TelemetryStoreStatus {
     std::uint64_t loss_persist_failures = 0;
     std::uint64_t loss_ranges_omitted = 0;
     std::size_t loss_ranges_pending = 0;
+    std::size_t loss_ranges_inflight = 0;
+    std::size_t pending_records = 0;
+    // Lower-bound confirmations for the most recent 256 sessions, not a disk index.
+    std::vector<TelemetryCommitWatermark> confirmed_commits;
     std::size_t pending_reports = 0;
     std::size_t pending_bytes = 0;
     std::vector<std::string> pending_report_ids;
@@ -141,8 +152,17 @@ TelemetryExportResult WriteTelemetryReportAtomically(
     bool managed_history,
     const std::shared_ptr<std::atomic_bool>& cancelled = {});
 
+enum class TelemetryCloseState { Completed, Failed, TimedOut };
+struct TelemetryCloseResult {
+    TelemetryCloseState state = TelemetryCloseState::Failed;
+    // Immutable last observation, not proof that a late commit did not occur.
+    std::shared_ptr<const TelemetryStoreStatus> status;
+    bool disk_outcome_unknown = false;
+};
+
 class TelemetryHistoryStore final {
 public:
+    // Callbacks must own their captures and must not synchronously Close this store.
     using ExportCallback = BoundedCallback<void(TelemetryExportResult)>;
     using MutationCallback = BoundedCallback<void(bool, std::string)>;
 
@@ -170,9 +190,9 @@ public:
                           std::filesystem::path diagnostic_root = {});
     ~TelemetryHistoryStore();
 
-    // Stop admission, persist accepted records, and join. Call on the managed
-    // cleanup worker before application exit; retained readers remain valid.
-    void Close();
+    // Stop admission and drain within budget; timeout detaches owned state.
+    // Call on the managed cleanup worker. Repeated calls return the same result.
+    TelemetryCloseResult Close(std::chrono::milliseconds budget = std::chrono::seconds(5));
 
     TelemetryHistoryStore(const TelemetryHistoryStore&) = delete;
     TelemetryHistoryStore& operator=(const TelemetryHistoryStore&) = delete;
@@ -200,92 +220,14 @@ public:
     std::vector<SafeTelemetryRecordPtr> CurrentRecords() const;
 
 private:
-    struct PendingReport {
-        std::string id;
-        std::uint64_t generation = 0;
-        std::vector<TelemetryCheckpointRecord> records;
-        std::size_t bytes = 0;
-        bool terminal = false;
-        std::uint64_t committed_revision = 0;
-        unsigned retry_count = 0;
-        std::chrono::steady_clock::time_point first_failure{};
-        std::chrono::steady_clock::time_point next_attempt{};
-    };
-
-    struct CurrentRecord {
-        SafeTelemetryRecordPtr record;
-        std::size_t charge = 0;
-    };
-
-    enum class JobKind { Snapshot, Export, ExportReport, ClearReport, RetryCheckpoint,
-                         SetHistoryEnabled };
-    struct Job {
-        JobKind kind = JobKind::Snapshot;
-        SessionTelemetry::SnapshotPtr snapshot;
-        StabilitySummary stability;
-        TelemetryCheckpointRecord checkpoint;
-        std::string anonymous_session_id;
-        std::filesystem::path destination;
-        std::string record_id;
-        std::int64_t first_utc_ms = 0;
-        std::int64_t last_utc_ms = 0;
-        ExportCallback export_callback;
-        MutationCallback mutation_callback;
-        std::shared_ptr<std::atomic_bool> cancelled;
-        bool enabled = true;
-        std::int64_t captured_utc_ms = 0;
-        std::uint64_t source_monotonic_us = 0;
-        std::size_t charge = 0;
-    };
-
-    void Run();
-    void HandleSnapshot(Job job);
-    void HandleExport(Job job);
-    void HandleClear(Job job);
-    void HandleRetry(Job job);
-    void RefreshAndPruneReports(std::uint64_t reserve_bytes = 0);
-    void FlushPendingReports(bool force);
-    void FlushLossRanges(bool force);
-    void RecordLossLocked(const std::string& session_id,
-                          const TelemetryCheckpointRecord& record);
-    void PublishPendingStatus();
-    void PublishStatusLocked();
-    bool Enqueue(Job job, bool terminal_priority);
-    bool EnqueueLocked(Job job, bool terminal_priority);
-    static std::string NewOpaqueId();
-
-    const std::filesystem::path root_;
-    const std::filesystem::path diagnostic_root_;
-    const std::string process_run_id_;
-    const std::size_t memory_buckets_;
-    const std::size_t queue_capacity_;
-    const std::size_t queue_byte_capacity_;
-    const std::uint64_t maximum_bytes_;
-    const std::chrono::hours retention_;
-
+    friend struct TelemetryHistoryStoreTestAccess;
+    struct WorkerContext;
+    const std::shared_ptr<TelemetryCheckpointControl> control_;
+    const std::shared_ptr<WorkerContext> context_;
     std::mutex close_mutex_;
-    std::mutex submit_mutex_;
-    mutable std::mutex mutex_;
-    std::condition_variable condition_;
-    std::deque<Job> jobs_;
-    std::size_t inflight_jobs_ = 0;
-    std::size_t export_jobs_ = 0;
-    std::deque<CurrentRecord> current_records_;
-    std::size_t current_record_bytes_ = 0;
-    // Worker-owned; previous sessions survive current_records_ replacement.
-    std::deque<PendingReport> pending_reports_;
-    std::chrono::steady_clock::time_point next_history_refresh_{};
-    std::deque<TelemetryLossRange> loss_ranges_pending_;
-    unsigned loss_retry_count_ = 0;
-    std::chrono::steady_clock::time_point loss_first_failure_{};
-    std::chrono::steady_clock::time_point loss_next_attempt_{};
-    std::unique_ptr<TelemetryRunLease> run_lease_;
-    std::string current_session_id_;
-    std::uint64_t current_generation_ = 0;
-    bool stopping_ = false;
-    TelemetryStoreStatus status_;
-    mutable std::shared_ptr<const TelemetryStoreStatus> status_cache_;
     std::thread worker_;
+    bool closed_ = false;
+    TelemetryCloseResult close_result_;
 };
 
 void InstallTelemetryHistoryStore(std::shared_ptr<TelemetryHistoryStore> store);

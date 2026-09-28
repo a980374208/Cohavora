@@ -17,6 +17,7 @@
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QLineEdit>
 #include <QtGui/QClipboard>
+#include <QtGui/QTextDocument>
 
 #include <nlohmann/json.hpp>
 
@@ -24,6 +25,39 @@
 
 #include <filesystem>
 #include <fstream>
+
+namespace MeetingUI {
+struct MeetingLogConsoleTestAccess {
+    static void DrainUntilText(MeetingLogConsoleWindow &console, const QString &text) {
+        // Rendering is time-sliced (4ms), so a fixed number of calls is not a
+        // completion condition on a slow/debug build. Keep the wait bounded.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        do {
+            console.drainPending();
+            if (console._logView->toPlainText().contains(text)) return;
+        } while (std::chrono::steady_clock::now() < deadline);
+        TEST_CHECK(console._logView->toPlainText().contains(text));
+    }
+
+    static void CheckByteEviction(MeetingLogConsoleWindow &console) {
+        console.clearLogs();
+        console.onFilterChanged({});
+        const auto first = console._nextEntryId;
+        for (int i = 0; i < 400; ++i) {
+            MeetingLogConsoleWindow::PendingEntry entry;
+            entry.message = QStringLiteral("row_%1_").arg(i) + QString(4096, QLatin1Char('x'));
+            console.appendVisible(std::move(entry));
+            console.drainPending();
+        }
+        DrainUntilText(console, QStringLiteral("row_399_"));
+        TEST_CHECK(console._logEntries.front().id > first); // Byte cap, not the 5000-entry cap.
+        TEST_CHECK(console._cacheBytes <= console.kMaxCacheBytes);
+        TEST_CHECK(console._logView->toPlainText().contains(QStringLiteral("row_399_")));
+        TEST_CHECK(!console._logView->toPlainText().contains(QStringLiteral("row_0_")));
+        TEST_CHECK(console._visibleIds.front() == console._logEntries.front().id);
+    }
+};
+}
 #include <memory>
 #include <thread>
 #include <chrono>
@@ -220,6 +254,34 @@ int main(int argc, char **argv) {
     }
     TEST_CHECK(showedUiLoss);
 
+    // A filter rebuild must yield after a bounded slice, then reach the newest
+    // record. Eviction must not clear/reinsert the retained document.
+    console.clearLogs();
+    severity->setCurrentIndex(0);
+    component->setCurrentIndex(0);
+    session->clear();
+    operation->clear();
+    for (int i = 0; i < 6000; ++i) {
+        console.appendLog(MeetingUI::LogCategory::General, QStringLiteral("CHAT_TEXT"),
+            QStringLiteral("bytes=%1").arg(100000 + i));
+        console.drainPending();
+    }
+    MeetingUI::MeetingLogConsoleTestAccess::DrainUntilText(
+        console, QStringLiteral("bytes=105999"));
+    TEST_CHECK(view->toPlainText().contains(QStringLiteral("bytes=105999")));
+    TEST_CHECK(!view->toPlainText().contains(QStringLiteral("bytes=100000")));
+    console.onFilterChanged(QStringLiteral("CHAT_TEXT"));
+    TEST_CHECK(view->document()->blockCount() <= 128);
+    MeetingUI::MeetingLogConsoleTestAccess::DrainUntilText(
+        console, QStringLiteral("bytes=105999"));
+    TEST_CHECK(view->toPlainText().contains(QStringLiteral("bytes=105999")));
+    console.onFilterChanged(QStringLiteral("bytes=105999"));
+    MeetingUI::MeetingLogConsoleTestAccess::DrainUntilText(
+        console, QStringLiteral("bytes=105999"));
+    TEST_CHECK(view->toPlainText().contains(QStringLiteral("bytes=105999")));
+    TEST_CHECK(!view->toPlainText().contains(QStringLiteral("bytes=105998")));
+
+    MeetingUI::MeetingLogConsoleTestAccess::CheckByteEviction(console);
     QProcess child;
     child.setProgram(QCoreApplication::applicationFilePath());
     child.setArguments({QStringLiteral("--fatal-child")});

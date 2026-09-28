@@ -1,3 +1,4 @@
+#include "src/core/session_shutdown_service.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/meeting_room_window.h"
 #include "src/ui/whiteboard/accessible_combo_box.h"
@@ -286,8 +287,9 @@ void ShowTelemetryExport(QWidget *parent, std::string record_id = {},
 	QObject::connect(progress, &QProgressDialog::canceled, progress,
 		[cancelled] { cancelled->store(true, std::memory_order_release); });
 	const auto destination = std::filesystem::path(directory.toStdWString());
-	auto completion = [guard, progressGuard](livekit::telemetry::TelemetryExportResult result) {
-			QMetaObject::invokeMethod(qApp, [guard, progressGuard, result = std::move(result)] {
+	const auto dispatcher = OpenMeeting::detail::QtDispatchEndpoint::Create();
+	auto completion = [dispatcher, guard, progressGuard](livekit::telemetry::TelemetryExportResult result) {
+			if (dispatcher) dispatcher->Post( [guard, progressGuard, result = std::move(result)] {
 				if (progressGuard) progressGuard->close();
 				if (!guard) return;
 				QMessageBox message(guard);
@@ -309,7 +311,7 @@ void ShowTelemetryExport(QWidget *parent, std::string record_id = {},
 				if (auto *dismiss = message.button(QMessageBox::Ok))
 					dismiss->setObjectName(QStringLiteral("meetingTelemetryExportDismiss"));
 				message.exec();
-			}, Qt::QueuedConnection);
+			});
 		};
 	if (record_id.empty())
 		store->ExportCurrent(destination, std::move(completion), cancelled);
@@ -969,8 +971,9 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 			const auto id = item->data(Qt::UserRole).toString().toStdString();
 			clearButton->setEnabled(false);
 			const QPointer<QListWidget> listGuard(reports);
-			store->ClearReport(id, [listGuard, id](bool removed, std::string) {
-				QMetaObject::invokeMethod(qApp, [listGuard, id, removed] {
+			const auto dispatcher = OpenMeeting::detail::QtDispatchEndpoint::Create();
+			store->ClearReport(id, [dispatcher, listGuard, id](bool removed, std::string) {
+				if (dispatcher) dispatcher->Post( [listGuard, id, removed] {
 					if (!listGuard || !removed) return;
 					for (auto row = 0; row != listGuard->count(); ++row) {
 						if (listGuard->item(row)->data(Qt::UserRole).toString().toStdString() == id) {
@@ -978,7 +981,7 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 							break;
 						}
 					}
-				}, Qt::QueuedConnection);
+				});
 			});
 		});
 

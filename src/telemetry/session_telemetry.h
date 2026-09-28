@@ -157,6 +157,10 @@ struct AudioActivityProbe {
 // Updated at the real CPU-paint or GPU-present boundary. Only first/recovery
 // milestones enter the bounded event queue; cumulative stall counters remain
 // lock-free producer data sampled by the session strand.
+// Configure before creating render bindings. Existing probes retain their mode.
+void SetFineRenderStatisticsEnabled(bool enabled) noexcept;
+bool FineRenderStatisticsEnabled() noexcept;
+
 struct RenderActivityProbe {
     static constexpr std::size_t kIntervalHistogramBuckets = 9;
     static constexpr std::size_t kFineIntervalHistogramBuckets = 1001;
@@ -182,8 +186,10 @@ struct RenderActivityProbe {
         interval_histogram{};
     // Integer millisecond upper bounds 0..999; bucket 1000 is overflow.
     // Allows independent window deltas without retaining frame timestamps.
-    std::array<std::atomic<std::uint64_t>, kFineIntervalHistogramBuckets>
-        fine_interval_histogram{};
+    using FineHistogram = std::array<std::atomic<std::uint64_t>, kFineIntervalHistogramBuckets>;
+    explicit RenderActivityProbe(bool fine = FineRenderStatisticsEnabled())
+        : fine_interval_histogram(fine ? std::make_unique<FineHistogram>() : nullptr) {}
+    const std::unique_ptr<FineHistogram> fine_interval_histogram;
     std::atomic<std::int64_t> frame_age_sum_ns{0};
     std::atomic<std::int64_t> maximum_frame_age_ns{0};
     std::atomic<std::uint64_t> frame_age_count{0};
@@ -916,8 +922,8 @@ struct Snapshot {
     double render_interval_p95_ms = -1.0;
     std::array<std::uint64_t, RenderActivityProbe::kIntervalHistogramBuckets>
         render_interval_histogram{};
-    std::array<std::uint64_t, RenderActivityProbe::kFineIntervalHistogramBuckets>
-        render_fine_interval_histogram{};
+    // Empty unless an explicitly enabled probe contributes statistics.
+    std::vector<std::uint64_t> render_fine_interval_histogram;
     double render_interval_p99_ms = -1.0;
     double render_submit_fps = -1.0;
     Availability render_frame_age_availability = Availability::Unknown;

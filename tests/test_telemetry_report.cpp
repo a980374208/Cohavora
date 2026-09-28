@@ -4,6 +4,7 @@
 #include "src/telemetry/build_identity.h"
 #include "src/telemetry/diagnostic_bundle.h"
 #include "tests/support/test_check.h"
+#include "tests/support/telemetry_history_close_checks.h"
 
 #include <nlohmann/json.hpp>
 #include <openssl/sha.h>
@@ -1896,6 +1897,16 @@ int wmain(int argc, wchar_t** argv) {
     TEST_CHECK(std::all_of(build_id.begin(), build_id.end(), [](char ch) {
         return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
     }));
+    {
+        TemporaryDirectory directory("cohavora-history-close");
+        history_close_checks::BoundaryTimeout(directory.path()/"before",Record(1,false),Record(2,true),false);
+        history_close_checks::BoundaryTimeout(directory.path()/"after",Record(1,false),Record(2,true),true);
+        history_close_checks::FinalFailure(directory.path()/"blocked",Record(1,false));
+        history_close_checks::FinalManifestFailure(directory.path()/"manifest-failure",Record(1,false),Record(2,true));
+        history_close_checks::Completed(directory.path()/"completed",Record(1,true));
+        history_close_checks::UnconfirmedCommit(directory.path()/"unconfirmed",Record(1,false));
+        history_close_checks::LateCallback(directory.path()/"late");
+    }
     JsonCsvShareValuesAndPreserveMissing();
     UnsafeTextAndCsvFormulaAreContained();
     CancellationAndUnwritableDestinationAreBounded();

@@ -18,6 +18,8 @@
 #include <vector>
 #include <windows.h>
 #include <spdlog/spdlog.h>
+#include "tests/support/diagnostic_sink_fault_checks.h"
+#include "tests/support/diagnostic_detach_checks.h"
 
 namespace {
 
@@ -132,6 +134,26 @@ void MakeSegment(const std::filesystem::path& path,
     TEST_CHECK(output.good());
 }
 
+void BatchWritesPreserveOrderAndCommitBoundary() {
+    TemporaryDirectory directory;
+    DiagnosticFileSink sink(directory.path, std::string(32, '1'));
+    std::vector<Event> batch;
+    for (std::uint64_t i = 1; i <= 64; ++i) {
+        auto event = Event::Received(ChatKind::Text, i);
+        event.event_sequence = i;
+        batch.push_back(event);
+    }
+    TEST_CHECK(sink.WriteBatch(batch) == batch.size());
+    TEST_CHECK(sink.last_committed_sequence() == 64);
+    const auto rows = ReadEvents(directory.path);
+    TEST_CHECK(rows.size() == 64);
+    for (std::size_t i = 0; i < rows.size(); ++i)
+        TEST_CHECK(rows[i]["event_sequence"] == i + 1);
+    batch.push_back(batch.back());
+    TEST_CHECK(sink.WriteBatch(batch) == 0); // Bounded batch, no partial admission.
+    TEST_CHECK(sink.last_committed_sequence() == 64);
+}
+
 void RotatesAndReclaimsOwnedSegments() {
     TemporaryDirectory directory;
     const auto root = directory.path / "logs";
@@ -179,7 +201,11 @@ void ActiveRunCannotBeReclaimed() {
     TEST_CHECK(!sink.Write(Event::Started("test-build")));
     TEST_CHECK(sink.failure_reason() == FailureReason::QuotaExceeded);
     TEST_CHECK(std::filesystem::exists(active_run / "segment-000000.jsonl"));
+    std::vector<Event> batch(8, Event::Started("test-build"));
+    TEST_CHECK(sink.WriteBatch(batch) == 0);
+    TEST_CHECK(sink.failure_reason() == FailureReason::QuotaExceeded);
     CloseHandle(lease);
+    TEST_CHECK(sink.WriteBatch(batch) == batch.size()); // Failed batch released the quota lock.
 
     DiagnosticFileSink invalid(root, "../invalid");
     TEST_CHECK(!invalid.Write(Event::Started("test-build")));
@@ -191,6 +217,103 @@ void RestrictsUnregisteredSpdlogOutput() {
     TEST_CHECK(InstallSafeSpdlogAdapter(pipeline));
     spdlog::error("private spdlog canary 4831");
     TEST_CHECK(pipeline->GetStatus().suppressed == 1);
+}
+
+void QuotaDefersLiveGrowthUntilRotationAndRetriesFailedAdmission() {
+    TemporaryDirectory directory;
+    const auto root = directory.path / "logs";
+    const auto active_run = root / ("run-" + std::string(32, '6'));
+    const auto segment = active_run / "segment-000000.jsonl";
+    MakeSegment(segment, DiagnosticFileSink::kTotalBytes -
+        DiagnosticFileSink::kSegmentBytes - 1024 * 1024);
+    const auto own_run = root / ("run-" + std::string(32, '7'));
+    MakeSegment(own_run / "segment-000000.jsonl",
+        DiagnosticFileSink::kSegmentBytes - 4096);
+    const auto lease = CreateFileW((active_run / L"active.lock").c_str(),
+        GENERIC_READ, 0, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    TEST_CHECK(lease != INVALID_HANDLE_VALUE);
+    const auto file = CreateFileW(segment.c_str(), GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    TEST_CHECK(file != INVALID_HANDLE_VALUE);
+    DiagnosticFileSink sink(root, std::string(32, '7'));
+    auto event = Event::Received(ChatKind::Text, 1);
+    event.event_sequence = 1;
+    TEST_CHECK(sink.Write(event));
+    LARGE_INTEGER size{};
+    size.QuadPart = DiagnosticFileSink::kTotalBytes;
+    TEST_CHECK(SetFilePointerEx(file, size, nullptr, FILE_BEGIN));
+    TEST_CHECK(SetEndOfFile(file));
+    event.event_sequence = 2;
+    TEST_CHECK(sink.Write(event)); // Same segment deliberately permits excess.
+    TEST_CHECK(sink.last_committed_sequence() == 2);
+    // Only a few KiB remain. Rotation must inspect live sizes and refuse a
+    // new segment while the foreign active run alone consumes the quota.
+    bool blocked = false;
+    for (int i = 0; i < 64; ++i) {
+        ++event.event_sequence;
+        if (!sink.Write(event)) { blocked = true; break; }
+    }
+    TEST_CHECK(blocked);
+    TEST_CHECK(std::filesystem::exists(own_run / "segment-000001.jsonl"));
+    TEST_CHECK(sink.failure_reason() == FailureReason::QuotaExceeded);
+    TEST_CHECK(sink.last_committed_sequence() == event.event_sequence - 1);
+    TEST_CHECK(std::filesystem::exists(segment));
+    size.QuadPart -= 1024 * 1024;
+    TEST_CHECK(SetFilePointerEx(file, size, nullptr, FILE_BEGIN));
+    TEST_CHECK(SetEndOfFile(file));
+    TEST_CHECK(sink.Write(event));
+    TEST_CHECK(sink.last_committed_sequence() == event.event_sequence);
+    CloseHandle(file);
+    CloseHandle(lease);
+}
+
+void QuotaReclaimsExpiredHistoryOnOpenAndRotation() {
+    TemporaryDirectory directory;
+    const auto old_run = directory.path / ("run-" + std::string(32, '8'));
+    const auto expired = old_run / "segment-000000.jsonl";
+    const auto recent = old_run / "segment-000001.jsonl";
+    MakeSegment(expired, 16);
+    MakeSegment(recent, 16);
+    std::filesystem::last_write_time(expired,
+        std::filesystem::file_time_type::clock::now() - std::chrono::hours(24 * 8));
+    const auto unrelated = old_run / "segment-other.jsonl";
+    std::ofstream(unrelated) << "preserve";
+    const auto own_run = directory.path / ("run-" + std::string(32, '9'));
+    MakeSegment(own_run / "segment-000000.jsonl",
+        DiagnosticFileSink::kSegmentBytes - 4096);
+    DiagnosticFileSink sink(directory.path, std::string(32, '9'));
+    TEST_CHECK(sink.Write(Event::Received(ChatKind::Text, 1)));
+    TEST_CHECK(!std::filesystem::exists(expired));
+    TEST_CHECK(std::filesystem::exists(recent));
+    TEST_CHECK(std::filesystem::exists(unrelated));
+    // Becoming expired does not trigger an in-segment directory scan.
+    std::filesystem::last_write_time(recent,
+        std::filesystem::file_time_type::clock::now() - std::chrono::hours(24 * 8));
+    TEST_CHECK(sink.Write(Event::Received(ChatKind::Text, 2)));
+    TEST_CHECK(std::filesystem::exists(recent));
+    for (int i = 0; i < 64 &&
+         !std::filesystem::exists(own_run / "segment-000001.jsonl"); ++i)
+        TEST_CHECK(sink.Write(Event::Received(ChatKind::Text, 3)));
+    TEST_CHECK(std::filesystem::exists(own_run / "segment-000001.jsonl"));
+    TEST_CHECK(!std::filesystem::exists(recent));
+    TEST_CHECK(std::filesystem::exists(unrelated));
+}
+
+void ReopeningTheSameSegmentRechecksQuota() {
+    TemporaryDirectory directory;
+    const auto old_run = directory.path / ("run-" + std::string(32, 'b'));
+    const auto history = old_run / "segment-000000.jsonl";
+    MakeSegment(history, 16);
+    DiagnosticFileSink sink(directory.path, std::string(32, 'c'));
+    TEST_CHECK(sink.Write(Event::Received(ChatKind::Text, 1)));
+    sink.Close();
+    // Closing/reopening must invalidate the successful admission even if the
+    // segment index stays unchanged (also used by failure recovery paths).
+    std::filesystem::last_write_time(history,
+        std::filesystem::file_time_type::clock::now() - std::chrono::hours(24 * 8));
+    TEST_CHECK(sink.Write(Event::Received(ChatKind::Text, 2)));
+    TEST_CHECK(!std::filesystem::exists(history));
 }
 
 void RejectsUnprojectedEventFields() {
@@ -583,11 +706,26 @@ void BenchmarkPauseIsBoundedAndDoesNotCreateSequenceGaps() {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 4 && std::string_view(argv[1]) == "--quota-child")
+        return diagnostic_sink_checks::ChildMain(argv[2], argv[3]);
+    {
+        TemporaryDirectory directory;
+        diagnostic_detach_checks::BlockedMirror(directory.path / "mirror");
+        diagnostic_detach_checks::BlockedFileOpen(directory.path / "file");
+    }
     BoundedConcurrentAdmission();
     WritesTypedJsonAndRecovers();
+    BatchWritesPreserveOrderAndCommitBoundary();
     RotatesAndReclaimsOwnedSegments();
     ActiveRunCannotBeReclaimed();
+    QuotaDefersLiveGrowthUntilRotationAndRetriesFailedAdmission();
+    QuotaReclaimsExpiredHistoryOnOpenAndRotation();
+    ReopeningTheSameSegmentRechecksQuota();
+    {
+        TemporaryDirectory directory;
+        diagnostic_sink_checks::Run(directory.path);
+    }
     RestrictsUnregisteredSpdlogOutput();
     RejectsUnprojectedEventFields();
     BusinessCatalogKeepsOnlyTypedFields();

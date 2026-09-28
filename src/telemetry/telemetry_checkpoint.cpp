@@ -229,21 +229,42 @@ bool ReadBounded(const std::filesystem::path& path, std::size_t maximum,
         !std::filesystem::is_regular_file(path, error) || error) return false;
     const auto size = std::filesystem::file_size(path, error);
     if (error || size > maximum) return false;
+#if defined(_WIN32)
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    struct Close { HANDLE h; ~Close() { CloseHandle(h); } } close{h};
+    LARGE_INTEGER actual{};
+    if (!GetFileSizeEx(h, &actual) || actual.QuadPart < 0 ||
+        static_cast<std::uint64_t>(actual.QuadPart) > maximum) return false;
+    content.resize(static_cast<std::size_t>(actual.QuadPart));
+    std::size_t offset = 0;
+    while (offset < content.size()) {
+        DWORD got = 0;
+        if (!ReadFile(h, content.data() + offset, static_cast<DWORD>(content.size()-offset), &got, nullptr) || !got) return false;
+        offset += got;
+    }
+    char extra; DWORD got = 0;
+    return ReadFile(h, &extra, 1, &got, nullptr) && got == 0;
+#else
     std::ifstream input(path, std::ios::binary);
     if (!input) return false;
     content.resize(static_cast<std::size_t>(size));
     input.read(content.data(), static_cast<std::streamsize>(size));
     return input.gcount() == static_cast<std::streamsize>(size) &&
         !input.bad() && input.peek() == std::char_traits<char>::eof();
+#endif
 }
 
 bool CommitManifest(const std::filesystem::path& temporary,
-                    const std::filesystem::path& final) {
+                    const std::filesystem::path& final,
+                    const TelemetryCheckpointControl* control = nullptr) {
 #if defined(_WIN32)
     // A read-only observer can briefly hold a handle that prevents replacement
     // on Windows. Retry only access/share conflicts on the persistence worker;
     // keep the old manifest and report failure if the bounded wait expires.
     for (unsigned attempt = 0; attempt <= 25; ++attempt) {
+        if (control && control->Stopped()) return false;
         if (MoveFileExW(temporary.c_str(), final.c_str(),
                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) return true;
         const auto failure = GetLastError();
@@ -260,10 +281,24 @@ bool CommitManifest(const std::filesystem::path& temporary,
 }
 
 bool WriteText(const std::filesystem::path& path, std::string_view content) {
+#if defined(_WIN32)
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr,
+        CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    struct Close { HANDLE h; ~Close() { CloseHandle(h); } } close{h};
+    std::size_t offset = 0;
+    while (offset < content.size()) {
+        DWORD written = 0;
+        if (!WriteFile(h, content.data() + offset, static_cast<DWORD>(content.size()-offset), &written, nullptr) || !written) return false;
+        offset += written;
+    }
+    return true; // Same OS-cache guarantee as ostream::flush, not power-loss durability.
+#else
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output.write(content.data(), static_cast<std::streamsize>(content.size()));
     output.flush();
     return static_cast<bool>(output);
+#endif
 }
 
 TelemetryCheckpointStatus Invalid(std::string reason) {
@@ -533,8 +568,15 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
     const std::vector<TelemetryCheckpointRecord>& records,
     std::uint64_t maximum_report_bytes,
     std::string_view process_run_id,
-    std::uint64_t maximum_history_bytes) {
+    std::uint64_t maximum_history_bytes,
+    const TelemetryCheckpointControl* control) {
     TelemetryCheckpointResult result;
+    const auto stopped = [&] {
+        if (!control || !control->Stopped()) return false;
+        result.reason = result.manifest_replaced ? "commit_outcome_unknown" : "checkpoint_abandoned";
+        return true;
+    };
+    if (stopped()) return result;
     result.reason = "no_records";
     if (records.empty()) return result;
     const auto& final = records.back();
@@ -584,6 +626,7 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
             result.reason = "store_busy";
             return result;
         }
+        if (stopped()) return result;
         std::filesystem::create_directories(directory, error);
         if (error) {
             result.reason = "directory_unavailable";
@@ -594,6 +637,7 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
             result.reason = "writer_busy";
             return result;
         }
+        if (stopped()) return result;
         const auto manifest_path = directory / "manifest.json";
         Json manifest;
         if (std::filesystem::exists(manifest_path)) {
@@ -635,6 +679,7 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
                 {"segments", Json::array()},
             };
         }
+        if (stopped()) return result;
         const auto watermark = manifest.at("last_committed_revision").get<std::uint64_t>();
         if (manifest.value("session_complete", false) &&
             final.revision > watermark) {
@@ -757,6 +802,7 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
             result.reason = "manifest_write_failed";
             return result;
         }
+        if (stopped()) return result;
         const auto used = OwnedBytes(root);
         if (!used || *used > maximum_history_bytes ||
             payload.size() + manifest_content.size() >
@@ -764,6 +810,7 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
             result.reason = "history_budget_exceeded";
             return result;
         }
+        if (stopped()) return result;
         if (!payload.empty()) {
             bool already_committed = false;
             if (std::filesystem::exists(segment_path)) {
@@ -773,24 +820,32 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
             }
             if (!already_committed) {
                 if (!WriteText(segment_temp, payload) ||
-                    !CommitManifest(segment_temp, segment_path)) {
+                    !CommitManifest(segment_temp, segment_path, control)) {
                     result.reason = "segment_commit_failed";
                     return result;
                 }
             }
         }
+        if (stopped()) return result;
         if (!WriteText(manifest_temp, manifest_content)) {
             result.reason = "manifest_write_failed";
             return result;
         }
-        if (!CommitManifest(manifest_temp, manifest_path)) {
+        if (control) control->BeforeManifest();
+        if (stopped()) return result;
+        if (!CommitManifest(manifest_temp, manifest_path, control)) {
             result.reason = "manifest_commit_failed";
             return result;
         }
+        result.manifest_replaced = true;
+        if (control) control->AfterManifest();
+        if (stopped()) return result;
         for (const auto& name : obsolete_segments) {
+            if (stopped()) return result;
             error.clear();
             std::filesystem::remove(directory / name, error);
         }
+        if (stopped()) return result;
         result.status = InspectTelemetryCheckpoint(directory);
         result.success = result.status.valid;
         result.reason = result.success ? "checkpoint_committed" : result.status.reason;

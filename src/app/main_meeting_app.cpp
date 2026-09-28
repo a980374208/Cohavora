@@ -203,6 +203,7 @@ int main(int argc, char *argv[]) {
 		std::all_of(pilotRun.begin(), pilotRun.end(), [](QChar c) {
 			return (c >= QLatin1Char('0') && c <= QLatin1Char('9')) ||
 				(c >= QLatin1Char('a') && c <= QLatin1Char('f')); })) {
+		livekit::telemetry::SetFineRenderStatisticsEnabled(true);
 		pilotProbe = std::make_unique<MeetingApp::PilotDiagnosticsProbe>(
 			std::filesystem::path(pilotPath.toStdWString()), pilotRun.toStdString(),
 			telemetryHistory, diagnostics, std::filesystem::path(telemetryRoot.toStdWString()),
@@ -287,7 +288,11 @@ int main(int argc, char *argv[]) {
 					[history = std::move(telemetryHistory), run = std::move(processRun),
 					 diagnostics]() mutable {
 						// All final session snapshots have entered the history queue.
-						history->Close();
+						const auto historyClose = history->Close();
+                        if (historyClose.state != livekit::telemetry::TelemetryCloseState::Completed) {
+                            diagnostics->TryEmit(livekit::diagnostic::Event::Issue(
+                                livekit::diagnostic::IssueCode::NativeCleanupFailed));
+                        }
 						livekit::telemetry::InstallTelemetryHistoryStore({});
 						history.reset();
 						run.reset();

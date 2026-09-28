@@ -10,6 +10,7 @@
 #include <QtWidgets/QComboBox>
 #include <QtCore/QDateTime>
 #include <QtCore/QTimer>
+#include <QtCore/QElapsedTimer>
 #include "src/telemetry/diagnostic_event.h"
 #include "src/telemetry/diagnostic_file_sink.h"
 #include <deque>
@@ -57,7 +58,9 @@ protected:
 	void closeEvent(QCloseEvent *e) override;
 
 private:
+	friend struct MeetingLogConsoleTestAccess;
 	struct LogEntry {
+		quint64 id = 0;
 		QString timeStr;
 		LogCategory category;
 		QString tag;
@@ -95,7 +98,9 @@ private:
 
 	void initUi();
 	static void offer(const std::shared_ptr<SharedQueue> &queue, PendingEntry entry);
-	bool appendVisible(PendingEntry entry);
+	void appendVisible(PendingEntry entry);
+	void renderVisible(QElapsedTimer &elapsed);
+	void trimVisible();
 	QString formatLogHtml(const QString &timeStr, LogCategory category, const QString &tag, const QString &message, QString *outCatName = nullptr);
 	void rebuildLogView();
 	bool matchesFilter(const LogEntry &entry) const;
@@ -120,6 +125,9 @@ private:
 	std::chrono::steady_clock::time_point _storageMessageUntil{};
 
 	std::deque<LogEntry> _logEntries;
+	std::deque<quint64> _visibleIds;
+	quint64 _nextEntryId = 1;
+	quint64 _nextVisibleId = 1;
 	size_t _cacheBytes = 0;
 	size_t _visibleCount = 0;
 	QString _currentFilter;

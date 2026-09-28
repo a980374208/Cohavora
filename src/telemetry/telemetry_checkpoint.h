@@ -37,8 +37,22 @@ struct TelemetryCheckpointStatus {
     std::uint64_t orphan_bytes = 0;
 };
 
+// Operation-owned cancellation. A successful manifest replacement is the
+// commit boundary; abandoning afterward never deletes or rolls back it.
+struct TelemetryCheckpointControl {
+    std::atomic<bool> abandoned{false};
+    bool Stopped() const noexcept { return abandoned.load(std::memory_order_acquire); }
+    void BeforeManifest() const { if (before_manifest_) before_manifest_(); }
+    void AfterManifest() const { if (after_manifest_) after_manifest_(); }
+private:
+    friend struct TelemetryHistoryStoreTestAccess;
+    std::function<void()> before_manifest_;
+    std::function<void()> after_manifest_;
+};
+
 struct TelemetryCheckpointResult {
     bool success = false;
+    bool manifest_replaced = false;
     std::string reason;
     std::filesystem::path report_directory;
     TelemetryCheckpointStatus status;
@@ -89,7 +103,8 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
     const std::vector<TelemetryCheckpointRecord>& records,
     std::uint64_t maximum_report_bytes = 64ull * 1024ull * 1024ull,
     std::string_view process_run_id = {},
-    std::uint64_t maximum_history_bytes = 100ull * 1024ull * 1024ull);
+    std::uint64_t maximum_history_bytes = 100ull * 1024ull * 1024ull,
+    const TelemetryCheckpointControl* control = nullptr);
 TelemetryCheckpointResult AppendTelemetryCheckpoint(
     const std::filesystem::path& root,
     const std::vector<SafeTelemetryRecordPtr>& records,

@@ -1472,6 +1472,7 @@ void ReconnectWaitsForAudioAndVisibleRender() {
     context.run();
 
     TEST_CHECK(snapshot);
+    TEST_CHECK(snapshot->render_fine_interval_histogram.empty());
     const auto *summary = FindOperation(*snapshot, OperationKind::ReconnectEpisode);
     TEST_CHECK(summary && summary->success == 1 && summary->inflight == 0);
     TEST_CHECK(snapshot->reconnect_video_availability == Availability::NotExpected);
@@ -1566,7 +1567,8 @@ void RenderSubmitDedupesAndExcludesHiddenIntervals() {
             });
     });
     const auto base = Event::Clock::now();
-    auto probe = std::make_shared<livekit::telemetry::RenderActivityProbe>();
+    TEST_CHECK(!livekit::telemetry::RenderActivityProbe().fine_interval_histogram);
+    auto probe = std::make_shared<livekit::telemetry::RenderActivityProbe>(true);
     TEST_CHECK(telemetry->RegisterRemoteVideoRenderBinding(
         "remote_render/p/t", 7, 1, base, true, true, 33ms, probe, base));
     TEST_CHECK(telemetry->RecordRemoteVideoRenderSubmit(

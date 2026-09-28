@@ -46,6 +46,8 @@ public:
     std::chrono::milliseconds DiagnosticWindowRemaining() const noexcept;
     bool StartWriter(std::filesystem::path root);
     DrainResult Close(ShutdownReason reason = ShutdownReason::UserExit) noexcept;
+    // In-flight callbacks can outlive Close. Capture owned state or weak owners,
+    // never borrowed Pipeline/UI pointers. Clearing prevents future acquisition.
     void SetMirror(Mirror mirror);
     void SetRetentionEnabled(bool enabled) noexcept;
     // Explicit, time-bounded external benchmark only. Never persisted as a
@@ -56,48 +58,16 @@ public:
     void CountSuppressed() noexcept;
     void RetryNow() noexcept;
     Status GetStatus() const noexcept;
-    std::string_view run_id() const noexcept { return {run_id_.data(), 32}; }
+    std::string_view run_id() const noexcept;
 
 private:
-    struct PendingEvent final {
-        Event event;
-        bool persist = true;
-    };
-    void Run(std::filesystem::path root) noexcept;
-    bool Pop(PendingEvent& event) noexcept;
-    Event Stamp(Event event) noexcept;
-
-    static constexpr std::size_t kOrdinaryCapacity = kOrdinaryEvents;
-    static constexpr std::size_t kCriticalCapacity = kCriticalEvents;
-    std::unique_ptr<PendingEvent[]> ordinary_;
-    std::unique_ptr<PendingEvent[]> critical_;
-    std::size_t ordinary_head_ = 0;
-    std::size_t ordinary_tail_ = 0;
-    std::size_t ordinary_count_ = 0;
-    std::size_t critical_head_ = 0;
-    std::size_t critical_tail_ = 0;
-    std::size_t critical_count_ = 0;
-    mutable std::mutex mutex_;
-    std::condition_variable wake_;
-    std::condition_variable writer_done_;
+    friend struct DiagnosticPipelineTestAccess;
+    struct WriterContext;
+    // Stable until destruction: concurrent API calls never race with a reset.
+    // Detached workers retain their own reference after Pipeline destruction.
+    const std::shared_ptr<WriterContext> context_;
     std::thread writer_;
     std::mutex close_mutex_;
-    Mirror mirror_;
-    Status status_;
-    bool stopping_ = false;
-    bool started_ = false;
-    bool writer_finished_ = false;
-    bool retry_requested_ = false;
-    std::atomic<bool> abort_{false};
-    bool retention_enabled_ = true;
-    DrainResult drain_result_ = DrainResult::Unknown;
-    std::array<char, 33> run_id_{};
-    std::chrono::steady_clock::time_point started_at_;
-    std::atomic<std::uint64_t> next_sequence_{0};
-    std::atomic<std::int64_t> diagnostic_deadline_ticks_{0};
-    std::atomic<std::uint64_t> diagnostic_window_bytes_{0};
-    std::atomic<std::int64_t> benchmark_pause_until_{0};
-    std::atomic<std::uint64_t> benchmark_suppressed_{0};
 };
 
 void InstallBusinessPipeline(const std::shared_ptr<DiagnosticPipeline>& pipeline) noexcept;

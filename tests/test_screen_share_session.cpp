@@ -1,5 +1,6 @@
 #include "tests/support/test_check.h"
 #include "screen_share_session.h"
+#include "src/media/desktop_frame_buffer_pool.h"
 #include "room.h"
 #include "rtc_video_source.h"
 #include "stats_collector.h"
@@ -657,7 +658,33 @@ void DynacastPublicationIsolation() {
 }
 }
 
+void FrameBufferReuseAndPinnedReaders() {
+    livekit::DesktopFrameBufferPool pool;
+    const webrtc::DesktopSize size(16, 16);
+    auto* first = pool.Acquire(size);
+    TEST_CHECK(first);
+    first->data()[0] = 71;
+    auto reader = first->Share();
+    auto* second = pool.Acquire(size);
+    TEST_CHECK(second && second->data() != reader->data());
+    auto secondReader = second->Share();
+    TEST_CHECK(!pool.Acquire(size));
+    const auto address = reader->data();
+    reader.reset();
+    auto* reused = pool.Acquire(size);
+    TEST_CHECK(reused && reused->data() == address && reused->data()[0] == 71);
+    auto retained = reused->Share();
+    secondReader.reset();
+    auto* resized = pool.Acquire(webrtc::DesktopSize(32, 24));
+    TEST_CHECK(resized && resized->size().equals(webrtc::DesktopSize(32, 24)));
+    TEST_CHECK(retained->size().equals(size) && retained->data()[0] == 71);
+    pool.Clear();
+    TEST_CHECK(retained->data()[0] == 71);
+    TEST_CHECK(pool.Acquire(size));
+}
+
 int main() {
+    FrameBufferReuseAndPinnedReaders();
     FrameTimestampAlignment();
     NormalAndRepeat();
     ObjectReleaseCycles();
