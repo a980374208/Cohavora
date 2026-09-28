@@ -7,6 +7,10 @@
 #include "local_video_track.h"
 
 #include <algorithm>
+#include <filesystem>
+#include <future>
+#include <fstream>
+#include "src/telemetry/sdp_negotiation_trace.h"
 #include <chrono>
 #include <iostream>
 #include <memory>
@@ -17,6 +21,20 @@
 using namespace std::chrono_literals;
 
 namespace livekit {
+
+// Reuse the existing transport test friendship to install a real loopback
+// socket and hold the write queue; no production send implementation is faked.
+class RoomConnectAttemptTestAccess final {
+public:
+    static void Install(WebSocketClient& client, std::unique_ptr<asio::ip::tcp::socket> socket) {
+        client.stream_ = std::move(socket);
+        client.connected_ = true;
+        client.writing_ = true;
+    }
+    static asio::awaitable<void> Flush(const std::shared_ptr<WebSocketClient>& client) {
+        co_await asio::co_spawn(client->strand_, client->WriteLoop(), asio::use_awaitable);
+    }
+};
 
 // Arrange the installed transport boundary and inspect negotiation ownership;
 // all requirements run through the production signaling dispatcher and handler.
@@ -701,10 +719,185 @@ void BackupSenderBundleRollsBackAsOneTransaction() {
     }
 }
 
+void SdpTraceFollowsRealPeerConnectionStates() {
+    using namespace livekit::diagnostic;
+    const auto root = std::filesystem::temp_directory_path() /
+        ("cohavora-sdp-test-" + std::string(NewCorrelationId().View()));
+    std::vector<Event> events;
+    auto pipeline = std::make_shared<DiagnosticPipeline>();
+    pipeline->SetMirror([&](const Event& event) {
+        if (event.kind == EventKind::RtcSdpStep || event.kind == EventKind::RtcSdpFailed)
+            events.push_back(event);
+    });
+    TEST_CHECK(pipeline->StartWriter(root));
+    InstallBusinessPipeline(pipeline);
+    {
+        Fixture f, remote;
+        auto& rtc = livekit::WebRTCManager::Instance();
+        rtc.signaling_thread()->BlockingCall([&] {
+            TEST_CHECK(f.publisher->AddTransceiver(webrtc::MediaType::AUDIO).ok());
+        });
+        Context context;
+        context.operation_id.Assign("sdp_exchange");
+        auto trace = std::make_shared<SdpNegotiationTrace>(context, SdpRole::Publisher);
+        context.operation_id.Assign("sdp_remote");
+        auto other = std::make_shared<SdpNegotiationTrace>(context, SdpRole::Subscriber);
+        bool done = false;
+        std::string offer, answer, failure;
+        auto wait = [&] {
+            rtc.signaling_thread()->BlockingCall([] {});
+            const auto deadline = std::chrono::steady_clock::now() + 3s;
+            while (!done && std::chrono::steady_clock::now() < deadline) {
+                f.io.restart();
+                f.io.run_one_for(10ms);
+            }
+            TEST_CHECK(done);
+            done = false;
+        };
+        auto set = [&](const std::string& error) { failure = error; done = true; };
+        rtc.CreateOffer(f.publisher, f.io.get_executor(), [&](const auto& sdp, const auto& error) {
+            offer = sdp; failure = error; done = true;
+        }, false, {}, trace);
+        wait(); TEST_CHECK(failure.empty() && !offer.empty());
+        rtc.SetLocalDescription(f.publisher, "offer", offer, f.io.get_executor(), set, {}, trace);
+        wait(); TEST_CHECK(failure.empty());
+        rtc.SetRemoteDescription(remote.publisher, "offer", offer, f.io.get_executor(), set, {}, other);
+        wait(); TEST_CHECK(failure.empty());
+        rtc.CreateAnswer(remote.publisher, f.io.get_executor(), [&](const auto& sdp, const auto& error) {
+            answer = sdp; failure = error; done = true;
+        }, {}, other);
+        wait(); TEST_CHECK(failure.empty() && !answer.empty());
+        rtc.SetLocalDescription(remote.publisher, "answer", answer, f.io.get_executor(), set, {}, other);
+        wait(); TEST_CHECK(failure.empty());
+        rtc.SetRemoteDescription(f.publisher, "answer", answer, f.io.get_executor(), set, {}, trace);
+        wait(); TEST_CHECK(failure.empty());
+        trace->Finish(Outcome::Success);
+        other->Finish(Outcome::Success);
+        // Valid Answer in stable state fails in RTC, not in parsing. These
+        // untraced calls prove the original local/remote failure labels too.
+        rtc.SetLocalDescription(f.publisher, "answer", answer, f.io.get_executor(), set);
+        wait(); TEST_CHECK(!failure.empty());
+        rtc.SetRemoteDescription(f.publisher, "answer", answer, f.io.get_executor(), set);
+        wait(); TEST_CHECK(!failure.empty());
+        context.operation_id.Assign("sdp_parse");
+        auto bad = std::make_shared<SdpNegotiationTrace>(context, SdpRole::Publisher);
+        rtc.SetRemoteDescription(f.publisher, "offer", "SDP_SECRET_CANARY", f.io.get_executor(), set, {}, bad);
+        wait(); TEST_CHECK(!failure.empty());
+        context.operation_id.Assign("sdp_send");
+        auto send = std::make_shared<SdpNegotiationTrace>(context, SdpRole::Subscriber);
+        auto signal = std::make_shared<livekit::SignalClient>("wss://unused.test", "secret-token",
+            livekit::SignalOptions{}, false, std::make_shared<livekit::proto::JoinResponse>(),
+            livekit::SignalEventHandler{}, f.io.get_executor());
+        livekit::proto::SignalRequest request;
+        request.mutable_answer()->set_sdp("SDP_SECRET_CANARY");
+        signal->Send(request, send); // No transport: must record failure, never completion.
+        Fixture failing;
+        failing.Requirement(1, 0);
+        const auto deadline = std::chrono::steady_clock::now() + 3s;
+        while (!Access::Idle(*failing.room) && std::chrono::steady_clock::now() < deadline) {
+            failing.io.restart();
+            failing.io.run_one_for(10ms);
+        }
+        TEST_CHECK(Access::Idle(*failing.room));
+        TEST_CHECK(!failing.LocalOffer().empty());
+    }
+    for (const bool fail_write : {false, true}) {
+        asio::io_context io;
+        asio::ssl::context tls(asio::ssl::context::tls_client);
+        asio::ip::tcp::acceptor listener(io, {asio::ip::address_v4::loopback(), 0});
+        auto socket = std::make_unique<asio::ip::tcp::socket>(io);
+        socket->connect(listener.local_endpoint());
+        auto peer = listener.accept();
+        if (fail_write) socket->close();
+        auto ws = std::make_shared<livekit::WebSocketClient>(io, tls);
+        livekit::RoomConnectAttemptTestAccess::Install(*ws, std::move(socket));
+        Context context;
+        context.operation_id.Assign(fail_write ? "sdp_write_fail" : "sdp_write_ok");
+        auto round = std::make_shared<SdpNegotiationTrace>(context, SdpRole::Subscriber);
+        auto receipt = std::make_shared<SdpSendTrace>(round, true);
+        auto queued = asio::co_spawn(io, ws->SendBinary({1, 2, 3}, receipt), asio::use_future);
+        io.run();
+        queued.get();
+        round->Record(SdpAction::Callback, SdpPhase::Completed); // Queue-return marker.
+        auto written = asio::co_spawn(io, livekit::RoomConnectAttemptTestAccess::Flush(ws), asio::use_future);
+        io.restart();
+        io.run();
+        written.get();
+        ws->Abort();
+        io.restart();
+        io.run();
+    }
+    InstallBusinessPipeline({});
+    TEST_CHECK(pipeline->Close() == DrainResult::Completed);
+    bool local = false, remote = false, stable = false, parse = false, send_failed = false;
+    bool local_label = false, remote_label = false;
+    bool write_ok = false, write_fail = false;
+    std::uint64_t queued_ok = 0, queued_fail = 0;
+    for (const auto& event : events) {
+        TEST_CHECK(event.sdp_reason != SdpReason::Timeout);
+        if (event.kind == EventKind::RtcSdpFailed) {
+            local_label |= event.stage == Stage::SetLocalDescription;
+            remote_label |= event.stage == Stage::SetRemoteDescription;
+            continue;
+        }
+        if (event.sdp_phase == SdpPhase::Completed && event.sdp_action == SdpAction::SetLocal &&
+            event.sdp_description == SdpDescription::Offer && event.context.operation_id.View() == "sdp_exchange") {
+            local = true;
+            TEST_CHECK(event.signaling_before == SdpState::Stable);
+            TEST_CHECK(event.signaling_after == SdpState::HaveLocalOffer);
+            TEST_CHECK(event.context.operation_id.View() == "sdp_exchange");
+        }
+        if (event.sdp_phase == SdpPhase::Completed && event.sdp_action == SdpAction::SetRemote &&
+            event.sdp_description == SdpDescription::Offer) {
+            remote = true;
+            TEST_CHECK(event.signaling_after == SdpState::HaveRemoteOffer);
+        }
+        if (event.sdp_phase == SdpPhase::Completed && event.sdp_action == SdpAction::SetRemote &&
+            event.sdp_description == SdpDescription::Answer) {
+            stable = true;
+            TEST_CHECK(event.signaling_before == SdpState::HaveLocalOffer);
+            TEST_CHECK(event.signaling_after == SdpState::Stable);
+        }
+        if (event.context.operation_id.View() == "sdp_write_ok") {
+            if (event.sdp_action == SdpAction::Callback) queued_ok = event.sdp_sequence;
+            if (event.sdp_action == SdpAction::SendAnswer && event.sdp_phase == SdpPhase::Completed) {
+                write_ok = true;
+                TEST_CHECK(queued_ok > 0 && event.sdp_sequence > queued_ok);
+            }
+        }
+        if (event.context.operation_id.View() == "sdp_write_fail") {
+            if (event.sdp_action == SdpAction::Callback) queued_fail = event.sdp_sequence;
+            if (event.sdp_action == SdpAction::SendAnswer) {
+                TEST_CHECK(event.sdp_phase != SdpPhase::Completed);
+                if (event.sdp_phase == SdpPhase::Failed) {
+                    write_fail = true;
+                    TEST_CHECK(queued_fail > 0 && event.sdp_sequence > queued_fail);
+                }
+            }
+        }
+        parse |= event.sdp_reason == SdpReason::ParseError;
+        if (event.context.operation_id.View() == "sdp_send") {
+            TEST_CHECK(event.sdp_phase != SdpPhase::Completed);
+            send_failed |= event.sdp_reason == SdpReason::SendError;
+        }
+    }
+    TEST_CHECK(local && remote && stable && parse && send_failed && local_label && remote_label);
+    TEST_CHECK(write_ok && write_fail);
+    for (const auto& file : std::filesystem::recursive_directory_iterator(root)) {
+        if (file.path().extension() != ".jsonl") continue;
+        std::ifstream input(file.path(), std::ios::binary);
+        const std::string text((std::istreambuf_iterator<char>(input)), {});
+        TEST_CHECK(text.find("SDP_SECRET_CANARY") == std::string::npos);
+        TEST_CHECK(text.find("secret-token") == std::string::npos);
+    }
+    std::filesystem::remove_all(root);
+}
+
 } // namespace
 
 int main() {
     TEST_CHECK(livekit::WebRTCManager::Instance().Initialize());
+    SdpTraceFollowsRealPeerConnectionStates();
     AutoSubscribeFalseDoesNotGateEmptyVideoDemandOffer();
     ZeroSectionsCreatesOfferForExistingTransceiver();
     ZeroSectionsWhileOfferInFlightQueuesRetry();
@@ -718,6 +911,6 @@ int main() {
     AudioPublishPolicyClosesSignalAndSenderLoop();
     BackupSenderBundleRollsBackAsOneTransaction();
     livekit::WebRTCManager::Instance().Deinitialize();
-    std::cout << "Single-PC media-section negotiation and publication: 12 cases PASS\n";
+    std::cout << "Single-PC media-section negotiation and publication: 13 cases PASS\n";
     return 0;
 }

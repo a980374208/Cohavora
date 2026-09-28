@@ -254,9 +254,21 @@ int main(int argc, char **argv) {
     TEST_CHECK(ledger_failure && login_failure && signal_saved);
 
     auto &console = MeetingUI::MeetingLogConsoleWindow::Instance();
+    livekit::diagnostic::Event sdp;
+    sdp.kind = livekit::diagnostic::EventKind::RtcSdpStep;
+    sdp.context.operation_id.Assign("sdp_console");
+    sdp.sdp_sequence = 3;
+    sdp.sdp_action = livekit::diagnostic::SdpAction::SetRemote;
+    sdp.sdp_phase = livekit::diagnostic::SdpPhase::Completed;
+    sdp.signaling_before = livekit::diagnostic::SdpState::HaveLocalOffer;
+    sdp.signaling_after = livekit::diagnostic::SdpState::Stable;
+    MeetingUI::MeetingLogConsoleWindow::diagnosticMirror()(sdp);
     console.drainPending();
     auto *view = console.findChild<QPlainTextEdit*>();
     TEST_CHECK(view);
+    TEST_CHECK(view->toPlainText().contains(QStringLiteral("set_remote completed")));
+    TEST_CHECK(view->toPlainText().contains(QStringLiteral("have_local_offer->stable")));
+    TEST_CHECK(view->toPlainText().contains(QStringLiteral("sdp_console")));
     TEST_CHECK(!view->toPlainText().contains(QStringLiteral("private unknown Qt canary 5934")));
     TEST_CHECK(!view->toPlainText().contains(QStringLiteral("signal.message.summary")));
     MeetingUI::MeetingLogConsoleTestAccess::CheckNoiseFiltering(console);

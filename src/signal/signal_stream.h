@@ -10,6 +10,7 @@
 #include "websocket_client.h"
 
 namespace livekit {
+namespace diagnostic { class SdpSendTrace; }
 namespace proto {
 class SignalRequest;
 class SignalResponse;
@@ -38,7 +39,8 @@ public:
     SignalStream(std::shared_ptr<WebSocketClient> ws_client);
     ~SignalStream();
 
-    asio::awaitable<void> Send(const livekit::proto::SignalRequest& req);
+    asio::awaitable<void> Send(const livekit::proto::SignalRequest& req,
+        std::shared_ptr<diagnostic::SdpSendTrace> trace = {});
     asio::awaitable<void> Close(bool notify_close);
     void Abort();
 

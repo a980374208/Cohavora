@@ -66,7 +66,31 @@ enum class EventKind : std::uint8_t {
     CallbackRejectedSummary,
     DiagnosticsModeChanged,
     RetentionChanged,
+    RtcSdpStep,
 };
+
+// Closed SDP metadata only: no SDP text, addresses, credentials or exception text.
+enum class SdpAction : std::uint8_t {
+    Round, CreateOffer, CreateAnswer, SetLocal, SetRemote,
+    SendOffer, SendAnswer, ReceiveOffer, ReceiveAnswer, Callback
+};
+enum class SdpDescription : std::uint8_t { Unknown, Offer, Answer };
+std::string_view SdpDescriptionName(SdpDescription value) noexcept;
+enum class SdpPhase : std::uint8_t { Started, Completed, Failed, Cancelled, Rejected };
+enum class SdpRole : std::uint8_t { Publisher, Subscriber };
+enum class SdpState : std::uint8_t {
+    Unknown, Stable, HaveLocalOffer, HaveLocalPranswer,
+    HaveRemoteOffer, HaveRemotePranswer, Closed
+};
+enum class SdpReason : std::uint8_t {
+    None, RtcError, ParseError, SendError, GenerationExpired,
+    Superseded, Timeout, Stopped, UnexpectedMessage
+};
+std::string_view SdpActionName(SdpAction value) noexcept;
+std::string_view SdpPhaseName(SdpPhase value) noexcept;
+std::string_view SdpRoleName(SdpRole value) noexcept;
+std::string_view SdpStateName(SdpState value) noexcept;
+std::string_view SdpReasonName(SdpReason value) noexcept;
 
 enum class Severity : std::uint8_t { Trace, Debug, Info, Warning, Error, Fatal };
 enum class ThreadRole : std::uint8_t { Unknown, Ui, Session, Rtc, Media, Writer };
@@ -165,6 +189,16 @@ struct Context final {
 struct Event final {
     EventKind kind = EventKind::ProcessStarted;
     ThreadRole thread_role = ThreadRole::Unknown;
+    SdpDescription sdp_description = SdpDescription::Unknown;
+    SdpAction sdp_action = SdpAction::Round;
+    SdpPhase sdp_phase = SdpPhase::Started;
+    SdpRole sdp_role = SdpRole::Publisher;
+    SdpState signaling_before = SdpState::Unknown;
+    SdpState signaling_after = SdpState::Unknown;
+    SdpReason sdp_reason = SdpReason::None;
+    std::uint64_t sdp_sequence = 0;
+    bool sdp_after_terminal = false;
+    bool sdp_ice_restart = false;
     Context context;
     OpaqueId media_endpoint_id;
     OpaqueId previous_media_endpoint_id;

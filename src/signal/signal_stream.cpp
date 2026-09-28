@@ -40,10 +40,11 @@ asio::awaitable<SignalStream::ConnectResult> SignalStream::Connect(
     co_return ConnectResult{stream, {}};
 }
 
-asio::awaitable<void> SignalStream::Send(const livekit::proto::SignalRequest& req) {
+asio::awaitable<void> SignalStream::Send(const livekit::proto::SignalRequest& req,
+    std::shared_ptr<diagnostic::SdpSendTrace> trace) {
     std::vector<uint8_t> payload(req.ByteSizeLong());
     req.SerializeToArray(payload.data(), static_cast<int>(payload.size()));
-    co_await ws_client_->SendBinary(std::move(payload));
+    co_await ws_client_->SendBinary(std::move(payload), std::move(trace));
 }
 
 asio::awaitable<void> SignalStream::Close(bool notify_close) {

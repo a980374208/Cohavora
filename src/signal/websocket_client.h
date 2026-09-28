@@ -17,6 +17,7 @@
 #include <atomic>
 
 namespace livekit {
+namespace diagnostic { class SdpSendTrace; }
 
 // WebSocket upgrade failures must retain the HTTP status.  In particular, the
 // signaling layer may fall back from /rtc/v1 to /rtc only for a genuine 404;
@@ -48,7 +49,8 @@ public:
     void StartRead();
 
     // Send messages
-    asio::awaitable<void> SendBinary(std::vector<uint8_t> data);
+    asio::awaitable<void> SendBinary(std::vector<uint8_t> data,
+        std::shared_ptr<diagnostic::SdpSendTrace> trace = {});
     asio::awaitable<void> SendText(std::string text);
 
     // Close WebSocket
@@ -71,6 +73,7 @@ private:
     // shutdown boundary without substituting transport operations.
     std::function<void(bool)> before_shutdown_for_testing_;
     struct QueuedMessage {
+        std::shared_ptr<diagnostic::SdpSendTrace> trace;
         std::vector<uint8_t> data;
     };
 
@@ -85,7 +88,8 @@ private:
     asio::awaitable<void> CloseOnOwner(uint16_t code, std::string reason);
     void AbortOnOwner();
 
-    asio::awaitable<void> SendRawFrame(uint8_t opcode, const std::vector<uint8_t>& payload);
+    asio::awaitable<void> SendRawFrame(uint8_t opcode, const std::vector<uint8_t>& payload,
+        std::shared_ptr<diagnostic::SdpSendTrace> trace = {});
     asio::awaitable<void> WriteLoop();
     std::shared_ptr<QueuedMessage> PopWriteQueue();
     void ResetWritingState();

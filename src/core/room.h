@@ -31,6 +31,7 @@
 #include "data_stream.h"
 #include "operation.h"
 #include "telemetry/diagnostic_event.h"
+#include "telemetry/sdp_negotiation_trace.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include "api/peer_connection_interface.h"
@@ -794,6 +795,11 @@ private:
         PendingRetry
     };
     NegotiationState negotiation_state_ = NegotiationState::Idle;
+    std::shared_ptr<diagnostic::SdpNegotiationTrace> publisher_sdp_trace_;
+    std::shared_ptr<diagnostic::SdpNegotiationTrace> subscriber_sdp_trace_;
+    std::shared_ptr<diagnostic::SdpNegotiationTrace> SdpTraceLocked(
+        diagnostic::SdpRole role, uint64_t generation, bool new_round = false,
+        bool ice_restart = false);
     // The negotiation round is shared, while each caller owns its own timeout.
     std::vector<std::shared_ptr<AwaitableState<void>>> negotiation_waiters_;
     bool negotiation_ice_restart_requested_ = false;

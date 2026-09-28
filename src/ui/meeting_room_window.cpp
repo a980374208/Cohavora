@@ -1691,6 +1691,7 @@ RoomTopBarWidget::RoomTopBarWidget(QWidget *parent)
 	setMinimumHeight(44);
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
+#if COHAVORA_SHOW_CONSOLE_BUTTON
 	_uiaConsole = new QPushButton(this);
 	_uiaConsole->setObjectName(QStringLiteral("meetingConsole"));
 	_uiaConsole->setAccessibleName(QCoreApplication::translate("MeetingUI", "Console"));
@@ -1698,6 +1699,7 @@ RoomTopBarWidget::RoomTopBarWidget(QWidget *parent)
 	_uiaConsole->setAttribute(Qt::WA_TransparentForMouseEvents);
 	_uiaConsole->setStyleSheet(QStringLiteral("QPushButton { background: transparent; border: 0; }"));
 	connect(_uiaConsole, &QPushButton::clicked, this, [this] { _consoleStream.fire({}); });
+#endif
 	_uiaTelemetry = new QPushButton(this);
 	_uiaTelemetry->setObjectName(QStringLiteral("meetingTelemetry"));
 	_uiaTelemetry->setAccessibleName(QCoreApplication::translate("MeetingUI", "Meeting telemetry"));
@@ -1745,7 +1747,9 @@ void RoomTopBarWidget::setTelemetrySnapshot(const QVariantMap &snapshot) {
 int RoomTopBarWidget::heightForWidth(int width) const {
  const QFontMetrics metrics(QFont("Microsoft YaHei", 9));
  const int toolsWidth = metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "Picture-in-Picture"))
+#if COHAVORA_SHOW_CONSOLE_BUTTON
      + metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "Console 📋"))
+#endif
      + metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "🐛 Simulate")) + 80;
  const int idWidth = metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "🆔 Meeting ID: %1 📋").arg(_meetingId)) + 24;
  return width < toolsWidth + idWidth + 420 ? 88 : 44;
@@ -1767,14 +1771,18 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
  const QFontMetrics metrics(QFont("Microsoft YaHei", 9));
  const auto buttonWidth = [&](const QString &text) { return metrics.horizontalAdvance(text) + 24; };
  const int simulateW = buttonWidth(QCoreApplication::translate("MeetingUI", "🐛 Simulate"));
- const int consoleW = buttonWidth(QCoreApplication::translate("MeetingUI", "Console 📋"));
  const int layoutW = std::max(buttonWidth(QCoreApplication::translate("MeetingUI", "Grid View")),
      buttonWidth(QCoreApplication::translate("MeetingUI", "Picture-in-Picture"))) + 8;
  _simulateRect = QRect(rightX - simulateW, rowY, simulateW, 28);
  rightX -= simulateW + 4;
+#if COHAVORA_SHOW_CONSOLE_BUTTON
+ const int consoleW = buttonWidth(QCoreApplication::translate("MeetingUI", "Console 📋"));
  _consoleRect = QRect(rightX - consoleW, rowY, consoleW, 28);
 	_uiaConsole->setGeometry(_consoleRect);
  rightX -= consoleW + 4;
+#else
+ _consoleRect = QRect();
+#endif
  _layoutRect = QRect(rightX - layoutW, rowY, layoutW, 28);
  rightX -= layoutW + 4;
  const int leftInfoRight = QFontMetrics(QFont("Microsoft YaHei", 10)).horizontalAdvance(
@@ -1931,7 +1939,9 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 
 	QString layoutStr = (_currentViewMode == VideoViewMode::Grid) ? QCoreApplication::translate("MeetingUI", "Grid View") : QCoreApplication::translate("MeetingUI", "Picture-in-Picture");
 	drawTextBtn(_layoutRect, layoutStr, _hoverBtn == HoverBtn::Layout, true);
+#if COHAVORA_SHOW_CONSOLE_BUTTON
 	drawTextBtn(_consoleRect, QCoreApplication::translate("MeetingUI", "Console 📋"), _hoverBtn == HoverBtn::Console, false, QColor(0x16, 0x77, 0xff));
+#endif
 	drawTextBtn(_simulateRect, QCoreApplication::translate("MeetingUI", "🐛 Simulate"), _hoverBtn == HoverBtn::Simulate, false, QColor(0xe6, 0x7e, 0x22));
 
 	// 4. 窗口控制按钮

@@ -20,6 +20,7 @@
 
 // Forward declare generated protobuf messages
 namespace livekit {
+namespace diagnostic { class SdpNegotiationTrace; }
 namespace proto {
 class JoinResponse;
 class ReconnectResponse;
@@ -102,11 +103,13 @@ public:
     void SetEventReady();
 
     // Send a message
-    void Send(const proto::SignalRequest& req);
+    void Send(const proto::SignalRequest& req,
+              std::shared_ptr<diagnostic::SdpNegotiationTrace> trace = {});
 
     // Transactional send. Unlike Send(), this does not silently queue or drop
     // the request and only completes after the active stream accepted it.
-    asio::awaitable<void> SendAsync(const proto::SignalRequest& req);
+    asio::awaitable<void> SendAsync(const proto::SignalRequest& req,
+        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace = {});
 
     // Send update track settings request to server for Adaptive Stream
     void SendUpdateTrackSettings(const std::string& track_sid,

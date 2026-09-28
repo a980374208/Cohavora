@@ -1,4 +1,6 @@
 #include "src/telemetry/diagnostic_pipeline.h"
+#include "src/telemetry/sdp_negotiation_trace.h"
+#include <map>
 #include "src/telemetry/diagnostic_file_sink.h"
 #include "src/telemetry/diagnostic_spdlog_bridge.h"
 #include "src/telemetry/telemetry_operation_timeline.h"
@@ -706,6 +708,73 @@ void BenchmarkPauseIsBoundedAndDoesNotCreateSequenceGaps() {
 
 } // namespace
 
+void SdpRoundsPersistOrderedTypedEvidence() {
+    TemporaryDirectory directory;
+    auto pipeline = std::make_shared<DiagnosticPipeline>();
+    InstallBusinessPipeline(pipeline);
+    TEST_CHECK(pipeline->StartWriter(directory.path));
+    Context first;
+    first.operation_id.Assign("sdp_101");
+    first.parent_operation_id.Assign("join_1");
+    first.room_generation = 42;
+    first.has_room_generation = true;
+    Context second = first;
+    second.operation_id.Assign("sdp_102");
+    {
+        SdpNegotiationTrace a(first, SdpRole::Publisher, true);
+        SdpNegotiationTrace b(second, SdpRole::Subscriber);
+        a.Record(SdpAction::SetLocal, SdpPhase::Completed, SdpState::Stable,
+            SdpState::HaveLocalOffer, SdpReason::None, 0, ThreadRole::Rtc, SdpDescription::Offer);
+        a.Finish(Outcome::Cancelled, SdpReason::Superseded);
+        a.Record(SdpAction::ReceiveAnswer, SdpPhase::Completed);
+        a.Finish(Outcome::Success);
+        b.Record(SdpAction::SetRemote, SdpPhase::Failed, SdpState::Stable,
+            SdpState::Stable, SdpReason::ParseError, 0, ThreadRole::Rtc, SdpDescription::Offer);
+        b.Finish(Outcome::Failure, SdpReason::ParseError);
+    }
+    InstallBusinessPipeline({});
+    TEST_CHECK(pipeline->Close() == DrainResult::Completed);
+    std::map<std::string, std::uint64_t> sequences;
+    std::map<std::string, int> terminals;
+    bool late = false, applied = false, failed = false;
+    for (const auto& event : ReadEvents(directory.path)) {
+        if (event["event_name"] != "rtc.sdp.step") continue;
+        const auto id = event["operation_id"].get<std::string>();
+        const auto& attrs = event["attributes"];
+        TEST_CHECK(attrs["round_sequence"] == ++sequences[id]);
+        TEST_CHECK(event["room_generation"] == 42);
+        TEST_CHECK(event["parent_operation_id"] == "join_1");
+        if (attrs["action"] == "round" && attrs["phase"] != "started") ++terminals[id];
+        if (attrs["action"] == "set_local") {
+            applied = true;
+            TEST_CHECK(event["stage"] == "set_local_description");
+            TEST_CHECK(attrs["description_type"] == "offer");
+            TEST_CHECK(attrs["signaling_before"] == "stable");
+            TEST_CHECK(attrs["signaling_after"] == "have_local_offer");
+        }
+        if (attrs["action"] == "receive_answer") {
+            late = true;
+            TEST_CHECK(attrs["after_terminal"] == true);
+        }
+        if (attrs["action"] == "set_remote") {
+            failed = true;
+            TEST_CHECK(event["stage"] == "set_remote_description");
+            TEST_CHECK(event["error_layer"] == "parse");
+        }
+        TEST_CHECK(!attrs.contains("sdp"));
+    }
+    TEST_CHECK(applied && failed && late);
+    TEST_CHECK(terminals["sdp_101"] == 1 && terminals["sdp_102"] == 1);
+    Event invalid;
+    invalid.kind = EventKind::RtcSdpStep;
+    TEST_CHECK(!IsValidEvent(invalid));
+    invalid.context = first;
+    invalid.sdp_sequence = 1;
+    TEST_CHECK(IsValidEvent(invalid));
+    invalid.sdp_description = static_cast<SdpDescription>(255);
+    TEST_CHECK(!IsValidEvent(invalid));
+}
+
 int main(int argc, char** argv) {
     if (argc == 4 && std::string_view(argv[1]) == "--quota-child")
         return diagnostic_sink_checks::ChildMain(argv[2], argv[3]);
@@ -714,6 +783,7 @@ int main(int argc, char** argv) {
         diagnostic_detach_checks::BlockedMirror(directory.path / "mirror");
         diagnostic_detach_checks::BlockedFileOpen(directory.path / "file");
     }
+    SdpRoundsPersistOrderedTypedEvidence();
     BoundedConcurrentAdmission();
     WritesTypedJsonAndRecovers();
     BatchWritesPreserveOrderAndCommitBoundary();

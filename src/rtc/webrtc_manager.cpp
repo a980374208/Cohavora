@@ -2,6 +2,7 @@
 #include <asio.hpp>
 #include "webrtc_manager.h"
 #include "telemetry/diagnostic_pipeline.h"
+#include "telemetry/sdp_negotiation_trace.h"
 #include "core/executor_lifetime.h"
 #include "audio_playout_device_selection.h"
 #include "audio_playout_warmup.h"
@@ -721,21 +722,68 @@ void WebRTCManager::Deinitialize() {
 using CreateSdpCompletion = CancellableExecutorCallback<std::string, std::string>;
 using SetSdpCompletion = CancellableExecutorCallback<std::string>;
 
+// All state reads are on the WebRTC signaling thread, at the actual call/callback.
+diagnostic::SdpState SdpStateOf(webrtc::PeerConnectionInterface* pc) {
+    using P = webrtc::PeerConnectionInterface;
+    using S = diagnostic::SdpState;
+    switch (pc->signaling_state()) {
+    case P::kStable: return S::Stable;
+    case P::kHaveLocalOffer: return S::HaveLocalOffer;
+    case P::kHaveLocalPrAnswer: return S::HaveLocalPranswer;
+    case P::kHaveRemoteOffer: return S::HaveRemoteOffer;
+    case P::kHaveRemotePrAnswer: return S::HaveRemotePranswer;
+    case P::kClosed: return S::Closed;
+    }
+    return S::Unknown;
+}
+
+class RtcSdpOperation final {
+public:
+    RtcSdpOperation(webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
+                    std::shared_ptr<diagnostic::SdpNegotiationTrace> trace,
+                    diagnostic::SdpAction action,
+                    diagnostic::SdpDescription description = diagnostic::SdpDescription::Unknown)
+        : pc_(std::move(pc)), trace_(std::move(trace)), action_(action), description_(description), before_(SdpStateOf(pc_.get())) {
+        if (trace_) trace_->Record(action_, diagnostic::SdpPhase::Started,
+            before_, before_, diagnostic::SdpReason::None, 0, diagnostic::ThreadRole::Rtc, description_);
+    }
+    void Complete(diagnostic::SdpPhase phase, diagnostic::SdpReason reason = diagnostic::SdpReason::None,
+                  int error = 0) {
+        if (!trace_) return;
+        trace_->Record(action_, phase, before_, SdpStateOf(pc_.get()), reason, error,
+            diagnostic::ThreadRole::Rtc, description_);
+        if (phase == diagnostic::SdpPhase::Failed)
+            trace_->Finish(diagnostic::Outcome::Failure, reason);
+        if (phase == diagnostic::SdpPhase::Rejected)
+            trace_->Finish(diagnostic::Outcome::Cancelled, reason);
+    }
+    bool traced() const { return bool(trace_); }
+private:
+    const webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc_;
+    const std::shared_ptr<diagnostic::SdpNegotiationTrace> trace_;
+    const diagnostic::SdpAction action_;
+    const diagnostic::SdpDescription description_;
+    const diagnostic::SdpState before_;
+};
+
 class CreateSdpObserverProxy : public webrtc::CreateSessionDescriptionObserver {
 public:
     static webrtc::scoped_refptr<CreateSdpObserverProxy> Create(
         std::shared_ptr<CreateSdpCompletion> completion,
-        diagnostic::Stage stage) {
+        diagnostic::Stage stage, std::shared_ptr<RtcSdpOperation> operation) {
         return webrtc::make_ref_counted<CreateSdpObserverProxy>(
-            std::move(completion), stage);
+            std::move(completion), stage, std::move(operation));
     }
 
     CreateSdpObserverProxy(
         std::shared_ptr<CreateSdpCompletion> completion,
-        diagnostic::Stage stage)
-        : completion_(std::move(completion)), stage_(stage) {}
+        diagnostic::Stage stage, std::shared_ptr<RtcSdpOperation> operation)
+        : completion_(std::move(completion)), stage_(stage), operation_(std::move(operation)) {}
 
     void OnSuccess(webrtc::SessionDescriptionInterface* desc) override {
+        const bool pending = completion_->pending();
+        operation_->Complete(pending ? diagnostic::SdpPhase::Completed : diagnostic::SdpPhase::Rejected,
+            pending ? diagnostic::SdpReason::None : diagnostic::SdpReason::GenerationExpired);
         std::string sdp;
         desc->ToString(&sdp);
         delete desc;
@@ -743,13 +791,17 @@ public:
     }
 
     void OnFailure(webrtc::RTCError error) override {
+        const bool pending = completion_->pending();
+        operation_->Complete(pending ? diagnostic::SdpPhase::Failed : diagnostic::SdpPhase::Rejected,
+            pending ? diagnostic::SdpReason::RtcError : diagnostic::SdpReason::GenerationExpired,
+            static_cast<int>(error.type()));
         diagnostic::Event event;
         event.kind = diagnostic::EventKind::RtcSdpFailed;
         event.thread_role = diagnostic::ThreadRole::Rtc;
         event.stage = stage_;
         event.error_layer = diagnostic::ErrorLayer::Rtc;
         event.rtc_error_type = static_cast<int>(error.type());
-        diagnostic::EmitBusinessEvent(event);
+        if (!operation_->traced()) diagnostic::EmitBusinessEvent(event);
         std::string err_msg = error.message();
         completion_->Complete("", std::move(err_msg));
     }
@@ -757,34 +809,42 @@ public:
 private:
     std::shared_ptr<CreateSdpCompletion> completion_;
     diagnostic::Stage stage_;
+    std::shared_ptr<RtcSdpOperation> operation_;
 };
 
 class SetSdpObserverProxy : public webrtc::SetSessionDescriptionObserver {
 public:
     static webrtc::scoped_refptr<SetSdpObserverProxy> Create(
         std::shared_ptr<SetSdpCompletion> completion,
-        diagnostic::Stage stage) {
+        diagnostic::Stage stage, std::shared_ptr<RtcSdpOperation> operation) {
         return webrtc::make_ref_counted<SetSdpObserverProxy>(
-            std::move(completion), stage);
+            std::move(completion), stage, std::move(operation));
     }
 
     SetSdpObserverProxy(
         std::shared_ptr<SetSdpCompletion> completion,
-        diagnostic::Stage stage)
-        : completion_(std::move(completion)), stage_(stage) {}
+        diagnostic::Stage stage, std::shared_ptr<RtcSdpOperation> operation)
+        : completion_(std::move(completion)), stage_(stage), operation_(std::move(operation)) {}
 
     void OnSuccess() override {
+        const bool pending = completion_->pending();
+        operation_->Complete(pending ? diagnostic::SdpPhase::Completed : diagnostic::SdpPhase::Rejected,
+            pending ? diagnostic::SdpReason::None : diagnostic::SdpReason::GenerationExpired);
         completion_->Complete("");
     }
 
     void OnFailure(webrtc::RTCError error) override {
+        const bool pending = completion_->pending();
+        operation_->Complete(pending ? diagnostic::SdpPhase::Failed : diagnostic::SdpPhase::Rejected,
+            pending ? diagnostic::SdpReason::RtcError : diagnostic::SdpReason::GenerationExpired,
+            static_cast<int>(error.type()));
         diagnostic::Event event;
         event.kind = diagnostic::EventKind::RtcSdpFailed;
         event.thread_role = diagnostic::ThreadRole::Rtc;
         event.stage = stage_;
         event.error_layer = diagnostic::ErrorLayer::Rtc;
         event.rtc_error_type = static_cast<int>(error.type());
-        diagnostic::EmitBusinessEvent(event);
+        if (!operation_->traced()) diagnostic::EmitBusinessEvent(event);
         std::string err_msg = error.message();
         completion_->Complete(std::move(err_msg));
     }
@@ -792,6 +852,7 @@ public:
 private:
     std::shared_ptr<SetSdpCompletion> completion_;
     diagnostic::Stage stage_;
+    std::shared_ptr<RtcSdpOperation> operation_;
 };
 
 void WebRTCManager::CreateOffer(
@@ -799,7 +860,8 @@ void WebRTCManager::CreateOffer(
     asio::any_io_executor executor,
     std::function<void(const std::string& sdp, const std::string& error)> callback,
     bool ice_restart,
-    std::shared_ptr<ExecutorCallbackGate> callback_gate) {
+    std::shared_ptr<ExecutorCallbackGate> callback_gate,
+    std::shared_ptr<diagnostic::SdpNegotiationTrace> trace) {
     if (!callback_gate) callback_gate = std::make_shared<ExecutorCallbackGate>(executor);
     auto completion = CreateSdpCompletion::Create(
         std::move(callback_gate), std::move(callback), "", "operation cancelled");
@@ -807,14 +869,26 @@ void WebRTCManager::CreateOffer(
     struct TaskParams {
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
         std::shared_ptr<CreateSdpCompletion> completion;
+        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace;
         bool ice_restart;
     };
-    auto* p = new TaskParams{pc, std::move(completion), ice_restart};
+    auto* p = new TaskParams{pc, std::move(completion), std::move(trace), ice_restart};
+    // Keep the cross-library task capture pointer-only, as in the existing ABI boundary.
     signaling_thread_->PostTask([p]() {
         std::unique_ptr<TaskParams> owned(p);
-        if (!p->completion->pending()) return;
+        const auto& trace = p->trace;
+        if (!p->completion->pending()) {
+            if (trace) {
+                trace->Record(diagnostic::SdpAction::CreateOffer, diagnostic::SdpPhase::Rejected,
+                    diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown,
+                    diagnostic::SdpReason::GenerationExpired, 0, diagnostic::ThreadRole::Rtc);
+                trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
+            }
+            return;
+        }
+        auto operation = std::make_shared<RtcSdpOperation>(p->pc, trace, diagnostic::SdpAction::CreateOffer);
         auto observer = CreateSdpObserverProxy::Create(
-            p->completion, diagnostic::Stage::CreateOffer);
+            p->completion, diagnostic::Stage::CreateOffer, operation);
         webrtc::PeerConnectionInterface::RTCOfferAnswerOptions options;
         options.ice_restart = p->ice_restart;
         p->pc->CreateOffer(observer.get(), options);
@@ -825,7 +899,8 @@ void WebRTCManager::CreateAnswer(
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc,
     asio::any_io_executor executor,
     std::function<void(const std::string& sdp, const std::string& error)> callback,
-    std::shared_ptr<ExecutorCallbackGate> callback_gate) {
+    std::shared_ptr<ExecutorCallbackGate> callback_gate,
+    std::shared_ptr<diagnostic::SdpNegotiationTrace> trace) {
     if (!callback_gate) callback_gate = std::make_shared<ExecutorCallbackGate>(executor);
     auto completion = CreateSdpCompletion::Create(
         std::move(callback_gate), std::move(callback), "", "operation cancelled");
@@ -833,13 +908,25 @@ void WebRTCManager::CreateAnswer(
     struct TaskParams {
         webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
         std::shared_ptr<CreateSdpCompletion> completion;
+        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace;
     };
-    auto* p = new TaskParams{pc, std::move(completion)};
+    auto* p = new TaskParams{pc, std::move(completion), std::move(trace)};
+    // Keep the cross-library task capture pointer-only, as in the existing ABI boundary.
     signaling_thread_->PostTask([p]() {
         std::unique_ptr<TaskParams> owned(p);
-        if (!p->completion->pending()) return;
+        const auto& trace = p->trace;
+        if (!p->completion->pending()) {
+            if (trace) {
+                trace->Record(diagnostic::SdpAction::CreateAnswer, diagnostic::SdpPhase::Rejected,
+                    diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown,
+                    diagnostic::SdpReason::GenerationExpired, 0, diagnostic::ThreadRole::Rtc);
+                trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
+            }
+            return;
+        }
+        auto operation = std::make_shared<RtcSdpOperation>(p->pc, trace, diagnostic::SdpAction::CreateAnswer);
         auto observer = CreateSdpObserverProxy::Create(
-            p->completion, diagnostic::Stage::CreateAnswer);
+            p->completion, diagnostic::Stage::CreateAnswer, operation);
         webrtc::PeerConnectionInterface::RTCOfferAnswerOptions options;
         p->pc->CreateAnswer(observer.get(), options);
     });
@@ -851,7 +938,8 @@ void WebRTCManager::SetRemoteDescription(
     const std::string& sdp,
     asio::any_io_executor executor,
     std::function<void(const std::string& error)> callback,
-    std::shared_ptr<ExecutorCallbackGate> callback_gate) {
+    std::shared_ptr<ExecutorCallbackGate> callback_gate,
+    std::shared_ptr<diagnostic::SdpNegotiationTrace> trace) {
     if (!callback_gate) callback_gate = std::make_shared<ExecutorCallbackGate>(executor);
     auto completion = SetSdpCompletion::Create(
         std::move(callback_gate), std::move(callback), "operation cancelled");
@@ -861,24 +949,38 @@ void WebRTCManager::SetRemoteDescription(
         std::string type;
         std::string sdp;
         std::shared_ptr<SetSdpCompletion> completion;
+        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace;
     };
-    auto* p = new TaskParams{pc, type, sdp, std::move(completion)};
+    auto* p = new TaskParams{pc, type, sdp, std::move(completion), std::move(trace)};
+    // Keep the cross-library task capture pointer-only, as in the existing ABI boundary.
     signaling_thread_->PostTask([p]() {
         std::unique_ptr<TaskParams> owned(p);
-        if (!p->completion->pending()) return;
+        const auto& trace = p->trace;
+        if (!p->completion->pending()) {
+            if (trace) {
+                trace->Record(diagnostic::SdpAction::SetRemote, diagnostic::SdpPhase::Rejected,
+                    diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown,
+                    diagnostic::SdpReason::GenerationExpired, 0, diagnostic::ThreadRole::Rtc);
+                trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
+            }
+            return;
+        }
+        auto operation = std::make_shared<RtcSdpOperation>(p->pc, trace, diagnostic::SdpAction::SetRemote,
+            p->type == "answer" ? diagnostic::SdpDescription::Answer : diagnostic::SdpDescription::Offer);
         webrtc::SdpParseError err;
         webrtc::SdpType sdp_type = (p->type == "answer") ? webrtc::SdpType::kAnswer : webrtc::SdpType::kOffer;
         std::unique_ptr<webrtc::SessionDescriptionInterface> session_desc =
             webrtc::CreateSessionDescription(sdp_type, p->sdp, &err);
         
         if (!session_desc) {
+            operation->Complete(diagnostic::SdpPhase::Failed, diagnostic::SdpReason::ParseError);
             std::string err_msg = err.description;
             p->completion->Complete(std::move(err_msg));
             return;
         }
 
         auto observer = SetSdpObserverProxy::Create(
-            p->completion, diagnostic::Stage::SetLocalDescription);
+            p->completion, diagnostic::Stage::SetRemoteDescription, operation);
         p->pc->SetRemoteDescription(observer.get(), session_desc.release());
     });
 }
@@ -889,7 +991,8 @@ void WebRTCManager::SetLocalDescription(
     const std::string& sdp,
     asio::any_io_executor executor,
     std::function<void(const std::string& error)> callback,
-    std::shared_ptr<ExecutorCallbackGate> callback_gate) {
+    std::shared_ptr<ExecutorCallbackGate> callback_gate,
+    std::shared_ptr<diagnostic::SdpNegotiationTrace> trace) {
     if (!callback_gate) callback_gate = std::make_shared<ExecutorCallbackGate>(executor);
     auto completion = SetSdpCompletion::Create(
         std::move(callback_gate), std::move(callback), "operation cancelled");
@@ -899,24 +1002,38 @@ void WebRTCManager::SetLocalDescription(
         std::string type;
         std::string sdp;
         std::shared_ptr<SetSdpCompletion> completion;
+        std::shared_ptr<diagnostic::SdpNegotiationTrace> trace;
     };
-    auto* p = new TaskParams{pc, type, sdp, std::move(completion)};
+    auto* p = new TaskParams{pc, type, sdp, std::move(completion), std::move(trace)};
+    // Keep the cross-library task capture pointer-only, as in the existing ABI boundary.
     signaling_thread_->PostTask([p]() {
         std::unique_ptr<TaskParams> owned(p);
-        if (!p->completion->pending()) return;
+        const auto& trace = p->trace;
+        if (!p->completion->pending()) {
+            if (trace) {
+                trace->Record(diagnostic::SdpAction::SetLocal, diagnostic::SdpPhase::Rejected,
+                    diagnostic::SdpState::Unknown, diagnostic::SdpState::Unknown,
+                    diagnostic::SdpReason::GenerationExpired, 0, diagnostic::ThreadRole::Rtc);
+                trace->Finish(diagnostic::Outcome::Cancelled, diagnostic::SdpReason::GenerationExpired);
+            }
+            return;
+        }
+        auto operation = std::make_shared<RtcSdpOperation>(p->pc, trace, diagnostic::SdpAction::SetLocal,
+            p->type == "answer" ? diagnostic::SdpDescription::Answer : diagnostic::SdpDescription::Offer);
         webrtc::SdpParseError err;
         webrtc::SdpType sdp_type = (p->type == "answer") ? webrtc::SdpType::kAnswer : webrtc::SdpType::kOffer;
         std::unique_ptr<webrtc::SessionDescriptionInterface> session_desc =
             webrtc::CreateSessionDescription(sdp_type, p->sdp, &err);
         
         if (!session_desc) {
+            operation->Complete(diagnostic::SdpPhase::Failed, diagnostic::SdpReason::ParseError);
             std::string err_msg = err.description;
             p->completion->Complete(std::move(err_msg));
             return;
         }
 
         auto observer = SetSdpObserverProxy::Create(
-            p->completion, diagnostic::Stage::SetRemoteDescription);
+            p->completion, diagnostic::Stage::SetLocalDescription, operation);
         p->pc->SetLocalDescription(observer.get(), session_desc.release());
     });
 }

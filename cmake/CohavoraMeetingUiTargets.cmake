@@ -73,6 +73,8 @@ add_library(cohavora_meeting_window_ui OBJECT
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_room_window.h
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_room_window.cpp)
 cohavora_configure_meeting_ui_objects(cohavora_meeting_window_ui)
+target_compile_definitions(cohavora_meeting_window_ui PRIVATE
+    COHAVORA_SHOW_CONSOLE_BUTTON=$<IF:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>,1,0>)
 target_link_libraries(cohavora_meeting_window_ui PRIVATE
     cohavora_meeting_network
     cohavora_meeting_runtime
