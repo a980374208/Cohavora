@@ -26,6 +26,9 @@ public:
     static DiagnosticClearResult ClearInactiveHistory(
         const std::filesystem::path& root) noexcept;
 
+    // Windows v2 quota identity is directory FileId + volume, scoped to the
+    // Windows session. All concurrent writers must use this protocol; legacy
+    // path-hash writers must be stopped before upgrading a shared root.
     DiagnosticFileSink(std::filesystem::path root, std::string run_id,
                        const std::atomic<bool>* abandoned = nullptr);
     ~DiagnosticFileSink();
@@ -64,6 +67,7 @@ private:
     const std::atomic<bool>* abandoned_ = nullptr; // Outlives this worker-owned sink.
     bool OpenSegment() noexcept;
     bool CheckQuota(std::uint64_t incoming_bytes) noexcept;
+    bool BindQuotaIdentity() noexcept;
     bool LockQuota() noexcept;
     void UnlockQuota() noexcept;
     std::string Serialize(const Event& event) const;
@@ -72,6 +76,7 @@ private:
     std::filesystem::path run_directory_;
     void* run_lease_ = nullptr;
     void* quota_mutex_ = nullptr;
+    void* root_identity_ = nullptr;
     bool quota_checked_segment_ = false;
     bool valid_run_id_ = false;
     std::uint32_t segment_index_ = 0;

@@ -138,6 +138,7 @@ private:
 
 	std::shared_ptr<SharedQueue> _queue = sharedQueue();
 	QTimer *_drainTimer = nullptr;
+	QTimer *_filterTimer = nullptr;
 };
 
 // 全局便捷日志输出宏
