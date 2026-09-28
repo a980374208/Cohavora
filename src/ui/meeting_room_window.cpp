@@ -2429,17 +2429,17 @@ void RoomTopBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {
 	};
 
 	const std::vector<ScenarioEntry> entries = {
-		{ "signalReconnect", livekit::SimulateScenarioType::SignalReconnect },
-		{ "fullReconnect", livekit::SimulateScenarioType::FullReconnect },
-		{ "speakerUpdate", livekit::SimulateScenarioType::SpeakerUpdate },
-		{ "nodeFailure", livekit::SimulateScenarioType::NodeFailure },
-		{ "migration", livekit::SimulateScenarioType::Migration },
-		{ "serverLeave", livekit::SimulateScenarioType::ServerLeave },
-		{ "switchCandidate", livekit::SimulateScenarioType::SwitchCandidate },
-		{ "e2eeKeyRatchet", livekit::SimulateScenarioType::E2eeKeyRatchet },
-		{ "participantName", livekit::SimulateScenarioType::ParticipantName },
-		{ "participantMetadata", livekit::SimulateScenarioType::ParticipantMetadata },
-		{ "clear", livekit::SimulateScenarioType::Clear }
+		{ QCoreApplication::translate("MeetingUI", "Signal reconnect"), livekit::SimulateScenarioType::SignalReconnect },
+		{ QCoreApplication::translate("MeetingUI", "Full reconnect"), livekit::SimulateScenarioType::FullReconnect },
+		{ QCoreApplication::translate("MeetingUI", "Speaker update"), livekit::SimulateScenarioType::SpeakerUpdate },
+		{ QCoreApplication::translate("MeetingUI", "Node failure"), livekit::SimulateScenarioType::NodeFailure },
+		{ QCoreApplication::translate("MeetingUI", "Server migration"), livekit::SimulateScenarioType::Migration },
+		{ QCoreApplication::translate("MeetingUI", "Server disconnect"), livekit::SimulateScenarioType::ServerLeave },
+		{ QCoreApplication::translate("MeetingUI", "Switch ICE candidate"), livekit::SimulateScenarioType::SwitchCandidate },
+		{ QCoreApplication::translate("MeetingUI", "Rotate E2EE key"), livekit::SimulateScenarioType::E2eeKeyRatchet },
+		{ QCoreApplication::translate("MeetingUI", "Update participant name"), livekit::SimulateScenarioType::ParticipantName },
+		{ QCoreApplication::translate("MeetingUI", "Update participant metadata"), livekit::SimulateScenarioType::ParticipantMetadata },
+		{ QCoreApplication::translate("MeetingUI", "Clear simulation"), livekit::SimulateScenarioType::Clear }
 	};
 
 	for (const auto &entry : entries) {
@@ -3182,17 +3182,17 @@ void RoomBottomBarWidget::showSimulateScenarioMenu(const QPoint &globalPos) {
 	};
 
 	const std::vector<ScenarioEntry> entries = {
-		{ "signalReconnect", livekit::SimulateScenarioType::SignalReconnect },
-		{ "fullReconnect", livekit::SimulateScenarioType::FullReconnect },
-		{ "speakerUpdate", livekit::SimulateScenarioType::SpeakerUpdate },
-		{ "nodeFailure", livekit::SimulateScenarioType::NodeFailure },
-		{ "migration", livekit::SimulateScenarioType::Migration },
-		{ "serverLeave", livekit::SimulateScenarioType::ServerLeave },
-		{ "switchCandidate", livekit::SimulateScenarioType::SwitchCandidate },
-		{ "e2eeKeyRatchet", livekit::SimulateScenarioType::E2eeKeyRatchet },
-		{ "participantName", livekit::SimulateScenarioType::ParticipantName },
-		{ "participantMetadata", livekit::SimulateScenarioType::ParticipantMetadata },
-		{ "clear", livekit::SimulateScenarioType::Clear }
+		{ QCoreApplication::translate("MeetingUI", "Signal reconnect"), livekit::SimulateScenarioType::SignalReconnect },
+		{ QCoreApplication::translate("MeetingUI", "Full reconnect"), livekit::SimulateScenarioType::FullReconnect },
+		{ QCoreApplication::translate("MeetingUI", "Speaker update"), livekit::SimulateScenarioType::SpeakerUpdate },
+		{ QCoreApplication::translate("MeetingUI", "Node failure"), livekit::SimulateScenarioType::NodeFailure },
+		{ QCoreApplication::translate("MeetingUI", "Server migration"), livekit::SimulateScenarioType::Migration },
+		{ QCoreApplication::translate("MeetingUI", "Server disconnect"), livekit::SimulateScenarioType::ServerLeave },
+		{ QCoreApplication::translate("MeetingUI", "Switch ICE candidate"), livekit::SimulateScenarioType::SwitchCandidate },
+		{ QCoreApplication::translate("MeetingUI", "Rotate E2EE key"), livekit::SimulateScenarioType::E2eeKeyRatchet },
+		{ QCoreApplication::translate("MeetingUI", "Update participant name"), livekit::SimulateScenarioType::ParticipantName },
+		{ QCoreApplication::translate("MeetingUI", "Update participant metadata"), livekit::SimulateScenarioType::ParticipantMetadata },
+		{ QCoreApplication::translate("MeetingUI", "Clear simulation"), livekit::SimulateScenarioType::Clear }
 	};
 
 	for (const auto &entry : entries) {
@@ -3374,9 +3374,8 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	attachCoordinatorSession();
 	scheduleViewportIntent(true);
 
-	// 自动弹出控制台便于测试观察
-	MeetingLogConsoleWindow::Instance().show();
-	MeetingLogConsoleWindow::Instance().raise();
+	// Keep draining logs in the background; open the console only on request.
+	(void)MeetingLogConsoleWindow::Instance();
 }
 
 MeetingRoomWindow::MeetingRoomWindow(

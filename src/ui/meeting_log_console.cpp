@@ -15,6 +15,7 @@
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QStyle>
+#include <QtWidgets/QScrollBar>
 #include <QtGui/QClipboard>
 #include <QtGui/QIcon>
 #include <QtGui/QTextCursor>
@@ -64,7 +65,7 @@ QString SafeLegacyMessage(const QString &tag, const QString &message) {
 			if (sizeOk) return QStringLiteral("%1 bytes=%2").arg(parts[0]).arg(size);
 		}
 	}
-	return QStringLiteral("[suppressed: unregistered diagnostic]");
+	return {};
 }
 
 QString SafeTag(const QString &tag) {
@@ -181,20 +182,30 @@ void MeetingLogConsoleWindow::initUi() {
 	_severityFilter = new QComboBox(this);
 	_severityFilter->setObjectName(QStringLiteral("consoleSeverityFilter"));
 	_severityFilter->setAccessibleName(QCoreApplication::translate("MeetingUI", "Severity filter"));
-	_severityFilter->addItems({
-		QCoreApplication::translate("MeetingUI", "All levels"),
-		QStringLiteral("trace"), QStringLiteral("debug"),
-		QStringLiteral("info"), QStringLiteral("warning"),
-		QStringLiteral("error"), QStringLiteral("fatal")});
+	_severityFilter->addItem(QCoreApplication::translate("MeetingUI", "All levels"));
+	_severityFilter->addItem(QCoreApplication::translate("MeetingUI", "Trace"), QStringLiteral("trace"));
+	_severityFilter->addItem(QCoreApplication::translate("MeetingUI", "Debug"), QStringLiteral("debug"));
+	_severityFilter->addItem(QCoreApplication::translate("MeetingUI", "Info"), QStringLiteral("info"));
+	_severityFilter->addItem(QCoreApplication::translate("MeetingUI", "Warning"), QStringLiteral("warning"));
+	_severityFilter->addItem(QCoreApplication::translate("MeetingUI", "Error"), QStringLiteral("error"));
+	_severityFilter->addItem(QCoreApplication::translate("MeetingUI", "Fatal"), QStringLiteral("fatal"));
 	_componentFilter = new QComboBox(this);
 	_componentFilter->setObjectName(QStringLiteral("consoleComponentFilter"));
 	_componentFilter->setAccessibleName(QCoreApplication::translate("MeetingUI", "Component filter"));
 	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "All components"));
-	for (const auto *name : {"legacy", "app", "diagnostic_pipeline",
-		"net", "meeting_coordinator", "room", "participant",
-		"session_runtime", "session_telemetry", "meeting_ui", "media",
-		"render", "rtc"})
-		_componentFilter->addItem(QString::fromLatin1(name));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "Legacy"), QStringLiteral("legacy"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "Application"), QStringLiteral("app"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "Diagnostic pipeline"), QStringLiteral("diagnostic_pipeline"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "Network"), QStringLiteral("net"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "Meeting coordinator"), QStringLiteral("meeting_coordinator"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "Room"), QStringLiteral("room"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "Participant"), QStringLiteral("participant"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "Session runtime"), QStringLiteral("session_runtime"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "Session telemetry"), QStringLiteral("session_telemetry"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "Meeting UI"), QStringLiteral("meeting_ui"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "Media"), QStringLiteral("media"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "Render"), QStringLiteral("render"));
+	_componentFilter->addItem(QCoreApplication::translate("MeetingUI", "RTC"), QStringLiteral("rtc"));
 	_sessionInput = new QLineEdit(this);
 	_sessionInput->setObjectName(QStringLiteral("consoleSessionFilter"));
 	_sessionInput->setAccessibleName(QCoreApplication::translate("MeetingUI", "Session ID"));
@@ -322,6 +333,12 @@ void MeetingLogConsoleWindow::initUi() {
 	_logView->setReadOnly(true);
 	_logView->setMaximumBlockCount(3000);
 	mainLayout->addWidget(_logView);
+	connect(_autoScrollBox, &QCheckBox::toggled, this, [this](bool enabled) {
+		if (enabled) {
+			auto *scroll = _logView->verticalScrollBar();
+			scroll->setValue(scroll->maximum());
+		}
+	});
 
 	_filterTimer = new QTimer(this);
 	_filterTimer->setSingleShot(true);
@@ -351,6 +368,12 @@ void MeetingLogConsoleWindow::enqueueLog(LogCategory category, const QString &ta
 	entry.category = category;
 	entry.tag = SafeTag(tag);
 	entry.message = SafeLegacyMessage(entry.tag, message);
+	// Unknown legacy text has no useful safe payload. Do not let its placeholder
+	// flood the bounded queue; retain an error marker without exposing raw text.
+	if (entry.message.isEmpty()) {
+		if (category != LogCategory::Error) return;
+		entry.message = QStringLiteral("[suppressed: unregistered diagnostic]");
+	}
 	entry.timeStr = QDateTime::currentDateTime().toString("hh:mm:ss.zzz");
 	entry.severity = category == LogCategory::Error
 		? QStringLiteral("error") : QStringLiteral("info");
@@ -384,8 +407,14 @@ void MeetingLogConsoleWindow::offer(const std::shared_ptr<SharedQueue> &queue,
 std::function<void(const livekit::diagnostic::Event&)>
 MeetingLogConsoleWindow::diagnosticMirror() {
 	return [queue = sharedQueue()](const livekit::diagnostic::Event &event) {
+		using namespace livekit::diagnostic;
+		const auto level = EventSeverity(event);
+		// Counts remain in the structured file sink. They are not actionable UI
+		// transitions and otherwise crowd out connection/media failures.
+		if (event.kind == EventKind::SignalMessageSummary && level <= Severity::Info)
+			return;
 		PendingEntry entry;
-		entry.category = event.kind == livekit::diagnostic::EventKind::SinkFailed
+		entry.category = level >= Severity::Error || event.kind == EventKind::SinkFailed
 			? LogCategory::Error : LogCategory::General;
 		const auto name = livekit::diagnostic::EventName(event.kind);
 		entry.tag = QString::fromLatin1(name.data(), static_cast<int>(name.size()));
@@ -432,10 +461,51 @@ MeetingLogConsoleWindow::diagnosticMirror() {
 			entry.message = QString::fromLatin1(
 				livekit::diagnostic::IssueCodeName(event.issue_code).data());
 			break;
+		case EventKind::RtcLifecycle:
+			entry.message = QStringLiteral("status=%1").arg(QString::fromLatin1(RtcStatusName(event.rtc_status).data()));
+			break;
+		case EventKind::RenderBackendChanged:
+			entry.message = QStringLiteral("%1 -> %2 reason=%3")
+				.arg(QString::fromLatin1(RenderBackendName(event.from_render_backend).data()),
+					QString::fromLatin1(RenderBackendName(event.to_render_backend).data()),
+					QString::fromLatin1(RenderReasonName(event.render_reason).data()));
+			break;
+		case EventKind::MediaSubscriptionChanged:
+			entry.message = QStringLiteral("media=%1 state=%2")
+				.arg(QString::fromLatin1(MediaKindName(event.media_kind).data()),
+					QString::fromLatin1(SubscriptionStateName(event.subscription_state).data()));
+			break;
+		case EventKind::DeviceSwitchTerminal:
+		case EventKind::DeviceCaptureTerminal:
+			entry.message = QStringLiteral("media=%1 reason=%2")
+				.arg(QString::fromLatin1(MediaKindName(event.media_kind).data()),
+					QString::fromLatin1(DeviceSwitchReasonName(event.device_switch_reason).data()));
+			break;
+		default: break;
 		}
+		// Only closed, typed fields may enter the presentation. Never include raw
+		// HTTP bodies, exception strings, SDP, or arbitrary producer attributes.
+		auto addField = [&entry](const char *key, QString value) {
+			if (!entry.message.isEmpty()) entry.message += QLatin1Char(' ');
+			entry.message += QString::fromLatin1(key) + QLatin1Char('=') + value;
+		};
+		if (event.route != Route::Unknown)
+			addField("route", QString::fromLatin1(RouteName(event.route).data()));
+		if (event.outcome != Outcome::Unknown && event.kind != EventKind::ProcessTerminal)
+			addField("outcome", QString::fromLatin1(OutcomeName(event.outcome).data()));
+		if (event.stage != Stage::Unknown)
+			addField("stage", QString::fromLatin1(StageName(event.stage).data()));
+		if (event.error_code != ErrorCode::None)
+			addField("error", QString::fromLatin1(ErrorCodeName(event.error_code).data()));
+		if (event.http_status != 0)
+			addField("http", QString::number(event.http_status));
+		if (event.duration_ms != 0)
+			addField("duration_ms", QString::number(event.duration_ms));
 		if (event.kind == livekit::diagnostic::EventKind::QueueSummary) {
 			std::lock_guard lock(queue->mutex);
+			const auto previousDropped = queue->pipelineDropped;
 			queue->pipelineDropped = event.dropped;
+			if (previousDropped == event.dropped) return;
 		}
 		offer(queue, std::move(entry));
 	};
@@ -452,9 +522,9 @@ void MeetingLogConsoleWindow::appendVisible(PendingEntry pending) {
 	entry.component = std::move(pending.component);
 	entry.sessionId = std::move(pending.sessionId);
 	entry.operationId = std::move(pending.operationId);
-	const auto context = QStringLiteral(" session=%1 operation=%2")
-		.arg(entry.sessionId.isEmpty() ? QStringLiteral("unknown") : entry.sessionId,
-			entry.operationId.isEmpty() ? QStringLiteral("unknown") : entry.operationId);
+	QString context;
+	if (!entry.sessionId.isEmpty()) context += QStringLiteral(" session=") + entry.sessionId;
+	if (!entry.operationId.isEmpty()) context += QStringLiteral(" operation=") + entry.operationId;
 	entry.formattedHtml = formatLogHtml(entry.timeStr, entry.category,
 		entry.tag, entry.message + context, &entry.catName);
 	entry.fullText = QString("[%1] [%2] [%3] %4%5")
@@ -507,19 +577,26 @@ void MeetingLogConsoleWindow::trimVisible() {
 void MeetingLogConsoleWindow::renderVisible(QElapsedTimer &elapsed) {
 	// Preserve the previous projection until the text filter settles.
 	if (!_logView || (_filterTimer && _filterTimer->isActive())) return;
+	auto *scroll = _logView->verticalScrollBar();
+	const auto previousPosition = scroll->value();
+	const bool followTail = _autoScrollBox && _autoScrollBox->isChecked()
+		&& previousPosition == scroll->maximum() && !_logView->textCursor().hasSelection();
+	bool appended = false;
 	auto it = std::lower_bound(_logEntries.begin(), _logEntries.end(), _nextVisibleId,
 		[](const LogEntry &entry, quint64 id) { return entry.id < id; });
 	for (int count = 0; it != _logEntries.end() && count < 128 && elapsed.elapsed() < 4; ++it, ++count) {
 		_nextVisibleId = it->id + 1;
 		if (!matchesFilter(*it)) continue;
 		_logView->appendHtml(it->formattedHtml);
+		appended = true;
 		for (auto block = _logView->document()->lastBlock(); block.isValid() && !block.userData(); block = block.previous())
 			block.setUserData(new LogBlockId(it->id));
 		_visibleIds.push_back(it->id);
 	}
 	trimVisible();
-	if (_autoScrollBox && _autoScrollBox->isChecked())
-		_logView->moveCursor(QTextCursor::End);
+	// Idle refreshes must not move the viewport or destroy a text selection.
+	// appendHtml can scroll by itself, so also restore the position when paused.
+	if (appended) scroll->setValue(followTail ? scroll->maximum() : previousPosition);
 }
 
 void MeetingLogConsoleWindow::drainPending() {
@@ -591,9 +668,9 @@ bool MeetingLogConsoleWindow::matchesFilter(const LogEntry &entry) const {
 	if (!_currentFilter.isEmpty() &&
 		!entry.fullText.contains(_currentFilter, Qt::CaseInsensitive)) return false;
 	if (_severityFilter && _severityFilter->currentIndex() > 0 &&
-		entry.severity != _severityFilter->currentText()) return false;
+		entry.severity != _severityFilter->currentData().toString()) return false;
 	if (_componentFilter && _componentFilter->currentIndex() > 0 &&
-		entry.component != _componentFilter->currentText()) return false;
+		entry.component != _componentFilter->currentData().toString()) return false;
 	if (_sessionInput && !_sessionInput->text().trimmed().isEmpty() &&
 		!entry.sessionId.contains(_sessionInput->text().trimmed(),
 			Qt::CaseInsensitive)) return false;

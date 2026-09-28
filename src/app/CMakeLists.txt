@@ -59,6 +59,7 @@ source_group("Generated Files" REGULAR_EXPRESSION ".*mocs_compilation.*")
 target_compile_definitions(cohavora_app PRIVATE
     COHAVORA_VERSION="${PROJECT_VERSION}")
 if(WIN32)
+    set_target_properties(cohavora_app PROPERTIES WIN32_EXECUTABLE TRUE)
     enable_language(RC)
     configure_file(cohavora.rc.in "${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc" @ONLY)
     target_sources(cohavora_app PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/cohavora.rc")
