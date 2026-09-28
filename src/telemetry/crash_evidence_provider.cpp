@@ -17,6 +17,9 @@
 #if defined(_WIN32)
 #include <Windows.h>
 #include <ShlObj.h>
+#if COHAVORA_ENABLE_MINIDUMP
+#include <DbgHelp.h>
+#endif
 #include <csignal>
 #include <exception>
 #endif
@@ -149,6 +152,9 @@ bool PruneOwnedEvidence(const std::filesystem::path& root) {
 struct HandlerState {
     HANDLE file = INVALID_HANDLE_VALUE;
     std::filesystem::path path;
+#if COHAVORA_ENABLE_MINIDUMP
+    std::filesystem::path dump_path;
+#endif
     CrashRecord record;
     std::atomic<bool> captured{false};
     std::uintptr_t main_base = 0;
@@ -161,7 +167,7 @@ struct HandlerState {
 std::atomic<HandlerState*> g_handler{nullptr};
 
 void Capture(HandlerState* state, std::uint32_t code,
-             std::uintptr_t address) noexcept {
+             std::uintptr_t address, EXCEPTION_POINTERS* pointers = nullptr) noexcept {
     if (!state || state->captured.exchange(true, std::memory_order_acq_rel))
         return;
     CrashRecord record = state->record;
@@ -174,6 +180,27 @@ void Capture(HandlerState* state, std::uint32_t code,
     record.checksum = Checksum(record);
     DWORD written = 0;
     WriteFile(state->file, &record, sizeof(record), &written, nullptr);
+#if COHAVORA_ENABLE_MINIDUMP
+    // Paths are prepared at startup. A failed dump must not lose metadata.
+    const auto dump = CreateFileW(state->dump_path.c_str(), GENERIC_WRITE, 0,
+        nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (dump == INVALID_HANDLE_VALUE) return;
+    CONTEXT context{};
+    EXCEPTION_RECORD exception{};
+    EXCEPTION_POINTERS synthetic{&exception, &context};
+    if (!pointers) {
+        RtlCaptureContext(&context);
+        exception.ExceptionCode = code;
+        pointers = &synthetic;
+    }
+    MINIDUMP_EXCEPTION_INFORMATION info{GetCurrentThreadId(), pointers, FALSE};
+    const bool captured = MiniDumpWriteDump(GetCurrentProcess(),
+        GetCurrentProcessId(), dump, MiniDumpNormal, &info, nullptr, nullptr);
+    CloseHandle(dump);
+    if (!captured) DeleteFileW(state->dump_path.c_str());
+#else
+    (void)pointers;
+#endif
 }
 
 LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* pointers) noexcept {
@@ -181,7 +208,7 @@ LONG WINAPI OnUnhandledException(EXCEPTION_POINTERS* pointers) noexcept {
         Capture(g_handler.load(std::memory_order_acquire),
             pointers->ExceptionRecord->ExceptionCode,
             reinterpret_cast<std::uintptr_t>(
-                pointers->ExceptionRecord->ExceptionAddress));
+                pointers->ExceptionRecord->ExceptionAddress), pointers);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 
@@ -335,6 +362,9 @@ std::unique_ptr<CrashEvidenceProvider> CrashEvidenceProvider::Install(
     auto& state = impl->state;
     state.path = root / (std::string(kPrefix) + process_run_id +
         std::string(kSuffix));
+#if COHAVORA_ENABLE_MINIDUMP
+    state.dump_path = root / (std::string(kPrefix) + process_run_id + ".dmp");
+#endif
     state.file = CreateFileW(state.path.c_str(), GENERIC_WRITE, 0,
         nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (state.file == INVALID_HANDLE_VALUE) {
@@ -367,7 +397,11 @@ std::unique_ptr<CrashEvidenceProvider> CrashEvidenceProvider::Install(
     state.previous_abort = std::signal(SIGABRT, &OnAbort);
     state.previous_terminate = std::set_terminate(&OnTerminate);
     provider->impl_ = std::move(impl);
+#if COHAVORA_ENABLE_MINIDUMP
+    provider->reason_ = "installed_metadata_and_minidump";
+#else
     provider->reason_ = "installed_metadata_only";
+#endif
 #else
     (void)root;
     (void)process_run_id;

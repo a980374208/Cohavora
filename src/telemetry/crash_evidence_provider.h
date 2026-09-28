@@ -24,8 +24,9 @@ struct CrashEvidenceScan {
     std::uint64_t rejected_files = 0;
 };
 
-// The default provider records fixed-size exception metadata only. It never
-// captures process memory, writes through the normal logger, or uploads data.
+// Records fixed-size exception metadata in every configuration. Debug and
+// RelWithDebInfo also write local minidumps; Release does not capture memory.
+// Never writes through the normal logger or uploads data.
 class CrashEvidenceProvider final {
 public:
     static std::filesystem::path DefaultRoot();

@@ -138,7 +138,9 @@ int ChildMain(const std::filesystem::path& root, std::wstring_view mode,
 }
 
 void FaultMatrix() {
+#if COHAVORA_ENABLE_MINIDUMP
     TEST_CHECK(livekit::telemetry::CurrentExecutablePdbIdentity() != "unknown");
+#endif
     TemporaryDirectory temporary;
     const auto root = temporary.path() / "evidence";
     const std::wstring access_id(32, L'a');
@@ -167,6 +169,7 @@ void FaultMatrix() {
             TEST_CHECK(item.code == EXCEPTION_ACCESS_VIOLATION);
             TEST_CHECK(item.main_module_address);
             TEST_CHECK(item.main_module_rva != 0);
+#if COHAVORA_ENABLE_MINIDUMP
             const auto symbol = SymbolizeExactBuild(item, BuildId(),
                 livekit::telemetry::CurrentExecutablePdbIdentity());
             TEST_CHECK(symbol.find("AccessViolationProbe") != std::string::npos);
@@ -174,11 +177,29 @@ void FaultMatrix() {
                 "00000000-0000-0000-0000000000000000-1").empty());
             TEST_CHECK(SymbolizeExactBuild(item, std::string(64, '0'),
                 livekit::telemetry::CurrentExecutablePdbIdentity()).empty());
+#endif
         }
     }
     TEST_CHECK(!std::filesystem::exists(root / "crash-v1-dddddddddddddddddddddddddddddddd.bin"));
-    for (const auto& entry : std::filesystem::directory_iterator(root))
-        TEST_CHECK(entry.path().extension() != ".dmp");
+    std::size_t dumps = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(root)) {
+        if (entry.path().extension() != ".dmp") continue;
+        ++dumps;
+        std::ifstream input(entry.path(), std::ios::binary);
+        MINIDUMP_HEADER header{};
+        input.read(reinterpret_cast<char*>(&header), sizeof(header));
+        TEST_CHECK(input.good());
+        TEST_CHECK(header.Signature == MINIDUMP_SIGNATURE);
+        TEST_CHECK(header.NumberOfStreams > 0);
+    }
+#if COHAVORA_ENABLE_MINIDUMP
+    TEST_CHECK(dumps == 3);
+    for (const char id : {'a', 'b', 'c'})
+        TEST_CHECK(std::filesystem::exists(root /
+            ("crash-v1-" + std::string(32, id) + ".dmp")));
+#else
+    TEST_CHECK(dumps == 0);
+#endif
 
     const auto ledger_path = temporary.path() / "ledger.json";
     {

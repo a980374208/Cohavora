@@ -377,6 +377,14 @@ add_library(cohavora_core STATIC
     ${LIVEKIT_HEADERS}
 )
 
+# Local crash dumps are available only in developer configurations.
+set_property(SOURCE
+    src/telemetry/crash_evidence_provider.cpp
+    APPEND PROPERTY COMPILE_DEFINITIONS
+    "COHAVORA_ENABLE_MINIDUMP=$<IF:$<CONFIG:Debug,RelWithDebInfo>,1,0>")
+target_link_libraries(cohavora_core PRIVATE
+    "$<$<CONFIG:Debug,RelWithDebInfo>:dbghelp>")
+
 # Project Local Dependencies Directory (./deps)
 if(NOT DEFINED DEPS_DIR)
     set(DEPS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/deps")

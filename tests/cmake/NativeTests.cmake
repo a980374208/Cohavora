@@ -137,6 +137,8 @@ add_executable(test_crash_evidence_provider
 )
 target_include_directories(test_crash_evidence_provider PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
 target_link_libraries(test_crash_evidence_provider PRIVATE cohavora_core dbghelp)
+target_compile_definitions(test_crash_evidence_provider PRIVATE
+    "COHAVORA_ENABLE_MINIDUMP=$<IF:$<CONFIG:Debug,RelWithDebInfo>,1,0>")
 add_test(NAME crash_evidence_provider_test COMMAND test_crash_evidence_provider)
 set_tests_properties(crash_evidence_provider_test PROPERTIES
     TIMEOUT 90 LABELS "LOGGING_LG5")
