@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cmath>
 #include <set>
+#include <stdexcept>
 
 namespace livekit {
 
@@ -14,8 +15,7 @@ LocalVideoTrack::LocalVideoTrack(const std::string& sid, const std::string& name
                                  TrackSource source_type,
                                  const VideoPublishOptions& options)
     : Track(sid, name, TrackKind::Video, source_type), source_(source) {
-    int w = source_ ? source_->width() : 1280;
-    int h = source_ ? source_->height() : 720;
+    const auto [w, h] = source_ ? source_->dimensions() : std::pair{1280, 720};
     requested_publish_options_ = options;
     requested_publish_options_.source = source_type;
     publish_options_ = ComputeMultiCodecSimulcastOptions(
@@ -25,12 +25,21 @@ LocalVideoTrack::LocalVideoTrack(const std::string& sid, const std::string& name
 LocalVideoTrack::~LocalVideoTrack() = default;
 
 void LocalVideoTrack::set_publish_options(const VideoPublishOptions& options) {
+    std::lock_guard lock(options_mutex_);
     requested_publish_options_ = options;
     requested_publish_options_.source = Track::source();
-    const int width = source_ && source_->width() > 0 ? source_->width() : 1280;
-    const int height = source_ && source_->height() > 0 ? source_->height() : 720;
+    const auto [width, height] = source_ ? source_->dimensions() : std::pair{1280,720};
     publish_options_ = ComputeMultiCodecSimulcastOptions(
         width, height, requested_publish_options_);
+}
+
+void LocalVideoTrack::SetScreenShareProfile(ScreenShareFrameProfile profile) {
+    if (Track::source() != TrackSource::ScreenShareVideo || !profile.quality.valid() ||
+        profile.width < 2 || profile.height < 2) throw std::invalid_argument("invalid screen profile");
+    std::lock_guard lock(options_mutex_);
+    screen_profile_ = profile;
+    requested_publish_options_.screen_share_fps = profile.quality.fps;
+    publish_options_ = ComputeMultiCodecSimulcastOptions(profile.width, profile.height, requested_publish_options_);
 }
 
 VideoFrameDiagnostics LocalVideoTrack::frame_diagnostics() const noexcept {
@@ -92,8 +101,8 @@ constexpr VideoPreset kCamera43[] = {
     {1920, 1440, 3500000, 30},
 };
 constexpr VideoPreset kScreenShare[] = {
-    // Application policy: match the desktop capture target (15 FPS), including
-    // small windows. Avoid duplicate size entries hiding the faster preset.
+    // Legacy SDK bitrate baseline at 15 FPS; screen_share_fps explicitly
+    // scales the application budget and frame-rate cap.
     {640, 360, 500000, 15}, {1280, 720, 1000000, 15},
     {1920, 1080, 1500000, 15}, {3840, 2160, 3000000, 15},
 };
@@ -141,7 +150,30 @@ VideoPublishOptions LocalVideoTrack::ComputeSimulcastOptions(int width, int heig
         : (is_16_9 ? EncodingPreset(kCamera169, max_size) : EncodingPreset(kCamera43, max_size));
     original.width = width;
     original.height = height;
+    if (screenshare && opts.screen_share_fps != 0) {
+        if (opts.screen_share_fps != 15 && opts.screen_share_fps != 20 && opts.screen_share_fps != 30)
+            throw std::invalid_argument("invalid screen frame rate");
+        // Interpolate by actual pixels so portrait/ultrawide/small sources do
+        // not inherit the next larger preset's bitrate solely from one edge.
+        constexpr std::pair<int64_t,int64_t> anchors[] = {
+            {0,150000}, {640LL*360,500000}, {1280LL*720,1000000},
+            {1920LL*1080,2000000}, {2560LL*1440,3500000}, {3840LL*2160,6000000}};
+        const int64_t pixels = int64_t(width) * height;
+        int64_t bitrate = anchors[5].second;
+        for (size_t i = 1; i < std::size(anchors); ++i) if (pixels <= anchors[i].first) {
+            const auto [low_pixels, low_rate] = anchors[i-1];
+            const auto [high_pixels, high_rate] = anchors[i];
+            bitrate = low_rate + (high_rate-low_rate)*(pixels-low_pixels)/(high_pixels-low_pixels);
+            break;
+        }
+        original.max_bitrate_bps = int(std::min<int64_t>(12000000, bitrate * opts.screen_share_fps / 15));
+        original.max_fps = opts.screen_share_fps;
+    }
     const auto codec = CodecName(opts.video_codec);
+    // VP8 ScreenshareLayers caches its target FPS at construction. Reserve
+    // the supported ceiling so a same-size 15/20 -> 30 change does not remain
+    // capped at the old rate. Capture cadence still enforces the user target.
+    if (screenshare && opts.screen_share_fps > 0 && codec == "vp8") original.max_fps = 30;
     // The reference adjusts only the source encoding, not the lower presets.
     if (codec == "av1") {
         original.max_bitrate_bps = static_cast<int>(static_cast<float>(original.max_bitrate_bps) * 0.7f);
@@ -154,8 +186,9 @@ VideoPublishOptions LocalVideoTrack::ComputeSimulcastOptions(int width, int heig
     std::vector<VideoPreset> presets;
     if (opts.simulcast && opts.scalability_mode.empty() && max_size >= 480) {
         if (screenshare) {
+            const int target_fps = opts.screen_share_fps > 0 ? opts.screen_share_fps : original.max_fps;
             const int low_bitrate = std::max(150000,
-                original.max_bitrate_bps / (4 * (original.max_fps / 3)));
+                original.max_bitrate_bps / (4 * (target_fps / 3)));
             presets.push_back({width / 2, height / 2, low_bitrate, 3});
         } else {
             const auto& camera = is_16_9 ? kCamera169 : kCamera43;

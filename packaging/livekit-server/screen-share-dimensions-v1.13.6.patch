@@ -1,0 +1,276 @@
+--- a/pkg/rtc/participant.go
++++ b/pkg/rtc/participant.go
+@@ -3500,6 +3500,16 @@
+ 	return mt
+ }
+ 
++// Media-driven updates must follow the same participant notification boundary as
++// signal-driven updates, otherwise room-service snapshots remain one step behind.
++func (p *ParticipantImpl) onVideoDimensionsChanged(track types.MediaTrack) {
++	if p.IsClosed() || p.GetPublishedTrack(track.ID()) != track {
++		return
++	}
++	p.dirty.Store(true)
++	p.listener().OnTrackUpdated(p, track)
++}
++
+ func (p *ParticipantImpl) addMediaTrack(signalCid string, ti *livekit.TrackInfo) *MediaTrack {
+ 	mt := NewMediaTrack(MediaTrackParams{
+ 		ParticipantID:          p.ID,
+@@ -3526,7 +3536,9 @@
+ 		},
+ 		PreferVideoSizeFromMedia:         p.params.PreferVideoSizeFromMedia,
+ 		EnableRTPStreamRestartDetection:  p.params.EnableRTPStreamRestartDetection,
+-		UpdateTrackInfoByVideoSizeChange: p.params.UseOneShotSignallingMode,
++		UpdateTrackInfoByVideoSizeChange: p.params.UseOneShotSignallingMode || ti.Source == livekit.TrackSource_SCREEN_SHARE,
++		PreserveSignalledVideoDimensions: !p.params.UseOneShotSignallingMode && ti.Source == livekit.TrackSource_SCREEN_SHARE,
++		OnVideoDimensionsChanged:         p.onVideoDimensionsChanged,
+ 		ForceBackupCodecPolicySimulcast:  p.params.ForceBackupCodecPolicySimulcast,
+ 		OnSubscribedMaxQualityChange:     p.onSubscribedMaxQualityChange,
+ 		OnSubscribedAudioCodecChange:     p.onSubscribedAudioCodecChange,
+--- a/pkg/rtc/mediatrack.go
++++ b/pkg/rtc/mediatrack.go
+@@ -93,6 +93,8 @@
+ 	ShouldRegressCodec               func() bool
+ 	PreferVideoSizeFromMedia         bool
+ 	EnableRTPStreamRestartDetection  bool
++	OnVideoDimensionsChanged         func(types.MediaTrack)
++	PreserveSignalledVideoDimensions bool
+ 	UpdateTrackInfoByVideoSizeChange bool
+ 	ForceBackupCodecPolicySimulcast  bool
+ 	OnSubscribedMaxQualityChange     func(
+@@ -123,18 +125,24 @@
+ 	}
+ 
+ 	t.MediaTrackReceiver = NewMediaTrackReceiver(MediaTrackReceiverParams{
+-		MediaTrack:               t,
+-		IsRelayed:                false,
+-		ParticipantID:            params.ParticipantID,
+-		ParticipantIdentity:      params.ParticipantIdentity,
+-		ParticipantVersion:       params.ParticipantVersion,
+-		ReceiverConfig:           params.ReceiverConfig,
+-		SubscriberConfig:         params.SubscriberConfig,
+-		AudioConfig:              params.AudioConfig,
+-		TelemetryListener:        params.TelemetryListener,
+-		Logger:                   params.Logger,
+-		RegressionTargetCodec:    t.regressionTargetCodec,
+-		PreferVideoSizeFromMedia: params.PreferVideoSizeFromMedia,
++		MediaTrack:                       t,
++		IsRelayed:                        false,
++		ParticipantID:                    params.ParticipantID,
++		ParticipantIdentity:              params.ParticipantIdentity,
++		ParticipantVersion:               params.ParticipantVersion,
++		ReceiverConfig:                   params.ReceiverConfig,
++		SubscriberConfig:                 params.SubscriberConfig,
++		AudioConfig:                      params.AudioConfig,
++		TelemetryListener:                params.TelemetryListener,
++		Logger:                           params.Logger,
++		RegressionTargetCodec:            t.regressionTargetCodec,
++		PreferVideoSizeFromMedia:         params.PreferVideoSizeFromMedia,
++		PreserveSignalledVideoDimensions: params.PreserveSignalledVideoDimensions,
++		OnVideoDimensionsChanged: func() {
++			if t.params.OnVideoDimensionsChanged != nil {
++				t.params.OnVideoDimensionsChanged(t)
++			}
++		},
+ 	}, ti)
+ 
+ 	if ti.Type == livekit.TrackType_AUDIO {
+--- a/pkg/rtc/mediatrackreceiver.go
++++ b/pkg/rtc/mediatrackreceiver.go
+@@ -117,18 +117,20 @@
+ // -----------------------------------------------------
+ 
+ type MediaTrackReceiverParams struct {
+-	MediaTrack               types.MediaTrack
+-	IsRelayed                bool
+-	ParticipantID            func() livekit.ParticipantID
+-	ParticipantIdentity      livekit.ParticipantIdentity
+-	ParticipantVersion       uint32
+-	ReceiverConfig           ReceiverConfig
+-	SubscriberConfig         DirectionConfig
+-	AudioConfig              sfu.AudioConfig
+-	TelemetryListener        func() types.ParticipantTelemetryListener
+-	Logger                   logger.Logger
+-	RegressionTargetCodec    mime.MimeType
+-	PreferVideoSizeFromMedia bool
++	MediaTrack                       types.MediaTrack
++	IsRelayed                        bool
++	ParticipantID                    func() livekit.ParticipantID
++	ParticipantIdentity              livekit.ParticipantIdentity
++	ParticipantVersion               uint32
++	ReceiverConfig                   ReceiverConfig
++	SubscriberConfig                 DirectionConfig
++	AudioConfig                      sfu.AudioConfig
++	TelemetryListener                func() types.ParticipantTelemetryListener
++	Logger                           logger.Logger
++	RegressionTargetCodec            mime.MimeType
++	OnVideoDimensionsChanged         func()
++	PreserveSignalledVideoDimensions bool
++	PreferVideoSizeFromMedia         bool
+ }
+ 
+ type MediaTrackReceiver struct {
+@@ -963,6 +965,20 @@
+ 	clonedInfo := utils.CloneProto(trackInfo)
+ 	clonedInfo.Width = update.Width
+ 	clonedInfo.Height = update.Height
++	// AV1 packets without DD resolutions do not expose geometry to the RTP
++	// parser. For a declared single full-size layer, publisher geometry is
++	// unambiguous. Never infer simulcast/SVC or backup layer dimensions.
++	if t.params.PreserveSignalledVideoDimensions && !trackInfo.Simulcast &&
++		trackInfo.Source == livekit.TrackSource_SCREEN_SHARE && update.Width > 0 && update.Height > 0 &&
++		len(clonedInfo.Codecs) > 0 && mime.NormalizeMimeType(clonedInfo.Codecs[0].MimeType) == mime.MimeTypeAV1 {
++		primary := clonedInfo.Codecs[0]
++		if len(primary.Layers) == 1 && primary.Layers[0].Width == trackInfo.Width && primary.Layers[0].Height == trackInfo.Height {
++			primary.Layers[0].Width, primary.Layers[0].Height = update.Width, update.Height
++			if len(clonedInfo.Layers) == 1 && clonedInfo.Layers[0].Quality == primary.Layers[0].Quality {
++				clonedInfo.Layers[0].Width, clonedInfo.Layers[0].Height = update.Width, update.Height
++			}
++		}
++	}
+ 	if proto.Equal(trackInfo, clonedInfo) {
+ 		t.lock.Unlock()
+ 		return
+@@ -990,7 +1006,10 @@
+ 		}
+ 	}
+ 
+-	if clonedInfo.Width != maxWidth || clonedInfo.Height != maxHeight {
++	// Screen-share geometry is signalled by the publisher. A low layer or
++	// backup codec may report first; it must not shrink the full-track geometry.
++	if !t.params.PreserveSignalledVideoDimensions &&
++		(clonedInfo.Width != maxWidth || clonedInfo.Height != maxHeight) {
+ 		clonedInfo.Width = maxWidth
+ 		clonedInfo.Height = maxHeight
+ 		changed = true
+@@ -1009,6 +1028,21 @@
+ 		}
+ 	}
+ 
++	// Keep legacy layer metadata consistent with the primary codec while
++	// preserving the layer identity, bitrate and SSRCs. Backup updates are local
++	// to that codec and never replace primary metadata.
++	if clonedInfo.Source == livekit.TrackSource_SCREEN_SHARE && len(clonedInfo.Codecs) > 0 &&
++		mime.NormalizeMimeType(clonedInfo.Codecs[0].MimeType) == mimeType {
++		for _, layer := range clonedInfo.Layers {
++			for _, current := range clonedInfo.Codecs[0].Layers {
++				if layer.Quality == current.Quality && (layer.Width != current.Width || layer.Height != current.Height) {
++					layer.Width, layer.Height = current.Width, current.Height
++					changed = true
++				}
++			}
++		}
++	}
++
+ 	if !changed {
+ 		t.lock.Unlock()
+ 		return
+@@ -1021,6 +1055,9 @@
+ 
+ 	t.params.TelemetryListener().OnTrackPublishedUpdate(t.PublisherID(), clonedInfo)
+ 	t.params.Logger.Debugw("updated video sizes", "before", logger.Proto(trackInfo), "after", logger.Proto(clonedInfo))
++	if t.params.OnVideoDimensionsChanged != nil {
++		t.params.OnVideoDimensionsChanged()
++	}
+ }
+ 
+ func (t *MediaTrackReceiver) TrackInfo() *livekit.TrackInfo {
+--- a/pkg/sfu/streamtrackermanager.go
++++ b/pkg/sfu/streamtrackermanager.go
+@@ -374,13 +374,19 @@
+ 
+ func (s *StreamTrackerManager) UpdateTrackInfo(ti *livekit.TrackInfo) {
+ 	s.lock.Lock()
++	// Screen-share geometry updates are frequent while media keeps flowing.
++	// SetPaused(false) resets active trackers; doing that for metadata alone
++	// can race their active notifications and leave a live layer unavailable.
++	updatePause := ti.Source != livekit.TrackSource_SCREEN_SHARE || s.trackInfo.GetMuted() != ti.GetMuted()
+ 	s.trackInfo = utils.CloneProto(ti)
+ 	s.maxExpectedLayerFromTrackInfoLocked(false)
+ 
+ 	paused := s.trackInfo.GetMuted()
+ 	s.lock.Unlock()
+ 
+-	s.setPaused(paused)
++	if updatePause {
++		s.setPaused(paused)
++	}
+ }
+ 
+ func (s *StreamTrackerManager) SetMaxExpectedSpatialLayer(layer int32) int32 {
+--- a/pkg/rtc/transportmanager.go
++++ b/pkg/rtc/transportmanager.go
+@@ -131,6 +131,16 @@
+ 	dataChannelSendErrorCount                    atomic.Uint32
+ }
+ 
++func publisherCongestionControl(conf config.CongestionControlConfig, consolidated bool) config.CongestionControlConfig {
++	// A consolidated PC advertises Transport-CC in both directions. WebRTC
++	// then sends TWCC instead of REMB; RemoteBWE ignores TWCC. Keep an explicit
++	// interceptor, otherwise use the native send-side estimator for this PC.
++	if consolidated && !conf.UseSendSideBWEInterceptor {
++		conf.UseSendSideBWE = true
++	}
++	return conf
++}
++
+ func NewTransportManager(params TransportManagerParams) (*TransportManager, error) {
+ 	if params.Logger == nil {
+ 		params.Logger = logger.GetLogger()
+@@ -155,7 +165,7 @@
+ 		Config:                            params.Config,
+ 		Twcc:                              params.Twcc,
+ 		DirectionConfig:                   params.Config.Publisher,
+-		CongestionControlConfig:           params.CongestionControlConfig,
++		CongestionControlConfig:           publisherCongestionControl(params.CongestionControlConfig, params.UseSinglePeerConnection || params.UseOneShotSignallingMode),
+ 		EnabledPublishCodecs:              params.EnabledPublishCodecs,
+ 		EnabledSubscribeCodecs:            publisherSubscribeCodecs,
+ 		Logger:                            lgr,
+--- a/pkg/sfu/receiver_base.go
++++ b/pkg/sfu/receiver_base.go
+@@ -947,11 +947,7 @@
+ 			continue
+ 		}
+ 
+-		spatialLayer := layer
+-		if extPkt.Spatial >= 0 {
+-			// svc packet, take spatial layer info from packet
+-			spatialLayer = extPkt.Spatial
+-		}
++		spatialLayer := r.packetSpatialLayer(layer, extPkt.Spatial)
+ 		if int(spatialLayer) >= len(spatialTrackers) {
+ 			r.params.Logger.Errorw(
+ 				"unexpected spatial layer", nil,
+@@ -1204,14 +1200,26 @@
+ 	var sizes []codec.VideoSize
+ 	r.videoSizeMu.RLock()
+ 	defer r.videoSizeMu.RUnlock()
+-	for _, v := range r.videoSizes {
+-		if v.Width == 0 || v.Height == 0 {
+-			break
+-		}
+-		sizes = append(sizes, v)
++	last := -1
++	for i, v := range r.videoSizes {
++		if v.Width != 0 && v.Height != 0 {
++			last = i
++		}
++	}
++	if last >= 0 {
++		sizes = append(sizes, r.videoSizes[:last+1]...)
+ 	}
+ 
+ 	return sizes
++}
++
++// A VP9/AV1 simulcast stream can carry a packet-local spatial index of zero.
++// Only SVC may override the RID-derived stream layer with that packet index.
++func (r *ReceiverBase) packetSpatialLayer(streamLayer, packetLayer int32) int32 {
++	if r.videoLayerMode == livekit.VideoLayer_MULTIPLE_SPATIAL_LAYERS_PER_STREAM && packetLayer >= 0 {
++		return packetLayer
++	}
++	return streamLayer
+ }
+ 
+ func (r *ReceiverBase) OnVideoSizeChanged(f func()) {

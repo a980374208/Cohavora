@@ -94,6 +94,9 @@ struct VideoPublishOptions {
     BackupCodecPolicy backup_codec_policy = BackupCodecPolicy::PreferRegression;
     std::vector<SimulcastCodecSpec> simulcast_codecs;
     bool auto_backup_codec = true;
+    // Zero retains SDK preset behavior. The application's screen-share session
+    // explicitly supplies 15/20/30; camera encoding is unaffected.
+    int screen_share_fps = 0;
 };
 
 struct ResolvedVideoPublishPlan {

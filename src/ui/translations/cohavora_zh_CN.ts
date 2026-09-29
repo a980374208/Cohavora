@@ -3667,6 +3667,66 @@ Sign in with your own account in a client configured for the same meeting servic
         <source>Account menu</source>
         <translation>账号菜单</translation>
     </message>
+    <message>
+        <source>Screen share resolution</source>
+        <translation>屏幕共享分辨率</translation>
+    </message>
+    <message>
+        <source>Screen share frame rate</source>
+        <translation>屏幕共享帧率</translation>
+    </message>
+    <message>
+        <source>Auto (up to 2K)</source>
+        <translation>自动（最高 2K）</translation>
+    </message>
+    <message>
+        <source>720p</source>
+        <translation>720p</translation>
+    </message>
+    <message>
+        <source>1080p</source>
+        <translation>1080p</translation>
+    </message>
+    <message>
+        <source>1440p (2K)</source>
+        <translation>1440p（2K）</translation>
+    </message>
+    <message>
+        <source>Native (up to 4K)</source>
+        <translation>原始尺寸（最高 4K）</translation>
+    </message>
+    <message>
+        <source>Share quality</source>
+        <translation>共享质量</translation>
+    </message>
+    <message>
+        <source>Screen share quality</source>
+        <translation>屏幕共享质量</translation>
+    </message>
+    <message>
+        <source>Resolution (keeps aspect ratio; smaller sources are not enlarged)</source>
+        <translation>分辨率（保持比例，不放大小尺寸来源）</translation>
+    </message>
+    <message>
+        <source>%1 × %2, %3 FPS</source>
+        <translation>%1 × %2，%3 帧/秒</translation>
+    </message>
+    <message>
+        <source> — Applying…</source>
+        <translation> — 正在应用…</translation>
+    </message>
+    <message>
+        <source> — Change failed; previous quality restored</source>
+        <translation> — 修改失败，已恢复原质量</translation>
+    </message>
+    <message>
+        <source> — Applied locally; synchronisation pending</source>
+        <translation> — 本地已应用，等待同步</translation>
+    </message>
+    <message>
+        <source> — Quality state uncertain; stop sharing to recover</source>
+        <translation> — 质量状态不确定，请停止共享后重试</translation>
+    </message>
 </context>
 <context>
     <name>MeetingUI::AnnotationOverlayWindow</name>

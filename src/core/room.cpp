@@ -225,8 +225,9 @@ ResolvedVideoPublishPlan ResolveVideoPublishPlan(
     const std::shared_ptr<LocalVideoTrack>& track,
     const std::vector<std::string>& enabled_codecs) {
     const auto source = track ? track->source() : nullptr;
-    const int width = source && source->width() > 0 ? source->width() : 1280;
-    const int height = source && source->height() > 0 ? source->height() : 720;
+    const auto profile = track ? track->screen_share_profile() : std::nullopt;
+    const auto [width, height] = profile ? std::pair{profile->width, profile->height}
+        : source ? source->dimensions() : std::pair{1280,720};
     return LocalVideoTrack::ResolvePublishPlan(
         width,
         height,
@@ -4493,7 +4494,9 @@ proto::VideoQuality Room::VideoQualityForTier(VideoQualityTier quality) {
     case VideoQualityTier::P180: return proto::VideoQuality::LOW;
     case VideoQualityTier::P360: return proto::VideoQuality::MEDIUM;
     case VideoQualityTier::P720:
-    case VideoQualityTier::P1080: return proto::VideoQuality::HIGH;
+    case VideoQualityTier::P1080:
+    case VideoQualityTier::P1440:
+    case VideoQualityTier::P2160: return proto::VideoQuality::HIGH;
     }
     return proto::VideoQuality::OFF;
 }
@@ -5565,7 +5568,8 @@ Room::AddTrackToPublisherAsync(
                 bundle.primary = sender;
                 bundle.senders.push_back(sender);
                 bundle.scalability_modes.push_back(
-                    task.publish_options.scalability_mode);
+                    task.publish_options.video_codec == "vp9" && task.publish_options.scalability_mode.empty() &&
+                    task.publish_options.layers.size() > 1 ? "L1T1" : task.publish_options.scalability_mode);
                 bundle.track_ids.push_back(task.rtc_track->id());
             }
 
@@ -5718,7 +5722,8 @@ Room::AddTrackToPublisherAsync(
                         }
                         bundle.senders.push_back(backup_sender);
                         bundle.scalability_modes.push_back(
-                            backup_spec.scalability_mode);
+                            backup_spec.codec == "vp9" && backup_spec.scalability_mode.empty() &&
+                            backup_spec.layers.size() > 1 ? "L1T1" : backup_spec.scalability_mode);
                         bundle.track_ids.push_back(backup_cid);
 
                         auto backup_prefs = get_prefs(backup_spec.codec);
@@ -5771,6 +5776,152 @@ Room::AddTrackToPublisherAsync(
         OperationKind::PublishTrack,
         OperationErrorCode::TrackPublishTimeout,
         "install_sender");
+}
+
+asio::awaitable<void> Room::ApplyScreenShareSenderParametersAsync(
+    std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile) {
+    auto admission = AdmitOperation(OperationKind::PublishTrack, "screen_quality");
+    if (!track || track->Track::source() != TrackSource::ScreenShareVideo ||
+        !profile.quality.valid() || profile.width < 2 || profile.height < 2)
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::InvalidState,
+                             "screen_quality", "invalid screen profile");
+    const auto generation = session_generation_.load(std::memory_order_acquire);
+    webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+    std::shared_ptr<TrackPublication> publication;
+    std::vector<std::string> ids;
+    {
+        std::lock_guard lock(room_mutex_);
+        pc = publisher_pc_;
+        if (local_participant_) for (const auto& [sid, item] : local_participant_->tracks()) {
+            if (item && item->track() == track) { publication = item; break; }
+        }
+        auto found = published_sender_track_ids_.find(track.get());
+        if (found != published_sender_track_ids_.end()) ids = found->second;
+        if (!IsNativeGenerationCurrentLocked(generation) || connection_state_ != ConnectionState::Connected)
+            publication.reset();
+    }
+    auto* signaling = WebRTCManager::Instance().signaling_thread();
+    if (!pc || !publication || !signaling || signaling->IsQuitting())
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                             "screen_quality", "screen publication is unavailable");
+    auto completion = std::make_shared<AwaitableState<void>>(executor_);
+    auto cancel = callback_gate_->CancelWhenClosed([weak = std::weak_ptr(completion)] {
+        if (auto pending = weak.lock()) FailAwaitable(pending, std::make_exception_ptr(OperationError(
+            OperationKind::PublishTrack, OperationErrorCode::Cancelled, "screen_quality", "room retired")));
+    });
+    struct Task {
+        std::shared_ptr<Room> room;
+        std::shared_ptr<AwaitableState<void>> completion;
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
+        std::shared_ptr<LocalVideoTrack> track;
+        std::shared_ptr<TrackPublication> publication;
+        std::vector<std::string> ids;
+        ScreenShareFrameProfile profile;
+        uint64_t generation;
+    };
+    auto* task = new Task{shared_from_this(), completion, pc, track, publication, ids, profile, generation};
+    signaling->PostTask([task] {
+        std::unique_ptr<Task> owned(task);
+        {
+            std::lock_guard lock(task->completion->mutex);
+            if (task->completion->completed) return;
+        }
+        auto current = [&] {
+            std::lock_guard lock(task->room->room_mutex_);
+            auto local = task->room->local_participant_;
+            return task->room->IsNativeGenerationCurrentLocked(task->generation) &&
+                task->room->connection_state_ == ConnectionState::Connected &&
+                task->room->publisher_pc_ == task->pc && local &&
+                local->get_publication(task->publication->sid()) == task->publication &&
+                task->publication->track() == task->track;
+        };
+        struct Saved {
+            webrtc::scoped_refptr<webrtc::RtpSenderInterface> sender;
+            webrtc::RtpParameters parameters;
+        };
+        std::vector<Saved> changed;
+        auto restore = [&] {
+            bool ok = true;
+            for (auto& entry : changed) {
+                auto fresh = entry.sender->GetParameters();
+                if (fresh.encodings.size() != entry.parameters.encodings.size()) { ok = false; continue; }
+                for (size_t i = 0; i < fresh.encodings.size(); ++i) {
+                    fresh.encodings[i].max_framerate = entry.parameters.encodings[i].max_framerate;
+                    fresh.encodings[i].max_bitrate_bps = entry.parameters.encodings[i].max_bitrate_bps;
+                }
+                ok = entry.sender->SetParameters(fresh).ok() && ok;
+            }
+            return ok;
+        };
+        try {
+            if (!current()) throw std::runtime_error("retired screen publication");
+            for (auto& sender : task->pc->GetSenders()) {
+                if (!sender || !sender->track()) continue;
+                if (sender->track() != task->track->rtc_track() &&
+                    std::find(task->ids.begin(), task->ids.end(), sender->track()->id()) == task->ids.end()) continue;
+                auto parameters = sender->GetParameters();
+                if (parameters.encodings.empty()) throw std::runtime_error("screen encoding unavailable");
+                auto options = task->track->requested_publish_options();
+                options.screen_share_fps = task->profile.quality.fps;
+                if (!parameters.codecs.empty()) options.video_codec = parameters.codecs[0].name;
+                // Compute the full-resolution budget independently of the frozen RID topology.
+                options.simulcast = false;
+                auto budget = LocalVideoTrack::ComputeSimulcastOptions(task->profile.width, task->profile.height, options).layers.front();
+                changed.push_back({sender, parameters});
+                for (auto& encoding : parameters.encodings) {
+                    const bool low = parameters.encodings.size() > 1 && encoding.scale_resolution_down_by.value_or(1.0) > 1.0;
+                    encoding.max_framerate = low ? 3 : budget.max_fps;
+                    encoding.max_bitrate_bps = low ? std::max(150000, budget.max_bitrate_bps / (4 * (task->profile.quality.fps / 3))) : budget.max_bitrate_bps;
+                }
+                if (!sender->SetParameters(parameters).ok()) throw std::runtime_error("screen sender rejected quality");
+            }
+            if (changed.empty() || !current()) throw std::runtime_error("screen sender retired");
+            if (!CompleteAwaitable(task->completion)) restore();
+        } catch (...) {
+            const bool restored = restore();
+            FailAwaitable(task->completion, std::make_exception_ptr(OperationError(
+                OperationKind::PublishTrack, restored ? OperationErrorCode::InvalidState : OperationErrorCode::StateUncertain,
+                "screen_quality", restored ? "quality update rejected" : "quality compensation failed", !restored)));
+        }
+    });
+    co_await WaitAwaitable<void>(completion, operation_timeouts_.publish,
+        OperationKind::PublishTrack, OperationErrorCode::StateUncertain, "screen_quality");
+}
+
+asio::awaitable<void> Room::SyncScreenShareMetadataAsync(
+    std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile) {
+    auto admission = AdmitOperation(OperationKind::PublishTrack, "screen_quality_metadata");
+    if (!track || track->Track::source() != TrackSource::ScreenShareVideo ||
+        !profile.quality.valid() || profile.width < 2 || profile.height < 2)
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::InvalidState,
+                             "screen_quality_metadata", "invalid screen profile");
+    std::shared_ptr<SignalClient> signal;
+    std::shared_ptr<TrackPublication> publication;
+    const auto generation = session_generation_.load(std::memory_order_acquire);
+    {
+        std::lock_guard lock(room_mutex_);
+        if (local_participant_) for (const auto& [sid, item] : local_participant_->tracks()) {
+            if (item && item->track() == track) { publication = item; break; }
+        }
+        if (!IsNativeGenerationCurrentLocked(generation) || connection_state_ != ConnectionState::Connected)
+            publication.reset();
+        signal = signal_client_;
+    }
+    if (!publication || !signal || !profile.quality.valid())
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                             "screen_quality_metadata", "screen publication retired");
+    proto::SignalRequest request;
+    auto* update = request.mutable_update_video_track();
+    update->set_track_sid(publication->sid());
+    update->set_width(profile.width);
+    update->set_height(profile.height);
+    co_await signal->SendAsync(request);
+    // Send completion is local transport delivery, not a server acknowledgement.
+    std::lock_guard lock(room_mutex_);
+    if (!IsNativeGenerationCurrentLocked(generation) || signal_client_ != signal ||
+        !local_participant_ || local_participant_->get_publication(publication->sid()) != publication)
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
+                             "screen_quality_metadata", "screen publication changed during sync");
 }
 
 asio::awaitable<void> Room::ApplyPublishedSenderScalabilityModesAsync(
@@ -8382,6 +8533,8 @@ void Room::HandleSignalMessage(
             std::string c_lower = sc.codec();
             std::transform(c_lower.begin(), c_lower.end(), c_lower.begin(),
                            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            // SFU sends MIME names (video/vp9), WebRTC uses codec names (VP9).
+            if (c_lower.starts_with("video/")) c_lower.erase(0, 6);
             for (const auto& q : sc.qualities()) {
                 codec_quality_map[c_lower][q.quality()] = q.enabled();
                 fallback_quality_states[q.quality()] = q.enabled();

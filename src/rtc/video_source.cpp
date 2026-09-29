@@ -4,7 +4,7 @@
 namespace livekit {
 
 VideoSource::VideoSource(int width, int height)
-    : width_(width), height_(height) {}
+    : dimensions_((uint64_t(uint32_t(std::max(0, width))) << 32) | uint32_t(std::max(0, height))) {}
 
 VideoSource::Subscription::Subscription(FrameSink sink) : state_(std::make_shared<State>(std::move(sink))) {}
 
@@ -40,8 +40,8 @@ void VideoSource::captureFrame(const VideoFrame& frame, const VideoCaptureOption
         captured_frame_count_.fetch_add(1, std::memory_order_relaxed);
     }
     if (frame.width() > 0 && frame.height() > 0) {
-        width_ = frame.width();
-        height_ = frame.height();
+        dimensions_.store((uint64_t(uint32_t(frame.width())) << 32) | uint32_t(frame.height()),
+                          std::memory_order_release);
     }
 
     std::vector<FrameSink> sinks_copy;

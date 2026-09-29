@@ -4455,10 +4455,14 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
  const int sidebarW = _activeSidebar != ActiveSidebar::None && sidebar
      ? std::min(w / 2, std::max(340, sidebar->minimumSizeHint().width())) : 0;
 	const int stageW = w - sidebarW;
-	const int shareBannerH = _screenShareBanner && !_screenShareBanner->isHidden() ? std::max(28, _screenShareBanner->heightForWidth(w)) : 0;
+	const int shareBannerH = _screenShareBanner && !_screenShareBanner->isHidden() ? std::max(44, _screenShareBanner->heightForWidth(w)) : 0;
 	const int stageTop = topBarH + shareBannerH;
 	const int stageH = std::max(0, h - stageTop - bottomBarH);
 	if (_screenShareBanner) _screenShareBanner->setGeometry(0, topBarH, w, shareBannerH);
+    if (_screenQualityButton && shareBannerH > 0) {
+        _screenQualityButton->setGeometry(12, 6, 116, shareBannerH - 12);
+        _screenQualityButton->raise();
+    }
 	if (_annotationButton && _annotationButton->isVisible() && shareBannerH > 0) {
 		_annotationButton->adjustSize();
 		const auto hint = _annotationButton->sizeHint();
@@ -5397,7 +5401,7 @@ void MeetingRoomWindow::requestScreenShare() {
 	if (state == State::Starting || state == State::Active || state == State::StopFailed) {
 		_coordinator->stopScreenShare();
 	} else if (state == State::Idle || state == State::Failed) {
-		if (auto *picker = findChild<QInputDialog *>(QStringLiteral("screen-share-picker"))) {
+		if (auto *picker = findChild<QDialog *>(QStringLiteral("screen-share-picker"))) {
 			picker->raise();
 			return;
 		}
@@ -5432,45 +5436,57 @@ void MeetingRoomWindow::handleScreenShareSources(
 		return;
 	}
 
-	auto *dialog = new QInputDialog(this);
+	auto *dialog = new QDialog(this);
 	dialog->setObjectName(QStringLiteral("screen-share-picker"));
 	dialog->setAttribute(Qt::WA_DeleteOnClose);
+	dialog->setWindowFlag(Qt::WindowContextHelpButtonHint, false);
 	dialog->setWindowTitle(QCoreApplication::translate("MeetingUI", "Select a Source to Share"));
-	dialog->setLabelText(QCoreApplication::translate("MeetingUI", "Select a screen or window (video only):"));
-	QStringList choices;
+	auto *layout = new QVBoxLayout(dialog);
+	auto *sourceLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Select a screen or window (video only):"), dialog);
+	layout->addWidget(sourceLabel);
+	auto *sourceCombo = createAccessibleComboBox(dialog);
+	sourceCombo->setObjectName(QStringLiteral("screenShareSource"));
+	sourceCombo->setAccessibleName(QCoreApplication::translate("MeetingUI", "Share source"));
+	sourceLabel->setBuddy(sourceCombo);
 	for (size_t i = 0; i < sources.size(); ++i) {
 		const auto &source = sources[i];
 		const auto kind = source.kind == livekit::DesktopSourceKind::Screen
 			? QCoreApplication::translate("MeetingUI", "Screen") : QCoreApplication::translate("MeetingUI", "Window");
-		choices.push_back(QString::number(i + 1) + QStringLiteral(". ") + kind +
+		sourceCombo->addItem(QString::number(i + 1) + QStringLiteral(". ") + kind +
 			QStringLiteral(" — ") + QString::fromStdString(source.title));
 	}
-	dialog->setComboBoxItems(choices);
-	dialog->setComboBoxEditable(false);
-	if (auto *combo = dialog->findChild<QComboBox *>()) {
-		configureAccessibleComboBox(combo);
-		combo->setObjectName(QStringLiteral("screenShareSource"));
-		combo->setAccessibleName(QCoreApplication::translate("MeetingUI", "Share source"));
-	}
+	layout->addWidget(sourceCombo);
+	auto *fpsLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Screen share frame rate"), dialog);
+	layout->addWidget(fpsLabel);
+	auto *fpsCombo = createAccessibleComboBox(dialog);
+	fpsCombo->setObjectName(QStringLiteral("screenShareStartFps"));
+	fpsCombo->setAccessibleName(fpsLabel->text());
+	fpsLabel->setBuddy(fpsCombo);
+	for (int fps : {15, 20, 30}) fpsCombo->addItem(QString::number(fps) + QStringLiteral(" FPS"), fps);
+	const int preferredFps = OpenMeeting::SessionManager::instance().mediaPreferences().screenShareFps;
+	const int preferredIndex = fpsCombo->findData(preferredFps);
+	fpsCombo->setCurrentIndex(preferredIndex >= 0 ? preferredIndex : fpsCombo->findData(20));
+	layout->addWidget(fpsCombo);
+	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
+	layout->addWidget(buttons);
+	buttons->button(QDialogButtonBox::Ok)->setObjectName(QStringLiteral("screenShareAccept"));
+	buttons->button(QDialogButtonBox::Cancel)->setObjectName(QStringLiteral("screenShareCancel"));
+	connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
+	connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
 	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
 	const std::weak_ptr<livekit::Room> room = _coordinator->room();
-	connect(dialog, &QInputDialog::textValueSelected, this,
-		[coordinator, room, sources, choices](const QString &choice) {
-			const int index = choices.indexOf(choice);
-			if (coordinator && !room.expired() && coordinator->room() == room.lock() && index >= 0)
-				coordinator->startScreenShare(sources[index]);
+	connect(dialog, &QDialog::accepted, this,
+		[coordinator, room, sources, sourceCombo, fpsCombo] {
+			const int index = sourceCombo->currentIndex();
+			if (coordinator && !room.expired() && coordinator->room() == room.lock() &&
+				index >= 0 && index < static_cast<int>(sources.size()))
+				coordinator->startScreenShare(sources[index], fpsCombo->currentData().toInt());
 		});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
 		dialog, [dialog](OpenMeeting::MeetingState state, const QString &) {
 			if (state != OpenMeeting::MeetingState::InMeeting) dialog->reject();
 		});
 	dialog->open();
-	if (auto *buttons = dialog->findChild<QDialogButtonBox *>()) {
-		if (auto *accept = buttons->button(QDialogButtonBox::Ok))
-			accept->setObjectName(QStringLiteral("screenShareAccept"));
-		if (auto *cancel = buttons->button(QDialogButtonBox::Cancel))
-			cancel->setObjectName(QStringLiteral("screenShareCancel"));
-	}
 }
 
 bool MeetingRoomWindow::isTrackVisible(const livekit::TrackKey &key) const {
@@ -5853,6 +5869,40 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		_screenShareBanner->setTextFormat(Qt::PlainText);
 		_screenShareBanner->setWordWrap(true);
 		_screenShareBanner->setAlignment(Qt::AlignCenter);
+        _screenShareBanner->setContentsMargins(136, 0, 110, 0);
+        _screenQualityButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Share quality"), _screenShareBanner);
+        _screenQualityButton->setObjectName(QStringLiteral("screenShareQuality"));
+        connect(_screenQualityButton, &QPushButton::clicked, this, [this] {
+            if (!_coordinator || _coordinator->state() != OpenMeeting::MeetingState::InMeeting) return;
+            const auto state = _coordinator->screenShareSnapshot();
+            auto* dialog = new QDialog(this);
+            dialog->setAttribute(Qt::WA_DeleteOnClose);
+            dialog->setObjectName(QStringLiteral("screenShareQualityDialog"));
+            dialog->setWindowTitle(QCoreApplication::translate("MeetingUI", "Screen share quality"));
+            AppTheme::setTone(*dialog, AppTheme::Tone::Dark);
+            AppTheme::makeDialogAdaptive(*dialog, QSize(420, 260));
+            auto* layout = new QVBoxLayout(dialog);
+            layout->addWidget(new QLabel(QCoreApplication::translate("MeetingUI", "Resolution (keeps aspect ratio; smaller sources are not enlarged)"), dialog));
+            auto* resolution = createAccessibleComboBox(dialog);
+            resolution->setObjectName(QStringLiteral("activeScreenShareResolution"));
+            resolution->addItems({QCoreApplication::translate("MeetingUI", "Auto (up to 2K)"), QCoreApplication::translate("MeetingUI", "720p"), QCoreApplication::translate("MeetingUI", "1080p"), QCoreApplication::translate("MeetingUI", "1440p (2K)"), QCoreApplication::translate("MeetingUI", "Native (up to 4K)")});
+            resolution->setCurrentIndex(static_cast<int>(state.requested_quality.resolution));
+            layout->addWidget(resolution);
+            auto* fps = createAccessibleComboBox(dialog);
+            fps->setObjectName(QStringLiteral("activeScreenShareFps"));
+            for (int rate : {15, 20, 30}) fps->addItem(QString::number(rate) + " FPS", rate);
+            fps->setCurrentIndex(fps->findData(state.requested_quality.fps));
+            layout->addWidget(fps);
+            auto* buttons = new QDialogButtonBox(QDialogButtonBox::Apply | QDialogButtonBox::Close, dialog);
+            layout->addWidget(buttons);
+            buttons->button(QDialogButtonBox::Apply)->setObjectName(QStringLiteral("screenShareQualityApply"));
+            connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, dialog, [this, resolution, fps, dialog] {
+                if (_coordinator) _coordinator->setScreenShareQuality({static_cast<livekit::ScreenShareResolution>(resolution->currentIndex()), fps->currentData().toInt()});
+                dialog->accept();
+            });
+            connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+            dialog->open();
+        });
 		MeetingUI::AppTheme::setStyleVariant(*_screenShareBanner, "meeting-room-window-screensharebanner");
 		_annotationButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Annotate"), _screenShareBanner);
 		_annotationButton->setObjectName(QStringLiteral("screenShareAnnotation"));
@@ -5878,6 +5928,20 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		QCoreApplication::translate("MeetingUI", "Stopping screen sharing..."));
 	_screenShareBanner->setVisible(active || snapshot.state == State::Starting ||
 		snapshot.state == State::Stopping || snapshot.state == State::StopFailed);
+    _screenQualityButton->setVisible(active);
+    _screenQualityButton->setEnabled(active && _coordinator && _coordinator->state() == OpenMeeting::MeetingState::InMeeting &&
+        snapshot.quality_status != livekit::ScreenShareQualityStatus::Degraded);
+    QString qualityText;
+    if (snapshot.applied_quality) qualityText = QCoreApplication::translate("MeetingUI", "%1 × %2, %3 FPS").arg(snapshot.applied_quality->width).arg(snapshot.applied_quality->height).arg(snapshot.applied_quality->quality.fps);
+    switch (snapshot.quality_status) {
+    case livekit::ScreenShareQualityStatus::Pending: qualityText += QCoreApplication::translate("MeetingUI", " — Applying…"); break;
+    case livekit::ScreenShareQualityStatus::Rejected: qualityText += QCoreApplication::translate("MeetingUI", " — Change failed; previous quality restored"); break;
+    case livekit::ScreenShareQualityStatus::MetadataPending: qualityText += QCoreApplication::translate("MeetingUI", " — Applied locally; synchronisation pending"); break;
+    case livekit::ScreenShareQualityStatus::Degraded: qualityText += QCoreApplication::translate("MeetingUI", " — Quality state uncertain; stop sharing to recover"); break;
+    default: break;
+    }
+    _screenQualityButton->setToolTip(qualityText);
+    if (active) _screenShareBanner->setText(_screenShareBanner->text() + "  " + qualityText);
 	_annotationButton->setVisible(active);
 	if (active && snapshot.source_kind == livekit::DesktopSourceKind::Window) {
 		_annotationButton->setToolTip(QCoreApplication::translate(
@@ -5954,6 +6018,7 @@ void MeetingRoomWindow::closeAnnotationOverlay() {
 }
 
 void MeetingRoomWindow::setAnnotationInteractionEnabled(bool enabled) {
+    if (_screenQualityButton) _screenQualityButton->setEnabled(enabled && _coordinator && _coordinator->screenShareSnapshot().quality_status != livekit::ScreenShareQualityStatus::Degraded);
 	if (_annotationOverlay) _annotationOverlay->setInteractionEnabled(enabled);
 	if (_annotationButton) _annotationButton->setEnabled(enabled && _annotationBinding.has_value());
 }

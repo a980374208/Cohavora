@@ -27,7 +27,10 @@ public:
     void Start(webrtc::DesktopCapturer::Callback* callback) override {
         callback_ = callback;
     }
-    void SetMaxFrameRate(uint32_t rate) override { rate_ = rate; }
+    void SetMaxFrameRate(uint32_t rate) override {
+        rate_ = rate;
+        if (current_ && started_) current_->SetMaxFrameRate(rate);
+    }
     void CaptureFrame() override {
         if (!callback_) return;
         while (current_) {

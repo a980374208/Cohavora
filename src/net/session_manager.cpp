@@ -16,7 +16,7 @@ constexpr auto kSettingsMigrationVersion = "migration/cohavoraSettingsVersion";
 constexpr auto kRegistrationBaseUrl = "network/registrationServerBaseUrl";
 constexpr auto kRegistrationServiceBinding = "network/registrationServiceBinding";
 constexpr int kCurrentSettingsMigrationVersion = 1;
-constexpr std::array<const char *, 24> kMigratedSettingsKeys = {
+constexpr std::array<const char *, 26> kMigratedSettingsKeys = {
     "network/serverBaseUrl",
     "media/enableMicrophone",
     "media/enableSpeaker",
@@ -32,6 +32,8 @@ constexpr std::array<const char *, 24> kMigratedSettingsKeys = {
     "media/speakerDeviceId",
     "media/cameraVideoCodec",
     "media/screenShareVideoCodec",
+    "media/screenShareResolution",
+    "media/screenShareFps",
     "media/videoCaptureWidth",
     "media/videoCaptureHeight",
     "media/videoCaptureFps",
@@ -194,6 +196,9 @@ void SessionManager::setMediaPreferences(const MediaPreferences &prefs) {
         _mediaPrefs.cameraVideoCodec);
     _mediaPrefs.screenShareVideoCodec = normalizeVideoCodecPreference(
         _mediaPrefs.screenShareVideoCodec);
+    _mediaPrefs.screenShareResolution = std::clamp(_mediaPrefs.screenShareResolution, 0, 4);
+    if (_mediaPrefs.screenShareFps != 15 && _mediaPrefs.screenShareFps != 20 && _mediaPrefs.screenShareFps != 30)
+        _mediaPrefs.screenShareFps = 20;
     saveToSettings();
     emit preferencesChanged(_mediaPrefs);
 }
@@ -507,6 +512,10 @@ void SessionManager::loadFromSettings() {
         std::max(0, _settings->value("media/videoCaptureWidth", 0).toInt());
     _mediaPrefs.videoCaptureHeight =
         std::max(0, _settings->value("media/videoCaptureHeight", 0).toInt());
+    _mediaPrefs.screenShareResolution = std::clamp(_settings->value("media/screenShareResolution", 0).toInt(), 0, 4);
+    _mediaPrefs.screenShareFps = _settings->value("media/screenShareFps", 20).toInt();
+    if (_mediaPrefs.screenShareFps != 15 && _mediaPrefs.screenShareFps != 20 && _mediaPrefs.screenShareFps != 30)
+        _mediaPrefs.screenShareFps = 20;
     _mediaPrefs.videoCaptureFps =
         std::max(1, _settings->value("media/videoCaptureFps", 30).toInt());
 
@@ -552,6 +561,8 @@ void SessionManager::saveToSettings() {
     _settings->setValue("media/speakerDeviceId", _mediaPrefs.speakerDeviceId);
     _settings->setValue("media/cameraVideoCodec", _mediaPrefs.cameraVideoCodec);
     _settings->setValue("media/screenShareVideoCodec", _mediaPrefs.screenShareVideoCodec);
+    _settings->setValue("media/screenShareResolution", _mediaPrefs.screenShareResolution);
+    _settings->setValue("media/screenShareFps", _mediaPrefs.screenShareFps);
     _settings->setValue("media/videoCaptureWidth", _mediaPrefs.videoCaptureWidth);
     _settings->setValue("media/videoCaptureHeight", _mediaPrefs.videoCaptureHeight);
     _settings->setValue("media/videoCaptureFps", _mediaPrefs.videoCaptureFps);

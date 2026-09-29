@@ -5,6 +5,7 @@
 #include <string>
 #include "track.h"
 #include "video_source.h"
+#include "screen_share_quality.h"
 #include "api/media_stream_interface.h"
 
 namespace livekit {
@@ -32,8 +33,12 @@ public:
         std::shared_ptr<telemetry::LocalVideoActivityProbe> probe);
 
     void set_publish_options(const VideoPublishOptions& options);
-    VideoPublishOptions publish_options() const { return publish_options_; }
-    VideoPublishOptions requested_publish_options() const { return requested_publish_options_; }
+    VideoPublishOptions publish_options() const { std::lock_guard lock(options_mutex_); return publish_options_; }
+    VideoPublishOptions requested_publish_options() const { std::lock_guard lock(options_mutex_); return requested_publish_options_; }
+    void SetScreenShareProfile(ScreenShareFrameProfile profile);
+    std::optional<ScreenShareFrameProfile> screen_share_profile() const {
+        std::lock_guard lock(options_mutex_); return screen_profile_;
+    }
 
     void mute() { set_muted(true); }
     void unmute() { set_muted(false); }
@@ -58,6 +63,8 @@ private:
     std::shared_ptr<telemetry::LocalVideoActivityProbe> publish_telemetry_probe_;
     VideoPublishOptions requested_publish_options_;
     VideoPublishOptions publish_options_;
+    mutable std::mutex options_mutex_;
+    std::optional<ScreenShareFrameProfile> screen_profile_;
 };
 
 } // namespace livekit

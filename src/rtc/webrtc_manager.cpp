@@ -57,6 +57,8 @@ public:
             auto h264 = webrtc::SupportedH264Codecs();
             formats.insert(formats.end(), h264.begin(), h264.end());
         }
+        const auto vp9 = webrtc::SupportedVP9Codecs(true);
+        formats.insert(formats.end(), vp9.begin(), vp9.end());
         return formats;
     }
 
@@ -64,6 +66,12 @@ public:
         const webrtc::SdpVideoFormat& format,
         std::optional<std::string> scalability_mode) const override {
         CodecSupport support;
+        if (_stricmp(format.name.c_str(), "VP9") == 0) {
+            if (!format.IsCodecInList(webrtc::SupportedVP9Codecs(false))) return {};
+            if (!scalability_mode) return {.is_supported = true};
+            const auto mode = webrtc::ScalabilityModeFromString(*scalability_mode);
+            return {.is_supported = mode && webrtc::VP9Encoder::SupportsScalabilityMode(*mode)};
+        }
         support.is_supported = _stricmp(format.name.c_str(), "VP8") == 0 ||
             (_stricmp(format.name.c_str(), "H264") == 0 &&
              webrtc::H264Encoder::IsSupported());
@@ -81,6 +89,12 @@ public:
             return webrtc::CreateH264Encoder(
                 env, webrtc::H264EncoderSettings::Parse(format));
         }
+        if (_stricmp(format.name.c_str(), "VP9") == 0 &&
+            format.IsCodecInList(webrtc::SupportedVP9Codecs(false))) {
+            const auto profile = webrtc::ParseSdpForVP9Profile(format.parameters)
+                .value_or(webrtc::VP9Profile::kProfile0);
+            return webrtc::CreateVp9Encoder(env, {.profile = profile});
+        }
         return nullptr;
     }
 };
@@ -93,12 +107,13 @@ public:
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
         std::vector<webrtc::SdpVideoFormat> formats;
 
-        // Preserve the established VP8/H264 preference order. VP9 and AV1 use
-        // their native encoder SVC implementation instead of the simulcast adapter.
+        // Preserve codec preference order. VP9 single-stream/SVC passes through
+        // the adapter; multiple independent RIDs can fall back to one encoder
+        // per stream when native VP9 rejects unequal simulcast frame rates.
         const auto legacy_formats = simulcast_factory_->GetSupportedFormats();
         AppendFormatsNamed(formats, legacy_formats, "VP8");
         AppendFormatsNamed(formats, legacy_formats, "H264");
-        const auto vp9_formats = webrtc::SupportedVP9Codecs(false);
+        const auto vp9_formats = webrtc::SupportedVP9Codecs(true);
         formats.insert(formats.end(), vp9_formats.begin(), vp9_formats.end());
         formats.push_back(webrtc::SdpVideoFormat::AV1Profile0());
         return formats;
@@ -144,9 +159,8 @@ public:
         if (CodecNameEquals(format, "VP9")) {
             const auto supported_formats = webrtc::SupportedVP9Codecs(false);
             if (!format.IsCodecInList(supported_formats)) return nullptr;
-            const auto profile = webrtc::ParseSdpForVP9Profile(format.parameters)
-                .value_or(webrtc::VP9Profile::kProfile0);
-            return webrtc::CreateVp9Encoder(env, {.profile = profile});
+            return std::make_unique<webrtc::SimulcastEncoderAdapter>(
+                env, simulcast_factory_.get(), nullptr, format);
         }
         return nullptr;
     }

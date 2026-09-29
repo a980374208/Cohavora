@@ -208,8 +208,13 @@ static proto::SignalRequest BuildAddTrackRequest(const std::shared_ptr<Track>& t
         int h = 720;
         auto vid_track = std::dynamic_pointer_cast<LocalVideoTrack>(track);
         if (vid_track && vid_track->source()) {
-            if (vid_track->source()->width() > 0) w = vid_track->source()->width();
-            if (vid_track->source()->height() > 0) h = vid_track->source()->height();
+            const auto dimensions = vid_track->source()->dimensions();
+            if (dimensions.first > 0 && dimensions.second > 0) {
+                w = dimensions.first; h = dimensions.second;
+            }
+            if (const auto profile = vid_track->screen_share_profile()) {
+                w = profile->width; h = profile->height;
+            }
         }
         if (vid_track) {
             auto pub_opts = video_options

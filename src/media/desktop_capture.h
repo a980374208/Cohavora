@@ -2,6 +2,7 @@
 
 #include "video_frame.h"
 #include "screen_binding.h"
+#include "screen_share_quality.h"
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -14,11 +15,16 @@ class IDesktopCapture {
 public:
     using FrameCallback = std::function<void(const VideoFrame&)>;
     using EndCallback = std::function<void()>;
+    using QualityCallback = std::function<void(ScreenShareFrameProfile)>;
     virtual ~IDesktopCapture() = default;
     virtual void Start(DesktopSource source, FrameCallback frame, EndCallback ended) = 0;
     // Called by the session owner, never from a capture callback. Joins all
     // delivery before returning; no Qt/UI calls are made by the worker.
     virtual void Stop() = 0;
+    // Thread-safe mailbox. Backends and scaling are changed on the worker only.
+    // A rejected request leaves the active capture untouched. The callback runs
+    // after a frame with the requested profile has been delivered.
+    virtual bool SetQuality(ScreenShareQuality, uint64_t, QualityCallback) { return false; }
 };
 
 enum class DesktopCaptureProbePhase {
