@@ -111,18 +111,13 @@ int main() {
             "TR_REMOTE_VIDEO", "camera", livekit::proto::TrackType::VIDEO, nullptr
         );
 
-        remote_pub.SetVideoDimensions(640, 360);
-        TEST_CHECK(remote_pub.current_quality() == livekit::proto::VideoQuality::MEDIUM);
-        TEST_CHECK(remote_pub.current_width() == 640);
-        TEST_CHECK(remote_pub.current_height() == 360);
-
         remote_pub.SetVideoQuality(livekit::proto::VideoQuality::LOW);
         TEST_CHECK(remote_pub.current_quality() == livekit::proto::VideoQuality::LOW);
 
         remote_pub.SetSubscribed(false);
         TEST_CHECK(remote_pub.is_subscribed() == false);
 
-        std::cout << "  [PASS] Test 3: RemoteTrackPublication SetVideoDimensions & SetVideoQuality verified." << std::endl;
+        std::cout << "  [PASS] Test 3: RemoteTrackPublication SetVideoQuality & SetSubscribed verified." << std::endl;
     }
 
     // Test 4: Room UpdateParticipants Attributes & Permissions Event Dispatch

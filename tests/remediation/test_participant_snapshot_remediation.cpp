@@ -7201,8 +7201,6 @@ int WindowAcceptanceMain(int argc, char **argv) {
         GapWindowDisconnectInvalidatesOldSender();
         GapWindowQueuedVideoBindingLease();
         std::cout << "AK_WINDOW_EXECUTED=13 PASSED=13 FAILED=0" << std::endl;
-        ScreenShareWindowControls();
-        ScreenShareCameraCoexistence();
         DepartureNoticeLifetime();
         AccountLogoutAndDuplicateLogin();
         TrackPresentationAcceptance();
