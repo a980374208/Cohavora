@@ -6,8 +6,6 @@
 #include <asio.hpp>
 #include "room.h"
 #include "participant.h"
-#include "local_video_track.h"
-#include "video_source.h"
 
 class TestDataListener : public livekit::RoomListener {
 public:
@@ -29,7 +27,7 @@ public:
 };
 
 int main() {
-    std::cout << "[TEST] Starting Data Packet Chunking & Simulcast Verification Tests..." << std::endl;
+    std::cout << "[TEST] Starting Data Packet Chunking Verification Tests..." << std::endl;
 
     asio::io_context io_ctx;
     auto room = livekit::Room::Create(io_ctx.get_executor());
@@ -71,19 +69,6 @@ int main() {
         std::cout << "  [PASS] Test 2: Data Packet Chunking 100KB payload assembly verified successfully!" << std::endl;
     }
 
-    // Test 3: Simulcast Video Track Options & ApplySimulcastParameters
-    {
-        auto vsrc = std::make_shared<livekit::VideoSource>(1280, 720);
-        auto vtrack = livekit::LocalVideoTrack::createLocalVideoTrack("simulcast_cam", vsrc);
-
-        TEST_CHECK(vtrack != nullptr);
-        auto opts = vtrack->publish_options();
-        TEST_CHECK(opts.simulcast == true);
-        TEST_CHECK(opts.layers.size() == 3);
-
-        std::cout << "  [PASS] Test 3: Simulcast Video Track options and layers initialized correctly!" << std::endl;
-    }
-
-    std::cout << "[SUCCESS] ALL Data Packet Chunking & Simulcast Verification Tests Passed!" << std::endl;
+    std::cout << "[SUCCESS] ALL Data Packet Chunking Verification Tests Passed!" << std::endl;
     return 0;
 }

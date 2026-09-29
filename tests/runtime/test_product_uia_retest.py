@@ -9,7 +9,6 @@ import unittest
 import zipfile
 
 import product_uia_retest as retest
-from test_meeting_soak import MemoryTrendTests
 
 
 PEER = r'''

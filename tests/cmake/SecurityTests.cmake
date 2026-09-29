@@ -112,7 +112,6 @@ add_test(NAME local_unpublish_transaction_test COMMAND test_local_unpublish_tran
 add_test(NAME unpublish_lifetime_remediation_test COMMAND test_unpublish_lifetime)
 add_test(NAME camera_switch_transaction_test COMMAND test_camera_switch_transaction)
 add_test(NAME audio_render_reference_apm_test COMMAND test_audio_render_reference_apm)
-add_test(NAME meeting_recovery_ux_test COMMAND test_meeting_recovery_ux)
 add_test(NAME data_stream_messaging_test COMMAND test_data_stream_messaging)
 add_test(NAME stream_writer_lifetime_remediation_test COMMAND test_stream_writer_lifetime)
 add_test(NAME stream_delivery_remediation_test COMMAND test_stream_delivery_remediation)
@@ -125,7 +124,6 @@ add_test(NAME stress_lifecycle_test COMMAND test_stress_lifecycle)
 set_tests_properties(stress_lifecycle_test PROPERTIES TIMEOUT 120)
 add_test(NAME simulate_scenario_test COMMAND test_simulate_scenario)
 add_test(NAME backup_codecs_test COMMAND test_backup_codecs)
-add_test(NAME meeting_ui_grid_test COMMAND test_meeting_ui_grid)
 
 # NEW-TEST-001: repeatable, device-free assertion restoration gate. Keep the
 # intentional-failure verifier alongside the tests whose checks it validates.
@@ -135,7 +133,6 @@ set_tests_properties(
     audio_playout_warmup_test
     simulcast_test
     backup_codecs_test
-    meeting_ui_grid_test
     PROPERTIES LABELS "ASSERTION_REGRESSION" TIMEOUT 60
 )
 

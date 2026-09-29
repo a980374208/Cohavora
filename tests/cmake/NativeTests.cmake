@@ -259,14 +259,6 @@ target_link_libraries(test_audio_render_reference_apm PRIVATE
     cohavora_core
 )
 
-# Meeting recovery UX and connection state loopback contract
-add_executable(test_meeting_recovery_ux
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/restored/test_meeting_recovery_ux.cpp
-)
-target_link_libraries(test_meeting_recovery_ux PRIVATE
-    cohavora_core
-)
-
 # Modern data stream messaging contract
 add_executable(test_data_stream_messaging
     ${LIVEKIT_TEST_SOURCE_DIR}/remediation/restored/test_data_stream_messaging.cpp
@@ -448,12 +440,6 @@ target_include_directories(test_backup_codecs PRIVATE ${LIVEKIT_PROJECT_SOURCE_D
 target_link_libraries(test_backup_codecs PRIVATE
     cohavora_core
 )
-
-# Multi-User Grid Math & Avatar Hash Test
-add_executable(test_meeting_ui_grid
-    ${LIVEKIT_TEST_SOURCE_DIR}/test_meeting_ui_grid.cpp
-)
-target_include_directories(test_meeting_ui_grid PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
 
 # Server-driven Single-PC negotiation, including zero additional media sections.
 add_executable(test_single_pc_negotiation

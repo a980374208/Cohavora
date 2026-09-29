@@ -140,6 +140,12 @@ target_compile_definitions(test_participant_window_remediation PRIVATE IDA2_WIND
 if(MSVC)
     target_compile_options(test_participant_window_remediation PRIVATE /bigobj)
 endif()
+# Exercise production widgets instead of independent copies of UI policy.
+add_test(NAME meeting_ui_grid_test COMMAND test_participant_window_remediation --grid-contract)
+add_test(NAME meeting_recovery_ux_test COMMAND test_participant_window_remediation --recovery-ux-contract)
+set_tests_properties(meeting_ui_grid_test meeting_recovery_ux_test PROPERTIES
+    TIMEOUT 60 LABELS "CORE_REGRESSION;UI_CONTRACT_FOCUSED;ASSERTION_REGRESSION")
+
 # Entry ownership and capture/publication source identity use synthetic media;
 # keep this regression in the default suite without enabling device/GPU tests.
 add_test(NAME meeting_entry_media_contract_test
