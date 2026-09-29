@@ -28,6 +28,16 @@ public:
         application_.installEventFilter(this);
     }
 
+    // Window closure can be a handoff (e.g. login -> main window), not an
+    // explicit exit. Recheck only after nested modal callers restore their UI.
+    void RequestIfStillNeeded(std::function<bool()> condition) {
+        if (started_) return;
+        pending_condition_ = std::move(condition);
+        if (condition_check_pending_) return;
+        condition_check_pending_ = true;
+        QMetaObject::invokeMethod(this, [this] { CheckConditionalRequest(); }, Qt::QueuedConnection);
+    }
+
     void Request() {
         if (started_) return;
         started_ = true;
@@ -44,6 +54,22 @@ protected:
     }
 
 private:
+    void CheckConditionalRequest() {
+        if (started_) {
+            pending_condition_ = {};
+            condition_check_pending_ = false;
+            return;
+        }
+        if (thread()->loopLevel() > 1) {
+            // A candidate exit must not reject the login dialog or unwind it.
+            QTimer::singleShot(10, this, [this] { CheckConditionalRequest(); });
+            return;
+        }
+        condition_check_pending_ = false;
+        auto condition = std::move(pending_condition_);
+        if (condition && condition()) Request();
+    }
+
     void TryStart() {
         // A queued call also runs inside QDialog::exec(). Its parent window
         // may still own stack-allocated dialogs, so wait for that stack to
@@ -69,6 +95,8 @@ private:
     QCoreApplication& application_;
     Shutdown shutdown_;
     UnwindModal unwind_modal_;
+    std::function<bool()> pending_condition_;
+    bool condition_check_pending_ = false;
     bool started_ = false;
     bool ready_ = false;
 };

@@ -313,10 +313,22 @@ void LoginDialog::initUI() {
     _errorLabel->setVisible(false);
     cardLayout->addWidget(_errorLabel);
 
-    // 支持回车快捷操作
-    connect(_passwordInput, &QLineEdit::returnPressed, this, &LoginDialog::onLoginClicked);
-    connect(_regConfirmPwdInput, &QLineEdit::returnPressed, this, &LoginDialog::onRegisterClicked);
-    connect(_guestNicknameInput, &QLineEdit::returnPressed, this, &LoginDialog::onGuestLoginClicked);
+    // Only the current page's submit action handles Return. In a QDialog,
+    // autoDefault otherwise allows auxiliary buttons (including close) to take
+    // over. Use one default-button path, not additional returnPressed handlers.
+    for (auto *button : findChildren<QPushButton *>()) {
+        button->setAutoDefault(false);
+        button->setDefault(false);
+    }
+    const auto updateDefaultButton = [this](int page) {
+        _loginBtn->setDefault(false);
+        _registerBtn->setDefault(false);
+        _guestBtn->setDefault(false);
+        auto *submit = page == 1 ? _registerBtn : page == 2 ? _guestBtn : _loginBtn;
+        submit->setDefault(true);
+    };
+    connect(_tabWidget, &QTabWidget::currentChanged, this, updateDefaultButton);
+    updateDefaultButton(_tabWidget->currentIndex());
 }
 
 void LoginDialog::loadSavedData() {

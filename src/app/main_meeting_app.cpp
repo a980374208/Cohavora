@@ -310,7 +310,17 @@ int main(int argc, char *argv[]) {
 			}
 		});
 	QObject::connect(&app, &QGuiApplication::lastWindowClosed,
-		&shutdownGuard, [&] { shutdownGuard.Request(); });
+		&shutdownGuard, [&] {
+            shutdownGuard.RequestIfStillNeeded([] {
+                // Reauthentication temporarily closes the last visible dialog
+                // before its caller shows the main window again.
+                for (auto *window : QApplication::topLevelWidgets()) {
+                    if (!window->parentWidget() && window->isVisible() &&
+                        window->testAttribute(Qt::WA_QuitOnClose)) return false;
+                }
+                return true;
+            });
+        });
 
 	const int result = app.exec();
 

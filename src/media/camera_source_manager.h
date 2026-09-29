@@ -95,6 +95,9 @@ public:
     // 返回设备可供用户选择的分辨率；相同宽高会合并并保留最高帧率。
     static std::vector<CameraResolution> GetSupportedResolutions(
         const std::string& device_path);
+    // Reuse a device snapshot without enumerating hardware again.
+    static std::vector<CameraResolution> GetSupportedResolutions(
+        const DShowDeviceInfo& device);
 
     // 最高能力低于 1080p 时选择最高档，否则选择最接近 1080p 的档位。
     static std::optional<CameraResolution> SelectDefaultResolution(

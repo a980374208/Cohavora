@@ -271,8 +271,13 @@ std::vector<CameraResolution> CameraSourceManager::GetSupportedResolutions(
         return {};
     }
 
+    return GetSupportedResolutions(*selected_device);
+}
+
+std::vector<CameraResolution> CameraSourceManager::GetSupportedResolutions(
+        const DShowDeviceInfo& device) {
     std::vector<CameraResolution> resolutions;
-    for (const auto& capability : selected_device->capabilities) {
+    for (const auto& capability : device.capabilities) {
         if (capability.width <= 0 || capability.height <= 0) {
             continue;
         }

@@ -4,6 +4,14 @@
 <context>
     <name>MeetingUI</name>
     <message>
+        <source>Preparing audio and video devices...</source>
+        <translation>正在准备音视频设备…</translation>
+    </message>
+    <message>
+        <source>Unable to prepare audio and video devices.</source>
+        <translation>无法完成音视频设备准备。</translation>
+    </message>
+    <message>
         <source>Whiteboard</source>
         <translation>白板</translation>
     </message>
@@ -1378,26 +1386,6 @@ Meeting ID: %2</source>
     <message>
         <source>Cohavora Meeting Room - %1</source>
         <translation>Cohavora 会议室 - %1</translation>
-    </message>
-    <message>
-        <source>No microphone available. The microphone has been muted automatically.</source>
-        <translation>未检测到可用的麦克风设备，麦克风已自动置为静音状态</translation>
-    </message>
-    <message>
-        <source>No camera available. The camera has been turned off automatically.</source>
-        <translation>未检测到可用的摄像头设备，摄像头已自动置为关闭状态</translation>
-    </message>
-    <message>
-        <source>Microphone capture started (48 kHz stereo, initial state: %1)</source>
-        <translation>成功启动物理麦克风音频采集 (48kHz 双声道, 初始状态: %1)</translation>
-    </message>
-    <message>
-        <source>On</source>
-        <translation>开启</translation>
-    </message>
-    <message>
-        <source>Unable to initialize or start the microphone</source>
-        <translation>物理麦克风初始化或启动失败</translation>
     </message>
     <message>
         <source>%1 (Me)</source>

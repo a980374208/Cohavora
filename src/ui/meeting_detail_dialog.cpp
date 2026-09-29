@@ -50,6 +50,7 @@ MeetingDetailDialog::MeetingDetailDialog(
 	, _controller(controller)
 	, _session(session) {
 	setWindowTitle(QCoreApplication::translate("MeetingUI", "Meeting Details"));
+	setWindowFlag(Qt::WindowContextHelpButtonHint, false);
 	setModal(true);
 	setMinimumWidth(540);
 	MeetingUI::AppTheme::setStyleVariant(*this, "meeting-detail-dialog-this");

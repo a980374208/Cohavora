@@ -1064,6 +1064,13 @@ QPushButton[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog
     border: 1px solid #ffccc7;
 }
 
+QPushButton[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][objectName]:disabled,
+[uiStyle="meeting-detail-dialog-this"] QPushButton[objectName]:disabled {
+    background: #e5e6eb;
+    color: #86909c;
+    border: 1px solid #c9cdd4;
+}
+
 [uiStyle="meeting-detail-dialog-statelabel"][uiStyle="meeting-detail-dialog-statelabel"][uiStyle="meeting-detail-dialog-statelabel"],
 [uiStyle="meeting-detail-dialog-statelabel"] * {
     color: #8f959e;
