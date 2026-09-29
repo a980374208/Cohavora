@@ -1,3 +1,5 @@
+cohavora_group_qt_generated_sources()
+
 add_library(cohavora_qt_video_render STATIC
     qt_cpu_video_renderer.h
     qt_cpu_video_renderer.cpp

@@ -1,3 +1,5 @@
+cohavora_group_qt_generated_sources()
+
 set(LIVEKIT_PROJECT_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../..")
 set(CMAKE_AUTOMOC ON)
 

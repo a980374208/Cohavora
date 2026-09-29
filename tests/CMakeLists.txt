@@ -1,4 +1,6 @@
 # Test targets are isolated from production targets and grouped by CMake-capable IDEs.
+cohavora_group_qt_generated_sources()
+
 set(LIVEKIT_PROJECT_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/..")
 set(LIVEKIT_TEST_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 set(CMAKE_FOLDER "tests")

@@ -367,6 +367,14 @@ source_group(TREE "${CMAKE_CURRENT_SOURCE_DIR}" PREFIX "Header Files" FILES ${LI
 source_group(TREE "${GEN_DIR}" PREFIX "Generated Files\\Protobuf"
     FILES ${PROTO_SRCS} ${PROTO_HDRS})
 
+# source_group is directory-scoped, so Qt target directories call this helper.
+# Static plugin imports are supplied transitively through INTERFACE_SOURCES.
+function(cohavora_group_qt_generated_sources)
+    source_group("Generated Files" REGULAR_EXPRESSION
+        [[.*mocs_compilation.*|.*Qt5(Gui|Widgets)_[^/\\]*_Import\.cpp$]])
+endfunction()
+cohavora_group_qt_generated_sources()
+
 # Main Signaling Library
 add_library(cohavora_core STATIC
     ${PROTO_SRCS}
