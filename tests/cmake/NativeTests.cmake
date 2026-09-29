@@ -406,14 +406,6 @@ target_link_libraries(test_simulcast PRIVATE
 )
 
 if(LIVEKIT_BUILD_EXTENDED_TESTS)
-    add_executable(test_adaptive_stream
-        ${LIVEKIT_TEST_SOURCE_DIR}/test_adaptive_stream.cpp
-    )
-    target_include_directories(test_adaptive_stream PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
-    target_link_libraries(test_adaptive_stream PRIVATE
-        cohavora_core
-    )
-
     add_executable(test_speaker_vad
         ${LIVEKIT_TEST_SOURCE_DIR}/test_speaker_vad.cpp
     )

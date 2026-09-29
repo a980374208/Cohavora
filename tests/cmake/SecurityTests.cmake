@@ -142,13 +142,11 @@ set_tests_properties(
 if(LIVEKIT_BUILD_EXTENDED_TESTS)
     add_test(NAME apm_3a_test COMMAND test_apm_3a)
     add_test(NAME attributes_permissions_quality_test COMMAND test_attributes_permissions_quality)
-    add_test(NAME adaptive_stream_test COMMAND test_adaptive_stream)
     add_test(NAME speaker_vad_test COMMAND test_speaker_vad)
     add_test(NAME e2ee_test COMMAND test_e2ee)
     set_tests_properties(
         apm_3a_test
         attributes_permissions_quality_test
-        adaptive_stream_test
         speaker_vad_test
         e2ee_test
         PROPERTIES LABELS "ASSERTION_REGRESSION" TIMEOUT 60

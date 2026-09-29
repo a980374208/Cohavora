@@ -4,7 +4,7 @@ set(LIVEKIT_TEST_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 set(CMAKE_FOLDER "tests")
 
 option(LIVEKIT_BUILD_EXTENDED_TESTS
-    "Build optional feature tests (APM, permissions, adaptive stream, VAD, E2EE)"
+    "Build optional feature tests (APM, permissions, VAD, E2EE)"
     OFF)
 option(LIVEKIT_BUILD_HARDWARE_TESTS
     "Build tests that enumerate or open local WASAPI/DirectShow devices"

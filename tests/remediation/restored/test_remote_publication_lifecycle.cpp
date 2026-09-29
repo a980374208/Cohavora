@@ -44,6 +44,8 @@ int main() {
     TEST_CHECK(participant->get_publication(publication->sid()) == publication);
     TEST_CHECK(participant->get_remote_publication(publication->sid()) == publication);
     TEST_CHECK(participant->get_remote_publication("TR_UNKNOWN") == nullptr);
+    TEST_CHECK(publication->is_subscribed());
+    TEST_CHECK(publication->is_enabled());
 
     publication->SetMediaBinding(
         "rtc-video-200",
@@ -62,10 +64,35 @@ int main() {
     TEST_CHECK(requests.back().kind == RemotePublicationControlRequest::Kind::Subscription);
     TEST_CHECK(requests.back().subscribed.has_value() && !*requests.back().subscribed);
 
-    TEST_CHECK(publication->SetVideoDimensions(640, 360));
-    TEST_CHECK(publication->current_width() == 640);
-    TEST_CHECK(publication->current_height() == 360);
-    TEST_CHECK(publication->current_quality() == livekit::proto::VideoQuality::MEDIUM);
+    // Retained from the retired AdaptiveStreamManager suite. Exercise the
+    // production publication/controller contract, including max-dimension
+    // thresholds and portrait orientation, instead of protobuf setters alone.
+    using Quality = livekit::proto::VideoQuality;
+    struct DimensionCase { uint32_t width; uint32_t height; Quality quality; };
+    const DimensionCase dimensions[] = {
+        {320, 180, Quality::LOW},
+        {640, 360, Quality::MEDIUM},
+        {1920, 1080, Quality::HIGH},
+        {180, 320, Quality::LOW},
+        {360, 640, Quality::MEDIUM},
+        {1080, 1920, Quality::HIGH},
+        {360, 360, Quality::LOW},
+        {361, 180, Quality::MEDIUM},
+        {360, 720, Quality::MEDIUM},
+        {360, 721, Quality::HIGH},
+    };
+    for (const auto &value : dimensions) {
+        const auto before = requests.size();
+        TEST_CHECK(publication->SetVideoDimensions(value.width, value.height));
+        TEST_CHECK(requests.size() == before + 1);
+        const auto &request = requests.back();
+        TEST_CHECK(request.kind == RemotePublicationControlRequest::Kind::Settings);
+        TEST_CHECK(request.width == value.width && request.height == value.height);
+        TEST_CHECK(request.quality == value.quality);
+        TEST_CHECK(publication->current_width() == value.width);
+        TEST_CHECK(publication->current_height() == value.height);
+        TEST_CHECK(publication->current_quality() == value.quality);
+    }
     TEST_CHECK(publication->SetPriority(7));
     TEST_CHECK(publication->priority() == 7);
     TEST_CHECK(publication->SetEnabled(false));
