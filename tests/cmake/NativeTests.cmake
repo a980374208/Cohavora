@@ -151,7 +151,7 @@ target_link_libraries(test_telemetry_report PRIVATE cohavora_core)
 add_test(NAME telemetry_report_test COMMAND test_telemetry_report)
 add_test(NAME telemetry_throughput_test COMMAND test_telemetry_report --throughput-regression)
 set_tests_properties(telemetry_throughput_test PROPERTIES
-    TIMEOUT 60 LABELS "CORE_REGRESSION;LOGGING_LG4;TELEMETRY_S7_ACCEPTANCE")
+    TIMEOUT 60 LABELS "DURATION_REGRESSION;LOGGING_LG4;TELEMETRY_S7_ACCEPTANCE")
 set_tests_properties(telemetry_report_test PROPERTIES
     TIMEOUT 60
     LABELS "TELEMETRY_S7;TELEMETRY_S7_ACCEPTANCE;CORE_REGRESSION;SECURITY_REGRESSION;LOGGING_LG1;LOGGING_LG4;LOGGING_LG5;LOGGING_LG6")

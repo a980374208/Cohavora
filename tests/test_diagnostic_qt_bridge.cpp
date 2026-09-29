@@ -147,6 +147,7 @@ struct MeetingLogConsoleTestAccess {
 #include <thread>
 #include <chrono>
 #include <cstdlib>
+#include <cstdio>
 
 namespace {
 QtMessageHandler safe_handler = nullptr;
@@ -159,6 +160,42 @@ Q_IMPORT_PLUGIN(QSvgIconPlugin)
 Q_IMPORT_PLUGIN(QJpegPlugin)
 Q_IMPORT_PLUGIN(QGifPlugin)
 Q_IMPORT_PLUGIN(QICOPlugin)
+
+namespace {
+// Keep the real blocked-UI interval: writer progress must not depend on Qt pumping.
+void BlockedUiPreservesWriter() {
+    QTemporaryDir directory;
+    TEST_CHECK(directory.isValid());
+    auto &console = MeetingUI::MeetingLogConsoleWindow::Instance();
+    auto blockedPipeline = std::make_shared<livekit::diagnostic::DiagnosticPipeline>();
+    blockedPipeline->SetMirror(
+        MeetingUI::MeetingLogConsoleWindow::diagnosticMirror());
+    const auto blockedRoot = std::filesystem::path(directory.path().toStdWString()) /
+        "blocked-ui";
+    TEST_CHECK(blockedPipeline->StartWriter(blockedRoot));
+    std::thread blockedProducer([&] {
+        for (int index = 0; index != 3000; ++index)
+            TEST_CHECK(blockedPipeline->TryEmit(
+                livekit::diagnostic::Event::Received(
+                    livekit::diagnostic::ChatKind::Text, 17)));
+    });
+    blockedProducer.join();
+    std::this_thread::sleep_for(std::chrono::seconds(10));
+    TEST_CHECK(blockedPipeline->Close() ==
+        livekit::diagnostic::DrainResult::Completed);
+    TEST_CHECK(blockedPipeline->GetStatus().written >= 3000);
+    console.drainPending();
+    bool showedUiLoss = false;
+    for (auto* label : console.findChildren<QLabel*>()) {
+        if (label->text().contains(QStringLiteral("UI loss=")) &&
+            !label->text().contains(QStringLiteral("UI loss=0")))
+            showedUiLoss = true;
+    }
+    TEST_CHECK(showedUiLoss);
+
+    std::puts("BLOCKED_UI_WRITER PASS: 10 seconds without UI pumping, durable records and visible UI loss");
+}
+} // namespace
 
 int main(int argc, char **argv) {
     if (argc == 2 && std::string_view(argv[1]) == "--console-lifetime-child") {
@@ -205,6 +242,11 @@ int main(int argc, char **argv) {
             if (type == QtFatalMsg) std::_Exit(91);
         });
         qFatal("private fatal canary 7753");
+        return 0;
+    }
+
+    if (app.arguments().contains(QStringLiteral("--blocked-ui-writer"))) {
+        BlockedUiPreservesWriter();
         return 0;
     }
 
@@ -342,32 +384,6 @@ int main(int argc, char **argv) {
         QStringLiteral("room_connect_42")));
     TEST_CHECK(!QApplication::clipboard()->text().contains(
         QStringLiteral("private unknown Qt canary 5934")));
-
-    auto blockedPipeline = std::make_shared<livekit::diagnostic::DiagnosticPipeline>();
-    blockedPipeline->SetMirror(
-        MeetingUI::MeetingLogConsoleWindow::diagnosticMirror());
-    const auto blockedRoot = std::filesystem::path(directory.path().toStdWString()) /
-        "blocked-ui";
-    TEST_CHECK(blockedPipeline->StartWriter(blockedRoot));
-    std::thread blockedProducer([&] {
-        for (int index = 0; index != 3000; ++index)
-            TEST_CHECK(blockedPipeline->TryEmit(
-                livekit::diagnostic::Event::Received(
-                    livekit::diagnostic::ChatKind::Text, 17)));
-    });
-    blockedProducer.join();
-    std::this_thread::sleep_for(std::chrono::seconds(10));
-    TEST_CHECK(blockedPipeline->Close() ==
-        livekit::diagnostic::DrainResult::Completed);
-    TEST_CHECK(blockedPipeline->GetStatus().written >= 3000);
-    console.drainPending();
-    bool showedUiLoss = false;
-    for (auto* label : console.findChildren<QLabel*>()) {
-        if (label->text().contains(QStringLiteral("UI loss=")) &&
-            !label->text().contains(QStringLiteral("UI loss=0")))
-            showedUiLoss = true;
-    }
-    TEST_CHECK(showedUiLoss);
 
     // A filter rebuild must yield after a bounded slice, then reach the newest
     // record. Eviction must not clear/reinsert the retained document.

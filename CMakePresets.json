@@ -117,6 +117,30 @@
       "execution": {
         "stopOnFailure": true
       }
+    },
+    {
+      "name": "quick-debug",
+      "inherits": "full-debug",
+      "displayName": "Debug regression excluding duration cases",
+      "filter": {
+        "exclude": {
+          "label": "DURATION_REGRESSION"
+        }
+      }
+    },
+    {
+      "name": "duration-debug",
+      "inherits": "full-debug",
+      "displayName": "Debug duration regression",
+      "filter": {
+        "include": {
+          "label": "DURATION_REGRESSION"
+        }
+      },
+      "execution": {
+        "stopOnFailure": false,
+        "noTestsAction": "error"
+      }
     }
   ]
 }

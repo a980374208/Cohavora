@@ -24,6 +24,11 @@ add_executable(test_diagnostic_qt_bridge
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/meeting_log_console.cpp)
 livekit_configure_qt_test(test_diagnostic_qt_bridge)
 add_test(NAME diagnostic_qt_bridge_test COMMAND test_diagnostic_qt_bridge)
+# The fixed 10-second UI stall is a separate case, retained in unfiltered CTest.
+add_test(NAME diagnostic_qt_blocked_ui_test
+    COMMAND test_diagnostic_qt_bridge --blocked-ui-writer)
+set_tests_properties(diagnostic_qt_blocked_ui_test PROPERTIES
+    TIMEOUT 30 LABELS "DURATION_REGRESSION;LOGGING_LG4;LOGGING_LG6")
 set_tests_properties(diagnostic_qt_bridge_test PROPERTIES
     TIMEOUT 30 LABELS "LOGGING_LG2;LOGGING_LG5;LOGGING_LG6;LOGGING_LG7")
 endif()
