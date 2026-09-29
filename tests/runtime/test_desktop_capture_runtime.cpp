@@ -175,8 +175,10 @@ int RunPatternTarget(DWORD parent_pid) {
     *shared = hwnd;
     TEST_CHECK(SetEvent(ready_event));
     const HANDLE waits[] = {parent, exit_event};
-    // Parent failure cannot leave an orphan target window/process.
-    WaitForMultipleObjects(2, waits, FALSE, 300000);
+    // The target lifetime follows the probe, including hour-long soaks.
+    // The parent handle still guarantees cleanup if the probe fails/exits.
+    const DWORD ended = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+    TEST_CHECK(ended == WAIT_OBJECT_0 || ended == WAIT_OBJECT_0 + 1);
     if (IsWindow(hwnd)) PostMessageW(hwnd, WM_CLOSE, 0, 0);
     ui.join();
     UnmapViewOfFile(shared);
@@ -293,6 +295,12 @@ int RunWgcIsolation(const std::string& mode) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(66));
                 } while (std::chrono::steady_clock::now() - begin < std::chrono::seconds(2));
                 capturer.reset();
+                if (!(frames >= 3 && pattern && closed == 1 && pools == 1 && devices == 1 && close_failed == 0)) {
+                    std::cerr << "[WGC_ISOLATION_FAILURE] cycle=" << cycle
+                              << " frames=" << frames << " pattern=" << pattern
+                              << " session_closed=" << closed << " pool_closed=" << pools
+                              << " d3d_released=" << devices << " close_failed=" << close_failed << std::endl;
+                }
                 TEST_CHECK(frames >= 3 && pattern && closed == 1 && pools == 1 && devices == 1 && close_failed == 0);
             }
             RoUninitialize();
@@ -464,7 +472,8 @@ int main(int argc, char** argv) {
     if (argc == 3 && std::string(argv[1]) == "--wgc-isolation") return RunWgcIsolation(argv[2]);
     if (argc == 3 && std::string(argv[1]) == "--pattern-target")
         return RunPatternTarget(static_cast<DWORD>(std::stoul(argv[2])));
-    const bool external_probe = argc == 2 && std::string(argv[1]) == "--external-wgc-window-lifecycle-probe";
+    const bool external_soak = argc == 2 && std::string(argv[1]) == "--external-wgc-window-soak";
+    const bool external_probe = external_soak || (argc == 2 && std::string(argv[1]) == "--external-wgc-window-lifecycle-probe");
     if (argc == 2 && std::string(argv[1]) == "--wgc-capability-probe") return ProbeWgcCapability();
     if (argc == 2 && std::string(argv[1]) == "--screen-fallback-unit") {
         TestScreenCaptureFallback();
@@ -518,7 +527,9 @@ int main(int argc, char** argv) {
     if (wgc_window_probe || production_default) {
         const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
         TEST_CHECK(SUCCEEDED(com));
-        const bool supported = webrtc::IsWgcSupported(webrtc::CaptureType::kWindow);
+        const bool supported = legacy_wgc
+            ? webrtc::IsWgcSupported(webrtc::CaptureType::kWindow)
+            : livekit::IsOwnedWgcSupported(livekit::DesktopSourceKind::Window);
         CoUninitialize();
         if (!supported) {
             PostMessageW(hwnd, WM_CLOSE, 0, 0);
@@ -531,12 +542,21 @@ int main(int argc, char** argv) {
     if (lifecycle_probe || wgc_window_probe || screen_probe) SampleMemory(0, "baseline");
     int total_frames = 0;
     Resources warm{}, settled{};
-    int cycles = (lifecycle_probe || wgc_window_probe) ? 12 : screen_probe ? 3 : 1;
+    int cycles = external_soak ? 100 : (lifecycle_probe || wgc_window_probe) ? 12 : screen_probe ? 3 : 1;
     if (const auto requested = std::getenv("LIVEKIT_TEST_SHARE_CYCLES")) {
         const int value = std::atoi(requested);
-        TEST_CHECK(value >= 1 && value <= 30);
+        TEST_CHECK(value >= (external_soak ? 100 : 1) && value <= (external_soak ? 1000 : 30));
         cycles = value;
     }
+    int soak_seconds = 3600;
+    if (external_soak) {
+        if (const auto requested = std::getenv("LIVEKIT_TEST_SHARE_SOAK_SECONDS"))
+            soak_seconds = std::atoi(requested);
+        TEST_CHECK(soak_seconds >= 3600 && soak_seconds <= 86400);
+        std::cout << "[CAPTURE_SOAK] {\"seconds\":" << soak_seconds
+                  << ",\"cycles\":" << cycles << ",\"sample_seconds\":10}" << std::endl;
+    }
+    const auto soak_begin = std::chrono::steady_clock::now();
     for (int cycle = 1; cycle <= cycles; ++cycle) {
         std::mutex mutex;
         std::condition_variable changed;
@@ -549,7 +569,7 @@ int main(int argc, char** argv) {
         probe.simulate_wgc_unsupported = unsupported_probe;
         probe.simulate_dxgi_unsupported = screen_fallback;
         probe.use_legacy_wgc_window = legacy_wgc;
-        probe.on_event = [cycle, &backend_id, &session_closed, &pool_closed,
+        probe.on_event = [cycle, external_probe, &backend_id, &session_closed, &pool_closed,
                           &d3d_released, &close_failed](livekit::DesktopCaptureProbeEvent event) {
             using Phase = livekit::DesktopCaptureProbePhase;
             if (event.phase == Phase::SessionClosed) ++session_closed;
@@ -567,6 +587,8 @@ int main(int argc, char** argv) {
                       << ",\"capturer_id\":" << event.capturer_id
                       << ",\"backend\":\"" << BackendName(event.capturer_id)
                       << "\"}" << std::endl;
+            if (external_probe && event.phase == Phase::Joined)
+                SampleMemory(cycle, "joined");
         };
         auto capture = livekit::CreateDesktopCaptureForProbe(std::move(probe));
         capture->Start(source,
@@ -628,6 +650,25 @@ int main(int argc, char** argv) {
                       << ",\"logical_processors\":" << std::thread::hardware_concurrency()
                       << "}" << std::endl;
         }
+        if (external_soak) {
+            const auto deadline = soak_begin + std::chrono::milliseconds(
+                static_cast<int64_t>(soak_seconds) * 1000 * cycle / cycles);
+            while (std::chrono::steady_clock::now() < deadline) {
+                int before;
+                { std::lock_guard lock(mutex); before = frames; }
+                const auto begin = std::chrono::steady_clock::now();
+                std::this_thread::sleep_until(std::min(deadline, begin + std::chrono::seconds(10)));
+                {
+                    std::lock_guard lock(mutex);
+                    TEST_CHECK(!failed);
+                    if (std::chrono::steady_clock::now() - begin >= std::chrono::seconds(1))
+                        TEST_CHECK(frames > before);
+                    std::cout << "[CAPTURE_PROGRESS] {\"cycle\":" << cycle
+                              << ",\"frames\":" << frames << "}" << std::endl;
+                }
+                SampleMemory(cycle, "active_soak");
+            }
+        }
         if (lifecycle_probe || wgc_window_probe || screen_probe) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
             SampleMemory(cycle, "active");
@@ -646,6 +687,17 @@ int main(int argc, char** argv) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1500));
             settled = SampleMemory(cycle, "stopped");
             if (cycle == 1) warm = settled;
+            if (external_soak) {
+                const auto bytes = static_cast<int64_t>(settled.private_bytes) - static_cast<int64_t>(warm.private_bytes);
+                const auto handles = static_cast<int64_t>(settled.handles) - warm.handles;
+                const auto threads = static_cast<int64_t>(settled.threads) - warm.threads;
+                const bool pass = bytes <= 8 * 1024 * 1024 && handles <= 32 && threads <= 2;
+                std::cout << "[CAPTURE_SOAK_CHECK] {\"cycle\":" << cycle
+                          << ",\"status\":\"" << (pass ? "PASS" : "FAIL")
+                          << "\",\"private_delta\":" << bytes << ",\"handle_delta\":" << handles
+                          << ",\"thread_delta\":" << threads << "}" << std::endl;
+                if (!pass) return 1;
+            }
         }
     }
     if (external_probe) {
@@ -657,6 +709,13 @@ int main(int argc, char** argv) {
         target.Exit();
         std::this_thread::sleep_for(std::chrono::seconds(5));
         SampleMemory(cycles, "target_process_exited");
+        // Keep the probe process alive beyond worker and target teardown so
+        // process-exit cleanup cannot masquerade as per-Stop handle release.
+        for (int elapsed = 10; elapsed <= 60; elapsed += 10) {
+            std::this_thread::sleep_for(std::chrono::seconds(10));
+            std::cout << "[CAPTURE_IDLE] {\"elapsed_seconds\":" << elapsed << "}" << std::endl;
+            SampleMemory(cycles, "post_stop_process_alive");
+        }
     } else {
         PostMessageW(hwnd, WM_CLOSE, 0, 0);
         ui.join();
