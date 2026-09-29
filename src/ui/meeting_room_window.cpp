@@ -3226,6 +3226,17 @@ void RoomBottomBarWidget::leaveEventHook(QEvent *e) {
 // MeetingRoomWindow 实现
 // ----------------------------------------------------
 
+// Only the native worker touches these resources until Qt accepts completion.
+// Cancellation is cooperative: an in-flight driver call finishes on its owner
+// thread, then queued cleanup releases everything without blocking the window.
+struct MeetingRoomWindow::MediaPreparation {
+	std::atomic_bool cancelled{false};
+	std::shared_ptr<livekit::WasapiAudioCapture> microphone;
+	std::shared_ptr<livekit::CameraSourceManager> camera;
+	bool cameraAvailable = false;
+	QString cameraPath;
+};
+
 MeetingRoomWindow::MeetingRoomWindow(const Config &config,
                                      std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator,
                                      QWidget *parent)
@@ -3248,20 +3259,7 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 
 	setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint);
 
-	// 1. 校验硬件设备可用性
-	if (!_config.audioMuted) {
-		if (!RoomBottomBarWidget::HasAvailableAudioDevice()) {
-			_config.audioMuted = true;
-			LogToConsole(LogCategory::Media, "AUDIO", QCoreApplication::translate("MeetingUI", "No microphone available. The microphone has been muted automatically."));
-		}
-	}
-	if (_config.videoEnabled) {
-		if (!RoomBottomBarWidget::HasAvailableVideoDevice()) {
-			_config.videoEnabled = false;
-			LogToConsole(LogCategory::Media, "VIDEO", QCoreApplication::translate("MeetingUI", "No camera available. The camera has been turned off automatically."));
-		}
-	}
-
+	_preparingMedia = true;
 	initLayout();
 	setupCoordinatorBindings();
 	_coordinator->setLocalAudioMuted(_config.audioMuted);
@@ -3301,91 +3299,186 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	});
 
 
-	// 4. 启动物理麦克风 WASAPI 采集
-	const auto mediaPreferences = OpenMeeting::SessionManager::instance().mediaPreferences();
-	_wasapiCap = livekit::WasapiAudioCapture::Create();
-	_wasapiCap->EnableApm();
-	setupAudioPreferencesBinding(OpenMeeting::SessionManager::instance());
-	bindMicrophoneCaptureState();
-	livekit::WebRTCManager::Instance().SetApmProcessor(_wasapiCap->apm_processor());
-	livekit::WasapiCaptureConfig acfg;
-	acfg.type = livekit::WasapiCaptureType::Microphone;
-	acfg.device_id = mediaPreferences.microphoneDeviceId.toStdString();
-	acfg.target_sample_rate = 48000;
-	acfg.target_channels = 2;
-	if (_wasapiCap->Init(acfg, _localAudioSource) && _wasapiCap->Start()) {
-		applyMicrophoneAvailability(true);
-		_wasapiCap->SetMute(_config.audioMuted);
-		LogToConsole(LogCategory::Media, "WASAPI", QCoreApplication::translate("MeetingUI", "Microphone capture started (48 kHz stereo, initial state: %1)").arg(_config.audioMuted ? QCoreApplication::translate("MeetingUI", "Mute") : QCoreApplication::translate("MeetingUI", "On")));
-	} else {
-		applyMicrophoneAvailability(false);
-		LogToConsole(LogCategory::Error, "WASAPI", QCoreApplication::translate("MeetingUI", "Unable to initialize or start the microphone"));
-	}
-
-	// 5. 启动物理摄像头 DirectShow 采集 (使用 CameraSourceManager 支持平滑热切换)
-	try {
-		auto selectedDevice = livekit::DShowEnumerator::GetDefaultVideoDevice();
-		const auto cameraDevices = livekit::DShowEnumerator::EnumerateVideoDevices();
-		if (!mediaPreferences.cameraDeviceId.isEmpty()) {
-			const auto selectedId = mediaPreferences.cameraDeviceId.toStdString();
-			const auto found = std::find_if(cameraDevices.begin(), cameraDevices.end(),
-				[&](const livekit::DShowDeviceInfo &device) {
-					return device.path == selectedId || device.name == selectedId;
-				});
-			if (found != cameraDevices.end()) selectedDevice = *found;
-		}
-		if (!selectedDevice.path.empty()) {
-			_cameraManager = livekit::CameraSourceManager::Create(_localVideoSource);
-			livekit::DShowCaptureConfig vcfg;
-			vcfg.device_path = selectedDevice.path;
-			const auto resolutions =
-				livekit::CameraSourceManager::GetSupportedResolutions(selectedDevice.path);
-			auto selectedResolution = std::find_if(
-				resolutions.begin(), resolutions.end(),
-				[&](const livekit::CameraResolution &resolution) {
-					return resolution.width == mediaPreferences.videoCaptureWidth &&
-						resolution.height == mediaPreferences.videoCaptureHeight;
-				});
-			if (selectedResolution == resolutions.end()) {
-				const auto automatic =
-					livekit::CameraSourceManager::SelectDefaultResolution(resolutions);
-				if (automatic) {
-					vcfg.width = automatic->width;
-					vcfg.height = automatic->height;
-					vcfg.fps = automatic->max_fps > 0
-						? (std::min)(30, automatic->max_fps) : 30;
-				}
-			} else {
-				vcfg.width = selectedResolution->width;
-				vcfg.height = selectedResolution->height;
-				vcfg.fps = selectedResolution->max_fps > 0
-					? (std::min)(mediaPreferences.videoCaptureFps,
-						selectedResolution->max_fps)
-					: mediaPreferences.videoCaptureFps;
-			}
-			vcfg.output_format = livekit::VideoBufferType::NV12;
-			if (_cameraManager->Start(vcfg)) {
-				_usingRealCamera = true;
-				_currentCameraPath = QString::fromStdString(selectedDevice.path);
-				LogToConsole(LogCategory::Media, "DSHOW",
-					QStringLiteral("camera_started %1x%2@%3fps")
-						.arg(vcfg.width).arg(vcfg.height).arg(vcfg.fps));
-			}
-		}
-	} catch (const std::exception &) {
-		LogToConsole(LogCategory::Error, "DSHOW", QStringLiteral("camera_initialization_failed"));
-	}
-
-	_coordinator->setLocalVideoAvailable(_usingRealCamera);
-	_localTile->setVideoActive(_config.videoEnabled && _usingRealCamera);
+	_localTile->setVideoActive(false);
 	_localTile->setAudioMuted(_config.audioMuted);
 	updateVideoLayout();
 
 	attachCoordinatorSession();
 	scheduleViewportIntent(true);
 
-	// Keep draining logs in the background; open the console only on request.
-	(void)MeetingLogConsoleWindow::Instance();
+	updateRecoveryStateUi(OpenMeeting::MeetingState::Idle, {});
+}
+
+void MeetingRoomWindow::prepareMediaAndJoin(std::function<void()> admission) {
+	Q_ASSERT(thread() == QThread::currentThread());
+	if (_mediaPreparationStarted || !_sessionRunning || _closeRequested ||
+		_closingForSessionInvalidation || !admission) return;
+	_mediaPreparationStarted = true;
+	_preparingMedia = true;
+	_pendingAdmission = std::move(admission);
+	_mediaPreparation = std::make_shared<MediaPreparation>();
+	_preparationCallbacks = OpenMeeting::QtCallbackGate<MeetingRoomWindow>::Create(this);
+	updateRecoveryStateUi(OpenMeeting::MeetingState::Idle, {});
+	const auto preparation = _mediaPreparation;
+	const auto callbacks = _preparationCallbacks;
+	const auto preferences = _cameraSessionManager
+		? _cameraSessionManager->mediaPreferences()
+		: OpenMeeting::SessionManager::instance().mediaPreferences();
+	const auto audioSource = _localAudioSource;
+	const auto videoSource = _localVideoSource;
+	const auto muted = _config.audioMuted;
+	const auto testPreparation = _mediaPreparationForTest;
+	// This application-owned MTA queue also participates in shutdown draining.
+	// WASAPI initializes on its capture thread; DirectShow uses its graph owner.
+	// No job reads a QWidget, QPointer or SessionManager.
+	const bool accepted = OpenMeeting::SessionShutdownService::Instance().Submit(
+		[preparation, callbacks, preferences, audioSource, videoSource, muted, testPreparation] {
+			if (preparation->cancelled.load()) return;
+			if (testPreparation) {
+				testPreparation(*preparation);
+			} else {
+				try {
+					auto microphone = livekit::WasapiAudioCapture::Create();
+					preparation->microphone = microphone;
+					microphone->EnableApm();
+					const auto processor = microphone->apm_processor();
+					if (processor) {
+						auto config = processor->GetConfig();
+						config.enable_aec = preferences.echoCancellation;
+						config.enable_ans = preferences.noiseSuppression;
+						config.enable_agc = preferences.autoGainControl;
+						processor->ApplyConfig(config);
+					}
+					// Set intent before Start: muted entry must not briefly capture unmuted.
+					microphone->SetMute(muted);
+					livekit::WasapiCaptureConfig config;
+					config.type = livekit::WasapiCaptureType::Microphone;
+					config.device_id = preferences.microphoneDeviceId.toStdString();
+					config.target_sample_rate = 48000;
+					config.target_channels = 2;
+					if (!preparation->cancelled.load() && microphone->Init(config, audioSource)) {
+						if (!preparation->cancelled.load()) microphone->Start();
+					}
+				} catch (...) {
+					// Device absence/failure degrades that medium, not admission.
+				}
+				if (preparation->cancelled.load()) return;
+				try {
+					// One snapshot supplies default selection, saved selection and capabilities.
+					const auto devices = livekit::DShowEnumerator::EnumerateVideoDevices();
+					if (preparation->cancelled.load()) return;
+					auto selected = std::find_if(devices.begin(), devices.end(),
+						[](const livekit::DShowDeviceInfo &device) { return device.is_default; });
+					if (selected == devices.end()) selected = devices.begin();
+					if (!preferences.cameraDeviceId.isEmpty()) {
+						const auto id = preferences.cameraDeviceId.toStdString();
+						const auto saved = std::find_if(devices.begin(), devices.end(),
+							[&](const livekit::DShowDeviceInfo &device) {
+								return device.path == id || device.name == id;
+							});
+						if (saved != devices.end()) selected = saved;
+					}
+					if (selected != devices.end() && !selected->path.empty()) {
+						const auto resolutions = livekit::CameraSourceManager::GetSupportedResolutions(*selected);
+						const auto requested = std::find_if(resolutions.begin(), resolutions.end(),
+							[&](const livekit::CameraResolution &resolution) {
+								return resolution.width == preferences.videoCaptureWidth &&
+									resolution.height == preferences.videoCaptureHeight;
+							});
+						const auto resolution = requested != resolutions.end()
+							? std::optional<livekit::CameraResolution>(*requested)
+							: livekit::CameraSourceManager::SelectDefaultResolution(resolutions);
+						livekit::DShowCaptureConfig config;
+						config.device_path = selected->path;
+						config.output_format = livekit::VideoBufferType::NV12;
+						if (resolution) {
+							config.width = resolution->width;
+							config.height = resolution->height;
+							const int fps = requested != resolutions.end() ? preferences.videoCaptureFps : 30;
+							config.fps = resolution->max_fps > 0 ? (std::min)(fps, resolution->max_fps) : fps;
+						}
+						if (preparation->cancelled.load()) return;
+						preparation->camera = livekit::CameraSourceManager::Create(videoSource);
+						preparation->cameraAvailable = preparation->camera->Start(config);
+						if (preparation->cameraAvailable) preparation->cameraPath = QString::fromStdString(selected->path);
+					}
+				} catch (...) {
+					preparation->cameraAvailable = false;
+				}
+			}
+		}, [callbacks](std::exception_ptr failure) {
+			callbacks->Post([failure](MeetingRoomWindow *window) {
+				if (failure) {
+					window->cancelMediaPreparation();
+					window->updateRecoveryStateUi(OpenMeeting::MeetingState::Failed,
+						QCoreApplication::translate("MeetingUI", "Unable to prepare audio and video devices."));
+					return;
+				}
+				window->finishMediaPreparation();
+			});
+		});
+	if (!accepted) {
+		// No worker ran and no native resources exist when admission is rejected.
+		_mediaPreparation.reset();
+		cancelMediaPreparation();
+		updateRecoveryStateUi(OpenMeeting::MeetingState::Failed,
+			QCoreApplication::translate("MeetingUI", "Unable to prepare audio and video devices."));
+	}
+}
+
+void MeetingRoomWindow::finishMediaPreparation() {
+	Q_ASSERT(thread() == QThread::currentThread());
+	if (!_mediaPreparation || _mediaPreparation->cancelled.load() ||
+		!_sessionRunning || _closeRequested || _closingForSessionInvalidation) return;
+	_wasapiCap = std::move(_mediaPreparation->microphone);
+	_cameraManager = std::move(_mediaPreparation->camera);
+	_usingRealCamera = _mediaPreparation->cameraAvailable;
+	_currentCameraPath = _mediaPreparation->cameraPath;
+	_mediaPreparation.reset();
+	_preparingMedia = false;
+	if (_wasapiCap) {
+		bindMicrophoneCaptureState();
+		if (_cameraSessionManager) setupAudioPreferencesBinding(*_cameraSessionManager);
+		livekit::WebRTCManager::Instance().SetApmProcessor(_wasapiCap->apm_processor());
+	}
+	applyMicrophoneAvailability(_wasapiCap && _wasapiCap->IsRunning());
+	if (!_microphoneAvailable) _config.audioMuted = true;
+	if (!_usingRealCamera) _config.videoEnabled = false;
+	if (_coordinator) {
+		_coordinator->setLocalAudioMuted(_config.audioMuted);
+		_coordinator->setLocalVideoEnabled(_config.videoEnabled);
+		_coordinator->setLocalVideoAvailable(_usingRealCamera);
+	}
+	if (_bottomBar) {
+		_bottomBar->setAudioMuted(_config.audioMuted);
+		_bottomBar->setVideoEnabled(_config.videoEnabled);
+	}
+	if (_localTile) {
+		_localTile->setVideoActive(_config.videoEnabled && _usingRealCamera);
+		_localTile->setAudioMuted(_config.audioMuted);
+	}
+	LogToConsole(LogCategory::Media, "CAPTURE",
+		QStringLiteral("devices_prepared microphone=%1 camera=%2").arg(_microphoneAvailable).arg(_usingRealCamera));
+	updateRecoveryStateUi(OpenMeeting::MeetingState::ConnectingRoom, {});
+	auto admission = std::move(_pendingAdmission);
+	if (admission) admission();
+}
+
+void MeetingRoomWindow::cancelMediaPreparation() {
+	Q_ASSERT(thread() == QThread::currentThread());
+	_pendingAdmission = {};
+	_preparingMedia = false;
+	if (_preparationCallbacks) _preparationCallbacks->Revoke();
+	if (auto preparation = std::move(_mediaPreparation)) {
+		preparation->cancelled.store(true);
+		// FIFO with preparation: never destroy a device while Start is using it.
+		OpenMeeting::SessionShutdownService::Instance().SubmitCleanup(
+			[preparation = std::move(preparation)]() mutable {
+				if (preparation->microphone) preparation->microphone->Stop();
+				if (preparation->camera) preparation->camera->Stop();
+				preparation.reset();
+			});
+	}
 }
 
 MeetingRoomWindow::MeetingRoomWindow(
@@ -4134,6 +4227,7 @@ void MeetingRoomWindow::setupCameraCompletionOwner(
 	        &OpenMeeting::SessionManager::sessionInvalidated,
 	        this,
 	        [this](OpenMeeting::SessionInvalidationReason) {
+			cancelMediaPreparation();
 			invalidateCameraCompletion();
 		});
 	connect(&sessionManager,
@@ -4143,6 +4237,7 @@ void MeetingRoomWindow::setupCameraCompletionOwner(
 	        Qt::QueuedConnection);
 	connect(&sessionManager, &OpenMeeting::SessionManager::loggedOut, this,
 		[this, &sessionManager]() {
+			cancelMediaPreparation();
 			invalidateCameraCompletion();
 			if (!sessionManager.isSessionInvalidating())
 				onSessionInvalidated(OpenMeeting::SessionInvalidationReason::UserLogout);
@@ -4380,7 +4475,15 @@ void MeetingRoomWindow::updateRecoveryStateUi(OpenMeeting::MeetingState state, c
 	const int stageW = _stageContainer ? _stageContainer->width() : width();
 
 
-	switch (state) {
+	if (_preparingMedia) {
+		if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
+		MeetingUI::AppTheme::setStyleVariant(*_recoveryBanner, "meeting-room-window-recoverybanner");
+		_recoveryBanner->setText(QCoreApplication::translate("MeetingUI", "Preparing audio and video devices..."));
+		_recoveryBanner->show();
+		_recoveryBanner->raise();
+		if (_bottomBar) _bottomBar->setInRecovery(true);
+	} else switch (state) {
+	case OpenMeeting::MeetingState::Validating:
 	case OpenMeeting::MeetingState::ConnectingRoom:
 	case OpenMeeting::MeetingState::StartingLocalMedia: {
 		if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
@@ -6377,6 +6480,7 @@ void MeetingRoomWindow::onHostRoleChanged(const QString &newHostId, const QStrin
 }
 
 void MeetingRoomWindow::handleEndMeetingClicked() {
+	if (_preparingMedia) { close(); return; }
 	if (_coordinator && _coordinator->isHost()) {
 		QMessageBox box(this);
 		box.setObjectName(QStringLiteral("meetingLeaveConfirmation"));
@@ -6513,7 +6617,7 @@ void MeetingRoomWindow::attachCoordinatorSession() {
 	// The entry owner starts the coordinator after constructing this window.
 	// Connecting here as well would restart that session, replace its sources,
 	// and leave the capture devices feeding only this window's old sources.
-	// Arm cleanup even before admission completes: capture is already running.
+	// Arm cleanup before asynchronous preparation or admission begins.
 	_sessionRunning = true;
 	_room = _coordinator->room();
 	if (_coordinator->state() == OpenMeeting::MeetingState::InMeeting) {
@@ -6524,6 +6628,7 @@ void MeetingRoomWindow::attachCoordinatorSession() {
 void MeetingRoomWindow::stopLiveKitSession(bool requestLeave) {
 	Q_ASSERT(thread() == QThread::currentThread());
 	const bool wasRunning = _sessionRunning.exchange(false);
+	cancelMediaPreparation();
 	if (_captureUiCallbacks) _captureUiCallbacks->Revoke();
 	invalidateCameraCompletion();
 	cancelDeviceSwitchTelemetry();

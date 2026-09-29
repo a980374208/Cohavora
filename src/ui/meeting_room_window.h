@@ -434,11 +434,12 @@ public:
 		InvitationMode invitationMode = InvitationMode::Disabled;
 	};
 
-	// Prepares capture and presentation only. The entry owner must explicitly
-	// start admission through the coordinator after constructing the window.
+	// Constructs presentation only; no device startup waits on the Qt thread.
 	explicit MeetingRoomWindow(const Config &config,
 	                           std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator = nullptr,
 	                           QWidget *parent = nullptr);
+	// Call after show(). Admission is invoked once, only after device preparation.
+	void prepareMediaAndJoin(std::function<void()> admission);
 	void requestScreenShare();
 	void requestDefaultScreenShare();
 	~MeetingRoomWindow() override;
@@ -599,6 +600,15 @@ private:
 		std::uint64_t serial,
 		livekit::telemetry::OperationOutcome outcome);
 	void cancelDeviceSwitchTelemetry();
+	struct MediaPreparation;
+	void finishMediaPreparation();
+	void cancelMediaPreparation();
+	std::shared_ptr<MediaPreparation> _mediaPreparation;
+	std::shared_ptr<OpenMeeting::QtCallbackGate<MeetingRoomWindow>> _preparationCallbacks;
+	std::function<void()> _pendingAdmission;
+	std::function<void(MediaPreparation&)> _mediaPreparationForTest;
+	bool _mediaPreparationStarted = false;
+	bool _preparingMedia = false;
 	void retireLocalCapture();
 	void bindLocalMediaSources();
 	void attachCoordinatorSession();

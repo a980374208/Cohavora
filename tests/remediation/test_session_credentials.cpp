@@ -1,6 +1,7 @@
 #include "src/net/session_manager.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/ui/login_dialog.h"
+#include "src/app/async_shutdown_guard.h"
 #include "tests/support/test_check.h"
 
 #include <QtCore/QElapsedTimer>
@@ -10,9 +11,11 @@
 #include <QtCore/QProcess>
 #include <QtCore/QTemporaryDir>
 #include <QtCore/QThread>
+#include <QtCore/QTimer>
 #include <QtNetwork/QTcpServer>
 #include <QtNetwork/QTcpSocket>
 #include <QtWidgets/QApplication>
+#include <QtGui/QKeyEvent>
 #include <QtPlugin>
 #include <cstdio>
 #include <utility>
@@ -772,6 +775,142 @@ struct Fixture {
     SessionManagerTestAccess::Owner session;
 };
 
+void verifyLoginReturnKey() {
+    Fixture f;
+    MeetingUI::LoginDialog dialog(*f.session);
+    auto *tabs = dialog.findChild<QTabWidget *>();
+    auto *account = dialog.findChild<QLineEdit *>("loginAccount");
+    auto *password = dialog.findChild<QLineEdit *>("loginPassword");
+    auto *close = dialog.findChild<QPushButton *>("closeBtn");
+    TEST_CHECK(tabs && account && password && close);
+    int rejected = 0, accepted = 0;
+    QObject::connect(&dialog, &QDialog::rejected, &dialog, [&] { ++rejected; });
+    QObject::connect(&dialog, &QDialog::accepted, &dialog, [&] { ++accepted; });
+    dialog.show();
+    QCoreApplication::processEvents();
+    const auto press = [](QWidget *target, int key) {
+        target->setFocus();
+        QKeyEvent down(QEvent::KeyPress, key, Qt::NoModifier);
+        QApplication::sendEvent(target, &down);
+        QKeyEvent up(QEvent::KeyRelease, key, Qt::NoModifier);
+        QApplication::sendEvent(target, &up);
+    };
+    auto *login = tabs->currentWidget()->findChild<QPushButton *>("primaryBtn");
+    TEST_CHECK(login);
+    int loginClicks = 0;
+    QObject::connect(login, &QPushButton::clicked, &dialog, [&] { ++loginClicks; });
+    // Invalid input must submit once and keep the page open, from either field.
+    account->clear();
+    password->clear();
+    press(account, Qt::Key_Return);
+    TEST_CHECK(loginClicks == 1 && dialog.isVisible() && rejected == 0);
+    press(password, Qt::Key_Enter);
+    TEST_CHECK(loginClicks == 2 && dialog.isVisible() && rejected == 0);
+    // Even a focused auxiliary close button must not become the Return action.
+    press(close, Qt::Key_Return);
+    TEST_CHECK(loginClicks == 3 && dialog.isVisible() && rejected == 0);
+    account->setText("keyboard-account");
+    password->setText(kPassword);
+    press(password, Qt::Key_Return);
+    f.server.received(1);
+    TEST_CHECK(loginClicks == 4 && !login->isEnabled());
+    press(&dialog, Qt::Key_Return);
+    QCoreApplication::processEvents();
+    TEST_CHECK(loginClicks == 4 && f.server.requests.size() == 1);
+    TEST_CHECK(dialog.isVisible() && rejected == 0);
+    f.server.reply(0, {}, 1001);
+    waitFor([&] { return login->isEnabled(); });
+    TEST_CHECK(dialog.isVisible() && accepted == 0 && rejected == 0);
+
+    tabs->setCurrentIndex(1);
+    auto *registration = tabs->currentWidget()->findChild<QPushButton *>("primaryBtn");
+    int registerClicks = 0;
+    QObject::connect(registration, &QPushButton::clicked, &dialog, [&] { ++registerClicks; });
+    press(dialog.findChild<QLineEdit *>("registerConfirmPassword"), Qt::Key_Return);
+    TEST_CHECK(registerClicks == 1 && loginClicks == 4 && rejected == 0 && dialog.isVisible());
+    tabs->setCurrentIndex(0);
+    TEST_CHECK(login->isDefault() && !registration->isDefault());
+    tabs->setCurrentIndex(2);
+    press(tabs->currentWidget()->findChild<QLineEdit *>(), Qt::Key_Enter);
+    TEST_CHECK(accepted == 1 && rejected == 0 && f.session->isLoggedIn());
+
+    // Explicit close and Escape retain their normal cancellation behavior.
+    MeetingUI::LoginDialog cancelled(*f.session);
+    cancelled.show();
+    int cancellations = 0;
+    QObject::connect(&cancelled, &QDialog::rejected, &cancelled, [&] { ++cancellations; });
+    cancelled.findChild<QPushButton *>("closeBtn")->click();
+    TEST_CHECK(cancellations == 1 && !cancelled.isVisible());
+    cancelled.show();
+    press(&cancelled, Qt::Key_Escape);
+    TEST_CHECK(cancellations == 2 && !cancelled.isVisible());
+    std::puts("LOGIN_KEYBOARD PASS: Return/Enter, page action, in-flight deduplication, close and Escape");
+}
+
+void verifyReloginWindowHandoff(QApplication &app) {
+    for (const bool cancel : {false, true}) {
+        Fixture f;
+        QWidget mainWindow;
+        int shutdownCalls = 0, closureSignals = 0, unwindCalls = 0;
+        bool restored = false;
+        MeetingApp::AsyncShutdownGuard guard(app,
+            [&](std::function<void()> completed) {
+                ++shutdownCalls;
+                TEST_CHECK(cancel || restored);
+                completed();
+            }, [&] { ++unwindCalls; });
+        QObject::connect(&app, &QGuiApplication::lastWindowClosed, &guard, [&] {
+            ++closureSignals;
+            guard.RequestIfStillNeeded([&] { return !mainWindow.isVisible(); });
+        });
+        QTimer deadline;
+        deadline.setSingleShot(true);
+        QObject::connect(&deadline, &QTimer::timeout, &guard, [] {
+            TEST_CHECK(false && "relogin handoff timed out");
+        });
+        deadline.start(5000);
+        QTimer::singleShot(0, &guard, [&] {
+            mainWindow.show();
+            // Repeat successful logout/login handoffs in the same process.
+            for (int attempt = 0; attempt < (cancel ? 1 : 3); ++attempt) {
+                mainWindow.hide();
+                MeetingUI::LoginDialog login(*f.session);
+                QTimer::singleShot(0, &login, [&] {
+                    if (cancel) login.reject();
+                    else {
+                        login.findChild<QTabWidget *>()->setCurrentIndex(2);
+                        QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                        QApplication::sendEvent(&login, &enter);
+                    }
+                });
+                const auto result = login.exec();
+                TEST_CHECK(shutdownCalls == 0 && unwindCalls == 0);
+                TEST_CHECK(result == (cancel ? QDialog::Rejected : QDialog::Accepted));
+                if (cancel) {
+                    mainWindow.close();
+                    return;
+                }
+                mainWindow.show();
+                // Exercise a queued check inside another modal loop too: it
+                // must wait without forcing that loop to close.
+                QEventLoop settling;
+                QTimer::singleShot(30, &settling, &QEventLoop::quit);
+                settling.exec();
+                TEST_CHECK(shutdownCalls == 0 && unwindCalls == 0);
+                f.session->logout(false);
+            }
+            restored = true;
+            QTimer::singleShot(30, &guard, [&] {
+                TEST_CHECK(shutdownCalls == 0 && mainWindow.isVisible());
+                mainWindow.close(); // A real final close still drains and exits.
+            });
+        });
+        TEST_CHECK(app.exec() == 0);
+        TEST_CHECK(shutdownCalls == 1 && closureSignals >= 1 && unwindCalls == 0);
+    }
+    std::puts("RELOGIN_WINDOW_HANDOFF PASS: repeated success survives; cancellation and final close exit cleanly");
+}
+
 void verifyRegistrationAndUi() {
     for (const bool previouslyLoggedIn : {false, true}) {
         Fixture f;
@@ -1184,6 +1323,8 @@ int main(int argc, char **argv) {
     verifyPublicLogoutBoundaries();
     verifyStore();
     verifyDebugHttpPersistenceAcrossStartupModes();
+    verifyReloginWindowHandoff(app);
+    verifyLoginReturnKey();
     verifyRegistrationAndUi();
     verifyRegistrationEndpointSelection();
     verifySessionInvalidLoginData();

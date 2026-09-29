@@ -769,16 +769,17 @@ void MeetingMainWindow::openQuickMeeting(
 	roomWindow->setAttribute(Qt::WA_DeleteOnClose);
 	if (startScreenShare) {
 		connect(coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
-			roomWindow, [roomWindow, pending = true](bool) mutable {
-				if (!pending) return;
+			roomWindow, [roomWindow, coordinator = coordinator.get(), pending = true](bool) mutable {
+				if (!pending || coordinator->state() != OpenMeeting::MeetingState::InMeeting) return;
 				pending = false;
 				roomWindow->requestDefaultScreenShare();
 			});
 	}
-	// This entry owns admission; constructing the window only prepares media.
-	coordinator->createAndJoinQuickMeetingAsync(
-		QCoreApplication::translate("MeetingUI", "%1's Instant Meeting").arg(session.nickname()), 3600, prefs);
+	const auto title = QCoreApplication::translate("MeetingUI", "%1's Instant Meeting").arg(session.nickname());
 	roomWindow->show();
+	roomWindow->prepareMediaAndJoin([coordinator, title, prefs] {
+		coordinator->createAndJoinQuickMeetingAsync(title, 3600, prefs);
+	});
 }
 
 void MeetingMainWindow::beginMeetingEntry(
@@ -847,6 +848,8 @@ void MeetingMainWindow::openJoinMeetingDialog(
 		(meetingSettings && meetingSettings->disableMicrophoneOnJoin);
 	config.videoEnabled = !dialog.isVideoMuted() &&
 		(!meetingSettings || !meetingSettings->disableCameraOnJoin);
+	preferences.enableMicrophone = !config.audioMuted;
+	preferences.enableVideo = config.videoEnabled;
 	config.invitationMode = dialog.isManualConnection()
 		? InvitationMode::Disabled
 		: InvitationMode::BusinessMeetingId;
@@ -857,16 +860,17 @@ void MeetingMainWindow::openJoinMeetingDialog(
 	roomWindow->setAttribute(Qt::WA_DeleteOnClose);
 	if (shareScreenAfterJoin) {
 		connect(coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
-			roomWindow, [roomWindow, pending = true](bool) mutable {
-				if (!pending) return;
+			roomWindow, [roomWindow, coordinator = coordinator.get(), pending = true](bool) mutable {
+				if (!pending || coordinator->state() != OpenMeeting::MeetingState::InMeeting) return;
 				pending = false;
 				roomWindow->requestDefaultScreenShare();
 			});
 	}
-	// One admission after capture is bound to the coordinator's local sources.
-	coordinator->connectDirectlyAsync(
-		dialog.serverUrl(), dialog.token(), dialog.meetingId(), dialog.displayName(), preferences);
 	roomWindow->show();
+	roomWindow->prepareMediaAndJoin([coordinator, config, preferences] {
+		coordinator->connectDirectlyAsync(
+			config.serverUrl, config.token, config.meetingId, config.displayName, preferences);
+	});
 }
 
 void MeetingMainWindow::handlePendingMeetingEntryDetail() {
@@ -955,7 +959,34 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 		this);
 	dialog.exec();
 	if (const auto detail = dialog.detailForJoin()) {
-		beginMeetingEntry(detail->record.meetingId, detail->record.settings);
+		auto reservation = _meetingEntryGuard.tryAcquire();
+		if (!reservation) {
+			QMessageBox::information(this, QCoreApplication::translate("MeetingUI", "Meeting Busy"),
+				QCoreApplication::translate("MeetingUI", "A meeting is already open or a request is in progress. Finish or close it before trying again."));
+			return;
+		}
+
+		auto &session = OpenMeeting::SessionManager::instance();
+		auto preferences = session.mediaPreferences();
+		preferences.enableMicrophone &= !detail->record.settings.disableMicrophoneOnJoin;
+		preferences.enableVideo &= !detail->record.settings.disableCameraOnJoin;
+		auto coordinator = OpenMeeting::MeetingCoordinator::create();
+
+		MeetingRoomWindow::Config config;
+		config.meetingId = detail->record.meetingId;
+		config.displayName = session.nickname();
+		config.audioMuted = !preferences.enableMicrophone;
+		config.videoEnabled = preferences.enableVideo;
+		config.invitationMode = InvitationMode::BusinessMeetingId;
+
+		auto *roomWindow = new MeetingRoomWindow(config, coordinator);
+		reservation->setParent(roomWindow);
+		reservation.release();
+		roomWindow->setAttribute(Qt::WA_DeleteOnClose);
+		roomWindow->show();
+		roomWindow->prepareMediaAndJoin([coordinator, config, password = detail->password, preferences] {
+			coordinator->joinMeetingAsync(config.meetingId, password, config.displayName, preferences);
+		});
 	}
 }
 

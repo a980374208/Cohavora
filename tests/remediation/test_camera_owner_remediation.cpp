@@ -27,6 +27,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <stdexcept>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -84,6 +85,17 @@ public:
 				config,
 				std::move(manager),
 				session));
+	}
+
+	static void prepare(MeetingUI::MeetingRoomWindow &window, Task work, Task admission) {
+		window.retireLocalCapture();
+		window._sessionRunning = true;
+		window._mediaPreparationForTest = [work = std::move(work)](auto &) { work(); };
+		window.prepareMediaAndJoin(std::move(admission));
+	}
+
+	static bool mediaDisabled(const MeetingUI::MeetingRoomWindow &window) {
+		return window._config.audioMuted && !window._config.videoEnabled;
 	}
 
 	static void setEffects(
@@ -566,6 +578,117 @@ void verifyWindowDeletionDoesNotWaitForCaptureStop() {
 	});
 }
 
+struct PreparationLatch {
+	std::atomic_bool entered{false};
+	std::mutex mutex;
+	std::condition_variable wake;
+	bool released = false;
+	void wait() {
+		std::unique_lock lock(mutex);
+		entered.store(true);
+		TEST_CHECK(wake.wait_for(lock, 10s, [&] { return released; }));
+	}
+	void release() {
+		{ std::lock_guard lock(mutex); released = true; }
+		wake.notify_one();
+	}
+};
+
+void verifyPreparationKeepsUiResponsiveAndDefersAdmission() {
+	runCase("preparation waits off Qt; admission runs once after readiness", [] {
+		Fixture fixture;
+		auto latch = std::make_shared<PreparationLatch>();
+		const auto uiThread = std::this_thread::get_id();
+		int admissions = 0;
+		CameraOwnerTestAccess::prepare(*fixture.window, [latch, uiThread] {
+			TEST_CHECK(std::this_thread::get_id() != uiThread);
+			latch->wait();
+		}, [&] {
+			TEST_CHECK(std::this_thread::get_id() == uiThread);
+			++admissions;
+		});
+		TEST_CHECK(pumpUntil([&] { return latch->entered.load(); }));
+		bool uiProgress = false;
+		QMetaObject::invokeMethod(QCoreApplication::instance(), [&] {
+			uiProgress = true;
+		}, Qt::QueuedConnection);
+		TEST_CHECK(pumpUntil([&] { return uiProgress; }));
+		TEST_CHECK(admissions == 0);
+		fixture.window->prepareMediaAndJoin([&] { admissions += 100; });
+		latch->release();
+		TEST_CHECK(pumpUntil([&] { return admissions != 0; }));
+		TEST_CHECK(admissions == 1);
+		TEST_CHECK(CameraOwnerTestAccess::mediaDisabled(*fixture.window));
+		fixture.window->prepareMediaAndJoin([&] { admissions += 100; });
+		drainEvents();
+		TEST_CHECK(admissions == 1);
+	});
+}
+
+void verifyCloseDuringPreparation() {
+	runCase("closing during device preparation cancels admission without waiting", [] {
+		Fixture fixture;
+		auto latch = std::make_shared<PreparationLatch>();
+		int admissions = 0;
+		CameraOwnerTestAccess::prepare(*fixture.window, [latch] { latch->wait(); }, [&] { ++admissions; });
+		TEST_CHECK(pumpUntil([&] { return latch->entered.load(); }));
+		fixture.window->close();
+		fixture.window.reset();
+		bool uiProgress = false;
+		QMetaObject::invokeMethod(QCoreApplication::instance(), [&] { uiProgress = true; }, Qt::QueuedConnection);
+		TEST_CHECK(pumpUntil([&] { return uiProgress; }));
+		TEST_CHECK(admissions == 0);
+		latch->release();
+		drainCaptureRetirement();
+		drainEvents();
+		TEST_CHECK(admissions == 0);
+	});
+}
+
+void verifyCancelQueuedPreparationCompletion() {
+	runCase("session invalidation revokes already queued preparation completion", [] {
+		Fixture fixture;
+		int admissions = 0;
+		CameraOwnerTestAccess::prepare(*fixture.window, [] {}, [&] { ++admissions; });
+		// Do not pump Qt: let the worker queue completion first.
+		const auto deadline = std::chrono::steady_clock::now() + 10s;
+		while (OpenMeeting::SessionShutdownService::Instance().busy() &&
+			std::chrono::steady_clock::now() < deadline) std::this_thread::yield();
+		TEST_CHECK(!OpenMeeting::SessionShutdownService::Instance().busy());
+		fixture.session->logout(false);
+		drainCaptureRetirement();
+		drainEvents();
+		TEST_CHECK(admissions == 0);
+	});
+}
+
+void verifyPreparationExceptionDoesNotAdmit() {
+	runCase("unexpected preparation failure never starts admission", [] {
+		Fixture fixture;
+		int admissions = 0;
+		CameraOwnerTestAccess::prepare(*fixture.window,
+			[] { throw std::runtime_error("controlled preparation failure"); }, [&] { ++admissions; });
+		drainCaptureRetirement();
+		drainEvents();
+		TEST_CHECK(admissions == 0);
+	});
+}
+
+void verifyCameraSnapshotCapabilities() {
+	runCase("camera snapshot derives resolution options without hardware enumeration", [] {
+		livekit::DShowDeviceInfo device;
+		device.path = "nonexistent-test-device";
+		device.capabilities = {
+			{640, 480, 15, 30}, {1920, 1080, 15, 30},
+			{640, 480, 60, 30}, {0, 1080, 30, 60}};
+		const auto resolutions = livekit::CameraSourceManager::GetSupportedResolutions(device);
+		TEST_CHECK(resolutions.size() == 2);
+		TEST_CHECK((resolutions[0] == livekit::CameraResolution{1920, 1080, 30}));
+		TEST_CHECK((resolutions[1] == livekit::CameraResolution{640, 480, 60}));
+		TEST_CHECK(livekit::CameraSourceManager::SelectDefaultResolution(resolutions) == resolutions.front());
+	});
+}
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -592,9 +715,15 @@ int main(int argc, char *argv[]) {
 	verifyNewerRequestWins();
 	verifyWindowDeletionDoesNotWaitForCaptureStop();
 
+	verifyPreparationKeepsUiResponsiveAndDefersAdmission();
+	verifyCloseDuringPreparation();
+	verifyCancelQueuedPreparationCompletion();
+	verifyPreparationExceptionDoesNotAdmit();
+	verifyCameraSnapshotCapabilities();
+
 	style::StopManager();
-	TEST_CHECK(executed == 10);
-	std::cout << "CPPQT002_CASES_PLANNED=10 EXECUTED=" << executed
+	TEST_CHECK(executed == 15);
+	std::cout << "CPPQT002_CASES_PLANNED=15 EXECUTED=" << executed
 	          << " PASSED=" << executed << " FAILED=0" << std::endl;
 	return 0;
 }
