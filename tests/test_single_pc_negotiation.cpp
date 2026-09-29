@@ -40,6 +40,9 @@ public:
 // all requirements run through the production signaling dispatcher and handler.
 class RoomSinglePcTestAccess final {
 public:
+    static asio::awaitable<void> ApplyModes(Room& room, PublishedSenderBundle bundle, uint64_t generation) {
+        co_await room.ApplyPublishedSenderScalabilityModesAsync(std::move(bundle), generation);
+    }
     static void InitializeCapabilities(
         webrtc::PeerConnectionInterface* publisher, bool single_pc) {
         Room::InitializePeerConnectionCapabilities(publisher, single_pc);
@@ -212,7 +215,13 @@ struct Fixture {
             io.run_one_for(10ms);
         }
         TEST_CHECK(done);
-        if (error) std::rethrow_exception(error);
+        if (error) {
+            try { std::rethrow_exception(error); }
+            catch (const livekit::OperationError& failure) {
+                std::cerr << "INSTALL_SENDER_FAILURE " << failure.stage() << " " << failure.what() << std::endl;
+                throw;
+            }
+        }
         TEST_CHECK(bundle.primary);
         return bundle;
     }
@@ -679,6 +688,8 @@ void BackupSenderBundleRollsBackAsOneTransaction() {
             const auto backup = bundle.senders[1]->GetParameters();
             TEST_CHECK(!primary.encodings.empty());
             TEST_CHECK(!backup.encodings.empty());
+            TEST_CHECK(primary.encodings.size() > 1);
+            TEST_CHECK(bundle.scalability_modes.front() == "L1T1");
             TEST_CHECK(std::all_of(primary.encodings.begin(), primary.encodings.end(),
                 [&](const auto& encoding) {
                     return encoding.active == policy_case.primary_active;
@@ -692,6 +703,60 @@ void BackupSenderBundleRollsBackAsOneTransaction() {
         });
         const std::string sid = std::string("TR_") + policy_case.track_name;
         Access::RememberSenderBundle(*f.room, track, bundle, sid);
+        if (policy_case.policy == livekit::BackupCodecPolicy::Simulcast) {
+            Fixture remote;
+            auto& rtc = livekit::WebRTCManager::Instance();
+            bool done = false;
+            std::string offer, answer, error;
+            const auto wait = [&] {
+                const auto deadline = std::chrono::steady_clock::now() + 3s;
+                while (!done && std::chrono::steady_clock::now() < deadline) {
+                    f.io.restart(); f.io.run_one_for(10ms);
+                }
+                TEST_CHECK(done && error.empty()); done = false;
+            };
+            auto set = [&](const std::string& value) { error = value; done = true; };
+            rtc.CreateOffer(f.publisher, f.io.get_executor(), [&](const auto& sdp, const auto& value) { offer=sdp; error=value; done=true; });
+            wait();
+            rtc.SetLocalDescription(f.publisher, "offer", offer, f.io.get_executor(), set); wait();
+            rtc.SetRemoteDescription(remote.publisher, "offer", offer, f.io.get_executor(), set); wait();
+            rtc.CreateAnswer(remote.publisher, f.io.get_executor(), [&](const auto& sdp, const auto& value) { answer=sdp; error=value; done=true; });
+            wait();
+            rtc.SetLocalDescription(remote.publisher, "answer", answer, f.io.get_executor(), set); wait();
+            rtc.SetRemoteDescription(f.publisher, "answer", answer, f.io.get_executor(), set); wait();
+            auto applied = asio::co_spawn(f.io, Access::ApplyModes(*f.room, bundle, f.generation), asio::use_future);
+            while (applied.wait_for(0ms) != std::future_status::ready) { f.io.restart(); f.io.run_one_for(10ms); }
+            try { applied.get(); }
+            catch (const livekit::OperationError& failure) {
+                std::cerr << "APPLY_MODE_FAILURE " << failure.stage() << " " << failure.what() << std::endl;
+                throw;
+            }
+            rtc.signaling_thread()->BlockingCall([&] {
+                for (const auto& encoding : bundle.primary->GetParameters().encodings)
+                    TEST_CHECK(encoding.scalability_mode == std::optional<std::string>("L1T1"));
+            });
+            for (const bool primary_enabled : {false, true}) {
+                livekit::proto::SignalResponse message;
+                auto* quality = message.mutable_subscribed_quality_update();
+                quality->set_track_sid(sid);
+                for (const auto& [codec, enabled] : std::vector<std::pair<std::string,bool>>{
+                        {"video/VP9",primary_enabled},{"video/VP8",!primary_enabled}}) {
+                    auto* entry = quality->add_subscribed_codecs(); entry->set_codec(codec);
+                    for (const auto level : {livekit::proto::LOW,livekit::proto::MEDIUM,livekit::proto::HIGH}) {
+                        auto* layer = entry->add_qualities(); layer->set_quality(level); layer->set_enabled(enabled);
+                    }
+                }
+                f.room->HandleSignalMessageForTesting(message);
+                rtc.signaling_thread()->BlockingCall([&] {
+                    for (size_t i=0;i<bundle.senders.size();++i) {
+                        const auto parameters = bundle.senders[i]->GetParameters();
+                        TEST_CHECK(!parameters.codecs.empty());
+                        for (const auto& encoding : parameters.encodings)
+                            TEST_CHECK(encoding.active == (i == 0 ? primary_enabled : !primary_enabled));
+                    }
+                });
+            }
+        }
         if (policy_case.policy == livekit::BackupCodecPolicy::PreferRegression) {
             livekit::proto::SignalResponse message;
             auto* quality = message.mutable_subscribed_quality_update();

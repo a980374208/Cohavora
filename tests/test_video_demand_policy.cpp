@@ -609,6 +609,14 @@ void TestGenerationReplacementAndQualityCaps() {
             "main screen share did not use the bounded 1080p tier");
 
     share_view.view_revision = 2;
+    share_view.stage_rect = {0, 0, 3840, 2160};
+    share_policy.UpdateViewport(share_view, At(1ms));
+    const auto& large_share = share_policy.Reconcile(At(1ms));
+    Require(large_share.visible_seats.front().width > 1920 && large_share.visible_seats.front().height > 1080,
+            "large main screen share remains capped at 1080p");
+    Require(large_share.visible_seats.front().width <= 3840 && large_share.visible_seats.front().height <= 2160,
+            "main screen share exceeds 4K budget");
+    share_view.view_revision = 3;
     share_view.selected_share.reset();
     share_view.pinned = CameraKey(share_catalog, 0);
     share_policy.UpdateViewport(share_view, At(1ms));

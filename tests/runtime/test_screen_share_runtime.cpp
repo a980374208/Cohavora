@@ -69,15 +69,16 @@ public:
             GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &monitor);
             const auto& bounds = monitor.rcMonitor;
             HWND hwnd = CreateWindowExW(fullscreen ? WS_EX_TOPMOST : 0, type.lpszClassName, L"LiveKit screen-share test pattern",
-                detailed ? WS_POPUP : WS_OVERLAPPEDWINDOW,
+                (detailed || std::getenv("LIVEKIT_TEST_QUALITY_HOT")) ? WS_POPUP : WS_OVERLAPPEDWINDOW,
                 fullscreen ? bounds.left : 80, fullscreen ? bounds.top : 80,
-                fullscreen ? bounds.right - bounds.left : 800,
-                fullscreen ? bounds.bottom - bounds.top : 600,
+                fullscreen ? bounds.right - bounds.left : (std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? 3840 : 800),
+                fullscreen ? bounds.bottom - bounds.top : (std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? 2160 : 600),
                 nullptr, nullptr, type.hInstance, nullptr);
             if (hwnd) {
                 if (detailed) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0x10000);
+                else if (std::getenv("LIVEKIT_TEST_QUALITY_HOT")) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0x20000);
                 ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                SetTimer(hwnd, 1, detailed ? 66 : 500, nullptr);
+                SetTimer(hwnd, 1, std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? 10 : detailed ? 66 : 500, nullptr);
                 UpdateWindow(hwnd);
             }
             ready.set_value(hwnd);
@@ -115,7 +116,7 @@ private:
         if (message == WM_TIMER) {
             const auto state = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
             SetWindowLongPtrW(hwnd, GWLP_USERDATA,
-                (state & 0x10000) ? (0x10000 | ((state + 1) & 0xfff)) : !state);
+                (state & 0x30000) ? ((state & 0x30000) | ((state + 1) & 0xfff)) : !state);
             InvalidateRect(hwnd, nullptr, false);
             return 0;
         }
@@ -124,7 +125,8 @@ private:
             HDC dc = message == WM_PAINT ? BeginPaint(hwnd, &paint) : reinterpret_cast<HDC>(wp);
             const auto state = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
             const bool detailed = (state & 0x10000) != 0;
-            const bool inverted = detailed ? ((state / 8) & 1) != 0 : state != 0;
+            const bool quality_hot = (state & 0x20000) != 0;
+            const bool inverted = (detailed || quality_hot) ? ((state / 8) & 1) != 0 : state != 0;
             HDC target = dc;
             HDC buffer = detailed ? CreateCompatibleDC(dc) : nullptr;
             HBITMAP bitmap = detailed ? CreateCompatibleBitmap(dc, 800, 600) : nullptr;
@@ -134,8 +136,18 @@ private:
             GetClientRect(hwnd, &rect);
             if (detailed) rect = RECT{0, 0, 800, 600};
             FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(inverted ? BLACK_BRUSH : WHITE_BRUSH)));
-            rect.right /= 2;
+            // The 4K fixture can extend beyond the physical display. Keep
+            // both animation samples in its visible upper-left region;
+            // DWM may leave off-display pixels black in a WGC capture.
+            rect.right /= std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? 4 : 2;
             FillRect(dc, &rect, static_cast<HBRUSH>(GetStockObject(inverted ? WHITE_BRUSH : BLACK_BRUSH)));
+            if (quality_hot) {
+                // Distinct moving content at each capture avoids two-phase
+                // aliasing and static-frame encoder suppression at 30 FPS.
+                const LONG x = static_cast<LONG>((state & 0xfff) * 11 % 600);
+                RECT moving{x, 32, x + 40, 96};
+                FillRect(dc, &moving, static_cast<HBRUSH>(GetStockObject(inverted ? BLACK_BRUSH : WHITE_BRUSH)));
+            }
             if (detailed) {
                 RECT area{0, 0, 800, 230};
                 FillRect(dc, &area, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
@@ -254,6 +266,9 @@ public:
             if (!first_frame_only || delivered->fetch_add(1) == 0) frame(value);
         }, [counts = counts_, end = std::move(end)] { ++counts->ended; end(); });
     }
+    bool SetQuality(livekit::ScreenShareQuality quality, uint64_t revision, QualityCallback callback) override {
+        return capture_->SetQuality(quality, revision, std::move(callback));
+    }
     void Stop() override { capture_->Stop(); ++counts_->stopped; }
 private:
     std::shared_ptr<CaptureCounts> counts_;
@@ -315,7 +330,8 @@ public:
         record->source = track->source();
         if (auto rtc_track = track->rtc_track()) record->rtc_track_id = rtc_track->id();
         const std::weak_ptr<ReceivedTrack> weak = record;
-        record->subscription = track->subscribeI420VideoFrames([weak, quality = quality](const auto& frame) {
+        const bool quality_hot = std::getenv("LIVEKIT_TEST_QUALITY_HOT") != nullptr;
+        record->subscription = track->subscribeI420VideoFrames([weak, quality = quality, quality_hot](const auto& frame) {
             auto record = weak.lock();
             if (!record) return;
             if (quality && record->source == Source::ScreenShareVideo) quality->Receive(frame);
@@ -328,8 +344,9 @@ public:
             ++record->valid_frames;
             record->valid_width = frame->width();
             record->valid_height = frame->height();
-            const auto* row = frame->data_y() + (frame->height() / 2) * frame->stride_y();
-            const int left = row[frame->width() / 4], right = row[3 * frame->width() / 4];
+            const auto* row = frame->data_y() + (frame->height() / (quality_hot ? 8 : 2)) * frame->stride_y();
+            const int divisor = quality_hot ? 8 : 4;
+            const int left = row[frame->width() / divisor], right = row[3 * frame->width() / divisor];
             if (left < 70 && right > 180) ++record->black_left;
             if (right < 70 && left > 180) ++record->white_left;
         });
@@ -802,6 +819,135 @@ asio::awaitable<void> LifecycleMatrix(Peer& sender, Peer& receiver) {
     SampleShareObjects(sender, cycles, "settled");
 }
 
+asio::awaitable<void> QualityHotMatrix(Peer& sender, Peer& receiver) {
+    using R = livekit::ScreenShareResolution;
+    using Q = livekit::ScreenShareQualityStatus;
+    PatternWindow window;
+    auto screen = co_await StartScreen(sender, receiver, window);
+    auto publication = sender.room->local_participant()->get_publication(screen.sid);
+    const auto track = publication->track();
+    const auto rtc = track->rtc_track();
+    const auto counts = sender.room->GetPublisherMediaObjectCounts();
+    const auto preview = sender.share->snapshot().preview;
+    const auto privateBytes = [] {
+        PROCESS_MEMORY_COUNTERS_EX memory{};
+        Require(GetProcessMemoryInfo(GetCurrentProcess(), reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory)) != 0, "quality_memory_sample_unavailable");
+        return static_cast<uint64_t>(memory.PrivateUsage);
+    };
+    const auto memory_before = privateBytes();
+    const auto initial = sender.share->snapshot().applied_quality.value();
+    Require(initial.source_width == 3840 && initial.source_height == 2160 && initial.width == 2560 && initial.height == 1440 &&
+        initial.quality.fps == 20, "quality_auto_default_not_2k20");
+    int fps_failures = 0;
+    const bool collect_fps_failures = std::getenv("LIVEKIT_TEST_COLLECT_FPS_FAILURES") != nullptr;
+    for (int index = 0; index < 50; ++index) {
+        const livekit::ScreenShareQuality quality{
+            index % 5 == 0 || index % 5 == 4 ? R::P720 : index % 5 == 2 ? R::P1440 : R::P1080,
+            index % 3 == 0 ? 15 : index % 3 == 1 ? 20 : 30};
+        sender.share->SetQuality(quality);
+        co_await Until([&] { return sender.share->snapshot().quality_status == Q::Applied &&
+            sender.share->snapshot().applied_quality && sender.share->snapshot().applied_quality->quality == quality; }, "quality_not_applied");
+        const auto applied = *sender.share->snapshot().applied_quality;
+        const int before = screen.record->frames;
+        co_await Until([&] { return screen.record->frames > before && screen.record->width == applied.width &&
+            screen.record->height == applied.height; }, "quality_remote_dimensions_missing");
+        Require(sender.LocalSid(Source::ScreenShareVideo) == screen.sid && publication->track() == track &&
+            track->rtc_track() == rtc && sender.share->snapshot().preview == preview &&
+            !screen.record->unpublished && !screen.record->unsubscribed && sender.captures->next_id == 1 &&
+            sender.room->GetPublisherMediaObjectCounts().transceivers == counts.transceivers, "quality_identity_changed");
+        if (index < 10) co_await Delay(1000ms);
+        const int sample = screen.record->frames;
+        const int capture_sample = sender.captures->frames;
+        const auto sample_start = std::chrono::steady_clock::now();
+        co_await Delay(index < 10 ? 4000ms : 1100ms);
+        const double decoded_fps = (screen.record->frames.load()-sample) /
+            std::chrono::duration<double>(std::chrono::steady_clock::now()-sample_start).count();
+        Require(decoded_fps > 0, "quality_remote_stalled");
+        std::cout << "[QUALITY_RUNTIME] " << nlohmann::json{{"stage",index},{"width",applied.width},{"height",applied.height},
+            {"fps",quality.fps},{"decoded_fps",decoded_fps},{"fps_checked",index < 10},{"received_frames",screen.record->frames.load()-sample},{"same_track",true},
+            {"captured_frames",sender.captures->frames.load()-capture_sample},
+            {"capture_instances",sender.captures->next_id.load()},{"private_bytes",privateBytes()}}.dump() << std::endl;
+        if (index < 10 && (decoded_fps < quality.fps * 0.70 || decoded_fps > quality.fps * 1.20)) {
+            ++fps_failures;
+            const auto stats = co_await sender.room->GetStats();
+            nlohmann::json layers = nlohmann::json::array();
+            for (const auto& report : stats.reports) for (const auto& out : report.outbound_rtp)
+                if (out.kind == "video") layers.push_back({{"rid",out.rid},{"width",out.frame_width},{"height",out.frame_height},
+                    {"encoded_fps",out.frames_per_second},{"limitation",out.quality_limitation_reason}});
+            std::cout << "[QUALITY_RUNTIME] " << nlohmann::json{{"event","fps_failure_stats"},{"layers",layers}}.dump() << std::endl;
+        }
+        if (index < 10 && !collect_fps_failures) Require(decoded_fps >= quality.fps * 0.70 && decoded_fps <= quality.fps * 1.20,
+            "quality_remote_fps_outside_tolerance");
+    }
+    sender.share->SetQuality({R::Native, 15});
+    co_await Until([&] { return sender.share->snapshot().quality_status == Q::Applied &&
+        sender.share->snapshot().applied_quality->width == 3840; }, "quality_native_not_4k");
+    co_await Until([&] { return screen.record->width == 3840 && screen.record->height == 2160; }, "quality_native_remote_not_4k");
+    sender.share->SetQuality({R::Auto, 20});
+    co_await Until([&] { return sender.share->snapshot().quality_status == Q::Applied &&
+        sender.share->snapshot().applied_quality->quality == livekit::ScreenShareQuality{}; }, "quality_auto_restore_failed");
+    std::cout << "[QUALITY_RUNTIME] " << nlohmann::json{{"auto_default","2k20"},{"native_4k","PASS"}}.dump() << std::endl;
+    const auto accepted = sender.share->snapshot().applied_quality->quality;
+    for (const auto scenario : {livekit::SimulateScenarioType::SignalReconnect, livekit::SimulateScenarioType::FullReconnect}) {
+        const int before = sender.listener->reconnected;
+        co_await sender.room->SimulateScenarioAsync(scenario);
+        co_await Until([&] { return sender.listener->reconnected > before; }, "quality_reconnect_missing", 45s);
+        co_await Until([&] { return sender.share->snapshot().quality_status == Q::Applied; }, "quality_reconnect_sync_missing");
+        Require(sender.share->snapshot().applied_quality->quality == accepted && sender.share->snapshot().preview == preview &&
+            sender.captures->next_id == 1, "quality_intent_lost_on_reconnect");
+        const auto sid = sender.LocalSid(Source::ScreenShareVideo);
+        co_await Until([&] { auto received = receiver.listener->Find(sid); return received && received->frames > 3; }, "quality_reconnect_media_missing");
+        std::cout << "[QUALITY_RUNTIME] " << nlohmann::json{{"reconnect",scenario == livekit::SimulateScenarioType::FullReconnect ? "full" : "signal"},{"status","PASS"}}.dump() << std::endl;
+    }
+    if (const char* duration = std::getenv("LIVEKIT_TEST_QUALITY_SOAK_SECONDS")) {
+        const int seconds = std::atoi(duration);
+        Require(seconds >= 30 && seconds <= 1800, "quality_soak_duration_invalid");
+        sender.share->SetQuality({R::Native, 30});
+        co_await Until([&] { return sender.share->snapshot().quality_status == Q::Applied &&
+            sender.share->snapshot().applied_quality->quality == livekit::ScreenShareQuality{R::Native,30}; }, "quality_soak_not_applied");
+        const auto sid = sender.LocalSid(Source::ScreenShareVideo);
+        co_await Until([&] { auto received = receiver.listener->Find(sid); return received && received->width == 3840 && received->height == 2160; }, "quality_soak_dimensions_missing");
+        const auto received = receiver.listener->Find(sid);
+        std::cout << "[QUALITY_RUNTIME] " << nlohmann::json{{"event","soak_start"},{"seconds",seconds},{"width",3840},{"height",2160},{"fps",30}}.dump() << std::endl;
+        int last_frames = received->frames;
+        auto cpu_before = ProcessCpuTicks();
+        for (int elapsed = 10; elapsed <= seconds; elapsed += 10) {
+            co_await Delay(10s);
+            Require(received->frames > last_frames && sender.share->snapshot().state == State::Active &&
+                sender.share->snapshot().quality_status == Q::Applied && sender.captures->next_id == 1, "quality_soak_stalled");
+            const auto cpu_after = ProcessCpuTicks();
+            std::cout << "[QUALITY_RUNTIME] " << nlohmann::json{{"event","soak_sample"},{"elapsed",elapsed},
+                {"decoded_frames",received->frames.load()-last_frames},{"capture_frames",sender.captures->frames.load()},
+                {"cpu_core_percent",double(cpu_after-cpu_before)/1e7/10.0*100.0},{"private_bytes",privateBytes()}}.dump() << std::endl;
+            SampleShareObjects(sender, elapsed, "quality_soak");
+            if (elapsed % 30 == 0) {
+                const auto stats = co_await sender.room->GetStats();
+                nlohmann::json layers = nlohmann::json::array();
+                nlohmann::json bandwidth = nullptr;
+                for (const auto& report : stats.reports) {
+                    for (const auto& out : report.outbound_rtp) if (out.kind == "video")
+                        layers.push_back({{"rid",out.rid},{"width",out.frame_width},{"height",out.frame_height},
+                            {"encoded_fps",out.frames_per_second},{"frames_encoded",out.frames_encoded},
+                            {"bytes_sent",out.bytes_sent},{"limitation",out.quality_limitation_reason}});
+                    for (const auto& pair : report.candidate_pairs) if (pair.current_pair && pair.available_outgoing_bitrate_available)
+                        bandwidth = pair.available_outgoing_bitrate;
+                }
+                std::cout << "[QUALITY_RUNTIME] " << nlohmann::json{{"event","soak_rtp"},{"elapsed",elapsed},
+                    {"available_outgoing_bitrate",bandwidth},{"layers",layers}}.dump() << std::endl;
+            }
+            cpu_before = cpu_after;
+            last_frames = received->frames;
+        }
+    }
+    sender.share->SetQuality({R::P720, 15});
+    sender.share->Stop();
+    co_await Until([&] { return sender.share->snapshot().state == State::Idle; }, "quality_stop_race_failed", 35s);
+    Require(sender.captures->live == 0 && !preview->active(), "quality_capture_not_released");
+    std::cout << "[QUALITY_RUNTIME] " << nlohmann::json{{"status",fps_failures ? "FAIL" : "PASS"},{"functional_status","PASS"},
+        {"fps_failures",fps_failures},{"switches",50},{"memory_before",memory_before},{"memory_after",privateBytes()}}.dump() << std::endl;
+    Require(fps_failures == 0, "quality_remote_fps_outside_tolerance");
+}
+
 asio::awaitable<void> PublisherLifecycleMatrix(Peer& sender, bool direct_track) {
     co_await sender.StartCamera();
     std::unique_ptr<PatternWindow> window;
@@ -1112,7 +1258,8 @@ asio::awaitable<int> Run(std::string url, std::string peer_url,
             Require(first.room->room_info().sid == second->room->room_info().sid, "peers_in_different_rooms");
             std::cout << "[CONNECTED] two_distinct_participants=true same_service_room=true" << std::endl;
         }
-        if (network_only) co_await NetworkFaultMatrix(first, *second, receiver_telemetry);
+        if (std::getenv("LIVEKIT_TEST_QUALITY_HOT")) co_await QualityHotMatrix(first, *second);
+        else if (network_only) co_await NetworkFaultMatrix(first, *second, receiver_telemetry);
         else if (performance_only) co_await PerformanceMatrix(first, *second);
         else if (publisher_only) co_await PublisherLifecycleMatrix(first, direct_track);
         else if (lifecycle_only) co_await LifecycleMatrix(first, *second);
@@ -1137,7 +1284,7 @@ asio::awaitable<int> Run(std::string url, std::string peer_url,
 } // namespace
 
 int main(int argc, char** argv) {
-    if (std::getenv("LIVEKIT_TEST_WGC_SCREEN"))
+    if (std::getenv("LIVEKIT_TEST_WGC_SCREEN") || std::getenv("LIVEKIT_TEST_QUALITY_HOT"))
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const bool recovery_only = argc == 2 && std::string(argv[1]) == "--recovery-and-leave";
     const bool lifecycle_only = argc == 2 && std::string(argv[1]) == "--lifecycle-probe";

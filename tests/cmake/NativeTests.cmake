@@ -352,6 +352,11 @@ target_link_libraries(test_audio_playout_warmup PRIVATE
 )
 
 # Screen-share lifecycle regression and opt-in real Windows capture probes.
+add_executable(test_screen_share_quality ${LIVEKIT_TEST_SOURCE_DIR}/test_screen_share_quality.cpp)
+target_include_directories(test_screen_share_quality PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_screen_share_quality PRIVATE cohavora_core)
+add_test(NAME screen_share_quality_test COMMAND test_screen_share_quality)
+set_tests_properties(screen_share_quality_test PROPERTIES TIMEOUT 30 LABELS "CORE_REGRESSION;SCREEN_SHARE_QUALITY_FOCUSED")
 add_executable(test_screen_share_session ${LIVEKIT_TEST_SOURCE_DIR}/test_screen_share_session.cpp)
 target_include_directories(test_screen_share_session PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
 target_link_libraries(test_screen_share_session PRIVATE cohavora_core)
@@ -375,6 +380,11 @@ if(COHAVORA_BUILD_RUNTIME_TOOLS)
     target_include_directories(test_screen_share_runtime PRIVATE
         ${LIVEKIT_PROJECT_SOURCE_DIR})
     target_link_libraries(test_screen_share_runtime PRIVATE cohavora_core)
+
+    add_executable(test_screen_share_quality_runtime EXCLUDE_FROM_ALL
+        ${LIVEKIT_TEST_SOURCE_DIR}/runtime/test_screen_share_quality_runtime.cpp)
+    target_include_directories(test_screen_share_quality_runtime PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+    target_link_libraries(test_screen_share_quality_runtime PRIVATE cohavora_core)
 
     # This M0 probe opens real desktop windows and captures one screen. It is
     # available only with both runtime tools and the Qt/UI test stack enabled.

@@ -12,6 +12,7 @@ inline void TestScreenCaptureFallback() {
         bool selected = true, throws = false, in_capture = false;
         Capturer::SourceId source = 0;
         Result result = Result::SUCCESS;
+        uint32_t rate = 0;
     };
     struct Fake final : Capturer {
         State& state;
@@ -21,6 +22,7 @@ inline void TestScreenCaptureFallback() {
         bool GetSourceList(SourceList*) override { return false; }
         bool SelectSource(SourceId id) override { state.source = id; return state.selected; }
         void Start(Callback* c) override { callback = c; }
+        void SetMaxFrameRate(uint32_t rate) override { state.rate = rate; }
         void CaptureFrame() override {
             ++state.captures;
             if (state.throws) throw std::runtime_error("injected capture error");
@@ -58,6 +60,7 @@ inline void TestScreenCaptureFallback() {
             livekit::ScreenCaptureFallback chain(std::move(factories));
             TEST_CHECK(chain.SelectSource(17));
             chain.Start(&sink);
+            chain.SetMaxFrameRate(20);
             chain.CaptureFrame();
             if (scenario == 8) {
                 TEST_CHECK(sink.result == Result::ERROR_PERMANENT);
@@ -73,10 +76,18 @@ inline void TestScreenCaptureFallback() {
             TEST_CHECK(sink.result == Result::SUCCESS);
             const int winner = scenario == 0 ? 0 : (scenario == 5 || scenario == 6) ? 2 : 1;
             TEST_CHECK(states[winner].captures > 0 && states[winner].source == 17);
+            TEST_CHECK(states[winner].rate == 20);
             const int first_captures = states[0].captures;
             chain.CaptureFrame();
             if (winner != 0) TEST_CHECK(states[0].captures == first_captures);
             if (winner < 2) TEST_CHECK(states[2].created == 0);
+            chain.SetMaxFrameRate(30);
+            TEST_CHECK(states[winner].rate == 30);
+            if (winner < 2) {
+                states[winner].result = Result::ERROR_PERMANENT;
+                chain.CaptureFrame();
+                TEST_CHECK(states[winner + 1].rate == 30);
+            }
         }
         for (const auto& state : states) TEST_CHECK(state.created == state.destroyed);
     }

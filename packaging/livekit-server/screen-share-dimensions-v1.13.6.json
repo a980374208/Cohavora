@@ -1,0 +1,63 @@
+{
+  "upstream": "https://github.com/livekit/livekit/tree/v1.13.6",
+  "archive_sha256": "7339d5b6f5bcc73579a516c7f18f803a708b9be7514b987a8445f2d06b4defd4",
+  "toolchain": "go1.26.6",
+  "files": {
+    "pkg/rtc/participant.go": {
+      "before": "5384a1580432b848276021488d4adaa3ebd25333610ada2680be1b2ac9ef60b1",
+      "after": "b3cfb1511e94ab4fbd28065ad5991711eed815c75cbe9a0b4b5c943e627abc7b"
+    },
+    "pkg/rtc/mediatrack.go": {
+      "before": "0e37c9dc105b1e384d3ff309f2aa6a35cd447f648199d66969956f56016d714a",
+      "after": "45d0ec9c9e8a96d9de492baed4acde89879edcc72ba7e7ab829245104fecdb73"
+    },
+    "pkg/rtc/mediatrackreceiver.go": {
+      "before": "914750ebcdfc9d43f5422fad95b5a3a78925281cfdeea63aecc893fd8aaf354b",
+      "after": "b790f4fa679ef4a35d19ed031cea6ec70a14def673b4d336785d7122357e8d54"
+    },
+    "pkg/rtc/screen_share_dimensions_test.go": {
+      "before": null,
+      "after": "750d74c9f8acd961802c6ff4806acb6a2a8897077f5de82aeb89148043d0a4f2"
+    },
+    "pkg/sfu/streamtrackermanager.go": {
+      "before": "7254c3b2c25a652d50f42e3d22ff054f0840f15c98f13b55c6fc36e4f41b9883",
+      "after": "a17f13d2b63aa93601b9c612239cebf88a0aa035440d787ffbb50b61012a8d66"
+    },
+    "pkg/sfu/screen_share_tracker_test.go": {
+      "before": null,
+      "after": "d02c7c1c33c026b7f56b7a5620344306efefdec5e7042f620cdccf97509f140c"
+    },
+    "pkg/rtc/transportmanager.go": {
+      "before": "23042be822b18063c2d576410711b3bdbd400cd39aa1e2b920583d2f96185b33",
+      "after": "72d06251677dd0abd4a92fd2e45753016b5e8ff4f6d006bb39f275480128c919"
+    },
+    "pkg/rtc/screen_share_bwe_test.go": {
+      "before": null,
+      "after": "019ac5b8b52719ef5cad53ea939ef254f47f5b388fbe1b217951f9f06986f913"
+    },
+    "pkg/sfu/receiver_base.go": {
+      "before": "c89e71027a6b98ed870a650189a960686e6320e4eca5414d94183146a915a76f",
+      "after": "58a1abca74d5a1ba6ff28938ede47e26c5611d9716ec4028b1eadebd0a9760e0"
+    },
+    "pkg/sfu/screen_share_spatial_test.go": {
+      "before": null,
+      "after": "73eb8b3b5d4345b961d7ab92cc07890a752ac4191487e94e691aeee7b7e5ff60"
+    }
+  },
+  "binary_sha256": "8d9e645d2854e76298fc4110ed0f5149180f8e3a8c58777763d5956064f7c014",
+  "test_binary_sha256": "7b15e63565de5a4aeb8707489612dc236df318e9adf9004231622a6d3c8055dd",
+  "unit_evidence": "../../out/screen-share-quality/s0-server-unit-v8.json",
+  "deployment": "ACCEPTED_V7",
+  "runtime": "PASS",
+  "runtime_evidence": [
+    "s0-server-v7-retry2-gate/backup",
+    "s0-server-v7-retry2-gate/simulcast",
+    "s0-server-v7-retry2-gate/single",
+    "s0-server-v7-retry2-gate/camera",
+    "s0-server-v7-retry2-gate/weak"
+  ],
+  "image_sha256": "sha256:37f99d42ec76fe8747295f3cde4d411a78cfc0e7d52019f313a53a05f3d624ce",
+  "rtc_unit_evidence": "../../out/screen-share-quality/s0-server-unit-v6.json",
+  "sfu_test_binary_sha256": "09ab8c5798c9dac59168b7f9f8604f10374faea42cc20529a663b14307d62cbb",
+  "sfu_unit_evidence": "../../out/screen-share-quality/s0-server-unit-v9.json"
+}

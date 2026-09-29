@@ -664,6 +664,7 @@ private:
 	std::shared_ptr<livekit::render::VideoRenderRouter> _localScreenPreview;
 	QLabel *_screenShareBanner = nullptr;
 	QPushButton *_annotationButton = nullptr;
+	QPushButton *_screenQualityButton = nullptr;
 	std::unique_ptr<AnnotationOverlayWindow> _annotationOverlay;
 	std::optional<livekit::ScreenBinding> _annotationBinding;
 	bool _annotationOffscreenForTesting = false;

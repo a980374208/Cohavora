@@ -123,6 +123,8 @@ private:
 	QComboBox *_resolutionCombo = nullptr;
 	QComboBox *_cameraCodecCombo = nullptr;
 	QComboBox *_screenShareCodecCombo = nullptr;
+	QComboBox *_screenShareResolutionCombo = nullptr;
+	QComboBox *_screenShareFpsCombo = nullptr;
 	QCheckBox *_videoCamera = nullptr;
 	QCheckBox *_highDefinition = nullptr;
 	QCheckBox *_mirrorEnabled = nullptr;

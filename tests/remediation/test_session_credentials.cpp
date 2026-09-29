@@ -174,6 +174,7 @@ void verifyAudioPreferences() {
     TEST_CHECK(defaults.speakerDeviceId.isEmpty());
     TEST_CHECK(defaults.cameraVideoCodec == QStringLiteral("auto"));
     TEST_CHECK(defaults.screenShareVideoCodec == QStringLiteral("auto"));
+    TEST_CHECK(defaults.screenShareResolution == 0 && defaults.screenShareFps == 20);
     session.reset();
 
     // Upgrading an existing ANS-only preference must not disable the other 3A stages.
@@ -200,6 +201,8 @@ void verifyAudioPreferences() {
     prefs.microphoneDeviceId = QStringLiteral("synthetic-microphone");
     prefs.cameraVideoCodec = QStringLiteral("VP9");
     prefs.screenShareVideoCodec = QStringLiteral("av1");
+    prefs.screenShareResolution = 3;
+    prefs.screenShareFps = 30;
     prefs.videoCaptureWidth = 1280;
     prefs.videoCaptureHeight = 720;
     prefs.videoCaptureFps = 25;
@@ -235,14 +238,18 @@ void verifyAudioPreferences() {
         TEST_CHECK(restored.microphoneDeviceId == prefs.microphoneDeviceId);
         TEST_CHECK(restored.cameraVideoCodec == QStringLiteral("vp9"));
         TEST_CHECK(restored.screenShareVideoCodec == QStringLiteral("av1"));
+        TEST_CHECK(restored.screenShareResolution == 3 && restored.screenShareFps == 30);
         TEST_CHECK(restored.videoCaptureWidth == 1280 && restored.videoCaptureHeight == 720);
         TEST_CHECK(restored.videoCaptureFps == 25);
     }
     prefs.cameraVideoCodec = QStringLiteral("h265");
     prefs.screenShareVideoCodec = QStringLiteral("not-a-codec");
+    prefs.screenShareResolution = -1;
+    prefs.screenShareFps = 17;
     session->setMediaPreferences(prefs);
     TEST_CHECK(session->mediaPreferences().cameraVideoCodec == QStringLiteral("auto"));
     TEST_CHECK(session->mediaPreferences().screenShareVideoCodec == QStringLiteral("auto"));
+    TEST_CHECK(session->mediaPreferences().screenShareResolution == 0 && session->mediaPreferences().screenShareFps == 20);
     std::puts("AUDIO PREFERENCES PASS: defaults, legacy ANS, independent 3A combinations, default speaker restore");
 }
 

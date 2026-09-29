@@ -263,7 +263,8 @@ int main(int argc, char **argv) {
     sdp.signaling_before = livekit::diagnostic::SdpState::HaveLocalOffer;
     sdp.signaling_after = livekit::diagnostic::SdpState::Stable;
     MeetingUI::MeetingLogConsoleWindow::diagnosticMirror()(sdp);
-    console.drainPending();
+    MeetingUI::MeetingLogConsoleTestAccess::DrainUntilText(
+        console, QStringLiteral("set_remote completed"));
     auto *view = console.findChild<QPlainTextEdit*>();
     TEST_CHECK(view);
     TEST_CHECK(view->toPlainText().contains(QStringLiteral("set_remote completed")));

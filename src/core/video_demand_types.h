@@ -45,6 +45,8 @@ enum class VideoQualityTier {
     P360,
     P720,
     P1080,
+    P1440,
+    P2160,
 };
 
 struct LogicalViewport {

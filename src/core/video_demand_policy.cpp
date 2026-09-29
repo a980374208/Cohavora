@@ -638,8 +638,9 @@ void VideoDemandPolicy::AddSeat(VideoDemandPlan& plan,
     uint32_t max_height = 360;
     if (role == VideoSeatRole::Main) {
         if (publication.source == TrackSource::ScreenShareVideo) {
-            max_width = 1920;
-            max_height = 1080;
+            max_width = 3840;
+            max_height = 2160;
+            if (extent.height > extent.width) std::swap(max_width, max_height);
         } else {
             max_width = 1280;
             max_height = 720;
@@ -651,7 +652,9 @@ void VideoDemandPolicy::AddSeat(VideoDemandPlan& plan,
         if (seat.height <= 180) seat.quality = VideoQualityTier::P180;
         else if (seat.height <= 360) seat.quality = VideoQualityTier::P360;
         else if (seat.height <= 720) seat.quality = VideoQualityTier::P720;
-        else seat.quality = VideoQualityTier::P1080;
+        else if (seat.height <= 1080) seat.quality = VideoQualityTier::P1080;
+        else if (seat.height <= 1440) seat.quality = VideoQualityTier::P1440;
+        else seat.quality = VideoQualityTier::P2160;
     }
 
     switch (role) {

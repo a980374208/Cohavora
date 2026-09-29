@@ -30,6 +30,7 @@
 #include "data_stream_assembler.h"
 #include "data_stream.h"
 #include "operation.h"
+#include "screen_share_quality.h"
 #include "telemetry/diagnostic_event.h"
 #include "telemetry/sdp_negotiation_trace.h"
 #include "livekit_rtc.pb.h"
@@ -52,6 +53,7 @@ class RenderSubmitObserver;
 }
 
 struct RoomStatsReport;
+class LocalVideoTrack;
 class RemoteTrackPublication;
 struct RemotePublicationControlRequest;
 class SubscriptionTelemetryOperation;
@@ -322,6 +324,10 @@ public:
     void EnableE2ee(const E2eeOptions& options);
     std::shared_ptr<E2eeManager> e2ee_manager() const { return e2ee_manager_; }
 
+    asio::awaitable<void> ApplyScreenShareSenderParametersAsync(
+        std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile);
+    asio::awaitable<void> SyncScreenShareMetadataAsync(
+        std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile);
     void AddTrackToPublisher(std::shared_ptr<Track> track);
     asio::awaitable<PublishedSenderBundle> AddTrackToPublisherAsync(
         std::shared_ptr<Track> track,

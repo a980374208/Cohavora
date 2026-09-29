@@ -182,7 +182,8 @@ public:
             !_startupReconnectPending && _state == MeetingState::InMeeting;
     }
     void requestScreenShareSources();
-    void startScreenShare(livekit::DesktopSource source);
+    void startScreenShare(livekit::DesktopSource source, std::optional<int> fps = std::nullopt);
+    void setScreenShareQuality(livekit::ScreenShareQuality quality);
     void stopScreenShare();
     livekit::ScreenShareSnapshot screenShareSnapshot() const { return _screenShareSnapshot; }
 

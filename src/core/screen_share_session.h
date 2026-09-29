@@ -13,9 +13,13 @@ class Room;
 
 enum class ScreenShareState { Idle, Starting, Active, Stopping, Failed, StopFailed };
 enum class ScreenShareError { None, Capture, Publish, Unpublish };
+enum class ScreenShareQualityStatus { Applied, Pending, Rejected, MetadataPending, Degraded };
 struct ScreenShareSnapshot {
     ScreenShareState state = ScreenShareState::Idle;
     ScreenShareError error = ScreenShareError::None;
+    ScreenShareQuality requested_quality;
+    std::optional<ScreenShareFrameProfile> applied_quality;
+    ScreenShareQualityStatus quality_status = ScreenShareQualityStatus::Applied;
     // Bounded frame mailbox only; the UI never owns capture/Track resources.
     std::shared_ptr<render::VideoRenderRouter> preview;
     std::string source_title;
@@ -34,6 +38,8 @@ public:
         std::function<bool()> connected;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>)> publish;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>)> unpublish;
+        std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>, ScreenShareFrameProfile)> apply_quality;
+        std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>, ScreenShareFrameProfile)> sync_quality;
         std::function<std::optional<ScreenBinding>(
             const DesktopSource &, std::uint64_t, std::string)> resolve_screen_binding =
                 ResolveScreenBinding;
@@ -48,7 +54,9 @@ public:
                        std::shared_ptr<void> executor_lifetime = {});
     ~ScreenShareSession();
     void Start(DesktopSource source,
-               VideoPublishOptions options = VideoPublishOptions());
+               VideoPublishOptions options = VideoPublishOptions(),
+               ScreenShareQuality quality = {});
+    void SetQuality(ScreenShareQuality quality);
     void Stop();
     // Revokes capture synchronously on the strand before Room disconnect and
     // executor teardown. Room disconnect owns the network rollback on leave.
@@ -56,7 +64,7 @@ public:
     // Strand-only revocation. The returned capture must be stopped/released by
     // the shutdown worker while the strand continues draining its coroutine.
     std::unique_ptr<IDesktopCapture> TakeCaptureForShutdown();
-    void SetTransportReady(bool ready) { transport_ready_ = ready; }
+    void SetTransportReady(bool ready);
     ScreenShareSnapshot snapshot() const { return snapshot_; } // strand only
 
 private:
@@ -67,6 +75,7 @@ private:
     static asio::awaitable<void> Drive(std::shared_ptr<ScreenShareSession> self,
                                        std::shared_ptr<Run> run, DesktopSource source,
                                        VideoPublishOptions options);
+    static asio::awaitable<void> ApplyQuality(std::shared_ptr<ScreenShareSession> self, std::shared_ptr<Run> run);
     void SetState(ScreenShareState state, ScreenShareError error = ScreenShareError::None);
     void StopFrames(const std::shared_ptr<Run>& run);
     asio::any_io_executor strand_;
@@ -77,5 +86,6 @@ private:
     uint64_t next_run_ = 0;
     bool closed_ = false;
     bool transport_ready_ = true;
+    uint64_t transport_revision_ = 0;
 };
 } // namespace livekit

@@ -7,6 +7,7 @@
 #include <mutex>
 #include <atomic>
 #include <memory>
+#include <utility>
 #include "video_frame.h"
 
 namespace livekit {
@@ -68,8 +69,12 @@ public:
     VideoSource(const VideoSource&) = delete;
     VideoSource& operator=(const VideoSource&) = delete;
 
-    int width() const noexcept { return width_; }
-    int height() const noexcept { return height_; }
+    std::pair<int, int> dimensions() const noexcept {
+        const auto value = dimensions_.load(std::memory_order_acquire);
+        return {int(value >> 32), int(value & 0xffffffff)};
+    }
+    int width() const noexcept { return dimensions().first; }
+    int height() const noexcept { return dimensions().second; }
     std::uint64_t captured_frame_count() const noexcept {
         return captured_frame_count_.load(std::memory_order_relaxed);
     }
@@ -84,8 +89,7 @@ public:
     std::shared_ptr<Subscription> subscribe(FrameSink sink);
 
 private:
-    std::atomic<int> width_{0};
-    std::atomic<int> height_{0};
+    std::atomic<std::uint64_t> dimensions_{0};
     std::atomic<std::uint64_t> captured_frame_count_{0};
     mutable std::mutex sink_mutex_;
     std::vector<FrameSink> sinks_;

@@ -1,3 +1,4 @@
+#include "src/ui/whiteboard/accessible_combo_box.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/app_branding.h"
 #include "src/ui/app_theme.h"
@@ -399,6 +400,18 @@ QWidget *SettingsDialog::buildVideoPage() {
 	_screenShareCodecCombo = new QComboBox(content);
 	populateVideoCodecChoices(_screenShareCodecCombo);
 	layout->addWidget(_screenShareCodecCombo);
+    layout->addWidget(new QLabel(QCoreApplication::translate("MeetingUI", "Screen share resolution"), content));
+    _screenShareResolutionCombo = new QComboBox(content);
+    configureAccessibleComboBox(_screenShareResolutionCombo);
+    _screenShareResolutionCombo->setObjectName(QStringLiteral("screenShareResolution"));
+    _screenShareResolutionCombo->addItems({QCoreApplication::translate("MeetingUI", "Auto (up to 2K)"), QCoreApplication::translate("MeetingUI", "720p"), QCoreApplication::translate("MeetingUI", "1080p"), QCoreApplication::translate("MeetingUI", "1440p (2K)"), QCoreApplication::translate("MeetingUI", "Native (up to 4K)")});
+    layout->addWidget(_screenShareResolutionCombo);
+    layout->addWidget(new QLabel(QCoreApplication::translate("MeetingUI", "Screen share frame rate"), content));
+    _screenShareFpsCombo = new QComboBox(content);
+    configureAccessibleComboBox(_screenShareFpsCombo);
+    _screenShareFpsCombo->setObjectName(QStringLiteral("screenShareFps"));
+    for (int fps : {15, 20, 30}) _screenShareFpsCombo->addItem(QString::number(fps) + " FPS", fps);
+    layout->addWidget(_screenShareFpsCombo);
 
 	_mirrorEnabled = new QCheckBox(QCoreApplication::translate("MeetingUI", "Mirror Video"), content);
 	layout->addWidget(_mirrorEnabled);
@@ -746,7 +759,7 @@ void SettingsDialog::connectPreferenceControls() {
 			emitCameraSelection();
 			requestPreviewIfVisible();
 		});
-	for (auto *combo : {_cameraCodecCombo, _screenShareCodecCombo}) {
+	for (auto *combo : {_cameraCodecCombo, _screenShareCodecCombo, _screenShareResolutionCombo, _screenShareFpsCombo}) {
 		connect(combo,
 			static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
 			this, [this](int) {
@@ -827,6 +840,8 @@ OpenMeeting::MediaPreferences SettingsDialog::preferences() const {
 	value.speakerDeviceId = selectedSpeakerDeviceId();
 	value.cameraVideoCodec = _cameraCodecCombo
 		? _cameraCodecCombo->currentData().toString() : QStringLiteral("auto");
+	value.screenShareResolution = _screenShareResolutionCombo->currentIndex();
+	value.screenShareFps = _screenShareFpsCombo->currentData().toInt();
 	value.screenShareVideoCodec = _screenShareCodecCombo
 		? _screenShareCodecCombo->currentData().toString() : QStringLiteral("auto");
 
@@ -872,6 +887,8 @@ void SettingsDialog::setPreferences(const OpenMeeting::MediaPreferences &value) 
 			_cameraCodecCombo, OpenMeeting::normalizeVideoCodecPreference(value.cameraVideoCodec));
 		_cameraCodecCombo->setCurrentIndex(selected >= 0 ? selected : 0);
 	}
+	_screenShareResolutionCombo->setCurrentIndex(value.screenShareResolution);
+	_screenShareFpsCombo->setCurrentIndex(_screenShareFpsCombo->findData(value.screenShareFps));
 	if (_screenShareCodecCombo) {
 		const auto selected = findData(_screenShareCodecCombo,
 			OpenMeeting::normalizeVideoCodecPreference(value.screenShareVideoCodec));

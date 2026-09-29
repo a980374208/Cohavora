@@ -48,7 +48,15 @@ struct CaptureState {
     livekit::IDesktopCapture::EndCallback ended;
     int starts = 0, stops = 0, live = 0;
     bool fail = false;
-    void Emit() { frame(livekit::VideoFrame::create(1920, 1080, livekit::VideoBufferType::I420)); }
+    bool reject_next_quality = false;
+    livekit::ScreenShareQuality quality;
+    uint64_t revision = 0;
+    livekit::IDesktopCapture::QualityCallback applied;
+    void Emit() {
+        auto profile = livekit::ResolveScreenShareProfile(1920, 1080, quality, revision).value();
+        frame(livekit::VideoFrame::create(profile.width, profile.height, livekit::VideoBufferType::I420));
+        if (applied) applied(profile);
+    }
 };
 class FakeCapture final : public livekit::IDesktopCapture {
 public:
@@ -59,6 +67,11 @@ public:
         state_->frame = std::move(frame);
         state_->ended = std::move(ended);
         if (state_->fail) throw std::runtime_error("capture denied");
+    }
+    bool SetQuality(livekit::ScreenShareQuality quality, uint64_t revision, QualityCallback callback) override {
+        if (state_->reject_next_quality) { state_->reject_next_quality = false; return false; }
+        state_->quality = quality; state_->revision = revision; state_->applied = std::move(callback);
+        return true;
     }
     void Stop() override { ++state_->stops; }
 private:
@@ -77,6 +90,10 @@ struct Fixture {
     std::weak_ptr<livekit::LocalVideoTrack> track;
     asio::steady_timer publish_gate{strand};
     asio::steady_timer stop_gate{strand};
+    asio::steady_timer quality_gate{strand};
+    bool hold_quality = false;
+    bool reject_quality_backend = false;
+    int quality_calls = 0;
     bool hold_publish = false, fail_publish = false, hold_stop = false, fail_stop = false;
     int publishes = 0, unpublishes = 0, frames = 0;
     livekit::proto::SignalRequest wire;
@@ -87,6 +104,7 @@ struct Fixture {
             std::shared_ptr<std::atomic<bool>> bindingValid = {}) {
         publish_gate.expires_at(asio::steady_timer::time_point::max());
         stop_gate.expires_at(asio::steady_timer::time_point::max());
+        quality_gate.expires_at(asio::steady_timer::time_point::max());
         livekit::RoomUnpublishTestAccess::Install(*room, local, [this] { return NegotiateStop(); });
         local->SetAsyncPublishTrackHandler([this](std::shared_ptr<livekit::Track> value,
                                                    const livekit::proto::SignalRequest& request) {
@@ -97,6 +115,15 @@ struct Fixture {
         local->add_publication(std::make_shared<livekit::TrackPublication>(camera, "TR_CAMERA", "camera"));
         auto backend = livekit::ScreenShareSession::ForRoom(room);
         backend.capture = [this] { return std::make_unique<FakeCapture>(capture); };
+        backend.apply_quality = [this](auto, auto) -> asio::awaitable<void> {
+            ++quality_calls;
+            if (reject_quality_backend) throw std::runtime_error("sender rejected");
+            if (hold_quality) {
+                std::error_code error;
+                co_await quality_gate.async_wait(asio::redirect_error(asio::use_awaitable, error));
+            }
+        };
+        backend.sync_quality = [](auto, auto) -> asio::awaitable<void> { co_return; };
         backend.resolve_screen_binding = [binding = std::move(resolvedBinding)](
                 const livekit::DesktopSource &source,
                 std::uint64_t sourceEpoch,
@@ -198,6 +225,81 @@ void NormalAndRepeat() {
     f.Until([&] { return f.State() == ScreenShareState::Active; });
     old_callback(livekit::VideoFrame::create(8, 8, livekit::VideoBufferType::I420));
     TEST_CHECK(f.source->width() == 1920 && f.publishes == 2);
+}
+
+void QualityTransactions() {
+    using Q = livekit::ScreenShareQualityStatus;
+    using R = livekit::ScreenShareResolution;
+    Fixture f;
+    f.Start();
+    f.Until([&] { return f.State() == ScreenShareState::Active; });
+    auto track = f.track.lock();
+    const auto preview = f.states.back().preview;
+    TEST_CHECK(f.states.back().applied_quality->quality.fps == 20);
+    for (int i = 0; i < 50; ++i) {
+        const livekit::ScreenShareQuality quality{i % 2 ? R::P1080 : R::P720, i % 3 == 0 ? 15 : i % 3 == 1 ? 20 : 30};
+        f.Do([&] { f.share->SetQuality(quality); });
+        f.Until([&] { return f.capture->quality == quality; });
+        f.capture->Emit();
+        f.Until([&] { return f.states.back().quality_status == Q::Applied; });
+        TEST_CHECK(f.states.back().applied_quality->quality == quality);
+        TEST_CHECK(f.track.lock() == track && f.states.back().preview == preview);
+        TEST_CHECK(f.capture->starts == 1 && f.capture->stops == 0 && f.publishes == 1);
+    }
+    // A recovered transport must replay even if an older operation completes
+    // after the recovery notification, even without a new quality command.
+    const int initial_calls = f.quality_calls;
+    f.hold_quality = true;
+    f.Do([&] { f.share->SetQuality({R::P720, 15}); });
+    f.Until([&] { return f.quality_calls > initial_calls; });
+    f.Do([&] {
+        f.share->SetTransportReady(false);
+        f.share->SetTransportReady(true);
+        f.hold_quality = false;
+        f.quality_gate.cancel();
+    });
+    f.Until([&] { return f.capture->quality == livekit::ScreenShareQuality{R::P720, 15}; });
+    f.capture->Emit();
+    f.Until([&] { return f.states.back().quality_status == Q::Applied; });
+    TEST_CHECK(f.quality_calls == initial_calls + 2);
+    TEST_CHECK(f.states.back().applied_quality->quality == (livekit::ScreenShareQuality{R::P720, 15}));
+    const auto before = f.states.back().applied_quality;
+    f.capture->reject_next_quality = true;
+    f.Do([&] { f.share->SetQuality({R::P720, 30}); });
+    f.Until([&] { return !f.capture->reject_next_quality; });
+    f.capture->Emit();
+    f.Until([&] { return f.states.back().quality_status == Q::Rejected; });
+    TEST_CHECK(f.states.back().applied_quality->quality == before->quality);
+    TEST_CHECK(f.State() == ScreenShareState::Active && preview->active());
+    f.Do([&] { f.share->SetTransportReady(false); f.share->SetQuality({R::P1440, 30}); });
+    TEST_CHECK(f.states.back().applied_quality->quality == before->quality);
+    f.Do([&] { f.share->SetTransportReady(true); });
+    f.Until([&] { return f.states.back().quality_status == Q::Applied || f.capture->revision > before->revision; });
+    f.capture->Emit();
+    f.Until([&] { return f.states.back().quality_status == Q::Applied; });
+    // Stop while the next quality waits for its confirming frame.
+    f.Do([&] { f.share->SetQuality({R::P1080, 15}); });
+    f.Until([&] { return f.capture->quality.fps == 15; });
+    auto late = f.capture->applied;
+    f.Do([&] { f.share->Stop(); });
+    late(*livekit::ResolveScreenShareProfile(1920, 1080, {R::P1080, 15}, 100));
+    f.Until([&] { return f.State() == ScreenShareState::Idle; });
+    TEST_CHECK(f.capture->stops == 1 && f.publishes == 1 && f.unpublishes == 1);
+}
+
+void QualityCompensationFailure() {
+    Fixture f;
+    f.Start();
+    f.Until([&] { return f.State() == ScreenShareState::Active; });
+    const auto preview = f.states.back().preview;
+    f.reject_quality_backend = true;
+    f.Do([&] { f.share->SetQuality({livekit::ScreenShareResolution::P720,30}); });
+    f.Until([&] { return f.states.back().quality_status == livekit::ScreenShareQualityStatus::Degraded; });
+    const int calls = f.quality_calls;
+    f.Do([&] { f.share->SetQuality({livekit::ScreenShareResolution::P1080,15}); });
+    TEST_CHECK(f.quality_calls == calls && f.State() == ScreenShareState::Active && preview->active());
+    f.Do([&] { f.share->Stop(); });
+    f.Until([&] { return f.State() == ScreenShareState::Idle; });
 }
 
 void ObjectReleaseCycles() {
@@ -687,6 +789,8 @@ int main() {
     FrameBufferReuseAndPinnedReaders();
     FrameTimestampAlignment();
     NormalAndRepeat();
+    QualityTransactions();
+    QualityCompensationFailure();
     ObjectReleaseCycles();
     CodecPreferenceSnapshot();
     ScreenBindingLifecycle();

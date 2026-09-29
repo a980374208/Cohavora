@@ -135,7 +135,31 @@ void TestEncodingPolicy() {
 
 } // namespace
 
+void TestScreenQualityBudgets() {
+    livekit::VideoPublishOptions options;
+    options.source = livekit::TrackSource::ScreenShareVideo;
+    for (const auto codec : {"vp8", "h264", "vp9", "av1"}) {
+        options.video_codec = codec;
+        for (int fps : {15,20,30}) {
+            options.screen_share_fps = fps;
+            const auto result = livekit::LocalVideoTrack::ComputeSimulcastOptions(2560,1440,options);
+            TEST_CHECK(result.layers.size() == 2 && result.layers[0].max_fps == (options.video_codec == "vp8" ? 30 : fps) && result.layers[1].max_fps == 3);
+            TEST_CHECK(result.layers[0].max_bitrate_bps <= 12000000 && result.layers[0].rid == "h" && result.layers[1].rid == "q");
+        }
+    }
+    options.video_codec = "vp8";
+    options.screen_share_fps = 30;
+    TEST_CHECK(livekit::LocalVideoTrack::ComputeSimulcastOptions(2560,1440,options).layers[0].max_bitrate_bps == 7000000);
+    TEST_CHECK(livekit::LocalVideoTrack::ComputeSimulcastOptions(1440,2560,options).layers[0].max_bitrate_bps == 7000000);
+    TEST_CHECK(livekit::LocalVideoTrack::ComputeSimulcastOptions(3840,2160,options).layers[0].max_bitrate_bps == 12000000);
+    options.source = livekit::TrackSource::Camera;
+    options.video_codec = "vp8";
+    options.screen_share_fps = 15;
+    TEST_CHECK(livekit::LocalVideoTrack::ComputeSimulcastOptions(1920,1080,options).layers[0].max_fps == 30);
+}
+
 int main() {
+    TestScreenQualityBudgets();
     TestEncodingPolicy();
 
     // Test 3: LocalParticipant PublishTrack Protobuf layers serialization

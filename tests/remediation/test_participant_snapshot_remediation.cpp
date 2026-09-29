@@ -2703,6 +2703,11 @@ void MeetingChatLogPrivacy() {
     for (const auto &secret : {text, name, fileName, imageName, reason}) {
         TEST_CHECK(!copied.contains(secret));
         console.onFilterChanged(secret);
+        // Production filter changes are debounced; wait for the public view,
+        // not an assumed synchronous rebuild.
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!view->toPlainText().isEmpty() && std::chrono::steady_clock::now() < deadline)
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
         TEST_CHECK(view->toPlainText().isEmpty());
     }
     console.onFilterChanged({});
@@ -5338,9 +5343,18 @@ void ScreenShareWindowControls() {
         void Start(livekit::DesktopSource source, FrameCallback callback, EndCallback) override {
             ++starts;
             selectedSource = std::move(source);
-            frame = std::move(callback);
+            frame = [quality = quality, qualityRevision = qualityRevision, qualityCallback = qualityCallback, callback = std::move(callback)](const auto& value) {
+                callback(value);
+                if (qualityCallback) qualityCallback(*livekit::ResolveScreenShareProfile(value.width(), value.height(), quality, qualityRevision));
+            };
+        }
+        bool SetQuality(livekit::ScreenShareQuality value, uint64_t revision, QualityCallback callback) override {
+            quality = value; qualityRevision = revision; qualityCallback = std::move(callback); return true;
         }
         void Stop() override { ++stops; }
+        livekit::ScreenShareQuality quality;
+        uint64_t qualityRevision = 0;
+        QualityCallback qualityCallback;
         int &starts, &stops;
         livekit::DesktopSource &selectedSource;
         FrameCallback &frame;
@@ -5392,7 +5406,7 @@ void ScreenShareWindowControls() {
     };
     ParticipantWindowTestAccess::deliverDefaultScreenSources(*fixture.window, defaultSources);
     fixture.pump();
-    TEST_CHECK(fixture.window->findChild<QInputDialog *>(QStringLiteral("screen-share-picker")) == nullptr);
+    TEST_CHECK(fixture.window->findChild<QDialog *>(QStringLiteral("screen-share-picker")) == nullptr);
     TEST_CHECK(starts == 1 && selectedSource.kind == livekit::DesktopSourceKind::Screen &&
         selectedSource.id == 456);
     fixture.coordinator->stopScreenShare();
@@ -5404,17 +5418,23 @@ void ScreenShareWindowControls() {
 
     const std::vector<livekit::DesktopSource> sources{{livekit::DesktopSourceKind::Window, 123, "test window"}};
     emit fixture.coordinator->screenShareSourcesReady(sources);
-    auto *picker = fixture.window->findChild<QInputDialog *>(QStringLiteral("screen-share-picker"));
+    auto *picker = fixture.window->findChild<QDialog *>(QStringLiteral("screen-share-picker"));
     TEST_CHECK(picker != nullptr);
     picker->reject();
     fixture.pump();
     TEST_CHECK(starts == 0 && stops == 0);
     emit fixture.coordinator->screenShareSourcesReady(sources);
-    picker = fixture.window->findChild<QInputDialog *>(QStringLiteral("screen-share-picker"));
+    picker = fixture.window->findChild<QDialog *>(QStringLiteral("screen-share-picker"));
     TEST_CHECK(picker != nullptr);
+    TEST_CHECK(!picker->windowFlags().testFlag(Qt::WindowContextHelpButtonHint));
+    auto *startFps = picker->findChild<QComboBox *>(QStringLiteral("screenShareStartFps"));
+    TEST_CHECK(startFps && startFps->count() == 3);
+    TEST_CHECK(startFps->currentData().toInt() == OpenMeeting::SessionManager::instance().mediaPreferences().screenShareFps);
+    startFps->setCurrentIndex(startFps->findData(30));
     picker->accept();
     fixture.pump();
     TEST_CHECK(starts == 1);
+    TEST_CHECK(fixture.coordinator->screenShareSnapshot().requested_quality.fps == 30);
     TEST_CHECK(ParticipantWindowTestAccess::shareState(*fixture.window) == livekit::ScreenShareState::Starting);
     ParticipantWindowTestAccess::clickShareDuringRecovery(*fixture.window);
     fixture.pump();
@@ -5457,12 +5477,26 @@ void ScreenShareWindowControls() {
     fixture.pump();
     auto *overlay = ParticipantWindowTestAccess::annotationOverlay(*fixture.window);
     TEST_CHECK(overlay && overlay->interactionEnabled() && !overlay->desktopMode());
+    auto* qualityButton = fixture.window->findChild<QPushButton*>(QStringLiteral("screenShareQuality"));
+    TEST_CHECK(qualityButton && qualityButton->isEnabled());
+    qualityButton->click();
+    fixture.pump();
+    auto* qualityDialog = fixture.window->findChild<QDialog*>(QStringLiteral("screenShareQualityDialog"));
+    TEST_CHECK(qualityDialog);
+    auto* resolutionCombo = qualityDialog->findChild<QComboBox*>(QStringLiteral("activeScreenShareResolution"));
+    auto* fpsCombo = qualityDialog->findChild<QComboBox*>(QStringLiteral("activeScreenShareFps"));
+    TEST_CHECK(resolutionCombo && resolutionCombo->count() == 5 && resolutionCombo->currentIndex() == 0);
+    TEST_CHECK(fpsCombo && fpsCombo->count() == 3 && fpsCombo->currentData().toInt() == 20);
+    qualityDialog->reject();
+    fixture.pump();
+    TEST_CHECK(ParticipantWindowTestAccess::annotationOverlay(*fixture.window) == overlay);
     OpenMeeting::MeetingCoordinatorTestAccess::setMeetingState(
         *fixture.coordinator, OpenMeeting::MeetingState::Reconnecting);
     fixture.pump();
     overlay = ParticipantWindowTestAccess::annotationOverlay(*fixture.window);
     TEST_CHECK(overlay && !overlay->interactionEnabled() && overlay->desktopMode());
     TEST_CHECK(!annotationButton->isEnabled());
+    TEST_CHECK(!qualityButton->isEnabled());
     OpenMeeting::MeetingCoordinatorTestAccess::setMeetingState(
         *fixture.coordinator, OpenMeeting::MeetingState::InMeeting);
     fixture.pump();

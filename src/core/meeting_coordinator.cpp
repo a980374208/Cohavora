@@ -3975,6 +3975,18 @@ void MeetingCoordinator::applyScreenShareSnapshotOnUiThread(uint64_t generation,
     if (!isCurrentSessionGenerationOnUiThread(generation) ||
         (_state != MeetingState::InMeeting && _state != MeetingState::Reconnecting)) return;
     _screenShareSnapshot = snapshot;
+    if (snapshot.state == livekit::ScreenShareState::Active && snapshot.applied_quality &&
+        snapshot.quality_status == livekit::ScreenShareQualityStatus::Applied) {
+        const auto quality = snapshot.applied_quality->quality;
+        auto prefs = _sessionManager.mediaPreferences();
+        if (prefs.screenShareResolution != static_cast<int>(quality.resolution) || prefs.screenShareFps != quality.fps) {
+            prefs.screenShareResolution = static_cast<int>(quality.resolution);
+            prefs.screenShareFps = quality.fps;
+            _mediaPrefs.screenShareResolution = prefs.screenShareResolution;
+            _mediaPrefs.screenShareFps = prefs.screenShareFps;
+            _sessionManager.setMediaPreferences(prefs);
+        }
+    }
     emit screenShareChanged(snapshot);
 }
 
@@ -3998,18 +4010,29 @@ void MeetingCoordinator::requestScreenShareSources() {
     });
 }
 
-void MeetingCoordinator::startScreenShare(livekit::DesktopSource source) {
+void MeetingCoordinator::startScreenShare(livekit::DesktopSource source, std::optional<int> fps) {
     if (!canStartScreenShare()) return;
     auto session = _sessionRuntime;
     livekit::VideoPublishOptions options;
     options.source = livekit::TrackSource::ScreenShareVideo;
     options.video_codec = OpenMeeting::normalizeVideoCodecPreference(
         _mediaPrefs.screenShareVideoCodec).toStdString();
-    session->post( [session, source = std::move(source), options = std::move(options)] {
+    const livekit::ScreenShareQuality quality{static_cast<livekit::ScreenShareResolution>(_mediaPrefs.screenShareResolution), fps.value_or(_mediaPrefs.screenShareFps)};
+    if (!quality.valid()) return;
+    session->post( [session, quality, source = std::move(source), options = std::move(options)] {
         if (!session->acceptsDataOnStrand()) return;
         if (auto share = session->screenShareOnStrand()) {
-            share->Start(source, options);
+            share->Start(source, options, quality);
         }
+    });
+}
+
+void MeetingCoordinator::setScreenShareQuality(livekit::ScreenShareQuality quality) {
+    if (!quality.valid() || !_sessionRuntime || _state != MeetingState::InMeeting) return;
+    auto session = _sessionRuntime;
+    session->post([session, quality] {
+        if (!session->acceptsDataOnStrand()) return;
+        if (auto share = session->screenShareOnStrand()) share->SetQuality(quality);
     });
 }
 

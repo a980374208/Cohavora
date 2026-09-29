@@ -8,6 +8,7 @@
 #include "modules/desktop_capture/win/screen_capturer_win_directx.h"
 #include "screen_capture_fallback.h"
 #include "libyuv/convert.h"
+#include "libyuv/scale.h"
 #include <windows.h>
 #include <objbase.h>
 #include "wgc_window_capture.h"
@@ -61,8 +62,26 @@ class DesktopCapture final : public IDesktopCapture, private webrtc::DesktopCapt
 public:
     explicit DesktopCapture(DesktopCaptureProbeOptions probe) : probe_(std::move(probe)) {}
     ~DesktopCapture() override { Stop(); }
+    bool SetQuality(ScreenShareQuality quality, uint64_t revision, QualityCallback applied) override {
+        if (!quality.valid()) return false;
+        {
+            std::lock_guard lock(wait_mutex_);
+            if (revision < requested_revision_) return false;
+            if (source_width_ > 0 && !ResolveScreenShareProfile(source_width_, source_height_, quality, revision)) return false;
+            requested_quality_ = quality;
+            requested_revision_ = revision;
+            requested_callback_ = std::move(applied);
+            ++mailbox_sequence_;
+        }
+        wake_.notify_all();
+        return true;
+    }
     void Start(DesktopSource source, FrameCallback frame, EndCallback ended) override {
         Stop();
+        {
+            std::lock_guard lock(wait_mutex_);
+            source_width_ = source_height_ = 0;
+        }
         frame_ = std::move(frame);
         ended_ = std::move(ended);
         backend_seen_ = false;
@@ -103,9 +122,25 @@ public:
                 }
                 capturer->Start(this);
                 Notify(DesktopCaptureProbePhase::Started);
-                capturer->SetMaxFrameRate(15);
                 last_frame_ = std::chrono::steady_clock::now();
+                ScreenCaptureDeadline deadline;
+                uint64_t applied_sequence = ~uint64_t{0};
                 while (!stopped_.load(std::memory_order_acquire)) {
+                    bool changed = false;
+                    {
+                        std::lock_guard lock(wait_mutex_);
+                        if (applied_sequence != mailbox_sequence_) {
+                            applied_sequence = mailbox_sequence_;
+                            active_quality_ = requested_quality_;
+                            active_revision_ = requested_revision_;
+                            active_callback_ = requested_callback_;
+                            changed = true;
+                        }
+                    }
+                    if (changed) {
+                        capturer->SetMaxFrameRate(active_quality_.fps);
+                        deadline.Reset(std::chrono::steady_clock::now(), active_quality_.fps);
+                    }
                     // WGC may keep returning its cached last frame after the
                     // target closes; successful CaptureFrame alone is not an
                     // ended signal. Observe the selected window's lifetime.
@@ -117,7 +152,8 @@ public:
                     capturer->CaptureFrame();
                     if (window && std::chrono::steady_clock::now() - last_frame_ > 5s) Fail();
                     std::unique_lock lock(wait_mutex_);
-                    wake_.wait_for(lock, 66ms, [this] { return stopped_.load(); });
+                    wake_.wait_until(lock, deadline.Advance(std::chrono::steady_clock::now()),
+                        [this, applied_sequence] { return stopped_.load() || mailbox_sequence_ != applied_sequence; });
                 }
                 capturer.reset();
                 Notify(DesktopCaptureProbePhase::Destroyed);
@@ -135,6 +171,9 @@ public:
         }
         frame_ = {};
         ended_ = {};
+        converted_.reset();
+        scaled_.reset();
+        last_applied_.reset();
     }
 private:
     void Notify(DesktopCaptureProbePhase phase, std::uint32_t capturer_id = 0) noexcept {
@@ -165,7 +204,18 @@ private:
             Fail();
             return;
         }
-        auto output = VideoFrame::create(w, h, VideoBufferType::I420);
+        {
+            std::lock_guard lock(wait_mutex_);
+            source_width_ = w; source_height_ = h;
+        }
+        const auto profile = ResolveScreenShareProfile(w, h, active_quality_, active_revision_);
+        if (!profile) {
+            if (w >= 2 && h >= 2) Fail();
+            return;
+        }
+        if (!converted_ || converted_->width() != w || converted_->height() != h)
+            converted_ = VideoFrame::create(w, h, VideoBufferType::I420);
+        auto& output = *converted_;
         const int cw = (w + 1) / 2, ch = (h + 1) / 2;
         auto* y = output.data();
         auto* u = y + w * h;
@@ -175,13 +225,42 @@ private:
             Fail();
             return;
         }
+        const VideoFrame* delivered = &output;
+        if (profile->width != w || profile->height != h) {
+            const int dw = profile->width, dh = profile->height;
+            if (!scaled_ || scaled_->width() != dw || scaled_->height() != dh)
+                scaled_ = VideoFrame::create(dw, dh, VideoBufferType::I420);
+            auto* dy = scaled_->data();
+            auto* du = dy + dw * dh;
+            auto* dv = du + (dw / 2) * (dh / 2);
+            if (libyuv::I420Scale(y, w, u, cw, v, cw, w, h,
+                                 dy, dw, du, dw / 2, dv, dw / 2, dw, dh, libyuv::kFilterBox) != 0) {
+                Fail();
+                return;
+            }
+            delivered = &*scaled_;
+        } else {
+            scaled_.reset();
+        }
         last_frame_ = std::chrono::steady_clock::now();
-        if (!stopped_.load(std::memory_order_acquire) && frame_) frame_(output);
+        if (!stopped_.load(std::memory_order_acquire) && frame_) {
+            frame_(*delivered);
+            if (!last_applied_ || *last_applied_ != *profile) {
+                last_applied_ = profile;
+                if (active_callback_) active_callback_(*profile);
+            }
+        }
     }
     std::atomic<bool> stopped_{true};
     std::thread worker_;
     std::mutex wait_mutex_;
     std::condition_variable wake_;
+    ScreenShareQuality requested_quality_, active_quality_;
+    uint64_t requested_revision_ = 0, active_revision_ = 0, mailbox_sequence_ = 0;
+    int source_width_ = 0, source_height_ = 0; // wait_mutex_
+    QualityCallback requested_callback_, active_callback_;
+    std::optional<ScreenShareFrameProfile> last_applied_; // worker only
+    std::optional<VideoFrame> converted_, scaled_; // bounded reusable worker buffers
     FrameCallback frame_;
     EndCallback ended_;
     std::chrono::steady_clock::time_point last_frame_;
