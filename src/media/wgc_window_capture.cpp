@@ -22,6 +22,35 @@ namespace {
 namespace capture = winrt::Windows::Graphics::Capture;
 namespace directx = winrt::Windows::Graphics::DirectX;
 
+bool KeepCaptureRuntimeLoaded() {
+    // On Windows 11 26100, apartment teardown can unload GraphicsCapture.dll
+    // while its asynchronous cleanup still targets code in that image (observed
+    // execute AV in GraphicsCapture.dll_unloaded). Keep one loader reference
+    // until process exit; never cache apartment-bound factories or sessions.
+    // Deliberately no FreeLibrary, including during static destruction.
+    static const HMODULE runtime = LoadLibraryExW(
+        L"GraphicsCapture.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    return runtime != nullptr;
+}
+
+bool CapturePlatformSupported(DesktopSourceKind kind) {
+    // GetVersionEx (used by WebRTC's version helper) reports Windows 8 for an
+    // unmanifested host such as the runtime probe. Read the actual OS version.
+    using GetVersion = LONG(WINAPI*)(OSVERSIONINFOW*);
+    static const auto get_version = reinterpret_cast<GetVersion>(
+        GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlGetVersion"));
+    OSVERSIONINFOW version{};
+    version.dwOSVersionInfoSize = sizeof(version);
+    if (!get_version || get_version(&version) < 0) return false;
+    const bool screen = kind == DesktopSourceKind::Screen;
+    const bool newer_major = version.dwMajorVersion > 10;
+    const bool win11 = newer_major ||
+        (version.dwMajorVersion == 10 && version.dwBuildNumber >= 22000);
+    if (!newer_major && (version.dwMajorVersion < 10 || version.dwBuildNumber < 18362 ||
+        (screen && version.dwBuildNumber < 19041))) return false;
+    return webrtc::HasActiveDisplay() || (!screen && win11);
+}
+
 class OwnedWgcWindowCapturer final : public webrtc::DesktopCapturer {
 public:
     explicit OwnedWgcWindowCapturer(std::function<void(DesktopCaptureProbePhase)> report, bool screen = false)
@@ -110,6 +139,7 @@ public:
     }
 private:
     void Open() {
+        if (!KeepCaptureRuntimeLoaded()) winrt::throw_hresult(E_NOINTERFACE);
         // A capture worker's apartment is recreated on each Start. Do not put
         // activation factories in C++/WinRT's process-wide cache across teardown.
         const auto factory = winrt::try_get_activation_factory<capture::GraphicsCaptureItem,
@@ -188,8 +218,14 @@ std::unique_ptr<webrtc::DesktopCapturer> CreateOwnedWgcWindowCapturer(
         std::function<void(DesktopCaptureProbePhase)> report) {
     return std::make_unique<OwnedWgcWindowCapturer>(std::move(report));
 }
-bool IsOwnedWgcSupported() {
+bool IsOwnedWgcSupported(DesktopSourceKind kind) {
     try {
+        // Preserve the OS/display restrictions of WebRTC's WGC probe. The
+        // required interop/free-threaded APIs arrived in Windows 10 1903.
+        if (!CapturePlatformSupported(kind)) return false;
+        if (!KeepCaptureRuntimeLoaded()) return false;
+        // Query actual interfaces and current support, not ApiInformation's
+        // metadata reader (which retained a File/Section pair per worker).
         const auto session = winrt::try_get_activation_factory<capture::GraphicsCaptureSession,
             capture::IGraphicsCaptureSessionStatics>();
         const auto item = winrt::try_get_activation_factory<capture::GraphicsCaptureItem,

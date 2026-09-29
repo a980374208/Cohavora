@@ -92,8 +92,10 @@ public:
             try {
                 const bool window = source.kind == DesktopSourceKind::Window;
                 const bool wgc_supported = !probe_.simulate_wgc_unsupported &&
-                    (!window || probe_.allow_wgc_window) && (window
-                        ? webrtc::IsWgcSupported(webrtc::CaptureType::kWindow) : IsOwnedWgcSupported());
+                    (!window || probe_.allow_wgc_window) &&
+                    (window && probe_.use_legacy_wgc_window
+                        ? webrtc::IsWgcSupported(webrtc::CaptureType::kWindow)
+                        : IsOwnedWgcSupported(source.kind));
                 auto capturer = window && wgc_supported &&
                     !probe_.use_legacy_wgc_window
                     ? CreateOwnedWgcWindowCapturer([this](auto phase) { Notify(phase); })
