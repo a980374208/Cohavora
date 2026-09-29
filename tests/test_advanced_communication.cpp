@@ -34,7 +34,7 @@ public:
 
 int main() {
     std::cout << "==================================================\n";
-    std::cout << " Running Advanced Communication & Flow Control Tests \n";
+    std::cout << " Running Chat and DataChannel Notification Tests \n";
     std::cout << "==================================================\n";
 
     asio::io_context io_ctx;
@@ -88,16 +88,23 @@ int main() {
     TEST_CHECK(listener->last_chat_msg.edit_timestamp.has_value());
     std::cout << "[Test 2.2 PASSED] EditChatMessage edited message successfully!\n" << std::endl;
 
-    // 3. 测试 DataChannel 缓冲背压控制 (BufferedAmountLowThreshold)
-    std::cout << "[Test 3] Testing DataChannel Backpressure Flow Control..." << std::endl;
-    room->SetDataChannelBufferedAmountLowThreshold(32768, /*reliable=*/true);
-    TEST_CHECK(room->GetDataChannelBufferedAmount(/*reliable=*/true) == 0);
-
-    // 触发背压水线变动通知
-    room->OnDataChannelBufferedAmountLow(65536, /*reliable=*/true);
-    TEST_CHECK(listener->backpressure_changed && "OnDataChannelBufferedAmountLowThresholdChanged listener should be notified!");
-    TEST_CHECK(listener->last_reliable == true);
-    std::cout << "[Test 3 PASSED] DataChannel backpressure low threshold notification triggered successfully!\n" << std::endl;
+    // With no channel installed, notifications report current amount zero.
+    // This checks Room listener dispatch, not threshold crossing/backpressure.
+    for (const bool reliable : {true, false}) {
+        listener->backpressure_changed = false;
+        listener->last_low_amount = 123;
+        listener->last_reliable = !reliable;
+        TEST_CHECK(room->GetDataChannelBufferedAmount(reliable) == 0);
+        room->OnDataChannelBufferedAmountLow(65536, reliable);
+        TEST_CHECK(listener->backpressure_changed);
+        TEST_CHECK(listener->last_low_amount == 0);
+        TEST_CHECK(listener->last_reliable == reliable);
+    }
+    room->RemoveListener(listener);
+    listener->backpressure_changed = false;
+    room->OnDataChannelBufferedAmountLow(65536, true);
+    TEST_CHECK(!listener->backpressure_changed);
+    std::cout << "[Test 3 PASSED] Reliable/lossy notification values and listener removal verified!\n";
 
     std::cout << "==================================================\n";
     std::cout << " ALL ADVANCED COMMUNICATION TESTS PASSED 100%! \n";

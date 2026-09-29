@@ -286,7 +286,9 @@ target_include_directories(test_stream_delivery_remediation PRIVATE ${LIVEKIT_PR
 target_link_libraries(test_stream_delivery_remediation PRIVATE cohavora_core)
 
 if(LIVEKIT_BUILD_EXTERNAL_TESTS)
-    add_executable(test_livekit_official_connect
+    # Manual L3 tool: requires credentials and runs until operator shutdown.
+    # Build explicitly; never register it as an automatic pass/fail test.
+    add_executable(test_livekit_official_connect EXCLUDE_FROM_ALL
         ${LIVEKIT_TEST_SOURCE_DIR}/test_livekit_official_connect.cpp
     )
     target_link_libraries(test_livekit_official_connect PRIVATE

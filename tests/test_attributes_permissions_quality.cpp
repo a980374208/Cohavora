@@ -57,31 +57,52 @@ int main() {
 
     // Test 2: Participant Permissions Guarding
     {
-        livekit::proto::SignalRequest sent_req;
+        std::vector<livekit::proto::SignalRequest> requests;
+        int data_calls = 0;
+        const std::vector<uint8_t> payload{1, 2, 3};
         auto local_p = std::make_shared<livekit::LocalParticipant>(
             "PA_LOCAL_2", "user_bob",
-            [&sent_req](const livekit::proto::SignalRequest& req) {
-                sent_req = req;
-            }
-        );
-
-        // Deny publish permissions
+            [&](const livekit::proto::SignalRequest& req) { requests.push_back(req); });
+        local_p->SetPublishDataHandler([&](const std::vector<uint8_t>& data,
+            bool reliable, const std::vector<std::string>& destinations,
+            const std::string& topic) {
+            ++data_calls;
+            TEST_CHECK(data == payload && reliable);
+            TEST_CHECK(destinations.empty() && topic.empty());
+        });
+        // Seed existing state so denied metadata updates must preserve it.
+        local_p->SetAttribute("key", "before");
+        requests.clear();
         livekit::ParticipantPermission perm;
         perm.can_publish = false;
         perm.can_publish_data = false;
         perm.can_update_metadata = false;
         local_p->set_permission(perm);
+        auto track = std::make_shared<livekit::Track>("TR_01", "mic", livekit::TrackKind::Audio);
+        local_p->PublishTrack(track);
+        TEST_CHECK(requests.empty());
+        TEST_CHECK(local_p->tracks().empty());
+        local_p->PublishData(payload);
+        TEST_CHECK(data_calls == 0);
+        local_p->SetAttribute("key", "after");
+        TEST_CHECK(requests.empty());
+        TEST_CHECK(local_p->get_attribute("key") == "before");
 
-        // Try publishing track & data (should be blocked safely)
-        auto dummy_track = std::make_shared<livekit::Track>("TR_01", "mic", livekit::TrackKind::Audio);
-        local_p->PublishTrack(dummy_track);
-        TEST_CHECK(!sent_req.has_add_track()); // Blocked!
-
-        local_p->PublishData({1, 2, 3}); // Blocked!
-
-        local_p->SetAttribute("key", "val"); // Blocked!
-
-        std::cout << "  [PASS] Test 2: Participant Permissions Guarding (can_publish / can_publish_data / can_update_metadata) verified." << std::endl;
+        // Positive controls prove that each denied path had a working sink.
+        perm.can_publish = true;
+        perm.can_publish_data = true;
+        perm.can_update_metadata = true;
+        local_p->set_permission(perm);
+        local_p->PublishTrack(track);
+        TEST_CHECK(requests.size() == 1 && requests.back().has_add_track());
+        TEST_CHECK(local_p->tracks().size() == 1);
+        local_p->PublishData(payload);
+        TEST_CHECK(data_calls == 1);
+        local_p->SetAttribute("key", "after");
+        TEST_CHECK(requests.size() == 2 && requests.back().has_update_metadata());
+        TEST_CHECK(requests.back().update_metadata().attributes().at("key") == "after");
+        TEST_CHECK(local_p->get_attribute("key") == "after");
+        std::cout << "  [PASS] Test 2: Denied operations preserve state and emit nothing; allowed controls reach every sink.\n";
     }
 
     // Test 3: RemoteTrackPublication Track Quality & Settings Control

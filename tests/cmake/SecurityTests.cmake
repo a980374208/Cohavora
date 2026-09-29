@@ -157,7 +157,3 @@ if(TARGET test_dshow_capture)
     add_test(NAME dshow_capture_test COMMAND test_dshow_capture)
     set_tests_properties(dshow_capture_test PROPERTIES TIMEOUT 30 LABELS "CORE_REGRESSION")
 endif()
-
-if(LIVEKIT_BUILD_EXTERNAL_TESTS)
-    add_test(NAME livekit_official_connect_test COMMAND test_livekit_official_connect)
-endif()

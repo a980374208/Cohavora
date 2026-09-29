@@ -142,7 +142,7 @@ target_compile_definitions(test_video_render_session_stress PRIVATE
 add_test(NAME video_render_session_stress_test COMMAND test_video_render_session_stress)
 set_tests_properties(video_render_session_stress_test PROPERTIES TIMEOUT 120)
 
-set_tests_properties(
+set_property(TEST
     always_active_checks_test
     camera_owner_remediation_test
     log_redaction_test
@@ -161,15 +161,7 @@ set_tests_properties(
     meeting_session_runtime_test
     participant_snapshot_remediation_test
     meeting_startup_transaction_test
-    PROPERTIES LABELS "CORE_REGRESSION"
+    APPEND PROPERTY LABELS "CORE_REGRESSION"
 )
-set_property(TEST meeting_session_runtime_test
-    APPEND PROPERTY LABELS "TELEMETRY_S1")
-set_property(TEST qt_log_redaction_test
-    APPEND PROPERTY LABELS "LOGGING_LG2;SECURITY_REGRESSION")
-set_property(TEST connection_log_redaction_test qt_log_redaction_test
-    APPEND PROPERTY LABELS "LOGGING_LG7")
 set_property(TEST signaling_tests signaling_url_policy_test
     APPEND PROPERTY LABELS "PR_SEC_006_FOCUSED")
-set_property(TEST always_active_checks_test
-    APPEND PROPERTY LABELS "ASSERTION_REGRESSION")
