@@ -1,6 +1,8 @@
 # Telegram Desktop UI Core Framework (Native CMake Subproject)
 # Self-contained pure C++ implementation for LiveKit Client UI
 
+cohavora_group_qt_generated_sources()
+
 set(TDESKTOP_SRC_DIR ${CMAKE_CURRENT_SOURCE_DIR})
 
 # --- 1. desktop_lz4 (lz4 & xxHash) ---

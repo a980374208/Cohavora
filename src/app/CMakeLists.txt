@@ -1,3 +1,5 @@
+cohavora_group_qt_generated_sources()
+
 add_executable(cohavora_app
     main_meeting_app.cpp
     debug_login_options.cpp
@@ -55,7 +57,6 @@ target_link_libraries(cohavora_app PRIVATE
 set_target_properties(cohavora_app PROPERTIES
     AUTOMOC ON
     OUTPUT_NAME "Cohavora")
-source_group("Generated Files" REGULAR_EXPRESSION ".*mocs_compilation.*")
 target_compile_definitions(cohavora_app PRIVATE
     COHAVORA_VERSION="${PROJECT_VERSION}")
 if(WIN32)
