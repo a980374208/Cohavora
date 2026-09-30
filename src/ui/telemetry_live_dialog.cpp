@@ -119,7 +119,10 @@ public:
             detailTables_[page]=details;
             auto *toggle=new QPushButton(QStringLiteral("展开指标口径"),content);toggle->setCheckable(true);
             connect(toggle,&QPushButton::toggled,details,&QWidget::setVisible);
-            connect(toggle,&QPushButton::toggled,this,[this](bool shown){if(shown && lastFrame_)Present(lastFrame_);});details->hide();
+            connect(toggle,&QPushButton::toggled,this,[this,toggle](bool shown){
+                toggle->setText(shown ? QStringLiteral("收起指标口径") : QStringLiteral("展开指标口径"));
+                if(shown && lastFrame_)Present(lastFrame_);
+            });details->hide();
             vertical->addWidget(toggle);vertical->addWidget(details);
             scroll->setWidget(content);tabs_->addTab(scroll,names[page]);
         }
