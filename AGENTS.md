@@ -54,6 +54,13 @@
 
 ## 4. 验证门
 
+### 性能、指标与稳定性测试配置
+
+- 性能测试、指标采集与稳定性测试（含启动/首帧耗时、资源占用、媒体质量指标和长稳测试）统一使用 **RelWithDebInfo** 版。
+- 构建和测试须明确指定配置：`cmake --build <build-dir> --config RelWithDebInfo`、`ctest --test-dir <build-dir> -C RelWithDebInfo`；直接运行程序或探针时核对其实际二进制配置。
+- 证据记录构建配置及二进制指纹；Debug 结果仅作调试参考，不作为上述测试的验收结论，也不与 RelWithDebInfo 数据混合比较。
+- 此配置要求不扩大验证范围，仍按下表选择最小适用 gate。
+
 | Gate | 触发条件 | 唯一最终动作 |
 |---|---|---|
 | None | 文档、报告、commit message、staging、提交边界；或有效 checkpoint 哈希完全一致 | 必要内容/格式/哈希检查；不 build、不跑 CTest |
