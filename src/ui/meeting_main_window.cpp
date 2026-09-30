@@ -2,6 +2,7 @@
 #include "src/ui/app_branding.h"
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/app_theme.h"
+#include "src/ui/app_icons.h"
 #include "src/ui/meeting_log_console.h"
 #include "src/ui/meeting_room_window.h"
 #include "src/ui/meeting_booking_dialog.h"
@@ -577,7 +578,8 @@ void MeetingMainWindow::initLayout() {
 
 	_sidebar->bottomItemClicked() | rpl::on_next([this](BottomItemType type) {
 		if (type == BottomItemType::Settings) {
-			SettingsDialog dialog(OpenMeeting::SessionManager::instance(), this);
+			const auto clickedAt = CameraDeviceDiscovery::Clock::now();
+			SettingsDialog dialog(OpenMeeting::SessionManager::instance(), this, clickedAt);
 			dialog.exec();
 			return;
 		}
@@ -631,7 +633,7 @@ void MeetingMainWindow::initLayout() {
 			? livekit::telemetry::InstalledTelemetryHistoryStore()->Status()->reports.size()
 			: 0;
 		auto *telemetryAction = menu->addAction(
-			style()->standardIcon(QStyle::SP_FileDialogDetailedView),
+			AppTheme::icon(AppTheme::Icon::Details),
 			QCoreApplication::translate("MeetingUI", "Telemetry reports on this device (%1)")
 				.arg(reportCount));
 		telemetryAction->setObjectName(QStringLiteral("mainPostMeetingTelemetry"));

@@ -45,6 +45,7 @@ target_link_libraries(cohavora_app PRIVATE
     cohavora_meeting_widgets
     cohavora_video_canvas_ui
     cohavora_meeting_window_ui
+    cohavora_device_discovery
     cohavora_meeting_network
     cohavora_meeting_runtime
     cohavora_qt_video_render

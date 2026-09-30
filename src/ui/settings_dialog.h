@@ -1,6 +1,7 @@
 #pragma once
 
 #include "src/net/session_manager.h"
+#include "src/ui/camera_device_discovery.h"
 
 #include <QtCore/QHash>
 #include <QtCore/QPoint>
@@ -17,6 +18,8 @@ class QProgressBar;
 class QPushButton;
 class QRadioButton;
 class QStackedWidget;
+
+namespace OpenMeeting { template <typename T> class QtCallbackGate; }
 
 namespace MeetingUI {
 
@@ -36,7 +39,8 @@ public:
 
 	explicit SettingsDialog(
 		OpenMeeting::SessionManager &session,
-		QWidget *parent = nullptr);
+		QWidget *parent = nullptr,
+		CameraDeviceDiscovery::Clock::time_point clickedAt = CameraDeviceDiscovery::Clock::now());
 	~SettingsDialog() override;
 
 	OpenMeeting::MediaPreferences preferences() const;
@@ -50,6 +54,7 @@ public:
 	void setVideoPreviewWidget(QWidget *previewWidget);
 
 public slots:
+	void done(int result) override;
 	void refreshDevices();
 	void setMicrophoneLevel(float normalizedLevel);
 	void setMicrophoneTestActive(bool active);
@@ -76,11 +81,13 @@ signals:
 	void speakerTestRequested(const QString &deviceId);
 
 protected:
+	bool eventFilter(QObject *watched, QEvent *event) override;
 	void mousePressEvent(QMouseEvent *event) override;
 	void mouseMoveEvent(QMouseEvent *event) override;
 	void mouseReleaseEvent(QMouseEvent *event) override;
 
 private:
+	friend class SettingsDialogTestAccess;
 	struct VideoFormat {
 		int width = 0;
 		int height = 0;
@@ -94,7 +101,10 @@ private:
 	QWidget *buildAboutPage();
 	void connectPreferenceControls();
 	void connectDeviceControllers();
-	void refreshVideoDevices(const OpenMeeting::MediaPreferences &preferences);
+	void prepareDevicePlaceholders();
+	void startDeviceDiscovery(bool forceRefresh);
+	void applyVideoDevices(const CameraDeviceDiscovery::Devices &devices);
+	void cancelDeviceDiscovery();
 	void rebuildResolutionChoices(const OpenMeeting::MediaPreferences &preferences);
 	int defaultFormatIndex(const QVector<VideoFormat> &formats) const;
 	VideoFormat selectedVideoFormat() const;
@@ -106,6 +116,15 @@ private:
 	void requestPreviewIfVisible();
 
 	OpenMeeting::SessionManager &_session;
+	CameraDeviceDiscovery *_cameraDiscovery = &CameraDeviceDiscovery::Instance();
+	CameraDeviceDiscovery::Request _cameraRequest;
+	std::shared_ptr<OpenMeeting::QtCallbackGate<SettingsDialog>> _cameraCallbacks;
+	CameraDeviceDiscovery::Clock::time_point _clickedAt;
+	bool _firstPaintScheduled = false;
+	bool _firstPaintReported = false;
+	bool _forceDeviceRefresh = false;
+	bool _videoDevicesReady = false;
+	bool _closed = false;
 	QListWidget *_navigation = nullptr;
 	QStackedWidget *_pages = nullptr;
 

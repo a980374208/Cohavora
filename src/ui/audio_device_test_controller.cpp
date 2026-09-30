@@ -5,6 +5,7 @@
 #include "src/media/wasapi_enumerator.h"
 #include "src/rtc/audio_frame.h"
 #include "src/rtc/audio_source.h"
+#include "src/telemetry/diagnostic_pipeline.h"
 
 #include <QtCore/QMetaObject>
 #include <QtCore/QThread>
@@ -473,6 +474,7 @@ void AudioDeviceTestController::refreshDevices() {
 			1,
 			std::memory_order_acq_rel) + 1;
 		_impl->enumerationThread = std::thread([this, generation] {
+			const auto started = std::chrono::steady_clock::now();
 			QVector<AudioDeviceDescriptor> microphones;
 			QVector<AudioDeviceDescriptor> speakers;
 			QString error;
@@ -486,6 +488,12 @@ void AudioDeviceTestController::refreshDevices() {
 				error = QCoreApplication::translate("MeetingUI", "Failed to list audio devices");
 			}
 
+			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - started).count();
+			livekit::diagnostic::EmitBusinessEvent(livekit::diagnostic::Event::SettingsProbe(
+				livekit::diagnostic::MediaKind::Audio, elapsed,
+				error.isEmpty() ? livekit::diagnostic::Outcome::Success : livekit::diagnostic::Outcome::Failure,
+				static_cast<std::uint32_t>(microphones.size() + speakers.size())));
 			_impl->enumerating.store(false, std::memory_order_release);
 			QMetaObject::invokeMethod(
 				this,

@@ -6608,6 +6608,44 @@ int RunMeetingUiaFixture(QApplication &application) {
     return application.exec();
 }
 
+class MeetingPaintProbe final : public QObject {
+public:
+    bool scheduled = false;
+    bool completed = false;
+protected:
+    bool eventFilter(QObject *, QEvent *event) override {
+        if (event->type() == QEvent::Paint && !scheduled) {
+            scheduled = true;
+            QTimer::singleShot(0, this, [this] { completed = true; });
+        }
+        return false;
+    }
+};
+
+void MeetingWindowOpenBenchmark(QApplication &application) {
+    MeetingUI::AppTranslation::install(application, MeetingUI::AppTranslation::startupLocale(application.arguments()));
+    MeetingUI::AppTheme::install(application);
+    for (int sample = 0; sample != 4; ++sample) {
+        WindowFixture fixture;
+        MeetingPaintProbe paint;
+        QElapsedTimer timer;
+        timer.start();
+        fixture.window = ParticipantWindowTestAccess::createChatPrivacy(fixture.coordinator);
+        const auto constructed = timer.nsecsElapsed();
+        fixture.window->installEventFilter(&paint);
+        fixture.window->show();
+        const auto shown = timer.nsecsElapsed();
+        while (!paint.completed && timer.elapsed() < 10000) {
+            application.processEvents(QEventLoop::AllEvents, 5);
+            QThread::msleep(1);
+        }
+        TEST_CHECK(paint.completed);
+        std::printf("meeting_benchmark sample=%d construct_ms=%.3f show_ms=%.3f first_qt_paint_ms=%.3f\n",
+            sample, constructed / 1e6, (shown - constructed) / 1e6, timer.nsecsElapsed() / 1e6);
+        std::fflush(stdout);
+    }
+}
+
 int WindowAcceptanceMain(int argc, char **argv) {
 	for (auto index = 1; index != argc; ++index) {
 		const auto argument = QByteArray(argv[index]);
@@ -6644,7 +6682,9 @@ int WindowAcceptanceMain(int argc, char **argv) {
     // Coordinator instances use explicitly injected temporary SessionManager
     // objects, including the in-memory moderation and account-notify fixtures.
     int result = 0;
-    if (application.arguments().contains("--grid-contract")) {
+    if (application.arguments().contains("--meeting-open-benchmark")) {
+        MeetingWindowOpenBenchmark(application);
+    } else if (application.arguments().contains("--grid-contract")) {
         for (int count = 1; count <= 16; ++count) {
             WindowFixture fixture;
             fixture.room->UpdateParticipantsForTesting(LargeWindowRoster(count - 1));

@@ -19,6 +19,9 @@
 #include "src/ui/meeting_chat_sidebar_widget.h"
 #include "src/ui/render/video_canvas.h"
 #include "src/ui/camera_switch_completion_owner.h"
+#include "src/ui/camera_device_discovery.h"
+#include "src/ui/audio_device_discovery.h"
+#include <array>
 #include <mmsystem.h>
 
 #include <QtWidgets/QWidget>
@@ -313,10 +316,6 @@ public:
 	void setChatUnreadCount(int count);
 	int chatUnreadCount() const { return _chatUnreadCount; }
 
-	static bool HasAvailableAudioDevice();
-	static bool HasAvailableSpeakerDevice();
-	static bool HasAvailableVideoDevice();
-
 	// 事件流
 	rpl::producer<bool> toggleAudioRequested() const { return _toggleAudioStream.events(); }
 	rpl::producer<bool> toggleSpeakerRequested() const { return _toggleSpeakerStream.events(); }
@@ -347,13 +346,28 @@ protected:
 	void mouseMoveEvent(QMouseEvent *e) override;
 	void mousePressEvent(QMouseEvent *e) override;
 	void leaveEventHook(QEvent *e) override;
+	void hideEvent(QHideEvent *e) override;
 
 private:
 	friend class ::CameraOwnerTestAccess;
 	friend class ::ParticipantWindowTestAccess;
-	void appendSpeakerDeviceActions(QMenu &menu);
+	enum class DeviceKind { Microphone, Speaker, Camera };
+	struct PendingDeviceAction {
+		std::shared_ptr<void> subscription;
+		std::shared_ptr<OpenMeeting::QtCallbackGate<RoomBottomBarWidget>> callbacks;
+	};
+	std::array<PendingDeviceAction, 3> _pendingDeviceActions;
+	CameraDeviceDiscovery *_cameraDiscovery = nullptr;
+	AudioDeviceDiscovery *_microphoneDiscovery = nullptr;
+	AudioDeviceDiscovery *_speakerDiscovery = nullptr;
+	QPointer<QMenu> _deviceMenu;
+	void cancelDeviceAction(DeviceKind kind);
+	void requestDeviceEnable(DeviceKind kind);
+	QMenu *createDeviceMenu(const char *name);
+	void showAudioEndpointMenu(const QPoint &globalPos, bool speaker);
 	void toggleAudio();
 	void toggleVideo();
+	void toggleSpeaker();
 	bool canStopScreenShare() const {
 		using State = livekit::ScreenShareState;
 		return _screenShareState == State::Starting || _screenShareState == State::Active ||

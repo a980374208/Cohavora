@@ -2,15 +2,20 @@
 #include <QtCore/QCoreApplication>
 #include "src/ui/app_branding.h"
 #include "src/ui/app_theme.h"
+#include "src/ui/app_icons.h"
 #include "src/ui/settings_dialog.h"
 
-#include "src/media/dshow_enumerator.h"
+#include "src/core/session_shutdown_service.h"
+#include "src/telemetry/diagnostic_pipeline.h"
 #include "src/ui/audio_device_test_controller.h"
 #include "src/ui/camera_preview_widget.h"
 
 #include <QtCore/QCoreApplication>
 #include <QtCore/QSignalBlocker>
+#include <QtCore/QPointer>
+#include <QtCore/QTimer>
 #include <QtCore/QVariant>
+#include <QtGui/QIcon>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainterPath>
 #include <QtGui/QRegion>
@@ -87,11 +92,13 @@ QLabel *makeSectionTitle(const QString &text, QWidget *parent) {
 	return label;
 }
 
-QWidget *makeScrollablePage(QWidget *content, QWidget *parent) {
+QScrollArea *makeScrollablePage(QWidget *parent) {
 	auto *scroll = new QScrollArea(parent);
 	scroll->setWidgetResizable(true);
 	scroll->setFrameShape(QFrame::NoFrame);
 	scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAsNeeded);
+	auto *content = new QWidget(scroll->viewport());
+	new QVBoxLayout(content);
 	scroll->setWidget(content);
 	return scroll;
 }
@@ -150,9 +157,11 @@ void populateVideoCodecChoices(QComboBox *combo) {
 
 SettingsDialog::SettingsDialog(
 		OpenMeeting::SessionManager &session,
-		QWidget *parent)
+		QWidget *parent,
+		CameraDeviceDiscovery::Clock::time_point clickedAt)
 	: QDialog(parent)
-	, _session(session) {
+	, _session(session)
+	, _clickedAt(clickedAt) {
 	setObjectName(QStringLiteral("settingsDialog"));
 	setWindowTitle(QCoreApplication::translate("MeetingUI", "Settings"));
 	setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint);
@@ -161,7 +170,6 @@ SettingsDialog::SettingsDialog(
 	resize(760 + kShadowMargin * 2, 640 + kShadowMargin * 2);
 	setMinimumSize(680 + kShadowMargin * 2, 520 + kShadowMargin * 2);
 	buildUi();
-	AppTheme::makeDialogAdaptive(*this, QSize(796, 676));
 	setPreferences(_session.mediaPreferences());
 	connectPreferenceControls();
 	connectDeviceControllers();
@@ -182,16 +190,48 @@ SettingsDialog::SettingsDialog(
 		emit cameraPreviewStopped();
 	});
 
-	refreshDevices();
+	prepareDevicePlaceholders();
 }
 
 SettingsDialog::~SettingsDialog() {
+	cancelDeviceDiscovery();
 	if (_audioTestController) {
 		_audioTestController->stopAll();
 	}
 	if (_cameraPreview) {
 		_cameraPreview->stopPreview();
 	}
+}
+
+void SettingsDialog::done(int result) {
+	cancelDeviceDiscovery();
+	QDialog::done(result);
+}
+
+void SettingsDialog::cancelDeviceDiscovery() {
+	_closed = true;
+	if (_cameraCallbacks) _cameraCallbacks->Revoke();
+	_cameraRequest.reset();
+}
+
+bool SettingsDialog::eventFilter(QObject *watched, QEvent *event) {
+	if (event->type() != QEvent::Paint || _firstPaintScheduled || _closed || !isVisible()) {
+		return QDialog::eventFilter(watched, event);
+	}
+	_firstPaintScheduled = true;
+	// The translucent top-level itself can be completely covered and never
+	// receive Paint. Observe the real navigation viewport instead, then return
+	// to the event loop after this paint pass. This is not compositor presentation.
+	QTimer::singleShot(0, this, [this] {
+		if (_closed) return;
+		_firstPaintReported = true;
+		const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+			CameraDeviceDiscovery::Clock::now() - _clickedAt).count();
+		livekit::diagnostic::EmitBusinessEvent(
+			livekit::diagnostic::Event::SettingsPaint(elapsed));
+		startDeviceDiscovery(_forceDeviceRefresh);
+	});
+	return QDialog::eventFilter(watched, event);
 }
 
 void SettingsDialog::buildUi() {
@@ -204,13 +244,18 @@ void SettingsDialog::buildUi() {
 		kShadowMargin,
 		kShadowMargin);
 	root->setSpacing(0);
+	// Establish the final scroll/stylesheet ancestry before adding controls.
+	// Moving populated pages through temporary parents repeatedly resolves
+	// inherited QSS fonts and palettes for every descendant.
+	AppTheme::makeDialogAdaptive(*this, QSize(796, 676));
+	auto *content = root->parentWidget();
 
 	auto *layers = new QStackedLayout();
 	layers->setContentsMargins(0, 0, 0, 0);
 	layers->setStackingMode(QStackedLayout::StackAll);
 	root->addLayout(layers);
 
-	auto *shadowSurface = new QFrame(this);
+	auto *shadowSurface = new QFrame(content);
 	shadowSurface->setObjectName(QStringLiteral("settingsShadowSurface"));
 	shadowSurface->setAttribute(Qt::WA_TransparentForMouseEvents, true);
 	auto *shadow = new QGraphicsDropShadowEffect(shadowSurface);
@@ -220,7 +265,7 @@ void SettingsDialog::buildUi() {
 	shadowSurface->setGraphicsEffect(shadow);
 	layers->addWidget(shadowSurface);
 
-	auto *surface = new RoundedSurface(this);
+	auto *surface = new RoundedSurface(content);
 	surface->setObjectName(QStringLiteral("settingsSurface"));
 	auto *surfaceLayout = new QVBoxLayout(surface);
 	surfaceLayout->setContentsMargins(0, 0, 0, 0);
@@ -240,7 +285,7 @@ void SettingsDialog::buildUi() {
 	titleLayout->addStretch();
 	auto *closeButton = new QPushButton(titleBar);
 	closeButton->setObjectName(QStringLiteral("closeButton"));
-	closeButton->setIcon(style()->standardIcon(QStyle::SP_TitleBarCloseButton));
+	closeButton->setIcon(AppTheme::icon(AppTheme::Icon::Close));
 	closeButton->setToolTip(QCoreApplication::translate("MeetingUI", "Close"));
 	closeButton->setAccessibleName(closeButton->toolTip());
 	closeButton->setFixedSize(28, 28);
@@ -253,6 +298,7 @@ void SettingsDialog::buildUi() {
 	body->setSpacing(0);
 
 	_navigation = new QListWidget(surface);
+	_navigation->viewport()->installEventFilter(this);
 	_navigation->setObjectName(QStringLiteral("settingsNavigation"));
 	_navigation->setAccessibleName(QCoreApplication::translate("MeetingUI", "Settings sections"));
 	_navigation->setMinimumWidth(150);
@@ -263,16 +309,16 @@ void SettingsDialog::buildUi() {
 	_navigation->setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
 	_navigation->setSelectionMode(QAbstractItemView::SingleSelection);
 	_navigation->addItem(new QListWidgetItem(
-		style()->standardIcon(QStyle::SP_FileDialogDetailedView),
+		AppTheme::icon(AppTheme::Icon::Details),
 		QCoreApplication::translate("MeetingUI", "General")));
 	_navigation->addItem(new QListWidgetItem(
-		style()->standardIcon(QStyle::SP_MediaPlay),
+		AppTheme::icon(AppTheme::Icon::Video),
 		QCoreApplication::translate("MeetingUI", "Video")));
 	_navigation->addItem(new QListWidgetItem(
-		style()->standardIcon(QStyle::SP_MediaVolume),
+		AppTheme::icon(AppTheme::Icon::Audio),
 		QCoreApplication::translate("MeetingUI", "Audio")));
 	_navigation->addItem(new QListWidgetItem(
-		style()->standardIcon(QStyle::SP_MessageBoxInformation),
+		AppTheme::icon(AppTheme::Icon::Information),
 		QCoreApplication::translate("MeetingUI", "About")));
 	body->addWidget(_navigation);
 
@@ -309,11 +355,15 @@ void SettingsDialog::buildUi() {
 		}
 	});
 	_navigation->setCurrentRow(static_cast<int>(Page::General));
+	for (auto *label : findChildren<QLabel *>()) {
+		if (label->maximumHeight() == QWIDGETSIZE_MAX) label->setWordWrap(true);
+	}
 }
 
 QWidget *SettingsDialog::buildGeneralPage() {
-	auto *content = new QWidget(this);
-	auto *layout = new QVBoxLayout(content);
+	auto *scroll = makeScrollablePage(_pages);
+	auto *content = scroll->widget();
+	auto *layout = static_cast<QVBoxLayout *>(content->layout());
 	layout->setContentsMargins(24, 20, 24, 24);
 	layout->setSpacing(8);
 	layout->addWidget(makePageTitle(QCoreApplication::translate("MeetingUI", "General"), content));
@@ -339,12 +389,13 @@ QWidget *SettingsDialog::buildGeneralPage() {
 	layout->addWidget(_showActiveSpeaker);
 	layout->addWidget(_stayWhenLocked);
 	layout->addStretch();
-	return makeScrollablePage(content, this);
+	return scroll;
 }
 
 QWidget *SettingsDialog::buildVideoPage() {
-	auto *content = new QWidget(this);
-	auto *layout = new QVBoxLayout(content);
+	auto *scroll = makeScrollablePage(_pages);
+	auto *content = scroll->widget();
+	auto *layout = static_cast<QVBoxLayout *>(content->layout());
 	layout->setContentsMargins(24, 20, 24, 24);
 	layout->setSpacing(8);
 	layout->addWidget(makePageTitle(QCoreApplication::translate("MeetingUI", "Video"), content));
@@ -432,12 +483,13 @@ QWidget *SettingsDialog::buildVideoPage() {
 	remoteRow->addStretch();
 	layout->addLayout(remoteRow);
 	layout->addStretch();
-	return makeScrollablePage(content, this);
+	return scroll;
 }
 
 QWidget *SettingsDialog::buildAudioPage() {
-	auto *content = new QWidget(this);
-	auto *layout = new QVBoxLayout(content);
+	auto *scroll = makeScrollablePage(_pages);
+	auto *content = scroll->widget();
+	auto *layout = static_cast<QVBoxLayout *>(content->layout());
 	layout->setContentsMargins(24, 20, 24, 24);
 	layout->setSpacing(8);
 	layout->addWidget(makePageTitle(QCoreApplication::translate("MeetingUI", "Audio"), content));
@@ -499,7 +551,7 @@ QWidget *SettingsDialog::buildAudioPage() {
 	layout->addWidget(_noiseSuppression);
 	layout->addWidget(_autoGainControl);
 	layout->addStretch();
-	return makeScrollablePage(content, this);
+	return scroll;
 }
 
 void SettingsDialog::connectDeviceControllers() {
@@ -648,8 +700,9 @@ void SettingsDialog::connectDeviceControllers() {
 }
 
 QWidget *SettingsDialog::buildAboutPage() {
-	auto *content = new QWidget(this);
-	auto *layout = new QVBoxLayout(content);
+	auto *scroll = makeScrollablePage(_pages);
+	auto *content = scroll->widget();
+	auto *layout = static_cast<QVBoxLayout *>(content->layout());
 	layout->setContentsMargins(24, 20, 24, 24);
 	layout->setSpacing(12);
 	layout->addWidget(makePageTitle(QCoreApplication::translate("MeetingUI", "About"), content));
@@ -680,7 +733,7 @@ QWidget *SettingsDialog::buildAboutPage() {
 	updateButton->setMinimumWidth(240);
 	layout->addWidget(updateButton, 0, Qt::AlignHCenter);
 	layout->addStretch(2);
-	return makeScrollablePage(content, this);
+	return scroll;
 }
 
 void SettingsDialog::connectPreferenceControls() {
@@ -835,7 +888,7 @@ OpenMeeting::MediaPreferences SettingsDialog::preferences() const {
 	value.echoCancellation = _echoCancellation && _echoCancellation->isChecked();
 	value.noiseSuppression = _noiseSuppression && _noiseSuppression->isChecked();
 	value.autoGainControl = _autoGainControl && _autoGainControl->isChecked();
-	value.cameraDeviceId = selectedCameraDeviceId();
+	if (_videoDevicesReady) value.cameraDeviceId = selectedCameraDeviceId();
 	value.microphoneDeviceId = selectedMicrophoneDeviceId();
 	value.speakerDeviceId = selectedSpeakerDeviceId();
 	value.cameraVideoCodec = _cameraCodecCombo
@@ -853,15 +906,19 @@ OpenMeeting::MediaPreferences SettingsDialog::preferences() const {
 		value.mirrorMode = OpenMeeting::VideoMirrorMode::LocalOnly;
 	}
 
-	const auto format = selectedVideoFormat();
-	if (_highDefinition && _highDefinition->isChecked() && format.width > 0 && format.height > 0) {
-		value.videoCaptureWidth = format.width;
-		value.videoCaptureHeight = format.height;
-		value.videoCaptureFps = format.fps;
-	} else {
-		value.videoCaptureWidth = 0;
-		value.videoCaptureHeight = 0;
-		value.videoCaptureFps = 0;
+	// General settings remain editable while discovery is pending or failed.
+	// Do not persist an empty selector over the user's saved device/format.
+	if (_videoDevicesReady) {
+		const auto format = selectedVideoFormat();
+		if (_highDefinition && _highDefinition->isChecked() && format.width > 0 && format.height > 0) {
+			value.videoCaptureWidth = format.width;
+			value.videoCaptureHeight = format.height;
+			value.videoCaptureFps = format.fps;
+		} else {
+			value.videoCaptureWidth = 0;
+			value.videoCaptureHeight = 0;
+			value.videoCaptureFps = 0;
+		}
 	}
 	return value;
 }
@@ -870,6 +927,9 @@ void SettingsDialog::setPreferences(const OpenMeeting::MediaPreferences &value) 
 	const auto oldUpdating = _updatingUi;
 	_updatingUi = true;
 	_generalCamera->setChecked(value.enableVideo);
+	if (!_videoDevicesReady && _cameraCombo->count() > 0) {
+		_cameraCombo->setItemData(0, value.cameraDeviceId, kDeviceIdRole);
+	}
 	_videoCamera->setChecked(value.enableVideo);
 	_generalMicrophone->setChecked(value.enableMicrophone);
 	_audioMicrophone->setChecked(value.enableMicrophone);
@@ -924,6 +984,7 @@ void SettingsDialog::setPreferences(const OpenMeeting::MediaPreferences &value) 
 }
 
 QString SettingsDialog::selectedCameraDeviceId() const {
+	if (!_videoDevicesReady) return _session.mediaPreferences().cameraDeviceId;
 	return _cameraCombo && _cameraCombo->currentIndex() >= 0
 		? _cameraCombo->currentData(kDeviceIdRole).toString()
 		: QString();
@@ -965,10 +1026,26 @@ void SettingsDialog::setVideoPreviewWidget(QWidget *previewWidget) {
 }
 
 void SettingsDialog::refreshDevices() {
+	if (_closed) return;
+	if (!_firstPaintReported) {
+		_forceDeviceRefresh = true;
+		return;
+	}
+	startDeviceDiscovery(true);
+}
+
+void SettingsDialog::prepareDevicePlaceholders() {
 	const auto value = _session.mediaPreferences();
-	refreshVideoDevices(value);
 	const auto oldUpdating = _updatingUi;
 	_updatingUi = true;
+	_videoDevicesReady = false;
+	_cameraCombo->clear();
+	_cameraCombo->addItem(QCoreApplication::translate("MeetingUI", "Loading cameras..."), value.cameraDeviceId);
+	_cameraCombo->setEnabled(false);
+	_cameraFormats.clear();
+	_resolutionCombo->clear();
+	_resolutionCombo->setEnabled(false);
+	_highDefinition->setEnabled(false);
 	_microphoneCombo->clear();
 	_microphoneCombo->addItem(QCoreApplication::translate("MeetingUI", "Testing microphone..."), value.microphoneDeviceId);
 	_microphoneCombo->setItemData(0, true, kDevicePendingRole);
@@ -980,17 +1057,39 @@ void SettingsDialog::refreshDevices() {
 	_microphoneTestButton->setEnabled(false);
 	_speakerTestButton->setEnabled(false);
 	_updatingUi = oldUpdating;
+}
+
+void SettingsDialog::startDeviceDiscovery(bool forceRefresh) {
+	if (_closed) return;
+	if (_cameraCallbacks) _cameraCallbacks->Revoke();
+	_cameraRequest.reset();
+	prepareDevicePlaceholders();
+	_cameraCallbacks = OpenMeeting::QtCallbackGate<SettingsDialog>::Create(this);
+	_cameraRequest = _cameraDiscovery->request(
+		[gate = _cameraCallbacks](const CameraDeviceDiscovery::Result &result) {
+			gate->Post([result](SettingsDialog *dialog) {
+				if (!result.succeeded) {
+					dialog->_cameraCombo->setItemText(0,
+						QCoreApplication::translate("MeetingUI", "Failed to list cameras"));
+					return;
+				}
+				dialog->applyVideoDevices(*result.devices);
+				dialog->requestPreviewIfVisible();
+			});
+		}, forceRefresh);
 	_audioTestController->refreshDevices();
 }
 
-void SettingsDialog::refreshVideoDevices(const OpenMeeting::MediaPreferences &value) {
+void SettingsDialog::applyVideoDevices(const CameraDeviceDiscovery::Devices &devices) {
+	// Read preferences at delivery time, not when the worker was started.
+	const auto value = _session.mediaPreferences();
 	const auto oldUpdating = _updatingUi;
 	_updatingUi = true;
+	_videoDevicesReady = true;
 	_cameraCombo->clear();
 	_cameraFormats.clear();
 	int defaultIndex = -1;
-	try {
-		const auto devices = livekit::DShowEnumerator::EnumerateVideoDevices();
+	{
 		for (const auto &device : devices) {
 			auto deviceId = QString::fromStdString(device.path);
 			if (deviceId.isEmpty()) {
@@ -1034,8 +1133,6 @@ void SettingsDialog::refreshVideoDevices(const OpenMeeting::MediaPreferences &va
 			});
 			_cameraFormats.insert(deviceId, formats);
 		}
-	} catch (...) {
-		// Device discovery failure is represented as an empty selector.
 	}
 
 	if (_cameraCombo->count() == 0) {
@@ -1212,7 +1309,8 @@ void SettingsDialog::emitCameraSelection() {
 }
 
 void SettingsDialog::requestPreviewIfVisible() {
-	if (!_pages || _pages->currentIndex() != static_cast<int>(Page::Video)) {
+	if (_closed || !_videoDevicesReady || !isVisible()
+		|| !_pages || _pages->currentIndex() != static_cast<int>(Page::Video)) {
 		return;
 	}
 	const auto value = preferences();

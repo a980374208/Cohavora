@@ -24,6 +24,41 @@ set_tests_properties(session_credentials_test PROPERTIES
 set_property(TEST session_credentials_test openmeeting_http_test openmeeting_http_watchdog_test
     http_owner_remediation_test APPEND PROPERTY LABELS "PR_SEC_002_FOCUSED")
 
+# Main-window UI fixture reuses the application's source and link lists, without
+# its authenticated entry point, resources for the executable, or debug login.
+if(TARGET cohavora_app)
+    get_target_property(main_ui_sources cohavora_app SOURCES)
+    get_target_property(main_ui_links cohavora_app LINK_LIBRARIES)
+    list(FILTER main_ui_sources EXCLUDE REGEX "main_meeting_app|debug_login_options|\\.rc$|\\.natvis$")
+    add_executable(test_main_window_latency
+        ${LIVEKIT_TEST_SOURCE_DIR}/ui/test_main_window_latency.cpp ${main_ui_sources})
+    livekit_configure_qt_test(test_main_window_latency)
+    target_link_libraries(test_main_window_latency PRIVATE ${main_ui_links})
+    target_compile_options(test_main_window_latency PRIVATE /utf-8)
+    add_test(NAME main_window_latency_test COMMAND test_main_window_latency)
+    set_tests_properties(main_window_latency_test PROPERTIES TIMEOUT 30 LABELS "UI_CONTRACT_FOCUSED")
+endif()
+
+# Settings discovery, first paint, cache and late-completion contracts.
+add_executable(test_settings_async
+    ${LIVEKIT_TEST_SOURCE_DIR}/test_settings_async.cpp
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/settings_dialog.cpp
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/settings_dialog.h
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/camera_preview_widget.cpp
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/camera_preview_widget.h
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/whiteboard/accessible_combo_box.cpp
+    # The test supplies an inert audio controller; no real devices are opened.
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/audio_device_test_controller.h)
+livekit_configure_qt_test(test_settings_async)
+target_link_libraries(test_settings_async PRIVATE
+    cohavora_device_discovery
+    cohavora_meeting_network cohavora_qt_video_render cohavora_ui_theme
+    cohavora_ui_translations)
+target_compile_options(test_settings_async PRIVATE /utf-8)
+add_test(NAME settings_async_test COMMAND test_settings_async)
+set_tests_properties(settings_async_test PROPERTIES
+    TIMEOUT 30 LABELS "CORE_REGRESSION;SETTINGS_FOCUSED")
+
 # Typed meeting catalog contracts and Qt owner ordering/lifetime behavior.
 add_executable(test_meeting_catalog
     ${LIVEKIT_TEST_SOURCE_DIR}/meeting/test_meeting_catalog.cpp

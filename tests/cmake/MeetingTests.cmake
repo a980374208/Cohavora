@@ -133,6 +133,7 @@ target_link_libraries(test_participant_window_remediation PRIVATE
     cohavora_meeting_widgets
     cohavora_video_canvas_ui
     cohavora_meeting_window_ui
+    cohavora_device_discovery
     cohavora_meeting_runtime
     cohavora_qt_video_render
     cohavora_ui_translations)
@@ -142,6 +143,17 @@ if(MSVC)
     target_compile_options(test_participant_window_remediation PRIVATE /bigobj)
 endif()
 # Exercise production widgets instead of independent copies of UI policy.
+add_executable(test_meeting_device_discovery
+    ${LIVEKIT_TEST_SOURCE_DIR}/ui/test_meeting_device_discovery.cpp)
+livekit_configure_qt_test(test_meeting_device_discovery)
+target_compile_options(test_meeting_device_discovery PRIVATE /utf-8)
+target_link_libraries(test_meeting_device_discovery PRIVATE
+    cohavora_meeting_widgets cohavora_video_canvas_ui cohavora_meeting_window_ui
+    cohavora_device_discovery cohavora_meeting_runtime cohavora_qt_video_render
+    cohavora_ui_theme cohavora_ui_translations)
+add_test(NAME meeting_device_discovery_test COMMAND test_meeting_device_discovery)
+set_tests_properties(meeting_device_discovery_test PROPERTIES TIMEOUT 30 LABELS "CORE_REGRESSION;SETTINGS_FOCUSED")
+
 add_test(NAME meeting_ui_grid_test COMMAND test_participant_window_remediation --grid-contract)
 add_test(NAME meeting_recovery_ux_test COMMAND test_participant_window_remediation --recovery-ux-contract)
 set_tests_properties(meeting_ui_grid_test meeting_recovery_ux_test PROPERTIES
