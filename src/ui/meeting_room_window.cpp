@@ -56,6 +56,24 @@
 namespace MeetingUI {
 namespace {
 
+// The popup owns only a cancellable subscription, never a native driver job.
+// Even cached results are queued so no action is populated before popup().
+template <typename Discovery, typename Apply>
+void loadDeviceMenu(QMenu *menu, Discovery &discovery, Apply apply) {
+    auto gate = OpenMeeting::QtCallbackGate<QMenu>::Create(menu);
+    auto request = std::make_shared<typename Discovery::Request>();
+    QObject::connect(menu, &QMenu::aboutToHide, menu, [gate, request] {
+        gate->Revoke();
+        request->reset();
+    });
+    QTimer::singleShot(0, menu, [&discovery, gate, request, apply = std::move(apply)] {
+        if (!gate->active()) return;
+        *request = discovery.request([gate, apply](const auto &result) {
+            gate->Post([apply, result](QMenu *target) { apply(*target, result); });
+        });
+    });
+}
+
 QSize bannerSize(QLabel &label, int availableWidth, int preferredWidth) {
  label.setWordWrap(true);
  label.ensurePolished();
@@ -2179,19 +2197,24 @@ RoomBottomBarWidget::RoomBottomBarWidget(QWidget *parent)
 }
 
 void RoomBottomBarWidget::setAudioMuted(bool muted) {
+	cancelDeviceAction(DeviceKind::Microphone);
 	_audioMuted = muted;
+	_uiaAudio->setEnabled(!_inRecovery);
 	_uiaAudio->setChecked(!muted);
 	_uiaAudio->setAccessibleName(QCoreApplication::translate("MeetingUI", muted ? "Unmute" : "Mute"));
 	update();
 }
 
 void RoomBottomBarWidget::setSpeakerMuted(bool muted) {
+	cancelDeviceAction(DeviceKind::Speaker);
 	_speakerMuted = muted;
 	update();
 }
 
 void RoomBottomBarWidget::setVideoEnabled(bool enabled) {
+	cancelDeviceAction(DeviceKind::Camera);
 	_videoEnabled = enabled;
+	_uiaVideo->setEnabled(!_inRecovery);
 	_uiaVideo->setChecked(enabled);
 	_uiaVideo->setAccessibleName(QCoreApplication::translate("MeetingUI", enabled ? "Stop Video" : "Start Video"));
 	update();
@@ -2212,30 +2235,99 @@ void RoomBottomBarWidget::setScreenShareAvailable(bool available) {
 	update();
 }
 
+void RoomBottomBarWidget::cancelDeviceAction(DeviceKind kind) {
+    auto &pending = _pendingDeviceActions[static_cast<std::size_t>(kind)];
+    if (pending.callbacks) pending.callbacks->Revoke();
+    pending = {};
+}
+
+void RoomBottomBarWidget::requestDeviceEnable(DeviceKind kind) {
+    if (_inRecovery) return;
+    auto &pending = _pendingDeviceActions[static_cast<std::size_t>(kind)];
+    if (pending.callbacks) return;
+    auto gate = OpenMeeting::QtCallbackGate<RoomBottomBarWidget>::Create(this);
+    pending.callbacks = gate;
+    if (kind == DeviceKind::Microphone) {
+        _uiaAudio->setChecked(!_audioMuted);
+        _uiaAudio->setEnabled(false);
+    } else if (kind == DeviceKind::Camera) {
+        _uiaVideo->setChecked(_videoEnabled);
+        _uiaVideo->setEnabled(false);
+    }
+    const auto complete = [gate, kind](bool available) {
+        gate->Post([kind, available](RoomBottomBarWidget *bar) {
+            bar->cancelDeviceAction(kind);
+            if (bar->_inRecovery) return;
+            if (kind == DeviceKind::Microphone) bar->_uiaAudio->setEnabled(true);
+            if (kind == DeviceKind::Camera) bar->_uiaVideo->setEnabled(true);
+            if (!available) {
+                const bool camera = kind == DeviceKind::Camera;
+                const bool speaker = kind == DeviceKind::Speaker;
+                ShowMeetingWarning(bar,
+                    camera ? "meetingCameraUnavailable" : speaker ? "meetingSpeakerUnavailable" : "meetingMicrophoneUnavailable",
+                    camera ? "meetingCameraUnavailableDismiss" : speaker ? "meetingSpeakerUnavailableDismiss" : "meetingMicrophoneUnavailableDismiss",
+                    QCoreApplication::translate("MeetingUI", camera ? "Camera Unavailable" : speaker ? "Speaker Unavailable" : "Microphone Unavailable"),
+                    QCoreApplication::translate("MeetingUI", camera ? "No camera device is available. Video cannot be enabled." : speaker ?
+                        "No speaker output device is available. The speaker cannot be enabled." :
+                        "No microphone input device is available. The microphone cannot be enabled."));
+                return;
+            }
+            if (kind == DeviceKind::Camera) {
+                bar->setVideoEnabled(true);
+                bar->_toggleVideoStream.fire_copy(true);
+            } else if (kind == DeviceKind::Microphone) {
+                bar->setAudioMuted(false);
+                bar->_toggleAudioStream.fire_copy(false);
+            } else {
+                bar->setSpeakerMuted(false);
+                bar->_toggleSpeakerStream.fire_copy(false);
+            }
+        });
+    };
+    if (kind == DeviceKind::Camera) {
+        auto &discovery = _cameraDiscovery ? *_cameraDiscovery : CameraDeviceDiscovery::Instance();
+        pending.subscription = discovery.request([complete](const auto &result) {
+            complete(result.succeeded && std::any_of(result.devices->begin(), result.devices->end(),
+                [](const auto &device) { return !device.path.empty(); }));
+        });
+    } else {
+        auto &discovery = kind == DeviceKind::Speaker
+            ? (_speakerDiscovery ? *_speakerDiscovery : SpeakerDeviceDiscovery())
+            : (_microphoneDiscovery ? *_microphoneDiscovery : MicrophoneDeviceDiscovery());
+        pending.subscription = discovery.request([complete](const auto &result) {
+            complete(result.succeeded && std::any_of(result.devices->begin(), result.devices->end(),
+                [](const auto &device) { return !device.id.empty(); }));
+        });
+    }
+}
+
 void RoomBottomBarWidget::toggleAudio() {
-	if (_inRecovery) { _uiaAudio->setChecked(!_audioMuted); return; }
-	if (_audioMuted && !HasAvailableAudioDevice()) {
-		_uiaAudio->setChecked(false);
-		ShowMeetingWarning(this, "meetingMicrophoneUnavailable", "meetingMicrophoneUnavailableDismiss",
-			QCoreApplication::translate("MeetingUI", "Microphone Unavailable"),
-			QCoreApplication::translate("MeetingUI", "No microphone input device is available. The microphone cannot be enabled."));
-		return;
-	}
-	setAudioMuted(!_audioMuted);
-	_toggleAudioStream.fire_copy(_audioMuted);
+    if (_inRecovery) { _uiaAudio->setChecked(!_audioMuted); return; }
+    if (_audioMuted) { requestDeviceEnable(DeviceKind::Microphone); return; }
+    setAudioMuted(true);
+    _toggleAudioStream.fire_copy(true);
 }
 
 void RoomBottomBarWidget::toggleVideo() {
-	if (_inRecovery) { _uiaVideo->setChecked(_videoEnabled); return; }
-	if (!_videoEnabled && !HasAvailableVideoDevice()) {
-		_uiaVideo->setChecked(false);
-		ShowMeetingWarning(this, "meetingCameraUnavailable", "meetingCameraUnavailableDismiss",
-			QCoreApplication::translate("MeetingUI", "Camera Unavailable"),
-			QCoreApplication::translate("MeetingUI", "No camera device is available. Video cannot be enabled."));
-		return;
-	}
-	setVideoEnabled(!_videoEnabled);
-	_toggleVideoStream.fire_copy(_videoEnabled);
+    if (_inRecovery) { _uiaVideo->setChecked(_videoEnabled); return; }
+    if (!_videoEnabled) { requestDeviceEnable(DeviceKind::Camera); return; }
+    setVideoEnabled(false);
+    _toggleVideoStream.fire_copy(false);
+}
+
+void RoomBottomBarWidget::toggleSpeaker() {
+    if (_inRecovery) return;
+    if (_speakerMuted) { requestDeviceEnable(DeviceKind::Speaker); return; }
+    setSpeakerMuted(true);
+    _toggleSpeakerStream.fire_copy(true);
+}
+
+void RoomBottomBarWidget::hideEvent(QHideEvent *event) {
+    for (auto kind : {DeviceKind::Microphone, DeviceKind::Speaker, DeviceKind::Camera}) cancelDeviceAction(kind);
+    if (_deviceMenu) _deviceMenu->close();
+    if (_uiaAudio) _uiaAudio->setEnabled(!_inRecovery);
+    if (_uiaVideo) _uiaVideo->setEnabled(!_inRecovery);
+    Ui::RpWidget::hideEvent(event);
 }
 
 void RoomBottomBarWidget::setParticipantCount(int count) {
@@ -2251,39 +2343,14 @@ void RoomBottomBarWidget::setChatUnreadCount(int count) {
 void RoomBottomBarWidget::setInRecovery(bool inRecovery) {
 	if (_inRecovery == inRecovery) return;
 	_inRecovery = inRecovery;
+    if (inRecovery) {
+        for (auto kind : {DeviceKind::Microphone, DeviceKind::Speaker, DeviceKind::Camera}) cancelDeviceAction(kind);
+        if (_deviceMenu) _deviceMenu->close();
+    }
 	for (auto *button : {_uiaParticipants, _uiaChat, _uiaWhiteboard, _uiaAudio, _uiaVideo})
 		button->setEnabled(!inRecovery);
 	_uiaShare->setEnabled(screenShareControlEnabled());
 	update();
-}
-
-bool RoomBottomBarWidget::HasAvailableAudioDevice() {
-	try {
-		auto mics = livekit::WasapiEnumerator::EnumerateInputDevices();
-		auto defMic = livekit::WasapiEnumerator::GetDefaultInputDevice();
-		return !mics.empty() && !defMic.id.empty();
-	} catch (...) {
-		return false;
-	}
-}
-
-bool RoomBottomBarWidget::HasAvailableSpeakerDevice() {
-	try {
-		auto spks = livekit::WasapiEnumerator::EnumerateOutputDevices();
-		return !spks.empty();
-	} catch (...) {
-		return false;
-	}
-}
-
-bool RoomBottomBarWidget::HasAvailableVideoDevice() {
-	try {
-		auto cams = livekit::DShowEnumerator::EnumerateVideoDevices();
-		auto defCam = livekit::DShowEnumerator::GetDefaultVideoDevice();
-		return !cams.empty() && !defCam.path.empty();
-	} catch (...) {
-		return false;
-	}
 }
 
 int RoomBottomBarWidget::heightForWidth(int width) const {
@@ -2547,131 +2614,111 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 	p.restore();
 }
 
+QMenu *RoomBottomBarWidget::createDeviceMenu(const char *name) {
+    if (_deviceMenu) _deviceMenu->close();
+    auto *menu = new QMenu(this);
+    menu->setObjectName(QString::fromLatin1(name));
+    _deviceMenu = menu;
+    AppTheme::styleMenu(*menu, AppTheme::Tone::Dark);
+    connect(menu, &QMenu::aboutToHide, menu, &QObject::deleteLater);
+    return menu;
+}
+
 void RoomBottomBarWidget::showAudioDeviceMenu(const QPoint &globalPos) {
-	QMenu menu(this);
-	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
-
-	// 1. 麦克风输入设备
-	QAction *micHeader = menu.addAction(QCoreApplication::translate("MeetingUI", "🎤 Select Microphone (Input)"));
-	micHeader->setEnabled(false);
-
-	auto inputDevices = livekit::WasapiEnumerator::EnumerateInputDevices();
-	QActionGroup *micGroup = new QActionGroup(&menu);
-	auto *defaultAction = menu.addAction(QCoreApplication::translate("MeetingUI", "System Default"));
-	defaultAction->setCheckable(true);
-	defaultAction->setChecked(_currentMicId.isEmpty());
-	micGroup->addAction(defaultAction);
-	connect(defaultAction, &QAction::triggered, this, [this] {
-		_micDeviceStream.fire_copy(QString());
-	});
-	for (const auto &dev : inputDevices) {
-		QString title = QString::fromStdString(dev.name);
-		if (dev.is_default) {
-			title += QCoreApplication::translate("MeetingUI", " (System Default)");
-		}
-		QAction *act = menu.addAction(title);
-		act->setCheckable(true);
-		if (_currentMicId == QString::fromStdString(dev.id)) {
-			act->setChecked(true);
-		}
-		micGroup->addAction(act);
-
-		connect(act, &QAction::triggered, this, [this, devId = QString::fromStdString(dev.id)] {
-			_micDeviceStream.fire_copy(devId);
-		});
-	}
-
-	menu.exec(globalPos);
+    showAudioEndpointMenu(globalPos, false);
 }
 
 void RoomBottomBarWidget::showSpeakerDeviceMenu(const QPoint &globalPos) {
-	QMenu menu(this);
-	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
-
-	QAction *spkHeader = menu.addAction(QCoreApplication::translate("MeetingUI", "🔊 Select Speaker (Output)"));
-	spkHeader->setEnabled(false);
-
-	appendSpeakerDeviceActions(menu);
-
-	menu.addSeparator();
-
-	QAction *toggleMuteAct = menu.addAction(_speakerMuted ? QCoreApplication::translate("MeetingUI", "🔊 Enable Speaker Output") : QCoreApplication::translate("MeetingUI", "🔇 Mute Speaker Output"));
-	connect(toggleMuteAct, &QAction::triggered, [this] {
-		_speakerMuted = !_speakerMuted;
-		_toggleSpeakerStream.fire_copy(_speakerMuted);
-		update();
-	});
-
-	menu.exec(globalPos);
+    showAudioEndpointMenu(globalPos, true);
 }
 
-void RoomBottomBarWidget::appendSpeakerDeviceActions(QMenu &menu) {
-	auto *group = new QActionGroup(&menu);
-	const auto addDevice = [&](const QString &title, const QString &deviceId) {
-		auto *action = menu.addAction(title);
-		action->setCheckable(true);
-		action->setChecked(deviceId == _currentSpeakerId);
-		group->addAction(action);
-		connect(action, &QAction::triggered, this, [this, deviceId] {
-			_speakerDeviceStream.fire_copy(deviceId);
-		});
-	};
-	addDevice(QCoreApplication::translate("MeetingUI", "(System Default)"), QString());
-	for (const auto &device : livekit::WasapiEnumerator::EnumerateOutputDevices()) {
-		auto title = QString::fromStdString(device.name);
-		if (device.is_default) {
-			title += QCoreApplication::translate("MeetingUI", " (System Default)");
-		}
-		addDevice(title, QString::fromStdString(device.id));
-	}
+void RoomBottomBarWidget::showAudioEndpointMenu(const QPoint &globalPos, bool speaker) {
+    if (_inRecovery) return;
+    auto *menu = createDeviceMenu(speaker ? "meetingSpeakerDeviceMenu" : "meetingMicrophoneDeviceMenu");
+    const auto populate = [this, speaker](QMenu &target, const AudioDeviceDiscovery::Result *result) {
+        target.clear();
+        target.addAction(QCoreApplication::translate("MeetingUI", speaker ?
+            "🔊 Select Speaker (Output)" : "🎤 Select Microphone (Input)"))->setEnabled(false);
+        auto *group = new QActionGroup(&target);
+        const auto add = [&](const QString &title, const QString &id) {
+            auto *action = target.addAction(title);
+            action->setData(id);
+            action->setCheckable(true);
+            action->setChecked(id == (speaker ? _currentSpeakerId : _currentMicId));
+            group->addAction(action);
+            connect(action, &QAction::triggered, this, [this, speaker, id] {
+                if (_inRecovery) return;
+                if (speaker) _speakerDeviceStream.fire_copy(id);
+                else _micDeviceStream.fire_copy(id);
+            });
+        };
+        add(QCoreApplication::translate("MeetingUI", "System Default"), QString());
+        if (result && result->succeeded) {
+            for (const auto &device : *result->devices) {
+                auto title = QString::fromStdString(device.name);
+                if (device.is_default) title += QCoreApplication::translate("MeetingUI", " (System Default)");
+                add(title, QString::fromStdString(device.id));
+            }
+        } else {
+            target.addAction(QCoreApplication::translate("MeetingUI", result ?
+                "Failed to list audio devices" : "Loading audio devices..."))->setEnabled(false);
+        }
+        if (speaker) {
+            target.addSeparator();
+            auto *toggle = target.addAction(QCoreApplication::translate("MeetingUI", _speakerMuted ?
+                "🔊 Enable Speaker Output" : "🔇 Mute Speaker Output"));
+            connect(toggle, &QAction::triggered, this, &RoomBottomBarWidget::toggleSpeaker);
+        }
+    };
+    populate(*menu, nullptr);
+    auto &discovery = speaker ? (_speakerDiscovery ? *_speakerDiscovery : SpeakerDeviceDiscovery())
+        : (_microphoneDiscovery ? *_microphoneDiscovery : MicrophoneDeviceDiscovery());
+    loadDeviceMenu(menu, discovery, [populate](QMenu &target, const auto &result) { populate(target, &result); });
+    menu->popup(globalPos);
 }
 
 void RoomBottomBarWidget::showVideoDeviceMenu(const QPoint &globalPos) {
-	QMenu menu(this);
-	AppTheme::styleMenu(menu, AppTheme::Tone::Dark);
-
-	QAction *camHeader = menu.addAction(QCoreApplication::translate("MeetingUI", "📷 Select Camera"));
-	camHeader->setEnabled(false);
-
-	auto videoDevices = livekit::DShowEnumerator::EnumerateVideoDevices();
-	auto defDev = livekit::DShowEnumerator::GetDefaultVideoDevice();
-
-	QActionGroup *camGroup = new QActionGroup(&menu);
-	for (const auto &dev : videoDevices) {
-		QString title = QString::fromStdString(dev.name);
-		if (dev.path == defDev.path) {
-			title += QCoreApplication::translate("MeetingUI", " (System Default)");
-		}
-		QAction *act = menu.addAction(title);
-		act->setCheckable(true);
-		if (_currentCameraPath.isEmpty()) {
-			if (dev.path == defDev.path) act->setChecked(true);
-		} else if (_currentCameraPath == QString::fromStdString(dev.path)) {
-			act->setChecked(true);
-		}
-		camGroup->addAction(act);
-
-		connect(act, &QAction::triggered, [this, devPath = QString::fromStdString(dev.path)] {
-			_currentCameraPath = devPath;
-			_videoDeviceStream.fire_copy(devPath);
-		});
-	}
-
-	if (videoDevices.empty()) {
-		QAction *emptyAct = menu.addAction(QCoreApplication::translate("MeetingUI", "No camera available"));
-		emptyAct->setEnabled(false);
-	}
-
-	menu.addSeparator();
-
-	QAction *toggleVideoAct = menu.addAction(!_videoEnabled ? QCoreApplication::translate("MeetingUI", "📷 Start Camera Video") : QCoreApplication::translate("MeetingUI", "🚫 Stop Camera Video"));
-	connect(toggleVideoAct, &QAction::triggered, [this] {
-		_videoEnabled = !_videoEnabled;
-		_toggleVideoStream.fire_copy(_videoEnabled);
-		update();
-	});
-
-	menu.exec(globalPos);
+    if (_inRecovery) return;
+    auto *menu = createDeviceMenu("meetingCameraDeviceMenu");
+    const auto populate = [this](QMenu &target, const CameraDeviceDiscovery::Result *result) {
+        target.clear();
+        target.addAction(QCoreApplication::translate("MeetingUI", "📷 Select Camera"))->setEnabled(false);
+        if (result && result->succeeded) {
+            const auto &devices = *result->devices;
+            auto defaultDevice = std::find_if(devices.begin(), devices.end(),
+                [](const auto &device) { return device.is_default; });
+            if (defaultDevice == devices.end()) defaultDevice = devices.begin();
+            auto *group = new QActionGroup(&target);
+            for (const auto &device : devices) {
+                const bool isDefault = &device == &*defaultDevice;
+                const auto id = QString::fromStdString(device.path);
+                auto title = QString::fromStdString(device.name);
+                if (isDefault) title += QCoreApplication::translate("MeetingUI", " (System Default)");
+                auto *action = target.addAction(title);
+                action->setData(id);
+                action->setCheckable(true);
+                action->setChecked(_currentCameraPath.isEmpty() ? isDefault : _currentCameraPath == id);
+                group->addAction(action);
+                connect(action, &QAction::triggered, this, [this, id] {
+                    if (_inRecovery) return;
+                    _currentCameraPath = id;
+                    _videoDeviceStream.fire_copy(id);
+                });
+            }
+            if (devices.empty()) target.addAction(QCoreApplication::translate("MeetingUI", "No camera available"))->setEnabled(false);
+        } else {
+            target.addAction(QCoreApplication::translate("MeetingUI", result ?
+                "Failed to list cameras" : "Loading cameras..."))->setEnabled(false);
+        }
+        target.addSeparator();
+        auto *toggle = target.addAction(QCoreApplication::translate("MeetingUI", _videoEnabled ?
+            "🚫 Stop Camera Video" : "📷 Start Camera Video"));
+        connect(toggle, &QAction::triggered, this, &RoomBottomBarWidget::toggleVideo);
+    };
+    populate(*menu, nullptr);
+    auto &discovery = _cameraDiscovery ? *_cameraDiscovery : CameraDeviceDiscovery::Instance();
+    loadDeviceMenu(menu, discovery, [populate](QMenu &target, const auto &result) { populate(target, &result); });
+    menu->popup(globalPos);
 }
 
 void RoomBottomBarWidget::mouseMoveEvent(QMouseEvent *e) {
@@ -2755,18 +2802,7 @@ void RoomBottomBarWidget::mousePressEvent(QMouseEvent *e) {
 						showSpeakerDeviceMenu(mapToGlobal(QPoint(item.rect.left(), item.rect.top() - 10)));
 						break;
 					}
-					if (_speakerMuted) {
-						if (!HasAvailableSpeakerDevice()) {
-							QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Speaker Unavailable"),
-								QCoreApplication::translate("MeetingUI", "No speaker output device is available. The speaker cannot be enabled."));
-							break;
-						}
-						_speakerMuted = false;
-					} else {
-						_speakerMuted = true;
-					}
-					_toggleSpeakerStream.fire_copy(_speakerMuted);
-					update();
+					toggleSpeaker();
 					break;
 				}
 				case 2: {
@@ -4679,7 +4715,7 @@ void MeetingRoomWindow::setupVideoPagingControls() {
 	_previousVideoPage = new QToolButton(_videoPagingControls);
 	_previousVideoPage->setObjectName(QStringLiteral("previousVideoPage"));
 	_previousVideoPage->setAutoRaise(true);
-	_previousVideoPage->setIcon(style()->standardIcon(QStyle::SP_ArrowLeft));
+	_previousVideoPage->setArrowType(Qt::LeftArrow);
 	_previousVideoPage->setToolTip(
 		QCoreApplication::translate("MeetingUI", "Previous video page"));
 	_previousVideoPage->setAccessibleName(_previousVideoPage->toolTip());
@@ -4692,7 +4728,7 @@ void MeetingRoomWindow::setupVideoPagingControls() {
 	_nextVideoPage = new QToolButton(_videoPagingControls);
 	_nextVideoPage->setObjectName(QStringLiteral("nextVideoPage"));
 	_nextVideoPage->setAutoRaise(true);
-	_nextVideoPage->setIcon(style()->standardIcon(QStyle::SP_ArrowRight));
+	_nextVideoPage->setArrowType(Qt::RightArrow);
 	_nextVideoPage->setToolTip(
 		QCoreApplication::translate("MeetingUI", "Next video page"));
 	_nextVideoPage->setAccessibleName(_nextVideoPage->toolTip());

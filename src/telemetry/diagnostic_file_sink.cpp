@@ -651,7 +651,8 @@ std::string DiagnosticFileSink::Serialize(const Event& event) const {
         value["error_code"] = ErrorCodeName(event.error_code);
     if (event.error_layer != ErrorLayer::None)
         value["error_layer"] = ErrorLayerName(event.error_layer);
-    if (event.duration_ms != 0)
+    if (event.duration_ms != 0 || event.kind == EventKind::SettingsFirstPaint ||
+        event.kind == EventKind::SettingsDeviceProbe)
         value["duration_ms"] = event.duration_ms;
     if (event.retryable)
         value["retryable"] = true;
@@ -760,6 +761,15 @@ std::string DiagnosticFileSink::Serialize(const Event& event) const {
             attributes["end_us"] = event.interval_end_us;
             attributes["threshold_us"] = event.stall_threshold_us;
         }
+        break;
+    case EventKind::SettingsFirstPaint:
+        attributes["measurement_point"] = "click_to_first_qt_paint_completed";
+        break;
+    case EventKind::SettingsDeviceProbe:
+        attributes["measurement_point"] = event.cache_hit ? "cached_snapshot" : "worker_device_enumeration";
+        attributes["media_kind"] = MediaKindName(event.media_kind);
+        attributes["cache_hit"] = event.cache_hit;
+        attributes["device_count"] = event.device_count;
         break;
     case EventKind::MediaFallback:
         attributes["media_kind"] = MediaKindName(event.media_kind);

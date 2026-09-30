@@ -72,6 +72,16 @@ if(WIN32)
     target_link_libraries(cohavora_video_canvas_ui PRIVATE d3d11 dxgi)
 endif()
 
+add_library(cohavora_device_discovery STATIC
+    ${PROJECT_SOURCE_DIR}/src/ui/cached_device_discovery.h
+    ${PROJECT_SOURCE_DIR}/src/ui/camera_device_discovery.h
+    ${PROJECT_SOURCE_DIR}/src/ui/camera_device_discovery.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/audio_device_discovery.h
+    ${PROJECT_SOURCE_DIR}/src/ui/audio_device_discovery.cpp)
+target_include_directories(cohavora_device_discovery PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(cohavora_device_discovery PRIVATE cohavora_core Qt5::Core)
+set_target_properties(cohavora_device_discovery PROPERTIES AUTOMOC OFF FOLDER "meeting/ui")
+
 add_library(cohavora_meeting_window_ui OBJECT
     ${PROJECT_SOURCE_DIR}/src/ui/camera_switch_completion_owner.h
     ${PROJECT_SOURCE_DIR}/src/ui/camera_switch_completion_owner.cpp
@@ -81,6 +91,7 @@ cohavora_configure_meeting_ui_objects(cohavora_meeting_window_ui)
 target_compile_definitions(cohavora_meeting_window_ui PRIVATE
     COHAVORA_SHOW_CONSOLE_BUTTON=$<IF:$<OR:$<CONFIG:Debug>,$<CONFIG:RelWithDebInfo>>,1,0>)
 target_link_libraries(cohavora_meeting_window_ui PRIVATE
+    cohavora_device_discovery
     cohavora_meeting_network
     cohavora_meeting_runtime
     cohavora_qt_video_render

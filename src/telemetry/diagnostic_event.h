@@ -69,6 +69,8 @@ enum class EventKind : std::uint8_t {
     RtcSdpStep,
     MediaFirstObserved,
     RenderStallInterval,
+    SettingsFirstPaint,
+    SettingsDeviceProbe,
 };
 
 enum class MediaObservation : std::uint8_t { FirstDecoded, FirstPcm, FirstRender };
@@ -260,6 +262,8 @@ struct Event final {
     std::uint64_t queue_high_water = 0;
     std::uint64_t bytes = 0;
     std::uint64_t duration_ms = 0;
+    std::uint32_t device_count = 0;
+    bool cache_hit = false;
     std::uint64_t last_committed_sequence = 0;
     std::uint64_t current_generation = 0;
     std::int64_t diagnostic_expires_at_utc_ms = 0;
@@ -282,6 +286,10 @@ struct Event final {
     static Event FileRecovered(std::uint64_t last_committed) noexcept;
     static Event Received(ChatKind kind, std::uint64_t bytes) noexcept;
     static Event Issue(IssueCode code) noexcept;
+    static Event SettingsPaint(std::uint64_t elapsed_ms) noexcept;
+    static Event SettingsProbe(MediaKind media, std::uint64_t elapsed_ms,
+                               Outcome result, std::uint32_t count,
+                               bool cache_hit = false) noexcept;
 };
 
 std::string_view EventName(EventKind kind) noexcept;

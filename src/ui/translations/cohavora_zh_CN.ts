@@ -4,6 +4,18 @@
 <context>
     <name>MeetingUI</name>
     <message>
+        <source>Loading audio devices...</source>
+        <translation>正在加载音频设备…</translation>
+    </message>
+    <message>
+        <source>Loading cameras...</source>
+        <translation>正在加载摄像头...</translation>
+    </message>
+    <message>
+        <source>Failed to list cameras</source>
+        <translation>无法获取摄像头列表</translation>
+    </message>
+    <message>
         <source>Preparing audio and video devices...</source>
         <translation>正在准备音视频设备…</translation>
     </message>

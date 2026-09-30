@@ -156,6 +156,28 @@ Event Event::Issue(IssueCode code) noexcept {
     return event;
 }
 
+Event Event::SettingsPaint(std::uint64_t elapsed_ms) noexcept {
+    Event event;
+    event.kind = EventKind::SettingsFirstPaint;
+    event.thread_role = ThreadRole::Ui;
+    event.duration_ms = elapsed_ms;
+    event.outcome = Outcome::Success;
+    return event;
+}
+
+Event Event::SettingsProbe(MediaKind media, std::uint64_t elapsed_ms,
+                          Outcome result, std::uint32_t count, bool cached) noexcept {
+    Event event;
+    event.kind = EventKind::SettingsDeviceProbe;
+    event.thread_role = cached ? ThreadRole::Ui : ThreadRole::Media;
+    event.media_kind = media;
+    event.duration_ms = elapsed_ms;
+    event.outcome = result;
+    event.device_count = count;
+    event.cache_hit = cached;
+    return event;
+}
+
 std::string_view SdpDescriptionName(SdpDescription value) noexcept {
     constexpr std::string_view names[] = {"unknown", "offer", "answer"};
     const auto index = static_cast<std::size_t>(value);
@@ -226,6 +248,8 @@ std::string_view EventName(EventKind kind) noexcept {
     case EventKind::MediaEndpointRecovered: return "media.endpoint.recovered";
     case EventKind::MediaFirstObserved: return "media.first_observed";
     case EventKind::RenderStallInterval: return "render.stall.interval";
+    case EventKind::SettingsFirstPaint: return "settings.first_paint";
+    case EventKind::SettingsDeviceProbe: return "settings.device_probe";
     case EventKind::MediaFallback: return "media.fallback";
     case EventKind::RenderBackendChanged: return "render.backend.changed";
     case EventKind::DeviceSwitchStarted: return "device.switch.started";
@@ -303,6 +327,8 @@ std::string_view ComponentName(EventKind kind) noexcept {
     case EventKind::ChatReceived:
     case EventKind::ChatSendTerminal:
     case EventKind::TransferTerminal: return "meeting_ui";
+    case EventKind::SettingsFirstPaint:
+    case EventKind::SettingsDeviceProbe: return "settings_ui";
     case EventKind::RtcSdpStep:
     case EventKind::RtcSdpFailed:
     case EventKind::RtcLifecycle: return "rtc";
@@ -400,6 +426,9 @@ bool IsCritical(EventKind kind) noexcept {
     case EventKind::CallbackRejectedSummary:
     case EventKind::RenderStallInterval:
         return false;
+    case EventKind::SettingsFirstPaint:
+    case EventKind::SettingsDeviceProbe:
+        return false;
     default: return true;
     }
 }
@@ -459,6 +488,8 @@ bool IsValidEvent(const Event& event) noexcept {
     case EventKind::MediaFirstObserved:
     case EventKind::RenderStallInterval:
     case EventKind::RetentionChanged:
+    case EventKind::SettingsFirstPaint:
+    case EventKind::SettingsDeviceProbe:
         break;
     default: return false;
     }

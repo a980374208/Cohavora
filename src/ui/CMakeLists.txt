@@ -14,6 +14,8 @@ endforeach()
 
 qt5_add_resources(cohavora_ui_theme_resources app_theme.qrc)
 add_library(cohavora_ui_theme OBJECT
+    app_icons.cpp
+    app_icons.h
     app_theme.cpp
     app_theme.h
     ${cohavora_ui_theme_resources})

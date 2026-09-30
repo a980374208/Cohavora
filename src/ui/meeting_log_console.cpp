@@ -493,6 +493,14 @@ MeetingLogConsoleWindow::diagnosticMirror() {
 				.arg(QString::fromLatin1(MediaKindName(event.media_kind).data()),
 					QString::fromLatin1(DeviceSwitchReasonName(event.device_switch_reason).data()));
 			break;
+		case EventKind::SettingsFirstPaint:
+			entry.message = QStringLiteral("measurement_point=click_to_first_qt_paint_completed");
+			break;
+		case EventKind::SettingsDeviceProbe:
+			entry.message = QStringLiteral("media=%1 cache_hit=%2 device_count=%3")
+				.arg(QString::fromLatin1(MediaKindName(event.media_kind).data()))
+				.arg(event.cache_hit).arg(event.device_count);
+			break;
 		default: break;
 		}
 		// Only closed, typed fields may enter the presentation. Never include raw
@@ -511,7 +519,8 @@ MeetingLogConsoleWindow::diagnosticMirror() {
 			addField("error", QString::fromLatin1(ErrorCodeName(event.error_code).data()));
 		if (event.http_status != 0)
 			addField("http", QString::number(event.http_status));
-		if (event.duration_ms != 0)
+		if (event.duration_ms != 0 || event.kind == EventKind::SettingsFirstPaint ||
+			event.kind == EventKind::SettingsDeviceProbe)
 			addField("duration_ms", QString::number(event.duration_ms));
 		if (event.kind == livekit::diagnostic::EventKind::QueueSummary) {
 			std::lock_guard lock(queue->mutex);
