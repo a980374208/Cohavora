@@ -115,7 +115,17 @@ Python fake peer 只用于秒级故障注入，所有结果强制 `l3_status=NOT
 协议 selftest 不创建真实会议、不打开摄像头、不捕获桌面。
 既有窗口生产控制仍由 `meeting_video_viewport_render_lease_test` 回归覆盖。
 
-## UIA 诊断采样边界
+## 可复用诊断工具
+
+- [安装包验证](../packaging/README.md)：实际卸载占用检查与构建预检。
+- [ETW 句柄工具](etw/README.md)：统一采集、解析、归因比较及符号化。
+- [真实 I/O 与退出回归](io/README.md)：独立构建，显式执行隔离卷测试。
+- [长稳／共享编排](orchestration/README.md)：`invoke_diagnostic_probe.ps1` 统一入口，支持无副作用 `-Plan`。
+
+原脚本、归档哈希和迁移去向见 [tool_migration.json](tool_migration.json)。
+离线工具边界验证：`python tests/runtime/test_diagnostic_tools.py`；不连接服务、不启动 WPR、不填满磁盘。
+
+### UIA 诊断采样边界
 
 常规资源／遥测采样使用原生 probe 和 OS 进程计数，不轮询 UIA 全树。
 仅在需要确认产品显示的检查点，使用 `uia_snapshot.py`：每次启动独立客户端，

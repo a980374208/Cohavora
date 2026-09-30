@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<WindowsPerformanceRecorder Version="1.0" Author="LiveKit capture probe">
+ <Profiles>
+  <SystemCollector Id="HandleCollector" Name="LiveKit Handle Collector">
+   <BufferSize Value="1024"/><Buffers Value="128"/>
+  </SystemCollector>
+  <SystemProvider Id="HandleProvider">
+   <Keywords><Keyword Value="ProcessThread"/><Keyword Value="Loader"/><Keyword Value="Handle"/></Keywords>
+   <Stacks><Stack Value="HandleCreate"/><Stack Value="HandleClose"/><Stack Value="HandleDuplicate"/></Stacks>
+  </SystemProvider>
+  <Profile Id="HandleStacks.Verbose.File" Name="HandleStacks" Description="Handle lifecycle and stacks" LoggingMode="File" DetailLevel="Verbose">
+   <Collectors><SystemCollectorId Value="HandleCollector"><SystemProviderId Value="HandleProvider"/></SystemCollectorId></Collectors>
+  </Profile>
+ </Profiles>
+</WindowsPerformanceRecorder>

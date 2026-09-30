@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.24)
+project(livekit_io_regression LANGUAGES CXX)
+if(NOT WIN32)
+    message(FATAL_ERROR "These probes require Windows")
+endif()
+get_filename_component(REPOSITORY "${CMAKE_CURRENT_LIST_DIR}/../../.." ABSOLUTE)
+set(JSON_INCLUDE_DIR "" CACHE PATH "Directory containing nlohmann/json.hpp")
+if(NOT EXISTS "${JSON_INCLUDE_DIR}/nlohmann/json.hpp")
+    message(FATAL_ERROR "Set JSON_INCLUDE_DIR to the existing dependency include directory")
+endif()
+foreach(probe IN ITEMS exit_probe disk_full_probe)
+    add_executable(${probe} ${probe}.cpp
+        "${REPOSITORY}/src/telemetry/diagnostic_event.cpp"
+        "${REPOSITORY}/src/telemetry/diagnostic_file_sink.cpp")
+    target_compile_features(${probe} PRIVATE cxx_std_20)
+    target_include_directories(${probe} PRIVATE "${REPOSITORY}" "${JSON_INCLUDE_DIR}")
+    target_compile_definitions(${probe} PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX _WIN32_WINNT=0x0A00)
+    target_link_libraries(${probe} PRIVATE advapi32)
+    if(MSVC)
+        target_compile_options(${probe} PRIVATE /utf-8)
+    endif()
+endforeach()
+# Deliberately not registered with CTest: real I/O requires an isolated volume.

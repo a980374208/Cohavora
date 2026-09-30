@@ -1,0 +1,112 @@
+{
+  "schema": 1,
+  "archive": "out/script-archive-20260929/originals.zip",
+  "archive_sha256": "54a1997dbebb3e3d59cc20f176b07f22c2da383bec1a019c727990c19bcbab61",
+  "archive_manifest": "out/script-archive-20260929/manifest.json",
+  "archive_files": 1616,
+  "historical_evidence": "Large evidence and binaries remain in their original directories; historical verdicts are unchanged.",
+  "migrations": [
+    {
+      "original": "out/packaging-validation/verify_installer.py",
+      "original_sha256": "ba178f59667d13be06b846cde088ab47e0316699b43367239645ad2e1f838cb7",
+      "replacement": "tests/packaging/verify_installer.py",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/native-sink-20260928/run.py",
+      "original_sha256": "cc6aa9cf0f03a26f9d6d3c9bf49868880a0e459c893fdff5db99fb54427cf53f",
+      "replacement": "tests/runtime/io/verify_sink_exit.py",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/native-sink-20260928/disk-full/run.ps1",
+      "original_sha256": "56f13bf509c88bc91c5ea266e63d5ac4f5e43b0c027d6e0bf8863178975e79a5",
+      "replacement": "tests/runtime/io/invoke_real_io.ps1",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/quota-real-io-20260928/run.ps1",
+      "original_sha256": "6eb64a84bf2df267d6e8f2b3ca31f319aba8a73d642f13cfad7d413154b1617b",
+      "replacement": "tests/runtime/io/invoke_real_io.ps1",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/audio-gap-diagnosis-20260928/test_product_pilot_stream_lifetime.py",
+      "original_sha256": "f0e62d5fc11784e5d34dc740db77ed18602c868315c78397329542623ea390be",
+      "replacement": "tests/runtime/test_product_pilot_stream_lifetime.py",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/soak-prepared/extract-handle-trace.py",
+      "original_sha256": "dcecd5c800d2aa6c92843280c7097d20af27b51702cacfd361307977252f75ae",
+      "replacement": "tests/runtime/etw/extract_handle_trace.py",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/soak-prepared/symbolize-handle-stacks.py",
+      "original_sha256": "4b028d1d724625a64023d59b75f6b1e8cf18a083d10dabfa2ab0e903a17499d7",
+      "replacement": "tests/runtime/etw/symbolize_handle_stacks.py",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/soak-prepared/compare-handle-traces.py",
+      "original_sha256": "98b8681c84b4f3ad77f8b2939a625088c32f90725647dfd47668d0df578f1f7a",
+      "replacement": "tests/runtime/etw/compare_handle_traces.py",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/soak-prepared/run-external-handle-probe.ps1",
+      "original_sha256": "00de900ed0669792395b1e53c11300594bcf35fff22b646b636bf67ef3e899cf",
+      "replacement": "tests/runtime/etw/invoke_handle_probe.ps1",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/soak-prepared/run-isolation-handle-probe.ps1",
+      "original_sha256": "10b3ef0590729f8ea135dab82f62eb93430153a7489b42e16a170142d1d8f201",
+      "replacement": "tests/runtime/etw/invoke_handle_probe.ps1",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/soak-prepared/run-persistent-wgc-probe.ps1",
+      "original_sha256": "dd9860ef009aa46620b80147be0a7b2da6e0bab73ae42f8ed1b99ea0b2a6e516",
+      "replacement": "tests/runtime/etw/invoke_handle_probe.ps1",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/soak-prepared/handle-wpr-helper.ps1",
+      "original_sha256": "d404a53d99a8c487f356e181988a1d200bd83b6cdb26d6b611e2b79c4b6d5cc2",
+      "replacement": "tests/runtime/etw/handle_wpr.ps1",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/soak-prepared/run-current-full-soak.ps1",
+      "original_sha256": "f4d61b8edfd09bfd32ae8a1efa718e2cd5492b6ed78083d1108a863b3f20e5e3",
+      "replacement": "tests/runtime/orchestration/run-current-full-soak.ps1",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/soak-prepared/run-soak-and-report.ps1",
+      "original_sha256": "ca99f95612cad7971407966bb773c9f223295a4ebd17fdd269a464ee1a5d219f",
+      "replacement": "tests/runtime/orchestration/run-soak-and-report.ps1",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/soak-prepared/run-render-probe.ps1",
+      "original_sha256": "391a1e4289a3be12ef6a5a9230c9a63369fab27e09e2ecc809532611ebfb04ba",
+      "replacement": "tests/runtime/orchestration/run-render-probe.ps1",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/soak-prepared/run-recovery-service-probe.ps1",
+      "original_sha256": "56f10cd03a37e585739b18f6704e662d49d8acf87760f33a7ae140efd471e1c5",
+      "replacement": "tests/runtime/orchestration/run-recovery-service-probe.ps1",
+      "cleanup": "removed_after_archive_verification"
+    },
+    {
+      "original": "out/soak-prepared/run-share-reuse-probe.ps1",
+      "original_sha256": "93b256a00c41eb61885ae2ec094d390b80cd657f5ed0a8fd683243ff4e717496",
+      "replacement": "tests/runtime/orchestration/run-share-reuse-probe.ps1",
+      "cleanup": "removed_after_archive_verification"
+    }
+  ]
+}
