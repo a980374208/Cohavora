@@ -237,9 +237,9 @@ public:
 	rpl::producer<livekit::SimulateScenarioType> simulateScenarioRequested() const { return _simulateScenarioStream.events(); }
 
 	void showSimulateScenarioMenu(const QPoint &globalPos);
-	void showTelemetryMenu(const QPoint &globalPos);
 
 signals:
+	void telemetryDetailsRequested();
 	// Native child HWNDs (such as Dx11VideoCanvas) may prevent the top-level
 	// WM_NCHITTEST path from reaching this QWidget. Blank title-bar presses
 	// therefore request a system drag explicitly as a reliable fallback.
@@ -650,6 +650,7 @@ private:
 	std::optional<livekit::TrackKey> _pinnedTrackKey;
 
 	// UI 组件
+	QPointer<QDialog> _telemetryDialog;
 	RoomTopBarWidget *_topBar = nullptr;
 	QWidget *_stageContainer = nullptr;
 	livekit::render::VideoCanvas *_videoCanvas = nullptr;

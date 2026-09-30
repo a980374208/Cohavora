@@ -240,10 +240,22 @@ bool WriteJson(const std::filesystem::path& path, const Json& value) {
     return static_cast<bool>(output);
 }
 
+const std::vector<SafeMetricRow>& MetricCatalogRows() {
+    static const auto rows = [] {
+        SafeTelemetryRecord catalog;
+        // Optional histograms are absent from ordinary default snapshots, but
+        // their finite numeric keys must survive checkpoint-to-bundle export.
+        catalog.snapshot.render_window_fine_interval_histogram.resize(
+            RenderActivityProbe::kFineIntervalHistogramBuckets);
+        return BuildSafeMetricRows(catalog);
+    }();
+    return rows;
+}
+
 const std::set<std::string>& MetricKeys() {
     static const auto keys = [] {
         std::set<std::string> result;
-        for (const auto& row : BuildSafeMetricRows(SafeTelemetryRecord{}))
+        for (const auto& row : MetricCatalogRows())
             result.insert(row.key);
         return result;
     }();
@@ -253,7 +265,7 @@ const std::set<std::string>& MetricKeys() {
 const std::string& MetricUnit(const std::string& key) {
     static const auto units = [] {
         std::map<std::string, std::string> result;
-        for (const auto& row : BuildSafeMetricRows(SafeTelemetryRecord{}))
+        for (const auto& row : MetricCatalogRows())
             result.emplace(row.key, row.unit);
         return result;
     }();
@@ -564,6 +576,10 @@ TelemetryExportResult WriteTelemetryDiagnosticBundle(
                 {"http_status", event.http_status},
                 {"occurred_at_utc_ms", event.occurred_at_utc_ms},
                 {"monotonic_us", event.monotonic_us},
+                {"source_monotonic_us", event.source_monotonic_us},
+                {"binding_epoch", event.binding_epoch},
+                {"begin_us", event.begin_us}, {"end_us", event.end_us},
+                {"threshold_us", event.threshold_us}, {"boundary", event.boundary},
                 {"event_sequence", event.event_sequence},
                 {"attempt", event.attempt},
             }.dump() << '\n';

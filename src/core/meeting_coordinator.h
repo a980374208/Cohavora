@@ -468,6 +468,9 @@ private:
     AdmissionStage _admissionStage = AdmissionStage::None;
     struct AdmissionTelemetryRecord {
         uint64_t generation = 0;
+        // Reserve the native identity before admission diagnostics are emitted.
+        // generation above remains the independent UI cancellation token.
+        uint64_t sessionGeneration = 0;
         std::chrono::steady_clock::time_point startedAt{};
         std::string operationId;
         QString diagnosticOperationId;

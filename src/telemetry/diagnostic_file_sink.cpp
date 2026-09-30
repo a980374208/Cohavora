@@ -634,6 +634,7 @@ std::string DiagnosticFileSink::Serialize(const Event& event) const {
         {"component", ComponentName(event.kind)},
         {"occurred_at_utc_ms", event.occurred_at_utc_ms},
         {"monotonic_us", event.monotonic_us},
+        {"source_monotonic_us", event.source_monotonic_us},
         {"event_sequence", event.event_sequence},
         {"process_run_id", event.process_run_id.data()},
         {"pid", event.process_id},
@@ -744,6 +745,21 @@ std::string DiagnosticFileSink::Serialize(const Event& event) const {
         attributes["endpoint_id"] = event.media_endpoint_id.View();
         if (!event.previous_media_endpoint_id.View().empty())
             attributes["previous_endpoint_id"] = event.previous_media_endpoint_id.View();
+        break;
+    case EventKind::MediaFirstObserved:
+    case EventKind::RenderStallInterval:
+        attributes["media_kind"] = MediaKindName(event.media_kind);
+        attributes["endpoint_id"] = event.media_endpoint_id.View();
+        attributes["binding_epoch"] = event.binding_epoch;
+        if (event.kind == EventKind::MediaFirstObserved) {
+            attributes["measurement_point"] = MediaObservationName(event.media_observation);
+        } else {
+            attributes["measurement_point"] = "render_submit_stall";
+            attributes["boundary"] = StallBoundaryName(event.stall_boundary);
+            attributes["begin_us"] = event.interval_begin_us;
+            attributes["end_us"] = event.interval_end_us;
+            attributes["threshold_us"] = event.stall_threshold_us;
+        }
         break;
     case EventKind::MediaFallback:
         attributes["media_kind"] = MediaKindName(event.media_kind);

@@ -2611,6 +2611,7 @@ uint64_t MeetingCoordinator::beginAdmission(AdmissionStage stage) {
     _admissionStage = stage;
     _admissionTelemetry = AdmissionTelemetryRecord{};
     _admissionTelemetry.generation = _admissionGeneration;
+    _admissionTelemetry.sessionGeneration = NextMeetingSessionGeneration();
     _admissionTelemetry.diagnosticOperationId =
         QUuid::createUuid().toString(QUuid::Id128);
     _admissionTelemetry.anonymousSessionId =
@@ -2631,7 +2632,7 @@ uint64_t MeetingCoordinator::beginAdmission(AdmissionStage stage) {
         _admissionTelemetry.diagnosticOperationId.toStdString());
     event.context.anonymous_session_id.Assign(
         _admissionTelemetry.anonymousSessionId.toStdString());
-    event.context.session_generation = _admissionGeneration;
+    event.context.session_generation = _admissionTelemetry.sessionGeneration;
     event.context.has_session_generation = true;
     event.stage = stage == AdmissionStage::Joining
         ? livekit::diagnostic::Stage::Joining
@@ -2679,7 +2680,8 @@ void MeetingCoordinator::attachAdmissionTelemetry(
     _admissionTelemetry.operationId = telemetry->StartOperation(
         livekit::telemetry::OperationKind::Admission,
         "admission",
-        _admissionTelemetry.startedAt);
+        _admissionTelemetry.startedAt,
+        _admissionTelemetry.diagnosticOperationId.toStdString());
 }
 
 void MeetingCoordinator::finishAdmissionTelemetry(
@@ -2698,7 +2700,7 @@ void MeetingCoordinator::finishAdmissionTelemetry(
         _admissionTelemetry.diagnosticOperationId.toStdString());
     event.context.anonymous_session_id.Assign(
         _admissionTelemetry.anonymousSessionId.toStdString());
-    event.context.session_generation = admissionGeneration;
+    event.context.session_generation = _admissionTelemetry.sessionGeneration;
     event.context.has_session_generation = true;
     event.outcome = DiagnosticOutcome(outcome);
     event.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -3313,7 +3315,8 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
     _ioContext = _sessionOwner->context;
     _sessionRuntime = std::make_shared<MeetingSessionRuntime>(
         *_ioContext,
-        (_nextSessionGeneration = NextMeetingSessionGeneration()),
+        (_nextSessionGeneration = _admissionTelemetry.sessionGeneration
+            ? _admissionTelemetry.sessionGeneration : NextMeetingSessionGeneration()),
         _sessionManager.userId(), _ioContext,
         _admissionTelemetry.anonymousSessionId.toStdString());
     _sessionOwner->runtime = _sessionRuntime;

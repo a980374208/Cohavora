@@ -6,6 +6,7 @@
 #include <random>
 #include <string>
 #include <vector>
+#include <optional>
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -122,6 +123,54 @@ struct DiagnosticPipeline::WriterContext final {
     std::condition_variable wake_;
     std::condition_variable writer_done_;
     std::shared_ptr<const Mirror> mirror_;
+    template<std::size_t Bytes> struct TimelineRing {
+        static constexpr auto capacity = (std::min)(std::size_t{2048}, Bytes / sizeof(Event));
+        std::unique_ptr<Event[]> events = std::make_unique<Event[]>(capacity);
+        std::size_t head = 0, count = 0;
+        std::uint64_t omitted = 0;
+        void Push(const Event& event) noexcept {
+            if (count == capacity) { head = (head + 1) % capacity; --count; ++omitted; }
+            events[(head + count++) % capacity] = event;
+        }
+        void Copy(TimelineSnapshot& result, std::string_view session, std::uint64_t generation) const {
+            result.omitted += omitted;
+            for (std::size_t i = 0; i < count; ++i) {
+                const auto& event = events[(head + i) % capacity];
+                if (event.context.anonymous_session_id.View() == session &&
+                    (!generation || !event.context.has_session_generation ||
+                     event.context.session_generation == generation)) result.events.push_back(event);
+            }
+        }
+    };
+    TimelineRing<1024 * 1024> lifecycle_;
+    // Reserve space for still-open intervals, so a busy closed-event tail
+    // cannot silently erase an ongoing stall. Total storage stays below 512 KiB.
+    static constexpr std::size_t kOpenStallSlots = 128;
+    std::array<std::optional<Event>, kOpenStallSlots> open_stalls_;
+    std::uint64_t omitted_open_stalls_ = 0;
+    TimelineRing<512 * 1024 - sizeof(open_stalls_)> stalls_;
+    void StoreStall(const Event& event) noexcept {
+        const auto same = [&](const auto& slot) {
+            return slot && slot->context.anonymous_session_id.View() == event.context.anonymous_session_id.View() &&
+                slot->media_endpoint_id.View() == event.media_endpoint_id.View() &&
+                slot->binding_epoch == event.binding_epoch && slot->interval_begin_us == event.interval_begin_us;
+        };
+        auto match = std::find_if(open_stalls_.begin(), open_stalls_.end(), same);
+        if (event.stall_boundary != StallBoundary::Open) {
+            if (match != open_stalls_.end()) match->reset();
+            stalls_.Push(event);
+            return;
+        }
+        if (match == open_stalls_.end())
+            match = std::find_if(open_stalls_.begin(), open_stalls_.end(), [](const auto& e) { return !e; });
+        if (match == open_stalls_.end()) {
+            match = std::min_element(open_stalls_.begin(), open_stalls_.end(), [](const auto& a, const auto& b) {
+                return a->event_sequence < b->event_sequence;
+            });
+            ++omitted_open_stalls_;
+        }
+        *match = event;
+    }
     Status status_;
     bool stopping_ = false;
     bool started_ = false;
@@ -154,6 +203,9 @@ Event DiagnosticPipeline::WriterContext::Stamp(Event event) noexcept {
     event.occurred_at_utc_ms = std::chrono::duration_cast<std::chrono::milliseconds>(wall).count();
     event.monotonic_us = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - started_at_).count();
+    if (!event.source_monotonic_us)
+        event.source_monotonic_us = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
     event.event_sequence = next_sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
 #if defined(_WIN32)
     event.process_id = GetCurrentProcessId();
@@ -211,6 +263,10 @@ bool DiagnosticPipeline::WriterContext::TryEmit(Event event) noexcept {
             return false;
         }
         ++status_.accepted;
+        if (IsTimelineEvent(event.kind)) {
+            if (event.kind == EventKind::RenderStallInterval) StoreStall(event);
+            else lifecycle_.Push(event);
+        }
         status_.pending = ordinary_count_ + critical_count_;
         status_.queue_high_water = (std::max)(status_.queue_high_water,
                                              static_cast<std::uint64_t>(status_.pending));
@@ -542,6 +598,25 @@ void DiagnosticPipeline::OpenDiagnosticWindow(std::chrono::milliseconds d) noexc
 bool DiagnosticPipeline::DiagnosticWindowActive() noexcept { return context_->DiagnosticWindowActive(); }
 std::chrono::milliseconds DiagnosticPipeline::DiagnosticWindowRemaining() const noexcept { return context_->DiagnosticWindowRemaining(); }
 void DiagnosticPipeline::SetMirror(Mirror mirror) { context_->SetMirror(std::move(mirror)); }
+
+TimelineSnapshot DiagnosticPipeline::RecentTimeline(std::string_view session, std::uint64_t generation) const {
+    TimelineSnapshot result;
+    if (session.size() != 32) return result;
+    const auto& c = *context_;
+    std::lock_guard lock(c.mutex_);
+    c.lifecycle_.Copy(result, session, generation);
+    c.stalls_.Copy(result, session, generation);
+    result.omitted += c.omitted_open_stalls_;
+    for (const auto& event : c.open_stalls_)
+        if (event && event->context.anonymous_session_id.View() == session &&
+            (!generation || event->context.session_generation == generation)) result.events.push_back(*event);
+    result.admission_drops = c.status_.dropped_ordinary + c.status_.dropped_critical;
+    std::sort(result.events.begin(), result.events.end(), [](const auto& a, const auto& b) {
+        return a.source_monotonic_us != b.source_monotonic_us
+            ? a.source_monotonic_us < b.source_monotonic_us : a.event_sequence < b.event_sequence;
+    });
+    return result;
+}
 void DiagnosticPipeline::SetRetentionEnabled(bool e) noexcept { context_->SetRetentionEnabled(e); }
 void DiagnosticPipeline::PauseProductionForBenchmark(std::chrono::milliseconds d) noexcept { context_->PauseProductionForBenchmark(d); }
 bool DiagnosticPipeline::ProductionPausedForBenchmark() const noexcept { return context_->ProductionPausedForBenchmark(); }

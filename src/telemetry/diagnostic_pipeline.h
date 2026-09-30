@@ -13,6 +13,7 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <vector>
 
 namespace livekit::diagnostic {
 
@@ -29,6 +30,13 @@ struct Status final {
     bool sink_available = false;
     bool accepting = true;
     bool retention_enabled = true;
+};
+
+struct TimelineSnapshot {
+    std::vector<Event> events;
+    // Process-wide truncation, not a claim of per-session loss.
+    std::uint64_t omitted = 0;
+    std::uint64_t admission_drops = 0;
 };
 
 class DiagnosticPipeline final {
@@ -49,6 +57,8 @@ public:
     // In-flight callbacks can outlive Close. Capture owned state or weak owners,
     // never borrowed Pipeline/UI pointers. Clearing prevents future acquisition.
     void SetMirror(Mirror mirror);
+    TimelineSnapshot RecentTimeline(std::string_view anonymous_session_id,
+                                    std::uint64_t generation = 0) const;
     void SetRetentionEnabled(bool enabled) noexcept;
     // Explicit, time-bounded external benchmark only. Never persisted as a
     // user preference; zero/expiry restores normal production automatically.

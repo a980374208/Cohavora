@@ -26,6 +26,11 @@ function(cohavora_configure_meeting_ui_objects target)
 endfunction()
 
 add_library(cohavora_meeting_widgets OBJECT
+    ${PROJECT_SOURCE_DIR}/src/ui/telemetry_panel_model.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/telemetry_panel_controller.h
+    ${PROJECT_SOURCE_DIR}/src/ui/telemetry_panel_controller.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/telemetry_chart_widgets.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/telemetry_live_dialog.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/telemetry_dialogs.h
     ${PROJECT_SOURCE_DIR}/src/ui/telemetry_dialogs.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_log_console.h
