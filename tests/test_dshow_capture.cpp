@@ -19,8 +19,11 @@
 namespace livekit {
 class DShowCaptureTestAccess {
 public:
-    static void configure(DShowVideoCapture& capture, IAMStreamConfig* stream) {
-        capture.ConfigureCaptureFormat(stream);
+    static DShowPixelFormat configure(DShowVideoCapture& capture, IAMStreamConfig* stream) {
+        return capture.ConfigureCaptureFormat(stream);
+    }
+    static GUID sinkSubtype(DShowPixelFormat source, DShowPixelFormat preferred) {
+        return DShowVideoCapture::CaptureSinkSubtype(source, preferred);
     }
     static bool connected(DShowVideoCapture& capture, const AM_MEDIA_TYPE& type) {
         return capture.ApplyConnectedFormat(type);
@@ -162,7 +165,7 @@ public:
         auto* type = static_cast<AM_MEDIA_TYPE*>(CoTaskMemAlloc(sizeof(AM_MEDIA_TYPE)));
         *type = {};
         type->majortype = MEDIATYPE_Video;
-        type->subtype = livekit::MediaConverters::PixelFormatToSubtype(livekit::DShowPixelFormat::NV12);
+        type->subtype = livekit::MediaConverters::PixelFormatToSubtype(nativeFormat);
         type->formattype = index == 0 ? FORMAT_VideoInfo : FORMAT_VideoInfo2;
         type->cbFormat = index == 0 ? sizeof(native) : sizeof(alternate);
         type->pbFormat = static_cast<BYTE*>(CoTaskMemAlloc(type->cbFormat));
@@ -177,7 +180,7 @@ public:
     }
     HRESULT STDMETHODCALLTYPE SetFormat(AM_MEDIA_TYPE* type) override {
         ++attempts;
-        TEST_CHECK(type->subtype == livekit::MediaConverters::PixelFormatToSubtype(livekit::DShowPixelFormat::NV12));
+        TEST_CHECK(type->subtype == livekit::MediaConverters::PixelFormatToSubtype(nativeFormat));
         // Every field except the supported frame interval must remain the
         // complete advertised mode, including rectangles and image byte size.
         if (type->formattype == FORMAT_VideoInfo) {
@@ -198,6 +201,7 @@ public:
     VIDEOINFOHEADER native{};
     VIDEOINFOHEADER2 alternate{};
     bool rejectNative = false;
+    livekit::DShowPixelFormat nativeFormat = livekit::DShowPixelFormat::NV12;
     int attempts = 0, selectedWidth = 0;
 };
 
@@ -213,6 +217,20 @@ void CheckCaptureFormatContract() {
     device.rejectNative = true;
     livekit::DShowCaptureTestAccess::configure(*capture, &device);
     TEST_CHECK(device.selectedWidth == 640 && device.attempts == 3);
+
+    // A camera may accept MJPEG despite the NV12 preference. The graph must
+    // request a supported decompressed sink, not insist that MJPEG yields NV12.
+    device.rejectNative = false;
+    device.nativeFormat = livekit::DShowPixelFormat::MJPEG;
+    device.native.bmiHeader.biCompression = MAKEFOURCC('M', 'J', 'P', 'G');
+    const auto selected = livekit::DShowCaptureTestAccess::configure(*capture, &device);
+    TEST_CHECK(selected == livekit::DShowPixelFormat::MJPEG);
+    TEST_CHECK(livekit::DShowCaptureTestAccess::sinkSubtype(selected, config.preferred_format) == MEDIASUBTYPE_RGB24);
+    TEST_CHECK(livekit::DShowCaptureTestAccess::sinkSubtype(livekit::DShowPixelFormat::YUY2,
+        config.preferred_format) == MEDIASUBTYPE_YUY2);
+    TEST_CHECK(livekit::DShowCaptureTestAccess::sinkSubtype(livekit::DShowPixelFormat::NV12,
+        config.preferred_format) == livekit::MediaConverters::PixelFormatToSubtype(livekit::DShowPixelFormat::NV12));
+    device.native.bmiHeader.biCompression = MAKEFOURCC('N', 'V', '1', '2');
 
     int received = 0;
     source->addSink([&](const livekit::VideoFrame& frame, const livekit::VideoCaptureOptions&) {
@@ -354,7 +372,7 @@ int main(int argc, char** argv) {
 
     if (!devices.empty()) {
         bool start_ok = dshow_cap->Start();
-        std::cout << "  DShow Camera Capture Started: " << (start_ok ? "SUCCESS" : "DEVICE BUSY / IN USE") << "\n";
+        std::cout << "  DShow Camera Capture Started: " << (start_ok ? "SUCCESS" : "FAILED (see graph diagnostics)") << "\n";
         TEST_CHECK(start_ok);
         if (start_ok) {
             std::unique_lock lock(frame_mutex);

@@ -1,4 +1,4 @@
-#include "base/basic_types.h"
+﻿#include "base/basic_types.h"
 #include "crl/crl.h"
 #include "rpl/rpl.h"
 #include "src/media/camera_source_manager.h"
@@ -90,8 +90,25 @@ public:
 	static void prepare(MeetingUI::MeetingRoomWindow &window, Task work, Task admission) {
 		window.retireLocalCapture();
 		window._sessionRunning = true;
-		window._mediaPreparationForTest = [work = std::move(work)](auto &) { work(); };
+		window._mediaPreparationForTest = [work = std::move(work)](bool, bool) { work(); };
 		window.prepareMediaAndJoin(std::move(admission));
+	}
+
+	static void prepareSelected(MeetingUI::MeetingRoomWindow &window,
+			bool microphone, bool camera, std::function<void(bool, bool)> work, Task admission) {
+		window.retireLocalCapture();
+		window._sessionRunning = true;
+		window._config.audioMuted = !microphone;
+		window._config.videoEnabled = camera;
+		window._mediaPreparationForTest = std::move(work);
+		window.prepareMediaAndJoin(std::move(admission));
+	}
+	static void enableDeferred(MeetingUI::MeetingRoomWindow &window, bool microphone) {
+		if (microphone) window.requestLocalMicrophone(false);
+		else window.requestLocalCamera(true);
+	}
+	static bool preparing(const MeetingUI::MeetingRoomWindow &window) {
+		return window._preparingMedia;
 	}
 
 	static bool mediaDisabled(const MeetingUI::MeetingRoomWindow &window) {
@@ -674,6 +691,52 @@ void verifyPreparationExceptionDoesNotAdmit() {
 	});
 }
 
+void verifyDeferredCaptureSelection() {
+	runCase("disabled entry does not request devices; later enable prepares only that device", [] {
+		for (int mask = 0; mask != 4; ++mask) {
+			Fixture fixture;
+			std::atomic<int> requested{0};
+			int admissions = 0;
+			CameraOwnerTestAccess::prepareSelected(*fixture.window, mask & 1, mask & 2,
+				[&](bool microphone, bool camera) { requested.fetch_or(int(microphone) | (int(camera) << 1)); },
+				[&] { ++admissions; });
+			TEST_CHECK(pumpUntil([&] { return admissions == 1; }));
+			TEST_CHECK(requested == mask);
+			if (mask != 0) continue;
+			CameraOwnerTestAccess::request(*fixture.window, QStringLiteral("deferred-camera"));
+			TEST_CHECK(fixture.session->mediaPreferences().cameraDeviceId == QStringLiteral("deferred-camera"));
+			TEST_CHECK(requested == 0);
+			for (const bool microphone : {true, false}) {
+				requested = 0;
+				CameraOwnerTestAccess::enableDeferred(*fixture.window, microphone);
+				TEST_CHECK(pumpUntil([&] { return !CameraOwnerTestAccess::preparing(*fixture.window); }));
+				TEST_CHECK(requested == (microphone ? 1 : 2));
+				TEST_CHECK(admissions == 1);
+			}
+		}
+	});
+}
+
+void verifyCloseDuringDeferredCapture() {
+	runCase("leave during deferred device startup rejects late completion", [] {
+		Fixture fixture;
+		auto latch = std::make_shared<PreparationLatch>();
+		int admissions = 0;
+		CameraOwnerTestAccess::prepareSelected(*fixture.window, false, false,
+			[latch](bool microphone, bool camera) { if (microphone || camera) latch->wait(); },
+			[&] { ++admissions; });
+		TEST_CHECK(pumpUntil([&] { return admissions == 1; }));
+		CameraOwnerTestAccess::enableDeferred(*fixture.window, false);
+		TEST_CHECK(pumpUntil([&] { return latch->entered.load(); }));
+		fixture.window->close();
+		fixture.window.reset();
+		latch->release();
+		drainCaptureRetirement();
+		drainEvents();
+		TEST_CHECK(admissions == 1);
+	});
+}
+
 void verifyCameraSnapshotCapabilities() {
 	runCase("camera snapshot derives resolution options without hardware enumeration", [] {
 		livekit::DShowDeviceInfo device;
@@ -719,11 +782,13 @@ int main(int argc, char *argv[]) {
 	verifyCloseDuringPreparation();
 	verifyCancelQueuedPreparationCompletion();
 	verifyPreparationExceptionDoesNotAdmit();
+	verifyDeferredCaptureSelection();
+	verifyCloseDuringDeferredCapture();
 	verifyCameraSnapshotCapabilities();
 
 	style::StopManager();
-	TEST_CHECK(executed == 15);
-	std::cout << "CPPQT002_CASES_PLANNED=15 EXECUTED=" << executed
+	TEST_CHECK(executed == 17);
+	std::cout << "CPPQT002_CASES_PLANNED=17 EXECUTED=" << executed
 	          << " PASSED=" << executed << " FAILED=0" << std::endl;
 	return 0;
 }

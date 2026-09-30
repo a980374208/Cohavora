@@ -55,7 +55,8 @@ public:
 
 private:
     friend class DShowCaptureTestAccess;
-    void ConfigureCaptureFormat(IAMStreamConfig* stream_config);
+    DShowPixelFormat ConfigureCaptureFormat(IAMStreamConfig* stream_config);
+    static GUID CaptureSinkSubtype(DShowPixelFormat source, DShowPixelFormat preferred);
     bool ApplyConnectedFormat(const AM_MEDIA_TYPE& media_type);
     bool BuildFilterGraph();
     void TeardownFilterGraph();
