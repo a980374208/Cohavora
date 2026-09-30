@@ -9,6 +9,9 @@
 /build-*/
 /build/*
 !/build/prepare/
+!/build/prompts/
+/build/prompts/*
+!/build/prompts/windows-build-assistant.txt
 /out/
 /bin/
 /lib/
