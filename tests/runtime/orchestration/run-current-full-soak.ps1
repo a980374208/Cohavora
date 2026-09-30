@@ -21,7 +21,7 @@ try {
     $lowBandwidthPython = if ($LowBandwidth) { 'True' } else { 'False' }
     if ($LowBandwidth) {
         & workbench upload `
-            (Join-Path $repository 'tests/runtime/soak_low_bandwidth_publishers.py') `
+            (Join-Path $repository 'tests/runtime/tools/meeting/soak_low_bandwidth_publishers.py') `
             '/tmp/soak_low_bandwidth_publishers.py' -i $instance -f | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Low-bandwidth publisher upload failed.' }
     }
@@ -101,7 +101,7 @@ PY
 
     if ($LowBandwidth) {
         & workbench upload `
-            (Join-Path $repository 'tests/runtime/ecs_resource_sampler.py') `
+            (Join-Path $repository 'tests/runtime/tools/meeting/ecs_resource_sampler.py') `
             ($remote.remote_directory + '/ecs_resource_sampler.py') -i $instance | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'ECS sampler upload failed.' }
         $startSampler = @"

@@ -1,6 +1,6 @@
 # PR-SEC-002: isolated credential storage, auth response ordering, and real login UI.
 add_executable(test_debug_login_options
-    ${LIVEKIT_TEST_SOURCE_DIR}/test_debug_login_options.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/ui/test_debug_login_options.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/app/debug_login_options.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/app/debug_login_options.h
@@ -11,7 +11,7 @@ set_tests_properties(debug_login_options_test PROPERTIES
     TIMEOUT 30 LABELS "PR_SEC_004_FOCUSED;CORE_REGRESSION")
 
 add_executable(test_session_credentials
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_session_credentials.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/security/test_session_credentials.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/login_dialog.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/login_dialog.h
@@ -26,7 +26,7 @@ set_property(TEST session_credentials_test openmeeting_http_test openmeeting_htt
 
 # Typed meeting catalog contracts and Qt owner ordering/lifetime behavior.
 add_executable(test_meeting_catalog
-    ${LIVEKIT_TEST_SOURCE_DIR}/test_meeting_catalog.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/meeting/test_meeting_catalog.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/meeting_list_model.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/meeting_list_model.h
@@ -50,7 +50,7 @@ set_tests_properties(meeting_catalog_test PROPERTIES TIMEOUT 60 LABELS "CORE_REG
 foreach(_policy_variant strict dev)
     set(_policy_target test_http_transport_policy_${_policy_variant})
     add_executable(${_policy_target}
-        ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_http_transport_policy.cpp
+        ${LIVEKIT_TEST_SOURCE_DIR}/security/test_http_transport_policy.cpp
         ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
     )
     target_include_directories(${_policy_target} BEFORE PRIVATE
@@ -95,7 +95,7 @@ set_target_properties(cohavora_render_dx11_test PROPERTIES AUTOMOC OFF
     PREFIX "" OUTPUT_NAME "cohavora-render-dx11-test" CXX_VISIBILITY_PRESET hidden)
 target_include_directories(cohavora_render_dx11_test PRIVATE
     ${LIVEKIT_PROJECT_SOURCE_DIR} ${LIVEKIT_PROJECT_SOURCE_DIR}/src
-    ${LIVEKIT_TEST_SOURCE_DIR}/render_p2)
+    ${LIVEKIT_TEST_SOURCE_DIR}/render/modules)
 target_compile_definitions(cohavora_render_dx11_test PRIVATE
     LK_RENDER_MODULE_BUILD LIVEKIT_DX11_MODULE_TESTING=1)
 target_link_libraries(cohavora_render_dx11_test PRIVATE d3d11 dxgi d3dcompiler)
@@ -104,12 +104,12 @@ if(MSVC)
 endif()
 add_dependencies(test_participant_window_remediation cohavora_render_dx11_test)
 
-add_executable(test_render_module ${LIVEKIT_TEST_SOURCE_DIR}/render_p2/test_render_module.cpp ${LIVEKIT_PROJECT_SOURCE_DIR}/src/render/backend_module.cpp)
+add_executable(test_render_module ${LIVEKIT_TEST_SOURCE_DIR}/render/modules/test_render_module.cpp ${LIVEKIT_PROJECT_SOURCE_DIR}/src/render/backend_module.cpp)
 set_target_properties(test_render_module PROPERTIES AUTOMOC OFF)
 target_include_directories(test_render_module PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR} ${LIVEKIT_PROJECT_SOURCE_DIR}/src)
 target_link_libraries(test_render_module PRIVATE d3d11 dxgi)
 foreach(variant missing_entry wrong_version missing_function wrong_capabilities create_failure)
-    add_library(render_fixture_${variant} MODULE ${LIVEKIT_TEST_SOURCE_DIR}/render_p2/invalid_module.c)
+    add_library(render_fixture_${variant} MODULE ${LIVEKIT_TEST_SOURCE_DIR}/render/modules/invalid_module.c)
     set_target_properties(render_fixture_${variant} PROPERTIES AUTOMOC OFF)
     target_include_directories(render_fixture_${variant} PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR}/src)
     target_compile_definitions(render_fixture_${variant} PRIVATE LK_RENDER_MODULE_BUILD FIXTURE_${variant})
@@ -125,7 +125,7 @@ set_tests_properties(render_module_fallback_test PROPERTIES
     TIMEOUT 45 LABELS "CORE_REGRESSION;RENDER_MODULE_FOCUSED")
 
 # The GL ABI contract uses a fake dispatch table and needs no context, GPU or desktop.
-target_sources(test_participant_window_remediation PRIVATE ${LIVEKIT_TEST_SOURCE_DIR}/render_p3/opengl_contract.cpp)
+target_sources(test_participant_window_remediation PRIVATE ${LIVEKIT_TEST_SOURCE_DIR}/render/opengl/opengl_contract.cpp)
 add_test(NAME render_opengl_contract_test COMMAND test_participant_window_remediation --opengl-contract)
 set_tests_properties(render_opengl_contract_test PROPERTIES
     TIMEOUT 45 LABELS "RENDER_CONTRACT")
@@ -190,7 +190,7 @@ get_target_property(cohavora_has_embedded_translations
     cohavora_ui_translations COHAVORA_HAS_EMBEDDED_TRANSLATIONS)
 if(cohavora_has_embedded_translations)
     add_executable(test_ui_presentation
-        ${LIVEKIT_TEST_SOURCE_DIR}/test_ui_presentation.cpp)
+        ${LIVEKIT_TEST_SOURCE_DIR}/ui/test_ui_presentation.cpp)
     livekit_configure_qt_test(test_ui_presentation)
     target_link_libraries(test_ui_presentation PRIVATE
         cohavora_ui_theme

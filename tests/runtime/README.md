@@ -1,4 +1,28 @@
-# 持续会议长稳准备与运行
+# Runtime 工具与自测
+
+## 目录与执行边界
+
+| 目录 | 内容 | 执行方式 |
+|---|---|---|
+| [`tools/`](tools/README.md) | 按产品验收、会议、屏幕捕获、桌面、媒体和诊断领域划分的工具 | 显式调用；配套模块保持同领域目录导入 |
+| `selftests/` | 工具离线自测、mock / fake peer 故障注入 | 可独立运行或使用下方 discovery |
+| `desktop_checks/` | 需要真实交互桌面的 UIA 自测 | 仅显式执行，不纳入离线 discovery |
+| `probes/` | C++ runtime 探针及配套头文件 | 原有 CMake target、开关与手动执行条件不变 |
+| `connection/` | 手动连接探针 | 保持手动 L3 边界 |
+| `etw/`、`orchestration/` | ETW 与场景编排 | 保持原入口职责与显式执行边界 |
+| `io/`、`e2ee_peer/` | 独立工程 | 保留各自 CMake 工程边界 |
+
+从仓库根目录运行全部默认离线自测（不含真实桌面检查）：
+
+```powershell
+python -B -m unittest discover -s tests/runtime/selftests -p "test_*.py" -v
+```
+
+`selftests/test_uia_snapshot.py --desktop` 仍是显式桌面检查，默认 discovery 不执行该分支。
+工具 CLI 的相对输出路径仍按原约定解析；自测入口与 Python 同目录导入不依赖当前工作目录。
+历史 `tool_migration.json` 保留原始归档路径与哈希，不作为当前入口目录索引。
+
+## 持续会议长稳准备与运行
 
 `meeting_soak.py` 是独立进程 watchdog，驱动 `test_participant_window_remediation --meeting-soak`。
 它保持同一个 Qt 进程和逻辑会议会话连续运行；SDK full reconnect 可以替换 native Room generation。
@@ -9,7 +33,7 @@
 从仓库根目录使用 Python 3.10+，仅需标准库：
 
 ```powershell
-python tests/runtime/meeting_soak.py prepare --output out/soak-prepared
+python tests/runtime/tools/meeting/meeting_soak.py prepare --output out/soak-prepared
 ```
 
 生成 `profile.json`、`plan.json` 和 `preparation.json`，状态为 `PREPARED / L3 NOT_RUN`。
@@ -39,7 +63,7 @@ python tests/runtime/meeting_soak.py prepare --output out/soak-prepared
 用户预留测试窗口并明确要求继续后，才运行：
 
 ```powershell
-python tests/runtime/meeting_soak.py run --prepared out/soak-prepared
+python tests/runtime/tools/meeting/meeting_soak.py run --prepared out/soak-prepared
 ```
 
 每次自动生成独立的 `runs/<UTC>-<id>/`，不覆盖此前结果。缺可执行文件或服务环境返回 `NOT_RUN`。
@@ -107,7 +131,7 @@ soft/full reconnect 是真实 SFU 上的 SDK 故障请求，不冒充路由器�
 ## 无服务短时验证
 
 ```powershell
-python tests/runtime/test_meeting_soak.py -v
+python tests/runtime/selftests/test_meeting_soak.py -v
 out/build/windows-vs2026-dev/Debug/test_participant_window_remediation.exe --meeting-soak-protocol-selftest
 ```
 
@@ -123,7 +147,7 @@ Python fake peer 只用于秒级故障注入，所有结果强制 `l3_status=NOT
 - [长稳／共享编排](orchestration/README.md)：`invoke_diagnostic_probe.ps1` 统一入口，支持无副作用 `-Plan`。
 
 原脚本、归档哈希和迁移去向见 [tool_migration.json](tool_migration.json)。
-离线工具边界验证：`python tests/runtime/test_diagnostic_tools.py`；不连接服务、不启动 WPR、不填满磁盘。
+离线工具边界验证：`python tests/runtime/selftests/test_diagnostic_tools.py`；不连接服务、不启动 WPR、不填满磁盘。
 
 ### UIA 诊断采样边界
 
@@ -133,7 +157,7 @@ Python fake peer 只用于秒级故障注入，所有结果强制 `l3_status=NOT
 不会执行 Pattern 动作、等待控件出现、自动重试或回退为全树导出；缺失／重复控件明确失败。
 
 ```powershell
-python tests/runtime/uia_snapshot.py --pid <测试产品PID> --start-ticks <UTC启动时间Ticks> `
+python tests/runtime/tools/desktop/uia_snapshot.py --pid <测试产品PID> --start-ticks <UTC启动时间Ticks> `
   --executable <测试产品绝对路径> --automation-id <完整AutomationId> --timeout 15
 ```
 
@@ -150,7 +174,7 @@ AutomationId 含限定前缀时需提供完整值；可复用启动检查时保�
 父驱动仍负责启动和结束产品，不把此改动等同于“父进程完全没有 UIA”。
 `Retest` 和正式验收配置保持原有调度。历史归因运行的脚本与指纹保持原样。
 
-验证：`python tests/runtime/test_uia_snapshot.py -v`；
-`python tests/runtime/test_uia_snapshot.py --desktop` 仅创建自有 WPF 窗口，核对两次独立读取、
+验证：`python tests/runtime/selftests/test_uia_snapshot.py -v`；
+`python tests/runtime/selftests/test_uia_snapshot.py --desktop` 仅创建自有 WPF 窗口，核对两次独立读取、
 客户端退出、快速重复拒绝及身份不匹配拒绝；第二次读取通过推进测试时钟放行，不是实等
 60 秒的时间验收。不连接会议或启用媒体设备，也不替代产品长稳验收。

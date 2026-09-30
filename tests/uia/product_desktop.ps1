@@ -85,7 +85,7 @@ if ($HeapDiagnostic) {
     # Keep the public switch for older callers, but isolation is now the default.
     $IsolateUiaCycles = $true
     if (!$Pilot -or $ProbeOnly) { throw 'HEAP_DIAGNOSTIC_REQUIRES_PILOT' }
-    . (Join-Path $PSScriptRoot '../runtime/product_heap_diagnostic.ps1')
+    . (Join-Path $PSScriptRoot '../runtime/tools/product_acceptance/product_heap_diagnostic.ps1')
 }
 function Record([string]$Action, [string]$Phase) {
     if ($env:LIVEKIT_UIA_REMOTE_CONTEXT -eq '1') { Sync-ObserverContext $Action $Phase }
@@ -119,7 +119,7 @@ function Sync-ObserverContext([string]$Action, [string]$Phase) {
     $path = Join-Path $OutputDirectory 'current-operation.json'
     $context | ConvertTo-Json -Compress | Set-Content ($path+'.tmp') -Encoding UTF8
     Move-Item -LiteralPath ($path+'.tmp') -Destination $path -Force
-    & python (Join-Path $PSScriptRoot '../runtime/product_pilot_context.py') --file $path
+    & python (Join-Path $PSScriptRoot '../runtime/tools/product_acceptance/product_pilot_context.py') --file $path
     if ($LASTEXITCODE -ne 0) { throw 'REMOTE_CONTEXT_FENCE_FAILED' }
 }
 function Save-Result([string]$Verdict, [string]$Reason) {

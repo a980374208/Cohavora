@@ -101,7 +101,7 @@ try {
     Set-Location -LiteralPath $repository
     Write-ControllerState 'RUNNING'
     $runnerStartedUtc = [DateTime]::UtcNow
-    & $Python -B 'tests/runtime/meeting_soak.py' run --prepared $prepared *>> $controllerLog
+    & $Python -B 'tests/runtime/tools/meeting/meeting_soak.py' run --prepared $prepared *>> $controllerLog
     $runnerExitCode = $LASTEXITCODE
 
     $latest = Get-ChildItem -LiteralPath $runs -Directory |

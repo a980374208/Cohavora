@@ -2,7 +2,7 @@
 # completion scheduling. The fixture does not start network or physical media.
 if(COHAVORA_BUILD_QT_TESTS)
 add_executable(test_camera_owner_remediation
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_camera_owner_remediation.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/meeting/test_camera_owner_remediation.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h)
 livekit_configure_qt_test(test_camera_owner_remediation)
 target_link_libraries(test_camera_owner_remediation PRIVATE
@@ -19,7 +19,7 @@ endif()
 
 if(COHAVORA_BUILD_QT_TESTS)
 add_executable(test_diagnostic_qt_bridge
-    ${LIVEKIT_TEST_SOURCE_DIR}/test_diagnostic_qt_bridge.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/telemetry/test_diagnostic_qt_bridge.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/diagnostic_qt_bridge.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/meeting_log_console.cpp)
 livekit_configure_qt_test(test_diagnostic_qt_bridge)
@@ -36,7 +36,7 @@ endif()
 # PR-SEC-001: typed safe summaries, production output boundary, and
 # connection-handshake wire/log separation.
 add_executable(test_log_redaction
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_log_redaction.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/security/test_log_redaction.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
 )
 target_include_directories(test_log_redaction PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
@@ -45,7 +45,7 @@ add_test(NAME log_redaction_test COMMAND test_log_redaction)
 set_tests_properties(log_redaction_test PROPERTIES TIMEOUT 60)
 
 add_executable(test_connection_log_redaction
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_connection_log_redaction.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/security/test_connection_log_redaction.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
 )
 target_include_directories(test_connection_log_redaction PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
@@ -57,7 +57,7 @@ set_tests_properties(connection_log_redaction_test PROPERTIES
 # PR-SEC-003: real loopback TLS handshakes must authenticate the endpoint
 # before either query or header credentials reach the WebSocket server.
 add_executable(test_websocket_tls_verification
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_websocket_tls_verification.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/security/test_websocket_tls_verification.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
 )
 target_include_directories(test_websocket_tls_verification PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
@@ -70,7 +70,7 @@ set_tests_properties(websocket_tls_verification_test PROPERTIES
 # sources into this fixture.
 if(COHAVORA_BUILD_QT_TESTS)
 add_executable(test_qt_log_redaction
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_qt_log_redaction.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/security/test_qt_log_redaction.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/meeting_log_console.h
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/meeting_log_console.cpp
@@ -84,7 +84,7 @@ endif()
 # This verifier proves checks execute under the same inherited NDEBUG flags as
 # the native application; dependency ABI definitions must remain unchanged.
 add_executable(test_always_active_checks
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_check_selftest.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check_selftest.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
 )
 target_include_directories(test_always_active_checks PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
@@ -93,7 +93,7 @@ set_target_properties(test_always_active_checks PROPERTIES AUTOMOC OFF)
 add_test(NAME always_active_checks_test
     COMMAND ${CMAKE_COMMAND}
         "-DTEST_EXECUTABLE=$<TARGET_FILE:test_always_active_checks>"
-        -P "${LIVEKIT_TEST_SOURCE_DIR}/remediation/verify_test_check.cmake"
+        -P "${LIVEKIT_TEST_SOURCE_DIR}/support/verify_test_check.cmake"
 )
 
 add_test(NAME signaling_tests COMMAND cohavora_core_tests)

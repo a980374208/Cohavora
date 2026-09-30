@@ -49,7 +49,7 @@ try {
         Invoke-Expression $definition.Extent.Text
     }
     if ($HeapDiagnostic) {
-        . (Join-Path $PSScriptRoot '../runtime/product_heap_diagnostic.ps1')
+        . (Join-Path $PSScriptRoot '../runtime/tools/product_acceptance/product_heap_diagnostic.ps1')
         $script:heapDirectory=Join-Path $OutputDirectory 'heap-diagnostic'
         $script:heapTools=Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/Debuggers/x64'
     }

@@ -2,7 +2,7 @@
 
 ## 产品 UIA 30 分钟稳态及 2 小时混合复测
 
-`tests/runtime/product_uia_retest.py` 为独立本机监督入口，复用
+`tests/runtime/tools/desktop/product_uia_retest.py` 为独立本机监督入口，复用
 `product_desktop.ps1` 的真实 UIA Pattern 操作及 `product_pilot_checkpoints.py`。
 原 Pilot/8 小时正式验收入口及其门槛不变。
 
@@ -30,21 +30,21 @@ Pin/Unpin、白板等混合矩阵。物理断网、远端 RTP/音质、服务端
 
 ```powershell
 # 已提交产品构建：全量时长，默认 1800 + 7200 秒。
-python tests/runtime/product_uia_retest.py --mode retest `
+python tests/runtime/tools/desktop/product_uia_retest.py --mode retest `
   --executable <committed-build>/Cohavora.exe --output out/<new-retest-run>
 
 # 相同真实会议操作，缩短等待；不是长期稳定性或内存通过证据。
-python tests/runtime/product_uia_retest.py --mode smoke `
+python tests/runtime/tools/desktop/product_uia_retest.py --mode smoke `
   --executable <committed-build>/Cohavora.exe --output out/<new-smoke-run>
 
 # 无会议、无媒体，仅产品访客 UIA 发现和本机窗口监督。
-python tests/runtime/product_uia_retest.py --mode probe `
+python tests/runtime/tools/desktop/product_uia_retest.py --mode probe `
   --executable <committed-build>/Cohavora.exe --output out/<new-probe-run>
 
 # 无服务、无需产品二进制：回归及真实桌面故障注入。
-python tests/runtime/test_product_uia_retest.py -v
+python tests/runtime/selftests/test_product_uia_retest.py -v
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/uia/test_retest_schedule.ps1
-python tests/runtime/test_product_uia_desktop.py --output out/<new-desktop-tests>
+python tests/runtime/desktop_checks/test_product_uia_desktop.py --output out/<new-desktop-tests>
 ```
 
 监督器独立于 UIA 线程：固定产品 PID、创建时间和镜像路径后持有进程句柄；仅终止本轮
@@ -397,7 +397,7 @@ ID、PID、请求及 UIA 观察时间；`uia-log-windows.jsonl` 保存开/关时
 进程异常退出或重启也直接 FAIL，不把失败轮次计入 100 次。`uia-resources.jsonl`
 只提供旁观的私有内存、句柄和线程采样；其中 GPU 与队列字段为空，不参与验收。
 
-最终判定另需运行 `tests/runtime/verify_product_acceptance.py`，传入 `--uia`、
+最终判定另需运行 `tests/runtime/tools/product_acceptance/verify_product_acceptance.py`，传入 `--uia`、
 `--witnesses`、`--resources`、`--diagnostics`、`--review`、`--performance`、
 `--limits` 和 `--output`。`--witnesses` 是独立 Room/SFU/接收端/capture 采集器的
 JSONL：每条含 `collector=external`、run/cycle/operation ID、UTC、source、event、
@@ -424,13 +424,13 @@ profile 的原始诊断目录，检查分段和配额。`--review` 是独立复�
 PILOT 使用 `-Pilot -Cycles 1`，与正式 8 小时/100 轮门分离，不注册默认 CTest。
 产品始终带 `--debug`。下列采集器不会操作产品 UI：
 
-- `tests/runtime/product_pilot_remote.py`：在服务端隔离目录读取配置密钥，通过
+- `tests/runtime/tools/product_acceptance/product_pilot_remote.py`：在服务端隔离目录读取配置密钥，通过
   Python LiveKit SDK 生成 10 路 160×90/5 fps/VP8/40 kbps 视频和一路 24 kbps
   音频，关闭 simulcast；轮询 SFU 成员/轨道、采集独立接收端 PCM/视频帧与
   RTCStats，以及主机出口/CPU/内存。只记录白名单字段，默认最多 600 秒；
   `<output>/stop` 或 SIGTERM 正常退出全部本轮连接。依赖为 livekit 1.1.20、
   livekit-api 1.2.1、numpy、PyYAML，安装在服务端测试目录，不修改系统 Python。
-- `tests/runtime/product_pilot_resources.ps1`：独立进程按 UIA 记录的 PID 采样
+- `tests/runtime/tools/product_acceptance/product_pilot_resources.ps1`：独立进程按 UIA 记录的 PID 采样
   CPU、私有内存、句柄、线程与 WDDM DedicatedUsage/SharedUsage。缺失 GPU
   instance 保留 null。WGC 句柄归属没有被猜测或用总句柄数替代。
 - 产品显式设置 `LIVEKIT_UIA_PILOT_PROBE=<new jsonl path>`、
@@ -438,7 +438,7 @@ PILOT 使用 `-Pilot -Cycles 1`，与正式 8 小时/100 轮门分离，不注�
   输出标记为 `collector=in_process`，包含遥测队列/丢弃/写失败、diagnostic
   writer、带 availability 的媒体指标及真实 capture frame 的 backend。
   这些内部计数与外部 OS/SFU/接收端证据分别保留。
-- `tests/runtime/verify_product_pilot.py --root <run root>`：核对采集覆盖、run 与
+- `tests/runtime/tools/product_acceptance/verify_product_pilot.py --root <run root>`：核对采集覆盖、run 与
   序号、共享交付、音频 PCM、真实日志分段与支持包 SHA-256。生成
   `pilot-review.json` 及 `correlated-witnesses.jsonl`；后者的 operation ID
   是按 UIA UTC 时间窗关联，不能冒充服务端原生传播的 operation ID。
@@ -452,7 +452,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/uia/product_deskto
   -RunId 44a5a387ab9f47da9aa8576ae738ab08 `
   -Pilot -Cycles 1 -MinimumSeconds 240 -ShareSeconds 35 `
   -LogPairSeconds 30 -StopSettleSeconds 10 -RoomSettleSeconds 10
-python tests/runtime/verify_product_pilot.py --root out/product-pilot-collected-20260928-023816
+python tests/runtime/tools/product_acceptance/verify_product_pilot.py --root out/product-pilot-collected-20260928-023816
 ```
 
 复跑必须换新 run ID 和输出目录。先启动外部采集、等待服务端 ready，再运行 UIA，
@@ -488,7 +488,7 @@ Known Folder 或 HKCU QSettings；应使用专用 Windows 账户。原始诊断�
 `IsolateUiaCycles`；每个工作进程完成一个周期后退出，保留已有身份核对和 600 秒上限。
 窗口／离会提示等待仅检查 PID 所属顶层窗口；操作控件的限定 ID 发现和显式证据树仍保留，
 不将完整控件树用于日常资源采样。只读显示检查使用
-[`uia_snapshot.py`](../runtime/uia_snapshot.py) 的独立短寿命客户端，同一产品身份的尝试至少
+[`uia_snapshot.py`](../runtime/tools/desktop/uia_snapshot.py) 的独立短寿命客户端，同一产品身份的尝试至少
 间隔 60 秒（失败也计入，CLI 与 Python 共享限制），详见运行工具 README。
 常规遥测和资源采样走原生 probe 与 OS 进程计数，不用该工具连续轮询显示。
 退出并不保证全部系统分配归零：此前三轮残留仍小幅增长，不能宣称根因完全修复。
@@ -496,7 +496,7 @@ Known Folder 或 HKCU QSettings；应使用专用 Windows 账户。原始诊断�
 诊断示例（仍必须使用全新输出目录）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/runtime/invoke_product_external.ps1 `
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/runtime/tools/product_acceptance/invoke_product_external.ps1 `
   -Root out/<new-diagnostic-run> -PreparedDirectory out/<prepared-test-account> `
   -HeapDiagnostic -HeapCheckOnly
 ```

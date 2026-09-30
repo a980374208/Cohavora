@@ -67,7 +67,7 @@ PY
     $env:LIVEKIT_TEST_MEDIA_DIAGNOSTICS = '1'
     if ($Mode -eq 'network') {
         $repo = $repository
-        $proxyScript = Join-Path $repo 'tests\runtime\livekit_signal_fault_proxy.py'
+        $proxyScript = Join-Path $repo 'tests\runtime\tools\meeting\livekit_signal_fault_proxy.py'
         $proxyStdout = Join-Path $prepared ($remote.room + '-proxy-stdout.log')
         $proxyStderr = Join-Path $prepared ($remote.room + '-proxy-stderr.log')
         $proxy = Start-Process -FilePath (Get-Command $Python).Source -PassThru -WindowStyle Hidden `

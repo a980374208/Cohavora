@@ -1,13 +1,13 @@
 # 长稳与共享诊断编排
 
-公共入口为 `../invoke_diagnostic_probe.ps1`。本目录保留各场景实现，公共入口负责参数路由、
+公共入口为 `../tools/diagnostics/invoke_diagnostic_probe.ps1`。本目录保留各场景实现，公共入口负责参数路由、
 互斥执行和历史输出保护；共用 ETW 工具，继续复用 meeting_soak、meeting_render_probe、
 ecs_resource_sampler 和 livekit_signal_fault_proxy，不增加另一套采集器。
 
 先用 `-Plan` 查看参数和脚本路径，不启动进程、不连接服务、不写文件：
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File tests/runtime/invoke_diagnostic_probe.ps1 -Scenario share -PreparedDirectory out/probe-new -Instance i-YOURINSTANCE -ServiceUrl ws://YOURHOST:17880 -Binary out/build/windows-vs2026-runtime-tools/Release/test_screen_share_runtime.exe -CompleteLifecycle -Plan
+powershell -NoProfile -ExecutionPolicy Bypass -File tests/runtime/tools/diagnostics/invoke_diagnostic_probe.ps1 -Scenario share -PreparedDirectory out/probe-new -Instance i-YOURINSTANCE -ServiceUrl ws://YOURHOST:17880 -Binary out/build/windows-vs2026-runtime-tools/Release/test_screen_share_runtime.exe -CompleteLifecycle -Plan
 ```
 
 PreparedDirectory 必须已存在；各运行使用独立目录。去掉 `-Plan` 才执行。

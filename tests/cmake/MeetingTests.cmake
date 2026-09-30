@@ -1,6 +1,6 @@
 # OpenMeeting HTTP Client Test
 add_executable(test_openmeeting_http
-    ${LIVEKIT_TEST_SOURCE_DIR}/test_openmeeting_http.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/meeting/test_openmeeting_http.cpp
 )
 target_include_directories(test_openmeeting_http BEFORE PRIVATE
     ${LIVEKIT_PROJECT_SOURCE_DIR}
@@ -20,15 +20,15 @@ add_test(NAME openmeeting_http_test COMMAND test_openmeeting_http --debug)
 add_test(NAME openmeeting_http_watchdog_test
     COMMAND ${CMAKE_COMMAND}
         "-DTEST_EXECUTABLE=$<TARGET_FILE:test_openmeeting_http>"
-        -P "${LIVEKIT_TEST_SOURCE_DIR}/remediation/verify_http_watchdog.cmake"
+        -P "${LIVEKIT_TEST_SOURCE_DIR}/meeting/verify_http_watchdog.cmake"
 )
 
 # CPPQT-001: the real Coordinator callbacks run against a controllable
 # admission backend, while the Room boundary is intercepted before SDK/device
 # creation. The production target continues to use the default HTTP backend.
 add_executable(test_http_admission_owner
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_http_admission_owner.cpp
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/meeting_log_test_sink.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/meeting/test_http_admission_owner.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/support/meeting_log_test_sink.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
 )
 target_include_directories(test_http_admission_owner BEFORE PRIVATE
@@ -52,7 +52,7 @@ set_tests_properties(http_owner_remediation_test PROPERTIES TIMEOUT 60)
 
 # Coordinator session runtime serialization test
 add_executable(test_meeting_session_runtime
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/restored/test_meeting_session_runtime.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/meeting/test_meeting_session_runtime.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/meeting_session_runtime.h
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/publication_catalog.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/publication_catalog.h
@@ -90,7 +90,7 @@ set_tests_properties(meeting_session_runtime_test PROPERTIES
 # IDA2-P0-001: immutable participant snapshots, incarnation tickets, ordered
 # Room delivery, and delayed Qt projection rejection for retired instances.
 add_executable(test_participant_snapshot_remediation
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_participant_snapshot_remediation.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/meeting/test_participant_snapshot_remediation.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
 )
 target_include_directories(test_participant_snapshot_remediation BEFORE PRIVATE
@@ -117,8 +117,8 @@ set_tests_properties(participant_snapshot_remediation_test PROPERTIES TIMEOUT 60
 # QApplication branch. It links the production console exactly once; the core
 # target keeps its original synchronous LogToConsole hook and owner cases.
 add_executable(test_participant_window_remediation
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_telemetry_panel.cpp
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_participant_snapshot_remediation.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/telemetry/test_telemetry_panel.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/meeting/test_participant_snapshot_remediation.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
 )
 target_include_directories(test_participant_window_remediation BEFORE PRIVATE
@@ -216,7 +216,7 @@ endif()
 # Coordinator startup transaction test: a meeting is committed only after both
 # required local tracks publish, otherwise it must roll back to failure.
 add_executable(test_meeting_startup_transaction
-    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/restored/test_meeting_startup_transaction.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/meeting/test_meeting_startup_transaction.cpp
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/meeting_startup_transaction.h
 )
 target_include_directories(test_meeting_startup_transaction BEFORE PRIVATE
