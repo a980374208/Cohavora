@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstring>
+#include <limits>
 
 namespace livekit::diagnostic {
 namespace {
@@ -223,6 +224,8 @@ std::string_view EventName(EventKind kind) noexcept {
     case EventKind::MediaRecoveryMilestone: return "media.recovery.milestone";
     case EventKind::MediaRecoveryTimeout: return "media.recovery.timeout";
     case EventKind::MediaEndpointRecovered: return "media.endpoint.recovered";
+    case EventKind::MediaFirstObserved: return "media.first_observed";
+    case EventKind::RenderStallInterval: return "render.stall.interval";
     case EventKind::MediaFallback: return "media.fallback";
     case EventKind::RenderBackendChanged: return "render.backend.changed";
     case EventKind::DeviceSwitchStarted: return "device.switch.started";
@@ -288,6 +291,8 @@ std::string_view ComponentName(EventKind kind) noexcept {
     case EventKind::SignalIssue: return "room";
     case EventKind::MediaRecoveryMilestone:
     case EventKind::MediaRecoveryTimeout:
+    case EventKind::MediaFirstObserved:
+    case EventKind::RenderStallInterval:
     case EventKind::MediaEndpointRecovered: return "session_telemetry";
     case EventKind::SessionStopped:
     case EventKind::CallbackRejectedSummary: return "session_runtime";
@@ -393,6 +398,7 @@ bool IsCritical(EventKind kind) noexcept {
     case EventKind::ReconnectAttemptStarted:
     case EventKind::SignalMessageSummary:
     case EventKind::CallbackRejectedSummary:
+    case EventKind::RenderStallInterval:
         return false;
     default: return true;
     }
@@ -450,6 +456,8 @@ bool IsValidEvent(const Event& event) noexcept {
     case EventKind::SignalIssue:
     case EventKind::CallbackRejectedSummary:
     case EventKind::DiagnosticsModeChanged:
+    case EventKind::MediaFirstObserved:
+    case EventKind::RenderStallInterval:
     case EventKind::RetentionChanged:
         break;
     default: return false;
@@ -459,6 +467,27 @@ bool IsValidEvent(const Event& event) noexcept {
             [](char ch) { return (ch >= '0' && ch <= '9') ||
                 (ch >= 'a' && ch <= 'f'); });
     };
+    if (event.kind == EventKind::MediaFirstObserved || event.kind == EventKind::RenderStallInterval) {
+        if (!hex_id(event.media_endpoint_id.View()) ||
+            !hex_id(event.context.anonymous_session_id.View()) ||
+            !event.context.has_session_generation || !event.context.session_generation ||
+            !event.context.has_room_generation || !event.context.room_generation ||
+            !event.binding_epoch || !event.source_monotonic_us ||
+            event.source_monotonic_us > static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) ||
+            event.context.operation_id.View().empty()) return false;
+        if (event.kind == EventKind::MediaFirstObserved &&
+            (event.media_observation > MediaObservation::FirstRender ||
+             event.media_kind != (event.media_observation == MediaObservation::FirstPcm
+                ? MediaKind::Audio : MediaKind::Video))) return false;
+        if (event.kind == EventKind::RenderStallInterval &&
+            (event.stall_boundary > StallBoundary::Inactive ||
+             event.media_kind != MediaKind::Video || !event.interval_begin_us ||
+             event.stall_threshold_us < 500000 ||
+             event.interval_begin_us > event.source_monotonic_us ||
+             event.interval_end_us > event.source_monotonic_us ||
+             (event.stall_boundary == StallBoundary::Open ? event.interval_end_us != 0
+                : event.interval_end_us < event.interval_begin_us))) return false;
+    }
     if (event.kind == EventKind::MediaEndpointRecovered &&
         (!hex_id(event.media_endpoint_id.View()) ||
          (!event.previous_media_endpoint_id.View().empty() &&
@@ -481,6 +510,39 @@ bool IsValidEvent(const Event& event) noexcept {
         IsToken(event.context.parent_operation_id.bytes, true) &&
         IsToken(event.context.request_id.bytes) &&
         IsToken(event.context.legacy_operation_id.bytes);
+}
+
+std::string_view MediaObservationName(MediaObservation value) noexcept {
+    constexpr std::string_view names[]{"first_decoded", "first_pcm", "first_render_submit"};
+    const auto i = static_cast<std::size_t>(value);
+    return i < std::size(names) ? names[i] : "unknown";
+}
+
+std::string_view StallBoundaryName(StallBoundary value) noexcept {
+    constexpr std::string_view names[]{"open", "recovered", "hidden", "rebound", "stopped", "inactive"};
+    const auto i = static_cast<std::size_t>(value);
+    return i < std::size(names) ? names[i] : "unknown";
+}
+
+bool IsTimelineEvent(EventKind kind) noexcept {
+    switch (kind) {
+    case EventKind::HttpRequestStarted: case EventKind::HttpRequestCompleted:
+    case EventKind::HttpResponseDecodeFailed: case EventKind::AdmissionStarted:
+    case EventKind::AdmissionStageChanged: case EventKind::AdmissionTerminal:
+    case EventKind::RoomConnectStarted: case EventKind::RoomConnectTerminal:
+    case EventKind::StartupTerminal: case EventKind::MediaPublishStarted:
+    case EventKind::MediaPublishTerminal: case EventKind::MediaPublishBatchStarted:
+    case EventKind::MediaPublishBatchTerminal: case EventKind::MediaUnpublishStarted:
+    case EventKind::MediaUnpublishTerminal: case EventKind::MediaRecoveryMilestone:
+    case EventKind::MediaRecoveryTimeout: case EventKind::MediaEndpointRecovered:
+    case EventKind::ReconnectEpisodeStarted: case EventKind::ReconnectEpisodeTerminal:
+    case EventKind::ReconnectAttemptStarted: case EventKind::ReconnectAttemptTerminal:
+    case EventKind::ReconnectModeChanged: case EventKind::DeviceSwitchStarted:
+    case EventKind::DeviceSwitchTerminal: case EventKind::MeetingLeaveRequested:
+    case EventKind::MeetingBackendNotificationCompleted: case EventKind::SessionStopped:
+    case EventKind::MediaFirstObserved: case EventKind::RenderStallInterval: return true;
+    default: return false;
+    }
 }
 
 std::string_view RouteName(Route value) noexcept {

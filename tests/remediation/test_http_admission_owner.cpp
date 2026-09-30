@@ -1,6 +1,7 @@
 #include "src/core/meeting_coordinator.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/ui/meeting_entry_guard.h"
+#include "src/telemetry/diagnostic_pipeline.h"
 #include "tests/support/test_check.h"
 
 #include <QtCore/QCoreApplication>
@@ -79,6 +80,10 @@ public:
 
     static void duplicateIdentityKick(MeetingCoordinator &coordinator, const QString &detail) {
         coordinator.handleDuplicateIdentityKickOff(detail);
+    }
+    static auto telemetryIdentity(const MeetingCoordinator& coordinator) {
+        return std::pair{coordinator._admissionTelemetry.anonymousSessionId.toStdString(),
+            coordinator._admissionTelemetry.sessionGeneration};
     }
 };
 
@@ -369,12 +374,28 @@ void CompleteCurrent(Fixture &fixture, PendingStage stage, size_t index, const Q
 void VerifyNormalFlows() {
     RunCase("normal Join -> Token", [] {
         Fixture fixture;
+        auto pipeline = std::make_shared<livekit::diagnostic::DiagnosticPipeline>();
+        livekit::diagnostic::InstallBusinessPipeline(pipeline);
         const auto index = PreparePending(fixture, PendingStage::Join, "normal-join");
+        const auto [session, generation] = MeetingCoordinatorTestAccess::telemetryIdentity(*fixture.coordinator);
+        TEST_CHECK(generation != 0);
+        const auto admission = pipeline->RecentTimeline(session, generation);
+        TEST_CHECK(!admission.events.empty());
+        TEST_CHECK(admission.events.front().kind == livekit::diagnostic::EventKind::AdmissionStarted);
+        TEST_CHECK(admission.events.front().context.session_generation == generation);
         CompleteCurrent(fixture, PendingStage::Join, index, "normal-join");
         TEST_CHECK(fixture.starts == 1);
         TEST_CHECK(fixture.startedUrls.back() == "wss://normal-join");
         TEST_CHECK(fixture.coordinator->state() == MeetingState::ConnectingRoom);
         TEST_CHECK(fixture.errors.empty());
+        Fixture another;
+        PreparePending(another, PendingStage::Join, "another-owner");
+        const auto [otherSession, otherGeneration] = MeetingCoordinatorTestAccess::telemetryIdentity(*another.coordinator);
+        TEST_CHECK(otherGeneration > generation && otherSession != session);
+        const auto otherAdmission = pipeline->RecentTimeline(otherSession, otherGeneration);
+        TEST_CHECK(!otherAdmission.events.empty());
+        TEST_CHECK(otherAdmission.events.front().context.session_generation == otherGeneration);
+        livekit::diagnostic::InstallBusinessPipeline({});
     });
     RunCase("normal Quick", [] {
         Fixture fixture;

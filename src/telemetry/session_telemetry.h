@@ -1,6 +1,7 @@
 #pragma once
 
 #include "stats.h"
+#include "diagnostic_event.h"
 #include "render/canvas_render_timing.h"
 
 #include <asio.hpp>
@@ -58,6 +59,7 @@ enum class EventKind {
     RemoteVideoRenderBinding,
     RemoteVideoRenderExpectation,
     RemoteVideoRenderSubmit,
+    RemoteVideoRenderStall,
     LocalPublicationBinding,
     LocalPublicationEnded,
     LocalVideoFrameInjected,
@@ -404,6 +406,8 @@ struct Snapshot {
     Clock::time_point generated_at{};
     Clock::time_point last_sample_at{};
     std::int64_t sample_age_ms = -1;
+    std::int64_t stats_stale_after_ms = 0;
+    std::int64_t runtime_stale_after_ms = 0;
     double coverage = 0.0;
 
     Availability session_duration_availability = Availability::Unknown;
@@ -916,6 +920,7 @@ struct Snapshot {
     std::int64_t last_subscribe_to_first_render_ms = -1;
     std::int64_t last_connect_to_first_render_ms = -1;
     std::int64_t last_admission_to_first_render_ms = -1;
+    std::uint64_t render_timeline_event_drops = 0;
     double render_average_interval_ms = -1.0;
     std::int64_t render_maximum_interval_ms = -1;
     double render_interval_p50_ms = -1.0;
@@ -926,6 +931,20 @@ struct Snapshot {
     std::vector<std::uint64_t> render_fine_interval_histogram;
     double render_interval_p99_ms = -1.0;
     double render_submit_fps = -1.0;
+    // P2: actual monotonic interval, aggregate unique submissions of currently
+    // expected continuous bindings. Never reinterpret render_submit_fps.
+    Availability render_window_availability = Availability::Unknown;
+    std::string render_window_reason = "render_window_not_observed";
+    std::uint64_t render_window_scope_epoch = 0;
+    Clock::time_point render_window_begin{};
+    Clock::time_point render_window_end{};
+    std::uint64_t render_window_bindings = 0;
+    std::uint64_t render_window_submits = 0;
+    double render_window_submit_fps = -1.0;
+    std::array<std::uint64_t, RenderActivityProbe::kIntervalHistogramBuckets>
+        render_window_interval_histogram{};
+    std::vector<std::uint64_t> render_window_fine_interval_histogram;
+    std::uint64_t render_window_fine_bindings = 0;
     Availability render_frame_age_availability = Availability::Unknown;
     std::string render_frame_age_reason = "no_render_submit";
     std::string render_frame_age_measurement_point =
@@ -1081,7 +1100,8 @@ public:
     std::string StartOperation(
         OperationKind kind,
         std::string id_prefix = {},
-        Clock::time_point source_time = Clock::now());
+        Clock::time_point source_time = Clock::now(),
+        std::string correlation_id = {});
     bool FinishOperation(
         const std::string& operation_id,
         OperationKind kind,
@@ -1268,6 +1288,8 @@ private:
         Clock::time_point expected_since{};
         std::chrono::nanoseconds expected_accumulated{0};
         std::shared_ptr<RenderActivityProbe> probe;
+        Clock::time_point open_stall_begin{};
+        Clock::time_point last_closed_stall_begin{};
     };
 
     struct AudioStatsBaseline {
@@ -1475,6 +1497,19 @@ private:
     std::map<std::string, MediaState> media_;
     std::map<std::string, AudioMediaState> audio_media_;
     std::map<std::string, RenderState> render_media_;
+    struct RenderWindowBindingBaseline {
+        std::string endpoint;
+        std::uint64_t room_generation = 0, binding_epoch = 0;
+        bool expected = false, continuous = false, fine = false;
+        std::uint64_t submits = 0;
+        std::array<std::uint64_t, RenderActivityProbe::kIntervalHistogramBuckets> histogram{};
+    };
+    std::vector<RenderWindowBindingBaseline> render_window_baselines_;
+    std::vector<std::uint64_t> render_window_fine_baseline_;
+    Clock::time_point render_window_baseline_at_{};
+    std::string render_window_backend_;
+    bool render_window_scope_dirty_ = true;
+    void UpdateRenderWindowOnStrand(Clock::time_point now);
     const std::shared_ptr<CanvasRenderProbe> canvas_render_probe_ =
         std::make_shared<CanvasRenderProbe>();
     std::map<std::string, LocalPublicationState> local_publications_;
@@ -1512,6 +1547,12 @@ private:
     Clock::time_point resource_observation_started_at_{};
     Clock::time_point session_started_at_{};
     Clock::time_point latest_admission_accepted_at_{};
+    std::string latest_admission_operation_id_;
+    void EmitFirstObservationOnStrand(diagnostic::MediaObservation observation,
+        const std::string& endpoint, std::uint64_t room, std::uint64_t binding, Clock::time_point at);
+    void EmitRenderStallOnStrand(RenderState& render, Clock::time_point begin,
+        Clock::time_point end, diagnostic::StallBoundary boundary, Clock::time_point observed);
+    void ObserveRenderStallsOnStrand(Clock::time_point now);
     Clock::time_point session_stopped_at_{};
     Clock::time_point usable_since_{};
     std::chrono::milliseconds usable_accumulated_{0};

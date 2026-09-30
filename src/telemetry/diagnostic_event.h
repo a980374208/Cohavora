@@ -67,7 +67,15 @@ enum class EventKind : std::uint8_t {
     DiagnosticsModeChanged,
     RetentionChanged,
     RtcSdpStep,
+    MediaFirstObserved,
+    RenderStallInterval,
 };
+
+enum class MediaObservation : std::uint8_t { FirstDecoded, FirstPcm, FirstRender };
+enum class StallBoundary : std::uint8_t { Open, Recovered, Hidden, Rebound, Stopped, Inactive };
+std::string_view MediaObservationName(MediaObservation value) noexcept;
+std::string_view StallBoundaryName(StallBoundary value) noexcept;
+bool IsTimelineEvent(EventKind kind) noexcept;
 
 // Closed SDP metadata only: no SDP text, addresses, credentials or exception text.
 enum class SdpAction : std::uint8_t {
@@ -202,6 +210,14 @@ struct Event final {
     Context context;
     OpaqueId media_endpoint_id;
     OpaqueId previous_media_endpoint_id;
+    MediaObservation media_observation = MediaObservation::FirstDecoded;
+    StallBoundary stall_boundary = StallBoundary::Open;
+    std::uint64_t binding_epoch = 0;
+    // Absolute steady-clock times. monotonic_us below remains process-relative.
+    std::uint64_t source_monotonic_us = 0;
+    std::uint64_t interval_begin_us = 0;
+    std::uint64_t interval_end_us = 0;
+    std::uint64_t stall_threshold_us = 0;
     std::array<char, 65> build_id{};
     std::array<char, 65> symbol_identity{};
     ShutdownReason shutdown_reason = ShutdownReason::Unknown;

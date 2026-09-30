@@ -390,6 +390,18 @@ void applyChoiceSurface(QWidget &surface, Tone tone) {
 	setTone(surface, tone);
 }
 
+void applySurfacePalette(QWidget &widget, Tone tone) {
+	applyChoiceSurface(widget, tone);
+	auto palette = widget.palette();
+	palette.setColor(QPalette::Link, tone == Tone::Dark ? QColor("#65b5ff") : QColor("#1677ff"));
+	palette.setColor(QPalette::LinkVisited, tone == Tone::Dark ? QColor("#8edbc2") : QColor("#267d66"));
+	// QStyleSheetStyle can restore platform Link roles during polish. Custom
+	// painters use these theme tokens independently of that palette rewrite.
+	widget.setProperty("chartPrimaryColor", palette.color(QPalette::Link));
+	widget.setProperty("chartSecondaryColor", palette.color(QPalette::LinkVisited));
+	widget.setPalette(palette);
+}
+
 void styleChoiceControls(QWidget &widget, Tone tone) {
 	setTone(widget, tone);
 	auto choices = widget.findChildren<QComboBox *>();

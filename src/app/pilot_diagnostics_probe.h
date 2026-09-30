@@ -90,6 +90,7 @@ public:
                             metric.key.starts_with("resource.internal.") ||
                             metric.key == "queue.depth" ||
                             metric.key.starts_with("render.interval.bucket.") ||
+                            metric.key.starts_with("render.window.") ||
                             metric.key == "render.interval.p95") {
                             const auto value = std::visit([](const auto& v) -> Json {
                                 if constexpr (std::is_same_v<std::decay_t<decltype(v)>, std::monostate>)

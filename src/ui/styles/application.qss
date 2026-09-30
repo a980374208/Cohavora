@@ -1160,3 +1160,51 @@ QScrollArea#adaptiveDialogScroll, QWidget#adaptiveDialogContent {
     background: transparent;
     border: none;
 }
+
+/* Telemetry uses the shared dark surface, typography and rounded controls. */
+QDialog[uiStyle="telemetry-panel"],
+[uiStyle="telemetry-panel"] QWidget {
+    background: #242831;
+    color: #f3f4f6;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+}
+[uiStyle="telemetry-panel"] QPushButton,
+[uiStyle="telemetry-panel"] QComboBox {
+    background: #2b303a;
+    border: 1px solid #3a414f;
+    border-radius: 6px;
+    min-height: 30px;
+    padding: 0 12px;
+}
+[uiStyle="telemetry-panel"] QComboBox { padding-right: 36px; }
+[uiStyle="telemetry-panel"] QPushButton:hover,
+[uiStyle="telemetry-panel"] QPushButton:checked {
+    background: #394252;
+}
+[uiStyle="telemetry-panel"] QPushButton:focus,
+[uiStyle="telemetry-panel"] QComboBox:focus { border-color: #1677ff; }
+[uiStyle="telemetry-panel"] QTabWidget::pane {
+    border: 1px solid #3a414f;
+    border-radius: 6px;
+}
+[uiStyle="telemetry-panel"] QTabBar::tab {
+    background: #2b303a;
+    color: #f3f4f6;
+    padding: 8px 18px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+}
+[uiStyle="telemetry-panel"] QTabBar::tab:selected { background: #394252; }
+[uiStyle="telemetry-panel"] QHeaderView::section {
+    background: #2b303a;
+    color: #f3f4f6;
+    border: none;
+    padding: 6px;
+}
+[uiStyle="telemetry-panel"] QTableWidget {
+    background: #242831;
+    alternate-background-color: #2b303a;
+    gridline-color: #3a414f;
+    selection-background-color: #394252;
+}

@@ -1,4 +1,6 @@
 #if defined(IDA2_WINDOW_ACCEPTANCE)
+class QApplication;
+void RunTelemetryPanelContract(QApplication &app);
 
 #include "base/basic_types.h"
 #include "crl/crl.h"
@@ -993,72 +995,19 @@ public:
         unavailableProjection.insert(
             QStringLiteral("audioTimeStretchAvailability"), QStringLiteral("NOT_EXPECTED"));
         bar.setTelemetrySnapshot(unavailableProjection);
-        QStringList telemetryRows;
-        bar.showTelemetryMenu(bar.mapToGlobal(bar._qualityRect.bottomLeft()));
-        auto *menu = bar.findChild<QMenu*>(
-            QStringLiteral("telemetrySummaryMenu"), Qt::FindDirectChildrenOnly);
-        TEST_CHECK(menu != nullptr);
-        TEST_CHECK(menu->windowModality() == Qt::NonModal);
-        for (const auto *action : menu->actions()) {
-            telemetryRows.push_back(action->text());
-        }
-        menu->close();
-        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
-        QApplication::processEvents();
-        const auto firstAudioRow = std::find_if(
-            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
-                return row.contains(QStringLiteral("First remote PCM"));
-            });
-        TEST_CHECK(firstAudioRow != telemetryRows.end());
-        TEST_CHECK(!firstAudioRow->contains(QStringLiteral("52 ms")));
-        const auto concealmentRow = std::find_if(
-            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
-                return row.contains(QStringLiteral("Audio concealment"));
-            });
-        TEST_CHECK(concealmentRow != telemetryRows.end());
-        TEST_CHECK(!concealmentRow->contains(QStringLiteral("2.50%")));
-        TEST_CHECK(!concealmentRow->contains(QStringLiteral("3 events")));
-        const auto cpuRow = std::find_if(
-            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
-                return row.contains(QStringLiteral("Process CPU"));
-            });
-        TEST_CHECK(cpuRow != telemetryRows.end());
-        TEST_CHECK(cpuRow->contains(QStringLiteral("12.50%")));
-        const auto memoryRow = std::find_if(
-            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
-                return row.contains(QStringLiteral("Process memory"));
-            });
-        TEST_CHECK(memoryRow != telemetryRows.end());
-        TEST_CHECK(memoryRow->contains(QStringLiteral("64.0 MiB")));
-        TEST_CHECK(memoryRow->contains(QStringLiteral("48.0 MiB")));
-        const auto lagRow = std::find_if(
-            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
-                return row.contains(QStringLiteral("Strand / UI lag"));
-            });
-        TEST_CHECK(lagRow != telemetryRows.end());
-        TEST_CHECK(lagRow->contains(QStringLiteral("3 ms / 11 ms")));
-        TEST_CHECK(lagRow->contains(QStringLiteral("7 ms / 24 ms")));
-        const auto trendRow = std::find_if(
-            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
-                return row.contains(QStringLiteral("Resource trend window"));
-            });
-        TEST_CHECK(trendRow != telemetryRows.end());
-        TEST_CHECK(trendRow->contains(QStringLiteral("N=120")));
-        const auto crashRow = std::find_if(
-            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
-                return row.contains(QStringLiteral("Confirmed process crashes"));
-            });
-        TEST_CHECK(crashRow != telemetryRows.end());
-        TEST_CHECK(crashRow->contains(QStringLiteral("UNSUPPORTED")));
-        TEST_CHECK(!crashRow->contains(QStringLiteral("0.00%")));
-        TEST_CHECK(std::any_of(
-            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
-                return row.contains(QStringLiteral("Open telemetry details"));
-            }));
-        TEST_CHECK(std::any_of(
-            telemetryRows.begin(), telemetryRows.end(), [](const QString &row) {
-                return row.contains(QStringLiteral("Export report"));
-            }));
+        int detailsRequests = 0;
+        QObject::connect(&bar, &MeetingUI::RoomTopBarWidget::telemetryDetailsRequested,
+            &bar, [&] { ++detailsRequests; });
+        auto *telemetryButton = bar.findChild<QPushButton*>(QStringLiteral("meetingTelemetry"));
+        TEST_CHECK(telemetryButton != nullptr);
+        telemetryButton->click();
+        TEST_CHECK(detailsRequests == 1);
+        const auto telemetryPoint = bar._qualityRect.center();
+        QMouseEvent click(QEvent::MouseButtonPress, QPointF(telemetryPoint),
+            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(&bar, &click);
+        TEST_CHECK(detailsRequests == 2);
+        TEST_CHECK(bar.findChild<QMenu*>(QStringLiteral("telemetrySummaryMenu")) == nullptr);
 
         auto staleProjection = snapshot;
         staleProjection.insert(QStringLiteral("revision"), 6);
@@ -6805,6 +6754,8 @@ int WindowAcceptanceMain(int argc, char **argv) {
             QString::fromUtf8("Cohavora · 开源音视频会议客户端"));
         MeetingUI::AppTheme::install(application);
         ParticipantWindowTestAccess::checkTelemetryS7Acceptance();
+    } else if (application.arguments().contains("--telemetry-panel")) {
+        RunTelemetryPanelContract(application);
     } else if (application.arguments().contains("--telemetry-ui")) {
         ParticipantWindowTestAccess::checkTelemetryTopBar();
         ParticipantWindowTestAccess::checkCpuPaintTelemetryBoundary();

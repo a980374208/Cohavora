@@ -47,6 +47,7 @@ bool IsTimelineEvent(std::string_view name) noexcept {
         "reconnect.mode_changed", "device.switch.started",
         "device.switch.terminal", "meeting.leave.requested",
         "meeting.backend_notification.completed", "session.stopped",
+        "media.first_observed", "render.stall.interval",
     };
     return std::any_of(names.begin(), names.end(),
         [name](const char* item) { return name == item; });
@@ -103,6 +104,51 @@ std::string Token(const nlohmann::json& value, const char* key) {
 }
 
 } // namespace
+
+std::optional<OperationTimelineEntry> ProjectTimelineEvent(const diagnostic::Event& e) {
+    if (!diagnostic::IsTimelineEvent(e.kind) || !diagnostic::IsValidEvent(e)) return {};
+    OperationTimelineEntry r;
+    r.event_name = diagnostic::EventName(e.kind);
+    r.process_run_id = std::string(e.process_run_id.data(), 32);
+    r.operation_id = e.context.operation_id.View();
+    r.parent_operation_id = e.context.parent_operation_id.View();
+    r.request_id = e.context.request_id.View();
+    r.stage = diagnostic::StageName(e.stage);
+    r.outcome = diagnostic::OutcomeName(e.outcome);
+    r.error_code = diagnostic::ErrorCodeName(e.error_code);
+    r.error_layer = diagnostic::ErrorLayerName(e.error_layer);
+    r.occurred_at_utc_ms = e.occurred_at_utc_ms;
+    r.monotonic_us = e.monotonic_us;
+    r.source_monotonic_us = e.source_monotonic_us;
+    r.event_sequence = e.event_sequence;
+    r.session_generation = e.context.session_generation;
+    r.room_generation = e.context.room_generation;
+    r.recovery_epoch = e.context.recovery_epoch;
+    r.attempt = e.attempt;
+    r.http_status = e.http_status >= 100 && e.http_status <= 599 ? e.http_status : 0;
+    r.media_kind = diagnostic::MediaKindName(e.media_kind);
+    r.endpoint_id = e.media_endpoint_id.View();
+    r.previous_endpoint_id = e.previous_media_endpoint_id.View();
+    if (e.kind == diagnostic::EventKind::MediaFirstObserved ||
+        e.kind == diagnostic::EventKind::RenderStallInterval) {
+        r.binding_epoch = e.binding_epoch;
+        if (e.kind == diagnostic::EventKind::MediaFirstObserved) {
+            r.measurement_point = diagnostic::MediaObservationName(e.media_observation);
+        } else {
+            r.measurement_point = "render_submit_stall";
+            r.begin_us = e.interval_begin_us; r.end_us = e.interval_end_us;
+            r.threshold_us = e.stall_threshold_us;
+            r.boundary = diagnostic::StallBoundaryName(e.stall_boundary);
+        }
+    } else if (e.kind == diagnostic::EventKind::MediaRecoveryMilestone ||
+               e.kind == diagnostic::EventKind::MediaRecoveryTimeout ||
+               e.kind == diagnostic::EventKind::MediaEndpointRecovered) {
+        r.measurement_point = diagnostic::RecoveryMeasurementName(e.recovery_measurement);
+        r.expected_endpoints = e.batch_track_count;
+        r.has_expected_endpoints = e.kind == diagnostic::EventKind::MediaRecoveryMilestone;
+    }
+    return r;
+}
 
 OperationTimeline ReadOperationTimeline(
     const std::filesystem::path& root,
@@ -241,6 +287,10 @@ OperationTimeline ReadOperationTimeline(
                     entry.operation_id = operation_id;
                     entry.parent_operation_id = parent_id;
                     entry.request_id = request_id;
+                    entry.session_generation = value.value("session_generation", std::uint64_t{0});
+                    entry.room_generation = value.value("room_generation", std::uint64_t{0});
+                    entry.recovery_epoch = value.value("recovery_epoch", std::uint64_t{0});
+                    entry.source_monotonic_us = value.value("source_monotonic_us", std::uint64_t{0});
                     entry.stage = Token(value, "stage");
                     entry.outcome = Token(value, "outcome");
                     entry.error_code = Token(value, "error_code");
@@ -260,6 +310,38 @@ OperationTimeline ReadOperationTimeline(
                     if (value.contains("attributes") &&
                         value.at("attributes").is_object()) {
                         const auto& attributes = value.at("attributes");
+                        if (name == "media.first_observed" || name == "render.stall.interval") {
+                            entry.endpoint_id = Token(attributes, "endpoint_id");
+                            entry.media_kind = Token(attributes, "media_kind");
+                            entry.measurement_point = Token(attributes, "measurement_point");
+                            entry.binding_epoch = attributes.value("binding_epoch", std::uint64_t{0});
+                            bool valid = value.at("source_monotonic_us").is_number_unsigned() &&
+                                entry.source_monotonic_us <= static_cast<std::uint64_t>((std::numeric_limits<std::int64_t>::max)()) &&
+                                attributes.at("binding_epoch").is_number_unsigned() &&
+                                IsHexId(entry.endpoint_id) && entry.session_generation &&
+                                entry.room_generation && entry.binding_epoch && entry.source_monotonic_us &&
+                                !entry.operation_id.empty();
+                            if (name == "media.first_observed") {
+                                valid &= (entry.measurement_point == "first_decoded" ||
+                                    entry.measurement_point == "first_render_submit") ? entry.media_kind == "video" :
+                                    entry.measurement_point == "first_pcm" && entry.media_kind == "audio";
+                            } else {
+                                entry.boundary = Token(attributes, "boundary");
+                                entry.begin_us = attributes.value("begin_us", std::uint64_t{0});
+                                entry.end_us = attributes.value("end_us", std::uint64_t{0});
+                                entry.threshold_us = attributes.value("threshold_us", std::uint64_t{0});
+                                valid &= attributes.at("begin_us").is_number_unsigned() &&
+                                    attributes.at("end_us").is_number_unsigned() && attributes.at("threshold_us").is_number_unsigned() &&
+                                    entry.begin_us <= entry.source_monotonic_us && entry.end_us <= entry.source_monotonic_us &&
+                                    entry.media_kind == "video" && entry.measurement_point == "render_submit_stall" &&
+                                    entry.begin_us && entry.threshold_us >= 500000 &&
+                                    (entry.boundary == "open" ? entry.end_us == 0 :
+                                        (entry.boundary == "recovered" || entry.boundary == "hidden" ||
+                                         entry.boundary == "rebound" || entry.boundary == "stopped" || entry.boundary == "inactive") &&
+                                        entry.end_us >= entry.begin_us);
+                            }
+                            if (!valid) { ++result.invalid_lines; continue; }
+                        }
                         if (name == "meeting.leave.requested") {
                             const auto reason = Token(attributes, "leave_reason");
                             if (reason == "leave" || reason == "end_for_all")
@@ -348,6 +430,9 @@ OperationTimeline ReadOperationTimeline(
         result.entries.assign(recent.begin(), recent.end());
         std::sort(result.entries.begin(), result.entries.end(),
             [](const auto& a, const auto& b) {
+                if (a.process_run_id == b.process_run_id)
+                    return a.monotonic_us == b.monotonic_us ? a.event_sequence < b.event_sequence
+                        : a.monotonic_us < b.monotonic_us;
                 return a.occurred_at_utc_ms == b.occurred_at_utc_ms
                     ? a.event_sequence < b.event_sequence
                     : a.occurred_at_utc_ms < b.occurred_at_utc_ms;

@@ -179,6 +179,7 @@ std::size_t SnapshotRetainedBytes(const Snapshot& snapshot) {
         &Snapshot::reconnect_audio_measurement_point,
         &Snapshot::render_first_frame_reason,
         &Snapshot::render_first_frame_measurement_point,
+        &Snapshot::render_window_reason,
         &Snapshot::render_frame_age_reason,
         &Snapshot::render_frame_age_measurement_point,
         &Snapshot::render_pipeline_reason,
@@ -203,7 +204,8 @@ std::size_t SnapshotRetainedBytes(const Snapshot& snapshot) {
         &Snapshot::stability_anomaly_density_algorithm,
     };
     std::size_t bytes = sizeof(Snapshot) + 64 +
-        snapshot.render_fine_interval_histogram.capacity() * sizeof(std::uint64_t);
+        snapshot.render_fine_interval_histogram.capacity() * sizeof(std::uint64_t) +
+        snapshot.render_window_fine_interval_histogram.capacity() * sizeof(std::uint64_t);
     for (const auto field : text_fields) bytes += (snapshot.*field).capacity() + 1;
     bytes += snapshot.metric_product_chains.capacity() * sizeof(MetricProductChainStatus);
     for (const auto& chain : snapshot.metric_product_chains)
@@ -531,6 +533,7 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     base("queue.out_of_order_drops", s.out_of_order_drops, "events");
     base("late_callbacks", s.late_callbacks, "callbacks");
     base("mapping_failures", s.mapping_failures, "events");
+    base("render.timeline.event_drops", s.render_timeline_event_drops, "events");
     base("counter_resets", s.counter_resets, "events");
     base("samples.valid", s.valid_samples, "samples");
     base("samples.unavailable", s.unavailable_samples, "samples");
@@ -1438,6 +1441,32 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("render.submit_fps", Ratio(s.render_submit_fps), "frames/s",
           s.render_first_frame_availability, s.render_first_frame_reason,
           s.render_first_frame_measurement_point);
+    constexpr auto window_point = "aggregate_expected_continuous_render_submit_window_v1";
+    const auto window_meta = s.render_window_scope_epoch ? Availability::Valid : Availability::Unknown;
+    group("render.window.scope_epoch", s.render_window_scope_epoch, "epoch",
+          window_meta, s.render_window_reason, window_point);
+    group("render.window.begin", static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+              s.render_window_begin.time_since_epoch()).count()), "monotonic_us",
+          window_meta, s.render_window_reason, window_point);
+    group("render.window.end", static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+              s.render_window_end.time_since_epoch()).count()), "monotonic_us",
+          window_meta, s.render_window_reason, window_point);
+    group("render.window.bindings", s.render_window_bindings, "bindings",
+          window_meta, s.render_window_reason, window_point);
+    group("render.window.submits", s.render_window_submits, "frames",
+          s.render_window_availability, s.render_window_reason, window_point);
+    group("render.window.submit_fps", Ratio(s.render_window_submit_fps), "frames/s",
+          s.render_window_availability, s.render_window_reason, window_point);
+    for (std::size_t i = 0; i < s.render_window_interval_histogram.size(); ++i)
+        group("render.window.interval.bucket." + std::to_string(i), s.render_window_interval_histogram[i], "intervals",
+              s.render_window_availability, s.render_window_reason, window_point);
+    group("render.window.fine.bindings", s.render_window_fine_bindings, "bindings",
+          window_meta, s.render_window_reason, window_point);
+    for (std::size_t i = 0; i < s.render_window_fine_interval_histogram.size(); ++i)
+        group("render.window.fine.bucket." + std::to_string(i), s.render_window_fine_interval_histogram[i], "intervals",
+              s.render_window_availability,
+              s.render_window_fine_bindings == s.render_window_bindings ? s.render_window_reason : "render_fine_partial_coverage",
+              window_point);
     group("render.frame_age.average", Ratio(s.render_average_frame_age_ms), "ms",
           s.render_frame_age_availability, s.render_frame_age_reason,
           s.render_frame_age_measurement_point);

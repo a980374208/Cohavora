@@ -117,6 +117,7 @@ set_tests_properties(participant_snapshot_remediation_test PROPERTIES TIMEOUT 60
 # QApplication branch. It links the production console exactly once; the core
 # target keeps its original synchronous LogToConsole hook and owner cases.
 add_executable(test_participant_window_remediation
+    ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_telemetry_panel.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/remediation/test_participant_snapshot_remediation.cpp
     ${LIVEKIT_TEST_SOURCE_DIR}/support/test_check.h
 )
@@ -227,3 +228,13 @@ target_compile_definitions(test_meeting_startup_transaction PRIVATE
     WIN32_LEAN_AND_MEAN
     NOMINMAX)
 add_test(NAME meeting_startup_transaction_test COMMAND test_meeting_startup_transaction)
+
+add_test(NAME meeting_telemetry_panel_test COMMAND test_participant_window_remediation --telemetry-panel)
+set_tests_properties(meeting_telemetry_panel_test PROPERTIES TIMEOUT 30 LABELS "TELEMETRY_S7;UI_CONTRACT_FOCUSED")
+
+foreach(panel_scale IN ITEMS 150 200)
+    add_test(NAME meeting_telemetry_panel_${panel_scale}_test
+        COMMAND test_participant_window_remediation --telemetry-panel --scale-${panel_scale})
+    set_tests_properties(meeting_telemetry_panel_${panel_scale}_test PROPERTIES
+        TIMEOUT 30 LABELS "TELEMETRY_S7;UI_CONTRACT_FOCUSED")
+endforeach()

@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <iostream>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -269,6 +270,22 @@ void JsonCsvShareValuesAndPreserveMissing() {
     TemporaryDirectory directory("cohavora-telemetry-report");
     std::vector<SafeTelemetryRecordPtr> records{
         Record(1, false, 1000), Record(2, true, 2000)};
+    for (auto& original : records) {
+        auto record = std::make_shared<SafeTelemetryRecord>(*original);
+    record->snapshot.render_window_availability = Availability::Valid;
+    record->snapshot.render_window_reason = "render_window_valid";
+    record->snapshot.render_window_scope_epoch = 3;
+    record->snapshot.render_window_begin = livekit::telemetry::Snapshot::Clock::time_point{} + 10s;
+    record->snapshot.render_window_end = livekit::telemetry::Snapshot::Clock::time_point{} + 12s;
+    record->snapshot.render_window_bindings = 2;
+    record->snapshot.render_window_submits = 120;
+    record->snapshot.render_window_submit_fps = 60;
+    record->snapshot.render_window_interval_histogram[2] = 119;
+    record->snapshot.render_window_fine_bindings = 1;
+    record->snapshot.render_window_fine_interval_histogram.resize(1001);
+    record->snapshot.render_window_fine_interval_histogram[33] = 59;
+        original = std::move(record);
+    }
     const auto result = WriteTelemetryReportAtomically(
         records, directory.path(), false);
     TEST_CHECK(result.success);
@@ -286,6 +303,14 @@ void JsonCsvShareValuesAndPreserveMissing() {
 
     const auto jsonl = ReadAll(result.report_directory / "metrics.jsonl");
     const auto csv = ReadAll(result.report_directory / "metrics.csv");
+    TEST_CHECK(FindMetric(jsonl, "render.window.submit_fps").at("value") == 60);
+    TEST_CHECK(FindMetric(jsonl, "render.window.begin").at("value") == 10000000);
+    TEST_CHECK(FindMetric(jsonl, "render.window.end").at("value") == 12000000);
+    TEST_CHECK(FindMetric(jsonl, "render.window.scope_epoch").at("value") == 3);
+    TEST_CHECK(FindMetric(jsonl, "render.window.interval.bucket.2").at("value") == 119);
+    TEST_CHECK(FindMetric(jsonl, "render.window.fine.bucket.33").at("value") == 59);
+    TEST_CHECK(FindMetric(jsonl, "render.window.fine.bucket.33").at("reason") == "render_fine_partial_coverage");
+    TEST_CHECK(csv.find("render.window.submit_fps") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"resource.cpu\"") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"stats.last_request_duration\",\"measurement_point\":\"\",\"reason\":\"stats_complete\",\"revision\":2,\"session_generation\":42,\"unit\":\"ms\",\"value\":null") != std::string::npos);
     TEST_CHECK(jsonl.find("\"key\":\"render.stall.count\"") != std::string::npos);
@@ -1208,6 +1233,12 @@ void HistoricalBundleIsSafeAndVerifiable() {
     const auto run_id = std::string(32, 'b');
     const auto session_id = Record(1, true)->anonymous_session_id;
     auto safe_record = std::make_shared<SafeTelemetryRecord>(*Record(1, true));
+    safe_record->snapshot.render_window_scope_epoch = 9;
+    safe_record->snapshot.render_window_availability = Availability::Valid;
+    safe_record->snapshot.render_window_reason = "render_window_valid";
+    safe_record->snapshot.render_window_submit_fps = 24;
+    safe_record->snapshot.render_window_fine_interval_histogram.resize(1001);
+    safe_record->snapshot.render_window_fine_interval_histogram[42] = 23;
     safe_record->source_utc_ms = std::chrono::duration_cast<
         std::chrono::milliseconds>(std::chrono::system_clock::now()
             .time_since_epoch()).count();
@@ -1298,6 +1329,18 @@ void HistoricalBundleIsSafeAndVerifiable() {
         {"monotonic_us", 5700},
         {"event_sequence", 5},
     }.dump() << '\n';
+    events << nlohmann::json{
+        {"schema_version", 1}, {"event_name", "render.stall.interval"},
+        {"process_run_id", run_id}, {"anonymous_session_id", session_id},
+        {"operation_id", session_id}, {"parent_operation_id", "room_connect_42"},
+        {"session_generation", 42}, {"room_generation", 9},
+        {"occurred_at_utc_ms", 1310}, {"monotonic_us", 5800},
+        {"source_monotonic_us", 2500000}, {"event_sequence", 6},
+        {"attributes", {{"media_kind", "video"}, {"endpoint_id", session_id},
+            {"binding_epoch", 7}, {"measurement_point", "render_submit_stall"},
+            {"boundary", "recovered"}, {"begin_us", 2000000},
+            {"end_us", 2500000}, {"threshold_us", 500000}}},
+    }.dump() << '\n';
     events.close();
     std::filesystem::create_directories(root.parent_path());
     std::ofstream(root.parent_path() / "stability-ledger-v1.json") <<
@@ -1322,6 +1365,25 @@ void HistoricalBundleIsSafeAndVerifiable() {
         root, entry, diagnostics, destination);
     TEST_CHECK(result.success);
     const auto bundle = result.report_directory;
+    const auto interval_events = ReadAll(bundle / "sessions" / session_id / "events.jsonl");
+    std::istringstream interval_input(interval_events);
+    std::string interval_line;
+    bool found_interval = false;
+    while (std::getline(interval_input, interval_line)) {
+        const auto row = nlohmann::json::parse(interval_line);
+        if (row.at("event_name") != "render.stall.interval") continue;
+        found_interval = true;
+        TEST_CHECK(row.at("begin_us") == 2000000 && row.at("end_us") == 2500000);
+        TEST_CHECK(row.at("binding_epoch") == 7 && row.at("room_generation") == 9);
+        TEST_CHECK(row.at("source_monotonic_us") == 2500000);
+        TEST_CHECK(row.at("boundary") == "recovered");
+    }
+    TEST_CHECK(found_interval);
+    const auto window_metrics = ReadAll(bundle / "sessions" / session_id / "telemetry" / "metrics.jsonl");
+    TEST_CHECK(FindMetric(window_metrics, "render.window.submit_fps").at("value") == 24);
+    TEST_CHECK(FindMetric(window_metrics, "render.window.scope_epoch").at("value") == 9);
+    TEST_CHECK(FindMetric(window_metrics, "render.window.fine.bucket.42").at("value") == 23);
+    TEST_CHECK(FindMetric(window_metrics, "render.window.fine.bucket.42").at("unit") == "intervals");
     const auto manifest = nlohmann::json::parse(ReadAll(bundle / "manifest.json"));
     TEST_CHECK(manifest.at("includes_memory_dump") == false);
     TEST_CHECK(manifest.at("process_run_id").get<std::string>() == run_id);
@@ -1892,6 +1954,19 @@ void CommittedCheckpointSurvivesForcedTermination(
 } // namespace
 
 int wmain(int argc, wchar_t** argv) {
+    // Explicit, opt-in runtime evidence export through the production path.
+    // Only the named report is selected; never enumerate unrelated sessions.
+    if (argc == 6 && std::wstring_view(argv[1]) == L"--export-runtime-bundle") {
+        livekit::telemetry::TelemetryReportEntry entry;
+        entry.record_id = std::filesystem::path(argv[3]).string();
+        const auto result = livekit::telemetry::WriteTelemetryDiagnosticBundle(
+            std::filesystem::path(argv[2]), entry,
+            std::filesystem::path(argv[4]), std::filesystem::path(argv[5]));
+        std::cout << nlohmann::json{{"success", result.success},
+            {"reason", result.reason},
+            {"directory", result.report_directory.generic_string()}}.dump() << std::endl;
+        return result.success ? 0 : 1;
+    }
     if (argc == 2 && std::wstring_view(argv[1]) == L"--manifest-transient-regression") {
         ManifestReplacementWaitsForTransientReader();
         return 0;

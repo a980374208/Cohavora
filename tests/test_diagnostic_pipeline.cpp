@@ -57,6 +57,76 @@ std::vector<nlohmann::json> ReadEvents(const std::filesystem::path& root) {
     return result;
 }
 
+void TimelineProjectionAndPersistenceAgree() {
+    TemporaryDirectory temporary;
+    constexpr auto session = "0123456789abcdef0123456789abcdef";
+    DiagnosticPipeline pipeline;
+    std::atomic<unsigned> mirrored{0};
+    pipeline.SetMirror([&](const Event&) { ++mirrored; });
+    TEST_CHECK(pipeline.StartWriter(temporary.path));
+    Event e;
+    e.kind = EventKind::MediaFirstObserved;
+    e.context.anonymous_session_id.Assign(session);
+    e.context.operation_id.Assign(session);
+    e.context.parent_operation_id.Assign("abcdef0123456789abcdef0123456789");
+    e.context.session_generation = 42; e.context.has_session_generation = true;
+    e.context.room_generation = 9; e.context.has_room_generation = true;
+    e.media_endpoint_id.Assign(session); e.binding_epoch = 3;
+    e.media_kind = MediaKind::Video; e.media_observation = MediaObservation::FirstRender;
+    e.source_monotonic_us = 1234000;
+    TEST_CHECK(pipeline.TryEmit(e));
+    e.kind = EventKind::RenderStallInterval;
+    e.source_monotonic_us = 2234000;
+    e.interval_begin_us = 1734000; e.interval_end_us = 2234000;
+    e.stall_threshold_us = 500000; e.stall_boundary = StallBoundary::Recovered;
+    TEST_CHECK(pipeline.TryEmit(e));
+    e.interval_end_us = 100;
+    TEST_CHECK(!pipeline.TryEmit(e));
+    const auto live = pipeline.RecentTimeline(session, 42);
+    TEST_CHECK(live.events.size() == 2 && !live.omitted);
+    TEST_CHECK(pipeline.RecentTimeline(session, 43).events.empty());
+    TEST_CHECK(pipeline.Close() == DrainResult::Completed);
+    TEST_CHECK(mirrored.load() >= 2);
+    const auto stored = livekit::telemetry::ReadOperationTimeline(temporary.path, session, 1024, std::string(pipeline.run_id()));
+    TEST_CHECK(stored.entries.size() == 2 && stored.invalid_lines == 0);
+    for (std::size_t i = 0; i != 2; ++i) {
+        const auto projected = livekit::telemetry::ProjectTimelineEvent(live.events[i]);
+        TEST_CHECK(projected);
+        const auto& disk = stored.entries[i];
+        TEST_CHECK(projected->event_name == disk.event_name);
+        TEST_CHECK(projected->source_monotonic_us == disk.source_monotonic_us);
+        TEST_CHECK(projected->operation_id == disk.operation_id);
+        TEST_CHECK(projected->parent_operation_id == disk.parent_operation_id);
+        TEST_CHECK(projected->binding_epoch == disk.binding_epoch);
+        TEST_CHECK(projected->endpoint_id == disk.endpoint_id);
+        TEST_CHECK(projected->begin_us == disk.begin_us && projected->end_us == disk.end_us);
+        TEST_CHECK(projected->boundary == disk.boundary);
+    }
+    DiagnosticPipeline bounded;
+    e.kind = EventKind::AdmissionStarted;
+    for (unsigned i = 0; i < 3000; ++i) TEST_CHECK(bounded.TryEmit(e));
+    const auto tail = bounded.RecentTimeline(session, 42);
+    TEST_CHECK(tail.omitted > 0 && tail.events.size() <= 2048);
+    TEST_CHECK(tail.events.size() * sizeof(Event) <= 1024 * 1024);
+    TEST_CHECK(tail.events.size() + tail.omitted == 3000);
+    DiagnosticPipeline protectedOpen;
+    e.kind = EventKind::RenderStallInterval;
+    e.interval_begin_us = 2000000; e.interval_end_us = 0;
+    e.stall_boundary = StallBoundary::Open;
+    TEST_CHECK(protectedOpen.TryEmit(e));
+    e.stall_boundary = StallBoundary::Recovered; e.interval_end_us = 2200000;
+    for (unsigned i = 0; i < 1000; ++i) {
+        e.interval_begin_us = 1000 + i;
+        TEST_CHECK(protectedOpen.TryEmit(e));
+    }
+    const auto protectedTail = protectedOpen.RecentTimeline(session, 42);
+    TEST_CHECK(protectedTail.omitted > 0);
+    TEST_CHECK(std::count_if(protectedTail.events.begin(), protectedTail.events.end(), [](const auto& event) {
+        return event.kind == EventKind::RenderStallInterval && event.stall_boundary == StallBoundary::Open;
+    }) == 1);
+    TEST_CHECK(protectedTail.events.size() * sizeof(Event) <= 512 * 1024);
+}
+
 void BoundedConcurrentAdmission() {
     DiagnosticPipeline pipeline;
     constexpr int threads = 8;
@@ -784,6 +854,7 @@ int main(int argc, char** argv) {
         diagnostic_detach_checks::BlockedFileOpen(directory.path / "file");
     }
     SdpRoundsPersistOrderedTypedEvidence();
+    TimelineProjectionAndPersistenceAgree();
     BoundedConcurrentAdmission();
     WritesTypedJsonAndRecovers();
     BatchWritesPreserveOrderAndCommitBoundary();

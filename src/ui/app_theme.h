@@ -31,6 +31,8 @@ inline void setStyleVariant(QWidget &widget, const char *variant) {
 	for (auto *child : widget.findChildren<QWidget *>()) refresh(child);
 }
 void setTone(QWidget &widget, Tone tone);
+// Shared palette for custom-painted panels as well as choice popups.
+void applySurfacePalette(QWidget &widget, Tone tone);
 void styleChoiceControls(QWidget &widget, Tone tone);
 void styleMenu(QMenu &menu, Tone tone);
 void centerOnScreen(QWidget &window);

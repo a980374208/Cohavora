@@ -782,6 +782,8 @@ void AudioStatsPreserveAvailabilityDeltasResetsAndStaleness() {
     });
     context.run_for(100ms);
     TEST_CHECK(stale);
+    TEST_CHECK(stale->stats_stale_after_ms > 0);
+    TEST_CHECK(stale->runtime_stale_after_ms > 0);
     TEST_CHECK(stale->audio_quality_availability == Availability::Stale);
     TEST_CHECK(stale->audio_concealment_availability == Availability::Stale);
     TEST_CHECK(stale->audio_jitter_buffer_availability == Availability::Stale);
@@ -1553,6 +1555,216 @@ void ReconnectTimeoutPreservesRecoveredMedia() {
     TEST_CHECK(snapshot->reconnect_render_availability == Availability::Valid);
     TEST_CHECK(snapshot->last_reconnect_stable_render_ms == 600);
     TEST_CHECK(snapshot->last_reconnect_render_interruption_ms == 700);
+}
+
+void RenderIntervalsKeepRealBoundaries() {
+    using namespace livekit::diagnostic;
+    constexpr auto session = "0123456789abcdef0123456789abcdef";
+    auto pipeline = std::make_shared<DiagnosticPipeline>();
+    InstallBusinessPipeline(pipeline);
+    asio::io_context context;
+    auto strand = asio::make_strand(context);
+    const auto base = Event::Clock::now();
+    auto telemetry = std::make_shared<SessionTelemetry>(strand, 902, 128, base, std::shared_ptr<void>{}, session);
+    TEST_CHECK(telemetry->StartOperation(OperationKind::Admission, "admission", base, session) == session);
+    TEST_CHECK(telemetry->StartOperation(OperationKind::Admission, "admission", base, "unsafe-id").empty());
+    auto probe = std::make_shared<livekit::telemetry::RenderActivityProbe>();
+    const auto drain = [&] { context.restart(); context.run(); };
+    const auto observe = [&](auto at) {
+        context.restart(); asio::post(strand, [&, at] { telemetry->SnapshotOnStrand(at); }); context.run();
+    };
+    TEST_CHECK(telemetry->RegisterRemoteVideoRenderBinding("stall/p/t", 9, 1, base,
+        true, true, 33ms, probe, base)); drain();
+    TEST_CHECK(telemetry->RecordRemoteVideoRenderSubmit("stall/p/t", 9, 1, 1, base,
+        "qt_cpu_submit", probe, base)); drain();
+    observe(base + 800ms);
+    observe(base + 900ms); // opening is deduplicated
+    auto entries = pipeline->RecentTimeline(session, 902).events;
+    TEST_CHECK(std::count_if(entries.begin(), entries.end(), [](const auto& e) {
+        return e.kind == livekit::diagnostic::EventKind::RenderStallInterval && e.stall_boundary == StallBoundary::Open;
+    }) == 1);
+    TEST_CHECK(telemetry->RecordRemoteVideoRenderSubmit("stall/p/t", 9, 1, 2, base,
+        "qt_cpu_submit", probe, base + 1s)); drain();
+    const auto us = [](auto p) { return std::chrono::duration_cast<std::chrono::microseconds>(p.time_since_epoch()).count(); };
+    entries = pipeline->RecentTimeline(session, 902).events;
+    auto recovered = std::find_if(entries.begin(), entries.end(), [](const auto& e) {
+        return e.kind == livekit::diagnostic::EventKind::RenderStallInterval && e.stall_boundary == StallBoundary::Recovered;
+    });
+    TEST_CHECK(recovered != entries.end());
+    TEST_CHECK(recovered->interval_begin_us == us(base + 500ms));
+    TEST_CHECK(recovered->interval_end_us == us(base + 1s));
+    TEST_CHECK(recovered->binding_epoch == 1 && recovered->context.room_generation == 9);
+    TEST_CHECK(!telemetry->RecordRemoteVideoRenderSubmit("stall/p/t", 9, 1, 2, base,
+        "qt_cpu_submit", probe, base + 2s)); // duplicate token cannot fabricate another interval
+    TEST_CHECK(telemetry->SetRemoteVideoRenderExpected("stall/p/t", 9, 1, probe, false,
+        livekit::telemetry::MediaExpectationReason::SurfaceHidden, base + 2s)); drain();
+    entries = pipeline->RecentTimeline(session, 902).events;
+    auto hidden = std::find_if(entries.begin(), entries.end(), [](const auto& e) {
+        return e.kind == livekit::diagnostic::EventKind::RenderStallInterval && e.stall_boundary == StallBoundary::Hidden;
+    });
+    TEST_CHECK(hidden != entries.end() && hidden->interval_begin_us == us(base + 1500ms));
+    TEST_CHECK(hidden->interval_end_us == us(base + 2s));
+    TEST_CHECK(std::count_if(entries.begin(), entries.end(), [](const auto& e) {
+        return e.kind == livekit::diagnostic::EventKind::MediaFirstObserved;
+    }) == 1);
+    TEST_CHECK(std::all_of(entries.begin(), entries.end(), [&](const auto& e) {
+        return e.context.parent_operation_id.View() == session;
+    }));
+    const auto before = entries.size();
+    observe(base + 10s);
+    TEST_CHECK(pipeline->RecentTimeline(session, 902).events.size() == before);
+    TEST_CHECK(pipeline->RecentTimeline(session, 903).events.empty());
+    auto replacement = std::make_shared<livekit::telemetry::RenderActivityProbe>();
+    TEST_CHECK(telemetry->RegisterRemoteVideoRenderBinding("stall/p/t", 10, 2, base,
+        true, false, 33ms, replacement, base + 11s)); drain();
+    TEST_CHECK(!telemetry->RecordRemoteVideoRenderSubmit("stall/p/t", 9, 1, 3, base,
+        "qt_cpu_submit", probe, base + 12s));
+    TEST_CHECK(telemetry->RecordRemoteVideoRenderSubmit("stall/p/t", 10, 2, 1, base,
+        "qt_cpu_submit", replacement, base + 12s)); drain();
+    TEST_CHECK(telemetry->RecordRemoteVideoRenderSubmit("stall/p/t", 10, 2, 2, base,
+        "qt_cpu_submit", replacement, base + 14s)); drain();
+    observe(base + 16s);
+    entries = pipeline->RecentTimeline(session, 902).events;
+    TEST_CHECK(std::none_of(entries.begin(), entries.end(), [](const auto& e) {
+        return e.kind == livekit::diagnostic::EventKind::RenderStallInterval && e.binding_epoch == 2;
+    }));
+    auto continuous = std::make_shared<livekit::telemetry::RenderActivityProbe>();
+    TEST_CHECK(telemetry->RegisterRemoteVideoRenderBinding("stall/p/t", 10, 3, base,
+        true, true, 33ms, continuous, base + 17s)); drain();
+    TEST_CHECK(telemetry->RecordRemoteVideoRenderSubmit("stall/p/t", 10, 3, 1, base,
+        "qt_cpu_submit", continuous, base + 18s)); drain();
+    auto next = std::make_shared<livekit::telemetry::RenderActivityProbe>();
+    TEST_CHECK(telemetry->RegisterRemoteVideoRenderBinding("stall/p/t", 11, 4, base,
+        true, true, 33ms, next, base + 20s)); drain();
+    entries = pipeline->RecentTimeline(session, 902).events;
+    auto rebound = std::find_if(entries.begin(), entries.end(), [](const auto& e) {
+        return e.kind == livekit::diagnostic::EventKind::RenderStallInterval && e.stall_boundary == StallBoundary::Rebound;
+    });
+    TEST_CHECK(rebound != entries.end() && rebound->interval_begin_us == us(base + 18500ms));
+    TEST_CHECK(rebound->interval_end_us == us(base + 20s));
+    // An independent binding uses real past time so Stop's actual timestamp
+    // must terminate its open interval and reject any later producer submit.
+    auto stopping = std::make_shared<livekit::telemetry::RenderActivityProbe>();
+    const auto past = Event::Clock::now() - 2s;
+    TEST_CHECK(telemetry->RegisterRemoteVideoRenderBinding("stall/p/stop", 11, 5, past,
+        true, true, 33ms, stopping, past)); drain();
+    TEST_CHECK(telemetry->RecordRemoteVideoRenderSubmit("stall/p/stop", 11, 5, 1, past,
+        "qt_cpu_submit", stopping, past)); drain();
+    context.restart(); asio::post(strand, [telemetry] { telemetry->StopOnStrand(); }); context.run();
+    entries = pipeline->RecentTimeline(session, 902).events;
+    auto stopped = std::find_if(entries.begin(), entries.end(), [](const auto& e) {
+        return e.kind == livekit::diagnostic::EventKind::RenderStallInterval && e.stall_boundary == StallBoundary::Stopped;
+    });
+    TEST_CHECK(stopped != entries.end() && stopped->binding_epoch == 5);
+    TEST_CHECK(stopped->interval_begin_us == us(past + 500ms));
+    TEST_CHECK(stopped->interval_end_us > stopped->interval_begin_us);
+    TEST_CHECK(!telemetry->RecordRemoteVideoRenderSubmit("stall/p/stop", 11, 5, 2, past,
+        "qt_cpu_submit", stopping, Event::Clock::now()));
+    InstallBusinessPipeline({});
+}
+
+void RenderWindowsRespectScopeAndActualTime() {
+    asio::io_context context;
+    auto strand = asio::make_strand(context);
+    auto telemetry = std::make_shared<SessionTelemetry>(strand, 901, 128);
+    SessionTelemetry::SnapshotPtr snapshot;
+    const auto base = Event::Clock::now();
+    auto probe = std::make_shared<livekit::telemetry::RenderActivityProbe>(true);
+    const auto read = [&](Event::Clock::time_point time) {
+        context.restart();
+        asio::post(strand, [&] { snapshot = telemetry->SnapshotOnStrand(time); });
+        context.run();
+    };
+    TEST_CHECK(telemetry->RegisterRemoteVideoRenderBinding(
+        "window/p/t", 9, 1, base, true, true, 33ms, probe, base));
+    context.run();
+    read(base + 2s);
+    TEST_CHECK(snapshot->render_window_availability == Availability::WarmingUp);
+    probe->unique_submits.store(30);
+    probe->interval_histogram[2].store(29);
+    (*probe->fine_interval_histogram)[33].store(29);
+    read(base + 3s);
+    TEST_CHECK(snapshot->render_window_availability == Availability::Valid);
+    TEST_CHECK(snapshot->render_window_submit_fps == 30);
+    TEST_CHECK(snapshot->render_window_submits == 30);
+    TEST_CHECK(snapshot->render_window_interval_histogram[2] == 29);
+    TEST_CHECK(snapshot->render_window_fine_interval_histogram[33] == 29);
+    const auto epoch = snapshot->render_window_scope_epoch;
+    const auto end = snapshot->render_window_end;
+    read(base + 3500ms);
+    TEST_CHECK(snapshot->render_window_end == end); // no resampling at UI publication rate
+    read(base + 5s);
+    TEST_CHECK(snapshot->render_window_submit_fps == 0);
+    TEST_CHECK(snapshot->render_window_end - snapshot->render_window_begin == 2s);
+    probe->unique_submits.store(2);
+    probe->interval_histogram[2].store(1);
+    (*probe->fine_interval_histogram)[33].store(1);
+    read(base + 6s);
+    TEST_CHECK(snapshot->render_window_availability == Availability::Invalid);
+    TEST_CHECK(snapshot->render_window_scope_epoch > epoch);
+    TEST_CHECK(snapshot->render_window_submit_fps < 0);
+    probe->unique_submits.store(12);
+    read(base + 8s);
+    TEST_CHECK(snapshot->render_window_submit_fps == 5);
+    read(base + 7s);
+    TEST_CHECK(snapshot->render_window_availability == Availability::Invalid);
+    TEST_CHECK(snapshot->render_window_reason == "render_window_time_regressed");
+
+    // Hide then show inside one drain: identical final membership must still split.
+    const auto before_toggle = snapshot->render_window_scope_epoch;
+    TEST_CHECK(telemetry->SetRemoteVideoRenderExpected("window/p/t", 9, 1, probe, false,
+        livekit::telemetry::MediaExpectationReason::SurfaceHidden, base + 9s));
+    TEST_CHECK(telemetry->SetRemoteVideoRenderExpected("window/p/t", 9, 1, probe, true,
+        livekit::telemetry::MediaExpectationReason::SurfaceVisible, base + 10s));
+    context.restart(); context.run();
+    read(base + 12s);
+    TEST_CHECK(snapshot->render_window_scope_epoch > before_toggle);
+    const auto before_replace = snapshot->render_window_scope_epoch;
+    auto replacement = std::make_shared<livekit::telemetry::RenderActivityProbe>();
+    TEST_CHECK(telemetry->RegisterRemoteVideoRenderBinding(
+        "window/p/t", 10, 2, base, true, false, 33ms, replacement, base + 13s));
+    context.restart(); context.run();
+    read(base + 14s);
+    TEST_CHECK(snapshot->render_window_scope_epoch > before_replace);
+    TEST_CHECK(snapshot->render_window_availability == Availability::NotExpected);
+    TEST_CHECK(snapshot->render_window_bindings == 0); // static excluded
+    TEST_CHECK(snapshot->render_window_fine_interval_histogram.empty());
+    auto one = std::make_shared<livekit::telemetry::RenderActivityProbe>(true);
+    auto two = std::make_shared<livekit::telemetry::RenderActivityProbe>();
+    TEST_CHECK(telemetry->RegisterRemoteVideoRenderBinding(
+        "window/p/one", 10, 3, base, true, true, 33ms, one, base + 15s));
+    TEST_CHECK(telemetry->RegisterRemoteVideoRenderBinding(
+        "window/p/two", 10, 4, base, true, true, 33ms, two, base + 15s));
+    context.restart(); context.run();
+    one->unique_submits.store(1); two->unique_submits.store(1);
+    read(base + 16s);
+    one->unique_submits.store(31); two->unique_submits.store(21);
+    one->interval_histogram[2].store(30); two->interval_histogram[3].store(20);
+    (*one->fine_interval_histogram)[33].store(30);
+    read(base + 17s);
+    TEST_CHECK(snapshot->render_window_bindings == 2);
+    TEST_CHECK(snapshot->render_window_submit_fps == 50); // sum, not per-binding average
+    TEST_CHECK(snapshot->render_window_fine_bindings == 1);
+    TEST_CHECK(snapshot->render_window_interval_histogram[2] == 30);
+    TEST_CHECK(snapshot->render_window_interval_histogram[3] == 20);
+    TEST_CHECK(snapshot->render_window_fine_interval_histogram[33] == 30);
+    const auto backend_epoch = snapshot->render_window_scope_epoch;
+    livekit::telemetry::RenderPipelineSample backend;
+    backend.actual_backend = "dx11";
+    TEST_CHECK(telemetry->RecordRenderPipelineSample(backend, base + 18s));
+    backend.actual_backend = "qt-cpu";
+    TEST_CHECK(telemetry->RecordRenderPipelineSample(backend, base + 18s));
+    context.restart(); context.run();
+    read(base + 19s);
+    TEST_CHECK(snapshot->render_window_scope_epoch > backend_epoch);
+    context.restart();
+    asio::post(strand, [&] {
+        telemetry->StopOnStrand();
+        snapshot = telemetry->SnapshotOnStrand(base + 20s);
+    });
+    context.run();
+    TEST_CHECK(snapshot->render_window_availability == Availability::NotExpected);
+    TEST_CHECK(snapshot->render_window_bindings == 0);
 }
 
 void RenderSubmitDedupesAndExcludesHiddenIntervals() {
@@ -2671,6 +2883,8 @@ void FifthBatchProductChainsAndDensitiesAreDeterministic() {
 } // namespace
 
 int main() {
+    RenderIntervalsKeepRealBoundaries();
+    RenderWindowsRespectScopeAndActualTime();
     BoundedQueueAndStopBarrier();
     GenerationEpochAndOperationLedger();
     TypedOperationRaceAndConvenienceApi();

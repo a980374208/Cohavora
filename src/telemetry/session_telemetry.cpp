@@ -407,11 +407,16 @@ bool SessionTelemetry::Submit(Event event) {
 std::string SessionTelemetry::StartOperation(
     OperationKind kind,
     std::string id_prefix,
-    Clock::time_point source_time) {
+    Clock::time_point source_time,
+    std::string correlation_id) {
     if (kind == OperationKind::Unknown) return {};
+    if (!correlation_id.empty() && (correlation_id.size() != 32 ||
+        !std::all_of(correlation_id.begin(), correlation_id.end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        }))) return {};
     if (id_prefix.empty()) id_prefix = OperationKindName(kind);
-    const auto id = id_prefix + ":" + std::to_string(session_generation_) + ":" +
-        std::to_string(next_operation_id_.fetch_add(1, std::memory_order_relaxed));
+    const auto id = correlation_id.empty() ? id_prefix + ":" + std::to_string(session_generation_) + ":" +
+        std::to_string(next_operation_id_.fetch_add(1, std::memory_order_relaxed)) : std::move(correlation_id);
     Event event;
     event.kind = EventKind::OperationStarted;
     event.session_generation = session_generation_;
@@ -646,13 +651,15 @@ bool SessionTelemetry::SetRemoteVideoRenderExpected(
     const bool previous = probe->expected.exchange(
         expected_render, std::memory_order_acq_rel);
     probe->expectation_reason.store(reason, std::memory_order_release);
+    std::int64_t previous_submit_ns = 0;
     if (previous != expected_render) {
         // The interval while a surface is hidden or minimized is outside the
         // render-stall denominator and cannot bridge two visible intervals.
-        probe->last_submit_ns.store(0, std::memory_order_release);
+        previous_submit_ns = probe->last_submit_ns.exchange(0, std::memory_order_acq_rel);
     }
     Event event;
     event.kind = EventKind::RemoteVideoRenderExpectation;
+    event.related_time = Clock::time_point(std::chrono::nanoseconds(previous_submit_ns));
     event.session_generation = session_generation_;
     event.series_key = std::move(series_key);
     event.room_generation = room_generation;
@@ -674,7 +681,7 @@ bool SessionTelemetry::RecordRemoteVideoRenderSubmit(
     std::shared_ptr<RenderActivityProbe> probe,
     Clock::time_point source_time) {
     if (series_key.empty() || room_generation == 0 || binding_epoch == 0 ||
-        frame_token == 0 || !probe ||
+        frame_token == 0 || !probe || !accepting_.load(std::memory_order_acquire) ||
         !probe->active.load(std::memory_order_acquire) ||
         !probe->expected.load(std::memory_order_acquire)) {
         return false;
@@ -716,6 +723,16 @@ bool SessionTelemetry::RecordRemoteVideoRenderSubmit(
                 probe->closed_stall_duration_ns.fetch_add(
                     stall, std::memory_order_relaxed);
                 AtomicMaximum(probe->longest_stall_duration_ns, stall);
+                Event interval_event;
+                interval_event.kind = EventKind::RemoteVideoRenderStall;
+                interval_event.session_generation = session_generation_;
+                interval_event.series_key = series_key;
+                interval_event.room_generation = room_generation;
+                interval_event.binding_epoch = binding_epoch;
+                interval_event.render_probe = probe;
+                interval_event.related_time = Clock::time_point(std::chrono::nanoseconds(previous_ns + threshold));
+                interval_event.source_time = source_time;
+                Submit(std::move(interval_event)); // queue loss is counted by Submit
             }
         }
     }
@@ -1157,6 +1174,7 @@ void SessionTelemetry::StopOnStrand(std::function<void()> on_stopped) {
 SessionTelemetry::SnapshotPtr SessionTelemetry::SnapshotOnStrand(Clock::time_point now) {
     AssertOnStrand();
     UpdateRenderAvailabilityOnStrand(now);
+    UpdateRenderWindowOnStrand(now);
     UpdateLocalPublishAvailabilityOnStrand(now);
     UpdateLocalDeviceStatsOnStrand(now);
     const auto build_started_at = Clock::now();
@@ -1435,6 +1453,7 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         ++summary->inflight;
         if (event.operation_kind == OperationKind::Admission) {
             latest_admission_accepted_at_ = event.source_time;
+            latest_admission_operation_id_ = event.operation_id;
             state_.admission_to_usable_availability = Availability::WarmingUp;
             state_.admission_to_usable_reason = "waiting_for_startup_terminal";
             state_.admission_to_usable_ms = -1;
@@ -1674,6 +1693,8 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             media->second.first_frame_seen = true;
             media->second.first_frame_at = event.source_time;
             ++state_.remote_video_first_frames;
+            EmitFirstObservationOnStrand(diagnostic::MediaObservation::FirstDecoded,
+                media->second.endpoint_id, event.room_generation, event.binding_epoch, event.source_time);
             state_.remote_video_first_frame_availability = Availability::Valid;
             state_.remote_video_first_frame_reason = "decoded_frame_received";
             state_.last_decoded_width = event.frame_width;
@@ -1805,6 +1826,8 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             media->second.first_frame_seen = true;
             media->second.first_frame_at = event.source_time;
             ++state_.remote_audio_first_frames;
+            EmitFirstObservationOnStrand(diagnostic::MediaObservation::FirstPcm,
+                media->second.endpoint_id, event.room_generation, event.binding_epoch, event.source_time);
             state_.last_audio_sample_rate = event.sample_rate;
             state_.last_audio_channels = event.channels;
             if (media->second.subscription_accepted != Clock::time_point{} &&
@@ -1860,9 +1883,19 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             break;
         }
         if (found != render_media_.end() && found->second.probe) {
+            auto& old = found->second;
+            const auto last = old.probe->last_submit_ns.load(std::memory_order_acquire);
+            const auto threshold = std::chrono::nanoseconds((std::max)(std::int64_t{500000000}, old.probe->target_interval_ns * 3));
+            const auto begin = old.open_stall_begin != Clock::time_point{} ? old.open_stall_begin :
+                old.expected_render && old.continuous_video && last > 0
+                    ? Clock::time_point(std::chrono::nanoseconds(last)) + threshold : Clock::time_point{};
+            if (begin != Clock::time_point{} && event.source_time > begin)
+                EmitRenderStallOnStrand(old, begin,
+                    event.source_time, diagnostic::StallBoundary::Rebound, event.source_time);
             found->second.probe->active.store(false, std::memory_order_release);
         }
         RenderState render;
+        render_window_scope_dirty_ = true;
         render.room_generation = event.room_generation;
         render.binding_epoch = event.binding_epoch;
         render.endpoint_id = std::string(diagnostic::NewCorrelationId().View());
@@ -1888,7 +1921,15 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             break;
         }
         auto& render = media->second;
+        if (!event.expected && render.expected_render && render.continuous_video) {
+            const auto threshold = std::chrono::nanoseconds((std::max)(std::int64_t{500000000}, render.probe->target_interval_ns * 3));
+            const auto begin = render.open_stall_begin != Clock::time_point{} ? render.open_stall_begin :
+                event.related_time == Clock::time_point{} ? Clock::time_point{} : event.related_time + threshold;
+            if (begin != Clock::time_point{} && event.source_time > begin)
+                EmitRenderStallOnStrand(render, begin, event.source_time, diagnostic::StallBoundary::Hidden, event.source_time);
+        }
         if (render.expected_render != event.expected) {
+            render_window_scope_dirty_ = true;
             if (render.expected_render && render.expected_since != Clock::time_point{} &&
                 event.source_time >= render.expected_since) {
                 render.expected_accumulated += event.source_time - render.expected_since;
@@ -1914,6 +1955,18 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         UpdateRenderAvailabilityOnStrand(event.source_time);
         break;
     }
+    case EventKind::RemoteVideoRenderStall: {
+        const auto found = render_media_.find(event.series_key);
+        if (found == render_media_.end() || found->second.room_generation != event.room_generation ||
+            found->second.binding_epoch != event.binding_epoch || found->second.probe != event.render_probe ||
+            !found->second.probe || !found->second.probe->active.load(std::memory_order_acquire)) {
+            ++state_.stale_render_binding_drops;
+            break;
+        }
+        EmitRenderStallOnStrand(found->second, event.related_time, event.source_time,
+            diagnostic::StallBoundary::Recovered, event.source_time);
+        break;
+    }
     case EventKind::RemoteVideoRenderSubmit: {
         const auto media = render_media_.find(event.series_key);
         if (media == render_media_.end() ||
@@ -1927,6 +1980,8 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         auto& render = media->second;
         if (!render.first_submit_seen) {
             render.first_submit_seen = true;
+            EmitFirstObservationOnStrand(diagnostic::MediaObservation::FirstRender,
+                render.endpoint_id, event.room_generation, event.binding_epoch, event.source_time);
             state_.render_first_frame_availability = Availability::Valid;
             state_.render_first_frame_reason = "first_unique_frame_submitted";
             state_.render_first_frame_measurement_point = event.measurement_point;
@@ -2119,6 +2174,8 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             sample.rejected_track_attachments;
         state_.render_attached_track_count = sample.attached_track_count;
         state_.render_requested_backend = sample.requested_backend;
+        if (state_.render_actual_backend != sample.actual_backend)
+            render_window_scope_dirty_ = true;
         state_.render_actual_backend = sample.actual_backend;
         state_.render_gpu_failure = sample.gpu_failure;
         state_.render_fallback_reason = sample.fallback_reason;
@@ -2334,6 +2391,178 @@ void SessionTelemetry::ReconcileAudioQualityExpectationOnStrand(
     state_.audio_jitter_buffer_reason = reason;
     state_.audio_time_stretch_availability = availability;
     state_.audio_time_stretch_reason = reason;
+}
+
+void SessionTelemetry::EmitFirstObservationOnStrand(diagnostic::MediaObservation observation,
+    const std::string& endpoint, std::uint64_t room, std::uint64_t binding, Clock::time_point at) {
+    AssertOnStrand();
+    const auto pipeline = diagnostic::InstalledBusinessPipeline();
+    if (!pipeline) return;
+    diagnostic::Event e;
+    e.kind = diagnostic::EventKind::MediaFirstObserved;
+    e.thread_role = diagnostic::ThreadRole::Session;
+    e.context.anonymous_session_id.Assign(anonymous_session_id_);
+    e.context.operation_id.Assign(endpoint);
+    e.context.parent_operation_id.Assign(recovery_.active ? recovery_.operation_id : latest_admission_operation_id_);
+    e.context.session_generation = session_generation_; e.context.has_session_generation = true;
+    e.context.room_generation = room; e.context.has_room_generation = true;
+    e.context.recovery_epoch = recovery_.epoch; e.context.has_recovery_epoch = recovery_.epoch != 0;
+    e.media_endpoint_id.Assign(endpoint); e.binding_epoch = binding;
+    e.media_observation = observation;
+    e.media_kind = observation == diagnostic::MediaObservation::FirstPcm
+        ? diagnostic::MediaKind::Audio : diagnostic::MediaKind::Video;
+    e.source_monotonic_us = std::chrono::duration_cast<std::chrono::microseconds>(at.time_since_epoch()).count();
+    e.outcome = diagnostic::Outcome::Success;
+    if (!pipeline->TryEmit(e)) ++state_.render_timeline_event_drops;
+}
+
+void SessionTelemetry::EmitRenderStallOnStrand(RenderState& render, Clock::time_point begin,
+    Clock::time_point end, diagnostic::StallBoundary boundary, Clock::time_point observed) {
+    AssertOnStrand();
+    if (begin == Clock::time_point{} || begin <= render.last_closed_stall_begin ||
+        (boundary != diagnostic::StallBoundary::Open && end < begin)) return;
+    if (boundary == diagnostic::StallBoundary::Open && render.open_stall_begin == begin) return;
+    diagnostic::Event e;
+    e.kind = diagnostic::EventKind::RenderStallInterval;
+    e.thread_role = diagnostic::ThreadRole::Session;
+    e.context.anonymous_session_id.Assign(anonymous_session_id_);
+    e.context.operation_id.Assign(render.endpoint_id);
+    e.context.parent_operation_id.Assign(recovery_.active ? recovery_.operation_id : latest_admission_operation_id_);
+    e.context.session_generation = session_generation_; e.context.has_session_generation = true;
+    e.context.room_generation = render.room_generation; e.context.has_room_generation = true;
+    e.context.recovery_epoch = recovery_.epoch; e.context.has_recovery_epoch = recovery_.epoch != 0;
+    e.media_endpoint_id.Assign(render.endpoint_id); e.binding_epoch = render.binding_epoch;
+    e.media_kind = diagnostic::MediaKind::Video; e.stall_boundary = boundary;
+    const auto us = [](Clock::time_point p) { return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(p.time_since_epoch()).count()); };
+    e.source_monotonic_us = us(observed); e.interval_begin_us = us(begin);
+    e.interval_end_us = boundary == diagnostic::StallBoundary::Open ? 0 : us(end);
+    e.stall_threshold_us = (std::max)(std::int64_t{500000000}, render.probe->target_interval_ns * 3) / 1000;
+    if (const auto pipeline = diagnostic::InstalledBusinessPipeline(); pipeline && !pipeline->TryEmit(e))
+        ++state_.render_timeline_event_drops;
+    if (boundary == diagnostic::StallBoundary::Open) render.open_stall_begin = begin;
+    else { render.last_closed_stall_begin = begin; render.open_stall_begin = {}; }
+}
+
+void SessionTelemetry::ObserveRenderStallsOnStrand(Clock::time_point now) {
+    for (auto& [key, render] : render_media_) {
+        if (!render.probe || !render.continuous_video) continue;
+        const bool active = render.probe->active.load(std::memory_order_acquire);
+        const bool expected = render.expected_render && render.probe->expected.load(std::memory_order_acquire);
+        const auto last = render.probe->last_submit_ns.load(std::memory_order_acquire);
+        const auto threshold = std::chrono::nanoseconds((std::max)(std::int64_t{500000000}, render.probe->target_interval_ns * 3));
+        const auto observed = stopping_ ? session_stopped_at_ : now;
+        const auto begin = render.open_stall_begin != Clock::time_point{} ? render.open_stall_begin :
+            last > 0 ? Clock::time_point(std::chrono::nanoseconds(last)) + threshold : Clock::time_point{};
+        if (begin == Clock::time_point{} || observed <= begin) continue;
+        if (stopping_ || !active) {
+            EmitRenderStallOnStrand(render, begin, observed, stopping_ ? diagnostic::StallBoundary::Stopped :
+                diagnostic::StallBoundary::Inactive, observed);
+        } else if (expected && render.open_stall_begin == Clock::time_point{}) {
+            EmitRenderStallOnStrand(render, begin, {}, diagnostic::StallBoundary::Open, observed);
+        }
+    }
+}
+
+void SessionTelemetry::UpdateRenderWindowOnStrand(Clock::time_point now) {
+    AssertOnStrand();
+    ObserveRenderStallsOnStrand(now);
+    std::vector<RenderWindowBindingBaseline> current;
+    current.reserve(render_media_.size());
+    std::uint64_t expected = 0, fine_bindings = 0;
+    bool waiting = false;
+    for (const auto& [key, render] : render_media_) {
+        if (stopping_) break;
+        if (!render.probe || !render.probe->active.load(std::memory_order_acquire)) continue;
+        const auto& probe = *render.probe;
+        RenderWindowBindingBaseline item;
+        item.endpoint = render.endpoint_id;
+        item.room_generation = render.room_generation;
+        item.binding_epoch = render.binding_epoch;
+        item.expected = render.expected_render && probe.expected.load(std::memory_order_acquire);
+        item.continuous = render.continuous_video;
+        item.fine = bool(probe.fine_interval_histogram);
+        item.submits = probe.unique_submits.load(std::memory_order_relaxed);
+        for (std::size_t i = 0; i < item.histogram.size(); ++i)
+            item.histogram[i] = probe.interval_histogram[i].load(std::memory_order_relaxed);
+        if (item.expected && item.continuous) {
+            ++expected;
+            fine_bindings += item.fine ? 1 : 0;
+            waiting |= item.submits == 0;
+        }
+        current.push_back(std::move(item));
+    }
+    bool changed = render_window_scope_dirty_ || current.size() != render_window_baselines_.size()
+        || render_window_backend_ != state_.render_actual_backend;
+    bool regressed = false;
+    if (!changed) for (std::size_t i = 0; i < current.size(); ++i) {
+        const auto& a = current[i]; const auto& b = render_window_baselines_[i];
+        changed |= a.endpoint != b.endpoint || a.room_generation != b.room_generation
+            || a.binding_epoch != b.binding_epoch || a.expected != b.expected
+            || a.continuous != b.continuous || a.fine != b.fine;
+        regressed |= a.submits < b.submits;
+        for (std::size_t k = 0; k < a.histogram.size(); ++k)
+            regressed |= a.histogram[k] < b.histogram[k];
+    }
+    const bool initial = render_window_baseline_at_ == Clock::time_point{};
+    const bool reversed = !initial && now < render_window_baseline_at_;
+    if (!initial && !changed && !regressed && !reversed
+        && now - render_window_baseline_at_ < std::chrono::seconds(1)) return;
+
+    std::vector<std::uint64_t> fine;
+    if (fine_bindings) {
+        fine.resize(RenderActivityProbe::kFineIntervalHistogramBuckets);
+        for (const auto& [key, render] : render_media_) {
+            if (!render.probe || !render.probe->active.load(std::memory_order_acquire)
+                || !render.expected_render || !render.continuous_video
+                || !render.probe->expected.load(std::memory_order_acquire)
+                || !render.probe->fine_interval_histogram) continue;
+            for (std::size_t i = 0; i < fine.size(); ++i)
+                fine[i] += (*render.probe->fine_interval_histogram)[i].load(std::memory_order_relaxed);
+        }
+        if (!changed && fine.size() == render_window_fine_baseline_.size())
+            for (std::size_t i = 0; i < fine.size(); ++i)
+                regressed |= fine[i] < render_window_fine_baseline_[i];
+    }
+    const bool reset = initial || changed || regressed || reversed;
+    if (reset) ++state_.render_window_scope_epoch;
+    state_.render_window_begin = reset ? now : render_window_baseline_at_;
+    state_.render_window_end = now;
+    state_.render_window_bindings = expected;
+    state_.render_window_fine_bindings = fine_bindings;
+    state_.render_window_submits = 0;
+    state_.render_window_submit_fps = -1;
+    state_.render_window_interval_histogram.fill(0);
+    state_.render_window_fine_interval_histogram.clear();
+    state_.render_window_availability = !expected ? Availability::NotExpected
+        : reversed || regressed ? Availability::Invalid
+        : reset || waiting ? Availability::WarmingUp : Availability::Valid;
+    state_.render_window_reason = !expected ? "no_expected_continuous_render_binding"
+        : reversed ? "render_window_time_regressed"
+        : regressed ? "render_window_counter_regressed"
+        : reset ? "render_window_scope_changed"
+        : waiting ? "render_window_waiting_first_submit" : "render_window_valid";
+    if (state_.render_window_availability == Availability::Valid) {
+        for (std::size_t i = 0; i < current.size(); ++i) {
+            if (!current[i].expected || !current[i].continuous) continue;
+            state_.render_window_submits += current[i].submits - render_window_baselines_[i].submits;
+            for (std::size_t k = 0; k < current[i].histogram.size(); ++k)
+                state_.render_window_interval_histogram[k] +=
+                    current[i].histogram[k] - render_window_baselines_[i].histogram[k];
+        }
+        state_.render_window_submit_fps = state_.render_window_submits /
+            std::chrono::duration<double>(now - render_window_baseline_at_).count();
+        if (!fine.empty() && fine.size() == render_window_fine_baseline_.size()) {
+            state_.render_window_fine_interval_histogram.resize(fine.size());
+            for (std::size_t i = 0; i < fine.size(); ++i)
+                state_.render_window_fine_interval_histogram[i] = fine[i] - render_window_fine_baseline_[i];
+        }
+    }
+    render_window_baselines_ = std::move(current);
+    render_window_fine_baseline_ = std::move(fine);
+    render_window_baseline_at_ = now;
+    render_window_backend_ = state_.render_actual_backend;
+    render_window_scope_dirty_ = false;
 }
 
 void SessionTelemetry::UpdateRenderAvailabilityOnStrand(Clock::time_point now) {
@@ -5319,6 +5548,7 @@ void SessionTelemetry::FinalizeStopOnStrand() {
 void SessionTelemetry::PublishSnapshotOnStrand(Clock::time_point now) {
     AssertOnStrand();
     UpdateRenderAvailabilityOnStrand(now);
+    UpdateRenderWindowOnStrand(now);
     UpdateLocalPublishAvailabilityOnStrand(now);
     UpdateLocalDeviceStatsOnStrand(now);
     ++state_.revision;
@@ -5348,6 +5578,8 @@ void SessionTelemetry::PublishSnapshotOnStrand(Clock::time_point now) {
 Snapshot SessionTelemetry::BuildSnapshotOnStrand(Clock::time_point now) const {
     AssertOnStrand();
     Snapshot snapshot = state_;
+    snapshot.stats_stale_after_ms = stale_after_.count();
+    snapshot.runtime_stale_after_ms = runtime_stale_after_.count();
     snapshot.generated_at = now;
     snapshot.session_complete = stop_finalized_;
     snapshot.stats_in_flight = stats_in_flight_;
