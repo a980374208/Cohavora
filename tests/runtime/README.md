@@ -114,3 +114,33 @@ out/build/windows-vs2026-dev/Debug/test_participant_window_remediation.exe --mee
 Python fake peer 只用于秒级故障注入，所有结果强制 `l3_status=NOT_RUN`。
 协议 selftest 不创建真实会议、不打开摄像头、不捕获桌面。
 既有窗口生产控制仍由 `meeting_video_viewport_render_lease_test` 回归覆盖。
+
+## UIA 诊断采样边界
+
+常规资源／遥测采样使用原生 probe 和 OS 进程计数，不轮询 UIA 全树。
+仅在需要确认产品显示的检查点，使用 `uia_snapshot.py`：每次启动独立客户端，
+只查询明确指定的完整 AutomationId，以 cache-only 模式返回属性数据，正常退出后才返回结果。
+不会执行 Pattern 动作、等待控件出现、自动重试或回退为全树导出；缺失／重复控件明确失败。
+
+```powershell
+python tests/runtime/uia_snapshot.py --pid <测试产品PID> --start-ticks <UTC启动时间Ticks> `
+  --executable <测试产品绝对路径> --automation-id <完整AutomationId> --timeout 15
+```
+
+PID、可执行路径、UTC 启动 ticks 必须来自同一次测试进程的身份记录，不能仅按进程名查找。
+AutomationId 含限定前缀时需提供完整值；可复用启动检查时保存的 ID，不为每次采样重新发现全树。
+每次最多读取 16 个不同 ID，单值上限 4096 字符。默认超时 15 秒、最大 30 秒；超时仅终止本次
+工具启动的 UIA 子进程，不终止产品。结果包含客户端 PID、退出码和请求身份，不含其他控件树。
+同一产品身份（PID、启动时间及可执行路径）的检查尝试至少间隔 60 秒，CLI 与 Python 调用
+共享临时状态及文件锁；切换控件 ID 不会绕过限制。并发或过快调用直接拒绝，不等待、不自动重试，
+失败尝试也计入间隔。常规连续采样仍走原生 probe 和 OS 计数，UIA 仅用于显式低频显示检查。
+此前短时对照的 5 秒循环不是常规配置；UIA 激活仍可能产生少量系统缓存或影响产品吞吐。
+
+堆诊断驱动 `product_desktop.ps1 -HeapDiagnostic` 现在默认按周期启动独立 UIA 客户端；
+父驱动仍负责启动和结束产品，不把此改动等同于“父进程完全没有 UIA”。
+`Retest` 和正式验收配置保持原有调度。历史归因运行的脚本与指纹保持原样。
+
+验证：`python tests/runtime/test_uia_snapshot.py -v`；
+`python tests/runtime/test_uia_snapshot.py --desktop` 仅创建自有 WPF 窗口，核对两次独立读取、
+客户端退出、快速重复拒绝及身份不匹配拒绝；第二次读取通过推进测试时钟放行，不是实等
+60 秒的时间验收。不连接会议或启用媒体设备，也不替代产品长稳验收。

@@ -15,9 +15,13 @@ foreach ($name in @('Find-Node', 'Wait-Top', 'Require-Pattern', 'Invoke', 'Share
 }
 $script:child = [pscustomobject]@{Id=123;HasExited=$false}
 $script:nodes = @()
-function Get-Nodes {
+function Get-Nodes([switch]$TopLevel) {
+    if (!$TopLevel) { ++$script:fullTreeCalls }
     if ($script:missingLookups -gt 0) { --$script:missingLookups; return @() }
     $script:nodes
+}
+function Get-ProcessRoots {
+    foreach ($node in $script:nodes) { [pscustomobject]@{Current=$node.Current;Element=$node} }
 }
 function Get-LiveNode([string]$Id, $Role, [switch]$Optional) {
     # The fixture supplies a live node corresponding to the observed cached ID.
@@ -57,7 +61,9 @@ Assert ($script:resolvedId -eq 'owner.meetingLeave') 'Live lookup must use the e
 $script:nodes[0].State.Reads = 2
 Assert ($null -eq (Find-Node 'meetingLeave' $button -Optional)) 'Vanished ID should be absent on the next lookup'
 $script:nodes = @(Make-Node 'owner.MeetingRoomWindow' $window -Vanish)
+$script:fullTreeCalls=0
 Assert ($null -ne (Wait-Top 'MeetingRoomWindow')) 'Top-level lookup lost the captured identity'
+Assert ($script:fullTreeCalls -eq 0) 'Top-level wait must not enumerate descendants'
 Assert ($script:nodes[0].State.Reads -eq 1) 'Top-level identity was reread'
 $script:nodes = @(Make-Node 'meetingLeave' $button)
 Assert ($null -ne (Find-Node 'meetingLeave' $button)) 'Exact ID did not match'
@@ -98,4 +104,13 @@ try { Action 'share_stop' { Assert-ShareActive; Invoke 'meetingShareScreen' }; t
 catch { if ($_.Exception.Message -ne 'SCREEN_SHARE_LOST_DURING_ACTIVE_WINDOW') { throw } }
 Assert ($script:records.Count -eq 1 -and $script:records[0] -eq 'requested') 'Lost share recorded successful observation'
 Assert ($script:invocations -eq 1) 'Lost share submitted another command'
+$definition=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-Nodes'},$true)
+Invoke-Expression $definition.Extent.Text
+function Get-ProcessRoots {
+    $element=[pscustomobject]@{Current=[pscustomobject]@{AutomationId='fixture'}}
+    $element | Add-Member ScriptMethod FindAll { throw 'DESCENDANT_SCAN_FORBIDDEN' }
+    [pscustomobject]@{Current=$element.Current;Element=$element}
+}
+Assert (@(Get-Nodes -TopLevel).Count -eq 1) 'Cache-only window lookup entered descendants'
+Assert (@(Get-Nodes -TopLevel -Live).Count -eq 1) 'Live window lookup entered descendants'
 Write-Output 'PASS: identity, role, Pattern, single-invocation recovery, active-share projection and failure-stop contracts'

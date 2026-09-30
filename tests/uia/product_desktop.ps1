@@ -81,6 +81,9 @@ if ($HeapPageCheck -and (!$HeapDiagnostic -or $HeapCheckOnly)) { throw 'PAGE_CHE
 if ($CrashDiagnostic -and (!$HeapDiagnostic -or $HeapCheckOnly -or $HeapPageCheck)) { throw 'CRASH_DIAGNOSTIC_REQUIRES_EXCLUSIVE_MODE' }
 if ($IsolateUiaCycles -and !$HeapDiagnostic) {throw 'ISOLATED_CLIENT_EXPERIMENT_REQUIRES_DIAGNOSTIC'}
 if ($HeapDiagnostic) {
+    # Diagnostics must not retain one querying UIA client across all cycles.
+    # Keep the public switch for older callers, but isolation is now the default.
+    $IsolateUiaCycles = $true
     if (!$Pilot -or $ProbeOnly) { throw 'HEAP_DIAGNOSTIC_REQUIRES_PILOT' }
     . (Join-Path $PSScriptRoot '../runtime/product_heap_diagnostic.ps1')
 }
@@ -182,7 +185,7 @@ function Get-ProcessRoots {
     }
     $script:rootCache = $next
 }
-function Get-Nodes([switch]$Live) {
+function Get-Nodes([switch]$Live, [switch]$TopLevel) {
     if (!$script:child) { throw "Product missing during $script:step" }
     if ($script:child.HasExited) {
         throw "PROCESS_EXIT: $script:step code=$($script:child.ExitCode)"
@@ -194,12 +197,14 @@ function Get-Nodes([switch]$Live) {
             $nodes = foreach ($root in Get-ProcessRoots) {
                 if ($Live) {
                     $root.Element
+                    if ($TopLevel) { continue }
                     $root.Element.FindAll([Windows.Automation.TreeScope]::Descendants, $condition)
                 } else {
                     # Full FindAll results create native UiaNode references in
                     # the product that survive managed client GC. Tree-only
                     # discovery needs immutable property data, not live nodes.
                     [pscustomobject]@{Current=$root.Current}
+                    if ($TopLevel) { continue }
                     $scope = (New-TreeCacheRequest).Activate()
                     try { $children = $root.Element.FindAll([Windows.Automation.TreeScope]::Descendants, $condition) }
                     finally { $scope.Dispose() }
@@ -238,7 +243,9 @@ function Get-LiveNode([string]$Id, [Windows.Automation.ControlType]$Role, [switc
         [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::AutomationIdProperty,$Id))
     $matches = @(foreach ($root in Get-ProcessRoots) {
         if ($root.Current.AutomationId -eq $Id) { $root.Element }
-        $root.Element.FindAll([Windows.Automation.TreeScope]::Descendants,$condition)
+        if ($Role -ne [Windows.Automation.ControlType]::Window) {
+            $root.Element.FindAll([Windows.Automation.TreeScope]::Descendants,$condition)
+        }
     })
     if ($Optional -and !$matches.Count) { return $null }
     if ($matches.Count -ne 1) { throw "CONTROL_COUNT: $Id=$($matches.Count) pid=$($script:child.Id)" }
@@ -250,7 +257,12 @@ function Get-LiveNode([string]$Id, [Windows.Automation.ControlType]$Role, [switc
 }
 function Find-Node([string]$Id, [Windows.Automation.ControlType]$Role, [switch]$Optional) {
     $script:step = "discover $Id"
-    $matches = @(foreach ($node in Get-Nodes) {
+    # Dialog/window waits need only this process's top-level windows. Do not
+    # enumerate every descendant once per polling iteration for these checks.
+    $candidates = if ($Role -eq [Windows.Automation.ControlType]::Window) {
+        @(Get-Nodes -TopLevel)
+    } else { @(Get-Nodes) }
+    $matches = @(foreach ($node in $candidates) {
         try {
             $c = $node.Current
             $automationId = [string]$c.AutomationId
@@ -274,14 +286,10 @@ function Wait-For([string]$Description, [scriptblock]$Condition, [int]$Seconds =
     do {
         if ($script:child.HasExited) { throw "PROCESS_EXIT: $Description code=$($script:child.ExitCode)" }
         if (!$ProbeOnly) {
-            $notice = New-Object Windows.Automation.AndCondition(
-                (New-Object Windows.Automation.PropertyCondition(
-                    [Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$script:child.Id)),
-                (New-Object Windows.Automation.PropertyCondition(
-                    [Windows.Automation.AutomationElement]::AutomationIdProperty, 'meetingDepartureNotice')))
             try {
-                $departure = @(Get-Nodes | Where-Object {
-                    $_.Current.AutomationId -eq 'meetingDepartureNotice' })
+                $departure = @(Get-ProcessRoots | Where-Object {
+                    $id=[string]$_.Current.AutomationId
+                    $id -eq 'meetingDepartureNotice' -or $id.EndsWith('.meetingDepartureNotice',[StringComparison]::Ordinal) })
             } catch {
                 if ($script:child.HasExited) {
                     throw "PROCESS_EXIT: $Description code=$($script:child.ExitCode)"
@@ -660,6 +668,7 @@ function Stop-Product {
         Sample-Resource 'final_exit'
 }
 function Run-IsolatedCycle {
+    $script:rootCache = @{}
     $directory=Join-Path $OutputDirectory 'cycle-workers'
     $null=New-Item -ItemType Directory -Path $directory -Force
     $prefix=Join-Path $directory ('cycle-{0:d4}' -f $script:cycle)

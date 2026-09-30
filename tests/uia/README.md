@@ -484,6 +484,15 @@ Known Folder 或 HKCU QSettings；应使用专用 Windows 账户。原始诊断�
 
 长时间使用实时 `FindAll` 遍历会在产品进程中累积 UIAutomationCore 的原生节点。实测客户端 GC 不释放这部分引用，客户端退出才释放。当前驱动用 `CacheRequest` 的 `AutomationElementMode.None` 取得树属性，只为实际操作取得实时控件；窗口根节点每次重新按 PID、窗口句柄及 UIA RuntimeId 核对。控件按本次观察到的完整 AutomationId 再定位，重复、错误角色、缺失 Pattern 仍明确失败。`Invoke` 只在提交前等待控件发现，不重试已提交动作。
 
+2026-09-30 诊断端收敛：`HeapDiagnostic` 默认启用已有的周期客户端隔离，不再依赖手动传入
+`IsolateUiaCycles`；每个工作进程完成一个周期后退出，保留已有身份核对和 600 秒上限。
+窗口／离会提示等待仅检查 PID 所属顶层窗口；操作控件的限定 ID 发现和显式证据树仍保留，
+不将完整控件树用于日常资源采样。只读显示检查使用
+[`uia_snapshot.py`](../runtime/uia_snapshot.py) 的独立短寿命客户端，同一产品身份的尝试至少
+间隔 60 秒（失败也计入，CLI 与 Python 共享限制），详见运行工具 README。
+常规遥测和资源采样走原生 probe 与 OS 进程计数，不用该工具连续轮询显示。
+退出并不保证全部系统分配归零：此前三轮残留仍小幅增长，不能宣称根因完全修复。
+
 诊断示例（仍必须使用全新输出目录）：
 
 ```powershell
