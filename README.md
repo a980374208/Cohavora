@@ -75,9 +75,25 @@ Cohavora 提供桌面会议界面，也提供可单独运行的命令行示例�
 
 ## 快速开始
 
-以下命令在 **Visual Studio 2026 的 Developer PowerShell** 中执行。先完成编译，再按下一节配置会议连接。
+可选择 [AI 分步引导](#方式一ai-辅助构建) 或 [手动编译](#方式二手动编译)。完成构建后，参阅[加入第一场会议](#加入第一场会议)配置服务连接。
 
-### 1. 准备工具
+### 方式一：AI 辅助构建
+
+适合首次配置 Windows 构建环境，或需要协助诊断工具链与依赖问题的开发者。
+
+1. 打开 <a href="build/prompts/windows-build-assistant.txt" target="_blank" rel="noopener noreferrer">Windows 环境部署与构建提示词（新页面）</a>，复制全文。
+2. 将提示词交给具备本地文件与命令执行能力的 AI 助手，说明仓库路径或源码获取位置，并要求“按提示词协助配置环境并构建 Cohavora”。
+3. 查看环境探测结果，在需要变更的阶段选择自动执行、手工处理或暂停。
+
+助手会依据所选仓库的当前配置确定工具版本、依赖和命令，分阶段完成环境准备、兼容性诊断、构建与验证。
+
+> GitHub 等平台可能不保留新窗口属性；可按住 Ctrl（macOS 为 ⌘）单击链接，或右键选择“在新标签页中打开”。
+
+### 方式二：手动编译
+
+以下命令使用仓库内置的 VS 2026 预设，在 **Visual Studio 2026 的 Developer PowerShell** 中执行。
+
+#### 1. 准备工具
 
 | 工具 | 要求 |
 | --- | --- |
@@ -88,9 +104,9 @@ Cohavora 提供桌面会议界面，也提供可单独运行的命令行示例�
 | Git | 用于获取源码和 UI 子模块 |
 | vcpkg | 已完成 bootstrap，用于安装 C++ 依赖 |
 
-本文使用 `Visual Studio 18 2026` 生成器，推荐 CMake 4.3 或更新版本。
+预设详情见 [CMakePresets.json](CMakePresets.json)；使用其他工具链时，需先确认生成器与预编译依赖的兼容性。
 
-### 2. 获取源码和 vcpkg
+#### 2. 获取源码和 vcpkg
 
 ```powershell
 git clone --recurse-submodules https://github.com/a980374208/Cohavora.git
@@ -118,7 +134,7 @@ $env:VCPKG_ROOT = 'C:\dev\vcpkg'
 
 CMake 会通过该路径加载 vcpkg，并根据 [vcpkg.json](vcpkg.json) 安装 Asio、Protobuf、spdlog 等依赖。默认使用 `x64-windows-static`。
 
-### 3. 准备依赖并编译
+#### 3. 准备依赖并编译
 
 在仓库根目录执行：
 
@@ -132,7 +148,7 @@ cmake --build --preset release --parallel 2
 
 这里使用 Release 预设，只构建桌面应用及其依赖，不构建测试和示例。`--parallel 2` 用于控制编译时的内存占用，可按机器配置调整。
 
-### 4. 启动应用
+#### 4. 启动应用
 
 ```powershell
 .\out\build\windows-vs2026-release\src\app\Release\Cohavora.exe
