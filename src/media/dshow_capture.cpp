@@ -116,10 +116,10 @@ bool ValidDimensions(const BITMAPINFOHEADER* bitmap) {
 }
 } // namespace
 
-void DShowVideoCapture::ConfigureCaptureFormat(IAMStreamConfig* stream_config) {
+DShowPixelFormat DShowVideoCapture::ConfigureCaptureFormat(IAMStreamConfig* stream_config) {
     int count = 0, size = 0;
     if (FAILED(stream_config->GetNumberOfCapabilities(&count, &size)) ||
-        size < int(sizeof(VIDEO_STREAM_CONFIG_CAPS))) return;
+        size < int(sizeof(VIDEO_STREAM_CONFIG_CAPS))) return DShowPixelFormat::Unknown;
 
     struct Candidate {
         OwnedMediaType type;
@@ -155,11 +155,26 @@ void DShowVideoCapture::ConfigureCaptureFormat(IAMStreamConfig* stream_config) {
             spdlog::info("[DShowVideoCapture] Requested {}x{}, selected supported {}x{} ({})",
                 config_.width, config_.height, bitmap->biWidth, std::abs(bitmap->biHeight),
                 MediaConverters::PixelFormatToString(MediaConverters::SubtypeToPixelFormat(candidate.type->subtype)));
-            return;
+            return MediaConverters::SubtypeToPixelFormat(candidate.type->subtype);
         }
         spdlog::warn("[DShowVideoCapture] Supported format rejected, hr=0x{:08x}", static_cast<uint32_t>(hr));
     }
     // Leave the driver default intact when none of its advertised modes works.
+    return DShowPixelFormat::Unknown;
+}
+
+GUID DShowVideoCapture::CaptureSinkSubtype(DShowPixelFormat source, DShowPixelFormat preferred) {
+    const auto supported = [](DShowPixelFormat format) {
+        return format == DShowPixelFormat::NV12 || format == DShowPixelFormat::YUY2 ||
+            format == DShowPixelFormat::RGB24 || format == DShowPixelFormat::ARGB32;
+    };
+    // preferred_format ranks camera modes; it is not a required decoder output.
+    // In particular, the Windows MJPEG decoder cannot satisfy an NV12-only sink.
+    // RGB24 lets intelligent connect insert a decoder for compressed sources.
+    const auto sink = supported(source) ? source :
+        (source == DShowPixelFormat::Unknown && supported(preferred)
+            ? preferred : DShowPixelFormat::RGB24);
+    return MediaConverters::PixelFormatToSubtype(sink);
 }
 
 bool DShowVideoCapture::ApplyConnectedFormat(const AM_MEDIA_TYPE& type) {
@@ -337,7 +352,8 @@ bool DShowVideoCapture::BuildFilterGraph() {
         }
     }
 
-    if (stream_config) ConfigureCaptureFormat(stream_config.Get());
+    const auto source_format = stream_config ? ConfigureCaptureFormat(stream_config.Get())
+                                            : DShowPixelFormat::Unknown;
 
     // 创建 SampleGrabber Filter
     hr = CoCreateInstance(CLSID_SampleGrabber_Local, nullptr, CLSCTX_INPROC_SERVER,
@@ -357,14 +373,14 @@ bool DShowVideoCapture::BuildFilterGraph() {
     AM_MEDIA_TYPE grabber_mt;
     ZeroMemory(&grabber_mt, sizeof(AM_MEDIA_TYPE));
     grabber_mt.majortype = MEDIATYPE_Video;
-    if (config_.preferred_format != DShowPixelFormat::Unknown) {
-        grabber_mt.subtype = MediaConverters::PixelFormatToSubtype(config_.preferred_format);
-    } else {
-        grabber_mt.subtype = GUID_NULL; // 自动接受源 Filter 提供的原生视频子格式 (NV12, YUY2, RGB24 等)
-    }
+    grabber_mt.subtype = CaptureSinkSubtype(source_format, config_.preferred_format);
     grabber_mt.formattype = GUID_NULL;
 
-    sample_grabber->SetMediaType(&grabber_mt);
+    hr = sample_grabber->SetMediaType(&grabber_mt);
+    if (FAILED(hr)) {
+        spdlog::error("[DShowVideoCapture] SampleGrabber media type rejected, hr=0x{:08x}", static_cast<uint32_t>(hr));
+        return false;
+    }
     sample_grabber->SetBufferSamples(FALSE);
     sample_grabber->SetOneShot(FALSE);
 
