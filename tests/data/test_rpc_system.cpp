@@ -7,6 +7,58 @@
 #include "participant.h"
 #include "rpc_types.h"
 
+#include "api/make_ref_counted.h"
+
+// The package's newer convenience declaration is absent from the pinned archive.
+namespace webrtc {
+void DataChannelInterface::SendAsync(DataBuffer buffer,
+    absl::AnyInvocable<void(RTCError) &&> on_complete) {
+    std::move(on_complete)(Send(buffer) ? RTCError() : RTCError(RTCErrorType::RESOURCE_EXHAUSTED));
+}
+}
+namespace livekit {
+class RoomStreamDeliveryTestAccess {
+public:
+    static void Install(Room& room, webrtc::scoped_refptr<webrtc::DataChannelInterface> channel) {
+        std::lock_guard lock(room.room_mutex_);
+        room.session_generation_.store(1); room.installed_session_generation_ = 1;
+        room.connection_state_ = ConnectionState::Connected;
+        room.reliable_dc_ = std::move(channel);
+    }
+};
+}
+namespace {
+class RpcLoopbackChannel : public webrtc::DataChannelInterface {
+public:
+    std::function<void(std::vector<uint8_t>)> deliver;
+    void RegisterObserver(webrtc::DataChannelObserver*) override {}
+    void UnregisterObserver() override {}
+    std::string label() const override { return "rpc-loopback"; }
+    bool reliable() const override { return true; }
+    int id() const override { return 1; }
+    DataState state() const override { return state_; }
+    uint32_t messages_sent() const override { return sent_; }
+    uint64_t bytes_sent() const override { return bytes_; }
+    uint32_t messages_received() const override { return 0; }
+    uint64_t bytes_received() const override { return 0; }
+    uint64_t buffered_amount() const override { return 0; }
+    void Close() override { state_ = kClosed; }
+    bool Send(const webrtc::DataBuffer& buffer) override {
+        if (state_ != kOpen) return false;
+        livekit::proto::DataPacket packet;
+        TEST_CHECK(packet.ParseFromArray(buffer.data.data(), static_cast<int>(buffer.data.size())));
+        TEST_CHECK(packet.has_rpc_request() || packet.has_rpc_ack() || packet.has_rpc_response());
+        ++sent_; bytes_ += buffer.data.size();
+        deliver({buffer.data.data(), buffer.data.data() + buffer.data.size()});
+        return true;
+    }
+private:
+    DataState state_ = kOpen;
+    uint32_t sent_ = 0;
+    uint64_t bytes_ = 0;
+};
+}
+
 int main() {
     std::cout << "==================================================\n";
     std::cout << " Running LiveKit RPC System Automated Tests       \n";
@@ -24,10 +76,14 @@ int main() {
 
     room->SetLocalParticipantForTesting(local_p);
 
-    // 模拟 DataChannel/Network 将 RPC 数据包自动回环组包路由
-    local_p->SetPublishDataHandler([room](const std::vector<uint8_t>& payload, bool reliable, const std::vector<std::string>& dest, const std::string& topic) {
-        room->OnIncomingDataPacket(payload, "user_alice", topic);
-    });
+    // Real Room send/receive admission with an asynchronous protobuf loopback.
+    auto channel = webrtc::make_ref_counted<RpcLoopbackChannel>();
+    channel->deliver = [weak = std::weak_ptr<livekit::Room>(room), &io_ctx](std::vector<uint8_t> bytes) {
+        asio::post(io_ctx, [weak, bytes = std::move(bytes)] {
+            if (auto current = weak.lock()) current->OnIncomingDataPacket(bytes, "PA_local_999", "");
+        });
+    };
+    livekit::RoomStreamDeliveryTestAccess::Install(*room, channel);
 
     local_p->SetSendRpcHandler([room](const livekit::RpcPacket& packet) -> asio::awaitable<std::string> {
         co_return co_await room->SendRpcRequest(packet);

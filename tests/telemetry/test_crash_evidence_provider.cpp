@@ -1,5 +1,6 @@
 #include "src/telemetry/crash_evidence_provider.h"
 #include "src/telemetry/build_identity.h"
+#include "src/e2ee/meeting_encryption.h"
 #include "tests/support/test_check.h"
 
 #include <Windows.h>
@@ -120,6 +121,15 @@ int ChildMain(const std::filesystem::path& root, std::wstring_view mode,
     auto provider = CrashEvidenceProvider::Install(
         root, narrow_run_id, BuildId());
     TEST_CHECK(provider->installed());
+    if (mode == L"e2ee") {
+        TEST_CHECK(livekit::ApplicationMemoryDumpAllowed());
+        auto secret = livekit::MeetingSecretHandle::Create({'a', 'b', 'c'});
+        secret->Revoke();
+        secret.reset();
+        TEST_CHECK(!livekit::ApplicationMemoryDumpAllowed());
+        AccessViolationProbe();
+        return 5;
+    }
     if (mode == L"clean") return 0;
     if (mode == L"shutdown") {
         provider.reset();
@@ -227,6 +237,18 @@ void FaultMatrix() {
     TEST_CHECK(CrashEvidenceProvider::Scan(root).records.size() == 2);
 }
 
+void SensitiveMemoryKeepsMetadataButSuppressesDump() {
+    TemporaryDirectory temporary;
+    const auto root = temporary.path() / "sensitive-evidence";
+    const std::wstring run_id(32, L'2');
+    TEST_CHECK(Child(root, L"e2ee", run_id.c_str()) != 0);
+    const auto scan = CrashEvidenceProvider::Scan(root);
+    TEST_CHECK(scan.records.size() == 1);
+    TEST_CHECK(scan.records[0].code == EXCEPTION_ACCESS_VIOLATION);
+    for (const auto& entry : std::filesystem::directory_iterator(root))
+        TEST_CHECK(entry.path().extension() != ".dmp");
+}
+
 void BuildMismatchAndUnavailableDirectoryStayUnknown() {
     TemporaryDirectory temporary;
     const auto blocked = temporary.path() / "blocked";
@@ -304,6 +326,7 @@ int wmain(int argc, wchar_t** argv) {
     if (argc == 5 && std::wstring_view(argv[1]) == L"--child")
         return ChildMain(argv[2], argv[3], argv[4]);
     FaultMatrix();
+    SensitiveMemoryKeepsMetadataButSuppressesDump();
     BuildMismatchAndUnavailableDirectoryStayUnknown();
     EvidenceQuotaOnlyPrunesOwnedStaleSlots();
     CollectionPolicyIsReadBeforeApplicationStartup();

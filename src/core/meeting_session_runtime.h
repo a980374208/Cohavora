@@ -32,16 +32,19 @@ struct InboundTransferKey {
     uint64_t coordinatorSession = 0;
     uint64_t nativeRoomGeneration = 0;
     uint64_t participantIncarnation = 0;
+    uint64_t encryptionRevision = 0;
     QString wireTransferId;
 
     InboundTransferKey() = default;
     InboundTransferKey(uint64_t coordinator_session,
                        uint64_t native_room_generation,
                        uint64_t participant_incarnation,
-                       QString wire_transfer_id)
+                       QString wire_transfer_id,
+                       uint64_t encryption_revision = 0)
         : coordinatorSession(coordinator_session),
           nativeRoomGeneration(native_room_generation),
           participantIncarnation(participant_incarnation),
+          encryptionRevision(encryption_revision),
           wireTransferId(std::move(wire_transfer_id)) {}
 
     // Preserves the narrow runtime test/API seam. Production callers always
@@ -53,10 +56,12 @@ struct InboundTransferKey {
         return std::tie(coordinatorSession,
                         nativeRoomGeneration,
                         participantIncarnation,
+                        encryptionRevision,
                         wireTransferId) <
             std::tie(other.coordinatorSession,
                      other.nativeRoomGeneration,
                      other.participantIncarnation,
+                     other.encryptionRevision,
                      other.wireTransferId);
     }
 
@@ -64,6 +69,7 @@ struct InboundTransferKey {
         return QString::number(coordinatorSession) + QLatin1Char(':') +
             QString::number(nativeRoomGeneration) + QLatin1Char(':') +
             QString::number(participantIncarnation) + QLatin1Char(':') +
+            QString::number(encryptionRevision) + QLatin1Char(':') +
             QString::number(wireTransferId.size()) + QLatin1Char(':') + wireTransferId;
     }
 };

@@ -15,6 +15,7 @@
 #include "data_stream.h"
 #include "data_stream_assembler.h"
 #include "room.h"
+#include "e2ee/meeting_encryption.h"
 
 namespace livekit {
 
@@ -1105,6 +1106,7 @@ struct EncryptedRoomFixture {
     asio::io_context io;
     std::shared_ptr<livekit::Room> room = livekit::Room::Create(io.get_executor());
     std::shared_ptr<ReaderTrace> trace = std::make_shared<ReaderTrace>();
+    std::shared_ptr<livekit::KeyProvider> provider;
     Clock::time_point now = Clock::now();
 
     EncryptedRoomFixture() {
@@ -1115,7 +1117,7 @@ struct EncryptedRoomFixture {
     void Enable(bool shared_key, bool install_key = true, bool wrong_key = false) {
         livekit::KeyProviderOptions options;
         options.shared_key = shared_key;
-        auto provider = std::make_shared<livekit::KeyProvider>(options);
+        provider = std::make_shared<livekit::KeyProvider>(options);
         if (install_key) {
             auto material = EncryptedStreamPeer::KeyMaterial();
             if (wrong_key) material.front() ^= 1;
@@ -1193,6 +1195,26 @@ void CheckEncryptionMismatch(EncryptedRoomFixture& f,
                              std::shared_ptr<Reader> reader,
                              bool encrypted_header) {
     const auto id = reader->info().stream_id;
+    if (encrypted_header) {
+        // Required rejects unauthenticated input before consulting its stream
+        // id. An attacker must not be able to terminate an authenticated reader.
+        auto budget = EncryptedRoomFixture::Access::Budget(*f.room);
+        const auto deadline = EncryptedRoomFixture::Access::Deadline(*f.room, id);
+        f.Dispatch(StreamChunk(id, 0, "untrusted"));
+        f.Dispatch(StreamTrailer(id));
+        TEST_CHECK(!reader->is_closed());
+        TEST_CHECK(budget->active_readers() == 1 && budget->buffered_bytes() == 0);
+        TEST_CHECK(EncryptedRoomFixture::Access::Deadline(*f.room, id) == deadline);
+        f.CheckNoRawData();
+        f.Dispatch(peer.Encrypt(StreamChunk(id, 0, "x")));
+        f.Dispatch(peer.Encrypt(StreamTrailer(id)));
+        TEST_CHECK(reader->is_closed() && !reader->is_failed());
+        TEST_CHECK(reader->ReadAll().size() == 1);
+        TEST_CHECK(f.trace->raw_data == std::vector<std::vector<uint8_t>>({{'x'}}));
+        TEST_CHECK(f.trace->event_data == f.trace->raw_data);
+        TEST_CHECK(budget->active_readers() == 0 && budget->buffered_bytes() == 0);
+        return;
+    }
     // No queued bytes: ReadAll must be woken by failure without a trailer/TTL.
     std::latch reading(1);
     auto waiter = std::async(std::launch::async, [reader, &reading] {
@@ -1236,11 +1258,22 @@ void CheckEncryptionMismatch(EncryptedRoomFixture& f,
 
 void TestEncryptionMismatch(bool byte_stream, bool encrypted_header) {
     EncryptedRoomFixture f;
-    f.Enable(false);
+    if (encrypted_header) f.Enable(false);
     EncryptedStreamPeer peer(false);
     const std::string id = "mixed-encryption";
     auto header = byte_stream ? ByteHeader(id, 1) : TextHeader(id, 1);
+    if (encrypted_header) {
+        f.Dispatch(header);
+        TEST_CHECK(f.trace->text_readers.empty() && f.trace->byte_readers.empty());
+        TEST_CHECK(EncryptedRoomFixture::Access::Budget(*f.room)->active_readers() == 0);
+        TEST_CHECK(!EncryptedRoomFixture::Access::HasDeadline(*f.room, id));
+        f.CheckNoRawData();
+    }
     f.Dispatch(encrypted_header ? peer.Encrypt(header) : header);
+    // The native pre-connect policy may be replaced while no media is bound.
+    // Preserve the NONE -> authenticated GCM mismatch test using a reader
+    // admitted while Off, rather than expecting Required to admit plaintext.
+    if (!encrypted_header) f.Enable(false);
     if (byte_stream) {
         TEST_CHECK(f.trace->byte_readers.size() == 1);
         CheckEncryptionMismatch(f, peer, f.trace->byte_readers.front(), encrypted_header);
@@ -1254,13 +1287,17 @@ enum class UndecryptableCase { Disabled, MissingKey, WrongKey, Tampered };
 
 void TestUndecryptableDoesNotFallback(UndecryptableCase failure) {
     EncryptedRoomFixture f;
-    if (failure != UndecryptableCase::Disabled) {
-        f.Enable(false, failure != UndecryptableCase::MissingKey,
-                 failure == UndecryptableCase::WrongKey);
-    }
+    const bool encrypted = failure != UndecryptableCase::Disabled;
+    if (encrypted) f.Enable(false);
     EncryptedStreamPeer peer(false);
     const std::string id = "unaffected-plaintext";
-    f.Dispatch(TextHeader(id));
+    f.Dispatch(encrypted ? peer.Encrypt(TextHeader(id)) : TextHeader(id));
+    if (encrypted) {
+        auto material = EncryptedStreamPeer::KeyMaterial();
+        if (failure == UndecryptableCase::MissingKey) material.clear();
+        if (failure == UndecryptableCase::WrongKey) material.front() ^= 1;
+        f.provider->SetKey(EncryptedStreamPeer::kIdentity, EncryptedStreamPeer::kKeyIndex, material);
+    }
     auto reader = f.trace->text_readers.front();
     const auto deadline = EncryptedRoomFixture::Access::Deadline(*f.room, id);
     auto budget = EncryptedRoomFixture::Access::Budget(*f.room);
@@ -1276,8 +1313,10 @@ void TestUndecryptableDoesNotFallback(UndecryptableCase failure) {
     TEST_CHECK(EncryptedRoomFixture::Access::Deadline(*f.room, id) == deadline);
     // Authentication failure cannot reveal a trustworthy stream id. Do not
     // invent a mismatch, refresh TTL or damage another Reader from ciphertext.
-    f.Dispatch(StreamChunk(id, 0, "ok"));
-    f.Dispatch(StreamTrailer(id));
+    if (encrypted) f.provider->SetKey(EncryptedStreamPeer::kIdentity,
+        EncryptedStreamPeer::kKeyIndex, EncryptedStreamPeer::KeyMaterial());
+    f.Dispatch(encrypted ? peer.Encrypt(StreamChunk(id, 0, "ok")) : StreamChunk(id, 0, "ok"));
+    f.Dispatch(encrypted ? peer.Encrypt(StreamTrailer(id)) : StreamTrailer(id));
     TEST_CHECK(reader->is_closed() && !reader->is_failed());
     TEST_CHECK(reader->ReadAll() == "ok");
     TEST_CHECK(budget->active_readers() == 0 && budget->buffered_bytes() == 0);
@@ -1289,9 +1328,9 @@ void TestEncryptedOldGeneration() {
     f.Enable(false);
     EncryptedStreamPeer peer(false);
     const std::string id = "reused-session-stream";
-    f.Dispatch(TextHeader(id));
+    f.Dispatch(peer.Encrypt(TextHeader(id)));
     auto old_reader = f.trace->text_readers.back();
-    f.Dispatch(StreamChunk(id, 0, "old"));
+    f.Dispatch(peer.Encrypt(StreamChunk(id, 0, "old")));
     auto old_budget = EncryptedRoomFixture::Access::Budget(*f.room);
 
     // Queue callbacks carrying generation 1, then install a new session before
@@ -1308,7 +1347,7 @@ void TestEncryptedOldGeneration() {
     }
     EncryptedRoomFixture::Access::AdvanceSession(*f.room, 2, {});
     // Deliberately do not poll until the replacement Reader has been installed.
-    EncryptedRoomFixture::Access::DispatchAt(*f.room, TextHeader(id), 2, f.now);
+    EncryptedRoomFixture::Access::DispatchAt(*f.room, peer.Encrypt(TextHeader(id)), 2, f.now);
     auto current = f.trace->text_readers.back();
     auto budget = EncryptedRoomFixture::Access::Budget(*f.room);
     const auto deadline = EncryptedRoomFixture::Access::Deadline(*f.room, id);
@@ -1322,13 +1361,58 @@ void TestEncryptedOldGeneration() {
     TEST_CHECK(budget->active_readers() == 1 && budget->buffered_bytes() == 0);
     TEST_CHECK(EncryptedRoomFixture::Access::Deadline(*f.room, id) == deadline);
     f.CheckNoRawData();
-    f.Dispatch(StreamChunk(id, 0, "new"), 2);
-    f.Dispatch(StreamTrailer(id), 2);
+    f.Dispatch(peer.Encrypt(StreamChunk(id, 0, "new")), 2);
+    f.Dispatch(peer.Encrypt(StreamTrailer(id)), 2);
     TEST_CHECK(current->is_closed() && !current->is_failed());
     TEST_CHECK(current->ReadAll() == "new");
     std::string old_data;
     TEST_CHECK(old_reader->ReadNext(old_data) && old_data == "old");
     TEST_CHECK(old_budget->buffered_bytes() == 0 && budget->buffered_bytes() == 0);
+}
+
+void TestByteReaderPolicyReplacement() {
+    for (bool replace_manager : {false, true}) {
+        for (bool trailer : {false, true}) {
+            EncryptedRoomFixture f;
+            f.Enable(true);
+            EncryptedStreamPeer peer(true);
+            const std::string id = "byte-policy-boundary";
+            f.Dispatch(peer.Encrypt(ByteHeader(id, 2)));
+            auto reader = f.trace->byte_readers.back();
+            auto budget = EncryptedRoomFixture::Access::Budget(*f.room);
+            f.Dispatch(peer.Encrypt(StreamChunk(id, 0, "a")));
+            TEST_CHECK(budget->buffered_bytes() == 1);
+            if (replace_manager) f.Enable(true);
+            else {
+                const auto manager = f.room->e2ee_manager();
+                const auto revision = manager->data_packet_state().policy_revision;
+                TEST_CHECK(manager->InstallRecoveryKey(
+                    livekit::MeetingSecretHandle::Create(std::vector<uint8_t>(32, 'R'))));
+                TEST_CHECK(manager->data_packet_state().policy_revision > revision);
+            }
+            // Slot 3 remains authentically decryptable. Authentication alone
+            // must not allow it to finish a reader owned by the old policy.
+            f.Dispatch(peer.Encrypt(trailer ? StreamTrailer(id) : StreamChunk(id, 1, "b")));
+            TEST_CHECK(reader->is_failed());
+            TEST_CHECK(reader->close_reason() == livekit::kDataStreamEncryptionTypeMismatch);
+            TEST_CHECK(budget->active_readers() == 0 && budget->buffered_bytes() == 1);
+            TEST_CHECK(!EncryptedRoomFixture::Access::AssemblerContains(*f.room, id));
+            TEST_CHECK(!EncryptedRoomFixture::Access::HasDeadline(*f.room, id));
+            TEST_CHECK(!EncryptedRoomFixture::Access::HasCleanupTimer(*f.room));
+            f.CheckNoRawData();
+            std::vector<uint8_t> prefix;
+            TEST_CHECK(reader->ReadNext(prefix) && prefix == std::vector<uint8_t>({'a'}));
+            TEST_CHECK(!reader->ReadNext(prefix));
+            TEST_CHECK(budget->buffered_bytes() == 0);
+            f.Dispatch(peer.Encrypt(ByteHeader(id, 2)));
+            auto current = f.trace->byte_readers.back();
+            TEST_CHECK(current != reader);
+            f.Dispatch(peer.Encrypt(StreamChunk(id, 0, "ok")));
+            f.Dispatch(peer.Encrypt(StreamTrailer(id)));
+            TEST_CHECK(!current->is_failed() && current->ReadAll() == std::vector<uint8_t>({'o', 'k'}));
+            TEST_CHECK(budget->active_readers() == 0 && budget->buffered_bytes() == 0);
+        }
+    }
 }
 
 void TestDecryptCommitReplacement(bool replace_session) {
@@ -1493,7 +1577,9 @@ void TestEncryptedSlotRotationAndUnreadMismatch() {
     f.Dispatch(peer.EncryptBytes({encoded.begin(), encoded.end()}, 4));
     TEST_CHECK(!reader->is_closed() && budget->buffered_bytes() == 2);
     f.Dispatch(StreamChunk("rotate", 2, "untrusted"));
-    TEST_CHECK(reader->close_reason() == livekit::kDataStreamEncryptionTypeMismatch);
+    TEST_CHECK(!reader->is_closed() && budget->buffered_bytes() == 2);
+    f.Dispatch(peer.Encrypt(StreamTrailer("rotate")));
+    TEST_CHECK(reader->is_closed() && !reader->is_failed());
     TEST_CHECK(budget->active_readers() == 0 && budget->buffered_bytes() == 2);
     TEST_CHECK(!EncryptedRoomFixture::Access::HasDeadline(*f.room, "rotate"));
     std::string prefix;
@@ -1651,6 +1737,7 @@ const EncryptedInboundCase kEncryptedInboundCases[] = {
     {"e2ee-wrong-key-no-raw", [] { TestUndecryptableDoesNotFallback(UndecryptableCase::WrongKey); }},
     {"e2ee-tampered-no-raw", [] { TestUndecryptableDoesNotFallback(UndecryptableCase::Tampered); }},
     {"e2ee-old-generation", TestEncryptedOldGeneration},
+    {"e2ee-byte-policy-replacement", TestByteReaderPolicyReplacement},
     {"e2ee-decrypt-session-replaced", [] { TestDecryptCommitReplacement(true); }},
     {"e2ee-decrypt-manager-replaced", [] { TestDecryptCommitReplacement(false); }},
     {"e2ee-queued-event-owner", TestEncryptedQueuedEventOwner},

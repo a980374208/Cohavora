@@ -1,6 +1,8 @@
+#include "src/ui/meeting_auto_share.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/app_branding.h"
 #include "src/ui/meeting_main_window.h"
+#include "src/ui/meeting_encryption_dialog.h"
 #include "src/ui/app_theme.h"
 #include "src/ui/app_icons.h"
 #include "src/ui/meeting_log_console.h"
@@ -756,6 +758,8 @@ void MeetingMainWindow::openQuickMeeting(
 		if (loginDlg.exec() != QDialog::Accepted) return;
 	}
 
+	auto encryption = PromptMeetingEncryption(this);
+	if (!encryption) return;
 	auto coordinator = OpenMeeting::MeetingCoordinator::create();
 	const auto prefs = session.mediaPreferences();
 
@@ -770,17 +774,14 @@ void MeetingMainWindow::openQuickMeeting(
 	reservation.release();
 	roomWindow->setAttribute(Qt::WA_DeleteOnClose);
 	if (startScreenShare) {
-		connect(coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
-			roomWindow, [roomWindow, coordinator = coordinator.get(), pending = true](bool) mutable {
-				if (!pending || coordinator->state() != OpenMeeting::MeetingState::InMeeting) return;
-				pending = false;
-				roomWindow->requestDefaultScreenShare();
-			});
+        ArmAutomaticScreenShare(coordinator.get(), roomWindow, [roomWindow] {
+            roomWindow->requestDefaultScreenShare();
+        });
 	}
 	const auto title = QCoreApplication::translate("MeetingUI", "%1's Instant Meeting").arg(session.nickname());
 	roomWindow->show();
-	roomWindow->prepareMediaAndJoin([coordinator, title, prefs] {
-		coordinator->createAndJoinQuickMeetingAsync(title, 3600, prefs);
+	roomWindow->prepareMediaAndJoin([coordinator, title, prefs, encryption = std::move(*encryption)]() mutable {
+		coordinator->createAndJoinQuickMeetingAsync(title, 3600, prefs, std::move(encryption));
 	});
 }
 
@@ -836,6 +837,8 @@ void MeetingMainWindow::openJoinMeetingDialog(
 		return;
 	}
 
+	auto encryption = PromptMeetingEncryption(this);
+	if (!encryption) return;
 	auto coordinator = OpenMeeting::MeetingCoordinator::create();
 	OpenMeeting::MediaPreferences preferences;
 	preferences.enableMicrophone = !dialog.isAudioMuted();
@@ -861,17 +864,14 @@ void MeetingMainWindow::openJoinMeetingDialog(
 	reservation.release();
 	roomWindow->setAttribute(Qt::WA_DeleteOnClose);
 	if (shareScreenAfterJoin) {
-		connect(coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
-			roomWindow, [roomWindow, coordinator = coordinator.get(), pending = true](bool) mutable {
-				if (!pending || coordinator->state() != OpenMeeting::MeetingState::InMeeting) return;
-				pending = false;
-				roomWindow->requestDefaultScreenShare();
-			});
+        ArmAutomaticScreenShare(coordinator.get(), roomWindow, [roomWindow] {
+            roomWindow->requestDefaultScreenShare();
+        });
 	}
 	roomWindow->show();
-	roomWindow->prepareMediaAndJoin([coordinator, config, preferences] {
+	roomWindow->prepareMediaAndJoin([coordinator, config, preferences, encryption = std::move(*encryption)]() mutable {
 		coordinator->connectDirectlyAsync(
-			config.serverUrl, config.token, config.meetingId, config.displayName, preferences);
+			config.serverUrl, config.token, config.meetingId, config.displayName, preferences, std::move(encryption));
 	});
 }
 
@@ -972,6 +972,8 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 		auto preferences = session.mediaPreferences();
 		preferences.enableMicrophone &= !detail->record.settings.disableMicrophoneOnJoin;
 		preferences.enableVideo &= !detail->record.settings.disableCameraOnJoin;
+		auto encryption = PromptMeetingEncryption(this);
+		if (!encryption) return;
 		auto coordinator = OpenMeeting::MeetingCoordinator::create();
 
 		MeetingRoomWindow::Config config;
@@ -986,8 +988,8 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 		reservation.release();
 		roomWindow->setAttribute(Qt::WA_DeleteOnClose);
 		roomWindow->show();
-		roomWindow->prepareMediaAndJoin([coordinator, config, password = detail->password, preferences] {
-			coordinator->joinMeetingAsync(config.meetingId, password, config.displayName, preferences);
+		roomWindow->prepareMediaAndJoin([coordinator, config, password = detail->password, preferences, encryption = std::move(*encryption)]() mutable {
+			coordinator->joinMeetingAsync(config.meetingId, password, config.displayName, preferences, std::move(encryption));
 		});
 	}
 }

@@ -838,6 +838,7 @@ QMessageBox[meetingUiTone="dark"] QCheckBox {
     spacing: 8px;
 }
 
+QWidget#meetingEncryptionPanel QPushButton,
 QMessageBox[meetingUiTone="dark"] QPushButton {
     min-width: 76px;
     min-height: 32px;
@@ -849,15 +850,18 @@ QMessageBox[meetingUiTone="dark"] QPushButton {
     font-size: 13px;
 }
 
+QWidget#meetingEncryptionPanel QPushButton:hover,
 QMessageBox[meetingUiTone="dark"] QPushButton:hover {
     background: #363c47;
     border-color: #596273;
 }
 
+QWidget#meetingEncryptionPanel QPushButton:pressed,
 QMessageBox[meetingUiTone="dark"] QPushButton:pressed {
     background: #222731;
 }
 
+QWidget#meetingEncryptionPanel QPushButton:disabled,
 QMessageBox[meetingUiTone="dark"] QPushButton:disabled {
     color: #707785;
     background: #252a32;

@@ -45,6 +45,13 @@ void ProcessUntil(Predicate predicate, const char* message) {
 }
 
 void TestQtCallbackGate() {
+    std::map<OpenMeeting::InboundTransferKey, int> fragments;
+    const OpenMeeting::InboundTransferKey oldKey{1, 2, 3, QStringLiteral("same-transfer"), 4};
+    const OpenMeeting::InboundTransferKey newKey{1, 2, 3, QStringLiteral("same-transfer"), 6};
+    fragments[oldKey] = 1;
+    Require(fragments.find(newKey) == fragments.end(), "file fragments crossed encryption epochs");
+    Require(oldKey.uiTransferId() != newKey.uiTransferId(), "UI transfer identities alias encryption epochs");
+
     auto receiver = std::make_unique<QObject>();
     auto gate = OpenMeeting::QtCallbackGate<QObject>::Create(receiver.get());
     bool delivered = false;

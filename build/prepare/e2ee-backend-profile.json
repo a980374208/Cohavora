@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "package_id": "cohavora-e2ee-backend-aaeeee8-v2",
+  "sdk_package_id": "webrtc-51ef663-cohavora-bssl-dual-v3",
+  "upstream_commit": "aaeeee8077eb0a4cad1c9494e9c6433c751ef663",
+  "files": {
+    "patched/frame_crypto_transformer.cc": "6d347ee0c24baff0e61049cdcf5a404c0eee693aa24c972423c3dfc97e0028c6",
+    "patched/include/api/crypto/frame_crypto_transformer.h": "e05b4886f7bf012644cf06b742e8f5939061278cdf39d2cec78b5e10dcb5502e",
+    "patched/manifest.json": "a68fb7554f24fc020fbd9649345200062273fb419d59eead042478801dfa38c6",
+    "media-guard/media-guard-manifest.json": "238de06b6bbd397866c275c7b2599e3fe80a7d0656a80d30f62136fabfb5cfb5",
+    "licenses/WebRTC-BSD.txt": "5d57f76601b87e2069605ccef52e5caaa5eeb7a2f76e34aa65a0102637d28376",
+    "licenses/Apache-2.0.txt": "88046bf22d5b4f4b8cc85079ae6aae5424a3a1999db952ed152828ff325b2c6d",
+    "media-guard/channel_receive.cc": "01cd62b7c0fa360490e030d62d9119fb56c56f6c499da83ab8567df31d9c6958",
+    "media-guard/channel_send.cc": "6148b1c57c6688df7e3d216323eb8458b2a7f6aac5dc01c00e4d829074d12b6e",
+    "media-guard/rtp_video_stream_receiver2.cc": "8276bf7e14941584202fcde2e5e6543586510e5c88cd1058aedc14a7da4b846c",
+    "media-guard/rtp_sender_video.cc": "f09281e22ad4a759b1a88af20ca67822555d7d7274b8cdd03adc2a266c1a7f8b",
+    "patched/include/api/crypto/cohavora_iv_sequence.h": "99a597fefbce8fbc24bb9a6bebe5237ab8c307aedc0d9ba5e746dd352acf40c7"
+  }
+}

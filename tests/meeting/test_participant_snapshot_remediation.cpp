@@ -2243,7 +2243,9 @@ public:
         window.updateVideoLayout();
     }
     static void stopRenderSession(MeetingUI::MeetingRoomWindow &window) {
+        TEST_CHECK(window._room);
         window.stopLiveKitSession();
+        TEST_CHECK(!window._room); // Stopped window can remain alive for a notice.
         TEST_CHECK(!window._remoteRenderSession->active());
     }
     static bool paused(const MeetingUI::VideoTileWidget *tile) {
@@ -4230,8 +4232,8 @@ void ReceiverSidRebindRegression() {
     receiver->setStreamId("PA_WINDOW|TR_PA_WINDOW_NEXT");
     livekit::ParticipantSnapshotRoomTestAccess::scanReusedReceiver(
         *fixture.room, receiver);
-    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::videoProbe(
-        *fixture.room, "TR_PA_WINDOW") == oldProbe);
+    TEST_CHECK(!livekit::ParticipantSnapshotRoomTestAccess::videoProbe(
+        *fixture.room, "TR_PA_WINDOW"));
     livekit::ParticipantSnapshotRoomTestAccess::resolveReusedReceiver(
         *fixture.room, receiver, "PA_WINDOW", "TR_PA_WINDOW_NEXT");
     auto nextProbe = livekit::ParticipantSnapshotRoomTestAccess::videoProbe(
@@ -4255,6 +4257,37 @@ void ReceiverSidRebindRegression() {
     source->push(170, 3000);
     TEST_CHECK(oldProbe->on_frame_count.load() == oldFrames);
     TEST_CHECK(nextProbe->on_frame_count.load() > nextFrames);
+    // The same track object on a new receiver needs a fresh binding/hook.
+    auto replacementReceiver = webrtc::make_ref_counted<ReusedVideoReceiver>(
+        rtc, "PA_WINDOW|TR_PA_WINDOW_NEXT");
+    livekit::ParticipantSnapshotRoomTestAccess::scanReusedReceiver(
+        *fixture.room, replacementReceiver);
+    auto receiverProbe = livekit::ParticipantSnapshotRoomTestAccess::videoProbe(
+        *fixture.room, "TR_PA_WINDOW_NEXT");
+    TEST_CHECK(receiverProbe && receiverProbe != nextProbe);
+    const auto retiredFrames = nextProbe->on_frame_count.load();
+    source->push(180, 4000);
+    TEST_CHECK(nextProbe->on_frame_count.load() == retiredFrames);
+    TEST_CHECK(receiverProbe->on_frame_count.load() > 0);
+    // A different native track with the identical string id must also replace.
+    auto replacementSource = webrtc::make_ref_counted<WindowMemoryVideoSource>();
+    auto replacementTrack = webrtc::VideoTrack::Create(
+        "rtc-reused-receiver", replacementSource, webrtc::Thread::Current());
+    auto newReceiver = webrtc::make_ref_counted<ReusedVideoReceiver>(
+        replacementTrack, "PA_WINDOW|TR_PA_WINDOW_NEXT");
+    livekit::ParticipantSnapshotRoomTestAccess::scanReusedReceiver(*fixture.room, newReceiver);
+    auto objectProbe = livekit::ParticipantSnapshotRoomTestAccess::videoProbe(
+        *fixture.room, "TR_PA_WINDOW_NEXT");
+    TEST_CHECK(objectProbe && objectProbe != receiverProbe);
+    const auto retiredReceiverFrames = receiverProbe->on_frame_count.load();
+    source->push(190, 5000);
+    TEST_CHECK(receiverProbe->on_frame_count.load() == retiredReceiverFrames);
+    replacementSource->push(200, 6000);
+    TEST_CHECK(objectProbe->on_frame_count.load() > 0);
+    livekit::ParticipantSnapshotRoomTestAccess::scanReusedReceiver(*fixture.room, newReceiver);
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::videoProbe(
+        *fixture.room, "TR_PA_WINDOW_NEXT") == objectProbe);
+    TEST_CHECK(livekit::ParticipantSnapshotRoomTestAccess::bindingCount(*fixture.room) == 1);
     fixture.pump();
     std::cout << "RECEIVER_SID_REBIND reused-rtc-id/old-sink-retired/new-sink-frames/idempotent PASS"
               << std::endl;
@@ -7213,6 +7246,8 @@ int main(int argc, char **argv) { return WindowAcceptanceMain(argc, argv); }
 
 #else // Original core target: QCoreApplication and synchronous log hook.
 
+#include "src/ui/meeting_auto_share.h"
+
 #include "src/core/meeting_coordinator.h"
 #include "src/core/remote_track_publication.h"
 #include "src/ui/meeting_log_console.h"
@@ -8324,6 +8359,7 @@ struct StartupReconnectSignals final {
     std::vector<bool> audioMuted;
     std::vector<bool> videoEnabled;
     std::vector<bool> shareAvailable;
+    int automaticShares = 0;
     int errors = 0;
 };
 
@@ -8331,6 +8367,10 @@ void ObserveStartupReconnect(Fixture &fixture, QObject &observer,
                              StartupReconnectSignals &observed) {
     QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::screenShareAvailabilityChanged,
         &observer, [&](bool available) { observed.shareAvailable.push_back(available); });
+    MeetingUI::ArmAutomaticScreenShare(fixture.coordinator.get(), &observer, [&] {
+        TEST_CHECK(fixture.coordinator->canStartScreenShare());
+        ++observed.automaticShares;
+    });
     QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
         &observer, [&](OpenMeeting::MeetingState state, const QString &) { observed.states.push_back(state); });
     QObject::connect(fixture.coordinator.get(), &OpenMeeting::MeetingCoordinator::localAudioMuteChanged,
@@ -8385,6 +8425,9 @@ void StartupReconnectOrder(bool degraded, bool reconnectedFirst) {
     TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::reconnectPending(*fixture.coordinator));
     TEST_CHECK(fixture.coordinator->canStartScreenShare());
     TEST_CHECK(observed.shareAvailable == std::vector<bool>{true});
+    TEST_CHECK(observed.automaticShares == 1);
+    emit fixture.coordinator->screenShareAvailabilityChanged(true);
+    TEST_CHECK(observed.automaticShares == 1);
     if (degraded) {
         TEST_CHECK(fixture.coordinator->isLocalAudioMuted());
         TEST_CHECK(!fixture.coordinator->isLocalVideoEnabled());
@@ -8428,6 +8471,9 @@ void StartupReconnectNormalSuccess() {
     TEST_CHECK(!OpenMeeting::MeetingCoordinatorTestAccess::startupListenOnly(*fixture.coordinator));
     TEST_CHECK(fixture.coordinator->canStartScreenShare());
     TEST_CHECK(observed.shareAvailable == std::vector<bool>{true});
+    TEST_CHECK(observed.automaticShares == 1);
+    emit fixture.coordinator->screenShareAvailabilityChanged(true);
+    TEST_CHECK(observed.automaticShares == 1);
     TEST_CHECK(observed.audioMuted == std::vector<bool>{true});
     TEST_CHECK(observed.videoEnabled == std::vector<bool>{false});
 }
@@ -8524,7 +8570,25 @@ void StartupReconnectTerminalIdempotenceAndReentry() {
     TEST_CHECK(staleErrors == 0);
 }
 
+void AutomaticShareContextCancellation() {
+    Fixture fixture;
+    OpenMeeting::MeetingCoordinatorTestAccess::prepareStartup(*fixture.coordinator);
+    int requests = 0;
+    auto context = std::make_unique<QObject>();
+    MeetingUI::ArmAutomaticScreenShare(fixture.coordinator.get(), context.get(), [&] { ++requests; });
+    // A stale true notification cannot bypass the current readiness predicate.
+    emit fixture.coordinator->screenShareAvailabilityChanged(true);
+    TEST_CHECK(requests == 0);
+    context.reset();
+    const auto generation = OpenMeeting::MeetingCoordinatorTestAccess::sessionGeneration(*fixture.coordinator);
+    OpenMeeting::MeetingCoordinatorTestAccess::queueSuccessfulStartup(*fixture.coordinator, generation);
+    DrainQt();
+    TEST_CHECK(fixture.coordinator->canStartScreenShare());
+    TEST_CHECK(requests == 0);
+}
+
 void StartupReconnectRegression() {
+    AutomaticShareContextCancellation();
     StartupReconnectNormalSuccess();
     for (bool degraded : {false, true}) {
         for (bool reconnectedFirst : {false, true}) {
@@ -8997,6 +9061,23 @@ void AkCaseI() {
     TEST_CHECK(origins.size() == 4);
     TEST_CHECK(origins[0] == livekit::SenderOrigin::Unresolved && origins[1] == livekit::SenderOrigin::Unresolved);
     TEST_CHECK(origins[2] == livekit::SenderOrigin::Remote && origins[3] == livekit::SenderOrigin::Remote);
+    for (const auto* topic : {"e2ee.bytes.control", "custom.binary.stream"}) {
+        livekit::proto::DataPacket packet;
+        packet.set_participant_sid("PA_NEW");
+        packet.set_participant_identity("reentry-peer");
+        packet.mutable_user()->set_payload(message.data(), message.size());
+        packet.mutable_user()->set_topic(topic);
+        fixture.room->OnIncomingDataPacket(PacketBytes(packet), "", "");
+    }
+    PumpPipeline(fixture);
+    TEST_CHECK(chats == 2);
+    livekit::proto::DataPacket legacy;
+    legacy.set_participant_sid("PA_NEW");
+    legacy.set_participant_identity("reentry-peer");
+    legacy.mutable_user()->set_payload("accepted");
+    fixture.room->OnIncomingDataPacket(PacketBytes(legacy), "", "");
+    PumpPipeline(fixture);
+    TEST_CHECK(chats == 3); // Existing empty-topic chat remains supported.
     openmeeting::meeting::NotifyMeetingData notify;
     notify.mutable_kickoffmeetingdata()->set_userid("local-user");
     notify.mutable_kickoffmeetingdata()->set_reason("server-origin-test");

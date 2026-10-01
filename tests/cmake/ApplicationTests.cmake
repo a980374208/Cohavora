@@ -36,6 +36,8 @@ if(TARGET cohavora_app)
     target_link_libraries(test_main_window_latency PRIVATE ${main_ui_links})
     target_compile_options(test_main_window_latency PRIVATE /utf-8)
     add_test(NAME main_window_latency_test COMMAND test_main_window_latency)
+    add_test(NAME meeting_encryption_ui_test COMMAND test_main_window_latency --e2ee-only)
+    set_tests_properties(meeting_encryption_ui_test PROPERTIES TIMEOUT 30 LABELS "UI_CONTRACT_FOCUSED")
     set_tests_properties(main_window_latency_test PROPERTIES TIMEOUT 30 LABELS "UI_CONTRACT_FOCUSED")
 endif()
 

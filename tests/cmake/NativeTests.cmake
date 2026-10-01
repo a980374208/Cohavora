@@ -312,6 +312,16 @@ if(LIVEKIT_BUILD_EXTERNAL_TESTS)
     target_include_directories(test_e2e_media_runtime PRIVATE
         ${LIVEKIT_PROJECT_SOURCE_DIR})
     target_link_libraries(test_e2e_media_runtime PRIVATE cohavora_core)
+
+    # E0 dependency/encoded-frame probe, never a Room or Flutter runtime verdict.
+    add_executable(test_e2ee_backend EXCLUDE_FROM_ALL
+        ${LIVEKIT_TEST_SOURCE_DIR}/runtime/probes/test_e2ee_backend.cpp)
+    target_include_directories(test_e2ee_backend PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+    target_link_libraries(test_e2ee_backend PRIVATE cohavora_core)
+    add_executable(test_e2ee_room_peer EXCLUDE_FROM_ALL
+        ${LIVEKIT_TEST_SOURCE_DIR}/runtime/probes/test_e2ee_room_peer.cpp)
+    target_include_directories(test_e2ee_room_peer PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+    target_link_libraries(test_e2ee_room_peer PRIVATE cohavora_core)
 endif()
 
 if(LIVEKIT_BUILD_HARDWARE_TESTS)
@@ -417,6 +427,19 @@ if(LIVEKIT_BUILD_EXTENDED_TESTS)
         ${OPENSSL_LIBRARIES}
     )
 endif()
+
+# Compile the real Room admission branch without the optional backend guard.
+# cohavora_core is static: its Room object is not extracted by this target.
+add_executable(test_e2ee_backend_unavailable
+    ${LIVEKIT_TEST_SOURCE_DIR}/security/test_e2ee_backend_unavailable.cpp
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/core/room.cpp)
+target_include_directories(test_e2ee_backend_unavailable PRIVATE ${LIVEKIT_PROJECT_SOURCE_DIR})
+target_link_libraries(test_e2ee_backend_unavailable PRIVATE cohavora_core)
+if(MSVC)
+    target_compile_options(test_e2ee_backend_unavailable PRIVATE /bigobj)
+endif()
+add_test(NAME e2ee_backend_unavailable_test COMMAND test_e2ee_backend_unavailable)
+set_tests_properties(e2ee_backend_unavailable_test PROPERTIES TIMEOUT 30 LABELS "CORE_REGRESSION")
 
 # Lifecycle & Reconnect Stress Test (GAP-02)
 add_executable(test_stress_lifecycle

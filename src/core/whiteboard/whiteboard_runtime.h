@@ -8,6 +8,7 @@
 #include <functional>
 #include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <string_view>
@@ -78,6 +79,7 @@ public:
     void setTransportReady(bool ready, std::uint64_t nowMs);
     void tick(std::uint64_t nowMs);
     void retire();
+    void encryptionChanged(std::uint64_t nowMs);
 
 private:
     struct PendingProposal {
@@ -161,6 +163,9 @@ private:
     std::map<std::string, std::deque<std::uint64_t>> rateEvents_;
     std::map<std::string, PendingProposal> pendingProposals_;
     std::map<std::string, PeerInstance> peers_;
+    // Retain the departed authority watermark so delayed observation/data
+    // callbacks cannot revive that instance after a full reconnect.
+    std::optional<PeerInstance> departedAuthority_;
     SnapshotAssembly snapshot_;
     std::map<std::string, std::shared_ptr<const Asset>> assets_;
     std::size_t assetBytes_ = 0;

@@ -1,3 +1,5 @@
+#include "e2ee/meeting_encryption.h"
+#include <cmath>
 #include "room.h"
 #include "session_telemetry.h"
 #include "telemetry/diagnostic_pipeline.h"
@@ -589,9 +591,30 @@ std::shared_ptr<webrtc::DataChannelObserver> Room::CreateDataChannelObserver(
 
 void Room::PostRemoteTrack(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
                            webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, uint64_t generation) {
+    // Protect asynchronous metadata resolution; duplicates reuse the same hook.
+    EnsureReceiverCryptoGate(receiver, generation);
     callback_gate_->Post([weak = weak_from_this(), receiver, track, generation]() {
         if (auto room = weak.lock()) room->OnRemoteTrackAdded(receiver, track, generation);
     });
+}
+
+std::shared_ptr<MediaReceiverGate> Room::EnsureReceiverCryptoGate(
+    webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, uint64_t generation) {
+    if (!receiver) return {};
+    std::shared_ptr<MediaReceiverGate> gate;
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!IsNativeGenerationCurrentLocked(generation) ||
+            !e2ee_manager_ || !e2ee_manager_->enabled()) return {};
+        std::erase_if(receiver_crypto_gates_, [](const auto& entry) { return entry.second.expired(); });
+        auto& slot = receiver_crypto_gates_[{generation, receiver.get()}];
+        if (auto existing = slot.lock()) return existing;
+        gate = CreateMediaReceiverGate();
+        slot = gate;
+    }
+    // RtpReceiver dispatches to its worker; never hold room_mutex_ here.
+    receiver->SetFrameTransformer(gate->Hook());
+    return gate;
 }
 
 bool Room::IsNativeGenerationCurrentLocked(uint64_t generation) const {
@@ -610,6 +633,13 @@ bool Room::AdmitListener(const ListenerDeliveryContext& context,
         (!context.required_state || connection_state_ == *context.required_state) &&
         (!context.require_reconnect || (reconnect_active_ && !reconnect_disabled_)) &&
         (!context.e2ee_owner || context.e2ee_owner == e2ee_manager_) &&
+        (!context.encryption_revision ||
+            (context.e2ee_owner == e2ee_manager_ && (!context.e2ee_owner ||
+             context.e2ee_owner->data_packet_state().policy_revision == *context.encryption_revision))) &&
+        (!context.media_encryption_binding ||
+            (!context.media_encryption_binding->retired.load(std::memory_order_acquire) &&
+             (!context.media_encryption_binding->binding_active ||
+              context.media_encryption_binding->binding_active->load(std::memory_order_acquire)))) &&
         std::find(listeners_.begin(), listeners_.end(), listener) != listeners_.end();
 }
 
@@ -1589,10 +1619,26 @@ void Room::RetireAllMembershipsLocked(std::deque<QueuedParticipantEvent>& retire
 }
 
 void Room::EnqueueParticipantEventLocked(ParticipantEvent event,
-                                        std::shared_ptr<E2eeManager> e2ee_owner) {
+                                        std::shared_ptr<E2eeManager> e2ee_owner,
+                                        std::optional<uint64_t> encryption_revision) {
     event.native_room_generation = session_generation_.load(std::memory_order_acquire);
     event.event_sequence = next_participant_event_sequence_++;
-    participant_events_.emplace_back(std::move(event), std::move(e2ee_owner));
+    if (encryption_revision) {
+        event.sender.encryption_revision = *encryption_revision;
+        event.sender.encryption_current = [weak = weak_from_this(),
+            owner = std::weak_ptr<E2eeManager>(e2ee_owner),
+            had_owner = bool(e2ee_owner), revision = *encryption_revision,
+            generation = event.native_room_generation] {
+            auto room = weak.lock();
+            if (!room) return false;
+            std::lock_guard lock(room->room_mutex_);
+            auto policy = owner.lock();
+            return room->IsNativeGenerationCurrentLocked(generation) &&
+                (!had_owner || policy) && policy == room->e2ee_manager_ &&
+                (!policy || policy->data_packet_state().policy_revision == revision);
+        };
+    }
+    participant_events_.emplace_back(std::move(event), std::move(e2ee_owner), encryption_revision);
     if (participant_event_drain_scheduled_) return;
 
     participant_event_drain_scheduled_ = true;
@@ -1666,7 +1712,7 @@ void Room::DrainParticipantEvents() {
             }
             try {
                 DeliverListener({event.native_room_generation, {}, false, false,
-                                 event.e2ee_owner}, listener,
+                                 event.e2ee_owner, {}, event.encryption_revision}, listener,
                     [&](RoomListener& target) {
                         if (event.kind != ParticipantEventKind::TrackAvailable ||
                             IsMediaBindingTicketActive(
@@ -1865,6 +1911,10 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         signal_client_ = attempt_signal;
         installed_session_generation_ = generation;
         join_response_ = join_res;
+        if (e2ee_manager_ && e2ee_manager_->enabled()) {
+            const auto& trailer = join_res->sif_trailer();
+            e2ee_manager_->PrepareMediaSession({trailer.begin(), trailer.end()});
+        }
         const std::string joined_room_sid = join_res->has_room()
             ? join_res->room().sid()
             : std::string{};
@@ -1950,9 +2000,12 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
         }
 
         if (attempt_options.create_webrtc_pc) {
+            // Pin configuration while native creation runs outside room_mutex_.
+            auto native_policy_admission = AcquireMediaPublishPolicy();
             // Creation can synchronously invoke WebRTC callbacks. Keep it outside
             // room_mutex_, and retain local ownership until the protected commit.
             struct NativeAttempt {
+                std::shared_ptr<void> encryption_policy;
                 std::shared_ptr<webrtc::PeerConnectionObserver> publisher_observer;
                 std::shared_ptr<webrtc::PeerConnectionObserver> subscriber_observer;
                 std::vector<std::shared_ptr<webrtc::DataChannelObserver>> dc_observers;
@@ -1967,12 +2020,27 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                     if (subscriber && subscriber != publisher) subscriber->Close();
                 }
             } native;
+            {
+                std::lock_guard lock(room_mutex_);
+                if (e2ee_manager_) native.encryption_policy = e2ee_manager_->AcquireMediaPublishPolicy();
+            }
             if (WebRTCManager::Instance().Initialize()) {
                 webrtc::PeerConnectionInterface::RTCConfiguration config;
                 config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
                 config.bundle_policy = webrtc::PeerConnectionInterface::kBundlePolicyMaxBundle;
                 config.continual_gathering_policy = webrtc::PeerConnectionInterface::GATHER_CONTINUALLY;
                 config.tcp_candidate_policy = webrtc::PeerConnectionInterface::kTcpCandidatePolicyEnabled;
+#if defined(COHAVORA_E2EE_MEDIA_GUARD)
+                {
+                    std::lock_guard lock(room_mutex_);
+                    if ((e2ee_manager_ && e2ee_manager_->enabled()) ||
+                        (connect_attempt_test_hooks_ && connect_attempt_test_hooks_->require_native_media_guard_without_cryptors)) {
+                        auto crypto = webrtc::CryptoOptions::NoGcm();
+                        crypto.sframe.require_frame_encryption = true;
+                        config.crypto_options = crypto;
+                    }
+                }
+#endif
                 if (join_res->has_client_configuration() &&
                     join_res->client_configuration().force_relay() == proto::ClientConfigSetting::ENABLED) {
                     config.type = webrtc::PeerConnectionInterface::kRelay;
@@ -2059,6 +2127,7 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
             subscriber_observer_ = std::move(native.subscriber_observer);
             publisher_pc_ = std::move(native.publisher);
             subscriber_pc_ = std::move(native.subscriber);
+            native_e2ee_policy_ = std::move(native.encryption_policy);
             reliable_dc_ = std::move(native.reliable);
             lossy_dc_ = std::move(native.lossy);
             data_channel_observers_.insert(data_channel_observers_.end(),
@@ -2677,25 +2746,28 @@ bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
 
     webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
     std::shared_ptr<LocalParticipant> local_participant;
+    OutgoingStreamContext send_context;
     {
         std::lock_guard lock(room_mutex_);
         if (!IsNativeGenerationCurrentLocked(generation)) return false;
         dc = reliable ? reliable_dc_ : lossy_dc_;
         local_participant = local_participant_;
+        send_context.manager = e2ee_manager_;
+        send_context.sender = local_participant_;
+        if (send_context.manager)
+            send_context.policy_revision = send_context.manager->data_packet_state().policy_revision;
     }
 
     const std::string local_identity = local_participant ? local_participant->identity() : std::string{};
     const std::string local_sid = local_participant ? local_participant->sid() : std::string{};
     auto send_packet = [&](const std::vector<uint8_t>& bytes) -> bool {
-        if (dc && dc->state() == webrtc::DataChannelInterface::kOpen) {
-            webrtc::DataBuffer buffer(
-                webrtc::CopyOnWriteBuffer(bytes.data(), bytes.size()),
-                /*binary=*/true);
-            if (!dc->Send(buffer)) {
-                Log("DATA", "SEND_FAILED", "DataChannel rejected the packet");
-                return false;
-            }
-            return true;
+        if (send_context.manager || (dc && dc->state() == webrtc::DataChannelInterface::kOpen)) {
+            proto::DataPacket packet;
+            if (!packet.ParseFromArray(bytes.data(), static_cast<int>(bytes.size()))) return false;
+            packet.clear_destination_identities();
+            for (const auto& destination : destination_identities)
+                packet.add_destination_identities(destination);
+            return PublishDataPacket(packet, reliable, generation, &send_context) == DataPacketSendResult::Accepted;
         } else {
             OnIncomingDataPacket(bytes, local_sid, topic, generation);
             return true;
@@ -2789,6 +2861,7 @@ bool Room::PublishData(const std::vector<uint8_t>& payload, bool reliable,
     user_packet->set_payload(payload.data(), payload.size());
     for (const auto& dest : destination_identities) {
         user_packet->add_destination_identities(dest);
+        packet.add_destination_identities(dest);
     }
 
     std::vector<uint8_t> data(packet.ByteSizeLong());
@@ -2811,6 +2884,8 @@ Room::DataPacketSendResult Room::PublishDataPacket(
     webrtc::scoped_refptr<webrtc::DataChannelInterface> dc;
     const bool stream_packet = packet.has_stream_header() || packet.has_stream_chunk() ||
                                packet.has_stream_trailer();
+    const bool protected_packet = stream_packet || packet.has_user() || packet.has_chat_message() ||
+                                  packet.has_rpc_request() || packet.has_rpc_ack() || packet.has_rpc_response();
     std::shared_ptr<E2eeManager> encryption_owner;
     E2eeManager::DataPacketState encryption_state{};
     std::shared_ptr<LocalParticipant> sender_owner;
@@ -2841,7 +2916,7 @@ Room::DataPacketSendResult Room::PublishDataPacket(
             sender_identity = sender_owner->identity();
             sender_sid = sender_owner->sid();
         }
-        if (stream_packet) {
+        if (protected_packet) {
             encryption_owner = e2ee_manager_;
             if (encryption_owner) encryption_state = encryption_owner->data_packet_state();
             if (stream_context &&
@@ -2869,7 +2944,7 @@ Room::DataPacketSendResult Room::PublishDataPacket(
         }
     }
 
-    if (stream_packet && encryption_owner && encryption_state.enabled &&
+    if (protected_packet && encryption_owner && encryption_state.enabled &&
         encryption_owner->encryption_type() != EncryptionType::NONE) {
         if (encryption_owner->encryption_type() != EncryptionType::GCM ||
             sender_identity.empty() || final_pkt.participant_identity() != sender_identity)
@@ -2877,7 +2952,12 @@ Room::DataPacketSendResult Room::PublishDataPacket(
         proto::EncryptedPacketPayload inner;
         if (packet.has_stream_header()) *inner.mutable_stream_header() = packet.stream_header();
         else if (packet.has_stream_chunk()) *inner.mutable_stream_chunk() = packet.stream_chunk();
-        else *inner.mutable_stream_trailer() = packet.stream_trailer();
+        else if (packet.has_stream_trailer()) *inner.mutable_stream_trailer() = packet.stream_trailer();
+        else if (packet.has_user()) *inner.mutable_user() = packet.user();
+        else if (packet.has_chat_message()) *inner.mutable_chat_message() = packet.chat_message();
+        else if (packet.has_rpc_request()) *inner.mutable_rpc_request() = packet.rpc_request();
+        else if (packet.has_rpc_ack()) *inner.mutable_rpc_ack() = packet.rpc_ack();
+        else if (packet.has_rpc_response()) *inner.mutable_rpc_response() = packet.rpc_response();
         const auto inner_size = inner.ByteSizeLong();
         if (inner_size > DataPacketCryptor::kMaxEncryptedPacketBytes - 12 - 16)
             return DataPacketSendResult::EncryptionFailed;
@@ -2907,7 +2987,7 @@ Room::DataPacketSendResult Room::PublishDataPacket(
         return DataPacketSendResult::SerializationFailed;
     }
 
-    if (stream_packet) {
+    if (protected_packet) {
         std::lock_guard lock(room_mutex_);
         if (!IsNativeGenerationCurrentLocked(expected_generation) ||
             connection_state_ != ConnectionState::Connected)
@@ -2916,9 +2996,8 @@ Room::DataPacketSendResult Room::PublishDataPacket(
             (encryption_owner && encryption_owner->data_packet_state().policy_revision !=
                                      encryption_state.policy_revision))
             return DataPacketSendResult::EncryptionContextChanged;
-        if (stream_context &&
-            (stream_context->sender.lock() != sender_owner ||
-             local_participant_ != sender_owner))
+        if (local_participant_ != sender_owner ||
+            (stream_context && stream_context->sender.lock() != sender_owner))
             return DataPacketSendResult::SenderContextChanged;
         if ((reliable ? reliable_dc_ : lossy_dc_) != dc)
             return DataPacketSendResult::ChannelUnavailable;
@@ -3099,10 +3178,65 @@ std::shared_ptr<ByteStreamWriter> Room::CreateByteStreamWriter(
         total_size, mime_type, destination_identities, sender_id);
 }
 
+bool Room::PublishRpcPacket(const RpcPacket& packet, uint64_t generation,
+    const OutgoingStreamContext& context) {
+    if (packet.wire_format == RpcWireFormat::StreamV2 &&
+        packet.type == RpcPacketType::Response && !packet.has_error) {
+        try {
+            TextStreamWriter writer(
+                [this, generation, context](const proto::DataPacket& data, bool reliable) {
+                    return PublishDataPacket(data, reliable, generation, &context) == DataPacketSendResult::Accepted;
+                }, "lk.rpc_response", {{"lk.rpc_request_id", packet.request_id}},
+                "", packet.payload.size(), "", {packet.destination_identity}, packet.caller_identity);
+            writer.Write(packet.payload);
+            writer.Close();
+            return true;
+        } catch (...) { return false; }
+    }
+    proto::DataPacket wire;
+    wire.add_destination_identities(packet.destination_identity);
+    if (packet.wire_format == RpcWireFormat::LegacyJson) {
+        if (packet.type == RpcPacketType::Ack) return false;
+        wire.mutable_user()->set_topic("lk.rpc");
+        wire.mutable_user()->set_payload(packet.Encode());
+    } else if (packet.type == RpcPacketType::Request) {
+        auto* request = wire.mutable_rpc_request();
+        request->set_id(packet.request_id); request->set_method(packet.method);
+        request->set_payload(packet.payload); request->set_version(1);
+        request->set_response_timeout_ms(static_cast<uint32_t>(std::max(1000.0, packet.timeout_sec * 1000.0 - 7000.0)));
+    } else if (packet.type == RpcPacketType::Ack) {
+        wire.mutable_rpc_ack()->set_request_id(packet.request_id);
+    } else {
+        auto* response = wire.mutable_rpc_response();
+        response->set_request_id(packet.request_id);
+        if (packet.has_error || packet.payload.size() > RpcPacket::kMaxPayloadBytes) {
+            auto* error = response->mutable_error();
+            error->set_code(RpcPacket::ToWireError(packet.has_error ? packet.error_code :
+                static_cast<int>(RpcErrorCode::RESPONSE_PAYLOAD_TOO_LARGE)));
+            error->set_message(packet.has_error ? packet.error_message.substr(0, 256) : "RPC response payload too large");
+        } else response->set_payload(packet.payload);
+    }
+    return PublishDataPacket(wire, true, generation, &context) == DataPacketSendResult::Accepted;
+}
+
 asio::awaitable<std::string> Room::SendRpcRequest(const RpcPacket& packet) {
     auto operation_admission = AdmitOperation(OperationKind::SendData, "SendRpcRequest");
     auto self = shared_from_this();
+    if (packet.wire_format == RpcWireFormat::StreamV2 || packet.request_id.empty() || packet.destination_identity.empty() || packet.method.empty() ||
+        !std::isfinite(packet.timeout_sec) || packet.timeout_sec <= 0 || packet.timeout_sec > 300)
+        throw RpcError(RpcErrorCode::REJECTED, "Invalid RPC request parameters");
+    if (packet.payload.size() > RpcPacket::kMaxPayloadBytes)
+        throw RpcError(RpcErrorCode::REQUEST_PAYLOAD_TOO_LARGE, "RPC request payload too large");
     auto pending = std::make_shared<PendingRpcCall>();
+    pending->destination = packet.destination_identity; pending->wire_format = packet.wire_format;
+    {
+        std::lock_guard lock(room_mutex_);
+        pending->generation = session_generation_.load(std::memory_order_acquire);
+        pending->context.manager = e2ee_manager_; pending->context.sender = local_participant_;
+        if (e2ee_manager_) pending->context.policy_revision = e2ee_manager_->data_packet_state().policy_revision;
+    }
+    if (packet.wire_format == RpcWireFormat::ProtobufV1)
+        pending->ack_timer = std::make_shared<asio::steady_timer>(executor_, std::chrono::seconds(7));
     pending->timer = std::make_shared<asio::steady_timer>(
         executor_,
         std::chrono::milliseconds(static_cast<int64_t>(packet.timeout_sec * 1000.0))
@@ -3110,14 +3244,13 @@ asio::awaitable<std::string> Room::SendRpcRequest(const RpcPacket& packet) {
 
     {
         std::lock_guard<std::mutex> lock(pending_rpc_mutex_);
+        if (pending_rpc_calls_.size() >= 128 || pending_rpc_calls_.contains(packet.request_id))
+            throw RpcError(RpcErrorCode::REJECTED, "RPC pending limit or duplicate request id");
         pending_rpc_calls_[packet.request_id] = pending;
     }
 
-    std::string encoded = packet.Encode();
-    std::vector<uint8_t> data(encoded.begin(), encoded.end());
-
     RpcPacket response_packet = co_await asio::async_initiate<decltype(asio::use_awaitable), void(RpcPacket)>(
-        [self, pending, packet, data](auto handler) mutable {
+        [self, pending, packet](auto handler) mutable {
             auto handler_ptr = std::make_shared<decltype(handler)>(std::move(handler));
             RpcPacket cancelled;
             cancelled.has_error = true;
@@ -3133,13 +3266,24 @@ asio::awaitable<std::string> Room::SendRpcRequest(const RpcPacket& packet) {
                     }
                     std::error_code ec;
                     pending->timer->cancel(ec);
+                    if (pending->ack_timer) pending->ack_timer->cancel(ec);
                     (*handler_ptr)(resp);
                 }, std::move(cancelled));
+            bool cancelled_before_registration = false;
             {
                 std::lock_guard lock(self->pending_rpc_mutex_);
-                pending->completion_cb = [weak = std::weak_ptr<Completion>(completion)](const RpcPacket& resp) {
-                    if (auto live = weak.lock()) live->Complete(resp);
-                };
+                cancelled_before_registration = pending->finished;
+                if (!cancelled_before_registration)
+                    pending->completion_cb = [weak = std::weak_ptr<Completion>(completion)](const RpcPacket& resp) {
+                        if (auto live = weak.lock()) live->Complete(resp);
+                    };
+            }
+            if (cancelled_before_registration) {
+                RpcPacket failure; failure.has_error = true;
+                failure.error_code = static_cast<int>(RpcErrorCode::NETWORK_ERROR);
+                failure.error_message = "RPC session retired before send";
+                completion->Complete(std::move(failure));
+                return;
             }
             pending->timer->async_wait([completion](const std::error_code& ec) {
                 if (!ec) {
@@ -3151,15 +3295,29 @@ asio::awaitable<std::string> Room::SendRpcRequest(const RpcPacket& packet) {
                 }
             });
 
-            // 在 completion_cb 与定时器就绪后，再执行网络发包
-            self->PublishData(data, /*reliable=*/true, {packet.destination_identity}, /*topic=*/"lk.rpc");
+            if (pending->ack_timer) pending->ack_timer->async_wait([completion](const std::error_code& ec) {
+                if (!ec) {
+                    RpcPacket failure; failure.has_error = true;
+                    failure.error_code = static_cast<int>(RpcErrorCode::CONNECTION_TIMEOUT);
+                    failure.error_message = "RPC acknowledgement timed out";
+                    completion->Complete(std::move(failure));
+                }
+            });
+            if (!self->PublishRpcPacket(packet, pending->generation, pending->context)) {
+                RpcPacket failure;
+                failure.has_error = true;
+                failure.error_code = static_cast<int>(RpcErrorCode::NETWORK_ERROR);
+                failure.error_message = "RPC send was not admitted";
+                completion->Complete(std::move(failure));
+            }
         },
         asio::use_awaitable
     );
 
     {
         std::lock_guard<std::mutex> lock(pending_rpc_mutex_);
-        pending_rpc_calls_.erase(packet.request_id);
+        const auto current = pending_rpc_calls_.find(packet.request_id);
+        if (current != pending_rpc_calls_.end() && current->second == pending) pending_rpc_calls_.erase(current);
     }
 
     if (response_packet.has_error) {
@@ -3170,20 +3328,50 @@ asio::awaitable<std::string> Room::SendRpcRequest(const RpcPacket& packet) {
 }
 
 void Room::OnIncomingRpcPacket(const RpcPacket& packet) {
-    OnIncomingRpcPacket(packet, session_generation_.load(std::memory_order_acquire));
+    std::shared_ptr<E2eeManager> policy;
+    uint64_t generation = 0, revision = 0;
+    {
+        std::lock_guard lock(room_mutex_);
+        policy = e2ee_manager_;
+        generation = session_generation_.load(std::memory_order_acquire);
+        // This legacy entry has no authenticated envelope. Required callers
+        // must enter through OnIncomingDataPacket instead.
+        if (policy && policy->enabled() && policy->encryption_type() != EncryptionType::NONE) return;
+        if (policy) revision = policy->data_packet_state().policy_revision;
+    }
+    OnIncomingRpcPacket(packet, generation, std::move(policy), std::nullopt, revision);
 }
 
-void Room::OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation) {
-    if (packet.type == RpcPacketType::Response) {
+void Room::OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation,
+    std::shared_ptr<E2eeManager> encryption_owner, std::optional<SenderContext> sender,
+    uint64_t encryption_revision) {
+    const auto admitted = [this, generation, encryption_owner, sender, encryption_revision] {
+        return IsNativeGenerationCurrentLocked(generation) &&
+            e2ee_manager_ == encryption_owner &&
+            (!encryption_owner ||
+                encryption_owner->data_packet_state().policy_revision == encryption_revision) &&
+            (!sender || IsSenderInstanceActive(*sender)) &&
+            (!(e2ee_manager_ && e2ee_manager_->enabled() &&
+               e2ee_manager_->encryption_type() != EncryptionType::NONE) || encryption_owner);
+    };
+    if (packet.type == RpcPacketType::Response || packet.type == RpcPacketType::Ack) {
         std::shared_ptr<PendingRpcCall> pending;
         std::function<void(const RpcPacket&)> completion;
         {
             std::lock_guard room_lock(room_mutex_);
-            if (!IsNativeGenerationCurrentLocked(generation)) return;
+            if (!admitted()) return;
             std::lock_guard<std::mutex> lock(pending_rpc_mutex_);
             auto it = pending_rpc_calls_.find(packet.request_id);
             if (it != pending_rpc_calls_.end()) {
                 pending = it->second;
+                if (pending->destination != packet.caller_identity || pending->wire_format != packet.wire_format ||
+                    pending->generation != generation || pending->context.manager != encryption_owner ||
+                    pending->context.policy_revision != encryption_revision) return;
+                if (packet.type == RpcPacketType::Ack) {
+                    std::error_code ec;
+                    if (pending->ack_timer) pending->ack_timer->cancel(ec);
+                    return;
+                }
                 completion = pending->completion_cb;
                 pending_rpc_calls_.erase(it);
             }
@@ -3193,28 +3381,36 @@ void Room::OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation) {
         std::shared_ptr<LocalParticipant> local;
         {
             std::lock_guard lock(room_mutex_);
-            if (!IsNativeGenerationCurrentLocked(generation)) return;
+            if (!admitted()) return;
             local = local_participant_;
         }
         if (!local) return;
-
+        const OutgoingStreamContext reply_context{encryption_owner, local, encryption_revision};
+        if (packet.wire_format == RpcWireFormat::ProtobufV1) {
+            RpcPacket ack; ack.type = RpcPacketType::Ack; ack.request_id = packet.request_id;
+            ack.destination_identity = packet.caller_identity;
+            if (!PublishRpcPacket(ack, generation, reply_context)) return;
+        }
         auto handler = local->getRpcHandler(packet.method);
         auto self = shared_from_this();
 
-        if (!handler) {
+        const bool invalid_version = packet.version !=
+            (packet.wire_format == RpcWireFormat::StreamV2 ? 2u : 1u);
+        const bool oversized = packet.wire_format != RpcWireFormat::StreamV2 &&
+            packet.payload.size() > RpcPacket::kMaxPayloadBytes;
+        if (!handler || invalid_version || packet.unsupported_encoding || oversized) {
             RpcPacket err_resp;
+            err_resp.wire_format = packet.wire_format;
             err_resp.type = RpcPacketType::Response;
             err_resp.request_id = packet.request_id;
             err_resp.method = packet.method;
             err_resp.caller_identity = local->identity();
             err_resp.destination_identity = packet.caller_identity;
             err_resp.has_error = true;
-            err_resp.error_code = static_cast<int>(RpcErrorCode::UNSUPPORTED_METHOD);
-            err_resp.error_message = "Method '" + packet.method + "' is not supported by " + local->identity();
-
-            std::string encoded = err_resp.Encode();
-            std::vector<uint8_t> data(encoded.begin(), encoded.end());
-            PublishData(data, /*reliable=*/true, {packet.caller_identity}, "lk.rpc", generation);
+            err_resp.error_code = static_cast<int>(invalid_version || packet.unsupported_encoding ? RpcErrorCode::UNSUPPORTED_VERSION :
+                oversized ? RpcErrorCode::REQUEST_PAYLOAD_TOO_LARGE : RpcErrorCode::UNSUPPORTED_METHOD);
+            err_resp.error_message = "RPC request is unsupported";
+            PublishRpcPacket(err_resp, generation, reply_context);
             return;
         }
 
@@ -3224,12 +3420,13 @@ void Room::OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation) {
         inv_data.payload = packet.payload;
         inv_data.response_timeout_sec = packet.timeout_sec;
 
-        livekit::safe_co_spawn(executor_, [self, local, handler, inv_data, packet, generation]() -> asio::awaitable<void> {
+        livekit::safe_co_spawn(executor_, [self, local, handler, inv_data, packet, generation, admitted, reply_context]() -> asio::awaitable<void> {
             {
                 std::lock_guard lock(self->room_mutex_);
-                if (!self->IsNativeGenerationCurrentLocked(generation)) co_return;
+                if (!admitted() || self->local_participant_ != local) co_return;
             }
             RpcPacket resp;
+            resp.wire_format = packet.wire_format;
             resp.type = RpcPacketType::Response;
             resp.request_id = packet.request_id;
             resp.method = packet.method;
@@ -3252,9 +3449,11 @@ void Room::OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation) {
                 resp.error_message = "Unknown exception in RPC handler";
             }
 
-            std::string encoded = resp.Encode();
-            std::vector<uint8_t> data(encoded.begin(), encoded.end());
-            self->PublishData(data, /*reliable=*/true, {packet.caller_identity}, "lk.rpc", generation);
+            {
+                std::lock_guard lock(self->room_mutex_);
+                if (!admitted() || self->local_participant_ != local) co_return;
+            }
+            self->PublishRpcPacket(resp, generation, reply_context);
         });
     }
 }
@@ -3424,19 +3623,36 @@ void Room::OnIncomingDataPacketAt(
     bool is_structured_chat = false;
     EncryptionType encryption_type = EncryptionType::NONE;
     std::shared_ptr<E2eeManager> decrypt_owner;
+    std::shared_ptr<E2eeManager> receive_policy;
+    uint64_t receive_policy_revision = 0;
+    {
+        std::lock_guard lock(room_mutex_);
+        receive_policy = e2ee_manager_;
+        if (receive_policy) receive_policy_revision = receive_policy->data_packet_state().policy_revision;
+    }
     SenderContext packet_sender;
     std::shared_ptr<Participant> packet_participant;
     bool sender_captured = false;
     // Called only with room_mutex_ held, at each state/event commit.
     const auto can_commit = [&] {
         return IsNativeGenerationCurrentLocked(generation) &&
+            e2ee_manager_ == receive_policy &&
+            (!receive_policy || receive_policy->data_packet_state().policy_revision == receive_policy_revision) &&
             (!decrypt_owner || (e2ee_manager_ == decrypt_owner && decrypt_owner->enabled())) &&
             (!sender_captured || IsSenderInstanceActive(packet_sender));
     };
 
     // 尝试反序列化 Protobuf DataPacket
     proto::DataPacket data_pkt;
-    if (data_pkt.ParseFromArray(payload.data(), static_cast<int>(payload.size()))) {
+    const bool parsed = data_pkt.ParseFromArray(payload.data(), static_cast<int>(payload.size()));
+    {
+        std::lock_guard lock(room_mutex_);
+        if (!can_commit()) return;
+        if (e2ee_manager_ && e2ee_manager_->enabled() &&
+            e2ee_manager_->encryption_type() != EncryptionType::NONE &&
+            (!parsed || !data_pkt.has_encrypted_packet())) return;
+    }
+    if (parsed) {
         if (!data_pkt.participant_identity().empty()) {
             sender_identity = data_pkt.participant_identity();
         }
@@ -3489,10 +3705,39 @@ void Room::OnIncomingDataPacketAt(
                 *data_pkt.mutable_user() = inner.user();
             else if (inner.has_chat_message())
                 *data_pkt.mutable_chat_message() = inner.chat_message();
+            else if (inner.has_rpc_request()) *data_pkt.mutable_rpc_request() = inner.rpc_request();
+            else if (inner.has_rpc_ack()) *data_pkt.mutable_rpc_ack() = inner.rpc_ack();
+            else if (inner.has_rpc_response()) *data_pkt.mutable_rpc_response() = inner.rpc_response();
             else
                 return; // Unsupported/empty inner values are never application raw data.
             if (hooks && hooks->after_decrypt_before_commit)
                 hooks->after_decrypt_before_commit();
+        }
+        if (data_pkt.has_rpc_request() || data_pkt.has_rpc_ack() || data_pkt.has_rpc_response()) {
+            RpcPacket rpc;
+            rpc.caller_identity = sender_identity;
+            if (sender_identity.empty()) return;
+            {
+                std::lock_guard lock(room_mutex_);
+                if (!can_commit()) return;
+            }
+            if (data_pkt.has_rpc_request()) {
+                const auto& request = data_pkt.rpc_request();
+                rpc.request_id = request.id(); rpc.method = request.method(); rpc.payload = request.payload();
+                rpc.timeout_sec = request.response_timeout_ms() / 1000.0;
+                rpc.version = request.version(); rpc.unsupported_encoding = !request.compressed_payload().empty();
+            } else if (data_pkt.has_rpc_ack()) {
+                rpc.type = RpcPacketType::Ack; rpc.request_id = data_pkt.rpc_ack().request_id();
+            } else {
+                const auto& response = data_pkt.rpc_response();
+                rpc.type = RpcPacketType::Response; rpc.request_id = response.request_id(); rpc.payload = response.payload();
+                rpc.has_error = response.has_error() || !response.compressed_payload().empty() || rpc.payload.size() > RpcPacket::kMaxPayloadBytes;
+                rpc.error_code = response.has_error() ? RpcPacket::FromWireError(response.error().code()) : static_cast<int>(RpcErrorCode::RESPONSE_PAYLOAD_TOO_LARGE);
+                rpc.error_message = response.has_error() ? response.error().message() : "Unsupported RPC response payload";
+            }
+            if (rpc.request_id.empty()) return;
+            OnIncomingRpcPacket(rpc, generation, receive_policy, packet_sender, receive_policy_revision);
+            return;
         }
         if (data_pkt.has_stream_header()) {
             const auto& header = data_pkt.stream_header();
@@ -3505,6 +3750,33 @@ void Room::OnIncomingDataPacketAt(
             std::shared_ptr<ByteStreamReader> byte_reader;
             std::vector<std::shared_ptr<RoomListener>> listeners_snapshot;
             bool invalid_declared_length = false;
+            const bool reserved_rpc = header.topic() == "lk.rpc_request" || header.topic() == "lk.rpc_response";
+            std::optional<RpcPacket> stream_rpc;
+            OutgoingStreamContext rpc_ack_context;
+            if (reserved_rpc) {
+                // This client originates v1 requests, so v2 responses are unsolicited.
+                if (!header.has_text_header() || header.topic() != "lk.rpc_request") return;
+                const auto& attrs = header.attributes();
+                auto id = attrs.find("lk.rpc_request_id");
+                auto method = attrs.find("lk.rpc_request_method");
+                auto timeout = attrs.find("lk.rpc_request_response_timeout_ms");
+                auto version = attrs.find("lk.rpc_request_version");
+                if (id == attrs.end() || id->second.empty() || method == attrs.end() ||
+                    method->second.empty() || timeout == attrs.end() || version == attrs.end() ||
+                    version->second != "2") return;
+                RpcPacket rpc;
+                rpc.wire_format = RpcWireFormat::StreamV2; rpc.version = 2;
+                rpc.request_id = id->second; rpc.method = method->second;
+                rpc.caller_identity = sender_identity;
+                try {
+                    size_t consumed = 0;
+                    const auto ms = std::stoull(timeout->second, &consumed);
+                    if (consumed != timeout->second.size() || ms > 300000) return;
+                    rpc.timeout_sec = ms / 1000.0;
+                } catch (...) { return; }
+                stream_rpc = std::move(rpc);
+            }
+
 
             if (header.has_text_header()) {
                 TextStreamInfo info;
@@ -3566,7 +3838,8 @@ void Room::OnIncomingDataPacketAt(
                     if (text_reader->admitted() &&
                         !text_reader->is_closed()) {
                         active_text_readers_[header.stream_id()] = {
-                            text_reader, encryption_type, sender};
+                            text_reader, encryption_type, sender, stream_rpc, receive_policy, receive_policy_revision};
+                        if (reserved_rpc) rpc_ack_context = {receive_policy, local_participant_, receive_policy_revision};
                         incoming_stream_deadlines_[header.stream_id()] =
                             now + incoming_reader_budget_->limits()
                                       .stream_ttl;
@@ -3574,6 +3847,7 @@ void Room::OnIncomingDataPacketAt(
                     } else {
                         incoming_data_streams_->Discard(header.stream_id());
                     }
+                    if (!reserved_rpc) {
                     ParticipantEvent event = p
                         ? MakeParticipantEventLocked(
                             ParticipantEventKind::TextStreamOpened,
@@ -3583,11 +3857,22 @@ void Room::OnIncomingDataPacketAt(
                     event.kind = ParticipantEventKind::TextStreamOpened;
                     event.sender = sender;
                     event.text_reader = text_reader;
-                    EnqueueParticipantEventLocked(std::move(event), decrypt_owner);
+                    EnqueueParticipantEventLocked(std::move(event), receive_policy, receive_policy_revision);
                     listeners_snapshot = listeners_;
+                    }
+                }
+                if (reserved_rpc && text_reader->admitted() && !text_reader->is_closed()) {
+                    RpcPacket ack; ack.type = RpcPacketType::Ack;
+                    ack.request_id = stream_rpc->request_id; ack.destination_identity = sender_identity;
+                    if (!PublishRpcPacket(ack, generation, rpc_ack_context)) {
+                        std::lock_guard lk(room_mutex_);
+                        if (const auto it = active_text_readers_.find(header.stream_id());
+                            it != active_text_readers_.end() && it->second.reader == text_reader)
+                            RetireIncomingReaderLocked(header.stream_id(), kDataStreamAssemblyRejected);
+                    }
                 }
                 for (const auto& listener : listeners_snapshot) {
-                    DeliverListener({generation, {}, true, false, decrypt_owner}, listener, [&](RoomListener& target) {
+                    DeliverListener({generation, {}, true, false, receive_policy, {}, receive_policy_revision}, listener, [&](RoomListener& target) {
                         target.OnTextStreamOpened(text_reader, p);
                     }, true);
                 }
@@ -3646,7 +3931,7 @@ void Room::OnIncomingDataPacketAt(
                     if (byte_reader->admitted() &&
                         !byte_reader->is_closed()) {
                         active_byte_readers_[header.stream_id()] = {
-                            byte_reader, encryption_type, sender};
+                            byte_reader, encryption_type, sender, {}, receive_policy, receive_policy_revision};
                         incoming_stream_deadlines_[header.stream_id()] =
                             now + incoming_reader_budget_->limits()
                                       .stream_ttl;
@@ -3663,11 +3948,11 @@ void Room::OnIncomingDataPacketAt(
                     event.kind = ParticipantEventKind::ByteStreamOpened;
                     event.sender = sender;
                     event.byte_reader = byte_reader;
-                    EnqueueParticipantEventLocked(std::move(event), decrypt_owner);
+                    EnqueueParticipantEventLocked(std::move(event), receive_policy, receive_policy_revision);
                     listeners_snapshot = listeners_;
                 }
                 for (const auto& listener : listeners_snapshot) {
-                    DeliverListener({generation, {}, true, false, decrypt_owner}, listener, [&](RoomListener& target) {
+                    DeliverListener({generation, {}, true, false, receive_policy, {}, receive_policy_revision}, listener, [&](RoomListener& target) {
                         target.OnByteStreamOpened(byte_reader, p);
                     }, true);
                 }
@@ -3683,6 +3968,15 @@ void Room::OnIncomingDataPacketAt(
                 if (!can_commit()) return;
                 const auto text = active_text_readers_.find(chunk.stream_id());
                 const auto bytes = active_byte_readers_.find(chunk.stream_id());
+                if ((text != active_text_readers_.end() &&
+                     (text->second.policy != receive_policy || text->second.policy_revision != receive_policy_revision)) ||
+                    (bytes != active_byte_readers_.end() &&
+                     (bytes->second.policy != receive_policy || bytes->second.policy_revision != receive_policy_revision))) {
+                    RetireIncomingReaderLocked(chunk.stream_id(), kDataStreamEncryptionTypeMismatch);
+                    incoming_data_streams_->Discard(chunk.stream_id());
+                    ScheduleIncomingStreamCleanupLocked(generation);
+                    return;
+                }
                 if ((text != active_text_readers_.end() &&
                      !SameSenderInstance(text->second.sender, packet_sender)) ||
                     (bytes != active_byte_readers_.end() &&
@@ -3752,6 +4046,7 @@ void Room::OnIncomingDataPacketAt(
                     ScheduleIncomingStreamCleanupLocked(generation);
                     return;
                 }
+                if (text != active_text_readers_.end() && text->second.rpc) assembled.reset();
                 if (reader_accepted) {
                     incoming_stream_deadlines_[chunk.stream_id()] =
                         now + incoming_reader_budget_->limits().stream_ttl;
@@ -3767,6 +4062,8 @@ void Room::OnIncomingDataPacketAt(
             real_sender_sid = std::move(assembled->sender_sid);
         } else if (data_pkt.has_stream_trailer()) {
             const auto& trailer = data_pkt.stream_trailer();
+            std::shared_ptr<TextStreamReader> rpc_reader;
+            std::optional<RpcPacket> completed_rpc;
 
             std::optional<AssembledDataStream> assembled;
             {
@@ -3774,6 +4071,15 @@ void Room::OnIncomingDataPacketAt(
                 if (!can_commit()) return;
                 const auto text = active_text_readers_.find(trailer.stream_id());
                 const auto bytes = active_byte_readers_.find(trailer.stream_id());
+                if ((text != active_text_readers_.end() &&
+                     (text->second.policy != receive_policy || text->second.policy_revision != receive_policy_revision)) ||
+                    (bytes != active_byte_readers_.end() &&
+                     (bytes->second.policy != receive_policy || bytes->second.policy_revision != receive_policy_revision))) {
+                    RetireIncomingReaderLocked(trailer.stream_id(), kDataStreamEncryptionTypeMismatch);
+                    incoming_data_streams_->Discard(trailer.stream_id());
+                    ScheduleIncomingStreamCleanupLocked(generation);
+                    return;
+                }
                 if ((text != active_text_readers_.end() &&
                      !SameSenderInstance(text->second.sender, packet_sender)) ||
                     (bytes != active_byte_readers_.end() &&
@@ -3813,6 +4119,10 @@ void Room::OnIncomingDataPacketAt(
                     trailer.reason().empty() && assembler_was_active &&
                     !assembled;
                 if (text != active_text_readers_.end()) {
+                    if (text->second.rpc) {
+                        completed_rpc = text->second.rpc;
+                        rpc_reader = text->second.reader;
+                    }
                     if (incomplete_normal_stream) {
                         text->second.reader->OnStreamError(kDataStreamAssemblyRejected);
                     } else {
@@ -3830,6 +4140,14 @@ void Room::OnIncomingDataPacketAt(
                 }
                 incoming_stream_deadlines_.erase(trailer.stream_id());
                 ScheduleIncomingStreamCleanupLocked(generation);
+            }
+            if (completed_rpc) {
+                if (rpc_reader->is_closed() && !rpc_reader->is_failed()) {
+                    try { completed_rpc->payload = rpc_reader->ReadAll(); }
+                    catch (...) { return; } // Never dispatch a failed or over-budget stream.
+                    OnIncomingRpcPacket(*completed_rpc, generation, receive_policy, packet_sender, receive_policy_revision);
+                }
+                return;
             }
             if (!assembled) {
                 return;
@@ -3853,12 +4171,12 @@ void Room::OnIncomingDataPacketAt(
 
     // 1. 优先校验解包 LiveKit RPC 报文 (Topic 为 lk.rpc)
     if (real_topic == "lk.rpc") {
-        // Encrypted RPC is not wired by this stream/user/chat receive adapter.
-        if (decrypt_owner) return;
+
         std::string text_payload(real_payload.begin(), real_payload.end());
         auto rpc_pkt_opt = RpcPacket::Decode(text_payload);
         if (rpc_pkt_opt.has_value()) {
-            OnIncomingRpcPacket(rpc_pkt_opt.value(), generation);
+            if (decrypt_owner && rpc_pkt_opt->caller_identity != sender_identity) return;
+            OnIncomingRpcPacket(rpc_pkt_opt.value(), generation, receive_policy, packet_sender, receive_policy_revision);
             return;
         }
     }
@@ -3889,7 +4207,7 @@ void Room::OnIncomingDataPacketAt(
         chat.sender_identity = !sender_identity.empty() ? sender_identity : (remote_p ? remote_p->identity() : real_sender_sid);
         std::shared_ptr<Participant> p = remote_p ? remote_p : (local_p && (local_p->sid() == real_sender_sid || local_p->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_p) : nullptr);
         for (const auto& listener : listeners_snapshot) {
-            DeliverListener({generation, {}, true, false, decrypt_owner}, listener, [&](RoomListener& target) {
+            DeliverListener({generation, {}, true, false, receive_policy, {}, receive_policy_revision}, listener, [&](RoomListener& target) {
                 target.OnChatMessage(chat, p);
             });
         }
@@ -3900,7 +4218,7 @@ void Room::OnIncomingDataPacketAt(
         if (chat_opt.has_value()) {
             std::shared_ptr<Participant> p = remote_p ? remote_p : (local_p && (local_p->sid() == real_sender_sid || local_p->identity() == sender_identity) ? std::static_pointer_cast<Participant>(local_p) : nullptr);
             for (const auto& listener : listeners_snapshot) {
-                DeliverListener({generation, {}, true, false, decrypt_owner}, listener, [&](RoomListener& target) {
+                DeliverListener({generation, {}, true, false, receive_policy, {}, receive_policy_revision}, listener, [&](RoomListener& target) {
                     target.OnChatMessage(chat_opt.value(), p);
                 });
             }
@@ -3923,10 +4241,10 @@ void Room::OnIncomingDataPacketAt(
             event.sender = sender_context;
             event.data = real_payload;
             event.topic = real_topic;
-            EnqueueParticipantEventLocked(std::move(event), decrypt_owner);
+            EnqueueParticipantEventLocked(std::move(event), receive_policy, receive_policy_revision);
         }
         for (const auto& listener : listeners_snapshot) {
-            DeliverListener({generation, {}, true, false, decrypt_owner}, listener, [&](RoomListener& target) {
+            DeliverListener({generation, {}, true, false, receive_policy, {}, receive_policy_revision}, listener, [&](RoomListener& target) {
                 target.OnDataReceived(real_payload, remote_p, real_topic);
             }, true);
         }
@@ -4159,6 +4477,14 @@ Room::PendingOperationCleanup Room::TakePendingOperationsLocked() {
     incoming_data_streams_ = std::make_unique<IncomingDataStreamAssembler>();
     incoming_reader_budget_ = std::make_shared<DataStreamReaderBudget>();
     PendingOperationCleanup pending;
+    {
+        std::lock_guard lock(pending_rpc_mutex_);
+        for (auto& [id, call] : pending_rpc_calls_) {
+            call->finished = true;
+            if (call->completion_cb) pending.rpc_completions.push_back(std::move(call->completion_cb));
+        }
+        pending_rpc_calls_.clear();
+    }
     for (const auto& waiter : pending_pc_waits_) {
         pending.void_states.push_back(waiter.completion);
     }
@@ -4181,6 +4507,10 @@ Room::PendingOperationCleanup Room::TakePendingOperationsLocked() {
     }
     pending_track_publishes_.clear();
     published_sender_track_ids_.clear();
+    if (!reconnect_active_) {
+        media_publication_policies_.clear();
+        if (!publisher_pc_ && !subscriber_pc_) native_e2ee_policy_.reset();
+    }
     return pending;
 }
 
@@ -4188,6 +4518,11 @@ void Room::FailPendingOperations(PendingOperationCleanup pending,
                                  OperationErrorCode code,
                                  const std::string& stage,
                                  const std::string& message) {
+    RpcPacket rpc_failure;
+    rpc_failure.has_error = true;
+    rpc_failure.error_code = static_cast<int>(RpcErrorCode::NETWORK_ERROR);
+    rpc_failure.error_message = "RPC session retired";
+    for (auto& complete : pending.rpc_completions) complete(rpc_failure);
     for (const auto& state : pending.void_states) {
         FailAwaitable(state, std::make_exception_ptr(OperationError(
             OperationKind::Connect, code, stage, message, true)));
@@ -4366,6 +4701,13 @@ void Room::DetachRemoteTrackSinks(std::vector<RemoteTrackSinkBinding> bindings) 
     for (auto& binding : bindings) {
         if (binding.media_binding) {
             binding.media_binding->active.store(false, std::memory_order_release);
+        }
+        if (binding.retire_crypto) {
+            try { binding.retire_crypto(); }
+            catch (...) {
+                diagnostic::EmitBusinessEvent(
+                    diagnostic::Event::Issue(diagnostic::IssueCode::NativeCleanupFailed));
+            }
         }
         if (binding.telemetry_probe) {
             binding.telemetry_probe->active.store(false, std::memory_order_release);
@@ -5409,7 +5751,8 @@ Room::AddTrackToPublisherAsync(
     std::shared_ptr<Track> track,
     uint64_t generation,
     std::optional<VideoPublishOptions> video_publish_options,
-    std::optional<AudioPublishPolicy> audio_publish_policy) {
+    std::optional<AudioPublishPolicy> audio_publish_policy,
+    bool require_encryption) {
     auto operation_admission = AdmitOperation(OperationKind::PublishTrack, "AddTrackToPublisherAsync");
     if (!track) {
         throw OperationError(OperationKind::PublishTrack,
@@ -5420,6 +5763,8 @@ Room::AddTrackToPublisherAsync(
 
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> pc;
     std::string stream_id;
+    std::string encryption_identity;
+    std::shared_ptr<E2eeManager> encryption;
     {
         std::lock_guard lock(room_mutex_);
         if (generation != session_generation_.load(std::memory_order_acquire) ||
@@ -5432,6 +5777,12 @@ Room::AddTrackToPublisherAsync(
         pc = publisher_pc_;
         stream_id = "livekit_stream_" +
             (local_participant_ ? local_participant_->identity() : "local");
+        encryption_identity = local_participant_ ? local_participant_->identity() : "";
+        encryption = e2ee_manager_;
+    }
+    if (require_encryption && (!encryption || !encryption->enabled())) {
+        throw OperationError(OperationKind::PublishTrack, OperationErrorCode::EncryptionFailed,
+            "e2ee_sender_admission", "encryption policy changed before sender installation", false);
     }
     if (!pc || !WebRTCManager::Instance().factory() ||
         !WebRTCManager::Instance().signaling_thread()) {
@@ -5503,11 +5854,15 @@ Room::AddTrackToPublisherAsync(
         AudioPublishPolicy audio_publish_policy;
         uint64_t generation = 0;
         bool screen_share = false;
+        std::shared_ptr<E2eeManager> encryption;
+        std::string encryption_identity;
+        bool require_encryption = false;
     };
     auto* params = new AddTrackTaskParams{
         shared_from_this(), completion, pc, rtc_track, stream_id,
         std::move(publish_options), std::move(resolved_audio_policy),
-        generation, track->source() == TrackSource::ScreenShareVideo};
+        generation, track->source() == TrackSource::ScreenShareVideo,
+        encryption, encryption_identity, require_encryption};
     WebRTCManager::Instance().signaling_thread()->PostTask(
         [params]() {
             // Destruction happens in this translation unit rather than in the
@@ -5763,6 +6118,24 @@ Room::AddTrackToPublisherAsync(
                     "install_sender",
                     "session changed during sender installation")));
                 return;
+            }
+            if (task.require_encryption) {
+                try {
+                    for (const auto& protected_sender : bundle.senders) {
+                        auto cryptor = task.encryption->CreateSenderCryptor(
+                            WebRTCManager::Instance().signaling_thread(), task.encryption_identity,
+                            protected_sender->track()->id(), task.rtc_track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind ? task.publish_options.video_codec : "opus",
+                            task.generation);
+                        if (!cryptor) throw std::runtime_error("media cryptor unavailable");
+                        protected_sender->SetFrameTransformer(std::move(cryptor));
+                    }
+                } catch (...) {
+                    task.room->RollbackPublishedSenderBundle(task.pc, bundle);
+                    FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                        OperationKind::PublishTrack, OperationErrorCode::EncryptionFailed,
+                        "e2ee_sender_binding", "media protection could not be installed; retry with a valid key", false)));
+                    return;
+                }
             }
             PublishedSenderBundle completed = bundle;
             if (!CompleteAwaitable(task.completion, std::move(completed))) {
@@ -6037,6 +6410,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
     std::shared_ptr<Track> track,
     const proto::SignalRequest& request) {
     auto operation_admission = AdmitOperation(OperationKind::PublishTrack, "PublishLocalTrackAsync");
+    auto media_policy = AcquireMediaPublishPolicy();
     co_return co_await PublishLocalTrackAsync(std::move(track), request,
         session_generation_.load(std::memory_order_acquire));
 }
@@ -6114,6 +6488,33 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
         }
     }
 
+    // Encryption admission belongs to the resolved plan, before AddTrack or
+    // native sender side effects. Never preserve an untrusted caller GCM flag.
+    std::shared_ptr<E2eeManager> publish_e2ee;
+    {
+        std::lock_guard lock(room_mutex_);
+        publish_e2ee = e2ee_manager_;
+    }
+    if (publish_e2ee && publish_e2ee->enabled()) {
+        const auto local = local_participant();
+        const auto codec = video_plan ? video_plan->effective_codec : std::string("opus");
+        if ((track->kind() == TrackKind::Video && !video_plan) ||
+            (codec != "opus" && codec != "vp8" && codec != "h264" && codec != "vp9") ||
+            publish_e2ee->encryption_type() != EncryptionType::GCM ||
+            (video_plan && video_plan->effective.simulcast_codecs.size() > 1)) {
+            throw OperationError(OperationKind::PublishTrack, OperationErrorCode::EncryptionCodecUnsupported,
+                "e2ee_codec_admission", "select a supported single-codec encrypted media profile", false,
+                codec, OperationRecoveryAction::SelectSupportedCodec);
+        }
+        if (!local || !publish_e2ee->CanPublishMedia(local->identity(), codec)) {
+            throw OperationError(OperationKind::PublishTrack, OperationErrorCode::EncryptionKeyUnavailable,
+                "e2ee_key_admission", "install the selected media key before publishing", false,
+                codec, OperationRecoveryAction::InstallEncryptionKey);
+        }
+        effective_request.mutable_add_track()->set_encryption(proto::Encryption::GCM);
+    } else {
+        effective_request.mutable_add_track()->set_encryption(proto::Encryption::NONE);
+    }
     const std::string cid = effective_request.add_track().cid();
     std::shared_ptr<SignalClient> signal;
     std::shared_ptr<LocalParticipant> local;
@@ -6209,7 +6610,8 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
                 : std::nullopt,
             audio_plan.has_value()
                 ? std::optional<AudioPublishPolicy>{audio_plan->effective}
-                : std::nullopt);
+                : std::nullopt,
+            effective_request.add_track().encryption() == proto::Encryption::GCM);
         co_await NegotiatePublisherAsync(timeouts.negotiation, generation);
         co_await ApplyPublishedSenderScalabilityModesAsync(
             sender_bundle, generation);
@@ -6234,6 +6636,8 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             track->set_sid(response.track().sid());
             local->add_publication(publication);
             published_sender_track_ids_[track.get()] = sender_bundle.track_ids;
+            media_publication_policies_[track.get()] = publish_e2ee
+                ? publish_e2ee->AcquireMediaPublishPolicy() : nullptr;
         }
         if (telemetry_owner && local_publication_epoch != 0) {
             const auto rtc_track = track->rtc_track();
@@ -6318,6 +6722,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
 asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLocalTracksBatchAsync(
     std::vector<LocalParticipant::BatchTrackItem> items) {
     auto operation_admission = AdmitOperation(OperationKind::PublishTrack, "PublishLocalTracksBatchAsync");
+    auto media_policy = AcquireMediaPublishPolicy();
     if (items.empty()) {
         co_return std::vector<std::shared_ptr<TrackPublication>>{};
     }
@@ -6393,6 +6798,25 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 Log("SIGNAL", "PUBLISH_AUDIO_RED_DISABLED",
                     "Audio RED disabled because media encryption is configured");
             }
+        }
+        if (planning_e2ee && planning_e2ee->enabled()) {
+            const auto codec = video_plans[index] ? video_plans[index]->effective_codec : std::string("opus");
+            if ((item.track->kind() == TrackKind::Video && !video_plans[index]) ||
+                (codec != "opus" && codec != "vp8" && codec != "h264" && codec != "vp9") ||
+                planning_e2ee->encryption_type() != EncryptionType::GCM ||
+                (video_plans[index] && video_plans[index]->effective.simulcast_codecs.size() > 1)) {
+                throw OperationError(OperationKind::PublishTrack, OperationErrorCode::EncryptionCodecUnsupported,
+                    "e2ee_codec_admission", "select a supported single-codec encrypted media profile", false,
+                    codec, OperationRecoveryAction::SelectSupportedCodec);
+            }
+            if (!planning_local || !planning_e2ee->CanPublishMedia(planning_local->identity(), codec)) {
+                throw OperationError(OperationKind::PublishTrack, OperationErrorCode::EncryptionKeyUnavailable,
+                    "e2ee_key_admission", "install the selected media key before publishing", false,
+                    codec, OperationRecoveryAction::InstallEncryptionKey);
+            }
+            eff_req.mutable_add_track()->set_encryption(proto::Encryption::GCM);
+        } else {
+            eff_req.mutable_add_track()->set_encryption(proto::Encryption::NONE);
         }
         effective_requests.push_back(std::move(eff_req));
     }
@@ -6520,7 +6944,8 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 audio_plans[index].has_value()
                     ? std::optional<AudioPublishPolicy>{
                         audio_plans[index]->effective}
-                    : std::nullopt));
+                    : std::nullopt,
+                effective_requests[index].add_track().encryption() == proto::Encryption::GCM));
         }
 
         // 单次全量 SDP 重协商
@@ -6554,6 +6979,8 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 local->add_publication(pub);
                 published_sender_track_ids_[items[i].track.get()] =
                     sender_bundles[i].track_ids;
+                media_publication_policies_[items[i].track.get()] = planning_e2ee
+                    ? planning_e2ee->AcquireMediaPublishPolicy() : nullptr;
                 publications.push_back(pub);
             }
         }
@@ -6940,6 +7367,7 @@ asio::awaitable<void> Room::RemoveLocalTrackFromPublisherAsync(
         std::lock_guard lock(room_mutex_);
         if (IsNativeGenerationCurrentLocked(generation)) {
             published_sender_track_ids_.erase(track.get());
+            media_publication_policies_.erase(track.get());
         }
     }
 }
@@ -7452,6 +7880,7 @@ void Room::AttachRemoteTrackToParticipant(
     std::chrono::steady_clock::time_point subscription_accepted_at;
     std::shared_ptr<MediaBindingState> media_binding;
     std::shared_ptr<SignalClient> signal;
+    std::shared_ptr<E2eeManager> receive_e2ee;
     webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> retired_rtc_track;
     bool native_enabled = true;
     double native_volume = 1.0;
@@ -7481,6 +7910,27 @@ void Room::AttachRemoteTrackToParticipant(
                     break;
                 }
             }
+        }
+
+        receive_e2ee = e2ee_manager_;
+        if (receive_e2ee && receive_e2ee->enabled() &&
+            (!pub || pub->encryption() != TrackEncryption::Gcm)) {
+            // Do not infer encryption from the presence of an RTP track. Keep
+            // the native channel/gate closed until TrackInfo declares GCM.
+            RemoveExpiredPendingTracks();
+            auto& pending = pending_track_queue_[participant->sid()];
+            const auto duplicate = std::any_of(pending.begin(), pending.end(), [&](const PendingTrack& item) {
+                return item.generation == generation && item.receiver == receiver && item.track_sid == track_id;
+            });
+            if (!duplicate) pending.push_back({generation, track, receiver, participant->sid(), track_id,
+                std::chrono::steady_clock::now() + std::chrono::seconds(15)});
+            if (pub && pub->encryption() != TrackEncryption::Unknown &&
+                pub->subscription_error() != TrackPublication::SubscriptionError::EncryptionRequired) {
+                pub->set_subscription_error(TrackPublication::SubscriptionError::EncryptionRequired);
+                EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                    ParticipantEventKind::TrackSubscriptionError, participant, pub, false));
+            }
+            return;
         }
 
         if (!pub) {
@@ -7515,6 +7965,7 @@ void Room::AttachRemoteTrackToParticipant(
         }
         subscription_revision = subscription_intent.revision;
         subscription_accepted_at = subscription_intent.accepted_at;
+        receive_e2ee = e2ee_manager_;
         binding_serial = next_remote_track_binding_serial_++;
         media_binding = std::make_shared<MediaBindingState>(
             MediaBindingKey{track_key, binding_serial});
@@ -7536,9 +7987,38 @@ void Room::AttachRemoteTrackToParticipant(
             remote_publication.get(), /*notify_listener=*/false, replaced_binding_serial);
     }
 
+    std::function<void()> retire_crypto;
+    bool receiver_committed = false;
+    const auto crypto_rollback = std::shared_ptr<void>(nullptr, [&](void*) {
+        if (!receiver_committed && retire_crypto) {
+            try { retire_crypto(); }
+            catch (...) {
+                diagnostic::EmitBusinessEvent(
+                    diagnostic::Event::Issue(diagnostic::IssueCode::NativeCleanupFailed));
+            }
+        }
+    });
+    if (receive_e2ee && receive_e2ee->enabled()) {
+        if (!receiver) return;
+        auto gate = EnsureReceiverCryptoGate(receiver, generation);
+        if (!gate) return;
+        auto active = std::shared_ptr<const std::atomic<bool>>(media_binding, &media_binding->active);
+        auto cryptor = receive_e2ee->CreateReceiverCryptor(
+            WebRTCManager::Instance().signaling_thread(), participant->identity(), track_id,
+            kind == TrackKind::Video, generation, std::move(active), &retire_crypto);
+        if (!cryptor) {
+            gate->SetTarget(binding_serial, nullptr);
+            return;
+        }
+        if (!gate->SetTarget(binding_serial, std::move(cryptor))) return;
+    }
+
     uint64_t superseded_binding_serial = 0;
     const auto retain_binding = [&](RemoteTrackSinkBinding& binding) {
+        binding.retire_crypto = retire_crypto;
+        binding.receiver = receiver;
         std::lock_guard lock(room_mutex_);
+        if (e2ee_manager_ != receive_e2ee) return false;
         if (generation != 0 && !IsNativeGenerationCurrentLocked(generation)) return false;
         const auto canonical = remote_participants_.find(participant->sid());
         const auto membership = FindMembershipLocked(participant);
@@ -7620,6 +8100,7 @@ void Room::AttachRemoteTrackToParticipant(
         }
         media_binding->active.store(true, std::memory_order_release);
         remote_track_sinks_.push_back(std::move(binding));
+        receiver_committed = true;
         if (remote_publication) {
             const auto existing_serial =
                 current_remote_binding_serials_.find(remote_publication.get());
@@ -8072,7 +8553,8 @@ void Room::OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface
     }
     if (duplicate) {
         if (duplicate_probe) duplicate_probe(same_track_object);
-        return;
+        // A reused RTC id is not an object identity. Resolve against the active
+        // binding below so a replacement receiver can take over its gate.
     }
 
     // 从 receiver 的 stream_ids 解包 (msid: <participantSid>|<trackSid>)
@@ -8117,11 +8599,19 @@ void Room::OnRemoteTrackResolved(
                 auto remote = std::dynamic_pointer_cast<RemoteTrackPublication>(publication);
                 if (!remote || !remote->has_media_binding() ||
                     remote->media_track_id() != track->id()) continue;
-                if (owner_sid == participant_sid && sid == track_sid &&
-                    remote->track() && remote->track()->rtc_track().get() == track.get()) {
-                    return;
-                }
                 const auto current = current_remote_binding_serials_.find(remote.get());
+                if (owner_sid == participant_sid && sid == track_sid &&
+                    remote->track() && remote->track()->rtc_track().get() == track.get() &&
+                    current != current_remote_binding_serials_.end()) {
+                    const auto binding = std::find_if(remote_track_sinks_.begin(),
+                        remote_track_sinks_.end(), [&](const auto& candidate) {
+                            return candidate.binding_serial == current->second &&
+                                candidate.receiver.get() == receiver.get() &&
+                                candidate.media_binding &&
+                                candidate.media_binding->active.load(std::memory_order_acquire);
+                        });
+                    if (binding != remote_track_sinks_.end()) return;
+                }
                 if (current != current_remote_binding_serials_.end()) {
                     old_bindings.emplace_back(std::move(remote), current->second);
                 }
@@ -8675,6 +9165,9 @@ void Room::UpdateParticipants(
     uint64_t event_generation) {
     std::vector<std::shared_ptr<RemoteParticipant>> newly_connected;
     std::vector<std::pair<std::shared_ptr<RemoteParticipant>, std::shared_ptr<TrackPublication>>> newly_published_tracks;
+    std::set<std::string> encryption_metadata_ready;
+    bool encryption_resume = false;
+    std::vector<std::pair<std::shared_ptr<RemoteTrackPublication>, uint64_t>> encryption_rejected_bindings;
     std::vector<std::pair<std::shared_ptr<RemoteParticipant>, std::shared_ptr<TrackPublication>>> unpublished_tracks;
     std::vector<std::shared_ptr<RemoteParticipant>> disconnected;
     struct AttrChange {
@@ -8886,6 +9379,11 @@ void Room::UpdateParticipants(
                 std::set<std::string> current_track_sids;
                 for (int t = 0; t < p_info.tracks_size(); ++t) {
                     const auto& t_info = p_info.tracks(t);
+                    // Signaling declaration only; never an authentication verdict.
+                    const auto encryption = t_info.encryption() == proto::Encryption::GCM
+                        ? TrackEncryption::Gcm : t_info.encryption() == proto::Encryption::NONE
+                        ? TrackEncryption::None : t_info.encryption() == proto::Encryption::CUSTOM
+                        ? TrackEncryption::Custom : TrackEncryption::Unknown;
                     current_track_sids.insert(t_info.sid());
                     auto pub = remote->get_publication(t_info.sid());
                     if (!pub) {
@@ -8903,6 +9401,7 @@ void Room::UpdateParticipants(
                                                            t_info.sid(),
                                                            t_info.name(),
                                                            t_info.type());
+                        pub->set_encryption(encryption);
                         remote->add_publication(pub);
                         const auto intent_key = MakeSubscriptionIntentKeyLocked(
                             remote->sid(), remote->identity(), t_info.sid());
@@ -8914,6 +9413,7 @@ void Room::UpdateParticipants(
                             ", muted=" + (t_info.muted() ? "true" : "false"));
                     } else {
                         // Metadata can arrive after an early RTC binding. Its
+                        pub->set_encryption(encryption);
                         // source is projected to the same track read by render.
                         if (pub->track()) pub->track()->set_source(TrackSourceFromProto(t_info.source()));
                         // 检测静音/画面开关状态变化
@@ -8927,6 +9427,26 @@ void Room::UpdateParticipants(
                                 false));
                             Log("TRACK", "MUTE_CHANGED", "Remote track state changed to: " +
                                 std::string(t_info.muted() ? "muted/off" : "on"));
+                        }
+                    }
+                    if (e2ee_manager_ && e2ee_manager_->enabled()) {
+                        encryption_metadata_ready.insert(remote->sid());
+                        if (encryption != TrackEncryption::Gcm) {
+                            pub->set_subscription_error(TrackPublication::SubscriptionError::EncryptionRequired);
+                            if (auto remote_pub = std::dynamic_pointer_cast<RemoteTrackPublication>(pub)) {
+                                const auto current = current_remote_binding_serials_.find(remote_pub.get());
+                                if (current != current_remote_binding_serials_.end()) {
+                                    if (auto binding = FindMediaBindingLocked(current->second)) binding->active.store(false);
+                                    encryption_rejected_bindings.emplace_back(remote_pub, current->second);
+                                }
+                            }
+                            EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                                ParticipantEventKind::TrackSubscriptionError, remote, pub, false));
+                        } else if (pub->subscription_error() == TrackPublication::SubscriptionError::EncryptionRequired) {
+                            encryption_resume = true;
+                            pub->set_subscription_error(TrackPublication::SubscriptionError::None);
+                            EnqueueParticipantEventLocked(MakeTrackEventLocked(
+                                ParticipantEventKind::TrackSubscriptionError, remote, pub, false));
                         }
                     }
                 }
@@ -9013,6 +9533,21 @@ void Room::UpdateParticipants(
     }
     DetachRemoteTrackSinks(TakeRemoteTrackSinksForTrackKeys(removed_track_keys));
     RemoveRemoteMediaTrackReferences(removed_tracks);
+
+    for (const auto& [publication, serial] : encryption_rejected_bindings)
+        DetachRemotePublicationMedia(publication.get(), true, serial);
+    for (const auto& sid : encryption_metadata_ready) FlushPendingTracks(sid, event_generation);
+    if (encryption_resume) {
+        webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher, subscriber;
+        {
+            std::lock_guard lock(room_mutex_);
+            if (IsNativeGenerationCurrentLocked(event_generation)) {
+                publisher = publisher_pc_; subscriber = subscriber_pc_;
+            }
+        }
+        if (subscriber) ReconcileRemoteReceivers(subscriber, event_generation);
+        if (publisher && publisher != subscriber) ReconcileRemoteReceivers(publisher, event_generation);
+    }
 
     for (const auto& p : newly_connected) {
         for (const auto& listener : listeners_snapshot) {
@@ -9175,10 +9710,96 @@ void Room::HandleSignalMessageForTesting(const proto::SignalResponse& message) {
     HandleSignalMessage(std::make_shared<proto::SignalResponse>(message));
 }
 
-void Room::EnableE2ee(const E2eeOptions& options) {
+std::shared_ptr<void> Room::AcquireMediaPublishPolicy() {
     std::lock_guard lock(room_mutex_);
+    auto manager_lease = e2ee_manager_ ? e2ee_manager_->AcquireMediaPublishPolicy() : nullptr;
+    auto self = shared_from_this();
+    media_publish_admissions_.fetch_add(1);
+    return std::shared_ptr<void>(nullptr, [self, manager_lease](void*) {
+        self->media_publish_admissions_.fetch_sub(1);
+    });
+}
+
+std::optional<MediaEncryptionStatus> Room::ReadMediaEncryptionStatus(uint64_t expected_generation) const {
+    std::lock_guard lock(room_mutex_);
+    if (!IsNativeGenerationCurrentLocked(expected_generation) ||
+        connection_state_ != ConnectionState::Connected || !e2ee_manager_) return std::nullopt;
+    return e2ee_manager_->ReadMediaStatus(expected_generation);
+}
+
+void Room::PostMediaEncryptionState(std::weak_ptr<E2eeManager> manager,
+    std::shared_ptr<const E2eeManager::MediaObservation> binding, EncryptionState state) {
+    if (!binding) return;
+    callback_gate_->Post([weak = weak_from_this(), manager, binding = std::move(binding), state] {
+        auto self = weak.lock();
+        if (!self) return;
+        ListenerDeliveryContext context{};
+        context.generation = binding->generation;
+        context.require_installed_owner = true;
+        context.media_encryption_binding = binding;
+        context.e2ee_owner = manager.lock();
+        if (!context.e2ee_owner) return;
+        MediaEncryptionEvent event;
+        event.participant_identity = binding->identity;
+        event.generation = binding->generation;
+        event.receiving = binding->receiving;
+        event.video = binding->video;
+        event.state = state;
+        if (binding->receiving) event.track_sid = binding->track;
+        else event.native_track_id = binding->track;
+        std::vector<std::shared_ptr<RoomListener>> listeners;
+        {
+            std::lock_guard lock(self->room_mutex_);
+            if (self->e2ee_manager_ != context.e2ee_owner ||
+                !self->IsNativeGenerationCurrentLocked(binding->generation)) return;
+            listeners = self->listeners_;
+        }
+        for (const auto& listener : listeners) {
+            self->DeliverListener(context, listener, [&](RoomListener& target) {
+                target.OnMediaEncryptionStateChanged(event);
+            });
+        }
+    });
+}
+
+bool Room::RecoverE2eeSharedKey(const std::shared_ptr<MeetingSecretHandle>& secret,
+                              uint64_t expected_generation) {
+    std::lock_guard lock(room_mutex_);
+    if (!secret) return false;
+    if (!IsNativeGenerationCurrentLocked(expected_generation) ||
+        connection_state_ != ConnectionState::Connected || !e2ee_manager_) {
+        secret->Revoke();
+        return false;
+    }
+    return e2ee_manager_->InstallRecoveryKey(secret);
+}
+
+void Room::EnableE2ee(const E2eeOptions& options) {
+#if defined(COHAVORA_E2EE_MEDIA_GUARD)
+    constexpr bool backendAvailable = true;
+#else
+    constexpr bool backendAvailable = false;
+#endif
+    // The packaged SDK alone lacks the pre-OnTrack media guard and the
+    // conditional key-epoch repair. Reject before allocating a manager or
+    // connecting, rather than exposing a partially protected Required room.
+    if (!backendAvailable && options.encryption_type != EncryptionType::NONE) {
+        throw OperationError(OperationKind::Connect, OperationErrorCode::EncryptionFailed,
+            "e2ee_backend_unavailable", "this build does not include the required E2EE backend");
+    }
+    std::lock_guard lock(room_mutex_);
+    if (publisher_pc_ || subscriber_pc_ || native_e2ee_policy_.use_count() != 0 ||
+        media_publish_admissions_.load() != 0 || !published_sender_track_ids_.empty() ||
+        !media_publication_policies_.empty() ||
+        (e2ee_manager_ && e2ee_manager_->HasActiveMediaBindings())) {
+        throw std::logic_error("retire media publications before replacing encryption policy");
+    }
     e2ee_manager_ = std::make_shared<E2eeManager>(options);
     std::weak_ptr<E2eeManager> manager = e2ee_manager_;
+    e2ee_manager_->SetMediaStateChangedHandler([weak = weak_from_this(), manager](
+        std::shared_ptr<const E2eeManager::MediaObservation> binding, EncryptionState state) {
+        if (auto self = weak.lock()) self->PostMediaEncryptionState(manager, std::move(binding), state);
+    });
     e2ee_manager_->SetStateChangedHandler([weak = weak_from_this(), manager](
         const std::string& identity, EncryptionState state) {
         if (auto self = weak.lock()) {
@@ -11000,6 +11621,8 @@ void Room::ClearTrackSubscriptionErrorLocked(
         publication->subscription_error() == TrackPublication::SubscriptionError::None) {
         return;
     }
+    if (e2ee_manager_ && e2ee_manager_->enabled() && publication->encryption() != TrackEncryption::Gcm &&
+        publication->subscription_error() == TrackPublication::SubscriptionError::EncryptionRequired) return;
     publication->set_subscription_error(TrackPublication::SubscriptionError::None);
     EnqueueParticipantEventLocked(MakeTrackEventLocked(
         ParticipantEventKind::TrackSubscriptionError, participant, publication, false));

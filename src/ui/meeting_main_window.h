@@ -54,6 +54,7 @@ private:
 
 // 加入会议弹窗
 class JoinMeetingDialog : public QDialog {
+    friend class MeetingEntryEncryptionTestAccess;
 	Q_OBJECT
 public:
 	explicit JoinMeetingDialog(
@@ -119,6 +120,7 @@ private:
 };
 
 class MeetingMainWindow : public Ui::RpWidget {
+    friend class MeetingEntryEncryptionTestAccess;
 public:
 	explicit MeetingMainWindow(QWidget *parent = nullptr);
 	~MeetingMainWindow() override = default;

@@ -468,6 +468,69 @@ message(STATUS
 # ASIO SSL objects cross target boundaries. The prefix kit remains a required
 # package artifact for rebuilding WebRTC, but is not a consumer compile option.
 add_library(cohavora_webrtc_sdk INTERFACE)
+set(COHAVORA_E2EE_BACKEND_PACKAGE_DIR "" CACHE PATH "Reviewed native E2EE overlay package directory")
+set(COHAVORA_E2EE_PATCH_DIR "" CACHE PATH "Isolated, fingerprinted E2EE backend repair for validation")
+set(COHAVORA_E2EE_MEDIA_GUARD_DIR "" CACHE PATH "Pinned native required-encryption channel guards")
+if(COHAVORA_E2EE_BACKEND_PACKAGE_DIR)
+    include(cmake/CohavoraE2eeBackendPackage.cmake)
+endif()
+if(COHAVORA_E2EE_PATCH_DIR)
+    foreach(repair_file frame_crypto_transformer.cc include/api/crypto/frame_crypto_transformer.h manifest.json)
+        if(NOT EXISTS "${COHAVORA_E2EE_PATCH_DIR}/${repair_file}")
+            message(FATAL_ERROR "Incomplete E2EE repair: ${repair_file}")
+        endif()
+    endforeach()
+    file(READ "${COHAVORA_E2EE_PATCH_DIR}/manifest.json" repair_manifest)
+    string(JSON repair_expected_source GET "${repair_manifest}" source_sha256)
+    string(JSON repair_expected_header GET "${repair_manifest}" header_sha256)
+    file(SHA256 "${COHAVORA_E2EE_PATCH_DIR}/frame_crypto_transformer.cc" repair_actual_source)
+    file(SHA256 "${COHAVORA_E2EE_PATCH_DIR}/include/api/crypto/frame_crypto_transformer.h" repair_actual_header)
+    if(NOT repair_actual_source STREQUAL repair_expected_source OR
+       NOT repair_actual_header STREQUAL repair_expected_header)
+        message(FATAL_ERROR "E2EE repair inputs do not match their manifest")
+    endif()
+    add_library(cohavora_e2ee_backend_repair OBJECT
+        "${COHAVORA_E2EE_PATCH_DIR}/frame_crypto_transformer.cc")
+    target_compile_features(cohavora_e2ee_backend_repair PRIVATE cxx_std_20)
+    target_compile_definitions(cohavora_e2ee_backend_repair PRIVATE BORINGSSL_PREFIX=cohavora_bssl)
+    target_include_directories(cohavora_e2ee_backend_repair BEFORE PRIVATE
+        "${COHAVORA_E2EE_PATCH_DIR}/include"
+        "${WEBRTC_ROOT}/include/third_party/boringssl/src/include"
+        "${WEBRTC_ROOT}/include/third_party/abseil-cpp"
+        "$<$<CONFIG:Debug>:${WEBRTC_DEBUG_PREFIX_DIR}>"
+        "$<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_PREFIX_DIR}>")
+    target_link_libraries(cohavora_e2ee_backend_repair PRIVATE cohavora_webrtc_sdk)
+    # Link the replacement object directly before archive resolution. Keep its
+    # BoringSSL headers/defines private; application ASIO uses OpenSSL.
+    # Keep replacements as direct final-link inputs. Placing them inside the
+    # core archive lets WebRTC's archive satisfy its own internal references
+    # first, silently selecting the original channel implementation.
+    target_sources(cohavora_core INTERFACE $<TARGET_OBJECTS:cohavora_e2ee_backend_repair>)
+    target_include_directories(cohavora_core BEFORE PUBLIC "${COHAVORA_E2EE_PATCH_DIR}/include")
+endif()
+if(COHAVORA_E2EE_MEDIA_GUARD_DIR)
+    if(NOT COHAVORA_E2EE_PATCH_DIR)
+        message(FATAL_ERROR "E2EE media guard requires the repaired crypto backend")
+    endif()
+    file(READ "${COHAVORA_E2EE_MEDIA_GUARD_DIR}/media-guard-manifest.json" guard_manifest)
+    set(guard_sources)
+    foreach(guard_file channel_receive.cc channel_send.cc rtp_video_stream_receiver2.cc rtp_sender_video.cc)
+        string(JSON guard_expected GET "${guard_manifest}" outputs "${guard_file}")
+        file(SHA256 "${COHAVORA_E2EE_MEDIA_GUARD_DIR}/${guard_file}" guard_actual)
+        if(NOT guard_actual STREQUAL guard_expected)
+            message(FATAL_ERROR "E2EE media guard fingerprint mismatch: ${guard_file}")
+        endif()
+        list(APPEND guard_sources "${COHAVORA_E2EE_MEDIA_GUARD_DIR}/${guard_file}")
+    endforeach()
+    target_sources(cohavora_e2ee_backend_repair PRIVATE ${guard_sources})
+    target_include_directories(cohavora_e2ee_backend_repair PRIVATE
+        "${WEBRTC_ROOT}/include/third_party/perfetto/include"
+        "$<$<CONFIG:Debug>:${WEBRTC_SELECTED_DEBUG_GENERATED_DIR}/third_party/perfetto/build_config>"
+        "$<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_GENERATED_DIR}/third_party/perfetto/build_config>"
+        "$<$<CONFIG:Debug>:${WEBRTC_SELECTED_DEBUG_GENERATED_DIR}/third_party/perfetto>"
+        "$<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_GENERATED_DIR}/third_party/perfetto>")
+    target_compile_definitions(cohavora_core PRIVATE COHAVORA_E2EE_MEDIA_GUARD=1)
+endif()
 target_include_directories(cohavora_webrtc_sdk SYSTEM BEFORE INTERFACE
     "$<$<CONFIG:Debug>:${WEBRTC_SELECTED_DEBUG_GENERATED_DIR}>"
     "$<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_GENERATED_DIR}>"

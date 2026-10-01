@@ -24,6 +24,18 @@
 #include <utility>
 #include <vector>
 
+namespace livekit {
+class RoomStreamDeliveryTestAccess final {
+public:
+    static void InstallRecoverySession(Room& room, uint64_t generation) {
+        std::lock_guard lock(room.room_mutex_);
+        room.session_generation_.store(generation);
+        room.installed_session_generation_ = generation;
+        room.connection_state_ = ConnectionState::Connected;
+    }
+};
+}
+
 namespace OpenMeeting {
 
 class SessionManagerTestAccess final {
@@ -81,6 +93,36 @@ public:
     static void duplicateIdentityKick(MeetingCoordinator &coordinator, const QString &detail) {
         coordinator.handleDuplicateIdentityKickOff(detail);
     }
+    static std::shared_ptr<asio::io_context> installRecoverySession(
+        MeetingCoordinator& coordinator, const std::shared_ptr<livekit::KeyProvider>& keys) {
+        auto io = std::make_shared<asio::io_context>();
+        coordinator._ioContext = io;
+        coordinator._sessionRuntime = std::make_shared<MeetingSessionRuntime>(*io, 77, "test", io);
+        coordinator._nextSessionGeneration = 77;
+        coordinator._nativeRoomGeneration = 1;
+        coordinator._sessionRunning.store(true);
+        coordinator._state = MeetingState::InMeeting;
+        coordinator._admissionEncryption.mode = livekit::MeetingEncryptionMode::Required;
+        coordinator._room = livekit::Room::Create(io->get_executor(), io);
+        coordinator._room->EnableE2ee({livekit::EncryptionType::GCM, keys});
+        livekit::RoomStreamDeliveryTestAccess::InstallRecoverySession(*coordinator._room, 1);
+        return io;
+    }
+    static void recoveryReconnect(MeetingCoordinator& coordinator) {
+        coordinator.setState(MeetingState::Reconnecting);
+    }
+    static void installUnfinishedTransfer(MeetingCoordinator& coordinator) {
+        coordinator._inboundTransferLedger["reentrant-transfer"] = {InboundTransferKey{}, false};
+    }
+    static void recoveryNativeRestart(MeetingCoordinator& coordinator) {
+        livekit::RoomStreamDeliveryTestAccess::InstallRecoverySession(*coordinator._room, 2);
+    }
+    static void closeRecoveryQueue(MeetingCoordinator& coordinator) {
+        coordinator._sessionRuntime->revokeCallbacks();
+    }
+    static auto effectiveCodecs(const MeetingCoordinator& coordinator) {
+        return std::pair{coordinator._mediaPrefs.cameraVideoCodec, coordinator._mediaPrefs.screenShareVideoCodec};
+    }
     static auto telemetryIdentity(const MeetingCoordinator& coordinator) {
         return std::pair{coordinator._admissionTelemetry.anonymousSessionId.toStdString(),
             coordinator._admissionTelemetry.sessionGeneration};
@@ -103,7 +145,7 @@ using OpenMeeting::SessionInvalidationReason;
 using OpenMeeting::SessionManager;
 using OpenMeeting::SessionManagerTestAccess;
 
-constexpr int kPlannedCases = 89;
+constexpr int kPlannedCases = 119;
 int gExecutedCases = 0;
 int gPassedCases = 0;
 
@@ -371,7 +413,217 @@ void CompleteCurrent(Fixture &fixture, PendingStage stage, size_t index, const Q
     }
 }
 
+void VerifyEncryptionRecovery() {
+    RunCase("Required recovery superseded inside transfer cancellation", [] {
+        Fixture f;
+        livekit::KeyProviderOptions options; options.shared_key = true;
+        auto keys = std::make_shared<livekit::KeyProvider>(options);
+        keys->SetSharedKey({'a', 'b', 'c'});
+        auto io = MeetingCoordinatorTestAccess::installRecoverySession(*f.coordinator, keys);
+        MeetingCoordinatorTestAccess::installUnfinishedTransfer(*f.coordinator);
+        std::vector<bool> results;
+        int cancelled = 0;
+        QObject::connect(f.coordinator.get(), &MeetingCoordinator::encryptionKeyRecoveryFinished,
+            f.coordinator.get(), [&](bool installed) { results.push_back(installed); });
+        QObject::connect(f.coordinator.get(), &MeetingCoordinator::chatMediaReceivingFailed,
+            f.coordinator.get(), [&](const QString&, const QString&) {
+                ++cancelled;
+                f.coordinator->recoverEncryptionKey(livekit::MeetingSecretHandle::Create({'g', 'h', 'i'}));
+            });
+        f.coordinator->recoverEncryptionKey(livekit::MeetingSecretHandle::Create({'d', 'e', 'f'}));
+        io->poll(); DrainEvents();
+        TEST_CHECK(cancelled == 1 && results.empty());
+        io->restart(); io->poll(); DrainEvents();
+        TEST_CHECK(results == std::vector<bool>{true});
+        TEST_CHECK(keys->GetSharedKey() == std::vector<uint8_t>({'g', 'h', 'i'}));
+        f.coordinator.reset(); io->restart(); io->poll(); DrainEvents();
+    });
+    for (const std::string scenario : {"current", "coalesced", "late-reconnect", "late-recovery", "stale-native", "closed-queue"}) {
+        RunCase(QString::fromStdString("Required media status " + scenario), [scenario] {
+            Fixture f;
+            livekit::KeyProviderOptions options; options.shared_key = true;
+            auto keys = std::make_shared<livekit::KeyProvider>(options);
+            keys->SetSharedKey({'a', 'b', 'c'});
+            auto io = MeetingCoordinatorTestAccess::installRecoverySession(*f.coordinator, keys);
+            std::vector<livekit::MediaEncryptionStatus> results;
+            QObject::connect(f.coordinator.get(), &MeetingCoordinator::encryptionMediaStatusChanged,
+                f.coordinator.get(), [&](const auto& status) { results.push_back(status); });
+            if (scenario == "closed-queue") MeetingCoordinatorTestAccess::closeRecoveryQueue(*f.coordinator);
+            if (scenario == "stale-native") MeetingCoordinatorTestAccess::recoveryNativeRestart(*f.coordinator);
+            f.coordinator->refreshEncryptionMediaStatus();
+            if (scenario == "coalesced") f.coordinator->refreshEncryptionMediaStatus();
+            io->poll();
+            if (scenario == "late-reconnect") MeetingCoordinatorTestAccess::recoveryReconnect(*f.coordinator);
+            if (scenario == "late-recovery") f.coordinator->recoverEncryptionKey(livekit::MeetingSecretHandle::Create({'d', 'e', 'f'}));
+            DrainEvents();
+            if (scenario == "current" || scenario == "coalesced") {
+                TEST_CHECK(results.size() == 1 && results[0].enabled);
+                TEST_CHECK(results[0].native_generation == 1 && results[0].tracks.empty());
+            } else TEST_CHECK(results.empty());
+            f.coordinator.reset(); io->restart(); io->poll(); DrainEvents();
+        });
+    }
+    for (const std::string scenario : {"success", "supersede", "cancel", "stale-native", "late-ui", "closed-queue"}) {
+        RunCase(QString::fromStdString("Required recovery " + scenario), [scenario] {
+            Fixture f;
+            livekit::KeyProviderOptions options; options.shared_key = true;
+            auto keys = std::make_shared<livekit::KeyProvider>(options);
+            keys->SetSharedKey({'a', 'b', 'c'});
+            auto io = MeetingCoordinatorTestAccess::installRecoverySession(*f.coordinator, keys);
+            std::vector<bool> results;
+            QObject::connect(f.coordinator.get(), &MeetingCoordinator::encryptionKeyRecoveryFinished,
+                f.coordinator.get(), [&](bool installed) { results.push_back(installed); });
+            if (scenario == "closed-queue") MeetingCoordinatorTestAccess::closeRecoveryQueue(*f.coordinator);
+            auto first = livekit::MeetingSecretHandle::Create({'d', 'e', 'f'});
+            f.coordinator->recoverEncryptionKey(first);
+            std::shared_ptr<livekit::MeetingSecretHandle> second;
+            if (scenario == "supersede") {
+                second = livekit::MeetingSecretHandle::Create({'g', 'h', 'i'});
+                f.coordinator->recoverEncryptionKey(second);
+                TEST_CHECK(!first->available());
+            }
+            if (scenario == "cancel") MeetingCoordinatorTestAccess::recoveryReconnect(*f.coordinator);
+            if (scenario == "stale-native") MeetingCoordinatorTestAccess::recoveryNativeRestart(*f.coordinator);
+            io->poll();
+            if (scenario == "late-ui") MeetingCoordinatorTestAccess::recoveryReconnect(*f.coordinator);
+            DrainEvents();
+            TEST_CHECK(!first->available());
+            if (scenario == "success" || scenario == "supersede") {
+                TEST_CHECK(results == std::vector<bool>{true});
+                TEST_CHECK(keys->GetSharedKey() == (scenario == "success" ?
+                    std::vector<uint8_t>{'d', 'e', 'f'} : std::vector<uint8_t>{'g', 'h', 'i'}));
+                TEST_CHECK(f.coordinator->canRecoverEncryptionKey());
+            } else if (scenario == "closed-queue" || scenario == "stale-native") {
+                TEST_CHECK(results == std::vector<bool>{false});
+                TEST_CHECK(keys->GetSharedKey() == std::vector<uint8_t>({'a', 'b', 'c'}));
+            } else {
+                TEST_CHECK(results.empty());
+                if (scenario == "cancel") TEST_CHECK(keys->GetSharedKey() == std::vector<uint8_t>({'a', 'b', 'c'}));
+            }
+            f.coordinator.reset(); io->restart(); io->poll(); DrainEvents();
+        });
+    }
+}
+
+void VerifyEncryptionAdmission() {
+    VerifyEncryptionRecovery();
+    using livekit::MeetingEncryptionMode;
+    using livekit::MeetingEncryptionRequest;
+    using livekit::MeetingSecretHandle;
+    RunCase("Required unsupported codec rejects all admission APIs before network", [] {
+        for (int entry = 0; entry < 3; ++entry) for (bool camera : {false, true}) {
+            Fixture f;
+            OpenMeeting::MediaPreferences prefs;
+            (camera ? prefs.cameraVideoCodec : prefs.screenShareVideoCodec) = camera ? "vp9" : "av1";
+            auto secret = MeetingSecretHandle::Create({'a', 'b', 'c'});
+            MeetingEncryptionRequest request{MeetingEncryptionMode::Required, secret};
+            if (entry == 0) f.coordinator->joinMeetingAsync("id", "", "name", prefs, request);
+            else if (entry == 1) f.coordinator->createAndJoinQuickMeetingAsync("title", 900, prefs, request);
+            else f.coordinator->connectDirectlyAsync("wss://test", "token", "id", "name", prefs, request);
+            TEST_CHECK(!secret->available() && f.errors.size() == 1);
+            TEST_CHECK(f.backend.joins.empty() && f.backend.creates.empty() && f.starts == 0);
+        }
+    });
+    for (int entry = 0; entry < 3; ++entry) for (bool required : {false, true}) {
+        RunCase(QString("Encryption codec admission entry %1 required %2").arg(entry).arg(required), [entry, required] {
+            Fixture f;
+            OpenMeeting::MediaPreferences prefs;
+            prefs.cameraVideoCodec = required ? "auto" : "vp9";
+            prefs.screenShareVideoCodec = required ? "h264" : "av1";
+            MeetingEncryptionRequest request;
+            if (required) request = {MeetingEncryptionMode::Required, MeetingSecretHandle::Create({'a', 'b', 'c'})};
+            if (entry == 0) f.coordinator->joinMeetingAsync("id", "", "name", prefs, request);
+            else if (entry == 1) f.coordinator->createAndJoinQuickMeetingAsync("title", 900, prefs, request);
+            else f.coordinator->connectDirectlyAsync("wss://test", "token", "id", "name", prefs, request);
+            TEST_CHECK(f.errors.empty());
+            const auto codecs = MeetingCoordinatorTestAccess::effectiveCodecs(*f.coordinator);
+            TEST_CHECK(codecs.first == (required ? "vp8" : "vp9"));
+            TEST_CHECK(codecs.second == (required ? "h264" : "av1"));
+            TEST_CHECK(prefs.cameraVideoCodec == (required ? "auto" : "vp9"));
+        });
+    }
+    RunCase("Required missing key rejected at all three entry APIs", [] {
+        Fixture f;
+        MeetingEncryptionRequest request{MeetingEncryptionMode::Required, {}};
+        f.coordinator->joinMeetingAsync("id", "", "name", {}, request);
+        f.coordinator->createAndJoinQuickMeetingAsync("title", 900, {}, request);
+        f.coordinator->connectDirectlyAsync("wss://test", "token", "id", "name", {}, request);
+        TEST_CHECK(f.backend.joins.empty() && f.backend.creates.empty() && f.starts == 0);
+        TEST_CHECK(f.errors.size() == 3);
+    });
+    RunCase("Required pending Join cancel revokes external aliases", [] {
+        Fixture f;
+        auto secret = MeetingSecretHandle::Create({'a', 'b', 'c'});
+        f.coordinator->joinMeetingAsync("id", "", "name", {}, {MeetingEncryptionMode::Required, secret});
+        TEST_CHECK(secret->available());
+        f.coordinator->leaveMeetingAsync();
+        TEST_CHECK(!secret->available());
+        f.backend.completeJoin(0, true);
+        TEST_CHECK(f.backend.tokens.empty() && f.starts == 0);
+    });
+    RunCase("Busy admission revokes only the rejected new secret", [] {
+        Fixture f;
+        auto active = MeetingSecretHandle::Create({'a', 'b', 'c'});
+        auto rejected = MeetingSecretHandle::Create({'d', 'e', 'f'});
+        f.coordinator->joinMeetingAsync("id", "", "name", {}, {MeetingEncryptionMode::Required, active});
+        f.coordinator->joinMeetingAsync("other", "", "name", {}, {MeetingEncryptionMode::Required, rejected});
+        TEST_CHECK(active->available() && !rejected->available());
+        TEST_CHECK(f.backend.joins.size() == 1);
+    });
+    RunCase("Error signal may destroy Coordinator before rejected secret cleanup", [] {
+        Fixture f;
+        auto active = MeetingSecretHandle::Create({'a', 'b', 'c'});
+        auto rejected = MeetingSecretHandle::Create({'d', 'e', 'f'});
+        f.coordinator->joinMeetingAsync("id", "", "name", {}, {MeetingEncryptionMode::Required, active});
+        QObject::connect(f.coordinator.get(), &MeetingCoordinator::errorOccurred,
+            f.coordinator.get(), [&] { f.coordinator.reset(); });
+        f.coordinator->joinMeetingAsync("other", "", "name", {}, {MeetingEncryptionMode::Required, rejected});
+        TEST_CHECK(!f.coordinator && !active->available() && !rejected->available());
+    });
+    RunCase("Duplicate admission sharing the active handle does not cancel it", [] {
+        Fixture f;
+        auto secret = MeetingSecretHandle::Create({'a', 'b', 'c'});
+        const MeetingEncryptionRequest request{MeetingEncryptionMode::Required, secret};
+        f.coordinator->joinMeetingAsync("id", "", "name", {}, request);
+        f.coordinator->joinMeetingAsync("id", "", "name", {}, request);
+        TEST_CHECK(secret->available() && f.backend.joins.size() == 1);
+    });
+    RunCase("Required authentication failure revokes key", [] {
+        Fixture f;
+        auto secret = MeetingSecretHandle::Create({'a', 'b', 'c'});
+        f.coordinator->joinMeetingAsync("id", "", "name", {}, {MeetingEncryptionMode::Required, secret});
+        f.backend.completeJoin(0, false, "denied");
+        TEST_CHECK(!secret->available() && f.starts == 0);
+    });
+    RunCase("Required pending Create cancel revokes key", [] {
+        Fixture f;
+        auto secret = MeetingSecretHandle::Create({'a', 'b', 'c'});
+        f.coordinator->createAndJoinQuickMeetingAsync("title", 900, {}, {MeetingEncryptionMode::Required, secret});
+        TEST_CHECK(secret->available());
+        f.coordinator->leaveMeetingAsync();
+        TEST_CHECK(!secret->available() && f.starts == 0);
+    });
+    RunCase("Required direct request is retained until session ownership boundary", [] {
+        Fixture f;
+        auto secret = MeetingSecretHandle::Create({'a', 'b', 'c'});
+        f.coordinator->connectDirectlyAsync("wss://test", "token", "id", "name", {}, {MeetingEncryptionMode::Required, secret});
+        // Fixture intercepts Room construction; native provider consumption is tested separately.
+        TEST_CHECK(f.starts == 1 && secret->available());
+        f.coordinator->leaveMeetingAsync();
+        TEST_CHECK(!secret->available());
+    });
+    RunCase("Coordinator destruction revokes pending Required request", [] {
+        auto secret = MeetingSecretHandle::Create({'a', 'b', 'c'});
+        {
+            Fixture f;
+            f.coordinator->joinMeetingAsync("id", "", "name", {}, {MeetingEncryptionMode::Required, secret});
+        }
+        TEST_CHECK(!secret->available());
+    });
+}
+
 void VerifyNormalFlows() {
+    VerifyEncryptionAdmission();
     RunCase("normal Join -> Token", [] {
         Fixture fixture;
         auto pipeline = std::make_shared<livekit::diagnostic::DiagnosticPipeline>();
@@ -1129,6 +1381,35 @@ private:
 };
 
 void VerifyDefaultBackendLoopback() {
+    RunCase("Required admission keeps secret out of HTTP bodies", [] {
+        for (const bool quick : {false, true}) {
+            LoopbackAdmissionServer server;
+            QTemporaryDir settingsDirectory;
+            TEST_CHECK(settingsDirectory.isValid());
+            auto session = SessionManagerTestAccess::create(MakeSettings(settingsDirectory.path(), server.baseUrl()));
+            session->loginAsGuest("Loopback User", "loopback-user");
+            auto coordinator = MeetingCoordinatorTestAccess::createDefault(*session);
+            int starts = 0;
+            MeetingCoordinatorTestAccess::setRoomStartHook(*coordinator,
+                [&](const QString&, const QString&) { ++starts; });
+            const QByteArray marker("public-e2ee-http-isolation-marker");
+            auto secret = livekit::MeetingSecretHandle::Create(
+                std::vector<uint8_t>(marker.begin(), marker.end()));
+            livekit::MeetingEncryptionRequest request{livekit::MeetingEncryptionMode::Required, secret};
+            if (quick) coordinator->createAndJoinQuickMeetingAsync("Loopback Quick", 321, {}, request);
+            else coordinator->joinMeetingAsync("loopback-join-id", "loopback-password", "Loopback", {}, request);
+            WaitUntil([&] { return starts == 1; });
+            TEST_CHECK(server.requests.size() == (quick ? 1 : 2));
+            for (const auto& request : server.requests) {
+                const auto bytes = QJsonDocument(request.body).toJson(QJsonDocument::Compact);
+                TEST_CHECK(!bytes.contains(marker) && !bytes.contains(marker.toBase64()));
+                TEST_CHECK(!bytes.contains("secret") && !bytes.contains("encryptionKey"));
+            }
+            coordinator.reset(); DrainEvents();
+            TEST_CHECK(!secret->available());
+            session->logout(false);
+        }
+    });
     RunCase("default backend loopback Join -> Token", [] {
         LoopbackAdmissionServer server;
         QTemporaryDir settingsDirectory;

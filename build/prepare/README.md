@@ -351,3 +351,23 @@ $archive = 'cohavora-libraries-win64-qt-5.15.18-20260925.zip'
 ```
 
 如版本、编译参数、补丁、编译器或任一文件发生变化，应生成新的归档和校验元数据，而不是继续使用本文记录的旧哈希。
+
+
+## Native E2EE backend overlay
+
+E2EE 使用独立小型源码包与固定基础 SDK 配套；不替换 vendor 文件，不混用 Flutter 自定义音频 ABI。当前 profile 为 `e2ee-backend-profile.json`，基础 SDK 为 `webrtc-51ef663-cohavora-bssl-dual-v3`。
+
+从已按固定上游源码生成的 repair/guard 输入打包：
+
+```powershell
+python build/prepare/package_e2ee_backend.py --patched <reviewed-patched-directory> --guard build-e2ee-backend/media-guard --bsd-license build-e2ee-backend/full/src/LICENSE --apache-license E:/vsSource/WebRTC/client-sdk-flutter/LICENSE --output <new-output-directory>
+cmake -S . -B <build-dir> -DCOHAVORA_E2EE_BACKEND_PACKAGE_DIR=<absolute-extracted-package-directory>
+cmake --build <build-dir> --config RelWithDebInfo --target cohavora_app
+```
+
+包内保留 WebRTC BSD、Apache-2.0 许可证、原源码版权头、修改说明和固定 profile。准备脚本位于 `tests/runtime/tools/media/prepare_e2ee_backend.py` 和 `prepare_e2ee_media_guard.py`，原始输入以其硬编码 SHA-256 验证。ZIP 使用固定时间戳和排序，输出目录必须不存在，避免覆盖历史产物。此工具只产生本地归档，不上传或发布。
+
+CMake 对照仓库内 profile 验证每个包输入，并验证基础 SDK Debug/Release 库 SHA-256；缺失或不匹配立即停止配置。该入口优先于早期两个 validation 目录参数。BoringSSL 前缀仍只作用于修复 object，应用 ASIO/OpenSSL 边界保持不变，object 仍直接加入最终链接，避免归档优先解析回原实现。未配置 overlay 的产品不能据此宣称支持 Required 媒体 E2EE；Room 能力准入保持拒绝，不降级明文。包完整性不等于产品 runtime 或最终验收 PASS。
+
+
+v2 overlay 增加 `cohavora_iv_sequence.h`：发送媒体和数据共享进程级、CSPRNG 初始化的 96 位递增 IV 分配器；Room/cryptor 重建和重装相同密钥不会重置进程分配状态。随机源失败或每进程总计 2^32 次额度耗尽时拒绝产生新的密文，没有明文回退。多个独立进程仍依赖随机起点的概率隔离，不宣称全系统绝对唯一或跨设备总调用次数已被集中管理。此改动保留原来的 12 字节 IV 与接收解析，不改变协议格式。准备工具从固定原始输入生成，使用当前 profile 对应目录，不把旧 `patched/` 目录自动视为当前输入；全部历史包继续保留。

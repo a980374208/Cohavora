@@ -35,11 +35,12 @@ void TestKeyProviderAndRatchet() {
     TEST_CHECK(provider.GetSharedKey(0) == secret_key);
     std::cout << "  [PASS] SetSharedKey and GetSharedKey verified." << std::endl;
 
-    // Ratchet Key Index 0 -> Index 1
+    // Official ratchet changes material in the same slot; selection is separate.
     std::vector<uint8_t> ratcheted_key = provider.RatchetSharedKey(0);
     TEST_CHECK(!ratcheted_key.empty());
     TEST_CHECK(ratcheted_key != secret_key);
-    TEST_CHECK(provider.GetSharedKey(1) == ratcheted_key);
+    TEST_CHECK(provider.GetSharedKey(0) == ratcheted_key);
+    TEST_CHECK(provider.GetSharedKey(1).empty());
     std::cout << "  [PASS] RatchetSharedKey successfully derived 256-bit ratcheted key." << std::endl;
 
     // Per-participant key test
@@ -49,7 +50,8 @@ void TestKeyProviderAndRatchet() {
 
     std::vector<uint8_t> alice_ratcheted = provider.RatchetKey("alice", 0);
     TEST_CHECK(!alice_ratcheted.empty());
-    TEST_CHECK(provider.GetKey("alice", 1) == alice_ratcheted);
+    TEST_CHECK(provider.GetKey("alice", 0) == alice_ratcheted);
+    TEST_CHECK(provider.GetKey("alice", 1).empty());
     std::cout << "  [PASS] Per-participant key setting & ratcheting verified." << std::endl;
 }
 

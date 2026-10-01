@@ -5,8 +5,8 @@
 | `product_acceptance/` | 产品验收、采集、证据校验、云端传输及配套配置 | `invoke_product_external.ps1`、`verify_product_acceptance.py` |
 | `meeting/` | 会议长稳、渲染探针、fake peer、低带宽发布与资源采样 | `meeting_soak.py`、`meeting_render_probe.py` |
 | `screen_capture/` | WGC 长稳、屏幕共享质量采集与分析 | `run_wgc_soak.py`、`invoke_screen_share_quality_probe.py` |
-| `desktop/` | 产品 UIA 监督、低频快照及 PowerShell worker | `product_uia_retest.py`、`uia_snapshot.py` |
-| `media/` | 双端媒体矩阵与 E2EE 互操作驱动 | `invoke_e2e_media_matrix.ps1`、`invoke_e2ee_interop.ps1` |
+| `desktop/` | 产品 UIA 监督、低频快照及 PowerShell worker | `product_uia_retest.py`、`uia_snapshot.py`、`e2ee_password_uia_worker.ps1` |
+| `media/` | 双端媒体矩阵与 E2EE 互操作驱动 | `invoke_e2e_media_matrix.ps1`、`invoke_e2ee_interop.py`、`invoke_e2ee_product.py` |
 | `diagnostics/` | 诊断场景统一参数入口 | `invoke_diagnostic_probe.ps1` |
 
 入口继续支持按文件路径直接执行，CLI 参数和运行条件保持不变。使用仓库根目录作为工作目录，

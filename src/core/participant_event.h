@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -145,6 +146,13 @@ struct SenderContext {
     ParticipantKey key;
     ParticipantTicket ticket;
     std::string display_name;
+    // Local receipt policy, never a wire field or key fingerprint. Consumers
+    // must recheck after every async hop, including the final UI delivery.
+    uint64_t encryption_revision = 0;
+    std::function<bool()> encryption_current;
+    bool encryptionCurrent() const {
+        return !encryption_current || encryption_current();
+    }
 };
 
 struct ParticipantEvent {

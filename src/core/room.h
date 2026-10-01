@@ -146,6 +146,17 @@ enum class SimulateScenarioType {
     Clear,
 };
 
+// Immutable notification data; native sender ids and publication SIDs are distinct.
+struct MediaEncryptionEvent {
+    std::string participant_identity;
+    std::string track_sid;
+    std::string native_track_id;
+    uint64_t generation = 0;
+    bool receiving = false;
+    bool video = false;
+    EncryptionState state = EncryptionState::NEW;
+};
+
 class RoomListener {
 public:
     virtual ~RoomListener() = default;
@@ -202,6 +213,7 @@ public:
     virtual void OnParticipantEvent(const ParticipantEvent& event) {}
     virtual bool ConsumesParticipantEvents() const { return false; }
 
+    virtual void OnMediaEncryptionStateChanged(const MediaEncryptionEvent& event) {}
     virtual void OnE2eeStateChanged(const std::string& participant_identity, const std::string& track_sid, EncryptionState state) {}
 
     virtual void OnRoomStats(const RoomStatsReport& report) {}
@@ -322,18 +334,24 @@ public:
 
     // === 新增：E2EE 端到端加密管理器 ===
     void EnableE2ee(const E2eeOptions& options);
+    bool RecoverE2eeSharedKey(const std::shared_ptr<MeetingSecretHandle>& secret,
+                              uint64_t expected_generation);
     std::shared_ptr<E2eeManager> e2ee_manager() const { return e2ee_manager_; }
+    // Call from the session owner, then project a value-only snapshot to UI.
+    std::optional<MediaEncryptionStatus> ReadMediaEncryptionStatus(uint64_t expected_generation) const;
 
     asio::awaitable<void> ApplyScreenShareSenderParametersAsync(
         std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile);
     asio::awaitable<void> SyncScreenShareMetadataAsync(
         std::shared_ptr<LocalVideoTrack> track, ScreenShareFrameProfile profile);
     void AddTrackToPublisher(std::shared_ptr<Track> track);
+    std::shared_ptr<void> AcquireMediaPublishPolicy();
     asio::awaitable<PublishedSenderBundle> AddTrackToPublisherAsync(
         std::shared_ptr<Track> track,
         uint64_t generation,
         std::optional<VideoPublishOptions> video_publish_options = std::nullopt,
-        std::optional<AudioPublishPolicy> audio_publish_policy = std::nullopt);
+        std::optional<AudioPublishPolicy> audio_publish_policy = std::nullopt,
+        bool require_encryption = false);
     asio::awaitable<std::shared_ptr<TrackPublication>> PublishLocalTrackAsync(
         std::shared_ptr<Track> track,
         const proto::SignalRequest& request);
@@ -389,6 +407,7 @@ private:
     friend class RoomConnectAttemptTestAccess;
     friend class RoomStreamDeliveryTestAccess;
     friend class RoomSinglePcTestAccess;
+    friend class RoomE2eeInteropTestAccess;
     // Only the named test-access friend can install these two transport-boundary
     // hooks. Production keeps them null and uses the existing native methods.
     struct LocalUnpublishTestHooks {
@@ -397,6 +416,7 @@ private:
     };
     std::shared_ptr<LocalUnpublishTestHooks> local_unpublish_test_hooks_;
     struct ConnectAttemptTestHooks {
+        bool require_native_media_guard_without_cryptors = false;
         std::function<asio::awaitable<void>(uint64_t)> before_join_commit;
         std::function<asio::awaitable<void>(bool, uint64_t)> before_subscription_send;
         std::function<asio::awaitable<void>(const proto::SyncState&)> before_subscription_sync_send;
@@ -444,7 +464,11 @@ private:
         bool require_installed_owner = false;
         bool require_reconnect = false;
         std::shared_ptr<E2eeManager> e2ee_owner;
+        std::shared_ptr<const E2eeManager::MediaObservation> media_encryption_binding;
+        std::optional<uint64_t> encryption_revision;
     };
+    void PostMediaEncryptionState(std::weak_ptr<E2eeManager> manager,
+        std::shared_ptr<const E2eeManager::MediaObservation> binding, EncryptionState state);
     bool AdmitListener(const ListenerDeliveryContext& context,
                        const std::shared_ptr<RoomListener>& listener) const;
     template <typename Callback>
@@ -473,6 +497,10 @@ private:
         webrtc::DataChannelInterface* channel = nullptr);
     void PostRemoteTrack(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
                          webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, uint64_t generation);
+    std::shared_ptr<MediaReceiverGate> EnsureReceiverCryptoGate(
+        webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, uint64_t generation);
+    std::map<std::pair<uint64_t, const webrtc::RtpReceiverInterface*>,
+        std::weak_ptr<MediaReceiverGate>> receiver_crypto_gates_;
     void OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
                             webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, uint64_t generation);
     void OnRemoteTrackResolved(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
@@ -508,7 +536,9 @@ private:
     size_t RetireIncomingReadersForParticipantLocked(
         const std::shared_ptr<Participant>& participant,
         const std::string& reason);
-    void OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation);
+    void OnIncomingRpcPacket(const RpcPacket& packet, uint64_t generation,
+        std::shared_ptr<E2eeManager> encryption_owner = {},
+        std::optional<SenderContext> sender = std::nullopt, uint64_t encryption_revision = 0);
     bool PublishData(const std::vector<uint8_t>& payload, bool reliable,
                      const std::vector<std::string>& destinations, const std::string& topic, uint64_t generation);
     enum class DataPacketSendResult {
@@ -526,6 +556,8 @@ private:
         std::weak_ptr<LocalParticipant> sender;
         uint64_t policy_revision = 0;
     };
+    bool PublishRpcPacket(const RpcPacket& packet, uint64_t generation,
+                          const OutgoingStreamContext& context);
     DataPacketSendResult PublishDataPacket(const proto::DataPacket& packet,
                                           bool reliable,
                                           uint64_t expected_generation,
@@ -697,12 +729,15 @@ private:
     // Delivery metadata stays private; the public ParticipantEvent DTO is unchanged.
     struct QueuedParticipantEvent : ParticipantEvent {
         std::shared_ptr<E2eeManager> e2ee_owner;
-        QueuedParticipantEvent(ParticipantEvent event, std::shared_ptr<E2eeManager> owner)
-            : ParticipantEvent(std::move(event)), e2ee_owner(std::move(owner)) {}
+        std::optional<uint64_t> encryption_revision;
+        QueuedParticipantEvent(ParticipantEvent event, std::shared_ptr<E2eeManager> owner,
+                               std::optional<uint64_t> revision)
+            : ParticipantEvent(std::move(event)), e2ee_owner(std::move(owner)), encryption_revision(revision) {}
     };
     void RetireAllMembershipsLocked(std::deque<QueuedParticipantEvent>& retired_events);
     void EnqueueParticipantEventLocked(ParticipantEvent event,
-                                      std::shared_ptr<E2eeManager> e2ee_owner = {});
+                                      std::shared_ptr<E2eeManager> e2ee_owner = {},
+                                      std::optional<uint64_t> encryption_revision = std::nullopt);
     void EnqueueRosterLocked();
     void DrainParticipantEvents();
     SenderContext ResolveSenderContextLocked(
@@ -749,6 +784,7 @@ private:
         const std::string& error,
         uint64_t generation = 0);
     struct PendingOperationCleanup {
+        std::vector<std::function<void(const RpcPacket&)>> rpc_completions;
         std::vector<std::shared_ptr<AwaitableState<void>>> void_states;
         std::vector<std::shared_ptr<AwaitableState<proto::TrackPublishedResponse>>> publish_states;
     };
@@ -789,6 +825,7 @@ private:
     std::size_t participant_event_paused_attempts_for_testing_ = 0;
     bool audio_output_muted_ = false;
     std::shared_ptr<E2eeManager> e2ee_manager_;
+    std::shared_ptr<void> native_e2ee_policy_;
 
     // WebRTC PeerConnection 资源
     webrtc::scoped_refptr<webrtc::PeerConnectionInterface> publisher_pc_;
@@ -844,6 +881,8 @@ private:
         // Keeps both the WebRTC track and its native sink alive. Calling this
         // unregisters the raw sink pointer before those owners are released.
         std::function<void()> detach;
+        std::function<void()> retire_crypto;
+        webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver;
     };
     std::vector<RemoteTrackSinkBinding> remote_track_sinks_;
     std::unordered_map<const RemoteTrackPublication*, uint64_t>
@@ -859,6 +898,11 @@ private:
 
     // === RPC Pending 跟踪数据结构 ===
     struct PendingRpcCall {
+        std::string destination;
+        RpcWireFormat wire_format = RpcWireFormat::ProtobufV1;
+        uint64_t generation = 0;
+        OutgoingStreamContext context;
+        std::shared_ptr<asio::steady_timer> ack_timer;
         std::shared_ptr<asio::steady_timer> timer;
         std::function<void(const RpcPacket&)> completion_cb;
         bool finished = false;
@@ -888,6 +932,9 @@ private:
     std::unordered_map<const Track*, std::vector<std::string>>
         published_sender_track_ids_;
     std::set<const Track*> reconnect_republish_tracks_;
+    std::atomic<unsigned> media_publish_admissions_{0};
+    // Keep even Off publications on their admitted policy, including restart.
+    std::unordered_map<const Track*, std::shared_ptr<void>> media_publication_policies_;
     // A media sender is changed before the remote SDP answer can commit the
     // public map mutation. Keep that intent through recovery so a failed
     // renegotiation never republishes a track the user removed.
@@ -1008,6 +1055,9 @@ private:
         std::shared_ptr<Reader> reader;
         EncryptionType encryption_type;
         SenderContext sender;
+        std::optional<RpcPacket> rpc;
+        std::shared_ptr<E2eeManager> policy;
+        uint64_t policy_revision = 0;
     };
     std::unordered_map<std::string, IncomingReader<TextStreamReader>> active_text_readers_;
     std::unordered_map<std::string, IncomingReader<ByteStreamReader>> active_byte_readers_;

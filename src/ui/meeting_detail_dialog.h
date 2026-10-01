@@ -17,6 +17,7 @@ class SessionManager;
 namespace MeetingUI {
 
 class MeetingDetailDialog final : public QDialog {
+    friend class MeetingEntryEncryptionTestAccess;
 public:
 	MeetingDetailDialog(
 		const QString &meetingId,

@@ -194,6 +194,24 @@ void collaborationAndDeltaRecovery() {
     client->setTransportReady(true, ++network.now);
     require(client->state() == wb::CollaborationState::Frozen,
             "transport recovery revived a board whose authority instance left");
+    const auto departed = network.instances["host"];
+    client->observePeer(departed);
+    client->observePeer({"host", departed.nativeRoomGeneration - 1, departed.incarnation + 100});
+    require(client->state() == wb::CollaborationState::Frozen, "stale authority observation revived board");
+    ++network.instances["host"].incarnation;
+    client->observePeer(network.instances["host"]);
+    require(client->state() == wb::CollaborationState::Synchronizing, "new authority instance bypassed sync");
+    client->observePeer(departed);
+    client->peerLeft(departed);
+    network.drain();
+    require(client->state() == wb::CollaborationState::Ready, "new authority instance failed to resynchronize");
+    const auto beforeReturnCommit = client->sequence();
+    require(authority->propose(addCommand(*authority, "after-authority-return"), ++network.now).changed(),
+            "authority return commit failed");
+    network.drain();
+    require(client->sequence() == beforeReturnCommit + 1, "returned authority commit not delivered");
+    client->receive(wb::OperationsTopic, *acknowledgementBytes, departed, ++network.now);
+    require(client->sequence() == beforeReturnCommit + 1, "departed authority callback mutated new state");
 }
 
 void snapshotAndIncarnationRecovery() {
@@ -319,7 +337,13 @@ void imageAssetRecovery() {
     client->receive(chunks[1].topic, chunks[1].payload, network.instances["host"], ++network.now);
     client->receive(chunks[1].topic, chunks[1].payload, network.instances["host"], ++network.now);
     require(!clientProjection.canEdit, "partial asset unexpectedly enabled editing");
+    client->encryptionChanged(++network.now);
+    // The remaining new-epoch chunk must not complete an old-epoch assembly.
     client->receive(chunks[0].topic, chunks[0].payload, network.instances["host"], ++network.now);
+    require(clientProjection.assets.empty(), "asset assembled across encryption epochs");
+    client->receive(chunks[1].topic, chunks[1].payload, network.instances["host"], ++network.now);
+    require(clientProjection.assets.size() == 1, "new-epoch chunks did not assemble the asset");
+    network.drain(); // New-epoch sync must complete before editing is restored.
     require(clientProjection.canEdit && clientProjection.assets.size() == 1,
             "out-of-order asset assembly did not restore editing");
     require(client->document().toJson() == authority->document().toJson(),

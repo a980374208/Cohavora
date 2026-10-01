@@ -1,4 +1,5 @@
-﻿#include "telemetry_live_dialog.h"
+﻿#include "src/ui/meeting_encryption_panel.h"
+#include "telemetry_live_dialog.h"
 #include "src/core/session_shutdown_service.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/meeting_room_window.h"
@@ -3503,6 +3504,14 @@ void MeetingRoomWindow::initLayout() {
 	}, lifetime());
 
 	auto handleSimulate = [this](livekit::SimulateScenarioType type) {
+        if (type == livekit::SimulateScenarioType::E2eeKeyRatchet && _room) {
+            const auto manager = _room->e2ee_manager();
+            if (manager && manager->enabled() && manager->encryption_type() != livekit::EncryptionType::NONE) {
+                LogToConsole(LogCategory::General, "E2EE",
+                    QCoreApplication::translate("MeetingUI", "Debug key rotation is unavailable in an encrypted meeting."));
+                return;
+            }
+        }
 		if (_room) {
 			_room->SimulateScenario(type);
 		}
@@ -4268,7 +4277,9 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
      ? std::min(w / 2, std::max(340, sidebar->minimumSizeHint().width())) : 0;
 	const int stageW = w - sidebarW;
 	const int shareBannerH = _screenShareBanner && !_screenShareBanner->isHidden() ? std::max(44, _screenShareBanner->heightForWidth(w)) : 0;
-	const int stageTop = topBarH + shareBannerH;
+	const int encryptionH = _encryptionPanel ? std::max(44, _encryptionPanel->sizeHint().height()) : 0;
+	if (_encryptionPanel) _encryptionPanel->setGeometry(0, topBarH + shareBannerH, w, encryptionH);
+	const int stageTop = topBarH + shareBannerH + encryptionH;
 	const int stageH = std::max(0, h - stageTop - bottomBarH);
 	if (_screenShareBanner) _screenShareBanner->setGeometry(0, topBarH, w, shareBannerH);
     if (_screenQualityButton && shareBannerH > 0) {
@@ -6334,6 +6345,42 @@ void MeetingRoomWindow::bindLocalMediaSources() {
 
 void MeetingRoomWindow::attachCoordinatorSession() {
 	if (!_coordinator) return;
+    if (!_encryptionPanel) {
+        _encryptionPanel = new MeetingEncryptionPanel(this);
+        _encryptionPanel->setRecoveryHandler([weak = std::weak_ptr<OpenMeeting::MeetingCoordinator>(_coordinator)](
+            std::shared_ptr<livekit::MeetingSecretHandle> secret) {
+            if (const auto owner = weak.lock()) owner->recoverEncryptionKey(std::move(secret));
+            else if (secret) secret->Revoke();
+        });
+        const auto refresh = [this] {
+            _encryptionPanel->setSession(_coordinator->requiresEncryption(),
+                _coordinator->state() == OpenMeeting::MeetingState::InMeeting,
+                _coordinator->canRecoverEncryptionKey());
+        };
+        connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged, this,
+            [refresh](OpenMeeting::MeetingState, const QString&) { refresh(); });
+        // Native generation may arrive after InMeeting; it is published before
+        // participantsUpdated, so refresh recovery availability at that boundary.
+        connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantsUpdated, this,
+            [refresh](const auto&) { refresh(); });
+        connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::encryptionKeyRecoveryFinished, this,
+            [this](bool installed) {
+                _encryptionPanel->setInstallResult(installed, _coordinator->canRecoverEncryptionKey());
+            });
+        connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::encryptionMediaStatusChanged, this,
+            [this](const livekit::MediaEncryptionStatus& status) { _encryptionPanel->setMediaStatus(status); });
+        // Bounded display sampling, never a recovery retry or an acceptance test.
+        auto* encryptionStatusTimer = new QTimer(_encryptionPanel);
+        encryptionStatusTimer->setInterval(1000);
+        connect(encryptionStatusTimer, &QTimer::timeout, this,
+            [this] { _coordinator->refreshEncryptionMediaStatus(); });
+        encryptionStatusTimer->start();
+        refresh();
+        _encryptionPanel->show();
+        QResizeEvent layoutEvent(size(), size());
+        resizeEvent(&layoutEvent);
+    }
+
 
 	// The entry owner starts the coordinator after constructing this window.
 	// Connecting here as well would restart that session, replace its sources,
@@ -6348,6 +6395,9 @@ void MeetingRoomWindow::attachCoordinatorSession() {
 
 void MeetingRoomWindow::stopLiveKitSession(bool requestLeave) {
 	Q_ASSERT(thread() == QThread::currentThread());
+	// The Coordinator's cleanup owner retains native resources through drain.
+	// A hidden/departure-notice window must not retain the retired Room and keys.
+	_room.reset();
 	CloseLiveTelemetryDialog(_telemetryDialog);
 	const bool wasRunning = _sessionRunning.exchange(false);
 	cancelMediaPreparation();

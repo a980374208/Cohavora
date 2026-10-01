@@ -1,3 +1,4 @@
+#include "e2ee/meeting_encryption.h"
 #include <asio.hpp>
 #include <openssl/sha.h>
 
@@ -53,6 +54,12 @@ public:
         room.connection_state_ = ConnectionState::Connected;
         room.local_participant_ = std::make_shared<LocalParticipant>(
             "PA_OUTBOUND", "outbound", LocalParticipant::SendSignalHandler{});
+    }
+
+    static void UseNoEncryptionManager(Room& room) {
+        std::lock_guard lock(room.room_mutex_);
+        TEST_CHECK(!room.publisher_pc_ && !room.subscriber_pc_);
+        room.e2ee_manager_.reset();
     }
 
     static void AfterEncrypt(Room& room, std::function<void()> hook) {
@@ -764,8 +771,338 @@ void TestOutboundSenderInstanceBinding() {
     TEST_CHECK(f.channel->attempts() == 0);
 }
 
+void TestProductUserProtection() {
+    OutboundFixture f;
+    struct Listener : livekit::RoomListener {
+        unsigned deliveries = 0;
+        void OnDataReceived(const std::vector<uint8_t>& data,
+            std::shared_ptr<livekit::RemoteParticipant>, const std::string& topic) override {
+            TEST_CHECK(data == std::vector<uint8_t>({1, 2, 3}) && topic == "protected-user");
+            ++deliveries;
+        }
+    };
+    auto listener = std::make_shared<Listener>(); f.room->AddListener(listener);
+    TEST_CHECK(f.room->PublishData({1, 2, 3}, true, {"b", "a", "b"}, "protected-user"));
+    auto packet = f.channel->accepted().back();
+    TEST_CHECK(packet.destination_identities_size() == 3 && packet.destination_identities(0) == "b");
+    auto inner = OpenOutbound(packet, true);
+    TEST_CHECK(inner.has_user() && inner.user().payload() == std::string("\1\2\3", 3));
+    auto deliver = [&](const livekit::proto::DataPacket& value) {
+        const auto bytes = value.SerializeAsString();
+        f.room->OnIncomingDataPacket({bytes.begin(), bytes.end()}, "PA_OUTBOUND", "");
+    };
+    livekit::proto::DataPacket plain = packet; *plain.mutable_user() = inner.user();
+    deliver(plain);
+    TEST_CHECK(listener->deliveries == 0);
+    f.room->OnIncomingDataPacket({1, 2, 3}, "PA_OUTBOUND", "protected-user");
+    TEST_CHECK(listener->deliveries == 0);
+    deliver(packet);
+    TEST_CHECK(listener->deliveries == 1);
+    auto damaged = packet;
+    (*damaged.mutable_encrypted_packet()->mutable_encrypted_value())[0] ^= 1;
+    deliver(damaged);
+    TEST_CHECK(listener->deliveries == 1);
+    const auto before_large = f.channel->accepted().size();
+    TEST_CHECK(f.room->PublishData(std::vector<uint8_t>(16001, 0x31), true, {"only-peer"}, "large-user"));
+    auto packets = f.channel->accepted();
+    TEST_CHECK(packets.size() == before_large + 4);
+    for (std::size_t i = before_large; i < packets.size(); ++i) {
+        TEST_CHECK(packets[i].destination_identities_size() == 1);
+        TEST_CHECK(packets[i].destination_identities(0) == "only-peer");
+        auto opened = OpenOutbound(packets[i], true);
+        TEST_CHECK(opened.has_stream_header() || opened.has_stream_chunk() || opened.has_stream_trailer());
+    }
+    f.channel->Close();
+    TEST_CHECK(!f.room->PublishData({1, 2, 3}, true, {}, "protected-user"));
+    TEST_CHECK(listener->deliveries == 1); // No local success echo when protected.
+    OutboundFixture missing(true, false);
+    TEST_CHECK(!missing.room->PublishData({1, 2, 3}, true, {}, "protected-user"));
+    TEST_CHECK(missing.channel->attempts() == 0);
+    f.room->RemoveListener(listener);
+    f.io.restart(); f.io.poll();
+    struct EventListener : livekit::RoomListener {
+        unsigned deliveries = 0;
+        bool ConsumesParticipantEvents() const override { return true; }
+        void OnParticipantEvent(const livekit::ParticipantEvent& event) override {
+            if (event.kind == livekit::ParticipantEventKind::DataReceived) ++deliveries;
+        }
+    };
+    auto queued = std::make_shared<EventListener>(); f.room->AddListener(queued);
+    for (int transition : {1, 0, 2}) {
+        deliver(packet);
+        TEST_CHECK(queued->deliveries == 0);
+        if (transition == 0) f.room->EnableE2ee({livekit::EncryptionType::GCM, f.keys});
+        else if (transition == 2) {
+            auto secret = livekit::MeetingSecretHandle::Create(std::vector<uint8_t>(32, 0x42));
+            TEST_CHECK(f.room->RecoverE2eeSharedKey(secret, 1));
+            TEST_CHECK(!secret->available());
+        } else {
+            f.room->e2ee_manager()->SetEnabled(false);
+            f.room->e2ee_manager()->SetEnabled(true);
+        }
+        f.io.restart(); f.io.poll();
+        TEST_CHECK(queued->deliveries == 0);
+    }
+    deliver(packet); f.io.restart(); f.io.poll();
+    TEST_CHECK(queued->deliveries == 1);
+    f.room->RemoveListener(queued);
+}
+
+void TestProtectedLegacyRpc(bool encrypted = true, bool absent_manager = false) {
+    OutboundFixture f;
+    if (absent_manager) livekit::RoomStreamDeliveryTestAccess::UseNoEncryptionManager(*f.room);
+    else if (!encrypted) {
+        f.room->EnableE2ee({livekit::EncryptionType::NONE, f.keys});
+        TEST_CHECK(!f.room->e2ee_manager()->enabled());
+        bool rejected = false;
+        try { f.room->e2ee_manager()->SetEnabled(true); }
+        catch (const std::invalid_argument&) { rejected = true; }
+        TEST_CHECK(rejected && !f.room->e2ee_manager()->enabled());
+    }
+    unsigned calls = 0;
+    f.room->local_participant()->registerRpcMethod("echo",
+        [&](const livekit::RpcInvocationData& input) -> asio::awaitable<std::string> {
+            ++calls;
+            TEST_CHECK(input.caller_identity == "outbound" && input.payload == "request");
+            co_return "response";
+        });
+    livekit::RpcPacket request;
+    request.wire_format = livekit::RpcWireFormat::LegacyJson;
+    request.request_id = "protected-rpc"; request.method = "echo";
+    request.payload = "request"; request.caller_identity = "outbound";
+    request.destination_identity = "outbound";
+    auto completed = asio::co_spawn(f.io, f.room->SendRpcRequest(request), asio::use_future);
+    auto drain = [&] { f.io.restart(); f.io.poll(); };
+    drain();
+    TEST_CHECK(f.channel->accepted().size() == 1);
+    auto deliver = [&](const livekit::proto::DataPacket& packet) {
+        auto encoded = packet.SerializeAsString();
+        f.room->OnIncomingDataPacket({encoded.begin(), encoded.end()}, "PA_OUTBOUND", "");
+        drain();
+    };
+    auto packet = f.channel->accepted().front();
+    if (encrypted) {
+        auto inner = OpenOutbound(packet, true);
+        auto plain = packet; *plain.mutable_user() = inner.user();
+        deliver(plain); TEST_CHECK(calls == 0);
+    } else {
+        TEST_CHECK(packet.has_user() && !packet.has_encrypted_packet());
+    }
+    deliver(packet); TEST_CHECK(calls == 1);
+    TEST_CHECK(f.channel->accepted().size() == 2);
+    deliver(f.channel->accepted().back());
+    TEST_CHECK(completed.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    TEST_CHECK(completed.get() == "response");
+    for (int transition : {0, 1, 2}) {
+        if (!encrypted && transition != 0) continue;
+        asio::steady_timer release(f.io, std::chrono::hours(1));
+        f.room->local_participant()->registerRpcMethod("echo",
+            [&](const livekit::RpcInvocationData&) -> asio::awaitable<std::string> {
+                ++calls;
+                std::error_code ec;
+                co_await release.async_wait(asio::redirect_error(asio::use_awaitable, ec));
+                co_return "late-response";
+            });
+        const auto before_calls = calls;
+        deliver(packet);
+        TEST_CHECK(calls == before_calls + 1);
+        const auto before_packets = f.channel->accepted().size();
+        if (transition == 0) f.room->EnableE2ee({livekit::EncryptionType::GCM, f.keys});
+        else if (transition == 2) {
+            auto secret = livekit::MeetingSecretHandle::Create(std::vector<uint8_t>(32, 0x42));
+            TEST_CHECK(f.room->RecoverE2eeSharedKey(secret, 1));
+            TEST_CHECK(!secret->available());
+        } else {
+            f.room->e2ee_manager()->SetEnabled(false);
+            f.room->e2ee_manager()->SetEnabled(true);
+        }
+        release.cancel(); drain();
+        TEST_CHECK(f.channel->accepted().size() == before_packets);
+    }
+    f.room->local_participant()->unregisterRpcMethod("echo");
+    f.channel->Close();
+    request.request_id = "send-rejected";
+    auto rejected = asio::co_spawn(f.io, f.room->SendRpcRequest(request), asio::use_future);
+    drain();
+    TEST_CHECK(rejected.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    bool failed = false;
+    try { rejected.get(); } catch (const livekit::RpcError& error) {
+        failed = error.code() == livekit::RpcErrorCode::NETWORK_ERROR;
+    }
+    TEST_CHECK(failed);
+    drain();
+}
+
+void TestProtobufRpc(bool encrypted = true) {
+    OutboundFixture f;
+    if (!encrypted) f.room->e2ee_manager()->SetEnabled(false);
+    unsigned calls = 0;
+    f.room->local_participant()->registerRpcMethod("echo",
+        [&](const livekit::RpcInvocationData& input) -> asio::awaitable<std::string> {
+            ++calls; TEST_CHECK(input.payload == "proto-request"); co_return "proto-response";
+        });
+    livekit::RpcPacket request;
+    request.request_id = "proto-rpc"; request.method = "echo"; request.payload = "proto-request";
+    request.caller_identity = "outbound"; request.destination_identity = "outbound";
+    auto future = asio::co_spawn(f.io, f.room->SendRpcRequest(request), asio::use_future);
+    auto drain = [&] { f.io.restart(); f.io.poll(); };
+    auto deliver = [&](const livekit::proto::DataPacket& packet) {
+        const auto bytes = packet.SerializeAsString();
+        f.room->OnIncomingDataPacket({bytes.begin(), bytes.end()}, "PA_OUTBOUND", ""); drain();
+    };
+    drain();
+    auto packets = f.channel->accepted(); TEST_CHECK(packets.size() == 1);
+    livekit::proto::RpcRequest wire_request = encrypted ? OpenOutbound(packets[0], true).rpc_request() : packets[0].rpc_request();
+    TEST_CHECK(wire_request.version() == 1 && wire_request.method() == "echo");
+    TEST_CHECK(wire_request.response_timeout_ms() == 8000);
+    if (encrypted) {
+        auto plain = packets[0]; *plain.mutable_rpc_request() = wire_request;
+        deliver(plain); TEST_CHECK(calls == 0);
+    }
+    deliver(packets[0]); TEST_CHECK(calls == 1);
+    packets = f.channel->accepted(); TEST_CHECK(packets.size() == 3);
+    if (encrypted) {
+        TEST_CHECK(OpenOutbound(packets[1], true).has_rpc_ack());
+        TEST_CHECK(OpenOutbound(packets[2], true).rpc_response().payload() == "proto-response");
+    } else {
+        TEST_CHECK(packets[1].has_rpc_ack() && packets[2].has_rpc_response());
+    }
+    auto spoof = packets[2]; spoof.set_participant_identity("wrong-destination");
+    deliver(spoof);
+    TEST_CHECK(future.wait_for(std::chrono::seconds(0)) != std::future_status::ready);
+    deliver(packets[1]);
+    TEST_CHECK(future.wait_for(std::chrono::seconds(0)) != std::future_status::ready);
+    deliver(packets[2]);
+    TEST_CHECK(future.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    TEST_CHECK(future.get() == "proto-response");
+    request.request_id = "proto-missing"; request.method = "missing";
+    auto missing = asio::co_spawn(f.io, f.room->SendRpcRequest(request), asio::use_future);
+    drain(); deliver(f.channel->accepted().back());
+    auto error_packet = f.channel->accepted().back();
+    const auto error = encrypted ? OpenOutbound(error_packet, true).rpc_response().error() : error_packet.rpc_response().error();
+    TEST_CHECK(error.code() == 1400);
+    deliver(error_packet);
+    bool unsupported = false;
+    try { missing.get(); } catch (const livekit::RpcError& value) { unsupported = value.code() == livekit::RpcErrorCode::UNSUPPORTED_METHOD; }
+    TEST_CHECK(unsupported);
+    request.request_id = "oversize"; request.payload.assign(livekit::RpcPacket::kMaxPayloadBytes + 1, 'x');
+    const auto before = f.channel->attempts();
+    auto oversized = asio::co_spawn(f.io, f.room->SendRpcRequest(request), asio::use_future); drain();
+    bool rejected = false;
+    try { oversized.get(); } catch (const livekit::RpcError& value) { rejected = value.code() == livekit::RpcErrorCode::REQUEST_PAYLOAD_TOO_LARGE; }
+    TEST_CHECK(rejected && f.channel->attempts() == before);
+    request.request_id = "disconnect"; request.payload = "proto-request"; request.method = "echo";
+    auto disconnected = asio::co_spawn(f.io, f.room->SendRpcRequest(request), asio::use_future); drain();
+    f.room->Disconnect(); drain();
+    TEST_CHECK(disconnected.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    bool cancelled = false;
+    try { disconnected.get(); } catch (const livekit::RpcError& value) { cancelled = value.code() == livekit::RpcErrorCode::NETWORK_ERROR; }
+    TEST_CHECK(cancelled);
+    drain();
+}
+
+void TestStreamRpc() {
+    for (const std::string mode : {"unknown-length", "known-length", "cancel", "policy", "missing"}) {
+        OutboundFixture f;
+        unsigned calls = 0;
+        const std::string body(20000, 'v');
+        f.room->local_participant()->registerRpcMethod("echo",
+            [&](const livekit::RpcInvocationData& input) -> asio::awaitable<std::string> {
+                ++calls;
+                TEST_CHECK(input.request_id == "v2-id" && input.payload == body);
+                co_return body;
+            });
+        auto writer = f.room->CreateTextStreamWriter("lk.rpc_request",
+            {{"lk.rpc_request_id", "v2-id"}, {"lk.rpc_request_method", mode == "missing" ? "missing" : "echo"},
+             {"lk.rpc_request_response_timeout_ms", "5000"}, {"lk.rpc_request_version", "2"}},
+            "v2-stream", mode == "known-length" ? std::optional<size_t>(body.size()) : std::nullopt,
+            "", {"outbound"});
+        writer->Write(body);
+        // Trailer must not be able to change authenticated routing metadata.
+        writer->Close(mode == "cancel" ? "cancelled" : "", {{"lk.rpc_request_id", "forged"}});
+        const auto input = f.channel->accepted();
+        auto deliver = [&](const livekit::proto::DataPacket& packet) {
+            const auto bytes = packet.SerializeAsString();
+            f.room->OnIncomingDataPacket({bytes.begin(), bytes.end()}, "PA_OUTBOUND", "");
+            f.io.restart(); f.io.poll();
+        };
+        deliver(input.front());
+        TEST_CHECK(calls == 0);
+        TEST_CHECK(f.channel->accepted().size() == input.size() + 1);
+        TEST_CHECK(OpenOutbound(f.channel->accepted().back(), true).rpc_ack().request_id() == "v2-id");
+        if (mode == "policy") {
+            f.room->e2ee_manager()->SetEnabled(false);
+            f.room->e2ee_manager()->SetEnabled(true);
+        }
+        for (size_t i = 1; i + 1 < input.size(); ++i) deliver(input[i]);
+        TEST_CHECK(calls == 0);
+        deliver(input.back());
+        const auto output = f.channel->accepted();
+        if (mode == "cancel" || mode == "policy") {
+            TEST_CHECK(calls == 0 && output.size() == input.size() + 1);
+        } else if (mode == "missing") {
+            TEST_CHECK(calls == 0);
+            TEST_CHECK(OpenOutbound(output.back(), true).rpc_response().error().code() == 1400);
+        } else {
+            TEST_CHECK(calls == 1);
+            std::string response;
+            for (size_t i = input.size() + 1; i < output.size(); ++i) {
+                const auto inner = OpenOutbound(output[i], true);
+                if (inner.has_stream_header()) {
+                    TEST_CHECK(inner.stream_header().topic() == "lk.rpc_response");
+                    TEST_CHECK(inner.stream_header().attributes().at("lk.rpc_request_id") == "v2-id");
+                }
+                if (inner.has_stream_chunk()) response += inner.stream_chunk().content();
+            }
+            TEST_CHECK(response == body);
+            TEST_CHECK(OpenOutbound(output.back(), true).has_stream_trailer());
+        }
+        f.room->Disconnect(); f.io.restart(); f.io.poll();
+    }
+}
+
+void TestRecoveryKeyContract() {
+    OutboundFixture f;
+    auto manager = f.room->e2ee_manager();
+    auto backend = f.keys->MediaBackend();
+    const auto initial = manager->data_packet_state();
+    auto writer = f.room->CreateTextStreamWriter("recovery", {}, "old-stream");
+    writer->Write("old-prefix");
+    auto stale = livekit::MeetingSecretHandle::Create(std::vector<uint8_t>(32, 0x33));
+    TEST_CHECK(!f.room->RecoverE2eeSharedKey(stale, 2));
+    TEST_CHECK(!stale->available() && manager->data_packet_state().policy_revision == initial.policy_revision);
+    auto replacement = livekit::MeetingSecretHandle::Create(std::vector<uint8_t>(32, 0x33));
+    TEST_CHECK(f.room->RecoverE2eeSharedKey(replacement, 1));
+    TEST_CHECK(!replacement->available());
+    TEST_CHECK(f.room->e2ee_manager() == manager && f.keys->MediaBackend() == backend);
+    TEST_CHECK(manager->enabled() && manager->encryption_type() == livekit::EncryptionType::GCM);
+    TEST_CHECK(manager->data_packet_state().policy_revision == initial.policy_revision + 1);
+    const auto before = f.channel->attempts();
+    bool rejected = false;
+    try { writer->Write("old-suffix"); } catch (const OperationError&) { rejected = true; }
+    TEST_CHECK(rejected && f.channel->attempts() == before);
+    auto fresh = f.room->CreateTextStreamWriter("recovery", {}, "new-stream");
+    fresh->Write("new-content"); fresh->Close();
+    const auto output = f.channel->accepted();
+    TEST_CHECK(OpenOutbound(output.back(), true, 0, std::vector<uint8_t>(32, 0x33)).has_stream_trailer());
+    TEST_CHECK(!f.room->RecoverE2eeSharedKey(replacement, 1));
+    TEST_CHECK(manager->data_packet_state().policy_revision == initial.policy_revision + 1);
+    f.room->Disconnect();
+    auto disconnected = livekit::MeetingSecretHandle::Create({'a', 'b', 'c'});
+    TEST_CHECK(!f.room->RecoverE2eeSharedKey(disconnected, 1) && !disconnected->available());
+    f.io.poll();
+}
+
 void RunOutboundCase(const std::string& name) {
-    if (name == "text") TestOutboundEnvelope(WriterKind::Text);
+    if (name == "recovery-key") TestRecoveryKeyContract();
+    else if (name == "rpc-stream") TestStreamRpc();
+    else if (name == "rpc-proto") TestProtobufRpc();
+    else if (name == "rpc-proto-off") TestProtobufRpc(false);
+    else if (name == "rpc-off") TestProtectedLegacyRpc(false, true);
+    else if (name == "rpc-none") TestProtectedLegacyRpc(false);
+    else if (name == "rpc") TestProtectedLegacyRpc();
+    else if (name == "user") TestProductUserProtection();
+    else if (name == "text") TestOutboundEnvelope(WriterKind::Text);
     else if (name == "byte") TestOutboundEnvelope(WriterKind::Byte);
     else if (name == "rotation") TestOutboundRotation();
     else if (name == "empty-cancel") TestOutboundEmptyAndCancel();
@@ -1602,7 +1939,7 @@ int main(int argc, char** argv) {
         RunOutboundCase(argv[2]);
         return 0;
     }
-    for (const auto* name : {"text", "byte", "missing", "replace", "disable", "rotation",
+    for (const auto* name : {"recovery-key", "rpc-stream", "rpc-proto", "rpc-proto-off", "rpc-off", "rpc-none", "rpc", "user", "text", "byte", "missing", "replace", "disable", "rotation",
                             "empty-cancel", "failure-stages", "bounds", "interleavings",
                             "sender-instance"})
         RunOutboundCase(name);

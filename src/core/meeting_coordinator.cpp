@@ -22,6 +22,7 @@
 #include <QtCore/QPointer>
 #include <QtCore/QThread>
 #include <QtCore/QUuid>
+#include <QtCore/qscopeguard.h>
 
 #include <exception>
 #include <future>
@@ -32,6 +33,19 @@
 namespace OpenMeeting {
 
 namespace {
+std::optional<MediaPreferences> ResolveEncryptionMediaPreferences(
+        const MediaPreferences& requested, const livekit::MeetingEncryptionRequest& encryption) {
+    auto effective = requested;
+    if (encryption.mode != livekit::MeetingEncryptionMode::Required) return effective;
+    const auto resolve = [](QString& codec) {
+        codec = codec.trimmed().toLower();
+        if (codec == QStringLiteral("auto")) codec = QStringLiteral("vp8");
+        return codec == QStringLiteral("vp8") || codec == QStringLiteral("h264");
+    };
+    if (!resolve(effective.cameraVideoCodec) || !resolve(effective.screenShareVideoCodec)) return std::nullopt;
+    return effective;
+}
+
 livekit::diagnostic::Outcome DiagnosticOutcome(
     livekit::telemetry::OperationOutcome outcome) noexcept {
     using Source = livekit::telemetry::OperationOutcome;
@@ -2281,6 +2295,10 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
 
     if (event.kind == livekit::ParticipantEventKind::DataReceived) {
         const bool serverOrigin = event.sender.origin == livekit::SenderOrigin::Server;
+        // Named application/stream channels must not fall through to the
+        // legacy text-chat parser. Empty topic retains the existing protocol;
+        // server-origin control notifications keep their separate trust path.
+        if (!serverOrigin && !event.topic.empty() && event.topic != "chat") return;
         if (!serverOrigin &&
             !livekit::IsParticipantTicketActive(
                 event.sender.ticket, event.sender.key)) {
@@ -2660,6 +2678,8 @@ livekit::diagnostic::Context MeetingCoordinator::diagnosticContext() const {
 }
 
 uint64_t MeetingCoordinator::invalidateAdmission() {
+    cancelEncryptionRecovery();
+    _admissionEncryption.Revoke();
     if (!_admissionTelemetry.terminal) {
         finishAdmissionTelemetry(
             _admissionTelemetry.generation,
@@ -2691,6 +2711,7 @@ void MeetingCoordinator::finishAdmissionTelemetry(
         _admissionTelemetry.generation != admissionGeneration) {
         return;
     }
+    _admissionEncryption.Revoke();
     const auto finishedAt = std::chrono::steady_clock::now();
     _admissionTelemetry.terminal = true;
     livekit::diagnostic::Event event;
@@ -2843,6 +2864,7 @@ bool MeetingCoordinator::isAdmissionCurrent(uint64_t generation,
 
 void MeetingCoordinator::setState(MeetingState s, const QString &detail) {
     if (_state != s) {
+        if (s != MeetingState::InMeeting) cancelEncryptionRecovery();
         _state = s;
         emit stateChanged(_state, detail);
     }
@@ -2851,7 +2873,13 @@ void MeetingCoordinator::setState(MeetingState s, const QString &detail) {
 void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
                                          const QString &password,
                                          const QString &displayName,
-                                         const MediaPreferences &prefs) {
+                                         const MediaPreferences &prefs,
+                                         livekit::MeetingEncryptionRequest encryption) {
+    const QPointer<MeetingCoordinator> encryptionOwner(this);
+    const auto secretCleanup = qScopeGuard([&, encryptionOwner] {
+        if (!encryptionOwner || encryption.secret != encryptionOwner->_admissionEncryption.secret)
+            encryption.Revoke();
+    });
     if (_sessionInvalidated || _sessionManager.isSessionInvalidating()) {
         qInfo() << "[Coordinator] Ignore join request after session invalidation.";
         return;
@@ -2865,13 +2893,28 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
     const QString requestedMeetingId = meetingId;
     const QString requestedPassword = password;
     const QString requestedDisplayName = displayName;
+    try { encryption.Validate(); }
+    catch (const livekit::EncryptionRequestException&) {
+        encryption.Revoke();
+        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"),
+            QCoreApplication::translate("MeetingUI", "A valid encryption key is required. Enter the key again."));
+        return;
+    }
+    const auto effectivePrefs = ResolveEncryptionMediaPreferences(prefs, encryption);
+    if (!effectivePrefs) {
+        encryption.Revoke();
+        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"),
+            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings."));
+        return;
+    }
     const uint64_t generation = beginAdmission(AdmissionStage::Joining);
+    _admissionEncryption = std::move(encryption);
     QPointer<MeetingCoordinator> owner(this);
 
     _currentMeetingId = requestedMeetingId;
     _currentPassword = requestedPassword;
     _currentDisplayName = requestedDisplayName.isEmpty() ? _sessionManager.nickname() : requestedDisplayName;
-    _mediaPrefs = prefs;
+    _mediaPrefs = *effectivePrefs;
     _requestedAudioMuted = !prefs.enableMicrophone;
     _requestedVideoEnabled = prefs.enableVideo;
     _audioMuted = _requestedAudioMuted || !_localAudioAvailable;
@@ -2973,7 +3016,13 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
 
 void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
                                                        int durationSeconds,
-                                                       const MediaPreferences &prefs) {
+                                                       const MediaPreferences &prefs,
+                                         livekit::MeetingEncryptionRequest encryption) {
+    const QPointer<MeetingCoordinator> encryptionOwner(this);
+    const auto secretCleanup = qScopeGuard([&, encryptionOwner] {
+        if (!encryptionOwner || encryption.secret != encryptionOwner->_admissionEncryption.secret)
+            encryption.Revoke();
+    });
     if (_sessionInvalidated || _sessionManager.isSessionInvalidating()) {
         qInfo() << "[Coordinator] Ignore quick-meeting request after session invalidation.";
         return;
@@ -2986,11 +3035,26 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
 
     const QString requestedTitle = title;
     const int requestedDurationSeconds = durationSeconds;
+    try { encryption.Validate(); }
+    catch (const livekit::EncryptionRequestException&) {
+        encryption.Revoke();
+        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"),
+            QCoreApplication::translate("MeetingUI", "A valid encryption key is required. Enter the key again."));
+        return;
+    }
+    const auto effectivePrefs = ResolveEncryptionMediaPreferences(prefs, encryption);
+    if (!effectivePrefs) {
+        encryption.Revoke();
+        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"),
+            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings."));
+        return;
+    }
     const uint64_t generation = beginAdmission(AdmissionStage::Creating);
+    _admissionEncryption = std::move(encryption);
     QPointer<MeetingCoordinator> owner(this);
 
     _currentDisplayName = _sessionManager.nickname();
-    _mediaPrefs = prefs;
+    _mediaPrefs = *effectivePrefs;
     _requestedAudioMuted = !prefs.enableMicrophone;
     _requestedVideoEnabled = prefs.enableVideo;
     _audioMuted = _requestedAudioMuted || !_localAudioAvailable;
@@ -3065,7 +3129,13 @@ void MeetingCoordinator::connectDirectlyAsync(const QString &url,
                                              const QString &token,
                                              const QString &meetingId,
                                              const QString &displayName,
-                                             const MediaPreferences &prefs) {
+                                             const MediaPreferences &prefs,
+                                         livekit::MeetingEncryptionRequest encryption) {
+    const QPointer<MeetingCoordinator> encryptionOwner(this);
+    const auto secretCleanup = qScopeGuard([&, encryptionOwner] {
+        if (!encryptionOwner || encryption.secret != encryptionOwner->_admissionEncryption.secret)
+            encryption.Revoke();
+    });
     invalidateAdmission();
     if (_sessionInvalidated || _sessionManager.isSessionInvalidating()) {
         qInfo() << "[Coordinator] Ignore direct-connect request after session invalidation.";
@@ -3073,11 +3143,26 @@ void MeetingCoordinator::connectDirectlyAsync(const QString &url,
     }
     const QString requestedUrl = url;
     const QString requestedToken = token;
+    try { encryption.Validate(); }
+    catch (const livekit::EncryptionRequestException&) {
+        encryption.Revoke();
+        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"),
+            QCoreApplication::translate("MeetingUI", "A valid encryption key is required. Enter the key again."));
+        return;
+    }
+    const auto effectivePrefs = ResolveEncryptionMediaPreferences(prefs, encryption);
+    if (!effectivePrefs) {
+        encryption.Revoke();
+        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"),
+            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings."));
+        return;
+    }
     const uint64_t generation = beginAdmission(AdmissionStage::ReadyToStart);
+    _admissionEncryption = std::move(encryption);
     QPointer<MeetingCoordinator> owner(this);
     _currentMeetingId = meetingId;
     _currentDisplayName = displayName;
-    _mediaPrefs = prefs;
+    _mediaPrefs = *effectivePrefs;
     _requestedAudioMuted = !prefs.enableMicrophone;
     _requestedVideoEnabled = prefs.enableVideo;
     _audioMuted = _requestedAudioMuted || !_localAudioAvailable;
@@ -3091,6 +3176,130 @@ void MeetingCoordinator::connectDirectlyAsync(const QString &url,
     }
 
     owner->startRoomSession(requestedUrl, requestedToken, generation);
+}
+
+bool MeetingCoordinator::canRecoverEncryptionKey() const {
+    return !_sessionInvalidated && !_sessionManager.isSessionInvalidating() &&
+        _state == MeetingState::InMeeting && _sessionRunning && _sessionRuntime &&
+        _room && _nativeRoomGeneration != 0 &&
+        _admissionEncryption.mode == livekit::MeetingEncryptionMode::Required &&
+        !_pendingEncryptionRecovery;
+}
+
+void MeetingCoordinator::cancelEncryptionRecovery() {
+    _pendingEncryptionStatusRequest = 0;
+    ++_encryptionRecoveryOperation;
+    if (auto pending = std::exchange(_pendingEncryptionRecovery, {})) pending->Revoke();
+}
+
+void MeetingCoordinator::refreshEncryptionMediaStatus() {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (_pendingEncryptionStatusRequest || !canRecoverEncryptionKey()) return;
+    const auto request = ++_nextEncryptionStatusRequest;
+    _pendingEncryptionStatusRequest = request;
+    const auto operation = _encryptionRecoveryOperation;
+    const auto nativeGeneration = _nativeRoomGeneration;
+    const auto session = _sessionRuntime;
+    const auto generation = session->generation();
+    const bool queued = session->post([gate = _sessionUiGate, session, room = _room,
+        request, operation, generation, nativeGeneration] {
+        session->assertOnStrand();
+        std::optional<livekit::MediaEncryptionStatus> status;
+        if (session->acceptsDataOnStrand()) status = room->ReadMediaEncryptionStatus(nativeGeneration);
+        gate->Post([request, operation, generation, nativeGeneration, status = std::move(status)](
+            MeetingCoordinator* self) {
+            if (self->_pendingEncryptionStatusRequest != request) return;
+            self->_pendingEncryptionStatusRequest = 0;
+            if (!status || !self->isCurrentSessionGenerationOnUiThread(generation) ||
+                self->_nativeRoomGeneration != nativeGeneration ||
+                self->_encryptionRecoveryOperation != operation ||
+                self->_state != MeetingState::InMeeting) return;
+            emit self->encryptionMediaStatusChanged(*status);
+        });
+    });
+    if (!queued) _pendingEncryptionStatusRequest = 0;
+}
+
+void MeetingCoordinator::recoverEncryptionKey(std::shared_ptr<livekit::MeetingSecretHandle> secret) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    // A duplicate alias must not revoke the already queued operation.
+    if (secret && secret == _pendingEncryptionRecovery) return;
+    if (!secret || !secret->available() || _state != MeetingState::InMeeting ||
+        !_sessionRunning || !_sessionRuntime || !_room || !_nativeRoomGeneration ||
+        _sessionInvalidated || _sessionManager.isSessionInvalidating() ||
+        _admissionEncryption.mode != livekit::MeetingEncryptionMode::Required) {
+        if (secret) secret->Revoke();
+        emit encryptionKeyRecoveryFinished(false);
+        return;
+    }
+    cancelEncryptionRecovery();
+    _pendingEncryptionRecovery = secret;
+    const auto operation = _encryptionRecoveryOperation;
+    // Stop UI-owned chunk production before the strand installs a new key.
+    // No fragment from an already started transfer may be sent under that key.
+    if (_mediaSendTimer) _mediaSendTimer->stop();
+    auto cancelledTransfers = std::move(_mediaSendQueue);
+    _mediaSendQueue.clear();
+    QPointer<MeetingCoordinator> recoveryOwner(this);
+    for (const auto& task : cancelledTransfers) {
+        EmitTransferTerminal(diagnosticContext(), task.mediaType,
+            livekit::diagnostic::TransferDirection::Send,
+            livekit::diagnostic::Outcome::Cancelled,
+            static_cast<std::uint64_t>(task.totalSize));
+        emit chatMessageSendFailed(task.messageId, tr("Encryption changed; send the file again"));
+        if (!recoveryOwner || _encryptionRecoveryOperation != operation ||
+            _pendingEncryptionRecovery != secret || !_sessionRuntime) return;
+    }
+    const auto nativeGeneration = _nativeRoomGeneration;
+    const auto session = _sessionRuntime;
+    const auto generation = session->generation();
+    const auto room = _room;
+    const bool queued = session->post([gate = _sessionUiGate, session, room,
+        secret, operation, generation, nativeGeneration] {
+        session->assertOnStrand();
+        bool installed = false;
+        if (session->acceptsDataOnStrand() && secret->available()) {
+            try { installed = room->RecoverE2eeSharedKey(secret, nativeGeneration); }
+            catch (...) { secret->Revoke(); }
+        } else secret->Revoke();
+        std::vector<QString> cancelledInbound;
+        if (installed) {
+            for (const auto& [key, transfer] : session->transfersOnStrand())
+                cancelledInbound.push_back(key.uiTransferId());
+            session->transfersOnStrand().clear();
+            if (auto board = session->whiteboardOnStrand())
+                board->encryptionChanged(static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch()));
+        }
+        gate->Post([operation, generation, nativeGeneration, installed,
+            cancelledInbound = std::move(cancelledInbound)](MeetingCoordinator* self) mutable {
+            if (!self->isCurrentSessionGenerationOnUiThread(generation) ||
+                self->_nativeRoomGeneration != nativeGeneration ||
+                self->_encryptionRecoveryOperation != operation ||
+                self->_state != MeetingState::InMeeting) return;
+            self->_pendingEncryptionRecovery.reset();
+            QPointer<MeetingCoordinator> owner(self);
+            if (installed) {
+                // Completed assembly can already be queued for UI delivery and
+                // absent from the strand map. Retire its unfinished placeholder too.
+                for (const auto& [id, entry] : self->_inboundTransferLedger)
+                    if (!entry.second && std::find(cancelledInbound.begin(), cancelledInbound.end(), id) == cancelledInbound.end())
+                        cancelledInbound.push_back(id);
+            }
+            for (const auto& id : cancelledInbound) {
+                self->_inboundTransferLedger.erase(id);
+                emit self->chatMediaReceivingFailed(id, tr("Encryption changed; request the file again"));
+                if (!owner || !owner->isCurrentSessionGenerationOnUiThread(generation) ||
+                    owner->_nativeRoomGeneration != nativeGeneration ||
+                    owner->_encryptionRecoveryOperation != operation ||
+                    owner->_state != MeetingState::InMeeting) return;
+            }
+            emit self->encryptionKeyRecoveryFinished(installed);
+        });
+    });
+    if (!queued) {
+        cancelEncryptionRecovery();
+        emit encryptionKeyRecoveryFinished(false);
+    }
 }
 
 void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
@@ -3483,20 +3692,22 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
         OpenMeeting::normalizeVideoCodecPreference(
             _mediaPrefs.cameraVideoCodec).toStdString();
     const bool allowInsecureTransport = isDebugHttpTransportEnabled();
+    const auto encryption = _admissionEncryption;
 
     _sessionOwner->thread = std::thread([gate = _sessionUiGate, ioContext, room = std::move(room), session = std::move(session),
                              audioSource = std::move(audioSource), videoSource = std::move(videoSource),
                              audioMuted, videoEnabled, audioAvailable, videoAvailable,
-                             cameraVideoCodec, allowInsecureTransport,
+                             cameraVideoCodec, allowInsecureTransport, encryption,
                              urlStr, tokenStr, sessionGeneration] {
         const auto opts = ProductionMeetingSignalOptions(
             allowInsecureTransport);
 
-        asio::co_spawn(*ioContext,
+        const auto startupExecutor = session->strand();
+        asio::co_spawn(startupExecutor,
                         [gate, room = std::move(room), session = std::move(session),
                          audioSource = std::move(audioSource), videoSource = std::move(videoSource),
                          audioMuted, videoEnabled, audioAvailable, videoAvailable,
-                         cameraVideoCodec,
+                         cameraVideoCodec, encryption,
                          urlStr, tokenStr, opts, sessionGeneration]() mutable -> asio::awaitable<void> {
             MeetingStartupTransaction startup;
             try {
@@ -3504,6 +3715,12 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
                     throw std::runtime_error(QCoreApplication::translate("MeetingUI", "The LiveKit URL or access token is empty").toStdString());
                 }
 
+                session->assertOnStrand();
+                encryption.Validate();
+                if (encryption.mode == livekit::MeetingEncryptionMode::Required) {
+                    auto provider = encryption.secret->ConsumeProvider();
+                    room->EnableE2ee({livekit::EncryptionType::GCM, std::move(provider)});
+                }
                 co_await room->ConnectAsync(urlStr, tokenStr, opts);
                 if (!startup.markRoomConnected()) {
                     throw std::runtime_error(QCoreApplication::translate("MeetingUI", "Invalid local media startup transaction state").toStdString());
@@ -3585,7 +3802,7 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
                 }
                 MeetingUI::LogToConsole(MeetingUI::LogCategory::Error, "STARTUP_TRANSACTION",
                                         QString("%1: %2").arg(title, err));
-                if (mediaBegan) {
+                if (mediaBegan && encryption.mode == livekit::MeetingEncryptionMode::Off) {
                     // 房间本身连接正常，仅本地媒体硬件发布异常：降级为无媒体参会，不强制断开会议
                     gate->Post([sessionGeneration, title, err](MeetingCoordinator* self) {
                         self->completeRoomStartupDegradedOnUiThread(sessionGeneration, title, err);
@@ -3772,6 +3989,7 @@ void MeetingCoordinator::failRoomStartupOnUiThread(
 }
 
 void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
+    cancelEncryptionRecovery();
     Q_ASSERT(QThread::currentThread() == thread());
     if (completion) _stopCompletion = std::move(completion);
     if (_stopPending) return;
@@ -4200,6 +4418,10 @@ void MeetingCoordinator::sendChatMessage(const QString &content, const QString &
 }
 
 void MeetingCoordinator::sendChatMediaMessage(const QString &messageId, const QString &mediaType, const QString &fileName, const QByteArray &data, int64_t seq) {
+    if (_pendingEncryptionRecovery) {
+        emit chatMessageSendFailed(messageId, tr("Encryption recovery in progress; send the file again"));
+        return;
+    }
     if (data.isEmpty()) {
         EmitTransferTerminal(diagnosticContext(), mediaType,
             livekit::diagnostic::TransferDirection::Send,
@@ -4841,7 +5063,7 @@ void MeetingCoordinator::enqueueWhiteboardData(
     if (!session || !livekit::whiteboard::isWhiteboardTopic(topic)) return;
     const auto now = static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
     session->post( [session, data, topic, sender, now] {
-        if (!session->acceptsDataOnStrand() ||
+        if (!session->acceptsDataOnStrand() || !sender.encryptionCurrent() ||
             !livekit::IsParticipantTicketActive(sender.ticket, sender.key)) return;
         livekit::whiteboard::PeerInstance peer{
             sender.key.identity.empty() ? sender.key.sid : sender.key.identity,
@@ -4918,6 +5140,7 @@ bool MeetingCoordinator::isCurrentSessionGenerationOnUiThread(uint64_t sessionGe
 
 bool MeetingCoordinator::isSenderContextCurrentOnUiThread(
     const livekit::SenderContext &sender) const {
+    if (!sender.encryptionCurrent()) return false;
     if (sender.origin == livekit::SenderOrigin::Server) return true;
     if (sender.origin == livekit::SenderOrigin::Unresolved ||
         !livekit::IsParticipantTicketActive(sender.ticket, sender.key)) {
@@ -5002,7 +5225,7 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
     const std::vector<uint8_t> &data,
     const livekit::SenderContext &sender) {
     session->assertOnStrand();
-    if (!session->acceptsDataOnStrand()) {
+    if (!session->acceptsDataOnStrand() || !sender.encryptionCurrent()) {
         return;
     }
     const uint64_t sessionGeneration = session->generation();
@@ -5034,7 +5257,7 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
                 sessionGeneration,
                 sender.key.native_room_generation,
                 sender.key.incarnation,
-                wireTransferId};
+                wireTransferId, sender.encryption_revision};
         };
 
         // 1. 尝试解析为 JSON 消息协议 (chat_text, media_start, media_chunk)

@@ -65,6 +65,7 @@ class CameraOwnerTestAccess;
 class ParticipantWindowTestAccess;
 
 namespace MeetingUI {
+class MeetingEncryptionPanel;
 
 class WhiteboardPanel;
 class AnnotationOverlayWindow;
@@ -691,6 +692,7 @@ private:
 	std::map<QString, std::unique_ptr<VideoTileWidget>> _remoteScreenTiles;
 	std::unique_ptr<VideoTileWidget> _localScreenTile;
 	std::shared_ptr<livekit::render::VideoRenderRouter> _localScreenPreview;
+	MeetingEncryptionPanel *_encryptionPanel = nullptr;
 	QLabel *_screenShareBanner = nullptr;
 	QPushButton *_annotationButton = nullptr;
 	QPushButton *_screenQualityButton = nullptr;
