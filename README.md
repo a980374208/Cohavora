@@ -26,7 +26,7 @@ Cohavora 提供桌面会议界面，也提供可单独运行的命令行示例�
 
 | 项目 | 在 Cohavora 中的用途 | 上游地址 |
 | --- | --- | --- |
-| WebRTC | 实时音视频和媒体传输；预编译包由 LiveKit 提供 | [WebRTC](https://webrtc.googlesource.com/src)、[LiveKit 构建包](https://github.com/livekit/rust-sdks) |
+| WebRTC | 实时音视频和媒体传输；参考 LiveKit 构建方式自行编译并预打包 | [WebRTC](https://webrtc.googlesource.com/src)、[LiveKit 构建参考](https://github.com/livekit/rust-sdks)、[本项目包元数据](build/prepare/webrtc-package.json) |
 | libyuv | 音视频帧格式转换，随 WebRTC SDK 提供 | [libyuv](https://chromium.googlesource.com/libyuv/libyuv) |
 | BoringSSL | WebRTC SDK 随附的加密实现 | [BoringSSL](https://boringssl.googlesource.com/boringssl) |
 | Asio | 异步网络连接与任务调度 | [Asio](https://github.com/chriskohlhoff/asio) |

@@ -21,15 +21,39 @@ from product_aliyun_transport import execute
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--output', type=Path)
+    parser.add_argument('--binary', type=Path, default=Path(
+        'out/build/windows-vs2026-dev/RelWithDebInfo/test_screen_share_runtime.exe'))
+    parser.add_argument('--check-binary-only', action='store_true')
     parser.add_argument('--gdi', action='store_true')
     parser.add_argument('--collect-fps-failures', action='store_true')
     parser.add_argument('--soak-seconds', type=int, default=0, choices=[0, 1800])
     args = parser.parse_args()
     if args.collect_fps_failures and (not args.gdi or args.soak_seconds):
         parser.error('--collect-fps-failures is only a GDI diagnostic; FPS failures still fail the run')
+    if not args.check_binary_only and args.output is None:
+        parser.error('--output is required for a runtime run')
+
+    verifier = Path(__file__).resolve().parents[1] / 'diagnostics' / 'verify_runtime_binary.ps1'
+    check = subprocess.run(['pwsh', '-NoProfile', '-File', str(verifier),
+                            '-Executable', str(args.binary.resolve()),
+                            '-ExpectedExecutableName', 'test_screen_share_runtime.exe',
+                            '-Configuration', 'RelWithDebInfo'],
+                           capture_output=True, text=True,
+                           creationflags=subprocess.CREATE_NO_WINDOW)
+    if check.returncode:
+        messages = (line.split('|', 1)[1].strip() for line in check.stderr.splitlines()
+                    if line.lstrip().startswith('| '))
+        detail = next((line for line in messages if line and not line.startswith('~')),
+                      'unknown error')
+        parser.exit(2, f'RelWithDebInfo binary verification failed: {detail}\n')
+    binary_identity = json.loads(check.stdout)
+    if args.check_binary_only:
+        print(json.dumps(binary_identity))
+        return 0
+
     args.output.mkdir(parents=True, exist_ok=False)
-    binary = Path('out/build/windows-vs2026-dev/Debug/test_screen_share_runtime.exe')
+    binary = Path(binary_identity['binary_path'])
     room = 'quality-hot-' + uuid.uuid4().hex[:12]
     auth = credentials(room)
     env = os.environ.copy()
@@ -53,7 +77,8 @@ def main():
                   run_id=room, gdi=args.gdi, soak_seconds=args.soak_seconds,
                   collect_fps_failures=args.collect_fps_failures,
                   resource_input_kind='generated_window_harness_phase_not_uia',
-                  binary_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(),
+                  binary_sha256=binary_identity['binary_sha256'],
+                  binary_identity=binary_identity,
                   server=execute("docker inspect --format '{{.Image}}' livekit && docker exec livekit sha256sum /livekit-server"),
                   inputs={p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in [
                       'src/core/room.cpp', 'src/core/screen_share_session.cpp', 'src/media/desktop_capture.cpp',
@@ -61,6 +86,12 @@ def main():
                       'tests/runtime/probes/test_screen_share_runtime.cpp']})
     manifest = args.output / 'summary.json'
     manifest.write_text(json.dumps(result, indent=2), encoding='utf-8')
+    if hashlib.sha256(binary.read_bytes()).hexdigest() != result['binary_sha256']:
+        result['status'] = 'FAIL'
+        result['failure_reason'] = 'binary_changed_before_launch'
+        result['finished_utc'] = datetime.now(timezone.utc).isoformat()
+        manifest.write_text(json.dumps(result, indent=2), encoding='utf-8')
+        parser.exit(2, 'Runtime harness changed after binary verification\n')
     child = subprocess.Popen([str(binary.resolve())], env=env, stdin=subprocess.DEVNULL,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                              creationflags=subprocess.CREATE_NO_WINDOW)
@@ -113,7 +144,10 @@ def main():
         except subprocess.TimeoutExpired: sampler.terminate(); sampler.wait(timeout=10)
         result['resource_sampler_exit'] = sampler.returncode
     result['exit_code'] = child.returncode
-    result['status'] = 'PASS' if child.returncode == 0 and '[RESULT] SCREEN_SHARE_L3 PASS' in lines else 'FAIL'
+    result['binary_sha256_after'] = hashlib.sha256(binary.read_bytes()).hexdigest()
+    result['binary_unchanged'] = result['binary_sha256_after'] == result['binary_sha256']
+    result['status'] = ('PASS' if child.returncode == 0 and result['binary_unchanged']
+                        and '[RESULT] SCREEN_SHARE_L3 PASS' in lines else 'FAIL')
     result['finished_utc'] = datetime.now(timezone.utc).isoformat()
     manifest.write_text(json.dumps(result, indent=2), encoding='utf-8')
     print(result['status'])

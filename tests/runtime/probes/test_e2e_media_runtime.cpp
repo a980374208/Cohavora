@@ -458,7 +458,9 @@ public:
         options.auto_subscribe = true;
         options.single_peer_connection = true;
         options.connect_timeout = 10s;
-        options.allow_insecure_transport = IsLoopbackDevelopmentUrl(config_.url);
+        const char* allow_insecure = std::getenv("LIVEKIT_TEST_ALLOW_INSECURE");
+        options.allow_insecure_transport = IsLoopbackDevelopmentUrl(config_.url) ||
+            (allow_insecure && std::string_view(allow_insecure) == "1");
         asio::co_spawn(strand_,
             [self = shared_from_this(), options]() -> asio::awaitable<void> {
                 try {
@@ -982,6 +984,7 @@ private:
     }
 
     asio::awaitable<void> RunPublisher() {
+        std::string stage = "resolve_plan";
         try {
             const auto plan = ResolveRequestedPlan();
             if (!plan.ok()) {
@@ -1016,6 +1019,7 @@ private:
                 Finish(false, "local_participant_unavailable");
                 co_return;
             }
+            stage = "create_source";
             video_source_ = std::make_shared<livekit::VideoSource>(
                 config_.width, config_.height);
             auto options = RequestedVideoOptions();
@@ -1023,6 +1027,7 @@ private:
                 "e2e-controlled-marker", video_source_,
                 options.source, options);
             const auto publication_started_us = NowUs();
+            stage = "publish_track";
             const auto publication = co_await participant->PublishTrackAsync(track);
             if (!publication || publication->sid().empty()) {
                 Finish(false, "controlled_track_publish_failed");
@@ -1032,6 +1037,7 @@ private:
 
             // Flow RTP during clock warm-up and allow the receiver's real
             // RemoteTrackPublication quality request to settle.
+            stage = "clock_warmup";
             for (int sample = 0; sample < 16 && !finished_; ++sample) {
                 const auto nonce = "clock-" + std::to_string(next_sequence_);
                 auto request = measurement_.BeginClockProbe(
@@ -1043,6 +1049,7 @@ private:
                 co_await SendNeutralFrames(8);
             }
 
+            stage = "media_probes";
             for (std::size_t index = 1;
                  index <= config_.probes && !finished_; ++index) {
                 std::uint64_t probe_id = 0;
@@ -1116,6 +1123,7 @@ private:
             }
 
             if (finished_) co_return;
+            stage = "publisher_stats";
             const bool stats_complete = co_await CollectPublisherStats();
             PrintPublisherSummary();
             const bool complete = acknowledged_probes_.size() == config_.probes &&
@@ -1126,7 +1134,15 @@ private:
                      e2e03_error_us_.size() == config_.probes));
             Finish(complete, complete ? "publisher_matrix_complete" :
                 "publisher_matrix_incomplete");
+        } catch (const livekit::OperationError& error) {
+            std::cout << "E2E_FAILURE role=publisher phase_id=" << config_.phase_id
+                      << " stage=" << stage
+                      << " operation=" << static_cast<int>(error.operation())
+                      << " code=" << static_cast<int>(error.code()) << '\n';
+            Finish(false, "publisher_operation_failed");
         } catch (const std::exception&) {
+            std::cout << "E2E_FAILURE role=publisher phase_id=" << config_.phase_id
+                      << " stage=" << stage << " exception=std" << '\n';
             Finish(false, "publisher_failed");
         }
     }

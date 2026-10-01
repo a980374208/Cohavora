@@ -57,6 +57,62 @@ std::vector<nlohmann::json> ReadEvents(const std::filesystem::path& root) {
     return result;
 }
 
+void SettingsEventsPersistZeroDurationsAndDeviceCounts() {
+    TemporaryDirectory directory;
+    DiagnosticPipeline pipeline;
+    TEST_CHECK(pipeline.StartWriter(directory.path));
+    TEST_CHECK(pipeline.TryEmit(Event::SettingsPaint(0)));
+    TEST_CHECK(pipeline.TryEmit(Event::SettingsProbe(
+        MediaKind::Video, 17, Outcome::Success, 3)));
+    TEST_CHECK(pipeline.TryEmit(Event::SettingsProbe(
+        MediaKind::Audio, 0, Outcome::Success, 0, true)));
+    TEST_CHECK(pipeline.TryEmit(Event::SettingsProbe(
+        MediaKind::Video, 0, Outcome::Failure, 0)));
+    TEST_CHECK(pipeline.Close() == DrainResult::Completed);
+
+    std::map<std::uint64_t, nlohmann::json> settings;
+    for (const auto& record : ReadEvents(directory.path)) {
+        const auto name = record.at("event_name").get<std::string>();
+        if (name != "settings.first_paint" && name != "settings.device_probe") continue;
+        TEST_CHECK(settings.emplace(record.at("event_sequence").get<std::uint64_t>(), record).second);
+    }
+    TEST_CHECK(settings.size() == 4);
+    auto current = settings.begin();
+    const auto& paint = current++->second;
+    TEST_CHECK(paint.at("event_name") == "settings.first_paint");
+    TEST_CHECK(paint.at("duration_ms") == 0);
+    TEST_CHECK(paint.at("outcome") == "success");
+    TEST_CHECK(paint.at("attributes").at("measurement_point") ==
+        "click_to_first_qt_paint_completed");
+
+    struct ExpectedProbe {
+        const char* media;
+        unsigned duration;
+        unsigned count;
+        bool cached;
+        const char* outcome;
+    };
+    const ExpectedProbe expected[] = {
+        {"video", 17, 3, false, "success"},
+        {"audio", 0, 0, true, "success"},
+        {"video", 0, 0, false, "failure"},
+    };
+    for (const auto& probe : expected) {
+        const auto& record = current++->second;
+        const auto& attributes = record.at("attributes");
+        TEST_CHECK(record.at("event_name") == "settings.device_probe");
+        TEST_CHECK(record.at("duration_ms") == probe.duration);
+        TEST_CHECK(record.at("outcome") == probe.outcome);
+        TEST_CHECK(attributes.at("media_kind") == probe.media);
+        TEST_CHECK(attributes.at("device_count") == probe.count);
+        TEST_CHECK(attributes.at("cache_hit") == probe.cached);
+        TEST_CHECK(attributes.at("measurement_point") ==
+            (probe.cached ? "cached_snapshot" : "worker_device_enumeration"));
+        TEST_CHECK(!attributes.contains("device_id") && !attributes.contains("device_name"));
+    }
+    std::puts("SETTINGS_EVENTS: zero durations, counts, cache and failure persist PASS");
+}
+
 void TimelineProjectionAndPersistenceAgree() {
     TemporaryDirectory temporary;
     constexpr auto session = "0123456789abcdef0123456789abcdef";
@@ -854,6 +910,7 @@ int main(int argc, char** argv) {
         diagnostic_detach_checks::BlockedFileOpen(directory.path / "file");
     }
     SdpRoundsPersistOrderedTypedEvidence();
+    SettingsEventsPersistZeroDurationsAndDeviceCounts();
     TimelineProjectionAndPersistenceAgree();
     BoundedConcurrentAdmission();
     WritesTypedJsonAndRecovers();

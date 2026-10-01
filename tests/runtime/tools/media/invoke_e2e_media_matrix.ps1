@@ -13,13 +13,31 @@ param(
         'vp9-svc-camera', 'av1-camera', 'av1-backup-screen',
         'vp8-source-360', 'vp8-simulcast-medium', 'vp8-simulcast-low')]
     [string]$CaseId,
-    [string]$RunId = (Get-Date -AsUTC -Format 'yyyyMMddTHHmmssZ')
+    [string]$RunId = (Get-Date -AsUTC -Format 'yyyyMMddTHHmmssZ'),
+    [string]$Executable,
+    [string]$EvidenceRoot,
+    [switch]$AllowInsecureTransport,
+    [switch]$CheckBinaryOnly
 )
 
 $ErrorActionPreference = 'Stop'
 $workspace = (Resolve-Path (Join-Path $PSScriptRoot '../../../..')).Path
-$executable = Join-Path $workspace 'build-debug/Debug/test_e2e_media_runtime.exe'
-$evidence = Join-Path $workspace "build-debug/evidence/e2e-media-s8c/$RunId"
+if ([string]::IsNullOrWhiteSpace($Executable)) {
+    $Executable = Join-Path $workspace 'build-debug/RelWithDebInfo/test_e2e_media_runtime.exe'
+}
+$verifier = Join-Path $workspace 'tests/runtime/tools/diagnostics/verify_runtime_binary.ps1'
+$binaryIdentityJson = & $verifier -Executable $Executable `
+    -ExpectedExecutableName 'test_e2e_media_runtime.exe' -Configuration RelWithDebInfo
+$script:binaryIdentity = $binaryIdentityJson | ConvertFrom-Json
+$executable = $binaryIdentity.binary_path
+if ($CheckBinaryOnly) {
+    Write-Output $binaryIdentityJson
+    return
+}
+if ([string]::IsNullOrWhiteSpace($EvidenceRoot)) {
+    $EvidenceRoot = Join-Path $workspace 'build-debug/evidence/e2e-media-s8c/RelWithDebInfo'
+}
+$evidence = Join-Path $EvidenceRoot $RunId
 $processes = @()
 
 function Get-RequiredEnvironmentValue([string]$Name) {
@@ -45,6 +63,13 @@ function Get-LongValue($Values, [string]$Name) {
     return [long]::Parse($Values[$Name], [Globalization.CultureInfo]::InvariantCulture)
 }
 
+function Get-OptionalLongValue($Values, [string]$Name) {
+    if (-not $Values.ContainsKey($Name) -or $Values[$Name] -eq 'UNAVAILABLE') {
+        return $null
+    }
+    return [long]::Parse($Values[$Name], [Globalization.CultureInfo]::InvariantCulture)
+}
+
 function Get-DoubleValue($Values, [string]$Name) {
     if (-not $Values.ContainsKey($Name) -or $Values[$Name] -eq 'UNAVAILABLE') {
         throw "Summary field unavailable: $Name"
@@ -53,9 +78,16 @@ function Get-DoubleValue($Values, [string]$Name) {
 }
 
 function Start-Peer([string]$Name, [string[]]$Arguments, [string]$Token) {
+    if ((Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant() -ne
+            $script:binaryIdentity.binary_sha256) {
+        throw 'Runtime harness changed after binary verification'
+    }
     $environment = @{
         COHAVORA_E2E_RUNTIME_TOKEN = $Token
         RUST_LOG = 'off'
+    }
+    if ($AllowInsecureTransport) {
+        $environment.LIVEKIT_TEST_ALLOW_INSECURE = '1'
     }
     $process = Start-Process -FilePath $executable -ArgumentList $Arguments `
         -PassThru -WorkingDirectory $workspace -WindowStyle Hidden `
@@ -81,9 +113,6 @@ function Wait-Pair($Publisher, $Receiver, [int]$TimeoutSeconds) {
 if ([string]::IsNullOrWhiteSpace($Url)) {
     throw 'LIVEKIT_URL or -Url is required'
 }
-if (-not (Test-Path -LiteralPath $executable)) {
-    throw "Runtime harness not found: $executable"
-}
 if ($RunId -notmatch '^[A-Za-z0-9_.-]+$') {
     throw 'RunId must contain only letters, digits, dot, underscore, or dash'
 }
@@ -91,6 +120,7 @@ if (Test-Path -LiteralPath $evidence) {
     throw "Evidence run already exists: $RunId"
 }
 $null = New-Item -ItemType Directory -Path $evidence
+$binaryIdentity | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $evidence 'binary-identity.json') -Encoding utf8
 
 $publisherToken = Get-RequiredEnvironmentValue $PublisherTokenEnv
 $receiverToken = Get-RequiredEnvironmentValue $ReceiverTokenEnv
@@ -151,23 +181,40 @@ try {
         $summaryLine = Get-Content -LiteralPath $publisherLog |
             Where-Object { $_ -like 'E2E_SUMMARY role=publisher *' } |
             Select-Object -Last 1
-        if ([string]::IsNullOrWhiteSpace($summaryLine)) {
-            throw "Publisher summary missing for $($case.Id)"
-        }
-        $summary = Convert-KeyValueLine $summaryLine
         $receiverLog = Join-Path $evidence "$($case.Id)-receiver.stdout.log"
         $receiverSummaryLine = Get-Content -LiteralPath $receiverLog |
             Where-Object { $_ -like 'E2E_SUMMARY role=receiver *' } |
             Select-Object -Last 1
-        if ([string]::IsNullOrWhiteSpace($receiverSummaryLine)) {
-            throw "Receiver summary missing for $($case.Id)"
+        if ([string]::IsNullOrWhiteSpace($summaryLine) -or
+                [string]::IsNullOrWhiteSpace($receiverSummaryLine)) {
+            $reason = if ([string]::IsNullOrWhiteSpace($summaryLine)) {
+                'publisher_summary_missing'
+            } else {
+                'receiver_summary_missing'
+            }
+            $results += [pscustomobject]@{
+                Phase = $case.Id; Codec = $case.Codec; EffectiveCodec = $null
+                ObservedCodecs = $null; ReceiverPublishCodec = $ReceiverPublishCodec
+                ReceiverUplinkVerified = $null; PublisherExitCode = $publisher.ExitCode
+                ReceiverExitCode = $receiver.ExitCode; ClockValidMeasurements = $null
+                SourceKind = $case.Source; Mode = $null; Scalability = $null
+                BackupPolicy = $case.BackupPolicy; Source = "$($case.Width)x$($case.Height)"
+                Simulcast = $case.Simulcast; Quality = $case.Quality; Received = $null
+                MarkerSuccessRate = $null; ClockUncertaintyP95Us = $null
+                E2E02ErrorP95Us = $null; E2E03ErrorP95Us = $null
+                EncodedFrames = $null; SentPackets = $null; DecodedFrames = $null
+                Passed = $false; FailureReason = $reason
+            }
+            Write-Output "[S8C_CASE] phase=$($case.Id) passed=false reason=$reason"
+            continue
         }
+        $summary = Convert-KeyValueLine $summaryLine
         $receiverSummary = Convert-KeyValueLine $receiverSummaryLine
         $markerRate = Get-DoubleValue $summary 'marker_success_rate'
-        $clockP95 = Get-LongValue $summary 'clock_uncertainty_p95_us'
-        $clockMax = Get-LongValue $summary 'clock_uncertainty_max_us'
-        $e2e02ErrorP95 = Get-LongValue $summary 'e2e02_error_p95_us'
-        $e2e03ErrorP95 = Get-LongValue $summary 'e2e03_error_p95_us'
+        $clockP95 = Get-OptionalLongValue $summary 'clock_uncertainty_p95_us'
+        $clockMax = Get-OptionalLongValue $summary 'clock_uncertainty_max_us'
+        $e2e02ErrorP95 = Get-OptionalLongValue $summary 'e2e02_error_p95_us'
+        $e2e03ErrorP95 = Get-OptionalLongValue $summary 'e2e03_error_p95_us'
         $receivedWidthMin = Get-LongValue $summary 'received_width_min'
         $receivedWidthMax = Get-LongValue $summary 'received_width_max'
         $receivedHeightMin = Get-LongValue $summary 'received_height_min'
@@ -179,9 +226,10 @@ try {
 
         $processPass = $publisher.ExitCode -eq 0 -and $receiver.ExitCode -eq 0
         $markerPass = $markerRate -ge $MinimumMarkerSuccessRate
-        $clockPass = $clockP95 -le $MaximumClockUncertaintyUs
-        $errorPass = $e2e02ErrorP95 -le $clockMax -and
-            $e2e03ErrorP95 -le $clockMax
+        $clockPass = $null -ne $clockP95 -and $clockP95 -le $MaximumClockUncertaintyUs
+        $errorPass = $null -ne $clockMax -and
+            $null -ne $e2e02ErrorP95 -and $e2e02ErrorP95 -le $clockMax -and
+            $null -ne $e2e03ErrorP95 -and $e2e03ErrorP95 -le $clockMax
         $dimensionPass = $receivedWidthMin -eq $case.ExpectedWidth -and
             $receivedWidthMax -eq $case.ExpectedWidth -and
             $receivedHeightMin -eq $case.ExpectedHeight -and
@@ -203,6 +251,9 @@ try {
             ObservedCodecs = $summary['observed_codecs']
             ReceiverPublishCodec = $ReceiverPublishCodec
             ReceiverUplinkVerified = $receiverSummary['local_uplink_verified']
+            PublisherExitCode = $publisher.ExitCode
+            ReceiverExitCode = $receiver.ExitCode
+            ClockValidMeasurements = $summary['clock_valid_measurements']
             SourceKind = $case.Source
             Mode = $summary['mode']
             Scalability = $summary['scalability']
@@ -219,6 +270,7 @@ try {
             SentPackets = $sentPackets
             DecodedFrames = $decodedFrames
             Passed = $passed
+            FailureReason = if ($passed) { '' } else { 'acceptance_checks_failed' }
         }
         Write-Output ("[S8C_CASE] phase={0} codec={1} quality={2} received={3}x{4} marker_rate={5:F3} clock_p95_us={6} e2e02_error_p95_us={7} e2e03_error_p95_us={8} passed={9}" -f
             $case.Id, $case.Codec, $case.Quality, $receivedWidthMin,
@@ -228,7 +280,12 @@ try {
 
     $csv = Join-Path $evidence 'matrix-summary.csv'
     $results | Export-Csv -LiteralPath $csv -NoTypeInformation -Encoding utf8
-    $matrixPassed = @($results | Where-Object { -not $_.Passed }).Count -eq 0
+    $binaryShaAfter = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
+    $binaryUnchanged = $binaryShaAfter -eq $binaryIdentity.binary_sha256
+    $binaryIdentity | Add-Member -NotePropertyName binary_sha256_after -NotePropertyValue $binaryShaAfter
+    $binaryIdentity | Add-Member -NotePropertyName binary_unchanged -NotePropertyValue $binaryUnchanged
+    $binaryIdentity | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath (Join-Path $evidence 'binary-identity.json') -Encoding utf8
+    $matrixPassed = @($results | Where-Object { -not $_.Passed }).Count -eq 0 -and $binaryUnchanged
     Write-Output "[S8C_MATRIX] passed=$($matrixPassed.ToString().ToLowerInvariant()) evidence=$evidence"
     $results | Format-Table -AutoSize | Out-String | Write-Output
     if (-not $matrixPassed) { exit 1 }
