@@ -61,8 +61,10 @@ bool clearLegacyCredentials(QSettings &legacy) {
 
 std::unique_ptr<QSettings> makeApplicationSettings() {
     auto selected = migrateCohavoraSettings(
-        std::make_unique<QSettings>(QStringLiteral("Cohavora"), QStringLiteral("Cohavora")),
-        std::make_unique<QSettings>(QStringLiteral("OpenMeeting"), QStringLiteral("LiveKitClient")));
+        std::make_unique<QSettings>(QSettings::defaultFormat(), QSettings::UserScope,
+            QStringLiteral("Cohavora"), QStringLiteral("Cohavora")),
+        std::make_unique<QSettings>(QSettings::defaultFormat(), QSettings::UserScope,
+            QStringLiteral("OpenMeeting"), QStringLiteral("LiveKitClient")));
     return std::move(selected.settings);
 }
 } // namespace

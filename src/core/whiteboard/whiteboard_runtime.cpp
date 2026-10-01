@@ -371,15 +371,42 @@ bool Runtime::applyEntry(const CommitEntry &entry) {
 
 void Runtime::observePeer(const PeerInstance &peer) {
     if (state_ == CollaborationState::Retired || peer.identity.empty()) return;
+    const auto newer = [](const PeerInstance& a, const PeerInstance& b) {
+        return a.nativeRoomGeneration > b.nativeRoomGeneration ||
+            (a.nativeRoomGeneration == b.nativeRoomGeneration && a.incarnation > b.incarnation);
+    };
+    const auto current = peers_.find(peer.identity);
+    if (current != peers_.end() && !(current->second == peer) && !newer(peer, current->second)) return;
+    const bool authorityReturned = !config_.localIsAuthority &&
+        peer.identity == config_.authorityIdentity && departedAuthority_.has_value();
+    if (authorityReturned && !newer(peer, *departedAuthority_)) return;
     peers_[peer.identity] = peer;
+    if (authorityReturned && state_ == CollaborationState::Frozen) {
+        // observePeer is fed by the active participant-ticket gate. Identity
+        // alone and transport recovery are insufficient: require a newer
+        // admitted instance, then resynchronize before permitting edits.
+        snapshot_ = {};
+        assetAssemblies_.clear();
+        requestedAssets_.clear();
+        pendingProposals_.clear();
+        state_ = transportReady_ ? CollaborationState::Synchronizing : CollaborationState::ReadOnly;
+        if (transportReady_) requestSync();
+        else publish("authority returned; waiting for connection");
+    }
 }
 
 void Runtime::peerLeft(const PeerInstance &peer) {
+    if (state_ == CollaborationState::Retired) return;
     const auto found = peers_.find(peer.identity);
     if (found != peers_.end() && !(found->second == peer)) return;
+    if (found == peers_.end() && departedAuthority_ && peer.identity == config_.authorityIdentity &&
+        (peer.nativeRoomGeneration < departedAuthority_->nativeRoomGeneration ||
+         (peer.nativeRoomGeneration == departedAuthority_->nativeRoomGeneration &&
+          peer.incarnation <= departedAuthority_->incarnation))) return;
     peers_.erase(peer.identity);
     rateEvents_.erase(peer.identity);
     if (!config_.localIsAuthority && peer.identity == config_.authorityIdentity) {
+        departedAuthority_ = peer;
         state_ = CollaborationState::Frozen;
         publish("authority left; board frozen");
     }
@@ -736,6 +763,22 @@ void Runtime::requestMissingAssets(std::uint64_t nowMs) {
 bool Runtime::missingActiveAsset() const {
     const auto &id = document_.page().backgroundAssetId;
     return !id.empty() && assets_.count(id) == 0;
+}
+
+void Runtime::encryptionChanged(std::uint64_t nowMs) {
+    if (state_ == CollaborationState::Retired) return;
+    snapshot_ = {};
+    assetAssemblies_.clear();
+    requestedAssets_.clear();
+    outboundAssets_.clear();
+    pendingProposals_.clear();
+    // Keep committed document/history; only unfinished work is cancelled.
+    // Existing sync/asset requests can recover committed content in the new epoch.
+    publish("encryption changed; unfinished transfers cancelled");
+    if (!transportReady_ || state_ == CollaborationState::Frozen) return;
+    lastAuthoritySeen_ = nowMs;
+    if (config_.localIsAuthority) sendDescriptor({});
+    else requestSync();
 }
 
 void Runtime::setTransportReady(bool ready, std::uint64_t nowMs) {

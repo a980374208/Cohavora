@@ -1,4 +1,5 @@
 #include "crash_evidence_provider.h"
+#include "../core/sensitive_memory_policy.h"
 
 #include <nlohmann/json.hpp>
 
@@ -182,6 +183,7 @@ void Capture(HandlerState* state, std::uint32_t code,
     WriteFile(state->file, &record, sizeof(record), &written, nullptr);
 #if COHAVORA_ENABLE_MINIDUMP
     // Paths are prepared at startup. A failed dump must not lose metadata.
+    if (!livekit::ApplicationMemoryDumpAllowed()) return;
     const auto dump = CreateFileW(state->dump_path.c_str(), GENERIC_WRITE, 0,
         nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (dump == INVALID_HANDLE_VALUE) return;
@@ -197,7 +199,11 @@ void Capture(HandlerState* state, std::uint32_t code,
     const bool captured = MiniDumpWriteDump(GetCurrentProcess(),
         GetCurrentProcessId(), dump, MiniDumpNormal, &info, nullptr, nullptr);
     CloseHandle(dump);
-    if (!captured) DeleteFileW(state->dump_path.c_str());
+    // If another thread admitted a secret while the dump was being written,
+    // discard that partial/complete file too. Dumps predating secret admission
+    // and OS/admin-created dumps are outside this application's policy.
+    if (!captured || !livekit::ApplicationMemoryDumpAllowed())
+        DeleteFileW(state->dump_path.c_str());
 #else
     (void)pointers;
 #endif

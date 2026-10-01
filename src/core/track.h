@@ -28,6 +28,9 @@ enum class TrackKind {
     Unknown
 };
 
+// A signaling declaration, not proof that received media was authenticated.
+enum class TrackEncryption { Unknown, None, Gcm, Custom };
+
 enum class TrackSource {
     Unknown,
     Camera,
@@ -323,6 +326,7 @@ public:
         CodecUnsupported,
         TrackNotFound,
         Unknown,
+        EncryptionRequired,
     };
 
     enum class StreamState {
@@ -340,6 +344,7 @@ public:
         StreamState stream_state = StreamState::Active;
         bool subscription_allowed = true;
         SubscriptionError subscription_error = SubscriptionError::None;
+        TrackEncryption encryption = TrackEncryption::Unknown;
     };
 
     TrackPublication(std::shared_ptr<Track> track, const std::string& sid, const std::string& name)
@@ -352,6 +357,7 @@ public:
         stream_state_ = snapshot.stream_state;
         subscription_allowed_ = snapshot.subscription_allowed;
         subscription_error_ = snapshot.subscription_error;
+        encryption_ = snapshot.encryption;
     }
     TrackPublication& operator=(const TrackPublication& other) {
         if (this == &other) return *this;
@@ -363,6 +369,7 @@ public:
         stream_state_ = snapshot.stream_state;
         subscription_allowed_ = snapshot.subscription_allowed;
         subscription_error_ = snapshot.subscription_error;
+        encryption_ = snapshot.encryption;
         return *this;
     }
     virtual ~TrackPublication() = default;
@@ -428,6 +435,7 @@ public:
             snapshot.stream_state = stream_state_;
             snapshot.subscription_allowed = subscription_allowed_;
             snapshot.subscription_error = subscription_error_;
+            snapshot.encryption = encryption_;
         }
         if (snapshot.track) {
             snapshot.kind = snapshot.track->kind();
@@ -435,6 +443,15 @@ public:
             snapshot.muted = snapshot.track->muted();
         }
         return snapshot;
+    }
+
+    TrackEncryption encryption() const {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        return encryption_;
+    }
+    void set_encryption(TrackEncryption encryption) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        encryption_ = encryption;
     }
 
 private:
@@ -445,6 +462,7 @@ private:
     StreamState stream_state_{StreamState::Active};
     bool subscription_allowed_{true};
     SubscriptionError subscription_error_{SubscriptionError::None};
+    TrackEncryption encryption_{TrackEncryption::Unknown};
 };
 
 } // namespace livekit

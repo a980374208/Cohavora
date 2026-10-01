@@ -25,7 +25,8 @@ struct CrashEvidenceScan {
 };
 
 // Records fixed-size exception metadata in every configuration. Debug and
-// RelWithDebInfo also write local minidumps; Release does not capture memory.
+// RelWithDebInfo also write local minidumps unless sensitive memory has been
+// used in this process; Release does not capture memory.
 // Never writes through the normal logger or uploads data.
 class CrashEvidenceProvider final {
 public:

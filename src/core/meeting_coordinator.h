@@ -20,6 +20,7 @@
 
 #include <asio.hpp>
 #include "src/core/room.h"
+#include "src/e2ee/meeting_encryption.h"
 #include "src/core/data_stream.h"
 #include "src/core/local_audio_track.h"
 #include "src/core/local_video_track.h"
@@ -154,18 +155,27 @@ public:
     void joinMeetingAsync(const QString &meetingId,
                           const QString &password,
                           const QString &displayName,
-                          const MediaPreferences &prefs);
+                          const MediaPreferences &prefs,
+                          livekit::MeetingEncryptionRequest encryption = {});
 
     void createAndJoinQuickMeetingAsync(const QString &title,
                                        int durationSeconds,
-                                       const MediaPreferences &prefs);
+                                       const MediaPreferences &prefs,
+                          livekit::MeetingEncryptionRequest encryption = {});
 
     // 直连/离线入会模式（用于测试或指定 LiveKit 网关凭证）
     void connectDirectlyAsync(const QString &url,
                              const QString &token,
                              const QString &meetingId,
                              const QString &displayName,
-                             const MediaPreferences &prefs);
+                             const MediaPreferences &prefs,
+                          livekit::MeetingEncryptionRequest encryption = {});
+
+    // A successful result means installation, not verified media decryption.
+    void recoverEncryptionKey(std::shared_ptr<livekit::MeetingSecretHandle> secret);
+    bool canRecoverEncryptionKey() const;
+    void refreshEncryptionMediaStatus();
+    bool requiresEncryption() const { return _admissionEncryption.mode == livekit::MeetingEncryptionMode::Required; }
 
     // 优雅退会管理 (普通离开 vs 主持人结束全员会议)
     void leaveMeetingAsync(bool endMeetingForAll = false);
@@ -263,6 +273,8 @@ signals:
     void sessionShutdownSlow();
     // 状态流转与全局通知
     void stateChanged(MeetingState newState, const QString &detail);
+    void encryptionKeyRecoveryFinished(bool installed);
+    void encryptionMediaStatusChanged(const livekit::MediaEncryptionStatus& status);
     void errorOccurred(const QString &title, const QString &message);
     void meetingJoinedSuccessfully(const QString &meetingId);
     void meetingLeft();
@@ -464,6 +476,12 @@ private:
     SessionManager &_sessionManager;
     AdmissionBackend _admissionBackend;
     RoomStartHook _roomStartHook;
+    void cancelEncryptionRecovery();
+    std::shared_ptr<livekit::MeetingSecretHandle> _pendingEncryptionRecovery;
+    uint64_t _encryptionRecoveryOperation = 0;
+    uint64_t _nextEncryptionStatusRequest = 0;
+    uint64_t _pendingEncryptionStatusRequest = 0;
+    livekit::MeetingEncryptionRequest _admissionEncryption;
     uint64_t _admissionGeneration = 0;
     AdmissionStage _admissionStage = AdmissionStage::None;
     struct AdmissionTelemetryRecord {

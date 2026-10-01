@@ -579,10 +579,14 @@ bool WebRTCManager::Initialize() {
     auto video_decoder_factory = CreateVideoDecoderFactory();
 
     auto env = webrtc::CreateEnvironment();
-    auto raw_adm = webrtc::CreateAudioDeviceModule(env, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
-    if (raw_adm) {
-        adm_ = webrtc::make_ref_counted<PlayoutOnlyAudioDeviceModule>(raw_adm);
-        worker_thread_->BlockingCall([this]() {
+    // Windows ADM owns a ScopedCOMInitializer. Construct it on the same
+    // worker that runs Init/Terminate and releases the final ADM reference.
+    // Creating it on a transient caller thread unbalances COM at teardown.
+    worker_thread_->BlockingCall([this, &env]() {
+        auto raw_adm = webrtc::CreateAudioDeviceModule(
+            env, webrtc::AudioDeviceModule::kPlatformDefaultAudio);
+        if (raw_adm) {
+            adm_ = webrtc::make_ref_counted<PlayoutOnlyAudioDeviceModule>(raw_adm);
             if (adm_) {
                 adm_->Init();
                 // Use the same Windows default playback role as settings and
@@ -591,8 +595,8 @@ bool WebRTCManager::Initialize() {
                     EmitRtcLifecycle(diagnostic::RtcStatus::PlayoutDeviceFailed);
                 }
             }
-        });
-    }
+        }
+    });
 
     factory_ = webrtc::CreatePeerConnectionFactory(
         network_thread_.get(),

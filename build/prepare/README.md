@@ -351,3 +351,19 @@ $archive = 'cohavora-libraries-win64-qt-5.15.18-20260925.zip'
 ```
 
 如版本、编译参数、补丁、编译器或任一文件发生变化，应生成新的归档和校验元数据，而不是继续使用本文记录的旧哈希。
+
+
+## Native E2EE backend overlay
+
+E2EE 使用独立小型源码包与固定基础 SDK 配套；不替换 vendor 文件，不混用 Flutter 自定义音频 ABI。当前 profile 为 `e2ee-backend-profile.json`，基础 SDK 为 `webrtc-51ef663-cohavora-bssl-dual-v3`。
+
+从已按固定上游源码生成的 repair/guard 输入打包：
+
+```powershell
+python build/prepare/package_e2ee_backend.py --patched <reviewed-patched-directory> --guard build-e2ee-backend/media-guard --bsd-license build-e2ee-backend/full/src/LICENSE --apache-license E:/vsSource/WebRTC/client-sdk-flutter/LICENSE --output <new-output-directory>
+cmake -S . -B <build-dir> -DCOHAVORA_E2EE_BACKEND_PACKAGE_DIR=<absolute-extracted-package-directory>
+cmake --build <build-dir> --config RelWithDebInfo --target cohavora_app
+```
+
+
+v2 overlay 增加 `cohavora_iv_sequence.h`：发送媒体和数据共享进程级、CSPRNG 初始化的 96 位递增 IV 分配器；Room/cryptor 重建和重装相同密钥不会重置进程分配状态。随机源失败或每进程总计 2^32 次额度耗尽时拒绝产生新的密文，没有明文回退。多个独立进程仍依赖随机起点的概率隔离，不宣称全系统绝对唯一或跨设备总调用次数已被集中管理。此改动保留原来的 12 字节 IV 与接收解析，不改变协议格式。准备工具从固定原始输入生成，使用当前 profile 对应目录，不把旧 `patched/` 目录自动视为当前输入；全部历史包继续保留。

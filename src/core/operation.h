@@ -43,7 +43,11 @@ enum class OperationErrorCode {
     SerializationFailed,
     DataChannelRejected,
     EncryptionFailed,
+    EncryptionCodecUnsupported,
+    EncryptionKeyUnavailable,
 };
+
+enum class OperationRecoveryAction { None, SelectSupportedCodec, InstallEncryptionKey, Rejoin };
 
 class OperationError final : public std::runtime_error {
 public:
@@ -51,23 +55,29 @@ public:
                    OperationErrorCode code,
                    std::string stage,
                    std::string message,
-                   bool retryable = false)
+                   bool retryable = false,
+                   std::string codec = {},
+                   OperationRecoveryAction recovery = OperationRecoveryAction::None)
         : std::runtime_error(std::move(message)),
           operation_(operation),
           code_(code),
           stage_(std::move(stage)),
-          retryable_(retryable) {}
+          retryable_(retryable), codec_(std::move(codec)), recovery_(recovery) {}
 
     OperationKind operation() const noexcept { return operation_; }
     OperationErrorCode code() const noexcept { return code_; }
     const std::string& stage() const noexcept { return stage_; }
     bool retryable() const noexcept { return retryable_; }
+    const std::string& codec() const noexcept { return codec_; }
+    OperationRecoveryAction recovery_action() const noexcept { return recovery_; }
 
 private:
     OperationKind operation_;
     OperationErrorCode code_;
     std::string stage_;
     bool retryable_;
+    std::string codec_;
+    OperationRecoveryAction recovery_;
 };
 
 struct OperationTimeouts {

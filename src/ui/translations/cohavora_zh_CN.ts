@@ -3727,6 +3727,70 @@ Sign in with your own account in a client configured for the same meeting servic
         <source> — Quality state uncertain; stop sharing to recover</source>
         <translation> — 质量状态不确定，请停止共享后重试</translation>
     </message>
+    <message>
+        <source>Meeting Encryption</source>
+        <translation>会议加密</translation>
+    </message>
+    <message>
+        <source>Require end-to-end encryption for this session</source>
+        <translation>本次会话要求端到端加密</translation>
+    </message>
+    <message>
+        <source>Use the same encryption key as the other participants. Share it through a trusted channel. The key is not saved. Participant and connection metadata remain visible to the service.</source>
+        <translation>请与其他参会者使用相同的加密密钥，并通过可信渠道分享。密钥不会保存。服务端仍可查看参会者和连接元数据。</translation>
+    </message>
+    <message>
+        <source>Encryption key</source>
+        <translation>加密密钥</translation>
+    </message>
+    <message>
+        <source>ASCII encryption key (not the meeting password)</source>
+        <translation>ASCII 加密密钥（不是会议密码）</translation>
+    </message>
+    <message>
+        <source>Enter 1 to 4096 printable ASCII characters. Unicode keys are not supported.</source>
+        <translation>请输入 1～4096 个可打印 ASCII 字符，不支持 Unicode 密钥。</translation>
+    </message>
+    <message>
+        <source>Debug key rotation is unavailable in an encrypted meeting.</source>
+        <translation>加密会议中不可使用调试换钥。</translation>
+    </message>
+    <message>
+        <source>Encryption Error</source>
+        <translation>加密错误</translation>
+    </message>
+    <message>
+        <source>A valid encryption key is required. Enter the key again.</source>
+        <translation>需要有效的加密密钥，请重新输入。</translation>
+    </message>
+    <message>
+        <source>Continue</source>
+        <translation>继续</translation>
+    </message>
+    <message><source>Re-enter encryption key</source><translation>重新输入加密密钥</translation></message>
+    <message><source>Installing encryption key...</source><translation>正在安装加密密钥…</translation></message>
+    <message><source>End-to-end encryption is off.</source><translation>未启用端到端加密。</translation></message>
+    <message><source>End-to-end encryption required; media verification pending.</source><translation>已要求端到端加密；媒体状态待验证。</translation></message>
+    <message><source>Waiting for connection; encryption verification pending.</source><translation>等待连接；加密状态待验证。</translation></message>
+    <message><source>Key installed; media verification pending.</source><translation>密钥已安装；媒体状态待验证。</translation></message>
+    <message><source>Cryptor reports: sending %1, receiving %2, waiting %3, errors %4. Current key verification pending.</source><translation>加密器状态：发送 %1，接收 %2，等待 %3，错误 %4。当前密钥待验证。</translation></message>
+    <message><source>Media encryption is unavailable.</source><translation>媒体加密不可用。</translation></message>
+    <message><source>End-to-end protection observed on this client's active media.</source><translation>已观察到本端活跃媒体的端到端保护。</translation></message>
+    <message><source>Media protection: sending %1/%2, receiving %3/%4; pending %5; errors %6.</source><translation>媒体保护：发送 %1/%2，接收 %3/%4；待验证 %5；错误 %6。</translation></message>
+    <message><source>Key could not be installed. Re-enter the shared key.</source><translation>无法安装密钥，请重新输入共享密钥。</translation></message>
+    <message><source>Protection details</source><translation>保护详情</translation></message>
+    <message><source>Only this client's active media is shown. This does not verify every participant or the whole room.</source><translation>仅显示本端活跃媒体的观察结果，不代表每位参与者或整个会议均已验证。</translation></message>
+    <message><source>Track</source><translation>轨道</translation></message>
+    <message><source>Direction</source><translation>方向</translation></message>
+    <message><source>Protection</source><translation>保护状态</translation></message>
+    <message><source>Missing key</source><translation>缺少密钥</translation></message>
+    <message><source>Protection failed</source><translation>保护失败</translation></message>
+    <message><source>Protected frame observed</source><translation>已观察到受保护帧</translation></message>
+    <message><source>Verification pending</source><translation>等待验证</translation></message>
+    <message><source>Receiving</source><translation>接收</translation></message>
+    <message><source>Sending</source><translation>发送</translation></message>
+    <message><source>Encrypted meetings support VP8 and H264. Auto uses VP8; select a supported codec in Settings for camera and screen sharing.</source><translation>加密会议支持 VP8 和 H264，自动模式使用 VP8。请在设置中为摄像头和屏幕共享选择支持的编码。</translation></message>
+    <message><source>Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings.</source><translation>加密会议支持 VP8 和 H264。请在设置中为摄像头和屏幕共享选择支持的编码。</translation></message>
 </context>
 <context>
     <name>MeetingUI::AnnotationOverlayWindow</name>
