@@ -376,6 +376,9 @@ void WhiteboardPanel::importImage() {
         QMessageBox box(QMessageBox::Warning, tr("Replace background"),
             tr("The page limit is reached. Importing will replace the current background and remove all annotations on this page."),
             QMessageBox::Yes | QMessageBox::Cancel, this);
+        box.setObjectName(QStringLiteral("whiteboardReplaceConfirmation"));
+        box.button(QMessageBox::Yes)->setObjectName(QStringLiteral("whiteboardReplaceConfirm"));
+        box.button(QMessageBox::Cancel)->setObjectName(QStringLiteral("whiteboardReplaceCancel"));
         box.setDefaultButton(QMessageBox::Cancel);
         box.setMinimumSize(500, 210);
         AppTheme::setTone(box, AppTheme::Tone::Light);

@@ -115,7 +115,11 @@ public:
         AppendFormatsNamed(formats, legacy_formats, "H264");
         const auto vp9_formats = webrtc::SupportedVP9Codecs(true);
         formats.insert(formats.end(), vp9_formats.begin(), vp9_formats.end());
-        formats.push_back(webrtc::SdpVideoFormat::AV1Profile0());
+        // SetParameters validates an explicit mode against the advertised RTP
+        // capability. Keep it consistent with QueryCodecSupport and libaom.
+        auto av1 = webrtc::SdpVideoFormat::AV1Profile0();
+        av1.scalability_modes.push_back(webrtc::ScalabilityMode::kL1T1);
+        formats.push_back(std::move(av1));
         return formats;
     }
 

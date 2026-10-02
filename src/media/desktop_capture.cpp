@@ -58,6 +58,37 @@ private:
     HRESULT result_;
 };
 
+// Inject an error only after a real backend has delivered frames. The normal
+// fallback owner still retires the backend outside its callback stack.
+class FailingCaptureForProbe final : public webrtc::DesktopCapturer,
+                                    private webrtc::DesktopCapturer::Callback {
+public:
+    FailingCaptureForProbe(std::unique_ptr<webrtc::DesktopCapturer> capture, unsigned frames)
+        : capture_(std::move(capture)), limit_(frames) {}
+    bool GetSourceList(SourceList* sources) override { return capture_->GetSourceList(sources); }
+    bool SelectSource(SourceId source) override { return capture_->SelectSource(source); }
+    void Start(webrtc::DesktopCapturer::Callback* callback) override { callback_ = callback; capture_->Start(this); }
+    void SetMaxFrameRate(uint32_t rate) override { capture_->SetMaxFrameRate(rate); }
+    void CaptureFrame() override {
+        if (delivered_ >= limit_) callback_->OnCaptureResult(Result::ERROR_PERMANENT, nullptr);
+        else capture_->CaptureFrame();
+    }
+private:
+    void OnCaptureResult(Result result, std::unique_ptr<webrtc::DesktopFrame> frame) override {
+        if (result == Result::SUCCESS && frame) ++delivered_;
+        callback_->OnCaptureResult(result, std::move(frame));
+    }
+    std::unique_ptr<webrtc::DesktopCapturer> capture_;
+    webrtc::DesktopCapturer::Callback* callback_ = nullptr;
+    unsigned limit_, delivered_ = 0;
+};
+
+std::unique_ptr<webrtc::DesktopCapturer> InjectCaptureFailure(
+        std::unique_ptr<webrtc::DesktopCapturer> capture, unsigned frames) {
+    if (capture && frames) return std::make_unique<FailingCaptureForProbe>(std::move(capture), frames);
+    return capture;
+}
+
 class DesktopCapture final : public IDesktopCapture, private webrtc::DesktopCapturer::Callback {
 public:
     explicit DesktopCapture(DesktopCaptureProbeOptions probe) : probe_(std::move(probe)) {}
@@ -87,6 +118,8 @@ public:
         backend_seen_ = false;
         backend_id_ = 0;
         stopped_ = false;
+        last_frame_ns_.store(NowNs(), std::memory_order_relaxed);
+        converter_ = std::thread([this] { ConvertLoop(); });
         worker_ = std::thread([this, source = std::move(source)] {
             ComScope com;
             try {
@@ -106,11 +139,14 @@ public:
                             {[this]() -> std::unique_ptr<webrtc::DesktopCapturer> {
                                 if (probe_.simulate_dxgi_unsupported ||
                                     !webrtc::ScreenCapturerWinDirectx::IsSupported()) return nullptr;
-                                return std::make_unique<webrtc::ScreenCapturerWinDirectx>(Options());
+                                return InjectCaptureFailure(
+                                    std::make_unique<webrtc::ScreenCapturerWinDirectx>(Options()),
+                                    probe_.simulate_dxgi_failure_after_frames);
                             }},
                             {[this, wgc_supported]() -> std::unique_ptr<webrtc::DesktopCapturer> {
                                 return wgc_supported
-                                    ? CreateOwnedWgcScreenCapturer([this](auto phase) { Notify(phase); }) : nullptr;
+                                    ? InjectCaptureFailure(CreateOwnedWgcScreenCapturer(
+                                        [this](auto phase) { Notify(phase); }), probe_.simulate_wgc_failure_after_frames) : nullptr;
                             }, true},
                             {[] { return MakeCapturer(DesktopSourceKind::Screen); }, true}
                         });
@@ -124,7 +160,6 @@ public:
                 }
                 capturer->Start(this);
                 Notify(DesktopCaptureProbePhase::Started);
-                last_frame_ = std::chrono::steady_clock::now();
                 ScreenCaptureDeadline deadline;
                 uint64_t applied_sequence = ~uint64_t{0};
                 while (!stopped_.load(std::memory_order_acquire)) {
@@ -151,11 +186,25 @@ public:
                         Fail();
                         break;
                     }
+                    // Plan the next slot before capture/conversion. Computing
+                    // it after an overrun adds an entire idle period to work
+                    // that has already exceeded the requested interval.
+                    const auto capture_started = std::chrono::steady_clock::now();
+                    const auto next_capture = deadline.Advance(capture_started);
+                    backend_time_us_ = 0;
                     capturer->CaptureFrame();
-                    if (window && std::chrono::steady_clock::now() - last_frame_ > 5s) Fail();
-                    std::unique_lock lock(wait_mutex_);
-                    wake_.wait_until(lock, deadline.Advance(std::chrono::steady_clock::now()),
-                        [this, applied_sequence] { return stopped_.load() || mailbox_sequence_ != applied_sequence; });
+                    if (window && std::chrono::nanoseconds(NowNs() - last_frame_ns_.load(std::memory_order_relaxed)) > 5s) Fail();
+                    const auto capture_finished = probe_.on_capture_timing ? std::chrono::steady_clock::now()
+                                                                          : capture_started;
+                    {
+                        std::unique_lock lock(wait_mutex_);
+                        wake_.wait_until(lock, next_capture,
+                            [this, applied_sequence] { return stopped_.load() || mailbox_sequence_ != applied_sequence; });
+                    }
+                    if (probe_.on_capture_timing) probe_.on_capture_timing(
+                        std::chrono::duration_cast<std::chrono::microseconds>(capture_finished-capture_started).count(),
+                        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now()-capture_finished).count(),
+                        backend_time_us_);
                 }
                 capturer.reset();
                 Notify(DesktopCaptureProbePhase::Destroyed);
@@ -167,10 +216,15 @@ public:
     void Stop() override {
         stopped_.store(true, std::memory_order_release);
         wake_.notify_all();
-        if (worker_.joinable()) {
-            worker_.join();
-            Notify(DesktopCaptureProbePhase::Joined);
+        conversion_wake_.notify_all();
+        const bool joined = worker_.joinable() || converter_.joinable();
+        if (worker_.joinable()) worker_.join();
+        if (converter_.joinable()) converter_.join();
+        {
+            std::lock_guard lock(conversion_mutex_);
+            pending_.reset();
         }
+        if (joined) Notify(DesktopCaptureProbePhase::Joined);
         frame_ = {};
         ended_ = {};
         converted_.reset();
@@ -178,6 +232,32 @@ public:
         last_applied_.reset();
     }
 private:
+    struct PendingFrame {
+        std::unique_ptr<webrtc::DesktopFrame> frame;
+        ScreenShareFrameProfile profile;
+        QualityCallback applied;
+    };
+    static std::int64_t NowNs() {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+    }
+    void ConvertLoop() noexcept {
+        try {
+            while (!stopped_.load(std::memory_order_acquire)) {
+                std::optional<PendingFrame> pending;
+                {
+                    std::unique_lock lock(conversion_mutex_);
+                    conversion_wake_.wait(lock, [this] { return stopped_.load() || pending_.has_value(); });
+                    if (stopped_.load()) break;
+                    pending = std::move(pending_);
+                    pending_.reset();
+                }
+                const auto started = probe_.on_conversion_timing ? NowNs() : 0;
+                ConvertAndDeliver(*pending);
+                if (probe_.on_conversion_timing) probe_.on_conversion_timing((NowNs()-started)/1000);
+            }
+        } catch (...) { Fail(); }
+    }
     void Notify(DesktopCaptureProbePhase phase, std::uint32_t capturer_id = 0) noexcept {
         if (!probe_.on_event) return;
         try { probe_.on_event({phase, capturer_id, GetCurrentThreadId()}); }
@@ -185,6 +265,8 @@ private:
     }
     void Fail() {
         if (!stopped_.exchange(true) && ended_) ended_();
+        wake_.notify_all();
+        conversion_wake_.notify_all();
     }
     void OnCaptureResult(webrtc::DesktopCapturer::Result result,
                          std::unique_ptr<webrtc::DesktopFrame> frame) override {
@@ -194,6 +276,7 @@ private:
             return;
         }
         if (result != webrtc::DesktopCapturer::Result::SUCCESS || !frame) return;
+        if (probe_.on_capture_timing) backend_time_us_ = std::max<int64_t>(0,frame->capture_time_ms()) * 1000;
         observed_backend.store(frame->capturer_id(), std::memory_order_relaxed);
         observed_frames.fetch_add(1, std::memory_order_relaxed);
         if (!backend_seen_ || frame->capturer_id() != backend_id_) {
@@ -215,6 +298,19 @@ private:
             if (w >= 2 && h >= 2) Fail();
             return;
         }
+        {
+            std::lock_guard lock(conversion_mutex_);
+            if (stopped_.load()) return;
+            // One in-flight frame plus one newest pending frame. The backend
+            // retains its device owner and never waits for conversion/delivery.
+            pending_ = PendingFrame{std::move(frame), *profile, active_callback_};
+        }
+        conversion_wake_.notify_one();
+    }
+    void ConvertAndDeliver(const PendingFrame& pending) {
+        const auto& frame = pending.frame;
+        const auto& profile = pending.profile;
+        const int w = frame->size().width(), h = frame->size().height();
         if (!converted_ || converted_->width() != w || converted_->height() != h)
             converted_ = VideoFrame::create(w, h, VideoBufferType::I420);
         auto& output = *converted_;
@@ -228,47 +324,49 @@ private:
             return;
         }
         const VideoFrame* delivered = &output;
-        if (profile->width != w || profile->height != h) {
-            const int dw = profile->width, dh = profile->height;
+        if (profile.width != w || profile.height != h) {
+            const int dw = profile.width, dh = profile.height;
             if (!scaled_ || scaled_->width() != dw || scaled_->height() != dh)
                 scaled_ = VideoFrame::create(dw, dh, VideoBufferType::I420);
             auto* dy = scaled_->data();
             auto* du = dy + dw * dh;
             auto* dv = du + (dw / 2) * (dh / 2);
-            if (libyuv::I420Scale(y, w, u, cw, v, cw, w, h,
-                                 dy, dw, du, dw / 2, dv, dw / 2, dw, dh, libyuv::kFilterBox) != 0) {
+            if (libyuv::I420Scale(y,w,u,cw,v,cw,w,h,
+                    dy,dw,du,dw/2,dv,dw/2,dw,dh,libyuv::kFilterBox) != 0) {
                 Fail();
                 return;
             }
             delivered = &*scaled_;
-        } else {
-            scaled_.reset();
-        }
-        last_frame_ = std::chrono::steady_clock::now();
+        } else scaled_.reset();
+        last_frame_ns_.store(NowNs(), std::memory_order_relaxed);
         if (!stopped_.load(std::memory_order_acquire) && frame_) {
             frame_(*delivered);
-            if (!last_applied_ || *last_applied_ != *profile) {
+            if (!stopped_.load(std::memory_order_acquire) && (!last_applied_ || *last_applied_ != profile)) {
                 last_applied_ = profile;
-                if (active_callback_) active_callback_(*profile);
+                if (pending.applied) pending.applied(profile);
             }
         }
     }
     std::atomic<bool> stopped_{true};
-    std::thread worker_;
+    std::thread worker_, converter_;
+    std::mutex conversion_mutex_;
+    std::condition_variable conversion_wake_;
+    std::optional<PendingFrame> pending_; // conversion_mutex_, at most one
     std::mutex wait_mutex_;
     std::condition_variable wake_;
     ScreenShareQuality requested_quality_, active_quality_;
     uint64_t requested_revision_ = 0, active_revision_ = 0, mailbox_sequence_ = 0;
     int source_width_ = 0, source_height_ = 0; // wait_mutex_
     QualityCallback requested_callback_, active_callback_;
-    std::optional<ScreenShareFrameProfile> last_applied_; // worker only
-    std::optional<VideoFrame> converted_, scaled_; // bounded reusable worker buffers
+    std::optional<ScreenShareFrameProfile> last_applied_; // converter only
+    std::optional<VideoFrame> converted_, scaled_; // converter-owned reusable buffers
     FrameCallback frame_;
     EndCallback ended_;
-    std::chrono::steady_clock::time_point last_frame_;
+    std::atomic<std::int64_t> last_frame_ns_{0};
     DesktopCaptureProbeOptions probe_;
     std::uint32_t backend_id_ = 0;
     bool backend_seen_ = false;
+    std::uint64_t backend_time_us_ = 0;
 };
 } // namespace
 
