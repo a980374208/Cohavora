@@ -121,9 +121,9 @@ public:
     int chroma_width() const noexcept { return chroma_width_; }
     int chroma_height() const noexcept { return chroma_height_; }
 
-    const uint8_t* data_y() const noexcept { return storage_.data(); }
-    const uint8_t* data_u() const noexcept { return storage_.data() + u_offset_; }
-    const uint8_t* data_v() const noexcept { return storage_.data() + v_offset_; }
+    const uint8_t* data_y() const noexcept { return storage_->bytes.get(); }
+    const uint8_t* data_u() const noexcept { return storage_->bytes.get() + u_offset_; }
+    const uint8_t* data_v() const noexcept { return storage_->bytes.get() + v_offset_; }
     int stride_y() const noexcept { return stride_y_; }
     int stride_u() const noexcept { return stride_u_; }
     int stride_v() const noexcept { return stride_v_; }
@@ -136,6 +136,14 @@ public:
     }
 
 private:
+    struct StorageBlock {
+        explicit StorageBlock(size_t count)
+            : bytes(std::make_unique_for_overwrite<uint8_t[]>(count)), size(count) {}
+        std::unique_ptr<uint8_t[]> bytes;
+        size_t size;
+    };
+    static std::shared_ptr<StorageBlock> AcquireStorage(size_t bytes);
+
     OwnedI420Frame(int width,
                    int height,
                    int chroma_width,
@@ -160,7 +168,7 @@ private:
     VideoRotation rotation_ = VideoRotation::VIDEO_ROTATION_0;
     RenderColorSpace color_space_;
     RenderFrameMetadata render_metadata_;
-    std::vector<uint8_t> storage_;
+    std::shared_ptr<StorageBlock> storage_;
 };
 
 } // namespace livekit::render

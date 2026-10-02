@@ -3,7 +3,7 @@ param(
     [string]$OutputDirectory = "$PSScriptRoot/../../out/uia-results",
     [switch]$ProbeOnly,
     [switch]$ProbeComboSelection,
-    [ValidateSet('console','whiteboard','whiteboard_clear','whiteboard_files','join','settings','meeting')][string]$Scenario = 'console',
+    [ValidateSet('console','whiteboard','whiteboard_clear','whiteboard_files','whiteboard_file_edges','join','settings','meeting')][string]$Scenario = 'console',
     [ValidateSet('zh_CN','en_US')][string]$Language = 'zh_CN'
 )
 $ErrorActionPreference = 'Stop'
@@ -38,7 +38,7 @@ $script:deferred = @()
 $oldPlatform = $env:QT_QPA_PLATFORM
 $oldAccessibility = $env:QT_ACCESSIBILITY
 function Save-Result([string]$Verdict, [string]$Detail) {
-    $fixtureSource = if ($Scenario -in @('join','settings')) { 'entry_fixture.cpp' } elseif ($Scenario -eq 'meeting') { '../remediation/test_participant_snapshot_remediation.cpp' } else { "${Scenario}_fixture.cpp" }
+    $fixtureSource = if ($Scenario -in @('join','settings')) { 'entry_fixture.cpp' } elseif ($Scenario -eq 'meeting') { '../meeting/test_participant_snapshot_remediation.cpp' } elseif ($Scenario -eq 'whiteboard_file_edges') { 'whiteboard_files_fixture.cpp' } else { "${Scenario}_fixture.cpp" }
     $productionSource = switch ($Scenario) {
         'console' { 'meeting_log_console.cpp' }
         'join' { 'meeting_main_window.cpp' }
@@ -51,6 +51,12 @@ function Save-Result([string]$Verdict, [string]$Detail) {
     if ($Scenario -in @('whiteboard','meeting')) {
         $sources += "$PSScriptRoot/../../src/ui/whiteboard/accessible_combo_box.cpp"
         $sources += "$PSScriptRoot/../../src/ui/whiteboard/accessible_combo_box.h"
+    }
+    if ($Scenario -in @('whiteboard_files','whiteboard_file_edges')) {
+        $sources += "$PSScriptRoot/whiteboard_file_helpers.ps1"
+        $sources += "$PSScriptRoot/../../src/ui/whiteboard/whiteboard_image_loader.cpp"
+        $sources += "$PSScriptRoot/../../src/ui/whiteboard/whiteboard_canvas.cpp"
+        $sources += "$PSScriptRoot/../../src/core/whiteboard/whiteboard_document.cpp"
     }
     [ordered]@{ verdict=$Verdict; detail=$Detail; step=$script:step;
         utc=[DateTime]::UtcNow.ToString('o'); language=$Language; scenario=$Scenario;
@@ -152,17 +158,21 @@ try {
     $env:QT_QPA_PLATFORM = 'windows'
     $env:QT_ACCESSIBILITY = '1'
     $fixtureArguments = @("--language=$Language")
-    if ($Scenario -in @('whiteboard_clear','whiteboard_files','settings','meeting')) {
+    if ($Scenario -in @('whiteboard_clear','whiteboard_files','whiteboard_file_edges','settings','meeting')) {
         $fixtureArguments += @('--state-file', ('"' + "$OutputDirectory/model-state.json" + '"'))
     }
     if ($Scenario -eq 'settings') { $fixtureArguments += '--settings' }
     if ($Scenario -eq 'meeting') { $fixtureArguments += '--uia-meeting-fixture' }
+    if ($Scenario -eq 'whiteboard_file_edges') { $fixtureArguments += '--file-edges' }
     $script:child = Start-Process -FilePath $Fixture -ArgumentList $fixtureArguments -PassThru -RedirectStandardError "$OutputDirectory/fixture-stderr.log"
     $pidCondition = New-Object Windows.Automation.PropertyCondition(
         [Windows.Automation.AutomationElement]::ProcessIdProperty, [int]$script:child.Id)
     $script:window = Wait-For 'process-scoped window discovery' {
-        $windows = [Windows.Automation.AutomationElement]::RootElement.FindAll(
-            [Windows.Automation.TreeScope]::Children, $pidCondition)
+        $windows = @([Windows.Automation.AutomationElement]::RootElement.FindAll(
+            [Windows.Automation.TreeScope]::Children, $pidCondition) | Where-Object {
+                $_.Current.ClassName -ne 'ConsoleWindowClass' -and
+                $_.Current.ControlType -eq [Windows.Automation.ControlType]::Window
+            })
         if ($windows.Count -gt 1) { throw 'Ambiguous fixture top-level windows' }
         if ($windows.Count -eq 1) { return $windows[0] }
     }

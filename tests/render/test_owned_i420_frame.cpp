@@ -1,6 +1,8 @@
+#include <algorithm>
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <thread>
 #include <vector>
 
 #include "core/track.h"
@@ -77,6 +79,51 @@ int main() {
                 "V plane must omit stride padding")) {
         return 1;
     }
+
+    // Tight planes use the contiguous path; they must produce the same owned
+    // bytes as padded odd-sized planes and remain valid after source mutation.
+    auto packed_y = expected_y, packed_u = expected_u, packed_v = expected_v;
+    auto packed = livekit::render::OwnedI420Frame::CopyFromPlanes(
+        kWidth, kHeight, packed_y.data(), kWidth,
+        packed_u.data(), 2, packed_v.data(), 2);
+    std::fill(packed_y.begin(), packed_y.end(), 0);
+    std::fill(packed_u.begin(), packed_u.end(), 0);
+    std::fill(packed_v.begin(), packed_v.end(), 0);
+    if (!Expect(packed &&
+        std::vector<uint8_t>(packed->data_y(), packed->data_y() + expected_y.size()) == expected_y &&
+        std::vector<uint8_t>(packed->data_u(), packed->data_u() + expected_u.size()) == expected_u &&
+        std::vector<uint8_t>(packed->data_v(), packed->data_v() + expected_v.size()) == expected_v,
+        "tight planes must be fully initialized and independent of source memory")) return 1;
+
+    std::vector<livekit::render::OwnedI420Frame::Ptr> retained;
+    for (uint8_t value = 0; value != 32; ++value) {
+        const uint8_t y[]{value, value, value, value}, u[]{value}, v[]{value};
+        retained.push_back(livekit::render::OwnedI420Frame::CopyFromPlanes(2, 2, y, 2, u, 1, v, 1));
+    }
+    for (size_t index = 0; index != retained.size(); ++index) {
+        const auto& held = retained[index];
+        if (!Expect(held && held->data_y()[0] == index && held->data_y()[3] == index &&
+            held->data_u()[0] == index && held->data_v()[0] == index,
+            "retained frames must remain immutable after storage cache exhaustion")) return 1;
+    }
+    const auto recycled_pixels = retained.front()->data_y();
+    std::weak_ptr<const livekit::render::OwnedI420Frame> released_frame = retained.front();
+    retained.front().reset();
+    const uint8_t next_y[]{99, 99, 99, 99}, next_uv[]{99};
+    auto reused = livekit::render::OwnedI420Frame::CopyFromPlanes(2, 2, next_y, 2, next_uv, 1, next_uv, 1);
+    if (!Expect(released_frame.expired() && reused && reused->data_y() == recycled_pixels &&
+        reused->data_y()[3] == 99 && retained[1]->data_y()[0] == 1,
+        "only released pixel storage may be reused; cached storage must not retain frame objects")) return 1;
+
+    livekit::render::OwnedI420Frame::Ptr after_producer_exit;
+    std::thread producer([&] {
+        after_producer_exit = livekit::render::OwnedI420Frame::CopyFromPlanes(
+            2, 2, next_y, 2, next_uv, 1, next_uv, 1);
+    });
+    producer.join();
+    if (!Expect(after_producer_exit && after_producer_exit->data_y()[3] == 99 &&
+        after_producer_exit->data_v()[0] == 99,
+        "outstanding frame storage must survive producer thread and cache destruction")) return 1;
 
     livekit::Track track("TR_I420", "render-test", livekit::TrackKind::Video);
     int first_calls = 0;

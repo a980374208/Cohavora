@@ -44,8 +44,8 @@ public:
         co_await room.ApplyPublishedSenderScalabilityModesAsync(std::move(bundle), generation);
     }
     static void InitializeCapabilities(
-        webrtc::PeerConnectionInterface* publisher, bool single_pc) {
-        Room::InitializePeerConnectionCapabilities(publisher, single_pc);
+        webrtc::PeerConnectionInterface* publisher, bool single_pc, bool video_enabled = true) {
+        Room::InitializePeerConnectionCapabilities(publisher, single_pc, video_enabled);
     }
 
     static uint64_t Install(
@@ -150,8 +150,8 @@ struct Fixture {
     uint64_t generation = 0;
     bool single_pc_mode = false;
 
-    explicit Fixture(bool single_pc = true, bool auto_subscribe = true) {
-        Install(single_pc, auto_subscribe);
+    explicit Fixture(bool single_pc = true, bool auto_subscribe = true, bool video_enabled = true) {
+        Install(single_pc, auto_subscribe, video_enabled);
     }
 
     ~Fixture() {
@@ -161,7 +161,7 @@ struct Fixture {
         room.reset();
     }
 
-    void Install(bool single_pc = true, bool auto_subscribe = true) {
+    void Install(bool single_pc = true, bool auto_subscribe = true, bool video_enabled = true) {
         single_pc_mode = single_pc;
         room->SetLogHandler([this](const std::string&, const std::string& tag,
                                    const std::string& message) {
@@ -174,7 +174,7 @@ struct Fixture {
         TEST_CHECK(created.ok());
         publisher = created.MoveValue();
         livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
-            Access::InitializeCapabilities(publisher.get(), single_pc);
+            Access::InitializeCapabilities(publisher.get(), single_pc, video_enabled);
         });
         // No external transport is opened. These tests cover offer construction,
         // merge decisions and session isolation, not server acceptance or media.
@@ -305,6 +305,24 @@ void AutoSubscribeFalseDoesNotGateEmptyVideoDemandOffer() {
     TEST_CHECK(offer.find(" H264/90000\r\n") != std::string::npos);
     TEST_CHECK(offer.find("a=recvonly\r\n") == std::string::npos);
     f.CheckReceivers(0, 0);
+}
+
+void AudioOnlyServerCanNegotiateDataWithoutVideo() {
+    Fixture f(true, true, false);
+    livekit::WebRTCManager::Instance().signaling_thread()->BlockingCall([&] {
+        webrtc::DataChannelInit init;
+        TEST_CHECK(f.publisher->CreateDataChannelOrError("_reliable", &init).ok());
+    });
+    f.Requirement(0, 0);
+    const auto deadline = std::chrono::steady_clock::now() + 3s;
+    while (f.LocalOffer().empty() && std::chrono::steady_clock::now() < deadline) {
+        f.io.restart();
+        f.io.run_one_for(10ms);
+    }
+    const auto offer = f.LocalOffer();
+    TEST_CHECK(!offer.empty());
+    TEST_CHECK(offer.find("m=application ") != std::string::npos);
+    TEST_CHECK(offer.find("m=video ") == std::string::npos);
 }
 
 void ZeroSectionsCreatesOfferForExistingTransceiver() {
@@ -724,6 +742,22 @@ void BackupSenderBundleRollsBackAsOneTransaction() {
             wait();
             rtc.SetLocalDescription(remote.publisher, "answer", answer, f.io.get_executor(), set); wait();
             rtc.SetRemoteDescription(f.publisher, "answer", answer, f.io.get_executor(), set); wait();
+            // The SFU builds its potential upstream codecs from this actual
+            // negotiated primary receiver. It must see the backup even before
+            // any backup packet has arrived.
+            rtc.signaling_thread()->BlockingCall([&] {
+                bool primary_receiver_found = false;
+                for (const auto& receiver : remote.publisher->GetReceivers()) {
+                    if (!receiver->track() || receiver->track()->id() != bundle.track_ids.front()) continue;
+                    primary_receiver_found = true;
+                    const auto codecs = receiver->GetParameters().codecs;
+                    TEST_CHECK(!codecs.empty() && codecs.front().name == "VP9");
+                    TEST_CHECK(std::any_of(codecs.begin(), codecs.end(), [](const auto& codec) {
+                        return codec.name == "VP8";
+                    }));
+                }
+                TEST_CHECK(primary_receiver_found);
+            });
             auto applied = asio::co_spawn(f.io, Access::ApplyModes(*f.room, bundle, f.generation), asio::use_future);
             while (applied.wait_for(0ms) != std::future_status::ready) { f.io.restart(); f.io.run_one_for(10ms); }
             try { applied.get(); }
@@ -964,6 +998,7 @@ int main() {
     TEST_CHECK(livekit::WebRTCManager::Instance().Initialize());
     SdpTraceFollowsRealPeerConnectionStates();
     AutoSubscribeFalseDoesNotGateEmptyVideoDemandOffer();
+    AudioOnlyServerCanNegotiateDataWithoutVideo();
     ZeroSectionsCreatesOfferForExistingTransceiver();
     ZeroSectionsWhileOfferInFlightQueuesRetry();
     RepeatedCountsAreAdditionalSections();
@@ -976,6 +1011,6 @@ int main() {
     AudioPublishPolicyClosesSignalAndSenderLoop();
     BackupSenderBundleRollsBackAsOneTransaction();
     livekit::WebRTCManager::Instance().Deinitialize();
-    std::cout << "Single-PC media-section negotiation and publication: 13 cases PASS\n";
+    std::cout << "Single-PC media-section negotiation and publication: 14 cases PASS\n";
     return 0;
 }

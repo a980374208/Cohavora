@@ -17,6 +17,7 @@ param(
     [string]$Executable,
     [string]$EvidenceRoot,
     [switch]$AllowInsecureTransport,
+    [switch]$UseLoopbackClock,
     [switch]$CheckBinaryOnly
 )
 
@@ -164,6 +165,33 @@ try {
         if (-not [string]::IsNullOrWhiteSpace($case.Scalability)) {
             $common += @('--scalability-mode', $case.Scalability)
         }
+        if ($UseLoopbackClock) {
+            # Reserve a pair while discovering them; the probe must bind both or fail.
+            # This option is only for the two local processes started by this script.
+            $clockPort = $null
+            for ($attempt = 0; $attempt -lt 32; ++$attempt) {
+                $candidate = Get-Random -Minimum 20000 -Maximum 60000
+                $first = [Net.Sockets.UdpClient]::new()
+                $second = [Net.Sockets.UdpClient]::new()
+                try {
+                    $first.Client.ExclusiveAddressUse = $true
+                    $second.Client.ExclusiveAddressUse = $true
+                    $first.Client.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $candidate))
+                    $second.Client.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Loopback, $candidate + 1))
+                    $clockPort = $candidate
+                } catch { } finally { $first.Dispose(); $second.Dispose() }
+                if ($null -ne $clockPort) { break }
+            }
+            if ($null -eq $clockPort) { throw 'No free loopback clock port pair' }
+            $common += @('--clock-loopback-port', [string]$clockPort)
+        }
+        [pscustomobject]@{
+            phase = $case.Id
+            clock_transport = if ($UseLoopbackClock) { 'same_host_loopback_udp' } else { 'livekit_data' }
+            media_transport = 'livekit_sfu'
+            maximum_clock_uncertainty_us = $MaximumClockUncertaintyUs
+            minimum_marker_success_rate = $MinimumMarkerSuccessRate
+        } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $evidence "$($case.Id)-test-config.json") -Encoding utf8
         $receiverArgs = @('--role', 'receiver', '--local-peer', $ReceiverIdentity,
             '--remote-peer', $PublisherIdentity) + $common
         if (-not [string]::IsNullOrWhiteSpace($ReceiverPublishCodec)) {
@@ -215,14 +243,16 @@ try {
         $clockMax = Get-OptionalLongValue $summary 'clock_uncertainty_max_us'
         $e2e02ErrorP95 = Get-OptionalLongValue $summary 'e2e02_error_p95_us'
         $e2e03ErrorP95 = Get-OptionalLongValue $summary 'e2e03_error_p95_us'
-        $receivedWidthMin = Get-LongValue $summary 'received_width_min'
-        $receivedWidthMax = Get-LongValue $summary 'received_width_max'
-        $receivedHeightMin = Get-LongValue $summary 'received_height_min'
-        $receivedHeightMax = Get-LongValue $summary 'received_height_max'
+        $receivedWidthMin = Get-OptionalLongValue $summary 'received_width_min'
+        $receivedWidthMax = Get-OptionalLongValue $summary 'received_width_max'
+        $receivedHeightMin = Get-OptionalLongValue $summary 'received_height_min'
+        $receivedHeightMax = Get-OptionalLongValue $summary 'received_height_max'
         $encodedFrames = Get-LongValue $summary 'encoded_frames'
         $sentPackets = Get-LongValue $summary 'sent_packets'
         $decodedFrames = Get-LongValue $receiverSummary 'decoded_frames'
         $observedCodecs = @($summary['observed_codecs'] -split ',')
+        $receiverObservedCodecs = @($receiverSummary['actual_receiver_codecs'] -split ',')
+        $receiverDecodedCodecs = @($receiverSummary['decoded_receiver_codecs'] -split ',')
 
         $processPass = $publisher.ExitCode -eq 0 -and $receiver.ExitCode -eq 0
         $markerPass = $markerRate -ge $MinimumMarkerSuccessRate
@@ -235,7 +265,10 @@ try {
             $receivedHeightMin -eq $case.ExpectedHeight -and
             $receivedHeightMax -eq $case.ExpectedHeight
         $codecPass = $summary['effective_codec'] -eq $case.ExpectedCodec -and
-            $observedCodecs -contains $case.ExpectedCodec
+            $observedCodecs -contains $case.ExpectedCodec -and
+            $receiverObservedCodecs -contains $case.ExpectedCodec -and
+            $receiverDecodedCodecs.Count -eq 1 -and
+            $receiverDecodedCodecs -contains $case.ExpectedCodec
         $counterPass = $encodedFrames -gt 0 -and $sentPackets -gt 0 -and
             $decodedFrames -gt 0 -and $receiverSummary['first_frame_detected'] -eq 'true'
         $uplinkPass = [string]::IsNullOrWhiteSpace($ReceiverPublishCodec) -or
@@ -249,6 +282,8 @@ try {
             Codec = $case.Codec
             EffectiveCodec = $summary['effective_codec']
             ObservedCodecs = $summary['observed_codecs']
+            ReceiverObservedCodecs = $receiverSummary['actual_receiver_codecs']
+            ReceiverDecodedCodecs = $receiverSummary['decoded_receiver_codecs']
             ReceiverPublishCodec = $ReceiverPublishCodec
             ReceiverUplinkVerified = $receiverSummary['local_uplink_verified']
             PublisherExitCode = $publisher.ExitCode
@@ -295,6 +330,10 @@ try {
     Write-Output "[S8C_MATRIX] INCONCLUSIVE evidence=$evidence"
     exit 2
 } finally {
+    # Persist completed cases even if setup/parsing of a later case failed.
+    $results | Export-Csv -LiteralPath (Join-Path $evidence 'matrix-summary.csv') -NoTypeInformation -Encoding utf8
+    ConvertTo-Json -InputObject @($results) -Depth 5 |
+        Set-Content -LiteralPath (Join-Path $evidence 'matrix-summary.json') -Encoding utf8
     foreach ($process in $processes) {
         if (-not $process.HasExited) {
             $process.Kill($true)

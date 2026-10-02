@@ -18,6 +18,7 @@ Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin)
 Q_IMPORT_PLUGIN(QWindowsVistaStylePlugin)
 Q_IMPORT_PLUGIN(QSvgPlugin)
 Q_IMPORT_PLUGIN(QSvgIconPlugin)
+Q_IMPORT_PLUGIN(QJpegPlugin)
 
 int main(int argc, char **argv) {
     QApplication app(argc, argv);
@@ -37,6 +38,36 @@ int main(int argc, char **argv) {
         for (int x = 0; x < input.width(); ++x)
             input.setPixel(x, y, qRgb(x % 256, y % 256, (x + y) % 256));
     if (!input.save(QFileInfo(stateFile).dir().filePath(QStringLiteral("input image.png")), "PNG")) return 2;
+    if (args.contains(QStringLiteral("--file-edges"))) {
+        const auto jpegPath = QFileInfo(stateFile).dir().filePath(QStringLiteral("input image.jpg"));
+        if (!input.save(jpegPath, "JPEG", 95)) return 2;
+        QImageReader reader(jpegPath);
+        reader.setAutoTransform(true);
+        const auto decodedJpeg = reader.read();
+        if (decodedJpeg.isNull() || !decodedJpeg.save(
+                QFileInfo(stateFile).dir().filePath(QStringLiteral("jpeg decoded reference.png")), "PNG")) return 2;
+        if (!QFile::copy(QFileInfo(stateFile).dir().filePath(QStringLiteral("input image.png")),
+                        QFileInfo(stateFile).dir().filePath(QStringLiteral("denied image.png")))) return 2;
+        namespace wb = livekit::whiteboard;
+        // The edge fixture starts at the page limit with an annotation. After
+        // show(), only the independent UIA process invokes operations.
+        auto &document = const_cast<wb::Document &>(panel.document());
+        for (std::size_t i = 1; i < wb::Document::MaxPages; ++i) {
+            if (!panel.canvas()->execute(wb::CommandKind::AddPage).changed()) return 2;
+        }
+        wb::Command seed;
+        seed.id = "file-edge-seed-command";
+        seed.actor = document.owner();
+        seed.context = document.context();
+        seed.kind = wb::CommandKind::Add;
+        seed.object.id = "file-edge-seed-object";
+        seed.object.author = document.owner();
+        seed.object.kind = wb::ObjectKind::Line;
+        seed.object.points = {{100, 100}, {300, 200}};
+        if (!document.apply(seed).changed()) return 2;
+        panel.canvas()->refreshFromDocument();
+        emit panel.canvas()->documentChanged();
+    }
     QImage existing(320, 180, QImage::Format_RGB32);
     existing.fill(qRgb(255, 0, 255));
     if (!existing.save(QFileInfo(stateFile).dir().filePath(QStringLiteral("existing image.png")), "PNG")) return 2;
@@ -93,6 +124,7 @@ int main(int argc, char **argv) {
     expectedErrors["dimensions"] = MeetingUI::WhiteboardPanel::tr("The image dimensions are unsupported (320x180 to 4096x4096, at most 16 MP).");
     expectedErrors["truncated"] = MeetingUI::WhiteboardPanel::tr("The image could not be decoded.");
     expectedErrors["oversized"] = MeetingUI::WhiteboardPanel::tr("The image file exceeds the 8 MiB limit.");
+    expectedErrors["unreadable"] = MeetingUI::WhiteboardPanel::tr("The image file could not be read.");
     QSaveFile manifest(QFileInfo(stateFile).dir().filePath(QStringLiteral("expected-errors.json")));
     const auto manifestBytes = QJsonDocument(expectedErrors).toJson();
     if (!manifest.open(QIODevice::WriteOnly) || manifest.write(manifestBytes) != manifestBytes.size() || !manifest.commit()) return 2;

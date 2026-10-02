@@ -53,6 +53,14 @@ asio::awaitable<void> Until(Predicate predicate, const char* code, std::chrono::
     }
 }
 
+std::string CaptureMode() {
+    const auto value = std::getenv("LIVEKIT_TEST_CAPTURE_BACKEND");
+    return value ? value : "";
+}
+bool FullscreenCapture() {
+    return std::getenv("LIVEKIT_TEST_WGC_SCREEN") || CaptureMode().find("screen") != std::string::npos;
+}
+
 class PatternWindow {
 public:
     explicit PatternWindow(bool detailed = false) {
@@ -64,12 +72,12 @@ public:
             type.hInstance = GetModuleHandleW(nullptr);
             type.lpszClassName = L"LiveKitScreenShareL3";
             RegisterClassW(&type);
-            const bool fullscreen = std::getenv("LIVEKIT_TEST_WGC_SCREEN") != nullptr;
+            const bool fullscreen = FullscreenCapture();
             MONITORINFO monitor{sizeof(monitor)};
             GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &monitor);
             const auto& bounds = monitor.rcMonitor;
             HWND hwnd = CreateWindowExW(fullscreen ? WS_EX_TOPMOST : 0, type.lpszClassName, L"LiveKit screen-share test pattern",
-                (detailed || std::getenv("LIVEKIT_TEST_QUALITY_HOT")) ? WS_POPUP : WS_OVERLAPPEDWINDOW,
+                (fullscreen || detailed || std::getenv("LIVEKIT_TEST_QUALITY_HOT")) ? WS_POPUP : WS_OVERLAPPEDWINDOW,
                 fullscreen ? bounds.left : 80, fullscreen ? bounds.top : 80,
                 fullscreen ? bounds.right - bounds.left : (std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? 3840 : 800),
                 fullscreen ? bounds.bottom - bounds.top : (std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? 2160 : 600),
@@ -78,7 +86,9 @@ public:
                 if (detailed) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0x10000);
                 else if (std::getenv("LIVEKIT_TEST_QUALITY_HOT")) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0x20000);
                 ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                SetTimer(hwnd, 1, std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? 10 : detailed ? 66 : 500, nullptr);
+                const auto requested_interval = std::getenv("LIVEKIT_TEST_PATTERN_INTERVAL_MS");
+                const unsigned interval = requested_interval ? std::max(5,std::min(33,std::atoi(requested_interval))) : 10;
+                SetTimer(hwnd, 1, std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? interval : detailed ? 66 : 500, nullptr);
                 UpdateWindow(hwnd);
             }
             ready.set_value(hwnd);
@@ -99,7 +109,7 @@ public:
     }
     livekit::DesktopSource source() const {
         Require(hwnd_ != nullptr, "pattern_window_unavailable");
-        if (std::getenv("LIVEKIT_TEST_WGC_SCREEN")) {
+        if (FullscreenCapture()) {
             const auto monitor = MonitorFromWindow(hwnd_, MONITOR_DEFAULTTOPRIMARY);
             for (const auto& source : livekit::EnumerateDesktopSources()) {
                 HMONITOR candidate = nullptr;
@@ -111,12 +121,14 @@ public:
         }
         return {livekit::DesktopSourceKind::Window, reinterpret_cast<intptr_t>(hwnd_), {}};
     }
+    HWND handle() const { return hwnd_; }
 private:
     static LRESULT CALLBACK Procedure(HWND hwnd, UINT message, WPARAM wp, LPARAM lp) {
         if (message == WM_TIMER) {
             const auto state = GetWindowLongPtrW(hwnd, GWLP_USERDATA);
+            const auto next = (state & 0x30000) ? ((state & 0x30000) | ((state + 1) & 0xfff)) : !state;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA,
-                (state & 0x30000) ? ((state & 0x30000) | ((state + 1) & 0xfff)) : !state);
+                next);
             InvalidateRect(hwnd, nullptr, false);
             return 0;
         }
@@ -203,6 +215,10 @@ private:
 struct CaptureCounts {
     std::atomic<int> frames{0}, stopped{0}, ended{0}, live{0}, next_id{0};
     std::atomic<uint32_t> backend{0};
+    std::atomic<uint64_t> work_us{0}, wait_us{0}, backend_us{0}, timed_frames{0};
+    std::atomic<uint64_t> conversion_us{0}, converted_frames{0};
+    std::mutex backend_mutex;
+    std::vector<uint32_t> backends;
     std::shared_ptr<ShareQualityProbe> quality;
 };
 
@@ -243,9 +259,29 @@ public:
         livekit::DesktopCaptureProbeOptions probe;
         probe.allow_wgc_window = std::getenv("LIVEKIT_TEST_GDI_WINDOW") == nullptr;
         probe.simulate_dxgi_unsupported = std::getenv("LIVEKIT_TEST_WGC_SCREEN") != nullptr;
+        const auto mode = CaptureMode();
+        probe.allow_wgc_window = probe.allow_wgc_window && mode != "gdi-window";
+        probe.simulate_dxgi_unsupported = probe.simulate_dxgi_unsupported ||
+            mode == "wgc-screen" || mode == "gdi-screen" || mode == "wgc-screen-fallback-gdi";
+        probe.simulate_wgc_unsupported = mode == "gdi-screen";
+        probe.simulate_dxgi_failure_after_frames = mode == "dxgi-screen-fallback-wgc" ? 60 : 0;
+        probe.simulate_wgc_failure_after_frames = mode == "wgc-screen-fallback-gdi" ? 60 : 0;
+        probe.on_capture_timing = [counts = counts_](uint64_t work, uint64_t wait, uint64_t backend) {
+            counts->work_us += work;
+            counts->wait_us += wait;
+            counts->backend_us += backend;
+            ++counts->timed_frames;
+        };
+        probe.on_conversion_timing = [counts = counts_](uint64_t work) {
+            counts->conversion_us += work;
+            ++counts->converted_frames;
+        };
         probe.on_event = [id, counts = counts_](livekit::DesktopCaptureProbeEvent event) {
-            if (event.phase == livekit::DesktopCaptureProbePhase::BackendFrame)
+            if (event.phase == livekit::DesktopCaptureProbePhase::BackendFrame) {
                 counts->backend = event.capturer_id;
+                std::lock_guard lock(counts->backend_mutex);
+                counts->backends.push_back(event.capturer_id);
+            }
             const auto now = std::chrono::system_clock::now().time_since_epoch();
             const auto epoch_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
             std::cout << "[CAPTURE_PROBE] {\"capture_id\":" << id
@@ -667,6 +703,53 @@ asio::awaitable<void> Stopped(Peer& sender, Peer& receiver, const ActiveScreen& 
     Require(sender.captures->stopped > 0, "capture_stop_not_called");
 }
 
+asio::awaitable<void> CaptureBackendCase(Peer& sender, Peer& receiver) {
+    namespace Id = webrtc::DesktopCapturerId;
+    const auto mode = CaptureMode();
+    const bool fallback = mode.find("fallback") != std::string::npos;
+    const uint32_t initial = mode.starts_with("dxgi") ? Id::kScreenCapturerWinDirectx
+        : mode == "gdi-screen" ? Id::kScreenCapturerWinGdi
+        : mode == "gdi-window" ? Id::kWindowCapturerWinGdi : Id::kWgcCapturerWin;
+    const uint32_t final = mode == "dxgi-screen-fallback-wgc" ? Id::kWgcCapturerWin
+        : mode == "wgc-screen-fallback-gdi" ? Id::kScreenCapturerWinGdi : initial;
+    const auto baseline = sender.room->GetPublisherMediaObjectCounts();
+    PatternWindow window;
+    auto screen = co_await StartScreen(sender, receiver, window);
+    {
+        std::lock_guard lock(sender.captures->backend_mutex);
+        Require(!sender.captures->backends.empty() && sender.captures->backends.front() == initial,
+                "capture_initial_backend_mismatch");
+    }
+    co_await Until([&] { return sender.captures->backend == final; }, "capture_fallback_missing");
+    const int before = screen.record->valid_frames;
+    co_await Delay(3s);
+    Require(screen.record->valid_frames > before + 10 && sender.captures->backend == final &&
+            sender.captures->next_id == 1 && sender.LocalSid(Source::ScreenShareVideo) == screen.sid,
+            "capture_remote_continuity_missing");
+    const int progressed = screen.record->valid_frames.load() - before;
+    std::vector<uint32_t> path;
+    {
+        std::lock_guard lock(sender.captures->backend_mutex);
+        path = sender.captures->backends;
+    }
+    Require(path.size() == (fallback ? 2 : 1) && path.back() == final, "capture_backend_path_mismatch");
+    sender.share->Stop();
+    co_await Stopped(sender, receiver, screen);
+    receiver.listener->Forget(screen.sid);
+    screen.record.reset();
+    co_await Until([&] {
+        const auto counts = sender.room->GetPublisherMediaObjectCounts();
+        return counts.transceivers == baseline.transceivers && counts.senders_with_track == baseline.senders_with_track &&
+            sender.captures->live == 0 && ShareObjectLedger::Alive(sender.share_objects->tracks) == 0 &&
+            ShareObjectLedger::Alive(sender.share_objects->sources) == 0 &&
+            ShareObjectLedger::Alive(sender.share_objects->previews) == 0;
+    }, "capture_backend_resources_retained");
+    std::cout << "[BACKEND_RUNTIME] " << nlohmann::json{{"case",mode},{"status","PASS"},
+        {"path",path},{"remote_frames_after_final_backend",progressed},{"same_capture",true},
+        {"same_track",true},{"stop_barrier",true},{"release",true},
+        {"fault",fallback ? "permanent_error_after_60_real_frames" : "none"}}.dump() << std::endl;
+}
+
 asio::awaitable<void> Matrix(Peer& sender, Peer& receiver, bool recovery_only) {
     co_await sender.StartCamera();
     const auto original_camera = sender.LocalSid(Source::Camera);
@@ -858,6 +941,12 @@ asio::awaitable<void> QualityHotMatrix(Peer& sender, Peer& receiver) {
         if (index < 10) co_await Delay(1000ms);
         const int sample = screen.record->frames;
         const int capture_sample = sender.captures->frames;
+        const auto work_sample = sender.captures->work_us.load();
+        const auto wait_sample = sender.captures->wait_us.load();
+        const auto backend_sample = sender.captures->backend_us.load();
+        const auto timed_sample = sender.captures->timed_frames.load();
+        const auto conversion_sample = sender.captures->conversion_us.load();
+        const auto converted_sample = sender.captures->converted_frames.load();
         const auto sample_start = std::chrono::steady_clock::now();
         co_await Delay(index < 10 ? 4000ms : 1100ms);
         const double decoded_fps = (screen.record->frames.load()-sample) /
@@ -866,6 +955,12 @@ asio::awaitable<void> QualityHotMatrix(Peer& sender, Peer& receiver) {
         std::cout << "[QUALITY_RUNTIME] " << nlohmann::json{{"stage",index},{"width",applied.width},{"height",applied.height},
             {"fps",quality.fps},{"decoded_fps",decoded_fps},{"fps_checked",index < 10},{"received_frames",screen.record->frames.load()-sample},{"same_track",true},
             {"captured_frames",sender.captures->frames.load()-capture_sample},
+            {"capture_work_us",sender.captures->work_us.load()-work_sample},
+            {"capture_wait_us",sender.captures->wait_us.load()-wait_sample},
+            {"backend_capture_us",sender.captures->backend_us.load()-backend_sample},
+            {"capture_timed_frames",sender.captures->timed_frames.load()-timed_sample},
+            {"conversion_work_us",sender.captures->conversion_us.load()-conversion_sample},
+            {"converted_frames",sender.captures->converted_frames.load()-converted_sample},
             {"capture_instances",sender.captures->next_id.load()},{"private_bytes",privateBytes()}}.dump() << std::endl;
         if (index < 10 && (decoded_fps < quality.fps * 0.70 || decoded_fps > quality.fps * 1.20)) {
             ++fps_failures;
@@ -1258,7 +1353,8 @@ asio::awaitable<int> Run(std::string url, std::string peer_url,
             Require(first.room->room_info().sid == second->room->room_info().sid, "peers_in_different_rooms");
             std::cout << "[CONNECTED] two_distinct_participants=true same_service_room=true" << std::endl;
         }
-        if (std::getenv("LIVEKIT_TEST_QUALITY_HOT")) co_await QualityHotMatrix(first, *second);
+        if (!CaptureMode().empty() && !performance_only) co_await CaptureBackendCase(first, *second);
+        else if (std::getenv("LIVEKIT_TEST_QUALITY_HOT")) co_await QualityHotMatrix(first, *second);
         else if (network_only) co_await NetworkFaultMatrix(first, *second, receiver_telemetry);
         else if (performance_only) co_await PerformanceMatrix(first, *second);
         else if (publisher_only) co_await PublisherLifecycleMatrix(first, direct_track);
@@ -1284,7 +1380,84 @@ asio::awaitable<int> Run(std::string url, std::string peer_url,
 } // namespace
 
 int main(int argc, char** argv) {
-    if (std::getenv("LIVEKIT_TEST_WGC_SCREEN") || std::getenv("LIVEKIT_TEST_QUALITY_HOT"))
+    if (argc == 2 && std::string(argv[1]) == "--gdi-worker-cost-probe") {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        _putenv_s("LIVEKIT_TEST_QUALITY_HOT", "1");
+        PatternWindow window;
+        const auto multimedia = LoadLibraryW(L"winmm.dll");
+        using TimerPeriod = UINT(WINAPI*)(UINT);
+        const auto begin_period = reinterpret_cast<TimerPeriod>(GetProcAddress(multimedia,"timeBeginPeriod"));
+        const auto end_period = reinterpret_cast<TimerPeriod>(GetProcAddress(multimedia,"timeEndPeriod"));
+        for (const std::string stage : {"baseline","precise-timer","factory"}) {
+            if (stage == "precise-timer") begin_period(1);
+            if (stage == "factory") livekit::WebRTCManager::Instance().Initialize();
+            std::atomic<uint64_t> work{0},backend{0},wait{0},frames{0};
+            livekit::DesktopCaptureProbeOptions options;
+            options.allow_wgc_window = false;
+            options.on_capture_timing = [&](uint64_t w,uint64_t idle,uint64_t b) {
+                work += w; backend += b; wait += idle; ++frames;
+            };
+            auto capture = livekit::CreateDesktopCaptureForProbe(std::move(options));
+            capture->SetQuality({livekit::ScreenShareResolution::P1440,30},1,{});
+            capture->Start(window.source(),[](const auto&){},[]{});
+            std::this_thread::sleep_for(3s);
+            capture->Stop();
+            RECT bounds{};
+            GetClientRect(window.handle(),&bounds);
+            std::cout << "[GDI_WORKER_COST] " << nlohmann::json{{"stage",stage},
+                {"source_width",bounds.right},{"source_height",bounds.bottom},
+                {"frames",frames.load()},{"work_us",work.load()},{"backend_us",backend.load()},
+                {"wait_us",wait.load()},{"scope","diagnostic_only_no_media"}}.dump() << std::endl;
+            if (stage == "precise-timer") end_period(1);
+            if (stage == "factory") livekit::WebRTCManager::Instance().Deinitialize();
+        }
+        FreeLibrary(multimedia);
+        return 0;
+    }
+    if (argc == 2 && std::string(argv[1]) == "--gdi-api-cost-probe") {
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        _putenv_s("LIVEKIT_TEST_QUALITY_HOT", "1");
+        PatternWindow window;
+        const auto hwnd = window.handle();
+        const auto source = GetWindowDC(hwnd);
+        const auto target = CreateCompatibleDC(source);
+        for (const bool dib : {false,true}) {
+        BITMAPINFO info{};
+        info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        info.bmiHeader.biWidth = 3840;
+        info.bmiHeader.biHeight = -2160;
+        info.bmiHeader.biPlanes = 1;
+        info.bmiHeader.biBitCount = 32;
+        void* pixels = nullptr;
+        const auto bitmap = dib ? CreateDIBSection(source,&info,DIB_RGB_COLORS,&pixels,nullptr,0)
+                                : CreateCompatibleBitmap(source,3840,2160);
+        const auto previous = SelectObject(target, bitmap);
+        for (const unsigned flags : {0u, 2u}) {
+            std::vector<double> costs;
+            int rendered = 0, far_rendered = 0;
+            for (int frame = 0; frame < 30; ++frame) {
+                const auto start = std::chrono::steady_clock::now();
+                const bool success = PrintWindow(hwnd, target, flags) != 0;
+                costs.push_back(std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count());
+                const auto left = GetPixel(target, 480, 270), right = GetPixel(target, 1440, 270);
+                rendered += success && ((left == RGB(0,0,0) && right == RGB(255,255,255)) ||
+                    (right == RGB(0,0,0) && left == RGB(255,255,255)));
+                far_rendered += success && GetPixel(target,3500,1800) == right;
+            }
+            std::sort(costs.begin(),costs.end());
+            std::cout << "[GDI_API_COST] " << nlohmann::json{{"flags",flags},{"calls",30},
+                {"buffer",dib ? "dib" : "ddb"},
+                {"median_ms",costs[15]},{"p95_ms",costs[28]},{"pattern_matches",rendered},
+                {"offscreen_matches",far_rendered},{"scope","diagnostic_only_owned_4k_window"}}.dump() << std::endl;
+        }
+        SelectObject(target,previous);
+        DeleteObject(bitmap);
+        }
+        DeleteDC(target);
+        ReleaseDC(hwnd,source);
+        return 0;
+    }
+    if (FullscreenCapture() || std::getenv("LIVEKIT_TEST_QUALITY_HOT"))
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     const bool recovery_only = argc == 2 && std::string(argv[1]) == "--recovery-and-leave";
     const bool lifecycle_only = argc == 2 && std::string(argv[1]) == "--lifecycle-probe";

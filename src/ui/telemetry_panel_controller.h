@@ -20,6 +20,7 @@ public:
 signals:
     void FrameReady(MeetingUI::PanelFramePtr frame);
 private:
+    friend struct TelemetryPanelControllerTestAccess;
     void Refresh();
     void Publish(bool forceMemory=false);
     PanelFramePtr previous_;

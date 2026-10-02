@@ -6,8 +6,26 @@
 #include "participant.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
+#include "rtc/webrtc_manager.h"
+#include "api/video_codecs/video_encoder_factory.h"
+#include "api/video_codecs/sdp_video_format.h"
+#include <algorithm>
 
 int main() {
+    // WebRTC validates SetParameters against advertised RTP capabilities, not
+    // only QueryCodecSupport. The two surfaces must agree for explicit AV1 SVC.
+    {
+        auto factory = livekit::CreateVideoEncoderFactory();
+        const auto formats = factory->GetSupportedFormats();
+        const auto av1 = std::find_if(formats.begin(), formats.end(), [](const auto& format) {
+            return format.name == "AV1";
+        });
+        TEST_CHECK(av1 != formats.end());
+        TEST_CHECK(factory->QueryCodecSupport(*av1, "L1T1").is_supported);
+        TEST_CHECK(std::find(av1->scalability_modes.begin(), av1->scalability_modes.end(),
+            webrtc::ScalabilityMode::kL1T1) != av1->scalability_modes.end());
+        TEST_CHECK(!factory->QueryCodecSupport(*av1, "L2T1").is_supported);
+    }
     std::cout << "========================================================" << std::endl;
     std::cout << "  LiveKit Native C++ SDK Backup Codecs & Multi-Codec Suite" << std::endl;
     std::cout << "========================================================" << std::endl;

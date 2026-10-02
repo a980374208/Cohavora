@@ -4,6 +4,7 @@
 #include "src/ui/app_theme.h"
 #include "src/net/session_manager.h"
 #include "src/ui/meeting_ui_integration.h"
+#include "tests/runtime/probes/b_file_product_runtime.h"
 #include "crl/crl.h"
 #include "rpl/rpl.h"
 #include "ui/style/style_core.h"
@@ -56,6 +57,11 @@ int main(int argc, char **argv) {
     Ui::Integration::Set(&integration);
     style::StartManager(100);
     MeetingUI::AppTheme::install(app);
+    if (args.contains(QStringLiteral("--b-file-runtime"))) {
+        const auto result = RunBAcceptanceFile(app);
+        style::StopManager();
+        return result;
+    }
     std::unique_ptr<OpenMeeting::SessionManager,
         decltype(&OpenMeeting::SessionManagerTestAccess::destroy)> session(
             OpenMeeting::SessionManagerTestAccess::create(settingsPath),

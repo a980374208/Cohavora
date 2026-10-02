@@ -425,6 +425,11 @@ private:
         std::function<void(uint64_t)> before_native_event_commit;
         std::function<void(uint64_t)> before_republish_listener_delivery;
         std::function<void(bool)> on_remote_track_duplicate;
+        // Opt-in, read-only timing after the complete native video callback.
+        // A probe must own its state and must not block or access Qt here.
+        std::function<void(std::chrono::nanoseconds)> on_native_video_callback_duration;
+        std::function<void(std::chrono::nanoseconds, std::chrono::nanoseconds)>
+            on_native_video_callback_phase_durations;
     };
     std::shared_ptr<ConnectAttemptTestHooks> connect_attempt_test_hooks_;
     struct StreamDeliveryTestHooks {
@@ -490,7 +495,8 @@ private:
     void BeforeNativeEventCommit(uint64_t generation);
     std::shared_ptr<webrtc::PeerConnectionObserver> CreatePeerConnectionObserver(int pc_type, uint64_t generation);
     static void InitializePeerConnectionCapabilities(
-        webrtc::PeerConnectionInterface* publisher, bool single_pc_mode);
+        webrtc::PeerConnectionInterface* publisher, bool single_pc_mode,
+        bool video_enabled = true);
     std::shared_ptr<webrtc::DataChannelObserver> CreateDataChannelObserver(
         bool reliable,
         uint64_t generation,

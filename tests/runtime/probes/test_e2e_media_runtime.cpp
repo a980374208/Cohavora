@@ -16,6 +16,7 @@
 #include <asio.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -53,6 +54,8 @@ struct Config {
     std::string codec = "vp8";
     std::string expected_codec;
     std::string receiver_publish_codec;
+    std::string lifecycle_probe = "none";
+    std::string expected_recovery_codec;
     std::string source = "camera";
     std::string scalability_mode;
     std::string backup_codec;
@@ -68,6 +71,9 @@ struct Config {
     int announcement_lead_ms = 150;
     int marker_repeat_frames = 5;
     bool shared_clock_ground_truth = false;
+    // Optional, actual peer clock exchanges over loopback for same-host runs.
+    // Media, announcements and media acknowledgements still traverse the SFU.
+    int clock_loopback_port = 0;
 };
 
 std::string Lower(std::string value) {
@@ -115,6 +121,8 @@ void Usage(const char* executable) {
         << " [--phase-id <id>] [--codec auto|vp8|h264|vp9|av1]"
         << " [--expected-codec vp8|h264|vp9|av1]"
         << " [--receiver-publish-codec vp8|h264|vp9|av1]"
+        << " [--lifecycle-probe none|cleanup|republish|signal-reconnect|full-reconnect|server-reconnect|negative]"
+        << " [--expected-recovery-codec vp8|h264|vp9|av1]"
         << " [--source camera|screen] [--scalability-mode <mode>]"
         << " [--backup-codec none|vp8|h264]"
         << " [--backup-policy prefer-regression|simulcast|regression]"
@@ -125,6 +133,7 @@ void Usage(const char* executable) {
         << " [--announcement-lead-ms <50..2000>]"
         << " [--marker-repeat-frames <1..30>]"
         << " [--shared-clock-ground-truth true|false]\n"
+        << " [--clock-loopback-port <1024..65534>]\n"
         << "Run the receiver first with the same matrix settings. Tokens are"
         << " never printed. The shared-clock option is valid only for two"
         << " processes on the same Windows host. This target is opt-in and is"
@@ -178,6 +187,8 @@ std::optional<Config> Parse(int argc, char** argv) {
         else if (argument == "--codec") config.codec = Lower(value);
         else if (argument == "--expected-codec") config.expected_codec = Lower(value);
         else if (argument == "--receiver-publish-codec") config.receiver_publish_codec = Lower(value);
+        else if (argument == "--lifecycle-probe") config.lifecycle_probe = Lower(value);
+        else if (argument == "--expected-recovery-codec") config.expected_recovery_codec = Lower(value);
         else if (argument == "--source") config.source = Lower(value);
         else if (argument == "--scalability-mode") config.scalability_mode = value;
         else if (argument == "--backup-codec") {
@@ -235,6 +246,10 @@ std::optional<Config> Parse(int argc, char** argv) {
             const auto parsed = ParseBool(value);
             if (!parsed) return std::nullopt;
             config.shared_clock_ground_truth = *parsed;
+        } else if (argument == "--clock-loopback-port") {
+            const auto parsed = ParseInt(value);
+            if (!parsed || *parsed < 1024 || *parsed > 65534) return std::nullopt;
+            config.clock_loopback_port = *parsed;
         } else {
             return std::nullopt;
         }
@@ -249,7 +264,8 @@ std::optional<Config> Parse(int argc, char** argv) {
         const char* value = std::getenv(token_env.c_str());
         if (value) config.token = value;
     }
-    if (config.url.empty() || config.token.empty() || config.session_id.empty() ||
+    if ((config.clock_loopback_port && !config.shared_clock_ground_truth) ||
+        config.url.empty() || config.token.empty() || config.session_id.empty() ||
         config.local_peer_id.empty() || config.remote_peer_id.empty() ||
         config.local_peer_id == config.remote_peer_id || config.phase_id.empty() ||
         (config.codec != "auto" && config.codec != "vp8" &&
@@ -262,6 +278,13 @@ std::optional<Config> Parse(int argc, char** argv) {
          (config.role != Role::Receiver ||
           (config.receiver_publish_codec != "vp8" && config.receiver_publish_codec != "h264" &&
            config.receiver_publish_codec != "vp9" && config.receiver_publish_codec != "av1"))) ||
+        (config.lifecycle_probe != "none" && config.lifecycle_probe != "cleanup" &&
+         config.lifecycle_probe != "republish" && config.lifecycle_probe != "signal-reconnect" &&
+         config.lifecycle_probe != "full-reconnect" && config.lifecycle_probe != "server-reconnect" &&
+         config.lifecycle_probe != "negative") ||
+        (!config.expected_recovery_codec.empty() && config.expected_recovery_codec != "vp8" &&
+         config.expected_recovery_codec != "h264" && config.expected_recovery_codec != "vp9" &&
+         config.expected_recovery_codec != "av1") ||
         (config.source != "camera" && config.source != "screen") ||
         (!config.backup_codec.empty() && config.backup_codec != "vp8" &&
          config.backup_codec != "h264") ||
@@ -441,12 +464,54 @@ public:
         : io_(io), strand_(asio::make_strand(io)), config_(std::move(config)),
           room_(livekit::Room::Create(strand_)),
           measurement_(MakeMeasurementSession(config_)), deadline_(strand_),
-          capability_timer_(strand_), finish_timer_(strand_) {}
+          capability_timer_(strand_), finish_timer_(strand_), clock_socket_(strand_) {}
 
     void Start() {
+        room_->SetLogHandler([role = config_.role, lifecycle = config_.lifecycle_probe != "none"](const std::string& category,
+                const std::string& tag, const std::string&) {
+            // Only fixed event names cross the diagnostic boundary.
+            if ((category == "SIGNAL" && tag == "QUALITY_UPDATE") ||
+                (category == "DYNACAST" &&
+                    (tag == "LAYER_UPDATE" || tag == "LAYER_UPDATE_FAILED"))) {
+                std::cout << "E2E_DYNACAST role="
+                          << (role == Role::Publisher ? "publisher" : "receiver")
+                          << " event=" << tag << '\n';
+            }
+            if (lifecycle && (category == "TRACK" || category == "WEBRTC") &&
+                (tag == "REMOTE_ADDED" || tag == "REMOTE_REMOVED" ||
+                 tag == "FLUSH_PENDING" || tag == "ON_TRACK" ||
+                 tag == "ON_TRACK_IGNORE" || tag == "ON_TRACK_DUPLICATE" ||
+                 tag == "LOCAL_UNPUBLISHED")) {
+                std::cout << "E2E_TRACK_EVENT role="
+                          << (role == Role::Publisher ? "publisher" : "receiver")
+                          << " event=" << tag << std::endl;
+            }
+            if (lifecycle && category == "ERROR" &&
+                (tag == "OFFER_FAIL" || tag == "LOCAL_DESC_FAIL" || tag == "PUB_REMOTE_ERR")) {
+                std::cout << "E2E_NEGOTIATION_FAILURE role="
+                          << (role == Role::Publisher ? "publisher" : "receiver")
+                          << " event=" << tag << std::endl;
+            }
+        });
+        if (config_.clock_loopback_port) {
+            using asio::ip::udp;
+            std::error_code error;
+            clock_socket_.open(udp::v4(), error);
+            if (!error) {
+                const auto port = config_.clock_loopback_port +
+                    (config_.role == Role::Publisher ? 1 : 0);
+                clock_socket_.bind(udp::endpoint(asio::ip::address_v4::loopback(),
+                    static_cast<unsigned short>(port)), error);
+            }
+            if (error) {
+                Finish(false, "clock_loopback_bind_failed");
+                return;
+            }
+            ReceiveLoopbackClock();
+        }
         room_->AddListener(shared_from_this());
         const auto timeout = std::chrono::seconds(
-            30 + static_cast<int>(config_.probes) *
+            30 + (config_.lifecycle_probe == "server-reconnect" ? 40 : 0) + static_cast<int>(config_.probes) *
                 (config_.probe_timeout_ms / 1000 + 2));
         deadline_.expires_after(timeout);
         deadline_.async_wait([self = shared_from_this()](const std::error_code& error) {
@@ -466,6 +531,22 @@ public:
                 try {
                     co_await self->room_->ConnectAsync(
                         self->config_.url, self->config_.token, options);
+                } catch (const livekit::OperationError& error) {
+                    const std::set<std::string_view> known_stages{
+                        "connect_signal", "connect_validate", "create_publisher_pc",
+                        "create_subscriber_pc", "initialize_webrtc", "advertise_video_receive",
+                        "negotiate_publisher", "publisher_negotiation", "signal_join",
+                        "set_publisher_remote_answer", "connect_commit"};
+                    const auto detail = Lower(error.what());
+                    const auto reason = detail.find("codec") != std::string::npos
+                        ? "codec_negotiation_rejected" : detail.find("parse") != std::string::npos
+                        ? "sdp_parse_rejected" : "other";
+                    std::cout << "E2E_CONNECT_FAILURE code=" << static_cast<int>(error.code())
+                              << " operation=" << static_cast<int>(error.operation())
+                              << " stage=" << (known_stages.contains(error.stage()) ? error.stage() : "other")
+                              << " reason=" << reason
+                              << std::endl;
+                    self->Finish(false, "connect_failed");
                 } catch (const std::exception&) {
                     self->Finish(false, "connect_failed");
                 }
@@ -500,14 +581,39 @@ public:
     void OnParticipantDisconnected(
             std::shared_ptr<livekit::RemoteParticipant> participant) override {
         if (!participant || participant->identity() != config_.remote_peer_id) return;
-        PostPeerLeft();
+        PostPeerLeft(true);
+    }
+
+    void OnReconnecting() override {
+        asio::post(strand_, [self = shared_from_this()] {
+            self->connected_ = false;
+            ++self->reconnecting_events_;
+            if (self->config_.role == Role::Receiver && self->config_.lifecycle_probe == "server-reconnect") {
+                std::cout << "E2E_BEFORE_RECOVERY role=receiver decoded_frames=" << self->decoded_frames_
+                          << " decoded_receiver_codecs=" << Join(std::vector<std::string>(
+                              self->receiver_decoded_codecs_.begin(), self->receiver_decoded_codecs_.end()))
+                          << std::endl;
+                ++self->receiver_media_epoch_;
+                self->receiver_codecs_.clear();
+                self->receiver_decoded_codecs_.clear();
+            }
+        });
+    }
+
+    void OnReconnected() override {
+        asio::post(strand_, [self = shared_from_this()] {
+            self->connected_ = true;
+            ++self->reconnected_events_;
+            self->SendCapabilities();
+        });
     }
 
     void OnLocalTrackRepublished(
             const std::string&,
-            std::shared_ptr<livekit::TrackPublication>) override {
-        asio::post(strand_, [self = shared_from_this()] {
+            std::shared_ptr<livekit::TrackPublication> publication) override {
+        asio::post(strand_, [self = shared_from_this(), publication = std::move(publication)] {
             ++self->republish_events_;
+            if (publication) self->published_track_id_ = publication->sid();
         });
     }
 
@@ -534,6 +640,12 @@ public:
         asio::post(strand_, [self = shared_from_this(), track = std::move(track),
                              publication = std::move(publication)] {
             const auto track_id = track->sid();
+            if (self->config_.lifecycle_probe != "none") {
+                std::cout << "E2E_SUBSCRIPTION event=subscribed sid_changed="
+                          << (self->last_subscribed_sid_.empty() || self->last_subscribed_sid_ == track_id
+                              ? "false" : "true") << std::endl;
+                self->last_subscribed_sid_ = track_id;
+            }
             self->remote_publication_ =
                 std::dynamic_pointer_cast<livekit::RemoteTrackPublication>(publication);
             if (!self->remote_publication_) {
@@ -557,6 +669,42 @@ public:
                     }
                 });
             self->subscriptions_.push_back(std::move(subscription));
+            if (!self->receiver_stats_started_) {
+                self->receiver_stats_started_ = true;
+                asio::co_spawn(self->strand_, [self]() -> asio::awaitable<void> {
+                    while (!self->finished_) {
+                        if (!self->connected_ && self->config_.lifecycle_probe == "server-reconnect") {
+                            co_await self->Delay(100ms);
+                            continue;
+                        }
+                        try {
+                            const auto epoch = self->receiver_media_epoch_;
+                            const auto report = co_await self->room_->GetStats();
+                            if (epoch != self->receiver_media_epoch_) continue;
+                            for (const auto& peer : report.reports) {
+                                for (const auto& stream : peer.inbound_rtp) {
+                                    if (!stream.kind_available || stream.kind != "video" ||
+                                        !stream.packets_received_available || stream.packets_received == 0)
+                                        continue;
+                                    for (const auto& codec : peer.codecs) {
+                                        if (stream.codec_id_available && codec.id == stream.codec_id &&
+                                            codec.mime_type_available) {
+                                            for (const std::string name : {"vp8", "h264", "vp9", "av1"}) {
+                                                if (CodecMatches(codec.mime_type, name)) {
+                                                    self->receiver_codecs_.insert(name);
+                                                    if (stream.frames_decoded_available && stream.frames_decoded > 0)
+                                                        self->receiver_decoded_codecs_.insert(name);
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (const std::exception&) { }
+                        if (!self->finished_) co_await self->Delay(500ms);
+                    }
+                }, asio::detached);
+            }
         });
     }
 
@@ -567,6 +715,9 @@ public:
         if (!track) return;
         const auto track_id = track->sid();
         asio::post(strand_, [self = shared_from_this(), track_id] {
+            if (self->config_.lifecycle_probe != "none")
+                std::cout << "E2E_SUBSCRIPTION event=unsubscribed current_sid="
+                          << (track_id == self->last_subscribed_sid_ ? "true" : "false") << std::endl;
             self->measurement_.CancelMediaTrack(track_id);
             self->remote_publication_.reset();
         });
@@ -592,7 +743,7 @@ public:
                     return;
                 }
                 ++self->acks_sent_;
-                if (self->acks_sent_ == self->config_.probes) {
+                if (self->acks_sent_ == self->config_.probes && self->config_.lifecycle_probe == "none") {
                     self->Finish(true, "receiver_all_media_acks_sent");
                 }
             });
@@ -629,9 +780,13 @@ private:
         std::uint32_t frame_height_ = 0;
     };
 
-    void PostPeerLeft() {
-        asio::post(strand_, [self = shared_from_this()] {
+    void PostPeerLeft(bool participant_departure = false) {
+        asio::post(strand_, [self = shared_from_this(), participant_departure] {
             if (self->finished_) return;
+            if (participant_departure && self->config_.role == Role::Receiver &&
+                (self->config_.lifecycle_probe == "full-reconnect" ||
+                 self->config_.lifecycle_probe == "server-reconnect") &&
+                self->acks_sent_ < self->config_.probes) return;
             const bool complete = self->config_.role == Role::Receiver &&
                 self->acks_sent_ == self->config_.probes;
             self->Finish(complete, complete ? "receiver_complete" :
@@ -676,6 +831,48 @@ private:
         return room_->PublishDataPacket(packet, true);
     }
 
+    bool SendClockBytes(std::string_view bytes) {
+        if (!config_.clock_loopback_port) return SendBytes(bytes);
+        auto payload = std::make_shared<std::string>(bytes);
+        const auto port = config_.clock_loopback_port +
+            (config_.role == Role::Receiver ? 1 : 0);
+        clock_socket_.async_send_to(asio::buffer(*payload),
+            asio::ip::udp::endpoint(asio::ip::address_v4::loopback(),
+                static_cast<unsigned short>(port)),
+            [self = shared_from_this(), payload](const std::error_code& error, std::size_t) {
+                if (error && !self->finished_)
+                    self->Finish(false, "clock_loopback_send_failed");
+            });
+        return true;
+    }
+
+    void ReceiveLoopbackClock() {
+        clock_socket_.async_receive_from(asio::buffer(clock_buffer_), clock_sender_,
+            [self = shared_from_this()](const std::error_code& error, std::size_t size) {
+                if (self->finished_) return;
+                if (error) {
+                    self->Finish(false, "clock_loopback_receive_failed");
+                    return;
+                }
+                const auto received_us = NowUs();
+                const auto expected_port = self->config_.clock_loopback_port +
+                    (self->config_.role == Role::Receiver ? 1 : 0);
+                if (self->clock_sender_.address().is_loopback() &&
+                    self->clock_sender_.port() == expected_port) {
+                    const std::string_view bytes(self->clock_buffer_.data(), size);
+                    const auto message = livekit::telemetry::DecodeE2eMessage(
+                        livekit::telemetry::kE2eMeasurementTopic, bytes);
+                    using Kind = livekit::telemetry::E2eMessageKind;
+                    if (message && (message->kind == Kind::ClockRequest ||
+                                    message->kind == Kind::ClockResponse)) {
+                        // The normal session validator checks peer/session/nonce/sequence.
+                        self->HandleMessage(bytes, received_us);
+                    }
+                }
+                self->ReceiveLoopbackClock();
+            });
+    }
+
     void HandleMessage(std::string_view bytes, std::int64_t received_us) {
         const auto message = livekit::telemetry::DecodeE2eMessage(
             livekit::telemetry::kE2eMeasurementTopic, bytes);
@@ -690,7 +887,7 @@ private:
             auto response = measurement_.AnswerClockProbe(*message, received_us, NowUs());
             if (response.accepted() && response.message) {
                 if (const auto encoded = livekit::telemetry::EncodeE2eMessage(
-                        *response.message)) SendBytes(*encoded);
+                        *response.message)) SendClockBytes(*encoded);
             }
             break;
         }
@@ -928,7 +1125,13 @@ private:
                 if (!stream.kind_available || stream.kind != "video") continue;
                 if (stream.codec_id_available) {
                     const auto name = codec_name(stream.codec_id);
-                    if (!name.empty()) codecs.insert(name);
+                    if (!name.empty() && stream.packets_sent_available && stream.packets_sent > 0)
+                        codecs.insert(name);
+                    if (name == "vp8" || name == "h264" || name == "vp9" || name == "av1") {
+                        std::cout << "E2E_SENDER codec=" << name
+                                  << " encoded_frames=" << stream.frames_encoded
+                                  << " sent_packets=" << stream.packets_sent << '\n';
+                    }
                 }
                 if (stream.encoder_implementation_available &&
                     !stream.encoder_implementation.empty()) {
@@ -983,9 +1186,62 @@ private:
         }
     }
 
+    livekit::PublisherMediaObjectCounts PrintMediaObjects(std::string_view stage) {
+        const auto counts = room_->GetPublisherMediaObjectCounts();
+        const auto participant = room_->local_participant();
+        std::cout << "E2E_OBJECTS stage=" << stage
+                  << " senders_with_track=" << counts.senders_with_track
+                  << " senders_without_track=" << counts.senders_without_track
+                  << " transceivers=" << counts.transceivers
+                  << " local_publications=" << (participant ? participant->tracks().size() : 0)
+                  << std::endl;
+        return counts;
+    }
+
+    asio::awaitable<void> RunExpectedPublishFailure() {
+        const auto before = PrintMediaObjects("negative_baseline");
+        video_source_ = std::make_shared<livekit::VideoSource>(config_.width, config_.height);
+        auto options = RequestedVideoOptions();
+        auto track = livekit::LocalVideoTrack::createLocalVideoTrack(
+            "e2e-negative-publication", video_source_, options.source, options);
+        bool rejected = false;
+        try {
+            co_await room_->local_participant()->PublishTrackAsync(track);
+        } catch (const livekit::OperationError& error) {
+            rejected = true;
+            std::cout << "E2E_NEGATIVE operation_error=true code=" << static_cast<int>(error.code())
+                      << " operation=" << static_cast<int>(error.operation())
+                      << " stage=" << (error.stage() == "resolve_publish_plan" ? "resolve_publish_plan" : "other")
+                      << std::endl;
+        }
+        const auto after = PrintMediaObjects("negative_after");
+        const auto local = room_->local_participant();
+        const bool clean = after.senders_with_track == before.senders_with_track &&
+            local && local->tracks().empty();
+        std::cout << "E2E_NEGATIVE rejected=" << (rejected ? "true" : "false")
+                  << " clean=" << (clean ? "true" : "false") << std::endl;
+        // The outer negative-case verifier expects the real SDK failure and
+        // independently checks that no sender/publication side effect remains.
+        Finish(false, rejected && clean ? "expected_publish_rejection" : "negative_gate_failed");
+    }
+
     asio::awaitable<void> RunPublisher() {
         std::string stage = "resolve_plan";
         try {
+            if (config_.lifecycle_probe != "none") {
+                std::set<std::string> codecs;
+                for (const auto& mime : room_->enabled_publish_codecs())
+                    for (const std::string name : {"vp8", "h264", "vp9", "av1"})
+                        if (CodecMatches(mime, name)) codecs.insert(name);
+                std::cout << "E2E_SERVER_POLICY video_codecs=" << (codecs.empty() ? "none" :
+                    Join(std::vector<std::string>(codecs.begin(), codecs.end()))) << std::endl;
+            }
+            if (config_.lifecycle_probe == "negative") {
+                co_await RunExpectedPublishFailure();
+                co_return;
+            }
+            const auto baseline = config_.lifecycle_probe == "none"
+                ? livekit::PublisherMediaObjectCounts{} : PrintMediaObjects("baseline");
             const auto plan = ResolveRequestedPlan();
             if (!plan.ok()) {
                 Finish(false, "publish_plan_unavailable");
@@ -1026,7 +1282,7 @@ private:
             auto track = livekit::LocalVideoTrack::createLocalVideoTrack(
                 "e2e-controlled-marker", video_source_,
                 options.source, options);
-            const auto publication_started_us = NowUs();
+            auto publication_started_us = NowUs();
             stage = "publish_track";
             const auto publication = co_await participant->PublishTrackAsync(track);
             if (!publication || publication->sid().empty()) {
@@ -1034,6 +1290,97 @@ private:
                 co_return;
             }
             published_track_id_ = publication->sid();
+            std::cout << "E2E_PUBLICATION role=publisher committed=true\n";
+
+            if (config_.lifecycle_probe != "none") {
+                const auto active = PrintMediaObjects("published");
+                auto expected_senders = plan.effective.simulcast_codecs.size();
+                if (active.senders_with_track != baseline.senders_with_track + expected_senders ||
+                    participant->tracks().size() != 1) {
+                    Finish(false, "publisher_object_count_mismatch");
+                    co_return;
+                }
+                co_await SendNeutralFrames(60);
+                const auto old_sid = published_track_id_;
+                if (config_.lifecycle_probe == "republish") {
+                    stage = "manual_republish";
+                    co_await participant->UnpublishTrackAsync(old_sid);
+                    if (PrintMediaObjects("unpublished").senders_with_track != baseline.senders_with_track ||
+                        !participant->tracks().empty()) {
+                        Finish(false, "republish_cleanup_failed");
+                        co_return;
+                    }
+                    publication_started_us = NowUs();
+                    auto replacement = co_await participant->PublishTrackAsync(track);
+                    if (!replacement || replacement->sid().empty() || replacement->sid() == old_sid) {
+                        Finish(false, "republish_identity_failed");
+                        co_return;
+                    }
+                    published_track_id_ = replacement->sid();
+                    ++manual_republish_events_;
+                } else if (config_.lifecycle_probe == "signal-reconnect" ||
+                           config_.lifecycle_probe == "full-reconnect" ||
+                           config_.lifecycle_probe == "server-reconnect") {
+                    stage = "session_reconnect";
+                    const bool external = config_.lifecycle_probe == "server-reconnect";
+                    const bool full = config_.lifecycle_probe != "signal-reconnect";
+                    if (full) publication_started_us = NowUs();
+                    if (external) {
+                        if (!co_await CollectPublisherStats()) {
+                            Finish(false, "initial_media_before_recovery_failed");
+                            co_return;
+                        }
+                        std::cout << "E2E_BEFORE_RECOVERY role=publisher requested_codec=" << resolved_requested_codec_
+                                  << " effective_codec=" << resolved_effective_codec_
+                                  << " observed_codecs=" << Join(observed_codecs_)
+                                  << " sent_packets=" << sent_packets_ << std::endl;
+                        std::cout << "E2E_LIFECYCLE_READY event=server_reconnect" << std::endl;
+                    } else {
+                        co_await room_->SimulateScenarioAsync(full ? livekit::SimulateScenarioType::FullReconnect
+                                                                  : livekit::SimulateScenarioType::SignalReconnect);
+                    }
+                    const auto recovery_deadline = Clock::now() + (external ? 40s : 20s);
+                    while (!finished_ && Clock::now() < recovery_deadline &&
+                           (reconnected_events_ == 0 || (full && republish_events_ == 0))) {
+                        Capture(MakeFrame());
+                        co_await Delay(100ms);
+                    }
+                    if (finished_) co_return;
+                    if (reconnecting_events_ != 1 || reconnected_events_ != 1 ||
+                        (full && (republish_events_ != 1 || old_sid == published_track_id_)) ||
+                        (!full && (republish_events_ != 0 || old_sid != published_track_id_))) {
+                        Finish(false, "reconnect_lifecycle_failed");
+                        co_return;
+                    }
+                    if (external) {
+                        const auto recovery_plan = ResolveRequestedPlan();
+                        if (!recovery_plan.ok() || config_.expected_recovery_codec.empty() ||
+                            recovery_plan.effective_codec != config_.expected_recovery_codec ||
+                            track->requested_publish_options().video_codec != config_.codec) {
+                            Finish(false, "recovery_publish_policy_failed");
+                            co_return;
+                        }
+                        resolved_requested_codec_ = recovery_plan.requested_codec;
+                        resolved_effective_codec_ = recovery_plan.effective_codec;
+                        fallback_reason_ = recovery_plan.fallback_reason;
+                        expected_senders = recovery_plan.effective.simulcast_codecs.size();
+                        resolved_mode_ = !recovery_plan.effective.scalability_mode.empty() ? "svc" :
+                            (recovery_plan.effective.simulcast && recovery_plan.effective.layers.size() > 1
+                                ? "simulcast" : "single");
+                        std::cout << "E2E_RECOVERY_PLAN requested_codec=" << resolved_requested_codec_
+                                  << " effective_codec=" << resolved_effective_codec_
+                                  << " requested_track_codec=" << track->requested_publish_options().video_codec
+                                  << " sid_changed=true" << std::endl;
+                    }
+                }
+                const auto current = room_->local_participant();
+                if (!current || current->tracks().size() != 1 ||
+                    PrintMediaObjects("ready_for_media").senders_with_track !=
+                        baseline.senders_with_track + expected_senders) {
+                    Finish(false, "recovery_object_count_mismatch");
+                    co_return;
+                }
+            }
 
             // Flow RTP during clock warm-up and allow the receiver's real
             // RemoteTrackPublication quality request to settle.
@@ -1044,7 +1391,7 @@ private:
                     nonce, next_sequence_++, NowUs());
                 if (request.accepted() && request.message) {
                     if (const auto encoded = livekit::telemetry::EncodeE2eMessage(
-                            *request.message)) SendBytes(*encoded);
+                            *request.message)) SendClockBytes(*encoded);
                 }
                 co_await SendNeutralFrames(8);
             }
@@ -1126,7 +1473,15 @@ private:
             stage = "publisher_stats";
             const bool stats_complete = co_await CollectPublisherStats();
             PrintPublisherSummary();
-            const bool complete = acknowledged_probes_.size() == config_.probes &&
+            bool clean = true;
+            if (config_.lifecycle_probe != "none") {
+                stage = "final_unpublish";
+                const auto current = room_->local_participant();
+                co_await current->UnpublishTrackAsync(published_track_id_);
+                const auto after = PrintMediaObjects("final_cleanup");
+                clean = after.senders_with_track == baseline.senders_with_track && current->tracks().empty();
+            }
+            const bool complete = clean && acknowledged_probes_.size() == config_.probes &&
                 clock_valid_measurements_ == config_.probes &&
                 stats_complete &&
                 (!config_.shared_clock_ground_truth ||
@@ -1135,8 +1490,14 @@ private:
             Finish(complete, complete ? "publisher_matrix_complete" :
                 "publisher_matrix_incomplete");
         } catch (const livekit::OperationError& error) {
+            const std::set<std::string_view> known_stages{
+                "install_sender", "apply_join_codec_policy", "install_backup_sender",
+                "apply_backup_codec_policy", "apply_scalability_mode",
+                "negotiate_publisher", "publish_track", "wait_track_published"};
             std::cout << "E2E_FAILURE role=publisher phase_id=" << config_.phase_id
                       << " stage=" << stage
+                      << " operation_stage=" << (known_stages.contains(error.stage())
+                            ? error.stage() : "other")
                       << " operation=" << static_cast<int>(error.operation())
                       << " code=" << static_cast<int>(error.code()) << '\n';
             Finish(false, "publisher_operation_failed");
@@ -1230,6 +1591,9 @@ private:
                   << " sent_packets=" << sent_packets_
                   << " connection_events=" << connection_events_
                   << " republish_events=" << republish_events_
+                  << " manual_republish_events=" << manual_republish_events_
+                  << " reconnecting_events=" << reconnecting_events_
+                  << " reconnected_events=" << reconnected_events_
                   << " reconnect_state=" << (republish_events_ > 0
                         ? "republished" : "not_observed")
                   << " source_width=" << config_.width
@@ -1273,6 +1637,7 @@ private:
 
     void PrintReceiverSummary() const {
         std::cout << "E2E_SUMMARY role=receiver"
+                  << " connection_events=" << connection_events_
                   << " phase_id=" << config_.phase_id
                   << " codec=" << config_.codec
                   << " source=" << config_.source
@@ -1282,6 +1647,10 @@ private:
                   << " probe_announcements=" << probe_announcements_accepted_
                   << " announcement_duplicates=" << probe_announcement_duplicates_
                   << " decoded_frames=" << decoded_frames_
+                  << " actual_receiver_codecs=" << (receiver_codecs_.empty() ? "none" :
+                        Join(std::vector<std::string>(receiver_codecs_.begin(), receiver_codecs_.end())))
+                  << " decoded_receiver_codecs=" << (receiver_decoded_codecs_.empty() ? "none" :
+                        Join(std::vector<std::string>(receiver_decoded_codecs_.begin(), receiver_decoded_codecs_.end())))
                   << " first_frame_detected=" << (decoded_frames_ > 0 ? "true" : "false")
                   << " local_publish_codec=" << (config_.receiver_publish_codec.empty()
                         ? "none" : config_.receiver_publish_codec)
@@ -1312,6 +1681,7 @@ private:
         std::error_code ignored;
         deadline_.cancel(ignored);
         capability_timer_.cancel(ignored);
+        clock_socket_.close(ignored);
         finish_timer_.expires_after(success ? 1000ms : 0ms);
         finish_timer_.async_wait([self = shared_from_this()](const std::error_code&) {
             self->room_->Disconnect();
@@ -1327,8 +1697,12 @@ private:
     asio::steady_timer deadline_;
     asio::steady_timer capability_timer_;
     asio::steady_timer finish_timer_;
+    asio::ip::udp::socket clock_socket_;
+    asio::ip::udp::endpoint clock_sender_;
+    std::array<char, 4096> clock_buffer_{};
     std::vector<livekit::Track::I420VideoFrameSubscription> subscriptions_;
     std::shared_ptr<livekit::RemoteTrackPublication> remote_publication_;
+    std::string last_subscribed_sid_;
     std::shared_ptr<livekit::VideoSource> video_source_;
     std::string published_track_id_;
     std::unordered_map<std::uint64_t, ProbeRecord> outgoing_probes_;
@@ -1337,6 +1711,8 @@ private:
     std::vector<std::int64_t> e2e02_error_us_, e2e03_error_us_;
     std::vector<std::int64_t> received_widths_, received_heights_;
     std::vector<std::string> observed_codecs_;
+    std::set<std::string> receiver_codecs_;
+    std::set<std::string> receiver_decoded_codecs_;
     std::vector<std::string> observed_implementations_;
     std::vector<std::string> observed_scalability_;
     std::string resolved_requested_codec_;
@@ -1365,12 +1741,17 @@ private:
     std::uint64_t sent_packets_ = 0;
     std::size_t connection_events_ = 0;
     std::size_t republish_events_ = 0;
+    std::size_t manual_republish_events_ = 0;
+    std::size_t reconnecting_events_ = 0;
+    std::size_t reconnected_events_ = 0;
     int last_received_width_ = 0;
     int last_received_height_ = 0;
     bool connected_ = false;
     bool quality_control_accepted_ = false;
     bool publisher_started_ = false;
     bool receiver_publish_started_ = false;
+    bool receiver_stats_started_ = false;
+    std::uint64_t receiver_media_epoch_ = 0;
     bool receiver_publish_ready_ = false;
     bool receiver_uplink_verified_ = false;
     bool finished_ = false;

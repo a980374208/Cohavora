@@ -27,10 +27,14 @@ def main():
     parser.add_argument('--check-binary-only', action='store_true')
     parser.add_argument('--gdi', action='store_true')
     parser.add_argument('--collect-fps-failures', action='store_true')
+    parser.add_argument('--skip-resource-sampler', action='store_true',
+                        help='Diagnostic comparison only; excludes resource-cost acceptance')
     parser.add_argument('--soak-seconds', type=int, default=0, choices=[0, 1800])
     args = parser.parse_args()
     if args.collect_fps_failures and (not args.gdi or args.soak_seconds):
         parser.error('--collect-fps-failures is only a GDI diagnostic; FPS failures still fail the run')
+    if args.skip_resource_sampler and args.soak_seconds:
+        parser.error('controlled long resource sampling requires the resource sampler')
     if not args.check_binary_only and args.output is None:
         parser.error('--output is required for a runtime run')
 
@@ -76,6 +80,9 @@ def main():
     result = dict(status='RUNNING', started_utc=datetime.now(timezone.utc).isoformat(),
                   run_id=room, gdi=args.gdi, soak_seconds=args.soak_seconds,
                   collect_fps_failures=args.collect_fps_failures,
+                  resource_sampling=not args.skip_resource_sampler,
+                  pattern_interval_ms=env.get('LIVEKIT_TEST_PATTERN_INTERVAL_MS','10'),
+                  runner_sha256=hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                   resource_input_kind='generated_window_harness_phase_not_uia',
                   binary_sha256=binary_identity['binary_sha256'],
                   binary_identity=binary_identity,
@@ -83,6 +90,8 @@ def main():
                   inputs={p: hashlib.sha256(Path(p).read_bytes()).hexdigest() for p in [
                       'src/core/room.cpp', 'src/core/screen_share_session.cpp', 'src/media/desktop_capture.cpp',
                       'src/core/local_video_track.cpp', 'src/rtc/webrtc_manager.cpp',
+                      'src/media/desktop_capture.h', 'src/media/screen_share_quality.h',
+                      'src/media/screen_capture_fallback.h',
                       'tests/runtime/probes/test_screen_share_runtime.cpp']})
     manifest = args.output / 'summary.json'
     manifest.write_text(json.dumps(result, indent=2), encoding='utf-8')
@@ -103,7 +112,7 @@ def main():
             stream.write(json.dumps(dict(run_id=room, pid=child.pid, cycle=0,
                 operation_id='quality-runtime', action='generated_window_quality', phase=value)) + '\n')
     phase('starting')
-    sampler = subprocess.Popen(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+    sampler = None if args.skip_resource_sampler else subprocess.Popen(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
         '-File', 'tests/runtime/tools/product_acceptance/product_pilot_resources.ps1', '-UiaDirectory', str(args.output.resolve()),
         '-Destination', str((args.output / 'resources.jsonl').resolve()), '-RunId', room,
         '-MaximumSeconds', str(args.soak_seconds + 720)], stdout=subprocess.DEVNULL,
@@ -140,9 +149,10 @@ def main():
     finally:
         if child.poll() is None: child.kill(); child.wait(timeout=10)
         child.stdout.close()
-        try: sampler.wait(timeout=15)
-        except subprocess.TimeoutExpired: sampler.terminate(); sampler.wait(timeout=10)
-        result['resource_sampler_exit'] = sampler.returncode
+        if sampler:
+            try: sampler.wait(timeout=15)
+            except subprocess.TimeoutExpired: sampler.terminate(); sampler.wait(timeout=10)
+        result['resource_sampler_exit'] = sampler.returncode if sampler else None
     result['exit_code'] = child.returncode
     result['binary_sha256_after'] = hashlib.sha256(binary.read_bytes()).hexdigest()
     result['binary_unchanged'] = result['binary_sha256_after'] == result['binary_sha256']

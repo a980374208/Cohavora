@@ -38,6 +38,17 @@ int main() {
     TEST_CHECK(deadline.Advance(start+220ms) == start+270ms);
     deadline.Reset(start+225ms,30);
     TEST_CHECK(deadline.Advance(start+230ms) == start+225ms+33333333ns);
+    // A synchronous 45 ms capture at 30 FPS must not acquire an additional
+    // 33 ms sleep after every overrun. Slow work bounds throughput naturally.
+    deadline.Reset(start, 30);
+    auto capture_start = start;
+    for (int frame = 0; frame < 20; ++frame) {
+        const auto wake = deadline.Advance(capture_start);
+        const auto capture_end = capture_start + 45ms;
+        TEST_CHECK(wake <= capture_end);
+        capture_start = std::max(wake, capture_end);
+    }
+    TEST_CHECK(capture_start == start + 900ms);
     TestScreenCaptureFallback();
     std::cout << "screen share policy, deadlines and live fallback FPS PASS\n";
 }

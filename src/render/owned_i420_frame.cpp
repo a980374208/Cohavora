@@ -1,5 +1,6 @@
 #include "owned_i420_frame.h"
 
+#include <array>
 #include <cstring>
 #include <limits>
 #include <optional>
@@ -71,6 +72,37 @@ VideoRotation ToVideoRotation(webrtc::VideoRotation rotation) {
 
 } // namespace
 
+std::shared_ptr<OwnedI420Frame::StorageBlock> OwnedI420Frame::AcquireStorage(size_t bytes) {
+    // Cache pixels, never frames, tracks or session owners. Only this producer
+    // thread can acquire a cache slot. A count of one means every published
+    // frame holding this private block has been destroyed, including frames
+    // retained by consumers through weak_ptr locks. No shared mutable frame
+    // can be overwritten. Outstanding blocks outlive the producer safely.
+    struct Cache {
+        std::array<std::shared_ptr<StorageBlock>, 8> blocks;
+        size_t bytes = 0;
+    };
+    constexpr size_t kMaximumCachedBytes = 8 * 1024 * 1024;
+    thread_local Cache cache;
+    for (const auto& block : cache.blocks)
+        if (block && block->size == bytes && block.use_count() == 1) return block;
+
+    if (bytes <= kMaximumCachedBytes) {
+        for (auto& block : cache.blocks) {
+            if (block && block.use_count() != 1) continue;
+            const auto previous = block ? block->size : 0;
+            if (cache.bytes - previous > kMaximumCachedBytes - bytes) continue;
+            auto replacement = std::make_shared<StorageBlock>(bytes);
+            block = std::move(replacement);
+            cache.bytes = cache.bytes - previous + bytes;
+            return block;
+        }
+    }
+    // Retained frames, large sizes and cache exhaustion preserve full delivery.
+    // Their storage is released with the immutable frame rather than cached.
+    return std::make_shared<StorageBlock>(bytes);
+}
+
 OwnedI420Frame::OwnedI420Frame(int width,
                                int height,
                                int chroma_width,
@@ -94,7 +126,9 @@ OwnedI420Frame::OwnedI420Frame(int width,
       rotation_(rotation),
       color_space_(color_space),
       render_metadata_(std::move(render_metadata)),
-      storage_(y_size + u_size + u_size) {}
+      // All bytes are filled by CopyFromPlanes before the immutable frame is
+      // published. Avoid clearing a full decoder frame immediately before copy.
+      storage_(AcquireStorage(y_size + u_size + u_size)) {}
 
 OwnedI420Frame::Ptr OwnedI420Frame::CopyFrom(
         const webrtc::VideoFrame& frame,
@@ -165,19 +199,20 @@ OwnedI420Frame::Ptr OwnedI420Frame::CopyFromPlanes(int width,
                                                                        color_space,
                                                                        std::move(render_metadata)));
 
-    for (int row = 0; row < height; ++row) {
-        std::memcpy(result->storage_.data() + static_cast<size_t>(row) * result->stride_y_,
-                    data_y + static_cast<size_t>(row) * stride_y,
-                    static_cast<size_t>(width));
-    }
-    for (int row = 0; row < chroma_height; ++row) {
-        std::memcpy(result->storage_.data() + result->u_offset_ + static_cast<size_t>(row) * result->stride_u_,
-                    data_u + static_cast<size_t>(row) * stride_u,
-                    static_cast<size_t>(chroma_width));
-        std::memcpy(result->storage_.data() + result->v_offset_ + static_cast<size_t>(row) * result->stride_v_,
-                    data_v + static_cast<size_t>(row) * stride_v,
-                    static_cast<size_t>(chroma_width));
-    }
+    const auto copy_plane = [](uint8_t* destination, const uint8_t* source,
+                               int row_bytes, int rows, int source_stride) {
+        if (source_stride == row_bytes) {
+            std::memcpy(destination, source, static_cast<size_t>(row_bytes) * rows);
+        } else {
+            for (int row = 0; row < rows; ++row)
+                std::memcpy(destination + static_cast<size_t>(row) * row_bytes,
+                            source + static_cast<size_t>(row) * source_stride,
+                            static_cast<size_t>(row_bytes));
+        }
+    };
+    copy_plane(result->storage_->bytes.get(), data_y, width, height, stride_y);
+    copy_plane(result->storage_->bytes.get() + result->u_offset_, data_u, chroma_width, chroma_height, stride_u);
+    copy_plane(result->storage_->bytes.get() + result->v_offset_, data_v, chroma_width, chroma_height, stride_v);
     return result;
 }
 

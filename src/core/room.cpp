@@ -561,8 +561,8 @@ std::shared_ptr<webrtc::PeerConnectionObserver> Room::CreatePeerConnectionObserv
 }
 
 void Room::InitializePeerConnectionCapabilities(
-    webrtc::PeerConnectionInterface* publisher, bool single_pc_mode) {
-    if (!single_pc_mode) return;
+    webrtc::PeerConnectionInterface* publisher, bool single_pc_mode, bool video_enabled) {
+    if (!single_pc_mode || !video_enabled) return;
 
     // LiveKit 1.13.6's Pion MediaEngine keeps the codecs from the first video
     // m-line when MediaEngine copying is disabled. Advertise the complete
@@ -2063,8 +2063,19 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                 auto pub_res = WebRTCManager::Instance().factory()->CreatePeerConnectionOrError(config, std::move(pub_deps));
                 if (pub_res.ok()) {
                     native.publisher = pub_res.MoveValue();
+                    // An explicit audio-only allow-list cannot answer a video
+                    // capability section. The data transport must still join
+                    // so publish admission can reject video without side effects.
+                    const bool video_enabled = join_res->enabled_publish_codecs().empty() ||
+                        std::any_of(join_res->enabled_publish_codecs().begin(),
+                                    join_res->enabled_publish_codecs().end(), [](const auto& codec) {
+                            std::string mime = codec.mime();
+                            std::transform(mime.begin(), mime.end(), mime.begin(),
+                                [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+                            return mime.rfind("video/", 0) == 0;
+                        });
                     InitializePeerConnectionCapabilities(
-                        native.publisher.get(), attempt_signal->is_single_pc_mode_active());
+                        native.publisher.get(), attempt_signal->is_single_pc_mode_active(), video_enabled);
 
                     webrtc::DataChannelInit rel_init;
                     rel_init.ordered = true;
@@ -4655,9 +4666,13 @@ public:
 
     explicit NativeVideoTrackSink(
         std::function<void(Clock::time_point, render::OwnedI420Frame::Ptr)> callback,
-        MetadataFactory metadata_factory = {})
+        MetadataFactory metadata_factory = {},
+        std::function<void(std::chrono::nanoseconds)> duration_probe = {},
+        std::function<void(std::chrono::nanoseconds, std::chrono::nanoseconds)> phase_probe = {})
         : callback_(std::move(callback))
-        , metadata_factory_(std::move(metadata_factory)) {}
+        , metadata_factory_(std::move(metadata_factory))
+        , duration_probe_(std::move(duration_probe))
+        , phase_probe_(std::move(phase_probe)) {}
 
     void OnFrame(const webrtc::VideoFrame& rtc_frame) override {
         if (!callback_) return;
@@ -4668,15 +4683,25 @@ public:
         // can safely outlive the decoder buffer.
         auto metadata = metadata_factory_
             ? metadata_factory_(source_time) : render::RenderFrameMetadata{};
+        Clock::time_point copied_at{};
         if (auto frame = render::OwnedI420Frame::CopyFrom(
                 rtc_frame, std::move(metadata))) {
+            if (phase_probe_) copied_at = Clock::now();
             callback_(source_time, std::move(frame));
+        }
+        if (duration_probe_ || phase_probe_) {
+            const auto finished_at = Clock::now();
+            if (duration_probe_) duration_probe_(finished_at - source_time);
+            if (phase_probe_ && copied_at != Clock::time_point{})
+                phase_probe_(copied_at - source_time, finished_at - copied_at);
         }
     }
 
 private:
     std::function<void(Clock::time_point, render::OwnedI420Frame::Ptr)> callback_;
     MetadataFactory metadata_factory_;
+    std::function<void(std::chrono::nanoseconds)> duration_probe_;
+    std::function<void(std::chrono::nanoseconds, std::chrono::nanoseconds)> phase_probe_;
 };
 
 struct VideoFrameTelemetryGate {
@@ -5987,6 +6012,22 @@ Room::AddTrackToPublisherAsync(
                         "apply_join_codec_policy",
                         "resolved primary codec has no sender preference")));
                     return;
+                }
+                // LiveKit derives the potential upstream codecs from the
+                // primary receiver's negotiated codec list. Keep the primary
+                // first, but also advertise the resolved backup codecs here:
+                // a subscriber can bind before the backup RTP arrives and
+                // must still be able to map a later codec regression.
+                for (size_t index = 1; index < task.publish_options.simulcast_codecs.size(); ++index) {
+                    for (const auto& codec : get_prefs(task.publish_options.simulcast_codecs[index].codec)) {
+                        const auto duplicate = std::any_of(preferences.begin(), preferences.end(),
+                            [&codec](const auto& current) {
+                                return current.name == codec.name &&
+                                    current.parameters == codec.parameters &&
+                                    current.preferred_payload_type == codec.preferred_payload_type;
+                            });
+                        if (!duplicate) preferences.push_back(codec);
+                    }
                 }
                 auto codec_status = transceiver->SetCodecPreferences(preferences);
                 if (!codec_status.ok()) {
@@ -8298,6 +8339,15 @@ void Room::AttachRemoteTrackToParticipant(
                 render_telemetry_probe);
         auto render_frame_token = std::make_shared<std::atomic<std::uint64_t>>(0);
         std::weak_ptr<Room> weak_room = weak_from_this();
+        std::function<void(std::chrono::nanoseconds)> duration_probe;
+        std::function<void(std::chrono::nanoseconds, std::chrono::nanoseconds)> phase_probe;
+        {
+            std::lock_guard lock(room_mutex_);
+            if (connect_attempt_test_hooks_) {
+                duration_probe = connect_attempt_test_hooks_->on_native_video_callback_duration;
+                phase_probe = connect_attempt_test_hooks_->on_native_video_callback_phase_durations;
+            }
+        }
         auto sink = std::make_shared<NativeVideoTrackSink>(
             [r_track, has_logged, weak_room, media_binding, telemetry_probe,
              telemetry_gate, weak_telemetry, telemetry_key,
@@ -8402,7 +8452,7 @@ void Room::AttachRemoteTrackToParticipant(
                 metadata.decoded_at = decoded_at;
                 metadata.observer = render_telemetry_observer;
                 return metadata;
-            });
+            }, std::move(duration_probe), std::move(phase_probe));
         video_track->AddOrUpdateSink(sink.get(), webrtc::VideoSinkWants());
         RemoteTrackSinkBinding binding{
             track_key,
