@@ -16,6 +16,7 @@
 #include <tuple>
 
 #include "participant_event.h"
+#include "remote_control/remote_control.h"
 #include "publication_catalog.h"
 #include "video_demand_policy.h"
 #include "video_demand_types.h"
@@ -104,6 +105,7 @@ public:
         : _executorLifetime(std::move(executorLifetime))
         , _strand(context.get_executor())
         , _videoDemandTimer(_strand)
+        , _remoteControlTimer(_strand)
         , _generation(generation)
         , _localUserId(std::move(localUserId))
         , _publicationCatalog(generation)
@@ -129,6 +131,21 @@ public:
         std::lock_guard lock(_callbackMutex);
         _callbacksAccepted = false;
     }
+    template <typename F> bool postRemoteControl(F&& callback) {
+        if (_remotePending.fetch_add(1) >= 128) {
+            --_remotePending; _remoteOverflow = true; revokeRemoteControl(); return false;
+        }
+        if (!post([this, fn = std::forward<F>(callback)]() mutable {
+            --_remotePending; fn();
+        })) { --_remotePending; return false; }
+        return true;
+    }
+    bool remoteControlOverflowed() const { return _remoteOverflow.load(); }
+    uint64_t remoteControlEpoch() const { return _remoteEpoch.load(); }
+    void revokeRemoteControl() { ++_remoteEpoch; }
+    uint64_t remoteInputEpoch() const { return _remoteInputEpoch.load(); }
+    void invalidateRemoteInput() { ++_remoteInputEpoch; }
+    void clearRemoteControlOverflowOnStrand() { assertOnStrand(); _remoteOverflow = false; }
     uint64_t generation() const { return _generation; }
     const QString &localUserId() const { return _localUserId; }
     const std::shared_ptr<livekit::telemetry::SessionTelemetry> &telemetry() const {
@@ -163,6 +180,13 @@ public:
     std::shared_ptr<livekit::ScreenShareSession> &screenShareOnStrand() {
         assertOnStrand();
         return _screenShare;
+    }
+
+    std::shared_ptr<livekit::remote_control::Runtime>& remoteControlOnStrand() {
+        assertOnStrand(); return _remoteControl;
+    }
+    asio::steady_timer& remoteControlTimerOnStrand() {
+        assertOnStrand(); return _remoteControlTimer;
     }
 
     std::shared_ptr<livekit::whiteboard::Runtime> &whiteboardOnStrand() {
@@ -525,8 +549,13 @@ private:
     const std::shared_ptr<void> _executorLifetime;
     std::mutex _callbackMutex;
     bool _callbacksAccepted = true;
+    std::atomic<unsigned> _remotePending{0};
+    std::atomic<bool> _remoteOverflow{false};
+    std::atomic<uint64_t> _remoteEpoch{1};
+    std::atomic<uint64_t> _remoteInputEpoch{1};
     Strand _strand;
     asio::steady_timer _videoDemandTimer;
+    asio::steady_timer _remoteControlTimer;
     const uint64_t _generation;
     const QString _localUserId;
     livekit::PublicationCatalog _publicationCatalog;
@@ -538,6 +567,7 @@ private:
     bool _acceptingData = true;
     std::map<InboundTransferKey, InboundMediaTransfer> _inboundMediaTransfers;
     std::shared_ptr<livekit::ScreenShareSession> _screenShare;
+    std::shared_ptr<livekit::remote_control::Runtime> _remoteControl;
     std::shared_ptr<livekit::whiteboard::Runtime> _whiteboard;
     std::map<std::string, livekit::ParticipantKey> _whiteboardPeers;
     std::map<std::string, livekit::ParticipantKey> _whiteboardDepartures;

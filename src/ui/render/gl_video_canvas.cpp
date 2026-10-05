@@ -1,4 +1,5 @@
 #include "gl_video_canvas.h"
+#include "video_surface_input.h"
 #include "render/canvas_render_timing.h"
 #include "render/api/render_backend_module_info.h"
 #include <QtGui/QWindow>
@@ -276,11 +277,8 @@ protected:
     void exposeEvent(QExposeEvent*) override { if (host_) host_->requestRender(); }
     void resizeEvent(QResizeEvent*) override { if (host_) QTimer::singleShot(0, host_, [host = host_] { host->requestRender(); }); }
     bool event(QEvent* e) override {
-        if (host_) switch (e->type()) {
-        case QEvent::MouseMove: case QEvent::MouseButtonPress: case QEvent::MouseButtonRelease:
-        case QEvent::MouseButtonDblClick: case QEvent::Leave:
-            QCoreApplication::sendEvent(host_, e); setCursor(host_->cursor()); return true;
-        default: break;
+        if (ForwardVideoSurfaceInput(host_, e)) {
+            setCursor(host_->cursor()); return true;
         }
         return QWindow::event(e);
     }

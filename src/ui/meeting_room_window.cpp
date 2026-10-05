@@ -3,6 +3,7 @@
 #include "src/core/session_shutdown_service.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/meeting_room_window.h"
+#include "src/ui/remote_control_ui.h"
 #include "src/ui/whiteboard/accessible_combo_box.h"
 #include "src/ui/app_theme.h"
 #include "src/ui/whiteboard/annotation_overlay_window.h"
@@ -1150,7 +1151,7 @@ void VideoTileWidget::setupVolumeControls() {
 }
 
 void VideoTileWidget::enterEventHook(QEnterEvent *e) {
-	if (_pinBtn) _pinBtn->show();
+	if (_pinBtn && !_remoteInputEnabled) _pinBtn->show();
 	if (_volBtn) _volBtn->show();
 	Ui::RpWidget::enterEventHook(e);
 }
@@ -1283,7 +1284,7 @@ void VideoTileWidget::setPinned(bool pinned) {
 	if (_isPinned == pinned) return;
 	_isPinned = pinned;
 	MeetingUI::AppTheme::setStyleVariant(*_pinBtn, pinned ? "meeting-room-window-pinbtn-2-active" : "meeting-room-window-pinbtn-2-normal");
-	_pinBtn->setVisible(pinned || underMouse());
+	_pinBtn->setVisible(!_remoteInputEnabled && (pinned || underMouse()));
 	invalidatePresentation();
 }
 
@@ -1409,6 +1410,7 @@ void VideoTileWidget::paintCard(QPainter &p, bool decorationOnly, bool hasFrame,
 		drawAvatarPlaceholder(p, r);
 	}
 
+	if (_remoteInputEnabled && !decorationOnly) return;
 	drawBottomNameTag(p, r);
 	drawNetworkQualityBadge(p, r);
 	if (decorationOnly && (hovered || _isPinned)) {
@@ -1614,6 +1616,18 @@ void VideoTileWidget::drawVideoPlaceholder(QPainter &p, const QRect &r) {
 	}
 	p.drawText(r.adjusted(12, 0, -12, 0), Qt::AlignCenter,
 		p.fontMetrics().elidedText(label, Qt::ElideRight, std::max(0, r.width() - 24)));
+}
+
+void VideoTileWidget::setRemoteInputEnabled(bool enabled) {
+    _remoteInputEnabled = enabled;
+    if (_pinBtn) _pinBtn->setVisible(!enabled && (_isPinned || underMouse()));
+    update();
+}
+QRectF VideoTileWidget::remoteControlContentRect() {
+    std::lock_guard<std::mutex> lock(_frameMutex);
+    if (!_isVideoActive || _isVideoStreamPaused || _currentFrame.isNull()) return {};
+    const auto fitted = _currentFrame.size().scaled(size(),Qt::KeepAspectRatio);
+    return QRectF((width()-fitted.width())/2,(height()-fitted.height())/2,fitted.width(),fitted.height());
 }
 
 void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
@@ -3257,6 +3271,7 @@ MeetingRoomWindow::MeetingRoomWindow(
 }
 
 MeetingRoomWindow::~MeetingRoomWindow() {
+    _remoteControlUi.reset();
 	if (_nativeResizeFilterInstalled && qApp) qApp->removeNativeEventFilter(this);
 	if (_departureNotice) {
 		// The notice is intentionally not parented to the meeting window.  Close
@@ -4276,6 +4291,12 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
  const int sidebarW = _activeSidebar != ActiveSidebar::None && sidebar
      ? std::min(w / 2, std::max(340, sidebar->minimumSizeHint().width())) : 0;
 	const int stageW = w - sidebarW;
+    const int annotationW = _annotationButton && !_annotationButton->isHidden()
+        ? std::max(80, _annotationButton->sizeHint().width()) : 0;
+    const int controlStopW = _remoteControlStopButton && !_remoteControlStopButton->isHidden()
+        ? std::max(100, _remoteControlStopButton->sizeHint().width()) : 0;
+    if (_screenShareBanner) _screenShareBanner->setContentsMargins(136, 4,
+        12 + (annotationW ? annotationW + 8 : 0) + (controlStopW ? controlStopW + 8 : 0), 4);
 	const int shareBannerH = _screenShareBanner && !_screenShareBanner->isHidden() ? std::max(44, _screenShareBanner->heightForWidth(w)) : 0;
 	const int encryptionH = _encryptionPanel ? std::max(44, _encryptionPanel->sizeHint().height()) : 0;
 	if (_encryptionPanel) _encryptionPanel->setGeometry(0, topBarH + shareBannerH, w, encryptionH);
@@ -4283,7 +4304,7 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 	const int stageH = std::max(0, h - stageTop - bottomBarH);
 	if (_screenShareBanner) _screenShareBanner->setGeometry(0, topBarH, w, shareBannerH);
     if (_screenQualityButton && shareBannerH > 0) {
-        _screenQualityButton->setGeometry(12, 6, 116, shareBannerH - 12);
+        _screenQualityButton->setGeometry(12, (shareBannerH - 32) / 2, 116, 32);
         _screenQualityButton->raise();
     }
 	if (_annotationButton && _annotationButton->isVisible() && shareBannerH > 0) {
@@ -4298,6 +4319,11 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 			buttonHeight);
 		_annotationButton->raise();
 	}
+    if (controlStopW && shareBannerH > 0) {
+        _remoteControlStopButton->setGeometry(w - 12 - (annotationW ? annotationW + 8 : 0) - controlStopW,
+            (shareBannerH - 32) / 2, controlStopW, 32);
+        _remoteControlStopButton->raise();
+    }
 
 	_stageContainer->setGeometry(0, stageTop, stageW, stageH);
 
@@ -4714,6 +4740,40 @@ void MeetingRoomWindow::setupWhiteboardBinding() {
 	}, lifetime());
 }
 
+void MeetingRoomWindow::setupRemoteControl() {
+    if (_remoteControlUi || !_coordinator || !_stageContainer) return;
+    _remoteControlUi = std::make_unique<RemoteControlUi>(_stageContainer,_coordinator.get(),[this] {
+        std::vector<RemoteControlTarget> targets;
+        if (_whiteboardVisible || !_coordinator || _coordinator->state() != OpenMeeting::MeetingState::InMeeting) return targets;
+        for (const auto& [sid,binding] : _remoteVideoBindings) {
+            if (!binding.screen || !canRenderRemoteVideo(sid)) continue;
+            auto* tile = remoteVideoTile(sid);
+            if (!tile) continue;
+            QWidget* widget = tile;
+            QRectF content;
+            if (_usingGpuBackend.load() && _videoCanvas && _videoCanvas->isVisible()) {
+                widget = _videoCanvas;
+                content = _videoCanvas->videoContentRect(tile->renderKey().toStdString());
+            } else if (tile->isVisible()) content = tile->remoteControlContentRect();
+            targets.push_back({binding.identity,sid,tile->displayName(),widget,content});
+        }
+        return targets;
+    },[this](bool blocked) {
+        if (_annotationOverlay) _annotationOverlay->setInteractionEnabled(!blocked && _coordinator &&
+            _coordinator->state() == OpenMeeting::MeetingState::InMeeting);
+        if (_annotationButton) _annotationButton->setEnabled(!blocked && _annotationBinding.has_value());
+    },[this](const QString& status) { updateRemoteControlStatus(status); });
+    connect(_coordinator.get(),&OpenMeeting::MeetingCoordinator::remoteControlChanged,this,
+        [this](const livekit::remote_control::Projection& p) {
+            std::string key;
+            if (p.state == livekit::remote_control::State::Controlling)
+                if (auto* tile = remoteVideoTile(QString::fromStdString(p.track))) key = tile->renderKey().toStdString();
+            if (_videoCanvas) _videoCanvas->setRemoteInputKey(std::move(key));
+            for (const auto& [sid,tile] : _remoteScreenTiles) tile->setRemoteInputEnabled(
+                p.state == livekit::remote_control::State::Controlling && sid.toStdString() == p.track);
+        });
+}
+
 void MeetingRoomWindow::setupVideoPagingControls() {
 	if (_videoPagingControls || !_stageContainer) return;
 	_videoPagingControls = new QWidget(_stageContainer);
@@ -5085,6 +5145,7 @@ void MeetingRoomWindow::receiveRenderedVideoFrame(
 		const QImage& image,
 		const QString& key,
 		livekit::render::VideoRenderFrame::Ptr renderFrame) {
+    if (_remoteControlUi) _remoteControlUi->noteFrame(key);
     if (key == QStringLiteral("local")) {
         if (_config.videoEnabled) receiveLocalVideoFrame(image, std::move(renderFrame));
     } else if (_localScreenTile && key == _localScreenTile->renderKey()) {
@@ -5095,6 +5156,7 @@ void MeetingRoomWindow::receiveRenderedVideoFrame(
 }
 
 void MeetingRoomWindow::receiveGpuVideoFrame(const std::string& key, livekit::render::VideoRenderFrame::Ptr frame) {
+    if (_remoteControlUi) _remoteControlUi->noteFrame(QString::fromStdString(key));
     if (!_usingGpuBackend.load(std::memory_order_acquire) || !_videoCanvas) return;
     const auto qkey = QString::fromStdString(key);
     VideoTileWidget* tile = nullptr;
@@ -5684,11 +5746,22 @@ void MeetingRoomWindow::removeRemoteVideo(const QString &trackSid) {
 	updateVideoLayout();
 }
 
+void MeetingRoomWindow::updateRemoteControlStatus(const QString& status) {
+    if (_remoteControlStatus == status) return;
+    _remoteControlStatus = status;
+    if (!_screenShareBanner) return;
+    _screenShareBanner->setText(_screenShareText + (status.isEmpty() ? QString() : "\n" + status));
+    _remoteControlStopButton->setVisible(!status.isEmpty());
+    QResizeEvent layout(size(), size());
+    resizeEvent(&layout);
+}
+
 void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot snapshot) {
 	using State = livekit::ScreenShareState;
 	_bottomBar->setScreenShareState(snapshot.state);
 	if (!_screenShareBanner) {
 		_screenShareBanner = new QLabel(this);
+        _screenShareBanner->setObjectName(QStringLiteral("screenShareBanner"));
 		_screenShareBanner->setTextFormat(Qt::PlainText);
 		_screenShareBanner->setWordWrap(true);
 		_screenShareBanner->setAlignment(Qt::AlignCenter);
@@ -5731,6 +5804,11 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		_annotationButton->setObjectName(QStringLiteral("screenShareAnnotation"));
 		connect(_annotationButton, &QPushButton::clicked,
 			this, &MeetingRoomWindow::openAnnotationOverlay);
+        _remoteControlStopButton = new QPushButton(tr("终止控制"), _screenShareBanner);
+        _remoteControlStopButton->setObjectName(QStringLiteral("remoteControlStop"));
+        connect(_remoteControlStopButton, &QPushButton::clicked, this, [this] {
+            if (_remoteControlUi) _remoteControlUi->stop();
+        });
 	}
 	const bool active = snapshot.state == State::Active;
 	std::optional<livekit::ScreenBinding> nextBinding;
@@ -5743,12 +5821,12 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		closeAnnotationOverlay();
 	}
 	_annotationBinding = std::move(nextBinding);
-	_screenShareBanner->setText(active ? QCoreApplication::translate("MeetingUI", "Sharing: %1").arg(
+	_screenShareText = active ? QCoreApplication::translate("MeetingUI", "Sharing: %1").arg(
 		QString::fromStdString(snapshot.source_title).isEmpty() ? QCoreApplication::translate("MeetingUI", "Screen") :
 		QString::fromStdString(snapshot.source_title)) :
 		snapshot.state == State::Starting ? QCoreApplication::translate("MeetingUI", "Starting screen sharing...") :
 		snapshot.state == State::StopFailed ? QCoreApplication::translate("MeetingUI", "Capture stopped, but unpublishing failed. Try stopping sharing again.") :
-		QCoreApplication::translate("MeetingUI", "Stopping screen sharing..."));
+		QCoreApplication::translate("MeetingUI", "Stopping screen sharing...");
 	_screenShareBanner->setVisible(active || snapshot.state == State::Starting ||
 		snapshot.state == State::Stopping || snapshot.state == State::StopFailed);
     _screenQualityButton->setVisible(active);
@@ -5764,7 +5842,9 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
     default: break;
     }
     _screenQualityButton->setToolTip(qualityText);
-    if (active) _screenShareBanner->setText(_screenShareBanner->text() + "  " + qualityText);
+    if (active) _screenShareText += "  " + qualityText;
+    _screenShareBanner->setText(_screenShareText + (_remoteControlStatus.isEmpty() ? QString() : "\n" + _remoteControlStatus));
+    _remoteControlStopButton->setVisible(active && !_remoteControlStatus.isEmpty());
 	_annotationButton->setVisible(active);
 	if (active && snapshot.source_kind == livekit::DesktopSourceKind::Window) {
 		_annotationButton->setToolTip(QCoreApplication::translate(
@@ -5794,6 +5874,7 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 }
 
 void MeetingRoomWindow::openAnnotationOverlay() {
+    if (_remoteControlUi && _remoteControlUi->active()) return;
 	if (_annotationOverlay || !_annotationBinding || !_coordinator ||
 		_coordinator->state() != OpenMeeting::MeetingState::InMeeting) {
 		return;
@@ -5841,12 +5922,14 @@ void MeetingRoomWindow::closeAnnotationOverlay() {
 }
 
 void MeetingRoomWindow::setAnnotationInteractionEnabled(bool enabled) {
+    enabled = enabled && !(_remoteControlUi && _remoteControlUi->active());
     if (_screenQualityButton) _screenQualityButton->setEnabled(enabled && _coordinator && _coordinator->screenShareSnapshot().quality_status != livekit::ScreenShareQualityStatus::Degraded);
 	if (_annotationOverlay) _annotationOverlay->setInteractionEnabled(enabled);
 	if (_annotationButton) _annotationButton->setEnabled(enabled && _annotationBinding.has_value());
 }
 
 void MeetingRoomWindow::setupCoordinatorBindings() {
+    setupRemoteControl();
 	if (!_coordinator) return;
     connect(_topBar, &RoomTopBarWidget::telemetryDetailsRequested, this, [this] {
         if (_telemetryDialog) {

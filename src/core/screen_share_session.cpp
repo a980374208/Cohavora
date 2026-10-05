@@ -118,6 +118,7 @@ void ScreenShareSession::SetState(ScreenShareState state, ScreenShareError error
         snapshot_.source_title = run_->source_title;
         snapshot_.source_kind = run_->source_kind;
         snapshot_.annotation_binding = run_->annotation_binding;
+        snapshot_.track_sid = run_->track ? run_->track->sid() : std::string();
         if (state == ScreenShareState::Active) snapshot_.preview = run_->preview;
     }
     if (!closed_ && observer_) observer_(snapshot_);

@@ -1621,6 +1621,11 @@ public:
             }
         }
         if (event.kind == livekit::ParticipantEventKind::DataReceived &&
+            event.topic == livekit::remote_control::Topic) {
+            MeetingCoordinator::enqueueRemoteControlData(_session.lock(),event.data,event.sender);
+            return;
+        }
+        if (event.kind == livekit::ParticipantEventKind::DataReceived &&
             livekit::whiteboard::isWhiteboardTopic(event.topic)) {
             auto session = _session.lock();
             if (!session || event.sender.origin == livekit::SenderOrigin::Server ||
@@ -1697,6 +1702,7 @@ public:
             session->post([session] {
                 if (auto share = session->screenShareOnStrand()) share->SetTransportReady(false);
                 if (auto board = session->whiteboardOnStrand()) board->setTransportReady(false, 0);
+                if (auto control = session->remoteControlOnStrand()) control->stop();
             });
         }
         if (!_uiGate || !_uiGate->active() || _generation == 0) return;
@@ -1754,6 +1760,7 @@ public:
             session->post([session] {
                 if (auto share = session->screenShareOnStrand()) share->SetTransportReady(false);
                 if (auto board = session->whiteboardOnStrand()) board->setTransportReady(false, 0);
+                if (auto control = session->remoteControlOnStrand()) control->stop();
             });
         }
         if (!_uiGate || !_uiGate->active() || _generation == 0) return;
@@ -2864,6 +2871,7 @@ bool MeetingCoordinator::isAdmissionCurrent(uint64_t generation,
 
 void MeetingCoordinator::setState(MeetingState s, const QString &detail) {
     if (_state != s) {
+        if (s != MeetingState::InMeeting) stopRemoteControl();
         if (s != MeetingState::InMeeting) cancelEncryptionRecovery();
         _state = s;
         emit stateChanged(_state, detail);
@@ -3264,6 +3272,7 @@ void MeetingCoordinator::recoverEncryptionKey(std::shared_ptr<livekit::MeetingSe
         } else secret->Revoke();
         std::vector<QString> cancelledInbound;
         if (installed) {
+            if (auto control = session->remoteControlOnStrand()) control->stop();
             for (const auto& [key, transfer] : session->transfersOnStrand())
                 cancelledInbound.push_back(key.uiTransferId());
             session->transfersOnStrand().clear();
@@ -3540,6 +3549,7 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
     roomDiagnosticContext.has_session_generation = true;
     _room->SetDiagnosticContext(roomDiagnosticContext);
     _sessionOwner->room = _room;
+    configureRemoteControlRuntimeOnUiThread();
     // Queue the snapshot sink before Admission/Startup can post their first
     // drain. The same strand then persists revision 1 instead of starting at 2.
     {
@@ -3989,6 +3999,7 @@ void MeetingCoordinator::failRoomStartupOnUiThread(
 }
 
 void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
+    stopRemoteControl();
     cancelEncryptionRecovery();
     Q_ASSERT(QThread::currentThread() == thread());
     if (completion) _stopCompletion = std::move(completion);
@@ -4148,6 +4159,8 @@ void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
             asio::post(runtime->strand(), [runtime, quiesced] {
                 try {
                 runtime->stopAcceptingDataOnStrand();
+                runtime->remoteControlTimerOnStrand().cancel();
+                if (auto control = std::exchange(runtime->remoteControlOnStrand(), {})) control->stop();
                 runtime->stopVideoDemandOnStrand();
                 std::unique_ptr<livekit::IDesktopCapture> capture;
                 if (auto share = std::exchange(runtime->screenShareOnStrand(), {}))
@@ -4258,6 +4271,7 @@ void MeetingCoordinator::setScreenShareQuality(livekit::ScreenShareQuality quali
 }
 
 void MeetingCoordinator::stopScreenShare() {
+    stopRemoteControl();
     ++_screenSourceRequest;
     if (!_sessionRuntime || !_sessionRunning) return;
     auto session = _sessionRuntime;
