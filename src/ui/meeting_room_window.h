@@ -66,6 +66,7 @@ class ParticipantWindowTestAccess;
 
 namespace MeetingUI {
 class MeetingEncryptionPanel;
+class RemoteControlUi;
 
 class WhiteboardPanel;
 class AnnotationOverlayWindow;
@@ -122,6 +123,8 @@ public:
 	void setFrame(
 		const QImage &image,
 		livekit::render::VideoRenderFrame::Ptr renderFrame = {});
+	QRectF remoteControlContentRect();
+	void setRemoteInputEnabled(bool enabled);
 
 	// 远端独立音量与静音管理
 	float remoteVolume() const { return _remoteVolume; }
@@ -211,6 +214,7 @@ private:
 	QImage _currentFrame;
 	livekit::render::VideoRenderFrame::Ptr _currentRenderFrame;
 	std::mutex _frameMutex;
+	bool _remoteInputEnabled = false;
 	bool _hasLoggedFirstPaint = false;
 	QImage _hardwareDecoration;
 	QSize _decorationLogicalSize;
@@ -536,6 +540,8 @@ private:
 	void initLayout();
 	void updateVideoLayout();
 	void setupWhiteboardBinding();
+	void setupRemoteControl();
+	std::unique_ptr<RemoteControlUi> _remoteControlUi;
 	void setupVideoPagingControls();
 	void setWhiteboardVisible(bool visible);
 	void scheduleViewportIntent(bool immediate = false);
@@ -581,6 +587,7 @@ private:
 		const livekit::TrackKey &key) const;
 	void refreshRemoteVideoPresentations();
 	void applyScreenShareSnapshot(livekit::ScreenShareSnapshot snapshot);
+    void updateRemoteControlStatus(const QString& status);
 	void handleScreenShareSources(const std::vector<livekit::DesktopSource> &sources);
 	void applyRemoteParticipantJoined(const QString &identity, const QString &name,
 		const OpenMeeting::ParticipantPresentation *presentation);
@@ -694,6 +701,9 @@ private:
 	std::shared_ptr<livekit::render::VideoRenderRouter> _localScreenPreview;
 	MeetingEncryptionPanel *_encryptionPanel = nullptr;
 	QLabel *_screenShareBanner = nullptr;
+    QString _screenShareText;
+    QString _remoteControlStatus;
+    QPushButton *_remoteControlStopButton = nullptr;
 	QPushButton *_annotationButton = nullptr;
 	QPushButton *_screenQualityButton = nullptr;
 	std::unique_ptr<AnnotationOverlayWindow> _annotationOverlay;

@@ -25,6 +25,7 @@ struct ScreenShareSnapshot {
     std::string source_title;
     DesktopSourceKind source_kind = DesktopSourceKind::Window;
     std::optional<ScreenBinding> annotation_binding;
+    std::string track_sid;
 };
 
 // Mirrors Flutter's serialized setSourceEnabled(screenShareVideo): capture,

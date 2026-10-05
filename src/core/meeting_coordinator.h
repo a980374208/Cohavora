@@ -196,6 +196,13 @@ public:
     void setScreenShareQuality(livekit::ScreenShareQuality quality);
     void stopScreenShare();
     livekit::ScreenShareSnapshot screenShareSnapshot() const { return _screenShareSnapshot; }
+    void requestRemoteControl(const QString& identity, const QString& trackSid,
+        std::shared_ptr<livekit::remote_control::Lease> frontendLease);
+    void respondRemoteControl(const QString& requestId, bool allow);
+    void activateRemoteControl(std::string grant);
+    void sendRemoteControlInput(livekit::remote_control::Input input, std::string grant, uint64_t inputEpoch);
+    void pauseRemoteControl(bool paused, std::string grant);
+    void stopRemoteControl();
 
     // 消息时序单调序列发生器
     int64_t nextSequenceNumber();
@@ -313,6 +320,7 @@ signals:
     void screenShareSourcesReady(const std::vector<livekit::DesktopSource> &sources);
     void screenShareChanged(livekit::ScreenShareSnapshot snapshot);
     void screenShareAvailabilityChanged(bool available);
+    void remoteControlChanged(livekit::remote_control::Projection projection);
     void telemetrySnapshotChanged(const QVariantMap &snapshot);
 
     // 业务信令事件 (从 DataChannel NotifyMeetingData 解包)
@@ -432,6 +440,11 @@ private:
                                            const std::vector<uint8_t> &data,
                                            const livekit::SenderContext &sender);
     void configureWhiteboardRuntimeOnUiThread();
+    void configureRemoteControlRuntimeOnUiThread();
+    static void tickRemoteControl(const std::shared_ptr<MeetingSessionRuntime>& session);
+    static void enqueueRemoteControlData(const std::shared_ptr<MeetingSessionRuntime>& session,
+        const std::vector<uint8_t>& data, const livekit::SenderContext& sender);
+    std::weak_ptr<livekit::remote_control::InputBackend> _remoteInput;
     static void enqueueWhiteboardData(const std::shared_ptr<MeetingSessionRuntime> &session,
                                const std::vector<uint8_t> &data,
                                const std::string &topic,
@@ -602,3 +615,4 @@ private:
 Q_DECLARE_METATYPE(livekit::RoomDisconnectReason)
 Q_DECLARE_METATYPE(OpenMeeting::MeetingRoomInfo)
 Q_DECLARE_METATYPE(livekit::ParticipantPermission)
+Q_DECLARE_METATYPE(livekit::remote_control::Projection)

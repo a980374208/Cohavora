@@ -41,6 +41,8 @@ public:
     void setTileDecoration(const std::string& key, DecorationPainter painter, const QRect& pinRect);
     void updateTilePresentation(const std::string& key, bool hasVideo);
     void setStageOverlay(QWidget* widget);
+    QRectF videoContentRect(const std::string& key) const;
+    void setRemoteInputKey(std::string key) { remote_input_key_ = std::move(key); frame_dirty_ = true; }
 signals:
     void rendererInitialized();
     void rendererUnavailable();
@@ -92,6 +94,8 @@ private:
     std::map<std::string, Decoration> decorations_;
     std::map<std::string, VideoRenderFrame::Ptr> telemetry_frames_;
     std::string hovered_tile_, pressed_pin_;
+    std::string remote_input_key_;
+    QSize last_physical_size_;
     QTimer* fps_timer_ = nullptr;
     std::atomic<bool> frame_dirty_{false};
     bool renderer_unavailable_emitted_ = false;

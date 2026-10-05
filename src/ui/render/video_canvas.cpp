@@ -116,6 +116,7 @@ void VideoCanvas::render() {
     QSize physical;
     if (!beginFrame(physical)) { notifyRendererUnavailable(); return; }
     if (physical.isEmpty()) return;
+    last_physical_size_ = physical;
     std::vector<VideoRenderFrame::Ptr> submitted_frames;
     for (const auto& logical : tiles_) {
         auto tile = ScaleVideoTile(logical, width(), height(), physical.width(), physical.height());
@@ -137,7 +138,7 @@ void VideoCanvas::render() {
             }
         }
         auto decoration = decorations_.find(tile.identity);
-        if (decoration != decorations_.end() && decoration->second.painter) {
+        if (tile.identity != remote_input_key_ && decoration != decorations_.end() && decoration->second.painter) {
             const auto image = decoration->second.painter(QSize(tile.width, tile.height),
                 geometry.available, hovered_tile_ == tile.identity);
             if (!image.isNull()) {
@@ -292,6 +293,22 @@ void VideoCanvas::updateHovered(const QPoint& point) {
         frame_dirty_.store(true, std::memory_order_release);
     }
     setCursor(hitTest(point, true).empty() ? Qt::ArrowCursor : Qt::PointingHandCursor);
+}
+
+QRectF VideoCanvas::videoContentRect(const std::string& key) const {
+    if (width() <= 0 || height() <= 0 || last_physical_size_.isEmpty()) return {};
+    const auto frame = frameGeometry(key);
+    if (!frame.available || frame.rotation != 0) return {};
+    for (const auto& logical : tiles_) if (logical.identity == key && logical.hasVideo) {
+        auto content = ScaleVideoTile(logical,width(),height(),last_physical_size_.width(),last_physical_size_.height());
+        content.x += 2; content.y += 2; content.width -= 4; content.height -= 4;
+        if (content.width <= 0 || content.height <= 0) return {};
+        content = FitVideoTile(content,frame);
+        const double sx = double(width())/last_physical_size_.width();
+        const double sy = double(height())/last_physical_size_.height();
+        return {content.x*sx,content.y*sy,content.width*sx,content.height*sy};
+    }
+    return {};
 }
 
 void VideoCanvas::mouseMoveEvent(QMouseEvent* e) {

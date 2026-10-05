@@ -1,4 +1,19 @@
 # OpenMeeting HTTP Client Test
+add_executable(test_remote_control ${LIVEKIT_TEST_SOURCE_DIR}/meeting/test_remote_control.cpp)
+target_link_libraries(test_remote_control PRIVATE cohavora_remote_control)
+set_target_properties(test_remote_control PROPERTIES AUTOMOC OFF)
+add_test(NAME remote_control_test COMMAND test_remote_control)
+set_tests_properties(remote_control_test PROPERTIES TIMEOUT 30 LABELS "REMOTE_CONTROL_FOCUSED")
+add_executable(test_remote_control_ui
+    ${LIVEKIT_TEST_SOURCE_DIR}/meeting/test_remote_control_ui.cpp
+    ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/remote_control_ui.cpp
+    ${LIVEKIT_TEST_SOURCE_DIR}/support/meeting_log_test_sink.cpp)
+livekit_configure_qt_test(test_remote_control_ui)
+target_link_libraries(test_remote_control_ui PRIVATE cohavora_meeting_runtime cohavora_ui_theme)
+target_compile_options(test_remote_control_ui PRIVATE /utf-8)
+add_test(NAME remote_control_ui_test COMMAND test_remote_control_ui)
+set_tests_properties(remote_control_ui_test PROPERTIES TIMEOUT 30 RUN_SERIAL TRUE LABELS "REMOTE_CONTROL_FOCUSED")
+
 add_executable(test_openmeeting_http
     ${LIVEKIT_TEST_SOURCE_DIR}/meeting/test_openmeeting_http.cpp
 )

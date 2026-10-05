@@ -37,3 +37,5 @@ set_tests_properties(screen_annotation_window_test PROPERTIES
     TIMEOUT 60 LABELS "ANNOTATION_FOCUSED" RUN_SERIAL TRUE ENVIRONMENT "QT_SCALE_FACTOR=1")
 set_property(TEST screen_share_session_test whiteboard_ui_test
     APPEND PROPERTY LABELS "ANNOTATION_FOCUSED")
+set_property(TEST screen_share_session_test screen_annotation_window_test
+    APPEND PROPERTY LABELS "REMOTE_CONTROL_FOCUSED")
