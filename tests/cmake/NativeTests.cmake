@@ -372,6 +372,13 @@ if(COHAVORA_BUILD_RUNTIME_TOOLS)
         add_executable(product_audio_loopback EXCLUDE_FROM_ALL
             ${LIVEKIT_TEST_SOURCE_DIR}/runtime/probes/product_audio_loopback.cpp)
         target_link_libraries(product_audio_loopback PRIVATE ole32 mmdevapi)
+
+        # Manual callback-startup witness; --force-playout explicitly opens output.
+        add_executable(product_playout_startup EXCLUDE_FROM_ALL
+            ${LIVEKIT_TEST_SOURCE_DIR}/runtime/tools/media/playout_startup/product_playout_startup.cpp)
+        target_include_directories(product_playout_startup PRIVATE
+            ${LIVEKIT_PROJECT_SOURCE_DIR})
+        target_link_libraries(product_playout_startup PRIVATE cohavora_core)
     endif()
     add_executable(test_desktop_capture_runtime EXCLUDE_FROM_ALL
         ${LIVEKIT_TEST_SOURCE_DIR}/runtime/probes/test_desktop_capture_runtime.cpp)

@@ -5,7 +5,7 @@
 #include "telemetry/sdp_negotiation_trace.h"
 #include "core/executor_lifetime.h"
 #include "audio_playout_device_selection.h"
-#include "audio_playout_warmup.h"
+#include "audio_playout_transport.h"
 #include "media/audio_apm.h"
 #include "rtc_base/ssl_adapter.h"
 #include "api/create_peerconnection_factory.h"
@@ -233,105 +233,104 @@ public:
     }
 };
 
-class PlayoutAudioTransportWrapper : public webrtc::AudioTransport {
-public:
-    explicit PlayoutAudioTransportWrapper(webrtc::AudioTransport* inner)
-        : inner_(inner) {}
+} // namespace
 
-    void ResetWarmup() {
-        warmup_.Reset();
+namespace detail {
+
+int32_t PlayoutAudioTransportWrapper::RecordedDataIsAvailable(
+    const void* audioSamples,
+    size_t nSamples,
+    size_t nBytesPerSample,
+    size_t nChannels,
+    uint32_t samplesPerSec,
+    uint32_t totalDelayMS,
+    int32_t clockDrift,
+    uint32_t currentMicLevel,
+    bool keyPressed,
+    uint32_t& newMicLevel) {
+    if (inner_) {
+        return inner_->RecordedDataIsAvailable(audioSamples, nSamples, nBytesPerSample,
+                                               nChannels, samplesPerSec, totalDelayMS,
+                                               clockDrift, currentMicLevel, keyPressed, newMicLevel);
     }
+    return 0;
+}
 
-    int32_t RecordedDataIsAvailable(const void* audioSamples,
-                                    size_t nSamples,
-                                    size_t nBytesPerSample,
-                                    size_t nChannels,
-                                    uint32_t samplesPerSec,
-                                    uint32_t totalDelayMS,
-                                    int32_t clockDrift,
-                                    uint32_t currentMicLevel,
-                                    bool keyPressed,
-                                    uint32_t& newMicLevel) override {
-        if (inner_) {
-            return inner_->RecordedDataIsAvailable(audioSamples, nSamples, nBytesPerSample,
-                                                   nChannels, samplesPerSec, totalDelayMS,
-                                                   clockDrift, currentMicLevel, keyPressed, newMicLevel);
-        }
-        return 0;
+int32_t PlayoutAudioTransportWrapper::NeedMorePlayData(
+    size_t nSamples,
+    size_t nBytesPerSample,
+    size_t nChannels,
+    uint32_t samplesPerSec,
+    void* audioSamples,
+    size_t& nSamplesOut,
+    int64_t* elapsed_time_ms,
+    int64_t* ntp_time_ms) {
+    if (!inner_) {
+        nSamplesOut = 0;
+        return -1;
     }
+    int32_t res = inner_->NeedMorePlayData(nSamples, nBytesPerSample, nChannels,
+                                            samplesPerSec, audioSamples, nSamplesOut,
+                                            elapsed_time_ms, ntp_time_ms);
+    // ADM's legacy names are misleading: nBytesPerSample is bytes per
+    // interleaved frame, and nSamplesOut counts all channels' PCM samples.
+    if (res == 0 && audioSamples && nSamplesOut > 0 && nChannels > 0 &&
+        nBytesPerSample == sizeof(int16_t) * nChannels) {
+        const size_t output_frames = std::min(nSamplesOut / nChannels, nSamples);
+        const size_t output_samples = output_frames * nChannels;
+        warmup_.Process(static_cast<int16_t*>(audioSamples), output_samples,
+                        nChannels, samplesPerSec);
 
-    int32_t NeedMorePlayData(size_t nSamples,
-                             size_t nBytesPerSample,
-                             size_t nChannels,
-                             uint32_t samplesPerSec,
-                             void* audioSamples,
-                             size_t& nSamplesOut,
-                             int64_t* elapsed_time_ms,
-                             int64_t* ntp_time_ms) override {
-        if (!inner_) {
-            nSamplesOut = 0;
-            return -1;
+        // 将下行扬声器渲染音频作为反向参考信号送入 APM (AEC 回声消除)
+        auto apm = WebRTCManager::Instance().apm_processor();
+        if (apm) {
+            const int16_t* pcm = static_cast<const int16_t*>(audioSamples);
+            std::vector<int16_t> render_pcm(pcm, pcm + output_samples);
+            AudioFrame render_frame(std::move(render_pcm),
+                                    static_cast<int>(samplesPerSec),
+                                    static_cast<int>(nChannels),
+                                    static_cast<int>(output_frames));
+            apm->ProcessRenderFrame(render_frame);
         }
-        int32_t res = inner_->NeedMorePlayData(nSamples, nBytesPerSample, nChannels,
-                                               samplesPerSec, audioSamples, nSamplesOut,
-                                               elapsed_time_ms, ntp_time_ms);
-        if (res == 0 && audioSamples && nSamplesOut > 0 &&
-            nBytesPerSample == sizeof(int16_t)) {
-            const size_t output_frames = std::min(nSamplesOut, nSamples);
-            const size_t output_samples = output_frames * nChannels;
-            warmup_.Process(static_cast<int16_t*>(audioSamples), output_samples,
-                            nChannels, samplesPerSec);
+    }
+    return res;
+}
 
-            // 将下行扬声器渲染音频作为反向参考信号送入 APM (AEC 回声消除)
+void PlayoutAudioTransportWrapper::PullRenderData(
+    int bits_per_sample,
+    int sample_rate,
+    size_t number_of_channels,
+    size_t number_of_frames,
+    void* audio_data,
+    int64_t* elapsed_time_ms,
+    int64_t* ntp_time_ms) {
+    if (inner_) {
+        inner_->PullRenderData(bits_per_sample, sample_rate, number_of_channels,
+                               number_of_frames, audio_data, elapsed_time_ms, ntp_time_ms);
+        if (bits_per_sample == 16 && audio_data) {
+            const size_t total_samples = number_of_frames * number_of_channels;
+            warmup_.Process(static_cast<int16_t*>(audio_data),
+                            total_samples,
+                            number_of_channels,
+                            static_cast<uint32_t>(sample_rate));
+
             auto apm = WebRTCManager::Instance().apm_processor();
             if (apm) {
-                const int16_t* pcm = static_cast<const int16_t*>(audioSamples);
-                std::vector<int16_t> render_pcm(pcm, pcm + output_samples);
+                const int16_t* pcm = static_cast<const int16_t*>(audio_data);
+                std::vector<int16_t> render_pcm(pcm, pcm + total_samples);
                 AudioFrame render_frame(std::move(render_pcm),
-                                        static_cast<int>(samplesPerSec),
-                                        static_cast<int>(nChannels),
-                                        static_cast<int>(output_frames));
+                                        sample_rate,
+                                        static_cast<int>(number_of_channels),
+                                        static_cast<int>(number_of_frames));
                 apm->ProcessRenderFrame(render_frame);
             }
         }
-        return res;
     }
+}
 
-    void PullRenderData(int bits_per_sample,
-                        int sample_rate,
-                        size_t number_of_channels,
-                        size_t number_of_frames,
-                        void* audio_data,
-                        int64_t* elapsed_time_ms,
-                        int64_t* ntp_time_ms) override {
-        if (inner_) {
-            inner_->PullRenderData(bits_per_sample, sample_rate, number_of_channels,
-                                   number_of_frames, audio_data, elapsed_time_ms, ntp_time_ms);
-            if (bits_per_sample == 16 && audio_data) {
-                const size_t total_samples = number_of_frames * number_of_channels;
-                warmup_.Process(static_cast<int16_t*>(audio_data),
-                                total_samples,
-                                number_of_channels,
-                                static_cast<uint32_t>(sample_rate));
+} // namespace detail
 
-                auto apm = WebRTCManager::Instance().apm_processor();
-                if (apm) {
-                    const int16_t* pcm = static_cast<const int16_t*>(audio_data);
-                    std::vector<int16_t> render_pcm(pcm, pcm + total_samples);
-                    AudioFrame render_frame(std::move(render_pcm),
-                                            sample_rate,
-                                            static_cast<int>(number_of_channels),
-                                            static_cast<int>(number_of_frames));
-                    apm->ProcessRenderFrame(render_frame);
-                }
-            }
-        }
-    }
-
-private:
-    webrtc::AudioTransport* inner_;
-    AudioPlayoutWarmup warmup_;
-};
+namespace {
 
 class PlayoutOnlyAudioDeviceModule : public webrtc::AudioDeviceModule {
 public:
@@ -347,7 +346,7 @@ public:
     int32_t RegisterAudioCallback(webrtc::AudioTransport* audioCallback) override {
         if (!inner_) return -1;
         if (audioCallback) {
-            auto wrapper = std::make_unique<PlayoutAudioTransportWrapper>(audioCallback);
+            auto wrapper = std::make_unique<detail::PlayoutAudioTransportWrapper>(audioCallback);
             const int32_t result = inner_->RegisterAudioCallback(wrapper.get());
             if (result == 0) {
                 transport_wrapper_ = std::move(wrapper);
@@ -407,9 +406,16 @@ public:
         return inner_ ? inner_->PlayoutIsInitialized() : false;
     }
 
+    bool HasAudioCallback() const {
+        return transport_wrapper_ != nullptr;
+    }
+
     int32_t StartPlayout() override {
-        if (transport_wrapper_) transport_wrapper_->ResetWarmup();
-        return inner_ ? inner_->StartPlayout() : 0;
+        // Windows ADM can copy an unfilled render buffer when no callback is
+        // registered. Never start its native render thread in that state.
+        if (!inner_ || !HasAudioCallback()) return -1;
+        transport_wrapper_->ResetWarmup();
+        return inner_->StartPlayout();
     }
 
     int32_t StopPlayout() override {
@@ -510,7 +516,7 @@ public:
 
 private:
     webrtc::scoped_refptr<webrtc::AudioDeviceModule> inner_;
-    std::unique_ptr<PlayoutAudioTransportWrapper> transport_wrapper_;
+    std::unique_ptr<detail::PlayoutAudioTransportWrapper> transport_wrapper_;
 };
 
 } // namespace
@@ -621,20 +627,10 @@ bool WebRTCManager::Initialize() {
         return false;
     }
 
-    // The factory registers VoiceEngine's AudioTransport with the ADM. Start
-    // rendering only after that callback is installed; the warmup wrapper
-    // suppresses the first discontinuous buffers without muting real audio.
-    if (adm_) {
-        worker_thread_->BlockingCall([this]() {
-            if (!adm_) return;
-            const int32_t speaker_result = adm_->InitSpeaker();
-            const int32_t playout_result = adm_->InitPlayout();
-            const int32_t start_result = adm_->Playing() ? 0 : adm_->StartPlayout();
-            if (speaker_result != 0 || playout_result != 0 || start_result != 0) {
-                EmitRtcLifecycle(diagnostic::RtcStatus::PlayoutStartFailed);
-            }
-        });
-    }
+    // This SDK initializes VoiceEngine and registers its AudioTransport when
+    // the first PeerConnection is created, not when the factory is created.
+    // Keep output closed until the native receive path or EnsurePlayout starts
+    // it after that registration; otherwise Windows can play unfilled PCM.
 
     initialized_ = true;
     EmitRtcLifecycle(diagnostic::RtcStatus::Ready);
@@ -663,6 +659,10 @@ bool WebRTCManager::EnsurePlayout() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!adm_ || !worker_thread_) return false;
     return worker_thread_->BlockingCall([this]() {
+        // adm_ is always our playout-only wrapper. Check before InitPlayout so
+        // a factory-only caller cannot open an unbound playback endpoint.
+        const auto* playout = static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get());
+        if (!playout->HasAudioCallback()) return false;
         if (adm_->Playing()) return true;
         if (!adm_->PlayoutIsInitialized()
                 && (adm_->InitSpeaker() != 0 || adm_->InitPlayout() != 0)) return false;
