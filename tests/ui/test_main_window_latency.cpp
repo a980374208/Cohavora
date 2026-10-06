@@ -1,5 +1,6 @@
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/meeting_detail_dialog.h"
+#include "src/core/meeting_catalog_controller.h"
 #include "src/ui/meeting_encryption_dialog.h"
 #include "src/ui/meeting_encryption_panel.h"
 #include "tests/runtime/probes/e2ee_product_runtime.h"
@@ -18,6 +19,7 @@
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QMessageBox>
 #include <QtPlugin>
 #include <cstdio>
 #include "src/ui/app_icons.h"
@@ -57,9 +59,51 @@ public:
     }
 };
 
+// Retain the production entry/preparation/admission control flow while
+// preventing any device or service startup through existing test friends.
+class CameraOwnerTestAccess final {
+public:
+    static std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator(MeetingUI::MeetingRoomWindow& window) {
+        return window._coordinator;
+    }
+    static MeetingUI::MeetingRoomWindow::Config config(const MeetingUI::MeetingRoomWindow& window) {
+        return window._config;
+    }
+};
+namespace OpenMeeting {
+class MeetingCoordinatorTestAccess final {
+public:
+    static void interceptAdmission(MeetingCoordinator& coordinator,
+            std::function<void(const QString&, const QString&)> joined, bool quickMeeting) {
+        coordinator._admissionBackend = {};
+        coordinator._admissionBackend.joinMeeting =
+            [joined, quickMeeting](const QString& id, const QString& password, ResultCallback<bool>) {
+                TEST_CHECK(!quickMeeting);
+                joined(id, password); // Pending admission never creates a native Room.
+            };
+        coordinator._admissionBackend.leaveMeeting = [](const QString& id, ResultCallback<bool> callback) {
+            TEST_CHECK(!id.isEmpty());
+            callback(true, true, {});
+        };
+        coordinator._admissionBackend.endMeeting = coordinator._admissionBackend.leaveMeeting;
+        coordinator._admissionBackend.getMeetingToken = [](const QString&, ResultCallback<LiveKitAuthInfo>) {
+            TEST_CHECK(false && "pending detail admission must not fetch a token");
+        };
+        coordinator._admissionBackend.createImmediateMeeting = [joined, quickMeeting](const QString& title, int duration, ResultCallback<LiveKitAuthInfo>) {
+            TEST_CHECK(quickMeeting && duration == 3600);
+            joined(title, {}); // Keep quick admission pending before native Room startup.
+        };
+    }
+    static const MediaPreferences& preferences(const MeetingCoordinator& coordinator) { return coordinator._mediaPrefs; }
+    static std::shared_ptr<livekit::MeetingSecretHandle> secret(const MeetingCoordinator& coordinator) {
+        return coordinator._admissionEncryption.secret;
+    }
+};
+}
+
 namespace MeetingUI {
 // Only inject the account/credential/detail preconditions. The actual main
-// window entry and encryption dialog control flow remains production code.
+// window entry and join-dialog control flow remains production code.
 class MeetingEntryEncryptionTestAccess final {
 public:
     static void enter(MeetingMainWindow& window, const QString& route) {
@@ -80,11 +124,28 @@ public:
         dialog.accept();
     }
     static void detailReady(MeetingDetailDialog& dialog) {
-        OpenMeeting::MeetingCatalogDetail detail;
-        detail.record.meetingId = "public-entry-fixture";
-        dialog._detail = detail;
-        dialog._joinRequested = true;
-        dialog.accept();
+        dialog.requestJoin();
+        TEST_CHECK(dialog.result() == QDialog::Accepted);
+    }
+    static void catalog(MeetingMainWindow& window, OpenMeeting::MeetingCatalogController::Backend backend) {
+        delete window._meetingCatalog;
+        window._meetingCatalog = new OpenMeeting::MeetingCatalogController(
+            OpenMeeting::SessionManager::instance(), std::move(backend), &window);
+        QObject::connect(window._meetingCatalog, &OpenMeeting::MeetingCatalogController::detailChanged,
+            &window, [&window] { window.handlePendingMeetingEntryDetail(); });
+        QObject::connect(window._meetingCatalog, &OpenMeeting::MeetingCatalogController::upcomingChanged,
+            &window, [&window] { window.syncSchedule(); });
+    }
+    static OpenMeeting::MeetingCatalogController& catalog(MeetingMainWindow& window) { return *window._meetingCatalog; }
+    static std::unique_ptr<QObject> reserve(MeetingMainWindow& window) { return window._meetingEntryGuard.tryAcquire(); }
+    static void detailJoin(MeetingDetailDialog& dialog) { dialog.requestJoin(); }
+    static bool detailJoinEnabled(const MeetingDetailDialog& dialog) { return dialog._joinButton->isEnabled(); }
+    static void join(JoinMeetingDialog& dialog) { dialog.onJoinClicked(); }
+    static bool loading(const JoinMeetingDialog& dialog) { return dialog._isLoading; }
+    static void loading(JoinMeetingDialog& dialog, bool value) { dialog.setLoading(value); }
+    static std::shared_ptr<livekit::MeetingSecretHandle> retainPreparedSecret(JoinMeetingDialog& dialog) {
+        TEST_CHECK(dialog.prepareEncryptionRequest());
+        return dialog._encryptionRequest->secret;
     }
 };
 }
@@ -95,27 +156,39 @@ void TestEncryptionEntryCancellation(QApplication& app) {
     TEST_CHECK(session.setServerBaseUrl("http://127.0.0.1:9"));
     session.loginAsGuest("Public entry fixture", "public-entry-fixture");
     TEST_CHECK(session.isLoggedIn());
+    session.setMeetingSecurityPreferences({true, true, true, false});
+    session.clearMeetingEncryptionKey();
     MeetingUI::MeetingMainWindow window;
-    for (const auto& route : {"ordinary", "quick", "detail", "direct", "quick-share", "join-share"}) {
+    for (const auto& route : {"ordinary", "direct", "join-share"}) {
         for (int attempt = 0; attempt != 2; ++attempt) {
+            std::fprintf(stderr, "E2EE_ENTRY_CANCEL route=%s attempt=%d BEGIN\n", route, attempt + 1);
+            std::fflush(stderr);
             int prompts = 0;
+            int joins = 0;
+            int keyErrors = 0;
             QTimer driver;
             driver.setInterval(0);
             QObject::connect(&driver, &QTimer::timeout, &window, [&] {
                 auto* modal = app.activeModalWidget();
                 if (auto* encryption = dynamic_cast<MeetingUI::MeetingEncryptionDialog*>(modal)) {
                     ++prompts;
-                    auto* required = encryption->findChild<QCheckBox*>("e2eeRequired");
-                    auto* input = encryption->findChild<QLineEdit*>("e2eeKeyInput");
-                    TEST_CHECK(required && input && !required->isChecked() && input->text().isEmpty());
+                    encryption->reject();
+                } else if (auto* join = dynamic_cast<MeetingUI::JoinMeetingDialog*>(modal)) {
+                    ++joins;
+                    auto* toggle = join->findChild<QPushButton*>("joinEncryptionToggle");
+                    auto* required = join->findChild<QCheckBox*>("e2eeRequired");
+                    auto* input = join->findChild<QLineEdit*>("e2eeKeyInput");
+                    TEST_CHECK(toggle && required && input && toggle->isEnabled());
+                    toggle->click();
                     required->setChecked(true);
                     input->setText("public-cancelled-entry-key");
-                    encryption->reject();
-                    TEST_CHECK(input->text().isEmpty() && !encryption->takeRequest());
-                } else if (auto* join = dynamic_cast<MeetingUI::JoinMeetingDialog*>(modal)) {
-                    MeetingUI::MeetingEntryEncryptionTestAccess::credentialsReady(*join, QString(route) == "direct");
-                } else if (auto* detail = dynamic_cast<MeetingUI::MeetingDetailDialog*>(modal)) {
-                    MeetingUI::MeetingEntryEncryptionTestAccess::detailReady(*detail);
+                    const auto retained = MeetingUI::MeetingEntryEncryptionTestAccess::retainPreparedSecret(*join);
+                    join->reject();
+                    TEST_CHECK(input->text().isEmpty() && !input->isUndoAvailable());
+                    TEST_CHECK(retained && !retained->available() && !join->takeEncryptionRequest());
+                } else if (auto* error = qobject_cast<QMessageBox*>(modal)) {
+                    ++keyErrors;
+                    error->reject();
                 }
             });
             QTimer deadline;
@@ -125,13 +198,428 @@ void TestEncryptionEntryCancellation(QApplication& app) {
             driver.start();
             MeetingUI::MeetingEntryEncryptionTestAccess::enter(window, QString::fromLatin1(route));
             driver.stop(); deadline.stop();
-            TEST_CHECK(prompts == 1);
+            TEST_CHECK(prompts == 0 && joins == 1 && keyErrors == 0);
             TEST_CHECK(MeetingUI::MeetingEntryEncryptionTestAccess::reservationReleased(window));
             for (auto* top : app.topLevelWidgets())
                 TEST_CHECK(!dynamic_cast<MeetingUI::MeetingRoomWindow*>(top));
             std::printf("E2EE_ENTRY_CANCEL route=%s attempt=%d PASS\n", route, attempt + 1);
         }
     }
+    session.setMeetingSecurityPreferences({});
+    session.logout(false);
+}
+
+class EntryAdmissionObserver final : public QObject {
+public:
+    bool quickMeeting = false;
+    int windows = 0;
+    int admissions = 0;
+    QString id;
+    QString password;
+    MeetingUI::MeetingRoomWindow::Config config;
+    QPointer<MeetingUI::MeetingRoomWindow> window;
+    std::shared_ptr<OpenMeeting::MeetingCoordinator> coordinator;
+    std::function<void()> onShow;
+protected:
+    bool eventFilter(QObject* object, QEvent* event) override {
+        auto* room = dynamic_cast<MeetingUI::MeetingRoomWindow*>(object);
+        if (room && event->type() == QEvent::Show && !window) {
+            ++windows;
+            window = room;
+            config = CameraOwnerTestAccess::config(*room);
+            coordinator = CameraOwnerTestAccess::coordinator(*room);
+            OpenMeeting::MeetingCoordinatorTestAccess::interceptAdmission(*coordinator,
+                [this](const QString& joinedId, const QString& joinedPassword) {
+                    ++admissions; id = joinedId; password = joinedPassword;
+                }, quickMeeting);
+            if (onShow) onShow();
+        }
+        return false;
+    }
+};
+
+void TestEntryDefaultsWithoutKey(QApplication& app) {
+    using namespace MeetingUI;
+    using namespace OpenMeeting;
+    auto& session = SessionManager::instance();
+    session.loginAsGuest("Public default fixture", "public-default-fixture");
+    session.setMeetingSecurityPreferences({true, true, true, true});
+    session.clearMeetingEncryptionKey();
+    auto preferences = session.mediaPreferences();
+    preferences.enableMicrophone = false;
+    preferences.enableVideo = false;
+    session.setMediaPreferences(preferences);
+    const auto spin = [&](const std::function<bool()>& complete) {
+        QElapsedTimer timer; timer.start();
+        while (!complete() && timer.elapsed() < 3000) {
+            app.processEvents(QEventLoop::AllEvents, 5);
+            app.sendPostedEvents(nullptr, QEvent::DeferredDelete);
+            QThread::msleep(1);
+        }
+        TEST_CHECK(complete());
+    };
+    for (const auto* route : {"quick", "quick-share", "detail"}) {
+        for (int attempt = 0; attempt != 2; ++attempt) {
+            std::fprintf(stderr, "E2EE_ENTRY_NO_DEFAULT_KEY route=%s attempt=%d BEGIN\n", route, attempt + 1);
+            std::fflush(stderr);
+            MeetingMainWindow window;
+            MeetingCatalogController::Backend backend;
+            backend.getMeetingInfo = [](const QString& id, ResultCallback<MeetingCatalogDetail> callback) {
+                MeetingCatalogDetail detail;
+                detail.record.meetingId = id;
+                detail.record.status = MeetingStatus::Scheduled;
+                callback(true, detail, {});
+            };
+            MeetingEntryEncryptionTestAccess::catalog(window, std::move(backend));
+            EntryAdmissionObserver observer;
+            observer.quickMeeting = QString::fromLatin1(route) != "detail";
+            app.installEventFilter(&observer);
+            QTimer driver;
+            driver.setInterval(0);
+            QObject::connect(&driver, &QTimer::timeout, &window, [&] {
+                if (auto* detail = dynamic_cast<MeetingDetailDialog*>(app.activeModalWidget())) {
+                    MeetingEntryEncryptionTestAccess::detailReady(*detail);
+                } else TEST_CHECK(!app.activeModalWidget()); // No key prompt or second Join dialog.
+            });
+            QTimer deadline;
+            deadline.setSingleShot(true);
+            QObject::connect(&deadline, &QTimer::timeout, &window, [] { TEST_CHECK(false && "default entry timeout"); });
+            deadline.start(10000);
+            driver.start();
+            MeetingEntryEncryptionTestAccess::enter(window, QString::fromLatin1(route));
+            spin([&] { return observer.admissions == 1; });
+            driver.stop(); deadline.stop();
+            TEST_CHECK(observer.windows == 1 && observer.window);
+            TEST_CHECK(observer.config.audioMuted && !observer.config.videoEnabled);
+            TEST_CHECK(!observer.coordinator->requiresEncryption());
+            TEST_CHECK(!MeetingCoordinatorTestAccess::secret(*observer.coordinator));
+            TEST_CHECK(!session.hasMeetingEncryptionKey());
+            TEST_CHECK(!MeetingEntryEncryptionTestAccess::reservationReleased(window));
+            observer.window->close();
+            bool drained = false;
+            SessionShutdownService::Instance().DrainAsync([&] { drained = true; });
+            spin([&] { return drained && !observer.window; });
+            observer.coordinator.reset();
+            app.removeEventFilter(&observer);
+            TEST_CHECK(MeetingEntryEncryptionTestAccess::reservationReleased(window));
+            std::printf("E2EE_ENTRY_NO_DEFAULT_KEY route=%s attempt=%d PASS\n", route, attempt + 1);
+        }
+    }
+    session.setMeetingSecurityPreferences({});
+    session.logout(false);
+}
+
+void TestDetailDirectAdmission(QApplication& app) {
+    using namespace MeetingUI;
+    using namespace OpenMeeting;
+    auto& session = SessionManager::instance();
+    const QByteArray marker("public-detail-session-key");
+    const auto spin = [&](const std::function<bool()>& complete) {
+        QElapsedTimer timer; timer.start();
+        while (!complete() && timer.elapsed() < 3000) {
+            app.processEvents(QEventLoop::AllEvents, 5);
+            app.sendPostedEvents(nullptr, QEvent::DeferredDelete);
+            QThread::msleep(1);
+        }
+        TEST_CHECK(complete());
+    };
+    for (const auto& name : {"off", "required", "all", "missing", "busy", "refreshing",
+            "refresh-error", "wrong-id", "completed", "auth-reset", "auth-preparation"}) {
+        std::fprintf(stderr, "E2EE_DETAIL_DIRECT_ADMISSION case=%s BEGIN\n", name);
+        std::fflush(stderr);
+        const QString scenario = QString::fromLatin1(name);
+        session.loginAsGuest("Public detail fixture", "public-detail-fixture");
+        auto preferences = session.mediaPreferences();
+        preferences.enableMicrophone = true;
+        preferences.enableVideo = true;
+        preferences.cameraVideoCodec = "auto";
+        preferences.screenShareVideoCodec = "auto";
+        session.setMediaPreferences(preferences);
+        session.setMeetingSecurityPreferences({true, true, scenario == "required" || scenario == "missing", scenario == "all"});
+        session.setMeetingEncryptionKey({marker.begin(), marker.end()});
+        if (scenario == "missing") session.clearMeetingEncryptionKey();
+
+        MeetingCatalogDetail detail;
+        detail.record.meetingId = "public-entry-fixture";
+        detail.record.status = scenario == "completed" ? MeetingStatus::Completed : MeetingStatus::Scheduled;
+        detail.record.settings.disableMicrophoneOnJoin = true;
+        detail.record.settings.disableCameraOnJoin = true;
+        detail.password = "public-detail-password";
+        MeetingMainWindow window;
+        int queries = 0;
+        MeetingCatalogController::Backend backend;
+        backend.getMeetings = [](const std::vector<MeetingStatus>&, ResultCallback<MeetingList> callback) {
+            callback(true, {}, {});
+        };
+        backend.getMeetingInfo = [&](const QString&, ResultCallback<MeetingCatalogDetail> callback) {
+            ++queries;
+            if (queries > 1 && scenario == "refreshing") return;
+            if (queries > 1 && scenario == "refresh-error") {
+                HttpError error; error.code = 1; error.message = "public-refresh-error";
+                callback(false, {}, error);
+                return;
+            }
+            auto response = detail;
+            if (scenario == "wrong-id") response.record.meetingId = "public-other-meeting";
+            callback(true, response, {});
+        };
+        MeetingEntryEncryptionTestAccess::catalog(window, std::move(backend));
+        auto busyReservation = scenario == "busy" ? MeetingEntryEncryptionTestAccess::reserve(window) : nullptr;
+        EntryAdmissionObserver observer;
+        if (scenario == "auth-preparation") observer.onShow = [&] {
+            session.loginAsGuest("Public replacement fixture", "public-replacement-fixture");
+        };
+        app.installEventFilter(&observer);
+        int joinDialogs = 0;
+        int errors = 0;
+        QTimer driver;
+        driver.setInterval(0);
+        QObject::connect(&driver, &QTimer::timeout, &window, [&] {
+            auto* modal = app.activeModalWidget();
+            if (auto* dialog = dynamic_cast<MeetingDetailDialog*>(modal)) {
+                const bool cannotJoin = scenario == "wrong-id" || scenario == "completed";
+                TEST_CHECK(MeetingEntryEncryptionTestAccess::detailJoinEnabled(*dialog) != cannotJoin);
+                MeetingEntryEncryptionTestAccess::detailJoin(*dialog);
+                if (cannotJoin) {
+                    TEST_CHECK(dialog->result() != QDialog::Accepted);
+                    dialog->reject();
+                } else {
+                    TEST_CHECK(dialog->result() == QDialog::Accepted);
+                    if (scenario == "refreshing" || scenario == "refresh-error")
+                        MeetingEntryEncryptionTestAccess::catalog(window).loadMeetingDetail(detail.record.meetingId);
+                    if (scenario == "auth-reset")
+                        session.loginAsGuest("Public replacement fixture", "public-replacement-fixture");
+                }
+            } else if (auto* join = dynamic_cast<JoinMeetingDialog*>(modal)) {
+                ++joinDialogs; join->reject();
+            } else if (auto* error = qobject_cast<QMessageBox*>(modal)) {
+                ++errors;
+                TEST_CHECK(scenario == "busy");
+                error->reject();
+            }
+        });
+        QTimer deadline;
+        deadline.setSingleShot(true);
+        QObject::connect(&deadline, &QTimer::timeout, &window, [] { TEST_CHECK(false && "detail dialog timeout"); });
+        deadline.start(10000);
+        driver.start();
+        MeetingEntryEncryptionTestAccess::enter(window, "detail");
+        driver.stop(); deadline.stop();
+        TEST_CHECK(joinDialogs == 0 && errors == (scenario == "busy" ? 1 : 0));
+        const bool admitted = scenario == "off" || scenario == "required" || scenario == "all" || scenario == "missing";
+        if (admitted || scenario == "auth-preparation") {
+            TEST_CHECK(observer.windows == 1);
+            TEST_CHECK(observer.config.meetingId == detail.record.meetingId && observer.config.displayName == "Public detail fixture");
+            TEST_CHECK(observer.config.audioMuted && !observer.config.videoEnabled);
+            TEST_CHECK(observer.config.invitationMode == InvitationMode::BusinessMeetingId);
+            if (admitted) {
+                spin([&] { return observer.admissions == 1; });
+                TEST_CHECK(observer.id == detail.record.meetingId && observer.password == detail.password);
+                TEST_CHECK(observer.coordinator->currentDisplayName() == "Public detail fixture");
+                TEST_CHECK(!MeetingCoordinatorTestAccess::preferences(*observer.coordinator).enableMicrophone);
+                TEST_CHECK(!MeetingCoordinatorTestAccess::preferences(*observer.coordinator).enableVideo);
+                const bool required = scenario == "required" || scenario == "all";
+                TEST_CHECK(observer.coordinator->requiresEncryption() == required);
+                const auto secret = MeetingCoordinatorTestAccess::secret(*observer.coordinator);
+                TEST_CHECK(required ? secret && secret->available() : !secret);
+                TEST_CHECK(session.hasMeetingEncryptionKey() == (scenario != "missing"));
+                TEST_CHECK(!MeetingEntryEncryptionTestAccess::reservationReleased(window));
+                TEST_CHECK(session.mediaPreferences().enableMicrophone && session.mediaPreferences().enableVideo);
+            } else {
+                spin([&] { return !observer.window; });
+                TEST_CHECK(observer.admissions == 0);
+            }
+            if (observer.window) observer.window->close();
+        } else TEST_CHECK(observer.windows == 0 && observer.admissions == 0);
+        busyReservation.reset();
+        bool drained = false;
+        SessionShutdownService::Instance().DrainAsync([&] { drained = true; });
+        spin([&] { return drained && !observer.window; });
+        observer.coordinator.reset();
+        app.removeEventFilter(&observer);
+        TEST_CHECK(MeetingEntryEncryptionTestAccess::reservationReleased(window));
+        std::printf("E2EE_DETAIL_DIRECT_ADMISSION case=%s PASS\n", name);
+    }
+    session.clearMeetingEncryptionKey();
+    session.setMeetingSecurityPreferences({});
+    session.logout(false);
+}
+
+void TestJoinEncryptionSettings(QApplication& app) {
+    using namespace MeetingUI;
+    using namespace livekit;
+    auto& session = OpenMeeting::SessionManager::instance();
+    session.setMeetingSecurityPreferences({false, false, false, true});
+    session.clearMeetingEncryptionKey();
+    {
+        JoinMeetingDialog dialog;
+        dialog.show(); app.processEvents();
+        auto* toggle = dialog.findChild<QPushButton*>("joinEncryptionToggle");
+        auto* pane = dialog.findChild<QWidget*>("joinEncryptionWidget");
+        auto* required = dialog.findChild<QCheckBox*>("e2eeRequired");
+        auto* input = dialog.findChild<QLineEdit*>("e2eeKeyInput");
+        auto* error = dialog.findChild<QLabel*>("e2eeInputError");
+        TEST_CHECK(toggle && pane && required && input && error);
+        TEST_CHECK(toggle->isEnabled() && pane->isHidden() && !required->isChecked());
+        TEST_CHECK(input->echoMode() == QLineEdit::Password && !input->isEnabled());
+        toggle->click();
+        TEST_CHECK(!pane->isHidden());
+        required->setChecked(true);
+        dialog.findChild<QLineEdit*>("joinMeetingId")->setText("847123456");
+        // Invalid material must be rejected before HTTP loading/admission.
+        for (const auto& invalid : {QString(), QString::fromUtf8("中文密钥"), QString(4097, QLatin1Char('A'))}) {
+            input->setText(invalid);
+            MeetingEntryEncryptionTestAccess::join(dialog);
+            TEST_CHECK(!MeetingEntryEncryptionTestAccess::loading(dialog));
+            TEST_CHECK(dialog.result() != QDialog::Accepted && !dialog.takeEncryptionRequest());
+            TEST_CHECK(!error->text().isEmpty() && input->isEnabled());
+        }
+        dialog.findChild<QPushButton*>("linkBtn")->click();
+        dialog.findChild<QLineEdit*>("joinServerUrl")->setText("ws://127.0.0.1:9");
+        dialog.findChild<QLineEdit*>("joinToken")->setText("public-join-encryption-token");
+        input->clear();
+        MeetingEntryEncryptionTestAccess::join(dialog);
+        TEST_CHECK(dialog.result() != QDialog::Accepted && !dialog.takeEncryptionRequest());
+        input->setText("public-join-encryption-key");
+        auto* accessible = QAccessible::queryAccessibleInterface(input);
+        TEST_CHECK(accessible && accessible->state().passwordEdit);
+        TEST_CHECK(!accessible->text(QAccessible::Value).contains("public-join-encryption-key"));
+        MeetingEntryEncryptionTestAccess::join(dialog);
+        auto request = dialog.takeEncryptionRequest();
+        TEST_CHECK(dialog.result() == QDialog::Accepted && dialog.isManualConnection());
+        TEST_CHECK(request && request->mode == MeetingEncryptionMode::Required && request->secret->available());
+        TEST_CHECK(!dialog.takeEncryptionRequest() && input->text().isEmpty() && !input->isUndoAvailable());
+        request->Revoke();
+        TEST_CHECK(!session.hasMeetingEncryptionKey()); // A one-meeting key is not a default.
+    }
+    {
+        JoinMeetingDialog cancelled;
+        auto* required = cancelled.findChild<QCheckBox*>("e2eeRequired");
+        auto* input = cancelled.findChild<QLineEdit*>("e2eeKeyInput");
+        required->setChecked(true);
+        input->setText("public-join-cancelled-key");
+        required->setChecked(false);
+        TEST_CHECK(input->text().isEmpty() && !input->isUndoAvailable() && !input->isEnabled());
+        required->setChecked(true);
+        input->setText("public-join-cancelled-key");
+        const auto retained = MeetingEntryEncryptionTestAccess::retainPreparedSecret(cancelled);
+        cancelled.reject();
+        TEST_CHECK(retained && !retained->available() && !cancelled.takeEncryptionRequest());
+        TEST_CHECK(input->text().isEmpty() && !input->isUndoAvailable());
+    }
+    session.setMeetingSecurityPreferences({false, false, false, true});
+    {
+        JoinMeetingDialog missing;
+        missing.show(); app.processEvents();
+        auto* toggle = missing.findChild<QPushButton*>("joinEncryptionToggle");
+        auto* required = missing.findChild<QCheckBox*>("e2eeRequired");
+        auto* error = missing.findChild<QLabel*>("e2eeInputError");
+        TEST_CHECK(toggle->isEnabled() && !required->isChecked() && required->isEnabled());
+        TEST_CHECK(error->isHidden() && error->text().isEmpty());
+        missing.findChild<QLineEdit*>("joinMeetingId")->setText("847123456");
+        missing.findChild<QPushButton*>("linkBtn")->click();
+        missing.findChild<QLineEdit*>("joinServerUrl")->setText("ws://127.0.0.1:9");
+        missing.findChild<QLineEdit*>("joinToken")->setText("public-default-off-token");
+        MeetingEntryEncryptionTestAccess::join(missing);
+        TEST_CHECK(!MeetingEntryEncryptionTestAccess::loading(missing));
+        auto off = missing.takeEncryptionRequest();
+        TEST_CHECK(missing.result() == QDialog::Accepted && missing.isManualConnection());
+        TEST_CHECK(off && off->mode == MeetingEncryptionMode::Off && !off->secret);
+    }
+    const QByteArray marker("public-global-encryption-key");
+    {
+        JoinMeetingDialog projected;
+        auto* toggle = projected.findChild<QPushButton*>("joinEncryptionToggle");
+        auto* required = projected.findChild<QCheckBox*>("e2eeRequired");
+        auto* input = projected.findChild<QLineEdit*>("e2eeKeyInput");
+        auto* error = projected.findChild<QLabel*>("e2eeInputError");
+        TEST_CHECK(toggle->isEnabled() && !required->isChecked() && error->isHidden());
+        required->setChecked(true);
+        input->setText("public-uncommitted-key-editor");
+        session.setMeetingEncryptionKey({marker.begin(), marker.end()});
+        TEST_CHECK(!toggle->isEnabled() && required->isChecked() && !required->isEnabled());
+        TEST_CHECK(input->text().isEmpty() && !input->isUndoAvailable() && !input->isEnabled());
+        const auto retained = MeetingEntryEncryptionTestAccess::retainPreparedSecret(projected);
+        TEST_CHECK(retained && retained->available());
+        session.clearMeetingEncryptionKey();
+        TEST_CHECK(!retained->available() && !projected.takeEncryptionRequest());
+        TEST_CHECK(toggle->isEnabled() && !required->isChecked() && required->isEnabled());
+        TEST_CHECK(input->text().isEmpty() && error->isHidden() && error->text().isEmpty());
+        projected.accept();
+        auto off = projected.takeEncryptionRequest();
+        TEST_CHECK(projected.result() == QDialog::Accepted && off && off->mode == MeetingEncryptionMode::Off && !off->secret);
+    }
+    session.setMeetingEncryptionKey({marker.begin(), marker.end()});
+    std::optional<MeetingEncryptionRequest> accepted;
+    {
+        JoinMeetingDialog global;
+        auto* toggle = global.findChild<QPushButton*>("joinEncryptionToggle");
+        auto* required = global.findChild<QCheckBox*>("e2eeRequired");
+        auto* input = global.findChild<QLineEdit*>("e2eeKeyInput");
+        TEST_CHECK(!toggle->isEnabled() && required->isChecked() && !required->isEnabled());
+        TEST_CHECK(!input->isEnabled() && input->text().isEmpty());
+        global.accept();
+        accepted = global.takeEncryptionRequest();
+        TEST_CHECK(accepted && accepted->mode == MeetingEncryptionMode::Required && accepted->secret->available());
+        TEST_CHECK(!global.takeEncryptionRequest());
+    }
+    TEST_CHECK(accepted->secret->available()); // Taken request survives dialog destruction.
+    accepted->Revoke();
+    TEST_CHECK(session.hasMeetingEncryptionKey());
+    {
+        JoinMeetingDialog global;
+        const auto retained = MeetingEntryEncryptionTestAccess::retainPreparedSecret(global);
+        global.reject();
+        TEST_CHECK(retained && !retained->available() && !global.takeEncryptionRequest());
+        TEST_CHECK(session.hasMeetingEncryptionKey());
+    }
+    {
+        JoinMeetingDialog updated;
+        TEST_CHECK(!updated.findChild<QPushButton*>("joinEncryptionToggle")->isEnabled());
+        session.setMeetingSecurityPreferences({true, false, false, false});
+        TEST_CHECK(updated.findChild<QPushButton*>("joinEncryptionToggle")->isEnabled());
+        TEST_CHECK(!updated.findChild<QCheckBox*>("e2eeRequired")->isChecked());
+        updated.accept();
+        auto off = updated.takeEncryptionRequest();
+        TEST_CHECK(off && off->mode == MeetingEncryptionMode::Off && !off->secret);
+    }
+    {
+        JoinMeetingDialog pending;
+        TEST_CHECK(!MeetingEntryEncryptionTestAccess::retainPreparedSecret(pending));
+        MeetingEntryEncryptionTestAccess::loading(pending, true);
+        session.setMeetingSecurityPreferences({false, false, false, true});
+        TEST_CHECK(!pending.findChild<QPushButton*>("joinEncryptionToggle")->isEnabled());
+        pending.accept(); // Admission completes after the policy changed.
+        auto required = pending.takeEncryptionRequest();
+        TEST_CHECK(required && required->mode == MeetingEncryptionMode::Required && required->secret->available());
+        required->Revoke();
+    }
+    session.setMeetingSecurityPreferences({true, false, false, false});
+    {
+        JoinMeetingDialog pending;
+        TEST_CHECK(!MeetingEntryEncryptionTestAccess::retainPreparedSecret(pending));
+        MeetingEntryEncryptionTestAccess::loading(pending, true);
+        session.setMeetingSecurityPreferences({false, false, false, true});
+        session.clearMeetingEncryptionKey();
+        pending.accept();
+        auto off = pending.takeEncryptionRequest();
+        TEST_CHECK(pending.result() == QDialog::Accepted && off && off->mode == MeetingEncryptionMode::Off && !off->secret);
+        TEST_CHECK(pending.findChild<QLabel*>("e2eeInputError")->isHidden());
+    }
+    session.clearMeetingEncryptionKey();
+    session.setMeetingSecurityPreferences({});
+    {
+        session.loginAsGuest("Public reset fixture", "public-reset-fixture");
+        JoinMeetingDialog reset;
+        auto* input = reset.findChild<QLineEdit*>("e2eeKeyInput");
+        reset.findChild<QCheckBox*>("e2eeRequired")->setChecked(true);
+        input->setText("public-reset-uncommitted-key");
+        const auto retained = MeetingEntryEncryptionTestAccess::retainPreparedSecret(reset);
+        session.logout(false);
+        TEST_CHECK(reset.result() == QDialog::Rejected && input->text().isEmpty() && !input->isUndoAvailable());
+        TEST_CHECK(retained && !retained->available() && !reset.takeEncryptionRequest());
+    }
+    std::puts("E2EE_JOIN_SETTINGS_INPUT_GLOBAL_POLICY_AND_CANCELLATION PASS");
 }
 
 void SendEncryptionKey(QWidget* widget, int key) {
@@ -429,6 +917,9 @@ int main(int argc, char **argv) {
     }
     if (app.arguments().contains("--e2ee-only")) {
         TestEncryptionEntryCancellation(app);
+        TestEntryDefaultsWithoutKey(app);
+        TestDetailDirectAdmission(app);
+        TestJoinEncryptionSettings(app);
         TestEncryptionDialog(app);
         style::StopManager();
         return 0;

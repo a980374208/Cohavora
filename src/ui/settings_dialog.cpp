@@ -6,6 +6,7 @@
 #include "src/ui/settings_dialog.h"
 
 #include "src/core/session_shutdown_service.h"
+#include "src/e2ee/meeting_encryption.h"
 #include "src/telemetry/diagnostic_pipeline.h"
 #include "src/ui/audio_device_test_controller.h"
 #include "src/ui/camera_preview_widget.h"
@@ -15,7 +16,9 @@
 #include <QtCore/QPointer>
 #include <QtCore/QTimer>
 #include <QtCore/QVariant>
+#include <QtCore/qscopeguard.h>
 #include <QtGui/QIcon>
+#include <QtGui/QKeyEvent>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainterPath>
 #include <QtGui/QRegion>
@@ -28,6 +31,7 @@
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QListWidget>
+#include <QtWidgets/QLineEdit>
 #include <QtWidgets/QProgressBar>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QRadioButton>
@@ -171,6 +175,7 @@ SettingsDialog::SettingsDialog(
 	setMinimumSize(680 + kShadowMargin * 2, 520 + kShadowMargin * 2);
 	buildUi();
 	setPreferences(_session.mediaPreferences());
+	syncSecurityControls();
 	connectPreferenceControls();
 	connectDeviceControllers();
 
@@ -184,16 +189,33 @@ SettingsDialog::SettingsDialog(
 			}
 		});
 	connect(this, &QDialog::finished, this, [this] {
+		clearSecurityEditor();
 		_audioTestController->stopAll();
 		setMicrophoneTestActive(false);
 		_cameraPreview->stopPreview();
 		emit cameraPreviewStopped();
 	});
+	connect(
+		&_session,
+		&OpenMeeting::SessionManager::meetingSecurityPreferencesChanged,
+		this,
+		&SettingsDialog::syncSecurityControls);
+	connect(
+		&_session,
+		&OpenMeeting::SessionManager::authenticationReset,
+		this,
+		[this] {
+			// A draft key belongs to the same authentication generation as the
+			// in-memory saved key, even when no key has been saved yet.
+			clearSecurityEditor();
+			updateSecurityKeyControls();
+		});
 
 	prepareDevicePlaceholders();
 }
 
 SettingsDialog::~SettingsDialog() {
+	clearSecurityEditor();
 	cancelDeviceDiscovery();
 	if (_audioTestController) {
 		_audioTestController->stopAll();
@@ -204,6 +226,7 @@ SettingsDialog::~SettingsDialog() {
 }
 
 void SettingsDialog::done(int result) {
+	clearSecurityEditor();
 	cancelDeviceDiscovery();
 	QDialog::done(result);
 }
@@ -215,6 +238,13 @@ void SettingsDialog::cancelDeviceDiscovery() {
 }
 
 bool SettingsDialog::eventFilter(QObject *watched, QEvent *event) {
+	if (watched == _e2eeKey && event->type() == QEvent::KeyPress) {
+		const auto *keyEvent = static_cast<QKeyEvent *>(event);
+		if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) {
+			saveSecurityKey();
+			return true;
+		}
+	}
 	if (event->type() != QEvent::Paint || _firstPaintScheduled || _closed || !isVisible()) {
 		return QDialog::eventFilter(watched, event);
 	}
@@ -318,6 +348,9 @@ void SettingsDialog::buildUi() {
 		AppTheme::icon(AppTheme::Icon::Audio),
 		QCoreApplication::translate("MeetingUI", "Audio")));
 	_navigation->addItem(new QListWidgetItem(
+		AppTheme::icon(AppTheme::Icon::Details),
+		QCoreApplication::translate("MeetingUI", "Security")));
+	_navigation->addItem(new QListWidgetItem(
 		AppTheme::icon(AppTheme::Icon::Information),
 		QCoreApplication::translate("MeetingUI", "About")));
 	body->addWidget(_navigation);
@@ -326,6 +359,7 @@ void SettingsDialog::buildUi() {
 	_pages->addWidget(buildGeneralPage());
 	_pages->addWidget(buildVideoPage());
 	_pages->addWidget(buildAudioPage());
+	_pages->addWidget(buildSecurityPage());
 	_pages->addWidget(buildAboutPage());
 	body->addWidget(_pages, 1);
 	surfaceLayout->addLayout(body, 1);
@@ -697,6 +731,186 @@ void SettingsDialog::connectDeviceControllers() {
 				commitPreferences();
 			}
 		});
+}
+
+QWidget *SettingsDialog::buildSecurityPage() {
+	auto *scroll = makeScrollablePage(_pages);
+	auto *content = scroll->widget();
+	auto *layout = static_cast<QVBoxLayout *>(content->layout());
+	layout->setContentsMargins(24, 20, 24, 24);
+	layout->setSpacing(12);
+	layout->addWidget(makePageTitle(
+		QCoreApplication::translate("MeetingUI", "Security"), content));
+	layout->addWidget(makeSectionTitle(
+		QCoreApplication::translate("MeetingUI", "End-to-end encryption (E2EE)"), content));
+
+	_quickE2ee = new QCheckBox(QCoreApplication::translate(
+		"MeetingUI", "Encrypt quick meetings"), content);
+	_quickE2ee->setObjectName(QStringLiteral("settingsQuickE2ee"));
+	layout->addWidget(_quickE2ee);
+	_screenShareE2ee = new QCheckBox(QCoreApplication::translate(
+		"MeetingUI", "Encrypt screen sharing"), content);
+	_screenShareE2ee->setObjectName(QStringLiteral("settingsScreenShareE2ee"));
+	layout->addWidget(_screenShareE2ee);
+	_meetingDetailsE2ee = new QCheckBox(QCoreApplication::translate(
+		"MeetingUI", "Encrypt meetings joined from meeting details"), content);
+	_meetingDetailsE2ee->setObjectName(QStringLiteral("settingsMeetingDetailsE2ee"));
+	layout->addWidget(_meetingDetailsE2ee);
+	_allE2ee = new QCheckBox(QCoreApplication::translate(
+		"MeetingUI", "Encrypt all meetings"), content);
+	_allE2ee->setObjectName(QStringLiteral("settingsAllE2ee"));
+	layout->addWidget(_allE2ee);
+	auto *scopeHint = new QLabel(QCoreApplication::translate(
+		"MeetingUI", "All meetings also includes quick meetings, screen sharing, and meeting details."), content);
+	scopeHint->setObjectName(QStringLiteral("hintLabel"));
+	scopeHint->setWordWrap(true);
+	layout->addWidget(scopeHint);
+
+	layout->addWidget(makeSectionTitle(
+		QCoreApplication::translate("MeetingUI", "Encryption key"), content));
+	_e2eeKey = new QLineEdit(content);
+	_e2eeKey->setObjectName(QStringLiteral("settingsE2eeKey"));
+	_e2eeKey->setAccessibleName(QCoreApplication::translate("MeetingUI", "Encryption key"));
+	_e2eeKey->setEchoMode(QLineEdit::Password);
+	_e2eeKey->setInputMethodHints(Qt::ImhHiddenText | Qt::ImhSensitiveData | Qt::ImhNoPredictiveText);
+	_e2eeKey->setContextMenuPolicy(Qt::NoContextMenu);
+	_e2eeKey->installEventFilter(this);
+	// Retain one overflow character so an overlong paste is rejected rather
+	// than silently accepted as a different encryption key.
+	_e2eeKey->setMaxLength(4097);
+	AppTheme::setStyleVariant(*_e2eeKey, "meeting-main-window-this");
+	layout->addWidget(_e2eeKey);
+
+	auto *keyButtons = new QHBoxLayout();
+	_e2eeSaveKey = new QPushButton(QCoreApplication::translate("MeetingUI", "Save key"), content);
+	_e2eeSaveKey->setObjectName(QStringLiteral("settingsE2eeSaveKey"));
+	_e2eeSaveKey->setAutoDefault(false);
+	_e2eeClearKey = new QPushButton(QCoreApplication::translate("MeetingUI", "Clear key"), content);
+	_e2eeClearKey->setObjectName(QStringLiteral("settingsE2eeClearKey"));
+	_e2eeClearKey->setAutoDefault(false);
+	keyButtons->addWidget(_e2eeSaveKey);
+	keyButtons->addWidget(_e2eeClearKey);
+	keyButtons->addStretch();
+	layout->addLayout(keyButtons);
+
+	_e2eeStatus = new QLabel(content);
+	_e2eeStatus->setObjectName(QStringLiteral("settingsE2eeStatus"));
+	_e2eeStatus->setWordWrap(true);
+	layout->addWidget(_e2eeStatus);
+	for (const auto &text : {
+			QCoreApplication::translate("MeetingUI", "Use the same encryption key as the other participants and share it through a trusted channel. Participant and connection metadata remain visible to the service."),
+			QCoreApplication::translate("MeetingUI", "The encryption key is kept only in memory for this sign-in and cleared on sign-out."),
+			QCoreApplication::translate("MeetingUI", "Changes apply the next time you create or join a meeting."),
+			QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Auto uses VP8; select a supported codec in Settings for camera and screen sharing.") }) {
+		auto *hint = new QLabel(text, content);
+		hint->setObjectName(QStringLiteral("hintLabel"));
+		hint->setWordWrap(true);
+		layout->addWidget(hint);
+	}
+	layout->addStretch();
+
+	connect(_quickE2ee, &QCheckBox::toggled, this, [this] {
+		commitSecurityPreferences();
+	});
+	connect(_screenShareE2ee, &QCheckBox::toggled, this, [this] {
+		commitSecurityPreferences();
+	});
+	connect(_meetingDetailsE2ee, &QCheckBox::toggled, this, [this] {
+		commitSecurityPreferences();
+	});
+	connect(_allE2ee, &QCheckBox::toggled, this, [this] {
+		commitSecurityPreferences();
+	});
+	connect(_e2eeKey, &QLineEdit::textChanged, this, [this] {
+		updateSecurityKeyControls();
+	});
+	connect(_e2eeSaveKey, &QPushButton::clicked, this, &SettingsDialog::saveSecurityKey);
+	connect(_e2eeClearKey, &QPushButton::clicked, this, [this] {
+		clearSecurityEditor();
+		_session.clearMeetingEncryptionKey();
+		updateSecurityKeyControls();
+	});
+	return scroll;
+}
+
+void SettingsDialog::syncSecurityControls() {
+	const auto value = _session.meetingSecurityPreferences();
+	const QSignalBlocker quickBlocker(_quickE2ee);
+	const QSignalBlocker screenShareBlocker(_screenShareE2ee);
+	const QSignalBlocker meetingDetailsBlocker(_meetingDetailsE2ee);
+	const QSignalBlocker allBlocker(_allE2ee);
+	_quickE2ee->setChecked(value.quickMeetingsE2ee || value.allMeetingsE2ee);
+	_screenShareE2ee->setChecked(value.screenShareE2ee || value.allMeetingsE2ee);
+	_meetingDetailsE2ee->setChecked(value.meetingDetailsE2ee || value.allMeetingsE2ee);
+	_allE2ee->setChecked(value.allMeetingsE2ee);
+	_quickE2ee->setEnabled(!value.allMeetingsE2ee);
+	_screenShareE2ee->setEnabled(!value.allMeetingsE2ee);
+	_meetingDetailsE2ee->setEnabled(!value.allMeetingsE2ee);
+	updateSecurityKeyControls();
+}
+
+void SettingsDialog::commitSecurityPreferences() {
+	auto value = _session.meetingSecurityPreferences();
+	// While All is active the checked entry controls are only a projection of
+	// its override. Never save that projection over the independent choices.
+	if (!value.allMeetingsE2ee && !_allE2ee->isChecked()) {
+		value.quickMeetingsE2ee = _quickE2ee->isChecked();
+		value.screenShareE2ee = _screenShareE2ee->isChecked();
+		value.meetingDetailsE2ee = _meetingDetailsE2ee->isChecked();
+	}
+	value.allMeetingsE2ee = _allE2ee->isChecked();
+	_session.setMeetingSecurityPreferences(value);
+	syncSecurityControls();
+}
+
+void SettingsDialog::updateSecurityKeyControls() {
+	const auto enabled = _quickE2ee->isChecked() || _screenShareE2ee->isChecked() ||
+		_meetingDetailsE2ee->isChecked() || _allE2ee->isChecked();
+	if (enabled) livekit::MarkSensitiveMemoryUsed();
+	_e2eeKey->setEnabled(enabled);
+	if (!enabled && !_e2eeKey->text().isEmpty()) clearSecurityEditor();
+	const auto hasKey = _session.hasMeetingEncryptionKey();
+	_e2eeKey->setPlaceholderText(hasKey
+		? QCoreApplication::translate("MeetingUI", "Key configured. Enter a new key to replace it.")
+		: QCoreApplication::translate("MeetingUI", "ASCII encryption key (not the meeting password)"));
+	_e2eeSaveKey->setEnabled(enabled && !_e2eeKey->text().isEmpty());
+	_e2eeClearKey->setEnabled(hasKey);
+	AppTheme::setStyleVariant(*_e2eeStatus, hasKey
+		? "settings-dialog-audiostatus-2-active" : "");
+	_e2eeStatus->setText(hasKey
+		? QCoreApplication::translate("MeetingUI", "Encryption key configured.")
+		: QCoreApplication::translate("MeetingUI", "Without a saved encryption key, E2EE is off. You can create or join meetings normally."));
+	_e2eeStatus->setVisible(enabled || hasKey);
+}
+
+void SettingsDialog::saveSecurityKey() {
+	if (!_e2eeKey->isEnabled() || _e2eeKey->text().isEmpty()) return;
+	auto text = _e2eeKey->text();
+	auto bytes = text.toUtf8();
+	const auto cleanup = qScopeGuard([&] {
+		if (!text.isEmpty()) OPENSSL_cleanse(text.data(), static_cast<size_t>(text.size()) * sizeof(QChar));
+		if (!bytes.isEmpty()) OPENSSL_cleanse(bytes.data(), static_cast<size_t>(bytes.size()));
+	});
+	clearSecurityEditor();
+	updateSecurityKeyControls();
+	try {
+		_session.setMeetingEncryptionKey(std::vector<uint8_t>(bytes.begin(), bytes.end()));
+		updateSecurityKeyControls();
+	} catch (const livekit::EncryptionRequestException&) {
+		AppTheme::setStyleVariant(*_e2eeStatus, "settings-dialog-audiostatus-3");
+		_e2eeStatus->setText(QCoreApplication::translate("MeetingUI", "Enter 1 to 4096 printable ASCII characters. Unicode keys are not supported."));
+		_e2eeStatus->show();
+	}
+}
+
+void SettingsDialog::clearSecurityEditor() {
+	if (!_e2eeKey) return;
+	const QSignalBlocker blocker(_e2eeKey);
+	auto text = _e2eeKey->text();
+	// setText resets the undo history. Qt/IME historical copies cannot be guaranteed erased.
+	_e2eeKey->setText(QString(text.size(), QChar(0)));
+	_e2eeKey->clear();
+	if (!text.isEmpty()) OPENSSL_cleanse(text.data(), static_cast<size_t>(text.size()) * sizeof(QChar));
 }
 
 QWidget *SettingsDialog::buildAboutPage() {

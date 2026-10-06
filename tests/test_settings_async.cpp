@@ -3,10 +3,12 @@
 #include "src/ui/app_translation.h"
 #include "src/ui/audio_device_test_controller.h"
 #include "src/core/session_shutdown_service.h"
+#include "src/e2ee/meeting_encryption.h"
 #include "src/telemetry/diagnostic_pipeline.h"
 #include "tests/support/test_check.h"
 
 #include <QtCore/QElapsedTimer>
+#include <QtCore/QFile>
 #include <QtCore/QSettings>
 #include <QtCore/QTemporaryDir>
 #include <QtCore/QThread>
@@ -16,6 +18,8 @@
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
+#include <QtWidgets/QLabel>
+#include <QtWidgets/QLineEdit>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QRadioButton>
 #include <QtWidgets/QScrollArea>
@@ -23,6 +27,7 @@
 #include <QtPlugin>
 
 #include <nlohmann/json.hpp>
+#include <array>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
@@ -210,7 +215,7 @@ void smallWindowPagesRemainReachable(const QString &path) {
 	auto *outer = dialog.findChild<QScrollArea *>("adaptiveDialogScroll");
 	TEST_CHECK(outer);
 	for (auto page : {Dialog::Page::General, Dialog::Page::Video,
-			Dialog::Page::Audio, Dialog::Page::About}) {
+			Dialog::Page::Audio, Dialog::Page::Security, Dialog::Page::About}) {
 		dialog.showPage(page);
 		QCoreApplication::processEvents();
 		auto *scroll = Access::page(dialog);
@@ -220,6 +225,7 @@ void smallWindowPagesRemainReachable(const QString &path) {
 		case Dialog::Page::General: target = dialog.findChild<QCheckBox *>("settingsStayWhenLocked"); break;
 		case Dialog::Page::Video: target = Access::lastVideoControl(dialog); break;
 		case Dialog::Page::Audio: target = dialog.findChild<QCheckBox *>("autoGainControlCheckBox"); break;
+		case Dialog::Page::Security: target = dialog.findChild<QPushButton *>("settingsE2eeClearKey"); break;
 		case Dialog::Page::About: target = scroll->findChild<QPushButton *>("secondaryButton"); break;
 		}
 		TEST_CHECK(target && target->isVisible());
@@ -231,6 +237,227 @@ void smallWindowPagesRemainReachable(const QString &path) {
 		TEST_CHECK(dialog.rect().contains(target->mapTo(&dialog, target->rect().center())));
 	}
 	dialog.reject();
+}
+
+void meetingSecurityScopeAndKeyLifetime(const QString &path) {
+	using namespace livekit;
+	using Entry = OpenMeeting::MeetingEncryptionEntry;
+	constexpr std::array entries{Entry::QuickMeeting, Entry::ScreenShare,
+		Entry::MeetingDetails, Entry::JoinMeeting};
+	const auto checkOffRequests = [&entries](const OpenMeeting::SessionManager &manager) {
+		for (const auto entry : entries) {
+			auto request = manager.meetingEncryptionRequest(entry);
+			request.Validate();
+			TEST_CHECK(request.mode == MeetingEncryptionMode::Off && !request.secret);
+		}
+	};
+	auto session = OpenMeeting::SessionManagerTestAccess::create(path);
+	TEST_CHECK(!session->hasMeetingEncryptionKey());
+	const auto preferencesFor = [](unsigned mask) {
+		OpenMeeting::MeetingSecurityPreferences prefs;
+		prefs.quickMeetingsE2ee = (mask & 1) != 0;
+		prefs.screenShareE2ee = (mask & 2) != 0;
+		prefs.meetingDetailsE2ee = (mask & 4) != 0;
+		prefs.allMeetingsE2ee = (mask & 8) != 0;
+		return prefs;
+	};
+	for (unsigned mask = 0; mask != 16; ++mask) {
+		const auto prefs = preferencesFor(mask);
+		session->setMeetingSecurityPreferences(prefs);
+		const auto actual = session->meetingSecurityPreferences();
+		TEST_CHECK(actual.quickMeetingsE2ee == prefs.quickMeetingsE2ee);
+		TEST_CHECK(actual.screenShareE2ee == prefs.screenShareE2ee);
+		TEST_CHECK(actual.meetingDetailsE2ee == prefs.meetingDetailsE2ee);
+		TEST_CHECK(actual.allMeetingsE2ee == prefs.allMeetingsE2ee);
+		checkOffRequests(*session);
+	}
+	try {
+		session->meetingEncryptionRequest(static_cast<Entry>(-1));
+		TEST_CHECK(false && "an unknown entry must still be rejected without a key");
+	} catch (const EncryptionRequestException &error) {
+		TEST_CHECK(error.code() == EncryptionRequestError::InvalidPolicy);
+	}
+	const QByteArray marker("public-settings-secret-marker");
+	session->setMeetingEncryptionKey({marker.begin(), marker.end()});
+	for (unsigned mask = 0; mask != 16; ++mask) {
+		session->setMeetingSecurityPreferences(preferencesFor(mask));
+		for (size_t index = 0; index != entries.size(); ++index) {
+			auto request = session->meetingEncryptionRequest(entries[index]);
+			request.Validate();
+			const bool required = (mask & 8) != 0 || (index < 3 && (mask & (1u << index)) != 0);
+			TEST_CHECK((request.mode == MeetingEncryptionMode::Required) == required);
+			TEST_CHECK(bool(request.secret) == required);
+			request.Revoke();
+			TEST_CHECK(session->hasMeetingEncryptionKey());
+		}
+	}
+	session->setMeetingSecurityPreferences(preferencesFor(8));
+	auto first = session->meetingEncryptionRequest(Entry::JoinMeeting);
+	auto second = session->meetingEncryptionRequest(Entry::QuickMeeting);
+	TEST_CHECK(first.secret != second.secret);
+	first.Revoke();
+	TEST_CHECK(second.secret->available() && session->hasMeetingEncryptionKey());
+	const auto provider = second.secret->ConsumeProvider();
+	TEST_CHECK(provider && !second.secret->available() && session->hasMeetingEncryptionKey());
+	auto next = session->meetingEncryptionRequest(Entry::MeetingDetails);
+	TEST_CHECK(next.secret->available());
+	// Clearing a default key does not revoke a separately owned accepted request.
+	session->clearMeetingEncryptionKey();
+	TEST_CHECK(!session->hasMeetingEncryptionKey() && next.secret->available());
+	checkOffRequests(*session);
+	next.Revoke();
+	session->setMeetingEncryptionKey({marker.begin(), marker.end()});
+	try {
+		session->setMeetingEncryptionKey({0});
+		TEST_CHECK(false && "invalid material must be rejected");
+	} catch (const EncryptionRequestException &error) {
+		TEST_CHECK(error.code() == EncryptionRequestError::InvalidKeyMaterial);
+	}
+	TEST_CHECK(session->hasMeetingEncryptionKey());
+	try {
+		session->meetingEncryptionRequest(static_cast<Entry>(-1));
+		TEST_CHECK(false && "an unknown entry must not silently disable encryption");
+	} catch (const EncryptionRequestException &error) {
+		TEST_CHECK(error.code() == EncryptionRequestError::InvalidPolicy);
+	}
+	session->saveToSettings();
+	QSettings persisted(path, QSettings::IniFormat);
+	persisted.sync();
+	TEST_CHECK(persisted.status() == QSettings::NoError);
+	for (const auto &key : persisted.allKeys()) {
+		TEST_CHECK(!key.contains(QStringLiteral("secret"), Qt::CaseInsensitive));
+		TEST_CHECK(!key.contains(QStringLiteral("key"), Qt::CaseInsensitive));
+		TEST_CHECK(!persisted.value(key).toString().contains(QString::fromLatin1(marker)));
+	}
+	QFile contents(path);
+	TEST_CHECK(contents.open(QIODevice::ReadOnly));
+	TEST_CHECK(!contents.readAll().contains(marker));
+	auto reloaded = OpenMeeting::SessionManagerTestAccess::create(path);
+	TEST_CHECK(reloaded->meetingSecurityPreferences().allMeetingsE2ee);
+	TEST_CHECK(!reloaded->meetingSecurityPreferences().quickMeetingsE2ee);
+	TEST_CHECK(!reloaded->meetingSecurityPreferences().screenShareE2ee);
+	TEST_CHECK(!reloaded->meetingSecurityPreferences().meetingDetailsE2ee);
+	TEST_CHECK(!reloaded->hasMeetingEncryptionKey());
+	checkOffRequests(*reloaded);
+	session->logout(false);
+	TEST_CHECK(!session->hasMeetingEncryptionKey());
+	TEST_CHECK(session->meetingSecurityPreferences().allMeetingsE2ee);
+	checkOffRequests(*session);
+}
+
+void securityPageEditsAndClearsKeys(const QString &path) {
+	auto session = makeSession(path);
+	Discovery discovery([] { return devices(); }, [](auto job) { job(); return true; });
+	Dialog dialog(*session);
+	Access::use(dialog, discovery);
+	dialog.showPage(Dialog::Page::Security);
+	dialog.show();
+	QCoreApplication::processEvents();
+	auto *quick = dialog.findChild<QCheckBox *>("settingsQuickE2ee");
+	auto *screenShare = dialog.findChild<QCheckBox *>("settingsScreenShareE2ee");
+	auto *details = dialog.findChild<QCheckBox *>("settingsMeetingDetailsE2ee");
+	auto *all = dialog.findChild<QCheckBox *>("settingsAllE2ee");
+	auto *key = dialog.findChild<QLineEdit *>("settingsE2eeKey");
+	auto *save = dialog.findChild<QPushButton *>("settingsE2eeSaveKey");
+	auto *clear = dialog.findChild<QPushButton *>("settingsE2eeClearKey");
+	auto *status = dialog.findChild<QLabel *>("settingsE2eeStatus");
+	TEST_CHECK(quick && screenShare && details && all && key && save && clear && status);
+	TEST_CHECK(!quick->isChecked() && !screenShare->isChecked() && !details->isChecked());
+	TEST_CHECK(!all->isChecked() && quick->isEnabled() && screenShare->isEnabled() && details->isEnabled());
+	TEST_CHECK(key->echoMode() == QLineEdit::Password && !key->isEnabled());
+	all->click();
+	TEST_CHECK(all->isChecked() && quick->isChecked() && screenShare->isChecked() && details->isChecked());
+	TEST_CHECK(!quick->isEnabled() && !screenShare->isEnabled() && !details->isEnabled());
+	TEST_CHECK(session->meetingSecurityPreferences().allMeetingsE2ee);
+	TEST_CHECK(!session->meetingSecurityPreferences().quickMeetingsE2ee);
+	TEST_CHECK(!session->meetingSecurityPreferences().screenShareE2ee);
+	TEST_CHECK(!session->meetingSecurityPreferences().meetingDetailsE2ee);
+	all->click();
+	TEST_CHECK(!all->isChecked() && !quick->isChecked() && !screenShare->isChecked() && !details->isChecked());
+	TEST_CHECK(quick->isEnabled() && screenShare->isEnabled() && details->isEnabled());
+	TEST_CHECK(!session->meetingSecurityPreferences().allMeetingsE2ee);
+	TEST_CHECK(!quick->isChecked() && !key->isEnabled() && !save->isEnabled());
+	// Preserve a mixed independent selection across All on/off, key updates,
+	// and an external preference update while the override is active.
+	screenShare->click();
+	TEST_CHECK(key->isEnabled() && !quick->isChecked() && !details->isChecked());
+	all->click();
+	auto prefs = session->meetingSecurityPreferences();
+	TEST_CHECK(!prefs.quickMeetingsE2ee && prefs.screenShareE2ee && !prefs.meetingDetailsE2ee);
+	prefs.meetingDetailsE2ee = true;
+	session->setMeetingSecurityPreferences(prefs);
+	all->click();
+	TEST_CHECK(!quick->isChecked() && screenShare->isChecked() && details->isChecked());
+	screenShare->click();
+	TEST_CHECK(key->isEnabled());
+	details->click();
+	TEST_CHECK(!key->isEnabled());
+	quick->click();
+	TEST_CHECK(key->isEnabled() && !save->isEnabled());
+	TEST_CHECK(status->text() == QCoreApplication::translate("MeetingUI",
+		"Without a saved encryption key, E2EE is off. You can create or join meetings normally."));
+	TEST_CHECK(status->property("uiStyle").toString().isEmpty());
+	save->click();
+	TEST_CHECK(!session->hasMeetingEncryptionKey() && !status->text().isEmpty());
+	key->setText(QString::fromUtf8("中文密钥"));
+	save->click();
+	TEST_CHECK(!session->hasMeetingEncryptionKey() && key->text().isEmpty());
+	key->setText(QString(5000, QLatin1Char('A')));
+	TEST_CHECK(key->text().size() == 4097);
+	save->click();
+	TEST_CHECK(!session->hasMeetingEncryptionKey() && key->text().isEmpty());
+	all->click();
+	key->setText(QStringLiteral("public-security-page-key"));
+	save->click();
+	TEST_CHECK(session->hasMeetingEncryptionKey() && clear->isEnabled());
+	TEST_CHECK(key->text().isEmpty() && !key->isUndoAvailable());
+	TEST_CHECK(session->meetingSecurityPreferences().quickMeetingsE2ee);
+	TEST_CHECK(!session->meetingSecurityPreferences().screenShareE2ee);
+	TEST_CHECK(!session->meetingSecurityPreferences().meetingDetailsE2ee);
+	all->click();
+	TEST_CHECK(quick->isChecked() && !screenShare->isChecked() && !details->isChecked());
+	for (const bool savedKey : {false, true}) {
+		for (const bool replaceLogin : {false, true}) {
+			session->loginAsGuest(QStringLiteral("Before authentication reset"));
+			if (savedKey) {
+				key->setText(QStringLiteral("public-saved-generation-key"));
+				save->click();
+			}
+			TEST_CHECK(session->hasMeetingEncryptionKey() == savedKey);
+			key->setText(QStringLiteral("public-unsubmitted-generation-key"));
+			key->insert(QStringLiteral("!"));
+			TEST_CHECK(key->isUndoAvailable() && save->isEnabled());
+			const auto previousGeneration = session->authGeneration();
+			if (replaceLogin) session->loginAsGuest(QStringLiteral("Replacement authentication"));
+			else session->logout(false);
+			TEST_CHECK(session->authGeneration() == previousGeneration + 1);
+			TEST_CHECK(key->text().isEmpty() && !key->isUndoAvailable());
+			TEST_CHECK(!save->isEnabled() && !clear->isEnabled());
+			TEST_CHECK(!session->hasMeetingEncryptionKey());
+			key->undo();
+			save->click();
+			TEST_CHECK(key->text().isEmpty() && !session->hasMeetingEncryptionKey());
+			TEST_CHECK(quick->isChecked() && !screenShare->isChecked() && !details->isChecked());
+			const auto request = session->meetingEncryptionRequest(OpenMeeting::MeetingEncryptionEntry::QuickMeeting);
+			TEST_CHECK(request.mode == livekit::MeetingEncryptionMode::Off && !request.secret);
+		}
+	}
+	key->setText(QStringLiteral("public-security-page-key"));
+	save->click();
+	TEST_CHECK(session->hasMeetingEncryptionKey());
+	key->setText(QStringLiteral("public-unsubmitted-key"));
+	dialog.reject();
+	TEST_CHECK(key->text().isEmpty() && !key->isUndoAvailable());
+	TEST_CHECK(session->hasMeetingEncryptionKey());
+	Dialog reopened(*session);
+	Access::use(reopened, discovery);
+	reopened.showPage(Dialog::Page::Security);
+	TEST_CHECK(reopened.findChild<QLineEdit *>("settingsE2eeKey")->text().isEmpty());
+	auto *reopenedClear = reopened.findChild<QPushButton *>("settingsE2eeClearKey");
+	TEST_CHECK(reopenedClear->isEnabled());
+	reopenedClear->click();
+	TEST_CHECK(!session->hasMeetingEncryptionKey() && !reopenedClear->isEnabled());
+	reopened.reject();
 }
 
 void firstPaintAndCloseDoNotWaitForDriver(const QString &path) {
@@ -413,6 +640,8 @@ int main(int argc, char **argv) {
 	livekit::diagnostic::InstallBusinessPipeline(pipeline);
 	firstPaintAndCloseDoNotWaitForDriver(temporary.filePath("first.ini"));
 	smallWindowPagesRemainReachable(temporary.filePath("layout.ini"));
+	meetingSecurityScopeAndKeyLifetime(temporary.filePath("security-lifetime.ini"));
+	securityPageEditsAndClearsKeys(temporary.filePath("security-ui.ini"));
 	staleQueuedCompletionAndFailurePreservePreferences(temporary.filePath("stale.ini"));
 	cacheExpiryEmptyAndSubmissionFailure();
 	using namespace livekit::diagnostic;
@@ -420,5 +649,5 @@ int main(int argc, char **argv) {
 	InstallBusinessPipeline({});
 	TEST_CHECK(pipeline->Close() == DrainResult::Completed);
 	verifyRecordedMetrics(root);
-	std::puts("Settings async, cache, cancellation, preferences and diagnostic persistence PASS");
+	std::puts("Settings async, cache, cancellation, security scope/key lifetime, preferences and diagnostic persistence PASS");
 }

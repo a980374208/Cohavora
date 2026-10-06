@@ -3,6 +3,7 @@ class QApplication;
 void RunTelemetryPanelContract(QApplication &app);
 
 #include "base/basic_types.h"
+#include "base/platform/win/base_windows_winrt.h"
 #include "crl/crl.h"
 #include "rpl/rpl.h"
 #include "src/core/meeting_coordinator.h"
@@ -10,6 +11,8 @@ void RunTelemetryPanelContract(QApplication &app);
 #include "src/net/service_endpoint_policy.h"
 #include "src/rtc/webrtc_manager.h"
 #include "src/render/owned_i420_frame.h"
+#include "src/render/qt_cpu_video_renderer.h"
+#include "src/media/desktop_capture.h"
 #include "src/telemetry/stats.h"
 #include "src/ui/meeting_room_window.h"
 #include "src/ui/meeting_log_console.h"
@@ -41,6 +44,7 @@ void RunTelemetryPanelContract(QApplication &app);
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QSaveFile>
 #include <QtCore/QJsonDocument>
+#include <QtCore/QJsonArray>
 #include <QtCore/QJsonObject>
 #include <QtCore/QDateTime>
 void RunOpenGlContract();
@@ -48,6 +52,7 @@ void RunOpenGlContract();
 #include "src/render/api/render_backend_module_info.h"
 #include "tests/render/modules/dx11_test_hooks.h"
 #include <d3d11.h>
+#include <dwmapi.h>
 #include <wrl/client.h>
 #include "src/ui/meeting_ui_integration.h"
 #include "tests/support/test_check.h"
@@ -60,6 +65,7 @@ void RunOpenGlContract();
 #include "rtc_base/thread.h"
 
 #include <QtCore/QCoreApplication>
+#include <QtCore/QAbstractNativeEventFilter>
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QDir>
 #include <QtCore/QEvent>
@@ -91,6 +97,7 @@ void RunOpenGlContract();
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <set>
 #include <string>
 #include <stdexcept>
 #include <type_traits>
@@ -1500,6 +1507,14 @@ public:
         return std::unique_ptr<MeetingUI::MeetingRoomWindow>(new MeetingUI::MeetingRoomWindow(
             MeetingUI::MeetingRoomWindow::ParticipantWindowTestTag{}, config, coordinator, true));
     }
+    static void initializeResizeObservationHeader(MeetingUI::MeetingRoomWindow &window) {
+        TEST_CHECK(window._topBar);
+        window._topBar->setMeetingId(QStringLiteral("731 804 926"));
+        window._topBar->setTelemetrySnapshot(QVariantMap{
+            {QStringLiteral("sessionGeneration"), 1}, {QStringLiteral("revision"), 1},
+            {QStringLiteral("availability"), QStringLiteral("VALID")},
+            {QStringLiteral("coverage"), 1.0}});
+    }
     static std::size_t tileCount(const MeetingUI::MeetingRoomWindow &window) { return window._remoteTiles.size(); }
     static std::size_t screenCount(const MeetingUI::MeetingRoomWindow &window) { return window._remoteScreenTiles.size(); }
     static const livekit::VideoDemandPlan &acceptedVideoPlan(
@@ -2290,6 +2305,16 @@ public:
         }
         return window._usingGpuBackend.load();
     }
+    static bool showPreparedGpu(MeetingUI::MeetingRoomWindow &window) {
+        if (!window._videoCanvas || GetSystemMetrics(SM_REMOTESESSION) != 0) return false;
+        window.setAttribute(Qt::WA_DontShowOnScreen, false);
+        window.show();
+        QElapsedTimer wait; wait.start();
+        while (!window._usingGpuBackend.load() && window._videoCanvas->rendererPending() && wait.elapsed() < 6000)
+            QApplication::processEvents(QEventLoop::AllEvents, 20);
+        QApplication::processEvents();
+        return window._usingGpuBackend.load();
+    }
     static livekit::render::GlVideoCanvas& glCanvas(MeetingUI::MeetingRoomWindow& window) {
         auto* canvas = dynamic_cast<livekit::render::GlVideoCanvas*>(window._videoCanvas);
         TEST_CHECK(canvas);
@@ -2305,22 +2330,102 @@ public:
         return window._videoCanvas->hasVideo(key.toStdString());
     }
     static void prepareResizeWindow(MeetingUI::MeetingRoomWindow &window) {
-        window.setWindowFlags(Qt::Window | Qt::FramelessWindowHint |
+        window.setWindowFlags(Qt::Window |
             Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint);
         window.setMinimumSize(850, 560);
+    }
+    static void checkRasterResize(MeetingUI::MeetingRoomWindow &window) {
+        const std::array<QWidget*, 7> raster{{window._topBar, window._bottomBar,
+            window._stageContainer, window._localTile, window._recoveryBanner,
+            window._participantsSidebar, window._chatSidebar}};
+        for (const auto widget : raster) {
+            // winId() would create the very HWND this regression forbids.
+            if (widget) TEST_CHECK(widget->internalWinId() == 0);
+        }
+        const auto root = reinterpret_cast<HWND>(window.internalWinId());
+        const auto canvas = reinterpret_cast<HWND>(window._videoCanvas->internalWinId());
+        TEST_CHECK(root && canvas && GetParent(canvas) == root);
+        TEST_CHECK(window._videoPagingControls->internalWinId());
+        TEST_CHECK(!window._previousVideoPage->internalWinId());
+        TEST_CHECK(!window._nextVideoPage->internalWinId());
+        RECT bounds{};
+        TEST_CHECK(GetWindowRect(canvas, &bounds));
+        const auto offset = window._videoCanvas->mapTo(&window, QPoint());
+        const auto dpr = window.devicePixelRatioF();
+        POINT origin{qRound(offset.x() * dpr), qRound(offset.y() * dpr)};
+        TEST_CHECK(ClientToScreen(root, &origin));
+        TEST_CHECK(std::abs(bounds.left - origin.x) <= 1);
+        TEST_CHECK(std::abs(bounds.top - origin.y) <= 1);
+        TEST_CHECK(std::abs(bounds.right - bounds.left - qRound(window._videoCanvas->width() * dpr)) <= 1);
+        TEST_CHECK(std::abs(bounds.bottom - bounds.top - qRound(window._videoCanvas->height() * dpr)) <= 1);
+        if (window._videoPagingControls->isVisible()) {
+            const auto paging = reinterpret_cast<HWND>(window._videoPagingControls->internalWinId());
+            TEST_CHECK(GetParent(paging) == root);
+            RECT controls{};
+            TEST_CHECK(GetWindowRect(paging, &controls));
+            const auto pos = window._videoPagingControls->mapTo(&window, QPoint());
+            POINT topLeft{qRound(pos.x() * dpr), qRound(pos.y() * dpr)};
+            TEST_CHECK(ClientToScreen(root, &topLeft));
+            TEST_CHECK(std::abs(controls.left - topLeft.x) <= 1);
+            TEST_CHECK(std::abs(controls.top - topLeft.y) <= 1);
+            POINT center{(controls.left + controls.right) / 2,
+                (controls.top + controls.bottom) / 2};
+            TEST_CHECK(ScreenToClient(root, &center));
+            TEST_CHECK(ChildWindowFromPointEx(root, center, CWP_SKIPINVISIBLE) == paging);
+        }
+    }
+    static void moveStageForResize(MeetingUI::MeetingRoomWindow &window, int dy) {
+        window._stageContainer->move(window._stageContainer->pos() + QPoint(0, dy));
+    }
+    static void showPagingForResize(MeetingUI::MeetingRoomWindow &window) {
+        window._videoPagingControls->show();
+        window._videoPagingControls->raise();
+    }
+    static std::array<QWidget*, 3> rasterPaintSurfaces(MeetingUI::MeetingRoomWindow &window) {
+        return {{window._topBar, window._bottomBar, window._participantsSidebar}};
     }
     static int checkNativeResize(MeetingUI::MeetingRoomWindow &window, bool before, const char *backend,
         bool disabled = false) {
         const auto handle = reinterpret_cast<HWND>(window.winId());
-        if (!disabled) TEST_CHECK(GetWindowLongPtr(handle, GWL_STYLE) & WS_THICKFRAME);
+        const auto style = GetWindowLongPtr(handle, GWL_STYLE);
+        TEST_CHECK((style & WS_CAPTION) != WS_CAPTION);
+        if (!disabled) TEST_CHECK(style & WS_THICKFRAME);
         RECT client{};
         TEST_CHECK(GetClientRect(handle, &client));
         const int w = client.right, h = client.bottom;
+        const auto dpr = window.devicePixelRatioF();
+        POINT origin{}, end{w, h};
+        RECT bounds{};
+        TEST_CHECK(ClientToScreen(handle, &origin) && ClientToScreen(handle, &end));
+        TEST_CHECK(GetWindowRect(handle, &bounds));
+        const int ncTop = origin.y - bounds.top, ncBottom = bounds.bottom - end.y;
+        if (!disabled) {
+            // Check the actual non-client edge after NCCALCSIZE, rather than
+            // treating a client point as evidence of the native frame width.
+            TEST_CHECK(ncTop == 1 && ncBottom == 1);
+            TEST_CHECK(origin.x > bounds.left && end.x < bounds.right);
+            const std::array<std::pair<POINT, int>, 8> nativeEdges{{
+                {{origin.x - 1, (origin.y + end.y) / 2}, HTLEFT},
+                {{end.x, (origin.y + end.y) / 2}, HTRIGHT},
+                {{(origin.x + end.x) / 2, origin.y - 1}, HTTOP},
+                {{(origin.x + end.x) / 2, end.y}, HTBOTTOM},
+                {{origin.x - 1, origin.y - 1}, HTTOPLEFT},
+                {{end.x, origin.y - 1}, HTTOPRIGHT},
+                {{origin.x - 1, end.y}, HTBOTTOMLEFT}, {{end.x, end.y}, HTBOTTOMRIGHT}
+            }};
+            for (const auto &[point, expected] : nativeEdges)
+                TEST_CHECK(SendMessage(handle, WM_NCHITTEST, 0, MAKELPARAM(point.x, point.y)) == expected);
+        }
+        const int totalVertical = std::max(1, qRound(4 * dpr));
+        const int clientVertical = std::max(1, totalVertical - 1);
+        const int innerY = disabled ? 2 : std::min(2, clientVertical - 1);
+        // Keep real client samples: the native DX11 child must still pass
+        // resize hits through, and tested must not depend on NC-only points.
         const std::array<std::pair<POINT, int>, 8> edges{{
             {{2, h / 2}, HTLEFT}, {{w - 3, h / 2}, HTRIGHT},
-            {{w / 2, 2}, HTTOP}, {{w / 2, h - 3}, HTBOTTOM},
-            {{2, 2}, HTTOPLEFT}, {{w - 3, 2}, HTTOPRIGHT},
-            {{2, h - 3}, HTBOTTOMLEFT}, {{w - 3, h - 3}, HTBOTTOMRIGHT}
+            {{w / 2, innerY}, HTTOP}, {{w / 2, h - 1 - innerY}, HTBOTTOM},
+            {{2, innerY}, HTTOPLEFT}, {{w - 3, innerY}, HTTOPRIGHT},
+            {{2, h - 1 - innerY}, HTBOTTOMLEFT}, {{w - 3, h - 1 - innerY}, HTBOTTOMRIGHT}
         }};
         std::vector<HWND> children;
         EnumChildWindows(handle, [](HWND child, LPARAM param) -> BOOL {
@@ -2345,17 +2450,58 @@ public:
                 if (!before) TEST_CHECK(disabled ? result != HTTRANSPARENT : result == HTTRANSPARENT);
             }
         }
-        TEST_CHECK(tested > 0);
+        if (!disabled) TEST_CHECK(tested > 0);
+        if (!disabled) {
+            bool captionHit = false;
+            TEST_CHECK(window._topBar);
+            for (int x = 12; x < window._topBar->width() - 12; ++x) {
+                const QPoint local(x, window._topBar->height() / 2);
+                if (!window._topBar->isWindowDragArea(local)) continue;
+                const auto position = window._topBar->mapTo(&window, local);
+                POINT point{qRound(position.x() * dpr), qRound(position.y() * dpr)};
+                TEST_CHECK(ClientToScreen(handle, &point));
+                TEST_CHECK(SendMessage(handle, WM_NCHITTEST, 0, MAKELPARAM(point.x, point.y)) == HTCAPTION);
+                captionHit = true;
+                break;
+            }
+            TEST_CHECK(captionHit);
+            // Immediately beyond the combined native/client 4 DIP band,
+            // lateral resize remains valid but vertical/diagonal resize ends.
+            const int topOutside = std::max(clientVertical, totalVertical - ncTop);
+            const int bottomOutside = std::max(clientVertical, totalVertical - ncBottom);
+            for (const int x : {2, w / 2, w - 3})
+                for (const int y : {topOutside, h - 1 - bottomOutside}) {
+                    POINT point{x, y};
+                    TEST_CHECK(ClientToScreen(handle, &point));
+                    const auto hit = SendMessage(handle, WM_NCHITTEST, 0, MAKELPARAM(point.x, point.y));
+                    TEST_CHECK(hit < HTTOP || hit > HTBOTTOMRIGHT);
+                }
+        }
         // Card content is still delivered to the child HWND, not the window frame.
         const auto canvas = reinterpret_cast<HWND>(window._videoCanvas->winId());
         RECT canvasRect{};
         TEST_CHECK(GetClientRect(canvas, &canvasRect));
+        if (disabled) {
+            // Fullscreen content need not touch the top-level client edge.
+            // Check the native canvas's own edges when resize is disabled.
+            TEST_CHECK(canvasRect.right > 2 && canvasRect.bottom > 2);
+            const std::array<POINT, 4> canvasEdges{{
+                {1, canvasRect.bottom / 2}, {canvasRect.right - 2, canvasRect.bottom / 2},
+                {canvasRect.right / 2, 1}, {canvasRect.right / 2, canvasRect.bottom - 2}
+            }};
+            for (auto point : canvasEdges) {
+                TEST_CHECK(ClientToScreen(canvas, &point));
+                TEST_CHECK(SendMessage(canvas, WM_NCHITTEST, 0, MAKELPARAM(point.x, point.y)) != HTTRANSPARENT);
+            }
+        }
         POINT center{canvasRect.right / 2, canvasRect.bottom / 2};
         TEST_CHECK(ClientToScreen(canvas, &center));
         TEST_CHECK(SendMessage(canvas, WM_NCHITTEST, 0, MAKELPARAM(center.x, center.y)) == HTCLIENT);
         std::cout << "NATIVE_RESIZE " << backend << (before ? " BEFORE" : " AFTER")
-            << " root-edges=8 child-edge-hits=" << tested << " blocked=" << blocked
-            << " dpr=" << window.devicePixelRatioF() << '\n';
+            << " native-edges=" << (disabled ? 0 : 8) << " client-edges=8 child-edge-hits=" << tested
+            << " disabled-canvas-edge-checks=" << (disabled ? 4 : 0)
+            << " blocked=" << blocked << " nc-top=" << ncTop << " nc-bottom=" << ncBottom
+            << " dpr=" << dpr << '\n';
         return blocked;
     }
     static MeetingUI::VideoTileWidget *local(MeetingUI::MeetingRoomWindow &window) { return window._localTile; }
@@ -5130,17 +5276,37 @@ void NativeWindowResizeAcceptance(bool before = false) {
     }
     const int blocked = ParticipantWindowTestAccess::checkNativeResize(window, before, "DX11");
     if (before) { TEST_CHECK(blocked > 0); return; }
+    ParticipantWindowTestAccess::checkRasterResize(window);
+    // Exercise the native canvas under an alien stage, including a sidebar
+    // created after the renderer and a stage move with unchanged canvas size.
+    for (const auto &size : {QSize(960, 640), QSize(1120, 720), QSize(1280, 800), QSize(960, 640)}) {
+        ParticipantWindowTestAccess::resizeWithSidebar(window, size);
+        ParticipantWindowTestAccess::showPagingForResize(window);
+        fixture.pump();
+        ParticipantWindowTestAccess::checkRasterResize(window);
+    }
+    ParticipantWindowTestAccess::moveStageForResize(window, 12);
+    fixture.pump();
+    ParticipantWindowTestAccess::checkRasterResize(window);
+    ParticipantWindowTestAccess::moveStageForResize(window, -12);
+    fixture.pump();
+    ParticipantWindowTestAccess::checkRasterResize(window);
     TEST_CHECK(ParticipantWindowTestAccess::doubleClickGpu(window,
         ParticipantWindowTestAccess::local(window)->geometry().center()) == "local");
-    TEST_CHECK(ParticipantWindowTestAccess::local(window)->isPinned());
+    TEST_CHECK(ParticipantWindowTestAccess::pinned(window) == "local");
     window.showMaximized();
+    fixture.pump();
+    TEST_CHECK(ParticipantWindowTestAccess::local(window)->isPinned());
     ParticipantWindowTestAccess::checkNativeResize(window, false, "maximized", true);
     window.showFullScreen();
+    fixture.pump();
     ParticipantWindowTestAccess::checkNativeResize(window, false, "fullscreen", true);
     window.showNormal();
+    fixture.pump();
     ParticipantWindowTestAccess::checkNativeResize(window, false, "restored");
     ParticipantWindowTestAccess::fallback(window);
     ParticipantWindowTestAccess::checkNativeResize(window, false, "CPU-fallback");
+    ParticipantWindowTestAccess::checkRasterResize(window);
     QWidget unrelated;
     unrelated.setAttribute(Qt::WA_DontShowOnScreen);
     unrelated.setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
@@ -5148,7 +5314,1073 @@ void NativeWindowResizeAcceptance(bool before = false) {
     const auto other = reinterpret_cast<HWND>(unrelated.winId());
     POINT edge{2, 120}; TEST_CHECK(ClientToScreen(other, &edge));
     TEST_CHECK(SendMessage(other, WM_NCHITTEST, 0, MAKELPARAM(edge.x, edge.y)) == HTCLIENT);
-    std::cout << "NATIVE_RESIZE PASS: eight edges, DX11/CPU, maximize/fullscreen/restore, content Pin, unrelated HWND\n";
+    std::cout << "NATIVE_RESIZE PASS: raster isolation/geometry, eight edges, DX11/CPU, maximize/fullscreen/restore, content Pin, unrelated HWND\n";
+}
+
+class NativeResizePaintProbe final : public QObject, public QAbstractNativeEventFilter {
+public:
+    NativeResizePaintProbe(HWND handle, std::array<QWidget*, 3> surfaces, bool before,
+        bool suppressNcPaint = false, bool suppressNcActivate = false, bool flushNativeResize = false,
+        bool defaultNcPaint = false, bool systemFrame = false, bool nativeResizeFrame = false)
+        : handle(handle), surfaces(surfaces), before(before),
+          suppressNcPaint(suppressNcPaint), suppressNcActivate(suppressNcActivate),
+          flushNativeResize(flushNativeResize), defaultNcPaint(defaultNcPaint), systemFrame(systemFrame),
+          nativeResizeFrame(nativeResizeFrame) {
+        rootWidget = surfaces[0] ? surfaces[0]->window() : nullptr;
+        originalProcedure = reinterpret_cast<WNDPROC>(GetWindowLongPtrW(handle, GWLP_WNDPROC));
+        TEST_CHECK(originalProcedure);
+        TEST_CHECK(!GetPropW(handle, contextProperty));
+        TEST_CHECK(SetPropW(handle, contextProperty, reinterpret_cast<HANDLE>(this)));
+        TEST_CHECK(SetWindowLongPtrW(handle, GWLP_WNDPROC,
+            reinterpret_cast<LONG_PTR>(&NativeResizePaintProbe::windowProcedure)) ==
+            reinterpret_cast<LONG_PTR>(originalProcedure));
+        for (auto *surface : surfaces) if (surface) surface->installEventFilter(this);
+        qApp->installNativeEventFilter(this);
+    }
+    ~NativeResizePaintProbe() override {
+        qApp->removeNativeEventFilter(this);
+        if (IsWindow(handle)) {
+            TEST_CHECK(GetWindowLongPtrW(handle, GWLP_WNDPROC) ==
+                reinterpret_cast<LONG_PTR>(&NativeResizePaintProbe::windowProcedure));
+            TEST_CHECK(SetWindowLongPtrW(handle, GWLP_WNDPROC,
+                reinterpret_cast<LONG_PTR>(originalProcedure)) ==
+                reinterpret_cast<LONG_PTR>(&NativeResizePaintProbe::windowProcedure));
+            TEST_CHECK(RemovePropW(handle, contextProperty) == reinterpret_cast<HANDLE>(this));
+        }
+    }
+    void reset() { paints.fill(0); nativePaints = 0; calculations = 0; }
+    std::array<int, 3> paints{};
+    int nativePaints = 0;
+    int calculations = 0;
+    int sizingMessages = 0;
+    int enteringSizing = 0;
+    int leavingSizing = 0;
+    int nonClientPaints = 0;
+    int nonClientActivations = 0;
+    int eraseBackgrounds = 0;
+    int directNcPaintBlocks = 0;
+    int nativeResizeFlushes = 0;
+    int sizeMessages = 0;
+    std::vector<std::array<qint64, 4>> nativeTimeline;
+protected:
+    bool eventFilter(QObject *object, QEvent *event) override {
+        if (event->type() == QEvent::Paint) {
+            for (size_t index = 0; index != surfaces.size(); ++index)
+                if (surfaces[index] == object) ++paints[index];
+        }
+        return false;
+    }
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    bool nativeEventFilter(const QByteArray &, void *message, qintptr *result) override {
+#else
+    bool nativeEventFilter(const QByteArray &, void *message, long *result) override {
+#endif
+        const auto *msg = static_cast<const MSG *>(message);
+        if (!msg || msg->hwnd != handle) return false;
+        if (nativeResizeFrame && msg->message == WM_NCCALCSIZE) {
+            auto *parameters = reinterpret_cast<NCCALCSIZE_PARAMS *>(msg->lParam);
+            const auto proposed = msg->wParam ? parameters->rgrc[0] : RECT{};
+            *result = DefWindowProcW(handle, msg->message, msg->wParam, msg->lParam);
+            if (msg->wParam) {
+                const int border = proposed.bottom - parameters->rgrc[0].bottom;
+                parameters->rgrc[0].top = proposed.top + border;
+                *result = 0;
+            }
+            return true;
+        }
+        if (nativeResizeFrame && msg->message == WM_NCHITTEST) {
+            POINT point{GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)};
+            RECT client{};
+            if (ScreenToClient(handle, &point) && GetClientRect(handle, &client) && !PtInRect(&client, point)) {
+                *result = DefWindowProcW(handle, msg->message, msg->wParam, msg->lParam);
+                return true;
+            }
+        }
+        if (systemFrame && (msg->message == WM_NCCALCSIZE || msg->message == WM_NCHITTEST)) {
+            *result = DefWindowProcW(handle, msg->message, msg->wParam, msg->lParam);
+            return true;
+        }
+        if (defaultNcPaint && msg->message == WM_NCPAINT) {
+            *result = DefWindowProcW(handle, msg->message, msg->wParam, msg->lParam);
+            return true;
+        }
+        if (suppressNcPaint && msg->message == WM_NCPAINT) {
+            *result = 0;
+            return true;
+        }
+        if (suppressNcActivate && msg->message == WM_NCACTIVATE) {
+            *result = DefWindowProcW(handle, msg->message, msg->wParam, -1);
+            return true;
+        }
+        if (msg->message == WM_NCCALCSIZE && msg->wParam == TRUE) {
+            ++calculations;
+            if (before) {
+                // Reproduce the former retained-client-bits policy on this
+                // fixture alone, with the same executable and Qt runtime.
+                *result = 0;
+                return true;
+            }
+        }
+        return false;
+    }
+private:
+    static LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+        auto *probe = reinterpret_cast<NativeResizePaintProbe *>(GetPropW(window, contextProperty));
+        TEST_CHECK(probe && probe->originalProcedure);
+        // Qt can handle synchronous WM_PAINT without invoking an application
+        // native-event filter. Observe this fixture's actual HWND entry point.
+        if (message == WM_PAINT) ++probe->nativePaints;
+        if (message == WM_SIZING) ++probe->sizingMessages;
+        if (message == WM_SIZE) ++probe->sizeMessages;
+        if (message == WM_ENTERSIZEMOVE) ++probe->enteringSizing;
+        if (message == WM_EXITSIZEMOVE) ++probe->leavingSizing;
+        if (message == WM_NCPAINT) ++probe->nonClientPaints;
+        if (message == WM_NCACTIVATE) ++probe->nonClientActivations;
+        if (message == WM_ERASEBKGND) ++probe->eraseBackgrounds;
+        if ((message == WM_SIZING || message == WM_SIZE || message == WM_PAINT ||
+                message == WM_ENTERSIZEMOVE || message == WM_EXITSIZEMOVE ||
+                message == WM_NCPAINT || message == WM_NCACTIVATE) &&
+                probe->nativeTimeline.size() < 2048) {
+            RECT bounds{};
+            if (message == WM_SIZING && lParam) bounds = *reinterpret_cast<const RECT *>(lParam);
+            else GetClientRect(window, &bounds);
+            probe->nativeTimeline.push_back({std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count(), qint64(message),
+                qint64(bounds.right - bounds.left), qint64(bounds.bottom - bounds.top)});
+        }
+        if (probe->suppressNcPaint && message == WM_NCPAINT) {
+            ++probe->directNcPaintBlocks;
+            return 0;
+        }
+        if (probe->suppressNcActivate && message == WM_NCACTIVATE)
+            return DefWindowProcW(window, message, wParam, -1);
+        bool flush = false;
+        if (probe->flushNativeResize && !probe->flushingNativeResize &&
+                message == WM_WINDOWPOSCHANGED && lParam && IsWindowVisible(window) && !IsIconic(window) &&
+                probe->rootWidget && probe->rootWidget->updatesEnabled()) {
+            const auto *position = reinterpret_cast<const WINDOWPOS *>(lParam);
+            flush = !(position->flags & (SWP_NOSIZE | SWP_NOREDRAW)) && position->cx > 0 && position->cy > 0;
+            if (flush) probe->flushingNativeResize = true;
+        }
+        const auto result = CallWindowProcW(probe->originalProcedure, window, message, wParam, lParam);
+        if (flush) {
+            ++probe->nativeResizeFlushes;
+            if (probe->rootWidget) probe->rootWidget->repaint();
+            UpdateWindow(window);
+            probe->flushingNativeResize = false;
+        }
+        return result;
+    }
+    static constexpr const wchar_t *contextProperty = L"LiveKit.NativeResizePaintProbe.Context";
+    WNDPROC originalProcedure = nullptr;
+    HWND handle = nullptr;
+    QPointer<QWidget> rootWidget;
+    std::array<QWidget*, 3> surfaces;
+    bool before = false;
+    bool suppressNcPaint = false;
+    bool suppressNcActivate = false;
+    bool flushNativeResize = false;
+    bool flushingNativeResize = false;
+    bool defaultNcPaint = false;
+    bool systemFrame = false;
+    bool nativeResizeFrame = false;
+};
+
+QImage CaptureResizeClient(HWND handle) {
+    RECT client{};
+    if (!GetClientRect(handle, &client) || client.right <= 0 || client.bottom <= 0) return {};
+    const auto source = GetDC(handle);
+    if (!source) return {};
+    const auto destination = CreateCompatibleDC(source);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = client.right;
+    info.bmiHeader.biHeight = -client.bottom;
+    info.bmiHeader.biPlanes = 1;
+    info.bmiHeader.biBitCount = 32;
+    info.bmiHeader.biCompression = BI_RGB;
+    void *pixels = nullptr;
+    const auto bitmap = destination
+        ? CreateDIBSection(source, &info, DIB_RGB_COLORS, &pixels, nullptr, 0) : nullptr;
+    QImage image;
+    if (bitmap && pixels) {
+        const auto previous = SelectObject(destination, bitmap);
+        if (BitBlt(destination, 0, 0, client.right, client.bottom, source, 0, 0, SRCCOPY)) {
+            GdiFlush();
+            image = QImage(static_cast<const uchar *>(pixels), client.right, client.bottom,
+                client.right * 4, QImage::Format_RGB32).copy();
+        }
+        SelectObject(destination, previous);
+        DeleteObject(bitmap);
+    }
+    if (destination) DeleteDC(destination);
+    ReleaseDC(handle, source);
+    return image;
+}
+
+QImage CaptureResizeDesktopCrop(HWND handle, QRect area, QPoint &screenOrigin,
+        HWND ownedBackground = nullptr, bool includeNonClient = false) {
+    DWORD process = 0;
+    RECT client{};
+    if (!IsWindowVisible(handle) || !GetWindowThreadProcessId(handle, &process) ||
+            process != GetCurrentProcessId() || !GetClientRect(handle, &client)) return {};
+    RECT windowBounds{};
+    if (includeNonClient) {
+        POINT clientOrigin{};
+        if (!GetWindowRect(handle, &windowBounds) || !ClientToScreen(handle, &clientOrigin)) return {};
+        area = area.intersected(QRect(windowBounds.left - clientOrigin.x, windowBounds.top - clientOrigin.y,
+            windowBounds.right - windowBounds.left, windowBounds.bottom - windowBounds.top));
+    } else {
+        area = area.intersected(QRect(0, 0, client.right, client.bottom));
+    }
+    if (area.isEmpty()) return {};
+    POINT origin{area.x(), area.y()};
+    if (!ClientToScreen(handle, &origin)) return {};
+    const QRect screenArea(origin.x, origin.y, area.width(), area.height());
+    const QRect desktop(GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+        GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+    if (!desktop.contains(screenArea)) return {};
+    if (ownedBackground) {
+        RECT backgroundBounds{};
+        DWORD backgroundProcess = 0;
+        if (!includeNonClient || !GetWindowThreadProcessId(ownedBackground, &backgroundProcess) ||
+                backgroundProcess != GetCurrentProcessId() || !GetWindowRect(ownedBackground, &backgroundBounds) ||
+                !QRect(backgroundBounds.left, backgroundBounds.top,
+                    backgroundBounds.right - backgroundBounds.left, backgroundBounds.bottom - backgroundBounds.top)
+                    .contains(screenArea)) return {};
+    }
+    for (const auto point : {screenArea.topLeft(), screenArea.topRight(), screenArea.center(),
+            screenArea.bottomLeft(), screenArea.bottomRight()}) {
+        const auto root = GetAncestor(WindowFromPoint(POINT{point.x(), point.y()}), GA_ROOT);
+        if (root != handle && (!ownedBackground || root != ownedBackground)) return {};
+    }
+    const auto source = GetDC(nullptr); // Actual desktop pixels, not the window's client DC.
+    if (!source) return {};
+    const auto destination = CreateCompatibleDC(source);
+    BITMAPINFO info{};
+    info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    info.bmiHeader.biWidth = area.width(); info.bmiHeader.biHeight = -area.height();
+    info.bmiHeader.biPlanes = 1; info.bmiHeader.biBitCount = 32; info.bmiHeader.biCompression = BI_RGB;
+    void *pixels = nullptr;
+    const auto bitmap = destination ? CreateDIBSection(source, &info, DIB_RGB_COLORS, &pixels, nullptr, 0) : nullptr;
+    QImage image;
+    if (bitmap && pixels) {
+        const auto previous = SelectObject(destination, bitmap);
+        if (BitBlt(destination, 0, 0, area.width(), area.height(), source, origin.x, origin.y, SRCCOPY | CAPTUREBLT)) {
+            GdiFlush();
+            image = QImage(static_cast<const uchar *>(pixels), area.width(), area.height(),
+                area.width() * 4, QImage::Format_RGB32).copy();
+        }
+        SelectObject(destination, previous); DeleteObject(bitmap);
+    }
+    if (destination) DeleteDC(destination);
+    ReleaseDC(nullptr, source);
+    RECT after{};
+    POINT afterOrigin{area.x(), area.y()};
+    if (!GetClientRect(handle, &after) || !EqualRect(&client, &after) ||
+            !ClientToScreen(handle, &afterOrigin) || afterOrigin.x != origin.x || afterOrigin.y != origin.y)
+        return {}; // Discard geometry races; never retain a crop outside this fixture.
+    RECT afterWindow{};
+    if (includeNonClient && (!GetWindowRect(handle, &afterWindow) || !EqualRect(&windowBounds, &afterWindow))) return {};
+    screenOrigin = QPoint(origin.x, origin.y);
+    return image;
+}
+
+// A test-owned opaque window supplies a spatially distinctive background.
+// Matching both colors at their screen coordinates proves background bleed;
+// a mostly white foreground alone cannot establish transparency.
+class ResizeObservationBackground final {
+public:
+    static constexpr int tileSize = 8;
+    static constexpr std::array<QRgb, 2> colors{0xffe90d9du, 0xff17e5bfu};
+    struct Matches {
+        std::array<int, 2> pixels{};
+        int adjacentPairs = 0;
+        bool visible() const { return pixels[0] >= 8 && pixels[1] >= 8 && adjacentPairs >= 4; }
+    };
+    ResizeObservationBackground(HWND fixture, QRect bounds) : bounds(bounds), fixture(fixture) {
+        WNDCLASSW windowClass{};
+        windowClass.lpfnWndProc = &ResizeObservationBackground::windowProcedure;
+        windowClass.hInstance = GetModuleHandleW(nullptr);
+        windowClass.lpszClassName = L"LiveKit.ResizeObservationBackground";
+        if (!RegisterClassW(&windowClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) return;
+        handle = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, windowClass.lpszClassName,
+            L"Owned resize observation background", WS_POPUP, bounds.x(), bounds.y(),
+            bounds.width(), bounds.height(), nullptr, nullptr, windowClass.hInstance, nullptr);
+        if (handle) {
+            // Put only this marker immediately below our topmost fixture.
+            SetWindowPos(handle, fixture, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            UpdateWindow(handle);
+        }
+    }
+    ~ResizeObservationBackground() { if (handle) DestroyWindow(handle); }
+    bool exposedBehindFixture() const {
+        RECT rectangle{};
+        DWORD process = 0;
+        return handle && IsWindowVisible(handle) && GetWindow(fixture, GW_HWNDNEXT) == handle &&
+            GetWindowThreadProcessId(handle, &process) && process == GetCurrentProcessId() &&
+            GetWindowRect(handle, &rectangle) &&
+            bounds == QRect(rectangle.left, rectangle.top,
+                rectangle.right - rectangle.left, rectangle.bottom - rectangle.top);
+    }
+    Matches match(const QImage &image, QPoint screenOrigin) const {
+        Matches result;
+        const auto expected = [&](int x, int y) {
+            return (((screenOrigin.x() + x - bounds.x()) / tileSize) +
+                ((screenOrigin.y() + y - bounds.y()) / tileSize)) & 1;
+        };
+        const auto matches = [&](int x, int y) {
+            if (!bounds.contains(screenOrigin + QPoint(x, y))) return false;
+            const auto pixel = image.pixel(x, y);
+            const auto color = colors[expected(x, y)];
+            return qAbs(qRed(pixel) - qRed(color)) <= 8 &&
+                qAbs(qGreen(pixel) - qGreen(color)) <= 8 && qAbs(qBlue(pixel) - qBlue(color)) <= 8;
+        };
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x) {
+                if (!matches(x, y)) continue;
+                ++result.pixels[expected(x, y)];
+                if (x + tileSize < image.width() && matches(x + tileSize, y)) ++result.adjacentPairs;
+            }
+        return result;
+    }
+    HWND handle = nullptr;
+    const QRect bounds;
+private:
+    static LRESULT CALLBACK windowProcedure(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
+        if (message == WM_ERASEBKGND) return 1;
+        if (message == WM_MOUSEACTIVATE) return MA_NOACTIVATEANDEAT;
+        if (message == WM_PAINT) {
+            PAINTSTRUCT paint{};
+            const auto dc = BeginPaint(window, &paint);
+            const std::array<HBRUSH, 2> brushes{
+                CreateSolidBrush(RGB(233, 13, 157)), CreateSolidBrush(RGB(23, 229, 191))};
+            for (int y = (paint.rcPaint.top / tileSize) * tileSize; y < paint.rcPaint.bottom; y += tileSize)
+                for (int x = (paint.rcPaint.left / tileSize) * tileSize; x < paint.rcPaint.right; x += tileSize) {
+                    const RECT tile{x, y, x + tileSize, y + tileSize};
+                    FillRect(dc, &tile, brushes[((x / tileSize) + (y / tileSize)) & 1]);
+                }
+            for (const auto brush : brushes) DeleteObject(brush);
+            EndPaint(window, &paint);
+            return 0;
+        }
+        return DefWindowProcW(window, message, wParam, lParam);
+    }
+    HWND fixture = nullptr;
+};
+
+QJsonObject NativeTelemetryLocatorHit(MeetingUI::MeetingRoomWindow &window, HWND handle) {
+    const auto *locator = window.findChild<QPushButton*>(QStringLiteral("meetingTelemetry"));
+    if (!locator || !locator->isVisible() || locator->rect().isEmpty())
+        return {{"valid", false}, {"reason", "meetingTelemetry locator not drawable"}};
+    const auto point = locator->mapTo(&window, locator->rect().center());
+    const auto dpr = window.devicePixelRatioF();
+    POINT physical{qRound(point.x() * dpr), qRound(point.y() * dpr)};
+    if (!ClientToScreen(handle, &physical))
+        return {{"valid", false}, {"reason", "ClientToScreen failed"}};
+    const auto hit = SendMessageW(handle, WM_NCHITTEST, 0, MAKELPARAM(physical.x, physical.y));
+    return {{"valid", true}, {"locator", "meetingTelemetry"}, {"logicalX", point.x()},
+        {"logicalY", point.y()}, {"screenX", int(physical.x)}, {"screenY", int(physical.y)},
+        {"expected", HTCLIENT}, {"actual", int(hit)}, {"clientHit", hit == HTCLIENT},
+        {"method", "SendMessageW(WM_NCHITTEST) at UIA locator center; no synthetic Qt click"}};
+}
+
+int NativeWindowResizePaintAcceptance(QApplication &application, bool before) {
+    const auto args = application.arguments();
+    MeetingUI::AppTranslation::install(application, MeetingUI::AppTranslation::startupLocale(args));
+    MeetingUI::AppTheme::install(application);
+    const auto outputArg = args.indexOf(QStringLiteral("--output"));
+    const auto directory = outputArg >= 0 && outputArg + 1 < args.size()
+        ? args[outputArg + 1]
+        : QDir::current().filePath(QStringLiteral("out/runtime-evidence/native-resize-paint-%1")
+            .arg(QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss-zzz")));
+    TEST_CHECK(QDir().mkpath(directory));
+    QJsonObject evidence{{"policy", before ? "retained-client-bits" : "current-production"},
+        {"pid", double(QCoreApplication::applicationPid())},
+        {"executable", QCoreApplication::applicationFilePath()},
+        {"arguments", QJsonArray::fromStringList(args)},
+        {"requestedScaleFactor", qEnvironmentVariable("QT_SCALE_FACTOR")},
+        {"sampleBoundary", "SetWindowPos -> UpdateWindow -> GDI capture, before explicit Qt processEvents"},
+        {"scope", "fixture raster client pixels; not display/compositor transient or real meeting media acceptance"}};
+    QFile executable(QCoreApplication::applicationFilePath());
+    if (executable.open(QIODevice::ReadOnly)) {
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        if (hash.addData(&executable)) evidence["executableSha256"] = QString::fromLatin1(hash.result().toHex());
+    }
+    QJsonArray samples;
+    const auto finish = [&](const char *verdict, const char *reason, int exitCode) {
+        evidence["verdict"] = verdict;
+        evidence["reason"] = reason;
+        evidence["samples"] = samples;
+        QSaveFile file(QDir(directory).filePath("resize-paint.json"));
+        const auto bytes = QJsonDocument(evidence).toJson();
+        TEST_CHECK(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit());
+        std::cout << "NATIVE_RESIZE_PAINT " << verdict << ": " << reason
+            << " evidence=" << QDir(directory).absolutePath().toStdString() << std::endl;
+        return exitCode;
+    };
+    if (GetSystemMetrics(SM_REMOTESESSION) != 0)
+        return finish("NOT_RUN", "DX11 desktop unavailable in remote session", 3);
+    if (!application.primaryScreen()) return finish("NOT_RUN", "no desktop screen", 3);
+    const auto available = application.primaryScreen()->availableGeometry();
+    if (available.width() < 940 || available.height() < 660)
+        return finish("NOT_RUN", "desktop cannot expose the fixture at its minimum resize sizes", 3);
+    qunsetenv("LIVEKIT_RENDER_BACKEND");
+    WindowFixture fixture;
+    fixture.open();
+    auto &window = *fixture.window;
+    ParticipantWindowTestAccess::prepareResizeWindow(window);
+    window.setGeometry(available.x() + 16, available.y() + 16, 860, 580);
+    if (!ParticipantWindowTestAccess::enableGpu(window, true))
+        return finish("NOT_RUN", "DX11 renderer unavailable", 3);
+    ParticipantWindowTestAccess::resizeWithSidebar(window, QSize(860, 580));
+    const auto surfaces = ParticipantWindowTestAccess::rasterPaintSurfaces(window);
+    const auto handle = reinterpret_cast<HWND>(window.winId());
+    NativeResizePaintProbe probe(handle, surfaces, before);
+    const auto settle = [&] {
+        QElapsedTimer timer; timer.start();
+        do { application.processEvents(QEventLoop::AllEvents, 5); }
+        while (timer.elapsed() < 25);
+        fixture.pump();
+    };
+    const auto regions = [&] {
+        std::array<QRect, 3> result;
+        const auto dpr = window.devicePixelRatioF();
+        for (size_t index = 0; index != surfaces.size(); ++index) {
+            const auto *surface = surfaces[index];
+            const auto offset = surface->mapTo(&window, QPoint());
+            const auto logical = surface->rect().adjusted(8, 4, -8, -4).translated(offset);
+            result[index] = QRect(qRound(logical.x() * dpr), qRound(logical.y() * dpr),
+                qRound(logical.width() * dpr), qRound(logical.height() * dpr));
+        }
+        return result;
+    };
+    const auto exposed = [&](const std::array<QRect, 3> &areas) {
+        for (const auto &area : areas) {
+            for (const auto point : {area.topLeft(), area.topRight(), area.center(),
+                    area.bottomLeft(), area.bottomRight()}) {
+                POINT screen{point.x(), point.y()};
+                if (!ClientToScreen(handle, &screen) || WindowFromPoint(screen) != handle) return false;
+            }
+        }
+        return true;
+    };
+    const auto changedPixels = [](const QImage &first, const QImage &second, const QRect &area) {
+        if (first.isNull() || first.size() != second.size() || !first.rect().contains(area)) return -1;
+        int changed = 0;
+        for (int y = area.top(); y <= area.bottom(); ++y) {
+            const auto *a = reinterpret_cast<const QRgb *>(first.constScanLine(y));
+            const auto *b = reinterpret_cast<const QRgb *>(second.constScanLine(y));
+            for (int x = area.left(); x <= area.right(); ++x) {
+                if (std::abs(qRed(a[x]) - qRed(b[x])) > 16 ||
+                    std::abs(qGreen(a[x]) - qGreen(b[x])) > 16 ||
+                    std::abs(qBlue(a[x]) - qBlue(b[x])) > 16) ++changed;
+            }
+        }
+        return changed;
+    };
+    window.raise();
+    settle();
+    auto reference = CaptureResizeClient(handle);
+    settle();
+    const auto baseline = CaptureResizeClient(handle);
+    if (!reference.isNull()) TEST_CHECK(reference.save(QDir(directory).filePath("baseline-first.png")));
+    if (!baseline.isNull()) TEST_CHECK(baseline.save(QDir(directory).filePath("baseline.png")));
+    const auto baselineAreas = regions();
+    if (reference.isNull() || !exposed(baselineAreas))
+        return finish("INCONCLUSIVE", "fixture is occluded or native pixel capture unavailable", 3);
+    for (const auto &area : baselineAreas) {
+        const auto changed = changedPixels(reference, baseline, area);
+        if (changed < 0 || changed > std::max(32, area.width() * area.height() / 200))
+            return finish("INCONCLUSIVE", "desktop raster baseline is not stable", 3);
+    }
+    evidence["dpr"] = window.devicePixelRatioF();
+    int failedRegions = 0, unresolvedRegions = 0;
+    const int widthDelta = std::min(200, available.width() - 892);
+    const int heightDelta = std::min(140, available.height() - 612);
+    SendMessage(handle, WM_ENTERSIZEMOVE, 0, 0);
+    for (int step = 1; step <= 16; ++step) {
+        probe.reset();
+        const int phase = step <= 8 ? step : 16 - step;
+        const auto dpr = window.devicePixelRatioF();
+        const QSize size(860 + widthDelta * phase / 8, 580 + heightDelta * phase / 8);
+        TEST_CHECK(SetWindowPos(handle, nullptr, 0, 0, qRound(size.width() * dpr),
+            qRound(size.height() * dpr), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE));
+        RECT dirty{};
+        const bool invalidated = GetUpdateRect(handle, &dirty, FALSE) != FALSE;
+        // Dispatch the OS's pending WM_PAINT as a sizing loop would. Do not
+        // force an invalidate/repaint or drain Qt first: those hide stale bits.
+        TEST_CHECK(UpdateWindow(handle));
+        const auto immediate = CaptureResizeClient(handle);
+        RECT nativeClient{};
+        TEST_CHECK(GetClientRect(handle, &nativeClient));
+        const auto immediateQtSize = window.size();
+        const auto areas = regions();
+        const auto paints = probe.paints;
+        const auto nativePaints = probe.nativePaints;
+        const auto calculations = probe.calculations;
+        const bool visible = exposed(areas);
+        settle();
+        const auto settled = CaptureResizeClient(handle);
+        const auto settledQtSize = window.size();
+        const auto prefix = QStringLiteral("step-%1").arg(step, 2, 10, QLatin1Char('0'));
+        if (!immediate.isNull()) TEST_CHECK(immediate.save(QDir(directory).filePath(prefix + "-native.png")));
+        if (!settled.isNull()) TEST_CHECK(settled.save(QDir(directory).filePath(prefix + "-settled.png")));
+        QJsonArray comparisons;
+        const std::array<const char *, 3> names{{"topBar", "bottomBar", "participantsSidebar"}};
+        for (size_t index = 0; index != areas.size(); ++index) {
+            const auto &area = areas[index];
+            const auto changed = changedPixels(immediate, settled, area);
+            const bool mismatch = changed > std::max(32, area.width() * area.height() / 200);
+            const bool observable = visible && changed >= 0 && calculations > 0;
+            const bool nativeQtPaint = nativePaints > 0 && paints[index] > 0;
+            if (!observable || (mismatch && !nativeQtPaint)) ++unresolvedRegions;
+            else if (mismatch) ++failedRegions;
+            comparisons.append(QJsonObject{{"surface", names[index]}, {"qtPaints", paints[index]},
+                {"x", area.x()}, {"y", area.y()}, {"width", area.width()}, {"height", area.height()},
+                {"changedPixels", changed}, {"visible", visible}, {"mismatch", mismatch}});
+        }
+        samples.append(QJsonObject{{"step", step}, {"width", size.width()}, {"height", size.height()},
+            {"nativeClientWidth", int(nativeClient.right)}, {"nativeClientHeight", int(nativeClient.bottom)},
+            {"immediatePixelWidth", immediate.width()}, {"immediatePixelHeight", immediate.height()},
+            {"immediateQtWidth", immediateQtSize.width()}, {"immediateQtHeight", immediateQtSize.height()},
+            {"settledPixelWidth", settled.width()}, {"settledPixelHeight", settled.height()},
+            {"settledQtWidth", settledQtSize.width()}, {"settledQtHeight", settledQtSize.height()},
+            {"nccalcsizeCount", calculations}, {"nativePaints", nativePaints}, {"invalidated", invalidated},
+            {"dirtyLeft", int(dirty.left)}, {"dirtyTop", int(dirty.top)}, {"dirtyRight", int(dirty.right)},
+            {"dirtyBottom", int(dirty.bottom)}, {"comparisons", comparisons}});
+    }
+    SendMessage(handle, WM_EXITSIZEMOVE, 0, 0);
+    evidence["failedRegions"] = failedRegions;
+    evidence["unresolvedRegions"] = unresolvedRegions;
+    if (failedRegions) return finish("FAIL", "native-painted raster regions differ from settled Qt pixels", 1);
+    if (unresolvedRegions) return finish("INCONCLUSIVE", "pixel or native-paint boundary was not observable", 3);
+    return finish("PASS", "16 native resize steps match settled raster client pixels", 0);
+}
+
+int NativeWindowResizeLiveObservation(QApplication &application) {
+    const auto args = application.arguments();
+    const auto output = args.indexOf(QStringLiteral("--output"));
+    TEST_CHECK(output >= 0 && output + 1 < args.size());
+    const QDir directory(args[output + 1]);
+    TEST_CHECK(QDir().mkpath(directory.absolutePath()));
+    const auto unavailable = [&](const char *reason, DWORD error = 0, QJsonObject state = {}) {
+        state["verdict"] = "INCONCLUSIVE";
+        state["reason"] = reason;
+        state["win32Error"] = double(error);
+        state["executable"] = QCoreApplication::applicationFilePath();
+        state["arguments"] = QJsonArray::fromStringList(args);
+        QSaveFile file(directory.filePath("resize-live.json"));
+        const auto bytes = QJsonDocument(state).toJson();
+        TEST_CHECK(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit());
+        std::cout << "NATIVE_RESIZE_LIVE INCONCLUSIVE: " << reason << std::endl;
+        return 3;
+    };
+    // Match production bootstrap before capture can be the first WinRT caller
+    // on its worker. The toolkit imports are initialized by Supported().
+    if (!base::WinRT::Supported()) return unavailable("required Windows Runtime imports unavailable");
+    POINT savedCursor{};
+    if (!GetCursorPos(&savedCursor)) return unavailable("interactive desktop cursor unavailable", GetLastError());
+    MeetingUI::AppTranslation::install(application, MeetingUI::AppTranslation::startupLocale(args));
+    MeetingUI::AppTheme::install(application);
+    const bool cpuFixture = args.contains("--cpu-fixture");
+    const bool systemFrame = args.contains("--system-frame");
+    const bool qtFramedClient = args.contains("--qt-framed-client");
+    const bool nativeResizeFrame = args.contains("--native-resize-frame");
+    if (cpuFixture) qputenv("LIVEKIT_RENDER_BACKEND", "cpu");
+    else qunsetenv("LIVEKIT_RENDER_BACKEND");
+    WindowFixture fixture;
+    fixture.window = ParticipantWindowTestAccess::createChatPrivacy(fixture.coordinator);
+    auto &window = *fixture.window;
+    ParticipantWindowTestAccess::prepareResizeWindow(window);
+    if (systemFrame || qtFramedClient) window.setWindowFlags(Qt::Window);
+    ParticipantWindowTestAccess::initializeResizeObservationHeader(window);
+    if (!application.primaryScreen()) return unavailable("desktop screen unavailable");
+    const auto available = application.primaryScreen()->availableGeometry();
+    window.setGeometry(available.x() + 24, available.y() + 24, 860, 580);
+    if (cpuFixture) {
+        window.show();
+        QApplication::processEvents();
+    } else if (!ParticipantWindowTestAccess::showPreparedGpu(window)) {
+        return unavailable("DX11 desktop unavailable");
+    }
+    window.raise(); window.activateWindow();
+    const auto handle = reinterpret_cast<HWND>(window.winId());
+    const auto dpr = window.devicePixelRatioF();
+    SetForegroundWindow(handle);
+    // Keep the short-lived fixture exposed; never move another window.
+    TEST_CHECK(SetWindowPos(handle, HWND_TOPMOST, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE));
+    BOOL dragFullWindows = FALSE;
+    const bool dragSettingRead = SystemParametersInfoW(SPI_GETDRAGFULLWINDOWS, 0, &dragFullWindows, 0);
+    RECT initialBounds{};
+    TEST_CHECK(GetWindowRect(handle, &initialBounds));
+    const int edgeInset = 2;
+    POINT edge{initialBounds.right - edgeInset, initialBounds.bottom - edgeInset};
+    const int travelX = std::min(240, qRound((available.right() + 1) * dpr) - int(edge.x) - 16);
+    const int travelY = std::min(120, qRound((available.bottom() + 1) * dpr) - int(edge.y) - 16);
+    const QRect desktop(GetSystemMetrics(SM_XVIRTUALSCREEN), GetSystemMetrics(SM_YVIRTUALSCREEN),
+        GetSystemMetrics(SM_CXVIRTUALSCREEN), GetSystemMetrics(SM_CYVIRTUALSCREEN));
+    ResizeObservationBackground background(handle, QRect(initialBounds.left - 16, initialBounds.top - 16,
+        initialBounds.right - initialBounds.left + std::max(0, travelX) + 32,
+        initialBounds.bottom - initialBounds.top + std::max(0, travelY) + 32).intersected(desktop));
+    if (!background.exposedBehindFixture()) return unavailable("owned opaque background unavailable");
+    // Only calibrate the marker, before the resize loop. Never force fixture
+    // paint or compositor synchronization during continuous observation.
+    const auto calibrationFlushHr = DwmFlush();
+    QPoint calibrationOrigin;
+    const auto calibration = CaptureResizeDesktopCrop(background.handle, QRect(0, 0, 16, 16), calibrationOrigin);
+    const auto calibrationMatches = background.match(calibration, calibrationOrigin);
+    const bool calibrated = !calibration.isNull() && calibrationMatches.visible();
+    if (!calibration.isNull()) TEST_CHECK(calibration.save(directory.filePath("background-calibration.png")));
+    using GetThreadDpi = HANDLE (WINAPI*)();
+    using SetThreadDpi = HANDLE (WINAPI*)(HANDLE);
+    using GetDpiAwareness = int (WINAPI*)(HANDLE);
+    const auto user32 = GetModuleHandleW(L"user32.dll");
+    const auto getThreadDpi = reinterpret_cast<GetThreadDpi>(GetProcAddress(user32, "GetThreadDpiAwarenessContext"));
+    const auto setThreadDpi = reinterpret_cast<SetThreadDpi>(GetProcAddress(user32, "SetThreadDpiAwarenessContext"));
+    const auto getDpiAwareness = reinterpret_cast<GetDpiAwareness>(GetProcAddress(user32, "GetAwarenessFromDpiAwarenessContext"));
+    const auto uiDpiContext = getThreadDpi ? getThreadDpi() : nullptr;
+    const auto dpiContextString = [](HANDLE context) { return QString::number(reinterpret_cast<quintptr>(context), 16); };
+    struct DpiScope {
+        SetThreadDpi set = nullptr;
+        HANDLE previous = nullptr;
+        ~DpiScope() { if (set && previous) set(previous); }
+    };
+    const auto telemetryHitBefore = NativeTelemetryLocatorHit(window, handle);
+    const bool ncPaint = args.contains("--suppress-nc-paint");
+    const bool ncActivate = args.contains("--suppress-nc-activate");
+    const bool flushResize = args.contains("--flush-native-resize");
+    const bool defaultNcPaint = args.contains("--default-nc-paint");
+    const bool retainClientBits = args.contains("--retain-client-bits");
+    const bool disableDwmNc = args.contains("--disable-dwm-nc");
+    const bool enableDwmNc = args.contains("--enable-dwm-nc");
+    const bool noDwmFrame = args.contains("--no-dwm-frame");
+    const bool noNativeCaption = args.contains("--no-native-caption");
+    const bool compositedRaster = args.contains("--composited-raster");
+    if (noNativeCaption || compositedRaster) {
+        if (noNativeCaption) SetWindowLongPtrW(handle, GWL_STYLE,
+            GetWindowLongPtrW(handle, GWL_STYLE) & ~LONG_PTR(WS_CAPTION));
+        if (compositedRaster) SetWindowLongPtrW(handle, GWL_EXSTYLE,
+            GetWindowLongPtrW(handle, GWL_EXSTYLE) | WS_EX_COMPOSITED);
+        SetWindowPos(handle, nullptr, 0, 0, 0, 0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (defaultNcPaint && ncPaint) return unavailable("conflicting non-client paint diagnostic options");
+    BOOL ncEnabledBefore = FALSE, ncEnabledAfter = FALSE;
+    const auto ncBeforeHr = DwmGetWindowAttribute(handle, DWMWA_NCRENDERING_ENABLED,
+        &ncEnabledBefore, sizeof(ncEnabledBefore));
+    HRESULT ncPolicyHr = S_FALSE, frameMarginsHr = S_FALSE;
+    if (disableDwmNc || enableDwmNc) {
+        const DWMNCRENDERINGPOLICY policy = enableDwmNc ? DWMNCRP_ENABLED : DWMNCRP_DISABLED;
+        ncPolicyHr = DwmSetWindowAttribute(handle, DWMWA_NCRENDERING_POLICY, &policy, sizeof(policy));
+    }
+    if (noDwmFrame) {
+        const MARGINS margins{};
+        frameMarginsHr = DwmExtendFrameIntoClientArea(handle, &margins);
+    }
+    const auto ncAfterHr = DwmGetWindowAttribute(handle, DWMWA_NCRENDERING_ENABLED,
+        &ncEnabledAfter, sizeof(ncEnabledAfter));
+    NativeResizePaintProbe paint(handle, ParticipantWindowTestAccess::rasterPaintSurfaces(window),
+        retainClientBits, ncPaint, ncActivate, flushResize, defaultNcPaint, systemFrame, nativeResizeFrame);
+    if (systemFrame || nativeResizeFrame) SetWindowPos(handle, nullptr, 0, 0, 0, 0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    RECT initialClient{}, initialExtendedFrame{};
+    POINT initialClientOrigin{};
+    if (!GetWindowRect(handle, &initialBounds) || !GetClientRect(handle, &initialClient) ||
+            !ClientToScreen(handle, &initialClientOrigin)) return unavailable("initial frame geometry unavailable");
+    POINT initialClientEnd{initialClient.right, initialClient.bottom};
+    if (!ClientToScreen(handle, &initialClientEnd)) return unavailable("initial client extent unavailable");
+    const RECT initialClientScreen{initialClientOrigin.x, initialClientOrigin.y,
+        initialClientEnd.x, initialClientEnd.y};
+    const auto extendedFrameHr = DwmGetWindowAttribute(handle, DWMWA_EXTENDED_FRAME_BOUNDS,
+        &initialExtendedFrame, sizeof(initialExtendedFrame));
+    const auto rectJson = [](const RECT &rect) {
+        return QJsonObject{{"left", int(rect.left)}, {"top", int(rect.top)},
+            {"right", int(rect.right)}, {"bottom", int(rect.bottom)},
+            {"width", int(rect.right - rect.left)}, {"height", int(rect.bottom - rect.top)}};
+    };
+    QJsonObject initialGeometry{{"window", rectJson(initialBounds)}, {"client", rectJson(initialClientScreen)},
+        {"extendedFrame", rectJson(initialExtendedFrame)}, {"extendedFrameHresult", int(extendedFrameHr)},
+        {"ncTopPixels", int(initialClientOrigin.y - initialBounds.top)},
+        {"ncBottomPixels", int(initialBounds.bottom - initialClientEnd.y)}};
+    {
+        QPoint frameOrigin;
+        const auto image = CaptureResizeDesktopCrop(handle,
+            QRect(initialBounds.left - initialClientOrigin.x, initialBounds.top - initialClientOrigin.y,
+                initialBounds.right - initialBounds.left, initialBounds.bottom - initialBounds.top),
+            frameOrigin, background.handle, true);
+        initialGeometry["screenDcFrameValid"] = !image.isNull();
+        if (!image.isNull()) {
+            TEST_CHECK(image.save(directory.filePath("initial-window-frame.png")));
+            initialGeometry["screenDcFrameFile"] = "initial-window-frame.png";
+            initialGeometry["screenDcFrameX"] = frameOrigin.x();
+            initialGeometry["screenDcFrameY"] = frameOrigin.y();
+        }
+        initialGeometry["screenDcFrameScope"] =
+            "Pre-drag entire own fixture window rectangle; only own background marker permitted at outer corners; diagnostic pixels, not composed-frame acceptance";
+    }
+    edge = POINT{initialBounds.right - edgeInset, initialBounds.bottom - edgeInset};
+    const auto initialEdgeHit = SendMessageW(handle, WM_NCHITTEST, 0, MAKELPARAM(edge.x, edge.y));
+    initialGeometry["driverEdgeInset"] = edgeInset;
+    initialGeometry["driverEdgeX"] = int(edge.x);
+    initialGeometry["driverEdgeY"] = int(edge.y);
+    initialGeometry["driverInitialHit"] = int(initialEdgeHit);
+    initialGeometry["driverExpectedHit"] = HTBOTTOMRIGHT;
+    if (initialEdgeHit != HTBOTTOMRIGHT)
+        return unavailable("resize start point does not hit HTBOTTOMRIGHT", 0,
+            QJsonObject{{"initialGeometry", initialGeometry}});
+    struct Sample {
+        qint64 deliveredNs = 0, desktopNs = 0;
+        QImage header, full, desktopTop, desktopBottom;
+        QPoint desktopTopOrigin, desktopBottomOrigin;
+        int dark = 0, width = 0, height = 0;
+        bool markerBehindFixture = false;
+    };
+    struct Samples {
+        std::mutex mutex;
+        std::vector<Sample> frames;
+        size_t retainedBytes = 0;
+        int delivered = 0, dropped = 0, fullFrames = 0, conversionFailures = 0;
+        bool ended = false;
+        HANDLE callbackDpiBefore = nullptr, callbackDpiActive = nullptr;
+        int callbackAwarenessBefore = -1, callbackAwarenessActive = -1;
+        bool dpiAligned = false;
+        int composedCalibrationFrames = 0;
+    } samples;
+    samples.frames.reserve(180);
+    const auto nowNs = [] { return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count(); };
+    const auto startedNs = nowNs();
+    livekit::DesktopCaptureProbeOptions options;
+    options.allow_wgc_window = true;
+    const bool composedDesktop = args.contains("--composed-desktop");
+    livekit::DesktopSource captureSource{livekit::DesktopSourceKind::Window,
+        reinterpret_cast<intptr_t>(handle), "own-resize-fixture"};
+    QPoint monitorOrigin;
+    if (composedDesktop) {
+        bool selected = false;
+        for (const auto &source : livekit::EnumerateDesktopSources()) {
+            if (source.kind != livekit::DesktopSourceKind::Screen) continue;
+            const auto binding = livekit::ResolveScreenBinding(source, 1, "resize-observer");
+            if (!binding || !QRect(binding->physical_x, binding->physical_y,
+                    binding->physical_width, binding->physical_height).contains(background.bounds)) continue;
+            captureSource = source;
+            monitorOrigin = QPoint(binding->physical_x, binding->physical_y);
+            selected = true;
+            break;
+        }
+        if (!selected) return unavailable("no monitor capture contains the owned fixture/background");
+    }
+    auto capture = livekit::CreateDesktopCaptureForProbe(std::move(options));
+    TEST_CHECK(capture->SetQuality({livekit::ScreenShareResolution::Native, 30}, 1, {}));
+    capture->Start(captureSource,
+        [&samples, dpr, nowNs, handle, &background, getThreadDpi, setThreadDpi, getDpiAwareness, uiDpiContext,
+            composedDesktop, monitorOrigin]
+            (const livekit::VideoFrame &frame) {
+            const auto deliveredNs = nowNs();
+            const auto owned = livekit::render::VideoRenderFrame::CopyFrom(frame);
+            auto image = owned ? livekit::render::QtCpuVideoRenderer().Convert(*owned) : QImage();
+            std::lock_guard lock(samples.mutex);
+            ++samples.delivered;
+            if (image.isNull()) { ++samples.conversionFailures; return; }
+            QImage composedTop;
+            QPoint composedTopOrigin;
+            if (composedDesktop) {
+                RECT client{};
+                POINT origin{};
+                if (!GetClientRect(handle, &client) || !ClientToScreen(handle, &origin)) return;
+                const int inset = qRound(8*dpr);
+                composedTopOrigin = QPoint(origin.x + inset, origin.y + inset);
+                const QRect top(composedTopOrigin - monitorOrigin, QSize(480, qRound(28*dpr)));
+                const QRect calibrationArea(background.bounds.topLeft() - monitorOrigin, QSize(16, 16));
+                if (!image.rect().contains(top) || !image.rect().contains(calibrationArea)) return;
+                composedTop = image.copy(top);
+                if (background.match(image.copy(calibrationArea), background.bounds.topLeft()).visible())
+                    ++samples.composedCalibrationFrames;
+                // Retain only pixels inside our fixture, never other apps on the monitor.
+                image = image.copy(QRect(QPoint(origin.x, origin.y) - monitorOrigin,
+                    QSize(client.right, client.bottom)).intersected(image.rect()));
+            }
+            // Fixed left-hand title/time/logo region; no QWidget access occurs
+            // on capture delivery. All frames retain this crop for review.
+            const QRect region(qRound(8*dpr), qRound(8*dpr), qRound(320*dpr), qRound(28*dpr));
+            Sample sample;
+            sample.deliveredNs = deliveredNs;
+            sample.width = image.width(); sample.height = image.height();
+            sample.header = image.copy(region.intersected(image.rect()));
+            sample.desktopNs = nowNs();
+            const auto beforeDpi = getThreadDpi ? getThreadDpi() : nullptr;
+            DpiScope desktopDpi{setThreadDpi, setThreadDpi && uiDpiContext ? setThreadDpi(uiDpiContext) : nullptr};
+            const auto activeDpi = getThreadDpi ? getThreadDpi() : nullptr;
+            if (samples.delivered == 1) {
+                samples.callbackDpiBefore = beforeDpi;
+                samples.callbackDpiActive = activeDpi;
+                samples.callbackAwarenessBefore = getDpiAwareness ? getDpiAwareness(beforeDpi) : -1;
+                samples.callbackAwarenessActive = getDpiAwareness ? getDpiAwareness(activeDpi) : -1;
+                samples.dpiAligned = desktopDpi.previous != nullptr;
+            }
+            sample.markerBehindFixture = background.exposedBehindFixture();
+            RECT client{};
+            if (GetClientRect(handle, &client)) {
+                const int inset = qRound(8*dpr);
+                const int cropWidth = std::min(480, std::max(0, int(client.right) - 2*inset));
+                const int topHeight = std::min(96, qRound(28*dpr));
+                const int bottomHeight = std::min(96, qRound(52*dpr));
+                sample.desktopTop = CaptureResizeDesktopCrop(handle,
+                    QRect(inset, inset, cropWidth, topHeight), sample.desktopTopOrigin);
+                sample.desktopBottom = CaptureResizeDesktopCrop(handle,
+                    QRect(inset, int(client.bottom)-inset-bottomHeight, cropWidth, bottomHeight),
+                    sample.desktopBottomOrigin);
+            }
+            if (composedDesktop) {
+                sample.desktopTop = std::move(composedTop);
+                sample.desktopTopOrigin = composedTopOrigin;
+            }
+            for (int y = 0; y < sample.header.height(); ++y)
+                for (int x = 0; x < sample.header.width(); ++x) {
+                    const auto pixel = sample.header.pixel(x, y);
+                    if (qGray(pixel) < 160) ++sample.dark;
+                }
+            if (samples.fullFrames < 12 && (samples.delivered == 1 || samples.delivered % 15 == 0 || sample.dark == 0)) {
+                sample.full = image;
+                ++samples.fullFrames;
+            }
+            const size_t bytes = size_t(sample.header.sizeInBytes()) + size_t(sample.full.sizeInBytes()) +
+                size_t(sample.desktopTop.sizeInBytes()) + size_t(sample.desktopBottom.sizeInBytes());
+            if (samples.frames.size() >= 180 || samples.retainedBytes + bytes > 128u*1024u*1024u) {
+                ++samples.dropped;
+                return;
+            }
+            samples.retainedBytes += bytes;
+            samples.frames.push_back(std::move(sample));
+        }, [&samples] { std::lock_guard lock(samples.mutex); samples.ended = true; });
+    std::atomic<bool> stopDriver{false};
+    std::atomic<int> mouseSteps{0}, driverError{0}, driverInputHit{HTNOWHERE};
+    // Exercise the mouse sizing loop, not the keyboard outline-only path.
+    // Input starts only over this exposed fixture and stops if ownership
+    // changes. No other application's window is driven.
+    std::thread driver([handle, edge, travelX, travelY, &stopDriver, &mouseSteps, &driverError, &driverInputHit] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(700));
+        const auto owned = [handle](bool foreground) {
+            DWORD process = 0;
+            return IsWindow(handle) && GetWindowThreadProcessId(handle, &process)
+                && process == GetCurrentProcessId() && (!foreground || GetForegroundWindow() == handle);
+        };
+        if (stopDriver.load() || !owned(false)) { driverError.store(11); return; }
+        if (travelX < 80 || travelY < 40) { driverError.store(12); return; }
+        if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) { driverError.store(13); return; }
+        if (!SetCursorPos(edge.x, edge.y)) { driverError.store(14); return; }
+        if (GetAncestor(WindowFromPoint(edge), GA_ROOT) != handle) { driverError.store(15); return; }
+        DWORD_PTR hit = HTNOWHERE;
+        if (!SendMessageTimeoutW(handle, WM_NCHITTEST, 0, MAKELPARAM(edge.x, edge.y),
+                SMTO_ABORTIFHUNG | SMTO_BLOCK, 1000, &hit)) { driverError.store(16); return; }
+        driverInputHit.store(int(hit));
+        if (hit != HTBOTTOMRIGHT) { driverError.store(16); return; }
+        INPUT press{}; press.type = INPUT_MOUSE; press.mi.dwFlags = MOUSEEVENTF_LEFTDOWN;
+        if (SendInput(1, &press, sizeof(press)) != 1) { driverError.store(2); return; }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const auto thread = GetWindowThreadProcessId(handle, nullptr);
+        for (int step = 1; step <= 180 && !stopDriver.load(); ++step) {
+            GUITHREADINFO info{}; info.cbSize = sizeof(info);
+            if (!owned(true) || !GetGUIThreadInfo(thread, &info) ||
+                    (info.hwndCapture != handle && !IsChild(handle, info.hwndCapture))) {
+                driverError.store(3);
+                break;
+            }
+            const int progress = step <= 90 ? step : 180 - step;
+            if (!SetCursorPos(edge.x + travelX * progress / 90, edge.y + travelY * progress / 90)) {
+                driverError.store(4);
+                break;
+            }
+            ++mouseSteps;
+            std::this_thread::sleep_for(std::chrono::milliseconds(16));
+        }
+        // Always balance our injected press, including cancellation paths.
+        INPUT release{}; release.type = INPUT_MOUSE; release.mi.dwFlags = MOUSEEVENTF_LEFTUP;
+        if (SendInput(1, &release, sizeof(release)) != 1) driverError.store(5);
+        PostMessageW(handle, WM_CANCELMODE, 0, 0);
+    });
+    QTimer::singleShot(4500, &application, [&] {
+        stopDriver.store(true);
+        PostMessageW(handle, WM_CANCELMODE, 0, 0);
+        application.quit();
+    });
+    std::cout << "NATIVE_RESIZE_LIVE OBSERVING pid=" << GetCurrentProcessId()
+        << " hwnd=" << reinterpret_cast<uintptr_t>(handle) << std::endl;
+    application.exec();
+    stopDriver.store(true);
+    driver.join();
+    SendMessageW(handle, WM_CANCELMODE, 0, 0);
+    const auto telemetryHitAfter = NativeTelemetryLocatorHit(window, handle);
+    capture->Stop(); // Joins delivery before changing exposure or reading the cache.
+    SetWindowPos(handle, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    SetCursorPos(savedCursor.x, savedCursor.y);
+    const auto observed = livekit::ObserveDesktopCapture();
+    QJsonArray frames, timeline;
+    qint64 previousNs = 0, maximumGapNs = 0;
+    int baselineDark = 0, zeroDark = 0;
+    int validDesktopTop = 0, validDesktopBottom = 0;
+    int drivenDesktopTop = 0, drivenDesktopBottom = 0, backgroundBleedTop = 0, backgroundBleedBottom = 0;
+    qint64 sizingStartNs = 0, sizingEndNs = 0;
+    for (const auto &event : paint.nativeTimeline) {
+        if (event[1] == WM_ENTERSIZEMOVE && !sizingStartNs) sizingStartNs = event[0];
+        if (event[1] == WM_EXITSIZEMOVE) sizingEndNs = event[0];
+    }
+    const auto whiteRatio = [](const QImage &image) {
+        if (image.isNull()) return -1.0;
+        int white = 0;
+        for (int y = 0; y < image.height(); ++y)
+            for (int x = 0; x < image.width(); ++x) {
+                const auto pixel = image.pixel(x, y);
+                if (qRed(pixel) >= 245 && qGreen(pixel) >= 245 && qBlue(pixel) >= 245) ++white;
+            }
+        return double(white) / (image.width() * image.height());
+    };
+    std::set<std::pair<int, int>> captureSizes;
+    for (size_t index = 0; index != samples.frames.size(); ++index) {
+        const auto &sample = samples.frames[index];
+        const auto topMarker = background.match(sample.desktopTop, sample.desktopTopOrigin);
+        const auto bottomMarker = background.match(sample.desktopBottom, sample.desktopBottomOrigin);
+        const bool driven = sample.desktopNs >= sizingStartNs && sample.desktopNs <= sizingEndNs;
+        if (sample.markerBehindFixture && driven) {
+            if (!sample.desktopTop.isNull()) ++drivenDesktopTop;
+            if (!sample.desktopBottom.isNull()) ++drivenDesktopBottom;
+        }
+        if (calibrated && sample.markerBehindFixture && topMarker.visible()) ++backgroundBleedTop;
+        if (calibrated && sample.markerBehindFixture && bottomMarker.visible()) ++backgroundBleedBottom;
+        captureSizes.emplace(sample.width, sample.height);
+        const auto prefix = QStringLiteral("frame-%1").arg(index, 3, 10, QLatin1Char('0'));
+        TEST_CHECK(sample.header.save(directory.filePath(prefix + "-header.png")));
+        if (!sample.full.isNull()) TEST_CHECK(sample.full.save(directory.filePath(prefix + "-full.png")));
+        if (!sample.desktopTop.isNull()) {
+            ++validDesktopTop;
+            TEST_CHECK(sample.desktopTop.save(directory.filePath(prefix + "-desktop-top.png")));
+        }
+        if (!sample.desktopBottom.isNull()) {
+            ++validDesktopBottom;
+            TEST_CHECK(sample.desktopBottom.save(directory.filePath(prefix + "-desktop-bottom.png")));
+        }
+        const auto gapNs = previousNs ? sample.deliveredNs - previousNs : 0;
+        maximumGapNs = std::max(maximumGapNs, gapNs); previousNs = sample.deliveredNs;
+        if (sample.deliveredNs - startedNs < 500000000) baselineDark = std::max(baselineDark, sample.dark);
+        if (sample.dark == 0) ++zeroDark;
+        frames.append(QJsonObject{{"index", int(index)}, {"timeMs", double(sample.deliveredNs-startedNs)/1e6},
+            {"deliveryGapMs", double(gapNs)/1e6}, {"width", sample.width}, {"height", sample.height},
+            {"headerDarkPixels", sample.dark}, {"fullFrameRetained", !sample.full.isNull()},
+            {"desktopTimeMs", double(sample.desktopNs-startedNs)/1e6},
+            {"desktopTopValid", !sample.desktopTop.isNull()}, {"desktopBottomValid", !sample.desktopBottom.isNull()},
+            {"desktopTopWhiteRatio", whiteRatio(sample.desktopTop)},
+            {"desktopBottomWhiteRatio", whiteRatio(sample.desktopBottom)},
+            {"markerBehindFixture", sample.markerBehindFixture}, {"duringSizingLoop", driven},
+            {"desktopTopMarkerA", topMarker.pixels[0]}, {"desktopTopMarkerB", topMarker.pixels[1]},
+            {"desktopTopMarkerPairs", topMarker.adjacentPairs},
+            {"desktopBottomMarkerA", bottomMarker.pixels[0]}, {"desktopBottomMarkerB", bottomMarker.pixels[1]},
+            {"desktopBottomMarkerPairs", bottomMarker.adjacentPairs},
+            {"desktopTopX", sample.desktopTopOrigin.x()}, {"desktopTopY", sample.desktopTopOrigin.y()},
+            {"desktopBottomX", sample.desktopBottomOrigin.x()}, {"desktopBottomY", sample.desktopBottomOrigin.y()}});
+    }
+    for (const auto &event : paint.nativeTimeline)
+        timeline.append(QJsonObject{{"timeMs", double(event[0]-startedNs)/1e6}, {"message", int(event[1])},
+            {"width", int(event[2])}, {"height", int(event[3])}});
+    QJsonObject state{{"executable", QCoreApplication::applicationFilePath()},
+        {"arguments", QJsonArray::fromStringList(args)}, {"dpr", dpr}, {"captureBackend", observed.backend},
+        {"renderBackend", ParticipantWindowTestAccess::soakRenderBackend(window)},
+        {"requestedCaptureFps", 30}, {"suppressNcPaint", ncPaint}, {"suppressNcActivate", ncActivate},
+        {"composedDesktop", composedDesktop}, {"composedCalibrationFrames", samples.composedCalibrationFrames},
+        {"cpuFixture", cpuFixture},
+        {"systemFrame", systemFrame},
+        {"qtFramedClient", qtFramedClient},
+        {"nativeResizeFrame", nativeResizeFrame},
+        {"sizeObservation", composedDesktop ? "distinct fixture client crop sizes; monitor size is constant" : "window capture sizes"},
+        {"flushNativeResize", flushResize}, {"nativeResizeFlushes", paint.nativeResizeFlushes},
+        {"defaultNcPaint", defaultNcPaint}, {"disableDwmNc", disableDwmNc}, {"noDwmFrame", noDwmFrame},
+        {"retainClientBits", retainClientBits},
+        {"noNativeCaption", noNativeCaption}, {"compositedRaster", compositedRaster},
+        {"enableDwmNc", enableDwmNc},
+        {"dwmNcPolicyHresult", int(ncPolicyHr)}, {"dwmFrameMarginsHresult", int(frameMarginsHr)},
+        {"dwmNcBeforeHresult", int(ncBeforeHr)}, {"dwmNcAfterHresult", int(ncAfterHr)},
+        {"dwmNcEnabledBefore", bool(ncEnabledBefore)}, {"dwmNcEnabledAfter", bool(ncEnabledAfter)},
+        {"hwndStyle", QString::number(quintptr(GetWindowLongPtrW(handle, GWL_STYLE)), 16)},
+        {"hwndExStyle", QString::number(quintptr(GetWindowLongPtrW(handle, GWL_EXSTYLE)), 16)},
+        {"qtTranslucentBackground", window.testAttribute(Qt::WA_TranslucentBackground)},
+        {"qtOpaquePaintEvent", window.testAttribute(Qt::WA_OpaquePaintEvent)},
+        {"qtAlphaBufferSize", window.windowHandle() ? window.windowHandle()->format().alphaBufferSize() : -1},
+        {"uiDpiContext", dpiContextString(uiDpiContext)},
+        {"uiDpiAwareness", getDpiAwareness ? getDpiAwareness(uiDpiContext) : -1},
+        {"callbackDpiContextBefore", dpiContextString(samples.callbackDpiBefore)},
+        {"callbackDpiContextActive", dpiContextString(samples.callbackDpiActive)},
+        {"callbackDpiAwarenessBefore", samples.callbackAwarenessBefore},
+        {"callbackDpiAwarenessActive", samples.callbackAwarenessActive},
+        {"callbackDesktopDpiAligned", samples.dpiAligned},
+        {"fixedMeetingId", "731 804 926"}, {"nativeTelemetryHitBefore", telemetryHitBefore},
+        {"nativeTelemetryHitAfter", telemetryHitAfter},
+        {"desktopTopSamples", validDesktopTop}, {"desktopBottomSamples", validDesktopBottom},
+        {"desktopTopSizingSamples", drivenDesktopTop}, {"desktopBottomSizingSamples", drivenDesktopBottom},
+        {"backgroundBleedTopSamples", backgroundBleedTop}, {"backgroundBleedBottomSamples", backgroundBleedBottom},
+        {"backgroundMarker", QJsonObject{{"calibrated", calibrated}, {"calibrationFlushHresult", int(calibrationFlushHr)},
+            {"x", background.bounds.x()}, {"y", background.bounds.y()},
+            {"width", background.bounds.width()}, {"height", background.bounds.height()},
+            {"tileSize", ResizeObservationBackground::tileSize},
+            {"colorA", "#e90d9d"}, {"colorB", "#17e5bf"}, {"channelTolerance", 8},
+            {"calibrationMarkerA", calibrationMatches.pixels[0]}, {"calibrationMarkerB", calibrationMatches.pixels[1]},
+            {"calibrationMarkerPairs", calibrationMatches.adjacentPairs},
+            {"hwndStyle", QString::number(quintptr(GetWindowLongPtrW(background.handle, GWL_STYLE)), 16)},
+            {"hwndExStyle", QString::number(quintptr(GetWindowLongPtrW(background.handle, GWL_EXSTYLE)), 16)}}},
+        {"desktopScope", "Actual Screen DC crops with UI thread DPI context, bounded to this fixture; occluded/geometry-raced crops discarded. Only calibrated spatial matches of both opaque background marker colors establish background bleed; white ratios are descriptive."},
+        {"wmSizing", paint.sizingMessages}, {"wmSize", paint.sizeMessages}, {"wmEnterSizeMove", paint.enteringSizing},
+        {"wmExitSizeMove", paint.leavingSizing}, {"wmPaint", paint.nativePaints},
+        {"wmNcPaint", paint.nonClientPaints}, {"wmNcActivate", paint.nonClientActivations},
+        {"wmEraseBackground", paint.eraseBackgrounds},
+        {"directNcPaintBlocks", paint.directNcPaintBlocks},
+        {"driver", "own-window mouse border drag"}, {"mouseSteps", mouseSteps.load()},
+        {"initialGeometry", initialGeometry}, {"driverInputHit", driverInputHit.load()},
+        {"driverExpectedHit", HTBOTTOMRIGHT},
+        {"driverError", driverError.load()}, {"dragFullWindowsRead", dragSettingRead},
+        {"dragFullWindows", bool(dragFullWindows)}, {"distinctCaptureSizes", int(captureSizes.size())},
+        {"deliveredFrames", samples.delivered},
+        {"retainedFrames", int(samples.frames.size())}, {"droppedFrames", samples.dropped},
+        {"retainedBytes", double(samples.retainedBytes)}, {"conversionFailures", samples.conversionFailures},
+        {"captureEnded", samples.ended}, {"maximumDeliveryGapMs", double(maximumGapNs)/1e6},
+        {"baselineHeaderDarkPixels", baselineDark}, {"zeroDarkHeaderSamples", zeroDark},
+        {"frames", frames}, {"nativeTimeline", timeline},
+        {"scope", "30fps WGC delivery observations, possibly cached frames; delivery times are not source/vsync timestamps; visual acceptance remains unverified"}};
+    QFile executable(QCoreApplication::applicationFilePath());
+    if (executable.open(QIODevice::ReadOnly)) {
+        QCryptographicHash hash(QCryptographicHash::Sha256);
+        if (hash.addData(&executable)) state["executableSha256"] = QString::fromLatin1(hash.result().toHex());
+    }
+    const bool sizingCaptureSufficient = !driverError.load() && mouseSteps.load() >= 100 &&
+        paint.enteringSizing > 0 && paint.leavingSizing > 0 && paint.sizeMessages >= 20 &&
+        captureSizes.size() >= 10 && paint.sizingMessages >= 20 && samples.frames.size() >= 30 &&
+        (std::string(observed.backend) == "wgc" ||
+            (composedDesktop && std::string(observed.backend) == "dxgi")) && !samples.ended && !samples.dropped &&
+        !samples.conversionFailures && maximumGapNs <= 100000000 && baselineDark > 100;
+    const bool sufficient = sizingCaptureSufficient && calibrated && samples.dpiAligned &&
+        drivenDesktopTop >= 20 && (composedDesktop ? samples.composedCalibrationFrames >= 20 : drivenDesktopBottom >= 20);
+    // During resizing, a monitor frame can predate the current bottom edge.
+    // Only the fixed top crop establishes bleed in the composed-screen mode.
+    const bool bleed = backgroundBleedTop > 0 || (!composedDesktop && backgroundBleedBottom > 0);
+    if (composedDesktop) state["desktopScope"] = "Composed DXGI/WGC monitor frames: calibrated fixed top crop inside owned fixture. GDI bottom crops are diagnostic only; source-frame and current bottom geometry can differ.";
+    const bool hitValid = telemetryHitBefore["valid"].toBool() && telemetryHitAfter["valid"].toBool();
+    const bool hitCorrect = hitValid && telemetryHitBefore["clientHit"].toBool() && telemetryHitAfter["clientHit"].toBool();
+    state["sizingCaptureSufficient"] = sizingCaptureSufficient;
+    state["observationSufficient"] = sufficient;
+    state["nativeTelemetryHitVerdict"] = !hitValid ? "INCONCLUSIVE" : hitCorrect ? "PASS" : "FAIL";
+    state["verdict"] = bleed ? "BACKGROUND_BLEED_OBSERVED" : sufficient && !zeroDark
+        ? "NO_BACKGROUND_BLEED_OBSERVED" : "INCONCLUSIVE";
+    state["reason"] = bleed ? "calibrated opaque background marker observed inside fixture raster crops"
+        : !sufficient ? "sizing/capture, calibrated background, DPI alignment or desktop samples insufficient"
+        : zeroDark ? "blank title-region candidates retained for visual review"
+        : "no marker bleed in sampled raster crops; real meeting visual acceptance remains unverified";
+    QSaveFile file(directory.filePath("resize-live.json"));
+    const auto bytes = QJsonDocument(state).toJson();
+    TEST_CHECK(file.open(QIODevice::WriteOnly) && file.write(bytes) == bytes.size() && file.commit());
+    std::cout << "NATIVE_RESIZE_LIVE " << state["verdict"].toString().toStdString()
+        << " WM_SIZING=" << paint.sizingMessages << " frames=" << samples.frames.size()
+        << " zeroDark=" << zeroDark << " evidence=" << directory.absolutePath().toStdString() << std::endl;
+    return bleed || (hitValid && !hitCorrect) ? 1 : sufficient && !zeroDark && hitCorrect ? 0 : 3;
 }
 
 void CardChromeAcceptance(bool before = false) {
@@ -6472,7 +7704,32 @@ void DepartureNoticeLifetime() {
         fixture.pump();
         TEST_CHECK(!guard && !notice);
     }
-    std::cout << "DEPARTURE_NOTICE PASS: server Logout, duplicate identity, leave-before-ack, standalone HWND, mouse input, parent deletion, deduplication\n";
+    // A pending meeting window must show the preflight failure instead of
+    // remaining on its initial Connecting banner when no Room starts.
+    {
+        WindowFixture fixture(false);
+        fixture.window = ParticipantWindowTestAccess::createChatPrivacy(fixture.coordinator);
+        auto *window = fixture.window.release();
+        window->setAttribute(Qt::WA_DeleteOnClose);
+        QPointer<MeetingUI::MeetingRoomWindow> guard(window);
+        OpenMeeting::MediaPreferences preferences;
+        preferences.cameraVideoCodec = QStringLiteral("h264");
+        preferences.screenShareVideoCodec = QStringLiteral("av1");
+        auto secret = livekit::MeetingSecretHandle::Create({'1', '2', '3', '4', '5', '6'});
+        fixture.coordinator->connectDirectlyAsync("wss://test", "token", "id", "name", preferences,
+            {livekit::MeetingEncryptionMode::Required, secret});
+        TEST_CHECK(fixture.coordinator->state() == OpenMeeting::MeetingState::Failed);
+        QPointer<QMessageBox> notice(ParticipantWindowTestAccess::departureNotice(*window));
+        TEST_CHECK(guard && notice && notice->isVisible() && !secret->available());
+        TEST_CHECK(notice->text().contains(QStringLiteral("VP8")) &&
+            notice->text().contains(QStringLiteral("H264")));
+        auto *ok = notice->button(QMessageBox::Ok);
+        TEST_CHECK(ok && ok->isEnabled());
+        ok->click();
+        fixture.pump();
+        TEST_CHECK(!guard && !notice);
+    }
+    std::cout << "DEPARTURE_NOTICE PASS: server Logout, duplicate identity, leave-before-ack, standalone HWND, mouse input, parent deletion, deduplication, encryption preflight error\n";
 }
 
 int RunMeetingSoak(QApplication &application) {
@@ -6715,6 +7972,7 @@ int WindowAcceptanceMain(int argc, char **argv) {
     QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
     QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
 #endif
+    QApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings);
     QStandardPaths::setTestModeEnabled(true);
     crl::details::init();
     // Match Qt's main-scope application lifetime: Qt post routines run before
@@ -6966,6 +8224,12 @@ int WindowAcceptanceMain(int argc, char **argv) {
         fixture.pump();
         TEST_CHECK(panel->document().page().objects.size() == 1);
         std::cout << "WHITEBOARD_MEETING PASS: toolbar, stage, participant updates, retained content, cancelled input\n";
+    } else if (application.arguments().contains("--window-resize-live-observe")) {
+        result = NativeWindowResizeLiveObservation(application);
+    } else if (application.arguments().contains("--window-resize-paint-before")) {
+        result = NativeWindowResizePaintAcceptance(application, true);
+    } else if (application.arguments().contains("--window-resize-paint")) {
+        result = NativeWindowResizePaintAcceptance(application, false);
     } else if (application.arguments().contains("--window-resize-before")) {
         NativeWindowResizeAcceptance(true);
     } else if (application.arguments().contains("--window-resize")) {

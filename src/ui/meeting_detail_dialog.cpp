@@ -48,7 +48,8 @@ MeetingDetailDialog::MeetingDetailDialog(
 	: QDialog(parent)
 	, _meetingId(meetingId)
 	, _controller(controller)
-	, _session(session) {
+	, _session(session)
+	, _authGeneration(session.authGeneration()) {
 	setWindowTitle(QCoreApplication::translate("MeetingUI", "Meeting Details"));
 	setWindowFlag(Qt::WindowContextHelpButtonHint, false);
 	setModal(true);
@@ -276,12 +277,25 @@ void MeetingDetailDialog::requestJoin() {
 	if (state.meetingId != _meetingId || state.refreshing || state.error.code != 0 ||
 		state.state != OpenMeeting::MeetingCatalogLoadState::Ready || !state.detail ||
 		state.detail->record.meetingId != _meetingId) return;
+	const auto status = state.detail->record.status;
+	if (!_session.isLoggedIn() || _session.authGeneration() != _authGeneration ||
+		(status != OpenMeeting::MeetingStatus::Scheduled &&
+		 status != OpenMeeting::MeetingStatus::InProgress)) return;
+	_detail = state.detail;
 	_joinRequested = true;
 	accept();
 }
 
 std::optional<OpenMeeting::MeetingCatalogDetail> MeetingDetailDialog::detailForJoin() const {
-	return _joinRequested ? _detail : std::nullopt;
+	if (!_joinRequested || result() != QDialog::Accepted || !_session.isLoggedIn() ||
+		_session.authGeneration() != _authGeneration) return std::nullopt;
+	const auto &state = _controller.detailState();
+	if (state.meetingId != _meetingId || state.refreshing || state.error.code != 0 ||
+		state.state != OpenMeeting::MeetingCatalogLoadState::Ready || !state.detail ||
+		state.detail->record.meetingId != _meetingId) return std::nullopt;
+	const auto status = state.detail->record.status;
+	return status == OpenMeeting::MeetingStatus::Scheduled || status == OpenMeeting::MeetingStatus::InProgress
+		? state.detail : std::nullopt;
 }
 
 void MeetingDetailDialog::setActionsEnabled(bool enabled) {

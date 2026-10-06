@@ -1330,7 +1330,8 @@ QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-thi
 }
 
 QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="linkBtn"],
-[uiStyle="meeting-main-window-this"] QPushButton[objectName="linkBtn"] {
+[uiStyle="meeting-main-window-this"] QPushButton[objectName="linkBtn"],
+[uiStyle="meeting-main-window-this"] QPushButton[objectName="joinEncryptionToggle"] {
     background: transparent;
     color: #1677ff;
     font-size: 12px;
@@ -1340,9 +1341,14 @@ QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-thi
 }
 
 QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="linkBtn"]:hover,
-[uiStyle="meeting-main-window-this"] QPushButton[objectName="linkBtn"]:hover {
+[uiStyle="meeting-main-window-this"] QPushButton[objectName="linkBtn"]:hover,
+[uiStyle="meeting-main-window-this"] QPushButton[objectName="joinEncryptionToggle"]:hover:enabled {
     color: #4096ff;
     text-decoration: underline;
+}
+
+[uiStyle="meeting-main-window-this"] QPushButton[objectName="joinEncryptionToggle"]:disabled {
+    color: #a8abb2;
 }
 
 QCheckBox[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"],
@@ -1885,7 +1891,9 @@ QRadioButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiS
 }
 
 QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="secondaryButton"],
-[uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"] {
+[uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"],
+[uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeSaveKey"],
+[uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeClearKey"] {
     min-height: 34px;
     padding: 0 16px;
     border: 1px solid #dcdfe6;
@@ -1895,18 +1903,24 @@ QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiSt
 }
 
 QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="secondaryButton"]:hover,
-[uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"]:hover {
+[uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"]:hover,
+[uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeSaveKey"]:hover,
+[uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeClearKey"]:hover {
     border-color: #1677ff;
     color: #1677ff;
 }
 
 QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="secondaryButton"]:pressed,
-[uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"]:pressed {
+[uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"]:pressed,
+[uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeSaveKey"]:pressed,
+[uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeClearKey"]:pressed {
     background: #eef5ff;
 }
 
 QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="secondaryButton"]:disabled,
-[uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"]:disabled {
+[uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"]:disabled,
+[uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeSaveKey"]:disabled,
+[uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeClearKey"]:disabled {
     color: #a8abb2;
     background: #f5f6f7;
 }

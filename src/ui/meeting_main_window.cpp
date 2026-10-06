@@ -2,7 +2,6 @@
 #include <QtCore/QCoreApplication>
 #include "src/ui/app_branding.h"
 #include "src/ui/meeting_main_window.h"
-#include "src/ui/meeting_encryption_dialog.h"
 #include "src/ui/app_theme.h"
 #include "src/ui/app_icons.h"
 #include "src/ui/meeting_log_console.h"
@@ -20,6 +19,7 @@
 #include "src/telemetry/telemetry_report.h"
 #include "styles/style_widgets.h"
 #include <QtCore/QPointer>
+#include <QtCore/qscopeguard.h>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QCheckBox>
@@ -172,6 +172,7 @@ JoinMeetingDialog::JoinMeetingDialog(
 	_closeBtn->setAccessibleName(QCoreApplication::translate("MeetingUI", "Close"));
 	MeetingUI::AppTheme::setStyleVariant(*_closeBtn, "meeting-main-window-closebtn");
 	_closeBtn->setFixedSize(24, 24);
+	_closeBtn->setAutoDefault(false);
 	connect(_closeBtn, &QPushButton::clicked, this, &QDialog::reject);
 	titleLayout->addWidget(_closeBtn);
 	mainLayout->addLayout(titleLayout);
@@ -241,9 +242,70 @@ JoinMeetingDialog::JoinMeetingDialog(
 	}
 	mainLayout->addWidget(_meetingPolicyLabel);
 
+	_encryptionToggleBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "⚙ Encryption / Security Settings ▾"), container);
+	_encryptionToggleBtn->setObjectName(QStringLiteral("joinEncryptionToggle"));
+	_encryptionToggleBtn->setAutoDefault(false);
+	_encryptionToggleBtn->setAccessibleName(QCoreApplication::translate("MeetingUI", "Encryption / Security Settings"));
+	mainLayout->addWidget(_encryptionToggleBtn);
+	_encryptionWidget = new QWidget(container);
+	_encryptionWidget->setObjectName(QStringLiteral("joinEncryptionWidget"));
+	auto encryptionLayout = new QVBoxLayout(_encryptionWidget);
+	encryptionLayout->setContentsMargins(0, 2, 0, 2);
+	encryptionLayout->setSpacing(8);
+	_encryptionRequired = new QCheckBox(QCoreApplication::translate("MeetingUI", "Require end-to-end encryption for this session"), _encryptionWidget);
+	_encryptionRequired->setObjectName(QStringLiteral("e2eeRequired"));
+	encryptionLayout->addWidget(_encryptionRequired);
+	auto encryptionInfo = new QLabel(QCoreApplication::translate("MeetingUI", "Use the same encryption key as the other participants. Share it through a trusted channel. The key is not saved. Participant and connection metadata remain visible to the service."), _encryptionWidget);
+	encryptionInfo->setWordWrap(true);
+	encryptionLayout->addWidget(encryptionInfo);
+	auto encryptionProfile = new QLabel(QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Auto uses VP8; select a supported codec in Settings for camera and screen sharing."), _encryptionWidget);
+	encryptionProfile->setWordWrap(true);
+	encryptionLayout->addWidget(encryptionProfile);
+	_encryptionKeyInput = new QLineEdit(_encryptionWidget);
+	_encryptionKeyInput->setObjectName(QStringLiteral("e2eeKeyInput"));
+	_encryptionKeyInput->setAccessibleName(QCoreApplication::translate("MeetingUI", "Encryption key"));
+	_encryptionKeyInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "ASCII encryption key (not the meeting password)"));
+	_encryptionKeyInput->setEchoMode(QLineEdit::Password);
+	_encryptionKeyInput->setInputMethodHints(Qt::ImhHiddenText | Qt::ImhSensitiveData | Qt::ImhNoPredictiveText);
+	_encryptionKeyInput->setContextMenuPolicy(Qt::NoContextMenu);
+	_encryptionKeyInput->setMaxLength(4097);
+	_encryptionKeyInput->setEnabled(false);
+	encryptionLayout->addWidget(_encryptionKeyInput);
+	_encryptionWidget->hide();
+	mainLayout->addWidget(_encryptionWidget);
+	_encryptionError = new QLabel(container);
+	_encryptionError->setObjectName(QStringLiteral("e2eeInputError"));
+	_encryptionError->setWordWrap(true);
+	AppTheme::setStyleVariant(*_encryptionError, "meeting-main-window-meetingpolicylabel");
+	mainLayout->addWidget(_encryptionError);
+	connect(_encryptionToggleBtn, &QPushButton::clicked, this, [this] {
+		const bool expanded = _encryptionWidget->isHidden();
+		_encryptionWidget->setVisible(expanded);
+		_encryptionToggleBtn->setText(QCoreApplication::translate("MeetingUI", expanded ? "⚙ Encryption / Security Settings ▴" : "⚙ Encryption / Security Settings ▾"));
+		layout()->activate();
+	});
+	connect(_encryptionRequired, &QCheckBox::toggled, this, [this](bool required) {
+		if (required) livekit::MarkSensitiveMemoryUsed();
+		_encryptionKeyInput->setEnabled(required && !_globalEncryption && !_isLoading);
+		if (!required) clearEncryptionEditor();
+		revokeEncryptionRequest();
+		if (!_globalEncryption) {
+			_encryptionError->clear();
+			_encryptionError->hide();
+		}
+	});
+	connect(_session, &OpenMeeting::SessionManager::meetingSecurityPreferencesChanged, this, [this] {
+		// Revalidate pending admission against the current usable defaults.
+		revokeEncryptionRequest();
+		clearEncryptionEditor();
+		updateEncryptionDefaults();
+	});
+	connect(_session, &OpenMeeting::SessionManager::authenticationReset, this, [this] { reject(); });
+
 	// 手动/高级直连设置折叠栏
 	_manualToggleBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "⚙ Advanced LiveKit Connection ▾"), container);
 	_manualToggleBtn->setObjectName("linkBtn");
+	_manualToggleBtn->setAutoDefault(false);
 	_manualToggleBtn->setAccessibleName(QCoreApplication::translate("MeetingUI", "Advanced LiveKit Connection"));
 	connect(_manualToggleBtn, &QPushButton::clicked, this, &JoinMeetingDialog::toggleManualServer);
 	mainLayout->addWidget(_manualToggleBtn);
@@ -269,6 +331,7 @@ JoinMeetingDialog::JoinMeetingDialog(
 	manLayout->addWidget(_tokenInput);
 	_manualWidget->setVisible(false);
 	mainLayout->addWidget(_manualWidget);
+	updateEncryptionDefaults();
 
 	// 状态/错误提示
 	_statusLabel = new QLabel(container);
@@ -285,8 +348,10 @@ JoinMeetingDialog::JoinMeetingDialog(
 	btnLayout->addStretch();
 	_cancelBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Cancel"), container);
 	_cancelBtn->setObjectName("cancelBtn");
+	_cancelBtn->setAutoDefault(false);
 	_joinBtn = new QPushButton(QCoreApplication::translate("MeetingUI", "Join Meeting"), container);
 	_joinBtn->setObjectName("joinBtn");
+	_joinBtn->setDefault(true);
 
 	btnLayout->addWidget(_cancelBtn);
 	btnLayout->addWidget(_joinBtn);
@@ -295,7 +360,97 @@ JoinMeetingDialog::JoinMeetingDialog(
 	connect(_cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
 	connect(_joinBtn, &QPushButton::clicked, this, &JoinMeetingDialog::onJoinClicked);
 	connect(_meetingIdInput, &QLineEdit::returnPressed, this, &JoinMeetingDialog::onJoinClicked);
+	connect(_encryptionKeyInput, &QLineEdit::returnPressed, this, &JoinMeetingDialog::onJoinClicked);
 	AppTheme::makeDialogAdaptive(*this, QSize(460, 560));
+}
+
+JoinMeetingDialog::~JoinMeetingDialog() {
+	clearEncryptionEditor();
+	revokeEncryptionRequest();
+}
+
+void JoinMeetingDialog::clearEncryptionEditor() {
+	if (!_encryptionKeyInput) return;
+	_encryptionKeyInput->setText(QString(_encryptionKeyInput->text().size(), QChar(0)));
+	_encryptionKeyInput->clear();
+}
+
+void JoinMeetingDialog::revokeEncryptionRequest() {
+	if (_encryptionRequest) _encryptionRequest->Revoke();
+	_encryptionRequest.reset();
+}
+
+void JoinMeetingDialog::updateEncryptionDefaults() {
+	const bool previousGlobal = _globalEncryption;
+	_globalEncryption = _session->meetingSecurityPreferences().allMeetingsE2ee &&
+		_session->hasMeetingEncryptionKey();
+	_encryptionToggleBtn->setEnabled(!_globalEncryption && !_isLoading);
+	_encryptionToggleBtn->setToolTip(_globalEncryption ? QCoreApplication::translate("MeetingUI", "End-to-end encryption for all meetings is enabled in Settings.") : QString());
+	if (_globalEncryption || previousGlobal) {
+		revokeEncryptionRequest();
+		clearEncryptionEditor();
+		_encryptionRequired->setChecked(_globalEncryption);
+		_encryptionWidget->hide();
+		_encryptionToggleBtn->setText(QCoreApplication::translate("MeetingUI", "⚙ Encryption / Security Settings ▾"));
+	}
+	_encryptionRequired->setEnabled(!_globalEncryption && !_isLoading);
+	_encryptionKeyInput->setEnabled(!_globalEncryption && !_isLoading && _encryptionRequired->isChecked());
+	_encryptionError->setText(_globalEncryption ? QCoreApplication::translate("MeetingUI",
+		"Using the encryption key configured for all meetings in Settings.") : QString());
+	_encryptionError->setVisible(_globalEncryption);
+}
+
+bool JoinMeetingDialog::prepareEncryptionRequest() {
+	livekit::MeetingEncryptionRequest request;
+	try {
+		if (_globalEncryption) {
+			request = _session->meetingEncryptionRequest(OpenMeeting::MeetingEncryptionEntry::JoinMeeting);
+		} else if (_encryptionRequired->isChecked()) {
+			auto text = _encryptionKeyInput->text();
+			auto bytes = text.toUtf8();
+			text.fill(QChar(0));
+			const auto cleanup = qScopeGuard([&] {
+				if (!bytes.isEmpty()) OPENSSL_cleanse(bytes.data(), static_cast<size_t>(bytes.size()));
+			});
+			request.mode = livekit::MeetingEncryptionMode::Required;
+			request.secret = livekit::MeetingSecretHandle::Create(std::vector<uint8_t>(bytes.begin(), bytes.end()));
+		}
+		request.Validate();
+	} catch (const livekit::EncryptionRequestException &) {
+		revokeEncryptionRequest();
+		_encryptionError->setText(QCoreApplication::translate("MeetingUI",
+			_globalEncryption
+				? "Set an encryption key in Settings > Security before joining."
+				: "Enter 1 to 4096 printable ASCII characters. Unicode keys are not supported."));
+		_encryptionError->show();
+		if (!_globalEncryption) {
+			_encryptionWidget->show();
+			_encryptionToggleBtn->setText(QCoreApplication::translate("MeetingUI", "⚙ Encryption / Security Settings ▴"));
+			_encryptionKeyInput->setFocus();
+		}
+		return false;
+	}
+	revokeEncryptionRequest();
+	_encryptionRequest = std::move(request);
+	if (!_globalEncryption) {
+		_encryptionError->clear();
+		_encryptionError->hide();
+	}
+	return true;
+}
+
+std::optional<livekit::MeetingEncryptionRequest> JoinMeetingDialog::takeEncryptionRequest() {
+	return std::exchange(_encryptionRequest, std::nullopt);
+}
+
+void JoinMeetingDialog::setMeetingPassword(const QString &password) {
+	_passwordInput->setText(password);
+}
+
+void JoinMeetingDialog::accept() {
+	if (!_encryptionRequest && !prepareEncryptionRequest()) return;
+	clearEncryptionEditor();
+	QDialog::accept();
 }
 
 void JoinMeetingDialog::toggleManualServer() {
@@ -308,12 +463,16 @@ void JoinMeetingDialog::toggleManualServer() {
 void JoinMeetingDialog::reject() {
 	_isCancelled = true;
 	_isLoading = false;
+	clearEncryptionEditor();
+	revokeEncryptionRequest();
 	QDialog::reject();
 }
 
 void JoinMeetingDialog::closeEvent(QCloseEvent *e) {
 	_isCancelled = true;
 	_isLoading = false;
+	clearEncryptionEditor();
+	revokeEncryptionRequest();
 	QDialog::closeEvent(e);
 }
 
@@ -325,6 +484,10 @@ void JoinMeetingDialog::setLoading(bool loading, const QString &statusText) {
 	if (_meetingIdInput) _meetingIdInput->setEnabled(!loading);
 	if (_passwordInput) _passwordInput->setEnabled(!loading);
 	if (_displayNameInput) _displayNameInput->setEnabled(!loading);
+	if (_manualToggleBtn) _manualToggleBtn->setEnabled(!loading);
+	if (_manualWidget) _manualWidget->setEnabled(!loading);
+	if (_encryptionToggleBtn) _encryptionToggleBtn->setEnabled(!loading && !_globalEncryption);
+	if (_encryptionWidget) _encryptionWidget->setEnabled(!loading && !_globalEncryption);
 
 	if (loading) {
 		if (_joinBtn) _joinBtn->setText(QCoreApplication::translate("MeetingUI", "Joining..."));
@@ -362,6 +525,7 @@ void JoinMeetingDialog::onJoinClicked() {
 			showError(QCoreApplication::translate("MeetingUI", "Enter a LiveKit server URL for a direct connection"));
 			return;
 		}
+		if (!prepareEncryptionRequest()) return;
 		persistMediaPreferences();
 		accept();
 		return;
@@ -377,6 +541,7 @@ void JoinMeetingDialog::onJoinClicked() {
 		if (_meetingIdInput) _meetingIdInput->setFocus();
 		return;
 	}
+	if (!prepareEncryptionRequest()) return;
 
 	const QString password = _passwordInput ? _passwordInput->text() : QString();
 	auto &session = *_session;
@@ -391,6 +556,7 @@ void JoinMeetingDialog::onJoinClicked() {
 			return;
 		}
 		if (!ok) {
+			self->revokeEncryptionRequest();
 			self->setLoading(false);
 			if (err.message.contains("user already in meeting", Qt::CaseInsensitive) || err.code == 200001) {
 				self->showError(QCoreApplication::translate("MeetingUI", "This account is already in the meeting. Use Guest Access or sign in with another account to join."));
@@ -410,6 +576,7 @@ void JoinMeetingDialog::onJoinClicked() {
 			}
 			self->setLoading(false);
 			if (!tokenOk || auth.url.isEmpty() || auth.token.isEmpty()) {
+				self->revokeEncryptionRequest();
 				self->showError(QCoreApplication::translate("MeetingUI", "Unable to obtain credentials: %1").arg(tokenErr.message.isEmpty() ? QCoreApplication::translate("MeetingUI", "Invalid credentials response") : tokenErr.message));
 				return;
 			}
@@ -758,8 +925,16 @@ void MeetingMainWindow::openQuickMeeting(
 		if (loginDlg.exec() != QDialog::Accepted) return;
 	}
 
-	auto encryption = PromptMeetingEncryption(this);
-	if (!encryption) return;
+	livekit::MeetingEncryptionRequest encryption;
+	try {
+		encryption = session.meetingEncryptionRequest(startScreenShare
+			? OpenMeeting::MeetingEncryptionEntry::ScreenShare
+			: OpenMeeting::MeetingEncryptionEntry::QuickMeeting);
+	} catch (const livekit::EncryptionRequestException &) {
+		QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Meeting Encryption"),
+			QCoreApplication::translate("MeetingUI", "Set an encryption key in Settings > Security before joining."));
+		return;
+	}
 	auto coordinator = OpenMeeting::MeetingCoordinator::create();
 	const auto prefs = session.mediaPreferences();
 
@@ -780,7 +955,7 @@ void MeetingMainWindow::openQuickMeeting(
 	}
 	const auto title = QCoreApplication::translate("MeetingUI", "%1's Instant Meeting").arg(session.nickname());
 	roomWindow->show();
-	roomWindow->prepareMediaAndJoin([coordinator, title, prefs, encryption = std::move(*encryption)]() mutable {
+	roomWindow->prepareMediaAndJoin([coordinator, title, prefs, encryption = std::move(encryption)]() mutable {
 		coordinator->createAndJoinQuickMeetingAsync(title, 3600, prefs, std::move(encryption));
 	});
 }
@@ -828,8 +1003,10 @@ void MeetingMainWindow::openJoinMeetingDialog(
 		std::unique_ptr<QObject> reservation,
 		const QString &meetingId,
 		std::optional<OpenMeeting::MeetingSettings> meetingSettings,
-		bool shareScreenAfterJoin) {
+		bool shareScreenAfterJoin,
+		const QString &initialPassword) {
 	JoinMeetingDialog dialog(this, meetingId, meetingSettings);
+	dialog.setMeetingPassword(initialPassword);
 	if (dialog.exec() != QDialog::Accepted) return;
 	if (dialog.serverUrl().isEmpty() || dialog.token().isEmpty()) {
 		QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Unable to Join Meeting"),
@@ -837,10 +1014,10 @@ void MeetingMainWindow::openJoinMeetingDialog(
 		return;
 	}
 
-	auto encryption = PromptMeetingEncryption(this);
+	auto encryption = dialog.takeEncryptionRequest();
 	if (!encryption) return;
 	auto coordinator = OpenMeeting::MeetingCoordinator::create();
-	OpenMeeting::MediaPreferences preferences;
+	auto preferences = OpenMeeting::SessionManager::instance().mediaPreferences();
 	preferences.enableMicrophone = !dialog.isAudioMuted();
 	preferences.enableVideo = !dialog.isVideoMuted();
 
@@ -954,12 +1131,15 @@ void MeetingMainWindow::showMeetingListDialog() {
 
 void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 	if (meetingId.isEmpty()) return;
+	auto &session = OpenMeeting::SessionManager::instance();
+	const auto authGeneration = session.authGeneration();
 	MeetingDetailDialog dialog(
 		meetingId,
 		*_meetingCatalog,
-		OpenMeeting::SessionManager::instance(),
+		session,
 		this);
-	dialog.exec();
+	if (dialog.exec() != QDialog::Accepted || !session.isLoggedIn() ||
+		session.authGeneration() != authGeneration) return;
 	if (const auto detail = dialog.detailForJoin()) {
 		auto reservation = _meetingEntryGuard.tryAcquire();
 		if (!reservation) {
@@ -968,14 +1148,19 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 			return;
 		}
 
-		auto &session = OpenMeeting::SessionManager::instance();
+		livekit::MeetingEncryptionRequest encryption;
+		try {
+			encryption = session.meetingEncryptionRequest(OpenMeeting::MeetingEncryptionEntry::MeetingDetails);
+		} catch (const livekit::EncryptionRequestException &) {
+			QMessageBox::warning(this, QCoreApplication::translate("MeetingUI", "Meeting Encryption"),
+				QCoreApplication::translate("MeetingUI", "Set an encryption key in Settings > Security before joining."));
+			return;
+		}
 		auto preferences = session.mediaPreferences();
-		preferences.enableMicrophone &= !detail->record.settings.disableMicrophoneOnJoin;
-		preferences.enableVideo &= !detail->record.settings.disableCameraOnJoin;
-		auto encryption = PromptMeetingEncryption(this);
-		if (!encryption) return;
-		auto coordinator = OpenMeeting::MeetingCoordinator::create();
-
+		preferences.enableMicrophone = preferences.enableMicrophone &&
+			!detail->record.settings.disableMicrophoneOnJoin;
+		preferences.enableVideo = preferences.enableVideo &&
+			!detail->record.settings.disableCameraOnJoin;
 		MeetingRoomWindow::Config config;
 		config.meetingId = detail->record.meetingId;
 		config.displayName = session.nickname();
@@ -983,13 +1168,22 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 		config.videoEnabled = preferences.enableVideo;
 		config.invitationMode = InvitationMode::BusinessMeetingId;
 
+		auto coordinator = OpenMeeting::MeetingCoordinator::create();
 		auto *roomWindow = new MeetingRoomWindow(config, coordinator);
 		reservation->setParent(roomWindow);
 		reservation.release();
 		roomWindow->setAttribute(Qt::WA_DeleteOnClose);
 		roomWindow->show();
-		roomWindow->prepareMediaAndJoin([coordinator, config, password = detail->password, preferences, encryption = std::move(*encryption)]() mutable {
-			coordinator->joinMeetingAsync(config.meetingId, password, config.displayName, preferences, std::move(encryption));
+		roomWindow->prepareMediaAndJoin([coordinator, config, preferences,
+			password = detail->password, authGeneration, sessionManager = &session,
+			window = QPointer<MeetingRoomWindow>(roomWindow), encryption = std::move(encryption)]() mutable {
+			if (!sessionManager->isLoggedIn() || sessionManager->authGeneration() != authGeneration) {
+				encryption.Revoke();
+				if (window) window->close();
+				return;
+			}
+			coordinator->joinMeetingAsync(config.meetingId, password, config.displayName,
+				preferences, std::move(encryption));
 		});
 	}
 }

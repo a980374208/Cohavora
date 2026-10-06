@@ -4,6 +4,90 @@
 <context>
     <name>MeetingUI</name>
     <message>
+        <source>Security</source>
+        <translation>安全</translation>
+    </message>
+    <message>
+        <source>End-to-end encryption (E2EE)</source>
+        <translation>端到端加密（E2EE）</translation>
+    </message>
+    <message>
+        <source>Encrypt quick meetings</source>
+        <translation>快速会议启用端到端加密</translation>
+    </message>
+    <message>
+        <source>Encrypt screen sharing</source>
+        <translation>屏幕共享启用端到端加密</translation>
+    </message>
+    <message>
+        <source>Encrypt meetings joined from meeting details</source>
+        <translation>从会议详情加入时启用端到端加密</translation>
+    </message>
+    <message>
+        <source>Encrypt all meetings</source>
+        <translation>所有会议启用端到端加密</translation>
+    </message>
+    <message>
+        <source>All meetings also includes quick meetings, screen sharing, and meeting details.</source>
+        <translation>开启所有会议加密时，快速会议、屏幕共享和会议详情入会也会自动开启。</translation>
+    </message>
+    <message>
+        <source>Save key</source>
+        <translation>保存密钥</translation>
+    </message>
+    <message>
+        <source>Clear key</source>
+        <translation>清除密钥</translation>
+    </message>
+    <message>
+        <source>Use the same encryption key as the other participants and share it through a trusted channel. Participant and connection metadata remain visible to the service.</source>
+        <translation>请与其他参会者使用相同的加密密钥，并通过可信渠道分享。服务端仍可查看参会者和连接元数据。</translation>
+    </message>
+    <message>
+        <source>The encryption key is kept only in memory for this sign-in and cleared on sign-out.</source>
+        <translation>密钥仅在本次登录期间保留于内存，退出登录后清除。</translation>
+    </message>
+    <message>
+        <source>Changes apply the next time you create or join a meeting.</source>
+        <translation>修改将在下次创建或加入会议时生效。</translation>
+    </message>
+    <message>
+        <source>Key configured. Enter a new key to replace it.</source>
+        <translation>已设置密钥，输入新密钥可替换。</translation>
+    </message>
+    <message>
+        <source>Encryption key configured.</source>
+        <translation>已设置加密密钥。</translation>
+    </message>
+    <message>
+        <source>Without a saved encryption key, E2EE is off. You can create or join meetings normally.</source>
+        <translation>未保存加密密钥时，默认不开启端到端加密，可正常创建或加入会议。</translation>
+    </message>
+    <message>
+        <source>⚙ Encryption / Security Settings ▾</source>
+        <translation>⚙ 加密 / 安全设置 ▾</translation>
+    </message>
+    <message>
+        <source>⚙ Encryption / Security Settings ▴</source>
+        <translation>⚙ 加密 / 安全设置 ▴</translation>
+    </message>
+    <message>
+        <source>Encryption / Security Settings</source>
+        <translation>加密 / 安全设置</translation>
+    </message>
+    <message>
+        <source>End-to-end encryption for all meetings is enabled in Settings.</source>
+        <translation>已在设置中开启所有会议端到端加密。</translation>
+    </message>
+    <message>
+        <source>Using the encryption key configured for all meetings in Settings.</source>
+        <translation>本次会议使用设置中为所有会议配置的加密密钥。</translation>
+    </message>
+    <message>
+        <source>Set an encryption key in Settings &gt; Security before joining.</source>
+        <translation>请先在“设置 &gt; 安全”中设置加密密钥，再创建或加入会议。</translation>
+    </message>
+    <message>
         <source>Loading audio devices...</source>
         <translation>正在加载音频设备…</translation>
     </message>

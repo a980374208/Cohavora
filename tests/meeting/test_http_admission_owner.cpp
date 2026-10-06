@@ -145,7 +145,7 @@ using OpenMeeting::SessionInvalidationReason;
 using OpenMeeting::SessionManager;
 using OpenMeeting::SessionManagerTestAccess;
 
-constexpr int kPlannedCases = 119;
+constexpr int kPlannedCases = 123;
 int gExecutedCases = 0;
 int gPassedCases = 0;
 
@@ -514,14 +514,27 @@ void VerifyEncryptionAdmission() {
         for (int entry = 0; entry < 3; ++entry) for (bool camera : {false, true}) {
             Fixture f;
             OpenMeeting::MediaPreferences prefs;
+            prefs.cameraVideoCodec = "h264";
             (camera ? prefs.cameraVideoCodec : prefs.screenShareVideoCodec) = camera ? "vp9" : "av1";
-            auto secret = MeetingSecretHandle::Create({'a', 'b', 'c'});
+            auto secret = MeetingSecretHandle::Create({'a', 'b', 'c', 'd', 'e', 'f'});
             MeetingEncryptionRequest request{MeetingEncryptionMode::Required, secret};
+            int visibleErrors = 0;
+            QObject::connect(f.coordinator.get(), &MeetingCoordinator::errorOccurred,
+                f.coordinator.get(), [&](const QString&, const QString&) {
+                    // Mirrors the meeting window's startup-error admission.
+                    if (f.coordinator->state() == MeetingState::Failed) ++visibleErrors;
+                });
             if (entry == 0) f.coordinator->joinMeetingAsync("id", "", "name", prefs, request);
             else if (entry == 1) f.coordinator->createAndJoinQuickMeetingAsync("title", 900, prefs, request);
             else f.coordinator->connectDirectlyAsync("wss://test", "token", "id", "name", prefs, request);
             TEST_CHECK(!secret->available() && f.errors.size() == 1);
-            TEST_CHECK(f.backend.joins.empty() && f.backend.creates.empty() && f.starts == 0);
+            TEST_CHECK(visibleErrors == 1 && f.coordinator->state() == MeetingState::Failed);
+            TEST_CHECK(f.errors.front().message.contains("Auto") &&
+                f.errors.front().message.contains("VP8") && f.errors.front().message.contains("H264"));
+            TEST_CHECK(f.backend.dispatches == 0 && f.starts == 0);
+            TEST_CHECK(!MeetingCoordinatorTestAccess::hasRoomArtifacts(*f.coordinator));
+            TEST_CHECK(f.coordinator->currentMeetingId().isEmpty());
+            TEST_CHECK((camera ? prefs.cameraVideoCodec : prefs.screenShareVideoCodec) == (camera ? "vp9" : "av1"));
         }
     });
     for (int entry = 0; entry < 3; ++entry) for (bool required : {false, true}) {
@@ -546,11 +559,52 @@ void VerifyEncryptionAdmission() {
         Fixture f;
         MeetingEncryptionRequest request{MeetingEncryptionMode::Required, {}};
         f.coordinator->joinMeetingAsync("id", "", "name", {}, request);
+        TEST_CHECK(f.coordinator->state() == MeetingState::Failed);
         f.coordinator->createAndJoinQuickMeetingAsync("title", 900, {}, request);
+        TEST_CHECK(f.coordinator->state() == MeetingState::Failed);
         f.coordinator->connectDirectlyAsync("wss://test", "token", "id", "name", {}, request);
         TEST_CHECK(f.backend.joins.empty() && f.backend.creates.empty() && f.starts == 0);
-        TEST_CHECK(f.errors.size() == 3);
+        TEST_CHECK(f.errors.size() == 3 && f.coordinator->state() == MeetingState::Failed);
     });
+    for (int action = 0; action < 4; ++action) {
+        RunCase(QString("Encryption preflight Failed reentrant action %1").arg(action), [action] {
+            for (int entry = 0; entry < 3; ++entry) for (bool codecFailure : {false, true}) {
+                Fixture f;
+                auto rejected = MeetingSecretHandle::Create({'a', 'b', 'c', 'd', 'e', 'f'});
+                auto replacement = MeetingSecretHandle::Create({'g', 'h', 'i', 'j', 'k', 'l'});
+                const auto authGeneration = f.session->authGeneration();
+                const MeetingEncryptionRequest request{MeetingEncryptionMode::Required,
+                    codecFailure ? rejected : nullptr};
+                OpenMeeting::MediaPreferences prefs;
+                if (codecFailure) prefs.screenShareVideoCodec = "av1";
+                QObject::connect(f.coordinator.get(), &MeetingCoordinator::stateChanged,
+                    f.coordinator.get(), [&](MeetingState state, const QString&) {
+                        if (state != MeetingState::Failed) return;
+                        if (action == 0) f.coordinator->leaveMeetingAsync();
+                        else if (action == 1) {
+                            f.coordinator->connectDirectlyAsync("wss://replacement", "token", "replacement", "name", {},
+                                {MeetingEncryptionMode::Required, replacement});
+                        } else if (action == 2) f.coordinator.reset();
+                        else f.session->loginAsGuest("New User", "new-user");
+                    });
+                if (entry == 0) f.coordinator->joinMeetingAsync("id", "", "name", prefs, request);
+                else if (entry == 1) f.coordinator->createAndJoinQuickMeetingAsync("title", 900, prefs, request);
+                else f.coordinator->connectDirectlyAsync("wss://test", "token", "id", "name", prefs, request);
+                TEST_CHECK(f.errors.empty() && f.backend.dispatches == 0);
+                if (codecFailure) TEST_CHECK(!rejected->available());
+                TEST_CHECK(f.starts == (action == 1 ? 1 : 0));
+                if (action == 0) TEST_CHECK(f.coordinator->state() == MeetingState::Idle);
+                else if (action == 1) {
+                    TEST_CHECK(f.coordinator->state() == MeetingState::ConnectingRoom);
+                    TEST_CHECK(f.coordinator->currentMeetingId() == "replacement" && replacement->available());
+                } else if (action == 2) TEST_CHECK(!f.coordinator);
+                else {
+                    TEST_CHECK(f.session->authGeneration() != authGeneration && f.session->userId() == "new-user");
+                    TEST_CHECK(f.coordinator->state() == MeetingState::Failed);
+                }
+            }
+        });
+    }
     RunCase("Required pending Join cancel revokes external aliases", [] {
         Fixture f;
         auto secret = MeetingSecretHandle::Create({'a', 'b', 'c'});

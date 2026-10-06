@@ -1,6 +1,7 @@
 #include "src/net/session_manager.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/ui/login_dialog.h"
+#include "src/ui/app_theme.h"
 #include "src/app/async_shutdown_guard.h"
 #include "tests/support/test_check.h"
 
@@ -16,6 +17,10 @@
 #include <QtNetwork/QTcpSocket>
 #include <QtWidgets/QApplication>
 #include <QtGui/QKeyEvent>
+#include <QtGui/QScreen>
+#include <QtWidgets/QLayout>
+#include <QtWidgets/QScrollArea>
+#include <QtWidgets/QScrollBar>
 #include <QtPlugin>
 #include <cstdio>
 #include <utility>
@@ -164,6 +169,71 @@ void verifySettingsMigration() {
     TEST_CHECK(retry.status == SettingsMigrationStatus::Migrated);
     TEST_CHECK(retry.settings->value("migration/cohavoraSettingsVersion").toInt() == 1);
     std::puts("SETTINGS MIGRATION PASS: first, repeat, new-value priority, write fallback, encrypted session");
+}
+
+void verifyMeetingSecurityPreferenceMigration() {
+    QTemporaryDir directory;
+    TEST_CHECK(directory.isValid());
+    OpenMeetingHttpClient client;
+    auto defaults = SessionManagerTestAccess::create(
+        settingsAt(directory.filePath("security-defaults.ini")), client);
+    TEST_CHECK(!defaults->meetingSecurityPreferences().quickMeetingsE2ee);
+    TEST_CHECK(!defaults->meetingSecurityPreferences().screenShareE2ee);
+    TEST_CHECK(!defaults->meetingSecurityPreferences().meetingDetailsE2ee);
+    TEST_CHECK(!defaults->meetingSecurityPreferences().allMeetingsE2ee);
+    defaults.reset();
+
+    for (const bool legacyEnabled : {false, true}) {
+        for (const bool allEnabled : {false, true}) {
+            for (unsigned present = 0; present != 4; ++present) {
+                const auto path = directory.filePath(QStringLiteral("security-%1-%2-%3.ini")
+                    .arg(legacyEnabled).arg(allEnabled).arg(present));
+                auto settings = settingsAt(path);
+                settings->setValue("security/quickMeetingsAndScreenShareE2ee", legacyEnabled);
+                settings->setValue("security/allMeetingsE2ee", allEnabled);
+                if (present & 1) settings->setValue("security/quickMeetingsE2ee", !legacyEnabled);
+                if (present & 2) settings->setValue("security/screenShareE2ee", !legacyEnabled);
+                settings->sync();
+                auto session = SessionManagerTestAccess::create(std::move(settings), client);
+                const auto prefs = session->meetingSecurityPreferences();
+                const bool expectedQuick = present & 1 ? !legacyEnabled : legacyEnabled;
+                const bool expectedShare = present & 2 ? !legacyEnabled : legacyEnabled;
+                TEST_CHECK(prefs.quickMeetingsE2ee == expectedQuick);
+                TEST_CHECK(prefs.screenShareE2ee == expectedShare);
+                TEST_CHECK(!prefs.meetingDetailsE2ee && prefs.allMeetingsE2ee == allEnabled);
+                auto persisted = settingsAt(path);
+                TEST_CHECK(!persisted->contains("security/quickMeetingsAndScreenShareE2ee"));
+                TEST_CHECK(persisted->contains("security/quickMeetingsE2ee"));
+                TEST_CHECK(persisted->contains("security/screenShareE2ee"));
+                TEST_CHECK(persisted->value("security/quickMeetingsE2ee").toBool() == expectedQuick);
+                TEST_CHECK(persisted->value("security/screenShareE2ee").toBool() == expectedShare);
+                TEST_CHECK(!persisted->contains("security/meetingDetailsE2ee"));
+
+                auto changed = prefs;
+                changed.meetingDetailsE2ee = true;
+                changed.allMeetingsE2ee = !allEnabled;
+                session->setMeetingSecurityPreferences(changed);
+                session.reset();
+                auto reloaded = SessionManagerTestAccess::create(settingsAt(path), client);
+                TEST_CHECK(reloaded->meetingSecurityPreferences().quickMeetingsE2ee == expectedQuick);
+                TEST_CHECK(reloaded->meetingSecurityPreferences().screenShareE2ee == expectedShare);
+                TEST_CHECK(reloaded->meetingSecurityPreferences().meetingDetailsE2ee);
+                TEST_CHECK(reloaded->meetingSecurityPreferences().allMeetingsE2ee == !allEnabled);
+                TEST_CHECK(!reloaded->hasMeetingEncryptionKey());
+            }
+        }
+    }
+    // A configured details preference survives migration, but is never
+    // inferred from the old combined preference or the global override.
+    auto configured = settingsAt(directory.filePath("security-details-priority.ini"));
+    configured->setValue("security/quickMeetingsAndScreenShareE2ee", false);
+    configured->setValue("security/meetingDetailsE2ee", true);
+    configured->sync();
+    auto session = SessionManagerTestAccess::create(std::move(configured), client);
+    TEST_CHECK(!session->meetingSecurityPreferences().quickMeetingsE2ee);
+    TEST_CHECK(!session->meetingSecurityPreferences().screenShareE2ee);
+    TEST_CHECK(session->meetingSecurityPreferences().meetingDetailsE2ee);
+    std::puts("MEETING SECURITY PREFERENCES PASS: split legacy migration, explicit-key priority, independent reload");
 }
 
 void verifyAudioPreferences() {
@@ -393,8 +463,9 @@ public:
         QJsonObject data{{"token", token}, {"userID", "user"}, {"nickname", "Synthetic"}};
         replyData(index, data, error);
     }
-    void replyData(size_t index, const QJsonValue &data, int error = 0) {
-        const auto body = QJsonDocument(QJsonObject{{"errCode", error}, {"errMsg", error ? "controlled-denial" : ""},
+    void replyData(size_t index, const QJsonValue &data, int error = 0,
+                   const QString &message = QStringLiteral("controlled-denial")) {
+        const auto body = QJsonDocument(QJsonObject{{"errCode", error}, {"errMsg", error ? message : QString()},
                                                    {"data", data}}).toJson(QJsonDocument::Compact);
         const QByteArray response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "
             + QByteArray::number(body.size()) + "\r\n\r\n" + body;
@@ -996,6 +1067,95 @@ void verifyRegistrationAndUi() {
     std::puts("REGISTRATION/UI PASS: account endpoint, raw credentials, retry, null success, no auth mutation");
 }
 
+void verifyLoginFormLayout(QApplication &app) {
+    MeetingUI::AppTheme::install(app);
+    Fixture f;
+    MeetingUI::LoginDialog dialog(*f.session);
+    auto *tabs = dialog.findChild<QTabWidget *>();
+    auto *scroll = dialog.findChild<QScrollArea *>(QStringLiteral("adaptiveDialogScroll"));
+    auto *status = dialog.findChild<QLabel *>(QStringLiteral("loginStatus"));
+    auto *settings = dialog.findChild<QPushButton *>(QStringLiteral("serverSettingsToggle"));
+    auto *registrationUrl = dialog.findChild<QLineEdit *>(QStringLiteral("registrationServerBaseUrl"));
+    TEST_CHECK(tabs && scroll && status && settings && registrationUrl);
+    const auto settleAndCheckFit = [&] {
+        // Drain both the coalesced form fit and Qt's deferred scroll geometry.
+        for (int i = 0; i < 5; ++i) QCoreApplication::processEvents();
+        auto *formLayout = scroll->widget()->layout();
+        const auto available = dialog.screen()->availableGeometry().size() - QSize(32, 64);
+        const int requiredHeight = formLayout->hasHeightForWidth()
+            ? formLayout->totalHeightForWidth(scroll->viewport()->width())
+            : formLayout->totalSizeHint().height();
+        if (requiredHeight <= available.height()
+            && formLayout->totalMinimumSize().width() <= available.width()) {
+            TEST_CHECK(scroll->verticalScrollBar()->maximum() == 0);
+            TEST_CHECK(scroll->horizontalScrollBar()->maximum() == 0);
+            TEST_CHECK(scroll->widget()->height() <= scroll->viewport()->height());
+        }
+        TEST_CHECK(dialog.height() <= available.height());
+        if (!status->isHidden())
+            TEST_CHECK(status->height() >= status->heightForWidth(status->width()));
+    };
+    dialog.show();
+    settleAndCheckFit();
+    settings->click();
+    tabs->setCurrentIndex(1);
+    settleAndCheckFit();
+    const int registrationHeight = dialog.height();
+    tabs->setCurrentIndex(2);
+    settleAndCheckFit();
+    TEST_CHECK(dialog.height() <= registrationHeight);
+    tabs->setCurrentIndex(1);
+    dialog.findChild<QLineEdit *>(QStringLiteral("registerAccount"))->setText("layout-account");
+    dialog.findChild<QLineEdit *>(QStringLiteral("registerNickname"))->setText("Layout");
+    dialog.findChild<QLineEdit *>(QStringLiteral("registerPassword"))->setText(kPassword);
+    dialog.findChild<QLineEdit *>(QStringLiteral("registerConfirmPassword"))->setText(kPassword);
+    tabs->currentWidget()->findChild<QPushButton *>(QStringLiteral("primaryBtn"))->click();
+    f.server.received(1);
+    const auto longError = QStringLiteral("A controlled registration failure with a longer translated explanation. ").repeated(4);
+    f.server.replyData(0, QJsonValue(QJsonValue::Null), 1001, longError);
+    waitFor([&] { return status->text() == longError; });
+    settleAndCheckFit();
+    TEST_CHECK(status->heightForWidth(status->width()) > status->fontMetrics().height());
+    settings->click();
+    settleAndCheckFit();
+    settings->click();
+    settleAndCheckFit();
+
+    // A genuinely constrained window must still expose the last input through
+    // keyboard focus rather than hiding a scroll bar and clipping the form.
+    dialog.resize(320, 240);
+    waitFor([&] { return scroll->verticalScrollBar()->maximum() > 0; });
+    dialog.activateWindow();
+    auto *firstInput = dialog.findChild<QLineEdit *>(QStringLiteral("registerAccount"));
+    firstInput->setFocus(Qt::OtherFocusReason);
+    // An unshown or inactive window can merely remember setFocus's target.
+    // Confirm global focus, then traverse using the same Tab path as the user.
+    waitFor([&] { return QApplication::focusWidget() == firstInput; });
+    scroll->verticalScrollBar()->setValue(0);
+    for (int i = 0; i < 32 && QApplication::focusWidget() != registrationUrl; ++i) {
+        auto *previous = QApplication::focusWidget();
+        TEST_CHECK(previous);
+        QKeyEvent down(QEvent::KeyPress, Qt::Key_Tab, Qt::NoModifier);
+        QApplication::sendEvent(previous, &down);
+        QKeyEvent up(QEvent::KeyRelease, Qt::Key_Tab, Qt::NoModifier);
+        QApplication::sendEvent(previous, &up);
+        waitFor([&] { return QApplication::focusWidget() != previous; });
+    }
+    TEST_CHECK(QApplication::focusWidget() == registrationUrl);
+    waitFor([&] {
+        const QRect inputRect(registrationUrl->mapTo(scroll->viewport(), QPoint()), registrationUrl->size());
+        return scroll->verticalScrollBar()->value() > 0
+            && scroll->viewport()->rect().intersects(inputRect)
+            && inputRect.top() >= 0 && inputRect.bottom() < scroll->viewport()->height();
+    });
+    TEST_CHECK(scroll->verticalScrollBar()->value() > 0);
+    const QRect inputRect(registrationUrl->mapTo(scroll->viewport(), QPoint()), registrationUrl->size());
+    TEST_CHECK(scroll->viewport()->rect().intersects(inputRect));
+    TEST_CHECK(inputRect.top() >= 0 && inputRect.bottom() < scroll->viewport()->height());
+    dialog.hide();
+    std::puts("LOGIN LAYOUT PASS: registration, settings, wrapped status, tab refit, small-window focus scrolling");
+}
+
 void verifyRegistrationEndpointSelection() {
     Fixture f;
     const std::vector<std::pair<QString, QString>> defaults{
@@ -1316,6 +1476,7 @@ int main(int argc, char **argv) {
     TEST_CHECK(OpenMeeting::isDebugHttpTransportEnabled());
     app.setQuitOnLastWindowClosed(false);
     verifySettingsMigration();
+    verifyMeetingSecurityPreferenceMigration();
     verifyAudioPreferences();
     verifyPublicAuthContract();
     verifyPublicInvalidLoginData();
@@ -1331,6 +1492,7 @@ int main(int argc, char **argv) {
     verifyMissingServerTokenInvalidatesSession();
     verifySessionAndUi();
     verifyOrdering();
+    verifyLoginFormLayout(app);
     std::puts("PR-SEC-002 focused cases PASS");
     return 0;
 }

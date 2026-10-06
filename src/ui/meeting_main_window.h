@@ -7,6 +7,7 @@
 #include "src/ui/schedule_widget.h"
 #include "src/ui/meeting_entry_guard.h"
 #include "src/net/meeting_types.h"
+#include "src/e2ee/meeting_encryption.h"
 #include <QtCore/QPointer>
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QLineEdit>
@@ -62,7 +63,7 @@ public:
 		const QString &initialMeetingId = QString(),
 		std::optional<OpenMeeting::MeetingSettings> meetingSettings = std::nullopt,
 		OpenMeeting::SessionManager *session = nullptr);
-	~JoinMeetingDialog() override = default;
+	~JoinMeetingDialog() override;
 
 	QString serverUrl() const;
 	QString token() const;
@@ -72,7 +73,10 @@ public:
 	bool isAudioMuted() const;
 	bool isVideoMuted() const;
 	bool isManualConnection() const { return _isManualConnection; }
+	std::optional<livekit::MeetingEncryptionRequest> takeEncryptionRequest();
+	void setMeetingPassword(const QString &password);
 
+	void accept() override;
 	void reject() override;
 
 protected:
@@ -88,6 +92,10 @@ private:
 	void setLoading(bool loading, const QString &statusText = QString());
 	void showError(const QString &msg);
 	void persistMediaPreferences();
+	void updateEncryptionDefaults();
+	bool prepareEncryptionRequest();
+	void clearEncryptionEditor();
+	void revokeEncryptionRequest();
 
 	QPushButton *_closeBtn = nullptr;
 	QLineEdit *_meetingIdInput = nullptr;
@@ -104,6 +112,13 @@ private:
 	QWidget *_manualWidget = nullptr;
 	QLineEdit *_serverUrlInput = nullptr;
 	QLineEdit *_tokenInput = nullptr;
+	QPushButton *_encryptionToggleBtn = nullptr;
+	QWidget *_encryptionWidget = nullptr;
+	QCheckBox *_encryptionRequired = nullptr;
+	QLineEdit *_encryptionKeyInput = nullptr;
+	QLabel *_encryptionError = nullptr;
+	bool _globalEncryption = false;
+	std::optional<livekit::MeetingEncryptionRequest> _encryptionRequest;
 
 	QString _resolvedServerUrl;
 	QString _resolvedToken;
@@ -157,7 +172,8 @@ private:
 		std::unique_ptr<QObject> reservation,
 		const QString &meetingId,
 		std::optional<OpenMeeting::MeetingSettings> meetingSettings,
-		bool shareScreenAfterJoin);
+		bool shareScreenAfterJoin,
+		const QString &initialPassword = QString());
 	void handlePendingMeetingEntryDetail();
 	void clearPendingMeetingEntry();
 	void syncSchedule();

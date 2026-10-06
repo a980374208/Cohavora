@@ -5,11 +5,18 @@
 #include <QtCore/QString>
 #include <QtCore/QSettings>
 #include <functional>
+#include <cstdint>
 #include <memory>
 #include <optional>
+#include <vector>
 #include "src/net/credential_store.h"
 #include "src/net/http_types.h"
 #include "src/net/openmeeting_http_client.h"
+
+namespace livekit {
+class MeetingEncryptionKey;
+struct MeetingEncryptionRequest;
+}
 
 namespace OpenMeeting {
 
@@ -63,6 +70,20 @@ struct MediaPreferences {
     int videoCaptureFps = 30;
 };
 
+struct MeetingSecurityPreferences {
+    bool quickMeetingsE2ee = false;
+    bool screenShareE2ee = false;
+    bool meetingDetailsE2ee = false;
+    bool allMeetingsE2ee = false;
+};
+
+enum class MeetingEncryptionEntry {
+    QuickMeeting,
+    ScreenShare,
+    MeetingDetails,
+    JoinMeeting,
+};
+
 // 业务账号会话的失效原因。它与 LiveKit 房间连接的断开原因严格分离：
 // 前者负责清理全局认证状态，后者只影响当前会议。
 enum class SessionInvalidationReason {
@@ -113,6 +134,15 @@ public:
         setVideoMirrorMode(enable ? VideoMirrorMode::LocalOnly : VideoMirrorMode::Off);
     }
 
+    // All security preferences/key APIs belong to this QObject's UI thread.
+    // Only the enable flags are persisted; key bytes remain in session memory.
+    const MeetingSecurityPreferences &meetingSecurityPreferences() const;
+    void setMeetingSecurityPreferences(const MeetingSecurityPreferences &prefs);
+    bool hasMeetingEncryptionKey() const;
+    void setMeetingEncryptionKey(std::vector<uint8_t> material);
+    void clearMeetingEncryptionKey();
+    livekit::MeetingEncryptionRequest meetingEncryptionRequest(MeetingEncryptionEntry entry) const;
+
     // HTTP 客户端获取
     OpenMeetingHttpClient &httpClient();
 
@@ -156,6 +186,7 @@ signals:
     // sessionInvalidated，以便同时处理重复登录等业务失效原因。
     void sessionExpired();
     void preferencesChanged(const MediaPreferences &prefs);
+    void meetingSecurityPreferencesChanged();
 
 private:
     // Defined only in the HTTP test. Production instances retain singleton
@@ -167,13 +198,15 @@ private:
     SessionManager(std::unique_ptr<QSettings> settings,
                    std::unique_ptr<CredentialStore> credentials,
                    OpenMeetingHttpClient *client, QObject *parent = nullptr);
-    ~SessionManager() override = default;
+    ~SessionManager() override;
 
     void resetAuthentication();
     bool announceLogin(quint64 generation);
 
     UserInfo _currentUser;
     MediaPreferences _mediaPrefs;
+    MeetingSecurityPreferences _meetingSecurityPrefs;
+    std::unique_ptr<livekit::MeetingEncryptionKey> _meetingEncryptionKey;
     QString _savedAccount;
     bool _rememberSession = false;
     bool _autoLogin = false;

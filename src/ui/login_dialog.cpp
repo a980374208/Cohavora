@@ -6,6 +6,7 @@
 #include "src/net/session_manager.h"
 #include <QtCore/QDateTime>
 #include <QtCore/QPointer>
+#include <QtCore/QTimer>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QGridLayout>
@@ -15,6 +16,7 @@
 #include <QtGui/QPainter>
 #include <QtGui/QFont>
 #include <QtGui/QScreen>
+#include <QtGui/QShowEvent>
 #include <QtWidgets/QScrollArea>
 #include <QtWidgets/QScrollBar>
 
@@ -326,6 +328,14 @@ void LoginDialog::initUI() {
         _guestBtn->setDefault(false);
         auto *submit = page == 1 ? _registerBtn : page == 2 ? _guestBtn : _loginBtn;
         submit->setDefault(true);
+        // Hidden pages must not keep the current form as tall or wide as the
+        // largest page, especially after switching away from registration.
+        for (int i = 0; i < _tabWidget->count(); ++i) {
+            _tabWidget->widget(i)->setSizePolicy(i == page
+                ? QSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred)
+                : QSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored));
+        }
+        scheduleFormFit();
     };
     connect(_tabWidget, &QTabWidget::currentChanged, this, updateDefaultButton);
     updateDefaultButton(_tabWidget->currentIndex());
@@ -358,6 +368,7 @@ void LoginDialog::updateSavedSessionAction() {
     _resumeBtn->setVisible(_session.hasSavedSession() &&
         _accountInput->text().trimmed() == _session.savedAccount() &&
         OpenMeeting::canonicalServiceUrl(_serverUrlInput->text()) == _session.serverBaseUrl());
+    scheduleFormFit();
 }
 
 void LoginDialog::updateEndpointOptions() {
@@ -368,6 +379,7 @@ void LoginDialog::updateEndpointOptions() {
     _rememberBox->setText(policy.isDebugHttp()
         ? QCoreApplication::translate("MeetingUI", "Remember sign-in (debug HTTP traffic is unencrypted)")
         : QCoreApplication::translate("MeetingUI", "Remember sign-in"));
+    scheduleFormFit();
 }
 
 void LoginDialog::acceptAuthenticatedSession() {
@@ -381,30 +393,82 @@ void LoginDialog::acceptAuthenticatedSession() {
 }
 
 void LoginDialog::toggleAdvancedSettings() {
-    bool isVisible = _advancedWidget->isVisible();
+    bool isVisible = !_advancedWidget->isHidden();
     _advancedWidget->setVisible(!isVisible);
     _advancedToggleBtn->setText(!isVisible ? QCoreApplication::translate("MeetingUI", "⚙ Server Settings ▴") : QCoreApplication::translate("MeetingUI", "⚙ Server Settings ▾"));
-    // The adaptive wrapper sizes once on show. Refit after changing the form,
-    // before overflowing into scroll bars on an otherwise large enough screen.
+    scheduleFormFit();
+}
+
+void LoginDialog::showEvent(QShowEvent *e) {
+    QDialog::showEvent(e);
+    scheduleFormFit();
+}
+
+void LoginDialog::scheduleFormFit() {
+    if (!isVisible() || _formFitPending) return;
+    _formFitPending = true;
+    // Wait for the tab, text and visibility changes to finish their layouts.
+    QTimer::singleShot(0, this, [this] {
+        _formFitPending = false;
+        if (isVisible()) fitFormToScreen();
+    });
+}
+
+void LoginDialog::fitFormToScreen() {
     auto *scroll = findChild<QScrollArea *>(QStringLiteral("adaptiveDialogScroll"));
     if (!scroll || !scroll->widget()) return;
     auto *content = scroll->widget();
-    _advancedWidget->parentWidget()->layout()->activate();
-    content->layout()->invalidate();
-    content->layout()->activate();
-    auto desired = QSize(460, 600).expandedTo(content->sizeHint());
+    auto *card = findChild<QWidget *>(QStringLiteral("loginCard"));
+    if (!card || !content->layout() || !card->layout()) return;
     auto *targetScreen = screen();
+    const auto available = targetScreen
+        ? targetScreen->availableGeometry().adjusted(16, 32, -16, -32)
+        : QRect(pos(), QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX));
+    const auto applyDensity = [&](bool compact) {
+        content->layout()->setContentsMargins(compact ? 8 : 12, compact ? 8 : 12,
+                                              compact ? 8 : 12, compact ? 8 : 12);
+        card->layout()->setContentsMargins(compact ? 20 : 28, compact ? 12 : 20,
+                                           compact ? 20 : 28, compact ? 16 : 24);
+        card->layout()->setSpacing(compact ? 8 : 12);
+        for (int i = 0; i < _tabWidget->count(); ++i) {
+            auto *pageLayout = _tabWidget->widget(i)->layout();
+            pageLayout->setContentsMargins(0, compact ? 8 : 12, 0, 0);
+            pageLayout->setSpacing(compact ? (i == 1 ? 6 : 8) : (i == 1 ? 10 : i == 2 ? 14 : 12));
+        }
+        for (auto *childLayout : content->findChildren<QLayout *>()) {
+            childLayout->invalidate();
+            childLayout->activate();
+        }
+        content->layout()->invalidate();
+        content->layout()->activate();
+    };
+    const auto measuredSize = [&](int scrollBarWidth) {
+        auto *formLayout = content->layout();
+        const auto minimum = formLayout->totalMinimumSize();
+        const int width = qMin(available.width(), qMax(460, minimum.width()) + scrollBarWidth);
+        const int formWidth = qMax(1, width - scrollBarWidth);
+        // QLabel wrapping depends on the final viewport width; sizeHint alone
+        // can still describe the old, wider form after adding an error message.
+        const int height = formLayout->hasHeightForWidth()
+            ? formLayout->totalHeightForWidth(formWidth) : formLayout->totalSizeHint().height();
+        return QSize(width, qMax(minimum.height(), height));
+    };
+    applyDensity(false);
+    auto desired = measuredSize(0);
+    if (desired.height() > available.height()) {
+        applyDensity(true);
+        desired = measuredSize(0);
+    }
+    if (desired.height() > available.height()) {
+        // Truly small screens still scroll, without introducing horizontal
+        // overflow just because the vertical scroll bar occupies some width.
+        desired = measuredSize(scroll->verticalScrollBar()->sizeHint().width());
+    }
+    desired.setHeight(qMin(available.height(), qMax(600, desired.height())));
+    if (size() != desired) resize(desired);
     if (targetScreen) {
-        const auto available = targetScreen->availableGeometry().adjusted(16, 32, -16, -32);
-        // On small screens retain vertical scrolling without forcing a second,
-        // horizontal scroll bar merely to accommodate the vertical one.
-        if (desired.height() > available.height())
-            desired.rwidth() += scroll->verticalScrollBar()->sizeHint().width();
-        resize(desired.boundedTo(available.size()));
         move(qBound(available.left(), x(), available.right() - width() + 1),
              qBound(available.top(), y(), available.bottom() - height() + 1));
-    } else {
-        resize(desired);
     }
 }
 
@@ -459,12 +523,14 @@ void LoginDialog::showError(const QString &msg) {
     MeetingUI::AppTheme::setStyleVariant(*_errorLabel, "login-dialog-errorlabel-2");
     _errorLabel->setText(msg);
     _errorLabel->setVisible(!msg.isEmpty());
+    scheduleFormFit();
 }
 
 void LoginDialog::showSuccess(const QString &msg) {
     MeetingUI::AppTheme::setStyleVariant(*_errorLabel, "login-dialog-errorlabel-3");
     _errorLabel->setText(msg);
     _errorLabel->setVisible(!msg.isEmpty());
+    scheduleFormFit();
 }
 
 void LoginDialog::toggleRegPasswordVisibility() {

@@ -2878,6 +2878,21 @@ void MeetingCoordinator::setState(MeetingState s, const QString &detail) {
     }
 }
 
+void MeetingCoordinator::failEncryptionAdmission(const QString &detail) {
+    const QPointer<MeetingCoordinator> owner(this);
+    const auto generation = _admissionGeneration;
+    const auto authGeneration = _sessionManager.authGeneration();
+    // The meeting window only handles startup errors after a Failed state.
+    // A preflight rejection must therefore retire its connecting presentation
+    // before delivering the actionable reason, even though no Room was started.
+    setState(MeetingState::Failed, detail);
+    if (!owner || owner->_admissionGeneration != generation ||
+        owner->_sessionManager.authGeneration() != authGeneration ||
+        owner->_state != MeetingState::Failed || owner->_sessionInvalidated ||
+        owner->_sessionManager.isSessionInvalidating()) return;
+    emit owner->errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"), detail);
+}
+
 void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
                                          const QString &password,
                                          const QString &displayName,
@@ -2904,15 +2919,15 @@ void MeetingCoordinator::joinMeetingAsync(const QString &meetingId,
     try { encryption.Validate(); }
     catch (const livekit::EncryptionRequestException&) {
         encryption.Revoke();
-        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"),
+        failEncryptionAdmission(
             QCoreApplication::translate("MeetingUI", "A valid encryption key is required. Enter the key again."));
         return;
     }
     const auto effectivePrefs = ResolveEncryptionMediaPreferences(prefs, encryption);
     if (!effectivePrefs) {
         encryption.Revoke();
-        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"),
-            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings."));
+        failEncryptionAdmission(
+            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Auto uses VP8; select a supported codec in Settings for camera and screen sharing."));
         return;
     }
     const uint64_t generation = beginAdmission(AdmissionStage::Joining);
@@ -3046,15 +3061,15 @@ void MeetingCoordinator::createAndJoinQuickMeetingAsync(const QString &title,
     try { encryption.Validate(); }
     catch (const livekit::EncryptionRequestException&) {
         encryption.Revoke();
-        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"),
+        failEncryptionAdmission(
             QCoreApplication::translate("MeetingUI", "A valid encryption key is required. Enter the key again."));
         return;
     }
     const auto effectivePrefs = ResolveEncryptionMediaPreferences(prefs, encryption);
     if (!effectivePrefs) {
         encryption.Revoke();
-        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"),
-            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings."));
+        failEncryptionAdmission(
+            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Auto uses VP8; select a supported codec in Settings for camera and screen sharing."));
         return;
     }
     const uint64_t generation = beginAdmission(AdmissionStage::Creating);
@@ -3154,15 +3169,15 @@ void MeetingCoordinator::connectDirectlyAsync(const QString &url,
     try { encryption.Validate(); }
     catch (const livekit::EncryptionRequestException&) {
         encryption.Revoke();
-        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"),
+        failEncryptionAdmission(
             QCoreApplication::translate("MeetingUI", "A valid encryption key is required. Enter the key again."));
         return;
     }
     const auto effectivePrefs = ResolveEncryptionMediaPreferences(prefs, encryption);
     if (!effectivePrefs) {
         encryption.Revoke();
-        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Encryption Error"),
-            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Select a supported camera and screen-sharing codec in Settings."));
+        failEncryptionAdmission(
+            QCoreApplication::translate("MeetingUI", "Encrypted meetings support VP8 and H264. Auto uses VP8; select a supported codec in Settings for camera and screen sharing."));
         return;
     }
     const uint64_t generation = beginAdmission(AdmissionStage::ReadyToStart);

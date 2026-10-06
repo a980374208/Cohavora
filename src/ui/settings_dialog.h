@@ -13,6 +13,7 @@ class QCheckBox;
 class QComboBox;
 class QFrame;
 class QLabel;
+class QLineEdit;
 class QListWidget;
 class QProgressBar;
 class QPushButton;
@@ -34,6 +35,7 @@ public:
 		General = 0,
 		Video,
 		Audio,
+		Security,
 		About,
 	};
 
@@ -98,7 +100,13 @@ private:
 	QWidget *buildGeneralPage();
 	QWidget *buildVideoPage();
 	QWidget *buildAudioPage();
+	QWidget *buildSecurityPage();
 	QWidget *buildAboutPage();
+	void syncSecurityControls();
+	void commitSecurityPreferences();
+	void updateSecurityKeyControls();
+	void saveSecurityKey();
+	void clearSecurityEditor();
 	void connectPreferenceControls();
 	void connectDeviceControllers();
 	void prepareDevicePlaceholders();
@@ -163,6 +171,15 @@ private:
 	QCheckBox *_noiseSuppression = nullptr;
 	QCheckBox *_autoGainControl = nullptr;
 	AudioDeviceTestController *_audioTestController = nullptr;
+
+	QCheckBox *_quickE2ee = nullptr;
+	QCheckBox *_screenShareE2ee = nullptr;
+	QCheckBox *_meetingDetailsE2ee = nullptr;
+	QCheckBox *_allE2ee = nullptr;
+	QLineEdit *_e2eeKey = nullptr;
+	QPushButton *_e2eeSaveKey = nullptr;
+	QPushButton *_e2eeClearKey = nullptr;
+	QLabel *_e2eeStatus = nullptr;
 
 	QHash<QString, QVector<VideoFormat>> _cameraFormats;
 	bool _usingExternalPreview = false;
