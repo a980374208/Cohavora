@@ -53,6 +53,7 @@ public:
     // are matched against the ADM's endpoint GUIDs on its owning worker thread.
     bool SetPlayoutDeviceById(const std::string& device_id);
     // Success means that the output stream actually started, not just selected.
+    // Reject startup until a PeerConnection has registered the audio callback.
     bool EnsurePlayout();
 
     // 跨线程安全 SDP 协商辅助函数
