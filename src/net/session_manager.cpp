@@ -1,5 +1,6 @@
 #include "src/net/session_manager.h"
 #include "src/net/service_endpoint_policy.h"
+#include "src/e2ee/meeting_encryption_key.h"
 #include <QtCore/QCoreApplication>
 #include <QtCore/QUuid>
 #include <QtCore/QDebug>
@@ -15,6 +16,11 @@ namespace {
 constexpr auto kSettingsMigrationVersion = "migration/cohavoraSettingsVersion";
 constexpr auto kRegistrationBaseUrl = "network/registrationServerBaseUrl";
 constexpr auto kRegistrationServiceBinding = "network/registrationServiceBinding";
+constexpr auto kLegacyQuickMeetingsAndScreenShareE2ee = "security/quickMeetingsAndScreenShareE2ee";
+constexpr auto kQuickMeetingsE2ee = "security/quickMeetingsE2ee";
+constexpr auto kScreenShareE2ee = "security/screenShareE2ee";
+constexpr auto kMeetingDetailsE2ee = "security/meetingDetailsE2ee";
+constexpr auto kAllMeetingsE2ee = "security/allMeetingsE2ee";
 constexpr int kCurrentSettingsMigrationVersion = 1;
 constexpr std::array<const char *, 26> kMigratedSettingsKeys = {
     "network/serverBaseUrl",
@@ -157,6 +163,8 @@ SessionManager &SessionManager::instance() {
     return inst;
 }
 
+SessionManager::~SessionManager() = default;
+
 OpenMeetingHttpClient &SessionManager::httpClient() {
     return *_client;
 }
@@ -237,6 +245,71 @@ void SessionManager::setVideoMirrorMode(VideoMirrorMode mode) {
     }
 }
 
+const MeetingSecurityPreferences &SessionManager::meetingSecurityPreferences() const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    return _meetingSecurityPrefs;
+}
+
+void SessionManager::setMeetingSecurityPreferences(const MeetingSecurityPreferences &prefs) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    // The global flag overrides entry behavior without overwriting each
+    // entry's independent choice, so turning it off restores those choices.
+    if (_meetingSecurityPrefs.quickMeetingsE2ee == prefs.quickMeetingsE2ee &&
+        _meetingSecurityPrefs.screenShareE2ee == prefs.screenShareE2ee &&
+        _meetingSecurityPrefs.meetingDetailsE2ee == prefs.meetingDetailsE2ee &&
+        _meetingSecurityPrefs.allMeetingsE2ee == prefs.allMeetingsE2ee) {
+        return;
+    }
+    _meetingSecurityPrefs = prefs;
+    saveToSettings();
+    emit meetingSecurityPreferencesChanged();
+}
+
+bool SessionManager::hasMeetingEncryptionKey() const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    return static_cast<bool>(_meetingEncryptionKey);
+}
+
+void SessionManager::setMeetingEncryptionKey(std::vector<uint8_t> material) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    // Validate before replacing the previous key. Invalid input is cleansed by
+    // the temporary holder and cannot silently erase a usable configuration.
+    _meetingEncryptionKey = livekit::MeetingEncryptionKey::Create(std::move(material));
+    emit meetingSecurityPreferencesChanged();
+}
+
+void SessionManager::clearMeetingEncryptionKey() {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (!_meetingEncryptionKey) return;
+    _meetingEncryptionKey.reset();
+    emit meetingSecurityPreferencesChanged();
+}
+
+livekit::MeetingEncryptionRequest SessionManager::meetingEncryptionRequest(MeetingEncryptionEntry entry) const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    bool entryEnabled = false;
+    switch (entry) {
+    case MeetingEncryptionEntry::QuickMeeting:
+        entryEnabled = _meetingSecurityPrefs.quickMeetingsE2ee;
+        break;
+    case MeetingEncryptionEntry::ScreenShare:
+        entryEnabled = _meetingSecurityPrefs.screenShareE2ee;
+        break;
+    case MeetingEncryptionEntry::MeetingDetails:
+        entryEnabled = _meetingSecurityPrefs.meetingDetailsE2ee;
+        break;
+    case MeetingEncryptionEntry::JoinMeeting:
+        break;
+    default:
+        throw livekit::EncryptionRequestException(livekit::EncryptionRequestError::InvalidPolicy);
+    }
+    const bool required = _meetingSecurityPrefs.allMeetingsE2ee || entryEnabled;
+    // Preferences become effective only after a usable default key is saved.
+    if (!required || !_meetingEncryptionKey) return {};
+    return {livekit::MeetingEncryptionMode::Required,
+            _meetingEncryptionKey->CreateMeetingSecret()};
+}
+
 QString SessionManager::registrationServerBaseUrl(const QString &serviceUrl) const {
     const auto policy = evaluateServiceEndpoint(serviceUrl.isNull() ? _serverBaseUrl : serviceUrl);
     if (policy.canonicalUrl.isEmpty()) return {};
@@ -286,8 +359,15 @@ void SessionManager::resetAuthentication() {
     ++_authGeneration;
     _loginPending = false;
     _currentUser = {};
+    const bool clearedMeetingKey = static_cast<bool>(_meetingEncryptionKey);
+    _meetingEncryptionKey.reset();
     httpClient().setCurrentUser({});
-    emit authenticationReset(_authGeneration);
+    const QPointer<SessionManager> self(this);
+    const auto generation = _authGeneration;
+    emit authenticationReset(generation);
+    if (clearedMeetingKey && self && self->_authGeneration == generation) {
+        emit meetingSecurityPreferencesChanged();
+    }
 }
 
 void SessionManager::cancelPendingLogin() {
@@ -521,6 +601,20 @@ void SessionManager::loadFromSettings() {
     _mediaPrefs.videoCaptureFps =
         std::max(1, _settings->value("media/videoCaptureFps", 30).toInt());
 
+    _meetingSecurityPrefs.allMeetingsE2ee = _settings->value(kAllMeetingsE2ee, false).toBool();
+    // Existing independent keys (including explicit false) take precedence
+    // over the old combined value. Meeting details has no legacy equivalent.
+    if (_settings->contains(kLegacyQuickMeetingsAndScreenShareE2ee)) {
+        const bool legacy = _settings->value(kLegacyQuickMeetingsAndScreenShareE2ee).toBool();
+        if (!_settings->contains(kQuickMeetingsE2ee)) _settings->setValue(kQuickMeetingsE2ee, legacy);
+        if (!_settings->contains(kScreenShareE2ee)) _settings->setValue(kScreenShareE2ee, legacy);
+        _settings->remove(kLegacyQuickMeetingsAndScreenShareE2ee);
+        _settings->sync();
+    }
+    _meetingSecurityPrefs.quickMeetingsE2ee = _settings->value(kQuickMeetingsE2ee, false).toBool();
+    _meetingSecurityPrefs.screenShareE2ee = _settings->value(kScreenShareE2ee, false).toBool();
+    _meetingSecurityPrefs.meetingDetailsE2ee = _settings->value(kMeetingDetailsE2ee, false).toBool();
+
     httpClient().setBaseUrl(_serverBaseUrl);
     resetAuthentication();
     if (canPersistSession()) {
@@ -568,6 +662,12 @@ void SessionManager::saveToSettings() {
     _settings->setValue("media/videoCaptureWidth", _mediaPrefs.videoCaptureWidth);
     _settings->setValue("media/videoCaptureHeight", _mediaPrefs.videoCaptureHeight);
     _settings->setValue("media/videoCaptureFps", _mediaPrefs.videoCaptureFps);
+
+    _settings->setValue(kQuickMeetingsE2ee, _meetingSecurityPrefs.quickMeetingsE2ee);
+    _settings->setValue(kScreenShareE2ee, _meetingSecurityPrefs.screenShareE2ee);
+    _settings->setValue(kMeetingDetailsE2ee, _meetingSecurityPrefs.meetingDetailsE2ee);
+    _settings->setValue(kAllMeetingsE2ee, _meetingSecurityPrefs.allMeetingsE2ee);
+    _settings->remove(kLegacyQuickMeetingsAndScreenShareE2ee);
 
     _settings->sync();
 }

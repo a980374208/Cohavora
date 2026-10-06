@@ -137,6 +137,8 @@ int main(int argc, char *argv[]) {
 	QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
 	QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
 #endif
+	// Native GPU surfaces must not turn the surrounding raster UI into HWNDs.
+	QApplication::setAttribute(Qt::AA_DontCreateNativeWidgetSiblings);
 
 	// 初始化 CRL (Concurrency & Reactive Library)
 	crl::details::init();

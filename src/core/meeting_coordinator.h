@@ -390,6 +390,7 @@ private:
                        QObject *parent);
     uint64_t beginAdmission(AdmissionStage stage);
     uint64_t invalidateAdmission();
+    void failEncryptionAdmission(const QString &detail);
     void attachAdmissionTelemetry(
         const std::shared_ptr<livekit::telemetry::SessionTelemetry> &telemetry);
     void finishAdmissionTelemetry(

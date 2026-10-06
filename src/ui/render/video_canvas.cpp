@@ -1,4 +1,5 @@
 #include "video_canvas.h"
+#include "src/ui/native_child_geometry.h"
 #include <QtGui/QMouseEvent>
 #include <QtGui/QCursor>
 #include <QtGui/QPainter>
@@ -11,6 +12,9 @@
 namespace livekit::render {
 VideoCanvas::VideoCanvas(QWidget* parent)
     : QWidget(parent), diagnostics_(std::make_unique<RenderDiagnostics>()) {
+    // Keep the stage/chrome in Qt's shared backing store. The native canvas
+    // still gets its own HWND, positioned relative to the nearest native parent.
+    new MeetingUI::NativeChildGeometry(*this);
     setMouseTracking(true);
     fps_timer_ = new QTimer(this);
     fps_timer_->setInterval(16);

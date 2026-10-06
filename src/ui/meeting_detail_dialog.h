@@ -40,6 +40,7 @@ private:
 	QString _meetingId;
 	OpenMeeting::MeetingCatalogController &_controller;
 	OpenMeeting::SessionManager &_session;
+	quint64 _authGeneration = 0;
 	std::optional<OpenMeeting::MeetingCatalogDetail> _detail;
 	QLabel *_titleLabel = nullptr;
 	QLabel *_meetingIdLabel = nullptr;

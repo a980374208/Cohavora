@@ -231,6 +231,7 @@ public:
 	explicit RoomTopBarWidget(QWidget *parent = nullptr);
 	~RoomTopBarWidget() override = default;
 	int heightForWidth(int width) const override;
+	bool isWindowDragArea(const QPoint &position) const;
 
 	void updateDuration(int seconds);
 	void setActiveSpeaker(const QString &speakerName);

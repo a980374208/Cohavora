@@ -28,6 +28,7 @@
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QProgressDialog>
 #include <QtWidgets/QScrollArea>
+#include "src/ui/native_child_geometry.h"
 #include <QtWidgets/QStyle>
 #include <QtWidgets/QTabWidget>
 #include <QtWidgets/QTableWidget>
@@ -89,6 +90,9 @@ constexpr int kBottomBarPadding = 12;
 constexpr int kBottomBarGap = 6;
 constexpr int kBottomBarEndWidth = 88;
 constexpr int kBottomBarPreferredToolWidth = 76;
+#if defined(Q_OS_WIN)
+constexpr int kNativeVerticalFramePixels = 1;
+#endif
 
 void ShowMeetingWarning(QWidget* parent, const char* id, const char* dismissId,
                            const QString& title, const QString& text) {
@@ -2044,6 +2048,14 @@ void RoomTopBarWidget::mouseMoveEvent(QMouseEvent *e) {
 	}
 }
 
+bool RoomTopBarWidget::isWindowDragArea(const QPoint &position) const {
+	return rect().contains(position) &&
+		!_qualityRect.contains(position) && !_meetingIdRect.contains(position) &&
+		!_minRect.contains(position) && !_maxRect.contains(position) &&
+		!_closeRect.contains(position) && !_consoleRect.contains(position) &&
+		!_simulateRect.contains(position) && !_layoutRect.contains(position);
+}
+
 void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 	if (e->button() == Qt::LeftButton) {
 		if (!_meetingIdRect.isEmpty() && _meetingIdRect.contains(e->pos())) {
@@ -2933,7 +2945,9 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	}
 	setMouseTracking(true);
 
-	setWindowFlags(Qt::Window | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint);
+	// Keep Qt's native frame bookkeeping consistent with the resizable HWND.
+	// WM_NCCALCSIZE removes the native title bar while retaining its resize frame.
+	setWindowFlags(Qt::Window | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint);
 
 	_preparingMedia = true;
 	initLayout();
@@ -3327,7 +3341,11 @@ void MeetingRoomWindow::setupNativeWindow() {
 	}
 
 	LONG_PTR style = GetWindowLongPtr(_handle, GWL_STYLE);
-	SetWindowLongPtr(_handle, GWL_STYLE, style | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+	// Windows 10 can paint a native caption even with our thin NCCALCSIZE
+	// inset. Keep the resize frame, but let only the Qt top bar own the caption.
+	SetWindowLongPtr(_handle, GWL_STYLE,
+		(style & ~LONG_PTR(WS_CAPTION)) | WS_THICKFRAME | WS_SYSMENU |
+		WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN);
 
 	MARGINS margins = { 1, 1, 1, 1 };
 	DwmExtendFrameIntoClientArea(_handle, &margins);
@@ -4777,6 +4795,10 @@ void MeetingRoomWindow::setupRemoteControl() {
 void MeetingRoomWindow::setupVideoPagingControls() {
 	if (_videoPagingControls || !_stageContainer) return;
 	_videoPagingControls = new QWidget(_stageContainer);
+	// This small overlay must stack above the native GPU surface. Keep its
+	// ancestors/siblings in the raster backing store and track stage movement.
+	new NativeChildGeometry(*_videoPagingControls);
+	_videoPagingControls->setAttribute(Qt::WA_NativeWindow);
 	_videoPagingControls->setObjectName(QStringLiteral("videoPagingControls"));
 	AppTheme::setTone(*_videoPagingControls, AppTheme::Tone::Dark);
 	auto *layout = new QHBoxLayout(_videoPagingControls);
@@ -6528,11 +6550,15 @@ int MeetingRoomWindow::nativeResizeHitTest(LPARAM position) const {
 	RECT client{};
 	if (!ScreenToClient(_handle, &point) || !GetClientRect(_handle, &client) ||
 		!PtInRect(&client, point)) return HTCLIENT;
-	const int border = std::max(1, qRound(8 * devicePixelRatioF()));
-	const bool left = point.x < border;
-	const bool right = point.x >= client.right - border;
-	const bool top = point.y < border;
-	const bool bottom = point.y >= client.bottom - border;
+	const int sideBorder = std::max(1, qRound(8 * devicePixelRatioF()));
+	// The native frame already provides an outer resize edge. Only a narrow
+	// inner vertical band is needed beside the top/bottom controls.
+	const int verticalBorder = std::max(1,
+		qRound(4 * devicePixelRatioF()) - kNativeVerticalFramePixels);
+	const bool left = point.x < sideBorder;
+	const bool right = point.x >= client.right - sideBorder;
+	const bool top = point.y < verticalBorder;
+	const bool bottom = point.y >= client.bottom - verticalBorder;
 	if (top && left) return HTTOPLEFT;
 	if (top && right) return HTTOPRIGHT;
 	if (bottom && left) return HTBOTTOMLEFT;
@@ -6556,7 +6582,7 @@ bool MeetingRoomWindow::nativeEventFilter(const QByteArray &eventType, void *mes
 	const auto msg = static_cast<MSG*>(message);
 	if (msg && msg->message == WM_NCHITTEST && _handle && msg->hwnd != _handle &&
 		IsChild(_handle, msg->hwnd) && nativeResizeHitTest(msg->lParam) != HTCLIENT) {
-		// DX11 makes the stage (and its Qt ancestors/siblings) native HWNDs.
+		// The GPU canvas and its paging overlay have native child HWNDs.
 		// Let Windows continue hit-testing to the meeting's top-level HWND at
 		// resize edges. Returning HTLEFT/etc. here would resize the child itself.
 		*result = HTTRANSPARENT;
@@ -6584,8 +6610,43 @@ bool MeetingRoomWindow::nativeEvent(const QByteArray &eventType, void *message, 
 	HWND handle = _handle ? _handle : msg->hwnd;
 
 	switch (msg->message) {
+	case WM_ERASEBKGND: {
+		if (_handle && msg->hwnd == _handle) {
+			// Qt's backing store paints the opaque client area in one pass.
+			*result = 1;
+			return true;
+		}
+	} break;
+
+	case WM_NCACTIVATE: {
+		if (_handle && msg->hwnd == _handle) {
+			// Preserve activation state without drawing a native caption over Qt.
+			*result = DefWindowProcW(_handle, msg->message, msg->wParam, -1);
+			return true;
+		}
+	} break;
+
 	case WM_NCCALCSIZE: {
-		if (msg->wParam == TRUE) {
+		if (msg->hwnd == handle && msg->wParam == TRUE) {
+			auto *parameters = reinterpret_cast<NCCALCSIZE_PARAMS *>(msg->lParam);
+			const RECT proposed = parameters->rgrc[0];
+			DefWindowProcW(handle, msg->message, msg->wParam, msg->lParam);
+			// Keep a native frame on all four sides and replace the caption with
+			// our Qt top bar. A thin top/bottom edge avoids a visible system band
+			// without taking over the entire non-client area beside GPU HWNDs.
+			const int resizeBorder = proposed.bottom - parameters->rgrc[0].bottom;
+			const auto style = GetWindowLongPtrW(handle, GWL_STYLE);
+			if ((style & WS_THICKFRAME) && !(style & WS_MAXIMIZE) &&
+				!isFullScreen() && resizeBorder > 0) {
+				// NCCALCSIZE can precede Qt's screen/DPI notification. A single
+				// physical pixel keeps this frame stable across that transition.
+				const int thinBorder = std::min(resizeBorder, kNativeVerticalFramePixels);
+				parameters->rgrc[0].top = proposed.top + thinBorder;
+				parameters->rgrc[0].bottom = proposed.bottom - thinBorder;
+			} else {
+				// Maximized windows still need the system's off-work-area inset.
+				parameters->rgrc[0].top = proposed.top + resizeBorder;
+			}
 			*result = 0;
 			return true;
 		}
@@ -6593,6 +6654,13 @@ bool MeetingRoomWindow::nativeEvent(const QByteArray &eventType, void *message, 
 
 	case WM_NCHITTEST: {
 		if (!handle) break;
+		POINT nativePoint{ GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam) };
+		RECT client{};
+		if (ScreenToClient(handle, &nativePoint) && GetClientRect(handle, &client) &&
+			!PtInRect(&client, nativePoint)) {
+			*result = DefWindowProcW(handle, msg->message, msg->wParam, msg->lParam);
+			return true;
+		}
 		const int resizeHit = nativeResizeHitTest(msg->lParam);
 		if (resizeHit != HTCLIENT) {
 			*result = resizeHit;
@@ -6606,9 +6674,10 @@ bool MeetingRoomWindow::nativeEvent(const QByteArray &eventType, void *message, 
 		const int x = static_cast<int>(p.x / ratio);
 		const int y = static_cast<int>(p.y / ratio);
 
-		const int w = width();
-
-		if (y < 44 && x < w - 420 && (x < (w - 220) / 2 || x > (w + 220) / 2)) {
+		// Alien title-bar widgets share this HWND. Only its actual empty area
+		// may act as a caption; its controls must receive client mouse events.
+		if (_topBar && _topBar->isWindowDragArea(
+			_topBar->mapFrom(this, QPoint(x, y)))) {
 			*result = HTCAPTION;
 			return true;
 		}

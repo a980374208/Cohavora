@@ -20,6 +20,7 @@ public:
     void reject() override;
 
 protected:
+    void showEvent(QShowEvent *e) override;
     void mousePressEvent(QMouseEvent *e) override;
     void mouseMoveEvent(QMouseEvent *e) override;
 
@@ -36,6 +37,8 @@ private:
     void loadSavedData();
     void updateSavedSessionAction();
     void updateEndpointOptions();
+    void scheduleFormFit();
+    void fitFormToScreen();
     void cancelLogin();
     void acceptAuthenticatedSession();
     void setLoading(bool loading, const QString &text = QString());
@@ -78,6 +81,7 @@ private:
 
     // 状态提示
     QLabel *_errorLabel = nullptr;
+    bool _formFitPending = false;
 
     // 窗口拖动
     QPoint _dragPosition;
