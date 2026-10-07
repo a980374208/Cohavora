@@ -27,6 +27,14 @@
 
 namespace {
 
+class CountingCoreApplication final : public QCoreApplication {
+public:
+    CountingCoreApplication(int& argc, char** argv) : QCoreApplication(argc, argv) {}
+
+    int aboutToQuitReceiverCount() const { return receivers(SIGNAL(aboutToQuit())); }
+    int destroyedReceiverCount() const { return receivers(SIGNAL(destroyed(QObject*))); }
+};
+
 void Require(bool condition, const char *message) {
     if (!condition) {
         std::cerr << "FAIL: " << message << std::endl;
@@ -42,6 +50,81 @@ void ProcessUntil(Predicate predicate, const char* message) {
         std::this_thread::yield();
     }
     Require(predicate(), message);
+}
+
+void TestQtDispatchEndpointConnectionLifetime(CountingCoreApplication& app) {
+    using Endpoint = OpenMeeting::detail::QtDispatchEndpoint;
+    constexpr int kIterations = 1000;
+    const int quitBaseline = app.aboutToQuitReceiverCount();
+    const int destroyedBaseline = app.destroyedReceiverCount();
+    const auto requireBaseline = [&] {
+        Require(app.aboutToQuitReceiverCount() == quitBaseline,
+                "released endpoint retained an application quit connection");
+        Require(app.destroyedReceiverCount() == destroyedBaseline,
+                "released endpoint retained an application destroyed connection");
+    };
+
+    for (int i = 0; i != kIterations; ++i) {
+        auto endpoint = Endpoint::Create();
+        Require(endpoint != nullptr, "endpoint creation failed on application thread");
+        std::weak_ptr<Endpoint> weak = endpoint;
+        Require(app.aboutToQuitReceiverCount() == quitBaseline + 1 &&
+                    app.destroyedReceiverCount() == destroyedBaseline + 1,
+                "live endpoint did not register exactly its two shutdown connections");
+        endpoint.reset();
+        Require(weak.expired(), "released endpoint retained a strong owner");
+        requireBaseline();
+    }
+
+    std::vector<std::shared_ptr<Endpoint>> endpoints;
+    std::vector<std::weak_ptr<Endpoint>> weakEndpoints;
+    endpoints.reserve(kIterations);
+    weakEndpoints.reserve(kIterations);
+    for (int i = 0; i != kIterations; ++i) {
+        auto endpoint = Endpoint::Create();
+        Require(endpoint != nullptr, "worker-release endpoint creation failed");
+        weakEndpoints.emplace_back(endpoint);
+        endpoints.push_back(std::move(endpoint));
+    }
+    Require(app.aboutToQuitReceiverCount() == quitBaseline + kIterations &&
+                app.destroyedReceiverCount() == destroyedBaseline + kIterations,
+            "worker-release setup did not retain all expected live endpoints");
+    std::thread releaseWorker([owned = std::move(endpoints)]() mutable {
+        owned.clear();
+    });
+    releaseWorker.join();
+    for (const auto& weak : weakEndpoints) {
+        Require(weak.expired(), "worker release retained a strong endpoint owner");
+    }
+    requireBaseline();
+}
+
+void TestQtDispatchEndpointQueuedPostSurvivesRelease(CountingCoreApplication& app) {
+    using Endpoint = OpenMeeting::detail::QtDispatchEndpoint;
+    const int quitBaseline = app.aboutToQuitReceiverCount();
+    const int destroyedBaseline = app.destroyedReceiverCount();
+    auto endpoint = Endpoint::Create();
+    Require(endpoint != nullptr, "queued-post endpoint creation failed");
+    std::weak_ptr<Endpoint> weak = endpoint;
+    int delivered = 0;
+    Require(endpoint->Post([&] {
+        Require(QThread::currentThread() == app.thread(),
+                "queued endpoint callback ran outside the application thread");
+        ++delivered;
+    }), "live endpoint rejected a queued callback");
+    Require(delivered == 0, "endpoint callback was delivered synchronously");
+    std::thread releaseWorker([owned = std::move(endpoint)]() mutable {
+        owned.reset();
+    });
+    releaseWorker.join();
+    Require(weak.expired(), "queued callback retained the dispatch endpoint");
+    Require(app.aboutToQuitReceiverCount() == quitBaseline &&
+                app.destroyedReceiverCount() == destroyedBaseline,
+            "queued-post endpoint release retained shutdown connections");
+    ProcessUntil([&] { return delivered == 1; },
+                 "endpoint release discarded an already queued callback");
+    QCoreApplication::processEvents();
+    Require(delivered == 1, "queued endpoint callback was delivered more than once");
 }
 
 void TestQtCallbackGate() {
@@ -472,12 +555,14 @@ void TestAsyncShutdownGuardUnwindsExistingLoop(QCoreApplication& app) {
 } // namespace
 
 int main(int argc, char **argv) {
-    QCoreApplication app(argc, argv);
+    CountingCoreApplication app(argc, argv);
     if (app.arguments().contains(
             QStringLiteral("--retained-cleanup-failure-child"))) {
         RunRetainedCleanupFailureChild();
     }
 
+    TestQtDispatchEndpointConnectionLifetime(app);
+    TestQtDispatchEndpointQueuedPostSurvivesRelease(app);
     TestQtCallbackGate();
     TestShutdownService();
     TestShutdownDrainReentry();
