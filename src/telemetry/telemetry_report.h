@@ -124,10 +124,25 @@ struct TelemetryStoreStatus {
     std::uint64_t queue_job_limit_hits = 0;
     std::uint64_t queue_byte_limit_hits = 0;
     std::uint64_t snapshot_max_us = 0;
+    // Aggregates only; no per-job logs or retained timing samples.
+    std::uint64_t snapshot_total_us = 0;
+    std::uint64_t snapshot_count = 0;
+    std::uint64_t worker_job_max_us = 0;
+    std::uint64_t worker_job_total_us = 0;
+    std::uint64_t worker_job_count = 0;
+    std::uint64_t flush_max_us = 0;
+    std::uint64_t flush_total_us = 0;
+    std::uint64_t flush_count = 0;
+    std::uint64_t owned_scan_max_us = 0;
+    std::uint64_t owned_scan_total_us = 0;
+    std::uint64_t owned_scan_count = 0;
     std::uint64_t checkpoint_max_us = 0;
+    std::uint64_t checkpoint_total_us = 0;
+    std::uint64_t checkpoint_count = 0;
     std::uint64_t history_refresh_max_us = 0;
     std::uint64_t history_refresh_last_us = 0;
     std::uint64_t history_refresh_count = 0;
+    std::uint64_t history_refresh_total_us = 0;
     std::size_t memory_records = 0;
     std::size_t memory_bytes = 0;
     std::uint64_t memory_records_evicted = 0;

@@ -2027,6 +2027,7 @@ struct TelemetryHistoryStore::WorkerContext final {
         std::uint64_t generation = 0;
         std::vector<TelemetryCheckpointRecord> records;
         std::size_t bytes = 0;
+        std::size_t payload_bytes = 0;
         bool terminal = false;
         std::uint64_t committed_revision = 0;
         unsigned retry_count = 0;
@@ -2037,6 +2038,20 @@ struct TelemetryHistoryStore::WorkerContext final {
     struct CurrentRecord {
         SafeTelemetryRecordPtr record;
         std::size_t charge = 0;
+    };
+
+    struct FlushTiming {
+        WorkerContext& context;
+        const std::chrono::steady_clock::time_point began = std::chrono::steady_clock::now();
+        ~FlushTiming() {
+            const auto elapsed = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - began).count());
+            std::lock_guard lock(context.mutex_);
+            ++context.status_.flush_count;
+            context.status_.flush_total_us += elapsed;
+            context.status_.flush_max_us = (std::max)(context.status_.flush_max_us, elapsed);
+        }
     };
 
     enum class JobKind { Snapshot, Export, ExportReport, ClearReport, RetryCheckpoint,
@@ -2455,6 +2470,7 @@ void TelemetryHistoryStore::WorkerContext::RunLoop() {
             }
         }
         const auto completed_charge = job.charge;
+        const auto job_began = std::chrono::steady_clock::now();
         try {
             if (!has_job) {
                 FlushPendingReports(false);
@@ -2470,6 +2486,8 @@ void TelemetryHistoryStore::WorkerContext::RunLoop() {
                 std::lock_guard lock(mutex_);
                 status_.snapshot_max_us = (std::max)(status_.snapshot_max_us,
                     static_cast<std::uint64_t>(elapsed));
+                status_.snapshot_total_us += static_cast<std::uint64_t>(elapsed);
+                ++status_.snapshot_count;
                 break;
             }
             case JobKind::Export: HandleExport(std::move(job)); break;
@@ -2529,6 +2547,12 @@ void TelemetryHistoryStore::WorkerContext::RunLoop() {
         }
         {
             std::lock_guard lock(mutex_);
+            const auto job_elapsed = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - job_began).count());
+            status_.worker_job_max_us = (std::max)(status_.worker_job_max_us, job_elapsed);
+            status_.worker_job_total_us += job_elapsed;
+            ++status_.worker_job_count;
             status_.queue_bytes -= completed_charge;
             --inflight_jobs_;
             status_.inflight_jobs = inflight_jobs_;
@@ -2642,9 +2666,12 @@ void TelemetryHistoryStore::WorkerContext::HandleSnapshot(Job job) {
                 (status_.history_enabled || !job.checkpoint.complete) &&
                 job.checkpoint.generation == current_generation_) {
                 const auto bucket = record->source_utc_ms / 1000;
+                // The JSONL belongs to pending_reports_, not current_records_.
+                // Charging it here evicts retained snapshots based on a second
+                // buffer's size and overstates the memory exposed to the UI.
                 const auto charge = sizeof(SafeTelemetryRecord) +
                     SnapshotRetainedBytes(record->snapshot) +
-                    StabilityRetainedBytes(record->stability) + PendingCharge(job.checkpoint);
+                    StabilityRetainedBytes(record->stability);
                 if (!current_records_.empty() &&
                     current_records_.back().record->source_utc_ms / 1000 == bucket) {
                     current_record_bytes_ -= current_records_.back().charge;
@@ -2679,6 +2706,39 @@ void TelemetryHistoryStore::WorkerContext::HandleSnapshot(Job job) {
     {
         std::lock_guard lock(mutex_);
         if (!status_.history_enabled) return;
+    }
+    constexpr std::size_t kMaximumPendingBytes = 8 * 1024 * 1024;
+    constexpr std::size_t kMaximumSegmentPayload = 4 * 1024 * 1024;
+    bool needs_headroom = false;
+    {
+        std::size_t total = 0;
+        std::size_t payload = job.checkpoint.jsonl.size();
+        std::size_t replaced_charge = 0;
+        bool existing = false;
+        for (const auto& pending : pending_reports_) {
+            total += pending.bytes;
+            if (pending.id != job.anonymous_session_id) continue;
+            existing = true;
+            payload += pending.payload_bytes;
+            for (const auto& record : pending.records) {
+                if (record.revision != job.checkpoint.revision) continue;
+                replaced_charge = PendingCharge(record);
+                payload -= record.jsonl.size();
+                break;
+            }
+        }
+        needs_headroom = total - replaced_charge + PendingCharge(job.checkpoint) >
+            kMaximumPendingBytes || payload > kMaximumSegmentPayload ||
+            (!existing && pending_reports_.size() >= 4);
+    }
+    if (needs_headroom) {
+        // Flush healthy reports before admitting the next record, including
+        // pressure shared by multiple sessions. Never override IO retry backoff
+        // and never keep a report reference across a flush that may erase it.
+        for (auto& pending : pending_reports_)
+            if (pending.retry_count == 0 && !pending.records.empty())
+                pending.next_attempt = std::chrono::steady_clock::now();
+        FlushPendingReports(false);
     }
     const auto found = std::find_if(pending_reports_.begin(), pending_reports_.end(),
         [&](const PendingReport& report) {
@@ -2715,8 +2775,11 @@ void TelemetryHistoryStore::WorkerContext::HandleSnapshot(Job job) {
         });
     const auto replaced_bytes = same_revision == report.records.end()
         ? std::size_t{0} : PendingCharge(*same_revision);
-    if (bytes > 8 * 1024 * 1024 ||
-        total - replaced_bytes + bytes > 8 * 1024 * 1024) {
+    const auto replaced_payload = same_revision == report.records.end()
+        ? std::size_t{0} : same_revision->jsonl.size();
+    if (bytes > kMaximumPendingBytes ||
+        total - replaced_bytes + bytes > kMaximumPendingBytes ||
+        report.payload_bytes - replaced_payload + compact.jsonl.size() > kMaximumSegmentPayload) {
         std::lock_guard lock(mutex_);
         RecordLossLocked(job.anonymous_session_id, compact);
         ++status_.pending_records_dropped;
@@ -2725,6 +2788,7 @@ void TelemetryHistoryStore::WorkerContext::HandleSnapshot(Job job) {
         PublishStatusLocked();
         return;
     }
+    report.payload_bytes = report.payload_bytes - replaced_payload + compact.jsonl.size();
     if (same_revision != report.records.end()) {
         report.bytes -= replaced_bytes;
         *same_revision = std::move(compact);
@@ -2734,9 +2798,10 @@ void TelemetryHistoryStore::WorkerContext::HandleSnapshot(Job job) {
     report.bytes += bytes;
     report.terminal = report.terminal || terminal;
     // The time-based flush alone can fill the bounded pending buffer during
-    // normal high-frequency snapshots. Flush healthy storage at a low water
-    // mark, leaving headroom for the next record; retain backoff on IO failure.
-    if ((report.terminal || report.bytes >= kDefaultMemoryBytes / 4) &&
+    // normal high-frequency snapshots. Batch by actual segment payload rather
+    // than its doubled allocation reservation; preflight above protects the
+    // pending and segment headroom before the next record is retained.
+    if ((report.terminal || report.payload_bytes >= kDefaultMemoryBytes / 4) &&
         report.retry_count == 0)
         report.next_attempt = std::chrono::steady_clock::now();
     PublishPendingStatus();
@@ -2757,6 +2822,7 @@ void TelemetryHistoryStore::WorkerContext::PublishPendingStatus() {
 }
 
 void TelemetryHistoryStore::WorkerContext::FlushPendingReports(bool force) {
+    const FlushTiming timing{*this};
     if (Stopped()) return;
     if (!pending_reports_.empty() && !process_run_id_.empty() &&
         (!run_lease_ || !run_lease_->acquired())) {
@@ -2803,7 +2869,17 @@ void TelemetryHistoryStore::WorkerContext::FlushPendingReports(bool force) {
         // Append performs its own locked quota check and full checkpoint
         // integrity check. Scan unrelated reports only for retention/index
         // refresh or when actual owned bytes require pruning for this write.
+        const auto owned_began = std::chrono::steady_clock::now();
         const auto owned = TelemetryHistoryOwnedBytes(root_);
+        {
+            const auto elapsed = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(
+                    std::chrono::steady_clock::now() - owned_began).count());
+            std::lock_guard lock(mutex_);
+            ++status_.owned_scan_count;
+            status_.owned_scan_total_us += elapsed;
+            status_.owned_scan_max_us = (std::max)(status_.owned_scan_max_us, elapsed);
+        }
         if (!owned || *owned > maximum_bytes_ ||
             reserve_bytes > maximum_bytes_ - *owned || now >= next_history_refresh_)
             RefreshAndPruneReports(reserve_bytes);
@@ -2819,6 +2895,8 @@ void TelemetryHistoryStore::WorkerContext::FlushPendingReports(bool force) {
             std::lock_guard lock(mutex_);
             status_.checkpoint_max_us = (std::max)(status_.checkpoint_max_us,
                 static_cast<std::uint64_t>(elapsed));
+            status_.checkpoint_total_us += static_cast<std::uint64_t>(elapsed);
+            ++status_.checkpoint_count;
         }
         if (result.success) {
             const auto watermark = result.status.last_committed_revision;
@@ -2828,6 +2906,7 @@ void TelemetryHistoryStore::WorkerContext::FlushPendingReports(bool force) {
             for (const auto& record : it->records) {
                 if (record.revision <= watermark) {
                     it->bytes -= PendingCharge(record);
+                    it->payload_bytes -= record.jsonl.size();
                 }
             }
             it->records.erase(std::remove_if(it->records.begin(), it->records.end(),
@@ -3172,6 +3251,7 @@ void TelemetryHistoryStore::WorkerContext::RefreshAndPruneReports(
             std::chrono::steady_clock::now() - refresh_began).count());
     status_.history_refresh_max_us = (std::max)(status_.history_refresh_max_us,
         status_.history_refresh_last_us);
+    status_.history_refresh_total_us += status_.history_refresh_last_us;
     if (error || accounting_failed) {
         ++status_.write_failures;
         status_.availability = Availability::Invalid;
@@ -3236,6 +3316,9 @@ void TelemetryHistoryStore::WorkerContext::Run() {
     run_lease_.reset();
     {
         std::lock_guard lock(mutex_);
+        // Include aggregate timings from the final forced flush before Close
+        // captures and freezes the immutable completion status.
+        PublishStatusLocked();
         finished_ = true;
     }
     done_.notify_all();

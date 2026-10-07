@@ -532,6 +532,39 @@ void StoreCoalescesBucketsAndPreservesUnknownFiles() {
     TEST_CHECK(!std::filesystem::exists(seed.report_directory / "manifest.json"));
 }
 
+void RetainedSnapshotsAreNotEvictedBySerializedHistogramSize() {
+    TemporaryDirectory directory("cohavora-telemetry-retained-histogram");
+    TelemetryHistoryStore store(directory.path());
+    const auto source_at = livekit::telemetry::Snapshot::Clock::now() - 60s;
+    for (std::uint64_t revision = 1; revision <= 20; ++revision) {
+        auto snapshot = std::make_shared<livekit::telemetry::Snapshot>(
+            Record(revision, revision == 20)->snapshot);
+        // A fine histogram has a small numeric backing buffer but produces
+        // thousands of JSONL metric rows. Persistence size must not evict
+        // otherwise in-budget snapshots from the current-session view.
+        snapshot->render_window_fine_interval_histogram.assign(2001, 1);
+        snapshot->generated_at = source_at + std::chrono::seconds(2 * revision);
+        TEST_CHECK(store.SubmitSnapshot(std::move(snapshot)));
+        for (int wait = 0; wait != 5000; ++wait) {
+            const auto status = store.Status();
+            if (status->queue_depth == 0 && status->inflight_jobs == 0) break;
+            std::this_thread::sleep_for(1ms);
+        }
+        TEST_CHECK(store.Status()->queue_depth == 0);
+        TEST_CHECK(store.Status()->inflight_jobs == 0);
+    }
+    store.Close();
+    const auto status = store.Status();
+    TEST_CHECK(status->queue_drops == 0 && status->pending_records_dropped == 0);
+    TEST_CHECK(status->write_failures == 0);
+    TEST_CHECK(status->memory_records == 20);
+    TEST_CHECK(status->memory_records_evicted == 0);
+    TEST_CHECK(status->memory_bytes < 2 * 1024 * 1024);
+    TEST_CHECK(status->checkpoint_count <= 8);
+    TEST_CHECK(store.CurrentRecords().front()->snapshot.revision == 1);
+    TEST_CHECK(store.CurrentRecords().back()->snapshot.revision == 20);
+}
+
 void FailedAutomaticHistoryWriteCanRetrySameSession() {
     TemporaryDirectory directory("cohavora-telemetry-retry");
     const auto history_root = directory.path() / "history";
@@ -1780,7 +1813,54 @@ void PendingPressureFlushesWithoutRevisionLoss() {
     TEST_CHECK(checkpoint.record_count == 80);
 }
 
-void SustainedSnapshotsDoNotStarveAdmission() {
+void LargeRecordFlushesHealthyHeadroomAcrossReports() {
+    for (const bool change_report : {false, true}) {
+        TemporaryDirectory directory(change_report ? "cohavora-pending-mixed" : "cohavora-pending-large");
+        const auto root = directory.path() / "history";
+        TelemetryHistoryStore store(root);
+        const std::string first_id(32, 'a');
+        const std::string second_id(32, 'b');
+        for (std::uint64_t revision = 1; revision <= 5; ++revision) {
+            auto snapshot = std::make_shared<livekit::telemetry::Snapshot>(
+                Record(revision, revision == 5)->snapshot);
+            const bool second_report = change_report && revision >= 4;
+            snapshot->session_generation = second_report ? 44 : 43;
+            if (second_report) snapshot->revision = revision - 3;
+            // Three sub-batch records retain about 3MiB of charged memory.
+            // A larger next record needs about 5MiB: healthy earlier data
+            // must flush before admission, even when it belongs to a session
+            // superseded by the report receiving the large record.
+            snapshot->render_window_fine_interval_histogram.assign(
+                revision == 4 ? 6001 : 1001, 1);
+            TEST_CHECK(store.SubmitSnapshot(snapshot, {}, second_report ? second_id : first_id));
+            for (int wait = 0; wait != 5000; ++wait) {
+                const auto status = store.Status();
+                if (status->queue_depth == 0 && status->inflight_jobs == 0) break;
+                std::this_thread::sleep_for(1ms);
+            }
+            TEST_CHECK(store.Status()->queue_depth == 0 && store.Status()->inflight_jobs == 0);
+            TEST_CHECK(store.Status()->pending_bytes <= 8 * 1024 * 1024);
+        }
+        store.Close();
+        const auto status = store.Status();
+        TEST_CHECK(status->queue_drops == 0 && status->pending_records_dropped == 0);
+        TEST_CHECK(status->write_failures == 0);
+        const auto first = InspectTelemetryCheckpoint(root / ("cohavora-telemetry-v2-" + first_id));
+        TEST_CHECK(first.valid && first.missing_revisions == 0 && first.pruned_records == 0);
+        TEST_CHECK(first.record_count == (change_report ? 3 : 5));
+        if (change_report) {
+            const auto second = InspectTelemetryCheckpoint(root / ("cohavora-telemetry-v2-" + second_id));
+            TEST_CHECK(second.valid && second.session_complete && second.record_count == 2);
+            TEST_CHECK(second.missing_revisions == 0 && second.pruned_records == 0);
+        } else TEST_CHECK(first.session_complete);
+    }
+}
+
+void SustainedSnapshotsDoNotStarveAdmission(bool fine_histogram_diagnostic = false) {
+    if (fine_histogram_diagnostic) {
+        std::fprintf(stdout, "NOT_FORMAL: offline fine-histogram throughput diagnostic; admission and zero-loss assertions unchanged\n");
+        std::fflush(stdout);
+    }
     TemporaryDirectory directory("cohavora-telemetry-throughput");
     const auto root = directory.path() / "history";
     // Include about 50 MiB of completed history, as in the real product
@@ -1815,6 +1895,12 @@ void SustainedSnapshotsDoNotStarveAdmission() {
         auto snapshot = std::make_shared<livekit::telemetry::Snapshot>(
             Record(i, i == 320)->snapshot);
         snapshot->session_generation = 43;
+        if (fine_histogram_diagnostic) {
+            snapshot->render_fine_interval_histogram.assign(
+                livekit::telemetry::RenderActivityProbe::kFineIntervalHistogramBuckets, 1);
+            snapshot->render_window_fine_interval_histogram.assign(
+                livekit::telemetry::RenderActivityProbe::kFineIntervalHistogramBuckets, 1);
+        }
         if (!store.SubmitSnapshot(snapshot, {}, id)) ++rejected;
         // Real page transitions emitted over 100 revisions in a 100 ms
         // window. Replay 120 together, then paced traffic, without waiting
@@ -1841,12 +1927,28 @@ void SustainedSnapshotsDoNotStarveAdmission() {
         static_cast<unsigned long long>(status->queue_byte_limit_hits),
         static_cast<unsigned long long>(status->queue_job_limit_hits));
     std::fflush(stdout);
+    if (fine_histogram_diagnostic) {
+        const auto checkpoint = InspectTelemetryCheckpoint(root / ("cohavora-telemetry-v2-" + id));
+        std::cout << nlohmann::json{
+            {"status", "NOT_FORMAL"}, {"input_revisions", 320},
+            {"histogram_bins_per_vector", livekit::telemetry::RenderActivityProbe::kFineIntervalHistogramBuckets},
+            {"queue_byte_capacity", status->queue_byte_capacity},
+            {"worker_job", {{"count", status->worker_job_count}, {"total_us", status->worker_job_total_us}, {"max_us", status->worker_job_max_us}}},
+            {"snapshot", {{"count", status->snapshot_count}, {"total_us", status->snapshot_total_us}, {"max_us", status->snapshot_max_us}}},
+            {"flush", {{"count", status->flush_count}, {"total_us", status->flush_total_us}, {"max_us", status->flush_max_us}}},
+            {"owned_scan", {{"count", status->owned_scan_count}, {"total_us", status->owned_scan_total_us}, {"max_us", status->owned_scan_max_us}}},
+            {"append", {{"count", status->checkpoint_count}, {"total_us", status->checkpoint_total_us}, {"max_us", status->checkpoint_max_us}}},
+            {"history_refresh", {{"count", status->history_refresh_count}, {"total_us", status->history_refresh_total_us}, {"max_us", status->history_refresh_max_us}}},
+            {"checkpoint", {{"valid", checkpoint.valid}, {"record_count", checkpoint.record_count}, {"last_revision", checkpoint.last_committed_revision}, {"missing", checkpoint.missing_revisions}, {"pruned", checkpoint.pruned_records}}}
+        }.dump() << std::endl;
+    }
     TEST_CHECK(rejected == 0 && status->queue_drops == 0);
     TEST_CHECK(status->pending_records_dropped == 0 && status->write_failures == 0);
     const auto result = InspectTelemetryCheckpoint(root / ("cohavora-telemetry-v2-" + id));
     TEST_CHECK(result.valid && result.session_complete);
     TEST_CHECK(result.last_committed_revision == 320 && result.record_count == 320);
-    TEST_CHECK(result.missing_revisions == 0 && result.pruned_records == 0);
+    TEST_CHECK(result.missing_revisions == 0);
+    if (!fine_histogram_diagnostic) TEST_CHECK(result.pruned_records == 0);
 }
 
 void QueueBytesRejectBeforeJobCount() {
@@ -1979,6 +2081,10 @@ int wmain(int argc, wchar_t** argv) {
         SustainedSnapshotsDoNotStarveAdmission();
         return 0;
     }
+    if (argc == 2 && std::wstring_view(argv[1]) == L"--throughput-fine-histogram-diagnostic") {
+        SustainedSnapshotsDoNotStarveAdmission(true);
+        return 0;
+    }
     if (argc == 3 && std::wstring_view(argv[1]) == L"--inspect-checkpoint") {
         for (int i = 0; i != 3; ++i) {
             const auto began = std::chrono::steady_clock::now();
@@ -2023,6 +2129,7 @@ int wmain(int argc, wchar_t** argv) {
     UnsafeTextAndCsvFormulaAreContained();
     CancellationAndUnwritableDestinationAreBounded();
     StoreCoalescesBucketsAndPreservesUnknownFiles();
+    RetainedSnapshotsAreNotEvictedBySerializedHistogramSize();
     FailedAutomaticHistoryWriteCanRetrySameSession();
     CheckpointAppendRetryAndIntegrity();
     MaximumSegmentHistoryRetainsIntegrity();
@@ -2053,6 +2160,7 @@ int wmain(int argc, wchar_t** argv) {
     DisablingHistoryRemovesLossSummary();
     ManualRetryCommitsAfterStorageRecovery();
     PendingPressureFlushesWithoutRevisionLoss();
+    LargeRecordFlushesHealthyHeadroomAcrossReports();
     QueueBytesRejectBeforeJobCount();
 #if defined(_WIN32)
     CommittedCheckpointSurvivesForcedTermination(executable);
