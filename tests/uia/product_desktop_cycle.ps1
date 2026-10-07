@@ -53,7 +53,7 @@ try {
     if ($HeapDiagnostic) {
         . (Join-Path $PSScriptRoot '../runtime/tools/product_acceptance/product_heap_diagnostic.ps1')
         $script:heapDirectory=Join-Path $OutputDirectory 'heap-diagnostic'
-        $script:heapTools=Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/Debuggers/x64'
+        $script:heapTools=Resolve-ProductHeapTools -HeapSnapshotDiagnostic:$HeapSnapshotDiagnostic
     }
     Run-Cycle
     @{run_id=$script:runId;cycle=$script:cycle;cycle_id=$script:cycleId;product_pid=$script:child.Id;

@@ -17,6 +17,7 @@ foreach($path in @($heapModule,$invoker,$driver,$worker)) {
 # snapshot operations below are mocks. No product, service or debugger is run.
 $HeapSnapshotDiagnostic=$false
 . $heapModule
+$script:ActualHeapResolver=(Get-Item Function:Resolve-ProductHeapTools).ScriptBlock
 $cases=[Collections.Generic.List[object]]::new()
 $script:launches=[Collections.Generic.List[object]]::new()
 $script:snapshotCalls=[Collections.Generic.List[object]]::new()
@@ -42,7 +43,20 @@ function New-Case([string]$Name){
     $script:HeapDiagnosticNoShare=$false;$script:HeapDiagnosticNoExport=$false;$script:IsolateUiaCycles=$false
     $script:launches.Clear();$script:snapshotCalls.Clear();$script:mockSnapshotOutcome='success'
     $script:child=$script:fixtureChild;$script:heapDebugger=$null
+    $caseDirectory=Split-Path $script:OutputDirectory
+    $script:heapCandidateRoots=@((Join-Path $caseDirectory 'ProgramFiles'),(Join-Path $caseDirectory 'ProgramFilesX86'))
+    foreach($root in $script:heapCandidateRoots){
+        $directory=Join-Path $root 'Windows Kits/10/Debuggers/x64'
+        $null=[IO.Directory]::CreateDirectory($directory)
+        foreach($tool in @('cdb.exe','umdh.exe')){[IO.File]::WriteAllText((Join-Path $directory $tool),'mock tool; never executed')}
+    }
 }
+function Resolve-ProductHeapTools {
+    param([switch]$HeapSnapshotDiagnostic)
+    & $script:ActualHeapResolver -HeapSnapshotDiagnostic:$HeapSnapshotDiagnostic -CandidateRoots $script:heapCandidateRoots
+}
+function Fixture-HeapDirectory([int]$Index){Join-Path $script:heapCandidateRoots[$Index] 'Windows Kits/10/Debuggers/x64'}
+function Remove-FixtureHeapTool([int]$Index,[string]$Tool){[IO.File]::Delete((Join-Path (Fixture-HeapDirectory $Index) $Tool))}
 function Start-Process {
     param($FilePath,$ArgumentList,$WorkingDirectory,[switch]$PassThru,$RedirectStandardOutput,$RedirectStandardError,$WindowStyle)
     $script:launches.Add(@{file=$FilePath;args=@($ArgumentList);working=$WorkingDirectory;stdout=$RedirectStandardOutput;stderr=$RedirectStandardError})
@@ -77,6 +91,50 @@ function Invoke-ProductNormalHeapSnapshot {
 }
 $failure=$null
 try {
+    Case 'ust_discovery_skips_cdb_only_first_directory' {
+        New-Case 'tool-fallback';Remove-FixtureHeapTool 0 'umdh.exe'
+        $script:HeapSnapshotDiagnostic=$false;Start-HeapDiagnosticProduct
+        Assert-True ($script:heapTools -eq (Fixture-HeapDirectory 1)) 'complete-second-directory-selected'
+        Assert-True ($script:launches[0].file -eq (Join-Path (Fixture-HeapDirectory 1) 'cdb.exe')) 'selected-debugger-forwarded'
+    }
+    Case 'snapshot_discovery_needs_only_cdb_and_preserves_priority' {
+        New-Case 'tool-snapshot';Remove-FixtureHeapTool 0 'umdh.exe';Remove-FixtureHeapTool 1 'umdh.exe'
+        Start-HeapDiagnosticProduct
+        Assert-True ($script:heapTools -eq (Fixture-HeapDirectory 0)) 'snapshot-selects-first-cdb-without-umdh'
+    }
+    Case 'ust_discovery_prefers_complete_first_directory' {
+        New-Case 'tool-priority';$script:HeapSnapshotDiagnostic=$false;Start-HeapDiagnosticProduct
+        Assert-True ($script:heapTools -eq (Fixture-HeapDirectory 0)) 'first-complete-directory-selected'
+    }
+    Case 'incomplete_directories_fail_before_product_launch' {
+        foreach($snapshot in @($false,$true)){
+            New-Case ('tool-missing-'+$snapshot);$script:HeapSnapshotDiagnostic=$snapshot
+            Remove-FixtureHeapTool 0 $(if($snapshot){'cdb.exe'}else{'umdh.exe'})
+            Remove-FixtureHeapTool 1 'cdb.exe'
+            $caught=$null
+            try{Start-HeapDiagnosticProduct}catch{$caught=$_.Exception.Message}
+            Assert-True ($caught -like 'HEAP_TOOLS_NOT_FOUND: required=cdb.exe*') 'explicit-tool-discovery-failure'
+            Assert-True ($snapshot -or $caught.Contains('umdh.exe')) 'mode-required-tools-reported'
+            Assert-True ($script:launches.Count -eq 0 -and !(Test-Path (Join-Path $OutputDirectory 'heap-diagnostic'))) 'missing-tools-never-launch-or-create-heap-evidence'
+        }
+    }
+    Case 'empty_root_and_directory_named_executable_are_not_accepted' {
+        New-Case 'tool-leaf';Remove-FixtureHeapTool 0 'cdb.exe'
+        $null=[IO.Directory]::CreateDirectory((Join-Path (Fixture-HeapDirectory 0) 'cdb.exe'))
+        $selected=& $script:ActualHeapResolver -HeapSnapshotDiagnostic -CandidateRoots (@('','   ')+$script:heapCandidateRoots)
+        Assert-True ($selected -eq (Fixture-HeapDirectory 1)) 'only-an-existing-tool-file-matches'
+    }
+    Case 'isolated_worker_uses_shared_discovery_and_current_mode' {
+        $assignment=@($trees[$worker].FindAll({param($n) $n -is [Management.Automation.Language.AssignmentStatementAst] -and $n.Left.Extent.Text -eq '$script:heapTools'},$true))
+        Assert-True ($assignment.Count -eq 1) 'single-worker-tools-assignment'
+        foreach($snapshot in @($false,$true)){
+            New-Case ('worker-tools-'+$snapshot);Remove-FixtureHeapTool 0 'umdh.exe'
+            $script:HeapSnapshotDiagnostic=$snapshot;Invoke-Expression $assignment[0].Extent.Text
+            $expected=Fixture-HeapDirectory $(if($snapshot){0}else{1})
+            Assert-True ($script:heapTools -eq $expected) 'worker-and-startup-share-mode-aware-discovery'
+            Assert-True ($script:launches.Count -eq 0) 'worker-discovery-never-launches-product'
+        }
+    }
     Case 'both_entry_points_reject_missing_parent_and_conflicting_heap_modes' {
         foreach($path in @($invoker,$driver)){
             $guard=@($trees[$path].EndBlock.Statements | Where-Object {$_ -is [Management.Automation.Language.IfStatementAst] -and $_.Extent.Text.Contains('HEAP_SNAPSHOT_REQUIRES_EXCLUSIVE_HEAP_DIAGNOSTIC')})

@@ -1,11 +1,29 @@
 # Dot-sourced only for diagnostic PILOTs. Never writes IFEO/system settings.
 if ($HeapSnapshotDiagnostic) { . (Join-Path $PSScriptRoot 'product_heap_snapshot.ps1') }
-function Start-HeapDiagnosticProduct {
-    $script:heapTools = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits/10/Debuggers/x64'
+function Resolve-ProductHeapTools {
+    param(
+        [switch]$HeapSnapshotDiagnostic,
+        [string[]]$CandidateRoots = @($env:ProgramFiles, ${env:ProgramFiles(x86)})
+    )
     $requiredTools = if ($HeapSnapshotDiagnostic) { @('cdb.exe') } else { @('cdb.exe', 'umdh.exe') }
-    foreach ($tool in $requiredTools) {
-        if (!(Test-Path -LiteralPath (Join-Path $script:heapTools $tool))) { throw "HEAP_TOOL_MISSING: $tool" }
+    $checkedDirectories = [Collections.Generic.List[string]]::new()
+    foreach ($root in $CandidateRoots) {
+        if ([string]::IsNullOrWhiteSpace($root)) { continue }
+        $directory = Join-Path $root 'Windows Kits/10/Debuggers/x64'
+        $checkedDirectories.Add($directory)
+        $complete = $true
+        foreach ($tool in $requiredTools) {
+            if (!(Test-Path -LiteralPath (Join-Path $directory $tool) -PathType Leaf)) {
+                $complete = $false
+                break
+            }
+        }
+        if ($complete) { return $directory }
     }
+    throw "HEAP_TOOLS_NOT_FOUND: required=$($requiredTools -join ','); searched=$($checkedDirectories -join ';')"
+}
+function Start-HeapDiagnosticProduct {
+    $script:heapTools = Resolve-ProductHeapTools -HeapSnapshotDiagnostic:$HeapSnapshotDiagnostic
     $script:heapDirectory = Join-Path $OutputDirectory 'heap-diagnostic'
     $null = New-Item -ItemType Directory -Path $script:heapDirectory
     if ($HeapSnapshotDiagnostic) {
