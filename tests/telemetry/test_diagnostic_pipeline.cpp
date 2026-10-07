@@ -209,6 +209,46 @@ void BoundedConcurrentAdmission() {
     TEST_CHECK(pipeline.Close() == DrainResult::Failed);
 }
 
+void ConcurrentAdmissionPersistsSequenceOrder() {
+    TemporaryDirectory directory;
+    DiagnosticPipeline pipeline;
+    constexpr int producer_count = 8;
+    constexpr int events_per_producer = 128;
+    std::atomic<int> ready{0};
+    std::atomic<bool> begin{false};
+    std::atomic<unsigned> rejected{0};
+    std::vector<std::thread> producers;
+    for (int producer = 0; producer < producer_count; ++producer) {
+        producers.emplace_back([&] {
+            ready.fetch_add(1, std::memory_order_release);
+            while (!begin.load(std::memory_order_acquire))
+                std::this_thread::yield();
+            for (int i = 0; i < events_per_producer; ++i) {
+                // Both queues remain below capacity; no loss or sink retry
+                // can explain an out-of-order admission in this fixture.
+                const auto event = i % 4 == 0 ? Event::Started("test-build")
+                    : Event::Received(ChatKind::Text, 17);
+                if (!pipeline.TryEmit(event)) ++rejected;
+            }
+        });
+    }
+    while (ready.load(std::memory_order_acquire) != producer_count)
+        std::this_thread::yield();
+    begin.store(true, std::memory_order_release);
+    for (auto& producer : producers) producer.join();
+    TEST_CHECK(rejected.load() == 0);
+    TEST_CHECK(pipeline.StartWriter(directory.path));
+    TEST_CHECK(pipeline.Close() == DrainResult::Completed);
+    const auto events = ReadEvents(directory.path);
+    TEST_CHECK(events.size() == producer_count * events_per_producer + 2);
+    for (std::size_t i = 0; i < events.size(); ++i)
+        TEST_CHECK(events[i].at("event_sequence") == i + 1);
+    const auto status = pipeline.GetStatus();
+    TEST_CHECK(status.dropped_ordinary == 0 && status.dropped_critical == 0);
+    TEST_CHECK(status.sink_failures == 0 && status.pending == 0);
+    std::puts("CONCURRENT_ADMISSION: mixed producers persist contiguous order PASS");
+}
+
 void WritesTypedJsonAndRecovers() {
     TemporaryDirectory directory;
     auto root = directory.path / "logs";
@@ -904,6 +944,10 @@ void SdpRoundsPersistOrderedTypedEvidence() {
 int main(int argc, char** argv) {
     if (argc == 4 && std::string_view(argv[1]) == "--quota-child")
         return diagnostic_sink_checks::ChildMain(argv[2], argv[3]);
+    if (argc == 2 && std::string_view(argv[1]) == "--concurrent-admission-order-only") {
+        ConcurrentAdmissionPersistsSequenceOrder();
+        return 0;
+    }
     {
         TemporaryDirectory directory;
         diagnostic_detach_checks::BlockedMirror(directory.path / "mirror");
@@ -913,6 +957,7 @@ int main(int argc, char** argv) {
     SettingsEventsPersistZeroDurationsAndDeviceCounts();
     TimelineProjectionAndPersistenceAgree();
     BoundedConcurrentAdmission();
+    ConcurrentAdmissionPersistsSequenceOrder();
     WritesTypedJsonAndRecovers();
     BatchWritesPreserveOrderAndCommitBoundary();
     RotatesAndReclaimsOwnedSegments();

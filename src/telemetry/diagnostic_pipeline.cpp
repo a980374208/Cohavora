@@ -228,9 +228,12 @@ bool DiagnosticPipeline::WriterContext::TryEmit(Event event) noexcept {
             CountSuppressed();
             return false;
         }
-        event = Stamp(event);
         std::lock_guard lock(mutex_);
         if (!status_.accepting) return false;
+        // Allocate the sequence under the admission lock: a producer must
+        // not reserve an earlier number and enqueue after another producer.
+        // Pop merges the two FIFO queues using this same admission order.
+        event = Stamp(event);
         if (event.window_sample) {
             constexpr std::uint64_t kWindowBudget = 20 * 1024 * 1024;
             const auto used = diagnostic_window_bytes_.load(std::memory_order_relaxed);
