@@ -526,6 +526,11 @@ function Start-Product {
         start_ticks=$script:child.StartTime.ToUniversalTime().Ticks} | ConvertTo-Json |
         Set-Content (Join-Path $OutputDirectory 'product-identity.json.tmp') -Encoding UTF8
     Move-Item (Join-Path $OutputDirectory 'product-identity.json.tmp') (Join-Path $OutputDirectory 'product-identity.json')
+    if($env:LIVEKIT_UIA_GPU_ETW_DIRECTORY){
+        $binding=Join-Path $env:LIVEKIT_UIA_GPU_ETW_DIRECTORY 'target-pid.txt'
+        [IO.File]::WriteAllText(($binding+'.tmp'),[string]$script:child.Id)
+        Move-Item -LiteralPath ($binding+'.tmp') -Destination $binding
+    }
     if ($HeapDiagnostic) { Wait-HeapDiagnosticHistory }
     $null = Wait-For 'product login or main window' {
             (Find-Node 'mainJoinMeeting' ([Windows.Automation.ControlType]::Button) -Optional) -or

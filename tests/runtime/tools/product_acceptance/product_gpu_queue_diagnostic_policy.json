@@ -1,0 +1,22 @@
+{
+  "schema": 2,
+  "scope": "process_all_enumerated_hardware_adapters_all_scheduler_nodes",
+  "status": "PROVISIONAL_USER_REQUESTED_DIAGNOSTIC",
+  "diagnostic_only": true,
+  "release_eligible": false,
+  "maximum_observed_pending_packets_per_scheduler_node": 64,
+  "maximum_room_release_pending_packets_per_scheduler_node": 4,
+  "maximum_dma_faults_delta": 0,
+  "etw_scope": "process_owned_device_context_scheduler_packet_lifecycle",
+  "etw_maximum_pending_packets_per_scheduler_node": 64,
+  "etw_maximum_room_release_pending_packets_per_scheduler_node": 4,
+  "notes": [
+    "Approximate values chosen before this diagnostic at the user's request; not formal release thresholds.",
+    "Pending means the sampled sum of QueuePacket submitted minus completed on one scheduler node, including all eight packet types.",
+    "Each enumerated adapter is reported separately; possible aliases are never summed.",
+    "The observer does not measure a hardware queue depth or unsampled peak. Missing, reset, wrapped or ambiguous counters fail closed.",
+    "Room-release observation starts five seconds after observed leave and ends at requested export.",
+    "Continuous lossless ETW now supplies the settled-release window; active WDDM all-node samples remain required.",
+    "ETW packet limits are approximate diagnostic values too; scheduler packets are not hardware queue depth."
+  ]
+}

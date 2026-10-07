@@ -211,7 +211,8 @@ int main(int argc, char *argv[]) {
 			telemetryHistory, diagnostics, std::filesystem::path(telemetryRoot.toStdWString()),
 			std::filesystem::path(diagnosticRoot.toStdWString()),
 			[&shutdownService] { return shutdownService.pending(); },
-			[pilotParticipant] { return pilotParticipant->load(std::memory_order_acquire); });
+			[pilotParticipant] { return pilotParticipant->load(std::memory_order_acquire); },
+			qEnvironmentVariable("LIVEKIT_UIA_GPU_BUDGET_PROBE") == QStringLiteral("1"));
 	}
 	app.setWindowIcon(QIcon(QStringLiteral(":/meeting-ui/icons/cohavora.svg")));
 	MeetingUI::AppTranslation::install(app,

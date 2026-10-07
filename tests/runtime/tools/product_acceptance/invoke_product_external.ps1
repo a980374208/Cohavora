@@ -18,6 +18,28 @@ param(
     [switch]$IsolateUiaCycles
 )
 $ErrorActionPreference='Stop'
+function Read-GpuTraceHeartbeat([string]$Path) {
+    # The collector atomically replaces this file. Allow its DELETE handle as
+    # well as readers/writers, and retry only transient sharing/lock conflicts.
+    $deadline=[Diagnostics.Stopwatch]::StartNew()
+    while($true) {
+        $stream=$null;$reader=$null
+        try {
+            $share=[IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete
+            $stream=[IO.FileStream]::new($Path,[IO.FileMode]::Open,[IO.FileAccess]::Read,$share)
+            $reader=[IO.StreamReader]::new($stream,[Text.UTF8Encoding]::new($false),$true)
+            return ($reader.ReadToEnd() | ConvertFrom-Json)
+        } catch {
+            $cause=$_.Exception.GetBaseException()
+            $code=$cause.HResult -band 65535
+            if($cause -isnot [IO.IOException] -or $code -notin @(32,33) -or
+                $deadline.ElapsedMilliseconds -ge 500) {throw}
+        } finally {
+            if($reader){$reader.Dispose()}elseif($stream){$stream.Dispose()}
+        }
+        Start-Sleep -Milliseconds 10
+    }
+}
 $workspace=(Resolve-Path (Join-Path $PSScriptRoot '../../../..')).Path
 Set-Location $workspace
 $Executable=(Resolve-Path -LiteralPath $Executable).Path

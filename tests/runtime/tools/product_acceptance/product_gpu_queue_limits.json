@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "status": "FROZEN_B14_TEST",
+  "diagnostic_only": false,
+  "scope": "process_all_enumerated_hardware_adapters_all_scheduler_nodes",
+  "etw_scope": "process_owned_device_context_scheduler_packet_lifecycle",
+  "maximum_observed_pending_packets_per_scheduler_node": 64,
+  "maximum_room_release_pending_packets_per_scheduler_node": 4,
+  "maximum_dma_faults_delta": 0,
+  "etw_maximum_pending_packets_per_scheduler_node": 64,
+  "etw_maximum_room_release_pending_packets_per_scheduler_node": 4,
+  "maximum_room_release_contexts": 0,
+  "maximum_room_release_devices": 0,
+  "etw_maximum_bytes": 34359738368,
+  "minimum_free_evidence_disk_bytes": 77309411328,
+  "evidence_disk_reserve_bytes": 8589934592,
+  "basis": "User authorized approximate GPU test values and unattended B14 continuation. Freeze these values before three new ordinary PILOTs; prior diagnostic runs remain ineligible.",
+  "metric": "All active WDDM scheduler-node QueuePacket submitted-minus-completed samples plus continuous process-owned ETW queue submission/completion reconstruction. Adapter aliases are not summed.",
+  "release_window": "Observed leave plus five seconds through requested export; matched completions and context/device destroys, zero loss, no unavailable-to-zero substitution.",
+  "limitations": [
+    "This frozen B14 test condition is specific to the current desktop/driver/SFU/load fingerprints, not a universal product capacity specification.",
+    "Kernel scheduler packets are not hardware queue depth. Unknown/hardware-queue schemas, loss, parse errors, reset, timeout and abort fail closed.",
+    "32 GiB ETW budget is independent of the existing 32 GiB checkpoint archive; require both budgets plus 8 GiB free reserve before qualification/formal.",
+    "PCM 200 ms, ECS 3 Mbps, fixed media load and all prior resource/performance thresholds remain unchanged."
+  ]
+}

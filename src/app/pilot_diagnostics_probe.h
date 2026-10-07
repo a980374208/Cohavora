@@ -5,6 +5,8 @@
 #include "src/telemetry/telemetry_report.h"
 #include "src/telemetry/diagnostic_pipeline.h"
 #include "src/media/desktop_capture.h"
+#include "tests/runtime/probes/product_gpu_budget_snapshot.h"
+#include "tests/runtime/probes/product_gpu_queue_snapshot.h"
 #include <nlohmann/json.hpp>
 #include <fstream>
 #include <functional>
@@ -23,7 +25,8 @@ public:
                           std::filesystem::path history_root,
                           std::filesystem::path diagnostic_root,
                           std::function<std::size_t()> cleanup_pending,
-                          std::function<std::shared_ptr<const std::string>()> participant_fingerprint)
+                          std::function<std::shared_ptr<const std::string>()> participant_fingerprint,
+                          bool collect_gpu_budget = false)
         : worker_([=](std::stop_token stop) {
           try {
             // The runner supplies a new, run-scoped destination.
@@ -34,6 +37,12 @@ public:
             std::uint64_t terminal_generation = 0;
             auto terminal_seen = std::chrono::steady_clock::time_point{};
             nlohmann::json released_heap;
+            std::unique_ptr<product_gpu_witness::BudgetSampler> gpu_budget;
+            std::unique_ptr<product_gpu_witness::QueueSampler> gpu_queue;
+            if (collect_gpu_budget) {
+                gpu_budget = std::make_unique<product_gpu_witness::BudgetSampler>();
+                gpu_queue = std::make_unique<product_gpu_witness::QueueSampler>();
+            }
             auto sample = [&] {
                 using Json = nlohmann::json;
                 const auto h = history->Status();
@@ -78,6 +87,8 @@ public:
                         {"failures", capture.failures}, {"failure_reason", capture.failure_reason},
                         {"binding_failures", capture.binding_failures},
                         {"binding_failure_reason", capture.binding_failure_reason}}}};
+                if (gpu_budget) row["gpu_budget"] = Json::parse(gpu_budget->SampleJson());
+                if (gpu_queue) row["gpu_queue"] = Json::parse(gpu_queue->SampleJson());
                 const auto records = history->CurrentRecords();
                 if (!records.empty()) {
                     const auto& s = records.back()->snapshot;
