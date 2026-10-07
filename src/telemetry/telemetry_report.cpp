@@ -1808,6 +1808,8 @@ std::string SerializeSafeTelemetryCheckpointRecord(
         AppendJsonValue(output, metric.value);
         output += "}\n";
     }
+    // Retained checkpoints are charged by capacity; release unused reserve.
+    output.shrink_to_fit();
     return output;
 }
 
