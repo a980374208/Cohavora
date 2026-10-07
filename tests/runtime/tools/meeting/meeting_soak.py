@@ -26,6 +26,8 @@ from datetime import datetime, timezone
 SCHEMA = 1
 MIB = 1024 * 1024
 ROOT = Path(__file__).resolve().parents[4]
+BUILD_CONFIGURATION = "RelWithDebInfo"
+SCOPE_FIELDS = ("diagnostic_only", "release_eligible", "qualification_credit")
 ACTIONS = ("grid9", "grid4", "next_page", "grid16", "pin", "unpin",
            "whiteboard_on", "whiteboard_off", "share_start", "share_stop",
            "soft_reconnect", "full_reconnect")
@@ -77,11 +79,33 @@ def read_json(path: Path):
     return json.loads(path.read_text(encoding="utf-8-sig"))
 
 
-def build_plan(steady_seconds=1800, mixed_seconds=7200):
-    if steady_seconds < 1800 or mixed_seconds < 7200:
-        raise ValueError("formal_duration_too_short")
-    if not all(math.isfinite(x) for x in (steady_seconds, mixed_seconds)):
+def finite_number(value, minimum=0, *, positive=False):
+    return (type(value) in (int, float) and abs(value) <= 2**53 and math.isfinite(value) and
+            (value > minimum if positive else value >= minimum))
+
+
+def evidence_scope(diagnostic=False, self_test=False):
+    if type(diagnostic) is not bool or type(self_test) is not bool:
+        raise ValueError("invalid_diagnostic_flag")
+    # This standalone supervisor never awards B14 qualification or release credit.
+    return {"diagnostic_only": diagnostic or self_test,
+            "release_eligible": False, "qualification_credit": 0}
+
+
+def validate_memory_limits(max_growth_mib, max_slope_mib_per_hour):
+    if (max_growth_mib is None) != (max_slope_mib_per_hour is None):
+        raise ValueError("both_memory_limits_required")
+    if any(value is not None and not finite_number(value)
+           for value in (max_growth_mib, max_slope_mib_per_hour)):
+        raise ValueError("invalid_memory_limit")
+
+
+def build_plan(steady_seconds=1800, mixed_seconds=7200, *, diagnostic=False):
+    evidence_scope(diagnostic)
+    if not finite_number(steady_seconds, positive=True) or not finite_number(mixed_seconds):
         raise ValueError("invalid_duration")
+    if not diagnostic and (steady_seconds != 1800 or mixed_seconds < 7200):
+        raise ValueError("formal_duration_too_short")
     plan = [{"at_s": 0, "action": "grid9", "phase": "steady", "cycle": 0}]
     # 10 minute cycles. Every cycle returns to grid9 for comparable memory samples.
     offset = 0
@@ -91,6 +115,57 @@ def build_plan(steady_seconds=1800, mixed_seconds=7200):
                      "phase": "mixed", "cycle": offset // 600 + 1})
         offset += 50
     return plan
+
+
+def validate_prepared_profile(profile, plan):
+    if not isinstance(profile, dict) or type(profile.get("schema")) is not int or profile["schema"] != SCHEMA:
+        raise ValueError("invalid_profile_schema")
+    mode = profile.get("mode", "formal")
+    diagnostic = profile.get("diagnostic_only", False)
+    scope = evidence_scope(diagnostic)
+    if type(mode) is not str or mode not in ("formal", "diagnostic") or diagnostic != (mode == "diagnostic"):
+        raise ValueError("inconsistent_diagnostic_profile")
+    # Old formal profiles omit the scope fields. New flags are never truthy-string bypasses.
+    if "allow_short" in profile and (type(profile["allow_short"]) is not bool or profile["allow_short"] != diagnostic):
+        raise ValueError("invalid_diagnostic_flag")
+    if ("release_eligible" in profile and
+            (type(profile["release_eligible"]) is not bool or profile["release_eligible"])):
+        raise ValueError("invalid_release_credit")
+    if ("qualification_credit" in profile and
+            (type(profile["qualification_credit"]) is not int or profile["qualification_credit"] != 0)):
+        raise ValueError("invalid_release_credit")
+    remote_videos = profile.get("min_remote_videos")
+    if type(remote_videos) is not int or remote_videos < (1 if diagnostic else 17):
+        raise ValueError("invalid_remote_video_count")
+    if plan != build_plan(profile["steady_seconds"], profile["mixed_seconds"], diagnostic=diagnostic):
+        raise ValueError("invalid_prepared_plan")
+    warmup = profile.get("memory_warmup", 300)
+    if not finite_number(warmup) or (not diagnostic and warmup != 300):
+        raise ValueError("invalid_memory_warmup")
+    if profile.get("build_configuration", BUILD_CONFIGURATION) != BUILD_CONFIGURATION:
+        raise ValueError("invalid_build_configuration")
+    validate_memory_limits(profile["max_growth_mib"], profile["max_slope_mib_per_hour"])
+    if type(profile.get("executable")) is not str or not profile["executable"]:
+        raise ValueError("invalid_executable")
+    return scope
+
+
+def verify_runtime_binary(executable: Path):
+    verifier = ROOT / "tests/runtime/tools/diagnostics/verify_runtime_binary.ps1"
+    try:
+        verified = subprocess.run(
+            ["pwsh", "-NoProfile", "-File", str(verifier), "-Executable", str(executable),
+             "-ExpectedExecutableName", "test_participant_window_remediation.exe",
+             "-Configuration", BUILD_CONFIGURATION],
+            capture_output=True, text=True, timeout=30, check=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        identity = json.loads(verified.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        raise ValueError("runtime_binary_configuration_not_verified") from None
+    if (not isinstance(identity, dict) or identity.get("configuration") != BUILD_CONFIGURATION or
+            identity.get("binary_sha256") != sha256(executable)):
+        raise ValueError("runtime_binary_configuration_not_verified")
+    return identity
 
 
 def memory_trend(samples, warmup_seconds=300):
@@ -113,6 +188,8 @@ def memory_trend(samples, warmup_seconds=300):
     # Median pair slopes tolerate isolated working/allocator spikes better than endpoints.
     slopes = [(b[1] - a[1]) / (b[0] - a[0]) * 3600
               for i, a in enumerate(points) for b in points[i + 1:] if b[0] > a[0]]
+    if not slopes:
+        return result
     edge = max(1, len(points) // 5)
     result.update(status="VALID", slope_mib_per_hour=statistics.median(slopes),
                   growth_mib=statistics.median(p[1] for p in points[-edge:]) -
@@ -194,6 +271,7 @@ def sha256(path):
 
 def source_fingerprint():
     paths = ("tests/runtime/tools/meeting/meeting_soak.py", "tests/runtime/probes/meeting_soak_adapter.h",
+             "tests/runtime/tools/diagnostics/verify_runtime_binary.ps1",
              "tests/meeting/test_participant_snapshot_remediation.cpp",
              "src/core/meeting_coordinator.cpp", "src/core/meeting_session_runtime.h",
              "src/core/video_demand_policy.cpp", "src/core/room.cpp",
@@ -222,6 +300,9 @@ def archive_evidence(output, summary):
              for name in names if (output / name).is_file()]
     manifest = {"schema": SCHEMA, "run_id": summary["run_id"], "created_utc": utc_now(),
                 "status": summary["status"], "files": files}
+    manifest.update({key: summary[key] for key in SCOPE_FIELDS if key in summary})
+    if "l3_status" in summary:
+        manifest["l3_status"] = summary["l3_status"]
     atomic_json(output / "manifest.json", manifest)
     archive = output.with_suffix(".zip")
     with zipfile.ZipFile(archive, "x", compression=zipfile.ZIP_DEFLATED) as bundle:
@@ -270,40 +351,129 @@ def validate_status(value, run_id, pid):
     return safe
 
 
+def validate_run_inputs(command, plan, duration_seconds, *, diagnostic=False, self_test=False,
+                        heartbeat_timeout=10, runtime_timeout=15, command_timeout=40,
+                        sample_interval=1, startup_timeout=90, shutdown_timeout=30,
+                        min_remote_videos=17, memory_warmup=300,
+                        max_growth_mib=None, max_slope_mib_per_hour=None):
+    scope = evidence_scope(diagnostic, self_test)
+    if not isinstance(command, (list, tuple)) or not command or any(type(part) is not str or not part for part in command):
+        raise ValueError("invalid_command")
+    if not all(finite_number(value, positive=True) for value in (
+            duration_seconds, heartbeat_timeout, runtime_timeout, command_timeout,
+            sample_interval, startup_timeout, shutdown_timeout)):
+        raise ValueError("invalid_runtime_duration")
+    if type(min_remote_videos) is not int or min_remote_videos < (1 if scope["diagnostic_only"] else 17):
+        raise ValueError("invalid_remote_video_count")
+    if not finite_number(memory_warmup) or (not scope["diagnostic_only"] and memory_warmup != 300):
+        raise ValueError("invalid_memory_warmup")
+    validate_memory_limits(max_growth_mib, max_slope_mib_per_hour)
+    if not isinstance(plan, list) or not plan:
+        raise ValueError("invalid_run_plan")
+    previous = -1
+    for step in plan:
+        if (not isinstance(step, dict) or not finite_number(step.get("at_s")) or
+                not previous < step["at_s"] < duration_seconds or
+                step.get("phase") not in ("steady", "mixed") or step.get("action") not in ACTIONS or
+                type(step.get("cycle")) is not int or step["cycle"] < 0):
+            raise ValueError("invalid_run_plan")
+        previous = step["at_s"]
+    if plan[0]["at_s"] != 0:
+        raise ValueError("invalid_run_plan")
+    if not self_test:
+        steady_seconds = next((step["at_s"] for step in plan if step["phase"] == "mixed"), duration_seconds)
+        if plan != build_plan(steady_seconds, duration_seconds - steady_seconds, diagnostic=diagnostic):
+            raise ValueError("canonical_plan_required")
+    return scope
+
+
+def finalize_result(summary, samples, plan, *, sample_interval=1, memory_warmup=300,
+                    max_growth_mib=None, max_slope_mib_per_hour=None,
+                    diagnostic=False, self_test=False):
+    scope = evidence_scope(diagnostic, self_test)
+    summary.update(scope)
+    steady = [s for s in samples if s["phase"] == "steady" and s["settled"]]
+    # Compare the same layout once each mixed cycle; not 4/16-tile allocation steps.
+    mixed = [s for s in samples if s["phase"] == "mixed" and s["action"] == "grid9" and s["settled"]]
+    mixed_planned = any(step["phase"] == "mixed" for step in plan)
+    summary["memory"] = {"steady": memory_trend(steady, memory_warmup),
+                         "mixed_grid9": memory_trend(mixed, memory_warmup) if mixed_planned else
+                             {"status": "SKIPPED", "reason": "not_in_plan"},
+                         "private_peak_mib": max((s["private_bytes"] / MIB for s in samples
+                             if s.get("private_bytes") is not None), default=None),
+                         "gate": "NOT_CONFIGURED"}
+    phases = [("steady", steady)]
+    if mixed_planned:
+        phases.append(("mixed_grid9", mixed))
+    for name, phase_samples in phases:
+        expected = [s for s in phase_samples if s["elapsed_s"] >= memory_warmup]
+        valid = [s for s in expected if s["private_bytes"] is not None]
+        coverage = len(valid) / len(expected) if expected else 0
+        tail_gap = expected[-1]["elapsed_s"] - valid[-1]["elapsed_s"] if valid else None
+        summary["memory"][name].update(sample_coverage=coverage, tail_gap_seconds=tail_gap)
+        if coverage < .95 or tail_gap is None or tail_gap > max(sample_interval * 3, 5):
+            summary["memory"][name]["status"] = "INSUFFICIENT_DATA"
+    summary["schedule_status"] = summary["status"]
+    if max_growth_mib is not None and max_slope_mib_per_hour is not None:
+        trends = [summary["memory"][name] for name, _ in phases]
+        if all(t["status"] == "VALID" for t in trends):
+            exceeded = any(t["growth_mib"] > max_growth_mib or
+                           t["slope_mib_per_hour"] > max_slope_mib_per_hour for t in trends)
+            summary["memory"]["gate"] = "FAIL" if exceeded else "PASS"
+            if exceeded and summary["status"] == "PASS":
+                summary.update(status="FAIL", reason="memory_growth_exceeded")
+        else:
+            summary["memory"]["gate"] = "INSUFFICIENT_DATA"
+    if not scope["diagnostic_only"] and summary["status"] == "PASS" and summary["memory"]["gate"] != "PASS":
+        summary.update(status="INCONCLUSIVE", reason="memory_acceptance_not_established")
+    summary["l3_status"] = ("NOT_RUN" if scope["diagnostic_only"] else
+        summary["status"] if summary["status"] != "PASS" else
+        "PASS" if summary["memory"]["gate"] == "PASS" else "INCONCLUSIVE")
+    return summary
+
+
 def run_session(output: Path, command: list[str], plan: list[dict], duration_seconds: float,
                 heartbeat_timeout=10, runtime_timeout=15, command_timeout=40,
                 sample_interval=1, startup_timeout=90, shutdown_timeout=30,
                 min_remote_videos=17, memory_warmup=300,
-                max_growth_mib=None, max_slope_mib_per_hour=None, self_test=False):
+                max_growth_mib=None, max_slope_mib_per_hour=None, self_test=False,
+                diagnostic=False):
+    scope = validate_run_inputs(command, plan, duration_seconds,
+        diagnostic=diagnostic, self_test=self_test, heartbeat_timeout=heartbeat_timeout,
+        runtime_timeout=runtime_timeout, command_timeout=command_timeout,
+        sample_interval=sample_interval, startup_timeout=startup_timeout,
+        shutdown_timeout=shutdown_timeout, min_remote_videos=min_remote_videos,
+        memory_warmup=memory_warmup, max_growth_mib=max_growth_mib,
+        max_slope_mib_per_hour=max_slope_mib_per_hour)
+    binary_identity = None if self_test else verify_runtime_binary(Path(command[0]).resolve())
     output = Path(output).resolve()
     output.mkdir(parents=True, exist_ok=True)
     if (output / "run.json").exists() or output.with_suffix(".zip").exists():
         raise ValueError("run_directory_already_used")
-    if not self_test:
-        # Library calls cannot bypass the CLI's minimum duration/canonical plan gate.
-        if duration_seconds < 9000 or plan != build_plan(1800, duration_seconds - 1800):
-            raise ValueError("formal_plan_required")
     run_id = uuid.uuid4().hex
     metadata = {"schema": SCHEMA, "run_id": run_id, "started_utc": utc_now(),
                 "self_test": self_test, "duration_seconds": duration_seconds,
                 "platform": platform.system(), "os_release": platform.release(),
                 "architecture": platform.machine(), "logical_processors": os.cpu_count(),
                 "adapter_sha256": sha256(Path(command[0])),
-                "source_inputs": source_fingerprint()}
+                "source_inputs": source_fingerprint(), "binary_identity": binary_identity,
+                "build_configuration": None if self_test else BUILD_CONFIGURATION, **scope}
     atomic_json(output / "run.json", metadata)
     atomic_json(output / "plan.json", plan)
-    atomic_json(output / "manifest.json", {"schema": SCHEMA, "run_id": run_id, "status": "RUNNING"})
+    atomic_json(output / "manifest.json", {"schema": SCHEMA, "run_id": run_id, "status": "RUNNING",
+        "l3_status": "NOT_RUN" if scope["diagnostic_only"] else "INCONCLUSIVE", **scope})
     atomic_json(output / "profile.json", {"min_remote_videos": min_remote_videos,
         "heartbeat_timeout": heartbeat_timeout, "runtime_timeout": runtime_timeout,
         "command_timeout": command_timeout, "sample_interval": sample_interval,
         "startup_timeout": startup_timeout, "shutdown_timeout": shutdown_timeout,
         "memory_warmup": memory_warmup, "max_growth_mib": max_growth_mib,
-        "max_slope_mib_per_hour": max_slope_mib_per_hour})
+        "max_slope_mib_per_hour": max_slope_mib_per_hour,
+        "build_configuration": None if self_test else BUILD_CONFIGURATION, **scope})
     summary = {"schema": SCHEMA, "run_id": run_id, "status": "INCONCLUSIVE",
-               "reason": "supervisor_interrupted", "l3_status": "NOT_RUN" if self_test else "INCONCLUSIVE",
+               "reason": "supervisor_interrupted", "l3_status": "NOT_RUN" if scope["diagnostic_only"] else "INCONCLUSIVE",
                "scheduled_commands": len(plan), "completed_commands": 0,
                "duration_seconds": duration_seconds, "measured_seconds": 0,
-               "exit_code": None, "forced_termination": False, "memory": {}}
+               "exit_code": None, "forced_termination": False, "memory": {}, **scope}
     samples, process, metrics = [], None, None
     start, measured_start = time.monotonic(), None
     pending, active = None, {"phase": "startup", "cycle": 0, "action": "connect"}
@@ -521,38 +691,10 @@ def run_session(output: Path, command: list[str], plan: list[dict], duration_sec
                     summary.update(status="INCONCLUSIVE", reason="evidence_write_failed")
             summary["finished_utc"] = utc_now()
             summary["wall_seconds"] = round(time.monotonic() - start, 3)
-    steady = [s for s in samples if s["phase"] == "steady" and s["settled"]]
-    # Compare the same layout once each mixed cycle; not 4/16-tile allocation steps.
-    mixed = [s for s in samples if s["phase"] == "mixed" and s["action"] == "grid9" and s["settled"]]
-    summary["memory"] = {"steady": memory_trend(steady, memory_warmup),
-                         "mixed_grid9": memory_trend(mixed, memory_warmup),
-                         "private_peak_mib": max((s["private_bytes"] / MIB for s in samples
-                             if s.get("private_bytes") is not None), default=None),
-                         "gate": "NOT_CONFIGURED"}
-    for name, phase_samples in (("steady", steady), ("mixed_grid9", mixed)):
-        expected = [s for s in phase_samples if s["elapsed_s"] >= memory_warmup]
-        valid = [s for s in expected if s["private_bytes"] is not None]
-        coverage = len(valid) / len(expected) if expected else 0
-        tail_gap = expected[-1]["elapsed_s"] - valid[-1]["elapsed_s"] if valid else None
-        summary["memory"][name].update(sample_coverage=coverage, tail_gap_seconds=tail_gap)
-        if coverage < .95 or tail_gap is None or tail_gap > max(sample_interval * 3, 5):
-            summary["memory"][name]["status"] = "INSUFFICIENT_DATA"
-    summary["schedule_status"] = summary["status"]
-    if max_growth_mib is not None and max_slope_mib_per_hour is not None:
-        trends = [summary["memory"][name] for name in ("steady", "mixed_grid9")]
-        if all(t["status"] == "VALID" for t in trends):
-            exceeded = any(t["growth_mib"] > max_growth_mib or
-                           t["slope_mib_per_hour"] > max_slope_mib_per_hour for t in trends)
-            summary["memory"]["gate"] = "FAIL" if exceeded else "PASS"
-            if exceeded and summary["status"] == "PASS":
-                summary.update(status="FAIL", reason="memory_growth_exceeded")
-        else:
-            summary["memory"]["gate"] = "INSUFFICIENT_DATA"
-    if not self_test and summary["status"] == "PASS" and summary["memory"]["gate"] != "PASS":
-        summary.update(status="INCONCLUSIVE", reason="memory_acceptance_not_established")
-    summary["l3_status"] = ("NOT_RUN" if self_test else
-        summary["status"] if summary["status"] != "PASS" else
-        "PASS" if summary["memory"]["gate"] == "PASS" else "INCONCLUSIVE")
+    finalize_result(summary, samples, plan, sample_interval=sample_interval,
+        memory_warmup=memory_warmup, max_growth_mib=max_growth_mib,
+        max_slope_mib_per_hour=max_slope_mib_per_hour,
+        diagnostic=diagnostic, self_test=self_test)
     summary["limitations"] = ["audio_continuity_not_gated", "gpu_memory_not_measured",
                               "shared_media_delivery_not_gated",
                               "actual_is_available_bindings_not_active_rtp_or_decoder_count",
@@ -561,12 +703,13 @@ def run_session(output: Path, command: list[str], plan: list[dict], duration_sec
         archive_evidence(output, summary)
     except OSError:
         summary.update(status="INCONCLUSIVE", reason="evidence_archive_failed",
-                       l3_status="NOT_RUN" if self_test else "INCONCLUSIVE")
+                       l3_status="NOT_RUN" if scope["diagnostic_only"] else "INCONCLUSIVE")
         # Preserve the already written CSV/events even when ZIP/disk operations fail.
         try:
             atomic_json(output / "summary.json", summary)
             atomic_json(output / "manifest.json", {"schema": SCHEMA, "run_id": run_id,
-                                                    "status": "INCONCLUSIVE", "reason": "evidence_archive_failed"})
+                "status": "INCONCLUSIVE", "reason": "evidence_archive_failed",
+                "l3_status": summary["l3_status"], **scope})
         except OSError:
             pass
     return summary
@@ -574,20 +717,27 @@ def run_session(output: Path, command: list[str], plan: list[dict], duration_sec
 
 def prepare(args):
     output = args.output.resolve()
-    output.mkdir(parents=True, exist_ok=False)
-    mixed = args.mixed_minutes * 60
-    plan = build_plan(1800, mixed)
-    profile = {"schema": SCHEMA, "steady_seconds": 1800, "mixed_seconds": mixed,
+    steady = args.steady_minutes * 60 if args.steady_minutes is not None else args.steady_seconds
+    mixed = args.mixed_seconds if args.mixed_seconds is not None else args.mixed_minutes * 60
+    plan = build_plan(steady, mixed, diagnostic=args.diagnostic)
+    scope = evidence_scope(args.diagnostic)
+    profile = {"schema": SCHEMA, "steady_seconds": steady, "mixed_seconds": mixed,
+               "mode": "diagnostic" if args.diagnostic else "formal", **scope,
                "executable": str(args.executable.resolve()), "min_remote_videos": args.min_remote_videos,
+               "build_configuration": args.configuration, "memory_warmup": args.memory_warmup_seconds,
                "max_growth_mib": args.max_growth_mib, "max_slope_mib_per_hour": args.max_slope_mib_per_hour}
+    validate_prepared_profile(profile, plan)
+    output.mkdir(parents=True, exist_ok=False)
     atomic_json(output / "profile.json", profile)
     atomic_json(output / "plan.json", plan)
     atomic_json(output / "preparation.json", {"schema": SCHEMA, "status": "PREPARED",
         "l3_status": "NOT_RUN", "created_utc": utc_now(), "scheduled_commands": len(plan),
-        "duration_seconds": 1800 + mixed, "required_environment_names": ["LIVEKIT_URL", "LIVEKIT_SOAK_TOKEN"],
+        "duration_seconds": steady + mixed, "required_environment_names": ["LIVEKIT_URL", "LIVEKIT_SOAK_TOKEN"],
+        "build_configuration": BUILD_CONFIGURATION, **scope,
         "requires": ["unlocked_interactive_windows_desktop", "continuous_remote_publishers",
                      "no_sleep_or_reboot", "user_reserved_test_window"]})
-    print("PREPARED; L3 NOT_RUN; duration_seconds=" + str(1800 + mixed))
+    print("PREPARED; L3 NOT_RUN; diagnostic_only=" + str(args.diagnostic).lower() +
+          "; release_eligible=false; qualification_credit=0; duration_seconds=" + str(steady + mixed))
     return 0
 
 
@@ -597,8 +747,17 @@ def main(argv=None):
     prep = commands.add_parser("prepare", help="Write plan/profile without starting any process or meeting")
     prep.add_argument("--output", type=Path, required=True)
     prep.add_argument("--executable", type=Path,
-        default=ROOT / "out/build/windows-vs2026-dev/Debug/test_participant_window_remediation.exe")
-    prep.add_argument("--mixed-minutes", type=int, default=120)
+        default=ROOT / "out/build/windows-vs2026-dev/RelWithDebInfo/test_participant_window_remediation.exe")
+    steady = prep.add_mutually_exclusive_group()
+    steady.add_argument("--steady-seconds", type=int, default=1800)
+    steady.add_argument("--steady-minutes", type=int)
+    mixed = prep.add_mutually_exclusive_group()
+    mixed.add_argument("--mixed-minutes", type=int, default=120)
+    mixed.add_argument("--mixed-seconds", type=int)
+    prep.add_argument("--diagnostic", "--smoke", "--allow-short", dest="diagnostic", action="store_true",
+        help="Run a diagnostic plan without L3, qualification, or release credit")
+    prep.add_argument("--configuration", choices=(BUILD_CONFIGURATION,), default=BUILD_CONFIGURATION)
+    prep.add_argument("--memory-warmup-seconds", type=float, default=300)
     prep.add_argument("--min-remote-videos", type=int, default=17)
     prep.add_argument("--max-growth-mib", type=float)
     prep.add_argument("--max-slope-mib-per-hour", type=float)
@@ -607,39 +766,27 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.mode == "prepare":
-            if args.mixed_minutes < 120 or args.min_remote_videos < 17:
-                raise ValueError("formal_profile_too_small")
-            if (args.max_growth_mib is None) != (args.max_slope_mib_per_hour is None):
-                raise ValueError("both_memory_limits_required")
-            for value in (args.max_growth_mib, args.max_slope_mib_per_hour):
-                if value is not None and (not math.isfinite(value) or value < 0):
-                    raise ValueError("invalid_memory_limit")
             return prepare(args)
         prepared = args.prepared.resolve()
         profile, plan = read_json(prepared / "profile.json"), read_json(prepared / "plan.json")
-        if (profile["schema"] != SCHEMA or profile["steady_seconds"] != 1800 or
-                profile["min_remote_videos"] < 17 or
-                plan != build_plan(profile["steady_seconds"], profile["mixed_seconds"])):
-            raise ValueError("invalid_formal_profile")
-        limits = (profile["max_growth_mib"], profile["max_slope_mib_per_hour"])
-        if (limits[0] is None) != (limits[1] is None) or any(
-                value is not None and (type(value) not in (float, int) or
-                not math.isfinite(value) or value < 0) for value in limits):
-            raise ValueError("invalid_memory_limit")
+        scope = validate_prepared_profile(profile, plan)
         run_dir = prepared / "runs" / (datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:8])
         executable = Path(profile["executable"])
         if not executable.is_file() or any(not os.environ.get(name) for name in ("LIVEKIT_URL", "LIVEKIT_SOAK_TOKEN")):
             run_dir.mkdir(parents=True)
             summary = {"schema": SCHEMA, "run_id": run_dir.name, "status": "NOT_RUN", "l3_status": "NOT_RUN",
-                       "reason": "missing_executable_or_service_environment", "created_utc": utc_now()}
+                       "reason": "missing_executable_or_service_environment", "created_utc": utc_now(), **scope}
             archive_evidence(run_dir, summary)
             print("NOT_RUN: missing executable or service environment; evidence=" + str(run_dir))
             return 2
         result = run_session(run_dir, [str(executable), "--meeting-soak", "--soak-directory", str(run_dir)],
-            plan, 1800 + profile["mixed_seconds"], min_remote_videos=profile["min_remote_videos"],
-            max_growth_mib=profile["max_growth_mib"], max_slope_mib_per_hour=profile["max_slope_mib_per_hour"])
-        print(result["status"] + ": " + result["reason"] + "; L3=" + result["l3_status"] + "; evidence=" + str(run_dir))
-        return 0 if result["l3_status"] == "PASS" else 1 if result["status"] == "FAIL" else 2
+            plan, profile["steady_seconds"] + profile["mixed_seconds"], min_remote_videos=profile["min_remote_videos"],
+            max_growth_mib=profile["max_growth_mib"], max_slope_mib_per_hour=profile["max_slope_mib_per_hour"],
+            memory_warmup=profile.get("memory_warmup", 300), diagnostic=scope["diagnostic_only"])
+        print(result["status"] + ": " + result["reason"] + "; L3=" + result["l3_status"] +
+              "; diagnostic_only=" + str(scope["diagnostic_only"]).lower() +
+              "; release_eligible=false; qualification_credit=0; evidence=" + str(run_dir))
+        return 0 if result["l3_status"] == "PASS" or (scope["diagnostic_only"] and result["status"] == "PASS") else 1 if result["status"] == "FAIL" else 2
     except (ValueError, KeyError, TypeError, OSError):
         print("NOT_RUN: invalid preparation or inaccessible path", file=sys.stderr)
         return 2

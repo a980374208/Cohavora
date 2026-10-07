@@ -13,6 +13,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 import zipfile
 
 
@@ -49,6 +50,124 @@ def process_alive(pid: int) -> bool:
 
 
 class PlanTests(unittest.TestCase):
+    @staticmethod
+    def profile(*, diagnostic=False, steady=1800, mixed=7200):
+        return {"schema": soak.SCHEMA, "steady_seconds": steady, "mixed_seconds": mixed,
+                "mode": "diagnostic" if diagnostic else "formal", **soak.evidence_scope(diagnostic),
+                "executable": sys.executable, "min_remote_videos": 1 if diagnostic else 17,
+                "max_growth_mib": None, "max_slope_mib_per_hour": None}
+
+    def test_only_explicit_diagnostic_allows_short_or_single_phase_plans(self):
+        for steady, mixed in ((10, 0), (30, 60), (28800, 0), (1800, 0), (1801, 7200)):
+            with self.subTest(steady=steady, mixed=mixed):
+                with self.assertRaises(ValueError):
+                    soak.build_plan(steady, mixed)
+                plan = soak.build_plan(steady, mixed, diagnostic=True)
+                self.assertEqual(plan[0]["action"], "grid9")
+                self.assertEqual(any(step["phase"] == "mixed" for step in plan), mixed > 0)
+        for value in (True, "10", float("nan"), float("inf"), -1, 0):
+            with self.subTest(steady=value), self.assertRaises(ValueError):
+                soak.build_plan(value, 0, diagnostic=True)
+        for value in (True, "0", float("nan"), float("inf"), -1):
+            with self.subTest(mixed=value), self.assertRaises(ValueError):
+                soak.build_plan(10, value, diagnostic=True)
+
+    def test_scope_flags_and_credit_have_strict_types(self):
+        plan = soak.build_plan()
+        for field, values in (("diagnostic_only", ("false", 0, 1, None)),
+                              ("allow_short", ("false", 0, 1, True)),
+                              ("release_eligible", ("false", 0, True)),
+                              ("qualification_credit", (False, "0", 1))):
+            for value in values:
+                profile = self.profile()
+                profile[field] = value
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    soak.validate_prepared_profile(profile, plan)
+
+    def test_legacy_formal_profile_remains_valid(self):
+        profile = self.profile()
+        for name in ("mode", *soak.SCOPE_FIELDS):
+            profile.pop(name)
+        self.assertEqual(soak.validate_prepared_profile(profile, soak.build_plan()),
+                         soak.evidence_scope(False))
+
+    def test_short_diagnostic_cannot_be_relabelled_formal(self):
+        plan = soak.build_plan(10, 0, diagnostic=True)
+        original = self.profile(diagnostic=True, steady=10, mixed=0)
+        for change in ({"diagnostic_only": False}, {"mode": "formal"},
+                       {"mode": "formal", "diagnostic_only": False}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                soak.validate_prepared_profile({**original, **change}, plan)
+        stripped = {key: value for key, value in original.items() if key not in ("mode", *soak.SCOPE_FIELDS)}
+        with self.assertRaises(ValueError):
+            soak.validate_prepared_profile(stripped, plan)
+
+    def test_prepared_numeric_fields_do_not_accept_bool_or_nonfinite_values(self):
+        plan = soak.build_plan()
+        for field, values in (("steady_seconds", (True, "1800", float("inf"))),
+                              ("mixed_seconds", (False, "7200", float("nan"))),
+                              ("min_remote_videos", (True, "17", 16)),
+                              ("memory_warmup", (False, "300", 0)),
+                              ("build_configuration", ("Debug", True))):
+            for value in values:
+                with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                    soak.validate_prepared_profile({**self.profile(), field: value}, plan)
+
+    def test_cli_diagnostic_aliases_emit_scope_and_relwithdebinfo_without_fallback(self):
+        with tempfile.TemporaryDirectory(prefix="soak-diagnostic-plan-") as directory:
+            for index, flag in enumerate(("--diagnostic", "--smoke", "--allow-short")):
+                output = Path(directory) / str(index)
+                self.assertEqual(soak.main(["prepare", "--output", str(output), flag,
+                    "--steady-seconds", "20", "--mixed-minutes", "0", "--min-remote-videos", "1"]), 0)
+                profile = soak.read_json(output / "profile.json")
+                self.assertEqual(profile["mode"], "diagnostic")
+                self.assertEqual(Path(profile["executable"]).parent.name, "RelWithDebInfo")
+                self.assertEqual(profile["build_configuration"], "RelWithDebInfo")
+                for name in ("profile.json", "preparation.json"):
+                    evidence = soak.read_json(output / name)
+                    for key, value in soak.evidence_scope(True).items():
+                        self.assertEqual(evidence[key], value)
+                self.assertEqual(soak.read_json(output / "preparation.json")["l3_status"], "NOT_RUN")
+
+    def test_library_invalid_parameters_cannot_create_output_or_start_process(self):
+        with tempfile.TemporaryDirectory(prefix="soak-invalid-library-") as directory:
+            output = Path(directory) / "run"
+            defaults = dict(command=[sys.executable], plan=soak.build_plan(10, 0, diagnostic=True),
+                            duration_seconds=10, diagnostic=True)
+            invalid = ({"diagnostic": "false"}, {"self_test": 1}, {"duration_seconds": True},
+                       {"duration_seconds": float("nan")}, {"heartbeat_timeout": 0},
+                       {"runtime_timeout": float("inf")}, {"sample_interval": -1},
+                       {"memory_warmup": True}, {"min_remote_videos": False},
+                       {"min_remote_videos": 0}, {"max_growth_mib": 1},
+                       {"max_growth_mib": True, "max_slope_mib_per_hour": 1},
+                       {"diagnostic": False}, {"command": []}, {"plan": []},
+                       {"plan": [{"at_s": False, "phase": "steady", "cycle": 0, "action": "grid9"}]})
+            with patch.object(soak.subprocess, "Popen") as spawn:
+                for change in invalid:
+                    with self.subTest(change=change), self.assertRaises(ValueError):
+                        soak.run_session(output, **{**defaults, **change})
+                    self.assertFalse(output.exists())
+                spawn.assert_not_called()
+
+    def test_runtime_binary_requires_existing_pe_configuration_verifier(self):
+        executable = Path(sys.executable)
+        identity = {"configuration": "RelWithDebInfo", "binary_sha256": soak.sha256(executable)}
+        response = subprocess.CompletedProcess([], 0, stdout=json.dumps(identity), stderr="")
+        with patch.object(soak.subprocess, "run", return_value=response) as verify:
+            self.assertEqual(soak.verify_runtime_binary(executable), identity)
+            command = verify.call_args.args[0]
+            self.assertIn("-Configuration", command)
+            self.assertEqual(command[-1], "RelWithDebInfo")
+            self.assertIn("test_participant_window_remediation.exe", command)
+            self.assertTrue(any(part.endswith("verify_runtime_binary.ps1") for part in command))
+        for bad in ({**identity, "configuration": "Debug"}, {**identity, "binary_sha256": "bad"}):
+            response.stdout = json.dumps(bad)
+            with patch.object(soak.subprocess, "run", return_value=response), self.assertRaises(ValueError):
+                soak.verify_runtime_binary(executable)
+        with patch.object(soak.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "pwsh")), \
+                self.assertRaises(ValueError):
+            soak.verify_runtime_binary(executable)
+
     def test_render_path_diagnostics_keep_numeric_evidence_safe(self) -> None:
         status = {
             "schema": soak.SCHEMA, "run_id": "diagnostic", "pid": 42,
@@ -205,28 +324,135 @@ class MemoryTrendTests(unittest.TestCase):
             [{"elapsed_s": 1, "private_bytes": 100 * MIB}], warmup_seconds=300,
         )["status"], "INSUFFICIENT_DATA")
 
+    def test_low_warmup_does_not_lower_shared_measurement_span(self):
+        samples = [{"elapsed_s": second, "private_bytes": 100 * MIB} for second in (0, 10, 20)]
+        for warmup in (0, 5):
+            with self.subTest(warmup=warmup):
+                self.assertEqual(soak.memory_trend(samples, warmup)["status"], "INSUFFICIENT_DATA")
+
+    @staticmethod
+    def settled_samples():
+        return [{"elapsed_s": second, "private_bytes": 100 * MIB, "settled": True,
+                 "action": "grid9", "phase": phase}
+                for phase, seconds in (("steady", (300, 360, 420)), ("mixed", (1800, 1860, 1920)))
+                for second in seconds]
+
+    def test_schedule_and_memory_pass_cannot_award_diagnostic_or_selftest_credit(self):
+        for flags in ({"diagnostic": True}, {"self_test": True},
+                      {"diagnostic": True, "self_test": True}):
+            with self.subTest(flags=flags):
+                result = soak.finalize_result({"status": "PASS"}, self.settled_samples(), soak.build_plan(),
+                    max_growth_mib=1, max_slope_mib_per_hour=1, **flags)
+                self.assertEqual(result["schedule_status"], "PASS")
+                self.assertEqual(result["memory"]["gate"], "PASS")
+                self.assertEqual(result["status"], "PASS")
+                self.assertEqual(result["l3_status"], "NOT_RUN")
+                self.assertEqual({name: result[name] for name in soak.SCOPE_FIELDS}, soak.evidence_scope(True))
+
+    def test_mixed_is_skipped_only_when_absent_from_plan(self):
+        samples = [sample for sample in self.settled_samples() if sample["phase"] == "steady"]
+        result = soak.finalize_result({"status": "PASS"}, samples, soak.build_plan(1800, 0, diagnostic=True),
+            max_growth_mib=1, max_slope_mib_per_hour=1, diagnostic=True)
+        self.assertEqual(result["memory"]["mixed_grid9"]["status"], "SKIPPED")
+        self.assertEqual(result["memory"]["gate"], "PASS")
+        for diagnostic in (False, True):
+            result = soak.finalize_result({"status": "PASS"}, samples, soak.build_plan(),
+                max_growth_mib=1, max_slope_mib_per_hour=1, diagnostic=diagnostic)
+            self.assertEqual(result["memory"]["mixed_grid9"]["status"], "INSUFFICIENT_DATA")
+            self.assertEqual(result["memory"]["gate"], "INSUFFICIENT_DATA")
+            self.assertNotEqual(result["l3_status"], "PASS")
+
+    def test_formal_scoped_l3_gate_keeps_zero_b14_credit(self):
+        result = soak.finalize_result({"status": "PASS"}, self.settled_samples(), soak.build_plan(),
+            max_growth_mib=1, max_slope_mib_per_hour=1)
+        self.assertEqual(result["l3_status"], "PASS")
+        self.assertFalse(result["diagnostic_only"])
+        self.assertFalse(result["release_eligible"])
+        self.assertEqual(result["qualification_credit"], 0)
+
 
 class SupervisorTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Real provenance is captured once before the short fault budget. Git and
+        # source hashing are not the supervisor's heartbeat/convergence work.
+        cls.source_inputs = soak.source_fingerprint()
+        cls.platform_inputs = {name: getattr(soak.platform, name)()
+                               for name in ("system", "release", "machine")}
+
     def run_fixture(self, output: Path, mode: str) -> dict:
-        started = time.monotonic()
-        result = soak.run_session(
-            output=output,
-            command=[sys.executable, str(HERE / "soak_fake_peer.py"),
-                     "--soak-directory", str(output), "--mode", mode],
-            plan=[{"at_s": 0, "action": "grid4", "phase": "steady", "cycle": 0}],
-            duration_seconds=0.8,
-            heartbeat_timeout=0.2,
-            runtime_timeout=0.22,
-            command_timeout=0.35,
-            sample_interval=0.02,
-            startup_timeout=2,
-            shutdown_timeout=0.25,
-            min_remote_videos=17,
-            memory_warmup=0,
-            self_test=True,
-        )
+        # Preload the real fake-peer code before measuring its supervision. Its
+        # fault clock starts only after run_session passes this run's environment.
+        # This follows the ready/start boundary used by product_uia_retest tests.
+        bootstrap = output.parent / (output.name + "-bootstrap")
+        bootstrap.mkdir()
+        worker = r'''
+import json, os, pathlib, runpy, sys, time
+bootstrap = pathlib.Path(sys.argv[1])
+peer_path, output, mode = sys.argv[2:5]
+peer = runpy.run_path(peer_path, run_name="soak_ready_fixture")
+(bootstrap / "ready").write_text("ready", encoding="ascii")
+deadline = time.monotonic() + 5
+while not (bootstrap / "start.json").exists():
+    if time.monotonic() >= deadline:
+        sys.exit(92)
+    time.sleep(.005)
+os.environ.update(json.loads((bootstrap / "start.json").read_text(encoding="utf-8")))
+sys.argv = [peer_path, "--soak-directory", output, "--mode", mode]
+sys.exit(peer["main"]())
+'''
+        command = [sys.executable, str(HERE / "soak_fake_peer.py"),
+                   "--soak-directory", str(output), "--mode", mode]
+        real_popen = subprocess.Popen
+        child = real_popen(
+            [sys.executable, "-c", worker, str(bootstrap), str(HERE / "soak_fake_peer.py"), str(output), mode],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        def release_peer(args, *extra, **kwargs):
+            # platform and source_fingerprint share stdlib subprocess; only the
+            # owned peer is substituted, unrelated probes keep their real API.
+            if args != command:
+                return real_popen(args, *extra, **kwargs)
+            soak.atomic_json(bootstrap / "start.json", {
+                "COHAVORA_SOAK_RUN_ID": kwargs["env"]["COHAVORA_SOAK_RUN_ID"]})
+            return child
+        try:
+            deadline = time.monotonic() + 5
+            while not (bootstrap / "ready").exists() and child.poll() is None and time.monotonic() < deadline:
+                time.sleep(.005)
+            self.assertTrue((bootstrap / "ready").is_file(), "Fake peer failed to initialize")
+            self.assertIsNone(child.poll(), "Fake peer exited before supervision")
+            started = time.monotonic()
+            with patch.object(soak, "source_fingerprint", return_value=self.source_inputs), \
+                    patch.object(soak.platform, "system", return_value=self.platform_inputs["system"]), \
+                    patch.object(soak.platform, "release", return_value=self.platform_inputs["release"]), \
+                    patch.object(soak.platform, "machine", return_value=self.platform_inputs["machine"]), \
+                    patch.object(soak.subprocess, "Popen", side_effect=release_peer):
+                result = soak.run_session(
+                    output=output,
+                    command=command,
+                    plan=[{"at_s": 0, "action": "grid4", "phase": "steady", "cycle": 0}],
+                    duration_seconds=0.8,
+                    heartbeat_timeout=0.2,
+                    runtime_timeout=0.22,
+                    command_timeout=0.35,
+                    sample_interval=0.02,
+                    startup_timeout=2,
+                    shutdown_timeout=0.25,
+                    min_remote_videos=17,
+                    memory_warmup=0,
+                    self_test=True,
+                )
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=5)
         self.assertLess(time.monotonic() - started, 3, "Short fixture unexpectedly blocked")
         self.assertEqual(result["l3_status"], "NOT_RUN")
+        for name in ("run.json", "profile.json", "summary.json", "manifest.json"):
+            evidence = soak.read_json(output / name)
+            for key, value in soak.evidence_scope(True).items():
+                self.assertEqual(evidence[key], value, (name, key))
         self.assertFalse(process_alive(int((output / "fake_peer.pid").read_text(encoding="ascii"))),
                          "Supervisor must reap its owned child on success and failure")
         disk_summary = json.loads((output / "summary.json").read_text(encoding="utf-8"))

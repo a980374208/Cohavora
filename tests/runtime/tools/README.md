@@ -17,6 +17,12 @@
 `meeting/meeting_soak.py`，屏幕质量驱动显式依赖 `product_acceptance/product_aliyun_transport.py`。
 跨领域入口只添加所需目录，不扫描或自动加入全部领域目录。
 
+`meeting/meeting_soak.py prepare` 默认保留 1800 秒 steady、至少 7200 秒 mixed
+及至少 17 路远端视频；`--diagnostic`（别名 `--smoke`、`--allow-short`）允许短测
+或省略 mixed。诊断与 self-test 的 L3 为 NOT_RUN；所有 standalone soak 均记录
+release_eligible=false、qualification_credit=0，不授予 B14 资格或正式放行信用。
+真实运行仅接受经 PE CodeView 校验的 RelWithDebInfo 二进制。
+
 远端部署的 `product_pilot_remote.py` 与 `product_pilot_context.py` 仍须一起复制，保持原来的远端文件名。
 离线自测在 `../selftests/`，真实桌面自测在 `../desktop_checks/`；工具目录不注册新的自动测试。
 
