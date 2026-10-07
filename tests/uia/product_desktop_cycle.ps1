@@ -12,6 +12,7 @@ $LogPairSeconds=[int]$config.log_pair_seconds
 $StopSettleSeconds=[int]$config.stop_settle_seconds
 $RoomSettleSeconds=[int]$config.room_settle_seconds
 $HeapDiagnostic=[bool]$config.heap_diagnostic
+$HeapSnapshotDiagnostic=[bool]$config.heap_snapshot_diagnostic
 $HeapDiagnosticNoShare=[bool]$config.no_share
 $HeapDiagnosticNoExport=[bool]$config.no_export
 $HeapCheckOnly=[bool]$config.heap_check_only
@@ -40,6 +41,7 @@ try {
         throw 'ISOLATED_CYCLE_PRODUCT_IDENTITY_CHANGED'
     }
     . (Join-Path $PSScriptRoot 'product_desktop_evidence.ps1')
+    . (Join-Path $PSScriptRoot '../runtime/tools/product_acceptance/product_pilot_probe_tail.ps1')
     # Reuse the actual driver functions; the child performs only one cycle.
     # It never starts, closes, or kills the product owned by the supervisor.
     $tokens=$null;$parseErrors=$null

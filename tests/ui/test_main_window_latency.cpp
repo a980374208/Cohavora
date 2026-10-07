@@ -26,6 +26,9 @@
 #include <QtGui/QPainter>
 #include <QtGui/QAccessible>
 #include <QtGui/QKeyEvent>
+#include <QtGui/QMouseEvent>
+#include <windows.h>
+#include <psapi.h>
 
 class MeasuredMainWindow final : public MeetingUI::MeetingMainWindow {
 protected:
@@ -843,6 +846,96 @@ void TestEncryptionDialog(QApplication& app) {
     std::puts("E2EE_UI_INPUT_CONTRACT PASS");
 }
 
+void TestAccountMenuLifetime(QApplication& app) {
+    // Reuse one real main window, as the same-process meeting lifecycle does.
+    // This fixture is unsigned-in and never starts a Room, devices or services.
+    TEST_CHECK(!OpenMeeting::SessionManager::instance().isLoggedIn());
+    int selected = 0;
+    int hidden = 0;
+    MeetingUI::MeetingMainWindow window;
+    window.show();
+    const auto drain = [&] {
+        for (int i = 0; i != 4; ++i) {
+            app.processEvents(QEventLoop::AllEvents, 5);
+            QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        }
+    };
+    drain();
+    auto* avatar = window.findChild<QPushButton*>("mainAccountMenu");
+    TEST_CHECK(avatar && avatar->isEnabled());
+    const auto baselineMenus = window.findChildren<QMenu*>().size();
+    const auto baselineActions = window.findChildren<QAction*>("mainPostMeetingTelemetry").size();
+    const auto record = [&](int sample) {
+        PROCESS_MEMORY_COUNTERS_EX memory{};
+        memory.cb = sizeof(memory);
+        using MemoryReader = BOOL(WINAPI*)(HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
+        const auto readMemory = reinterpret_cast<MemoryReader>(
+            GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "K32GetProcessMemoryInfo"));
+        TEST_CHECK(readMemory && readMemory(GetCurrentProcess(),
+            reinterpret_cast<PROCESS_MEMORY_COUNTERS*>(&memory), sizeof(memory)));
+        HEAP_SUMMARY heap{};
+        heap.cb = sizeof(heap);
+        TEST_CHECK(HeapSummary(GetProcessHeap(), 0, &heap));
+        int hiddenMenus = 0;
+        for (auto* menu : window.findChildren<QMenu*>()) if (!menu->isVisible()) ++hiddenMenus;
+        std::printf("MENU_LIFETIME sample=%d menus=%d hidden_menus=%d telemetry_actions=%d "
+            "owned_qobjects=%d owned_widgets=%d selected=%d hide_events=%d "
+            "private_bytes=%llu default_heap_allocated_bytes=%llu default_heap_committed_bytes=%llu\n",
+            sample, window.findChildren<QMenu*>().size(), hiddenMenus,
+            window.findChildren<QAction*>("mainPostMeetingTelemetry").size(),
+            window.findChildren<QObject*>().size(), window.findChildren<QWidget*>().size(),
+            selected, hidden, static_cast<unsigned long long>(memory.PrivateUsage),
+            static_cast<unsigned long long>(heap.cbAllocated),
+            static_cast<unsigned long long>(heap.cbCommitted));
+        std::fflush(stdout);
+    };
+    record(0);
+    bool noRetainedMenus = true;
+    for (int sample = 1; sample <= 100; ++sample) {
+        avatar->click();
+        drain();
+        QPointer<QMenu> popup;
+        for (auto* menu : window.findChildren<QMenu*>()) {
+            if (!menu->isVisible()) continue;
+            TEST_CHECK(!popup);
+            popup = menu;
+        }
+        TEST_CHECK(popup);
+        auto* action = popup->findChild<QAction*>("mainPostMeetingTelemetry");
+        TEST_CHECK(action && action->isEnabled());
+        QObject::connect(action, &QAction::triggered, &window, [&] { ++selected; });
+        QObject::connect(popup, &QMenu::aboutToHide, &window, [&] { ++hidden; });
+        const auto local = popup->actionGeometry(action).center();
+        const auto global = popup->mapToGlobal(local);
+        // The existing target does not link QtTest. Send the same press/release
+        // pair through real QMenu handlers; QAction::trigger() or popup->close()
+        // would bypass the menu selection/hide lifetime being tested.
+        QMouseEvent press(QEvent::MouseButtonPress, local, local, global,
+            Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+        QMouseEvent release(QEvent::MouseButtonRelease, local, local, global,
+            Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+        QCoreApplication::sendEvent(popup, &press);
+        QCoreApplication::sendEvent(popup, &release);
+        drain();
+        TEST_CHECK(selected == sample && hidden == sample);
+        TEST_CHECK(!popup || !popup->isVisible());
+        const auto dialogs = window.findChildren<QDialog*>("telemetryPostMeetingDialog");
+        TEST_CHECK(dialogs.size() == 1 && dialogs.front()->isVisible());
+        auto* dismiss = dialogs.front()->findChild<QPushButton*>("telemetryPostClose");
+        TEST_CHECK(dismiss);
+        dismiss->click();
+        drain();
+        TEST_CHECK(window.findChildren<QDialog*>("telemetryPostMeetingDialog").isEmpty());
+        noRetainedMenus = noRetainedMenus && window.findChildren<QMenu*>().size() == baselineMenus &&
+            window.findChildren<QAction*>("mainPostMeetingTelemetry").size() == baselineActions;
+        if (sample == 1 || sample == 10 || sample == 100) record(sample);
+    }
+    // Delay this assertion until the complete bounded run has recorded the
+    // growth curve. Do not compact heaps or delete candidate menus to pass it.
+    TEST_CHECK(noRetainedMenus);
+    std::puts("ACCOUNT_MENU_LIFETIME PASS");
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && std::string(argv[1]) == "--e2ee-frame-signature") {
         using namespace e2ee_frame_test;
@@ -893,6 +986,11 @@ int main(int argc, char **argv) {
     const auto styleMs = startup.nsecsElapsed() / 1e6;
     MeetingUI::AppTranslation::install(app, MeetingUI::AppTranslation::startupLocale(app.arguments()));
     MeetingUI::AppTheme::install(app);
+    if (app.arguments().contains("--menu-lifetime-only")) {
+        TestAccountMenuLifetime(app);
+        style::StopManager();
+        return 0;
+    }
     if (app.arguments().contains("--e2ee-uia-fixture")) {
         MeetingUI::MeetingEncryptionDialog dialog;
         dialog.findChild<QCheckBox*>("e2eeRequired")->setChecked(true);

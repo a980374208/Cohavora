@@ -7,6 +7,8 @@ param(
     [string]$ReleaseGate='',
     [int]$DedicatedDesktopSessionId=0,
     [switch]$HeapDiagnostic,
+    [switch]$HeapSnapshotDiagnostic,
+    [switch]$HeapDiagnosticPersistentUia,
     [switch]$HeapDiagnosticNoShare,
     [switch]$HeapCheckOnly,
     [switch]$HeapDiagnosticNoExport,
@@ -37,6 +39,7 @@ function Invoke-TestRemote([string]$Command) {
 $meetingId=$setup.meeting_id
 if(Test-Path -LiteralPath $Root){throw 'Run directory must be new'}
 if($HeapDiagnostic -and $Mode -ne 'Pilot'){throw 'HEAP_DIAGNOSTIC_REQUIRES_PILOT'}
+if($HeapSnapshotDiagnostic -and (!$HeapDiagnostic -or $HeapCheckOnly -or $HeapPageCheck -or $CrashDiagnostic)){throw 'HEAP_SNAPSHOT_REQUIRES_EXCLUSIVE_HEAP_DIAGNOSTIC'}
 if($HeapDiagnosticNoShare -and !$HeapDiagnostic){throw 'NO_SHARE_REQUIRES_HEAP_DIAGNOSTIC'}
 if($HeapCheckOnly -and !$HeapDiagnostic){throw 'HEAP_CHECK_REQUIRES_DIAGNOSTIC'}
 if($HeapDiagnosticNoExport -and !$HeapDiagnostic){throw 'NO_EXPORT_REQUIRES_HEAP_DIAGNOSTIC'}
@@ -44,6 +47,8 @@ if($HeapPageCheck -and (!$HeapDiagnostic -or $HeapCheckOnly)){throw 'PAGE_CHECK_
 if($CrashDiagnostic -and (!$HeapDiagnostic -or $HeapCheckOnly -or $HeapPageCheck)){throw 'CRASH_DIAGNOSTIC_REQUIRES_EXCLUSIVE_MODE'}
 if($DiagnosticCycles -ne 2 -and !$HeapDiagnostic){throw 'EXTENDED_CYCLES_REQUIRE_DIAGNOSTIC'}
 if($IsolateUiaCycles -and !$HeapDiagnostic){throw 'ISOLATED_CLIENT_EXPERIMENT_REQUIRES_DIAGNOSTIC'}
+if($HeapDiagnosticPersistentUia -and !$HeapDiagnostic){throw 'PERSISTENT_CLIENT_REQUIRES_HEAP_DIAGNOSTIC'}
+if($HeapDiagnosticPersistentUia -and $IsolateUiaCycles){throw 'HEAP_UIA_PROFILES_CONFLICT'}
 $limits=Get-Content (Join-Path $PSScriptRoot 'product_external_limits.json') -Raw | ConvertFrom-Json
 if($Mode -eq 'Formal') {
     if(!$ReleaseGate){throw 'FORMAL_RELEASE_GATE_REQUIRED'}
@@ -126,6 +131,8 @@ try {
     if ($DedicatedDesktopSessionId -gt 0) {$uiaArgs+=@('-DedicatedDesktopSessionId',$DedicatedDesktopSessionId)}
     if($Mode -eq 'Pilot'){$uiaArgs+='-Pilot'}
     if($HeapDiagnostic){$uiaArgs+='-HeapDiagnostic'}
+    if($HeapSnapshotDiagnostic){$uiaArgs+='-HeapSnapshotDiagnostic'}
+    if($HeapDiagnosticPersistentUia){$uiaArgs+='-HeapDiagnosticPersistentUia'}
     if($HeapDiagnosticNoShare){$uiaArgs+='-HeapDiagnosticNoShare'}
     if($HeapCheckOnly){$uiaArgs+='-HeapCheckOnly'}
     if($HeapDiagnosticNoExport){$uiaArgs+='-HeapDiagnosticNoExport'}
