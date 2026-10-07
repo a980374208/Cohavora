@@ -40,14 +40,23 @@ public:
         auto endpoint = std::shared_ptr<QtDispatchEndpoint>(
             new QtDispatchEndpoint(application));
         const std::weak_ptr<QtDispatchEndpoint> weak(endpoint);
-        QObject::connect(application, &QCoreApplication::aboutToQuit,
+        endpoint->aboutToQuitConnection_ = QObject::connect(
+            application, &QCoreApplication::aboutToQuit,
             application, [weak] {
                 if (auto current = weak.lock()) current->Close();
             }, Qt::DirectConnection);
-        QObject::connect(application, &QObject::destroyed, [weak] {
+        endpoint->destroyedConnection_ = QObject::connect(
+            application, &QObject::destroyed, [weak] {
             if (auto current = weak.lock()) current->Close();
         });
         return endpoint;
+    }
+
+    ~QtDispatchEndpoint() {
+        // The last owner may be a worker. Disconnect by handle without
+        // addressing the application or waiting for its event loop.
+        QObject::disconnect(aboutToQuitConnection_);
+        QObject::disconnect(destroyedConnection_);
     }
 
     template <typename F>
@@ -69,6 +78,8 @@ private:
 
     std::mutex mutex_;
     QCoreApplication* application_ = nullptr;
+    QMetaObject::Connection aboutToQuitConnection_;
+    QMetaObject::Connection destroyedConnection_;
 };
 
 } // namespace detail
