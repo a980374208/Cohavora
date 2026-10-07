@@ -44,8 +44,8 @@ public:
         std::function<std::optional<ScreenBinding>(
             const DesktopSource &, std::uint64_t, std::string)> resolve_screen_binding =
                 ResolveScreenBinding;
-        std::function<bool(const ScreenBinding &)> validate_screen_binding =
-            ValidateScreenBinding;
+        std::function<ScreenBindingStatus(const ScreenBinding &)> validate_screen_binding =
+            CheckScreenBinding;
         std::chrono::milliseconds first_frame_timeout{5000};
         std::chrono::milliseconds geometry_check_interval{500};
     };

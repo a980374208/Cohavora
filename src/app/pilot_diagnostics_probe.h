@@ -74,7 +74,10 @@ public:
                         {"sink_failures", d.sink_failures}, {"pending", d.pending},
                         {"retention_enabled", d.retention_enabled},
                         {"last_committed_sequence", d.last_committed_sequence}}},
-                    {"capture", {{"backend", capture.backend}, {"frames", capture.frames}}}};
+                    {"capture", {{"backend", capture.backend}, {"frames", capture.frames},
+                        {"failures", capture.failures}, {"failure_reason", capture.failure_reason},
+                        {"binding_failures", capture.binding_failures},
+                        {"binding_failure_reason", capture.binding_failure_reason}}}};
                 const auto records = history->CurrentRecords();
                 if (!records.empty()) {
                     const auto& s = records.back()->snapshot;

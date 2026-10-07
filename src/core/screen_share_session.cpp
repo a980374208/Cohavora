@@ -42,6 +42,9 @@ struct ScreenShareSession::Run {
     std::string source_title;
     DesktopSourceKind source_kind = DesktopSourceKind::Window;
     std::optional<ScreenBinding> annotation_binding;
+    // Retain source identity checks even while annotations are invalidated by
+    // a temporary desktop geometry change. Capture stays on the same source.
+    std::optional<ScreenBinding> source_binding;
     std::mutex delivery;
     bool accepting = true; // delivery mutex; Stop is a frame barrier
     std::atomic<bool> first_frame{false};
@@ -147,6 +150,7 @@ void ScreenShareSession::Start(DesktopSource source, VideoPublishOptions options
         try {
             run->annotation_binding = backend_.resolve_screen_binding(
                 source, run->id, NewShareSessionId());
+            run->source_binding = run->annotation_binding;
         } catch (...) {
             run->annotation_binding.reset();
         }
@@ -397,14 +401,28 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
                         self->SetState(ScreenShareState::Active);
                     }
                 }
-                if (run->annotation_binding && self->backend_.validate_screen_binding &&
+                if (run->source_binding && self->backend_.validate_screen_binding &&
                     std::chrono::steady_clock::now() >= nextGeometryCheck) {
-                    bool valid = false;
-                    try { valid = self->backend_.validate_screen_binding(*run->annotation_binding); }
-                    catch (...) { valid = false; }
-                    if (!valid) {
+                    auto status = ScreenBindingStatus::Unavailable;
+                    try { status = self->backend_.validate_screen_binding(*run->source_binding); }
+                    catch (...) { status = ScreenBindingStatus::Unavailable; }
+                    if (status != ScreenBindingStatus::Valid && status != ScreenBindingStatus::GeometryChanged) {
                         failure = ScreenShareError::Capture;
                         break;
+                    }
+                    if (status == ScreenBindingStatus::GeometryChanged && run->annotation_binding) {
+                        // Stop drawing at obsolete coordinates immediately;
+                        // the capture backend can recover without republishing.
+                        run->annotation_binding.reset();
+                        self->SetState(ScreenShareState::Active);
+                    } else if (status == ScreenBindingStatus::Valid && !run->annotation_binding) {
+                        // The original monitor and geometry are valid again.
+                        // Retire the old annotation scope before offering a new
+                        // one; do not restore old strokes or stale callbacks.
+                        ++run->source_binding->source_epoch;
+                        run->source_binding->share_session_id = NewShareSessionId();
+                        run->annotation_binding = run->source_binding;
+                        self->SetState(ScreenShareState::Active);
                     }
                     nextGeometryCheck = std::chrono::steady_clock::now() +
                         self->backend_.geometry_check_interval;

@@ -27,6 +27,52 @@ namespace {
 using namespace std::chrono_literals;
 std::atomic<std::uint32_t> observed_backend{0};
 std::atomic<std::uint64_t> observed_frames{0};
+enum class CaptureFailure {
+    None, SourceUnavailable, WindowClosed, FrameTimeout, BackendPermanent,
+    InvalidFrame, UnsupportedQuality, Conversion, Scaling, WorkerException,
+    ConversionException
+};
+enum class BindingFailure { None, InvalidBinding, MonitorUnavailable, MonitorInvalid,
+    ScreenUnavailable, DeviceChanged, EmptyGeometry, GeometryChanged };
+std::atomic<std::uint64_t> observed_failures{0}, observed_binding_failures{0};
+std::atomic<CaptureFailure> observed_failure{CaptureFailure::None};
+std::atomic<BindingFailure> observed_binding_failure{BindingFailure::None};
+
+const char* FailureName(CaptureFailure failure) {
+    switch (failure) {
+    case CaptureFailure::None: return "none";
+    case CaptureFailure::SourceUnavailable: return "source_unavailable";
+    case CaptureFailure::WindowClosed: return "window_closed";
+    case CaptureFailure::FrameTimeout: return "window_frame_timeout";
+    case CaptureFailure::BackendPermanent: return "backend_permanent";
+    case CaptureFailure::InvalidFrame: return "invalid_frame";
+    case CaptureFailure::UnsupportedQuality: return "unsupported_quality";
+    case CaptureFailure::Conversion: return "conversion_failed";
+    case CaptureFailure::Scaling: return "scaling_failed";
+    case CaptureFailure::WorkerException: return "capture_worker_exception";
+    case CaptureFailure::ConversionException: return "conversion_worker_exception";
+    }
+    return "unknown";
+}
+const char* FailureName(BindingFailure failure) {
+    switch (failure) {
+    case BindingFailure::None: return "none";
+    case BindingFailure::InvalidBinding: return "invalid_binding";
+    case BindingFailure::MonitorUnavailable: return "monitor_unavailable";
+    case BindingFailure::MonitorInvalid: return "monitor_invalid";
+    case BindingFailure::ScreenUnavailable: return "screen_unavailable";
+    case BindingFailure::DeviceChanged: return "device_changed";
+    case BindingFailure::EmptyGeometry: return "empty_geometry";
+    case BindingFailure::GeometryChanged: return "geometry_changed";
+    }
+    return "unknown";
+}
+ScreenBindingStatus RejectBinding(BindingFailure failure) {
+    observed_binding_failure.store(failure, std::memory_order_relaxed);
+    observed_binding_failures.fetch_add(1, std::memory_order_release);
+    return failure == BindingFailure::GeometryChanged
+        ? ScreenBindingStatus::GeometryChanged : ScreenBindingStatus::Unavailable;
+}
 
 webrtc::DesktopCaptureOptions Options(bool allow_wgc_window = false) {
     auto options = webrtc::DesktopCaptureOptions::CreateDefault();
@@ -155,7 +201,7 @@ public:
                 if (!capturer || !capturer->SelectSource(source.id)) {
                     capturer.reset();
                     Notify(DesktopCaptureProbePhase::Destroyed);
-                    Fail();
+                    Fail(CaptureFailure::SourceUnavailable);
                     return;
                 }
                 capturer->Start(this);
@@ -183,7 +229,7 @@ public:
                     // ended signal. Observe the selected window's lifetime.
                     if (source.kind == DesktopSourceKind::Window &&
                         !IsWindow(reinterpret_cast<HWND>(source.id))) {
-                        Fail();
+                        Fail(CaptureFailure::WindowClosed);
                         break;
                     }
                     // Plan the next slot before capture/conversion. Computing
@@ -193,7 +239,8 @@ public:
                     const auto next_capture = deadline.Advance(capture_started);
                     backend_time_us_ = 0;
                     capturer->CaptureFrame();
-                    if (window && std::chrono::nanoseconds(NowNs() - last_frame_ns_.load(std::memory_order_relaxed)) > 5s) Fail();
+                    if (window && std::chrono::nanoseconds(NowNs() - last_frame_ns_.load(std::memory_order_relaxed)) > 5s)
+                        Fail(CaptureFailure::FrameTimeout);
                     const auto capture_finished = probe_.on_capture_timing ? std::chrono::steady_clock::now()
                                                                           : capture_started;
                     {
@@ -209,7 +256,7 @@ public:
                 capturer.reset();
                 Notify(DesktopCaptureProbePhase::Destroyed);
             } catch (...) {
-                Fail();
+                Fail(CaptureFailure::WorkerException);
             }
         });
     }
@@ -256,15 +303,19 @@ private:
                 ConvertAndDeliver(*pending);
                 if (probe_.on_conversion_timing) probe_.on_conversion_timing((NowNs()-started)/1000);
             }
-        } catch (...) { Fail(); }
+        } catch (...) { Fail(CaptureFailure::ConversionException); }
     }
     void Notify(DesktopCaptureProbePhase phase, std::uint32_t capturer_id = 0) noexcept {
         if (!probe_.on_event) return;
         try { probe_.on_event({phase, capturer_id, GetCurrentThreadId()}); }
         catch (...) {}
     }
-    void Fail() {
-        if (!stopped_.exchange(true) && ended_) ended_();
+    void Fail(CaptureFailure failure) {
+        if (!stopped_.exchange(true)) {
+            observed_failure.store(failure, std::memory_order_relaxed);
+            observed_failures.fetch_add(1, std::memory_order_release);
+            if (ended_) ended_();
+        }
         wake_.notify_all();
         conversion_wake_.notify_all();
     }
@@ -272,7 +323,7 @@ private:
                          std::unique_ptr<webrtc::DesktopFrame> frame) override {
         if (stopped_.load(std::memory_order_acquire)) return;
         if (result == webrtc::DesktopCapturer::Result::ERROR_PERMANENT) {
-            Fail();
+            Fail(CaptureFailure::BackendPermanent);
             return;
         }
         if (result != webrtc::DesktopCapturer::Result::SUCCESS || !frame) return;
@@ -286,7 +337,7 @@ private:
         }
         const int w = frame->size().width(), h = frame->size().height();
         if (w <= 0 || h <= 0 || w > 16384 || h > 16384 || frame->stride() < w * 4) {
-            Fail();
+            Fail(CaptureFailure::InvalidFrame);
             return;
         }
         {
@@ -295,7 +346,7 @@ private:
         }
         const auto profile = ResolveScreenShareProfile(w, h, active_quality_, active_revision_);
         if (!profile) {
-            if (w >= 2 && h >= 2) Fail();
+            if (w >= 2 && h >= 2) Fail(CaptureFailure::UnsupportedQuality);
             return;
         }
         {
@@ -320,7 +371,7 @@ private:
         auto* v = u + cw * ch;
         // DesktopFrame BGRA bytes are libyuv's little-endian ARGB input.
         if (libyuv::ARGBToI420(frame->data(), frame->stride(), y, w, u, cw, v, cw, w, h) != 0) {
-            Fail();
+            Fail(CaptureFailure::Conversion);
             return;
         }
         const VideoFrame* delivered = &output;
@@ -333,7 +384,7 @@ private:
             auto* dv = du + (dw / 2) * (dh / 2);
             if (libyuv::I420Scale(y,w,u,cw,v,cw,w,h,
                     dy,dw,du,dw/2,dv,dw/2,dw,dh,libyuv::kFilterBox) != 0) {
-                Fail();
+                Fail(CaptureFailure::Scaling);
                 return;
             }
             delivered = &*scaled_;
@@ -377,7 +428,11 @@ DesktopCaptureObservation ObserveDesktopCapture() {
     if (id == kWgcCapturerWin) backend = "wgc";
     else if (id == kScreenCapturerWinDirectx) backend = "dxgi";
     else if (id == kWindowCapturerWinGdi || id == kScreenCapturerWinGdi) backend = "gdi";
-    return {backend, observed_frames.load(std::memory_order_relaxed)};
+    const auto failures = observed_failures.load(std::memory_order_acquire);
+    const auto binding_failures = observed_binding_failures.load(std::memory_order_acquire);
+    return {backend, observed_frames.load(std::memory_order_relaxed),
+        failures, FailureName(observed_failure.load(std::memory_order_relaxed)),
+        binding_failures, FailureName(observed_binding_failure.load(std::memory_order_relaxed))};
 }
 
 std::vector<DesktopSource> EnumerateDesktopSources() {
@@ -444,18 +499,24 @@ std::optional<ScreenBinding> ResolveScreenBinding(
     return result;
 }
 
-bool ValidateScreenBinding(const ScreenBinding &binding) {
+ScreenBindingStatus CheckScreenBinding(const ScreenBinding &binding) {
     if (binding.source_epoch == 0 || binding.share_session_id.empty() ||
-        binding.device_key.empty()) return false;
+        binding.device_key.empty()) return RejectBinding(BindingFailure::InvalidBinding);
     HMONITOR monitor = nullptr;
     std::wstring currentKey;
-    if (!webrtc::GetHmonitorFromDeviceIndex(binding.source_id, &monitor) || !monitor ||
-        !webrtc::IsMonitorValid(monitor) ||
-        !webrtc::IsScreenValid(binding.source_id, &currentKey) ||
-        currentKey != binding.device_key) return false;
+    if (!webrtc::GetHmonitorFromDeviceIndex(binding.source_id, &monitor) || !monitor)
+        return RejectBinding(BindingFailure::MonitorUnavailable);
+    if (!webrtc::IsMonitorValid(monitor)) return RejectBinding(BindingFailure::MonitorInvalid);
+    if (!webrtc::IsScreenValid(binding.source_id, &currentKey)) return RejectBinding(BindingFailure::ScreenUnavailable);
+    if (currentKey != binding.device_key) return RejectBinding(BindingFailure::DeviceChanged);
     const auto rect = webrtc::GetScreenRect(binding.source_id, binding.device_key);
-    return !rect.is_empty() &&
-        rect.left() == binding.physical_x && rect.top() == binding.physical_y &&
-        rect.width() == binding.physical_width && rect.height() == binding.physical_height;
+    if (rect.is_empty()) return RejectBinding(BindingFailure::EmptyGeometry);
+    if (rect.left() != binding.physical_x || rect.top() != binding.physical_y ||
+        rect.width() != binding.physical_width || rect.height() != binding.physical_height)
+        return RejectBinding(BindingFailure::GeometryChanged);
+    return ScreenBindingStatus::Valid;
+}
+bool ValidateScreenBinding(const ScreenBinding &binding) {
+    return CheckScreenBinding(binding) == ScreenBindingStatus::Valid;
 }
 } // namespace livekit

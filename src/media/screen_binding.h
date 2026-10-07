@@ -6,6 +6,7 @@
 namespace livekit {
 
 enum class DesktopSourceKind { Screen, Window };
+enum class ScreenBindingStatus { Valid, GeometryChanged, Unavailable };
 
 struct DesktopSource {
     DesktopSourceKind kind = DesktopSourceKind::Screen;
