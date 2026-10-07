@@ -17,6 +17,7 @@
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QFileDialog>
+#include "directory_icon_provider.h"
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QHeaderView>
@@ -283,11 +284,13 @@ void ShowTelemetryExport(QWidget *parent, std::string record_id = {},
                          std::int64_t last_utc_ms = 0) {
 	const auto store = livekit::telemetry::InstalledTelemetryHistoryStore();
 	if (!store) return;
+	DirectoryIconProvider icons(*QApplication::style());
 	QFileDialog dialog(parent, QCoreApplication::translate("MeetingUI", "Export telemetry report"));
 	dialog.setObjectName(QStringLiteral("telemetryExportDirectory"));
 	dialog.setOption(QFileDialog::DontUseNativeDialog);
 	dialog.setOption(QFileDialog::ShowDirsOnly);
 	dialog.setFileMode(QFileDialog::Directory);
+	dialog.setIconProvider(&icons);
 	if (auto *buttons = dialog.findChild<QDialogButtonBox *>()) {
 		if (auto *accept = buttons->button(QDialogButtonBox::Open))
 			accept->setObjectName(QStringLiteral("telemetryExportAccept"));
