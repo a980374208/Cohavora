@@ -1,4 +1,8 @@
 if(WIN32)
+    add_executable(directory_icon_probe EXCLUDE_FROM_ALL
+        ${LIVEKIT_TEST_SOURCE_DIR}/runtime/tools/diagnostics/memory/directory_icon_probe.cpp)
+    livekit_configure_qt_test(directory_icon_probe)
+    target_link_libraries(directory_icon_probe PRIVATE cohavora_ui_theme Psapi)
     # Build on demand; never add an interactive test to ordinary CTest by default.
     add_executable(uia_console_fixture EXCLUDE_FROM_ALL
         ${LIVEKIT_TEST_SOURCE_DIR}/uia/console_fixture.cpp
