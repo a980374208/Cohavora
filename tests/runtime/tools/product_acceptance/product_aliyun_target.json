@@ -7,5 +7,12 @@
   "server_cpu": 2,
   "server_memory_gib": 2,
   "server_bandwidth_mbps": 3,
-  "bandwidth_source": "user_confirmed_2026-09-28"
+  "bandwidth_source": "user_confirmed_2026-09-28",
+  "collector_media_route": {
+    "public_ip": "123.56.225.164",
+    "private_ip": "172.17.54.189",
+    "udp_port": 17882,
+    "tcp_port": 17881,
+    "server_config_sha256": "adeea7210d4a05f07909c0c10fbb6460f24f129484963acebf6f58972208c66e"
+  }
 }

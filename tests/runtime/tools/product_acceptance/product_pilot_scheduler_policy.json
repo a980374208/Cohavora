@@ -1,0 +1,10 @@
+{
+  "schema": 1,
+  "status": "FROZEN_B14_TEST",
+  "diagnostic_only": false,
+  "scope": "collector child and publisher descendants only",
+  "scheduler": { "nice": 0, "policy": 0 },
+  "removed_capabilities": ["CAP_SYS_NICE", "CAP_SYS_RESOURCE"],
+  "no_new_privs": true,
+  "rtprio_limit": [0, 0]
+}

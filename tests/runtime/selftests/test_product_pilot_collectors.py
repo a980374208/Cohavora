@@ -13,12 +13,98 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/product_acce
 from product_pilot_checkpoints import read_committed
 from product_pilot_performance import window_p95
 from product_pilot_context import validate_context
+from product_pilot_local_route import LocalSfuRoute
+from product_pilot_timing import AudioArrivalWitness
 from product_pilot_diagnostics import safe_event
 from verify_product_external import archive_session
 from release_product_acceptance import evaluate
 from product_pilot_audio import review_outbound_audio
 from copy import deepcopy
 from datetime import datetime, timezone
+
+
+class AudioTimingContracts(unittest.TestCase):
+    def test_broadcast_duplicate_preserves_first_arrival_and_true_native_gap(self):
+        witness=AudioArrivalWitness()
+        witness.arrival(1,7,1.0)
+        witness.arrival(1,7,1.1)
+        self.assertEqual(witness.copied(1,1.15)["ffi_arrival_s"],1.0)
+        witness.arrival(1,7,1.19)
+        self.assertNotIn(1,witness.pending)
+        witness.arrival(2,7,1.02)
+        witness.arrival(2,7,1.21)
+        proof=witness.copied(2,1.3)
+        self.assertAlmostEqual(proof["ffi_gap_ms"],20)
+        self.assertAlmostEqual(proof["ffi_to_python_ms"],280)
+        self.assertAlmostEqual(proof["python_gap_ms"],150)
+
+    def test_unmatched_or_cross_stream_frame_cannot_fabricate_timing(self):
+        witness=AudioArrivalWitness()
+        self.assertIsNone(witness.copied(999,1.0))
+        witness.arrival(1,1,1.0);witness.arrival(2,2,1.2)
+        self.assertIsNone(witness.copied(2,1.3)["ffi_gap_ms"])
+        self.assertIsNone(witness.copied(1,1.4)["python_gap_ms"])
+
+    def test_witness_overflow_remains_explicit_loss(self):
+        witness=AudioArrivalWitness()
+        for i in range(4097):witness.arrival(i,1,i/50)
+        self.assertEqual(witness.lost,1)
+        self.assertIsNone(witness.copied(4096,99))
+
+    def test_timing_diagnostic_cannot_become_formal_release_evidence(self):
+        with TemporaryDirectory() as directory:
+            roots=[Path(directory)/str(i) for i in range(3)]
+            for root in roots:root.mkdir()
+            (roots[0]/"diagnostic-debugger.json").write_text(json.dumps(dict(kind="audio_timing")))
+            with self.assertRaisesRegex(ValueError,"diagnostic_run_not_release_eligible"):
+                evaluate(roots,{})
+
+class LocalSfuRouteContracts(unittest.TestCase):
+    def target(self):
+        return dict(collector_media_route=dict(public_ip="123.56.225.164",
+            private_ip="172.17.54.189",udp_port=17882,tcp_port=17881))
+
+    def test_rules_cannot_redirect_shared_processes_or_other_sfu_ports(self):
+        route=LocalSfuRoute(self.target(),"b"*32,Path("result.json"))
+        for protocol,port in route.ports:
+            rule=route.rule(protocol,port)
+            self.assertEqual(rule[rule.index("--cgroup")+1],str(route.classid))
+            self.assertEqual(rule[rule.index("-d")+1],"123.56.225.164")
+            self.assertEqual(rule[rule.index("--dport")+1],str(port))
+            self.assertEqual(rule[rule.index("--to-destination")+1],f"172.17.54.189:{port}")
+            self.assertEqual(route.command("-I",rule)[:7],["iptables","-w","5","-t","nat","-I","OUTPUT"])
+
+    def test_partial_install_failure_removes_only_successfully_inserted_rule(self):
+        import subprocess
+        with TemporaryDirectory() as directory:
+            root=Path(directory)
+            route=LocalSfuRoute(self.target(),"b"*32,root/"proof.json")
+            route.mount=root;route.group=root/"group"
+            results=[Mock(returncode=0),subprocess.CalledProcessError(1,["iptables"]),Mock(returncode=0)]
+            with patch("product_pilot_local_route.subprocess.run",side_effect=results) as run, \
+                 patch.object(Path,"rmdir") as remove:
+                with self.assertRaises(subprocess.CalledProcessError):
+                    route.__enter__()
+                self.assertEqual(run.call_count,3)
+                inserted=run.call_args_list[0].args[0]
+                removed=run.call_args_list[2].args[0]
+                self.assertEqual(removed,inserted[:5]+["-D"]+inserted[6:])
+                remove.assert_called_once()
+            self.assertTrue(json.loads((root/"proof.json").read_text())["cleanup_complete"])
+
+    def test_collision_and_invalid_target_fail_before_network_mutation(self):
+        with TemporaryDirectory() as directory:
+            root=Path(directory)
+            route=LocalSfuRoute(self.target(),"b"*32,root/"proof.json")
+            route.mount=root
+            (root/"net_cls.classid").write_text(str(route.classid))
+            with patch("product_pilot_local_route.subprocess.run") as run:
+                with self.assertRaisesRegex(ValueError,"collision"):
+                    route.__enter__()
+                run.assert_not_called()
+        target=self.target();target["collector_media_route"]["private_ip"]="8.8.8.8"
+        with self.assertRaisesRegex(ValueError,"addresses"):
+            LocalSfuRoute(target,"b"*32,Path("result.json"))
 
 
 class OutboundAudioContracts(unittest.TestCase):

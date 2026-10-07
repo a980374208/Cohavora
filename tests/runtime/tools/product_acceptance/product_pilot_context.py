@@ -9,7 +9,14 @@ import base64
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
+import time
+
+
+RECOVERY_ATTEMPTS = 3
+RECOVERY_BUDGET_SECONDS = 45
+RECOVERY_CALL_SECONDS = 15
 
 
 def validate_context(value, run):
@@ -59,18 +66,104 @@ sys.exit(3)
 '''
 
 
+REMOTE_ACK_RECOVERY = r'''
+import base64,json,sys
+from pathlib import Path
+c=json.loads(base64.b64decode(sys.argv[2]))
+run=c['run_id']
+assert len(run)==32 and all(x in '0123456789abcdef' for x in run)
+root=Path(sys.argv[1])/('pilot-'+run[:8])
+assert json.loads((root/'ready.json').read_text())['run_id']==run
+context_path=root/'context.json'
+ack_path=root/'context-ack.json'
+assert json.loads(context_path.read_text())==c
+observed=json.loads(ack_path.read_text())
+assert observed['context']==c
+assert type(observed['sequence']) is int and observed['sequence']>0
+issued=context_path.stat().st_mtime_ns
+accepted=ack_path.stat().st_mtime_ns
+assert 0<=accepted-issued<=10_000_000_000
+observed['recovery_proof']={'context_written_ns':issued,'ack_written_ns':accepted}
+print(json.dumps(observed))
+'''
+
+
+def validate_ack(ack, context, recovered=False):
+    if ack.get("context") != context or type(ack.get("sequence")) is not int or ack["sequence"] <= 0:
+        raise ValueError("remote_context_ack_mismatch")
+    if recovered:
+        proof = ack.get("recovery_proof") or {}
+        issued, accepted = proof.get("context_written_ns"), proof.get("ack_written_ns")
+        if type(issued) is not int or type(accepted) is not int or issued <= 0 or \
+                not 0 <= accepted-issued <= 10_000_000_000:
+            raise ValueError("remote_context_recovery_deadline_unproven")
+    return ack
+
+
 def fence(path):
     context = json.loads(path.read_text(encoding="utf-8-sig"))
     validate_context(context, context["run_id"])
-    from product_aliyun_transport import execute, target
+    from product_aliyun_transport import AliyunRemoteCommandError, execute, target
     import shlex
     payload = base64.b64encode(json.dumps(context).encode()).decode()
-    ack = json.loads(execute("python3 -c " + shlex.quote(REMOTE_FENCE) + " "
-        + shlex.quote(target()["remote_root"]) + " " + shlex.quote(payload)))
-    if ack.get("context") != context or type(ack.get("sequence")) is not int:
-        raise ValueError("remote_context_ack_mismatch")
-    with (path.parent / "context-acks.jsonl").open("a", encoding="utf-8") as output:
-        output.write(json.dumps(ack) + "\n")
+    arguments = " " + shlex.quote(target()["remote_root"]) + " " + shlex.quote(payload)
+    recovered = False
+    attempts = []
+    session_limit_failures = 0
+    verdict = "FAILED"
+
+    def request(stage, script, timeout):
+        nonlocal session_limit_failures
+        started = time.monotonic()
+        entry = dict(stage=stage, readonly=stage == "receipt_recovery", timeout_seconds=timeout)
+        try:
+            return json.loads(execute("python3 -c " + shlex.quote(script) + arguments, timeout=timeout))
+        except Exception as error:
+            entry["error_type"] = type(error).__name__
+            if isinstance(error, AliyunRemoteCommandError):
+                entry["transport"] = error.diagnostics
+                session_limit_failures += int(error.diagnostics["service_code"] == "Forbidden.SessionLimit")
+            raise
+        finally:
+            entry["elapsed_seconds"] = time.monotonic() - started
+            attempts.append(entry)
+
+    try:
+        try:
+            ack = request("publish_and_wait", REMOTE_FENCE, 45)
+        except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError):
+            # Read only an already-issued receipt. Retrying retrieval never
+            # republishes context or extends its original ten-second ACK window.
+            deadline = time.monotonic() + RECOVERY_BUDGET_SECONDS
+            for attempt in range(RECOVERY_ATTEMPTS):
+                if attempt:
+                    time.sleep(.5)
+                remaining = int(deadline - time.monotonic())
+                if remaining <= 5:
+                    raise RuntimeError("context_recovery_budget_exhausted")
+                try:
+                    ack = request("receipt_recovery", REMOTE_ACK_RECOVERY,
+                                  min(RECOVERY_CALL_SECONDS, remaining))
+                    # Identity/deadline rejection is terminal, never retried.
+                    validate_ack(ack, context, True)
+                    recovered = True
+                    break
+                except (RuntimeError, subprocess.TimeoutExpired, json.JSONDecodeError) as error:
+                    remote_rejected = isinstance(error, AliyunRemoteCommandError) and \
+                        error.diagnostics["remote_exit_code"] not in (None, 0)
+                    if remote_rejected or session_limit_failures >= 2 or attempt == RECOVERY_ATTEMPTS - 1:
+                        raise
+        validate_ack(ack, context, recovered)
+        ack["transport_recovered"] = recovered
+        with (path.parent / "context-acks.jsonl").open("a", encoding="utf-8") as output:
+            output.write(json.dumps(ack) + "\n")
+        verdict = "CONFIRMED"
+    finally:
+        record = dict(run_id=context["run_id"], cycle=context["cycle"],
+            operation_id=context["operation_id"], action=context["action"], phase=context["phase"],
+            verdict=verdict, transport_recovered=recovered, attempts=attempts)
+        with (path.parent / "context-fence-attempts.jsonl").open("a", encoding="utf-8") as output:
+            output.write(json.dumps(record) + "\n")
 
 
 if __name__ == "__main__":

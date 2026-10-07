@@ -1,9 +1,11 @@
 import ast
 import asyncio
+import gc
 from pathlib import Path
 from types import SimpleNamespace as NS
 import time
 import unittest
+import weakref
 
 
 class StreamLifetime(unittest.IsolatedAsyncioTestCase):
@@ -14,14 +16,20 @@ class StreamLifetime(unittest.IsolatedAsyncioTestCase):
         class Stream:
             def __init__(self,*args,**kwargs):
                 self.queue=asyncio.Queue(); self.closed=False; streams.append(self)
+                self.frames_observed=0;self.buffers_released=0
             def __aiter__(self):return self
-            async def __anext__(self):return await self.queue.get()
+            async def __anext__(self):
+                row=await self.queue.get()
+                self.frames_observed+=1;self.buffers_released+=1
+                row.width=160;row.height=90;row.format=5
+                return row
             async def aclose(self):self.closed=True
         path=(Path(__file__).resolve().parents[1] / 'tools/product_acceptance/product_pilot_remote.py')
         tree=ast.parse(path.read_text(encoding='utf-8-sig'))
         run=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='run')
         definitions=[n for n in run.body if isinstance(n,(ast.FunctionDef,ast.AsyncFunctionDef)) and n.name in ('consume','subscribed','unsubscribed')]
         self.ns=dict(asyncio=asyncio,time=time,rtc=NS(TrackKind=NS(KIND_AUDIO=1),AudioStream=Stream,VideoStream=Stream),
+            create_video_counter=Stream,
             stop=asyncio.Event(),tracks={},tasks=[],stream_tasks={},receiver=NS(on=lambda _:lambda f:f),
             emit=lambda event,**data:self.events.append((event,data)))
         exec(compile(ast.Module(body=definitions,type_ignores=[]),str(path),'exec'),self.ns)
@@ -72,6 +80,46 @@ class StreamLifetime(unittest.IsolatedAsyncioTestCase):
         await self.drain()
         self.assertEqual(self.streams,[])
         self.assertFalse(self.ns['stream_tasks'])
+
+
+class CliLifetime(unittest.IsolatedAsyncioTestCase):
+    async def exercise(self, failed):
+        path=(Path(__file__).resolve().parents[1] / 'tools/product_acceptance/product_pilot_remote.py')
+        tree=ast.parse(path.read_text(encoding='utf-8-sig'))
+        definition=next(n for n in tree.body if isinstance(n,ast.AsyncFunctionDef) and n.name=='run_cli')
+        events=[]
+        loop=asyncio.get_running_loop()
+        class DisconnectedRoom:
+            def __init__(self):self.listener=lambda:self
+            def __del__(self):
+                events.append(('released',asyncio.get_running_loop() is loop,loop.is_closed()))
+                loop.call_soon(events.append,('callback_drained',))
+        references=[]
+        def disconnected_callback_cycle():
+            room=DisconnectedRoom()
+            return weakref.ref(room)
+        async def run(_):
+            references.append(disconnected_callback_cycle())
+            if failed:raise RuntimeError('original_collector_failure')
+        namespace=dict(run=run,gc=gc,asyncio=asyncio)
+        exec(compile(ast.Module(body=[definition],type_ignores=[]),str(path),'exec'),namespace)
+        was_enabled=gc.isenabled()
+        gc.disable()  # the callback cycle must survive the original run frame
+        try:
+            if failed:
+                with self.assertRaisesRegex(RuntimeError,'original_collector_failure'):
+                    await namespace['run_cli'](None)
+            else:await namespace['run_cli'](None)
+            self.assertIsNone(references[0]())
+            self.assertEqual(events,[('released',True,False),('callback_drained',)])
+        finally:
+            if was_enabled:gc.enable()
+
+    async def test_disconnected_callback_cycle_is_released_before_loop_close(self):
+        await self.exercise(False)
+
+    async def test_failure_remains_failure_while_callback_cycle_is_released(self):
+        await self.exercise(True)
 
 
 if __name__=='__main__':unittest.main()

@@ -87,7 +87,7 @@ $children=@();$uia=$null;$remoteStarted=$false;$failure=$null;$runExit=1
 try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot/product_meeting_fixture.ps1" -PreparedDirectory $PreparedDirectory -OutputDirectory $Root -MinimumRemainingSeconds ($maximum+300)
     if($LASTEXITCODE){throw 'MEETING_PREFLIGHT_FAILED'}
-    foreach($name in @('product_pilot_remote.py','product_pilot_context.py')) {
+    foreach($name in @('product_pilot_remote.py','product_pilot_load.py','product_pilot_context.py','product_pilot_local_route.py','product_pilot_scheduler.py','product_pilot_scheduler_policy.json','product_aliyun_target.json','product_pilot_timing.py','product_pilot_video_counter.py','product_pilot_audio_reference.py')) {
         $remoteHash=Invoke-TestRemote "sha256sum $remote/$name"
         if($LASTEXITCODE -or !$remoteHash -or ($remoteHash -split ' ')[0] -ne (Get-FileHash "$PSScriptRoot/$name" -Algorithm SHA256).Hash.ToLowerInvariant()) {
             throw 'REMOTE_COLLECTOR_INPUT_MISMATCH'
