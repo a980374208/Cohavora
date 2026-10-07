@@ -5921,7 +5921,8 @@ void MeetingRoomWindow::openAnnotationOverlay() {
 				_annotationButton->setToolTip(QCoreApplication::translate(
 					"MeetingUI", "The shared screen could not be mapped reliably."));
 			}
-			if (_coordinator) _coordinator->stopScreenShare();
+			// The overlay's coordinates are invalid. Native ScreenShareSession
+			// still validates source identity and owns capture termination.
 		});
 		_annotationOverlay = std::move(overlay);
 	} catch (const std::exception &) {

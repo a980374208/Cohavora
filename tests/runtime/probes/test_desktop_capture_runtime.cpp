@@ -467,7 +467,62 @@ int RunPersistentWgcIsolation() {
 
 }
 
+// Diagnostic only. Same first screen, production capture chain and 500 ms
+// binding checks as the product. No pixels, source titles or device keys are
+// persisted. A binding failure remains a failure even if it later recovers.
+int ObserveScreenBinding(int seconds) {
+    if (seconds < 1 || seconds > 1200) return 2;
+    const HRESULT com = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+    if (FAILED(com)) return 2;
+    const auto sources = livekit::EnumerateDesktopSources();
+    const auto screen = std::find_if(sources.begin(), sources.end(), [](const auto& source) {
+        return source.kind == livekit::DesktopSourceKind::Screen;
+    });
+    const auto binding = screen == sources.end() ? std::optional<livekit::ScreenBinding>{}
+        : livekit::ResolveScreenBinding(*screen, 1, "diagnostic-screen-binding");
+    CoUninitialize();
+    if (!binding) {
+        std::cout << "[SCREEN_BINDING_RESULT] {\"status\":\"INCONCLUSIVE_NO_BINDING\",\"formal_credit\":0}" << std::endl;
+        return 2;
+    }
+    const auto initial = livekit::ObserveDesktopCapture();
+    std::atomic<std::uint64_t> delivered{0};
+    std::atomic<bool> ended{false};
+    auto capture = livekit::CreateDesktopCapture();
+    if (!capture->SetQuality({}, 1, {})) return 2;
+    capture->Start(*screen, [&](const livekit::VideoFrame&) { delivered.fetch_add(1); }, [&] { ended.store(true); });
+    const auto began = std::chrono::steady_clock::now();
+    const auto deadline = began + std::chrono::seconds(seconds);
+    bool binding_failed = false;
+    do {
+        const bool valid = livekit::ValidateScreenBinding(*binding);
+        binding_failed |= !valid;
+        const auto observation = livekit::ObserveDesktopCapture();
+        std::cout << "[SCREEN_BINDING_OBSERVATION] {\"utc_ms\":"
+                  << std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()
+                  << ",\"pid\":" << GetCurrentProcessId() << ",\"binding_valid\":" << (valid ? "true" : "false")
+                  << ",\"delivered_frames\":" << delivered.load() << ",\"capture_ended\":" << (ended.load() ? "true" : "false")
+                  << ",\"backend\":\"" << observation.backend << "\",\"capture_failures\":" << observation.failures - initial.failures
+                  << ",\"capture_failure_reason\":\"" << observation.failure_reason
+                  << "\",\"binding_failures\":" << observation.binding_failures - initial.binding_failures
+                  << ",\"binding_failure_reason\":\"" << observation.binding_failure_reason << "\"}" << std::endl;
+        std::this_thread::sleep_until(std::min(deadline, std::chrono::steady_clock::now() + std::chrono::milliseconds(500)));
+    } while (std::chrono::steady_clock::now() < deadline);
+    capture->Stop();
+    const bool failed = ended.load() || binding_failed;
+    const auto status = delivered.load() == 0 ? "INCONCLUSIVE_NO_FRAMES"
+        : failed ? "DIAGNOSTIC_FAILURE_OBSERVED" : "DIAGNOSTIC_NO_FAILURE_OBSERVED";
+    std::cout << "[SCREEN_BINDING_RESULT] {\"status\":\"" << status
+              << "\",\"seconds\":" << std::chrono::duration<double>(std::chrono::steady_clock::now() - began).count()
+              << ",\"delivered_frames\":" << delivered.load() << ",\"formal_credit\":0}" << std::endl;
+    return delivered.load() == 0 ? 2 : failed ? 1 : 0;
+}
+
 int main(int argc, char** argv) {
+    if (argc == 3 && std::string(argv[1]) == "--screen-binding-observation") {
+        try { return ObserveScreenBinding(std::stoi(argv[2])); }
+        catch (...) { return 2; }
+    }
     if (argc == 2 && std::string(argv[1]) == "--wgc-persistent-isolation") return RunPersistentWgcIsolation();
     if (argc == 3 && std::string(argv[1]) == "--wgc-isolation") return RunWgcIsolation(argv[2]);
     if (argc == 3 && std::string(argv[1]) == "--pattern-target")

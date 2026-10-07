@@ -101,7 +101,8 @@ struct Fixture {
 
     explicit Fixture(
             std::optional<livekit::ScreenBinding> resolvedBinding = std::nullopt,
-            std::shared_ptr<std::atomic<bool>> bindingValid = {}) {
+            std::shared_ptr<std::atomic<bool>> bindingValid = {},
+            std::shared_ptr<std::atomic<livekit::ScreenBindingStatus>> bindingStatus = {}) {
         publish_gate.expires_at(asio::steady_timer::time_point::max());
         stop_gate.expires_at(asio::steady_timer::time_point::max());
         quality_gate.expires_at(asio::steady_timer::time_point::max());
@@ -135,8 +136,10 @@ struct Fixture {
             result.share_session_id = std::move(shareSessionId);
             return std::optional<livekit::ScreenBinding>{std::move(result)};
         };
-        backend.validate_screen_binding = [bindingValid](const livekit::ScreenBinding &) {
-            return !bindingValid || bindingValid->load(std::memory_order_acquire);
+        backend.validate_screen_binding = [bindingValid, bindingStatus](const livekit::ScreenBinding &) {
+            if (bindingStatus) return bindingStatus->load(std::memory_order_acquire);
+            return !bindingValid || bindingValid->load(std::memory_order_acquire)
+                ? livekit::ScreenBindingStatus::Valid : livekit::ScreenBindingStatus::Unavailable;
         };
         backend.first_frame_timeout = 80ms;
         backend.geometry_check_interval = 1ms;
@@ -375,6 +378,57 @@ void ScreenBindingLifecycle() {
     window.Until([&] { return window.State() == ScreenShareState::Active; });
     TEST_CHECK(window.states.back().source_kind == livekit::DesktopSourceKind::Window);
     TEST_CHECK(!window.states.back().annotation_binding);
+}
+
+void ScreenGeometryChangeKeepsCaptureAndRetiresAnnotations() {
+    using Status = livekit::ScreenBindingStatus;
+    livekit::ScreenBinding binding;
+    binding.display_name = "DISPLAY1";
+    binding.device_key = L"DISPLAY1";
+    binding.physical_width = binding.canonical_width = 1920;
+    binding.physical_height = binding.canonical_height = 1080;
+    const livekit::DesktopSource screen{livekit::DesktopSourceKind::Screen, 77, "bound screen"};
+    auto status = std::make_shared<std::atomic<Status>>(Status::Valid);
+    Fixture f(binding, {}, status);
+    f.Do([&] { f.share->Start(screen); });
+    f.capture->Emit();
+    f.Until([&] { return f.State() == ScreenShareState::Active; });
+    const auto original = *f.states.back().annotation_binding;
+    const auto track = f.track.lock();
+    status->store(Status::GeometryChanged);
+    f.Until([&] { return !f.states.back().annotation_binding; });
+    TEST_CHECK(f.State() == ScreenShareState::Active && f.states.back().error == ScreenShareError::None);
+    TEST_CHECK(f.capture->stops == 0 && f.publishes == 1 && f.unpublishes == 0);
+    const auto frames = f.frames;
+    f.capture->Emit();
+    TEST_CHECK(f.frames > frames && f.track.lock() == track);
+    status->store(Status::Valid);
+    f.Until([&] { return f.states.back().annotation_binding.has_value(); });
+    const auto restored = *f.states.back().annotation_binding;
+    TEST_CHECK(restored.source_id == original.source_id && restored.device_key == original.device_key);
+    TEST_CHECK(restored.source_epoch > original.source_epoch);
+    TEST_CHECK(restored.share_session_id != original.share_session_id);
+    TEST_CHECK(f.capture->starts == 1 && f.capture->stops == 0 && f.unpublishes == 0);
+    f.Do([&] { f.share->Stop(); });
+    f.Until([&] { return f.State() == ScreenShareState::Idle; });
+
+    // Identity loss, capture end and explicit Stop must still be honored when
+    // no annotation binding is currently exposed to the UI.
+    for (int terminal = 0; terminal < 3; ++terminal) {
+        auto current = std::make_shared<std::atomic<Status>>(Status::Valid);
+        Fixture g(binding, {}, current);
+        g.Do([&] { g.share->Start(screen); });
+        g.capture->Emit();
+        g.Until([&] { return g.State() == ScreenShareState::Active; });
+        current->store(Status::GeometryChanged);
+        g.Until([&] { return !g.states.back().annotation_binding; });
+        if (terminal == 0) current->store(Status::Unavailable);
+        else if (terminal == 1) g.capture->ended();
+        else g.Do([&] { g.share->Stop(); });
+        g.Until([&] { return g.State() == (terminal == 2 ? ScreenShareState::Idle : ScreenShareState::Failed); });
+        TEST_CHECK(g.capture->stops == 1 && g.publishes == 1 && g.unpublishes == 1);
+        TEST_CHECK(!g.local->get_publication("TR_SCREEN"));
+    }
 }
 
 void CancelPublishAndLeave() {
@@ -794,6 +848,7 @@ int main() {
     ObjectReleaseCycles();
     CodecPreferenceSnapshot();
     ScreenBindingLifecycle();
+    ScreenGeometryChangeKeepsCaptureAndRetiresAnnotations();
     CancelPublishAndLeave();
     FailuresAndEnded();
     ReconnectAndConfirmation();

@@ -56,6 +56,12 @@ struct DesktopCaptureProbeOptions {
 struct DesktopCaptureObservation {
     const char* backend = "unknown";
     std::uint64_t frames = 0;
+    // Cumulative process counters and fixed reason codes only, retained after
+    // Stop(). These are attribution evidence, not a per-share verdict.
+    std::uint64_t failures = 0;
+    const char* failure_reason = "none";
+    std::uint64_t binding_failures = 0;
+    const char* binding_failure_reason = "none";
 };
 DesktopCaptureObservation ObserveDesktopCapture();
 
@@ -66,5 +72,6 @@ std::optional<ScreenBinding> ResolveScreenBinding(
     const DesktopSource &source, std::uint64_t sourceEpoch,
     std::string shareSessionId);
 bool ValidateScreenBinding(const ScreenBinding &binding);
+ScreenBindingStatus CheckScreenBinding(const ScreenBinding &binding);
 
 } // namespace livekit

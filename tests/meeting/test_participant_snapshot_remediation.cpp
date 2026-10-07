@@ -6695,7 +6695,7 @@ void ScreenShareWindowControls() {
         result.share_session_id = std::move(shareSessionId);
         return std::optional<livekit::ScreenBinding>{std::move(result)};
     };
-    backend.validate_screen_binding = [](const livekit::ScreenBinding &) { return true; };
+    backend.validate_screen_binding = [](const livekit::ScreenBinding &) { return livekit::ScreenBindingStatus::Valid; };
     backend.publish = [](auto) -> asio::awaitable<void> { co_return; };
     backend.unpublish = [](auto) -> asio::awaitable<void> { co_return; };
     auto share = std::make_shared<livekit::ScreenShareSession>(fixture.runtime->strand(), std::move(backend),
@@ -6838,6 +6838,13 @@ void ScreenShareWindowControls() {
     overlay = ParticipantWindowTestAccess::annotationOverlay(*fixture.window);
     TEST_CHECK(overlay && overlay->interactionEnabled() && overlay->desktopMode());
     TEST_CHECK(annotationButton->isEnabled());
+    const auto stopsBeforeAnnotationInvalidation = stops;
+    TEST_CHECK(QMetaObject::invokeMethod(overlay, "bindingInvalidated", Qt::DirectConnection));
+    fixture.pump();
+    TEST_CHECK(!ParticipantWindowTestAccess::annotationOverlay(*fixture.window));
+    TEST_CHECK(!annotationButton->isEnabled());
+    TEST_CHECK(ParticipantWindowTestAccess::shareState(*fixture.window) == livekit::ScreenShareState::Active);
+    TEST_CHECK(stops == stopsBeforeAnnotationInvalidation);
     fixture.coordinator->stopScreenShare();
     fixture.pump();
     TEST_CHECK(!ParticipantWindowTestAccess::annotationOverlay(*fixture.window));
