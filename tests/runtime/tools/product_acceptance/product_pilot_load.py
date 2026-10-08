@@ -317,11 +317,21 @@ async def publish(args):
         errors.append(dict(stage="publish", error_type=type(error).__name__))
     finally:
         stop.set()
-        for task in tasks:
-            task.cancel()
+        # Let in-flight native capture receive its callback before tearing down
+        # its source. Cancelling a Python waiter does not cancel native capture.
+        pending = set()
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=5)
+        capture_tasks_drained = not pending
+        if pending:
+            errors.append(dict(stage="capture", error_type="capture_drain_timeout"))
+            # Cancellation is failure cleanup only, never evidence of a drain.
+            for task in pending:
+                task.cancel()
         results = await asyncio.gather(*tasks, return_exceptions=True)
         for result in results:
-            if isinstance(result, Exception):
+            if isinstance(result, BaseException):
+                capture_tasks_drained = False
                 errors.append(dict(stage="capture", error_type=type(result).__name__))
         # Capture tasks must be drained before clearing the audio queue.
         # SDK clear_queue releases its waiter; it does not cancel its timer.
@@ -348,14 +358,14 @@ async def publish(args):
             except Exception as error:
                 errors.append(dict(stage="source_close", source_kind=source_kind,
                     error_type=type(error).__name__))
-        complete = (stop_requested and not errors and disconnected == 10
+        complete = (stop_requested and capture_tasks_drained and not errors and disconnected == 10
             and len(sources) == sources_closed == 11 and audio_queues_cleared == 1)
         if cadence is not None:
             try:record_cadence("publisher.stopped")
             finally:cadence.close()
         commit(args.output / "result.json", dict(schema=1, run_id=args.run_id,
             pid=os.getpid(), status="COMPLETE" if complete else "FAILED", errors=errors,
-            capture_tasks_drained=all(task.done() for task in tasks),
+            capture_tasks_drained=capture_tasks_drained,
             rooms_disconnected=disconnected, video_captures=captures,
             sources_created=len(sources), sources_closed=sources_closed,
             audio_queues_cleared=audio_queues_cleared,

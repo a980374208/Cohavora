@@ -269,6 +269,26 @@ class PublisherLifecycle(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(code,1); self.assertEqual(result["status"],"FAILED")
         self.assertIsNone(ready)
 
+    async def test_inflight_capture_finishes_before_resource_cleanup(self):
+        code,result,*_=await self.exercise(drain_mode="natural")
+        self.assertEqual(code,0); self.assertEqual(result["status"],"COMPLETE")
+        self.assertTrue(result["capture_tasks_drained"])
+        self.assertEqual(self.last_wait_requests,[5])
+        self.assertNotIn("capture_cancelled",self.last_events)
+        for event in ("audio_clear_queue","room_disconnect","source_close"):
+            self.assertLess(self.last_events.index("capture_completed"),self.last_events.index(event))
+
+    async def test_capture_drain_timeout_cannot_report_complete(self):
+        code,result,*_=await self.exercise(drain_mode="timeout")
+        self.assertEqual(code,1); self.assertEqual(result["status"],"FAILED")
+        self.assertFalse(result["capture_tasks_drained"])
+        self.assertEqual(self.last_wait_requests,[5])
+        self.assertNotIn("capture_completed",self.last_events)
+        self.assertIn("capture_cancelled",self.last_events)
+        errors={error["error_type"] for error in result["errors"]}
+        self.assertIn("capture_drain_timeout",errors)
+        self.assertIn("CancelledError",errors)
+
     async def test_partial_startup_failure_cleans_up(self):
         code,result,ready,*_=await self.exercise(connect_error=True)
         self.assertEqual(code,1); self.assertEqual(result["rooms_disconnected"],1)
