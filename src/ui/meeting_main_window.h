@@ -80,6 +80,7 @@ public:
 	void reject() override;
 
 protected:
+	void showEvent(QShowEvent *e) override;
 	void mousePressEvent(QMouseEvent *e) override;
 	void mouseMoveEvent(QMouseEvent *e) override;
 	void closeEvent(QCloseEvent *e) override;
@@ -89,6 +90,8 @@ private slots:
 	void toggleManualServer();
 
 private:
+	void scheduleFormFit();
+	void fitFormToScreen();
 	void setLoading(bool loading, const QString &statusText = QString());
 	void showError(const QString &msg);
 	void persistMediaPreferences();
@@ -127,6 +130,7 @@ private:
 	bool _isLoading = false;
 	bool _isCancelled = false;
 	bool _isManualConnection = false;
+	bool _formFitPending = false;
 	std::optional<OpenMeeting::MeetingSettings> _meetingSettings;
 	OpenMeeting::SessionManager *_session = nullptr;
 
