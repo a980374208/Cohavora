@@ -81,6 +81,11 @@ TCP 17980/17981、UDP 17982，`--cleanup` 只删除任务标签对应的规则�
 使用 RelWithDebInfo，记录 source/binary/server 指纹、真实 backend/远端帧和停止释放；
 两个 native Room 在同一进程内，不作跨设备或跨进程保证。
 
+`build-debug/RelWithDebInfo/test_desktop_capture_runtime.exe --screen-binding-observation 300`
+用于远程浏览接入时的本机捕获诊断：选择与产品相同的第一个屏幕，使用生产捕获链，
+每 500 ms 检查原屏幕绑定，输出帧计数、后端和固定错误原因码，不保存像素或设备名。
+即使绑定随后恢复，发生过的错误仍保留；不检查用户输入，也不计正式长稳或媒体放行。
+
 `complex-wgc-window` / `complex-gdi-window` 保留原 PSNR 30 dB、SSIM 0.95、
 文字区域 PSNR 30 dB 门。`cost-wgc-window` / `cost-gdi-window` 另行运行同样的
 生成窗口，关闭逐秒像素比较，记录 10 秒 camera-only 基线及 30 秒共享负载的
