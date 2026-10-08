@@ -9,7 +9,7 @@ $watchdog=[IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../tools/product_acce
 $definitions=[ordered]@{}
 $loaded=[ordered]@{}
 foreach($entry in @(
-    @{path=$driver;names=@('Write-ProductLifetimeProgress','Wait-ProductMinimumLifetime','Record','Action')},
+    @{path=$driver;names=@('Append-SafeJsonl','Write-ProductLifetimeProgress','Wait-ProductMinimumLifetime','Record','Action')},
     @{path=$watchdog;names=@('Read-ProductObserverSnapshot','Test-ProductFiniteNumber','Assert-ProductObserverIdentity','Get-ProductObserverAgeMilliseconds','Assert-ProductActionProgress')})) {
     $tokens=$null;$errors=$null
     $ast=[Management.Automation.Language.Parser]::ParseFile($entry.path,[ref]$tokens,[ref]$errors)

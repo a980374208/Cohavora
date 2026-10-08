@@ -8,6 +8,11 @@ $driver = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../uia/product_des
 $tokens = $null; $parseErrors = $null
 $driverAst = [Management.Automation.Language.Parser]::ParseFile($driver, [ref]$tokens, [ref]$parseErrors)
 if ($parseErrors.Count) { throw 'DRIVER_PARSER_FAILED' }
+$append = @($driverAst.EndBlock.Statements | Where-Object {
+    $_ -is [Management.Automation.Language.FunctionDefinitionAst] -and $_.Name -eq 'Append-SafeJsonl'
+})
+if ($append.Count -ne 1) { throw 'JSONL_APPEND_FUNCTION_NOT_UNIQUE' }
+. ([scriptblock]::Create($append[0].Extent.Text))
 $actions = @($driverAst.FindAll({
     param($node)
     $node -is [Management.Automation.Language.CommandAst] -and

@@ -111,6 +111,33 @@ if ($HeapDiagnostic) {
     if (!$Pilot -or $ProbeOnly) { throw 'HEAP_DIAGNOSTIC_REQUIRES_PILOT' }
     . (Join-Path $PSScriptRoot '../runtime/tools/product_acceptance/product_heap_diagnostic.ps1')
 }
+function Append-SafeJsonl([string]$Path, [string]$Json) {
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Json + "`n")
+    $stream = $null
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $retries = 0
+    while ($null -eq $stream) {
+        try {
+            # Preserve the single writer; readers already share write access.
+            # Disable managed buffering so disposal cannot replay pending bytes.
+            $stream = [IO.FileStream]::new($Path, [IO.FileMode]::Append,
+                [IO.FileAccess]::Write, [IO.FileShare]::Read, 1)
+        } catch {
+            $cause = $_.Exception.GetBaseException()
+            $code = $cause.HResult -band 65535
+            $remaining = 1000 - $clock.ElapsedMilliseconds
+            if ($cause -isnot [IO.IOException] -or $code -notin @(32, 33) -or
+                $retries -ge 20 -or $remaining -le 0) { throw }
+            $retries++
+            Start-Sleep -Milliseconds ([int][Math]::Min(50, $remaining))
+        }
+    }
+    # A failed write/flush may have appended bytes. Never replay that record.
+    try {
+        $stream.Write($bytes, 0, $bytes.Length)
+        $stream.Flush()
+    } finally { $stream.Dispose() }
+}
 function Record([string]$Action, [string]$Phase) {
     if ($env:LIVEKIT_UIA_REMOTE_CONTEXT -eq '1') { Sync-ObserverContext $Action $Phase }
     $row = [ordered]@{schema=1; run_id=$script:runId; cycle=$script:cycle;
@@ -124,8 +151,7 @@ function Record([string]$Action, [string]$Phase) {
         # Use this exact acknowledged live action frame, not an earlier driver/launch timestamp.
         Initialize-ProductFirstLive $row.elapsed_seconds $row.utc 'first_live_requested'
     }
-    [IO.File]::AppendAllText((Join-Path $OutputDirectory 'uia-actions.jsonl'),
-        (($row | ConvertTo-Json -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
+    Append-SafeJsonl -Path (Join-Path $OutputDirectory 'uia-actions.jsonl') -Json ($row | ConvertTo-Json -Compress)
 }
 function Sync-ObserverContext([string]$Action, [string]$Phase) {
     $probes = @(Read-ProductPilotProbeTail -Path $env:LIVEKIT_UIA_PILOT_PROBE -Count 3 -MaximumBytes 1048576 | ForEach-Object {
@@ -190,8 +216,7 @@ function Sample-Resource([string]$Phase) {
         handles=$(if ($process) { $process.HandleCount } else { 0 });
         threads=$(if ($process) { $process.Threads.Count } else { 0 });
         gpu_local_bytes=$null; gpu_nonlocal_bytes=$null; queue_depth=$null}
-    [IO.File]::AppendAllText((Join-Path $OutputDirectory 'uia-resources.jsonl'),
-        (($row | ConvertTo-Json -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
+    Append-SafeJsonl -Path (Join-Path $OutputDirectory 'uia-resources.jsonl') -Json ($row | ConvertTo-Json -Compress)
 }
 function New-TreeCacheRequest {
     $request = [Windows.Automation.CacheRequest]::new()
@@ -1018,8 +1043,7 @@ function Run-Cycle {
                 production_and_persistence=($env:LIVEKIT_UIA_LOG_PAIR -eq '1');
                 off_start_utc=$offStart.ToString('o'); off_end_utc=$offEnd.ToString('o');
                 on_start_utc=$onStart.ToString('o'); on_end_utc=[DateTime]::UtcNow.ToString('o')}
-            [IO.File]::AppendAllText((Join-Path $OutputDirectory 'uia-log-windows.jsonl'),
-                (($window | ConvertTo-Json -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
+            Append-SafeJsonl -Path (Join-Path $OutputDirectory 'uia-log-windows.jsonl') -Json ($window | ConvertTo-Json -Compress)
         }
         }
         if ($Retest) {
