@@ -15,10 +15,10 @@ from product_pilot_checkpoints import read_committed, collect
 from product_pilot_archive import encode_segment, read_segment
 from product_pilot_performance import window_p95
 from product_pilot_context import validate_context
+from product_pilot_diagnostics import safe_event
+from verify_product_external import archive_session, cleanup_release
 from product_pilot_local_route import LocalSfuRoute
 from product_pilot_timing import AudioArrivalWitness
-from product_pilot_diagnostics import safe_event
-from verify_product_external import archive_session
 from release_product_acceptance import evaluate
 from product_pilot_audio import review_outbound_audio
 from copy import deepcopy
@@ -61,6 +61,7 @@ class AudioTimingContracts(unittest.TestCase):
             (roots[0]/"diagnostic-debugger.json").write_text(json.dumps(dict(kind="audio_timing")))
             with self.assertRaisesRegex(ValueError,"diagnostic_run_not_release_eligible"):
                 evaluate(roots,{})
+
 
 class LocalSfuRouteContracts(unittest.TestCase):
     def target(self):
@@ -108,6 +109,43 @@ class LocalSfuRouteContracts(unittest.TestCase):
         target=self.target();target["collector_media_route"]["private_ip"]="8.8.8.8"
         with self.assertRaisesRegex(ValueError,"addresses"):
             LocalSfuRoute(target,"b"*32,Path("result.json"))
+
+
+class CleanupReleaseContracts(unittest.TestCase):
+    def setUp(self):
+        def at(seconds, **values):
+            return dict(utc_ms=seconds*1000, **values)
+        self.actions = {
+            ("join", "uia_observed"): at(0, anonymous_session_id="old"),
+            ("leave", "uia_observed"): at(100),
+            ("export", "uia_observed"): at(116)}
+        self.probe = [at(i, anonymous_session_id="old", session_complete=True,
+                         native_cleanup_pending=0) for i in range(100, 119)]
+        self.next_join = at(118)
+
+    def test_next_join_global_work_cannot_be_attributed_to_old_sid(self):
+        self.probe[-1]["native_cleanup_pending"] = 1
+        passed, proof = cleanup_release(self.probe, self.actions, self.next_join)
+        self.assertTrue(passed)
+        self.assertEqual(proof["samples"], 11)
+        self.assertEqual(proof["maximum_pending"], 0)
+
+    def test_pending_work_in_release_window_fails_even_with_zero_last_sample(self):
+        self.probe[8]["native_cleanup_pending"] = 1
+        self.assertFalse(cleanup_release(self.probe, self.actions, self.next_join)[0])
+
+    def test_missing_short_stale_and_gapped_release_evidence_fail(self):
+        for rows in ([], self.probe[:9], self.probe[12:],
+                     self.probe[:8]+self.probe[12:]):
+            self.assertFalse(cleanup_release(rows, self.actions, self.next_join)[0])
+        for row in self.probe:
+            row["anonymous_session_id"] = "different"
+        self.assertFalse(cleanup_release(self.probe, self.actions, self.next_join)[0])
+
+    def test_overlapping_next_join_limits_release_window_and_last_cycle_is_bounded(self):
+        self.assertFalse(cleanup_release(self.probe, self.actions, dict(utc_ms=108000))[0])
+        self.probe[-1]["native_cleanup_pending"] = 1
+        self.assertTrue(cleanup_release(self.probe, self.actions)[0])
 
 
 class LosslessArchiveContracts(unittest.TestCase):
@@ -210,7 +248,6 @@ class LosslessArchiveContracts(unittest.TestCase):
             entry.update(size_bytes=len(missing),sha256=hashlib.sha256(missing).hexdigest())
             with self.assertRaisesRegex(ValueError,"revision_gap"):
                 archive_session(args.output,session,[dict(entry,**storage)])
-
 
 
 class OutboundAudioContracts(unittest.TestCase):
@@ -322,6 +359,28 @@ class CollectorContracts(unittest.TestCase):
             validate_context(value, "e"*32)
         with self.assertRaisesRegex(ValueError, "schema"):
             validate_context(dict(value, token="must_not_be_carried"), run)
+
+    def test_current_writer_fields_keep_types_and_reject_raw_payloads(self):
+        run="a"*32
+        event=dict(schema_version=1,process_run_id=run,event_sequence=1,
+                   occurred_at_utc_ms=2,monotonic_us=3,source_monotonic_us=4,
+                   pid=5,event_name="rtc.sdp_step",severity="info",
+                   attributes=dict(description_type="offer",action="set_local",
+                       phase="completed",pc_role="publisher",round_sequence=1,
+                       signaling_before="stable",signaling_after="have_local_offer",
+                       after_terminal=False,ice_restart=True,cache_hit=False,
+                       device_count=2,binding_epoch=1,boundary="end",begin_us=3,
+                       end_us=4,threshold_us=1))
+        self.assertEqual(safe_event(event,run)["event_sequence"],1)
+        for value in (-1,True,2**64,"https://private.example"):
+            with self.assertRaisesRegex(ValueError,"privacy_unsigned"):
+                safe_event(dict(event,source_monotonic_us=value),run)
+        with self.assertRaisesRegex(ValueError,"privacy_boolean"):
+            safe_event(dict(event,attributes=dict(event["attributes"],cache_hit=1)),run)
+        with self.assertRaisesRegex(ValueError,"privacy_unbounded"):
+            safe_event(dict(event,attributes=dict(event["attributes"],description_type="https://private.example")),run)
+        with self.assertRaisesRegex(ValueError,"privacy_attribute"):
+            safe_event(dict(event,attributes=dict(event["attributes"],sdp="raw SDP")),run)
 
     def test_atomic_replace_access_conflict_retries_without_skipping(self):
         path = Mock()

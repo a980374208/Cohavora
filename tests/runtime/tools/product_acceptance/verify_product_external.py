@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 import hashlib
 import json
 import math
+import re
 from pathlib import Path
 import statistics
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from product_pilot_correlation import correlate
 from product_pilot_audio import review_outbound_audio
 from product_pilot_archive import read_segment
 from product_pilot_load import review_lifecycle
+from product_pilot_diagnostics import diagnostic_source, safe_event
 from verify_product_acceptance import validate_bundle, EvidenceError, instant
 
 
@@ -119,6 +121,123 @@ def collector_exits_complete(plan, collectors, exits):
         and {r["pid"] for r in rows}==set(expected))
 
 
+def review_diagnostic_terminal(root, identity, run, diagnostics, witness, watcher):
+    """Prove all observed events, then match the native retained suffix exactly.
+
+    Native quota can remove a closed prefix after the watcher validated it. This
+    proves the complete external typed witness and the retained native bytes;
+    it never claims that pruned raw attributes are still stored externally.
+    """
+    pid = identity.get("pid")
+    process_run = witness.get("process_run_id")
+    if (identity.get("run_id") != run or type(pid) is not int or pid <= 0
+            or type(witness.get("schema")) is not int or witness["schema"] != 2
+            or witness.get("run_id") != run or type(witness.get("pid")) is not int or witness["pid"] != pid
+            or not isinstance(process_run, str) or not re.fullmatch("[0-9a-f]{32}", process_run)
+            or watcher.get("run_id") != run or watcher.get("process_run_id") != process_run
+            or type(watcher.get("pid")) is not int or watcher["pid"] != pid or watcher.get("status") != "COMPLETE"
+            or type(watcher.get("events")) is not int or watcher["events"] != len(diagnostics)
+            or not diagnostics):
+        raise ValueError("diagnostic_terminal_witness_identity_or_completion")
+    for sequence, event in enumerate(diagnostics, 1):
+        if (event.get("run_id") != run or event.get("process_run_id") != process_run
+                or type(event.get("pid")) is not int or event["pid"] != pid
+                or type(event.get("event_sequence")) is not int or event["event_sequence"] != sequence
+                or not isinstance(event.get("raw_sha256"), str) or not re.fullmatch("[0-9a-f]{64}", event["raw_sha256"])
+                or not isinstance(event.get("source_segment"), str) or not re.fullmatch(r"segment-[0-9]{6}\.jsonl", event["source_segment"])):
+            raise ValueError("diagnostic_continuous_identity_sequence_or_hash")
+    probe, source = diagnostic_source(root)
+    if probe.get("run_id") != run or probe.get("process_run_id") != process_run:
+        raise ValueError("diagnostic_terminal_probe_identity")
+    segments = witness.get("segments")
+    if not isinstance(segments, list) or not segments:
+        raise ValueError("diagnostic_terminal_segments_missing")
+    actual_paths = sorted(source.glob("segment-*.jsonl"))
+    if [p.name for p in actual_paths] != [s.get("file") for s in segments]:
+        raise ValueError("diagnostic_terminal_segment_set_changed")
+    first, last, native_events, native_bytes, previous_segment = None, None, 0, 0, None
+    anchor = None
+    for path, segment in zip(actual_paths, segments):
+        if not re.fullmatch(r"segment-[0-9]{6}\.jsonl", path.name) or path.is_symlink():
+            raise ValueError("diagnostic_terminal_segment_path")
+        index = int(path.name[8:14])
+        if previous_segment is not None and index != previous_segment + 1:
+            raise ValueError("diagnostic_terminal_segment_gap")
+        previous_segment = index
+        if path.stat().st_size > 16 * 1024 * 1024:
+            raise ValueError("diagnostic_terminal_segment_budget")
+        content = path.read_bytes()
+        if (type(segment.get("size_bytes")) is not int or len(content) != segment["size_bytes"]
+                or hashlib.sha256(content).hexdigest() != segment.get("sha256")
+                or not content or not content.endswith(b"\n")):
+            raise ValueError("diagnostic_terminal_segment_hash_size_or_complete_line")
+        native_bytes += len(content)
+        lines = content.splitlines(keepends=True)
+        claimed_rows, claimed_sequences = segment.get("records"), segment.get("sequences")
+        if (not isinstance(claimed_rows, list) or not isinstance(claimed_sequences, list)
+                or len(lines) != len(claimed_rows) or len(lines) != len(claimed_sequences)):
+            raise ValueError("diagnostic_terminal_row_witness_missing")
+        for line, claimed, claimed_sequence in zip(lines, claimed_rows, claimed_sequences):
+            event = json.loads(line)
+            bounded = safe_event(event, process_run)
+            sequence = bounded["event_sequence"]
+            raw_hash = hashlib.sha256(line).hexdigest()
+            if (type(sequence) is not int or sequence < 1 or sequence > len(diagnostics)
+                    or bounded["pid"] != pid or (last is not None and sequence != last + 1)
+                    or type(claimed_sequence) is not int or claimed_sequence != sequence
+                    or claimed != dict(event_sequence=sequence, raw_sha256=raw_hash)):
+                raise ValueError("diagnostic_terminal_retained_suffix_sequence_or_identity")
+            observed = diagnostics[sequence - 1]
+            native_safe = {k: v for k, v in observed.items() if k not in ("run_id", "source_segment", "raw_sha256")}
+            if (observed["source_segment"] != path.name or observed["raw_sha256"] != raw_hash
+                    or native_safe != bounded):
+                raise ValueError("diagnostic_terminal_native_line_not_exactly_observed")
+            first = sequence if first is None else first
+            last = sequence
+            native_events += 1
+            anchor = dict(event_sequence=sequence, event_name=event["event_name"],
+                outcome=event.get("attributes", {}).get("outcome"),
+                drain_result=event.get("attributes", {}).get("drain_result"), raw_sha256=raw_hash)
+    if (last != len(diagnostics) or anchor != witness.get("terminal_anchor")
+            or anchor["event_name"] != "process.terminal" or anchor["outcome"] != "success"
+            or anchor["drain_result"] != "completed"):
+        raise ValueError("diagnostic_terminal_tail_or_successful_process_anchor_missing")
+    return dict(passed=True, continuous_events=len(diagnostics), native_retained_events=native_events,
+        native_retained_bytes=native_bytes, first_native_retained_sequence=first,
+        terminal_sequence=last, pruned_native_prefix_events=first - 1,
+        complete_external_typed_witness=True, complete_raw_native_retention=first == 1,
+        proof="continuous sequence 1..terminal plus exact native retained suffix identity and per-line SHA256",
+        limitation="external typed witness excludes raw attributes; native prefix may be legitimately pruned")
+
+
+def cleanup_release(probe, actions, next_join_requested=None):
+    """Review the global queue only inside this cycle's settled release window.
+
+    The probe SID comes from the most recent history snapshot, whereas the
+    pending count also includes device discovery and next-join preparation.
+    Export completion bounds this cycle; a subsequent join bounds it even
+    earlier if actions overlap. Process-exit draining is reviewed separately.
+    """
+    start = timestamp(actions["leave", "uia_observed"]) + 5
+    end = timestamp(actions["export", "uia_observed"])
+    if next_join_requested is not None:
+        end = min(end, timestamp(next_join_requested))
+    sid = actions["join", "uia_observed"]["anonymous_session_id"]
+    settled = [p for p in probe if p.get("anonymous_session_id") == sid
+               and p.get("session_complete") and start <= timestamp(p) < end]
+    times = [timestamp(p) for p in settled]
+    pending = [p.get("native_cleanup_pending") for p in settled]
+    covered = (len(times) >= 2 and times[0] <= start + 2
+               and times[-1] >= end - 2 and times[-1] - times[0] >= 5
+               and all(0 < b - a <= 2 for a, b in zip(times, times[1:])))
+    passed = covered and all(type(v) is int and v == 0 for v in pending)
+    return passed, dict(scope="global queue in settled cycle release window",
+        start_utc=datetime.fromtimestamp(start, timezone.utc).isoformat(),
+        end_utc=datetime.fromtimestamp(end, timezone.utc).isoformat(),
+        samples=len(settled), coverage_complete=covered,
+        maximum_pending=max(pending) if pending and all(type(v) is int for v in pending) else None)
+
+
 def groups(path, key, run):
     group, number, sequence = [], None, 0
     for row in records(path):
@@ -186,7 +305,8 @@ def archive_session(root, session, entries):
                 stored_segment_bytes=stored_total, native_metric_summary=metric_summary)
 
 
-def interrupted_review(root, error):
+def interrupted_review(root, error, output=None):
+    output=root if output is None else output
     """Preserve partial progress without assigning unreviewed cycles PASS."""
     plan=read(root/"plan.json")
     actions=list(records(root/"uia/uia-actions.jsonl")) if (root/"uia/uia-actions.jsonl").exists() else []
@@ -208,11 +328,12 @@ def interrupted_review(root, error):
         cycles=cycles,cycle_counts=dict(Counter(c["verdict"] for c in cycles)),
         cycles_requested=plan["cycles"],cycles_not_run=plan["cycles"]-len(cycles),
         reviewed_utc=datetime.now(timezone.utc).isoformat())
-    (root/"external-review.json").write_text(json.dumps(report,indent=2)+"\n")
+    (output/"external-review.json").write_text(json.dumps(report,indent=2)+"\n")
     print(json.dumps(dict(verdict="FAIL",reason=reason,cycles=report["cycle_counts"])))
 
 
-def review(root):
+def review(root, output=None):
+    output=root if output is None else output
     plan, result, limits = read(root/"plan.json"), read(root/"uia/uia-result.json"), read(root/"limits.json")
     run = plan["run_id"]
     identity = read(root/"uia/product-identity.json")
@@ -302,8 +423,10 @@ def review(root):
             check("revision_1_to_terminal",True,proof)
             check("memory_checkpoint_final",probe[-1]["revision"]==probe[-1]["history"]["checkpoint_revision"]==proof["last_revision"])
         except (OSError,ValueError) as error: check("revision_1_to_terminal",False,str(error))
-        terminal=[p for p in probe if p.get("session_complete") and timestamp(p)>=timestamp(a["leave","uia_observed"])]
-        check("native_cleanup_released", bool(terminal) and terminal[-1]["native_cleanup_pending"]==0)
+        next_join = next((v for v in cycle_actions.get(cycle+1, [])
+                          if v["action"] == "join" and v["phase"] == "requested"), None)
+        released_ok, release_proof = cleanup_release(probe, a, next_join)
+        check("native_cleanup_released", released_ok, release_proof)
         bundles=list((root/f"uia/export-{cycle:04}").glob("cohavora-diagnostic-bundle-*"))
         try:
             if len(bundles)!=1: raise ValueError("support_bundle_count")
@@ -321,6 +444,17 @@ def review(root):
         decoded=max((int(s["inbound"]["frames_decoded"]) for r in screen for s in r["stats"]),default=0)
         check("independent_screen_delivery", bool(screen_ids) and screen_ids<=unpublished and packets>0 and decoded>0,
               dict(rtp_packets=packets,decoded_frames=decoded))
+        subscribed_video={r["sid"] for r in remote if r["event"]=="receiver.track_subscribed" and r.get("kind")=="video"}
+        closed_video=[r for r in remote if r["event"]=="receiver.stream_closed" and r.get("kind")=="video"]
+        check("independent_video_buffers_released", bool(subscribed_video) and
+            subscribed_video <= {r["sid"] for r in closed_video} and all(
+                r.get("active") is False and
+                isinstance(r.get("video_counter"),dict) and
+                r["video_counter"].get("frames_observed")==r["video_counter"].get("buffers_released") and
+                type(r["video_counter"].get("frames_observed")) is int and
+                r["video_counter"]["frames_observed"]>=r["frames"] for r in closed_video),
+            dict(streams=[dict(sid=r["sid"],consumed_frames=r["frames"],counter=r.get("video_counter")) for r in closed_video],
+                scope="real decoded-frame delivery and all native buffer releases; pixel quality unmeasured"))
         backend={p["capture"]["backend"] for p in probe if p["capture"]["frames"]>0}
         check("backend_observed",bool(backend) and backend <= {"dxgi","wgc","gdi"},sorted(backend))
         playout=[r for r in audio if r["event"]=="audio.sample" and start+1<=timestamp(r)<=end]
@@ -388,7 +522,7 @@ def review(root):
         item=dict(cycle=cycle,cycle_id=a["join","uia_observed"]["cycle_id"],anonymous_session_id=sid,
                   verdict="PASS" if all(x=="PASS" or (name in outbound and x=="DEFERRED") for name,x in checks.items()) else "FAIL",checks=checks,details=details)
         report["cycles"].append(item)
-        (root/"external-review-progress.json").write_text(json.dumps(dict(run_id=run,cycles_reviewed=cycle,last_verdict=item["verdict"])))
+        (output/"external-review-progress.json").write_text(json.dumps(dict(run_id=run,cycles_reviewed=cycle,last_verdict=item["verdict"])))
     exit_evidence=read(root/"uia/process-exit.json")
     crashes=read(root/"windows-crash-event.json")
     duration=(datetime.fromisoformat(result["finished_utc"])-datetime.fromisoformat(result["started_utc"])).total_seconds()
@@ -430,7 +564,13 @@ def review(root):
     exits=read(root/"collector-exits.json")
     final_checks["collectors_exited_normally"]=collector_exits_complete(plan,read(root/"collectors.json"),exits)
     witness=read(root/"diagnostic-sequences.json")
-    final_checks["diagnostic_final_matches_continuous"]=witness["run_id"]==run and [i for s in witness["segments"] for i in s["sequences"]]==[d["event_sequence"] for d in diagnostics]
+    try:
+        diagnostic_terminal=review_diagnostic_terminal(root,identity,run,diagnostics,witness,watcher)
+        final_checks["diagnostic_final_matches_continuous"]=diagnostic_terminal["passed"]
+        report["diagnostic_terminal_witness"]=diagnostic_terminal
+    except (OSError,KeyError,TypeError,ValueError) as error:
+        final_checks["diagnostic_final_matches_continuous"]=False
+        report["diagnostic_terminal_witness"]=dict(passed=False,reason=str(error))
     if formal:
         product_lifetime=product_lifetime_floor(result,identity,run,actions)
         report["product_lifetime_floor"]=product_lifetime
@@ -439,16 +579,19 @@ def review(root):
     successful=result["cycles_completed"]==count and result["verdict"]==("UIA_COMPLETE" if formal else "PILOT_COMPLETE") and report["cycle_counts"].get("PASS")==count and exit_evidence["exit_code"]==0 and crashes["count"]==0 and all(r["passed"] for r in report["resource_growth"].values()) and all(final_checks.values()) and (not formal or len(release_details)==100)
     report["verdict"]="PASS_WITH_DEFERRED" if successful else "FAIL"
     report["reviewed_utc"]=datetime.now(timezone.utc).isoformat()
-    (root/"external-review.json").write_text(json.dumps(report,indent=2)+"\n")
+    (output/"external-review.json").write_text(json.dumps(report,indent=2)+"\n")
     print(json.dumps(dict(verdict=report["verdict"],cycles=report["cycle_counts"])))
     return 0 if successful else 1
 
 
 if __name__=="__main__":
     p=argparse.ArgumentParser(description=__doc__);p.add_argument("--root",type=Path,required=True)
+    p.add_argument("--review-output",type=Path,help="New derivative review directory; original evidence and FAIL remain unchanged")
     args=p.parse_args()
-    try: raise SystemExit(review(args.root))
+    output=args.review_output or args.root
+    if args.review_output: output.mkdir(parents=True,exist_ok=False)
+    try: raise SystemExit(review(args.root,output))
     except (OSError,KeyError,ValueError,TypeError,StopIteration) as error:
-        (args.root/"external-review-error.json").write_text(json.dumps(dict(verdict="FAIL",error_type=type(error).__name__,reason=str(error))))
-        interrupted_review(args.root,error)
+        (output/"external-review-error.json").write_text(json.dumps(dict(verdict="FAIL",error_type=type(error).__name__,reason=str(error))))
+        interrupted_review(args.root,error,output)
         raise SystemExit(1)

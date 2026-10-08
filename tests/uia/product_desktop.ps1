@@ -85,6 +85,9 @@ $script:runClock = [Diagnostics.Stopwatch]::StartNew()
 $script:productOwnedIdentity = $null
 $script:productFirstLive = $null
 $script:productFirstLiveIdentityFailure = $null
+$script:shareStateObservation = $null
+$script:shareStateFailure = $null
+$script:shareNodeQueryObservation = $null
 $script:productLiveElapsedBeforeClose = $null
 $oldAppData = $env:APPDATA
 $oldLocalAppData = $env:LOCALAPPDATA
@@ -153,6 +156,7 @@ function Save-Result([string]$Verdict, [string]$Reason) {
         finished_utc=[DateTime]::UtcNow.ToString('o'); ui_only=$true;
         product_first_live=$script:productFirstLive;
         product_first_live_identity_failure=$script:productFirstLiveIdentityFailure;
+        share_state_failure=$script:shareStateFailure;
         product_live_elapsed_seconds_before_close=$script:productLiveElapsedBeforeClose;
         product_lifetime_floor_required_seconds=$MinimumSeconds;
         retest=[bool]$Retest; smoke=[bool]$RetestSmoke}
@@ -221,6 +225,10 @@ function Get-ProcessRoots {
     }
     $script:rootCache = $next
 }
+function Set-ShareQueryField($Trace,[string]$Field,$Value) {
+    # Observation must never change a query result or replace its exception.
+    try {if($null -ne $Trace){$Trace[$Field]=$Value}} catch { }
+}
 function Get-Nodes([switch]$Live, [switch]$TopLevel, [switch]$WindowsOnly) {
     if (!$script:child) { throw "Product missing during $script:step" }
     if ($script:child.HasExited) {
@@ -235,6 +243,7 @@ function Get-Nodes([switch]$Live, [switch]$TopLevel, [switch]$WindowsOnly) {
                 [Windows.Automation.ControlType]::Window))
     }
     for ($attempt = 0; $attempt -lt 10; ++$attempt) {
+        Set-ShareQueryField $script:shareNodeQueryObservation 'cache_attempts' ($attempt+1)
         try {
             $nodes = foreach ($root in Get-ProcessRoots) {
                 if ($Live) {
@@ -257,6 +266,12 @@ function Get-Nodes([switch]$Live, [switch]$TopLevel, [switch]$WindowsOnly) {
             }
             return @($nodes)
         } catch {
+            if($null -ne $script:shareNodeQueryObservation){
+                $trace=$script:shareNodeQueryObservation
+                Set-ShareQueryField $trace 'cache_errors' (@($trace.cache_errors)+[ordered]@{
+                    attempt=($attempt+1);utc=[DateTime]::UtcNow.ToString('o');
+                    error_type=$_.Exception.GetType().FullName;hresult=$_.Exception.HResult})
+            }
             if ($script:child.HasExited) {
                 throw "PROCESS_EXIT: $script:step code=$($script:child.ExitCode)"
             }
@@ -343,6 +358,9 @@ function Save-Tree([string]$Name) {
         Set-Content -LiteralPath (Join-Path $OutputDirectory "$Name.json") -Encoding UTF8
 }
 function Get-LiveNode([string]$Id, [Windows.Automation.ControlType]$Role, [switch]$Optional) {
+    $trace=$script:shareNodeQueryObservation
+    Set-ShareQueryField $trace 'stage' 'live_enumeration'
+    Set-ShareQueryField $trace 'live_requested_id' $Id
     $condition = [Windows.Automation.AndCondition]::new(
         [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::ProcessIdProperty,[int]$script:child.Id),
         [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::AutomationIdProperty,$Id))
@@ -352,21 +370,38 @@ function Get-LiveNode([string]$Id, [Windows.Automation.ControlType]$Role, [switc
         # when it is not exposed as a direct desktop child.
         $root.Element.FindAll([Windows.Automation.TreeScope]::Descendants,$condition)
     })
-    if ($Optional -and !$matches.Count) { return $null }
+    Set-ShareQueryField $trace 'live_match_count' $matches.Count
+    if ($Optional -and !$matches.Count) {
+        Set-ShareQueryField $trace 'result' 'NULL_MISSING'
+        return $null
+    }
     if ($matches.Count -ne 1) { throw "CONTROL_COUNT: $Id=$($matches.Count) pid=$($script:child.Id)" }
+    Set-ShareQueryField $trace 'stage' 'live_current_read'
     $c = $matches[0].Current
-    if ($Optional -and $c.IsOffscreen) { return $null }
+    Set-ShareQueryField $trace 'stage' 'live_contract'
+    if ($Optional) {
+        $offscreen=$c.IsOffscreen
+        Set-ShareQueryField $trace 'live_optional_offscreen' $offscreen
+        if($offscreen){
+            Set-ShareQueryField $trace 'result' 'NULL_OFFSCREEN'
+            return $null
+        }
+    }
     if ($c.ProcessId -ne $script:child.Id -or $c.ControlType -ne $Role -or
         [string]::IsNullOrWhiteSpace($c.Name) -or $c.IsOffscreen) { throw "CONTROL_CONTRACT: $Id changed after discovery" }
+    Set-ShareQueryField $trace 'result' 'NODE'
     return $matches[0]
 }
 function Find-Node([string]$Id, [Windows.Automation.ControlType]$Role, [switch]$Optional) {
     $script:step = "discover $Id"
+    $trace=$script:shareNodeQueryObservation
+    Set-ShareQueryField $trace 'stage' 'cached_enumeration'
     # Query only Window-role descendants, including parented Qt dialogs. Keep
     # discovery cache-only rather than retaining a full set of live controls.
     $candidates = if ($Role -eq [Windows.Automation.ControlType]::Window) {
         @(Get-Nodes -WindowsOnly)
     } else { @(Get-Nodes) }
+    Set-ShareQueryField $trace 'cached_candidate_count' $candidates.Count
     $matches = @(foreach ($node in $candidates) {
         try {
             $c = $node.Current
@@ -374,18 +409,34 @@ function Find-Node([string]$Id, [Windows.Automation.ControlType]$Role, [switch]$
             if ($automationId -eq $Id -or $automationId.EndsWith(".$Id", [StringComparison]::Ordinal)) {
                 [pscustomobject]@{Current=$c;Id=$automationId}
             }
-        } catch [Windows.Automation.ElementNotAvailableException] { }
+        } catch [Windows.Automation.ElementNotAvailableException] {
+            if($null -ne $trace){Set-ShareQueryField $trace 'cached_unavailable_count' ($trace.cached_unavailable_count+1)}
+        }
     })
+    Set-ShareQueryField $trace 'cached_match_count' $matches.Count
     # A cache-only enumeration and a live provider query can straddle a Qt
     # layout/visibility update. Confirm absence against the live provider;
     # Get-LiveNode still enforces unique identity, role and visible state.
-    if ($Optional -and $matches.Count -eq 0) { return Get-LiveNode $Id $Role -Optional }
+    if ($Optional -and $matches.Count -eq 0) {
+        Set-ShareQueryField $trace 'fallback_reason' 'cached_absent'
+        return Get-LiveNode $Id $Role -Optional
+    }
     if ($matches.Count -ne 1) { throw "CONTROL_COUNT: $Id=$($matches.Count) pid=$($script:child.Id)" }
     $c = $matches[0].Current
-    if ($Optional -and $c.IsOffscreen) { return Get-LiveNode $matches[0].Id $Role -Optional }
+    Set-ShareQueryField $trace 'cached_selected_id' $matches[0].Id
+    Set-ShareQueryField $trace 'stage' 'cached_contract'
+    if($Optional){
+        $offscreen=$c.IsOffscreen
+        Set-ShareQueryField $trace 'cached_optional_offscreen' $offscreen
+        if($offscreen){
+            Set-ShareQueryField $trace 'fallback_reason' 'cached_offscreen'
+            return Get-LiveNode $matches[0].Id $Role -Optional
+        }
+    }
     if ($c.ControlType -ne $Role -or [string]::IsNullOrWhiteSpace($c.Name) -or $c.IsOffscreen) {
         throw "CONTROL_CONTRACT: $Id role=$($c.ControlType.ProgrammaticName) enabled=$($c.IsEnabled) offscreen=$($c.IsOffscreen)"
     }
+    Set-ShareQueryField $trace 'fallback_reason' 'confirm_selected'
     return Get-LiveNode $matches[0].Id $Role -Optional:$Optional
 }
 function Test-MeetingWindowClosed {
@@ -515,22 +566,97 @@ function Select-FirstShareSource {
     }
     Invoke 'screenShareAccept'
 }
+function Get-ShareGateNode([string]$Key,[string]$Id,[Windows.Automation.ControlType]$Role) {
+    if($null -eq $script:shareStateObservation){return Find-Node $Id $Role -Optional}
+    $trace=[ordered]@{requested_id=$Id;expected_role=$Role.ProgrammaticName;
+        started_utc=[DateTime]::UtcNow.ToString('o');finished_utc=$null;
+        cached_candidate_count=$null;cached_match_count=$null;cached_selected_id=$null;
+        cached_optional_offscreen=$null;cached_unavailable_count=0;cache_attempts=0;cache_errors=@();
+        live_requested_id=$null;live_match_count=$null;live_optional_offscreen=$null;
+        fallback_reason=$null;result='NOT_READ';stage='query';error_type=$null;hresult=$null}
+    $script:shareStateObservation.queries[$Key]=$trace
+    $previous=$script:shareNodeQueryObservation
+    $script:shareNodeQueryObservation=$trace
+    try {
+        $node=Find-Node $Id $Role -Optional
+        # The same returned object/null is used by the existing predicate.
+        if($null -ne $node){$trace.result='NODE'}
+        elseif($trace.result -eq 'NOT_READ'){$trace.result='NULL_MISSING'}
+        return $node
+    } catch {
+        $trace.result='EXCEPTION';$trace.error_type=$_.Exception.GetType().FullName
+        $trace.hresult=$_.Exception.HResult
+        throw
+    } finally {
+        $trace.finished_utc=[DateTime]::UtcNow.ToString('o')
+        $script:shareNodeQueryObservation=$previous
+    }
+}
+function Save-ShareStateFailure($Observation) {
+    $script:shareStateFailure=$Observation
+    $stream=$null
+    try {
+        $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($Observation|ConvertTo-Json -Depth 8))
+        $path=Join-Path $OutputDirectory 'share-state-failure.json'
+        $stream=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+        $stream.Write($bytes,0,$bytes.Length)
+    } catch {$Observation.evidence_write_error_type=$_.Exception.GetType().FullName}
+    finally {
+        if($stream){try{$stream.Dispose()}catch{$Observation.evidence_write_error_type=$_.Exception.GetType().FullName}}
+    }
+}
 function Share-State([Windows.Automation.ToggleState]$Expected) {
-    if (Find-Node 'meetingScreenShareFailure' ([Windows.Automation.ControlType]::Window) -Optional) {
+    Set-ShareQueryField $script:shareStateObservation 'decision_branch' 'error_dialog_query'
+    if (Get-ShareGateNode 'error_dialog' 'meetingScreenShareFailure' ([Windows.Automation.ControlType]::Window)) {
+        Set-ShareQueryField $script:shareStateObservation 'decision_branch' 'named_error_dialog'
         throw 'SCREEN_SHARE_FAILED: named product error dialog observed'
     }
-    $node = Find-Node 'meetingShareScreen' ([Windows.Automation.ControlType]::CheckBox) -Optional
-    if (!$node) { return $false }
-    $stateMatches = (Require-Pattern $node ([Windows.Automation.TogglePattern]::Pattern)).Current.ToggleState -eq $Expected
+    Set-ShareQueryField $script:shareStateObservation 'decision_branch' 'share_button_query'
+    $node = Get-ShareGateNode 'share_button' 'meetingShareScreen' ([Windows.Automation.ControlType]::CheckBox)
+    if (!$node) {
+        Set-ShareQueryField $script:shareStateObservation 'decision_branch' 'share_button_missing'
+        return $false
+    }
+    Set-ShareQueryField $script:shareStateObservation 'decision_branch' 'toggle_read'
+    Set-ShareQueryField $script:shareStateObservation 'toggle_read_status' 'READ_FAILED'
+    $actualState=(Require-Pattern $node ([Windows.Automation.TogglePattern]::Pattern)).Current.ToggleState
+    Set-ShareQueryField $script:shareStateObservation 'toggle_read_status' $(if($null -eq $actualState){'NULL'}else{'READ'})
+    Set-ShareQueryField $script:shareStateObservation 'actual_toggle_state' $(if($null -eq $actualState){$null}else{$actualState.ToString()})
+    $stateMatches = $actualState -eq $Expected
+    Set-ShareQueryField $script:shareStateObservation 'decision_branch' 'toggle_mismatch'
     if ($Expected -eq [Windows.Automation.ToggleState]::On) {
         # Toggle On also represents Starting/StopFailed. The annotation control
         # is visible only after the native projection reaches Active.
-        return $stateMatches -and ($null -ne (Find-Node 'screenShareAnnotation' ([Windows.Automation.ControlType]::Button) -Optional))
+        if($stateMatches){
+            Set-ShareQueryField $script:shareStateObservation 'decision_branch' 'annotation_query'
+            $annotation=Get-ShareGateNode 'annotation' 'screenShareAnnotation' ([Windows.Automation.ControlType]::Button)
+            Set-ShareQueryField $script:shareStateObservation 'decision_branch' $(if($null -ne $annotation){'PASS'}else{'annotation_missing'})
+            return $null -ne $annotation
+        }
+        return $false
     }
+    if($stateMatches){Set-ShareQueryField $script:shareStateObservation 'decision_branch' 'PASS'}
     return $stateMatches
 }
 function Assert-ShareActive {
-    if (!(Share-State ([Windows.Automation.ToggleState]::On))) { throw 'SCREEN_SHARE_LOST_DURING_ACTIVE_WINDOW' }
+    $observation=[ordered]@{schema=1;run_id=$script:runId;cycle=$script:cycle;cycle_id=$script:cycleId;
+        operation_id=$script:operation;pid=$null;pid_read_error_type=$null;
+        started_utc=[DateTime]::UtcNow.ToString('o');finished_utc=$null;
+        expected_toggle_state='On';actual_toggle_state=$null;toggle_read_status='NOT_READ';
+        decision_branch='NOT_READ';queries=[ordered]@{error_dialog=$null;share_button=$null;annotation=$null};
+        exception_type=$null;exception_hresult=$null;evidence_write_error_type=$null}
+    try{if($script:child){$observation.pid=$script:child.Id}}catch{$observation.pid_read_error_type=$_.Exception.GetType().FullName}
+    $previous=$script:shareStateObservation
+    $script:shareStateObservation=$observation
+    try {
+        if (!(Share-State ([Windows.Automation.ToggleState]::On))) { throw 'SCREEN_SHARE_LOST_DURING_ACTIVE_WINDOW' }
+    } catch {
+        $observation.exception_type=$_.Exception.GetType().FullName
+        $observation.exception_hresult=$_.Exception.HResult
+        $observation.finished_utc=[DateTime]::UtcNow.ToString('o')
+        Save-ShareStateFailure $observation
+        throw
+    } finally {$script:shareStateObservation=$previous}
 }
 function Initialize-ProductFirstLive([double]$OriginSeconds, [string]$OriginUtc, [string]$OriginKind) {
     if ($null -ne $script:productFirstLive) {throw 'PRODUCT_FIRST_LIVE_ORIGIN_ALREADY_SET'}

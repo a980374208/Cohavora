@@ -25,6 +25,12 @@ release_eligible=false、qualification_credit=0，不授予 B14 资格或正式�
 
 远端部署的 `product_pilot_remote.py`、`product_pilot_context.py`、
 `product_pilot_local_route.py` 与 `product_aliyun_target.json` 须一起复制，保持远端文件名。
+`product_pilot_video_counter.py` 保持原生 VideoStream／解码／事件过滤和 4 项有界队列，
+只计实际 native decoded-frame 事件，立即释放对应 buffer，不再复制未用于判定的像素。
+保留全部实际 RTP／decoded stats 和帧推进门，并新增全部 video buffer 正常释放门；
+它不证明像素质量。按当前固定 SDK 的私有 ownership 接口适配，升级 SDK 必须重验证。
+`product_pilot_context.py` 在 CLI 丢失回执时只读恢复一次现有确认，严格核对
+run／周期／operation 和服务端原 10 秒窗口；不重发操作、不接受迟到或缺证回执。
 正式运行期间只做本地进程／采样尾部监控，远端完整证据搬运和复盘放在运行结束后，
 避免额外管理流量和 CPU 工作污染固定负载及整机出口门。
 离线自测在 `../selftests/`，真实桌面自测在 `../desktop_checks/`；工具目录不注册新的自动测试。
@@ -89,3 +95,5 @@ SFU 配置、共享进程、负载及整机 eth0 出口容量门不变；配置�
 规则命中和正常清理作为独立证据。
 B14 编排现在在产品启动前准备实时采集器，正常
 退出后停止并排空，保存 loss／解析／字节预算及四采集器退出证据。
+原生全局清理计数只在本周期离会后的持续
+释放窗口归属，下一周期入会和进程退出另行核对，不用旧 SID 归属新入会作业。
