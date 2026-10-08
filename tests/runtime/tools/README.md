@@ -2,7 +2,7 @@
 
 | 目录 | 内容 | 主要入口 |
 |---|---|---|
-| `product_acceptance/` | 产品验收、采集、证据校验、云端传输及配套配置 | `invoke_product_external.ps1`、`verify_product_acceptance.py`、`run_b_acceptance_codec.py` |
+| `product_acceptance/` | 产品验收、采集、证据校验、云端传输及独立诊断 | `invoke_product_external.ps1`、`verify_product_acceptance.py`、`run_b_acceptance_codec.py`、`invoke_tencent_pilot.ps1` |
 | `meeting/` | 会议长稳、渲染探针、fake peer、低带宽发布与资源采样 | `meeting_soak.py`、`meeting_render_probe.py` |
 | `screen_capture/` | WGC 长稳、屏幕共享质量采集与分析 | `run_wgc_soak.py`、`invoke_screen_share_quality_probe.py` |
 | `desktop/` | 产品 UIA 监督、低频快照及 PowerShell worker | `product_uia_retest.py`、`uia_snapshot.py`、`e2ee_password_uia_worker.ps1` |
@@ -29,6 +29,17 @@ release_eligible=false、qualification_credit=0，不授予 B14 资格或正式�
 `verify_product_first_cycle_media_log.py` 在新目录复核真实媒体、日志性能和退出证据。
 运行预算 600 秒，输入活动仅记录；所有输出均为诊断、qualification_credit=0，
 不执行共享、完整 GPU 门、三轮 PILOT 或正式长稳，不证明物理麦克风持续非静音。
+
+`product_acceptance/invoke_tencent_pilot.ps1` 是独立诊断入口，使用专用
+PowerShell 7.5+ 的 `pwsh.exe -NoProfile -File` 进程。必须显式传入 `-PreparedDirectory`、`-TargetConfig`、
+`-Executable` 和 `-Root`（别名 `-EvidenceRoot`）；输出须为仓库 `out/` 下新目录。
+TargetConfig 为 JSON：schema=1、provider="tencent"、service_url 与 PREPARED setup.json
+的 URL 一致（server_provider 可作 provider 的别名）；URL 不接受 userinfo/query/fragment。
+PreparedDirectory 包含 setup.json 和当前 Windows 用户可解密的 password.dpapi。
+`-PrepareOnly` 只校验本地输入与二进制并生成诊断计划，不解密、不访问网络、不启动子进程。
+真实诊断仅查询既有会议的身份、ownership 与有效期，随后复用 UIA/资源/归档采集；
+密码只注入 UIA 子进程环境。无论是否启用 heap，都写入正式放行拒绝标记；
+DIAGNOSTIC_ONLY_COMPLETE 仅表示本地诊断流程完整，云端负载、独立媒体与正式验收仍为 NOT_RUN。
 
 远端部署的 `product_pilot_remote.py`、`product_pilot_context.py`、
 `product_pilot_local_route.py` 与 `product_aliyun_target.json` 须一起复制，保持远端文件名。
