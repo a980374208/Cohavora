@@ -23,7 +23,10 @@
 release_eligible=false、qualification_credit=0，不授予 B14 资格或正式放行信用。
 真实运行仅接受经 PE CodeView 校验的 RelWithDebInfo 二进制。
 
-远端部署的 `product_pilot_remote.py` 与 `product_pilot_context.py` 仍须一起复制，保持原来的远端文件名。
+远端部署的 `product_pilot_remote.py`、`product_pilot_context.py`、
+`product_pilot_local_route.py` 与 `product_aliyun_target.json` 须一起复制，保持远端文件名。
+正式运行期间只做本地进程／采样尾部监控，远端完整证据搬运和复盘放在运行结束后，
+避免额外管理流量和 CPU 工作污染固定负载及整机出口门。
 离线自测在 `../selftests/`，真实桌面自测在 `../desktop_checks/`；工具目录不注册新的自动测试。
 
 ```powershell
@@ -79,3 +82,10 @@ authority图片权限、完整文档/sequence/asset及Pillow独立导出像素�
 checkpoint 归档采用逐段 gzip 无损存储；原生 SHA-256、大小、revision 1
 到终态的检查不变，并额外核对压缩文件哈希及大小。原有归档段存储预算
 保持 PILOT 1 GiB／正式 32 GiB，同时记录解压后原始字节数；旧原始段兼容。
+
+同机测试 peer 的媒体通过独立 net_cls cgroup 和端口限定 OUTPUT DNAT 留在本机；
+只匹配本轮采集子进程、SFU 公网地址与 RTC UDP/TCP 端口，结束按原规则撤销。
+SFU 配置、共享进程、负载及整机 eth0 出口容量门不变；配置哈希、本地路由、
+规则命中和正常清理作为独立证据。
+B14 编排现在在产品启动前准备实时采集器，正常
+退出后停止并排空，保存 loss／解析／字节预算及四采集器退出证据。

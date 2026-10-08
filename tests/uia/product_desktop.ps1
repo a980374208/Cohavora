@@ -38,6 +38,16 @@ public static class ProductDesktop {
     [DllImport("user32.dll", CharSet=CharSet.Unicode)] static extern bool GetUserObjectInformation(IntPtr h, int index, StringBuilder value, int length, out int needed);
     [DllImport("user32.dll")] static extern bool CloseDesktop(IntPtr h);
     [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetExitCodeProcess(IntPtr h, out uint code);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
+    static extern bool QueryFullProcessImageName(IntPtr h, uint flags, StringBuilder value, ref uint length);
+    public static string ImagePath(IntPtr handle) {
+        // Process.Path enumerates MainModule, which can be unavailable during
+        // startup. Query the identity of the retained process handle instead.
+        var path = new StringBuilder(32768); uint length = 32768;
+        if (!QueryFullProcessImageName(handle, 0, path, ref length))
+            throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+        return path.ToString();
+    }
     public static uint ExitCode(IntPtr handle) {
         uint code;
         if (!GetExitCodeProcess(handle, out code))
@@ -72,6 +82,10 @@ $script:lastResourceSample = [DateTime]::MinValue
 $script:layout = 'unknown'
 $started = [DateTime]::UtcNow
 $script:runClock = [Diagnostics.Stopwatch]::StartNew()
+$script:productOwnedIdentity = $null
+$script:productFirstLive = $null
+$script:productFirstLiveIdentityFailure = $null
+$script:productLiveElapsedBeforeClose = $null
 $oldAppData = $env:APPDATA
 $oldLocalAppData = $env:LOCALAPPDATA
 $oldQtPlatform = $env:QT_QPA_PLATFORM
@@ -102,6 +116,10 @@ function Record([string]$Action, [string]$Phase) {
         operation_id=$script:operation; action=$Action; phase=$Phase;
         pid=$(if ($script:child) { $script:child.Id } else { $null }); utc=[DateTime]::UtcNow.ToString('o');
         elapsed_seconds=$(if ($script:runClock) {$script:runClock.Elapsed.TotalSeconds} else {$null})}
+    if ($Phase -eq 'requested' -and $script:runClock -and $script:child -and !$script:productFirstLive) {
+        # Use this exact acknowledged live action frame, not an earlier driver/launch timestamp.
+        Initialize-ProductFirstLive $row.elapsed_seconds $row.utc 'first_live_requested'
+    }
     [IO.File]::AppendAllText((Join-Path $OutputDirectory 'uia-actions.jsonl'),
         (($row | ConvertTo-Json -Compress) + "`n"), [Text.UTF8Encoding]::new($false))
 }
@@ -129,12 +147,24 @@ function Sync-ObserverContext([string]$Action, [string]$Phase) {
     if ($LASTEXITCODE -ne 0) { throw 'REMOTE_CONTEXT_FENCE_FAILED' }
 }
 function Save-Result([string]$Verdict, [string]$Reason) {
-    [ordered]@{schema=1; run_id=$script:runId; verdict=$Verdict; reason=$Reason;
+    $result=[ordered]@{schema=1; run_id=$script:runId; verdict=$Verdict; reason=$Reason;
         cycles_requested=$Cycles; cycles_completed=$script:completed;
         minimum_seconds=$MinimumSeconds; started_utc=$started.ToString('o');
         finished_utc=[DateTime]::UtcNow.ToString('o'); ui_only=$true;
-        retest=[bool]$Retest; smoke=[bool]$RetestSmoke} |
-        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $OutputDirectory 'uia-result.json') -Encoding UTF8
+        product_first_live=$script:productFirstLive;
+        product_first_live_identity_failure=$script:productFirstLiveIdentityFailure;
+        product_live_elapsed_seconds_before_close=$script:productLiveElapsedBeforeClose;
+        product_lifetime_floor_required_seconds=$MinimumSeconds;
+        retest=[bool]$Retest; smoke=[bool]$RetestSmoke}
+    $path=Join-Path $OutputDirectory 'uia-result.json'
+    $temporary=$path+'.tmp'
+    try {
+        # Preserve Set-Content -Encoding UTF8's BOM for PS5.1 consumers which
+        # still use Get-Content without an explicit encoding (including errors).
+        [IO.File]::WriteAllText($temporary,($result|ConvertTo-Json -Depth 6),[Text.UTF8Encoding]::new($true))
+        if([IO.File]::Exists($path)){[IO.File]::Replace($temporary,$path,[Management.Automation.Language.NullString]::Value)}
+        else{[IO.File]::Move($temporary,$path)}
+    }finally{if([IO.File]::Exists($temporary)){[IO.File]::Delete($temporary)}}
 }
 function Sample-Resource([string]$Phase) {
     if (!$script:child) { return }
@@ -502,6 +532,162 @@ function Share-State([Windows.Automation.ToggleState]$Expected) {
 function Assert-ShareActive {
     if (!(Share-State ([Windows.Automation.ToggleState]::On))) { throw 'SCREEN_SHARE_LOST_DURING_ACTIVE_WINDOW' }
 }
+function Initialize-ProductFirstLive([double]$OriginSeconds, [string]$OriginUtc, [string]$OriginKind) {
+    if ($null -ne $script:productFirstLive) {throw 'PRODUCT_FIRST_LIVE_ORIGIN_ALREADY_SET'}
+    if (!$script:productOwnedIdentity -or !$script:child -or !$script:runClock -or !$script:runClock.IsRunning) {
+        throw 'PRODUCT_FIRST_LIVE_IDENTITY_MISSING'
+    }
+    $script:child.Refresh()
+    if ($script:child.HasExited -ne $false -or $script:child.Id -ne $script:productOwnedIdentity.pid -or
+        $script:child.StartTime.ToUniversalTime().Ticks -ne $script:productOwnedIdentity.start_ticks -or
+        [ProductDesktop]::ImagePath($script:childHandle) -ne $script:productOwnedIdentity.executable) {
+        throw 'PRODUCT_FIRST_LIVE_IDENTITY_CHANGED_OR_EXITED'
+    }
+    $script:productFirstLive=[ordered]@{pid=$script:productOwnedIdentity.pid;
+        start_ticks=$script:productOwnedIdentity.start_ticks;executable=$script:productOwnedIdentity.executable;
+        run_clock_elapsed_origin_seconds=$OriginSeconds;utc=$OriginUtc;
+        clock_source='System.Diagnostics.Stopwatch';origin_kind=$OriginKind}
+    # Confirm this exact owned process remains live after the origin frame was captured.
+    $null=Get-ProductLiveElapsedSeconds
+}
+function Get-ProductLiveElapsedSeconds {
+    param([switch]$AsSample)
+    if (!$script:runClock -or !$script:runClock.IsRunning -or !$script:productFirstLive -or !$script:child) {
+        throw 'PRODUCT_FIRST_LIVE_ORIGIN_MISSING'
+    }
+    $script:child.Refresh()
+    if ($script:child.HasExited -ne $false -or $script:child.Id -ne $script:productFirstLive.pid -or
+        $script:child.StartTime.ToUniversalTime().Ticks -ne $script:productFirstLive.start_ticks -or
+        [ProductDesktop]::ImagePath($script:childHandle) -ne $script:productFirstLive.executable) {
+        throw 'PRODUCT_FIRST_LIVE_IDENTITY_CHANGED_OR_EXITED'
+    }
+    $clockElapsed=$script:runClock.Elapsed.TotalSeconds
+    $elapsed=$clockElapsed-$script:productFirstLive.run_clock_elapsed_origin_seconds
+    if ($elapsed -lt 0) {throw 'PRODUCT_MONOTONIC_CLOCK_REGRESSED'}
+    $script:child.Refresh()
+    if ($script:child.HasExited -ne $false) {throw 'PRODUCT_EXIT_DURING_LIFETIME_SAMPLE'}
+    if ($AsSample) {
+        return [pscustomobject]@{pid=$script:productFirstLive.pid;start_ticks=$script:productFirstLive.start_ticks;
+            executable=$script:productFirstLive.executable;live_elapsed_seconds=$elapsed;
+            run_clock_elapsed_seconds=$clockElapsed;utc=[DateTime]::UtcNow.ToString('o')}
+    }
+    return $elapsed
+}
+function Write-ProductLifetimeProgress {
+    param([Parameter(Mandatory=$true)]$Sample,
+        [Parameter(Mandatory=$true)][ValidateSet('waiting','complete')][string]$Phase)
+    if (!$script:productFirstLive -or $Sample.pid -ne $script:productFirstLive.pid -or
+        $Sample.start_ticks -ne $script:productFirstLive.start_ticks -or
+        $Sample.executable -ne $script:productFirstLive.executable) {
+        throw 'PRODUCT_LIFETIME_PROGRESS_SAMPLE_IDENTITY_INVALID'
+    }
+    if ($script:runId -cnotmatch '^[0-9a-f]{32}$' -or $Cycles -isnot [int] -or $Cycles -lt 1 -or
+        $script:cycle -isnot [int] -or $script:cycle -ne $Cycles -or
+        $MinimumSeconds -isnot [int] -or $MinimumSeconds -lt 1) {
+        throw 'PRODUCT_LIFETIME_PROGRESS_FINAL_CYCLE_REQUIRED'
+    }
+    foreach ($value in @($Sample.live_elapsed_seconds,$Sample.run_clock_elapsed_seconds)) {
+        if ($value -isnot [double] -or [double]::IsNaN($value) -or [double]::IsInfinity($value) -or $value -lt 0) {
+            throw 'PRODUCT_LIFETIME_PROGRESS_CLOCK_INVALID'
+        }
+    }
+    if ($Sample.live_elapsed_seconds -ne
+        ($Sample.run_clock_elapsed_seconds-$script:productFirstLive.run_clock_elapsed_origin_seconds) -or
+        (($Phase -eq 'waiting') -ne ($Sample.live_elapsed_seconds -lt $MinimumSeconds))) {
+        throw 'PRODUCT_LIFETIME_PROGRESS_PHASE_OR_CLOCK_INVALID'
+    }
+    $row=[ordered]@{schema=1;run_id=$script:runId;pid=$Sample.pid;start_ticks=$Sample.start_ticks;
+        executable=$Sample.executable;cycle=$script:cycle;cycles=$Cycles;required_seconds=$MinimumSeconds;
+        live_elapsed_seconds=$Sample.live_elapsed_seconds;run_clock_elapsed_seconds=$Sample.run_clock_elapsed_seconds;
+        utc=$Sample.utc;phase=$Phase.ToLowerInvariant()}
+    $path=Join-Path $OutputDirectory 'product-lifetime-progress.json'
+    $temporary=$path+'.tmp'
+    try {
+        [IO.File]::WriteAllText($temporary,($row | ConvertTo-Json -Compress),[Text.UTF8Encoding]::new($false))
+        # Windows PowerShell 5.1 coerces an ordinary $null string argument to
+        # empty text. NullString preserves the .NET null meaning: no backup.
+        if ([IO.File]::Exists($path)) {[IO.File]::Replace($temporary,$path,[Management.Automation.Language.NullString]::Value)}
+        else {[IO.File]::Move($temporary,$path)}
+    } finally {
+        if ([IO.File]::Exists($temporary)) {[IO.File]::Delete($temporary)}
+    }
+}
+function Wait-ProductMinimumLifetime {
+    # Only normal completion calls this; failure cleanup and cycle workers never wait.
+    while ($true) {
+        $sample=Get-ProductLiveElapsedSeconds -AsSample
+        if ($sample.live_elapsed_seconds -ge $MinimumSeconds) {
+            Write-ProductLifetimeProgress -Sample $sample -Phase complete
+            return
+        }
+        Write-ProductLifetimeProgress -Sample $sample -Phase waiting
+        Sample-Resource 'minimum_lifetime_wait'
+        Start-Sleep -Seconds 1
+    }
+}
+function Save-ProductFirstLiveIdentityFailure([string]$Branch, $HasExited, $ActualPath,
+    [string]$PathReadStatus, [string]$ReadErrorType) {
+    # Observe the retained handle before Cleanup-Product can terminate the child.
+    # Evidence failures are secondary and must not replace the identity failure.
+    $row=[ordered]@{schema=1;run_id=$script:runId;cycle=$script:cycle;
+        utc=[DateTime]::UtcNow.ToString('o');phase='first_live_identity_pre_cleanup';
+        branch=$Branch;pid=$null;pid_read_error_type=$null;has_exited_at_gate=$HasExited;
+        expected_path=$Executable;actual_path=$ActualPath;path_read_status=$PathReadStatus;
+        path_source='retained_handle_QueryFullProcessImageName';
+        gate_read_error_type=$ReadErrorType;exit_code=$null;exit_code_raw=$null;
+        exit_code_hex=$null;exit_code_status='READ_FAILED';exit_code_read_error_type=$null;
+        evidence_write_error_type=$null}
+    $script:productFirstLiveIdentityFailure=$row
+    try {$row.pid=$script:child.Id} catch {$row.pid_read_error_type=$_.Exception.GetType().FullName}
+    try {
+        $code=[ProductDesktop]::ExitCode($script:childHandle)
+        $row.exit_code_raw=[long]$code
+        $row.exit_code_hex=('0x{0:X8}' -f [uint32]$code)
+        if($code -eq 259){$row.exit_code_status='STILL_ACTIVE_259'}
+        else {$row.exit_code=[long]$code;$row.exit_code_status='OBSERVED_AFTER_GATE'}
+    } catch {$row.exit_code_read_error_type=$_.Exception.GetType().FullName}
+    $stream=$null
+    try {
+        $bytes=[Text.UTF8Encoding]::new($false).GetBytes(($row | ConvertTo-Json -Depth 4))
+        $path=Join-Path $OutputDirectory 'product-first-live-identity-failure.json'
+        $stream=[IO.File]::Open($path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::Read)
+        $stream.Write($bytes,0,$bytes.Length)
+    } catch {$row.evidence_write_error_type=$_.Exception.GetType().FullName}
+    finally {
+        if($stream){
+            try {$stream.Dispose()} catch {$row.evidence_write_error_type=$_.Exception.GetType().FullName}
+        }
+    }
+}
+function Assert-ProductFirstLiveIdentity {
+    $hasExited=$null;$actualPath=$null;$pathReadStatus='NOT_READ';$branch='REFRESH_FAILED'
+    try {
+        $script:child.Refresh()
+        $branch='HAS_EXITED_READ_FAILED'
+        $hasExited=$script:child.HasExited
+        if($hasExited -ne $false){
+            $branch=if($hasExited){'PROCESS_EXITED'}else{'HAS_EXITED_READ_FAILED'}
+            $pathReadStatus='SKIPPED_SHORT_CIRCUIT'
+        }
+        else {
+            $branch='PATH_READ_FAILED';$pathReadStatus='READ_FAILED'
+            $actualPath=[ProductDesktop]::ImagePath($script:childHandle)
+            $pathReadStatus=if($null -eq $actualPath){'NULL'}elseif($actualPath -eq ''){'EMPTY'}else{'READ'}
+            if($actualPath -eq $Executable){
+                $branch='POST_PATH_LIVENESS_READ_FAILED'
+                $script:child.Refresh()
+                $hasExited=$script:child.HasExited
+                if($hasExited -eq $false){return}
+                $branch=if($hasExited){'PROCESS_EXITED_AFTER_PATH'}else{'HAS_EXITED_READ_FAILED'}
+            }else{$branch='EXECUTABLE_PATH_MISMATCH'}
+        }
+    } catch {
+        Save-ProductFirstLiveIdentityFailure $branch $hasExited $actualPath $pathReadStatus ($_.Exception.GetType().FullName)
+        throw
+    }
+    Save-ProductFirstLiveIdentityFailure $branch $hasExited $actualPath $pathReadStatus ''
+    throw 'PRODUCT_FIRST_LIVE_IDENTITY_INVALID'
+}
 function Start-Product {
     $profile = Join-Path $OutputDirectory 'profile'
     $env:APPDATA = Join-Path $profile 'Roaming'
@@ -521,9 +707,16 @@ function Start-Product {
     # Retain the native handle before exit. Windows PowerShell's Start-Process
     # wrapper can otherwise return a null ExitCode even after WaitForExit.
     $script:childHandle = $script:child.Handle
+    if ($null -ne $script:productOwnedIdentity) {throw 'PRODUCT_OWNED_IDENTITY_ALREADY_SET'}
+    Assert-ProductFirstLiveIdentity
+    $script:productOwnedIdentity=[ordered]@{run_id=$script:runId;pid=$script:child.Id;executable=$Executable;
+        start_ticks=$script:child.StartTime.ToUniversalTime().Ticks}
+    if ($IsolateUiaCycles -or $ProbeOnly) {
+        # Diagnostic workers have no supervisor Stopwatch; this origin never qualifies Formal.
+        Initialize-ProductFirstLive $script:runClock.Elapsed.TotalSeconds ([DateTime]::UtcNow.ToString('o')) 'supervisor_owned_live_diagnostic'
+    }
     # Publish identity before any UIA call: even first-window discovery can hang.
-    @{run_id=$script:runId;pid=$script:child.Id;executable=$Executable;
-        start_ticks=$script:child.StartTime.ToUniversalTime().Ticks} | ConvertTo-Json |
+    $script:productOwnedIdentity | ConvertTo-Json |
         Set-Content (Join-Path $OutputDirectory 'product-identity.json.tmp') -Encoding UTF8
     Move-Item (Join-Path $OutputDirectory 'product-identity.json.tmp') (Join-Path $OutputDirectory 'product-identity.json')
     if($env:LIVEKIT_UIA_GPU_ETW_DIRECTORY){
@@ -764,6 +957,7 @@ function Run-Cycle {
 function Stop-Product {
         Action 'process_exit' {
             $main = Wait-Top 'MeetingMainWindow'
+            $script:productLiveElapsedBeforeClose=Get-ProductLiveElapsedSeconds
             (Require-Pattern $main ([Windows.Automation.WindowPattern]::Pattern)).Close()
             if (!$script:child.WaitForExit(60000)) { throw 'PRODUCT_SHUTDOWN_TIMEOUT' }
             $exitCode = [ProductDesktop]::ExitCode($script:childHandle)
@@ -870,12 +1064,15 @@ try {
         }
         if (!$ProbeOnly) { ++$script:completed }
     }
-    if (!$ProbeOnly) { Stop-Product }
+    if (!$ProbeOnly) {
+        Wait-ProductMinimumLifetime
+        Stop-Product
+    }
     if ($ProbeOnly) { Save-Result 'PROBED' 'tree_observation_only' }
     elseif ($Retest) { Save-Result 'RETEST_COMPLETE' $(if ($RetestSmoke) {'short_smoke_only'} else {'ui_lifecycle_scope_independent_media_witnesses_required'}) }
     elseif ($Pilot) { Save-Result 'PILOT_COMPLETE' 'not_formal_acceptance' }
-    elseif (([DateTime]::UtcNow - $started).TotalSeconds -lt $MinimumSeconds) {
-        Save-Result 'INCONCLUSIVE' 'duration_shorter_than_eight_hours'; exit 2
+    elseif ($null -eq $script:productLiveElapsedBeforeClose -or $script:productLiveElapsedBeforeClose -lt $MinimumSeconds) {
+        Save-Result 'INCONCLUSIVE' 'product_lifetime_shorter_than_required'; exit 2
     } else { Save-Result 'UIA_COMPLETE' 'independent_witnesses_required' }
 } catch {
     $failure = $_.ToString() + "`n" + $_.ScriptStackTrace

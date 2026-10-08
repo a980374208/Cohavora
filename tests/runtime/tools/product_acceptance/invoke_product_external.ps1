@@ -3,6 +3,7 @@ param(
     [Parameter(Mandatory=$true)][string]$PreparedDirectory,
     [string]$Executable='out/build/windows-vs2026-dev/src/app/Debug/Cohavora.exe',
     [string]$AudioCollector='out/build/windows-vs2026-dev/Debug/product_audio_loopback.exe',
+    [string]$GpuTraceTool='out/build/product-gpu-budget/RelWithDebInfo/product_gpu_trace.exe',
     [ValidateSet('Pilot','Formal')][string]$Mode='Pilot',
     [string]$ReleaseGate='',
     [int]$DedicatedDesktopSessionId=0,
@@ -18,6 +19,9 @@ param(
     [switch]$IsolateUiaCycles
 )
 $ErrorActionPreference='Stop'
+. (Join-Path $PSScriptRoot 'product_pilot_probe_tail.ps1')
+. (Join-Path $PSScriptRoot 'product_pilot_watchdog.ps1')
+. (Join-Path $PSScriptRoot 'product_pilot_observer.ps1')
 function Read-GpuTraceHeartbeat([string]$Path) {
     # The collector atomically replaces this file. Allow its DELETE handle as
     # well as readers/writers, and retry only transient sharing/lock conflicts.
@@ -40,10 +44,20 @@ function Read-GpuTraceHeartbeat([string]$Path) {
         Start-Sleep -Milliseconds 10
     }
 }
+function Read-LatestCompleteUiaAction([string]$Path) {
+    $lines=@(Read-ProductPilotCompleteJsonlTail -Path $Path -Count 1 -MaximumBytes 1048576)
+    if(!$lines.Count){return $null}
+    $record=ConvertFrom-Json -InputObject $lines[0] -ErrorAction Stop
+    if(!$record -or $record -is [Array] -or $record.utc -isnot [string]){throw 'UIA_ACTION_RECORD_INVALID'}
+    return $record
+}
 $workspace=(Resolve-Path (Join-Path $PSScriptRoot '../../../..')).Path
 Set-Location $workspace
 $Executable=(Resolve-Path -LiteralPath $Executable).Path
 $AudioCollector=(Resolve-Path -LiteralPath $AudioCollector).Path
+$GpuTraceTool=(Resolve-Path -LiteralPath $GpuTraceTool).Path
+if((Split-Path (Split-Path $GpuTraceTool) -Leaf) -ne 'RelWithDebInfo'){throw 'GPU_TRACE_RELWITHDEBINFO_REQUIRED'}
+$evidenceDrive=[IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Root)).Substring(0,1)
 $PreparedDirectory=(Resolve-Path -LiteralPath $PreparedDirectory).Path
 $setup=Get-Content "$PreparedDirectory/setup.json" -Raw | ConvertFrom-Json
 if ($setup.status -ne 'PREPARED' -or $setup.meeting_id -cnotmatch '^[0-9]{9}$') {throw 'PREPARED_MEETING_INVALID'}
@@ -80,7 +94,7 @@ if($Mode -eq 'Formal') {
         if((Get-FileHash -LiteralPath $entry.Name -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.Value){throw 'RELEASE_INPUT_CHANGED'}
     }
     if((Get-FileHash -LiteralPath $Executable -Algorithm SHA256).Hash.ToLowerInvariant() -ne $gate.product_sha256){throw 'RELEASE_BINARY_CHANGED'}
-    if((Get-PSDrive -Name ([IO.Path]::GetPathRoot($workspace).Substring(0,1))).Free -lt $limits.minimum_free_disk_bytes){throw 'EVIDENCE_DISK_BUDGET_UNAVAILABLE'}
+    if((Get-PSDrive -Name $evidenceDrive).Free -lt $limits.minimum_free_disk_bytes){throw 'EVIDENCE_DISK_BUDGET_UNAVAILABLE'}
 }
 $null=New-Item -ItemType Directory -Path $Root
 $Root=(Resolve-Path -LiteralPath $Root).Path
@@ -95,17 +109,28 @@ $remote=$target.remote_root
 $remoteRun="$remote/pilot-$prefix"
 $plan=[ordered]@{schema=2;run_id=$run;root=$Root;mode=$Mode;seconds=$seconds;cycles=$cycles;meeting_id=$meetingId;
     share_seconds=60;log_pair_seconds=35;requires_context=$true;explicit_microphone_unmute=$true;
+    gpu_budget_observer=@{required=$true;scope='calling_process_all_enumerated_hardware_adapters_all_nodes';maximum_gap_ms=2000};
+    gpu_queue_observer=@{required=$true;scope='process_all_enumerated_hardware_adapters_all_scheduler_nodes';maximum_gap_ms=2000;queue_bounds='NOT_FROZEN'};
+    gpu_etw_observer=@{required=$true;scope='process_owned_device_context_scheduler_packet_lifecycle';
+        mode='lossless realtime owner-filtered JSONL';maximum_bytes=8589934592;storage_budget_status='PROVISIONAL_DIAGNOSTIC'};
     server_provider='aliyun';server_instance_id=$target.instance_id;
     server_cpu=$target.server_cpu;server_memory_gib=$target.server_memory_gib;server_bandwidth_mbps=$target.server_bandwidth_mbps;
+    collector_media_route=$target.collector_media_route;
     load=@{video_publishers=10;width=160;height=90;fps=5;video_bps_each=40000;video_codec='VP8';audio_bps=24000;simulcast=$false}}
 $plan | ConvertTo-Json -Depth 6 | Set-Content "$Root/plan.json" -Encoding UTF8
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'product_external_limits.json') -Destination "$Root/limits.json"
 $hashes=[ordered]@{}
-$paths=@($Executable,$AudioCollector,(Join-Path $workspace 'tests/uia/product_desktop.ps1'),(Join-Path $workspace 'tests/uia/product_desktop_cycle.ps1'),(Join-Path $workspace 'tests/uia/product_desktop_evidence.ps1')) +
-    @(Get-ChildItem -LiteralPath @($PSScriptRoot, (Join-Path $PSScriptRoot '../../selftests'), (Join-Path $PSScriptRoot '../../probes')) -File | Where-Object {$_.Name -match 'product_(pilot|audio|external|heap|meeting|aliyun)|invoke_product_external|verify_product'} | Select-Object -ExpandProperty FullName)
+$paths=@($Executable,$AudioCollector,$GpuTraceTool,[IO.Path]::ChangeExtension($GpuTraceTool,'.pdb'),
+    (Join-Path $PSScriptRoot '../diagnostics/gpu_budget/CMakeLists.txt'),
+    (Join-Path $PSScriptRoot '../diagnostics/gpu_budget/invoke_gpu_live_control.ps1'),
+    (Join-Path $workspace 'tests/uia/product_desktop.ps1'),(Join-Path $workspace 'tests/uia/product_desktop_cycle.ps1'),(Join-Path $workspace 'tests/uia/product_desktop_evidence.ps1')) +
+    @(Get-ChildItem -LiteralPath @($PSScriptRoot, (Join-Path $PSScriptRoot '../../selftests'), (Join-Path $PSScriptRoot '../../probes')) -File | Where-Object {$_.Name -match 'product_(pilot|audio|external|heap|meeting|aliyun|gpu_budget|gpu_queue|gpu_etw|gpu_trace)|invoke_product_external|verify_product|release_product_acceptance'} | Select-Object -ExpandProperty FullName)
 foreach($path in $paths){$hashes[$path]=(Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()}
 $hashes | ConvertTo-Json | Set-Content "$Root/executed-inputs.json" -Encoding UTF8
-$children=@();$uia=$null;$remoteStarted=$false;$failure=$null;$runExit=1
+$children=@();$uia=$null;$gpuTrace=$null;$remoteLaunchAttempted=$false;$failure=$null;$runExit=1
+$runBudget=$null;$uiaLaunchClock=$null;$identity=$null;$last=$null
+$probeMissingClock=$null;$resourceMissingClock=$null
+$cleanupErrors=[Collections.Generic.List[string]]::new()
 try {
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$PSScriptRoot/product_meeting_fixture.ps1" -PreparedDirectory $PreparedDirectory -OutputDirectory $Root -MinimumRemainingSeconds ($maximum+300)
     if($LASTEXITCODE){throw 'MEETING_PREFLIGHT_FAILED'}
@@ -120,9 +145,12 @@ try {
     $formalArg=if($Mode -eq 'Formal'){'--formal'}elseif($HeapDiagnostic){'--diagnostic'}else{''}
     Invoke-TestRemote "$remote/venv/bin/python --version; $remote/bootstrap/bin/uv pip freeze --python $remote/venv/bin/python" | Set-Content "$Root/remote-environment.txt" -Encoding UTF8
     if ($desktopBaseline) {$null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $desktopBaseline}
-    Invoke-TestRemote "nohup $remote/venv/bin/python $remote/product_pilot_remote.py --dependencies $remote/collector-python --config $($target.livekit_config) --output $remoteRun --run-id $run --room $meetingId --seconds $maximum $formalArg > $remote/pilot-$prefix.stderr 2>&1 < /dev/null &"
+    # Start the common capture budget before every remote/local collector.
+    $runBudget=Write-ProductRunBudget "$Root/run-clock.json" $run $maximum
+    # A transport timeout cannot prove that the submitted launch did not happen.
+    $remoteLaunchAttempted=$true
+    Invoke-TestRemote "nohup $remote/venv/bin/python $remote/product_pilot_local_route.py --target-config $remote/product_aliyun_target.json --run-id $run --result $remote/pilot-$prefix-route.json -- $remote/venv/bin/python $remote/product_pilot_remote.py --dependencies $remote/collector-python --config $($target.livekit_config) --output $remoteRun --run-id $run --room $meetingId --seconds $maximum $formalArg > $remote/pilot-$prefix.stderr 2>&1 < /dev/null &"
     if($LASTEXITCODE){throw 'REMOTE_START_FAILED'}
-    $remoteStarted=$true
     $ready=$false
     for($i=0;$i -lt 30;++$i){
         $response=Invoke-TestRemote "if test -f $remoteRun/ready.json; then cat $remoteRun/ready.json; else echo null; fi" 2>$null
@@ -139,16 +167,29 @@ try {
     $env:LIVEKIT_UIA_REMOTE_CONTEXT='1'
     $env:LIVEKIT_UIA_LOG_PAIR='1'
     $env:LIVEKIT_UIA_PILOT_PROBE="$Root/process-probe.jsonl"
+    $env:LIVEKIT_UIA_GPU_BUDGET_PROBE='1'
     if ($desktopBaseline) {$null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $desktopBaseline}
-    $resource=Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',"$PSScriptRoot/product_pilot_resources.ps1",'-UiaDirectory',"$Root/uia",'-Destination',"$Root/external-resources.jsonl",'-RunId',$run,'-MaximumSeconds',$maximum,'-AudioCollector',$AudioCollector) -RedirectStandardOutput "$Root/resources.stdout" -RedirectStandardError "$Root/resources.stderr"
+    $resource=Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',"$PSScriptRoot/product_pilot_resources.ps1",'-UiaDirectory',"$Root/uia",'-Destination',"$Root/external-resources.jsonl",'-RunId',$run,'-MaximumSeconds',$maximum,'-RunBudgetPath',"$Root/run-clock.json",'-AudioCollector',$AudioCollector) -RedirectStandardOutput "$Root/resources.stdout" -RedirectStandardError "$Root/resources.stderr"
     $children+=$resource
     $null=$resource.Handle
-    $archive=Start-Process python.exe -WindowStyle Hidden -PassThru -ArgumentList @("$PSScriptRoot/product_pilot_checkpoints.py",'--probe',"$Root/process-probe.jsonl",'--result',"$Root/uia/uia-result.json",'--output',"$Root/checkpoint-archive",'--run-id',$run,'--seconds',$maximum,'--maximum-bytes',$archiveBudget) -RedirectStandardOutput "$Root/archive.stdout" -RedirectStandardError "$Root/archive.stderr"
+    $archive=Start-Process python.exe -WindowStyle Hidden -PassThru -ArgumentList @("$PSScriptRoot/product_pilot_checkpoints.py",'--probe',"$Root/process-probe.jsonl",'--result',"$Root/uia/uia-result.json",'--output',"$Root/checkpoint-archive",'--run-id',$run,'--seconds',$maximum,'--run-budget',"$Root/run-clock.json",'--maximum-bytes',$archiveBudget) -RedirectStandardOutput "$Root/archive.stdout" -RedirectStandardError "$Root/archive.stderr"
     $children+=$archive
     $null=$archive.Handle
-    $diagnostic=Start-Process python.exe -WindowStyle Hidden -PassThru -ArgumentList @("$PSScriptRoot/product_pilot_diagnostics.py",'--root',$Root,'--watch','--seconds',$maximum) -RedirectStandardOutput "$Root/diagnostic.stdout" -RedirectStandardError "$Root/diagnostic.stderr"
+    $diagnostic=Start-Process python.exe -WindowStyle Hidden -PassThru -ArgumentList @("$PSScriptRoot/product_pilot_diagnostics.py",'--root',$Root,'--watch','--seconds',$maximum,'--run-budget',"$Root/run-clock.json") -RedirectStandardOutput "$Root/diagnostic.stdout" -RedirectStandardError "$Root/diagnostic.stderr"
     $children+=$diagnostic
     $null=$diagnostic.Handle
+    $gpuDirectory=Join-Path $Root 'gpu-etw'
+    $null=New-Item -ItemType Directory -Path $gpuDirectory
+    $gpuSession='B14-Gpu-Release-'+$run
+    $gpuTrace=Start-Process $GpuTraceTool -WindowStyle Hidden -PassThru -ArgumentList @('--live',$gpuSession,('"'+$gpuDirectory+'"'),$maximum,$plan.gpu_etw_observer.maximum_bytes) -RedirectStandardOutput "$Root/gpu-trace.stdout" -RedirectStandardError "$Root/gpu-trace.stderr"
+    $children+=$gpuTrace;$null=$gpuTrace.Handle
+    $gpuDeadline=[DateTime]::UtcNow.AddSeconds(10)
+    while(!(Test-Path "$gpuDirectory/trace-ready.json")){
+        if($gpuTrace.HasExited -or [DateTime]::UtcNow -gt $gpuDeadline){throw 'GPU_ETW_COLLECTOR_NOT_READY'}
+        Start-Sleep -Milliseconds 100
+    }
+    $gpuHeartbeatClock=[Diagnostics.Stopwatch]::StartNew()
+    $env:LIVEKIT_UIA_GPU_ETW_DIRECTORY=$gpuDirectory
     $uiaArgs=@('-NoProfile','-ExecutionPolicy','Bypass','-File',"$workspace/tests/uia/product_desktop.ps1",'-Executable',$Executable,'-OutputDirectory',"$Root/uia",'-RunId',$run,'-Cycles',$cycles,'-MinimumSeconds',$seconds,'-ShareSeconds',60,'-LogPairSeconds',35,'-StopSettleSeconds',10,'-RoomSettleSeconds',10)
     if ($DedicatedDesktopSessionId -gt 0) {$uiaArgs+=@('-DedicatedDesktopSessionId',$DedicatedDesktopSessionId)}
     if($Mode -eq 'Pilot'){$uiaArgs+='-Pilot'}
@@ -161,77 +202,113 @@ try {
     if($HeapPageCheck){$uiaArgs+='-HeapPageCheck'}
     if($CrashDiagnostic){$uiaArgs+='-CrashDiagnostic'}
     if($IsolateUiaCycles){$uiaArgs+='-IsolateUiaCycles'}
+    $uiaLaunchClock=[Diagnostics.Stopwatch]::StartNew()
     $uia=Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList $uiaArgs -RedirectStandardOutput "$Root/uia.stdout" -RedirectStandardError "$Root/uia.stderr"
     $uiaHandle=$uia.Handle
+    Remove-Item Env:LIVEKIT_UIA_GPU_BUDGET_PROBE -ErrorAction SilentlyContinue
+    Remove-Item Env:LIVEKIT_UIA_GPU_ETW_DIRECTORY -ErrorAction SilentlyContinue
     Remove-Item Env:LIVEKIT_UIA_PASSWORD
-    @{uia_pid=$uia.Id;resource_pid=$resource.Id;archive_pid=$archive.Id;diagnostic_pid=$diagnostic.Id;run_id=$run} | ConvertTo-Json | Set-Content "$Root/collectors.json" -Encoding UTF8
-    $started=[DateTime]::UtcNow
+    @{uia_pid=$uia.Id;resource_pid=$resource.Id;archive_pid=$archive.Id;diagnostic_pid=$diagnostic.Id;gpu_trace_pid=$gpuTrace.Id;gpu_trace_session=$gpuSession;run_id=$run} | ConvertTo-Json | Set-Content "$Root/collectors.json" -Encoding UTF8
     while(!$uia.WaitForExit(1000)) {
         if ($desktopBaseline) {
             Get-DesktopEvidenceState | ConvertTo-Json -Compress | Add-Content "$Root/desktop-observations.jsonl" -Encoding UTF8
             $null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $desktopBaseline
         }
-        if(([DateTime]::UtcNow-$started).TotalSeconds -gt $maximum){throw 'RUN_WATCHDOG_TIMEOUT'}
-        if((Get-PSDrive -Name ([IO.Path]::GetPathRoot($workspace).Substring(0,1))).Free -lt 5GB){throw 'EVIDENCE_DISK_RESERVE_EXHAUSTED'}
-        if(Test-Path "$Root/uia/uia-result.json"){continue}
-        if($archive.HasExited -or $diagnostic.HasExited){throw 'COLLECTOR_STOPPED_BEFORE_UIA_COMPLETION'}
-        if(Test-Path "$Root/uia/uia-actions.jsonl") {
-            $last=Get-Content "$Root/uia/uia-actions.jsonl" -Tail 1 | ConvertFrom-Json
-            $idle=([DateTime]::UtcNow-[DateTime]$last.utc).TotalSeconds
-            if($resource.HasExited -and $last.action -ne 'process_exit'){throw 'RESOURCE_COLLECTOR_STOPPED_EARLY'}
-            # Includes the deliberate per-cycle dwell through the 8h schedule.
-            if($idle -gt 400){throw 'UIA_OPERATION_WATCHDOG_TIMEOUT'}
+        if((Get-ProductRunBudgetElapsed $runBudget) -gt $maximum){throw 'RUN_WATCHDOG_TIMEOUT'}
+        $diskReserve=5GB
+        if((Get-PSDrive -Name $evidenceDrive).Free -lt $diskReserve){throw 'EVIDENCE_DISK_RESERVE_EXHAUSTED'}
+        if(Test-ProductEarlyObservers $Root $run $Mode $cycles $seconds $archive $diagnostic $gpuTrace $gpuDirectory $gpuHeartbeatClock $identity $plan.gpu_etw_observer.maximum_bytes){continue}
+        $last=$null
+        if(Test-Path "$Root/uia/uia-actions.jsonl"){$last=Read-LatestCompleteUiaAction "$Root/uia/uia-actions.jsonl"}
+        # The driver atomically publishes identity before its first action.
+        # Read action first so a concurrently published action cannot outrun a
+        # null identity cached earlier in this observer iteration.
+        if(!$identity -and (Test-Path "$Root/uia/product-identity.json")){
+            $identity=Read-ProductObserverSnapshot "$Root/uia/product-identity.json"
+            $probeMissingClock=[Diagnostics.Stopwatch]::StartNew()
         }
-        if(Test-Path "$Root/process-probe.jsonl"){
-            $health=Get-Content "$Root/process-probe.jsonl" -Tail 2 | ForEach-Object {try{$_ | ConvertFrom-Json}catch{}} | Select-Object -Last 1
-            if($health -and $last.action -ne 'process_exit' -and ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()-$health.utc_ms) -gt 15000){throw 'PROCESS_PROBE_STALE'}
-            if($health -and ($health.history.queue_drops -or $health.history.pending_records_dropped -or $health.history.write_failures -or $health.diagnostic.dropped_ordinary -or $health.diagnostic.dropped_critical -or $health.diagnostic.sink_failures)){
-                $health | ConvertTo-Json -Depth 10 | Set-Content "$Root/watchdog-failure-probe.json" -Encoding UTF8
-                throw 'LIVE_ZERO_LOSS_GATE_FAILED'
+        $nowMs=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+        $progress=$null;$liveProduct=$null
+        try{
+            if($last -and (Get-ProductObserverAgeMilliseconds $last.utc $nowMs) -gt 400000 -and
+               (Test-Path "$Root/uia/product-lifetime-progress.json")){
+                $progress=Read-ProductObserverSnapshot "$Root/uia/product-lifetime-progress.json"
+                if($identity){$liveProduct=Get-Process -Id $identity.pid -ErrorAction SilentlyContinue}
             }
+            $nowMs=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            Assert-ProductActionProgress $last $run $uiaLaunchClock.Elapsed.TotalSeconds $nowMs $progress $identity $cycles $seconds $liveProduct
+        }finally{if($liveProduct){$liveProduct.Dispose()}}
+        $exiting=($last -and $last.action -eq 'process_exit')
+        if($last -and !$resourceMissingClock){$resourceMissingClock=[Diagnostics.Stopwatch]::StartNew()}
+        if($resource.HasExited -and $last -and !$exiting){throw 'RESOURCE_COLLECTOR_STOPPED_EARLY'}
+        if($resourceMissingClock){
+            $resourceHealth=$null
+            if(Test-Path "$Root/external-resources.jsonl"){
+                $resourceRows=@(Read-ProductPilotCompleteJsonlTail -Path "$Root/external-resources.jsonl" -Count 1)
+                if($resourceRows.Count){$resourceHealth=$resourceRows[0]|ConvertFrom-Json -ErrorAction Stop}
+            }
+            $nowMs=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            Assert-ProductResourceHealth $resourceHealth $run $identity $resourceMissingClock.Elapsed.TotalSeconds $nowMs $exiting
+            if($resourceHealth){$resourceMissingClock.Restart()}
+        }
+        $health=$null
+        if(Test-Path "$Root/process-probe.jsonl"){
+            $health=Read-ProductPilotProbeTail -Path "$Root/process-probe.jsonl" -Count 2 -MaximumBytes 1048576 | ForEach-Object {try{$_ | ConvertFrom-Json}catch{}} | Select-Object -Last 1
+        }
+        if($probeMissingClock){
+            $nowMs=[DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+            try{Assert-ProductNativeHealth $health $run $identity $probeMissingClock.Elapsed.TotalSeconds $nowMs $exiting}
+            catch{
+                if($_.Exception.Message -eq 'LIVE_ZERO_LOSS_GATE_FAILED'){
+                    try{$health|ConvertTo-Json -Depth 10|Set-Content "$Root/watchdog-failure-probe.json" -Encoding UTF8}catch{}
+                }
+                throw
+            }
+            if($health){$probeMissingClock.Restart()}
         }
     }
     $uia.Refresh()
-    $result=Get-Content "$Root/uia/uia-result.json" -Raw | ConvertFrom-Json
-    if($result.verdict -notin @('PILOT_COMPLETE','UIA_COMPLETE')){throw 'UIA_RUN_FAILED'}
+    if($uia.ExitCode -ne 0 -or !(Test-ProductUiaCompletion $Root $run $Mode $cycles $seconds)){throw 'UIA_RUN_FAILED'}
     $runExit=0
 } catch {
     $failure=$_.Exception.Message
-    @{run_id=$run;verdict='FAIL';reason=$failure;utc=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content "$Root/controller-result.json" -Encoding UTF8
-    @{run_id=$run;reason=$failure} | ConvertTo-Json | Set-Content "$Root/collector-stop.json" -Encoding UTF8
-    if(Test-Path "$Root/uia/uia-actions.jsonl") {
-        $last=Get-Content "$Root/uia/uia-actions.jsonl" -Tail 1 | ConvertFrom-Json
-        $product=Get-Process -Id $last.pid -ErrorAction SilentlyContinue
-        if($product -and $product.Path -eq $Executable){Stop-Process -Id $product.Id}
-    }
-    if($uia -and !$uia.HasExited){Stop-Process -Id $uia.Id}
+    try{@{run_id=$run;verdict='FAIL';reason=$failure;utc=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json|Set-Content "$Root/controller-result.json" -Encoding UTF8}catch{$cleanupErrors.Add('CONTROLLER_FAILURE_RECEIPT_WRITE_FAILED')}
+    try{@{run_id=$run;reason=$failure}|ConvertTo-Json|Set-Content "$Root/collector-stop.json" -Encoding UTF8}catch{$cleanupErrors.Add('COLLECTOR_STOP_WRITE_FAILED')}
+    # Identity is published before first-window discovery. A collector can fail
+    # before the first UIA action; do not orphan that product or trust PID alone.
+    $product=$null
+    try{if(Test-Path "$Root/uia/product-identity.json") {
+        $identity=Get-Content "$Root/uia/product-identity.json" -Raw | ConvertFrom-Json
+        $product=Get-Process -Id $identity.pid -ErrorAction SilentlyContinue
+        if($product -and $identity.run_id -eq $run -and
+           $product.Path -eq $Executable -and $identity.executable -eq $Executable -and
+           $product.StartTime.ToUniversalTime().Ticks -eq [long]$identity.start_ticks){
+            $product.Kill();$null=$product.WaitForExit(5000)
+        }
+    }}catch{$cleanupErrors.Add('PRODUCT_FAILURE_CLEANUP_FAILED')}finally{if($product){$product.Dispose()}}
+    if($uia){try{$uia.Refresh();if(!$uia.HasExited){$uia.Kill();$null=$uia.WaitForExit(5000)}}catch{$cleanupErrors.Add('UIA_FAILURE_CLEANUP_FAILED')}}
 } finally {
+    Remove-Item Env:LIVEKIT_UIA_GPU_BUDGET_PROBE -ErrorAction SilentlyContinue
+    Remove-Item Env:LIVEKIT_UIA_GPU_ETW_DIRECTORY -ErrorAction SilentlyContinue
     Remove-Item Env:LIVEKIT_UIA_PASSWORD -ErrorAction SilentlyContinue
-    if($remoteStarted){
+    if($remoteLaunchAttempted){
         try {
-            Invoke-TestRemote "if test -d $remoteRun; then touch $remoteRun/stop; fi"
-            for($i=0;$i -lt 15;++$i){
-                $last=Invoke-TestRemote "if test -f $remoteRun/remote.jsonl; then tail -n 1 $remoteRun/remote.jsonl; else echo null; fi" | ConvertFrom-Json
-                if($last.event -eq 'collector.stopped'){break}
-                Start-Sleep -Seconds 1
-            }
-            if ($last.event -ne 'collector.stopped') {$runExit=1}
-            & workbench download "$remoteRun/remote.jsonl" "$Root/remote.jsonl" -i $target.instance_id -r $target.region
-            if ($LASTEXITCODE) {$runExit=1}
+            $shutdownArgs=@('--root',$Root,'--run-id',$run,'--launch-attempted')
+            & python "$PSScriptRoot/product_pilot_shutdown.py" @shutdownArgs
+            if($LASTEXITCODE){throw 'REMOTE_SHUTDOWN_OR_EVIDENCE_FAILED'}
         } catch {
             $runExit=1
-            @{reason='REMOTE_CLEANUP_OR_EVIDENCE_FAILED';run_id=$run} | ConvertTo-Json | Set-Content "$Root/remote-cleanup-failure.json"
+            $cleanupErrors.Add('REMOTE_CLEANUP_OR_EVIDENCE_FAILED')
+            try{@{reason='REMOTE_CLEANUP_OR_EVIDENCE_FAILED';run_id=$run}|ConvertTo-Json|Set-Content "$Root/remote-cleanup-failure.json"}catch{$cleanupErrors.Add('REMOTE_FAILURE_RECEIPT_WRITE_FAILED')}
         }
     }
-    $childResults=@(foreach($child in $children){
-        $timedOut=!$child.WaitForExit(10000)
-        if($timedOut){Stop-Process -Id $child.Id; $child.WaitForExit(); $runExit=1}
-        $child.Refresh()
-        if($null -eq $child.ExitCode -or $child.ExitCode -ne 0){$runExit=1}
-        @{pid=$child.Id;exit_code=$child.ExitCode;forced_stop=$timedOut}
-    })
-    @{run_id=$run;collectors=$childResults} | ConvertTo-Json -Depth 4 | Set-Content "$Root/collector-exits.json" -Encoding UTF8
+    $cleanup=Invoke-ProductCollectorCleanup $children $gpuTrace $GpuTraceTool $gpuSession $gpuDirectory
+    if(!$cleanup.passed){$runExit=1}
+    foreach($cleanupError in $cleanup.errors){$cleanupErrors.Add($cleanupError)}
+    try{@{run_id=$run;collectors=$cleanup.collectors;cleanup_errors=@($cleanupErrors.ToArray())}|ConvertTo-Json -Depth 5|Set-Content "$Root/collector-exits.json" -Encoding UTF8}
+    catch{$cleanupErrors.Add('COLLECTOR_EXIT_RECEIPT_WRITE_FAILED');$runExit=1}
 }
+try{
 if(Test-Path "$Root/process-probe.jsonl"){
     python "$PSScriptRoot/product_pilot_diagnostics.py" --root $Root
     if($LASTEXITCODE){$runExit=1}
@@ -247,6 +324,11 @@ if($Mode -eq 'Pilot' -and (Test-Path "$Root/uia/uia-result.json") -and $u.verdic
     python "$PSScriptRoot/verify_product_pilot.py" --root $Root
     if($LASTEXITCODE){$runExit=1}
 }
-@{run_id=$run;exit_code=$runExit;verdict=$(if($runExit -eq 0){'EVIDENCE_COMPLETE'}else{'FAIL'})} | ConvertTo-Json | Set-Content "$Root/runner-exit.json" -Encoding UTF8
+}catch{$runExit=1;$cleanupErrors.Add('TERMINAL_REVIEW_FAILED')}
+finally{
+    if($cleanupErrors.Count){$runExit=1}
+    try{@{run_id=$run;exit_code=$runExit;verdict=$(if($runExit -eq 0){'EVIDENCE_COMPLETE'}else{'FAIL'});cleanup_errors=@($cleanupErrors.ToArray())}|ConvertTo-Json -Depth 4|Set-Content "$Root/runner-exit.json" -Encoding UTF8}
+    catch{$runExit=1;Write-Error 'RUNNER_EXIT_RECEIPT_WRITE_FAILED' -ErrorAction Continue}
+}
 Write-Output "RUN_ROOT=$Root"
 exit $runExit

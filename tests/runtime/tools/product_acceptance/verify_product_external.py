@@ -9,6 +9,7 @@ import argparse
 from collections import Counter, defaultdict
 import hashlib
 import json
+import math
 from pathlib import Path
 import statistics
 from datetime import datetime, timezone
@@ -17,7 +18,8 @@ from product_pilot_performance import paired_window
 from product_pilot_correlation import correlate
 from product_pilot_audio import review_outbound_audio
 from product_pilot_archive import read_segment
-from verify_product_acceptance import validate_bundle, EvidenceError
+from product_pilot_load import review_lifecycle
+from verify_product_acceptance import validate_bundle, EvidenceError, instant
 
 
 def read(path):
@@ -33,6 +35,88 @@ def records(path):
 
 def timestamp(r):
     return r["utc_ms"]/1000 if "utc_ms" in r else datetime.fromisoformat(r["utc"].replace("Z", "+00:00")).timestamp()
+
+
+def product_lifetime_floor(result, identity, run, actions):
+    """Bind the pre-close monotonic product lifetime; old schemas stay UNKNOWN."""
+    origin=result.get("product_first_live")
+    fields=("pid","start_ticks","executable","utc","run_clock_elapsed_origin_seconds","clock_source","origin_kind")
+    proof=dict(passed=False,status="UNKNOWN",reason="product_lifetime_fields_missing")
+    if (not isinstance(origin,dict) or any(k not in origin for k in fields)
+            or any(k not in result for k in ("product_live_elapsed_seconds_before_close","product_lifetime_floor_required_seconds"))):
+        return proof
+    proof.update(status="FAIL",reason="product_lifetime_identity_or_clock_invalid")
+    pid,ticks,executable=(origin[k] for k in ("pid","start_ticks","executable"))
+    if (type(run) is not str or not run or result.get("run_id") != run or identity.get("run_id") != run
+            or type(pid) is not int or pid <= 0 or type(identity.get("pid")) is not int or identity["pid"] != pid
+            or type(ticks) is not int or not 0 < ticks <= (1 << 63)-1
+            or type(identity.get("start_ticks")) is not int or identity["start_ticks"] != ticks
+            or type(executable) is not str or not executable or not Path(executable).is_absolute()
+            or identity.get("executable") != executable or type(origin["utc"]) is not str
+            or origin["clock_source"] != "System.Diagnostics.Stopwatch" or origin["origin_kind"] != "first_live_requested"):
+        return proof
+    try:
+        first_live_utc=instant(origin["utc"])
+    except (EvidenceError,ValueError):
+        return proof
+    if first_live_utc.utcoffset().total_seconds() != 0:
+        return proof
+    first_requested=next((a for a in actions if a.get("phase") == "requested" and a.get("run_id") == run
+        and type(a.get("pid")) is int and a["pid"] == pid),None)
+    if first_requested is None or any(k not in first_requested for k in ("elapsed_seconds","utc")):
+        proof.update(status="UNKNOWN",reason="product_first_live_requested_frame_missing")
+        return proof
+    exit_requested=next((a for a in reversed(actions) if a.get("action") == "process_exit"
+        and a.get("phase") == "requested" and a.get("run_id") == run
+        and type(a.get("pid")) is int and a["pid"] == pid),None)
+    if exit_requested is None or "elapsed_seconds" not in exit_requested:
+        proof.update(status="UNKNOWN",reason="product_exit_requested_frame_missing")
+        return proof
+    elapsed=result["product_live_elapsed_seconds_before_close"]
+    required=result["product_lifetime_floor_required_seconds"]
+    minimum=result.get("minimum_seconds")
+    if type(required) is not int or type(minimum) is not int:
+        return proof
+    values=(origin["run_clock_elapsed_origin_seconds"],first_requested["elapsed_seconds"],
+        exit_requested["elapsed_seconds"],elapsed,required,minimum)
+    # Exact JSON types reject bool/string; Python ints are finite without a lossy float cast.
+    if any(not (type(v) is int or type(v) is float and math.isfinite(v)) or v < 0 for v in values):
+        return proof
+    if (origin["run_clock_elapsed_origin_seconds"] != first_requested["elapsed_seconds"]
+            or origin["utc"] != first_requested["utc"]):
+        proof["reason"]="product_first_live_requested_frame_mismatch"
+        return proof
+    try:
+        requested_elapsed=exit_requested["elapsed_seconds"]-first_requested["elapsed_seconds"]
+    except OverflowError:
+        proof["reason"]="product_lifetime_requested_clock_invalid"
+        return proof
+    if type(requested_elapsed) is float and not math.isfinite(requested_elapsed):
+        proof["reason"]="product_lifetime_requested_clock_invalid"
+        return proof
+    proof.update(product_first_live=origin,product_live_elapsed_seconds_before_close=elapsed,
+        first_requested_to_exit_requested_elapsed_seconds=requested_elapsed,
+        product_lifetime_floor_required_seconds=required,reason="product_lifetime_floor_not_reached")
+    passed=required >= 28800 and required == minimum and elapsed >= required and requested_elapsed >= required
+    proof.update(passed=passed,status="PASS" if passed else "FAIL")
+    if passed:
+        proof.pop("reason")
+    return proof
+
+
+def collector_exits_complete(plan, collectors, exits):
+    roles=["resource_pid","archive_pid","diagnostic_pid"]
+    if plan.get("gpu_etw_observer"):
+        roles.append("gpu_trace_pid")
+        if collectors.get("gpu_trace_session") != "B14-Gpu-Release-"+plan["run_id"]:
+            return False
+    expected=[collectors.get(k) for k in roles]
+    rows=exits.get("collectors",[])
+    return (collectors.get("run_id")==plan["run_id"]==exits.get("run_id")
+        and all(type(p) is int and p>0 for p in expected) and len(set(expected))==len(expected)
+        and isinstance(rows,list) and len(rows)==len(expected)
+        and all(type(r.get("pid")) is int and r["pid"]>0 and r.get("exit_code")==0 and r.get("forced_stop") is False for r in rows)
+        and {r["pid"] for r in rows}==set(expected))
 
 
 def groups(path, key, run):
@@ -131,6 +215,7 @@ def interrupted_review(root, error):
 def review(root):
     plan, result, limits = read(root/"plan.json"), read(root/"uia/uia-result.json"), read(root/"limits.json")
     run = plan["run_id"]
+    identity = read(root/"uia/product-identity.json")
     formal = plan["mode"] == "Formal"
     count = 100 if formal else plan["cycles"]
     if not formal and (count < 2 or plan["seconds"] < 240 * count):
@@ -320,23 +405,38 @@ def review(root):
             growth=statistics.median(r[field] for r in release_details[-10:])-statistics.median(r[field] for r in release_details[:10]) if available else None
             report["resource_growth"][field]=dict(growth=growth,limit=limit,passed=available and growth<=limit)
     final_checks={}
+    load_ready, load_stopped = [], []
     for name,file in (("audio","product-audio.jsonl"),("remote","remote.jsonl")):
         last=None
-        for last in records(root/file): pass
+        for last in records(root/file):
+            if name == "remote" and last.get("event") == "load.ready":
+                load_ready.append(last)
+            if name == "remote" and last.get("event") == "load.stopped":
+                load_stopped.append(last)
         final_checks[name+"_complete"]=bool(last) and last.get("event")=="collector.stopped" and last.get("status")=="COMPLETE"
+    final_checks["isolated_load_lifecycle_complete"] = review_lifecycle(load_ready, load_stopped, run)
     last=None
     for last in records(root/"external-resources.jsonl"): pass
     final_checks["process_released"]=bool(last) and last.get("process_alive") is False
     watcher=read(root/"diagnostic-watcher-result.json")
     final_checks["diagnostic_watcher_complete"]=watcher["run_id"]==run and watcher["status"]=="COMPLETE" and watcher["events"]==len(diagnostics)
     final_checks["diagnostic_privacy_schema"]=watcher.get("privacy_schema_violations")==0
+    route=read(root/"server-route.json")
+    final_checks["collector_local_route_complete"]=(route["run_id"]==run and
+        route["status"]=="COMPLETE" and route["cleanup_complete"] is True and
+        route["child_exit_code"]==0 and route["matched_connections"]>0 and
+        route["private_route_device"]=="lo" and
+        route["server_config_sha256"]==plan["collector_media_route"]["server_config_sha256"])
     exits=read(root/"collector-exits.json")
-    final_checks["collectors_exited_normally"]=exits["run_id"]==run and len(exits["collectors"])==3 and all(
-        e["exit_code"]==0 and not e["forced_stop"] for e in exits["collectors"])
+    final_checks["collectors_exited_normally"]=collector_exits_complete(plan,read(root/"collectors.json"),exits)
     witness=read(root/"diagnostic-sequences.json")
     final_checks["diagnostic_final_matches_continuous"]=witness["run_id"]==run and [i for s in witness["segments"] for i in s["sequences"]]==[d["event_sequence"] for d in diagnostics]
+    if formal:
+        product_lifetime=product_lifetime_floor(result,identity,run,actions)
+        report["product_lifetime_floor"]=product_lifetime
+        final_checks["product_lifetime_floor"]=product_lifetime["passed"]
     report["final_checks"]=final_checks
-    successful=result["cycles_completed"]==count and result["verdict"]==("UIA_COMPLETE" if formal else "PILOT_COMPLETE") and (not formal or duration>=28800) and report["cycle_counts"].get("PASS")==count and exit_evidence["exit_code"]==0 and crashes["count"]==0 and all(r["passed"] for r in report["resource_growth"].values()) and all(final_checks.values()) and (not formal or len(release_details)==100)
+    successful=result["cycles_completed"]==count and result["verdict"]==("UIA_COMPLETE" if formal else "PILOT_COMPLETE") and report["cycle_counts"].get("PASS")==count and exit_evidence["exit_code"]==0 and crashes["count"]==0 and all(r["passed"] for r in report["resource_growth"].values()) and all(final_checks.values()) and (not formal or len(release_details)==100)
     report["verdict"]="PASS_WITH_DEFERRED" if successful else "FAIL"
     report["reviewed_utc"]=datetime.now(timezone.utc).isoformat()
     (root/"external-review.json").write_text(json.dumps(report,indent=2)+"\n")

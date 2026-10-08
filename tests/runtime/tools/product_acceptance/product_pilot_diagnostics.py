@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import time
 from product_pilot_privacy import validate_serialized_event
+from product_pilot_run_budget import load_run_budget
 
 
 def safe_event(event, process_run):
@@ -40,11 +41,13 @@ def safe_event(event, process_run):
     return result
 
 
-def watch(root, seconds):
-    deadline, next_sequence, offsets = time.monotonic() + seconds, 1, {}
+def watch(root, seconds, run_budget=None):
+    run = json.loads((root / "plan.json").read_text(encoding="utf-8-sig"))["run_id"] if run_budget else None
+    budget = load_run_budget(run_budget, run, seconds)
+    next_sequence, offsets = 1, {}
     destination = root / "diagnostic-events.jsonl"
     with destination.open("x", encoding="utf-8", buffering=1) as output:
-        while time.monotonic() < deadline:
+        while not budget.expired():
             probe_path = root / "process-probe.jsonl"
             if not probe_path.exists():
                 time.sleep(.2)
@@ -55,6 +58,8 @@ def watch(root, seconds):
                 time.sleep(.2)
                 continue
             probe = json.loads(first)
+            if run is not None and probe.get("run_id") != run:
+                raise ValueError("diagnostic_probe_run_mismatch")
             process_run = probe["process_run_id"]
             if not re.fullmatch(r"[0-9a-f]{32}", process_run):
                 raise ValueError("invalid_process_run")
@@ -134,8 +139,9 @@ if __name__ == "__main__":
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--watch", action="store_true")
     parser.add_argument("--seconds", type=int, default=600)
+    parser.add_argument("--run-budget", type=Path, help="Required by the production invoker; one shared QPC marker")
     args = parser.parse_args()
     if args.watch:
-        watch(args.root, args.seconds)
+        watch(args.root, args.seconds, args.run_budget)
     else:
         collect(args.root)

@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import time
 from product_pilot_archive import encode_segment
+from product_pilot_run_budget import load_run_budget
 
 def read_committed(path):
     # ReplaceFile/MoveFileEx can briefly deny a new Windows reader while an
@@ -31,9 +32,10 @@ def collect(args):
     total = 0
     raw_total = 0
     sequence = 0
-    deadline = time.monotonic() + args.seconds
+    budget = load_run_budget(getattr(args, "run_budget", None), args.run_id, args.seconds)
     settled = None
     manifests = {}
+    interrupted_seen = False
     with (args.output / "collector.jsonl").open("x", encoding="utf-8", buffering=1) as log:
         def emit(event, **values):
             nonlocal sequence
@@ -43,7 +45,7 @@ def collect(args):
                 utc=datetime.now(timezone.utc).isoformat(), **values)) + "\n")
 
         try:
-            while time.monotonic() < deadline:
+            while settled is not None or not budget.expired():
                 if args.probe.exists():
                     # First complete row gives immutable process/run/root identity.
                     with args.probe.open(encoding="utf-8-sig") as stream:
@@ -96,13 +98,17 @@ def collect(args):
                             (destination / ("manifest-%020d.json" % manifest["last_committed_revision"])).write_bytes(raw)
                             manifests[session] = raw
                 interrupted = (args.result.parent.parent / "collector-stop.json").exists()
-                if args.result.exists() or interrupted:
-                    settled = settled or time.monotonic()
+                interrupted_seen = interrupted_seen or interrupted
+                if args.result.exists() or interrupted or settled is not None:
+                    if settled is None:
+                        if not interrupted and budget.expired():
+                            raise TimeoutError("pilot_result_not_observed_before_run_deadline")
+                        settled = time.monotonic()
                     if time.monotonic() - settled >= 3:
-                        emit("collector.stopped", status="INTERRUPTED" if interrupted else "COMPLETE",
+                        emit("collector.stopped", status="INTERRUPTED" if interrupted_seen else "COMPLETE",
                              segments=len(known), bytes=total, raw_bytes=raw_total,
                              storage_encoding="gzip", maximum_bytes=args.maximum_bytes)
-                        return 1 if interrupted else 0
+                        return 1 if interrupted_seen else 0
                 time.sleep(.5)
             raise TimeoutError("pilot_result_not_observed")
         except Exception as error:
@@ -117,5 +123,6 @@ if __name__ == "__main__":
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--seconds", type=int, default=600)
+    parser.add_argument("--run-budget", type=Path, help="Required by the production invoker; one shared QPC marker")
     parser.add_argument("--maximum-bytes", type=int, default=1024**3)
     raise SystemExit(collect(parser.parse_args()))

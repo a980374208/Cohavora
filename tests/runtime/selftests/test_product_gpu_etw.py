@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"tools/product_acceptance"))
 from product_gpu_etw import EVENT_IDS, LAYOUT, reconstruct, release_observation, interval_observation, validate_capture, validate_live_capture, review_hybrid_cycle, validate_frozen_limits
+from verify_product_external import collector_exits_complete
 
 BASE = 134354900000000000
 PID = 501
@@ -34,7 +35,26 @@ def decoded(rows):
 
 
 class GpuEtwContracts(unittest.TestCase):
+    def test_collector_lifecycle_requires_exact_role_pids_including_gpu(self):
+        plan=dict(run_id="run",gpu_etw_observer={"required":True})
+        collectors=dict(run_id="run",resource_pid=1,archive_pid=2,diagnostic_pid=3,gpu_trace_pid=4,gpu_trace_session="B14-Gpu-Release-run")
+        exits=dict(run_id="run",collectors=[dict(pid=p,exit_code=0,forced_stop=False) for p in range(1,5)])
+        self.assertTrue(collector_exits_complete(plan,collectors,exits))
+        for kind in ("missing","foreign","duplicate","forced","failed","session"):
+            changed=copy.deepcopy(exits);identity=copy.deepcopy(collectors)
+            if kind=="missing":changed["collectors"].pop()
+            elif kind=="foreign":changed["collectors"][-1]["pid"]=99
+            elif kind=="duplicate":changed["collectors"][-1]["pid"]=3
+            elif kind=="forced":changed["collectors"][-1]["forced_stop"]=True
+            elif kind=="failed":changed["collectors"][-1]["exit_code"]=1
+            else:identity["gpu_trace_session"]="foreign-session"
+            self.assertFalse(collector_exits_complete(plan,identity,changed),kind)
 
+    def test_legacy_three_collector_contract_remains_exact(self):
+        plan=dict(run_id="run")
+        collectors=dict(run_id="run",resource_pid=1,archive_pid=2,diagnostic_pid=3)
+        exits=dict(run_id="run",collectors=[dict(pid=p,exit_code=0,forced_stop=False) for p in range(1,4)])
+        self.assertTrue(collector_exits_complete(plan,collectors,exits))
     def test_kernel_header_pid_can_complete_owned_work(self):
         rows=fixture(); proof=reconstruct(rows,PID,decoded(rows))
         self.assertEqual(proof["counts"]["queue_completes"],1)
