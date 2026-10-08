@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import re
 import statistics
+from product_pilot_desktop_policy import bind_desktop_input_policy
 
 
 def read(path): return json.loads(path.read_text(encoding="utf-8-sig"))
@@ -13,6 +14,8 @@ def render(root,gate):
     result=read(root/"external-review.json")
     plan=read(root/"plan.json")
     runner=read(root/"runner-exit.json")
+    release=read(gate)
+    input_policy=bind_desktop_input_policy(plan,result,release)
     if plan["mode"]!="Formal": raise ValueError("formal_report_requires_formal_run")
     counts={k:result.get("cycle_counts",{}).get(k,0) for k in
             ("PASS","FAIL","CRASH","TIMEOUT","BLOCKED","NETWORK_FAILURE")}
@@ -23,7 +26,9 @@ def render(root,gate):
         f"Run ID：`{plan['run_id']}`。证据目录：`{root.resolve()}`。",
         f"开始：{result.get('started_utc','UNKNOWN')}；结束：{result.get('finished_utc','UNKNOWN')}。",
         f"运行秒数：{result.get('duration_seconds','UNKNOWN')}；周期统计：`{json.dumps(counts)}`。",
-        "", "本机产品 --debug；UIA 控件树 + Pattern。腾讯 2 vCPU / 2 GiB / 3 Mbps；固定 10 路 160×90 / 5 fps / VP8 / 40 kbps + 1 路 24 kbps 音频，simulcast off。",
+        f"用户输入策略：`{input_policy}`。" + ("输入变化仅作故障诊断旁证，不自动中止；不证明严格独占输入条件。" if input_policy == "diagnostic" else "输入证据不可用或 tick 变化中止运行。"),
+        "", f"构建配置：`{release['validation'].get('configuration','UNKNOWN')}`；产品 SHA-256：`{release['product_sha256']}`。`--debug` 是产品诊断开关。",
+        f"UIA 控件树 + Pattern。服务器：`{plan.get('server_provider','UNKNOWN')}` / `{plan.get('server_instance_id','UNKNOWN')}`；{plan.get('server_cpu','UNKNOWN')} vCPU / {plan.get('server_memory_gib','UNKNOWN')} GiB / {plan.get('server_bandwidth_mbps','UNKNOWN')} Mbps；冻结负载：`{json.dumps(plan['load'],ensure_ascii=False)}`。",
         "", "| cycle | cycle ID | native session | 结果 | revision 范围 | 缺失 | 失败检查 |",
         "|---|---|---|---|---|---|---|"]
     for c in result.get("cycles",[]):

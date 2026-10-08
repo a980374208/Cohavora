@@ -15,6 +15,7 @@ from product_pilot_performance import paired_window
 from product_pilot_correlation import correlate
 from product_pilot_audio import review_outbound_audio
 from product_pilot_archive import read_segment
+from product_pilot_desktop_policy import bind_desktop_input_policy
 
 
 def read(path):
@@ -40,6 +41,7 @@ def review_rejoin(root):
     """Use the same per-cycle external gates for PILOT and formal execution."""
     plan, uia, external = (read(root / name) for name in
         ("plan.json", "uia/uia-result.json", "external-review.json"))
+    input_policy=bind_desktop_input_policy(plan,uia,external)
     run, count = plan["run_id"], plan["cycles"]
     checks = {}
     def check(name, ok, detail=None):
@@ -89,6 +91,7 @@ def review_rejoin(root):
         checks[name] = dict(status=status, detail=dict(cycles=values))
     statuses = [c["status"] for c in checks.values()]
     report = dict(schema=2, run_id=run, scope="same-process multi-lifecycle PILOT",
+        desktop_input_policy=input_policy,
         verdict="PILOT_PASS" if all(s in ("PASS", "DEFERRED") for s in statuses) else "FAIL",
         checks=checks, check_counts=dict(Counter(statuses)),
         limitations=external.get("deferred", []) + ["not_8_hours_or_100_lifecycles"],
@@ -102,8 +105,10 @@ def review(root):
     if read(root / "plan.json").get("cycles", 1) > 1:
         return review_rejoin(root)
     plan, uia = read(root / "plan.json"), read(root / "uia/uia-result.json")
+    input_policy=bind_desktop_input_policy(plan,uia)
     run = plan["run_id"]
     report = {"schema": 1, "run_id": run, "verdict": "INCONCLUSIVE",
+              "desktop_input_policy": input_policy,
               "scope": "one short PILOT, not formal acceptance", "checks": {},
               "limitations": ["not_8_hours_or_100_lifecycles", "concurrent_server_load",
                   "pcm_delivery_does_not_prove_audio_quality", "wgc_handle_ownership_not_observed",

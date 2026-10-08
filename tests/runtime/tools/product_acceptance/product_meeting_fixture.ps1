@@ -38,7 +38,7 @@ try {
     $oldEnd=[long]$oldInfo.creatorDefinedMeeting.scheduledTime+[long]$oldInfo.creatorDefinedMeeting.meetingDuration
     if ($CreateNew) {
         if (Test-Path -LiteralPath $OutputDirectory) {throw 'PREPARED_OUTPUT_MUST_BE_NEW'}
-        $duration=[Math]::Max(86400,$MinimumRemainingSeconds+3600)
+        $duration=[Math]::Max(259200,$MinimumRemainingSeconds+3600)
         $created=Request-MeetingApi '/meeting/create_immediate_meeting' @{
             creatorUserID=$login.userID
             creatorDefinedMeetingInfo=@{title='UIA external acceptance';scheduledTime=$now;meetingDuration=$duration;password=''}
@@ -49,6 +49,14 @@ try {
     } else {$meetingId=$setup.meeting_id}
     $detail=Request-MeetingApi '/meeting/get_meeting' @{userID=$login.userID;meetingID=$meetingId}
     $info=$detail.meetingDetail.info
+    if ($CreateNew) {
+        $actualDuration=$info.creatorDefinedMeeting.meetingDuration
+        # Int32/Int64 JSON integers are exact and intrinsically within Int64 range.
+        if ($actualDuration -isnot [int32] -and $actualDuration -isnot [int64]) {
+            throw 'CREATED_MEETING_DURATION_INVALID'
+        }
+        if ($actualDuration -lt 259200) {throw 'CREATED_MEETING_DURATION_TOO_SHORT'}
+    }
     $end=[long]$info.creatorDefinedMeeting.scheduledTime+[long]$info.creatorDefinedMeeting.meetingDuration
     $remaining=$end-[DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
     if ($info.systemGenerated.meetingID -ne $meetingId -or $info.systemGenerated.creatorUserID -ne $login.userID) {throw 'MEETING_FIXTURE_OWNERSHIP_MISMATCH'}
@@ -63,6 +71,10 @@ try {
         remaining_seconds=$remaining;required_seconds=$MinimumRemainingSeconds;expires_unix_seconds=$end;
         previous_meeting_id=$setup.meeting_id;previous_expires_unix_seconds=$oldEnd;previous_remaining_seconds=($oldEnd-$now);
         owner_verified=$true;created_new=[bool]$CreateNew}
+    if ($CreateNew) {
+        $evidence.requested_duration_seconds=$duration
+        $evidence.actual_duration_seconds=$actualDuration
+    }
     $evidence | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'meeting-preflight.json') -Encoding UTF8
     $evidence | ConvertTo-Json -Compress
 } finally {$password=$null;$token=$null;$login=$null;$created=$null;$secret=$null}

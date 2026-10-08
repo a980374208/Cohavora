@@ -20,6 +20,7 @@ from verify_product_external import archive_session, cleanup_release
 from product_pilot_local_route import LocalSfuRoute
 from product_pilot_timing import AudioArrivalWitness
 from release_product_acceptance import evaluate
+from product_pilot_desktop_policy import bind_desktop_input_policy
 from product_pilot_audio import review_outbound_audio
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -61,6 +62,57 @@ class AudioTimingContracts(unittest.TestCase):
             (roots[0]/"diagnostic-debugger.json").write_text(json.dumps(dict(kind="audio_timing")))
             with self.assertRaisesRegex(ValueError,"diagnostic_run_not_release_eligible"):
                 evaluate(roots,{})
+
+
+class DesktopInputPolicyContracts(unittest.TestCase):
+    def test_actual_policy_must_match_plan_and_legacy_is_strict(self):
+        self.assertEqual(bind_desktop_input_policy({}, {}), "strict")
+        diagnostic = dict(desktop_input_policy="diagnostic")
+        self.assertEqual(bind_desktop_input_policy(diagnostic, diagnostic), "diagnostic")
+        for evidence in ({}, dict(desktop_input_policy="strict")):
+            with self.assertRaisesRegex(ValueError, "desktop_input_policy_mismatch"):
+                bind_desktop_input_policy(diagnostic, evidence)
+
+    def test_invalid_policy_does_not_silently_disable_input_gate(self):
+        for value in (None, "ignore", True, [], "DIAGNOSTIC"):
+            with self.assertRaisesRegex(ValueError, "desktop_input_policy_invalid"):
+                bind_desktop_input_policy(dict(desktop_input_policy=value))
+
+    def qualification(self, root, policy):
+        run = hashlib.md5(str(root).encode(), usedforsecurity=False).hexdigest()
+        docs = {
+            "plan.json": dict(run_id=run, mode="Pilot", cycles=2, load={}),
+            "pilot-review.json": dict(run_id=run, verdict="PILOT_PASS",
+                checks={"log_performance_complete": dict(status="PASS", detail={})}),
+            "external-review.json": dict(run_id=run, verdict="PASS_WITH_DEFERRED", cycle_counts={"PASS": 2}),
+            "uia/uia-result.json": {},
+            "executed-inputs.json": {},
+            "runner-exit.json": dict(run_id=run, verdict="EVIDENCE_COMPLETE", exit_code=0)}
+        for name, value in docs.items():
+            if name in ("plan.json", "pilot-review.json", "external-review.json", "uia/uia-result.json"):
+                value["desktop_input_policy"] = policy
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(value), encoding="utf-8")
+
+    def test_release_rejects_mixed_qualification_policies(self):
+        with TemporaryDirectory() as directory:
+            roots = [Path(directory) / str(i) for i in range(3)]
+            for root, policy in zip(roots, ("strict", "diagnostic", "diagnostic")):
+                self.qualification(root, policy)
+            with self.assertRaisesRegex(ValueError, "pilot_desktop_input_policy_changed"):
+                evaluate(roots, {})
+
+    def test_release_binds_validation_and_actual_uia_policy(self):
+        with TemporaryDirectory() as directory:
+            roots = [Path(directory) / str(i) for i in range(3)]
+            for root in roots:
+                self.qualification(root, "diagnostic")
+            with self.assertRaisesRegex(ValueError, "desktop_input_policy_mismatch"):
+                evaluate(roots, dict(desktop_input_policy="strict"))
+            (roots[0] / "uia/uia-result.json").write_text("{}")
+            with self.assertRaisesRegex(ValueError, "desktop_input_policy_mismatch"):
+                evaluate(roots, dict(desktop_input_policy="diagnostic"))
 
 
 class LocalSfuRouteContracts(unittest.TestCase):

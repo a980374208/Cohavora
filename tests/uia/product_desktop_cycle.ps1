@@ -20,6 +20,8 @@ $HeapPageCheck=[bool]$config.heap_page_check
 $CrashDiagnostic=[bool]$config.crash_diagnostic
 $ProbeOnly=$false
 $DedicatedDesktopSessionId=[int]$config.dedicated_session
+$DesktopInputPolicy=if($config.desktop_input_policy){[string]$config.desktop_input_policy}else{'strict'}
+if($DesktopInputPolicy -cnotin @('strict','diagnostic')){throw 'DESKTOP_INPUT_POLICY_INVALID'}
 $script:desktopBaseline=$config.desktop_baseline
 $script:runId=$config.run_id
 $script:cycle=[int]$config.cycle
@@ -57,7 +59,7 @@ try {
     }
     Run-Cycle
     @{run_id=$script:runId;cycle=$script:cycle;cycle_id=$script:cycleId;product_pid=$script:child.Id;
-        client_pid=$PID;status='COMPLETE';native_process_run=$script:nativeProcessRun;
+        client_pid=$PID;status='COMPLETE';desktop_input_policy=$DesktopInputPolicy;native_process_run=$script:nativeProcessRun;
         native_session=$script:nativeSession;participant_hash=$script:participantHash;layout=$script:layout} |
         ConvertTo-Json | Set-Content -LiteralPath $resultPath -Encoding UTF8
     $exitCode=0
@@ -67,7 +69,7 @@ try {
         try {Save-Tree ('cycle-{0:d4}-worker-failure' -f $script:cycle)} catch {}
     }
     @{run_id=$script:runId;cycle=$script:cycle;cycle_id=$script:cycleId;product_pid=$config.product_pid;
-        client_pid=$PID;status='FAIL';step=$script:step;reason=$failure} |
+        client_pid=$PID;status='FAIL';desktop_input_policy=$DesktopInputPolicy;step=$script:step;reason=$failure} |
         ConvertTo-Json | Set-Content -LiteralPath $resultPath -Encoding UTF8
 } finally {
     if ($script:child) {$script:child.Dispose()}

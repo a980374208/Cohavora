@@ -13,6 +13,7 @@ SPEC = importlib.util.spec_from_file_location("gpu_budget_evidence", PATH)
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
 sys.path.insert(0, str(PATH.parent))
+from release_product_acceptance import FULL_MEDIA_GPU_CHECKS, evaluate, full_media_gpu_gaps
 from product_pilot_scheduler import load_scheduler_policy
 
 
@@ -36,6 +37,12 @@ def all_nodes_snapshot():
     return data
 
 
+def complete_gpu_report(checks, backend="dxgi"):
+    path=PATH.parent/"product_gpu_queue_limits.json"
+    policy=json.loads(path.read_text())
+    digest=hashlib.sha256(path.read_bytes()).hexdigest()
+    return dict(deferred=[],gpu_queue_frozen_limits=dict(sha256=digest,policy=policy),
+        cycles=[dict(checks=checks,details=dict(backend_observed=[backend],gpu_queue_coverage=dict(policy_sha256=digest)))])
 
 
 class BudgetTests(unittest.TestCase):
@@ -127,10 +134,66 @@ class BudgetTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "gpu_budget_topology_changed"):
             MODULE.review_window(probes, "run", 123, 0, 4000, MODULE.ALL_NODES_SCOPE)
 
+    def test_new_budget_coverage_does_not_close_complete_gpu_gate(self):
+        report = dict(deferred=["dxgi_linked_adapter_nodes_other_than_0", "gpu_queue", "wgc_handle_ownership"],
+                      cycles=[dict(checks=dict(dxgi_node0_budget_coverage="PASS"),
+                                   details=dict(backend_observed=["dxgi"]))])
+        gaps = full_media_gpu_gaps(report)
+        self.assertIn("dxgi_linked_adapter_nodes_other_than_0", gaps)
+        self.assertIn("gpu_queue_coverage", gaps)
+        self.assertNotIn("wgc_handle_ownership", gaps)
 
+    def test_three_limited_pilots_cannot_authorize_complete_formal_run(self):
+        with TemporaryDirectory() as directory:
+            roots = [Path(directory) / str(i) for i in range(3)]
+            for i, root in enumerate(roots):
+                root.mkdir()
+                run_id = f"{i:032x}"
+                scheduler_path = PATH.parent / "product_pilot_scheduler_policy.json"
+                scheduler = load_scheduler_policy(scheduler_path)
+                (root / "collector-scheduler-policy.json").write_bytes(scheduler_path.read_bytes())
+                (root / "uia").mkdir()
+                gpu = complete_gpu_report(dict(dxgi_node0_budget_coverage="PASS"))
+                external = dict(gpu, run_id=run_id, verdict="PASS_WITH_DEFERRED", cycle_counts={"PASS": 2},
+                                final_checks={"collector_scheduler_policy_complete": True},
+                                collector_scheduler_policy={"passed": True, "policy_sha256": scheduler["sha256"]})
+                files = {
+                    "plan.json": dict(run_id=run_id, cycles=2, mode="Pilot", load={},
+                                      collector_scheduler_policy=scheduler,
+                                      gpu_queue_limits_sha256=gpu["gpu_queue_frozen_limits"]["sha256"]),
+                    "runner-exit.json": dict(run_id=run_id, verdict="EVIDENCE_COMPLETE", exit_code=0),
+                    "executed-inputs.json": {str(scheduler_path): scheduler["sha256"]},
+                    "pilot-review.json": dict(run_id=run_id, verdict="PILOT_PASS"),
+                    "uia/uia-result.json": {}, "external-review.json": external}
+                for name, value in files.items():
+                    (root / name).write_text(json.dumps(value), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "full_media_gpu_not_closed:"):
+                evaluate(roots, {}, require_full_media_gpu=True)
 
+    def test_wgc_release_is_required_only_when_observed(self):
+        checks = {name: "PASS" for name in FULL_MEDIA_GPU_CHECKS}
+        report = complete_gpu_report(checks,"wgc")
+        self.assertEqual(full_media_gpu_gaps(report), ["wgc_handle_ownership"])
+        checks["wgc_ownership_released"] = "PASS"
+        self.assertEqual(full_media_gpu_gaps(report), [])
+        report["deferred"] = ["wgc_handle_ownership"]
+        self.assertEqual(full_media_gpu_gaps(report), ["wgc_handle_ownership"])
 
+    def test_missing_microphone_pcm_cannot_be_deferred_in_complete_gate(self):
+        checks = {name: "PASS" for name in FULL_MEDIA_GPU_CHECKS}
+        report = complete_gpu_report(checks)
+        self.assertEqual(full_media_gpu_gaps(report), [])
+        checks["outbound_audio_pcm_continuity"] = "DEFERRED"
+        self.assertEqual(full_media_gpu_gaps(report), ["outbound_audio_pcm_continuity"])
 
+    def test_frozen_gpu_hash_and_scope_cannot_be_inferred_from_green_check(self):
+        checks={name:"PASS" for name in FULL_MEDIA_GPU_CHECKS}
+        report=complete_gpu_report(checks)
+        report['cycles'][0]['details']['gpu_queue_coverage']['policy_sha256']='0'*64
+        self.assertEqual(full_media_gpu_gaps(report),['gpu_queue_frozen_limits'])
+        report=complete_gpu_report(checks)
+        report['gpu_queue_frozen_limits']['policy']['diagnostic_only']=True
+        self.assertEqual(full_media_gpu_gaps(report),['gpu_queue_frozen_limits'])
 
 
 if __name__ == "__main__":

@@ -8,13 +8,39 @@ $OutputDirectory=(Resolve-Path $OutputDirectory).Path
 $script:runId=[guid]::NewGuid().ToString('N');$script:cycle=1;$script:operation='menu-test'
 function Sample-Resource($Phase) {}
 if (!$Fixture) {
-    function Get-DesktopEvidenceState { [pscustomobject]@{session_id=2;interactive=$true;default_input_desktop=$true;same_input_desktop=$true;input_available=$true;last_input_tick=10} }
+    $script:desktopState=[pscustomobject]@{session_id=2;interactive=$true;default_input_desktop=$true;same_input_desktop=$true;input_available=$true;last_input_tick=10}
+    function Get-DesktopEvidenceState { $script:desktopState }
     foreach ($case in @(@{session=1;baseline=$null;expected='DEDICATED_DESKTOP_SESSION_MISMATCH'},
                        @{session=2;baseline=@{last_input_tick=9};expected='DEDICATED_DESKTOP_INPUT_ACTIVITY'})) {
         $failure=$null
         try {$null=Assert-DedicatedDesktop $case.session $case.baseline} catch {$failure=$_.Exception.Message}
         if ($failure -ne $case.expected) {throw "Unexpected desktop result: $failure"}
     }
+    # Input evidence remains diagnostic; session and interactive desktop gates
+    # continue to reject environments where real UIA cannot run correctly.
+    $state=Assert-DedicatedDesktop 2 @{last_input_tick=9} diagnostic
+    if($state.last_input_tick -ne 10){throw 'DIAGNOSTIC_INPUT_EVIDENCE_LOST'}
+    $script:desktopState.input_available=$false
+    $null=Assert-DedicatedDesktop 2 @{last_input_tick=9} diagnostic
+    $failure=$null
+    try {$null=Assert-DedicatedDesktop 2} catch {$failure=$_.Exception.Message}
+    if($failure -ne 'DEDICATED_DESKTOP_INPUT_EVIDENCE_UNAVAILABLE'){throw "Unexpected strict input result: $failure"}
+    foreach($policy in @('strict','diagnostic')) {
+        $failure=$null
+        try {$null=Assert-DedicatedDesktop 1 -InputPolicy $policy} catch {$failure=$_.Exception.Message}
+        if($failure -ne 'DEDICATED_DESKTOP_SESSION_MISMATCH'){throw "Unexpected session result: $failure"}
+        foreach($field in @('interactive','default_input_desktop','same_input_desktop')) {
+            $script:desktopState.$field=$false
+            $failure=$null
+            try {$null=Assert-DedicatedDesktop 2 -InputPolicy $policy} catch {$failure=$_.Exception.Message}
+            if($failure -ne 'DEDICATED_DESKTOP_NOT_INTERACTIVE'){throw "Unexpected interactive result: $failure"}
+            $script:desktopState.$field=$true
+        }
+    }
+    $failure=$null
+    try {$null=Assert-DedicatedDesktop 2 -InputPolicy 'ignore'} catch {$failure=$_.Exception.Message}
+    if(!$failure){throw 'INVALID_INPUT_POLICY_ACCEPTED'}
+    $script:desktopState.input_available=$true
     $script:child=@{Id=123}
     function Write-MenuPhase($AttemptId,$Phase) {}
     function Save-MenuObservation($Observer,$AttemptId) {if(!$Observer.Healthy){throw 'MENU_OBSERVER_EVIDENCE_INCOMPLETE'}}
@@ -36,7 +62,7 @@ if (!$Fixture) {
         try {Invoke-AccountTelemetry -Seconds 0} catch {$failure=$_.Exception.Message}
         if($failure -ne $case.expected -or $script:openCount -ne 1 -or $script:selected -ne [int]$case.present) {throw "Unexpected menu result: $failure"}
     }
-    Write-Output 'PASS: menu close/missing/item missing/selection/observer failure; session and input gates'
+    Write-Output 'PASS: menu close/missing/item missing/selection/observer failure; strict/diagnostic input and unchanged session/interactive gates'
     exit 0
 }
 $tokens=$null;$errors=$null

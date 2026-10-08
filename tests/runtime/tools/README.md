@@ -25,10 +25,16 @@ release_eligible=false、qualification_credit=0，不授予 B14 资格或正式�
 
 远端部署的 `product_pilot_remote.py`、`product_pilot_context.py`、
 `product_pilot_local_route.py` 与 `product_aliyun_target.json` 须一起复制，保持远端文件名。
+`product_pilot_timing.py` 随采集器部署；仅 `-AudioTimingDiagnostic` 启用 FFI／事件循环时序。
+`product_pilot_audio_reference.py` 同步部署；仅时序诊断在独立 PeerConnection 中接收既有合成音频，
+同进程按真实 AudioStream handle 关联旁证，与产品 RTP／PCM 验收分离；不替代物理麦克风源确认。
+不保存 PCM／像素／地址／凭据，不修改外部 SDK 文件；该轮显式标记 diagnostic_only、
+release_eligible=false 并生成正式放行拒绝标记，任何诊断 PASS 都不能计入三轮。
 `product_pilot_video_counter.py` 保持原生 VideoStream／解码／事件过滤和 4 项有界队列，
 只计实际 native decoded-frame 事件，立即释放对应 buffer，不再复制未用于判定的像素。
 保留全部实际 RTP／decoded stats 和帧推进门，并新增全部 video buffer 正常释放门；
 它不证明像素质量。按当前固定 SDK 的私有 ownership 接口适配，升级 SDK 必须重验证。
+`analyze_product_timing.py` 离线关联诊断时序与 PCM 超限，不生成 PILOT／正式 PASS。
 `product_pilot_context.py` 在 CLI 丢失回执时只读恢复一次现有确认，严格核对
 run／周期／operation 和服务端原 10 秒窗口；不重发操作、不接受迟到或缺证回执。
 正式运行期间只做本地进程／采样尾部监控，远端完整证据搬运和复盘放在运行结束后，
@@ -85,15 +91,41 @@ authority图片权限、完整文档/sequence/asset及Pillow独立导出像素�
 `desktop/run_b_telemetry_uia_interference.ps1`。每轮核对Room与清理服务归零、
 真实媒体推进和history/diagnostic排空；限定门不替代B14的8小时/100次验收。
 
+`product_acceptance/run_b14_acceptance.ps1` 在独占桌面执行三轮完整 PILOT，
+经既有正式放行判定器核对 current-source 验证和冻结输入后，再从零执行
+8 小时/100 次产品长稳。必须显式传入 RelWithDebInfo 产品与音频采集器，
+证据磁盘预算按实际输出盘检查；运行期间持有任务锁和系统/显示唤醒请求，
+终止后释放。PILOT 失败即停止，历史失败与 DEFERRED 边界保持原样。
 checkpoint 归档采用逐段 gzip 无损存储；原生 SHA-256、大小、revision 1
 到终态的检查不变，并额外核对压缩文件哈希及大小。原有归档段存储预算
 保持 PILOT 1 GiB／正式 32 GiB，同时记录解压后原始字节数；旧原始段兼容。
-
 同机测试 peer 的媒体通过独立 net_cls cgroup 和端口限定 OUTPUT DNAT 留在本机；
 只匹配本轮采集子进程、SFU 公网地址与 RTC UDP/TCP 端口，结束按原规则撤销。
 SFU 配置、共享进程、负载及整机 eth0 出口容量门不变；配置哈希、本地路由、
-规则命中和正常清理作为独立证据。
-B14 编排现在在产品启动前准备实时采集器，正常
-退出后停止并排空，保存 loss／解析／字节预算及四采集器退出证据。
-原生全局清理计数只在本周期离会后的持续
+规则命中和正常清理作为独立证据。原生全局清理计数只在本周期离会后的持续
 释放窗口归属，下一周期入会和进程退出另行核对，不用旧 SID 归属新入会作业。
+
+`product_acceptance/product_gpu_queue.py` 核对真实产品 PID 的全部 WDDM
+scheduler-node packet 原始计数、在会工作推进和完整周期采样；scheduler
+nodes 与 DXGI/D3D12 memory nodes 分开计量，adapter 别名不相加。
+`product_gpu_queue_diagnostic_policy.json` 的 64／4／0 是用户要求的大概
+诊断界限，由 `-GpuBudgetDiagnostic` 在运行前复制并验哈希；不作为正式
+GPU 放行。查询失败和 counter 反序／reset 保持 UNKNOWN／FAIL，不能
+将 device 销毁后的 unavailable 补零或作为释放成功。
+
+`diagnostics/gpu_budget/invoke_gpu_release_control.ps1` 编排独立 copy/fence／
+device 释放对照，用 `product_gpu_trace` 的独立 DxgKrnl ETW session 保留
+提交、完成和 context/device 销毁。`product_acceptance/product_gpu_etw.py`
+验证 payload 所有权链、配对、时钟与零丢失；独立 PASS 无资格／正式信用。
+`invoke_gpu_live_control.ps1` 另验证实时消费及延迟 PID 绑定，绑定前全部事件
+保留，绑定后保留全部设备／上下文生命周期和所有权链关联的 packet，
+header PID 不作工作归属。B14 编排现在在产品启动前准备实时采集器，正常
+退出后停止并排空，保存 loss／解析／字节预算及四采集器退出证据。
+离线复核只保留当前 ownership／pending 状态和预声明周期窗口，避免按
+8 小时事件数累积 transition 列表。历史诊断继续使用暂定 8 GiB/64／4／0，
+不计资格。`product_gpu_queue_limits.json` 根据用户授权选择测试数值，
+在新普通资格前冻结本 B14 环境的 WDDM+ETW scheduler packet 64／4／0，
+并要求释放窗口 context/device 为零；保留 hardware queue depth 边界。
+普通资格与正式必须使用独立 32 GiB GPU 日志上限，启动时至少 72 GiB
+空闲（另含原 32 GiB checkpoint 与 8 GiB余量），哈希绑定三轮输入和
+正式门；未知/缺失/丢失/终态不配对持续失败，诊断标记持续拒绝资格。

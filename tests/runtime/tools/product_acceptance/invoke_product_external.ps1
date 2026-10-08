@@ -7,6 +7,7 @@ param(
     [ValidateSet('Pilot','Formal')][string]$Mode='Pilot',
     [string]$ReleaseGate='',
     [int]$DedicatedDesktopSessionId=0,
+    [ValidateSet('strict','diagnostic')][string]$DesktopInputPolicy='strict',
     [switch]$HeapDiagnostic,
     [switch]$HeapSnapshotDiagnostic,
     [switch]$HeapDiagnosticPersistentUia,
@@ -16,11 +17,16 @@ param(
     [switch]$HeapPageCheck,
     [switch]$CrashDiagnostic,
     [ValidateRange(2,10)][int]$DiagnosticCycles=2,
-    [switch]$IsolateUiaCycles
+    [switch]$IsolateUiaCycles,
+    [switch]$AudioTimingDiagnostic,
+    [switch]$GpuBudgetDiagnostic,
+    [ValidateRange(-10,0)][int]$DiagnosticReceiverNice=0,
+    [switch]$DiagnosticNoRealtime
 )
 $ErrorActionPreference='Stop'
 . (Join-Path $PSScriptRoot 'product_pilot_probe_tail.ps1')
 . (Join-Path $PSScriptRoot 'product_pilot_watchdog.ps1')
+. (Join-Path $PSScriptRoot 'product_pilot_admission.ps1')
 . (Join-Path $PSScriptRoot 'product_pilot_observer.ps1')
 function Read-GpuTraceHeartbeat([string]$Path) {
     # The collector atomically replaces this file. Allow its DELETE handle as
@@ -51,6 +57,8 @@ function Read-LatestCompleteUiaAction([string]$Path) {
     if(!$record -or $record -is [Array] -or $record.utc -isnot [string]){throw 'UIA_ACTION_RECORD_INVALID'}
     return $record
 }
+if($DiagnosticReceiverNice -ne 0 -and !$AudioTimingDiagnostic){throw 'RECEIVER_PRIORITY_REQUIRES_TIMING_DIAGNOSTIC'}
+if($DiagnosticNoRealtime -and (!$AudioTimingDiagnostic -or $DiagnosticReceiverNice -ne 0)){throw 'NO_REALTIME_REQUIRES_TIMING_DIAGNOSTIC_NICE_ZERO'}
 $workspace=(Resolve-Path (Join-Path $PSScriptRoot '../../../..')).Path
 Set-Location $workspace
 $Executable=(Resolve-Path -LiteralPath $Executable).Path
@@ -65,7 +73,7 @@ $target=Get-Content (Join-Path $PSScriptRoot 'product_aliyun_target.json') -Raw 
 if ($setup.service_url.TrimEnd('/') -ne $target.service_url) {throw 'TEST_SERVICE_UNEXPECTED'}
 . (Join-Path $workspace 'tests/uia/product_desktop_evidence.ps1')
 if ($Mode -eq 'Formal' -or $DedicatedDesktopSessionId -gt 0) {
-    $desktopBaseline=Assert-DedicatedDesktop $DedicatedDesktopSessionId
+    $desktopBaseline=Assert-DedicatedDesktop $DedicatedDesktopSessionId -InputPolicy $DesktopInputPolicy
 }
 function Invoke-TestRemote([string]$Command) {
     $output=& python "$PSScriptRoot/product_aliyun_transport.py" $Command
@@ -85,11 +93,30 @@ if($DiagnosticCycles -ne 2 -and !$HeapDiagnostic){throw 'EXTENDED_CYCLES_REQUIRE
 if($IsolateUiaCycles -and !$HeapDiagnostic){throw 'ISOLATED_CLIENT_EXPERIMENT_REQUIRES_DIAGNOSTIC'}
 if($HeapDiagnosticPersistentUia -and !$HeapDiagnostic){throw 'PERSISTENT_CLIENT_REQUIRES_HEAP_DIAGNOSTIC'}
 if($HeapDiagnosticPersistentUia -and $IsolateUiaCycles){throw 'HEAP_UIA_PROFILES_CONFLICT'}
+if($AudioTimingDiagnostic -and ($Mode -eq 'Formal' -or $HeapDiagnostic)){throw 'AUDIO_TIMING_REQUIRES_SEPARATE_NONFORMAL_RUN'}
+if($GpuBudgetDiagnostic -and ($Mode -eq 'Formal' -or $HeapDiagnostic)){throw 'GPU_BUDGET_REQUIRES_SEPARATE_NONFORMAL_RUN'}
 $limits=Get-Content (Join-Path $PSScriptRoot 'product_external_limits.json') -Raw | ConvertFrom-Json
+$gpuLimitsPath=Join-Path $PSScriptRoot 'product_gpu_queue_limits.json'
+$gpuLimits=Get-Content -LiteralPath $gpuLimitsPath -Raw | ConvertFrom-Json
+$frozenGpu=!($AudioTimingDiagnostic -or $GpuBudgetDiagnostic -or $HeapDiagnostic)
+$schedulerPolicyPath=Join-Path $PSScriptRoot 'product_pilot_scheduler_policy.json'
+$schedulerPolicy=$null
+if($frozenGpu){
+    # The Python consumers strictly validate all policy fields before SDK import.
+    $schedulerPolicy=@{sha256=(Get-FileHash -LiteralPath $schedulerPolicyPath -Algorithm SHA256).Hash.ToLowerInvariant();
+        policy=(Get-Content -LiteralPath $schedulerPolicyPath -Raw | ConvertFrom-Json)}
+}
+if($frozenGpu -and ($gpuLimits.status -ne 'FROZEN_B14_TEST' -or $gpuLimits.diagnostic_only -ne $false)){throw 'GPU_TEST_LIMITS_NOT_FROZEN'}
+if($frozenGpu -and (Get-PSDrive -Name $evidenceDrive).Free -lt $gpuLimits.minimum_free_evidence_disk_bytes){throw 'GPU_EVIDENCE_DISK_BUDGET_UNAVAILABLE'}
 if($Mode -eq 'Formal') {
     if(!$ReleaseGate){throw 'FORMAL_RELEASE_GATE_REQUIRED'}
     $gate=Get-Content -LiteralPath $ReleaseGate -Raw | ConvertFrom-Json
     if($gate.verdict -ne 'READY' -or !$gate.historical_crash_regression_closed){throw 'FORMAL_GATE_NOT_READY'}
+    if($gate.full_media_gpu_ready -ne $true){throw 'FORMAL_FULL_MEDIA_GPU_NOT_READY'}
+    $gateInputPolicy=if($gate.desktop_input_policy){$gate.desktop_input_policy}else{'strict'}
+    if($gateInputPolicy -cne $DesktopInputPolicy){throw 'FORMAL_DESKTOP_INPUT_POLICY_MISMATCH'}
+    if(!$schedulerPolicy -or $gate.collector_scheduler_policy.sha256 -ne $schedulerPolicy.sha256){throw 'FORMAL_COLLECTOR_SCHEDULER_POLICY_NOT_READY'}
+    Assert-ProductQualifiedTools $gate $Executable $AudioCollector $GpuTraceTool
     foreach($entry in $gate.inputs.PSObject.Properties) {
         if((Get-FileHash -LiteralPath $entry.Name -Algorithm SHA256).Hash.ToLowerInvariant() -ne $entry.Value){throw 'RELEASE_INPUT_CHANGED'}
     }
@@ -108,16 +135,40 @@ $prefix=$run.Substring(0,8)
 $remote=$target.remote_root
 $remoteRun="$remote/pilot-$prefix"
 $plan=[ordered]@{schema=2;run_id=$run;root=$Root;mode=$Mode;seconds=$seconds;cycles=$cycles;meeting_id=$meetingId;
+    desktop_input_policy=$DesktopInputPolicy;
     share_seconds=60;log_pair_seconds=35;requires_context=$true;explicit_microphone_unmute=$true;
     gpu_budget_observer=@{required=$true;scope='calling_process_all_enumerated_hardware_adapters_all_nodes';maximum_gap_ms=2000};
-    gpu_queue_observer=@{required=$true;scope='process_all_enumerated_hardware_adapters_all_scheduler_nodes';maximum_gap_ms=2000;queue_bounds='NOT_FROZEN'};
+    gpu_queue_observer=@{required=$true;scope='process_all_enumerated_hardware_adapters_all_scheduler_nodes';maximum_gap_ms=2000;queue_bounds=$(if($frozenGpu){'FROZEN_B14_TEST'}else{'NOT_FROZEN'})};
     gpu_etw_observer=@{required=$true;scope='process_owned_device_context_scheduler_packet_lifecycle';
-        mode='lossless realtime owner-filtered JSONL';maximum_bytes=8589934592;storage_budget_status='PROVISIONAL_DIAGNOSTIC'};
+        mode='lossless realtime owner-filtered JSONL';maximum_bytes=$(if($frozenGpu){[long]$gpuLimits.etw_maximum_bytes}else{8589934592});storage_budget_status=$(if($frozenGpu){'FROZEN_B14_TEST'}else{'PROVISIONAL_DIAGNOSTIC'})};
     server_provider='aliyun';server_instance_id=$target.instance_id;
     server_cpu=$target.server_cpu;server_memory_gib=$target.server_memory_gib;server_bandwidth_mbps=$target.server_bandwidth_mbps;
     collector_media_route=$target.collector_media_route;
-    load=@{video_publishers=10;width=160;height=90;fps=5;video_bps_each=40000;video_codec='VP8';audio_bps=24000;simulcast=$false}}
+    load=@{video_publishers=10;width=160;height=90;fps=5;video_bps_each=40000;video_codec='VP8';audio_bps=24000;simulcast=$false;encryption_mode='off'}}
 $plan | ConvertTo-Json -Depth 6 | Set-Content "$Root/plan.json" -Encoding UTF8
+if($frozenGpu){
+    Copy-Item -LiteralPath $gpuLimitsPath -Destination "$Root/gpu-queue-limits.json"
+    $plan.gpu_queue_limits_sha256=(Get-FileHash -LiteralPath $gpuLimitsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Copy-Item -LiteralPath $schedulerPolicyPath -Destination "$Root/collector-scheduler-policy.json"
+    $plan.collector_scheduler_policy=$schedulerPolicy
+    $plan | ConvertTo-Json -Depth 6 | Set-Content "$Root/plan.json" -Encoding UTF8
+}
+if($AudioTimingDiagnostic -or $GpuBudgetDiagnostic){
+    if($AudioTimingDiagnostic){
+        $plan.diagnostic_receiver_scheduling=@{nice=$DiagnosticReceiverNice;policy='SCHED_OTHER';publisher_nice=0}
+        $plan.diagnostic_audio_reference=@{required=$true;scope='existing fixed tone in separate PeerConnection, same receiver process';qualification_credit=0}
+        if($DiagnosticNoRealtime){$plan.diagnostic_realtime_restriction=@{required=$true;scope='collector child and publisher descendants only';cap_sys_nice=$false;cap_sys_resource=$false;no_new_privs=$true;rtprio_limit=@(0,0);qualification_credit=0}}
+    }
+    $plan.diagnostic_only=$true
+    $plan.release_eligible=$false
+    if($GpuBudgetDiagnostic){
+        $gpuQueuePolicy=Join-Path $PSScriptRoot 'product_gpu_queue_diagnostic_policy.json'
+        Copy-Item -LiteralPath $gpuQueuePolicy -Destination "$Root/gpu-queue-diagnostic-policy.json"
+        $plan.gpu_queue_diagnostic_policy_sha256=(Get-FileHash -LiteralPath $gpuQueuePolicy -Algorithm SHA256).Hash.ToLowerInvariant()
+    }
+    $plan | ConvertTo-Json -Depth 6 | Set-Content "$Root/plan.json" -Encoding UTF8
+    @{kind=$(if($GpuBudgetDiagnostic){'gpu_budget'}else{'audio_timing'});audio_timing=$AudioTimingDiagnostic.IsPresent;gpu_budget=$GpuBudgetDiagnostic.IsPresent;diagnostic_only=$true;release_eligible=$false;run_id=$run} | ConvertTo-Json | Set-Content "$Root/diagnostic-debugger.json" -Encoding UTF8
+}
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'product_external_limits.json') -Destination "$Root/limits.json"
 $hashes=[ordered]@{}
 $paths=@($Executable,$AudioCollector,$GpuTraceTool,[IO.Path]::ChangeExtension($GpuTraceTool,'.pdb'),
@@ -142,14 +193,17 @@ try {
     }
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File tests/runtime/tools/product_acceptance/product_audio_devices.ps1 -Output "$Root/audio-devices.json" -RunId $run
     if($LASTEXITCODE){throw 'AUDIO_DEVICE_OBSERVER_FAILED'}
-    $formalArg=if($Mode -eq 'Formal'){'--formal'}elseif($HeapDiagnostic){'--diagnostic'}else{''}
+    $formalArg=if($Mode -eq 'Formal'){'--formal'}elseif($AudioTimingDiagnostic){"--diagnostic --timing-diagnostic --diagnostic-receiver-nice $DiagnosticReceiverNice"}elseif($HeapDiagnostic -or $GpuBudgetDiagnostic){'--diagnostic'}else{''}
+    $schedulerArg=if($AudioTimingDiagnostic){"--diagnostic-receiver-nice $DiagnosticReceiverNice"}else{''}
+    if($DiagnosticNoRealtime){$formalArg+=' --diagnostic-no-realtime';$schedulerArg+=' --diagnostic-no-realtime'}
+    if($schedulerPolicy){$formalArg+=" --scheduler-policy $remote/product_pilot_scheduler_policy.json";$schedulerArg+=" --scheduler-policy $remote/product_pilot_scheduler_policy.json"}
     Invoke-TestRemote "$remote/venv/bin/python --version; $remote/bootstrap/bin/uv pip freeze --python $remote/venv/bin/python" | Set-Content "$Root/remote-environment.txt" -Encoding UTF8
-    if ($desktopBaseline) {$null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $desktopBaseline}
+    if ($desktopBaseline) {$null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $desktopBaseline $DesktopInputPolicy}
     # Start the common capture budget before every remote/local collector.
     $runBudget=Write-ProductRunBudget "$Root/run-clock.json" $run $maximum
     # A transport timeout cannot prove that the submitted launch did not happen.
     $remoteLaunchAttempted=$true
-    Invoke-TestRemote "nohup $remote/venv/bin/python $remote/product_pilot_local_route.py --target-config $remote/product_aliyun_target.json --run-id $run --result $remote/pilot-$prefix-route.json -- $remote/venv/bin/python $remote/product_pilot_remote.py --dependencies $remote/collector-python --config $($target.livekit_config) --output $remoteRun --run-id $run --room $meetingId --seconds $maximum $formalArg > $remote/pilot-$prefix.stderr 2>&1 < /dev/null &"
+    Invoke-TestRemote "nohup $remote/venv/bin/python $remote/product_pilot_local_route.py --target-config $remote/product_aliyun_target.json --run-id $run --result $remote/pilot-$prefix-route.json $schedulerArg -- $remote/venv/bin/python $remote/product_pilot_remote.py --dependencies $remote/collector-python --config $($target.livekit_config) --output $remoteRun --run-id $run --room $meetingId --seconds $maximum $formalArg > $remote/pilot-$prefix.stderr 2>&1 < /dev/null &"
     if($LASTEXITCODE){throw 'REMOTE_START_FAILED'}
     $ready=$false
     for($i=0;$i -lt 30;++$i){
@@ -168,7 +222,7 @@ try {
     $env:LIVEKIT_UIA_LOG_PAIR='1'
     $env:LIVEKIT_UIA_PILOT_PROBE="$Root/process-probe.jsonl"
     $env:LIVEKIT_UIA_GPU_BUDGET_PROBE='1'
-    if ($desktopBaseline) {$null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $desktopBaseline}
+    if ($desktopBaseline) {$null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $desktopBaseline $DesktopInputPolicy}
     $resource=Start-Process powershell.exe -WindowStyle Hidden -PassThru -ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File',"$PSScriptRoot/product_pilot_resources.ps1",'-UiaDirectory',"$Root/uia",'-Destination',"$Root/external-resources.jsonl",'-RunId',$run,'-MaximumSeconds',$maximum,'-RunBudgetPath',"$Root/run-clock.json",'-AudioCollector',$AudioCollector) -RedirectStandardOutput "$Root/resources.stdout" -RedirectStandardError "$Root/resources.stderr"
     $children+=$resource
     $null=$resource.Handle
@@ -192,6 +246,7 @@ try {
     $env:LIVEKIT_UIA_GPU_ETW_DIRECTORY=$gpuDirectory
     $uiaArgs=@('-NoProfile','-ExecutionPolicy','Bypass','-File',"$workspace/tests/uia/product_desktop.ps1",'-Executable',$Executable,'-OutputDirectory',"$Root/uia",'-RunId',$run,'-Cycles',$cycles,'-MinimumSeconds',$seconds,'-ShareSeconds',60,'-LogPairSeconds',35,'-StopSettleSeconds',10,'-RoomSettleSeconds',10)
     if ($DedicatedDesktopSessionId -gt 0) {$uiaArgs+=@('-DedicatedDesktopSessionId',$DedicatedDesktopSessionId)}
+    $uiaArgs+=@('-DesktopInputPolicy',$DesktopInputPolicy)
     if($Mode -eq 'Pilot'){$uiaArgs+='-Pilot'}
     if($HeapDiagnostic){$uiaArgs+='-HeapDiagnostic'}
     if($HeapSnapshotDiagnostic){$uiaArgs+='-HeapSnapshotDiagnostic'}
@@ -212,10 +267,10 @@ try {
     while(!$uia.WaitForExit(1000)) {
         if ($desktopBaseline) {
             Get-DesktopEvidenceState | ConvertTo-Json -Compress | Add-Content "$Root/desktop-observations.jsonl" -Encoding UTF8
-            $null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $desktopBaseline
+            $null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $desktopBaseline $DesktopInputPolicy
         }
         if((Get-ProductRunBudgetElapsed $runBudget) -gt $maximum){throw 'RUN_WATCHDOG_TIMEOUT'}
-        $diskReserve=5GB
+        $diskReserve=if($frozenGpu){[long]$gpuLimits.evidence_disk_reserve_bytes}else{5GB}
         if((Get-PSDrive -Name $evidenceDrive).Free -lt $diskReserve){throw 'EVIDENCE_DISK_RESERVE_EXHAUSTED'}
         if(Test-ProductEarlyObservers $Root $run $Mode $cycles $seconds $archive $diagnostic $gpuTrace $gpuDirectory $gpuHeartbeatClock $identity $plan.gpu_etw_observer.maximum_bytes){continue}
         $last=$null
@@ -272,7 +327,7 @@ try {
     $runExit=0
 } catch {
     $failure=$_.Exception.Message
-    try{@{run_id=$run;verdict='FAIL';reason=$failure;utc=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json|Set-Content "$Root/controller-result.json" -Encoding UTF8}catch{$cleanupErrors.Add('CONTROLLER_FAILURE_RECEIPT_WRITE_FAILED')}
+    try{@{run_id=$run;verdict='FAIL';reason=$failure;desktop_input_policy=$DesktopInputPolicy;utc=[DateTime]::UtcNow.ToString('o')}|ConvertTo-Json|Set-Content "$Root/controller-result.json" -Encoding UTF8}catch{$cleanupErrors.Add('CONTROLLER_FAILURE_RECEIPT_WRITE_FAILED')}
     try{@{run_id=$run;reason=$failure}|ConvertTo-Json|Set-Content "$Root/collector-stop.json" -Encoding UTF8}catch{$cleanupErrors.Add('COLLECTOR_STOP_WRITE_FAILED')}
     # Identity is published before first-window discovery. A collector can fail
     # before the first UIA action; do not orphan that product or trust PID alone.
@@ -294,6 +349,7 @@ try {
     if($remoteLaunchAttempted){
         try {
             $shutdownArgs=@('--root',$Root,'--run-id',$run,'--launch-attempted')
+            if($AudioTimingDiagnostic){$shutdownArgs+='--timing'}
             & python "$PSScriptRoot/product_pilot_shutdown.py" @shutdownArgs
             if($LASTEXITCODE){throw 'REMOTE_SHUTDOWN_OR_EVIDENCE_FAILED'}
         } catch {

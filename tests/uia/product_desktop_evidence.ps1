@@ -150,16 +150,21 @@ public sealed class ProductMenuObserver : IDisposable {
 
 function Get-DesktopEvidenceState { [ProductDesktopEvidence]::Snapshot() }
 
-function Assert-DedicatedDesktop([int]$ExpectedSessionId, $Baseline = $null) {
+function Assert-DedicatedDesktop([int]$ExpectedSessionId, $Baseline = $null,
+    [ValidateSet('strict','diagnostic')][string]$InputPolicy = 'strict') {
     if ($ExpectedSessionId -le 0) { throw 'DEDICATED_DESKTOP_SESSION_REQUIRED' }
     $state = Get-DesktopEvidenceState
     if ($state.session_id -ne $ExpectedSessionId) { throw 'DEDICATED_DESKTOP_SESSION_MISMATCH' }
     if (!$state.interactive -or !$state.default_input_desktop -or !$state.same_input_desktop) {
         throw 'DEDICATED_DESKTOP_NOT_INTERACTIVE'
     }
-    if (!$state.input_available) { throw 'DEDICATED_DESKTOP_INPUT_EVIDENCE_UNAVAILABLE' }
-    if ($null -ne $Baseline -and $state.last_input_tick -ne $Baseline.last_input_tick) {
-        throw 'DEDICATED_DESKTOP_INPUT_ACTIVITY'
+    # Diagnostic policy keeps read-only input evidence for failure attribution.
+    # Input availability/activity is not a stop condition under this policy.
+    if ($InputPolicy -eq 'strict') {
+        if (!$state.input_available) { throw 'DEDICATED_DESKTOP_INPUT_EVIDENCE_UNAVAILABLE' }
+        if ($null -ne $Baseline -and $state.last_input_tick -ne $Baseline.last_input_tick) {
+            throw 'DEDICATED_DESKTOP_INPUT_ACTIVITY'
+        }
     }
     return $state
 }

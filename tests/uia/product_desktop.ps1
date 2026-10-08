@@ -2,6 +2,7 @@ param(
     [Parameter(Mandatory=$true)][string]$Executable,
     [Parameter(Mandatory=$true)][string]$OutputDirectory,
     [int]$DedicatedDesktopSessionId = 0,
+    [ValidateSet('strict','diagnostic')][string]$DesktopInputPolicy = 'strict',
     [int]$Cycles = 100,
     [int]$MinimumSeconds = 28800,
     [int]$ShareSeconds = 60,
@@ -151,6 +152,7 @@ function Sync-ObserverContext([string]$Action, [string]$Phase) {
 }
 function Save-Result([string]$Verdict, [string]$Reason) {
     $result=[ordered]@{schema=1; run_id=$script:runId; verdict=$Verdict; reason=$Reason;
+        desktop_input_policy=$DesktopInputPolicy;
         cycles_requested=$Cycles; cycles_completed=$script:completed;
         minimum_seconds=$MinimumSeconds; started_utc=$started.ToString('o');
         finished_utc=[DateTime]::UtcNow.ToString('o'); ui_only=$true;
@@ -177,7 +179,7 @@ function Sample-Resource([string]$Phase) {
     if ($script:desktopBaseline) {
         $state=Get-DesktopEvidenceState
         $state | ConvertTo-Json -Compress | Add-Content (Join-Path $OutputDirectory 'desktop-observations.jsonl') -Encoding UTF8
-        $null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $script:desktopBaseline
+        $null=Assert-DedicatedDesktop $DedicatedDesktopSessionId $script:desktopBaseline $DesktopInputPolicy
     }
     $script:lastResourceSample = $now
     $process = Get-Process -Id $script:child.Id -ErrorAction SilentlyContinue
@@ -900,6 +902,14 @@ function Run-Cycle {
             Set-Value 'joinDisplayName' ("U-{0}-{1:d4}" -f $script:runId.Substring(0,8),$script:cycle)
             Toggle-To 'joinMicrophone' ([Windows.Automation.ToggleState]::On)
             Toggle-To 'joinCamera' ([Windows.Automation.ToggleState]::On)
+            # The current product embeds the security choice in the join dialog.
+            # This frozen load uses ordinary, non-E2EE SFU peers; operate and
+            # verify the visible Off choice before submitting the join once.
+            Invoke 'joinEncryptionToggle'
+            Toggle-To 'e2eeRequired' ([Windows.Automation.ToggleState]::Off)
+            [ordered]@{run_id=$script:runId;cycle=$script:cycle;pid=$script:child.Id;
+                operation_id=$script:operation;mode='off';utc=[DateTime]::UtcNow.ToString('o')} |
+                ConvertTo-Json -Compress | Add-Content (Join-Path $OutputDirectory 'uia-encryption-outcomes.jsonl') -Encoding UTF8
             Invoke 'joinBtn'
             $null = Wait-Top 'MeetingRoomWindow'
             $null = Wait-For 'remote video paging controls' {
@@ -1101,7 +1111,7 @@ function Run-IsolatedCycle {
     $prefix=Join-Path $directory ('cycle-{0:d4}' -f $script:cycle)
     $configuration=[ordered]@{output_directory=$OutputDirectory;executable=$Executable;
         started_utc=$started.ToString('o');cycles=$Cycles;minimum_seconds=$MinimumSeconds;
-        dedicated_session=$DedicatedDesktopSessionId;desktop_baseline=$script:desktopBaseline;
+        dedicated_session=$DedicatedDesktopSessionId;desktop_baseline=$script:desktopBaseline;desktop_input_policy=$DesktopInputPolicy;
         share_seconds=$ShareSeconds;log_pair_seconds=$LogPairSeconds;stop_settle_seconds=$StopSettleSeconds;
         room_settle_seconds=$RoomSettleSeconds;heap_diagnostic=[bool]$HeapDiagnostic;no_share=[bool]$HeapDiagnosticNoShare;
         heap_snapshot_diagnostic=[bool]$HeapSnapshotDiagnostic;
@@ -1169,7 +1179,7 @@ try {
         throw 'FORMAL_PROFILE_REQUIRED: 100 complete cycles and at least 8 hours'
     }
     if ($DedicatedDesktopSessionId -gt 0) {
-        $script:desktopBaseline=Assert-DedicatedDesktop $DedicatedDesktopSessionId
+        $script:desktopBaseline=Assert-DedicatedDesktop $DedicatedDesktopSessionId -InputPolicy $DesktopInputPolicy
         $script:desktopBaseline | ConvertTo-Json | Set-Content (Join-Path $OutputDirectory 'desktop-baseline.json') -Encoding UTF8
     }
     $script:cycle = 1

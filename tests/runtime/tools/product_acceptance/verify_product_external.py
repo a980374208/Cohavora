@@ -1,8 +1,8 @@
 """Streaming review of the fixed-load product run; never substitutes UI for media.
 
-The original strict DXGI-budget verifier remains available. This review names
-the actually collected WDDM counters and explicitly defers unobserved budgets,
-GPU queues, physical microphone capture and WGC handle ownership.
+The original strict verifier remains available. This review checks the actual
+product's DXGI budgets on all discovered nodes separately from WDDM counters.
+GPU queues, physical microphone capture and WGC handle ownership stay explicit.
 """
 from __future__ import annotations
 import argparse
@@ -20,7 +20,12 @@ from product_pilot_correlation import correlate
 from product_pilot_audio import review_outbound_audio
 from product_pilot_archive import read_segment
 from product_pilot_load import review_lifecycle
+from product_pilot_scheduler import review_scheduler_policy
+from product_pilot_desktop_policy import bind_desktop_input_policy
 from product_pilot_diagnostics import diagnostic_source, safe_event
+from analyze_product_gpu_budget import ALL_NODES_SCOPE, MAXIMUM_OBSERVER_GAP_MS, review_cycle as review_gpu_cycle, stamp as gpu_stamp
+from product_gpu_queue import SCOPE as GPU_QUEUE_SCOPE, review_cycle as review_gpu_queue_cycle, review_diagnostic_bounds
+from product_gpu_etw import validate_live_capture, reconstruct as reconstruct_gpu_etw, review_hybrid_cycle, validate_frozen_limits
 from verify_product_acceptance import validate_bundle, EvidenceError, instant
 
 
@@ -324,6 +329,7 @@ def interrupted_review(root, error, output=None):
             uia_completed="export" in completed,reason="independent_review_incomplete",
             observed_actions=sorted(completed)))
     report=dict(schema=1,run_id=plan["run_id"],mode=plan["mode"],verdict="FAIL",
+        desktop_input_policy=plan.get("desktop_input_policy","strict"),
         reason=reason,review_error=dict(type=type(error).__name__,reason=str(error)),
         cycles=cycles,cycle_counts=dict(Counter(c["verdict"] for c in cycles)),
         cycles_requested=plan["cycles"],cycles_not_run=plan["cycles"]-len(cycles),
@@ -335,8 +341,11 @@ def interrupted_review(root, error, output=None):
 def review(root, output=None):
     output=root if output is None else output
     plan, result, limits = read(root/"plan.json"), read(root/"uia/uia-result.json"), read(root/"limits.json")
+    input_policy=bind_desktop_input_policy(plan,result)
     run = plan["run_id"]
     identity = read(root/"uia/product-identity.json")
+    if identity.get("run_id") != run or Path(identity["executable"]).parent.name != "RelWithDebInfo":
+        raise ValueError("gpu_budget_product_identity_or_configuration")
     formal = plan["mode"] == "Formal"
     count = 100 if formal else plan["cycles"]
     if not formal and (count < 2 or plan["seconds"] < 240 * count):
@@ -375,8 +384,9 @@ def review(root, output=None):
         raise ValueError("continuous_diagnostic_sequence_gap")
     log_windows = {r["cycle"]:r for r in records(root/"uia/uia-log-windows.jsonl")}
     report = dict(schema=1, run_id=run, mode=plan["mode"], verdict="FAIL", cycles=[],
+        desktop_input_policy=input_policy,
         started_utc=result["started_utc"], finished_utc=result["finished_utc"],
-        deferred=["dxgi_local_nonlocal_budget", "gpu_queue", "wgc_handle_ownership",
+        deferred=["gpu_queue", "wgc_handle_ownership",
                   "slow_disk", "power_loss", "real_crash_recovery", "release_symbol_review",
                   "audio_pixel_quality", "physical_multimonitor_coordinates"])
     devices = read(root/"audio-devices.json")
@@ -385,6 +395,45 @@ def review(root, output=None):
     if devices["active_capture_endpoints"] == 0:
         report["deferred"].append("outbound_microphone_no_active_capture_endpoint")
     release_details = []
+    frozen_gpu, frozen_policy = False, None
+    if plan.get("gpu_queue_limits_sha256"):
+        if plan.get("diagnostic_only") or (root/"diagnostic-debugger.json").exists():
+            raise ValueError("gpu_queue_frozen_limits_cannot_qualify_diagnostic")
+        policy_path=root/"gpu-queue-limits.json"
+        if hashlib.sha256(policy_path.read_bytes()).hexdigest()!=plan["gpu_queue_limits_sha256"]:
+            raise ValueError("gpu_queue_frozen_limits_hash_changed")
+        frozen_policy=read(policy_path)
+        validate_frozen_limits(frozen_policy)
+        frozen_gpu=True
+        report["gpu_queue_frozen_limits"]=dict(sha256=plan["gpu_queue_limits_sha256"],policy=frozen_policy)
+    gpu_etw_proof, gpu_etw_error = None, None
+    if plan.get("gpu_etw_observer"):
+        try:
+            expected=dict(required=True,scope="process_owned_device_context_scheduler_packet_lifecycle",
+                mode="lossless realtime owner-filtered JSONL",maximum_bytes=frozen_policy["etw_maximum_bytes"] if frozen_gpu else 8589934592,
+                storage_budget_status="FROZEN_B14_TEST" if frozen_gpu else "PROVISIONAL_DIAGNOSTIC")
+            if plan["gpu_etw_observer"] != expected:
+                raise ValueError("gpu_etw_observer_contract_changed")
+            gpu_root=root/"gpu-etw"
+            summary=read(gpu_root/"trace-summary.json")
+            validate_live_capture(read(gpu_root/"trace-ready.json"),summary,identity,expected["maximum_bytes"])
+            if (gpu_root/"events.jsonl").stat().st_size != summary["written_bytes"]:
+                raise ValueError("gpu_etw_persisted_size_mismatch")
+            gpu_windows=[]
+            for values in cycle_actions.values():
+                endpoints={(v['action'],v['phase']):int(gpu_stamp(v)*10000)+116444736000000000 for v in values}
+                gpu_windows.extend(((endpoints['join','uia_observed'],endpoints['leave','requested']),
+                    (endpoints['leave','uia_observed']+50000000,endpoints['export','requested'])))
+            gpu_etw_proof=reconstruct_gpu_etw(records(gpu_root/"events.jsonl"),identity["pid"],summary,windows=gpu_windows)
+            if any(gpu_etw_proof[k] for k in ("final_pending","final_contexts","final_devices")):
+                raise ValueError("gpu_etw_final_product_resources_not_released")
+            exited=[a for a in actions if a["action"]=="process_exit" and a["phase"]=="uia_observed"]
+            if len(exited)!=1 or summary["trace_end_filetime_100ns"] < int(timestamp(exited[0])*10000000)+116444736000000000:
+                raise ValueError("gpu_etw_capture_does_not_span_product_exit")
+            report["gpu_etw_capture"]={k:v for k,v in gpu_etw_proof.items() if k!="transitions"}
+            report["gpu_etw_capture"]["collector_summary"]=summary
+        except (ValueError,KeyError,TypeError,OSError) as error:
+            gpu_etw_error=str(error)
     for cycle in range(1,count+1):
         data = {}
         for name, stream in streams.items():
@@ -399,6 +448,49 @@ def review(root, output=None):
             if detail is not None: details[name] = detail
         required = ("join","page","share_start","share_stop","logging","leave","export")
         check("uia_actions", all((name,phase) in a for name in required for phase in ("requested","uia_observed")))
+        try:
+            expected_observer = dict(required=True, scope=ALL_NODES_SCOPE, maximum_gap_ms=MAXIMUM_OBSERVER_GAP_MS)
+            if plan.get("gpu_budget_observer") != expected_observer:
+                raise ValueError("gpu_budget_observer_contract_missing_or_changed")
+            gpu_proof = review_gpu_cycle(probe, run, identity["pid"], cycle_actions[cycle], ALL_NODES_SCOPE)
+            check("dxgi_node0_budget_coverage", True, gpu_proof)
+            check("dxgi_all_nodes_budget_coverage", True, gpu_proof)
+        except (ValueError, KeyError, TypeError) as error:
+            check("dxgi_node0_budget_coverage", False, str(error))
+            check("dxgi_all_nodes_budget_coverage", False, str(error))
+            if "dxgi_local_nonlocal_budget" not in report["deferred"]:
+                report["deferred"].append("dxgi_local_nonlocal_budget")
+        try:
+            if plan.get("gpu_queue_observer") != dict(required=True, scope=GPU_QUEUE_SCOPE,
+                    maximum_gap_ms=MAXIMUM_OBSERVER_GAP_MS, queue_bounds="FROZEN_B14_TEST" if frozen_gpu else "NOT_FROZEN"):
+                raise ValueError("gpu_queue_observer_contract_missing_or_changed")
+            if plan.get("gpu_etw_observer"):
+                if gpu_etw_error: raise ValueError(gpu_etw_error)
+                queue_proof = review_gpu_queue_cycle(probe, run, identity["pid"], cycle_actions[cycle], active_only=True)
+            else:
+                queue_proof = review_gpu_queue_cycle(probe, run, identity["pid"], cycle_actions[cycle])
+            check("gpu_scheduler_packets_coverage", True, queue_proof)
+            if frozen_gpu:
+                queue_limits=review_hybrid_cycle(gpu_etw_proof,queue_proof,cycle_actions[cycle],frozen_policy,frozen=True)
+                check("gpu_scheduler_packets_frozen_limits",queue_limits["passed"],queue_limits)
+                check("gpu_queue_coverage",queue_limits["gpu_measurement_complete"],dict(metric=frozen_policy["metric"],
+                    scope=frozen_policy["scope"],etw_scope=frozen_policy["etw_scope"],policy_sha256=plan["gpu_queue_limits_sha256"],
+                    active=queue_limits["continuous_active"],release=queue_limits["continuous_release"],
+                    dma_faults_delta=queue_limits["maximum_dma_faults_delta_per_node"],limitations=frozen_policy["limitations"]))
+            elif plan.get("gpu_queue_diagnostic_policy_sha256"):
+                policy_path = root/"gpu-queue-diagnostic-policy.json"
+                if (not plan.get("diagnostic_only") or plan.get("release_eligible") is not False
+                        or formal or not (root/"diagnostic-debugger.json").exists()
+                        or hashlib.sha256(policy_path.read_bytes()).hexdigest() != plan["gpu_queue_diagnostic_policy_sha256"]):
+                    raise ValueError("gpu_queue_provisional_policy_requires_diagnostic_identity")
+                if plan.get("gpu_etw_observer"):
+                    queue_limits=review_hybrid_cycle(gpu_etw_proof,queue_proof,cycle_actions[cycle],read(policy_path))
+                else:
+                    queue_limits = review_diagnostic_bounds(probe, run, identity["pid"], cycle_actions[cycle], queue_proof, read(policy_path))
+                check("gpu_scheduler_packets_provisional_limits", queue_limits["passed"], queue_limits)
+        except (ValueError, KeyError, TypeError) as error:
+            check("gpu_scheduler_packets_coverage", False, str(error))
+            if frozen_gpu:check("gpu_queue_coverage",False,str(error))
         start, end = timestamp(a["join","uia_observed"]), timestamp(a["leave","requested"])
         outbound = review_outbound_audio(run,cycle_actions[cycle],remote,devices,device_outcomes,limits["max_audio_gap_ms"])
         for name, outcome in outbound.items():
@@ -528,6 +620,8 @@ def review(root, output=None):
     duration=(datetime.fromisoformat(result["finished_utc"])-datetime.fromisoformat(result["started_utc"])).total_seconds()
     report["duration_seconds"]=duration
     report["cycle_counts"]=dict(Counter(c["verdict"] for c in report["cycles"]))
+    if frozen_gpu and all(c["checks"].get("gpu_queue_coverage")=="PASS" for c in report["cycles"]):
+        report["deferred"].remove("gpu_queue")
     report["diagnostic_events"]=len(diagnostics)
     report["diagnostic_sequence_gaps"]=0
     report["exit_code"]=exit_evidence["exit_code"]
@@ -556,6 +650,10 @@ def review(root, output=None):
     final_checks["diagnostic_watcher_complete"]=watcher["run_id"]==run and watcher["status"]=="COMPLETE" and watcher["events"]==len(diagnostics)
     final_checks["diagnostic_privacy_schema"]=watcher.get("privacy_schema_violations")==0
     route=read(root/"server-route.json")
+    if 'collector_scheduler_policy' in plan:
+        scheduler_review=review_scheduler_policy(plan, records(root/'remote.jsonl'), route)
+        report['collector_scheduler_policy']=scheduler_review
+        final_checks['collector_scheduler_policy_complete']=scheduler_review['passed']
     final_checks["collector_local_route_complete"]=(route["run_id"]==run and
         route["status"]=="COMPLETE" and route["cleanup_complete"] is True and
         route["child_exit_code"]==0 and route["matched_connections"]>0 and

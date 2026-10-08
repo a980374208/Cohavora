@@ -6,6 +6,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/product_acceptance"))
 from product_gpu_queue import SCOPE, review_cycle, validate_snapshot, review_diagnostic_bounds
+from release_product_acceptance import FULL_MEDIA_GPU_CHECKS, full_media_gpu_gaps
 
 
 def snapshot():
@@ -137,6 +138,19 @@ class QueueEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "gpu_queue_counters_reset_or_wrapped"):
             review_cycle(probes, "run", 123, actions)
 
+    def test_adapter_aliases_are_separate_and_observations_cannot_close_bounds(self):
+        probes, actions = evidence()
+        for row in probes:
+            alias = copy.deepcopy(row["gpu_queue"]["adapters"][0])
+            alias["adapter_ordinal"] = 1
+            row["gpu_queue"]["adapters"].append(alias)
+        result = review_cycle(probes, "run", 123, actions)
+        self.assertEqual(set(result["adapters"]), {"0", "1"})
+        self.assertEqual(result["adapters"]["0"]["0"]["maximum_observed_submitted_minus_completed"], 1)
+        checks = {key: "PASS" for key in FULL_MEDIA_GPU_CHECKS if key != "gpu_queue_coverage"}
+        checks["gpu_scheduler_packets_coverage"] = "PASS"
+        report = dict(deferred=["gpu_queue"], cycles=[dict(checks=checks, details=dict(backend_observed=["dxgi"]))])
+        self.assertEqual(full_media_gpu_gaps(report), ["gpu_queue", "gpu_queue_coverage", "gpu_queue_frozen_limits"])
 
     def test_provisional_limits_are_diagnostic_only_and_fail_when_exceeded(self):
         probes, actions, policy = diagnostic_evidence()
