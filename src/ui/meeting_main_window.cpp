@@ -19,6 +19,7 @@
 #include "src/telemetry/telemetry_report.h"
 #include "styles/style_widgets.h"
 #include <QtCore/QPointer>
+#include <QtCore/QTimer>
 #include <QtCore/qscopeguard.h>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QHBoxLayout>
@@ -30,9 +31,12 @@
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QProgressDialog>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QScrollArea>
+#include <QtWidgets/QScrollBar>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QFont>
+#include <QtGui/QScreen>
 
 #if defined(Q_OS_WIN)
 #include <windows.h>
@@ -282,7 +286,7 @@ JoinMeetingDialog::JoinMeetingDialog(
 		const bool expanded = _encryptionWidget->isHidden();
 		_encryptionWidget->setVisible(expanded);
 		_encryptionToggleBtn->setText(QCoreApplication::translate("MeetingUI", expanded ? "⚙ Encryption / Security Settings ▴" : "⚙ Encryption / Security Settings ▾"));
-		layout()->activate();
+		scheduleFormFit();
 	});
 	connect(_encryptionRequired, &QCheckBox::toggled, this, [this](bool required) {
 		if (required) livekit::MarkSensitiveMemoryUsed();
@@ -293,6 +297,7 @@ JoinMeetingDialog::JoinMeetingDialog(
 			_encryptionError->clear();
 			_encryptionError->hide();
 		}
+		scheduleFormFit();
 	});
 	connect(_session, &OpenMeeting::SessionManager::meetingSecurityPreferencesChanged, this, [this] {
 		// Revalidate pending admission against the current usable defaults.
@@ -369,6 +374,70 @@ JoinMeetingDialog::~JoinMeetingDialog() {
 	revokeEncryptionRequest();
 }
 
+void JoinMeetingDialog::showEvent(QShowEvent *e) {
+	QDialog::showEvent(e);
+	scheduleFormFit();
+}
+
+void JoinMeetingDialog::scheduleFormFit() {
+	if (!isVisible() || _formFitPending) return;
+	_formFitPending = true;
+	// Measure after visibility and wrapped-text changes reach the inner layout.
+	QTimer::singleShot(0, this, [this] {
+		_formFitPending = false;
+		if (isVisible()) fitFormToScreen();
+	});
+}
+
+void JoinMeetingDialog::fitFormToScreen() {
+	auto *scroll = findChild<QScrollArea *>(QStringLiteral("adaptiveDialogScroll"));
+	if (!scroll || !scroll->widget()) return;
+	auto *content = scroll->widget();
+	auto *card = findChild<QWidget *>(QStringLiteral("dialogContainer"));
+	if (!content->layout() || !card || !card->layout()) return;
+	auto *targetScreen = screen();
+	const auto available = targetScreen
+		? targetScreen->availableGeometry().adjusted(16, 32, -16, -32)
+		: QRect(pos(), QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX));
+	const auto applyDensity = [&](bool compact) {
+		content->layout()->setContentsMargins(compact ? 8 : 12, compact ? 8 : 12,
+			compact ? 8 : 12, compact ? 8 : 12);
+		card->layout()->setContentsMargins(compact ? 20 : 28, compact ? 12 : 24,
+			compact ? 20 : 28, compact ? 12 : 24);
+		card->layout()->setSpacing(compact ? 8 : 12);
+		for (auto *childLayout : content->findChildren<QLayout *>()) {
+			childLayout->invalidate();
+			childLayout->activate();
+		}
+		content->layout()->invalidate();
+		content->layout()->activate();
+	};
+	const auto measuredSize = [&](int scrollBarWidth) {
+		auto *form = content->layout();
+		const auto minimum = form->totalMinimumSize();
+		const int width = qMin(available.width(), qMax(460, minimum.width()) + scrollBarWidth);
+		const int formWidth = qMax(1, width - scrollBarWidth);
+		const int height = form->hasHeightForWidth()
+			? form->totalHeightForWidth(formWidth) : form->totalSizeHint().height();
+		return QSize(width, qMax(minimum.height(), height));
+	};
+	applyDensity(false);
+	auto desired = measuredSize(0);
+	if (desired.height() > available.height()) {
+		applyDensity(true);
+		desired = measuredSize(0);
+	}
+	if (desired.height() > available.height()) {
+		desired = measuredSize(scroll->verticalScrollBar()->sizeHint().width());
+	}
+	desired.setHeight(qMin(available.height(), qMax(560, desired.height())));
+	if (size() != desired) resize(desired);
+	if (targetScreen) {
+		move(qBound(available.left(), x(), available.right() - width() + 1),
+			qBound(available.top(), y(), available.bottom() - height() + 1));
+	}
+}
+
 void JoinMeetingDialog::clearEncryptionEditor() {
 	if (!_encryptionKeyInput) return;
 	_encryptionKeyInput->setText(QString(_encryptionKeyInput->text().size(), QChar(0)));
@@ -398,6 +467,7 @@ void JoinMeetingDialog::updateEncryptionDefaults() {
 	_encryptionError->setText(_globalEncryption ? QCoreApplication::translate("MeetingUI",
 		"Using the encryption key configured for all meetings in Settings.") : QString());
 	_encryptionError->setVisible(_globalEncryption);
+	scheduleFormFit();
 }
 
 bool JoinMeetingDialog::prepareEncryptionRequest() {
@@ -428,6 +498,7 @@ bool JoinMeetingDialog::prepareEncryptionRequest() {
 			_encryptionToggleBtn->setText(QCoreApplication::translate("MeetingUI", "⚙ Encryption / Security Settings ▴"));
 			_encryptionKeyInput->setFocus();
 		}
+		scheduleFormFit();
 		return false;
 	}
 	revokeEncryptionRequest();
@@ -436,6 +507,7 @@ bool JoinMeetingDialog::prepareEncryptionRequest() {
 		_encryptionError->clear();
 		_encryptionError->hide();
 	}
+	scheduleFormFit();
 	return true;
 }
 
@@ -457,7 +529,7 @@ void JoinMeetingDialog::toggleManualServer() {
 	bool isVisible = _manualWidget->isVisible();
 	_manualWidget->setVisible(!isVisible);
 	_manualToggleBtn->setText(!isVisible ? QCoreApplication::translate("MeetingUI", "⚙ Advanced LiveKit Connection ▴") : QCoreApplication::translate("MeetingUI", "⚙ Advanced LiveKit Connection ▾"));
-	layout()->activate();
+	scheduleFormFit();
 }
 
 void JoinMeetingDialog::reject() {
@@ -499,6 +571,7 @@ void JoinMeetingDialog::setLoading(bool loading, const QString &statusText) {
 	} else {
 		if (_joinBtn) _joinBtn->setText(QCoreApplication::translate("MeetingUI", "Join Meeting"));
 	}
+	scheduleFormFit();
 }
 
 void JoinMeetingDialog::showError(const QString &msg) {
@@ -506,6 +579,7 @@ void JoinMeetingDialog::showError(const QString &msg) {
 	MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-main-window-statuslabel-3");
 	_statusLabel->setText(msg);
 	_statusLabel->setVisible(!msg.isEmpty());
+	scheduleFormFit();
 }
 
 void JoinMeetingDialog::onJoinClicked() {
