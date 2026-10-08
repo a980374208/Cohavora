@@ -23,6 +23,13 @@
 release_eligible=false、qualification_credit=0，不授予 B14 资格或正式放行信用。
 真实运行仅接受经 PE CodeView 校验的 RelWithDebInfo 二进制。
 
+`product_acceptance/run_product_first_cycle_media_log_diagnostic.ps1` 只编排一次
+产品启动和首周期媒体／日志对照，复用既有十路发布负载及远端退出清理。
+`invoke_product_first_cycle_media_log_diagnostic.ps1` 从冻结 UIA 源码提取原动作；
+`verify_product_first_cycle_media_log.py` 在新目录复核真实媒体、日志性能和退出证据。
+运行预算 600 秒，输入活动仅记录；所有输出均为诊断、qualification_credit=0，
+不执行共享、完整 GPU 门、三轮 PILOT 或正式长稳，不证明物理麦克风持续非静音。
+
 远端部署的 `product_pilot_remote.py`、`product_pilot_context.py`、
 `product_pilot_local_route.py` 与 `product_aliyun_target.json` 须一起复制，保持远端文件名。
 `product_pilot_timing.py` 随采集器部署；仅 `-AudioTimingDiagnostic` 启用 FFI／事件循环时序。
