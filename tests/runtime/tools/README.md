@@ -7,7 +7,7 @@
 | `screen_capture/` | WGC 长稳、屏幕共享质量采集与分析 | `run_wgc_soak.py`、`invoke_screen_share_quality_probe.py` |
 | `desktop/` | 产品 UIA 监督、低频快照及 PowerShell worker | `product_uia_retest.py`、`uia_snapshot.py`、`e2ee_password_uia_worker.ps1` |
 | `media/` | 双端媒体矩阵、E2EE 互操作驱动与独立音源旁证 | `invoke_e2e_media_matrix.ps1`、`invoke_e2ee_interop.py`、`invoke_e2ee_product.py`、`microphone_input/probe_microphone_input.py` |
-| `diagnostics/` | 诊断场景统一参数入口与进程内 GPU 预算旁证 | `invoke_diagnostic_probe.ps1`、`gpu_budget/` |
+| `diagnostics/` | 诊断场景统一参数入口、进程内 GPU 预算旁证与历史原生退出采样 | `invoke_diagnostic_probe.ps1`、`gpu_budget/`、`native_exit/` |
 
 入口继续支持按文件路径直接执行，CLI 参数和运行条件保持不变。使用仓库根目录作为工作目录，
 具体命令与执行边界见 [runtime README](../README.md)、[UIA README](../../uia/README.md)
@@ -16,6 +16,11 @@
 同领域 Python 模块及配套 JSON / worker 保持同目录；`desktop/product_uia_retest.py` 显式依赖
 `meeting/meeting_soak.py`，屏幕质量驱动显式依赖 `product_acceptance/product_aliyun_transport.py`。
 跨领域入口只添加所需目录，不扫描或自动加入全部领域目录。
+
+`diagnostics/native_exit/` 的两个 Linux 入口按冻结历史发布端输入采集退出阶段，
+配套发布／订阅夹具和直接依赖须一起部署。来源、120／660 秒预算、独立 API 清理
+及完整 trace 导出 `DEFERRED` 边界见 [原生退出诊断说明](diagnostics/native_exit/README.md)。
+所有结果仅作诊断，不代表当前源码 PILOT 或正式验收。
 
 `meeting/meeting_soak.py prepare` 默认保留 1800 秒 steady、至少 7200 秒 mixed
 及至少 17 路远端视频；`--diagnostic`（别名 `--smoke`、`--allow-short`）允许短测

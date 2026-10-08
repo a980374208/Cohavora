@@ -1,0 +1,2 @@
+# Frozen source hashes refer to exact bytes, including line endings.
+*.py -text
