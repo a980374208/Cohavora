@@ -2,6 +2,7 @@
 import unittest
 import hashlib
 import json
+import itertools
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -10,7 +11,8 @@ from unittest.mock import Mock, patch
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools/product_acceptance"))
 
-from product_pilot_checkpoints import read_committed
+from product_pilot_checkpoints import read_committed, collect
+from product_pilot_archive import encode_segment, read_segment
 from product_pilot_performance import window_p95
 from product_pilot_context import validate_context
 from product_pilot_local_route import LocalSfuRoute
@@ -21,6 +23,7 @@ from release_product_acceptance import evaluate
 from product_pilot_audio import review_outbound_audio
 from copy import deepcopy
 from datetime import datetime, timezone
+from argparse import Namespace
 
 
 class AudioTimingContracts(unittest.TestCase):
@@ -105,6 +108,109 @@ class LocalSfuRouteContracts(unittest.TestCase):
         target=self.target();target["collector_media_route"]["private_ip"]="8.8.8.8"
         with self.assertRaisesRegex(ValueError,"addresses"):
             LocalSfuRoute(target,"b"*32,Path("result.json"))
+
+
+class LosslessArchiveContracts(unittest.TestCase):
+    def fixture(self, root):
+        session="a"*32
+        run="b"*32
+        process="c"*32
+        native=root/"native"/"cohavora-telemetry-v2-current"
+        native.mkdir(parents=True)
+        payload=b''.join((json.dumps(dict(revision=i,session_generation=7,
+            key="queue.depth",value=0,padding="x"*8192))+"\n").encode() for i in (1,2,3))
+        name="segment-00000000000000000003.jsonl"
+        entry=dict(file=name,first_revision=1,last_revision=3,size_bytes=len(payload),
+            sha256=hashlib.sha256(payload).hexdigest())
+        (native/name).write_bytes(payload)
+        (native/"manifest.json").write_text(json.dumps(dict(process_run_id=process,
+            anonymous_session_id=session,last_committed_revision=3,
+            session_generation=7,session_complete=True,pruned_records=0,segments=[entry])))
+        probe=root/"probe.jsonl"
+        probe.write_text(json.dumps(dict(run_id=run,process_run_id=process,
+            history_root=str(native.parent)))+"\n")
+        result=root/"uia"/"uia-result.json"
+        result.parent.mkdir()
+        result.write_text("{}")
+        stored, storage=encode_segment(name,payload)
+        args=Namespace(probe=probe,result=result,output=root/"archive",run_id=run,
+            seconds=30,maximum_bytes=len(stored))
+        return session,payload,entry,stored,storage,args
+
+    def collect(self, args):
+        ticks=itertools.count()
+        with patch("product_pilot_checkpoints.time.monotonic",side_effect=lambda:next(ticks)), \
+             patch("product_pilot_checkpoints.time.sleep"):
+            return collect(args)
+
+    def test_compressed_budget_preserves_all_native_bytes_and_revision_proof(self):
+        with TemporaryDirectory() as directory:
+            session,payload,entry,stored,storage,args=self.fixture(Path(directory))
+            self.assertGreater(len(payload),args.maximum_bytes)
+            self.assertEqual(self.collect(args),0)
+            events=[json.loads(line) for line in (args.output/"collector.jsonl").read_text().splitlines()]
+            archived=next(row for row in events if row["event"]=="segment.archived")
+            self.assertEqual(read_segment(args.output/session,archived),payload)
+            proof=archive_session(args.output,session,[archived])
+            self.assertEqual(proof["missing_revisions"],0)
+            self.assertEqual(proof["archived_bytes"],len(payload))
+            self.assertEqual(proof["stored_segment_bytes"],len(stored))
+            self.assertEqual(events[-1]["bytes"],args.maximum_bytes)
+            self.assertEqual(events[-1]["raw_bytes"],len(payload))
+
+    def test_one_byte_over_storage_budget_still_fails_before_segment_write(self):
+        with TemporaryDirectory() as directory:
+            session,payload,entry,stored,storage,args=self.fixture(Path(directory))
+            args.maximum_bytes-=1
+            self.assertEqual(self.collect(args),1)
+            self.assertFalse((args.output/session/storage["archive_file"]).exists())
+            event=json.loads((args.output/"collector.jsonl").read_text().splitlines()[-1])
+            self.assertEqual(event["reason"],"external_archive_budget_exceeded")
+
+    def test_storage_tampering_and_native_hash_tampering_both_fail(self):
+        with TemporaryDirectory() as directory:
+            session,payload,entry,stored,storage,args=self.fixture(Path(directory))
+            path=Path(directory)/storage["archive_file"]
+            path.write_bytes(stored+b"changed")
+            with self.assertRaisesRegex(ValueError,"storage_hash_or_size"):
+                read_segment(Path(directory),dict(entry,**storage))
+            changed,changed_storage=encode_segment(entry["file"],payload.replace(b'"revision": 1',b'"revision": 2'))
+            path.write_bytes(changed)
+            with self.assertRaisesRegex(ValueError,"archive_hash_or_size"):
+                read_segment(Path(directory),dict(entry,**changed_storage))
+
+    def test_declared_decoded_size_and_storage_path_are_enforced(self):
+        with TemporaryDirectory() as directory:
+            session,payload,entry,stored,storage,args=self.fixture(Path(directory))
+            (Path(directory)/storage["archive_file"]).write_bytes(stored)
+            with self.assertRaisesRegex(ValueError,"archive_hash_or_size"):
+                read_segment(Path(directory),dict(entry,**storage,size_bytes=1))
+            with self.assertRaisesRegex(ValueError,"storage_path"):
+                read_segment(Path(directory),dict(entry,**dict(storage,archive_file="../escape.gz")))
+            with self.assertRaisesRegex(ValueError,"encoding"):
+                read_segment(Path(directory),dict(entry,**dict(storage,archive_encoding="unknown")))
+
+    def test_truncated_compressed_stream_fails_even_with_matching_storage_hash(self):
+        with TemporaryDirectory() as directory:
+            session,payload,entry,stored,storage,args=self.fixture(Path(directory))
+            truncated=stored[:-8]
+            (Path(directory)/storage["archive_file"]).write_bytes(truncated)
+            storage.update(stored_bytes=len(truncated),stored_sha256=hashlib.sha256(truncated).hexdigest())
+            with self.assertRaisesRegex(ValueError,"compressed_payload_invalid"):
+                read_segment(Path(directory),dict(entry,**storage))
+
+    def test_valid_compression_and_hashes_cannot_hide_a_missing_revision(self):
+        with TemporaryDirectory() as directory:
+            session,payload,entry,stored,storage,args=self.fixture(Path(directory))
+            self.assertEqual(self.collect(args),0)
+            missing=b''.join(line+b"\n" for line in payload.splitlines()
+                             if json.loads(line)["revision"]!=2)
+            stored,storage=encode_segment(entry["file"],missing)
+            (args.output/session/storage["archive_file"]).write_bytes(stored)
+            entry.update(size_bytes=len(missing),sha256=hashlib.sha256(missing).hexdigest())
+            with self.assertRaisesRegex(ValueError,"revision_gap"):
+                archive_session(args.output,session,[dict(entry,**storage)])
+
 
 
 class OutboundAudioContracts(unittest.TestCase):

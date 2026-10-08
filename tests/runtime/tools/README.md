@@ -75,3 +75,7 @@ authority图片权限、完整文档/sequence/asset及Pillow独立导出像素�
 同进程5次join/leave资源残余门，显式依赖同领域telemetry/network/files驱动及
 `desktop/run_b_telemetry_uia_interference.ps1`。每轮核对Room与清理服务归零、
 真实媒体推进和history/diagnostic排空；限定门不替代B14的8小时/100次验收。
+
+checkpoint 归档采用逐段 gzip 无损存储；原生 SHA-256、大小、revision 1
+到终态的检查不变，并额外核对压缩文件哈希及大小。原有归档段存储预算
+保持 PILOT 1 GiB／正式 32 GiB，同时记录解压后原始字节数；旧原始段兼容。

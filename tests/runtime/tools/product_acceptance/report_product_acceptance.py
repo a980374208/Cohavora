@@ -61,6 +61,7 @@ def render(root,gate):
         f"最终检查：`{json.dumps(result.get('final_checks',{}),ensure_ascii=False)}`。",
         f"遥测与日志计数峰值（明确包含有意抑制）：`{json.dumps(counters)}`。",
         f"已严格复核的终态会话 {len(proofs)}；归档修订合计 {sum(p['last_revision'] for p in proofs)}；缺失修订合计 {sum(p['missing_revisions'] for p in proofs)}；归档 segment bytes {sum(p['archived_bytes'] for p in proofs)}。统计仅涵盖有完整 proof 的会话，缺证周期不填零。",
+        f"归档段实际存储字节：{sum(p.get('stored_segment_bytes',p['archived_bytes']) for p in proofs)}；原始字节以解压后原生 SHA-256／大小核对，未删减 revision。",
         f"资源峰值：`{json.dumps(resource_peaks)}`；私有内存不替代额外稳态工作集。",
         f"全服务器 NIC 观察峰值 bps：{max((p['peak_bps'] for p in network if p.get('peak_bps') is not None),default='UNKNOWN')}；超 3 Mbps 样本合计：{sum(p.get('samples_above_limit',0) for p in network) if network else 'UNKNOWN'}。",
         f"独立产品下行音频最大包间隔 ms：{max((p['maximum_gap_ms'] for p in audio if p.get('maximum_gap_ms') is not None),default='UNKNOWN')}。",

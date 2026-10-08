@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from product_pilot_performance import paired_window
 from product_pilot_correlation import correlate
 from product_pilot_audio import review_outbound_audio
+from product_pilot_archive import read_segment
 from verify_product_acceptance import validate_bundle, EvidenceError
 
 
@@ -58,35 +59,36 @@ def groups(path, key, run):
 
 
 def archive_session(root, session, entries):
-    revisions, generations, total = set(), set(), 0
+    revisions, generations, total, stored_total = set(), set(), 0, 0
     metric_summary={}
     for entry in entries:
         path = root / session / entry["file"]
         if path.is_symlink() or not path.resolve().is_relative_to(root.resolve()):
             raise ValueError("archive_path_escape")
         digest, size = hashlib.sha256(), 0
-        with path.open("rb") as stream:
-            for line in stream:
-                digest.update(line); size += len(line)
-                row = json.loads(line)
-                # Metric rows carry generation/revision; session identity is
-                # bound by the hashed segment entry and containing manifest.
-                if not entry["first_revision"] <= row["revision"] <= entry["last_revision"]:
-                    raise ValueError("archive_revision_identity")
-                revisions.add(row["revision"]); generations.add(row["session_generation"])
-                key=row.get("key","")
-                if key.startswith(("network.inbound.","video.codec.","reconnect.","queue.","resource.internal.")):
-                    summary=metric_summary.setdefault(key,dict(availability={},valid_samples=0))
-                    availability=row.get("availability","UNKNOWN")
-                    summary["availability"][availability]=summary["availability"].get(availability,0)+1
-                    value=row.get("value")
-                    if availability.upper()=="VALID" and value is not None:
-                        summary["valid_samples"]+=1
-                        summary["last"]=value
-                        if isinstance(value,(int,float)):
-                            summary["maximum"]=max(summary.get("maximum",value),value)
-                        elif isinstance(value,str):
-                            summary["observed"]=sorted(set(summary.get("observed",[]))|{value})
+        content = read_segment(root / session, entry)
+        stored_total += entry.get("stored_bytes", len(content))
+        for line in content.splitlines(keepends=True):
+            digest.update(line); size += len(line)
+            row = json.loads(line)
+            # Metric rows carry generation/revision; session identity is
+            # bound by the hashed segment entry and containing manifest.
+            if not entry["first_revision"] <= row["revision"] <= entry["last_revision"]:
+                raise ValueError("archive_revision_identity")
+            revisions.add(row["revision"]); generations.add(row["session_generation"])
+            key=row.get("key","")
+            if key.startswith(("network.inbound.","video.codec.","reconnect.","queue.","resource.internal.")):
+                summary=metric_summary.setdefault(key,dict(availability={},valid_samples=0))
+                availability=row.get("availability","UNKNOWN")
+                summary["availability"][availability]=summary["availability"].get(availability,0)+1
+                value=row.get("value")
+                if availability.upper()=="VALID" and value is not None:
+                    summary["valid_samples"]+=1
+                    summary["last"]=value
+                    if isinstance(value,(int,float)):
+                        summary["maximum"]=max(summary.get("maximum",value),value)
+                    elif isinstance(value,str):
+                        summary["observed"]=sorted(set(summary.get("observed",[]))|{value})
         if size != entry["size_bytes"] or digest.hexdigest() != entry["sha256"]:
             raise ValueError("archive_hash_or_size_mismatch")
         total += size
@@ -97,7 +99,7 @@ def archive_session(root, session, entries):
         raise ValueError("archive_revision_gap_or_nonterminal")
     return dict(first_revision=1, last_revision=last, missing_revisions=0,
                 archived_bytes=total, segments=len(entries), product_pruned_records=m["pruned_records"],
-                native_metric_summary=metric_summary)
+                stored_segment_bytes=stored_total, native_metric_summary=metric_summary)
 
 
 def interrupted_review(root, error):

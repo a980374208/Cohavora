@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 import time
+from product_pilot_archive import encode_segment
 
 def read_committed(path):
     # ReplaceFile/MoveFileEx can briefly deny a new Windows reader while an
@@ -28,9 +29,11 @@ def collect(args):
     args.output.mkdir(parents=True, exist_ok=False)
     known = set()
     total = 0
+    raw_total = 0
     sequence = 0
     deadline = time.monotonic() + args.seconds
     settled = None
+    manifests = {}
     with (args.output / "collector.jsonl").open("x", encoding="utf-8", buffering=1) as log:
         def emit(event, **values):
             nonlocal sequence
@@ -77,21 +80,28 @@ def collect(args):
                             content = read_committed(source)
                             if len(content) != entry["size_bytes"] or hashlib.sha256(content).hexdigest() != entry["sha256"]:
                                 raise ValueError("segment_integrity_mismatch")
-                            if total + len(content) > args.maximum_bytes:
+                            stored, storage = encode_segment(name, content)
+                            if total + len(stored) > args.maximum_bytes:
                                 raise ValueError("external_archive_budget_exceeded")
-                            with (destination / name).open("xb") as out:
-                                out.write(content)
-                            total += len(content)
+                            with (destination / storage["archive_file"]).open("xb") as out:
+                                out.write(stored)
+                            total += len(stored)
+                            raw_total += len(content)
                             known.add(key)
-                            emit("segment.archived", session=session, **entry)
-                        (destination / "manifest.json").write_bytes(raw)
-                        (destination / ("manifest-%020d.json" % manifest["last_committed_revision"])).write_bytes(raw)
+                            emit("segment.archived", session=session, **entry, **storage)
+                        # Every revision snapshot remains present. Rewriting
+                        # unchanged terminal manifests each poll adds no proof.
+                        if manifests.get(session) != raw:
+                            (destination / "manifest.json").write_bytes(raw)
+                            (destination / ("manifest-%020d.json" % manifest["last_committed_revision"])).write_bytes(raw)
+                            manifests[session] = raw
                 interrupted = (args.result.parent.parent / "collector-stop.json").exists()
                 if args.result.exists() or interrupted:
                     settled = settled or time.monotonic()
                     if time.monotonic() - settled >= 3:
                         emit("collector.stopped", status="INTERRUPTED" if interrupted else "COMPLETE",
-                             segments=len(known), bytes=total)
+                             segments=len(known), bytes=total, raw_bytes=raw_total,
+                             storage_encoding="gzip", maximum_bytes=args.maximum_bytes)
                         return 1 if interrupted else 0
                 time.sleep(.5)
             raise TimeoutError("pilot_result_not_observed")

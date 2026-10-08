@@ -14,6 +14,7 @@ from verify_product_acceptance import validate_bundle, EvidenceError
 from product_pilot_performance import paired_window
 from product_pilot_correlation import correlate
 from product_pilot_audio import review_outbound_audio
+from product_pilot_archive import read_segment
 
 
 def read(path):
@@ -256,18 +257,17 @@ def review(root):
             session, name = event["session"], event["file"]
             if not re.fullmatch(r"[0-9a-f]{32}", session) or not re.fullmatch(r"segment-[0-9]{20}\.jsonl", name):
                 raise ValueError("unsafe_archive_path")
-            segment = archive / session / name
             digest = hashlib.sha256()
             size = 0
-            with segment.open("rb") as stream:
-                for line in stream:
-                    digest.update(line)
-                    size += len(line)
-                    metric = json.loads(line)
-                    revision = metric["revision"]
-                    archive_hashes_ok &= event["first_revision"] <= revision <= event["last_revision"]
-                    revisions[session].add(revision)
-                    generations[session].add(metric["session_generation"])
+            content = read_segment(archive / session, event)
+            for line in content.splitlines(keepends=True):
+                digest.update(line)
+                size += len(line)
+                metric = json.loads(line)
+                revision = metric["revision"]
+                archive_hashes_ok &= event["first_revision"] <= revision <= event["last_revision"]
+                revisions[session].add(revision)
+                generations[session].add(metric["session_generation"])
             archive_hashes_ok &= size == event["size_bytes"] and digest.hexdigest() == event["sha256"]
             archived_bytes += size
         details = []
