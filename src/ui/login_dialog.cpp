@@ -12,6 +12,9 @@
 #include <QtWidgets/QGridLayout>
 #include <QtWidgets/QGraphicsDropShadowEffect>
 #include <QtWidgets/QMessageBox>
+#include <QtWidgets/QApplication>
+#include <QtWidgets/QStyleOption>
+#include <QtWidgets/QTabBar>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QFont>
@@ -21,6 +24,58 @@
 #include <QtWidgets/QScrollBar>
 
 namespace MeetingUI {
+namespace {
+
+// QTabWidget's default hints include every page, even those with an Ignored
+// size policy. Login forms should measure only the selected page.
+class CurrentPageTabWidget final : public QTabWidget {
+public:
+    using QTabWidget::QTabWidget;
+
+    QSize sizeHint() const override {
+        const auto *page = currentWidget();
+        return sizeWithTabs(page ? page->sizeHint().expandedTo(page->minimumSize()) : QSize(0, 0), false);
+    }
+
+    QSize minimumSizeHint() const override {
+        const auto *page = currentWidget();
+        return sizeWithTabs(page ? page->minimumSizeHint().expandedTo(page->minimumSize()) : QSize(0, 0), true);
+    }
+
+    bool hasHeightForWidth() const override {
+        return currentWidget() && currentWidget()->hasHeightForWidth();
+    }
+
+    int heightForWidth(int width) const override {
+        const auto *page = currentWidget();
+        if (!page) return sizeHint().height();
+        QStyleOptionTabWidgetFrame option;
+        initStyleOption(&option);
+        option.state = QStyle::State_None;
+        const auto padding = style()->sizeFromContents(QStyle::CT_TabWidget, &option, QSize(0, 0), this);
+        const int pageWidth = qMax(1, width - padding.width());
+        const int pageHeight = page->hasHeightForWidth()
+            ? page->heightForWidth(pageWidth) : page->sizeHint().height();
+        const int barHeight = tabBar()->isHidden() ? 0 : tabBar()->sizeHint().height();
+        const int height = qMax(page->minimumSize().height(), pageHeight) + barHeight + padding.height();
+        return qMax(height, QApplication::globalStrut().height());
+    }
+
+private:
+    QSize sizeWithTabs(QSize pageSize, bool minimum) const {
+        auto bar = tabBar()->isHidden() ? QSize(0, 0)
+            : minimum ? tabBar()->minimumSizeHint() : tabBar()->sizeHint();
+        if (!minimum && tabBar()->usesScrollButtons()) bar = bar.boundedTo(QSize(200, 200));
+        const QSize contents(qMax(pageSize.width(), bar.width()), pageSize.height() + bar.height());
+        QStyleOptionTabWidgetFrame option;
+        initStyleOption(&option);
+        option.state = QStyle::State_None;
+        return style()->sizeFromContents(QStyle::CT_TabWidget, &option, contents, this)
+            .expandedTo(QApplication::globalStrut());
+    }
+};
+
+} // namespace
 
 LoginDialog::LoginDialog(QWidget *parent)
     : LoginDialog(OpenMeeting::SessionManager::instance(), parent) {
@@ -113,7 +168,7 @@ void LoginDialog::initUI() {
     cardLayout->addSpacing(8);
 
     // 选项卡：账号登录 vs 用户注册 vs 访客体验
-    _tabWidget = new QTabWidget(card);
+    _tabWidget = new CurrentPageTabWidget(card);
     _tabWidget->setDocumentMode(true);
 
     // --- Tab 1: 账号登录 ---
@@ -335,6 +390,7 @@ void LoginDialog::initUI() {
                 ? QSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred)
                 : QSizePolicy(QSizePolicy::Ignored, QSizePolicy::Ignored));
         }
+        _tabWidget->updateGeometry();
         scheduleFormFit();
     };
     connect(_tabWidget, &QTabWidget::currentChanged, this, updateDefaultButton);
@@ -459,13 +515,26 @@ void LoginDialog::fitFormToScreen() {
         applyDensity(true);
         desired = measuredSize(0);
     }
+    const bool contentFits = desired.height() <= available.height();
     if (desired.height() > available.height()) {
         // Truly small screens still scroll, without introducing horizontal
         // overflow just because the vertical scroll bar occupies some width.
         desired = measuredSize(scroll->verticalScrollBar()->sizeHint().width());
     }
     desired.setHeight(qMin(available.height(), qMax(600, desired.height())));
+    const auto scrollPolicy = scroll->verticalScrollBarPolicy();
+    if (contentFits) {
+        // Qt can retain a scroll bar by measuring wrapping at the old, narrower
+        // viewport. Restore the full width before applying a size that fits;
+        // AsNeeded still handles genuine overflow after the layout settles.
+        scroll->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    }
     if (size() != desired) resize(desired);
+    if (contentFits) {
+        layout()->activate();
+        content->layout()->activate();
+        scroll->setVerticalScrollBarPolicy(scrollPolicy);
+    }
     if (targetScreen) {
         move(qBound(available.left(), x(), available.right() - width() + 1),
              qBound(available.top(), y(), available.bottom() - height() + 1));

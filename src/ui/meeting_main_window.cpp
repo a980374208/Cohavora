@@ -893,15 +893,22 @@ void MeetingMainWindow::initLayout() {
 }
 
 void MeetingMainWindow::handleUserLogout() {
+	if (_sessionInvalidationDialogActive) return;
+	_sessionInvalidationDialogActive = true;
+	const auto reset = qScopeGuard([this] { _sessionInvalidationDialogActive = false; });
 	closeMeetingWindows();
 	hideLogConsole();
 	OpenMeeting::SessionManager::instance().logout();
+	showLoginDialog();
+}
 
+void MeetingMainWindow::showLoginDialog() {
 	// The main window is unavailable while no account is authenticated.  The
 	// login dialog has no parent so the hidden main window is never exposed.
 	hide();
 	LoginDialog loginDlg;
-	if (loginDlg.exec() == QDialog::Accepted) {
+	if (loginDlg.exec() == QDialog::Accepted &&
+		OpenMeeting::SessionManager::instance().isLoggedIn()) {
 		if (_sidebar) _sidebar->update();
 		if (_meetingCatalog) _meetingCatalog->refreshUpcoming();
 		show();
@@ -933,10 +940,14 @@ void MeetingMainWindow::hideLogConsole() {
 }
 
 void MeetingMainWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason) {
-	if (_sessionInvalidationDialogActive) {
+	if (_sessionInvalidationDialogActive ||
+		OpenMeeting::SessionManager::instance().isLoggedIn()) {
 		return;
 	}
 	_sessionInvalidationDialogActive = true;
+	const auto reset = qScopeGuard([this] { _sessionInvalidationDialogActive = false; });
+	hide();
+	hideLogConsole();
 
 	const bool duplicatedLogin =
 		reason == OpenMeeting::SessionInvalidationReason::DuplicatedLogin;
@@ -953,7 +964,7 @@ void MeetingMainWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationRea
 		}
 	}
 
-	QMessageBox::warning(this,
+	QMessageBox::warning(nullptr,
 	                     duplicatedLogin ? QCoreApplication::translate("MeetingUI", "Account Signed Out")
 	                                     : QCoreApplication::translate("MeetingUI", "Session Expired"),
 	                     duplicatedLogin
@@ -962,11 +973,7 @@ void MeetingMainWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationRea
 
 	// SessionManager 在发射 sessionInvalidated 前已复用 logout(false) 清理 token
 	// 和本地 user 设置；这里仅负责让用户回到可重新认证的界面。
-	LoginDialog loginDlg(this);
-	if (loginDlg.exec() == QDialog::Accepted && _sidebar) {
-		_sidebar->update();
-	}
-	_sessionInvalidationDialogActive = false;
+	showLoginDialog();
 }
 
 void MeetingMainWindow::onCardClicked(ActionCardType type) {
