@@ -193,6 +193,7 @@ public:
     }
     void requestScreenShareSources();
     void startScreenShare(livekit::DesktopSource source, std::optional<int> fps = std::nullopt);
+    void startScreenShare(livekit::DesktopSource source, livekit::ScreenShareQuality quality);
     void setScreenShareQuality(livekit::ScreenShareQuality quality);
     void stopScreenShare();
     livekit::ScreenShareSnapshot screenShareSnapshot() const { return _screenShareSnapshot; }

@@ -22,6 +22,19 @@ def rows(quality="high"):
             "sink_frame_age_ms": 50, "sink_frame_width": size["width"],
             "sink_frame_height": size["height"], "intent_present": True,
             "intent_subscribed": True, "desired_enabled": True, "desired_quality": quality,
+            "desired_width": {"low": 280, "medium": 400, "high": 1280}[quality],
+            "desired_height": {"low": 158, "medium": 225, "high": 720}[quality],
+            "desired_max_fps": 15 if quality == "low" else 30,
+            "seat_present": True,
+            "seat_quality": {"low": "p180", "medium": "p360", "high": "p720"}[quality],
+            "seat_width": {"low": 280, "medium": 400, "high": 1280}[quality],
+            "seat_height": {"low": 158, "medium": 225, "high": 720}[quality],
+            "source_width": 1280, "source_height": 720,
+            "window_width": 1600 if quality == "medium" else 1120,
+            "window_height": 1000 if quality == "medium" else 720,
+            "viewport_stage_width": 1600 if quality == "medium" else 1120,
+            "viewport_stage_height": 900 if quality == "medium" else 632,
+            "viewport_device_pixel_ratio": 1.0,
             "publication_subscribed": True, "subscription_error": False,
             "stats_bytes_available": True, "stats_packets_available": True, "stats_decoded_available": True,
             "stats_stream_hash": "4" * 16, "focused": quality == "high", "seat_role": "main" if quality == "high" else "grid",
@@ -38,16 +51,73 @@ def rows(quality="high"):
             "layout_mode": "speaker" if quality == "high" else "grid",
             "pinned_sid_hash": "1" * 16 if quality == "high" else "",
             "focused_sid_hash": "1" * 16 if quality == "high" else "",
+            "resource_pid": 77, "resource_status": "AVAILABLE",
+            "command_seq": 1, "command_status": "applied",
+            "private_bytes": 100_000_000, "working_set_bytes": 90_000_000,
+            "handles": 100, "cpu_time_seconds": float(second),
+            "cpu_percent_of_one_core": 10.0, "cpu_percent_of_host": 1.0,
             "page": 0, "page_size": 16, "selected": 16, "bound": 16})
     return data
 
 
 class HdVerdictTests(unittest.TestCase):
     def test_actual_fps_and_dimensions_pass(self):
-        for quality in ("low", "high"):
+        for quality in ("low", "medium", "high"):
             result = probe.evaluate_step(rows(quality), quality, freeze.QUALITY_CONTRACT)
             self.assertEqual(result["status"], "PASS")
             self.assertEqual(result["native_fps"], freeze.QUALITY_CONTRACT[quality]["source_fps"])
+
+    def test_frozen_pixel_driven_stages_pass_with_independent_resource_summary(self):
+        for step in freeze.PROBE["steps"]:
+            quality = step["quality"]
+            result = probe.evaluate_step(rows(quality), quality, freeze.QUALITY_CONTRACT, step=step)
+            self.assertEqual(result["status"], "PASS")
+            self.assertEqual(result["delivered_fps"], freeze.QUALITY_CONTRACT[quality]["source_fps"])
+            self.assertEqual(result["client_resources"]["status"], "AVAILABLE")
+            self.assertEqual(result["expected_window"], [step["window_width"], step["window_height"]])
+
+    def test_resize_ack_without_expected_source_and_pixel_intent_is_not_ready(self):
+        step = freeze.PROBE["steps"][1]
+        for mutation in (lambda t: t.update(window_width=1120),
+                         lambda t: t.update(source_width=0),
+                         lambda t: t.update(viewport_device_pixel_ratio=1.5),
+                         lambda t: t.update(desired_width=280, desired_height=158, seat_width=280, seat_height=158),
+                         lambda t: t.update(seat_quality="p180")):
+            data = rows("medium")[0]
+            mutation(data["target"])
+            self.assertFalse(probe.ready(data, data["target"], "medium", freeze.QUALITY_CONTRACT, step=step))
+
+    def test_main_requires_720_floor_even_with_high_intent(self):
+        data = rows()[0]
+        data["target"].update(desired_width=960, desired_height=540, seat_width=960, seat_height=540)
+        self.assertFalse(probe.ready(data, data["target"], "high", freeze.QUALITY_CONTRACT,
+                                     step=freeze.PROBE["steps"][2]))
+
+    def test_delivered_frame_rate_is_gated(self):
+        data = rows()
+        for index, row in enumerate(data):
+            row["target"]["sink_delivered_frame_count"] = 100 + index * 15
+        self.assertIn("frame_rate_below_frozen_minimum", probe.evaluate_step(
+            data, "high", freeze.QUALITY_CONTRACT)["reason"])
+
+    def test_stage_resources_cannot_hide_failed_reads(self):
+        data = rows("medium")
+        data[30].update(resource_status="UNKNOWN", private_bytes=None)
+        result = probe.evaluate_step(data, "medium", freeze.QUALITY_CONTRACT, step=freeze.PROBE["steps"][1])
+        self.assertEqual(result["client_resources"]["status"], "UNKNOWN")
+        self.assertEqual(result["status"], "INCONCLUSIVE")
+
+    def test_missing_intent_keeps_original_phase_failure(self):
+        data = rows("medium")
+        data[30]["target"]["desired_width"] = None
+        self.assertIn("dimensions_or_view_state_mismatch", probe.evaluate_step(
+            data, "medium", freeze.QUALITY_CONTRACT, step=freeze.PROBE["steps"][1])["reason"])
+
+    def test_phase_command_ack_must_remain_stable(self):
+        data = rows("medium")
+        data[30]["command_seq"] = 2
+        self.assertIn("step_command_ack_changed", probe.evaluate_step(
+            data, "medium", freeze.QUALITY_CONTRACT, step=freeze.PROBE["steps"][1])["reason"])
 
     def test_source_metadata_cannot_replace_30fps_receipt(self):
         data = rows()

@@ -37,6 +37,7 @@ enum class VideoDemandReason {
     Whiteboard,
     PermissionDenied,
     Muted,
+    NoCompatibleLayer,
 };
 
 enum class VideoQualityTier {
@@ -71,6 +72,9 @@ struct ViewportIntent {
     double device_pixel_ratio = 1.0;
     bool window_visible = true;
     bool minimized = false;
+    // Local previews consume grid seats on the first page only.
+    bool local_participant_present = false;
+    bool local_screen_share_present = false;
 };
 
 struct VideoSeat {
@@ -82,6 +86,10 @@ struct VideoSeat {
     uint32_t width = 0;
     uint32_t height = 0;
     VideoQualityTier quality = VideoQualityTier::None;
+    // Layout pixel demand and selected transport layer are deliberately separate.
+    uint32_t subscription_width = 0;
+    uint32_t subscription_height = 0;
+    std::optional<PublishedVideoQuality> selected_layer_quality;
     uint32_t priority = 0;
     VideoDemandReason reason = VideoDemandReason::Visible;
     TrackPublication::SubscriptionError subscription_error =
@@ -106,6 +114,8 @@ struct VideoDemandPlan {
     std::vector<TrackKey> selected_video;
     std::vector<TrackKey> selected_audio;
     VideoDemandReason reason = VideoDemandReason::Hidden;
+    bool show_local_participant = false;
+    bool show_local_screen_share = false;
 };
 
 struct RemoteTrackDemand {
@@ -116,6 +126,7 @@ struct RemoteTrackDemand {
     uint32_t width = 0;
     uint32_t height = 0;
     VideoQualityTier quality = VideoQualityTier::None;
+    std::optional<PublishedVideoQuality> selected_layer_quality;
     std::optional<uint32_t> max_fps;
     uint32_t priority = 0;
 };

@@ -22,7 +22,8 @@ bool SamePublicationState(const RemotePublicationInfo& left,
         left.subscription_error == right.subscription_error &&
         left.media_available == right.media_available &&
         left.source_width == right.source_width &&
-        left.source_height == right.source_height;
+        left.source_height == right.source_height &&
+        left.published_video_layers == right.published_video_layers;
 }
 
 bool SameParticipantState(const PublicationCatalogParticipant& left,
@@ -233,6 +234,10 @@ RemotePublicationInfo PublicationCatalog::Project(
     result.stream_state = publication.state.stream_state;
     result.subscription_allowed = publication.state.subscription_allowed;
     result.subscription_error = publication.state.subscription_error;
+    result.source_width = publication.state.source_width;
+    result.source_height = publication.state.source_height;
+    result.published_video_layers =
+        NormalizePublishedVideoLayers(publication.state.published_video_layers);
     result.media_available = media_available &&
         result.subscription_error == TrackPublication::SubscriptionError::None;
     return result;

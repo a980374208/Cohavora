@@ -4260,14 +4260,19 @@ void MeetingCoordinator::requestScreenShareSources() {
 }
 
 void MeetingCoordinator::startScreenShare(livekit::DesktopSource source, std::optional<int> fps) {
+    startScreenShare(std::move(source), livekit::ScreenShareQuality{
+        static_cast<livekit::ScreenShareResolution>(_mediaPrefs.screenShareResolution),
+        fps.value_or(_mediaPrefs.screenShareFps)});
+}
+
+void MeetingCoordinator::startScreenShare(livekit::DesktopSource source, livekit::ScreenShareQuality quality) {
+    if (!quality.valid()) return;
     if (!canStartScreenShare()) return;
     auto session = _sessionRuntime;
     livekit::VideoPublishOptions options;
     options.source = livekit::TrackSource::ScreenShareVideo;
     options.video_codec = OpenMeeting::normalizeVideoCodecPreference(
         _mediaPrefs.screenShareVideoCodec).toStdString();
-    const livekit::ScreenShareQuality quality{static_cast<livekit::ScreenShareResolution>(_mediaPrefs.screenShareResolution), fps.value_or(_mediaPrefs.screenShareFps)};
-    if (!quality.valid()) return;
     session->post( [session, quality, source = std::move(source), options = std::move(options)] {
         if (!session->acceptsDataOnStrand()) return;
         if (auto share = session->screenShareOnStrand()) {

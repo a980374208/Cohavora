@@ -160,6 +160,12 @@ class HdFreezeTests(unittest.TestCase):
         value["probe"]["steps"][1]["seconds"] = 20
         with self.assertRaisesRegex(ValueError, "invalid_hd_profile"):
             hd.validate_profile(value)
+        for key, replacement in (("quality", "high"), ("window_width", 1121),
+                                 ("window_height", 721)):
+            value = deepcopy(self.profile)
+            value["probe"]["steps"][0][key] = replacement
+            with self.subTest(key=key), self.assertRaisesRegex(ValueError, "invalid_hd_profile"):
+                hd.validate_profile(value)
         value = deepcopy(self.profile)
         value["probe"]["receiver_arguments"] = []
         with self.assertRaisesRegex(ValueError, "invalid_hd_profile"):
@@ -189,7 +195,9 @@ class HdFreezeTests(unittest.TestCase):
     def test_source_definition_and_build_inputs_are_frozen(self):
         self.freeze()
         for path in (self.source_path, self.shared_source, self.exe, self.exe.with_suffix(".pdb"),
-                     self.root / hd.TOOL_INPUTS[1]):
+                     self.root / hd.TOOL_INPUTS[1],
+                     self.root / "tests/telemetry/test_telemetry_panel.cpp",
+                     self.root / "tests/render/opengl/opengl_contract.cpp"):
             before = path.read_bytes()
             path.write_bytes(before + b" ")
             with self.subTest(path=path.name), self.assertRaisesRegex(ValueError, "frozen_inputs_changed"):

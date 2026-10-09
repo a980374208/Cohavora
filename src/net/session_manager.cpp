@@ -1,6 +1,7 @@
 #include "src/net/session_manager.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/e2ee/meeting_encryption_key.h"
+#include "src/media/screen_share_quality.h"
 #include <QtCore/QCoreApplication>
 #include <QtCore/QUuid>
 #include <QtCore/QDebug>
@@ -206,7 +207,9 @@ void SessionManager::setMediaPreferences(const MediaPreferences &prefs) {
         _mediaPrefs.cameraVideoCodec);
     _mediaPrefs.screenShareVideoCodec = normalizeVideoCodecPreference(
         _mediaPrefs.screenShareVideoCodec);
-    _mediaPrefs.screenShareResolution = std::clamp(_mediaPrefs.screenShareResolution, 0, 4);
+    _mediaPrefs.screenShareResolution = std::clamp(_mediaPrefs.screenShareResolution,
+        static_cast<int>(livekit::ScreenShareResolution::Auto),
+        static_cast<int>(livekit::ScreenShareResolution::P2160));
     if (_mediaPrefs.screenShareFps != 15 && _mediaPrefs.screenShareFps != 20 && _mediaPrefs.screenShareFps != 30)
         _mediaPrefs.screenShareFps = 20;
     saveToSettings();
@@ -594,7 +597,10 @@ void SessionManager::loadFromSettings() {
         std::max(0, _settings->value("media/videoCaptureWidth", 0).toInt());
     _mediaPrefs.videoCaptureHeight =
         std::max(0, _settings->value("media/videoCaptureHeight", 0).toInt());
-    _mediaPrefs.screenShareResolution = std::clamp(_settings->value("media/screenShareResolution", 0).toInt(), 0, 4);
+    _mediaPrefs.screenShareResolution = std::clamp(
+        _settings->value("media/screenShareResolution", 0).toInt(),
+        static_cast<int>(livekit::ScreenShareResolution::Auto),
+        static_cast<int>(livekit::ScreenShareResolution::P2160));
     _mediaPrefs.screenShareFps = _settings->value("media/screenShareFps", 20).toInt();
     if (_mediaPrefs.screenShareFps != 15 && _mediaPrefs.screenShareFps != 20 && _mediaPrefs.screenShareFps != 30)
         _mediaPrefs.screenShareFps = 20;

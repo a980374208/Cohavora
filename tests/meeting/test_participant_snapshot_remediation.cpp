@@ -15,6 +15,8 @@ void RunTelemetryPanelContract(QApplication &app);
 #include "src/media/desktop_capture.h"
 #include "src/telemetry/stats.h"
 #include "src/ui/meeting_room_window.h"
+#include "src/ui/screen_share_quality_controls.h"
+#include <QtCore/qscopeguard.h>
 #include "src/ui/meeting_log_console.h"
 #include "src/ui/telemetry_dialogs.h"
 #include "src/ui/app_branding.h"
@@ -77,6 +79,7 @@ void RunOpenGlContract();
 #include <QtCore/QThread>
 #include <QtCore/QTimer>
 #include <QtCore/QMimeData>
+#include <tuple>
 #include <QtGui/QClipboard>
 #include <QtPlugin>
 #include <QtWidgets/QApplication>
@@ -504,9 +507,28 @@ public:
                     }
                 }
             }
+            const auto publicationState = publication ? publication->SnapshotState()
+                : TrackPublication::StateSnapshot{};
+            uint32_t announcedWidth = 0, announcedHeight = 0;
+            for (const auto &layer : publicationState.published_video_layers) {
+                const QString quality = layer.quality == PublishedVideoQuality::Low ? "low"
+                    : layer.quality == PublishedVideoQuality::Medium ? "medium" : "high";
+                if (quality == intentQuality && layer.width == intentWidth &&
+                    layer.height == intentHeight) {
+                    announcedWidth = layer.width;
+                    announcedHeight = layer.height;
+                    break;
+                }
+            }
             QJsonObject item{
                 {"sid_hash", digest(key.publication_sid)},
                 {"identity_hash", digest(key.participant.identity)},
+                {"source", publicationState.source == TrackSource::Camera ? "camera"
+                    : publicationState.source == TrackSource::ScreenShareVideo ? "screen_share" : "unknown"},
+                {"source_width", static_cast<double>(publicationState.source_width)},
+                {"source_height", static_cast<double>(publicationState.source_height)},
+                {"selected_layer_announced_width", static_cast<double>(announcedWidth)},
+                {"selected_layer_announced_height", static_cast<double>(announcedHeight)},
                 {"intent_present", intentPresent},
                 {"intent_subscribed", intentSubscribed},
                 {"sent_subscribed", sentSubscribed
@@ -684,8 +706,8 @@ class ParticipantWindowTestAccess final {
 public:
     static void checkGrid(MeetingUI::MeetingRoomWindow &window, int expectedCount) {
         TEST_CHECK(window.isVideoStageVisible());
-        // A local-only fixture has no remote catalog/plan to project. Its
-        // production layout still uses the single-tile gallery branch.
+        // A window without an accepted session still uses its local-only
+        // gallery fallback; accepted plans own the local seats on every page.
         if (expectedCount > 1)
             TEST_CHECK(window._acceptedVideoPlan.mode == livekit::VideoLayoutMode::Grid);
         window.updateVideoLayout();
@@ -697,9 +719,21 @@ public:
             TEST_CHECK(window._stageContainer->rect().contains(rect));
             TEST_CHECK(std::abs(rect.width() * 9 - rect.height() * 16) <= 16);
             for (const auto &other : rectangles) TEST_CHECK(!other.intersects(rect));
+            if (!rectangles.empty()) {
+                const auto &previous = rectangles.back();
+                TEST_CHECK(rect.top() > previous.top() ||
+                    (rect.top() == previous.top() && rect.left() > previous.left()));
+            }
             rectangles.push_back(rect);
         };
-        checkTile(window._localTile);
+        const auto showLocal = window._acceptedVideoPlan.coordinator_session == 0 ||
+            window._acceptedVideoPlan.show_local_participant;
+        if (showLocal) checkTile(window._localTile);
+        else TEST_CHECK(window._localTile->isHidden());
+        if (window._acceptedVideoPlan.show_local_screen_share)
+            checkTile(window._localScreenTile.get());
+        else if (window._localScreenTile)
+            TEST_CHECK(window._localScreenTile->isHidden());
         for (const auto &seat : window._acceptedVideoPlan.visible_seats)
             checkTile(window.remoteVideoTile(seat.key));
         TEST_CHECK(rectangles.size() == static_cast<std::size_t>(expectedCount));
@@ -1563,6 +1597,11 @@ public:
             const MeetingUI::MeetingRoomWindow &window) {
         return window._acceptedVideoPlan;
     }
+    static const livekit::ViewportIntent &lastViewportIntent(
+            const MeetingUI::MeetingRoomWindow &window) {
+        TEST_CHECK(window._lastViewportIntent);
+        return *window._lastViewportIntent;
+    }
     static bool whiteboardVisible(const MeetingUI::MeetingRoomWindow &window) {
         return window._whiteboardVisible;
     }
@@ -1593,6 +1632,10 @@ public:
     static void nextVideoPage(MeetingUI::MeetingRoomWindow &window) {
         TEST_CHECK(window._nextVideoPage && window._nextVideoPage->isEnabled());
         window._nextVideoPage->click();
+    }
+    static void previousVideoPage(MeetingUI::MeetingRoomWindow &window) {
+        TEST_CHECK(window._previousVideoPage && window._previousVideoPage->isEnabled());
+        window._previousVideoPage->click();
     }
     static void setPinnedTrack(MeetingUI::MeetingRoomWindow &window,
                                const livekit::TrackKey &key,
@@ -1637,7 +1680,13 @@ public:
     static QJsonObject soakTrackViewportProbe(
             const MeetingUI::MeetingRoomWindow &window, const livekit::TrackKey &key) {
         const auto &plan = window._acceptedVideoPlan;
-        QJsonObject result{{"focused", plan.focused == key}};
+        QJsonObject result{{"focused", plan.focused == key},
+            {"show_local_participant", plan.show_local_participant},
+            {"show_local_screen_share", plan.show_local_screen_share},
+            {"window_width", window.width()}, {"window_height", window.height()},
+            {"viewport_stage_width", window._stageContainer ? window._stageContainer->width() : 0},
+            {"viewport_stage_height", window._stageContainer ? window._stageContainer->height() : 0},
+            {"viewport_device_pixel_ratio", window.devicePixelRatioF()}};
         const auto seat = std::find_if(plan.visible_seats.begin(), plan.visible_seats.end(),
             [&key](const auto &item) { return item.key == key; });
         result.insert("seat_present", seat != plan.visible_seats.end());
@@ -1653,6 +1702,12 @@ public:
             result.insert("seat_quality", soakQualityName(seat->quality));
             result.insert("seat_width", static_cast<double>(seat->width));
             result.insert("seat_height", static_cast<double>(seat->height));
+            result.insert("seat_subscription_width", static_cast<double>(seat->subscription_width));
+            result.insert("seat_subscription_height", static_cast<double>(seat->subscription_height));
+            result.insert("seat_selected_layer_quality", seat->selected_layer_quality
+                ? (*seat->selected_layer_quality == livekit::PublishedVideoQuality::Low ? "low"
+                    : *seat->selected_layer_quality == livekit::PublishedVideoQuality::Medium ? "medium" : "high")
+                : "none");
         }
         livekit::render::VideoFrameGeometry geometry;
         if (window._videoCanvas) {
@@ -1687,6 +1742,7 @@ public:
         case livekit::VideoDemandReason::Whiteboard: result.demand_reason = "whiteboard"; break;
         case livekit::VideoDemandReason::PermissionDenied: result.demand_reason = "permission_denied"; break;
         case livekit::VideoDemandReason::Muted: result.demand_reason = "muted"; break;
+        case livekit::VideoDemandReason::NoCompatibleLayer: result.demand_reason = "no_compatible_layer"; break;
         }
         result.focused_sid_hash = plan.focused ? soakSidHash(plan.focused->publication_sid) : QString{};
         result.pinned_sid_hash = window._pinnedTrackKey
@@ -1726,6 +1782,52 @@ public:
     }
     static std::function<bool()> soakViewport(MeetingUI::MeetingRoomWindow &window,
                                                const QString &action) {
+        if (action.startsWith("window_resize:")) {
+            const auto match = QRegularExpression(
+                "^window_resize:([0-9]{3,4})x([0-9]{3,4})$").match(action);
+            if (!match.hasMatch()) return {};
+            const auto width = match.captured(1).toInt();
+            const auto height = match.captured(2).toInt();
+            if (width < 850 || width > 3840 || height < 560 || height > 2160) return {};
+            const auto size = QSize(width, height);
+            const auto previousSize = window.size();
+            // This task-owned runtime window can exceed the monitor's maximum
+            // tracking size. Qt propagates the requested minimum to Windows'
+            // WM_GETMINMAXINFO before the real native resize; reset it for each
+            // command so a subsequent small viewport can shrink again.
+            window.setMinimumSize(size);
+            window.resize(size);
+            // Hidden deterministic fixtures defer QWidget's native resize event.
+            // Apply the production layout handler to their actual new size;
+            // visible runtime windows receive this event normally from Qt.
+            if (!window.isVisible()) {
+                QResizeEvent event(size, previousSize);
+                window.resizeEvent(&event);
+            }
+            window.scheduleViewportIntent(true);
+            return [&window, size] {
+                return window.size() == size && window._lastViewportIntent
+                    && window._stageContainer
+                    && window._lastViewportIntent->stage_rect.width == window._stageContainer->width()
+                    && window._lastViewportIntent->stage_rect.height == window._stageContainer->height();
+            };
+        }
+        if (action == "auto") {
+            if (!window._pinnedRenderKey.isEmpty())
+                window.setPinnedTile(window._pinnedRenderKey, false);
+            // The isolated fixture omits initLayout's top-bar bindings, just as
+            // its grid commands set the mode explicitly. Submit a real viewport;
+            // production Session policy owns automatic focus, without a pin.
+            window._viewMode = MeetingUI::VideoViewMode::Auto;
+            window._videoPage = 0;
+            if (window._topBar)
+                window._topBar->_currentViewMode = MeetingUI::VideoViewMode::Auto;
+            window.scheduleViewportIntent(true);
+            return [&window] {
+                return !window._pinnedTrackKey &&
+                    window._acceptedVideoPlan.requested_mode == livekit::VideoLayoutMode::Auto;
+            };
+        }
         if (action == "grid4" || action == "grid9" || action == "grid16") {
             const auto size = action.mid(4).toUInt();
             window._viewMode = MeetingUI::VideoViewMode::Grid;
@@ -4323,6 +4425,167 @@ bool HasTrackSettingsSince(
         });
 }
 
+void PhaseCSourceDimensionsPolicyTrackSettings() {
+    WindowFixture fixture(false);
+    auto server = std::make_shared<WindowLoopbackServer>(fixture.io);
+    WindowServerGuard stop{server};
+    server->start();
+    WindowConnect(fixture, server, false);
+    const auto key = WindowTrackKey(*fixture.observer, "TR_PA_WINDOW");
+    const auto publication = fixture.room->remote_participants()
+        .at("PA_WINDOW")->get_remote_publication("TR_PA_WINDOW");
+    TEST_CHECK(publication);
+
+    auto metadata = WindowParticipant("policy-source-peer");
+    auto *source = metadata.mutable_participants(0)->mutable_tracks(0);
+    source->set_source(livekit::proto::TrackSource::CAMERA);
+    source->set_width(640);
+    source->set_height(360);
+    auto *singleLayer = source->add_layers();
+    singleLayer->set_quality(livekit::proto::HIGH);
+    singleLayer->set_width(640);
+    singleLayer->set_height(360);
+    server->sendParticipants(metadata);
+    WindowPumpUntil(fixture, [&] {
+        return publication->SnapshotState().source_width == 640;
+    }, "phase-c-policy-initial-source");
+
+    const auto capturePlan = [&] {
+        std::optional<livekit::RemoteMediaPlan> plan;
+        asio::post(fixture.runtime->strand(), [&] {
+            plan = fixture.runtime->buildRemoteMediaPlanOnStrand();
+        });
+        fixture.pump();
+        TEST_CHECK(plan.has_value());
+        return *plan;
+    };
+    const auto checkRequest = [&](std::size_t begin, uint32_t width, uint32_t height,
+                                  livekit::VideoQualityTier tier,
+                                  livekit::proto::VideoQuality quality,
+                                  const char *phase) {
+        const auto plan = capturePlan();
+        TEST_CHECK(plan.video.size() == 1 && plan.video.front().key == key);
+        const auto &demand = plan.video.front();
+        const uint32_t fps = std::min(width, height) <= 180 ? 15 : 30;
+        TEST_CHECK(demand.width == width && demand.height == height &&
+            demand.quality == tier && demand.max_fps == fps);
+        WindowPumpUntil(fixture, [&] {
+            return std::any_of(server->trackSettingsMessages.begin() +
+                    std::min(begin, server->trackSettingsMessages.size()),
+                server->trackSettingsMessages.end(), [&](const auto &settings) {
+                    return !settings.track_sids().empty() &&
+                        settings.track_sids(0) == key.publication_sid &&
+                        !settings.disabled() && settings.width() == width &&
+                        settings.height() == height && settings.quality() == quality &&
+                        settings.fps() == fps && settings.priority() == demand.priority;
+                });
+        }, phase);
+        TEST_CHECK(publication->current_width() == width &&
+            publication->current_height() == height &&
+            publication->current_quality() == quality);
+        return plan;
+    };
+
+    livekit::ViewportIntent view;
+    view.coordinator_session = fixture.runtime->generation();
+    view.view_revision = 1;
+    view.mode = livekit::VideoLayoutMode::Grid;
+    view.page_size = 16;
+    view.stage_rect = {0, 0, 320, 180};
+    view.pinned = key;
+    auto begin = server->trackSettingsMessages.size();
+    fixture.coordinator->submitViewportIntent(view);
+    const auto smallSource = checkRequest(begin, 640, 360,
+        livekit::VideoQualityTier::P180, livekit::proto::VideoQuality::HIGH,
+        "phase-c-policy-single-layer");
+
+    // A source-only signaling update must rebuild the consumer request while
+    // preserving the canonical publication and the current pinned viewport.
+    begin = server->trackSettingsMessages.size();
+    source->set_width(3840);
+    source->set_height(2160);
+    source->clear_layers();
+    for (const auto &[quality, width, height, rid] : {
+             std::tuple{livekit::proto::LOW, 320U, 180U, "q"},
+             std::tuple{livekit::proto::MEDIUM, 1280U, 720U, "h"},
+             std::tuple{livekit::proto::HIGH, 3840U, 2160U, "f"}}) {
+        auto *layer = source->add_layers();
+        layer->set_quality(quality);
+        layer->set_width(width);
+        layer->set_height(height);
+        layer->set_rid(rid);
+    }
+    server->sendParticipants(metadata);
+    WindowPumpUntil(fixture, [&] {
+        return publication->SnapshotState().source_width == 3840;
+    }, "phase-c-policy-source-refresh");
+    const auto refreshed = checkRequest(begin, 320, 180,
+        livekit::VideoQualityTier::P180, livekit::proto::VideoQuality::LOW,
+        "phase-c-policy-main-ceil");
+    TEST_CHECK(refreshed.catalog_revision > smallSource.catalog_revision &&
+        fixture.room->remote_participants().at("PA_WINDOW")
+            ->get_remote_publication("TR_PA_WINDOW") == publication);
+
+    begin = server->trackSettingsMessages.size();
+    ++view.view_revision;
+    view.stage_rect = {0, 0, 3840, 2160};
+    fixture.coordinator->submitViewportIntent(view);
+    checkRequest(begin, 3840, 2160, livekit::VideoQualityTier::P2160,
+        livekit::proto::VideoQuality::HIGH, "phase-c-policy-pin-4k");
+
+    begin = server->trackSettingsMessages.size();
+    ++view.view_revision;
+    view.pinned.reset();
+    fixture.coordinator->submitViewportIntent(view);
+    checkRequest(begin, 320, 180, livekit::VideoQualityTier::P720,
+        livekit::proto::VideoQuality::LOW, "phase-c-policy-grid-floor");
+
+    begin = server->trackSettingsMessages.size();
+    ++view.view_revision;
+    view.stage_rect = {0, 0, 12288, 6912};
+    fixture.coordinator->submitViewportIntent(view);
+    checkRequest(begin, 1280, 720, livekit::VideoQualityTier::P1440,
+        livekit::proto::VideoQuality::MEDIUM, "phase-c-policy-grid-2k-cap");
+
+    begin = server->trackSettingsMessages.size();
+    ++view.view_revision;
+    view.stage_rect = {0, 0, 1280, 720};
+    fixture.coordinator->submitViewportIntent(view);
+    checkRequest(begin, 320, 180, livekit::VideoQualityTier::P180,
+        livekit::proto::VideoQuality::LOW, "phase-c-policy-grid-low-return");
+
+    // Screen-share's top h layer is advertised as MEDIUM. Request both the
+    // exact dimensions and its quality even though viewport tier is P1440.
+    begin = server->trackSettingsMessages.size();
+    source->set_source(livekit::proto::SCREEN_SHARE);
+    source->set_width(2560);
+    source->set_height(1440);
+    source->clear_layers();
+    for (const auto &[quality, width, height, rid] : {
+             std::tuple{livekit::proto::LOW, 1280U, 720U, "q"},
+             std::tuple{livekit::proto::MEDIUM, 2560U, 1440U, "h"}}) {
+        auto *layer = source->add_layers();
+        layer->set_quality(quality);
+        layer->set_width(width);
+        layer->set_height(height);
+        layer->set_rid(rid);
+    }
+    server->sendParticipants(metadata);
+    WindowPumpUntil(fixture, [&] {
+        return publication->SnapshotState().source == livekit::TrackSource::ScreenShareVideo;
+    }, "phase-c-policy-screen-source");
+    ++view.view_revision;
+    view.stage_rect = {0, 0, 3840, 2160};
+    view.pinned = key;
+    fixture.coordinator->submitViewportIntent(view);
+    checkRequest(begin, 2560, 1440, livekit::VideoQualityTier::P1440,
+        livekit::proto::VideoQuality::MEDIUM, "phase-c-policy-screen-medium-top");
+    TEST_CHECK(!server->protocolFailure);
+    std::cout << "PHASE_C_POLICY single/source-refresh/main-ceil/pin-4K/grid-floor/"
+                 "grid-2K-cap/screen-MEDIUM-top/actual-TrackSettings PASS external-media=NOT_RUN"
+              << std::endl;
+}
+
 void PhaseCRoomMediaPlanAndRecovery() {
     WindowFixture fixture(false);
     auto server = std::make_shared<WindowLoopbackServer>(fixture.io);
@@ -6770,6 +7033,13 @@ void ScreenShareFailureAccessibility() {
 }
 
 void ScreenShareWindowControls() {
+    auto &preferencesOwner = OpenMeeting::SessionManager::instance();
+    const auto savedPreferences = preferencesOwner.mediaPreferences();
+    const auto restorePreferences = qScopeGuard([&] { preferencesOwner.setMediaPreferences(savedPreferences); });
+    auto nativePreferences = savedPreferences;
+    nativePreferences.screenShareResolution = int(livekit::ScreenShareResolution::Native);
+    nativePreferences.screenShareFps = 20;
+    preferencesOwner.setMediaPreferences(nativePreferences);
     WindowFixture fixture;
     OpenMeeting::MeetingCoordinatorTestAccess::commitLocalStartupPrecondition(*fixture.coordinator);
     int starts = 0, stops = 0;
@@ -6859,7 +7129,39 @@ void ScreenShareWindowControls() {
     stops = 0;
     captureFrame = {};
 
-    const std::vector<livekit::DesktopSource> sources{{livekit::DesktopSourceKind::Window, 123, "test window"}};
+    const std::vector<livekit::DesktopSource> unavailableSources{
+        {livekit::DesktopSourceKind::Screen, -999, "unavailable screen"},
+        {livekit::DesktopSourceKind::Window, 0, "unavailable window"},
+    };
+    emit fixture.coordinator->screenShareSourcesReady(unavailableSources);
+    auto *unavailablePicker = fixture.window->findChild<QDialog *>(QStringLiteral("screen-share-picker"));
+    TEST_CHECK(unavailablePicker);
+    auto *unavailableSource = unavailablePicker->findChild<QComboBox *>(QStringLiteral("screenShareSource"));
+    auto *unavailableResolution = unavailablePicker->findChild<QComboBox *>(QStringLiteral("screenShareStartResolution"));
+    TEST_CHECK(unavailableSource && unavailableResolution);
+    for (int index : {0, 1}) {
+        unavailableSource->setCurrentIndex(index);
+        TEST_CHECK(unavailableResolution->count() == 2);
+        TEST_CHECK(unavailableResolution->currentData().toInt() == int(livekit::ScreenShareResolution::Auto));
+        TEST_CHECK(unavailableResolution->findData(int(livekit::ScreenShareResolution::Native)) >= 0);
+    }
+    unavailablePicker->reject();
+    fixture.pump();
+    TEST_CHECK(starts == 0 && stops == 0);
+
+    // Real HWND dimensions exercise picker source changes without capturing
+    // pixels or depending on the host having a 4K display.
+    QWidget largeSource, smallSource;
+    for (auto *sourceWindow : {&largeSource, &smallSource})
+        sourceWindow->setWindowFlags(Qt::Window | Qt::FramelessWindowHint);
+    const auto largeHandle = reinterpret_cast<HWND>(largeSource.winId());
+    const auto smallHandle = reinterpret_cast<HWND>(smallSource.winId());
+    TEST_CHECK(SetWindowPos(largeHandle, nullptr, 0, 0, 3840, 2160, SWP_NOACTIVATE | SWP_NOZORDER));
+    TEST_CHECK(SetWindowPos(smallHandle, nullptr, 0, 0, 1920, 1080, SWP_NOACTIVATE | SWP_NOZORDER));
+    const std::vector<livekit::DesktopSource> sources{
+        {livekit::DesktopSourceKind::Window, reinterpret_cast<intptr_t>(largeHandle), "4K window"},
+        {livekit::DesktopSourceKind::Window, reinterpret_cast<intptr_t>(smallHandle), "1080p window"},
+    };
     emit fixture.coordinator->screenShareSourcesReady(sources);
     auto *picker = fixture.window->findChild<QDialog *>(QStringLiteral("screen-share-picker"));
     TEST_CHECK(picker != nullptr);
@@ -6871,6 +7173,23 @@ void ScreenShareWindowControls() {
     TEST_CHECK(picker != nullptr);
     TEST_CHECK(!picker->windowFlags().testFlag(Qt::WindowContextHelpButtonHint));
     auto *startFps = picker->findChild<QComboBox *>(QStringLiteral("screenShareStartFps"));
+    auto *startResolution = picker->findChild<QComboBox *>(QStringLiteral("screenShareStartResolution"));
+    TEST_CHECK(startResolution && startResolution->count() == 6);
+    TEST_CHECK(!startResolution->accessibleName().isEmpty());
+    TEST_CHECK(preferencesOwner.mediaPreferences().screenShareResolution == int(livekit::ScreenShareResolution::Native));
+    TEST_CHECK(startResolution->currentData().toInt() == int(livekit::ScreenShareResolution::Auto));
+    TEST_CHECK(startResolution->findData(static_cast<int>(livekit::ScreenShareResolution::Native)) == 5);
+    startResolution->setCurrentIndex(startResolution->findData(static_cast<int>(livekit::ScreenShareResolution::P2160)));
+    auto *sourceChoice = picker->findChild<QComboBox *>(QStringLiteral("screenShareSource"));
+    TEST_CHECK(sourceChoice && sourceChoice->count() == 2);
+    sourceChoice->setCurrentIndex(1);
+    TEST_CHECK(startResolution->findData(int(livekit::ScreenShareResolution::P2160)) < 0);
+    TEST_CHECK(startResolution->findData(int(livekit::ScreenShareResolution::P1440)) < 0);
+    TEST_CHECK(startResolution->currentData().toInt() == int(livekit::ScreenShareResolution::Auto));
+    startResolution->setCurrentIndex(startResolution->findData(int(livekit::ScreenShareResolution::Native)));
+    sourceChoice->setCurrentIndex(0);
+    TEST_CHECK(startResolution->currentData().toInt() == int(livekit::ScreenShareResolution::Native));
+    startResolution->setCurrentIndex(startResolution->findData(int(livekit::ScreenShareResolution::P2160)));
     TEST_CHECK(startFps && startFps->count() == 3);
     TEST_CHECK(startFps->currentData().toInt() == OpenMeeting::SessionManager::instance().mediaPreferences().screenShareFps);
     startFps->setCurrentIndex(startFps->findData(30));
@@ -6878,6 +7197,8 @@ void ScreenShareWindowControls() {
     fixture.pump();
     TEST_CHECK(starts == 1);
     TEST_CHECK(fixture.coordinator->screenShareSnapshot().requested_quality.fps == 30);
+    TEST_CHECK(fixture.coordinator->screenShareSnapshot().requested_quality.resolution == livekit::ScreenShareResolution::P2160);
+    TEST_CHECK(selectedSource.kind == livekit::DesktopSourceKind::Window && selectedSource.id == sources.front().id);
     TEST_CHECK(ParticipantWindowTestAccess::shareState(*fixture.window) == livekit::ScreenShareState::Starting);
     ParticipantWindowTestAccess::clickShareDuringRecovery(*fixture.window);
     fixture.pump();
@@ -6928,7 +7249,13 @@ void ScreenShareWindowControls() {
     TEST_CHECK(qualityDialog);
     auto* resolutionCombo = qualityDialog->findChild<QComboBox*>(QStringLiteral("activeScreenShareResolution"));
     auto* fpsCombo = qualityDialog->findChild<QComboBox*>(QStringLiteral("activeScreenShareFps"));
-    TEST_CHECK(resolutionCombo && resolutionCombo->count() == 5 && resolutionCombo->currentIndex() == 0);
+    TEST_CHECK(resolutionCombo && resolutionCombo->currentData().toInt() == 0);
+    const auto screenPixels = QSize(screenBinding.physical_width, screenBinding.physical_height);
+    TEST_CHECK((resolutionCombo->findData(int(livekit::ScreenShareResolution::P2160)) >= 0) ==
+        MeetingUI::screenShareResolutionFits(screenPixels, QSize(3840, 2160)));
+    TEST_CHECK((resolutionCombo->findData(int(livekit::ScreenShareResolution::P1440)) >= 0) ==
+        MeetingUI::screenShareResolutionFits(screenPixels, QSize(2560, 1440)));
+    TEST_CHECK(resolutionCombo->findData(int(livekit::ScreenShareResolution::Native)) >= 0);
     TEST_CHECK(fpsCombo && fpsCombo->count() == 3 && fpsCombo->currentData().toInt() == 20);
     qualityDialog->reject();
     fixture.pump();
@@ -6991,6 +7318,102 @@ void ScreenShareWindowControls() {
     std::cout << "SCREEN_SHARE_WINDOW source selection, annotation lifecycle, reconnect barrier, stale generation PASS\n";
 }
 
+void GridPaginationAndLocalSharing() {
+    for (const uint32_t pageSize : {4u, 9u, 16u}) {
+        WindowFixture fixture;
+        const auto remoteCount = 2 * pageSize - 1;
+        fixture.room->UpdateParticipantsForTesting(LargeWindowRoster(remoteCount));
+        fixture.open();
+        const auto gridReady = ParticipantWindowTestAccess::soakViewport(
+            *fixture.window, QStringLiteral("grid%1").arg(pageSize));
+        fixture.pump();
+        TEST_CHECK(gridReady && gridReady());
+
+        const auto checkPage = [&](uint32_t page, uint32_t pages,
+                                   std::size_t remotes, bool sharing) {
+            const auto &plan = ParticipantWindowTestAccess::acceptedVideoPlan(*fixture.window);
+            TEST_CHECK(plan.page == page && plan.page_count == pages);
+            TEST_CHECK(plan.page_size == pageSize);
+            TEST_CHECK(plan.show_local_participant == (page == 0));
+            TEST_CHECK(plan.show_local_screen_share == (sharing && page == 0));
+            TEST_CHECK(plan.visible_seats.size() == remotes);
+            TEST_CHECK(plan.selected_video.size() == remotes);
+            const auto locals = page == 0 ? (sharing ? 2 : 1) : 0;
+            TEST_CHECK(remotes + locals <= pageSize);
+            ParticipantWindowTestAccess::checkGrid(
+                *fixture.window, static_cast<int>(remotes + locals));
+            const auto &intent = ParticipantWindowTestAccess::lastViewportIntent(*fixture.window);
+            TEST_CHECK(intent.local_participant_present);
+            TEST_CHECK(intent.local_screen_share_present == sharing);
+        };
+        const auto collectPage = [&](std::vector<livekit::TrackKey> &visited) {
+            for (const auto &seat : ParticipantWindowTestAccess::acceptedVideoPlan(
+                    *fixture.window).visible_seats) {
+                TEST_CHECK(std::find(visited.begin(), visited.end(), seat.key) == visited.end());
+                visited.push_back(seat.key);
+            }
+        };
+
+        // Without sharing, self consumes the first seat on page one only.
+        std::vector<livekit::TrackKey> visited;
+        checkPage(0, 2, pageSize - 1, false);
+        collectPage(visited);
+        ParticipantWindowTestAccess::nextVideoPage(*fixture.window);
+        fixture.pump();
+        checkPage(1, 2, pageSize, false);
+        collectPage(visited);
+        TEST_CHECK(visited.size() == remoteCount);
+        ParticipantWindowTestAccess::previousVideoPage(*fixture.window);
+        fixture.pump();
+        checkPage(0, 2, pageSize - 1, false);
+
+        const auto revisionBeforeShare = ParticipantWindowTestAccess::lastViewportIntent(
+            *fixture.window).view_revision;
+        const auto policyBeforeShare = ParticipantWindowTestAccess::acceptedVideoPlan(
+            *fixture.window).policy_revision;
+        livekit::ScreenShareSnapshot share;
+        share.state = livekit::ScreenShareState::Active;
+        share.source_kind = livekit::DesktopSourceKind::Window;
+        // Project a value snapshot through the real Coordinator/UI binding;
+        // no capture device, publisher, or explicit viewport refresh is used.
+        OpenMeeting::MeetingCoordinatorTestAccess::screenSnapshot(
+            *fixture.coordinator, fixture.runtime->generation(), share);
+        fixture.pump();
+        TEST_CHECK(ParticipantWindowTestAccess::lastViewportIntent(
+            *fixture.window).view_revision > revisionBeforeShare);
+        TEST_CHECK(ParticipantWindowTestAccess::acceptedVideoPlan(
+            *fixture.window).policy_revision > policyBeforeShare);
+        checkPage(0, 3, pageSize - 2, true);
+        // checkGrid verifies geometry in local -> local screen -> remote order.
+        visited.clear();
+        collectPage(visited);
+        ParticipantWindowTestAccess::nextVideoPage(*fixture.window);
+        fixture.pump();
+        checkPage(1, 3, pageSize, true);
+        collectPage(visited);
+        ParticipantWindowTestAccess::nextVideoPage(*fixture.window);
+        fixture.pump();
+        checkPage(2, 3, 1, true);
+        collectPage(visited);
+        TEST_CHECK(visited.size() == remoteCount);
+
+        // Removing the share from the final page shrinks three pages to two.
+        // The accepted page clamps to the new last page and shows all remotes.
+        const auto revisionBeforeStop = ParticipantWindowTestAccess::lastViewportIntent(
+            *fixture.window).view_revision;
+        OpenMeeting::MeetingCoordinatorTestAccess::screenSnapshot(
+            *fixture.coordinator, fixture.runtime->generation(), {});
+        fixture.pump();
+        TEST_CHECK(ParticipantWindowTestAccess::lastViewportIntent(
+            *fixture.window).view_revision > revisionBeforeStop);
+        TEST_CHECK(!ParticipantWindowTestAccess::localScreen(*fixture.window));
+        checkPage(1, 2, pageSize, false);
+        ParticipantWindowTestAccess::previousVideoPage(*fixture.window);
+        fixture.pump();
+        checkPage(0, 2, pageSize - 1, false);
+    }
+}
+
 void PhaseDWindowViewportAndRenderLease() {
     constexpr int kParticipantCount = 100;
     WindowFixture fixture;
@@ -7025,17 +7448,17 @@ void PhaseDWindowViewportAndRenderLease() {
         TEST_CHECK(expected <= 16);
     };
 
-    checkBounded(9);
+    checkBounded(8);
     TEST_CHECK(ParticipantWindowTestAccess::acceptedVideoPlan(
         *fixture.window).page_count == 12);
     ParticipantWindowTestAccess::setVideoPageSize(*fixture.window, 4);
     fixture.pump();
-    checkBounded(4);
+    checkBounded(3);
     TEST_CHECK(ParticipantWindowTestAccess::acceptedVideoPlan(
-        *fixture.window).page_count == 25);
+        *fixture.window).page_count == 26);
     ParticipantWindowTestAccess::setVideoPageSize(*fixture.window, 16);
     fixture.pump();
-    checkBounded(16);
+    checkBounded(15);
     TEST_CHECK(ParticipantWindowTestAccess::acceptedVideoPlan(
         *fixture.window).page_count == 7);
 
@@ -7043,7 +7466,7 @@ void PhaseDWindowViewportAndRenderLease() {
     fixture.pump();
     const auto oldPage = ParticipantWindowTestAccess::acceptedVideoPlan(
         *fixture.window).selected_video;
-    TEST_CHECK(oldPage.size() == 9);
+    TEST_CHECK(oldPage.size() == 8);
     const auto oldSid = oldPage.front().publication_sid;
     const auto oldIndex = std::stoi(
         oldSid.substr(std::string("TR_PHASE_D_").size()));
@@ -7873,22 +8296,98 @@ void DepartureNoticeLifetime() {
 }
 
 void MeetingSoakEvidenceSelfTest() {
+    {
+        // A hidden QWidget can accept oversized geometry even when Windows
+        // later clamps its visible HWND to the monitor. Exercise both actual
+        // widget and native client dimensions after showing this fixture.
+        WindowFixture resizeFixture;
+        resizeFixture.open();
+        resizeFixture.window->show();
+        resizeFixture.pump();
+        const auto nativeClientMatches = [&](QSize size) {
+            const auto &window = *resizeFixture.window;
+            const auto handle = reinterpret_cast<HWND>(window.winId());
+            RECT client{};
+            const auto dpr = window.devicePixelRatioF();
+            return window.isVisible() && window.size() == size &&
+                IsWindowVisible(handle) && GetClientRect(handle, &client) &&
+                client.right - client.left == qRound(size.width() * dpr) &&
+                client.bottom - client.top == qRound(size.height() * dpr);
+        };
+        const auto large = ParticipantWindowTestAccess::soakViewport(
+            *resizeFixture.window, "window_resize:3840x2160");
+        TEST_CHECK(large);
+        WindowPumpUntil(resizeFixture, [&] {
+            return large() && nativeClientMatches(QSize(3840, 2160));
+        }, "soak-visible-native-resize-3840x2160");
+        TEST_CHECK(resizeFixture.window->minimumSize() == QSize(3840, 2160));
+        const auto restoredViewport = ParticipantWindowTestAccess::soakViewport(
+            *resizeFixture.window, "window_resize:1120x720");
+        TEST_CHECK(restoredViewport);
+        WindowPumpUntil(resizeFixture, [&] {
+            return restoredViewport() && nativeClientMatches(QSize(1120, 720));
+        }, "soak-visible-native-resize-restore-1120x720");
+        TEST_CHECK(resizeFixture.window->minimumSize() == QSize(1120, 720));
+        resizeFixture.window->hide();
+        resizeFixture.pump();
+        std::cout << "SOAK_RESIZE_NATIVE PASS: visible widget/client 3840x2160 -> 1120x720\n";
+    }
     WindowFixture fixture;
-    fixture.room->UpdateParticipantsForTesting(LargeWindowRoster(16));
+    fixture.room->UpdateParticipantsForTesting(LargeWindowRoster(17));
     std::vector<WindowMedia> media;
-    for (int index = 0; index != 16; ++index) {
+    for (int index = 0; index != 17; ++index) {
         const auto suffix = std::to_string(index);
         media.push_back(fixture.attachExisting("soak-evidence-rtc-" + suffix, false,
             "TR_PHASE_D_" + suffix, "PA_PHASE_D_" + suffix));
     }
     fixture.open();
     fixture.pump();
+    const auto initialUnpin = ParticipantWindowTestAccess::soakViewport(*fixture.window, "unpin");
+    TEST_CHECK(initialUnpin);
+    const auto initialResize = ParticipantWindowTestAccess::soakViewport(
+        *fixture.window, "window_resize:1120x720");
+    TEST_CHECK(initialResize);
     const auto grid = ParticipantWindowTestAccess::soakViewport(*fixture.window, "grid16");
     TEST_CHECK(grid);
-    fixture.pump();
+    QByteArray lastInitialGridDiagnostic;
+    WindowPumpUntil(fixture, [&] {
+        const auto &plan = ParticipantWindowTestAccess::acceptedVideoPlan(*fixture.window);
+        const auto path = ParticipantWindowTestAccess::soakRenderPath(*fixture.window);
+        const bool unpinAck = initialUnpin();
+        const bool resizeAck = initialResize();
+        const bool gridAck = grid();
+        // The current product reserves one local avatar on the first page.
+        // Sixteen visible seats therefore require exactly fifteen remote videos.
+        const auto localCount = static_cast<int>(plan.show_local_participant) +
+            static_cast<int>(plan.show_local_screen_share);
+        const bool complete = unpinAck && resizeAck && gridAck &&
+            plan.show_local_participant && !plan.show_local_screen_share &&
+            plan.selected_video.size() + localCount == 16;
+        if (!complete) {
+            QJsonObject diagnostic{
+                {"unpin_ack", unpinAck}, {"resize_ack", resizeAck}, {"grid_ack", gridAck},
+                {"selected_count", static_cast<int>(plan.selected_video.size())},
+                {"show_local_participant", plan.show_local_participant},
+                {"show_local_screen_share", plan.show_local_screen_share},
+                {"requested_mode", static_cast<int>(plan.requested_mode)},
+                {"layout_mode", path.layout_mode}, {"demand_reason", path.demand_reason},
+                {"focused_sid_hash", path.focused_sid_hash}, {"pinned_sid_hash", path.pinned_sid_hash},
+            };
+            if (!plan.selected_video.empty()) {
+                diagnostic.insert("viewport", ParticipantWindowTestAccess::soakTrackViewportProbe(
+                    *fixture.window, plan.selected_video.front()));
+            }
+            const auto serialized = QJsonDocument(diagnostic).toJson(QJsonDocument::Compact);
+            if (serialized != lastInitialGridDiagnostic) {
+                std::cerr << "SOAK_INITIAL_GRID pending=" << serialized.constData() << std::endl;
+                lastInitialGridDiagnostic = serialized;
+            }
+        }
+        return complete;
+    }, "soak-evidence-initial-grid16");
     TEST_CHECK(grid());
     const auto selected = ParticipantWindowTestAccess::acceptedVideoPlan(*fixture.window).selected_video;
-    TEST_CHECK(selected.size() == 16);
+    TEST_CHECK(selected.size() == 15);
     const auto target = selected.at(1); // The explicit selector must not pin the first tile.
     const auto sidHash = ParticipantWindowTestAccess::soakSidHash(target.publication_sid);
     const auto targetIndex = std::stoi(target.publication_sid.substr(std::string("TR_PHASE_D_").size()));
@@ -7904,6 +8403,38 @@ void MeetingSoakEvidenceSelfTest() {
     };
     TEST_CHECK(!readTarget().value("sink_frame_dimensions_available").toBool());
     TEST_CHECK(readTarget().value("sink_frame_age_ms").toInt() == -1);
+    std::cout << "SOAK_RESIZE before=" << QJsonDocument(
+        ParticipantWindowTestAccess::soakTrackViewportProbe(*fixture.window, target))
+            .toJson(QJsonDocument::Compact).constData() << std::endl;
+    for (const auto &invalidResize : {"window_resize:", "window_resize:849x720",
+             "window_resize:1120x559", "window_resize:3841x2160", "window_resize:1120x720extra"})
+        TEST_CHECK(!ParticipantWindowTestAccess::soakViewport(*fixture.window, invalidResize));
+    const auto resizeMedium = ParticipantWindowTestAccess::soakViewport(
+        *fixture.window, "window_resize:1600x1000");
+    TEST_CHECK(resizeMedium);
+    WindowPumpUntil(fixture, [&] {
+        return resizeMedium() && ParticipantWindowTestAccess::soakTrackViewportProbe(
+            *fixture.window, target).value("seat_quality").toString() == "p360";
+    }, "soak-resize-medium-policy");
+    TEST_CHECK(resizeMedium());
+    auto resizedViewport = ParticipantWindowTestAccess::soakTrackViewportProbe(*fixture.window, target);
+    std::cout << "SOAK_RESIZE medium=" << QJsonDocument(resizedViewport)
+        .toJson(QJsonDocument::Compact).constData() << std::endl;
+    TEST_CHECK(resizedViewport.value("window_width").toInt() == 1600
+        && resizedViewport.value("window_height").toInt() == 1000);
+    TEST_CHECK(resizedViewport.value("seat_quality").toString() == "p360");
+    const auto resizeLow = ParticipantWindowTestAccess::soakViewport(
+        *fixture.window, "window_resize:1120x720");
+    TEST_CHECK(resizeLow);
+    WindowPumpUntil(fixture, [&] {
+        return resizeLow() && ParticipantWindowTestAccess::soakTrackViewportProbe(
+            *fixture.window, target).value("seat_quality").toString() == "p180";
+    }, "soak-resize-low-policy");
+    TEST_CHECK(resizeLow());
+    resizedViewport = ParticipantWindowTestAccess::soakTrackViewportProbe(*fixture.window, target);
+    std::cout << "SOAK_RESIZE low=" << QJsonDocument(resizedViewport)
+        .toJson(QJsonDocument::Compact).constData() << std::endl;
+    TEST_CHECK(resizedViewport.value("seat_quality").toString() == "p180");
     TEST_CHECK(!ParticipantWindowTestAccess::soakViewport(*fixture.window, "pin_identity:"));
     TEST_CHECK(!ParticipantWindowTestAccess::soakViewport(*fixture.window, "pin_identity:absent-source"));
     TEST_CHECK(!ParticipantWindowTestAccess::soakViewport(*fixture.window, "pin_sid_hash:bad-hash"));
@@ -7925,6 +8456,28 @@ void MeetingSoakEvidenceSelfTest() {
     TEST_CHECK(probe.value("identity_hash").toString() == ParticipantWindowTestAccess::soakSidHash(target.participant.identity));
     TEST_CHECK(probe.value("intent_present").toBool() && probe.value("desired_enabled").isBool());
     TEST_CHECK(probe.value("desired_quality").toString() == "high");
+    {
+        const auto publication = fixture.room->remote_participants()
+            .at(target.participant.sid)->get_remote_publication(target.publication_sid);
+        TEST_CHECK(publication);
+        const auto saved = publication->SnapshotState();
+        const auto width = static_cast<uint32_t>(probe.value("desired_width").toInt());
+        const auto height = static_cast<uint32_t>(probe.value("desired_height").toInt());
+        TEST_CHECK(width > 0 && height > 0);
+        publication->set_source_video_info(width, height, {});
+        const auto undeclared = readTarget();
+        TEST_CHECK(undeclared.value("source_width").toInt() == static_cast<int>(width) &&
+            undeclared.value("source_height").toInt() == static_cast<int>(height));
+        TEST_CHECK(undeclared.value("selected_layer_announced_width").toInt() == 0 &&
+            undeclared.value("selected_layer_announced_height").toInt() == 0);
+        publication->set_source_video_info(width, height,
+            {{livekit::PublishedVideoQuality::High, width, height, "fixture"}});
+        const auto declared = readTarget();
+        TEST_CHECK(declared.value("selected_layer_announced_width").toInt() == static_cast<int>(width) &&
+            declared.value("selected_layer_announced_height").toInt() == static_cast<int>(height));
+        publication->set_source_video_info(saved.source_width, saved.source_height,
+            saved.published_video_layers);
+    }
     const auto mapped = livekit::ParticipantSnapshotRoomTestAccess::soakInboundBindingProbe(
         *fixture.room, "soak-evidence-rtc-" + std::to_string(targetIndex));
     TEST_CHECK(mapped.value("mapped_sid_hash").toString() == sidHash);
@@ -7986,6 +8539,85 @@ void MeetingSoakEvidenceSelfTest() {
     const auto [active, fresh] = livekit::ParticipantSnapshotRoomTestAccess::soakSelectedNativeFrames(
         *fixture.room, {target});
     TEST_CHECK(active == 1 && fresh == 1);
+    TEST_CHECK(readTarget().value("source").toString() == "camera");
+    {
+        WindowFixture screenFixture;
+        auto screenRoster = LargeWindowRoster(1);
+        auto *screenInfo = screenRoster.mutable_participants(0)->mutable_tracks(0);
+        screenInfo->set_source(livekit::proto::SCREEN_SHARE);
+        screenInfo->set_width(2560);
+        screenInfo->set_height(1440);
+        for (const auto &[quality, width, height, rid] : {
+                 std::tuple{livekit::proto::LOW, 1280U, 720U, "q"},
+                 std::tuple{livekit::proto::MEDIUM, 2560U, 1440U, "h"}}) {
+            auto *layer = screenInfo->add_layers();
+            layer->set_quality(quality);
+            layer->set_width(width);
+            layer->set_height(height);
+            layer->set_rid(rid);
+        }
+        screenFixture.room->UpdateParticipantsForTesting(screenRoster);
+        auto screenMedia = screenFixture.attachExisting("soak-auto-screen", true,
+            "TR_PHASE_D_0", "PA_PHASE_D_0");
+        screenFixture.open();
+        screenFixture.pump();
+        const auto screenKey = ParticipantWindowTestAccess::acceptedVideoPlan(
+            *screenFixture.window).selected_video.at(0);
+        const auto screenPin = ParticipantWindowTestAccess::soakViewport(
+            *screenFixture.window, "pin_sid_hash:" +
+                ParticipantWindowTestAccess::soakSidHash(screenKey.publication_sid));
+        TEST_CHECK(screenPin);
+        screenFixture.pump();
+        TEST_CHECK(screenPin());
+        const auto screenResize = ParticipantWindowTestAccess::soakViewport(
+            *screenFixture.window, "window_resize:1120x720");
+        TEST_CHECK(screenResize);
+        const auto screenAuto = ParticipantWindowTestAccess::soakViewport(
+            *screenFixture.window, "auto");
+        TEST_CHECK(screenAuto);
+        QByteArray lastAutoDiagnostic;
+        WindowPumpUntil(screenFixture, [&] {
+            const auto path = ParticipantWindowTestAccess::soakRenderPath(*screenFixture.window);
+            const bool complete = screenAuto() && screenResize() && path.layout_mode == "speaker" &&
+                path.demand_reason == "screen_share" && path.pinned_sid_hash.isEmpty();
+            if (!complete) {
+                const auto diagnostic = QJsonDocument(QJsonObject{
+                    {"auto_ack", screenAuto()}, {"resize_ack", screenResize()},
+                    {"layout", path.layout_mode}, {"reason", path.demand_reason},
+                    {"focused", path.focused_sid_hash}, {"pinned", path.pinned_sid_hash},
+                    {"viewport", ParticipantWindowTestAccess::soakTrackViewportProbe(
+                        *screenFixture.window, screenKey)},
+                    {"tracks", livekit::ParticipantSnapshotRoomTestAccess::soakSelectedTrackProbes(
+                        *screenFixture.room, ParticipantWindowTestAccess::acceptedVideoPlan(
+                            *screenFixture.window).selected_video, nullptr)}})
+                        .toJson(QJsonDocument::Compact);
+                if (diagnostic != lastAutoDiagnostic) {
+                    std::cout << "SOAK_AUTO_SCREEN pending=" << diagnostic.constData() << std::endl;
+                    lastAutoDiagnostic = diagnostic;
+                }
+            }
+            return complete;
+        }, "soak-auto-screen-focus");
+        auto screenViewport = ParticipantWindowTestAccess::soakTrackViewportProbe(
+            *screenFixture.window, screenKey);
+        TEST_CHECK(screenViewport.value("focused").toBool());
+        TEST_CHECK(screenViewport.value("seat_role").toString() == "main");
+        TEST_CHECK(screenViewport.value("seat_width").toInt() < 1280 &&
+            screenViewport.value("seat_height").toInt() < 720);
+        TEST_CHECK(screenViewport.value("seat_subscription_width").toInt() == 1280 &&
+            screenViewport.value("seat_subscription_height").toInt() == 720 &&
+            screenViewport.value("seat_selected_layer_quality").toString() == "low");
+        const auto screenLarge = ParticipantWindowTestAccess::soakViewport(
+            *screenFixture.window, "window_resize:3840x2160");
+        TEST_CHECK(screenLarge);
+        WindowPumpUntil(screenFixture, [&] {
+            const auto viewport = ParticipantWindowTestAccess::soakTrackViewportProbe(
+                *screenFixture.window, screenKey);
+            return screenLarge() && viewport.value("seat_subscription_width").toInt() == 2560 &&
+                viewport.value("seat_subscription_height").toInt() == 1440 &&
+                viewport.value("seat_selected_layer_quality").toString() == "medium";
+        }, "soak-auto-screen-source-highest");
+    }
     std::cout << "MEETING_SOAK_EVIDENCE PASS: exact identity/SID pin, accepted intent, native memory-frame dimensions 720p/180p, concurrent callback freshness\n";
 }
 
@@ -8233,6 +8865,8 @@ void MeetingWindowOpenBenchmark(QApplication &application) {
     }
 }
 
+#include "tests/runtime/probes/share4k_product_ui_runtime.h"
+
 int WindowAcceptanceMain(int argc, char **argv) {
 	for (auto index = 1; index != argc; ++index) {
 		const auto argument = QByteArray(argv[index]);
@@ -8270,7 +8904,11 @@ int WindowAcceptanceMain(int argc, char **argv) {
     // Coordinator instances use explicitly injected temporary SessionManager
     // objects, including the in-memory moderation and account-notify fixtures.
     int result = 0;
-    if (application.arguments().contains("--meeting-open-benchmark")) {
+    if (application.arguments().contains("--share4k-owned-window")) {
+        result = share4k_product_ui::RunOwnedWindow(application);
+    } else if (application.arguments().contains("--share4k-product-ui")) {
+        result = share4k_product_ui::Run(application);
+    } else if (application.arguments().contains("--meeting-open-benchmark")) {
         MeetingWindowOpenBenchmark(application);
     } else if (application.arguments().contains("--grid-contract")) {
         for (int count = 1; count <= 16; ++count) {
@@ -8288,8 +8926,9 @@ int WindowAcceptanceMain(int argc, char **argv) {
                 ParticipantWindowTestAccess::checkGrid(*fixture.window, count);
             }
         }
+        GridPaginationAndLocalSharing();
         ParticipantWindowTestAccess::checkAvatar();
-        std::cout << "GRID_CONTRACT PASS: production layout 1..16 seats at three sizes and avatar rendering\n";
+        std::cout << "GRID_CONTRACT PASS: layout 1..16 seats at three sizes, 4/9/16 total capacity, local/share ordering, paging, share start/stop and page clamp\n";
     } else if (application.arguments().contains("--recovery-ux-contract")) {
         WindowFixture fixture;
         fixture.window = ParticipantWindowTestAccess::createChatPrivacy(fixture.coordinator);
@@ -8745,6 +9384,7 @@ int WindowAcceptanceMain(int argc, char **argv) {
     } else if (application.arguments().contains("--gap-video-lease")) {
         GapWindowQueuedVideoBindingLease();
     } else if (application.arguments().contains("--phase-c-room")) {
+        PhaseCSourceDimensionsPolicyTrackSettings();
         PhaseCRoomMediaPlanAndRecovery();
     } else if (application.arguments().contains("--phase-d-window")) {
         ParticipantWithoutVideoWindow();

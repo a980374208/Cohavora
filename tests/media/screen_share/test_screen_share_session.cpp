@@ -239,8 +239,9 @@ void QualityTransactions() {
     auto track = f.track.lock();
     const auto preview = f.states.back().preview;
     TEST_CHECK(f.states.back().applied_quality->quality.fps == 20);
+    constexpr R resolutions[] = {R::P720, R::P1080, R::P1440, R::P2160, R::Native};
     for (int i = 0; i < 50; ++i) {
-        const livekit::ScreenShareQuality quality{i % 2 ? R::P1080 : R::P720, i % 3 == 0 ? 15 : i % 3 == 1 ? 20 : 30};
+        const livekit::ScreenShareQuality quality{resolutions[i % 5], i % 3 == 0 ? 15 : i % 3 == 1 ? 20 : 30};
         f.Do([&] { f.share->SetQuality(quality); });
         f.Until([&] { return f.capture->quality == quality; });
         f.capture->Emit();
@@ -629,6 +630,37 @@ void FrameBridgeLifetime() {
     TEST_CHECK(!fallback->frame_diagnostics().rtc_available);
 }
 
+void OrdinaryVideoFrameSizeBoundary() {
+    struct Case {
+        int source_width, source_height, expected_width, expected_height;
+    };
+    // Observe the delivered WebRTC buffer, rather than publication metadata:
+    // a 2K announcement must not silently become a 1080p encoder input.
+    for (const auto& value : {
+             Case{640, 360, 640, 360},
+             Case{2560, 1440, 2560, 1440},
+             Case{1440, 2560, 1440, 2560},
+             Case{3840, 2160, 3840, 2160},
+             Case{2160, 3840, 2160, 3840},
+             Case{4608, 2592, 3840, 2160},
+             Case{2592, 4608, 2160, 3840},
+             Case{4096, 2160, 3840, 2024},
+             Case{3000, 3000, 2160, 2160}}) {
+        auto source = std::make_shared<livekit::VideoSource>(
+            value.source_width, value.source_height);
+        auto rtc = livekit::RtcVideoSource::Create(source);
+        Sink sink;
+        auto* bridge = static_cast<webrtc::VideoTrackSourceInterface*>(rtc.get());
+        bridge->AddOrUpdateSink(&sink, webrtc::VideoSinkWants{});
+        source->captureFrame(livekit::VideoFrame::create(
+            value.source_width, value.source_height, livekit::VideoBufferType::I420));
+        TEST_CHECK(sink.frames == 1);
+        TEST_CHECK(sink.width == value.expected_width &&
+                   sink.height == value.expected_height);
+        bridge->RemoveSink(&sink);
+    }
+}
+
 void InFlightFrameTeardown() {
     struct BlockingSink : webrtc::VideoSinkInterface<webrtc::VideoFrame> {
         std::promise<void> entered, release;
@@ -853,6 +885,7 @@ int main() {
     FailuresAndEnded();
     ReconnectAndConfirmation();
     FrameBridgeLifetime();
+    OrdinaryVideoFrameSizeBoundary();
     InFlightFrameTeardown();
     SubscriptionCancellation();
     RemoteSourceProjection();

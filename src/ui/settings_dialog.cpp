@@ -4,6 +4,7 @@
 #include "src/ui/app_theme.h"
 #include "src/ui/app_icons.h"
 #include "src/ui/settings_dialog.h"
+#include "src/ui/screen_share_quality_controls.h"
 
 #include "src/core/session_shutdown_service.h"
 #include "src/e2ee/meeting_encryption.h"
@@ -489,7 +490,8 @@ QWidget *SettingsDialog::buildVideoPage() {
     _screenShareResolutionCombo = new QComboBox(content);
     configureAccessibleComboBox(_screenShareResolutionCombo);
     _screenShareResolutionCombo->setObjectName(QStringLiteral("screenShareResolution"));
-    _screenShareResolutionCombo->addItems({QCoreApplication::translate("MeetingUI", "Auto (up to 2K)"), QCoreApplication::translate("MeetingUI", "720p"), QCoreApplication::translate("MeetingUI", "1080p"), QCoreApplication::translate("MeetingUI", "1440p (2K)"), QCoreApplication::translate("MeetingUI", "Native (up to 4K)")});
+    _screenShareResolutionCombo->setAccessibleName(QCoreApplication::translate("MeetingUI", "Screen share resolution"));
+    populateScreenShareResolutionChoices(*_screenShareResolutionCombo, screenShareDisplayPixelSize(screen()));
     layout->addWidget(_screenShareResolutionCombo);
     layout->addWidget(new QLabel(QCoreApplication::translate("MeetingUI", "Screen share frame rate"), content));
     _screenShareFpsCombo = new QComboBox(content);
@@ -1107,7 +1109,7 @@ OpenMeeting::MediaPreferences SettingsDialog::preferences() const {
 	value.speakerDeviceId = selectedSpeakerDeviceId();
 	value.cameraVideoCodec = _cameraCodecCombo
 		? _cameraCodecCombo->currentData().toString() : QStringLiteral("auto");
-	value.screenShareResolution = _screenShareResolutionCombo->currentIndex();
+	value.screenShareResolution = _screenShareResolutionCombo->currentData().toInt();
 	value.screenShareFps = _screenShareFpsCombo->currentData().toInt();
 	value.screenShareVideoCodec = _screenShareCodecCombo
 		? _screenShareCodecCombo->currentData().toString() : QStringLiteral("auto");
@@ -1161,7 +1163,7 @@ void SettingsDialog::setPreferences(const OpenMeeting::MediaPreferences &value) 
 			_cameraCodecCombo, OpenMeeting::normalizeVideoCodecPreference(value.cameraVideoCodec));
 		_cameraCodecCombo->setCurrentIndex(selected >= 0 ? selected : 0);
 	}
-	_screenShareResolutionCombo->setCurrentIndex(value.screenShareResolution);
+	selectScreenShareResolution(*_screenShareResolutionCombo, value.screenShareResolution);
 	_screenShareFpsCombo->setCurrentIndex(_screenShareFpsCombo->findData(value.screenShareFps));
 	if (_screenShareCodecCombo) {
 		const auto selected = findData(_screenShareCodecCombo,

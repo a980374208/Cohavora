@@ -4,7 +4,7 @@
 |---|---|---|
 | `product_acceptance/` | 产品验收、采集、证据校验、云端传输及独立诊断 | `invoke_product_external.ps1`、`verify_product_acceptance.py`、`run_b_acceptance_codec.py`、`invoke_tencent_pilot.ps1` |
 | `meeting/` | 会议长稳、渲染探针、B11 输入冻结与 SSH 传输、高清层诊断、fake peer、低带宽发布与资源采样 | `meeting_soak.py`、`meeting_render_probe.py`、`b11_input_freeze.py`、`b11_remote.py`、`run-hd-layer-probe.ps1` |
-| `screen_capture/` | WGC 长稳、屏幕共享质量采集与分析 | `run_wgc_soak.py`、`invoke_screen_share_quality_probe.py` |
+| `screen_capture/` | WGC 长稳、屏幕共享质量采集与分析 | `run_wgc_soak.py`、`invoke_screen_share_quality_probe.py`、`b11_product_ui_4k.py` |
 | `desktop/` | 产品 UIA 监督、低频快照及 PowerShell worker | `product_uia_retest.py`、`uia_snapshot.py`、`e2ee_password_uia_worker.ps1` |
 | `media/` | 双端媒体矩阵、E2EE 互操作驱动与独立音源旁证 | `invoke_e2e_media_matrix.ps1`、`invoke_e2ee_interop.py`、`invoke_e2ee_product.py`、`microphone_input/probe_microphone_input.py` |
 | `diagnostics/` | 诊断场景统一参数入口、进程内 GPU 预算旁证与历史原生退出采样 | `invoke_diagnostic_probe.ps1`、`gpu_budget/`、`native_exit/` |
@@ -67,6 +67,13 @@ CLI／配置／SFU image、SSH 身份和当前 RelWithDebInfo 工件均纳入输
 分列）；首个 CPU baseline 不计作完整区间，后续缺失保留 `UNKNOWN`。
 正常和异常结束均尝试停止本任务精确 PID／启动时间／argv 对应负载与采样器、删除短期凭据。
 诊断完成仍为 `formal_b11_status=NOT_RUN`、`release_eligible=false`，不证明 16 路同时高清或长稳。
+
+`meeting/b11_highres_input_freeze.py`、`b11_highres_run.py` 和 `b11_highres_layer_probe.py`
+支持独立 2K／4K 层切换诊断。4K 场景使用任务自有窗口的实际 WGC 捕获，分别作为普通视频
+和屏幕共享发布；屏幕源为 Native capture fixture，不表示生产 UI 已开放 4K 配置。
+`meeting/b11_gpu_resource_sampler.py` 通过英文 PDH 计数器绑定接收进程 PID／启动身份，
+采集逐 GPU 引擎利用率及逐适配器专用／共享显存；最忙引擎百分比不等同于整机 GPU 百分比。
+稳态阶段采集与启动 baseline 分列，缺失指标保留 `UNKNOWN`，资源数值不自动构成性能验收。
 
 `meeting/b11_100_input_freeze.py`、`b11_100_remote_run.py` 和 `b11_100_grid_probe.py`
 组成独立的 100 源 grid16 诊断，模板为 `b11_100_grid_profile.json`。固定 100 路

@@ -374,10 +374,11 @@ public:
             track.policy_revision = demand.policy_revision;
             track.subscribed = true;
             track.enabled = true;
-            track.width = seat->width;
-            track.height = seat->height;
+            track.width = seat->subscription_width;
+            track.height = seat->subscription_height;
             track.quality = seat->quality;
-            track.max_fps = seat->quality == livekit::VideoQualityTier::P180
+            track.selected_layer_quality = seat->selected_layer_quality;
+            track.max_fps = std::min(track.width, track.height) <= 180
                 ? std::optional<uint32_t>{15}
                 : std::optional<uint32_t>{30};
             track.priority = seat->priority;
@@ -492,6 +493,7 @@ private:
         case livekit::VideoDemandReason::Whiteboard: return "whiteboard";
         case livekit::VideoDemandReason::PermissionDenied: return "permission_denied";
         case livekit::VideoDemandReason::Muted: return "muted";
+        case livekit::VideoDemandReason::NoCompatibleLayer: return "no_compatible_layer";
         }
         return "hidden";
     }

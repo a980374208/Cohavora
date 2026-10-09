@@ -1,4 +1,6 @@
 #include "src/ui/settings_dialog.h"
+#include "src/media/screen_share_quality.h"
+#include "src/ui/screen_share_quality_controls.h"
 #include "src/ui/app_theme.h"
 #include "src/ui/app_translation.h"
 #include "src/ui/audio_device_test_controller.h"
@@ -10,6 +12,7 @@
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QFile>
 #include <QtCore/QSettings>
+#include <QtCore/QSignalBlocker>
 #include <QtCore/QTemporaryDir>
 #include <QtCore/QThread>
 #include <QtCore/QTimer>
@@ -32,6 +35,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <initializer_list>
 #include <stdexcept>
 #include <source_location>
 #include <thread>
@@ -137,6 +141,104 @@ void checkSavedDevices(const OpenMeeting::MediaPreferences &prefs, const QString
 	TEST_CHECK(prefs.videoCaptureFps == 30);
 	TEST_CHECK(prefs.microphoneDeviceId == "saved-microphone");
 	TEST_CHECK(prefs.speakerDeviceId == "saved-speaker");
+}
+
+void screenShareResolutionChoicesMatchPhysicalPixels() {
+	using Resolution = livekit::ScreenShareResolution;
+	const auto displayPixels = MeetingUI::screenShareDisplayPixelSize(QApplication::primaryScreen());
+	TEST_CHECK(displayPixels.width() > 0 && displayPixels.height() > 0);
+	QComboBox displayChoices;
+	MeetingUI::populateScreenShareResolutionChoices(displayChoices, displayPixels);
+	std::printf("screen_share_menu physical=%dx%d choices=%d\n",
+		displayPixels.width(), displayPixels.height(), displayChoices.count());
+	const auto checkChoices = [](QSize pixels, std::initializer_list<Resolution> expected) {
+		QComboBox combo;
+		MeetingUI::populateScreenShareResolutionChoices(combo, pixels);
+		TEST_CHECK(combo.count() == static_cast<int>(expected.size()));
+		int index = 0;
+		for (const auto resolution : expected) {
+			TEST_CHECK(combo.itemData(index++).toInt() == static_cast<int>(resolution));
+		}
+		TEST_CHECK(combo.currentData().toInt() == static_cast<int>(Resolution::Auto));
+		const int native = combo.findData(static_cast<int>(Resolution::Native));
+		TEST_CHECK(native >= 0 && combo.itemText(native) ==
+			QCoreApplication::translate("MeetingUI", "Native (up to 4K)"));
+	};
+	checkChoices(QSize(2560, 1440),
+		{Resolution::Auto, Resolution::P720, Resolution::P1080, Resolution::P1440, Resolution::Native});
+	checkChoices(QSize(1920, 1080),
+		{Resolution::Auto, Resolution::P720, Resolution::P1080, Resolution::Native});
+	checkChoices(QSize(3840, 2160),
+		{Resolution::Auto, Resolution::P720, Resolution::P1080, Resolution::P1440, Resolution::P2160, Resolution::Native});
+	checkChoices(QSize(1440, 2560),
+		{Resolution::Auto, Resolution::P720, Resolution::P1080, Resolution::P1440, Resolution::Native});
+	checkChoices(QSize(), {Resolution::Auto, Resolution::Native});
+	// An oversized source still offers the existing Native mode and its 4K cap hint.
+	checkChoices(QSize(7680, 4320),
+		{Resolution::Auto, Resolution::P720, Resolution::P1080, Resolution::P1440, Resolution::P2160, Resolution::Native});
+	QComboBox unsupported;
+	MeetingUI::populateScreenShareResolutionChoices(unsupported, QSize(2560, 1440));
+	MeetingUI::selectScreenShareResolution(unsupported, static_cast<int>(Resolution::P2160));
+	TEST_CHECK(unsupported.currentData().toInt() == static_cast<int>(Resolution::Auto));
+}
+
+void screenShareResolutionPreservesPersistedValues(const QString &path) {
+	using Resolution = livekit::ScreenShareResolution;
+	auto session = makeSession(path);
+	auto preferences = session->mediaPreferences();
+	preferences.screenShareResolution = static_cast<int>(Resolution::Native);
+	session->setMediaPreferences(preferences);
+	{
+		Dialog dialog(*session);
+		auto *resolution = dialog.findChild<QComboBox *>(QStringLiteral("screenShareResolution"));
+		TEST_CHECK(resolution);
+		// Persisted enum compatibility does not depend on this host having a 4K display.
+		{
+			QSignalBlocker blocker(resolution);
+			resolution->clear();
+			MeetingUI::populateScreenShareResolutionChoices(*resolution, QSize(3840, 2160));
+		}
+		dialog.setPreferences(preferences);
+		TEST_CHECK(resolution && resolution->count() == 6);
+		TEST_CHECK(resolution->currentData().toInt() == 4 && resolution->currentIndex() == 5);
+		TEST_CHECK(dialog.preferences().screenShareResolution == 4);
+		TEST_CHECK(resolution->findData(static_cast<int>(Resolution::P2160)) == 4);
+		resolution->setCurrentIndex(resolution->findData(static_cast<int>(Resolution::P2160)));
+		TEST_CHECK(dialog.preferences().screenShareResolution == 5);
+		TEST_CHECK(session->mediaPreferences().screenShareResolution == 5);
+		checkSavedDevices(session->mediaPreferences(), "camera-a");
+	}
+	// Restore from the persisted value: row 5 must remain Native, not 2160p.
+	auto restored = OpenMeeting::SessionManagerTestAccess::create(path);
+	TEST_CHECK(restored->mediaPreferences().screenShareResolution == 5);
+	Dialog dialog(*restored);
+	auto *resolution = dialog.findChild<QComboBox *>(QStringLiteral("screenShareResolution"));
+	TEST_CHECK(resolution);
+	{
+		QSignalBlocker blocker(resolution);
+		resolution->clear();
+		MeetingUI::populateScreenShareResolutionChoices(*resolution, QSize(3840, 2160));
+	}
+	dialog.setPreferences(restored->mediaPreferences());
+	TEST_CHECK(resolution && resolution->currentIndex() == 4 && resolution->currentData().toInt() == 5);
+	auto native = restored->mediaPreferences();
+	native.screenShareResolution = static_cast<int>(Resolution::Native);
+	dialog.setPreferences(native);
+	TEST_CHECK(resolution->currentIndex() == 5 && dialog.preferences().screenShareResolution == 4);
+	{
+		QSignalBlocker blocker(resolution);
+		resolution->clear();
+		MeetingUI::populateScreenShareResolutionChoices(*resolution, QSize(2560, 1440));
+	}
+	// Merely projecting an unavailable saved 2160p choice must not overwrite it.
+	dialog.setPreferences(restored->mediaPreferences());
+	TEST_CHECK(resolution->findData(static_cast<int>(Resolution::P2160)) < 0);
+	TEST_CHECK(resolution->currentData().toInt() == static_cast<int>(Resolution::Auto));
+	TEST_CHECK(dialog.preferences().screenShareResolution == static_cast<int>(Resolution::Auto));
+	TEST_CHECK(restored->mediaPreferences().screenShareResolution == static_cast<int>(Resolution::P2160));
+	resolution->setCurrentIndex(resolution->findData(static_cast<int>(Resolution::P1080)));
+	TEST_CHECK(restored->mediaPreferences().screenShareResolution == static_cast<int>(Resolution::P1080));
+	checkSavedDevices(restored->mediaPreferences(), "camera-a");
 }
 
 void benchmarkThemedOpen(const QString &path) {
@@ -640,6 +742,8 @@ int main(int argc, char **argv) {
 	livekit::diagnostic::InstallBusinessPipeline(pipeline);
 	firstPaintAndCloseDoNotWaitForDriver(temporary.filePath("first.ini"));
 	smallWindowPagesRemainReachable(temporary.filePath("layout.ini"));
+	screenShareResolutionChoicesMatchPhysicalPixels();
+	screenShareResolutionPreservesPersistedValues(temporary.filePath("screen-share-resolution.ini"));
 	meetingSecurityScopeAndKeyLifetime(temporary.filePath("security-lifetime.ini"));
 	securityPageEditsAndClearsKeys(temporary.filePath("security-ui.ini"));
 	staleQueuedCompletionAndFailurePreservePreferences(temporary.filePath("stale.ini"));

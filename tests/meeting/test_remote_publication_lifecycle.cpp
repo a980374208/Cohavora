@@ -123,14 +123,96 @@ int main() {
     remote_track->set_sid("TR_REMOTE_VIDEO_201");
     remote_track->set_name("camera");
     remote_track->set_type(livekit::proto::TrackType::VIDEO);
+    remote_track->set_width(640);
+    remote_track->set_height(360);
+    remote_track->set_mime_type("video/VP8");
+    const auto set_layer = [](livekit::proto::VideoLayer* layer,
+                              Quality quality, uint32_t width, uint32_t height,
+                              const std::string& rid) {
+        layer->set_quality(quality);
+        layer->set_width(width);
+        layer->set_height(height);
+        layer->set_rid(rid);
+    };
+    set_layer(remote_track->add_layers(), Quality::HIGH, 640, 360, "only");
     room->UpdateParticipantsForTesting(update);
 
     const auto room_participant = room->remote_participants().at("PA_REMOTE_201");
     const auto canonical = room_participant->get_remote_publication("TR_REMOTE_VIDEO_201");
     TEST_CHECK(canonical);
     TEST_CHECK(room_participant->get_publication(canonical->sid()) == canonical);
+    TEST_CHECK(canonical->SnapshotState().source_width == 640);
+    TEST_CHECK(canonical->SnapshotState().source_height == 360);
+    using Layer = livekit::PublishedVideoLayer;
+    using PublishedQuality = livekit::PublishedVideoQuality;
+    const std::vector<Layer> legacy_layers = {
+        {PublishedQuality::High, 640, 360, "only"}};
+    TEST_CHECK(canonical->SnapshotState().published_video_layers == legacy_layers);
+    TEST_CHECK(canonical->current_width() == 0 && canonical->current_height() == 0);
     TEST_CHECK(!canonical->SetPriority(3));
     TEST_CHECK(canonical->priority() == 0);
+
+    // Source metadata updates keep the canonical publication and remain
+    // independent of its requested subscription dimensions.
+    remote_track->set_width(3840);
+    remote_track->set_height(2160);
+    auto* backup_codec = remote_track->add_codecs();
+    backup_codec->set_mime_type("video/h264");
+    set_layer(backup_codec->add_layers(), Quality::LOW, 320, 180, "q");
+    auto* selected_codec = remote_track->add_codecs();
+    selected_codec->set_mime_type("VIDEO/vp8");
+    // A highest screen layer can be MEDIUM/h. Preserve those labels even when
+    // its pixel dimensions exceed the HIGH layer of the legacy declaration.
+    set_layer(selected_codec->add_layers(), Quality::MEDIUM, 2560, 1440, "h");
+    set_layer(selected_codec->add_layers(), Quality::LOW, 1280, 720, "q");
+    set_layer(selected_codec->add_layers(), Quality::OFF, 3840, 2160, "f");
+    set_layer(selected_codec->add_layers(), Quality::HIGH, 0, 2160, "f");
+    room->UpdateParticipantsForTesting(update);
+    TEST_CHECK(room_participant->get_remote_publication("TR_REMOTE_VIDEO_201") == canonical);
+    TEST_CHECK(canonical->SnapshotState().source_width == 3840);
+    TEST_CHECK(canonical->SnapshotState().source_height == 2160);
+    const std::vector<Layer> selected_layers = {
+        {PublishedQuality::Low, 1280, 720, "q"},
+        {PublishedQuality::Medium, 2560, 1440, "h"}};
+    TEST_CHECK(canonical->SnapshotState().published_video_layers == selected_layers);
+    TEST_CHECK(canonical->current_width() == 0 && canonical->current_height() == 0);
+
+    // A layer-only update reaches the same canonical object, without altering
+    // source or requested dimensions or borrowing any backup-codec candidates.
+    selected_codec->mutable_layers(0)->set_width(3840);
+    selected_codec->mutable_layers(0)->set_height(2160);
+    room->UpdateParticipantsForTesting(update);
+    TEST_CHECK(room_participant->get_remote_publication("TR_REMOTE_VIDEO_201") == canonical);
+    const std::vector<Layer> changed_layers = {
+        {PublishedQuality::Low, 1280, 720, "q"},
+        {PublishedQuality::Medium, 3840, 2160, "h"}};
+    TEST_CHECK(canonical->SnapshotState().published_video_layers == changed_layers);
+    TEST_CHECK(canonical->SnapshotState().source_width == 3840);
+    TEST_CHECK(canonical->current_width() == 0 && canonical->current_height() == 0);
+
+    // Unmatched or empty codec metadata falls back only to the legacy layers.
+    remote_track->set_mime_type("video/av1");
+    room->UpdateParticipantsForTesting(update);
+    TEST_CHECK(canonical->SnapshotState().published_video_layers == legacy_layers);
+    remote_track->set_mime_type("video/vp8");
+    selected_codec->clear_layers();
+    room->UpdateParticipantsForTesting(update);
+    TEST_CHECK(canonical->SnapshotState().published_video_layers == legacy_layers);
+    remote_track->clear_layers();
+    remote_track->clear_codecs();
+    room->UpdateParticipantsForTesting(update);
+    TEST_CHECK(canonical->SnapshotState().published_video_layers.empty());
+    TEST_CHECK(canonical->SnapshotState().source_width == 3840);
+    TEST_CHECK(room_participant->get_remote_publication("TR_REMOTE_VIDEO_201") == canonical);
+    remote_track->set_height(0);
+    room->UpdateParticipantsForTesting(update);
+    TEST_CHECK(canonical->SnapshotState().source_width == 0);
+    TEST_CHECK(canonical->SnapshotState().source_height == 0);
+    remote_track->set_width(1920);
+    remote_track->set_height(1080);
+    room->UpdateParticipantsForTesting(update);
+    TEST_CHECK(canonical->SnapshotState().source_width == 1920);
+    TEST_CHECK(canonical->SnapshotState().source_height == 1080);
 
     auto* disconnected = update.mutable_participants(0);
     disconnected->set_state(livekit::proto::ParticipantInfo::DISCONNECTED);

@@ -24,11 +24,15 @@
 #include <cstdlib>
 #include <future>
 #include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <map>
 #include <mutex>
 #include <thread>
 #include <vector>
+#include <sstream>
+#include <openssl/sha.h>
 
 #pragma comment(lib, "Psapi.lib")
 
@@ -63,10 +67,10 @@ bool FullscreenCapture() {
 
 class PatternWindow {
 public:
-    explicit PatternWindow(bool detailed = false) {
+    explicit PatternWindow(bool detailed = false, int fixed_width = 0, int fixed_height = 0) {
         std::promise<HWND> ready;
         auto result = ready.get_future();
-        thread_ = std::thread([ready = std::move(ready), detailed]() mutable {
+        thread_ = std::thread([ready = std::move(ready), detailed, fixed_width, fixed_height]() mutable {
             WNDCLASSW type{};
             type.lpfnWndProc = Procedure;
             type.hInstance = GetModuleHandleW(nullptr);
@@ -77,18 +81,18 @@ public:
             GetMonitorInfoW(MonitorFromPoint(POINT{0, 0}, MONITOR_DEFAULTTOPRIMARY), &monitor);
             const auto& bounds = monitor.rcMonitor;
             HWND hwnd = CreateWindowExW(fullscreen ? WS_EX_TOPMOST : 0, type.lpszClassName, L"LiveKit screen-share test pattern",
-                (fullscreen || detailed || std::getenv("LIVEKIT_TEST_QUALITY_HOT")) ? WS_POPUP : WS_OVERLAPPEDWINDOW,
+                (fullscreen || detailed || fixed_width || std::getenv("LIVEKIT_TEST_QUALITY_HOT")) ? WS_POPUP : WS_OVERLAPPEDWINDOW,
                 fullscreen ? bounds.left : 80, fullscreen ? bounds.top : 80,
-                fullscreen ? bounds.right - bounds.left : (std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? 3840 : 800),
-                fullscreen ? bounds.bottom - bounds.top : (std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? 2160 : 600),
+                fixed_width ? fixed_width : fullscreen ? bounds.right - bounds.left : (std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? 3840 : 800),
+                fixed_height ? fixed_height : fullscreen ? bounds.bottom - bounds.top : (std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? 2160 : 600),
                 nullptr, nullptr, type.hInstance, nullptr);
             if (hwnd) {
                 if (detailed) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0x10000);
-                else if (std::getenv("LIVEKIT_TEST_QUALITY_HOT")) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0x20000);
+                else if (fixed_width || std::getenv("LIVEKIT_TEST_QUALITY_HOT")) SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0x20000);
                 ShowWindow(hwnd, SW_SHOWNOACTIVATE);
                 const auto requested_interval = std::getenv("LIVEKIT_TEST_PATTERN_INTERVAL_MS");
                 const unsigned interval = requested_interval ? std::max(5,std::min(33,std::atoi(requested_interval))) : 10;
-                SetTimer(hwnd, 1, std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? interval : detailed ? 66 : 500, nullptr);
+                SetTimer(hwnd, 1, fixed_width ? 33 : std::getenv("LIVEKIT_TEST_QUALITY_HOT") ? interval : detailed ? 66 : 500, nullptr);
                 UpdateWindow(hwnd);
             }
             ready.set_value(hwnd);
@@ -1320,6 +1324,356 @@ asio::awaitable<void> PerformanceMatrix(Peer& sender, Peer& receiver) {
               << "}" << std::endl;
 }
 
+std::string PolicySourceHash(std::string_view value) {
+    unsigned char digest[SHA256_DIGEST_LENGTH]{};
+    SHA256(reinterpret_cast<const unsigned char*>(value.data()), value.size(), digest);
+    std::ostringstream result;
+    result << std::hex << std::setfill('0');
+    for (int index = 0; index != 8; ++index) result << std::setw(2) << unsigned(digest[index]);
+    return result.str();
+}
+
+void EmitPolicySource(const nlohmann::json& value) {
+    std::cout << "SOURCE_PROBE " << value.dump() << std::endl;
+}
+
+livekit::VideoPublishOptions PolicySourceOptions(bool screen) {
+    livekit::VideoPublishOptions options;
+    options.source = screen ? Source::ScreenShareVideo : Source::Camera;
+    options.video_codec = "vp8";
+    options.simulcast = true;
+    options.auto_backup_codec = false;
+    if (screen) options.screen_share_fps = 20;
+    return options;
+}
+
+struct PolicySourceInput {
+    int width = 2560;
+    int height = 1440;
+    bool wgc = false;
+    bool direct_wgc = false;
+};
+
+std::optional<PolicySourceInput> ResolvePolicySourceInput(
+        bool screen, int width, int height, std::string_view capture) {
+    const bool four_k = width == 3840 && height == 2160;
+    if (!four_k && !(width == 2560 && height == 1440)) return {};
+    if (capture.empty()) capture = screen || four_k ? "wgc_window" : "synthetic_i420";
+    if (capture != "wgc_window" && capture != "synthetic_i420") return {};
+    const bool wgc = capture == "wgc_window";
+    if ((screen || four_k) && !wgc) return {};
+    return PolicySourceInput{width, height, wgc, wgc && (four_k || !screen)};
+}
+
+PolicySourceInput ReadPolicySourceInput(bool screen) {
+    const auto width_env = std::getenv("POLICY_SOURCE_WIDTH");
+    const auto height_env = std::getenv("POLICY_SOURCE_HEIGHT");
+    Require(bool(width_env) == bool(height_env), "policy_source_dimensions_incomplete");
+    int width = 2560, height = 1440;
+    if (width_env) {
+        const auto parse = [](const char* value) {
+            char* end = nullptr;
+            const auto result = std::strtol(value, &end, 10);
+            Require(end && *end == 0 && result >= 2 && result <= 3840,
+                "policy_source_dimension_invalid");
+            return int(result);
+        };
+        width = parse(width_env);
+        height = parse(height_env);
+    }
+    const auto capture_env = std::getenv("POLICY_SOURCE_CAPTURE");
+    const auto input = ResolvePolicySourceInput(screen, width, height, capture_env ? capture_env : "");
+    Require(input.has_value(), "policy_source_input_unsupported");
+    return *input;
+}
+
+void PolicySourceSelfTest() {
+    const auto camera = livekit::LocalVideoTrack::ComputeSimulcastOptions(2560, 1440, PolicySourceOptions(false));
+    Require(camera.layers.size() == 3 && camera.layers[0].width == 2560 &&
+        camera.layers[0].height == 1440 && camera.layers[0].max_fps == 30 &&
+        camera.layers[1].width == 640 && camera.layers[1].height == 360 &&
+        camera.layers[1].max_fps == 20 && camera.layers[2].width == 320 &&
+        camera.layers[2].height == 180 && camera.layers[2].max_fps == 15, "camera_policy_source_layers_changed");
+    const auto screen = livekit::LocalVideoTrack::ComputeSimulcastOptions(2560, 1440, PolicySourceOptions(true));
+    Require(screen.layers.size() == 2 && screen.layers[0].width == 2560 &&
+        screen.layers[0].height == 1440 && screen.layers[1].width == 1280 &&
+        screen.layers[1].height == 720 && screen.layers[1].max_fps == 3,
+        "screen_policy_source_layers_changed");
+    const auto camera_4k = livekit::LocalVideoTrack::ComputeSimulcastOptions(3840, 2160, PolicySourceOptions(false));
+    Require(camera_4k.layers.size() == 3 && camera_4k.layers[0].rid == "f" &&
+        camera_4k.layers[0].width == 3840 && camera_4k.layers[0].height == 2160 &&
+        camera_4k.layers[0].max_fps == 30 && camera_4k.layers[0].max_bitrate_bps == 8000000 &&
+        camera_4k.layers[1].rid == "h" && camera_4k.layers[1].width == 640 &&
+        camera_4k.layers[1].height == 360 && camera_4k.layers[1].max_fps == 20 &&
+        camera_4k.layers[2].rid == "q" && camera_4k.layers[2].width == 320 &&
+        camera_4k.layers[2].height == 180 && camera_4k.layers[2].max_fps == 15,
+        "camera_4k_policy_source_layers_changed");
+    const auto screen_4k = livekit::LocalVideoTrack::ComputeSimulcastOptions(3840, 2160, PolicySourceOptions(true));
+    Require(screen_4k.layers.size() == 2 && screen_4k.layers[0].rid == "h" &&
+        screen_4k.layers[0].width == 3840 && screen_4k.layers[0].height == 2160 &&
+        screen_4k.layers[0].max_fps == 30 && screen_4k.layers[0].max_bitrate_bps == 8000000 &&
+        screen_4k.layers[1].rid == "q" && screen_4k.layers[1].width == 1920 &&
+        screen_4k.layers[1].height == 1080 && screen_4k.layers[1].max_fps == 3 &&
+        screen_4k.layers[1].max_bitrate_bps == 333333,
+        "screen_4k_policy_source_layers_changed");
+    const auto ordinary_4k = ResolvePolicySourceInput(false, 3840, 2160, "");
+    const auto share_4k = ResolvePolicySourceInput(true, 3840, 2160, "wgc_window");
+    Require(ordinary_4k && ordinary_4k->wgc && ordinary_4k->direct_wgc &&
+        share_4k && share_4k->direct_wgc &&
+        !ResolvePolicySourceInput(false, 3840, 2160, "synthetic_i420") &&
+        !ResolvePolicySourceInput(true, 3840, 2160, "synthetic_i420") &&
+        !ResolvePolicySourceInput(false, 4096, 2160, "wgc_window") &&
+        !ResolvePolicySourceInput(false, 3840, 1440, "wgc_window") &&
+        !ResolvePolicySourceInput(false, 3840, 2160, "gdi_window"),
+        "policy_source_4k_input_contract_changed");
+    Require(ResolvePolicySourceInput(false, 2560, 1440, "")->wgc == false &&
+        ResolvePolicySourceInput(true, 2560, 1440, "")->direct_wgc == false,
+        "policy_source_2k_input_compatibility_changed");
+    const auto profile = livekit::ResolveScreenShareProfile(3840, 2160,
+        {livekit::ScreenShareResolution::Native, 30});
+    Require(profile && profile->width == 3840 && profile->height == 2160,
+        "policy_source_native_4k_capture_profile_changed");
+    Require(PolicySourceHash("") == "e3b0c44298fc1c14", "policy_source_hash_changed");
+    EmitPolicySource({{"schema", 1}, {"event", "selftest"}, {"status", "PASS"},
+        {"runtime_status", "NOT_RUN"}, {"camera_source_fps", 30}, {"screen_source_fps", 20},
+        {"four_k_source_width", 3840}, {"four_k_source_height", 2160},
+        {"four_k_capture_backend", "wgc_window"}});
+}
+
+asio::awaitable<void> PolicyCameraFrames(std::shared_ptr<livekit::VideoSource> source,
+                                        std::shared_ptr<std::atomic<bool>> running) {
+    auto frame = livekit::VideoFrame::create(2560, 1440, livekit::VideoBufferType::I420);
+    std::fill(frame.data(), frame.data() + frame.dataSize(), uint8_t{128});
+    asio::steady_timer timer(co_await asio::this_coro::executor);
+    auto next = std::chrono::steady_clock::now();
+    int sequence = 0;
+    while (running->load()) {
+        std::fill(frame.data(), frame.data() + 2560 * 1440, uint8_t{40});
+        const int x = (++sequence * 13) % (2560 - 80);
+        for (int y = 360; y < 1080; ++y)
+            std::fill(frame.data() + y * 2560 + x, frame.data() + y * 2560 + x + 80, uint8_t{220});
+        source->captureFrame(frame);
+        next += std::chrono::nanoseconds(1000000000 / 30);
+        if (next < std::chrono::steady_clock::now()) next = std::chrono::steady_clock::now();
+        timer.expires_at(next);
+        co_await timer.async_wait(asio::use_awaitable);
+    }
+}
+
+asio::awaitable<int> RunPolicySource(std::string url, std::string token) {
+    const auto executor = co_await asio::this_coro::executor;
+    Peer sender(executor);
+    // This entry persists only allowlisted SOURCE_PROBE/CAPTURE_PROBE fields.
+    sender.room->SetLogHandler([](const auto&, const auto&, const auto&) {});
+    std::unique_ptr<PatternWindow> window;
+    std::shared_ptr<livekit::VideoSource> camera_source;
+    std::unique_ptr<CountedCapture> direct_capture;
+    auto capture_size_mismatches = std::make_shared<std::atomic<uint64_t>>(0);
+    auto capture_ended = std::make_shared<std::atomic<bool>>(false);
+    int result = 1;
+    bool stopped = false;
+    try {
+        const auto kind_env = std::getenv("POLICY_SOURCE_KIND");
+        const std::string kind = kind_env ? kind_env : "";
+        Require(kind == "camera" || kind == "screen", "invalid_policy_source_kind");
+        const bool screen = kind == "screen";
+        const auto input = ReadPolicySourceInput(screen);
+        const int width = input.width, height = input.height;
+        const int target_fps = screen ? 20 : 30;
+        const auto capture_backend = input.wgc ? "wgc_window" : "synthetic_i420";
+        // Native 4K is a task-owned capture/source fixture. It deliberately
+        // does not claim that the product screen-share UI exposes a 4K mode.
+        const auto source_scope = input.direct_wgc ? "owned_window_native_fixture" :
+            screen ? "screen_share_session" : "synthetic_i420_fixture";
+        const auto ready_env = std::getenv("POLICY_SOURCE_READY_FILE");
+        const auto stop_env = std::getenv("POLICY_SOURCE_STOP_FILE");
+        Require(ready_env && *ready_env && stop_env && *stop_env, "policy_source_paths_missing");
+        const auto ready_path = std::filesystem::path(ready_env);
+        const auto stop_path = std::filesystem::path(stop_env);
+        Require(ready_path.is_absolute() && stop_path.is_absolute() && ready_path != stop_path &&
+            !std::filesystem::exists(ready_path) && !std::filesystem::exists(stop_path),
+            "policy_source_paths_invalid_or_existing");
+        int maximum_seconds = 600;
+        if (const auto duration = std::getenv("POLICY_SOURCE_MAX_SECONDS")) {
+            char* end = nullptr;
+            const auto parsed = std::strtol(duration, &end, 10);
+            Require(end && *end == 0 && parsed >= 1 && parsed <= 600, "invalid_policy_source_duration");
+            maximum_seconds = static_cast<int>(parsed);
+        }
+        livekit::SignalOptions connection;
+        connection.auto_subscribe = false;
+        connection.single_peer_connection = true;
+        connection.allow_insecure_transport = std::getenv("LIVEKIT_TEST_ALLOW_INSECURE") &&
+            std::string(std::getenv("LIVEKIT_TEST_ALLOW_INSECURE")) == "1";
+        connection.connect_timeout = 20s;
+        co_await sender.room->ConnectAsync(url, token, connection);
+        const auto local = sender.room->local_participant();
+        Require(local != nullptr, "policy_source_local_participant_missing");
+        const auto source_type = screen ? Source::ScreenShareVideo : Source::Camera;
+        if (input.wgc) {
+            Require(CaptureMode() == "wgc-window" && !FullscreenCapture() &&
+                !std::getenv("LIVEKIT_TEST_GDI_WINDOW") && !std::getenv("LIVEKIT_TEST_FIRST_FRAME_ONLY"),
+                "policy_source_requires_owned_wgc_window");
+            window = std::make_unique<PatternWindow>(false, width, height);
+            RECT bounds{};
+            Require(GetClientRect(window->handle(), &bounds) && bounds.right == width && bounds.bottom == height,
+                "policy_source_window_dimensions_mismatch");
+            if (input.direct_wgc) {
+                camera_source = std::make_shared<livekit::VideoSource>(width, height);
+                sender.camera = livekit::LocalVideoTrack::createLocalVideoTrack(
+                    screen ? "policy-screen-owned-window-native" : "policy-ordinary-owned-window-native",
+                    camera_source, source_type, PolicySourceOptions(screen));
+                direct_capture = std::make_unique<CountedCapture>(sender.captures);
+                Require(direct_capture->SetQuality({livekit::ScreenShareResolution::Native, target_fps}, 1, {}),
+                    "policy_source_native_capture_quality_rejected");
+                direct_capture->Start(window->source(),
+                    [source = camera_source, capture_size_mismatches, width, height](const auto& frame) {
+                        if (frame.width() != width || frame.height() != height) {
+                            ++*capture_size_mismatches;
+                            return;
+                        }
+                        source->captureFrame(frame);
+                    }, [capture_ended] { *capture_ended = true; });
+                co_await Until([&] { return camera_source->captured_frame_count() > 2 || capture_ended->load(); },
+                    "policy_source_native_wgc_frames_missing", 35s);
+                Require(!capture_ended->load() && capture_size_mismatches->load() == 0,
+                    "policy_source_native_wgc_first_frames_invalid");
+                co_await local->PublishTrackAsync(sender.camera);
+            } else {
+                sender.share->Start(window->source(), PolicySourceOptions(true),
+                    {livekit::ScreenShareResolution::P1440, 20});
+                co_await Until([&] { return sender.share->snapshot().state == State::Active; },
+                    "policy_source_screen_not_active", 35s);
+                co_await Until([&] { return sender.captures->frames > 2; }, "policy_source_screen_frames_missing");
+            }
+        } else {
+            camera_source = std::make_shared<livekit::VideoSource>(2560, 1440);
+            sender.camera = livekit::LocalVideoTrack::createLocalVideoTrack(
+                "policy-camera-2k", camera_source, Source::Camera, PolicySourceOptions(false));
+            sender.camera_running->store(true);
+            asio::co_spawn(executor, PolicyCameraFrames(camera_source, sender.camera_running), asio::detached);
+            co_await local->PublishTrackAsync(sender.camera);
+            co_await Until([&] { return camera_source->captured_frame_count() > 2; },
+                "policy_source_camera_frames_missing");
+        }
+        const auto sid = sender.LocalSid(source_type);
+        Require(!sid.empty(), "policy_source_publication_missing");
+        const auto publication = local->get_publication(sid);
+        const auto track = publication ? std::dynamic_pointer_cast<livekit::LocalVideoTrack>(publication->track()) : nullptr;
+        Require(track != nullptr && track->source()->dimensions() == std::pair{width, height},
+            "policy_source_track_dimensions_mismatch");
+        const auto identity_hash = PolicySourceHash(local->identity());
+        const auto sid_hash = PolicySourceHash(sid);
+        const auto layers = [&] {
+            nlohmann::json values = nlohmann::json::array();
+            for (const auto& layer : track->publish_options().layers)
+                values.push_back({{"rid", layer.rid}, {"width", layer.width}, {"height", layer.height},
+                    {"max_fps", layer.max_fps}, {"max_bitrate_bps", layer.max_bitrate_bps}});
+            return values;
+        }();
+        const auto check_source = [&] {
+            Require(sender.room->connection_state() == livekit::ConnectionState::Connected &&
+                sender.LocalSid(source_type) == sid && track->source()->dimensions() == std::pair{width, height},
+                "policy_source_identity_or_dimensions_changed");
+            if (input.direct_wgc) {
+                Require(direct_capture && !capture_ended->load() && capture_size_mismatches->load() == 0 &&
+                    sender.captures->backend == webrtc::DesktopCapturerId::kWgcCapturerWin,
+                    "policy_source_native_wgc_profile_changed_or_unavailable");
+                RECT bounds{};
+                Require(GetClientRect(window->handle(), &bounds) && bounds.right == width && bounds.bottom == height,
+                    "policy_source_native_window_dimensions_changed");
+            } else if (screen) {
+                const auto snapshot = sender.share->snapshot();
+                Require(snapshot.state == State::Active && snapshot.applied_quality &&
+                    snapshot.applied_quality->source_width == 2560 && snapshot.applied_quality->source_height == 1440 &&
+                    snapshot.applied_quality->width == 2560 && snapshot.applied_quality->height == 1440 &&
+                    snapshot.applied_quality->quality.fps == 20 &&
+                    sender.captures->backend == webrtc::DesktopCapturerId::kWgcCapturerWin,
+                    "policy_source_wgc_profile_changed_or_unavailable");
+            }
+        };
+        check_source();
+        nlohmann::json ready{{"schema", 1}, {"event", "ready"}, {"source_kind", kind},
+            {"source_width", width}, {"source_height", height}, {"target_fps", target_fps},
+            {"publication_sid_hash", sid_hash}, {"identity_hash", identity_hash},
+            {"capture_backend", capture_backend}, {"source_scope", source_scope}, {"layers", layers},
+            {"captured_frames", track->source()->captured_frame_count()},
+            {"capture_frames", input.wgc ? sender.captures->frames.load() : 0},
+            {"capturer_id", input.wgc ? sender.captures->backend.load() : 0},
+            {"capture_size_mismatches", capture_size_mismatches->load()}};
+        auto temporary = ready_path;
+        temporary += ".tmp";
+        Require(!std::filesystem::exists(temporary), "policy_source_ready_temporary_exists");
+        { std::ofstream output(temporary, std::ios::binary); output << ready.dump(2); output.flush();
+          Require(output.good(), "policy_source_ready_write_failed"); }
+        Require(MoveFileExW(temporary.c_str(), ready_path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH),
+            "policy_source_ready_publish_failed");
+        EmitPolicySource(ready);
+        const auto started = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - started < std::chrono::seconds(maximum_seconds)) {
+            if (std::filesystem::exists(stop_path)) { stopped = true; break; }
+            check_source();
+            const auto stats = co_await sender.room->GetStats();
+            auto streams = nlohmann::json::array();
+            for (const auto& report : stats.reports) for (const auto& out : report.outbound_rtp) {
+                if (!out.kind_available || out.kind != "video") continue;
+                streams.push_back({{"stats_stream_hash", PolicySourceHash(out.id)},
+                    {"rid", out.rid == "q" || out.rid == "h" || out.rid == "f" ? out.rid : ""},
+                    {"width", out.frame_width}, {"height", out.frame_height},
+                    {"fps", out.frames_per_second}, {"frames_encoded", out.frames_encoded},
+                    {"packets_sent", out.packets_sent}, {"bytes_sent", out.bytes_sent},
+                    {"width_available", out.frame_width_available}, {"height_available", out.frame_height_available},
+                    {"fps_available", out.frames_per_second_available}, {"frames_encoded_available", out.frames_encoded_available},
+                    {"packets_sent_available", out.packets_sent_available}, {"bytes_sent_available", out.bytes_sent_available}});
+            }
+            EmitPolicySource({{"schema", 1}, {"event", "sample"}, {"source_kind", kind},
+                {"publication_sid_hash", sid_hash}, {"identity_hash", identity_hash},
+                {"source_width", width}, {"source_height", height}, {"target_fps", target_fps},
+                {"elapsed_seconds", std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count()},
+                {"captured_frames", track->source()->captured_frame_count()},
+                {"capture_frames", input.wgc ? sender.captures->frames.load() : 0},
+                {"capture_backend", capture_backend}, {"source_scope", source_scope},
+                {"capturer_id", input.wgc ? sender.captures->backend.load() : 0},
+                {"capture_size_mismatches", capture_size_mismatches->load()}, {"outbound", streams}});
+            co_await Delay(1s);
+        }
+        Require(stopped, "policy_source_maximum_hold_elapsed");
+        sender.camera_running->store(false);
+        if (input.direct_wgc) {
+            direct_capture->Stop();
+            direct_capture.reset();
+            Require(sender.captures->live == 0 && capture_size_mismatches->load() == 0,
+                "policy_source_native_capture_retained_or_invalid");
+            co_await local->UnpublishTrackAsync(sid);
+        } else if (screen) {
+            sender.share->Stop();
+            co_await Until([&] { return sender.share->snapshot().state == State::Idle; },
+                "policy_source_screen_stop_failed", 35s);
+            Require(sender.captures->live == 0, "policy_source_capture_retained");
+        } else {
+            co_await local->UnpublishTrackAsync(sid);
+        }
+        Require(sender.LocalSid(source_type).empty(), "policy_source_publication_retained");
+        result = 0;
+    } catch (const Failure& error) {
+        EmitPolicySource({{"schema", 1}, {"event", "failure"}, {"code", error.code}});
+    } catch (...) {
+        EmitPolicySource({{"schema", 1}, {"event", "failure"}, {"code", "policy_source_exception"}});
+    }
+    if (direct_capture) {
+        direct_capture->Stop();
+        direct_capture.reset();
+    }
+    sender.Shutdown();
+    co_await sender.room->DisconnectAsync();
+    co_await Delay(100ms);
+    window.reset();
+    sender.room->RemoveListener(sender.listener);
+    EmitPolicySource({{"schema", 1}, {"event", "result"}, {"status", result == 0 ? "PASS" : "INCONCLUSIVE"},
+        {"stop_requested", stopped}, {"capture_live", sender.captures->live.load()}});
+    co_return result;
+}
+
 asio::awaitable<int> Run(std::string url, std::string peer_url,
                         std::string token, std::string peer_token,
                         bool recovery_only, bool lifecycle_only, bool publisher_only,
@@ -1380,6 +1734,35 @@ asio::awaitable<int> Run(std::string url, std::string peer_url,
 } // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 && std::string(argv[1]) == "--policy-source-publisher-selftest") {
+        try { PolicySourceSelfTest(); return 0; }
+        catch (const Failure& error) {
+            EmitPolicySource({{"schema", 1}, {"event", "selftest"}, {"status", "FAIL"}, {"code", error.code}});
+            return 1;
+        }
+    }
+    if (argc == 2 && std::string(argv[1]) == "--policy-source-publisher") {
+        const auto url = std::getenv("LIVEKIT_URL");
+        const auto token = std::getenv("LIVEKIT_TOKEN");
+        if (!url || !*url || !token || !*token) {
+            EmitPolicySource({{"schema", 1}, {"event", "failure"}, {"code", "policy_source_environment_missing"}});
+            return 2;
+        }
+        SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        if (const auto kind = std::getenv("POLICY_SOURCE_KIND"); kind &&
+            (std::string(kind) == "screen" ||
+                (std::getenv("POLICY_SOURCE_WIDTH") && std::string(std::getenv("POLICY_SOURCE_WIDTH")) == "3840") ||
+                (std::getenv("POLICY_SOURCE_CAPTURE") && std::string(std::getenv("POLICY_SOURCE_CAPTURE")) == "wgc_window")))
+            _putenv_s("LIVEKIT_TEST_CAPTURE_BACKEND", "wgc-window");
+        asio::io_context io;
+        auto future = asio::co_spawn(asio::make_strand(io), RunPolicySource(url, token), asio::use_future);
+        io.run();
+        try { return future.get(); }
+        catch (...) {
+            EmitPolicySource({{"schema", 1}, {"event", "failure"}, {"code", "policy_source_executor_exception"}});
+            return 1;
+        }
+    }
     if (argc == 2 && std::string(argv[1]) == "--gdi-worker-cost-probe") {
         SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         _putenv_s("LIVEKIT_TEST_QUALITY_HOT", "1");

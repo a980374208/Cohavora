@@ -41,13 +41,14 @@
   },
   "probe": {
     "steps": [
-      {"layout": "grid16", "seconds": 45},
-      {"layout": "pin_identity", "identity_role": "hd", "seconds": 60},
-      {"layout": "grid16", "seconds": 60}
+      {"layout": "grid16", "quality": "low", "window_width": 1120, "window_height": 720, "seconds": 45},
+      {"layout": "grid16", "quality": "medium", "window_width": 1600, "window_height": 1000, "seconds": 45},
+      {"layout": "pin_identity", "identity_role": "hd", "quality": "high", "window_width": 1120, "window_height": 720, "seconds": 60},
+      {"layout": "grid16", "quality": "low", "window_width": 1120, "window_height": 720, "seconds": 60}
     ],
     "settle_seconds": 35,
     "stall_seconds": 20,
-    "maximum_wall_seconds": 340,
+    "maximum_wall_seconds": 420,
     "minimum_remote_videos": 17,
     "receiver_count": 1,
     "receiver_arguments": ["--scale-100"]

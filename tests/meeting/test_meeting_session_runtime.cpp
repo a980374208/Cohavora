@@ -467,6 +467,75 @@ void TestVideoPolicyTelemetryShutdownCrossing() {
             "old session policy telemetry contaminated its successor");
 }
 
+void TestSelectedLayerRemoteMediaProjection() {
+    using Quality = livekit::PublishedVideoQuality;
+    asio::io_context context;
+    auto runtime = std::make_shared<OpenMeeting::MeetingSessionRuntime>(
+        context, 94, QStringLiteral("layer-policy-user"));
+    asio::post(runtime->strand(), [runtime] {
+        const auto key = PolicyTrack(8, 1, "TR_LAYER_POLICY");
+        auto participant = std::make_shared<livekit::MembershipState>(key.participant);
+        auto membership = std::make_shared<livekit::TrackMembershipState>(key);
+        livekit::ParticipantEvent event;
+        event.kind = livekit::ParticipantEventKind::Upsert;
+        event.native_room_generation = 8;
+        event.participant.key = key.participant;
+        event.participant.ticket = participant;
+        event.participant.state.sid = key.participant.sid;
+        event.participant.state.identity = key.participant.identity;
+        livekit::TrackPublication::StateSnapshot state;
+        state.sid = key.publication_sid;
+        state.kind = livekit::TrackKind::Video;
+        state.source = livekit::TrackSource::Camera;
+        state.source_width = 2560;
+        state.source_height = 1440;
+        state.published_video_layers = {
+            {Quality::Low, 320, 180, "q"}, {Quality::Medium, 640, 360, "h"},
+            {Quality::High, 2560, 1440, "f"}};
+        event.participant.publications.push_back({key, membership, state});
+        Require(runtime->updatePublicationCatalogOnStrand(event) ==
+                    livekit::CatalogApplyResult::Applied,
+                "projection fixture catalog was rejected");
+        livekit::ViewportIntent view;
+        view.coordinator_session = 94;
+        view.view_revision = 1;
+        view.mode = livekit::VideoLayoutMode::Grid;
+        view.page_size = 4;
+        view.stage_rect = {0, 0, 1750, 984};
+        runtime->updateViewportIntentOnStrand(view);
+        const auto grid = runtime->buildRemoteMediaPlanOnStrand();
+        Require(grid.video.size() == 1 && grid.video.front().width == 640 &&
+                    grid.video.front().height == 360 &&
+                    grid.video.front().quality == livekit::VideoQualityTier::P720 &&
+                    grid.video.front().selected_layer_quality == Quality::Medium &&
+                    grid.video.front().max_fps == 30 &&
+                    runtime->videoDemandPlanOnStrand().visible_seats.front().width == 875,
+                "projection replaced selected layer dimensions/quality with viewport demand");
+
+        // A tiny main seat still receives a publisher's only 4K layer at 30 FPS.
+        auto& refreshed = event.participant.publications.front().state;
+        refreshed.source_width = 3840;
+        refreshed.source_height = 2160;
+        refreshed.published_video_layers = {{Quality::High, 3840, 2160, "single"}};
+        runtime->updatePublicationCatalogOnStrand(event);
+        view.view_revision = 2;
+        view.mode = livekit::VideoLayoutMode::Speaker;
+        view.pinned = key;
+        view.stage_rect = {0, 0, 235, 132};
+        runtime->updateViewportIntentOnStrand(view);
+        const auto single = runtime->buildRemoteMediaPlanOnStrand();
+        Require(single.video.size() == 1 && single.video.front().width == 3840 &&
+                    single.video.front().height == 2160 &&
+                    single.video.front().quality == livekit::VideoQualityTier::P180 &&
+                    single.video.front().selected_layer_quality == Quality::High &&
+                    single.video.front().max_fps == 30,
+                "single-layer projection reused the tiny viewport tier to cap dimensions or FPS");
+        runtime->stopVideoDemandOnStrand();
+        runtime->stopTelemetryOnStrand();
+    });
+    context.run();
+}
+
 void TestAsyncShutdownGuardKeepsQtResponsive(QCoreApplication& app) {
     int shutdownCalls = 0;
     bool heartbeatDelivered = false;
@@ -569,6 +638,7 @@ int main(int argc, char **argv) {
     TestRetainedCleanupFailureIsProcessIsolated();
     TestRuntimePostRevocationIsAtomic();
     TestVideoPolicyTelemetryShutdownCrossing();
+    TestSelectedLayerRemoteMediaProjection();
     TestAsyncShutdownGuardKeepsQtResponsive(app);
     TestAsyncShutdownGuardUnwindsExistingLoop(app);
 

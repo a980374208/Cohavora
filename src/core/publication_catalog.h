@@ -23,6 +23,7 @@ struct RemotePublicationInfo {
     bool media_available = false;
     uint32_t source_width = 0;
     uint32_t source_height = 0;
+    std::vector<PublishedVideoLayer> published_video_layers;
 };
 
 struct PublicationCatalogParticipant {

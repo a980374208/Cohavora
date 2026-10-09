@@ -1,4 +1,4 @@
-"""Measure one frozen HD source across grid/pin/grid, without formal B11 credit."""
+"""Measure a frozen HD source across pixel-driven low/medium/pin-high/low."""
 from __future__ import annotations
 
 import csv
@@ -39,6 +39,16 @@ def validate_tracks(raw):
             if value is not None and (type(value) is not int or not 0 <= value <= 16384):
                 raise soak.StopRun("invalid_hd_intent")
             safe[name] = value
+        for name in ("seat_width", "seat_height", "source_width", "source_height",
+                     "window_width", "window_height", "viewport_stage_width", "viewport_stage_height"):
+            value = item.get(name)
+            if value is not None and (type(value) is not int or not 0 <= value <= 16384):
+                raise soak.StopRun("invalid_hd_viewport_dimensions")
+            safe[name] = value
+        dpr = item.get("viewport_device_pixel_ratio")
+        if dpr is not None and (type(dpr) not in (int, float) or not 0 < dpr <= 16):
+            raise soak.StopRun("invalid_hd_viewport_dpr")
+        safe["viewport_device_pixel_ratio"] = dpr
         if item.get("desired_enabled") is not None and type(item["desired_enabled"]) is not bool:
             raise soak.StopRun("invalid_hd_intent")
         if item.get("desired_quality") not in (None, "low", "medium", "high", "unknown"):
@@ -102,7 +112,7 @@ def track_identity(track):
             track["current_binding_serial"], track["sink_binding_serial"])
 
 
-def ready(status, track, quality, contract):
+def ready(status, track, quality, contract, *, step=None):
     if not track:
         return False
     expected = contract[quality]
@@ -121,15 +131,41 @@ def ready(status, track, quality, contract):
         track["publication_subscribed"] and not track["subscription_error"] and
         status.get("stats_age_ms", 0) <= contract["maximum_frame_age_ms"] and
         all(track[name] for name in ("stats_bytes_available", "stats_packets_available", "stats_decoded_available")))
+    if step is not None:
+        if not (track.get("window_width") == step["window_width"] and
+                track.get("window_height") == step["window_height"] and
+                track.get("source_width") == contract["high"]["width"] and
+                track.get("source_height") == contract["high"]["height"] and
+                type(track.get("viewport_device_pixel_ratio")) in (int, float) and
+                track["viewport_device_pixel_ratio"] == 1.0 and
+                type(track.get("viewport_stage_width")) is int and track["viewport_stage_width"] > 0 and
+                type(track.get("viewport_stage_height")) is int and track["viewport_stage_height"] > 0 and
+                track.get("seat_present") is True and
+                track.get("seat_quality") == {"low": "p180", "medium": "p360", "high": "p720"}[quality] and
+                track.get("seat_width") == track.get("desired_width") and
+                track.get("seat_height") == track.get("desired_height") and
+                track.get("desired_max_fps") == (15 if quality == "low" else 30)):
+            return False
+        width, height = track.get("desired_width"), track.get("desired_height")
+        if not (type(width) is int and type(height) is int and 0 < width <= 1280 and 0 < height <= 720):
+            return False
+        short_edge = min(width, height)
+        automatic_quality = "low" if short_edge <= 180 else "medium" if short_edge <= 360 else "high"
+        if automatic_quality != quality:
+            return False
+        # This stage deliberately pins a source larger than the small main viewport.
+        if quality == "high" and (width, height) != (1280, 720):
+            return False
     if quality == "high":
         return media_ready and status["layout_mode"] == "speaker" and \
             status["demand_reason"] == "pinned" and track["focused"] and track["seat_role"] == "main" and \
             status["pinned_sid_hash"] == track["sid_hash"] and status["focused_sid_hash"] == track["sid_hash"]
     return media_ready and status["layout_mode"] == "grid" and not status["pinned_sid_hash"] and \
+        not track["focused"] and track["seat_role"] == "grid" and \
         status["page"] == 0 and status["page_size"] == 16 and status["selected"] == status["bound"] == 16
 
 
-def evaluate_step(rows, quality, contract):
+def evaluate_step(rows, quality, contract, *, step=None):
     """Rows are post-settle, distinct observer heartbeats, not metadata FPS."""
     result = {"quality": quality, "status": "INCONCLUSIVE", "reason": "insufficient_samples",
               "sample_count": len(rows), "source_fps": contract[quality]["source_fps"]}
@@ -147,7 +183,7 @@ def evaluate_step(rows, quality, contract):
     identities = {track_identity(row["target"]) for row in rows}
     if len(identities) != 1:
         failures.append("target_binding_changed")
-    valid = [ready(row, row["target"], quality, contract) for row in rows]
+    valid = [ready(row, row["target"], quality, contract, step=step) for row in rows]
     result["dimension_and_state_match_ratio"] = sum(valid) / len(valid)
     if result["dimension_and_state_match_ratio"] < contract["dimension_match_ratio"]:
         failures.append("dimensions_or_view_state_mismatch")
@@ -172,7 +208,8 @@ def evaluate_step(rows, quality, contract):
     result["canvas_dimensions_status"] = "AVAILABLE" if canvas_available else "UNKNOWN"
     native_fps = result["sink_on_frame_count_delta"] / duration
     decoded_fps = result["stats_decoded_delta"] / duration
-    result.update(native_fps=native_fps, decoded_fps=decoded_fps,
+    delivered_fps = result["sink_delivered_frame_count_delta"] / duration
+    result.update(native_fps=native_fps, decoded_fps=decoded_fps, delivered_fps=delivered_fps,
                   minimum_fps=contract[quality]["source_fps"] * contract["minimum_frame_rate_ratio"],
                   received_dimensions=sorted({(r["target"]["sink_frame_width"], r["target"]["sink_frame_height"]) for r in rows}),
                   max_frame_age_ms=max(r["target"]["sink_frame_age_ms"] for r in rows),
@@ -180,10 +217,20 @@ def evaluate_step(rows, quality, contract):
     result["distinct_stats_samples"] = len({r["stats_sample_seq"] for r in rows})
     if result["distinct_stats_samples"] < 3:
         failures.append("stats_samples_not_progressing")
-    if min(native_fps, decoded_fps) < result["minimum_fps"]:
+    if min(native_fps, decoded_fps, delivered_fps) < result["minimum_fps"]:
         failures.append("frame_rate_below_frozen_minimum")
+    if step is not None:
+        if any(row.get("command_status") != "applied" for row in rows) or \
+                len({row.get("command_seq") for row in rows}) != 1:
+            failures.append("step_command_ack_changed")
+        result.update(expected_layout=step["layout"], expected_window=[step["window_width"], step["window_height"]],
+            requested_dimensions=sorted({(r["target"].get("desired_width"), r["target"].get("desired_height")) for r in rows},
+                key=lambda dimensions: tuple(-1 if value is None else value for value in dimensions)),
+            client_resources=render.client_resource_summary(rows))
     result.update(status="FAIL" if failures else "PASS" if canvas_available else "INCONCLUSIVE",
         reason=",".join(failures) if failures else "actual_dimensions_and_frames_progressed" if canvas_available else "target_canvas_dimensions_unavailable")
+    if step is not None and result["status"] == "PASS" and result["client_resources"]["status"] != "AVAILABLE":
+        result.update(status="INCONCLUSIVE", reason="client_resource_evidence_incomplete")
     return result
 
 
@@ -220,6 +267,7 @@ def run(output: Path, executable: Path, *, input_manifest: Path, profile: Path) 
     resources, last_status, target_identity_value = [], None, None
     seq, step_index, heartbeat = 0, -1, -1
     sent_at = ready_at = None
+    resize_pending = False
     rows, consecutive = [], []
     fields = ("elapsed_s", "step", "heartbeat_seq", "selected", "bound", "layout_mode", "desired_quality", "width", "height", "sink_frames", "stats_decoded", "stats_packets", "stats_bytes", "private_bytes", "working_set_bytes", "handles", *render.RESOURCE_FIELDS)
     with (output / "events.jsonl").open("w", encoding="utf-8") as events, \
@@ -236,9 +284,10 @@ def run(output: Path, executable: Path, *, input_manifest: Path, profile: Path) 
             soak.atomic_json(output / "command.json", {"schema": 1, "run_id": run_id, "seq": seq, "action": action})
             event("command_sent", seq=seq, action=action)
         def begin(index):
-            nonlocal step_index, sent_at, ready_at, rows, consecutive
+            nonlocal step_index, sent_at, ready_at, rows, consecutive, resize_pending
             step_index, sent_at, ready_at, rows, consecutive = index, time.monotonic(), None, [], []
-            send("pin_identity:" + identity if plan[index]["layout"] == "pin_identity" else "grid16" if index == 0 else "unpin")
+            resize_pending = True
+            send(f"window_resize:{plan[index]['window_width']}x{plan[index]['window_height']}")
         try:
             process = subprocess.Popen([str(executable), *settings["probe"]["receiver_arguments"], "--meeting-soak", "--soak-directory", str(output)],
                 cwd=soak.ROOT, env=os.environ.copy(), stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
@@ -283,13 +332,22 @@ def run(output: Path, executable: Path, *, input_manifest: Path, profile: Path) 
                     elif now - start > 90:
                         raise soak.StopRun("connection_timeout")
                     continue
-                quality = "high" if step_index == 1 else "low"
+                quality = plan[step_index]["quality"]
                 if status["command_seq"] == seq and status["command_status"] == "rejected":
                     raise soak.StopRun("command_rejected")
+                if resize_pending:
+                    if now - sent_at > settings["probe"]["settle_seconds"]:
+                        raise soak.StopRun("hd_window_resize_timeout")
+                    if status["command_seq"] == seq and status["command_status"] == "applied":
+                        resize_pending = False
+                        sent_at = time.monotonic()
+                        send("pin_identity:" + identity if plan[step_index]["layout"] == "pin_identity"
+                             else "unpin" if step_index and plan[step_index-1]["layout"] == "pin_identity" else "grid16")
+                    continue
                 if ready_at is None:
                     if now - sent_at > settings["probe"]["settle_seconds"]:
                         raise soak.StopRun("hd_layer_settle_timeout")
-                    if status["command_seq"] == seq and status["command_status"] == "applied" and ready(status, track, quality, contract):
+                    if status["command_seq"] == seq and status["command_status"] == "applied" and ready(status, track, quality, contract, step=plan[step_index]):
                         consecutive.append(status)
                     else:
                         consecutive = []
@@ -308,14 +366,14 @@ def run(output: Path, executable: Path, *, input_manifest: Path, profile: Path) 
                     raise soak.StopRun("hd_target_lost")
                 rows.append(status)
                 if now - ready_at >= plan[step_index]["seconds"]:
-                    result = evaluate_step(rows, quality, contract)
+                    result = evaluate_step(rows, quality, contract, step=plan[step_index])
                     summary["step_results"].append(result)
                     event("step_finished", step=step_index, status=result["status"], reason=result["reason"])
                     if result["status"] != "PASS":
                         raise soak.StopRun(result["reason"], result["status"])
                     summary["completed_steps"] += 1
                     if step_index == len(plan) - 1:
-                        summary.update(status="PASS", reason="actual_low_high_low_dimensions_and_frames_verified")
+                        summary.update(status="PASS", reason="actual_low_medium_high_low_dimensions_and_frames_verified")
                         break
                     begin(step_index + 1)
             else:

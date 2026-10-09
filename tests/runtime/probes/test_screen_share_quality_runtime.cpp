@@ -13,6 +13,13 @@
 #include <filesystem>
 #include <future>
 #include <iostream>
+#include <fstream>
+#include <mutex>
+#include <openssl/sha.h>
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
 
 namespace livekit {
 class RoomUnpublishTestAccess {
@@ -160,6 +167,135 @@ struct Generator {
     int width = 1280, height = 720, fps = 15;
     bool running = true;
 };
+
+// Receive-only peer for the separate product Qt/UI publisher fixture. The
+// request remains 4K while sender UI changes quality, so received pixels prove
+// the publication's new source profile rather than a receiver downscale.
+struct ProductUiReceiver final : livekit::RoomListener {
+    struct State {
+        std::mutex mutex;
+        std::string sid, initial_sid;
+        std::weak_ptr<livekit::Track> initial_track;
+        uint64_t frames = 0, subscriptions = 0, removed = 0, unsubscribed = 0;
+        uint64_t callback_frames = 0, post_detach_callbacks = 0;
+        uint64_t frames4k = 0, frames1080 = 0;
+        int width = 0, height = 0;
+        bool attached = false, same_track = false, dimensions_accepted = false;
+        std::chrono::steady_clock::time_point last_frame{};
+    };
+    std::shared_ptr<State> state = std::make_shared<State>();
+    livekit::Track::I420VideoFrameSubscription sink;
+    void OnTrackSubscribed(std::shared_ptr<livekit::Track> value,
+            std::shared_ptr<livekit::TrackPublication> publication,
+            std::shared_ptr<livekit::RemoteParticipant>) override {
+        if (!value || value->kind() != livekit::TrackKind::Video ||
+            value->source() != livekit::TrackSource::ScreenShareVideo) return;
+        auto remote = std::dynamic_pointer_cast<livekit::RemoteTrackPublication>(publication);
+        const bool accepted = remote && remote->SetVideoDimensions(3840, 2160);
+        {
+            std::lock_guard lock(state->mutex);
+            if (state->initial_sid.empty()) { state->initial_sid = publication->sid(); state->initial_track = value; }
+            state->sid = publication->sid(); ++state->subscriptions;
+            state->attached = true; state->same_track = value == state->initial_track.lock();
+            state->dimensions_accepted = accepted;
+        }
+        sink = value->subscribeI420VideoFrames([data = state](const auto &frame) {
+            std::lock_guard lock(data->mutex);
+            // Keep callback-entry evidence independent of the media binding.
+            // A callback copied before detach can arrive after publication
+            // removal; ignoring it would falsely prove stop-time silence.
+            ++data->callback_frames;
+            if (!data->attached) { ++data->post_detach_callbacks; return; }
+            if (!frame) return;
+            data->width = frame->width(); data->height = frame->height(); ++data->frames;
+            data->frames4k += frame->width() == 3840 && frame->height() == 2160;
+            data->frames1080 += frame->width() == 1920 && frame->height() == 1080;
+            data->last_frame = std::chrono::steady_clock::now();
+        });
+    }
+    void OnTrackUnpublished(std::shared_ptr<livekit::RemoteParticipant>,
+            std::shared_ptr<livekit::TrackPublication> publication) override {
+        std::lock_guard lock(state->mutex);
+        if (publication && publication->sid() == state->sid) { ++state->removed; state->attached = false; }
+    }
+    void OnTrackUnsubscribed(std::shared_ptr<livekit::Track>,
+            std::shared_ptr<livekit::TrackPublication> publication,
+            std::shared_ptr<livekit::RemoteParticipant>) override {
+        std::lock_guard lock(state->mutex);
+        if (publication && publication->sid() == state->sid) { ++state->unsubscribed; state->attached = false; }
+    }
+    json Snapshot() {
+        std::lock_guard lock(state->mutex);
+        const bool observed = state->last_frame != std::chrono::steady_clock::time_point{};
+        std::string sid_hash;
+        if (!state->sid.empty()) {
+            uint8_t digest[SHA256_DIGEST_LENGTH];
+            SHA256(reinterpret_cast<const uint8_t*>(state->sid.data()), state->sid.size(), digest);
+            const char hex[] = "0123456789abcdef";
+            for (int i = 0; i < 8; ++i) { sid_hash += hex[digest[i] >> 4]; sid_hash += hex[digest[i] & 15]; }
+        }
+        return {{"track_sid", state->sid}, {"sid_hash", sid_hash}, {"frames", state->frames}, {"frames_4k", state->frames4k},
+            {"callback_frames", state->callback_frames}, {"post_detach_callbacks", state->post_detach_callbacks},
+            {"frames_1080p", state->frames1080}, {"width", state->width}, {"height", state->height},
+            {"subscriptions", state->subscriptions}, {"removed", state->removed},
+            {"unsubscribed", state->unsubscribed}, {"attached", state->attached},
+            {"same_sid", !state->initial_sid.empty() && state->sid == state->initial_sid},
+            {"same_track", state->same_track}, {"dimensions_request_accepted", state->dimensions_accepted},
+            {"requested_width",3840}, {"requested_height",2160},
+            {"frame_age_ms", observed ? std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - state->last_frame).count() : -1}};
+    }
+};
+
+bool WriteProductUiStatus(const std::filesystem::path &path, const json &value) {
+    const auto temporary = path.wstring() + L".tmp";
+    { std::ofstream stream(std::filesystem::path(temporary), std::ios::binary | std::ios::trunc);
+      if (!stream) return false; stream << value.dump() << '\n'; stream.flush(); if (!stream) return false; }
+    return MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != FALSE;
+}
+
+asio::awaitable<int> RunProductUiObserver(const std::filesystem::path directory) {
+    const auto executor = co_await asio::this_coro::executor;
+    auto room = livekit::Room::Create(executor);
+    room->SetLogHandler([](const auto &, const auto &, const auto &) {});
+    auto receiver = std::make_shared<ProductUiReceiver>(); room->AddListener(receiver);
+    int result = 1;
+    uint64_t sequence = 0;
+    try {
+        livekit::SignalOptions options;
+        options.auto_subscribe = true; options.single_peer_connection = true;
+        options.allow_insecure_transport = std::getenv("LIVEKIT_TEST_ALLOW_INSECURE") != nullptr;
+        options.connect_timeout = 20s;
+        co_await room->ConnectAsync(std::getenv("LIVEKIT_URL"), std::getenv("RECEIVER_TOKEN"), options);
+        const auto start = std::chrono::steady_clock::now();
+        Emit({{"event", "product_ui_observer_connected"}});
+        std::ofstream samples(directory / "samples.jsonl", std::ios::binary | std::ios::trunc);
+        Check(bool(samples), "product_ui_observer_samples_unavailable");
+        while (!std::filesystem::exists(directory / "observer.stop") && std::chrono::steady_clock::now() - start < 360s) {
+            auto value = receiver->Snapshot();
+            value["schema"] = 1; value["sample_seq"] = ++sequence;
+            value["pid"] = GetCurrentProcessId();
+            value["utc_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            value["connected"] = room->connection_state() == livekit::ConnectionState::Connected;
+            value["elapsed_s"] = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            value["scope"] = "Independent native Room receives actual product UI shared media; no synthetic source";
+            Check(WriteProductUiStatus(directory / "status.json", value), "product_ui_observer_status_write_failed");
+            samples << value.dump() << '\n'; samples.flush();
+            co_await Delay(250ms);
+        }
+        result = std::filesystem::exists(directory / "observer.stop") ? 0 : 1;
+    } catch (const ProbeFailure &failure) {
+        Emit({{"event", "failure"}, {"code", failure.code}});
+    } catch (...) { Emit({{"event", "failure"}, {"code", "product_ui_observer_failed"}}); }
+    co_await room->DisconnectAsync(); room->RemoveListener(receiver); receiver->sink.reset();
+    auto value = receiver->Snapshot(); value["connected"] = false; value["finished"] = true;
+    value["status"] = result == 0 ? "PASS" : "FAIL";
+    WriteProductUiStatus(directory / "final.json", value);
+    Emit({{"event", "product_ui_observer_result"}, {"status", result == 0 ? "PASS" : "FAIL"}});
+    co_return result;
+}
+
 asio::awaitable<void> Frames(std::shared_ptr<Generator> generator) {
     int width = 0, height = 0, sequence = 0;
     std::optional<livekit::VideoFrame> frame;
@@ -425,6 +561,14 @@ asio::awaitable<int> Run(std::string codec, bool simulcast) {
 }
 }
 int main(int argc, char** argv) {
+    if (argc >= 3 && std::string(argv[1]) == "--product-ui-observer") {
+        if (!std::getenv("LIVEKIT_URL") || !std::getenv("RECEIVER_TOKEN") ||
+            !std::filesystem::is_directory(argv[2])) return 2;
+        asio::io_context io;
+        auto future = asio::co_spawn(asio::make_strand(io), RunProductUiObserver(std::filesystem::path(argv[2])), asio::use_future);
+        io.run();
+        try { return future.get(); } catch (...) { return 1; }
+    }
     if (argc < 2 || !std::getenv("LIVEKIT_URL") || !std::getenv("LIVEKIT_TOKEN") ||
         !std::getenv("LIVEKIT_PEER_TOKEN") || !std::getenv("LIVEKIT_LATE_TOKEN")) return 2;
     asio::io_context io;

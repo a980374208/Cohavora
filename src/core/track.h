@@ -1,6 +1,7 @@
 #pragma once
 
 #include <winsock2.h>
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <string>
@@ -10,6 +11,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <utility>
+#include <tuple>
 #include "api/media_stream_interface.h"
 #include "audio_frame.h"
 #include "video_frame.h"
@@ -71,6 +73,38 @@ struct VideoLayerSetting {
     std::string rid; // "f", "h", "q"
     double scale_resolution_down_by = 1.0;
 };
+
+// Signaling-advertised layers of one codec, not requested or received sizes.
+// Keep quality and RID exactly as advertised: a highest layer need not use f.
+enum class PublishedVideoQuality { Low, Medium, High };
+
+struct PublishedVideoLayer {
+    PublishedVideoQuality quality = PublishedVideoQuality::High;
+    uint32_t width = 0;
+    uint32_t height = 0;
+    std::string rid;
+
+    bool operator==(const PublishedVideoLayer& other) const {
+        return quality == other.quality && width == other.width &&
+            height == other.height && rid == other.rid;
+    }
+};
+
+inline std::vector<PublishedVideoLayer> NormalizePublishedVideoLayers(
+    std::vector<PublishedVideoLayer> layers) {
+    layers.erase(std::remove_if(layers.begin(), layers.end(), [](const auto& layer) {
+        const bool known_quality = layer.quality == PublishedVideoQuality::Low ||
+            layer.quality == PublishedVideoQuality::Medium ||
+            layer.quality == PublishedVideoQuality::High;
+        return !known_quality || layer.width == 0 || layer.height == 0;
+    }), layers.end());
+    std::sort(layers.begin(), layers.end(), [](const auto& left, const auto& right) {
+        return std::tie(left.quality, left.width, left.height, left.rid) <
+            std::tie(right.quality, right.width, right.height, right.rid);
+    });
+    layers.erase(std::unique(layers.begin(), layers.end()), layers.end());
+    return layers;
+}
 
 enum class BackupCodecPolicy {
     PreferRegression = 0,
@@ -345,6 +379,11 @@ public:
         bool subscription_allowed = true;
         SubscriptionError subscription_error = SubscriptionError::None;
         TrackEncryption encryption = TrackEncryption::Unknown;
+        // Signaling-advertised source size, not a requested or received size.
+        // Both zero means the source dimensions are unknown.
+        uint32_t source_width = 0;
+        uint32_t source_height = 0;
+        std::vector<PublishedVideoLayer> published_video_layers;
     };
 
     TrackPublication(std::shared_ptr<Track> track, const std::string& sid, const std::string& name)
@@ -358,6 +397,9 @@ public:
         subscription_allowed_ = snapshot.subscription_allowed;
         subscription_error_ = snapshot.subscription_error;
         encryption_ = snapshot.encryption;
+        source_width_ = snapshot.source_width;
+        source_height_ = snapshot.source_height;
+        published_video_layers_ = snapshot.published_video_layers;
     }
     TrackPublication& operator=(const TrackPublication& other) {
         if (this == &other) return *this;
@@ -370,6 +412,9 @@ public:
         subscription_allowed_ = snapshot.subscription_allowed;
         subscription_error_ = snapshot.subscription_error;
         encryption_ = snapshot.encryption;
+        source_width_ = snapshot.source_width;
+        source_height_ = snapshot.source_height;
+        published_video_layers_ = snapshot.published_video_layers;
         return *this;
     }
     virtual ~TrackPublication() = default;
@@ -389,6 +434,18 @@ public:
     void set_track(std::shared_ptr<Track> track) {
         std::lock_guard<std::mutex> lock(state_mutex_);
         track_ = std::move(track);
+    }
+    void set_source_dimensions(uint32_t width, uint32_t height) {
+        // Legacy dimension-only refresh carries no layer declaration.
+        set_source_video_info(width, height, {});
+    }
+    void set_source_video_info(uint32_t width, uint32_t height,
+                               std::vector<PublishedVideoLayer> layers) {
+        layers = NormalizePublishedVideoLayers(std::move(layers));
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        source_width_ = width && height ? width : 0;
+        source_height_ = width && height ? height : 0;
+        published_video_layers_ = std::move(layers);
     }
     bool muted() const {
         const auto value = track();
@@ -436,6 +493,9 @@ public:
             snapshot.subscription_allowed = subscription_allowed_;
             snapshot.subscription_error = subscription_error_;
             snapshot.encryption = encryption_;
+            snapshot.source_width = source_width_;
+            snapshot.source_height = source_height_;
+            snapshot.published_video_layers = published_video_layers_;
         }
         if (snapshot.track) {
             snapshot.kind = snapshot.track->kind();
@@ -463,6 +523,9 @@ private:
     bool subscription_allowed_{true};
     SubscriptionError subscription_error_{SubscriptionError::None};
     TrackEncryption encryption_{TrackEncryption::Unknown};
+    uint32_t source_width_ = 0;
+    uint32_t source_height_ = 0;
+    std::vector<PublishedVideoLayer> published_video_layers_;
 };
 
 } // namespace livekit

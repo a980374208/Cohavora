@@ -1,12 +1,37 @@
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <iostream>
 #include <memory>
+#include <new>
 #include <thread>
 #include <vector>
 
 #include "core/track.h"
 #include "render/owned_i420_frame.h"
+
+namespace {
+
+thread_local bool count_producer_array_allocations = false;
+thread_local size_t producer_array_allocations = 0;
+
+} // namespace
+
+// Observe pixel allocations only inside the dedicated producer test. Pointer
+// equality alone cannot distinguish cache reuse from allocator address reuse.
+void* operator new[](size_t bytes) {
+    auto* allocation = ::operator new(bytes);
+    if (count_producer_array_allocations) ++producer_array_allocations;
+    return allocation;
+}
+
+void operator delete[](void* allocation) noexcept {
+    ::operator delete(allocation);
+}
+
+void operator delete[](void* allocation, size_t) noexcept {
+    ::operator delete(allocation);
+}
 
 namespace {
 
@@ -16,6 +41,95 @@ bool Expect(bool condition, const char* message) {
         return false;
     }
     return true;
+}
+
+bool HasUniformPlanes(const livekit::render::OwnedI420Frame::Ptr& frame, uint8_t value) {
+    if (!frame) return false;
+    const auto luma_bytes = size_t(frame->width()) * frame->height();
+    const auto chroma_bytes = size_t(frame->chroma_width()) * frame->chroma_height();
+    const auto matches = [value](uint8_t byte) { return byte == value; };
+    return std::all_of(frame->data_y(), frame->data_y() + luma_bytes, matches) &&
+        std::all_of(frame->data_u(), frame->data_u() + chroma_bytes, matches) &&
+        std::all_of(frame->data_v(), frame->data_v() + chroma_bytes, matches);
+}
+
+bool TestMixed4KProducerCache() {
+    using livekit::render::OwnedI420Frame;
+    std::array<OwnedI420Frame::Ptr, 8> retained;
+    OwnedI420Frame::Ptr temporary;
+    bool succeeded = false;
+    // A new producer starts with an empty thread-local cache. Hold every frame
+    // while populating 2 UHD + 6 HD blocks: 33,177,600 bytes (31.64 MiB).
+    std::thread producer([&] {
+        std::vector<uint8_t> uhd_source(size_t(3840) * 2160 * 3 / 2);
+        std::vector<uint8_t> hd_source(size_t(1280) * 720 * 3 / 2);
+        const auto copy = [&](int width, int height, uint8_t value) {
+            auto& source = width == 3840 ? uhd_source : hd_source;
+            std::fill(source.begin(), source.end(), value);
+            const auto luma_bytes = size_t(width) * height;
+            const auto chroma_bytes = luma_bytes / 4;
+            return OwnedI420Frame::CopyFromPlanes(width, height, source.data(), width,
+                source.data() + luma_bytes, width / 2,
+                source.data() + luma_bytes + chroma_bytes, width / 2);
+        };
+        count_producer_array_allocations = true;
+        for (size_t index = 0; index != retained.size(); ++index) {
+            const bool uhd = index < 2;
+            retained[index] = copy(uhd ? 3840 : 1280, uhd ? 2160 : 720, uint8_t(40 + index));
+            if (!Expect(HasUniformPlanes(retained[index], uint8_t(40 + index)),
+                    "mixed UHD/HD frames must own every copied plane")) return;
+        }
+        if (!Expect(retained[0]->stride_y() == 3840 && retained[0]->stride_u() == 1920 &&
+                retained[0]->data_u() == retained[0]->data_y() + size_t(3840) * 2160 &&
+                retained[0]->data_v() == retained[0]->data_u() + size_t(1920) * 1080,
+                "UHD I420 storage must be tightly packed")) return;
+
+        const auto released_hd_pixels = retained[2]->data_y();
+        retained[2].reset();
+        const auto before_temporary = producer_array_allocations;
+        // The released HD slot is available, but replacing it with another UHD
+        // block would exceed the byte budget. Retained pixels must stay intact.
+        temporary = copy(3840, 2160, 70);
+        if (!Expect(temporary && producer_array_allocations > before_temporary &&
+                temporary->data_y() != retained[0]->data_y() &&
+                temporary->data_y() != retained[1]->data_y(),
+                "an over-budget UHD frame must receive independent temporary storage")) return;
+        const auto before_hd_reuse = producer_array_allocations;
+        retained[2] = copy(1280, 720, 82);
+        if (!Expect(retained[2] && retained[2]->data_y() == released_hd_pixels &&
+                producer_array_allocations == before_hd_reuse,
+                "the mixed-size cache must retain and reuse released HD storage")) return;
+
+        const auto released_uhd_pixels = retained[0]->data_y();
+        std::weak_ptr<const OwnedI420Frame> released_uhd_frame = retained[0];
+        retained[0].reset();
+        const auto before_uhd_reuse = producer_array_allocations;
+        retained[0] = copy(3840, 2160, 80);
+        if (!Expect(released_uhd_frame.expired() && retained[0] &&
+                retained[0]->data_y() == released_uhd_pixels &&
+                producer_array_allocations == before_uhd_reuse,
+                "released UHD pixels must be reused without retaining the old frame or allocating again")) return;
+        std::fill(uhd_source.begin(), uhd_source.end(), 0);
+        std::fill(hd_source.begin(), hd_source.end(), 0);
+        for (size_t index = 0; index != retained.size(); ++index) {
+            const auto expected = uint8_t(index == 0 ? 80 : index == 2 ? 82 : 40 + index);
+            if (!Expect(HasUniformPlanes(retained[index], expected),
+                    "UHD reuse and budget fallback must not overwrite any retained mixed-size frame")) return;
+        }
+        if (!Expect(HasUniformPlanes(temporary, 70),
+                "over-budget pixels must remain immutable while cached storage is reused")) return;
+        count_producer_array_allocations = false;
+        succeeded = true;
+    });
+    producer.join();
+    if (!succeeded) return false;
+    for (size_t index = 0; index != retained.size(); ++index) {
+        const auto expected = uint8_t(index == 0 ? 80 : index == 2 ? 82 : 40 + index);
+        if (!Expect(HasUniformPlanes(retained[index], expected),
+                "retained UHD/HD pixels must survive producer thread and cache destruction")) return false;
+    }
+    return Expect(HasUniformPlanes(temporary, 70),
+        "over-budget UHD pixels must survive producer thread destruction");
 }
 
 } // namespace
@@ -115,15 +229,7 @@ int main() {
         reused->data_y()[3] == 99 && retained[1]->data_y()[0] == 1,
         "only released pixel storage may be reused; cached storage must not retain frame objects")) return 1;
 
-    livekit::render::OwnedI420Frame::Ptr after_producer_exit;
-    std::thread producer([&] {
-        after_producer_exit = livekit::render::OwnedI420Frame::CopyFromPlanes(
-            2, 2, next_y, 2, next_uv, 1, next_uv, 1);
-    });
-    producer.join();
-    if (!Expect(after_producer_exit && after_producer_exit->data_y()[3] == 99 &&
-        after_producer_exit->data_v()[0] == 99,
-        "outstanding frame storage must survive producer thread and cache destruction")) return 1;
+    if (!TestMixed4KProducerCache()) return 1;
 
     livekit::Track track("TR_I420", "render-test", livekit::TrackKind::Video);
     int first_calls = 0;

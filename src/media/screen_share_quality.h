@@ -6,14 +6,15 @@
 #include <optional>
 
 namespace livekit {
-enum class ScreenShareResolution { Auto, P720, P1080, P1440, Native };
+// Values are persisted as media/screenShareResolution; append new modes.
+enum class ScreenShareResolution { Auto = 0, P720 = 1, P1080 = 2, P1440 = 3, Native = 4, P2160 = 5 };
 
 struct ScreenShareQuality {
     ScreenShareResolution resolution = ScreenShareResolution::Auto;
     int fps = 20;
     bool operator==(const ScreenShareQuality&) const = default;
     bool valid() const {
-        return resolution >= ScreenShareResolution::Auto && resolution <= ScreenShareResolution::Native &&
+        return resolution >= ScreenShareResolution::Auto && resolution <= ScreenShareResolution::P2160 &&
             (fps == 15 || fps == 20 || fps == 30);
     }
 };
@@ -33,6 +34,7 @@ inline std::optional<ScreenShareFrameProfile> ResolveScreenShareProfile(
     switch (quality.resolution) {
     case ScreenShareResolution::P720: bound_width = 1280; bound_height = 720; break;
     case ScreenShareResolution::P1080: bound_width = 1920; bound_height = 1080; break;
+    case ScreenShareResolution::P2160:
     case ScreenShareResolution::Native: bound_width = 3840; bound_height = 2160; break;
     default: break;
     }

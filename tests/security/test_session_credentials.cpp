@@ -327,6 +327,40 @@ void verifyAudioPreferences() {
     std::puts("AUDIO PREFERENCES PASS: defaults, legacy ANS, independent 3A combinations, default speaker restore");
 }
 
+void verifyScreenShareResolutionPreferences() {
+    QTemporaryDir directory;
+    TEST_CHECK(directory.isValid());
+    OpenMeetingHttpClient client;
+    struct Case { int stored; int normalized; };
+    // Native stays at its old value 4; explicit 2160p is appended at 5.
+    for (const auto value : {Case{0,0}, {1,1}, {2,2}, {3,3}, {4,4}, {5,5}, {-1,0}, {99,5}}) {
+        const auto path = directory.filePath(QStringLiteral("screen-share-%1.ini").arg(value.stored));
+        {
+            auto settings = settingsAt(path);
+            settings->setValue("media/screenShareResolution", value.stored);
+            settings->setValue("media/screenShareFps", 20);
+            settings->setValue("media/screenShareVideoCodec", QStringLiteral("VP9"));
+            settings->sync();
+        }
+        auto session = SessionManagerTestAccess::create(settingsAt(path), client);
+        TEST_CHECK(session->mediaPreferences().screenShareResolution == value.normalized);
+        TEST_CHECK(session->mediaPreferences().screenShareFps == 20);
+        TEST_CHECK(session->mediaPreferences().screenShareVideoCodec == QStringLiteral("vp9"));
+        auto prefs = session->mediaPreferences();
+        prefs.screenShareResolution = value.stored;
+        prefs.screenShareFps = 15;
+        session->setMediaPreferences(prefs);
+        TEST_CHECK(session->mediaPreferences().screenShareResolution == value.normalized);
+        session.reset();
+        TEST_CHECK(settingsAt(path)->value("media/screenShareResolution").toInt() == value.normalized);
+        session = SessionManagerTestAccess::create(settingsAt(path), client);
+        TEST_CHECK(session->mediaPreferences().screenShareResolution == value.normalized);
+        TEST_CHECK(session->mediaPreferences().screenShareFps == 15);
+        TEST_CHECK(session->mediaPreferences().screenShareVideoCodec == QStringLiteral("vp9"));
+    }
+    std::puts("SCREEN SHARE PREFERENCES PASS: legacy values, appended 2160p, range normalization and reload");
+}
+
 void verifyStore() {
     QTemporaryDir directory;
     TEST_CHECK(directory.isValid());
@@ -1562,6 +1596,7 @@ int main(int argc, char **argv) {
     verifySettingsMigration();
     verifyMeetingSecurityPreferenceMigration();
     verifyAudioPreferences();
+    verifyScreenShareResolutionPreferences();
     verifyPublicAuthContract();
     verifyPublicInvalidLoginData();
     verifyPublicAuthOrdering();

@@ -21,12 +21,19 @@ TOOL_INPUTS = (
     "tests/runtime/tools/meeting/b11_hd_layer_probe.py",
     "tests/runtime/tools/meeting/b11_hd_remote_run.py",
     "tests/runtime/tools/meeting/run-hd-layer-probe.ps1",
+    "tests/telemetry/test_telemetry_panel.cpp",
+    "tests/render/opengl/opengl_contract.cpp",
 )
 PROBE = {
-    "steps": [{"layout": "grid16", "seconds": 45},
-              {"layout": "pin_identity", "identity_role": "hd", "seconds": 60},
-              {"layout": "grid16", "seconds": 60}],
-    "settle_seconds": 35, "stall_seconds": 20, "maximum_wall_seconds": 340,
+    "steps": [{"layout": "grid16", "quality": "low", "window_width": 1120,
+               "window_height": 720, "seconds": 45},
+              {"layout": "grid16", "quality": "medium", "window_width": 1600,
+               "window_height": 1000, "seconds": 45},
+              {"layout": "pin_identity", "identity_role": "hd", "quality": "high",
+               "window_width": 1120, "window_height": 720, "seconds": 60},
+              {"layout": "grid16", "quality": "low", "window_width": 1120,
+               "window_height": 720, "seconds": 60}],
+    "settle_seconds": 35, "stall_seconds": 20, "maximum_wall_seconds": 420,
     "minimum_remote_videos": 17, "receiver_count": 1,
     "receiver_arguments": ["--scale-100"],
 }

@@ -1,0 +1,104 @@
+{
+  "schema": 1,
+  "scope": "B11_4K_OWNED_WINDOW_LAYER_GPU_DIAGNOSTIC_V1",
+  "build_configuration": "RelWithDebInfo",
+  "scenario": "camera4k",
+  "transport": "ssh",
+  "target_config": "out/b11-4k/target.json",
+  "source_identity_path": "out/b11-4k/camera4k-source-identity.json",
+  "target": {
+    "instance": "ssh:192.0.2.10",
+    "service_url": "ws://192.0.2.10:17880",
+    "local_service_url": "http://127.0.0.1:17880",
+    "config_path": "/home/ubuntu/openmeeting-server/components/livekit/config/livekit.yml",
+    "sfu_container": "livekit",
+    "expected_vcpus": 16,
+    "expected_memory_gib": 64,
+    "minimum_public_egress_mbps": 20
+  },
+  "probe": {
+    "steps": [
+      {
+        "layout": "grid16",
+        "request": "grid_low",
+        "window_width": 1120,
+        "window_height": 720,
+        "seconds": 30
+      },
+      {
+        "layout": "grid16",
+        "request": "grid_large",
+        "window_width": 3840,
+        "window_height": 2160,
+        "seconds": 30
+      },
+      {
+        "layout": "pin_identity",
+        "request": "main_small",
+        "window_width": 850,
+        "window_height": 560,
+        "seconds": 30
+      },
+      {
+        "layout": "pin_identity",
+        "request": "main_highest",
+        "window_width": 3840,
+        "window_height": 2160,
+        "seconds": 30
+      },
+      {
+        "layout": "grid16",
+        "request": "grid_large",
+        "window_width": 3840,
+        "window_height": 2160,
+        "seconds": 30
+      }
+    ],
+    "settle_seconds": 35,
+    "maximum_wall_seconds": 480,
+    "minimum_remote_videos": 15,
+    "receiver_count": 1,
+    "receiver_arguments": [
+      "--scale-100"
+    ]
+  },
+  "quality_contract": {
+    "policy_version": 2,
+    "supersedes_policy": "grid_720_cap_main_720_floor",
+    "grid_selection": "floor_available_layer",
+    "grid_maximum_dimensions": [
+      2560,
+      1440
+    ],
+    "grid_below_minimum": "lowest_layer_within_cap",
+    "main_selection": "ceil_available_layer",
+    "main_maximum_dimensions": [
+      3840,
+      2160
+    ],
+    "main_above_maximum": "highest_layer_within_cap",
+    "single_layer_selection": "only_available_layer",
+    "main_minimum_dimensions": null,
+    "minimum_frame_rate_ratio": 0.9,
+    "maximum_frame_age_ms": 3000,
+    "maximum_sample_gap_seconds": 3,
+    "minimum_observation_seconds": 20,
+    "dimension_match_ratio": 1.0,
+    "receive_fps_status_at_freeze": "NOT_RUN",
+    "grid_first_page_local_seats": {
+      "participant": true,
+      "screen_share": false
+    },
+    "allow_dynamic_encoder_layer_downscale": true,
+    "require_fresh_publisher_layer_evidence": true,
+    "maximum_publisher_age_seconds": 3,
+    "maximum_source_aspect_relative_error": 0.02,
+    "required_source_backend": "wgc_window",
+    "required_source_scope": "owned_window_native_fixture",
+    "require_gpu_resource_evidence": true,
+    "gpu_required_scope": "measurement_steps",
+    "capture_counter_scope": "windows_x64",
+    "capture_counter_semantics": "converted_callback_delivery_count_and_video_source_api_count",
+    "capture_counter_invariant": "capture_frames_ge_captured_frames_gt_zero_independent_monotonic_progress"
+  }
+}
