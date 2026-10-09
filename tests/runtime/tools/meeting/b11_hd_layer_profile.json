@@ -1,0 +1,66 @@
+{
+  "schema": 1,
+  "scope": "B11_HD_LAYER_DIAGNOSTIC",
+  "build_configuration": "RelWithDebInfo",
+  "transport": "ssh",
+  "target_config": "out/b11-hd/target.json",
+  "source_identity_path": "out/b11-hd/source-identity.json",
+  "target": {
+    "instance": "ssh:192.0.2.10",
+    "service_url": "ws://192.0.2.10:17880",
+    "local_service_url": "http://127.0.0.1:17880",
+    "config_path": "/home/ubuntu/livekit.yml",
+    "sfu_container": "livekit",
+    "expected_vcpus": 16,
+    "expected_memory_gib": 64,
+    "minimum_public_egress_mbps": 20
+  },
+  "publishers": {
+    "hd": {
+      "kind": "load_test",
+      "count": 1,
+      "subscribers": 0,
+      "resolution": "high",
+      "codec": "vp8",
+      "duration": "15m",
+      "num_per_second": 1,
+      "simulcast": true,
+      "identity_prefix": "b11hd_RUN01"
+    },
+    "background": {
+      "kind": "load_test",
+      "count": 16,
+      "subscribers": 0,
+      "resolution": "low",
+      "codec": "vp8",
+      "duration": "15m",
+      "num_per_second": 5,
+      "simulcast": true,
+      "identity_prefix": "b11low_RUN01"
+    }
+  },
+  "probe": {
+    "steps": [
+      {"layout": "grid16", "seconds": 45},
+      {"layout": "pin_identity", "identity_role": "hd", "seconds": 60},
+      {"layout": "grid16", "seconds": 60}
+    ],
+    "settle_seconds": 35,
+    "stall_seconds": 20,
+    "maximum_wall_seconds": 340,
+    "minimum_remote_videos": 17,
+    "receiver_count": 1,
+    "receiver_arguments": ["--scale-100"]
+  },
+  "quality_contract": {
+    "low": {"width": 320, "height": 180, "source_fps": 15},
+    "medium": {"width": 640, "height": 360, "source_fps": 20},
+    "high": {"width": 1280, "height": 720, "source_fps": 30},
+    "receive_fps_status_at_freeze": "NOT_RUN",
+    "minimum_frame_rate_ratio": 0.90,
+    "maximum_frame_age_ms": 3000,
+    "maximum_sample_gap_seconds": 3,
+    "minimum_observation_seconds": 20,
+    "dimension_match_ratio": 1.0
+  }
+}

@@ -146,6 +146,10 @@ struct RenderPathProbe {
     quint64 page_size = 0;
     quint64 page_count = 0;
     QString selected_fingerprint;
+    QString layout_mode;
+    QString demand_reason;
+    QString focused_sid_hash;
+    QString pinned_sid_hash;
     QJsonArray selected_tracks;
     QJsonArray inbound_streams;
     quint64 stats_sample_seq = 0;
@@ -290,6 +294,10 @@ private:
             {"page_size", static_cast<double>(render.page_size)},
             {"page_count", static_cast<double>(render.page_count)},
             {"selected_fingerprint", render.selected_fingerprint},
+            {"layout_mode", render.layout_mode},
+            {"demand_reason", render.demand_reason},
+            {"focused_sid_hash", render.focused_sid_hash},
+            {"pinned_sid_hash", render.pinned_sid_hash},
             {"selected_tracks", render.selected_tracks},
             {"inbound_streams", render.inbound_streams},
             {"stats_sample_seq", static_cast<double>(render.stats_sample_seq)},

@@ -17,10 +17,19 @@ add_executable(test_session_credentials
     ${LIVEKIT_PROJECT_SOURCE_DIR}/src/ui/login_dialog.h
 )
 livekit_configure_qt_test(test_session_credentials)
-target_link_libraries(test_session_credentials PRIVATE cohavora_meeting_network)
+target_link_libraries(test_session_credentials PRIVATE cohavora_meeting_network cohavora_ui_translations)
 add_test(NAME session_credentials_test COMMAND test_session_credentials --debug)
 set_tests_properties(session_credentials_test PROPERTIES
     TIMEOUT 60 LABELS "CORE_REGRESSION")
+get_target_property(cohavora_has_embedded_translations
+    cohavora_ui_translations COHAVORA_HAS_EMBEDDED_TRANSLATIONS)
+if(cohavora_has_embedded_translations)
+    add_test(NAME login_layout_zh_test COMMAND test_session_credentials --debug --login-layout-only)
+    set_tests_properties(login_layout_zh_test PROPERTIES TIMEOUT 30 LABELS "UI_CONTRACT_FOCUSED")
+    add_test(NAME login_layout_zh_hidpi_test COMMAND test_session_credentials --debug --login-layout-only)
+    set_tests_properties(login_layout_zh_hidpi_test PROPERTIES
+        TIMEOUT 30 LABELS "UI_CONTRACT_FOCUSED" ENVIRONMENT "QT_SCALE_FACTOR=2")
+endif()
 set_property(TEST session_credentials_test openmeeting_http_test openmeeting_http_watchdog_test
     http_owner_remediation_test APPEND PROPERTY LABELS "PR_SEC_002_FOCUSED")
 
@@ -36,6 +45,8 @@ if(TARGET cohavora_app)
     target_link_libraries(test_main_window_latency PRIVATE ${main_ui_links})
     target_compile_options(test_main_window_latency PRIVATE /utf-8)
     add_test(NAME main_window_latency_test COMMAND test_main_window_latency)
+    add_test(NAME main_window_login_handoff_test COMMAND test_main_window_latency --login-handoff-only)
+    set_tests_properties(main_window_login_handoff_test PROPERTIES TIMEOUT 30 LABELS "UI_CONTRACT_FOCUSED")
     add_test(NAME meeting_encryption_ui_test COMMAND test_main_window_latency --e2ee-only)
     set_tests_properties(meeting_encryption_ui_test PROPERTIES TIMEOUT 30 LABELS "UI_CONTRACT_FOCUSED")
     set_tests_properties(main_window_latency_test PROPERTIES TIMEOUT 30 LABELS "UI_CONTRACT_FOCUSED")
@@ -223,8 +234,6 @@ foreach(ui_theme_consumer IN ITEMS test_camera_owner_remediation
     target_link_libraries(${ui_theme_consumer} PRIVATE cohavora_ui_theme)
 endforeach()
 
-get_target_property(cohavora_has_embedded_translations
-    cohavora_ui_translations COHAVORA_HAS_EMBEDDED_TRANSLATIONS)
 if(cohavora_has_embedded_translations)
     add_executable(test_ui_presentation
         ${LIVEKIT_TEST_SOURCE_DIR}/ui/test_ui_presentation.cpp)

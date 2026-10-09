@@ -362,8 +362,6 @@ public:
     }
     static std::pair<quint64, quint64> soakSelectedNativeFrames(
             Room &room, const std::vector<TrackKey> &selected) {
-        const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
         const auto recent = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::seconds(3)).count();
         quint64 active = 0, fresh = 0;
@@ -374,20 +372,21 @@ public:
                 || !binding.telemetry_probe || !binding.telemetry_probe->active.load()) continue;
             ++active;
             const auto last = binding.telemetry_probe->last_frame_ns.load();
+            const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
             fresh += last > 0 && now >= last && now - last < recent;
         }
         return {active, fresh};
     }
     static QJsonArray soakSelectedTrackProbes(
             Room &room, const std::vector<TrackKey> &selected,
-            const RoomStatsReport *stats) {
+            const RoomStatsReport *stats,
+            const std::function<void()> &beforeFrameSample = {}) {
         const auto digest = [](const std::string &value) {
             return QString::fromLatin1(QCryptographicHash::hash(
                 QByteArray::fromStdString(value), QCryptographicHash::Sha256)
                     .toHex().left(16));
         };
-        const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
         QJsonArray result;
         for (const auto &key : selected) {
             std::shared_ptr<RemoteTrackPublication> publication;
@@ -396,6 +395,9 @@ public:
             bool intentPresent = false, intentSubscribed = false;
             bool subscriptionDirty = false, settingsDirty = false;
             bool sinkActive = false;
+            bool intentEnabled = false;
+            uint32_t intentWidth = 0, intentHeight = 0, intentMaxFps = 0;
+            QString intentQuality;
             quint64 intentPolicyRevision = 0;
             quint64 currentBindingSerial = 0, sinkBindingSerial = 0;
             quint64 sinkBindingCount = 0;
@@ -421,6 +423,16 @@ public:
                 if (const auto *intent = room.FindSubscriptionIntentLocked(intentKey)) {
                     intentPresent = true;
                     intentSubscribed = intent->subscribed;
+                    intentEnabled = intent->enabled;
+                    intentWidth = intent->width;
+                    intentHeight = intent->height;
+                    intentMaxFps = intent->max_fps;
+                    switch (intent->quality) {
+                    case proto::VideoQuality::LOW: intentQuality = "low"; break;
+                    case proto::VideoQuality::MEDIUM: intentQuality = "medium"; break;
+                    case proto::VideoQuality::HIGH: intentQuality = "high"; break;
+                    default: intentQuality = "unknown"; break;
+                    }
                     sentSubscribed = intent->sent_subscribed;
                     subscriptionDirty = intent->subscription_dirty;
                     settingsDirty = intent->settings_dirty;
@@ -447,10 +459,20 @@ public:
             }
             rtcTrackId = bindingRtcTrackId.empty()
                 ? publicationMediaTrackId : bindingRtcTrackId;
-            const auto lastFrame = sinkProbe ? sinkProbe->last_frame_ns.load() : 0;
+            const auto lastFrame = [&] {
+                if (beforeFrameSample) beforeFrameSample();
+                return sinkProbe ? sinkProbe->last_frame_ns.load() : 0;
+            }();
+            const auto lastOnFrame = sinkProbe ? sinkProbe->last_on_frame_ns.load() : 0;
+            // Read producer timestamps before the reference clock. The media
+            // worker can publish a newer frame during this snapshot; a clock
+            // sampled before the loop would misreport that fresh frame as -1.
+            const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count();
             const auto sinkAgeMs = lastFrame > 0 && now >= lastFrame
                 ? (now - lastFrame) / 1000000 : -1;
-            const auto lastOnFrame = sinkProbe ? sinkProbe->last_on_frame_ns.load() : 0;
+            const auto frameWidth = sinkProbe ? sinkProbe->width.load(std::memory_order_acquire) : 0;
+            const auto frameHeight = sinkProbe ? sinkProbe->height.load(std::memory_order_acquire) : 0;
             const auto onFrameAgeMs = lastOnFrame > 0 && now >= lastOnFrame
                 ? (now - lastOnFrame) / 1000000 : -1;
             quint64 bytes = 0, packets = 0, decoded = 0, received = 0;
@@ -484,6 +506,7 @@ public:
             }
             QJsonObject item{
                 {"sid_hash", digest(key.publication_sid)},
+                {"identity_hash", digest(key.participant.identity)},
                 {"intent_present", intentPresent},
                 {"intent_subscribed", intentSubscribed},
                 {"sent_subscribed", sentSubscribed
@@ -491,6 +514,13 @@ public:
                 {"subscription_dirty", subscriptionDirty},
                 {"settings_dirty", settingsDirty},
                 {"intent_policy_revision", static_cast<double>(intentPolicyRevision)},
+                // These are accepted local intent values, not an acknowledgement
+                // of which simulcast encoding the SFU is currently forwarding.
+                {"desired_enabled", intentPresent ? QJsonValue(intentEnabled) : QJsonValue(QJsonValue::Null)},
+                {"desired_width", intentPresent ? QJsonValue(static_cast<double>(intentWidth)) : QJsonValue(QJsonValue::Null)},
+                {"desired_height", intentPresent ? QJsonValue(static_cast<double>(intentHeight)) : QJsonValue(QJsonValue::Null)},
+                {"desired_quality", intentPresent ? QJsonValue(intentQuality) : QJsonValue(QJsonValue::Null)},
+                {"desired_max_fps", intentPresent ? QJsonValue(static_cast<double>(intentMaxFps)) : QJsonValue(QJsonValue::Null)},
                 {"current_binding_serial", static_cast<double>(currentBindingSerial)},
                 {"sink_binding_serial", static_cast<double>(sinkBindingSerial)},
                 {"sink_binding_count", static_cast<double>(sinkBindingCount)},
@@ -511,6 +541,9 @@ public:
                     ? QString{} : digest(publicationMediaTrackId)},
                 {"sink_active", sinkActive},
                 {"sink_frame_age_ms", static_cast<double>(sinkAgeMs)},
+                {"sink_frame_width", static_cast<double>(frameWidth)},
+                {"sink_frame_height", static_cast<double>(frameHeight)},
+                {"sink_frame_dimensions_available", sinkActive && lastFrame > 0 && frameWidth > 0 && frameHeight > 0},
                 {"stats_match_count", static_cast<double>(matches)},
                 {"stats_stream_hash", matches
                     ? QString::fromLatin1(statsIds.result().toHex().left(16)) : QString{}},
@@ -530,7 +563,8 @@ public:
         return result;
     }
     static QJsonObject soakInboundBindingProbe(
-            Room &room, const std::string &trackIdentifier) {
+            Room &room, const std::string &trackIdentifier,
+            const std::function<void()> &beforeFrameSample = {}) {
         const auto digest = [](const std::string &value) {
             return value.empty() ? QString{} : QString::fromLatin1(
                 QCryptographicHash::hash(QByteArray::fromStdString(value),
@@ -566,11 +600,16 @@ public:
                 }
             }
         }
+        const auto lastFrame = [&] {
+            if (beforeFrameSample) beforeFrameSample();
+            return sinkProbe ? sinkProbe->last_frame_ns.load() : 0;
+        }();
         const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
-        const auto lastFrame = sinkProbe ? sinkProbe->last_frame_ns.load() : 0;
         const auto frameAgeMs = lastFrame > 0 && now >= lastFrame
             ? (now - lastFrame) / 1000000 : -1;
+        const auto frameWidth = sinkProbe ? sinkProbe->width.load(std::memory_order_acquire) : 0;
+        const auto frameHeight = sinkProbe ? sinkProbe->height.load(std::memory_order_acquire) : 0;
         return {
             {"mapped_sid_hash", digest(mappedSid)},
             {"mapped_binding_serial", static_cast<double>(bindingSerial)},
@@ -582,6 +621,9 @@ public:
             {"mapped_sink_delivered_frame_count", static_cast<double>(sinkProbe
                 ? sinkProbe->delivered_frame_count.load() : 0)},
             {"mapped_sink_frame_age_ms", static_cast<double>(frameAgeMs)},
+            {"mapped_sink_frame_width", static_cast<double>(frameWidth)},
+            {"mapped_sink_frame_height", static_cast<double>(frameHeight)},
+            {"mapped_sink_frame_dimensions_available", sinkActive && lastFrame > 0 && frameWidth > 0 && frameHeight > 0},
         };
     }
 };
@@ -1576,6 +1618,53 @@ public:
         return window._videoCanvas ? window._videoCanvas->backendName().toLower()
                                    : QStringLiteral("unknown");
     }
+    static QString soakSidHash(const std::string &sid) {
+        return sid.empty() ? QString{} : QString::fromLatin1(QCryptographicHash::hash(
+            QByteArray::fromStdString(sid), QCryptographicHash::Sha256).toHex().left(16));
+    }
+    static QString soakQualityName(livekit::VideoQualityTier quality) {
+        switch (quality) {
+        case livekit::VideoQualityTier::None: return "none";
+        case livekit::VideoQualityTier::P180: return "p180";
+        case livekit::VideoQualityTier::P360: return "p360";
+        case livekit::VideoQualityTier::P720: return "p720";
+        case livekit::VideoQualityTier::P1080: return "p1080";
+        case livekit::VideoQualityTier::P1440: return "p1440";
+        case livekit::VideoQualityTier::P2160: return "p2160";
+        }
+        return "unknown";
+    }
+    static QJsonObject soakTrackViewportProbe(
+            const MeetingUI::MeetingRoomWindow &window, const livekit::TrackKey &key) {
+        const auto &plan = window._acceptedVideoPlan;
+        QJsonObject result{{"focused", plan.focused == key}};
+        const auto seat = std::find_if(plan.visible_seats.begin(), plan.visible_seats.end(),
+            [&key](const auto &item) { return item.key == key; });
+        result.insert("seat_present", seat != plan.visible_seats.end());
+        if (seat != plan.visible_seats.end()) {
+            QString role;
+            switch (seat->role) {
+            case livekit::VideoSeatRole::Grid: role = "grid"; break;
+            case livekit::VideoSeatRole::Main: role = "main"; break;
+            case livekit::VideoSeatRole::Sidebar: role = "sidebar"; break;
+            case livekit::VideoSeatRole::PictureInPicture: role = "picture_in_picture"; break;
+            }
+            result.insert("seat_role", role);
+            result.insert("seat_quality", soakQualityName(seat->quality));
+            result.insert("seat_width", static_cast<double>(seat->width));
+            result.insert("seat_height", static_cast<double>(seat->height));
+        }
+        livekit::render::VideoFrameGeometry geometry;
+        if (window._videoCanvas) {
+            if (const auto *tile = window.remoteVideoTile(key))
+                geometry = window._videoCanvas->frameGeometry(tile->renderKey().toStdString());
+        }
+        result.insert("render_frame_dimensions_available", geometry.available);
+        result.insert("render_frame_width", geometry.width);
+        result.insert("render_frame_height", geometry.height);
+        result.insert("render_frame_rotation", static_cast<int>(geometry.rotation));
+        return result;
+    }
     static meeting_soak::RenderPathProbe soakRenderPath(
             const MeetingUI::MeetingRoomWindow &window) {
         meeting_soak::RenderPathProbe result;
@@ -1583,6 +1672,25 @@ public:
         result.page = plan.page;
         result.page_size = plan.page_size;
         result.page_count = plan.page_count;
+        switch (plan.mode) {
+        case livekit::VideoLayoutMode::Auto: result.layout_mode = "auto"; break;
+        case livekit::VideoLayoutMode::Grid: result.layout_mode = "grid"; break;
+        case livekit::VideoLayoutMode::Speaker: result.layout_mode = "speaker"; break;
+        case livekit::VideoLayoutMode::PictureInPicture: result.layout_mode = "picture_in_picture"; break;
+        }
+        switch (plan.reason) {
+        case livekit::VideoDemandReason::Visible: result.demand_reason = "visible"; break;
+        case livekit::VideoDemandReason::Pinned: result.demand_reason = "pinned"; break;
+        case livekit::VideoDemandReason::ActiveSpeaker: result.demand_reason = "active_speaker"; break;
+        case livekit::VideoDemandReason::ScreenShare: result.demand_reason = "screen_share"; break;
+        case livekit::VideoDemandReason::Hidden: result.demand_reason = "hidden"; break;
+        case livekit::VideoDemandReason::Whiteboard: result.demand_reason = "whiteboard"; break;
+        case livekit::VideoDemandReason::PermissionDenied: result.demand_reason = "permission_denied"; break;
+        case livekit::VideoDemandReason::Muted: result.demand_reason = "muted"; break;
+        }
+        result.focused_sid_hash = plan.focused ? soakSidHash(plan.focused->publication_sid) : QString{};
+        result.pinned_sid_hash = window._pinnedTrackKey
+            ? soakSidHash(window._pinnedTrackKey->publication_sid) : QString{};
         QCryptographicHash selectedHash(QCryptographicHash::Sha256);
         for (const auto &key : plan.selected_video) {
             selectedHash.addData(QByteArray::fromStdString(key.publication_sid));
@@ -1638,17 +1746,33 @@ public:
             window.scheduleViewportIntent(true);
             return [&window, page] { return window._acceptedVideoPlan.page == page; };
         }
-        if (action == "pin") {
+        if (action == "pin" || action.startsWith("pin_identity:")
+            || action.startsWith("pin_sid_hash:")) {
+            std::optional<livekit::TrackKey> target;
+            const bool byIdentity = action.startsWith("pin_identity:");
+            const bool bySidHash = action.startsWith("pin_sid_hash:");
+            const auto selector = byIdentity ? action.mid(13)
+                : bySidHash ? action.mid(13) : QString{};
+            if ((byIdentity || bySidHash) && selector.isEmpty()) return {};
+            if (bySidHash && !QRegularExpression("^[0-9a-f]{16}$").match(selector).hasMatch()) return {};
             for (const auto &key : window._acceptedVideoPlan.selected_video) {
+                if (byIdentity && QString::fromStdString(key.participant.identity) != selector) continue;
+                if (bySidHash && soakSidHash(key.publication_sid) != selector) continue;
                 auto *tile = window.remoteVideoTile(key);
                 if (!tile) continue;
-                window.setPinnedTile(tile->renderKey(), true);
-                return [&window, key] {
-                    return window._acceptedVideoPlan.focused == key
-                        && window._acceptedVideoPlan.reason == livekit::VideoDemandReason::Pinned;
-                };
+                // A specific selector must identify exactly one currently
+                // visible publication; do not silently pin another source.
+                if (target) return {};
+                target = key;
+                if (action == "pin") break;
             }
-            return {};
+            if (!target) return {};
+            window.setPinnedTile(window.remoteVideoTile(*target)->renderKey(), true);
+            return [&window, key = *target] {
+                return window._pinnedTrackKey == key
+                    && window._acceptedVideoPlan.focused == key
+                    && window._acceptedVideoPlan.reason == livekit::VideoDemandReason::Pinned;
+            };
         }
         if (action == "unpin") {
             if (!window._pinnedRenderKey.isEmpty())
@@ -2714,12 +2838,21 @@ public:
     bool remote() const override { return true; }
     bool is_screencast() const override { return false; }
     std::optional<bool> needs_denoising() const override { return false; }
-    void push(uint8_t luminance, int64_t timestamp) {
+    void push(uint8_t luminance, int64_t timestamp, int width = 4, int height = 4) {
         TEST_CHECK(QThread::currentThread() == QCoreApplication::instance()->thread());
-        auto buffer = webrtc::I420Buffer::Create(4, 4);
-        std::memset(buffer->MutableDataY(), luminance, buffer->StrideY() * 4);
-        std::memset(buffer->MutableDataU(), 128, buffer->StrideU() * 2);
-        std::memset(buffer->MutableDataV(), 128, buffer->StrideV() * 2);
+        pushFrame(luminance, timestamp, width, height);
+    }
+    void pushForConcurrentProbe(uint8_t luminance, int64_t timestamp, int width, int height) {
+        TEST_CHECK(QThread::currentThread() != QCoreApplication::instance()->thread());
+        pushFrame(luminance, timestamp, width, height);
+    }
+private:
+    void pushFrame(uint8_t luminance, int64_t timestamp, int width, int height) {
+        TEST_CHECK(width > 0 && height > 0);
+        auto buffer = webrtc::I420Buffer::Create(width, height);
+        std::memset(buffer->MutableDataY(), luminance, buffer->StrideY() * height);
+        std::memset(buffer->MutableDataU(), 128, buffer->StrideU() * ((height + 1) / 2));
+        std::memset(buffer->MutableDataV(), 128, buffer->StrideV() * ((height + 1) / 2));
         OnFrame(webrtc::VideoFrame::Builder().set_video_frame_buffer(buffer).set_timestamp_us(timestamp).build());
     }
 };
@@ -7739,6 +7872,123 @@ void DepartureNoticeLifetime() {
     std::cout << "DEPARTURE_NOTICE PASS: server Logout, duplicate identity, leave-before-ack, standalone HWND, mouse input, parent deletion, deduplication, encryption preflight error\n";
 }
 
+void MeetingSoakEvidenceSelfTest() {
+    WindowFixture fixture;
+    fixture.room->UpdateParticipantsForTesting(LargeWindowRoster(16));
+    std::vector<WindowMedia> media;
+    for (int index = 0; index != 16; ++index) {
+        const auto suffix = std::to_string(index);
+        media.push_back(fixture.attachExisting("soak-evidence-rtc-" + suffix, false,
+            "TR_PHASE_D_" + suffix, "PA_PHASE_D_" + suffix));
+    }
+    fixture.open();
+    fixture.pump();
+    const auto grid = ParticipantWindowTestAccess::soakViewport(*fixture.window, "grid16");
+    TEST_CHECK(grid);
+    fixture.pump();
+    TEST_CHECK(grid());
+    const auto selected = ParticipantWindowTestAccess::acceptedVideoPlan(*fixture.window).selected_video;
+    TEST_CHECK(selected.size() == 16);
+    const auto target = selected.at(1); // The explicit selector must not pin the first tile.
+    const auto sidHash = ParticipantWindowTestAccess::soakSidHash(target.publication_sid);
+    const auto targetIndex = std::stoi(target.publication_sid.substr(std::string("TR_PHASE_D_").size()));
+    const auto readTarget = [&] {
+        const auto probes = livekit::ParticipantSnapshotRoomTestAccess::soakSelectedTrackProbes(
+            *fixture.room, ParticipantWindowTestAccess::acceptedVideoPlan(*fixture.window).selected_video, nullptr);
+        for (const auto &value : probes) {
+            const auto item = value.toObject();
+            if (item.value("sid_hash").toString() == sidHash) return item;
+        }
+        TEST_CHECK(false);
+        return QJsonObject{};
+    };
+    TEST_CHECK(!readTarget().value("sink_frame_dimensions_available").toBool());
+    TEST_CHECK(readTarget().value("sink_frame_age_ms").toInt() == -1);
+    TEST_CHECK(!ParticipantWindowTestAccess::soakViewport(*fixture.window, "pin_identity:"));
+    TEST_CHECK(!ParticipantWindowTestAccess::soakViewport(*fixture.window, "pin_identity:absent-source"));
+    TEST_CHECK(!ParticipantWindowTestAccess::soakViewport(*fixture.window, "pin_sid_hash:bad-hash"));
+    const auto pin = ParticipantWindowTestAccess::soakViewport(*fixture.window,
+        "pin_identity:" + QString::fromStdString(target.participant.identity));
+    TEST_CHECK(pin);
+    fixture.pump();
+    TEST_CHECK(pin());
+    auto layout = ParticipantWindowTestAccess::soakRenderPath(*fixture.window);
+    TEST_CHECK(layout.layout_mode == "speaker" && layout.demand_reason == "pinned");
+    TEST_CHECK(layout.focused_sid_hash == sidHash && layout.pinned_sid_hash == sidHash);
+    const auto viewport = ParticipantWindowTestAccess::soakTrackViewportProbe(*fixture.window, target);
+    TEST_CHECK(viewport.value("focused").toBool() && viewport.value("seat_role").toString() == "main");
+    media.at(static_cast<std::size_t>(targetIndex)).source->push(110, 1000, 1280, 720);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    auto probe = readTarget();
+    TEST_CHECK(probe.value("sink_frame_dimensions_available").toBool());
+    TEST_CHECK(probe.value("sink_frame_width").toInt() == 1280 && probe.value("sink_frame_height").toInt() == 720);
+    TEST_CHECK(probe.value("identity_hash").toString() == ParticipantWindowTestAccess::soakSidHash(target.participant.identity));
+    TEST_CHECK(probe.value("intent_present").toBool() && probe.value("desired_enabled").isBool());
+    TEST_CHECK(probe.value("desired_quality").toString() == "high");
+    const auto mapped = livekit::ParticipantSnapshotRoomTestAccess::soakInboundBindingProbe(
+        *fixture.room, "soak-evidence-rtc-" + std::to_string(targetIndex));
+    TEST_CHECK(mapped.value("mapped_sid_hash").toString() == sidHash);
+    TEST_CHECK(mapped.value("mapped_sink_frame_dimensions_available").toBool());
+    TEST_CHECK(mapped.value("mapped_sink_frame_width").toInt() == 1280 && mapped.value("mapped_sink_frame_height").toInt() == 720);
+    const auto unpin = ParticipantWindowTestAccess::soakViewport(*fixture.window, "unpin");
+    TEST_CHECK(unpin);
+    fixture.pump();
+    TEST_CHECK(unpin());
+    layout = ParticipantWindowTestAccess::soakRenderPath(*fixture.window);
+    TEST_CHECK(layout.layout_mode == "grid" && layout.pinned_sid_hash.isEmpty());
+    media.at(static_cast<std::size_t>(targetIndex)).source->push(90, 2000, 320, 180);
+    ParticipantWindowTestAccess::render(*fixture.window);
+    probe = readTarget();
+    TEST_CHECK(probe.value("sink_frame_width").toInt() == 320 && probe.value("sink_frame_height").toInt() == 180);
+    const auto pinByHash = ParticipantWindowTestAccess::soakViewport(*fixture.window, "pin_sid_hash:" + sidHash);
+    TEST_CHECK(pinByHash);
+    fixture.pump();
+    TEST_CHECK(pinByHash());
+    int64_t concurrentTimestamp = 3000;
+    const auto sampleWithProducer = [&](const auto &sample) {
+        std::promise<void> begin, completed;
+        auto beginFrame = begin.get_future();
+        auto frameCompleted = completed.get_future();
+        std::thread producer([&] {
+            beginFrame.wait();
+            media.at(static_cast<std::size_t>(targetIndex)).source->pushForConcurrentProbe(
+                100, concurrentTimestamp, 1280, 720);
+            completed.set_value();
+        });
+        // Release a real NativeVideoTrackSink callback immediately before the
+        // timestamp load. This deterministically fails if the reference clock
+        // is sampled first; it does not fabricate probe timestamps or relax age.
+        const auto result = sample([&] {
+            begin.set_value();
+            TEST_CHECK(frameCompleted.wait_for(std::chrono::seconds(3)) == std::future_status::ready);
+        });
+        producer.join();
+        concurrentTimestamp += 1000;
+        return result;
+    };
+    const auto framesBeforeConcurrent = readTarget().value("sink_delivered_frame_count").toDouble();
+    const auto concurrentSelected = sampleWithProducer([&](const auto &beforeRead) {
+        return livekit::ParticipantSnapshotRoomTestAccess::soakSelectedTrackProbes(
+            *fixture.room, {target}, nullptr, beforeRead).at(0).toObject();
+    });
+    TEST_CHECK(concurrentSelected.value("sink_delivered_frame_count").toDouble() == framesBeforeConcurrent + 1);
+    TEST_CHECK(concurrentSelected.value("sink_frame_age_ms").toInt() >= 0 &&
+        concurrentSelected.value("sink_frame_age_ms").toInt() <= 3000);
+    TEST_CHECK(concurrentSelected.value("sink_on_frame_age_ms").toInt() >= 0 &&
+        concurrentSelected.value("sink_on_frame_age_ms").toInt() <= 3000);
+    const auto concurrentInbound = sampleWithProducer([&](const auto &beforeRead) {
+        return livekit::ParticipantSnapshotRoomTestAccess::soakInboundBindingProbe(
+            *fixture.room, "soak-evidence-rtc-" + std::to_string(targetIndex), beforeRead);
+    });
+    TEST_CHECK(concurrentInbound.value("mapped_sink_delivered_frame_count").toDouble() == framesBeforeConcurrent + 2);
+    TEST_CHECK(concurrentInbound.value("mapped_sink_frame_age_ms").toInt() >= 0 &&
+        concurrentInbound.value("mapped_sink_frame_age_ms").toInt() <= 3000);
+    const auto [active, fresh] = livekit::ParticipantSnapshotRoomTestAccess::soakSelectedNativeFrames(
+        *fixture.room, {target});
+    TEST_CHECK(active == 1 && fresh == 1);
+    std::cout << "MEETING_SOAK_EVIDENCE PASS: exact identity/SID pin, accepted intent, native memory-frame dimensions 720p/180p, concurrent callback freshness\n";
+}
+
 int RunMeetingSoak(QApplication &application) {
     const auto index = application.arguments().indexOf("--soak-directory");
     if (index < 0 || index + 1 >= application.arguments().size()) return 3;
@@ -7830,6 +8080,12 @@ int RunMeetingSoak(QApplication &application) {
                     streamProbe.insert("lost", static_cast<double>(stream.packets_lost));
                     streamProbe.insert("decoded", static_cast<double>(stream.frames_decoded));
                     streamProbe.insert("received", static_cast<double>(stream.frames_received));
+                    streamProbe.insert("frame_width", static_cast<double>(stream.frame_width));
+                    streamProbe.insert("frame_height", static_cast<double>(stream.frame_height));
+                    streamProbe.insert("frames_per_second", stream.frames_per_second);
+                    streamProbe.insert("frame_width_available", stream.frame_width_available);
+                    streamProbe.insert("frame_height_available", stream.frame_height_available);
+                    streamProbe.insert("frames_per_second_available", stream.frames_per_second_available);
                     streamProbe.insert("bytes_available", stream.bytes_received_available);
                     streamProbe.insert("packets_available", stream.packets_received_available);
                     streamProbe.insert("lost_available", stream.packets_lost_available);
@@ -7842,6 +8098,15 @@ int RunMeetingSoak(QApplication &application) {
                 livekit::ParticipantSnapshotRoomTestAccess::soakSelectedTrackProbes(
                     *room, ParticipantWindowTestAccess::acceptedVideoPlan(*window).selected_video,
                     statsAvailable ? &stats : nullptr);
+            const auto &selected = ParticipantWindowTestAccess::acceptedVideoPlan(*window).selected_video;
+            for (int index = 0; index < result.selected_tracks.size(); ++index) {
+                auto item = result.selected_tracks[index].toObject();
+                const auto viewport = ParticipantWindowTestAccess::soakTrackViewportProbe(
+                    *window, selected.at(static_cast<std::size_t>(index)));
+                for (auto field = viewport.begin(); field != viewport.end(); ++field)
+                    item.insert(field.key(), field.value());
+                result.selected_tracks[index] = item;
+            }
             const auto [active, recent] =
                 livekit::ParticipantSnapshotRoomTestAccess::soakSelectedNativeFrames(
                     *room, ParticipantWindowTestAccess::acceptedVideoPlan(*window).selected_video);
@@ -8106,6 +8371,8 @@ int WindowAcceptanceMain(int argc, char **argv) {
     } else if (application.arguments().contains("--meeting-soak-protocol-selftest")) {
         TEST_CHECK(meeting_soak::ProtocolSelfTest());
         std::cout << "MEETING_SOAK_PROTOCOL PASS: atomic status, run isolation, ordered commands, event-loop heartbeat\n";
+    } else if (application.arguments().contains("--meeting-soak-evidence-selftest")) {
+        MeetingSoakEvidenceSelfTest();
     } else if (application.arguments().contains("--meeting-soak")) {
         result = RunMeetingSoak(application);
     } else if (application.arguments().contains("--moderation-contract")) {

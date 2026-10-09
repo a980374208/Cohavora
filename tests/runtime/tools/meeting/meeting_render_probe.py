@@ -3,14 +3,18 @@ from __future__ import annotations
 
 import argparse
 import csv
+import ctypes
+import math
 import os
 from pathlib import Path
 import re
+import statistics
 import subprocess
 import time
 import uuid
 
 import meeting_soak as soak
+import b11_input_freeze as b11_freeze
 
 
 EXTRA_FIELDS = (
@@ -20,7 +24,12 @@ EXTRA_FIELDS = (
     "stats_sample_seq", "stats_age_ms", "stats_video_streams",
     "stats_track_ids_available",
 )
-FIELDS = ("elapsed_s", "step", *soak.METRIC_FIELDS[5:], *EXTRA_FIELDS,
+RESOURCE_FIELDS = ("resource_pid", "resource_sample_seq", "resource_status",
+    "resource_reason", "cpu_time_seconds", "cpu_percent_of_one_core",
+    "cpu_percent_of_host", "cpu_sample_interval_seconds", "logical_processor_count")
+RESOURCE_COUNTER_FIELDS = ("private_bytes", "working_set_bytes", "handles",
+    "cpu_time_seconds", "cpu_percent_of_one_core", "cpu_percent_of_host")
+FIELDS = ("elapsed_s", "step", *soak.METRIC_FIELDS[5:], *EXTRA_FIELDS, *RESOURCE_FIELDS,
           "selected_fingerprint")
 REMOTE_VIDEOS = 17
 CYCLES = 2
@@ -38,6 +47,97 @@ TRACK_COUNT_FIELDS = ("intent_policy_revision", "current_binding_serial",
     "sink_binding_serial", "sink_binding_count", "sink_on_frame_count",
     "sink_delivered_frame_count", "stats_match_count", "stats_bytes",
     "stats_packets", "stats_decoded", "stats_received")
+
+
+class ClientResourceSampler(soak.ProcessMetrics):
+    """Sample the launched observer's pinned handle; CPU uses monotonic intervals."""
+    def __init__(self, pid):
+        super().__init__(pid)
+        self.sequence = 0
+        self.previous_cpu = self.previous_monotonic = None
+        self.logical_processor_count = os.cpu_count()
+        if os.name == "nt" and self.handle:
+            from ctypes import wintypes as w
+            self.kernel.GetProcessTimes.argtypes = [w.HANDLE] + [ctypes.POINTER(w.FILETIME)] * 4
+            self.kernel.GetProcessTimes.restype = w.BOOL
+            # Include every processor group on hosts with more than 64 logical CPUs.
+            self.kernel.GetActiveProcessorCount.argtypes = [w.WORD]
+            self.kernel.GetActiveProcessorCount.restype = w.DWORD
+            self.logical_processor_count = self.kernel.GetActiveProcessorCount(0xffff) or None
+
+    def _cpu_seconds(self):
+        if not self.handle:
+            return None
+        from ctypes import wintypes as w
+        times = [w.FILETIME() for _ in range(4)]
+        if not self.kernel.GetProcessTimes(self.handle, *(ctypes.byref(value) for value in times)):
+            return None
+        ticks = sum((value.dwHighDateTime << 32) | value.dwLowDateTime for value in times[2:])
+        return ticks / 10_000_000
+
+    def sample(self, now=None):
+        self.sequence += 1
+        now = time.monotonic() if now is None else now
+        values = super().sample()
+        try:
+            cpu_seconds = self._cpu_seconds()
+        except (OSError, AttributeError):
+            cpu_seconds = None
+        values.update(resource_pid=self.pid, resource_sample_seq=self.sequence,
+            resource_status="UNKNOWN", resource_reason="process_metrics_unavailable",
+            logical_processor_count=self.logical_processor_count,
+            cpu_time_seconds=cpu_seconds, cpu_percent_of_one_core=None,
+            cpu_percent_of_host=None, cpu_sample_interval_seconds=None)
+        baseline = self.previous_cpu is None
+        if cpu_seconds is not None and self.previous_cpu is not None and \
+                _resource_value_available(now) and \
+                now > self.previous_monotonic and cpu_seconds >= self.previous_cpu:
+            values["cpu_sample_interval_seconds"] = now - self.previous_monotonic
+            values["cpu_percent_of_one_core"] = (cpu_seconds - self.previous_cpu) / \
+                (now - self.previous_monotonic) * 100
+            if type(self.logical_processor_count) is int and self.logical_processor_count > 0:
+                values["cpu_percent_of_host"] = values["cpu_percent_of_one_core"] / \
+                    self.logical_processor_count
+        self.previous_cpu = cpu_seconds if _resource_value_available(now) else None
+        self.previous_monotonic = now if self.previous_cpu is not None else None
+        if all(_resource_value_available(values.get(name)) for name in RESOURCE_COUNTER_FIELDS):
+            values.update(resource_status="AVAILABLE", resource_reason="")
+        elif baseline and cpu_seconds is not None and all(
+                _resource_value_available(values.get(name)) for name in
+                ("private_bytes", "working_set_bytes", "handles")) and \
+                type(self.logical_processor_count) is int and self.logical_processor_count > 0:
+            values.update(resource_status="BASELINE", resource_reason="cpu_interval_not_yet_available")
+        return values
+
+
+def _resource_value_available(value):
+    return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+
+def client_resource_summary(samples):
+    """Collector coverage only; it never awards a resource/quality acceptance PASS."""
+    coverage = {}
+    for name in RESOURCE_COUNTER_FIELDS:
+        values = [row[name] for row in samples if _resource_value_available(row.get(name))]
+        coverage[name] = {"valid_samples": len(values), "peak": max(values, default=None),
+            "mean": statistics.fmean(values) if values else None}
+    incomplete = [row for row in samples if row.get("resource_status") != "AVAILABLE"]
+    # One CPU baseline is expected. A later read failure, including a new baseline,
+    # remains an evidence gap even when a subsequent sample recovers.
+    if samples and samples[0].get("resource_status") == "BASELINE":
+        incomplete = [row for row in incomplete if row is not samples[0]]
+    pid = samples[0].get("resource_pid") if samples else None
+    pid_consistent = type(pid) is int and pid > 0 and all(
+        row.get("resource_pid") == pid for row in samples)
+    complete = bool(samples) and pid_consistent and not incomplete and all(
+        values["valid_samples"] > 0 for values in coverage.values())
+    return {"status": "AVAILABLE" if complete else "UNKNOWN",
+        "quality_evidence_eligible": complete, "quality_acceptance_status": "NOT_EVALUATED",
+        "reason": "counters_collected" if complete else "client_resource_evidence_incomplete",
+        "pid": pid, "pid_consistent": pid_consistent,
+        "sample_count": len(samples), "unknown_samples": len(incomplete),
+        "cpu_measurement": "process_kernel_plus_user_delta_over_monotonic_interval",
+        "cpu_host_denominator": "all_active_logical_processors", "fields": coverage}
 
 
 def validate_track_probes(value: object) -> list[dict]:
@@ -167,8 +267,38 @@ def build_steps(grid16_transport=False, grid16_transition=False) -> list[dict]:
             for action, size, page in actions]
 
 
+def probe_profile(grid16_transport=False, grid16_transition=False) -> dict:
+    steps = build_steps(grid16_transport, grid16_transition)
+    return {"observe_seconds": None if grid16_transition else 300 if grid16_transport else OBSERVE_SECONDS,
+            **({"step_observation_seconds": [step["observe_seconds"] for step in steps]}
+               if grid16_transition else {}),
+            "stall_seconds": 20 if grid16_transport or grid16_transition else STALL_SECONDS,
+            "settle_seconds": SETTLE_SECONDS,
+            "maximum_wall_seconds": 520 if grid16_transition else 420 if grid16_transport else MAX_WALL_SECONDS,
+            "minimum_remote_videos": REMOTE_VIDEOS, "receiver_count": 1}
+
+
 def run(output: Path, executable: Path, grid16_transport=False,
-        grid16_transition=False) -> dict:
+        grid16_transition=False, *, input_manifest: Path | None = None,
+        profile: Path | None = None) -> dict:
+    if grid16_transport and grid16_transition:
+        raise ValueError("select_one_probe_mode")
+    if (input_manifest is None) != (profile is None):
+        raise ValueError("input_manifest_and_profile_required_together")
+    frozen_inputs = None
+    if input_manifest is not None:
+        if not os.environ.get("LIVEKIT_URL"):
+            raise ValueError("bound_service_environment_missing")
+        frozen_inputs = b11_freeze.verify_inputs(input_manifest, executable, profile,
+            require_remote=True, service_url=os.environ.get("LIVEKIT_URL"))
+        mode = "grid16_transition" if grid16_transition else "grid16_transport" if grid16_transport else "render"
+        if frozen_inputs["inputs"]["profile"]["probe_mode"] != mode:
+            raise ValueError("frozen_probe_mode_mismatch")
+        if frozen_inputs["inputs"]["profile"]["probe"] != probe_profile(grid16_transport, grid16_transition):
+            raise ValueError("frozen_probe_measurement_profile_mismatch")
+        binary_identity = frozen_inputs["inputs"]["binary_identity"]
+    else:
+        binary_identity = soak.verify_runtime_binary(executable)
     output = output.resolve()
     output.mkdir(parents=True, exist_ok=False)
     run_id = uuid.uuid4().hex
@@ -177,6 +307,15 @@ def run(output: Path, executable: Path, grid16_transport=False,
         "kind": "grid16_transition_probe" if grid16_transition else
             "grid16_transport_probe" if grid16_transport else "targeted_render_probe",
         "started_utc": soak.utc_now(), "binary_sha256": soak.sha256(executable),
+        "build_configuration": soak.BUILD_CONFIGURATION,
+        "binary_identity": binary_identity,
+        "input_freeze": None if frozen_inputs is None else {
+            "manifest_sha256": soak.sha256(input_manifest),
+            "profile_sha256": soak.sha256(profile),
+            "remote_target": frozen_inputs["remote_target"],
+            "binary_source_equivalence": frozen_inputs["binary_source_equivalence"]},
+        "acceptance_scope": "B11_PREFLIGHT_DIAGNOSTIC",
+        "formal_b11_status": "NOT_RUN",
         "source_inputs": soak.source_fingerprint(),
         "probe_sha256": soak.sha256(Path(__file__)),
     })
@@ -197,7 +336,9 @@ def run(output: Path, executable: Path, grid16_transport=False,
         "kind": "grid16_transition_probe" if grid16_transition else
             "grid16_transport_probe" if grid16_transport else "targeted_render_probe",
         "result": "INCONCLUSIVE", "status": "INCONCLUSIVE", "reason": "not_started",
+        "formal_b11_status": "NOT_RUN", "diagnostic_only": True, "release_eligible": False,
         "formal_soak_status": "NOT_RUN", "exit_code": None,
+        "client_resources": client_resource_summary([]),
         "planned_steps": len(steps), "completed_steps": 0, "step_results": []}
     if not soak.desktop_available():
         summary["reason"] = "interactive_desktop_unavailable"
@@ -205,6 +346,8 @@ def run(output: Path, executable: Path, grid16_transport=False,
         return summary
 
     process = None
+    process_metrics = None
+    resource_samples = []
     status = None
     start = time.monotonic()
     sequence = 0
@@ -286,6 +429,9 @@ def run(output: Path, executable: Path, grid16_transport=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
             event("process_started", pid=process.pid)
+            process_metrics = ClientResourceSampler(process.pid)
+            resource_samples.append(process_metrics.sample(time.monotonic()))
+            event("resource_sampler_started", **resource_samples[-1])
             while time.monotonic() - start < max_wall_seconds:
                 time.sleep(1)
                 now = time.monotonic()
@@ -311,6 +457,9 @@ def run(output: Path, executable: Path, grid16_transport=False,
                 except OSError:
                     continue
                 status = current
+                resources = process_metrics.sample(now)
+                resource_samples.append(resources)
+                status.update(resources)
                 label = "connect" if step_index < 0 else (f"{step_index + 1:02d}:"
                     f"{steps[step_index]['action']}:p{steps[step_index]['page']}")
                 writer.writerow({"elapsed_s": round(now - start, 3), "step": label,
@@ -400,6 +549,9 @@ def run(output: Path, executable: Path, grid16_transport=False,
                     summary["forced_termination"] = True
             if process:
                 summary["exit_code"] = process.returncode
+            if process_metrics:
+                process_metrics.close()
+            summary["client_resources"] = client_resource_summary(resource_samples)
             if status:
                 soak.atomic_json(output / "last-status.json", status)
             if step_index >= 0 and summary["result"] == "INCONCLUSIVE":
@@ -415,15 +567,21 @@ def run(output: Path, executable: Path, grid16_transport=False,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--grid16-transport", action="store_true")
-    parser.add_argument("--grid16-transition", action="store_true")
-    parser.add_argument("--executable", type=Path, default=soak.ROOT /
-        "out/build/windows-vs2026-dev/Debug/test_participant_window_remediation.exe")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--grid16-transport", action="store_true")
+    mode.add_argument("--grid16-transition", action="store_true")
+    parser.add_argument("--executable", type=Path, required=True)
+    parser.add_argument("--input-manifest", type=Path)
+    parser.add_argument("--profile", type=Path)
     args = parser.parse_args()
     if not args.executable.is_file() or not all(os.environ.get(name) for name in
             ("LIVEKIT_URL", "LIVEKIT_SOAK_TOKEN")):
         parser.error("existing executable and in-memory service credentials required")
-    result = run(args.output, args.executable.resolve(), args.grid16_transport,
-                 args.grid16_transition)
+    try:
+        result = run(args.output, args.executable.resolve(), args.grid16_transport,
+                     args.grid16_transition, input_manifest=args.input_manifest,
+                     profile=args.profile)
+    except (OSError, ValueError):
+        parser.error("RelWithDebInfo binary or frozen inputs did not verify; observer was not started")
     print(f"{result['result']}: {result['reason']}; evidence={args.output.resolve()}")
     raise SystemExit(1 if result["result"] == "INCONCLUSIVE" else 0)

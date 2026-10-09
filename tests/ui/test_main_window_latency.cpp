@@ -1,5 +1,6 @@
 #include "src/ui/meeting_main_window.h"
 #include "src/ui/meeting_detail_dialog.h"
+#include "src/ui/login_dialog.h"
 #include "src/core/meeting_catalog_controller.h"
 #include "src/ui/meeting_encryption_dialog.h"
 #include "src/ui/meeting_encryption_panel.h"
@@ -846,6 +847,83 @@ void TestEncryptionDialog(QApplication& app) {
     std::puts("E2EE_UI_INPUT_CONTRACT PASS");
 }
 
+void TestSessionInvalidationHandoff(QApplication& app) {
+    using namespace MeetingUI;
+    using namespace OpenMeeting;
+    auto& session = SessionManager::instance();
+    initializeServiceEndpointPolicy(true);
+    TEST_CHECK(session.setServerBaseUrl("http://127.0.0.1:9"));
+    for (const auto reason : {SessionInvalidationReason::TokenExpired,
+            SessionInvalidationReason::DuplicatedLogin}) {
+        for (const bool cancel : {false, true}) {
+            MeetingMainWindow window;
+            MeetingEntryEncryptionTestAccess::catalog(window, {});
+            session.loginAsGuest("Login handoff fixture", "public-handoff-fixture");
+            window.show();
+            int warnings = 0, logins = 0;
+            bool checkedLogin = false, completed = false;
+            QTimer driver;
+            driver.setInterval(0);
+            QObject::connect(&driver, &QTimer::timeout, &window, [&] {
+                auto* modal = app.activeModalWidget();
+                if (auto* warning = qobject_cast<QMessageBox*>(modal)) {
+                    TEST_CHECK(!window.isVisible() && !warning->parentWidget());
+                    ++warnings;
+                    TEST_CHECK(warnings == 1);
+                    warning->accept();
+                } else if (auto* login = dynamic_cast<LoginDialog*>(modal)) {
+                    TEST_CHECK(!window.isVisible() && !login->parentWidget());
+                    if (!checkedLogin) {
+                        checkedLogin = true;
+                        ++logins;
+                        // Duplicate queued notices must not open a second login.
+                        emit session.sessionInvalidated(reason);
+                        QCoreApplication::sendPostedEvents(&window, QEvent::MetaCall);
+                        TEST_CHECK(app.activeModalWidget() == login);
+                        return;
+                    }
+                    driver.stop();
+                    if (cancel) login->reject();
+                    else {
+                        auto* tabs = login->findChild<QTabWidget*>();
+                        tabs->setCurrentIndex(2);
+                        QKeyEvent enter(QEvent::KeyPress, Qt::Key_Return, Qt::NoModifier);
+                        QApplication::sendEvent(login, &enter);
+                        TEST_CHECK(session.isLoggedIn());
+                    }
+                    completed = true;
+                }
+            });
+            QTimer deadline;
+            deadline.setSingleShot(true);
+            QObject::connect(&deadline, &QTimer::timeout, &window, [] {
+                TEST_CHECK(false && "session invalidation login handoff timed out");
+            });
+            deadline.start(5000);
+            driver.start();
+            session.invalidateSession(reason);
+            QElapsedTimer elapsed;
+            elapsed.start();
+            while (!completed && elapsed.elapsed() < 5000)
+                app.processEvents(QEventLoop::AllEvents, 5);
+            deadline.stop();
+            TEST_CHECK(completed && warnings == 1 && logins == 1);
+            TEST_CHECK(window.isVisible() == !cancel);
+            TEST_CHECK(session.isLoggedIn() == !cancel);
+            TEST_CHECK(!app.activeModalWidget());
+            if (!cancel) {
+                // A notice queued for the old account cannot hide the new one.
+                emit session.sessionInvalidated(reason);
+                for (int i = 0; i != 4; ++i) app.processEvents();
+                TEST_CHECK(window.isVisible() && !app.activeModalWidget());
+            }
+            window.close();
+            session.logout(false);
+        }
+    }
+    std::puts("SESSION_INVALIDATION_LOGIN_HANDOFF PASS: hidden main, single login, success, cancel, stale notice");
+}
+
 void TestAccountMenuLifetime(QApplication& app) {
     // Reuse one real main window, as the same-process meeting lifecycle does.
     // This fixture is unsigned-in and never starts a Room, devices or services.
@@ -986,6 +1064,11 @@ int main(int argc, char **argv) {
     const auto styleMs = startup.nsecsElapsed() / 1e6;
     MeetingUI::AppTranslation::install(app, MeetingUI::AppTranslation::startupLocale(app.arguments()));
     MeetingUI::AppTheme::install(app);
+    if (app.arguments().contains("--login-handoff-only")) {
+        TestSessionInvalidationHandoff(app);
+        style::StopManager();
+        return 0;
+    }
     if (app.arguments().contains("--menu-lifetime-only")) {
         TestAccountMenuLifetime(app);
         style::StopManager();

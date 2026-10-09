@@ -2,6 +2,7 @@
 #include "src/net/service_endpoint_policy.h"
 #include "src/ui/login_dialog.h"
 #include "src/ui/app_theme.h"
+#include "src/ui/app_translation.h"
 #include "src/app/async_shutdown_guard.h"
 #include "tests/support/test_check.h"
 
@@ -1077,14 +1078,33 @@ void verifyLoginFormLayout(QApplication &app) {
     auto *settings = dialog.findChild<QPushButton *>(QStringLiteral("serverSettingsToggle"));
     auto *registrationUrl = dialog.findChild<QLineEdit *>(QStringLiteral("registrationServerBaseUrl"));
     TEST_CHECK(tabs && scroll && status && settings && registrationUrl);
+    int fitIndex = 0;
     const auto settleAndCheckFit = [&] {
         // Drain both the coalesced form fit and Qt's deferred scroll geometry.
         for (int i = 0; i < 5; ++i) QCoreApplication::processEvents();
+        TEST_CHECK(scroll->verticalScrollBarPolicy() == Qt::ScrollBarAsNeeded);
         auto *formLayout = scroll->widget()->layout();
         const auto available = dialog.screen()->availableGeometry().size() - QSize(32, 64);
+        const int fullWidth = scroll->maximumViewportSize().width();
         const int requiredHeight = formLayout->hasHeightForWidth()
-            ? formLayout->totalHeightForWidth(scroll->viewport()->width())
+            ? formLayout->totalHeightForWidth(fullWidth)
             : formLayout->totalSizeHint().height();
+        if (app.arguments().contains(QStringLiteral("--login-layout-only"))) {
+            auto *content = scroll->widget();
+            std::printf("LOGIN_FIT tab=%d dialog=%dx%d viewport=%dx%d full_width=%d "
+                "content=%dx%d preferred_hfw=%d full_hfw=%d current_hfw=%d v_range=%d available_h=%d\n",
+                tabs->currentIndex(), dialog.width(), dialog.height(),
+                scroll->viewport()->width(), scroll->viewport()->height(), fullWidth,
+                content->width(), content->height(), requiredHeight,
+                content->heightForWidth(fullWidth), content->heightForWidth(scroll->viewport()->width()),
+                scroll->verticalScrollBar()->maximum(), available.height());
+            std::fflush(stdout);
+            const auto screenshotDir = qEnvironmentVariable("LIVEKIT_LOGIN_LAYOUT_SCREENSHOTS");
+            if (!screenshotDir.isEmpty()) {
+                TEST_CHECK(QDir().mkpath(screenshotDir));
+                TEST_CHECK(dialog.grab().save(screenshotDir + QStringLiteral("/fit-%1.png").arg(++fitIndex)));
+            }
+        }
         if (requiredHeight <= available.height()
             && formLayout->totalMinimumSize().width() <= available.width()) {
             TEST_CHECK(scroll->verticalScrollBar()->maximum() == 0);
@@ -1098,8 +1118,43 @@ void verifyLoginFormLayout(QApplication &app) {
     dialog.show();
     settleAndCheckFit();
     settings->click();
+    settleAndCheckFit();
+    const auto accountSize = dialog.size();
+    const int accountScrollRange = scroll->verticalScrollBar()->maximum();
+    // A long translated or enlarged control on a hidden registration page
+    // must not make the account page grow or introduce a scroll bar.
+    auto *hiddenNotice = new QLabel(QStringLiteral("Hidden registration guidance"), tabs->widget(1));
+    hiddenNotice->setMinimumHeight(dialog.screen()->availableGeometry().height() * 2);
+    tabs->widget(1)->layout()->addWidget(hiddenNotice);
+    tabs->updateGeometry();
+    settings->click();
+    settings->click();
+    settleAndCheckFit();
+    TEST_CHECK(dialog.size() == accountSize);
+    TEST_CHECK(scroll->verticalScrollBar()->maximum() == accountScrollRange);
+    delete hiddenNotice;
+    tabs->updateGeometry();
     tabs->setCurrentIndex(1);
     settleAndCheckFit();
+    const auto registrationSize = dialog.size();
+    auto *formLayout = scroll->widget()->layout();
+    const int registrationRequiredHeight = formLayout->totalHeightForWidth(registrationSize.width());
+    if (registrationRequiredHeight <= registrationSize.height()) {
+        // Seed a real scrollbar, then refit at the existing target size. The
+        // recovery must not depend on a dialog resize event being emitted.
+        dialog.resize(registrationSize.width(), qMin(registrationSize.height() - 40, registrationRequiredHeight - 1));
+        for (int i = 0; i < 5; ++i) QCoreApplication::processEvents();
+        TEST_CHECK(scroll->verticalScrollBar()->maximum() > 0);
+        dialog.resize(registrationSize);
+        for (int i = 0; i < 5; ++i) QCoreApplication::processEvents();
+        const int narrowWidth = registrationSize.width() - scroll->verticalScrollBar()->sizeHint().width();
+        if (formLayout->totalHeightForWidth(narrowWidth) > registrationSize.height())
+            TEST_CHECK(scroll->verticalScrollBar()->maximum() > 0);
+        settings->click();
+        settings->click();
+        settleAndCheckFit();
+        TEST_CHECK(dialog.size() == registrationSize);
+    }
     const int registrationHeight = dialog.height();
     tabs->setCurrentIndex(2);
     settleAndCheckFit();
@@ -1109,18 +1164,39 @@ void verifyLoginFormLayout(QApplication &app) {
     dialog.findChild<QLineEdit *>(QStringLiteral("registerNickname"))->setText("Layout");
     dialog.findChild<QLineEdit *>(QStringLiteral("registerPassword"))->setText(kPassword);
     dialog.findChild<QLineEdit *>(QStringLiteral("registerConfirmPassword"))->setText(kPassword);
-    tabs->currentWidget()->findChild<QPushButton *>(QStringLiteral("primaryBtn"))->click();
-    f.server.received(1);
     const auto longError = QStringLiteral("A controlled registration failure with a longer translated explanation. ").repeated(4);
-    f.server.replyData(0, QJsonValue(QJsonValue::Null), 1001, longError);
-    waitFor([&] { return status->text() == longError; });
-    settleAndCheckFit();
-    TEST_CHECK(status->heightForWidth(status->width()) > status->fontMetrics().height());
-    settings->click();
-    settleAndCheckFit();
-    settings->click();
-    settleAndCheckFit();
+    const auto shortError = QStringLiteral("\u670d\u52a1\u5668\u8fde\u63a5\u4e2d\u65ad\uff0c\u8bf7\u68c0\u67e5 HTTPS \u670d\u52a1\u72b6\u6001\u3002");
+    for (const auto &error : {longError, shortError}) {
+        const auto requestIndex = f.server.requests.size();
+        tabs->currentWidget()->findChild<QPushButton *>(QStringLiteral("primaryBtn"))->click();
+        f.server.received(requestIndex + 1);
+        f.server.replyData(requestIndex, QJsonValue(QJsonValue::Null), 1001, error);
+        waitFor([&] { return status->text() == error; });
+        settleAndCheckFit();
+        if (error == longError)
+            TEST_CHECK(status->heightForWidth(status->width()) > status->fontMetrics().height());
+        settings->click();
+        settleAndCheckFit();
+        settings->click();
+        settleAndCheckFit();
+        tabs->setCurrentIndex(2);
+        settleAndCheckFit();
+        tabs->setCurrentIndex(1);
+        settleAndCheckFit();
+    }
 
+    if (app.arguments().contains(QStringLiteral("--login-layout-only"))) {
+        const auto screenshotDir = qEnvironmentVariable("LIVEKIT_LOGIN_LAYOUT_SCREENSHOTS");
+        if (!screenshotDir.isEmpty()) {
+            TEST_CHECK(QDir().mkpath(screenshotDir));
+            TEST_CHECK(dialog.grab().save(screenshotDir + QStringLiteral("/registration-error.png")));
+            tabs->setCurrentIndex(2);
+            settleAndCheckFit();
+            TEST_CHECK(dialog.grab().save(screenshotDir + QStringLiteral("/guest-error.png")));
+            tabs->setCurrentIndex(1);
+            settleAndCheckFit();
+        }
+    }
     // A genuinely constrained window must still expose the last input through
     // keyboard focus rather than hiding a scroll bar and clipping the form.
     dialog.resize(320, 240);
@@ -1153,7 +1229,7 @@ void verifyLoginFormLayout(QApplication &app) {
     TEST_CHECK(scroll->viewport()->rect().intersects(inputRect));
     TEST_CHECK(inputRect.top() >= 0 && inputRect.bottom() < scroll->viewport()->height());
     dialog.hide();
-    std::puts("LOGIN LAYOUT PASS: registration, settings, wrapped status, tab refit, small-window focus scrolling");
+    std::puts("LOGIN LAYOUT PASS: hidden-page isolation, registration, settings, wrapped status, tab refit, small-window focus scrolling");
 }
 
 void verifyRegistrationEndpointSelection() {
@@ -1470,11 +1546,19 @@ int main(int argc, char **argv) {
         TEST_CHECK(settingsAt(path)->contains("auth/protectedSessionV2"));
         return 0;
     }
+    QApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+    QApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
     QApplication app(argc, argv);
     OpenMeeting::initializeServiceEndpointPolicy(
         app.arguments().contains(QStringLiteral("--debug")));
     TEST_CHECK(OpenMeeting::isDebugHttpTransportEnabled());
     app.setQuitOnLastWindowClosed(false);
+    if (app.arguments().contains(QStringLiteral("--login-layout-only"))) {
+        MeetingUI::AppTranslation::install(app, MeetingUI::AppTranslation::startupLocale(app.arguments()));
+        TEST_CHECK(QCoreApplication::translate("MeetingUI", "Sign Up") == QStringLiteral("\u6ce8 \u518c"));
+        verifyLoginFormLayout(app);
+        return 0;
+    }
     verifySettingsMigration();
     verifyMeetingSecurityPreferenceMigration();
     verifyAudioPreferences();

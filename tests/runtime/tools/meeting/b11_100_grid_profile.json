@@ -1,0 +1,56 @@
+{
+  "schema": 1,
+  "scope": "B11_100_SOURCE_GRID16_DIAGNOSTIC",
+  "build_configuration": "RelWithDebInfo",
+  "transport": "ssh",
+  "target_config": "out/b11-grid100/target.json",
+  "source_identity_path": "out/b11-grid100/source-identity.json",
+  "target": {
+    "instance": "ssh:192.0.2.10",
+    "service_url": "ws://192.0.2.10:17880",
+    "local_service_url": "http://127.0.0.1:17880",
+    "config_path": "/home/ubuntu/livekit.yml",
+    "sfu_container": "livekit",
+    "expected_vcpus": 16,
+    "expected_memory_gib": 64,
+    "minimum_public_egress_mbps": 20
+  },
+  "publisher": {
+    "kind": "load_test",
+    "count": 100,
+    "subscribers": 0,
+    "resolution": "high",
+    "codec": "vp8",
+    "duration": "15m",
+    "num_per_second": 5,
+    "simulcast": true,
+    "identity_prefix": "b11grid100_RUN01"
+  },
+  "probe": {
+    "observe_seconds": 300,
+    "settle_seconds": 35,
+    "maximum_wall_seconds": 450,
+    "minimum_remote_videos": 100,
+    "receiver_count": 1,
+    "receiver_arguments": ["--scale-100"]
+  },
+  "quality_contract": {
+    "low": {"width": 320, "heights": [150, 180], "source_fps": 15},
+    "medium": {"width": 640, "heights": [360], "source_fps": 20},
+    "high": {"width": 1280, "heights": [720], "source_fps": 30},
+    "subscription_mode": "AUTOMATIC_GRID16",
+    "selected_count": 16,
+    "source_assignment_by_sequence": "UNKNOWN_CONCURRENT_PUBLISH_ORDER",
+    "receive_fps_status_at_freeze": "NOT_RUN",
+    "minimum_frame_rate_ratio": 0.90,
+    "maximum_frame_age_ms": 3000,
+    "maximum_sample_gap_seconds": 3,
+    "minimum_observation_seconds": 20,
+    "dimension_match_ratio": 1.0
+  },
+  "network_contract": {
+    "publisher_media_path": "TASK_NAMESPACE_DNAT_TO_HOST_LOCAL",
+    "path_gate_required": true,
+    "path_gate_evidence_path": "out/b11-grid100/private-media-path-gate.json"
+  }
+}

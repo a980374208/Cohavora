@@ -162,6 +162,7 @@ private:
 	void openQuickMeeting(std::unique_ptr<QObject> reservation, bool startScreenShare);
 	void onSessionInvalidated(OpenMeeting::SessionInvalidationReason reason);
 	void handleUserLogout();
+	void showLoginDialog();
 	void closeMeetingWindows();
 	void hideLogConsole();
 	void showBookingDialog();

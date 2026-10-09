@@ -3,13 +3,13 @@
 | 目录 | 内容 | 主要入口 |
 |---|---|---|
 | `product_acceptance/` | 产品验收、采集、证据校验、云端传输及独立诊断 | `invoke_product_external.ps1`、`verify_product_acceptance.py`、`run_b_acceptance_codec.py`、`invoke_tencent_pilot.ps1` |
-| `meeting/` | 会议长稳、渲染探针、fake peer、低带宽发布与资源采样 | `meeting_soak.py`、`meeting_render_probe.py` |
+| `meeting/` | 会议长稳、渲染探针、B11 输入冻结与 SSH 传输、高清层诊断、fake peer、低带宽发布与资源采样 | `meeting_soak.py`、`meeting_render_probe.py`、`b11_input_freeze.py`、`b11_remote.py`、`run-hd-layer-probe.ps1` |
 | `screen_capture/` | WGC 长稳、屏幕共享质量采集与分析 | `run_wgc_soak.py`、`invoke_screen_share_quality_probe.py` |
 | `desktop/` | 产品 UIA 监督、低频快照及 PowerShell worker | `product_uia_retest.py`、`uia_snapshot.py`、`e2ee_password_uia_worker.ps1` |
 | `media/` | 双端媒体矩阵、E2EE 互操作驱动与独立音源旁证 | `invoke_e2e_media_matrix.ps1`、`invoke_e2ee_interop.py`、`invoke_e2ee_product.py`、`microphone_input/probe_microphone_input.py` |
 | `diagnostics/` | 诊断场景统一参数入口、进程内 GPU 预算旁证与历史原生退出采样 | `invoke_diagnostic_probe.ps1`、`gpu_budget/`、`native_exit/` |
 
-入口继续支持按文件路径直接执行，CLI 参数和运行条件保持不变。使用仓库根目录作为工作目录，
+入口继续支持按文件路径直接执行。使用仓库根目录作为工作目录，
 具体命令与执行边界见 [runtime README](../README.md)、[UIA README](../../uia/README.md)
 和 [编排 README](../orchestration/README.md)。
 
@@ -27,6 +27,57 @@
 或省略 mixed。诊断与 self-test 的 L3 为 NOT_RUN；所有 standalone soak 均记录
 release_eligible=false、qualification_credit=0，不授予 B14 资格或正式放行信用。
 真实运行仅接受经 PE CodeView 校验的 RelWithDebInfo 二进制。
+
+`meeting/b11_input_freeze.py` 仅在本地冻结／验证 B11 grid16 的 profile、源码及
+RelWithDebInfo 渲染 harness 指纹，不调用 Workbench、不上传、不运行媒体测试。
+`freeze --output ... --executable ... --profile ...` 创建新 manifest，已有输出拒绝覆盖；
+`verify --manifest ... --executable ... --profile ...` 离线复核输入。
+默认 profile 为 `meeting/b11_grid16_preflight_profile.json`，固定 17 路原负载发布、
+1 个接收端及 300 秒观察。计划新增实例的 `instance`、`service_url`、
+`local_service_url` 三项均为 null；本地冻结记录 `status=FROZEN`、
+`remote_target=PENDING`、`binary_source_equivalence=UNKNOWN`、`runtime=NOT_RUN`。
+补齐实际目标后需使用新输出重新冻结。
+公共诊断入口的 render 现在必须显式 `-Binary`，原负载 grid16 另须 `-InputManifest` 和
+`-Profile`；真实执行前使用 `verify --require-remote --instance ... --service-url ...`
+拒绝未补齐或不匹配的目标。远端配置路径、管理 URL 和 SFU 容器通过
+`-RemoteConfigPath`、`-RemoteServiceUrl`、`-SfuContainer` 显式适配。
+SSH/Tencent 目标另外传入 render 专用 `-TargetConfig`；JSON 包含 `schema=1`、
+`transport="ssh"`、`host`、`port`、`user`、`key_path`、`known_hosts_path`。
+profile 根层的 `transport="ssh"` 与 `target_config` 绑定该配置并重新冻结。
+未声明 transport 的旧 profile 保持 Workbench 路径。`meeting/b11_remote.py`
+提供相同 target config 下的 exec/upload/download，保持 SSH host-key 校验；host 必须为 IP，
+私钥与 known_hosts 使用绝对路径，known_hosts 须位于本仓库。冻结通过本机 ssh-keygen
+记录公钥指纹，不保存或上传私钥内容。
+render 支持真实腾讯云 `ins-*` 或明确的 `ssh:<host>` 标识；其它场景仍只接受阿里云 `i-*`。
+SSH 认证失败或公网带宽未知时保留 `UNKNOWN/NOT_RUN`，不能记为资源或预检 `PASS`。
+历史 `-LowBandwidth` 保留独立诊断路径，可省略 manifest/profile，但仍须显式
+RelWithDebInfo 二进制，不代表 B11 原负载预检。
+使用命令见 [编排 README](../orchestration/README.md)。冻结和 grid16 预检均为诊断，
+源码与二进制等价关系仍为 `UNKNOWN`，不更新 B11 验收状态，也不授予正式 PASS。
+
+`meeting/b11_hd_input_freeze.py` 独立冻结 `B11_HD_LAYER_DIAGNOSTIC`，默认合同见
+`meeting/b11_hd_layer_profile.json`：1 路 high 三层源、16 路 low 背景，100% 接收端缩放，
+45／60／60 秒 grid16 → 精确 identity pin → grid16。官方 CLI 的九个内嵌 IVF 素材、
+CLI／配置／SFU image、SSH 身份和当前 RelWithDebInfo 工件均纳入输入；目标 neon 的
+真实帧尺寸应从 320×180 切至 1280×720，再回到 320×180。源 FPS 定义与接收 FPS 分开，
+请求 `desired_quality` 不能替代实际 sink／canvas 尺寸、RTP／解码进展。
+`meeting/run-hd-layer-probe.ps1 -Executable ... -InputManifest ... -Profile ... -Output ...`
+执行独立 SSH 诊断；`-Plan` 只校验冻结，无网络操作。output 与 prepared 必须为不重叠的新目录。
+客户端资源按实际 observer PID 采集私有内存、工作集、句柄及 CPU（单核百分比与整机百分比
+分列）；首个 CPU baseline 不计作完整区间，后续缺失保留 `UNKNOWN`。
+正常和异常结束均尝试停止本任务精确 PID／启动时间／argv 对应负载与采样器、删除短期凭据。
+诊断完成仍为 `formal_b11_status=NOT_RUN`、`release_eligible=false`，不证明 16 路同时高清或长稳。
+
+`meeting/b11_100_input_freeze.py`、`b11_100_remote_run.py` 和 `b11_100_grid_probe.py`
+组成独立的 100 源 grid16 诊断，模板为 `b11_100_grid_profile.json`。固定 100 路
+VP8 simulcast（最高 1280×720／30 FPS），一个 RelWithDebInfo 客户端固定 16 宫格，
+沿用自动订阅策略并观察 300 秒；网格实际接收低层或中层，逐 SID 冻结尺寸、绑定和
+请求质量，以真实帧及 RTP 增量判定。历史静止 stats 允许存在，不可见 current 流推进
+判 FAIL，未映射 RTP 推进保留 INCONCLUSIVE。官方低层允许 320×150／180，
+并发发布次序不能证明具体资产归属。
+100 源启动前必须通过单源私有媒体路径 gate；运行时在新任务 network namespace 内
+重新核验路径，namespace 内 RTC DNAT 将模拟发布媒体留在主机。共享 SFU 配置保持原值。
+每轮精确清理任务进程、namespace、veth 和临时凭据；此诊断不授予正式 B11 或长稳信用。
 
 `product_acceptance/run_product_first_cycle_media_log_diagnostic.ps1` 只编排一次
 产品启动和首周期媒体／日志对照，复用既有十路发布负载及远端退出清理。
