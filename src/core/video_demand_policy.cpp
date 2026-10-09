@@ -29,7 +29,9 @@ bool SameViewport(const ViewportIntent& left, const ViewportIntent& right) {
         left.stage_rect.height == right.stage_rect.height &&
         left.device_pixel_ratio == right.device_pixel_ratio &&
         left.window_visible == right.window_visible &&
-        left.minimized == right.minimized;
+        left.minimized == right.minimized &&
+        left.local_participant_present == right.local_participant_present &&
+        left.local_screen_share_present == right.local_screen_share_present;
 }
 
 bool SameSpeakerInput(const ActiveSpeakerInfo& left,
@@ -53,6 +55,45 @@ uint32_t CeilDiv(std::size_t count, uint32_t page_size) {
 
 bool Contains(const std::vector<TrackKey>& keys, const TrackKey& key) {
     return std::find(keys.begin(), keys.end(), key) != keys.end();
+}
+
+uint64_t LayerPixels(const PublishedVideoLayer& layer) {
+    return uint64_t(layer.width) * layer.height;
+}
+
+bool SmallerLayer(const PublishedVideoLayer& left,
+                  const PublishedVideoLayer& right) {
+    return std::tuple{LayerPixels(left), left.width, left.height, left.quality, left.rid} <
+        std::tuple{LayerPixels(right), right.width, right.height, right.quality, right.rid};
+}
+
+std::optional<PublishedVideoLayer> SelectPublishedLayer(
+    const std::vector<PublishedVideoLayer>& layers,
+    VideoSeatRole role, uint32_t width, uint32_t height) {
+    if (layers.size() == 1) return layers.front();
+    const uint32_t long_limit = role == VideoSeatRole::Main ? 3840 : 2560;
+    const uint32_t short_limit = role == VideoSeatRole::Main ? 2160 : 1440;
+    const PublishedVideoLayer* nearest = nullptr;
+    const PublishedVideoLayer* boundary = nullptr;
+    for (const auto& layer : layers) {
+        if (std::max(layer.width, layer.height) > long_limit ||
+            std::min(layer.width, layer.height) > short_limit) continue;
+        const bool main = role == VideoSeatRole::Main;
+        if (!boundary || (main ? SmallerLayer(*boundary, layer)
+                               : SmallerLayer(layer, *boundary))) {
+            boundary = &layer;
+        }
+        const bool fits = main
+            ? layer.width >= width && layer.height >= height
+            : layer.width <= width && layer.height <= height;
+        if (fits && (!nearest || (main ? SmallerLayer(layer, *nearest)
+                                       : SmallerLayer(*nearest, layer)))) {
+            nearest = &layer;
+        }
+    }
+    if (nearest) return *nearest;
+    if (boundary) return *boundary;
+    return std::nullopt;
 }
 
 } // namespace
@@ -118,6 +159,10 @@ bool VideoDemandPolicy::UpdateViewport(const ViewportIntent& intent,
 
     const uint32_t normalized_size = NormalizePageSize(
         intent.page_size, config_.default_grid_page_size);
+    const bool local_seats_changed = has_viewport_ &&
+        (intent.local_participant_present != viewport_.local_participant_present ||
+         intent.local_screen_share_present != viewport_.local_screen_share_present);
+    if (local_seats_changed) grid_page_.anchor.reset();
     if (!has_viewport_ || intent.mode != viewport_.mode ||
         intent.page != viewport_.page ||
         normalized_size != NormalizePageSize(
@@ -135,7 +180,7 @@ bool VideoDemandPolicy::UpdateViewport(const ViewportIntent& intent,
             sidebar_page_.anchor = intent.page_anchor;
             sidebar_page_.requested_page = intent.page;
             sidebar_page_.page_size = config_.sidebar_limit;
-        } else {
+        } else if (!local_seats_changed) {
             grid_page_.anchor = intent.page_anchor;
             grid_page_.requested_page = intent.page;
             grid_page_.page_size = normalized_size;
@@ -442,6 +487,14 @@ VideoDemandPlan VideoDemandPolicy::BuildPlan(TimePoint now) {
     result.requested_mode = viewport_.mode;
     result.mode = viewport_.mode;
     result.stage_content = viewport_.stage_content;
+    const auto stage = StageExtent();
+    const bool local_visible = viewport_.window_visible && !viewport_.minimized &&
+        stage.width != 0 && stage.height != 0 &&
+        viewport_.stage_content != StageContent::Whiteboard;
+    result.show_local_participant = local_visible &&
+        viewport_.local_participant_present;
+    result.show_local_screen_share = local_visible &&
+        viewport_.local_screen_share_present;
     if (!catalog_) return result;
 
     result.catalog_revision = catalog_->catalog_revision;
@@ -451,7 +504,6 @@ VideoDemandPlan VideoDemandPolicy::BuildPlan(TimePoint now) {
     result.stable_speaker = ResolveIntentTrack(
         stable_speaker_, TrackSource::Camera);
 
-    const auto stage = StageExtent();
     if (!viewport_.window_visible || viewport_.minimized ||
         stage.width == 0 || stage.height == 0) {
         result.reason = VideoDemandReason::Hidden;
@@ -497,13 +549,24 @@ void VideoDemandPolicy::BuildGrid(
     bool use_paging) {
     page_size = std::max<uint32_t>(1, page_size);
     plan.page_size = page_size;
-    plan.page_count = use_paging ? CeilDiv(videos.size(), page_size) : 1;
+    const uint32_t local_count = use_paging
+        ? static_cast<uint32_t>(plan.show_local_participant) +
+            static_cast<uint32_t>(plan.show_local_screen_share)
+        : 0;
+    plan.page_count = use_paging
+        ? CeilDiv(videos.size() + local_count, page_size) : 1;
     plan.page = use_paging
         ? std::min(viewport_.page, plan.page_count - 1) : 0;
 
-    std::size_t start = use_paging
+    const std::size_t page_offset = use_paging
         ? static_cast<std::size_t>(plan.page) * page_size : 0;
-    if (use_paging) {
+    std::size_t start = page_offset > local_count ? page_offset - local_count : 0;
+    const bool first_local_page = use_paging && plan.page == 0 && local_count != 0;
+    if (first_local_page) {
+        // Local tiles fix the beginning of the first page; a stale remote anchor
+        // must not skip participants after an earlier remote seat disappears.
+        grid_page_.anchor.reset();
+    } else if (use_paging) {
         if (grid_page_.requested_page != viewport_.page ||
             grid_page_.page_size != page_size || plan.page != viewport_.page) {
             grid_page_.anchor.reset();
@@ -526,9 +589,15 @@ void VideoDemandPolicy::BuildGrid(
         }
     }
 
+    const uint32_t remote_capacity = first_local_page ? page_size - local_count
+                                                    : page_size;
+    if (use_paging && plan.page != 0) {
+        plan.show_local_participant = false;
+        plan.show_local_screen_share = false;
+    }
     const auto extent = GridExtent(page_size);
     const std::size_t limit = std::min<std::size_t>(
-        videos.size(), start + std::min(page_size, config_.video_budget));
+        videos.size(), start + std::min(remote_capacity, config_.video_budget));
     for (std::size_t index = start; index < limit; ++index) {
         AddSeat(plan, videos[index], VideoSeatRole::Grid, extent);
     }
@@ -634,27 +703,55 @@ void VideoDemandPolicy::AddSeat(VideoDemandPlan& plan,
         seat.reason = VideoDemandReason::Muted;
     }
 
-    uint32_t max_width = 640;
-    uint32_t max_height = 360;
-    if (role == VideoSeatRole::Main) {
-        if (publication.source == TrackSource::ScreenShareVideo) {
-            max_width = 3840;
-            max_height = 2160;
-            if (extent.height > extent.width) std::swap(max_width, max_height);
-        } else {
-            max_width = 1280;
-            max_height = 720;
+    if (extent.width != 0 && extent.height != 0) {
+        const bool known_source = publication.source_width != 0 &&
+            publication.source_height != 0;
+        auto layers = NormalizePublishedVideoLayers(publication.published_video_layers);
+        const auto largest = layers.empty() ? layers.end()
+            : std::max_element(layers.begin(), layers.end(), SmallerLayer);
+        // When original dimensions are absent, declared layer geometry still
+        // supplies the video aspect. With neither, use the viewport aspect.
+        const double source_width = known_source ? publication.source_width
+            : largest != layers.end() ? largest->width : extent.width;
+        const double source_height = known_source ? publication.source_height
+            : largest != layers.end() ? largest->height : extent.height;
+        uint32_t max_width = role == VideoSeatRole::Main ? 3840 : 2560;
+        uint32_t max_height = role == VideoSeatRole::Main ? 2160 : 1440;
+        if (source_height > source_width) {
+            std::swap(max_width, max_height);
         }
-    }
-    seat.width = std::min(extent.width, max_width);
-    seat.height = std::min(extent.height, max_height);
-    if (seat.width != 0 && seat.height != 0) {
-        if (seat.height <= 180) seat.quality = VideoQualityTier::P180;
-        else if (seat.height <= 360) seat.quality = VideoQualityTier::P360;
-        else if (seat.height <= 720) seat.quality = VideoQualityTier::P720;
-        else if (seat.height <= 1080) seat.quality = VideoQualityTier::P1080;
-        else if (seat.height <= 1440) seat.quality = VideoQualityTier::P1440;
+        double scale = std::min(extent.width / source_width,
+                                extent.height / source_height);
+        scale = std::min(scale, std::min(max_width / source_width,
+                                        max_height / source_height));
+        // Never request an upscale when the publication advertises a smaller source.
+        if (known_source || largest != layers.end()) scale = std::min(scale, 1.0);
+        seat.width = std::min(max_width, static_cast<uint32_t>(
+            std::max<long>(1, std::lround(source_width * scale))));
+        seat.height = std::min(max_height, static_cast<uint32_t>(
+            std::max<long>(1, std::lround(source_height * scale))));
+        const auto short_edge = std::min(seat.width, seat.height);
+        if (short_edge <= 180) seat.quality = VideoQualityTier::P180;
+        else if (short_edge <= 360) seat.quality = VideoQualityTier::P360;
+        else if (short_edge <= 720) seat.quality = VideoQualityTier::P720;
+        else if (short_edge <= 1080) seat.quality = VideoQualityTier::P1080;
+        else if (short_edge <= 1440) seat.quality = VideoQualityTier::P1440;
         else seat.quality = VideoQualityTier::P2160;
+
+        if (layers.empty()) {
+            // Compatibility when no codec layer declaration is available.
+            // Original source dimensions alone do not prove a single layer.
+            // This expresses a pixel request, not evidence of an available layer.
+            seat.subscription_width = seat.width;
+            seat.subscription_height = seat.height;
+        } else if (const auto selected = SelectPublishedLayer(
+                       layers, role, seat.width, seat.height)) {
+            seat.subscription_width = selected->width;
+            seat.subscription_height = selected->height;
+            seat.selected_layer_quality = selected->quality;
+        } else if (publication.subscription_allowed && !publication.muted) {
+            seat.reason = VideoDemandReason::NoCompatibleLayer;
+        }
     }
 
     switch (role) {
@@ -667,7 +764,8 @@ void VideoDemandPolicy::AddSeat(VideoDemandPlan& plan,
     if (origin == FocusOrigin::Pinned) seat.priority = 500;
 
     plan.visible_seats.push_back(seat);
-    if (IsDemandable(publication) && seat.width != 0 && seat.height != 0 &&
+    if (IsDemandable(publication) && seat.subscription_width != 0 &&
+        seat.subscription_height != 0 &&
         plan.selected_video.size() < config_.video_budget &&
         !Contains(plan.selected_video, publication.key)) {
         plan.selected_video.push_back(publication.key);
@@ -681,8 +779,8 @@ VideoDemandPolicy::SeatExtent VideoDemandPolicy::StageExtent() const {
     const auto scale = [dpr](int value) -> uint32_t {
         if (value <= 0) return 0;
         const double scaled = static_cast<double>(value) * dpr;
-        return static_cast<uint32_t>(std::min<double>(
-            std::lround(scaled), std::numeric_limits<uint32_t>::max()));
+        return static_cast<uint32_t>(std::round(std::min<double>(
+            scaled, std::numeric_limits<uint32_t>::max())));
     };
     return {scale(viewport_.stage_rect.width),
             scale(viewport_.stage_rect.height)};
@@ -708,19 +806,21 @@ VideoDemandPolicy::SeatExtent VideoDemandPolicy::GridExtent(
 VideoDemandPolicy::SeatExtent VideoDemandPolicy::MainExtent(
     bool has_sidebar) const {
     const auto stage = StageExtent();
-    return {has_sidebar ? stage.width * 3 / 4 : stage.width, stage.height};
+    return {has_sidebar ? static_cast<uint32_t>(uint64_t(stage.width) * 3 / 4)
+                        : stage.width, stage.height};
 }
 
 VideoDemandPolicy::SeatExtent VideoDemandPolicy::SidebarExtent(
     uint32_t visible_count) const {
     const auto stage = StageExtent();
-    if (visible_count == 0) return {};
+    if (visible_count == 0 || stage.width == 0 || stage.height == 0) return {};
     return {std::max<uint32_t>(1, stage.width / 4),
             std::max<uint32_t>(1, stage.height / visible_count)};
 }
 
 VideoDemandPolicy::SeatExtent VideoDemandPolicy::PictureInPictureExtent() const {
     const auto stage = StageExtent();
+    if (stage.width == 0 || stage.height == 0) return {};
     return {std::max<uint32_t>(1, stage.width / 3),
             std::max<uint32_t>(1, stage.height / 3)};
 }
@@ -757,6 +857,8 @@ bool VideoDemandPolicy::SamePlan(const VideoDemandPlan& left,
         left.mode != right.mode || left.stage_content != right.stage_content ||
         left.page != right.page || left.page_size != right.page_size ||
         left.page_count != right.page_count ||
+        left.show_local_participant != right.show_local_participant ||
+        left.show_local_screen_share != right.show_local_screen_share ||
         !SameOptionalKey(left.focused, right.focused) ||
         !SameOptionalKey(left.stable_speaker, right.stable_speaker) ||
         left.reason != right.reason ||
@@ -771,6 +873,9 @@ bool VideoDemandPolicy::SamePlan(const VideoDemandPlan& left,
         if (lhs.key != rhs.key || lhs.source != rhs.source ||
             lhs.role != rhs.role ||
             lhs.width != rhs.width || lhs.height != rhs.height ||
+            lhs.subscription_width != rhs.subscription_width ||
+            lhs.subscription_height != rhs.subscription_height ||
+            lhs.selected_layer_quality != rhs.selected_layer_quality ||
             lhs.quality != rhs.quality || lhs.priority != rhs.priority ||
             lhs.reason != rhs.reason || lhs.subscription_error != rhs.subscription_error) {
             return false;

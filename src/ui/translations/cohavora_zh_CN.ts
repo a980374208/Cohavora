@@ -3776,6 +3776,10 @@ Sign in with your own account in a client configured for the same meeting servic
         <translation>1440p（2K）</translation>
     </message>
     <message>
+        <source>2160p (4K)</source>
+        <translation>2160p（4K）</translation>
+    </message>
+    <message>
         <source>Native (up to 4K)</source>
         <translation>原始尺寸（最高 4K）</translation>
     </message>

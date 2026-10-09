@@ -261,6 +261,50 @@ TrackSource TrackSourceFromProto(proto::TrackSource source) {
     }
 }
 
+proto::VideoQuality VideoQualityFromPublishedLayer(PublishedVideoQuality quality) {
+    switch (quality) {
+    case PublishedVideoQuality::Low: return proto::VideoQuality::LOW;
+    case PublishedVideoQuality::Medium: return proto::VideoQuality::MEDIUM;
+    case PublishedVideoQuality::High: return proto::VideoQuality::HIGH;
+    }
+    return proto::VideoQuality::OFF;
+}
+
+std::vector<PublishedVideoLayer> PublishedVideoLayersFromProto(
+    const proto::TrackInfo& track) {
+    const auto convert = [](const auto& advertised_layers) {
+        std::vector<PublishedVideoLayer> layers;
+        layers.reserve(advertised_layers.size());
+        for (const auto& advertised : advertised_layers) {
+            PublishedVideoQuality quality;
+            switch (advertised.quality()) {
+            case proto::VideoQuality::LOW: quality = PublishedVideoQuality::Low; break;
+            case proto::VideoQuality::MEDIUM: quality = PublishedVideoQuality::Medium; break;
+            case proto::VideoQuality::HIGH: quality = PublishedVideoQuality::High; break;
+            default: continue;
+            }
+            if (!advertised.width() || !advertised.height()) continue;
+            layers.push_back({quality, advertised.width(), advertised.height(),
+                              advertised.rid()});
+        }
+        return layers;
+    };
+    // Use one codec's advertised layers. Backup-codec layers may have different
+    // dimensions and quality labels and must not enter the same candidate set.
+    for (const auto& codec : track.codecs()) {
+        const auto& expected = track.mime_type();
+        const auto& actual = codec.mime_type();
+        if (expected.empty() || expected.size() != actual.size() ||
+            !std::equal(expected.begin(), expected.end(), actual.begin(),
+                [](unsigned char left, unsigned char right) {
+                    return std::tolower(left) == std::tolower(right);
+                })) continue;
+        auto layers = convert(codec.layers());
+        if (!layers.empty()) return layers;
+    }
+    return convert(track.layers());
+}
+
 RoomInfo RoomInfoFromProto(const proto::Room& room) {
     RoomInfo info;
     info.sid = room.sid();
@@ -1277,7 +1321,9 @@ ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
                         });
                     const auto& demand = *found->demand;
                     enabled = demand.enabled;
-                    quality = VideoQualityForTier(demand.quality);
+                    quality = demand.selected_layer_quality
+                        ? VideoQualityFromPublishedLayer(*demand.selected_layer_quality)
+                        : VideoQualityForTier(demand.quality);
                     width = demand.width;
                     height = demand.height;
                     max_fps = demand.max_fps.value_or(0);
@@ -1332,7 +1378,9 @@ ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
                             });
                         const auto& demand = *found->demand;
                         enabled = demand.enabled;
-                        quality = VideoQualityForTier(demand.quality);
+                        quality = demand.selected_layer_quality
+                            ? VideoQualityFromPublishedLayer(*demand.selected_layer_quality)
+                            : VideoQualityForTier(demand.quality);
                         width = demand.width;
                         height = demand.height;
                         max_fps = demand.max_fps.value_or(0);
@@ -9452,6 +9500,8 @@ void Room::UpdateParticipants(
                                                            t_info.name(),
                                                            t_info.type());
                         pub->set_encryption(encryption);
+                        pub->set_source_video_info(t_info.width(), t_info.height(),
+                            PublishedVideoLayersFromProto(t_info));
                         remote->add_publication(pub);
                         const auto intent_key = MakeSubscriptionIntentKeyLocked(
                             remote->sid(), remote->identity(), t_info.sid());
@@ -9464,6 +9514,8 @@ void Room::UpdateParticipants(
                     } else {
                         // Metadata can arrive after an early RTC binding. Its
                         pub->set_encryption(encryption);
+                        pub->set_source_video_info(t_info.width(), t_info.height(),
+                            PublishedVideoLayersFromProto(t_info));
                         // source is projected to the same track read by render.
                         if (pub->track()) pub->track()->set_source(TrackSourceFromProto(t_info.source()));
                         // 检测静音/画面开关状态变化

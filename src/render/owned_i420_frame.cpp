@@ -82,7 +82,7 @@ std::shared_ptr<OwnedI420Frame::StorageBlock> OwnedI420Frame::AcquireStorage(siz
         std::array<std::shared_ptr<StorageBlock>, 8> blocks;
         size_t bytes = 0;
     };
-    constexpr size_t kMaximumCachedBytes = 8 * 1024 * 1024;
+    constexpr size_t kMaximumCachedBytes = 32 * 1024 * 1024;
     thread_local Cache cache;
     for (const auto& block : cache.blocks)
         if (block && block->size == bytes && block.use_count() == 1) return block;

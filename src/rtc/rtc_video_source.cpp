@@ -154,8 +154,10 @@ void RtcVideoSource::OnVideoFrame(const VideoFrame& frame, const VideoCaptureOpt
 
     if (!screencast_) {
         const bool landscape = width >= height;
-        const int max_width = landscape ? 1920 : 1080;
-        const int max_height = landscape ? 1080 : 1920;
+        // Preserve ordinary-video sources through the supported 4K ceiling.
+        // Smaller published layers are selected by simulcast/subscription.
+        const int max_width = landscape ? 3840 : 2160;
+        const int max_height = landscape ? 2160 : 3840;
         int target_w = width;
         int target_h = height;
 

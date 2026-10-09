@@ -62,7 +62,7 @@ struct MediaPreferences {
     QString speakerDeviceId;
     QString cameraVideoCodec = QStringLiteral("auto");
     QString screenShareVideoCodec = QStringLiteral("auto");
-    int screenShareResolution = 0; // Auto, 720p, 1080p, 1440p, Native
+    int screenShareResolution = 0; // Auto=0, 720p=1, 1080p=2, 1440p=3, Native=4, 2160p=5
     int screenShareFps = 20;
     // A zero size means "choose the best device mode around 1080p".
     int videoCaptureWidth = 0;
