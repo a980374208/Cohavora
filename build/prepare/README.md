@@ -365,5 +365,9 @@ cmake -S . -B <build-dir> -DCOHAVORA_E2EE_BACKEND_PACKAGE_DIR=<absolute-extracte
 cmake --build <build-dir> --config RelWithDebInfo --target cohavora_app
 ```
 
+包内保留 WebRTC BSD、Apache-2.0 许可证、原源码版权头、修改说明和固定 profile。输入须与 profile 中的固定上游版本和 SHA-256 匹配。ZIP 使用固定时间戳和排序，输出目录必须不存在，避免覆盖已有产物。此工具只产生本地归档，不上传或发布。
 
-v2 overlay 增加 `cohavora_iv_sequence.h`：发送媒体和数据共享进程级、CSPRNG 初始化的 96 位递增 IV 分配器；Room/cryptor 重建和重装相同密钥不会重置进程分配状态。随机源失败或每进程总计 2^32 次额度耗尽时拒绝产生新的密文，没有明文回退。多个独立进程仍依赖随机起点的概率隔离，不宣称全系统绝对唯一或跨设备总调用次数已被集中管理。此改动保留原来的 12 字节 IV 与接收解析，不改变协议格式。准备工具从固定原始输入生成，使用当前 profile 对应目录，不把旧 `patched/` 目录自动视为当前输入；全部历史包继续保留。
+CMake 对照仓库内 profile 验证每个包输入，并验证基础 SDK Debug/Release 库 SHA-256；缺失或不匹配立即停止配置。该入口优先于两个独立输入目录参数。BoringSSL 前缀仍只作用于修复 object，应用 ASIO/OpenSSL 边界保持不变，object 仍直接加入最终链接，避免归档优先解析回原实现。未配置 overlay 的产品不能据此宣称支持 Required 媒体 E2EE；Room 能力准入保持拒绝，不降级明文。
+
+
+overlay 包含 `cohavora_iv_sequence.h`：发送媒体和数据共享进程级、CSPRNG 初始化的 96 位递增 IV 分配器；Room/cryptor 重建和重装相同密钥不会重置进程分配状态。随机源失败或每进程总计 2^32 次额度耗尽时拒绝产生新的密文，没有明文回退。多个独立进程仍依赖随机起点的概率隔离，不宣称全系统绝对唯一或跨设备总调用次数已被集中管理。该实现保留 12 字节 IV 与接收解析，不改变协议格式。输入须使用当前 profile 对应目录，不把其他 `patched/` 目录自动视为当前输入。

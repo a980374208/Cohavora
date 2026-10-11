@@ -88,14 +88,14 @@ def build(args):
     add_bytes("README.md", (
         "# Cohavora WebRTC compile support\n\n"
         "This archive supplements the matching WebRTC SDK package; it does "
-        "not include a source checkout. Obtain the revisions listed in "
-        "metadata/package.json. The patches directory contains the SDK "
-        "changes, configs contains GN arguments, prefix-kit contains "
-        "BoringSSL symbol-prefix helpers, and packaging contains the SDK "
-        "archive scripts and package metadata.\n\n"
-        "Use the architecture and runtime ABI recorded in the manifest. "
-        "Verify entries against metadata/checksums.sha256 and preserve "
-        "source licenses and notices.\n"
+        "not include a WebRTC source checkout. Obtain the revisions listed "
+        "in metadata/package.json. The patches directory contains the SDK "
+        "changes, configs contains the GN arguments, prefix-kit contains "
+        "the BoringSSL symbol-prefix helpers, and packaging contains the "
+        "SDK archive scripts and package metadata.\n\n"
+        "Use the matching MSVC architecture and runtime ABI recorded in the "
+        "manifest. Verify archive entries against metadata/checksums.sha256 "
+        "before using them. Preserve the source licenses and notices.\n"
     ).encode("utf-8"))
 
     for patch in sorted(patches.glob("*.patch")):

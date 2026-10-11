@@ -1,6 +1,5 @@
 # Cohavora
 
-
 **基于 C++、Qt 和 WebRTC 的 Windows 原生音视频会议客户端，对接 LiveKit 实时音视频服务。**
 
 Cohavora 提供桌面会议界面，也提供可单独运行的命令行示例。你可以用它加入音视频房间、共享屏幕、聊天和使用协作白板，也可以从源码了解原生客户端的设备采集、会议状态管理和视频渲染实现。
@@ -198,6 +197,11 @@ cmake --build --preset dev-debug --parallel 2
 
 `dev-debug` 只构建应用及其依赖。项目的 Debug 配置保留应用调试符号，但 Qt 和默认 WebRTC 依赖仍使用 Release ABI，运行库统一为 `/MT`；不要随意混入 `/MD` 或不同 ABI 的库。
 
+| 需求 | 配置预设 | 构建入口 |
+| --- | --- | --- |
+| 开发桌面界面 | `windows-vs2026-dev` | `dev-debug` 构建应用；`all-debug` 构建全部默认目标 |
+| Release 应用 | `windows-vs2026-release` | 构建使用 `release` |
+
 ### 运行命令行示例
 
 dev 配置提供三个示例目标：
@@ -233,6 +237,7 @@ cmake --build out/build/windows-vs2026-dev --config Debug --target simple_room -
 | `src/e2ee/`、`src/rpc/` | 端到端加密、RPC 和消息类型 |
 | `src/telemetry/` | 性能统计、诊断、日志脱敏和报告 |
 | `protos/` | 信令与业务协议定义，C++ 文件在构建时生成 |
+| `samples/` | 命令行示例构建定义 |
 | `cmake/`、`build/prepare/` | 构建模块与依赖准备脚本 |
 
 阅读源码时可以从 [桌面入口](src/app/main_meeting_app.cpp) 开始，沿着 [会议协调器](src/core/meeting_coordinator.cpp) 阅读到 [Room 实现](src/core/room.cpp)。

@@ -2,6 +2,7 @@
   "archive": "cohavora-libraries-win64-qt-5.15.18-20260925.zip",
   "archive_prefix": "Libraries/win64",
   "file_count": 7654,
+  "local_source_build_guide_sha256": "c0fdca5b76e6b8fb0393adcc6e442df5292ea8fec9c46c5b6c1101cae5ec0b2c",
   "required_files_sha256": "1ae8e0417e1cfcfb086a3e82b5d0d49aed0b5b6496e51f7ab42e4df8a8142eb0",
   "required_manifest_sha256": "19eaa557bc2e516f2dbe368283d3490ecbecdb223e2fece21281b0868ea57ef0",
   "schema_version": 1,

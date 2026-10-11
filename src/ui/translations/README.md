@@ -2,7 +2,7 @@
 
 界面源语言为英文，静态文案使用 `QCoreApplication::translate("MeetingUI", "English source text")`。完整句子使用 `%1` 等占位符，中文译文维护在 `cohavora_zh_CN.ts` 中。
 
-英文检查已完成，启动时默认使用 `zh_CN` 并加载中文翻译。中文 TS 编译为 QM 后嵌入客户端，无需手动复制应用译文文件。
+启动时默认使用 `zh_CN` 并加载中文翻译。中文 TS 编译为 QM 后嵌入客户端，无需手动复制应用译文文件。
 
 使用 `--language=en_US` 或 `--language en_US` 可查看英文源文案；`--language=zh_CN` 可显式选择简体中文，重启生效。
 

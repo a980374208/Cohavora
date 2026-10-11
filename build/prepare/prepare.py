@@ -177,6 +177,12 @@ def load_libraries_archive_metadata(path: Path):
                 or not re.fullmatch(r"[0-9a-f]{64}", metadata[field])):
             raise ValueError(
                 f"Libraries archive metadata has an invalid {field}")
+    local_guide_field = "local_source_build_guide_sha256"
+    if local_guide_field in metadata:
+        if (not isinstance(metadata[local_guide_field], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", metadata[local_guide_field])):
+            raise ValueError(
+                f"Libraries archive metadata has an invalid {local_guide_field}")
     if (not isinstance(metadata["url"], str)
             or not re.fullmatch(r"https://github\.com/[^\s]+", metadata["url"])
             or not metadata["url"].endswith("/" + metadata["archive"])):
@@ -207,11 +213,16 @@ def load_libraries_archive_metadata(path: Path):
         raise ValueError(
             "Libraries archive metadata does not match libraries-required.txt")
     source_build_guide = script_dir / "README.md"
+    # Older schema-1 metadata used the release guide fingerprint for the local
+    # copy as well. The optional local fingerprint allows that copy to evolve
+    # without changing the independently pinned release asset.
+    local_guide_sha256 = metadata.get(
+        local_guide_field, metadata["source_build_guide_sha256"])
     if (not source_build_guide.is_file()
             or hashlib.sha256(source_build_guide.read_bytes()).hexdigest()
-            != metadata["source_build_guide_sha256"]):
+            != local_guide_sha256):
         raise ValueError(
-            "Libraries archive metadata does not match the source build guide")
+            "Libraries archive metadata does not match the local source build guide")
     return metadata
 
 
