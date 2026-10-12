@@ -130,7 +130,7 @@ git clone https://github.com/microsoft/vcpkg.git C:\dev\vcpkg
 $env:VCPKG_ROOT = 'C:\dev\vcpkg'
 ```
 
-CMake 会通过该路径加载 vcpkg，并根据 [vcpkg.json](vcpkg.json) 安装 Asio、Protobuf、spdlog 等依赖。默认使用 `x64-windows-static`。
+CMake 会通过该路径加载 vcpkg，在加载 toolchain 前将 `VCPKG_MANIFEST_DIR` 默认设为 `build/vcpkg`，并根据 [build/vcpkg/vcpkg.json](build/vcpkg/vcpkg.json) 安装 Asio、Protobuf、spdlog 等依赖。默认使用 `x64-windows-static`。
 
 #### 3. 准备依赖并编译
 
@@ -187,6 +187,8 @@ cmake --build --preset release --parallel 2
 
 以下操作沿用前面准备好的依赖和 `VCPKG_ROOT`。所有预设见 [CMakePresets.json](CMakePresets.json)。
 
+配置辅助脚本位于 [build/configure.py](build/configure.py)，可在仓库根目录执行 `python build/configure.py --help` 查看选项；根目录的 `configure.bat` 会转发到该脚本。
+
 ### 调试桌面应用
 
 ```powershell
@@ -238,7 +240,9 @@ cmake --build out/build/windows-vs2026-dev --config Debug --target simple_room -
 | `src/telemetry/` | 性能统计、诊断、日志脱敏和报告 |
 | `protos/` | 信令与业务协议定义，C++ 文件在构建时生成 |
 | `samples/` | 命令行示例构建定义 |
-| `cmake/`、`build/prepare/` | 构建模块与依赖准备脚本 |
+| `cmake/` | CMake 构建模块 |
+| `build/configure.py`、`build/vcpkg/` | 配置辅助脚本与 vcpkg manifest |
+| `build/prepare/` | 依赖准备脚本与固定包元数据 |
 
 阅读源码时可以从 [桌面入口](src/app/main_meeting_app.cpp) 开始，沿着 [会议协调器](src/core/meeting_coordinator.cpp) 阅读到 [Room 实现](src/core/room.cpp)。
 
@@ -323,7 +327,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Inno Setup 编译失败' }
 
 **依赖下载失败，能使用本地压缩包吗？** 可以通过 `python build/prepare/prepare.py --qt-archive "C:\downloads\cohavora-libraries-win64-qt-5.15.18-20260925.zip"` 提供固定的 Qt/Libraries 归档。文件必须符合 [归档元数据](build/prepare/libraries-archive.json) 的校验信息；WebRTC 和 vcpkg 依赖仍需另外准备。
 
-**可以离线配置吗？** [configure.py](configure.py) 提供 `--offline`，但需要提前备齐子模块、Qt/WebRTC、vcpkg 工具和依赖缓存。它禁用 vcpkg 源站下载，不会自动补齐缺失依赖；`--offline` 与 `--prepare-deps` 不能同时使用。
+**可以离线配置吗？** 在仓库根目录执行 `python build/configure.py --offline`，但需要提前备齐子模块、Qt/WebRTC、vcpkg 工具和依赖缓存。它禁用 vcpkg 源站下载，不会自动补齐缺失依赖；`--offline` 与 `--prepare-deps` 不能同时使用。
 
 **能启动界面，但无法加入会议。** 先确认使用的是 LiveKit 直连还是业务服务入会。直连需要正确的 WebSocket 地址和有效房间 JWT；业务模式需要正确的会议服务地址、账号权限和会议号。随后检查网络、服务状态及设备权限。
 

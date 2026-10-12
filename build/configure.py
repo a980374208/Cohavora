@@ -164,7 +164,7 @@ def main():
 
     cmake_executable = require_cmake()
 
-    project_root = Path(__file__).parent.resolve()
+    project_root = Path(__file__).resolve().parent.parent
     build_dir = project_root / args.build_dir
     qt_archive = (
         Path(args.qt_archive).expanduser().resolve()

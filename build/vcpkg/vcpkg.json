@@ -1,6 +1,6 @@
 {
   "name": "livekit-signaling-cpp",
-  "version": "0.1.0",
+  "version": "0.0.1",
   "builtin-baseline": "0d61518465fb561a1350ded112bc80964b097c04",
   "dependencies": [
     "asio",

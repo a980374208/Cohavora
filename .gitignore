@@ -8,10 +8,14 @@
 # Build outputs & caches
 /build-*/
 /build/*
+!/build/configure.py
 !/build/prepare/
 !/build/prompts/
 /build/prompts/*
 !/build/prompts/windows-build-assistant.txt
+!/build/vcpkg/
+/build/vcpkg/*
+!/build/vcpkg/vcpkg.json
 /out/
 /bin/
 /lib/

@@ -331,7 +331,7 @@ cmake --preset windows-vs2026-release
 cmake --build --preset release --parallel 2
 ```
 
-`package_libraries.py` 会固定条目顺序、时间戳、权限和压缩级别，并在完成后读取所有 ZIP 条目验证 CRC。`configure.py --prepare-deps` 还会验证正式元数据中的文件大小、SHA-256、文件数、目录前缀和必需文件指纹。
+`package_libraries.py` 会固定条目顺序、时间戳、权限和压缩级别，并在完成后读取所有 ZIP 条目验证 CRC。在仓库根目录执行 `python build/configure.py --prepare-deps` 还会验证正式元数据中的文件大小、SHA-256、文件数、目录前缀和必需文件指纹。
 
 ## 9. 快速核验正式资产
 

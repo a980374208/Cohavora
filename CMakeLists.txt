@@ -8,6 +8,14 @@ if(NOT DEFINED CMAKE_MSVC_DEBUG_INFORMATION_FORMAT)
         "$<$<CONFIG:Debug>:Embedded>$<$<CONFIG:RelWithDebInfo>:ProgramDatabase>")
 endif()
 
+# Locate the relocated manifest before the vcpkg toolchain is loaded. Migrate
+# the old project-root cache value while preserving custom manifest directories.
+if(NOT DEFINED VCPKG_MANIFEST_DIR OR VCPKG_MANIFEST_DIR STREQUAL ""
+        OR VCPKG_MANIFEST_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+    set(VCPKG_MANIFEST_DIR "${CMAKE_CURRENT_SOURCE_DIR}/build/vcpkg"
+        CACHE PATH "Directory containing the vcpkg manifest" FORCE)
+endif()
+
 # A vcpkg manifest is activated only when its toolchain is loaded before the
 # first project() call. Keep explicit toolchains authoritative, and make the
 # documented bare configure command work when VCPKG_ROOT is available.
@@ -61,7 +69,7 @@ if((NOT DEFINED CMAKE_TOOLCHAIN_FILE OR CMAKE_TOOLCHAIN_FILE STREQUAL "")
     unset(cohavora_vcpkg_root)
 endif()
 
-project(Cohavora VERSION 0.1.0
+project(Cohavora VERSION 0.0.1
     DESCRIPTION "Cohavora - Open-source Audio and Video Meeting Client"
     LANGUAGES C CXX)
 set(COHAVORA_DISPLAY_NAME "Cohavora · 开源音视频会议客户端")
