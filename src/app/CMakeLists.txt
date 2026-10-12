@@ -1,5 +1,7 @@
 cohavora_group_qt_generated_sources()
 
+include(${PROJECT_SOURCE_DIR}/cmake/CohavoraUpdates.cmake)
+
 add_executable(cohavora_app
     main_meeting_app.cpp
     debug_login_options.cpp
@@ -52,6 +54,7 @@ target_link_libraries(cohavora_app PRIVATE
     cohavora_whiteboard_ui
     cohavora_ui_theme
     cohavora_ui_translations
+    cohavora_updates
     cohavora_core
     version)
 

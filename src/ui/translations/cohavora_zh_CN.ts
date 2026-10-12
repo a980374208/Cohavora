@@ -2164,6 +2164,74 @@ Sign in with your own account in a client configured for the same meeting servic
         <translation>检查更新</translation>
     </message>
     <message>
+        <source>Start Installer</source>
+        <translation>启动安装程序</translation>
+    </message>
+    <message>
+        <source>Download Update</source>
+        <translation>下载更新</translation>
+    </message>
+    <message>
+        <source>Check for a new version of Cohavora.</source>
+        <translation>检查是否有新版 Cohavora。</translation>
+    </message>
+    <message>
+        <source>Checking for updates...</source>
+        <translation>正在检查更新…</translation>
+    </message>
+    <message>
+        <source>You are using the latest version.</source>
+        <translation>当前已是最新版本。</translation>
+    </message>
+    <message>
+        <source>Version %1 is available.</source>
+        <translation>发现新版本 %1。</translation>
+    </message>
+    <message>
+        <source>Downloading the update...</source>
+        <translation>正在下载更新…</translation>
+    </message>
+    <message>
+        <source>Update verified. Start the installer when you are ready to close Cohavora.</source>
+        <translation>更新已验证。准备关闭 Cohavora 时，请启动安装程序。</translation>
+    </message>
+    <message>
+        <source>Verifying the installer...</source>
+        <translation>正在验证安装程序…</translation>
+    </message>
+    <message>
+        <source>Installer started. Finish your meeting and close Cohavora to complete the update.</source>
+        <translation>安装程序已启动。请结束会议并关闭 Cohavora，以完成更新。</translation>
+    </message>
+    <message>
+        <source>Updates are not configured for this build.</source>
+        <translation>此版本尚未配置更新服务。</translation>
+    </message>
+    <message>
+        <source>The update configuration is invalid.</source>
+        <translation>更新配置无效。</translation>
+    </message>
+    <message>
+        <source>The update information could not be verified. Try again later.</source>
+        <translation>无法验证更新信息，请稍后重试。</translation>
+    </message>
+    <message>
+        <source>The update could not be saved. Check available disk space and try again.</source>
+        <translation>无法保存更新，请检查磁盘可用空间后重试。</translation>
+    </message>
+    <message>
+        <source>The installer could not be verified. Check for updates to try again.</source>
+        <translation>无法验证安装程序，请重新检查更新后重试。</translation>
+    </message>
+    <message>
+        <source>The installer could not be started. Check for updates to try again.</source>
+        <translation>无法启动安装程序，请重新检查更新后重试。</translation>
+    </message>
+    <message>
+        <source>The update server could not be reached. Try again later.</source>
+        <translation>无法连接更新服务器，请稍后重试。</translation>
+    </message>
+    <message>
         <source>Testing microphone...</source>
         <translation>正在检测麦克风…</translation>
     </message>

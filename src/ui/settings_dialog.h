@@ -21,6 +21,7 @@ class QRadioButton;
 class QStackedWidget;
 
 namespace OpenMeeting { template <typename T> class QtCallbackGate; }
+namespace Cohavora::Update { class UpdateService; }
 
 namespace MeetingUI {
 
@@ -102,6 +103,7 @@ private:
 	QWidget *buildAudioPage();
 	QWidget *buildSecurityPage();
 	QWidget *buildAboutPage();
+	void syncUpdateControls();
 	void syncSecurityControls();
 	void commitSecurityPreferences();
 	void updateSecurityKeyControls();
@@ -180,6 +182,13 @@ private:
 	QPushButton *_e2eeSaveKey = nullptr;
 	QPushButton *_e2eeClearKey = nullptr;
 	QLabel *_e2eeStatus = nullptr;
+	Cohavora::Update::UpdateService *_updateService = nullptr;
+	QPushButton *_updateCheck = nullptr;
+	QPushButton *_updateAction = nullptr;
+	QPushButton *_updateCancel = nullptr;
+	QLabel *_updateStatus = nullptr;
+	QLabel *_updateNotes = nullptr;
+	QProgressBar *_updateProgress = nullptr;
 
 	QHash<QString, QVector<VideoFormat>> _cameraFormats;
 	bool _usingExternalPreview = false;

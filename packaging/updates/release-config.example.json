@@ -1,0 +1,7 @@
+{
+  "latest_version": "0.0.1",
+  "force_update": false,
+  "download_url": "http://123.56.225.164/downloads/Cohavora-0.0.1-x64-Setup.exe",
+  "fallback_download_url": "https://github.com/a980374208/Cohavora/releases/download/v0.0.1/Cohavora-0.0.1-x64-Setup.exe",
+  "release_notes": "本次更新说明"
+}

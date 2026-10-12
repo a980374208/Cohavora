@@ -5,6 +5,7 @@
 #include "src/ui/app_icons.h"
 #include "src/ui/settings_dialog.h"
 #include "src/ui/screen_share_quality_controls.h"
+#include "src/update/update_service.h"
 
 #include "src/core/session_shutdown_service.h"
 #include "src/e2ee/meeting_encryption.h"
@@ -227,6 +228,7 @@ SettingsDialog::~SettingsDialog() {
 }
 
 void SettingsDialog::done(int result) {
+	if (_updateService) _updateService->cancel();
 	clearSecurityEditor();
 	cancelDeviceDiscovery();
 	QDialog::done(result);
@@ -944,12 +946,122 @@ QWidget *SettingsDialog::buildAboutPage() {
 	versionLabel->setAlignment(Qt::AlignCenter);
 	layout->addWidget(versionLabel);
 
-	auto *updateButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Check for Updates"), content);
-	updateButton->setObjectName(QStringLiteral("secondaryButton"));
-	updateButton->setMinimumWidth(240);
-	layout->addWidget(updateButton, 0, Qt::AlignHCenter);
+	_updateService = new Cohavora::Update::UpdateService(
+		Cohavora::Update::UpdateService::BuildConfiguration(),
+		QCoreApplication::applicationVersion(), this);
+	_updateCheck = new QPushButton(QCoreApplication::translate("MeetingUI", "Check for Updates"), content);
+	_updateCheck->setObjectName(QStringLiteral("secondaryButton"));
+	_updateCheck->setAccessibleName(QCoreApplication::translate("MeetingUI", "Check for Updates"));
+	_updateCheck->setMinimumWidth(240);
+	layout->addWidget(_updateCheck, 0, Qt::AlignHCenter);
+	_updateStatus = new QLabel(content);
+	_updateStatus->setObjectName(QStringLiteral("hintLabel"));
+	_updateStatus->setAlignment(Qt::AlignCenter);
+	_updateStatus->setWordWrap(true);
+	_updateStatus->setTextFormat(Qt::PlainText);
+	layout->addWidget(_updateStatus);
+	_updateNotes = new QLabel(content);
+	_updateNotes->setObjectName(QStringLiteral("hintLabel"));
+	_updateNotes->setWordWrap(true);
+	_updateNotes->setTextFormat(Qt::PlainText);
+	_updateNotes->setTextInteractionFlags(Qt::TextSelectableByMouse);
+	layout->addWidget(_updateNotes);
+	_updateProgress = new QProgressBar(content);
+	_updateProgress->setRange(0, 100);
+	_updateProgress->setTextVisible(false);
+	layout->addWidget(_updateProgress);
+	auto *actions = new QHBoxLayout();
+	_updateAction = new QPushButton(content);
+	_updateAction->setObjectName(QStringLiteral("secondaryButton"));
+	_updateCancel = new QPushButton(QCoreApplication::translate("MeetingUI", "Cancel"), content);
+	_updateCancel->setObjectName(QStringLiteral("secondaryButton"));
+	actions->addStretch();
+	actions->addWidget(_updateAction);
+	actions->addWidget(_updateCancel);
+	actions->addStretch();
+	layout->addLayout(actions);
+	connect(_updateCheck, &QPushButton::clicked, _updateService, &Cohavora::Update::UpdateService::check);
+	connect(_updateCancel, &QPushButton::clicked, _updateService, &Cohavora::Update::UpdateService::cancel);
+	connect(_updateAction, &QPushButton::clicked, this, [this] {
+		using State = Cohavora::Update::State;
+		if (_updateService->state() == State::Available) {
+			_updateService->download();
+		} else if (_updateService->state() == State::Ready) {
+			_updateService->launchInstaller();
+		}
+	});
+	connect(_updateService, &Cohavora::Update::UpdateService::changed, this, &SettingsDialog::syncUpdateControls);
+	connect(_updateService, &Cohavora::Update::UpdateService::downloadProgress,
+		this, [this](qint64 received, qint64 total) {
+			_updateProgress->setValue(total > 0 ? int(received * 100 / total) : 0);
+		});
+	connect(_updateService, &Cohavora::Update::UpdateService::installerStarted, this, [this] {
+		_updateStatus->setText(QCoreApplication::translate("MeetingUI",
+			"Installer started. Finish your meeting and close Cohavora to complete the update."));
+	});
+	syncUpdateControls();
 	layout->addStretch(2);
 	return scroll;
+}
+
+void SettingsDialog::syncUpdateControls() {
+	using State = Cohavora::Update::State;
+	using Error = Cohavora::Update::Error;
+	const auto state = _updateService->state();
+	const auto busy = state == State::Checking || state == State::Downloading || state == State::Verifying;
+	_updateCheck->setEnabled(!busy);
+	_updateCancel->setVisible(busy);
+	_updateProgress->setVisible(state == State::Downloading || state == State::Verifying);
+	_updateProgress->setRange(0, state == State::Verifying ? 0 : 100);
+	if (state != State::Downloading) _updateProgress->setValue(0);
+	_updateAction->setVisible(state == State::Available || state == State::Ready);
+	_updateAction->setText(state == State::Ready
+		? QCoreApplication::translate("MeetingUI", "Start Installer")
+		: QCoreApplication::translate("MeetingUI", "Download Update"));
+	const auto hasRelease = state == State::Available || state == State::Downloading ||
+		state == State::Ready || state == State::Verifying;
+	_updateNotes->setVisible(hasRelease && !_updateService->release().notes.isEmpty());
+	_updateNotes->setText(hasRelease ? _updateService->release().notes : QString());
+	QString message;
+	switch (state) {
+	case State::Idle:
+		message = QCoreApplication::translate("MeetingUI", "Check for a new version of Cohavora."); break;
+	case State::Checking:
+		message = QCoreApplication::translate("MeetingUI", "Checking for updates..."); break;
+	case State::UpToDate:
+		message = QCoreApplication::translate("MeetingUI", "You are using the latest version."); break;
+	case State::Available:
+		message = QCoreApplication::translate("MeetingUI", "Version %1 is available.")
+			.arg(_updateService->release().version); break;
+	case State::Downloading:
+		message = QCoreApplication::translate("MeetingUI", "Downloading the update..."); break;
+	case State::Ready:
+		message = QCoreApplication::translate("MeetingUI", "Update verified. Start the installer when you are ready to close Cohavora."); break;
+	case State::Verifying:
+		message = QCoreApplication::translate("MeetingUI", "Verifying the installer..."); break;
+	case State::InstallerStarted:
+		message = QCoreApplication::translate("MeetingUI",
+			"Installer started. Finish your meeting and close Cohavora to complete the update."); break;
+	case State::Failed:
+		switch (_updateService->error()) {
+		case Error::NotConfigured:
+			message = QCoreApplication::translate("MeetingUI", "Updates are not configured for this build."); break;
+		case Error::InvalidConfiguration:
+			message = QCoreApplication::translate("MeetingUI", "The update configuration is invalid."); break;
+		case Error::InvalidManifest:
+			message = QCoreApplication::translate("MeetingUI", "The update information could not be verified. Try again later."); break;
+		case Error::Disk:
+			message = QCoreApplication::translate("MeetingUI", "The update could not be saved. Check available disk space and try again."); break;
+		case Error::Integrity:
+			message = QCoreApplication::translate("MeetingUI", "The installer could not be verified. Check for updates to try again."); break;
+		case Error::Launch:
+			message = QCoreApplication::translate("MeetingUI", "The installer could not be started. Check for updates to try again."); break;
+		default:
+			message = QCoreApplication::translate("MeetingUI", "The update server could not be reached. Try again later."); break;
+		}
+		break;
+	}
+	_updateStatus->setText(message);
 }
 
 void SettingsDialog::connectPreferenceControls() {
