@@ -31,12 +31,11 @@ public:
         std::shared_ptr<telemetry::LocalAudioActivityProbe> probe) noexcept;
 
 private:
-    void OnAudioFrame(const AudioFrame& frame);
+    struct FrameDeliveryState;
 
     std::shared_ptr<AudioSource> lk_source_;
-    std::mutex sink_mutex_;
-    std::vector<webrtc::AudioTrackSinkInterface*> sinks_;
-    std::shared_ptr<telemetry::LocalAudioActivityProbe> telemetry_probe_;
+    std::shared_ptr<FrameDeliveryState> delivery_state_;
+    std::shared_ptr<AudioSource::Subscription> subscription_;
 };
 
 } // namespace livekit

@@ -26,7 +26,9 @@ LocalAudioTrack::LocalAudioTrack(const std::string& sid, const std::string& name
     : Track(sid, name, TrackKind::Audio), source_(std::move(source)),
       requested_publish_policy_(policy) {}
 
-LocalAudioTrack::~LocalAudioTrack() = default;
+LocalAudioTrack::~LocalAudioTrack() {
+    if (audio_subscription_) audio_subscription_->disconnect();
+}
 
 void LocalAudioTrack::set_rtc_source_for_telemetry(
         webrtc::scoped_refptr<RtcAudioSource> source) {
@@ -93,11 +95,12 @@ std::shared_ptr<LocalAudioTrack> LocalAudioTrack::createLocalAudioTrack(const st
     std::string sid = "TR_AUD_" + name;
     auto track = std::make_shared<LocalAudioTrack>(sid, name, source, policy);
     if (source) {
-        source->addSink([track](const AudioFrame& frame) {
-            if (!track->muted()) {
-                track->notifyAudioFrame(frame);
-            }
-        });
+        track->audio_subscription_ = source->subscribe(
+            [weak = std::weak_ptr<LocalAudioTrack>(track)](const AudioFrame& frame) {
+                if (auto track = weak.lock(); track && !track->muted()) {
+                    track->notifyAudioFrame(frame);
+                }
+            });
 
         auto factory = WebRTCManager::Instance().factory();
         if (factory) {

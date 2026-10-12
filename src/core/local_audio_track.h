@@ -46,6 +46,7 @@ private:
     mutable std::mutex rtc_source_mutex_;
     webrtc::scoped_refptr<RtcAudioSource> rtc_source_;
     std::shared_ptr<telemetry::LocalAudioActivityProbe> publish_telemetry_probe_;
+    std::shared_ptr<AudioSource::Subscription> audio_subscription_;
 };
 
 } // namespace livekit
