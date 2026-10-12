@@ -27,6 +27,16 @@ struct ScreenBinding {
     int canonical_width = 0;
     int canonical_height = 0;
 
+    // Appended to preserve existing aggregate initializers. Raw identities stay
+    // in memory; device_key remains the root key expected by GetScreenRect.
+    bool display_identity_bound = false;
+    std::uint32_t display_session_id = 0;
+    std::wstring root_display_name;
+    bool remote_child_identity = false;
+    std::wstring child_display_name;
+    std::wstring child_device_key;
+    std::wstring child_device_id;
+
     bool operator==(const ScreenBinding &other) const = default;
 };
 

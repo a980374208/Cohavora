@@ -1,4 +1,6 @@
 #include "desktop_capture.h"
+#include "screen_display_identity.h"
+#include <limits>
 
 #include "modules/desktop_capture/desktop_capturer.h"
 #include "modules/desktop_capture/desktop_capture_options.h"
@@ -10,6 +12,7 @@
 #include "libyuv/convert.h"
 #include "libyuv/scale.h"
 #include <windows.h>
+#include <wtsapi32.h>
 #include <objbase.h>
 #include "wgc_window_capture.h"
 #include <roapi.h>
@@ -72,6 +75,85 @@ ScreenBindingStatus RejectBinding(BindingFailure failure) {
     observed_binding_failures.fetch_add(1, std::memory_order_release);
     return failure == BindingFailure::GeometryChanged
         ? ScreenBindingStatus::GeometryChanged : ScreenBindingStatus::Unavailable;
+}
+
+std::optional<std::wstring> DecodeSelectedDisplayName(const std::string& utf8) {
+    if (utf8.empty() || utf8.size() > static_cast<std::size_t>((std::numeric_limits<int>::max)())) return std::nullopt;
+    const int bytes = static_cast<int>(utf8.size());
+    const int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), bytes, nullptr, 0);
+    if (length <= 0) return std::nullopt;
+    std::wstring name(static_cast<std::size_t>(length), L'\0');
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, utf8.data(), bytes, name.data(), length) != length ||
+        name.find(L'\0') != std::wstring::npos) return std::nullopt;
+    return name;
+}
+
+std::optional<screen_display_identity::Display> ReadDisplayIdentity(intptr_t index) {
+    if (index < 0 || static_cast<std::uint64_t>(index) > std::numeric_limits<DWORD>::max()) return std::nullopt;
+    DWORD session = 0;
+    if (!ProcessIdToSessionId(GetCurrentProcessId(), &session)) return std::nullopt;
+    DISPLAY_DEVICEW root{};
+    root.cb = sizeof(root);
+    if (!EnumDisplayDevicesW(nullptr, static_cast<DWORD>(index), &root, 0)) return std::nullopt;
+    screen_display_identity::Display result;
+    result.index = index;
+    result.session = session;
+    result.active = (root.StateFlags & DISPLAY_DEVICE_ACTIVE) != 0;
+    result.remote = (root.StateFlags & DISPLAY_DEVICE_REMOTE) != 0;
+    result.name = root.DeviceName;
+    result.root_key = root.DeviceKey;
+    if (!result.root_key.empty()) return result;
+    if (!result.remote) return std::nullopt;
+    // Query the current process session, not a console/RDP heuristic. No
+    // persistent module or user/monitor identifiers are exported to logs.
+    const auto module = LoadLibraryExW(L"wtsapi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    if (!module) return std::nullopt;
+    const auto query = reinterpret_cast<decltype(&WTSQuerySessionInformationW)>(
+        GetProcAddress(module, "WTSQuerySessionInformationW"));
+    const auto release = reinterpret_cast<decltype(&WTSFreeMemory)>(
+        GetProcAddress(module, "WTSFreeMemory"));
+    LPWSTR buffer = nullptr;
+    DWORD bytes = 0;
+    if (query && release && query(WTS_CURRENT_SERVER_HANDLE, session,
+            WTSClientProtocolType, &buffer, &bytes)) {
+        result.rdp = buffer && bytes >= sizeof(USHORT) && *reinterpret_cast<USHORT*>(buffer) == 2;
+    }
+    if (buffer && release) release(buffer);
+    FreeLibrary(module);
+    if (!result.rdp) return std::nullopt;
+    bool enumerationEnded = false;
+    for (DWORD childIndex = 0; childIndex < 64; ++childIndex) {
+        DISPLAY_DEVICEW child{};
+        child.cb = sizeof(child);
+        SetLastError(ERROR_SUCCESS);
+        if (!EnumDisplayDevicesW(root.DeviceName, childIndex, &child, 0)) {
+            if (GetLastError() != ERROR_SUCCESS) return std::nullopt;
+            // The API does not promise an error for every failed enumeration;
+            // false/error-zero cannot distinguish silent failure from exhaustion.
+            enumerationEnded = true;
+            break;
+        }
+        result.children.push_back({(child.StateFlags & DISPLAY_DEVICE_ACTIVE) != 0,
+            child.DeviceName, child.DeviceKey, child.DeviceID});
+    }
+    if (!enumerationEnded) return std::nullopt;
+    return result;
+}
+
+std::optional<screen_display_identity::Observation> ObserveDisplayIdentity(intptr_t index) {
+    return screen_display_identity::Observe(
+        [index] { return ReadDisplayIdentity(index); },
+        [](intptr_t source, const std::wstring& actualRootKey)
+                -> std::optional<screen_display_identity::Geometry> {
+            HMONITOR monitor = nullptr;
+            if (!webrtc::GetHmonitorFromDeviceIndex(source, &monitor) || !monitor ||
+                !webrtc::IsMonitorValid(monitor)) return std::nullopt;
+            // Child identity has already been verified; this API compares the
+            // optional key against root.DeviceKey, including its actual empty value.
+            const auto rect = webrtc::GetScreenRect(source, actualRootKey);
+            if (rect.is_empty()) return std::nullopt;
+            return screen_display_identity::Geometry{rect.left(), rect.top(), rect.width(), rect.height()};
+        });
 }
 
 webrtc::DesktopCaptureOptions Options(bool allow_wgc_window = false) {
@@ -472,15 +554,15 @@ std::optional<ScreenBinding> ResolveScreenBinding(
     }
     if (!matched) return std::nullopt;
 
-    HMONITOR monitor = nullptr;
-    std::wstring deviceKey;
-    if (!webrtc::GetHmonitorFromDeviceIndex(source.id, &monitor) || !monitor ||
-        !webrtc::IsMonitorValid(monitor) ||
-        !webrtc::IsScreenValid(source.id, &deviceKey)) return std::nullopt;
-    const auto rect = webrtc::GetScreenRect(source.id, deviceKey);
-    if (rect.is_empty()) return std::nullopt;
-    const int width = rect.width();
-    const int height = rect.height();
+    const auto selectedName = DecodeSelectedDisplayName(deviceNames[*matched]);
+    if (!selectedName) return std::nullopt;
+    const auto observation = ObserveDisplayIdentity(source.id);
+    if (!observation) return std::nullopt;
+    if (!screen_display_identity::MatchesSelectedDisplay(*observation, *selectedName)) return std::nullopt;
+    const auto& identity = observation->identity;
+    const auto& geometry = observation->geometry;
+    const int width = geometry.width;
+    const int height = geometry.height;
     if (width < 320 || height < 180 || width > 16384 || height > 16384) return std::nullopt;
     const double scale = std::min(1.0, 4096.0 / std::max(width, height));
 
@@ -489,9 +571,16 @@ std::optional<ScreenBinding> ResolveScreenBinding(
     result.source_epoch = sourceEpoch;
     result.source_id = source.id;
     result.display_name = deviceNames[*matched];
-    result.device_key = std::move(deviceKey);
-    result.physical_x = rect.left();
-    result.physical_y = rect.top();
+    result.device_key = identity.root_key;
+    result.display_identity_bound = true;
+    result.display_session_id = identity.session;
+    result.root_display_name = identity.name;
+    result.remote_child_identity = identity.remote_child;
+    result.child_display_name = identity.child.name;
+    result.child_device_key = identity.child.key;
+    result.child_device_id = identity.child.id;
+    result.physical_x = geometry.x;
+    result.physical_y = geometry.y;
     result.physical_width = width;
     result.physical_height = height;
     result.canonical_width = std::max(320, static_cast<int>(std::lround(width * scale)));
@@ -500,6 +589,24 @@ std::optional<ScreenBinding> ResolveScreenBinding(
 }
 
 ScreenBindingStatus CheckScreenBinding(const ScreenBinding &binding) {
+    if (binding.display_identity_bound) {
+        if (binding.source_epoch == 0 || binding.share_session_id.empty() ||
+            binding.root_display_name.empty() ||
+            (binding.remote_child_identity ? (!binding.device_key.empty() || binding.child_display_name.empty() ||
+                binding.child_device_key.empty() || binding.child_device_id.empty()) : binding.device_key.empty()))
+            return RejectBinding(BindingFailure::InvalidBinding);
+        screen_display_identity::Identity expected{binding.source_id, binding.display_session_id,
+            binding.root_display_name, binding.device_key, binding.remote_child_identity,
+            {binding.remote_child_identity, binding.child_display_name, binding.child_device_key, binding.child_device_id}};
+        const auto observation = ObserveDisplayIdentity(binding.source_id);
+        if (!observation) return RejectBinding(BindingFailure::ScreenUnavailable);
+        if (observation->identity != expected) return RejectBinding(BindingFailure::DeviceChanged);
+        const screen_display_identity::Geometry original{binding.physical_x, binding.physical_y,
+            binding.physical_width, binding.physical_height};
+        if (observation->geometry != original) return RejectBinding(BindingFailure::GeometryChanged);
+        return ScreenBindingStatus::Valid;
+    }
+
     if (binding.source_epoch == 0 || binding.share_session_id.empty() ||
         binding.device_key.empty()) return RejectBinding(BindingFailure::InvalidBinding);
     HMONITOR monitor = nullptr;
