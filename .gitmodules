@@ -25,3 +25,6 @@
 [submodule "src/ui/tdesktop/ThirdParty/xxHash"]
 	path = src/ui/tdesktop/ThirdParty/xxHash
 	url = https://github.com/Cyan4973/xxHash.git
+[submodule "samples/acceptance"]
+	path = samples/acceptance
+	url = git@github.com:a980374208/Cohavora-acceptance.git
