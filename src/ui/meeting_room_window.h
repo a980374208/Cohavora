@@ -570,6 +570,7 @@ private:
 	void setupVideoCanvasInteractions();
 	void bindTileInteractions(VideoTileWidget *tile);
 	void setPinnedTile(const QString &renderKey, bool pinned);
+	VideoTileWidget *focusedVideoTile() const;
 	void togglePinForRenderKey(const QString &renderKey);
 	void setupCoordinatorBindings();
 	void showDepartureNotice(const QString &title, const QString &message,
@@ -675,6 +676,7 @@ private:
 	int _participantCount = 1;
 	QString _pinnedRenderKey;
 	std::optional<livekit::TrackKey> _pinnedTrackKey;
+	std::optional<livekit::LocalVideoTarget> _pinnedLocalTarget;
 
 	// UI 组件
 	QPointer<QDialog> _telemetryDialog;

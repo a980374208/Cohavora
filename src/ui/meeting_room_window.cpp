@@ -212,6 +212,7 @@ bool SameViewportIntentContent(const livekit::ViewportIntent &left,
 		left.local_screen_share_present == right.local_screen_share_present &&
 		sameKey(left.page_anchor, right.page_anchor) &&
 		sameKey(left.pinned, right.pinned) &&
+		left.pinned_local == right.pinned_local &&
 		sameKey(left.selected_share, right.selected_share) &&
 		left.stage_content == right.stage_content &&
 		left.stage_rect.x == right.stage_rect.x &&
@@ -4547,6 +4548,7 @@ void MeetingRoomWindow::onRemoteParticipantLeft(const QString &identity) {
 
 	if (_pinnedRenderKey == QStringLiteral("remote-camera/") + identity) {
 		_pinnedRenderKey.clear();
+		_pinnedTrackKey.reset();
 	}
 
 	_participantCount = 1 + static_cast<int>(_remoteParticipantNames.size());
@@ -4760,11 +4762,21 @@ void MeetingRoomWindow::bindTileInteractions(VideoTileWidget *tile) {
 
 void MeetingRoomWindow::setPinnedTile(const QString &renderKey, bool pinned) {
 	if (pinned) {
+		std::optional<livekit::LocalVideoTarget> local;
+		if (_localTile && renderKey == _localTile->renderKey()) {
+			local = livekit::LocalVideoTarget::Camera;
+		} else if (_localScreenTile && renderKey == _localScreenTile->renderKey()) {
+			local = livekit::LocalVideoTarget::ScreenShare;
+		}
+		const auto remote = local ? std::nullopt : trackKeyForRenderKey(renderKey);
+		if (!local && !remote) return;
 		_pinnedRenderKey = renderKey;
-		_pinnedTrackKey = trackKeyForRenderKey(renderKey);
+		_pinnedTrackKey = remote;
+		_pinnedLocalTarget = local;
 	} else if (_pinnedRenderKey == renderKey) {
 		_pinnedRenderKey.clear();
 		_pinnedTrackKey.reset();
+		_pinnedLocalTarget.reset();
 	}
 	scheduleViewportIntent(true);
 }
@@ -4924,6 +4936,7 @@ void MeetingRoomWindow::submitViewportIntent() {
 	intent.local_participant_present = _localTile != nullptr;
 	intent.local_screen_share_present = _localScreenTile != nullptr;
 	intent.pinned = _pinnedTrackKey;
+	intent.pinned_local = _pinnedLocalTarget;
 	intent.stage_content = _whiteboardVisible
 		? livekit::StageContent::Whiteboard
 		: livekit::StageContent::Video;
@@ -5051,10 +5064,15 @@ void MeetingRoomWindow::updateVideoLayout() {
 		_videoPagingControls->setVisible(_acceptedVideoPlan.page_count > 1);
 		_videoPagingControls->raise();
 	}
-	if (std::none_of(allTiles.begin(), allTiles.end(), [this](const auto *tile) {
-		return tile->renderKey() == _pinnedRenderKey;
-	})) _pinnedRenderKey.clear();
-	for (auto *tile : allTiles) tile->setPinned(tile->renderKey() == _pinnedRenderKey);
+	VideoTileWidget *pinnedTile = nullptr;
+	if (_acceptedVideoPlan.pinned_local == livekit::LocalVideoTarget::Camera) {
+		pinnedTile = _localTile;
+	} else if (_acceptedVideoPlan.pinned_local == livekit::LocalVideoTarget::ScreenShare) {
+		pinnedTile = _localScreenTile.get();
+	} else if (_acceptedVideoPlan.pinned) {
+		pinnedTile = remoteVideoTile(*_acceptedVideoPlan.pinned);
+	}
+	for (auto *tile : allTiles) tile->setPinned(tile == pinnedTile);
 	if (!_usingGpuBackend.load(std::memory_order_acquire)) {
 		for (auto *tile : allTiles) tile->setHardwareCanvasMode(false);
 	}
@@ -5082,8 +5100,9 @@ void MeetingRoomWindow::updateVideoLayout() {
 	// 1. 画中画模式 (PiP)
 	if (_acceptedVideoPlan.mode == livekit::VideoLayoutMode::PictureInPicture && N >= 2) {
 		VideoTileWidget *mainTile = allTiles[1];
-		if (_acceptedVideoPlan.focused) {
-			if (auto *focused = remoteVideoTile(*_acceptedVideoPlan.focused)) mainTile = focused;
+		if (auto *focused = focusedVideoTile();
+			focused && std::find(allTiles.begin(), allTiles.end(), focused) != allTiles.end()) {
+			mainTile = focused;
 		}
 		// One back-to-front order drives both QWidget stacking and DX11 drawing.
 		const auto main = std::find(allTiles.begin(), allTiles.end(), mainTile);
@@ -5113,10 +5132,9 @@ void MeetingRoomWindow::updateVideoLayout() {
 	// 2. 演讲者聚焦模式 (Speaker / Focus Mode)
 	if (_acceptedVideoPlan.mode == livekit::VideoLayoutMode::Speaker && N >= 2) {
 		VideoTileWidget *focusTile = allTiles[0];
-		if (_acceptedVideoPlan.focused) {
-			if (auto *focused = remoteVideoTile(*_acceptedVideoPlan.focused)) {
-				focusTile = focused;
-			}
+		if (auto *focused = focusedVideoTile();
+			focused && std::find(allTiles.begin(), allTiles.end(), focused) != allTiles.end()) {
+			focusTile = focused;
 		} else if (focusTile == _localTile && allTiles.size() > 1) {
 			focusTile = allTiles[1];
 		}
@@ -5486,6 +5504,16 @@ std::optional<livekit::TrackKey> MeetingRoomWindow::trackKeyForRenderKey(
 	return std::nullopt;
 }
 
+VideoTileWidget *MeetingRoomWindow::focusedVideoTile() const {
+	if (_acceptedVideoPlan.focused_local == livekit::LocalVideoTarget::Camera) {
+		return _localTile;
+	}
+	if (_acceptedVideoPlan.focused_local == livekit::LocalVideoTarget::ScreenShare) {
+		return _localScreenTile.get();
+	}
+	return _acceptedVideoPlan.focused ? remoteVideoTile(*_acceptedVideoPlan.focused) : nullptr;
+}
+
 VideoTileWidget *MeetingRoomWindow::ensureRemoteCameraTile(
 		const QString &identity,
 		const QString &name) {
@@ -5543,15 +5571,12 @@ void MeetingRoomWindow::applyAcceptedVideoDemandPlan(
 		_lastViewportIntent.reset();
 	}
 	_acceptedVideoPlan = std::move(plan);
-	if (_acceptedVideoPlan.stage_content == livekit::StageContent::Video &&
-		_acceptedVideoPlan.reason != livekit::VideoDemandReason::Hidden &&
-		_pinnedTrackKey &&
-		std::none_of(
-			_acceptedVideoPlan.visible_seats.begin(),
-			_acceptedVideoPlan.visible_seats.end(),
-			[this](const auto &seat) { return seat.key == *_pinnedTrackKey; })) {
-		_pinnedTrackKey.reset();
-		_pinnedRenderKey.clear();
+	// An older accepted plan must not overwrite a newer pin/unpin request.
+	if (!_lastViewportIntent ||
+		_acceptedVideoPlan.view_revision >= _lastViewportIntent->view_revision) {
+		_pinnedTrackKey = _acceptedVideoPlan.pinned;
+		_pinnedLocalTarget = _acceptedVideoPlan.pinned_local;
+		if (!_pinnedTrackKey && !_pinnedLocalTarget) _pinnedRenderKey.clear();
 	}
 	if (_acceptedVideoPlan.stage_content == livekit::StageContent::Video &&
 		_acceptedVideoPlan.reason != livekit::VideoDemandReason::Hidden) {
@@ -5967,7 +5992,10 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		bindTileInteractions(_localScreenTile.get());
 	} else if (!active && _localScreenTile) {
 		if (_videoCanvas) _videoCanvas->removeUser(_localScreenTile->renderKey().toStdString());
-		if (_pinnedRenderKey == _localScreenTile->renderKey()) _pinnedRenderKey.clear();
+		if (_pinnedLocalTarget == livekit::LocalVideoTarget::ScreenShare) {
+			_pinnedLocalTarget.reset();
+			_pinnedRenderKey.clear();
+		}
 		_localScreenTile.reset();
 	}
 	QResizeEvent layout(size(), size());

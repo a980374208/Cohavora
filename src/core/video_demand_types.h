@@ -57,6 +57,12 @@ struct LogicalViewport {
     int height = 0;
 };
 
+// Local previews are layout targets, never remote subscription TrackKeys.
+enum class LocalVideoTarget {
+    Camera,
+    ScreenShare,
+};
+
 struct ViewportIntent {
     uint64_t coordinator_session = 0;
     uint64_t view_revision = 0;
@@ -66,6 +72,8 @@ struct ViewportIntent {
     uint32_t page_size = 9;
     std::optional<TrackKey> page_anchor;
     std::optional<TrackKey> pinned;
+    // Mutually exclusive with pinned; a local target takes precedence.
+    std::optional<LocalVideoTarget> pinned_local;
     std::optional<TrackKey> selected_share;
     StageContent stage_content = StageContent::Video;
     LogicalViewport stage_rect;
@@ -100,6 +108,7 @@ struct VideoSeat {
 
 struct VideoDemandPlan {
     uint64_t coordinator_session = 0;
+    uint64_t view_revision = 0;
     uint64_t policy_revision = 0;
     uint64_t catalog_revision = 0;
     VideoLayoutMode requested_mode = VideoLayoutMode::Auto;
@@ -109,6 +118,11 @@ struct VideoDemandPlan {
     uint32_t page_size = 0;
     uint32_t page_count = 1;
     std::optional<TrackKey> focused;
+    std::optional<LocalVideoTarget> focused_local;
+    // Validated pin, including while the stage is hidden. UI decorations use
+    // this accepted state rather than the pending viewport request.
+    std::optional<TrackKey> pinned;
+    std::optional<LocalVideoTarget> pinned_local;
     std::optional<TrackKey> stable_speaker;
     std::vector<VideoSeat> visible_seats;
     std::vector<TrackKey> selected_video;
