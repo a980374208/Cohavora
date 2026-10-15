@@ -65,7 +65,8 @@ bool PublicationCatalog::Consumes(ParticipantEventKind kind) {
 
 CatalogApplyResult PublicationCatalog::Apply(const ParticipantEvent& event) {
     if (!accepting_) return CatalogApplyResult::RejectedRetired;
-    if (!Consumes(event.kind) || event.participant.is_local) {
+    if (!Consumes(event.kind) ||
+        (event.participant.is_local && event.kind != ParticipantEventKind::Upsert)) {
         return CatalogApplyResult::NoChange;
     }
 
@@ -85,6 +86,14 @@ CatalogApplyResult PublicationCatalog::Apply(const ParticipantEvent& event) {
         return CatalogApplyResult::RejectedStale;
     }
     bool changed = InstallGeneration(native_generation);
+
+    if (event.participant.is_local) {
+        // Local membership establishes the room generation even in a solo room,
+        // but local previews must never enter the remote subscription catalog.
+        if (!changed) return CatalogApplyResult::NoChange;
+        Changed();
+        return CatalogApplyResult::Applied;
+    }
 
     if (event.kind == ParticipantEventKind::Departure) {
         const auto size = snapshot_.participants.size();
