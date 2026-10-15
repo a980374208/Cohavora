@@ -302,10 +302,22 @@ std::vector<const RemotePublicationInfo*> VideoDemandPolicy::OrderedVideo() cons
 std::vector<VideoDemandPolicy::SeatCandidate> VideoDemandPolicy::OrderedSeats() const {
     std::vector<SeatCandidate> result;
     if (!catalog_) return result;
+    std::vector<const PublicationCatalogParticipant*> participants;
+    participants.reserve(catalog_->participants.size());
     for (const auto& participant : catalog_->participants) {
-        if (participant.key.native_room_generation != catalog_->native_room_generation) continue;
+        if (participant.key.native_room_generation == catalog_->native_room_generation) {
+            participants.push_back(&participant);
+        }
+    }
+    // Roster replay order and native SIDs can change on reconnect. Business
+    // identity fixes page membership; full TrackKeys still govern lifetimes.
+    std::sort(participants.begin(), participants.end(), [](const auto* left, const auto* right) {
+        return std::tie(left->key.identity, left->key.sid, left->key.incarnation) <
+            std::tie(right->key.identity, right->key.sid, right->key.incarnation);
+    });
+    for (const auto* participant : participants) {
         std::vector<const RemotePublicationInfo*> publications;
-        for (const auto& publication : participant.publications) {
+        for (const auto& publication : participant->publications) {
             if (publication.kind == TrackKind::Video &&
                 publication.key.participant.native_room_generation ==
                     catalog_->native_room_generation) {
@@ -323,7 +335,7 @@ std::vector<VideoDemandPolicy::SeatCandidate> VideoDemandPolicy::OrderedSeats() 
             result.push_back({publication->key, publication->source, publication});
         }
         if (publications.empty()) {
-            result.push_back({{participant.key, 0, {}}, TrackSource::Camera, nullptr});
+            result.push_back({{participant->key, 0, {}}, TrackSource::Camera, nullptr});
         }
     }
     return result;
