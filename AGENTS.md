@@ -38,3 +38,8 @@ Windows 的 Visual Studio/MSBuild 构建首次执行时直接申请获准环境�
 使用 `CMakePresets.json` 中与当前工具链匹配的产品预设。多配置 generator 构建须明确指定 `--config`；性能与指标分析使用 `RelWithDebInfo`，Debug 仅作调试参考。不混用不同 CRT、Qt 或 WebRTC ABI。
 
 修改 bug 后说明根因；有明确下一步建议时在完成回答末尾给出。
+
+## 验收与报告
+
+- 验收报告默认以 HTML 形式存放到 `samples\acceptance`。
+- 后续验收测试计划统一维护于 `samples/acceptance/data/test-plan.json`。新增或调整测试时，优先合并到现有验收组及子门，避免另建重复清单或执行入口；批次汇总、历史结果与辅助诊断不重复计作产品验收项。
