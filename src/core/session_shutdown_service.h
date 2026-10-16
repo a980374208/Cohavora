@@ -8,8 +8,10 @@
 #include <QtCore/QThread>
 
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdint>
 #include <deque>
 #include <exception>
 #include <functional>
@@ -155,14 +157,27 @@ private:
 class SessionShutdownService final {
 public:
     using Completion = std::function<void(std::exception_ptr)>;
+    struct HeapMaintenanceResult {
+        bool platformAvailable = false;
+        bool succeeded = false;
+        bool callbackThrew = false;
+        std::uint32_t error = 0;
+    };
+    using HeapMaintenance = std::function<HeapMaintenanceResult()>;
+    struct HeapMaintenanceObservation {
+        std::uint64_t attempts = 0;
+        std::int64_t elapsedMicroseconds = 0;
+        HeapMaintenanceResult result;
+    };
 
     static SessionShutdownService& Instance() {
         static SessionShutdownService service;
         return service;
     }
 
-    SessionShutdownService()
+    explicit SessionShutdownService(HeapMaintenance maintenance = {})
         : state_(std::make_shared<State>()) {
+        state_->maintenance = maintenance ? std::move(maintenance) : HeapMaintenance(OptimizeDefaultHeap);
         state_->endpoint = detail::QtDispatchEndpoint::Create();
         Q_ASSERT(state_->endpoint);
         state_->worker = std::thread([state = state_] { Run(state); });
@@ -204,18 +219,42 @@ public:
     // fail before destroying the native owner on the caller's (possibly UI)
     // thread. Revoke/retire all producers before asking the service to stop.
     bool SubmitCleanup(std::function<void()> job, Completion completed = {}) {
+        return EnqueueCleanup(std::move(job), std::move(completed), false);
+    }
+
+    // Only a real session's native retirement requests optional default-heap
+    // maintenance. Capture/history jobs must use SubmitCleanup instead.
+    bool SubmitSessionCleanup(std::function<void()> job, Completion completed = {}) {
+        return EnqueueCleanup(std::move(job), std::move(completed), true);
+    }
+
+    // Quit closes this before retiring session producers. Cleanup admission
+    // remains open; an already claimed maintenance call finishes normally.
+    void CloseHeapMaintenanceAdmission() {
+        std::lock_guard lock(state_->mutex);
+        state_->heapMaintenanceAccepting = false;
+    }
+
+    HeapMaintenanceObservation heapMaintenanceObservation() const {
+        std::lock_guard lock(state_->mutex);
+        return state_->maintenanceObservation;
+    }
+
+private:
+    bool EnqueueCleanup(std::function<void()> job, Completion completed, bool maintainHeap) {
         if (!job) return false;
         auto state = state_;
         {
             std::lock_guard lock(state->mutex);
             if (state->workerExiting) std::terminate();
-            state->jobs.push_back({std::move(job), std::move(completed), true});
+            state->jobs.push_back({std::move(job), std::move(completed), true, maintainHeap});
             ++state->pending;
         }
         state->wake.notify_one();
         return true;
     }
 
+public:
     std::size_t pending() const {
         std::lock_guard lock(state_->mutex);
         return state_->pending;
@@ -260,6 +299,7 @@ private:
         std::function<void()> run;
         Completion completed;
         bool retainOnFailure = false;
+        bool maintainHeap = false;
     };
 
     struct State {
@@ -279,6 +319,9 @@ private:
         bool workerExiting = false;
         bool workerExited = false;
         std::thread worker;
+        HeapMaintenance maintenance;
+        HeapMaintenanceObservation maintenanceObservation;
+        bool heapMaintenanceAccepting = true;
     };
 
     static void AssertOnApplicationThread() {
@@ -330,6 +373,55 @@ private:
         }
     }
 
+    static HeapMaintenanceResult OptimizeDefaultHeap() noexcept {
+        HeapMaintenanceResult result;
+#if defined(_WIN32)
+        result.platformAvailable = true;
+        HEAP_OPTIMIZE_RESOURCES_INFORMATION information{HEAP_OPTIMIZE_RESOURCES_CURRENT_VERSION, 0};
+        result.succeeded = ::HeapSetInformation(::GetProcessHeap(), HeapOptimizeResources,
+            &information, sizeof(information)) != FALSE;
+        if (!result.succeeded) result.error = ::GetLastError();
+#endif
+        return result;
+    }
+
+    static void MaintainHeapAfterSessionCleanup(const std::shared_ptr<State>& state) {
+        {
+            std::lock_guard lock(state->mutex);
+            // The current successful job still owns its pending slot. This is
+            // claim-time queue idleness, not a fence against concurrent joins
+            // or allocations. Never hold this mutex during the platform call.
+            if (state->pending != 1 || !state->jobs.empty() || !state->failedJobs.empty()
+                || !state->heapMaintenanceAccepting || !state->accepting
+                || state->stopping || state->workerExiting) return;
+        }
+        const auto start = std::chrono::steady_clock::now();
+        HeapMaintenanceResult result;
+        try {
+            result = state->maintenance();
+        } catch (...) {
+            result.callbackThrew = true;
+        }
+        const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now() - start).count();
+        std::uint64_t attempts = 0;
+        {
+            std::lock_guard lock(state->mutex);
+            auto& observation = state->maintenanceObservation;
+            attempts = ++observation.attempts;
+            observation.elapsedMicroseconds = elapsed;
+            observation.result = result;
+        }
+        // Primitive, address-free observations only. Logging failure must not
+        // turn an optional maintenance attempt into failed native cleanup.
+        try {
+            qInfo() << "Default heap session maintenance: attempt=" << attempts
+                << "available=" << result.platformAvailable << "succeeded=" << result.succeeded
+                << "error=" << result.error << "callback_threw=" << result.callbackThrew
+                << "elapsed_us=" << elapsed;
+        } catch (...) { }
+    }
+
     static void Run(const std::shared_ptr<State>& state) {
 #if defined(_WIN32)
         const auto comResult = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
@@ -367,6 +459,11 @@ private:
                 // Destroy native owners before reporting quiescence. Their
                 // destructors can themselves perform cleanup.
                 job.run = {};
+            }
+            if (!failure && job.maintainHeap) {
+                // Native captures were destroyed above; keep pending until
+                // maintenance finishes and only then deliver completion/drain.
+                MaintainHeapAfterSessionCleanup(state);
             }
             if (job.completed) {
                 Post(state, [callback = std::move(job.completed), failure] {

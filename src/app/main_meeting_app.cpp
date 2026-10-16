@@ -211,6 +211,13 @@ int main(int argc, char *argv[]) {
 	auto& shutdownService = OpenMeeting::SessionShutdownService::Instance();
 	const auto pilotPath = qEnvironmentVariable("LIVEKIT_UIA_PILOT_PROBE");
 	const auto pilotRun = qEnvironmentVariable("LIVEKIT_UIA_RUN_ID");
+	// This intervention is opt-in and belongs only to a bounded diagnostic run.
+	// It is never enabled by the normal PILOT/formal runner.
+	const auto heapOptimizeGeneration =
+		qEnvironmentVariable("LIVEKIT_UIA_HEAP_OPTIMIZE_RELEASED_GENERATION");
+	const auto heapDiagnosticAction = qEnvironmentVariable("LIVEKIT_UIA_HEAP_OPTIMIZE_ACTION");
+	const bool heapDiagnosticActionValid = heapDiagnosticAction.isEmpty() ||
+		heapDiagnosticAction == QStringLiteral("observe") || heapDiagnosticAction == QStringLiteral("optimize");
 	if (debugLogin.debugEnabled && !pilotPath.isEmpty() && pilotRun.size() == 32 &&
 		std::all_of(pilotRun.begin(), pilotRun.end(), [](QChar c) {
 			return (c >= QLatin1Char('0') && c <= QLatin1Char('9')) ||
@@ -222,7 +229,18 @@ int main(int argc, char *argv[]) {
 			std::filesystem::path(diagnosticRoot.toStdWString()),
 			[&shutdownService] { return shutdownService.pending(); },
 			[pilotParticipant] { return pilotParticipant->load(std::memory_order_acquire); },
-			qEnvironmentVariable("LIVEKIT_UIA_GPU_BUDGET_PROBE") == QStringLiteral("1"));
+			qEnvironmentVariable("LIVEKIT_UIA_GPU_BUDGET_PROBE") == QStringLiteral("1"),
+			heapOptimizeGeneration == QStringLiteral("3") && heapDiagnosticActionValid ? 3 : 0,
+			qEnvironmentVariable("LIVEKIT_UIA_HEAP_PAGE_JOURNAL") == QStringLiteral("1"),
+			heapDiagnosticAction == QStringLiteral("observe") ? product_heap_diagnostic::Action::Observe :
+				product_heap_diagnostic::Action::Optimize,
+			[&shutdownService] {
+				const auto observation = shutdownService.heapMaintenanceObservation();
+				return MeetingApp::HeapMaintenanceSnapshot{
+					observation.attempts, observation.result.platformAvailable,
+					observation.result.succeeded, observation.result.error,
+					observation.result.callbackThrew, observation.elapsedMicroseconds};
+			});
 	}
 	app.setWindowIcon(QIcon(QStringLiteral(":/meeting-ui/icons/cohavora.svg")));
 	MeetingUI::AppTranslation::install(app,
@@ -285,6 +303,7 @@ int main(int argc, char *argv[]) {
 	app.setQuitOnLastWindowClosed(false);
 	MeetingApp::AsyncShutdownGuard shutdownGuard(app,
 		[&](std::function<void()> finished) {
+			shutdownService.CloseHeapMaintenanceAdmission();
 			// Close producers before closing cleanup admission. Meeting windows
 			// are heap-owned, WA_DeleteOnClose widgets; explicitly destroy any
 			// remaining hidden ones so their coordinators cannot enqueue later.

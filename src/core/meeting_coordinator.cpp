@@ -4164,7 +4164,7 @@ void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
         return;
     }
 
-    SessionShutdownService::Instance().SubmitCleanup(
+    SessionShutdownService::Instance().SubmitSessionCleanup(
         [resources, audioCapture, videoCapture, stability, stabilityId] {
             const auto runtime = resources->runtime;
             // This wait runs only on the cleanup worker. The I/O executor keeps
