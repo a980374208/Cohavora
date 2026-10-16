@@ -3,6 +3,7 @@
 // WDDM scheduler packet counters for the actual calling process. Memory nodes
 // (DXGI/D3D12) and scheduler/engine nodes (D3DKMT) are different enumerations.
 #include <chrono>
+#include <atomic>
 #include <cstdint>
 #include <sstream>
 #include <utility>
@@ -15,6 +16,11 @@
 #endif
 
 namespace product_gpu_witness {
+#if defined(_WIN32)
+constexpr std::uint64_t LuidBits(const LUID& luid) noexcept {
+    return (std::uint64_t(static_cast<std::uint32_t>(luid.HighPart)) << 32) | luid.LowPart;
+}
+#endif
 class QueueSampler final {
 public:
     QueueSampler() {
@@ -23,13 +29,19 @@ public:
         query_ = module_.value ? reinterpret_cast<Query>(GetProcAddress(module_.value, "D3DKMTQueryStatistics")) : nullptr;
         process_.value = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, GetCurrentProcessId());
         process_error_ = process_.value ? ERROR_SUCCESS : GetLastError();
+        sampler_generation_ = next_generation_.fetch_add(1, std::memory_order_relaxed) + 1;
+        FILETIME created{}, exited{}, kernel{}, user{};
+        identity_query_succeeded_ = process_.value && GetProcessTimes(process_.value, &created, &exited, &kernel, &user);
+        identity_error_ = identity_query_succeeded_ ? ERROR_SUCCESS : (process_.value ? GetLastError() : process_error_);
+        identity_pid_ = process_.value ? GetProcessId(process_.value) : 0;
+        process_start_filetime_ = (std::uint64_t(created.dwHighDateTime) << 32) | created.dwLowDateTime;
         initialization_ = CreateDXGIFactory1(IID_PPV_ARGS(&factory_));
         if (FAILED(initialization_)) return;
         for (UINT ordinal = 0; ; ++ordinal) {
             Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
             const auto enumerated = factory_->EnumAdapters1(ordinal, &adapter);
-            if (enumerated == DXGI_ERROR_NOT_FOUND) break;
-            if (FAILED(enumerated)) { initialization_ = enumerated; break; }
+            if (enumerated == DXGI_ERROR_NOT_FOUND) { enumeration_terminal_ = enumerated; enumeration_complete_ = true; break; }
+            if (FAILED(enumerated)) { initialization_ = enumerated; enumeration_terminal_ = enumerated; break; }
             DXGI_ADAPTER_DESC1 desc{};
             const auto described = adapter->GetDesc1(&desc);
             if (SUCCEEDED(described) && (desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) continue;
@@ -37,7 +49,8 @@ public:
             entry.ordinal = ordinal;
             entry.described = described;
             if (SUCCEEDED(described)) {
-                entry.luid = desc.AdapterLuid; // Used internally; no hardware identifier is emitted.
+                entry.luid = desc.AdapterLuid; // Literal identity is emitted only in the run-scoped diagnostic sample.
+                entry.flags = desc.Flags;
                 if (query_) {
                     D3DKMT_QUERYSTATISTICS stats{};
                     stats.Type = D3DKMT_QUERYSTATISTICS_ADAPTER;
@@ -67,13 +80,21 @@ public:
         process_available = process_.value != nullptr;
         topology_current = factory_.Get() != nullptr && factory_->IsCurrent() != FALSE;
         all_valid = SUCCEEDED(initialization_) && query_available && process_available && topology_current && !adapters_.empty();
+        const bool topology_before = topology_current;
+        FILETIME sample_begin{}; GetSystemTimePreciseAsFileTime(&sample_begin);
+        const auto begin_filetime = (std::uint64_t(sample_begin.dwHighDateTime) << 32) | sample_begin.dwLowDateTime;
         bool first = true;
         for (const auto& entry : adapters_) {
             if (!first) rows << ',';
             first = false;
             const bool nodes_known = SUCCEEDED(entry.described) && entry.status >= 0 && entry.nodes > 0;
             all_valid = all_valid && nodes_known;
-            rows << "{\"adapter_ordinal\":" << entry.ordinal << ",\"scheduler_node_count\":" << entry.nodes
+            rows << "{\"adapter_ordinal\":" << entry.ordinal << ",\"adapter_luid_u64\":";
+            if (SUCCEEDED(entry.described)) rows << LuidBits(entry.luid); else rows << "null";
+            rows << ",\"description_hresult\":" << static_cast<std::uint32_t>(entry.described)
+                 << ",\"adapter_flags\":";
+            if (SUCCEEDED(entry.described)) rows << entry.flags; else rows << "null";
+            rows << ",\"scheduler_node_count\":" << entry.nodes
                  << ",\"adapter_ntstatus\":" << static_cast<std::uint32_t>(entry.status) << ",\"nodes\":[";
             for (UINT node = 0; node < entry.nodes; ++node) {
                 if (node) rows << ',';
@@ -123,6 +144,9 @@ public:
             }
             rows << "]}";
         }
+        const bool topology_after = factory_.Get() != nullptr && factory_->IsCurrent() != FALSE;
+        FILETIME sample_end{}; GetSystemTimePreciseAsFileTime(&sample_end);
+        const auto end_filetime = (std::uint64_t(sample_end.dwHighDateTime) << 32) | sample_end.dwLowDateTime;
 #endif
         std::ostringstream out;
         out << "{\"collector\":\"wddm_process_packet_statistics\",\"pid\":" << pid
@@ -134,7 +158,22 @@ public:
             << ",\"process_error\":" << process_error
             << ",\"topology_current\":" << (topology_current ? "true" : "false")
             << ",\"adapters\":[" << rows.str() << "],\"elapsed_us\":"
-            << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count() << '}';
+            << std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - began).count();
+#if defined(_WIN32)
+        out << ",\"ordinal_luid_receipt\":{\"schema\":1,\"sampler_generation\":" << sampler_generation_
+            << ",\"process_identity_valid\":" << (identity_query_succeeded_ && identity_pid_ == pid ? "true" : "false")
+            << ",\"process_identity_actual_pid\":" << identity_pid_
+            << ",\"process_times_query_error\":" << identity_error_
+            << ",\"process_start_filetime_100ns\":";
+        if (identity_query_succeeded_) out << process_start_filetime_; else out << "null";
+        out << ",\"hardware_enumeration_complete\":" << (enumeration_complete_ ? "true" : "false")
+            << ",\"enumeration_terminal_hresult\":" << static_cast<std::uint32_t>(enumeration_terminal_)
+            << ",\"topology_before\":" << (topology_before ? "true" : "false")
+            << ",\"topology_after\":" << (topology_after ? "true" : "false")
+            << ",\"sample_begin_filetime_100ns\":" << begin_filetime
+            << ",\"sample_end_filetime_100ns\":" << end_filetime << '}';
+#endif
+        out << '}';
         return out.str();
     }
 private:
@@ -145,10 +184,16 @@ private:
     struct Adapter {
         UINT ordinal = 0;
         LUID luid{};
+        UINT flags = 0;
         UINT nodes = 0;
         HRESULT described = E_FAIL;
         NTSTATUS status = static_cast<NTSTATUS>(0xc0000002u);
     };
+    inline static std::atomic<std::uint64_t> next_generation_{0};
+    std::uint64_t sampler_generation_ = 0, process_start_filetime_ = 0;
+    bool enumeration_complete_ = false, identity_query_succeeded_ = false;
+    DWORD identity_error_ = ERROR_SUCCESS, identity_pid_ = 0;
+    HRESULT enumeration_terminal_ = E_PENDING;
     Query query_ = nullptr;
     DWORD process_error_ = ERROR_SUCCESS;
     HRESULT initialization_ = E_FAIL;
