@@ -1,4 +1,5 @@
 #pragma once
+#include "src/telemetry/ui_timing_measurement.h"
 
 #include "base/basic_types.h"
 #include "ui/widgets/rp_window.h"
@@ -17,6 +18,7 @@
 
 #include <memory>
 #include <optional>
+#include <utility>
 
 namespace OpenMeeting {
 enum class SessionInvalidationReason;
@@ -76,6 +78,8 @@ public:
 	std::optional<livekit::MeetingEncryptionRequest> takeEncryptionRequest();
 	void setMeetingPassword(const QString &password);
 
+	std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> takeJoinTiming() { return std::exchange(_joinTiming, {}); }
+	std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> takePageTiming() { return std::exchange(_pageTiming, {}); }
 	void accept() override;
 	void reject() override;
 
@@ -90,6 +94,8 @@ private slots:
 	void toggleManualServer();
 
 private:
+	std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> _joinTiming;
+	std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> _pageTiming;
 	void scheduleFormFit();
 	void fitFormToScreen();
 	void setLoading(bool loading, const QString &statusText = QString());

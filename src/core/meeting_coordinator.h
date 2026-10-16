@@ -1,4 +1,5 @@
 #pragma once
+#include "src/telemetry/ui_timing_measurement.h"
 
 #include <QtCore/QObject>
 #include <QtCore/QString>
@@ -179,6 +180,12 @@ public:
 
     // 优雅退会管理 (普通离开 vs 主持人结束全员会议)
     void leaveMeetingAsync(bool endMeetingForAll = false);
+    void observePageTiming(std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> sample) { _pageTiming = std::move(sample); }
+    auto pageTiming() const { return _pageTiming; }
+    auto joinTiming() const { return _joinTiming; }
+    void observeJoinTiming(std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> sample) { _joinTiming = std::move(sample); }
+    std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> beginLeaveTiming();
+
 
     // 本地媒体控制
     void setLocalAudioMuted(bool muted);
@@ -587,6 +594,9 @@ private:
     std::atomic<bool> _sessionRunning{false};
     // Qt-thread owned session state. Startup and transport recovery complete on
     // separate callbacks, so neither may independently clear Reconnecting.
+    std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> _pageTiming;
+    std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> _joinTiming;
+    std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> _leaveTiming;
     bool _startupCommitted = false;
     bool _startupReconnectPending = false;
     bool _startupListenOnly = false;

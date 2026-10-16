@@ -11,6 +11,7 @@
 #include "src/ui/meeting_list_dialog.h"
 #include "src/ui/login_dialog.h"
 #include "src/ui/settings_dialog.h"
+#include "src/ui/ui_timing_observer.h"
 #include "src/ui/shadow_helper.h"
 #include "src/ui/telemetry_dialogs.h"
 #include "src/core/meeting_catalog_controller.h"
@@ -487,6 +488,8 @@ bool JoinMeetingDialog::prepareEncryptionRequest() {
 		}
 		request.Validate();
 	} catch (const livekit::EncryptionRequestException &) {
+		if (_joinTiming) _joinTiming->Finish(livekit::diagnostic::Outcome::Failure);
+		if (_pageTiming) _pageTiming->Finish(livekit::diagnostic::Outcome::Failure);
 		revokeEncryptionRequest();
 		_encryptionError->setText(QCoreApplication::translate("MeetingUI",
 			_globalEncryption
@@ -533,6 +536,8 @@ void JoinMeetingDialog::toggleManualServer() {
 }
 
 void JoinMeetingDialog::reject() {
+	if (_pageTiming) _pageTiming->Finish(livekit::diagnostic::Outcome::Cancelled);
+	if (_joinTiming) _joinTiming->Finish(livekit::diagnostic::Outcome::Cancelled);
 	_isCancelled = true;
 	_isLoading = false;
 	clearEncryptionEditor();
@@ -541,6 +546,8 @@ void JoinMeetingDialog::reject() {
 }
 
 void JoinMeetingDialog::closeEvent(QCloseEvent *e) {
+	if (_joinTiming) _joinTiming->Finish(livekit::diagnostic::Outcome::Cancelled);
+	if (_pageTiming) _pageTiming->Finish(livekit::diagnostic::Outcome::Cancelled);
 	_isCancelled = true;
 	_isLoading = false;
 	clearEncryptionEditor();
@@ -575,6 +582,8 @@ void JoinMeetingDialog::setLoading(bool loading, const QString &statusText) {
 }
 
 void JoinMeetingDialog::showError(const QString &msg) {
+	if (_pageTiming) _pageTiming->Finish(livekit::diagnostic::Outcome::Failure);
+	if (_joinTiming) _joinTiming->Finish(livekit::diagnostic::Outcome::Failure);
 	if (!_statusLabel) return;
 	MeetingUI::AppTheme::setStyleVariant(*_statusLabel, "meeting-main-window-statuslabel-3");
 	_statusLabel->setText(msg);
@@ -584,6 +593,10 @@ void JoinMeetingDialog::showError(const QString &msg) {
 
 void JoinMeetingDialog::onJoinClicked() {
 	if (_isLoading) return;
+	_joinTiming = std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
+		livekit::diagnostic::TimingMetric::JoinReady, livekit::diagnostic::TimingScene::Meeting);
+	_pageTiming = std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
+		livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Meeting);
 
 	// 1. 检查是否启用了高级手动直连模式
 	_isManualConnection = _manualWidget && _manualWidget->isVisible()
@@ -1025,6 +1038,8 @@ void MeetingMainWindow::openQuickMeeting(
 	config.videoEnabled = prefs.enableVideo;
 	config.invitationMode = InvitationMode::BusinessMeetingId;
 
+	if (!coordinator->pageTiming()) coordinator->observePageTiming(std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
+		livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Meeting));
 	auto *roomWindow = new MeetingRoomWindow(config, coordinator);
 	reservation->setParent(roomWindow);
 	reservation.release();
@@ -1098,6 +1113,8 @@ void MeetingMainWindow::openJoinMeetingDialog(
 	auto encryption = dialog.takeEncryptionRequest();
 	if (!encryption) return;
 	auto coordinator = OpenMeeting::MeetingCoordinator::create();
+	coordinator->observeJoinTiming(dialog.takeJoinTiming());
+	coordinator->observePageTiming(dialog.takePageTiming());
 	auto preferences = OpenMeeting::SessionManager::instance().mediaPreferences();
 	preferences.enableMicrophone = !dialog.isAudioMuted();
 	preferences.enableVideo = !dialog.isVideoMuted();
@@ -1113,10 +1130,14 @@ void MeetingMainWindow::openJoinMeetingDialog(
 		(!meetingSettings || !meetingSettings->disableCameraOnJoin);
 	preferences.enableMicrophone = !config.audioMuted;
 	preferences.enableVideo = config.videoEnabled;
+	if (auto sample = coordinator->joinTiming())
+		sample->Media(!config.audioMuted, config.videoEnabled, false, false);
 	config.invitationMode = dialog.isManualConnection()
 		? InvitationMode::Disabled
 		: InvitationMode::BusinessMeetingId;
 
+	if (!coordinator->pageTiming()) coordinator->observePageTiming(std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
+		livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Meeting));
 	auto *roomWindow = new MeetingRoomWindow(config, coordinator);
 	reservation->setParent(roomWindow);
 	reservation.release();
@@ -1250,6 +1271,8 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 		config.invitationMode = InvitationMode::BusinessMeetingId;
 
 		auto coordinator = OpenMeeting::MeetingCoordinator::create();
+		if (!coordinator->pageTiming()) coordinator->observePageTiming(std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
+			livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Meeting));
 		auto *roomWindow = new MeetingRoomWindow(config, coordinator);
 		reservation->setParent(roomWindow);
 		reservation.release();

@@ -484,6 +484,7 @@ public:
 	void onMeetingDetailUpdated(const OpenMeeting::MeetingDetail &detail);
 	void onHostRoleChanged(const QString &newHostId, const QString &operatorName);
 	void handleEndMeetingClicked();
+	void beginLeaveTimingObservation();
 	livekit::render::RenderDiagnostics renderDiagnostics() const { return _renderDiagnostics; }
 
 protected:

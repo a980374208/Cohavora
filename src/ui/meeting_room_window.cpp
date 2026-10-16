@@ -3,6 +3,7 @@
 #include "src/core/session_shutdown_service.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/meeting_room_window.h"
+#include "src/ui/ui_timing_observer.h"
 #include "src/ui/screen_share_quality_controls.h"
 #include "src/ui/remote_control_ui.h"
 #include "src/ui/whiteboard/accessible_combo_box.h"
@@ -2982,6 +2983,19 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 
 	_preparingMedia = true;
 	initLayout();
+	if (auto sample = _coordinator->pageTiming())
+		new FirstPaintTimingObserver(_bottomBar, sample);
+	if (auto sample = _coordinator->joinTiming()) {
+		connect(this, &QObject::destroyed, QCoreApplication::instance(), [sample] {
+            sample->Finish(livekit::diagnostic::Outcome::Cancelled);
+        });
+		QPointer<MeetingRoomWindow> window(this);
+		ObserveTimingBoundary(sample, [window] {
+            return window && window->isVisible() && window->_coordinator &&
+                window->_coordinator->state() == OpenMeeting::MeetingState::InMeeting &&
+                window->_coordinator->canStartScreenShare();
+        });
+	}
 	setupCoordinatorBindings();
 	_coordinator->setLocalAudioMuted(_config.audioMuted);
 	_coordinator->setLocalVideoEnabled(_config.videoEnabled);
@@ -6515,6 +6529,19 @@ void MeetingRoomWindow::onHostRoleChanged(const QString &newHostId, const QStrin
 	                         QCoreApplication::translate("MeetingUI", "Participant [%1] is now the host").arg(newHostId));
 }
 
+void MeetingRoomWindow::beginLeaveTimingObservation() {
+	if (!_coordinator) return;
+	auto sample = _coordinator->beginLeaveTiming();
+	QPointer<MeetingRoomWindow> room(this);
+	QPointer<QWidget> before;
+	for (auto *widget : QApplication::topLevelWidgets()) {
+		if (widget->objectName() == QStringLiteral("MeetingMainWindow")) { before = widget; break; }
+	}
+	ObserveTimingBoundary(sample, [room, before] {
+		return (!room || !room->isVisible()) && before && before->isVisible();
+	});
+}
+
 void MeetingRoomWindow::handleEndMeetingClicked() {
 	if (_preparingMedia) { close(); return; }
 	if (_coordinator && _coordinator->isHost()) {
@@ -6530,12 +6557,14 @@ void MeetingRoomWindow::handleEndMeetingClicked() {
 		cancelBtn->setObjectName(QStringLiteral("meetingLeaveCancel"));
 		box.exec();
 		if (box.clickedButton() == leaveBtn) {
+			beginLeaveTimingObservation();
 			QPointer<MeetingRoomWindow> guard(this);
 			stopLiveKitSession(false);
 			if (!guard) return;
 			_coordinator->leaveMeetingAsync(false);
 			if (guard) guard->close();
 		} else if (box.clickedButton() == endBtn) {
+			beginLeaveTimingObservation();
 			QPointer<MeetingRoomWindow> guard(this);
 			stopLiveKitSession(false);
 			if (!guard) return;
@@ -6551,6 +6580,7 @@ void MeetingRoomWindow::handleEndMeetingClicked() {
 		box.button(QMessageBox::Yes)->setObjectName(QStringLiteral("meetingLeaveConfirm"));
 		box.button(QMessageBox::No)->setObjectName(QStringLiteral("meetingLeaveCancel"));
 		if (box.exec() == QMessageBox::Yes) {
+			beginLeaveTimingObservation();
 			QPointer<MeetingRoomWindow> guard(this);
 			stopLiveKitSession(false);
 			if (!guard) return;

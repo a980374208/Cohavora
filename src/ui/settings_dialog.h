@@ -1,4 +1,5 @@
 #pragma once
+#include "src/telemetry/ui_timing_measurement.h"
 
 #include "src/net/session_manager.h"
 #include "src/ui/camera_device_discovery.h"
@@ -130,6 +131,7 @@ private:
 	CameraDeviceDiscovery::Request _cameraRequest;
 	std::shared_ptr<OpenMeeting::QtCallbackGate<SettingsDialog>> _cameraCallbacks;
 	CameraDeviceDiscovery::Clock::time_point _clickedAt;
+	std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> _paintTiming;
 	bool _firstPaintScheduled = false;
 	bool _firstPaintReported = false;
 	bool _forceDeviceRefresh = false;

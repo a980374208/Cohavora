@@ -762,6 +762,23 @@ std::string DiagnosticFileSink::Serialize(const Event& event) const {
             attributes["threshold_us"] = event.stall_threshold_us;
         }
         break;
+    case EventKind::UiTiming:
+        attributes["audio_requested"] = event.timing_audio_requested;
+        attributes["video_requested"] = event.timing_video_requested;
+        attributes["audio_ready"] = event.timing_audio_ready;
+        attributes["video_ready"] = event.timing_video_ready;
+        attributes["definition_version"] = "2026-10-16-v1";
+        attributes["clock_domain"] = "process_steady_clock_us";
+        attributes["metric"] = event.timing_metric == TimingMetric::JoinReady ? "join_ready"
+            : event.timing_metric == TimingMetric::LeaveComplete ? "leave_complete" : "ui_first_paint";
+        attributes["scene"] = event.timing_scene == TimingScene::Meeting ? "meeting" : "settings";
+        attributes["phase"] = event.timing_phase == TimingPhase::Started ? "started"
+            : event.timing_phase == TimingPhase::Bound ? "bound" : "terminal";
+        attributes["begin_us"] = event.interval_begin_us;
+        attributes["end_us"] = event.interval_end_us ? nlohmann::json(event.interval_end_us) : nlohmann::json(nullptr);
+        attributes["elapsed_us"] = event.interval_end_us ? nlohmann::json(event.interval_end_us - event.interval_begin_us) : nlohmann::json(nullptr);
+        attributes["missing_reason"] = event.outcome == Outcome::Success || event.outcome == Outcome::DegradedSuccess ? "none" : "boundary_not_completed";
+        break;
     case EventKind::SettingsFirstPaint:
         attributes["measurement_point"] = "click_to_first_qt_paint_completed";
         break;

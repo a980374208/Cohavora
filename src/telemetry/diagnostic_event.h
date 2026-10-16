@@ -71,7 +71,12 @@ enum class EventKind : std::uint8_t {
     RenderStallInterval,
     SettingsFirstPaint,
     SettingsDeviceProbe,
+    UiTiming,
 };
+
+enum class TimingMetric : std::uint8_t { JoinReady, LeaveComplete, UiFirstPaint };
+enum class TimingScene : std::uint8_t { Meeting, Settings };
+enum class TimingPhase : std::uint8_t { Started, Bound, Terminal };
 
 enum class MediaObservation : std::uint8_t { FirstDecoded, FirstPcm, FirstRender };
 enum class StallBoundary : std::uint8_t { Open, Recovered, Hidden, Rebound, Stopped, Inactive };
@@ -261,6 +266,13 @@ struct Event final {
     std::uint64_t dropped = 0;
     std::uint64_t queue_high_water = 0;
     std::uint64_t bytes = 0;
+    bool timing_audio_requested = false;
+    bool timing_video_requested = false;
+    bool timing_audio_ready = false;
+    bool timing_video_ready = false;
+    TimingMetric timing_metric = TimingMetric::JoinReady;
+    TimingScene timing_scene = TimingScene::Meeting;
+    TimingPhase timing_phase = TimingPhase::Started;
     std::uint64_t duration_ms = 0;
     std::uint32_t device_count = 0;
     bool cache_hit = false;

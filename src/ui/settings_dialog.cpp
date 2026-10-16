@@ -167,7 +167,9 @@ SettingsDialog::SettingsDialog(
 		CameraDeviceDiscovery::Clock::time_point clickedAt)
 	: QDialog(parent)
 	, _session(session)
-	, _clickedAt(clickedAt) {
+	, _clickedAt(clickedAt)
+	, _paintTiming(std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
+		livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Settings, clickedAt)) {
 	setObjectName(QStringLiteral("settingsDialog"));
 	setWindowTitle(QCoreApplication::translate("MeetingUI", "Settings"));
 	setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint | Qt::WindowSystemMenuHint);
@@ -256,7 +258,8 @@ bool SettingsDialog::eventFilter(QObject *watched, QEvent *event) {
 	// receive Paint. Observe the real navigation viewport instead, then return
 	// to the event loop after this paint pass. This is not compositor presentation.
 	QTimer::singleShot(0, this, [this] {
-		if (_closed) return;
+		if (_closed || !isVisible()) { _firstPaintScheduled = false; return; }
+		_paintTiming->Finish(livekit::diagnostic::Outcome::Success);
 		_firstPaintReported = true;
 		const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
 			CameraDeviceDiscovery::Clock::now() - _clickedAt).count();

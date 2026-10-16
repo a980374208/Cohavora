@@ -2641,6 +2641,14 @@ uint64_t MeetingCoordinator::beginAdmission(AdmissionStage stage) {
         QUuid::createUuid().toString(QUuid::Id128);
     _admissionTelemetry.anonymousSessionId =
         QUuid::createUuid().toString(QUuid::Id128);
+    {
+        auto context = diagnosticContext();
+        context.session_generation = _admissionTelemetry.sessionGeneration;
+        context.has_session_generation = true;
+        context.parent_operation_id.Assign(_admissionTelemetry.diagnosticOperationId.toStdString());
+        if (_joinTiming) _joinTiming->Bind(context);
+        if (_pageTiming) _pageTiming->Bind(context);
+    }
     _admissionTelemetry.startedAt = std::chrono::steady_clock::now();
     _admissionTelemetry.terminal = false;
     _admissionTelemetry.stabilityLedger =
@@ -2718,6 +2726,9 @@ void MeetingCoordinator::finishAdmissionTelemetry(
         _admissionTelemetry.generation != admissionGeneration) {
         return;
     }
+    if (_joinTiming && outcome != livekit::telemetry::OperationOutcome::Success &&
+        outcome != livekit::telemetry::OperationOutcome::DegradedSuccess)
+        _joinTiming->Finish(DiagnosticOutcome(outcome));
     _admissionEncryption.Revoke();
     const auto finishedAt = std::chrono::steady_clock::now();
     _admissionTelemetry.terminal = true;
@@ -2784,6 +2795,10 @@ void MeetingCoordinator::finishActiveStabilitySession() {
 
 void MeetingCoordinator::finishStartupTelemetry(
     livekit::telemetry::OperationOutcome outcome) {
+    if (_joinTiming && outcome != livekit::telemetry::OperationOutcome::Success &&
+        outcome != livekit::telemetry::OperationOutcome::DegradedSuccess) {
+        _joinTiming->Finish(DiagnosticOutcome(outcome));
+    }
     if (_startupTelemetryOperationId.empty()) return;
     livekit::diagnostic::Event event;
     event.kind = livekit::diagnostic::EventKind::StartupTerminal;
@@ -3418,6 +3433,10 @@ void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
     stopped.context.has_session_generation = true;
     stopped.outcome = livekit::diagnostic::Outcome::Success;
     livekit::diagnostic::EmitBusinessEvent(stopped);
+    if (owner->_leaveTiming) {
+        owner->_leaveTiming->businessReady = true;
+        owner->_leaveTiming->businessOutcome = livekit::diagnostic::Outcome::Success;
+    }
     emit owner->meetingLeft();
     });
 }
@@ -3914,6 +3933,16 @@ void MeetingCoordinator::completeRoomStartupOnUiThread(
         return;
     }
     emit owner->localVideoEnableChanged(owner->_videoEnabled);
+    if (owner && owner->_joinTiming && owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
+        owner->_joinTiming->Media(!requestedAudioMuted, requestedVideoEnabled,
+            owner->_localAudioAvailable && bool(owner->_localAudioTrack),
+            owner->_localVideoAvailable && bool(owner->_localVideoTrack));
+        owner->_joinTiming->businessOutcome =
+            (!requestedAudioMuted && (!owner->_localAudioAvailable || !owner->_localAudioTrack)) ||
+            (requestedVideoEnabled && (!owner->_localVideoAvailable || !owner->_localVideoTrack))
+            ? livekit::diagnostic::Outcome::DegradedSuccess : livekit::diagnostic::Outcome::Success;
+        owner->_joinTiming->businessReady = true;
+    }
 }
 
 void MeetingCoordinator::completeRoomStartupDegradedOnUiThread(
@@ -3957,6 +3986,10 @@ void MeetingCoordinator::completeRoomStartupDegradedOnUiThread(
         return;
     }
     emit owner->localVideoEnableChanged(false);
+    if (owner && owner->_joinTiming && owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
+        owner->_joinTiming->businessOutcome = livekit::diagnostic::Outcome::DegradedSuccess;
+        owner->_joinTiming->businessReady = true;
+    }
     if (!owner || !owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
         return;
     }
@@ -4011,6 +4044,14 @@ void MeetingCoordinator::failRoomStartupOnUiThread(
         if (owner && owner->_admissionGeneration == admission && owner->_state == MeetingState::Failed)
             emit owner->errorOccurred(title, detail);
     });
+}
+
+std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> MeetingCoordinator::beginLeaveTiming() {
+    using namespace livekit::diagnostic;
+    if (_leaveTiming && !_leaveTiming->terminal()) return _leaveTiming;
+    _leaveTiming = std::make_shared<UiTimingMeasurement>(TimingMetric::LeaveComplete, TimingScene::Meeting);
+    _leaveTiming->Bind(diagnosticContext());
+    return _leaveTiming;
 }
 
 void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
@@ -4140,9 +4181,22 @@ void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
                 QCoreApplication::translate("MeetingUI", "Media cleanup failed. The session remains closed while its resources are retained."));
         });
     };
-    auto completed = [finish, failed](std::exception_ptr failure) {
+    const auto leaveTiming = _leaveTiming;
+    auto completed = [finish, failed, leaveTiming, owner](std::exception_ptr failure) {
         if (failure) failed(failure);
         else finish();
+        if (leaveTiming) {
+            // Enqueue after the normal SessionStopped continuation. If its UI
+            // owner was already deleted, the drained native shutdown itself is
+            // the value-only closing terminal; never retain a retired owner.
+            QMetaObject::invokeMethod(QCoreApplication::instance(), [leaveTiming, failure, owner] {
+                if (failure) leaveTiming->Finish(livekit::diagnostic::Outcome::Failure);
+                else if (!owner) {
+                    leaveTiming->businessOutcome = livekit::diagnostic::Outcome::Success;
+                    leaveTiming->businessReady = true;
+                }
+            }, Qt::QueuedConnection);
+        }
     };
 
     if (!resources) {

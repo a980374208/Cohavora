@@ -248,6 +248,7 @@ std::string_view EventName(EventKind kind) noexcept {
     case EventKind::MediaEndpointRecovered: return "media.endpoint.recovered";
     case EventKind::MediaFirstObserved: return "media.first_observed";
     case EventKind::RenderStallInterval: return "render.stall.interval";
+    case EventKind::UiTiming: return "ui.timing";
     case EventKind::SettingsFirstPaint: return "settings.first_paint";
     case EventKind::SettingsDeviceProbe: return "settings.device_probe";
     case EventKind::MediaFallback: return "media.fallback";
@@ -327,6 +328,7 @@ std::string_view ComponentName(EventKind kind) noexcept {
     case EventKind::ChatReceived:
     case EventKind::ChatSendTerminal:
     case EventKind::TransferTerminal: return "meeting_ui";
+    case EventKind::UiTiming: return "meeting_ui";
     case EventKind::SettingsFirstPaint:
     case EventKind::SettingsDeviceProbe: return "settings_ui";
     case EventKind::RtcSdpStep:
@@ -490,9 +492,19 @@ bool IsValidEvent(const Event& event) noexcept {
     case EventKind::RetentionChanged:
     case EventKind::SettingsFirstPaint:
     case EventKind::SettingsDeviceProbe:
+    case EventKind::UiTiming:
         break;
     default: return false;
     }
+    if (event.kind == EventKind::UiTiming &&
+        (event.timing_metric > TimingMetric::UiFirstPaint ||
+         event.timing_scene > TimingScene::Settings ||
+         event.timing_phase > TimingPhase::Terminal ||
+         event.context.operation_id.View().empty() || !event.interval_begin_us ||
+         event.source_monotonic_us < event.interval_begin_us ||
+         (event.timing_phase == TimingPhase::Terminal
+             ? (event.interval_end_us != event.source_monotonic_us || event.outcome == Outcome::Unknown)
+             : (event.interval_end_us != 0 || event.outcome != Outcome::Unknown)))) return false;
     const auto hex_id = [](std::string_view value) {
         return value.size() == 32 && std::all_of(value.begin(), value.end(),
             [](char ch) { return (ch >= '0' && ch <= '9') ||
