@@ -1,0 +1,2 @@
+# This manifest is bound to an exact SHA256 in dependency metadata.
+/build/prepare/libraries-required.txt text eol=lf

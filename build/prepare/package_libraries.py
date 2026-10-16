@@ -157,7 +157,9 @@ def write_metadata(
         "source_build_guide": source_build_guide.name,
         "source_build_guide_url": SOURCE_BUILD_GUIDE_URL,
         "source_build_guide_sha256": file_sha256(source_build_guide),
-        "local_source_build_guide_sha256": file_sha256(SOURCE_BUILD_GUIDE),
+        "local_source_build_guide_hash_mode": "lf",
+        "local_source_build_guide_sha256": hashlib.sha256(
+            SOURCE_BUILD_GUIDE.read_bytes().replace(b"\r\n", b"\n")).hexdigest(),
     }
     temporary = ARCHIVE_METADATA.with_name(
         f".{ARCHIVE_METADATA.name}.{os.getpid()}.tmp")

@@ -218,8 +218,17 @@ def load_libraries_archive_metadata(path: Path):
     # without changing the independently pinned release asset.
     local_guide_sha256 = metadata.get(
         local_guide_field, metadata["source_build_guide_sha256"])
+    local_guide_hash_mode = metadata.get("local_source_build_guide_hash_mode", "raw")
+    if (local_guide_hash_mode not in ("raw", "lf")
+            or (local_guide_hash_mode != "raw" and local_guide_field not in metadata)):
+        raise ValueError("Libraries archive metadata has an invalid local guide hash mode")
+    local_guide_bytes = source_build_guide.read_bytes() if source_build_guide.is_file() else None
+    # Normalize only checkout line endings for the local guide. Published assets
+    # retain their independently pinned, exact-byte fingerprints.
+    if local_guide_bytes is not None and local_guide_hash_mode == "lf":
+        local_guide_bytes = local_guide_bytes.replace(b"\r\n", b"\n")
     if (not source_build_guide.is_file()
-            or hashlib.sha256(source_build_guide.read_bytes()).hexdigest()
+            or hashlib.sha256(local_guide_bytes).hexdigest()
             != local_guide_sha256):
         raise ValueError(
             "Libraries archive metadata does not match the local source build guide")
