@@ -2946,6 +2946,10 @@ void RoomBottomBarWidget::leaveEventHook(QEvent *e) {
 // thread, then queued cleanup releases everything without blocking the window.
 struct MeetingRoomWindow::MediaPreparation {
 	std::atomic_bool cancelled{false};
+	std::atomic_bool microphoneWanted{false};
+	std::atomic_bool cameraWanted{false};
+	bool attemptedMicrophone = false;
+	bool attemptedCamera = false;
 	std::shared_ptr<livekit::WasapiAudioCapture> microphone;
 	std::shared_ptr<livekit::CameraSourceManager> camera;
 	bool cameraAvailable = false;
@@ -3032,7 +3036,10 @@ void MeetingRoomWindow::prepareMediaAndJoin(std::function<void()> admission) {
 	if (_mediaPreparationStarted || !_sessionRunning || _closeRequested ||
 		_closingForSessionInvalidation || !admission) return;
 	_mediaPreparationStarted = true;
+	_mediaPreparationError.clear();
 	_pendingAdmission = std::move(admission);
+	_pendingAudioMuted = _config.audioMuted;
+	_pendingVideoEnabled = _config.videoEnabled;
 	beginMediaPreparation(!_config.audioMuted, _config.videoEnabled);
 }
 
@@ -3042,7 +3049,10 @@ void MeetingRoomWindow::beginMediaPreparation(bool microphone, bool camera) {
 		_closingForSessionInvalidation) return;
 	_preparingMedia = true;
 	_mediaPreparation = std::make_shared<MediaPreparation>();
+	_mediaPreparation->microphoneWanted.store(microphone);
+	_mediaPreparation->cameraWanted.store(camera);
 	_preparationCallbacks = OpenMeeting::QtCallbackGate<MeetingRoomWindow>::Create(this);
+	updateMediaPreparationFeedback();
 	updateRecoveryStateUi(OpenMeeting::MeetingState::Idle, {});
 	const auto preparation = _mediaPreparation;
 	const auto callbacks = _preparationCallbacks;
@@ -3061,7 +3071,8 @@ void MeetingRoomWindow::beginMediaPreparation(bool microphone, bool camera) {
 		[preparation, callbacks, preferences, audioSource, videoSource,
 		 prepareMicrophone, prepareCamera, preparationOverride] {
 			if (preparation->cancelled.load()) return;
-			if (prepareMicrophone) {
+			if (prepareMicrophone && preparation->microphoneWanted.load()) {
+				preparation->attemptedMicrophone = true;
 				if (preparationOverride) preparationOverride(true, false);
 				else try {
 					auto microphone = livekit::WasapiAudioCapture::Create();
@@ -3091,7 +3102,8 @@ void MeetingRoomWindow::beginMediaPreparation(bool microphone, bool camera) {
 				}
 			}
 			if (preparation->cancelled.load()) return;
-			if (prepareCamera) {
+			if (prepareCamera && preparation->cameraWanted.load()) {
+				preparation->attemptedCamera = true;
 				if (preparationOverride) preparationOverride(false, true);
 				else try {
 					// One snapshot supplies default selection, saved selection and capabilities.
@@ -3160,15 +3172,37 @@ void MeetingRoomWindow::finishMediaPreparation() {
 	Q_ASSERT(thread() == QThread::currentThread());
 	if (!_mediaPreparation || _mediaPreparation->cancelled.load() ||
 		!_sessionRunning || _closeRequested || _closingForSessionInvalidation) return;
-	const bool newMicrophone = bool(_mediaPreparation->microphone);
-	if (newMicrophone) _wasapiCap = std::move(_mediaPreparation->microphone);
-	if (_mediaPreparation->camera) {
-		_cameraManager = std::move(_mediaPreparation->camera);
-		_usingRealCamera = _mediaPreparation->cameraAvailable;
-		_currentCameraPath = _mediaPreparation->cameraPath;
+	const bool requestedMuted = _pendingAudioMuted.value_or(_config.audioMuted);
+	const bool requestedVideo = _pendingVideoEnabled.value_or(_config.videoEnabled);
+	auto preparation = std::move(_mediaPreparation);
+	// Keep WASAPI's hot-plug listener even when its first device start failed.
+	const bool newMicrophone = !requestedMuted && bool(preparation->microphone);
+	if (newMicrophone) _wasapiCap = std::move(preparation->microphone);
+	if (requestedVideo && preparation->camera && preparation->cameraAvailable) {
+		_cameraManager = std::move(preparation->camera);
+		_usingRealCamera = true;
+		_currentCameraPath = preparation->cameraPath;
 	}
 	if (!_cameraManager) _usingRealCamera = false;
-	_mediaPreparation.reset();
+	const bool nextMicrophone = !requestedMuted && !_wasapiCap &&
+		!preparation->attemptedMicrophone;
+	const bool nextCamera = requestedVideo && !_cameraManager &&
+		!preparation->attemptedCamera;
+	if (!requestedMuted && preparation->attemptedMicrophone &&
+		(!_wasapiCap || !_wasapiCap->IsRunning())) {
+		_mediaPreparationError = QCoreApplication::translate("MeetingUI", "Unable to start the microphone. Check the device and system permissions.");
+	}
+	if (requestedVideo && preparation->attemptedCamera && !_usingRealCamera) {
+		if (!_mediaPreparationError.isEmpty()) _mediaPreparationError += QLatin1Char('\n');
+		_mediaPreparationError += QCoreApplication::translate("MeetingUI", "Unable to start the camera. Check the device and system permissions.");
+	}
+	// Failed cameras and cancelled devices are retired on the cleanup worker.
+	if (preparation->microphone || preparation->camera) {
+		OpenMeeting::SessionShutdownService::Instance().SubmitCleanup([preparation] {
+			if (preparation->microphone) preparation->microphone->Stop();
+			if (preparation->camera) preparation->camera->Stop();
+		});
+	}
 	_preparingMedia = false;
 	if (newMicrophone) {
 		bindMicrophoneCaptureState();
@@ -3177,8 +3211,8 @@ void MeetingRoomWindow::finishMediaPreparation() {
 	if (_cameraSessionManager) setupAudioPreferencesBinding(*_cameraSessionManager);
 	// Availability projection may synchronously emit the previous mute state.
 	// Retain the user's current intent before changing coordinator availability.
-	const bool audioMuted = _config.audioMuted || !_wasapiCap || !_wasapiCap->IsRunning();
-	const bool videoEnabled = _config.videoEnabled && _usingRealCamera;
+	const bool audioMuted = requestedMuted || !_wasapiCap || !_wasapiCap->IsRunning();
+	const bool videoEnabled = requestedVideo && _usingRealCamera;
 	applyMicrophoneAvailability(_wasapiCap && _wasapiCap->IsRunning());
 	_config.audioMuted = audioMuted;
 	_config.videoEnabled = videoEnabled;
@@ -3198,6 +3232,17 @@ void MeetingRoomWindow::finishMediaPreparation() {
 	}
 	LogToConsole(LogCategory::Media, "CAPTURE",
 		QStringLiteral("devices_prepared microphone=%1 camera=%2").arg(_microphoneAvailable).arg(_usingRealCamera));
+	if (nextMicrophone || nextCamera) {
+		// Only unattempted work is carried forward. A failed device requires a
+		// new explicit request; the worker never retries it in a loop.
+		_pendingAudioMuted = nextMicrophone ? std::optional<bool>(false) : std::nullopt;
+		_pendingVideoEnabled = nextCamera ? std::optional<bool>(true) : std::nullopt;
+		beginMediaPreparation(nextMicrophone, nextCamera);
+		return;
+	}
+	_pendingAudioMuted.reset();
+	_pendingVideoEnabled.reset();
+	updateMediaPreparationFeedback();
 	updateRecoveryStateUi(_pendingAdmission ? OpenMeeting::MeetingState::ConnectingRoom :
 		(_coordinator ? _coordinator->state() : OpenMeeting::MeetingState::InMeeting), {});
 	auto admission = std::move(_pendingAdmission);
@@ -3206,28 +3251,61 @@ void MeetingRoomWindow::finishMediaPreparation() {
 
 void MeetingRoomWindow::requestLocalMicrophone(bool muted) {
 	if (!_sessionRunning || _closeRequested || _closingForSessionInvalidation) return;
-	_config.audioMuted = muted;
-	if (!muted && !_wasapiCap) {
-		if (!_mediaPreparation) beginMediaPreparation(true, false);
+	_mediaPreparationError.clear();
+	if (_mediaPreparation) {
+		_pendingAudioMuted = muted;
+		_mediaPreparation->microphoneWanted.store(!muted);
+		if (muted && _coordinator) _coordinator->setLocalAudioMuted(true);
+		updateMediaPreparationFeedback();
 		return;
 	}
+	if (!muted && !_wasapiCap) {
+		_pendingAudioMuted = false;
+		beginMediaPreparation(true, false);
+		return;
+	}
+	if (!muted && !_wasapiCap->IsRunning()) {
+		_mediaPreparationError = QCoreApplication::translate("MeetingUI", "Unable to start the microphone. Check the device and system permissions.");
+	}
+	updateMediaPreparationFeedback();
+	updateRecoveryStateUi(_coordinator ? _coordinator->state() : OpenMeeting::MeetingState::InMeeting, {});
 	if (_coordinator) _coordinator->setLocalAudioMuted(muted);
 }
 
 void MeetingRoomWindow::requestLocalCamera(bool enabled) {
 	if (!_sessionRunning || _closeRequested || _closingForSessionInvalidation) return;
-	_config.videoEnabled = enabled;
-	if (enabled && !_cameraManager) {
-		if (!_mediaPreparation) beginMediaPreparation(false, true);
+	_mediaPreparationError.clear();
+	if (_mediaPreparation) {
+		_pendingVideoEnabled = enabled;
+		_mediaPreparation->cameraWanted.store(enabled);
+		if (!enabled && _coordinator) _coordinator->setLocalVideoEnabled(false);
+		updateMediaPreparationFeedback();
 		return;
 	}
+	if (enabled && !_cameraManager) {
+		_pendingVideoEnabled = true;
+		beginMediaPreparation(false, true);
+		return;
+	}
+	updateMediaPreparationFeedback();
+	updateRecoveryStateUi(_coordinator ? _coordinator->state() : OpenMeeting::MeetingState::InMeeting, {});
 	if (_coordinator) _coordinator->setLocalVideoEnabled(enabled);
+}
+
+void MeetingRoomWindow::updateMediaPreparationFeedback() {
+	if (_participantsSidebar) {
+		_participantsSidebar->setLocalMediaPreparation(
+			_pendingAudioMuted, _pendingVideoEnabled, _mediaPreparationError);
+	}
 }
 
 void MeetingRoomWindow::cancelMediaPreparation() {
 	Q_ASSERT(thread() == QThread::currentThread());
 	_pendingAdmission = {};
 	_preparingMedia = false;
+	_pendingAudioMuted.reset();
+	_pendingVideoEnabled.reset();
+	updateMediaPreparationFeedback();
 	if (_preparationCallbacks) _preparationCallbacks->Revoke();
 	if (auto preparation = std::move(_mediaPreparation)) {
 		preparation->cancelled.store(true);
@@ -3416,6 +3494,10 @@ void MeetingRoomWindow::initLayout() {
 
 	_participantsSidebar = new OpenMeeting::ParticipantsSidebarWidget(_coordinator, this);
 	_participantsSidebar->hide();
+	connect(_participantsSidebar, &OpenMeeting::ParticipantsSidebarWidget::localMicrophoneRequested,
+		this, &MeetingRoomWindow::requestLocalMicrophone);
+	connect(_participantsSidebar, &OpenMeeting::ParticipantsSidebarWidget::localCameraRequested,
+		this, &MeetingRoomWindow::requestLocalCamera);
 	connect(_participantsSidebar, &OpenMeeting::ParticipantsSidebarWidget::closeRequested, this, [this]() {
 		switchSidebar(ActiveSidebar::None);
 	});
@@ -3597,7 +3679,7 @@ void MeetingRoomWindow::initLayout() {
 
 	_bottomBar->toggleAudioRequested() | rpl::on_next([this](bool muted) {
 		requestLocalMicrophone(muted);
-		LogToConsole(LogCategory::Media, "AUDIO", _config.audioMuted ? QCoreApplication::translate("MeetingUI", "User muted the microphone") : QCoreApplication::translate("MeetingUI", "User enabled or unmuted the microphone"));
+		LogToConsole(LogCategory::Media, "AUDIO", muted ? QCoreApplication::translate("MeetingUI", "User muted the microphone") : QCoreApplication::translate("MeetingUI", "User requested to enable the microphone"));
 	}, lifetime());
 
 	_bottomBar->toggleSpeakerRequested() | rpl::on_next([this](bool muted) {
@@ -3607,7 +3689,7 @@ void MeetingRoomWindow::initLayout() {
 
 	_bottomBar->toggleVideoRequested() | rpl::on_next([this](bool enabled) {
 		requestLocalCamera(enabled);
-		LogToConsole(LogCategory::Media, "VIDEO", _config.videoEnabled ? QCoreApplication::translate("MeetingUI", "User enabled local video") : QCoreApplication::translate("MeetingUI", "User disabled local video"));
+		LogToConsole(LogCategory::Media, "VIDEO", enabled ? QCoreApplication::translate("MeetingUI", "User requested to enable local video") : QCoreApplication::translate("MeetingUI", "User disabled local video"));
 	}, lifetime());
 
 	setupInvitationBinding();
@@ -4286,7 +4368,13 @@ void MeetingRoomWindow::updateRecoveryStateUi(OpenMeeting::MeetingState state, c
 	}
 	case OpenMeeting::MeetingState::InMeeting: {
 		if (_bottomBar) _bottomBar->setInRecovery(false);
-		if (_wasReconnecting) {
+		if (!_mediaPreparationError.isEmpty()) {
+			if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
+			MeetingUI::AppTheme::setStyleVariant(*_recoveryBanner, "meeting-room-window-recoverybanner-4");
+			_recoveryBanner->setText(_mediaPreparationError);
+			_recoveryBanner->show();
+			_recoveryBanner->raise();
+		} else if (_wasReconnecting) {
 			_wasReconnecting = false;
 			MeetingUI::AppTheme::setStyleVariant(*_recoveryBanner, "meeting-room-window-recoverybanner-3");
 			_recoveryBanner->setText(QCoreApplication::translate("MeetingUI", "✅ Meeting connection restored"));
@@ -6368,39 +6456,25 @@ void MeetingRoomWindow::onRemoteMuteRequested(bool isVideo, bool mute, const QSt
 	const auto operatorName = resolveParticipantDisplayName(_coordinator, operatorId, QString());
 	if (isVideo) {
 		if (mute) {
-			_bottomBar->setVideoEnabled(false);
-			_config.videoEnabled = false;
-			_localTile->setVideoActive(false);
-			if (_coordinator) _coordinator->setLocalVideoEnabled(false);
+			requestLocalCamera(false);
 			updateVideoLayout();
 			LogToConsole(LogCategory::Media, "VIDEO", QCoreApplication::translate("MeetingUI", "Host [%1] turned off your camera").arg(operatorName));
 		} else {
 			if (QMessageBox::question(this, QCoreApplication::translate("MeetingUI", "Request to Enable Camera"),
 				QCoreApplication::translate("MeetingUI", "Host [%1] would like you to turn on your camera. Allow?").arg(operatorName),
 				QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
-				_bottomBar->setVideoEnabled(true);
-				_config.videoEnabled = true;
-				_localTile->setVideoActive(_usingRealCamera);
 				requestLocalCamera(true);
 				updateVideoLayout();
 			}
 		}
 	} else {
 		if (mute) {
-			_bottomBar->setAudioMuted(true);
-			_config.audioMuted = true;
-			_localTile->setAudioMuted(true);
-			if (_wasapiCap) _wasapiCap->SetMute(true);
-			if (_coordinator) _coordinator->setLocalAudioMuted(true);
+			requestLocalMicrophone(true);
 			LogToConsole(LogCategory::Media, "AUDIO", QCoreApplication::translate("MeetingUI", "Host [%1] muted you").arg(operatorName));
 		} else {
 			if (QMessageBox::question(this, QCoreApplication::translate("MeetingUI", "Request to Unmute"),
 				QCoreApplication::translate("MeetingUI", "Host [%1] would like you to unmute your microphone. Allow?").arg(operatorName),
 				QMessageBox::Yes | QMessageBox::No) == QMessageBox::Yes) {
-				_bottomBar->setAudioMuted(false);
-				_config.audioMuted = false;
-				_localTile->setAudioMuted(false);
-				if (_wasapiCap) _wasapiCap->SetMute(false);
 				requestLocalMicrophone(false);
 			}
 		}

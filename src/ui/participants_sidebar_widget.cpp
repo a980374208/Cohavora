@@ -64,6 +64,13 @@ void ParticipantsSidebarWidget::setupUi() {
     searchLayout->addWidget(_searchEdit);
     mainLayout->addWidget(searchContainer);
 
+    _mediaStatusLabel = new QLabel(this);
+    _mediaStatusLabel->setObjectName("participantLocalMediaStatus");
+    _mediaStatusLabel->setWordWrap(true);
+    _mediaStatusLabel->setContentsMargins(12, 0, 12, 8);
+    _mediaStatusLabel->hide();
+    mainLayout->addWidget(_mediaStatusLabel);
+
     // 3. 参会人列表 (QListView + Model/Delegate)
     _listModel = new ParticipantListModel(this);
     _proxyModel = new ParticipantFilterProxyModel(this);
@@ -128,6 +135,17 @@ void ParticipantsSidebarWidget::updateHostControlsVisibility() {
     _bottomPanel->setVisible(isHostUser);
 }
 
+void ParticipantsSidebarWidget::setLocalMediaPreparation(
+        std::optional<bool> audioMuted, std::optional<bool> videoEnabled,
+        const QString &error) {
+    _pendingAudioMuted = audioMuted;
+    _pendingVideoEnabled = videoEnabled;
+    const bool preparing = audioMuted.has_value() || videoEnabled.has_value();
+    _mediaStatusLabel->setText(preparing
+        ? QCoreApplication::translate("MeetingUI", "Preparing audio and video devices...") : error);
+    _mediaStatusLabel->setVisible(preparing || !error.isEmpty());
+}
+
 void ParticipantsSidebarWidget::onSearchTextChanged(const QString &text) {
     _proxyModel->setSearchKeyword(text);
 }
@@ -139,7 +157,7 @@ void ParticipantsSidebarWidget::onMicClicked(const QString &identity) {
     if (target.identity.isEmpty()) return;
 
     if (target.isLocal) {
-        _coordinator->setLocalAudioMuted(!target.isAudioMuted);
+        emit localMicrophoneRequested(!_pendingAudioMuted.value_or(target.isAudioMuted));
     } else if (_coordinator->isHost()) {
         // 主持人控制他人
         bool newMute = !target.isAudioMuted;
@@ -154,7 +172,7 @@ void ParticipantsSidebarWidget::onCameraClicked(const QString &identity) {
     if (target.identity.isEmpty()) return;
 
     if (target.isLocal) {
-        _coordinator->setLocalVideoEnabled(!target.isVideoEnabled);
+        emit localCameraRequested(!_pendingVideoEnabled.value_or(target.isVideoEnabled));
     } else if (_coordinator->isHost()) {
         // 主持人控制他人摄像头
         bool newEnable = !target.isVideoEnabled;
@@ -172,16 +190,20 @@ void ParticipantsSidebarWidget::onMoreClicked(const QString &identity, const QPo
     MeetingUI::AppTheme::styleMenu(menu, MeetingUI::AppTheme::Tone::Dark);
 
     if (target.isLocal) {
+        const bool audioMuted = _pendingAudioMuted.value_or(target.isAudioMuted);
+        const bool videoEnabled = _pendingVideoEnabled.value_or(target.isVideoEnabled);
         // 本地用户菜单
         auto *infoAct = menu.addAction(QCoreApplication::translate("MeetingUI", "Role: Local Participant"));
         infoAct->setEnabled(false);
-        auto *toggleMicAct = menu.addAction(target.isAudioMuted ? QCoreApplication::translate("MeetingUI", "Enable Microphone") : QCoreApplication::translate("MeetingUI", "Mute Myself"));
-        connect(toggleMicAct, &QAction::triggered, this, [this, target]() {
-            _coordinator->setLocalAudioMuted(!target.isAudioMuted);
+        auto *toggleMicAct = menu.addAction(audioMuted ? QCoreApplication::translate("MeetingUI", "Enable Microphone") : QCoreApplication::translate("MeetingUI", "Mute Myself"));
+        toggleMicAct->setObjectName("participantLocalMicrophoneAction");
+        connect(toggleMicAct, &QAction::triggered, this, [this, identity]() {
+            onMicClicked(identity);
         });
-        auto *toggleCamAct = menu.addAction(target.isVideoEnabled ? QCoreApplication::translate("MeetingUI", "Turn Off Camera") : QCoreApplication::translate("MeetingUI", "Turn On Camera"));
-        connect(toggleCamAct, &QAction::triggered, this, [this, target]() {
-            _coordinator->setLocalVideoEnabled(!target.isVideoEnabled);
+        auto *toggleCamAct = menu.addAction(videoEnabled ? QCoreApplication::translate("MeetingUI", "Turn Off Camera") : QCoreApplication::translate("MeetingUI", "Turn On Camera"));
+        toggleCamAct->setObjectName("participantLocalCameraAction");
+        connect(toggleCamAct, &QAction::triggered, this, [this, identity]() {
+            onCameraClicked(identity);
         });
     } else {
         // 远端参会人

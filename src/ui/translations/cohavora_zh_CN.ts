@@ -108,6 +108,22 @@
         <translation>无法完成音视频设备准备。</translation>
     </message>
     <message>
+        <source>Unable to start the microphone. Check the device and system permissions.</source>
+        <translation>无法启动麦克风，请检查设备连接及系统权限。</translation>
+    </message>
+    <message>
+        <source>Unable to start the camera. Check the device and system permissions.</source>
+        <translation>无法启动摄像头，请检查设备连接及系统权限。</translation>
+    </message>
+    <message>
+        <source>User requested to enable the microphone</source>
+        <translation>用户请求开启麦克风</translation>
+    </message>
+    <message>
+        <source>User requested to enable local video</source>
+        <translation>用户请求开启本地视频</translation>
+    </message>
+    <message>
         <source>Whiteboard</source>
         <translation>白板</translation>
     </message>

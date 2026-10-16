@@ -630,12 +630,17 @@ private:
 	void requestLocalCamera(bool enabled);
 	void finishMediaPreparation();
 	void cancelMediaPreparation();
+	void updateMediaPreparationFeedback();
 	std::shared_ptr<MediaPreparation> _mediaPreparation;
 	std::shared_ptr<OpenMeeting::QtCallbackGate<MeetingRoomWindow>> _preparationCallbacks;
 	std::function<void()> _pendingAdmission;
 	std::function<void(bool, bool)> _mediaPreparationOverride;
 	bool _mediaPreparationStarted = false;
 	bool _preparingMedia = false;
+	// Pending intent survives availability signals; _config remains effective state.
+	std::optional<bool> _pendingAudioMuted;
+	std::optional<bool> _pendingVideoEnabled;
+	QString _mediaPreparationError;
 	bool _audioPreferencesBound = false;
 	void retireLocalCapture();
 	void bindLocalMediaSources();

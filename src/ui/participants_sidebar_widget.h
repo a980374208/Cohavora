@@ -10,6 +10,7 @@
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QMessageBox>
 #include <memory>
+#include <optional>
 
 #include "src/core/meeting_coordinator.h"
 #include "src/ui/participants_list_model.h"
@@ -24,9 +25,14 @@ public:
     ~ParticipantsSidebarWidget() override = default;
 
     void updateParticipants(const std::vector<ParticipantInfo> &participants);
+    void setLocalMediaPreparation(std::optional<bool> audioMuted,
+                                 std::optional<bool> videoEnabled,
+                                 const QString &error = {});
 
 signals:
     void closeRequested();
+    void localMicrophoneRequested(bool muted);
+    void localCameraRequested(bool enabled);
 
 protected:
     void paintEvent(QPaintEvent *e) override;
@@ -56,6 +62,9 @@ private:
     ParticipantListModel *_listModel = nullptr;
     ParticipantFilterProxyModel *_proxyModel = nullptr;
     ParticipantItemDelegate *_itemDelegate = nullptr;
+    QLabel *_mediaStatusLabel = nullptr;
+    std::optional<bool> _pendingAudioMuted;
+    std::optional<bool> _pendingVideoEnabled;
 };
 
 } // namespace OpenMeeting
