@@ -3444,13 +3444,19 @@ void MeetingRoomWindow::setupNativeWindow() {
 		qApp->installNativeEventFilter(this);
 		_nativeResizeFilterInstalled = true;
 	}
+	// Qt owns the fullscreen HWND style and monitor geometry. Reinstalling a
+	// resize frame during restore can turn its delayed native state back normal.
+	if (isFullScreen()) return;
 
-	LONG_PTR style = GetWindowLongPtr(_handle, GWL_STYLE);
+	const LONG_PTR style = GetWindowLongPtr(_handle, GWL_STYLE);
 	// Windows 10 can paint a native caption even with our thin NCCALCSIZE
 	// inset. Keep the resize frame, but let only the Qt top bar own the caption.
-	SetWindowLongPtr(_handle, GWL_STYLE,
+	const LONG_PTR decoratedStyle =
 		(style & ~LONG_PTR(WS_CAPTION)) | WS_THICKFRAME | WS_SYSMENU |
-		WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN);
+		WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_CLIPCHILDREN;
+	if (style != decoratedStyle) {
+		SetWindowLongPtr(_handle, GWL_STYLE, decoratedStyle);
+	}
 
 	MARGINS margins = { 1, 1, 1, 1 };
 	DwmExtendFrameIntoClientArea(_handle, &margins);
@@ -3458,8 +3464,10 @@ void MeetingRoomWindow::setupNativeWindow() {
 	DWORD preference = 2; // DWMWCP_ROUND
 	DwmSetWindowAttribute(_handle, 33, &preference, sizeof(preference));
 
-	SetWindowPos(_handle, nullptr, 0, 0, 0, 0,
-		SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+	if (style != decoratedStyle) {
+		SetWindowPos(_handle, nullptr, 0, 0, 0, 0,
+			SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+	}
 #endif
 }
 
