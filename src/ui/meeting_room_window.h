@@ -581,8 +581,8 @@ private:
 	void restoreParticipantPresentations();
 	void applyParticipantPresentation(const OpenMeeting::ParticipantPresentation &presentation);
 	void attachRemoteVideo(const OpenMeeting::ParticipantPresentation &presentation,
-		const OpenMeeting::RemoteVideoTrackPresentation &track);
-	void removeRemoteVideo(const QString &trackSid);
+		const OpenMeeting::RemoteVideoTrackPresentation &track, bool reconcile = true);
+	void removeRemoteVideo(const QString &trackSid, bool reconcile = true);
 	VideoTileWidget *remoteVideoTile(const QString &trackSid) const;
 	bool canRenderRemoteVideo(const QString &trackSid) const;
 	livekit::TrackPublication::SubscriptionError remoteVideoSubscriptionError(

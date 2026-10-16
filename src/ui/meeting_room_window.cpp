@@ -5697,8 +5697,11 @@ void MeetingRoomWindow::applyAcceptedVideoDemandPlan(
 			isVideoStageVisible() && _acceptedVideoPlan.page_count > 1);
 	}
 	syncVisibleRemoteTiles();
-	reconcileRemoteRenderSelection();
-	updateVideoLayout();
+	// Presentations can arrive before the accepted plan creates their tiles.
+	// Replay current media state so new tiles do not depend on a first frame.
+	QPointer<MeetingRoomWindow> owner(this);
+	refreshRemoteVideoPresentations();
+	if (owner) owner->updateVideoLayout();
 }
 
 void MeetingRoomWindow::syncVisibleRemoteTiles() {
@@ -5869,13 +5872,18 @@ void MeetingRoomWindow::refreshRemoteVideoPresentations() {
 	for (const auto &presentation : presentations) {
 		for (const auto &video : presentation.videoTracks) {
 			if (!owner || !coordinator || owner->_coordinator.get() != coordinator) return;
-			owner->attachRemoteVideo(presentation, video);
+			owner->attachRemoteVideo(presentation, video, false);
 		}
+	}
+	// All presentations share one accepted plan. Publish its final selection
+	// once, rather than a telemetry snapshot for every replayed track.
+	if (owner && coordinator && owner->_coordinator.get() == coordinator) {
+		owner->reconcileRemoteRenderSelection();
 	}
 }
 
 void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresentation &presentation,
-		const OpenMeeting::RemoteVideoTrackPresentation &value) {
+		const OpenMeeting::RemoteVideoTrackPresentation &value, bool reconcile) {
 	if (!_remoteRenderSession || !_coordinator ||
 		!_coordinator->isParticipantPresentationCurrent(presentation, &value)) return;
 	const auto &identity = presentation.participant.identity;
@@ -5888,7 +5896,7 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 			coordinator->isParticipantPresentationCurrent(presentation, &value);
 	};
 	if (const auto old = _remoteVideoBindings.find(sid);
-		old != _remoteVideoBindings.end() && old->second.screen != screen) removeRemoteVideo(sid);
+		old != _remoteVideoBindings.end() && old->second.screen != screen) removeRemoteVideo(sid, reconcile);
 	if (!current()) return;
 	const auto old = _remoteVideoBindings.find(sid);
 	const bool resetFrame = old == _remoteVideoBindings.end() ||
@@ -5927,11 +5935,11 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 		if (screen) tile->setDisplayName(QCoreApplication::translate("MeetingUI", "%1 · Screen Share").arg(presentation.participant.name));
 	}
 	if (!current()) return;
-	reconcileRemoteRenderSelection();
+	if (reconcile) reconcileRemoteRenderSelection();
 	if (resetFrame) updateVideoLayout();
 }
 
-void MeetingRoomWindow::removeRemoteVideo(const QString &trackSid) {
+void MeetingRoomWindow::removeRemoteVideo(const QString &trackSid, bool reconcile) {
 	const auto binding = _remoteVideoBindings.find(trackSid);
 	if (binding != _remoteVideoBindings.end() && _pinnedTrackKey &&
 		binding->second.key == *_pinnedTrackKey) {
@@ -5950,7 +5958,7 @@ void MeetingRoomWindow::removeRemoteVideo(const QString &trackSid) {
 	_remoteScreenTiles.erase(trackSid);
 	_remoteVideoBindings.erase(trackSid);
 	syncVisibleRemoteTiles();
-	reconcileRemoteRenderSelection();
+	if (reconcile) reconcileRemoteRenderSelection();
 	updateVideoLayout();
 }
 
