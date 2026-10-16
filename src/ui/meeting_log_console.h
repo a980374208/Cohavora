@@ -38,6 +38,9 @@ class MeetingLogConsoleWindow : public QDialog {
 public:
 	static MeetingLogConsoleWindow& Instance();
 	static void DestroyInstance();
+	// Startup-only, on the Qt thread; rejects replacement and an active console.
+	static bool ConfigureStorageRoots(std::filesystem::path diagnostics,
+		std::filesystem::path crashEvidence);
 
 	explicit MeetingLogConsoleWindow(QWidget *parent = nullptr);
 	~MeetingLogConsoleWindow() override;
@@ -106,6 +109,8 @@ private:
 	bool matchesFilter(const LogEntry &entry) const;
 	void showStorageMessage(QString message);
 
+	const std::filesystem::path _diagnosticRoot;
+	const std::filesystem::path _crashRoot;
 	QPlainTextEdit *_logView = nullptr;
 	QPushButton *_clearBtn = nullptr;
 	QPushButton *_copyBtn = nullptr;

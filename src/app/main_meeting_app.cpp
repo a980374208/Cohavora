@@ -28,6 +28,7 @@
 #include "src/net/session_manager.h"
 #include "src/rtc/webrtc_manager.h"
 #include "src/app/debug_login_options.h"
+#include "src/app/debug_storage_paths.h"
 #include "src/app/pilot_diagnostics_probe.h"
 #include "src/app/async_shutdown_guard.h"
 #include "src/core/session_shutdown_service.h"
@@ -108,9 +109,14 @@ bool LoginWithDebugCredentials(
 } // namespace
 
 int main(int argc, char *argv[]) {
+	const auto debugStorage = MeetingApp::ResolveDebugStoragePaths(
+		MeetingApp::NativeDebugOptionEnabled(argc, argv),
+		qEnvironmentVariable("LIVEKIT_UIA_DATA_ROOT"));
+	if (!debugStorage.valid) return 2;
 	auto diagnostics = std::make_shared<livekit::diagnostic::DiagnosticPipeline>();
 	const auto buildId = livekit::telemetry::CurrentExecutableBuildId();
-	const auto crashRoot = livekit::telemetry::CrashEvidenceProvider::DefaultRoot();
+	const auto crashRoot = debugStorage.enabled ? debugStorage.crashEvidence
+		: livekit::telemetry::CrashEvidenceProvider::DefaultRoot();
 	const auto crashEnabled =
 		livekit::telemetry::CrashEvidenceProvider::CollectionEnabled(crashRoot);
 	auto crashScan = livekit::telemetry::CrashEvidenceProvider::Scan(
@@ -162,9 +168,12 @@ int main(int argc, char *argv[]) {
 		return 2;
 	}
 	MeetingUI::DiagnosticQtBridge diagnosticQtBridge(diagnostics);
-	const auto diagnosticRoot = QDir(
+	const auto diagnosticRoot = debugStorage.enabled
+		? QString::fromStdWString(debugStorage.diagnostics.wstring()) : QDir(
 		QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
 		.filePath(QStringLiteral("diagnostics"));
+	if (!MeetingUI::MeetingLogConsoleWindow::ConfigureStorageRoots(
+		std::filesystem::path(diagnosticRoot.toStdWString()), crashRoot)) return 2;
 	QSettings diagnosticSettings;
 	const bool requestedLogRetention = diagnosticSettings.value(
 		QStringLiteral("diagnostics/historyEnabled"), true).toBool();
@@ -185,7 +194,8 @@ int main(int argc, char *argv[]) {
 	if (!processRun->started()) {
 		qWarning() << "The local stability ledger is unavailable.";
 	}
-	const auto telemetryRoot = QDir(
+	const auto telemetryRoot = debugStorage.enabled
+		? QString::fromStdWString(debugStorage.telemetryReports.wstring()) : QDir(
 		QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
 		.filePath(QStringLiteral("telemetry/reports"));
 	auto telemetryHistory =
@@ -224,7 +234,8 @@ int main(int argc, char *argv[]) {
 		debugLogin.debugEnabled);
 
 	// 设置 UI 抽象层 Integration
-	MeetingUI::MeetingUiIntegration integration;
+	MeetingUI::MeetingUiIntegration integration(debugStorage.enabled
+		? QString::fromStdWString(debugStorage.emojiCache.wstring()) : QString());
 	Ui::Integration::Set(&integration);
 
 	// 初始化 Telegram Desktop lib_ui 样式系统

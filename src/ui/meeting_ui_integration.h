@@ -14,7 +14,8 @@ namespace MeetingUI {
 
 class MeetingUiIntegration final : public Ui::Integration {
 public:
-	MeetingUiIntegration() = default;
+	explicit MeetingUiIntegration(QString emojiCache = {})
+		: _emojiCache(std::move(emojiCache)) {}
 	~MeetingUiIntegration() = default;
 
 	void postponeCall(FnMut<void()> &&callable) override {
@@ -29,7 +30,9 @@ public:
 	}
 
 	QString emojiCacheFolder() override {
-		const auto path = QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/emoji";
+		const auto path = _emojiCache.isEmpty()
+			? QStandardPaths::writableLocation(QStandardPaths::CacheLocation) + "/emoji"
+			: _emojiCache;
 		QDir().mkpath(path);
 		return path;
 	}
@@ -90,6 +93,7 @@ public:
 	QString phraseRestore() override { return QCoreApplication::translate("MeetingUI", "Restore"); }
 
 private:
+	const QString _emojiCache;
 	int _touchCounter = 0;
 };
 

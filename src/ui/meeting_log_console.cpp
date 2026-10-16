@@ -26,6 +26,12 @@
 
 namespace {
 
+struct ConsoleStorageRoots final {
+	std::filesystem::path diagnostics;
+	std::filesystem::path crashEvidence;
+};
+std::unique_ptr<const ConsoleStorageRoots> g_consoleStorageRoots;
+
 struct LogBlockId final : QTextBlockUserData {
     explicit LogBlockId(quint64 value) : id(value) {}
     quint64 id;
@@ -81,6 +87,15 @@ QString SafeTag(const QString &tag) {
 
 namespace MeetingUI {
 
+bool MeetingLogConsoleWindow::ConfigureStorageRoots(
+		std::filesystem::path diagnostics, std::filesystem::path crashEvidence) {
+	if (!qApp || qApp->thread() != QThread::currentThread() ||
+		g_consoleStorageRoots || Active() || diagnostics.empty()) return false;
+	g_consoleStorageRoots = std::make_unique<const ConsoleStorageRoots>(
+		ConsoleStorageRoots{std::move(diagnostics), std::move(crashEvidence)});
+	return true;
+}
+
 MeetingLogConsoleWindow& MeetingLogConsoleWindow::Instance() {
 	Q_ASSERT(qApp && qApp->thread() == QThread::currentThread());
 	auto& instance = SingletonConsole();
@@ -114,7 +129,12 @@ MeetingLogConsoleWindow::sharedQueue() {
 }
 
 MeetingLogConsoleWindow::MeetingLogConsoleWindow(QWidget *parent)
-	: QDialog(parent) {
+	: QDialog(parent)
+	, _diagnosticRoot(g_consoleStorageRoots ? g_consoleStorageRoots->diagnostics
+		: std::filesystem::path(QDir(QStandardPaths::writableLocation(
+			QStandardPaths::AppLocalDataLocation)).filePath(QStringLiteral("diagnostics")).toStdWString()))
+	, _crashRoot(g_consoleStorageRoots ? g_consoleStorageRoots->crashEvidence
+		: livekit::telemetry::CrashEvidenceProvider::DefaultRoot()) {
 	setObjectName(QStringLiteral("meetingLogConsole"));
 	AppTheme::configureModelessWindow(*this);
 	AppTheme::setTone(*this, AppTheme::Tone::Dark);
@@ -259,7 +279,7 @@ void MeetingLogConsoleWindow::initUi() {
 	_crashCollectionBox = new QCheckBox(
 		QCoreApplication::translate("MeetingUI", "Crash metadata next run"), this);
 	_crashCollectionBox->setObjectName(QStringLiteral("consoleCrashCollection"));
-	const auto crashRoot = livekit::telemetry::CrashEvidenceProvider::DefaultRoot();
+	const auto crashRoot = _crashRoot;
 	_crashCollectionBox->setChecked(!crashRoot.empty() &&
 		livekit::telemetry::CrashEvidenceProvider::CollectionEnabled(crashRoot));
 	_crashCollectionBox->setEnabled(!crashRoot.empty());
@@ -295,9 +315,7 @@ void MeetingLogConsoleWindow::initUi() {
 		});
 	connect(_clearSavedBtn, &QPushButton::clicked, this, [this] {
 		if (_queue->clearFuture.valid()) return;
-		const auto root = std::filesystem::path(QDir(
-			QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
-			.filePath(QStringLiteral("diagnostics")).toStdWString());
+		const auto root = _diagnosticRoot;
 		try {
 			_queue->clearFuture = std::async(std::launch::async, [root] {
 				return livekit::diagnostic::DiagnosticFileSink::ClearInactiveHistory(root);
