@@ -1,5 +1,6 @@
 #include <QtCore/QCoreApplication>
 #include "openmeeting_http_client.h"
+#include "src/net/account_credentials_policy.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/telemetry/diagnostic_pipeline.h"
 #include <QtCore/QUrl>
@@ -13,6 +14,21 @@
 
 namespace OpenMeeting {
 namespace {
+
+bool rejectInvalidCredentials(QObject *context, const QString &account,
+                              const QString &password, ResultCallback<UserInfo> &callback) {
+    const auto validation = validateAccountCredentials(account, password);
+    if (validation == CredentialValidationError::None) return false;
+
+    HttpError error;
+    error.code = static_cast<int>(ErrorCode::InvalidCredentials);
+    error.message = credentialValidationMessage(validation);
+    error.failureLayer = HttpFailureLayer::Policy;
+    QTimer::singleShot(0, context, [callback = std::move(callback), error]() {
+        if (callback) callback(false, UserInfo{}, error);
+    });
+    return true;
+}
 
 HttpError parseError(const HttpError &source, const QString &message) {
     auto error = source;
@@ -332,6 +348,7 @@ void OpenMeetingHttpClient::sendPostToEndpoint(
 // -------------------------------------------------------------
 
 void OpenMeetingHttpClient::login(const QString &account, const QString &password, ResultCallback<UserInfo> callback) {
+    if (rejectInvalidCredentials(this, account, password, callback)) return;
     const auto revision = ++_authRevision;
     const QPointer<OpenMeetingHttpClient> self(this);
     requestLogin(account, password, [self, revision, callback](bool ok, const UserInfo &user, const HttpError &err) {
@@ -367,6 +384,7 @@ void OpenMeetingHttpClient::login(const QString &account, const QString &passwor
 }
 
 void OpenMeetingHttpClient::requestLogin(const QString &account, const QString &password, ResultCallback<UserInfo> callback) {
+    if (rejectInvalidCredentials(this, account, password, callback)) return;
     QJsonObject body;
     body["account"] = account;
     body["password"] = password;
@@ -389,6 +407,7 @@ void OpenMeetingHttpClient::requestLogin(const QString &account, const QString &
 
 void OpenMeetingHttpClient::registerUser(const QString &account, const QString &password,
         const QString &nickname, ResultCallback<UserInfo> callback, const QString &registrationBaseUrl) {
+    if (rejectInvalidCredentials(this, account, password, callback)) return;
     QJsonObject body;
     body["account"] = account;
     body["password"] = password;

@@ -236,12 +236,24 @@
         <translation>开源音视频会议客户端</translation>
     </message>
     <message>
-        <source>Phone number or account</source>
-        <translation>请输入手机号或账号</translation>
+        <source>Phone number or account (%1-%2 characters)</source>
+        <translation>请输入手机号或账号（%1–%2 位）</translation>
     </message>
     <message>
-        <source>Password</source>
-        <translation>请输入登录密码</translation>
+        <source>Account or phone number (%1-%2 characters)</source>
+        <translation>请输入注册账号或手机号（%1–%2 位）</translation>
+    </message>
+    <message>
+        <source>Password (%1-%2 characters)</source>
+        <translation>请输入密码（%1–%2 位）</translation>
+    </message>
+    <message>
+        <source>The account must contain %1-%2 characters</source>
+        <translation>账号长度必须为 %1–%2 位</translation>
+    </message>
+    <message>
+        <source>The password must contain %1-%2 characters</source>
+        <translation>密码长度必须为 %1–%2 位</translation>
     </message>
     <message>
         <source>Remember sign-in</source>
@@ -268,16 +280,8 @@
         <translation>账号登录</translation>
     </message>
     <message>
-        <source>Account or phone number</source>
-        <translation>请输入注册账号或手机号</translation>
-    </message>
-    <message>
         <source>Display name</source>
         <translation>请输入用户昵称</translation>
-    </message>
-    <message>
-        <source>Password (at least 6 characters)</source>
-        <translation>设置登录密码 (至少6位)</translation>
     </message>
     <message>
         <source>Confirm password</source>
@@ -356,14 +360,6 @@
         <translation>正在注册...</translation>
     </message>
     <message>
-        <source>Enter a password</source>
-        <translation>请设置登录密码</translation>
-    </message>
-    <message>
-        <source>The password must contain at least 6 characters</source>
-        <translation>密码长度不能少于 6 位</translation>
-    </message>
-    <message>
         <source>The passwords do not match. Please try again.</source>
         <translation>两次输入的密码不一致，请重新确认</translation>
     </message>
@@ -374,10 +370,6 @@
     <message>
         <source>Unable to create the account. Please try again later.</source>
         <translation>注册失败，请稍后重试</translation>
-    </message>
-    <message>
-        <source>Enter an account or phone number</source>
-        <translation>请输入账号或手机号</translation>
     </message>
     <message>
         <source>Sign-in failed. Check your credentials and server connection.</source>

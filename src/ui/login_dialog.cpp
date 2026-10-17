@@ -2,6 +2,7 @@
 #include "src/ui/app_theme.h"
 #include "src/ui/app_branding.h"
 #include "src/ui/login_dialog.h"
+#include "src/net/account_credentials_policy.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/net/session_manager.h"
 #include <QtCore/QDateTime>
@@ -178,13 +179,15 @@ void LoginDialog::initUI() {
     accLayout->setSpacing(12);
 
     _accountInput = new QLineEdit(accountTab);
-    _accountInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Phone number or account"));
+    _accountInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Phone number or account (%1-%2 characters)")
+        .arg(OpenMeeting::kMinAccountLength).arg(OpenMeeting::kMaxAccountLength));
     _accountInput->setAccessibleName(_accountInput->placeholderText());
     accLayout->addWidget(_accountInput);
 
     auto pwdLayout = new QHBoxLayout();
     _passwordInput = new QLineEdit(accountTab);
-    _passwordInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Password"));
+    _passwordInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Password (%1-%2 characters)")
+        .arg(OpenMeeting::kMinPasswordLength).arg(OpenMeeting::kMaxPasswordLength));
     _passwordInput->setAccessibleName(_passwordInput->placeholderText());
     _passwordInput->setEchoMode(QLineEdit::Password);
     pwdLayout->addWidget(_passwordInput);
@@ -244,7 +247,8 @@ void LoginDialog::initUI() {
 
     _regAccountInput = new QLineEdit(regTab);
     _regAccountInput->setObjectName("registerAccount");
-    _regAccountInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Account or phone number"));
+    _regAccountInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Account or phone number (%1-%2 characters)")
+        .arg(OpenMeeting::kMinAccountLength).arg(OpenMeeting::kMaxAccountLength));
     regLayout->addWidget(_regAccountInput);
 
     _regNicknameInput = new QLineEdit(regTab);
@@ -255,7 +259,8 @@ void LoginDialog::initUI() {
     auto regPwdLayout = new QHBoxLayout();
     _regPasswordInput = new QLineEdit(regTab);
     _regPasswordInput->setObjectName("registerPassword");
-    _regPasswordInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Password (at least 6 characters)"));
+    _regPasswordInput->setPlaceholderText(QCoreApplication::translate("MeetingUI", "Password (%1-%2 characters)")
+        .arg(OpenMeeting::kMinPasswordLength).arg(OpenMeeting::kMaxPasswordLength));
     _regPasswordInput->setEchoMode(QLineEdit::Password);
     regPwdLayout->addWidget(_regPasswordInput);
 
@@ -622,24 +627,16 @@ void LoginDialog::onRegisterClicked() {
     const QString confirmPwd = _regConfirmPwdInput->text();
     const QString serverUrl = _serverUrlInput->text().trimmed();
 
-    if (account.isEmpty()) {
-        showError(QCoreApplication::translate("MeetingUI", "Account or phone number"));
-        _regAccountInput->setFocus();
+    const auto validation = OpenMeeting::validateAccountCredentials(account, pwd);
+    if (validation != OpenMeeting::CredentialValidationError::None) {
+        showError(OpenMeeting::credentialValidationMessage(validation));
+        (validation == OpenMeeting::CredentialValidationError::AccountLength
+            ? _regAccountInput : _regPasswordInput)->setFocus();
         return;
     }
     if (nickname.isEmpty()) {
         showError(QCoreApplication::translate("MeetingUI", "Display name"));
         _regNicknameInput->setFocus();
-        return;
-    }
-    if (pwd.isEmpty()) {
-        showError(QCoreApplication::translate("MeetingUI", "Enter a password"));
-        _regPasswordInput->setFocus();
-        return;
-    }
-    if (pwd.length() < 6) {
-        showError(QCoreApplication::translate("MeetingUI", "The password must contain at least 6 characters"));
-        _regPasswordInput->setFocus();
         return;
     }
     if (pwd != confirmPwd) {
@@ -689,14 +686,12 @@ void LoginDialog::onLoginClicked() {
     const QString password = _passwordInput ? _passwordInput->text() : QString();
     const QString serverUrl = _serverUrlInput ? _serverUrlInput->text().trimmed() : QString();
 
-    if (account.isEmpty()) {
-        showError(QCoreApplication::translate("MeetingUI", "Enter an account or phone number"));
-        if (_accountInput) _accountInput->setFocus();
-        return;
-    }
-    if (password.isEmpty()) {
-        showError(QCoreApplication::translate("MeetingUI", "Password"));
-        if (_passwordInput) _passwordInput->setFocus();
+    const auto validation = OpenMeeting::validateAccountCredentials(account, password);
+    if (validation != OpenMeeting::CredentialValidationError::None) {
+        showError(OpenMeeting::credentialValidationMessage(validation));
+        auto *input = validation == OpenMeeting::CredentialValidationError::AccountLength
+            ? _accountInput : _passwordInput;
+        if (input) input->setFocus();
         return;
     }
 

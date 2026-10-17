@@ -1,4 +1,5 @@
 #include "src/net/session_manager.h"
+#include "src/net/account_credentials_policy.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/e2ee/meeting_encryption_key.h"
 #include "src/media/screen_share_quality.h"
@@ -430,6 +431,11 @@ void SessionManager::loginWithPassword(const QString &account,
                                        bool remember,
                                        bool autoLogin,
                                        std::function<void(bool success, const QString &errMsg)> callback) {
+    const auto validation = validateAccountCredentials(account, password);
+    if (validation != CredentialValidationError::None) {
+        if (callback) callback(false, credentialValidationMessage(validation));
+        return;
+    }
     resetAuthentication();
     forgetSavedSession();
     const auto generation = _authGeneration;

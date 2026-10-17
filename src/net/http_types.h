@@ -16,6 +16,7 @@ enum class ErrorCode {
     InvalidServiceUrl = -3,
     InsecureTransport = -4,
     RedirectRejected = -5,
+    InvalidCredentials = -6,
     TokenExpired = 100010,
     TokenInvalid = 100002,
     TokenNotFound = 100004,
