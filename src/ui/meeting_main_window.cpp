@@ -46,6 +46,7 @@
 #endif
 
 namespace MeetingUI {
+namespace Theme = MeetingUI::AppTheme;
 
 // ----------------------------------------------------
 // WindowControlsWidget 窗口右上角控制按钮
@@ -72,16 +73,16 @@ void WindowControlsWidget::paintEvent(QPaintEvent *e) {
 
 	// 最小化按钮
 	if (_hoverBtn == HoverBtn::Min) {
-		p.fillRect(_minRect, QColor(0xe5, 0xe8, 0xef));
+		p.fillRect(_minRect, Theme::color(Theme::ColorRole::Hover));
 	}
-	p.setPen(QPen(QColor(0x60, 0x62, 0x66), 1.2));
+	p.setPen(QPen(Theme::color(Theme::ColorRole::TextSecondary), 1.2));
 	p.drawLine(_minRect.center().x() - 5, _minRect.center().y(), _minRect.center().x() + 5, _minRect.center().y());
 
 	// 最大化按钮
 	if (_hoverBtn == HoverBtn::Max) {
-		p.fillRect(_maxRect, QColor(0xe5, 0xe8, 0xef));
+		p.fillRect(_maxRect, Theme::color(Theme::ColorRole::Hover));
 	}
-	p.setPen(QPen(QColor(0x60, 0x62, 0x66), 1.2));
+	p.setPen(QPen(Theme::color(Theme::ColorRole::TextSecondary), 1.2));
 	p.drawRect(_maxRect.center().x() - 5, _maxRect.center().y() - 5, 10, 10);
 
 	// 关闭按钮
@@ -89,10 +90,10 @@ void WindowControlsWidget::paintEvent(QPaintEvent *e) {
 		// 右上角带圆角的红色悬浮背景
 		QPainterPath closePath;
 		closePath.addRoundedRect(_closeRect, 0, 0);
-		p.fillPath(closePath, QColor(0xf5, 0x3f, 0x3f));
-		p.setPen(QPen(Qt::white, 1.3));
+		p.fillPath(closePath, Theme::color(Theme::ColorRole::Danger));
+		p.setPen(QPen(Theme::color(Theme::ColorRole::OnAccent), 1.3));
 	} else {
-		p.setPen(QPen(QColor(0x60, 0x62, 0x66), 1.2));
+		p.setPen(QPen(Theme::color(Theme::ColorRole::TextSecondary), 1.2));
 	}
 	const int ccx = _closeRect.center().x();
 	const int ccy = _closeRect.center().y();
@@ -1331,9 +1332,9 @@ void MeetingMainWindow::paintEvent(QPaintEvent *e) {
 	if (radius > 0) {
 		QPainterPath path;
 		path.addRoundedRect(QRectF(0, 0, w, h), radius, radius);
-		p.fillPath(path, Qt::white);
+		p.fillPath(path, Theme::color(Theme::ColorRole::Window));
 	} else {
-		p.fillRect(rect(), Qt::white);
+		p.fillRect(rect(), Theme::color(Theme::ColorRole::Window));
 	}
 
 	// 2. 绘制中间与右侧之间的浅灰纵向分割线
@@ -1342,7 +1343,7 @@ void MeetingMainWindow::paintEvent(QPaintEvent *e) {
 	const int gridW = remainW * 46 / 100;
 	const int splitX = sidebarW + gridW;
 
-	p.setPen(QColor(0xf0, 0xf2, 0xf5));
+	p.setPen(Theme::color(Theme::ColorRole::Border));
 	p.drawLine(splitX, 36, splitX, h - 36);
 }
 

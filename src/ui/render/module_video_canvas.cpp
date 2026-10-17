@@ -68,6 +68,7 @@ QString Dx11DriverDescription(BackendDevice& device) {
 struct ModuleVideoCanvas::Scene {
     uint64_t sequence = 0;
     lk_render_frame_target target{};
+    std::array<float, 4> clear_color{};
     std::string measurement_point;
     std::vector<Resource> resources;
     std::vector<lk_render_draw_command> commands;
@@ -158,7 +159,8 @@ struct ModuleVideoCanvas::Worker {
                     std::chrono::microseconds render_present_duration{-1};
                     if (result == LK_RENDER_OK) {
                         const lk_render_scene_view view{sizeof(view), uint32_t(scene->commands.size()),
-                            scene->commands.data(), {0.0706f, 0.0784f, 0.1020f, 1}};
+                            scene->commands.data(), {scene->clear_color[0], scene->clear_color[1],
+                                scene->clear_color[2], scene->clear_color[3]}};
                         const auto render_started_at = std::chrono::steady_clock::now();
                         result = device->Render(scene->target, view); // Includes Present.
                         render_present_duration =
@@ -377,6 +379,7 @@ bool ModuleVideoCanvas::beginFrame(QSize& pixels) {
 #endif
     if (pixels.isEmpty()) return true;
     building_ = std::make_shared<Scene>();
+    building_->clear_color = stageClearColor();
     building_->sequence = ++submitted_;
     building_->target = target_;
     building_->measurement_point = "dx11_module_present";

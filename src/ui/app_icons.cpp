@@ -1,4 +1,5 @@
 #include "src/ui/app_icons.h"
+#include "src/ui/app_theme.h"
 
 #include <QtGui/QIconEngine>
 #include <QtGui/QPainter>
@@ -19,8 +20,9 @@ public:
         painter->translate(rect.x() + (rect.width() - side) / 2., rect.y() + (rect.height() - side) / 2.);
         painter->scale(side / 24., side / 24.);
         painter->setRenderHint(QPainter::Antialiasing);
-        const auto color = QApplication::palette().color(
-            mode == QIcon::Disabled ? QPalette::Disabled : QPalette::Active, QPalette::WindowText);
+        const auto color = mode == QIcon::Selected ? AppTheme::color(ColorRole::OnAccent)
+            : QApplication::palette().color(
+                mode == QIcon::Disabled ? QPalette::Disabled : QPalette::Active, QPalette::WindowText);
         painter->setPen(QPen(color, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
         painter->setBrush(Qt::NoBrush);
         switch (_kind) {

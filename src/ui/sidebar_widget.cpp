@@ -1,3 +1,4 @@
+#include "src/ui/app_theme.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/sidebar_widget.h"
 #include "src/net/session_manager.h"
@@ -5,6 +6,7 @@
 #include <QtGui/QFont>
 
 namespace MeetingUI {
+namespace Theme = MeetingUI::AppTheme;
 
 SidebarWidget::SidebarWidget(QWidget *parent)
 	: Ui::RpWidget(parent) {
@@ -103,13 +105,13 @@ void SidebarWidget::paintEvent(QPaintEvent *e) {
 		bgPath.arcTo(0, h - _cornerRadius * 2, _cornerRadius * 2, _cornerRadius * 2, 180, 90);
 		bgPath.lineTo(w, h);
 		bgPath.closeSubpath();
-		p.fillPath(bgPath, QColor(0xf6, 0xf8, 0xfa));
+		p.fillPath(bgPath, Theme::color(Theme::ColorRole::SurfaceAlt));
 	} else {
-		p.fillRect(rect(), QColor(0xf6, 0xf8, 0xfa));
+		p.fillRect(rect(), Theme::color(Theme::ColorRole::SurfaceAlt));
 	}
 
 	// 右侧分割线
-	p.setPen(QColor(0xe5, 0xe8, 0xec));
+	p.setPen(Theme::color(Theme::ColorRole::Border));
 	p.drawLine(w - 1, 0, w - 1, h);
 
 	// 绘制头像
@@ -123,11 +125,11 @@ void SidebarWidget::paintEvent(QPaintEvent *e) {
 		// 如果选中，绘制高亮背景或胶囊
 		if (isActive) {
 			p.setPen(Qt::NoPen);
-			p.setBrush(QColor(0xe6, 0xf0, 0xff));
+			p.setBrush(Theme::color(Theme::ColorRole::AccentSoft));
 			p.drawRoundedRect(item.rect, 8, 8);
 		} else if (isHovered) {
 			p.setPen(Qt::NoPen);
-			p.setBrush(QColor(0xec, 0xef, 0xf4));
+			p.setBrush(Theme::color(Theme::ColorRole::Hover));
 			p.drawRoundedRect(item.rect, 8, 8);
 		}
 
@@ -142,7 +144,7 @@ void SidebarWidget::paintEvent(QPaintEvent *e) {
 		font.setBold(isActive);
 		p.setFont(font);
 
-		p.setPen(isActive ? QColor(0x16, 0x77, 0xff) : (isHovered ? QColor(0x1f, 0x23, 0x29) : QColor(0x60, 0x62, 0x66)));
+		p.setPen(isActive ? Theme::color(Theme::ColorRole::Accent) : (isHovered ? Theme::color(Theme::ColorRole::Text) : Theme::color(Theme::ColorRole::TextSecondary)));
 		p.drawText(QRect(item.rect.x(), item.rect.y() + 32, item.rect.width(), 20), Qt::AlignCenter, item.text);
 	}
 
@@ -151,7 +153,7 @@ void SidebarWidget::paintEvent(QPaintEvent *e) {
 		const bool isHovered = (_hoveredBottom && *_hoveredBottom == bItem.type);
 		if (isHovered) {
 			p.setPen(Qt::NoPen);
-			p.setBrush(QColor(0xe5, 0xe8, 0xef));
+			p.setBrush(Theme::color(Theme::ColorRole::Hover));
 			p.drawRoundedRect(bItem.rect, 6, 6);
 		}
 		drawBottomIcon(p, bItem.type, bItem.rect, isHovered);
@@ -165,20 +167,20 @@ void SidebarWidget::drawAvatar(QPainter &p, const QRect &r) {
 	// 悬浮放大微光
 	QRect avRect = r;
 	if (_avatarHovered) {
-		p.setPen(QPen(QColor(0x16, 0x77, 0xff, 60), 2));
+		p.setPen(QPen(Theme::color(Theme::ColorRole::AccentSoft), 2));
 	} else {
-		p.setPen(QPen(QColor(0xdf, 0xe3, 0xe8), 1));
+		p.setPen(QPen(Theme::color(Theme::ColorRole::Border), 1));
 	}
 
 	// 头像外圆
-	p.setBrush(QColor(0xfa, 0xfb, 0xfc));
+	p.setBrush(Theme::color(Theme::ColorRole::Surface));
 	p.drawEllipse(avRect);
 
 	// 头像内部渐变圆形
 	QRect innerRect = avRect.adjusted(3, 3, -3, -3);
 	QLinearGradient grad(innerRect.topLeft(), innerRect.bottomRight());
-	grad.setColorAt(0.0, QColor(0xe8, 0xf1, 0xff));
-	grad.setColorAt(1.0, QColor(0xd0, 0xe2, 0xff));
+	grad.setColorAt(0.0, Theme::color(Theme::ColorRole::AccentSoft));
+	grad.setColorAt(1.0, Theme::color(Theme::ColorRole::AccentSoft).darker(106));
 	p.setPen(Qt::NoPen);
 	p.setBrush(grad);
 	p.drawEllipse(innerRect);
@@ -194,13 +196,13 @@ void SidebarWidget::drawAvatar(QPainter &p, const QRect &r) {
 		f.setPixelSize(14);
 		f.setBold(true);
 		p.setFont(f);
-		p.setPen(QColor(0x16, 0x77, 0xff));
+		p.setPen(Theme::color(Theme::ColorRole::Accent));
 		QString letter = name.left(1).toUpper();
 		p.drawText(innerRect, Qt::AlignCenter, letter);
 	} else {
 		// 未登录：用户轮廓图标
 		p.setPen(Qt::NoPen);
-		p.setBrush(QColor(0x33, 0x77, 0xdd));
+		p.setBrush(Theme::color(Theme::ColorRole::Accent));
 		// 头部
 		p.drawEllipse(innerRect.center().x() - 4, innerRect.top() + 7, 8, 8);
 		// 身体
@@ -218,10 +220,10 @@ void SidebarWidget::drawAvatar(QPainter &p, const QRect &r) {
 	const QPoint badgeCenter(avRect.right() - 3, avRect.bottom() - 3);
 	// 白外圈
 	p.setPen(Qt::NoPen);
-	p.setBrush(Qt::white);
+	p.setBrush(Theme::color(Theme::ColorRole::Surface));
 	p.drawEllipse(badgeCenter, badgeRadius + 1, badgeRadius + 1);
 	// 状态点（已登录绿色，未登录灰色）
-	p.setBrush(isLogged ? QColor(0x52, 0xc4, 0x1a) : QColor(0xbf, 0xbf, 0xbf));
+	p.setBrush(Theme::color(isLogged ? Theme::ColorRole::Success : Theme::ColorRole::TextMuted));
 	p.drawEllipse(badgeCenter, badgeRadius, badgeRadius);
 
 	p.restore();
@@ -231,7 +233,7 @@ void SidebarWidget::drawNavIcon(QPainter &p, NavItemType type, const QRect &r, b
 	p.save();
 	p.setRenderHint(QPainter::Antialiasing);
 
-	const QColor color = active ? QColor(0x16, 0x77, 0xff) : (hovered ? QColor(0x1f, 0x23, 0x29) : QColor(0x60, 0x62, 0x66));
+	const QColor color = active ? Theme::color(Theme::ColorRole::Accent) : (hovered ? Theme::color(Theme::ColorRole::Text) : Theme::color(Theme::ColorRole::TextSecondary));
 	p.setPen(QPen(color, 2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 	p.setBrush(Qt::NoBrush);
 
@@ -274,7 +276,7 @@ void SidebarWidget::drawBottomIcon(QPainter &p, BottomItemType type, const QRect
 	p.save();
 	p.setRenderHint(QPainter::Antialiasing);
 
-	const QColor color = hovered ? QColor(0x1f, 0x23, 0x29) : QColor(0x8a, 0x8f, 0x99);
+	const QColor color = hovered ? Theme::color(Theme::ColorRole::Text) : Theme::color(Theme::ColorRole::TextMuted);
 	p.setPen(QPen(color, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 	p.setBrush(Qt::NoBrush);
 

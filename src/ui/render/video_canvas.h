@@ -7,6 +7,7 @@
 #include "render/video_layout.h"
 #include "render/video_render_frame.h"
 #include "render/render_diagnostics.h"
+#include <array>
 #include <atomic>
 #include <functional>
 #include <map>
@@ -50,6 +51,8 @@ signals:
     void tilePinRequested(const QString& key);
 protected:
     void render();
+    // Read only on the UI owner; render workers receive a copy in their scene.
+    std::array<float, 4> stageClearColor() const;
     virtual void requestRender() { render(); }
     bool eventFilter(QObject*, QEvent*) override;
     bool event(QEvent*) override;

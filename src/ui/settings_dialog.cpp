@@ -178,6 +178,12 @@ SettingsDialog::SettingsDialog(
 	resize(760 + kShadowMargin * 2, 640 + kShadowMargin * 2);
 	setMinimumSize(680 + kShadowMargin * 2, 520 + kShadowMargin * 2);
 	buildUi();
+	syncThemeControls();
+	AppTheme::observeChanges(*this, [this] { syncThemeControls(); });
+	connect(_themeCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+		this, [this](int index) {
+			if (index >= 0) AppTheme::setTheme(AppTheme::themeFromId(_themeCombo->itemData(index).toString()));
+		});
 	setPreferences(_session.mediaPreferences());
 	syncSecurityControls();
 	connectPreferenceControls();
@@ -409,6 +415,24 @@ QWidget *SettingsDialog::buildGeneralPage() {
 	layout->addWidget(makePageTitle(QCoreApplication::translate("MeetingUI", "General"), content));
 	layout->addSpacing(6);
 
+	auto *themeLabel = makeSectionTitle(QCoreApplication::translate("MeetingUI", "Theme"), content);
+	layout->addWidget(themeLabel);
+	_themeCombo = createAccessibleComboBox(content);
+	_themeCombo->setObjectName(QStringLiteral("settingsThemeCombo"));
+	_themeCombo->setAccessibleName(QCoreApplication::translate("MeetingUI", "Theme"));
+	_themeCombo->addItem(QCoreApplication::translate("MeetingUI", "System"), AppTheme::themeId(AppTheme::Theme::System));
+	_themeCombo->addItem(QCoreApplication::translate("MeetingUI", "Light"), AppTheme::themeId(AppTheme::Theme::Light));
+	_themeCombo->addItem(QCoreApplication::translate("MeetingUI", "Dark"), AppTheme::themeId(AppTheme::Theme::Dark));
+	_themeCombo->addItem(QCoreApplication::translate("MeetingUI", "Teal"), AppTheme::themeId(AppTheme::Theme::Teal));
+	AppTheme::styleChoiceControls(*_themeCombo, AppTheme::Tone::Light);
+	themeLabel->setBuddy(_themeCombo);
+	layout->addWidget(_themeCombo);
+	auto *themeHint = new QLabel(QCoreApplication::translate("MeetingUI", "Changes apply immediately and are saved for the next launch."), content);
+	themeHint->setObjectName(QStringLiteral("hintLabel"));
+	themeHint->setWordWrap(true);
+	layout->addWidget(themeHint);
+	layout->addSpacing(12);
+
 	_generalCamera = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable camera on joining"), content);
 	_generalCamera->setObjectName(QStringLiteral("settingsJoinCamera"));
 	_generalMicrophone = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable microphone on joining"), content);
@@ -430,6 +454,11 @@ QWidget *SettingsDialog::buildGeneralPage() {
 	layout->addWidget(_stayWhenLocked);
 	layout->addStretch();
 	return scroll;
+}
+
+void SettingsDialog::syncThemeControls() {
+	const QSignalBlocker blocker(_themeCombo);
+	_themeCombo->setCurrentIndex(_themeCombo->findData(AppTheme::themeId(AppTheme::selectedTheme())));
 }
 
 QWidget *SettingsDialog::buildVideoPage() {

@@ -14,6 +14,7 @@
 #include <algorithm>
 
 namespace MeetingUI {
+namespace Theme = MeetingUI::AppTheme;
 
 // ----------------------------------------------------
 // FloatingActionButton (右下角圆环日历添加按钮)
@@ -60,15 +61,15 @@ void FloatingActionButton::paintEvent(QPaintEvent *e) {
 
 	// 2. 纯白背景圆底 + 微弱高光边缘
 	p.save();
-	p.setBrush(_pressed ? QColor(0xf0, 0xf3, 0xf8) : Qt::white);
-	p.setPen(QPen(QColor(0xe0, 0xe4, 0xec), 1));
+	p.setBrush(_pressed ? Theme::color(Theme::ColorRole::Pressed) : Theme::color(Theme::ColorRole::Surface));
+	p.setPen(QPen(Theme::color(Theme::ColorRole::Border), 1));
 	p.drawEllipse(circleBox);
 	p.restore();
 
 	// 绘制内部日历加号图标 (📅+)
 	p.save();
 	p.setRenderHint(QPainter::Antialiasing);
-	p.setPen(QPen(QColor(0x30, 0x31, 0x33), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+	p.setPen(QPen(Theme::color(Theme::ColorRole::Text), 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 	p.setBrush(Qt::NoBrush);
 
 	// 日历外框
@@ -252,7 +253,7 @@ void ScheduleWidget::drawHeader(QPainter &p) {
 	bigFont.setPixelSize(28);
 	bigFont.setBold(true);
 	p.setFont(bigFont);
-	p.setPen(QColor(0x1f, 0x23, 0x29));
+	p.setPen(Theme::color(Theme::ColorRole::Text));
 
 	const QString mainDate = getFormattedDate();
 	p.drawText(_dateRect, Qt::AlignLeft | Qt::AlignVCenter | Qt::TextWordWrap, mainDate);
@@ -263,7 +264,7 @@ void ScheduleWidget::drawHeader(QPainter &p) {
 	subFont.setPixelSize(13);
 	subFont.setBold(false);
 	p.setFont(subFont);
-	p.setPen(QColor(0x8f, 0x95, 0x9e));
+	p.setPen(Theme::color(Theme::ColorRole::TextMuted));
 
 	const QString subDate = getFormattedSubDate();
 	p.drawText(_subDateRect, Qt::AlignLeft | Qt::AlignVCenter | Qt::TextWordWrap, subDate);
@@ -276,18 +277,18 @@ void ScheduleWidget::drawHeader(QPainter &p) {
 	const QString refreshText = QCoreApplication::translate("MeetingUI", "Refresh");
 	const int refreshW = fm.horizontalAdvance(refreshText) + 8;
 
-	p.setPen(_refreshHovered ? QColor(0x16, 0x77, 0xff) : QColor(0x8f, 0x95, 0x9e));
+	p.setPen(_refreshHovered ? Theme::color(Theme::ColorRole::Accent) : Theme::color(Theme::ColorRole::TextMuted));
 	p.drawText(_refreshRect, Qt::AlignCenter, refreshText);
 
 	if (_allMeetingsHovered) {
-		p.setPen(QColor(0x16, 0x77, 0xff));
+		p.setPen(Theme::color(Theme::ColorRole::Accent));
 	} else {
-		p.setPen(QColor(0x8f, 0x95, 0x9e));
+		p.setPen(Theme::color(Theme::ColorRole::TextMuted));
 	}
 	p.drawText(_allMeetingsRect, Qt::AlignRight | Qt::AlignVCenter, allMeetingsText);
 
 	// 分割线
-	p.setPen(QColor(0xeb, 0xed, 0xf0));
+	p.setPen(Theme::color(Theme::ColorRole::Border));
 	p.drawLine(left, _headerBottom - 8, w - rightMargin, _headerBottom - 8);
 
 	p.restore();
@@ -302,23 +303,23 @@ void ScheduleWidget::drawEmptyCoffeeIllustration(QPainter &p, const QRect &area)
 
 	// 1. 咖啡碟投影与底座
 	p.setPen(Qt::NoPen);
-	p.setBrush(QColor(0x16, 0x77, 0xff, 15));
+	p.setBrush(Theme::color(Theme::ColorRole::AccentSoft));
 	p.drawEllipse(QPoint(cx, cy + 34), 64, 18);
 
 	// 咖啡碟主体（浅蓝渐变碟）
 	QLinearGradient saucerGrad(cx - 50, cy + 20, cx + 50, cy + 36);
-	saucerGrad.setColorAt(0.0, QColor(0xe5, 0xf0, 0xff));
-	saucerGrad.setColorAt(0.5, QColor(0xd6, 0xe8, 0xff));
-	saucerGrad.setColorAt(1.0, QColor(0xc4, 0xde, 0xff));
+	saucerGrad.setColorAt(0.0, Theme::color(Theme::ColorRole::AccentSoft).lighter(108));
+	saucerGrad.setColorAt(0.5, Theme::color(Theme::ColorRole::AccentSoft));
+	saucerGrad.setColorAt(1.0, Theme::color(Theme::ColorRole::AccentSoft).darker(108));
 	p.setBrush(saucerGrad);
 	p.drawEllipse(QPoint(cx, cy + 28), 56, 14);
 
 	// 咖啡碟内凹圆弧
-	p.setBrush(QColor(0xbb, 0xd8, 0xff, 80));
+	p.setBrush(Theme::color(Theme::ColorRole::AccentSoft).darker(115));
 	p.drawEllipse(QPoint(cx, cy + 27), 40, 9);
 
 	// 2. 咖啡杯把手 (右侧圆环半圆)
-	p.setPen(QPen(QColor(0xd0, 0xe4, 0xff), 7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+	p.setPen(QPen(Theme::color(Theme::ColorRole::AccentSoft).darker(110), 7, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 	p.setBrush(Qt::NoBrush);
 	p.drawArc(cx + 12, cy - 14, 30, 32, -60 * 16, 180 * 16);
 
@@ -331,9 +332,9 @@ void ScheduleWidget::drawEmptyCoffeeIllustration(QPainter &p, const QRect &area)
 	cupPath.closeSubpath();
 
 	QLinearGradient cupGrad(cx - 30, cy - 16, cx + 30, cy + 20);
-	cupGrad.setColorAt(0.0, QColor(0xf6, 0xf9, 0xff));
-	cupGrad.setColorAt(0.4, QColor(0xe2, 0xee, 0xff));
-	cupGrad.setColorAt(1.0, QColor(0xcb, 0xe2, 0xff));
+	cupGrad.setColorAt(0.0, Theme::color(Theme::ColorRole::Surface));
+	cupGrad.setColorAt(0.4, Theme::color(Theme::ColorRole::AccentSoft));
+	cupGrad.setColorAt(1.0, Theme::color(Theme::ColorRole::AccentSoft).darker(108));
 	p.setPen(Qt::NoPen);
 	p.setBrush(cupGrad);
 	p.drawPath(cupPath);
@@ -344,16 +345,16 @@ void ScheduleWidget::drawEmptyCoffeeIllustration(QPainter &p, const QRect &area)
 
 	// 4. 咖啡杯口椭圆
 	QLinearGradient rimGrad(cx, cy - 20, cx, cy - 12);
-	rimGrad.setColorAt(0.0, QColor(0xff, 0xff, 0xff));
-	rimGrad.setColorAt(1.0, QColor(0xd8, 0xe8, 0xff));
+	rimGrad.setColorAt(0.0, Theme::color(Theme::ColorRole::Surface));
+	rimGrad.setColorAt(1.0, Theme::color(Theme::ColorRole::AccentSoft));
 	p.setPen(Qt::NoPen);
 	p.setBrush(rimGrad);
 	p.drawEllipse(QPoint(cx, cy - 16), 28, 7);
 
 	// 杯内热咖啡液体（深色/浅暖褐渐变）
 	QLinearGradient coffeeGrad(cx, cy - 18, cx, cy - 14);
-	coffeeGrad.setColorAt(0.0, QColor(0xe0, 0xec, 0xfc));
-	coffeeGrad.setColorAt(1.0, QColor(0xc4, 0xdb, 0xf8));
+	coffeeGrad.setColorAt(0.0, Theme::color(Theme::ColorRole::AccentSoft).darker(105));
+	coffeeGrad.setColorAt(1.0, Theme::color(Theme::ColorRole::AccentSoft).darker(120));
 	p.setBrush(coffeeGrad);
 	p.drawEllipse(QPoint(cx, cy - 16), 25, 5);
 
@@ -367,7 +368,7 @@ void ScheduleWidget::drawEmptyCoffeeIllustration(QPainter &p, const QRect &area)
 	topPath.lineTo(cubeX + 14, cubeY);
 	topPath.lineTo(cubeX + 7, cubeY + 4);
 	topPath.closeSubpath();
-	p.setBrush(QColor(0xff, 0xff, 0xff));
+	p.setBrush(Theme::color(Theme::ColorRole::Surface));
 	p.drawPath(topPath);
 	// 左侧面
 	QPainterPath leftPath;
@@ -376,7 +377,7 @@ void ScheduleWidget::drawEmptyCoffeeIllustration(QPainter &p, const QRect &area)
 	leftPath.lineTo(cubeX + 7, cubeY + 12);
 	leftPath.lineTo(cubeX, cubeY + 8);
 	leftPath.closeSubpath();
-	p.setBrush(QColor(0xeb, 0xf3, 0xff));
+	p.setBrush(Theme::color(Theme::ColorRole::AccentSoft));
 	p.drawPath(leftPath);
 	// 右侧面
 	QPainterPath rightPath;
@@ -385,7 +386,7 @@ void ScheduleWidget::drawEmptyCoffeeIllustration(QPainter &p, const QRect &area)
 	rightPath.lineTo(cubeX + 14, cubeY + 8);
 	rightPath.lineTo(cubeX + 7, cubeY + 12);
 	rightPath.closeSubpath();
-	p.setBrush(QColor(0xd2, 0xe4, 0xfc));
+	p.setBrush(Theme::color(Theme::ColorRole::AccentSoft).darker(110));
 	p.drawPath(rightPath);
 
 	// 6. 升起的香气热气波浪曲线
@@ -397,7 +398,7 @@ void ScheduleWidget::drawEmptyCoffeeIllustration(QPainter &p, const QRect &area)
 	textFont.setPixelSize(14);
 	textFont.setBold(false);
 	p.setFont(textFont);
-	p.setPen(QColor(0x8f, 0x95, 0x9e));
+	p.setPen(Theme::color(Theme::ColorRole::TextMuted));
 	p.drawText(QRect(cx - 100, cy + 62, 200, 24), Qt::AlignCenter, QCoreApplication::translate("MeetingUI", "No Meetings"));
 
 	p.restore();
@@ -408,7 +409,7 @@ void ScheduleWidget::drawCoffeeSteam(QPainter &p, int cx, int cy) {
 	p.setRenderHint(QPainter::Antialiasing);
 
 	// 三道柔美白雾热气曲线
-	QPen steamPen(QColor(0x82, 0xb4, 0xf8, 70), 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+	QPen steamPen(Theme::color(Theme::ColorRole::AccentSoft), 2.2, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
 	p.setPen(steamPen);
 	p.setBrush(Qt::NoBrush);
 
@@ -439,7 +440,7 @@ void ScheduleWidget::drawStateMessage(QPainter &p, const QRect &area) {
 	font.setFamily(QStringLiteral("Microsoft YaHei"));
 	font.setPixelSize(13);
 	p.setFont(font);
-	p.setPen(_model->rowCount() > 0 ? QColor(0xd4, 0x88, 0x06) : QColor(0x8f, 0x95, 0x9e));
+	p.setPen(_model->rowCount() > 0 ? Theme::color(Theme::ColorRole::Warning) : Theme::color(Theme::ColorRole::TextMuted));
 	p.drawText(area, Qt::AlignCenter | Qt::TextWordWrap, _stateMessage);
 	p.restore();
 }

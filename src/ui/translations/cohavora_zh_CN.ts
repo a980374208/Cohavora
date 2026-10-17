@@ -2060,6 +2060,30 @@ Sign in with your own account in a client configured for the same meeting servic
         <translation>常规设置</translation>
     </message>
     <message>
+        <source>Theme</source>
+        <translation>主题</translation>
+    </message>
+    <message>
+        <source>System</source>
+        <translation>系统</translation>
+    </message>
+    <message>
+        <source>Light</source>
+        <translation>浅色</translation>
+    </message>
+    <message>
+        <source>Dark</source>
+        <translation>深色</translation>
+    </message>
+    <message>
+        <source>Teal</source>
+        <translation>青绿</translation>
+    </message>
+    <message>
+        <source>Changes apply immediately and are saved for the next launch.</source>
+        <translation>修改立即生效，并在下次启动时保留。</translation>
+    </message>
+    <message>
         <source>Video</source>
         <translation>视频</translation>
     </message>

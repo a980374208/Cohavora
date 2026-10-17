@@ -4,31 +4,31 @@ QWidget[uiStyle="whiteboard-panel"],
 [uiStyle="whiteboard-panel"] QScrollArea,
 [uiStyle="whiteboard-panel"] QScrollArea > QWidget > QWidget,
 [uiStyle="whiteboard-panel"] QWidget#whiteboardTextBox {
-    background: #f7f8fa;
-    color: #1f2329;
+    background: @window@;
+    color: @text@;
     border: none;
 }
 [uiStyle="whiteboard-panel"] QLabel {
-    color: #4e5969;
+    color: @text-secondary@;
     background: transparent;
     font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
     font-size: 12px;
 }
 [uiStyle="whiteboard-panel"] QLabel#whiteboardTitle {
-    color: #1f2329;
+    color: @text@;
     font-size: 16px;
     font-weight: bold;
 }
 [uiStyle="whiteboard-panel"] QLabel#whiteboardLocalNotice {
-    color: #1677ff;
-    background: #eaf3ff;
+    color: @accent@;
+    background: @accent-soft@;
     border-radius: 6px;
     padding: 4px 8px;
 }
 [uiStyle="whiteboard-panel"] QPushButton {
-    color: #1f2329;
-    background: #ffffff;
-    border: 1px solid #dfe3e8;
+    color: @text@;
+    background: @surface@;
+    border: 1px solid @border@;
     border-radius: 7px;
     padding: 6px 10px;
     min-height: 20px;
@@ -36,27 +36,27 @@ QWidget[uiStyle="whiteboard-panel"],
     font-size: 12px;
 }
 [uiStyle="whiteboard-panel"] QPushButton:hover {
-    color: #1677ff;
-    border-color: #91caff;
-    background: #f0f7ff;
+    color: @accent@;
+    border-color: @accent-soft@;
+    background: @accent-soft@;
 }
 [uiStyle="whiteboard-panel"] QPushButton:checked,
 [uiStyle="whiteboard-panel"] QPushButton:pressed {
-    color: #1677ff;
-    border-color: #1677ff;
-    background: #eaf3ff;
+    color: @accent@;
+    border-color: @accent@;
+    background: @accent-soft@;
 }
 [uiStyle="whiteboard-panel"] QPushButton:disabled {
-    color: #a8abb2;
-    background: #f2f3f5;
-    border-color: #e5e8ec;
+    color: @text-muted@;
+    background: @surface-alt@;
+    border-color: @border@;
 }
 [uiStyle="whiteboard-panel"] QComboBox,
 [uiStyle="whiteboard-panel"] QSpinBox,
 [uiStyle="whiteboard-panel"] QPlainTextEdit {
-    color: #1f2329;
-    background: #ffffff;
-    border: 1px solid #dfe3e8;
+    color: @text@;
+    background: @surface@;
+    border: 1px solid @border@;
     border-radius: 7px;
     padding: 6px 36px 6px 8px;
     min-height: 20px;
@@ -72,36 +72,36 @@ QDialog[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login
 
 [uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="loginCard"],
 [uiStyle="login-dialog-this"] [objectName="loginCard"] {
-    background-color: #ffffff;
+    background-color: @surface@;
     border-radius: 16px;
-    border: 1px solid #e1e4ea;
+    border: 1px solid @border@;
 }
 
 QLabel[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"],
 [uiStyle="login-dialog-this"] QLabel {
-    color: #1f2329;
+    color: @text@;
     font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
 }
 
 QLineEdit[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"],
 [uiStyle="login-dialog-this"] QLineEdit {
-    border: 1px solid #dcdfe6;
+    border: 1px solid @border@;
     border-radius: 8px;
     padding: 10px 14px;
     font-size: 13px;
-    background: #f8f9fa;
+    background: @surface-alt@;
 }
 
 QLineEdit[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"]:focus,
 [uiStyle="login-dialog-this"] QLineEdit:focus {
-    border: 1px solid #1677ff;
-    background: #ffffff;
+    border: 1px solid @accent@;
+    background: @surface@;
 }
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="primaryBtn"],
 [uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"] {
-    background-color: #1677ff;
-    color: #ffffff;
+    background-color: @accent@;
+    color: @on-accent@;
     border-radius: 8px;
     padding: 10px 24px;
     font-size: 14px;
@@ -111,38 +111,55 @@ QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="l
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="primaryBtn"]:hover,
 [uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"]:hover {
-    background-color: #4096ff;
+    background-color: @accent-hover@;
 }
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="primaryBtn"]:pressed,
 [uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"]:pressed {
-    background-color: #0958d9;
+    background-color: @accent-pressed@;
 }
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="primaryBtn"]:disabled,
 [uiStyle="login-dialog-this"] QPushButton[objectName="primaryBtn"]:disabled {
-    background-color: #b7d6ff;
+    background-color: @accent-soft@;
+    color: @text-muted@;
 }
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="guestBtn"],
-[uiStyle="login-dialog-this"] QPushButton[objectName="guestBtn"] {
-    background-color: #f2f3f5;
-    color: #1f2329;
+[uiStyle="login-dialog-this"] QPushButton[objectName="guestBtn"],
+[uiStyle="login-dialog-this"] QPushButton[objectName="resumeSavedSession"] {
+    background-color: @surface-alt@;
+    color: @text@;
     border-radius: 8px;
     padding: 10px 24px;
     font-size: 14px;
-    border: 1px solid #dcdfe6;
+    border: 1px solid @border@;
 }
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="guestBtn"]:hover,
-[uiStyle="login-dialog-this"] QPushButton[objectName="guestBtn"]:hover {
-    background-color: #e5e6eb;
+[uiStyle="login-dialog-this"] QPushButton[objectName="guestBtn"]:hover,
+[uiStyle="login-dialog-this"] QPushButton[objectName="resumeSavedSession"]:hover {
+    background-color: @hover@;
+}
+
+[uiStyle="login-dialog-this"] QPushButton[objectName="resumeSavedSession"]:focus {
+    border-color: @accent@;
+}
+
+[uiStyle="login-dialog-this"] QPushButton[objectName="resumeSavedSession"]:pressed {
+    background-color: @pressed@;
+}
+
+[uiStyle="login-dialog-this"] QPushButton[objectName="resumeSavedSession"]:disabled {
+    background-color: @surface-alt@;
+    color: @text-muted@;
+    border-color: @border@;
 }
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="linkBtn"],
 [uiStyle="login-dialog-this"] QPushButton[objectName="linkBtn"] {
     background: transparent;
-    color: #1677ff;
+    color: @accent@;
     font-size: 12px;
     border: none;
     padding: 0;
@@ -151,7 +168,7 @@ QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="l
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="linkBtn"]:hover,
 [uiStyle="login-dialog-this"] QPushButton[objectName="linkBtn"]:hover {
-    color: #4096ff;
+    color: @accent-hover@;
     text-decoration: underline;
 }
 
@@ -160,20 +177,20 @@ QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="l
     background: transparent;
     border: none;
     font-size: 16px;
-    color: #8c8c8c;
+    color: @text-muted@;
     border-radius: 4px;
 }
 
 QPushButton[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="closeBtn"]:hover,
 [uiStyle="login-dialog-this"] QPushButton[objectName="closeBtn"]:hover {
-    background: #f5f5f5;
-    color: #f53f3f;
+    background: @surface-alt@;
+    color: @danger@;
 }
 
 QCheckBox[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"],
 [uiStyle="login-dialog-this"] QCheckBox {
     font-size: 12px;
-    color: #606266;
+    color: @text-secondary@;
 }
 
 QTabWidget[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"]::pane,
@@ -185,7 +202,7 @@ QTabWidget[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="lo
 QTabBar[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"]::tab,
 [uiStyle="login-dialog-this"] QTabBar::tab {
     background: transparent;
-    color: #8c8c8c;
+    color: @text-muted@;
     font-size: 13px;
     font-weight: 500;
     padding: 8px 14px;
@@ -195,66 +212,66 @@ QTabBar[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login
 
 QTabBar[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"]::tab:selected,
 [uiStyle="login-dialog-this"] QTabBar::tab:selected {
-    color: #1677ff;
-    border-bottom: 2px solid #1677ff;
+    color: @accent@;
+    border-bottom: 2px solid @accent@;
     font-weight: bold;
 }
 
 [uiStyle="login-dialog-subtitle"][uiStyle="login-dialog-subtitle"][uiStyle="login-dialog-subtitle"],
 [uiStyle="login-dialog-subtitle"] * {
-    color: #8c8c8c;
+    color: @text-muted@;
     font-size: 12px;
 }
 
 [uiStyle="login-dialog-togglepwdbtn"][uiStyle="login-dialog-togglepwdbtn"][uiStyle="login-dialog-togglepwdbtn"],
 [uiStyle="login-dialog-togglepwdbtn"] * {
-    border: 1px solid #dcdfe6;
+    border: 1px solid @border@;
     border-radius: 8px;
-    background: #f8f9fa;
+    background: @surface-alt@;
 }
 
 [uiStyle="login-dialog-toggleregpwdbtn"][uiStyle="login-dialog-toggleregpwdbtn"][uiStyle="login-dialog-toggleregpwdbtn"],
 [uiStyle="login-dialog-toggleregpwdbtn"] * {
-    border: 1px solid #dcdfe6;
+    border: 1px solid @border@;
     border-radius: 8px;
-    background: #f8f9fa;
+    background: @surface-alt@;
 }
 
 [uiStyle="login-dialog-guestdesc"][uiStyle="login-dialog-guestdesc"][uiStyle="login-dialog-guestdesc"],
 [uiStyle="login-dialog-guestdesc"] * {
-    color: #606266;
+    color: @text-secondary@;
     font-size: 12px;
 }
 
 [uiStyle="login-dialog-advancedtogglebtn"][uiStyle="login-dialog-advancedtogglebtn"][uiStyle="login-dialog-advancedtogglebtn"],
 [uiStyle="login-dialog-advancedtogglebtn"] * {
-    color: #8c8c8c;
+    color: @text-muted@;
     font-size: 11px;
 }
 
 [uiStyle="login-dialog-advlabel"][uiStyle="login-dialog-advlabel"][uiStyle="login-dialog-advlabel"],
 [uiStyle="login-dialog-advlabel"] * {
-    color: #606266;
+    color: @text-secondary@;
     font-size: 12px;
 }
 
 [uiStyle="login-dialog-errorlabel"][uiStyle="login-dialog-errorlabel"][uiStyle="login-dialog-errorlabel"],
 [uiStyle="login-dialog-errorlabel"] * {
-    color: #f53f3f;
+    color: @danger@;
     font-size: 12px;
     padding: 2px 4px;
 }
 
 [uiStyle="login-dialog-errorlabel-2"][uiStyle="login-dialog-errorlabel-2"][uiStyle="login-dialog-errorlabel-2"],
 [uiStyle="login-dialog-errorlabel-2"] * {
-    color: #f53f3f;
+    color: @danger@;
     font-size: 12px;
     padding: 2px 0;
 }
 
 [uiStyle="login-dialog-errorlabel-3"][uiStyle="login-dialog-errorlabel-3"][uiStyle="login-dialog-errorlabel-3"],
 [uiStyle="login-dialog-errorlabel-3"] * {
-    color: #00b578;
+    color: @success@;
     font-size: 12px;
     padding: 2px 0;
     font-weight: bold;
@@ -262,12 +279,12 @@ QTabBar[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login
 
 QDialog[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
 [uiStyle="meeting-booking-dialog-this"] QDialog {
-    background: #ffffff;
+    background: @surface@;
 }
 
 QLabel[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
 [uiStyle="meeting-booking-dialog-this"] QLabel {
-    color: #303133;
+    color: @text@;
     font-size: 13px;
 }
 
@@ -282,9 +299,9 @@ QSpinBox[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-
 QComboBox[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
 [uiStyle="meeting-booking-dialog-this"] QComboBox {
     min-height: 34px;
-    border: 1px solid #dcdfe6;
+    border: 1px solid @border@;
     border-radius: 6px;
-    background: #ffffff;
+    background: @surface@;
 }
 
 QLineEdit[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
@@ -313,7 +330,7 @@ QSpinBox[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-
 [uiStyle="meeting-booking-dialog-this"] QSpinBox:focus,
 QComboBox[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"]:focus,
 [uiStyle="meeting-booking-dialog-this"] QComboBox:focus {
-    border-color: #1677ff;
+    border-color: @accent@;
 }
 
 QPushButton[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"],
@@ -325,49 +342,50 @@ QPushButton[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dial
 
 QPushButton[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][objectName="primary"],
 [uiStyle="meeting-booking-dialog-this"] QPushButton[objectName="primary"] {
-    background: #1677ff;
-    color: white;
+    background: @accent@;
+    color: @on-accent@;
     border: none;
 }
 
 QPushButton[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][objectName="primary"]:hover,
 [uiStyle="meeting-booking-dialog-this"] QPushButton[objectName="primary"]:hover {
-    background: #4096ff;
+    background: @accent-hover@;
 }
 
 QPushButton[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][objectName="primary"]:disabled,
 [uiStyle="meeting-booking-dialog-this"] QPushButton[objectName="primary"]:disabled {
-    background: #b7d6ff;
+    background: @accent-soft@;
+    color: @text-muted@;
 }
 
 QPushButton[uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][uiStyle="meeting-booking-dialog-this"][objectName="secondary"],
 [uiStyle="meeting-booking-dialog-this"] QPushButton[objectName="secondary"] {
-    background: #f2f3f5;
-    color: #4e5969;
+    background: @surface-alt@;
+    color: @text-secondary@;
     border: none;
 }
 
 [uiStyle="meeting-booking-dialog-statuslabel"][uiStyle="meeting-booking-dialog-statuslabel"][uiStyle="meeting-booking-dialog-statuslabel"],
 [uiStyle="meeting-booking-dialog-statuslabel"] * {
-    color: #d4380d;
+    color: @warning@;
 }
 
 [uiStyle="meeting-booking-dialog-statuslabel-2"][uiStyle="meeting-booking-dialog-statuslabel-2"][uiStyle="meeting-booking-dialog-statuslabel-2"],
 [uiStyle="meeting-booking-dialog-statuslabel-2"] * {
-    color: #1677ff;
+    color: @accent@;
 }
 
 [uiStyle="meeting-booking-dialog-statuslabel-3"][uiStyle="meeting-booking-dialog-statuslabel-3"][uiStyle="meeting-booking-dialog-statuslabel-3"],
 [uiStyle="meeting-booking-dialog-statuslabel-3"] * {
-    color: #d4380d;
+    color: @warning@;
 }
 
 QPlainTextEdit[uiStyle="meeting-chat-sidebar-widget-this"][uiStyle="meeting-chat-sidebar-widget-this"][uiStyle="meeting-chat-sidebar-widget-this"],
 [uiStyle="meeting-chat-sidebar-widget-this"] QPlainTextEdit {
-    background-color: #242831;
-    border: 1px solid #363C4A;
+    background-color: @surface@;
+    border: 1px solid @border@;
     border-radius: 6px;
-    color: #F3F4F6;
+    color: @text@;
     padding: 6px 8px;
     font-size: 13px;
     font-family: "Microsoft YaHei", sans-serif;
@@ -375,13 +393,13 @@ QPlainTextEdit[uiStyle="meeting-chat-sidebar-widget-this"][uiStyle="meeting-chat
 
 QPlainTextEdit[uiStyle="meeting-chat-sidebar-widget-this"][uiStyle="meeting-chat-sidebar-widget-this"][uiStyle="meeting-chat-sidebar-widget-this"]:focus,
 [uiStyle="meeting-chat-sidebar-widget-this"] QPlainTextEdit:focus {
-    border: 1px solid #3B82F6;
+    border: 1px solid @accent@;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-dlg"][uiStyle="meeting-chat-sidebar-widget-dlg"][uiStyle="meeting-chat-sidebar-widget-dlg"],
 [uiStyle="meeting-chat-sidebar-widget-dlg"] * {
-    background-color: #12141A;
-    color: #FFFFFF;
+    background-color: @stage@;
+    color: @text@;
     font-family: "Microsoft YaHei";
 }
 
@@ -393,8 +411,8 @@ QPlainTextEdit[uiStyle="meeting-chat-sidebar-widget-this"][uiStyle="meeting-chat
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-savebtn"][uiStyle="meeting-chat-sidebar-widget-savebtn"][uiStyle="meeting-chat-sidebar-widget-savebtn"],
 [uiStyle="meeting-chat-sidebar-widget-savebtn"] QPushButton {
-    background-color: #2563EB;
-    color: #FFFFFF;
+    background-color: @accent@;
+    color: @on-accent@;
     border: none;
     border-radius: 4px;
     padding: 6px 18px;
@@ -403,13 +421,13 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-savebtn"][uiStyle="meeting-chat
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-savebtn"][uiStyle="meeting-chat-sidebar-widget-savebtn"][uiStyle="meeting-chat-sidebar-widget-savebtn"]:hover,
 [uiStyle="meeting-chat-sidebar-widget-savebtn"] QPushButton:hover {
-    background-color: #1D4ED8;
+    background-color: @accent-pressed@;
 }
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-closebtn"][uiStyle="meeting-chat-sidebar-widget-closebtn"][uiStyle="meeting-chat-sidebar-widget-closebtn"],
 [uiStyle="meeting-chat-sidebar-widget-closebtn"] QPushButton {
-    background-color: #374151;
-    color: #E5E7EB;
+    background-color: @surface-alt@;
+    color: @text@;
     border: none;
     border-radius: 4px;
     padding: 6px 18px;
@@ -418,13 +436,13 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-closebtn"][uiStyle="meeting-cha
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-closebtn"][uiStyle="meeting-chat-sidebar-widget-closebtn"][uiStyle="meeting-chat-sidebar-widget-closebtn"]:hover,
 [uiStyle="meeting-chat-sidebar-widget-closebtn"] QPushButton:hover {
-    background-color: #4B5563;
+    background-color: @hover@;
 }
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-retrybtn"][uiStyle="meeting-chat-sidebar-widget-retrybtn"][uiStyle="meeting-chat-sidebar-widget-retrybtn"],
 [uiStyle="meeting-chat-sidebar-widget-retrybtn"] QPushButton {
     background: transparent;
-    color: #EF4444;
+    color: @danger@;
     border: none;
     font-size: 10px;
     font-weight: bold;
@@ -434,12 +452,12 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-retrybtn"][uiStyle="meeting-cha
 QPushButton[uiStyle="meeting-chat-sidebar-widget-retrybtn"][uiStyle="meeting-chat-sidebar-widget-retrybtn"][uiStyle="meeting-chat-sidebar-widget-retrybtn"]:hover,
 [uiStyle="meeting-chat-sidebar-widget-retrybtn"] QPushButton:hover {
     text-decoration: underline;
-    color: #F87171;
+    color: @danger@;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-timelabel"][uiStyle="meeting-chat-sidebar-widget-timelabel"][uiStyle="meeting-chat-sidebar-widget-timelabel"],
 [uiStyle="meeting-chat-sidebar-widget-timelabel"] * {
-    color: #6B7280;
+    color: @text-muted@;
     font-size: 10px;
     font-family: "Microsoft YaHei";
 }
@@ -452,7 +470,7 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-retrybtn"][uiStyle="meeting-cha
 
 [uiStyle="meeting-chat-sidebar-widget-namelabel"][uiStyle="meeting-chat-sidebar-widget-namelabel"][uiStyle="meeting-chat-sidebar-widget-namelabel"],
 [uiStyle="meeting-chat-sidebar-widget-namelabel"] * {
-    color: #9CA3AF;
+    color: @text-muted@;
     font-size: 11px;
     font-weight: 500;
     font-family: "Microsoft YaHei";
@@ -460,85 +478,85 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-retrybtn"][uiStyle="meeting-cha
 
 [uiStyle="meeting-chat-sidebar-widget-timelabel-2"][uiStyle="meeting-chat-sidebar-widget-timelabel-2"][uiStyle="meeting-chat-sidebar-widget-timelabel-2"],
 [uiStyle="meeting-chat-sidebar-widget-timelabel-2"] * {
-    color: #6B7280;
+    color: @text-muted@;
     font-size: 10px;
     font-family: "Microsoft YaHei";
 }
 
 QWidget[uiStyle="meeting-chat-sidebar-widget-bubble-active"][uiStyle="meeting-chat-sidebar-widget-bubble-active"][uiStyle="meeting-chat-sidebar-widget-bubble-active"][objectName="MyTextBubble"],
 [uiStyle="meeting-chat-sidebar-widget-bubble-active"] QWidget[objectName="MyTextBubble"] {
-    background-color: #2563EB;
+    background-color: @accent@;
     border-radius: 8px;
 }
 
 QWidget[uiStyle="meeting-chat-sidebar-widget-bubble-normal"][uiStyle="meeting-chat-sidebar-widget-bubble-normal"][uiStyle="meeting-chat-sidebar-widget-bubble-normal"][objectName="OtherTextBubble"],
 [uiStyle="meeting-chat-sidebar-widget-bubble-normal"] QWidget[objectName="OtherTextBubble"] {
-    background-color: #242831;
-    border: 1px solid #363C4A;
+    background-color: @surface@;
+    border: 1px solid @border@;
     border-radius: 8px;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-textlabel-active"][uiStyle="meeting-chat-sidebar-widget-textlabel-active"][uiStyle="meeting-chat-sidebar-widget-textlabel-active"],
 [uiStyle="meeting-chat-sidebar-widget-textlabel-active"] * {
-    color: #FFFFFF;
+    color: @on-accent@;
     font-size: 13px;
     font-family: "Microsoft YaHei";
 }
 
 [uiStyle="meeting-chat-sidebar-widget-textlabel-normal"][uiStyle="meeting-chat-sidebar-widget-textlabel-normal"][uiStyle="meeting-chat-sidebar-widget-textlabel-normal"],
 [uiStyle="meeting-chat-sidebar-widget-textlabel-normal"] * {
-    color: #F3F4F6;
+    color: @text@;
     font-size: 13px;
     font-family: "Microsoft YaHei";
 }
 
 QWidget[uiStyle="meeting-chat-sidebar-widget-imgcontainer"][uiStyle="meeting-chat-sidebar-widget-imgcontainer"][uiStyle="meeting-chat-sidebar-widget-imgcontainer"][objectName="OtherImgContainer"],
 [uiStyle="meeting-chat-sidebar-widget-imgcontainer"] QWidget[objectName="OtherImgContainer"] {
-    background-color: #1F242D;
-    border: 1px dashed #3B4252;
+    background-color: @surface-alt@;
+    border: 1px dashed @border@;
     border-radius: 8px;
     padding: 4px;
 }
 
 QWidget[uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-active"][uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-active"][uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-active"][objectName="MyImgContainer"],
 [uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-active"] QWidget[objectName="MyImgContainer"] {
-    background-color: #1D4ED8;
+    background-color: @accent-soft@;
     border-radius: 8px;
     padding: 4px;
 }
 
 QWidget[uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-normal"][uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-normal"][uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-normal"][objectName="OtherImgContainer"],
 [uiStyle="meeting-chat-sidebar-widget-imgcontainer-2-normal"] QWidget[objectName="OtherImgContainer"] {
-    background-color: #242831;
-    border: 1px solid #363C4A;
+    background-color: @surface@;
+    border: 1px solid @border@;
     border-radius: 8px;
     padding: 4px;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-fnlabel"][uiStyle="meeting-chat-sidebar-widget-fnlabel"][uiStyle="meeting-chat-sidebar-widget-fnlabel"],
 [uiStyle="meeting-chat-sidebar-widget-fnlabel"] * {
-    color: rgba(255, 255, 255, 0.7);
+    color: rgba(@text-rgb@, 0.7);
     font-size: 11px;
     font-family: "Microsoft YaHei";
 }
 
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-2"][uiStyle="meeting-chat-sidebar-widget-statuslabel-2"][uiStyle="meeting-chat-sidebar-widget-statuslabel-2"],
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-2"] * {
-    color: #60A5FA;
+    color: @accent@;
     font-size: 10px;
     font-family: "Microsoft YaHei";
 }
 
 QProgressBar[uiStyle="meeting-chat-sidebar-widget-progressbar"][uiStyle="meeting-chat-sidebar-widget-progressbar"][uiStyle="meeting-chat-sidebar-widget-progressbar"],
 [uiStyle="meeting-chat-sidebar-widget-progressbar"] QProgressBar {
-    background-color: rgba(255, 255, 255, 0.2);
+    background-color: rgba(@text-rgb@, 0.2);
     border: none;
     border-radius: 1px;
 }
 
 QProgressBar[uiStyle="meeting-chat-sidebar-widget-progressbar"][uiStyle="meeting-chat-sidebar-widget-progressbar"][uiStyle="meeting-chat-sidebar-widget-progressbar"]::chunk,
 [uiStyle="meeting-chat-sidebar-widget-progressbar"] QProgressBar::chunk {
-    background-color: #60A5FA;
+    background-color: @accent@;
     border-radius: 1px;
 }
 
@@ -550,20 +568,20 @@ QProgressBar[uiStyle="meeting-chat-sidebar-widget-progressbar"][uiStyle="meeting
 
 QWidget[uiStyle="meeting-chat-sidebar-widget-card-active"][uiStyle="meeting-chat-sidebar-widget-card-active"][uiStyle="meeting-chat-sidebar-widget-card-active"][objectName="MyFileCard"],
 [uiStyle="meeting-chat-sidebar-widget-card-active"] QWidget[objectName="MyFileCard"] {
-    background-color: #2563EB;
+    background-color: @accent-soft@;
     border-radius: 8px;
 }
 
 QWidget[uiStyle="meeting-chat-sidebar-widget-card-normal"][uiStyle="meeting-chat-sidebar-widget-card-normal"][uiStyle="meeting-chat-sidebar-widget-card-normal"][objectName="OtherFileCard"],
 [uiStyle="meeting-chat-sidebar-widget-card-normal"] QWidget[objectName="OtherFileCard"] {
-    background-color: #242831;
-    border: 1px solid #363C4A;
+    background-color: @surface@;
+    border: 1px solid @border@;
     border-radius: 8px;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-namelabel-2"][uiStyle="meeting-chat-sidebar-widget-namelabel-2"][uiStyle="meeting-chat-sidebar-widget-namelabel-2"],
 [uiStyle="meeting-chat-sidebar-widget-namelabel-2"] * {
-    color: #FFFFFF;
+    color: @text@;
     font-size: 12px;
     font-weight: bold;
     font-family: "Microsoft YaHei";
@@ -571,35 +589,35 @@ QWidget[uiStyle="meeting-chat-sidebar-widget-card-normal"][uiStyle="meeting-chat
 
 [uiStyle="meeting-chat-sidebar-widget-sizelabel"][uiStyle="meeting-chat-sidebar-widget-sizelabel"][uiStyle="meeting-chat-sidebar-widget-sizelabel"],
 [uiStyle="meeting-chat-sidebar-widget-sizelabel"] * {
-    color: rgba(255, 255, 255, 0.65);
+    color: rgba(@text-rgb@, 0.65);
     font-size: 10px;
     font-family: "Microsoft YaHei";
 }
 
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-3"][uiStyle="meeting-chat-sidebar-widget-statuslabel-3"][uiStyle="meeting-chat-sidebar-widget-statuslabel-3"],
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-3"] * {
-    color: #60A5FA;
+    color: @accent@;
     font-size: 10px;
     font-family: "Microsoft YaHei";
 }
 
 QProgressBar[uiStyle="meeting-chat-sidebar-widget-progressbar-2"][uiStyle="meeting-chat-sidebar-widget-progressbar-2"][uiStyle="meeting-chat-sidebar-widget-progressbar-2"],
 [uiStyle="meeting-chat-sidebar-widget-progressbar-2"] QProgressBar {
-    background-color: rgba(255, 255, 255, 0.2);
+    background-color: rgba(@text-rgb@, 0.2);
     border: none;
     border-radius: 1px;
 }
 
 QProgressBar[uiStyle="meeting-chat-sidebar-widget-progressbar-2"][uiStyle="meeting-chat-sidebar-widget-progressbar-2"][uiStyle="meeting-chat-sidebar-widget-progressbar-2"]::chunk,
 [uiStyle="meeting-chat-sidebar-widget-progressbar-2"] QProgressBar::chunk {
-    background-color: #60A5FA;
+    background-color: @accent@;
     border-radius: 1px;
 }
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn"][uiStyle="meeting-chat-sidebar-widget-actionbtn"][uiStyle="meeting-chat-sidebar-widget-actionbtn"],
 [uiStyle="meeting-chat-sidebar-widget-actionbtn"] QPushButton {
-    background-color: rgba(255, 255, 255, 0.05);
-    color: #6B7280;
+    background-color: rgba(@text-rgb@, 0.05);
+    color: @text-muted@;
     border-radius: 14px;
     border: none;
     font-size: 12px;
@@ -607,8 +625,8 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn"][uiStyle="meeting-ch
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-2"][uiStyle="meeting-chat-sidebar-widget-actionbtn-2"][uiStyle="meeting-chat-sidebar-widget-actionbtn-2"],
 [uiStyle="meeting-chat-sidebar-widget-actionbtn-2"] QPushButton {
-    background-color: rgba(255, 255, 255, 0.15);
-    color: #FFFFFF;
+    background-color: rgba(@text-rgb@, 0.15);
+    color: @text@;
     border-radius: 14px;
     border: none;
     font-size: 12px;
@@ -616,18 +634,18 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-2"][uiStyle="meeting-
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-2"][uiStyle="meeting-chat-sidebar-widget-actionbtn-2"][uiStyle="meeting-chat-sidebar-widget-actionbtn-2"]:hover,
 [uiStyle="meeting-chat-sidebar-widget-actionbtn-2"] QPushButton:hover {
-    background-color: rgba(255, 255, 255, 0.3);
+    background-color: rgba(@text-rgb@, 0.3);
 }
 
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-4"][uiStyle="meeting-chat-sidebar-widget-statuslabel-4"][uiStyle="meeting-chat-sidebar-widget-statuslabel-4"],
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-4"] * {
-    color: #9CA3AF;
+    color: @text-muted@;
     font-size: 10px;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-5"][uiStyle="meeting-chat-sidebar-widget-statuslabel-5"][uiStyle="meeting-chat-sidebar-widget-statuslabel-5"],
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-5"] * {
-    color: #93C5FD;
+    color: @accent@;
     font-size: 10px;
     font-weight: 500;
     font-family: "Microsoft YaHei";
@@ -635,7 +653,7 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-2"][uiStyle="meeting-
 
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-6"][uiStyle="meeting-chat-sidebar-widget-statuslabel-6"][uiStyle="meeting-chat-sidebar-widget-statuslabel-6"],
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-6"] * {
-    color: #60A5FA;
+    color: @accent@;
     font-size: 11px;
     font-weight: bold;
     font-family: "Microsoft YaHei";
@@ -643,30 +661,30 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-2"][uiStyle="meeting-
 
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-7"][uiStyle="meeting-chat-sidebar-widget-statuslabel-7"][uiStyle="meeting-chat-sidebar-widget-statuslabel-7"],
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-7"] * {
-    color: #EF4444;
+    color: @danger@;
     font-size: 11px;
     font-family: "Microsoft YaHei";
 }
 
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-8"][uiStyle="meeting-chat-sidebar-widget-statuslabel-8"][uiStyle="meeting-chat-sidebar-widget-statuslabel-8"],
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-8"] * {
-    color: #60A5FA;
+    color: @accent@;
     font-size: 10px;
     font-family: "Microsoft YaHei";
 }
 
 QWidget[uiStyle="meeting-chat-sidebar-widget-imgcontainer-3"][uiStyle="meeting-chat-sidebar-widget-imgcontainer-3"][uiStyle="meeting-chat-sidebar-widget-imgcontainer-3"][objectName="OtherImgContainer"],
 [uiStyle="meeting-chat-sidebar-widget-imgcontainer-3"] QWidget[objectName="OtherImgContainer"] {
-    background-color: #242831;
-    border: 1px solid #363C4A;
+    background-color: @surface@;
+    border: 1px solid @border@;
     border-radius: 8px;
     padding: 4px;
 }
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-3"][uiStyle="meeting-chat-sidebar-widget-actionbtn-3"][uiStyle="meeting-chat-sidebar-widget-actionbtn-3"],
 [uiStyle="meeting-chat-sidebar-widget-actionbtn-3"] QPushButton {
-    background-color: rgba(255, 255, 255, 0.15);
-    color: #FFFFFF;
+    background-color: rgba(@text-rgb@, 0.15);
+    color: @text@;
     border-radius: 14px;
     border: none;
     font-size: 12px;
@@ -674,12 +692,12 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-3"][uiStyle="meeting-
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-3"][uiStyle="meeting-chat-sidebar-widget-actionbtn-3"][uiStyle="meeting-chat-sidebar-widget-actionbtn-3"]:hover,
 [uiStyle="meeting-chat-sidebar-widget-actionbtn-3"] QPushButton:hover {
-    background-color: rgba(255, 255, 255, 0.3);
+    background-color: rgba(@text-rgb@, 0.3);
 }
 
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-9"][uiStyle="meeting-chat-sidebar-widget-statuslabel-9"][uiStyle="meeting-chat-sidebar-widget-statuslabel-9"],
 [uiStyle="meeting-chat-sidebar-widget-statuslabel-9"] * {
-    color: #EF4444;
+    color: @danger@;
     font-size: 10px;
     font-weight: bold;
     font-family: "Microsoft YaHei";
@@ -687,22 +705,22 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-actionbtn-3"][uiStyle="meeting-
 
 QDialog[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"],
 [uiStyle="meeting-chat-sidebar-widget-this-2"] QDialog {
-    background-color: #1A1D24;
-    color: #FFFFFF;
+    background-color: @surface@;
+    color: @text@;
     font-family: "Microsoft YaHei", sans-serif;
 }
 
 QLabel[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"],
 [uiStyle="meeting-chat-sidebar-widget-this-2"] QLabel {
-    color: #E5E7EB;
+    color: @text@;
     font-family: "Microsoft YaHei", sans-serif;
 }
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][objectName="CancelBtn"],
 [uiStyle="meeting-chat-sidebar-widget-this-2"] QPushButton[objectName="CancelBtn"] {
-    background-color: #374151;
-    color: #E5E7EB;
-    border: 1px solid #4B5563;
+    background-color: @surface-alt@;
+    color: @text@;
+    border: 1px solid @border@;
     border-radius: 6px;
     padding: 6px 18px;
     font-size: 13px;
@@ -710,13 +728,13 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][objectName="CancelBtn"]:hover,
 [uiStyle="meeting-chat-sidebar-widget-this-2"] QPushButton[objectName="CancelBtn"]:hover {
-    background-color: #4B5563;
+    background-color: @hover@;
 }
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][objectName="SendBtn"],
 [uiStyle="meeting-chat-sidebar-widget-this-2"] QPushButton[objectName="SendBtn"] {
-    background-color: #2563EB;
-    color: #FFFFFF;
+    background-color: @accent@;
+    color: @on-accent@;
     border: none;
     border-radius: 6px;
     padding: 6px 22px;
@@ -726,46 +744,46 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][objectName="SendBtn"]:hover,
 [uiStyle="meeting-chat-sidebar-widget-this-2"] QPushButton[objectName="SendBtn"]:hover {
-    background-color: #1D4ED8;
+    background-color: @accent-pressed@;
 }
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-sidebar-widget-this-2"][objectName="SendBtn"]:disabled,
 [uiStyle="meeting-chat-sidebar-widget-this-2"] QPushButton[objectName="SendBtn"]:disabled {
-    background-color: #374151;
-    color: #6B7280;
+    background-color: @surface-alt@;
+    color: @text-muted@;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-titlelabel"][uiStyle="meeting-chat-sidebar-widget-titlelabel"][uiStyle="meeting-chat-sidebar-widget-titlelabel"],
 [uiStyle="meeting-chat-sidebar-widget-titlelabel"] * {
     font-size: 15px;
     font-weight: bold;
-    color: #F9FAFB;
+    color: @text@;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-imgcard"][uiStyle="meeting-chat-sidebar-widget-imgcard"][uiStyle="meeting-chat-sidebar-widget-imgcard"],
 [uiStyle="meeting-chat-sidebar-widget-imgcard"] * {
-    background-color: #12141A;
-    border: 1px solid #2B303C;
+    background-color: @stage@;
+    border: 1px solid @border@;
     border-radius: 8px;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-infolabel"][uiStyle="meeting-chat-sidebar-widget-infolabel"][uiStyle="meeting-chat-sidebar-widget-infolabel"],
 [uiStyle="meeting-chat-sidebar-widget-infolabel"] * {
-    color: #9CA3AF;
+    color: @text-muted@;
     font-size: 12px;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-filecard"][uiStyle="meeting-chat-sidebar-widget-filecard"][uiStyle="meeting-chat-sidebar-widget-filecard"],
 [uiStyle="meeting-chat-sidebar-widget-filecard"] * {
-    background-color: #242831;
-    border: 1px solid #363C4A;
+    background-color: @surface@;
+    border: 1px solid @border@;
     border-radius: 8px;
 }
 
 [uiStyle="file-badge-document"][uiStyle="file-badge-document"][uiStyle="file-badge-document"],
 [uiStyle="file-badge-document"] * {
-    background-color: #2563EB;
-    color: #FFFFFF;
+    background-color: @accent@;
+    color: @on-accent@;
     font-size: 11px;
     font-weight: bold;
     border-radius: 6px;
@@ -773,8 +791,8 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-
 
 [uiStyle="file-badge-pdf"][uiStyle="file-badge-pdf"][uiStyle="file-badge-pdf"],
 [uiStyle="file-badge-pdf"] * {
-    background-color: #DC2626;
-    color: #FFFFFF;
+    background-color: @danger@;
+    color: @on-accent@;
     font-size: 11px;
     font-weight: bold;
     border-radius: 6px;
@@ -782,8 +800,8 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-
 
 [uiStyle="file-badge-archive"][uiStyle="file-badge-archive"][uiStyle="file-badge-archive"],
 [uiStyle="file-badge-archive"] * {
-    background-color: #D97706;
-    color: #FFFFFF;
+    background-color: @warning@;
+    color: @on-accent@;
     font-size: 11px;
     font-weight: bold;
     border-radius: 6px;
@@ -791,8 +809,8 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-
 
 [uiStyle="file-badge-spreadsheet"][uiStyle="file-badge-spreadsheet"][uiStyle="file-badge-spreadsheet"],
 [uiStyle="file-badge-spreadsheet"] * {
-    background-color: #059669;
-    color: #FFFFFF;
+    background-color: @success@;
+    color: @on-accent@;
     font-size: 11px;
     font-weight: bold;
     border-radius: 6px;
@@ -800,8 +818,8 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-
 
 [uiStyle="file-badge-text"][uiStyle="file-badge-text"][uiStyle="file-badge-text"],
 [uiStyle="file-badge-text"] * {
-    background-color: #4B5563;
-    color: #FFFFFF;
+    background-color: @hover@;
+    color: @text@;
     font-size: 11px;
     font-weight: bold;
     border-radius: 6px;
@@ -809,21 +827,21 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-
 
 [uiStyle="meeting-chat-sidebar-widget-namelabel-3"][uiStyle="meeting-chat-sidebar-widget-namelabel-3"][uiStyle="meeting-chat-sidebar-widget-namelabel-3"],
 [uiStyle="meeting-chat-sidebar-widget-namelabel-3"] * {
-    color: #F3F4F6;
+    color: @text@;
     font-size: 13px;
     font-weight: bold;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-sizelabel-2"][uiStyle="meeting-chat-sidebar-widget-sizelabel-2"][uiStyle="meeting-chat-sidebar-widget-sizelabel-2"],
 [uiStyle="meeting-chat-sidebar-widget-sizelabel-2"] * {
-    color: #9CA3AF;
+    color: @text-muted@;
     font-size: 12px;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-scroll-2"][uiStyle="meeting-chat-sidebar-widget-scroll-2"][uiStyle="meeting-chat-sidebar-widget-scroll-2"],
 [uiStyle="meeting-chat-sidebar-widget-scroll-2"] * {
     background-color: transparent;
-    border: 1px solid #2B303C;
+    border: 1px solid @border@;
     border-radius: 6px;
 }
 
@@ -834,67 +852,67 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-2"][uiStyle="meeting-chat-
 
 [uiStyle="meeting-chat-sidebar-widget-itemrow-active"][uiStyle="meeting-chat-sidebar-widget-itemrow-active"][uiStyle="meeting-chat-sidebar-widget-itemrow-active"],
 [uiStyle="meeting-chat-sidebar-widget-itemrow-active"] * {
-    background-color: rgba(239, 68, 68, 0.15);
-    border: 1px solid #EF4444;
+    background-color: rgba(@danger-rgb@, 0.15);
+    border: 1px solid @danger@;
     border-radius: 4px;
     padding: 4px 8px;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-itemrow-normal"][uiStyle="meeting-chat-sidebar-widget-itemrow-normal"][uiStyle="meeting-chat-sidebar-widget-itemrow-normal"],
 [uiStyle="meeting-chat-sidebar-widget-itemrow-normal"] * {
-    background-color: #242831;
+    background-color: @surface@;
     border-radius: 4px;
     padding: 4px 8px;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-namelbl-active"][uiStyle="meeting-chat-sidebar-widget-namelbl-active"][uiStyle="meeting-chat-sidebar-widget-namelbl-active"],
 [uiStyle="meeting-chat-sidebar-widget-namelbl-active"] * {
-    color: #FCA5A5;
+    color: @danger@;
     font-size: 12px;
     font-weight: bold;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-namelbl-normal"][uiStyle="meeting-chat-sidebar-widget-namelbl-normal"][uiStyle="meeting-chat-sidebar-widget-namelbl-normal"],
 [uiStyle="meeting-chat-sidebar-widget-namelbl-normal"] * {
-    color: #F3F4F6;
+    color: @text@;
     font-size: 12px;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-sizelbl-active"][uiStyle="meeting-chat-sidebar-widget-sizelbl-active"][uiStyle="meeting-chat-sidebar-widget-sizelbl-active"],
 [uiStyle="meeting-chat-sidebar-widget-sizelbl-active"] * {
-    color: #EF4444;
+    color: @danger@;
     font-size: 11px;
     font-weight: bold;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-sizelbl-normal"][uiStyle="meeting-chat-sidebar-widget-sizelbl-normal"][uiStyle="meeting-chat-sidebar-widget-sizelbl-normal"],
 [uiStyle="meeting-chat-sidebar-widget-sizelbl-normal"] * {
-    color: #9CA3AF;
+    color: @text-muted@;
     font-size: 11px;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-summarylbl"][uiStyle="meeting-chat-sidebar-widget-summarylbl"][uiStyle="meeting-chat-sidebar-widget-summarylbl"],
 [uiStyle="meeting-chat-sidebar-widget-summarylbl"] * {
-    color: #9CA3AF;
+    color: @text-muted@;
     font-size: 12px;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-warnlbl"][uiStyle="meeting-chat-sidebar-widget-warnlbl"][uiStyle="meeting-chat-sidebar-widget-warnlbl"],
 [uiStyle="meeting-chat-sidebar-widget-warnlbl"] * {
-    color: #EF4444;
+    color: @danger@;
     font-size: 12px;
     font-weight: bold;
 }
 
 QWidget[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="ChatSidebar"],
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QWidget[objectName="ChatSidebar"] {
-    background-color: #1A1D24;
-    border-left: 1px solid #2B303C;
+    background-color: @surface@;
+    border-left: 1px solid @border@;
 }
 
 QLabel[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="ChatTitle"],
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QLabel[objectName="ChatTitle"] {
-    color: #F3F4F6;
+    color: @text@;
     font-size: 14px;
     font-weight: bold;
     font-family: "Microsoft YaHei";
@@ -903,7 +921,7 @@ QLabel[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sideb
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="CloseBtn"],
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="CloseBtn"] {
     background: transparent;
-    color: #9CA3AF;
+    color: @text-muted@;
     font-size: 16px;
     border: none;
     border-radius: 4px;
@@ -915,8 +933,8 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="CloseBtn"]:hover,
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="CloseBtn"]:hover {
-    background-color: rgba(255, 255, 255, 0.1);
-    color: #FFFFFF;
+    background-color: rgba(@text-rgb@, 0.1);
+    color: @text@;
 }
 
 QScrollArea[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="MessageScrollArea"],
@@ -935,7 +953,7 @@ QScrollBar[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-s
 
 QScrollBar[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"]::handle:vertical,
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QScrollBar::handle:vertical {
-    background: #4B5563;
+    background: @hover@;
     min-height: 20px;
     border-radius: 3px;
 }
@@ -949,14 +967,14 @@ QScrollBar[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-s
 
 QWidget[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="BottomInputPanel"],
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QWidget[objectName="BottomInputPanel"] {
-    background-color: #171A20;
-    border-top: 1px solid #2B303C;
+    background-color: @surface-alt@;
+    border-top: 1px solid @border@;
 }
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="MediaBtn"],
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="MediaBtn"] {
     background-color: transparent;
-    color: #9CA3AF;
+    color: @text-muted@;
     border: none;
     border-radius: 4px;
     padding: 4px 8px;
@@ -965,14 +983,14 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="MediaBtn"]:hover,
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="MediaBtn"]:hover {
-    background-color: rgba(255, 255, 255, 0.08);
-    color: #F3F4F6;
+    background-color: rgba(@text-rgb@, 0.08);
+    color: @text@;
 }
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="SendBtn"],
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="SendBtn"] {
-    background-color: #2563EB;
-    color: #FFFFFF;
+    background-color: @accent@;
+    color: @on-accent@;
     border: none;
     border-radius: 4px;
     padding: 6px 14px;
@@ -983,20 +1001,20 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="SendBtn"]:hover,
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="SendBtn"]:hover {
-    background-color: #1D4ED8;
+    background-color: @accent-pressed@;
 }
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="SendBtn"]:disabled,
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="SendBtn"]:disabled {
-    background-color: #374151;
-    color: #6B7280;
+    background-color: @surface-alt@;
+    color: @text-muted@;
 }
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="ScrollDownBtn"],
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="ScrollDownBtn"] {
-    background-color: rgba(36, 40, 49, 0.9);
-    border: 1px solid #363C4A;
-    color: #3B82F6;
+    background-color: rgba(@surface-rgb@, 0.9);
+    border: 1px solid @border@;
+    color: @accent@;
     border-radius: 12px;
     font-size: 11px;
     padding: 4px 10px;
@@ -1005,8 +1023,8 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-
 
 QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-sidebar-widget-this-3"][objectName="ScrollDownBtn"]:hover,
 [uiStyle="meeting-chat-sidebar-widget-this-3"] QPushButton[objectName="ScrollDownBtn"]:hover {
-    background-color: #2563EB;
-    color: #FFFFFF;
+    background-color: @accent@;
+    color: @on-accent@;
 }
 
 [uiStyle="meeting-chat-sidebar-widget-scrollcontent"][uiStyle="meeting-chat-sidebar-widget-scrollcontent"][uiStyle="meeting-chat-sidebar-widget-scrollcontent"],
@@ -1016,10 +1034,10 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-
 
 [uiStyle="meeting-chat-sidebar-widget-dropoverlay"][uiStyle="meeting-chat-sidebar-widget-dropoverlay"][uiStyle="meeting-chat-sidebar-widget-dropoverlay"],
 [uiStyle="meeting-chat-sidebar-widget-dropoverlay"] * {
-    background-color: rgba(30, 58, 138, 0.88);
-    border: 2px dashed #60A5FA;
+    background-color: rgba(@accent-rgb@, 0.88);
+    border: 2px dashed @accent@;
     border-radius: 8px;
-    color: #FFFFFF;
+    color: @on-accent@;
     font-size: 14px;
     font-weight: bold;
     font-family: "Microsoft YaHei", sans-serif;
@@ -1027,12 +1045,12 @@ QPushButton[uiStyle="meeting-chat-sidebar-widget-this-3"][uiStyle="meeting-chat-
 
 QDialog[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"],
 [uiStyle="meeting-detail-dialog-this"] QDialog {
-    background: #ffffff;
+    background: @surface@;
 }
 
 QLabel[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"],
 [uiStyle="meeting-detail-dialog-this"] QLabel {
-    color: #303133;
+    color: @text@;
     font-size: 13px;
 }
 
@@ -1045,97 +1063,97 @@ QPushButton[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog
 
 QPushButton[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][objectName="primary"],
 [uiStyle="meeting-detail-dialog-this"] QPushButton[objectName="primary"] {
-    background: #1677ff;
-    color: white;
+    background: @accent@;
+    color: @on-accent@;
     border: none;
 }
 
 QPushButton[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][objectName="secondary"],
 [uiStyle="meeting-detail-dialog-this"] QPushButton[objectName="secondary"] {
-    background: #f2f3f5;
-    color: #4e5969;
+    background: @surface-alt@;
+    color: @text-secondary@;
     border: none;
 }
 
 QPushButton[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][objectName="danger"],
 [uiStyle="meeting-detail-dialog-this"] QPushButton[objectName="danger"] {
-    background: #fff1f0;
-    color: #cf1322;
-    border: 1px solid #ffccc7;
+    background: @danger-soft@;
+    color: @danger@;
+    border: 1px solid @danger-soft@;
 }
 
 QPushButton[uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][uiStyle="meeting-detail-dialog-this"][objectName]:disabled,
 [uiStyle="meeting-detail-dialog-this"] QPushButton[objectName]:disabled {
-    background: #e5e6eb;
-    color: #86909c;
-    border: 1px solid #c9cdd4;
+    background: @hover@;
+    color: @text-muted@;
+    border: 1px solid @border@;
 }
 
 [uiStyle="meeting-detail-dialog-statelabel"][uiStyle="meeting-detail-dialog-statelabel"][uiStyle="meeting-detail-dialog-statelabel"],
 [uiStyle="meeting-detail-dialog-statelabel"] * {
-    color: #8f959e;
+    color: @text-muted@;
 }
 
 [uiStyle="meeting-detail-dialog-statelabel-2"][uiStyle="meeting-detail-dialog-statelabel-2"][uiStyle="meeting-detail-dialog-statelabel-2"],
 [uiStyle="meeting-detail-dialog-statelabel-2"] * {
-    color: #1677ff;
+    color: @accent@;
 }
 
 [uiStyle="meeting-detail-dialog-statelabel-3"][uiStyle="meeting-detail-dialog-statelabel-3"][uiStyle="meeting-detail-dialog-statelabel-3"],
 [uiStyle="meeting-detail-dialog-statelabel-3"] * {
-    color: #d4380d;
+    color: @warning@;
 }
 
 [uiStyle="meeting-detail-dialog-statelabel-4"][uiStyle="meeting-detail-dialog-statelabel-4"][uiStyle="meeting-detail-dialog-statelabel-4"],
 [uiStyle="meeting-detail-dialog-statelabel-4"] * {
-    color: #1677ff;
+    color: @accent@;
 }
 
 [uiStyle="meeting-detail-dialog-statelabel-5"][uiStyle="meeting-detail-dialog-statelabel-5"][uiStyle="meeting-detail-dialog-statelabel-5"],
 [uiStyle="meeting-detail-dialog-statelabel-5"] * {
-    color: #d4380d;
+    color: @warning@;
 }
 
 [uiStyle="meeting-detail-dialog-statelabel-6"][uiStyle="meeting-detail-dialog-statelabel-6"][uiStyle="meeting-detail-dialog-statelabel-6"],
 [uiStyle="meeting-detail-dialog-statelabel-6"] * {
-    color: #8f959e;
+    color: @text-muted@;
 }
 
 [uiStyle="meeting-detail-dialog-statelabel-7"][uiStyle="meeting-detail-dialog-statelabel-7"][uiStyle="meeting-detail-dialog-statelabel-7"],
 [uiStyle="meeting-detail-dialog-statelabel-7"] * {
-    color: #8f959e;
+    color: @text-muted@;
 }
 
 [uiStyle="meeting-detail-dialog-statelabel-8"][uiStyle="meeting-detail-dialog-statelabel-8"][uiStyle="meeting-detail-dialog-statelabel-8"],
 [uiStyle="meeting-detail-dialog-statelabel-8"] * {
-    color: #8f959e;
+    color: @text-muted@;
 }
 
 [uiStyle="meeting-detail-dialog-statelabel-9"][uiStyle="meeting-detail-dialog-statelabel-9"][uiStyle="meeting-detail-dialog-statelabel-9"],
 [uiStyle="meeting-detail-dialog-statelabel-9"] * {
-    color: #d4380d;
+    color: @warning@;
 }
 
 [uiStyle="meeting-detail-dialog-statelabel-10"][uiStyle="meeting-detail-dialog-statelabel-10"][uiStyle="meeting-detail-dialog-statelabel-10"],
 [uiStyle="meeting-detail-dialog-statelabel-10"] * {
-    color: #1677ff;
+    color: @accent@;
 }
 
 [uiStyle="meeting-detail-dialog-statelabel-11"][uiStyle="meeting-detail-dialog-statelabel-11"][uiStyle="meeting-detail-dialog-statelabel-11"],
 [uiStyle="meeting-detail-dialog-statelabel-11"] * {
-    color: #089f62;
+    color: @success@;
 }
 
 [uiStyle="meeting-list-dialog-statelabel"][uiStyle="meeting-list-dialog-statelabel"][uiStyle="meeting-list-dialog-statelabel"],
 [uiStyle="meeting-list-dialog-statelabel"] * {
-    color: #8f959e;
+    color: @text-muted@;
     padding: 12px;
 }
 
 QListView[uiStyle="meeting-list-dialog-view"][uiStyle="meeting-list-dialog-view"][uiStyle="meeting-list-dialog-view"],
 [uiStyle="meeting-list-dialog-view"] QListView {
     border: none;
-    background: #ffffff;
+    background: @surface@;
     outline: none;
 }
 
@@ -1146,25 +1164,25 @@ QListView[uiStyle="meeting-list-dialog-view"][uiStyle="meeting-list-dialog-view"
 
 QDialog[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"],
 [uiStyle="meeting-list-dialog-this"] QDialog {
-    background: #ffffff;
+    background: @surface@;
 }
 
 QLineEdit[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"],
 [uiStyle="meeting-list-dialog-this"] QLineEdit {
     min-height: 36px;
-    border: 1px solid #dcdfe6;
+    border: 1px solid @border@;
     border-radius: 6px;
     padding: 0 10px;
 }
 
 QLineEdit[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"]:focus,
 [uiStyle="meeting-list-dialog-this"] QLineEdit:focus {
-    border-color: #1677ff;
+    border-color: @accent@;
 }
 
 QTabWidget[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"]::pane,
 [uiStyle="meeting-list-dialog-this"] QTabWidget::pane {
-    border: 1px solid #e5e8ec;
+    border: 1px solid @border@;
     border-radius: 6px;
     top: -1px;
 }
@@ -1173,12 +1191,12 @@ QTabBar[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][
 [uiStyle="meeting-list-dialog-this"] QTabBar::tab {
     min-width: 150px;
     padding: 10px 14px;
-    color: #606266;
+    color: @text-secondary@;
 }
 
 QTabBar[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"]::tab:selected,
 [uiStyle="meeting-list-dialog-this"] QTabBar::tab:selected {
-    color: #1677ff;
+    color: @accent@;
     font-weight: bold;
 }
 
@@ -1191,41 +1209,42 @@ QPushButton[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-thi
 
 QPushButton[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][objectName="primary"],
 [uiStyle="meeting-list-dialog-this"] QPushButton[objectName="primary"] {
-    background: #1677ff;
-    color: white;
+    background: @accent@;
+    color: @on-accent@;
     border: none;
 }
 
 QPushButton[uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][uiStyle="meeting-list-dialog-this"][objectName="secondary"],
 [uiStyle="meeting-list-dialog-this"] QPushButton[objectName="secondary"] {
-    background: #f2f3f5;
-    color: #4e5969;
+    background: @surface-alt@;
+    color: @text-secondary@;
     border: none;
 }
 
 QDialog[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"],
 [uiStyle="meeting-log-console-this"] QDialog {
-    background-color: #18191f;
-    color: #e5e6eb;
+    background-color: @surface@;
+    color: @text@;
     font-family: "Consolas", "Courier New", "Microsoft YaHei", monospace;
 }
 
 QPlainTextEdit[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"],
 [uiStyle="meeting-log-console-this"] QPlainTextEdit {
-    background-color: #121316;
-    color: #d1d5db;
-    border: 1px solid #2d3039;
+    background-color: @surface@;
+    color: @text-secondary@;
+    border: 1px solid @border@;
     border-radius: 6px;
     font-size: 12px;
     padding: 8px;
-    selection-background-color: #1677ff;
+    selection-background-color: @accent@;
+    selection-color: @on-accent@;
 }
 
 QPushButton[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"],
 [uiStyle="meeting-log-console-this"] QPushButton {
-    background-color: #272a34;
-    color: #e5e6eb;
-    border: 1px solid #3c404d;
+    background-color: @surface-alt@;
+    color: @text@;
+    border: 1px solid @border@;
     border-radius: 6px;
     padding: 6px 14px;
     font-size: 12px;
@@ -1233,28 +1252,28 @@ QPushButton[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-thi
 
 QPushButton[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"]:hover,
 [uiStyle="meeting-log-console-this"] QPushButton:hover {
-    background-color: #363a47;
+    background-color: @hover@;
 }
 
 QLineEdit[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"],
 [uiStyle="meeting-log-console-this"] QLineEdit {
-    background-color: #1e2027;
-    border: 1px solid #2d3039;
+    background-color: @surface@;
+    border: 1px solid @border@;
     border-radius: 6px;
     padding: 4px 10px;
-    color: #ffffff;
+    color: @text@;
     font-size: 12px;
 }
 
 QCheckBox[uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"][uiStyle="meeting-log-console-this"],
 [uiStyle="meeting-log-console-this"] QCheckBox {
-    color: #86909c;
+    color: @text-muted@;
     font-size: 12px;
 }
 
 [uiStyle="meeting-log-console-statuslabel"][uiStyle="meeting-log-console-statuslabel"][uiStyle="meeting-log-console-statuslabel"],
 [uiStyle="meeting-log-console-statuslabel"] * {
-    color: #00b42a;
+    color: @success@;
     font-weight: bold;
     font-size: 13px;
 }
@@ -1266,37 +1285,37 @@ QDialog[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][
 
 [uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="dialogContainer"],
 [uiStyle="meeting-main-window-this"] [objectName="dialogContainer"] {
-    background-color: #ffffff;
+    background-color: @surface@;
     border-radius: 14px;
-    border: 1px solid #e1e4ea;
+    border: 1px solid @border@;
 }
 
 QLabel[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"],
 [uiStyle="meeting-main-window-this"] QLabel {
-    color: #1f2329;
+    color: @text@;
     font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
     font-size: 13px;
 }
 
 QLineEdit[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"],
 [uiStyle="meeting-main-window-this"] QLineEdit {
-    border: 1px solid #dcdfe6;
+    border: 1px solid @border@;
     border-radius: 8px;
     padding: 8px 12px;
     font-size: 13px;
-    background: #f8f9fa;
+    background: @surface-alt@;
 }
 
 QLineEdit[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"]:focus,
 [uiStyle="meeting-main-window-this"] QLineEdit:focus {
-    border: 1px solid #1677ff;
-    background: #ffffff;
+    border: 1px solid @accent@;
+    background: @surface@;
 }
 
 QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="joinBtn"],
 [uiStyle="meeting-main-window-this"] QPushButton[objectName="joinBtn"] {
-    background-color: #1677ff;
-    color: #ffffff;
+    background-color: @accent@;
+    color: @on-accent@;
     border-radius: 8px;
     padding: 9px 24px;
     font-size: 14px;
@@ -1306,18 +1325,19 @@ QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-thi
 
 QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="joinBtn"]:hover,
 [uiStyle="meeting-main-window-this"] QPushButton[objectName="joinBtn"]:hover {
-    background-color: #4096ff;
+    background-color: @accent-hover@;
 }
 
 QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="joinBtn"]:disabled,
 [uiStyle="meeting-main-window-this"] QPushButton[objectName="joinBtn"]:disabled {
-    background-color: #b7d6ff;
+    background-color: @accent-soft@;
+    color: @text-muted@;
 }
 
 QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="cancelBtn"],
 [uiStyle="meeting-main-window-this"] QPushButton[objectName="cancelBtn"] {
-    background-color: #f2f3f5;
-    color: #4e5969;
+    background-color: @surface-alt@;
+    color: @text-secondary@;
     border-radius: 8px;
     padding: 9px 20px;
     font-size: 14px;
@@ -1326,14 +1346,14 @@ QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-thi
 
 QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="cancelBtn"]:hover,
 [uiStyle="meeting-main-window-this"] QPushButton[objectName="cancelBtn"]:hover {
-    background-color: #e5e6eb;
+    background-color: @hover@;
 }
 
 QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="linkBtn"],
 [uiStyle="meeting-main-window-this"] QPushButton[objectName="linkBtn"],
 [uiStyle="meeting-main-window-this"] QPushButton[objectName="joinEncryptionToggle"] {
     background: transparent;
-    color: #1677ff;
+    color: @accent@;
     font-size: 12px;
     border: none;
     padding: 0;
@@ -1343,140 +1363,142 @@ QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-thi
 QPushButton[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][objectName="linkBtn"]:hover,
 [uiStyle="meeting-main-window-this"] QPushButton[objectName="linkBtn"]:hover,
 [uiStyle="meeting-main-window-this"] QPushButton[objectName="joinEncryptionToggle"]:hover:enabled {
-    color: #4096ff;
+    color: @accent-hover@;
     text-decoration: underline;
 }
 
 [uiStyle="meeting-main-window-this"] QPushButton[objectName="joinEncryptionToggle"]:disabled {
-    color: #a8abb2;
+    color: @text-muted@;
 }
 
 QCheckBox[uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"][uiStyle="meeting-main-window-this"],
 [uiStyle="meeting-main-window-this"] QCheckBox {
     font-size: 13px;
-    color: #4e5969;
+    color: @text-secondary@;
 }
 
 [uiStyle="meeting-main-window-closebtn"][uiStyle="meeting-main-window-closebtn"][uiStyle="meeting-main-window-closebtn"],
 [uiStyle="meeting-main-window-closebtn"] * {
     border:none;
-    color:#8c8c8c;
+    color:@text-muted@;
     font-size:14px;
 }
 
 [uiStyle="meeting-main-window-idlabel"][uiStyle="meeting-main-window-idlabel"][uiStyle="meeting-main-window-idlabel"],
 [uiStyle="meeting-main-window-idlabel"] * {
     font-weight: bold;
-    color: #303133;
+    color: @text@;
     font-size: 12px;
 }
 
 [uiStyle="meeting-main-window-pwdlabel"][uiStyle="meeting-main-window-pwdlabel"][uiStyle="meeting-main-window-pwdlabel"],
 [uiStyle="meeting-main-window-pwdlabel"] * {
     font-weight: bold;
-    color: #303133;
+    color: @text@;
     font-size: 12px;
 }
 
 [uiStyle="meeting-main-window-namelabel"][uiStyle="meeting-main-window-namelabel"][uiStyle="meeting-main-window-namelabel"],
 [uiStyle="meeting-main-window-namelabel"] * {
     font-weight: bold;
-    color: #303133;
+    color: @text@;
     font-size: 12px;
 }
 
 [uiStyle="meeting-main-window-meetingpolicylabel"][uiStyle="meeting-main-window-meetingpolicylabel"][uiStyle="meeting-main-window-meetingpolicylabel"],
 [uiStyle="meeting-main-window-meetingpolicylabel"] * {
-    color: #8f5b00;
-    background: #fff7e6;
-    border: 1px solid #ffe7ba;
+    color: @warning@;
+    background: @warning-soft@;
+    border: 1px solid @warning-soft@;
     border-radius: 6px;
     padding: 7px 9px;
 }
 
 [uiStyle="meeting-main-window-statuslabel"][uiStyle="meeting-main-window-statuslabel"][uiStyle="meeting-main-window-statuslabel"],
 [uiStyle="meeting-main-window-statuslabel"] * {
-    color: #f53f3f;
+    color: @danger@;
     font-size: 12px;
     padding: 2px 4px;
 }
 
 [uiStyle="meeting-main-window-statuslabel-2"][uiStyle="meeting-main-window-statuslabel-2"][uiStyle="meeting-main-window-statuslabel-2"],
 [uiStyle="meeting-main-window-statuslabel-2"] * {
-    color: #1677ff;
+    color: @accent@;
     font-size: 12px;
 }
 
 [uiStyle="meeting-main-window-statuslabel-3"][uiStyle="meeting-main-window-statuslabel-3"][uiStyle="meeting-main-window-statuslabel-3"],
 [uiStyle="meeting-main-window-statuslabel-3"] * {
-    color: #f53f3f;
+    color: @danger@;
     font-size: 12px;
 }
 
 QPushButton[uiStyle="meeting-room-window-pinbtn"][uiStyle="meeting-room-window-pinbtn"][uiStyle="meeting-room-window-pinbtn"],
 [uiStyle="meeting-room-window-pinbtn"] QPushButton {
-    background-color: rgba(0, 0, 0, 150);
+    background-color: rgba(@surface-rgb@, 150);
     border-radius: 14px;
-    color: white;
+    color: @text@;
     border: none;
     font-size: 13px;
 }
 
 QPushButton[uiStyle="meeting-room-window-pinbtn"][uiStyle="meeting-room-window-pinbtn"][uiStyle="meeting-room-window-pinbtn"]:hover,
 [uiStyle="meeting-room-window-pinbtn"] QPushButton:hover {
-    background-color: rgba(22, 119, 255, 220);
+    background-color: rgba(@accent-rgb@, 220);
+    color: @on-accent@;
 }
 
 QPushButton[uiStyle="meeting-room-window-volbtn"][uiStyle="meeting-room-window-volbtn"][uiStyle="meeting-room-window-volbtn"],
 [uiStyle="meeting-room-window-volbtn"] QPushButton {
-    background-color: rgba(0, 0, 0, 150);
+    background-color: rgba(@surface-rgb@, 150);
     border-radius: 14px;
-    color: white;
+    color: @text@;
     border: none;
     font-size: 13px;
 }
 
 QPushButton[uiStyle="meeting-room-window-volbtn"][uiStyle="meeting-room-window-volbtn"][uiStyle="meeting-room-window-volbtn"]:hover,
 [uiStyle="meeting-room-window-volbtn"] QPushButton:hover {
-    background-color: rgba(22, 119, 255, 220);
+    background-color: rgba(@accent-rgb@, 220);
+    color: @on-accent@;
 }
 
 QWidget[uiStyle="meeting-room-window-volpopup"][uiStyle="meeting-room-window-volpopup"][uiStyle="meeting-room-window-volpopup"],
 [uiStyle="meeting-room-window-volpopup"] QWidget {
-    background-color: rgba(20, 24, 32, 230);
+    background-color: rgba(@surface-rgb@, 230);
     border-radius: 8px;
-    border: 1px solid rgba(255, 255, 255, 40);
+    border: 1px solid rgba(@text-rgb@, 40);
 }
 
 QPushButton[uiStyle="meeting-room-window-muteremotebtn"][uiStyle="meeting-room-window-muteremotebtn"][uiStyle="meeting-room-window-muteremotebtn"],
 [uiStyle="meeting-room-window-muteremotebtn"] QPushButton {
     background: transparent;
-    color: #ffffff;
+    color: @text@;
     border: none;
     font-size: 13px;
 }
 
 QPushButton[uiStyle="meeting-room-window-muteremotebtn"][uiStyle="meeting-room-window-muteremotebtn"][uiStyle="meeting-room-window-muteremotebtn"]:hover,
 [uiStyle="meeting-room-window-muteremotebtn"] QPushButton:hover {
-    color: #1677ff;
+    color: @accent@;
 }
 
 QSlider[uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-volslider"]::groove:horizontal,
 [uiStyle="meeting-room-window-volslider"] QSlider::groove:horizontal {
     height: 4px;
-    background: rgba(255, 255, 255, 60);
+    background: rgba(@text-rgb@, 60);
     border-radius: 2px;
 }
 
 QSlider[uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-volslider"]::sub-page:horizontal,
 [uiStyle="meeting-room-window-volslider"] QSlider::sub-page:horizontal {
-    background: #1677ff;
+    background: @accent@;
     border-radius: 2px;
 }
 
 QSlider[uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-volslider"]::handle:horizontal,
 [uiStyle="meeting-room-window-volslider"] QSlider::handle:horizontal {
-    background: #ffffff;
+    background: @surface@;
     width: 12px;
     margin: -4px 0;
     border-radius: 6px;
@@ -1484,7 +1506,7 @@ QSlider[uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-vo
 
 [uiStyle="meeting-room-window-vollabel"][uiStyle="meeting-room-window-vollabel"][uiStyle="meeting-room-window-vollabel"],
 [uiStyle="meeting-room-window-vollabel"] * {
-    color: #ffffff;
+    color: @text@;
     font-size: 11px;
     border: none;
     background: transparent;
@@ -1492,62 +1514,62 @@ QSlider[uiStyle="meeting-room-window-volslider"][uiStyle="meeting-room-window-vo
 
 [uiStyle="meeting-room-window-muteremotebtn-2-active"][uiStyle="meeting-room-window-muteremotebtn-2-active"][uiStyle="meeting-room-window-muteremotebtn-2-active"],
 [uiStyle="meeting-room-window-muteremotebtn-2-active"] * {
-    color: #f53f3f;
+    color: @danger@;
     border: none;
     font-size: 13px;
 }
 
 [uiStyle="meeting-room-window-muteremotebtn-2-normal"][uiStyle="meeting-room-window-muteremotebtn-2-normal"][uiStyle="meeting-room-window-muteremotebtn-2-normal"],
 [uiStyle="meeting-room-window-muteremotebtn-2-normal"] * {
-    color: #ffffff;
+    color: @text@;
     border: none;
     font-size: 13px;
 }
 
 [uiStyle="meeting-room-window-muteremotebtn-3"][uiStyle="meeting-room-window-muteremotebtn-3"][uiStyle="meeting-room-window-muteremotebtn-3"],
 [uiStyle="meeting-room-window-muteremotebtn-3"] * {
-    color: #ffffff;
+    color: @text@;
     border: none;
     font-size: 13px;
 }
 
 [uiStyle="meeting-room-window-pinbtn-2-active"][uiStyle="meeting-room-window-pinbtn-2-active"][uiStyle="meeting-room-window-pinbtn-2-active"],
 [uiStyle="meeting-room-window-pinbtn-2-active"] * {
-    background-color: #1677ff;
+    background-color: @accent@;
     border-radius: 14px;
-    color: white;
+    color: @on-accent@;
     border: none;
     font-size: 13px;
 }
 
 [uiStyle="meeting-room-window-pinbtn-2-normal"][uiStyle="meeting-room-window-pinbtn-2-normal"][uiStyle="meeting-room-window-pinbtn-2-normal"],
 [uiStyle="meeting-room-window-pinbtn-2-normal"] * {
-    background-color: rgba(0, 0, 0, 150);
+    background-color: rgba(@surface-rgb@, 150);
     border-radius: 14px;
-    color: white;
+    color: @text@;
     border: none;
     font-size: 13px;
 }
 
 QLineEdit[uiStyle="meeting-room-window-chatinput"][uiStyle="meeting-room-window-chatinput"][uiStyle="meeting-room-window-chatinput"],
 [uiStyle="meeting-room-window-chatinput"] QLineEdit {
-    background-color: #f2f3f5;
+    background-color: @surface-alt@;
     border-radius: 16px;
     border: 1px solid transparent;
     padding: 4px 14px;
     font-size: 12px;
-    color: #1f2329;
+    color: @text@;
 }
 
 QLineEdit[uiStyle="meeting-room-window-chatinput"][uiStyle="meeting-room-window-chatinput"][uiStyle="meeting-room-window-chatinput"]:focus,
 [uiStyle="meeting-room-window-chatinput"] QLineEdit:focus {
-    background-color: #ffffff;
-    border: 1px solid #1677ff;
+    background-color: @surface@;
+    border: 1px solid @accent@;
 }
 
 QPushButton[uiStyle="meeting-room-window-handbtn"][uiStyle="meeting-room-window-handbtn"][uiStyle="meeting-room-window-handbtn"],
 [uiStyle="meeting-room-window-handbtn"] QPushButton {
-    background-color: #f2f3f5;
+    background-color: @surface-alt@;
     border-radius: 16px;
     border: none;
     font-size: 15px;
@@ -1555,18 +1577,18 @@ QPushButton[uiStyle="meeting-room-window-handbtn"][uiStyle="meeting-room-window-
 
 QPushButton[uiStyle="meeting-room-window-handbtn"][uiStyle="meeting-room-window-handbtn"][uiStyle="meeting-room-window-handbtn"]:hover,
 [uiStyle="meeting-room-window-handbtn"] QPushButton:hover {
-    background-color: #e5e6eb;
+    background-color: @hover@;
 }
 
 [uiStyle="meeting-room-window-stagecontainer"][uiStyle="meeting-room-window-stagecontainer"][uiStyle="meeting-room-window-stagecontainer"],
 [uiStyle="meeting-room-window-stagecontainer"] * {
-    background-color: #12141a;
+    background-color: @stage@;
 }
 
 QLabel[uiStyle="meeting-room-window-invitehintbanner"][uiStyle="meeting-room-window-invitehintbanner"][uiStyle="meeting-room-window-invitehintbanner"],
 [uiStyle="meeting-room-window-invitehintbanner"] QLabel {
-    background-color: rgba(255, 255, 255, 25);
-    color: #e5e6eb;
+    background-color: rgba(@text-rgb@, 25);
+    color: @text@;
     border-radius: 8px;
     font-size: 13px;
     font-family: "Microsoft YaHei";
@@ -1575,9 +1597,9 @@ QLabel[uiStyle="meeting-room-window-invitehintbanner"][uiStyle="meeting-room-win
 
 QLabel[uiStyle="meeting-room-window-recoverybanner"][uiStyle="meeting-room-window-recoverybanner"][uiStyle="meeting-room-window-recoverybanner"],
 [uiStyle="meeting-room-window-recoverybanner"] QLabel {
-    background-color: rgba(30, 58, 138, 230);
-    color: #e0e7ff;
-    border: 1px solid #3b82f6;
+    background-color: rgba(@accent-rgb@, 230);
+    color: @on-accent@;
+    border: 1px solid @accent@;
     border-radius: 8px;
     font-size: 13px;
     font-weight: bold;
@@ -1587,9 +1609,9 @@ QLabel[uiStyle="meeting-room-window-recoverybanner"][uiStyle="meeting-room-windo
 
 QLabel[uiStyle="meeting-room-window-recoverybanner-2"][uiStyle="meeting-room-window-recoverybanner-2"][uiStyle="meeting-room-window-recoverybanner-2"],
 [uiStyle="meeting-room-window-recoverybanner-2"] QLabel {
-    background-color: rgba(217, 119, 6, 235);
-    color: #ffffff;
-    border: 1px solid #f59e0b;
+    background-color: rgba(@danger-rgb@, 235);
+    color: @on-accent@;
+    border: 1px solid @warning@;
     border-radius: 8px;
     font-size: 13px;
     font-weight: bold;
@@ -1599,9 +1621,9 @@ QLabel[uiStyle="meeting-room-window-recoverybanner-2"][uiStyle="meeting-room-win
 
 QLabel[uiStyle="meeting-room-window-recoverybanner-3"][uiStyle="meeting-room-window-recoverybanner-3"][uiStyle="meeting-room-window-recoverybanner-3"],
 [uiStyle="meeting-room-window-recoverybanner-3"] QLabel {
-    background-color: rgba(22, 101, 52, 235);
-    color: #ffffff;
-    border: 1px solid #22c55e;
+    background-color: rgba(@success-rgb@, 235);
+    color: @on-accent@;
+    border: 1px solid @success@;
     border-radius: 8px;
     font-size: 13px;
     font-weight: bold;
@@ -1611,9 +1633,9 @@ QLabel[uiStyle="meeting-room-window-recoverybanner-3"][uiStyle="meeting-room-win
 
 QLabel[uiStyle="meeting-room-window-recoverybanner-4"][uiStyle="meeting-room-window-recoverybanner-4"][uiStyle="meeting-room-window-recoverybanner-4"],
 [uiStyle="meeting-room-window-recoverybanner-4"] QLabel {
-    background-color: rgba(185, 28, 28, 235);
-    color: #ffffff;
-    border: 1px solid #ef4444;
+    background-color: rgba(@danger-rgb@, 235);
+    color: @on-accent@;
+    border: 1px solid @danger@;
     border-radius: 8px;
     font-size: 13px;
     font-weight: bold;
@@ -1623,20 +1645,20 @@ QLabel[uiStyle="meeting-room-window-recoverybanner-4"][uiStyle="meeting-room-win
 
 [uiStyle="meeting-room-window-screensharebanner"][uiStyle="meeting-room-window-screensharebanner"][uiStyle="meeting-room-window-screensharebanner"],
 [uiStyle="meeting-room-window-screensharebanner"] * {
-    background: #087f5b;
-    color: white;
+    background: @success@;
+    color: @on-accent@;
     font-weight: bold;
 }
 
 QWidget[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="ParticipantsSidebar"],
 [uiStyle="participants-sidebar-widget-this"] QWidget[objectName="ParticipantsSidebar"] {
-    background-color: #1A1D24;
-    border-left: 1px solid #2B303C;
+    background-color: @surface@;
+    border-left: 1px solid @border@;
 }
 
 QLabel[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="SidebarTitle"],
 [uiStyle="participants-sidebar-widget-this"] QLabel[objectName="SidebarTitle"] {
-    color: #F3F4F6;
+    color: @text@;
     font-size: 14px;
     font-weight: bold;
 }
@@ -1644,7 +1666,7 @@ QLabel[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar
 QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="CloseBtn"],
 [uiStyle="participants-sidebar-widget-this"] QPushButton[objectName="CloseBtn"] {
     background: transparent;
-    color: #9CA3AF;
+    color: @text-muted@;
     font-size: 16px;
     border: none;
     border-radius: 4px;
@@ -1656,23 +1678,23 @@ QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-si
 
 QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="CloseBtn"]:hover,
 [uiStyle="participants-sidebar-widget-this"] QPushButton[objectName="CloseBtn"]:hover {
-    background-color: rgba(255, 255, 255, 0.1);
-    color: #FFFFFF;
+    background-color: rgba(@text-rgb@, 0.1);
+    color: @text@;
 }
 
 QLineEdit[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="SearchEdit"],
 [uiStyle="participants-sidebar-widget-this"] QLineEdit[objectName="SearchEdit"] {
-    background-color: #242831;
-    border: 1px solid #363C4A;
+    background-color: @surface@;
+    border: 1px solid @border@;
     border-radius: 4px;
-    color: #F3F4F6;
+    color: @text@;
     padding: 4px 8px;
     font-size: 12px;
 }
 
 QLineEdit[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="SearchEdit"]:focus,
 [uiStyle="participants-sidebar-widget-this"] QLineEdit[objectName="SearchEdit"]:focus {
-    border: 1px solid #3B82F6;
+    border: 1px solid @accent@;
 }
 
 QListView[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="ParticipantList"],
@@ -1684,7 +1706,7 @@ QListView[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-side
 
 QListView[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="ParticipantList"]::item,
 [uiStyle="participants-sidebar-widget-this"] QListView[objectName="ParticipantList"]::item {
-    border-bottom: 1px solid #232731;
+    border-bottom: 1px solid @border@;
 }
 
 QScrollBar[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"]:vertical,
@@ -1697,7 +1719,7 @@ QScrollBar[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sid
 
 QScrollBar[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"]::handle:vertical,
 [uiStyle="participants-sidebar-widget-this"] QScrollBar::handle:vertical {
-    background: #4B5563;
+    background: @hover@;
     min-height: 20px;
     border-radius: 3px;
 }
@@ -1711,14 +1733,14 @@ QScrollBar[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sid
 
 QWidget[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="BottomPanel"],
 [uiStyle="participants-sidebar-widget-this"] QWidget[objectName="BottomPanel"] {
-    background-color: #171A20;
-    border-top: 1px solid #2B303C;
+    background-color: @surface-alt@;
+    border-top: 1px solid @border@;
 }
 
 QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="MuteAllBtn"],
 [uiStyle="participants-sidebar-widget-this"] QPushButton[objectName="MuteAllBtn"] {
-    background-color: #EF4444;
-    color: #FFFFFF;
+    background-color: @danger@;
+    color: @on-accent@;
     border: none;
     border-radius: 4px;
     padding: 6px 12px;
@@ -1728,13 +1750,13 @@ QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-si
 
 QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="MuteAllBtn"]:hover,
 [uiStyle="participants-sidebar-widget-this"] QPushButton[objectName="MuteAllBtn"]:hover {
-    background-color: #DC2626;
+    background-color: @danger-hover@;
 }
 
 QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="UnmuteAllBtn"],
 [uiStyle="participants-sidebar-widget-this"] QPushButton[objectName="UnmuteAllBtn"] {
-    background-color: #374151;
-    color: #F3F4F6;
+    background-color: @surface-alt@;
+    color: @text@;
     border: none;
     border-radius: 4px;
     padding: 6px 12px;
@@ -1743,7 +1765,7 @@ QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-si
 
 QPushButton[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="UnmuteAllBtn"]:hover,
 [uiStyle="participants-sidebar-widget-this"] QPushButton[objectName="UnmuteAllBtn"]:hover {
-    background-color: #4B5563;
+    background-color: @hover@;
 }
 
 QListView[uiStyle="schedule-widget-listview"][uiStyle="schedule-widget-listview"][uiStyle="schedule-widget-listview"],
@@ -1765,14 +1787,14 @@ QDialog[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle=
 
 QFrame[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsShadowSurface"],
 [uiStyle="settings-dialog-this"] QFrame[objectName="settingsShadowSurface"] {
-    background: #ffffff;
+    background: @surface@;
     border-radius: 12px;
 }
 
 QFrame[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsSurface"],
 [uiStyle="settings-dialog-this"] QFrame[objectName="settingsSurface"] {
-    background: #ffffff;
-    border: 1px solid #dfe3e8;
+    background: @surface@;
+    border: 1px solid @border@;
     border-radius: 12px;
 }
 
@@ -1780,20 +1802,20 @@ QWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle=
 [uiStyle="settings-dialog-this"] QWidget {
     font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
     font-size: 13px;
-    color: #1f2329;
+    color: @text@;
 }
 
 QWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="titleBar"],
 [uiStyle="settings-dialog-this"] QWidget[objectName="titleBar"] {
-    background: #ffffff;
-    border-bottom: 1px solid #e5e8ec;
+    background: @surface@;
+    border-bottom: 1px solid @border@;
 }
 
 QLabel[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="dialogTitle"],
 [uiStyle="settings-dialog-this"] QLabel[objectName="dialogTitle"] {
     font-size: 15px;
     font-weight: 500;
-    color: #303133;
+    color: @text@;
 }
 
 QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="closeButton"],
@@ -1805,14 +1827,14 @@ QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiSt
 
 QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="closeButton"]:hover,
 [uiStyle="settings-dialog-this"] QPushButton[objectName="closeButton"]:hover {
-    background: #f2f3f5;
+    background: @surface-alt@;
 }
 
 QListWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsNavigation"],
 [uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"] {
-    background: #ffffff;
+    background: @surface@;
     border: none;
-    border-right: 1px solid #e5e8ec;
+    border-right: 1px solid @border@;
     outline: none;
     padding: 8px 7px;
 }
@@ -1822,42 +1844,42 @@ QListWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiSt
     min-height: 40px;
     padding-left: 12px;
     border-radius: 6px;
-    color: #303133;
+    color: @text@;
 }
 
 QListWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsNavigation"]::item:hover,
 [uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"]::item:hover {
-    background: #f5f7fa;
+    background: @window@;
 }
 
 QListWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsNavigation"]::item:selected,
 [uiStyle="settings-dialog-this"] QListWidget[objectName="settingsNavigation"]::item:selected {
-    background: #1677ff;
-    color: #ffffff;
+    background: @accent@;
+    color: @on-accent@;
 }
 
 QLabel[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="pageTitle"],
 [uiStyle="settings-dialog-this"] QLabel[objectName="pageTitle"] {
-    color: #1f2329;
+    color: @text@;
 }
 
 QLabel[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="sectionTitle"],
 [uiStyle="settings-dialog-this"] QLabel[objectName="sectionTitle"] {
-    color: #1f2329;
+    color: @text@;
 }
 
 QLabel[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="hintLabel"],
 [uiStyle="settings-dialog-this"] QLabel[objectName="hintLabel"] {
-    color: #8f959e;
+    color: @text-muted@;
     font-size: 12px;
 }
 
 QComboBox[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"],
 [uiStyle="settings-dialog-this"] QComboBox {
     min-height: 34px;
-    border: 1px solid #dcdfe6;
+    border: 1px solid @border@;
     border-radius: 5px;
-    background: #ffffff;
+    background: @surface@;
     padding: 0 36px 0 10px;
 }
 
@@ -1865,13 +1887,13 @@ QComboBox[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyl
 [uiStyle="settings-dialog-this"] QComboBox:hover,
 QComboBox[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"]:focus,
 [uiStyle="settings-dialog-this"] QComboBox:focus {
-    border-color: #1677ff;
+    border-color: @accent@;
 }
 
 QComboBox[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"]:disabled,
 [uiStyle="settings-dialog-this"] QComboBox:disabled {
-    background: #f5f6f7;
-    color: #a8abb2;
+    background: @surface-alt@;
+    color: @text-muted@;
 }
 
 QCheckBox[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"],
@@ -1896,45 +1918,45 @@ QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiSt
 [uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeClearKey"] {
     min-height: 34px;
     padding: 0 16px;
-    border: 1px solid #dcdfe6;
+    border: 1px solid @border@;
     border-radius: 5px;
-    background: #ffffff;
-    color: #303133;
+    background: @surface@;
+    color: @text@;
 }
 
 QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="secondaryButton"]:hover,
 [uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"]:hover,
 [uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeSaveKey"]:hover,
 [uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeClearKey"]:hover {
-    border-color: #1677ff;
-    color: #1677ff;
+    border-color: @accent@;
+    color: @accent@;
 }
 
 QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="secondaryButton"]:pressed,
 [uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"]:pressed,
 [uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeSaveKey"]:pressed,
 [uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeClearKey"]:pressed {
-    background: #eef5ff;
+    background: @accent-soft@;
 }
 
 QPushButton[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="secondaryButton"]:disabled,
 [uiStyle="settings-dialog-this"] QPushButton[objectName="secondaryButton"]:disabled,
 [uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeSaveKey"]:disabled,
 [uiStyle="settings-dialog-this"] QPushButton[objectName="settingsE2eeClearKey"]:disabled {
-    color: #a8abb2;
-    background: #f5f6f7;
+    color: @text-muted@;
+    background: @surface-alt@;
 }
 
 QFrame[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="previewHost"],
 [uiStyle="settings-dialog-this"] QFrame[objectName="previewHost"] {
-    background: #172033;
-    border: 1px solid #26334d;
+    background: @surface@;
+    border: 1px solid @accent-soft@;
     border-radius: 7px;
 }
 
 QLabel[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="previewMessage"],
 [uiStyle="settings-dialog-this"] QLabel[objectName="previewMessage"] {
-    color: #c8d1df;
+    color: @text-secondary@;
     font-size: 14px;
 }
 
@@ -1944,36 +1966,36 @@ QProgressBar[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiS
     max-height: 8px;
     border: none;
     border-radius: 4px;
-    background: #e9edf2;
+    background: @surface-alt@;
 }
 
 QProgressBar[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"]::chunk,
 [uiStyle="settings-dialog-this"] QProgressBar::chunk {
     border-radius: 4px;
-    background: #20b26b;
+    background: @success@;
 }
 
 [uiStyle="settings-dialog-audiostatus"][uiStyle="settings-dialog-audiostatus"][uiStyle="settings-dialog-audiostatus"],
 [uiStyle="settings-dialog-audiostatus"] * {
-    color: #f53f3f;
+    color: @danger@;
 }
 
 [uiStyle="settings-dialog-audiostatus-2-active"][uiStyle="settings-dialog-audiostatus-2-active"][uiStyle="settings-dialog-audiostatus-2-active"],
 [uiStyle="settings-dialog-audiostatus-2-active"] * {
-    color: #20a162;
+    color: @success@;
 }
 
 [uiStyle="settings-dialog-audiostatus-2-normal"][uiStyle="settings-dialog-audiostatus-2-normal"][uiStyle="settings-dialog-audiostatus-2-normal"],
 [uiStyle="settings-dialog-audiostatus-2-normal"] * {
-    color: #f53f3f;
+    color: @danger@;
 }
 
 [uiStyle="settings-dialog-audiostatus-3"][uiStyle="settings-dialog-audiostatus-3"][uiStyle="settings-dialog-audiostatus-3"],
 [uiStyle="settings-dialog-audiostatus-3"] * {
-    color: #f53f3f;
+    color: @danger@;
 }
 
 [uiStyle="settings-dialog-previewmessage-active"][uiStyle="settings-dialog-previewmessage-active"][uiStyle="settings-dialog-previewmessage-active"],
 [uiStyle="settings-dialog-previewmessage-active"] * {
-    color: #ff7875;
+    color: @danger@;
 }

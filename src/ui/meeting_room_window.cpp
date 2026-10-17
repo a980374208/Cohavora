@@ -62,6 +62,14 @@
 namespace MeetingUI {
 namespace {
 
+using ColorRole = AppTheme::ColorRole;
+
+QColor themeColor(ColorRole role, int alpha = -1) {
+	auto result = AppTheme::color(role);
+	if (alpha >= 0) result.setAlpha(alpha);
+	return result;
+}
+
 // The popup owns only a cancellable subscription, never a native driver job.
 // Even cached results are queued so no action is populated before popup().
 template <typename Discovery, typename Apply>
@@ -139,6 +147,7 @@ public:
 		setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
 		setAccessibleName(QCoreApplication::translate(
 			"MeetingUI", "CPU and private memory trend"));
+		AppTheme::observeChanges(*this, [this] { update(); });
 	}
 
 protected:
@@ -146,7 +155,7 @@ protected:
 		QPainter painter(this);
 		painter.setRenderHint(QPainter::Antialiasing);
 		const auto plot = rect().adjusted(44, 18, -18, -30);
-		painter.setPen(QColor(0x68, 0x70, 0x7a));
+		painter.setPen(themeColor(ColorRole::TextSecondary));
 		painter.drawRect(plot);
 		painter.drawText(8, 20, QCoreApplication::translate("MeetingUI", "CPU"));
 		painter.drawText(
@@ -179,9 +188,9 @@ protected:
 				static_cast<double>(snapshot.private_bytes) /
 				static_cast<double>(maximumMemory)));
 		}
-		painter.setPen(QPen(QColor(0x2f, 0xc4, 0x77), 2));
+		painter.setPen(QPen(themeColor(ColorRole::Success), 2));
 		painter.drawPolyline(cpu);
-		painter.setPen(QPen(QColor(0x42, 0x9b, 0xe8), 2));
+		painter.setPen(QPen(themeColor(ColorRole::Accent), 2));
 		painter.drawPolyline(memory);
 	}
 
@@ -1102,10 +1111,14 @@ VideoTileWidget::VideoTileWidget(const QString &displayName, bool isLocal, QWidg
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
 
 	_visualizer = new AudioVisualizerWidget(this, 7);
-	_visualizer->setBarColor(QColor(0, 180, 42));
+	_visualizer->setBarColor(themeColor(ColorRole::Success));
 	_visualizer->hide();
 
 	setupVolumeControls();
+	AppTheme::observeChanges(*this, [this] {
+		_visualizer->setBarColor(themeColor(ColorRole::Success));
+		invalidatePresentation();
+	});
 }
 
 void VideoTileWidget::setupVolumeControls() {
@@ -1332,14 +1345,16 @@ QRect VideoTileWidget::pinButtonRect() const {
 
 QImage VideoTileWidget::hardwareDecoration(const QSize &pixels, bool hasFrame, bool hovered) {
 	if (pixels.isEmpty() || size().isEmpty()) return {};
+	const auto themeRevision = AppTheme::revision();
 	if (!_hardwareDecoration.isNull() && _hardwareDecoration.size() == pixels &&
 		_decorationLogicalSize == size() && _decorationHasFrame == hasFrame &&
-		_decorationHovered == hovered) return _hardwareDecoration;
+		_decorationHovered == hovered && _decorationThemeRevision == themeRevision) return _hardwareDecoration;
 	_hardwareDecoration = QImage(pixels, QImage::Format_RGBA8888_Premultiplied);
 	_hardwareDecoration.fill(Qt::transparent);
 	_decorationLogicalSize = size();
 	_decorationHasFrame = hasFrame;
 	_decorationHovered = hovered;
+	_decorationThemeRevision = themeRevision;
 	QPainter painter(&_hardwareDecoration);
 	painter.scale(double(pixels.width()) / width(), double(pixels.height()) / height());
 	paintCard(painter, true, hasFrame, hovered);
@@ -1430,7 +1445,7 @@ void VideoTileWidget::paintCard(QPainter &p, bool decorationOnly, bool hasFrame,
 		QPainterPath path;
 		path.addRoundedRect(r.adjusted(2, 2, -2, -2), 10, 10);
 		p.setClipPath(path);
-		p.fillPath(path, QColor(0x1a, 0x1d, 0x24));
+		p.fillPath(path, themeColor(ColorRole::Tile));
 	}
 
 	if (_videoSubscriptionError != livekit::TrackPublication::SubscriptionError::None) {
@@ -1449,9 +1464,9 @@ void VideoTileWidget::paintCard(QPainter &p, bool decorationOnly, bool hasFrame,
 		p.save();
 		const auto button = pinButtonRect();
 		p.setPen(Qt::NoPen);
-		p.setBrush(_isPinned ? QColor("#1677ff") : QColor(0, 0, 0, 150));
+		p.setBrush(_isPinned ? themeColor(ColorRole::Accent) : themeColor(ColorRole::Surface, 235));
 		p.drawRoundedRect(button, 14, 14);
-		p.setPen(Qt::white);
+		p.setPen(themeColor(_isPinned ? ColorRole::OnAccent : ColorRole::Text));
 		p.setFont(QFont("Segoe UI Emoji", 10));
 		p.drawText(button, Qt::AlignCenter, QString::fromUtf8("📌"));
 		p.restore();
@@ -1460,7 +1475,7 @@ void VideoTileWidget::paintCard(QPainter &p, bool decorationOnly, bool hasFrame,
 	// 画中画模式下的基础边框
 	if (_isPip) {
 		p.setClipping(false);
-		p.setPen(QPen(_isSpeaking ? QColor(0x00, 0xb4, 0x2a) : QColor(0x86, 0x90, 0x9c), _isSpeaking ? 3.0 : 2.0));
+		p.setPen(QPen(_isSpeaking ? themeColor(ColorRole::Success) : themeColor(ColorRole::TextMuted), _isSpeaking ? 3.0 : 2.0));
 		p.setBrush(Qt::NoBrush);
 		p.drawRoundedRect(r.adjusted(1, 1, -1, -1), 10, 10);
 	}
@@ -1472,11 +1487,11 @@ void VideoTileWidget::paintCard(QPainter &p, bool decorationOnly, bool hasFrame,
 		p.setBrush(Qt::NoBrush);
 
 		int alpha = static_cast<int>(60 + 150 * std::clamp(_audioLevel * 4.0f, 0.1f, 1.0f));
-		QPen outerGlow(QColor(0, 180, 42, alpha / 3), 6.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+		QPen outerGlow(themeColor(ColorRole::Success, alpha / 3), 6.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
 		p.setPen(outerGlow);
 		p.drawRoundedRect(r.adjusted(3, 3, -3, -3), _isPip ? 10 : 8, _isPip ? 10 : 8);
 
-		QPen innerFocus(QColor(0, 180, 42, alpha), 2.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
+		QPen innerFocus(themeColor(ColorRole::Success, alpha), 2.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin);
 		p.setPen(innerFocus);
 		p.drawRoundedRect(r.adjusted(1, 1, -1, -1), _isPip ? 10 : 8, _isPip ? 10 : 8);
 
@@ -1504,7 +1519,7 @@ static std::pair<QColor, QColor> GenerateAvatarGradient(const QString &str) {
 }
 
 void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
-	p.fillRect(r, QColor(0x18, 0x1a, 0x22));
+	p.fillRect(r, themeColor(ColorRole::Tile));
 
 	const int cx = r.center().x();
 	const int cy = r.center().y();
@@ -1515,8 +1530,8 @@ void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
 	if (_isSpeaking && !_isAudioMuted) {
 		p.save();
 		const int auraRadius = outerRadius + static_cast<int>(std::clamp(_audioLevel, 0.1f, 1.0f) * 14.0f);
-		p.setPen(QPen(QColor(0x00, 0xb4, 0x2a, 100), 2.0));
-		p.setBrush(QColor(0x00, 0xb4, 0x2a, 35));
+		p.setPen(QPen(themeColor(ColorRole::Success, 100), 2.0));
+		p.setBrush(themeColor(ColorRole::Success, 35));
 		p.drawEllipse(QPoint(cx, cy - 14), auraRadius, auraRadius);
 		p.restore();
 	}
@@ -1560,7 +1575,7 @@ void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
 
 	const int micX = startX + 6;
 	const int micY = nameY + 6;
-	p.setPen(QPen(_isAudioMuted ? QColor(0xf5, 0x3f, 0x3f) : QColor(0x00, 0xb4, 0x2a), 1.5, Qt::SolidLine, Qt::RoundCap));
+	p.setPen(QPen(_isAudioMuted ? themeColor(ColorRole::Danger) : themeColor(ColorRole::Success), 1.5, Qt::SolidLine, Qt::RoundCap));
 	p.drawRoundedRect(QRect(micX - 3, micY - 5, 6, 8), 3, 3);
 	p.drawLine(micX, micY + 3, micX, micY + 6);
 	p.drawLine(micX - 4, micY + 6, micX + 4, micY + 6);
@@ -1568,7 +1583,7 @@ void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
 		p.drawLine(micX - 5, micY - 6, micX + 5, micY + 7);
 	}
 
-	p.setPen(QColor(0xf0, 0xf2, 0xf5));
+	p.setPen(themeColor(ColorRole::Text));
 	p.drawText(QRect(startX + 18, nameY - 2, textW + 10, 20), Qt::AlignLeft | Qt::AlignVCenter, label);
 }
 
@@ -1577,23 +1592,23 @@ void VideoTileWidget::drawNetworkQualityBadge(QPainter &p, const QRect &r) {
 	const int bx = r.x() + 10;
 	const int by = r.y() + 12;
 	int bars = 0;
-	QColor color(0x86, 0x90, 0x9c);
+	QColor color = themeColor(ColorRole::TextMuted);
 	switch (_connectionQuality) {
 	case livekit::ConnectionQuality::Excellent:
 		bars = 3;
-		color = QColor(0x00, 0xb4, 0x2a);
+		color = themeColor(ColorRole::Success);
 		break;
 	case livekit::ConnectionQuality::Good:
 		bars = 2;
-		color = QColor(0x52, 0xc4, 0x1a);
+		color = themeColor(ColorRole::Success);
 		break;
 	case livekit::ConnectionQuality::Poor:
 		bars = 1;
-		color = QColor(0xe6, 0x7e, 0x22);
+		color = themeColor(ColorRole::Warning);
 		break;
 	case livekit::ConnectionQuality::Lost:
 		bars = 1;
-		color = QColor(0xf5, 0x3f, 0x3f);
+		color = themeColor(ColorRole::Danger);
 		break;
 	case livekit::ConnectionQuality::Unknown:
 		break;
@@ -1607,16 +1622,16 @@ void VideoTileWidget::drawNetworkQualityBadge(QPainter &p, const QRect &r) {
 
 	if (_isVideoStreamPaused) {
 		const QRect pausedRect(bx + 16, by - 3, 54, 16);
-		p.setBrush(QColor(0xe6, 0x7e, 0x22, 220));
+		p.setBrush(themeColor(ColorRole::Warning, 220));
 		p.drawRoundedRect(pausedRect, 5, 5);
-		p.setPen(Qt::white);
+		p.setPen(themeColor(ColorRole::OnAccent));
 		p.setFont(QFont("Microsoft YaHei", 8, QFont::DemiBold));
 		p.drawText(pausedRect, Qt::AlignCenter, QCoreApplication::translate("MeetingUI", "Paused: Network"));
 	}
 
 	if (_isPinned) {
 		p.setFont(QFont("Segoe UI Emoji", 10));
-		p.setPen(Qt::white);
+		p.setPen(themeColor(ColorRole::Text));
 		const int pinOffset = _isVideoStreamPaused ? 74 : 16;
 		p.drawText(QRect(bx + pinOffset, by - 2, 16, 16), Qt::AlignCenter, QString::fromUtf8("📌"));
 	}
@@ -1625,9 +1640,9 @@ void VideoTileWidget::drawNetworkQualityBadge(QPainter &p, const QRect &r) {
 
 void VideoTileWidget::drawVideoPlaceholder(QPainter &p, const QRect &r) {
 	using Error = livekit::TrackPublication::SubscriptionError;
-	p.fillRect(r, QColor(0x14, 0x16, 0x1d));
+	p.fillRect(r, themeColor(ColorRole::Tile));
 	p.setPen(_isVideoStreamPaused || _videoSubscriptionError != Error::None
-		? QColor(0xe6, 0x7e, 0x22) : QColor(0x86, 0x90, 0x9c));
+		? themeColor(ColorRole::Warning) : themeColor(ColorRole::TextMuted));
 	p.setFont(QFont("Microsoft YaHei", 12));
 	QString label;
 	switch (_videoSubscriptionError) {
@@ -1684,7 +1699,7 @@ void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
 	}
 
 	const auto paintStartedAt = std::chrono::steady_clock::now();
-	p.fillRect(r, QColor(0x0e, 0x10, 0x14));
+	p.fillRect(r, themeColor(ColorRole::Letterbox));
 
 	QImage scaled = frameCopy.scaled(r.size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
 	const int x = r.x() + (r.width() - scaled.width()) / 2;
@@ -1717,12 +1732,12 @@ void VideoTileWidget::drawBottomNameTag(QPainter &p, const QRect &r) {
 
 	p.save();
 	p.setPen(Qt::NoPen);
-	p.setBrush(QColor(0, 0, 0, 160));
+	p.setBrush(themeColor(ColorRole::Surface, 235));
 	p.drawRoundedRect(tagRect, 6, 6);
 
 	const int micX = tagRect.x() + 10;
 	const int micY = tagRect.center().y();
-	p.setPen(QPen(_isAudioMuted ? QColor(0xf5, 0x3f, 0x3f) : QColor(0x00, 0xb4, 0x2a), 1.4, Qt::SolidLine, Qt::RoundCap));
+	p.setPen(QPen(_isAudioMuted ? themeColor(ColorRole::Danger) : themeColor(ColorRole::Success), 1.4, Qt::SolidLine, Qt::RoundCap));
 	p.drawRoundedRect(_isScreenShare ? QRect(micX - 5, micY - 4, 10, 7) : QRect(micX - 3, micY - 4, 6, 7), 2, 2);
 	p.drawLine(micX, micY + 3, micX, micY + 5);
 	p.drawLine(micX - 3, micY + 5, micX + 3, micY + 5);
@@ -1730,7 +1745,7 @@ void VideoTileWidget::drawBottomNameTag(QPainter &p, const QRect &r) {
 		p.drawLine(micX - 4, micY - 5, micX + 4, micY + 6);
 	}
 
-	p.setPen(Qt::white);
+	p.setPen(themeColor(ColorRole::Text));
 	p.drawText(QRect(tagRect.x() + 20, tagRect.y(), textW + 6, tagH), Qt::AlignVCenter | Qt::AlignLeft, label);
 	p.restore();
 }
@@ -1755,6 +1770,7 @@ void VideoTileWidget::mouseDoubleClickEvent(QMouseEvent *e) {
 
 RoomTopBarWidget::RoomTopBarWidget(QWidget *parent)
 	: Ui::RpWidget(parent) {
+	AppTheme::observeChanges(*this, [this] { update(); });
 	setMinimumHeight(44);
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
@@ -1891,8 +1907,8 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	const int w = width();
 	const int h = height();
 
-	p.fillRect(rect(), QColor(0xfd, 0xfd, 0xfe));
-	p.setPen(QColor(0xeb, 0xed, 0xf0));
+	p.fillRect(rect(), themeColor(ColorRole::Surface));
+	p.setPen(themeColor(ColorRole::Border));
 	p.drawLine(0, h - 1, w, h - 1);
 
 	// 1. 左侧：Logo、会议名称与持续时间
@@ -1903,7 +1919,7 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 
 	QFont font("Microsoft YaHei", 10);
 	p.setFont(font);
-	p.setPen(QColor(0x4e, 0x59, 0x69));
+	p.setPen(themeColor(ColorRole::TextSecondary));
 	const int nameWidth = QFontMetrics(font).horizontalAdvance(QCoreApplication::translate("MeetingUI", "Meetings"));
 	p.drawText(QRect(logoX + 16, 0, nameWidth, 44), Qt::AlignVCenter | Qt::AlignLeft, QCoreApplication::translate("MeetingUI", "Meetings"));
 
@@ -1915,21 +1931,21 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	
 	QFont timeFont("Microsoft YaHei", 10, QFont::DemiBold);
 	p.setFont(timeFont);
-	p.setPen(QColor(0x1f, 0x23, 0x29));
+	p.setPen(themeColor(ColorRole::Text));
 	p.drawText(QRect(logoX + 24 + nameWidth, 0, 60, 44), Qt::AlignVCenter | Qt::AlignLeft, timeStr);
 
 	const QString availability = _telemetrySnapshot.value(
 		QStringLiteral("availability"), QStringLiteral("UNKNOWN")).toString();
-	QColor qualityColor(0x86, 0x90, 0x9c);
-	if (availability == QStringLiteral("VALID")) qualityColor = QColor(0x00, 0x9a, 0x29);
-	else if (availability == QStringLiteral("WARMING_UP")) qualityColor = QColor(0x16, 0x77, 0xff);
-	else if (availability == QStringLiteral("STALE")) qualityColor = QColor(0xd4, 0x88, 0x06);
+	QColor qualityColor = themeColor(ColorRole::TextMuted);
+	if (availability == QStringLiteral("VALID")) qualityColor = themeColor(ColorRole::Success);
+	else if (availability == QStringLiteral("WARMING_UP")) qualityColor = themeColor(ColorRole::Accent);
+	else if (availability == QStringLiteral("STALE")) qualityColor = themeColor(ColorRole::Warning);
 	else if (availability == QStringLiteral("TIMEOUT") ||
-		availability == QStringLiteral("INVALID")) qualityColor = QColor(0xd9, 0x36, 0x3e);
-	else if (availability == QStringLiteral("UNSUPPORTED")) qualityColor = QColor(0xa6, 0x1d, 0x24);
+		availability == QStringLiteral("INVALID")) qualityColor = themeColor(ColorRole::Danger);
+	else if (availability == QStringLiteral("UNSUPPORTED")) qualityColor = themeColor(ColorRole::Danger);
 	if (_hoverBtn == HoverBtn::Quality) {
 		p.setPen(Qt::NoPen);
-		p.setBrush(QColor(0xf2, 0xf3, 0xf5));
+		p.setBrush(themeColor(ColorRole::Hover));
 		p.drawRoundedRect(_qualityRect, 4, 4);
 	}
 	const double coverage = _telemetrySnapshot.value(QStringLiteral("coverage"), 0.0).toDouble();
@@ -1940,7 +1956,7 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	const int sigY = _qualityRect.center().y() + 5;
 	p.setPen(Qt::NoPen);
 	for (int bar = 0; bar != 3; ++bar) {
-		p.setBrush(bar < activeBars ? qualityColor : QColor(0xd8, 0xdc, 0xe3));
+		p.setBrush(bar < activeBars ? qualityColor : themeColor(ColorRole::Border));
 		const int barHeight = 4 + bar * 3;
 		p.drawRect(sigX + bar * 4, sigY - barHeight, 2, barHeight);
 	}
@@ -1951,14 +1967,14 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	if (!_meetingIdRect.isEmpty() && !_meetingId.isEmpty()) {
 		p.save();
 		bool isHover = _meetingIdRect.contains(mapFromGlobal(QCursor::pos()));
-		p.setPen(QPen(_copiedAnim ? QColor(0x52, 0xc4, 0x1a) : (isHover ? QColor(0x16, 0x77, 0xff) : QColor(0xd9, 0xd9, 0xd9)), 1));
-		p.setBrush(_copiedAnim ? QColor(0xf6, 0xff, 0xed) : (isHover ? QColor(0xf0, 0xf5, 0xff) : QColor(0xf5, 0xf7, 0xfa)));
+		p.setPen(QPen(_copiedAnim ? themeColor(ColorRole::Success) : (isHover ? themeColor(ColorRole::Accent) : themeColor(ColorRole::Border)), 1));
+		p.setBrush(_copiedAnim ? themeColor(ColorRole::Success, 22) : (isHover ? themeColor(ColorRole::AccentSoft) : themeColor(ColorRole::SurfaceAlt)));
 		p.drawRoundedRect(_meetingIdRect, 6, 6);
 
 		QFont mFont("Microsoft YaHei", 9);
 		mFont.setBold(true);
 		p.setFont(mFont);
-		p.setPen(_copiedAnim ? QColor(0x52, 0xc4, 0x1a) : (isHover ? QColor(0x16, 0x77, 0xff) : QColor(0x4e, 0x59, 0x69)));
+		p.setPen(_copiedAnim ? themeColor(ColorRole::Success) : (isHover ? themeColor(ColorRole::Accent) : themeColor(ColorRole::TextSecondary)));
 		QString dispText = _copiedAnim ? QCoreApplication::translate("MeetingUI", "✔ Meeting ID Copied") : QCoreApplication::translate("MeetingUI", "🆔 Meeting ID: %1 📋").arg(_meetingId);
 		p.drawText(_meetingIdRect, Qt::AlignCenter, dispText);
 		p.restore();
@@ -1968,12 +1984,12 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	if (!_speakerCapsuleRect.isEmpty()) {
 		p.save();
 		p.setPen(Qt::NoPen);
-		p.setBrush(QColor(0xe8, 0xf3, 0xff));
+		p.setBrush(themeColor(ColorRole::AccentSoft));
 		p.drawRoundedRect(_speakerCapsuleRect, 6, 6);
 
 		QFont speakerFont("Microsoft YaHei", 9);
 		p.setFont(speakerFont);
-		p.setPen(QColor(0x16, 0x77, 0xff));
+		p.setPen(themeColor(ColorRole::Accent));
 		QString speakerText = _speakerName.isEmpty() ? QCoreApplication::translate("MeetingUI", "Speaking: None") : QCoreApplication::translate("MeetingUI", "Speaking: %1").arg(_speakerName);
 		QFontMetrics fm(speakerFont);
 		QString elided = fm.elidedText(speakerText, Qt::ElideMiddle, _speakerCapsuleRect.width() - 12);
@@ -1982,18 +1998,18 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	}
 
 	// 3. 右侧工具按钮
-	auto drawTextBtn = [&](const QRect &r, const QString &text, bool hovered, bool hasArrow = false, const QColor &customColor = QColor(0x4e, 0x59, 0x69)) {
+	auto drawTextBtn = [&](const QRect &r, const QString &text, bool hovered, bool hasArrow = false, const QColor &customColor = themeColor(ColorRole::TextSecondary)) {
 		p.save();
 		if (hovered) {
 			p.setPen(Qt::NoPen);
-			p.setBrush(QColor(0xf2, 0xf3, 0xf5));
+			p.setBrush(themeColor(ColorRole::Hover));
 			p.drawRoundedRect(r, 6, 6);
 		}
 		p.setFont(QFont("Microsoft YaHei", 9));
 		p.setPen(customColor);
 		if (hasArrow) {
 			p.drawText(r.adjusted(4, 0, -12, 0), Qt::AlignCenter, text);
-			p.setPen(QPen(QColor(0x86, 0x90, 0x9c), 1.3));
+			p.setPen(QPen(themeColor(ColorRole::TextMuted), 1.3));
 			const int ax = r.right() - 10;
 			const int ay = r.center().y();
 			p.drawLine(ax - 3, ay - 1, ax, ay + 2);
@@ -2007,17 +2023,17 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 	QString layoutStr = (_currentViewMode == VideoViewMode::Grid) ? QCoreApplication::translate("MeetingUI", "Grid View") : QCoreApplication::translate("MeetingUI", "Picture-in-Picture");
 	drawTextBtn(_layoutRect, layoutStr, _hoverBtn == HoverBtn::Layout, true);
 #if COHAVORA_SHOW_CONSOLE_BUTTON
-	drawTextBtn(_consoleRect, QCoreApplication::translate("MeetingUI", "Console 📋"), _hoverBtn == HoverBtn::Console, false, QColor(0x16, 0x77, 0xff));
+	drawTextBtn(_consoleRect, QCoreApplication::translate("MeetingUI", "Console 📋"), _hoverBtn == HoverBtn::Console, false, themeColor(ColorRole::Accent));
 #endif
-	drawTextBtn(_simulateRect, QCoreApplication::translate("MeetingUI", "🐛 Simulate"), _hoverBtn == HoverBtn::Simulate, false, QColor(0xe6, 0x7e, 0x22));
+	drawTextBtn(_simulateRect, QCoreApplication::translate("MeetingUI", "🐛 Simulate"), _hoverBtn == HoverBtn::Simulate, false, themeColor(ColorRole::Warning));
 
 	// 4. 窗口控制按钮
 	p.save();
-	if (_hoverBtn == HoverBtn::Min) p.fillRect(_minRect, QColor(0xe5, 0xe8, 0xef));
-	if (_hoverBtn == HoverBtn::Max) p.fillRect(_maxRect, QColor(0xe5, 0xe8, 0xef));
-	if (_hoverBtn == HoverBtn::Close) p.fillRect(_closeRect, QColor(0xf5, 0x3f, 0x3f));
+	if (_hoverBtn == HoverBtn::Min) p.fillRect(_minRect, themeColor(ColorRole::Hover));
+	if (_hoverBtn == HoverBtn::Max) p.fillRect(_maxRect, themeColor(ColorRole::Hover));
+	if (_hoverBtn == HoverBtn::Close) p.fillRect(_closeRect, themeColor(ColorRole::Danger));
 
-	p.setPen(QPen((_hoverBtn == HoverBtn::Close) ? Qt::white : QColor(0x60, 0x62, 0x66), 1.2));
+	p.setPen(QPen((_hoverBtn == HoverBtn::Close) ? themeColor(ColorRole::OnAccent) : themeColor(ColorRole::TextSecondary), 1.2));
 	p.drawLine(_minRect.center().x() - 5, _minRect.center().y(), _minRect.center().x() + 5, _minRect.center().y());
 	p.drawRect(_maxRect.center().x() - 5, _maxRect.center().y() - 5, 10, 10);
 	p.drawLine(_closeRect.center().x() - 5, _closeRect.center().y() - 5, _closeRect.center().x() + 5, _closeRect.center().y() + 5);
@@ -2172,6 +2188,7 @@ void RoomTopBarWidget::leaveEventHook(QEvent *e) {
 
 RoomBottomBarWidget::RoomBottomBarWidget(QWidget *parent)
 	: Ui::RpWidget(parent) {
+	AppTheme::observeChanges(*this, [this] { update(); });
 	setMinimumHeight(kBottomBarHeight);
 	setMouseTracking(true);
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
@@ -2466,8 +2483,8 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 	const int w = width();
 	const int h = height();
 
-	p.fillRect(rect(), Qt::white);
-	p.setPen(QColor(0xeb, 0xed, 0xf0));
+	p.fillRect(rect(), themeColor(ColorRole::Surface));
+	p.setPen(themeColor(ColorRole::Border));
 	p.drawLine(0, 0, w, 0);
 
 	for (const auto &item : _toolItems) {
@@ -2481,7 +2498,7 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 		}
 		if (hovered) {
 			p.setPen(Qt::NoPen);
-			p.setBrush(QColor(0xf2, 0xf3, 0xf5));
+			p.setBrush(themeColor(ColorRole::Hover));
 			p.drawRoundedRect(r, 8, 8);
 		}
 
@@ -2490,7 +2507,7 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 
 		if (item.id == 1) {
 			const bool muted = _audioMuted;
-			p.setPen(QPen(muted ? QColor(0xf5, 0x3f, 0x3f) : QColor(0x1f, 0x23, 0x29), 1.8, Qt::SolidLine, Qt::RoundCap));
+			p.setPen(QPen(muted ? themeColor(ColorRole::Danger) : themeColor(ColorRole::Text), 1.8, Qt::SolidLine, Qt::RoundCap));
 			p.setBrush(Qt::NoBrush);
 			p.drawRoundedRect(QRect(cx - 4, cy - 7, 8, 11), 3, 3);
 			p.drawLine(cx, cy + 4, cx, cy + 8);
@@ -2500,7 +2517,7 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 			}
 		} else if (item.id == 11) {
 			const bool muted = _speakerMuted;
-			p.setPen(QPen(muted ? QColor(0xf5, 0x3f, 0x3f) : QColor(0x1f, 0x23, 0x29), 1.8, Qt::SolidLine, Qt::RoundCap));
+			p.setPen(QPen(muted ? themeColor(ColorRole::Danger) : themeColor(ColorRole::Text), 1.8, Qt::SolidLine, Qt::RoundCap));
 			p.setBrush(Qt::NoBrush);
 
 			// 喇叭后腔方块
@@ -2524,7 +2541,7 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 			}
 		} else if (item.id == 2) {
 			const bool closed = !_videoEnabled;
-			p.setPen(QPen(closed ? QColor(0xf5, 0x3f, 0x3f) : QColor(0x1f, 0x23, 0x29), 1.8, Qt::SolidLine, Qt::RoundCap));
+			p.setPen(QPen(closed ? themeColor(ColorRole::Danger) : themeColor(ColorRole::Text), 1.8, Qt::SolidLine, Qt::RoundCap));
 			p.setBrush(Qt::NoBrush);
 			p.drawRoundedRect(QRect(cx - 8, cy - 6, 11, 12), 2, 2);
 			QPainterPath camPath;
@@ -2538,25 +2555,25 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 				p.drawLine(cx - 9, cy - 8, cx + 9, cy + 9);
 			}
 		} else if (item.id == 3) {
-			p.setPen(QPen(QColor(0x00, 0xb4, 0x2a), 1.8, Qt::SolidLine, Qt::RoundCap));
+			p.setPen(QPen(themeColor(ColorRole::Success), 1.8, Qt::SolidLine, Qt::RoundCap));
 			p.setBrush(Qt::NoBrush);
 			p.drawRoundedRect(QRect(cx - 8, cy - 7, 16, 12), 2, 2);
 			p.drawLine(cx, cy + 2, cx, cy - 3);
 			p.drawLine(cx - 3, cy - 1, cx, cy - 4);
 			p.drawLine(cx + 3, cy - 1, cx, cy - 4);
 		} else if (item.id == 4) {
-			p.setPen(QPen(QColor(0x1f, 0x23, 0x29), 1.6));
+			p.setPen(QPen(themeColor(ColorRole::Text), 1.6));
 			p.drawEllipse(QPoint(cx - 3, cy - 4), 3, 3);
 			p.drawArc(cx - 7, cy, 8, 8, 0, 180 * 16);
-			p.setPen(QPen(QColor(0x16, 0x77, 0xff), 1.8));
+			p.setPen(QPen(themeColor(ColorRole::Accent), 1.8));
 			p.drawLine(cx + 4, cy - 2, cx + 8, cy - 2);
 			p.drawLine(cx + 6, cy - 4, cx + 6, cy);
 		} else if (item.id == 5) {
-			p.setPen(QPen(QColor(0x1f, 0x23, 0x29), 1.6));
+			p.setPen(QPen(themeColor(ColorRole::Text), 1.6));
 			p.drawEllipse(QPoint(cx - 3, cy - 4), 3, 3);
 			p.drawArc(cx - 5, cy, 10, 8, 0, 180 * 16);
 		} else if (item.id == 6) {
-			p.setPen(QPen(QColor(0x1f, 0x23, 0x29), 1.6));
+			p.setPen(QPen(themeColor(ColorRole::Text), 1.6));
 			p.drawRoundedRect(QRect(cx - 7, cy - 6, 14, 11), 3, 3);
 			p.drawLine(cx - 3, cy - 2, cx + 3, cy - 2);
 			p.drawLine(cx - 3, cy + 1, cx + 1, cy + 1);
@@ -2564,16 +2581,16 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 			if (_chatUnreadCount > 0) {
 				p.save();
 				p.setPen(Qt::NoPen);
-				p.setBrush(QColor(0xf5, 0x3f, 0x3f));
+				p.setBrush(themeColor(ColorRole::Danger));
 				if (_chatUnreadCount > 99) {
 					p.drawRoundedRect(QRect(cx + 4, cy - 10, 16, 10), 5, 5);
 					p.setFont(QFont("Microsoft YaHei", 6, QFont::Bold));
-					p.setPen(Qt::white);
+					p.setPen(themeColor(ColorRole::OnAccent));
 					p.drawText(QRect(cx + 4, cy - 10, 16, 10), Qt::AlignCenter, "99+");
 				} else if (_chatUnreadCount > 9) {
 					p.drawRoundedRect(QRect(cx + 4, cy - 10, 14, 10), 5, 5);
 					p.setFont(QFont("Microsoft YaHei", 6, QFont::Bold));
-					p.setPen(Qt::white);
+					p.setPen(themeColor(ColorRole::OnAccent));
 					p.drawText(QRect(cx + 4, cy - 10, 14, 10), Qt::AlignCenter, QString::number(_chatUnreadCount));
 				} else {
 					p.drawEllipse(QPoint(cx + 8, cy - 6), 4, 4);
@@ -2581,13 +2598,13 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 				p.restore();
 			}
 		} else if (item.id == 7) {
-			p.setPen(QPen(QColor(0x16, 0x77, 0xff), 1.6, Qt::SolidLine, Qt::RoundCap));
+			p.setPen(QPen(themeColor(ColorRole::Accent), 1.6, Qt::SolidLine, Qt::RoundCap));
 			p.setBrush(Qt::NoBrush);
 			p.drawRoundedRect(QRect(cx - 9, cy - 7, 18, 13), 2, 2);
 			p.drawLine(cx - 5, cy + 2, cx + 4, cy - 3);
 			p.drawLine(cx, cy + 6, cx, cy + 10);
 		} else if (item.id == 10) {
-			const QColor bugCol = hovered ? QColor(0x16, 0x77, 0xff) : QColor(0x1f, 0x23, 0x29);
+			const QColor bugCol = hovered ? themeColor(ColorRole::Accent) : themeColor(ColorRole::Text);
 			p.setPen(QPen(bugCol, 1.6, Qt::SolidLine, Qt::RoundCap));
 			p.setBrush(Qt::NoBrush);
 			p.drawRoundedRect(QRect(cx - 5, cy - 4, 10, 11), 4, 4);
@@ -2619,14 +2636,14 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 		QFont font("Microsoft YaHei");
 		font.setPixelSize(11);
 		p.setFont(font);
-		p.setPen(QColor(0x4e, 0x59, 0x69));
+		p.setPen(themeColor(ColorRole::TextSecondary));
 		const int textWidth = std::max(0, r.width() - (item.hasDropdown ? 18 : 8));
 		const auto visibleTitle = QFontMetrics(font).elidedText(title, Qt::ElideRight, textWidth);
 		p.drawText(QRect(r.x() + 4, r.y() + 32, r.width() - 8, r.height() - 32),
 			Qt::AlignCenter | Qt::TextSingleLine, visibleTitle);
 
 		if (item.hasDropdown) {
-			p.setPen(QPen(QColor(0x86, 0x90, 0x9c), 1.4));
+			p.setPen(QPen(themeColor(ColorRole::TextMuted), 1.4));
 			const int ax = r.right() - 7;
 			const int ay = r.y() + 10;
 			p.drawLine(ax - 3, ay, ax, ay + 3);
@@ -2639,14 +2656,14 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 	p.save();
 	if (_endHovered) {
 		p.setPen(Qt::NoPen);
-		p.setBrush(QColor(0xff, 0xec, 0xe8));
+		p.setBrush(themeColor(ColorRole::Danger, 22));
 		p.drawRoundedRect(_endMeetingRect, 8, 8);
 	}
 
 	const int ecx = _endMeetingRect.center().x();
 	const int ecy = _endMeetingRect.y() + 16;
 
-	p.setPen(QPen(QColor(0xf5, 0x3f, 0x3f), 1.8, Qt::SolidLine, Qt::RoundCap));
+	p.setPen(QPen(themeColor(ColorRole::Danger), 1.8, Qt::SolidLine, Qt::RoundCap));
 	p.drawLine(ecx - 6, ecy - 7, ecx + 2, ecy - 7);
 	p.drawLine(ecx + 2, ecy - 7, ecx + 2, ecy + 7);
 	p.drawLine(ecx + 2, ecy + 7, ecx - 6, ecy + 7);
@@ -2659,7 +2676,7 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 	endFont.setPixelSize(11);
 	endFont.setBold(true);
 	p.setFont(endFont);
-	p.setPen(QColor(0xf5, 0x3f, 0x3f));
+	p.setPen(themeColor(ColorRole::Danger));
 	const auto endMeetingTitle = QFontMetrics(endFont).elidedText(
 		QCoreApplication::translate("MeetingUI", "End Meeting"), Qt::ElideRight,
 		std::max(0, _endMeetingRect.width() - 8));
@@ -2965,6 +2982,10 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	, _coordinator(std::move(coordinator)) {
 	setObjectName("MeetingRoomWindow");
 	AppTheme::setTone(*this, AppTheme::Tone::Dark);
+	AppTheme::observeChanges(*this, [this] {
+		update();
+		if (_stageContainer) _stageContainer->update();
+	});
 	if (!_coordinator) {
 		_coordinator = OpenMeeting::MeetingCoordinator::create(this);
 	}
@@ -3346,6 +3367,10 @@ MeetingRoomWindow::MeetingRoomWindow(
 	// renderer are production paths; no device capture or account singleton.
 	setObjectName("MeetingRoomWindowParticipantFixture");
 	AppTheme::setTone(*this, AppTheme::Tone::Dark);
+	AppTheme::observeChanges(*this, [this] {
+		update();
+		if (_stageContainer) _stageContainer->update();
+	});
 	if (fullLayoutForChatPrivacy) {
 		initLayout();
 	} else {
@@ -3390,6 +3415,10 @@ MeetingRoomWindow::MeetingRoomWindow(
 	_cameraManager(std::move(cameraManager)) {
 	setObjectName("MeetingRoomWindowCameraOwnerFixture");
 	AppTheme::setTone(*this, AppTheme::Tone::Dark);
+	AppTheme::observeChanges(*this, [this] {
+		update();
+		if (_stageContainer) _stageContainer->update();
+	});
 	_topBar = new RoomTopBarWidget(this);
 	_stageContainer = new QWidget(this);
 	_bottomBar = new RoomBottomBarWidget(this);
@@ -5335,7 +5364,7 @@ void MeetingRoomWindow::updateVideoLayout() {
 
 void MeetingRoomWindow::paintEvent(QPaintEvent *e) {
 	QPainter p(this);
-	p.fillRect(rect(), QColor(0x12, 0x14, 0x1a));
+	p.fillRect(rect(), themeColor(ColorRole::Stage));
 }
 
 void MeetingRoomWindow::receiveRenderedVideoFrame(

@@ -1,3 +1,4 @@
+#include "src/ui/app_theme.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/camera_preview_widget.h"
 
@@ -10,6 +11,7 @@
 #include <algorithm>
 
 namespace MeetingUI {
+namespace Theme = MeetingUI::AppTheme;
 
 CameraPreviewWidget::CameraPreviewWidget(QWidget *parent)
 	: QWidget(parent)
@@ -112,7 +114,7 @@ void CameraPreviewWidget::paintEvent(QPaintEvent *event) {
 	Q_UNUSED(event);
 	QPainter painter(this);
 	painter.setRenderHint(QPainter::SmoothPixmapTransform);
-	painter.fillRect(rect(), QColor(22, 27, 43));
+	painter.fillRect(rect(), Theme::color(Theme::ColorRole::Letterbox));
 	if (!_frame.isNull()) {
 		const auto target = _frame.size().scaled(size(), Qt::KeepAspectRatio);
 		const QRect area((width() - target.width()) / 2,
@@ -128,7 +130,7 @@ void CameraPreviewWidget::paintEvent(QPaintEvent *event) {
 		}
 	}
 	if (!_status.isEmpty()) {
-		painter.setPen(_statusIsError ? QColor(255, 184, 184) : QColor(226, 230, 241));
+		painter.setPen(_statusIsError ? Theme::color(Theme::ColorRole::Danger) : Theme::color(Theme::ColorRole::Text));
 		painter.drawText(rect().adjusted(24, 24, -24, -24),
 			Qt::AlignCenter | Qt::TextWordWrap, _status);
 	}

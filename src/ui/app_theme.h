@@ -1,8 +1,12 @@
 #pragma once
 
 #include <QtCore/QVariant>
+#include <QtCore/QString>
+#include <QtGui/QColor>
 #include <QtWidgets/QStyle>
 #include <QtWidgets/QWidget>
+#include <functional>
+#include <optional>
 
 class QApplication;
 class QDialog;
@@ -16,8 +20,32 @@ enum class Tone {
 	Dark,
 };
 
-void install(QApplication &application);
-// State changes only select a rule from the application-wide startup sheet.
+enum class Theme { System, Light, Dark, Teal };
+enum class ColorRole {
+	Window, Surface, SurfaceAlt, Hover, Pressed,
+	Text, TextSecondary, TextMuted, Border,
+	Accent, AccentHover, AccentPressed, AccentSoft, OnAccent,
+	Success, Warning, Danger, Stage, Tile, Letterbox,
+};
+
+struct InstallOptions {
+	// Optional platform probe for isolated hosts/tests. Only Light/Dark are valid.
+	std::function<std::optional<Theme>()> systemThemeProbe;
+};
+
+// All theme access and notifications belong to the application/UI thread.
+void install(QApplication &application, InstallOptions options = {});
+Theme selectedTheme();
+Theme effectiveTheme();
+QString themeId(Theme theme);
+Theme themeFromId(const QString &id);
+QColor color(ColorRole role);
+quint64 revision();
+void setTheme(Theme theme);
+void refreshSystemTheme();
+void observeChanges(QObject &context, std::function<void()> callback);
+
+// State changes select a rule from the current application-wide sheet.
 // Inline so small widget-only consumers use the same property contract.
 inline void setStyleVariant(QWidget &widget, const char *variant) {
 	if (widget.property("uiStyle").toByteArray() == variant) return;

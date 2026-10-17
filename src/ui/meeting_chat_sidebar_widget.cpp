@@ -18,6 +18,7 @@
 #include <QtGui/QResizeEvent>
 
 namespace OpenMeeting {
+namespace Theme = MeetingUI::AppTheme;
 
 // ----------------------------------------------------
 // ChatInputEdit 实现
@@ -63,6 +64,7 @@ void ChatInputEdit::insertFromMimeData(const QMimeData *source) {
 ChatBubbleWidget::ChatBubbleWidget(const ChatMessageItem &msg, QWidget *parent)
     : QWidget(parent), _msg(msg) {
     setupUi(msg);
+    Theme::observeChanges(*this, [this] { refreshReceivingImagePlaceholder(); });
 }
 
 QString ChatBubbleWidget::formatFileSize(qint64 bytes) {
@@ -267,6 +269,22 @@ void ChatBubbleWidget::setupTextBubble(QVBoxLayout *col, const ChatMessageItem &
     col->addWidget(bubble);
 }
 
+void ChatBubbleWidget::refreshReceivingImagePlaceholder() {
+    if (!_thumbLabel || !_receivingImagePlaceholder) return;
+    QPixmap placeholder(210, 130);
+    placeholder.fill(Theme::color(Theme::ColorRole::SurfaceAlt));
+    QPainter painter(&placeholder);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Theme::color(Theme::ColorRole::TextMuted));
+    painter.setFont(QFont("Microsoft YaHei", 24));
+    painter.drawText(QRect(0, 15, 210, 50), Qt::AlignCenter, QString::fromUtf8("🖼️"));
+    painter.setFont(QFont("Microsoft YaHei", 10));
+    painter.drawText(QRect(0, 75, 210, 30), Qt::AlignCenter,
+        QCoreApplication::translate("MeetingUI", "Receiving image..."));
+    painter.end();
+    _thumbLabel->setPixmap(placeholder);
+}
+
 void ChatBubbleWidget::setupImageBubble(QVBoxLayout *col, const ChatMessageItem &msg) {
     QImage img;
     if (!msg.fileData.isEmpty()) {
@@ -294,23 +312,8 @@ void ChatBubbleWidget::setupImageBubble(QVBoxLayout *col, const ChatMessageItem 
     if (msg.status == MessageSendStatus::Receiving) {
         MeetingUI::AppTheme::setStyleVariant(*_imgContainer, "meeting-chat-sidebar-widget-imgcontainer");
         _thumbLabel->setFixedSize(210, 130);
-
-        QPixmap placePix(210, 130);
-        placePix.fill(QColor(26, 30, 39));
-        {
-            QPainter p(&placePix);
-            p.setRenderHint(QPainter::Antialiasing);
-            p.setPen(QColor(156, 163, 175));
-            QFont f("Microsoft YaHei", 24);
-            p.setFont(f);
-            p.drawText(QRect(0, 15, 210, 50), Qt::AlignCenter, QString::fromUtf8("🖼️"));
-
-            QFont f2("Microsoft YaHei", 10);
-            p.setFont(f2);
-            p.setPen(QColor(156, 163, 175));
-            p.drawText(QRect(0, 75, 210, 30), Qt::AlignCenter, QCoreApplication::translate("MeetingUI", "Receiving image..."));
-        }
-        _thumbLabel->setPixmap(placePix);
+        _receivingImagePlaceholder = true;
+        refreshReceivingImagePlaceholder();
     } else {
         MeetingUI::AppTheme::setStyleVariant(*_imgContainer, msg.isMine ? "meeting-chat-sidebar-widget-imgcontainer-2-active" : "meeting-chat-sidebar-widget-imgcontainer-2-normal");
 
@@ -391,30 +394,33 @@ void ChatBubbleWidget::setupFileBubble(QVBoxLayout *col, const ChatMessageItem &
     // 文件类型图标
     QString ext = QFileInfo(msg.fileName).suffix().toUpper();
     if (ext.isEmpty()) ext = QCoreApplication::translate("MeetingUI", "FILE");
-    QColor iconColor = "#4B5563";
-    if (ext == "PDF") iconColor = "#DC2626";
-    else if (ext == "DOC" || ext == "DOCX") iconColor = "#2563EB";
-    else if (ext == "XLS" || ext == "XLSX") iconColor = "#059669";
-    else if (ext == "ZIP" || ext == "RAR" || ext == "7Z") iconColor = "#D97706";
-    else if (ext == "TXT") iconColor = "#4B5563";
-
     auto *iconLabel = new QLabel(card);
     iconLabel->setFixedSize(36, 36);
-    QPixmap iconPix(36, 36);
-    iconPix.fill(Qt::transparent);
-    {
+    const auto refreshFileIcon = [ext, iconLabel] {
+        QColor iconColor;
+        if (ext == "PDF") iconColor = "#DC2626";
+        else if (ext == "DOC" || ext == "DOCX") iconColor = "#2563EB";
+        else if (ext == "XLS" || ext == "XLSX") iconColor = "#059669";
+        else if (ext == "ZIP" || ext == "RAR" || ext == "7Z") iconColor = "#D97706";
+        const bool typeColor = iconColor.isValid();
+        if (!typeColor) iconColor = Theme::color(Theme::ColorRole::TextSecondary);
+        QPixmap iconPix(36, 36);
+        iconPix.fill(Qt::transparent);
         QPainter p(&iconPix);
         p.setRenderHint(QPainter::Antialiasing);
         p.setBrush(iconColor);
         p.setPen(Qt::NoPen);
         p.drawRoundedRect(0, 0, 36, 36, 6, 6);
 
-        p.setPen(Qt::white);
+        p.setPen(typeColor ? QColor(Qt::white) : Theme::color(Theme::ColorRole::Surface));
         QFont f("Microsoft YaHei", 9, QFont::Bold);
         p.setFont(f);
         p.drawText(QRect(0, 0, 36, 36), Qt::AlignCenter, ext.left(4));
-    }
-    iconLabel->setPixmap(iconPix);
+        p.end();
+        iconLabel->setPixmap(iconPix);
+    };
+    refreshFileIcon();
+    Theme::observeChanges(*iconLabel, refreshFileIcon);
     cardLayout->addWidget(iconLabel);
 
     // 文件信息列
@@ -573,6 +579,7 @@ void ChatBubbleWidget::completeReceivingMedia(const QByteArray &data) {
         QImage img;
         img.loadFromData(data);
         if (!img.isNull() && _thumbLabel) {
+            _receivingImagePlaceholder = false;
             QImage thumb = img.scaled(210, 160, Qt::KeepAspectRatio, Qt::SmoothTransformation);
             QPixmap roundedThumb(thumb.size());
             roundedThumb.fill(Qt::transparent);
@@ -1191,12 +1198,12 @@ void MeetingChatSidebarWidget::paintEvent(QPaintEvent *e) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing, false);
 
-    p.fillRect(rect(), QColor("#1A1D24"));
+    p.fillRect(rect(), Theme::color(Theme::ColorRole::Surface));
 
-    p.setPen(QPen(QColor(8, 10, 14), 1));
+    p.setPen(QPen(Theme::color(Theme::ColorRole::Border), 1));
     p.drawLine(0, 0, 0, height());
 
-    p.setPen(QPen(QColor(58, 66, 82), 1));
+    p.setPen(QPen(Theme::color(Theme::ColorRole::Border), 1));
     p.drawLine(1, 0, 1, height());
 
     QLinearGradient shadow(2, 0, 10, 0);

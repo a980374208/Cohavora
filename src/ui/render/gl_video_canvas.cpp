@@ -64,6 +64,7 @@ bool RetiredOwnerTimedOut(int64_t now) {
 struct GlVideoCanvas::Scene {
     uint64_t sequence = 0;
     lk_render_frame_target target{};
+    std::array<float, 4> clear_color{};
     std::string measurement_point;
     std::vector<Resource> resources;
     std::vector<lk_render_draw_command> commands;
@@ -193,7 +194,9 @@ struct GlVideoCanvas::Worker {
             }
             std::chrono::microseconds render_duration{-1};
             if (result == LK_RENDER_OK) {
-                const lk_render_scene_view view{sizeof(view), uint32_t(scene->commands.size()), scene->commands.data(), {0.0706f, 0.0784f, 0.1020f, 1}};
+                const lk_render_scene_view view{sizeof(view), uint32_t(scene->commands.size()),
+                    scene->commands.data(), {scene->clear_color[0], scene->clear_color[1],
+                        scene->clear_color[2], scene->clear_color[3]}};
                 const auto render_started_at = Clock::now();
                 result = device->Render(target, view);
                 render_duration = std::chrono::duration_cast<std::chrono::microseconds>(
@@ -458,6 +461,7 @@ bool GlVideoCanvas::beginFrame(QSize& pixels) {
     const auto dpr = surface_->devicePixelRatio();
     pixels = QSize(qRound(surface_->width()*dpr), qRound(surface_->height()*dpr));
     building_ = std::make_shared<Scene>(); building_->target = target_;
+    building_->clear_color = stageClearColor();
     building_->sequence = ++submitted_;
     building_->measurement_point = "opengl_swap_buffers";
     building_->target.pixel_width = pixels.width(); building_->target.pixel_height = pixels.height();

@@ -1,3 +1,4 @@
+#include "src/ui/app_theme.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/meeting_list_delegate.h"
 
@@ -7,6 +8,7 @@
 #include <QtWidgets/QApplication>
 
 namespace MeetingUI {
+namespace Theme = MeetingUI::AppTheme;
 
 MeetingListDelegate::MeetingListDelegate(bool compact, QObject *parent)
 	: QStyledItemDelegate(parent)
@@ -34,7 +36,7 @@ void MeetingListDelegate::paint(
 		headerFont.setPixelSize(12);
 		headerFont.setBold(true);
 		painter->setFont(headerFont);
-		painter->setPen(QColor(0x60, 0x62, 0x66));
+		painter->setPen(Theme::color(Theme::ColorRole::TextSecondary));
 		painter->drawText(
 			QRect(content.left() + 4, content.top(), content.width() - 8, 22),
 			Qt::AlignLeft | Qt::AlignVCenter,
@@ -46,10 +48,10 @@ void MeetingListDelegate::paint(
 
 	const bool selected = option.state.testFlag(QStyle::State_Selected);
 	const bool hovered = option.state.testFlag(QStyle::State_MouseOver);
-	painter->setPen(QPen(selected ? QColor(0x91, 0xc1, 0xff) : QColor(0xe5, 0xe8, 0xec), 1));
+	painter->setPen(QPen(selected ? Theme::color(Theme::ColorRole::Accent) : Theme::color(Theme::ColorRole::Border), 1));
 	painter->setBrush(selected
-		? QColor(0xe8, 0xf2, 0xff)
-		: (hovered ? QColor(0xf5, 0xf8, 0xfc) : QColor(0xff, 0xff, 0xff)));
+		? Theme::color(Theme::ColorRole::AccentSoft)
+		: (hovered ? Theme::color(Theme::ColorRole::Hover) : Theme::color(Theme::ColorRole::Surface)));
 	painter->drawRoundedRect(content, 7, 7);
 
 	const auto title = index.data(MeetingTitleRole).toString();
@@ -62,7 +64,7 @@ void MeetingListDelegate::paint(
 	timeFont.setPixelSize(14);
 	timeFont.setBold(true);
 	painter->setFont(timeFont);
-	painter->setPen(QColor(0x16, 0x77, 0xff));
+	painter->setPen(Theme::color(Theme::ColorRole::Accent));
 	painter->drawText(
 		QRect(left, content.top() + 8, 52, 23),
 		Qt::AlignLeft | Qt::AlignVCenter,
@@ -72,7 +74,7 @@ void MeetingListDelegate::paint(
 	titleFont.setPixelSize(14);
 	titleFont.setBold(true);
 	painter->setFont(titleFont);
-	painter->setPen(QColor(0x1f, 0x23, 0x29));
+	painter->setPen(Theme::color(Theme::ColorRole::Text));
 	painter->drawText(
 		QRect(left + 60, content.top() + 8, right - left - 120, 23),
 		Qt::AlignLeft | Qt::AlignVCenter,
@@ -83,8 +85,8 @@ void MeetingListDelegate::paint(
 	stateFont.setBold(false);
 	painter->setFont(stateFont);
 	painter->setPen(status == QCoreApplication::translate("MeetingUI", "In Progress")
-		? QColor(0x08, 0x9f, 0x62)
-		: QColor(0x60, 0x62, 0x66));
+		? Theme::color(Theme::ColorRole::Success)
+		: Theme::color(Theme::ColorRole::TextSecondary));
 	painter->drawText(
 		QRect(right - 70, content.top() + 8, 70, 23),
 		Qt::AlignRight | Qt::AlignVCenter,
@@ -97,7 +99,7 @@ void MeetingListDelegate::paint(
 	if (repeat != QCoreApplication::translate("MeetingUI", "Does Not Repeat")) {
 		subtitle += QString::fromUtf8(" · %1").arg(repeat);
 	}
-	painter->setPen(QColor(0x8f, 0x95, 0x9e));
+	painter->setPen(Theme::color(Theme::ColorRole::TextMuted));
 	painter->drawText(
 		QRect(left + 60, content.top() + 34, right - left - 60, 20),
 		Qt::AlignLeft | Qt::AlignVCenter,

@@ -20,6 +20,7 @@
 #include <cmath>
 
 namespace MeetingUI {
+namespace Theme = MeetingUI::AppTheme;
 namespace wb = livekit::whiteboard;
 namespace {
 constexpr qint64 MaxBackgroundCacheBytes = 96LL * 1024 * 1024;
@@ -37,6 +38,7 @@ WhiteboardCanvas::WhiteboardCanvas(wb::Document &document, QWidget *parent)
     laserTimer_.setSingleShot(true);
     connect(&laserTimer_, &QTimer::timeout, this, [this] { laser_.reset(); update(); });
     refreshItems();
+    Theme::observeChanges(*this, [this] { invalidateCache(); });
 }
 
 void WhiteboardCanvas::setEditingEnabled(bool enabled) {
@@ -263,7 +265,7 @@ void WhiteboardCanvas::paintCommitted(QPainter &painter, QRect clip) {
         painter.fillRect(clip, Qt::transparent);
         painter.setCompositionMode(QPainter::CompositionMode_SourceOver);
     } else {
-        painter.fillRect(clip, QColor(0xed, 0xf0, 0xf5));
+        painter.fillRect(clip, Theme::color(Theme::ColorRole::SurfaceAlt));
     }
     painter.setTransform(transform(), true);
     const QRectF pageRect(0, 0, document_.page().width, document_.page().height);

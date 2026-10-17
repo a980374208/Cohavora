@@ -1,3 +1,4 @@
+#include "src/ui/app_theme.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/action_card_widget.h"
 #include "styles/style_widgets.h"
@@ -5,6 +6,7 @@
 #include <QtGui/QFont>
 
 namespace MeetingUI {
+namespace Theme = MeetingUI::AppTheme;
 
 namespace {
 constexpr int kCardSize = 120;
@@ -104,17 +106,19 @@ void ActionCardWidget::paintEvent(QPaintEvent *e) {
 	p.save();
 	QLinearGradient grad(_cardRect.topLeft(), _cardRect.bottomLeft());
 	if (_pressed) {
-		grad.setColorAt(0.0, QColor(0x0e, 0x5e, 0xce));
-		grad.setColorAt(1.0, QColor(0x12, 0x64, 0xd8));
+		grad.setColorAt(0.0, Theme::color(Theme::ColorRole::AccentPressed).darker(105));
+		grad.setColorAt(1.0, Theme::color(Theme::ColorRole::AccentPressed));
 	} else if (_hovered) {
-		grad.setColorAt(0.0, QColor(0x35, 0x8d, 0xff));
-		grad.setColorAt(1.0, QColor(0x13, 0x72, 0xfc));
+		grad.setColorAt(0.0, Theme::color(Theme::ColorRole::AccentHover).lighter(105));
+		grad.setColorAt(1.0, Theme::color(Theme::ColorRole::AccentHover));
 	} else {
-		grad.setColorAt(0.0, QColor(0x1c, 0x7c, 0xff));
-		grad.setColorAt(1.0, QColor(0x10, 0x6d, 0xec));
+		grad.setColorAt(0.0, Theme::color(Theme::ColorRole::Accent).lighter(105));
+		grad.setColorAt(1.0, Theme::color(Theme::ColorRole::Accent).darker(105));
 	}
 
-	p.setPen(QPen(QColor(255, 255, 255, _hovered ? 90 : 50), 1.0));
+	auto border = Theme::color(Theme::ColorRole::OnAccent);
+	border.setAlpha(_hovered ? 90 : 50);
+	p.setPen(QPen(border, 1.0));
 	p.setBrush(grad);
 	p.drawRoundedRect(_cardRect, 20, 20);
 
@@ -125,7 +129,7 @@ void ActionCardWidget::paintEvent(QPaintEvent *e) {
 	// 绘制下方标题文本
 	const QFont font = CardTitleFont();
 	p.setFont(font);
-	p.setPen(QColor(0x1f, 0x23, 0x29));
+	p.setPen(Theme::color(Theme::ColorRole::Text));
 
 	const int textTop = kCardTop + cardSize + kTitleGap;
 	const int titleHeight = std::max(22, height() - textTop - kBottomPadding);
@@ -142,7 +146,7 @@ void ActionCardWidget::paintEvent(QPaintEvent *e) {
 
 		// 绘制小下拉箭头 ∨
 		p.save();
-		p.setPen(QPen(QColor(0x60, 0x62, 0x66), 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+		p.setPen(QPen(Theme::color(Theme::ColorRole::TextSecondary), 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 		const int arrowX = startX + textW + 6;
 		const int arrowY = textRect.center().y() - 2;
 		QPainterPath arrowPath;
@@ -165,7 +169,7 @@ void ActionCardWidget::drawCardIcon(QPainter &p, const QRect &r) {
 	const int cx = r.center().x();
 	const int cy = r.center().y();
 
-	p.setPen(QPen(Qt::white, 6.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+	p.setPen(QPen(Theme::color(Theme::ColorRole::OnAccent), 6.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 	p.setBrush(Qt::NoBrush);
 
 	if (_type == ActionCardType::JoinMeeting) {
@@ -176,7 +180,7 @@ void ActionCardWidget::drawCardIcon(QPainter &p, const QRect &r) {
 	} else if (_type == ActionCardType::QuickMeeting) {
 		// 动感白色闪电 (⚡)
 		p.setPen(Qt::NoPen);
-		p.setBrush(Qt::white);
+		p.setBrush(Theme::color(Theme::ColorRole::OnAccent));
 
 		QPainterPath path;
 		path.moveTo(cx + 4, cy - 22);
@@ -189,7 +193,7 @@ void ActionCardWidget::drawCardIcon(QPainter &p, const QRect &r) {
 		p.drawPath(path);
 	} else if (_type == ActionCardType::ScheduleMeeting) {
 		// 圆角盾牌勾选 / 大对勾 (✔)
-		p.setPen(QPen(Qt::white, 6.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+		p.setPen(QPen(Theme::color(Theme::ColorRole::OnAccent), 6.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 		p.setBrush(Qt::NoBrush);
 
 		QPainterPath path;
@@ -199,7 +203,7 @@ void ActionCardWidget::drawCardIcon(QPainter &p, const QRect &r) {
 		p.drawPath(path);
 	} else if (_type == ActionCardType::ShareScreen) {
 		// 共享屏幕双视窗 (🗔)
-		p.setPen(QPen(Qt::white, 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+		p.setPen(QPen(Theme::color(Theme::ColorRole::OnAccent), 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 		p.setBrush(Qt::NoBrush);
 
 		// 后层屏幕
@@ -207,7 +211,7 @@ void ActionCardWidget::drawCardIcon(QPainter &p, const QRect &r) {
 		p.drawRoundedRect(backScreen, 3, 3);
 
 		// 前层主屏幕（填充加白边）
-		p.setBrush(QColor(0x16, 0x77, 0xff));
+		p.setBrush(Theme::color(Theme::ColorRole::Accent));
 		QRect frontScreen(cx - 6, cy - 6, 22, 18);
 		p.drawRoundedRect(frontScreen, 3, 3);
 

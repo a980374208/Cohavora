@@ -220,6 +220,7 @@ private:
 	QSize _decorationLogicalSize;
 	bool _decorationHasFrame = false;
 	bool _decorationHovered = false;
+	quint64 _decorationThemeRevision = 0;
 };
 
 // ----------------------------------------------------

@@ -21,6 +21,8 @@
 #include <QtGui/QTextCursor>
 #include <QtGui/QTextBlock>
 #include <algorithm>
+#include <array>
+#include <vector>
 #include <QtGui/QFont>
 #include <atomic>
 
@@ -86,6 +88,20 @@ QString SafeTag(const QString &tag) {
 } // namespace
 
 namespace MeetingUI {
+namespace Theme = MeetingUI::AppTheme;
+namespace {
+constexpr std::array ConsoleColorRoles = {
+    Theme::ColorRole::TextMuted, Theme::ColorRole::TextSecondary,
+    Theme::ColorRole::Accent, Theme::ColorRole::Success,
+    Theme::ColorRole::Warning, Theme::ColorRole::Danger,
+    Theme::ColorRole::Text,
+};
+auto ConsoleThemeColors() {
+    std::array<QColor, ConsoleColorRoles.size()> result;
+    for (size_t i = 0; i != result.size(); ++i) result[i] = Theme::color(ConsoleColorRoles[i]);
+    return result;
+}
+} // namespace
 
 bool MeetingLogConsoleWindow::ConfigureStorageRoots(
 		std::filesystem::path diagnostics, std::filesystem::path crashEvidence) {
@@ -142,6 +158,59 @@ MeetingLogConsoleWindow::MeetingLogConsoleWindow(QWidget *parent)
 	resize(780, 520);
 	setMinimumSize(600, 380);
 	initUi();
+	Theme::observeChanges(*this, [this, previousColors = ConsoleThemeColors()]() mutable {
+		const auto colors = ConsoleThemeColors();
+		struct ColorRange { int position; int length; size_t role; };
+		std::vector<ColorRange> ranges;
+		for (auto block = _logView->document()->begin(); block.isValid(); block = block.next()) {
+			for (auto it = block.begin(); !it.atEnd(); ++it) {
+				const auto fragment = it.fragment();
+				if (!fragment.isValid()) continue;
+				const auto foreground = fragment.charFormat().foreground().color();
+				for (size_t i = 0; i != previousColors.size(); ++i) {
+					if (foreground == previousColors[i]) {
+						ranges.push_back({fragment.position(), fragment.length(), i});
+						break;
+					}
+				}
+			}
+		}
+		// Change formatting in place so switching themes retains selection and scroll position.
+		QTextCursor cursor(_logView->document());
+		cursor.beginEditBlock();
+		for (const auto &range : ranges) {
+			cursor.setPosition(range.position);
+			cursor.setPosition(range.position + range.length, QTextCursor::KeepAnchor);
+			QTextCharFormat format;
+			format.setForeground(colors[range.role]);
+			cursor.mergeCharFormat(format);
+		}
+		cursor.endEditBlock();
+		std::array<QString, ConsoleColorRoles.size()> previousNames, names;
+		for (size_t i = 0; i != colors.size(); ++i) {
+			previousNames[i] = previousColors[i].name();
+			names[i] = colors[i].name();
+		}
+		const auto prefix = QStringLiteral("<span style=\"color:");
+		for (auto &entry : _logEntries) {
+			auto &html = entry.formattedHtml;
+			// Only our generated markup contains a literal '<span'; message/tag text is escaped.
+			// Fixed-width edits of this uniquely owned cache leave size and byte charge unchanged.
+			auto offset = html.indexOf(prefix);
+			while (offset >= 0) {
+				offset += prefix.size();
+				const auto previous = html.mid(offset, 7);
+				for (size_t i = 0; i != previousNames.size(); ++i) {
+					if (previous != previousNames[i]) continue;
+					auto *characters = html.data();
+					for (int j = 0; j != 7; ++j) characters[offset + j] = names[i][j];
+					break;
+				}
+				offset = html.indexOf(prefix, offset + 7);
+			}
+		}
+		previousColors = colors;
+	});
 	AppTheme::makeDialogAdaptive(*this, QSize(780, 520));
 	g_activeConsole.store(this, std::memory_order_release);
 	_drainTimer = new QTimer(this);
@@ -732,38 +801,36 @@ void MeetingLogConsoleWindow::rebuildLogView() {
 }
 
 QString MeetingLogConsoleWindow::formatLogHtml(const QString &timeStr, LogCategory category, const QString &tag, const QString &message, QString *outCatName) {
-	QString color = "#d1d5db"; // 默认浅白
+	QString color = Theme::color(Theme::ColorRole::Text).name();
 	QString catName = "INFO";
 
 	switch (category) {
 	case LogCategory::General:
-		color = "#86909c"; catName = "GEN"; break;
+		color = Theme::color(Theme::ColorRole::TextSecondary).name(); catName = "GEN"; break;
 	case LogCategory::Connection:
-		color = "#14C9C9"; catName = "CONN"; break;
+		color = Theme::color(Theme::ColorRole::Accent).name(); catName = "CONN"; break;
 	case LogCategory::Signal:
-		color = "#165DFF"; catName = "SIGNAL"; break;
+		color = Theme::color(Theme::ColorRole::Accent).name(); catName = "SIGNAL"; break;
 	case LogCategory::WebRTC:
-		color = "#722ED1"; catName = "WEBRTC"; break;
+		color = Theme::color(Theme::ColorRole::Accent).name(); catName = "WEBRTC"; break;
 	case LogCategory::Media:
-		color = "#00B42A"; catName = "MEDIA"; break;
+		color = Theme::color(Theme::ColorRole::Success).name(); catName = "MEDIA"; break;
 	case LogCategory::Track:
-		color = "#F7BA1E"; catName = "TRACK"; break;
+		color = Theme::color(Theme::ColorRole::Warning).name(); catName = "TRACK"; break;
 	case LogCategory::Participant:
-		color = "#3491FA"; catName = "USER"; break;
+		color = Theme::color(Theme::ColorRole::Accent).name(); catName = "USER"; break;
 	case LogCategory::Error:
-		color = "#F53F3F"; catName = "ERROR"; break;
+		color = Theme::color(Theme::ColorRole::Danger).name(); catName = "ERROR"; break;
 	}
 
 	if (outCatName) {
 		*outCatName = catName;
 	}
 
-	return QString(R"(<span style="color:#595e6d;">[%1]</span> <span style="color:%2; font-weight:bold;">[%3]</span> <span style="color:#86909c;">[%4]</span> <span style="color:%2;">%5</span>)")
-		.arg(timeStr)
-		.arg(color)
-		.arg(catName)
-		.arg(tag.toHtmlEscaped())
-		.arg(message.toHtmlEscaped());
+	return QString(R"(<span style="color:%6;">[%1]</span> <span style="color:%2; font-weight:bold;">[%3]</span> <span style="color:%7;">[%4]</span> <span style="color:%2;">%5</span>)")
+		.arg(timeStr, color, catName, tag.toHtmlEscaped(), message.toHtmlEscaped(),
+			Theme::color(Theme::ColorRole::TextMuted).name(),
+			Theme::color(Theme::ColorRole::TextSecondary).name());
 }
 
 void MeetingLogConsoleWindow::clearLogs() {

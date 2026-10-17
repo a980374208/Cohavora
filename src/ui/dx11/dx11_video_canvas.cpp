@@ -41,7 +41,8 @@ bool Dx11VideoCanvas::beginFrame(QSize& physical) {
     if (physical.isEmpty()) return true; // Minimized/suspended, not device failure.
     if (!renderer_.Resize(physical.width(), physical.height())) return false;
     texture_pool_.UploadPendingFrames(renderer_.device(), renderer_.context());
-    return renderer_.BeginFrame();
+    const auto clear = stageClearColor();
+    return renderer_.BeginFrame(clear[0], clear[1], clear[2], clear[3]);
 }
 void Dx11VideoCanvas::drawSolid(const render::VideoTileRect& tile, float r, float g, float b) {
     renderer_.SetViewport(tile.x, tile.y, tile.width, tile.height);

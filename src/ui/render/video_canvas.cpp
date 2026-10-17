@@ -1,5 +1,6 @@
 #include "video_canvas.h"
 #include "src/ui/native_child_geometry.h"
+#include "src/ui/app_theme.h"
 #include <QtGui/QMouseEvent>
 #include <QtGui/QCursor>
 #include <QtGui/QPainter>
@@ -22,6 +23,12 @@ VideoCanvas::VideoCanvas(QWidget* parent)
         if (frame_dirty_.exchange(false, std::memory_order_acq_rel)) requestRender();
     });
     fps_timer_->start();
+    MeetingUI::AppTheme::observeChanges(*this, [this] {
+        // A static or empty stage must repaint without waiting for a video frame.
+        stage_dirty_ = true;
+        frame_dirty_.store(true, std::memory_order_release);
+        update();
+    });
 }
 VideoCanvas::~VideoCanvas() {
     stopRendering();
@@ -113,6 +120,11 @@ void VideoCanvas::markRendererFailure(RenderGpuFailure failure, RenderFallbackRe
     if (next == *diagnostics_) return;
     *diagnostics_ = std::move(next);
 }
+std::array<float, 4> VideoCanvas::stageClearColor() const {
+    Q_ASSERT(QThread::currentThread() == thread());
+    const auto color = MeetingUI::AppTheme::color(MeetingUI::AppTheme::ColorRole::Stage);
+    return {float(color.redF()), float(color.greenF()), float(color.blueF()), 1.0f};
+}
 void VideoCanvas::render() {
     Q_ASSERT(QThread::currentThread() == thread());
     updateRenderExpectations();
@@ -121,19 +133,25 @@ void VideoCanvas::render() {
     if (!beginFrame(physical)) { notifyRendererUnavailable(); return; }
     if (physical.isEmpty()) return;
     last_physical_size_ = physical;
+    using Role = MeetingUI::AppTheme::ColorRole;
+    const auto tileColor = MeetingUI::AppTheme::color(Role::Tile);
+    const auto letterboxColor = MeetingUI::AppTheme::color(Role::Letterbox);
+    const auto speakingColor = MeetingUI::AppTheme::color(Role::Success);
     std::vector<VideoRenderFrame::Ptr> submitted_frames;
     for (const auto& logical : tiles_) {
         auto tile = ScaleVideoTile(logical, width(), height(), physical.width(), physical.height());
         if (tile.width <= 0 || tile.height <= 0) continue;
-        if (tile.isSpeaking && !decorations_.count(tile.identity)) drawSolid(tile, 0.08f, 0.72f, 0.46f);
-        else drawSolid(tile, 0.16f, 0.18f, 0.23f);
+        const auto background = tile.isSpeaking && !decorations_.count(tile.identity)
+            ? speakingColor : tileColor;
+        drawSolid(tile, float(background.redF()), float(background.greenF()), float(background.blueF()));
         const auto geometry = frameGeometry(tile.identity);
         if (tile.hasVideo && geometry.available) {
             auto content = tile;
             content.x += 2; content.y += 2;
             content.width = std::max(1, content.width - 4);
             content.height = std::max(1, content.height - 4);
-            drawSolid(content, 0, 0, 0);
+            drawSolid(content, float(letterboxColor.redF()), float(letterboxColor.greenF()),
+                float(letterboxColor.blueF()));
             if (drawVideo(FitVideoTile(content, geometry))) {
                 if (const auto frame = telemetry_frames_.find(tile.identity);
                     frame != telemetry_frames_.end() && frame->second) {

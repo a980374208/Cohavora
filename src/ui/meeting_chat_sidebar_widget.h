@@ -103,6 +103,7 @@ private:
     void setupTextBubble(QVBoxLayout *col, const ChatMessageItem &msg);
     void setupImageBubble(QVBoxLayout *col, const ChatMessageItem &msg);
     void setupFileBubble(QVBoxLayout *col, const ChatMessageItem &msg);
+    void refreshReceivingImagePlaceholder();
 
     static QColor avatarColor(const QString &seed);
     static void showImagePreview(const QImage &img, const QString &title);
@@ -117,6 +118,7 @@ private:
     QWidget *_imgContainer = nullptr;
     QLabel *_thumbLabel = nullptr;
     QPushButton *_imgPreviewBtn = nullptr;
+    bool _receivingImagePlaceholder = false;
 
     // 文件气泡动态操作按钮
     QPushButton *_actionBtn = nullptr;

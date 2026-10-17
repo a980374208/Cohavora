@@ -1,3 +1,4 @@
+#include "src/ui/app_theme.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/participant_item_delegate.h"
 #include "src/ui/participants_list_model.h"
@@ -6,6 +7,7 @@
 #include <QtCore/QCryptographicHash>
 
 namespace OpenMeeting {
+namespace Theme = MeetingUI::AppTheme;
 
 static const QColor AVATAR_COLORS[] = {
     QColor("#2563EB"), // 蓝
@@ -54,9 +56,9 @@ void ParticipantItemDelegate::paint(QPainter *painter, const QStyleOptionViewIte
 
     // 1. 悬浮与选中背景绘制
     if (option.state & QStyle::State_Selected) {
-        painter->fillRect(rect, QColor(38, 120, 240, 50));
+        painter->fillRect(rect, Theme::color(Theme::ColorRole::AccentSoft));
     } else if (option.state & QStyle::State_MouseOver) {
-        painter->fillRect(rect, QColor(255, 255, 255, 14));
+        painter->fillRect(rect, Theme::color(Theme::ColorRole::Hover));
     }
 
     // 获取数据属性
@@ -99,13 +101,13 @@ void ParticipantItemDelegate::paint(QPainter *painter, const QStyleOptionViewIte
     int textY = rect.top() + (rect.height() + fm.ascent() - fm.descent()) / 2;
 
     // 绘制姓名 (白色)
-    painter->setPen(QColor("#F3F4F6"));
+    painter->setPen(Theme::color(Theme::ColorRole::Text));
     painter->drawText(textStartX, textY, elidedName);
     int currentX = textStartX + fm.horizontalAdvance(elidedName);
 
     // 绘制 (我)
     if (isLocal) {
-        painter->setPen(QColor("#9CA3AF"));
+        painter->setPen(Theme::color(Theme::ColorRole::TextMuted));
         painter->drawText(currentX, textY, suffix);
         currentX += suffixWidth;
     }
@@ -118,15 +120,19 @@ void ParticipantItemDelegate::paint(QPainter *painter, const QStyleOptionViewIte
         int tagY = rect.top() + (rect.height() - tagH) / 2;
         QRect tagRect(currentX, tagY, tagW, tagH);
 
-        painter->setPen(QColor(245, 158, 11, 150));
-        painter->setBrush(QColor(245, 158, 11, 40));
+        auto tagBorder = Theme::color(Theme::ColorRole::Warning);
+        tagBorder.setAlpha(150);
+        auto tagBackground = tagBorder;
+        tagBackground.setAlpha(40);
+        painter->setPen(tagBorder);
+        painter->setBrush(tagBackground);
         painter->drawRoundedRect(tagRect, 3, 3);
 
         QFont tagFont = nameFont;
         tagFont.setPointSize(8);
         tagFont.setBold(true);
         painter->setFont(tagFont);
-        painter->setPen(QColor("#F59E0B"));
+        painter->setPen(Theme::color(Theme::ColorRole::Warning));
         painter->drawText(tagRect, Qt::AlignCenter, QCoreApplication::translate("MeetingUI", "Host"));
     }
 
@@ -143,7 +149,7 @@ void ParticipantItemDelegate::drawAvatar(QPainter *painter, const QRect &rect, c
 
     // 发言发光环
     if (isSpeaking) {
-        painter->setPen(QPen(QColor("#10B981"), 2.0));
+        painter->setPen(QPen(Theme::color(Theme::ColorRole::Success), 2.0));
         painter->setBrush(Qt::NoBrush);
         painter->drawEllipse(rect.adjusted(-1, -1, 1, 1));
     }
@@ -181,7 +187,7 @@ void ParticipantItemDelegate::drawMicIcon(QPainter *painter, const QRect &rect, 
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing, true);
 
-    QColor color = isMuted ? QColor("#EF4444") : (isSpeaking ? QColor("#10B981") : QColor("#D1D5DB"));
+    QColor color = isMuted ? Theme::color(Theme::ColorRole::Danger) : (isSpeaking ? Theme::color(Theme::ColorRole::Success) : Theme::color(Theme::ColorRole::TextSecondary));
     painter->setPen(QPen(color, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     painter->setBrush(isMuted ? Qt::NoBrush : QBrush(color));
 
@@ -200,7 +206,7 @@ void ParticipantItemDelegate::drawMicIcon(QPainter *painter, const QRect &rect, 
 
     // 若静音，画红色贯穿斜杠
     if (isMuted) {
-        painter->setPen(QPen(QColor("#EF4444"), 1.8, Qt::SolidLine, Qt::RoundCap));
+        painter->setPen(QPen(Theme::color(Theme::ColorRole::Danger), 1.8, Qt::SolidLine, Qt::RoundCap));
         painter->drawLine(rect.left() + 3, rect.bottom() - 3, rect.right() - 3, rect.top() + 3);
     }
 
@@ -211,7 +217,7 @@ void ParticipantItemDelegate::drawCameraIcon(QPainter *painter, const QRect &rec
     painter->save();
     painter->setRenderHint(QPainter::Antialiasing, true);
 
-    QColor color = isVideoEnabled ? QColor("#D1D5DB") : QColor("#EF4444");
+    QColor color = isVideoEnabled ? Theme::color(Theme::ColorRole::TextSecondary) : Theme::color(Theme::ColorRole::Danger);
     painter->setPen(QPen(color, 1.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
     painter->setBrush(isVideoEnabled ? QBrush(color) : Qt::NoBrush);
 
@@ -233,7 +239,7 @@ void ParticipantItemDelegate::drawCameraIcon(QPainter *painter, const QRect &rec
 
     // 若关摄，画红色贯穿斜杠
     if (!isVideoEnabled) {
-        painter->setPen(QPen(QColor("#EF4444"), 1.8, Qt::SolidLine, Qt::RoundCap));
+        painter->setPen(QPen(Theme::color(Theme::ColorRole::Danger), 1.8, Qt::SolidLine, Qt::RoundCap));
         painter->drawLine(rect.left() + 3, rect.bottom() - 3, rect.right() - 3, rect.top() + 3);
     }
 
@@ -245,7 +251,7 @@ void ParticipantItemDelegate::drawMoreIcon(QPainter *painter, const QRect &rect)
     painter->setRenderHint(QPainter::Antialiasing, true);
 
     painter->setPen(Qt::NoPen);
-    painter->setBrush(QColor("#9CA3AF"));
+    painter->setBrush(Theme::color(Theme::ColorRole::TextMuted));
 
     int cx = rect.center().x();
     int cy = rect.center().y();

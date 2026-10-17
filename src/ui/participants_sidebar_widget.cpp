@@ -8,6 +8,7 @@
 #include <QtGui/QPainter>
 
 namespace OpenMeeting {
+namespace Theme = MeetingUI::AppTheme;
 
 ParticipantsSidebarWidget::ParticipantsSidebarWidget(std::shared_ptr<MeetingCoordinator> coordinator, QWidget *parent)
     : QWidget(parent)
@@ -269,15 +270,15 @@ void ParticipantsSidebarWidget::paintEvent(QPaintEvent *e) {
     p.setRenderHint(QPainter::Antialiasing, false);
 
     // 1. 填充主体背景色
-    p.fillRect(rect(), QColor("#1A1D24"));
+    p.fillRect(rect(), Theme::color(Theme::ColorRole::Surface));
 
     // 2. 明显又不突兀的立体双层分界线
     // 舞台侧深邃暗阴影基底线 (x=0)
-    p.setPen(QPen(QColor(8, 10, 14), 1));
+    p.setPen(QPen(Theme::color(Theme::ColorRole::Border), 1));
     p.drawLine(0, 0, 0, height());
 
     // 侧边栏侧中度冷灰高光分割线 (x=1) - 清晰界定面板边缘
-    p.setPen(QPen(QColor(58, 66, 82), 1));
+    p.setPen(QPen(Theme::color(Theme::ColorRole::Border), 1));
     p.drawLine(1, 0, 1, height());
 
     // 3. 细微边缘层级环境阴影 (x=2 ~ 10)

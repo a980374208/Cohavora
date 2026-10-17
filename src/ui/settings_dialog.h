@@ -105,6 +105,7 @@ private:
 	QWidget *buildSecurityPage();
 	QWidget *buildAboutPage();
 	void syncUpdateControls();
+	void syncThemeControls();
 	void syncSecurityControls();
 	void commitSecurityPreferences();
 	void updateSecurityKeyControls();
@@ -140,6 +141,7 @@ private:
 	QListWidget *_navigation = nullptr;
 	QStackedWidget *_pages = nullptr;
 
+	QComboBox *_themeCombo = nullptr;
 	QCheckBox *_generalCamera = nullptr;
 	QCheckBox *_generalMicrophone = nullptr;
 	QCheckBox *_generalSpeaker = nullptr;
