@@ -265,7 +265,22 @@ enum class LocalMediaKind {
     Video,
 };
 
+enum class LocalVideoSourceKind { Unknown, Camera, Screen };
+
+// Typed counters since the source/bridge was created, not encoder/RTP counters.
+// source_frames is the VideoSource::captureFrame entry (after device conversion),
+// not the raw device callback count. Sampling never retains a native source.
+struct LocalVideoPipelineSample {
+    bool source_available = false;
+    bool rtc_available = false;
+    std::uint64_t source_frames = 0;
+    std::uint64_t rtc_input_frames = 0;
+    std::uint64_t rtc_output_frames = 0;
+    std::uint64_t rtc_dropped_frames = 0;
+};
+
 struct LocalVideoPublishDescriptor {
+    LocalVideoSourceKind source_kind = LocalVideoSourceKind::Unknown;
     std::string requested_codec;
     std::string effective_codec;
     std::string fallback_reason;
@@ -279,6 +294,9 @@ struct LocalVideoPublishDescriptor {
 // Written on the local capture bridge and sampled on the session strand. The
 // first accepted frame also submits one typed event; later frames stay lock-free.
 struct LocalVideoActivityProbe {
+    // Set before binding becomes active; invoked only by the session strand.
+    // The provider must use a weak track and perform no thread hop or wait.
+    std::function<LocalVideoPipelineSample()> pipeline_sampler;
     std::atomic<bool> active{false};
     std::atomic<std::int64_t> first_injected_ns{0};
     std::atomic<bool> first_event_submitted{false};
@@ -352,6 +370,7 @@ struct Event {
     std::shared_ptr<LocalVideoActivityProbe> local_video_probe;
     std::shared_ptr<LocalAudioActivityProbe> local_audio_probe;
     LocalVideoPublishDescriptor local_video_publish;
+    std::optional<LocalVideoPipelineSample> local_video_pipeline_final;
     RenderPipelineSample render_pipeline;
 };
 
@@ -826,6 +845,17 @@ struct Snapshot {
     bool microphone_effective = false;
     bool camera_requested = false;
     bool camera_effective = false;
+    // Latest typed Camera publication only; ended bindings retain their last
+    // sampled values and are never sampled again. Screen/Unknown are excluded.
+    Availability camera_source_availability = Availability::Unknown;
+    Availability camera_rtc_availability = Availability::Unknown;
+    bool camera_pipeline_active = false;
+    std::uint64_t camera_room_generation = 0;
+    std::uint64_t camera_publication_epoch = 0;
+    std::uint64_t camera_source_frames = 0;
+    std::uint64_t camera_rtc_input_frames = 0;
+    std::uint64_t camera_rtc_output_frames = 0;
+    std::uint64_t camera_rtc_dropped_frames = 0;
     std::uint32_t actual_capture_width = 0;
     std::uint32_t actual_capture_height = 0;
     std::uint32_t actual_capture_sample_rate = 0;
@@ -1198,7 +1228,10 @@ public:
         LocalVideoPublishDescriptor video_publish = {});
     bool EndLocalPublication(
         std::string series_key,
-        Clock::time_point source_time = Clock::now());
+        Clock::time_point source_time = Clock::now(),
+        // Capture before detaching the producer; the queued event must not
+        // depend on a probe that can become inactive before the strand drains.
+        std::optional<LocalVideoPipelineSample> final_sample = {});
     bool RecordLocalVideoFrameInjected(
         std::string series_key,
         std::uint64_t room_generation,
@@ -1363,6 +1396,7 @@ private:
     };
 
     struct LocalPublicationState {
+        std::uint64_t registration_sequence = 0;
         std::uint64_t room_generation = 0;
         std::uint64_t publication_epoch = 0;
         LocalMediaKind media_kind = LocalMediaKind::Unknown;
@@ -1387,6 +1421,7 @@ private:
         std::shared_ptr<LocalVideoActivityProbe> video_probe;
         std::shared_ptr<LocalAudioActivityProbe> audio_probe;
         LocalVideoPublishDescriptor video_publish;
+        LocalVideoPipelineSample pipeline_sample;
         bool device_stall_active = false;
         Clock::time_point device_stall_started_at{};
         std::chrono::nanoseconds device_stall_accumulated{0};

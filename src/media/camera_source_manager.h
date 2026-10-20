@@ -24,6 +24,15 @@ enum class CameraSwitchState {
     Aborted
 };
 
+enum class CameraStartResult {
+    Ready = 0,
+    FactoryFailed,
+    InitFailed,
+    StartFailed,
+    FirstFrameTimeout,
+    Cancelled
+};
+
 struct CameraResolution {
     int width = 0;
     int height = 0;
@@ -83,6 +92,11 @@ public:
     // 启动初始采集设备
     bool Start(const DShowCaptureConfig& config);
 
+    // Only call from a media/preparation worker: graph startup alone does not
+    // establish camera readiness. A valid frame must arrive before the deadline.
+    CameraStartResult StartAndWaitForFirstFrame(const DShowCaptureConfig& config,
+                                              int timeout_ms = 3000);
+
     // 停止当前所有捕获器
     void Stop();
 
@@ -116,6 +130,12 @@ public:
 private:
     friend class ::CameraOwnerInspectionAccess;
     struct DeviceSwitchSpan;
+    struct InitialCaptureAttempt;
+
+    CameraStartResult StartInitialCapture(const DShowCaptureConfig& config,
+                                          std::optional<int> first_frame_timeout_ms);
+    static void RetireInitialCapture(
+        const std::shared_ptr<InitialCaptureAttempt>& attempt);
 
     using ScheduledTask = std::function<void()>;
     using TimeoutScheduler = std::function<void(int timeout_ms, ScheduledTask task)>;
@@ -144,6 +164,8 @@ private:
 
     std::shared_ptr<ICameraCapturer> active_capturer_;
     std::shared_ptr<ICameraCapturer> probing_capturer_;
+    std::shared_ptr<InitialCaptureAttempt> initial_capture_;
+    std::shared_ptr<InitialCaptureAttempt> active_initial_capture_;
     std::string active_device_path_;
     DShowCaptureConfig current_config_;
 

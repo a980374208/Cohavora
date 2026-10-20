@@ -851,12 +851,14 @@ bool SessionTelemetry::RegisterLocalPublication(
 
 bool SessionTelemetry::EndLocalPublication(
     std::string series_key,
-    Clock::time_point source_time) {
+    Clock::time_point source_time,
+    std::optional<LocalVideoPipelineSample> final_sample) {
     if (series_key.empty()) return false;
     Event event;
     event.kind = EventKind::LocalPublicationEnded;
     event.session_generation = session_generation_;
     event.series_key = std::move(series_key);
+    event.local_video_pipeline_final = std::move(final_sample);
     event.source_time = source_time;
     return Submit(std::move(event));
 }
@@ -1147,6 +1149,8 @@ void SessionTelemetry::StopOnStrand(std::function<void()> on_stopped) {
         for (auto& callback : callbacks) callback();
         return;
     }
+    // Freeze the final camera source/bridge counters before stopping admission.
+    UpdateLocalDeviceStatsOnStrand(Clock::now());
     stopping_ = true;
     if (session_stopped_at_ == Clock::time_point{}) {
         session_stopped_at_ = Clock::now();
@@ -1464,6 +1468,7 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             CloseUsableIntervalOnStrand(event.source_time);
         }
         if (event.operation_kind == OperationKind::Disconnect) {
+            UpdateLocalDeviceStatsOnStrand(event.source_time);
             for (auto& [_, publication] : local_publications_) {
                 publication.active = false;
                 publication.expected_send = false;
@@ -2089,6 +2094,7 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             }
         }
         LocalPublicationState publication;
+        publication.registration_sequence = state_.local_publications + 1;
         publication.room_generation = event.room_generation;
         publication.publication_epoch = event.publication_epoch;
         publication.media_kind = event.local_media_kind;
@@ -2117,6 +2123,12 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         if (found == local_publications_.end()) {
             ++state_.stale_local_publication_drops;
             break;
+        }
+        UpdateLocalDeviceStatsOnStrand(event.source_time);
+        if (event.local_video_pipeline_final &&
+            found->second.media_kind == LocalMediaKind::Video &&
+            found->second.video_publish.source_kind == LocalVideoSourceKind::Camera) {
+            found->second.pipeline_sample = *event.local_video_pipeline_final;
         }
         found->second.active = false;
         found->second.expected_send = false;
@@ -3249,12 +3261,54 @@ void SessionTelemetry::UpdateLocalDeviceStatsOnStrand(Clock::time_point now) {
     state_.microphone_effective = false;
     state_.camera_requested = false;
     state_.camera_effective = false;
+    state_.camera_source_availability = Availability::Unknown;
+    state_.camera_rtc_availability = Availability::Unknown;
+    state_.camera_pipeline_active = false;
+    state_.camera_room_generation = 0;
+    state_.camera_publication_epoch = 0;
+    state_.camera_source_frames = 0;
+    state_.camera_rtc_input_frames = 0;
+    state_.camera_rtc_output_frames = 0;
+    state_.camera_rtc_dropped_frames = 0;
+    std::uint64_t newest_camera_sequence = 0;
     state_.actual_capture_width = 0;
     state_.actual_capture_height = 0;
     state_.actual_capture_sample_rate = 0;
     state_.actual_capture_channels = 0;
 
     for (auto& [_, publication] : local_publications_) {
+        const bool is_camera = publication.media_kind == LocalMediaKind::Video &&
+            publication.video_publish.source_kind == LocalVideoSourceKind::Camera;
+        if (is_camera && publication.video_probe) {
+            const auto& sampler = publication.video_probe->pipeline_sampler;
+            const bool pipeline_active = publication.active && !stopping_ &&
+                publication.video_probe->active.load(std::memory_order_acquire);
+            if (pipeline_active && sampler) {
+                try {
+                    publication.pipeline_sample = sampler();
+                } catch (...) {
+                    // A failed observation is unavailable, never measured zero.
+                    publication.pipeline_sample = {};
+                }
+            }
+            if (publication.registration_sequence > newest_camera_sequence) {
+                newest_camera_sequence = publication.registration_sequence;
+                const auto& sample = publication.pipeline_sample;
+                state_.camera_pipeline_active = pipeline_active;
+                state_.camera_room_generation = publication.room_generation;
+                state_.camera_publication_epoch = publication.publication_epoch;
+                state_.camera_source_availability = sample.source_available
+                    ? Availability::Valid
+                    : (sampler ? Availability::Unknown : Availability::Unsupported);
+                state_.camera_rtc_availability = sample.rtc_available
+                    ? Availability::Valid
+                    : (sampler ? Availability::Unknown : Availability::Unsupported);
+                state_.camera_source_frames = sample.source_frames;
+                state_.camera_rtc_input_frames = sample.rtc_input_frames;
+                state_.camera_rtc_output_frames = sample.rtc_output_frames;
+                state_.camera_rtc_dropped_frames = sample.rtc_dropped_frames;
+            }
+        }
         std::int64_t last_frame_ns = 0;
         std::uint64_t frames = 0;
         if (publication.video_probe) {
@@ -3266,7 +3320,7 @@ void SessionTelemetry::UpdateLocalDeviceStatsOnStrand(Clock::time_point now) {
                 std::memory_order_relaxed);
             clock_resets += publication.video_probe->clock_resets.load(
                 std::memory_order_relaxed);
-            if (publication.active) {
+            if (publication.active && is_camera) {
                 state_.camera_requested |= publication.expected_send;
                 state_.camera_effective |= frames > 0;
                 const auto width = publication.video_probe->width.load(

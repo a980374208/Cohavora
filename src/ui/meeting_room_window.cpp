@@ -740,6 +740,22 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 				  TelemetryValue(snapshot, "actualCaptureHeight"),
 				  TelemetryValue(snapshot, "actualCaptureSampleRate"),
 				  TelemetryValue(snapshot, "actualCaptureChannels"))},
+		{QCoreApplication::translate("MeetingUI", "Camera pipeline frames"),
+		 QCoreApplication::translate("MeetingUI", "source %1; RTC input %2 / output %3 / dropped %4")
+			 .arg(snapshot.value(QStringLiteral("cameraSourceAvailability")).toString() == QStringLiteral("VALID")
+				  ? TelemetryValue(snapshot, "cameraSourceFrames") : QStringLiteral("--"),
+				  snapshot.value(QStringLiteral("cameraRtcAvailability")).toString() == QStringLiteral("VALID")
+				  ? TelemetryValue(snapshot, "cameraRtcInputFrames") : QStringLiteral("--"),
+				  snapshot.value(QStringLiteral("cameraRtcAvailability")).toString() == QStringLiteral("VALID")
+				  ? TelemetryValue(snapshot, "cameraRtcOutputFrames") : QStringLiteral("--"),
+				  snapshot.value(QStringLiteral("cameraRtcAvailability")).toString() == QStringLiteral("VALID")
+				  ? TelemetryValue(snapshot, "cameraRtcDroppedFrames") : QStringLiteral("--")),
+		 LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("cameraSourceAvailability")).toString()) +
+			 QStringLiteral(" / ") + LocalizeTelemetryDisplayText(snapshot.value(QStringLiteral("cameraRtcAvailability")).toString()),
+		 QCoreApplication::translate("MeetingUI", "room %1 / publication %2; active %3")
+			 .arg(TelemetryValue(snapshot, "cameraRoomGeneration"),
+				  TelemetryValue(snapshot, "cameraPublicationEpoch"),
+				  TelemetryValue(snapshot, "cameraPipelineActive"))},
 		{QCoreApplication::translate("MeetingUI", "Device switch outcomes"),
 		 QCoreApplication::translate("MeetingUI", "%1 attempts / %2 success / %3 failure / %4 timeout")
 			 .arg(TelemetryValue(snapshot, "deviceSwitchAttempts"),
@@ -2971,6 +2987,7 @@ struct MeetingRoomWindow::MediaPreparation {
 	std::shared_ptr<livekit::WasapiAudioCapture> microphone;
 	std::shared_ptr<livekit::CameraSourceManager> camera;
 	bool cameraAvailable = false;
+	livekit::CameraStartResult cameraStartResult = livekit::CameraStartResult::InitFailed;
 	QString cameraPath;
 };
 
@@ -3176,7 +3193,8 @@ void MeetingRoomWindow::beginMediaPreparation(bool microphone, bool camera) {
 						}
 						if (preparation->cancelled.load()) return;
 						preparation->camera = livekit::CameraSourceManager::Create(videoSource);
-						preparation->cameraAvailable = preparation->camera->Start(config);
+						preparation->cameraStartResult = preparation->camera->StartAndWaitForFirstFrame(config);
+						preparation->cameraAvailable = preparation->cameraStartResult == livekit::CameraStartResult::Ready;
 						if (preparation->cameraAvailable) preparation->cameraPath = QString::fromStdString(selected->path);
 					}
 				} catch (...) {
@@ -3229,7 +3247,9 @@ void MeetingRoomWindow::finishMediaPreparation() {
 	}
 	if (requestedVideo && preparation->attemptedCamera && !_usingRealCamera) {
 		if (!_mediaPreparationError.isEmpty()) _mediaPreparationError += QLatin1Char('\n');
-		_mediaPreparationError += QCoreApplication::translate("MeetingUI", "Unable to start the camera. Check the device and system permissions.");
+		_mediaPreparationError += preparation->cameraStartResult == livekit::CameraStartResult::FirstFrameTimeout
+			? QCoreApplication::translate("MeetingUI", "The camera did not produce video within 3 seconds. Check the device and enable the camera to retry.")
+			: QCoreApplication::translate("MeetingUI", "Unable to start the camera. Check the device and system permissions.");
 	}
 	// Failed cameras and cancelled devices are retired on the cleanup worker.
 	if (preparation->microphone || preparation->camera) {

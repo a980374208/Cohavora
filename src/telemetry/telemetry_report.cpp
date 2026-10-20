@@ -1076,6 +1076,44 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     group("device.state.camera_effective", s.camera_effective, "bool",
           s.device_state_availability, s.device_state_reason,
           s.device_state_measurement_point);
+    const auto camera_scope_availability = s.camera_publication_epoch != 0
+        ? Availability::Valid : Availability::Unknown;
+    const auto camera_scope_reason = s.camera_publication_epoch == 0
+        ? "no_camera_publication"
+        : (s.camera_pipeline_active ? "current_camera_publication"
+                                    : "camera_publication_ended");
+    group("camera.pipeline.active", s.camera_publication_epoch != 0
+              ? MetricValue{s.camera_pipeline_active} : MetricValue{std::monostate{}}, "bool",
+          camera_scope_availability, camera_scope_reason,
+          "typed_camera_publication_binding");
+    group("camera.pipeline.room_generation", ValueWhenSupported(
+              s.camera_room_generation, camera_scope_availability), "generation",
+          camera_scope_availability, camera_scope_reason,
+          "typed_camera_publication_binding");
+    group("camera.pipeline.publication_epoch", ValueWhenSupported(
+              s.camera_publication_epoch, camera_scope_availability), "epoch",
+          camera_scope_availability, camera_scope_reason,
+          "typed_camera_publication_binding");
+    const auto camera_source_reason = s.camera_source_availability == Availability::Valid
+        ? camera_scope_reason : "camera_source_counters_unavailable";
+    const auto camera_rtc_reason = s.camera_rtc_availability == Availability::Valid
+        ? camera_scope_reason : "camera_rtc_bridge_counters_unavailable";
+    group("camera.pipeline.source_frames", ValueWhenSupported(
+              s.camera_source_frames, s.camera_source_availability), "frames",
+          s.camera_source_availability, camera_source_reason,
+          "video_source_capture_frame_entry");
+    group("camera.pipeline.rtc_input_frames", ValueWhenSupported(
+              s.camera_rtc_input_frames, s.camera_rtc_availability), "frames",
+          s.camera_rtc_availability, camera_rtc_reason,
+          "rtc_video_source_on_frame_entry");
+    group("camera.pipeline.rtc_output_frames", ValueWhenSupported(
+              s.camera_rtc_output_frames, s.camera_rtc_availability), "frames",
+          s.camera_rtc_availability, camera_rtc_reason,
+          "rtc_video_source_on_frame_delivery");
+    group("camera.pipeline.rtc_dropped_frames", ValueWhenSupported(
+              s.camera_rtc_dropped_frames, s.camera_rtc_availability), "frames",
+          s.camera_rtc_availability, camera_rtc_reason,
+          "rtc_video_source_on_frame_validation");
     group("device.state.capture_width", static_cast<std::uint64_t>(s.actual_capture_width),
           "pixels", s.device_state_availability, s.device_state_reason,
           s.device_state_measurement_point);

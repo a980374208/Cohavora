@@ -13,11 +13,42 @@
 #include <fstream>
 #include <functional>
 #include <thread>
+#include <type_traits>
 #if defined(_WIN32)
 #include <windows.h>
 #endif
 
 namespace MeetingApp {
+// Shared by the opt-in probe and its projection regression. Values already
+// passed through the typed safe catalog; preserve unavailable values as null.
+inline nlohmann::json BuildPilotDiagnosticMetrics(
+    const livekit::telemetry::SafeTelemetryRecord& record) {
+    using Json = nlohmann::json;
+    auto metrics = Json::array();
+    for (const auto& metric : livekit::telemetry::BuildSafeMetricRows(record)) {
+        if (metric.key.starts_with("network.rtp.") ||
+            metric.key.starts_with("video.pipeline.") ||
+            metric.key.starts_with("camera.pipeline.") ||
+            metric.key.starts_with("video.codec.decoders") ||
+            metric.key.starts_with("audio.window.") ||
+            metric.key.starts_with("audio.concealment.") ||
+            metric.key.starts_with("resource.internal.") ||
+            metric.key == "queue.depth" ||
+            metric.key.starts_with("render.interval.bucket.") ||
+            metric.key.starts_with("render.window.") ||
+            metric.key == "render.interval.p95") {
+            const auto value = std::visit([](const auto& v) -> Json {
+                if constexpr (std::is_same_v<std::decay_t<decltype(v)>, std::monostate>)
+                    return nullptr;
+                else return v;
+            }, metric.value);
+            metrics.push_back({{"key", metric.key}, {"value", value},
+                {"availability", metric.availability}, {"unit", metric.unit}});
+        }
+    }
+    return metrics;
+}
+
 // A value-only copy of the last completed default-heap maintenance attempt.
 // Observation availability is separate from the platform/API outcome below.
 struct HeapMaintenanceSnapshot {
@@ -187,28 +218,7 @@ public:
                     }
                     // Preserve availability alongside selected values. Nulls are
                     // never replaced with a fabricated zero by the verifier.
-                    auto metrics = Json::array();
-                    for (const auto& metric : livekit::telemetry::BuildSafeMetricRows(*records.back())) {
-                        if (metric.key.starts_with("network.rtp.") ||
-                            metric.key.starts_with("video.pipeline.") ||
-                            metric.key.starts_with("video.codec.decoders") ||
-                            metric.key.starts_with("audio.window.") ||
-                            metric.key.starts_with("audio.concealment.") ||
-                            metric.key.starts_with("resource.internal.") ||
-                            metric.key == "queue.depth" ||
-                            metric.key.starts_with("render.interval.bucket.") ||
-                            metric.key.starts_with("render.window.") ||
-                            metric.key == "render.interval.p95") {
-                            const auto value = std::visit([](const auto& v) -> Json {
-                                if constexpr (std::is_same_v<std::decay_t<decltype(v)>, std::monostate>)
-                                    return nullptr;
-                                else return v;
-                            }, metric.value);
-                            metrics.push_back({{"key", metric.key}, {"value", value},
-                                {"availability", metric.availability}, {"unit", metric.unit}});
-                        }
-                    }
-                    row["metrics"] = std::move(metrics);
+                    row["metrics"] = BuildPilotDiagnosticMetrics(*records.back());
                     row["revision"] = s.revision;
                     row["session_complete"] = s.session_complete;
                     row["anonymous_session_id"] = records.back()->anonymous_session_id;

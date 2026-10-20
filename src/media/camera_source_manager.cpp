@@ -2,10 +2,24 @@
 #include "dshow_enumerator.h"
 #include "telemetry/diagnostic_pipeline.h"
 #include <algorithm>
+#include <condition_variable>
 #include <cstdint>
 #include <tuple>
 
 namespace livekit {
+
+struct CameraSourceManager::InitialCaptureAttempt final {
+    // Device calls are serialized separately from manager state. In particular,
+    // Stop must not race a late Init/Start into restarting a retired graph.
+    std::mutex lifecycle_mutex;
+    std::condition_variable ready;
+    std::shared_ptr<ICameraCapturer> capturer;
+    bool stopped = false; // lifecycle_mutex
+    bool cancelled = false; // state_mutex_
+    bool first_frame_delivery_pending = false; // state_mutex_
+    std::optional<VideoFrame> first_frame; // state_mutex_
+    VideoCaptureOptions first_frame_options; // state_mutex_
+};
 
 struct CameraSourceManager::DeviceSwitchSpan final {
     DeviceSwitchSpan()
@@ -14,6 +28,7 @@ struct CameraSourceManager::DeviceSwitchSpan final {
         diagnostic::Event event;
         event.kind = diagnostic::EventKind::DeviceSwitchStarted;
         event.thread_role = diagnostic::ThreadRole::Media;
+        event.media_kind = diagnostic::MediaKind::Video;
         event.context.operation_id = operation_id;
         diagnostic::EmitBusinessEvent(event);
     }
@@ -31,6 +46,7 @@ struct CameraSourceManager::DeviceSwitchSpan final {
         diagnostic::Event event;
         event.kind = diagnostic::EventKind::DeviceSwitchTerminal;
         event.thread_role = diagnostic::ThreadRole::Media;
+        event.media_kind = diagnostic::MediaKind::Video;
         event.context.operation_id = operation_id;
         event.outcome = outcome;
         event.device_switch_reason = reason;
@@ -52,6 +68,7 @@ void EmitCaptureTerminal(diagnostic::Outcome outcome,
     diagnostic::Event event;
     event.kind = diagnostic::EventKind::DeviceCaptureTerminal;
     event.thread_role = diagnostic::ThreadRole::Media;
+    event.media_kind = diagnostic::MediaKind::Video;
     event.context.parent_operation_id = parent;
     event.outcome = outcome;
     event.device_switch_reason = reason;
@@ -157,74 +174,205 @@ std::shared_ptr<VideoSource> CameraSourceManager::GetOutputSource() const {
 }
 
 bool CameraSourceManager::Start(const DShowCaptureConfig& config) {
-    std::shared_ptr<ICameraCapturer> old_cap;
-    std::shared_ptr<ICameraCapturer> new_cap;
-    std::shared_ptr<VideoSource> relay_source;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        if (probing_capturer_) {
-            probing_capturer_->Stop();
-            probing_capturer_.reset();
-        }
-        old_cap = active_capturer_;
-        active_capturer_.reset();
+    return StartInitialCapture(config, std::nullopt) == CameraStartResult::Ready;
+}
 
+CameraStartResult CameraSourceManager::StartAndWaitForFirstFrame(
+        const DShowCaptureConfig& config, int timeout_ms) {
+    return StartInitialCapture(config, timeout_ms > 0 ? timeout_ms : 3000);
+}
+
+void CameraSourceManager::RetireInitialCapture(
+        const std::shared_ptr<InitialCaptureAttempt>& attempt) {
+    if (!attempt) return;
+    std::lock_guard lock(attempt->lifecycle_mutex);
+    if (!attempt->stopped && attempt->capturer) {
+        attempt->stopped = true;
+        attempt->capturer->Stop();
+    }
+}
+
+CameraStartResult CameraSourceManager::StartInitialCapture(
+        const DShowCaptureConfig& config,
+        std::optional<int> first_frame_timeout_ms) {
+    auto attempt = std::make_shared<InitialCaptureAttempt>();
+    std::shared_ptr<InitialCaptureAttempt> old_initial;
+    std::shared_ptr<InitialCaptureAttempt> old_active_initial;
+    std::shared_ptr<ICameraCapturer> old_active;
+    std::shared_ptr<ICameraCapturer> old_probe;
+    uint64_t generation = 0;
+    {
+        std::lock_guard lock(state_mutex_);
+        old_initial = std::move(initial_capture_);
+        old_active_initial = std::move(active_initial_capture_);
+        if (old_initial) old_initial->cancelled = true;
+        if (old_active_initial) old_active_initial->cancelled = true;
+        old_active = std::move(active_capturer_);
+        old_probe = std::move(probing_capturer_);
+        generation = ++switch_generation_;
+        initial_capture_ = attempt;
         current_config_ = config;
         active_device_path_ = config.device_path;
         switch_state_ = CameraSwitchState::Idle;
-        switch_generation_++;
+    }
+    if (old_initial) old_initial->ready.notify_all();
+    RetireInitialCapture(old_initial);
+    RetireInitialCapture(old_active_initial);
+    if (old_active && !old_active_initial) old_active->Stop();
+    if (old_probe) old_probe->Stop();
 
-        new_cap = factory_();
-        if (!new_cap) {
-            EmitCaptureTerminal(diagnostic::Outcome::Failure,
-                diagnostic::DeviceSwitchReason::FactoryFailed);
-            return false;
-        }
-
-        relay_source = std::make_shared<VideoSource>(config.width, config.height);
-        std::weak_ptr<CameraSourceManager> weak_self = shared_from_this();
-        relay_source->addSink([weak_self](const VideoFrame& frame, const VideoCaptureOptions& options) {
-            if (auto self = weak_self.lock()) {
-                if (auto out = self->GetOutputSource()) {
-                    out->captureFrame(frame, options);
+    std::weak_ptr<CameraSourceManager> weak_self = shared_from_this();
+    std::weak_ptr<InitialCaptureAttempt> weak_attempt = attempt;
+    VideoSource::FrameSink relay = [weak_self, weak_attempt, generation](
+            const VideoFrame& frame, const VideoCaptureOptions& options) {
+        if (frame.width() <= 0 || frame.height() <= 0 || frame.dataSize() == 0) return;
+        const auto self = weak_self.lock();
+        const auto current = weak_attempt.lock();
+        if (!self || !current) return;
+        std::shared_ptr<VideoSource> out;
+        bool first_frame_received = false;
+        {
+            std::lock_guard lock(self->state_mutex_);
+            if (current->cancelled) return;
+            if (self->active_initial_capture_ == current &&
+                self->active_capturer_ == current->capturer) {
+                // The worker must finish delivering the cached first frame
+                // before a newer driver callback can reach the output. Drop
+                // callbacks in this short commit window without waiting on it.
+                if (current->first_frame_delivery_pending) return;
+                // The active camera remains valid while a replacement probes.
+                out = self->output_source_;
+            } else if (self->initial_capture_ == current &&
+                       self->switch_generation_.load() == generation) {
+                if (!current->first_frame) {
+                    current->first_frame = frame;
+                    current->first_frame_options = options;
+                    first_frame_received = true;
                 }
             }
-        });
-
-        if (!new_cap->Init(config, relay_source)) {
-            EmitCaptureTerminal(diagnostic::Outcome::Failure,
-                diagnostic::DeviceSwitchReason::InitFailed);
-            return false;
         }
-        if (!new_cap->Start()) {
-            EmitCaptureTerminal(diagnostic::Outcome::Failure,
-                diagnostic::DeviceSwitchReason::StartFailed);
-            return false;
-        }
+        if (first_frame_received) current->ready.notify_all();
+        if (out) out->captureFrame(frame, options);
+    };
 
-        active_capturer_ = new_cap;
+    bool graph_started = false;
+    auto failure_reason = diagnostic::DeviceSwitchReason::Superseded;
+    {
+        std::lock_guard lifecycle_lock(attempt->lifecycle_mutex);
+        const auto still_owned = [&] {
+            std::lock_guard lock(state_mutex_);
+            return !attempt->cancelled && initial_capture_ == attempt &&
+                switch_generation_.load() == generation;
+        };
+        if (still_owned()) {
+            attempt->capturer = factory_();
+            if (!attempt->capturer) {
+                failure_reason = diagnostic::DeviceSwitchReason::FactoryFailed;
+            } else {
+                auto source = std::make_shared<VideoSource>(config.width, config.height);
+                source->addSink(relay);
+                if (!attempt->capturer->Init(config, std::move(source))) {
+                    failure_reason = diagnostic::DeviceSwitchReason::InitFailed;
+                } else if (still_owned()) {
+                    graph_started = attempt->capturer->Start();
+                    failure_reason = diagnostic::DeviceSwitchReason::StartFailed;
+                }
+            }
+        }
     }
 
-    if (old_cap) {
-        old_cap->Stop();
+    std::optional<VideoFrame> first_frame;
+    VideoCaptureOptions first_frame_options;
+    bool success = false;
+    {
+        std::unique_lock lock(state_mutex_);
+        const auto owns_attempt = [&] {
+            return !attempt->cancelled && initial_capture_ == attempt &&
+                switch_generation_.load() == generation;
+        };
+        if (graph_started && owns_attempt() && first_frame_timeout_ms) {
+            const bool ready = attempt->ready.wait_for(lock,
+                std::chrono::milliseconds(*first_frame_timeout_ms), [&] {
+                    return !owns_attempt() || attempt->first_frame.has_value();
+                });
+            if (!ready) failure_reason = diagnostic::DeviceSwitchReason::ProbeTimeout;
+        }
+        if (!owns_attempt()) {
+            failure_reason = diagnostic::DeviceSwitchReason::Superseded;
+        } else if (graph_started &&
+                   (!first_frame_timeout_ms || attempt->first_frame)) {
+            active_capturer_ = attempt->capturer;
+            active_initial_capture_ = attempt;
+            initial_capture_.reset();
+            first_frame = std::move(attempt->first_frame);
+            first_frame_options = attempt->first_frame_options;
+            attempt->first_frame_delivery_pending = first_frame.has_value();
+            success = true;
+        } else {
+            attempt->cancelled = true;
+            initial_capture_.reset();
+            switch_state_ = CameraSwitchState::Aborted;
+        }
     }
-    EmitCaptureTerminal(diagnostic::Outcome::Success,
-        diagnostic::DeviceSwitchReason::Completed);
-    return true;
+    if (!success) RetireInitialCapture(attempt);
+    if (success && first_frame) {
+        std::shared_ptr<VideoSource> out;
+        {
+            std::lock_guard lock(state_mutex_);
+            if (!attempt->cancelled && active_initial_capture_ == attempt &&
+                active_capturer_ == attempt->capturer) {
+                out = output_source_;
+            }
+        }
+        if (out) out->captureFrame(*first_frame, first_frame_options);
+        {
+            std::lock_guard lock(state_mutex_);
+            attempt->first_frame_delivery_pending = false;
+        }
+    }
+    const auto outcome = success ? diagnostic::Outcome::Success
+        : failure_reason == diagnostic::DeviceSwitchReason::Superseded
+            ? diagnostic::Outcome::Cancelled
+        : failure_reason == diagnostic::DeviceSwitchReason::ProbeTimeout
+            ? diagnostic::Outcome::Timeout : diagnostic::Outcome::Failure;
+    EmitCaptureTerminal(outcome, success
+        ? diagnostic::DeviceSwitchReason::Completed : failure_reason);
+    if (success) return CameraStartResult::Ready;
+    switch (failure_reason) {
+    case diagnostic::DeviceSwitchReason::FactoryFailed:
+        return CameraStartResult::FactoryFailed;
+    case diagnostic::DeviceSwitchReason::InitFailed:
+        return CameraStartResult::InitFailed;
+    case diagnostic::DeviceSwitchReason::StartFailed:
+        return CameraStartResult::StartFailed;
+    case diagnostic::DeviceSwitchReason::ProbeTimeout:
+        return CameraStartResult::FirstFrameTimeout;
+    default:
+        return CameraStartResult::Cancelled;
+    }
 }
 
 void CameraSourceManager::Stop() {
     std::shared_ptr<ICameraCapturer> act;
     std::shared_ptr<ICameraCapturer> prb;
+    std::shared_ptr<InitialCaptureAttempt> initial;
+    std::shared_ptr<InitialCaptureAttempt> active_initial;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         switch_generation_++;
         switch_state_ = CameraSwitchState::Idle;
         act = std::move(active_capturer_);
         prb = std::move(probing_capturer_);
+        initial = std::move(initial_capture_);
+        active_initial = std::move(active_initial_capture_);
+        if (initial) initial->cancelled = true;
+        if (active_initial) active_initial->cancelled = true;
     }
 
-    if (act) {
+    if (initial) initial->ready.notify_all();
+    RetireInitialCapture(initial);
+    RetireInitialCapture(active_initial);
+    if (act && !active_initial) {
         act->Stop();
     }
     if (prb) {
@@ -364,6 +512,18 @@ void CameraSourceManager::SwitchDeviceAsync(const std::string& target_device_pat
 void CameraSourceManager::ReconfigureAsync(const DShowCaptureConfig& target_config,
                                            int timeout_ms,
                                            SwitchCallback callback) {
+    std::shared_ptr<InitialCaptureAttempt> initial;
+    {
+        std::lock_guard lock(state_mutex_);
+        initial = std::move(initial_capture_);
+        if (initial) {
+            initial->cancelled = true;
+            ++switch_generation_;
+        }
+    }
+    if (initial) initial->ready.notify_all();
+    RetireInitialCapture(initial);
+
     auto switch_span = std::make_shared<DeviceSwitchSpan>();
     if (timeout_ms <= 0) {
         timeout_ms = 3000;
@@ -541,6 +701,7 @@ void CameraSourceManager::HandleProbeFrameReceived(uint64_t generation,
                                                    SwitchCallback callback,
                                                    std::shared_ptr<DeviceSwitchSpan> switch_span) {
     std::shared_ptr<ICameraCapturer> old_active;
+    std::shared_ptr<InitialCaptureAttempt> old_initial;
     std::shared_ptr<VideoSource> out_src;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -552,6 +713,8 @@ void CameraSourceManager::HandleProbeFrameReceived(uint64_t generation,
 
 
         old_active = std::move(active_capturer_);
+        old_initial = std::move(active_initial_capture_);
+        if (old_initial) old_initial->cancelled = true;
         active_capturer_ = std::move(probe_capturer);
         probing_capturer_.reset();
         active_device_path_ = target_config.device_path;
@@ -568,8 +731,9 @@ void CameraSourceManager::HandleProbeFrameReceived(uint64_t generation,
 
     // 异步安全释放旧设备
     if (old_active) {
-        ScheduleCleanup([old_active]() {
-            old_active->Stop();
+        ScheduleCleanup([old_active, old_initial]() {
+            if (old_initial) RetireInitialCapture(old_initial);
+            else old_active->Stop();
         });
     }
 

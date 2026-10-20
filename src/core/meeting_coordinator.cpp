@@ -806,6 +806,23 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("microphoneEffective"), snapshot.microphone_effective);
     result.insert(QStringLiteral("cameraRequested"), snapshot.camera_requested);
     result.insert(QStringLiteral("cameraEffective"), snapshot.camera_effective);
+    result.insert(QStringLiteral("cameraSourceAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.camera_source_availability)));
+    result.insert(QStringLiteral("cameraRtcAvailability"), QString::fromLatin1(
+        livekit::telemetry::AvailabilityName(snapshot.camera_rtc_availability)));
+    result.insert(QStringLiteral("cameraPipelineActive"), snapshot.camera_pipeline_active);
+    result.insert(QStringLiteral("cameraRoomGeneration"),
+                  QVariant::fromValue<qulonglong>(snapshot.camera_room_generation));
+    result.insert(QStringLiteral("cameraPublicationEpoch"),
+                  QVariant::fromValue<qulonglong>(snapshot.camera_publication_epoch));
+    result.insert(QStringLiteral("cameraSourceFrames"),
+                  QVariant::fromValue<qulonglong>(snapshot.camera_source_frames));
+    result.insert(QStringLiteral("cameraRtcInputFrames"),
+                  QVariant::fromValue<qulonglong>(snapshot.camera_rtc_input_frames));
+    result.insert(QStringLiteral("cameraRtcOutputFrames"),
+                  QVariant::fromValue<qulonglong>(snapshot.camera_rtc_output_frames));
+    result.insert(QStringLiteral("cameraRtcDroppedFrames"),
+                  QVariant::fromValue<qulonglong>(snapshot.camera_rtc_dropped_frames));
     result.insert(QStringLiteral("actualCaptureWidth"), snapshot.actual_capture_width);
     result.insert(QStringLiteral("actualCaptureHeight"), snapshot.actual_capture_height);
     result.insert(QStringLiteral("actualCaptureSampleRate"),

@@ -906,8 +906,23 @@ std::string LocalPublishTelemetryKey(std::string_view rtc_track_id) {
         : "local_publish/" + std::string(rtc_track_id);
 }
 
+telemetry::LocalVideoPipelineSample SampleLocalVideoPipeline(
+    const std::shared_ptr<LocalVideoTrack>& track) {
+    telemetry::LocalVideoPipelineSample sample;
+    if (!track) return sample;
+    const auto frames = track->frame_diagnostics();
+    sample.source_available = frames.source_available;
+    sample.rtc_available = frames.rtc_available;
+    sample.source_frames = frames.source_frames;
+    sample.rtc_input_frames = frames.rtc_input_frames;
+    sample.rtc_output_frames = frames.rtc_output_frames;
+    sample.rtc_dropped_frames = frames.rtc_dropped_frames;
+    return sample;
+}
+
 std::shared_ptr<telemetry::LocalVideoActivityProbe> MakeLocalVideoActivityProbe(
     const std::shared_ptr<telemetry::SessionTelemetry>& telemetry_owner,
+    const std::shared_ptr<LocalVideoTrack>& video,
     std::string series_key,
     std::uint64_t room_generation,
     std::uint64_t publication_epoch) {
@@ -920,6 +935,9 @@ std::shared_ptr<telemetry::LocalVideoActivityProbe> MakeLocalVideoActivityProbe(
     probe->series_key = std::move(series_key);
     probe->room_generation = room_generation;
     probe->publication_epoch = publication_epoch;
+    probe->pipeline_sampler = [weak_video = std::weak_ptr<LocalVideoTrack>(video)] {
+        return SampleLocalVideoPipeline(weak_video.lock());
+    };
     probe->active.store(true, std::memory_order_release);
     return probe;
 }
@@ -6646,6 +6664,7 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             const auto rtc_track = track->rtc_track();
             local_video_probe = MakeLocalVideoActivityProbe(
                 telemetry_owner,
+                video,
                 LocalPublishTelemetryKey(rtc_track ? rtc_track->id() : std::string{}),
                 generation,
                 local_publication_epoch);
@@ -6732,12 +6751,18 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             const auto rtc_track = track->rtc_track();
             const auto rtc_track_id = rtc_track ? rtc_track->id() : std::string{};
             telemetry::LocalVideoPublishDescriptor video_publish;
+            video_publish.source_kind = track->source() == TrackSource::Camera
+                ? telemetry::LocalVideoSourceKind::Camera
+                : (track->source() == TrackSource::ScreenShareVideo
+                    ? telemetry::LocalVideoSourceKind::Screen
+                    : telemetry::LocalVideoSourceKind::Unknown);
             if (video_plan.has_value()) {
                 video_publish.requested_codec = video_plan->requested_codec;
                 video_publish.effective_codec = video_plan->effective_codec;
                 video_publish.fallback_reason = video_plan->fallback_reason;
-                video_publish.source = track->source() == TrackSource::ScreenShareVideo
-                    ? "screen" : "camera";
+                video_publish.source = video_publish.source_kind == telemetry::LocalVideoSourceKind::Camera
+                    ? "camera" : (video_publish.source_kind == telemetry::LocalVideoSourceKind::Screen
+                        ? "screen" : "unknown");
                 video_publish.mode = !video_plan->effective.scalability_mode.empty()
                     ? "svc"
                     : (video_plan->effective.simulcast &&
@@ -6962,6 +6987,7 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 const auto rtc_track = items[index].track->rtc_track();
                 local_video_probes[index] = MakeLocalVideoActivityProbe(
                     telemetry_owner,
+                    video,
                     LocalPublishTelemetryKey(
                         rtc_track ? rtc_track->id() : std::string{}),
                     generation,
@@ -7081,14 +7107,19 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 const auto rtc_track_id = rtc_track
                     ? rtc_track->id() : std::string{};
                 telemetry::LocalVideoPublishDescriptor video_publish;
+                video_publish.source_kind = items[index].track->source() == TrackSource::Camera
+                    ? telemetry::LocalVideoSourceKind::Camera
+                    : (items[index].track->source() == TrackSource::ScreenShareVideo
+                        ? telemetry::LocalVideoSourceKind::Screen
+                        : telemetry::LocalVideoSourceKind::Unknown);
                 if (video_plans[index].has_value()) {
                     const auto& plan = *video_plans[index];
                     video_publish.requested_codec = plan.requested_codec;
                     video_publish.effective_codec = plan.effective_codec;
                     video_publish.fallback_reason = plan.fallback_reason;
-                    video_publish.source =
-                        items[index].track->source() == TrackSource::ScreenShareVideo
-                            ? "screen" : "camera";
+                    video_publish.source = video_publish.source_kind == telemetry::LocalVideoSourceKind::Camera
+                        ? "camera" : (video_publish.source_kind == telemetry::LocalVideoSourceKind::Screen
+                            ? "screen" : "unknown");
                     video_publish.mode = !plan.effective.scalability_mode.empty()
                         ? "svc"
                         : (plan.effective.simulcast && plan.effective.layers.size() > 1
@@ -7596,7 +7627,10 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::UnpublishLocalTrackAsyn
         }
         publication->set_track(nullptr);
         if (telemetry_owner && !local_publish_telemetry_key.empty()) {
-            telemetry_owner->EndLocalPublication(local_publish_telemetry_key);
+            const auto video = std::dynamic_pointer_cast<LocalVideoTrack>(track);
+            telemetry_owner->EndLocalPublication(local_publish_telemetry_key,
+                std::chrono::steady_clock::now(), video
+                    ? std::optional{SampleLocalVideoPipeline(video)} : std::nullopt);
         }
         if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(track)) {
             video->set_publish_telemetry_probe({});

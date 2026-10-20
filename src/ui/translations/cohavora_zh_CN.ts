@@ -116,6 +116,10 @@
         <translation>无法启动摄像头，请检查设备连接及系统权限。</translation>
     </message>
     <message>
+        <source>The camera did not produce video within 3 seconds. Check the device and enable the camera to retry.</source>
+        <translation>摄像头在 3 秒内未输出画面。请检查设备，再次开启摄像头重试。</translation>
+    </message>
+    <message>
         <source>User requested to enable the microphone</source>
         <translation>用户请求开启麦克风</translation>
     </message>
@@ -3010,6 +3014,18 @@ Sign in with your own account in a client configured for the same meeting servic
     <message>
         <source>Local device continuity</source>
         <translation>本地设备供流连续性</translation>
+    </message>
+    <message>
+        <source>Camera pipeline frames</source>
+        <translation>摄像头分段帧数</translation>
+    </message>
+    <message>
+        <source>source %1; RTC input %2 / output %3 / dropped %4</source>
+        <translation>视频源 %1；RTC 输入 %2 / 输出 %3 / 丢弃 %4</translation>
+    </message>
+    <message>
+        <source>room %1 / publication %2; active %3</source>
+        <translation>会话代次 %1 / 发布代次 %2；活动 %3</translation>
     </message>
     <message>
         <source>%1 active / %2 expected; %3 stops, %4 ms</source>
