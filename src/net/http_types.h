@@ -17,9 +17,17 @@ enum class ErrorCode {
     InsecureTransport = -4,
     RedirectRejected = -5,
     InvalidCredentials = -6,
-    TokenExpired = 100010,
-    TokenInvalid = 100002,
+    // OpenMeeting uses openimsdk/tools/errs for token validation errors.
+    // Its application codes 100002/100010 mean password error/session replaced.
+    TokenExpired = 1501,
+    TokenInvalid = 1502,
+    TokenMalformed = 1503,
+    TokenNotValidYet = 1504,
+    TokenUnknown = 1505,
+    TokenKicked = 1506,
+    TokenNotExist = 1507,
     TokenNotFound = 100004,
+    SessionReplaced = 100010,
     UnknownError = -999
 };
 
@@ -43,9 +51,20 @@ struct HttpError {
     HttpFailureLayer failureLayer = HttpFailureLayer::None;
 
     bool isTokenExpired() const {
-        return code == static_cast<int>(ErrorCode::TokenExpired) ||
-               code == static_cast<int>(ErrorCode::TokenInvalid) ||
-               code == static_cast<int>(ErrorCode::TokenNotFound);
+        switch (static_cast<ErrorCode>(code)) {
+        case ErrorCode::TokenExpired:
+        case ErrorCode::TokenInvalid:
+        case ErrorCode::TokenMalformed:
+        case ErrorCode::TokenNotValidYet:
+        case ErrorCode::TokenUnknown:
+        case ErrorCode::TokenKicked:
+        case ErrorCode::TokenNotExist:
+        case ErrorCode::TokenNotFound:
+        case ErrorCode::SessionReplaced:
+            return true;
+        default:
+            return false;
+        }
     }
 };
 

@@ -340,8 +340,15 @@ std::string_view ComponentName(EventKind kind) noexcept {
 
 std::string_view BusinessErrorName(std::int32_t code) noexcept {
     switch (code) {
-    case 100010: return "token_expired";
-    case 100002: return "token_invalid";
+    case 1501: return "token_expired";
+    case 1502: return "token_invalid";
+    case 1503: return "token_malformed";
+    case 1504: return "token_not_valid_yet";
+    case 1505: return "token_unknown";
+    case 1506: return "token_kicked";
+    case 1507: return "token_not_found";
+    case 100010: return "token_kicked";
+    case 100002: return "password_error";
     case 100004: return "token_not_found";
     default: return "unknown";
     }
