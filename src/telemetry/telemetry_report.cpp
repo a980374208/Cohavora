@@ -52,7 +52,7 @@ std::int64_t UtcNowMs() {
 // Keep this retained-allocation census in sync with Snapshot's owning fields.
 // Charge capacities (including shared snapshots conservatively once per job),
 // not the serialized JSON scratch buffer that exists only on the worker.
-std::size_t SnapshotRetainedBytes(const Snapshot& snapshot) {
+std::size_t SnapshotDynamicRetainedBytes(const Snapshot& snapshot) {
     constexpr std::string Snapshot::* text_fields[] = {
         &Snapshot::reason,
         &Snapshot::session_duration_reason,
@@ -203,7 +203,7 @@ std::size_t SnapshotRetainedBytes(const Snapshot& snapshot) {
         &Snapshot::stability_anomaly_density_reason,
         &Snapshot::stability_anomaly_density_algorithm,
     };
-    std::size_t bytes = sizeof(Snapshot) + 64 +
+    std::size_t bytes = 64 +
         snapshot.render_fine_interval_histogram.capacity() * sizeof(std::uint64_t) +
         snapshot.render_window_fine_interval_histogram.capacity() * sizeof(std::uint64_t);
     for (const auto field : text_fields) bytes += (snapshot.*field).capacity() + 1;
@@ -212,6 +212,10 @@ std::size_t SnapshotRetainedBytes(const Snapshot& snapshot) {
         bytes += chain.metric_id.capacity() + chain.reason.capacity() + 2;
     bytes += snapshot.operation_summaries.capacity() * sizeof(OperationSummary);
     return bytes;
+}
+
+std::size_t SnapshotRetainedBytes(const Snapshot& snapshot) {
+    return sizeof(Snapshot) + SnapshotDynamicRetainedBytes(snapshot);
 }
 
 std::size_t StabilityRetainedBytes(const StabilitySummary& stability) {
@@ -248,26 +252,14 @@ std::string SafeText(std::string value) {
     return value;
 }
 
-std::string CsvCell(std::string value) {
-    value = SafeText(std::move(value));
-    std::string escaped;
-    escaped.reserve(value.size() + 2);
-    escaped.push_back('"');
-    for (const char ch : value) {
-        if (ch == '"') escaped.push_back('"');
-        escaped.push_back(ch);
+void AppendCsvCell(std::string& output, const std::string& value) {
+    const auto safe = SafeText(value);
+    output.push_back('"');
+    for (const char ch : safe) {
+        if (ch == '"') output.push_back('"');
+        output.push_back(ch);
     }
-    escaped.push_back('"');
-    return escaped;
-}
-
-Json JsonValue(const MetricValue& value) {
-    return std::visit([](const auto& item) -> Json {
-        using T = std::decay_t<decltype(item)>;
-        if constexpr (std::is_same_v<T, std::monostate>) return nullptr;
-        else if constexpr (std::is_same_v<T, std::string>) return SafeText(item);
-        else return item;
-    }, value);
+    output.push_back('"');
 }
 
 void AppendJsonString(std::string& output, const std::string& value) {
@@ -492,7 +484,11 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
     const SafeTelemetryRecord& record) {
     const auto& s = record.snapshot;
     std::vector<SafeMetricRow> rows;
-    rows.reserve(320);
+    // Leave headroom for the fixed metric set, then include every variable
+    // row. Fine histograms can exceed the fixed set several times over.
+    rows.reserve(512 + (std::min)(s.metric_product_chains.size(), std::size_t{64}) +
+        s.render_interval_histogram.size() + s.render_window_interval_histogram.size() +
+        s.render_window_fine_interval_histogram.size());
     const auto base = [&](std::string key, MetricValue value, std::string unit = {}) {
         AddMetric(rows, std::move(key), std::move(value), std::move(unit),
                   s.availability, s.reason);
@@ -1972,6 +1968,9 @@ TelemetryExportResult WriteTelemetryReportAtomically(
 
     std::ofstream jsonl(temporary / "metrics.jsonl", std::ios::binary | std::ios::trunc);
     std::ofstream csv(temporary / "metrics.csv", std::ios::binary | std::ios::trunc);
+    std::string json_row, csv_cells;
+    json_row.reserve(1024);
+    csv_cells.reserve(1024);
     csv << "captured_utc_ms,session_generation,revision,key,value,unit,availability,reason,measurement_point,definition_version\r\n";
     for (const auto& pointer : records) {
         if (!pointer) continue;
@@ -1983,29 +1982,48 @@ TelemetryExportResult WriteTelemetryReportAtomically(
             result.reason = "export_cancelled";
             return result;
         }
+        const auto definition = ",\"captured_utc_ms\":" +
+            std::to_string(pointer->captured_utc_ms) + ",\"definition_version\":" +
+            std::to_string(pointer->definition_version) + ",\"key\":";
+        const auto metadata = ",\"revision\":" + std::to_string(pointer->snapshot.revision) +
+            ",\"session_generation\":" + std::to_string(pointer->snapshot.session_generation) +
+            ",\"unit\":";
         for (const auto& metric : BuildSafeMetricRows(*pointer)) {
-            Json line{
-                {"captured_utc_ms", pointer->captured_utc_ms},
-                {"session_generation", pointer->snapshot.session_generation},
-                {"revision", pointer->snapshot.revision},
-                {"key", metric.key},
-                {"value", JsonValue(metric.value)},
-                {"unit", metric.unit},
-                {"availability", metric.availability},
-                {"reason", metric.reason},
-                {"measurement_point", metric.measurement_point},
-                {"definition_version", pointer->definition_version},
-            };
-            jsonl << line.dump() << '\n';
+            // Preserve nlohmann::json's lexical key order and typed formatting;
+            // text escaping/UTF-8 validation and doubles use the same helpers
+            // as the checkpoint path. Only the per-row JSON tree is removed.
+            json_row.clear();
+            json_row += "{\"availability\":";
+            AppendJsonString(json_row, metric.availability);
+            json_row += definition;
+            AppendJsonString(json_row, metric.key);
+            json_row += ",\"measurement_point\":";
+            AppendJsonString(json_row, metric.measurement_point);
+            json_row += ",\"reason\":";
+            AppendJsonString(json_row, metric.reason);
+            json_row += metadata;
+            AppendJsonString(json_row, metric.unit);
+            json_row += ",\"value\":";
+            AppendJsonValue(json_row, metric.value);
+            json_row += '}';
+            jsonl << json_row << '\n';
+            csv_cells.clear();
+            AppendCsvCell(csv_cells, metric.key);
+            csv_cells += ',';
+            AppendCsvCell(csv_cells, CsvValue(metric.value));
+            csv_cells += ',';
+            AppendCsvCell(csv_cells, metric.unit);
+            csv_cells += ',';
+            AppendCsvCell(csv_cells, metric.availability);
+            csv_cells += ',';
+            AppendCsvCell(csv_cells, metric.reason);
+            csv_cells += ',';
+            AppendCsvCell(csv_cells, metric.measurement_point);
+            csv_cells += ',';
             csv << pointer->captured_utc_ms << ','
                 << pointer->snapshot.session_generation << ','
                 << pointer->snapshot.revision << ','
-                << CsvCell(metric.key) << ','
-                << CsvCell(CsvValue(metric.value)) << ','
-                << CsvCell(metric.unit) << ','
-                << CsvCell(metric.availability) << ','
-                << CsvCell(metric.reason) << ','
-                << CsvCell(metric.measurement_point) << ','
+                << csv_cells
                 << pointer->definition_version << "\r\n";
         }
     }
@@ -2710,7 +2728,10 @@ void TelemetryHistoryStore::WorkerContext::HandleSnapshot(Job job) {
                 // Charging it here evicts retained snapshots based on a second
                 // buffer's size and overstates the memory exposed to the UI.
                 const auto charge = sizeof(SafeTelemetryRecord) +
-                    SnapshotRetainedBytes(record->snapshot) +
+                    // Snapshot is embedded in the record's fixed storage.
+                    // Capacity charges remain conservative, including SSO.
+                    SnapshotDynamicRetainedBytes(record->snapshot) +
+                    record->anonymous_session_id.capacity() + 1 +
                     StabilityRetainedBytes(record->stability);
                 if (!current_records_.empty() &&
                     current_records_.back().record->source_utc_ms / 1000 == bucket) {

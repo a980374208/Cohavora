@@ -246,6 +246,11 @@ void TelemetryPanelModel::Reconcile(std::span<const SafeTelemetryRecordPtr> reco
     MergeChartHistory();
 }
 PanelFramePtr TelemetryPanelModel::BuildFrame(int windowSeconds, TelemetryClock::time_point now) {
+    return BuildMutableFrame(windowSeconds, now);
+}
+
+std::shared_ptr<PanelFrame> TelemetryPanelModel::BuildMutableFrame(
+        int windowSeconds, TelemetryClock::time_point now) {
     auto frame = std::make_shared<PanelFrame>();
     const int seconds=historySeconds_ ? historySeconds_ : (windowSeconds==0?300:std::clamp(windowSeconds,1,300));
     frame->end = now; frame->begin = now-std::chrono::seconds(seconds);

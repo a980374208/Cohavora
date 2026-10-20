@@ -48,7 +48,7 @@ void TelemetryPanelController::Publish(bool forceMemory) {
         if(const auto pipeline=livekit::diagnostic::InstalledBusinessPipeline())
             model_.ReconcileTimeline(pipeline->RecentTimeline(key_.anonymousId,key_.generation));
     }
-    auto frame=std::make_shared<PanelFrame>(*model_.BuildFrame(seconds_,now));
+    auto frame=model_.BuildMutableFrame(seconds_,now);
     bool refresh=forceMemory || !previous_ || frame->waiting || now-memoryPublishedAt_>=std::chrono::seconds(5);
     for(auto id:{MetricId::PrivateMemory,MetricId::WorkingSet}) {
         const auto i=static_cast<size_t>(id);

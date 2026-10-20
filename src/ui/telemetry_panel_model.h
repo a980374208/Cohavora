@@ -103,6 +103,11 @@ public:
     void ReconcileTimeline(const livekit::diagnostic::TimelineSnapshot& timeline);
     std::size_t RetainedBytes() const;
 private:
+    friend class TelemetryPanelController;
+    // The controller adjusts memory presentation before publishing immutable
+    // ownership. Never hand this mutable builder to a frame consumer.
+    std::shared_ptr<PanelFrame> BuildMutableFrame(
+        int windowSeconds, TelemetryClock::time_point now);
     struct WindowSample {
         TelemetryClock::time_point begin{}, end{};
         std::uint64_t scope = 0, bindings = 0, fineBindings = 0;

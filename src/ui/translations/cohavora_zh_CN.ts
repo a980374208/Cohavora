@@ -4,6 +4,22 @@
 <context>
     <name>MeetingUI</name>
     <message>
+        <source>Clipboard changed. Try copying again.</source>
+        <translation>剪贴板已更新，请重新复制。</translation>
+    </message>
+    <message>
+        <source>Copied logs to clipboard.</source>
+        <translation>日志已复制到剪贴板。</translation>
+    </message>
+    <message>
+        <source>Clipboard is busy. Try copying again.</source>
+        <translation>剪贴板正忙，请重新复制。</translation>
+    </message>
+    <message>
+        <source>Retrying clipboard copy...</source>
+        <translation>正在重试复制到剪贴板…</translation>
+    </message>
+    <message>
         <source>Security</source>
         <translation>安全</translation>
     </message>

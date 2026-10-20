@@ -58,6 +58,7 @@ public slots:
 
 protected:
 	void resizeEvent(QResizeEvent *e) override;
+	void showEvent(QShowEvent *e) override;
 	void closeEvent(QCloseEvent *e) override;
 
 private:
@@ -68,9 +69,6 @@ private:
 		LogCategory category;
 		QString tag;
 		QString message;
-		QString catName;
-		QString formattedHtml;
-		QString fullText;
 		QString severity;
 		QString component;
 		QString sessionId;
@@ -100,13 +98,22 @@ private:
 	static std::shared_ptr<SharedQueue> sharedQueue();
 
 	void initUi();
+	void copyTextToClipboard(QString text);
+	void tryCopyTextToClipboard(QString text, quint64 generation,
+		quint64 revision, int attempt);
+	quint64 clipboardRevision() const;
+	quint64 _clipboardCopyGeneration = 0;
+	quint64 _clipboardRevision = 0;
+	bool _clipboardCopyPending = false;
+	QMetaObject::Connection _clipboardChangeConnection;
 	static void offer(const std::shared_ptr<SharedQueue> &queue, PendingEntry entry);
 	void appendVisible(PendingEntry entry);
-	void renderVisible(QElapsedTimer &elapsed);
+	void renderVisible(QElapsedTimer &elapsed, bool allowHidden = false);
 	void trimVisible();
-	QString formatLogHtml(const QString &timeStr, LogCategory category, const QString &tag, const QString &message, QString *outCatName = nullptr);
-	void rebuildLogView();
+	QString formatLogHtml(const QString &timeStr, LogCategory category, const QString &tag, const QString &message);
+	void rebuildLogView(bool allowHidden = false);
 	bool matchesFilter(const LogEntry &entry) const;
+	void refreshStatus();
 	void showStorageMessage(QString message);
 
 	const std::filesystem::path _diagnosticRoot;
@@ -128,6 +135,9 @@ private:
 	QPushButton *_clearSavedBtn = nullptr;
 	QLabel *_storageStatusLabel = nullptr;
 	std::chrono::steady_clock::time_point _storageMessageUntil{};
+	QString _pendingStorageMessage;
+	std::function<void()> _refreshThemeProjection;
+	bool _pendingRebuild = false;
 
 	std::deque<LogEntry> _logEntries;
 	std::deque<quint64> _visibleIds;
