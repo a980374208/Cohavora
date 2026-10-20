@@ -4,9 +4,14 @@
 #include <QtCore/QPointer>
 #include <QtCore/QTimer>
 #include <QtGui/QAccessible>
+#include <QtGui/QHelpEvent>
+#include <QtGui/QTextDocument>
 #include <QtWidgets/QAccessibleWidget>
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QListView>
+#include <QtWidgets/QStylePainter>
+#include <QtWidgets/QStyledItemDelegate>
+#include <QtWidgets/QToolTip>
 
 namespace MeetingUI {
 class WhiteboardSelectionView final : public QListView {
@@ -45,6 +50,108 @@ public:
 };
 
 namespace {
+class ElidedComboBox final : public QComboBox {
+public:
+    explicit ElidedComboBox(QWidget *parent) : QComboBox(parent) {
+        setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+        setMinimumContentsLength(18);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
+
+    void showPopup() override {
+        // Qt's popup can otherwise grow to the longest model item, even when
+        // the closed combo has a bounded size hint. Keep the accessible view.
+        auto *popup = view()->window();
+        if (popup->windowType() == Qt::Popup) {
+            popup->setMinimumWidth(0);
+            popup->setMaximumWidth(width());
+        }
+        QComboBox::showPopup();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override {
+        QStyleOptionComboBox option;
+        initStyleOption(&option);
+        QStylePainter painter(this);
+        painter.setPen(palette().color(QPalette::Text));
+        painter.drawComplexControl(QStyle::CC_ComboBox, option);
+        if (!isEditable()) option.currentText = elidedText(option);
+        painter.drawControl(QStyle::CE_ComboBoxLabel, option);
+    }
+
+    bool event(QEvent *event) override {
+        if (event->type() == QEvent::ToolTip && !isEditable()) {
+            QStyleOptionComboBox option;
+            initStyleOption(&option);
+            if (elidedText(option) != option.currentText) {
+                const auto *help = static_cast<QHelpEvent *>(event);
+                // A window title may contain HTML-like text. Always show it
+                // literally, and read it on demand after blocked model updates.
+                QToolTip::showText(help->globalPos(),
+                    Qt::convertFromPlainText(option.currentText), this);
+            } else {
+                QToolTip::hideText();
+            }
+            event->accept();
+            return true;
+        }
+        return QComboBox::event(event);
+    }
+
+private:
+    QString elidedText(const QStyleOptionComboBox &option) const {
+        const auto field = style()->subControlRect(QStyle::CC_ComboBox,
+            &option, QStyle::SC_ComboBoxEditField, this);
+        const int iconWidth = option.currentIcon.isNull() ? 0 : option.iconSize.width() + 4;
+        return option.fontMetrics.elidedText(option.currentText, Qt::ElideRight,
+            qMax(0, field.width() - iconWidth - 4));
+    }
+};
+
+class ElidedChoiceDelegate final : public QStyledItemDelegate {
+public:
+    explicit ElidedChoiceDelegate(QComboBox *combo) : QStyledItemDelegate(combo), combo_(combo) {}
+
+    QSize sizeHint(const QStyleOptionViewItem &option, const QModelIndex &index) const override {
+        auto size = QStyledItemDelegate::sizeHint(option, index);
+        // QListView otherwise keeps each item's full text width even when its
+        // popup and horizontal scroll bar are constrained, defeating elision.
+        const auto *viewport = combo_ ? combo_->view()->viewport() : nullptr;
+        if (viewport && viewport->width() > 0)
+            size.setWidth(qMin(size.width(), viewport->width()));
+        return size;
+    }
+
+    bool helpEvent(QHelpEvent *event, QAbstractItemView *view,
+            const QStyleOptionViewItem &option, const QModelIndex &index) override {
+        if (event && event->type() == QEvent::ToolTip && view && index.isValid()) {
+            QStyleOptionViewItem item(option);
+            initStyleOption(&item, index);
+            const auto textRect = view->style()->subElementRect(
+                QStyle::SE_ItemViewItemText, &item, view);
+            if (item.fontMetrics.elidedText(item.text, Qt::ElideRight,
+                    textRect.width()) != item.text) {
+                QToolTip::showText(event->globalPos(), Qt::convertFromPlainText(item.text),
+                    view->viewport(), option.rect);
+            } else {
+                QToolTip::hideText();
+            }
+            event->accept();
+            return true;
+        }
+        return QStyledItemDelegate::helpEvent(event, view, option, index);
+    }
+
+protected:
+    void initStyleOption(QStyleOptionViewItem *option, const QModelIndex &index) const override {
+        QStyledItemDelegate::initStyleOption(option, index);
+        option->textElideMode = Qt::ElideRight;
+    }
+private:
+    QPointer<QComboBox> combo_;
+};
+
 class AccessibleOption final : public QAccessibleInterface,
         public QAccessibleTableCellInterface, public QAccessibleActionInterface {
 public:
@@ -204,6 +311,17 @@ void configureAccessibleComboBox(QComboBox *combo) {
 QComboBox *createAccessibleComboBox(QWidget *parent) {
     auto *combo = new QComboBox(parent);
     configureAccessibleComboBox(combo);
+    return combo;
+}
+QComboBox *createElidedAccessibleComboBox(QWidget *parent) {
+    auto *combo = new ElidedComboBox(parent);
+    configureAccessibleComboBox(combo);
+    auto *view = static_cast<QListView *>(combo->view());
+    view->setTextElideMode(Qt::ElideRight);
+    view->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    view->setResizeMode(QListView::Adjust);
+    view->setWordWrap(false);
+    combo->setItemDelegate(new ElidedChoiceDelegate(combo));
     return combo;
 }
 QComboBox *createAccessibleWhiteboardComboBox(QWidget *parent) {

@@ -1644,10 +1644,37 @@ QLabel[uiStyle="meeting-room-window-recoverybanner-4"][uiStyle="meeting-room-win
 }
 
 [uiStyle="meeting-room-window-screensharebanner"][uiStyle="meeting-room-window-screensharebanner"][uiStyle="meeting-room-window-screensharebanner"],
-[uiStyle="meeting-room-window-screensharebanner"] * {
-    background: @success@;
-    color: @on-accent@;
-    font-weight: bold;
+[uiStyle="meeting-room-window-screensharebanner"] QLabel {
+    background: @accent-soft@;
+    color: @text@;
+    border-bottom: 1px solid @border@;
+    font-weight: 500;
+}
+
+[uiStyle="meeting-room-window-screensharebanner"] QPushButton {
+    min-height: 28px;
+    background: @surface@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 5px;
+    padding: 0 12px;
+    font-weight: 500;
+}
+
+[uiStyle="meeting-room-window-screensharebanner"] QPushButton:hover,
+[uiStyle="meeting-room-window-screensharebanner"] QPushButton:focus {
+    background: @hover@;
+    border-color: @accent@;
+}
+
+[uiStyle="meeting-room-window-screensharebanner"] QPushButton:pressed {
+    background: @pressed@;
+}
+
+[uiStyle="meeting-room-window-screensharebanner"] QPushButton:disabled {
+    background: @surface-alt@;
+    color: @text-muted@;
+    border-color: @border@;
 }
 
 QWidget[uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][uiStyle="participants-sidebar-widget-this"][objectName="ParticipantsSidebar"],
@@ -1778,6 +1805,83 @@ QListView[uiStyle="schedule-widget-listview"][uiStyle="schedule-widget-listview"
 QListView[uiStyle="schedule-widget-listview"][uiStyle="schedule-widget-listview"][uiStyle="schedule-widget-listview"]::item,
 [uiStyle="schedule-widget-listview"] QListView::item {
     background: transparent;
+}
+
+/* The source picker uses native QComboBox/QDialogButtonBox controls. Set both
+   foreground and background so Windows cannot keep a light native surface. */
+[uiStyle="screen-share-picker"] QWidget {
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+    color: @text@;
+}
+
+[uiStyle="screen-share-picker"] QComboBox {
+    min-height: 34px;
+    padding: 0 36px 0 10px;
+    border: 1px solid @border@;
+    border-radius: 5px;
+    background: @surface@;
+    color: @text@;
+}
+
+[uiStyle="screen-share-picker"] QComboBox:hover,
+[uiStyle="screen-share-picker"] QComboBox:focus {
+    border-color: @accent@;
+}
+
+[uiStyle="screen-share-picker"] QComboBox:disabled {
+    background: @surface-alt@;
+    color: @text-muted@;
+    border-color: @border@;
+}
+
+[uiStyle="screen-share-picker"] QPushButton {
+    min-width: 76px;
+    min-height: 34px;
+    padding: 0 16px;
+    border: 1px solid @border@;
+    border-radius: 5px;
+    background: @surface@;
+    color: @text@;
+}
+
+[uiStyle="screen-share-picker"] QPushButton:hover,
+[uiStyle="screen-share-picker"] QPushButton:focus {
+    border-color: @accent@;
+    background: @hover@;
+}
+
+[uiStyle="screen-share-picker"] QPushButton:pressed {
+    background: @pressed@;
+}
+
+[uiStyle="screen-share-picker"] QPushButton#screenShareAccept,
+[uiStyle="screen-share-picker"] QPushButton#screenShareQualityApply {
+    background: @accent@;
+    color: @on-accent@;
+    border-color: @accent@;
+}
+
+[uiStyle="screen-share-picker"] QPushButton#screenShareAccept:hover,
+[uiStyle="screen-share-picker"] QPushButton#screenShareAccept:focus,
+[uiStyle="screen-share-picker"] QPushButton#screenShareQualityApply:hover,
+[uiStyle="screen-share-picker"] QPushButton#screenShareQualityApply:focus {
+    background: @accent-hover@;
+    border-color: @accent-hover@;
+}
+
+[uiStyle="screen-share-picker"] QPushButton#screenShareAccept:pressed,
+[uiStyle="screen-share-picker"] QPushButton#screenShareQualityApply:pressed {
+    background: @accent-pressed@;
+    border-color: @accent-pressed@;
+}
+
+[uiStyle="screen-share-picker"] QPushButton:disabled,
+[uiStyle="screen-share-picker"] QPushButton#screenShareAccept:disabled,
+[uiStyle="screen-share-picker"] QPushButton#screenShareQualityApply:disabled {
+    background: @surface-alt@;
+    color: @text-muted@;
+    border-color: @border@;
 }
 
 QDialog[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsDialog"],

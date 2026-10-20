@@ -5220,7 +5220,9 @@ void MeetingRoomWindow::updateVideoLayout() {
 		_videoPagingControls->move(
 			std::max(8, stageW - _videoPagingControls->width() - 12),
 			std::max(8, stageH - _videoPagingControls->height() - 12));
-		_videoPagingControls->setVisible(_acceptedVideoPlan.page_count > 1);
+		_videoPagingControls->setVisible(
+			_acceptedVideoPlan.mode == livekit::VideoLayoutMode::Grid ||
+			_acceptedVideoPlan.page_count > 1);
 		_videoPagingControls->raise();
 	}
 	VideoTileWidget *pinnedTile = nullptr;
@@ -5575,11 +5577,10 @@ void MeetingRoomWindow::handleScreenShareSources(
 	dialog->setWindowFlag(Qt::WindowContextHelpButtonHint, false);
 	dialog->setWindowTitle(QCoreApplication::translate("MeetingUI", "Select a Source to Share"));
 	AppTheme::setTone(*dialog, AppTheme::Tone::Dark);
-	AppTheme::makeDialogAdaptive(*dialog, QSize(520, 360));
 	auto *layout = new QVBoxLayout(dialog);
 	auto *sourceLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Select a screen or window (video only):"), dialog);
 	layout->addWidget(sourceLabel);
-	auto *sourceCombo = createAccessibleComboBox(dialog);
+	auto *sourceCombo = createElidedAccessibleComboBox(dialog);
 	sourceCombo->setObjectName(QStringLiteral("screenShareSource"));
 	sourceCombo->setAccessibleName(QCoreApplication::translate("MeetingUI", "Share source"));
 	sourceLabel->setBuddy(sourceCombo);
@@ -5593,7 +5594,7 @@ void MeetingRoomWindow::handleScreenShareSources(
 	layout->addWidget(sourceCombo);
 	auto *resolutionLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Screen share resolution"), dialog);
 	layout->addWidget(resolutionLabel);
-	auto *resolutionCombo = createAccessibleComboBox(dialog);
+	auto *resolutionCombo = createElidedAccessibleComboBox(dialog);
 	resolutionCombo->setObjectName(QStringLiteral("screenShareStartResolution"));
 	resolutionCombo->setAccessibleName(resolutionLabel->text());
 	resolutionLabel->setBuddy(resolutionCombo);
@@ -5613,7 +5614,7 @@ void MeetingRoomWindow::handleScreenShareSources(
 	layout->addWidget(resolutionCombo);
 	auto *fpsLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Screen share frame rate"), dialog);
 	layout->addWidget(fpsLabel);
-	auto *fpsCombo = createAccessibleComboBox(dialog);
+	auto *fpsCombo = createElidedAccessibleComboBox(dialog);
 	fpsCombo->setObjectName(QStringLiteral("screenShareStartFps"));
 	fpsCombo->setAccessibleName(fpsLabel->text());
 	fpsLabel->setBuddy(fpsCombo);
@@ -5626,6 +5627,9 @@ void MeetingRoomWindow::handleScreenShareSources(
 	layout->addWidget(buttons);
 	buttons->button(QDialogButtonBox::Ok)->setObjectName(QStringLiteral("screenShareAccept"));
 	buttons->button(QDialogButtonBox::Cancel)->setObjectName(QStringLiteral("screenShareCancel"));
+	AppTheme::setStyleVariant(*dialog, "screen-share-picker");
+	AppTheme::makeDialogAdaptive(*dialog, QSize(520, 360));
+	dialog->setMaximumWidth(560);
 	connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
 	connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
 	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
@@ -5765,7 +5769,9 @@ void MeetingRoomWindow::applyAcceptedVideoDemandPlan(
 	}
 	if (_videoPagingControls) {
 		_videoPagingControls->setVisible(
-			isVideoStageVisible() && _acceptedVideoPlan.page_count > 1);
+			isVideoStageVisible() &&
+			(_acceptedVideoPlan.mode == livekit::VideoLayoutMode::Grid ||
+			 _acceptedVideoPlan.page_count > 1));
 	}
 	syncVisibleRemoteTiles();
 	// Presentations can arrive before the accepted plan creates their tiles.
@@ -6063,10 +6069,9 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
             dialog->setObjectName(QStringLiteral("screenShareQualityDialog"));
             dialog->setWindowTitle(QCoreApplication::translate("MeetingUI", "Screen share quality"));
             AppTheme::setTone(*dialog, AppTheme::Tone::Dark);
-            AppTheme::makeDialogAdaptive(*dialog, QSize(420, 260));
             auto* layout = new QVBoxLayout(dialog);
             layout->addWidget(new QLabel(QCoreApplication::translate("MeetingUI", "Resolution (keeps aspect ratio; smaller sources are not enlarged)"), dialog));
-            auto* resolution = createAccessibleComboBox(dialog);
+            auto* resolution = createElidedAccessibleComboBox(dialog);
             resolution->setObjectName(QStringLiteral("activeScreenShareResolution"));
             resolution->setAccessibleName(QCoreApplication::translate("MeetingUI", "Screen share resolution"));
             const auto pixels = state.source_kind == livekit::DesktopSourceKind::Screen && state.annotation_binding
@@ -6077,7 +6082,7 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
             populateScreenShareResolutionChoices(*resolution, pixels);
             selectScreenShareResolution(*resolution, static_cast<int>(state.requested_quality.resolution));
             layout->addWidget(resolution);
-            auto* fps = createAccessibleComboBox(dialog);
+            auto* fps = createElidedAccessibleComboBox(dialog);
             fps->setObjectName(QStringLiteral("activeScreenShareFps"));
             for (int rate : {15, 20, 30}) fps->addItem(QString::number(rate) + " FPS", rate);
             fps->setCurrentIndex(fps->findData(state.requested_quality.fps));
@@ -6085,6 +6090,9 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
             auto* buttons = new QDialogButtonBox(QDialogButtonBox::Apply | QDialogButtonBox::Close, dialog);
             layout->addWidget(buttons);
             buttons->button(QDialogButtonBox::Apply)->setObjectName(QStringLiteral("screenShareQualityApply"));
+            AppTheme::setStyleVariant(*dialog, "screen-share-picker");
+            AppTheme::makeDialogAdaptive(*dialog, QSize(420, 260));
+            dialog->setMaximumWidth(560);
             connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, dialog, [this, resolution, fps, dialog] {
                 if (_coordinator) _coordinator->setScreenShareQuality({static_cast<livekit::ScreenShareResolution>(resolution->currentData().toInt()), fps->currentData().toInt()});
                 dialog->accept();
