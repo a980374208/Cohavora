@@ -29,6 +29,59 @@ constexpr std::size_t kMaximumManifestBytes = kTelemetryCheckpointMaximumManifes
 constexpr std::size_t kMaximumSegmentBytes = 4 * 1024 * 1024;
 constexpr std::size_t kMaximumSegments = 4096;
 
+thread_local TelemetryCheckpointWork* active_work = nullptr;
+
+std::optional<std::uint64_t> CurrentThreadCpu100ns() noexcept {
+#if defined(_WIN32)
+    FILETIME birth{}, exit{}, kernel{}, user{};
+    if (GetThreadTimes(GetCurrentThread(), &birth, &exit, &kernel, &user)) {
+        const auto ticks = [](FILETIME value) {
+            return (static_cast<std::uint64_t>(value.dwHighDateTime) << 32) |
+                value.dwLowDateTime;
+        };
+        return ticks(kernel) + ticks(user);
+    }
+#endif
+    return std::nullopt;
+}
+
+class CheckpointWorkScope final {
+public:
+    CheckpointWorkScope(TelemetryCheckpointWork* requested, bool append)
+        : previous_(active_work) {
+        if (!active_work) active_work = requested;
+        if (!active_work) return;
+        if (append) ++active_work->append_calls;
+        else ++active_work->inspect_calls;
+        if (!previous_) {
+            ++active_work->operations;
+            began_ = std::chrono::steady_clock::now();
+            cpu_began_ = CurrentThreadCpu100ns();
+        }
+    }
+    ~CheckpointWorkScope() {
+        if (active_work && !previous_) {
+            const auto cpu_end = CurrentThreadCpu100ns();
+            const auto elapsed = static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - began_).count());
+            active_work->operation_wall_ns += elapsed;
+            active_work->operation_max_wall_ns = (std::max)(
+                active_work->operation_max_wall_ns, elapsed);
+            if (cpu_began_ && cpu_end && *cpu_end >= *cpu_began_)
+                active_work->thread_cpu_100ns += *cpu_end - *cpu_began_;
+            else ++active_work->thread_cpu_failures;
+        }
+        active_work = previous_;
+    }
+    CheckpointWorkScope(const CheckpointWorkScope&) = delete;
+    CheckpointWorkScope& operator=(const CheckpointWorkScope&) = delete;
+private:
+    TelemetryCheckpointWork* previous_;
+    std::chrono::steady_clock::time_point began_{};
+    std::optional<std::uint64_t> cpu_began_;
+};
+
 using Validated = std::tuple<std::string, std::uint64_t,
                              std::uint64_t, std::uint64_t>;
 class ValidationCache final {
@@ -216,8 +269,17 @@ std::optional<std::uint64_t> OwnedBytes(const std::filesystem::path& root) {
 
 std::string Sha256(std::string_view content) {
     std::array<unsigned char, SHA256_DIGEST_LENGTH> digest{};
+    const auto began = active_work ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
     SHA256(reinterpret_cast<const unsigned char*>(content.data()),
            content.size(), digest.data());
+    if (active_work) {
+        ++active_work->hash_calls;
+        active_work->hash_bytes += content.size();
+        active_work->hash_wall_ns += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                std::chrono::steady_clock::now() - began).count());
+    }
     constexpr char digits[] = "0123456789abcdef";
     std::string result;
     result.reserve(digest.size() * 2);
@@ -230,6 +292,7 @@ std::string Sha256(std::string_view content) {
 
 bool ReadBounded(const std::filesystem::path& path, std::size_t maximum,
                  std::string& content) {
+    if (active_work) ++active_work->read_calls;
     std::error_code error;
     if (std::filesystem::is_symlink(path, error) || error ||
         !std::filesystem::is_regular_file(path, error) || error) return false;
@@ -247,16 +310,23 @@ bool ReadBounded(const std::filesystem::path& path, std::size_t maximum,
     std::size_t offset = 0;
     while (offset < content.size()) {
         DWORD got = 0;
-        if (!ReadFile(h, content.data() + offset, static_cast<DWORD>(content.size()-offset), &got, nullptr) || !got) return false;
+        const bool ok = ReadFile(h, content.data() + offset,
+            static_cast<DWORD>(content.size()-offset), &got, nullptr) != 0;
+        if (active_work) active_work->read_bytes += got;
+        if (!ok || !got) return false;
         offset += got;
     }
     char extra; DWORD got = 0;
-    return ReadFile(h, &extra, 1, &got, nullptr) && got == 0;
+    const bool ok = ReadFile(h, &extra, 1, &got, nullptr) != 0;
+    if (active_work) active_work->read_bytes += got;
+    return ok && got == 0;
 #else
     std::ifstream input(path, std::ios::binary);
     if (!input) return false;
     content.resize(static_cast<std::size_t>(size));
     input.read(content.data(), static_cast<std::streamsize>(size));
+    if (active_work && input.gcount() > 0)
+        active_work->read_bytes += static_cast<std::uint64_t>(input.gcount());
     return input.gcount() == static_cast<std::streamsize>(size) &&
         !input.bad() && input.peek() == std::char_traits<char>::eof();
 #endif
@@ -307,9 +377,11 @@ bool WriteText(const std::filesystem::path& path, std::string_view content) {
 #endif
 }
 
-TelemetryCheckpointStatus Invalid(std::string reason) {
+TelemetryCheckpointStatus Invalid(std::string reason,
+    std::optional<TelemetryCheckpointFailure> failure = std::nullopt) {
     TelemetryCheckpointStatus result;
     result.reason = std::move(reason);
+    result.failure = std::move(failure);
     return result;
 }
 
@@ -443,7 +515,8 @@ TelemetryCheckpointRecord MakeTelemetryCheckpointRecord(
 }
 
 TelemetryCheckpointStatus InspectTelemetryCheckpoint(
-    const std::filesystem::path& directory) {
+    const std::filesystem::path& directory, TelemetryCheckpointWork* work) {
+    const CheckpointWorkScope observation{work, false};
     try {
         std::error_code error;
         if (std::filesystem::is_symlink(directory, error) || error ||
@@ -504,13 +577,28 @@ TelemetryCheckpointStatus InspectTelemetryCheckpoint(
             if (first <= previous_revision || last < first ||
                 file != SegmentName(last) || !names.insert(file).second ||
                 expected_size == 0 || expected_size > kMaximumSegmentBytes ||
-                expected_hash.size() != SHA256_DIGEST_LENGTH * 2)
+                expected_hash.size() != SHA256_DIGEST_LENGTH * 2 ||
+                !std::all_of(expected_hash.begin(), expected_hash.end(), [](char ch) {
+                    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+                }))
                 return Invalid("segment_index_invalid");
             std::string payload;
-            if (!ReadBounded(directory / file, kMaximumSegmentBytes, payload) ||
-                payload.size() != expected_size || payload.back() != '\n' ||
-                Sha256(payload) != expected_hash)
-                return Invalid("segment_missing_or_corrupt");
+            const auto invalid_segment = [&](std::string actual_hash = {}) {
+                TelemetryCheckpointFailure failure;
+                failure.segment_file = file;
+                failure.expected_sha256 = expected_hash;
+                failure.actual_sha256 = std::move(actual_hash);
+                failure.segment_first_revision = first;
+                failure.segment_last_revision = last;
+                return Invalid("segment_missing_or_corrupt", std::move(failure));
+            };
+            if (!ReadBounded(directory / file, kMaximumSegmentBytes, payload))
+                return invalid_segment();
+            const auto actual_hash = Sha256(payload);
+            if (payload.size() != expected_size || payload.empty() ||
+                payload.back() != '\n' || actual_hash != expected_hash) {
+                return invalid_segment(actual_hash);
+            }
             // Always reread and SHA-256 verify the bytes above. Only reuse the
             // expensive JSON validation for the same verified content AND
             // index constraints. File names, mtimes and sizes are not trust
@@ -575,7 +663,8 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
     std::uint64_t maximum_report_bytes,
     std::string_view process_run_id,
     std::uint64_t maximum_history_bytes,
-    const TelemetryCheckpointControl* control) {
+    const TelemetryCheckpointControl* control, TelemetryCheckpointWork* work) {
+    const CheckpointWorkScope observation{work, true};
     TelemetryCheckpointResult result;
     const auto stopped = [&] {
         if (!control || !control->Stopped()) return false;
@@ -650,6 +739,7 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
             const auto inspected = InspectTelemetryCheckpoint(directory);
             if (!inspected.valid || inspected.session_generation !=
                     final.generation) {
+                result.status = inspected;
                 result.reason = inspected.valid ? "session_generation_mismatch" : inspected.reason;
                 return result;
             }

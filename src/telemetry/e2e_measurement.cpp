@@ -133,6 +133,7 @@ bool ValidPolicy(const ClockCalibrationPolicy& policy) {
     return policy.maximum_samples >= 2 &&
         policy.minimum_samples >= 2 &&
         policy.minimum_samples <= policy.maximum_samples &&
+        policy.minimum_span_us >= 0 &&
         policy.maximum_age_us > 0 &&
         policy.maximum_uncertainty_us > 0 &&
         std::isfinite(policy.maximum_absolute_drift_ppm) &&
@@ -147,6 +148,58 @@ std::int64_t SaturatingCeil(long double value) {
     }
     if (value <= 0.0L) return 0;
     return static_cast<std::int64_t>(std::ceil(value));
+}
+
+std::optional<ClockMappedTime> MapClockInterval(
+        const ClockMapping& mapping, long double remote_time_us,
+        bool enforce_gate) {
+    const long double rate = 1.0L +
+        static_cast<long double>(mapping.drift_ppm) / 1'000'000.0L;
+    if (!std::isfinite(remote_time_us) || !std::isfinite(rate) || rate <= 0.0L ||
+        !std::isfinite(mapping.minimum_rate) || mapping.minimum_rate <= 0.0 ||
+        !std::isfinite(mapping.maximum_rate) ||
+        mapping.maximum_rate < mapping.minimum_rate ||
+        !std::isfinite(mapping.minimum_offset_us) ||
+        !std::isfinite(mapping.maximum_offset_us) ||
+        mapping.maximum_offset_us < mapping.minimum_offset_us) return std::nullopt;
+
+    const long double reference = mapping.reference_local_us;
+    // Quantization plus one microsecond of numerical allowance. This is not
+    // a hardware accuracy claim or a bound on future frequency wander.
+    const long double margin =
+        static_cast<long double>(mapping.timestamp_resolution_us) + 1.0L;
+    const long double point = std::round(reference +
+        (remote_time_us - reference - mapping.offset_us) / rate);
+    long double lower = std::numeric_limits<long double>::infinity();
+    long double upper = -std::numeric_limits<long double>::infinity();
+    for (const double candidate_rate : {mapping.minimum_rate, mapping.maximum_rate}) {
+        for (const double offset : {mapping.minimum_offset_us, mapping.maximum_offset_us}) {
+            lower = std::min(lower, reference +
+                (remote_time_us - reference - margin - offset) / candidate_rate);
+            upper = std::max(upper, reference +
+                (remote_time_us - reference + margin - offset) / candidate_rate);
+        }
+    }
+    if (!std::isfinite(point) || !std::isfinite(lower) || !std::isfinite(upper)) {
+        return std::nullopt;
+    }
+    const auto uncertainty = SaturatingCeil(std::max({
+        static_cast<long double>(mapping.fit_uncertainty_us),
+        point - std::floor(lower), std::ceil(upper) - point}));
+    const long double minimum = static_cast<long double>(
+        std::numeric_limits<std::int64_t>::min());
+    const long double maximum = static_cast<long double>(
+        std::numeric_limits<std::int64_t>::max());
+    if ((enforce_gate && uncertainty > mapping.maximum_uncertainty_us) ||
+        point - uncertainty <= minimum || point + uncertainty >= maximum) {
+        return std::nullopt;
+    }
+    ClockMappedTime result;
+    result.local_time_us = static_cast<std::int64_t>(point);
+    result.uncertainty_us = uncertainty;
+    result.lower_bound_us = result.local_time_us - uncertainty;
+    result.upper_bound_us = result.local_time_us + uncertainty;
+    return result;
 }
 
 } // namespace
@@ -420,12 +473,14 @@ bool ClockCalibrator::AddExchange(const ClockExchange& exchange) {
         (static_cast<long double>(exchange.t1_remote_receive_us) +
             static_cast<long double>(exchange.t2_remote_send_us)) / 2.0L;
     Sample sample;
+    sample.exchange = exchange;
     sample.sequence = exchange.sequence;
     sample.local_midpoint_us = local_midpoint;
     sample.offset_us = remote_midpoint - local_midpoint;
     sample.round_trip_us = round_trip;
-    sample.uncertainty_us = round_trip / 2 +
-        (round_trip % 2 != 0 ? 1 : 0) + policy_.timestamp_resolution_us;
+    sample.uncertainty_us = SaturatingCeil(
+        std::ceil(static_cast<long double>(round_trip) / 2.0L) +
+        policy_.timestamp_resolution_us);
 
     samples_.push_back(sample);
     std::sort(samples_.begin(), samples_.end(), [](const Sample& a, const Sample& b) {
@@ -445,13 +500,19 @@ bool ClockCalibrator::AddExchange(const ClockExchange& exchange) {
 
 ClockMapping ClockCalibrator::Evaluate(std::int64_t now_local_us) const {
     ClockMapping result;
+    result.maximum_uncertainty_us = policy_.maximum_uncertainty_us;
+    result.timestamp_resolution_us = policy_.timestamp_resolution_us;
     result.accepted_samples = samples_.size();
     result.rejected_samples = rejected_samples_;
     if (samples_.empty()) return result;
 
     const auto& latest = samples_.back();
-    result.reference_local_us = static_cast<std::int64_t>(
-        std::llround(latest.local_midpoint_us));
+    const auto latest_elapsed = latest.exchange.t3_local_receive_us -
+        latest.exchange.t0_local_send_us;
+    result.reference_local_us = latest.exchange.t0_local_send_us +
+        latest_elapsed / 2 + latest_elapsed % 2;
+    result.calibration_span_us = SaturatingCeil(
+        latest.local_midpoint_us - samples_.front().local_midpoint_us);
     if (now_local_us < result.reference_local_us) {
         result.state = ClockCalibrationState::Invalid;
         result.reason = "local_clock_before_reference";
@@ -466,6 +527,10 @@ ClockMapping ClockCalibrator::Evaluate(std::int64_t now_local_us) const {
     if (result.age_us > policy_.maximum_age_us) {
         result.state = ClockCalibrationState::Stale;
         result.reason = "clock_mapping_stale";
+        return result;
+    }
+    if (result.calibration_span_us < policy_.minimum_span_us) {
+        result.reason = "clock_calibration_span_insufficient";
         return result;
     }
 
@@ -506,7 +571,89 @@ ClockMapping ClockCalibrator::Evaluate(std::int64_t now_local_us) const {
             uncertainty,
             std::abs(sample.offset_us - predicted) + sample.uncertainty_us);
     }
-    result.uncertainty_us = SaturatingCeil(uncertainty);
+    result.fit_uncertainty_us = SaturatingCeil(uncertainty);
+    result.uncertainty_us = result.fit_uncertainty_us;
+
+    // The causal constraints below bound an affine remote/local clock model.
+    // They do not assume network symmetry and do not use the accepted drift
+    // policy as a physical prior to narrow the interval.
+    const long double margin =
+        static_cast<long double>(policy_.timestamp_resolution_us) + 1.0L;
+    long double minimum_rate = 0.0L;
+    long double maximum_rate = std::numeric_limits<long double>::infinity();
+    for (const auto& first : samples_) {
+        for (const auto& second : samples_) {
+            const long double elapsed = static_cast<long double>(
+                first.exchange.t3_local_receive_us -
+                second.exchange.t0_local_send_us) + 2.0L * margin;
+            const long double remote_elapsed = static_cast<long double>(
+                first.exchange.t2_remote_send_us -
+                second.exchange.t1_remote_receive_us) - 2.0L * margin;
+            if (elapsed > 0.0L) {
+                minimum_rate = std::max(minimum_rate, remote_elapsed / elapsed);
+            } else if (elapsed < 0.0L) {
+                maximum_rate = std::min(maximum_rate, remote_elapsed / elapsed);
+            } else if (remote_elapsed > 0.0L) {
+                minimum_rate = 1.0L;
+                maximum_rate = 0.0L;
+            }
+        }
+    }
+    if (minimum_rate > maximum_rate || maximum_rate <= 0.0L) {
+        result.state = ClockCalibrationState::Invalid;
+        result.reason = "clock_model_inconsistent";
+        return result;
+    }
+    if (!std::isfinite(minimum_rate) || !std::isfinite(maximum_rate) ||
+        minimum_rate <= 0.0L) {
+        result.state = ClockCalibrationState::Uncertain;
+        result.reason = "clock_rate_interval_unbounded";
+        return result;
+    }
+    result.minimum_rate = std::nextafter(static_cast<double>(minimum_rate),
+        -std::numeric_limits<double>::infinity());
+    result.maximum_rate = std::nextafter(static_cast<double>(maximum_rate),
+        std::numeric_limits<double>::infinity());
+    long double minimum_offset = -std::numeric_limits<long double>::infinity();
+    long double maximum_offset = std::numeric_limits<long double>::infinity();
+    for (const auto& sample : samples_) {
+        const auto& exchange = sample.exchange;
+        const long double local_send = static_cast<long double>(
+            exchange.t0_local_send_us - result.reference_local_us) - margin;
+        const long double local_receive = static_cast<long double>(
+            exchange.t3_local_receive_us - result.reference_local_us) + margin;
+        const long double remote_send = static_cast<long double>(
+            exchange.t2_remote_send_us - result.reference_local_us) - margin;
+        const long double remote_receive = static_cast<long double>(
+            exchange.t1_remote_receive_us - result.reference_local_us) + margin;
+        minimum_offset = std::max(minimum_offset, std::min(
+            remote_send - result.minimum_rate * local_receive,
+            remote_send - result.maximum_rate * local_receive));
+        maximum_offset = std::min(maximum_offset, std::max(
+            remote_receive - result.minimum_rate * local_send,
+            remote_receive - result.maximum_rate * local_send));
+    }
+    if (!std::isfinite(minimum_offset) || !std::isfinite(maximum_offset) ||
+        minimum_offset > maximum_offset) {
+        result.state = ClockCalibrationState::Invalid;
+        result.reason = "clock_model_inconsistent";
+        return result;
+    }
+    result.minimum_offset_us = std::nextafter(static_cast<double>(minimum_offset),
+        -std::numeric_limits<double>::infinity());
+    result.maximum_offset_us = std::nextafter(static_cast<double>(maximum_offset),
+        std::numeric_limits<double>::infinity());
+    const long double rate = 1.0L +
+        static_cast<long double>(result.drift_ppm) / 1'000'000.0L;
+    const long double query_remote = result.reference_local_us +
+        static_cast<long double>(result.offset_us) + rate * result.age_us;
+    const auto query = MapClockInterval(result, query_remote, false);
+    if (!query) {
+        result.state = ClockCalibrationState::Invalid;
+        result.reason = "clock_interval_arithmetic_out_of_range";
+        return result;
+    }
+    result.uncertainty_us = query->uncertainty_us;
     if (result.uncertainty_us > policy_.maximum_uncertainty_us) {
         result.state = ClockCalibrationState::Uncertain;
         result.reason = "clock_uncertainty_exceeds_limit";
@@ -530,24 +677,7 @@ std::optional<ClockMappedTime> ClockMapping::RemoteToLocal(
     if (state != ClockCalibrationState::Valid || remote_time_us < 0) {
         return std::nullopt;
     }
-    const long double slope = static_cast<long double>(drift_ppm) / 1'000'000.0L;
-    const long double denominator = 1.0L + slope;
-    if (denominator <= 0.0L) return std::nullopt;
-    const long double remote_reference =
-        static_cast<long double>(reference_local_us) + offset_us;
-    const long double local = static_cast<long double>(reference_local_us) +
-        (static_cast<long double>(remote_time_us) - remote_reference) /
-            denominator;
-    if (!std::isfinite(local) ||
-        local < static_cast<long double>(std::numeric_limits<std::int64_t>::min()) ||
-        local > static_cast<long double>(std::numeric_limits<std::int64_t>::max())) {
-        return std::nullopt;
-    }
-    ClockMappedTime result;
-    result.local_time_us = static_cast<std::int64_t>(std::llround(local));
-    result.lower_bound_us = result.local_time_us - uncertainty_us;
-    result.upper_bound_us = result.local_time_us + uncertainty_us;
-    return result;
+    return MapClockInterval(*this, remote_time_us, true);
 }
 
 E2eMeasurementSession::E2eMeasurementSession(
@@ -740,6 +870,27 @@ E2eActionResult E2eMeasurementSession::AcceptClockResponse(
     }
     pending_probes_.erase(pending);
     return Action(E2eActionStatus::Accepted, "clock_response_accepted");
+}
+
+std::size_t E2eMeasurementSession::ExpireClockProbes(
+        std::int64_t now_local_us, std::int64_t maximum_age_us) {
+    if (now_local_us < 0 || maximum_age_us <= 0) return 0;
+    std::size_t expired = 0;
+    for (auto it = pending_probes_.begin(); it != pending_probes_.end();) {
+        if (now_local_us >= it->second.local_send_us &&
+            now_local_us - it->second.local_send_us > maximum_age_us) {
+            it = pending_probes_.erase(it);
+            ++expired;
+        } else {
+            ++it;
+        }
+    }
+    return expired;
+}
+
+void E2eMeasurementSession::ResetClockCalibration() {
+    pending_probes_.clear();
+    calibrator_.Reset();
 }
 
 E2eActionResult E2eMeasurementSession::BeginMediaProbe(
@@ -999,11 +1150,21 @@ E2eActionResult E2eMeasurementSession::AcceptMediaAck(
     measurement.uncertainty_us = mapping.uncertainty_us;
     measurement.one_way_reason = mapping.reason;
     if (mapping.state == ClockCalibrationState::Valid) {
-        const auto decode_local = mapping.RemoteToLocal(
-            acknowledgement.remote_decode_us);
-        const auto render_local = mapping.RemoteToLocal(
-            acknowledgement.remote_render_submit_us);
-        if (decode_local && render_local &&
+        const auto decode_local = MapClockInterval(mapping,
+            acknowledgement.remote_decode_us, false);
+        const auto render_local = MapClockInterval(mapping,
+            acknowledgement.remote_render_submit_us, false);
+        if (decode_local && render_local) {
+            measurement.decode_uncertainty_us = decode_local->uncertainty_us;
+            measurement.render_uncertainty_us = render_local->uncertainty_us;
+            measurement.uncertainty_us = std::max({mapping.uncertainty_us,
+                decode_local->uncertainty_us, render_local->uncertainty_us});
+        }
+        if (!decode_local || !render_local ||
+            measurement.uncertainty_us > mapping.maximum_uncertainty_us) {
+            measurement.clock_state = ClockCalibrationState::Uncertain;
+            measurement.one_way_reason = "clock_event_uncertainty_exceeds_limit";
+        } else if (
             decode_local->local_time_us >= pending.times.publication_start_us &&
             render_local->local_time_us >= pending.times.capture_us &&
             render_local->local_time_us <= local_receive_us) {
@@ -1011,6 +1172,7 @@ E2eActionResult E2eMeasurementSession::AcceptMediaAck(
                 decode_local->local_time_us - pending.times.publication_start_us;
             measurement.capture_to_render_submit_us =
                 render_local->local_time_us - pending.times.capture_us;
+            measurement.clock_state = ClockCalibrationState::Valid;
             measurement.one_way_reason = "clock_mapped_media_measurements_valid";
         } else {
             measurement.one_way_reason =

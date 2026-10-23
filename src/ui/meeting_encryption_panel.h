@@ -2,6 +2,7 @@
 #include "meeting_encryption_dialog.h"
 #include "src/e2ee/media_encryption_status.h"
 #include <QtCore/QPointer>
+#include <QtCore/QTimer>
 #include <QtWidgets/QHeaderView>
 #include <QtWidgets/QTableWidget>
 #include <functional>
@@ -13,6 +14,16 @@ class MeetingEncryptionPanel final : public QWidget {
 public:
     explicit MeetingEncryptionPanel(QWidget* parent = nullptr) : QWidget(parent) {
         setObjectName(QStringLiteral("meetingEncryptionPanel"));
+        unencryptedNoticeTimer_ = new QTimer(this);
+        unencryptedNoticeTimer_->setObjectName(QStringLiteral("unencryptedNoticeTimer"));
+        unencryptedNoticeTimer_->setSingleShot(true);
+        unencryptedNoticeTimer_->setTimerType(Qt::PreciseTimer);
+        unencryptedNoticeTimer_->setInterval(20000);
+        connect(unencryptedNoticeTimer_, &QTimer::timeout, this, [this] {
+            if (required_ || !connected_) return;
+            unencryptedNoticeDismissed_ = true;
+            hide();
+        });
         AppTheme::applySurfacePalette(*this, AppTheme::Tone::Dark);
         auto* row = new QHBoxLayout(this);
         row->setContentsMargins(12, 4, 12, 4);
@@ -109,8 +120,17 @@ public:
         if (changed) label_->setText(!required ? trText("End-to-end encryption is off.") :
             connected ? trText("End-to-end encryption required; media verification pending.") :
                         trText("Waiting for connection; encryption verification pending."));
+        if (changed) {
+            unencryptedNoticeTimer_->stop();
+            restoreDismissedNotice();
+            // Start once on meeting entry. Participant/media refreshes must not
+            // extend the deadline, and encrypted/recovery states never expire.
+            if (!required && connected) unencryptedNoticeTimer_->start();
+        }
     }
     void setInstallResult(bool installed, bool canRecover) {
+        unencryptedNoticeTimer_->stop();
+        restoreDismissedNotice();
         canRecover_ = canRecover;
         recover_->setEnabled(canRecover_ && !dialog_);
         label_->setText(installed ? trText("Key installed; media verification pending.") :
@@ -148,6 +168,11 @@ public:
         populateDetails();
     }
 private:
+    void restoreDismissedNotice() {
+        if (!unencryptedNoticeDismissed_) return;
+        unencryptedNoticeDismissed_ = false;
+        show();
+    }
     void populateDetails() {
         if (!table_) return;
         table_->setRowCount(static_cast<int>(mediaStatus_.tracks.size()));
@@ -166,6 +191,7 @@ private:
     QLabel* media_ = nullptr;
     QPushButton* recover_ = nullptr;
     QPushButton* details_ = nullptr;
+    QTimer* unencryptedNoticeTimer_ = nullptr;
     QPointer<QDialog> detailsDialog_;
     QPointer<QTableWidget> table_;
     livekit::MediaEncryptionStatus mediaStatus_;
@@ -174,6 +200,7 @@ private:
     bool initialized_ = false;
     bool required_ = false;
     bool connected_ = false;
+    bool unencryptedNoticeDismissed_ = false;
     std::function<void(std::shared_ptr<livekit::MeetingSecretHandle>)> handler_;
 };
 }

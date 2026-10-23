@@ -111,6 +111,7 @@ set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 include(cmake/CohavoraAbi.cmake)
+include(cmake/CohavoraMediaDiagnostics.cmake)
 
 # Find Packages via CMake / Vcpkg
 find_package(asio CONFIG REQUIRED)
@@ -387,6 +388,8 @@ add_library(cohavora_core STATIC
 )
 
 # Local crash dumps are available only in developer configurations.
+target_link_libraries(cohavora_core PUBLIC cohavora_media_diagnostics)
+
 set_property(SOURCE
     src/telemetry/crash_evidence_provider.cpp
     APPEND PROPERTY COMPILE_DEFINITIONS

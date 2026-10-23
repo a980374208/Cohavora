@@ -775,9 +775,10 @@ TelemetryExportResult WriteTelemetryDiagnosticBundle(
             cleanup();
             return result;
         }
-        std::filesystem::rename(temporary, final, error);
-        if (error) {
-            result.reason = "atomic_replace_failed";
+        result.publication = PublishTelemetryDirectory(temporary, final, cancelled);
+        if (!result.publication.success) {
+            result.cancelled = result.publication.cancelled;
+            result.reason = result.cancelled ? "export_cancelled" : "atomic_replace_failed";
             cleanup();
             return result;
         }

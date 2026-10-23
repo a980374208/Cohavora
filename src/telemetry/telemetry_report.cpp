@@ -1217,6 +1217,10 @@ std::vector<SafeMetricRow> BuildSafeMetricRows(
           s.inbound_video_active_decode_streams < 0 ? Availability::Unknown : s.video_pipeline_availability,
           s.inbound_video_active_decode_streams < 0 ? "decode_stream_baseline_incomplete" : s.video_pipeline_reason,
           "rtc_inbound_rtp_positive_frames_decoded_delta");
+    group("video.pipeline.active_decode_streams_lower_bound",
+          s.inbound_video_active_decode_streams_lower_bound, "streams",
+          s.video_pipeline_availability, "proven_positive_decode_deltas_lower_bound",
+          "rtc_inbound_rtp_positive_frames_decoded_delta_lower_bound");
     group("video.pipeline.inbound_dropped", s.inbound_video_frames_dropped, "frames",
           s.video_pipeline_availability, s.video_pipeline_reason,
           s.video_pipeline_measurement_point);
@@ -1847,6 +1851,50 @@ std::string SerializeSafeTelemetryCheckpointRecord(
     return output;
 }
 
+TelemetryDirectoryPublication PublishTelemetryDirectory(
+    const std::filesystem::path& temporary,
+    const std::filesystem::path& final,
+    const std::shared_ptr<std::atomic_bool>& cancelled) {
+    TelemetryDirectoryPublication result;
+#if defined(_WIN32)
+    // A short-lived reader of the directory OR a child without SHARE_DELETE
+    // blocks the entire directory rename (32 or 5 respectively). Retry only
+    // these Windows sharing/locking results, on the export worker, with a
+    // 250 ms deadline. Never replace an existing destination or copy a partial
+    // tree into public view. Persistent access denial still fails the export.
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+#endif
+    for (;;) {
+        if (cancelled && cancelled->load()) {
+            result.cancelled = true;
+            return result;
+        }
+        ++result.attempts;
+#if defined(_WIN32)
+        result.success = MoveFileExW(temporary.c_str(), final.c_str(),
+            MOVEFILE_WRITE_THROUGH) != 0;
+        result.last_error = result.success ? 0 : static_cast<int>(GetLastError());
+#else
+        std::error_code error;
+        std::filesystem::rename(temporary, final, error);
+        result.success = !error;
+        result.last_error = error.value();
+#endif
+        if (result.success) return result;
+        if (!result.first_error) result.first_error = result.last_error;
+#if defined(_WIN32)
+        if (result.attempts >= 26 || std::chrono::steady_clock::now() >= deadline ||
+            (result.last_error != ERROR_SHARING_VIOLATION &&
+             result.last_error != ERROR_LOCK_VIOLATION &&
+             result.last_error != ERROR_ACCESS_DENIED)) return result;
+        Sleep(10);
+#else
+        return result;
+#endif
+    }
+}
+
+
 TelemetryExportResult WriteTelemetryReportAtomically(
     const std::vector<SafeTelemetryRecordPtr>& records,
     const std::filesystem::path& destination_root,
@@ -2038,10 +2086,11 @@ TelemetryExportResult WriteTelemetryReportAtomically(
     }
     jsonl.close();
     csv.close();
-    std::filesystem::rename(temporary, final_directory, error);
-    if (error) {
+    result.publication = PublishTelemetryDirectory(temporary, final_directory, cancelled);
+    if (!result.publication.success) {
         cleanup();
-        result.reason = "atomic_replace_failed";
+        result.cancelled = result.publication.cancelled;
+        result.reason = result.cancelled ? "export_cancelled" : "atomic_replace_failed";
         return result;
     }
     result.success = true;
@@ -2946,14 +2995,16 @@ void TelemetryHistoryStore::WorkerContext::FlushPendingReports(bool force) {
             RefreshAndPruneReports(reserve_bytes);
         if (Stopped()) return;
         const auto append_began = std::chrono::steady_clock::now();
+        TelemetryCheckpointWork checkpoint_work;
         const auto result = AppendTelemetryCheckpoint(
             root_, it->id, it->records,
             (std::min)(maximum_bytes_ / 2, 64ull * 1024ull * 1024ull),
-            process_run_id_, maximum_bytes_, control_.get());
+            process_run_id_, maximum_bytes_, control_.get(), &checkpoint_work);
         {
             const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
                 std::chrono::steady_clock::now() - append_began).count();
             std::lock_guard lock(mutex_);
+            status_.checkpoint_work.Add(checkpoint_work);
             status_.checkpoint_max_us = (std::max)(status_.checkpoint_max_us,
                 static_cast<std::uint64_t>(elapsed));
             status_.checkpoint_total_us += static_cast<std::uint64_t>(elapsed);
@@ -3018,6 +3069,17 @@ void TelemetryHistoryStore::WorkerContext::FlushPendingReports(bool force) {
             ++status_.write_failures;
             status_.availability = Availability::Invalid;
             status_.reason = "met_06_" + result.reason;
+            if (!status_.first_checkpoint_failure) {
+                auto failure = result.status.failure.value_or(TelemetryCheckpointFailure{});
+                failure.reason = result.reason;
+                failure.session_generation = it->generation;
+                failure.attempted_first_revision = it->records.front().revision;
+                failure.attempted_last_revision = it->records.back().revision;
+                failure.observed_utc_ms = UtcNowMs();
+                failure.observed_steady_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count();
+                status_.first_checkpoint_failure = std::move(failure);
+            }
             unconfirmed_commit_ = unconfirmed_commit_ || result.manifest_replaced;
             PublishStatusLocked();
         }
@@ -3059,6 +3121,7 @@ void TelemetryHistoryStore::WorkerContext::HandleExport(Job job) {
     }
     try {
         std::lock_guard lock(mutex_);
+        status_.last_export_publication = result.publication;
         if (result.success) {
             ++status_.exports_succeeded;
             status_.availability = Availability::Valid;
@@ -3189,7 +3252,12 @@ void TelemetryHistoryStore::WorkerContext::RefreshAndPruneReports(
                 }
                 TelemetryCheckpointReadLease reader(it->path());
                 if (has_lock && !reader.acquired()) continue;
-                const auto inspected = InspectTelemetryCheckpoint(it->path());
+                TelemetryCheckpointWork checkpoint_work;
+                const auto inspected = InspectTelemetryCheckpoint(it->path(), &checkpoint_work);
+                {
+                    std::lock_guard lock(mutex_);
+                    status_.checkpoint_work.Add(checkpoint_work);
+                }
                 if (!inspected.valid) {
                     if (inspected.reason == "unsupported_version")
                         ++unsupported;

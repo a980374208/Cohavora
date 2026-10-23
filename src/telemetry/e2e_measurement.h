@@ -94,8 +94,10 @@ struct ClockExchange {
 struct ClockCalibrationPolicy {
     std::size_t maximum_samples = 32;
     std::size_t minimum_samples = 3;
+    std::int64_t minimum_span_us = 0;
     std::int64_t maximum_age_us = 30'000'000;
     std::int64_t maximum_uncertainty_us = 10'000;
+    // Acceptance policy only; never used to clip the data-derived rate bounds.
     double maximum_absolute_drift_ppm = 1'000.0;
     std::int64_t timestamp_resolution_us = 1;
 };
@@ -112,6 +114,7 @@ struct ClockMappedTime {
     std::int64_t local_time_us = 0;
     std::int64_t lower_bound_us = 0;
     std::int64_t upper_bound_us = 0;
+    std::int64_t uncertainty_us = 0;
 };
 
 struct ClockMapping {
@@ -125,6 +128,16 @@ struct ClockMapping {
     std::int64_t uncertainty_us = 0;
     std::int64_t age_us = 0;
     std::int64_t best_round_trip_us = 0;
+    std::int64_t fit_uncertainty_us = 0;
+    std::int64_t calibration_span_us = 0;
+    // Causal outer bounds under an affine clock model, not a statistical CI.
+    // Rates are remote/local; offsets are remote-local at reference_local_us.
+    double minimum_rate = 0.0;
+    double maximum_rate = 0.0;
+    double minimum_offset_us = 0.0;
+    double maximum_offset_us = 0.0;
+    std::int64_t maximum_uncertainty_us = 10'000;
+    std::int64_t timestamp_resolution_us = 1;
 
     [[nodiscard]] std::optional<ClockMappedTime> RemoteToLocal(
         std::int64_t remote_time_us) const;
@@ -140,6 +153,7 @@ public:
 
 private:
     struct Sample {
+        ClockExchange exchange;
         std::uint64_t sequence = 0;
         long double local_midpoint_us = 0.0;
         long double offset_us = 0.0;
@@ -182,6 +196,8 @@ struct E2eMediaMeasurement {
     std::optional<std::uint32_t> remote_frame_height;
     ClockCalibrationState clock_state = ClockCalibrationState::WarmingUp;
     std::int64_t uncertainty_us = 0;
+    std::int64_t decode_uncertainty_us = 0;
+    std::int64_t render_uncertainty_us = 0;
     std::string one_way_reason = "clock_mapping_unavailable";
     std::string measurement_point;
 };
@@ -230,6 +246,11 @@ public:
     [[nodiscard]] E2eActionResult AcceptClockResponse(
         const E2eMessage& response,
         std::int64_t local_receive_us);
+    // Called by the serialized owner. A response to a removed nonce is late.
+    [[nodiscard]] std::size_t ExpireClockProbes(
+        std::int64_t now_local_us, std::int64_t maximum_age_us);
+    // Starts a new calibration epoch without cancelling in-flight media.
+    void ResetClockCalibration();
 
     [[nodiscard]] E2eActionResult BeginMediaProbe(
         std::string track_id,

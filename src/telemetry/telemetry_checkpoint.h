@@ -35,6 +35,7 @@ struct TelemetryCheckpointStatus {
     std::int64_t last_retained_source_utc_ms = 0;
     std::uint64_t orphan_files = 0;
     std::uint64_t orphan_bytes = 0;
+    std::optional<TelemetryCheckpointFailure> failure;
 };
 
 // Operation-owned cancellation. A successful manifest replacement is the
@@ -95,7 +96,8 @@ TelemetryCheckpointRecord MakeTelemetryCheckpointRecord(
     const SafeTelemetryRecord& record);
 
 TelemetryCheckpointStatus InspectTelemetryCheckpoint(
-    const std::filesystem::path& report_directory);
+    const std::filesystem::path& report_directory,
+    TelemetryCheckpointWork* work = nullptr);
 
 TelemetryCheckpointResult AppendTelemetryCheckpoint(
     const std::filesystem::path& root,
@@ -104,7 +106,8 @@ TelemetryCheckpointResult AppendTelemetryCheckpoint(
     std::uint64_t maximum_report_bytes = 64ull * 1024ull * 1024ull,
     std::string_view process_run_id = {},
     std::uint64_t maximum_history_bytes = 100ull * 1024ull * 1024ull,
-    const TelemetryCheckpointControl* control = nullptr);
+    const TelemetryCheckpointControl* control = nullptr,
+    TelemetryCheckpointWork* work = nullptr);
 TelemetryCheckpointResult AppendTelemetryCheckpoint(
     const std::filesystem::path& root,
     const std::vector<SafeTelemetryRecordPtr>& records,

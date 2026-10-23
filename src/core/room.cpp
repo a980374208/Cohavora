@@ -1,6 +1,7 @@
 #include "e2ee/meeting_encryption.h"
 #include <cmath>
 #include "room.h"
+#include "telemetry/callback_phase_diagnostic.h"
 #include "session_telemetry.h"
 #include "telemetry/diagnostic_pipeline.h"
 #include "webrtc_manager.h"
@@ -955,6 +956,32 @@ std::string RemoteVideoRenderTelemetryKey(
     std::string_view track_sid) {
     return "remote_render/" + std::string(participant_sid) + "/" +
         std::string(track_sid);
+}
+
+std::string RemoteMediaRecoveryIdentity(
+    const Participant& participant,
+    const TrackPublication& publication) {
+    const auto identity = participant.identity();
+    const auto target = publication.SnapshotState();
+    if (identity.empty() || target.name.empty() ||
+        target.kind == TrackKind::Unknown || target.source == TrackSource::Unknown) {
+        return {};
+    }
+    // Use the whole advertised roster, not the subset whose sinks have arrived.
+    // Multiple same-name/source publications cannot be paired across new SIDs.
+    std::size_t matches = 0;
+    for (const auto& [_, candidate] : participant.tracks()) {
+        if (!candidate) continue;
+        const auto snapshot = candidate->SnapshotState();
+        if (snapshot.kind == target.kind && snapshot.source == target.source &&
+            snapshot.name == target.name) ++matches;
+    }
+    if (matches != 1) return {};
+    // Internal identity only. Length prefixes keep arbitrary names unambiguous.
+    return std::to_string(identity.size()) + ":" + identity + ":" +
+        std::to_string(static_cast<int>(target.kind)) + ":" +
+        std::to_string(static_cast<int>(target.source)) + ":" +
+        std::to_string(target.name.size()) + ":" + target.name;
 }
 
 bool IsRemoteMediaExpected(const TrackPublication::StateSnapshot& snapshot) {
@@ -4734,29 +4761,68 @@ public:
         std::function<void(Clock::time_point, render::OwnedI420Frame::Ptr)> callback,
         MetadataFactory metadata_factory = {},
         std::function<void(std::chrono::nanoseconds)> duration_probe = {},
-        std::function<void(std::chrono::nanoseconds, std::chrono::nanoseconds)> phase_probe = {})
+        std::function<void(std::chrono::nanoseconds, std::chrono::nanoseconds)> phase_probe = {}
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+        , std::shared_ptr<const E2eeManager::MediaObservation> trace_observation = {}
+        , uint64_t trace_binding_serial = 0
+#endif
+        )
         : callback_(std::move(callback))
         , metadata_factory_(std::move(metadata_factory))
         , duration_probe_(std::move(duration_probe))
-        , phase_probe_(std::move(phase_probe)) {}
+        , phase_probe_(std::move(phase_probe))
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+        , trace_observation_(std::move(trace_observation))
+        , trace_binding_serial_(trace_binding_serial)
+#endif
+    {}
 
     void OnFrame(const webrtc::VideoFrame& rtc_frame) override {
         if (!callback_) return;
         const auto source_time = Clock::now();
+        telemetry::callback_diagnostic::FrameScope diagnostic_trace(source_time);
+        using DiagnosticPoint = telemetry::callback_diagnostic::FramePoint;
 
         // Do not run an I420-to-RGBA pixel loop on WebRTC's media worker.
         // CopyFrom preserves stride-correct planes and metadata in a frame that
         // can safely outlive the decoder buffer.
+        telemetry::callback_diagnostic::Mark(DiagnosticPoint::MetadataBegin);
         auto metadata = metadata_factory_
             ? metadata_factory_(source_time) : render::RenderFrameMetadata{};
+        telemetry::callback_diagnostic::Mark(DiagnosticPoint::MetadataEnd);
+        diagnostic_trace.Identity(metadata.room_generation, metadata.binding_epoch,
+            metadata.frame_token, rtc_frame.width(), rtc_frame.height());
         Clock::time_point copied_at{};
+        telemetry::callback_diagnostic::Mark(DiagnosticPoint::CopyBegin);
         if (auto frame = render::OwnedI420Frame::CopyFrom(
                 rtc_frame, std::move(metadata))) {
+            telemetry::callback_diagnostic::Mark(DiagnosticPoint::CopyEnd);
             if (phase_probe_) copied_at = Clock::now();
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+            if (trace_observation_ && trace_observation_->frame_trace &&
+                !trace_observation_->retired.load(std::memory_order_acquire) &&
+                (!trace_observation_->binding_active ||
+                 trace_observation_->binding_active->load(std::memory_order_acquire))) {
+                MediaFrameTraceRecord record;
+                record.phase = MediaFrameTracePhase::CopiedForDelivery;
+                record.binding_id = trace_observation_->binding_id;
+                record.generation = trace_observation_->generation;
+                record.room_binding_serial = trace_binding_serial_;
+                record.install_epoch = trace_observation_->install_epoch->load(std::memory_order_acquire);
+                record.rtp_timestamp = rtc_frame.rtp_timestamp();
+                record.timestamp_us = rtc_frame.timestamp_us();
+                record.width = rtc_frame.width();
+                record.height = rtc_frame.height();
+                trace_observation_->frame_trace->Record(record);
+            }
+#endif
+            telemetry::callback_diagnostic::Mark(DiagnosticPoint::DispatchBegin);
             callback_(source_time, std::move(frame));
+            telemetry::callback_diagnostic::Mark(DiagnosticPoint::DispatchEnd);
         }
-        if (duration_probe_ || phase_probe_) {
+        if (duration_probe_ || phase_probe_ || diagnostic_trace) {
             const auto finished_at = Clock::now();
+            diagnostic_trace.Complete(finished_at);
             if (duration_probe_) duration_probe_(finished_at - source_time);
             if (phase_probe_ && copied_at != Clock::time_point{})
                 phase_probe_(copied_at - source_time, finished_at - copied_at);
@@ -4768,6 +4834,10 @@ private:
     MetadataFactory metadata_factory_;
     std::function<void(std::chrono::nanoseconds)> duration_probe_;
     std::function<void(std::chrono::nanoseconds, std::chrono::nanoseconds)> phase_probe_;
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+    std::shared_ptr<const E2eeManager::MediaObservation> trace_observation_;
+    uint64_t trace_binding_serial_ = 0;
+#endif
 };
 
 struct VideoFrameTelemetryGate {
@@ -8111,6 +8181,9 @@ void Room::AttachRemoteTrackToParticipant(
     }
 
     std::function<void()> retire_crypto;
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+    std::shared_ptr<const E2eeManager::MediaObservation> receive_trace_observation;
+#endif
     bool receiver_committed = false;
     const auto crypto_rollback = std::shared_ptr<void>(nullptr, [&](void*) {
         if (!receiver_committed && retire_crypto) {
@@ -8128,11 +8201,26 @@ void Room::AttachRemoteTrackToParticipant(
         auto active = std::shared_ptr<const std::atomic<bool>>(media_binding, &media_binding->active);
         auto cryptor = receive_e2ee->CreateReceiverCryptor(
             WebRTCManager::Instance().signaling_thread(), participant->identity(), track_id,
-            kind == TrackKind::Video, generation, std::move(active), &retire_crypto);
+            kind == TrackKind::Video, generation, std::move(active), &retire_crypto
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+            , &receive_trace_observation
+#endif
+            );
         if (!cryptor) {
             gate->SetTarget(binding_serial, nullptr);
             return;
         }
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+        if (receive_trace_observation) {
+            MediaFrameTraceRecord record;
+            record.phase = MediaFrameTracePhase::BindingMapped;
+            record.binding_id = receive_trace_observation->binding_id;
+            record.generation = receive_trace_observation->generation;
+            record.room_binding_serial = binding_serial;
+            record.install_epoch = receive_trace_observation->install_epoch->load(std::memory_order_acquire);
+            receive_trace_observation->frame_trace->Record(record);
+        }
+#endif
         if (!gate->SetTarget(binding_serial, std::move(cryptor))) return;
     }
 
@@ -8192,7 +8280,9 @@ void Room::AttachRemoteTrackToParticipant(
                     subscription_accepted_at,
                     expected_receive,
                     r_track->source() != TrackSource::ScreenShareVideo,
-                    binding.telemetry_probe);
+                    binding.telemetry_probe,
+                    std::chrono::steady_clock::now(),
+                    RemoteMediaRecoveryIdentity(*participant, *pub));
                 if (binding.render_telemetry_probe) {
                     telemetry_owner->RegisterRemoteVideoRenderBinding(
                         RemoteVideoRenderTelemetryKey(participant->sid(), track_id),
@@ -8202,7 +8292,9 @@ void Room::AttachRemoteTrackToParticipant(
                         false,
                         r_track->source() != TrackSource::ScreenShareVideo,
                         std::chrono::milliseconds(33),
-                        binding.render_telemetry_probe);
+                        binding.render_telemetry_probe,
+                        std::chrono::steady_clock::now(),
+                        RemoteMediaRecoveryIdentity(*participant, *pub));
                 }
             }
         } else if (kind == TrackKind::Audio && binding.audio_telemetry_probe) {
@@ -8218,7 +8310,9 @@ void Room::AttachRemoteTrackToParticipant(
                     binding_serial,
                     subscription_accepted_at,
                     expected_receive,
-                    binding.audio_telemetry_probe);
+                    binding.audio_telemetry_probe,
+                    std::chrono::steady_clock::now(),
+                    RemoteMediaRecoveryIdentity(*participant, *pub));
             }
         }
         media_binding->active.store(true, std::memory_order_release);
@@ -8534,7 +8628,11 @@ void Room::AttachRemoteTrackToParticipant(
                 metadata.decoded_at = decoded_at;
                 metadata.observer = render_telemetry_observer;
                 return metadata;
-            }, std::move(duration_probe), std::move(phase_probe));
+            }, std::move(duration_probe), std::move(phase_probe)
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+            , receive_trace_observation, binding_serial
+#endif
+            );
         video_track->AddOrUpdateSink(sink.get(), webrtc::VideoSinkWants());
         RemoteTrackSinkBinding binding{
             track_key,
@@ -11197,6 +11295,7 @@ asio::awaitable<void> Room::AttemptReconnect(
                 std::vector<webrtc::scoped_refptr<webrtc::DataChannelInterface>> old_data_channels;
                 std::vector<std::shared_ptr<webrtc::DataChannelObserver>> old_data_channel_observers;
                 std::vector<RemoteTrackSinkBinding> old_track_sinks;
+                std::uint64_t retired_media_generation = 0;
                 PendingOperationCleanup old_pending;
                 LifecycleListenerDelivery reconnected_delivery;
                 {
@@ -11209,6 +11308,32 @@ asio::awaitable<void> Room::AttemptReconnect(
                     if (reconnect_disabled_) {
                         reconnect_active_ = false;
                         co_return;
+                    }
+                    retired_media_generation = installed_session_generation_;
+                    if (const auto telemetry_owner = session_telemetry_.lock()) {
+                        std::map<std::string, std::string> recovery_identities;
+                        for (const auto& [participant_sid, participant] : remote_participants_) {
+                            if (!participant) continue;
+                            for (const auto& [track_sid, publication] : participant->tracks()) {
+                                if (!publication) continue;
+                                const auto identity = RemoteMediaRecoveryIdentity(
+                                    *participant, *publication);
+                                if (publication->SnapshotState().kind == TrackKind::Video) {
+                                    recovery_identities.emplace(
+                                        RemoteVideoTelemetryKey(participant_sid, track_sid), identity);
+                                    recovery_identities.emplace(
+                                        RemoteVideoRenderTelemetryKey(participant_sid, track_sid), identity);
+                                } else if (publication->SnapshotState().kind == TrackKind::Audio) {
+                                    recovery_identities.emplace(
+                                        RemoteAudioTelemetryKey(participant_sid, track_sid), identity);
+                                }
+                            }
+                        }
+                        // Enqueue before old sinks emit BindingEnded. This is
+                        // transport replacement, not a logical unsubscribe.
+                        telemetry_owner->RetireRemoteMediaGeneration(
+                            retired_media_generation, std::chrono::steady_clock::now(),
+                            std::move(recovery_identities));
                     }
                     old_signal = std::move(signal_client_);
                     installed_session_generation_ = 0;

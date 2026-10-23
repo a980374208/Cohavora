@@ -50,6 +50,7 @@ enum class EventKind {
     OperationStarted,
     OperationTerminal,
     RoomConnectAccepted,
+    RemoteMediaGenerationRetired,
     RemoteVideoBinding,
     RemoteVideoExpectation,
     RemoteVideoFrame,
@@ -336,6 +337,9 @@ struct Event {
     Clock::time_point source_time{};
     Clock::time_point enqueued_at{};
     std::string series_key;
+    // Internal matching only; never projected into diagnostics or history.
+    std::string recovery_identity;
+    std::map<std::string, std::string> recovery_identities;
     std::string operation_id;
     OperationKind operation_kind = OperationKind::Unknown;
     OperationOutcome operation_outcome = OperationOutcome::None;
@@ -765,6 +769,8 @@ struct Snapshot {
     // framesDecoded baseline. This counts advancing streams, not codec names
     // or allocated decoder objects.
     std::int64_t inbound_video_active_decode_streams = -1;
+    // Proven positive deltas only; unbased/new streams do not add to this bound.
+    std::uint64_t inbound_video_active_decode_streams_lower_bound = 0;
     std::uint64_t inbound_video_frames_dropped = 0;
     std::uint64_t outbound_video_frames_encoded = 0;
     std::uint64_t outbound_video_frames_sent = 0;
@@ -1140,6 +1146,10 @@ public:
     bool RecordRoomConnectAccepted(
         std::uint64_t room_generation,
         Clock::time_point source_time = Clock::now());
+    bool RetireRemoteMediaGeneration(
+        std::uint64_t room_generation,
+        Clock::time_point source_time = Clock::now(),
+        std::map<std::string, std::string> recovery_identities = {});
     bool RegisterRemoteVideoBinding(
         std::string series_key,
         std::uint64_t room_generation,
@@ -1148,7 +1158,8 @@ public:
         bool expected_receive,
         bool continuous_video,
         std::shared_ptr<VideoActivityProbe> probe,
-        Clock::time_point source_time = Clock::now());
+        Clock::time_point source_time = Clock::now(),
+        std::string recovery_identity = {});
     bool SetRemoteVideoExpected(
         std::string series_key,
         bool expected_receive,
@@ -1171,7 +1182,8 @@ public:
         Clock::time_point subscription_accepted,
         bool expected_receive,
         std::shared_ptr<AudioActivityProbe> probe,
-        Clock::time_point source_time = Clock::now());
+        Clock::time_point source_time = Clock::now(),
+        std::string recovery_identity = {});
     bool SetRemoteAudioExpected(
         std::string series_key,
         bool expected_receive,
@@ -1196,7 +1208,8 @@ public:
         bool continuous_video,
         std::chrono::milliseconds target_interval,
         std::shared_ptr<RenderActivityProbe> probe,
-        Clock::time_point source_time = Clock::now());
+        Clock::time_point source_time = Clock::now(),
+        std::string recovery_identity = {});
     bool SetRemoteVideoRenderExpected(
         std::string series_key,
         std::uint64_t room_generation,
@@ -1291,6 +1304,7 @@ private:
         std::uint64_t room_generation = 0;
         std::uint64_t binding_epoch = 0;
         std::string endpoint_id;
+        std::string recovery_identity;
         bool expected_receive = false;
         bool continuous_video = true;
         bool first_frame_seen = false;
@@ -1303,6 +1317,7 @@ private:
         std::uint64_t room_generation = 0;
         std::uint64_t binding_epoch = 0;
         std::string endpoint_id;
+        std::string recovery_identity;
         bool expected_receive = false;
         bool first_frame_seen = false;
         Clock::time_point subscription_accepted{};
@@ -1314,6 +1329,7 @@ private:
         std::uint64_t room_generation = 0;
         std::uint64_t binding_epoch = 0;
         std::string endpoint_id;
+        std::string recovery_identity;
         bool expected_render = false;
         bool continuous_video = true;
         bool first_submit_seen = false;
@@ -1429,6 +1445,9 @@ private:
 
     struct RecoveryTrackState {
         std::string previous_endpoint_id;
+        std::string recovery_identity;
+        std::uint64_t room_generation = 0;
+        bool awaiting_rebind = false;
         Clock::time_point last_good_at{};
         Clock::time_point first_recovered_at{};
         Clock::time_point stable_recovered_at{};
@@ -1468,6 +1487,9 @@ private:
         OperationOutcome outcome,
         Clock::time_point finished_at);
     void MaybeFinishReconnectOnStrand(Clock::time_point now);
+    void RebindRecoveryTrackOnStrand(
+        std::map<std::string, RecoveryTrackState>& tracks,
+        const Event& event);
     void UpdateFirstFrameAvailabilityOnStrand();
     void UpdateAudioFirstFrameAvailabilityOnStrand();
     void ReconcileAudioQualityExpectationOnStrand(bool reset_window);

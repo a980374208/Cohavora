@@ -20,6 +20,7 @@
 #include <ShlObj.h>
 #if COHAVORA_ENABLE_MINIDUMP
 #include <DbgHelp.h>
+#include "crash_dump_writer.h"
 #endif
 #include <csignal>
 #include <exception>
@@ -196,8 +197,10 @@ void Capture(HandlerState* state, std::uint32_t code,
         pointers = &synthetic;
     }
     MINIDUMP_EXCEPTION_INFORMATION info{GetCurrentThreadId(), pointers, FALSE};
+    detail::CrashDumpWriter writer(dump);
+    auto callbacks = writer.callbacks();
     const bool captured = MiniDumpWriteDump(GetCurrentProcess(),
-        GetCurrentProcessId(), dump, MiniDumpNormal, &info, nullptr, nullptr);
+        GetCurrentProcessId(), dump, MiniDumpNormal, &info, nullptr, &callbacks) && writer.complete();
     CloseHandle(dump);
     // If another thread admitted a secret while the dump was being written,
     // discard that partial/complete file too. Dumps predating secret admission

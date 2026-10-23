@@ -61,7 +61,7 @@ public:
                                     std::uint64_t generation = 0) const;
     void SetRetentionEnabled(bool enabled) noexcept;
     // Explicit, time-bounded external benchmark only. Never persisted as a
-    // user preference; zero/expiry restores normal production automatically.
+    // user preference; capped at 120 seconds. Zero/expiry restores production.
     void PauseProductionForBenchmark(std::chrono::milliseconds duration) noexcept;
     bool ProductionPausedForBenchmark() const noexcept;
     std::uint64_t BenchmarkSuppressed() const noexcept;

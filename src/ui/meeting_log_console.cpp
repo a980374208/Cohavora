@@ -337,15 +337,22 @@ void MeetingLogConsoleWindow::initUi() {
 			"MeetingUI", "Collect diagnostic events"), this);
 		production->setObjectName(QStringLiteral("consoleCollectDiagnostics"));
 		production->setChecked(true);
-		production->setEnabled(pipeline != nullptr);
+		// The frozen calibration window may exceed the legacy 60 second lease.
+		// Keep a bounded lease and use the same duration for both expiry paths.
+		const auto pauseSetting = qEnvironmentVariable("LIVEKIT_UIA_LOG_PAUSE_SECONDS");
+		bool pauseValid = true;
+		const auto pauseSeconds = pauseSetting.isEmpty() ? 60 : pauseSetting.toInt(&pauseValid);
+		pauseValid = pauseValid && pauseSeconds > 0 && pauseSeconds <= 120;
+		const auto pauseMilliseconds = pauseValid ? pauseSeconds * 1000 : 0;
+		production->setEnabled(pipeline != nullptr && pauseValid);
 		retention->addWidget(production);
 		auto* restore = new QTimer(production);
 		restore->setSingleShot(true);
 		connect(restore, &QTimer::timeout, production, [production] { production->setChecked(true); });
-		connect(production, &QCheckBox::toggled, production, [weakPipeline, restore](bool enabled) {
+		connect(production, &QCheckBox::toggled, production, [weakPipeline, restore, pauseMilliseconds](bool enabled) {
 			if (const auto active = weakPipeline.lock())
-				active->PauseProductionForBenchmark(std::chrono::milliseconds(enabled ? 0 : 60000));
-			if (enabled) restore->stop(); else restore->start(60000);
+				active->PauseProductionForBenchmark(std::chrono::milliseconds(enabled ? 0 : pauseMilliseconds));
+			if (enabled) restore->stop(); else restore->start(pauseMilliseconds);
 		});
 		connect(production, &QObject::destroyed, [weakPipeline] {
 			if (const auto active = weakPipeline.lock())

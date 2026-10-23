@@ -68,10 +68,16 @@ public:
 
     std::string SampleJson() const {
         const auto began = std::chrono::steady_clock::now();
-        std::ostringstream rows;
+        std::ostringstream rows, readability_rows;
+        std::vector<const char*> health_errors;
+        unsigned total_nodes = 0, readable_nodes = 0;
         bool all_valid = false, topology_current = false;
-        unsigned pid = 0, initialization = 0, process_error = 0;
+        unsigned pid = 0, initialization = 0x80004001u, process_error = 0;
         bool query_available = false, process_available = false;
+        const auto read_state = [](unsigned total, unsigned readable) {
+            return total == 0 ? "NO_NODES" : readable == total ? "ALL_READABLE" :
+                readable == 0 ? "NONE_READABLE" : "PARTIALLY_READABLE";
+        };
 #if defined(_WIN32)
         pid = GetCurrentProcessId();
         initialization = static_cast<unsigned>(initialization_);
@@ -81,12 +87,16 @@ public:
         topology_current = factory_.Get() != nullptr && factory_->IsCurrent() != FALSE;
         all_valid = SUCCEEDED(initialization_) && query_available && process_available && topology_current && !adapters_.empty();
         const bool topology_before = topology_current;
+        LARGE_INTEGER qpc_frequency{}, sample_begin_qpc{}, sample_end_qpc{};
+        bool raw_clock_valid = QueryPerformanceFrequency(&qpc_frequency) && qpc_frequency.QuadPart > 0
+            && QueryPerformanceCounter(&sample_begin_qpc);
         FILETIME sample_begin{}; GetSystemTimePreciseAsFileTime(&sample_begin);
         const auto begin_filetime = (std::uint64_t(sample_begin.dwHighDateTime) << 32) | sample_begin.dwLowDateTime;
         bool first = true;
         for (const auto& entry : adapters_) {
-            if (!first) rows << ',';
+            if (!first) { rows << ','; readability_rows << ','; }
             first = false;
+            unsigned adapter_readable = 0;
             const bool nodes_known = SUCCEEDED(entry.described) && entry.status >= 0 && entry.nodes > 0;
             all_valid = all_valid && nodes_known;
             rows << "{\"adapter_ordinal\":" << entry.ordinal << ",\"adapter_luid_u64\":";
@@ -103,11 +113,22 @@ public:
                 stats.AdapterLuid = entry.luid;
                 stats.hProcess = process_.value;
                 stats.QueryProcessNode.NodeId = node;
+                LARGE_INTEGER query_begin_qpc{}, query_end_qpc{};
+                const bool query_clock_begin = QueryPerformanceCounter(&query_begin_qpc) != FALSE;
                 const auto status = query_ && process_.value ? query_(&stats) : static_cast<NTSTATUS>(0xc0000002u);
+                const bool query_clock_end = QueryPerformanceCounter(&query_end_qpc) != FALSE;
+                raw_clock_valid = raw_clock_valid && query_clock_begin && query_clock_end
+                    && sample_begin_qpc.QuadPart <= query_begin_qpc.QuadPart && query_begin_qpc.QuadPart <= query_end_qpc.QuadPart;
                 const bool valid = status >= 0;
+                ++total_nodes;
+                if (valid) { ++readable_nodes; ++adapter_readable; }
                 all_valid = all_valid && valid;
                 rows << "{\"node_index\":" << node << ",\"availability\":\"" << (valid ? "VALID" : "UNAVAILABLE")
-                     << "\",\"ntstatus\":" << static_cast<std::uint32_t>(status) << ",\"running_time_raw\":";
+                     << "\",\"ntstatus\":" << static_cast<std::uint32_t>(status) << ",\"qpc_begin\":";
+                if (query_clock_begin) rows << query_begin_qpc.QuadPart; else rows << "null";
+                rows << ",\"qpc_end\":";
+                if (query_clock_end) rows << query_end_qpc.QuadPart; else rows << "null";
+                rows << ",\"running_time_raw\":";
                 if (valid) rows << stats.QueryResult.ProcessNodeInformation.RunningTime.QuadPart; else rows << "null";
                 rows << ",\"queue_packets\":[";
                 for (unsigned type = 0; type < D3DKMT_QUERYSTATISTICS_QUEUE_PACKET_TYPE_MAX; ++type) {
@@ -143,13 +164,44 @@ public:
                 rows << "]}";
             }
             rows << "]}";
+            readability_rows << "{\"adapter_ordinal\":" << entry.ordinal << ",\"adapter_luid_u64\":";
+            if (SUCCEEDED(entry.described)) readability_rows << LuidBits(entry.luid); else readability_rows << "null";
+            readability_rows << ",\"total_nodes\":" << entry.nodes << ",\"readable_nodes\":" << adapter_readable
+                << ",\"unavailable_nodes\":" << entry.nodes - adapter_readable
+                << ",\"state\":\"" << read_state(entry.nodes, adapter_readable) << "\"}";
         }
         const bool topology_after = factory_.Get() != nullptr && factory_->IsCurrent() != FALSE;
+        raw_clock_valid = QueryPerformanceCounter(&sample_end_qpc) && raw_clock_valid
+            && sample_begin_qpc.QuadPart <= sample_end_qpc.QuadPart;
         FILETIME sample_end{}; GetSystemTimePreciseAsFileTime(&sample_end);
         const auto end_filetime = (std::uint64_t(sample_end.dwHighDateTime) << 32) | sample_end.dwLowDateTime;
+        if (FAILED(initialization_)) health_errors.push_back("initialization_failed");
+        if (!query_available) health_errors.push_back("query_api_unavailable");
+        if (!process_available) health_errors.push_back("process_handle_unavailable");
+        if (process_error != ERROR_SUCCESS) health_errors.push_back("process_open_error");
+        if (!identity_query_succeeded_ || identity_pid_ != pid || !pid || !process_start_filetime_ || identity_error_)
+            health_errors.push_back("process_identity_unavailable");
+        if (!sampler_generation_) health_errors.push_back("sampler_generation_invalid");
+        if (!enumeration_complete_ || enumeration_terminal_ != DXGI_ERROR_NOT_FOUND)
+            health_errors.push_back("hardware_enumeration_incomplete");
+        if (!topology_before || !topology_after) health_errors.push_back("topology_not_current");
+        if (adapters_.empty()) health_errors.push_back("hardware_adapters_missing");
+        bool descriptions_valid = true, adapter_topology_valid = true;
+        for (const auto& entry : adapters_) {
+            descriptions_valid = descriptions_valid && SUCCEEDED(entry.described);
+            adapter_topology_valid = adapter_topology_valid && entry.status >= 0 && entry.nodes > 0;
+        }
+        if (!descriptions_valid) health_errors.push_back("adapter_description_unavailable");
+        if (!adapter_topology_valid) health_errors.push_back("adapter_topology_unavailable");
+        if (begin_filetime < process_start_filetime_ || end_filetime < begin_filetime)
+            health_errors.push_back("sample_clock_invalid");
+        if (!raw_clock_valid) health_errors.push_back("native_query_clock_unavailable");
+        all_valid = all_valid && health_errors.empty();
+#else
+        health_errors.push_back("platform_unsupported");
 #endif
         std::ostringstream out;
-        out << "{\"collector\":\"wddm_process_packet_statistics\",\"pid\":" << pid
+        out << "{\"schema\":\"wddm_process_packet_statistics_v3\",\"collector\":\"wddm_process_packet_statistics\",\"pid\":" << pid
             << ",\"scope\":\"process_all_enumerated_hardware_adapters_all_scheduler_nodes\""
             << ",\"availability\":\"" << (all_valid ? "VALID" : "UNAVAILABLE")
             << "\",\"initialization_hresult\":" << initialization
@@ -171,8 +223,25 @@ public:
             << ",\"topology_before\":" << (topology_before ? "true" : "false")
             << ",\"topology_after\":" << (topology_after ? "true" : "false")
             << ",\"sample_begin_filetime_100ns\":" << begin_filetime
-            << ",\"sample_end_filetime_100ns\":" << end_filetime << '}';
+            << ",\"sample_end_filetime_100ns\":" << end_filetime
+            << ",\"clock_contract\":\"b14_native_process_node_raw_qpc_v1\",\"raw_clock_valid\":" << (raw_clock_valid ? "true" : "false")
+            << ",\"qpc_frequency\":";
+        if (qpc_frequency.QuadPart > 0) out << qpc_frequency.QuadPart; else out << "null";
+        out << ",\"sample_begin_qpc\":";
+        if (sample_begin_qpc.QuadPart > 0) out << sample_begin_qpc.QuadPart; else out << "null";
+        out << ",\"sample_end_qpc\":";
+        if (sample_end_qpc.QuadPart > 0) out << sample_end_qpc.QuadPart; else out << "null";
+        out << '}';
 #endif
+        out << ",\"node_readability\":{\"schema\":\"wddm_process_node_readability_v1\",\"health\":\""
+            << (health_errors.empty() ? "HEALTHY" : "ERROR") << "\",\"health_errors\":[";
+        for (std::size_t index = 0; index < health_errors.size(); ++index) {
+            if (index) out << ',';
+            out << '"' << health_errors[index] << '"';
+        }
+        out << "],\"state\":\"" << read_state(total_nodes, readable_nodes) << "\",\"total_nodes\":" << total_nodes
+            << ",\"readable_nodes\":" << readable_nodes << ",\"unavailable_nodes\":" << total_nodes - readable_nodes
+            << ",\"adapters\":[" << readability_rows.str() << "]}";
         out << '}';
         return out.str();
     }

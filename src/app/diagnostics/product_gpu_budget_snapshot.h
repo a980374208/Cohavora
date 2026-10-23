@@ -10,7 +10,7 @@
 #if defined(_WIN32)
 #include <windows.h>
 #include <dxgi1_4.h>
-#include <d3d12.h>
+#include <d3dkmthk.h>
 #include <wrl/client.h>
 #endif
 
@@ -22,11 +22,18 @@ public:
 #if defined(_WIN32)
         initialization_ = CreateDXGIFactory1(IID_PPV_ARGS(&factory_));
         if (FAILED(initialization_)) return;
-        // A temporary device discovers linked memory nodes before measurement.
-        // It submits no work and is released before the first budget snapshot.
-        d3d12_ = LoadLibraryExW(L"d3d12.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-        const auto create_device = d3d12_ ? reinterpret_cast<PFN_D3D12_CREATE_DEVICE>(
-            GetProcAddress(d3d12_, "D3D12CreateDevice")) : nullptr;
+        // DXGI NodeIndex identifies a physical adapter within a linked adapter,
+        // not a scheduler engine. Discover that count without creating a D3D
+        // device: even a device which submits no application commands can
+        // cause driver initialization/paging work in the measured process.
+        gdi32_ = LoadLibraryExW(L"gdi32.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+        const auto open_adapter = gdi32_ ? reinterpret_cast<PFND3DKMT_OPENADAPTERFROMLUID>(
+            GetProcAddress(gdi32_, "D3DKMTOpenAdapterFromLuid")) : nullptr;
+        const auto query_adapter = gdi32_ ? reinterpret_cast<PFND3DKMT_QUERYADAPTERINFO>(
+            GetProcAddress(gdi32_, "D3DKMTQueryAdapterInfo")) : nullptr;
+        const auto close_adapter = gdi32_ ? reinterpret_cast<PFND3DKMT_CLOSEADAPTER>(
+            GetProcAddress(gdi32_, "D3DKMTCloseAdapter")) : nullptr;
+        topology_api_available_ = open_adapter && query_adapter && close_adapter;
         for (UINT ordinal = 0; ; ++ordinal) {
             Microsoft::WRL::ComPtr<IDXGIAdapter1> adapter;
             const auto hr = factory_->EnumAdapters1(ordinal, &adapter);
@@ -40,12 +47,26 @@ public:
             }
             Adapter entry;
             entry.ordinal = ordinal;
+            entry.described = described;
+            if (SUCCEEDED(described)) entry.luid = desc.AdapterLuid;
             entry.activation = FAILED(described) ? described : adapter.As(&entry.adapter);
-            if (create_device && SUCCEEDED(entry.activation)) {
-                Microsoft::WRL::ComPtr<ID3D12Device> node_device;
-                entry.node_query = create_device(adapter.Get(), D3D_FEATURE_LEVEL_11_0,
-                    IID_PPV_ARGS(&node_device));
-                if (SUCCEEDED(entry.node_query) && node_device) entry.node_count = node_device->GetNodeCount();
+            if (topology_api_available_ && SUCCEEDED(entry.activation)) {
+                D3DKMT_OPENADAPTERFROMLUID opened{};
+                opened.AdapterLuid = entry.luid;
+                entry.open_status = open_adapter(&opened);
+                if (entry.open_status >= 0) {
+                    D3DKMT_PHYSICAL_ADAPTER_COUNT count{};
+                    D3DKMT_QUERYADAPTERINFO query{};
+                    query.hAdapter = opened.hAdapter;
+                    query.Type = KMTQAITYPE_PHYSICALADAPTERCOUNT;
+                    query.pPrivateDriverData = &count;
+                    query.PrivateDriverDataSize = sizeof(count);
+                    entry.node_status = query_adapter(&query);
+                    if (entry.node_status >= 0) entry.node_count = count.Count;
+                    D3DKMT_CLOSEADAPTER closed{};
+                    closed.hAdapter = opened.hAdapter;
+                    entry.close_status = close_adapter(&closed);
+                }
             }
             adapters_.push_back(std::move(entry));
         }
@@ -54,7 +75,7 @@ public:
 
     ~BudgetSampler() {
 #if defined(_WIN32)
-        if (d3d12_) FreeLibrary(d3d12_);
+        if (gdi32_) FreeLibrary(gdi32_);
 #endif
     }
     BudgetSampler(const BudgetSampler&) = delete;
@@ -78,13 +99,23 @@ public:
         for (const auto& entry : adapters_) {
             if (!first) rows << ',';
             first = false;
-            const bool nodes_known = SUCCEEDED(entry.node_query) && entry.node_count > 0;
+            const bool nodes_known = SUCCEEDED(entry.activation) && entry.open_status >= 0
+                && entry.node_status >= 0 && entry.close_status >= 0 && entry.node_count > 0;
             all_valid = all_valid && nodes_known;
             rows << "{\"adapter_ordinal\":" << entry.ordinal
-                 << ",\"node_count\":" << entry.node_count
-                 << ",\"node_count_hresult\":" << static_cast<unsigned>(entry.node_query)
+                 << ",\"description_hresult\":" << static_cast<std::uint32_t>(entry.described)
+                 << ",\"activation_hresult\":" << static_cast<std::uint32_t>(entry.activation)
+                 << ",\"adapter_luid_u64\":";
+            if (SUCCEEDED(entry.described)) {
+                rows << ((std::uint64_t(static_cast<std::uint32_t>(entry.luid.HighPart)) << 32) | entry.luid.LowPart);
+            } else rows << "null";
+            rows << ",\"node_count\":";
+            if (entry.node_status >= 0 && entry.node_count > 0) rows << entry.node_count; else rows << "null";
+            rows << ",\"open_adapter_ntstatus\":" << static_cast<std::uint32_t>(entry.open_status)
+                 << ",\"node_count_ntstatus\":" << static_cast<std::uint32_t>(entry.node_status)
+                 << ",\"close_adapter_ntstatus\":" << static_cast<std::uint32_t>(entry.close_status)
                  << ",\"nodes\":[";
-            for (UINT node = 0; node < entry.node_count; ++node) {
+            for (UINT node = 0; nodes_known && node < entry.node_count; ++node) {
                 if (node) rows << ',';
                 rows << "{\"node_index\":" << node;
                 for (const auto group : {DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_MEMORY_SEGMENT_GROUP_NON_LOCAL}) {
@@ -111,7 +142,13 @@ public:
         }
 #endif
         std::ostringstream out;
-        out << "{\"collector\":\"dxgi_in_process_budget\",\"pid\":" << process_id
+        out << "{\"schema\":2,\"collector\":\"dxgi_in_process_budget\",\"pid\":" << process_id
+            << ",\"topology_source\":\"d3dkmt_physical_adapter_count\",\"topology_api_available\":"
+#if defined(_WIN32)
+            << (topology_api_available_ ? "true" : "false")
+#else
+            << "false"
+#endif
             << ",\"scope\":\"calling_process_all_enumerated_hardware_adapters_all_nodes\""
             << ",\"availability\":\""
             << (all_valid ? "VALID" : "UNAVAILABLE") << "\",\"initialization_hresult\":" << initialization
@@ -126,14 +163,19 @@ private:
 #if defined(_WIN32)
     struct Adapter {
         UINT ordinal{};
+        HRESULT described = E_FAIL;
+        LUID luid{};
         HRESULT activation = E_FAIL;
-        HRESULT node_query = E_NOINTERFACE;
+        NTSTATUS open_status = static_cast<NTSTATUS>(0xc0000002u);
+        NTSTATUS node_status = static_cast<NTSTATUS>(0xc0000002u);
+        NTSTATUS close_status = static_cast<NTSTATUS>(0xc0000002u);
         UINT node_count = 0;
         Microsoft::WRL::ComPtr<IDXGIAdapter3> adapter;
     };
     HRESULT initialization_ = E_FAIL;
     Microsoft::WRL::ComPtr<IDXGIFactory1> factory_;
-    HMODULE d3d12_ = nullptr;
+    HMODULE gdi32_ = nullptr;
+    bool topology_api_available_ = false;
     std::vector<Adapter> adapters_;
     unsigned excluded_software_ = 0;
 #endif

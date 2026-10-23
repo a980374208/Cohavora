@@ -489,6 +489,7 @@ public:
 	livekit::render::RenderDiagnostics renderDiagnostics() const { return _renderDiagnostics; }
 
 protected:
+	bool eventFilter(QObject *watched, QEvent *event) override;
 	void resizeEvent(QResizeEvent *e) override;
 	void paintEvent(QPaintEvent *e) override;
 	void showEvent(QShowEvent *e) override;

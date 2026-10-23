@@ -12,6 +12,7 @@
 #include "key_provider.h"
 #include "media_encryption_status.h"
 #include "media_frame_evidence.h"
+#include "media_frame_trace.h"
 
 namespace livekit {
 class MeetingSecretHandle;
@@ -153,6 +154,10 @@ public:
         std::shared_ptr<const std::atomic<uint64_t>> install_epoch;
         std::vector<uint8_t> sif_trailer;
         MediaFrameEvidence frame_evidence;
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+        // Immutable after binding creation; diagnostic builds only.
+        std::shared_ptr<BoundedMediaFrameTrace> frame_trace;
+#endif
     };
     using MediaStateChangedHandler = std::function<void(
         std::shared_ptr<const MediaObservation>, EncryptionState)>;
@@ -161,6 +166,8 @@ public:
         std::lock_guard lock(mutex_);
         media_state_changed_handler_ = std::move(handler);
     }
+    // Diagnostic opt-in before any binding is created; never changes crypto policy.
+    void SetMediaFrameTrace(std::shared_ptr<BoundedMediaFrameTrace> trace);
     // Initial media admission, before signaling or native sender side effects.
     bool CanPublishMedia(const std::string& identity, const std::string& codec) const;
     webrtc::scoped_refptr<webrtc::FrameTransformerInterface> CreateSenderCryptor(
@@ -170,7 +177,8 @@ public:
         webrtc::Thread* signaling, const std::string& identity,
         const std::string& track, bool video, uint64_t generation,
         std::shared_ptr<const std::atomic<bool>> binding_active,
-        std::function<void()>* retire = nullptr);
+        std::function<void()>* retire = nullptr,
+        std::shared_ptr<const MediaObservation>* observation_out = nullptr);
     std::vector<std::shared_ptr<const MediaObservation>> media_observations() const;
     MediaEncryptionStatus ReadMediaStatus(uint64_t generation) const;
     bool HasActiveMediaBindings() const;
@@ -222,6 +230,9 @@ private:
     std::map<std::pair<std::string, std::string>, std::shared_ptr<FrameCryptor>> cryptors_;
     StateChangedHandler state_changed_handler_;
     MediaStateChangedHandler media_state_changed_handler_;
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+    std::shared_ptr<BoundedMediaFrameTrace> media_frame_trace_;
+#endif
     std::vector<std::weak_ptr<MediaObservation>> media_observations_;
     uint64_t next_media_binding_id_ = 0;
     std::shared_ptr<std::atomic<int>> media_send_index_ = std::make_shared<std::atomic<int>>(0);

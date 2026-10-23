@@ -282,7 +282,7 @@ bool DiagnosticPipeline::WriterContext::TryEmit(Event event) noexcept {
 
 void DiagnosticPipeline::WriterContext::PauseProductionForBenchmark(std::chrono::milliseconds duration) noexcept {
     duration = (std::clamp)(duration, std::chrono::milliseconds::zero(),
-                           std::chrono::milliseconds(60000));
+                           std::chrono::milliseconds(120000));
     benchmark_pause_until_.store(duration.count() ?
         (std::chrono::steady_clock::now() + duration).time_since_epoch().count() : 0,
         std::memory_order_release);

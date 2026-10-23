@@ -1,4 +1,5 @@
 #include "owned_i420_frame.h"
+#include "telemetry/callback_phase_diagnostic.h"
 
 #include <array>
 #include <cstring>
@@ -73,6 +74,7 @@ VideoRotation ToVideoRotation(webrtc::VideoRotation rotation) {
 } // namespace
 
 std::shared_ptr<OwnedI420Frame::StorageBlock> OwnedI420Frame::AcquireStorage(size_t bytes) {
+    telemetry::callback_diagnostic::StorageScope diagnostic_storage;
     // Cache pixels, never frames, tracks or session owners. Only this producer
     // thread can acquire a cache slot. A count of one means every published
     // frame holding this private block has been destroyed, including frames
@@ -84,8 +86,12 @@ std::shared_ptr<OwnedI420Frame::StorageBlock> OwnedI420Frame::AcquireStorage(siz
     };
     constexpr size_t kMaximumCachedBytes = 32 * 1024 * 1024;
     thread_local Cache cache;
-    for (const auto& block : cache.blocks)
-        if (block && block->size == bytes && block.use_count() == 1) return block;
+    for (const auto& block : cache.blocks) {
+        if (block && block->size == bytes && block.use_count() == 1) {
+            telemetry::callback_diagnostic::StorageReused();
+            return block;
+        }
+    }
 
     if (bytes <= kMaximumCachedBytes) {
         for (auto& block : cache.blocks) {
@@ -138,7 +144,9 @@ OwnedI420Frame::Ptr OwnedI420Frame::CopyFrom(
         return nullptr;
     }
 
+    telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::ToI420Begin);
     const auto i420_buffer = buffer->ToI420();
+    telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::ToI420End);
     if (!i420_buffer) {
         return nullptr;
     }
@@ -188,6 +196,7 @@ OwnedI420Frame::Ptr OwnedI420Frame::CopyFromPlanes(int width,
         return nullptr;
     }
 
+    telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::AllocateBegin);
     auto result = std::shared_ptr<OwnedI420Frame>(new OwnedI420Frame(width,
                                                                        height,
                                                                        chroma_width,
@@ -198,6 +207,7 @@ OwnedI420Frame::Ptr OwnedI420Frame::CopyFromPlanes(int width,
                                                                        rotation,
                                                                        color_space,
                                                                        std::move(render_metadata)));
+    telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::AllocateEnd);
 
     const auto copy_plane = [](uint8_t* destination, const uint8_t* source,
                                int row_bytes, int rows, int source_stride) {
@@ -210,9 +220,13 @@ OwnedI420Frame::Ptr OwnedI420Frame::CopyFromPlanes(int width,
                             static_cast<size_t>(row_bytes));
         }
     };
+    telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::PlanesBegin);
     copy_plane(result->storage_->bytes.get(), data_y, width, height, stride_y);
+    telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::YEnd);
     copy_plane(result->storage_->bytes.get() + result->u_offset_, data_u, chroma_width, chroma_height, stride_u);
+    telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::UEnd);
     copy_plane(result->storage_->bytes.get() + result->v_offset_, data_v, chroma_width, chroma_height, stride_v);
+    telemetry::callback_diagnostic::MarkCopy(telemetry::callback_diagnostic::FramePoint::VEnd);
     return result;
 }
 

@@ -72,6 +72,7 @@ private:
 
 	QRect _avatarRect;
 	QPushButton *_accessibleAvatar = nullptr;
+	QPushButton *_accessibleSettings = nullptr;
 	QVector<NavItem> _navItems;
 	QVector<BottomItem> _bottomItems;
 	int _cornerRadius = 14;

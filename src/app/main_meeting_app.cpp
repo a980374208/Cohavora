@@ -211,6 +211,18 @@ int main(int argc, char *argv[]) {
 	auto& shutdownService = OpenMeeting::SessionShutdownService::Instance();
 	const auto pilotPath = qEnvironmentVariable("LIVEKIT_UIA_PILOT_PROBE");
 	const auto pilotRun = qEnvironmentVariable("LIVEKIT_UIA_RUN_ID");
+	const auto probeCapacityContract = qEnvironmentVariable("LIVEKIT_UIA_PROBE_CAPACITY_CONTRACT");
+	const auto probeCapacityMaximum = qEnvironmentVariable("LIVEKIT_UIA_PROBE_CAPACITY_MAXIMUM_BYTES");
+	bool probeCapacityNumberValid = false;
+	const auto probeCapacityBytes = probeCapacityMaximum.toULongLong(&probeCapacityNumberValid);
+	if (debugLogin.debugEnabled && (!probeCapacityContract.isEmpty() || !probeCapacityMaximum.isEmpty()) &&
+		((probeCapacityContract != QStringLiteral("b14_native_probe_evidence_capacity_v1") &&
+		  probeCapacityContract != QStringLiteral("b14_native_probe_evidence_capacity_v2")) ||
+		 !probeCapacityNumberValid || probeCapacityBytes <= 131072 || probeCapacityBytes > 8589934592ull ||
+		 pilotPath.isEmpty())) {
+		qCritical() << "Automated probe evidence capacity configuration is invalid.";
+		return 5;
+	}
 	// This intervention is opt-in and belongs only to a bounded diagnostic run.
 	// It is never enabled by the normal PILOT/formal runner.
 	const auto heapOptimizeGeneration =
@@ -240,7 +252,7 @@ int main(int argc, char *argv[]) {
 					observation.attempts, observation.result.platformAvailable,
 					observation.result.succeeded, observation.result.error,
 					observation.result.callbackThrew, observation.elapsedMicroseconds};
-			});
+			}, probeCapacityBytes, probeCapacityContract.toStdString());
 	}
 	app.setWindowIcon(QIcon(QStringLiteral(":/meeting-ui/icons/cohavora.svg")));
 	MeetingUI::AppTranslation::install(app,
@@ -284,7 +296,7 @@ int main(int argc, char *argv[]) {
 		if (loginDlg.exec() != QDialog::Accepted) {
 			// 用户主动退出登录对话框，直接退出程序
 			style::StopManager();
-			return 0;
+			return !pilotProbe || pilotProbe->Finish() ? 0 : 5;
 		}
 	}
 
@@ -356,10 +368,11 @@ int main(int argc, char *argv[]) {
         });
 
 	const int result = app.exec();
+	const bool probeEvidenceComplete = !pilotProbe || pilotProbe->Finish();
 
 	// 退出时显式释放 WebRTC 资源与样式系统
 	livekit::WebRTCManager::Instance().Deinitialize();
 	style::StopManager();
 
-	return result;
+	return result == 0 && !probeEvidenceComplete ? 5 : result;
 }

@@ -33,6 +33,26 @@ bool MediaActive(const E2eeManager::MediaObservation& observation) {
     return !observation.retired.load(std::memory_order_acquire) &&
         (!observation.binding_active || observation.binding_active->load(std::memory_order_acquire));
 }
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+void TraceEncodedMediaFrame(const E2eeManager::MediaObservation& observation,
+    const webrtc::TransformableFrameInterface& frame, MediaFrameTracePhase phase,
+    uint64_t install_epoch, bool sif = false) {
+    if (!observation.frame_trace) return;
+    MediaFrameTraceRecord record;
+    record.phase = phase;
+    record.binding_id = observation.binding_id;
+    record.generation = observation.generation;
+    record.install_epoch = install_epoch;
+    record.rtp_timestamp = frame.GetTimestamp();
+    record.ssrc = frame.GetSsrc();
+    record.ssrc_available = true;
+    record.sif_match = sif;
+    const auto bytes = frame.GetData();
+    const auto size = bytes.size() - (sif ? observation.sif_trailer.size() : 0);
+    record.sfu_vp8_signature = BoundedMediaFrameTrace::MatchesSfuVp8BlankFrame(bytes.data(), size);
+    observation.frame_trace->Record(record);
+}
+#endif
 class MediaOutput : public webrtc::TransformedFrameCallback {
 public:
     MediaOutput(webrtc::scoped_refptr<webrtc::TransformedFrameCallback> target,
@@ -40,7 +60,11 @@ public:
         : target_(std::move(target)), observation_(std::move(observation)) {}
     void OnTransformedFrame(std::unique_ptr<webrtc::TransformableFrameInterface> frame) override {
         if (!MediaActive(*observation_)) return;
-        observation_->frame_evidence.Complete(frame.get(), observation_->install_epoch->load(std::memory_order_acquire));
+        const auto install_epoch = observation_->install_epoch->load(std::memory_order_acquire);
+        observation_->frame_evidence.Complete(frame.get(), install_epoch);
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+        TraceEncodedMediaFrame(*observation_, *frame, MediaFrameTracePhase::Output, install_epoch);
+#endif
         observation_->output.fetch_add(1, std::memory_order_relaxed);
         target_->OnTransformedFrame(std::move(frame));
     }
@@ -112,8 +136,11 @@ public:
         const auto& trailer = observation_->sif_trailer;
         const bool sif = observation_->receiving && !trailer.empty() && bytes.size() >= trailer.size() &&
             std::equal(trailer.begin(), trailer.end(), bytes.end() - trailer.size());
-        observation_->frame_evidence.Admit(frame.get(),
-            observation_->install_epoch->load(std::memory_order_acquire), !bytes.empty() && !sif);
+        const auto install_epoch = observation_->install_epoch->load(std::memory_order_acquire);
+        observation_->frame_evidence.Admit(frame.get(), install_epoch, !bytes.empty() && !sif);
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+        TraceEncodedMediaFrame(*observation_, *frame, MediaFrameTracePhase::Input, install_epoch, sif);
+#endif
         if (index_) {
             const int selected = index_->load(std::memory_order_acquire);
             if (last_index_.exchange(selected) != selected) cryptor->SetKeyIndex(selected);
@@ -623,10 +650,24 @@ webrtc::scoped_refptr<webrtc::FrameTransformerInterface> CreateMediaDiscarder() 
     return webrtc::make_ref_counted<MediaDiscarder>();
 }
 
+void E2eeManager::SetMediaFrameTrace(std::shared_ptr<BoundedMediaFrameTrace> trace) {
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+    std::lock_guard lock(mutex_);
+    if (std::any_of(media_observations_.begin(), media_observations_.end(),
+        [](const auto& entry) { auto value = entry.lock(); return value && !value->retired.load(); })) {
+        throw std::logic_error("media frame trace requires retired bindings");
+    }
+    media_frame_trace_ = std::move(trace);
+#else
+    (void)trace;
+#endif
+}
+
 webrtc::scoped_refptr<webrtc::FrameTransformerInterface> E2eeManager::CreateReceiverCryptor(
     webrtc::Thread* signaling, const std::string& identity, const std::string& track,
     bool video, uint64_t generation, std::shared_ptr<const std::atomic<bool>> binding_active,
-    std::function<void()>* retire) {
+    std::function<void()>* retire, std::shared_ptr<const MediaObservation>* observation_out) {
+    if (observation_out) observation_out->reset();
     if (!signaling || identity.empty() || track.empty() || !binding_active ||
         options_.encryption_type != EncryptionType::GCM || !options_.key_provider) return nullptr;
     std::lock_guard lock(mutex_);
@@ -641,6 +682,9 @@ webrtc::scoped_refptr<webrtc::FrameTransformerInterface> E2eeManager::CreateRece
     observation->receiving = true;
     observation->generation = generation;
     observation->binding_active = std::move(binding_active);
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+    if (video) observation->frame_trace = media_frame_trace_;
+#endif
     // Missing keys remain fail-closed in the backend, but the binding survives
     // so an explicit later key installation can recover without plaintext.
     auto cryptor = webrtc::scoped_refptr<webrtc::FrameCryptorTransformer>(new webrtc::FrameCryptorTransformer(
@@ -651,6 +695,18 @@ webrtc::scoped_refptr<webrtc::FrameTransformerInterface> E2eeManager::CreateRece
     cryptor->RegisterFrameCryptorTransformerObserver(webrtc::make_ref_counted<MediaState>(observation, media_state_changed_handler_));
     std::erase_if(media_observations_, [](const auto& entry) { return entry.expired(); });
     media_observations_.push_back(observation);
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+    if (observation->frame_trace) {
+        // A numeric event survives even a binding that retires before fixture polling.
+        MediaFrameTraceRecord record;
+        record.phase = MediaFrameTracePhase::BindingCreated;
+        record.binding_id = observation->binding_id;
+        record.generation = observation->generation;
+        record.install_epoch = observation->install_epoch->load(std::memory_order_acquire);
+        observation->frame_trace->Record(record);
+        if (observation_out) *observation_out = observation;
+    }
+#endif
     auto transformer = webrtc::make_ref_counted<MediaTransformer>(std::move(cryptor), std::move(observation), nullptr, media_owner_);
     if (retire) *retire = [transformer] { transformer->Retire(); };
     return transformer;

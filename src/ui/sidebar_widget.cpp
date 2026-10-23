@@ -19,6 +19,16 @@ SidebarWidget::SidebarWidget(QWidget *parent)
 	_accessibleAvatar->setAttribute(Qt::WA_TransparentForMouseEvents);
 	_accessibleAvatar->setStyleSheet(QStringLiteral("QPushButton { background: transparent; border: 0; }"));
 	connect(_accessibleAvatar, &QPushButton::clicked, this, [this] { _avatarClicks.fire({}); });
+	_accessibleSettings = new QPushButton(this);
+	_accessibleSettings->setObjectName(QStringLiteral("mainSettings"));
+	_accessibleSettings->setAccessibleName(QCoreApplication::translate("MeetingUI", "Settings"));
+	_accessibleSettings->setToolTip(QCoreApplication::translate("MeetingUI", "Settings"));
+	_accessibleSettings->setFlat(true);
+	_accessibleSettings->setAttribute(Qt::WA_TransparentForMouseEvents);
+	_accessibleSettings->setStyleSheet(QStringLiteral("QPushButton { background: transparent; border: 0; }"));
+	connect(_accessibleSettings, &QPushButton::clicked, this, [this] {
+		_bottomItemClicks.fire_copy(BottomItemType::Settings);
+	});
 }
 
 void SidebarWidget::setActiveNav(NavItemType type) {
@@ -82,6 +92,7 @@ void SidebarWidget::updateLayout() {
 	settingsItem.tooltip = QCoreApplication::translate("MeetingUI", "Settings");
 	settingsItem.rect = QRect((w - bottomItemSize) / 2, bottomY, bottomItemSize, bottomItemSize);
 	_bottomItems.push_back(settingsItem);
+	_accessibleSettings->setGeometry(settingsItem.rect);
 }
 
 void SidebarWidget::paintEvent(QPaintEvent *e) {

@@ -4484,6 +4484,15 @@ void MeetingRoomWindow::updateRecoveryStateUi(OpenMeeting::MeetingState state, c
     if (_videoCanvas) _videoCanvas->setStageOverlay(_recoveryBanner);
 }
 
+bool MeetingRoomWindow::eventFilter(QObject *watched, QEvent *event) {
+	if (watched == _encryptionPanel &&
+		(event->type() == QEvent::Show || event->type() == QEvent::Hide)) {
+		QResizeEvent layoutEvent(size(), size());
+		resizeEvent(&layoutEvent);
+	}
+	return Ui::RpWidget::eventFilter(watched, event);
+}
+
 void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
@@ -4504,7 +4513,8 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
     if (_screenShareBanner) _screenShareBanner->setContentsMargins(136, 4,
         12 + (annotationW ? annotationW + 8 : 0) + (controlStopW ? controlStopW + 8 : 0), 4);
 	const int shareBannerH = _screenShareBanner && !_screenShareBanner->isHidden() ? std::max(44, _screenShareBanner->heightForWidth(w)) : 0;
-	const int encryptionH = _encryptionPanel ? std::max(44, _encryptionPanel->sizeHint().height()) : 0;
+	const int encryptionH = _encryptionPanel && !_encryptionPanel->isHidden()
+		? std::max(44, _encryptionPanel->sizeHint().height()) : 0;
 	if (_encryptionPanel) _encryptionPanel->setGeometry(0, topBarH + shareBannerH, w, encryptionH);
 	const int stageTop = topBarH + shareBannerH + encryptionH;
 	const int stageH = std::max(0, h - stageTop - bottomBarH);
@@ -4886,6 +4896,7 @@ void MeetingRoomWindow::syncVideoCanvasLayout(const std::vector<VideoTileWidget*
 	_videoCanvas->setTilesLayout(canvas_tiles);
 	_videoCanvas->show();
 	_videoCanvas->raise();
+	if (_remoteControlUi) _remoteControlUi->raiseEntry();
 	if (_videoPagingControls && _videoPagingControls->isVisible()) {
 		_videoPagingControls->raise();
 	}
@@ -4961,18 +4972,23 @@ void MeetingRoomWindow::setupRemoteControl() {
     if (_remoteControlUi || !_coordinator || !_stageContainer) return;
     _remoteControlUi = std::make_unique<RemoteControlUi>(_stageContainer,_coordinator.get(),[this] {
         std::vector<RemoteControlTarget> targets;
-        if (_whiteboardVisible || !_coordinator || _coordinator->state() != OpenMeeting::MeetingState::InMeeting) return targets;
+        if (!_coordinator || _coordinator->state() != OpenMeeting::MeetingState::InMeeting) return targets;
         for (const auto& [sid,binding] : _remoteVideoBindings) {
-            if (!binding.screen || !canRenderRemoteVideo(sid)) continue;
+            if (!binding.screen || binding.track.expired() ||
+                !livekit::IsTrackTicketActive(binding.ticket, binding.key)) continue;
             auto* tile = remoteVideoTile(sid);
-            if (!tile) continue;
-            QWidget* widget = tile;
+            QWidget* widget = nullptr;
             QRectF content;
-            if (_usingGpuBackend.load() && _videoCanvas && _videoCanvas->isVisible()) {
-                widget = _videoCanvas;
-                content = _videoCanvas->videoContentRect(tile->renderKey().toStdString());
-            } else if (tile->isVisible()) content = tile->remoteControlContentRect();
-            targets.push_back({binding.identity,sid,tile->displayName(),widget,content});
+            if (!_whiteboardVisible && tile && canRenderRemoteVideo(sid)) {
+                if (_usingGpuBackend.load() && _videoCanvas && _videoCanvas->isVisible()) {
+                    widget = _videoCanvas;
+                    content = _videoCanvas->videoContentRect(tile->renderKey().toStdString());
+                } else if (tile->isVisible()) {
+                    widget = tile;
+                    content = tile->remoteControlContentRect();
+                }
+            }
+            targets.push_back({binding.identity,sid,tile ? tile->displayName() : binding.identity,widget,content});
         }
         return targets;
     },[this](bool blocked) {
@@ -6014,6 +6030,7 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 	if (!current()) return;
 	if (reconcile) reconcileRemoteRenderSelection();
 	if (resetFrame) updateVideoLayout();
+	if (_remoteControlUi) _remoteControlUi->refreshTargets();
 }
 
 void MeetingRoomWindow::removeRemoteVideo(const QString &trackSid, bool reconcile) {
@@ -6034,6 +6051,7 @@ void MeetingRoomWindow::removeRemoteVideo(const QString &trackSid, bool reconcil
 	}
 	_remoteScreenTiles.erase(trackSid);
 	_remoteVideoBindings.erase(trackSid);
+	if (_remoteControlUi) _remoteControlUi->refreshTargets();
 	syncVisibleRemoteTiles();
 	if (reconcile) reconcileRemoteRenderSelection();
 	updateVideoLayout();
@@ -6738,6 +6756,7 @@ void MeetingRoomWindow::attachCoordinatorSession() {
 	if (!_coordinator) return;
     if (!_encryptionPanel) {
         _encryptionPanel = new MeetingEncryptionPanel(this);
+        _encryptionPanel->installEventFilter(this);
         _encryptionPanel->setRecoveryHandler([weak = std::weak_ptr<OpenMeeting::MeetingCoordinator>(_coordinator)](
             std::shared_ptr<livekit::MeetingSecretHandle> secret) {
             if (const auto owner = weak.lock()) owner->recoverEncryptionKey(std::move(secret));

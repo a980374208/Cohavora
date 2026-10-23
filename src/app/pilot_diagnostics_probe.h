@@ -8,14 +8,17 @@
 #include "src/app/diagnostics/product_gpu_budget_snapshot.h"
 #include "src/app/diagnostics/product_gpu_queue_snapshot.h"
 #include "src/app/diagnostics/product_heap_optimize_diagnostic.h"
+#include "src/app/diagnostics/released_heap_window.h"
 #include <nlohmann/json.hpp>
 #include <cstdint>
 #include <fstream>
 #include <functional>
 #include <thread>
+#include <atomic>
 #include <type_traits>
 #if defined(_WIN32)
 #include <windows.h>
+#include "src/app/diagnostics/product_probe_capacity_writer.h"
 #endif
 
 namespace MeetingApp {
@@ -28,6 +31,8 @@ inline nlohmann::json BuildPilotDiagnosticMetrics(
     for (const auto& metric : livekit::telemetry::BuildSafeMetricRows(record)) {
         if (metric.key.starts_with("network.rtp.") ||
             metric.key.starts_with("video.pipeline.") ||
+            metric.key.starts_with("video.policy.") ||
+            metric.key.starts_with("device.state.") ||
             metric.key.starts_with("camera.pipeline.") ||
             metric.key.starts_with("video.codec.decoders") ||
             metric.key.starts_with("audio.window.") ||
@@ -36,6 +41,7 @@ inline nlohmann::json BuildPilotDiagnosticMetrics(
             metric.key == "queue.depth" ||
             metric.key.starts_with("render.interval.bucket.") ||
             metric.key.starts_with("render.window.") ||
+            metric.key == "render.pipeline.actual_backend" ||
             metric.key == "render.interval.p95") {
             const auto value = std::visit([](const auto& v) -> Json {
                 if constexpr (std::is_same_v<std::decay_t<decltype(v)>, std::monostate>)
@@ -74,17 +80,33 @@ public:
                           std::uint64_t heap_optimize_generation = 0,
                           bool collect_heap_pages = false,
                           product_heap_diagnostic::Action heap_action = product_heap_diagnostic::Action::Optimize,
-                          std::function<HeapMaintenanceSnapshot()> heap_maintenance_observation = {})
-        : worker_([=](std::stop_token stop) {
+                          std::function<HeapMaintenanceSnapshot()> heap_maintenance_observation = {},
+                          std::uint64_t evidence_maximum_bytes = 0,
+                          std::string evidence_contract = "b14_native_probe_evidence_capacity_v2")
+        : worker_([=, this](std::stop_token stop) {
+#if defined(_WIN32)
+          std::unique_ptr<product_probe_capacity::Writer> bounded;
+#endif
           try {
             // The runner supplies a new, run-scoped destination.
-            if (std::filesystem::exists(destination)) return;
-            std::ofstream output(destination, std::ios::binary);
-            if (!output) return;
+            std::ofstream output;
+            if (evidence_maximum_bytes) {
+#if defined(_WIN32)
+                bounded = std::make_unique<product_probe_capacity::Writer>(destination, evidence_maximum_bytes, run_id, evidence_contract);
+#else
+                throw std::runtime_error("native_probe_capacity_windows_required");
+#endif
+            } else {
+                if (std::filesystem::exists(destination)) return;
+                output.open(destination, std::ios::binary);
+                if (!output) return;
+            }
             std::uint64_t sequence = 0;
             std::uint64_t terminal_generation = 0;
             auto terminal_seen = std::chrono::steady_clock::time_point{};
             nlohmann::json released_heap;
+            released_heap_window::Sampler window_heap;
+            const auto process_creation = ProcessCreationJson();
             product_heap_diagnostic::ReleaseGuard heap_optimize_guard(heap_optimize_generation);
             product_heap_diagnostic::JournalWorkspace heap_workspace(heap_optimize_generation && collect_heap_pages);
             nlohmann::json heap_optimize_result;
@@ -117,6 +139,23 @@ public:
                         {"queue_byte_limit_hits", h->queue_byte_limit_hits},
                         {"snapshot_max_us", h->snapshot_max_us},
                         {"checkpoint_max_us", h->checkpoint_max_us},
+                        {"checkpoint_work", {
+                            {"schema", "b14_checkpoint_work_v1"},
+                            {"scope", "history_worker_append_and_refresh_inspect"},
+                            {"operations", h->checkpoint_work.operations},
+                            {"inspect_calls", h->checkpoint_work.inspect_calls},
+                            {"append_calls", h->checkpoint_work.append_calls},
+                            {"hash_calls", h->checkpoint_work.hash_calls},
+                            {"hash_bytes", h->checkpoint_work.hash_bytes},
+                            {"hash_wall_ns", h->checkpoint_work.hash_wall_ns},
+                            {"read_calls", h->checkpoint_work.read_calls},
+                            {"read_bytes", h->checkpoint_work.read_bytes},
+                            {"operation_wall_ns", h->checkpoint_work.operation_wall_ns},
+                            {"operation_max_wall_ns", h->checkpoint_work.operation_max_wall_ns},
+                            {"thread_cpu_100ns", h->checkpoint_work.operations &&
+                                !h->checkpoint_work.thread_cpu_failures
+                                ? Json(h->checkpoint_work.thread_cpu_100ns) : Json(nullptr)},
+                            {"thread_cpu_failures", h->checkpoint_work.thread_cpu_failures}}},
                         {"history_refresh_max_us", h->history_refresh_max_us},
                         {"history_refresh_last_us", h->history_refresh_last_us},
                         {"history_refresh_count", h->history_refresh_count},
@@ -124,9 +163,32 @@ public:
                         {"memory_bytes", h->memory_bytes}, {"memory_records", h->memory_records},
                         {"pending_records_dropped", h->pending_records_dropped},
                         {"write_failures", h->write_failures},
+                        {"last_export_publication", {
+                            {"schema", "cohavora-directory-publication-v1"},
+                            {"success", h->last_export_publication.success},
+                            {"cancelled", h->last_export_publication.cancelled},
+                            {"attempts", h->last_export_publication.attempts},
+                            {"first_native_error", h->last_export_publication.first_error},
+                            {"last_native_error", h->last_export_publication.last_error}}},
+                        {"checkpoint_failure_contract", "b14_checkpoint_failure_v1"},
+                        {"first_checkpoint_failure", h->first_checkpoint_failure ? Json{
+                            {"reason", h->first_checkpoint_failure->reason},
+                            {"segment_file", h->first_checkpoint_failure->segment_file.empty() ? Json(nullptr) : Json(h->first_checkpoint_failure->segment_file)},
+                            {"expected_sha256", h->first_checkpoint_failure->expected_sha256.empty() ? Json(nullptr) : Json(h->first_checkpoint_failure->expected_sha256)},
+                            {"actual_sha256", h->first_checkpoint_failure->actual_sha256.empty() ? Json(nullptr) : Json(h->first_checkpoint_failure->actual_sha256)},
+                            {"segment_first_revision", h->first_checkpoint_failure->segment_first_revision ? Json(h->first_checkpoint_failure->segment_first_revision) : Json(nullptr)},
+                            {"segment_last_revision", h->first_checkpoint_failure->segment_last_revision ? Json(h->first_checkpoint_failure->segment_last_revision) : Json(nullptr)},
+                            {"session_generation", h->first_checkpoint_failure->session_generation},
+                            {"attempted_first_revision", h->first_checkpoint_failure->attempted_first_revision},
+                            {"attempted_last_revision", h->first_checkpoint_failure->attempted_last_revision},
+                            {"observed_utc_ms", h->first_checkpoint_failure->observed_utc_ms},
+                            {"observed_steady_ns", h->first_checkpoint_failure->observed_steady_ns},
+                            {"clock_contract", "std_chrono_steady_nanoseconds"}} : Json(nullptr)},
                         {"checkpoint_revision", h->checkpoint_revision}}},
                     {"diagnostic", {{"accepted", d.accepted}, {"written", d.written},
                         {"benchmark_production_paused", pipeline->ProductionPausedForBenchmark()},
+                        {"window_observation_contract", "b14_diagnostic_window_observation_v1"},
+                        {"diagnostic_window_active", pipeline->DiagnosticWindowActive()},
                         {"benchmark_suppressed", pipeline->BenchmarkSuppressed()},
                         {"suppressed", d.suppressed},
                         {"dropped_ordinary", d.dropped_ordinary},
@@ -138,6 +200,15 @@ public:
                         {"failures", capture.failures}, {"failure_reason", capture.failure_reason},
                         {"binding_failures", capture.binding_failures},
                         {"binding_failure_reason", capture.binding_failure_reason}}}};
+#if defined(_WIN32)
+                if (bounded) {
+                    row["schema"] = 2;
+                    row["capacity_contract"] = bounded->version();
+                    row["capacity_maximum_bytes"] = bounded->maximum();
+                    row["pid"] = CurrentProcessId();
+                    row["process_start_ticks"] = bounded->birth();
+                }
+#endif
                 HeapMaintenanceSnapshot maintenance;
                 bool maintenanceObserved = false;
                 if (heap_maintenance_observation) {
@@ -199,7 +270,6 @@ public:
                             if (const auto* journal = heap_workspace.get()) {
                                 const auto journal_path = destination.parent_path() / "heap-page-journal.json";
                                 if (!std::filesystem::exists(journal_path)) {
-                                    std::ofstream page_output(journal_path, std::ios::binary);
                                     const Json page_json{{"schema", 1}, {"run_id", run_id},
                                         {"pid", CurrentProcessId()}, {"generation", intervention.generation},
                                         {"action", heap_optimize_result["action"]},
@@ -207,8 +277,19 @@ public:
                                         {"workspace_base", journal->workspace_base}, {"workspace_size", journal->workspace_size},
                                         {"before", PageSampleJson(journal->before)}, {"after", PageSampleJson(journal->after)},
                                         {"formal_credit", 0}, {"qualification_credit", 0}};
-                                    if (page_output) { page_output << page_json.dump() << '\n'; page_output.flush(); }
-                                    if (page_output) {
+                                    bool page_written = false;
+#if defined(_WIN32)
+                                    if (bounded) {
+                                        bounded->pages(page_json.dump() + '\n');
+                                        page_written = true;
+                                    } else
+#endif
+                                    {
+                                        std::ofstream page_output(journal_path, std::ios::binary);
+                                        if (page_output) { page_output << page_json.dump() << '\n'; page_output.flush(); }
+                                        page_written = static_cast<bool>(page_output);
+                                    }
+                                    if (page_written) {
                                         heap_optimize_result["page_journal_available"] = true;
                                         heap_optimize_result["page_journal_file"] = "heap-page-journal.json";
                                     }
@@ -230,6 +311,9 @@ public:
                             histogram[std::to_string(i)] = s.render_fine_interval_histogram[i];
                     row["render_interval_histogram_ms"] = std::move(histogram);
                     row["render_expected_bindings"] = s.render_expected_bindings;
+                    row["render_measurement_contract"] = "b14_render_cadence_probe_v1";
+                    row["video_policy_observation_contract"] = "b14_video_policy_probe_v1";
+                    row["local_load_observation_contract"] = "b14_local_measurement_load_v1";
                     if (s.session_complete && cleanup_pending() == 0) {
                         if (terminal_generation != s.session_generation) {
                             terminal_generation = s.session_generation;
@@ -261,18 +345,45 @@ public:
                         }
                         row["released_heap"] = released_heap;
                     }
+                    // The external diagnostic driver requests this only after
+                    // its actual leave/uia_observed + 5 s. Keep the original
+                    // cached summary and its timestamp untouched above.
+                    released_heap_window::Context context{
+                        run_id, std::string(pipeline->run_id()), CurrentProcessId(),
+                        process_creation["available"] == true ?
+                            process_creation["creation_filetime_100ns"].get<std::uint64_t>() : 0,
+                        s.session_generation, s.session_complete, stop.stop_requested(), cleanup_pending()};
+                    row["released_heap_window"] = window_heap.Observe(
+                        released_heap_window::ReadRequest(destination.parent_path() / "released-heap-request.json"),
+                        context, [] {
+#if defined(_WIN32)
+                            HEAP_SUMMARY summary{};
+                            summary.cb = sizeof(summary);
+                            const bool available = HeapSummary(GetProcessHeap(), 0, &summary) != FALSE;
+                            return Json{{"available", available}, {"scope", "default_process_heap_only"},
+                                {"allocated_bytes", available ? Json(summary.cbAllocated) : Json(nullptr)},
+                                {"committed_bytes", available ? Json(summary.cbCommitted) : Json(nullptr)},
+                                {"reserved_bytes", available ? Json(summary.cbReserved) : Json(nullptr)}};
+#else
+                            return Json{{"available", false}, {"reason", "windows_only"}};
+#endif
+                        }, [] { return std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count(); });
                 }
                 if (heap_optimize_generation)
                     row["heap_optimize_diagnostic"] = heap_optimize_result;
                 // Stamp the completed observation, after reading its source snapshot.
                 row["utc_ms"] = std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count();
-                output << row.dump() << '\n';
-                output.flush();
+#if defined(_WIN32)
+                if (bounded) bounded->append(row.dump() + '\n');
+                else
+#endif
+                { output << row.dump() << '\n'; output.flush(); }
             };
             auto next_sample = std::chrono::steady_clock::now();
             constexpr auto sample_period = std::chrono::seconds(1);
-            while (!stop.stop_requested() && output) {
+            while (!stop.stop_requested() && (evidence_maximum_bytes || output)) {
                 sample();
                 next_sample += sample_period;
                 const auto completed_at = std::chrono::steady_clock::now();
@@ -287,12 +398,31 @@ public:
                         stop_check < next_sample ? stop_check : next_sample);
                 }
             }
-            if (output) sample();
+            if (evidence_maximum_bytes || output) sample();
+#if defined(_WIN32)
+            if (bounded) bounded->finish(true);
+#endif
+          } catch (const std::system_error& error) {
+            if (evidence_maximum_bytes) failed_.store(true, std::memory_order_release);
+#if defined(_WIN32)
+            if (bounded) { try { bounded->finish(false, static_cast<DWORD>(error.code().value())); } catch (...) {} }
+#endif
           } catch (...) {
-            // Missing/truncated probe evidence fails the external completeness
-            // check; diagnostics must not terminate the product.
+            if (evidence_maximum_bytes) failed_.store(true, std::memory_order_release);
+#if defined(_WIN32)
+            if (bounded) { try { bounded->finish(false, ERROR_UNHANDLED_EXCEPTION); } catch (...) {} }
+#endif
+            // Legacy evidence retains its old dispatch. Bounded failures also
+            // reach the joined product exit; no UI/media callback waits here.
           }
         }) {}
+    ~PilotDiagnosticsProbe() { Finish(); }
+    bool Finish() noexcept {
+        worker_.request_stop();
+        try { if (worker_.joinable()) worker_.join(); }
+        catch (...) { failed_.store(true, std::memory_order_release); }
+        return !failed_.load(std::memory_order_acquire);
+    }
 private:
     static unsigned long CurrentProcessId() noexcept {
 #if defined(_WIN32)
@@ -355,6 +485,7 @@ private:
             {"complete", sample.complete}, {"overflow", sample.overflow},
             {"truncated", sample.truncated}, {"query_budget_exhausted", sample.query_budget_exhausted}};
     }
+    std::atomic<bool> failed_{false};
     std::jthread worker_;
 };
 } // namespace MeetingApp

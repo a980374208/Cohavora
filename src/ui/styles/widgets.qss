@@ -1651,6 +1651,7 @@ QLabel[uiStyle="meeting-room-window-recoverybanner-4"][uiStyle="meeting-room-win
     font-weight: 500;
 }
 
+QPushButton[uiStyle="meeting-stage-action"],
 [uiStyle="meeting-room-window-screensharebanner"] QPushButton {
     min-height: 28px;
     background: @surface@;
@@ -1661,16 +1662,20 @@ QLabel[uiStyle="meeting-room-window-recoverybanner-4"][uiStyle="meeting-room-win
     font-weight: 500;
 }
 
+QPushButton[uiStyle="meeting-stage-action"]:hover,
+QPushButton[uiStyle="meeting-stage-action"]:focus,
 [uiStyle="meeting-room-window-screensharebanner"] QPushButton:hover,
 [uiStyle="meeting-room-window-screensharebanner"] QPushButton:focus {
     background: @hover@;
     border-color: @accent@;
 }
 
+QPushButton[uiStyle="meeting-stage-action"]:pressed,
 [uiStyle="meeting-room-window-screensharebanner"] QPushButton:pressed {
     background: @pressed@;
 }
 
+QPushButton[uiStyle="meeting-stage-action"]:disabled,
 [uiStyle="meeting-room-window-screensharebanner"] QPushButton:disabled {
     background: @surface-alt@;
     color: @text-muted@;

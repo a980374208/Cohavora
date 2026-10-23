@@ -91,8 +91,6 @@ void Dx11Renderer::CleanupLocked() {
 
     render_target_view_.Reset();
     swap_chain_.Reset();
-    context_.Reset();
-    device_.Reset();
 
     vertex_shader_.Reset();
     input_layout_.Reset();
@@ -107,6 +105,14 @@ void Dx11Renderer::CleanupLocked() {
     yuv_conversion_buffer_.Reset();
     frame_transform_buffer_.Reset();
     solid_color_buffer_.Reset();
+
+    // Keep the immediate context until every child resource is released so
+    // Flush can retire D3D11's deferred destruction before the device closes.
+    if (context_) {
+        context_->Flush();
+    }
+    context_.Reset();
+    device_.Reset();
     hwnd_ = nullptr;
     width_ = 0;
     height_ = 0;

@@ -3,6 +3,7 @@
 #include "session_telemetry.h"
 #include "stability_ledger.h"
 #include "bounded_callback.h"
+#include "telemetry_directory_publication.h"
 
 #include <atomic>
 #include <chrono>
@@ -87,6 +88,56 @@ struct TelemetryCommitWatermark {
     std::uint64_t revision = 0;
 };
 
+// b14_checkpoint_work_v1: additive observations of non-overlapping, explicitly
+// instrumented checkpoint operations on the history worker. Hash wall time is
+// not CPU time; thread CPU includes all work in each outer operation.
+struct TelemetryCheckpointWork {
+    std::uint64_t operations = 0;
+    std::uint64_t inspect_calls = 0;
+    std::uint64_t append_calls = 0;
+    std::uint64_t hash_calls = 0;
+    std::uint64_t hash_bytes = 0;
+    std::uint64_t hash_wall_ns = 0;
+    std::uint64_t read_calls = 0;
+    std::uint64_t read_bytes = 0;
+    std::uint64_t operation_wall_ns = 0;
+    std::uint64_t operation_max_wall_ns = 0;
+    std::uint64_t thread_cpu_100ns = 0;
+    std::uint64_t thread_cpu_failures = 0;
+
+    void Add(const TelemetryCheckpointWork& other) noexcept {
+        operations += other.operations;
+        inspect_calls += other.inspect_calls;
+        append_calls += other.append_calls;
+        hash_calls += other.hash_calls;
+        hash_bytes += other.hash_bytes;
+        hash_wall_ns += other.hash_wall_ns;
+        read_calls += other.read_calls;
+        read_bytes += other.read_bytes;
+        operation_wall_ns += other.operation_wall_ns;
+        if (other.operation_max_wall_ns > operation_max_wall_ns)
+            operation_max_wall_ns = other.operation_max_wall_ns;
+        thread_cpu_100ns += other.thread_cpu_100ns;
+        thread_cpu_failures += other.thread_cpu_failures;
+    }
+};
+
+// b14_checkpoint_failure_v1: first append failure, independent of later status
+// transitions. Empty segment/hash fields mean that evidence was unavailable.
+struct TelemetryCheckpointFailure {
+    std::string reason;
+    std::string segment_file;
+    std::string expected_sha256;
+    std::string actual_sha256;
+    std::uint64_t segment_first_revision = 0;
+    std::uint64_t segment_last_revision = 0;
+    std::uint64_t session_generation = 0;
+    std::uint64_t attempted_first_revision = 0;
+    std::uint64_t attempted_last_revision = 0;
+    std::int64_t observed_utc_ms = 0;
+    std::int64_t observed_steady_ns = 0;
+};
+
 struct TelemetryStoreStatus {
     Availability availability = Availability::WarmingUp;
     std::string reason = "history_store_starting";
@@ -100,6 +151,8 @@ struct TelemetryStoreStatus {
     std::uint64_t corrupt_artifacts_pruned = 0;
     std::uint64_t exports_succeeded = 0;
     std::uint64_t exports_cancelled = 0;
+    TelemetryDirectoryPublication last_export_publication;
+    std::optional<TelemetryCheckpointFailure> first_checkpoint_failure;
     std::uint64_t checkpoint_revision = 0;
     std::uint64_t pending_records_dropped = 0;
     std::uint64_t pending_reports_dropped = 0;
@@ -139,6 +192,7 @@ struct TelemetryStoreStatus {
     std::uint64_t checkpoint_max_us = 0;
     std::uint64_t checkpoint_total_us = 0;
     std::uint64_t checkpoint_count = 0;
+    TelemetryCheckpointWork checkpoint_work;
     std::uint64_t history_refresh_max_us = 0;
     std::uint64_t history_refresh_last_us = 0;
     std::uint64_t history_refresh_count = 0;
@@ -154,6 +208,7 @@ struct TelemetryExportResult {
     bool cancelled = false;
     std::string reason;
     std::filesystem::path report_directory;
+    TelemetryDirectoryPublication publication;
 };
 
 std::vector<SafeMetricRow> BuildSafeMetricRows(

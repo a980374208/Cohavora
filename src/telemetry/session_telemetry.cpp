@@ -1,4 +1,5 @@
 #include "session_telemetry.h"
+#include "callback_phase_diagnostic.h"
 #include "diagnostic_pipeline.h"
 
 #include <algorithm>
@@ -463,6 +464,20 @@ bool SessionTelemetry::RecordRoomConnectAccepted(
     return Submit(std::move(event));
 }
 
+bool SessionTelemetry::RetireRemoteMediaGeneration(
+    std::uint64_t room_generation,
+    Clock::time_point source_time,
+    std::map<std::string, std::string> recovery_identities) {
+    if (room_generation == 0) return false;
+    Event event;
+    event.kind = EventKind::RemoteMediaGenerationRetired;
+    event.room_generation = room_generation;
+    event.recovery_epoch = ActiveRecoveryEpoch();
+    event.recovery_identities = std::move(recovery_identities);
+    event.source_time = source_time;
+    return Submit(std::move(event));
+}
+
 bool SessionTelemetry::RegisterRemoteVideoBinding(
     std::string series_key,
     std::uint64_t room_generation,
@@ -471,12 +486,15 @@ bool SessionTelemetry::RegisterRemoteVideoBinding(
     bool expected_receive,
     bool continuous_video,
     std::shared_ptr<VideoActivityProbe> probe,
-    Clock::time_point source_time) {
+    Clock::time_point source_time,
+    std::string recovery_identity) {
     if (series_key.empty() || room_generation == 0 || binding_epoch == 0 || !probe) {
         return false;
     }
     Event event;
     event.kind = EventKind::RemoteVideoBinding;
+    event.recovery_identity = std::move(recovery_identity);
+    event.recovery_epoch = ActiveRecoveryEpoch();
     event.session_generation = session_generation_;
     event.series_key = std::move(series_key);
     event.room_generation = room_generation;
@@ -540,12 +558,15 @@ bool SessionTelemetry::RegisterRemoteAudioBinding(
     Clock::time_point subscription_accepted,
     bool expected_receive,
     std::shared_ptr<AudioActivityProbe> probe,
-    Clock::time_point source_time) {
+    Clock::time_point source_time,
+    std::string recovery_identity) {
     if (series_key.empty() || room_generation == 0 || binding_epoch == 0 || !probe) {
         return false;
     }
     Event event;
     event.kind = EventKind::RemoteAudioBinding;
+    event.recovery_identity = std::move(recovery_identity);
+    event.recovery_epoch = ActiveRecoveryEpoch();
     event.session_generation = session_generation_;
     event.series_key = std::move(series_key);
     event.room_generation = room_generation;
@@ -610,7 +631,8 @@ bool SessionTelemetry::RegisterRemoteVideoRenderBinding(
     bool continuous_video,
     std::chrono::milliseconds target_interval,
     std::shared_ptr<RenderActivityProbe> probe,
-    Clock::time_point source_time) {
+    Clock::time_point source_time,
+    std::string recovery_identity) {
     if (series_key.empty() || room_generation == 0 || binding_epoch == 0 || !probe) {
         return false;
     }
@@ -624,6 +646,8 @@ bool SessionTelemetry::RegisterRemoteVideoRenderBinding(
         (std::max)(std::chrono::milliseconds(1), target_interval)).count();
     Event event;
     event.kind = EventKind::RemoteVideoRenderBinding;
+    event.recovery_identity = std::move(recovery_identity);
+    event.recovery_epoch = ActiveRecoveryEpoch();
     event.session_generation = session_generation_;
     event.series_key = std::move(series_key);
     event.room_generation = room_generation;
@@ -1135,7 +1159,6 @@ bool SessionTelemetry::CompleteUiLagProbe(
 void SessionTelemetry::RefreshOnStrand(Clock::time_point now) {
     AssertOnStrand();
     MaybeFinishReconnectOnStrand(now);
-    UpdateRenderAvailabilityOnStrand(now);
     PublishSnapshotOnStrand(now);
 }
 
@@ -1176,13 +1199,17 @@ void SessionTelemetry::StopOnStrand(std::function<void()> on_stopped) {
 }
 
 SessionTelemetry::SnapshotPtr SessionTelemetry::SnapshotOnStrand(Clock::time_point now) {
+    callback_diagnostic::SnapshotScope diagnostic_snapshot(false);
     AssertOnStrand();
     UpdateRenderAvailabilityOnStrand(now);
     UpdateRenderWindowOnStrand(now);
     UpdateLocalPublishAvailabilityOnStrand(now);
     UpdateLocalDeviceStatsOnStrand(now);
+    diagnostic_snapshot.Point(callback_diagnostic::SnapshotPoint::UpdatesEnd);
     const auto build_started_at = Clock::now();
+    diagnostic_snapshot.Point(callback_diagnostic::SnapshotPoint::BuildBegin);
     auto snapshot = BuildSnapshotOnStrand(now);
+    diagnostic_snapshot.Point(callback_diagnostic::SnapshotPoint::BuildEnd);
     const auto build_us = std::chrono::duration_cast<std::chrono::microseconds>(
         Clock::now() - build_started_at).count();
     ++state_.telemetry_snapshot_publications;
@@ -1192,6 +1219,8 @@ SessionTelemetry::SnapshotPtr SessionTelemetry::SnapshotOnStrand(Clock::time_poi
     state_.total_snapshot_build_us += build_us;
     PopulateTelemetryCostOnSnapshot(snapshot, now);
     latest_snapshot_ = std::make_shared<const Snapshot>(std::move(snapshot));
+    diagnostic_snapshot.Point(callback_diagnostic::SnapshotPoint::SharedSnapshotEnd);
+    diagnostic_snapshot.Complete(state_.revision);
     return latest_snapshot_;
 }
 
@@ -1495,6 +1524,8 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
                 }
                 RecoveryTrackState track;
                 track.previous_endpoint_id = media.endpoint_id;
+                track.recovery_identity = media.recovery_identity;
+                track.room_generation = media.room_generation;
                 const auto last_ns = media.probe->last_frame_ns.load(
                     std::memory_order_acquire);
                 if (last_ns > 0) {
@@ -1512,6 +1543,8 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
                 }
                 RecoveryTrackState track;
                 track.previous_endpoint_id = media.endpoint_id;
+                track.recovery_identity = media.recovery_identity;
+                track.room_generation = media.room_generation;
                 const auto last_ns = media.probe->last_frame_ns.load(
                     std::memory_order_acquire);
                 if (last_ns > 0) {
@@ -1527,6 +1560,8 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
                 }
                 RecoveryTrackState track;
                 track.previous_endpoint_id = media.endpoint_id;
+                track.recovery_identity = media.recovery_identity;
+                track.room_generation = media.room_generation;
                 const auto last_ns = media.probe->last_submit_ns.load(
                     std::memory_order_acquire);
                 if (last_ns > 0) {
@@ -1632,6 +1667,47 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             state_.remote_video_first_frame_reason = "waiting_for_decoded_frame";
         }
         break;
+    case EventKind::RemoteMediaGenerationRetired: {
+        // A full restart retires the transport, not the logical publication.
+        // Keep the outage denominator until its uniquely identified replacement
+        // actually recovers, or the original observation deadline expires.
+        const bool same_episode = recovery_.active && event.recovery_epoch != 0 &&
+            event.recovery_epoch == recovery_.epoch;
+        if (!same_episode) break;
+        for (auto& [_, binding] : media_) {
+            if (binding.room_generation == event.room_generation)
+                binding.expected_receive = false;
+        }
+        for (auto& [_, binding] : audio_media_) {
+            if (binding.room_generation == event.room_generation)
+                binding.expected_receive = false;
+        }
+        const auto retire = [&](auto& media, auto& tracks, auto& recovered) {
+            for (auto& [key, binding] : media) {
+                if (binding.room_generation != event.room_generation) continue;
+                const auto pending = tracks.find(key);
+                if (pending == tracks.end()) continue;
+                auto& track = pending->second;
+                if (track.room_generation != event.room_generation) continue;
+                // Recheck the complete roster at retirement: a publication
+                // added after binding may have made the cached identity ambiguous.
+                const auto identity = event.recovery_identities.find(key);
+                track.recovery_identity = identity == event.recovery_identities.end()
+                    ? std::string{} : identity->second;
+                if (track.recovered && recovered > 0) --recovered;
+                track.recovered = false;
+                track.awaiting_rebind = true;
+                track.first_recovered_at = {};
+                track.stable_recovered_at = {};
+            }
+        };
+        retire(media_, recovery_.tracks, state_.reconnect_video_recovered);
+        retire(audio_media_, recovery_.audio_tracks, state_.reconnect_audio_recovered);
+        retire(render_media_, recovery_.render_tracks, state_.reconnect_render_recovered);
+        UpdateFirstFrameAvailabilityOnStrand();
+        UpdateAudioFirstFrameAvailabilityOnStrand();
+        break;
+    }
     case EventKind::RemoteVideoBinding: {
         if (event.series_key.empty() || event.room_generation == 0 ||
             event.binding_epoch == 0 || !event.video_probe) {
@@ -1650,11 +1726,13 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         media.room_generation = event.room_generation;
         media.binding_epoch = event.binding_epoch;
         media.endpoint_id = std::string(diagnostic::NewCorrelationId().View());
+        media.recovery_identity = event.recovery_identity;
         media.expected_receive = event.expected;
         media.continuous_video = event.continuous_video;
         media.subscription_accepted = event.related_time;
         media.probe = event.video_probe;
         media_[event.series_key] = std::move(media);
+        RebindRecoveryTrackOnStrand(recovery_.tracks, event);
         state_.remote_video_bindings = media_.size();
         UpdateFirstFrameAvailabilityOnStrand();
         break;
@@ -1727,7 +1805,8 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             break;
         }
         const auto recovering = recovery_.tracks.find(event.series_key);
-        if (recovering == recovery_.tracks.end() || recovering->second.recovered) {
+        if (recovering == recovery_.tracks.end() || recovering->second.recovered ||
+            recovering->second.awaiting_rebind) {
             break;
         }
         auto& track = recovering->second;
@@ -1778,10 +1857,12 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         media.room_generation = event.room_generation;
         media.binding_epoch = event.binding_epoch;
         media.endpoint_id = std::string(diagnostic::NewCorrelationId().View());
+        media.recovery_identity = event.recovery_identity;
         media.expected_receive = event.expected;
         media.subscription_accepted = event.related_time;
         media.probe = event.audio_probe;
         audio_media_[event.series_key] = std::move(media);
+        RebindRecoveryTrackOnStrand(recovery_.audio_tracks, event);
         state_.remote_audio_bindings = audio_media_.size();
         UpdateAudioFirstFrameAvailabilityOnStrand();
         ReconcileAudioQualityExpectationOnStrand(true);
@@ -1848,7 +1929,8 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             break;
         }
         const auto recovering = recovery_.audio_tracks.find(event.series_key);
-        if (recovering == recovery_.audio_tracks.end() || recovering->second.recovered) {
+        if (recovering == recovery_.audio_tracks.end() || recovering->second.recovered ||
+            recovering->second.awaiting_rebind) {
             break;
         }
         auto& track = recovering->second;
@@ -1904,12 +1986,14 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         render.room_generation = event.room_generation;
         render.binding_epoch = event.binding_epoch;
         render.endpoint_id = std::string(diagnostic::NewCorrelationId().View());
+        render.recovery_identity = event.recovery_identity;
         render.expected_render = event.expected;
         render.continuous_video = event.continuous_video;
         render.subscription_accepted = event.related_time;
         render.expected_since = event.expected ? event.source_time : Clock::time_point{};
         render.probe = event.render_probe;
         render_media_[event.series_key] = std::move(render);
+        RebindRecoveryTrackOnStrand(recovery_.render_tracks, event);
         state_.render_bindings = render_media_.size();
         UpdateRenderAvailabilityOnStrand(event.source_time);
         break;
@@ -1947,7 +2031,9 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
         }
         if (!event.expected && recovery_.active) {
             const auto pending = recovery_.render_tracks.find(event.series_key);
-            if (pending != recovery_.render_tracks.end()) {
+            if (pending != recovery_.render_tracks.end() &&
+                !(pending->second.awaiting_rebind &&
+                  event.expectation_reason == MediaExpectationReason::RenderBindingEnded)) {
                 recovery_.render_tracks.erase(pending);
                 recovery_.expectation_changed = true;
                 recovery_.render_expectation_changed = true;
@@ -2019,7 +2105,8 @@ void SessionTelemetry::ApplyOnStrand(const Event& event) {
             break;
         }
         const auto recovering = recovery_.render_tracks.find(event.series_key);
-        if (recovering == recovery_.render_tracks.end() || recovering->second.recovered) {
+        if (recovering == recovery_.render_tracks.end() || recovering->second.recovered ||
+            recovering->second.awaiting_rebind) {
             UpdateRenderAvailabilityOnStrand(event.source_time);
             break;
         }
@@ -2802,6 +2889,35 @@ void SessionTelemetry::UpdateRenderAvailabilityOnStrand(Clock::time_point now) {
         state_.render_stall_reason = active_stall
             ? "visible_render_stall_active" : "render_stall_window_valid";
     }
+}
+
+void SessionTelemetry::RebindRecoveryTrackOnStrand(
+    std::map<std::string, RecoveryTrackState>& tracks,
+    const Event& event) {
+    AssertOnStrand();
+    if (!recovery_.active || event.recovery_epoch == 0 ||
+        event.recovery_epoch != recovery_.epoch || event.recovery_identity.empty()) {
+        return;
+    }
+    auto previous = tracks.end();
+    for (auto it = tracks.begin(); it != tracks.end(); ++it) {
+        if (it->second.recovery_identity != event.recovery_identity) continue;
+        if (previous != tracks.end()) return; // Ambiguous outage publications.
+        previous = it;
+    }
+    if (previous == tracks.end() || !previous->second.awaiting_rebind ||
+        event.room_generation <= previous->second.room_generation ||
+        (previous->first != event.series_key && tracks.contains(event.series_key))) {
+        return;
+    }
+    auto node = tracks.extract(previous);
+    node.key() = event.series_key;
+    node.mapped().room_generation = event.room_generation;
+    node.mapped().awaiting_rebind = false;
+    // A new endpoint must independently meet the existing stable window.
+    node.mapped().first_recovered_at = {};
+    node.mapped().stable_recovered_at = {};
+    tracks.insert(std::move(node));
 }
 
 void SessionTelemetry::MaybeFinishReconnectOnStrand(Clock::time_point now) {
@@ -4082,6 +4198,8 @@ void SessionTelemetry::UpdateVideoStatsOnStrand(
     }
     const auto inbound_drop_denominator =
         state_.window_inbound_video_frames_received;
+    state_.inbound_video_active_decode_streams_lower_bound =
+        static_cast<std::uint64_t>(state_.inbound_video_active_decode_streams);
     if (!decode_stream_coverage || state_.inbound_video_rtp_streams == 0)
         state_.inbound_video_active_decode_streams = -1;
     if (inbound_drop_denominator > 0) {
@@ -5300,7 +5418,6 @@ void SessionTelemetry::CompleteStatsOnStrand(
         UpdateAudioStatsOnStrand(report, now);
     }
     ApplyOnStrand(completed);
-    UpdateRenderAvailabilityOnStrand(now);
     PublishSnapshotOnStrand(now);
     if (stopping_) {
         FinalizeStopOnStrand();
@@ -5600,14 +5717,18 @@ void SessionTelemetry::FinalizeStopOnStrand() {
 }
 
 void SessionTelemetry::PublishSnapshotOnStrand(Clock::time_point now) {
+    callback_diagnostic::SnapshotScope diagnostic_snapshot(true);
     AssertOnStrand();
     UpdateRenderAvailabilityOnStrand(now);
     UpdateRenderWindowOnStrand(now);
     UpdateLocalPublishAvailabilityOnStrand(now);
     UpdateLocalDeviceStatsOnStrand(now);
+    diagnostic_snapshot.Point(callback_diagnostic::SnapshotPoint::UpdatesEnd);
     ++state_.revision;
     const auto build_started_at = Clock::now();
+    diagnostic_snapshot.Point(callback_diagnostic::SnapshotPoint::BuildBegin);
     auto snapshot = BuildSnapshotOnStrand(now);
+    diagnostic_snapshot.Point(callback_diagnostic::SnapshotPoint::BuildEnd);
     const auto build_us = std::chrono::duration_cast<std::chrono::microseconds>(
         Clock::now() - build_started_at).count();
     ++state_.telemetry_snapshot_publications;
@@ -5617,9 +5738,12 @@ void SessionTelemetry::PublishSnapshotOnStrand(Clock::time_point now) {
     state_.total_snapshot_build_us += build_us;
     PopulateTelemetryCostOnSnapshot(snapshot, now);
     latest_snapshot_ = std::make_shared<const Snapshot>(std::move(snapshot));
+    diagnostic_snapshot.Point(callback_diagnostic::SnapshotPoint::SharedSnapshotEnd);
     if (snapshot_callback_) {
         const auto callback_started_at = Clock::now();
+        diagnostic_snapshot.Point(callback_diagnostic::SnapshotPoint::CallbackBegin);
         snapshot_callback_(latest_snapshot_);
+        diagnostic_snapshot.Point(callback_diagnostic::SnapshotPoint::CallbackEnd);
         const auto callback_us = std::chrono::duration_cast<std::chrono::microseconds>(
             Clock::now() - callback_started_at).count();
         state_.last_snapshot_callback_us = callback_us;
@@ -5627,6 +5751,7 @@ void SessionTelemetry::PublishSnapshotOnStrand(Clock::time_point now) {
             state_.maximum_snapshot_callback_us, callback_us);
         state_.total_snapshot_callback_us += callback_us;
     }
+    diagnostic_snapshot.Complete(state_.revision);
 }
 
 Snapshot SessionTelemetry::BuildSnapshotOnStrand(Clock::time_point now) const {
