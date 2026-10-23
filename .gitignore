@@ -8,6 +8,7 @@
 # Build outputs & caches
 /build-*/
 /build/*
+/out/*
 !/build/configure.py
 !/build/prepare/
 !/build/prompts/
