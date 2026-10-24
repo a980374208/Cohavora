@@ -9,7 +9,7 @@
 #define RepoRoot AddBackslash(SourcePath) + "..\..\"
 
 #ifndef AppBuildDir
-  #define AppBuildDir RepoRoot + "out\build\windows-vs2026-release\src\app\Release"
+  #define AppBuildDir RepoRoot + "..\live-kit-test-local\build-debug\src\app\Release"
 #endif
 #ifndef OutputDir
   #define OutputDir RepoRoot + "out\installer"

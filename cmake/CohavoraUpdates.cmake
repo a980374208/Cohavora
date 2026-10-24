@@ -6,7 +6,8 @@ set(COHAVORA_UPDATE_PRIMARY_URL
 set(COHAVORA_UPDATE_FALLBACK_URL
     "https://github.com/a980374208/Cohavora/releases/latest/download/latest.json"
     CACHE STRING "Public HTTPS URL of the identical signed fallback manifest")
-set(COHAVORA_UPDATE_PUBLIC_KEY_HEX "" CACHE STRING
+set(COHAVORA_UPDATE_PUBLIC_KEY_HEX
+    "20cdd8328dd6f7ddc2842be3897176b2803e9b3b7ebd71da6c8ce4fbaeb13e42" CACHE STRING
     "Trusted raw Ed25519 public key (64 hexadecimal characters)")
 
 if(COHAVORA_UPDATE_PUBLIC_KEY_HEX)

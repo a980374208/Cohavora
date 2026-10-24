@@ -283,7 +283,9 @@ bool IsUtcTimestamp(const QJsonValue &value) {
 
 bool IsSecureUrl(const QUrl &url) {
     return url.isValid() && !url.isRelative()
-        && IsText(url.toString(), true)
+        // Qt's display form decodes %20 in signed HTTPS query parameters.
+        // Validate the request spelling so GitHub asset redirects remain valid.
+        && IsText(url.toString(QUrl::FullyEncoded), true)
         && url.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0
         && !url.host().isEmpty() && url.userInfo().isEmpty()
         && !url.authority(QUrl::FullyEncoded).contains(QLatin1Char('@'))
@@ -314,6 +316,7 @@ bool IsAllowedUpdateUrl(const QUrl &url) {
 }
 
 bool IsAllowedUpdateUrlText(const QString &text) {
+    if (!IsText(text, true)) return false;
     const QUrl url(text, QUrl::StrictMode);
     if (!IsAllowedUpdateUrl(url)) return false;
     if (IsSecureUrl(url)) return true;
