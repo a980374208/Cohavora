@@ -3,6 +3,7 @@
 #include "webrtc_manager.h"
 #include "telemetry/diagnostic_pipeline.h"
 #include "telemetry/sdp_negotiation_trace.h"
+#include "telemetry/received_decode_diagnostic.h"
 #include "core/executor_lifetime.h"
 #include "audio_playout_device_selection.h"
 #include "audio_playout_transport.h"
@@ -211,23 +212,30 @@ public:
     std::unique_ptr<webrtc::VideoDecoder> Create(
         const webrtc::Environment& env,
         const webrtc::SdpVideoFormat& format) override {
+        const auto observed = [](std::unique_ptr<webrtc::VideoDecoder> decoder) {
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+            return telemetry::WithReceivedDecodeDiagnostic(std::move(decoder));
+#else
+            return decoder;
+#endif
+        };
         if (_stricmp(format.name.c_str(), "VP8") == 0) {
-            return webrtc::CreateVp8Decoder(env);
+            return observed(webrtc::CreateVp8Decoder(env));
         }
         if (_stricmp(format.name.c_str(), "VP9") == 0) {
             const auto supported_formats = webrtc::SupportedVP9DecoderCodecs();
             if (!format.IsCodecInList(supported_formats)) return nullptr;
-            return webrtc::VP9Decoder::Create();
+            return observed(webrtc::VP9Decoder::Create());
         }
         if (_stricmp(format.name.c_str(), "H264") == 0) {
-            return webrtc::H264Decoder::Create();
+            return observed(webrtc::H264Decoder::Create());
         }
         if (_stricmp(format.name.c_str(), "AV1") == 0) {
             const std::vector<webrtc::SdpVideoFormat> supported{
                 webrtc::SdpVideoFormat::AV1Profile0(),
                 webrtc::SdpVideoFormat::AV1Profile1()};
             if (!format.IsCodecInList(supported)) return nullptr;
-            return webrtc::CreateDav1dDecoder(env);
+            return observed(webrtc::CreateDav1dDecoder(env));
         }
         return nullptr;
     }

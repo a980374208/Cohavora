@@ -2323,6 +2323,12 @@ void RoomBottomBarWidget::setScreenShareAvailable(bool available) {
 	update();
 }
 
+void RoomBottomBarWidget::setWhiteboardHasContent(bool hasContent) {
+	if (_whiteboardHasContent == hasContent) return;
+	_whiteboardHasContent = hasContent;
+	update();
+}
+
 void RoomBottomBarWidget::cancelDeviceAction(DeviceKind kind) {
     auto &pending = _pendingDeviceActions[static_cast<std::size_t>(kind)];
     if (pending.callbacks) pending.callbacks->Revoke();
@@ -2571,7 +2577,9 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 				p.drawLine(cx - 9, cy - 8, cx + 9, cy + 9);
 			}
 		} else if (item.id == 3) {
-			p.setPen(QPen(themeColor(ColorRole::Success), 1.8, Qt::SolidLine, Qt::RoundCap));
+			const auto role = _screenShareState == livekit::ScreenShareState::Active
+				? ColorRole::Success : ColorRole::Text;
+			p.setPen(QPen(themeColor(role), 1.8, Qt::SolidLine, Qt::RoundCap));
 			p.setBrush(Qt::NoBrush);
 			p.drawRoundedRect(QRect(cx - 8, cy - 7, 16, 12), 2, 2);
 			p.drawLine(cx, cy + 2, cx, cy - 3);
@@ -2614,7 +2622,8 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 				p.restore();
 			}
 		} else if (item.id == 7) {
-			p.setPen(QPen(themeColor(ColorRole::Accent), 1.6, Qt::SolidLine, Qt::RoundCap));
+			p.setPen(QPen(themeColor(_whiteboardHasContent ? ColorRole::Accent : ColorRole::Text),
+				1.6, Qt::SolidLine, Qt::RoundCap));
 			p.setBrush(Qt::NoBrush);
 			p.drawRoundedRect(QRect(cx - 9, cy - 7, 18, 13), 2, 2);
 			p.drawLine(cx - 5, cy + 2, cx + 4, cy - 3);
@@ -5135,6 +5144,9 @@ void MeetingRoomWindow::setWhiteboardVisible(bool visible) {
 		connect(_whiteboardPanel, &WhiteboardPanel::closeRequested, this, [this] {
 			setWhiteboardVisible(false);
 		});
+		connect(_whiteboardPanel->canvas(), &WhiteboardCanvas::documentChanged, this, [this] {
+			_bottomBar->setWhiteboardHasContent(_whiteboardPanel->document().hasContent());
+		});
 		if (_coordinator) {
 			connect(_whiteboardPanel, &WhiteboardPanel::commandProposed,
 				_coordinator.get(), &OpenMeeting::MeetingCoordinator::submitWhiteboardCommand);
@@ -6275,6 +6287,9 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		});
 	_bottomBar->shareScreenClicked() | rpl::on_next([this] { requestScreenShare(); }, lifetime());
 	_bottomBar->setScreenShareAvailable(_coordinator->canStartScreenShare());
+	_bottomBar->setWhiteboardHasContent(_coordinator->whiteboardHasContent());
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::whiteboardContentChanged,
+		_bottomBar, &RoomBottomBarWidget::setWhiteboardHasContent);
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::screenShareAvailabilityChanged,
 		_bottomBar, &RoomBottomBarWidget::setScreenShareAvailable);
 	applyScreenShareSnapshot(_coordinator->screenShareSnapshot());

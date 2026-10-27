@@ -136,6 +136,21 @@ bool VideoDemandPolicy::UpdateCatalog(
             current_focus_.reset();
             current_focus_origin_ = FocusOrigin::None;
             focus_since_.reset();
+            if (grid_page_.anchor) {
+                const auto& anchor = *grid_page_.anchor;
+                const auto* publication = Find(anchor);
+                const auto source = publication ? publication->source : TrackSource::Camera;
+                const auto seats = OrderedSeats();
+                const bool unique_source = std::count_if(seats.begin(), seats.end(),
+                    [&](const auto& candidate) {
+                        return candidate.publication && candidate.source == source &&
+                            candidate.key.participant.identity == anchor.participant.identity;
+                    }) == 1;
+                grid_page_.replay_anchor = PageAnchorIdentity{
+                    anchor.participant.identity, anchor.publication_sid, source, unique_source};
+            }
+            // Each member is replayed separately. Retain the business anchor
+            // until its new lifetime arrives instead of anchoring a partial page.
             grid_page_.anchor.reset();
             sidebar_page_.anchor.reset();
         }
@@ -163,7 +178,7 @@ bool VideoDemandPolicy::UpdateViewport(const ViewportIntent& intent,
     const bool local_seats_changed = has_viewport_ &&
         (intent.local_participant_present != viewport_.local_participant_present ||
          intent.local_screen_share_present != viewport_.local_screen_share_present);
-    if (local_seats_changed) grid_page_.anchor.reset();
+    if (local_seats_changed) grid_page_.ResetAnchor();
     if (has_viewport_ &&
         (!SameOptionalKey(intent.pinned, viewport_.pinned) ||
          intent.pinned_local != viewport_.pinned_local)) {
@@ -178,7 +193,7 @@ bool VideoDemandPolicy::UpdateViewport(const ViewportIntent& intent,
         if (intent.mode == VideoLayoutMode::Speaker) {
             sidebar_page_.anchor.reset();
         } else {
-            grid_page_.anchor.reset();
+            grid_page_.ResetAnchor();
         }
     }
     viewport_ = intent;
@@ -189,6 +204,7 @@ bool VideoDemandPolicy::UpdateViewport(const ViewportIntent& intent,
             sidebar_page_.requested_page = intent.page;
             sidebar_page_.page_size = config_.sidebar_limit;
         } else if (!local_seats_changed) {
+            grid_page_.replay_anchor.reset();
             grid_page_.anchor = intent.page_anchor;
             grid_page_.requested_page = intent.page;
             grid_page_.page_size = normalized_size;
@@ -270,7 +286,7 @@ void VideoDemandPolicy::Retire() {
     current_auto_share_.reset();
     current_focus_.reset();
     focus_since_.reset();
-    grid_page_.anchor.reset();
+    grid_page_.ResetAnchor();
     sidebar_page_.anchor.reset();
 
     VideoDemandPlan stopped;
@@ -600,14 +616,41 @@ void VideoDemandPolicy::BuildGrid(
     if (first_local_page) {
         // Local tiles fix the beginning of the first page; a stale remote anchor
         // must not skip participants after an earlier remote seat disappears.
-        grid_page_.anchor.reset();
+        if (viewport_.page == 0 || !grid_page_.replay_anchor) {
+            grid_page_.ResetAnchor();
+        }
     } else if (use_paging) {
         if (grid_page_.requested_page != viewport_.page ||
-            grid_page_.page_size != page_size || plan.page != viewport_.page) {
+            grid_page_.page_size != page_size) {
+            grid_page_.ResetAnchor();
+        } else if (plan.page != viewport_.page && !grid_page_.replay_anchor) {
             grid_page_.anchor.reset();
         }
         grid_page_.requested_page = viewport_.page;
         grid_page_.page_size = page_size;
+        if (grid_page_.replay_anchor && plan.page == viewport_.page) {
+            const auto& identity = *grid_page_.replay_anchor;
+            const auto same_source = [&](const auto& candidate) {
+                return candidate.publication &&
+                    candidate.key.participant.identity == identity.participant_identity &&
+                    candidate.source == identity.source;
+            };
+            auto found = std::find_if(videos.begin(), videos.end(),
+                [&](const auto& candidate) {
+                    return same_source(candidate) &&
+                        candidate.key.publication_sid == identity.publication_sid;
+                });
+            // Uniqueness in a partial replay alone cannot distinguish two old
+            // cameras. Only an originally unique source may change its SID.
+            if (found == videos.end() && identity.source_was_unique &&
+                std::count_if(videos.begin(), videos.end(), same_source) == 1) {
+                found = std::find_if(videos.begin(), videos.end(), same_source);
+            }
+            if (found != videos.end()) {
+                grid_page_.anchor = found->key;
+                grid_page_.replay_anchor.reset();
+            }
+        }
         if (grid_page_.anchor) {
             const auto found = std::find_if(videos.begin(), videos.end(),
                 [&](const auto& candidate) {
@@ -619,7 +662,7 @@ void VideoDemandPolicy::BuildGrid(
                 grid_page_.anchor.reset();
             }
         }
-        if (!grid_page_.anchor && start < videos.size()) {
+        if (!grid_page_.anchor && !grid_page_.replay_anchor && start < videos.size()) {
             grid_page_.anchor = videos[start].key;
         }
     }

@@ -38,6 +38,7 @@ struct Projection {
     bool canAdmin = false;
     std::string status;
     std::vector<std::shared_ptr<const Asset>> assets;
+    bool hasContent = false;
 };
 
 struct RuntimeConfig {

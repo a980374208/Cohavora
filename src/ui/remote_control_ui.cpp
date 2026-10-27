@@ -408,6 +408,7 @@ void RemoteControlUi::apply(rc::Projection p) {
         dialog->setProperty("requestId",QString::fromStdString(p.request));
         dialog->setWindowTitle(tr("允许远程控制？"));
         AppTheme::setTone(*dialog,AppTheme::Tone::Dark);
+        AppTheme::setStyleVariant(*dialog,"standard-dialog");
         auto* outer = new QVBoxLayout(dialog);
         auto* label = new QLabel(tr("%1 申请控制您正在共享的桌面。\n本地键鼠操作优先；全部松开并静止 1 秒后，对方可继续控制。\n点击共享条“终止控制”或按 Ctrl+Alt+F12 可结束授权。\n仅支持普通桌面，不支持管理员窗口或安全桌面。").arg(name),dialog);
         label->setTextFormat(Qt::PlainText); label->setWordWrap(true); outer->addWidget(label);

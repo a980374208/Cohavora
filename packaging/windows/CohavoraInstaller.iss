@@ -69,6 +69,11 @@ PrivilegesRequiredOverridesAllowed=commandline dialog
 ; Restart Manager only considers processes using the installed files.
 CloseApplications=yes
 RestartApplications=no
+; Define the cohavora tool in ISCC with /Scohavora=<signing command>.
+; A missing tool or signing failure aborts packaging; no unsigned fallback.
+SignTool=cohavora
+SignedUninstaller=yes
+SignToolRetryCount=0
 
 [Languages]
 Name: "chinesesimp"; MessagesFile: "{#ChineseMessagesFile}"

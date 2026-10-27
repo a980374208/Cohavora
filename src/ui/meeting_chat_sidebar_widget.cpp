@@ -14,7 +14,6 @@
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
 #include <QtGui/QDesktopServices>
-#include <QtGui/QCursor>
 #include <QtGui/QResizeEvent>
 
 namespace OpenMeeting {
@@ -946,12 +945,15 @@ void MeetingChatSidebarWidget::setupUi() {
     _scrollContent->setAcceptDrops(true);
     _inputContainer->setAcceptDrops(true);
     _inputEdit->setAcceptDrops(true);
+    _inputEdit->viewport()->setAcceptDrops(true);
 
     _scrollArea->installEventFilter(this);
     _scrollArea->viewport()->installEventFilter(this);
     _scrollContent->installEventFilter(this);
     _inputContainer->installEventFilter(this);
     _inputEdit->installEventFilter(this);
+    // QAbstractScrollArea delivers drag/drop to its viewport, not the editor.
+    _inputEdit->viewport()->installEventFilter(this);
 
     _dropOverlay = new QLabel(this);
     _dropOverlay->setObjectName("DropOverlay");
@@ -1224,36 +1226,25 @@ bool MeetingChatSidebarWidget::eventFilter(QObject *watched, QEvent *event) {
         auto *de = static_cast<QDragEnterEvent *>(event);
         if (de->mimeData() && (de->mimeData()->hasUrls() || de->mimeData()->hasImage())) {
             de->acceptProposedAction();
-            _isDraggingOver = true;
-            if (_dropOverlay) {
-                _dropOverlay->setGeometry(rect().adjusted(10, 48, -10, -10));
-                _dropOverlay->raise();
-                _dropOverlay->show();
-            }
+            setDropOverlayVisible(true);
             return true;
         }
     } else if (event->type() == QEvent::DragMove) {
         auto *dm = static_cast<QDragMoveEvent *>(event);
         if (dm->mimeData() && (dm->mimeData()->hasUrls() || dm->mimeData()->hasImage())) {
             dm->acceptProposedAction();
+            setDropOverlayVisible(true);
             return true;
         }
     } else if (event->type() == QEvent::DragLeave) {
-        QPoint localPos = mapFromGlobal(QCursor::pos());
-        if (!rect().contains(localPos)) {
-            _isDraggingOver = false;
-            if (_dropOverlay) {
-                _dropOverlay->hide();
-            }
-        }
+        // Leave also ends a cancelled/transferred drag while the cursor is
+        // still inside the sidebar. A subsequent enter/move restores the hint.
+        setDropOverlayVisible(false);
         return true;
     } else if (event->type() == QEvent::Drop) {
         auto *dp = static_cast<QDropEvent *>(event);
-        _isDraggingOver = false;
-        if (_dropOverlay) {
-            _dropOverlay->hide();
-        }
-        if (dp->mimeData()) {
+        setDropOverlayVisible(false);
+        if (dp->mimeData() && (dp->mimeData()->hasUrls() || dp->mimeData()->hasImage())) {
             dp->acceptProposedAction();
             handleDropMimeData(dp->mimeData());
             return true;
@@ -1265,41 +1256,38 @@ bool MeetingChatSidebarWidget::eventFilter(QObject *watched, QEvent *event) {
 void MeetingChatSidebarWidget::dragEnterEvent(QDragEnterEvent *e) {
     if (e->mimeData() && (e->mimeData()->hasUrls() || e->mimeData()->hasImage())) {
         e->acceptProposedAction();
-        _isDraggingOver = true;
-        if (_dropOverlay) {
-            _dropOverlay->setGeometry(rect().adjusted(10, 48, -10, -10));
-            _dropOverlay->raise();
-            _dropOverlay->show();
-        }
+        setDropOverlayVisible(true);
     }
 }
 
 void MeetingChatSidebarWidget::dragMoveEvent(QDragMoveEvent *e) {
     if (e->mimeData() && (e->mimeData()->hasUrls() || e->mimeData()->hasImage())) {
         e->acceptProposedAction();
+        setDropOverlayVisible(true);
     }
 }
 
 void MeetingChatSidebarWidget::dragLeaveEvent(QDragLeaveEvent *e) {
     Q_UNUSED(e);
-    QPoint localPos = mapFromGlobal(QCursor::pos());
-    if (!rect().contains(localPos)) {
-        _isDraggingOver = false;
-        if (_dropOverlay) {
-            _dropOverlay->hide();
-        }
-    }
+    setDropOverlayVisible(false);
 }
 
 void MeetingChatSidebarWidget::dropEvent(QDropEvent *e) {
-    _isDraggingOver = false;
-    if (_dropOverlay) {
-        _dropOverlay->hide();
-    }
+    setDropOverlayVisible(false);
     if (e->mimeData()) {
         e->acceptProposedAction();
         handleDropMimeData(e->mimeData());
     }
+}
+
+void MeetingChatSidebarWidget::setDropOverlayVisible(bool visible) {
+    _isDraggingOver = visible;
+    if (!_dropOverlay) return;
+    if (visible) {
+        _dropOverlay->setGeometry(rect().adjusted(10, 48, -10, -10));
+        _dropOverlay->raise();
+    }
+    _dropOverlay->setVisible(visible);
 }
 
 void MeetingChatSidebarWidget::handleDropMimeData(const QMimeData *mimeData) {

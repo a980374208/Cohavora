@@ -9,6 +9,12 @@
 #include <stdexcept>
 
 namespace livekit::whiteboard {
+bool Document::hasContent() const {
+    return std::any_of(pages_.begin(), pages_.end(), [](const Page &page) {
+        return !page.objects.empty() || !page.backgroundAssetId.empty();
+    });
+}
+
 namespace {
 using Json = nlohmann::json;
 constexpr std::size_t kMaxCommands = 20000;

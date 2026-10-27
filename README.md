@@ -63,10 +63,10 @@ Qt、WebRTC 及其他依赖自身还可能包含传递依赖，实际分发时�
 | 音视频会议 | 麦克风静音、摄像头开关、参与者列表与视频显示 |
 | 设备设置 | 选择摄像头、麦克风和扬声器，预览摄像头并测试音频设备 |
 | 屏幕共享 | 共享屏幕或窗口，支持共享批注 |
-| 会议聊天 | 发送文字、图片和文件 |
+| 会议聊天 | 发送文字、图片和文件，支持将本地图片或文件拖入聊天区或输入框，确认后发送 |
 | 协作白板 | 绘图、文本、多页、图片导入及 PNG 导出，支持主持方控制编辑权限 |
 | 会议管理 | 登录、按会议号入会、快速会议、预约、编辑和取消会议，需要配套业务服务 |
-| 连接与诊断 | 重连状态提示、音视频统计和本地诊断报告 |
+| 连接与诊断 | 重连状态提示与网格观看位置恢复、音视频统计和本地诊断报告 |
 | 界面语言 | 默认简体中文，可通过启动参数切换英文 |
 
 白板内容保留在当前会议窗口中，需要留存时请在离会前导出。通讯录等部分导航入口尚未实现。底层另有 RPC、数据流和端到端加密能力，其中端到端加密可通过 `simple_room` 示例体验，桌面端尚无用户密钥配置入口。
@@ -144,7 +144,7 @@ cmake --build --preset release --parallel 2
 
 第一条命令下载并校验固定版本的 WebRTC 和 Qt/Libraries，将它们放入 `deps/`。Qt/Libraries 压缩包约 **1.22 GB**，首次准备需要网络和足够的磁盘空间；后续运行会检查并复用有效缓存。首次 CMake 配置还会通过 vcpkg 安装依赖。
 
-这里使用 Release 预设，只构建桌面应用及其依赖，不构建示例。`--parallel 2` 用于控制编译时的内存占用，可按机器配置调整。
+这里使用 Release 预设，只构建桌面应用及其依赖，不构建示例。`--parallel 2` 控制 MSBuild 的项目级并行度，可按机器配置调整；MSVC 还默认通过 `/MP` 并行编译同一项目中的源文件，因此编译进程总数可能高于 2，仍需留意内存占用。
 
 #### 4. 启动应用
 
@@ -281,15 +281,60 @@ renderers/
 
 安装 [Inno Setup](https://jrsoftware.org/isinfo.php) 后，用 [Windows 安装脚本](packaging/windows/CohavoraInstaller.iss) 编译安装包。建议使用 Inno Setup 7（已通过 7.1 编译验证）；使用 6.x 时至少需要 6.3，并需自行准备与编译器版本匹配的 `ChineseSimplified.isl`。英文使用编译器自带的 `Default.isl`。
 
-在仓库根目录执行，修改 `$iscc` 为本机实际安装路径；如果已加入 `PATH`，也可以直接使用 `ISCC.exe`：
+安装包及卸载程序要求 Authenticode 签名，当前先使用本机自签名代码签名证书。通过 [打包入口](packaging/windows/build-installer.ps1) 执行时，会创建并复用当前用户证书库中的 `Cohavora Self-Signed` 证书，RSA 私钥标记为不可导出；公钥证书与指纹配置保存在 `%LOCALAPPDATA%\Cohavora\signing\authenticode-selfsigned.cer` 和 `authenticode-selfsigned.json`。配置损坏、证书缺失或过期时明确报错，不自动轮换证书。
+
+在仓库根目录执行，按本机安装位置填写 ISCC 和 Windows SDK SignTool 路径；打包入口必须显式传入 `AppBuildDir` 和 `OutputDir`。下面使用标准 Release 预设的运行目录，输出目录须为新目录或空目录，避免复用其他证书的卸载程序签名缓存：
+
+```powershell
+$AppBuildDir = (Resolve-Path 'out/build/windows-vs2026-release/src/app/Release').Path
+& .\packaging\windows\build-installer.ps1 `
+    -Iscc 'C:\Program Files (x86)\Inno Setup 7\ISCC.exe' `
+    -SignTool 'C:\Program Files (x86)\Windows Kits\10\bin\<SDK版本>\x64\signtool.exe' `
+    -AppBuildDir $AppBuildDir `
+    -OutputDir 'C:\packages\selfsigned-output'
+```
+
+该入口不会把证书加入受信任根。自签安装包已嵌入 Authenticode 签名，但 Windows 仍可能显示未知发布者或信任提示；本机自签模式不接受 `-TimestampUrl`。`AppPublisher` 字段不代表证书受信任。现有 Ed25519 PEM 密钥继续用于升级清单，不能代替 Windows 代码签名证书。
+
+ISS 使用名为 `cohavora` 的签名工具，由打包入口通过 ISCC 的 `/Scohavora=<命令>` 提供；缺少工具或签名失败都会停止编译，不回退到未签名安装包。未来取得受信任证书后，可给入口传入 `-CertificateThumbprint`，并同时提供 RFC 3161 时间戳地址 `-TimestampUrl`，或使用下面的直接编译方式。
+
+在 Inno Setup IDE 中直接编译 ISS 前，需要先配置同名工具。使用下面的命令复用本机自签证书并写入当前用户的 IDE 签名工具配置；该模式仅配置工具，不打包。配置后关闭并重新打开 IDE，再编译 `CohavoraInstaller.iss`。命令行的 `/Scohavora=...` 不会自动保存到 IDE，这是直接编译时出现 `SignTool is invalid` 的原因。
+
+```powershell
+& .\packaging\windows\build-installer.ps1 -ConfigureIdeSignToolOnly `
+    -Iscc 'C:\Program Files (x86)\Inno Setup 7\ISCC.exe' `
+    -SignTool 'C:\Program Files (x86)\Windows Kits\10\bin\<SDK版本>\x64\signtool.exe'
+```
+
+也可在 IDE 的 `Tools → Configure Sign Tools…` 中添加名为 `cohavora` 的工具，命令使用下面构造的 `$SignCommand` 内容。该配置保留其他已定义的签名工具；更换证书或 SignTool 路径后需要重新配置。
+
+下面以 Windows 当前用户 `My` 证书库和 Microsoft SignTool 为例。在仓库根目录执行，先替换工具路径、证书指纹及证书服务商提供的 RFC 3161 时间戳地址。`/sha1` 用于精确选择证书，文件摘要和时间戳摘要均使用 SHA-256。私钥及密码不写入 ISS、源码或命令示例：
 
 ```powershell
 $iscc = 'C:\Program Files (x86)\Inno Setup 7\ISCC.exe'
-& $iscc packaging/windows/CohavoraInstaller.iss
+$SignTool = 'C:\Program Files (x86)\Windows Kits\10\bin\<SDK版本>\x64\signtool.exe'
+$CertificateThumbprint = '<代码签名证书的40位十六进制指纹>'
+$TimestampUrl = '<RFC3161时间戳服务地址>'
+$SignCommand = '$q{0}$q sign /sha1 {1} /s My /fd SHA256 /tr $q{2}$q /td SHA256 $f' -f `
+    $SignTool, $CertificateThumbprint, $TimestampUrl
+$AppBuildDir = (Resolve-Path 'out/build/windows-vs2026-release/src/app/Release').Path
+& $iscc "/Scohavora=$SignCommand" "/DAppBuildDir=$AppBuildDir" packaging/windows/CohavoraInstaller.iss
 if ($LASTEXITCODE -ne 0) { throw 'Inno Setup 编译失败' }
 ```
 
-脚本默认读取 `out/build/windows-vs2026-release/src/app/Release/`，输出至 `out/installer/Cohavora-<版本>-x64-Setup.exe`。版本来自 `Cohavora.exe` 的版本资源，与构建该 EXE 时的 CMake `PROJECT_VERSION` 一致，无需在安装脚本中另行维护。缺少 EXE、任一渲染 DLL、版本资源或中文语言文件时，编译会明确报错。
+`$q` 和 `$f` 是 Inno Setup 签名命令占位符：`$q` 表示引号，`$f` 已包含待签文件路径的引号。上面使用单引号格式字符串，避免 PowerShell 提前展开占位符；云签名工具同样通过 `/Scohavora=` 传入命令并以 `$f` 接收文件路径。证书位于本机计算机证书库时按工具配置增加 `/sm`。签名失败不自动重试，避免重复凭据提示或远程签名请求。
+
+直接编译 ISS 且未覆盖参数时，默认读取 `../live-kit-test-local/build-debug/src/app/Release/`，输出至 `out/installer/Cohavora-<版本>-x64-Setup.exe`；使用标准 Release 预设时须像上例一样显式传入 `AppBuildDir`。版本来自 `Cohavora.exe` 的版本资源，与构建该 EXE 时的 CMake `PROJECT_VERSION` 一致，无需在安装脚本中另行维护。缺少 EXE、任一渲染 DLL、版本资源或中文语言文件时，编译会明确报错。
+
+ISCC 签署最终安装包、卸载程序及其需要的临时副本；打包前已构建的应用 EXE 和 renderer DLL 不会因此自动获得签名。卸载程序签名缓存保存在输出目录；更换证书或签名策略时使用新的输出目录。签名打包不要传入 ISCC 的禁用签名参数。使用受信任证书及时间戳后，用下列 Microsoft SignTool 命令验证最终安装包，所有非零退出码（含警告）均需处理；本机自签名且未加时间戳的包默认不会通过这项公众信任检查：
+
+```powershell
+$Installer = 'out/installer/Cohavora-<版本>-x64-Setup.exe'
+& $SignTool verify /pa /all /tw $Installer
+if ($LASTEXITCODE -ne 0) { throw '安装包 Authenticode 验证失败或存在警告' }
+```
+
+确认安装包的签名状态后，再使用 `packaging/updates/update_manifest.py create` 对最终安装包计算大小、SHA-256 并生成 Ed25519 签名的 `latest.json`；生成清单后不得再次签名或修改安装包。参考 [Inno Setup 签名工具配置](https://jrsoftware.org/ishelp/topic_setup_signtool.htm)、[Microsoft SignTool](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool)和 [New-SelfSignedCertificate](https://learn.microsoft.com/en-us/powershell/module/pki/new-selfsignedcertificate)。
 
 脚本只打入上述三个运行文件、应用图标和项目 `LICENSE`，避免把构建目录内残留的 DLL、PDB 或其他文件带入安装包。当前标准配置静态链接 Qt、CRT 和其他应用依赖；如调整为动态依赖，需同步维护 CMake 和 Inno Setup 的文件清单。
 
@@ -297,7 +342,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Inno Setup 编译失败' }
 
 | 参数 | 默认值／用途 |
 | --- | --- |
-| `AppBuildDir` | 标准 Release 预设的运行目录，包含 EXE 和 `renderers/`；也可指定干净的 CMake install 暂存目录 |
+| `AppBuildDir` | 直接编译 ISS 时默认为 `../live-kit-test-local/build-debug/src/app/Release/`；可覆盖为包含 EXE 和 `renderers/` 的运行目录，或干净的 CMake install 暂存目录 |
 | `OutputDir` | 仓库下的 `out/installer/` |
 | `ChineseMessagesFile` | Inno Setup 安装目录下的 `Languages/ChineseSimplified.isl` |
 | `PackageCompression` | `lzma2/max`，兼顾体积与编译资源占用；本地快速验证可用 `lzma2/fast` |
@@ -307,7 +352,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Inno Setup 编译失败' }
 ```powershell
 cmake --install out/build/windows-vs2026-release --config Release --prefix C:/packages/Cohavora-stage
 if ($LASTEXITCODE -ne 0) { throw '生成打包暂存目录失败' }
-& $iscc "/DAppBuildDir=C:\packages\Cohavora-stage" "/DOutputDir=C:\packages\output" packaging/windows/CohavoraInstaller.iss
+& $iscc "/Scohavora=$SignCommand" "/DAppBuildDir=C:\packages\Cohavora-stage" "/DOutputDir=C:\packages\output" packaging/windows/CohavoraInstaller.iss
 if ($LASTEXITCODE -ne 0) { throw 'Inno Setup 编译失败' }
 ```
 

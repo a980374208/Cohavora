@@ -318,6 +318,7 @@ public:
 	bool isVideoEnabled() const { return _videoEnabled; }
 	void setScreenShareState(livekit::ScreenShareState state);
 	void setScreenShareAvailable(bool available);
+	void setWhiteboardHasContent(bool hasContent);
 
 	void setParticipantCount(int count);
 	void setChatUnreadCount(int count);
@@ -400,6 +401,7 @@ private:
 	bool _screenShareAvailable = true;
 	int _participantCount = 1;
 	int _chatUnreadCount = 0;
+	bool _whiteboardHasContent = false;
 
 	QLineEdit *_chatInput = nullptr;
 	QPushButton *_handBtn = nullptr;

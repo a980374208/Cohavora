@@ -33,6 +33,7 @@
 #include "screen_share_quality.h"
 #include "telemetry/diagnostic_event.h"
 #include "telemetry/sdp_negotiation_trace.h"
+#include "telemetry/received_frame_diagnostic.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
 #include "api/peer_connection_interface.h"
@@ -432,6 +433,8 @@ private:
             on_native_video_callback_phase_durations;
     };
     std::shared_ptr<ConnectAttemptInstrumentation> connect_attempt_instrumentation_;
+    // Set by the private runtime fixture before Connect; preserved for ICE restarts.
+    bool disable_ice_tcp_for_inspection_ = false;
     struct StreamDeliveryInstrumentation {
         std::function<void()> after_decrypt_before_commit;
         std::function<void()> after_encrypt_before_commit;
@@ -507,6 +510,13 @@ private:
         webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver, uint64_t generation);
     std::map<std::pair<uint64_t, const webrtc::RtpReceiverInterface*>,
         std::weak_ptr<MediaReceiverGate>> receiver_crypto_gates_;
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+    // The fixture opts in before Connect. The receiver owns the stable hook;
+    // duplicate/rebound tracks replace only its per-binding observation target.
+    bool received_frame_diagnostics_enabled_ = false;
+    std::map<std::pair<uint64_t, const webrtc::RtpReceiverInterface*>,
+        std::weak_ptr<MediaReceiverGate>> receiver_diagnostic_gates_;
+#endif
     void OnRemoteTrackAdded(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
                             webrtc::scoped_refptr<webrtc::MediaStreamTrackInterface> track, uint64_t generation);
     void OnRemoteTrackResolved(webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver,
@@ -889,6 +899,9 @@ private:
         std::function<void()> detach;
         std::function<void()> retire_crypto;
         webrtc::scoped_refptr<webrtc::RtpReceiverInterface> receiver;
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+        std::shared_ptr<telemetry::ReceivedFrameDiagnostic> received_frame_diagnostic;
+#endif
     };
     std::vector<RemoteTrackSinkBinding> remote_track_sinks_;
     std::unordered_map<const RemoteTrackPublication*, uint64_t>

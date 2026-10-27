@@ -869,6 +869,7 @@ void Runtime::publish(std::string status) {
     if (!project_ || state_ == CollaborationState::Retired) return;
     Projection value;
     value.snapshot = document_.toJson();
+    value.hasContent = document_.hasContent();
     value.sequence = sequence_;
     value.state = state_;
     value.authorityIdentity = config_.authorityIdentity;

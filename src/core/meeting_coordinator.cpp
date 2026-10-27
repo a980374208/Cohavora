@@ -3591,6 +3591,7 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
     _sessionOwner->runtime = _sessionRuntime;
 
     _room = livekit::Room::Create(_ioContext->get_executor(), _ioContext);
+    if (_roomCreatedHookForInspection) _roomCreatedHookForInspection(*_room);
     livekit::diagnostic::Context roomDiagnosticContext;
     roomDiagnosticContext.anonymous_session_id.Assign(
         _admissionTelemetry.anonymousSessionId.toStdString());
@@ -4147,6 +4148,7 @@ void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
     _whiteboardCanAdmin = false;
     _whiteboardAssets.clear();
     _whiteboardStatus.clear();
+    if (std::exchange(_whiteboardHasContent, false)) emit whiteboardContentChanged(false);
 
     // Revoke UI producers before enqueuing native shutdown. Their managed
     // capture retirement jobs precede this session's cleanup on the same worker.
@@ -5070,10 +5072,10 @@ void MeetingCoordinator::configureWhiteboardRuntimeOnUiThread() {
                  locked = value.locked, writersOpen = value.writersOpen,
                  canEdit = value.canEdit, canAdmin = value.canAdmin,
                  assets = std::move(assets),
-                 status = std::move(status)](MeetingCoordinator* self) mutable {
+                 status = std::move(status), hasContent = value.hasContent](MeetingCoordinator* self) mutable {
                     self->projectWhiteboardOnUiThread(generation, std::move(snapshot), sequence, state,
                         std::move(authorityIdentity), std::move(localActor), locked, writersOpen,
-                        canEdit, canAdmin, std::move(assets), std::move(status));
+                        canEdit, canAdmin, std::move(assets), std::move(status), hasContent);
                 });
         };
         auto send = [transport](std::string_view topic, std::string_view payload,
@@ -5188,7 +5190,7 @@ void MeetingCoordinator::projectWhiteboardOnUiThread(
     uint64_t sessionGeneration, QByteArray snapshot, quint64 sequence,
     int collaborationState, QString authorityIdentity, QString localActor,
     bool locked, bool writersOpen, bool canEdit, bool canAdmin,
-    QVariantMap assets, QString status) {
+    QVariantMap assets, QString status, bool hasContent) {
     Q_ASSERT(QThread::currentThread() == thread());
     if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
     _whiteboardSnapshot = std::move(snapshot);
@@ -5203,6 +5205,8 @@ void MeetingCoordinator::projectWhiteboardOnUiThread(
     for (auto it = assets.begin(); it != assets.end(); ++it)
         _whiteboardAssets.insert(it.key(), it.value());
     _whiteboardStatus = std::move(status);
+    if (std::exchange(_whiteboardHasContent, hasContent) != hasContent)
+        emit whiteboardContentChanged(hasContent);
     emit whiteboardProjectionChanged(_whiteboardSnapshot, _whiteboardSequence, _whiteboardState,
         _whiteboardAuthority, _whiteboardLocalActor, _whiteboardLocked, _whiteboardWritersOpen,
         _whiteboardCanEdit, _whiteboardCanAdmin, _whiteboardAssets, _whiteboardStatus);

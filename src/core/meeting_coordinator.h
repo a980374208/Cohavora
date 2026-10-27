@@ -253,6 +253,7 @@ public:
     // Whiteboard commands are proposals. Only the session-strand authority
     // runtime can turn them into ordered commits.
     void activateWhiteboard();
+    bool whiteboardHasContent() const { return _whiteboardHasContent; }
     void submitWhiteboardCommand(const livekit::whiteboard::Command &command);
     void submitWhiteboardImage(const QByteArray &png,
                                const QString &assetId,
@@ -356,6 +357,7 @@ signals:
 
     // Immutable UI projection. Snapshot bytes are parsed into a value-only
     // Document on the Qt thread; no runtime or Room lifetime crosses this signal.
+    void whiteboardContentChanged(bool hasContent);
     void whiteboardProjectionChanged(const QByteArray &snapshot,
                                      quint64 sequence,
                                      int collaborationState,
@@ -469,7 +471,8 @@ private:
                                      bool canEdit,
                                      bool canAdmin,
                                      QVariantMap assets,
-                                     QString status);
+                                     QString status,
+                                     bool hasContent);
     void cancelInboundTransfersForParticipant(const livekit::ParticipantKey &participantKey);
     void applyParticipantEventOnUiThread(uint64_t coordinatorGeneration,
                                          const livekit::ParticipantEvent &event);
@@ -498,6 +501,7 @@ private:
     SessionManager &_sessionManager;
     AdmissionBackend _admissionBackend;
     RoomStartHook _roomStartHook;
+    std::function<void(livekit::Room &)> _roomCreatedHookForInspection;
     void cancelEncryptionRecovery();
     std::shared_ptr<livekit::MeetingSecretHandle> _pendingEncryptionRecovery;
     uint64_t _encryptionRecoveryOperation = 0;
@@ -602,6 +606,7 @@ private:
     bool _startupListenOnly = false;
     QTimer *_whiteboardTickTimer = nullptr;
     QByteArray _whiteboardSnapshot;
+    bool _whiteboardHasContent = false;
     quint64 _whiteboardSequence = 0;
     int _whiteboardState = 0;
     QString _whiteboardAuthority;

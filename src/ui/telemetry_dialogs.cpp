@@ -416,6 +416,7 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 	dialog->resize(760, 560);
 	dialog->setMinimumSize(620, 440);
 	AppTheme::setTone(*dialog, AppTheme::Tone::Light);
+	AppTheme::setStyleVariant(*dialog, "telemetry-panel");
 	auto *layout = new QVBoxLayout(dialog);
 	layout->setContentsMargins(18, 18, 18, 18);
 	layout->setSpacing(10);
@@ -590,6 +591,7 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 				cancel->setObjectName(QStringLiteral("telemetryExportCancel"));
 		}
 		AppTheme::setTone(chooser, AppTheme::Tone::Light);
+		AppTheme::setStyleVariant(chooser, "standard-dialog");
 		AppTheme::styleChoiceControls(chooser, AppTheme::Tone::Light);
 		AppTheme::makeDialogAdaptive(chooser, {760, 520});
 		if (chooser.exec() != QDialog::Accepted || chooser.selectedFiles().isEmpty()) return;

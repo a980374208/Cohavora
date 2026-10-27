@@ -454,6 +454,7 @@ void WhiteboardCanvas::openTextEditor(QPointF position) {
     textBox_ = new QWidget(this);
     textBox_->setObjectName(QStringLiteral("whiteboardTextBox"));
     AppTheme::setTone(*textBox_, AppTheme::Tone::Light);
+    AppTheme::setStyleVariant(*textBox_, "whiteboard-panel");
     auto *layout = new QVBoxLayout(textBox_);
     layout->setContentsMargins(8, 8, 8, 8);
     textEdit_ = new QPlainTextEdit(textBox_);

@@ -196,6 +196,7 @@ private:
     void setupUi();
     void handleDropMimeData(const QMimeData *mimeData);
     void handleDroppedFiles(const QStringList &filePaths);
+    void setDropOverlayVisible(bool visible);
 
     QLabel *_titleLabel = nullptr;
     QPushButton *_closeBtn = nullptr;

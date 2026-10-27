@@ -1247,7 +1247,7 @@ QScrollArea#adaptiveDialogScroll, QWidget#adaptiveDialogContent {
     border: none;
 }
 
-/* Telemetry uses the shared dark surface, typography and rounded controls. */
+/* Telemetry uses the shared theme surface, typography and rounded controls. */
 QDialog[uiStyle="telemetry-panel"],
 [uiStyle="telemetry-panel"] QWidget {
     background: @surface@;
@@ -1258,6 +1258,7 @@ QDialog[uiStyle="telemetry-panel"],
 [uiStyle="telemetry-panel"] QPushButton,
 [uiStyle="telemetry-panel"] QComboBox {
     background: @surface-alt@;
+    color: @text@;
     border: 1px solid @border@;
     border-radius: 6px;
     min-height: 30px;
@@ -1270,6 +1271,13 @@ QDialog[uiStyle="telemetry-panel"],
 }
 [uiStyle="telemetry-panel"] QPushButton:focus,
 [uiStyle="telemetry-panel"] QComboBox:focus { border-color: @accent@; }
+[uiStyle="telemetry-panel"] QPushButton:pressed { background: @pressed@; }
+[uiStyle="telemetry-panel"] QPushButton:disabled,
+[uiStyle="telemetry-panel"] QComboBox:disabled {
+    background: @surface-alt@;
+    color: @text-muted@;
+    border-color: @border@;
+}
 [uiStyle="telemetry-panel"] QTabWidget::pane {
     border: 1px solid @border@;
     border-radius: 6px;
@@ -1293,4 +1301,54 @@ QDialog[uiStyle="telemetry-panel"],
     alternate-background-color: @surface-alt@;
     gridline-color: @border@;
     selection-background-color: @hover@;
+}
+
+/* Opt-in for ordinary dialogs and Qt's non-native file chooser. Define both
+   colors: Windows may otherwise draw a light native surface with dark-theme text.
+   Keep these rules after the telemetry ancestor rules for its child chooser. */
+QDialog[uiStyle="standard-dialog"] {
+    background: @surface@;
+    color: @text@;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+}
+[uiStyle="standard-dialog"] QPushButton {
+    background: @surface-alt@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 6px;
+    min-height: 30px;
+    padding: 0 14px;
+}
+[uiStyle="standard-dialog"] QPushButton:hover { background: @hover@; }
+[uiStyle="standard-dialog"] QPushButton:pressed { background: @pressed@; }
+[uiStyle="standard-dialog"] QPushButton:focus,
+[uiStyle="standard-dialog"] QPushButton:default { border-color: @accent@; }
+[uiStyle="standard-dialog"] QLineEdit,
+[uiStyle="standard-dialog"] QComboBox {
+    background: @surface@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 6px;
+    min-height: 30px;
+    padding: 0 8px;
+    selection-background-color: @accent-soft@;
+    selection-color: @accent@;
+}
+[uiStyle="standard-dialog"] QComboBox { padding-right: 36px; }
+[uiStyle="standard-dialog"] QLineEdit:focus,
+[uiStyle="standard-dialog"] QComboBox:focus { border-color: @accent@; }
+[uiStyle="standard-dialog"] QPushButton:disabled,
+[uiStyle="standard-dialog"] QLineEdit:disabled,
+[uiStyle="standard-dialog"] QComboBox:disabled {
+    background: @surface-alt@;
+    color: @text-muted@;
+    border-color: @border@;
+}
+[uiStyle="standard-dialog"] QHeaderView::section,
+[uiStyle="standard-dialog"] QTableCornerButton::section {
+    background: @surface-alt@;
+    color: @text@;
+    border: none;
+    padding: 6px;
 }

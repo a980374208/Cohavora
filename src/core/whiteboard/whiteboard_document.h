@@ -83,6 +83,8 @@ public:
     const std::string &id() const { return id_; }
     const std::string &owner() const { return owner_; }
     const std::vector<Page> &pages() const { return pages_; }
+    // Empty pages and undo history do not count as visible board content.
+    bool hasContent() const;
     const Page &page() const { return pages_[active_]; }
     std::size_t activePageIndex() const { return active_; }
     std::uint64_t revision() const { return revision_; }

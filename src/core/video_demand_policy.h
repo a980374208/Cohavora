@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdint>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace livekit {
@@ -48,10 +49,23 @@ private:
         Fallback,
     };
 
+    struct PageAnchorIdentity {
+        std::string participant_identity;
+        std::string publication_sid;
+        TrackSource source = TrackSource::Unknown;
+        bool source_was_unique = false;
+    };
+
     struct PageState {
         uint32_t requested_page = 0;
         uint32_t page_size = 0;
         std::optional<TrackKey> anchor;
+        std::optional<PageAnchorIdentity> replay_anchor;
+
+        void ResetAnchor() {
+            anchor.reset();
+            replay_anchor.reset();
+        }
     };
 
     struct SeatExtent {

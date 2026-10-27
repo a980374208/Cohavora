@@ -24,6 +24,10 @@
 #include <algorithm>
 #include "api/jsep.h"
 #include "api/video/video_sink_interface.h"
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+#include "api/make_ref_counted.h"
+#include <cstdlib>
+#endif
 #include "pc/session_description.h"
 
 namespace livekit {
@@ -748,6 +752,11 @@ Room::Room(asio::any_io_executor executor, std::shared_ptr<void> executor_lifeti
     : executor_lifetime_(std::move(executor_lifetime))
     , callback_gate_(std::make_shared<ExecutorCallbackGate>(executor, executor_lifetime_))
     , executor_(executor) {
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+    const char* receive_probe = std::getenv("COHAVORA_RECEIVED_FRAME_DIAGNOSTIC");
+    received_frame_diagnostics_enabled_ = receive_probe &&
+        receive_probe[0] == '1' && receive_probe[1] == '\0';
+#endif
     CrashHandler::InstallSignalHandlers();
 }
 
@@ -2122,7 +2131,12 @@ asio::awaitable<void> Room::ConnectAsync(const std::string& url, const std::stri
                 config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
                 config.bundle_policy = webrtc::PeerConnectionInterface::kBundlePolicyMaxBundle;
                 config.continual_gathering_policy = webrtc::PeerConnectionInterface::GATHER_CONTINUALLY;
-                config.tcp_candidate_policy = webrtc::PeerConnectionInterface::kTcpCandidatePolicyEnabled;
+                {
+                    std::lock_guard lock(room_mutex_);
+                    config.tcp_candidate_policy = disable_ice_tcp_for_inspection_
+                        ? webrtc::PeerConnectionInterface::kTcpCandidatePolicyDisabled
+                        : webrtc::PeerConnectionInterface::kTcpCandidatePolicyEnabled;
+                }
 #if defined(COHAVORA_E2EE_MEDIA_GUARD)
                 {
                     std::lock_guard lock(room_mutex_);
@@ -4863,6 +4877,9 @@ void Room::DetachRemoteTrackSinks(std::vector<RemoteTrackSinkBinding> bindings) 
         if (binding.media_binding) {
             binding.media_binding->active.store(false, std::memory_order_release);
         }
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+        if (binding.received_frame_diagnostic) binding.received_frame_diagnostic->Retire();
+#endif
         if (binding.retire_crypto) {
             try { binding.retire_crypto(); }
             catch (...) {
@@ -8183,9 +8200,13 @@ void Room::AttachRemoteTrackToParticipant(
     std::function<void()> retire_crypto;
 #if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
     std::shared_ptr<const E2eeManager::MediaObservation> receive_trace_observation;
+    std::shared_ptr<telemetry::ReceivedFrameDiagnostic> received_frame_diagnostic;
 #endif
     bool receiver_committed = false;
     const auto crypto_rollback = std::shared_ptr<void>(nullptr, [&](void*) {
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+        if (!receiver_committed && received_frame_diagnostic) received_frame_diagnostic->Retire();
+#endif
         if (!receiver_committed && retire_crypto) {
             try { retire_crypto(); }
             catch (...) {
@@ -8223,11 +8244,57 @@ void Room::AttachRemoteTrackToParticipant(
 #endif
         if (!gate->SetTarget(binding_serial, std::move(cryptor))) return;
     }
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+    else if (receiver && kind == TrackKind::Video) {
+        std::shared_ptr<MediaReceiverGate> diagnostic_gate;
+        bool install_hook = false;
+        {
+            std::lock_guard lock(room_mutex_);
+            // Never replace a crypto gate, even when an old encryption owner
+            // is already retired. Unknown/GCM/custom publications stay untouched.
+            const bool crypto_hook_present = std::any_of(
+                receiver_crypto_gates_.begin(), receiver_crypto_gates_.end(),
+                [&](const auto& entry) {
+                    return entry.first.second == receiver.get() && !entry.second.expired();
+                });
+            if (received_frame_diagnostics_enabled_ && !crypto_hook_present &&
+                e2ee_manager_ == receive_e2ee && (!receive_e2ee || !receive_e2ee->enabled()) &&
+                pub->encryption() == TrackEncryption::None &&
+                (generation == 0 || IsNativeGenerationCurrentLocked(generation))) {
+                std::erase_if(receiver_diagnostic_gates_, [](const auto& entry) { return entry.second.expired(); });
+                auto& slot = receiver_diagnostic_gates_[{generation, receiver.get()}];
+                diagnostic_gate = slot.lock();
+                if (!diagnostic_gate) {
+                    diagnostic_gate = CreateMediaReceiverGate();
+                    slot = diagnostic_gate;
+                    install_hook = true;
+                }
+                received_frame_diagnostic = std::make_shared<telemetry::ReceivedFrameDiagnostic>(
+                    std::shared_ptr<const std::atomic<bool>>(media_binding, &media_binding->active));
+            }
+        }
+        if (diagnostic_gate) {
+            auto passthrough = webrtc::make_ref_counted<telemetry::ReceivedFrameDiagnosticPassthrough>(
+                received_frame_diagnostic);
+            if (diagnostic_gate->SetTarget(binding_serial, std::move(passthrough))) {
+                // RtpReceiver dispatches registration to its worker, exactly as
+                // EnsureReceiverCryptoGate does. No Room lock crosses that call.
+                if (install_hook) receiver->SetFrameTransformer(diagnostic_gate->Hook());
+            } else {
+                received_frame_diagnostic->Retire();
+                received_frame_diagnostic.reset();
+            }
+        }
+    }
+#endif
 
     uint64_t superseded_binding_serial = 0;
     const auto retain_binding = [&](RemoteTrackSinkBinding& binding) {
         binding.retire_crypto = retire_crypto;
         binding.receiver = receiver;
+#if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
+        binding.received_frame_diagnostic = received_frame_diagnostic;
+#endif
         std::lock_guard lock(room_mutex_);
         if (e2ee_manager_ != receive_e2ee) return false;
         if (generation != 0 && !IsNativeGenerationCurrentLocked(generation)) return false;
@@ -12161,7 +12228,6 @@ asio::awaitable<void> Room::RestartIceConnections(
     new_config.sdp_semantics = webrtc::SdpSemantics::kUnifiedPlan;
     new_config.bundle_policy = webrtc::PeerConnectionInterface::kBundlePolicyMaxBundle;
     new_config.continual_gathering_policy = webrtc::PeerConnectionInterface::GATHER_CONTINUALLY;
-    new_config.tcp_candidate_policy = webrtc::PeerConnectionInterface::kTcpCandidatePolicyEnabled;
     if (reconnect_response->has_client_configuration() &&
         reconnect_response->client_configuration().force_relay() == proto::ClientConfigSetting::ENABLED) {
         new_config.type = webrtc::PeerConnectionInterface::kRelay;
@@ -12185,6 +12251,9 @@ asio::awaitable<void> Room::RestartIceConnections(
         pub_pc = publisher_pc_;
         sub_pc = subscriber_pc_;
         generation = session_generation_.load(std::memory_order_acquire);
+        new_config.tcp_candidate_policy = disable_ice_tcp_for_inspection_
+            ? webrtc::PeerConnectionInterface::kTcpCandidatePolicyDisabled
+            : webrtc::PeerConnectionInterface::kTcpCandidatePolicyEnabled;
     }
 
     if (!pub_pc) {
