@@ -102,7 +102,14 @@ LoginDialog::LoginDialog(OpenMeeting::SessionManager &session, QWidget *parent)
         }
     });
     connect(_accountInput, &QLineEdit::textChanged, this, [this] { updateSavedSessionAction(); });
-    connect(_serverUrlInput, &QLineEdit::textChanged, this, [this] {
+    const auto clearEndpointError = [this](QLineEdit *input) {
+        if (_endpointErrorInput == input) showError(QString());
+    };
+    connect(_registrationServerUrlInput, &QLineEdit::textChanged, this, [this, clearEndpointError] {
+        clearEndpointError(_registrationServerUrlInput);
+    });
+    connect(_serverUrlInput, &QLineEdit::textChanged, this, [this, clearEndpointError] {
+        clearEndpointError(_serverUrlInput);
         _registrationServerUrlInput->setText(
             _session.registrationServerBaseUrl(_serverUrlInput->text()));
         updateSavedSessionAction();
@@ -496,10 +503,15 @@ void LoginDialog::fitFormToScreen() {
             pageLayout->setContentsMargins(0, compact ? 8 : 12, 0, 0);
             pageLayout->setSpacing(compact ? (i == 1 ? 6 : 8) : (i == 1 ? 10 : i == 2 ? 14 : 12));
         }
-        for (auto *childLayout : content->findChildren<QLayout *>()) {
-            childLayout->invalidate();
-            childLayout->activate();
-        }
+        const auto layouts = content->findChildren<QLayout *>();
+        for (auto *childLayout : layouts) childLayout->invalidate();
+        // A pasted endpoint can change the HTTP notice's minimum width.
+        // Refresh inner layouts before measuring their ancestors, then expose
+        // the current page's new hint through the custom tab widget.
+        for (auto it = layouts.crbegin(); it != layouts.crend(); ++it) (*it)->activate();
+        _tabWidget->updateGeometry();
+        card->layout()->invalidate();
+        card->layout()->activate();
         content->layout()->invalidate();
         content->layout()->activate();
     };
@@ -586,6 +598,7 @@ void LoginDialog::setLoading(bool loading, const QString &text) {
             _loginBtn->setText(QCoreApplication::translate("MeetingUI", "Signing in..."));
             if (_registerBtn) _registerBtn->setText(QCoreApplication::translate("MeetingUI", "Creating account..."));
         }
+        _endpointErrorInput = nullptr;
         _errorLabel->setVisible(false);
     } else {
         _loginBtn->setText(QCoreApplication::translate("MeetingUI", "Sign In"));
@@ -593,7 +606,8 @@ void LoginDialog::setLoading(bool loading, const QString &text) {
     }
 }
 
-void LoginDialog::showError(const QString &msg) {
+void LoginDialog::showError(const QString &msg, QLineEdit *endpointInput) {
+    _endpointErrorInput = msg.isEmpty() ? nullptr : endpointInput;
     MeetingUI::AppTheme::setStyleVariant(*_errorLabel, "login-dialog-errorlabel-2");
     _errorLabel->setText(msg);
     _errorLabel->setVisible(!msg.isEmpty());
@@ -601,6 +615,7 @@ void LoginDialog::showError(const QString &msg) {
 }
 
 void LoginDialog::showSuccess(const QString &msg) {
+    _endpointErrorInput = nullptr;
     MeetingUI::AppTheme::setStyleVariant(*_errorLabel, "login-dialog-errorlabel-3");
     _errorLabel->setText(msg);
     _errorLabel->setVisible(!msg.isEmpty());
@@ -648,13 +663,13 @@ void LoginDialog::onRegisterClicked() {
     auto &session = _session;
     if (!session.setServerBaseUrl(serverUrl)) {
         showError(OpenMeeting::serviceEndpointErrorMessage(
-            OpenMeeting::evaluateServiceEndpoint(serverUrl).status));
+            OpenMeeting::evaluateServiceEndpoint(serverUrl).status), _serverUrlInput);
         return;
     }
     const QString registrationUrl = _registrationServerUrlInput->text().trimmed();
     if (!session.setRegistrationServerBaseUrl(registrationUrl)) {
         showError(OpenMeeting::serviceEndpointErrorMessage(
-            OpenMeeting::evaluateServiceEndpoint(registrationUrl).status));
+            OpenMeeting::evaluateServiceEndpoint(registrationUrl).status), _registrationServerUrlInput);
         _registrationServerUrlInput->setFocus();
         return;
     }
@@ -698,7 +713,7 @@ void LoginDialog::onLoginClicked() {
     auto &session = _session;
     if (!session.setServerBaseUrl(serverUrl)) {
         showError(OpenMeeting::serviceEndpointErrorMessage(
-            OpenMeeting::evaluateServiceEndpoint(serverUrl).status));
+            OpenMeeting::evaluateServiceEndpoint(serverUrl).status), _serverUrlInput);
         return;
     }
 

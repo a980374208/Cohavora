@@ -42,7 +42,7 @@ private:
     void cancelLogin();
     void acceptAuthenticatedSession();
     void setLoading(bool loading, const QString &text = QString());
-    void showError(const QString &msg);
+    void showError(const QString &msg, QLineEdit *endpointInput = nullptr);
     void showSuccess(const QString &msg);
 
     QTabWidget *_tabWidget = nullptr;
@@ -81,6 +81,7 @@ private:
 
     // 状态提示
     QLabel *_errorLabel = nullptr;
+    QLineEdit *_endpointErrorInput = nullptr;
     bool _formFitPending = false;
 
     // 窗口拖动
