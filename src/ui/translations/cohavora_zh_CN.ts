@@ -2724,6 +2724,18 @@ Sign in with your own account in a client configured for the same meeting servic
         <translation>发送方已离会</translation>
     </message>
     <message>
+        <source>File recovery timed out. Ask the sender to send it again.</source>
+        <translation>文件接收恢复超时，请让发送方重新发送。</translation>
+    </message>
+    <message>
+        <source>File recovery is unavailable. Ask the sender to send it again.</source>
+        <translation>无法恢复文件接收，请让发送方重新发送。</translation>
+    </message>
+    <message>
+        <source>The received file is incomplete. Ask the sender to send it again.</source>
+        <translation>接收到的文件不完整，请让发送方重新发送。</translation>
+    </message>
+    <message>
         <source>No additional details</source>
         <translation>无附加说明</translation>
     </message>

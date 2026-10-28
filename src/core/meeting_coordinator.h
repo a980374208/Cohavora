@@ -18,6 +18,7 @@
 #include <thread>
 #include <atomic>
 #include <chrono>
+#include <set>
 
 #include <asio.hpp>
 #include "src/core/room.h"
@@ -476,6 +477,15 @@ private:
                                      bool hasContent,
                                      QString rejectedCommandId = {});
     void cancelInboundTransfersForParticipant(const livekit::ParticipantKey &participantKey);
+    void restoreInboundTransfersForParticipant(const livekit::ParticipantKey &participantKey,
+                                               const livekit::ParticipantTicket &ticket);
+    void processMediaRecovery(bool force = false);
+    void handleMediaResumeRequest(const QJsonObject &request, const livekit::SenderContext &sender);
+    void pruneMediaSendCache(qint64 now);
+    static void failInboundMediaTransferOnStrand(
+        const std::shared_ptr<QtCallbackGate<MeetingCoordinator>> &gate,
+        const std::shared_ptr<MeetingSessionRuntime> &session,
+        const InboundTransferKey &key, const QString &reason);
     void applyParticipantEventOnUiThread(uint64_t coordinatorGeneration,
                                          const livekit::ParticipantEvent &event);
     // Queued Qt callbacks use this immutable token instead of retaining a
@@ -575,9 +585,21 @@ private:
         int totalChunks = 0;
         QString base64Payload;
         int chunkSize = 24 * 1024;
+        std::set<QString> recipients;
+        qint64 expiresAt = 0;
+    };
+    struct MediaReplayTask {
+        QString transferId;
+        livekit::SenderContext recipient;
+        std::set<int> chunks;
     };
     std::deque<MediaSendChunkTask> _mediaSendQueue;
+    std::map<QString, MediaSendChunkTask> _mediaSendCache;
+    std::deque<MediaReplayTask> _mediaReplayQueue;
     QTimer *_mediaSendTimer = nullptr;
+    QTimer *_mediaRecoveryTimer = nullptr;
+    uint64_t _mediaReconnectGeneration = 0;
+    std::map<QString, livekit::ParticipantKey> _mediaReconnectPeers;
     void processNextMediaSendChunk();
 
     std::atomic<int64_t> _msgSequenceCounter{0};

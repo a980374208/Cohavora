@@ -79,18 +79,30 @@ struct InboundTransferKey {
 // owns only per-room callback state and is strictly affine to its ASIO strand.
 // Do not access transfersOnStrand() from Qt or WebRTC callback threads.
 struct InboundMediaTransfer {
+    // Presentation identity survives a local Room generation replacement.
+    QString uiTransferId;
     QString mediaType;
     QString fileName;
     int totalChunks = 0;
     qint64 totalSize = 0;
     int64_t seq = 0;
     qint64 lastActiveTimestamp = 0;
+    qint64 lastRecoveryTimestamp = 0;
+    bool supportsResume = false;
+    bool completionQueued = false;
     QString senderIdentity;
     QString senderName;
     livekit::ParticipantKey senderKey;
     livekit::ParticipantTicket senderTicket;
     QString wireTransferId;
     std::map<int, QString> receivedChunks;
+};
+
+struct InboundMediaTerminal {
+    livekit::ParticipantKey senderKey;
+    uint64_t encryptionRevision = 0;
+    QString wireTransferId;
+    qint64 expiresAt = 0;
 };
 
 class MeetingSessionRuntime final {
@@ -175,6 +187,11 @@ public:
     std::map<InboundTransferKey, InboundMediaTransfer> &transfersOnStrand() {
         assertOnStrand();
         return _inboundMediaTransfers;
+    }
+
+    std::map<QString, InboundMediaTerminal> &completedTransferIdsOnStrand() {
+        assertOnStrand();
+        return _completedTransferIds;
     }
 
     std::shared_ptr<livekit::ScreenShareSession> &screenShareOnStrand() {
@@ -568,6 +585,7 @@ private:
     std::shared_ptr<livekit::telemetry::SessionTelemetry> _telemetry;
     bool _acceptingData = true;
     std::map<InboundTransferKey, InboundMediaTransfer> _inboundMediaTransfers;
+    std::map<QString, InboundMediaTerminal> _completedTransferIds;
     std::shared_ptr<livekit::ScreenShareSession> _screenShare;
     std::shared_ptr<livekit::remote_control::Runtime> _remoteControl;
     std::shared_ptr<livekit::whiteboard::Runtime> _whiteboard;
