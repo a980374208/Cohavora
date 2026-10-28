@@ -106,7 +106,7 @@ Source: "{#RepoRoot}LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\cohavora.ico"
-Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\cohavora.ico"; Tasks: desktopicon
+Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; WorkingDir: "{app}"; IconFilename: "{app}\cohavora.ico"; Tasks: desktopicon; Check: ShouldCreateDesktopShortcut
 
 [Registry]
 ; HKA follows the installation scope (HKLM for all users, HKCU for current user).
@@ -123,6 +123,65 @@ Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram}"; Flags: now
 const
   RmSuccess = 0;
   RmMoreData = 234;
+
+// The desktop merges user and public folders. Only treat an exact, uncustomized
+// link to this installation as interchangeable; preserve other installations.
+function ShortcutTargetsApplication(const LinkPath: String): Boolean;
+var
+  Shell, Shortcut: Variant;
+  TargetPath, WorkingDir: String;
+begin
+  Result := False;
+  if not FileExists(LinkPath) then Exit;
+  try
+    Shell := CreateOleObject('WScript.Shell');
+    Shortcut := Shell.CreateShortcut(LinkPath);
+    TargetPath := Shortcut.TargetPath;
+    WorkingDir := Shortcut.WorkingDirectory;
+    if TargetPath = '' then Exit;
+    Result :=
+      (CompareText(ExpandFileName(TargetPath),
+        ExpandFileName(ExpandConstant('{app}\{#MyAppExeName}'))) = 0) and
+      (Shortcut.Arguments = '') and (Shortcut.Hotkey = '') and
+      (Shortcut.WindowStyle = 1) and (Shortcut.Description = '') and
+      (CompareText(Shortcut.IconLocation,
+        ExpandConstant('{app}\cohavora.ico') + ',0') = 0);
+    if Result and (WorkingDir <> '') then
+      Result := CompareText(AddBackslash(ExpandFileName(WorkingDir)),
+        AddBackslash(ExpandFileName(ExpandConstant('{app}')))) = 0;
+  except
+    Log('Unable to inspect desktop shortcut; preserving it: ' + LinkPath);
+    Result := False;
+  end;
+end;
+
+function ShouldCreateDesktopShortcut: Boolean;
+begin
+  Result := IsAdminInstallMode or not ShortcutTargetsApplication(
+    ExpandConstant('{commondesktop}\{#MyAppName}.lnk'));
+end;
+
+procedure RemoveDuplicateDesktopShortcut;
+var
+  UserLink, CommonLink: String;
+begin
+  UserLink := ExpandConstant('{userdesktop}\{#MyAppName}.lnk');
+  CommonLink := ExpandConstant('{commondesktop}\{#MyAppName}.lnk');
+  if (CompareText(UserLink, CommonLink) <> 0) and
+    ShortcutTargetsApplication(CommonLink) and ShortcutTargetsApplication(UserLink) then begin
+    if DeleteFile(UserLink) then
+      Log('Removed duplicate desktop shortcut: ' + UserLink)
+    else
+      Log('Unable to remove duplicate desktop shortcut: ' + UserLink);
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  // Wait until [Icons] has successfully created or reused the public shortcut.
+  if (CurStep = ssPostInstall) and WizardIsTaskSelected('desktopicon') then
+    RemoveDuplicateDesktopShortcut;
+end;
 
 // Query only the files owned by this installation. Never shut down processes here.
 function RmStartSession(var SessionHandle: Cardinal; SessionFlags: Cardinal;
