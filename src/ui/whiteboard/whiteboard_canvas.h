@@ -25,7 +25,7 @@ public:
     double zoom() const { return zoom_; }
     void fitPage();
     void cancelInput();
-    void setActor(std::string actor) { actor_ = std::move(actor); }
+    void setActor(std::string actor);
     void setEditingEnabled(bool enabled);
     void setOverlayMode(bool enabled);
     void setOverlayInputSurface(bool enabled);
@@ -33,6 +33,7 @@ public:
     void setCommandHandler(std::function<livekit::whiteboard::Result(
         const livekit::whiteboard::Command &)> handler) { commandHandler_ = std::move(handler); }
     void refreshFromDocument();
+    void rejectCommand(const std::string &commandId);
     void setBackgroundImage(std::string assetId, QImage image);
     bool hasBackgroundImage(const std::string &assetId) const;
     QImage currentBackgroundImage() const;
@@ -83,6 +84,11 @@ private:
         QImage image;
         std::uint64_t lastUsed = 0;
     };
+    struct PendingItem {
+        std::string commandId;
+        livekit::whiteboard::Context context;
+        WhiteboardRendering::Item item;
+    };
 
     livekit::whiteboard::Document &document_;
     std::string actor_;
@@ -96,6 +102,8 @@ private:
     bool panning_ = false, erasing_ = false;
     std::optional<livekit::whiteboard::Command> gesture_;
     std::vector<WhiteboardRendering::Item> items_;
+    // Display only: the document and export remain authority-confirmed.
+    std::vector<PendingItem> pendingItems_;
     QImage cache_;
     QRegion dirty_;
     std::map<std::string, BackgroundEntry> backgrounds_;

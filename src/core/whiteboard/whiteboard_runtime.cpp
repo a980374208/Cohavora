@@ -174,9 +174,15 @@ bool Runtime::acceptRate(std::string_view identity, std::uint64_t nowMs) {
 }
 
 Result Runtime::propose(Command command, std::uint64_t nowMs) {
-    if (state_ != CollaborationState::Ready || !transportReady_) return {Status::Forbidden, {}};
+    const auto commandId = command.id;
+    const auto reject = [this, &commandId](Status status, std::string reason) {
+        publish(std::move(reason), commandId);
+        return Result{status, {}};
+    };
+    if (state_ != CollaborationState::Ready || !transportReady_)
+        return reject(Status::Forbidden, "operation unavailable");
     if (!allowedWriter(config_.localIdentity) || !acceptRate(config_.localIdentity, nowMs))
-        return {Status::Forbidden, {}};
+        return reject(Status::Forbidden, "operation forbidden");
     command.actor = actorId(config_.localIdentity);
     if (command.kind == CommandKind::Add) command.object.author = command.actor;
     normalizeCollaborativeStroke(command);
@@ -187,16 +193,19 @@ Result Runtime::propose(Command command, std::uint64_t nowMs) {
     probe.sequence = sequence_;
     probe.requestId = command.id;
     probe.entry.command = command;
-    if (!encodeMessage(probe)) return {Status::LimitReached, {}};
+    if (!encodeMessage(probe)) return reject(Status::LimitReached, "operation too large");
     if (config_.localIsAuthority) {
         PeerInstance local{config_.localIdentity, 0, 0};
-        return commitProposal(std::move(command), local, nowMs);
+        const auto result = commitProposal(std::move(command), local, nowMs);
+        if (!result.changed()) publish("operation rejected", commandId);
+        return result;
     }
-    if (pendingProposals_.size() >= 256) return {Status::LimitReached, {}};
+    if (pendingProposals_.size() >= 256)
+        return reject(Status::LimitReached, "too many pending operations");
     PendingProposal pending{std::move(command), 0};
     const auto id = pending.command.id;
     auto [entry, inserted] = pendingProposals_.emplace(id, std::move(pending));
-    if (!inserted) return {Status::Duplicate, {}};
+    if (!inserted) return reject(Status::Duplicate, "duplicate operation");
     if (!sendProposal(entry->second, nowMs)) {
         state_ = CollaborationState::ReadOnly;
         publish("transport unavailable");
@@ -506,7 +515,7 @@ void Runtime::receive(std::string_view topic, std::string_view payload,
         break;
     case MessageKind::Reject:
         pendingProposals_.erase(message.requestId);
-        publish(message.reason.empty() ? "operation rejected" : message.reason);
+        publish(message.reason.empty() ? "operation rejected" : message.reason, message.requestId);
         break;
     default: break;
     }
@@ -865,7 +874,7 @@ std::vector<std::string> Runtime::writersVector() const {
     return {writers_.begin(), writers_.end()};
 }
 
-void Runtime::publish(std::string status) {
+void Runtime::publish(std::string status, std::string rejectedCommandId) {
     if (!project_ || state_ == CollaborationState::Retired) return;
     Projection value;
     value.snapshot = document_.toJson();
@@ -883,6 +892,7 @@ void Runtime::publish(std::string status) {
         allowedWriter(config_.localIdentity) && !waitingForAsset;
     value.status = waitingForAsset && state_ == CollaborationState::Ready
         ? "background loading" : std::move(status);
+    value.rejectedCommandId = std::move(rejectedCommandId);
     value.assets.reserve(assets_.size());
     for (const auto &[_, asset] : assets_) value.assets.push_back(asset);
     project_(std::move(value));

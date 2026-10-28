@@ -37,6 +37,7 @@ struct Projection {
     bool canEdit = false;
     bool canAdmin = false;
     std::string status;
+    std::string rejectedCommandId;
     std::vector<std::shared_ptr<const Asset>> assets;
     bool hasContent = false;
 };
@@ -139,7 +140,7 @@ private:
     void receiveAsset(const Message &message, std::uint64_t nowMs);
     void requestMissingAssets(std::uint64_t nowMs);
     bool missingActiveAsset() const;
-    void publish(std::string status = {});
+    void publish(std::string status = {}, std::string rejectedCommandId = {});
     void rememberProposal(std::string key, CommitEntry entry);
     bool sendProposal(PendingProposal &proposal, std::uint64_t nowMs);
     std::vector<std::string> writersVector() const;

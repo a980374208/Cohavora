@@ -358,6 +358,7 @@ signals:
     // Immutable UI projection. Snapshot bytes are parsed into a value-only
     // Document on the Qt thread; no runtime or Room lifetime crosses this signal.
     void whiteboardContentChanged(bool hasContent);
+    void whiteboardCommandRejected(const QString &commandId);
     void whiteboardProjectionChanged(const QByteArray &snapshot,
                                      quint64 sequence,
                                      int collaborationState,
@@ -472,7 +473,8 @@ private:
                                      bool canAdmin,
                                      QVariantMap assets,
                                      QString status,
-                                     bool hasContent);
+                                     bool hasContent,
+                                     QString rejectedCommandId = {});
     void cancelInboundTransfersForParticipant(const livekit::ParticipantKey &participantKey);
     void applyParticipantEventOnUiThread(uint64_t coordinatorGeneration,
                                          const livekit::ParticipantEvent &event);

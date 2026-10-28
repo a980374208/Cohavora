@@ -26,6 +26,10 @@ namespace {
 constexpr qint64 MaxBackgroundCacheBytes = 96LL * 1024 * 1024;
 std::string newId() { return QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString(); }
 QPointF point(const wb::Point &p) { return {p.x, p.y}; }
+bool sameContext(const wb::Context &a, const wb::Context &b) {
+    return a.documentId == b.documentId && a.pageId == b.pageId &&
+        a.pageEpoch == b.pageEpoch && a.interactionEpoch == b.interactionEpoch;
+}
 }
 
 WhiteboardCanvas::WhiteboardCanvas(wb::Document &document, QWidget *parent)
@@ -44,7 +48,19 @@ WhiteboardCanvas::WhiteboardCanvas(wb::Document &document, QWidget *parent)
 void WhiteboardCanvas::setEditingEnabled(bool enabled) {
     if (editingEnabled_ == enabled) return;
     editingEnabled_ = enabled;
-    if (!enabled) cancelInput();
+    if (!enabled) {
+        cancelInput();
+        pendingItems_.clear();
+        invalidateCache();
+    }
+}
+
+void WhiteboardCanvas::setActor(std::string actor) {
+    if (actor_ == actor) return;
+    cancelInput();
+    pendingItems_.clear();
+    actor_ = std::move(actor);
+    invalidateCache();
 }
 
 void WhiteboardCanvas::setOverlayMode(bool enabled) {
@@ -73,9 +89,22 @@ void WhiteboardCanvas::setOverlayInputSurface(bool enabled) {
 
 void WhiteboardCanvas::refreshFromDocument() {
     Q_ASSERT(QThread::currentThread() == thread());
-    cancelInput();
+    const auto context = document_.context();
+    if (!gesture_ || !sameContext(gesture_->context, context)) cancelInput();
+    std::erase_if(pendingItems_, [&](const PendingItem &pending) {
+        return !sameContext(pending.context, context) ||
+            std::any_of(document_.page().objects.begin(), document_.page().objects.end(),
+                [&](const wb::Object &object) { return object.id == pending.item.id; });
+    });
     touchCurrentBackground();
     refreshItems();
+}
+
+void WhiteboardCanvas::rejectCommand(const std::string &commandId) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (std::erase_if(pendingItems_, [&](const PendingItem &pending) {
+            return pending.commandId == commandId;
+        })) invalidateCache();
 }
 
 void WhiteboardCanvas::setBackgroundImage(std::string assetId, QImage image) {
@@ -223,7 +252,16 @@ wb::Result WhiteboardCanvas::applyImagePage(const std::string &assetId,
 wb::Result WhiteboardCanvas::apply(const wb::Command &value) {
     Q_ASSERT(QThread::currentThread() == thread());
     if (!editingEnabled_) return {wb::Status::Forbidden, {}};
+    if (commandHandler_ && value.kind == wb::CommandKind::Add) {
+        if (pendingItems_.size() >= 256) {
+            emit notice(tr("Whiteboard limit reached. Export this page or clear some content."));
+            return {wb::Status::LimitReached, {}};
+        }
+        pendingItems_.push_back({value.id, value.context, WhiteboardRendering::compile(value.object)});
+        invalidateCache(transform().mapRect(pendingItems_.back().item.bounds));
+    }
     const auto result = commandHandler_ ? commandHandler_(value) : document_.apply(value);
+    if (result.status != wb::Status::NoChange) rejectCommand(value.id);
     if (result.changed()) {
         if (value.kind == wb::CommandKind::Add || value.kind == wb::CommandKind::Redo) {
             items_.push_back(WhiteboardRendering::compile(document_.page().objects.back()));
@@ -279,6 +317,8 @@ void WhiteboardCanvas::paintCommitted(QPainter &painter, QRect clip) {
     const auto documentClip = transform().inverted().mapRect(QRectF(clip));
     for (const auto &item : items_)
         if (item.bounds.intersects(documentClip)) WhiteboardRendering::draw(painter, item);
+    for (const auto &pending : pendingItems_)
+        if (pending.item.bounds.intersects(documentClip)) WhiteboardRendering::draw(painter, pending.item);
     painter.restore();
 }
 void WhiteboardCanvas::paintEvent(QPaintEvent *event) {

@@ -124,12 +124,13 @@ const
   RmSuccess = 0;
   RmMoreData = 234;
 
-// The desktop merges user and public folders. Only treat an exact, uncustomized
-// link to this installation as interchangeable; preserve other installations.
+// Explorer keeps desktop positions by shell item identity. Preserve existing
+// links in place, including customizations, instead of rewriting or moving them
+// between the merged user and public desktop folders.
 function ShortcutTargetsApplication(const LinkPath: String): Boolean;
 var
   Shell, Shortcut: Variant;
-  TargetPath, WorkingDir: String;
+  TargetPath: String;
 begin
   Result := False;
   if not FileExists(LinkPath) then Exit;
@@ -137,18 +138,9 @@ begin
     Shell := CreateOleObject('WScript.Shell');
     Shortcut := Shell.CreateShortcut(LinkPath);
     TargetPath := Shortcut.TargetPath;
-    WorkingDir := Shortcut.WorkingDirectory;
     if TargetPath = '' then Exit;
-    Result :=
-      (CompareText(ExpandFileName(TargetPath),
-        ExpandFileName(ExpandConstant('{app}\{#MyAppExeName}'))) = 0) and
-      (Shortcut.Arguments = '') and (Shortcut.Hotkey = '') and
-      (Shortcut.WindowStyle = 1) and (Shortcut.Description = '') and
-      (CompareText(Shortcut.IconLocation,
-        ExpandConstant('{app}\cohavora.ico') + ',0') = 0);
-    if Result and (WorkingDir <> '') then
-      Result := CompareText(AddBackslash(ExpandFileName(WorkingDir)),
-        AddBackslash(ExpandFileName(ExpandConstant('{app}')))) = 0;
+    Result := CompareText(ExpandFileName(TargetPath),
+      ExpandFileName(ExpandConstant('{app}\{#MyAppExeName}'))) = 0;
   except
     Log('Unable to inspect desktop shortcut; preserving it: ' + LinkPath);
     Result := False;
@@ -156,31 +148,18 @@ begin
 end;
 
 function ShouldCreateDesktopShortcut: Boolean;
-begin
-  Result := IsAdminInstallMode or not ShortcutTargetsApplication(
-    ExpandConstant('{commondesktop}\{#MyAppName}.lnk'));
-end;
-
-procedure RemoveDuplicateDesktopShortcut;
 var
   UserLink, CommonLink: String;
 begin
   UserLink := ExpandConstant('{userdesktop}\{#MyAppName}.lnk');
   CommonLink := ExpandConstant('{commondesktop}\{#MyAppName}.lnk');
-  if (CompareText(UserLink, CommonLink) <> 0) and
-    ShortcutTargetsApplication(CommonLink) and ShortcutTargetsApplication(UserLink) then begin
-    if DeleteFile(UserLink) then
-      Log('Removed duplicate desktop shortcut: ' + UserLink)
-    else
-      Log('Unable to remove duplicate desktop shortcut: ' + UserLink);
-  end;
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  // Wait until [Icons] has successfully created or reused the public shortcut.
-  if (CurStep = ssPostInstall) and WizardIsTaskSelected('desktopicon') then
-    RemoveDuplicateDesktopShortcut;
+  // Never replace an existing destination, even if it is customized, damaged,
+  // or belongs to another installation. Reuse the other scope only when its
+  // target identifies this installation. This also prevents new duplicates.
+  if IsAdminInstallMode then
+    Result := not FileExists(CommonLink) and not ShortcutTargetsApplication(UserLink)
+  else
+    Result := not FileExists(UserLink) and not ShortcutTargetsApplication(CommonLink);
 end;
 
 // Query only the files owned by this installation. Never shut down processes here.

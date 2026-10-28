@@ -5158,6 +5158,10 @@ void MeetingRoomWindow::setWhiteboardVisible(bool visible) {
 				_coordinator.get(), &OpenMeeting::MeetingCoordinator::setWhiteboardWritersOpen);
 			connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::whiteboardProjectionChanged,
 				_whiteboardPanel, &WhiteboardPanel::applyProjection);
+			connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::whiteboardCommandRejected,
+				_whiteboardPanel->canvas(), [canvas = _whiteboardPanel->canvas()](const QString &id) {
+					canvas->rejectCommand(id.toStdString());
+				});
 			if (_coordinator->state() == OpenMeeting::MeetingState::InMeeting ||
 				_coordinator->state() == OpenMeeting::MeetingState::Reconnecting) {
 				_whiteboardPanel->enableCollaboration();
@@ -6825,6 +6829,7 @@ void MeetingRoomWindow::stopLiveKitSession(bool requestLeave) {
 	_room.reset();
 	CloseLiveTelemetryDialog(_telemetryDialog);
 	const bool wasRunning = _sessionRunning.exchange(false);
+	if (_whiteboardPanel) _whiteboardPanel->canvas()->setEditingEnabled(false);
 	cancelMediaPreparation();
 	if (_captureUiCallbacks) _captureUiCallbacks->Revoke();
 	invalidateCameraCompletion();

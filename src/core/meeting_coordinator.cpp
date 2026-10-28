@@ -5061,6 +5061,7 @@ void MeetingCoordinator::configureWhiteboardRuntimeOnUiThread() {
             QString authorityIdentity = QString::fromStdString(value.authorityIdentity);
             QString localActor = QString::fromStdString(value.localIdentity);
             QString status = QString::fromStdString(value.status);
+            QString rejectedCommandId = QString::fromStdString(value.rejectedCommandId);
             QVariantMap assets;
             for (const auto &asset : value.assets) {
                 if (!asset || !projectedAssetIds->insert(asset->id).second) continue;
@@ -5072,10 +5073,12 @@ void MeetingCoordinator::configureWhiteboardRuntimeOnUiThread() {
                  locked = value.locked, writersOpen = value.writersOpen,
                  canEdit = value.canEdit, canAdmin = value.canAdmin,
                  assets = std::move(assets),
-                 status = std::move(status), hasContent = value.hasContent](MeetingCoordinator* self) mutable {
+                 status = std::move(status), hasContent = value.hasContent,
+                 rejectedCommandId = std::move(rejectedCommandId)](MeetingCoordinator* self) mutable {
                     self->projectWhiteboardOnUiThread(generation, std::move(snapshot), sequence, state,
                         std::move(authorityIdentity), std::move(localActor), locked, writersOpen,
-                        canEdit, canAdmin, std::move(assets), std::move(status), hasContent);
+                        canEdit, canAdmin, std::move(assets), std::move(status), hasContent,
+                        std::move(rejectedCommandId));
                 });
         };
         auto send = [transport](std::string_view topic, std::string_view payload,
@@ -5111,11 +5114,23 @@ void MeetingCoordinator::activateWhiteboard() {
 void MeetingCoordinator::submitWhiteboardCommand(const livekit::whiteboard::Command &command) {
     Q_ASSERT(QThread::currentThread() == thread());
     auto session = _sessionRuntime;
-    if (!session || !_sessionRunning.load(std::memory_order_acquire)) return;
+    if (!session || !_sessionRunning.load(std::memory_order_acquire)) {
+        emit whiteboardCommandRejected(QString::fromStdString(command.id));
+        return;
+    }
+    const auto generation = session->generation();
     const auto now = static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
-    session->post( [session, command, now] {
-        if (!session->acceptsDataOnStrand()) return;
-        if (auto board = session->whiteboardOnStrand()) board->propose(command, now);
+    session->post( [gate = _sessionUiGate, session, generation, command, now] {
+        if (session->acceptsDataOnStrand()) {
+            if (auto board = session->whiteboardOnStrand()) {
+                board->propose(command, now);
+                return;
+            }
+        }
+        gate->Post([generation, id = QString::fromStdString(command.id)](MeetingCoordinator *self) {
+            if (self->isCurrentSessionGenerationOnUiThread(generation))
+                emit self->whiteboardCommandRejected(id);
+        });
     });
 }
 
@@ -5190,7 +5205,7 @@ void MeetingCoordinator::projectWhiteboardOnUiThread(
     uint64_t sessionGeneration, QByteArray snapshot, quint64 sequence,
     int collaborationState, QString authorityIdentity, QString localActor,
     bool locked, bool writersOpen, bool canEdit, bool canAdmin,
-    QVariantMap assets, QString status, bool hasContent) {
+    QVariantMap assets, QString status, bool hasContent, QString rejectedCommandId) {
     Q_ASSERT(QThread::currentThread() == thread());
     if (!isCurrentSessionGenerationOnUiThread(sessionGeneration)) return;
     _whiteboardSnapshot = std::move(snapshot);
@@ -5210,6 +5225,7 @@ void MeetingCoordinator::projectWhiteboardOnUiThread(
     emit whiteboardProjectionChanged(_whiteboardSnapshot, _whiteboardSequence, _whiteboardState,
         _whiteboardAuthority, _whiteboardLocalActor, _whiteboardLocked, _whiteboardWritersOpen,
         _whiteboardCanEdit, _whiteboardCanAdmin, _whiteboardAssets, _whiteboardStatus);
+    if (!rejectedCommandId.isEmpty()) emit whiteboardCommandRejected(rejectedCommandId);
 }
 
 void MeetingCoordinator::enqueueDataReceived(const std::shared_ptr<MeetingSessionRuntime> &session,
