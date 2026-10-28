@@ -20,6 +20,7 @@
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QDialog>
 #include <QtWidgets/QDialogButtonBox>
+#include <QtWidgets/QFileDialog>
 #include <QtWidgets/QFormLayout>
 #include <QtWidgets/QScrollArea>
 #include <QtWidgets/QVBoxLayout>
@@ -381,6 +382,12 @@ protected:
 		auto *dialog = qobject_cast<QDialog *>(watched);
 		if (!dialog) {
 			return QObject::eventFilter(watched, event);
+		}
+
+		// Static file-dialog helpers create their own buttons. Pair their text
+		// with themed surfaces instead of retaining the Windows native background.
+		if (qobject_cast<QFileDialog *>(dialog) && !dialog->property("uiStyle").isValid()) {
+			setStyleVariant(*dialog, "standard-dialog");
 		}
 
 		auto *box = qobject_cast<QMessageBox *>(dialog);
