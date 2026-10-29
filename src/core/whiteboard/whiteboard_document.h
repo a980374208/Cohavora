@@ -90,6 +90,8 @@ public:
     std::uint64_t revision() const { return revision_; }
     Context context() const;
     Result apply(const Command &command);
+    // Called only by the trusted collaboration authority transition.
+    bool setOwner(std::string owner);
     void advanceInteractionBarrier();
     bool canUndo(const std::string &actor) const;
     bool canRedo(const std::string &actor) const;

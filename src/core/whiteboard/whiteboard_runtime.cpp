@@ -149,6 +149,57 @@ void Runtime::start(std::uint64_t nowMs) {
     publish(config_.localIsAuthority ? "ready" : "synchronizing");
 }
 
+void Runtime::setAuthority(std::string identity, std::uint64_t nowMs) {
+    if (state_ == CollaborationState::Retired || identity.empty() ||
+        identity.size() > 128 || identity == config_.authorityIdentity) return;
+    const auto previousAuthority = config_.authorityIdentity;
+    const bool wasAuthority = config_.localIsAuthority && authorityTransferSource_.empty();
+    config_.authorityIdentity = std::move(identity);
+    config_.localIsAuthority = config_.localIdentity == config_.authorityIdentity;
+    document_.setOwner(actorId(config_.authorityIdentity));
+    // The handoff itself occupies a sequence, so a delayed snapshot from an
+    // earlier transfer to the same host cannot roll ownership barriers back.
+    if (wasAuthority) ++sequence_;
+    // Neither old commits nor gestures submitted with old permissions may be
+    // replayed as new-authority operations. Committed content/assets remain.
+    log_.clear();
+    proposals_.clear();
+    proposalOrder_.clear();
+    pendingProposals_.clear();
+    rateEvents_.clear();
+    snapshot_ = {};
+    assetAssemblies_.clear();
+    requestedAssets_.clear();
+    outboundAssets_.clear();
+    departedAuthority_.reset();
+    // Offering a former snapshot does not prove it is still current: the
+    // successor may have committed edits while its acknowledgement was lost.
+    // Even a returning host must obtain the current host's final snapshot.
+    authorityTransferSource_ = config_.localIsAuthority ? previousAuthority : std::string{};
+    authoritySnapshotReceived_ = false;
+    offeringAuthorityTransfer_ = wasAuthority;
+    lastAuthoritySeen_ = lastSyncRequest_ = nowMs;
+    state_ = transportReady_ ? CollaborationState::Synchronizing : CollaborationState::ReadOnly;
+    publish("host changed; synchronizing");
+    if (!transportReady_) return;
+    if (offeringAuthorityTransfer_) sendSnapshot({config_.authorityIdentity});
+    requestSync();
+}
+
+void Runtime::finishAuthorityTransfer(std::uint64_t nowMs) {
+    if (authorityTransferSource_.empty() || !authoritySnapshotReceived_) return;
+    for (const auto &page : document_.pages()) {
+        if (!page.backgroundAssetId.empty() && !assets_.count(page.backgroundAssetId)) return;
+    }
+    authorityTransferSource_.clear();
+    authoritySnapshotReceived_ = false;
+    offeringAuthorityTransfer_ = false;
+    state_ = CollaborationState::Ready;
+    lastHeartbeatSent_ = nowMs;
+    sendDescriptor({});
+    publish("ready");
+}
+
 bool Runtime::send(const Message &message, const std::vector<std::string> &destinations) {
     if (!transportReady_ || state_ == CollaborationState::Retired || !send_) return false;
     const auto bytes = encodeMessage(message);
@@ -386,8 +437,9 @@ void Runtime::observePeer(const PeerInstance &peer) {
     };
     const auto current = peers_.find(peer.identity);
     if (current != peers_.end() && !(current->second == peer) && !newer(peer, current->second)) return;
-    const bool authorityReturned = !config_.localIsAuthority &&
-        peer.identity == config_.authorityIdentity && departedAuthority_.has_value();
+    const auto &recoveryAuthority = authorityTransferSource_.empty()
+        ? config_.authorityIdentity : authorityTransferSource_;
+    const bool authorityReturned = peer.identity == recoveryAuthority && departedAuthority_.has_value();
     if (authorityReturned && !newer(peer, *departedAuthority_)) return;
     peers_[peer.identity] = peer;
     if (authorityReturned && state_ == CollaborationState::Frozen) {
@@ -414,7 +466,8 @@ void Runtime::peerLeft(const PeerInstance &peer) {
           peer.incarnation <= departedAuthority_->incarnation))) return;
     peers_.erase(peer.identity);
     rateEvents_.erase(peer.identity);
-    if (!config_.localIsAuthority && peer.identity == config_.authorityIdentity) {
+    if ((!config_.localIsAuthority && peer.identity == config_.authorityIdentity) ||
+        peer.identity == authorityTransferSource_) {
         departedAuthority_ = peer;
         state_ = CollaborationState::Frozen;
         publish("authority left; board frozen");
@@ -430,6 +483,35 @@ void Runtime::receive(std::string_view topic, std::string_view payload,
         parsed->authorityIdentity != config_.authorityIdentity) return;
     const auto &message = *parsed;
     if (sender.identity == config_.authorityIdentity) lastAuthoritySeen_ = nowMs;
+
+    // Only the authenticated successor can retrieve the final old-authority
+    // snapshot. This branch never accepts commands or changes local roles.
+    if (offeringAuthorityTransfer_ && sender.identity == config_.authorityIdentity) {
+        if (message.kind == MessageKind::Discover || message.kind == MessageKind::SyncRequest) {
+            sendSnapshot({sender.identity});
+            return;
+        }
+        if (message.kind == MessageKind::AssetRequest) {
+            if (!acceptRate(sender.identity, nowMs)) return;
+            const auto asset = assets_.find(message.assetId);
+            if (asset != assets_.end()) queueAsset(asset->second, {sender.identity});
+            return;
+        }
+        if (message.kind == MessageKind::Descriptor || message.kind == MessageKind::Commit) {
+            offeringAuthorityTransfer_ = false;
+        }
+    }
+    if (!authorityTransferSource_.empty()) {
+        if (sender.identity != authorityTransferSource_) return;
+        lastAuthoritySeen_ = nowMs;
+        if (message.kind == MessageKind::SnapshotChunk && !authoritySnapshotReceived_ &&
+            message.baseSequence > sequence_)
+            receiveSnapshot(message, nowMs);
+        else if (message.kind == MessageKind::AssetChunk && authoritySnapshotReceived_)
+            receiveAsset(message, nowMs);
+        finishAuthorityTransfer(nowMs);
+        return;
+    }
 
     if (config_.localIsAuthority) {
         if (sender.identity == config_.authorityIdentity) return;
@@ -522,7 +604,8 @@ void Runtime::receive(std::string_view topic, std::string_view payload,
 }
 
 void Runtime::requestSync() {
-    if (config_.localIsAuthority || !transportReady_ || state_ == CollaborationState::Retired ||
+    if ((config_.localIsAuthority && authorityTransferSource_.empty()) ||
+        !transportReady_ || state_ == CollaborationState::Retired ||
         state_ == CollaborationState::Frozen) return;
     state_ = CollaborationState::Synchronizing;
     Message request;
@@ -531,7 +614,8 @@ void Runtime::requestSync() {
     request.authorityIdentity = config_.authorityIdentity;
     request.sequence = sequence_;
     request.baseSequence = sequence_;
-    send(request, {config_.authorityIdentity});
+    send(request, {authorityTransferSource_.empty()
+        ? config_.authorityIdentity : authorityTransferSource_});
     publish("synchronizing");
 }
 
@@ -643,7 +727,8 @@ void Runtime::receiveSnapshot(const Message &message, std::uint64_t nowMs) {
     writersOpen_ = snapshot_.writersOpen;
     writers_ = std::set<std::string>(snapshot_.writers.begin(), snapshot_.writers.end());
     snapshot_ = {};
-    state_ = CollaborationState::Ready;
+    authoritySnapshotReceived_ = !authorityTransferSource_.empty();
+    state_ = authoritySnapshotReceived_ ? CollaborationState::Synchronizing : CollaborationState::Ready;
     requestMissingAssets(nowMs);
     publish("ready");
 }
@@ -752,7 +837,7 @@ void Runtime::receiveAsset(const Message &message, std::uint64_t nowMs) {
 }
 
 void Runtime::requestMissingAssets(std::uint64_t nowMs) {
-    if (config_.localIsAuthority || state_ == CollaborationState::Retired ||
+    if ((config_.localIsAuthority && authorityTransferSource_.empty()) || state_ == CollaborationState::Retired ||
         state_ == CollaborationState::Frozen || !transportReady_) return;
     for (const auto &page : document_.pages()) {
         if (page.backgroundAssetId.empty() || assets_.count(page.backgroundAssetId)) continue;
@@ -765,7 +850,8 @@ void Runtime::requestMissingAssets(std::uint64_t nowMs) {
         request.authorityIdentity = config_.authorityIdentity;
         request.sequence = sequence_;
         request.assetId = page.backgroundAssetId;
-        if (send(request, {config_.authorityIdentity})) requestedAssets_[page.backgroundAssetId] = nowMs;
+        if (send(request, {authorityTransferSource_.empty()
+            ? config_.authorityIdentity : authorityTransferSource_})) requestedAssets_[page.backgroundAssetId] = nowMs;
     }
 }
 
@@ -786,7 +872,7 @@ void Runtime::encryptionChanged(std::uint64_t nowMs) {
     publish("encryption changed; unfinished transfers cancelled");
     if (!transportReady_ || state_ == CollaborationState::Frozen) return;
     lastAuthoritySeen_ = nowMs;
-    if (config_.localIsAuthority) sendDescriptor({});
+    if (config_.localIsAuthority && authorityTransferSource_.empty()) sendDescriptor({});
     else requestSync();
 }
 
@@ -803,7 +889,7 @@ void Runtime::setTransportReady(bool ready, std::uint64_t nowMs) {
         return;
     }
     lastAuthoritySeen_ = nowMs;
-    if (config_.localIsAuthority) {
+    if (config_.localIsAuthority && authorityTransferSource_.empty()) {
         state_ = CollaborationState::Ready;
         sendDescriptor({});
         publish("ready");
@@ -817,7 +903,8 @@ void Runtime::tick(std::uint64_t nowMs) {
         requestedAssets_.erase(it->first);
         it = assetAssemblies_.erase(it);
     }
-    if (config_.localIsAuthority && nowMs - lastHeartbeatSent_ >= HeartbeatIntervalMs) {
+    if (config_.localIsAuthority && authorityTransferSource_.empty() &&
+        nowMs - lastHeartbeatSent_ >= HeartbeatIntervalMs) {
         Message heartbeat;
         heartbeat.kind = MessageKind::Heartbeat;
         heartbeat.documentId = config_.documentId;
@@ -826,7 +913,7 @@ void Runtime::tick(std::uint64_t nowMs) {
         heartbeat.sentAtMs = nowMs;
         send(heartbeat);
         lastHeartbeatSent_ = nowMs;
-    } else if (!config_.localIsAuthority) {
+    } else if (!config_.localIsAuthority || !authorityTransferSource_.empty()) {
         requestMissingAssets(nowMs);
         if (state_ == CollaborationState::Ready) {
             for (auto &[_, proposal] : pendingProposals_) {
@@ -837,7 +924,8 @@ void Runtime::tick(std::uint64_t nowMs) {
                     break;
                 }
             }
-        } else if (state_ == CollaborationState::Synchronizing &&
+        } else if ((state_ == CollaborationState::Synchronizing ||
+                    (!authorityTransferSource_.empty() && state_ == CollaborationState::ReadOnly)) &&
                    nowMs - lastSyncRequest_ >= HeartbeatIntervalMs) {
             lastSyncRequest_ = nowMs;
             requestSync();

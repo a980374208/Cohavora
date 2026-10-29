@@ -84,6 +84,13 @@ Context Document::context() const {
     return {id_, page().id, page().epoch, interactionEpoch_};
 }
 
+bool Document::setOwner(std::string owner) {
+    if (!identifier(owner) || owner == owner_) return false;
+    owner_ = std::move(owner);
+    advanceInteractionBarrier();
+    return true;
+}
+
 bool Document::validObject(const Object &object, const Page &target) const {
     const auto kind = static_cast<int>(object.kind);
     if (!identifier(object.id) || !identifier(object.author) || kind < 0 || kind > 6 ||

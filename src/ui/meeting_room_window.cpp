@@ -3097,7 +3097,7 @@ void MeetingRoomWindow::prepareMediaAndJoin(std::function<void()> admission) {
 	if (_mediaPreparationStarted || !_sessionRunning || _closeRequested ||
 		_closingForSessionInvalidation || !admission) return;
 	_mediaPreparationStarted = true;
-	_mediaPreparationError.clear();
+	setMediaPreparationError({});
 	_pendingAdmission = std::move(admission);
 	_pendingAudioMuted = _config.audioMuted;
 	_pendingVideoEnabled = _config.videoEnabled;
@@ -3250,16 +3250,18 @@ void MeetingRoomWindow::finishMediaPreparation() {
 		!preparation->attemptedMicrophone;
 	const bool nextCamera = requestedVideo && !_cameraManager &&
 		!preparation->attemptedCamera;
+	QString preparationError = _mediaPreparationError;
 	if (!requestedMuted && preparation->attemptedMicrophone &&
 		(!_wasapiCap || !_wasapiCap->IsRunning())) {
-		_mediaPreparationError = QCoreApplication::translate("MeetingUI", "Unable to start the microphone. Check the device and system permissions.");
+		preparationError = QCoreApplication::translate("MeetingUI", "Unable to start the microphone. Check the device and system permissions.");
 	}
 	if (requestedVideo && preparation->attemptedCamera && !_usingRealCamera) {
-		if (!_mediaPreparationError.isEmpty()) _mediaPreparationError += QLatin1Char('\n');
-		_mediaPreparationError += preparation->cameraStartResult == livekit::CameraStartResult::FirstFrameTimeout
+		if (!preparationError.isEmpty()) preparationError += QLatin1Char('\n');
+		preparationError += preparation->cameraStartResult == livekit::CameraStartResult::FirstFrameTimeout
 			? QCoreApplication::translate("MeetingUI", "The camera did not produce video within 3 seconds. Check the device and enable the camera to retry.")
 			: QCoreApplication::translate("MeetingUI", "Unable to start the camera. Check the device and system permissions.");
 	}
+	if (preparationError != _mediaPreparationError) setMediaPreparationError(preparationError);
 	// Failed cameras and cancelled devices are retired on the cleanup worker.
 	if (preparation->microphone || preparation->camera) {
 		OpenMeeting::SessionShutdownService::Instance().SubmitCleanup([preparation] {
@@ -3315,7 +3317,7 @@ void MeetingRoomWindow::finishMediaPreparation() {
 
 void MeetingRoomWindow::requestLocalMicrophone(bool muted) {
 	if (!_sessionRunning || _closeRequested || _closingForSessionInvalidation) return;
-	_mediaPreparationError.clear();
+	setMediaPreparationError({});
 	if (_mediaPreparation) {
 		_pendingAudioMuted = muted;
 		_mediaPreparation->microphoneWanted.store(!muted);
@@ -3329,7 +3331,7 @@ void MeetingRoomWindow::requestLocalMicrophone(bool muted) {
 		return;
 	}
 	if (!muted && !_wasapiCap->IsRunning()) {
-		_mediaPreparationError = QCoreApplication::translate("MeetingUI", "Unable to start the microphone. Check the device and system permissions.");
+		setMediaPreparationError(QCoreApplication::translate("MeetingUI", "Unable to start the microphone. Check the device and system permissions."));
 	}
 	updateMediaPreparationFeedback();
 	updateRecoveryStateUi(_coordinator ? _coordinator->state() : OpenMeeting::MeetingState::InMeeting, {});
@@ -3338,7 +3340,7 @@ void MeetingRoomWindow::requestLocalMicrophone(bool muted) {
 
 void MeetingRoomWindow::requestLocalCamera(bool enabled) {
 	if (!_sessionRunning || _closeRequested || _closingForSessionInvalidation) return;
-	_mediaPreparationError.clear();
+	setMediaPreparationError({});
 	if (_mediaPreparation) {
 		_pendingVideoEnabled = enabled;
 		_mediaPreparation->cameraWanted.store(enabled);
@@ -3354,6 +3356,28 @@ void MeetingRoomWindow::requestLocalCamera(bool enabled) {
 	updateMediaPreparationFeedback();
 	updateRecoveryStateUi(_coordinator ? _coordinator->state() : OpenMeeting::MeetingState::InMeeting, {});
 	if (_coordinator) _coordinator->setLocalVideoEnabled(enabled);
+}
+
+void MeetingRoomWindow::setMediaPreparationError(const QString &error) {
+	_mediaPreparationError = error;
+	if (_mediaPreparationErrorTimer) _mediaPreparationErrorTimer->stop();
+	if (!error.isEmpty()) {
+		if (!_mediaPreparationErrorTimer) {
+			_mediaPreparationErrorTimer = new QTimer(this);
+			_mediaPreparationErrorTimer->setSingleShot(true);
+			connect(_mediaPreparationErrorTimer, &QTimer::timeout, this, [this] {
+				// Retire the shared feedback state so a later UI refresh cannot
+				// resurrect the notice. Leave connection/recovery banners intact.
+				if (_recoveryBanner && _recoveryBanner->text() == _mediaPreparationError) {
+					_recoveryBanner->hide();
+				}
+				_mediaPreparationError.clear();
+				updateMediaPreparationFeedback();
+			});
+		}
+		_mediaPreparationErrorTimer->start(5000);
+	}
+	updateMediaPreparationFeedback();
 }
 
 void MeetingRoomWindow::updateMediaPreparationFeedback() {
@@ -6451,9 +6475,19 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	        this, [this](const QString &title, const QString &message) {
 		if (_closingForSessionInvalidation ||
 			OpenMeeting::SessionManager::instance().isSessionInvalidating() ||
-			!_coordinator || _coordinator->state() != OpenMeeting::MeetingState::Failed) {
+			!_coordinator) {
 			return;
 		}
+		if (_coordinator->state() == OpenMeeting::MeetingState::InMeeting ||
+			_coordinator->state() == OpenMeeting::MeetingState::Reconnecting) {
+			auto *notice = new QMessageBox(QMessageBox::Warning, title, message,
+				QMessageBox::Ok, this);
+			notice->setObjectName(QStringLiteral("meetingOperationError"));
+			notice->setAttribute(Qt::WA_DeleteOnClose);
+			notice->open();
+			return;
+		}
+		if (_coordinator->state() != OpenMeeting::MeetingState::Failed) return;
 		invalidateCameraCompletion();
 		QPointer<MeetingRoomWindow> guard(this);
 		LogToConsole(LogCategory::Error, "SESSION_STARTUP", QString("%1: %2").arg(title, message));
@@ -6659,11 +6693,7 @@ void MeetingRoomWindow::handleEndMeetingClicked() {
 			if (guard) guard->close();
 		} else if (box.clickedButton() == endBtn) {
 			beginLeaveTimingObservation();
-			QPointer<MeetingRoomWindow> guard(this);
-			stopLiveKitSession(false);
-			if (!guard) return;
 			_coordinator->leaveMeetingAsync(true);
-			if (guard) guard->close();
 		}
 	} else {
 		QMessageBox box(QMessageBox::Question,
@@ -6843,6 +6873,7 @@ void MeetingRoomWindow::stopLiveKitSession(bool requestLeave) {
 	if (_localGenTimer) _localGenTimer->stop();
 	if (_recoveryBannerFadeTimer) _recoveryBannerFadeTimer->stop();
 	_usingGpuBackend.store(false, std::memory_order_release);
+	if (_mediaPreparationErrorTimer) _mediaPreparationErrorTimer->stop();
 	if (_videoCanvas) {
 		_videoCanvas->shutdownRenderer();
 		_videoCanvas->hide();

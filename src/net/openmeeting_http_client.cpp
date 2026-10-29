@@ -702,4 +702,17 @@ void OpenMeetingHttpClient::endMeeting(const QString &meetingId,
     }, true, std::move(context));
 }
 
+void OpenMeetingHttpClient::setMeetingHost(const QString &meetingId, const QString &hostUserId,
+                                          ResultCallback<bool> callback, HttpRequestContext context) {
+    QJsonObject body;
+    body["meetingID"] = meetingId;
+    body["userID"] = _currentUser.userId;
+    body["hostUserID"] = hostUserId;
+    body["coHostUserIDs"] = QJsonArray{};
+    sendPost("/meeting/set_meeting_host_info", body,
+        [callback](bool ok, const QJsonValue &, const HttpError &err) {
+            if (callback) callback(ok, ok, err);
+        }, true, std::move(context));
+}
+
 } // namespace OpenMeeting

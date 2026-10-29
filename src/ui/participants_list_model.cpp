@@ -46,6 +46,33 @@ QVariant ParticipantListModel::data(const QModelIndex &index, int role) const {
 }
 
 void ParticipantListModel::setParticipants(const std::vector<ParticipantInfo> &participants) {
+    bool sameIdentities = participants.size() == _items.size();
+    int firstChanged = -1;
+    int lastChanged = -1;
+    if (sameIdentities) {
+        for (int row = 0; row != static_cast<int>(participants.size()); ++row) {
+            const auto &before = _items[row];
+            const auto &after = participants[row];
+            if (before.identity != after.identity) {
+                sameIdentities = false;
+                break;
+            }
+            if (before.name != after.name || before.isLocal != after.isLocal ||
+                before.isHost != after.isHost || before.isAudioMuted != after.isAudioMuted ||
+                before.isVideoEnabled != after.isVideoEnabled || before.isSpeaking != after.isSpeaking ||
+                before.audioLevel != after.audioLevel) {
+                if (firstChanged < 0) firstChanged = row;
+                lastChanged = row;
+            }
+        }
+    }
+    if (sameIdentities) {
+        // Media/speaking snapshots do not replace participant identities. Keep
+        // view indexes and the scroll position, including inside a menu's loop.
+        _items = participants;
+        if (firstChanged >= 0) emit dataChanged(index(firstChanged), index(lastChanged));
+        return;
+    }
     beginResetModel();
     _items = participants;
     endResetModel();

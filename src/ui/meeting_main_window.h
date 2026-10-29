@@ -23,6 +23,7 @@
 namespace OpenMeeting {
 enum class SessionInvalidationReason;
 class MeetingCatalogController;
+class MeetingCoordinator;
 class SessionManager;
 }
 
@@ -188,6 +189,7 @@ private:
 	void handlePendingMeetingEntryDetail();
 	void clearPendingMeetingEntry();
 	void syncSchedule();
+	void bindMeetingCatalog(OpenMeeting::MeetingCoordinator *coordinator);
 
 	static constexpr int kWindowCornerRadius = 12;
 

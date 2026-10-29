@@ -65,6 +65,9 @@ struct MeetingDetail {
     QString meetingName;
     QString creatorUserId;
     QString hostUserId;
+    QString effectiveHostUserId() const {
+        return hostUserId.isEmpty() ? creatorUserId : hostUserId;
+    }
     int64_t startTime = 0;
     int64_t endTime = 0;
     bool disableMicrophoneOnJoin = false;
@@ -384,6 +387,7 @@ private:
         std::function<void(const QString &, int, ResultCallback<LiveKitAuthInfo>, HttpRequestContext)> createImmediateMeetingWithContext;
         std::function<void(const QString &, ResultCallback<bool>, HttpRequestContext)> leaveMeetingWithContext;
         std::function<void(const QString &, ResultCallback<bool>, HttpRequestContext)> endMeetingWithContext;
+        std::function<void(const QString &, const QString &, ResultCallback<bool>, HttpRequestContext)> setMeetingHost;
     };
     using RoomStartHook = std::function<void(const QString &, const QString &)>;
     enum class AdmissionStage {
@@ -402,6 +406,8 @@ private:
                        QObject *parent);
     uint64_t beginAdmission(AdmissionStage stage);
     uint64_t invalidateAdmission();
+    void finishLeavingMeeting(bool endedForAll);
+    void applyMeetingHost(const QString &userId, const QString &operatorName);
     void failEncryptionAdmission(const QString &detail);
     void attachAdmissionTelemetry(
         const std::shared_ptr<livekit::telemetry::SessionTelemetry> &telemetry);
@@ -562,6 +568,9 @@ private:
     // 全局账号会话被撤销后，忽略仍在途的 HTTP 入会回调，防止已经关闭的
     // 会议窗口重新创建 Room 或重新发布媒体。
     bool _sessionInvalidated = false;
+    bool _hostTransferPending = false;
+    bool _endMeetingPending = false;
+    uint64_t _meetingHostRevision = 0;
 
     std::map<QString, ParticipantInfo> _participants;
     std::map<QString, std::map<QString, RemoteVideoTrackPresentation>> _remoteVideoTracks;
@@ -639,6 +648,9 @@ private:
     bool _whiteboardWritersOpen = true;
     bool _whiteboardCanEdit = false;
     bool _whiteboardCanAdmin = false;
+    uint64_t _whiteboardProjectionSession = 0;
+    // The pointed value is accessed only on this session's strand.
+    std::shared_ptr<uint64_t> _whiteboardProjectionRevision;
     QVariantMap _whiteboardAssets;
     QString _whiteboardStatus;
 

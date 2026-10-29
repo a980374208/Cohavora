@@ -636,6 +636,7 @@ private:
 	void finishMediaPreparation();
 	void cancelMediaPreparation();
 	void updateMediaPreparationFeedback();
+	void setMediaPreparationError(const QString &error);
 	std::shared_ptr<MediaPreparation> _mediaPreparation;
 	std::shared_ptr<OpenMeeting::QtCallbackGate<MeetingRoomWindow>> _preparationCallbacks;
 	std::function<void()> _pendingAdmission;
@@ -646,6 +647,7 @@ private:
 	std::optional<bool> _pendingAudioMuted;
 	std::optional<bool> _pendingVideoEnabled;
 	QString _mediaPreparationError;
+	QTimer *_mediaPreparationErrorTimer = nullptr;
 	bool _audioPreferencesBound = false;
 	void retireLocalCapture();
 	void bindLocalMediaSources();

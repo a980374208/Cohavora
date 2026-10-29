@@ -4,6 +4,18 @@
 <context>
     <name>MeetingUI</name>
     <message>
+        <source>Host permissions are synchronizing. Please try again shortly.</source>
+        <translation>主持人权限正在同步，请稍后重试。</translation>
+    </message>
+    <message>
+        <source>Could not transfer host. Please try again.</source>
+        <translation>移交主持人失败，请重试。</translation>
+    </message>
+    <message>
+        <source>Could not end the meeting. Please try again.</source>
+        <translation>结束全体会议失败，请重试。</translation>
+    </message>
+    <message>
         <source>Clipboard changed. Try copying again.</source>
         <translation>剪贴板已更新，请重新复制。</translation>
     </message>

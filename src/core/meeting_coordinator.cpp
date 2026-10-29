@@ -2042,7 +2042,7 @@ public:
             info.identity = id;
             info.name = realNick;
             info.isLocal = false;
-            info.isHost = (id == coordinator->_meetingDetail.hostUserId || id == coordinator->_meetingDetail.creatorUserId);
+            info.isHost = (id == coordinator->_meetingDetail.effectiveHostUserId());
             info.isAudioMuted = true;
             info.isVideoEnabled = false;
             CopyParticipantState(p, &info);
@@ -2469,8 +2469,7 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
         info.identity = identity;
         info.name = ResolveParticipantNickname(event.participant.state);
         info.isLocal = event.participant.is_local;
-        info.isHost = identity == _meetingDetail.hostUserId ||
-            identity == _meetingDetail.creatorUserId;
+        info.isHost = identity == _meetingDetail.effectiveHostUserId();
         info.isAudioMuted = info.isLocal ? _audioMuted : true;
         info.isVideoEnabled = info.isLocal ? _videoEnabled : false;
         info.isSpeaking = event.participant.state.speaking;
@@ -2634,6 +2633,11 @@ MeetingCoordinator::AdmissionBackend MeetingCoordinator::makeDefaultAdmissionBac
         sessionManager.httpClient().endMeeting(meetingId,
             std::move(callback), std::move(context));
     };
+    backend.setMeetingHost = [&sessionManager](const QString &meetingId,
+        const QString &hostUserId, ResultCallback<bool> callback, HttpRequestContext context) {
+        sessionManager.httpClient().setMeetingHost(meetingId, hostUserId,
+            std::move(callback), std::move(context));
+    };
     return backend;
 }
 
@@ -2710,7 +2714,7 @@ QString MeetingCoordinator::stateString() const {
 bool MeetingCoordinator::isHost() const {
     QString myUserId = _sessionManager.userId();
     if (myUserId.isEmpty()) return false;
-    return (myUserId == _meetingDetail.hostUserId || myUserId == _meetingDetail.creatorUserId);
+    return myUserId == _meetingDetail.effectiveHostUserId();
 }
 
 uint64_t MeetingCoordinator::beginAdmission(AdmissionStage stage) {
@@ -2780,6 +2784,8 @@ livekit::diagnostic::Context MeetingCoordinator::diagnosticContext() const {
 }
 
 uint64_t MeetingCoordinator::invalidateAdmission() {
+    _hostTransferPending = false;
+    _endMeetingPending = false;
     cancelEncryptionRecovery();
     _admissionEncryption.Revoke();
     if (!_admissionTelemetry.terminal) {
@@ -3432,6 +3438,55 @@ void MeetingCoordinator::recoverEncryptionKey(std::shared_ptr<livekit::MeetingSe
 }
 
 void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
+    if (!endMeetingForAll) {
+        finishLeavingMeeting(false);
+        return;
+    }
+    // Ending the room is a server transaction. A failed request must leave the
+    // host in the meeting so they can retry or explicitly choose to leave.
+    if (_endMeetingPending || _hostTransferPending || !isHost() ||
+        (_state != MeetingState::InMeeting && _state != MeetingState::Reconnecting) ||
+        _currentMeetingId.isEmpty() || !_sessionManager.isLoggedIn()) return;
+    _endMeetingPending = true;
+    const auto generation = _admissionGeneration;
+    const auto sessionGeneration = _nextSessionGeneration;
+    const auto meetingId = _currentMeetingId;
+    const auto context = admissionHttpContext();
+    QPointer<MeetingCoordinator> owner(this);
+    auto completed = [owner, generation, sessionGeneration, meetingId, context](
+        bool ok, bool, const HttpError &error) {
+        if (!owner || owner->_admissionGeneration != generation ||
+            owner->_nextSessionGeneration != sessionGeneration ||
+            owner->_currentMeetingId != meetingId || !owner->_endMeetingPending ||
+            owner->_sessionInvalidated) return;
+        owner->_endMeetingPending = false;
+        livekit::diagnostic::Event event;
+        event.kind = livekit::diagnostic::EventKind::MeetingBackendNotificationCompleted;
+        event.thread_role = livekit::diagnostic::ThreadRole::Ui;
+        event.context.anonymous_session_id.Assign(context.anonymousSessionId.toStdString());
+        event.context.request_id.Assign(error.requestId.toStdString());
+        event.route = livekit::diagnostic::Route::EndMeeting;
+        event.outcome = ok ? livekit::diagnostic::Outcome::Success : livekit::diagnostic::Outcome::Failure;
+        event.error_layer = DiagnosticLayer(error.failureLayer);
+        event.http_status = error.httpStatus;
+        event.network_error = error.networkError;
+        event.business_code = error.businessCode;
+        if (!ok) event.error_code = livekit::diagnostic::ErrorCode::Unknown;
+        livekit::diagnostic::EmitBusinessEvent(event);
+        if (!ok) {
+            emit owner->errorOccurred(QCoreApplication::translate("MeetingUI", "End Meeting"),
+                QCoreApplication::translate("MeetingUI", "Could not end the meeting. Please try again."));
+            return;
+        }
+        owner->finishLeavingMeeting(true);
+    };
+    if (_admissionBackend.endMeetingWithContext)
+        _admissionBackend.endMeetingWithContext(meetingId, std::move(completed), context);
+    else
+        _admissionBackend.endMeeting(meetingId, std::move(completed));
+}
+
+void MeetingCoordinator::finishLeavingMeeting(bool endedForAll) {
     const auto leaveContext = admissionHttpContext();
     const auto leavingGeneration = _nextSessionGeneration;
     invalidateAdmission();
@@ -3440,8 +3495,8 @@ void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
     }
 
     const QString meetingId = _currentMeetingId;
-    const bool notifyBackend = !meetingId.isEmpty() && _sessionManager.isLoggedIn();
-    const bool shouldEndMeeting = endMeetingForAll && isHost();
+    const bool notifyBackend = !endedForAll && !meetingId.isEmpty() && _sessionManager.isLoggedIn();
+    const bool shouldEndMeeting = endedForAll;
     auto backendRequest = shouldEndMeeting
         ? _admissionBackend.endMeeting : _admissionBackend.leaveMeeting;
     QPointer<MeetingCoordinator> owner(this);
@@ -4905,6 +4960,7 @@ void MeetingCoordinator::handleMediaResumeRequest(
 }
 
 void MeetingCoordinator::requestParticipantMute(const QString &targetUserId, bool isVideo, bool mute) {
+    if (!isHost()) return;
     openmeeting::meeting::NotifyMeetingData notify;
     notify.set_operatoruserid(_sessionManager.userId().toStdString());
 
@@ -4929,7 +4985,7 @@ void MeetingCoordinator::requestParticipantMicrophone(const QString &targetUserI
 }
 
 void MeetingCoordinator::muteAllParticipants(bool muteMic, bool /*allowSelfUnmute*/) {
-    if (!_room || _state != MeetingState::InMeeting) return;
+    if (!_room || _state != MeetingState::InMeeting || !isHost()) return;
     openmeeting::meeting::NotifyMeetingData notify;
     notify.set_operatoruserid(_sessionManager.userId().toStdString());
 
@@ -4946,27 +5002,66 @@ void MeetingCoordinator::muteAllParticipants(bool muteMic, bool /*allowSelfUnmut
 }
 
 void MeetingCoordinator::transferHost(const QString &newHostUserId) {
-    if (!_room || _state != MeetingState::InMeeting) return;
-    openmeeting::meeting::NotifyMeetingData notify;
-    notify.set_operatoruserid(SessionManager::instance().userId().toStdString());
-
-    auto *hostData = notify.mutable_meetinghostdata();
-    hostData->set_userid(newHostUserId.toStdString());
-    hostData->set_operatornickname(SessionManager::instance().nickname().toStdString());
-    hostData->set_hosttype("host");
-
-    sendNotifyData(notify, true);
-
-    _meetingDetail.hostUserId = newHostUserId;
-    for (auto &[id, p] : _participants) {
-        p.isHost = (id == newHostUserId);
+    if (!_room || _state != MeetingState::InMeeting || !isHost() ||
+        _hostTransferPending || _endMeetingPending || newHostUserId.isEmpty() ||
+        _currentMeetingId.isEmpty() || !_sessionManager.isLoggedIn() || _sessionInvalidated ||
+        newHostUserId == _meetingDetail.effectiveHostUserId() ||
+        !_admissionBackend.setMeetingHost) return;
+    if (_whiteboardProjectionSession == _nextSessionGeneration && _whiteboardProjectionRevision &&
+        (!_whiteboardCanAdmin || _whiteboardAuthority != _meetingDetail.effectiveHostUserId())) {
+        emit errorOccurred(QCoreApplication::translate("MeetingUI", "Transfer Host"),
+            QCoreApplication::translate("MeetingUI", "Host permissions are synchronizing. Please try again shortly."));
+        return;
     }
+    _hostTransferPending = true;
+    const auto generation = _admissionGeneration;
+    const auto sessionGeneration = _nextSessionGeneration;
+    const auto oldHost = _meetingDetail.effectiveHostUserId();
+    const auto hostRevision = _meetingHostRevision;
+    const auto nickname = _sessionManager.nickname();
+    QPointer<MeetingCoordinator> owner(this);
+    _admissionBackend.setMeetingHost(_currentMeetingId, newHostUserId,
+        [owner, generation, sessionGeneration, oldHost, hostRevision, newHostUserId, nickname](
+            bool ok, bool, const HttpError &) {
+            if (!owner || owner->_admissionGeneration != generation ||
+                owner->_nextSessionGeneration != sessionGeneration ||
+                !owner->_hostTransferPending || owner->_sessionInvalidated) return;
+            owner->_hostTransferPending = false;
+            if (!ok) {
+                emit owner->errorOccurred(QCoreApplication::translate("MeetingUI", "Transfer Host"),
+                    QCoreApplication::translate("MeetingUI", "Could not transfer host. Please try again."));
+                return;
+            }
+            // Metadata can arrive before HTTP completion, including a later
+            // transfer. Never overwrite a newer authoritative host.
+            if (owner->_meetingHostRevision == hostRevision &&
+                owner->_meetingDetail.effectiveHostUserId() == oldHost)
+                owner->applyMeetingHost(newHostUserId, nickname);
+        }, admissionHttpContext());
+}
+
+void MeetingCoordinator::applyMeetingHost(const QString &userId, const QString &operatorName) {
+    if (userId.isEmpty() || userId == _meetingDetail.effectiveHostUserId()) return;
+    ++_meetingHostRevision;
+    _whiteboardCanAdmin = _whiteboardCanEdit = false;
+    _meetingDetail.hostUserId = userId;
+    for (auto &[id, participant] : _participants) participant.isHost = (id == userId);
+    configureWhiteboardRuntimeOnUiThread();
+    QPointer<MeetingCoordinator> owner(this);
+    const auto generation = _admissionGeneration;
+    const auto hostRevision = _meetingHostRevision;
     updateParticipantListAndNotify();
-    emit hostRoleChanged(newHostUserId, SessionManager::instance().nickname());
-    emit meetingDetailUpdated(_meetingDetail);
+    if (!owner || owner->_admissionGeneration != generation ||
+        owner->_meetingHostRevision != hostRevision) return;
+    const auto detail = owner->_meetingDetail;
+    emit owner->meetingDetailUpdated(detail);
+    if (!owner || owner->_admissionGeneration != generation ||
+        owner->_meetingHostRevision != hostRevision) return;
+    emit owner->hostRoleChanged(userId, operatorName);
 }
 
 void MeetingCoordinator::kickParticipant(const QString &targetUserId, const QString &reason) {
+    if (!isHost()) return;
     openmeeting::meeting::NotifyMeetingData notify;
     notify.set_operatoruserid(SessionManager::instance().userId().toStdString());
 
@@ -5190,6 +5285,8 @@ void MeetingCoordinator::parseRoomMetadata(const std::string &metadata) {
             owner->_nativeRoomGeneration == nativeGeneration;
     };
     if (metadata.empty()) {
+        ++_meetingHostRevision;
+        _whiteboardCanAdmin = _whiteboardCanEdit = false;
         _meetingDetail = MeetingDetail{};
         for (auto &[identity, participant] : _participants) {
             participant.isHost = false;
@@ -5202,11 +5299,15 @@ void MeetingCoordinator::parseRoomMetadata(const std::string &metadata) {
     }
     const auto parsed = ParseOpenMeetingMetadata(metadata);
     if (parsed.state != OpenMeetingMetadataState::Valid) return;
+    const auto previousHost = _meetingDetail.effectiveHostUserId();
     _meetingDetail = parsed.detail;
+    if (previousHost != _meetingDetail.effectiveHostUserId()) {
+        ++_meetingHostRevision;
+        _whiteboardCanAdmin = _whiteboardCanEdit = false;
+    }
 
     for (auto &[identity, participant] : _participants) {
-        participant.isHost = (identity == _meetingDetail.hostUserId ||
-                              identity == _meetingDetail.creatorUserId);
+        participant.isHost = (identity == _meetingDetail.effectiveHostUserId());
     }
 
     updateParticipantListAndNotify();
@@ -5216,6 +5317,10 @@ void MeetingCoordinator::parseRoomMetadata(const std::string &metadata) {
     if (owner && owner->isCurrentSessionGenerationOnUiThread(sessionGeneration)) {
         owner->configureWhiteboardRuntimeOnUiThread();
     }
+    if (current() && !previousHost.isEmpty() &&
+        previousHost != owner->_meetingDetail.effectiveHostUserId()) {
+        emit owner->hostRoleChanged(owner->_meetingDetail.effectiveHostUserId(), {});
+    }
 }
 
 void MeetingCoordinator::configureWhiteboardRuntimeOnUiThread() {
@@ -5223,8 +5328,7 @@ void MeetingCoordinator::configureWhiteboardRuntimeOnUiThread() {
     auto session = _sessionRuntime;
     auto room = _room;
     if (!session || !room || !_sessionRunning.load(std::memory_order_acquire)) return;
-    const QString authority = !_meetingDetail.hostUserId.isEmpty()
-        ? _meetingDetail.hostUserId : _meetingDetail.creatorUserId;
+    const QString authority = _meetingDetail.effectiveHostUserId();
     QString localIdentity = session->localUserId();
     if (localIdentity.isEmpty() && room->local_participant())
         localIdentity = QString::fromStdString(room->local_participant()->identity());
@@ -5233,6 +5337,12 @@ void MeetingCoordinator::configureWhiteboardRuntimeOnUiThread() {
     const QString documentId = QStringLiteral("board-") + QString::fromLatin1(
         QCryptographicHash::hash(boardKey, QCryptographicHash::Sha256).toHex().left(32));
     const auto generation = session->generation();
+    if (_whiteboardProjectionSession != generation || !_whiteboardProjectionRevision) {
+        _whiteboardProjectionSession = generation;
+        _whiteboardProjectionRevision = std::make_shared<uint64_t>(0);
+    }
+    const auto projectionRevision = _whiteboardProjectionRevision;
+    const auto hostRevision = _meetingHostRevision;
     std::vector<livekit::whiteboard::PeerInstance> peers;
     peers.reserve(_participants.size());
     for (const auto &[identity, participant] : _participants) {
@@ -5246,11 +5356,21 @@ void MeetingCoordinator::configureWhiteboardRuntimeOnUiThread() {
         documentId.toStdString(), localIdentity.toStdString(), authority.toStdString(),
         localIdentity == authority};
     const auto now = static_cast<std::uint64_t>(QDateTime::currentMSecsSinceEpoch());
-    session->post( [gate = _sessionUiGate, session, generation, config = std::move(config),
+    session->post( [gate = _sessionUiGate, session, generation, projectionRevision, hostRevision, config = std::move(config),
                                    peers = std::move(peers), transport, now]() mutable {
-        if (!session->acceptsDataOnStrand() || session->whiteboardOnStrand()) return;
+        if (!session->acceptsDataOnStrand()) return;
+        *projectionRevision = hostRevision;
+        if (auto runtime = session->whiteboardOnStrand()) {
+            runtime->setAuthority(config.authorityIdentity, now);
+            return;
+        }
         auto projectedAssetIds = std::make_shared<std::set<std::string>>();
-        auto project = [gate, generation, projectedAssetIds](livekit::whiteboard::Projection value) mutable {
+        auto project = [gate, generation, projectionRevision, assetRevision = hostRevision,
+                        projectedAssetIds](livekit::whiteboard::Projection value) mutable {
+            if (assetRevision != *projectionRevision) {
+                assetRevision = *projectionRevision;
+                projectedAssetIds->clear();
+            }
             QByteArray snapshot(value.snapshot.data(), static_cast<int>(value.snapshot.size()));
             const auto sequence = static_cast<quint64>(value.sequence);
             const auto state = static_cast<int>(value.state);
@@ -5264,13 +5384,14 @@ void MeetingCoordinator::configureWhiteboardRuntimeOnUiThread() {
                 assets.insert(QString::fromStdString(asset->id),
                     QByteArray(asset->bytes.data(), static_cast<int>(asset->bytes.size())));
             }
-            gate->Post([generation, snapshot = std::move(snapshot), sequence, state,
+            gate->Post([generation, hostRevision = *projectionRevision, snapshot = std::move(snapshot), sequence, state,
                  authorityIdentity = std::move(authorityIdentity), localActor = std::move(localActor),
                  locked = value.locked, writersOpen = value.writersOpen,
                  canEdit = value.canEdit, canAdmin = value.canAdmin,
                  assets = std::move(assets),
                  status = std::move(status), hasContent = value.hasContent,
                  rejectedCommandId = std::move(rejectedCommandId)](MeetingCoordinator* self) mutable {
+                    if (self->_meetingHostRevision != hostRevision) return;
                     self->projectWhiteboardOnUiThread(generation, std::move(snapshot), sequence, state,
                         std::move(authorityIdentity), std::move(localActor), locked, writersOpen,
                         canEdit, canAdmin, std::move(assets), std::move(status), hasContent,
@@ -6012,29 +6133,8 @@ void MeetingCoordinator::handleDataReceivedOnSessionStrand(
         }
     }
 
-    // 3. MeetingHostData 主持人角色变更信令
-    if (notify.has_meetinghostdata()) {
-        const auto &hostData = notify.meetinghostdata();
-        QString newHost = QString::fromStdString(hostData.userid());
-        QString opNick = QString::fromStdString(hostData.operatornickname());
-        gate->Post([sessionGeneration, sender, newHost, opNick](MeetingCoordinator* self) {
-            QPointer<MeetingCoordinator> owner(self);
-            const auto valid = [&] {
-                return owner && owner->isCurrentSessionGenerationOnUiThread(sessionGeneration) &&
-                    owner->isSenderContextCurrentOnUiThread(sender);
-            };
-            if (!valid()) return;
-            self->_meetingDetail.hostUserId = newHost;
-            for (auto &[id, p] : self->_participants) {
-                p.isHost = (id == newHost);
-            }
-            self->updateParticipantListAndNotify();
-            if (!valid()) return;
-            emit owner->hostRoleChanged(newHost, opNick);
-            if (!valid()) return;
-            emit owner->meetingDetailUpdated(owner->_meetingDetail);
-        });
-    }
+    // Host notifications precede the server metadata transaction and are also
+    // client-sendable. Only committed room metadata / HTTP success changes roles.
 }
 
 std::shared_ptr<livekit::TextStreamWriter> MeetingCoordinator::createTextStreamWriter(

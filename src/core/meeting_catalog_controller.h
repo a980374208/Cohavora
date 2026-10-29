@@ -74,6 +74,10 @@ public:
 
     bool refreshUpcoming();
     bool refreshHistory();
+    // The active room's authoritative projection wins over list snapshots.
+    // The caller refreshes the server catalog after publishing/clearing it.
+    void setActiveMeeting(const MeetingRecord &meeting);
+    void clearActiveMeeting();
     bool loadMeetingDetail(const QString &meetingId);
     void clearMeetingDetail();
 
@@ -99,10 +103,16 @@ private:
         QString httpService;
         QString userId;
     };
+    struct ActiveMeeting {
+        RequestContext context;
+        MeetingRecord meeting;
+    };
 
     static Backend defaultBackend(SessionManager &session);
     std::optional<RequestContext> captureContext() const;
     bool isContextCurrent(const RequestContext &context) const;
+    MeetingList projectUpcomingMeetings(const MeetingList &meetings,
+                                       const RequestContext &context) const;
     bool startListQuery(bool history);
     void handleAccountChange(bool reload);
     void invalidateUpcomingQuery();
@@ -117,6 +127,7 @@ private:
     MeetingListViewState _history;
     MeetingDetailViewState _detail;
     MeetingWriteResult _lastWrite;
+    std::optional<ActiveMeeting> _activeMeeting;
     quint64 _upcomingGeneration = 0;
     quint64 _historyGeneration = 0;
     quint64 _detailGeneration = 0;

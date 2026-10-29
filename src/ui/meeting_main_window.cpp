@@ -1031,6 +1031,7 @@ void MeetingMainWindow::openQuickMeeting(
 		return;
 	}
 	auto coordinator = OpenMeeting::MeetingCoordinator::create();
+	bindMeetingCatalog(coordinator.get());
 	const auto prefs = session.mediaPreferences();
 
 	MeetingRoomWindow::Config config;
@@ -1133,6 +1134,7 @@ void MeetingMainWindow::openJoinMeetingDialog(
 	preferences.enableVideo = config.videoEnabled;
 	if (auto sample = coordinator->joinTiming())
 		sample->Media(!config.audioMuted, config.videoEnabled, false, false);
+	if (!dialog.isManualConnection()) bindMeetingCatalog(coordinator.get());
 	config.invitationMode = dialog.isManualConnection()
 		? InvitationMode::Disabled
 		: InvitationMode::BusinessMeetingId;
@@ -1272,6 +1274,7 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 		config.invitationMode = InvitationMode::BusinessMeetingId;
 
 		auto coordinator = OpenMeeting::MeetingCoordinator::create();
+		bindMeetingCatalog(coordinator.get());
 		if (!coordinator->pageTiming()) coordinator->observePageTiming(std::make_shared<livekit::diagnostic::UiTimingMeasurement>(
 			livekit::diagnostic::TimingMetric::UiFirstPaint, livekit::diagnostic::TimingScene::Meeting));
 		auto *roomWindow = new MeetingRoomWindow(config, coordinator);
@@ -1291,6 +1294,69 @@ void MeetingMainWindow::showMeetingDetail(const QString &meetingId) {
 				preferences, std::move(encryption));
 		});
 	}
+}
+
+void MeetingMainWindow::bindMeetingCatalog(OpenMeeting::MeetingCoordinator *coordinator) {
+	using namespace OpenMeeting;
+	auto &session = SessionManager::instance();
+	const auto authGeneration = session.authGeneration();
+	const auto userId = session.userId();
+	const auto service = session.serverBaseUrl();
+	const QPointer<MeetingCatalogController> catalog(_meetingCatalog);
+	const QPointer<MeetingCoordinator> owner(coordinator);
+	const auto active = std::make_shared<std::optional<MeetingRecord>>();
+	const auto currentAccount = [authGeneration, userId, service] {
+		const auto &session = SessionManager::instance();
+		return session.isLoggedIn() && session.authGeneration() == authGeneration &&
+			session.userId() == userId && session.serverBaseUrl() == service;
+	};
+	const auto project = [catalog, owner, active, currentAccount] {
+		if (!catalog || !owner || !currentAccount() ||
+			(owner->state() != MeetingState::InMeeting &&
+			 owner->state() != MeetingState::Reconnecting)) return false;
+		const auto &detail = owner->meetingDetail();
+		const auto meetingId = owner->currentMeetingId();
+		if (meetingId.isEmpty()) return false;
+		if (*active && (*active)->meetingId == meetingId &&
+			(*active)->title == detail.meetingName &&
+			(*active)->creatorUserId == detail.creatorUserId &&
+			(*active)->hostUserId == detail.effectiveHostUserId() &&
+			(*active)->startTimeSeconds == detail.startTime) return false;
+		MeetingRecord record;
+		for (const auto &existing : catalog->upcomingState().meetings) {
+			if (existing.meetingId == meetingId) { record = existing; break; }
+		}
+		record.meetingId = meetingId;
+		record.title = detail.meetingName;
+		record.creatorUserId = detail.creatorUserId;
+		record.hostUserId = detail.effectiveHostUserId();
+		record.status = MeetingStatus::InProgress;
+		record.rawStatus = meetingStatusToWire(record.status);
+		record.startTimeSeconds = detail.startTime;
+		*active = record;
+		catalog->setActiveMeeting(record);
+		return true;
+	};
+	const auto refresh = [catalog, currentAccount] {
+		if (catalog && currentAccount()) catalog->refreshUpcoming();
+	};
+	const auto update = [project, refresh] {
+		if (project()) refresh();
+	};
+	connect(coordinator, &MeetingCoordinator::meetingJoinedSuccessfully, this,
+		[update](const QString &) { update(); });
+	connect(coordinator, &MeetingCoordinator::hostRoleChanged, this,
+		[update](const QString &, const QString &) { update(); });
+	// Metadata can arrive after the join signal (or be cleared on reconnect).
+	connect(coordinator, &MeetingCoordinator::meetingDetailUpdated, this,
+		[update](const MeetingDetail &) { update(); });
+	const auto finish = [catalog, active, currentAccount, refresh] {
+		if (!std::exchange(*active, std::nullopt) || !catalog || !currentAccount()) return;
+		catalog->clearActiveMeeting();
+		refresh();
+	};
+	connect(coordinator, &MeetingCoordinator::meetingLeft, this, finish);
+	connect(coordinator, &QObject::destroyed, this, finish);
 }
 
 void MeetingMainWindow::syncSchedule() {

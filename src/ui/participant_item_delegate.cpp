@@ -266,6 +266,18 @@ void ParticipantItemDelegate::drawMoreIcon(QPainter *painter, const QRect &rect)
 bool ParticipantItemDelegate::editorEvent(QEvent *event, QAbstractItemModel *model, const QStyleOptionViewItem &option, const QModelIndex &index) {
     if (!index.isValid()) return false;
 
+    if (event->type() == QEvent::MouseButtonPress) {
+        const auto *mouseEvent = static_cast<QMouseEvent *>(event);
+        if (mouseEvent->button() == Qt::LeftButton &&
+            (getMicRect(option.rect).contains(mouseEvent->pos()) ||
+             getCameraRect(option.rect).contains(mouseEvent->pos()) ||
+             getMoreRect(option.rect).contains(mouseEvent->pos()))) {
+            // Inline buttons must not select a row or start QListView's delayed
+            // EnsureVisible scroll. Execute the action only on release below.
+            return true;
+        }
+    }
+
     if (event->type() == QEvent::MouseButtonRelease) {
         auto *mouseEvent = static_cast<QMouseEvent *>(event);
         if (mouseEvent->button() == Qt::LeftButton) {

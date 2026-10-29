@@ -81,8 +81,9 @@ void ParticipantsSidebarWidget::setupUi() {
     _listView->setObjectName("ParticipantList");
     _listView->setModel(_proxyModel);
     _listView->setUniformItemSizes(true);
-    _listView->setLayoutMode(QListView::Batched);
-    _listView->setBatchSize(100);
+    // Keep the full scroll range during media-state relayouts. Batched layout
+    // temporarily reports only its first 100 rows and clamps a scrolled view.
+    _listView->setLayoutMode(QListView::SinglePass);
     _listView->setSelectionMode(QAbstractItemView::NoSelection);
     _listView->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
 

@@ -69,6 +69,9 @@ public:
     bool writersOpen() const { return writersOpen_; }
 
     void start(std::uint64_t nowMs);
+    // Session-strand entry point for an authenticated meeting-host update.
+    // The old authority supplies its final snapshot before the new one edits.
+    void setAuthority(std::string identity, std::uint64_t nowMs);
     Result propose(Command command, std::uint64_t nowMs);
     Result importImage(Asset asset, std::string commandId, std::string pageId,
                        bool replaceCurrent, std::uint64_t nowMs);
@@ -129,6 +132,7 @@ private:
     void appendAndBroadcast(CommitEntry entry);
     bool applyEntry(const CommitEntry &entry);
     void requestSync();
+    void finishAuthorityTransfer(std::uint64_t nowMs);
     void sendDescriptor(const std::vector<std::string> &destination);
     void sendRecovery(std::uint64_t fromSequence, const std::vector<std::string> &destination);
     void sendSnapshot(const std::vector<std::string> &destination);
@@ -152,6 +156,9 @@ private:
     CollaborationState state_ = CollaborationState::Synchronizing;
     bool transportReady_ = true;
     bool started_ = false;
+    std::string authorityTransferSource_;
+    bool authoritySnapshotReceived_ = false;
+    bool offeringAuthorityTransfer_ = false;
     bool locked_ = false;
     bool writersOpen_ = true;
     std::set<std::string> writers_;

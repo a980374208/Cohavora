@@ -82,6 +82,9 @@ public:
     void endMeeting(const QString &meetingId, ResultCallback<bool> callback,
                     HttpRequestContext context = {});
 
+    void setMeetingHost(const QString &meetingId, const QString &hostUserId,
+                        ResultCallback<bool> callback, HttpRequestContext context = {});
+
 signals:
     void tokenExpired();
     void userLoggedIn(const UserInfo &user);

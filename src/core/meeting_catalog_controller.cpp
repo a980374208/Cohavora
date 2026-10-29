@@ -6,6 +6,7 @@
 
 #include <QtCore/QPointer>
 
+#include <algorithm>
 #include <utility>
 
 namespace OpenMeeting {
@@ -93,6 +94,61 @@ bool MeetingCatalogController::refreshHistory() {
     return startListQuery(true);
 }
 
+MeetingList MeetingCatalogController::projectUpcomingMeetings(
+        const MeetingList &meetings, const RequestContext &context) const {
+    MeetingList projected = meetings;
+    if (_activeMeeting && isContextCurrent(_activeMeeting->context)) {
+        const auto &active = _activeMeeting->meeting;
+        const auto existing = std::find_if(projected.begin(), projected.end(),
+            [&](const MeetingRecord &meeting) { return meeting.meetingId == active.meetingId; });
+        auto merged = existing != projected.end() ? *existing : active;
+        // Room metadata owns the live identity/role fields. The catalog still
+        // supplies scheduling and settings that the room projection omits.
+        merged.hostUserId = active.hostUserId;
+        merged.status = active.status;
+        merged.rawStatus = active.rawStatus;
+        merged.title = active.title;
+        merged.creatorUserId = active.creatorUserId;
+        merged.startTimeSeconds = active.startTimeSeconds;
+        projected.erase(std::remove_if(projected.begin(), projected.end(),
+            [&](const MeetingRecord &meeting) { return meeting.meetingId == active.meetingId; }),
+            projected.end());
+        projected.push_back(std::move(merged));
+    }
+    projected.erase(std::remove_if(projected.begin(), projected.end(),
+        [&](const MeetingRecord &meeting) {
+            if (meeting.status != MeetingStatus::InProgress) return false;
+            const auto &host = meeting.hostUserId.isEmpty()
+                ? meeting.creatorUserId : meeting.hostUserId;
+            return host.isEmpty() || host != context.userId;
+        }), projected.end());
+    return projected;
+}
+
+void MeetingCatalogController::setActiveMeeting(const MeetingRecord &meeting) {
+    const auto context = captureContext();
+    if (!context || meeting.meetingId.isEmpty() || meeting.status != MeetingStatus::InProgress) return;
+    // Publish one coherent snapshot. Invalidating through the usual helper
+    // would emit before the host change and permit observers to reenter it.
+    ++_upcomingGeneration;
+    _activeMeeting = ActiveMeeting{*context, meeting};
+    _upcoming.meetings = projectUpcomingMeetings(_upcoming.meetings, *context);
+    _upcoming.refreshing = false;
+    _upcoming.hasSnapshot = true;
+    _upcoming.state = _upcoming.meetings.empty()
+        ? MeetingCatalogLoadState::Empty : MeetingCatalogLoadState::Ready;
+    _upcoming.error = {};
+    emit upcomingChanged();
+}
+
+void MeetingCatalogController::clearActiveMeeting() {
+    if (!_activeMeeting) return;
+    _activeMeeting.reset();
+    // Keep the last visible snapshot until the caller refreshes from the
+    // server; no known-meeting cache survives the room or account lifecycle.
+    invalidateUpcomingQuery();
+}
+
 bool MeetingCatalogController::startListQuery(bool history) {
     auto context = captureContext();
     auto &state = history ? _history : _upcoming;
@@ -130,10 +186,10 @@ bool MeetingCatalogController::startListQuery(bool history) {
             current.refreshing = false;
             current.error = error;
             if (ok) {
-                current.meetings = meetings;
+                current.meetings = history ? meetings : self->projectUpcomingMeetings(meetings, context);
                 current.hasSnapshot = true;
-                current.state = meetings.empty() ? MeetingCatalogLoadState::Empty
-                                                 : MeetingCatalogLoadState::Ready;
+                current.state = current.meetings.empty() ? MeetingCatalogLoadState::Empty
+                                                        : MeetingCatalogLoadState::Ready;
                 current.error = {};
             } else if (current.hasSnapshot) {
                 current.state = current.meetings.empty() ? MeetingCatalogLoadState::Empty
@@ -373,6 +429,7 @@ void MeetingCatalogController::handleAccountChange(bool reload) {
     _bookingGeneration.reset();
     _meetingWriteGenerations.clear();
     _upcomingRefreshPending = false;
+    _activeMeeting.reset();
     _upcoming = {};
     _history = {};
     _detail = {};
