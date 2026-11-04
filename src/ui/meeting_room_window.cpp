@@ -6693,7 +6693,35 @@ void MeetingRoomWindow::handleEndMeetingClicked() {
 			if (guard) guard->close();
 		} else if (box.clickedButton() == endBtn) {
 			beginLeaveTimingObservation();
-			_coordinator->leaveMeetingAsync(true);
+			auto coordinator = _coordinator;
+			QPointer<MeetingRoomWindow> guard(this);
+			// Hide before retiring presentation; neither HTTP nor native cleanup
+			// should keep the host on an empty meeting window.
+			hide();
+			stopLiveKitSession(false);
+			if (!guard) return;
+			coordinator->leaveMeetingAsync(true,
+				[owner = QPointer<OpenMeeting::MeetingCoordinator>(coordinator.get())](
+					bool ok, bool, const OpenMeeting::HttpError &) {
+				if (ok) return;
+				// A host transfer can reject the end request before it starts.
+				if (owner && (owner->state() == OpenMeeting::MeetingState::InMeeting ||
+					owner->state() == OpenMeeting::MeetingState::Reconnecting))
+					owner->leaveMeetingAsync(false);
+				auto *notice = new QMessageBox(QMessageBox::Warning,
+					QCoreApplication::translate("MeetingUI", "End Meeting"),
+					QCoreApplication::translate("MeetingUI", "Could not end the meeting. Please try again."),
+					QMessageBox::Ok, nullptr);
+				notice->setObjectName(QStringLiteral("meetingEndError"));
+				notice->setAttribute(Qt::WA_DeleteOnClose);
+				notice->setAttribute(Qt::WA_QuitOnClose, false);
+				notice->setWindowModality(Qt::NonModal);
+				AppTheme::setTone(*notice, AppTheme::Tone::Light);
+				notice->show();
+				notice->raise();
+				notice->activateWindow();
+			});
+			if (guard) guard->close();
 		}
 	} else {
 		QMessageBox box(QMessageBox::Question,

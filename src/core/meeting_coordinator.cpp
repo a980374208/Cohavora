@@ -3437,29 +3437,32 @@ void MeetingCoordinator::recoverEncryptionKey(std::shared_ptr<livekit::MeetingSe
     }
 }
 
-void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
+void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll, ResultCallback<bool> endResult) {
     if (!endMeetingForAll) {
         finishLeavingMeeting(false);
         return;
     }
-    // Ending the room is a server transaction. A failed request must leave the
-    // host in the meeting so they can retry or explicitly choose to leave.
+    // The server transaction outlives local departure. Its result belongs to
+    // the requesting account, not the Room/window that is being retired.
     if (_endMeetingPending || _hostTransferPending || !isHost() ||
         (_state != MeetingState::InMeeting && _state != MeetingState::Reconnecting) ||
-        _currentMeetingId.isEmpty() || !_sessionManager.isLoggedIn()) return;
+        _currentMeetingId.isEmpty() || !_sessionManager.isLoggedIn()) {
+        if (endResult && !_sessionInvalidated && _sessionManager.isLoggedIn())
+            endResult(false, false, {});
+        return;
+    }
     _endMeetingPending = true;
+    QPointer<SessionManager> session(&_sessionManager);
+    const auto authGeneration = _sessionManager.authGeneration();
     const auto generation = _admissionGeneration;
     const auto sessionGeneration = _nextSessionGeneration;
     const auto meetingId = _currentMeetingId;
     const auto context = admissionHttpContext();
     QPointer<MeetingCoordinator> owner(this);
-    auto completed = [owner, generation, sessionGeneration, meetingId, context](
-        bool ok, bool, const HttpError &error) {
-        if (!owner || owner->_admissionGeneration != generation ||
-            owner->_nextSessionGeneration != sessionGeneration ||
-            owner->_currentMeetingId != meetingId || !owner->_endMeetingPending ||
-            owner->_sessionInvalidated) return;
-        owner->_endMeetingPending = false;
+    auto completed = [owner, session, authGeneration, sessionGeneration, meetingId, context,
+                      delivered = std::make_shared<bool>(false), endResult = std::move(endResult)](
+        bool ok, bool result, const HttpError &error) {
+        if (std::exchange(*delivered, true)) return;
         livekit::diagnostic::Event event;
         event.kind = livekit::diagnostic::EventKind::MeetingBackendNotificationCompleted;
         event.thread_role = livekit::diagnostic::ThreadRole::Ui;
@@ -3473,20 +3476,32 @@ void MeetingCoordinator::leaveMeetingAsync(bool endMeetingForAll) {
         event.business_code = error.businessCode;
         if (!ok) event.error_code = livekit::diagnostic::ErrorCode::Unknown;
         livekit::diagnostic::EmitBusinessEvent(event);
-        if (!ok) {
+        if (!session || !session->isLoggedIn() || session->isSessionInvalidating() ||
+            session->authGeneration() != authGeneration) return;
+        if (endResult) {
+            endResult(ok, result, error);
+        } else if (!ok && owner && owner->_nextSessionGeneration == sessionGeneration &&
+                   owner->_currentMeetingId == meetingId) {
             emit owner->errorOccurred(QCoreApplication::translate("MeetingUI", "End Meeting"),
                 QCoreApplication::translate("MeetingUI", "Could not end the meeting. Please try again."));
-            return;
         }
-        owner->finishLeavingMeeting(true);
     };
-    if (_admissionBackend.endMeetingWithContext)
-        _admissionBackend.endMeetingWithContext(meetingId, std::move(completed), context);
+    // A synchronous result can replace or delete this coordinator too.
+    const auto contextualRequest = _admissionBackend.endMeetingWithContext;
+    const auto request = _admissionBackend.endMeeting;
+    if (contextualRequest)
+        contextualRequest(meetingId, std::move(completed), context);
     else
-        _admissionBackend.endMeeting(meetingId, std::move(completed));
+        request(meetingId, std::move(completed));
+    if (owner && owner->_admissionGeneration == generation &&
+        owner->_nextSessionGeneration == sessionGeneration) owner->finishLeavingMeeting(true);
 }
 
 void MeetingCoordinator::finishLeavingMeeting(bool endedForAll) {
+    // DeleteRoom can deliver OnDisconnected before the HTTP end response.
+    // Preserve the admission generation owned by that cleanup continuation;
+    // a second leave must not revoke its eventual Idle/meetingLeft delivery.
+    if (_state == MeetingState::Leaving) return;
     const auto leaveContext = admissionHttpContext();
     const auto leavingGeneration = _nextSessionGeneration;
     invalidateAdmission();

@@ -182,8 +182,9 @@ public:
     void refreshEncryptionMediaStatus();
     bool requiresEncryption() const { return _admissionEncryption.mode == livekit::MeetingEncryptionMode::Required; }
 
-    // 优雅退会管理 (普通离开 vs 主持人结束全员会议)
-    void leaveMeetingAsync(bool endMeetingForAll = false);
+    // Local cleanup starts immediately. End results may outlive this owner;
+    // the optional callback must not capture the meeting window.
+    void leaveMeetingAsync(bool endMeetingForAll = false, ResultCallback<bool> endResult = {});
     void observePageTiming(std::shared_ptr<livekit::diagnostic::UiTimingMeasurement> sample) { _pageTiming = std::move(sample); }
     auto pageTiming() const { return _pageTiming; }
     auto joinTiming() const { return _joinTiming; }
