@@ -6496,6 +6496,11 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		}
 		showDepartureNotice(title, message, QMessageBox::Critical);
 	});
+	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingDisconnected,
+	        this, [this] {
+		stopLiveKitSession(false);
+		close();
+	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::meetingLeft,
 	        this, [this]() {
 		invalidateCameraCompletion();

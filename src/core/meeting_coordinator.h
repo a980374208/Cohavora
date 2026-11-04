@@ -298,6 +298,9 @@ signals:
     void encryptionMediaStatusChanged(const livekit::MediaEncryptionStatus& status);
     void errorOccurred(const QString &title, const QString &message);
     void meetingJoinedSuccessfully(const QString &meetingId);
+    // Terminal Room disconnect has revoked the session. Presentation may close
+    // while the shutdown service retains and drains the native owners.
+    void meetingDisconnected();
     void meetingLeft();
     // LiveKit 服务端主动断开（例如同一 identity 重复进入同一房间）。
     // UI 仅消费客户端枚举，不依赖 protobuf 协议细节。
@@ -557,6 +560,9 @@ private:
     MediaPreferences _mediaPrefs;
     MeetingDetail _meetingDetail;
     MeetingRoomInfo _roomInfo;
+    // First authoritative business room for this session. Room updates may
+    // otherwise overwrite it with an empty room recreated by a stale token.
+    QString _businessRoomSid;
 
     bool _audioMuted = false;
     bool _videoEnabled = true;

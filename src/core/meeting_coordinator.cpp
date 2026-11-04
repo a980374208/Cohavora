@@ -1820,6 +1820,15 @@ public:
                     if (!stillStopped() || owner->_state != MeetingState::Idle) return;
                     emit owner->meetingLeft();
                 });
+                if (owner && owner->_nextSessionGeneration == generation &&
+                    owner->_admissionGeneration == admissionGeneration &&
+                    !owner->_sessionRunning.load(std::memory_order_acquire) &&
+                    !owner->_sessionInvalidated &&
+                    (owner->_state == MeetingState::Leaving || owner->_state == MeetingState::Idle)) {
+                    // Window lifetime must not depend on a native join. Keep
+                    // meetingLeft as the fully drained business terminal.
+                    emit owner->meetingDisconnected();
+                }
             }
         });
     }
@@ -1876,6 +1885,23 @@ public:
                 return;
             }
             const auto nativeGeneration = owner->_nativeRoomGeneration;
+            if (owner->_room && !owner->_businessRoomSid.isEmpty()) {
+                const auto info = owner->_room->room_info();
+                if (!info.sid.empty() && QString::fromStdString(info.sid) != owner->_businessRoomSid &&
+                    info.metadata.empty()) {
+                    // DeleteRoom can race transport recovery: an old token
+                    // creates a fresh, metadata-free SFU room with the same
+                    // name. It is not the admitted business meeting.
+                    owner->finishLeavingMeeting(false);
+                    if (owner && owner->_nextSessionGeneration == generation &&
+                        !owner->_sessionRunning.load(std::memory_order_acquire) &&
+                        !owner->_sessionInvalidated &&
+                        (owner->_state == MeetingState::Leaving || owner->_state == MeetingState::Idle)) {
+                        emit owner->meetingDisconnected();
+                    }
+                    return;
+                }
+            }
             owner->_startupReconnectPending = false;
             owner->processMediaRecovery(true);
             if (!owner->tryCommitOperationalStateOnUiThread(
@@ -3715,6 +3741,7 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
     owner->_startupCommitted = false;
     owner->_startupReconnectPending = false;
     owner->_startupListenOnly = false;
+    owner->_businessRoomSid.clear();
     auto roomStartHook = owner->_roomStartHook;
     if (roomStartHook) {
         roomStartHook(url, token);
@@ -5314,6 +5341,9 @@ void MeetingCoordinator::parseRoomMetadata(const std::string &metadata) {
     }
     const auto parsed = ParseOpenMeetingMetadata(metadata);
     if (parsed.state != OpenMeetingMetadataState::Valid) return;
+    if (_businessRoomSid.isEmpty() && parsed.detail.meetingId == _currentMeetingId) {
+        _businessRoomSid = _roomInfo.sid;
+    }
     const auto previousHost = _meetingDetail.effectiveHostUserId();
     _meetingDetail = parsed.detail;
     if (previousHost != _meetingDetail.effectiveHostUserId()) {
