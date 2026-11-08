@@ -3,21 +3,67 @@
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDir>
 #include <QtCore/QLibraryInfo>
+#include <QtCore/QSettings>
 #include <QtCore/QTranslator>
 #include <QtCore/QVariant>
 
 namespace MeetingUI::AppTranslation {
-QLocale startupLocale(const QStringList &arguments) {
+namespace {
+constexpr auto kLanguageSetting = "ui/language";
+}
+
+QString languageId(Language language) {
+	switch (language) {
+	case Language::Chinese: return QStringLiteral("zh_CN");
+	case Language::English: return QStringLiteral("en_US");
+	case Language::System: return QStringLiteral("system");
+	}
+	return QStringLiteral("system");
+}
+
+Language languageFromId(const QString &id) {
+	if (id == QStringLiteral("zh_CN")) return Language::Chinese;
+	if (id == QStringLiteral("en_US")) return Language::English;
+	return Language::System;
+}
+
+Language selectedLanguage() {
+	return languageFromId(QSettings().value(QString::fromLatin1(kLanguageSetting)).toString());
+}
+
+void setLanguage(Language language) {
+	QSettings().setValue(QString::fromLatin1(kLanguageSetting), languageId(language));
+}
+
+QLocale localeForLanguage(Language language, const QLocale &systemLocale) {
+	if (language == Language::System) {
+		// Prefer the OS display language over its regional formatting locale.
+		const auto uiLanguages = systemLocale.uiLanguages();
+		const auto uiLocale = uiLanguages.isEmpty() ? systemLocale : QLocale(uiLanguages.front());
+		language = uiLocale.language() == QLocale::Chinese ? Language::Chinese : Language::English;
+	}
+	// All Chinese variants use the available Simplified Chinese catalog.
+	return language == Language::Chinese
+		? QLocale(QLocale::Chinese, QLocale::China)
+		: QLocale(QLocale::English, QLocale::UnitedStates);
+}
+
+QLocale startupLocale(const QStringList &arguments, const QLocale &systemLocale) {
+	const auto overrideLocale = [&](const QString &id) {
+		if (id == QStringLiteral("system")) return localeForLanguage(Language::System, systemLocale);
+		return localeForLanguage(QLocale(id).language() == QLocale::Chinese
+			? Language::Chinese : Language::English, systemLocale);
+	};
 	for (int i = 1; i < arguments.size(); ++i) {
 		const auto &argument = arguments.at(i);
 		if (argument.startsWith(QStringLiteral("--language="))) {
-			return QLocale(argument.mid(11));
+			return overrideLocale(argument.mid(11));
 		}
 		if (argument == QStringLiteral("--language") && i + 1 < arguments.size()) {
-			return QLocale(arguments.at(i + 1));
+			return overrideLocale(arguments.at(i + 1));
 		}
 	}
-	return QLocale(QLocale::Chinese, QLocale::China);
+	return localeForLanguage(selectedLanguage(), systemLocale);
 }
 
 void install(QCoreApplication &application, const QLocale &locale,

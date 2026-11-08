@@ -2,6 +2,7 @@
 #include <QtCore/QCoreApplication>
 #include "src/ui/app_branding.h"
 #include "src/ui/app_theme.h"
+#include "src/ui/app_translation.h"
 #include "src/ui/app_icons.h"
 #include "src/ui/settings_dialog.h"
 #include "src/ui/screen_share_quality_controls.h"
@@ -24,6 +25,7 @@
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainterPath>
 #include <QtGui/QRegion>
+#include <QtGui/QWheelEvent>
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QButtonGroup>
 #include <QtWidgets/QCheckBox>
@@ -184,6 +186,13 @@ SettingsDialog::SettingsDialog(
 		this, [this](int index) {
 			if (index >= 0) AppTheme::setTheme(AppTheme::themeFromId(_themeCombo->itemData(index).toString()));
 		});
+	_languageCombo->setCurrentIndex(_languageCombo->findData(
+		AppTranslation::languageId(AppTranslation::selectedLanguage())));
+	connect(_languageCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
+		this, [this](int index) {
+			if (index >= 0) AppTranslation::setLanguage(
+				AppTranslation::languageFromId(_languageCombo->itemData(index).toString()));
+		});
 	setPreferences(_session.mediaPreferences());
 	syncSecurityControls();
 	connectPreferenceControls();
@@ -249,6 +258,28 @@ void SettingsDialog::cancelDeviceDiscovery() {
 }
 
 bool SettingsDialog::eventFilter(QObject *watched, QEvent *event) {
+	if (event->type() == QEvent::Wheel) {
+		if (auto *combo = qobject_cast<QComboBox *>(watched)) {
+			// Scroll the enclosing page instead of changing a setting, including
+			// focused combos. At an inner boundary, try the outer scroll area.
+			const auto *wheel = static_cast<QWheelEvent *>(event);
+			event->ignore();
+			for (auto *parent = combo->parentWidget(); parent; parent = parent->parentWidget()) {
+				if (auto *scroll = qobject_cast<QScrollArea *>(parent)) {
+					auto *viewport = scroll->viewport();
+					QWheelEvent forwarded(viewport->mapFromGlobal(wheel->globalPosition().toPoint()),
+						wheel->globalPosition(), wheel->pixelDelta(), wheel->angleDelta(),
+						wheel->buttons(), wheel->modifiers(), wheel->phase(), wheel->inverted(), wheel->source());
+					QCoreApplication::sendEvent(viewport, &forwarded);
+					if (forwarded.isAccepted()) {
+						event->accept();
+						break;
+					}
+				}
+			}
+			return true;
+		}
+	}
 	if (watched == _e2eeKey && event->type() == QEvent::KeyPress) {
 		const auto *keyEvent = static_cast<QKeyEvent *>(event);
 		if (keyEvent->key() == Qt::Key_Return || keyEvent->key() == Qt::Key_Enter) {
@@ -401,6 +432,9 @@ void SettingsDialog::buildUi() {
 		}
 	});
 	_navigation->setCurrentRow(static_cast<int>(Page::General));
+	for (auto *combo : findChildren<QComboBox *>()) {
+		combo->installEventFilter(this);
+	}
 	for (auto *label : findChildren<QLabel *>()) {
 		if (label->maximumHeight() == QWIDGETSIZE_MAX) label->setWordWrap(true);
 	}
@@ -431,6 +465,27 @@ QWidget *SettingsDialog::buildGeneralPage() {
 	themeHint->setObjectName(QStringLiteral("hintLabel"));
 	themeHint->setWordWrap(true);
 	layout->addWidget(themeHint);
+	layout->addSpacing(12);
+
+	auto *languageLabel = makeSectionTitle(QCoreApplication::translate("MeetingUI", "Language"), content);
+	layout->addWidget(languageLabel);
+	_languageCombo = createAccessibleComboBox(content);
+	_languageCombo->setObjectName(QStringLiteral("settingsLanguageCombo"));
+	_languageCombo->setAccessibleName(QCoreApplication::translate("MeetingUI", "Language"));
+	_languageCombo->addItem(QCoreApplication::translate("MeetingUI", "Follow system"),
+		AppTranslation::languageId(AppTranslation::Language::System));
+	_languageCombo->addItem(QCoreApplication::translate("MeetingUI", "Simplified Chinese"),
+		AppTranslation::languageId(AppTranslation::Language::Chinese));
+	_languageCombo->addItem(QCoreApplication::translate("MeetingUI", "English"),
+		AppTranslation::languageId(AppTranslation::Language::English));
+	AppTheme::styleChoiceControls(*_languageCombo, AppTheme::Tone::Light);
+	languageLabel->setBuddy(_languageCombo);
+	layout->addWidget(_languageCombo);
+	auto *languageHint = new QLabel(QCoreApplication::translate("MeetingUI",
+		"Language changes take effect after restarting the application."), content);
+	languageHint->setObjectName(QStringLiteral("hintLabel"));
+	languageHint->setWordWrap(true);
+	layout->addWidget(languageHint);
 	layout->addSpacing(12);
 
 	_generalCamera = new QCheckBox(QCoreApplication::translate("MeetingUI", "Enable camera on joining"), content);

@@ -152,10 +152,10 @@ cmake --build --preset release --parallel 2
 .\out\build\windows-vs2026-release\src\app\Release\Cohavora.exe
 ```
 
-需要英文界面时：
+使用 HTTP 和服务端交互时，需要携带 `--debug` 启动：
 
 ```powershell
-.\out\build\windows-vs2026-release\src\app\Release\Cohavora.exe --language en_US
+.\out\build\windows-vs2026-release\src\app\Release\Cohavora.exe --debug
 ```
 
 ## 加入第一场会议

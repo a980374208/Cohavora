@@ -4,6 +4,26 @@
 <context>
     <name>MeetingUI</name>
     <message>
+        <source>Language</source>
+        <translation>语言</translation>
+    </message>
+    <message>
+        <source>Follow system</source>
+        <translation>跟随系统</translation>
+    </message>
+    <message>
+        <source>Simplified Chinese</source>
+        <translation>简体中文</translation>
+    </message>
+    <message>
+        <source>English</source>
+        <translation>English</translation>
+    </message>
+    <message>
+        <source>Language changes take effect after restarting the application.</source>
+        <translation>语言修改将在重启应用后生效。</translation>
+    </message>
+    <message>
         <source>Host permissions are synchronizing. Please try again shortly.</source>
         <translation>主持人权限正在同步，请稍后重试。</translation>
     </message>

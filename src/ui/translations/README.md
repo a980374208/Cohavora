@@ -2,9 +2,11 @@
 
 界面源语言为英文，静态文案使用 `QCoreApplication::translate("MeetingUI", "English source text")`。完整句子使用 `%1` 等占位符，中文译文维护在 `cohavora_zh_CN.ts` 中。
 
-启动时默认使用 `zh_CN` 并加载中文翻译。中文 TS 编译为 QM 后嵌入客户端，无需手动复制应用译文文件。
+启动时默认跟随系统显示语言：中文（含繁体中文系统）使用简体中文，其余语言使用英文。中文 TS 编译为 QM 后嵌入客户端，无需手动复制应用译文文件。
 
-使用 `--language=en_US` 或 `--language en_US` 可查看英文源文案；`--language=zh_CN` 可显式选择简体中文，重启生效。
+在“设置 → 通用 → 语言”中可选择“跟随系统 / 简体中文 / English”，偏好保存在 `ui/language`，重启应用后生效。缺失或无效的偏好按“跟随系统”处理。
+
+使用 `--language=en_US` 或 `--language en_US` 可查看英文源文案；`--language=zh_CN` 可显式选择简体中文；`--language=system` 跟随系统。这些参数仅覆盖当次启动，不修改已保存的偏好。优先级为命令行、已保存偏好、系统显示语言。
 
 更新翻译条目：
 

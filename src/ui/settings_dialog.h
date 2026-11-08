@@ -142,6 +142,7 @@ private:
 	QStackedWidget *_pages = nullptr;
 
 	QComboBox *_themeCombo = nullptr;
+	QComboBox *_languageCombo = nullptr;
 	QCheckBox *_generalCamera = nullptr;
 	QCheckBox *_generalMicrophone = nullptr;
 	QCheckBox *_generalSpeaker = nullptr;

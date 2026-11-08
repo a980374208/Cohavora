@@ -29,7 +29,8 @@ void ParticipantsSidebarWidget::setupUi() {
     setObjectName("ParticipantsSidebar");
 
     auto *mainLayout = new QVBoxLayout(this);
-    mainLayout->setContentsMargins(2, 0, 0, 0);
+    // Keep the 6 DIP scrollbar outside the meeting window's 8 DIP resize band.
+    mainLayout->setContentsMargins(2, 0, 8, 0);
     mainLayout->setSpacing(0);
 
     // 1. Header
