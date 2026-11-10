@@ -19,6 +19,7 @@ bool SameViewport(const ViewportIntent& left, const ViewportIntent& right) {
     return left.coordinator_session == right.coordinator_session &&
         left.catalog_revision == right.catalog_revision &&
         left.mode == right.mode && left.page == right.page &&
+        left.resolution_match == right.resolution_match &&
         left.speaker_layout == right.speaker_layout &&
         left.speaking_only == right.speaking_only &&
         left.page_size == right.page_size &&
@@ -85,24 +86,40 @@ bool SmallerLayer(const PublishedVideoLayer& left,
 
 std::optional<PublishedVideoLayer> SelectPublishedLayer(
     const std::vector<PublishedVideoLayer>& layers,
-    VideoSeatRole role, uint32_t width, uint32_t height) {
+    VideoSeatRole role, uint32_t width, uint32_t height,
+    VideoResolutionMatch mode) {
     if (layers.size() == 1) return layers.front();
     const uint32_t long_limit = role == VideoSeatRole::Main ? 3840 : 2560;
     const uint32_t short_limit = role == VideoSeatRole::Main ? 2160 : 1440;
     const PublishedVideoLayer* nearest = nullptr;
     const PublishedVideoLayer* boundary = nullptr;
+    const bool upward = mode == VideoResolutionMatch::Up ||
+        (mode == VideoResolutionMatch::Auto && role == VideoSeatRole::Main);
+    // Compare relative width/height error with a common denominator W*H.
+    // Integer scores make exact ties deterministic, including portrait video.
+    const auto distance = [width, height](const PublishedVideoLayer& layer) {
+        const auto dx = layer.width > width ? layer.width - width : width - layer.width;
+        const auto dy = layer.height > height ? layer.height - height : height - layer.height;
+        return uint64_t(dx) * height + uint64_t(dy) * width;
+    };
     for (const auto& layer : layers) {
         if (std::max(layer.width, layer.height) > long_limit ||
             std::min(layer.width, layer.height) > short_limit) continue;
-        const bool main = role == VideoSeatRole::Main;
-        if (!boundary || (main ? SmallerLayer(*boundary, layer)
+        if (mode == VideoResolutionMatch::Nearest) {
+            if (!nearest || distance(layer) < distance(*nearest) ||
+                (distance(layer) == distance(*nearest) && SmallerLayer(layer, *nearest))) {
+                nearest = &layer;
+            }
+            continue;
+        }
+        if (!boundary || (upward ? SmallerLayer(*boundary, layer)
                                : SmallerLayer(layer, *boundary))) {
             boundary = &layer;
         }
-        const bool fits = main
+        const bool fits = upward
             ? layer.width >= width && layer.height >= height
             : layer.width <= width && layer.height <= height;
-        if (fits && (!nearest || (main ? SmallerLayer(layer, *nearest)
+        if (fits && (!nearest || (upward ? SmallerLayer(layer, *nearest)
                                        : SmallerLayer(*nearest, layer)))) {
             nearest = &layer;
         }
@@ -1076,7 +1093,7 @@ void VideoDemandPolicy::AddSeat(VideoDemandPlan& plan,
             seat.subscription_width = seat.width;
             seat.subscription_height = seat.height;
         } else if (const auto selected = SelectPublishedLayer(
-                       layers, role, seat.width, seat.height)) {
+                       layers, role, seat.width, seat.height, viewport_.resolution_match)) {
             seat.subscription_width = selected->width;
             seat.subscription_height = selected->height;
             seat.selected_layer_quality = selected->quality;

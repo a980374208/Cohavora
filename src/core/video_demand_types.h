@@ -2,6 +2,7 @@
 
 #include "participant_event.h"
 #include "video_capacity.h"
+#include "video_resolution_match.h"
 
 #include <cstdint>
 #include <optional>
@@ -92,6 +93,7 @@ struct ViewportIntent {
     uint64_t view_revision = 0;
     uint64_t catalog_revision = 0;
     VideoLayoutMode mode = VideoLayoutMode::Auto;
+    VideoResolutionMatch resolution_match = VideoResolutionMatch::Auto;
     SpeakerLayout speaker_layout = SpeakerLayout::Right;
     bool speaking_only = false;
     uint32_t page = 0;

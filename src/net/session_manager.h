@@ -10,6 +10,7 @@
 #include <optional>
 #include <vector>
 #include "src/net/credential_store.h"
+#include "src/core/video_resolution_match.h"
 #include "src/net/http_types.h"
 #include "src/net/openmeeting_http_client.h"
 
@@ -46,6 +47,7 @@ enum class VideoMirrorMode {
 QString normalizeVideoCodecPreference(const QString &codec);
 
 struct MediaPreferences {
+    livekit::VideoResolutionMatch receiveResolutionMatch = livekit::VideoResolutionMatch::Auto;
     bool enableMicrophone = true;
     bool enableSpeaker = true;
     bool enableVideo = false;

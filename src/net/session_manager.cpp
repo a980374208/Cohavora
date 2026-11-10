@@ -24,7 +24,7 @@ constexpr auto kScreenShareE2ee = "security/screenShareE2ee";
 constexpr auto kMeetingDetailsE2ee = "security/meetingDetailsE2ee";
 constexpr auto kAllMeetingsE2ee = "security/allMeetingsE2ee";
 constexpr int kCurrentSettingsMigrationVersion = 1;
-constexpr std::array<const char *, 26> kMigratedSettingsKeys = {
+constexpr std::array<const char *, 27> kMigratedSettingsKeys = {
     "network/serverBaseUrl",
     "media/enableMicrophone",
     "media/enableSpeaker",
@@ -42,6 +42,7 @@ constexpr std::array<const char *, 26> kMigratedSettingsKeys = {
     "media/screenShareVideoCodec",
     "media/screenShareResolution",
     "media/screenShareFps",
+    "media/receiveResolutionMatch",
     "media/videoCaptureWidth",
     "media/videoCaptureHeight",
     "media/videoCaptureFps",
@@ -204,6 +205,8 @@ QString SessionManager::nickname() const {
 
 void SessionManager::setMediaPreferences(const MediaPreferences &prefs) {
     _mediaPrefs = prefs;
+    _mediaPrefs.receiveResolutionMatch = livekit::ParseVideoResolutionMatch(
+        livekit::VideoResolutionMatchName(_mediaPrefs.receiveResolutionMatch));
     _mediaPrefs.cameraVideoCodec = normalizeVideoCodecPreference(
         _mediaPrefs.cameraVideoCodec);
     _mediaPrefs.screenShareVideoCodec = normalizeVideoCodecPreference(
@@ -608,6 +611,8 @@ void SessionManager::loadFromSettings() {
         static_cast<int>(livekit::ScreenShareResolution::Auto),
         static_cast<int>(livekit::ScreenShareResolution::P2160));
     _mediaPrefs.screenShareFps = _settings->value("media/screenShareFps", 20).toInt();
+    _mediaPrefs.receiveResolutionMatch = livekit::ParseVideoResolutionMatch(
+        _settings->value("media/receiveResolutionMatch", QStringLiteral("auto")).toString().toStdString());
     if (_mediaPrefs.screenShareFps != 15 && _mediaPrefs.screenShareFps != 20 && _mediaPrefs.screenShareFps != 30)
         _mediaPrefs.screenShareFps = 20;
     _mediaPrefs.videoCaptureFps =
@@ -671,6 +676,8 @@ void SessionManager::saveToSettings() {
     _settings->setValue("media/screenShareVideoCodec", _mediaPrefs.screenShareVideoCodec);
     _settings->setValue("media/screenShareResolution", _mediaPrefs.screenShareResolution);
     _settings->setValue("media/screenShareFps", _mediaPrefs.screenShareFps);
+    _settings->setValue("media/receiveResolutionMatch",
+        QString::fromLatin1(livekit::VideoResolutionMatchName(_mediaPrefs.receiveResolutionMatch)));
     _settings->setValue("media/videoCaptureWidth", _mediaPrefs.videoCaptureWidth);
     _settings->setValue("media/videoCaptureHeight", _mediaPrefs.videoCaptureHeight);
     _settings->setValue("media/videoCaptureFps", _mediaPrefs.videoCaptureFps);

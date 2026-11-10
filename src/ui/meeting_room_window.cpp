@@ -222,6 +222,7 @@ bool SameViewportIntentContent(const livekit::ViewportIntent &left,
 		return a.has_value() == b.has_value() && (!a || *a == *b);
 	};
 	return left.mode == right.mode && left.page == right.page &&
+		left.resolution_match == right.resolution_match &&
 		left.page_size == right.page_size &&
 		left.speaker_layout == right.speaker_layout &&
 		left.speaking_only == right.speaking_only &&
@@ -4210,6 +4211,7 @@ void MeetingRoomWindow::bindMicrophoneCaptureState() {
 void MeetingRoomWindow::setupAudioPreferencesBinding(
 		OpenMeeting::SessionManager &sessionManager) {
 	applyAudioProcessingPreferences(sessionManager.mediaPreferences());
+	scheduleViewportIntent(true);
 	if (_audioPreferencesBound) return;
 	_audioPreferencesBound = true;
 	if (_bottomBar) {
@@ -4221,6 +4223,9 @@ void MeetingRoomWindow::setupAudioPreferencesBinding(
 			previousMicrophone = sessionManager.mediaPreferences().microphoneDeviceId,
 			previousSpeaker = sessionManager.mediaPreferences().speakerDeviceId]
 		(const OpenMeeting::MediaPreferences &preferences) mutable {
+			// Submit before device-switch branches, which may return on failure.
+			// Unchanged video preferences are filtered by viewport deduplication.
+			scheduleViewportIntent(true);
 			applyAudioProcessingPreferences(preferences);
 			if (previousMicrophone != preferences.microphoneDeviceId) {
 				previousMicrophone = preferences.microphoneDeviceId;
@@ -5251,6 +5256,9 @@ void MeetingRoomWindow::submitViewportIntent() {
 	if (_topBar) _topBar->setLayoutSelection(_viewMode, _speakerLayout);
 	if (!_coordinator || !_stageContainer || _closeRequested) return;
 	livekit::ViewportIntent intent;
+	if (_cameraSessionManager) {
+		intent.resolution_match = _cameraSessionManager->mediaPreferences().receiveResolutionMatch;
+	}
 	switch (_viewMode) {
 	case VideoViewMode::Auto: intent.mode = livekit::VideoLayoutMode::Auto; break;
 	case VideoViewMode::Grid: intent.mode = livekit::VideoLayoutMode::Grid; break;

@@ -161,6 +161,45 @@ void populateVideoCodecChoices(QComboBox *combo) {
 	}
 }
 
+QString receiveResolutionMatchHelp(livekit::VideoResolutionMatch mode) {
+	switch (mode) {
+	case livekit::VideoResolutionMatch::Up:
+		return QCoreApplication::translate("MeetingUI",
+			"Selects the smallest available layer whose width and height both meet or exceed the display demand, reducing blur from enlarging a lower-resolution image.\n\n"
+			"Example: with 180p, 360p and 720p layers, a display demand of about 500p selects 720p.\n\n"
+			"Usually uses more bandwidth and decoding resources. If no layer is large enough, uses the highest layer within the allowed limits. The example assumes matching aspect ratios.");
+	case livekit::VideoResolutionMatch::Down:
+		return QCoreApplication::translate("MeetingUI",
+			"Selects the largest available layer whose width and height both stay within the display demand, avoiding unnecessarily high resolution for a small view.\n\n"
+			"Example: with 180p, 360p and 720p layers, a display demand of about 500p selects 360p.\n\n"
+			"Usually saves bandwidth and decoding resources, but enlargement may look softer. If no layer is small enough, uses the lowest layer within the allowed limits. The example assumes matching aspect ratios.");
+	case livekit::VideoResolutionMatch::Nearest:
+		return QCoreApplication::translate("MeetingUI",
+			"Compares each layer's relative width and height differences from the display demand and selects the closest layer. Equal distances prefer the lower resolution.\n\n"
+			"Example: with 180p, 360p and 720p layers of the same aspect ratio:\n"
+			"About 500p needed → selects 360p\nAbout 600p needed → selects 720p\n540p needed → equal distances, selects 360p\n\n"
+			"Balances clarity and resource usage. The selected layer changes with the display size.");
+	default:
+		return QCoreApplication::translate("MeetingUI",
+			"Chooses the matching direction according to the view's role.\n\n"
+			"• Main views and detached screen-share windows match up to prioritize clarity.\n"
+			"• Gallery tiles, sidebar thumbnails and picture-in-picture thumbnails match down to save bandwidth and decoding resources.\n\n"
+			"This is the default behavior. Changing the layout or display size recalculates the receiving layer.");
+	}
+}
+
+QString resolutionMatchToolTip(const QString &title, const QString &description) {
+	auto body = description.toHtmlEscaped();
+	body.replace(QStringLiteral("\n\n"), QStringLiteral("</p><p>"));
+	body.replace(QLatin1Char('\n'), QStringLiteral("<br/>"));
+	return QStringLiteral("<qt><b>%1</b><p>%2</p></qt>").arg(title.toHtmlEscaped(), body);
+}
+
+void syncResolutionMatchHelp(QComboBox *combo) {
+	combo->setToolTip(combo->currentData(Qt::ToolTipRole).toString());
+	combo->setAccessibleDescription(combo->currentData(Qt::AccessibleDescriptionRole).toString());
+}
+
 } // namespace
 
 SettingsDialog::SettingsDialog(
@@ -589,6 +628,51 @@ QWidget *SettingsDialog::buildVideoPage() {
     for (int fps : {15, 20, 30}) _screenShareFpsCombo->addItem(QString::number(fps) + " FPS", fps);
     layout->addWidget(_screenShareFpsCombo);
 
+	layout->addWidget(makeSectionTitle(
+		QCoreApplication::translate("MeetingUI", "Receive quality"), content));
+	const auto matchLabel = QCoreApplication::translate("MeetingUI", "Simulcast resolution matching");
+	auto *matchTitle = new QLabel(matchLabel + QStringLiteral("  ⓘ"), content);
+	matchTitle->setObjectName(QStringLiteral("receiveResolutionMatchLabel"));
+	matchTitle->setAccessibleName(matchLabel);
+	const auto generalHelp = QCoreApplication::translate("MeetingUI",
+		"Selects a receiving layer from the resolutions published by the other participant, using the actual display size and screen scaling.\n\n"
+		"Applies to remote cameras and screen shares, including detached screen-share windows. Changes are saved and applied to the current meeting immediately; local publishing resolution is unchanged.\n\n"
+		"All strategies follow the existing resolution limits. A single valid layer is used as-is. Without layer information, the display dimensions are requested and the server determines the received layer.\n\n"
+		"Actual receiving quality also depends on published layers, network bandwidth and server scheduling.");
+	matchTitle->setToolTip(resolutionMatchToolTip(matchLabel, generalHelp));
+	matchTitle->setToolTipDuration(30000);
+	matchTitle->setAccessibleDescription(generalHelp);
+	layout->addWidget(matchTitle);
+	_receiveResolutionMatchCombo = new QComboBox(content);
+	configureAccessibleComboBox(_receiveResolutionMatchCombo);
+	_receiveResolutionMatchCombo->setObjectName(QStringLiteral("receiveResolutionMatch"));
+	_receiveResolutionMatchCombo->setAccessibleName(matchLabel);
+	_receiveResolutionMatchCombo->addItem(QCoreApplication::translate("MeetingUI", "Auto (follow layout)"), QStringLiteral("auto"));
+	_receiveResolutionMatchCombo->addItem(QCoreApplication::translate("MeetingUI", "Match up (prefer clarity)"), QStringLiteral("up"));
+	_receiveResolutionMatchCombo->addItem(QCoreApplication::translate("MeetingUI", "Match down (save bandwidth)"), QStringLiteral("down"));
+	_receiveResolutionMatchCombo->addItem(QCoreApplication::translate("MeetingUI", "Nearest resolution"), QStringLiteral("nearest"));
+	matchTitle->setBuddy(_receiveResolutionMatchCombo);
+	_receiveResolutionMatchCombo->setToolTipDuration(30000);
+	for (int index = 0; index != _receiveResolutionMatchCombo->count(); ++index) {
+		const auto mode = livekit::ParseVideoResolutionMatch(
+			_receiveResolutionMatchCombo->itemData(index).toString().toStdString());
+		const auto description = receiveResolutionMatchHelp(mode);
+		_receiveResolutionMatchCombo->setItemData(index,
+			resolutionMatchToolTip(_receiveResolutionMatchCombo->itemText(index), description), Qt::ToolTipRole);
+		_receiveResolutionMatchCombo->setItemData(index, description, Qt::AccessibleDescriptionRole);
+	}
+	syncResolutionMatchHelp(_receiveResolutionMatchCombo);
+	connect(_receiveResolutionMatchCombo,
+		static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged), this,
+		[this](int) { syncResolutionMatchHelp(_receiveResolutionMatchCombo); });
+	layout->addWidget(_receiveResolutionMatchCombo);
+	auto *matchHint = new QLabel(QCoreApplication::translate("MeetingUI",
+		"Auto matches up for the main view and down for other views. Applies immediately to received camera and screen-share video. Actual quality depends on published layers and network conditions."), content);
+	matchHint->setObjectName(QStringLiteral("hintLabel"));
+	matchHint->setWordWrap(true);
+	layout->addWidget(matchHint);
+
+	layout->addWidget(makeSectionTitle(QCoreApplication::translate("MeetingUI", "Mirror Video"), content));
 	_mirrorEnabled = new QCheckBox(QCoreApplication::translate("MeetingUI", "Mirror Video"), content);
 	layout->addWidget(_mirrorEnabled);
 	_localMirror = new QRadioButton(QCoreApplication::translate("MeetingUI", "Mirror only my preview"), content);
@@ -1227,7 +1311,7 @@ void SettingsDialog::connectPreferenceControls() {
 			emitCameraSelection();
 			requestPreviewIfVisible();
 		});
-	for (auto *combo : {_cameraCodecCombo, _screenShareCodecCombo, _screenShareResolutionCombo, _screenShareFpsCombo}) {
+	for (auto *combo : {_cameraCodecCombo, _screenShareCodecCombo, _screenShareResolutionCombo, _screenShareFpsCombo, _receiveResolutionMatchCombo}) {
 		connect(combo,
 			static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
 			this, [this](int) {
@@ -1310,6 +1394,8 @@ OpenMeeting::MediaPreferences SettingsDialog::preferences() const {
 		? _cameraCodecCombo->currentData().toString() : QStringLiteral("auto");
 	value.screenShareResolution = _screenShareResolutionCombo->currentData().toInt();
 	value.screenShareFps = _screenShareFpsCombo->currentData().toInt();
+	value.receiveResolutionMatch = livekit::ParseVideoResolutionMatch(
+		_receiveResolutionMatchCombo->currentData().toString().toStdString());
 	value.screenShareVideoCodec = _screenShareCodecCombo
 		? _screenShareCodecCombo->currentData().toString() : QStringLiteral("auto");
 
@@ -1364,6 +1450,8 @@ void SettingsDialog::setPreferences(const OpenMeeting::MediaPreferences &value) 
 	}
 	selectScreenShareResolution(*_screenShareResolutionCombo, value.screenShareResolution);
 	_screenShareFpsCombo->setCurrentIndex(_screenShareFpsCombo->findData(value.screenShareFps));
+	_receiveResolutionMatchCombo->setCurrentIndex(_receiveResolutionMatchCombo->findData(
+		QString::fromLatin1(livekit::VideoResolutionMatchName(value.receiveResolutionMatch))));
 	if (_screenShareCodecCombo) {
 		const auto selected = findData(_screenShareCodecCombo,
 			OpenMeeting::normalizeVideoCodecPreference(value.screenShareVideoCodec));

@@ -4,6 +4,106 @@
 <context>
     <name>MeetingUI</name>
     <message>
+        <source>Selects a receiving layer from the resolutions published by the other participant, using the actual display size and screen scaling.
+
+Applies to remote cameras and screen shares, including detached screen-share windows. Changes are saved and applied to the current meeting immediately; local publishing resolution is unchanged.
+
+All strategies follow the existing resolution limits. A single valid layer is used as-is. Without layer information, the display dimensions are requested and the server determines the received layer.
+
+Actual receiving quality also depends on published layers, network bandwidth and server scheduling.</source>
+        <translation>根据画面的实际显示大小和屏幕缩放比例，从对方发布的多个分辨率层中选择接收层。
+
+适用于远端摄像头和屏幕共享，包括独立共享窗口。修改后立即保存并更新当前会议的接收策略，不改变本地发送分辨率。
+
+所有策略遵循现有分辨率限制；只有一个有效层时使用该层。未提供层信息时，按显示尺寸请求，由服务端决定实际接收层。
+
+实际接收画质仍受对方发布的层、网络带宽和服务端调度影响。</translation>
+    </message>
+    <message>
+        <source>Chooses the matching direction according to the view's role.
+
+• Main views and detached screen-share windows match up to prioritize clarity.
+• Gallery tiles, sidebar thumbnails and picture-in-picture thumbnails match down to save bandwidth and decoding resources.
+
+This is the default behavior. Changing the layout or display size recalculates the receiving layer.</source>
+        <translation>根据画面位置自动选择匹配方式。
+
+• 主画面和独立共享窗口向上匹配，优先保证清晰度。
+• 宫格、侧栏缩略图和画中画小窗向下匹配，优先节省带宽和解码开销。
+
+这是默认策略，保持原有行为。布局或画面大小变化时，会重新选择接收层。</translation>
+    </message>
+    <message>
+        <source>Selects the smallest available layer whose width and height both meet or exceed the display demand, reducing blur from enlarging a lower-resolution image.
+
+Example: with 180p, 360p and 720p layers, a display demand of about 500p selects 720p.
+
+Usually uses more bandwidth and decoding resources. If no layer is large enough, uses the highest layer within the allowed limits. The example assumes matching aspect ratios.</source>
+        <translation>选择宽度和高度都不小于显示需求的最小分辨率层，尽量避免放大低分辨率画面造成模糊。
+
+例如：对方提供 180p、360p、720p，画面需要约 500p 时，选择 720p。
+
+通常会增加带宽和解码开销。没有足够大的可选层时，使用允许范围内的最高层。示例假设视频宽高比一致。</translation>
+    </message>
+    <message>
+        <source>Selects the largest available layer whose width and height both stay within the display demand, avoiding unnecessarily high resolution for a small view.
+
+Example: with 180p, 360p and 720p layers, a display demand of about 500p selects 360p.
+
+Usually saves bandwidth and decoding resources, but enlargement may look softer. If no layer is small enough, uses the lowest layer within the allowed limits. The example assumes matching aspect ratios.</source>
+        <translation>选择宽度和高度都不大于显示需求的最大分辨率层，避免为较小的画面接收过高分辨率。
+
+例如：对方提供 180p、360p、720p，画面需要约 500p 时，选择 360p。
+
+通常更节省带宽和解码开销，但放大显示时可能略显模糊。没有足够小的可选层时，使用允许范围内的最低层。示例假设视频宽高比一致。</translation>
+    </message>
+    <message>
+        <source>Compares each layer's relative width and height differences from the display demand and selects the closest layer. Equal distances prefer the lower resolution.
+
+Example: with 180p, 360p and 720p layers of the same aspect ratio:
+About 500p needed → selects 360p
+About 600p needed → selects 720p
+540p needed → equal distances, selects 360p
+
+Balances clarity and resource usage. The selected layer changes with the display size.</source>
+        <translation>比较各层宽度和高度与显示需求的相对差，选择最接近的一层。差距相同时，选择较低分辨率。
+
+例如：对方提供同宽高比的 180p、360p、720p：
+需要约 500p → 选择 360p
+需要约 600p → 选择 720p
+需要 540p → 距离相同，选择 360p
+
+兼顾清晰度和资源开销，实际选择会随显示大小变化。</translation>
+    </message>
+    <message>
+        <source>Receive quality</source>
+        <translation>接收画质</translation>
+    </message>
+    <message>
+        <source>Simulcast resolution matching</source>
+        <translation>Simulcast 分辨率匹配</translation>
+    </message>
+    <message>
+        <source>Auto (follow layout)</source>
+        <translation>自动（沿用布局策略）</translation>
+    </message>
+    <message>
+        <source>Match up (prefer clarity)</source>
+        <translation>向上匹配（清晰度优先）</translation>
+    </message>
+    <message>
+        <source>Match down (save bandwidth)</source>
+        <translation>向下匹配（节省带宽）</translation>
+    </message>
+    <message>
+        <source>Nearest resolution</source>
+        <translation>最近分辨率</translation>
+    </message>
+    <message>
+        <source>Auto matches up for the main view and down for other views. Applies immediately to received camera and screen-share video. Actual quality depends on published layers and network conditions.</source>
+        <translation>自动模式下，主画面向上匹配，其他画面向下匹配。修改立即应用于远端摄像头和屏幕共享的接收策略，实际画质受对方发布层和网络状况影响。</translation>
+    </message>
+    <message>
         <source>Language</source>
         <translation>语言</translation>
     </message>
