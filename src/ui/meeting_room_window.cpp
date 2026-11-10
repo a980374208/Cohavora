@@ -1,4 +1,5 @@
-﻿#include "src/ui/meeting_encryption_panel.h"
+﻿#include "shared_screen_window.h"
+#include "src/ui/meeting_encryption_panel.h"
 #include "telemetry_live_dialog.h"
 #include "src/core/session_shutdown_service.h"
 #include <QtCore/QCoreApplication>
@@ -230,8 +231,9 @@ bool SameViewportIntentContent(const livekit::ViewportIntent &left,
 		left.stage_rect.width == right.stage_rect.width &&
 		left.stage_rect.height == right.stage_rect.height &&
 		left.device_pixel_ratio == right.device_pixel_ratio &&
-		left.window_visible == right.window_visible &&
-		left.minimized == right.minimized;
+		left.remote_video_enabled == right.remote_video_enabled &&
+        left.window_visible == right.window_visible &&
+		left.minimized == right.minimized && left.detached_share == right.detached_share;
 }
 
 void AddTelemetryRow(QTableWidget *table, const QStringList &values) {
@@ -1138,14 +1140,14 @@ VideoTileWidget::VideoTileWidget(const QString &displayName, bool isLocal, QWidg
 }
 
 void VideoTileWidget::setupVolumeControls() {
-	_pinBtn = new QPushButton(QString::fromUtf8("📌"), this);
+	_pinBtn = new QPushButton(QStringLiteral("…"), this);
 	_pinBtn->setFixedSize(28, 28);
-	_pinBtn->setToolTip(QCoreApplication::translate("MeetingUI", "Pin / Unpin Video"));
+	_pinBtn->setToolTip(tr("More actions"));
 	MeetingUI::AppTheme::setStyleVariant(*_pinBtn, "meeting-room-window-pinbtn");
 	_pinBtn->hide();
 
 	connect(_pinBtn, &QPushButton::clicked, [this] {
-		emit pinToggled(!_isPinned); // The window owns the single selected identity.
+		emit moreRequested();
 	});
 
 	if (_isLocal || _isScreenShare) return;
@@ -1212,13 +1214,13 @@ void VideoTileWidget::setupVolumeControls() {
 }
 
 void VideoTileWidget::enterEventHook(QEnterEvent *e) {
-	if (_pinBtn && !_remoteInputEnabled) _pinBtn->show();
+	if (_pinBtn) _pinBtn->show();
 	if (_volBtn) _volBtn->show();
 	Ui::RpWidget::enterEventHook(e);
 }
 
 void VideoTileWidget::leaveEventHook(QEvent *e) {
-	if (_pinBtn && !_isPinned) _pinBtn->hide();
+	if (_pinBtn) _pinBtn->hide();
 	if (_volBtn && (!_volPopup || !_volPopup->isVisible())) {
 		_volBtn->hide();
 	}
@@ -1234,7 +1236,7 @@ void VideoTileWidget::resizeEvent(QResizeEvent *e) {
 		_pinBtn->setGeometry(pinButtonRect());
 	}
 	if (_volBtn) {
-		_volBtn->move(w - 36, 10);
+		_volBtn->move(w - 70, 10);
 	}
 	if (_volPopup) {
 		_volPopup->move(std::max(0, w - _volPopup->width() - 10), 42);
@@ -1345,7 +1347,7 @@ void VideoTileWidget::setPinned(bool pinned) {
 	if (_isPinned == pinned) return;
 	_isPinned = pinned;
 	MeetingUI::AppTheme::setStyleVariant(*_pinBtn, pinned ? "meeting-room-window-pinbtn-2-active" : "meeting-room-window-pinbtn-2-normal");
-	_pinBtn->setVisible(!_remoteInputEnabled && (pinned || underMouse()));
+	_pinBtn->setVisible(underMouse());
 	invalidatePresentation();
 }
 
@@ -1356,7 +1358,7 @@ void VideoTileWidget::setPipMode(bool pip) {
 }
 
 QRect VideoTileWidget::pinButtonRect() const {
-	return QRect(_volBtn ? width() - 70 : width() - 36, 10, 28, 28);
+	return QRect(width() - 36, 10, 28, 28);
 }
 
 QImage VideoTileWidget::hardwareDecoration(const QSize &pixels, bool hasFrame, bool hovered) {
@@ -1476,7 +1478,7 @@ void VideoTileWidget::paintCard(QPainter &p, bool decorationOnly, bool hasFrame,
 	if (_remoteInputEnabled && !decorationOnly) return;
 	drawBottomNameTag(p, r);
 	drawNetworkQualityBadge(p, r);
-	if (decorationOnly && (hovered || _isPinned)) {
+	if (decorationOnly && hovered) {
 		p.save();
 		const auto button = pinButtonRect();
 		p.setPen(Qt::NoPen);
@@ -1484,7 +1486,7 @@ void VideoTileWidget::paintCard(QPainter &p, bool decorationOnly, bool hasFrame,
 		p.drawRoundedRect(button, 14, 14);
 		p.setPen(themeColor(_isPinned ? ColorRole::OnAccent : ColorRole::Text));
 		p.setFont(QFont("Segoe UI Emoji", 10));
-		p.drawText(button, Qt::AlignCenter, QString::fromUtf8("📌"));
+		p.drawText(button, Qt::AlignCenter, QStringLiteral("…"));
 		p.restore();
 	}
 
@@ -1683,7 +1685,7 @@ void VideoTileWidget::drawVideoPlaceholder(QPainter &p, const QRect &r) {
 
 void VideoTileWidget::setRemoteInputEnabled(bool enabled) {
     _remoteInputEnabled = enabled;
-    if (_pinBtn) _pinBtn->setVisible(!enabled && (_isPinned || underMouse()));
+    if (_pinBtn) _pinBtn->setVisible(underMouse());
     update();
 }
 QRectF VideoTileWidget::remoteControlContentRect() {
@@ -4360,7 +4362,7 @@ void MeetingRoomWindow::onTimerTick() {
 }
 
 void MeetingRoomWindow::onRemoteRenderTick() {
-	if (_remoteRenderSession && isVideoStageVisible()) {
+	if (_remoteRenderSession && (isVideoStageVisible() || isSharedScreenVisible())) {
 		_remoteRenderSession->RenderLatestFrames();
 		const auto nowMs = QDateTime::currentMSecsSinceEpoch();
 		if (nowMs - _lastRenderTelemetrySampleMs >= 1000) {
@@ -4398,9 +4400,10 @@ void MeetingRoomWindow::onRemoteRenderTick() {
 			}
 		}
 	}
-	if (_localScreenTile && _localScreenPreview && isVideoStageVisible() &&
-		(_acceptedVideoPlan.coordinator_session == 0 ||
-		 _acceptedVideoPlan.show_local_screen_share)) {
+	if (_localScreenTile && _localScreenPreview &&
+        ((isVideoStageVisible() && (_acceptedVideoPlan.coordinator_session == 0 ||
+          _acceptedVideoPlan.show_local_screen_share)) ||
+         (isSharedScreenVisible() && _acceptedVideoPlan.show_detached_local))) {
 		auto frame = _localScreenPreview->TakeLatest("screen", _localScreenPreview->generation());
 		if (!frame) return;
 		_localScreenTile->setVideoActive(true);
@@ -4842,6 +4845,7 @@ void MeetingRoomWindow::tryActivateGpuBackend() {
 		_videoCanvas->shutdownRenderer();
 		_videoCanvas->hide();
 		_remoteRenderSession->UseQtCpuBackend();
+        if (_sharedWindow) _sharedWindow->useCpu();
 		_renderDiagnostics = _videoCanvas->renderDiagnostics();
 		livekit::diagnostic::Event event;
 		event.kind = livekit::diagnostic::EventKind::RenderBackendChanged;
@@ -4876,6 +4880,7 @@ void MeetingRoomWindow::tryActivateGpuBackend() {
 }
 
 void MeetingRoomWindow::fallBackToQtCpuBackend() {
+    if (_sharedWindow) _sharedWindow->useCpu();
 	const bool was_using_gpu = _usingGpuBackend.exchange(false, std::memory_order_acq_rel);
 	if (_remoteRenderSession) {
 		_remoteRenderSession->UseQtCpuBackend();
@@ -4947,10 +4952,11 @@ void MeetingRoomWindow::setupVideoCanvasInteractions() {
 	connect(_videoCanvas, &livekit::render::VideoCanvas::tileDoubleClicked,
 		this, &MeetingRoomWindow::togglePinForRenderKey, Qt::UniqueConnection);
 	connect(_videoCanvas, &livekit::render::VideoCanvas::tilePinRequested,
-		this, &MeetingRoomWindow::togglePinForRenderKey, Qt::UniqueConnection);
+		this, &MeetingRoomWindow::showVideoTileMenu, Qt::UniqueConnection);
 }
 
 void MeetingRoomWindow::bindTileInteractions(VideoTileWidget *tile) {
+    connect(tile, &VideoTileWidget::moreRequested, this, [this, tile] { showVideoTileMenu(tile->renderKey()); });
 	connect(tile, &VideoTileWidget::tileDoubleClicked, this, [this, tile] {
 		setPinnedTile(tile->renderKey(), !tile->isPinned());
 	});
@@ -5012,7 +5018,8 @@ void MeetingRoomWindow::setupRemoteControl() {
             auto* tile = remoteVideoTile(sid);
             QWidget* widget = nullptr;
             QRectF content;
-            if (!_whiteboardVisible && tile && canRenderRemoteVideo(sid)) {
+            if (!_whiteboardVisible && tile && canRenderRemoteVideo(sid) &&
+                !(_detachedShareIntent && _detachedShareIntent->track == binding.key)) {
                 if (_usingGpuBackend.load() && _videoCanvas && _videoCanvas->isVisible()) {
                     widget = _videoCanvas;
                     content = _videoCanvas->videoContentRect(tile->renderKey().toStdString());
@@ -5021,7 +5028,7 @@ void MeetingRoomWindow::setupRemoteControl() {
                     content = tile->remoteControlContentRect();
                 }
             }
-            targets.push_back({binding.identity,sid,tile ? tile->displayName() : binding.identity,widget,content});
+            targets.push_back({binding.identity,sid,tile ? tile->displayName() : binding.identity,widget,content, tile && widget ? QRectF(tile->pinButtonRect().translated(widget->mapFromGlobal(tile->mapToGlobal(QPoint())))) : QRectF{}});
         }
         return targets;
     },[this](bool blocked) {
@@ -5029,6 +5036,7 @@ void MeetingRoomWindow::setupRemoteControl() {
             _coordinator->state() == OpenMeeting::MeetingState::InMeeting);
         if (_annotationButton) _annotationButton->setEnabled(!blocked && _annotationBinding.has_value());
     },[this](const QString& status) { updateRemoteControlStatus(status); });
+    _remoteControlUi->setTileMenuMode(true);
     connect(_coordinator.get(),&OpenMeeting::MeetingCoordinator::remoteControlChanged,this,
         [this](const livekit::remote_control::Projection& p) {
             std::string key;
@@ -5150,8 +5158,16 @@ void MeetingRoomWindow::submitViewportIntent() {
 		: livekit::StageContent::Video;
 	intent.stage_rect = {0, 0, _stageContainer->width(), _stageContainer->height()};
 	intent.device_pixel_ratio = devicePixelRatioF();
+    intent.remote_video_enabled = _receiveRemoteVideo;
 	intent.window_visible = _logicalWindowVisible;
 	intent.minimized = isMinimized();
+    if (_detachedShareIntent && _sharedWindow) {
+        auto share = _sharedWindow->viewport();
+        share.surface_id = _detachedShareIntent->surface_id;
+        share.track = _detachedShareIntent->track;
+        share.local = _detachedShareIntent->local;
+        intent.detached_share = std::move(share);
+    }
 	if (_lastViewportIntent &&
 		SameViewportIntentContent(*_lastViewportIntent, intent)) {
 		return;
@@ -5199,6 +5215,236 @@ void MeetingRoomWindow::setWhiteboardVisible(bool visible) {
 	updateVideoLayout();
 	if (visible) _whiteboardPanel->canvas()->setFocus(Qt::OtherFocusReason);
 	else tryActivateGpuBackend();
+}
+
+void MeetingRoomWindow::showVideoTileMenu(const QString& renderKey) {
+    if (!_coordinator || _coordinator->state() != OpenMeeting::MeetingState::InMeeting || _closeRequested) return;
+    VideoTileWidget* tile = nullptr;
+    bool local = false, screenShare = false;
+    if (_localTile && _localTile->renderKey() == renderKey) { tile = _localTile; local = true; }
+    if (_localScreenTile && _localScreenTile->renderKey() == renderKey) {
+        tile = _localScreenTile.get(); local = true; screenShare = true;
+    }
+    const auto key = local ? std::optional<livekit::TrackKey>{} : trackKeyForRenderKey(renderKey);
+    if (key) {
+        tile = remoteVideoTile(*key);
+        const auto* seat = _acceptedVideoPlan.FindMediaSeat(*key);
+        screenShare = seat && seat->source == livekit::TrackSource::ScreenShareVideo;
+    }
+    if (!tile) return;
+    QPointer<VideoTileWidget> guarded(tile);
+    const auto currentParticipant = [this, local, key]() -> std::optional<OpenMeeting::ParticipantInfo> {
+        if (!_coordinator) return std::nullopt;
+        for (const auto& person : _coordinator->participants()) {
+            if ((local && person.isLocal) || (!local && key && person.participantKey == key->participant)) return person;
+        }
+        return std::nullopt;
+    };
+    const auto current = [this, guarded, renderKey, key, local] {
+        return guarded && _coordinator && !_closeRequested &&
+            _coordinator->state() == OpenMeeting::MeetingState::InMeeting &&
+            (local || trackKeyForRenderKey(renderKey) == key);
+    };
+    const auto target = currentParticipant();
+    const auto canManage = [this, local] { return local || (_coordinator && _coordinator->isHost()); };
+    auto* menu = new QMenu(this);
+    menu->setObjectName(QStringLiteral("videoTileActions"));
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+    AppTheme::styleMenu(*menu, AppTheme::Tone::Dark);
+    const auto add = [this, menu, current](const QString& text, const char* id, auto action) {
+        auto* entry = menu->addAction(text); entry->setObjectName(QString::fromLatin1(id));
+        connect(entry, &QAction::triggered, this, [current, action] { if (current()) action(); });
+    };
+    if (target && canManage()) {
+        const bool muted = local ? _pendingAudioMuted.value_or(_config.audioMuted) : target->isAudioMuted;
+        if (!muted || target->permissions.can_publish) {
+            add(muted ? (local ? tr("Unmute") : tr("Request unmute")) : tr("Mute"), "tileMicrophone",
+                [this, local, muted, currentParticipant, canManage] {
+                    const auto now = currentParticipant();
+                    if (!now || !canManage() || (muted && !now->permissions.can_publish)) return;
+                    if (local) requestLocalMicrophone(!muted);
+                    else _coordinator->requestParticipantMicrophone(now->identity, muted);
+                });
+        }
+        const bool enabled = local ? _pendingVideoEnabled.value_or(_config.videoEnabled) : target->isVideoEnabled;
+        if (!screenShare && (enabled || target->permissions.can_publish)) {
+            add(enabled ? tr("Stop video") : (local ? tr("Start video") : tr("Request video")), "tileCamera",
+                [this, local, enabled, currentParticipant, canManage] {
+                    const auto now = currentParticipant();
+                    if (!now || !canManage() || (!enabled && !now->permissions.can_publish)) return;
+                    if (local) requestLocalCamera(!enabled);
+                    else _coordinator->requestParticipantCamera(now->identity, !enabled);
+                });
+        }
+    }
+    if (!local && key && target && screenShare && _remoteControlUi) {
+        const auto identity = target->identity;
+        const auto sid = QString::fromStdString(key->publication_sid);
+        if (_remoteControlUi->controlsTarget(identity, sid)) {
+            add(tr("End remote control"), "tileRemoteControl", [this, identity, sid] {
+                if (_remoteControlUi && _remoteControlUi->controlsTarget(identity, sid)) _remoteControlUi->stop();
+            });
+        } else if (target->permissions.can_publish_data && _remoteControlUi->canRequestTarget(identity, sid)) {
+            add(tr("Remote control"), "tileRemoteControl", [this, identity, sid, currentParticipant] {
+                const auto now = currentParticipant();
+                if (now && now->permissions.can_publish_data && _remoteControlUi) _remoteControlUi->requestTarget(identity, sid);
+            });
+        }
+    }
+    const bool supported = !_videoCanvas ||
+        _videoCanvas->renderDiagnostics().requested_backend != livekit::render::RenderBackend::OpenGL;
+    const auto mayReceive = [this] {
+        for (const auto& person : _coordinator->participants())
+            if (person.isLocal) return person.permissions.can_subscribe;
+        return true;
+    };
+    const bool permittedShare = local || (mayReceive() && key && remoteVideoSubscriptionError(*key) ==
+        livekit::TrackPublication::SubscriptionError::None);
+    if (screenShare && supported && permittedShare && !_sharedReturnPending &&
+        (!_remoteControlUi || !_remoteControlUi->active())) {
+        add(tr("Open in separate window"), "tilePopout", [this, key, local, mayReceive] {
+            if (local || (mayReceive() && key && remoteVideoSubscriptionError(*key) ==
+                livekit::TrackPublication::SubscriptionError::None)) detachSharedScreen(key, local);
+        });
+    }
+    if (!menu->isEmpty()) menu->addSeparator();
+    menu->addSection(tr("For my layout"));
+    const bool pinned = _pinnedRenderKey == renderKey;
+    add(pinned ? tr("Unlock this view") : tr("Lock this view"), "tilePin", [this, renderKey, pinned] {
+        setPinnedTile(renderKey, !pinned);
+    });
+    if (_receiveRemoteVideo || mayReceive()) add(_receiveRemoteVideo ? tr("Stop receiving all other video") : tr("Resume receiving other video"),
+        "tileReceiveVideo", [this, mayReceive] {
+            if (!_receiveRemoteVideo && !mayReceive()) return;
+            _receiveRemoteVideo = !_receiveRemoteVideo;
+            scheduleViewportIntent(true);
+        });
+    // Rebuild on the next open if authority/lifetime changes while the menu is
+    // visible. Each callback also revalidates the exact target and authority.
+    connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::hostRoleChanged, menu, &QMenu::close);
+    connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantPermissionsChanged, menu, &QMenu::close);
+    connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::participantLeft, menu, &QMenu::close);
+    connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::remoteVideoTrackUnavailable, menu, &QMenu::close);
+    menu->popup(tile->mapToGlobal(tile->pinButtonRect().bottomLeft()));
+}
+
+void MeetingRoomWindow::detachSharedScreen(std::optional<livekit::TrackKey> key, bool local) {
+    if (!_coordinator || _closeRequested ||
+        _coordinator->state() != OpenMeeting::MeetingState::InMeeting ||
+        (_remoteControlUi && _remoteControlUi->active()) ||
+        (local ? (!_localScreenTile || key.has_value()) : !key.has_value())) return;
+    if (_sharedReturnPending) return;
+    if (_detachedShareIntent && _detachedShareIntent->local == local && _detachedShareIntent->track == key) {
+        if (_sharedWindow) _sharedWindow->locate();
+        return;
+    }
+    QString name = tr("You");
+    if (key) {
+        const auto* seat = _acceptedVideoPlan.FindMediaSeat(*key);
+        if (!seat || seat->source != livekit::TrackSource::ScreenShareVideo) return;
+        const auto identity = QString::fromStdString(key->participant.identity);
+        const auto found = _remoteParticipantNames.find(identity);
+        name = found != _remoteParticipantNames.end() ? found->second : identity;
+    }
+    // DX11 uses an independent canvas/device. Never switch the meeting to CPU
+    // merely because a second surface is requested. ANGLE multi-owner support
+    // is a separate backend capability; do not silently degrade it here.
+    const auto backend = _videoCanvas ? _videoCanvas->renderDiagnostics().requested_backend
+        : livekit::render::RenderBackend::QtCpu;
+    if (backend == livekit::render::RenderBackend::OpenGL) return;
+    if (!_sharedWindow) {
+        const bool gpu = _videoCanvas && backend == livekit::render::RenderBackend::Dx11 &&
+            (!_gpuBackendActivationAttempted || _videoCanvas->rendererReady() || _videoCanvas->rendererPending());
+        _sharedWindow = std::make_unique<SharedScreenWindow>(gpu);
+        _sharedWindow->setAttribute(Qt::WA_DontShowOnScreen, testAttribute(Qt::WA_DontShowOnScreen));
+        connect(_sharedWindow.get(), &SharedScreenWindow::returnRequested,
+            this, &MeetingRoomWindow::returnSharedScreen, Qt::QueuedConnection);
+        connect(_sharedWindow.get(), &SharedScreenWindow::viewportChanged,
+            this, [this] { scheduleViewportIntent(); });
+        connect(_sharedWindow.get(), &SharedScreenWindow::rendererUnavailable,
+            this, &MeetingRoomWindow::fallBackToQtCpuBackend, Qt::QueuedConnection);
+        const auto* targetScreen = screen();
+        if (targetScreen && !_sharedWindow->restoredGeometry()) {
+            const auto area = targetScreen->availableGeometry();
+            _sharedWindow->resize(std::min(960, area.width()), std::min(600, area.height()));
+            _sharedWindow->move(area.center() - _sharedWindow->rect().center());
+        }
+    }
+    livekit::DetachedShareViewport intent;
+    intent.surface_id = ++_nextSharedSurfaceId;
+    if (!intent.surface_id) intent.surface_id = ++_nextSharedSurfaceId;
+    intent.track = std::move(key);
+    intent.local = local;
+    _detachedShareIntent = std::move(intent);
+    _sharedWindow->setSharingName(name);
+    _sharedWindow->setStatus(tr("Waiting for shared screen…"), true);
+    _sharedWindow->show();
+    _sharedWindow->raise();
+    scheduleViewportIntent(true);
+}
+
+void MeetingRoomWindow::returnSharedScreen() {
+    if (!_detachedShareIntent || _closeRequested) return;
+    // The old accepted route remains active until the single replacement plan
+    // has returned the publication to the main stage.
+    const auto key = _detachedShareIntent->track;
+    const bool local = _detachedShareIntent->local;
+    _detachedShareIntent.reset();
+    _sharedReturnPending = true;
+    if (key) {
+        _pinnedTrackKey = key;
+        _pinnedLocalTarget.reset();
+        _pinnedRenderKey = QStringLiteral("remote-screen/") + QString::fromStdString(key->publication_sid);
+    }
+    else if (local && _localScreenTile) {
+        _pinnedTrackKey.reset();
+        _pinnedLocalTarget = livekit::LocalVideoTarget::ScreenShare;
+        _pinnedRenderKey = _localScreenTile->renderKey();
+    }
+    if (isMinimized()) showNormal();
+    else show();
+    raise();
+    activateWindow();
+    if (_whiteboardVisible) setWhiteboardVisible(false);
+    scheduleViewportIntent(true);
+}
+
+bool MeetingRoomWindow::isSharedScreenVisible() const {
+    return _sharedWindow && _sharedWindow->viewing() &&
+        (!_detachedShareIntent || _detachedShareIntent->surface_id == _acceptedVideoPlan.detached_surface_id) &&
+        _acceptedVideoPlan.detached_surface_id &&
+        _displayedSharedSurfaceId == _acceptedVideoPlan.detached_surface_id;
+}
+
+bool MeetingRoomWindow::isDetachedShareFrame(const QString& key) const {
+    if (!isSharedScreenVisible()) return false;
+    if (_acceptedVideoPlan.show_detached_local && _localScreenTile)
+        return key == _localScreenTile->renderKey();
+    return _acceptedVideoPlan.detached_share &&
+        key.toStdString() == _acceptedVideoPlan.detached_share->key.publication_sid;
+}
+
+void MeetingRoomWindow::syncSharedScreenPlan() {
+    if (!_sharedWindow) return;
+    const auto& plan = _acceptedVideoPlan;
+    if (!plan.detached_surface_id) {
+        _displayedSharedSurfaceId = 0;
+        if (_sharedReturnPending) {
+            _sharedReturnPending = false;
+            _sharedWindow->hide();
+        }
+        return;
+    }
+    if (_displayedSharedSurfaceId != plan.detached_surface_id) {
+        _sharedWindow->clearFrame();
+        _displayedSharedSurfaceId = plan.detached_surface_id;
+    }
+    if (!plan.detached_share && !plan.detached_local) {
+        _sharedWindow->setStatus(tr("Screen sharing has ended."), true);
+    } else if (plan.detached_share && std::find(plan.selected_video.begin(), plan.selected_video.end(),
+                   plan.detached_share->key) == plan.selected_video.end()) {
+        _sharedWindow->setStatus(tr("Waiting for shared screen…"), true);
+    }
 }
 
 bool MeetingRoomWindow::isVideoStageVisible() const {
@@ -5449,6 +5695,11 @@ void MeetingRoomWindow::receiveRenderedVideoFrame(
 		const QImage& image,
 		const QString& key,
 		livekit::render::VideoRenderFrame::Ptr renderFrame) {
+    if (isDetachedShareFrame(key)) {
+        if (_acceptedVideoPlan.detached_local || canRenderRemoteVideo(key))
+            _sharedWindow->setFrame(image, std::move(renderFrame));
+        return;
+    }
     if (_remoteControlUi) _remoteControlUi->noteFrame(key);
     if (key == QStringLiteral("local")) {
         if (_config.videoEnabled) receiveLocalVideoFrame(image, std::move(renderFrame));
@@ -5460,6 +5711,12 @@ void MeetingRoomWindow::receiveRenderedVideoFrame(
 }
 
 void MeetingRoomWindow::receiveGpuVideoFrame(const std::string& key, livekit::render::VideoRenderFrame::Ptr frame) {
+    const auto routeKey = QString::fromStdString(key);
+    if (isDetachedShareFrame(routeKey)) {
+        if (_acceptedVideoPlan.detached_local || canRenderRemoteVideo(routeKey))
+            _sharedWindow->setGpuFrame(std::move(frame));
+        return;
+    }
     if (_remoteControlUi) _remoteControlUi->noteFrame(QString::fromStdString(key));
     if (!_usingGpuBackend.load(std::memory_order_acquire) || !_videoCanvas) return;
     const auto qkey = QString::fromStdString(key);
@@ -5707,6 +5964,9 @@ void MeetingRoomWindow::handleScreenShareSources(
 }
 
 bool MeetingRoomWindow::isTrackVisible(const livekit::TrackKey &key) const {
+    if (_acceptedVideoPlan.detached_share && _acceptedVideoPlan.detached_share->key == key &&
+        _acceptedVideoPlan.detached_share->width && _acceptedVideoPlan.detached_share->height)
+        return true;
 	return std::any_of(
 		_acceptedVideoPlan.visible_seats.begin(),
 		_acceptedVideoPlan.visible_seats.end(),
@@ -5780,6 +6040,10 @@ VideoTileWidget *MeetingRoomWindow::remoteVideoTile(
 
 void MeetingRoomWindow::applyAcceptedVideoDemandPlan(
 		livekit::VideoDemandPlan plan) {
+    const auto requestedSurface = _detachedShareIntent ? _detachedShareIntent->surface_id : 0;
+    if (_sharedWindow && _lastViewportIntent &&
+        plan.view_revision < _lastViewportIntent->view_revision &&
+        plan.detached_surface_id != requestedSurface) return;
 	if (_acceptedVideoPlan.coordinator_session == plan.coordinator_session &&
 		plan.policy_revision < _acceptedVideoPlan.policy_revision) {
 		return;
@@ -5790,6 +6054,7 @@ void MeetingRoomWindow::applyAcceptedVideoDemandPlan(
 		_lastViewportIntent.reset();
 	}
 	_acceptedVideoPlan = std::move(plan);
+    syncSharedScreenPlan();
 	// An older accepted plan must not overwrite a newer pin/unpin request.
 	if (!_lastViewportIntent ||
 		_acceptedVideoPlan.view_revision >= _lastViewportIntent->view_revision) {
@@ -5950,6 +6215,7 @@ void MeetingRoomWindow::reconcileRemoteRenderSelection() {
 	for (const auto &[sid, oldBinding] : _activeRemoteRenderLeases) {
 		const auto current = active.find(sid);
 		if (current != active.end() && current->second == oldBinding) continue;
+        if (isDetachedShareFrame(sid)) _sharedWindow->setStatus(tr("Waiting for shared screen…"), true);
 		if (auto *tile = remoteVideoTile(sid)) {
 			if (_videoCanvas) _videoCanvas->removeUser(
 				tile->renderKey().toStdString());
@@ -5991,9 +6257,7 @@ bool MeetingRoomWindow::canRenderRemoteVideo(const QString &trackSid) const {
 
 livekit::TrackPublication::SubscriptionError MeetingRoomWindow::remoteVideoSubscriptionError(
 		const livekit::TrackKey &key) const {
-	for (const auto &seat : _acceptedVideoPlan.visible_seats) {
-		if (seat.key == key) return seat.subscription_error;
-	}
+    if (const auto* seat = _acceptedVideoPlan.FindMediaSeat(key)) return seat->subscription_error;
 	return livekit::TrackPublication::SubscriptionError::None;
 }
 
@@ -6055,6 +6319,7 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 		// rejects callbacks already in flight when the same Track is rebound.
 		_remoteRenderSession->RemoveTrack(sid.toStdString());
 		_activeRemoteRenderLeases.erase(sid);
+        if (isDetachedShareFrame(sid)) _sharedWindow->setStatus(tr("Waiting for shared screen…"), true);
 		if (tile) {
 			if (_videoCanvas) _videoCanvas->removeUser(tile->renderKey().toStdString());
 			tile->setFrame({});
@@ -6074,6 +6339,7 @@ void MeetingRoomWindow::attachRemoteVideo(const OpenMeeting::ParticipantPresenta
 }
 
 void MeetingRoomWindow::removeRemoteVideo(const QString &trackSid, bool reconcile) {
+    if (isDetachedShareFrame(trackSid)) _sharedWindow->setStatus(tr("Screen sharing has ended."), true);
 	const auto binding = _remoteVideoBindings.find(trackSid);
 	if (binding != _remoteVideoBindings.end() && _pinnedTrackKey &&
 		binding->second.key == *_pinnedTrackKey) {
@@ -6224,6 +6490,12 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		_localScreenTile->setVideoActive(true);
 		bindTileInteractions(_localScreenTile.get());
 	} else if (!active && _localScreenTile) {
+        if (_detachedShareIntent && _detachedShareIntent->local) {
+            // Retire this local viewing target. A later capture session must
+            // not silently replace the ended share in the existing window.
+            _detachedShareIntent->local = false;
+            if (_sharedWindow) _sharedWindow->setStatus(tr("Screen sharing has ended."), true);
+        }
 		if (_videoCanvas) _videoCanvas->removeUser(_localScreenTile->renderKey().toStdString());
 		if (_pinnedLocalTarget == livekit::LocalVideoTarget::ScreenShare) {
 			_pinnedLocalTarget.reset();
@@ -6887,6 +7159,13 @@ void MeetingRoomWindow::attachCoordinatorSession() {
 
 void MeetingRoomWindow::stopLiveKitSession(bool requestLeave) {
 	Q_ASSERT(thread() == QThread::currentThread());
+    _detachedShareIntent.reset();
+    _displayedSharedSurfaceId = 0;
+    _sharedReturnPending = false;
+    if (_sharedWindow) {
+        disconnect(_sharedWindow.get(), nullptr, this, nullptr);
+        _sharedWindow.reset();
+    }
 	// The Coordinator's cleanup owner retains native resources through drain.
 	// A hidden/departure-notice window must not retain the retired Room and keys.
 	_room.reset();

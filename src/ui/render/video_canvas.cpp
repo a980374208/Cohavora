@@ -63,7 +63,13 @@ void VideoCanvas::updateFrame(const std::string& key, VideoRenderFrame::Ptr fram
     updateRenderExpectations();
     frame_dirty_.store(true, std::memory_order_release);
 }
+void VideoCanvas::setVideoDestination(const std::string& key, const QRectF& rect) {
+    if (video_destinations_[key] == rect) return;
+    video_destinations_[key] = rect;
+    frame_dirty_ = true;
+}
 void VideoCanvas::removeUser(const std::string& key) {
+    video_destinations_.erase(key);
     Q_ASSERT(QThread::currentThread() == thread());
     if (const auto frame = telemetry_frames_.find(key);
         frame != telemetry_frames_.end()) {
@@ -82,6 +88,7 @@ void VideoCanvas::clearUsers() {
         frame->SetRenderExpected(false, RenderExpectationReason::BindingEnded);
     }
     telemetry_frames_.clear();
+    video_destinations_.clear();
     clearBackend();
     decorations_.clear(); hovered_tile_.clear(); pressed_pin_.clear();
     frame_dirty_.store(true, std::memory_order_release);
@@ -147,12 +154,24 @@ void VideoCanvas::render() {
         const auto geometry = frameGeometry(tile.identity);
         if (tile.hasVideo && geometry.available) {
             auto content = tile;
-            content.x += 2; content.y += 2;
-            content.width = std::max(1, content.width - 4);
-            content.height = std::max(1, content.height - 4);
+            if (!video_destinations_.count(tile.identity)) {
+                content.x += 2; content.y += 2;
+                content.width = std::max(1, content.width - 4);
+                content.height = std::max(1, content.height - 4);
+            }
             drawSolid(content, float(letterboxColor.redF()), float(letterboxColor.greenF()),
                 float(letterboxColor.blueF()));
-            if (drawVideo(FitVideoTile(content, geometry))) {
+            auto destination = FitVideoTile(content, geometry);
+            if (const auto found = video_destinations_.find(tile.identity); found != video_destinations_.end()) {
+                const auto& rect = found->second;
+                // Round only in physical pixels: at 200% DPI an odd source
+                // width must not become one logical pixel (two pixels) wider.
+                const double sx = double(physical.width()) / width();
+                const double sy = double(physical.height()) / height();
+                destination = {tile.identity, qRound(rect.x()*sx), qRound(rect.y()*sy),
+                    qRound(rect.width()*sx), qRound(rect.height()*sy), false, 0, true};
+            }
+            if (drawVideo(destination)) {
                 if (const auto frame = telemetry_frames_.find(tile.identity);
                     frame != telemetry_frames_.end() && frame->second) {
                     submitted_frames.push_back(frame->second);
@@ -160,7 +179,7 @@ void VideoCanvas::render() {
             }
         }
         auto decoration = decorations_.find(tile.identity);
-        if (tile.identity != remote_input_key_ && decoration != decorations_.end() && decoration->second.painter) {
+        if (decoration != decorations_.end() && decoration->second.painter) {
             const auto image = decoration->second.painter(QSize(tile.width, tile.height),
                 geometry.available, hovered_tile_ == tile.identity);
             if (!image.isNull()) {
@@ -285,9 +304,10 @@ void VideoCanvas::updateTilePresentation(const std::string& identity, bool hasVi
 void VideoCanvas::mouseDoubleClickEvent(QMouseEvent* e) {
     const auto hit = hitTest(e->pos());
     if (e->button() == Qt::LeftButton && !hit.empty()) {
-        pressed_pin_.clear();
-        // The first click already activated the Pin button.
-        if (hitTest(e->pos(), true).empty()) emit tileDoubleClicked(QString::fromStdString(hit));
+        pressed_pin_ = hitTest(e->pos(), true);
+        // Rapidly reopening More must still activate on release; only the
+        // video body interprets a double click as a layout lock toggle.
+        if (pressed_pin_.empty()) emit tileDoubleClicked(QString::fromStdString(hit));
         e->accept();
         return;
     }

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include <QtCore/QCoreApplication>
 
@@ -67,6 +67,7 @@ class ParticipantWindowInspectionAccess;
 namespace MeetingUI {
 class MeetingEncryptionPanel;
 class RemoteControlUi;
+class SharedScreenWindow;
 
 class WhiteboardPanel;
 class AnnotationOverlayWindow;
@@ -154,6 +155,7 @@ signals:
 	void tileDoubleClicked();
 	void tileClicked();
 	void pinToggled(bool pinned);
+    void moreRequested();
 	void remoteVolumeChanged(float volume);
 	void remoteLocalMuteToggled(bool muted);
 	void presentationChanged();
@@ -548,6 +550,19 @@ private:
 	void setupWhiteboardBinding();
 	void setupRemoteControl();
 	std::unique_ptr<RemoteControlUi> _remoteControlUi;
+    void showVideoTileMenu(const QString& renderKey);
+    void detachSharedScreen(std::optional<livekit::TrackKey> key, bool local);
+    void returnSharedScreen();
+    void syncSharedScreenPlan();
+
+    bool isDetachedShareFrame(const QString& key) const;
+    bool isSharedScreenVisible() const;
+    std::unique_ptr<SharedScreenWindow> _sharedWindow;
+    std::optional<livekit::DetachedShareViewport> _detachedShareIntent;
+    uint64_t _nextSharedSurfaceId = 0;
+    uint64_t _displayedSharedSurfaceId = 0;
+    bool _sharedReturnPending = false;
+    bool _receiveRemoteVideo = true;
 	void setupVideoPagingControls();
 	void setWhiteboardVisible(bool visible);
 	void scheduleViewportIntent(bool immediate = false);

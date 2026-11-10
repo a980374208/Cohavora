@@ -29,10 +29,12 @@ bool SameViewport(const ViewportIntent& left, const ViewportIntent& right) {
         left.stage_rect.width == right.stage_rect.width &&
         left.stage_rect.height == right.stage_rect.height &&
         left.device_pixel_ratio == right.device_pixel_ratio &&
+        left.remote_video_enabled == right.remote_video_enabled &&
         left.window_visible == right.window_visible &&
         left.minimized == right.minimized &&
         left.local_participant_present == right.local_participant_present &&
-        left.local_screen_share_present == right.local_screen_share_present;
+        left.local_screen_share_present == right.local_screen_share_present &&
+        left.detached_share == right.detached_share;
 }
 
 bool SameSpeakerInput(const ActiveSpeakerInfo& left,
@@ -471,13 +473,17 @@ VideoDemandPolicy::FocusChoice VideoDemandPolicy::ChooseFocus(
     const std::vector<SeatCandidate>& videos,
     bool allow_auto_share,
     TimePoint now) {
+    const auto eligible = [&](std::optional<TrackKey> key) {
+        return key && std::any_of(videos.begin(), videos.end(),
+            [&](const auto& seat) { return seat.key == *key; }) ? key : std::nullopt;
+    };
     const auto pinned = viewport_.pinned_local
-        ? std::nullopt : ResolveIntentSeat(viewport_.pinned);
-    const auto selected_share = ResolveIntentTrack(
-        viewport_.selected_share, TrackSource::ScreenShareVideo);
+        ? std::nullopt : eligible(ResolveIntentSeat(viewport_.pinned));
+    const auto selected_share = eligible(ResolveIntentTrack(
+        viewport_.selected_share, TrackSource::ScreenShareVideo));
     const auto auto_share = allow_auto_share && current_auto_share_ &&
             IsAutoShare(*current_auto_share_)
-        ? current_auto_share_ : std::nullopt;
+        ? eligible(current_auto_share_) : std::nullopt;
 
     auto set_focus = [&](const std::optional<TrackKey>& key,
                          FocusOrigin origin) -> FocusChoice {
@@ -498,7 +504,7 @@ VideoDemandPolicy::FocusChoice VideoDemandPolicy::ChooseFocus(
         current_focus_origin_ == FocusOrigin::Pinned ||
         current_focus_origin_ == FocusOrigin::SelectedShare ||
         current_focus_origin_ == FocusOrigin::AutoShare;
-    const bool current_valid = ResolveIntentSeat(current_focus_).has_value();
+    const bool current_valid = eligible(ResolveIntentSeat(current_focus_)).has_value();
     const auto stable = ResolveIntentTrack(stable_speaker_, TrackSource::Camera);
     if (stable) {
         if (current_focus_ && *current_focus_ == *stable) {
@@ -536,11 +542,22 @@ VideoDemandPlan VideoDemandPolicy::BuildPlan(TimePoint now) {
         viewport_.local_participant_present;
     result.show_local_screen_share = local_visible &&
         viewport_.local_screen_share_present;
+    const auto* detached = viewport_.detached_share && viewport_.detached_share->surface_id
+        ? &*viewport_.detached_share : nullptr;
+    const bool detached_visible = detached && detached->visible && !detached->minimized &&
+        detached->rect.width > 0 && detached->rect.height > 0;
+    if (detached) {
+        result.detached_surface_id = detached->surface_id;
+        result.detached_local = detached->local && !detached->track &&
+            viewport_.local_screen_share_present;
+        result.show_detached_local = result.detached_local && detached_visible;
+        if (result.detached_local) result.show_local_screen_share = false;
+    }
     if (viewport_.pinned_local) {
         if ((*viewport_.pinned_local == LocalVideoTarget::Camera &&
              viewport_.local_participant_present) ||
             (*viewport_.pinned_local == LocalVideoTarget::ScreenShare &&
-             viewport_.local_screen_share_present)) {
+             viewport_.local_screen_share_present && !result.detached_local)) {
             result.pinned_local = viewport_.pinned_local;
         }
     } else {
@@ -550,6 +567,25 @@ VideoDemandPlan VideoDemandPolicy::BuildPlan(TimePoint now) {
 
     result.catalog_revision = catalog_->catalog_revision;
     result.selected_audio = SelectedAudio();
+    if (detached && !detached->local) {
+        const auto key = ResolveIntentTrack(detached->track, TrackSource::ScreenShareVideo);
+        if (key) {
+            const auto* publication = Find(*key);
+            VideoDemandPlan share;
+            const double dpr = std::isfinite(detached->device_pixel_ratio) &&
+                detached->device_pixel_ratio > 0 ? detached->device_pixel_ratio : 1.0;
+            const auto pixels = [dpr, detached_visible](int value) -> uint32_t {
+                return detached_visible ? static_cast<uint32_t>(std::min<double>(
+                    std::max(0, value) * dpr, 16384.0)) : 0;
+            };
+            AddSeat(share, SeatCandidate{publication->key, publication->source, publication},
+                VideoSeatRole::Main, {pixels(detached->rect.width), pixels(detached->rect.height)},
+                FocusOrigin::SelectedShare);
+            if (!share.visible_seats.empty()) result.detached_share = share.visible_seats.front();
+            result.selected_video = std::move(share.selected_video);
+            if (result.pinned == key) result.pinned.reset();
+        }
+    }
     AdvanceSpeaker(now);
     RefreshAutoShare();
     result.stable_speaker = ResolveIntentTrack(
@@ -565,11 +601,18 @@ VideoDemandPlan VideoDemandPolicy::BuildPlan(TimePoint now) {
         return result;
     }
 
-    const auto videos = OrderedSeats();
+    auto videos = OrderedSeats();
+    if (result.detached_share) {
+        std::erase_if(videos, [&](const auto& seat) { return seat.key == result.detached_share->key; });
+    }
+    const auto on_main = [&](const std::optional<TrackKey>& key) {
+        return key && std::any_of(videos.begin(), videos.end(),
+            [&](const auto& seat) { return seat.key == *key; });
+    };
     const bool pinned = result.pinned.has_value() || result.pinned_local.has_value();
-    const bool selected_share = ResolveIntentTrack(
-        viewport_.selected_share, TrackSource::ScreenShareVideo).has_value();
-    const bool auto_share = current_auto_share_ && IsAutoShare(*current_auto_share_);
+    const bool selected_share = on_main(ResolveIntentTrack(
+        viewport_.selected_share, TrackSource::ScreenShareVideo));
+    const bool auto_share = on_main(current_auto_share_) && IsAutoShare(*current_auto_share_);
 
     if (viewport_.mode == VideoLayoutMode::PictureInPicture) {
         BuildFocused(result, videos, VideoLayoutMode::PictureInPicture,
@@ -598,7 +641,11 @@ void VideoDemandPolicy::BuildGrid(
     const std::vector<SeatCandidate>& videos,
     uint32_t page_size,
     bool use_paging) {
+    const uint32_t reserved = plan.detached_share && plan.detached_share->width &&
+        plan.detached_share->height ? 1 : 0;
+    if (reserved) page_size = std::min(page_size, config_.video_budget - reserved);
     page_size = std::max<uint32_t>(1, page_size);
+    plan.effective_main_page_size = page_size;
     plan.page_size = page_size;
     const uint32_t local_count = use_paging
         ? static_cast<uint32_t>(plan.show_local_participant) +
@@ -667,7 +714,7 @@ void VideoDemandPolicy::BuildGrid(
         }
     }
 
-    const uint32_t remote_capacity = first_local_page ? page_size - local_count
+    const uint32_t remote_capacity = first_local_page ? (page_size > local_count ? page_size - local_count : 0)
                                                     : page_size;
     if (use_paging && plan.page != 0) {
         plan.show_local_participant = false;
@@ -778,7 +825,9 @@ void VideoDemandPolicy::AddSeat(VideoDemandPlan& plan,
                                 VideoSeatRole role,
                                 SeatExtent extent,
                                 FocusOrigin origin) {
-    if (plan.visible_seats.size() >= config_.video_budget) return;
+    const uint32_t reserved = plan.detached_share && plan.detached_share->width &&
+        plan.detached_share->height ? 1 : 0;
+    if (plan.visible_seats.size() + reserved >= config_.video_budget) return;
     VideoSeat seat;
     seat.key = candidate.key;
     seat.source = candidate.source;
@@ -856,8 +905,9 @@ void VideoDemandPolicy::AddSeat(VideoDemandPlan& plan,
     if (publication.source == TrackSource::ScreenShareVideo) seat.priority += 50;
     if (origin == FocusOrigin::Pinned) seat.priority = 500;
 
+    if (!viewport_.remote_video_enabled) seat.reason = VideoDemandReason::Hidden;
     plan.visible_seats.push_back(seat);
-    if (IsDemandable(publication) && seat.subscription_width != 0 &&
+    if (viewport_.remote_video_enabled && IsDemandable(publication) && seat.subscription_width != 0 &&
         seat.subscription_height != 0 &&
         plan.selected_video.size() < config_.video_budget &&
         !Contains(plan.selected_video, publication.key)) {
@@ -952,6 +1002,11 @@ bool VideoDemandPolicy::SamePlan(const VideoDemandPlan& left,
         left.page_count != right.page_count ||
         left.show_local_participant != right.show_local_participant ||
         left.show_local_screen_share != right.show_local_screen_share ||
+        left.detached_surface_id != right.detached_surface_id ||
+        left.detached_share != right.detached_share ||
+        left.detached_local != right.detached_local ||
+        left.show_detached_local != right.show_detached_local ||
+        left.effective_main_page_size != right.effective_main_page_size ||
         !SameOptionalKey(left.focused, right.focused) ||
         left.focused_local != right.focused_local ||
         !SameOptionalKey(left.pinned, right.pinned) ||

@@ -5627,4 +5627,92 @@ Sign in with your own account in a client configured for the same meeting servic
         <translation>其他指标</translation>
     </message>
 </context>
+
+<context>
+    <name>MeetingUI::SharedScreenWindow</name>
+    <message><source>Watching · %1 × %2 · %3</source><translation>观看中 · %1 × %2 · %3</translation></message>
+    <message><source>Full screen</source><translation>全屏</translation></message>
+    <message><source>Exit full screen</source><translation>退出全屏</translation></message>
+    <message><source>More</source><translation>更多</translation></message>
+    <message><source>Fit window to content</source><translation>窗口适应画面</translation></message>
+    <message><source>Always on top</source><translation>窗口置顶</translation></message>
+    <message><source>Keep toolbar expanded</source><translation>固定工具栏</translation></message>
+    <message><source>Minimize</source><translation>最小化</translation></message>
+    <message><source>Expand toolbar</source><translation>展开工具栏</translation></message>
+    <message>
+        <source>Shared screen — Cohavora</source>
+        <translation>共享屏幕 — Cohavora</translation>
+    </message>
+    <message>
+        <source>Fit to window</source>
+        <translation>自适应</translation>
+    </message>
+    <message>
+        <source>Return to meeting</source>
+        <translation>回到会议</translation>
+    </message>
+    <message>
+        <source>Waiting for shared screen…</source>
+        <translation>正在等待共享画面…</translation>
+    </message>
+    <message>
+        <source>%1 is sharing</source>
+        <translation>%1 正在共享</translation>
+    </message>
+    <message>
+        <source>Watching · %1 × %2</source>
+        <translation>正在观看 · %1 × %2</translation>
+    </message>
+</context>
+
+<context>
+    <name>MeetingUI::MeetingRoomWindow</name>
+    <message><source>Unmute</source><translation>解除静音</translation></message>
+    <message><source>Request unmute</source><translation>请求解除静音</translation></message>
+    <message><source>Mute</source><translation>静音</translation></message>
+    <message><source>Stop video</source><translation>停止视频</translation></message>
+    <message><source>Start video</source><translation>开启视频</translation></message>
+    <message><source>Request video</source><translation>请求开启视频</translation></message>
+    <message><source>End remote control</source><translation>结束远程控制</translation></message>
+    <message><source>Remote control</source><translation>远程控制</translation></message>
+    <message><source>Open in separate window</source><translation>独立窗口</translation></message>
+    <message><source>For my layout</source><translation>对我的布局视图</translation></message>
+    <message><source>Unlock this view</source><translation>取消锁定该成员的画面</translation></message>
+    <message><source>Lock this view</source><translation>锁定该成员的画面</translation></message>
+    <message><source>Stop receiving all other video</source><translation>停止接收所有他人视频</translation></message>
+    <message><source>Resume receiving other video</source><translation>恢复接收所有他人视频</translation></message>
+    <message>
+        <source>Open shared screen</source>
+        <translation>独立窗口</translation>
+    </message>
+    <message>
+        <source>Locate shared screen</source>
+        <translation>定位共享窗口</translation>
+    </message>
+    <message>
+        <source>End remote control before opening a separate window.</source>
+        <translation>请先结束远程控制，再打开独立窗口。</translation>
+    </message>
+    <message>
+        <source>Separate viewing is available with the DX11 or CPU video backend.</source>
+        <translation>独立观看支持 DX11 或 CPU 视频后端。</translation>
+    </message>
+    <message>
+        <source>The shared screen is open in a separate window.</source>
+        <translation>共享画面已在独立窗口中打开。</translation>
+    </message>
+    <message>
+        <source>You</source>
+        <translation>你</translation>
+    </message>
+    <message>
+        <source>Waiting for shared screen…</source>
+        <translation>正在等待共享画面…</translation>
+    </message>
+    <message>
+        <source>Screen sharing has ended.</source>
+        <translation>共享已结束。</translation>
+    </message>
+</context>
+<context><name>MeetingUI::VideoTileWidget</name><message><source>More actions</source><translation>更多操作</translation></message></context>
 </TS>
