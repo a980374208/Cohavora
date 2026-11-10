@@ -390,8 +390,11 @@ bool ModuleVideoCanvas::beginFrame(QSize& pixels) {
 void ModuleVideoCanvas::AddCommand(const VideoTileRect& tile, lk_render_resource_id id, float r, float g, float b) {
     if (failed_ || !building_) return;
     if (building_->commands.size() >= kMaxCommands) { fail(RenderGpuFailure::ResourceLimit); return; }
+    const auto clip = tile.clip.value_or(VideoClipRect{0, 0,
+        int(building_->target.pixel_width), int(building_->target.pixel_height)});
+    if (tile.width <= 0 || tile.height <= 0 || clip.width <= 0 || clip.height <= 0) return;
     building_->commands.push_back({id, {tile.x, tile.y, uint32_t(tile.width), uint32_t(tile.height)},
-        {0, 0, building_->target.pixel_width, building_->target.pixel_height}, {r, g, b, 1}});
+        {clip.x, clip.y, uint32_t(clip.width), uint32_t(clip.height)}, {r, g, b, 1}});
 }
 void ModuleVideoCanvas::drawSolid(const VideoTileRect& tile, float r, float g, float b) { AddCommand(tile, {}, r, g, b); }
 bool ModuleVideoCanvas::drawVideo(const VideoTileRect& tile) {

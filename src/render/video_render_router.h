@@ -9,6 +9,7 @@
 #include <unordered_map>
 
 #include "render/owned_i420_frame.h"
+#include "../core/video_capacity.h"
 
 namespace livekit::render {
 
@@ -26,7 +27,8 @@ public:
         uint64_t dropped_capacity = 0;
     };
 
-    explicit VideoRenderRouter(uint64_t generation, size_t max_active_tracks = 16);
+    explicit VideoRenderRouter(uint64_t generation,
+                               size_t max_active_tracks = kMaximumRemoteVideoTracks);
 
     VideoRenderRouter(const VideoRenderRouter&) = delete;
     VideoRenderRouter& operator=(const VideoRenderRouter&) = delete;

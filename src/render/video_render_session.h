@@ -12,6 +12,7 @@
 
 #include "src/core/track.h"
 #include "src/core/participant_event.h"
+#include "../core/video_capacity.h"
 #include "src/render/qt_cpu_video_renderer.h"
 #include "src/render/video_render_router.h"
 #include "src/render/local_video_render_input.h"
@@ -77,7 +78,7 @@ public:
     };
 
     explicit VideoRenderSession(FrameReadyCallback frame_ready_callback,
-                                size_t max_active_tracks = 16);
+                                size_t max_active_tracks = kMaximumRemoteVideoTracks);
     ~VideoRenderSession();
 
     VideoRenderSession(const VideoRenderSession&) = delete;

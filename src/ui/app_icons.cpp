@@ -20,7 +20,11 @@ public:
         painter->translate(rect.x() + (rect.width() - side) / 2., rect.y() + (rect.height() - side) / 2.);
         painter->scale(side / 24., side / 24.);
         painter->setRenderHint(QPainter::Antialiasing);
+        const bool layoutIcon = _kind == Icon::LayoutGrid || _kind == Icon::LayoutRight ||
+            _kind == Icon::LayoutTop || _kind == Icon::LayoutUpperL || _kind == Icon::LayoutLowerL ||
+            _kind == Icon::LayoutFloating || _kind == Icon::ChevronDown;
         const auto color = mode == QIcon::Selected ? AppTheme::color(ColorRole::OnAccent)
+            : layoutIcon ? AppTheme::color(mode == QIcon::Disabled ? ColorRole::TextMuted : ColorRole::Accent)
             : QApplication::palette().color(
                 mode == QIcon::Disabled ? QPalette::Disabled : QPalette::Active, QPalette::WindowText);
         painter->setPen(QPen(color, 1.8, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
@@ -57,6 +61,43 @@ public:
             painter->drawEllipse(QRectF(3, 3, 18, 18));
             painter->drawPoint(QPointF(12, 7));
             painter->drawLine(QPointF(12, 11), QPointF(12, 17));
+            break;
+        case Icon::LayoutGrid:
+            for (const auto y : {4., 14.})
+                for (const auto x : {4., 14.})
+                    painter->drawRoundedRect(QRectF(x, y, 6, 6), 1, 1);
+            break;
+        case Icon::LayoutRight:
+            painter->drawRoundedRect(QRectF(3, 4, 11, 16), 1, 1);
+            for (const auto y : {4., 10., 16.})
+                painter->drawRoundedRect(QRectF(17, y, 4, 4), .6, .6);
+            break;
+        case Icon::LayoutTop:
+            for (const auto x : {3., 10., 17.})
+                painter->drawRoundedRect(QRectF(x, 4, 4, 4), .6, .6);
+            painter->drawRoundedRect(QRectF(3, 11, 18, 9), 1, 1);
+            break;
+        case Icon::LayoutUpperL:
+        case Icon::LayoutLowerL: {
+            const bool upper = _kind == Icon::LayoutUpperL;
+            const auto stripY = upper ? 3. : 17.;
+            const auto mainY = upper ? 10. : 3.;
+            for (const auto x : {3., 10., 17.})
+                painter->drawRoundedRect(QRectF(x, stripY, 4, 4), .6, .6);
+            painter->drawRoundedRect(QRectF(3, mainY, 11, 11), 1, 1);
+            for (const auto y : {mainY, mainY + 7.})
+                painter->drawRoundedRect(QRectF(17, y, 4, 4), .6, .6);
+            break;
+        }
+        case Icon::LayoutFloating:
+            painter->drawRoundedRect(QRectF(3, 3, 18, 18), 1, 1);
+            painter->drawRoundedRect(QRectF(14, 6, 5, 12), .6, .6);
+            painter->drawLine(QPointF(14, 10), QPointF(19, 10));
+            painter->drawLine(QPointF(14, 14), QPointF(19, 14));
+            break;
+        case Icon::ChevronDown:
+            painter->drawLine(QPointF(6, 9), QPointF(12, 15));
+            painter->drawLine(QPointF(12, 15), QPointF(18, 9));
             break;
         }
         painter->restore();

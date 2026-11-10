@@ -5627,4 +5627,120 @@ Sign in with your own account in a client configured for the same meeting servic
         <translation>其他指标</translation>
     </message>
 </context>
+
+<context>
+    <name>MeetingRoomWindow</name>
+    <message>
+        <source>Layout</source>
+        <translation>布局</translation>
+    </message>
+    <message>
+        <source>Close</source>
+        <translation>关闭</translation>
+    </message>
+    <message>
+        <source>Gallery</source>
+        <translation>宫格布局</translation>
+    </message>
+    <message>
+        <source>Right layout</source>
+        <translation>右侧布局</translation>
+    </message>
+    <message>
+        <source>Top layout</source>
+        <translation>顶部布局</translation>
+    </message>
+    <message>
+        <source>Upper L layout</source>
+        <translation>上 L 布局</translation>
+    </message>
+    <message>
+        <source>Lower L layout</source>
+        <translation>下 L 布局</translation>
+    </message>
+    <message>
+        <source>Floating layout</source>
+        <translation>悬浮布局</translation>
+    </message>
+    <message>
+        <source>Videos per page</source>
+        <translation>每屏视频数量</translation>
+    </message>
+    <message>
+        <source>Speaker layouts</source>
+        <translation>演讲者布局</translation>
+    </message>
+    <message>
+        <source>Previous layouts</source>
+        <translation>上一个布局</translation>
+    </message>
+    <message>
+        <source>More layouts</source>
+        <translation>更多布局</translation>
+    </message>
+    <message>
+        <source>Show only speaking people in the member list</source>
+        <translation>列表仅展示正在说话的人</translation>
+    </message>
+    <message>
+        <source>%1 per screen</source>
+        <translation>一屏 %1 等分</translation>
+    </message>
+    <message>
+        <source>Right member list</source>
+        <translation>右侧成员列表</translation>
+    </message>
+    <message>
+        <source>Top member list</source>
+        <translation>顶部成员列表</translation>
+    </message>
+    <message>
+        <source>Upper L</source>
+        <translation>上 L 型</translation>
+    </message>
+    <message>
+        <source>Lower L</source>
+        <translation>下 L 型</translation>
+    </message>
+    <message>
+        <source>Floating list</source>
+        <translation>悬浮列表</translation>
+    </message>
+    <message>
+        <source>Video pages</source>
+        <translation>视频分页</translation>
+    </message>
+    <message>
+        <source>Previous video page</source>
+        <translation>上一页视频</translation>
+    </message>
+    <message>
+        <source>Next video page</source>
+        <translation>下一页视频</translation>
+    </message>
+    <message>
+        <source>Jump to page</source>
+        <translation>跳转页码</translation>
+    </message>
+    <message>
+        <source>Page %1 of %2. Jump to page.</source>
+        <translation>第 %1 页，共 %2 页。点击跳转。</translation>
+    </message>
+    <message>
+        <source>Page 1 to %1</source>
+        <translation>页码范围：1 至 %1</translation>
+    </message>
+    <message>
+        <source>Page number</source>
+        <translation>页码</translation>
+    </message>
+    <message>
+        <source>Go</source>
+        <translation>跳转</translation>
+    </message>
+    <message>
+        <source>Enter a page from 1 to %1.</source>
+        <translation>请输入 1 至 %1 之间的页码。</translation>
+    </message>
+</context>
 </TS>

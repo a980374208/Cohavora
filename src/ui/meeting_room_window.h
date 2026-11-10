@@ -40,6 +40,7 @@
 #include <QtCore/QTimer>
 #include <QtCore/QTime>
 #include <QtGui/QImage>
+#include <QtGui/QFont>
 #include <QtGui/QPainter>
 #include <memory>
 #include <vector>
@@ -67,6 +68,8 @@ class ParticipantWindowInspectionAccess;
 namespace MeetingUI {
 class MeetingEncryptionPanel;
 class RemoteControlUi;
+class MeetingLayoutPopup;
+class MeetingVideoPager;
 
 class WhiteboardPanel;
 class AnnotationOverlayWindow;
@@ -149,6 +152,9 @@ public:
 	// UI-thread-only decoration cache. Video pixels never pass through this image.
 	QImage hardwareDecoration(const QSize &pixels, bool hasFrame, bool hovered);
 	QRect pinButtonRect() const;
+	// Tile-local visible part; the full widget size still owns video fitting.
+	void setLayoutClip(const QRect &visible);
+	QRect layoutClipRect() const { return _layoutClip.value_or(rect()); }
 
 signals:
 	void tileDoubleClicked();
@@ -171,6 +177,14 @@ protected:
 
 private:
 	friend class ::ParticipantWindowInspectionAccess;
+	std::optional<QRect> _layoutClip;
+	struct NameTagPresentation {
+		QRect rect;
+		QFont font;
+		QString text;
+		bool compact = false;
+	};
+	NameTagPresentation bottomNameTag(const QRect &r) const;
 	void drawAvatarPlaceholder(QPainter &p, const QRect &r);
 	void drawVideoFrame(QPainter &p, const QRect &r);
 	void drawBottomNameTag(QPainter &p, const QRect &r);
@@ -238,6 +252,8 @@ public:
 	void setActiveSpeaker(const QString &speakerName);
 	void setMeetingId(const QString &meetingId);
 	void setTelemetrySnapshot(const QVariantMap &snapshot);
+	void setLayoutSelection(VideoViewMode mode, livekit::SpeakerLayout speakerLayout);
+	QToolButton *layoutButton() const { return _layoutButton; }
 
 	rpl::producer<VideoViewMode> viewModeChanged() const { return _viewModeStream.events(); }
 	rpl::producer<> consoleClicked() const { return _consoleStream.events(); }
@@ -250,12 +266,14 @@ public:
 
 signals:
 	void telemetryDetailsRequested();
+	void layoutMenuRequested();
 	// Native child HWNDs (such as Dx11VideoCanvas) may prevent the top-level
 	// WM_NCHITTEST path from reaching this QWidget. Blank title-bar presses
 	// therefore request a system drag explicitly as a reliable fallback.
 	void windowDragRequested();
 
 protected:
+	bool eventHook(QEvent *event) override;
 	void paintEvent(QPaintEvent *e) override;
 	void resizeEvent(QResizeEvent *e) override;
 	void mouseMoveEvent(QMouseEvent *e) override;
@@ -277,6 +295,7 @@ private:
 	VideoViewMode _currentViewMode = VideoViewMode::Grid;
 
 	QRect _layoutRect;
+	QToolButton *_layoutButton = nullptr;
 	QRect _qualityRect;
 	QPushButton *_uiaTelemetry = nullptr;
 	QRect _consoleRect;
@@ -549,6 +568,8 @@ private:
 	void setupRemoteControl();
 	std::unique_ptr<RemoteControlUi> _remoteControlUi;
 	void setupVideoPagingControls();
+	void saveVideoLayoutPreferences();
+	void updateStageGeometry();
 	void setWhiteboardVisible(bool visible);
 	void scheduleViewportIntent(bool immediate = false);
 	void submitViewportIntent();
@@ -676,13 +697,13 @@ private:
 	uint64_t _viewportRevision = 0;
 	uint32_t _videoPage = 0;
 	uint32_t _videoPageSize = 9;
+	livekit::SpeakerLayout _speakerLayout = livekit::SpeakerLayout::Right;
+	bool _speakingOnly = false;
+	bool _persistVideoLayoutPreferences = false;
 	bool _logicalWindowVisible = true;
 	QTimer *_viewportIntentTimer = nullptr;
-	QWidget *_videoPagingControls = nullptr;
-	QToolButton *_previousVideoPage = nullptr;
-	QToolButton *_nextVideoPage = nullptr;
-	QComboBox *_videoPageSizeControl = nullptr;
-	QLabel *_videoPageLabel = nullptr;
+	MeetingVideoPager *_videoPagingControls = nullptr;
+	MeetingLayoutPopup *_layoutPopup = nullptr;
 
 	// 参会状态
 	int _participantCount = 1;

@@ -39,11 +39,13 @@ public:
     bool hasVideo(const std::string& key) const { return frameGeometry(key).available; }
     void setTilesLayout(const std::vector<VideoTileRect>& tiles);
     using DecorationPainter = std::function<QImage(const QSize&, bool, bool)>;
-    void setTileDecoration(const std::string& key, DecorationPainter painter, const QRect& pinRect);
+    using ToolTipProvider = std::function<QString()>;
+    void setTileDecoration(const std::string& key, DecorationPainter painter, const QRect& pinRect,
+                           ToolTipProvider toolTip = {});
     void updateTilePresentation(const std::string& key, bool hasVideo);
     void setStageOverlay(QWidget* widget);
     QRectF videoContentRect(const std::string& key) const;
-    void setRemoteInputKey(std::string key) { remote_input_key_ = std::move(key); frame_dirty_ = true; }
+    void setRemoteInputKey(std::string key);
 signals:
     void rendererInitialized();
     void rendererUnavailable();
@@ -85,8 +87,14 @@ private:
     friend class ::ParticipantWindowInspectionAccess;
     std::string hitTest(const QPoint&, bool pinOnly = false) const;
     void updateHovered(const QPoint&);
+    void updateTileToolTip();
+    void cancelTileToolTip();
+    bool canShowTileToolTip(const QPoint&) const;
+    void scheduleTileToolTip(const QPoint&);
+    void showTileToolTip();
     struct Decoration {
         DecorationPainter painter;
+        ToolTipProvider toolTip;
         QRect pinRect;
         qint64 cacheKey = 0;
     };
@@ -100,6 +108,9 @@ private:
     std::string remote_input_key_;
     QSize last_physical_size_;
     QTimer* fps_timer_ = nullptr;
+    QTimer* tool_tip_timer_ = nullptr;
+    std::string tool_tip_key_;
+    QString visible_tool_tip_;
     std::atomic<bool> frame_dirty_{false};
     bool renderer_unavailable_emitted_ = false;
     std::unique_ptr<RenderDiagnostics> diagnostics_;

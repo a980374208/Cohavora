@@ -1,5 +1,91 @@
 /* Application widget variants. Selected with AppTheme::setStyleVariant. */
 
+/* Meeting layout and page popups are separate native windows above the video
+   canvas; all colors follow the same live theme tokens as the main window. */
+QToolButton[uiStyle="meeting-layout-trigger"] {
+    background: @accent-soft@;
+    color: @accent@;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    padding: 5px 10px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 13px;
+    font-weight: 500;
+}
+QToolButton[uiStyle="meeting-layout-trigger"]:hover,
+QToolButton[uiStyle="meeting-layout-trigger"]:focus {
+    border-color: @accent@;
+}
+QToolButton[uiStyle="meeting-layout-trigger"]:pressed {
+    background: @pressed@;
+    border-color: @accent@;
+}
+QToolButton[uiStyle="meeting-layout-trigger"]:disabled {
+    background: @surface-alt@;
+    color: @text-muted@;
+}
+
+[uiStyle="meeting-layout-popup"] QLabel,
+[uiStyle="meeting-layout-popup"] QCheckBox {
+    color: @text@;
+    background: transparent;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+[uiStyle="meeting-layout-popup"] QScrollArea,
+[uiStyle="meeting-layout-popup"] QScrollArea > QWidget,
+[uiStyle="meeting-layout-popup"] QScrollArea > QWidget > QWidget {
+    background: transparent;
+    border: none;
+}
+[uiStyle="meeting-layout-popup"] QToolButton,
+[uiStyle="meeting-video-pager"] QToolButton {
+    color: @text@;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 5px;
+    padding: 3px 6px;
+    font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    font-size: 12px;
+}
+[uiStyle="meeting-layout-popup"] QToolButton:hover,
+[uiStyle="meeting-layout-popup"] QToolButton:checked,
+[uiStyle="meeting-video-pager"] QToolButton:hover {
+    color: @accent@;
+    background: @accent-soft@;
+}
+[uiStyle="meeting-layout-popup"] QToolButton:focus,
+[uiStyle="meeting-video-pager"] QToolButton:focus {
+    border-color: @accent@;
+}
+[uiStyle="meeting-layout-popup"] QToolButton:pressed,
+[uiStyle="meeting-video-pager"] QToolButton:pressed {
+    background: @pressed@;
+}
+[uiStyle="meeting-layout-popup"] QToolButton:disabled,
+[uiStyle="meeting-video-pager"] QToolButton:disabled {
+    color: @text-muted@;
+}
+[uiStyle="meeting-layout-popup"] QLineEdit {
+    color: @text@;
+    background: @surface-alt@;
+    border: 1px solid @border@;
+    border-radius: 5px;
+    padding: 5px 7px;
+    font-size: 13px;
+}
+[uiStyle="meeting-layout-popup"] QLineEdit:focus {
+    border-color: @accent@;
+}
+[uiStyle="meeting-layout-popup"] QLabel#videoPageJumpError {
+    color: @danger@;
+}
+[uiStyle="meeting-video-pager"] QToolButton#previousVideoPage,
+[uiStyle="meeting-video-pager"] QToolButton#nextVideoPage {
+    font-size: 22px;
+    padding: 0;
+}
+
 QWidget[uiStyle="whiteboard-panel"],
 [uiStyle="whiteboard-panel"] QScrollArea,
 [uiStyle="whiteboard-panel"] QScrollArea > QWidget > QWidget,
@@ -1652,6 +1738,7 @@ QLabel[uiStyle="meeting-room-window-recoverybanner-4"][uiStyle="meeting-room-win
 }
 
 QPushButton[uiStyle="meeting-stage-action"],
+QToolButton[uiStyle="meeting-stage-action"],
 [uiStyle="meeting-room-window-screensharebanner"] QPushButton {
     min-height: 28px;
     background: @surface@;
@@ -1664,6 +1751,8 @@ QPushButton[uiStyle="meeting-stage-action"],
 
 QPushButton[uiStyle="meeting-stage-action"]:hover,
 QPushButton[uiStyle="meeting-stage-action"]:focus,
+QToolButton[uiStyle="meeting-stage-action"]:hover,
+QToolButton[uiStyle="meeting-stage-action"]:focus,
 [uiStyle="meeting-room-window-screensharebanner"] QPushButton:hover,
 [uiStyle="meeting-room-window-screensharebanner"] QPushButton:focus {
     background: @hover@;
@@ -1671,11 +1760,13 @@ QPushButton[uiStyle="meeting-stage-action"]:focus,
 }
 
 QPushButton[uiStyle="meeting-stage-action"]:pressed,
+QToolButton[uiStyle="meeting-stage-action"]:pressed,
 [uiStyle="meeting-room-window-screensharebanner"] QPushButton:pressed {
     background: @pressed@;
 }
 
 QPushButton[uiStyle="meeting-stage-action"]:disabled,
+QToolButton[uiStyle="meeting-stage-action"]:disabled,
 [uiStyle="meeting-room-window-screensharebanner"] QPushButton:disabled {
     background: @surface-alt@;
     color: @text-muted@;

@@ -12,11 +12,13 @@
 namespace livekit {
 
 struct VideoDemandPolicyConfig {
-    uint32_t video_budget = 16;
+    uint32_t video_budget = kMaximumRemoteVideoTracks;
     uint32_t default_grid_page_size = 9;
-    uint32_t sidebar_limit = 4;
+    uint32_t sidebar_limit = kMaximumRemoteVideoTracks;
     std::chrono::milliseconds speaker_candidate_delay{1000};
     std::chrono::milliseconds focus_minimum_residence{3000};
+    std::chrono::milliseconds thumbnail_speaker_delay{150};
+    std::chrono::milliseconds thumbnail_speaker_retention{2000};
 };
 
 class VideoDemandPolicy final {
@@ -84,6 +86,13 @@ private:
         const RemotePublicationInfo* publication = nullptr;
     };
 
+    struct ThumbnailSpeaker {
+        ParticipantKey key;
+        bool is_local = false;
+        TimePoint started;
+        std::optional<TimePoint> stopped;
+    };
+
     const RemotePublicationInfo* Find(const TrackKey& key) const;
     std::vector<const RemotePublicationInfo*> OrderedVideo() const;
     std::vector<SeatCandidate> OrderedSeats() const;
@@ -96,6 +105,10 @@ private:
     bool IsAutoShare(const TrackKey& key) const;
     bool IsDemandable(const RemotePublicationInfo& publication) const;
     void AdvanceSpeaker(TimePoint now);
+    bool IsThumbnailSpeaker(const ParticipantKey& key, bool is_local,
+                            TimePoint now) const;
+    void FinalizeLayout(VideoDemandPlan& plan);
+    SeatExtent RectExtent(const LogicalViewport& rect) const;
     void RefreshAutoShare();
     FocusChoice ChooseFocus(const std::vector<SeatCandidate>& videos,
                             bool allow_auto_share,
@@ -116,10 +129,6 @@ private:
                  SeatExtent extent,
                  FocusOrigin origin = FocusOrigin::None);
     SeatExtent StageExtent() const;
-    SeatExtent GridExtent(uint32_t page_size) const;
-    SeatExtent MainExtent(bool has_sidebar) const;
-    SeatExtent SidebarExtent(uint32_t visible_count) const;
-    SeatExtent PictureInPictureExtent() const;
     static uint32_t NormalizePageSize(uint32_t requested,
                                       uint32_t default_size);
     static VideoDemandReason ReasonForFocus(FocusOrigin origin,
@@ -134,6 +143,7 @@ private:
     ViewportIntent viewport_;
     bool has_viewport_ = false;
     std::vector<ActiveSpeakerInfo> speakers_;
+    std::vector<ThumbnailSpeaker> thumbnail_speakers_;
     std::optional<TrackKey> speaker_candidate_;
     std::optional<TimePoint> speaker_candidate_since_;
     std::optional<TrackKey> stable_speaker_;

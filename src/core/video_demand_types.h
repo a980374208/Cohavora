@@ -1,6 +1,7 @@
 #pragma once
 
 #include "participant_event.h"
+#include "video_capacity.h"
 
 #include <cstdint>
 #include <optional>
@@ -8,6 +9,14 @@
 #include <vector>
 
 namespace livekit {
+
+enum class SpeakerLayout {
+    Right,
+    Top,
+    TopLeft,
+    BottomLeft,
+    Floating,
+};
 
 enum class VideoLayoutMode {
     Auto,
@@ -55,6 +64,8 @@ struct LogicalViewport {
     int y = 0;
     int width = 0;
     int height = 0;
+
+    bool operator==(const LogicalViewport&) const = default;
 };
 
 // Local previews are layout targets, never remote subscription TrackKeys.
@@ -68,6 +79,8 @@ struct ViewportIntent {
     uint64_t view_revision = 0;
     uint64_t catalog_revision = 0;
     VideoLayoutMode mode = VideoLayoutMode::Auto;
+    SpeakerLayout speaker_layout = SpeakerLayout::Right;
+    bool speaking_only = false;
     uint32_t page = 0;
     uint32_t page_size = 9;
     std::optional<TrackKey> page_anchor;
@@ -76,7 +89,10 @@ struct ViewportIntent {
     std::optional<LocalVideoTarget> pinned_local;
     std::optional<TrackKey> selected_share;
     StageContent stage_content = StageContent::Video;
+    // Full available area before the optional paging row is reserved. A zero
+    // row height preserves callers that already supply the final video area.
     LogicalViewport stage_rect;
+    int paging_bar_height = 0;
     double device_pixel_ratio = 1.0;
     bool window_visible = true;
     bool minimized = false;
@@ -91,6 +107,7 @@ struct VideoSeat {
     TrackKey key;
     TrackSource source = TrackSource::Unknown;
     VideoSeatRole role = VideoSeatRole::Grid;
+    LogicalViewport rect;
     uint32_t width = 0;
     uint32_t height = 0;
     VideoQualityTier quality = VideoQualityTier::None;
@@ -113,6 +130,8 @@ struct VideoDemandPlan {
     uint64_t catalog_revision = 0;
     VideoLayoutMode requested_mode = VideoLayoutMode::Auto;
     VideoLayoutMode mode = VideoLayoutMode::Auto;
+    SpeakerLayout speaker_layout = SpeakerLayout::Right;
+    bool speaking_only = false;
     StageContent stage_content = StageContent::Video;
     uint32_t page = 0;
     uint32_t page_size = 0;
@@ -130,6 +149,8 @@ struct VideoDemandPlan {
     VideoDemandReason reason = VideoDemandReason::Hidden;
     bool show_local_participant = false;
     bool show_local_screen_share = false;
+    std::optional<LogicalViewport> local_participant_rect;
+    std::optional<LogicalViewport> local_screen_share_rect;
 };
 
 struct RemoteTrackDemand {

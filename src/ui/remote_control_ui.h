@@ -11,6 +11,7 @@
 #include <QtWidgets/QWidget>
 #include <functional>
 #include <map>
+#include <optional>
 #include <set>
 #include <vector>
 
@@ -29,6 +30,8 @@ struct RemoteControlTarget {
     // missing share (for example, while paging or showing the whiteboard).
     QPointer<QWidget> widget;
     QRectF content; // widget-local, logical pixels; actual displayed video
+    // Independent visible viewport. Keep content complete for pointer mapping.
+    std::optional<QRectF> inputClip;
 };
 class RemoteControlUi final : public QObject {
 public:

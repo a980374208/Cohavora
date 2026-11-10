@@ -3,7 +3,10 @@
 #include <QtGui/QIcon>
 
 namespace MeetingUI::AppTheme {
-enum class Icon { Close, Details, Video, Audio, Information };
+enum class Icon {
+    Close, Details, Video, Audio, Information,
+    LayoutGrid, LayoutRight, LayoutTop, LayoutUpperL, LayoutLowerL, LayoutFloating, ChevronDown,
+};
 // Theme icons render at the requested size, without image-format discovery or
 // decoding every standard-icon resolution during window construction.
 QIcon icon(Icon kind);

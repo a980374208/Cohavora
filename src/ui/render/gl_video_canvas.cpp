@@ -469,8 +469,11 @@ bool GlVideoCanvas::beginFrame(QSize& pixels) {
     return true;
 }
 void GlVideoCanvas::addCommand(const VideoTileRect& tile, lk_render_resource_id id, float r, float g, float b) {
+    const auto clip = tile.clip.value_or(VideoClipRect{0, 0,
+        int(building_->target.pixel_width), int(building_->target.pixel_height)});
+    if (tile.width <= 0 || tile.height <= 0 || clip.width <= 0 || clip.height <= 0) return;
     building_->commands.push_back({id, {tile.x, tile.y, uint32_t(tile.width), uint32_t(tile.height)},
-        {0, 0, building_->target.pixel_width, building_->target.pixel_height}, {r, g, b, 1}});
+        {clip.x, clip.y, uint32_t(clip.width), uint32_t(clip.height)}, {r, g, b, 1}});
 }
 void GlVideoCanvas::drawSolid(const VideoTileRect& tile, float r, float g, float b) { addCommand(tile, {}, r, g, b); }
 bool GlVideoCanvas::drawVideo(const VideoTileRect& tile) {

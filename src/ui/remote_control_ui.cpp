@@ -36,7 +36,12 @@ namespace MeetingUI {
 namespace rc = livekit::remote_control;
 namespace {
 bool SelectableTarget(const RemoteControlTarget& target) {
-    return target.widget && target.widget->isVisible() && target.content.width() > 1 && target.content.height() > 1;
+    if (!target.widget || !target.widget->isVisible() ||
+        target.content.width() <= 1 || target.content.height() <= 1) return false;
+    // A clipped thumbnail can expose its border while the fitted desktop is
+    // entirely hidden. Input admission uses visible content; pointer mapping
+    // continues to use the complete video rectangle.
+    return !target.inputClip || !target.content.intersected(*target.inputClip).isEmpty();
 }
 #if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
 const char* ProbeState(rc::State state) {
@@ -210,8 +215,7 @@ void RemoteControlUi::refreshTargets() {
 }
 std::optional<RemoteControlTarget> RemoteControlUi::target() const {
     for (auto t : targets_()) if (t.track.toStdString() == projection_.track &&
-        t.identity.toStdString() == projection_.peer && t.widget && t.widget->isVisible() &&
-        t.content.width() > 1 && t.content.height() > 1) return t;
+        t.identity.toStdString() == projection_.peer && SelectableTarget(t)) return t;
     return {};
 }
 #if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
@@ -513,6 +517,15 @@ bool RemoteControlUi::eventFilter(QObject* watched,QEvent* event) {
     }
     const auto t = target();
     if (!t || watched != t->widget) return false;
+    const auto insideInputClip = [&](const QPointF& point) {
+        if (!t->inputClip) return true;
+        const auto& clip = *t->inputClip;
+        // Layout extents use an exclusive right/bottom edge, including when a
+        // partial card ends immediately above another strip.
+        return clip.width() > 0 && clip.height() > 0 &&
+            point.x() >= clip.left() && point.x() < clip.right() &&
+            point.y() >= clip.top() && point.y() < clip.bottom();
+    };
     // The activation click is local UI intent, not an application click on
     // the remote desktop. Consume its matching release even if Ready arrived.
     if (activationClick_) {
@@ -522,7 +535,8 @@ bool RemoteControlUi::eventFilter(QObject* watched,QEvent* event) {
     if (projection_.state == rc::State::AwaitingActivation) {
         if (event->type() == QEvent::MouseButtonPress) {
             const auto* mouse = static_cast<QMouseEvent*>(event);
-            if (mouse->button() == Qt::LeftButton && t->content.contains(mouse->localPos())) {
+            if (mouse->button() == Qt::LeftButton && t->content.contains(mouse->localPos()) &&
+                insideInputClip(mouse->localPos())) {
                 activationClick_ = true; activate();
             }
             return true;
@@ -531,7 +545,8 @@ bool RemoteControlUi::eventFilter(QObject* watched,QEvent* event) {
     }
     if (localPaused_ && event->type() == QEvent::MouseButtonPress) {
         const auto* mouse = static_cast<QMouseEvent*>(event);
-        if (mouse->button() == Qt::LeftButton && t->content.contains(mouse->localPos())) {
+        if (mouse->button() == Qt::LeftButton && t->content.contains(mouse->localPos()) &&
+            insideInputClip(mouse->localPos())) {
             activationClick_ = true; t->widget->setFocus(Qt::MouseFocusReason); tick();
         }
         return true;
@@ -558,6 +573,7 @@ bool RemoteControlUi::eventFilter(QObject* watched,QEvent* event) {
     if (!mouse && event->type() != QEvent::Wheel) return false;
     if (localPaused_ || projection_.inputPaused) return true;
     const auto point = mouse ? static_cast<QMouseEvent*>(event)->localPos() : static_cast<QWheelEvent*>(event)->position();
+    if (!insideInputClip(point)) { if (pointerDown_) pause(true); return true; }
     const auto normalized = rc::NormalizePointer(point.x(),point.y(),t->content.left(),t->content.top(),
         t->content.width(),t->content.height());
     if (!normalized) { if (pointerDown_) pause(true); return true; }

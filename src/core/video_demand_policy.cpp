@@ -1,4 +1,5 @@
 #include "video_demand_policy.h"
+#include "video_layout_geometry.h"
 
 #include <algorithm>
 #include <cmath>
@@ -18,6 +19,8 @@ bool SameViewport(const ViewportIntent& left, const ViewportIntent& right) {
     return left.coordinator_session == right.coordinator_session &&
         left.catalog_revision == right.catalog_revision &&
         left.mode == right.mode && left.page == right.page &&
+        left.speaker_layout == right.speaker_layout &&
+        left.speaking_only == right.speaking_only &&
         left.page_size == right.page_size &&
         SameOptionalKey(left.page_anchor, right.page_anchor) &&
         SameOptionalKey(left.pinned, right.pinned) &&
@@ -28,6 +31,7 @@ bool SameViewport(const ViewportIntent& left, const ViewportIntent& right) {
         left.stage_rect.y == right.stage_rect.y &&
         left.stage_rect.width == right.stage_rect.width &&
         left.stage_rect.height == right.stage_rect.height &&
+        left.paging_bar_height == right.paging_bar_height &&
         left.device_pixel_ratio == right.device_pixel_ratio &&
         left.window_visible == right.window_visible &&
         left.minimized == right.minimized &&
@@ -39,6 +43,15 @@ bool SameSpeakerInput(const ActiveSpeakerInfo& left,
                       const ActiveSpeakerInfo& right) {
     return left.key == right.key && left.is_local == right.is_local &&
         left.speaking == right.speaking;
+}
+
+LogicalViewport StageWithPaging(const ViewportIntent& viewport, bool paging) {
+    auto stage = viewport.stage_rect;
+    if (paging) {
+        stage.height -= std::clamp(viewport.paging_bar_height, 0,
+                                   std::max(0, stage.height));
+    }
+    return stage;
 }
 
 int SourceOrder(TrackSource source) {
@@ -102,7 +115,7 @@ std::optional<PublishedVideoLayer> SelectPublishedLayer(
 VideoDemandPolicy::VideoDemandPolicy(uint64_t coordinator_session,
                                      VideoDemandPolicyConfig config)
     : coordinator_session_(coordinator_session), config_(std::move(config)) {
-    if (config_.video_budget > 16) config_.video_budget = 16;
+    config_.video_budget = std::min(config_.video_budget, kMaximumRemoteVideoTracks);
     config_.default_grid_page_size =
         NormalizePageSize(config_.default_grid_page_size, 9);
     viewport_.coordinator_session = coordinator_session_;
@@ -136,6 +149,7 @@ bool VideoDemandPolicy::UpdateCatalog(
             current_focus_.reset();
             current_focus_origin_ = FocusOrigin::None;
             focus_since_.reset();
+            thumbnail_speakers_.clear();
             if (grid_page_.anchor) {
                 const auto& anchor = *grid_page_.anchor;
                 const auto* publication = Find(anchor);
@@ -175,6 +189,12 @@ bool VideoDemandPolicy::UpdateViewport(const ViewportIntent& intent,
 
     const uint32_t normalized_size = NormalizePageSize(
         intent.page_size, config_.default_grid_page_size);
+    const bool layout_changed = has_viewport_ &&
+        (intent.mode != viewport_.mode ||
+         intent.speaker_layout != viewport_.speaker_layout ||
+         intent.speaking_only != viewport_.speaking_only ||
+         normalized_size != NormalizePageSize(viewport_.page_size,
+             config_.default_grid_page_size));
     const bool local_seats_changed = has_viewport_ &&
         (intent.local_participant_present != viewport_.local_participant_present ||
          intent.local_screen_share_present != viewport_.local_screen_share_present);
@@ -197,12 +217,21 @@ bool VideoDemandPolicy::UpdateViewport(const ViewportIntent& intent,
         }
     }
     viewport_ = intent;
+    if (layout_changed) {
+        viewport_.page = 0;
+        viewport_.page_anchor.reset();
+        grid_page_.ResetAnchor();
+        sidebar_page_.ResetAnchor();
+    }
     has_viewport_ = true;
-    if (intent.page_anchor) {
+    if (intent.page_anchor && !layout_changed) {
         if (intent.mode == VideoLayoutMode::Speaker) {
             sidebar_page_.anchor = intent.page_anchor;
             sidebar_page_.requested_page = intent.page;
-            sidebar_page_.page_size = config_.sidebar_limit;
+            // A caller-supplied anchor is valid for this request's effective
+            // layout capacity, which follows the strip dimensions on resize.
+            // BuildFocused records that capacity after resolving local previews.
+            sidebar_page_.page_size = 0;
         } else if (!local_seats_changed) {
             grid_page_.replay_anchor.reset();
             grid_page_.anchor = intent.page_anchor;
@@ -224,6 +253,34 @@ bool VideoDemandPolicy::UpdateSpeakers(
                 same = false;
                 break;
             }
+        }
+    }
+    // Keep every speaker independently of the single stable main-stage focus.
+    // Missing entries mean stopped, rather than immediate removal from the list.
+    for (auto& entry : thumbnail_speakers_) {
+        const bool active = std::any_of(speakers.begin(), speakers.end(),
+            [&](const auto& speaker) {
+                return speaker.is_local == entry.is_local &&
+                    (entry.is_local || speaker.key == entry.key) && speaker.speaking;
+            });
+        if (!active && !entry.stopped) entry.stopped = now;
+    }
+    for (const auto& speaker : speakers) {
+        if (!speaker.speaking) continue;
+        auto found = std::find_if(thumbnail_speakers_.begin(), thumbnail_speakers_.end(),
+            [&](const auto& entry) {
+                return speaker.is_local == entry.is_local &&
+                    (entry.is_local || speaker.key == entry.key);
+            });
+        if (found == thumbnail_speakers_.end()) {
+            thumbnail_speakers_.push_back({speaker.key, speaker.is_local, now, std::nullopt});
+        } else if (found->stopped) {
+            const bool was_confirmed = *found->stopped - found->started >=
+                config_.thumbnail_speaker_delay;
+            if (!was_confirmed || now - *found->stopped >= config_.thumbnail_speaker_retention) {
+                found->started = now;
+            }
+            found->stopped.reset();
         }
     }
     if (!same) speakers_ = speakers;
@@ -256,6 +313,19 @@ VideoDemandPolicy::NextReconcileAt(TimePoint now) const {
         if (!next || value < *next) next = value;
     };
 
+    if (viewport_.speaking_only &&
+        (viewport_.mode == VideoLayoutMode::Speaker || plan_.mode == VideoLayoutMode::Speaker)) {
+        for (const auto& speaker : thumbnail_speakers_) {
+            if (!speaker.stopped) {
+                const auto confirmed_at = speaker.started + config_.thumbnail_speaker_delay;
+                if (confirmed_at > now) consider(confirmed_at);
+            } else if (*speaker.stopped - speaker.started >= config_.thumbnail_speaker_delay) {
+                const auto expires_at = *speaker.stopped + config_.thumbnail_speaker_retention;
+                if (expires_at > now) consider(expires_at);
+            }
+        }
+    }
+
     if (speaker_candidate_ && speaker_candidate_since_ &&
         !SameOptionalKey(speaker_candidate_, stable_speaker_) &&
         ResolveIntentTrack(speaker_candidate_, TrackSource::Camera)) {
@@ -280,6 +350,7 @@ void VideoDemandPolicy::Retire() {
     accepting_ = false;
     catalog_.reset();
     speakers_.clear();
+    thumbnail_speakers_.clear();
     speaker_candidate_.reset();
     speaker_candidate_since_.reset();
     stable_speaker_.reset();
@@ -294,6 +365,8 @@ void VideoDemandPolicy::Retire() {
     stopped.policy_revision = plan_.policy_revision;
     stopped.requested_mode = viewport_.mode;
     stopped.mode = viewport_.mode;
+    stopped.speaker_layout = viewport_.speaker_layout;
+    stopped.speaking_only = viewport_.speaking_only;
     stopped.stage_content = viewport_.stage_content;
     stopped.reason = VideoDemandReason::Hidden;
     if (!SamePlan(stopped, plan_)) {
@@ -522,11 +595,17 @@ VideoDemandPolicy::FocusChoice VideoDemandPolicy::ChooseFocus(
 }
 
 VideoDemandPlan VideoDemandPolicy::BuildPlan(TimePoint now) {
+    std::erase_if(thumbnail_speakers_, [&](const auto& speaker) {
+        return speaker.stopped &&
+            now - *speaker.stopped >= config_.thumbnail_speaker_retention;
+    });
     VideoDemandPlan result;
     result.coordinator_session = coordinator_session_;
     result.view_revision = viewport_.view_revision;
     result.requested_mode = viewport_.mode;
     result.mode = viewport_.mode;
+    result.speaker_layout = viewport_.speaker_layout;
+    result.speaking_only = viewport_.speaking_only;
     result.stage_content = viewport_.stage_content;
     const auto stage = StageExtent();
     const bool local_visible = viewport_.window_visible && !viewport_.minimized &&
@@ -546,7 +625,10 @@ VideoDemandPlan VideoDemandPolicy::BuildPlan(TimePoint now) {
     } else {
         result.pinned = ResolveIntentSeat(viewport_.pinned);
     }
-    if (!catalog_) return result;
+    if (!catalog_) {
+        FinalizeLayout(result);
+        return result;
+    }
 
     result.catalog_revision = catalog_->catalog_revision;
     result.selected_audio = SelectedAudio();
@@ -590,6 +672,7 @@ VideoDemandPlan VideoDemandPolicy::BuildPlan(TimePoint now) {
                                     config_.default_grid_page_size),
                   true);
     }
+    FinalizeLayout(result);
     return result;
 }
 
@@ -673,11 +756,10 @@ void VideoDemandPolicy::BuildGrid(
         plan.show_local_participant = false;
         plan.show_local_screen_share = false;
     }
-    const auto extent = GridExtent(page_size);
     const std::size_t limit = std::min<std::size_t>(
         videos.size(), start + std::min(remote_capacity, config_.video_budget));
     for (std::size_t index = start; index < limit; ++index) {
-        AddSeat(plan, videos[index], VideoSeatRole::Grid, extent);
+        AddSeat(plan, videos[index], VideoSeatRole::Grid, {});
     }
     plan.reason = VideoDemandReason::Visible;
 }
@@ -694,7 +776,11 @@ void VideoDemandPolicy::BuildFocused(
         : ChooseFocus(videos, allow_auto_share, now);
     plan.focused = focus.key;
     plan.focused_local = plan.pinned_local;
-    if (plan.focused_local) {
+    if (!focus.key && !plan.focused_local) {
+        if (plan.show_local_participant) plan.focused_local = LocalVideoTarget::Camera;
+        else if (plan.show_local_screen_share) plan.focused_local = LocalVideoTarget::ScreenShare;
+    }
+    if (plan.focused_local && plan.pinned_local) {
         current_focus_.reset();
         current_focus_origin_ = FocusOrigin::Pinned;
         focus_since_.reset();
@@ -707,70 +793,167 @@ void VideoDemandPolicy::BuildFocused(
         [&](const auto& candidate) { return focus.key && candidate.key == *focus.key; });
     if (main == videos.end() && !plan.focused_local) return;
 
-    std::vector<SeatCandidate> other;
-    for (const auto& candidate : videos) {
-        if (main == videos.end() || candidate.key != main->key) other.push_back(candidate);
-    }
-
+    // Legacy PiP is an internal compatibility mode: local camera/share previews
+    // remain visible independently of its one additional remote thumbnail.
+    // The new Floating speaker list uses the paginated speaker path below.
     if (mode == VideoLayoutMode::PictureInPicture) {
-        const bool has_pip = !other.empty() && config_.video_budget > 1;
         if (main != videos.end()) {
-            AddSeat(plan, *main, VideoSeatRole::Main,
-                    MainExtent(false), focus.origin);
+            AddSeat(plan, *main, VideoSeatRole::Main, {}, focus.origin);
         }
-        if (has_pip) {
-            AddSeat(plan, other.front(), VideoSeatRole::PictureInPicture,
-                    PictureInPictureExtent());
-        }
+        const auto secondary = std::find_if(videos.begin(), videos.end(),
+            [&](const auto& candidate) {
+                return main == videos.end() || candidate.key != main->key;
+            });
+        const bool has_pip = secondary != videos.end() && config_.video_budget > 1;
+        if (has_pip) AddSeat(plan, *secondary, VideoSeatRole::PictureInPicture, {});
         plan.page = 0;
         plan.page_size = has_pip ? 1 : 0;
         plan.page_count = 1;
-    } else {
-        const uint32_t side_limit = config_.video_budget > 1
-            ? std::min(config_.sidebar_limit, config_.video_budget - 1) : 0;
-        plan.page_size = side_limit;
-        plan.page_count = CeilDiv(other.size(), std::max<uint32_t>(1, side_limit));
-        plan.page = std::min(viewport_.page, plan.page_count - 1);
-        std::size_t start = static_cast<std::size_t>(plan.page) * side_limit;
-        if (side_limit == 0) start = 0;
-        if (sidebar_page_.requested_page != viewport_.page ||
-            sidebar_page_.page_size != side_limit || plan.page != viewport_.page) {
-            sidebar_page_.anchor.reset();
-        }
-        sidebar_page_.requested_page = viewport_.page;
-        sidebar_page_.page_size = side_limit;
-        if (sidebar_page_.anchor) {
-            const auto found = std::find_if(other.begin(), other.end(),
-                [&](const auto& candidate) {
-                    return candidate.key == *sidebar_page_.anchor;
-                });
-            if (found != other.end()) {
-                start = static_cast<std::size_t>(found - other.begin());
-            } else {
-                sidebar_page_.anchor.reset();
-            }
-        }
-        if (!sidebar_page_.anchor && start < other.size()) {
-            sidebar_page_.anchor = other[start].key;
-        }
-        const auto remaining = start < other.size() ? other.size() - start : 0;
-        const uint32_t side_count = static_cast<uint32_t>(
-            std::min<std::size_t>(side_limit, remaining));
-        if (main != videos.end()) {
-            AddSeat(plan, *main, VideoSeatRole::Main,
-                    MainExtent(side_count != 0), focus.origin);
-        }
-        const auto side_extent = SidebarExtent(side_count);
-        for (uint32_t index = 0; index != side_count; ++index) {
-            AddSeat(plan, other[start + index], VideoSeatRole::Sidebar,
-                    side_extent);
-        }
+        const auto source = main != videos.end() ? main->source
+            : (*plan.focused_local == LocalVideoTarget::ScreenShare
+                ? TrackSource::ScreenShareVideo : TrackSource::Camera);
+        plan.reason = ReasonForFocus(focus.origin, source);
+        return;
     }
 
+    const bool filter = viewport_.speaking_only;
+    std::vector<SeatCandidate> other;
+    for (const auto& candidate : videos) {
+        if (main != videos.end() && candidate.key == main->key) continue;
+        if (filter && !IsThumbnailSpeaker(candidate.key.participant, false, now)) continue;
+        other.push_back(candidate);
+    }
+    const bool camera_main = plan.focused_local == LocalVideoTarget::Camera;
+    const bool screen_main = plan.focused_local == LocalVideoTarget::ScreenShare;
+    const bool local_speaking = !filter || IsThumbnailSpeaker({}, true, now);
+    const bool camera_other = plan.show_local_participant && !camera_main && local_speaking;
+    const bool screen_other = plan.show_local_screen_share && !screen_main && local_speaking;
+    const uint32_t local_count = static_cast<uint32_t>(camera_other) +
+        static_cast<uint32_t>(screen_other);
+    const std::size_t thumbnail_count = other.size() + local_count;
+    const auto capacity_for = [&](LogicalViewport stage) {
+        uint32_t capacity = SpeakerThumbnailCapacity(viewport_.speaker_layout, stage);
+        const bool l_shape = viewport_.speaker_layout == SpeakerLayout::TopLeft ||
+            viewport_.speaker_layout == SpeakerLayout::BottomLeft;
+        const uint64_t configured = uint64_t(config_.sidebar_limit) * (l_shape ? 2 : 1);
+        capacity = static_cast<uint32_t>(std::min<uint64_t>(capacity, configured));
+        const uint32_t remote_main = main != videos.end() ? 1u : 0u;
+        // Keep one display capacity across pages: adding first-page local seats
+        // to the remote budget would skip remote candidates on subsequent pages.
+        // Local previews themselves never create remote bindings, including a
+        // local-only meeting whose remote-video budget is zero.
+        const uint32_t remote_limit = config_.video_budget -
+            std::min(config_.video_budget, remote_main);
+        return std::min(capacity, other.empty() ? local_count : remote_limit);
+    };
+    uint32_t side_limit = capacity_for(viewport_.stage_rect);
+    if (thumbnail_count > side_limit && side_limit != 0) {
+        // Decide whether paging is needed from the full area, independent of
+        // the previous UI plan. Reserving a row may shrink horizontal cards
+        // and increase capacity; do not let that undo the paging decision.
+        side_limit = std::min(side_limit, capacity_for(StageWithPaging(viewport_, true)));
+    }
+    plan.page_size = side_limit;
+    plan.page_count = side_limit == 0 ? 1 : CeilDiv(thumbnail_count, side_limit);
+    plan.page = std::min(viewport_.page, plan.page_count - 1);
+    const std::size_t offset = static_cast<std::size_t>(plan.page) * side_limit;
+    std::size_t start = offset > local_count ? offset - local_count : 0;
+    const bool camera_on_page = camera_other && offset == 0 && side_limit != 0;
+    const bool screen_on_page = screen_other &&
+        static_cast<std::size_t>(camera_other) >= offset &&
+        static_cast<std::size_t>(camera_other) < offset + side_limit;
+    const uint32_t local_on_page = static_cast<uint32_t>(camera_on_page) +
+        static_cast<uint32_t>(screen_on_page);
+    // Speaking membership changes at confirmation/retention deadlines, even
+    // without a new viewport. Page it by current roster offset: retaining an
+    // old anchor would skip speakers inserted before it and leave page gaps.
+    if (filter || sidebar_page_.requested_page != viewport_.page ||
+        (sidebar_page_.page_size != 0 && sidebar_page_.page_size != side_limit) ||
+        plan.page != viewport_.page ||
+        local_on_page != 0) {
+        sidebar_page_.anchor.reset();
+    }
+    sidebar_page_.requested_page = viewport_.page;
+    sidebar_page_.page_size = side_limit;
+    if (sidebar_page_.anchor) {
+        const auto found = std::find_if(other.begin(), other.end(),
+            [&](const auto& candidate) { return candidate.key == *sidebar_page_.anchor; });
+        if (found != other.end()) start = static_cast<std::size_t>(found - other.begin());
+        else sidebar_page_.anchor.reset();
+    }
+    if (!filter && !sidebar_page_.anchor && start < other.size() && local_on_page == 0) {
+        sidebar_page_.anchor = other[start].key;
+    }
+    plan.show_local_participant = camera_main || camera_on_page;
+    plan.show_local_screen_share = screen_main || screen_on_page;
+    const uint32_t remote_capacity = side_limit - local_on_page;
+    const auto remaining = start < other.size() ? other.size() - start : 0;
+    const uint32_t side_count = static_cast<uint32_t>(
+        std::min<std::size_t>(remote_capacity, remaining));
+    if (main != videos.end()) {
+        AddSeat(plan, *main, VideoSeatRole::Main, {}, focus.origin);
+    }
+    for (uint32_t index = 0; index != side_count; ++index) {
+        AddSeat(plan, other[start + index], VideoSeatRole::Sidebar, {});
+    }
     const auto source = main != videos.end() ? main->source
         : (*plan.focused_local == LocalVideoTarget::ScreenShare
             ? TrackSource::ScreenShareVideo : TrackSource::Camera);
     plan.reason = ReasonForFocus(focus.origin, source);
+}
+
+bool VideoDemandPolicy::IsThumbnailSpeaker(const ParticipantKey& key,
+                                           bool is_local, TimePoint now) const {
+    return std::any_of(thumbnail_speakers_.begin(), thumbnail_speakers_.end(),
+        [&](const auto& speaker) {
+            if (speaker.is_local != is_local || (!is_local && speaker.key != key)) return false;
+            const auto confirmed_at = speaker.started + config_.thumbnail_speaker_delay;
+            if (now < confirmed_at || (speaker.stopped && *speaker.stopped < confirmed_at)) return false;
+            return !speaker.stopped || now - *speaker.stopped < config_.thumbnail_speaker_retention;
+        });
+}
+
+void VideoDemandPolicy::FinalizeLayout(VideoDemandPlan& plan) {
+    const bool gallery = plan.mode == VideoLayoutMode::Grid || plan.mode == VideoLayoutMode::Auto;
+    // This is the same display order used by MeetingRoomWindow: camera first,
+    // gallery screen preview second, then remote seats; focused screen last.
+    const std::size_t camera_index = 0;
+    const std::size_t screen_index = gallery
+        ? static_cast<std::size_t>(plan.show_local_participant)
+        : static_cast<std::size_t>(plan.show_local_participant) + plan.visible_seats.size();
+    const std::size_t remote_offset = static_cast<std::size_t>(plan.show_local_participant) +
+        static_cast<std::size_t>(gallery && plan.show_local_screen_share);
+    const std::size_t total = plan.visible_seats.size() +
+        static_cast<std::size_t>(plan.show_local_participant) +
+        static_cast<std::size_t>(plan.show_local_screen_share);
+    std::size_t main_index = 0;
+    if (plan.focused_local == LocalVideoTarget::Camera && plan.show_local_participant) {
+        main_index = camera_index;
+    } else if (plan.focused_local == LocalVideoTarget::ScreenShare && plan.show_local_screen_share) {
+        main_index = screen_index;
+    } else if (plan.focused) {
+        const auto found = std::find_if(plan.visible_seats.begin(), plan.visible_seats.end(),
+            [&](const auto& seat) { return seat.key == *plan.focused; });
+        if (found != plan.visible_seats.end()) {
+            main_index = remote_offset + static_cast<std::size_t>(found - plan.visible_seats.begin());
+        }
+    }
+    const auto rects = CalculateVideoLayout(plan.mode, plan.speaker_layout,
+        StageWithPaging(viewport_, plan.page_count > 1), plan.page_size, total, main_index);
+    if (plan.show_local_participant) plan.local_participant_rect = rects[camera_index];
+    if (plan.show_local_screen_share) plan.local_screen_share_rect = rects[screen_index];
+    auto seats = std::move(plan.visible_seats);
+    plan.visible_seats.clear();
+    plan.selected_video.clear();
+    for (std::size_t index = 0; index < seats.size(); ++index) {
+        const auto& old = seats[index];
+        FocusOrigin origin = FocusOrigin::None;
+        if (old.reason == VideoDemandReason::Pinned || old.priority == 500) origin = FocusOrigin::Pinned;
+        else if (old.reason == VideoDemandReason::ActiveSpeaker) origin = FocusOrigin::ActiveSpeaker;
+        const auto& rect = rects[remote_offset + index];
+        AddSeat(plan, {old.key, old.source, Find(old.key)}, old.role, RectExtent(rect), origin);
+        if (plan.visible_seats.size() == index + 1) plan.visible_seats.back().rect = rect;
+    }
 }
 
 void VideoDemandPolicy::AddSeat(VideoDemandPlan& plan,
@@ -865,7 +1048,7 @@ void VideoDemandPolicy::AddSeat(VideoDemandPlan& plan,
     }
 }
 
-VideoDemandPolicy::SeatExtent VideoDemandPolicy::StageExtent() const {
+VideoDemandPolicy::SeatExtent VideoDemandPolicy::RectExtent(const LogicalViewport& rect) const {
     const double dpr = std::isfinite(viewport_.device_pixel_ratio) &&
             viewport_.device_pixel_ratio > 0.0
         ? viewport_.device_pixel_ratio : 1.0;
@@ -875,53 +1058,19 @@ VideoDemandPolicy::SeatExtent VideoDemandPolicy::StageExtent() const {
         return static_cast<uint32_t>(std::round(std::min<double>(
             scaled, std::numeric_limits<uint32_t>::max())));
     };
-    return {scale(viewport_.stage_rect.width),
-            scale(viewport_.stage_rect.height)};
+    return {scale(rect.width), scale(rect.height)};
 }
 
-VideoDemandPolicy::SeatExtent VideoDemandPolicy::GridExtent(
-    uint32_t page_size) const {
-    const auto stage = StageExtent();
-    uint32_t columns = 1;
-    uint32_t rows = 1;
-    if (page_size == 2) {
-        columns = 2;
-    } else if (page_size <= 4) {
-        columns = rows = 2;
-    } else if (page_size <= 9) {
-        columns = rows = 3;
-    } else {
-        columns = rows = 4;
-    }
-    return {stage.width / columns, stage.height / rows};
-}
-
-VideoDemandPolicy::SeatExtent VideoDemandPolicy::MainExtent(
-    bool has_sidebar) const {
-    const auto stage = StageExtent();
-    return {has_sidebar ? static_cast<uint32_t>(uint64_t(stage.width) * 3 / 4)
-                        : stage.width, stage.height};
-}
-
-VideoDemandPolicy::SeatExtent VideoDemandPolicy::SidebarExtent(
-    uint32_t visible_count) const {
-    const auto stage = StageExtent();
-    if (visible_count == 0 || stage.width == 0 || stage.height == 0) return {};
-    return {std::max<uint32_t>(1, stage.width / 4),
-            std::max<uint32_t>(1, stage.height / visible_count)};
-}
-
-VideoDemandPolicy::SeatExtent VideoDemandPolicy::PictureInPictureExtent() const {
-    const auto stage = StageExtent();
-    if (stage.width == 0 || stage.height == 0) return {};
-    return {std::max<uint32_t>(1, stage.width / 3),
-            std::max<uint32_t>(1, stage.height / 3)};
+VideoDemandPolicy::SeatExtent VideoDemandPolicy::StageExtent() const {
+    return RectExtent(viewport_.stage_rect);
 }
 
 uint32_t VideoDemandPolicy::NormalizePageSize(uint32_t requested,
                                               uint32_t default_size) {
-    if (requested == 4 || requested == 9 || requested == 16) return requested;
-    return default_size == 4 || default_size == 9 || default_size == 16
+    if (requested == 4 || requested == 9 || requested == 16 ||
+        requested == 25 || requested == 49) return requested;
+    return default_size == 4 || default_size == 9 || default_size == 16 ||
+            default_size == 25 || default_size == 49
         ? default_size : 9;
 }
 
@@ -947,11 +1096,15 @@ bool VideoDemandPolicy::SamePlan(const VideoDemandPlan& left,
     if (left.coordinator_session != right.coordinator_session ||
         left.catalog_revision != right.catalog_revision ||
         left.requested_mode != right.requested_mode ||
+        left.speaker_layout != right.speaker_layout ||
+        left.speaking_only != right.speaking_only ||
         left.mode != right.mode || left.stage_content != right.stage_content ||
         left.page != right.page || left.page_size != right.page_size ||
         left.page_count != right.page_count ||
         left.show_local_participant != right.show_local_participant ||
         left.show_local_screen_share != right.show_local_screen_share ||
+        left.local_participant_rect != right.local_participant_rect ||
+        left.local_screen_share_rect != right.local_screen_share_rect ||
         !SameOptionalKey(left.focused, right.focused) ||
         left.focused_local != right.focused_local ||
         !SameOptionalKey(left.pinned, right.pinned) ||
@@ -967,7 +1120,7 @@ bool VideoDemandPolicy::SamePlan(const VideoDemandPlan& left,
         const auto& lhs = left.visible_seats[index];
         const auto& rhs = right.visible_seats[index];
         if (lhs.key != rhs.key || lhs.source != rhs.source ||
-            lhs.role != rhs.role ||
+            lhs.role != rhs.role || lhs.rect != rhs.rect ||
             lhs.width != rhs.width || lhs.height != rhs.height ||
             lhs.subscription_width != rhs.subscription_width ||
             lhs.subscription_height != rhs.subscription_height ||

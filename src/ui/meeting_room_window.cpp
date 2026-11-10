@@ -3,6 +3,8 @@
 #include "src/core/session_shutdown_service.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/meeting_room_window.h"
+#include "src/ui/meeting_layout_controls.h"
+#include "src/core/video_layout_geometry.h"
 #include "src/ui/ui_timing_observer.h"
 #include "src/ui/screen_share_quality_controls.h"
 #include "src/ui/remote_control_ui.h"
@@ -35,6 +37,7 @@
 #include <QtWidgets/QStyle>
 #include <QtWidgets/QTabWidget>
 #include <QtWidgets/QTableWidget>
+#include <QtWidgets/QToolTip>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QIcon>
@@ -97,6 +100,7 @@ QSize bannerSize(QLabel &label, int availableWidth, int preferredWidth) {
 }
 
 constexpr int kBottomBarHeight = 72;
+constexpr int kVideoPagerHeight = 34;
 constexpr int kBottomBarPadding = 12;
 constexpr int kBottomBarGap = 6;
 constexpr int kBottomBarEndWidth = 88;
@@ -218,6 +222,8 @@ bool SameViewportIntentContent(const livekit::ViewportIntent &left,
 	};
 	return left.mode == right.mode && left.page == right.page &&
 		left.page_size == right.page_size &&
+		left.speaker_layout == right.speaker_layout &&
+		left.speaking_only == right.speaking_only &&
 		left.local_participant_present == right.local_participant_present &&
 		left.local_screen_share_present == right.local_screen_share_present &&
 		sameKey(left.page_anchor, right.page_anchor) &&
@@ -229,6 +235,7 @@ bool SameViewportIntentContent(const livekit::ViewportIntent &left,
 		left.stage_rect.y == right.stage_rect.y &&
 		left.stage_rect.width == right.stage_rect.width &&
 		left.stage_rect.height == right.stage_rect.height &&
+		left.paging_bar_height == right.paging_bar_height &&
 		left.device_pixel_ratio == right.device_pixel_ratio &&
 		left.window_visible == right.window_visible &&
 		left.minimized == right.minimized;
@@ -1124,6 +1131,7 @@ VideoTileWidget::VideoTileWidget(const QString &displayName, bool isLocal, QWidg
 	, _isLocal(isLocal) {
 	_isScreenShare = isScreenShare;
 	setMouseTracking(true);
+	setToolTip(QStringLiteral("<qt>%1</qt>").arg(_displayName.toHtmlEscaped()));
 	setAttribute(Qt::WA_OpaquePaintEvent, false);
 
 	_visualizer = new AudioVisualizerWidget(this, 7);
@@ -1240,14 +1248,21 @@ void VideoTileWidget::resizeEvent(QResizeEvent *e) {
 		_volPopup->move(std::max(0, w - _volPopup->width() - 10), 42);
 	}
 	if (_visualizer) {
-		_visualizer->setGeometry((w - 90) / 2, h - 36, 90, 24);
+		const auto tag = bottomNameTag(rect());
+		const int visualizerWidth = tag.compact ? std::min(60, std::max(0, w - 12)) : 90;
+		const int visualizerHeight = tag.compact ? 14 : 24;
+		const int visualizerY = tag.compact && !tag.rect.isEmpty()
+			? std::max(0, tag.rect.y() - visualizerHeight - 3) : h - 36;
+		_visualizer->setGeometry((w - visualizerWidth) / 2, visualizerY, visualizerWidth, visualizerHeight);
 		_visualizer->raise();
 	}
 }
 
 void VideoTileWidget::setDisplayName(const QString &name) {
 	if (_displayName == name) return;
+	if (QToolTip::text() == toolTip()) QToolTip::hideText();
 	_displayName = name;
+	setToolTip(QStringLiteral("<qt>%1</qt>").arg(_displayName.toHtmlEscaped()));
 	invalidatePresentation();
 }
 
@@ -1353,6 +1368,13 @@ void VideoTileWidget::setPipMode(bool pip) {
 	if (_isPip == pip) return;
 	_isPip = pip;
 	invalidatePresentation();
+}
+
+void VideoTileWidget::setLayoutClip(const QRect &visible) {
+	const auto clipped = visible.intersected(rect());
+	_layoutClip = clipped == rect() ? std::nullopt : std::optional(clipped);
+	if (_layoutClip && !clipped.isEmpty()) setMask(QRegion(clipped));
+	else clearMask();
 }
 
 QRect VideoTileWidget::pinButtonRect() const {
@@ -1540,7 +1562,13 @@ void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
 	const int cx = r.center().x();
 	const int cy = r.center().y();
 	const int minDim = std::min(r.width(), r.height());
-	const int outerRadius = std::clamp(minDim * 22 / 100, 28, 54);
+	const auto nameTag = bottomNameTag(r);
+	const int outerRadius = nameTag.compact
+		? std::clamp(minDim * 22 / 100, 8, 36)
+		: std::clamp(minDim * 22 / 100, 28, 54);
+	const int avatarY = nameTag.compact && !nameTag.rect.isEmpty()
+		? r.y() + std::max(0, nameTag.rect.y() - r.y() - 6) / 2
+		: cy - 14;
 
 	// 正在说话时：在头像外围绘制随音量动态扩散的声波涟漪光环
 	if (_isSpeaking && !_isAudioMuted) {
@@ -1548,20 +1576,20 @@ void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
 		const int auraRadius = outerRadius + static_cast<int>(std::clamp(_audioLevel, 0.1f, 1.0f) * 14.0f);
 		p.setPen(QPen(themeColor(ColorRole::Success, 100), 2.0));
 		p.setBrush(themeColor(ColorRole::Success, 35));
-		p.drawEllipse(QPoint(cx, cy - 14), auraRadius, auraRadius);
+		p.drawEllipse(QPoint(cx, avatarY), auraRadius, auraRadius);
 		p.restore();
 	}
 
 	// 质感色彩哈希渐变圆形头像
 	p.save();
 	auto [col1, col2] = GenerateAvatarGradient(_displayName.isEmpty() ? _identity : _displayName);
-	QLinearGradient grad(cx - outerRadius, cy - 14 - outerRadius, cx + outerRadius, cy - 14 + outerRadius);
+	QLinearGradient grad(cx - outerRadius, avatarY - outerRadius, cx + outerRadius, avatarY + outerRadius);
 	grad.setColorAt(0.0, col1);
 	grad.setColorAt(1.0, col2);
 
 	p.setPen(Qt::NoPen);
 	p.setBrush(grad);
-	p.drawEllipse(QPoint(cx, cy - 14), outerRadius, outerRadius);
+	p.drawEllipse(QPoint(cx, avatarY), outerRadius, outerRadius);
 
 	QString initial = _displayName.isEmpty() ? (_identity.isEmpty() ? "U" : _identity.left(1)) : _displayName.left(1);
 	if (!_displayName.isEmpty()) {
@@ -1575,9 +1603,11 @@ void VideoTileWidget::drawAvatarPlaceholder(QPainter &p, const QRect &r) {
 	QFont avatarFont("Microsoft YaHei", outerRadius * 8 / 10, QFont::Bold);
 	p.setFont(avatarFont);
 	p.setPen(Qt::white);
-	QRect avatarRect(cx - outerRadius, cy - 14 - outerRadius, outerRadius * 2, outerRadius * 2);
+	QRect avatarRect(cx - outerRadius, avatarY - outerRadius, outerRadius * 2, outerRadius * 2);
 	p.drawText(avatarRect, Qt::AlignCenter, initial);
 	p.restore();
+	// Small avatar and video cards share the compact bottom tag.
+	if (nameTag.compact) return;
 
 	// 昵称与麦克风指示
 	QFont font("Microsoft YaHei", std::clamp(minDim * 6 / 100, 9, 12), QFont::Bold);
@@ -1730,39 +1760,58 @@ void VideoTileWidget::drawVideoFrame(QPainter &p, const QRect &r) {
 	}
 }
 
+VideoTileWidget::NameTagPresentation VideoTileWidget::bottomNameTag(const QRect &r) const {
+	NameTagPresentation result;
+	result.compact = r.width() < 320 || r.height() < 180;
+	result.font = QFont("Microsoft YaHei", 10);
+	if (result.compact) result.font.setPixelSize(12);
+	const QFontMetrics fm(result.font);
+	const int margin = result.compact ? (r.width() < 200 ? 4 : 6) : 12;
+	const int height = std::max(result.compact ? 18 : 24, fm.height() + 2);
+	const int padding = result.compact ? 22 : 30;
+	const int available = std::max(0, r.width() - margin * 2);
+	const int maximum = result.compact ? std::min(available, r.width() * 65 / 100) : available;
+	if (maximum < padding || r.height() < height + margin * 2) return result;
+	result.text = fm.elidedText(_displayName, Qt::ElideRight, maximum - padding);
+	const int width = std::min(maximum, fm.horizontalAdvance(result.text) + padding);
+	result.rect = QRect(r.x() + margin, r.y() + r.height() - margin - height, width, height);
+	return result;
+}
+
 void VideoTileWidget::drawBottomNameTag(QPainter &p, const QRect &r) {
-	if (!_isVideoActive &&
-		_videoSubscriptionError == livekit::TrackPublication::SubscriptionError::None) return;
-
-	const int tagH = 24;
-	const int margin = 12;
-
-	QFont font("Microsoft YaHei", 10);
-	p.setFont(font);
-	QFontMetrics fm(font);
-	const auto label = fm.elidedText(_displayName, Qt::ElideRight, std::max(0, r.width() - margin * 2 - 30));
-	const int textW = fm.horizontalAdvance(label);
-	const int tagW = textW + 30;
-
-	QRect tagRect(r.x() + margin, r.bottom() - margin - tagH, tagW, tagH);
-
+	const auto tag = bottomNameTag(r);
+	if (tag.rect.isEmpty() || (!_isVideoActive && !tag.compact &&
+		_videoSubscriptionError == livekit::TrackPublication::SubscriptionError::None)) return;
+	const auto &tagRect = tag.rect;
+	const bool darkTheme = themeColor(ColorRole::Text).lightness() > 128;
 	p.save();
+	p.setFont(tag.font);
 	p.setPen(Qt::NoPen);
-	p.setBrush(themeColor(ColorRole::Surface, 235));
-	p.drawRoundedRect(tagRect, 6, 6);
+	// Reuse the theme's dark/bright pair so the translucent compact badge has
+	// consistent contrast over video in Light, Dark, Teal and System themes.
+	p.setBrush(tag.compact
+		? themeColor(darkTheme ? ColorRole::Surface : ColorRole::Text, 180)
+		: themeColor(ColorRole::Surface, 235));
+	p.drawRoundedRect(tagRect, tag.compact ? 4 : 6, tag.compact ? 4 : 6);
 
-	const int micX = tagRect.x() + 10;
+	const int micX = tagRect.x() + (tag.compact ? 8 : 10);
 	const int micY = tagRect.center().y();
-	p.setPen(QPen(_isAudioMuted ? themeColor(ColorRole::Danger) : themeColor(ColorRole::Success), 1.4, Qt::SolidLine, Qt::RoundCap));
-	p.drawRoundedRect(_isScreenShare ? QRect(micX - 5, micY - 4, 10, 7) : QRect(micX - 3, micY - 4, 6, 7), 2, 2);
-	p.drawLine(micX, micY + 3, micX, micY + 5);
-	p.drawLine(micX - 3, micY + 5, micX + 3, micY + 5);
+	auto micColor = themeColor(_isAudioMuted ? ColorRole::Danger : ColorRole::Success);
+	if (tag.compact && !darkTheme) micColor = micColor.lighter(170);
+	p.setPen(QPen(micColor, tag.compact ? 1.2 : 1.4, Qt::SolidLine, Qt::RoundCap));
+	const int micHalfWidth = tag.compact ? 2 : 3;
+	p.drawRoundedRect(_isScreenShare
+		? QRect(micX - (tag.compact ? 4 : 5), micY - 4, tag.compact ? 8 : 10, tag.compact ? 6 : 7)
+		: QRect(micX - micHalfWidth, micY - 4, micHalfWidth * 2, tag.compact ? 6 : 7), 2, 2);
+	p.drawLine(micX, micY + 2, micX, micY + 5);
+	p.drawLine(micX - micHalfWidth, micY + 5, micX + micHalfWidth, micY + 5);
 	if (_isAudioMuted && !_isScreenShare) {
-		p.drawLine(micX - 4, micY - 5, micX + 4, micY + 6);
+		p.drawLine(micX - micHalfWidth - 1, micY - 5, micX + micHalfWidth + 1, micY + 5);
 	}
 
-	p.setPen(themeColor(ColorRole::Text));
-	p.drawText(QRect(tagRect.x() + 20, tagRect.y(), textW + 6, tagH), Qt::AlignVCenter | Qt::AlignLeft, label);
+	p.setPen(themeColor(tag.compact && !darkTheme ? ColorRole::Surface : ColorRole::Text));
+	const int textOffset = tag.compact ? 17 : 20;
+	p.drawText(tagRect.adjusted(textOffset, 0, -5, 0), Qt::AlignVCenter | Qt::AlignLeft, tag.text);
 	p.restore();
 }
 
@@ -1799,6 +1848,8 @@ RoomTopBarWidget::RoomTopBarWidget(QWidget *parent)
 	_uiaConsole->setStyleSheet(QStringLiteral("QPushButton { background: transparent; border: 0; }"));
 	connect(_uiaConsole, &QPushButton::clicked, this, [this] { _consoleStream.fire({}); });
 #endif
+	_layoutButton = new MeetingLayoutButton(this);
+	connect(_layoutButton, &QToolButton::clicked, this, &RoomTopBarWidget::layoutMenuRequested);
 	_uiaTelemetry = new QPushButton(this);
 	_uiaTelemetry->setObjectName(QStringLiteral("meetingTelemetry"));
 	_uiaTelemetry->setAccessibleName(QCoreApplication::translate("MeetingUI", "Meeting telemetry"));
@@ -1843,15 +1894,38 @@ void RoomTopBarWidget::setTelemetrySnapshot(const QVariantMap &snapshot) {
 	update();
 }
 
+void RoomTopBarWidget::setLayoutSelection(VideoViewMode mode, livekit::SpeakerLayout speakerLayout) {
+	_currentViewMode = mode;
+	static_cast<MeetingLayoutButton *>(_layoutButton)->setSelection(
+		mode == VideoViewMode::Speaker || mode == VideoViewMode::Pip
+			? livekit::VideoLayoutMode::Speaker : livekit::VideoLayoutMode::Grid,
+		speakerLayout);
+}
+
+bool RoomTopBarWidget::eventHook(QEvent *event) {
+	const auto handled = Ui::RpWidget::eventHook(event);
+	if (event->type() == QEvent::LayoutRequest && _layoutButton) {
+		QResizeEvent resize(size(), size());
+		resizeEvent(&resize);
+		updateGeometry();
+		if (auto *parent = parentWidget())
+			QCoreApplication::postEvent(parent, new QResizeEvent(parent->size(), parent->size()));
+		update();
+	}
+	return handled;
+}
+
 int RoomTopBarWidget::heightForWidth(int width) const {
  const QFontMetrics metrics(QFont("Microsoft YaHei", 9));
- const int toolsWidth = metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "Picture-in-Picture"))
+ _layoutButton->ensurePolished();
+ const int toolsWidth = _layoutButton->sizeHint().width()
 #if COHAVORA_SHOW_CONSOLE_BUTTON
      + metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "Console 📋"))
 #endif
      + metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "🐛 Simulate")) + 80;
  const int idWidth = metrics.horizontalAdvance(QCoreApplication::translate("MeetingUI", "🆔 Meeting ID: %1 📋").arg(_meetingId)) + 24;
- return width < toolsWidth + idWidth + 420 ? 88 : 44;
+ const int rowHeight = std::max(44, _layoutButton->sizeHint().height() + 16);
+ return rowHeight * (width < toolsWidth + idWidth + 420 ? 2 : 1);
 }
 
 void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
@@ -1865,13 +1939,15 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
 
 	int rightX = w - btnW * 3 - 6;
 
- const bool twoRows = heightForWidth(w) > 44;
- const int rowY = twoRows ? 52 : 8;
+ _layoutButton->ensurePolished();
+ const auto layoutSize = _layoutButton->sizeHint();
+ const int rowHeight = std::max(44, layoutSize.height() + 16);
+ const bool twoRows = heightForWidth(w) > rowHeight;
+ const int rowY = (twoRows ? rowHeight : 0) + (rowHeight - 28) / 2;
  const QFontMetrics metrics(QFont("Microsoft YaHei", 9));
  const auto buttonWidth = [&](const QString &text) { return metrics.horizontalAdvance(text) + 24; };
  const int simulateW = buttonWidth(QCoreApplication::translate("MeetingUI", "🐛 Simulate"));
- const int layoutW = std::max(buttonWidth(QCoreApplication::translate("MeetingUI", "Grid View")),
-     buttonWidth(QCoreApplication::translate("MeetingUI", "Picture-in-Picture"))) + 8;
+ const int layoutW = layoutSize.width();
  _simulateRect = QRect(rightX - simulateW, rowY, simulateW, 28);
  rightX -= simulateW + 4;
 #if COHAVORA_SHOW_CONSOLE_BUTTON
@@ -1882,7 +1958,9 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
 #else
  _consoleRect = QRect();
 #endif
- _layoutRect = QRect(rightX - layoutW, rowY, layoutW, 28);
+ _layoutRect = QRect(rightX - layoutW, (twoRows ? rowHeight : 0) + (rowHeight - layoutSize.height()) / 2,
+     layoutW, layoutSize.height());
+ _layoutButton->setGeometry(_layoutRect);
  rightX -= layoutW + 4;
  const int leftInfoRight = QFontMetrics(QFont("Microsoft YaHei", 10)).horizontalAdvance(
      QCoreApplication::translate("MeetingUI", "Meetings")) + 116;
@@ -1905,11 +1983,11 @@ void RoomTopBarWidget::resizeEvent(QResizeEvent *e) {
 		const int pillW = std::min(availCenterW, 200);
 		int pillX = (w - pillW) / 2;
 		pillX = std::max(leftBoundary + 8, std::min(pillX, rightButtonsLeft - 8 - pillW));
-		_speakerCapsuleRect = QRect(pillX, (twoRows ? 53 : 9), pillW, 26);
+		_speakerCapsuleRect = QRect(pillX, (twoRows ? rowHeight : 0) + (rowHeight - 26) / 2, pillW, 26);
 	} else if (availCenterW >= 110) {
 		const int pillW = availCenterW;
 		const int pillX = leftBoundary + 8;
-		_speakerCapsuleRect = QRect(pillX, (twoRows ? 53 : 9), pillW, 26);
+		_speakerCapsuleRect = QRect(pillX, (twoRows ? rowHeight : 0) + (rowHeight - 26) / 2, pillW, 26);
 	} else {
 		_speakerCapsuleRect = QRect(); // 窗口空间不足时自动隐藏，彻底杜绝元素重叠
 	}
@@ -2036,8 +2114,7 @@ void RoomTopBarWidget::paintEvent(QPaintEvent *e) {
 		p.restore();
 	};
 
-	QString layoutStr = (_currentViewMode == VideoViewMode::Grid) ? QCoreApplication::translate("MeetingUI", "Grid View") : QCoreApplication::translate("MeetingUI", "Picture-in-Picture");
-	drawTextBtn(_layoutRect, layoutStr, _hoverBtn == HoverBtn::Layout, true);
+
 #if COHAVORA_SHOW_CONSOLE_BUTTON
 	drawTextBtn(_consoleRect, QCoreApplication::translate("MeetingUI", "Console 📋"), _hoverBtn == HoverBtn::Console, false, themeColor(ColorRole::Accent));
 #endif
@@ -2143,9 +2220,7 @@ void RoomTopBarWidget::mousePressEvent(QMouseEvent *e) {
 		} else if (_simulateRect.contains(e->pos())) {
 			showSimulateScenarioMenu(mapToGlobal(QPoint(_simulateRect.left(), _simulateRect.bottom() + 4)));
 		} else if (_layoutRect.contains(e->pos())) {
-			_currentViewMode = (_currentViewMode == VideoViewMode::Grid) ? VideoViewMode::Pip : VideoViewMode::Grid;
-			_viewModeStream.fire_copy(_currentViewMode);
-			update();
+			emit layoutMenuRequested();
 		} else {
 			emit windowDragRequested();
 			e->accept();
@@ -3028,6 +3103,21 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	// WM_NCCALCSIZE removes the native title bar while retaining its resize frame.
 	setWindowFlags(Qt::Window | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint);
 
+	_persistVideoLayoutPreferences = true;
+	const QSettings preferences;
+	const auto savedLayout = preferences.value(QStringLiteral("meeting/videoLayout"), QStringLiteral("grid")).toString();
+	const auto savedCapacity = preferences.value(QStringLiteral("meeting/gridCapacity"), 9).toUInt();
+	_videoPageSize = savedCapacity == 25 || savedCapacity == 49 ? savedCapacity : 9;
+	_speakingOnly = preferences.value(QStringLiteral("meeting/speakingOnly"), false).toBool();
+	const std::array<QString, 5> speakerLayouts = {QStringLiteral("right"), QStringLiteral("top"),
+		QStringLiteral("top-left"), QStringLiteral("bottom-left"), QStringLiteral("floating")};
+	for (size_t i = 0; i < speakerLayouts.size(); ++i) {
+		if (savedLayout == speakerLayouts[i]) {
+			_viewMode = VideoViewMode::Speaker;
+			_speakerLayout = static_cast<livekit::SpeakerLayout>(i);
+			break;
+		}
+	}
 	_preparingMedia = true;
 	initLayout();
 	if (auto sample = _coordinator->pageTiming())
@@ -3502,6 +3592,7 @@ MeetingRoomWindow::~MeetingRoomWindow() {
 void MeetingRoomWindow::showEvent(QShowEvent *e) {
 	Ui::RpWidget::showEvent(e);
 	_logicalWindowVisible = true;
+	updateStageGeometry();
 	setupNativeWindow();
 	tryActivateGpuBackend();
 	scheduleViewportIntent(true);
@@ -3509,6 +3600,8 @@ void MeetingRoomWindow::showEvent(QShowEvent *e) {
 
 void MeetingRoomWindow::hideEvent(QHideEvent *e) {
 	_logicalWindowVisible = false;
+	if (_layoutPopup) _layoutPopup->hide();
+	if (_videoPagingControls) _videoPagingControls->hide();
 	scheduleViewportIntent(true);
 	updateVideoLayout();
 	Ui::RpWidget::hideEvent(e);
@@ -3517,6 +3610,7 @@ void MeetingRoomWindow::hideEvent(QHideEvent *e) {
 void MeetingRoomWindow::changeEvent(QEvent *e) {
 	Ui::RpWidget::changeEvent(e);
 	if (e && e->type() == QEvent::WindowStateChange) {
+		updateStageGeometry();
 		scheduleViewportIntent(true);
 		updateVideoLayout();
 	}
@@ -4575,6 +4669,8 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
     }
 
 	_stageContainer->setGeometry(0, stageTop, stageW, stageH);
+	_bottomBar->setGeometry(0, h - bottomBarH, w, bottomBarH);
+	updateStageGeometry();
 
 	if (_activeSidebar == ActiveSidebar::Participants) {
 		if (_participantsSidebar) {
@@ -4598,8 +4694,6 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
 		if (_participantsSidebar) _participantsSidebar->hide();
 		if (_chatSidebar) _chatSidebar->hide();
 	}
-
-	_bottomBar->setGeometry(0, h - bottomBarH, w, bottomBarH);
 
 	updateVideoLayout();
 	scheduleViewportIntent(false);
@@ -4911,16 +5005,20 @@ void MeetingRoomWindow::syncVideoCanvasLayout(const std::vector<VideoTileWidget*
 	for (auto *tile : tiles) {
 		if (!tile) continue;
 		const QRect geometry = tile->geometry();
+		const auto visible = tile->layoutClipRect().translated(geometry.topLeft());
 		canvas_tiles.push_back({
 			tile->renderKey().toStdString(),
 			geometry.x(), geometry.y(), geometry.width(), geometry.height(),
-			tile->isSpeaking(), tile->audioLevel(), tile->isVideoActive() && !tile->isVideoStreamPaused()
+			tile->isSpeaking(), tile->audioLevel(), tile->isVideoActive() && !tile->isVideoStreamPaused(),
+			livekit::render::VideoClipRect{visible.x(), visible.y(), visible.width(), visible.height()}
 		});
 		QPointer<VideoTileWidget> guarded(tile);
 		_videoCanvas->setTileDecoration(tile->renderKey().toStdString(),
 			[guarded](const QSize &pixels, bool hasFrame, bool hovered) {
 				return guarded ? guarded->hardwareDecoration(pixels, hasFrame, hovered) : QImage();
-			}, tile->pinButtonRect());
+			}, tile->pinButtonRect(), [guarded] {
+				return guarded ? guarded->toolTip() : QString();
+			});
 		tile->setHardwareCanvasMode(true);
 		tile->hide();
 	}
@@ -5012,6 +5110,7 @@ void MeetingRoomWindow::setupRemoteControl() {
             auto* tile = remoteVideoTile(sid);
             QWidget* widget = nullptr;
             QRectF content;
+            std::optional<QRectF> inputClip;
             if (!_whiteboardVisible && tile && canRenderRemoteVideo(sid)) {
                 if (_usingGpuBackend.load() && _videoCanvas && _videoCanvas->isVisible()) {
                     widget = _videoCanvas;
@@ -5020,8 +5119,15 @@ void MeetingRoomWindow::setupRemoteControl() {
                     widget = tile;
                     content = tile->remoteControlContentRect();
                 }
+                if (widget) {
+                    const auto visible = tile->layoutClipRect();
+                    inputClip = QRectF(widget->mapFromGlobal(tile->mapToGlobal(visible.topLeft())), visible.size());
+                    if (widget == _videoCanvas) inputClip = inputClip->intersected(_videoCanvas->rect());
+                    else inputClip = inputClip->intersected(QRectF(
+                        tile->mapFrom(_stageContainer, QPoint()), _stageContainer->size()));
+                }
             }
-            targets.push_back({binding.identity,sid,tile ? tile->displayName() : binding.identity,widget,content});
+            targets.push_back({binding.identity,sid,tile ? tile->displayName() : binding.identity,widget,content,inputClip});
         }
         return targets;
     },[this](bool blocked) {
@@ -5042,82 +5148,82 @@ void MeetingRoomWindow::setupRemoteControl() {
 
 void MeetingRoomWindow::setupVideoPagingControls() {
 	if (_videoPagingControls || !_stageContainer) return;
-	_videoPagingControls = new QWidget(_stageContainer);
-	// This small overlay must stack above the native GPU surface. Keep its
-	// ancestors/siblings in the raster backing store and track stage movement.
-	new NativeChildGeometry(*_videoPagingControls);
-	_videoPagingControls->setAttribute(Qt::WA_NativeWindow);
-	_videoPagingControls->setObjectName(QStringLiteral("videoPagingControls"));
-	AppTheme::setTone(*_videoPagingControls, AppTheme::Tone::Dark);
-	auto *layout = new QHBoxLayout(_videoPagingControls);
-	layout->setContentsMargins(8, 6, 8, 6);
-	layout->setSpacing(6);
-
-	_previousVideoPage = new QToolButton(_videoPagingControls);
-	_previousVideoPage->setObjectName(QStringLiteral("previousVideoPage"));
-	_previousVideoPage->setAutoRaise(true);
-	_previousVideoPage->setArrowType(Qt::LeftArrow);
-	_previousVideoPage->setToolTip(
-		QCoreApplication::translate("MeetingUI", "Previous video page"));
-	_previousVideoPage->setAccessibleName(_previousVideoPage->toolTip());
-
-	_videoPageLabel = new QLabel(QStringLiteral("1 / 1"), _videoPagingControls);
-	_videoPageLabel->setObjectName(QStringLiteral("videoPageIndicator"));
-	_videoPageLabel->setAlignment(Qt::AlignCenter);
-	_videoPageLabel->setMinimumWidth(54);
-
-	_nextVideoPage = new QToolButton(_videoPagingControls);
-	_nextVideoPage->setObjectName(QStringLiteral("nextVideoPage"));
-	_nextVideoPage->setAutoRaise(true);
-	_nextVideoPage->setArrowType(Qt::RightArrow);
-	_nextVideoPage->setToolTip(
-		QCoreApplication::translate("MeetingUI", "Next video page"));
-	_nextVideoPage->setAccessibleName(_nextVideoPage->toolTip());
-
-	_videoPageSizeControl = createAccessibleComboBox(_videoPagingControls);
-	_videoPageSizeControl->setObjectName(QStringLiteral("videoPageSize"));
-	_videoPageSizeControl->setToolTip(
-		QCoreApplication::translate("MeetingUI", "Videos per page"));
-	_videoPageSizeControl->setAccessibleName(_videoPageSizeControl->toolTip());
-	for (const auto size : {4, 9, 16}) {
-		_videoPageSizeControl->addItem(QString::number(size), size);
-	}
-	_videoPageSizeControl->setCurrentIndex(
-		_videoPageSizeControl->findData(static_cast<int>(_videoPageSize)));
-	AppTheme::styleChoiceControls(*_videoPagingControls, AppTheme::Tone::Dark);
-
-	layout->addWidget(_previousVideoPage);
-	layout->addWidget(_videoPageLabel);
-	layout->addWidget(_nextVideoPage);
-	layout->addWidget(_videoPageSizeControl);
-	_videoPagingControls->adjustSize();
+	// A sibling row reserves real space below the native video stage.
+	_videoPagingControls = new MeetingVideoPager(this);
 	_videoPagingControls->hide();
-
-	connect(_previousVideoPage, &QToolButton::clicked, this, [this] {
-		if (_videoPage == 0) return;
-		--_videoPage;
+	_videoPagingControls->pageRequested = [this](uint32_t page) {
+		if (page >= _acceptedVideoPlan.page_count) return;
+		_videoPage = page;
 		scheduleViewportIntent(true);
-	});
-	connect(_nextVideoPage, &QToolButton::clicked, this, [this] {
-		if (_videoPage + 1 >= _acceptedVideoPlan.page_count) return;
-		++_videoPage;
+	};
+	_layoutPopup = new MeetingLayoutPopup(this);
+	_topBar->setLayoutSelection(_viewMode, _speakerLayout);
+	_layoutPopup->layoutSelected = [this](livekit::VideoLayoutMode mode, livekit::SpeakerLayout layout) {
+		_viewMode = mode == livekit::VideoLayoutMode::Grid ? VideoViewMode::Grid : VideoViewMode::Speaker;
+		if (_viewMode == VideoViewMode::Grid) {
+			_pinnedTrackKey.reset();
+			_pinnedLocalTarget.reset();
+			_pinnedRenderKey.clear();
+		}
+		_speakerLayout = layout;
+		_videoPage = 0;
+		saveVideoLayoutPreferences();
 		scheduleViewportIntent(true);
+	};
+	_layoutPopup->gridCapacitySelected = [this](uint32_t capacity) {
+		if (capacity != 9 && capacity != 25 && capacity != 49) return;
+		_viewMode = VideoViewMode::Grid;
+		_pinnedTrackKey.reset();
+		_pinnedLocalTarget.reset();
+		_pinnedRenderKey.clear();
+		_videoPageSize = capacity;
+		_videoPage = 0;
+		saveVideoLayoutPreferences();
+		scheduleViewportIntent(true);
+	};
+	_layoutPopup->speakingOnlyChanged = [this](bool enabled) {
+		_speakingOnly = enabled;
+		_videoPage = 0;
+		saveVideoLayoutPreferences();
+		scheduleViewportIntent(true);
+	};
+	connect(_topBar, &RoomTopBarWidget::layoutMenuRequested, this, [this] {
+		_layoutPopup->setSelection(_viewMode == VideoViewMode::Grid ? livekit::VideoLayoutMode::Grid
+			: livekit::VideoLayoutMode::Speaker, _speakerLayout, _videoPageSize, _speakingOnly);
+		_layoutPopup->showAnchored(_topBar->layoutButton());
 	});
-	connect(_videoPageSizeControl, qOverload<int>(&QComboBox::currentIndexChanged),
-		this, [this](int index) {
-			if (!_videoPageSizeControl || index < 0) return;
-			const auto requested = static_cast<uint32_t>(
-				_videoPageSizeControl->itemData(index).toUInt());
-			if (requested == _videoPageSize) return;
-			_videoPageSize = requested;
-			_videoPage = 0;
-			scheduleViewportIntent(true);
-		});
-
 	_viewportIntentTimer = new QTimer(this);
 	_viewportIntentTimer->setSingleShot(true);
 	connect(_viewportIntentTimer, &QTimer::timeout,
 		this, &MeetingRoomWindow::submitViewportIntent);
+}
+
+void MeetingRoomWindow::saveVideoLayoutPreferences() {
+	if (!_persistVideoLayoutPreferences) return;
+	const std::array<QString, 5> layouts = {QStringLiteral("right"), QStringLiteral("top"),
+		QStringLiteral("top-left"), QStringLiteral("bottom-left"), QStringLiteral("floating")};
+	QSettings preferences;
+	preferences.setValue(QStringLiteral("meeting/videoLayout"), _viewMode == VideoViewMode::Grid
+		? QStringLiteral("grid") : layouts[static_cast<size_t>(_speakerLayout)]);
+	preferences.setValue(QStringLiteral("meeting/gridCapacity"), _videoPageSize);
+	preferences.setValue(QStringLiteral("meeting/speakingOnly"), _speakingOnly);
+}
+
+void MeetingRoomWindow::updateStageGeometry() {
+	if (!_stageContainer || !_topBar || !_bottomBar) return;
+	const int stageTop = _topBar->geometry().bottom() + 1
+		+ (_screenShareBanner && !_screenShareBanner->isHidden() ? _screenShareBanner->height() : 0)
+		+ (_encryptionPanel && !_encryptionPanel->isHidden() ? _encryptionPanel->height() : 0);
+	const int contentHeight = std::max(0, height() - stageTop - _bottomBar->height());
+	const bool paging = _videoPagingControls && _logicalWindowVisible && !isMinimized()
+		&& !_whiteboardVisible && _acceptedVideoPlan.page_count > 1;
+	const int pagerHeight = paging ? std::min(kVideoPagerHeight, contentHeight) : 0;
+	_stageContainer->setGeometry(0, stageTop, _stageContainer->width(), contentHeight - pagerHeight);
+	if (_videoPagingControls) {
+		_videoPagingControls->setGeometry(0, stageTop + contentHeight - pagerHeight,
+			_stageContainer->width(), pagerHeight);
+		_videoPagingControls->setVisible(paging);
+	}
 }
 
 void MeetingRoomWindow::scheduleViewportIntent(bool immediate) {
@@ -5131,6 +5237,7 @@ void MeetingRoomWindow::scheduleViewportIntent(bool immediate) {
 }
 
 void MeetingRoomWindow::submitViewportIntent() {
+	if (_topBar) _topBar->setLayoutSelection(_viewMode, _speakerLayout);
 	if (!_coordinator || !_stageContainer || _closeRequested) return;
 	livekit::ViewportIntent intent;
 	switch (_viewMode) {
@@ -5141,6 +5248,8 @@ void MeetingRoomWindow::submitViewportIntent() {
 	}
 	intent.page = _videoPage;
 	intent.page_size = _videoPageSize;
+	intent.speaker_layout = _speakerLayout;
+	intent.speaking_only = _speakingOnly;
 	intent.local_participant_present = _localTile != nullptr;
 	intent.local_screen_share_present = _localScreenTile != nullptr;
 	intent.pinned = _pinnedTrackKey;
@@ -5148,7 +5257,9 @@ void MeetingRoomWindow::submitViewportIntent() {
 	intent.stage_content = _whiteboardVisible
 		? livekit::StageContent::Whiteboard
 		: livekit::StageContent::Video;
-	intent.stage_rect = {0, 0, _stageContainer->width(), _stageContainer->height()};
+	intent.stage_rect = {0, 0, _stageContainer->width(),
+		std::max(0, height() - _stageContainer->y() - _bottomBar->height())};
+	intent.paging_bar_height = kVideoPagerHeight;
 	intent.device_pixel_ratio = devicePixelRatioF();
 	intent.window_visible = _logicalWindowVisible;
 	intent.minimized = isMinimized();
@@ -5194,6 +5305,7 @@ void MeetingRoomWindow::setWhiteboardVisible(bool visible) {
 		}
 	}
 	_whiteboardVisible = visible;
+	updateStageGeometry();
 	if (!visible && _whiteboardPanel) _whiteboardPanel->hide();
 	scheduleViewportIntent(true);
 	updateVideoLayout();
@@ -5271,16 +5383,6 @@ void MeetingRoomWindow::updateVideoLayout() {
 		return;
 	}
 	if (_whiteboardPanel) _whiteboardPanel->hide();
-	if (_videoPagingControls) {
-		_videoPagingControls->adjustSize();
-		_videoPagingControls->move(
-			std::max(8, stageW - _videoPagingControls->width() - 12),
-			std::max(8, stageH - _videoPagingControls->height() - 12));
-		_videoPagingControls->setVisible(
-			_acceptedVideoPlan.mode == livekit::VideoLayoutMode::Grid ||
-			_acceptedVideoPlan.page_count > 1);
-		_videoPagingControls->raise();
-	}
 	VideoTileWidget *pinnedTile = nullptr;
 	if (_acceptedVideoPlan.pinned_local == livekit::LocalVideoTarget::Camera) {
 		pinnedTile = _localTile;
@@ -5295,7 +5397,10 @@ void MeetingRoomWindow::updateVideoLayout() {
 	}
 
 	const int N = static_cast<int>(allTiles.size());
-	if (N == 0) return;
+	if (N == 0) {
+		syncVideoCanvasLayout({});
+		return;
+	}
 
 	const bool hasRemote = !_remoteTiles.empty();
 	const bool localActive = _localTile && _localTile->isVideoActive();
@@ -5314,128 +5419,33 @@ void MeetingRoomWindow::updateVideoLayout() {
 		_recoveryBanner->raise();
 	}
 
-	// 1. 画中画模式 (PiP)
-	if (_acceptedVideoPlan.mode == livekit::VideoLayoutMode::PictureInPicture && N >= 2) {
-		VideoTileWidget *mainTile = allTiles[1];
-		if (auto *focused = focusedVideoTile();
-			focused && std::find(allTiles.begin(), allTiles.end(), focused) != allTiles.end()) {
-			mainTile = focused;
-		}
-		// One back-to-front order drives both QWidget stacking and DX11 drawing.
-		const auto main = std::find(allTiles.begin(), allTiles.end(), mainTile);
+	// Both subscription pixel demand and QWidget/GPU placement use this geometry.
+	size_t mainIndex = 0;
+	if (auto *focused = focusedVideoTile()) {
+		const auto found = std::find(allTiles.begin(), allTiles.end(), focused);
+		if (found != allTiles.end()) mainIndex = static_cast<size_t>(found - allTiles.begin());
+	}
+	if (!gallery && mainIndex != 0) {
+		const auto main = allTiles.begin() + mainIndex;
 		std::rotate(allTiles.begin(), main, main + 1);
-
-		mainTile->setPipMode(false);
-		mainTile->setGeometry(0, 0, stageW, stageH);
-		mainTile->show();
-		mainTile->lower();
-
-		const int pipW = std::clamp(stageW * 22 / 100, 160, 260);
-		const int pipH = pipW * 9 / 16;
-		int pipRightOffset = 16;
-
-		for (auto *t : allTiles) {
-			if (t == mainTile) continue;
-			t->setPipMode(true);
-			t->setGeometry(stageW - pipW - pipRightOffset, stageH - pipH - 16, pipW, pipH);
-			t->show();
-			t->raise();
-			pipRightOffset += pipW + 10;
-		}
-		syncVideoCanvasLayout(allTiles);
-		return;
+		mainIndex = 0;
 	}
-
-	// 2. 演讲者聚焦模式 (Speaker / Focus Mode)
-	if (_acceptedVideoPlan.mode == livekit::VideoLayoutMode::Speaker && N >= 2) {
-		VideoTileWidget *focusTile = allTiles[0];
-		if (auto *focused = focusedVideoTile();
-			focused && std::find(allTiles.begin(), allTiles.end(), focused) != allTiles.end()) {
-			focusTile = focused;
-		} else if (focusTile == _localTile && allTiles.size() > 1) {
-			focusTile = allTiles[1];
-		}
-
-		std::vector<VideoTileWidget*> otherTiles;
-		for (auto *t : allTiles) {
-			if (t != focusTile) otherTiles.push_back(t);
-		}
-
-		const int margin = 8;
-		const int gap = 8;
-		const int filmstripW = std::clamp(stageW * 24 / 100, 180, 260);
-		const int mainW = stageW - filmstripW - gap - margin * 2;
-		const int mainH = stageH - margin * 2;
-
-		focusTile->setPipMode(false);
-		focusTile->setGeometry(margin, margin, mainW, mainH);
-		focusTile->show();
-
-		const int numOthers = static_cast<int>(otherTiles.size());
-		const int smallH = (mainH - (numOthers - 1) * gap) / std::max(1, numOthers);
-		const int clampedH = std::clamp(smallH, 90, filmstripW * 9 / 16);
-
-		for (int i = 0; i < numOthers; ++i) {
-			otherTiles[i]->setPipMode(false);
-			otherTiles[i]->setGeometry(margin + mainW + gap, margin + i * (clampedH + gap), filmstripW, clampedH);
-			otherTiles[i]->show();
-		}
-		syncVideoCanvasLayout(allTiles);
-		return;
-	}
-
-	// 3. 自适应 16:9 最优画廊宫格模式 (Optimal Gallery Grid)
-	const int margin = 8;
-	const int gap = 8;
-	int bestRows = 1, bestCols = 1;
-	int bestTileW = 0, bestTileH = 0;
-	double maxArea = 0.0;
-
-	for (int cols = 1; cols <= N; ++cols) {
-		int rows = (N + cols - 1) / cols;
-		int availW = stageW - margin * 2 - (cols - 1) * gap;
-		int availH = stageH - margin * 2 - (rows - 1) * gap;
-		if (availW <= 0 || availH <= 0) continue;
-
-		int maxW = availW / cols;
-		int maxH = availH / rows;
-
-		int tW = maxW;
-		int tH = maxH;
-		if (static_cast<double>(maxW) / maxH > 16.0 / 9.0) {
-			tW = static_cast<int>(maxH * 16.0 / 9.0);
-			tH = maxH;
-		} else {
-			tW = maxW;
-			tH = static_cast<int>(maxW * 9.0 / 16.0);
-		}
-
-		double area = static_cast<double>(tW) * tH;
-		if (area > maxArea) {
-			maxArea = area;
-			bestRows = rows;
-			bestCols = cols;
-			bestTileW = tW;
-			bestTileH = tH;
-		}
-	}
-
-	const int totalGridH = bestRows * bestTileH + (bestRows - 1) * gap;
-	const int startY = (stageH - totalGridH) / 2;
-
-	int tileIdx = 0;
-	for (int r = 0; r < bestRows && tileIdx < N; ++r) {
-		int itemsInRow = std::min(bestCols, N - r * bestCols);
-		int rowW = itemsInRow * bestTileW + (itemsInRow - 1) * gap;
-		int startX = (stageW - rowW) / 2;
-
-		for (int c = 0; c < itemsInRow && tileIdx < N; ++c) {
-			QRect geom(startX + c * (bestTileW + gap), startY + r * (bestTileH + gap), bestTileW, bestTileH);
-			allTiles[tileIdx]->setPipMode(false);
-			allTiles[tileIdx]->setGeometry(geom);
-			allTiles[tileIdx]->show();
-			++tileIdx;
-		}
+	const auto geometry = livekit::CalculateVideoLayout(_acceptedVideoPlan.mode,
+		_acceptedVideoPlan.speaker_layout, {0, 0, stageW, stageH},
+		_acceptedVideoPlan.page_size ? _acceptedVideoPlan.page_size : 9, allTiles.size(), mainIndex);
+	const auto clips = livekit::CalculateVideoLayoutClips(_acceptedVideoPlan.mode,
+		_acceptedVideoPlan.speaker_layout, {0, 0, stageW, stageH}, allTiles.size(), mainIndex);
+	for (size_t i = 0; i < allTiles.size(); ++i) {
+		const auto &rect = geometry[i];
+		auto *tile = allTiles[i];
+		tile->setPipMode(!gallery && i != mainIndex &&
+			(_acceptedVideoPlan.mode == livekit::VideoLayoutMode::PictureInPicture ||
+			 _acceptedVideoPlan.speaker_layout == livekit::SpeakerLayout::Floating));
+		tile->setGeometry(rect.x, rect.y, rect.width, rect.height);
+		const auto &clip = clips[i];
+		tile->setLayoutClip(QRect(clip.x, clip.y, clip.width, clip.height).translated(-tile->pos()));
+		tile->setVisible(rect.width > 0 && rect.height > 0 && !tile->layoutClipRect().isEmpty());
+		if (!gallery) tile->raise();
 	}
 	syncVideoCanvasLayout(allTiles);
 }
@@ -5797,38 +5807,24 @@ void MeetingRoomWindow::applyAcceptedVideoDemandPlan(
 		_pinnedLocalTarget = _acceptedVideoPlan.pinned_local;
 		if (!_pinnedTrackKey && !_pinnedLocalTarget) _pinnedRenderKey.clear();
 	}
-	if (_acceptedVideoPlan.stage_content == livekit::StageContent::Video &&
-		_acceptedVideoPlan.reason != livekit::VideoDemandReason::Hidden) {
-		_videoPage = _acceptedVideoPlan.page;
+	// Display accepted state; only a response to the latest request may update pending input.
+	if (!_lastViewportIntent || _acceptedVideoPlan.view_revision >= _lastViewportIntent->view_revision) {
+		if (_acceptedVideoPlan.stage_content == livekit::StageContent::Video &&
+			_acceptedVideoPlan.reason != livekit::VideoDemandReason::Hidden) {
+			_videoPage = _acceptedVideoPlan.page;
+		}
+		if (_acceptedVideoPlan.mode == livekit::VideoLayoutMode::Grid &&
+			(_acceptedVideoPlan.page_size == 4 || _acceptedVideoPlan.page_size == 9 ||
+			 _acceptedVideoPlan.page_size == 16 || _acceptedVideoPlan.page_size == 25 ||
+			 _acceptedVideoPlan.page_size == 49)) {
+			_videoPageSize = _acceptedVideoPlan.page_size;
+		}
 	}
-	if (_acceptedVideoPlan.mode == livekit::VideoLayoutMode::Grid &&
-		(_acceptedVideoPlan.page_size == 4 ||
-		 _acceptedVideoPlan.page_size == 9 ||
-		 _acceptedVideoPlan.page_size == 16)) {
-		_videoPageSize = _acceptedVideoPlan.page_size;
-	}
-	if (_videoPageSizeControl) {
-		const QSignalBlocker blocker(_videoPageSizeControl);
-		const auto index = _videoPageSizeControl->findData(
-			static_cast<int>(_videoPageSize));
-		if (index >= 0) _videoPageSizeControl->setCurrentIndex(index);
-	}
-	if (_videoPageLabel) {
-		_videoPageLabel->setText(QStringLiteral("%1 / %2")
-			.arg(_acceptedVideoPlan.page + 1)
-			.arg(std::max<uint32_t>(1, _acceptedVideoPlan.page_count)));
-	}
-	if (_previousVideoPage) _previousVideoPage->setEnabled(_videoPage > 0);
-	if (_nextVideoPage) {
-		_nextVideoPage->setEnabled(
-			_videoPage + 1 < _acceptedVideoPlan.page_count);
-	}
-	if (_videoPagingControls) {
-		_videoPagingControls->setVisible(
-			isVideoStageVisible() &&
-			(_acceptedVideoPlan.mode == livekit::VideoLayoutMode::Grid ||
-			 _acceptedVideoPlan.page_count > 1));
-	}
+	if (_videoPagingControls) _videoPagingControls->setPage(_acceptedVideoPlan.page,
+		std::max<uint32_t>(1, _acceptedVideoPlan.page_count));
+	const auto previousStageSize = _stageContainer->size();
+	updateStageGeometry();
+	if (previousStageSize != _stageContainer->size()) scheduleViewportIntent(false);
 	syncVisibleRemoteTiles();
 	// Presentations can arrive before the accepted plan creates their tiles.
 	// Replay current media state so new tiles do not depend on a first frame.
@@ -5841,7 +5837,7 @@ void MeetingRoomWindow::syncVisibleRemoteTiles() {
 	std::set<QString> cameraIdentities;
 	std::set<QString> screenSids;
 	for (const auto &seat : _acceptedVideoPlan.visible_seats) {
-		if (cameraIdentities.size() + screenSids.size() >= 16) break;
+		if (cameraIdentities.size() + screenSids.size() >= livekit::kMaximumRemoteVideoTracks) break;
 		const auto identity = QString::fromStdString(
 			seat.key.participant.identity.empty()
 				? seat.key.participant.sid

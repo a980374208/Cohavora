@@ -1222,7 +1222,7 @@ ControlApplyResult Room::ApplyRemoteMediaPlan(const RemoteMediaPlan& plan) {
             result.reason = ControlRejectionReason::StaleRecovery;
             return result;
         }
-        if (plan.video.size() > 16) {
+        if (plan.video.size() > kMaximumRemoteVideoTracks) {
             result.reason = ControlRejectionReason::InvalidDemand;
             return result;
         }
