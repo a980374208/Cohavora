@@ -240,6 +240,8 @@ set(LIVEKIT_SOURCES
     src/core/data_stream_assembler.cpp
     src/core/data_stream.cpp
     src/rtc/webrtc_manager.cpp
+    src/rtc/retained_vp8_decoder.cpp
+    src/rtc/retained_vp8_decoder.h
     src/rtc/audio_frame.cpp
     src/rtc/video_frame.cpp
     src/rtc/audio_source.cpp
@@ -249,6 +251,11 @@ set(LIVEKIT_SOURCES
     src/rtc/rtc_audio_source.cpp
     src/rtc/rtc_video_source.cpp
     src/render/owned_i420_frame.cpp
+    src/render/retained_video_frame.cpp
+    src/render/latest_video_frame_core.cpp
+    src/render/latest_video_frame_worker.cpp
+    src/render/remote_video_frame_pipeline.cpp
+    src/render/remote_video_frame_pipeline.h
     src/render/video_render_frame.h
     src/render/video_render_frame.cpp
     src/render/video_render_router.cpp
@@ -323,6 +330,9 @@ set(LIVEKIT_HEADERS
     src/rtc/rtc_audio_source.h
     src/rtc/rtc_video_source.h
     src/render/owned_i420_frame.h
+    src/render/retained_video_frame.h
+    src/render/latest_video_frame_core.h
+    src/render/latest_video_frame_worker.h
     src/render/video_render_router.h
     src/media/media_converters.h
     src/media/wasapi_types.h
@@ -469,6 +479,20 @@ message(STATUS "[WebRTC] Using Debug Library   : ${WEBRTC_DEBUG_LIB}")
 message(STATUS "[WebRTC] Using Release Library : ${WEBRTC_RELEASE_LIB}")
 message(STATUS
     "[WebRTC] Debug configuration selects: ${WEBRTC_SELECTED_DEBUG_LIB}")
+
+# Certification is tied to the tested binary, not a format enum or package name.
+# An SDK upgrade falls back until its allocation/release contract is re-audited.
+file(SHA256 "${WEBRTC_RELEASE_LIB}" retained_vp8_sdk_hash)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${WEBRTC_RELEASE_LIB}")
+if(retained_vp8_sdk_hash STREQUAL "5f0cf912e593c9a279ee61a7e41400e38d633d0a8921216bed76cfd00d8b9022")
+    if(COHAVORA_DEBUG_DEPENDENCY_ABI STREQUAL "Debug")
+        set_property(SOURCE src/rtc/retained_vp8_decoder.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+            "$<$<NOT:$<CONFIG:Debug>>:COHAVORA_CERTIFIED_VP8=1>")
+    else()
+        set_property(SOURCE src/rtc/retained_vp8_decoder.cpp APPEND PROPERTY COMPILE_DEFINITIONS
+            COHAVORA_CERTIFIED_VP8=1)
+    endif()
+endif()
 
 # The packaged WebRTC archive already prefixes its internal BoringSSL symbols.
 # Consumers must keep using the application's OpenSSL headers because public

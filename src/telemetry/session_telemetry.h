@@ -144,7 +144,19 @@ struct VideoActivityProbe {
     std::atomic<bool> active{true};
     std::atomic<std::uint64_t> on_frame_count{0};
     std::atomic<std::uint64_t> delivered_frame_count{0};
+    // Producer observations: distinct from decoder arrivals and presentation.
+    std::atomic<std::uint64_t> copy_attempts{0};
+    std::atomic<std::uint64_t> copy_failures{0};
+    std::atomic<std::uint64_t> copied_bytes{0};
+    std::atomic<std::uint64_t> precopy_skipped{0};
+    // Async admission is not a skipped copy or a callback timing sample.
+    std::atomic<std::uint64_t> retained_submitted{0};
+    std::atomic<std::uint64_t> retained_capacity_rejected{0};
+    std::atomic<std::uint64_t> admission_rejected_rate{0};
+    std::atomic<std::uint64_t> admission_rejected_inactive{0};
+    std::atomic<std::uint64_t> admission_rejected_busy{0};
     std::atomic<std::int64_t> last_on_frame_ns{0};
+    // Media liveness follows decoded arrivals, independently of display demand.
     std::atomic<std::int64_t> last_frame_ns{0};
     std::atomic<std::uint32_t> width{0};
     std::atomic<std::uint32_t> height{0};

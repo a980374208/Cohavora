@@ -396,9 +396,7 @@ public:
             track.height = seat->subscription_height;
             track.quality = seat->quality;
             track.selected_layer_quality = seat->selected_layer_quality;
-            track.max_fps = std::min(track.width, track.height) <= 180
-                ? std::optional<uint32_t>{15}
-                : std::optional<uint32_t>{30};
+            track.max_fps = livekit::VideoSubscriptionMaxFps(track.width, track.height);
             track.priority = seat->priority;
             result.video.push_back(std::move(track));
         }

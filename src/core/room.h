@@ -51,6 +51,7 @@ enum class OperationOutcome;
 
 namespace render {
 class RenderSubmitObserver;
+class RemoteVideoFramePipeline;
 }
 
 struct RoomStatsReport;
@@ -904,6 +905,7 @@ private:
 #endif
     };
     std::vector<RemoteTrackSinkBinding> remote_track_sinks_;
+    std::weak_ptr<render::RemoteVideoFramePipeline> remote_video_pipeline_;
     std::unordered_map<const RemoteTrackPublication*, uint64_t>
         current_remote_binding_serials_;
     uint64_t next_remote_track_binding_serial_ = 1;

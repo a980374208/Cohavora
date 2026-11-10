@@ -17,11 +17,13 @@
 #include "video_frame.h"
 #include "video_source.h"
 #include "webrtc_manager.h"
+#include "video_frame_admission.h"
 
 namespace livekit {
 
 namespace render {
 class OwnedI420Frame;
+class RemoteVideoFrameEndpoint;
 }
 
 enum class TrackKind {
@@ -178,6 +180,48 @@ public:
     using VideoFrameSink = std::function<void(const VideoFrame&, const VideoCaptureOptions&)>;
     using I420VideoFrameSink = std::function<void(std::shared_ptr<const render::OwnedI420Frame>)>;
 
+private:
+    struct I420VideoSinkEntry {
+        I420VideoFrameSink sink;
+        std::shared_ptr<VideoFrameAdmission> admission;
+        std::function<bool()> valid;
+        std::function<bool()> uses_retained;
+    };
+
+public:
+    // A move-only snapshot of the consumers admitted for this specific frame.
+    // Destruction on copy failure automatically cancels outstanding permits.
+    class I420VideoFrameDelivery {
+    public:
+        I420VideoFrameDelivery() = default;
+        I420VideoFrameDelivery(I420VideoFrameDelivery&&) = default;
+        I420VideoFrameDelivery& operator=(I420VideoFrameDelivery&&) = default;
+        I420VideoFrameDelivery(const I420VideoFrameDelivery&) = delete;
+        bool empty() const { return recipients_.empty(); }
+        uint64_t rejected_rate = 0;
+        uint64_t rejected_inactive = 0;
+        uint64_t rejected_busy = 0;
+        std::function<bool()> binding_valid;
+        void Deliver(const std::shared_ptr<const render::OwnedI420Frame>& frame) {
+            if (!frame) return;
+            for (auto& recipient : recipients_) {
+                const auto& entry = recipient.entry;
+                if ((!binding_valid || binding_valid()) &&
+                    (!entry->valid || entry->valid()) && recipient.permit.Commit()) {
+                    entry->sink(frame);
+                }
+            }
+            recipients_.clear();
+        }
+    private:
+        friend class Track;
+        struct Recipient {
+            std::shared_ptr<I420VideoSinkEntry> entry;
+            VideoFrameAdmission::Permit permit;
+        };
+        std::vector<Recipient> recipients_;
+    };
+
     // Move-only token. Destroying or resetting it unregisters the sink without
     // depending on the Track object's lifetime.
     class I420VideoFrameSubscription {
@@ -214,7 +258,10 @@ public:
 
     Track(const std::string& sid, const std::string& name, TrackKind kind, TrackSource source = TrackSource::Unknown)
         : sid_(sid), name_(name), kind_(kind), source_(source), muted_(false) {}
-    virtual ~Track() = default;
+    virtual ~Track() {
+        std::lock_guard lock(i420_video_sink_registry_->mutex);
+        for (const auto& [id, entry] : i420_video_sink_registry_->sinks) entry->admission->Deactivate();
+    }
 
     std::string sid() const { return sid_; }
     std::string name() const { return name_; }
@@ -277,14 +324,50 @@ public:
         if (sink) video_sinks_.push_back(sink);
     }
 
-    I420VideoFrameSubscription subscribeI420VideoFrames(I420VideoFrameSink sink) {
+    I420VideoFrameSubscription subscribeI420VideoFrames(
+            I420VideoFrameSink sink,
+            std::shared_ptr<VideoFrameAdmission> admission = {},
+            std::function<bool()> valid = {}, std::function<bool()> uses_retained = {}) {
         if (!sink) return {};
 
         auto registry = i420_video_sink_registry_;
         std::lock_guard<std::mutex> lock(registry->mutex);
         const uint64_t id = registry->next_id++;
-        registry->sinks.emplace(id, std::move(sink));
+        if (!admission) admission = std::make_shared<VideoFrameAdmission>();
+        registry->sinks.emplace(id, std::make_shared<I420VideoSinkEntry>(
+            I420VideoSinkEntry{std::move(sink), std::move(admission), std::move(valid), std::move(uses_retained)}));
         return I420VideoFrameSubscription(registry, id);
+    }
+
+    I420VideoFrameDelivery prepareI420VideoDelivery(VideoFrameAdmission::Clock::time_point time,
+                                                   bool retained_selected = false) {
+        I420VideoFrameDelivery delivery;
+        std::vector<std::shared_ptr<I420VideoSinkEntry>> entries;
+        {
+            std::lock_guard lock(i420_video_sink_registry_->mutex);
+            entries.reserve(i420_video_sink_registry_->sinks.size());
+            for (const auto& [id, entry] : i420_video_sink_registry_->sinks) entries.push_back(entry);
+        }
+        delivery.recipients_.reserve(entries.size());
+        for (auto& entry : entries) {
+            if (retained_selected && entry->uses_retained && entry->uses_retained()) continue;
+            if (entry->valid && !entry->valid()) {
+                ++delivery.rejected_inactive;
+                continue;
+            }
+            VideoFrameAdmission::Rejection reason;
+            auto permit = entry->admission->TryAcquire(time, reason);
+            if (permit) {
+                delivery.recipients_.push_back({std::move(entry), std::move(*permit)});
+            } else if (reason == VideoFrameAdmission::Rejection::Rate) {
+                ++delivery.rejected_rate;
+            } else if (reason == VideoFrameAdmission::Rejection::Busy) {
+                ++delivery.rejected_busy;
+            } else {
+                ++delivery.rejected_inactive;
+            }
+        }
+        return delivery;
     }
 
     void notifyAudioFrame(const AudioFrame& frame) {
@@ -294,6 +377,15 @@ public:
             sinks = audio_sinks_;
         }
         for (const auto& s : sinks) s(frame);
+    }
+
+    void setRemoteVideoEndpoint(const std::shared_ptr<render::RemoteVideoFrameEndpoint>& endpoint) {
+        std::lock_guard lock(i420_video_sink_registry_->mutex);
+        remote_video_endpoint_ = endpoint;
+    }
+    std::shared_ptr<render::RemoteVideoFrameEndpoint> remoteVideoEndpoint() const {
+        std::lock_guard lock(i420_video_sink_registry_->mutex);
+        return remote_video_endpoint_.lock();
     }
 
     void notifyVideoFrame(const VideoFrame& frame, const VideoCaptureOptions& options) {
@@ -309,7 +401,7 @@ public:
         if (!frame) return;
 
         auto registry = i420_video_sink_registry_;
-        std::vector<I420VideoFrameSink> sinks;
+        std::vector<std::shared_ptr<I420VideoSinkEntry>> sinks;
         {
             std::lock_guard<std::mutex> lock(registry->mutex);
             sinks.reserve(registry->sinks.size());
@@ -317,14 +409,18 @@ public:
                 sinks.push_back(sink);
             }
         }
-        for (const auto& sink : sinks) sink(frame);
+        // Already-owned callers retain their delivery contract. Admission is
+        // applied by the native producer before it converts or copies pixels.
+        for (const auto& entry : sinks) {
+            if (entry->admission->active()) entry->sink(frame);
+        }
     }
 
 private:
     struct I420VideoSinkRegistry {
         std::mutex mutex;
         uint64_t next_id = 1;
-        std::unordered_map<uint64_t, I420VideoFrameSink> sinks;
+        std::unordered_map<uint64_t, std::shared_ptr<I420VideoSinkEntry>> sinks;
     };
 
     std::string sid_;
@@ -342,12 +438,16 @@ private:
     std::vector<AudioFrameSink> audio_sinks_;
     std::vector<VideoFrameSink> video_sinks_;
     std::shared_ptr<I420VideoSinkRegistry> i420_video_sink_registry_ = std::make_shared<I420VideoSinkRegistry>();
+    std::weak_ptr<render::RemoteVideoFrameEndpoint> remote_video_endpoint_;
 };
 
 inline void Track::I420VideoFrameSubscription::reset() noexcept {
     const uint64_t id = std::exchange(id_, 0);
     if (auto registry = registry_.lock()) {
         std::lock_guard<std::mutex> lock(registry->mutex);
+        if (const auto it = registry->sinks.find(id); it != registry->sinks.end()) {
+            it->second->admission->Deactivate();
+        }
         registry->sinks.erase(id);
     }
     registry_.reset();

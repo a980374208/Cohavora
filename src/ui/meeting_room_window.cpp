@@ -6204,6 +6204,10 @@ void MeetingRoomWindow::reconcileRemoteRenderSelection() {
 		value.track = std::move(track);
 		value.identity = binding->second.identity.toStdString();
 		value.render_key = key.publication_sid;
+        if (const auto* seat = _acceptedVideoPlan.FindMediaSeat(key)) {
+            value.max_fps = livekit::VideoSubscriptionMaxFps(
+                seat->subscription_width, seat->subscription_height);
+        }
 		selection.push_back(std::move(value));
 	}
 	const auto result = _remoteRenderSession->ApplySelection(

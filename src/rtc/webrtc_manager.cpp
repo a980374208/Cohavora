@@ -1,6 +1,7 @@
 #include <winsock2.h>
 #include <asio.hpp>
 #include "webrtc_manager.h"
+#include "retained_vp8_decoder.h"
 #include "telemetry/diagnostic_pipeline.h"
 #include "telemetry/sdp_negotiation_trace.h"
 #include "telemetry/received_decode_diagnostic.h"
@@ -220,7 +221,7 @@ public:
 #endif
         };
         if (_stricmp(format.name.c_str(), "VP8") == 0) {
-            return observed(webrtc::CreateVp8Decoder(env));
+            return observed(render::CreateRetainedVp8Decoder(env));
         }
         if (_stricmp(format.name.c_str(), "VP9") == 0) {
             const auto supported_formats = webrtc::SupportedVP9DecoderCodecs();

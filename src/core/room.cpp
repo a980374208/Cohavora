@@ -12,6 +12,7 @@
 #include "rtc_audio_source.h"
 #include "rtc_video_source.h"
 #include "render/owned_i420_frame.h"
+#include "render/remote_video_frame_pipeline.h"
 #include "log_redaction.h"
 #include "livekit_rtc.pb.h"
 #include "livekit_models.pb.h"
@@ -4772,7 +4773,8 @@ public:
         std::function<render::RenderFrameMetadata(Clock::time_point)>;
 
     explicit NativeVideoTrackSink(
-        std::function<void(Clock::time_point, render::OwnedI420Frame::Ptr)> callback,
+        std::function<Track::I420VideoFrameDelivery(Clock::time_point, int, int, bool)> callback,
+        std::shared_ptr<telemetry::VideoActivityProbe> activity_probe,
         MetadataFactory metadata_factory = {},
         std::function<void(std::chrono::nanoseconds)> duration_probe = {},
         std::function<void(std::chrono::nanoseconds, std::chrono::nanoseconds)> phase_probe = {}
@@ -4782,6 +4784,7 @@ public:
 #endif
         )
         : callback_(std::move(callback))
+        , activity_probe_(std::move(activity_probe))
         , metadata_factory_(std::move(metadata_factory))
         , duration_probe_(std::move(duration_probe))
         , phase_probe_(std::move(phase_probe))
@@ -4790,6 +4793,19 @@ public:
         , trace_binding_serial_(trace_binding_serial)
 #endif
     {}
+
+    ~NativeVideoTrackSink() override { Close(); }
+    void SetPipeline(std::shared_ptr<render::RemoteVideoFramePipeline> pipeline,
+                     std::shared_ptr<render::RemoteVideoFrameEndpoint> endpoint) {
+        pipeline_ = std::move(pipeline);
+        endpoint_ = std::move(endpoint);
+    }
+    void Close() {
+        if (endpoint_) endpoint_->Close();
+        endpoint_.reset();
+        // RemoveSink drains ingress before native cleanup joins the last worker.
+        pipeline_.reset();
+    }
 
     void OnFrame(const webrtc::VideoFrame& rtc_frame) override {
         if (!callback_) return;
@@ -4807,32 +4823,48 @@ public:
         diagnostic_trace.Identity(metadata.room_generation, metadata.binding_epoch,
             metadata.frame_token, rtc_frame.width(), rtc_frame.height());
         Clock::time_point copied_at{};
-        telemetry::callback_diagnostic::Mark(DiagnosticPoint::CopyBegin);
-        if (auto frame = render::OwnedI420Frame::CopyFrom(
-                rtc_frame, std::move(metadata))) {
-            telemetry::callback_diagnostic::Mark(DiagnosticPoint::CopyEnd);
-            if (phase_probe_) copied_at = Clock::now();
+        const bool retained = endpoint_ && endpoint_->Offer(rtc_frame, metadata, activity_probe_);
+        auto delivery = callback_(source_time, rtc_frame.width(), rtc_frame.height(), retained);
+        activity_probe_->admission_rejected_rate.fetch_add(delivery.rejected_rate, std::memory_order_relaxed);
+        activity_probe_->admission_rejected_inactive.fetch_add(delivery.rejected_inactive, std::memory_order_relaxed);
+        activity_probe_->admission_rejected_busy.fetch_add(delivery.rejected_busy, std::memory_order_relaxed);
+        if (delivery.empty()) {
+            if (!retained) activity_probe_->precopy_skipped.fetch_add(1, std::memory_order_relaxed);
+        } else {
+            activity_probe_->copy_attempts.fetch_add(1, std::memory_order_relaxed);
+            telemetry::callback_diagnostic::Mark(DiagnosticPoint::CopyBegin);
+            if (auto frame = render::OwnedI420Frame::CopyFrom(
+                    rtc_frame, std::move(metadata))) {
+                telemetry::callback_diagnostic::Mark(DiagnosticPoint::CopyEnd);
+                activity_probe_->delivered_frame_count.fetch_add(1, std::memory_order_relaxed);
+                activity_probe_->copied_bytes.fetch_add(
+                    uint64_t(frame->width()) * frame->height() +
+                    2 * uint64_t(frame->chroma_width()) * frame->chroma_height(), std::memory_order_relaxed);
+                if (phase_probe_) copied_at = Clock::now();
 #if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
-            if (trace_observation_ && trace_observation_->frame_trace &&
-                !trace_observation_->retired.load(std::memory_order_acquire) &&
-                (!trace_observation_->binding_active ||
-                 trace_observation_->binding_active->load(std::memory_order_acquire))) {
-                MediaFrameTraceRecord record;
-                record.phase = MediaFrameTracePhase::CopiedForDelivery;
-                record.binding_id = trace_observation_->binding_id;
-                record.generation = trace_observation_->generation;
-                record.room_binding_serial = trace_binding_serial_;
-                record.install_epoch = trace_observation_->install_epoch->load(std::memory_order_acquire);
-                record.rtp_timestamp = rtc_frame.rtp_timestamp();
-                record.timestamp_us = rtc_frame.timestamp_us();
-                record.width = rtc_frame.width();
-                record.height = rtc_frame.height();
-                trace_observation_->frame_trace->Record(record);
-            }
+                if (trace_observation_ && trace_observation_->frame_trace &&
+                    !trace_observation_->retired.load(std::memory_order_acquire) &&
+                    (!trace_observation_->binding_active ||
+                     trace_observation_->binding_active->load(std::memory_order_acquire))) {
+                    MediaFrameTraceRecord record;
+                    record.phase = MediaFrameTracePhase::CopiedForDelivery;
+                    record.binding_id = trace_observation_->binding_id;
+                    record.generation = trace_observation_->generation;
+                    record.room_binding_serial = trace_binding_serial_;
+                    record.install_epoch = trace_observation_->install_epoch->load(std::memory_order_acquire);
+                    record.rtp_timestamp = rtc_frame.rtp_timestamp();
+                    record.timestamp_us = rtc_frame.timestamp_us();
+                    record.width = rtc_frame.width();
+                    record.height = rtc_frame.height();
+                    trace_observation_->frame_trace->Record(record);
+                }
 #endif
-            telemetry::callback_diagnostic::Mark(DiagnosticPoint::DispatchBegin);
-            callback_(source_time, std::move(frame));
-            telemetry::callback_diagnostic::Mark(DiagnosticPoint::DispatchEnd);
+                telemetry::callback_diagnostic::Mark(DiagnosticPoint::DispatchBegin);
+                delivery.Deliver(frame);
+                telemetry::callback_diagnostic::Mark(DiagnosticPoint::DispatchEnd);
+            } else {
+                activity_probe_->copy_failures.fetch_add(1, std::memory_order_relaxed);
+            }
         }
         if (duration_probe_ || phase_probe_ || diagnostic_trace) {
             const auto finished_at = Clock::now();
@@ -4844,7 +4876,10 @@ public:
     }
 
 private:
-    std::function<void(Clock::time_point, render::OwnedI420Frame::Ptr)> callback_;
+    std::function<Track::I420VideoFrameDelivery(Clock::time_point, int, int, bool)> callback_;
+    std::shared_ptr<render::RemoteVideoFramePipeline> pipeline_;
+    std::shared_ptr<render::RemoteVideoFrameEndpoint> endpoint_;
+    std::shared_ptr<telemetry::VideoActivityProbe> activity_probe_;
     MetadataFactory metadata_factory_;
     std::function<void(std::chrono::nanoseconds)> duration_probe_;
     std::function<void(std::chrono::nanoseconds, std::chrono::nanoseconds)> phase_probe_;
@@ -8596,18 +8631,20 @@ void Room::AttachRemoteTrackToParticipant(
              telemetry_gate, weak_telemetry, telemetry_key,
              telemetry_room_generation, binding_serial](
                 std::chrono::steady_clock::time_point source_time,
-                render::OwnedI420Frame::Ptr frame) {
-            if (!media_binding->active.load(std::memory_order_acquire)) return;
+                int width, int height, bool retained) -> Track::I420VideoFrameDelivery {
+            if (!media_binding->active.load(std::memory_order_acquire)) {
+                Track::I420VideoFrameDelivery rejected;
+                rejected.rejected_inactive = 1;
+                return rejected;
+            }
             const auto frame_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 source_time.time_since_epoch()).count();
-            telemetry_probe->delivered_frame_count.fetch_add(
-                1, std::memory_order_relaxed);
             const auto previous_frame_ns = telemetry_probe->last_frame_ns.exchange(
                 frame_ns, std::memory_order_acq_rel);
             telemetry_probe->width.store(
-                static_cast<std::uint32_t>(frame->width()), std::memory_order_release);
+                static_cast<std::uint32_t>(width), std::memory_order_release);
             telemetry_probe->height.store(
-                static_cast<std::uint32_t>(frame->height()), std::memory_order_release);
+                static_cast<std::uint32_t>(height), std::memory_order_release);
 
             if (const auto telemetry_owner = weak_telemetry.lock()) {
                 const bool first_frame =
@@ -8643,8 +8680,8 @@ void Room::AttachRemoteTrackToParticipant(
                         binding_serial,
                         recovery_epoch,
                         recovery_stable,
-                        static_cast<std::uint32_t>(frame->width()),
-                        static_cast<std::uint32_t>(frame->height()),
+                        static_cast<std::uint32_t>(width),
+                        static_cast<std::uint32_t>(height),
                         source_time,
                         recovery_first &&
                                 telemetry_gate->recovery_last_good_ns.load(
@@ -8668,15 +8705,18 @@ void Room::AttachRemoteTrackToParticipant(
                     }
                 }
             }
-            if (r_track) {
-                r_track->notifyI420VideoFrame(frame);
-            }
             if (!has_logged->exchange(true)) {
                 if (auto room = weak_room.lock()) {
-                    room->Log("WEBRTC", "VIDEO_FRAME", "WebRTC decoder started producing remote video (" + std::to_string(frame->width()) + "x" + std::to_string(frame->height()) + ")");
+                    room->Log("WEBRTC", "VIDEO_FRAME", "WebRTC decoder started producing remote video (" + std::to_string(width) + "x" + std::to_string(height) + ")");
                 }
             }
-        },
+            auto delivery = r_track ? r_track->prepareI420VideoDelivery(source_time, retained)
+                                    : Track::I420VideoFrameDelivery{};
+            delivery.binding_valid = [media_binding] {
+                return media_binding->active.load(std::memory_order_acquire);
+            };
+            return delivery;
+        }, telemetry_probe,
             [render_telemetry_key, telemetry_room_generation, binding_serial,
              render_telemetry_observer, render_frame_token, telemetry_probe](
                     std::chrono::steady_clock::time_point decoded_at) {
@@ -8700,6 +8740,21 @@ void Room::AttachRemoteTrackToParticipant(
             , receive_trace_observation, binding_serial
 #endif
             );
+        std::shared_ptr<render::RemoteVideoFramePipeline> pipeline;
+        {
+            std::lock_guard lock(room_mutex_);
+            pipeline = remote_video_pipeline_.lock();
+            if (!pipeline) {
+                pipeline = std::make_shared<render::RemoteVideoFramePipeline>();
+                remote_video_pipeline_ = pipeline;
+            }
+        }
+        auto endpoint = pipeline->Bind([media_binding, weak_track = std::weak_ptr<Track>(r_track)] {
+            const auto track = weak_track.lock();
+            return media_binding->active.load(std::memory_order_acquire) && track && !track->muted();
+        });
+        if (r_track) r_track->setRemoteVideoEndpoint(endpoint);
+        sink->SetPipeline(std::move(pipeline), std::move(endpoint));
         video_track->AddOrUpdateSink(sink.get(), webrtc::VideoSinkWants());
         RemoteTrackSinkBinding binding{
             track_key,
@@ -8714,6 +8769,7 @@ void Room::AttachRemoteTrackToParticipant(
             [track, sink]() {
                 auto* attached_track = static_cast<webrtc::VideoTrackInterface*>(track.get());
                 if (attached_track) attached_track->RemoveSink(sink.get());
+                sink->Close();
             }};
         const bool retained = retain_binding(binding);
         if (!retained) {

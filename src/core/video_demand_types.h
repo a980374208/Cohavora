@@ -183,6 +183,12 @@ struct VideoDemandPlan {
     }
 };
 
+// Shared by SFU demand and local camera copy admission. Keep the decision
+// based on the selected transport layer rather than the layout rectangle.
+inline uint32_t VideoSubscriptionMaxFps(uint32_t width, uint32_t height) {
+    return (width < height ? width : height) <= 180 ? 15 : 30;
+}
+
 struct RemoteTrackDemand {
     TrackKey key;
     uint64_t policy_revision = 0;

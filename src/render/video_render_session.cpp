@@ -112,6 +112,8 @@ VideoRenderSession::AttachResult VideoRenderSession::AttachSelection(
     if (track_id.empty()) {
         return AttachResult::InvalidTrack;
     }
+    const auto max_fps = track->source() == TrackSource::Camera ? selection.max_fps : 0;
+    const auto native_endpoint = track->remoteVideoEndpoint();
 
     // A full Room reconnect can recreate the Track object while preserving its
     // SID.  Keeping the old RAII token in that case silently routes every new
@@ -120,12 +122,15 @@ VideoRenderSession::AttachResult VideoRenderSession::AttachSelection(
     const auto existing = tracks_.find(track_id);
     if (existing != tracks_.end()) {
         if (existing->second.track.lock() == track &&
+            existing->second.native_endpoint.lock() == native_endpoint &&
             existing->second.render_key == (render_key.empty() ? identity : render_key) &&
             existing->second.validates_lease == validates_lease &&
             (!validates_lease ||
              (existing->second.key == selection.key &&
               existing->second.media_binding_key == selection.media_binding_key &&
               BindingLeaseActive(existing->second)))) {
+            existing->second.admission->SetMaxFps(max_fps);
+            if (existing->second.native_consumer) existing->second.native_consumer->SetMaxFps(max_fps);
             return AttachResult::AlreadyBound;
         }
         state->router->RemoveTrack(track_id, state->generation);
@@ -147,11 +152,23 @@ VideoRenderSession::AttachResult VideoRenderSession::AttachSelection(
     const auto track_ticket = selection.ticket;
     const auto media_binding_key = selection.media_binding_key;
     const auto media_binding_ticket = selection.media_binding_ticket;
+    auto admission = std::make_shared<VideoFrameAdmission>(max_fps);
+    const auto valid = [weak_state, weak_track = std::weak_ptr<Track>(track),
+                        validates_lease, track_key, track_ticket,
+                        media_binding_key, media_binding_ticket] {
+        const auto state = weak_state.lock();
+        const auto track = weak_track.lock();
+        return state && state->active.load(std::memory_order_acquire) && track && !track->muted() &&
+            (!validates_lease || (IsTrackTicketActive(track_ticket, track_key) &&
+                IsMediaBindingTicketActive(media_binding_ticket, media_binding_key)));
+    };
+    std::shared_ptr<RemoteVideoFrameConsumer> native_consumer;
+    if (native_endpoint) native_consumer = native_endpoint->Subscribe(max_fps, valid);
     auto subscription = track->subscribeI420VideoFrames(
-        [weak_state, track_id, generation, binding_generation, validates_lease,
+        [weak_state, track_id, generation, binding_generation, validates_lease, admission,
          track_key, track_ticket, media_binding_key, media_binding_ticket](OwnedI420Frame::Ptr frame) {
             const auto state = weak_state.lock();
-            if (!state || !state->active.load(std::memory_order_acquire)) {
+            if (!state || !state->active.load(std::memory_order_acquire) || !admission->active()) {
                 return;
             }
             state->track_frames_received.fetch_add(1, std::memory_order_relaxed);
@@ -163,6 +180,9 @@ VideoRenderSession::AttachResult VideoRenderSession::AttachSelection(
                 return;
             }
             state->router->SubmitBound(track_id, generation, binding_generation, std::move(frame));
+        }, admission, valid, [weak = std::weak_ptr<RemoteVideoFrameConsumer>(native_consumer)] {
+            const auto consumer = weak.lock();
+            return consumer && consumer->active();
         });
     if (!subscription.active()) {
         state->router->RemoveTrack(track_id, generation);
@@ -172,7 +192,7 @@ VideoRenderSession::AttachResult VideoRenderSession::AttachSelection(
     tracks_.emplace(track_id, TrackBinding{identity, render_key.empty() ? identity : render_key,
         track, selection.key, selection.ticket, selection.media_binding_key,
         selection.media_binding_ticket, validates_lease, binding_generation,
-        std::move(subscription)});
+        std::move(subscription), std::move(admission), std::move(native_consumer), native_endpoint});
     return AttachResult::Attached;
 }
 
@@ -204,15 +224,26 @@ void VideoRenderSession::RenderLatestFrames() {
         return;
     }
 
-    for (const auto& [track_id, binding] : tracks_) {
+    for (auto& [track_id, binding] : tracks_) {
         if (!BindingLeaseActive(binding)) {
+            if (binding.native_consumer) binding.native_consumer->Retire();
             continue;
         }
         auto frame = state->router->TakeLatest(track_id, state->generation);
         const auto track = binding.track.lock();
+        if (track && !track->muted() && binding.native_consumer) {
+            if (auto native = binding.native_consumer->Take()) {
+                state->track_frames_received.fetch_add(1, std::memory_order_relaxed);
+                if (!frame || native->render_metadata().frame_token >= frame->render_metadata().frame_token)
+                    frame = std::move(native);
+            }
+        }
         if (!frame || !track || track->muted()) {
             continue;
         }
+        const auto token = frame->render_metadata().frame_token;
+        if (token && token <= binding.last_frame_token) continue;
+        binding.last_frame_token = token;
         RenderFrame(binding.render_key, VideoRenderFrame::FromI420(std::move(frame)));
     }
     if (auto local = local_input_.TakeLatest()) RenderFrame(local_render_key_, std::move(local));

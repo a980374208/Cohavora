@@ -16,6 +16,7 @@
 #include "src/render/qt_cpu_video_renderer.h"
 #include "src/render/video_render_router.h"
 #include "src/render/local_video_render_input.h"
+#include "src/render/remote_video_frame_pipeline.h"
 
 namespace livekit::render {
 
@@ -52,6 +53,7 @@ public:
         std::shared_ptr<Track> track;
         std::string identity;
         std::string render_key;
+        uint32_t max_fps = 0; // No rate ceiling; latest semantics preserve an accepted tail.
     };
 
     struct SelectionResult {
@@ -136,6 +138,10 @@ private:
         bool validates_lease = false;
         uint64_t binding_generation = 0;
         Track::I420VideoFrameSubscription subscription;
+        std::shared_ptr<VideoFrameAdmission> admission;
+        std::shared_ptr<RemoteVideoFrameConsumer> native_consumer;
+        std::weak_ptr<RemoteVideoFrameEndpoint> native_endpoint;
+        uint64_t last_frame_token = 0;
     };
 
     static uint64_t NextGeneration();
