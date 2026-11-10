@@ -44,6 +44,8 @@ public:
                            ToolTipProvider toolTip = {});
     void updateTilePresentation(const std::string& key, bool hasVideo);
     void setStageOverlay(QWidget* widget);
+    // Optional full-canvas viewing destination, in logical pixels.
+    void setVideoDestination(const std::string& key, const QRectF& rect);
     QRectF videoContentRect(const std::string& key) const;
     void setRemoteInputKey(std::string key);
 signals:
@@ -102,6 +104,7 @@ private:
     QImage stage_image_;
     bool stage_dirty_ = true, painting_stage_ = false;
     std::vector<VideoTileRect> tiles_;
+    std::map<std::string, QRectF> video_destinations_;
     std::map<std::string, Decoration> decorations_;
     std::map<std::string, VideoRenderFrame::Ptr> telemetry_frames_;
     std::string hovered_tile_, pressed_pin_;

@@ -303,6 +303,9 @@ public:
         _videoPolicyTelemetry.stage_content = plan.stage_content;
         _videoPolicyTelemetry.reason = plan.reason;
         _videoPolicyTelemetry.requested = KeysForSeats(plan.visible_seats);
+        if (plan.detached_share && plan.detached_share->width && plan.detached_share->height) {
+            _videoPolicyTelemetry.requested.push_back(plan.detached_share->key);
+        }
         _videoPolicyTelemetry.selected = UniqueKeys(plan.selected_video);
         _videoPolicyTelemetry.retired = false;
         if (advances) {
@@ -382,10 +385,8 @@ public:
         result.audio = demand.selected_audio;
         result.video.reserve(demand.selected_video.size());
         for (const auto& key : demand.selected_video) {
-            const auto seat = std::find_if(
-                demand.visible_seats.begin(), demand.visible_seats.end(),
-                [&](const auto& candidate) { return candidate.key == key; });
-            if (seat == demand.visible_seats.end()) continue;
+            const auto* seat = demand.FindMediaSeat(key);
+            if (!seat) continue;
             livekit::RemoteTrackDemand track;
             track.key = key;
             track.policy_revision = demand.policy_revision;

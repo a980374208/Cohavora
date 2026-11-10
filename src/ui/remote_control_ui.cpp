@@ -211,7 +211,27 @@ void RemoteControlUi::refreshTargets() {
             return !candidate.identity.isEmpty() && !candidate.track.isEmpty();
         });
     }
-    entry_->setVisible(hasRemoteDesktop);
+    entry_->setVisible(hasRemoteDesktop && !tileMenuMode_);
+}
+bool RemoteControlUi::canRequestTarget(const QString& identity, const QString& track) const {
+    if (!coordinator_ || !meetingActive_ || active()) return false;
+    for (const auto& person : coordinator_->participants())
+        if (person.isLocal && !person.permissions.can_publish_data) return false;
+    for (const auto& candidate : targets_())
+        if (candidate.identity == identity && candidate.track == track && SelectableTarget(candidate)) return true;
+    return false;
+}
+bool RemoteControlUi::controlsTarget(const QString& identity, const QString& track) const {
+    return active() && projection_.peer == identity.toStdString() && projection_.track == track.toStdString();
+}
+void RemoteControlUi::requestTarget(const QString& identity, const QString& track) {
+    if (!canRequestTarget(identity, track)) return;
+    if (frontendLease_) frontendLease_->valid = false;
+    frontendLease_ = std::make_shared<rc::Lease>();
+    frontendLease_->current = [] { return true; };
+    frontendLease_->deadline = rc::NowMs() + rc::LeaseMs;
+    projection_.track = track.toStdString(); lastFrame_ = recentFrames_[track];
+    coordinator_->requestRemoteControl(identity, track, frontendLease_);
 }
 std::optional<RemoteControlTarget> RemoteControlUi::target() const {
     for (auto t : targets_()) if (t.track.toStdString() == projection_.track &&
@@ -526,6 +546,13 @@ bool RemoteControlUi::eventFilter(QObject* watched,QEvent* event) {
             point.x() >= clip.left() && point.x() < clip.right() &&
             point.y() >= clip.top() && point.y() < clip.bottom();
     };
+    const bool pointer = event->type() == QEvent::MouseMove || event->type() == QEvent::MouseButtonPress ||
+        event->type() == QEvent::MouseButtonRelease || event->type() == QEvent::MouseButtonDblClick;
+    if (tileMenuMode_ && pointer && t->menuRect.contains(static_cast<QMouseEvent*>(event)->localPos())) {
+        motion_.reset();
+        if (pointerDown_ || event->type() == QEvent::MouseButtonPress) pause(true);
+        return false;
+    }
     // The activation click is local UI intent, not an application click on
     // the remote desktop. Consume its matching release even if Ready arrived.
     if (activationClick_) {
@@ -571,7 +598,7 @@ bool RemoteControlUi::eventFilter(QObject* watched,QEvent* event) {
     const bool mouse = event->type() == QEvent::MouseMove || event->type() == QEvent::MouseButtonPress ||
         event->type() == QEvent::MouseButtonRelease || event->type() == QEvent::MouseButtonDblClick;
     if (!mouse && event->type() != QEvent::Wheel) return false;
-    if (localPaused_ || projection_.inputPaused) return true;
+    if (localPaused_ || projection_.inputPaused) return event->type() != QEvent::MouseMove;
     const auto point = mouse ? static_cast<QMouseEvent*>(event)->localPos() : static_cast<QWheelEvent*>(event)->position();
     if (!insideInputClip(point)) { if (pointerDown_) pause(true); return true; }
     const auto normalized = rc::NormalizePointer(point.x(),point.y(),t->content.left(),t->content.top(),
@@ -594,6 +621,6 @@ bool RemoteControlUi::eventFilter(QObject* watched,QEvent* event) {
     if (!i.valid()) return true;
     if (i.kind == rc::InputKind::Move) motion_ = i;
     else { motion_.reset(); send(i); }
-    return true;
+    return event->type() != QEvent::MouseMove;
 }
 } // namespace MeetingUI

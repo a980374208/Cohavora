@@ -74,6 +74,19 @@ enum class LocalVideoTarget {
     ScreenShare,
 };
 
+// A second presentation surface in the same meeting, never a second session.
+struct DetachedShareViewport {
+    uint64_t surface_id = 0;
+    std::optional<TrackKey> track;
+    bool local = false;
+    LogicalViewport rect;
+    double device_pixel_ratio = 1.0;
+    bool visible = false;
+    bool minimized = false;
+
+    bool operator==(const DetachedShareViewport&) const = default;
+};
+
 struct ViewportIntent {
     uint64_t coordinator_session = 0;
     uint64_t view_revision = 0;
@@ -94,11 +107,13 @@ struct ViewportIntent {
     LogicalViewport stage_rect;
     int paging_bar_height = 0;
     double device_pixel_ratio = 1.0;
+    bool remote_video_enabled = true;
     bool window_visible = true;
     bool minimized = false;
     // Local previews consume grid seats on the first page only.
     bool local_participant_present = false;
     bool local_screen_share_present = false;
+    std::optional<DetachedShareViewport> detached_share;
 };
 
 struct VideoSeat {
@@ -121,6 +136,7 @@ struct VideoSeat {
         TrackPublication::SubscriptionError::None;
 
     bool IsParticipantPlaceholder() const { return key.publication_sid.empty(); }
+    bool operator==(const VideoSeat&) const = default;
 };
 
 struct VideoDemandPlan {
@@ -151,6 +167,18 @@ struct VideoDemandPlan {
     bool show_local_screen_share = false;
     std::optional<LogicalViewport> local_participant_rect;
     std::optional<LogicalViewport> local_screen_share_rect;
+    // Main seats remain distinct from the independently visible shared surface.
+    uint64_t detached_surface_id = 0;
+    std::optional<VideoSeat> detached_share;
+    bool detached_local = false;
+    bool show_detached_local = false;
+    uint32_t effective_main_page_size = 0;
+
+    const VideoSeat* FindMediaSeat(const TrackKey& key) const {
+        if (detached_share && detached_share->key == key) return &*detached_share;
+        for (const auto& seat : visible_seats) if (seat.key == key) return &seat;
+        return nullptr;
+    }
 };
 
 struct RemoteTrackDemand {

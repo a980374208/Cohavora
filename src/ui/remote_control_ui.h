@@ -32,6 +32,7 @@ struct RemoteControlTarget {
     QRectF content; // widget-local, logical pixels; actual displayed video
     // Independent visible viewport. Keep content complete for pointer mapping.
     std::optional<QRectF> inputClip;
+    QRectF menuRect; // local UI; never forward these pointer events to the peer
 };
 class RemoteControlUi final : public QObject {
 public:
@@ -43,6 +44,10 @@ public:
     void noteFrame(const QString& track);
     void refreshTargets();
     void raiseEntry();
+    void setTileMenuMode(bool enabled) { tileMenuMode_ = enabled; refreshTargets(); }
+    bool canRequestTarget(const QString& identity, const QString& track) const;
+    bool controlsTarget(const QString& identity, const QString& track) const;
+    void requestTarget(const QString& identity, const QString& track);
     void stop();
     bool active() const { return projection_.state != livekit::remote_control::State::Idle; }
 protected:
@@ -76,6 +81,7 @@ private:
     std::shared_ptr<livekit::remote_control::Lease> frontendLease_;
     std::optional<livekit::remote_control::Input> motion_;
     uint64_t lastFrame_ = 0, lastMotion_ = 0;
+    bool tileMenuMode_ = false;
     bool pointerDown_ = false;
     bool activationClick_ = false;
     bool activationPending_ = false;

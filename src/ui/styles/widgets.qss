@@ -2199,3 +2199,28 @@ QProgressBar[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiS
 [uiStyle="settings-dialog-previewmessage-active"] * {
     color: @danger@;
 }
+
+/* Shared viewing window: one title toolbar, using the application theme. */
+QWidget[uiStyle="shared-screen-window"] {
+    background: @window@;
+    color: @text@;
+}
+[uiStyle="shared-screen-window"] QLabel {
+    background: transparent;
+    color: @text@;
+    padding: 4px;
+}
+[uiStyle="shared-screen-window"] QPushButton,
+QPushButton#openSharedScreen {
+    background: @surface@;
+    color: @text@;
+    border: 1px solid @border@;
+    border-radius: 6px;
+    padding: 6px 10px;
+}
+[uiStyle="shared-screen-window"] QPushButton:hover,
+QPushButton#openSharedScreen:hover {
+    background: @accent-soft@;
+    color: @accent@;
+}
+QPushButton#openSharedScreen:disabled { color: @text-muted@; }
