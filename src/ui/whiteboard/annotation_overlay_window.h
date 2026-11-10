@@ -34,6 +34,7 @@ signals:
     void bindingInvalidated();
 
 protected:
+    bool event(QEvent *event) override;
     void resizeEvent(QResizeEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -57,6 +58,7 @@ private:
     QLabel *status_ = nullptr;
     QPointer<QScreen> screen_;
     bool desktopMode_ = false;
+    bool desktopModePending_ = false;
     bool interactionEnabled_ = true;
     bool invalidated_ = false;
 };

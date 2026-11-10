@@ -4064,6 +4064,10 @@ Sign in with your own account in a client configured for the same meeting servic
         <translation>共享质量</translation>
     </message>
     <message>
+        <source>%1 FPS</source>
+        <translation>%1 帧/秒</translation>
+    </message>
+    <message>
         <source>Screen share quality</source>
         <translation>屏幕共享质量</translation>
     </message>
@@ -4163,8 +4167,8 @@ Sign in with your own account in a client configured for the same meeting servic
         <translation>绘制</translation>
     </message>
     <message>
-        <source>Switch between drawing and operating the shared desktop</source>
-        <translation>在绘制和操作共享桌面之间切换</translation>
+        <source>Switch between drawing and operating the shared desktop. Right-click the annotation canvas or press Esc to enter desktop mode.</source>
+        <translation>在绘制和操作共享桌面之间切换。在批注画布上右键或按 Esc 进入穿透模式。</translation>
     </message>
     <message>
         <source>Pen</source>

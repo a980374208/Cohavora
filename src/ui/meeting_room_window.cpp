@@ -5149,6 +5149,7 @@ void MeetingRoomWindow::setupRemoteControl() {
         if (_annotationOverlay) _annotationOverlay->setInteractionEnabled(!blocked && _coordinator &&
             _coordinator->state() == OpenMeeting::MeetingState::InMeeting);
         if (_annotationButton) _annotationButton->setEnabled(!blocked && _annotationBinding.has_value());
+        syncScreenShareControls();
     },[this](const QString& status) { updateRemoteControlStatus(status); });
     _remoteControlUi->setTileMenuMode(true);
     connect(_coordinator.get(),&OpenMeeting::MeetingCoordinator::remoteControlChanged,this,
@@ -5486,6 +5487,14 @@ void MeetingRoomWindow::detachSharedScreen(std::optional<livekit::TrackKey> key,
             this, [this] { scheduleViewportIntent(); });
         connect(_sharedWindow.get(), &SharedScreenWindow::rendererUnavailable,
             this, &MeetingRoomWindow::fallBackToQtCpuBackend, Qt::QueuedConnection);
+        connect(_sharedWindow.get(), &SharedScreenWindow::shareQualityRequested, this, [this] {
+            if (_detachedShareIntent && _detachedShareIntent->local && _screenQualityButton)
+                _screenQualityButton->click();
+        });
+        connect(_sharedWindow.get(), &SharedScreenWindow::annotationRequested, this, [this] {
+            if (_detachedShareIntent && _detachedShareIntent->local && _annotationButton)
+                _annotationButton->click();
+        });
         const auto* targetScreen = screen();
         if (targetScreen && !_sharedWindow->restoredGeometry()) {
             const auto area = targetScreen->availableGeometry();
@@ -5501,6 +5510,7 @@ void MeetingRoomWindow::detachSharedScreen(std::optional<livekit::TrackKey> key,
     _detachedShareIntent = std::move(intent);
     _sharedWindow->setSharingName(name);
     _sharedWindow->setStatus(tr("Waiting for shared screen…"), true);
+    syncScreenShareControls();
     _sharedWindow->show();
     _sharedWindow->raise();
     scheduleViewportIntent(true);
@@ -5514,6 +5524,7 @@ void MeetingRoomWindow::returnSharedScreen() {
     const bool local = _detachedShareIntent->local;
     _detachedShareIntent.reset();
     _sharedReturnPending = true;
+    syncScreenShareControls();
     if (key) {
         _pinnedTrackKey = key;
         _pinnedLocalTarget.reset();
@@ -6374,10 +6385,31 @@ void MeetingRoomWindow::updateRemoteControlStatus(const QString& status) {
     if (_remoteControlStatus == status) return;
     _remoteControlStatus = status;
     if (!_screenShareBanner) return;
-    _screenShareBanner->setText(_screenShareText + (status.isEmpty() ? QString() : "\n" + status));
     _remoteControlStopButton->setVisible(!status.isEmpty());
+    syncScreenShareControls();
     QResizeEvent layout(size(), size());
     resizeEvent(&layout);
+}
+
+void MeetingRoomWindow::syncScreenShareControls() {
+    const bool detached = _screenShareActive && _sharedWindow &&
+        _detachedShareIntent && _detachedShareIntent->local;
+    if (_sharedWindow) {
+        _sharedWindow->setLocalShareControls(detached ? _screenQualityButton : nullptr,
+            detached ? _annotationButton : nullptr, _screenShareDetails);
+    }
+    if (!_screenShareBanner) return;
+    const bool visible = _screenShareBannerNeeded && (!detached || !_remoteControlStatus.isEmpty());
+    const bool relayout = _screenShareBanner->isHidden() == visible;
+    _screenShareBanner->setVisible(visible);
+    _screenShareBanner->setText(detached ? _remoteControlStatus :
+        _screenShareText + (_remoteControlStatus.isEmpty() ? QString() : "\n" + _remoteControlStatus));
+    _screenQualityButton->setVisible(_screenShareActive && !detached);
+    _annotationButton->setVisible(_screenShareActive && !detached);
+    if (relayout) {
+        QResizeEvent layout(size(), size());
+        resizeEvent(&layout);
+    }
 }
 
 void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot snapshot) {
@@ -6395,7 +6427,9 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
         connect(_screenQualityButton, &QPushButton::clicked, this, [this] {
             if (!_coordinator || _coordinator->state() != OpenMeeting::MeetingState::InMeeting) return;
             const auto state = _coordinator->screenShareSnapshot();
-            auto* dialog = new QDialog(this);
+            QWidget* owner = _sharedWindow && _detachedShareIntent && _detachedShareIntent->local
+                ? static_cast<QWidget*>(_sharedWindow.get()) : this;
+            auto* dialog = new QDialog(owner);
             dialog->setAttribute(Qt::WA_DeleteOnClose);
             dialog->setObjectName(QStringLiteral("screenShareQualityDialog"));
             dialog->setWindowTitle(QCoreApplication::translate("MeetingUI", "Screen share quality"));
@@ -6443,6 +6477,9 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
         });
 	}
 	const bool active = snapshot.state == State::Active;
+    _screenShareActive = active;
+    _screenShareBannerNeeded = active || snapshot.state == State::Starting ||
+        snapshot.state == State::Stopping || snapshot.state == State::StopFailed;
 	std::optional<livekit::ScreenBinding> nextBinding;
 	if (active && snapshot.source_kind == livekit::DesktopSourceKind::Screen &&
 		snapshot.annotation_binding) {
@@ -6459,13 +6496,12 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		snapshot.state == State::Starting ? QCoreApplication::translate("MeetingUI", "Starting screen sharing...") :
 		snapshot.state == State::StopFailed ? QCoreApplication::translate("MeetingUI", "Capture stopped, but unpublishing failed. Try stopping sharing again.") :
 		QCoreApplication::translate("MeetingUI", "Stopping screen sharing...");
-	_screenShareBanner->setVisible(active || snapshot.state == State::Starting ||
-		snapshot.state == State::Stopping || snapshot.state == State::StopFailed);
     _screenQualityButton->setVisible(active);
     _screenQualityButton->setEnabled(active && _coordinator && _coordinator->state() == OpenMeeting::MeetingState::InMeeting &&
         snapshot.quality_status != livekit::ScreenShareQualityStatus::Degraded);
     QString qualityText;
     if (snapshot.applied_quality) qualityText = QCoreApplication::translate("MeetingUI", "%1 × %2, %3 FPS").arg(snapshot.applied_quality->width).arg(snapshot.applied_quality->height).arg(snapshot.applied_quality->quality.fps);
+    const auto dimensionsLength = qualityText.size();
     switch (snapshot.quality_status) {
     case livekit::ScreenShareQualityStatus::Pending: qualityText += QCoreApplication::translate("MeetingUI", " — Applying…"); break;
     case livekit::ScreenShareQualityStatus::Rejected: qualityText += QCoreApplication::translate("MeetingUI", " — Change failed; previous quality restored"); break;
@@ -6473,6 +6509,10 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
     case livekit::ScreenShareQualityStatus::Degraded: qualityText += QCoreApplication::translate("MeetingUI", " — Quality state uncertain; stop sharing to recover"); break;
     default: break;
     }
+    _screenShareDetails = snapshot.applied_quality
+        ? QCoreApplication::translate("MeetingUI", "%1 FPS").arg(snapshot.applied_quality->quality.fps)
+        : QString();
+    _screenShareDetails += qualityText.mid(dimensionsLength);
     _screenQualityButton->setToolTip(qualityText);
     if (active) _screenShareText += "  " + qualityText;
     _screenShareBanner->setText(_screenShareText + (_remoteControlStatus.isEmpty() ? QString() : "\n" + _remoteControlStatus));
@@ -6510,6 +6550,7 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		}
 		_localScreenTile.reset();
 	}
+    syncScreenShareControls();
 	QResizeEvent layout(size(), size());
 	resizeEvent(&layout);
 	scheduleViewportIntent(true);
@@ -6541,6 +6582,7 @@ void MeetingRoomWindow::openAnnotationOverlay() {
 				_annotationButton->setToolTip(QCoreApplication::translate(
 					"MeetingUI", "The shared screen could not be mapped reliably."));
 			}
+            syncScreenShareControls();
 			// The overlay's coordinates are invalid. Native ScreenShareSession
 			// still validates source identity and owns capture termination.
 		});
@@ -6552,6 +6594,7 @@ void MeetingRoomWindow::openAnnotationOverlay() {
 			_annotationButton->setToolTip(QCoreApplication::translate(
 				"MeetingUI", "The shared screen could not be mapped reliably."));
 		}
+        syncScreenShareControls();
 		QMessageBox::warning(this,
 			QCoreApplication::translate("MeetingUI", "Screen annotation"),
 			QCoreApplication::translate("MeetingUI", "The shared screen could not be mapped reliably."));
@@ -6569,6 +6612,7 @@ void MeetingRoomWindow::setAnnotationInteractionEnabled(bool enabled) {
     if (_screenQualityButton) _screenQualityButton->setEnabled(enabled && _coordinator && _coordinator->screenShareSnapshot().quality_status != livekit::ScreenShareQualityStatus::Degraded);
 	if (_annotationOverlay) _annotationOverlay->setInteractionEnabled(enabled);
 	if (_annotationButton) _annotationButton->setEnabled(enabled && _annotationBinding.has_value());
+    syncScreenShareControls();
 }
 
 void MeetingRoomWindow::setupCoordinatorBindings() {

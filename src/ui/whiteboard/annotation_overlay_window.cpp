@@ -7,7 +7,9 @@
 #include <QtCore/QSignalBlocker>
 #include <QtCore/QUuid>
 #include <QtGui/QGuiApplication>
+#include <QtGui/QContextMenuEvent>
 #include <QtGui/QKeyEvent>
+#include <QtGui/QMouseEvent>
 #include <QtGui/QResizeEvent>
 #include <QtGui/QScreen>
 #include <QtGui/QWindow>
@@ -127,7 +129,7 @@ void AnnotationOverlayWindow::createToolbar(QScreen *screen, bool showWindows) {
     drawMode_ = toolButton(tools, tr("Draw"), "annotationDrawMode");
     drawMode_->setCheckable(true);
     drawMode_->setChecked(true);
-    drawMode_->setToolTip(tr("Switch between drawing and operating the shared desktop"));
+    drawMode_->setToolTip(tr("Switch between drawing and operating the shared desktop. Right-click the annotation canvas or press Esc to enter desktop mode."));
     connect(drawMode_, &QPushButton::toggled, this,
             [this](bool checked) { setDesktopMode(!checked); });
 
@@ -216,6 +218,7 @@ void AnnotationOverlayWindow::positionToolbar(QScreen *screen) {
 }
 
 void AnnotationOverlayWindow::setDesktopMode(bool desktopMode) {
+    desktopModePending_ = false;
     desktopMode_ = desktopMode || !interactionEnabled_;
     canvas_->cancelInput();
     // Desktop mode controls native pointer routing, not the authorization of
@@ -295,7 +298,43 @@ void AnnotationOverlayWindow::keyPressEvent(QKeyEvent *event) {
     QWidget::keyPressEvent(event);
 }
 
+bool AnnotationOverlayWindow::event(QEvent *event) {
+    if (event->type() == QEvent::WindowDeactivate || event->type() == QEvent::Hide)
+        desktopModePending_ = false;
+    return QWidget::event(event);
+}
+
 bool AnnotationOverlayWindow::eventFilter(QObject *watched, QEvent *event) {
+    if (watched == canvas_) {
+        const auto type = event->type();
+        if (type == QEvent::FocusOut || type == QEvent::UngrabMouse || type == QEvent::Hide)
+            desktopModePending_ = false;
+        if (type == QEvent::ContextMenu) {
+            auto *context = static_cast<QContextMenuEvent *>(event);
+            if (context->reason() == QContextMenuEvent::Mouse && !canvas_->childAt(context->pos())) {
+                event->accept();
+                return true;
+            }
+        }
+        if (type == QEvent::MouseButtonPress || type == QEvent::MouseButtonDblClick ||
+            type == QEvent::MouseButtonRelease || type == QEvent::MouseMove) {
+            auto *mouse = static_cast<QMouseEvent *>(event);
+            if (!desktopMode_ && interactionEnabled_ &&
+                (type == QEvent::MouseButtonPress || type == QEvent::MouseButtonDblClick) &&
+                mouse->button() == Qt::RightButton && !canvas_->childAt(mouse->pos())) {
+                canvas_->cancelInput();
+                desktopModePending_ = true;
+            }
+            if (desktopModePending_) {
+                // Consume the complete gesture before disabling the HWND. In a
+                // left/right chord, no release may leak to the shared desktop.
+                event->accept();
+                if (type == QEvent::MouseButtonRelease && mouse->buttons() == Qt::NoButton)
+                    setDesktopMode(true);
+                return true;
+            }
+        }
+    }
     if (watched == canvas_ && event->type() == QEvent::KeyPress) {
         auto *key = static_cast<QKeyEvent *>(event);
         if (key->key() == Qt::Key_Escape) {

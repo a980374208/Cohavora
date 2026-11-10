@@ -28,6 +28,8 @@ public:
     bool viewing() const;
     void setSharingName(const QString& name);
     void setStatus(const QString& text, bool clear = false);
+    void setLocalShareControls(const QPushButton* quality, const QPushButton* annotation,
+                              const QString& details);
     void setFrame(const QImage& image, livekit::render::VideoRenderFrame::Ptr frame);
     void setGpuFrame(livekit::render::VideoRenderFrame::Ptr frame);
     void useCpu();
@@ -43,6 +45,8 @@ signals:
     void returnRequested();
     void viewportChanged();
     void rendererUnavailable();
+    void shareQualityRequested();
+    void annotationRequested();
 protected:
     bool eventFilter(QObject*, QEvent*) override;
     bool event(QEvent*) override;
@@ -80,6 +84,9 @@ private:
     QPushButton* _more = nullptr;
     QPushButton* _back = nullptr;
     QPushButton* _expand = nullptr;
+    QPushButton* _shareQuality = nullptr;
+    QPushButton* _annotation = nullptr;
+    bool _localShareControlsVisible = false;
     QScrollBar* _horizontal = nullptr;
     QScrollBar* _vertical = nullptr;
     QTimer* _idleTimer = nullptr;
@@ -98,6 +105,8 @@ private:
     QPoint _panPosition;
     QLabel* _name = nullptr;
     QLabel* _status = nullptr;
+    QWidget* _statusBar = nullptr;
+    QLabel* _shareDetails = nullptr;
     SharedScreenFrameView* _view = nullptr;
     livekit::render::VideoCanvas* _canvas = nullptr;
     bool _gpu = false;

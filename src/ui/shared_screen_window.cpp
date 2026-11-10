@@ -76,6 +76,16 @@ SharedScreenWindow::SharedScreenWindow(bool gpu)
     _name->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     _name->setAttribute(Qt::WA_TransparentForMouseEvents);
     bar->addWidget(_name, 1);
+    _shareQuality = new QPushButton(QCoreApplication::translate("MeetingUI", "Share quality"), _toolbar);
+    _shareQuality->setObjectName(QStringLiteral("sharedScreenQuality"));
+    connect(_shareQuality, &QPushButton::clicked, this, &SharedScreenWindow::shareQualityRequested);
+    bar->addWidget(_shareQuality);
+    _shareQuality->hide();
+    _annotation = new QPushButton(QCoreApplication::translate("MeetingUI", "Annotate"), _toolbar);
+    _annotation->setObjectName(QStringLiteral("sharedScreenAnnotation"));
+    connect(_annotation, &QPushButton::clicked, this, &SharedScreenWindow::annotationRequested);
+    bar->addWidget(_annotation);
+    _annotation->hide();
     _scale = createAccessibleComboBox(_toolbar);
     _scale->setObjectName(QStringLiteral("sharedScreenScale"));
     AppTheme::setStyleVariant(*_scale, "screen-share-picker");
@@ -137,9 +147,20 @@ SharedScreenWindow::SharedScreenWindow(bool gpu)
     };
     connect(_horizontal, &QScrollBar::valueChanged, this, scroll);
     connect(_vertical, &QScrollBar::valueChanged, this, scroll);
-    _status = new QLabel(tr("Waiting for shared screen…"), this);
+    _statusBar = new QWidget(this);
+    _statusBar->setObjectName(QStringLiteral("sharedScreenStatusBar"));
+    auto* statusLayout = new QHBoxLayout(_statusBar);
+    statusLayout->setContentsMargins(0, 0, 0, 0);
+    _status = new QLabel(tr("Waiting for shared screen…"), _statusBar);
     _status->setTextFormat(Qt::PlainText);
-    layout->addWidget(_status);
+    statusLayout->addWidget(_status, 1);
+    _shareDetails = new QLabel(_statusBar);
+    _shareDetails->setObjectName(QStringLiteral("sharedScreenShareDetails"));
+    _shareDetails->setTextFormat(Qt::PlainText);
+    _shareDetails->setWordWrap(true);
+    statusLayout->addWidget(_shareDetails);
+    _shareDetails->hide();
+    layout->addWidget(_statusBar);
     AppTheme::setStyleVariant(*this, "shared-screen-window");
     AppTheme::observeChanges(*this, [this] { refreshTheme(); });
     refreshTheme();
@@ -219,6 +240,22 @@ void SharedScreenWindow::setSharingName(const QString& name) {
 void SharedScreenWindow::setStatus(const QString& text, bool clear) {
     if (clear) clearFrame();
     _status->setText(text);
+}
+void SharedScreenWindow::setLocalShareControls(const QPushButton* quality,
+        const QPushButton* annotation, const QString& details) {
+    _localShareControlsVisible = quality && annotation;
+    for (const auto& pair : {std::make_pair(_shareQuality, quality), std::make_pair(_annotation, annotation)}) {
+        if (pair.second) {
+            pair.first->setEnabled(pair.second->isEnabled());
+            pair.first->setToolTip(pair.second->toolTip());
+        }
+        pair.first->setVisible(_localShareControlsVisible && !_compact);
+    }
+    _shareDetails->setText(_localShareControlsVisible ? details : QString());
+    _shareDetails->setVisible(_localShareControlsVisible && !details.isEmpty());
+    // Preserve space for every action and a draggable title at small sizes.
+    setMinimumWidth(std::max(640, _toolbar->minimumSizeHint().width() + 72));
+    layoutToolbar();
 }
 void SharedScreenWindow::setFrame(const QImage& image, livekit::render::VideoRenderFrame::Ptr frame) {
     if (_gpu || !viewing() || image.isNull()) return;
@@ -417,6 +454,8 @@ void SharedScreenWindow::layoutToolbar() {
 void SharedScreenWindow::setCompact(bool compact) {
     _compact = compact && isFullScreen();
     _scale->setVisible(!_compact); _more->setVisible(!_compact); _back->setVisible(!_compact);
+    _shareQuality->setVisible(!_compact && _localShareControlsVisible);
+    _annotation->setVisible(!_compact && _localShareControlsVisible);
     _expand->setVisible(_compact); layoutToolbar();
 }
 void SharedScreenWindow::noteInteraction() {
@@ -427,7 +466,7 @@ void SharedScreenWindow::toggleFullscreen() {
         _idleTimer->stop();
         showNormal();
         _layout->insertWidget(0, _toolbar);
-        _layout->setContentsMargins(6, 4, 6, 4); _status->show();
+        _layout->setContentsMargins(6, 4, 6, 4); _statusBar->show();
         setCompact(false); _fullscreen->setText(tr("Full screen"));
         if (_beforeFullscreen.isValid()) setGeometry(_beforeFullscreen);
         if (_wasMaximized) showMaximized();
@@ -441,7 +480,7 @@ void SharedScreenWindow::toggleFullscreen() {
             new NativeChildGeometry(*_toolbar); _toolbar->setAttribute(Qt::WA_NativeWindow);
         }
         _layout->removeWidget(_toolbar); _layout->setContentsMargins(0, 0, 0, 0);
-        _status->hide();
+        _statusBar->hide();
         showFullScreen(); _fullscreen->setText(tr("Exit full screen"));
         setCompact(false); layoutToolbar(); noteInteraction();
     }

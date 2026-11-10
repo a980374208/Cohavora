@@ -631,6 +631,7 @@ private:
 	void refreshRemoteVideoPresentations();
 	void applyScreenShareSnapshot(livekit::ScreenShareSnapshot snapshot);
     void updateRemoteControlStatus(const QString& status);
+    void syncScreenShareControls();
 	void handleScreenShareSources(const std::vector<livekit::DesktopSource> &sources);
 	void applyRemoteParticipantJoined(const QString &identity, const QString &name,
 		const OpenMeeting::ParticipantPresentation *presentation);
@@ -753,6 +754,9 @@ private:
 	MeetingEncryptionPanel *_encryptionPanel = nullptr;
 	QLabel *_screenShareBanner = nullptr;
     QString _screenShareText;
+    QString _screenShareDetails;
+    bool _screenShareActive = false;
+    bool _screenShareBannerNeeded = false;
     QString _remoteControlStatus;
     QPushButton *_remoteControlStopButton = nullptr;
 	QPushButton *_annotationButton = nullptr;
