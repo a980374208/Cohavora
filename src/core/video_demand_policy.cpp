@@ -594,7 +594,15 @@ VideoDemandPolicy::FocusChoice VideoDemandPolicy::ChooseFocus(
         current_focus_origin_ == FocusOrigin::Pinned ||
         current_focus_origin_ == FocusOrigin::SelectedShare ||
         current_focus_origin_ == FocusOrigin::AutoShare;
-    const bool current_valid = eligible(ResolveIntentSeat(current_focus_)).has_value();
+    // OrderedSeats also includes audio-only participant placeholders. Keep
+    // those for explicit pins/all-placeholder meetings, but do not let an
+    // automatic fallback hide an available video indefinitely.
+    const auto playable = std::find_if(videos.begin(), videos.end(), [&](const auto& seat) {
+        return seat.publication && IsDemandable(*seat.publication);
+    });
+    const auto* current_publication = current_focus_ ? Find(*current_focus_) : nullptr;
+    const bool current_valid = eligible(ResolveIntentSeat(current_focus_)).has_value() &&
+        (playable == videos.end() || (current_publication && IsDemandable(*current_publication)));
     const auto stable = ResolveIntentTrack(stable_speaker_, TrackSource::Camera);
     if (stable) {
         if (current_focus_ && *current_focus_ == *stable) {
@@ -611,6 +619,7 @@ VideoDemandPolicy::FocusChoice VideoDemandPolicy::ChooseFocus(
     if (current_valid && !previous_override) {
         return {current_focus_, current_focus_origin_};
     }
+    if (playable != videos.end()) return set_focus(playable->key, FocusOrigin::Fallback);
     if (!videos.empty()) {
         return set_focus(videos.front().key, FocusOrigin::Fallback);
     }
