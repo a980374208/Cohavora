@@ -1,6 +1,10 @@
-add_executable(cohavora_media_broadcaster
-    livekit_media_broadcaster.cpp)
-target_link_libraries(cohavora_media_broadcaster PRIVATE cohavora_core)
+if(WIN32)
+    # This sample uses WASAPI, DirectShow and COM capture APIs.
+    add_executable(cohavora_media_broadcaster
+        livekit_media_broadcaster.cpp)
+    target_link_libraries(cohavora_media_broadcaster PRIVATE cohavora_core)
+    set_property(TARGET cohavora_media_broadcaster PROPERTY FOLDER "samples")
+endif()
 
 add_executable(simple_room
     simple_room.cpp)
@@ -11,7 +15,6 @@ add_executable(simple_rpc
 target_link_libraries(simple_rpc PRIVATE cohavora_core)
 
 foreach(livekit_sample_target IN ITEMS
-        cohavora_media_broadcaster
         simple_room
         simple_rpc)
     set_property(TARGET ${livekit_sample_target} PROPERTY FOLDER "samples")

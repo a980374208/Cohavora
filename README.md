@@ -327,7 +327,9 @@ dev 配置提供三个示例目标：
 | --- | --- |
 | `simple_room` | 连接房间、发布示例音视频、观察参与者事件，可配置端到端加密 |
 | `simple_rpc` | 演示参与者之间的 RPC 调用 |
-| `cohavora_media_broadcaster` | 采集并发布麦克风、系统声音或摄像头媒体 |
+| `cohavora_media_broadcaster` | 仅 Windows：通过 WASAPI / DirectShow 采集并发布麦克风、系统声音或摄像头媒体 |
+
+Ubuntu 启用 `COHAVORA_BUILD_SAMPLES=ON` 时提供 `simple_room` 和 `simple_rpc`，不生成 `cohavora_media_broadcaster`。构建桌面应用请选择 `cohavora_app` 目标。
 
 例如先查看 `simple_room` 的用法：
 
