@@ -9,8 +9,10 @@
 #include <atomic>
 #include <chrono>
 #include <thread>
-#include "dshow_types.h"
+#include "camera_types.h"
+#ifdef _WIN32
 #include "dshow_capture.h"
+#endif
 #include "video_source.h"
 
 class CameraOwnerInspectionAccess;
@@ -45,30 +47,35 @@ struct CameraResolution {
 class ICameraCapturer {
 public:
     virtual ~ICameraCapturer() = default;
-    virtual bool Init(const DShowCaptureConfig& config, std::shared_ptr<VideoSource> video_source) = 0;
+    virtual bool Init(const CameraCaptureConfig& config, std::shared_ptr<VideoSource> video_source) = 0;
     virtual bool Start() = 0;
     virtual void Stop() = 0;
     virtual bool IsRunning() const noexcept = 0;
-    virtual DShowCaptureConfig GetConfig() const = 0;
+    virtual CameraCaptureConfig GetConfig() const = 0;
     virtual std::string GetDevicePath() const = 0;
 };
 
-// 默认 DirectShow 捕获器包装
+#ifdef _WIN32
+// Windows capture adapter; no Windows types enter the shared camera API.
 class DShowCameraCapturer : public ICameraCapturer {
 public:
     explicit DShowCameraCapturer(std::shared_ptr<DShowVideoCapture> capture = nullptr);
     ~DShowCameraCapturer() override;
 
-    bool Init(const DShowCaptureConfig& config, std::shared_ptr<VideoSource> video_source) override;
+    bool Init(const CameraCaptureConfig& config, std::shared_ptr<VideoSource> video_source) override;
     bool Start() override;
     void Stop() override;
     bool IsRunning() const noexcept override;
-    DShowCaptureConfig GetConfig() const override;
+    CameraCaptureConfig GetConfig() const override;
     std::string GetDevicePath() const override;
 
 private:
     std::shared_ptr<DShowVideoCapture> capture_;
 };
+
+#endif
+
+std::shared_ptr<ICameraCapturer> CreatePlatformCameraCapturer();
 
 using CapturerFactory = std::function<std::shared_ptr<ICameraCapturer>()>;
 
@@ -90,11 +97,11 @@ public:
     std::shared_ptr<VideoSource> GetOutputSource() const;
 
     // 启动初始采集设备
-    bool Start(const DShowCaptureConfig& config);
+    bool Start(const CameraCaptureConfig& config);
 
     // Only call from a media/preparation worker: graph startup alone does not
     // establish camera readiness. A valid frame must arrive before the deadline.
-    CameraStartResult StartAndWaitForFirstFrame(const DShowCaptureConfig& config,
+    CameraStartResult StartAndWaitForFirstFrame(const CameraCaptureConfig& config,
                                               int timeout_ms = 3000);
 
     // 停止当前所有捕获器
@@ -103,7 +110,7 @@ public:
     // 活跃状态查询
     bool IsRunning() const;
     std::string GetActiveDevicePath() const;
-    DShowCaptureConfig GetActiveConfig() const;
+    CameraCaptureConfig GetActiveConfig() const;
     CameraSwitchState GetSwitchState() const;
 
     // 返回设备可供用户选择的分辨率；相同宽高会合并并保留最高帧率。
@@ -111,14 +118,14 @@ public:
         const std::string& device_path);
     // Reuse a device snapshot without enumerating hardware again.
     static std::vector<CameraResolution> GetSupportedResolutions(
-        const DShowDeviceInfo& device);
+        const CameraDeviceInfo& device);
 
     // 最高能力低于 1080p 时选择最高档，否则选择最接近 1080p 的档位。
     static std::optional<CameraResolution> SelectDefaultResolution(
         const std::vector<CameraResolution>& resolutions);
 
     // 事务式应用完整采集配置，用于同设备切换分辨率或帧率。
-    void ReconfigureAsync(const DShowCaptureConfig& target_config,
+    void ReconfigureAsync(const CameraCaptureConfig& target_config,
                           int timeout_ms,
                           SwitchCallback callback);
 
@@ -132,7 +139,7 @@ private:
     struct DeviceSwitchSpan;
     struct InitialCaptureAttempt;
 
-    CameraStartResult StartInitialCapture(const DShowCaptureConfig& config,
+    CameraStartResult StartInitialCapture(const CameraCaptureConfig& config,
                                           std::optional<int> first_frame_timeout_ms);
     static void RetireInitialCapture(
         const std::shared_ptr<InitialCaptureAttempt>& attempt);
@@ -143,7 +150,7 @@ private:
 
     void HandleProbeFrameReceived(uint64_t generation,
                                   std::shared_ptr<ICameraCapturer> probe_capturer,
-                                  const DShowCaptureConfig& target_config,
+                                  const CameraCaptureConfig& target_config,
                                   const VideoFrame& frame,
                                   const VideoCaptureOptions& options,
                                   SwitchCallback callback,
@@ -167,7 +174,7 @@ private:
     std::shared_ptr<InitialCaptureAttempt> initial_capture_;
     std::shared_ptr<InitialCaptureAttempt> active_initial_capture_;
     std::string active_device_path_;
-    DShowCaptureConfig current_config_;
+    CameraCaptureConfig current_config_;
 
     CameraSwitchState switch_state_{CameraSwitchState::Idle};
     std::atomic<uint64_t> switch_generation_{0};

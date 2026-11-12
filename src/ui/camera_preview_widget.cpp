@@ -44,7 +44,7 @@ void CameraPreviewWidget::startPreview(
 		return;
 	}
 
-	livekit::DShowCaptureConfig config;
+	livekit::CameraCaptureConfig config;
 	config.device_path = deviceId.toStdString();
 	config.width = width;
 	config.height = height;

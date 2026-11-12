@@ -22,7 +22,8 @@ public:
         std::string noise_cancellation_options_json;
     };
 
-    static std::shared_ptr<AudioStream> fromTrack(const std::shared_ptr<Track>& track, const Options& options = Options());
+    static std::shared_ptr<AudioStream> fromTrack(const std::shared_ptr<Track>& track);
+    static std::shared_ptr<AudioStream> fromTrack(const std::shared_ptr<Track>& track, const Options& options);
 
     explicit AudioStream(const Options& options);
     virtual ~AudioStream();

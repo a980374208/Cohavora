@@ -4,7 +4,9 @@
 #include <QtCore/QPointer>
 #include <QtCore/QTimer>
 #include "base/basic_types.h"
+#ifdef Q_OS_WIN
 #include "base/platform/win/base_windows_winrt.h"
+#endif
 #include <QtWidgets/QApplication>
 #include <QtWidgets/QDialog>
 #include <QtGui/QIcon>
@@ -41,9 +43,12 @@
 #include "src/ui/diagnostic_qt_bridge.h"
 
 #include <filesystem>
+#include "src/platform/qt_path.h"
 #include <memory>
 
 // 静态链接 Qt 必须显式导入平台与图像插件
+// Linux plugins are selected by qt5_import_plugins in CMake.
+#ifdef Q_OS_WIN
 Q_IMPORT_PLUGIN(QWindowsIntegrationPlugin)
 Q_IMPORT_PLUGIN(QWindowsVistaStylePlugin)
 Q_IMPORT_PLUGIN(QSvgPlugin)
@@ -51,6 +56,7 @@ Q_IMPORT_PLUGIN(QSvgIconPlugin)
 Q_IMPORT_PLUGIN(QJpegPlugin)
 Q_IMPORT_PLUGIN(QGifPlugin)
 Q_IMPORT_PLUGIN(QICOPlugin)
+#endif
 
 namespace crl {
 rpl::producer<> on_main_update_requests() {
@@ -149,16 +155,43 @@ int main(int argc, char *argv[]) {
 	// 初始化 CRL (Concurrency & Reactive Library)
 	crl::details::init();
 
+#ifdef Q_OS_LINUX
+    // Qt 5 otherwise prefers Xcb on GNOME even in a native Wayland session.
+    if (!qEnvironmentVariableIsSet("QT_QPA_PLATFORM") &&
+        !qEnvironmentVariableIsEmpty("WAYLAND_DISPLAY") &&
+        qEnvironmentVariable("XDG_SESSION_TYPE") == QStringLiteral("wayland")) {
+        qputenv("QT_QPA_PLATFORM", "wayland");
+    }
+#endif
 	QApplication app(argc, argv);
+
+#ifdef Q_OS_WIN
 	// Capture can be the first WinRT caller on a worker thread; initialize the
 	// desktop toolkit's dynamic WinRT imports before meeting actions start.
 	if (!base::WinRT::Supported()) {
 		qCritical() << "Required Windows Runtime APIs are unavailable.";
 		return 4;
 	}
+#endif
 	app.setOrganizationName(QStringLiteral("Cohavora"));
 	app.setApplicationName(MeetingUI::AppBranding::name());
+#if defined(__linux__)
+    app.setDesktopFileName(QStringLiteral("org.cohavora.Cohavora"));
+#endif
 	app.setApplicationVersion(QStringLiteral(COHAVORA_VERSION));
+#ifdef Q_OS_LINUX
+    // The application owns this dedicated data directory. Tighten existing
+    // directories as well as new ones before any normal diagnostic writer.
+    const auto appData = QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
+    if (appData.isEmpty() || !QDir().mkpath(appData)) return 2;
+    const auto appDataPath = cohavora::platform::PathFromQString(appData);
+    MeetingApp::debug_storage_detail::Directory appDataDirectory{
+        ::open(appDataPath.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)};
+    struct stat appDataInfo{};
+    if (appDataDirectory.fd < 0 || ::fstat(appDataDirectory.fd, &appDataInfo) != 0 ||
+        appDataInfo.st_uid != ::geteuid() || ::fchmod(appDataDirectory.fd, 0700) != 0) return 2;
+#endif
+
 	auto debugLogin = MeetingApp::ParseDebugLoginOptions(app.arguments());
 	if (debugLogin.status == MeetingApp::DebugLoginOptionStatus::Invalid ||
 		!MeetingApp::ConfigureDebugSettingsRoot(debugLogin.debugEnabled,
@@ -169,23 +202,23 @@ int main(int argc, char *argv[]) {
 	}
 	MeetingUI::DiagnosticQtBridge diagnosticQtBridge(diagnostics);
 	const auto diagnosticRoot = debugStorage.enabled
-		? QString::fromStdWString(debugStorage.diagnostics.wstring()) : QDir(
+		? cohavora::platform::QStringFromPath(debugStorage.diagnostics) : QDir(
 		QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
 		.filePath(QStringLiteral("diagnostics"));
 	if (!MeetingUI::MeetingLogConsoleWindow::ConfigureStorageRoots(
-		std::filesystem::path(diagnosticRoot.toStdWString()), crashRoot)) return 2;
+		cohavora::platform::PathFromQString(diagnosticRoot), crashRoot)) return 2;
 	QSettings diagnosticSettings;
 	const bool requestedLogRetention = diagnosticSettings.value(
 		QStringLiteral("diagnostics/historyEnabled"), true).toBool();
 	diagnostics->SetRetentionEnabled(
 		diagnosticSettings.status() == QSettings::NoError && requestedLogRetention);
-	diagnostics->StartWriter(std::filesystem::path(diagnosticRoot.toStdWString()));
+	diagnostics->StartWriter(cohavora::platform::PathFromQString(diagnosticRoot));
 	if (!processRun) {
 		const auto stabilityPath = QDir(
 			QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
 			.filePath(QStringLiteral("telemetry/stability-ledger-v1.json"));
 		stabilityLedger = std::make_shared<livekit::telemetry::StabilityLedger>(
-			std::filesystem::path(stabilityPath.toStdWString()));
+			cohavora::platform::PathFromQString(stabilityPath));
 		processRun = std::make_shared<livekit::telemetry::ScopedProcessRun>(
 			stabilityLedger, std::move(crashScan.recovery),
 			std::string(diagnostics->run_id()), buildId);
@@ -195,14 +228,14 @@ int main(int argc, char *argv[]) {
 		qWarning() << "The local stability ledger is unavailable.";
 	}
 	const auto telemetryRoot = debugStorage.enabled
-		? QString::fromStdWString(debugStorage.telemetryReports.wstring()) : QDir(
+		? cohavora::platform::QStringFromPath(debugStorage.telemetryReports) : QDir(
 		QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
 		.filePath(QStringLiteral("telemetry/reports"));
 	auto telemetryHistory =
 		std::make_shared<livekit::telemetry::TelemetryHistoryStore>(
-			std::filesystem::path(telemetryRoot.toStdWString()),
+			cohavora::platform::PathFromQString(telemetryRoot),
 			std::string(diagnostics->run_id()),
-			std::filesystem::path(diagnosticRoot.toStdWString()));
+			cohavora::platform::PathFromQString(diagnosticRoot));
 	livekit::telemetry::InstallTelemetryHistoryStore(telemetryHistory);
 	telemetryHistory->SetHistoryEnabled(
 		QSettings().value(QStringLiteral("telemetry/historyEnabled"), true).toBool());
@@ -236,9 +269,9 @@ int main(int argc, char *argv[]) {
 				(c >= QLatin1Char('a') && c <= QLatin1Char('f')); })) {
 		livekit::telemetry::SetFineRenderStatisticsEnabled(true);
 		pilotProbe = std::make_unique<MeetingApp::PilotDiagnosticsProbe>(
-			std::filesystem::path(pilotPath.toStdWString()), pilotRun.toStdString(),
-			telemetryHistory, diagnostics, std::filesystem::path(telemetryRoot.toStdWString()),
-			std::filesystem::path(diagnosticRoot.toStdWString()),
+			cohavora::platform::PathFromQString(pilotPath), pilotRun.toStdString(),
+			telemetryHistory, diagnostics, cohavora::platform::PathFromQString(telemetryRoot),
+			cohavora::platform::PathFromQString(diagnosticRoot),
 			[&shutdownService] { return shutdownService.pending(); },
 			[pilotParticipant] { return pilotParticipant->load(std::memory_order_acquire); },
 			qEnvironmentVariable("LIVEKIT_UIA_GPU_BUDGET_PROBE") == QStringLiteral("1"),
@@ -265,7 +298,7 @@ int main(int argc, char *argv[]) {
 
 	// 设置 UI 抽象层 Integration
 	MeetingUI::MeetingUiIntegration integration(debugStorage.enabled
-		? QString::fromStdWString(debugStorage.emojiCache.wstring()) : QString());
+		? cohavora::platform::QStringFromPath(debugStorage.emojiCache) : QString());
 	Ui::Integration::Set(&integration);
 
 	// 初始化 Telegram Desktop lib_ui 样式系统
@@ -274,6 +307,9 @@ int main(int argc, char *argv[]) {
 
 	// 初始化会话与用户认证
 	auto &session = OpenMeeting::SessionManager::instance();
+#if defined(__linux__)
+    int startupExitCode = 0;
+#endif
 	if (debugLogin.status == MeetingApp::DebugLoginOptionStatus::Enabled) {
 		const bool loggedIn = LoginWithDebugCredentials(
 			session, debugLogin.account, debugLogin.password);
@@ -281,12 +317,20 @@ int main(int argc, char *argv[]) {
 		if (!loggedIn) {
 			qCritical() << "Automated debug sign-in failed or timed out.";
 			diagnosticClose.reason = livekit::diagnostic::ShutdownReason::LoginRejected;
+#if defined(__linux__)
+            // The credential owner now exists; keep the dispatcher alive
+            // through the same async shutdown barrier as ordinary exit.
+            startupExitCode = 3;
+#else
 			style::StopManager();
 			return 3;
+#endif
 		}
-	} else {
-		session.resumeSavedSession(true);
 	}
+#if !defined(__linux__)
+    else {
+        session.resumeSavedSession(true);
+    }
 
 	// Only a successfully restored, explicitly enabled session skips login.
 	if (!session.isLoggedIn() ||
@@ -312,9 +356,19 @@ int main(int argc, char *argv[]) {
 	// 创建并展示现代会议主界面
 	auto mainWindow = std::make_unique<MeetingUI::MeetingMainWindow>();
 	mainWindow->show();
+#else
+    std::unique_ptr<MeetingUI::MeetingMainWindow> mainWindow;
+    QPointer<MeetingUI::LoginDialog> startupLogin;
+    bool startupFinished = false;
+    bool startupStopped = false;
+#endif
 	app.setQuitOnLastWindowClosed(false);
 	MeetingApp::AsyncShutdownGuard shutdownGuard(app,
 		[&](std::function<void()> finished) {
+#if defined(__linux__)
+            startupStopped = true;
+            if (startupLogin) startupLogin->reject();
+#endif
 			shutdownService.CloseHeapMaintenanceAdmission();
 			// Close producers before closing cleanup admission. Meeting windows
 			// are heap-owned, WA_DeleteOnClose widgets; explicitly destroy any
@@ -328,7 +382,14 @@ int main(int argc, char *argv[]) {
 			}
 			mainWindow.reset();
 			MeetingUI::MeetingLogConsoleWindow::DestroyInstance();
-			shutdownService.DrainAsync([&, finished = std::move(finished)]() mutable {
+            // Both completions run on Qt. Secret Service drains on its own
+            // owner/reaper, never on the serial native media cleanup queue.
+            auto remaining = std::make_shared<int>(2);
+            auto drained = [remaining, finished = std::move(finished)]() mutable {
+                if (--*remaining == 0 && finished) finished();
+            };
+            session.shutdownCredentialsAsync(drained);
+			shutdownService.DrainAsync([&, drained]() mutable {
 				shutdownService.SubmitCleanup(
 					[history = std::move(telemetryHistory), run = std::move(processRun),
 					 diagnostics]() mutable {
@@ -344,7 +405,7 @@ int main(int argc, char *argv[]) {
 						livekit::telemetry::InstallStabilityLedger({});
 						diagnostics->Close(livekit::diagnostic::ShutdownReason::UserExit);
 					});
-				shutdownService.ShutdownAsync(std::move(finished));
+				shutdownService.ShutdownAsync(drained);
 			});
 		}, [] {
 			// Reject the current modal without deleting its parent. The guard
@@ -367,6 +428,52 @@ int main(int argc, char *argv[]) {
             });
         });
 
+#if defined(__linux__)
+    const auto showAuthenticatedMain = [&] {
+        if (startupStopped || startupFinished || !session.isLoggedIn()) return;
+        startupFinished = true;
+        if (pilotProbe) {
+            const auto fingerprint = QCryptographicHash::hash(
+                (pilotRun + QLatin1Char(':') + session.userId()).toUtf8(),
+                QCryptographicHash::Sha256).toHex().toStdString();
+            pilotParticipant->store(std::make_shared<const std::string>(fingerprint), std::memory_order_release);
+        }
+        mainWindow = std::make_unique<MeetingUI::MeetingMainWindow>();
+        mainWindow->show();
+    };
+    const auto showStartupLogin = [&] {
+        if (startupStopped || startupFinished || startupLogin) return;
+        startupLogin = new MeetingUI::LoginDialog(session);
+        startupLogin->setAttribute(Qt::WA_DeleteOnClose);
+        QObject::connect(startupLogin, &QDialog::accepted, &app, [&] {
+            if (session.isLoggedIn()) showAuthenticatedMain();
+            else shutdownGuard.Request();
+        });
+        QObject::connect(startupLogin, &QDialog::rejected, &app, [&] { shutdownGuard.Request(); });
+        startupLogin->open(); // No nested exec()/wait while Secret Service runs.
+    };
+    QTimer::singleShot(0, &app, [&] {
+        if (startupExitCode != 0) {
+            shutdownGuard.Request();
+            return;
+        }
+        if (debugLogin.status == MeetingApp::DebugLoginOptionStatus::Enabled && session.isLoggedIn()) {
+            showAuthenticatedMain();
+            return;
+        }
+        session.restoreSavedSessionAsync([&] {
+            if (!session.hasSavedSession() || !session.isAutoLogin()) {
+                showStartupLogin();
+                return;
+            }
+            session.resumeSavedSessionAsync(true, std::nullopt, [&](bool restored) {
+                if (restored && session.isLoggedIn()) showAuthenticatedMain();
+                else showStartupLogin();
+            });
+        });
+    });
+#endif
+
 	const int result = app.exec();
 	const bool probeEvidenceComplete = !pilotProbe || pilotProbe->Finish();
 
@@ -374,5 +481,8 @@ int main(int argc, char *argv[]) {
 	livekit::WebRTCManager::Instance().Deinitialize();
 	style::StopManager();
 
+#if defined(__linux__)
+    if (result == 0 && startupExitCode != 0) return startupExitCode;
+#endif
 	return result == 0 && !probeEvidenceComplete ? 5 : result;
 }

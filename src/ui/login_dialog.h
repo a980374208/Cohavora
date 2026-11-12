@@ -36,6 +36,7 @@ private:
     void initUI();
     void loadSavedData();
     void updateSavedSessionAction();
+    void refreshPersistenceState();
     void updateEndpointOptions();
     void scheduleFormFit();
     void fitFormToScreen();
@@ -58,6 +59,7 @@ private:
     QPushButton *_resumeBtn = nullptr;
     OpenMeeting::SessionManager &_session;
     bool _loginInFlight = false;
+    bool _loading = false;
     quint64 _loginGeneration = 0;
 
     // 用户注册

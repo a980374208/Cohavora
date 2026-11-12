@@ -21,9 +21,17 @@ struct DebugStoragePaths final {
 #include <QtCore/QDir>
 #include <QtCore/QRegularExpression>
 #include <cstring>
+#ifdef Q_OS_WIN
 #include <QtCore/qt_windows.h>
 #include <aclapi.h>
 #include <sddl.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <cerrno>
+#include "src/platform/qt_path.h"
+#endif
 #include <array>
 #include <memory>
 #include <vector>
@@ -44,6 +52,7 @@ inline bool NativeDebugOptionEnabled(int argc, char *const argv[]) noexcept {
 	return enabled;
 }
 
+#ifdef Q_OS_WIN
 namespace debug_storage_detail {
 inline bool IsPrivateDirectory(const std::filesystem::path &path) {
 	PSID owner = nullptr;
@@ -172,4 +181,60 @@ inline DebugStoragePaths ResolveDebugStoragePaths(bool debugEnabled, const QStri
 	result.enabled = true;
 	return result;
 }
+#else
+namespace debug_storage_detail {
+struct Directory {
+    int fd = -1;
+    ~Directory() { if (fd >= 0) ::close(fd); }
+    bool descend(const char *name, bool create) {
+        if (create && ::mkdirat(fd, name, 0700) != 0 && errno != EEXIST) return false;
+        const int next = ::openat(fd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (next < 0) return false;
+        ::close(fd);
+        fd = next;
+        return true;
+    }
+    bool isPrivate() const {
+        struct stat value{};
+        return ::fstat(fd, &value) == 0 && value.st_uid == ::geteuid()
+            && (value.st_mode & 0077) == 0;
+    }
+};
+}
+inline DebugStoragePaths ResolveDebugStoragePaths(bool debugEnabled, const QString &root) {
+    DebugStoragePaths result;
+    if (!debugEnabled || root.isEmpty()) return result;
+    result.valid = false;
+    if (!root.startsWith('/') || root.contains(QChar(0))) return result;
+    const auto parts = root.mid(1).split('/');
+    for (const auto &part : parts) {
+        if (part.isEmpty() || part == "." || part == "..") return result;
+    }
+    debug_storage_detail::Directory directory{::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC)};
+    if (directory.fd < 0) return result;
+    for (const auto &part : parts) {
+        if (!directory.descend(part.toUtf8().constData(), true)) return result;
+    }
+    if (!directory.isPrivate()) return result;
+    for (const auto *relative : {"crash-evidence", "diagnostics", "telemetry", "telemetry/reports", "cache", "cache/emoji"}) {
+        debug_storage_detail::Directory child{::dup(directory.fd)};
+        if (child.fd < 0) return result;
+        for (const auto &part : QByteArray(relative).split('/')) {
+            if (!child.descend(part.constData(), true) || !child.isPrivate()) return result;
+        }
+    }
+    struct stat ledger{};
+    if (::fstatat(directory.fd, "telemetry/stability-ledger-v1.json", &ledger, AT_SYMLINK_NOFOLLOW) == 0) {
+        if (!S_ISREG(ledger.st_mode) || ledger.st_uid != ::geteuid() || (ledger.st_mode & 0077)) return result;
+    } else if (errno != ENOENT) return result;
+    result.root = cohavora::platform::PathFromQString(root);
+    result.crashEvidence = result.root / "crash-evidence";
+    result.diagnostics = result.root / "diagnostics";
+    result.stabilityLedger = result.root / "telemetry" / "stability-ledger-v1.json";
+    result.telemetryReports = result.root / "telemetry" / "reports";
+    result.emojiCache = result.root / "cache" / "emoji";
+    result.valid = result.enabled = true;
+    return result;
+}
+#endif
 } // namespace MeetingApp

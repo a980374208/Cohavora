@@ -118,9 +118,25 @@ public:
     bool canPersistSession() const;
     bool isDebugHttp() const;
     bool hasSavedSession() const { return _savedSession.has_value(); }
+    // A locked store may permit a user-initiated retry without exposing a
+    // decoded session. Automatic login still requires hasSavedSession().
+    bool canResumeSavedSession() const {
+        return !_credentialShutdown && (_savedSession.has_value() || _savedSessionRetryAvailable);
+    }
     bool resumeSavedSession(bool automatic = false, std::optional<bool> autoLoginChoice = std::nullopt);
     bool forgetSavedSession();
     void cancelPendingLogin();
+    // Async completion reports a finished operation, never request admission.
+    // The legacy bool resume remains synchronous on Windows and returns false
+    // on Linux; Linux callers must use the explicit async boundary below.
+    void restoreSavedSessionAsync(std::function<void()> completion);
+    void resumeSavedSessionAsync(bool automatic, std::optional<bool> autoLoginChoice,
+                                 std::function<void(bool)> completion);
+    void forgetSavedSessionAsync(std::function<void(bool)> completion = {});
+    void shutdownCredentialsAsync(std::function<void()> completion);
+    bool credentialOperationPending() const { return _credentialPending; }
+    bool credentialRestoreComplete() const { return _credentialRestoreComplete; }
+    quint64 credentialGeneration() const { return _credentialGeneration; }
     quint64 authGeneration() const { return _authGeneration; }
     QString persistenceMessage() const { return credentialStatusMessage(_credentialStatus); }
     CredentialStatus credentialStatus() const { return _credentialStatus; }
@@ -151,6 +167,9 @@ public:
     // 登录业务操作
     bool setServerBaseUrl(const QString &url);
     bool setRegistrationServerBaseUrl(const QString &url);
+    // Linux remember=true waits for the save terminal before completion.
+    // success=true with a nonempty message means authenticated in memory,
+    // with a persistence warning that must be shown before closing sign-in.
     void loginWithPassword(const QString &account,
                            const QString &password,
                            bool remember,
@@ -189,6 +208,8 @@ signals:
     void sessionExpired();
     void preferencesChanged(const MediaPreferences &prefs);
     void meetingSecurityPreferencesChanged();
+    // A single Qt-owner projection for saved/remember/auto-login/status/pending.
+    void persistenceStateChanged();
 
 private:
     // The inspection friend may construct instances. Production retains singleton
@@ -204,6 +225,9 @@ private:
 
     void resetAuthentication();
     bool announceLogin(quint64 generation);
+    void invalidateCredentialOperation();
+    void persistSessionAsync(StoredSession record, quint64 authGeneration,
+                             std::function<void(bool)> completion = {});
 
     UserInfo _currentUser;
     MediaPreferences _mediaPrefs;
@@ -216,8 +240,16 @@ private:
     bool _settingsLoaded = false;
     bool _loginPending = false;
     quint64 _authGeneration = 0;
+    quint64 _credentialGeneration = 0;
+    CredentialStore::RequestId _credentialRequest = 0;
+    bool _credentialPending = false;
+    bool _credentialRestoreComplete = false;
+    bool _credentialShutdown = false;
+    bool _credentialShutdownComplete = false;
+    std::vector<std::function<void()>> _credentialShutdownWaiters;
     CredentialStatus _credentialStatus = CredentialStatus::Empty;
     std::optional<StoredSession> _savedSession;
+    bool _savedSessionRetryAvailable = false;
     QString _serverBaseUrl;
 
     std::unique_ptr<QSettings> _settings;

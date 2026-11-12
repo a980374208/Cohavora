@@ -90,6 +90,8 @@ add_library(cohavora_meeting_window_ui OBJECT
     ${PROJECT_SOURCE_DIR}/src/ui/shared_screen_window.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/remote_control_ui.h
     ${PROJECT_SOURCE_DIR}/src/ui/remote_control_ui.cpp
+    ${PROJECT_SOURCE_DIR}/src/ui/remote_control_key_mapping.h
+    ${PROJECT_SOURCE_DIR}/src/ui/remote_control_key_mapping.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/camera_switch_completion_owner.h
     ${PROJECT_SOURCE_DIR}/src/ui/camera_switch_completion_owner.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_room_window.h

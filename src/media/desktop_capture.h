@@ -7,17 +7,34 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace livekit {
+
+// Value-only status: never put portal paths, restore tokens or raw D-Bus errors
+// in this callback. Ready means the authorized capture pipeline can deliver
+// frames, so the session can start its first-frame budget.
+enum class DesktopCapturePhase { AwaitingPermission, Ready, Cancelled, Denied, Failed };
 
 class IDesktopCapture {
 public:
     using FrameCallback = std::function<void(const VideoFrame&)>;
     using EndCallback = std::function<void()>;
     using QualityCallback = std::function<void(ScreenShareFrameProfile)>;
+    using StatusCallback = std::function<void(DesktopCapturePhase)>;
     virtual ~IDesktopCapture() = default;
     virtual void Start(DesktopSource source, FrameCallback frame, EndCallback ended) = 0;
+    // Asynchronous backends report AwaitingPermission first on their owner,
+    // then Ready exactly once or a terminal cancellation/failure. They must bound
+    // backend setup independently of user selection time. A terminal status
+    // precedes ended; ended without a terminal status means capture failure.
+    // The adapter preserves existing backends' first-frame timer origin.
+    virtual void StartWithStatus(DesktopSource source, FrameCallback frame,
+                                 EndCallback ended, StatusCallback status) {
+        Start(std::move(source), std::move(frame), std::move(ended));
+        if (status) status(DesktopCapturePhase::Ready);
+    }
     // Called by the session owner, never from a capture callback. Joins all
     // delivery before returning; no Qt/UI calls are made by the worker.
     virtual void Stop() = 0;
@@ -65,6 +82,9 @@ struct DesktopCaptureObservation {
 };
 DesktopCaptureObservation ObserveDesktopCapture();
 
+// Fast, non-blocking prerequisite for attempting capture. Portal availability
+// and per-source permissions are checked asynchronously by the backend.
+bool DesktopCaptureSupported();
 std::vector<DesktopSource> EnumerateDesktopSources();
 std::unique_ptr<IDesktopCapture> CreateDesktopCapture();
 std::unique_ptr<IDesktopCapture> CreateDesktopCaptureForProbe(DesktopCaptureProbeOptions probe);

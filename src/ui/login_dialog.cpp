@@ -2,7 +2,13 @@
 #include "src/ui/app_theme.h"
 #include "src/ui/app_branding.h"
 #include "src/ui/login_dialog.h"
+#ifdef Q_OS_LINUX
+#include "src/ui/linux_window_frame.h"
+#include <QtWidgets/QAbstractButton>
+#include <utility>
+#endif
 #include "src/net/account_credentials_policy.h"
+#include <QtCore/QSignalBlocker>
 #include "src/net/service_endpoint_policy.h"
 #include "src/net/session_manager.h"
 #include <QtCore/QDateTime>
@@ -91,16 +97,38 @@ LoginDialog::LoginDialog(OpenMeeting::SessionManager &session, QWidget *parent)
 
     initUI();
     AppTheme::makeDialogAdaptive(*this, QSize(460, 600));
+#ifdef Q_OS_LINUX
+    const QPointer<QWidget> card = findChild<QWidget *>(QStringLiteral("loginCard"));
+    LinuxWindowFrameOptions frameOptions;
+    frameOptions.radius = 16;
+    frameOptions.captionHitTest = [this, card](QPoint point) {
+        if (!card || !card->isVisibleTo(this) || !_tabWidget) return false;
+        const auto local = card->mapFrom(this, point);
+        if (!card->rect().contains(local) || local.y() >= _tabWidget->mapTo(card, QPoint()).y()) return false;
+        // The shared application filter also sees the title labels. Limit the
+        // caption to the header and leave its Close button independently usable.
+        for (auto *child = card->childAt(local); child && child != card;
+                child = child->parentWidget()) {
+            if (qobject_cast<QAbstractButton *>(child) || child->focusPolicy() != Qt::NoFocus) return false;
+        }
+        return true;
+    };
+    installLinuxWindowFrame(*this, std::move(frameOptions));
+#endif
     loadSavedData();
     connect(_rememberBox, &QCheckBox::toggled, this, [this](bool checked) {
         _autoLoginBox->setEnabled(checked &&
-            OpenMeeting::serviceAllowsCredentialPersistence(_serverUrlInput->text()));
+            OpenMeeting::credentialPersistenceSupported() && OpenMeeting::serviceAllowsCredentialPersistence(_serverUrlInput->text()));
         if (!checked) {
             _autoLoginBox->setChecked(false);
-            if (!_session.forgetSavedSession()) showError(_session.persistenceMessage());
-            updateSavedSessionAction();
+            const QPointer<LoginDialog> self(this);
+            _session.forgetSavedSessionAsync([self](bool cleared) {
+                if (self && !cleared) self->showError(self->_session.persistenceMessage());
+            });
         }
     });
+    connect(&_session, &OpenMeeting::SessionManager::persistenceStateChanged,
+            this, &LoginDialog::refreshPersistenceState);
     connect(_accountInput, &QLineEdit::textChanged, this, [this] { updateSavedSessionAction(); });
     const auto clearEndpointError = [this](QLineEdit *input) {
         if (_endpointErrorInput == input) showError(QString());
@@ -135,10 +163,18 @@ void LoginDialog::initUI() {
     MeetingUI::AppTheme::setStyleVariant(*this, "login-dialog-this");
 
     auto rootLayout = new QVBoxLayout(this);
+#ifdef Q_OS_LINUX
+    rootLayout->setContentsMargins(0, 0, 0, 0);
+#else
     rootLayout->setContentsMargins(12, 12, 12, 12);
+#endif
 
     auto card = new QWidget(this);
     card->setObjectName("loginCard");
+#ifdef Q_OS_LINUX
+    // LinuxWindowFrame owns the outer round clipping, border and shadow.
+    card->setProperty("linuxWindowFrameSurface", true);
+#endif
     rootLayout->addWidget(card);
 
     auto cardLayout = new QVBoxLayout(card);
@@ -159,6 +195,9 @@ void LoginDialog::initUI() {
     auto titleBox = new QVBoxLayout();
     titleBox->setSpacing(4);
     auto title = new QLabel(AppBranding::name(), card);
+#ifdef Q_OS_LINUX
+    title->setObjectName(QStringLiteral("loginTitle"));
+#endif
     QFont tf = title->font();
     tf.setPixelSize(22);
     tf.setBold(true);
@@ -166,6 +205,9 @@ void LoginDialog::initUI() {
     title->setAlignment(Qt::AlignCenter);
 
     auto subtitle = new QLabel(AppBranding::tagline(), card);
+#ifdef Q_OS_LINUX
+    subtitle->setObjectName(QStringLiteral("loginSubtitle"));
+#endif
     MeetingUI::AppTheme::setStyleVariant(*subtitle, "login-dialog-subtitle");
     subtitle->setAlignment(Qt::AlignCenter);
     subtitle->setWordWrap(true);
@@ -212,6 +254,12 @@ void LoginDialog::initUI() {
     _rememberBox->setObjectName("rememberSession");
     _autoLoginBox = new QCheckBox(QCoreApplication::translate("MeetingUI", "Sign in automatically"), accountTab);
     _autoLoginBox->setObjectName("autoLogin");
+    if (!OpenMeeting::credentialPersistenceSupported()) {
+        const auto reason = QCoreApplication::translate("MeetingUI",
+            "Remembering sign-in is not available on this platform yet.");
+        _rememberBox->setToolTip(reason);
+        _autoLoginBox->setToolTip(reason);
+    }
     optLayout->addWidget(_rememberBox);
     optLayout->addWidget(_autoLoginBox);
     optLayout->addStretch();
@@ -233,14 +281,24 @@ void LoginDialog::initUI() {
     connect(_resumeBtn, &QPushButton::clicked, this, [this] {
         if (_accountInput->text().trimmed() != _session.savedAccount() ||
             OpenMeeting::canonicalServiceUrl(_serverUrlInput->text()) != _session.serverBaseUrl()) return;
+        // Until unlock succeeds the stored choice is unknown. An unchecked,
+        // disabled checkbox is not a request to rewrite that choice.
+        const auto automaticChoice = _session.hasSavedSession()
+            ? std::optional<bool>(_autoLoginBox->isChecked()) : std::nullopt;
         const QPointer<LoginDialog> self(this);
-        const bool resumed = _session.resumeSavedSession(false, _autoLoginBox->isChecked());
-        if (!self) return;
-        if (resumed) acceptAuthenticatedSession();
-        else {
-            showError(_session.persistenceMessage());
-            updateSavedSessionAction();
-        }
+        setLoading(true);
+        _loginInFlight = true;
+        _session.resumeSavedSessionAsync(false, automaticChoice, [self](bool resumed) {
+            if (!self) return;
+            self->_loginInFlight = false;
+            self->setLoading(false);
+            if (resumed && self->_session.isLoggedIn()) self->acceptAuthenticatedSession();
+            else {
+                self->showError(self->_session.persistenceMessage());
+                self->updateSavedSessionAction();
+            }
+        });
+        if (self) _loginGeneration = _session.authGeneration();
     });
     accLayout->addWidget(_loginBtn);
 
@@ -417,6 +475,8 @@ void LoginDialog::loadSavedData() {
     _passwordInput->setObjectName("loginPassword");
     _accountInput->setObjectName("loginAccount");
     _serverUrlInput->setObjectName("serverBaseUrl");
+    const QSignalBlocker rememberSignals(_rememberBox);
+    const QSignalBlocker automaticSignals(_autoLoginBox);
     _rememberBox->setChecked(session.isRememberSession());
     _autoLoginBox->setChecked(session.isAutoLogin());
     _autoLoginBox->setEnabled(session.isRememberSession());
@@ -432,8 +492,20 @@ void LoginDialog::loadSavedData() {
     if (!session.persistenceMessage().isEmpty()) showError(session.persistenceMessage());
 }
 
+void LoginDialog::refreshPersistenceState() {
+    const QSignalBlocker rememberSignals(_rememberBox);
+    const QSignalBlocker automaticSignals(_autoLoginBox);
+    _rememberBox->setChecked(_session.isRememberSession());
+    _autoLoginBox->setChecked(_session.isAutoLogin());
+    updateSavedSessionAction();
+    updateEndpointOptions();
+    if (!_loading && !_session.credentialOperationPending() && !_session.persistenceMessage().isEmpty())
+        showError(_session.persistenceMessage());
+}
+
 void LoginDialog::updateSavedSessionAction() {
-    _resumeBtn->setVisible(_session.hasSavedSession() &&
+    _resumeBtn->setEnabled(!_loading && !_session.credentialOperationPending());
+    _resumeBtn->setVisible(_session.canResumeSavedSession() &&
         _accountInput->text().trimmed() == _session.savedAccount() &&
         OpenMeeting::canonicalServiceUrl(_serverUrlInput->text()) == _session.serverBaseUrl());
     scheduleFormFit();
@@ -441,9 +513,9 @@ void LoginDialog::updateSavedSessionAction() {
 
 void LoginDialog::updateEndpointOptions() {
     const auto policy = OpenMeeting::evaluateServiceEndpoint(_serverUrlInput->text());
-    const bool persistent = OpenMeeting::serviceAllowsCredentialPersistence(_serverUrlInput->text());
-    _rememberBox->setEnabled(persistent);
-    _autoLoginBox->setEnabled(persistent && _rememberBox->isChecked());
+    const bool persistent = OpenMeeting::credentialPersistenceSupported() && OpenMeeting::serviceAllowsCredentialPersistence(_serverUrlInput->text());
+    _rememberBox->setEnabled(!_loading && persistent && !_session.credentialOperationPending());
+    _autoLoginBox->setEnabled(!_loading && persistent && !_session.credentialOperationPending() && _rememberBox->isChecked());
     _rememberBox->setText(policy.isDebugHttp()
         ? QCoreApplication::translate("MeetingUI", "Remember sign-in (debug HTTP traffic is unencrypted)")
         : QCoreApplication::translate("MeetingUI", "Remember sign-in"));
@@ -483,6 +555,11 @@ void LoginDialog::scheduleFormFit() {
 }
 
 void LoginDialog::fitFormToScreen() {
+#ifdef Q_OS_LINUX
+    // Let the compositor own maximized/fullscreen geometry. A queued form-fit
+    // from Show must not resize the surface underneath its configured state.
+    if (isMaximized() || isFullScreen()) return;
+#endif
     auto *scroll = findChild<QScrollArea *>(QStringLiteral("adaptiveDialogScroll"));
     if (!scroll || !scroll->widget()) return;
     auto *content = scroll->widget();
@@ -493,8 +570,12 @@ void LoginDialog::fitFormToScreen() {
         ? targetScreen->availableGeometry().adjusted(16, 32, -16, -32)
         : QRect(pos(), QSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX));
     const auto applyDensity = [&](bool compact) {
+#ifdef Q_OS_LINUX
+        content->layout()->setContentsMargins(0, 0, 0, 0);
+#else
         content->layout()->setContentsMargins(compact ? 8 : 12, compact ? 8 : 12,
                                               compact ? 8 : 12, compact ? 8 : 12);
+#endif
         card->layout()->setContentsMargins(compact ? 20 : 28, compact ? 12 : 20,
                                            compact ? 20 : 28, compact ? 16 : 24);
         card->layout()->setSpacing(compact ? 8 : 12);
@@ -569,13 +650,14 @@ void LoginDialog::togglePasswordVisibility() {
 }
 
 void LoginDialog::setLoading(bool loading, const QString &text) {
-    const bool persistent = OpenMeeting::serviceAllowsCredentialPersistence(
+    _loading = loading;
+    const bool persistent = OpenMeeting::credentialPersistenceSupported() && OpenMeeting::serviceAllowsCredentialPersistence(
         _serverUrlInput->text());
-    _rememberBox->setEnabled(!loading && persistent);
-    _autoLoginBox->setEnabled(!loading && persistent && _rememberBox->isChecked());
+    _rememberBox->setEnabled(!loading && persistent && !_session.credentialOperationPending());
+    _autoLoginBox->setEnabled(!loading && persistent && !_session.credentialOperationPending() && _rememberBox->isChecked());
     _serverUrlInput->setEnabled(!loading);
     _registrationServerUrlInput->setEnabled(!loading);
-    _resumeBtn->setEnabled(!loading);
+    _resumeBtn->setEnabled(!loading && !_session.credentialOperationPending());
     _loginBtn->setEnabled(!loading);
     _guestBtn->setEnabled(!loading);
     _accountInput->setEnabled(!loading);
@@ -700,6 +782,11 @@ void LoginDialog::onLoginClicked() {
     const QString account = _accountInput ? _accountInput->text().trimmed() : QString();
     const QString password = _passwordInput ? _passwordInput->text() : QString();
     const QString serverUrl = _serverUrlInput ? _serverUrlInput->text().trimmed() : QString();
+    // Changing the endpoint publishes persistence state synchronously. Keep
+    // this click's choices before that projection refreshes the controls.
+    const bool remember = _rememberBox && _rememberBox->isChecked();
+    const bool automatic = _autoLoginBox && _autoLoginBox->isChecked();
+    const QPointer<LoginDialog> self(this);
 
     const auto validation = OpenMeeting::validateAccountCredentials(account, password);
     if (validation != OpenMeeting::CredentialValidationError::None) {
@@ -711,7 +798,9 @@ void LoginDialog::onLoginClicked() {
     }
 
     auto &session = _session;
-    if (!session.setServerBaseUrl(serverUrl)) {
+    const bool endpointAccepted = session.setServerBaseUrl(serverUrl);
+    if (!self) return;
+    if (!endpointAccepted) {
         showError(OpenMeeting::serviceEndpointErrorMessage(
             OpenMeeting::evaluateServiceEndpoint(serverUrl).status), _serverUrlInput);
         return;
@@ -719,9 +808,8 @@ void LoginDialog::onLoginClicked() {
 
     setLoading(true);
 
-    QPointer<LoginDialog> self = this;
     _loginInFlight = true;
-    session.loginWithPassword(account, password, _rememberBox && _rememberBox->isChecked(), _autoLoginBox && _autoLoginBox->isChecked(),
+    session.loginWithPassword(account, password, remember, automatic,
         [self](bool success, const QString &errMsg) {
             if (!self) return;
             self->_loginInFlight = false;
@@ -747,18 +835,26 @@ void LoginDialog::onGuestLoginClicked() {
 }
 
 void LoginDialog::mousePressEvent(QMouseEvent *e) {
+#ifdef Q_OS_LINUX
+    QDialog::mousePressEvent(e);
+#else
     if (e->button() == Qt::LeftButton) {
         _isDragging = true;
         _dragPosition = e->globalPos() - frameGeometry().topLeft();
         e->accept();
     }
+#endif
 }
 
 void LoginDialog::mouseMoveEvent(QMouseEvent *e) {
+#ifdef Q_OS_LINUX
+    QDialog::mouseMoveEvent(e);
+#else
     if (_isDragging && (e->buttons() & Qt::LeftButton)) {
         move(e->globalPos() - _dragPosition);
         e->accept();
     }
+#endif
 }
 
 } // namespace MeetingUI

@@ -33,8 +33,8 @@
 #include "src/core/screen_share_session.h"
 #include "src/core/whiteboard/whiteboard_document.h"
 #include "src/rtc/video_frame.h"
-#include "src/media/wasapi_capture.h"
-#include "src/media/dshow_capture.h"
+#include "src/media/microphone_capture.h"
+#include "src/media/camera_source_manager.h"
 #include "src/net/http_types.h"
 #include "src/net/session_manager.h"
 #include "src/telemetry/stability_ledger.h"
@@ -106,6 +106,9 @@ struct ParticipantInfo {
     bool isLocal = false;
     bool isHost = false;
     bool isAudioMuted = false;
+    bool hasScreenShareAudio = false;
+    bool isScreenShareAudioMuted = true;
+    bool isScreenShareAudioStreamPaused = false;
     bool isVideoEnabled = false;
     bool isSpeaking = false;
     float audioLevel = 0.0f;
@@ -135,6 +138,13 @@ struct ParticipantPresentation {
     ParticipantInfo participant;
     uint64_t coordinatorSession = 0;
     std::vector<RemoteVideoTrackPresentation> videoTracks;
+};
+
+struct ScreenShareAudioOutputsSnapshot {
+    uint64_t request_id = 0;
+    uint64_t run_id = 0;
+    uint64_t audio_epoch = 0;
+    std::vector<livekit::SystemAudioOutput> outputs;
 };
 
 class MeetingCoordinator : public QObject {
@@ -199,15 +209,38 @@ public:
     void setLocalVideoAvailable(bool available);
     bool isLocalAudioMuted() const { return _audioMuted; }
     bool isLocalVideoEnabled() const { return _videoEnabled; }
-    bool canStartScreenShare() const {
+    bool isMeetingReady() const {
         return _sessionRuntime && _sessionRunning && _startupCommitted &&
             !_startupReconnectPending && _state == MeetingState::InMeeting;
     }
+    static livekit::remote_control::Capabilities remoteControlCapabilities();
+    static bool remoteControlAvailable() { return remoteControlCapabilities().canControl(); }
+    bool canStartScreenShare() const {
+        return isMeetingReady() && livekit::DesktopCaptureSupported();
+    }
     void requestScreenShareSources();
     void startScreenShare(livekit::DesktopSource source, std::optional<int> fps = std::nullopt);
-    void startScreenShare(livekit::DesktopSource source, livekit::ScreenShareQuality quality);
+    void startScreenShare(livekit::DesktopSource source, livekit::ScreenShareQuality quality,
+                          livekit::ScreenShareAudioOptions audio = {});
     void setScreenShareQuality(livekit::ScreenShareQuality quality);
+    void startScreenShareAudio(livekit::ScreenShareAudioOptions audio, uint64_t expectedRun,
+                              std::optional<uint64_t> expectedAudioEpoch = std::nullopt);
+    void setScreenShareAudioMuted(bool muted, uint64_t expectedRun = 0,
+                                 std::optional<uint64_t> expectedAudioEpoch = std::nullopt);
+    void stopScreenShareAudio(uint64_t expectedRun = 0,
+                             std::optional<uint64_t> expectedAudioEpoch = std::nullopt);
+    uint64_t requestScreenShareAudioOutputs(uint64_t expectedRun, uint64_t expectedAudioEpoch);
     void stopScreenShare();
+    static bool systemAudioSharingAvailable() {
+#if defined(WEBRTC_LINUX)
+        return livekit::SystemAudioSharingAvailable();
+#else
+        return false;
+#endif
+    }
+    const std::vector<livekit::SystemAudioOutput>& screenShareAudioOutputs() const {
+        return _screenShareAudioOutputs;
+    }
     livekit::ScreenShareSnapshot screenShareSnapshot() const { return _screenShareSnapshot; }
     void requestRemoteControl(const QString& identity, const QString& trackSid,
         std::shared_ptr<livekit::remote_control::Lease> frontendLease);
@@ -335,6 +368,7 @@ signals:
     void localAudioMuteChanged(bool muted);
     void localVideoEnableChanged(bool enabled);
     void screenShareSourcesReady(const std::vector<livekit::DesktopSource> &sources);
+    void screenShareAudioOutputsReady(OpenMeeting::ScreenShareAudioOutputsSnapshot snapshot);
     void screenShareChanged(livekit::ScreenShareSnapshot snapshot);
     void screenShareAvailabilityChanged(bool available);
     void remoteControlChanged(livekit::remote_control::Projection projection);
@@ -571,7 +605,9 @@ private:
     bool _localAudioAvailable = true;
     bool _localVideoAvailable = true;
     livekit::ScreenShareSnapshot _screenShareSnapshot;
+    std::vector<livekit::SystemAudioOutput> _screenShareAudioOutputs;
     uint64_t _screenSourceRequest = 0;
+    uint64_t _screenAudioOutputRequest = 0;
     // 全局账号会话被撤销后，忽略仍在途的 HTTP 入会回调，防止已经关闭的
     // 会议窗口重新创建 Room 或重新发布媒体。
     bool _sessionInvalidated = false;
@@ -662,8 +698,8 @@ private:
     QString _whiteboardStatus;
 
     // 本地媒体源与轨道
-    std::shared_ptr<livekit::WasapiAudioCapture> _wasapiCap;
-    std::shared_ptr<livekit::DShowVideoCapture> _dshowCap;
+    std::shared_ptr<livekit::MicrophoneCapture> _wasapiCap;
+    std::shared_ptr<livekit::ICameraCapturer> _dshowCap;
     std::shared_ptr<livekit::LocalAudioTrack> _localAudioTrack;
     std::shared_ptr<livekit::LocalVideoTrack> _localVideoTrack;
     std::shared_ptr<livekit::AudioSource> _localAudioSource;
@@ -673,6 +709,7 @@ private:
 } // namespace OpenMeeting
 
 Q_DECLARE_METATYPE(livekit::RoomDisconnectReason)
+Q_DECLARE_METATYPE(OpenMeeting::ScreenShareAudioOutputsSnapshot)
 Q_DECLARE_METATYPE(OpenMeeting::MeetingRoomInfo)
 Q_DECLARE_METATYPE(livekit::ParticipantPermission)
 Q_DECLARE_METATYPE(livekit::remote_control::Projection)

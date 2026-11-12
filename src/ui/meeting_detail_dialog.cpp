@@ -1,6 +1,9 @@
 #include <QtCore/QCoreApplication>
 #include "src/ui/app_theme.h"
 #include "src/ui/meeting_detail_dialog.h"
+#ifdef Q_OS_LINUX
+#include "src/ui/linux_window_frame.h"
+#endif
 
 #include "src/core/meeting_catalog_controller.h"
 #include "src/net/session_manager.h"
@@ -136,6 +139,9 @@ MeetingDetailDialog::MeetingDetailDialog(
 		this, [this](quint64) { reject(); });
 
 	AppTheme::makeDialogAdaptive(*this, QSize(640, 520));
+#ifdef Q_OS_LINUX
+	installLinuxClientDecorationShadow(*this);
+#endif
 	setActionsEnabled(false);
 	updateDetail();
 	_controller.loadMeetingDetail(_meetingId);

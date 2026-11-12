@@ -14,10 +14,9 @@ endif()
 # Release selection preserves fast Debug builds while still emitting symbols.
 add_library(cohavora_dependency_abi INTERFACE)
 add_library(cohavora::dependency_abi ALIAS cohavora_dependency_abi)
-target_compile_definitions(cohavora_dependency_abi INTERFACE
-    $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CONFIG:Debug>>>:_ITERATOR_DEBUG_LEVEL=0>)
-
 if(MSVC)
+    target_compile_definitions(cohavora_dependency_abi INTERFACE
+        $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<NOT:$<CONFIG:Debug>>>:_ITERATOR_DEBUG_LEVEL=0>)
     if(COHAVORA_DEBUG_DEPENDENCY_ABI STREQUAL "Debug")
         target_compile_definitions(cohavora_dependency_abi INTERFACE
             $<$<AND:$<COMPILE_LANGUAGE:CXX>,$<CONFIG:Debug>>:_ITERATOR_DEBUG_LEVEL=2>)

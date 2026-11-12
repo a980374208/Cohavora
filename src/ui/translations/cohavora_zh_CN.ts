@@ -4,6 +4,186 @@
 <context>
     <name>MeetingUI</name>
     <message>
+        <source>Share system audio</source>
+        <translation>共享系统音频</translation>
+    </message>
+    <message>
+        <source>Refresh audio outputs</source>
+        <translation>刷新音频输出</translation>
+    </message>
+    <message>
+        <source>Start sharing audio</source>
+        <translation>开始共享音频</translation>
+    </message>
+    <message>
+        <source>Loading audio outputs…</source>
+        <translation>正在加载音频输出…</translation>
+    </message>
+    <message>
+        <source>The previous audio output is unavailable. Select another output.</source>
+        <translation>原音频输出设备不可用，请选择其他输出。</translation>
+    </message>
+    <message>
+        <source>Retry shared audio…</source>
+        <translation>重试共享音频…</translation>
+    </message>
+    <message>
+        <source>Share system audio…</source>
+        <translation>共享系统音频…</translation>
+    </message>
+    <message>
+        <source>System audio off</source>
+        <translation>系统音频未共享</translation>
+    </message>
+    <message>
+        <source>System default output (follow changes)</source>
+        <translation>系统默认输出（跟随变化）</translation>
+    </message>
+    <message>
+        <source>Choose screen or window, then allow sharing in the system picker.</source>
+        <translation>选择屏幕或窗口，然后在系统选择器中允许共享。</translation>
+    </message>
+    <message>
+        <source>Share system audio (preview)</source>
+        <translation>共享系统音频（预览）</translation>
+    </message>
+    <message>
+        <source>System audio output to share</source>
+        <translation>选择要共享声音的输出设备</translation>
+    </message>
+    <message>
+        <source>Shares other applications playing through the selected output. Cohavora and streams with no known application are excluded. Audio is independent of the selected screen or window.</source>
+        <translation>共享所选输出设备中其他应用的声音，排除 Cohavora 自身和无法识别来源的音频。声音范围与所选屏幕或窗口无关。</translation>
+    </message>
+    <message>
+        <source>No supported audio outputs are available. Video sharing is available.</source>
+        <translation>没有可用的音频输出设备，仍可共享视频。</translation>
+    </message>
+    <message>
+        <source>System audio sharing is unavailable in this build. Video sharing is available.</source>
+        <translation>当前版本未启用系统音频共享，仍可共享视频。</translation>
+    </message>
+    <message>
+        <source>Shared audio</source>
+        <translation>共享音频</translation>
+    </message>
+    <message>
+        <source>Unmute shared audio</source>
+        <translation>取消共享音频静音</translation>
+    </message>
+    <message>
+        <source>Mute shared audio</source>
+        <translation>将共享音频静音</translation>
+    </message>
+    <message>
+        <source>Retry stopping shared audio</source>
+        <translation>重试停止共享音频</translation>
+    </message>
+    <message>
+        <source>Stop sharing audio</source>
+        <translation>停止共享音频</translation>
+    </message>
+    <message>
+        <source>Starting shared audio…</source>
+        <translation>正在启动共享音频…</translation>
+    </message>
+    <message>
+        <source>Shared audio muted</source>
+        <translation>共享音频已静音</translation>
+    </message>
+    <message>
+        <source>Sharing other application audio</source>
+        <translation>正在共享其他应用的声音</translation>
+    </message>
+    <message>
+        <source>Stopping shared audio…</source>
+        <translation>正在停止共享音频…</translation>
+    </message>
+    <message>
+        <source>System audio failed; video sharing continues</source>
+        <translation>系统音频共享失败，视频共享继续</translation>
+    </message>
+    <message>
+        <source>System audio failed</source>
+        <translation>系统音频共享失败</translation>
+    </message>
+    <message>
+        <source>Audio capture stopped; retry removing its publication</source>
+        <translation>音频采集已停止，请重试移除共享音轨</translation>
+    </message>
+    <message>
+        <source>Shared audio capture has stopped, but removal of its publication is not confirmed. Retry stopping shared audio or leave the meeting. Video sharing continues.</source>
+        <translation>共享音频采集已停止，但尚未确认移除共享音轨。请重试停止共享音频或离开会议。视频共享继续。</translation>
+    </message>
+    <message>
+        <source>System audio sharing is unavailable. Video sharing continues.</source>
+        <translation>系统音频共享不可用，视频共享继续。</translation>
+    </message>
+    <message>
+        <source>Shared audio could not be started or its selected output became unavailable. Audio capture has stopped. Video sharing continues.</source>
+        <translation>共享音频无法启动或所选输出设备不可用。音频采集已停止，视频共享继续。</translation>
+    </message>
+    <message>
+        <source>Annotation is not available for Wayland sharing yet.</source>
+        <translation>Wayland 共享暂不支持批注。</translation>
+    </message>
+    <message>
+        <source>Choose a screen or window in the system picker. Video only.</source>
+        <translation>请在系统选择器中选择屏幕或窗口，仅共享视频。</translation>
+    </message>
+    <message>
+        <source>Screen sharing is unavailable in this desktop session.</source>
+        <translation>当前桌面会话不支持屏幕共享。</translation>
+    </message>
+    <message>
+        <source>Choose screen or window, then allow sharing in the system picker. Video only.</source>
+        <translation>请选择屏幕或窗口，然后在系统选择器中允许共享。仅共享视频。</translation>
+    </message>
+    <message>
+        <source>Choose a screen or window in the system picker. Waiting for permission…</source>
+        <translation>请在系统选择器中选择屏幕或窗口，正在等待授权…</translation>
+    </message>
+    <message>
+        <source>Screen sharing permission was denied. You can try again and allow access in the system picker.</source>
+        <translation>屏幕共享授权被拒绝。你可以重试并在系统选择器中允许访问。</translation>
+    </message>
+    <message>
+        <source>Remembering sign-in is not available on this platform yet.</source>
+        <translation>当前平台暂不支持记住登录状态。</translation>
+    </message>
+    <message>
+        <source>Updates are not available on this platform yet.</source>
+        <translation>当前平台暂不支持应用内更新。</translation>
+    </message>
+    <message>
+        <source>Audio processing changes take effect the next time you join a meeting.</source>
+        <translation>音频处理设置将在下次入会时生效。</translation>
+    </message>
+    <message>
+        <source>Audio device testing is not available on this platform yet.</source>
+        <translation>当前平台暂不支持设备试听和麦克风测试。</translation>
+    </message>
+    <message>
+        <source>Screen sharing is not available on this platform yet.</source>
+        <translation>当前平台暂不支持屏幕共享。</translation>
+    </message>
+    <message>
+        <source>End-to-end encryption is not available on Linux yet. Meetings that require it cannot be joined.</source>
+        <translation>Linux 版暂不支持端到端加密，无法加入要求此加密的会议。</translation>
+    </message>
+    <message>
+        <source>Microphone testing is not available on Linux yet.</source>
+        <translation>Linux 版暂不支持麦克风测试。</translation>
+    </message>
+    <message>
+        <source>Speaker testing is not available on Linux yet.</source>
+        <translation>Linux 版暂不支持扬声器试听。</translation>
+    </message>
+    <message>
+        <source>Unable to enumerate audio devices</source>
+        <translation>无法获取音频设备列表。</translation>
+    </message>
+    <message>
         <source>Selects a receiving layer from the resolutions published by the other participant, using the actual display size and screen scaling.
 
 Applies to remote cameras and screen shares, including detached screen-share windows. Changes are saved and applied to the current meeting immediately; local publishing resolution is unchanged.
@@ -1680,6 +1860,10 @@ Meeting ID: %2</source>
         <translation>用户点击开启扬声器 (恢复声音输出)</translation>
     </message>
     <message>
+        <source>User requested to enable speaker output</source>
+        <translation>用户请求开启扬声器输出</translation>
+    </message>
+    <message>
         <source>User enabled local video</source>
         <translation>用户点击开启本地视频</translation>
     </message>
@@ -2352,6 +2536,34 @@ Sign in with your own account in a client configured for the same meeting servic
         <translation>启动安装程序</translation>
     </message>
     <message>
+        <source>Save installation package</source>
+        <translation>保存安装包</translation>
+    </message>
+    <message>
+        <source>No trusted Linux update source is configured for this platform. Use your signed package repository.</source>
+        <translation>此平台尚未配置可信的 Linux 更新源，请使用已签名的软件包仓库。</translation>
+    </message>
+    <message>
+        <source>Package verified. Save it, then leave your meeting and close Cohavora before installing with the system package manager.</source>
+        <translation>安装包已验证。请先保存安装包，再退出会议并关闭 Cohavora，然后使用系统包管理器安装。</translation>
+    </message>
+    <message>
+        <source>Verifying and saving the installation package...</source>
+        <translation>正在验证并保存安装包…</translation>
+    </message>
+    <message>
+        <source>Package saved to %1. Leave your meeting and close Cohavora before installing with the system package manager.</source>
+        <translation>安装包已保存至 %1。请退出会议并关闭 Cohavora，然后使用系统包管理器安装。</translation>
+    </message>
+    <message>
+        <source>The package could not be verified. Check for updates to try again.</source>
+        <translation>无法验证安装包，请重新检查更新后重试。</translation>
+    </message>
+    <message>
+        <source>The package could not be saved. Choose a personal folder that other users cannot modify and check available disk space.</source>
+        <translation>无法保存安装包。请选择其他用户无法修改的个人文件夹，并检查磁盘可用空间。</translation>
+    </message>
+    <message>
         <source>Download Update</source>
         <translation>下载更新</translation>
     </message>
@@ -2798,6 +3010,10 @@ Sign in with your own account in a client configured for the same meeting servic
     <message>
         <source>Local Media Startup Failed</source>
         <translation>本地媒体启动失败</translation>
+    </message>
+    <message>
+        <source>Local audio and video could not be started. Please leave the meeting and try joining again.</source>
+        <translation>本地音视频未能启动，请退出会议后重新加入。</translation>
     </message>
     <message>
         <source>Room Connection Failed</source>
@@ -5935,4 +6151,12 @@ Sign in with your own account in a client configured for the same meeting servic
     </message>
 </context>
 <context><name>MeetingUI::VideoTileWidget</name><message><source>More actions</source><translation>更多操作</translation></message></context>
+<context>
+    <name>MeetingUI::RemoteControlUi</name>
+    <message><source>当前 X11 键盘物理映射尚未验证，无法发起远程控制；请使用 Wayland 会话。</source><translation>当前 X11 键盘物理映射尚未验证，无法发起远程控制；请使用 Wayland 会话。</translation></message>
+    <message><source>本机暂不接受远程控制：尚未具备本地键鼠优先、可靠释放和后台紧急停止的完整安全保障。</source><translation>本机暂不接受远程控制：尚未具备本地键鼠优先、可靠释放和后台紧急停止的完整安全保障。</translation></message>
+    <message><source>当前窗口系统不支持安全远程控制。</source><translation>当前窗口系统不支持安全远程控制。</translation></message>
+    <message><source>当前平台不支持安全远程控制。</source><translation>当前平台不支持安全远程控制。</translation></message>
+    <message><source>对端当前无法接受远程控制。</source><translation>对端当前无法接受远程控制。</translation></message>
+</context>
 </TS>

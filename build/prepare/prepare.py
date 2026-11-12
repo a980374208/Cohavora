@@ -22,6 +22,12 @@ import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 
+if sys.platform.startswith("linux") and __name__ == "__main__":
+    from prepare_linux import main as prepare_linux_main
+
+    prepare_linux_main()
+    raise SystemExit(0)
+
 
 script_dir = Path(__file__).parent.resolve()
 root_dir = script_dir.parent.parent.resolve()

@@ -10,6 +10,28 @@ set(COHAVORA_UPDATE_PUBLIC_KEY_HEX
     "20cdd8328dd6f7ddc2842be3897176b2803e9b3b7ebd71da6c8ce4fbaeb13e42" CACHE STRING
     "Trusted raw Ed25519 public key (64 hexadecimal characters)")
 
+# Linux never inherits the Windows channel or its trust anchor. Production
+# distribution should use a signed APT repository. The optional standalone
+# channel only verifies and exports a DEB; it cannot install or elevate.
+set(COHAVORA_LINUX_UPDATE_PRIMARY_URL "" CACHE STRING "HTTPS Linux schema-2 manifest; empty disables Linux checks")
+set(COHAVORA_LINUX_UPDATE_FALLBACK_URL "" CACHE STRING "Optional HTTPS Linux schema-2 fallback")
+set(COHAVORA_LINUX_UPDATE_PUBLIC_KEY_HEX "" CACHE STRING "Independent trusted Linux Ed25519 public key")
+foreach(linux_url IN ITEMS COHAVORA_LINUX_UPDATE_PRIMARY_URL COHAVORA_LINUX_UPDATE_FALLBACK_URL)
+    if(${linux_url} AND NOT "${${linux_url}}" MATCHES "^https://")
+        message(FATAL_ERROR "${linux_url} must use HTTPS")
+    endif()
+endforeach()
+if(COHAVORA_LINUX_UPDATE_PUBLIC_KEY_HEX)
+    string(LENGTH "${COHAVORA_LINUX_UPDATE_PUBLIC_KEY_HEX}" linux_key_length)
+    if(NOT linux_key_length EQUAL 64 OR NOT COHAVORA_LINUX_UPDATE_PUBLIC_KEY_HEX MATCHES "^[0-9a-fA-F]+$")
+        message(FATAL_ERROR "COHAVORA_LINUX_UPDATE_PUBLIC_KEY_HEX must contain 64 hex characters")
+    endif()
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+        (NOT COHAVORA_LINUX_UPDATE_PRIMARY_URL OR NOT COHAVORA_LINUX_UPDATE_PUBLIC_KEY_HEX))
+    message(STATUS "[Updates] Linux signed source not configured; Linux update checks remain disabled")
+endif()
+
 if(COHAVORA_UPDATE_PUBLIC_KEY_HEX)
     string(LENGTH "${COHAVORA_UPDATE_PUBLIC_KEY_HEX}" key_length)
     if(NOT key_length EQUAL 64 OR
@@ -32,7 +54,8 @@ endif()
 
 # Escape user-supplied cache strings before inserting them in C++ literals.
 foreach(update_option IN ITEMS
-        COHAVORA_UPDATE_PRIMARY_URL COHAVORA_UPDATE_FALLBACK_URL COHAVORA_UPDATE_PUBLIC_KEY_HEX)
+        COHAVORA_UPDATE_PRIMARY_URL COHAVORA_UPDATE_FALLBACK_URL COHAVORA_UPDATE_PUBLIC_KEY_HEX
+        COHAVORA_LINUX_UPDATE_PRIMARY_URL COHAVORA_LINUX_UPDATE_FALLBACK_URL COHAVORA_LINUX_UPDATE_PUBLIC_KEY_HEX)
     set(${update_option}_CPP "${${update_option}}")
     string(REPLACE "\\" "\\\\" ${update_option}_CPP "${${update_option}_CPP}")
     string(REPLACE "\"" "\\\"" ${update_option}_CPP "${${update_option}_CPP}")

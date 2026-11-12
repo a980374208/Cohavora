@@ -39,6 +39,10 @@
 #include <QtGui/QFont>
 #include <QtGui/QScreen>
 
+#ifdef Q_OS_LINUX
+#include "src/ui/linux_window_frame.h"
+#endif
+
 #if defined(Q_OS_WIN)
 #include <windows.h>
 #include <windowsx.h>
@@ -749,6 +753,15 @@ MeetingMainWindow::MeetingMainWindow(QWidget *parent)
 	auto &session = OpenMeeting::SessionManager::instance();
 	_meetingCatalog = new OpenMeeting::MeetingCatalogController(session, this);
 	initLayout();
+#ifdef Q_OS_LINUX
+	installLinuxWindowFrame(*this, {
+		.radius = kWindowCornerRadius,
+		.captionHitTest = [this](QPoint position) {
+			return position.y() >= 0 && position.y() < 36 && position.x() >= 68 &&
+				(!_windowControls || !_windowControls->geometry().contains(position));
+		},
+	});
+#endif
 	connect(&session,
 	        &OpenMeeting::SessionManager::sessionInvalidated,
 	        this,
@@ -991,6 +1004,11 @@ void MeetingMainWindow::onSessionInvalidated(OpenMeeting::SessionInvalidationRea
 }
 
 void MeetingMainWindow::onCardClicked(ActionCardType type) {
+#if defined(Q_OS_LINUX)
+	// Reject the action before reserving entry or creating a meeting, including
+	// invocations that do not originate from the disabled home-screen card.
+	if (type == ActionCardType::ShareScreen && !livekit::DesktopCaptureSupported()) return;
+#endif
 	if (type == ActionCardType::JoinMeeting) {
 		beginMeetingEntry();
 		return;
@@ -1365,6 +1383,14 @@ void MeetingMainWindow::syncSchedule() {
 	}
 }
 
+void MeetingMainWindow::changeEvent(QEvent *e) {
+	Ui::RpWidget::changeEvent(e);
+	if (e->type() == QEvent::WindowStateChange) {
+		if (_sidebar) _sidebar->setCornerRadius(isMaximized() || isFullScreen() ? 0 : kWindowCornerRadius);
+		update();
+	}
+}
+
 void MeetingMainWindow::resizeEvent(QResizeEvent *e) {
 	const int w = width();
 	const int h = height();
@@ -1372,7 +1398,7 @@ void MeetingMainWindow::resizeEvent(QResizeEvent *e) {
 	// 左侧导航栏 (宽 68)
 	const int sidebarW = 68;
 	_sidebar->setGeometry(0, 0, sidebarW, h);
-	_sidebar->setCornerRadius(isMaximized() ? 0 : kWindowCornerRadius);
+	_sidebar->setCornerRadius(isMaximized() || isFullScreen() ? 0 : kWindowCornerRadius);
 
 	// 右上角窗口控制按钮
 	_windowControls->move(w - _windowControls->width() - 4, 4);
@@ -1392,7 +1418,7 @@ void MeetingMainWindow::paintEvent(QPaintEvent *e) {
 
 	const int w = width();
 	const int h = height();
-	const int radius = isMaximized() ? 0 : kWindowCornerRadius;
+	const int radius = isMaximized() || isFullScreen() ? 0 : kWindowCornerRadius;
 
 	// 1. 绘制主体圆角容器背景
 	if (radius > 0) {

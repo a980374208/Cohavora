@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <QtCore/QCoreApplication>
 
@@ -8,10 +8,10 @@
 #include "src/core/room.h"
 #include "src/core/local_audio_track.h"
 #include "src/core/local_video_track.h"
-#include "src/media/dshow_capture.h"
-#include "src/media/dshow_enumerator.h"
-#include "src/media/wasapi_enumerator.h"
-#include "src/media/wasapi_capture.h"
+#include "src/media/camera_source_manager.h"
+#include "src/media/camera_enumerator.h"
+#include "src/media/audio_device_enumerator.h"
+#include "src/media/microphone_capture.h"
 #include "src/core/meeting_coordinator.h"
 #include "src/core/session_shutdown_service.h"
 #include "src/render/video_render_session.h"
@@ -22,7 +22,6 @@
 #include "src/ui/camera_device_discovery.h"
 #include "src/ui/audio_device_discovery.h"
 #include <array>
-#include <mmsystem.h>
 
 #include <QtWidgets/QWidget>
 #include <QtWidgets/QLabel>
@@ -51,16 +50,6 @@
 #include <functional>
 #include <optional>
 
-#include <mmdeviceapi.h>
-#include <audioclient.h>
-#include <wrl/client.h>
-
-#ifndef AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
-#define AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM 0x80000000
-#endif
-#ifndef AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY
-#define AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY 0x08000000
-#endif
 
 class CameraOwnerInspectionAccess;
 class ParticipantWindowInspectionAccess;
@@ -399,7 +388,8 @@ private:
 	void toggleSpeaker();
 	bool canStopScreenShare() const {
 		using State = livekit::ScreenShareState;
-		return _screenShareState == State::Starting || _screenShareState == State::Active ||
+		return _screenShareState == State::AwaitingPermission ||
+			_screenShareState == State::Starting || _screenShareState == State::Active ||
 			_screenShareState == State::StopFailed;
 	}
 	bool screenShareControlEnabled() const {
@@ -633,13 +623,20 @@ private:
     void updateRemoteControlStatus(const QString& status);
     void syncScreenShareControls();
 	void handleScreenShareSources(const std::vector<livekit::DesktopSource> &sources);
+    void openScreenShareAudioPicker(uint64_t run, uint64_t audioEpoch);
 	void applyRemoteParticipantJoined(const QString &identity, const QString &name,
 		const OpenMeeting::ParticipantPresentation *presentation);
 	void setupCameraCompletionOwner(OpenMeeting::SessionManager &sessionManager);
 	void setupAudioPreferencesBinding(OpenMeeting::SessionManager &sessionManager);
 	void applyAudioProcessingPreferences(const OpenMeeting::MediaPreferences &preferences);
+#ifdef Q_OS_LINUX
+	void requestSpeakerDevice(const QString &deviceId, bool fallbackToDefault = false,
+		std::function<void(bool)> completed = {});
+#else
 	bool selectSpeakerDevice(const QString &deviceId);
+#endif
 	void requestMicrophoneSwitch(const QString &deviceId);
+	void queueMicrophoneMute(bool muted, bool commitRequestedState = false);
 	void applyMicrophoneAvailability(bool available);
 	void bindMicrophoneCaptureState();
 	void setSpeakerOutputMuted(bool muted);
@@ -755,12 +752,16 @@ private:
 	QLabel *_screenShareBanner = nullptr;
     QString _screenShareText;
     QString _screenShareDetails;
+    QString _screenShareAudioStatus;
+    bool _screenShareAudioControlNeeded = false;
     bool _screenShareActive = false;
     bool _screenShareBannerNeeded = false;
     QString _remoteControlStatus;
     QPushButton *_remoteControlStopButton = nullptr;
 	QPushButton *_annotationButton = nullptr;
 	QPushButton *_screenQualityButton = nullptr;
+    QPushButton *_screenAudioButton = nullptr;
+    livekit::ScreenShareAudioError _lastScreenAudioError = livekit::ScreenShareAudioError::None;
 	std::unique_ptr<AnnotationOverlayWindow> _annotationOverlay;
 	std::optional<livekit::ScreenBinding> _annotationBinding;
 	bool _annotationOffscreenForDiagnostics = false;
@@ -781,7 +782,7 @@ private:
 
 	// 本地摄像头采集与模拟流
 	std::shared_ptr<livekit::CameraSourceManager> _cameraManager;
-	std::shared_ptr<livekit::DShowVideoCapture> _dshowCap;
+	std::shared_ptr<livekit::ICameraCapturer> _dshowCap;
 	std::unique_ptr<CameraSwitchCompletionOwner> _cameraCompletionOwner;
 	OpenMeeting::SessionManager *_cameraSessionManager = nullptr;
 	CameraLogEffect _cameraLogEffect;
@@ -792,12 +793,28 @@ private:
 	DeviceSwitchTelemetry _microphoneSwitchTelemetry;
 	DeviceSwitchTelemetry _speakerSwitchTelemetry;
 	std::uint64_t _pendingMicrophoneDeviceGeneration = 0;
+#ifdef Q_OS_LINUX
+	std::shared_ptr<std::atomic<std::uint64_t>> _microphoneMuteIntent =
+		std::make_shared<std::atomic<std::uint64_t>>(0);
+	std::shared_ptr<std::atomic<std::uint64_t>> _microphoneSwitchIntent =
+		std::make_shared<std::atomic<std::uint64_t>>(0);
+	std::shared_ptr<std::atomic<std::uint64_t>> _speakerDeviceIntent =
+		std::make_shared<std::atomic<std::uint64_t>>(0);
+	std::shared_ptr<std::atomic<std::uint64_t>> _speakerMuteIntent =
+		std::make_shared<std::atomic<std::uint64_t>>(0);
+	std::weak_ptr<livekit::Room> _speakerConfiguredRoom;
+	bool _speakerDevicePending = false;
+	bool _speakerRequestedMuted = true;
+	bool _microphoneMutePending = false;
+	bool _microphoneSwitchPending = false;
+	bool _microphoneStateCommit = false;
+#endif
 	bool _usingRealCamera = false;
 	QTimer *_localGenTimer = nullptr;
 	int _localFrameStep = 0;
 
 	// 本地麦克风采集
-	std::shared_ptr<livekit::WasapiAudioCapture> _wasapiCap;
+	std::shared_ptr<livekit::MicrophoneCapture> _wasapiCap;
 	std::shared_ptr<OpenMeeting::QtCallbackGate<MeetingRoomWindow>> _captureUiCallbacks;
 	bool _microphoneAvailable = false;
 	bool _speakerAvailable = false;

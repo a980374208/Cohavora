@@ -17,6 +17,10 @@
 #if defined(_WIN32)
 #define NOMINMAX
 #include <Windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+#include <cerrno>
 #endif
 
 namespace livekit::telemetry {
@@ -430,9 +434,9 @@ bool StabilityLedger::PersistLocked() {
         return false;
     }
 
-    const auto temporary = std::filesystem::path(
-        path_.wstring() + L".tmp." +
-        std::filesystem::path(NewOpaqueId()).wstring());
+    auto temporary = path_;
+    temporary += ".tmp." + NewOpaqueId();
+#if defined(_WIN32)
     {
         std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
         output.write(serialized.data(), static_cast<std::streamsize>(serialized.size()));
@@ -445,6 +449,30 @@ bool StabilityLedger::PersistLocked() {
             return false;
         }
     }
+#else
+    // Create private bytes before writing; a debug root can be reused safely
+    // under the user's normal umask, including paths containing UTF-8 text.
+    const int fd = ::open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC | O_NOFOLLOW, 0600);
+    if (fd < 0) {
+        impl_->last_write_ok = false;
+        IncrementDiagnostic(impl_->document, "write_failures");
+        return false;
+    }
+    size_t offset = 0;
+    while (offset < serialized.size()) {
+        const auto written = ::write(fd, serialized.data() + offset, serialized.size() - offset);
+        if (written < 0 && errno == EINTR) continue;
+        if (written <= 0) break;
+        offset += static_cast<size_t>(written);
+    }
+    const bool closed = ::close(fd) == 0;
+    if (offset != serialized.size() || !closed) {
+        std::filesystem::remove(temporary, error);
+        impl_->last_write_ok = false;
+        IncrementDiagnostic(impl_->document, "write_failures");
+        return false;
+    }
+#endif
     if (!AtomicReplace(temporary, path_)) {
         std::filesystem::remove(temporary, error);
         impl_->last_write_ok = false;

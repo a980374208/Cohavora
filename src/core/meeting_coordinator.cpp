@@ -1,5 +1,6 @@
 #include <QtCore/QCoreApplication>
 #include "src/core/meeting_coordinator.h"
+#include "src/rtc/webrtc_manager.h"
 #include "src/net/service_endpoint_policy.h"
 #include "src/ui/meeting_log_console.h"
 #include "src/telemetry/log_redaction.h"
@@ -182,7 +183,7 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("availability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(snapshot.availability)));
     result.insert(QStringLiteral("reason"), QString::fromStdString(snapshot.reason));
-    result.insert(QStringLiteral("sampleAgeMs"), snapshot.sample_age_ms);
+    result.insert(QStringLiteral("sampleAgeMs"), QVariant::fromValue<qlonglong>(snapshot.sample_age_ms));
     result.insert(QStringLiteral("coverage"), snapshot.coverage);
     result.insert(QStringLiteral("sessionDurationAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
@@ -192,7 +193,7 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("sessionDurationMeasurementPoint"),
                   QString::fromStdString(
                       snapshot.session_duration_measurement_point));
-    result.insert(QStringLiteral("sessionDurationMs"), snapshot.session_duration_ms);
+    result.insert(QStringLiteral("sessionDurationMs"), QVariant::fromValue<qlonglong>(snapshot.session_duration_ms));
     result.insert(QStringLiteral("usableDurationAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.usable_duration_availability)));
@@ -201,14 +202,14 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("usableDurationMeasurementPoint"),
                   QString::fromStdString(
                       snapshot.usable_duration_measurement_point));
-    result.insert(QStringLiteral("usableDurationMs"), snapshot.usable_duration_ms);
+    result.insert(QStringLiteral("usableDurationMs"), QVariant::fromValue<qlonglong>(snapshot.usable_duration_ms));
     result.insert(QStringLiteral("admissionToUsableAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.admission_to_usable_availability)));
     result.insert(QStringLiteral("admissionToUsableReason"),
                   QString::fromStdString(snapshot.admission_to_usable_reason));
     result.insert(QStringLiteral("admissionToUsableMs"),
-                  snapshot.admission_to_usable_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.admission_to_usable_ms));
     result.insert(QStringLiteral("queueCapacity"),
                   QVariant::fromValue<qulonglong>(snapshot.queue_capacity));
     result.insert(QStringLiteral("queueDepth"),
@@ -241,21 +242,21 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("eventQueueLagSamples"),
                   QVariant::fromValue<qulonglong>(snapshot.event_queue_lag_samples));
     result.insert(QStringLiteral("lastEventQueueLagMs"),
-                  snapshot.last_event_queue_lag_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_event_queue_lag_ms));
     result.insert(QStringLiteral("maximumEventQueueLagMs"),
-                  snapshot.maximum_event_queue_lag_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.maximum_event_queue_lag_ms));
     result.insert(QStringLiteral("resourceAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(snapshot.resource_availability)));
     result.insert(QStringLiteral("resourceReason"),
                   QString::fromStdString(snapshot.resource_reason));
     result.insert(QStringLiteral("resourceSampleAgeMs"),
-                  snapshot.resource_sample_age_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.resource_sample_age_ms));
     result.insert(QStringLiteral("resourceSamples"),
                   QVariant::fromValue<qulonglong>(snapshot.resource_samples));
     result.insert(QStringLiteral("resourceSampleFailures"),
                   QVariant::fromValue<qulonglong>(snapshot.resource_sample_failures));
     result.insert(QStringLiteral("lastResourceSampleUs"),
-                  snapshot.last_resource_sample_us);
+                  QVariant::fromValue<qlonglong>(snapshot.last_resource_sample_us));
     result.insert(QStringLiteral("cpuAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(snapshot.cpu_availability)));
     result.insert(QStringLiteral("cpuReason"),
@@ -282,7 +283,7 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("processThreadCount"),
                   snapshot.process_thread_count);
     result.insert(QStringLiteral("threadCountSampleAgeMs"),
-                  snapshot.thread_count_sample_age_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.thread_count_sample_age_ms));
     result.insert(QStringLiteral("handleCountAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.handle_count_availability)));
@@ -303,7 +304,7 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("resourceTrendSamples"),
                   QVariant::fromValue<qulonglong>(snapshot.resource_trend_samples));
     result.insert(QStringLiteral("resourceTrendSpanMs"),
-                  snapshot.resource_trend_span_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.resource_trend_span_ms));
     result.insert(QStringLiteral("resourceTrendCoverage"),
                   snapshot.resource_trend_coverage);
     result.insert(QStringLiteral("minimumWorkingSetBytes"),
@@ -334,13 +335,13 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("resourceSessionDeltaReason"),
                   QString::fromStdString(snapshot.resource_session_delta_reason));
     result.insert(QStringLiteral("workingSetDeltaBytes"),
-                  snapshot.working_set_delta_bytes);
+                  QVariant::fromValue<qlonglong>(snapshot.working_set_delta_bytes));
     result.insert(QStringLiteral("privateBytesDelta"),
-                  snapshot.private_bytes_delta);
+                  QVariant::fromValue<qlonglong>(snapshot.private_bytes_delta));
     result.insert(QStringLiteral("threadCountDelta"),
-                  snapshot.thread_count_delta);
+                  QVariant::fromValue<qlonglong>(snapshot.thread_count_delta));
     result.insert(QStringLiteral("handleCountDelta"),
-                  snapshot.handle_count_delta);
+                  QVariant::fromValue<qlonglong>(snapshot.handle_count_delta));
     result.insert(QStringLiteral("resourceFinalDeltaAvailability"),
                   QString::fromLatin1(livekit::telemetry::AvailabilityName(
                       snapshot.resource_final_delta_availability)));
@@ -384,23 +385,23 @@ QVariantMap ProjectTelemetrySnapshot(
                   QVariant::fromValue<qulonglong>(
                       snapshot.telemetry_snapshot_publications));
     result.insert(QStringLiteral("totalResourceSampleUs"),
-                  snapshot.total_resource_sample_us);
+                  QVariant::fromValue<qlonglong>(snapshot.total_resource_sample_us));
     result.insert(QStringLiteral("maximumResourceSampleUs"),
-                  snapshot.maximum_resource_sample_us);
+                  QVariant::fromValue<qlonglong>(snapshot.maximum_resource_sample_us));
     result.insert(QStringLiteral("averageResourceSampleUs"),
                   snapshot.average_resource_sample_us);
     result.insert(QStringLiteral("lastSnapshotBuildUs"),
-                  snapshot.last_snapshot_build_us);
+                  QVariant::fromValue<qlonglong>(snapshot.last_snapshot_build_us));
     result.insert(QStringLiteral("maximumSnapshotBuildUs"),
-                  snapshot.maximum_snapshot_build_us);
+                  QVariant::fromValue<qlonglong>(snapshot.maximum_snapshot_build_us));
     result.insert(QStringLiteral("totalSnapshotBuildUs"),
-                  snapshot.total_snapshot_build_us);
+                  QVariant::fromValue<qlonglong>(snapshot.total_snapshot_build_us));
     result.insert(QStringLiteral("lastSnapshotCallbackUs"),
-                  snapshot.last_snapshot_callback_us);
+                  QVariant::fromValue<qlonglong>(snapshot.last_snapshot_callback_us));
     result.insert(QStringLiteral("maximumSnapshotCallbackUs"),
-                  snapshot.maximum_snapshot_callback_us);
+                  QVariant::fromValue<qlonglong>(snapshot.maximum_snapshot_callback_us));
     result.insert(QStringLiteral("totalSnapshotCallbackUs"),
-                  snapshot.total_snapshot_callback_us);
+                  QVariant::fromValue<qlonglong>(snapshot.total_snapshot_callback_us));
     result.insert(QStringLiteral("telemetryObservedCostRatio"),
                   snapshot.telemetry_observed_cost_ratio);
     result.insert(QStringLiteral("telemetryAbAvailability"),
@@ -478,17 +479,17 @@ QVariantMap ProjectTelemetrySnapshot(
                   QString::fromStdString(snapshot.strand_lag_reason));
     result.insert(QStringLiteral("strandLagSamples"),
                   QVariant::fromValue<qulonglong>(snapshot.strand_lag_samples));
-    result.insert(QStringLiteral("lastStrandLagMs"), snapshot.last_strand_lag_ms);
+    result.insert(QStringLiteral("lastStrandLagMs"), QVariant::fromValue<qlonglong>(snapshot.last_strand_lag_ms));
     result.insert(QStringLiteral("maximumStrandLagMs"),
-                  snapshot.maximum_strand_lag_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.maximum_strand_lag_ms));
     result.insert(QStringLiteral("uiLagAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(snapshot.ui_lag_availability)));
     result.insert(QStringLiteral("uiLagReason"),
                   QString::fromStdString(snapshot.ui_lag_reason));
     result.insert(QStringLiteral("uiLagSamples"),
                   QVariant::fromValue<qulonglong>(snapshot.ui_lag_samples));
-    result.insert(QStringLiteral("lastUiLagMs"), snapshot.last_ui_lag_ms);
-    result.insert(QStringLiteral("maximumUiLagMs"), snapshot.maximum_ui_lag_ms);
+    result.insert(QStringLiteral("lastUiLagMs"), QVariant::fromValue<qlonglong>(snapshot.last_ui_lag_ms));
+    result.insert(QStringLiteral("maximumUiLagMs"), QVariant::fromValue<qlonglong>(snapshot.maximum_ui_lag_ms));
     result.insert(QStringLiteral("uiProbeTimeouts"),
                   QVariant::fromValue<qulonglong>(snapshot.ui_probe_timeouts));
     result.insert(QStringLiteral("uiProbeSkipped"),
@@ -509,7 +510,7 @@ QVariantMap ProjectTelemetrySnapshot(
                   QVariant::fromValue<qulonglong>(snapshot.stats_request_rejections));
     result.insert(QStringLiteral("statsRequestsSkipped"),
                   QVariant::fromValue<qulonglong>(snapshot.stats_requests_skipped));
-    result.insert(QStringLiteral("lastStatsRequestMs"), snapshot.last_stats_request_ms);
+    result.insert(QStringLiteral("lastStatsRequestMs"), QVariant::fromValue<qlonglong>(snapshot.last_stats_request_ms));
     result.insert(QStringLiteral("operationsStarted"),
                   QVariant::fromValue<qulonglong>(snapshot.operations_started));
     result.insert(QStringLiteral("operationsTerminal"),
@@ -544,7 +545,7 @@ QVariantMap ProjectTelemetrySnapshot(
                     QVariant::fromValue<qulonglong>(summary.cancelled));
         item.insert(QStringLiteral("inflight"),
                     QVariant::fromValue<qulonglong>(summary.inflight));
-        item.insert(QStringLiteral("lastDurationMs"), summary.last_duration_ms);
+        item.insert(QStringLiteral("lastDurationMs"), QVariant::fromValue<qlonglong>(summary.last_duration_ms));
         operationSummaries.push_back(std::move(item));
     }
     result.insert(QStringLiteral("operationSummaries"), operationSummaries);
@@ -590,7 +591,7 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("localVideoFirstInjections"),
                   QVariant::fromValue<qulonglong>(snapshot.local_video_first_injections));
     result.insert(QStringLiteral("lastPublishToVideoInjectionMs"),
-                  snapshot.last_publish_to_video_injection_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_publish_to_video_injection_ms));
     result.insert(QStringLiteral("localVideoEncodeAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.local_video_encode_availability)));
@@ -602,7 +603,7 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("localVideoFirstEncodes"),
                   QVariant::fromValue<qulonglong>(snapshot.local_video_first_encodes));
     result.insert(QStringLiteral("lastPublishToVideoEncodeMs"),
-                  snapshot.last_publish_to_video_encode_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_publish_to_video_encode_ms));
     result.insert(QStringLiteral("localRtpSendAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.local_rtp_send_availability)));
@@ -614,9 +615,9 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("localFirstRtpSends"),
                   QVariant::fromValue<qulonglong>(snapshot.local_first_rtp_sends));
     result.insert(QStringLiteral("lastPublishToRtpSendMs"),
-                  snapshot.last_publish_to_rtp_send_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_publish_to_rtp_send_ms));
     result.insert(QStringLiteral("localPublishStatsUncertaintyMs"),
-                  snapshot.local_publish_stats_uncertainty_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.local_publish_stats_uncertainty_ms));
     result.insert(QStringLiteral("subscriptionMediaAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.subscription_media_availability)));
@@ -632,7 +633,7 @@ QVariantMap ProjectTelemetrySnapshot(
                   QVariant::fromValue<qulonglong>(
                       snapshot.remote_subscription_no_media));
     result.insert(QStringLiteral("longestSubscriptionMediaWaitMs"),
-                  snapshot.longest_subscription_media_wait_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.longest_subscription_media_wait_ms));
     result.insert(QStringLiteral("inboundRtpTrafficAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.inbound_rtp_traffic_availability)));
@@ -657,9 +658,9 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("inboundPacketLossReason"),
                   QString::fromStdString(snapshot.inbound_packet_loss_reason));
     result.insert(QStringLiteral("inboundPacketsLost"),
-                  snapshot.inbound_packets_lost);
+                  QVariant::fromValue<qlonglong>(snapshot.inbound_packets_lost));
     result.insert(QStringLiteral("windowInboundPacketsLost"),
-                  snapshot.window_inbound_packets_lost);
+                  QVariant::fromValue<qlonglong>(snapshot.window_inbound_packets_lost));
     result.insert(QStringLiteral("inboundPacketLossRatio"),
                   snapshot.inbound_packet_loss_ratio);
     result.insert(QStringLiteral("inboundJitterAvailability"), QString::fromLatin1(
@@ -825,7 +826,7 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("localDeviceUnexpectedStops"),
                   QVariant::fromValue<qulonglong>(snapshot.local_device_unexpected_stops));
     result.insert(QStringLiteral("localDeviceInterruptionDurationMs"),
-                  snapshot.local_device_interruption_duration_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.local_device_interruption_duration_ms));
     result.insert(QStringLiteral("localDeviceFormatChanges"),
                   QVariant::fromValue<qulonglong>(snapshot.local_device_format_changes));
     result.insert(QStringLiteral("localDeviceClockResets"),
@@ -896,11 +897,11 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("staleBindingFrameDrops"),
                   QVariant::fromValue<qulonglong>(snapshot.stale_binding_frame_drops));
     result.insert(QStringLiteral("roomConnectToFirstDecodedMs"),
-                  snapshot.room_connect_to_first_decoded_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.room_connect_to_first_decoded_ms));
     result.insert(QStringLiteral("lastConnectToFirstDecodedMs"),
-                  snapshot.last_connect_to_first_decoded_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_connect_to_first_decoded_ms));
     result.insert(QStringLiteral("lastSubscribeToFirstDecodedMs"),
-                  snapshot.last_subscribe_to_first_decoded_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_subscribe_to_first_decoded_ms));
     result.insert(QStringLiteral("lastDecodedWidth"), snapshot.last_decoded_width);
     result.insert(QStringLiteral("lastDecodedHeight"), snapshot.last_decoded_height);
     result.insert(QStringLiteral("nativeVideoFreezeAvailability"), QString::fromLatin1(
@@ -916,7 +917,7 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("nativeVideoFreezeCount"),
                   QVariant::fromValue<qulonglong>(snapshot.native_video_freeze_count));
     result.insert(QStringLiteral("nativeVideoFreezeDurationMs"),
-                  snapshot.native_video_freeze_duration_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.native_video_freeze_duration_ms));
     result.insert(QStringLiteral("videoQualityLimitationAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.video_quality_limitation_availability)));
@@ -925,21 +926,21 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("videoQualityLimitationCurrent"),
                   QString::fromStdString(snapshot.video_quality_limitation_current));
     result.insert(QStringLiteral("videoQualityNoneDurationMs"),
-                  snapshot.video_quality_none_duration_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.video_quality_none_duration_ms));
     result.insert(QStringLiteral("videoQualityCpuDurationMs"),
-                  snapshot.video_quality_cpu_duration_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.video_quality_cpu_duration_ms));
     result.insert(QStringLiteral("videoQualityBandwidthDurationMs"),
-                  snapshot.video_quality_bandwidth_duration_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.video_quality_bandwidth_duration_ms));
     result.insert(QStringLiteral("videoQualityOtherDurationMs"),
-                  snapshot.video_quality_other_duration_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.video_quality_other_duration_ms));
     result.insert(QStringLiteral("windowVideoQualityCpuDurationMs"),
-                  snapshot.window_video_quality_cpu_duration_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.window_video_quality_cpu_duration_ms));
     result.insert(QStringLiteral("windowVideoQualityBandwidthDurationMs"),
-                  snapshot.window_video_quality_bandwidth_duration_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.window_video_quality_bandwidth_duration_ms));
     result.insert(QStringLiteral("videoQualityResolutionChanges"),
-                  snapshot.video_quality_resolution_changes);
+                  QVariant::fromValue<qlonglong>(snapshot.video_quality_resolution_changes));
     result.insert(QStringLiteral("windowVideoQualityResolutionChanges"),
-                  snapshot.window_video_quality_resolution_changes);
+                  QVariant::fromValue<qlonglong>(snapshot.window_video_quality_resolution_changes));
     result.insert(QStringLiteral("outboundVideoWidth"), snapshot.outbound_video_width);
     result.insert(QStringLiteral("outboundVideoHeight"), snapshot.outbound_video_height);
     result.insert(QStringLiteral("outboundVideoFps"), snapshot.outbound_video_fps);
@@ -1049,13 +1050,13 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("reconnectMediaTimeouts"),
                   QVariant::fromValue<qulonglong>(snapshot.reconnect_media_timeouts));
     result.insert(QStringLiteral("lastReconnectSignalingMs"),
-                  snapshot.last_reconnect_signaling_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_reconnect_signaling_ms));
     result.insert(QStringLiteral("lastReconnectFirstVideoMs"),
-                  snapshot.last_reconnect_first_video_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_reconnect_first_video_ms));
     result.insert(QStringLiteral("lastReconnectStableVideoMs"),
-                  snapshot.last_reconnect_stable_video_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_reconnect_stable_video_ms));
     result.insert(QStringLiteral("lastReconnectMediaInterruptionMs"),
-                  snapshot.last_reconnect_media_interruption_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_reconnect_media_interruption_ms));
     result.insert(QStringLiteral("firstAudioAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.remote_audio_first_frame_availability)));
@@ -1071,7 +1072,7 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("staleAudioBindingDrops"),
                   QVariant::fromValue<qulonglong>(snapshot.stale_audio_binding_drops));
     result.insert(QStringLiteral("lastSubscribeToFirstPcmMs"),
-                  snapshot.last_subscribe_to_first_pcm_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_subscribe_to_first_pcm_ms));
     result.insert(QStringLiteral("lastAudioSampleRate"), snapshot.last_audio_sample_rate);
     result.insert(QStringLiteral("lastAudioChannels"), snapshot.last_audio_channels);
     result.insert(QStringLiteral("audioQualityAvailability"), QString::fromLatin1(
@@ -1131,11 +1132,11 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("reconnectAudioRecovered"),
                   QVariant::fromValue<qulonglong>(snapshot.reconnect_audio_recovered));
     result.insert(QStringLiteral("lastReconnectFirstAudioMs"),
-                  snapshot.last_reconnect_first_audio_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_reconnect_first_audio_ms));
     result.insert(QStringLiteral("lastReconnectStableAudioMs"),
-                  snapshot.last_reconnect_stable_audio_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_reconnect_stable_audio_ms));
     result.insert(QStringLiteral("lastReconnectAudioInterruptionMs"),
-                  snapshot.last_reconnect_audio_interruption_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_reconnect_audio_interruption_ms));
     result.insert(QStringLiteral("renderFirstFrameAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(snapshot.render_first_frame_availability)));
     result.insert(QStringLiteral("renderFirstFrameReason"),
@@ -1148,17 +1149,17 @@ QVariantMap ProjectTelemetrySnapshot(
                   QVariant::fromValue<qulonglong>(snapshot.unique_render_submits));
     result.insert(QStringLiteral("staleRenderBindingDrops"),
                   QVariant::fromValue<qulonglong>(snapshot.stale_render_binding_drops));
-    result.insert(QStringLiteral("lastDecodeToRenderMs"), snapshot.last_decode_to_render_ms);
+    result.insert(QStringLiteral("lastDecodeToRenderMs"), QVariant::fromValue<qlonglong>(snapshot.last_decode_to_render_ms));
     result.insert(QStringLiteral("lastSubscribeToFirstRenderMs"),
-                  snapshot.last_subscribe_to_first_render_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_subscribe_to_first_render_ms));
     result.insert(QStringLiteral("lastConnectToFirstRenderMs"),
-                  snapshot.last_connect_to_first_render_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_connect_to_first_render_ms));
     result.insert(QStringLiteral("lastAdmissionToFirstRenderMs"),
-                  snapshot.last_admission_to_first_render_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_admission_to_first_render_ms));
     result.insert(QStringLiteral("renderAverageIntervalMs"),
                   snapshot.render_average_interval_ms);
     result.insert(QStringLiteral("renderMaximumIntervalMs"),
-                  snapshot.render_maximum_interval_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.render_maximum_interval_ms));
     result.insert(QStringLiteral("renderIntervalP50Ms"), snapshot.render_interval_p50_ms);
     result.insert(QStringLiteral("renderIntervalP95Ms"), snapshot.render_interval_p95_ms);
     result.insert(QStringLiteral("renderIntervalP99Ms"), snapshot.render_interval_p99_ms);
@@ -1170,9 +1171,9 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("renderAverageFrameAgeMs"),
                   snapshot.render_average_frame_age_ms);
     result.insert(QStringLiteral("renderMaximumFrameAgeMs"),
-                  snapshot.render_maximum_frame_age_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.render_maximum_frame_age_ms));
     result.insert(QStringLiteral("renderTargetIntervalMs"),
-                  snapshot.render_target_interval_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.render_target_interval_ms));
     result.insert(QStringLiteral("renderExpectedBindings"),
                   QVariant::fromValue<qulonglong>(snapshot.render_expected_bindings));
     result.insert(QStringLiteral("renderHiddenBindings"),
@@ -1190,11 +1191,11 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("renderStallCount"),
                   QVariant::fromValue<qulonglong>(snapshot.render_stall_count));
     result.insert(QStringLiteral("renderStallDurationMs"),
-                  snapshot.render_stall_duration_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.render_stall_duration_ms));
     result.insert(QStringLiteral("renderLongestStallMs"),
-                  snapshot.render_longest_stall_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.render_longest_stall_ms));
     result.insert(QStringLiteral("renderExpectedDurationMs"),
-                  snapshot.render_expected_duration_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.render_expected_duration_ms));
     result.insert(QStringLiteral("renderStallRatio"), snapshot.render_stall_ratio);
     result.insert(QStringLiteral("renderStallActive"), snapshot.render_stall_active);
     result.insert(QStringLiteral("renderStageAvailability"), QString::fromLatin1(
@@ -1203,23 +1204,23 @@ QVariantMap ProjectTelemetrySnapshot(
                   QString::fromStdString(snapshot.render_stage_reason));
     result.insert(QStringLiteral("renderConvertSamples"),
                   QVariant::fromValue<qulonglong>(snapshot.render_convert_samples));
-    result.insert(QStringLiteral("renderConvertTotalUs"), snapshot.render_convert_total_us);
-    result.insert(QStringLiteral("renderConvertMaxUs"), snapshot.render_convert_max_us);
+    result.insert(QStringLiteral("renderConvertTotalUs"), QVariant::fromValue<qlonglong>(snapshot.render_convert_total_us));
+    result.insert(QStringLiteral("renderConvertMaxUs"), QVariant::fromValue<qlonglong>(snapshot.render_convert_max_us));
     result.insert(QStringLiteral("renderUploadSamples"),
                   QVariant::fromValue<qulonglong>(snapshot.render_upload_samples));
-    result.insert(QStringLiteral("renderUploadTotalUs"), snapshot.render_upload_total_us);
-    result.insert(QStringLiteral("renderUploadMaxUs"), snapshot.render_upload_max_us);
+    result.insert(QStringLiteral("renderUploadTotalUs"), QVariant::fromValue<qlonglong>(snapshot.render_upload_total_us));
+    result.insert(QStringLiteral("renderUploadMaxUs"), QVariant::fromValue<qlonglong>(snapshot.render_upload_max_us));
     result.insert(QStringLiteral("renderDrawSamples"),
                   QVariant::fromValue<qulonglong>(snapshot.render_draw_samples));
-    result.insert(QStringLiteral("renderDrawTotalUs"), snapshot.render_draw_total_us);
-    result.insert(QStringLiteral("renderDrawMaxUs"), snapshot.render_draw_max_us);
+    result.insert(QStringLiteral("renderDrawTotalUs"), QVariant::fromValue<qlonglong>(snapshot.render_draw_total_us));
+    result.insert(QStringLiteral("renderDrawMaxUs"), QVariant::fromValue<qlonglong>(snapshot.render_draw_max_us));
     result.insert(QStringLiteral("renderPresentBlockSamples"),
                   QVariant::fromValue<qulonglong>(
                       snapshot.render_present_block_samples));
     result.insert(QStringLiteral("renderPresentBlockTotalUs"),
-                  snapshot.render_present_block_total_us);
+                  QVariant::fromValue<qlonglong>(snapshot.render_present_block_total_us));
     result.insert(QStringLiteral("renderPresentBlockMaxUs"),
-                  snapshot.render_present_block_max_us);
+                  QVariant::fromValue<qlonglong>(snapshot.render_present_block_max_us));
     result.insert(QStringLiteral("renderGpuExecutionAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.render_gpu_execution_availability)));
@@ -1320,11 +1321,11 @@ QVariantMap ProjectTelemetrySnapshot(
     result.insert(QStringLiteral("reconnectRenderRecovered"),
                   QVariant::fromValue<qulonglong>(snapshot.reconnect_render_recovered));
     result.insert(QStringLiteral("lastReconnectFirstRenderMs"),
-                  snapshot.last_reconnect_first_render_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_reconnect_first_render_ms));
     result.insert(QStringLiteral("lastReconnectStableRenderMs"),
-                  snapshot.last_reconnect_stable_render_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_reconnect_stable_render_ms));
     result.insert(QStringLiteral("lastReconnectRenderInterruptionMs"),
-                  snapshot.last_reconnect_render_interruption_ms);
+                  QVariant::fromValue<qlonglong>(snapshot.last_reconnect_render_interruption_ms));
     result.insert(QStringLiteral("reconnectDensityAvailability"), QString::fromLatin1(
         livekit::telemetry::AvailabilityName(
             snapshot.reconnect_density_availability)));
@@ -1608,6 +1609,23 @@ InitialMediaState MeetingCoordinator::resolveInitialMediaState(
     return result;
 }
 
+static bool IsMicrophoneSource(livekit::TrackSource source) {
+    // Older peers can omit the source. An explicitly identified share-audio
+    // publication must never change the microphone indicator.
+    return source == livekit::TrackSource::Microphone ||
+        source == livekit::TrackSource::Unknown;
+}
+
+static std::vector<livekit::SystemAudioOutput> DiscoverScreenShareAudioOutputs() {
+    std::vector<livekit::SystemAudioOutput> outputs;
+#if defined(WEBRTC_LINUX)
+    if (livekit::SystemAudioSharingAvailable()) {
+        try { outputs = livekit::EnumerateSystemAudioOutputs(); } catch (...) {}
+    }
+#endif
+    return outputs;
+}
+
 static void CopyParticipantState(const livekit::ParticipantStateSnapshot &state,
                                  ParticipantInfo *info) {
     if (!info) return;
@@ -1622,7 +1640,8 @@ static void CopyParticipantState(const livekit::ParticipantStateSnapshot &state,
             publication.stream_state != livekit::TrackPublication::StreamState::Paused) {
             continue;
         }
-        if (publication.kind == livekit::TrackKind::Audio) {
+        if (publication.kind == livekit::TrackKind::Audio &&
+            IsMicrophoneSource(publication.source)) {
             audio_paused = true;
         } else if (publication.kind == livekit::TrackKind::Video) {
             video_paused = true;
@@ -1992,7 +2011,8 @@ public:
                 candidate->stream_state() != livekit::TrackPublication::StreamState::Paused) {
                 continue;
             }
-            if (candidate->track()->kind() == livekit::TrackKind::Audio) {
+            if (candidate->track()->kind() == livekit::TrackKind::Audio &&
+                IsMicrophoneSource(candidate->track()->source())) {
                 audioPaused = true;
             } else if (candidate->track()->kind() == livekit::TrackKind::Video) {
                 videoPaused = true;
@@ -2136,8 +2156,10 @@ public:
         const auto generation = _generation;
         QString id = QString::fromStdString(p->identity());
         bool isVideo = (track->kind() == livekit::TrackKind::Video);
+        const bool isMicrophone = track->kind() == livekit::TrackKind::Audio &&
+            IsMicrophoneSource(track->source());
         const std::string track_sid = track->sid();
-        _uiGate->Post([generation, id, isVideo, track_sid](MeetingCoordinator* coordinator) {
+        _uiGate->Post([generation, id, isVideo, isMicrophone, track_sid](MeetingCoordinator* coordinator) {
             if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
             if (isVideo) {
                 emit coordinator->remoteVideoTrackUnavailable(id, QString::fromStdString(track_sid));
@@ -2146,12 +2168,13 @@ public:
             if (it != coordinator->_participants.end()) {
                 if (isVideo) {
                     it->second.isVideoEnabled = false;
-                } else {
+                } else if (isMicrophone) {
                     it->second.isAudioMuted = true;
                 }
                 coordinator->updateParticipantListAndNotify();
             }
-            emit coordinator->remoteTrackMuted(id, isVideo, true);
+            if (isVideo || isMicrophone)
+                emit coordinator->remoteTrackMuted(id, isVideo, true);
         });
     }
 
@@ -2162,18 +2185,21 @@ public:
         const auto generation = _generation;
         QString id = QString::fromStdString(participant->identity());
         bool isVideo = (publication->track()->kind() == livekit::TrackKind::Video);
-        _uiGate->Post([generation, id, isVideo, muted](MeetingCoordinator* coordinator) {
+        const bool isMicrophone = publication->track()->kind() == livekit::TrackKind::Audio &&
+            IsMicrophoneSource(publication->track()->source());
+        _uiGate->Post([generation, id, isVideo, isMicrophone, muted](MeetingCoordinator* coordinator) {
             if (!coordinator->isCurrentSessionGenerationOnUiThread(generation)) return;
             auto it = coordinator->_participants.find(id);
             if (it != coordinator->_participants.end()) {
                 if (isVideo) {
                     it->second.isVideoEnabled = !muted;
-                } else {
+                } else if (isMicrophone) {
                     it->second.isAudioMuted = muted;
                 }
                 coordinator->updateParticipantListAndNotify();
             }
-            emit coordinator->remoteTrackMuted(id, isVideo, muted);
+            if (isVideo || isMicrophone)
+                emit coordinator->remoteTrackMuted(id, isVideo, muted);
         });
     }
 
@@ -2497,6 +2523,9 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
         info.isLocal = event.participant.is_local;
         info.isHost = identity == _meetingDetail.effectiveHostUserId();
         info.isAudioMuted = info.isLocal ? _audioMuted : true;
+        info.hasScreenShareAudio = false;
+        info.isScreenShareAudioMuted = true;
+        info.isScreenShareAudioStreamPaused = false;
         info.isVideoEnabled = info.isLocal ? _videoEnabled : false;
         info.isSpeaking = event.participant.state.speaking;
         info.audioLevel = event.participant.state.audio_level;
@@ -2507,10 +2536,16 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
         // Local effective state includes device readiness and newer UI intent.
         // An older publication snapshot must not re-enable a failed device.
         for (const auto &publication : event.participant.state.publications) {
-            if (!publication.track) continue;
-            if (!info.isLocal && publication.kind == livekit::TrackKind::Audio) {
-                info.isAudioMuted = publication.muted;
-            } else if (publication.kind == livekit::TrackKind::Video) {
+            if (publication.kind == livekit::TrackKind::Audio) {
+                if (!info.isLocal && IsMicrophoneSource(publication.source))
+                    info.isAudioMuted = info.isAudioMuted && publication.muted;
+                if (publication.source == livekit::TrackSource::ScreenShareAudio) {
+                    info.hasScreenShareAudio = true;
+                    info.isScreenShareAudioMuted = info.isScreenShareAudioMuted && publication.muted;
+                    info.isScreenShareAudioStreamPaused = info.isScreenShareAudioStreamPaused ||
+                        publication.stream_state == livekit::TrackPublication::StreamState::Paused;
+                }
+            } else if (publication.track && publication.kind == livekit::TrackKind::Video) {
                 if (!info.isLocal) info.isVideoEnabled = !publication.muted;
                 const auto participantTracks = _remoteVideoTracks.find(identity);
                 if (participantTracks != _remoteVideoTracks.end()) {
@@ -2540,7 +2575,10 @@ void MeetingCoordinator::applyParticipantEventOnUiThread(
                 identity,
                 static_cast<int>(info.connectionQuality),
                 info.connectionQualityScore);
-        } else if (event.kind == livekit::ParticipantEventKind::TrackMuted) {
+        } else if (event.kind == livekit::ParticipantEventKind::TrackMuted &&
+                   (event.publication.kind == livekit::TrackKind::Video ||
+                    (event.publication.kind == livekit::TrackKind::Audio &&
+                     IsMicrophoneSource(event.publication.source)))) {
             emit remoteTrackMuted(
                 identity,
                 event.publication.kind == livekit::TrackKind::Video,
@@ -2678,6 +2716,7 @@ MeetingCoordinator::MeetingCoordinator(SessionManager &sessionManager,
     (void)SessionShutdownService::Instance();
     qRegisterMetaType<livekit::RoomDisconnectReason>("livekit::RoomDisconnectReason");
     qRegisterMetaType<MeetingRoomInfo>("OpenMeeting::MeetingRoomInfo");
+    qRegisterMetaType<ScreenShareAudioOutputsSnapshot>("OpenMeeting::ScreenShareAudioOutputsSnapshot");
     qRegisterMetaType<livekit::ParticipantPermission>("livekit::ParticipantPermission");
     qRegisterMetaType<std::shared_ptr<livekit::TextStreamReader>>("std::shared_ptr<livekit::TextStreamReader>");
     qRegisterMetaType<std::shared_ptr<livekit::ByteStreamReader>>("std::shared_ptr<livekit::ByteStreamReader>");
@@ -3876,8 +3915,12 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
                             }
                         });
                 });
+            auto shareBackend = livekit::ScreenShareSession::ForRoom(room);
+            shareBackend.dispatch_cleanup = [](std::function<void()> job) {
+                SessionShutdownService::Instance().SubmitCleanup(std::move(job));
+            };
             session->screenShareOnStrand() = std::make_shared<livekit::ScreenShareSession>(
-                session->strand(), livekit::ScreenShareSession::ForRoom(room),
+                session->strand(), std::move(shareBackend),
                 [gate, generation](livekit::ScreenShareSnapshot snapshot) {
                     gate->Post([generation, snapshot](MeetingCoordinator* self) {
                         self->applyScreenShareSnapshotOnUiThread(generation, snapshot);
@@ -3924,12 +3967,13 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
         OpenMeeting::normalizeVideoCodecPreference(
             _mediaPrefs.cameraVideoCodec).toStdString();
     const bool allowInsecureTransport = isDebugHttpTransportEnabled();
+    const auto nativeAudioPreferences = _mediaPrefs;
     const auto encryption = _admissionEncryption;
 
     _sessionOwner->thread = std::thread([gate = _sessionUiGate, ioContext, room = std::move(room), session = std::move(session),
                              audioSource = std::move(audioSource), videoSource = std::move(videoSource),
                              audioMuted, videoEnabled, audioAvailable, videoAvailable,
-                             cameraVideoCodec, allowInsecureTransport, encryption,
+                             cameraVideoCodec, allowInsecureTransport, encryption, nativeAudioPreferences,
                              urlStr, tokenStr, sessionGeneration] {
         const auto opts = ProductionMeetingSignalOptions(
             allowInsecureTransport);
@@ -3939,7 +3983,7 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
                         [gate, room = std::move(room), session = std::move(session),
                          audioSource = std::move(audioSource), videoSource = std::move(videoSource),
                          audioMuted, videoEnabled, audioAvailable, videoAvailable,
-                         cameraVideoCodec, encryption,
+                         cameraVideoCodec, encryption, nativeAudioPreferences,
                          urlStr, tokenStr, opts, sessionGeneration]() mutable -> asio::awaitable<void> {
             MeetingStartupTransaction startup;
             try {
@@ -3994,7 +4038,23 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
                     throw std::runtime_error(QCoreApplication::translate("MeetingUI", "The LiveKit room connected without creating a local participant").toStdString());
                 }
 
+#ifdef _WIN32
                 auto audioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", audioSource);
+#else
+                auto audioTrack = livekit::LocalAudioTrack::createLocalAudioTrack("simple_audio", {});
+                auto& manager = livekit::WebRTCManager::Instance();
+                const auto factory = manager.factory();
+                if (!factory) throw std::runtime_error("native_audio_factory_unavailable");
+                manager.signaling_thread()->BlockingCall([&] {
+                    webrtc::AudioOptions options;
+                    options.echo_cancellation = nativeAudioPreferences.echoCancellation;
+                    options.noise_suppression = nativeAudioPreferences.noiseSuppression;
+                    options.auto_gain_control = nativeAudioPreferences.autoGainControl;
+                    const auto source = factory->CreateAudioSource(options);
+                    audioTrack->set_rtc_track(factory->CreateAudioTrack("simple_audio", source.get()));
+                });
+#endif
+                audioTrack->set_source(livekit::TrackSource::Microphone);
                 audioTrack->set_muted(effectiveAudioMuted || !audioAvailable);
 
                 livekit::VideoPublishOptions vopts;
@@ -4023,9 +4083,12 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
                         audioMuted, videoEnabled, effectiveAudioMuted, effectiveVideoEnabled);
                 });
             } catch (const std::exception &) {
-                const QString err = QString::fromStdString(
+                const QString diagnostic = QString::fromStdString(
                     livekit::secure_log::ExceptionSummary("meeting_startup"));
                 const bool mediaBegan = startup.mediaStartupBegan();
+                const QString err = mediaBegan
+                    ? QCoreApplication::translate("MeetingUI", "Local audio and video could not be started. Please leave the meeting and try joining again.")
+                    : diagnostic;
                 const QString title = mediaBegan
                     ? QCoreApplication::translate("MeetingUI", "Local Media Startup Failed")
                     : QCoreApplication::translate("MeetingUI", "Room Connection Failed");
@@ -4033,7 +4096,7 @@ void MeetingCoordinator::beginRoomSession(const QString &url,
                     startup.completeRollback();
                 }
                 MeetingUI::LogToConsole(MeetingUI::LogCategory::Error, "STARTUP_TRANSACTION",
-                                        QString("%1: %2").arg(title, err));
+                                        QString("%1: %2").arg(title, diagnostic));
                 if (mediaBegan && encryption.mode == livekit::MeetingEncryptionMode::Off) {
                     // 房间本身连接正常，仅本地媒体硬件发布异常：降级为无媒体参会，不强制断开会议
                     gate->Post([sessionGeneration, title, err](MeetingCoordinator* self) {
@@ -4416,7 +4479,7 @@ void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
             const auto runtime = resources->runtime;
             // This wait runs only on the cleanup worker. The I/O executor keeps
             // running and no completion below depends on a Qt callback.
-            auto quiesced = std::make_shared<std::promise<std::unique_ptr<livekit::IDesktopCapture>>>();
+            auto quiesced = std::make_shared<std::promise<livekit::ScreenShareCaptureResources>>();
             auto captureReady = quiesced->get_future();
             asio::post(runtime->strand(), [runtime, quiesced] {
                 try {
@@ -4424,9 +4487,9 @@ void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
                 runtime->remoteControlTimerOnStrand().cancel();
                 if (auto control = std::exchange(runtime->remoteControlOnStrand(), {})) control->stop();
                 runtime->stopVideoDemandOnStrand();
-                std::unique_ptr<livekit::IDesktopCapture> capture;
+                livekit::ScreenShareCaptureResources capture;
                 if (auto share = std::exchange(runtime->screenShareOnStrand(), {}))
-                    capture = share->TakeCaptureForShutdown();
+                    capture = share->TakeCapturesForShutdown();
                 if (auto board = std::exchange(runtime->whiteboardOnStrand(), {})) board->retire();
                 runtime->transfersOnStrand().clear();
                 quiesced->set_value(std::move(capture));
@@ -4434,9 +4497,11 @@ void MeetingCoordinator::stopRoomSession(std::function<void()> completion) {
                     quiesced->set_exception(std::current_exception());
                 }
             });
-            auto screenCapture = captureReady.get();
-            if (screenCapture) screenCapture->Stop();
-            screenCapture.reset();
+            auto captures = captureReady.get();
+            if (captures.desktop) captures.desktop->Stop();
+            if (captures.system_audio) captures.system_audio->Stop();
+            captures.desktop.reset();
+            captures.system_audio.reset();
             if (audioCapture) audioCapture->Stop();
             if (videoCapture) videoCapture->Stop();
             if (resources->room) {
@@ -4492,16 +4557,21 @@ void MeetingCoordinator::requestScreenShareSources() {
         return;
     }
     const auto request = ++_screenSourceRequest;
+    _screenShareAudioOutputs.clear();
     auto session = _sessionRuntime;
     const auto generation = session->generation();
     session->post( [gate = _sessionUiGate, session, generation, request] {
         if (!session->acceptsDataOnStrand()) return;
         std::vector<livekit::DesktopSource> sources;
         try { sources = livekit::EnumerateDesktopSources(); } catch (...) {}
-        gate->Post([generation, request, sources = std::move(sources)](MeetingCoordinator* self) {
-            if (!self->isCurrentSessionGenerationOnUiThread(generation) || request != self->_screenSourceRequest ||
-                self->_state != MeetingState::InMeeting) return;
-            emit self->screenShareSourcesReady(sources);
+        SessionShutdownService::Instance().SubmitCleanup([gate, generation, request, sources = std::move(sources)] {
+            auto outputs = DiscoverScreenShareAudioOutputs();
+            gate->Post([generation, request, sources = std::move(sources), outputs = std::move(outputs)](MeetingCoordinator* self) {
+                if (!self->isCurrentSessionGenerationOnUiThread(generation) || request != self->_screenSourceRequest ||
+                    self->_state != MeetingState::InMeeting) return;
+                self->_screenShareAudioOutputs = std::move(outputs);
+                emit self->screenShareSourcesReady(sources);
+            });
         });
     });
 }
@@ -4512,7 +4582,8 @@ void MeetingCoordinator::startScreenShare(livekit::DesktopSource source, std::op
         fps.value_or(_mediaPrefs.screenShareFps)});
 }
 
-void MeetingCoordinator::startScreenShare(livekit::DesktopSource source, livekit::ScreenShareQuality quality) {
+void MeetingCoordinator::startScreenShare(livekit::DesktopSource source, livekit::ScreenShareQuality quality,
+                                        livekit::ScreenShareAudioOptions audio) {
     if (!quality.valid()) return;
     if (!canStartScreenShare()) return;
     auto session = _sessionRuntime;
@@ -4520,11 +4591,75 @@ void MeetingCoordinator::startScreenShare(livekit::DesktopSource source, livekit
     options.source = livekit::TrackSource::ScreenShareVideo;
     options.video_codec = OpenMeeting::normalizeVideoCodecPreference(
         _mediaPrefs.screenShareVideoCodec).toStdString();
-    session->post( [session, quality, source = std::move(source), options = std::move(options)] {
+    session->post( [session, quality, source = std::move(source), options = std::move(options), audio = std::move(audio)] {
         if (!session->acceptsDataOnStrand()) return;
         if (auto share = session->screenShareOnStrand()) {
-            share->Start(source, options, quality);
+            share->Start(source, options, quality, audio);
         }
+    });
+}
+
+uint64_t MeetingCoordinator::requestScreenShareAudioOutputs(uint64_t expectedRun, uint64_t expectedAudioEpoch) {
+    if (!_sessionRuntime || !isMeetingReady() || !systemAudioSharingAvailable() ||
+        _screenShareSnapshot.state != livekit::ScreenShareState::Active ||
+        _screenShareSnapshot.run_id != expectedRun || _screenShareSnapshot.audio_epoch != expectedAudioEpoch) return 0;
+    const auto request = ++_screenAudioOutputRequest;
+    auto session = _sessionRuntime;
+    const auto generation = session->generation();
+    session->post([gate = _sessionUiGate, session, generation, request, expectedRun, expectedAudioEpoch] {
+        if (!session->acceptsDataOnStrand()) return;
+        const auto share = session->screenShareOnStrand();
+        if (!share) return;
+        const auto current = share->snapshot();
+        if (current.state != livekit::ScreenShareState::Active ||
+            current.run_id != expectedRun || current.audio_epoch != expectedAudioEpoch) return;
+        SessionShutdownService::Instance().SubmitCleanup([gate, generation, request, expectedRun, expectedAudioEpoch] {
+            ScreenShareAudioOutputsSnapshot snapshot;
+            snapshot.request_id = request;
+            snapshot.run_id = expectedRun;
+            snapshot.audio_epoch = expectedAudioEpoch;
+            snapshot.outputs = DiscoverScreenShareAudioOutputs();
+            gate->Post([generation, snapshot = std::move(snapshot)](MeetingCoordinator* self) {
+                if (!self->isCurrentSessionGenerationOnUiThread(generation) ||
+                    snapshot.request_id != self->_screenAudioOutputRequest ||
+                    self->_state != MeetingState::InMeeting ||
+                    self->_screenShareSnapshot.state != livekit::ScreenShareState::Active ||
+                    self->_screenShareSnapshot.run_id != snapshot.run_id ||
+                    self->_screenShareSnapshot.audio_epoch != snapshot.audio_epoch) return;
+                self->_screenShareAudioOutputs = snapshot.outputs;
+                emit self->screenShareAudioOutputsReady(snapshot);
+            });
+        });
+    });
+    return request;
+}
+
+void MeetingCoordinator::startScreenShareAudio(livekit::ScreenShareAudioOptions audio, uint64_t expectedRun,
+                                              std::optional<uint64_t> expectedAudioEpoch) {
+    if (!_sessionRuntime || !isMeetingReady() || !systemAudioSharingAvailable()) return;
+    auto session = _sessionRuntime;
+    session->post([session, audio = std::move(audio), expectedRun, expectedAudioEpoch] {
+        if (!session->acceptsDataOnStrand()) return;
+        if (auto share = session->screenShareOnStrand()) share->StartAudio(audio, expectedRun, expectedAudioEpoch);
+    });
+}
+
+void MeetingCoordinator::setScreenShareAudioMuted(bool muted, uint64_t expectedRun,
+                                                std::optional<uint64_t> expectedAudioEpoch) {
+    if (!_sessionRuntime || _state != MeetingState::InMeeting) return;
+    auto session = _sessionRuntime;
+    session->post([session, muted, expectedRun, expectedAudioEpoch] {
+        if (!session->acceptsDataOnStrand()) return;
+        if (auto share = session->screenShareOnStrand()) share->SetAudioMuted(muted, expectedRun, expectedAudioEpoch);
+    });
+}
+
+void MeetingCoordinator::stopScreenShareAudio(uint64_t expectedRun,
+                                            std::optional<uint64_t> expectedAudioEpoch) {
+    if (!_sessionRuntime || !_sessionRunning) return;
+    auto session = _sessionRuntime;
+    session->post([session, expectedRun, expectedAudioEpoch] {
+        if (auto share = session->screenShareOnStrand()) share->StopAudio(expectedRun, expectedAudioEpoch);
     });
 }
 
@@ -4540,6 +4675,7 @@ void MeetingCoordinator::setScreenShareQuality(livekit::ScreenShareQuality quali
 void MeetingCoordinator::stopScreenShare() {
     stopRemoteControl();
     ++_screenSourceRequest;
+    ++_screenAudioOutputRequest;
     if (!_sessionRuntime || !_sessionRunning) return;
     auto session = _sessionRuntime;
     session->post( [session] {

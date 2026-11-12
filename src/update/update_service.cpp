@@ -5,7 +5,8 @@
 #include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
-#include <QtCore/QProcess>
+#include <QtCore/QSaveFile>
+#include <QtCore/QSysInfo>
 #include <QtCore/QStandardPaths>
 #include <QtCore/QTemporaryDir>
 #include <QtCore/QThread>
@@ -29,12 +30,34 @@
 #include <io.h>
 #include <vector>
 #endif
+#ifdef Q_OS_LINUX
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 namespace Cohavora::Update {
 namespace {
 
 constexpr qint64 FileChunkBytes = 256 * 1024;
 constexpr int MaximumRedirects = 5;
+
+bool LinuxPackagePlatformSupported() {
+#if defined(Q_OS_LINUX) && defined(__x86_64__)
+    return QSysInfo::productType() == QStringLiteral("ubuntu") &&
+        QSysInfo::productVersion() == QStringLiteral("24.04");
+#else
+    return false;
+#endif
+}
+
+bool AllowedRequest(const QUrl &url) {
+#ifdef Q_OS_WIN
+    return IsAllowedUpdateUrl(url);
+#else
+    return IsSecureUrl(url);
+#endif
+}
 
 bool IsRedirect(int status) {
     return status == 301 || status == 302 || status == 303 ||
@@ -111,12 +134,17 @@ std::unique_ptr<QFile> OpenLockedInstaller(const QString &path) {
         return {};
     }
     return file;
-#else
-    const QFileInfo information(path);
-    if (!information.isFile() || information.isSymLink()) return {};
-    auto file = std::make_unique<QFile>(path);
-    if (!file->open(QIODevice::ReadOnly)) return {};
+#elif defined(Q_OS_LINUX)
+    const auto encoded = QFile::encodeName(path);
+    const int descriptor = ::open(encoded.constData(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (descriptor < 0) return {};
+    struct stat status{};
+    if (::fstat(descriptor,&status) != 0 || !S_ISREG(status.st_mode)) { ::close(descriptor); return {}; }
+    auto file = std::make_unique<QFile>();
+    if (!file->open(descriptor,QIODevice::ReadOnly,QFileDevice::AutoCloseHandle)) { ::close(descriptor); return {}; }
     return file;
+#else
+    return {};
 #endif
 }
 
@@ -154,7 +182,9 @@ bool StartVerifiedInstaller(const QString &path, const QString &workingDirectory
     if (request.hProcess) CloseHandle(request.hProcess);
     return started;
 #else
-    return QProcess::startDetached(path, QStringList{}, workingDirectory);
+    Q_UNUSED(path);
+    Q_UNUSED(workingDirectory);
+    return false;
 #endif
 }
 
@@ -193,7 +223,11 @@ UpdateService::~UpdateService() {
 
 Configuration UpdateService::BuildConfiguration() {
     Configuration result;
+#ifdef Q_OS_WIN
     const auto primaryText = QString::fromUtf8(COHAVORA_UPDATE_PRIMARY_URL);
+#else
+    const auto primaryText = QString::fromUtf8(COHAVORA_LINUX_UPDATE_PRIMARY_URL);
+#endif
     result.primaryUrl = QUrl(primaryText);
     if (result.primaryUrl.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) == 0
         && !IsAllowedUpdateUrlText(primaryText)) {
@@ -201,8 +235,13 @@ Configuration UpdateService::BuildConfiguration() {
         // after QUrl has canonicalized escaped characters and padded ports.
         result.primaryUrl = QUrl(QStringLiteral("invalid-update-primary"));
     }
+#ifdef Q_OS_WIN
     result.fallbackUrl = QUrl(QString::fromUtf8(COHAVORA_UPDATE_FALLBACK_URL));
     const auto key = QByteArray(COHAVORA_UPDATE_PUBLIC_KEY_HEX);
+#else
+    result.fallbackUrl = QUrl(QString::fromUtf8(COHAVORA_LINUX_UPDATE_FALLBACK_URL));
+    const auto key = QByteArray(COHAVORA_LINUX_UPDATE_PUBLIC_KEY_HEX);
+#endif
     // QByteArray::fromHex ignores invalid characters, so validate the source first.
     const bool validHex = key.size() == 64 && std::all_of(key.cbegin(), key.cend(), [](char c) {
         return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
@@ -212,12 +251,23 @@ Configuration UpdateService::BuildConfiguration() {
     return result;
 }
 
+bool UpdateService::checksConfigured() const {
+#ifndef Q_OS_WIN
+    if (!LinuxPackagePlatformSupported()) return false;
+#endif
+    return AllowedRequest(configuration_.primaryUrl) && configuration_.publicKey.size() == 32 &&
+        (configuration_.fallbackUrl.isEmpty() || IsSecureUrl(configuration_.fallbackUrl));
+}
+
 bool UpdateService::hasValidConfiguration() {
+#ifndef Q_OS_WIN
+    if (!LinuxPackagePlatformSupported()) { fail(Error::NotConfigured); return false; }
+#endif
     if (configuration_.primaryUrl.isEmpty() || configuration_.publicKey.isEmpty()) {
         fail(Error::NotConfigured);
         return false;
     }
-    if (!IsAllowedUpdateUrl(configuration_.primaryUrl) ||
+    if (!AllowedRequest(configuration_.primaryUrl) ||
         (!configuration_.fallbackUrl.isEmpty() && !IsSecureUrl(configuration_.fallbackUrl)) ||
         configuration_.publicKey.size() != 32 || !IsValidVersion(currentVersion_) ||
         configuration_.requestTimeoutMs <= 0 || configuration_.downloadTimeoutMs <= 0) {
@@ -245,6 +295,15 @@ void UpdateService::stopActiveOperation() {
     }
     file_.reset();
     hash_.reset();
+    exportFile_.reset();
+    exportDirectory_.reset();
+#ifdef Q_OS_LINUX
+    if (exportDirectoryDescriptor_ >= 0) ::close(exportDirectoryDescriptor_);
+    if (exportParentDescriptor_ >= 0) ::close(exportParentDescriptor_);
+#endif
+    exportDirectoryDescriptor_ = -1;
+    exportParentDescriptor_ = -1;
+    exportDirectoryPath_.clear();
 #ifdef Q_OS_WIN
     if (directoryLock_) CloseHandle(directoryLock_);
 #endif
@@ -268,6 +327,7 @@ void UpdateService::check() {
     stopActiveOperation();
     discardDownload();
     release_ = {};
+    exportedPackagePath_.clear();
     if (!hasValidConfiguration()) return;
     sources_ = {configuration_.primaryUrl};
     if (!configuration_.fallbackUrl.isEmpty() && configuration_.fallbackUrl != configuration_.primaryUrl) {
@@ -310,7 +370,11 @@ void UpdateService::download() {
         return;
     }
     installerPath_ = QDir(downloadDirectory_->path()).filePath(
+#ifdef Q_OS_WIN
         QStringLiteral("Cohavora-%1-x64-Setup.exe").arg(release_.version));
+#else
+        QStringLiteral("cohavora_%1_amd64.deb").arg(release_.packageVersion));
+#endif
     sources_ = release_.urls;
     sourceIndex_ = 0;
     operation_ = Operation::Installer;
@@ -335,7 +399,7 @@ void UpdateService::beginDownloadSource() {
 }
 
 void UpdateService::beginRequest(const QUrl &url) {
-    if (!IsAllowedUpdateUrl(url)) {
+    if (!AllowedRequest(url)) {
         retryOrFail(operation_ == Operation::Manifest ? Error::InvalidManifest : Error::Integrity);
         return;
     }
@@ -455,7 +519,7 @@ void UpdateService::finishReply(QNetworkReply *reply, quint64 generation) {
         }
         // A signed HTTP primary may redirect within the allowed Web subtree or
         // to HTTPS. Requests that started on HTTPS never downgrade to HTTP.
-        if (!IsAllowedUpdateUrl(target)
+        if (!AllowedRequest(target)
             || !canonicalWebLocation
             || (IsSecureUrl(reply->url()) && !IsSecureUrl(target))
             || ++redirectCount_ > MaximumRedirects) {
@@ -479,7 +543,11 @@ void UpdateService::finishReply(QNetworkReply *reply, quint64 generation) {
     if (!isCurrent(reply, generation) || reply->bytesAvailable() > 0) return;
 
     if (operation_ == Operation::Manifest) {
+#ifdef Q_OS_WIN
         const auto parsed = ParseManifest(manifestBytes_, configuration_.publicKey);
+#else
+        const auto parsed = ParseLinuxManifest(manifestBytes_, configuration_.publicKey);
+#endif
         if (!parsed) {
             retryOrFail(Error::InvalidManifest);
             return;
@@ -538,14 +606,15 @@ void UpdateService::cancel() {
 
 bool UpdateService::launchInstaller() {
     Q_ASSERT(QThread::currentThread() == thread());
+#ifndef Q_OS_WIN
+    return false;
+#else
     if (state_ != State::Ready || operation_ != Operation::None || installerPath_.isEmpty()) return false;
-#ifdef Q_OS_WIN
     directoryLock_ = LockInstallerDirectory(downloadDirectory_->path());
     if (!directoryLock_) {
         fail(Error::Integrity);
         return false;
     }
-#endif
     file_ = OpenLockedInstaller(installerPath_);
     if (!file_ || file_->size() != release_.size) {
         fail(Error::Integrity);
@@ -559,10 +628,74 @@ bool UpdateService::launchInstaller() {
     setState(State::Verifying);
     QTimer::singleShot(0, this, [this, generation] { verifyInstallerChunk(generation); });
     return true;
+#endif
+}
+
+bool UpdateService::exportPackage(const QString &parentDirectory) {
+    Q_ASSERT(QThread::currentThread() == thread());
+#ifndef Q_OS_LINUX
+    Q_UNUSED(parentDirectory);
+    return false;
+#else
+    if (!checksConfigured() || state_ != State::Ready || operation_ != Operation::None ||
+        release_.artifact != Artifact::Ubuntu2404Amd64Deb) return false;
+    const auto canonicalParent = QFileInfo(parentDirectory).canonicalFilePath();
+    if (!QDir::isAbsolutePath(parentDirectory) || canonicalParent.isEmpty()) {
+        fail(Error::Disk);
+        return false;
+    }
+    exportParentDescriptor_ = ::open(QFile::encodeName(canonicalParent).constData(),
+        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    struct stat parentStatus{};
+    if (exportParentDescriptor_ < 0 || ::fstat(exportParentDescriptor_,&parentStatus) != 0 ||
+        parentStatus.st_uid != ::getuid() || (parentStatus.st_mode & 0022) != 0) {
+        fail(Error::Disk);
+        return false;
+    }
+    file_ = OpenLockedInstaller(installerPath_);
+    if (!file_ || file_->size() != release_.size) { fail(Error::Integrity); return false; }
+    const auto anchoredParent = QStringLiteral("/proc/self/fd/%1").arg(exportParentDescriptor_);
+    exportDirectory_ = std::make_unique<QTemporaryDir>(QDir(anchoredParent).filePath(
+        QStringLiteral("Cohavora-update-%1-XXXXXX").arg(release_.version)));
+    if (!exportDirectory_->isValid() || !MakeDirectoryPrivate(exportDirectory_->path())) {
+        fail(Error::Disk); return false;
+    }
+    exportDirectoryPath_ = QDir(canonicalParent).filePath(QFileInfo(exportDirectory_->path()).fileName());
+    exportDirectoryDescriptor_ = ::open(QFile::encodeName(exportDirectory_->path()).constData(),
+        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (!exportDirectoryMatchesPath()) { fail(Error::Disk); return false; }
+    const auto anchoredDirectory = QStringLiteral("/proc/self/fd/%1").arg(exportDirectoryDescriptor_);
+    exportFile_ = std::make_unique<QSaveFile>(QDir(anchoredDirectory).filePath(
+        QStringLiteral("cohavora_%1_amd64.deb").arg(release_.packageVersion)));
+    exportFile_->setDirectWriteFallback(false);
+    if (!exportFile_->open(QIODevice::WriteOnly) ||
+        !exportFile_->setPermissions(QFileDevice::ReadOwner | QFileDevice::WriteOwner)) {
+        fail(Error::Disk); return false;
+    }
+    hash_ = std::make_unique<QCryptographicHash>(QCryptographicHash::Sha256);
+    receivedBytes_ = 0;
+    operation_ = Operation::Export;
+    const auto generation = generation_;
+    QTimer::singleShot(0,this,[this,generation] { verifyInstallerChunk(generation); });
+    setState(State::Verifying);
+    return true;
+#endif
+}
+
+bool UpdateService::exportDirectoryMatchesPath() const {
+#ifdef Q_OS_LINUX
+    struct stat opened{}, visible{};
+    return exportDirectoryDescriptor_ >= 0 &&
+        ::fstat(exportDirectoryDescriptor_,&opened) == 0 &&
+        ::lstat(QFile::encodeName(exportDirectoryPath_).constData(),&visible) == 0 &&
+        S_ISDIR(visible.st_mode) && opened.st_dev == visible.st_dev && opened.st_ino == visible.st_ino;
+#else
+    return false;
+#endif
 }
 
 void UpdateService::verifyInstallerChunk(quint64 generation) {
-    if (generation != generation_ || operation_ != Operation::Launch || !file_) return;
+    if (generation != generation_ || (operation_ != Operation::Launch && operation_ != Operation::Export) || !file_) return;
     const auto chunk = file_->read(FileChunkBytes);
     if (chunk.isEmpty() && (file_->error() != QFileDevice::NoError || !file_->atEnd())) {
         fail(Error::Disk);
@@ -574,6 +707,9 @@ void UpdateService::verifyInstallerChunk(quint64 generation) {
     }
     receivedBytes_ += chunk.size();
     hash_->addData(chunk);
+    if (operation_ == Operation::Export && (!exportFile_ || exportFile_->write(chunk) != chunk.size())) {
+        fail(Error::Disk); return;
+    }
     if (!file_->atEnd()) {
         QTimer::singleShot(0, this, [this, generation] { verifyInstallerChunk(generation); });
         return;
@@ -581,6 +717,17 @@ void UpdateService::verifyInstallerChunk(quint64 generation) {
     if (receivedBytes_ != release_.size || file_->size() != release_.size ||
         hash_->result() != release_.sha256) {
         fail(Error::Integrity);
+        return;
+    }
+    if (operation_ == Operation::Export) {
+        if (!exportDirectoryMatchesPath()) { fail(Error::Disk); return; }
+        if (!exportFile_->commit()) { fail(Error::Disk); return; }
+        if (!exportDirectoryMatchesPath()) { fail(Error::Disk); return; }
+        exportedPackagePath_ = QDir(exportDirectoryPath_).filePath(QFileInfo(exportFile_->fileName()).fileName());
+        exportDirectory_->setAutoRemove(false);
+        stopActiveOperation();
+        discardDownload();
+        setState(State::Exported);
         return;
     }
     // Keep the Windows read lock until the launch API has started the executable.

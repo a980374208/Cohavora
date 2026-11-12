@@ -626,4 +626,5 @@ ScreenBindingStatus CheckScreenBinding(const ScreenBinding &binding) {
 bool ValidateScreenBinding(const ScreenBinding &binding) {
     return CheckScreenBinding(binding) == ScreenBindingStatus::Valid;
 }
+bool DesktopCaptureSupported() { return true; }
 } // namespace livekit

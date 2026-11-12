@@ -1,4 +1,6 @@
+#if defined(_WIN32)
 #include <winsock2.h>
+#endif
 #include <asio.hpp>
 #include "webrtc_manager.h"
 #include "retained_vp8_decoder.h"
@@ -30,7 +32,11 @@
 #include "modules/video_coding/codecs/av1/libaom_av1_encoder.h"
 #include "modules/video_coding/svc/scalability_mode_util.h"
 #include "media/engine/simulcast_encoder_adapter.h"
+#if defined(_WIN32)
 #include <objbase.h>
+#else
+#include <strings.h>
+#endif
 
 namespace webrtc {
 namespace webrtc_checks_impl {
@@ -41,6 +47,14 @@ namespace webrtc_checks_impl {
 namespace livekit {
 
 namespace {
+
+int CompareCodecName(const char* left, const char* right) {
+#if defined(_WIN32)
+    return _stricmp(left, right);
+#else
+    return strcasecmp(left, right);
+#endif
+}
 
 void EmitRtcLifecycle(diagnostic::RtcStatus status) noexcept {
     diagnostic::Event event;
@@ -68,14 +82,14 @@ public:
         const webrtc::SdpVideoFormat& format,
         std::optional<std::string> scalability_mode) const override {
         CodecSupport support;
-        if (_stricmp(format.name.c_str(), "VP9") == 0) {
+        if (CompareCodecName(format.name.c_str(), "VP9") == 0) {
             if (!format.IsCodecInList(webrtc::SupportedVP9Codecs(false))) return {};
             if (!scalability_mode) return {.is_supported = true};
             const auto mode = webrtc::ScalabilityModeFromString(*scalability_mode);
             return {.is_supported = mode && webrtc::VP9Encoder::SupportsScalabilityMode(*mode)};
         }
-        support.is_supported = _stricmp(format.name.c_str(), "VP8") == 0 ||
-            (_stricmp(format.name.c_str(), "H264") == 0 &&
+        support.is_supported = CompareCodecName(format.name.c_str(), "VP8") == 0 ||
+            (CompareCodecName(format.name.c_str(), "H264") == 0 &&
              webrtc::H264Encoder::IsSupported());
         return support;
     }
@@ -83,15 +97,15 @@ public:
     std::unique_ptr<webrtc::VideoEncoder> Create(
         const webrtc::Environment& env,
         const webrtc::SdpVideoFormat& format) override {
-        if (_stricmp(format.name.c_str(), "VP8") == 0) {
+        if (CompareCodecName(format.name.c_str(), "VP8") == 0) {
             return webrtc::CreateVp8Encoder(env);
         }
-        if (_stricmp(format.name.c_str(), "H264") == 0 &&
+        if (CompareCodecName(format.name.c_str(), "H264") == 0 &&
             webrtc::H264Encoder::IsSupported()) {
             return webrtc::CreateH264Encoder(
                 env, webrtc::H264EncoderSettings::Parse(format));
         }
-        if (_stricmp(format.name.c_str(), "VP9") == 0 &&
+        if (CompareCodecName(format.name.c_str(), "VP9") == 0 &&
             format.IsCodecInList(webrtc::SupportedVP9Codecs(false))) {
             const auto profile = webrtc::ParseSdpForVP9Profile(format.parameters)
                 .value_or(webrtc::VP9Profile::kProfile0);
@@ -175,7 +189,7 @@ private:
     static bool CodecNameEquals(
         const webrtc::SdpVideoFormat& format,
         const char* expected) {
-        return _stricmp(format.name.c_str(), expected) == 0;
+        return CompareCodecName(format.name.c_str(), expected) == 0;
     }
 
     static void AppendFormatsNamed(
@@ -220,18 +234,18 @@ public:
             return decoder;
 #endif
         };
-        if (_stricmp(format.name.c_str(), "VP8") == 0) {
+        if (CompareCodecName(format.name.c_str(), "VP8") == 0) {
             return observed(render::CreateRetainedVp8Decoder(env));
         }
-        if (_stricmp(format.name.c_str(), "VP9") == 0) {
+        if (CompareCodecName(format.name.c_str(), "VP9") == 0) {
             const auto supported_formats = webrtc::SupportedVP9DecoderCodecs();
             if (!format.IsCodecInList(supported_formats)) return nullptr;
             return observed(webrtc::VP9Decoder::Create());
         }
-        if (_stricmp(format.name.c_str(), "H264") == 0) {
+        if (CompareCodecName(format.name.c_str(), "H264") == 0) {
             return observed(webrtc::H264Decoder::Create());
         }
-        if (_stricmp(format.name.c_str(), "AV1") == 0) {
+        if (CompareCodecName(format.name.c_str(), "AV1") == 0) {
             const std::vector<webrtc::SdpVideoFormat> supported{
                 webrtc::SdpVideoFormat::AV1Profile0(),
                 webrtc::SdpVideoFormat::AV1Profile1()};
@@ -377,6 +391,20 @@ public:
     }
 
     int32_t Terminate() override {
+#if !defined(_WIN32)
+        // VoiceEngine terminates whenever the last PeerConnection goes away,
+        // but this ADM belongs to the process-wide factory. The packaged Pulse
+        // backend cannot restart its threads after Terminate/Init (quit_ stays
+        // set). VoiceEngine already stops both streams and unregisters its
+        // transport before this call; retain the idle native device until the
+        // manager releases the factory and performs the final shutdown.
+        return 0;
+#else
+        return inner_ ? inner_->Terminate() : 0;
+#endif
+    }
+
+    int32_t ShutdownNative() {
         return inner_ ? inner_->Terminate() : 0;
     }
 
@@ -384,7 +412,7 @@ public:
         return inner_ ? inner_->Initialized() : true;
     }
 
-    // --- Playout 相关：100% 由原生 Core Audio 处理 ---
+    // Keep native playout and the render-reference callback on both platforms.
     int16_t PlayoutDevices() override {
         return inner_ ? inner_->PlayoutDevices() : 0;
     }
@@ -491,7 +519,9 @@ public:
         return inner_ ? inner_->PlayoutDelay(delayMS) : 0;
     }
 
-    // --- Recording 相关：全部禁用，防止原生录音线程与自定义 WasapiAudioCapture / RtcAudioSource 冲突 ---
+    // Windows uses the application's WASAPI capture. Linux uses the native
+    // PulseAudio/ALSA ADM for microphone capture and audio-track sending.
+#if defined(_WIN32)
     int16_t RecordingDevices() override { return 0; }
     int32_t RecordingDeviceName(uint16_t, char[webrtc::kAdmMaxDeviceNameSize], char[webrtc::kAdmMaxGuidSize]) override { return -1; }
     int32_t SetRecordingDevice(uint16_t) override { return 0; }
@@ -515,6 +545,78 @@ public:
     int32_t StereoRecordingIsAvailable(bool* available) const override { if (available) *available = false; return 0; }
     int32_t SetStereoRecording(bool) override { return 0; }
     int32_t StereoRecording(bool* enabled) const override { if (enabled) *enabled = false; return 0; }
+#else
+    int16_t RecordingDevices() override { return inner_ ? inner_->RecordingDevices() : 0; }
+    int32_t RecordingDeviceName(uint16_t index,
+                                char name[webrtc::kAdmMaxDeviceNameSize],
+                                char guid[webrtc::kAdmMaxGuidSize]) override {
+        return inner_ ? inner_->RecordingDeviceName(index, name, guid) : -1;
+    }
+    int32_t SetRecordingDevice(uint16_t index) override {
+        return inner_ ? inner_->SetRecordingDevice(index) : -1;
+    }
+    int32_t SetRecordingDevice(WindowsDeviceType device) override {
+        return inner_ ? inner_->SetRecordingDevice(device) : -1;
+    }
+    int32_t RecordingIsAvailable(bool* available) override {
+        return inner_ ? inner_->RecordingIsAvailable(available) : -1;
+    }
+    int32_t InitRecording() override {
+        return inner_ ? recording_gate_.InitRecording(*inner_) : -1;
+    }
+    bool RecordingIsInitialized() const override {
+        return inner_ && inner_->RecordingIsInitialized();
+    }
+    int32_t StartRecording() override {
+        return inner_ ? recording_gate_.StartRecording(*inner_) : -1;
+    }
+    int32_t StopRecording() override { return inner_ ? inner_->StopRecording() : -1; }
+    bool Recording() const override { return inner_ && inner_->Recording(); }
+    bool StartNativeRecording() {
+        return inner_ && recording_gate_.StartExplicitly(*inner_);
+    }
+    bool StopNativeRecording() {
+        return !inner_ || recording_gate_.StopExplicitly(*inner_);
+    }
+    void RevokeNativeRecording() { recording_gate_.Revoke(); }
+    int32_t InitMicrophone() override { return inner_ ? inner_->InitMicrophone() : -1; }
+    bool MicrophoneIsInitialized() const override {
+        return inner_ && inner_->MicrophoneIsInitialized();
+    }
+    int32_t MicrophoneVolumeIsAvailable(bool* available) override {
+        return inner_ ? inner_->MicrophoneVolumeIsAvailable(available) : -1;
+    }
+    int32_t SetMicrophoneVolume(uint32_t volume) override {
+        return inner_ ? inner_->SetMicrophoneVolume(volume) : -1;
+    }
+    int32_t MicrophoneVolume(uint32_t* volume) const override {
+        return inner_ ? inner_->MicrophoneVolume(volume) : -1;
+    }
+    int32_t MaxMicrophoneVolume(uint32_t* max_volume) const override {
+        return inner_ ? inner_->MaxMicrophoneVolume(max_volume) : -1;
+    }
+    int32_t MinMicrophoneVolume(uint32_t* min_volume) const override {
+        return inner_ ? inner_->MinMicrophoneVolume(min_volume) : -1;
+    }
+    int32_t MicrophoneMuteIsAvailable(bool* available) override {
+        return inner_ ? inner_->MicrophoneMuteIsAvailable(available) : -1;
+    }
+    int32_t SetMicrophoneMute(bool muted) override {
+        return inner_ ? inner_->SetMicrophoneMute(muted) : -1;
+    }
+    int32_t MicrophoneMute(bool* muted) const override {
+        return inner_ ? inner_->MicrophoneMute(muted) : -1;
+    }
+    int32_t StereoRecordingIsAvailable(bool* available) const override {
+        return inner_ ? inner_->StereoRecordingIsAvailable(available) : -1;
+    }
+    int32_t SetStereoRecording(bool enabled) override {
+        return inner_ ? inner_->SetStereoRecording(enabled) : -1;
+    }
+    int32_t StereoRecording(bool* enabled) const override {
+        return inner_ ? inner_->StereoRecording(enabled) : -1;
+    }
+#endif
 
     bool BuiltInAECIsAvailable() const override { return false; }
     bool BuiltInAGCIsAvailable() const override { return false; }
@@ -526,7 +628,79 @@ public:
 private:
     webrtc::scoped_refptr<webrtc::AudioDeviceModule> inner_;
     std::unique_ptr<detail::PlayoutAudioTransportWrapper> transport_wrapper_;
+#if !defined(_WIN32)
+    detail::NativeRecordingGate recording_gate_;
+#endif
 };
+
+struct EnumeratedAudioDevice {
+    uint16_t index = 0;
+    AudioDeviceInfo info;
+};
+
+#if !defined(_WIN32)
+std::string EncodeAdmDeviceName(const std::string& name) {
+    constexpr char kHex[] = "0123456789abcdef";
+    std::string encoded;
+    encoded.reserve(name.size() * 2);
+    for (unsigned char byte : name) {
+        encoded.push_back(kHex[byte >> 4]);
+        encoded.push_back(kHex[byte & 0x0f]);
+    }
+    return encoded;
+}
+#endif
+
+std::vector<EnumeratedAudioDevice> EnumerateAudioDevices(
+        webrtc::AudioDeviceModule& device, bool recording) {
+    std::vector<EnumeratedAudioDevice> result;
+    const int16_t count = recording ? device.RecordingDevices() : device.PlayoutDevices();
+    for (int16_t index = 0; index < count; ++index) {
+        char name[webrtc::kAdmMaxDeviceNameSize] = {};
+        char guid[webrtc::kAdmMaxGuidSize] = {};
+        const auto status = recording
+            ? device.RecordingDeviceName(static_cast<uint16_t>(index), name, guid)
+            : device.PlayoutDeviceName(static_cast<uint16_t>(index), name, guid);
+        if (status != 0 || !name[0]) continue;
+        AudioDeviceInfo info;
+        info.name = name;
+#if defined(_WIN32)
+        info.id = guid;
+#else
+        // Linux PulseAudio and ALSA return empty GUIDs. Encode raw ADM name
+        // bytes as ASCII so Qt's UTF-8 conversion cannot change the ID.
+        if (index != 0) {
+            info.id = "adm-index:" + std::to_string(index) + ":" +
+                EncodeAdmDeviceName(info.name);
+        }
+#endif
+        result.push_back({static_cast<uint16_t>(index), std::move(info)});
+    }
+    return result;
+}
+
+#if !defined(_WIN32)
+std::optional<uint16_t> FindAudioDeviceIndex(
+        webrtc::AudioDeviceModule& device, bool recording,
+        const std::string& device_id) {
+    for (const auto& entry : EnumerateAudioDevices(device, recording)) {
+        if (entry.info.id == device_id) return entry.index;
+    }
+    return std::nullopt;
+}
+
+std::optional<std::string> AudioDeviceIdentityAtIndex(
+        webrtc::AudioDeviceModule& device, bool recording, uint16_t index) {
+    for (const auto& entry : EnumerateAudioDevices(device, recording)) {
+        if (entry.index == index) {
+            // The public default ID is empty; rollback still needs its name.
+            return "adm-index:" + std::to_string(index) + ":" +
+                EncodeAdmDeviceName(entry.info.name);
+        }
+    }
+    return std::nullopt;
+}
+#endif
 
 } // namespace
 
@@ -544,7 +718,7 @@ bool IsVideoEncoderFormatSupported(
     auto factory = CreateVideoEncoderFactory();
     const auto formats = factory->GetSupportedFormats();
     for (const auto& format : formats) {
-        if (_stricmp(format.name.c_str(), codec_name.c_str()) != 0) continue;
+        if (CompareCodecName(format.name.c_str(), codec_name.c_str()) != 0) continue;
         const auto mode = scalability_mode.empty()
             ? std::optional<std::string>{}
             : std::optional<std::string>{scalability_mode};
@@ -570,7 +744,9 @@ bool WebRTCManager::Initialize() {
     }
 
     // 确保当前线程启用 COM 多线程环境
+#if defined(_WIN32)
     CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+#endif
 
     // 屏蔽 WebRTC 原生日志输出
     webrtc::LogMessage::LogToDebug(webrtc::LS_NONE);
@@ -581,14 +757,24 @@ bool WebRTCManager::Initialize() {
         EmitRtcLifecycle(diagnostic::RtcStatus::SslFailed);
         return false;
     }
+    ssl_initialized_ = true;
 
     network_thread_ = webrtc::Thread::CreateWithSocketServer();
     worker_thread_ = webrtc::Thread::Create();
     signaling_thread_ = webrtc::Thread::Create();
 
-    if (!network_thread_->Start() || !worker_thread_->Start() || !signaling_thread_->Start()) {
+    const bool network_started = network_thread_ && network_thread_->Start();
+    const bool worker_started = network_started && worker_thread_ && worker_thread_->Start();
+    const bool signaling_started = worker_started && signaling_thread_ && signaling_thread_->Start();
+    if (!signaling_started) {
         EmitRtcLifecycle(diagnostic::RtcStatus::ThreadsFailed);
+        if (worker_started) worker_thread_->Stop();
+        if (network_started) network_thread_->Stop();
+        signaling_thread_.reset();
+        worker_thread_.reset();
+        network_thread_.reset();
         webrtc::CleanupSSL();
+        ssl_initialized_ = false;
         return false;
     }
 
@@ -607,12 +793,34 @@ bool WebRTCManager::Initialize() {
         if (raw_adm) {
             adm_ = webrtc::make_ref_counted<PlayoutOnlyAudioDeviceModule>(raw_adm);
             if (adm_) {
-                adm_->Init();
-                // Use the same Windows default playback role as settings and
-                // speaker testing, rather than the separate communications role.
-                if (adm_->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultDevice) != 0) {
+                const bool ready = adm_->Init() == 0;
+#if defined(_WIN32)
+                // Match the Windows default playback role used by settings.
+                const bool playout_selected = ready &&
+                    adm_->SetPlayoutDevice(webrtc::AudioDeviceModule::kDefaultDevice) == 0;
+#else
+                // Linux ADM has no WindowsDeviceType overload. Index zero is
+                // the PulseAudio/ALSA system default for each direction.
+                const bool playout_selected = ready &&
+                    adm_->SetPlayoutDevice(uint16_t{0}) == 0;
+                const bool recording_selected = ready &&
+                    adm_->SetRecordingDevice(uint16_t{0}) == 0;
+                recording_device_index_ = 0;
+                recording_device_identity_ = recording_selected
+                    ? AudioDeviceIdentityAtIndex(*adm_, true, 0) : std::nullopt;
+                recording_device_selected_ = recording_device_identity_.has_value();
+                playout_device_identity_ = playout_selected
+                    ? AudioDeviceIdentityAtIndex(*adm_, false, 0) : std::nullopt;
+#endif
+                if (!playout_selected) {
                     EmitRtcLifecycle(diagnostic::RtcStatus::PlayoutDeviceFailed);
                 }
+#if defined(_WIN32)
+                playout_device_selected_ = playout_selected;
+#else
+                playout_device_selected_ = playout_device_identity_.has_value();
+#endif
+                playout_device_index_ = 0;
             }
         }
     });
@@ -632,7 +840,7 @@ bool WebRTCManager::Initialize() {
 
     if (!factory_) {
         EmitRtcLifecycle(diagnostic::RtcStatus::FactoryFailed);
-        Deinitialize();
+        DeinitializeLocked();
         return false;
     }
 
@@ -646,49 +854,432 @@ bool WebRTCManager::Initialize() {
     return true;
 }
 
+#if !defined(_WIN32)
+bool WebRTCManager::RefreshDefaultPlayoutOnWorker() {
+    if (!playout_device_is_default_) return playout_device_selected_;
+    const auto identity = AudioDeviceIdentityAtIndex(*adm_, false, 0);
+    if (playout_device_selected_ && identity &&
+        identity == playout_device_identity_) return true;
+
+    // Force a real switch when index zero now names a different default.
+    const auto previous = playout_device_selected_
+        ? std::optional<uint16_t>(playout_device_index_) : std::nullopt;
+    const auto result = detail::ApplyPlayoutDeviceWithRollback(
+        *adm_, uint16_t{0}, previous, [this] { ResetApmProcessor(); },
+        [](uint16_t) { return false; });
+    if (!result.applied || !identity ||
+        AudioDeviceIdentityAtIndex(*adm_, false, 0) != identity) {
+        adm_->StopPlayout();
+        playout_device_selected_ = false;
+        playout_device_identity_.reset();
+        return false;
+    }
+    playout_device_index_ = 0;
+    playout_device_identity_ = identity;
+    playout_device_selected_ = true;
+    return true;
+}
+
+bool WebRTCManager::RefreshDefaultRecordingOnWorker() {
+    if (!recording_device_is_default_) return recording_device_selected_;
+    const auto identity = AudioDeviceIdentityAtIndex(*adm_, true, 0);
+    if (recording_device_selected_ && identity &&
+        identity == recording_device_identity_) return true;
+
+    auto* native = static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get());
+    const bool was_recording = recording_device_selected_ && adm_->Recording();
+    const auto fail = [this, native]() {
+        native->RevokeNativeRecording();
+        adm_->StopRecording();
+        recording_device_selected_ = false;
+        recording_device_identity_.reset();
+        return false;
+    };
+    native->RevokeNativeRecording();
+    if ((adm_->Recording() || adm_->RecordingIsInitialized()) &&
+        (adm_->StopRecording() != 0 || adm_->Recording())) return fail();
+    if (!identity || adm_->SetRecordingDevice(uint16_t{0}) != 0 ||
+        AudioDeviceIdentityAtIndex(*adm_, true, 0) != identity) return fail();
+    recording_device_index_ = 0;
+    recording_device_identity_ = identity;
+    recording_device_selected_ = true;
+    if (was_recording && !native->StartNativeRecording()) return fail();
+    if (AudioDeviceIdentityAtIndex(*adm_, true, 0) != identity) return fail();
+    ResetApmProcessor();
+    return true;
+}
+#endif
+
 bool WebRTCManager::SetPlayoutDevice(uint16_t index) {
+#if !defined(_WIN32)
+    std::optional<std::string> device_id;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!adm_ || !worker_thread_) return false;
+        device_id = worker_thread_->BlockingCall([this, index]() -> std::optional<std::string> {
+            for (const auto& device : EnumerateAudioDevices(*adm_, false)) {
+                if (device.index == index) return device.info.id;
+            }
+            return std::nullopt;
+        });
+    }
+    return device_id && SwitchPlayoutDeviceById(*device_id).applied;
+#else
     std::lock_guard<std::mutex> lock(mutex_);
     if (!adm_ || !worker_thread_) return false;
     return worker_thread_->BlockingCall([this, index]() {
         return detail::ApplyPlayoutDevice(*adm_, index, [this] { ResetApmProcessor(); });
     });
+#endif
 }
 
 bool WebRTCManager::SetPlayoutDeviceById(const std::string& device_id) {
+    return SwitchPlayoutDeviceById(device_id).applied;
+}
+
+PlayoutSwitchResult WebRTCManager::SwitchPlayoutDeviceById(
+        const std::string& device_id) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!adm_ || !worker_thread_) return false;
+    if (!adm_ || !worker_thread_) return {};
     // BlockingCall completes before device_id goes out of scope. Keep its
     // closure small and trivially copyable across the packaged WebRTC ABI.
     return worker_thread_->BlockingCall([this, &device_id]() {
-        return detail::SelectPlayoutDeviceById(*adm_, device_id, [this] { ResetApmProcessor(); });
+#if defined(_WIN32)
+        const bool applied = detail::SelectPlayoutDeviceById(
+            *adm_, device_id, [this] { ResetApmProcessor(); });
+        return PlayoutSwitchResult{
+            applied, applied ? PlayoutSelection::Requested : PlayoutSelection::Unknown,
+            adm_->Playing(), adm_->PlayoutIsInitialized()};
+#else
+        if (playout_device_is_default_ &&
+            (playout_device_selected_ || device_id.empty()) &&
+            !RefreshDefaultPlayoutOnWorker()) {
+            if (device_id.empty() || adm_->Playing()) {
+                return PlayoutSwitchResult{false, PlayoutSelection::Unknown,
+                    adm_->Playing(), adm_->PlayoutIsInitialized(),
+                    PlayoutFailureStage::Rollback};
+            }
+        }
+        const auto previous_current = [this]() {
+            return playout_device_selected_ && playout_device_identity_ &&
+                AudioDeviceIdentityAtIndex(*adm_, false, playout_device_index_) ==
+                    playout_device_identity_;
+        };
+        const auto forget_previous = [this]() {
+            playout_device_selected_ = false;
+            playout_device_identity_.reset();
+        };
+        if (playout_device_selected_ && !previous_current()) forget_previous();
+        const auto unresolved = [this, &previous_current]() {
+            if (!playout_device_selected_ &&
+                (adm_->Playing() || adm_->PlayoutIsInitialized()) &&
+                (adm_->StopPlayout() != 0 || adm_->Playing())) {
+                return PlayoutSwitchResult{false, PlayoutSelection::Unknown,
+                    adm_->Playing(), adm_->PlayoutIsInitialized(), PlayoutFailureStage::Stop};
+            }
+            return PlayoutSwitchResult{false, previous_current()
+                ? PlayoutSelection::Previous : PlayoutSelection::Unknown,
+                adm_->Playing(), adm_->PlayoutIsInitialized(), PlayoutFailureStage::Resolve};
+        };
+        const auto index = FindAudioDeviceIndex(*adm_, false, device_id);
+        if (!index) return unresolved();
+        const auto requested_identity = AudioDeviceIdentityAtIndex(*adm_, false, *index);
+        if (!requested_identity ||
+            (!device_id.empty() && *requested_identity != device_id)) {
+            return unresolved();
+        }
+        const auto previous = playout_device_selected_
+            ? std::optional<uint16_t>(playout_device_index_) : std::nullopt;
+        auto result = detail::ApplyPlayoutDeviceWithRollback(
+            *adm_, *index, previous, [this] { ResetApmProcessor(); },
+            [this](uint16_t old_index) {
+                return playout_device_identity_ &&
+                    AudioDeviceIdentityAtIndex(*adm_, false, old_index) ==
+                        playout_device_identity_;
+            });
+        if (result.selection == PlayoutSelection::Requested) {
+            if (AudioDeviceIdentityAtIndex(*adm_, false, *index) == requested_identity) {
+                playout_device_index_ = *index;
+                playout_device_identity_ = requested_identity;
+                playout_device_selected_ = true;
+                playout_device_is_default_ = device_id.empty();
+            } else {
+                adm_->StopPlayout();
+                forget_previous();
+                result = {false, PlayoutSelection::Unknown, adm_->Playing(),
+                          adm_->PlayoutIsInitialized(), PlayoutFailureStage::Rollback};
+            }
+        } else if (result.selection == PlayoutSelection::Previous && !previous_current()) {
+            adm_->StopPlayout();
+            forget_previous();
+            result = {false, PlayoutSelection::Unknown, adm_->Playing(),
+                      adm_->PlayoutIsInitialized(), PlayoutFailureStage::Rollback};
+        } else if (result.selection == PlayoutSelection::Unknown) {
+            adm_->StopPlayout();
+            forget_previous();
+            result.playing = adm_->Playing();
+            result.initialized = adm_->PlayoutIsInitialized();
+        }
+        return result;
+#endif
     });
+}
+
+std::vector<AudioDeviceInfo> WebRTCManager::ListRecordingDevices() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!adm_ || !worker_thread_) return {};
+    return worker_thread_->BlockingCall([this]() {
+        std::vector<AudioDeviceInfo> result;
+        for (auto& entry : EnumerateAudioDevices(*adm_, true)) {
+            result.push_back(std::move(entry.info));
+        }
+        return result;
+    });
+}
+
+std::vector<AudioDeviceInfo> WebRTCManager::ListPlayoutDevices() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!adm_ || !worker_thread_) return {};
+    return worker_thread_->BlockingCall([this]() {
+        std::vector<AudioDeviceInfo> result;
+        for (auto& entry : EnumerateAudioDevices(*adm_, false)) {
+            result.push_back(std::move(entry.info));
+        }
+        return result;
+    });
+}
+
+bool WebRTCManager::SetRecordingDeviceById(const std::string& device_id) {
+#if defined(_WIN32)
+    (void)device_id;
+    return false;
+#else
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!adm_ || !worker_thread_) return false;
+    return worker_thread_->BlockingCall([this, &device_id]() {
+        if (recording_device_is_default_ &&
+            (recording_device_selected_ || device_id.empty()) &&
+            !RefreshDefaultRecordingOnWorker() &&
+            (device_id.empty() || adm_->Recording())) return false;
+        auto* native = static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get());
+        const auto previous_current = [this]() {
+            return recording_device_selected_ && recording_device_identity_ &&
+                AudioDeviceIdentityAtIndex(*adm_, true, recording_device_index_) ==
+                    recording_device_identity_;
+        };
+        const auto fail_closed = [this, native]() {
+            native->RevokeNativeRecording();
+            const bool stopped = (!adm_->Recording() && !adm_->RecordingIsInitialized()) ||
+                (adm_->StopRecording() == 0 && !adm_->Recording());
+            recording_device_selected_ = false;
+            recording_device_identity_.reset();
+            return stopped;
+        };
+        const auto selected = FindAudioDeviceIndex(*adm_, true, device_id);
+        const bool restart_after_stale = recording_device_selected_ &&
+            !previous_current() && adm_->Recording();
+        if (recording_device_selected_ && !previous_current() && !fail_closed()) {
+            return false;
+        }
+        if (!recording_device_selected_ && adm_->Recording() && !fail_closed()) {
+            return false;
+        }
+        if (!selected) return false;
+        const auto requested_identity = AudioDeviceIdentityAtIndex(*adm_, true, *selected);
+        if (!requested_identity ||
+            (!device_id.empty() && *requested_identity != device_id)) {
+            return false;
+        }
+
+        const bool was_initialized = adm_->RecordingIsInitialized();
+        const bool was_recording = adm_->Recording();
+        const auto previous_index = recording_device_index_;
+        const bool had_selection = recording_device_selected_;
+        if (had_selection && *selected == previous_index &&
+            requested_identity == recording_device_identity_) return true;
+        if ((was_initialized || was_recording) && adm_->StopRecording() != 0) {
+            if (!previous_current()) fail_closed();
+            return false;
+        }
+
+        const auto restore_previous = [&]() {
+            if (!had_selection || !previous_current() ||
+                adm_->SetRecordingDevice(previous_index) != 0) {
+                fail_closed();
+                return;
+            }
+            if (was_initialized || was_recording) {
+                if (adm_->InitRecording() != 0 ||
+                    (was_recording &&
+                     (adm_->StartRecording() != 0 || !adm_->Recording()))) {
+                    fail_closed();
+                    return;
+                }
+            }
+            if (!previous_current()) fail_closed();
+        };
+
+        if (adm_->SetRecordingDevice(*selected) != 0) {
+            restore_previous();
+            return false;
+        }
+        if ((was_initialized || was_recording) &&
+            (adm_->InitRecording() != 0 ||
+             (was_recording && (adm_->StartRecording() != 0 || !adm_->Recording())))) {
+            adm_->StopRecording();
+            restore_previous();
+            return false;
+        }
+        if (AudioDeviceIdentityAtIndex(*adm_, true, *selected) != requested_identity) {
+            fail_closed();
+            return false;
+        }
+        recording_device_index_ = *selected;
+        recording_device_identity_ = requested_identity;
+        recording_device_selected_ = true;
+        recording_device_is_default_ = device_id.empty();
+        if (restart_after_stale &&
+            (!native->StartNativeRecording() ||
+             AudioDeviceIdentityAtIndex(*adm_, true, *selected) != requested_identity)) {
+            fail_closed();
+            return false;
+        }
+        ResetApmProcessor();
+        return true;
+    });
+#endif
+}
+
+bool WebRTCManager::EnsureRecording() {
+#if defined(_WIN32)
+    return false;
+#else
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!adm_ || !worker_thread_) return false;
+    return worker_thread_->BlockingCall([this]() {
+        auto* native = static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get());
+        if (recording_device_is_default_ && !RefreshDefaultRecordingOnWorker()) {
+            return false;
+        }
+        if (!recording_device_is_default_ && recording_device_selected_ &&
+            (!recording_device_identity_ ||
+             AudioDeviceIdentityAtIndex(*adm_, true, recording_device_index_) !=
+                 recording_device_identity_)) {
+            native->RevokeNativeRecording();
+            adm_->StopRecording();
+            recording_device_selected_ = false;
+            recording_device_identity_.reset();
+            return false;
+        }
+        if (!recording_device_selected_ && adm_->Recording()) {
+            native->RevokeNativeRecording();
+            adm_->StopRecording();
+            return false;
+        }
+        if (!recording_device_selected_) return false;
+        return native->StartNativeRecording();
+    });
+#endif
+}
+
+bool WebRTCManager::RecordingActive() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!adm_ || !worker_thread_) return false;
+    return worker_thread_->BlockingCall([this]() {
+#if !defined(_WIN32)
+        if (recording_device_is_default_ && recording_device_selected_ &&
+            !RefreshDefaultRecordingOnWorker()) return false;
+        if (!recording_device_is_default_ && recording_device_selected_ &&
+            (!recording_device_identity_ ||
+             AudioDeviceIdentityAtIndex(*adm_, true, recording_device_index_) !=
+                 recording_device_identity_)) {
+            static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get())
+                ->RevokeNativeRecording();
+            adm_->StopRecording();
+            recording_device_selected_ = false;
+            recording_device_identity_.reset();
+            return false;
+        }
+        if (!recording_device_selected_) {
+            if (adm_->Recording()) {
+                static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get())
+                    ->RevokeNativeRecording();
+                adm_->StopRecording();
+            }
+            return false;
+        }
+#endif
+        return adm_->Recording();
+    });
+}
+
+bool WebRTCManager::StopRecording() {
+#if defined(_WIN32)
+    return true;
+#else
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!adm_) return true;
+    if (!worker_thread_) return false;
+    return worker_thread_->BlockingCall([this]() {
+        return static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get())
+            ->StopNativeRecording();
+    });
+#endif
 }
 
 bool WebRTCManager::EnsurePlayout() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!adm_ || !worker_thread_) return false;
     return worker_thread_->BlockingCall([this]() {
-        // adm_ is always our playout-only wrapper. Check before InitPlayout so
-        // a factory-only caller cannot open an unbound playback endpoint.
+#if !defined(_WIN32)
+        if (playout_device_is_default_ && !RefreshDefaultPlayoutOnWorker()) {
+            return false;
+        }
+        if (!playout_device_is_default_ && playout_device_selected_ &&
+            (!playout_device_identity_ ||
+             AudioDeviceIdentityAtIndex(*adm_, false, playout_device_index_) !=
+                 playout_device_identity_)) {
+            adm_->StopPlayout();
+            playout_device_selected_ = false;
+            playout_device_identity_.reset();
+            return false;
+        }
+        if (!playout_device_selected_) {
+            if (adm_->Playing()) adm_->StopPlayout();
+            return false;
+        }
+#endif
+        // The ADM wrapper tracks AudioTransport registration on both platforms.
+        // Keep output closed until a PeerConnection binds that callback.
         const auto* playout = static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get());
         if (!playout->HasAudioCallback()) return false;
         if (adm_->Playing()) return true;
-        if (!adm_->PlayoutIsInitialized()
-                && (adm_->InitSpeaker() != 0 || adm_->InitPlayout() != 0)) return false;
+        if (!adm_->PlayoutIsInitialized()) {
+#if defined(_WIN32)
+            if (adm_->InitSpeaker() != 0) return false;
+#endif
+            if (adm_->InitPlayout() != 0) return false;
+        }
         return adm_->StartPlayout() == 0 && adm_->Playing();
     });
 }
 
 void WebRTCManager::Deinitialize() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!initialized_) {
-        return;
-    }
+    DeinitializeLocked();
+}
+
+void WebRTCManager::DeinitializeLocked() {
+    if (!ssl_initialized_ && !initialized_) return;
 
     // Stop native callbacks before destroying the VoiceEngine/AudioTransport.
     if (adm_) {
         if (worker_thread_) {
             worker_thread_->BlockingCall([this]() {
+#if !defined(_WIN32)
+                static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get())
+                    ->RevokeNativeRecording();
+#endif
                 if (adm_->Playing()) {
                     adm_->StopPlayout();
                 }
@@ -697,6 +1288,10 @@ void WebRTCManager::Deinitialize() {
                 }
             });
         } else {
+#if !defined(_WIN32)
+            static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get())
+                ->RevokeNativeRecording();
+#endif
             if (adm_->Playing()) {
                 adm_->StopPlayout();
             }
@@ -712,12 +1307,14 @@ void WebRTCManager::Deinitialize() {
         if (worker_thread_) {
             worker_thread_->BlockingCall([this]() {
                 adm_->RegisterAudioCallback(nullptr);
-                adm_->Terminate();
+                static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get())
+                    ->ShutdownNative();
                 adm_ = nullptr;
             });
         } else {
             adm_->RegisterAudioCallback(nullptr);
-            adm_->Terminate();
+            static_cast<PlayoutOnlyAudioDeviceModule*>(adm_.get())
+                ->ShutdownNative();
             adm_ = nullptr;
         }
     }
@@ -745,8 +1342,19 @@ void WebRTCManager::Deinitialize() {
         network_thread_.reset();
     }
 
-    webrtc::CleanupSSL();
+    if (ssl_initialized_) webrtc::CleanupSSL();
+    ssl_initialized_ = false;
     initialized_ = false;
+    playout_device_selected_ = false;
+    playout_device_index_ = 0;
+    recording_device_selected_ = false;
+    recording_device_index_ = 0;
+#if !defined(_WIN32)
+    playout_device_identity_.reset();
+    recording_device_identity_.reset();
+    playout_device_is_default_ = true;
+    recording_device_is_default_ = true;
+#endif
     EmitRtcLifecycle(diagnostic::RtcStatus::Stopped);
 }
 

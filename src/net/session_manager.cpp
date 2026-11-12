@@ -8,6 +8,7 @@
 #include <QtCore/QDebug>
 #include <QtCore/QPointer>
 #include <QtCore/QThread>
+#include <QtCore/QTimer>
 #include <algorithm>
 #include <array>
 #include <stdexcept>
@@ -24,7 +25,7 @@ constexpr auto kScreenShareE2ee = "security/screenShareE2ee";
 constexpr auto kMeetingDetailsE2ee = "security/meetingDetailsE2ee";
 constexpr auto kAllMeetingsE2ee = "security/allMeetingsE2ee";
 constexpr int kCurrentSettingsMigrationVersion = 1;
-constexpr std::array<const char *, 27> kMigratedSettingsKeys = {
+constexpr auto kMigratedSettingsKeys = std::to_array<const char *>({
     "network/serverBaseUrl",
     "media/enableMicrophone",
     "media/enableSpeaker",
@@ -50,9 +51,11 @@ constexpr std::array<const char *, 27> kMigratedSettingsKeys = {
     "general/showActiveSpeaker",
     "general/stayInMeetingWhenLocked",
     "auth/account",
+#if !defined(__linux__)
     "auth/protectedSessionV2",
     "auth/restoreDisabled",
-};
+#endif
+});
 constexpr std::array<const char *, 5> kLegacyCredentialKeys = {
     "auth/protectedSessionV2",
     "auth/restoreDisabled",
@@ -62,10 +65,18 @@ constexpr std::array<const char *, 5> kLegacyCredentialKeys = {
 };
 
 bool clearLegacyCredentials(QSettings &legacy) {
+#if defined(__linux__)
+    // Secret Service imports only cleanup references into its own sidecar.
+    // Do not dirty the shared legacy file: implicit/destructor sync could
+    // block Qt on a foreign QSettings lock, and migration cannot claim erase.
+    Q_UNUSED(legacy);
+    return true;
+#else
     for (const auto *key : kLegacyCredentialKeys) legacy.remove(key);
     legacy.remove(QStringLiteral("user"));
     legacy.sync();
     return legacy.status() == QSettings::NoError;
+#endif
 }
 
 std::unique_ptr<QSettings> makeApplicationSettings() {
@@ -95,6 +106,21 @@ SettingsMigrationSelection migrateCohavoraSettings(
     }
     current->setFallbacksEnabled(false);
     legacy->setFallbacksEnabled(false);
+#if defined(__linux__)
+    QVariantMap metadata;
+    constexpr auto cleanupKeys = std::to_array<const char *>({
+        "auth/keyringV2/creating", "auth/keyringV2/pending", "auth/keyringV2/journal",
+        "auth/keyringV2/revision", "auth/keyringV2/transaction", "auth/keyringV2/active",
+        "auth/keyringV2/service", "auth/keyringV2/account"});
+    for (const auto *key : cleanupKeys) if (legacy->contains(key)) metadata.insert(QString::fromLatin1(key), legacy->value(key));
+    metadata.insert(QStringLiteral("source_path"), legacy->fileName());
+    metadata.insert(QStringLiteral("has_legacy_secret_fields"),
+        legacy->contains("auth/password") || legacy->contains("auth/protectedSessionV2") ||
+        legacy->contains("auth/rememberPassword") || legacy->contains("auth/autoLogin") || legacy->contains("user/token"));
+    // QObject property only: never setValue(), never copy secrets, never write
+    // credential/tombstone metadata into either shared QSettings namespace.
+    current->setProperty("cohavoraLegacyKeyringMetadata", metadata);
+#endif
     current->sync();
     legacy->sync();
 
@@ -166,7 +192,11 @@ SessionManager &SessionManager::instance() {
     return inst;
 }
 
-SessionManager::~SessionManager() = default;
+SessionManager::~SessionManager() {
+    // main drains shutdownCredentialsAsync while its Qt dispatcher is alive.
+    // No late credential result may project into an owner being destroyed.
+    invalidateCredentialOperation();
+}
 
 OpenMeetingHttpClient &SessionManager::httpClient() {
     return *_client;
@@ -177,7 +207,7 @@ bool SessionManager::isLoggedIn() const {
 }
 
 bool SessionManager::canPersistSession() const {
-    return serviceAllowsCredentialPersistence(_serverBaseUrl);
+    return credentialPersistenceSupported() && serviceAllowsCredentialPersistence(_serverBaseUrl);
 }
 
 bool SessionManager::isDebugHttp() const {
@@ -348,6 +378,7 @@ bool SessionManager::setRegistrationServerBaseUrl(const QString &url) {
 }
 
 bool SessionManager::setServerBaseUrl(const QString &url) {
+    if (_credentialShutdown) return false;
     const auto policy = evaluateServiceEndpoint(url);
     if (!policy.requestAllowed()) return false;
     const auto &service = policy.canonicalUrl;
@@ -364,6 +395,7 @@ bool SessionManager::setServerBaseUrl(const QString &url) {
 void SessionManager::resetAuthentication() {
     Q_ASSERT(QThread::currentThread() == thread());
     ++_authGeneration;
+    invalidateCredentialOperation();
     _loginPending = false;
     _currentUser = {};
     const bool clearedMeetingKey = static_cast<bool>(_meetingEncryptionKey);
@@ -375,6 +407,7 @@ void SessionManager::resetAuthentication() {
     if (clearedMeetingKey && self && self->_authGeneration == generation) {
         emit meetingSecurityPreferencesChanged();
     }
+    if (self && self->_authGeneration == generation) emit persistenceStateChanged();
 }
 
 void SessionManager::cancelPendingLogin() {
@@ -382,12 +415,17 @@ void SessionManager::cancelPendingLogin() {
 }
 
 bool SessionManager::forgetSavedSession() {
+#if defined(__linux__)
+    forgetSavedSessionAsync();
+    return false; // The deletion has not completed synchronously.
+#else
     if (_loginPending) resetAuthentication();
     _savedSession.reset();
     _rememberSession = false;
     _autoLogin = false;
     _credentialStatus = _credentials->clear();
     return _credentialStatus == CredentialStatus::Empty;
+#endif
 }
 
 bool SessionManager::announceLogin(quint64 generation) {
@@ -400,6 +438,12 @@ bool SessionManager::announceLogin(quint64 generation) {
 }
 
 bool SessionManager::resumeSavedSession(bool automatic, std::optional<bool> autoLoginChoice) {
+    if (_credentialShutdown) return false;
+#if defined(__linux__)
+    Q_UNUSED(automatic);
+    Q_UNUSED(autoLoginChoice);
+    return false; // Callers must wait for resumeSavedSessionAsync's actual result.
+#else
     if (!canPersistSession() || !_savedSession || (automatic && !_autoLogin) || _loginPending) return false;
     // Recheck the tombstone and binding at activation, not just at startup.
     auto loaded = _credentials->load(_serverBaseUrl, _savedAccount);
@@ -427,6 +471,235 @@ bool SessionManager::resumeSavedSession(bool automatic, std::optional<bool> auto
     }
     httpClient().setCurrentUser(_currentUser);
     return announceLogin(_authGeneration);
+#endif
+}
+
+void SessionManager::invalidateCredentialOperation() {
+    Q_ASSERT(QThread::currentThread() == thread());
+    ++_credentialGeneration;
+    const auto request = std::exchange(_credentialRequest, 0);
+    _credentialPending = false;
+    _savedSessionRetryAvailable = false;
+    if (request && _credentials) _credentials->cancel(request);
+}
+
+void SessionManager::restoreSavedSessionAsync(std::function<void()> completion) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (_credentialShutdown || _loginPending || isLoggedIn()) {
+        QTimer::singleShot(0, this, [completion = std::move(completion)] { if (completion) completion(); });
+        return;
+    }
+    invalidateCredentialOperation();
+    const auto credential = _credentialGeneration;
+    const auto authentication = _authGeneration;
+    const auto service = _serverBaseUrl;
+    const auto account = _savedAccount;
+    _credentialRestoreComplete = false;
+    _credentialPending = true;
+    _savedSession.reset();
+    _rememberSession = _autoLogin = false;
+    const QPointer<SessionManager> self(this);
+    auto finished = [self, credential, authentication, service, account,
+                     completion = std::move(completion)](CredentialLoadResult loaded) mutable {
+        if (!self || self->_credentialShutdown || self->_credentialGeneration != credential ||
+            self->_authGeneration != authentication || self->_serverBaseUrl != service ||
+            self->_savedAccount != account) return;
+        self->_credentialRequest = 0;
+        self->_credentialPending = false;
+        self->_credentialRestoreComplete = true;
+        self->_credentialStatus = loaded.status;
+        if (loaded.status == CredentialStatus::Ready && loaded.session.service == service &&
+            loaded.session.account == account && !loaded.session.user.token.isEmpty() &&
+            !loaded.session.user.userId.isEmpty()) {
+            self->_savedSession = std::move(loaded.session);
+            self->_rememberSession = true;
+            self->_autoLogin = self->_savedSession->autoLogin;
+        } else {
+            // These load terminals follow a matching active local reference.
+            // They permit another explicit attempt, never token activation or
+            // an inference about the unread auto-login choice.
+            self->_savedSessionRetryAvailable = loaded.status == CredentialStatus::Locked ||
+                loaded.status == CredentialStatus::Denied;
+            if (loaded.status == CredentialStatus::Ready)
+                self->_credentialStatus = CredentialStatus::InvalidRecord;
+        }
+        emit self->persistenceStateChanged();
+        if (self && self->_credentialGeneration == credential && self->_authGeneration == authentication && completion)
+            completion();
+    };
+    if (!canPersistSession()) {
+        QTimer::singleShot(0, this, [finished = std::move(finished)]() mutable { finished({}); });
+    } else {
+        _credentialRequest = _credentials->loadAsync(service, account,
+            CredentialStore::Interaction::Background, this, std::move(finished));
+    }
+    emit persistenceStateChanged();
+}
+
+void SessionManager::resumeSavedSessionAsync(bool automatic, std::optional<bool> autoLoginChoice,
+                                            std::function<void(bool)> completion) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (_credentialShutdown || !canPersistSession() || !canResumeSavedSession() ||
+        (automatic && (!_savedSession || !_autoLogin)) || _loginPending || _credentialPending) {
+        QTimer::singleShot(0, this, [completion = std::move(completion)] { if (completion) completion(false); });
+        return;
+    }
+    resetAuthentication();
+    const auto credential = _credentialGeneration;
+    const auto authentication = _authGeneration;
+    const auto service = _serverBaseUrl;
+    const auto account = _savedAccount;
+    _credentialPending = true;
+    _loginPending = true;
+    const QPointer<SessionManager> self(this);
+    _credentialRequest = _credentials->loadAsync(service, account,
+        automatic ? CredentialStore::Interaction::Background : CredentialStore::Interaction::UserInitiated,
+        this, [self, credential, authentication, service, account, automatic, autoLoginChoice,
+               completion = std::move(completion)](CredentialLoadResult loaded) mutable {
+            if (!self || self->_credentialShutdown || self->_credentialGeneration != credential ||
+                self->_authGeneration != authentication || self->_serverBaseUrl != service ||
+                self->_savedAccount != account || !self->_loginPending) return;
+            self->_credentialRequest = 0;
+            self->_credentialPending = false;
+            self->_credentialStatus = loaded.status;
+            const bool valid = loaded.status == CredentialStatus::Ready && loaded.session.service == service &&
+                loaded.session.account == account && !loaded.session.user.token.isEmpty() &&
+                !loaded.session.user.userId.isEmpty() && (!automatic || loaded.session.autoLogin);
+            if (!valid) {
+                self->_loginPending = false;
+                if (loaded.status == CredentialStatus::Ready && (!automatic || loaded.session.autoLogin))
+                    self->_credentialStatus = CredentialStatus::InvalidRecord;
+                self->_savedSession.reset();
+                self->_savedSessionRetryAvailable = loaded.status == CredentialStatus::Locked ||
+                    loaded.status == CredentialStatus::Denied;
+                self->_rememberSession = self->_autoLogin = false;
+                emit self->persistenceStateChanged();
+                if (self && self->_credentialGeneration == credential && self->_authGeneration == authentication && completion)
+                    completion(false);
+                return;
+            }
+            // The backend just rechecked tombstone/binding/revision. Activate
+            // on this same Qt completion, with no intervening queued hop.
+            self->_sessionInvalidating = false;
+            self->_savedSession = std::move(loaded.session);
+            self->_currentUser = self->_savedSession->user;
+            self->_rememberSession = true;
+            self->_autoLogin = self->_savedSession->autoLogin;
+            self->httpClient().setCurrentUser(self->_currentUser);
+            const bool changedChoice = autoLoginChoice && *autoLoginChoice != self->_autoLogin;
+            auto replacement = *self->_savedSession;
+            if (changedChoice) replacement.autoLogin = *autoLoginChoice;
+            emit self->persistenceStateChanged();
+            if (!self || self->_credentialGeneration != credential || self->_authGeneration != authentication) return;
+            const bool committed = self->announceLogin(authentication);
+            if (!self || self->_authGeneration != authentication) return;
+            if (committed && changedChoice) {
+                self->persistSessionAsync(std::move(replacement), authentication,
+                    [self, authentication, completion = std::move(completion)](bool) mutable {
+                        if (!self || self->_authGeneration != authentication || !self->_loginPending) return;
+                        self->_loginPending = false;
+                        // Save failure keeps the authenticated identity. The
+                        // dialog reads the terminal persistence warning.
+                        if (completion) completion(true);
+                    });
+            } else {
+                self->_loginPending = false;
+                if (completion) completion(committed);
+            }
+        });
+    emit persistenceStateChanged();
+}
+
+void SessionManager::persistSessionAsync(StoredSession record, quint64 authentication,
+                                        std::function<void(bool)> completion) {
+    if (_credentialShutdown || _authGeneration != authentication || !canPersistSession()) {
+        if (completion) completion(false);
+        return;
+    }
+    invalidateCredentialOperation();
+    const auto credential = _credentialGeneration;
+    _credentialPending = true;
+    const auto service = _serverBaseUrl;
+    const auto account = _savedAccount;
+    const QPointer<SessionManager> self(this);
+    // Keep a separate value for the callback: argument evaluation order must
+    // not move this token-bearing record before it is passed to the backend.
+    const auto resultRecord = record;
+    _credentialRequest = _credentials->saveAsync(std::move(record), CredentialStore::Interaction::UserInitiated,
+        this, [self, credential, authentication, service, account, resultRecord,
+               completion = std::move(completion)](CredentialStatus status) mutable {
+            if (!self || self->_credentialShutdown || self->_credentialGeneration != credential ||
+                self->_authGeneration != authentication || self->_serverBaseUrl != service ||
+                self->_savedAccount != account) return;
+            self->_credentialRequest = 0;
+            self->_credentialPending = false;
+            self->_credentialStatus = status;
+            if (status == CredentialStatus::Ready) {
+                self->_savedSession = resultRecord;
+                self->_rememberSession = true;
+                self->_autoLogin = resultRecord.autoLogin;
+            } else {
+                self->_savedSession.reset();
+                self->_rememberSession = self->_autoLogin = false;
+            }
+            emit self->persistenceStateChanged();
+            if (self && self->_credentialGeneration == credential && self->_authGeneration == authentication && completion)
+                completion(status == CredentialStatus::Ready);
+        });
+    emit persistenceStateChanged();
+}
+
+void SessionManager::forgetSavedSessionAsync(std::function<void(bool)> completion) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (_loginPending) resetAuthentication();
+    else invalidateCredentialOperation();
+    const auto credential = _credentialGeneration;
+    const auto authentication = _authGeneration;
+    _savedSession.reset();
+    _rememberSession = _autoLogin = false;
+    _credentialRestoreComplete = true;
+    _credentialPending = !_credentialShutdown;
+    const QPointer<SessionManager> self(this);
+    if (_credentialShutdown) {
+        _credentialStatus = CredentialStatus::Cancelled;
+        QTimer::singleShot(0, this, [completion = std::move(completion)] { if (completion) completion(false); });
+    } else {
+        // clearAsync commits the tombstone before returning. A subsequent
+        // logout/endpoint switch cannot resurrect an in-flight saved token.
+        _credentialRequest = _credentials->clearAsync(this,
+            [self, credential, authentication, completion = std::move(completion)](CredentialStatus status) mutable {
+                if (!self || self->_credentialShutdown || self->_credentialGeneration != credential ||
+                    self->_authGeneration != authentication) return;
+                self->_credentialRequest = 0;
+                self->_credentialPending = false;
+                self->_credentialStatus = status;
+                emit self->persistenceStateChanged();
+                if (self && self->_credentialGeneration == credential && self->_authGeneration == authentication && completion)
+                    completion(status == CredentialStatus::Empty);
+            });
+    }
+    emit persistenceStateChanged();
+}
+
+void SessionManager::shutdownCredentialsAsync(std::function<void()> completion) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    if (_credentialShutdownComplete) {
+        QTimer::singleShot(0, this, [completion = std::move(completion)] { if (completion) completion(); });
+        return;
+    }
+    if (completion) _credentialShutdownWaiters.push_back(std::move(completion));
+    if (_credentialShutdown) return;
+    _credentialShutdown = true;
+    resetAuthentication();
+    const QPointer<SessionManager> self(this);
+    _credentials->shutdownAsync(this, [self] {
+        if (!self) return;
+        self->_credentialShutdownComplete = true;
+        auto waiters = std::move(self->_credentialShutdownWaiters);
+        emit self->persistenceStateChanged();
+        for (auto &waiter : waiters) if (waiter) waiter();
+    });
+    emit persistenceStateChanged();
 }
 
 void SessionManager::loginWithPassword(const QString &account,
@@ -434,6 +707,10 @@ void SessionManager::loginWithPassword(const QString &account,
                                        bool remember,
                                        bool autoLogin,
                                        std::function<void(bool success, const QString &errMsg)> callback) {
+    if (_credentialShutdown) {
+        if (callback) callback(false, QCoreApplication::translate("MeetingUI", "The application is closing."));
+        return;
+    }
     const auto validation = validateAccountCredentials(account, password);
     if (validation != CredentialValidationError::None) {
         if (callback) callback(false, credentialValidationMessage(validation));
@@ -448,7 +725,8 @@ void SessionManager::loginWithPassword(const QString &account,
         if (callback) callback(false, serviceEndpointErrorMessage(endpoint.status));
         return;
     }
-    const bool persist = remember && serviceAllowsCredentialPersistence(service);
+    const bool persist = remember && credentialPersistenceSupported() &&
+        serviceAllowsCredentialPersistence(service);
     const bool persistAutomatically = persist && autoLogin;
     _loginPending = true;
     const QPointer<SessionManager> self(this);
@@ -463,8 +741,8 @@ void SessionManager::loginWithPassword(const QString &account,
                 if (callback) callback(false, superseded);
                 return;
             }
-            self->_loginPending = false;
             if (!ok || info.token.isEmpty() || info.userId.isEmpty()) {
+                self->_loginPending = false;
                 if (callback) callback(false, ok ? QCoreApplication::translate("MeetingUI", "The sign-in response is missing required credentials.") : err.message);
                 return;
             }
@@ -472,6 +750,27 @@ void SessionManager::loginWithPassword(const QString &account,
             self->_currentUser = info;
             self->_savedAccount = account;
             self->saveToSettings();
+#if defined(__linux__)
+            if (persist) {
+                // The identity is usable while the keyring request is pending,
+                // but keep this login transaction open until its save result.
+                // The dialog must still exist to show a persistence failure.
+                self->httpClient().setCurrentUser(info);
+                if (!self->announceLogin(generation)) {
+                    if (callback) callback(false, superseded);
+                    return;
+                }
+                self->persistSessionAsync(
+                    StoredSession{service, account, info, persistAutomatically}, generation,
+                    [self, generation, service, callback](bool saved) {
+                        if (!self || self->_authGeneration != generation ||
+                            self->_serverBaseUrl != service || !self->_loginPending) return;
+                        self->_loginPending = false;
+                        if (callback) callback(true, saved ? QString() : self->persistenceMessage());
+                    });
+                return;
+            }
+#else
             if (persist) {
                 StoredSession record{service, account, info, persistAutomatically};
                 self->_credentialStatus = self->_credentials->save(record);
@@ -481,6 +780,12 @@ void SessionManager::loginWithPassword(const QString &account,
                     self->_autoLogin = persistAutomatically;
                 }
             }
+#endif
+            if (!self || self->_authGeneration != generation || !self->_loginPending) {
+                if (callback) callback(false, superseded);
+                return;
+            }
+            self->_loginPending = false;
             self->httpClient().setCurrentUser(info);
             const bool committed = self->announceLogin(generation);
             if (callback) callback(committed, committed ? QString() : superseded);
@@ -501,6 +806,7 @@ void SessionManager::registerUser(const QString &account,
 }
 
 void SessionManager::loginAsGuest(const QString &nickname, const QString &customUserId) {
+    if (_credentialShutdown) return;
     resetAuthentication();
     forgetSavedSession();
     _sessionInvalidating = false;
@@ -634,6 +940,12 @@ void SessionManager::loadFromSettings() {
 
     httpClient().setBaseUrl(_serverBaseUrl);
     resetAuthentication();
+#if defined(__linux__)
+    _credentialRestoreComplete = false;
+    _savedSession.reset();
+    _rememberSession = _autoLogin = false;
+    _credentialStatus = CredentialStatus::Empty;
+#else
     if (canPersistSession()) {
         auto loaded = _credentials->load(_serverBaseUrl, _savedAccount);
         _credentialStatus = loaded.status;
@@ -645,6 +957,8 @@ void SessionManager::loadFromSettings() {
     } else {
         _credentialStatus = CredentialStatus::Empty;
     }
+    _credentialRestoreComplete = true;
+#endif
     if (!recognizedEndpoint) {
         _settings->setValue("network/serverBaseUrl", QString());
         _settings->sync();

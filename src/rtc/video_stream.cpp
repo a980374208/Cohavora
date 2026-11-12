@@ -9,6 +9,10 @@ VideoStream::~VideoStream() {
     close();
 }
 
+std::shared_ptr<VideoStream> VideoStream::fromTrack(const std::shared_ptr<Track>& track) {
+    return fromTrack(track, Options{});
+}
+
 std::shared_ptr<VideoStream> VideoStream::fromTrack(const std::shared_ptr<Track>& track, const Options& options) {
     auto stream = std::make_shared<VideoStream>(options);
     if (track) {

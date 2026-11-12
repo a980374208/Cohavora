@@ -46,6 +46,7 @@ private:
     struct Scene;
     struct Worker;
     QWindow* windowSurface() const;
+    void syncSurfaceGeometry();
     void startWorker();
     void pollWorker();
     void fail(RenderGpuFailure);
@@ -62,6 +63,7 @@ private:
     uint64_t next_resource_ = 1, presented_ = 0, submitted_ = 0;
     bool initialized_ = false, failed_ = false;
     bool waiting_for_worker_slot_ = false;
+    const bool wayland_surface_;
     QString failure_reason_, driver_description_;
 };
 }

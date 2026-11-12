@@ -1,6 +1,6 @@
 #include "annotation_overlay_window.h"
 
-#include "src/platform/win/annotation_window_support.h"
+#include "src/platform/annotation_window_support.h"
 #include "src/ui/app_theme.h"
 
 #include <QtCore/QSaveFile>

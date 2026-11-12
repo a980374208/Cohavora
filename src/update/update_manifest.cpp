@@ -73,13 +73,27 @@ std::optional<std::array<int, 3>> ParseVersion(const QString &version) {
     return parts;
 }
 
+bool IsLinuxPackageVersion(const QJsonValue &value, const QString &version) {
+    if (!value.isString()) return false;
+    const auto packageVersion = value.toString();
+    const auto prefix = version + QLatin1Char('-');
+    if (!packageVersion.startsWith(prefix) || packageVersion.size() == prefix.size()) return false;
+    const auto first = packageVersion[prefix.size()].unicode();
+    if (first < '1' || first > '9') return false;
+    for (int at = prefix.size() + 1; at < packageVersion.size(); ++at) {
+        const auto character = packageVersion[at].unicode();
+        if (character < '0' || character > '9') return false;
+    }
+    return true;
+}
+
 // Qt's DOM parser keeps the last duplicate object member. Walk its already
 // validated input as well, comparing decoded keys so "version" and an escaped
 // spelling cannot give a signed document two different interpretations.
 class UniqueJsonKeys final {
 public:
-    explicit UniqueJsonKeys(const QByteArray &input, bool payload)
-        : input_(input), payload_(payload) {}
+    explicit UniqueJsonKeys(const QByteArray &input, bool payload, bool linuxPackage)
+        : input_(input), payload_(payload), linuxPackage_(linuxPackage) {}
 
     bool Check() {
         if (!ReadValue(0, ObjectContext::Root)) return false;
@@ -178,7 +192,7 @@ private:
                     && ((context == ObjectContext::Root && key == QStringLiteral("schema"))
                         || (context == ObjectContext::Installer && key == QStringLiteral("size")));
                 const auto childContext = payload_ && context == ObjectContext::Root
-                    && key == QStringLiteral("windows-x64")
+                    && key == (linuxPackage_ ? QStringLiteral("linux-amd64-deb") : QStringLiteral("windows-x64"))
                     ? ObjectContext::Installer : ObjectContext::Other;
                 if (!Take(':') || !ReadValue(depth + 1, childContext, integer)) return false;
                 SkipSpace();
@@ -226,17 +240,18 @@ private:
 
     const QByteArray &input_;
     bool payload_ = false;
+    bool linuxPackage_ = false;
     int offset_ = 0;
 };
 
-std::optional<QJsonObject> ReadObject(const QByteArray &bytes, bool payload = false) {
+std::optional<QJsonObject> ReadObject(const QByteArray &bytes, bool payload = false, bool linuxPackage = false) {
     // Round-tripping rejects malformed UTF-8 rather than accepting replacement
     // characters that were not among the authenticated bytes.
     if (QString::fromUtf8(bytes).toUtf8() != bytes) return std::nullopt;
     QJsonParseError error;
     const auto document = QJsonDocument::fromJson(bytes, &error);
     if (error.error != QJsonParseError::NoError || !document.isObject()
-        || !UniqueJsonKeys(bytes, payload).Check()) return std::nullopt;
+        || !UniqueJsonKeys(bytes, payload, linuxPackage).Check()) return std::nullopt;
     return document.object();
 }
 
@@ -336,8 +351,8 @@ bool IsNewerVersion(const QString &candidate, const QString &current) {
     return next && installed && *next > *installed;
 }
 
-std::optional<Release> ParseManifest(const QByteArray &envelope,
-                                    const QByteArray &publicKey) {
+static std::optional<Release> ParseTargetManifest(const QByteArray &envelope,
+                                    const QByteArray &publicKey, bool linuxPackage) {
     if (envelope.isEmpty() || envelope.size() > MaxManifestBytes
         || publicKey.size() != 32) return std::nullopt;
     const auto outer = ReadObject(envelope);
@@ -349,7 +364,7 @@ std::optional<Release> ParseManifest(const QByteArray &envelope,
         return std::nullopt;
     }
 
-    const auto object = ReadObject(*payload, true);
+    const auto object = ReadObject(*payload, true, linuxPackage);
     if (!object) return std::nullopt;
     const auto schema = object->value(QStringLiteral("schema"));
     const auto product = object->value(QStringLiteral("product"));
@@ -357,8 +372,8 @@ std::optional<Release> ParseManifest(const QByteArray &envelope,
     const auto version = object->value(QStringLiteral("version"));
     const auto notes = object->value(QStringLiteral("notes"));
     const auto forceUpdate = object->value(QStringLiteral("force_update"));
-    const auto platform = object->value(QStringLiteral("windows-x64"));
-    if (!schema.isDouble() || schema.toDouble() != 1
+    const auto platform = object->value(linuxPackage ? QStringLiteral("linux-amd64-deb") : QStringLiteral("windows-x64"));
+    if (!schema.isDouble() || schema.toDouble() != (linuxPackage ? 2 : 1)
         || !product.isString() || product.toString() != QStringLiteral("Cohavora")
         || !channel.isString() || channel.toString() != QStringLiteral("stable")
         || !version.isString() || !IsValidVersion(version.toString())
@@ -369,6 +384,21 @@ std::optional<Release> ParseManifest(const QByteArray &envelope,
         || !platform.isObject()) return std::nullopt;
 
     const auto installer = platform.toObject();
+    if (linuxPackage) {
+        const QSet<QString> fields{QStringLiteral("schema"),QStringLiteral("product"),QStringLiteral("channel"),
+            QStringLiteral("version"),QStringLiteral("notes"),QStringLiteral("force_update"),
+            QStringLiteral("published_at"),QStringLiteral("linux-amd64-deb")};
+        if (object->size() != fields.size()) return std::nullopt;
+        for (auto it = object->begin(); it != object->end(); ++it)
+            if (!fields.contains(it.key())) return std::nullopt;
+        if (installer.size() != 10 || installer.value("platform") != QStringLiteral("linux") ||
+            installer.value("architecture") != QStringLiteral("amd64") ||
+            installer.value("package_format") != QStringLiteral("deb") ||
+            installer.value("distribution") != QStringLiteral("ubuntu") ||
+            installer.value("distribution_version") != QStringLiteral("24.04") ||
+            installer.value("package") != QStringLiteral("cohavora") ||
+            !IsLinuxPackageVersion(installer.value("package_version"), version.toString())) return std::nullopt;
+    }
     const auto sizeValue = installer.value(QStringLiteral("size"));
     const auto hashValue = installer.value(QStringLiteral("sha256"));
     const auto urlsValue = installer.value(QStringLiteral("urls"));
@@ -393,6 +423,8 @@ std::optional<Release> ParseManifest(const QByteArray &envelope,
     release.forceUpdate = forceUpdate.toBool(false);
     release.sha256 = QByteArray::fromHex(hash);
     release.size = static_cast<qint64>(size);
+    release.artifact = linuxPackage ? Artifact::Ubuntu2404Amd64Deb : Artifact::WindowsInstaller;
+    if (linuxPackage) release.packageVersion = installer.value("package_version").toString();
     QSet<QString> uniqueUrls;
     for (const auto &entry : urls) {
         if (!entry.isString()) return std::nullopt;
@@ -400,10 +432,17 @@ std::optional<Release> ParseManifest(const QByteArray &envelope,
         if (!IsText(text, true) || uniqueUrls.contains(text)) return std::nullopt;
         uniqueUrls.insert(text);
         const QUrl url(text, QUrl::StrictMode);
-        if (!IsAllowedUpdateUrlText(text)) return std::nullopt;
+        if (linuxPackage ? !IsSecureUrl(url) : !IsAllowedUpdateUrlText(text)) return std::nullopt;
         release.urls.append(url);
     }
     return release;
+}
+
+std::optional<Release> ParseManifest(const QByteArray &envelope, const QByteArray &publicKey) {
+    return ParseTargetManifest(envelope,publicKey,false);
+}
+std::optional<Release> ParseLinuxManifest(const QByteArray &envelope, const QByteArray &publicKey) {
+    return ParseTargetManifest(envelope,publicKey,true);
 }
 
 } // namespace Cohavora::Update

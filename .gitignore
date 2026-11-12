@@ -10,6 +10,7 @@
 /build/*
 /out/*
 !/build/configure.py
+!/build/isolate_linux_jpeg.py
 !/build/prepare/
 !/build/prompts/
 /build/prompts/*

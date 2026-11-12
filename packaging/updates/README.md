@@ -1,6 +1,6 @@
 # Cohavora 升级发行工具
 
-客户端优先读取阿里云 ECS 静态 Web 清单 `http://123.56.225.164/downloads/latest.json`，失败时读取 GitHub Releases 备用清单。安装包也按签名清单中的地址顺序尝试。此目录只生成、验证本地发行文件，不操作服务器、不上传文件、不发布 GitHub Release。
+Windows 客户端优先读取阿里云 ECS 静态 Web 清单 `http://123.56.225.164/downloads/latest.json`，失败时读取 GitHub Releases 备用清单。安装包也按签名清单中的地址顺序尝试。此目录只生成、验证本地发行文件，不操作服务器、不上传文件、不发布 GitHub Release。
 
 当前软件版本为 `0.0.1`。客户端仅在清单版本高于当前版本时提供升级，不降级；同为 `0.0.1` 时不会提示更新。以下 `0.0.2` 仅用于演示下一版本的发行命令；下一次发行应先同步产品版本，再填写新版本的发行配置。
 
@@ -128,3 +128,47 @@ CLI 模式还支持 `--notes-file <UTF-8纯文本路径>` 和 `--published-at <U
 ```
 
 清单最大 96 KiB，payload 最大 48 KiB，说明最大 8 KiB UTF-8，下载地址数量为 1–8。主备清单使用同一 Ed25519 签名密钥；安装包的版本、大小与 SHA-256 必须匹配已接受清单。服务端无需解析或重签清单，只提供原始字节。
+
+## Linux：独立信任配置与 DEB 保存
+
+Linux 正式发行优先使用发行者维护的签名 APT 仓库。项目当前没有配置或发布该仓库，也不自带安装、提权或 root helper。可选的独立更新通道仅支持 Ubuntu `24.04`、`amd64`、`Package: cohavora` 和 DEB：检查签名清单、下载、验证后由用户选择目录保存。用户应先退出会议并关闭 Cohavora，再自行使用系统包管理器安装。不会运行 DEB，也不会自动关闭应用。
+
+以下 CMake cache 参数默认全部为空；未配主地址与可信公钥、发行版或架构不匹配时，更新页与后端均禁用。Linux 不继承 Windows 的地址、公钥或 `latest.json`。主、备清单及所有包地址只允许 HTTPS；公钥必须通过可信构建配置交付，不能从清单或下载源取得。
+
+```text
+COHAVORA_LINUX_UPDATE_PRIMARY_URL
+COHAVORA_LINUX_UPDATE_FALLBACK_URL
+COHAVORA_LINUX_UPDATE_PUBLIC_KEY_HEX
+```
+
+Linux 使用独立 `schema: 2`，外层仍为上述原始 payload 字节的 Ed25519 签名信封。根字段必须恰好为 `schema, product, channel, version, notes, force_update, published_at, linux-amd64-deb`。应用版本严格为 `X.Y.Z`，包版本严格为同一应用版本加 `-` 和无前导零的正整数 Debian revision，即 `X.Y.Z-[1-9][0-9]*`；例如 `0.0.2-1`、`0.0.2-2` 均合法，`-0`、`-01` 或不同应用版本均被拒绝。revision 对应打包配置 `CPACK_DEBIAN_PACKAGE_RELEASE`。`linux-amd64-deb` 必须恰好包含以下字段：
+
+```json
+{
+  "platform": "linux",
+  "architecture": "amd64",
+  "package_format": "deb",
+  "distribution": "ubuntu",
+  "distribution_version": "24.04",
+  "package": "cohavora",
+  "package_version": "0.0.2-1",
+  "size": 123,
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "urls": ["https://updates.example.invalid/cohavora_0.0.2-1_amd64.deb"]
+}
+```
+
+以下仅为本地离线发行命令；地址为占位值，不是当前可信更新源。复用仓库外受保护的独立 Linux Ed25519 私钥，先完成 DEB 打包，再生成清单。工具用 `dpkg-deb --field` 验证 Package、Version、Architecture，从实际 DEB 读取合法 revision，并将完整包版本、实际大小和 SHA-256 绑定进签名；`verify --deb` 也逐项核对完整包版本及字节，不会执行包脚本。
+
+```bash
+python3 packaging/updates/linux_update_manifest.py create \
+  --private-key "$LinuxPrivateKey" --deb "$Deb" --version 0.0.2 \
+  --url https://updates.example.invalid/cohavora_0.0.2-1_amd64.deb \
+  --output "$LinuxManifest"
+python3 packaging/updates/linux_update_manifest.py verify \
+  --manifest "$LinuxManifest" --public-key-hex "$LinuxPublicKeyHex" --deb "$Deb"
+```
+
+客户端当前仍按应用版本 `X.Y.Z` 判断是否有新版本；仅增加 Debian revision 不会自动提示更新。revision 升级需通过独立验收的系统包管理器流程完成，本地私有根 dpkg 验证不代表正式更新通道已验收。
+
+保存阶段只接受当前用户拥有、其他用户和组无写权限的个人目录。通过目录 fd 锚定新建的私有随机子目录，在提交前和完成前核对用户可见路径的 inode/device；使用同一个已打开的普通文件 fd 分块重验 SHA-256，并通过 `QSaveFile` 原子提交。源文件符号链接会被拒绝，取消或验证失败会清理未提交文件；不会覆盖用户已有文件。字节验证保证截至保存完成时，之后用户仍可自行修改已导出的文件。清单签名与摘要不能代替软件来源治理，也不能防止阻断或旧版本签名清单重放。真实 HTTPS、签名 APT 仓库、升级和回滚安装需要独立验收。

@@ -1,10 +1,10 @@
 # Cohavora
 
-**基于 C++、Qt 和 WebRTC 的 Windows 原生音视频会议客户端，对接 LiveKit 实时音视频服务。**
+**基于 C++、Qt 和 WebRTC 的音视频会议客户端，对接 LiveKit 实时音视频服务。Windows 提供完整桌面客户端，Ubuntu 提供基础会议版。**
 
 Cohavora 提供桌面会议界面，也提供可单独运行的命令行示例。你可以用它加入音视频房间、共享屏幕、聊天和使用协作白板，也可以从源码了解原生客户端的设备采集、会议状态管理和视频渲染实现。
 
-当前构建流程面向 **Windows x64**，使用 **C++20 + Qt 5.15.18**。账号登录、会议预约等业务功能需要兼容 OpenMeeting 的服务；只有 LiveKit 服务时，也可以通过地址和房间访问令牌直接连接。
+当前支持 **Windows x64** 完整客户端和 **Ubuntu 24.04 x64** 基础会议版，使用 **C++20 + Qt 5.15.18**。账号登录、会议预约等业务功能需要兼容 OpenMeeting 的服务；只有 LiveKit 服务时，也可以通过地址和房间访问令牌直接连接。
 
 - [开源依赖与致谢](#开源依赖与致谢)
 - [主要功能](#主要功能)
@@ -58,6 +58,8 @@ Qt、WebRTC 及其他依赖自身还可能包含传递依赖，实际分发时�
 
 ## 主要功能
 
+下表描述 Windows 完整客户端。Ubuntu 基础会议版提供 LiveKit 入会、远端音视频接收、本地麦克风与 V4L2 摄像头发布、设备选择及开关、重连提示和离会；账号、会议管理、聊天、屏幕共享及白板界面尚未接入。
+
 | 功能 | 说明 |
 | --- | --- |
 | 音视频会议 | 麦克风静音、摄像头开关、参与者列表与视频显示 |
@@ -73,7 +75,7 @@ Qt、WebRTC 及其他依赖自身还可能包含传递依赖，实际分发时�
 
 ## 快速开始
 
-可选择 [AI 分步引导](#方式一ai-辅助构建) 或 [手动编译](#方式二手动编译)。完成构建后，参阅[加入第一场会议](#加入第一场会议)配置服务连接。
+Windows 可选择 [AI 分步引导](#方式一ai-辅助构建) 或 [手动编译](#方式二手动编译)；Ubuntu 参阅 [Ubuntu 从源码构建](#ubuntu-从源码构建基础会议版)。完成构建后，参阅[加入第一场会议](#加入第一场会议)配置服务连接。
 
 ### 方式一：AI 辅助构建
 
@@ -160,7 +162,7 @@ cmake --build --preset release --parallel 2
 
 ## 加入第一场会议
 
-本仓库提供客户端。实际通话需要可访问的 LiveKit 服务；账号和会议管理还需要配套业务服务。
+本仓库提供客户端。实际通话需要可访问的 LiveKit 服务；账号和会议管理还需要配套业务服务。Ubuntu 基础会议版启动后直接在初始窗口填写 LiveKit WebSocket 地址和有效房间令牌，下面的游客登录与账号操作步骤适用于 Windows 完整客户端。
 
 ### 方式一：使用 LiveKit 地址和令牌直连
 
@@ -188,6 +190,119 @@ cmake --build --preset release --parallel 2
 以下操作沿用前面准备好的依赖和 `VCPKG_ROOT`。所有预设见 [CMakePresets.json](CMakePresets.json)。
 
 配置辅助脚本位于 [build/configure.py](build/configure.py)，可在仓库根目录执行 `python build/configure.py --help` 查看选项；根目录的 `configure.bat` 会转发到该脚本。
+
+### Ubuntu 从源码构建基础会议版
+
+以下命令适用于 Ubuntu 24.04 x86_64。先安装编译工具、vcpkg 所需的下载工具，以及静态 Qt 运行时链接使用的系统开发包：
+
+```bash
+sudo apt-get update
+sudo apt-get install --no-install-recommends \
+  build-essential git python3 perl cmake ninja-build pkg-config \
+  ca-certificates curl zip unzip tar autoconf automake libtool nasm \
+  libssl-dev libfreetype-dev libfontconfig-dev libdbus-1-dev \
+  libglib2.0-dev \
+  libgl1-mesa-dev libegl1-mesa-dev \
+  libx11-dev libx11-xcb-dev libxext-dev libxrender-dev libxi-dev libsm-dev libice-dev \
+  libxcb1-dev libxcb-glx0-dev libxcb-icccm4-dev libxcb-image0-dev \
+  libxcb-keysyms1-dev libxcb-randr0-dev libxcb-render-util0-dev \
+  libxcb-render0-dev libxcb-shape0-dev libxcb-shm0-dev libxcb-sync-dev \
+  libxcb-xfixes0-dev libxcb-xinerama0-dev libxcb-xinput-dev libxcb-xkb-dev \
+  libxkbcommon-dev libxkbcommon-x11-dev
+```
+
+获取源码。Ubuntu 基础会议版不依赖 Git 子模块：
+
+```bash
+git clone https://github.com/a980374208/Cohavora.git
+cd Cohavora
+```
+
+已有克隆时，直接在仓库根目录继续。Ubuntu 构建无需运行 `git submodule update --init --recursive`；该命令还会尝试访问私有 SSH 子模块 `samples/acceptance`，公开账号可能因此失败。Windows 完整客户端另需其 UI 子模块，私有验收子模块不属于 Ubuntu 构建范围。
+
+尚未安装 vcpkg 时，可在仓库的同级目录安装；已有 vcpkg 则将 `VCPKG_ROOT` 改为其实际目录：
+
+```bash
+git clone https://github.com/microsoft/vcpkg.git ../vcpkg
+../vcpkg/bootstrap-vcpkg.sh -disableMetrics
+export VCPKG_ROOT="$(realpath ../vcpkg)"
+```
+
+在仓库根目录准备固定版本依赖、配置并编译：
+
+```bash
+python3 build/prepare/prepare.py
+cmake --preset ubuntu-ninja-relwithdebinfo
+cmake --build --preset ubuntu-meeting --parallel 2
+./out/build/ubuntu/src/app/Cohavora
+```
+
+准备脚本从项目 Release 下载并校验 Ubuntu 版静态 Qt 5.15.18 和 WebRTC/BoringSSL 双配置 SDK，默认分别安装到 `deps/Libraries/linux64` 和 `deps/webrtc`，下载归档缓存在 `deps/.archives/`；有效安装会在后续运行时复用。Qt ZIP 约 1.04 GB，WebRTC 压缩包约 243 MB，首次执行需要网络和数 GB 磁盘空间。网络受限时，可用 `--qt-archive`、`--webrtc-archive` 指定已下载的固定归档。
+
+CMake 通过 `VCPKG_ROOT` 加载 vcpkg，以 `x64-linux` 和 [build/vcpkg/vcpkg.json](build/vcpkg/vcpkg.json) 安装 Asio、Protobuf、spdlog 等通用 C++ 依赖；默认安装目录为 `deps/vcpkg_installed`，下载缓存为 `deps/vcpkg_downloads`。
+
+`ubuntu-meeting` 使用 `RelWithDebInfo`，只构建基础会议版及其依赖；旧名称 `ubuntu-receiver` 仍可使用。界面支持 LiveKit 入会、接收远端音视频、发布本地麦克风和 V4L2 摄像头、切换麦克风/扬声器/摄像头、重连提示及离会。摄像头需要可用的 `/dev/video*` 设备；账号登录和完整会议业务界面尚未接入 Linux。Ubuntu 与 Windows 的 Qt/WebRTC 二进制不可混用。
+
+### Ubuntu 完整 UI 开发构建（P0–P6）
+
+`ubuntu-product` 是 Linux 共用完整桌面 UI 的独立开发预设，使用 `RelWithDebInfo`，输出到 `out/build/ubuntu-product`。上面的 `ubuntu-meeting` 基础会议版仍保留；本预设不代表完整 Linux 产品已通过验收。
+
+先完成上一节的工具、vcpkg 和基础开发包准备，再补齐完整 UI 所需的公开子模块及 Linux 开发包。只初始化 UI 路径，不需要私有验收子模块：
+
+```bash
+git submodule update --init --recursive -- src/ui/tdesktop
+sudo apt-get install --no-install-recommends \
+  libwayland-dev libwayland-bin libffi-dev \
+  libglib2.0-dev libglib2.0-dev-bin libpcre2-dev \
+  libmount-dev libblkid-dev libselinux1-dev libsepol-dev \
+  libxtst-dev libgbm-dev libdrm-dev libpipewire-0.3-dev libspa-0.2-dev libpulse-dev \
+  libsecret-1-dev
+```
+
+完整 UI 需要与本项目 Qt 5.15.18 补丁、编译器及 C++ ABI 匹配的 **静态 QtWayland SDK**，包括 `Qt5WaylandClient`、Wayland QPA、xdg-shell、窗口装饰及 EGL client integration 静态插件。QtWayland 源码应采用 Qt `v5.15.18-lts-lgpl` superproject 锁定的提交 `5a85cd79f9e16f9191d7187aa4b9f34b3f2c969b`；不能将发行版动态 QtWayland 插件混入本项目静态 Qt。需要 Linux 屏幕阅读器或 AT-SPI 桌面验收时，QtBase 还须启用 `accessibility-atspi-bridge`，并以该配置构建 QtWayland；仅启用通用 `accessibility` 不会提供 AT-SPI 桥。
+
+**当前 `prepare.py` 下载的已发布 Ubuntu Qt 包尚不包含 QtWayland。** 准备脚本仍用于取得固定 WebRTC 和基础 Qt；请另外提供已经构建并验证的同 ABI QtWayland SDK，通过 `QT_ROOT` 明确选择。不要用旧包覆盖扩展 SDK。
+
+```bash
+python3 build/prepare/prepare.py
+export QT_ROOT="/absolute/path/to/qt-5.15.18-with-wayland"
+cmake --preset ubuntu-product -DQT_ROOT="$QT_ROOT"
+cmake --build --preset ubuntu-product --parallel 2
+./out/build/ubuntu-product/src/app/Cohavora
+```
+
+在原生 Wayland 桌面可显式使用 `QT_QPA_PLATFORM=wayland` 启动；X11 使用 `QT_QPA_PLATFORM=xcb`，两种运行结果分别验收。账号和会议业务仍需要兼容 OpenMeeting 的服务，真实媒体仍需要 LiveKit 连接配置；不要将凭据写进构建脚本或 CMake 缓存。
+
+若已有构建目录后改用另一套 Qt SDK，重新配置时追加 `-U 'Qt5*_DIR' -DQT_ROOT="$QT_ROOT"`，清除旧 Qt 组件的 CMake 定位缓存；随后重建，避免混用不同安装目录的模块。
+
+P3 系统音频采用 PulseAudio 播放流 monitor，兼容 pipewire-pulse，输出为独立的 `ScreenShareAudio` 轨道。共享默认关闭；共享设置可选择声音输出，屏幕或窗口的选择不限制声音范围。同一输出内，具有可识别进程身份的其他应用声音参与混音，本进程的播放音和无法识别来源的流被排除。最多同时混合 32 路；设备移除、服务断连或捕获失败会关闭共享音频，视频共享可继续。共享音频静音、停止与麦克风分开控制；可通过共享菜单选择输出并重新开启音频，无需重新选择共享画面。
+
+已发布的 Linux WebRTC SDK 存在跨音轨静音和外部音源重新配置缺陷，因此 `COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED` 默认关闭，普通下载构建保留视频共享。本机 P3 audio-v2 SDK 已完成 Release 双轨隔离、编码器重建及音源切换回归；启用该选项时 CMake 要求 Release 静态库 SHA-256 为 `c97897128ed8735875c149a578af1c33075813e26648aa370ea800f973015105`，不能用旧 SDK 强行开启。Debug SDK 尚未取得相同行为验证。使用匹配的完整 SDK 根目录配置：
+
+```bash
+cmake --preset ubuntu-product -DQT_ROOT="$QT_ROOT" \
+  -DWEBRTC_ROOT="/absolute/path/to/cohavora-webrtc-linux-x64-aaeeee8-cohavora-bssl-p3-audio-v2" \
+  -DCOHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED=ON
+cmake --build --preset ubuntu-product --parallel 2
+```
+
+此 SDK 尚未替换准备脚本的公开下载包。构建或合成分轨回归不代表物理音质、自动恢复或完整会议验收通过；已记录的 PulseAudio 重初始化缺陷仍独立阻断完整音频重连验收。
+
+完整 UI 同时使用 Qt 和 WebRTC 各自的 JPEG ABI。构建会用 Python 3、`nm` 和 `objcopy` 在构建目录生成 WebRTC 副本，隔离 Chromium JPEG 函数前缀遗漏的两个内部数据表，并记录原件与副本指纹；依赖目录的 SDK 保持原样。若更换依赖后出现额外符号冲突，构建会停止，需重新审查 ABI，不能忽略重复符号错误。
+
+本机开发曾通过下载并解包 Ubuntu 开发包到用户级 sysroot 来验证依赖；这只是无 sudo 环境的构建折衷。普通 Ubuntu 开发机应优先使用上面的 apt 开发包。使用自备 sysroot 时，通过 `CMAKE_PREFIX_PATH` 和 `PKG_CONFIG_PATH` 指向其开发文件，不复制本机绝对路径，也不要把开发 sysroot 当作应用运行包分发。
+
+P2 增加 Wayland 屏幕／窗口视频共享：在会议内选择共享类型、分辨率和帧率，再由系统选择器选择实际来源并授权；等待授权期间可以取消。桌面需要 ScreenCast Portal 及对应桌面后端、PipeWire 1.0 或更新版本。本实现仅使用 CPU 缓冲，复用原有发布与预览链路，不持久化授权；纯 X11 会话的捕获尚未接入。实现与 OBS 行为参考说明见 [Wayland capture](src/media/linux/README.md)。
+
+原生 Wayland 可以发起旧 v2 协议的远程控制请求，物理键使用严格的 Set1/E0 映射；未知键拒绝。X11 控制端的物理键位映射尚未验证。Linux 被控方向因本地输入优先、可靠释放、屏幕绑定及后台紧急停止的安全能力不足而明确禁用；不通过 root、uinput 或私有桌面接口绕过授权。Windows 真机互通和文本／IME 仍须独立验证。
+
+登录状态可异步保存到 Secret Service（GNOME Keyring），密码不持久化。缺少或拒绝密钥环服务时允许本次内存登录，并显示保存失败状态，不回退到明文文件。独立的 0600 元数据文件只保存条目 UUID、绑定及撤销状态。旧凭据来源保持禁用；无法确认删除时明确提示清理未完成，不把旧条目当作已删除。
+
+当前实测 Ubuntu 24.04 的 `gnome-keyring 46.1-2ubuntu0.2` 在应用取消解锁提示时会崩溃；官方未修改 51.1 另有应用关窗后提示残留的问题。本地补丁候选已通过独立验证，但尚未作为 Ubuntu 发行依赖交付。开发预览可不勾选“记住登录”，使用本次内存会话；完整持久化验收仍开放。应用安装包不捆绑或替换系统密钥环服务，详见 [Ubuntu 打包说明](packaging/linux/README.md)。
+
+本地 DEB、tar.gz 和调试信息包的构建入口见 [Ubuntu 打包说明](packaging/linux/README.md)。Linux 使用独立的签名更新清单与信任配置，默认没有已配置的 Linux 更新源；不会请求 Windows 安装器。可选更新通道支持验签、下载及保存 DEB，安装由退出会议和应用后的系统包管理器执行；正式发行优先使用签名 APT 仓库，详见 [Linux 更新说明](packaging/updates/README.md)。
+
+Linux 共享批注、被控输入和音频设备测试仍禁用；系统音频受上述 SDK 验证开关限制，Linux E2EE Required 继续拒绝。完整 UI 启动、账号登录、真实设备、重连、安装升级和资源释放须分别取得同一构建的证据；基础版已有结果、离线 SDK smoke 以及 Windows 验收不能替代这些子门。
 
 ### 调试桌面应用
 
@@ -222,6 +337,8 @@ cmake --build out/build/windows-vs2026-dev --config Debug --target simple_room -
 ```
 
 示例支持 `--url`、`--token` 参数，也支持 `LIVEKIT_URL`、`LIVEKIT_TOKEN` 环境变量。`simple_room` 和 `simple_rpc` 未提供连接参数时仅显示帮助，不会验证实际连接。访问令牌属于凭据，请勿写入源码或提交到仓库。
+
+`simple_room` 默认要求安全信令传输。仅对明确使用 `ws` 的私有开发服务，可在该次运行环境中设置 `COHAVORA_SAMPLE_ALLOW_INSECURE_TRANSPORT=1`；默认不会根据 URL 自动放宽策略，此开关不改变桌面产品的传输设置。
 
 ## 代码结构
 

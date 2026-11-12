@@ -1,4 +1,5 @@
-﻿#include "shared_screen_window.h"
+#include "src/platform/qt_path.h"
+#include "shared_screen_window.h"
 #include "src/ui/meeting_encryption_panel.h"
 #include "telemetry_live_dialog.h"
 #include "src/core/session_shutdown_service.h"
@@ -56,6 +57,10 @@
 #include <cmath>
 #include <exception>
 #include <set>
+
+#ifdef Q_OS_LINUX
+#include "src/ui/linux_window_frame.h"
+#endif
 
 #if defined(Q_OS_WIN)
 #include <windows.h>
@@ -358,7 +363,7 @@ void ShowTelemetryExport(QWidget *parent, std::string record_id = {},
 	const QPointer<QProgressDialog> progressGuard(progress);
 	QObject::connect(progress, &QProgressDialog::canceled, progress,
 		[cancelled] { cancelled->store(true, std::memory_order_release); });
-	const auto destination = std::filesystem::path(directory.toStdWString());
+	const auto destination = cohavora::platform::PathFromQString(directory);
 	const auto dispatcher = OpenMeeting::detail::QtDispatchEndpoint::Create();
 	auto completion = [dispatcher, guard, progressGuard](livekit::telemetry::TelemetryExportResult result) {
 			if (dispatcher) dispatcher->Post( [guard, progressGuard, result = std::move(result)] {
@@ -375,8 +380,7 @@ void ShowTelemetryExport(QWidget *parent, std::string record_id = {},
 					: QCoreApplication::translate("MeetingUI", "Export failed: %1")
 						.arg(QString::fromStdString(result.reason)));
 				if (result.success) {
-					message.setInformativeText(QString::fromStdWString(
-						result.report_directory.wstring()));
+					message.setInformativeText(cohavora::platform::QStringFromPath(result.report_directory));
 				}
 				AppTheme::setTone(message, AppTheme::Tone::Dark);
 				message.setStandardButtons(QMessageBox::Ok);
@@ -955,7 +959,7 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 					QString::number(entry.size_bytes / 1024),
 					QString::number(entry.record_count)), reports);
 			item->setData(Qt::UserRole, QString::fromStdString(entry.record_id));
-			item->setData(Qt::UserRole + 1, entry.created_utc_ms);
+			item->setData(Qt::UserRole + 1, QVariant::fromValue<qlonglong>(entry.created_utc_ms));
 			item->setData(Qt::UserRole + 2, static_cast<qulonglong>(entry.size_bytes));
 		}
 	}
@@ -2397,6 +2401,11 @@ void RoomBottomBarWidget::setScreenShareState(livekit::ScreenShareState state) {
 
 void RoomBottomBarWidget::setScreenShareAvailable(bool available) {
 	_screenShareAvailable = available;
+#ifndef Q_OS_WIN
+    _uiaShare->setToolTip(QCoreApplication::translate("MeetingUI", available
+        ? "Choose a screen or window in the system picker. Video only."
+        : "Screen sharing is unavailable in this desktop session."));
+#endif
 	_uiaShare->setEnabled(screenShareControlEnabled());
 	update();
 }
@@ -2729,7 +2738,8 @@ void RoomBottomBarWidget::paintEvent(QPaintEvent *e) {
 		else if (item.id == 2) title = _videoEnabled ? QCoreApplication::translate("MeetingUI", "Stop Video") : QCoreApplication::translate("MeetingUI", "Start Video");
 		else if (item.id == 3) {
 			using State = livekit::ScreenShareState;
-			if (_screenShareState == State::Starting) title = QCoreApplication::translate("MeetingUI", "Cancel Sharing");
+			if (_screenShareState == State::Starting || _screenShareState == State::AwaitingPermission)
+				title = QCoreApplication::translate("MeetingUI", "Cancel Sharing");
 			else if (_screenShareState == State::Active) title = QCoreApplication::translate("MeetingUI", "Stop Sharing");
 			else if (_screenShareState == State::Stopping) title = QCoreApplication::translate("MeetingUI", "Stopping");
 			else if (_screenShareState == State::StopFailed) title = QCoreApplication::translate("MeetingUI", "Retry Stop");
@@ -2830,6 +2840,7 @@ void RoomBottomBarWidget::showAudioEndpointMenu(const QPoint &globalPos, bool sp
         add(QCoreApplication::translate("MeetingUI", "System Default"), QString());
         if (result && result->succeeded) {
             for (const auto &device : *result->devices) {
+                if (device.id.empty()) continue; // The ADM default uses the existing empty-ID entry.
                 auto title = QString::fromStdString(device.name);
                 if (device.is_default) title += QCoreApplication::translate("MeetingUI", " (System Default)");
                 add(title, QString::fromStdString(device.id));
@@ -3071,7 +3082,7 @@ struct MeetingRoomWindow::MediaPreparation {
 	std::atomic_bool cameraWanted{false};
 	bool attemptedMicrophone = false;
 	bool attemptedCamera = false;
-	std::shared_ptr<livekit::WasapiAudioCapture> microphone;
+	std::shared_ptr<livekit::MicrophoneCapture> microphone;
 	std::shared_ptr<livekit::CameraSourceManager> camera;
 	bool cameraAvailable = false;
 	livekit::CameraStartResult cameraStartResult = livekit::CameraStartResult::InitFailed;
@@ -3105,6 +3116,15 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 	// Keep Qt's native frame bookkeeping consistent with the resizable HWND.
 	// WM_NCCALCSIZE removes the native title bar while retaining its resize frame.
 	setWindowFlags(Qt::Window | Qt::WindowSystemMenuHint | Qt::WindowMinMaxButtonsHint);
+#ifdef Q_OS_LINUX
+	setWindowFlag(Qt::FramelessWindowHint, true);
+	installLinuxWindowFrame(*this, {
+		.captionHitTest = [this](QPoint position) {
+			return _topBar && _topBar->geometry().contains(position) &&
+				_topBar->isWindowDragArea(_topBar->mapFrom(this, position));
+		},
+	});
+#endif
 
 	_persistVideoLayoutPreferences = true;
 	const QSettings preferences;
@@ -3133,7 +3153,7 @@ MeetingRoomWindow::MeetingRoomWindow(const Config &config,
 		ObserveTimingBoundary(sample, [window] {
             return window && window->isVisible() && window->_coordinator &&
                 window->_coordinator->state() == OpenMeeting::MeetingState::InMeeting &&
-                window->_coordinator->canStartScreenShare();
+                window->_coordinator->isMeetingReady();
         });
 	}
 	setupCoordinatorBindings();
@@ -3229,7 +3249,7 @@ void MeetingRoomWindow::beginMediaPreparation(bool microphone, bool camera) {
 				preparation->attemptedMicrophone = true;
 				if (preparationOverride) preparationOverride(true, false);
 				else try {
-					auto microphone = livekit::WasapiAudioCapture::Create();
+					auto microphone = livekit::MicrophoneCapture::Create();
 					preparation->microphone = microphone;
 					microphone->EnableApm();
 					const auto processor = microphone->apm_processor();
@@ -3243,8 +3263,8 @@ void MeetingRoomWindow::beginMediaPreparation(bool microphone, bool camera) {
 					// Set intent before Start: muted entry must not briefly capture unmuted.
 					// Keep preparation silent until the Qt owner commits the request.
 					microphone->SetMute(true);
-					livekit::WasapiCaptureConfig config;
-					config.type = livekit::WasapiCaptureType::Microphone;
+					livekit::MicrophoneCaptureConfig config;
+					config.type = livekit::AudioCaptureType::Microphone;
 					config.device_id = preferences.microphoneDeviceId.toStdString();
 					config.target_sample_rate = 48000;
 					config.target_channels = 2;
@@ -3261,15 +3281,15 @@ void MeetingRoomWindow::beginMediaPreparation(bool microphone, bool camera) {
 				if (preparationOverride) preparationOverride(false, true);
 				else try {
 					// One snapshot supplies default selection, saved selection and capabilities.
-					const auto devices = livekit::DShowEnumerator::EnumerateVideoDevices();
+					const auto devices = livekit::CameraEnumerator::EnumerateVideoDevices();
 					if (preparation->cancelled.load()) return;
 					auto selected = std::find_if(devices.begin(), devices.end(),
-						[](const livekit::DShowDeviceInfo &device) { return device.is_default; });
+						[](const livekit::CameraDeviceInfo &device) { return device.is_default; });
 					if (selected == devices.end()) selected = devices.begin();
 					if (!preferences.cameraDeviceId.isEmpty()) {
 						const auto id = preferences.cameraDeviceId.toStdString();
 						const auto saved = std::find_if(devices.begin(), devices.end(),
-							[&](const livekit::DShowDeviceInfo &device) {
+							[&](const livekit::CameraDeviceInfo &device) {
 								return device.path == id || device.name == id;
 							});
 						if (saved != devices.end()) selected = saved;
@@ -3284,7 +3304,7 @@ void MeetingRoomWindow::beginMediaPreparation(bool microphone, bool camera) {
 						const auto resolution = requested != resolutions.end()
 							? std::optional<livekit::CameraResolution>(*requested)
 							: livekit::CameraSourceManager::SelectDefaultResolution(resolutions);
-						livekit::DShowCaptureConfig config;
+						livekit::CameraCaptureConfig config;
 						config.device_path = selected->path;
 						config.output_format = livekit::VideoBufferType::NV12;
 						if (resolution) {
@@ -3380,7 +3400,7 @@ void MeetingRoomWindow::finishMediaPreparation() {
 		_coordinator->setLocalAudioMuted(audioMuted);
 		_coordinator->setLocalVideoEnabled(videoEnabled);
 	}
-	if (_wasapiCap) _wasapiCap->SetMute(audioMuted);
+	if (_wasapiCap) queueMicrophoneMute(audioMuted);
 	if (_bottomBar) {
 		_bottomBar->setAudioMuted(_config.audioMuted);
 		_bottomBar->setVideoEnabled(_config.videoEnabled);
@@ -3423,6 +3443,12 @@ void MeetingRoomWindow::requestLocalMicrophone(bool muted) {
 		beginMediaPreparation(true, false);
 		return;
 	}
+#ifdef Q_OS_LINUX
+    if (!muted) {
+        queueMicrophoneMute(false, true);
+        return;
+    }
+#endif
 	if (!muted && !_wasapiCap->IsRunning()) {
 		setMediaPreparationError(QCoreApplication::translate("MeetingUI", "Unable to start the microphone. Check the device and system permissions."));
 	}
@@ -3885,7 +3911,7 @@ void MeetingRoomWindow::initLayout() {
 
 	_bottomBar->toggleSpeakerRequested() | rpl::on_next([this](bool muted) {
 		setSpeakerOutputMuted(muted);
-		LogToConsole(LogCategory::Media, "SPEAKER", _bottomBar->isSpeakerMuted() ? QCoreApplication::translate("MeetingUI", "User muted speaker output") : QCoreApplication::translate("MeetingUI", "User enabled speaker output"));
+		LogToConsole(LogCategory::Media, "SPEAKER", muted ? QCoreApplication::translate("MeetingUI", "User muted speaker output") : QCoreApplication::translate("MeetingUI", "User requested to enable speaker output"));
 	}, lifetime());
 
 	_bottomBar->toggleVideoRequested() | rpl::on_next([this](bool enabled) {
@@ -4031,7 +4057,11 @@ void MeetingRoomWindow::initLayout() {
 		auto &session = OpenMeeting::SessionManager::instance();
 		auto preferences = session.mediaPreferences();
 		if (preferences.speakerDeviceId == deviceId) {
+#ifdef Q_OS_LINUX
+			requestSpeakerDevice(deviceId);
+#else
 			selectSpeakerDevice(deviceId);
+#endif
 		} else {
 			preferences.speakerDeviceId = deviceId;
 			session.setMediaPreferences(preferences);
@@ -4106,6 +4136,71 @@ void MeetingRoomWindow::cancelDeviceSwitchTelemetry() {
 	_pendingMicrophoneDeviceGeneration = 0;
 }
 
+#ifdef Q_OS_LINUX
+void MeetingRoomWindow::requestSpeakerDevice(const QString &deviceId,
+		bool fallbackToDefault, std::function<void(bool)> completed) {
+	if (!_room || !_sessionRunning || _closeRequested || _closingForSessionInvalidation) return;
+	if (!_captureUiCallbacks) {
+		_captureUiCallbacks = OpenMeeting::QtCallbackGate<MeetingRoomWindow>::Create(this);
+	}
+	const auto callbacks = _captureUiCallbacks;
+	const auto room = _room;
+	const auto intent = _speakerDeviceIntent;
+	const auto serial = ++*intent;
+	++*_speakerMuteIntent;
+	const auto operation = beginDeviceSwitchTelemetry(
+		_speakerSwitchTelemetry,
+		livekit::telemetry::OperationKind::SpeakerDeviceSwitch);
+	_speakerDevicePending = true;
+	const auto finish = [weakRoom = std::weak_ptr<livekit::Room>(room), intent, serial, operation,
+		completed = std::move(completed)](MeetingRoomWindow *window,
+			bool selected, bool available, const QString &selectedId) {
+		if (intent->load() != serial || !window->_room || window->_room != weakRoom.lock() || !window->_sessionRunning ||
+			window->_closeRequested || window->_closingForSessionInvalidation) return;
+		window->_speakerDevicePending = false;
+		window->_speakerAvailable = available;
+		if (selected && window->_bottomBar) window->_bottomBar->setSpeakerDeviceId(selectedId);
+		const bool muted = window->_speakerRequestedMuted || !available;
+		if (window->_bottomBar) window->_bottomBar->setSpeakerMuted(muted);
+		window->_room->SetAudioOutputMuted(muted);
+		window->finishDeviceSwitchTelemetry(window->_speakerSwitchTelemetry, operation,
+			selected && available ? livekit::telemetry::OperationOutcome::Success
+				: livekit::telemetry::OperationOutcome::Failure);
+		if (!selected || !available) {
+			LogToConsole(LogCategory::Error, "AUDIO_OUTPUT", "Unable to select speaker output device");
+		}
+		if (completed) completed(selected && available);
+	};
+	const bool accepted = OpenMeeting::SessionShutdownService::Instance().Submit(
+		[callbacks, intent, serial, room, deviceId, fallbackToDefault, finish] {
+			if (intent->load() != serial || !callbacks->active()) return;
+			auto &manager = livekit::WebRTCManager::Instance();
+			bool selected = false;
+			bool available = false;
+			QString selectedId = deviceId;
+			try {
+				selected = manager.SetPlayoutDeviceById(deviceId.toStdString());
+				if (intent->load() != serial || !callbacks->active()) return;
+				if (!selected && fallbackToDefault && !deviceId.isEmpty()) {
+					selected = manager.SetPlayoutDeviceById({});
+					selectedId.clear();
+				}
+				if (intent->load() != serial || !callbacks->active()) return;
+				available = manager.EnsurePlayout();
+			} catch (...) {
+				selected = false;
+			}
+			callbacks->Post([finish, selected, available, selectedId](MeetingRoomWindow *window) {
+				finish(window, selected, available, selectedId);
+			});
+		});
+	if (!accepted) {
+		callbacks->Post([finish, deviceId](MeetingRoomWindow *window) {
+			finish(window, false, false, deviceId);
+		});
+	}
+}
+#else
 bool MeetingRoomWindow::selectSpeakerDevice(const QString &deviceId) {
 	const auto operation = beginDeviceSwitchTelemetry(
 		_speakerSwitchTelemetry,
@@ -4127,6 +4222,62 @@ bool MeetingRoomWindow::selectSpeakerDevice(const QString &deviceId) {
 		livekit::telemetry::OperationOutcome::Success);
 	return true;
 }
+#endif
+
+void MeetingRoomWindow::queueMicrophoneMute(bool muted, bool commitRequestedState) {
+#ifdef Q_OS_LINUX
+    if (_microphoneStateCommit || !_wasapiCap || !_sessionRunning ||
+        _closeRequested || _closingForSessionInvalidation) return;
+    const auto capture = _wasapiCap;
+    if (!commitRequestedState && !_microphoneMutePending &&
+        capture->IsMuted() == muted) return;
+    if (!_captureUiCallbacks) {
+        _captureUiCallbacks = OpenMeeting::QtCallbackGate<MeetingRoomWindow>::Create(this);
+    }
+    const auto callbacks = _captureUiCallbacks;
+    const auto intent = _microphoneMuteIntent;
+    const auto serial = ++*intent;
+    _microphoneMutePending = true;
+    const bool accepted = OpenMeeting::SessionShutdownService::Instance().Submit(
+        [capture, callbacks, intent, serial, muted, commitRequestedState] {
+            if (intent->load() != serial || !callbacks->active()) return;
+            capture->SetMute(muted);
+            const bool available = capture->IsRunning();
+            callbacks->Post([capture, intent, serial, muted, commitRequestedState, available](MeetingRoomWindow* window) {
+                if (intent->load() != serial || window->_wasapiCap != capture ||
+                    !window->_sessionRunning || window->_closeRequested || window->_closingForSessionInvalidation) return;
+                const QPointer<MeetingRoomWindow> guard(window);
+                window->_microphoneMutePending = false;
+                window->_microphoneStateCommit = true;
+                const bool currentAvailable = available && capture->IsRunning();
+                window->applyMicrophoneAvailability(currentAvailable);
+                if (!guard) return;
+                if (commitRequestedState && window->_coordinator) {
+                    window->_coordinator->setLocalAudioMuted(muted || !currentAvailable);
+                    if (!guard) return;
+                }
+                window->_microphoneStateCommit = false;
+                if (!muted && !currentAvailable) {
+                    window->setMediaPreparationError(QCoreApplication::translate("MeetingUI", "Unable to start the microphone. Check the device and system permissions."));
+                }
+                window->updateMediaPreparationFeedback();
+                if (!guard) return;
+                // Admission/host policy may still require mute even after the
+                // native device opened. Apply that final intent on the worker.
+                if (window->_coordinator && window->_coordinator->isLocalAudioMuted() != capture->IsMuted()) {
+                    window->queueMicrophoneMute(window->_coordinator->isLocalAudioMuted());
+                }
+            });
+        });
+    if (!accepted) {
+        _microphoneMutePending = false;
+        applyMicrophoneAvailability(false);
+    }
+#else
+    if (_wasapiCap) _wasapiCap->SetMute(muted);
+    if (commitRequestedState && _coordinator) _coordinator->setLocalAudioMuted(muted);
+#endif
+}
 
 void MeetingRoomWindow::requestMicrophoneSwitch(const QString &deviceId) {
 	const auto operation = beginDeviceSwitchTelemetry(
@@ -4138,6 +4289,37 @@ void MeetingRoomWindow::requestMicrophoneSwitch(const QString &deviceId) {
 			livekit::telemetry::OperationOutcome::Failure);
 		return;
 	}
+#ifdef Q_OS_LINUX
+    const auto capture = _wasapiCap;
+    const auto callbacks = _captureUiCallbacks;
+    const auto intent = _microphoneSwitchIntent;
+    const auto serial = ++*intent;
+    _microphoneSwitchPending = true;
+    const bool accepted = OpenMeeting::SessionShutdownService::Instance().Submit(
+        [capture, callbacks, intent, serial, operation, id = deviceId.toStdString()] {
+            if (intent->load() != serial || !callbacks || !callbacks->active()) return;
+            std::uint64_t generation = 0;
+            try { generation = capture->SwitchDeviceTracked(id); } catch (...) {}
+            const bool available = capture->IsRunning();
+            callbacks->Post([capture, intent, serial, operation, generation, available](MeetingRoomWindow* window) {
+                if (intent->load() != serial || window->_wasapiCap != capture || !window->_sessionRunning ||
+                    window->_closeRequested || window->_closingForSessionInvalidation) return;
+                const QPointer<MeetingRoomWindow> guard(window);
+                window->_microphoneSwitchPending = false;
+                if (!window->_microphoneMutePending) window->applyMicrophoneAvailability(available && capture->IsRunning());
+                if (!guard) return;
+                window->finishDeviceSwitchTelemetry(window->_microphoneSwitchTelemetry, operation,
+                    generation != 0 ? livekit::telemetry::OperationOutcome::Success : livekit::telemetry::OperationOutcome::Failure);
+                if (generation == 0) window->setMediaPreparationError(
+                    QCoreApplication::translate("MeetingUI", "Unable to switch the microphone. Check the selected device and system permissions."));
+            });
+        });
+    if (!accepted) {
+        _microphoneSwitchPending = false;
+        finishDeviceSwitchTelemetry(_microphoneSwitchTelemetry, operation, livekit::telemetry::OperationOutcome::Failure);
+    }
+    return;
+#else
 	const auto generation = _wasapiCap->SwitchDeviceTracked(deviceId.toStdString());
 	if (generation == 0) {
 		finishDeviceSwitchTelemetry(
@@ -4162,15 +4344,47 @@ void MeetingRoomWindow::requestMicrophoneSwitch(const QString &deviceId) {
 			owner->_microphoneSwitchTelemetry, operation,
 			livekit::telemetry::OperationOutcome::Timeout);
 	});
+#endif
 }
 
 void MeetingRoomWindow::setSpeakerOutputMuted(bool muted) {
+#ifdef Q_OS_LINUX
+	_speakerRequestedMuted = muted;
+	const auto intent = _speakerMuteIntent;
+	const auto serial = ++*intent;
+	// Muting is immediate; an older native readiness completion cannot unmute.
+	if (_bottomBar) _bottomBar->setSpeakerMuted(true);
+	if (_room) _room->SetAudioOutputMuted(true);
+	if (muted || _speakerDevicePending || !_room || !_sessionRunning ||
+		_closeRequested || _closingForSessionInvalidation) return;
+	if (!_captureUiCallbacks) {
+		_captureUiCallbacks = OpenMeeting::QtCallbackGate<MeetingRoomWindow>::Create(this);
+	}
+	const auto callbacks = _captureUiCallbacks;
+	const auto room = _room;
+	const bool accepted = OpenMeeting::SessionShutdownService::Instance().Submit(
+		[callbacks, intent, serial, room] {
+			if (intent->load() != serial || !callbacks->active()) return;
+			bool available = false;
+			try { available = livekit::WebRTCManager::Instance().EnsurePlayout(); } catch (...) {}
+			callbacks->Post([intent, serial, weakRoom = std::weak_ptr<livekit::Room>(room), available](MeetingRoomWindow *window) {
+				if (intent->load() != serial || !window->_room || window->_room != weakRoom.lock() || !window->_sessionRunning ||
+					window->_closeRequested || window->_closingForSessionInvalidation) return;
+				window->_speakerAvailable = available;
+				const bool muted = window->_speakerRequestedMuted || !available;
+				if (window->_bottomBar) window->_bottomBar->setSpeakerMuted(muted);
+				window->_room->SetAudioOutputMuted(muted);
+			});
+		});
+	if (!accepted) _speakerAvailable = false;
+#else
 	if (!muted) {
 		_speakerAvailable = livekit::WebRTCManager::Instance().EnsurePlayout();
 		muted = !_speakerAvailable;
 	}
 	if (_bottomBar) _bottomBar->setSpeakerMuted(muted);
 	if (_room) _room->SetAudioOutputMuted(muted);
+#endif
 }
 
 void MeetingRoomWindow::applyMicrophoneAvailability(bool available) {
@@ -4179,16 +4393,22 @@ void MeetingRoomWindow::applyMicrophoneAvailability(bool available) {
 }
 
 void MeetingRoomWindow::bindMicrophoneCaptureState() {
-	const std::weak_ptr<livekit::WasapiAudioCapture> capture = _wasapiCap;
+	const std::weak_ptr<livekit::MicrophoneCapture> capture = _wasapiCap;
 	if (!_captureUiCallbacks) {
 		_captureUiCallbacks = OpenMeeting::QtCallbackGate<MeetingRoomWindow>::Create(this);
 	}
 	const auto callbacks = _captureUiCallbacks;
 	_wasapiCap->SetCaptureStateCallback([callbacks, capture](bool available) {
-		callbacks->Post([capture, available](MeetingRoomWindow *window) {
+		callbacks->Post([capture, available](MeetingRoomWindow *window) mutable {
 			if (!window->_sessionRunning || window->_closingForSessionInvalidation) return;
 			const auto source = capture.lock();
 			if (!source || window->_wasapiCap != source) return;
+#ifdef Q_OS_LINUX
+            if (window->_microphoneMutePending || window->_microphoneSwitchPending) return;
+            // Native notifications can queue across a later command. Project
+            // the latest atomic snapshot, never resurrect the older event.
+            available = source->IsRunning();
+#endif
 			window->applyMicrophoneAvailability(available);
 		});
 	});
@@ -4221,7 +4441,8 @@ void MeetingRoomWindow::setupAudioPreferencesBinding(
 	connect(&sessionManager, &OpenMeeting::SessionManager::preferencesChanged, this,
 		[this, session = QPointer<OpenMeeting::SessionManager>(&sessionManager),
 			previousMicrophone = sessionManager.mediaPreferences().microphoneDeviceId,
-			previousSpeaker = sessionManager.mediaPreferences().speakerDeviceId]
+			previousSpeaker = sessionManager.mediaPreferences().speakerDeviceId,
+			confirmedSpeaker = std::make_shared<QString>(sessionManager.mediaPreferences().speakerDeviceId)]
 		(const OpenMeeting::MediaPreferences &preferences) mutable {
 			// Submit before device-switch branches, which may return on failure.
 			// Unchanged video preferences are filtered by viewport deduplication.
@@ -4235,6 +4456,21 @@ void MeetingRoomWindow::setupAudioPreferencesBinding(
 			if (previousSpeaker != preferences.speakerDeviceId) {
 				if (_room && _coordinator
 					&& _coordinator->state() == OpenMeeting::MeetingState::InMeeting) {
+#ifdef Q_OS_LINUX
+					requestSpeakerDevice(preferences.speakerDeviceId, false,
+						[session, requested = preferences.speakerDeviceId, confirmedSpeaker](bool success) {
+							if (!session || session->mediaPreferences().speakerDeviceId != requested) return;
+							if (success) {
+									*confirmedSpeaker = requested;
+								return;
+							}
+							auto restored = session->mediaPreferences();
+							restored.speakerDeviceId = *confirmedSpeaker;
+							session->setMediaPreferences(restored);
+						});
+					previousSpeaker = preferences.speakerDeviceId;
+					return;
+#else
 					if (!selectSpeakerDevice(preferences.speakerDeviceId)) {
 						// Restore the previous choice after the current settings commit
 						// finishes; never overwrite a newer user selection.
@@ -4247,8 +4483,10 @@ void MeetingRoomWindow::setupAudioPreferencesBinding(
 							}, Qt::QueuedConnection);
 						return;
 					}
+#endif
 				}
 				previousSpeaker = preferences.speakerDeviceId;
+				*confirmedSpeaker = preferences.speakerDeviceId;
 			}
 		});
 }
@@ -4431,6 +4669,16 @@ void MeetingRoomWindow::invalidateCameraCompletion() {
 
 void MeetingRoomWindow::retireLocalCapture() {
 	Q_ASSERT(thread() == QThread::currentThread());
+#ifdef Q_OS_LINUX
+    ++*_microphoneMuteIntent;
+    ++*_microphoneSwitchIntent;
+    ++*_speakerDeviceIntent;
+    ++*_speakerMuteIntent;
+    _speakerDevicePending = false;
+    _speakerConfiguredRoom.reset();
+    _microphoneMutePending = false;
+    _microphoneSwitchPending = false;
+#endif
 	auto microphone = std::move(_wasapiCap);
 	auto manager = std::move(_cameraManager);
 	auto legacyCapture = std::move(_dshowCap);
@@ -4645,8 +4893,12 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
         ? std::max(80, _annotationButton->sizeHint().width()) : 0;
     const int controlStopW = _remoteControlStopButton && !_remoteControlStopButton->isHidden()
         ? std::max(100, _remoteControlStopButton->sizeHint().width()) : 0;
-    if (_screenShareBanner) _screenShareBanner->setContentsMargins(136, 4,
-        12 + (annotationW ? annotationW + 8 : 0) + (controlStopW ? controlStopW + 8 : 0), 4);
+    const int audioW = _screenAudioButton && !_screenAudioButton->isHidden()
+        ? std::max(110, _screenAudioButton->sizeHint().width()) : 0;
+    if (_screenShareBanner) _screenShareBanner->setContentsMargins(
+        _screenQualityButton && !_screenQualityButton->isHidden() ? 136 : 12, 4,
+        12 + (annotationW ? annotationW + 8 : 0) + (controlStopW ? controlStopW + 8 : 0) +
+            (audioW ? audioW + 8 : 0), 4);
 	const int shareBannerH = _screenShareBanner && !_screenShareBanner->isHidden() ? std::max(44, _screenShareBanner->heightForWidth(w)) : 0;
 	const int encryptionH = _encryptionPanel && !_encryptionPanel->isHidden()
 		? std::max(44, _encryptionPanel->sizeHint().height()) : 0;
@@ -4674,6 +4926,12 @@ void MeetingRoomWindow::resizeEvent(QResizeEvent *e) {
         _remoteControlStopButton->setGeometry(w - 12 - (annotationW ? annotationW + 8 : 0) - controlStopW,
             (shareBannerH - 32) / 2, controlStopW, 32);
         _remoteControlStopButton->raise();
+    }
+    if (audioW && shareBannerH > 0) {
+        _screenAudioButton->setGeometry(w - 12 - (annotationW ? annotationW + 8 : 0) -
+            (controlStopW ? controlStopW + 8 : 0) - audioW,
+            (shareBannerH - 32) / 2, audioW, 32);
+        _screenAudioButton->raise();
     }
 
 	_stageContainer->setGeometry(0, stageTop, stageW, stageH);
@@ -5413,6 +5671,19 @@ void MeetingRoomWindow::showVideoTileMenu(const QString& renderKey) {
                 const auto now = currentParticipant();
                 if (now && now->permissions.can_publish_data && _remoteControlUi) _remoteControlUi->requestTarget(identity, sid);
             });
+        } else if (const auto hint = _remoteControlUi->capabilityHint(); !hint.isEmpty()) {
+            auto* unavailable = menu->addAction(tr("Remote control"));
+            unavailable->setObjectName(QStringLiteral("tileRemoteControlUnavailable"));
+            unavailable->setEnabled(false);
+            unavailable->setToolTip(hint);
+            menu->setToolTipsVisible(true);
+        }
+    }
+    if (local && screenShare && _remoteControlUi) {
+        if (const auto hint = _remoteControlUi->capabilityHint(true); !hint.isEmpty()) {
+            auto* unavailable = menu->addAction(hint);
+            unavailable->setObjectName(QStringLiteral("tileRemoteControlHostUnavailable"));
+            unavailable->setEnabled(false);
         }
     }
     const bool supported = !_videoCanvas ||
@@ -5876,7 +6147,8 @@ void MeetingRoomWindow::requestScreenShare() {
 	if (!_coordinator) return;
 	using State = livekit::ScreenShareState;
 	const auto state = _coordinator->screenShareSnapshot().state;
-	if (state == State::Starting || state == State::Active || state == State::StopFailed) {
+	if (state == State::AwaitingPermission || state == State::Starting ||
+		state == State::Active || state == State::StopFailed) {
 		_coordinator->stopScreenShare();
 	} else if (state == State::Idle || state == State::Failed) {
 		if (auto *picker = findChild<QDialog *>(QStringLiteral("screen-share-picker"))) {
@@ -5924,6 +6196,10 @@ void MeetingRoomWindow::handleScreenShareSources(
 	AppTheme::setTone(*dialog, AppTheme::Tone::Dark);
 	auto *layout = new QVBoxLayout(dialog);
 	auto *sourceLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Select a screen or window (video only):"), dialog);
+#ifdef Q_OS_LINUX
+	sourceLabel->setText(QCoreApplication::translate("MeetingUI",
+		"Choose screen or window, then allow sharing in the system picker."));
+#endif
 	layout->addWidget(sourceLabel);
 	auto *sourceCombo = createElidedAccessibleComboBox(dialog);
 	sourceCombo->setObjectName(QStringLiteral("screenShareSource"));
@@ -5933,8 +6209,12 @@ void MeetingRoomWindow::handleScreenShareSources(
 		const auto &source = sources[i];
 		const auto kind = source.kind == livekit::DesktopSourceKind::Screen
 			? QCoreApplication::translate("MeetingUI", "Screen") : QCoreApplication::translate("MeetingUI", "Window");
+#ifdef Q_OS_LINUX
+		sourceCombo->addItem(kind);
+#else
 		sourceCombo->addItem(QString::number(i + 1) + QStringLiteral(". ") + kind +
 			QStringLiteral(" — ") + QString::fromStdString(source.title));
+#endif
 	}
 	layout->addWidget(sourceCombo);
 	auto *resolutionLabel = new QLabel(QCoreApplication::translate("MeetingUI", "Screen share resolution"), dialog);
@@ -5968,31 +6248,181 @@ void MeetingRoomWindow::handleScreenShareSources(
 	const int preferredIndex = fpsCombo->findData(preferredFps);
 	fpsCombo->setCurrentIndex(preferredIndex >= 0 ? preferredIndex : fpsCombo->findData(20));
 	layout->addWidget(fpsCombo);
+
+    QCheckBox *shareAudio = nullptr;
+    QComboBox *audioOutput = nullptr;
+#ifdef Q_OS_LINUX
+    shareAudio = new QCheckBox(QCoreApplication::translate("MeetingUI", "Share system audio (preview)"), dialog);
+    shareAudio->setObjectName(QStringLiteral("screenShareSystemAudio"));
+    shareAudio->setChecked(false);
+    layout->addWidget(shareAudio);
+    audioOutput = createElidedAccessibleComboBox(dialog);
+    audioOutput->setObjectName(QStringLiteral("screenShareAudioOutput"));
+    audioOutput->setAccessibleName(QCoreApplication::translate("MeetingUI", "System audio output to share"));
+    audioOutput->addItem(QCoreApplication::translate("MeetingUI", "System default output (follow changes)"), QString());
+    for (const auto &output : _coordinator->screenShareAudioOutputs()) {
+        if (output.id.empty()) continue;
+        audioOutput->addItem(QString::fromStdString(output.name), QString::fromStdString(output.id));
+    }
+    const bool audioAvailable = _coordinator->systemAudioSharingAvailable() && audioOutput->count() > 1;
+    shareAudio->setEnabled(audioAvailable);
+    audioOutput->setEnabled(false);
+    connect(shareAudio, &QCheckBox::toggled, audioOutput, &QWidget::setEnabled);
+    layout->addWidget(audioOutput);
+    auto *audioHint = new QLabel(QCoreApplication::translate("MeetingUI",
+        "Shares other applications playing through the selected output. Cohavora and streams with no known application are excluded. Audio is independent of the selected screen or window."), dialog);
+    audioHint->setWordWrap(true);
+    if (!audioAvailable) audioHint->setText(_coordinator->systemAudioSharingAvailable()
+        ? QCoreApplication::translate("MeetingUI", "No supported audio outputs are available. Video sharing is available.")
+        : QCoreApplication::translate("MeetingUI", "System audio sharing is unavailable in this build. Video sharing is available."));
+    layout->addWidget(audioHint);
+#endif
 	auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
 	layout->addWidget(buttons);
 	buttons->button(QDialogButtonBox::Ok)->setObjectName(QStringLiteral("screenShareAccept"));
 	buttons->button(QDialogButtonBox::Cancel)->setObjectName(QStringLiteral("screenShareCancel"));
 	AppTheme::setStyleVariant(*dialog, "screen-share-picker");
-	AppTheme::makeDialogAdaptive(*dialog, QSize(520, 360));
+	AppTheme::makeDialogAdaptive(*dialog, QSize(520, shareAudio ? 500 : 360));
 	dialog->setMaximumWidth(560);
 	connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
 	connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
 	QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
 	const std::weak_ptr<livekit::Room> room = _coordinator->room();
 	connect(dialog, &QDialog::accepted, this,
-		[coordinator, room, sources, sourceCombo, resolutionCombo, fpsCombo] {
+		[coordinator, room, sources, sourceCombo, resolutionCombo, fpsCombo, shareAudio, audioOutput] {
 			const int index = sourceCombo->currentIndex();
+			livekit::ScreenShareAudioOptions audio;
+            if (shareAudio && shareAudio->isEnabled() && shareAudio->isChecked() && audioOutput &&
+                audioOutput->currentIndex() >= 0) {
+                audio.enabled = true;
+                audio.output_id = audioOutput->currentData().toString().toStdString();
+                audio.output_name = audioOutput->currentText().toStdString();
+            }
 			if (coordinator && !room.expired() && coordinator->room() == room.lock() &&
 				index >= 0 && index < static_cast<int>(sources.size()))
 				coordinator->startScreenShare(sources[index], livekit::ScreenShareQuality{
 					static_cast<livekit::ScreenShareResolution>(resolutionCombo->currentData().toInt()),
-					fpsCombo->currentData().toInt()});
+					fpsCombo->currentData().toInt()}, std::move(audio));
 		});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::stateChanged,
 		dialog, [dialog](OpenMeeting::MeetingState state, const QString &) {
 			if (state != OpenMeeting::MeetingState::InMeeting) dialog->reject();
 		});
 	dialog->open();
+}
+
+void MeetingRoomWindow::openScreenShareAudioPicker(uint64_t run, uint64_t audioEpoch) {
+    using AudioState = livekit::ScreenShareAudioState;
+    if (!_coordinator || !_coordinator->isMeetingReady() || !_coordinator->systemAudioSharingAvailable()) return;
+    const auto snapshot = _coordinator->screenShareSnapshot();
+    if (snapshot.state != livekit::ScreenShareState::Active || snapshot.run_id != run ||
+        snapshot.audio_epoch != audioEpoch ||
+        (snapshot.audio_state != AudioState::Disabled && snapshot.audio_state != AudioState::Failed)) return;
+    if (auto *existing = findChild<QDialog*>(QStringLiteral("screen-share-audio-picker"))) {
+        existing->raise();
+        existing->activateWindow();
+        return;
+    }
+    auto *dialog = new QDialog(this);
+    dialog->setObjectName(QStringLiteral("screen-share-audio-picker"));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowFlag(Qt::WindowContextHelpButtonHint, false);
+    dialog->setWindowTitle(QCoreApplication::translate("MeetingUI", "Share system audio"));
+    AppTheme::setTone(*dialog, AppTheme::Tone::Dark);
+    AppTheme::setStyleVariant(*dialog, "screen-share-picker");
+    auto *layout = new QVBoxLayout(dialog);
+    auto *label = new QLabel(QCoreApplication::translate("MeetingUI", "System audio output to share"), dialog);
+    layout->addWidget(label);
+    auto *output = createElidedAccessibleComboBox(dialog);
+    output->setObjectName(QStringLiteral("screenShareAudioRestartOutput"));
+    output->setAccessibleName(label->text());
+    label->setBuddy(output);
+    layout->addWidget(output);
+    auto *status = new QLabel(dialog);
+    status->setObjectName(QStringLiteral("screenShareAudioOutputStatus"));
+    status->setWordWrap(true);
+    layout->addWidget(status);
+    auto *hint = new QLabel(QCoreApplication::translate("MeetingUI",
+        "Shares other applications playing through the selected output. Cohavora and streams with no known application are excluded. Audio is independent of the selected screen or window."), dialog);
+    hint->setWordWrap(true);
+    layout->addWidget(hint);
+    auto *refresh = new QPushButton(QCoreApplication::translate("MeetingUI", "Refresh audio outputs"), dialog);
+    refresh->setObjectName(QStringLiteral("screenShareAudioRefresh"));
+    layout->addWidget(refresh);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, dialog);
+    auto *start = buttons->button(QDialogButtonBox::Ok);
+    start->setObjectName(QStringLiteral("screenShareAudioStart"));
+    start->setText(QCoreApplication::translate("MeetingUI", "Start sharing audio"));
+    start->setEnabled(false);
+    buttons->button(QDialogButtonBox::Cancel)->setObjectName(QStringLiteral("screenShareAudioCancel"));
+    layout->addWidget(buttons);
+    QPointer<OpenMeeting::MeetingCoordinator> coordinator(_coordinator.get());
+    const std::weak_ptr<livekit::Room> room = _coordinator->room();
+    const auto request = std::make_shared<uint64_t>(0);
+    const auto isCurrent = [coordinator, room, run, audioEpoch] {
+        if (!coordinator || room.expired() || coordinator->room() != room.lock() || !coordinator->isMeetingReady()) return false;
+        const auto value = coordinator->screenShareSnapshot();
+        return value.state == livekit::ScreenShareState::Active && value.run_id == run &&
+            value.audio_epoch == audioEpoch &&
+            (value.audio_state == AudioState::Disabled || value.audio_state == AudioState::Failed);
+    };
+    const auto refreshOutputs = [coordinator, dialog, output, status, start, refresh, request, run, audioEpoch, isCurrent] {
+        if (!isCurrent()) { dialog->reject(); return; }
+        output->clear();
+        output->setEnabled(false);
+        start->setEnabled(false);
+        refresh->setEnabled(false);
+        status->setText(QCoreApplication::translate("MeetingUI", "Loading audio outputs…"));
+        *request = coordinator->requestScreenShareAudioOutputs(run, audioEpoch);
+        if (!*request) dialog->reject();
+    };
+    connect(coordinator.data(), &OpenMeeting::MeetingCoordinator::screenShareAudioOutputsReady, dialog,
+        [dialog, output, status, start, refresh, request, run, audioEpoch,
+         previousOutput = snapshot.audio_output_id, isCurrent](OpenMeeting::ScreenShareAudioOutputsSnapshot value) {
+            if (value.request_id != *request || value.run_id != run || value.audio_epoch != audioEpoch) return;
+            if (!isCurrent()) { dialog->reject(); return; }
+            output->clear();
+            output->addItem(QCoreApplication::translate("MeetingUI", "System default output (follow changes)"), QString());
+            for (const auto &device : value.outputs) {
+                if (!device.id.empty())
+                    output->addItem(QString::fromStdString(device.name), QString::fromStdString(device.id));
+            }
+            const bool available = output->count() > 1;
+            const int previous = output->findData(QString::fromStdString(previousOutput));
+            output->setCurrentIndex(available ? previous : -1);
+            output->setEnabled(available);
+            start->setEnabled(available && previous >= 0);
+            refresh->setEnabled(true);
+            status->setText(!available
+                ? QCoreApplication::translate("MeetingUI", "No supported audio outputs are available. Video sharing is available.")
+                : previous < 0
+                ? QCoreApplication::translate("MeetingUI", "The previous audio output is unavailable. Select another output.")
+                : QString());
+        }, Qt::QueuedConnection);
+    connect(output, QOverload<int>::of(&QComboBox::currentIndexChanged), dialog, [output, start](int index) {
+        start->setEnabled(output->isEnabled() && output->count() > 1 && index >= 0);
+    });
+    connect(refresh, &QPushButton::clicked, dialog, refreshOutputs);
+    connect(buttons, &QDialogButtonBox::accepted, dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    connect(dialog, &QDialog::accepted, this, [coordinator, output, run, audioEpoch, isCurrent] {
+        if (!isCurrent() || !output->isEnabled() || output->currentIndex() < 0) return;
+        livekit::ScreenShareAudioOptions options;
+        options.enabled = true;
+        options.output_id = output->currentData().toString().toStdString();
+        options.output_name = output->currentText().toStdString();
+        coordinator->startScreenShareAudio(std::move(options), run, audioEpoch);
+    });
+    connect(coordinator.data(), &OpenMeeting::MeetingCoordinator::screenShareChanged, dialog,
+        [dialog, isCurrent](livekit::ScreenShareSnapshot) { if (!isCurrent()) dialog->reject(); });
+    connect(coordinator.data(), &OpenMeeting::MeetingCoordinator::stateChanged, dialog,
+        [dialog](OpenMeeting::MeetingState state, const QString&) {
+            if (state != OpenMeeting::MeetingState::InMeeting) dialog->reject();
+        });
+    AppTheme::makeDialogAdaptive(*dialog, QSize(520, 330));
+    dialog->setMaximumWidth(560);
+    dialog->open();
+    refreshOutputs();
 }
 
 bool MeetingRoomWindow::isTrackVisible(const livekit::TrackKey &key) const {
@@ -6403,13 +6833,16 @@ void MeetingRoomWindow::syncScreenShareControls() {
             detached ? _annotationButton : nullptr, _screenShareDetails);
     }
     if (!_screenShareBanner) return;
-    const bool visible = _screenShareBannerNeeded && (!detached || !_remoteControlStatus.isEmpty());
+    const bool visible = _screenShareBannerNeeded && (!detached || !_remoteControlStatus.isEmpty() ||
+        !_screenShareAudioStatus.isEmpty() || _screenShareAudioControlNeeded);
     const bool relayout = _screenShareBanner->isHidden() == visible;
     _screenShareBanner->setVisible(visible);
-    _screenShareBanner->setText(detached ? _remoteControlStatus :
+    _screenShareBanner->setText(detached ? _screenShareAudioStatus +
+        (_remoteControlStatus.isEmpty() ? QString() : "\n" + _remoteControlStatus) :
         _screenShareText + (_remoteControlStatus.isEmpty() ? QString() : "\n" + _remoteControlStatus));
     _screenQualityButton->setVisible(_screenShareActive && !detached);
     _annotationButton->setVisible(_screenShareActive && !detached);
+    _screenAudioButton->setVisible(_screenShareAudioControlNeeded);
     if (relayout) {
         QResizeEvent layout(size(), size());
         resizeEvent(&layout);
@@ -6479,10 +6912,56 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
         connect(_remoteControlStopButton, &QPushButton::clicked, this, [this] {
             if (_remoteControlUi) _remoteControlUi->stop();
         });
+        _screenAudioButton = new QPushButton(QCoreApplication::translate("MeetingUI", "Shared audio"), _screenShareBanner);
+        _screenAudioButton->setObjectName(QStringLiteral("screenShareAudioControls"));
+        connect(_screenAudioButton, &QPushButton::clicked, this, [this] {
+            if (!_coordinator) return;
+            const auto state = _coordinator->screenShareSnapshot();
+            const std::weak_ptr<livekit::Room> room = _coordinator->room();
+            using AudioState = livekit::ScreenShareAudioState;
+            auto *menu = new QMenu(_screenAudioButton);
+            menu->setObjectName(QStringLiteral("screenShareAudioMenu"));
+            AppTheme::styleMenu(*menu, AppTheme::Tone::Dark);
+            connect(menu, &QMenu::aboutToHide, menu, &QObject::deleteLater);
+            if (state.state == livekit::ScreenShareState::Active &&
+                (state.audio_state == AudioState::Disabled || state.audio_state == AudioState::Failed)) {
+                auto *start = menu->addAction(QCoreApplication::translate("MeetingUI",
+                    state.audio_state == AudioState::Failed ? "Retry shared audio…" : "Share system audio…"));
+                start->setObjectName(QStringLiteral("screenShareAudioEnable"));
+                start->setEnabled(_coordinator->isMeetingReady() && _coordinator->systemAudioSharingAvailable());
+                connect(start, &QAction::triggered, this, [this, room, run = state.run_id, epoch = state.audio_epoch] {
+                    if (_coordinator && !room.expired() && _coordinator->room() == room.lock())
+                        openScreenShareAudioPicker(run, epoch);
+                });
+            }
+            if (state.audio_state == AudioState::Active) {
+                auto *mute = menu->addAction(QCoreApplication::translate("MeetingUI",
+                    state.audio_muted ? "Unmute shared audio" : "Mute shared audio"));
+                mute->setObjectName(QStringLiteral("screenShareAudioMute"));
+                mute->setEnabled(_coordinator->state() == OpenMeeting::MeetingState::InMeeting);
+                connect(mute, &QAction::triggered, this, [this, room, run = state.run_id,
+                        epoch = state.audio_epoch, muted = !state.audio_muted] {
+                    if (_coordinator && !room.expired() && _coordinator->room() == room.lock())
+                        _coordinator->setScreenShareAudioMuted(muted, run, epoch);
+                });
+            }
+            if (state.audio_state != AudioState::Disabled && state.audio_state != AudioState::Failed) {
+                auto *stop = menu->addAction(QCoreApplication::translate("MeetingUI",
+                    state.audio_state == AudioState::StopFailed ? "Retry stopping shared audio" : "Stop sharing audio"));
+                stop->setObjectName(QStringLiteral("screenShareAudioStop"));
+                stop->setEnabled(state.audio_state != AudioState::Stopping);
+                connect(stop, &QAction::triggered, this, [this, room, run = state.run_id, epoch = state.audio_epoch] {
+                    if (_coordinator && !room.expired() && _coordinator->room() == room.lock())
+                        _coordinator->stopScreenShareAudio(run, epoch);
+                });
+            }
+            menu->popup(_screenAudioButton->mapToGlobal(QPoint(0, _screenAudioButton->height())));
+        });
 	}
 	const bool active = snapshot.state == State::Active;
     _screenShareActive = active;
-    _screenShareBannerNeeded = active || snapshot.state == State::Starting ||
+    _screenShareBannerNeeded = active || snapshot.state == State::AwaitingPermission ||
+        snapshot.state == State::Starting ||
         snapshot.state == State::Stopping || snapshot.state == State::StopFailed;
 	std::optional<livekit::ScreenBinding> nextBinding;
 	if (active && snapshot.source_kind == livekit::DesktopSourceKind::Screen &&
@@ -6494,9 +6973,18 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		closeAnnotationOverlay();
 	}
 	_annotationBinding = std::move(nextBinding);
+	const auto shareTitle =
+#ifdef Q_OS_LINUX
+		QCoreApplication::translate("MeetingUI",
+			snapshot.source_kind == livekit::DesktopSourceKind::Window ? "Window" : "Screen");
+#else
+		QString::fromStdString(snapshot.source_title).isEmpty()
+			? QCoreApplication::translate("MeetingUI", "Screen")
+			: QString::fromStdString(snapshot.source_title);
+#endif
 	_screenShareText = active ? QCoreApplication::translate("MeetingUI", "Sharing: %1").arg(
-		QString::fromStdString(snapshot.source_title).isEmpty() ? QCoreApplication::translate("MeetingUI", "Screen") :
-		QString::fromStdString(snapshot.source_title)) :
+		shareTitle) :
+		snapshot.state == State::AwaitingPermission ? QCoreApplication::translate("MeetingUI", "Choose a screen or window in the system picker. Waiting for permission…") :
 		snapshot.state == State::Starting ? QCoreApplication::translate("MeetingUI", "Starting screen sharing...") :
 		snapshot.state == State::StopFailed ? QCoreApplication::translate("MeetingUI", "Capture stopped, but unpublishing failed. Try stopping sharing again.") :
 		QCoreApplication::translate("MeetingUI", "Stopping screen sharing...");
@@ -6519,9 +7007,55 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
     _screenShareDetails += qualityText.mid(dimensionsLength);
     _screenQualityButton->setToolTip(qualityText);
     if (active) _screenShareText += "  " + qualityText;
+    using AudioState = livekit::ScreenShareAudioState;
+    _screenShareAudioStatus.clear();
+    switch (snapshot.audio_state) {
+    case AudioState::Disabled:
+#ifdef Q_OS_LINUX
+        if (active) _screenShareAudioStatus = QCoreApplication::translate("MeetingUI", "System audio off");
+#endif
+        break;
+    case AudioState::Starting:
+        _screenShareAudioStatus = QCoreApplication::translate("MeetingUI", "Starting shared audio…"); break;
+    case AudioState::Active:
+        _screenShareAudioStatus = QCoreApplication::translate("MeetingUI", snapshot.audio_muted
+            ? "Shared audio muted" : "Sharing other application audio"); break;
+    case AudioState::Stopping:
+        _screenShareAudioStatus = QCoreApplication::translate("MeetingUI", "Stopping shared audio…"); break;
+    case AudioState::Failed:
+        _screenShareAudioStatus = active
+            ? QCoreApplication::translate("MeetingUI", "System audio failed; video sharing continues")
+            : QCoreApplication::translate("MeetingUI", "System audio failed"); break;
+    case AudioState::StopFailed:
+        _screenShareAudioStatus = QCoreApplication::translate("MeetingUI", "Audio capture stopped; retry removing its publication"); break;
+    default: break;
+    }
+    if (!_screenShareAudioStatus.isEmpty() && !snapshot.audio_output_name.empty())
+        _screenShareAudioStatus += QStringLiteral(" — ") + QString::fromStdString(snapshot.audio_output_name);
+    if (!_screenShareAudioStatus.isEmpty()) _screenShareText += "\n" + _screenShareAudioStatus;
+    _screenShareAudioControlNeeded = snapshot.audio_state == AudioState::Starting ||
+        snapshot.audio_state == AudioState::Active || snapshot.audio_state == AudioState::Stopping ||
+        snapshot.audio_state == AudioState::StopFailed;
+#ifdef Q_OS_LINUX
+    _screenShareAudioControlNeeded = _screenShareAudioControlNeeded || active;
+#endif
+    const bool canStartAudio = active && _coordinator && _coordinator->systemAudioSharingAvailable() &&
+        _coordinator->isMeetingReady();
+    const bool canStopAudio = snapshot.audio_state == AudioState::Starting ||
+        snapshot.audio_state == AudioState::Active || snapshot.audio_state == AudioState::StopFailed;
+    _screenAudioButton->setEnabled(canStartAudio || canStopAudio);
+    _screenAudioButton->setToolTip(active && _coordinator && !_coordinator->systemAudioSharingAvailable()
+        ? QCoreApplication::translate("MeetingUI", "System audio sharing is unavailable in this build. Video sharing is available.")
+        : _screenShareAudioStatus);
     _screenShareBanner->setText(_screenShareText + (_remoteControlStatus.isEmpty() ? QString() : "\n" + _remoteControlStatus));
     _remoteControlStopButton->setVisible(active && !_remoteControlStatus.isEmpty());
 	_annotationButton->setVisible(active);
+#ifdef Q_OS_LINUX
+	if (active) {
+		_annotationButton->setToolTip(QCoreApplication::translate(
+			"MeetingUI", "Annotation is not available for Wayland sharing yet."));
+	}
+#else
 	if (active && snapshot.source_kind == livekit::DesktopSourceKind::Window) {
 		_annotationButton->setToolTip(QCoreApplication::translate(
 			"MeetingUI", "Only full-screen sharing can be annotated."));
@@ -6532,6 +7066,7 @@ void MeetingRoomWindow::applyScreenShareSnapshot(livekit::ScreenShareSnapshot sn
 		_annotationButton->setToolTip(QCoreApplication::translate(
 			"MeetingUI", "Annotate the shared screen"));
 	}
+#endif
 	setAnnotationInteractionEnabled(
 		_coordinator && _coordinator->state() == OpenMeeting::MeetingState::InMeeting);
 	_localScreenPreview = active ? snapshot.preview : nullptr;
@@ -6651,9 +7186,24 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::screenShareChanged,
 		this, [this](livekit::ScreenShareSnapshot snapshot) {
 			applyScreenShareSnapshot(snapshot);
+            const auto previousAudioError = _lastScreenAudioError;
+            _lastScreenAudioError = snapshot.audio_error;
+            if (snapshot.state == livekit::ScreenShareState::Active &&
+                snapshot.audio_error != livekit::ScreenShareAudioError::None &&
+                snapshot.audio_error != previousAudioError) {
+                const auto message = snapshot.audio_error == livekit::ScreenShareAudioError::Unpublish
+                    ? QCoreApplication::translate("MeetingUI", "Shared audio capture has stopped, but removal of its publication is not confirmed. Retry stopping shared audio or leave the meeting. Video sharing continues.")
+                    : snapshot.audio_error == livekit::ScreenShareAudioError::Unavailable
+                    ? QCoreApplication::translate("MeetingUI", "System audio sharing is unavailable. Video sharing continues.")
+                    : QCoreApplication::translate("MeetingUI", "Shared audio could not be started or its selected output became unavailable. Audio capture has stopped. Video sharing continues.");
+                ShowMeetingWarning(this, "meetingScreenShareAudioFailure", "meetingScreenShareAudioFailureDismiss",
+                    QCoreApplication::translate("MeetingUI", "Shared audio"), message);
+            }
 			if (snapshot.error == livekit::ScreenShareError::None) return;
 			QString message;
-			if (snapshot.error == livekit::ScreenShareError::Capture)
+			if (snapshot.error == livekit::ScreenShareError::PermissionDenied)
+				message = QCoreApplication::translate("MeetingUI", "Screen sharing permission was denied. You can try again and allow access in the system picker.");
+			else if (snapshot.error == livekit::ScreenShareError::Capture)
 				message = QCoreApplication::translate("MeetingUI", "The selected screen or window is no longer available. Sharing has stopped. You can select another source.");
 			else if (snapshot.error == livekit::ScreenShareError::Publish)
 				message = QCoreApplication::translate("MeetingUI", "Unable to publish the screen share. Capture has stopped. Check your connection and publishing permissions, then try again.");
@@ -6751,7 +7301,7 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		_bottomBar->setAudioMuted(muted);
 		_localTile->setAudioMuted(muted);
 		if (_wasapiCap) {
-			_wasapiCap->SetMute(muted);
+			queueMicrophoneMute(muted);
 		}
 	});
 	connect(_coordinator.get(), &OpenMeeting::MeetingCoordinator::localVideoEnableChanged,
@@ -6790,11 +7340,19 @@ void MeetingRoomWindow::setupCoordinatorBindings() {
 		if (state == OpenMeeting::MeetingState::InMeeting) {
 			_room = _coordinator->room();
 			const auto preferences = OpenMeeting::SessionManager::instance().mediaPreferences();
+#ifdef Q_OS_LINUX
+			if (_speakerConfiguredRoom.lock() != _room) {
+				_speakerConfiguredRoom = _room;
+				requestSpeakerDevice(preferences.speakerDeviceId, true);
+				setSpeakerOutputMuted(!preferences.enableSpeaker);
+			}
+#else
 			if (!selectSpeakerDevice(preferences.speakerDeviceId)
 				&& !preferences.speakerDeviceId.isEmpty()) {
 				selectSpeakerDevice(QString());
 			}
 			setSpeakerOutputMuted(!preferences.enableSpeaker);
+#endif
 			restoreParticipantPresentations();
 		}
 	});
@@ -7247,7 +7805,9 @@ void MeetingRoomWindow::stopLiveKitSession(bool requestLeave) {
 	}
 
 	if (_wasapiCap) {
+#ifdef Q_OS_WIN
 		_wasapiCap->SetMute(true);
+#endif
 		_wasapiCap->SetCaptureStateCallback({});
 		_wasapiCap->SetDeviceFrameCallback({});
 		auto &manager = livekit::WebRTCManager::Instance();

@@ -92,10 +92,18 @@ std::optional<AbsolutePoint> MapAbsolute(uint16_t x, uint16_t y,
 Runtime::Runtime(Hooks hooks) : hooks_(std::move(hooks)) {}
 Runtime::~Runtime() { if (lease_) lease_->valid = false; if (hooks_.input) hooks_.input->stop(); }
 Message Runtime::message(Kind k) const { auto m = scope_; m.kind = k; return m; }
+Capabilities Runtime::capabilities() const {
+    try {
+        auto local = hooks_.capabilities ? hooks_.capabilities() : Capabilities{};
+        if (!hooks_.input && local.host.available()) local.host.status = CapabilityStatus::UnsupportedPlatform;
+        return local;
+    }
+    catch (...) { return {}; }
+}
 void Runtime::project(Reason reason) {
     if (hooks_.project) hooks_.project({state_,reason,peer_.identity,scope_.request,
         scope_.grant,scope_.track,scope_.width,scope_.height,
-        inputStatus_.epoch,inputStatus_.paused || controllerPaused_,controllerPaused_});
+        inputStatus_.epoch,inputStatus_.paused || controllerPaused_,controllerPaused_,capabilities(),host_});
 }
 bool Runtime::send(Message m) {
     try {
@@ -118,6 +126,10 @@ void Runtime::finish(Reason reason, bool notify) {
 void Runtime::stop(Reason reason) { finish(reason,true); }
 bool Runtime::current(uint64_t now) {
     if (state_ == State::Idle) return false;
+    const auto local = capabilities();
+    if (host_ ? !local.host.available() : !local.canControl()) {
+        finish(Reason::Unavailable,true); return false;
+    }
     if (!peerCurrent_ || !peerCurrent_()) { finish(Reason::PeerChanged,true); return false; }
     if (now >= deadline_) { finish(Reason::Timeout,true); return false; }
     if (host_ && (!hooks_.surface || hooks_.surface() != surface_)) {
@@ -128,6 +140,7 @@ bool Runtime::current(uint64_t now) {
 }
 void Runtime::request(Peer peer, Current check, std::string track, uint64_t now) {
     if (state_ != State::Idle || peer.identity.empty() || !check || !check() || track.empty()) return;
+    if (!capabilities().canControl()) { project(Reason::Unavailable); return; }
     peer_ = std::move(peer); peerCurrent_ = std::move(check);
     scope_ = {}; scope_.request = hooks_.newId(); scope_.track = std::move(track);
     state_ = State::Requesting; host_ = false; deadline_ = now + RequestMs;
@@ -181,6 +194,25 @@ void Runtime::receive(const Message& m, Peer peer, Current check, uint64_t now) 
     if (m.kind == Kind::Request) {
         if (state_ != State::Idle || (lastRequest_ && now - lastRequest_ < 2000) ||
             m.request.empty() || !m.grant.empty() || m.sequence != 0) return;
+        if (!capabilities().host.available()) {
+            // A missing safety capability is rejected before consent, even if
+            // the platform cannot produce a Windows screen binding at all.
+            lastRequest_ = now;
+            auto denied = m;
+            denied.kind = Kind::Deny;
+            try { if (hooks_.send) (void)hooks_.send(peer.identity,Encode(denied)); } catch (...) { }
+            if (hooks_.project) {
+                Projection unavailable;
+                unavailable.reason = Reason::Unavailable;
+                unavailable.peer = peer.identity;
+                unavailable.request = m.request;
+                unavailable.track = m.track;
+                unavailable.capabilities = capabilities();
+                unavailable.hosting = true;
+                hooks_.project(std::move(unavailable));
+            }
+            return;
+        }
         const auto surface = hooks_.surface ? hooks_.surface() : std::nullopt;
         if (!surface || surface->track != m.track || surface->binding.share_session_id.empty() ||
             !surface->binding.source_epoch) return;
@@ -196,7 +228,7 @@ void Runtime::receive(const Message& m, Peer peer, Current check, uint64_t now) 
     if (m.kind == Kind::End || m.kind == Kind::Deny) {
         // Cancelling a pending request may precede receipt of the host's Grant.
         if (m.grant == scope_.grant || (host_ && state_ != State::Controlled && m.grant.empty()))
-            finish(Reason::Cancelled,false);
+            finish(m.kind == Kind::Deny ? Reason::Unavailable : Reason::Cancelled,false);
         return;
     }
     if (state_ == State::Requesting && m.kind == Kind::Grant) {

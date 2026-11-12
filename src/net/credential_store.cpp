@@ -3,11 +3,94 @@
 #include "src/net/service_endpoint_policy.h"
 
 #include <QtCore/QJsonDocument>
+#include <QtCore/QPointer>
+#include <QtCore/QThread>
+#include <QtCore/QTimer>
 #include <QtCore/QUrl>
+#include <unordered_map>
+#ifdef Q_OS_LINUX
+#include "src/net/linux_secret_service.h"
+#endif
+#ifdef Q_OS_WIN
 #include <windows.h>
 #include <dpapi.h>
+#else
+#include <openssl/crypto.h>
+#endif
 
 namespace OpenMeeting {
+
+struct CredentialStore::AsyncAdapter {
+    struct Pending { bool cancelled = false; };
+    std::unique_ptr<QObject> dispatcher = std::make_unique<QObject>();
+    std::unordered_map<RequestId, std::shared_ptr<Pending>> requests;
+    RequestId next = 0;
+    bool closed = false;
+
+    template <typename F>
+    RequestId post(QObject *context, F operation) {
+        Q_ASSERT(QThread::currentThread() == dispatcher->thread());
+        if (!context) context = dispatcher.get();
+        if (context->thread() != dispatcher->thread()) return 0;
+        const QPointer<QObject> receiver(context);
+        auto pending = std::make_shared<Pending>();
+        pending->cancelled = closed;
+        const auto id = ++next;
+        requests.emplace(id, pending);
+        QTimer::singleShot(0, dispatcher.get(), [this, id, pending, receiver,
+                operation = std::move(operation)]() mutable {
+            requests.erase(id);
+            if (receiver) operation(pending->cancelled);
+        });
+        return id;
+    }
+};
+
+CredentialStore::CredentialStore() : adapter_(std::make_unique<AsyncAdapter>()) {}
+CredentialStore::~CredentialStore() = default;
+
+CredentialStore::RequestId CredentialStore::loadAsync(const QString &service,
+        const QString &account, Interaction, QObject *context, LoadCompletion completion) {
+    return adapter_->post(context, [this, service, account, completion = std::move(completion)](bool cancelled) mutable {
+        auto result = cancelled ? CredentialLoadResult{CredentialStatus::Cancelled, {}} : load(service, account);
+        if (completion) completion(std::move(result));
+    });
+}
+
+CredentialStore::RequestId CredentialStore::saveAsync(StoredSession session,
+        Interaction, QObject *context, StatusCompletion completion) {
+    return adapter_->post(context, [this, session = std::move(session), completion = std::move(completion)](bool cancelled) mutable {
+        const auto result = cancelled ? CredentialStatus::Cancelled : save(session);
+        if (completion) completion(result);
+    });
+}
+
+CredentialStore::RequestId CredentialStore::clearAsync(QObject *context, StatusCompletion completion) {
+    Q_ASSERT(QThread::currentThread() == adapter_->dispatcher->thread());
+    // Keep DPAPI/legacy revocation's original same-thread commit boundary.
+    // Cancellation may suppress notification, never the logout tombstone.
+    const auto result = clear();
+    return adapter_->post(context, [result, completion = std::move(completion)](bool cancelled) mutable {
+        if (completion) completion(result);
+        (void)cancelled;
+    });
+}
+
+void CredentialStore::cancel(RequestId request) {
+    Q_ASSERT(QThread::currentThread() == adapter_->dispatcher->thread());
+    if (const auto found = adapter_->requests.find(request); found != adapter_->requests.end())
+        found->second->cancelled = true;
+}
+
+void CredentialStore::shutdownAsync(QObject *context, std::function<void()> completion) {
+    Q_ASSERT(QThread::currentThread() == adapter_->dispatcher->thread());
+    adapter_->closed = true;
+    for (auto &[id, pending] : adapter_->requests) pending->cancelled = true;
+    adapter_->post(context, [completion = std::move(completion)](bool) mutable {
+        if (completion) completion();
+    });
+}
+
 namespace {
 constexpr auto kRecord = "auth/protectedSessionV2";
 constexpr auto kDisabled = "auth/restoreDisabled";
@@ -15,11 +98,16 @@ constexpr int kMaxPlaintext = 64 * 1024;
 constexpr int kMaxCiphertext = 128 * 1024;
 
 void wipe(QByteArray &bytes) {
+#ifdef Q_OS_WIN
     if (!bytes.isEmpty()) SecureZeroMemory(bytes.data(), static_cast<SIZE_T>(bytes.size()));
+#else
+    if (!bytes.isEmpty()) OPENSSL_cleanse(bytes.data(), static_cast<size_t>(bytes.size()));
+#endif
     bytes.clear();
 }
 
 bool protect(const QByteArray &input, QByteArray &output, bool encrypt) {
+#ifdef Q_OS_WIN
     DATA_BLOB source{static_cast<DWORD>(input.size()),
                      reinterpret_cast<BYTE *>(const_cast<char *>(input.constData()))};
     DATA_BLOB result{};
@@ -37,6 +125,12 @@ bool protect(const QByteArray &input, QByteArray &output, bool encrypt) {
         LocalFree(result.pbData);
     }
     return bounded;
+#else
+    Q_UNUSED(input);
+    Q_UNUSED(output);
+    Q_UNUSED(encrypt);
+    return false; // Secret Service support belongs to the keyring phase.
+#endif
 }
 
 class SettingsCredentialStore final : public CredentialStore {
@@ -137,6 +231,14 @@ private:
 };
 } // namespace
 
+bool credentialPersistenceSupported() {
+#if defined(Q_OS_WIN) || defined(Q_OS_LINUX)
+    return true;
+#else
+    return false;
+#endif
+}
+
 QString canonicalServiceUrl(const QString &text) {
     QUrl url(text.trimmed(), QUrl::StrictMode);
     if (!url.isValid() || url.host().isEmpty() || !url.userInfo().isEmpty() ||
@@ -163,12 +265,29 @@ QString credentialStatusMessage(CredentialStatus status) {
     case CredentialStatus::SaveFailed:
         return QCoreApplication::translate("MeetingUI", "Your session was not saved. You will need to sign in again next time.");
     case CredentialStatus::CleanupFailed:
+#ifdef Q_OS_LINUX
+        return QCoreApplication::translate("MeetingUI", "Unable to finish clearing saved sign-in data. Unlock the keyring and restore access to settings, then try again.");
+#else
         return QCoreApplication::translate("MeetingUI", "Unable to clear local credentials. Old credentials may remain after restarting. Restore write access to settings and try again.");
+#endif
+    case CredentialStatus::Locked:
+        return QCoreApplication::translate("MeetingUI", "Your keyring is locked. Unlock it to restore or save your session; you can continue without saving.");
+    case CredentialStatus::Busy:
+        return QCoreApplication::translate("MeetingUI", "Saved sign-in settings are busy. Try again, or continue without saving.");
+    case CredentialStatus::Denied:
+    case CredentialStatus::Cancelled:
+        return QCoreApplication::translate("MeetingUI", "Keyring access was cancelled. You can continue without saving your session.");
+    case CredentialStatus::TimedOut:
+        return QCoreApplication::translate("MeetingUI", "The keyring did not respond. You can continue without saving your session.");
     default: return {};
     }
 }
 
 std::unique_ptr<CredentialStore> makeCredentialStore(QSettings &settings) {
+#ifdef Q_OS_LINUX
+    return makeLinuxCredentialStore(settings);
+#else
     return std::make_unique<SettingsCredentialStore>(settings);
+#endif
 }
 } // namespace OpenMeeting

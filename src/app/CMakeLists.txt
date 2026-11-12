@@ -1,5 +1,32 @@
 cohavora_group_qt_generated_sources()
 
+if(UNIX AND NOT APPLE AND NOT COHAVORA_LINUX_PRODUCT_UI)
+    add_executable(cohavora_app
+        linux_minimal_main.cpp
+        ${PROJECT_SOURCE_DIR}/src/media/linux_camera_capture.cpp
+        ${PROJECT_SOURCE_DIR}/src/media/linux_camera_capture.h)
+    target_include_directories(cohavora_app BEFORE PRIVATE
+        ${PROJECT_SOURCE_DIR}
+        ${WEBRTC_ROOT}/include/third_party/libyuv/include)
+    target_link_libraries(cohavora_app PRIVATE
+        cohavora_core
+        cohavora_qt_video_render
+        cohavora_ui_theme
+        cohavora::qt_application_runtime)
+    target_compile_definitions(cohavora_app PRIVATE
+        COHAVORA_VERSION="${PROJECT_VERSION}")
+    set_target_properties(cohavora_app PROPERTIES
+        AUTOMOC ON OUTPUT_NAME "Cohavora")
+    qt5_import_plugins(cohavora_app
+        INCLUDE_BY_TYPE platforms
+            Qt5::QXcbIntegrationPlugin Qt5::QOffscreenIntegrationPlugin
+        INCLUDE_BY_TYPE imageformats
+            Qt5::QGifPlugin Qt5::QICOPlugin
+            Qt5::QWebpPlugin Qt5::QSvgPlugin
+        INCLUDE_BY_TYPE iconengines Qt5::QSvgIconPlugin)
+    return()
+endif()
+
 include(${PROJECT_SOURCE_DIR}/cmake/CohavoraUpdates.cmake)
 
 add_executable(cohavora_app
@@ -30,13 +57,18 @@ add_executable(cohavora_app
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_main_window.h
     ${PROJECT_SOURCE_DIR}/src/ui/settings_dialog.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/settings_dialog.h
-    ${PROJECT_SOURCE_DIR}/src/ui/audio_device_test_controller.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/audio_device_test_controller.h
     ${PROJECT_SOURCE_DIR}/src/ui/camera_preview_widget.cpp
     ${PROJECT_SOURCE_DIR}/src/ui/camera_preview_widget.h
     ${PROJECT_SOURCE_DIR}/src/ui/meeting_ui_integration.h
     ${PROJECT_SOURCE_DIR}/src/core/whiteboard/whiteboard_transport.h
 )
+
+if(WIN32)
+    target_sources(cohavora_app PRIVATE ${PROJECT_SOURCE_DIR}/src/ui/audio_device_test_controller.cpp)
+else()
+    target_sources(cohavora_app PRIVATE ${PROJECT_SOURCE_DIR}/src/ui/audio_device_test_controller_linux.cpp)
+endif()
 
 target_include_directories(cohavora_app BEFORE PRIVATE
     ${PROJECT_SOURCE_DIR}
@@ -55,8 +87,10 @@ target_link_libraries(cohavora_app PRIVATE
     cohavora_ui_theme
     cohavora_ui_translations
     cohavora_updates
-    cohavora_core
-    version)
+    cohavora_core)
+if(WIN32)
+    target_link_libraries(cohavora_app PRIVATE version)
+endif()
 
 set_target_properties(cohavora_app PROPERTIES
     AUTOMOC ON
@@ -81,6 +115,7 @@ if(WIN32)
     endforeach()
     source_group("Resources" FILES ${cohavora_resource_files})
 endif()
+if(WIN32)
 target_compile_definitions(cohavora_app PRIVATE
     WIN32
     _WINDOWS
@@ -90,7 +125,17 @@ target_compile_definitions(cohavora_app PRIVATE
     CRL_USE_WINAPI
     ASIO_STANDALONE
     WEBRTC_WIN)
+else()
+    target_link_libraries(cohavora_app PRIVATE Qt5::WaylandClient)
+    qt5_import_plugins(cohavora_app
+        INCLUDE_BY_TYPE platforms Qt5::QWaylandIntegrationPlugin Qt5::QXcbIntegrationPlugin Qt5::QOffscreenIntegrationPlugin
+        INCLUDE_BY_TYPE wayland-shell-integration Qt5::QWaylandXdgShellIntegrationPlugin
+        INCLUDE_BY_TYPE wayland-decoration-client Qt5::QWaylandBradientDecorationPlugin
+        INCLUDE_BY_TYPE wayland-graphics-integration-client Qt5::QWaylandEglClientBufferPlugin
+        INCLUDE_BY_TYPE imageformats Qt5::QJpegPlugin Qt5::QGifPlugin Qt5::QICOPlugin Qt5::QWebpPlugin Qt5::QSvgPlugin
+        INCLUDE_BY_TYPE iconengines Qt5::QSvgIconPlugin)
+endif()
 
 livekit_deploy_renderer(cohavora_app
     GROUP app
-    DESTINATION "${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>")
+    DESTINATION "$<IF:$<BOOL:${CMAKE_CONFIGURATION_TYPES}>,${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>,${CMAKE_CURRENT_BINARY_DIR}>")

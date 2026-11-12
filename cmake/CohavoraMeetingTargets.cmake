@@ -20,6 +20,14 @@ target_link_libraries(cohavora_meeting_network PUBLIC
     OpenSSL::Crypto)
 if(WIN32)
     target_link_libraries(cohavora_meeting_network PRIVATE crypt32)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(PkgConfig REQUIRED)
+    pkg_check_modules(COHAVORA_SECRET_SERVICE REQUIRED IMPORTED_TARGET libsecret-1)
+    target_sources(cohavora_meeting_network PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/net/linux_secret_service.cpp
+        ${PROJECT_SOURCE_DIR}/src/net/linux_secret_service.h
+        ${PROJECT_SOURCE_DIR}/src/net/linux_secret_service_store.cpp)
+    target_link_libraries(cohavora_meeting_network PRIVATE PkgConfig::COHAVORA_SECRET_SERVICE)
 endif()
 set_target_properties(cohavora_meeting_network PROPERTIES
     AUTOMOC ON
@@ -28,11 +36,17 @@ set_target_properties(cohavora_meeting_network PROPERTIES
 add_library(cohavora_remote_control STATIC
     ${PROJECT_SOURCE_DIR}/src/core/remote_control/remote_control.h
     ${PROJECT_SOURCE_DIR}/src/core/remote_control/remote_control.cpp
-    ${PROJECT_SOURCE_DIR}/src/platform/win/remote_input.h
-    ${PROJECT_SOURCE_DIR}/src/platform/win/remote_input.cpp)
+    ${PROJECT_SOURCE_DIR}/src/platform/remote_input.cpp)
+if(WIN32)
+    target_sources(cohavora_remote_control PRIVATE
+        ${PROJECT_SOURCE_DIR}/src/platform/win/remote_input.cpp)
+    target_link_libraries(cohavora_remote_control PRIVATE user32)
+endif()
 target_include_directories(cohavora_remote_control PUBLIC ${PROJECT_SOURCE_DIR})
-target_link_libraries(cohavora_remote_control PRIVATE nlohmann_json::nlohmann_json user32)
-target_compile_definitions(cohavora_remote_control PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_link_libraries(cohavora_remote_control PRIVATE nlohmann_json::nlohmann_json)
+if(WIN32)
+    target_compile_definitions(cohavora_remote_control PRIVATE WIN32_LEAN_AND_MEAN NOMINMAX)
+endif()
 set_target_properties(cohavora_remote_control PROPERTIES AUTOMOC OFF FOLDER "meeting")
 
 add_library(cohavora_meeting_runtime STATIC

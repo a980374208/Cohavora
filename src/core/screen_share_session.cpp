@@ -25,17 +25,37 @@ std::string NewShareSessionId() {
 }
 
 struct ScreenShareSession::Run {
+    struct CaptureCleanup {
+        std::mutex mutex;
+        std::unique_ptr<IDesktopCapture> capture;
+        std::atomic<bool> complete{false};
+        std::unique_ptr<IDesktopCapture> Claim() {
+            std::lock_guard lock(mutex);
+            return std::move(capture);
+        }
+    };
+    struct AudioCaptureCleanup {
+        std::mutex mutex;
+        std::unique_ptr<ISystemAudioCapture> capture;
+        std::atomic<bool> complete{false};
+        std::unique_ptr<ISystemAudioCapture> Claim() {
+            std::lock_guard lock(mutex);
+            return std::move(capture);
+        }
+    };
     explicit Run(asio::any_io_executor executor, uint64_t id,
                  std::shared_ptr<void> executor_lifetime)
-        : executor_lifetime(std::move(executor_lifetime)), timer(executor), id(id),
+        : executor_lifetime(std::move(executor_lifetime)), timer(executor), audio_timer(executor), id(id),
           source(std::make_shared<VideoSource>(0, 0)),
           preview(std::make_shared<render::VideoRenderRouter>(id, 1)) {}
     // Capture callbacks can retain Run independently of ScreenShareSession.
     // In particular the timer must be destroyed before its context lease.
     const std::shared_ptr<void> executor_lifetime;
     asio::steady_timer timer;
+    asio::steady_timer audio_timer;
     const uint64_t id;
     std::unique_ptr<IDesktopCapture> capture;
+    std::shared_ptr<CaptureCleanup> capture_cleanup; // strand; job owns stop/join
     std::shared_ptr<VideoSource> source;
     std::shared_ptr<LocalVideoTrack> track;
     std::shared_ptr<render::VideoRenderRouter> preview;
@@ -49,6 +69,8 @@ struct ScreenShareSession::Run {
     bool accepting = true; // delivery mutex; Stop is a frame barrier
     std::atomic<bool> first_frame{false};
     std::atomic<bool> ended{false};
+    std::optional<DesktopCapturePhase> capture_phase; // delivery mutex
+    std::optional<std::chrono::steady_clock::time_point> ready_at; // delivery mutex
     bool stopping = false; // strand
     bool published = false;
     bool driving = false;
@@ -59,7 +81,22 @@ struct ScreenShareSession::Run {
     bool quality_dirty = false;
     std::chrono::steady_clock::time_point next_metadata_retry{};
     ScreenShareQualityStatus quality_status = ScreenShareQualityStatus::Pending;
-
+    ScreenShareAudioOptions audio_options;
+    ScreenShareAudioState audio_state = ScreenShareAudioState::Disabled;
+    ScreenShareAudioError audio_error = ScreenShareAudioError::None;
+    std::unique_ptr<ISystemAudioCapture> audio_capture;
+    std::shared_ptr<AudioCaptureCleanup> audio_cleanup;
+    std::shared_ptr<AudioSource> audio_source;
+    std::shared_ptr<LocalAudioTrack> audio_track;
+    std::mutex audio_delivery;
+    uint64_t audio_epoch = 0; // strand writes under audio_delivery; callback generation
+    bool audio_accepting = false; // audio_delivery; independent PCM barrier
+    std::optional<SystemAudioCaptureStatus> audio_status; // bounded mailbox
+    bool audio_first_frame = false; // audio_delivery
+    bool audio_muted = false; // strand; native mute is SDK-gated
+    bool audio_stopping = false;
+    bool audio_publish_attempted = false;
+    bool audio_driving = false;
 };
 
 ScreenShareSession::Backend ScreenShareSession::ForRoom(const std::shared_ptr<Room>& room) {
@@ -90,6 +127,34 @@ ScreenShareSession::Backend ScreenShareSession::ForRoom(const std::shared_ptr<Ro
         // A completed full reconnect can legitimately retire this publication.
         // Do not touch the camera or a successor screen track by source alone.
     };
+    backend.publish_audio = [weak](std::shared_ptr<LocalAudioTrack> track) -> asio::awaitable<void> {
+        auto room = weak.lock();
+        auto local = room ? room->local_participant() : nullptr;
+        if (!local) throw std::runtime_error("share audio publish session closed");
+        co_await local->PublishTrackAsync(std::move(track));
+    };
+    backend.unpublish_audio = [weak](std::shared_ptr<LocalAudioTrack> track) -> asio::awaitable<void> {
+        auto room = weak.lock();
+        auto local = room ? room->local_participant() : nullptr;
+        if (!local) throw std::runtime_error("share audio unpublish session closed");
+        for (const auto& [sid, publication] : local->tracks()) {
+            if (publication && publication->track() == track) {
+                co_await local->UnpublishTrackAsync(sid);
+                co_return;
+            }
+        }
+    };
+    backend.mute_audio = [weak](std::shared_ptr<LocalAudioTrack> track, bool muted) {
+        auto room = weak.lock();
+        auto local = room ? room->local_participant() : nullptr;
+        if (!local) return;
+        for (const auto& [sid, publication] : local->tracks()) {
+            if (publication && publication->track() == track) {
+                local->SetMuted(sid, muted);
+                return;
+            }
+        }
+    };
     backend.apply_quality = [weak](auto track, auto profile) -> asio::awaitable<void> {
         auto room = weak.lock();
         if (!room) throw std::runtime_error("screen room retired");
@@ -113,8 +178,12 @@ ScreenShareSession::~ScreenShareSession() {
 }
 
 void ScreenShareSession::SetState(ScreenShareState state, ScreenShareError error) {
-    snapshot_ = {state, error};
+    snapshot_ = {};
+    snapshot_.state = state;
+    snapshot_.error = error;
     if (run_) {
+        snapshot_.run_id = run_->id;
+        snapshot_.audio_epoch = run_->audio_epoch;
         snapshot_.requested_quality = run_->requested;
         snapshot_.applied_quality = run_->applied;
         snapshot_.quality_status = run_->quality_status;
@@ -122,30 +191,68 @@ void ScreenShareSession::SetState(ScreenShareState state, ScreenShareError error
         snapshot_.source_kind = run_->source_kind;
         snapshot_.annotation_binding = run_->annotation_binding;
         snapshot_.track_sid = run_->track ? run_->track->sid() : std::string();
+        snapshot_.audio_state = run_->audio_state;
+        snapshot_.audio_error = run_->audio_error;
+        snapshot_.audio_muted = run_->audio_muted;
+        snapshot_.audio_output_name = run_->audio_options.output_name;
+        snapshot_.audio_output_id = run_->audio_options.output_id;
+        snapshot_.audio_track_sid = run_->audio_track ? run_->audio_track->sid() : std::string();
         if (state == ScreenShareState::Active) snapshot_.preview = run_->preview;
     }
     if (!closed_ && observer_) observer_(snapshot_);
 }
 
 void ScreenShareSession::StopFrames(const std::shared_ptr<Run>& run) {
+    run->audio_stopping = true;
+    if (run->audio_driving || run->audio_publish_attempted)
+        run->audio_state = ScreenShareAudioState::Stopping;
+    StopAudioFrames(run);
+    run->audio_timer.cancel();
     {
         std::lock_guard lock(run->delivery);
         run->accepting = false;
         run->preview->Deactivate(run->id);
     }
     if (run->capture) {
-        run->capture->Stop();
-        run->capture.reset();
+        auto cleanup = std::make_shared<Run::CaptureCleanup>();
+        cleanup->capture = std::move(run->capture);
+        run->capture_cleanup = cleanup;
+        backend_.dispatch_cleanup([cleanup, lifetime = run->executor_lifetime] {
+            auto capture = cleanup->Claim();
+            if (capture) capture->Stop();
+            capture.reset();
+            cleanup->complete.store(true, std::memory_order_release);
+        });
     }
 }
 
-void ScreenShareSession::Start(DesktopSource source, VideoPublishOptions options, ScreenShareQuality quality) {
+void ScreenShareSession::StopAudioFrames(const std::shared_ptr<Run>& run) {
+    {
+        std::lock_guard lock(run->audio_delivery);
+        run->audio_accepting = false;
+    }
+    if (run->audio_capture) {
+        auto cleanup = std::make_shared<Run::AudioCaptureCleanup>();
+        cleanup->capture = std::move(run->audio_capture);
+        run->audio_cleanup = cleanup;
+        backend_.dispatch_cleanup([cleanup, lifetime = run->executor_lifetime] {
+            auto capture = cleanup->Claim();
+            if (capture) capture->Stop();
+            capture.reset();
+            cleanup->complete.store(true, std::memory_order_release);
+        });
+    }
+}
+
+void ScreenShareSession::Start(DesktopSource source, VideoPublishOptions options, ScreenShareQuality quality,
+                               ScreenShareAudioOptions audio) {
     if (!quality.valid()) return;
     if (closed_ || run_ || !transport_ready_ || !backend_.connected()) return;
     auto run = std::make_shared<Run>(strand_, ++next_run_, executor_lifetime_);
     run->requested = quality;
     run->source_title = source.title;
     run->source_kind = source.kind;
+    run->audio_options = std::move(audio);
     if (source.kind == DesktopSourceKind::Screen && backend_.resolve_screen_binding) {
         try {
             run->annotation_binding = backend_.resolve_screen_binding(
@@ -161,6 +268,76 @@ void ScreenShareSession::Start(DesktopSource source, VideoPublishOptions options
     options.source = TrackSource::ScreenShareVideo;
     asio::co_spawn(strand_, Drive(
         shared_from_this(), run, std::move(source), std::move(options)), asio::detached);
+}
+
+void ScreenShareSession::StartAudioDriver(const std::shared_ptr<Run>& run) {
+    if (run->audio_driving) return;
+    run->audio_driving = true;
+    asio::co_spawn(strand_, DriveAudio(shared_from_this(), run, run->audio_epoch), asio::detached);
+}
+
+void ScreenShareSession::StartAudio(ScreenShareAudioOptions audio, uint64_t expected_run,
+                                   std::optional<uint64_t> expected_audio_epoch) {
+    if (!audio.enabled || closed_ || !run_ || run_->stopping ||
+        (expected_run && run_->id != expected_run) ||
+        (expected_audio_epoch && run_->audio_epoch != *expected_audio_epoch) ||
+        snapshot_.state != ScreenShareState::Active || !transport_ready_ || !backend_.connected() ||
+        (run_->audio_state != ScreenShareAudioState::Disabled && run_->audio_state != ScreenShareAudioState::Failed) ||
+        run_->audio_driving || run_->audio_publish_attempted || run_->audio_capture ||
+        run_->audio_track || run_->audio_source ||
+        (run_->audio_cleanup && !run_->audio_cleanup->complete.load(std::memory_order_acquire))) return;
+    auto run = run_;
+    run->audio_options = std::move(audio);
+    run->audio_cleanup.reset();
+    run->audio_stopping = false;
+    run->audio_muted = false;
+    run->audio_error = ScreenShareAudioError::None;
+    {
+        std::lock_guard lock(run->audio_delivery);
+        ++run->audio_epoch;
+        run->audio_accepting = false;
+        run->audio_status.reset();
+        run->audio_first_frame = false;
+    }
+    if (!backend_.audio_available()) {
+        run->audio_state = ScreenShareAudioState::Failed;
+        run->audio_error = ScreenShareAudioError::Unavailable;
+        SetState(ScreenShareState::Active);
+        return;
+    }
+    run->audio_state = ScreenShareAudioState::Starting;
+    SetState(ScreenShareState::Active);
+    StartAudioDriver(run);
+}
+
+void ScreenShareSession::SetAudioMuted(bool muted, uint64_t expected_run,
+                                      std::optional<uint64_t> expected_audio_epoch) {
+    if (closed_ || !run_ || run_->stopping || run_->audio_stopping ||
+        (expected_run && run_->id != expected_run) ||
+        (expected_audio_epoch && run_->audio_epoch != *expected_audio_epoch) ||
+        run_->audio_state != ScreenShareAudioState::Active || !transport_ready_ ||
+        !backend_.audio_available()) return;
+    if (run_->audio_muted == muted) return;
+    run_->audio_muted = muted;
+    run_->audio_track->set_muted(muted);
+    if (backend_.mute_audio) backend_.mute_audio(run_->audio_track, muted);
+    SetState(snapshot_.state, snapshot_.error);
+}
+
+void ScreenShareSession::StopAudio(uint64_t expected_run,
+                                  std::optional<uint64_t> expected_audio_epoch) {
+    if (closed_ || !run_ || !run_->audio_options.enabled ||
+        (expected_run && run_->id != expected_run) ||
+        (expected_audio_epoch && run_->audio_epoch != *expected_audio_epoch) ||
+        run_->audio_state == ScreenShareAudioState::Disabled ||
+        run_->audio_state == ScreenShareAudioState::Failed) return;
+    auto run = run_;
+    run->audio_stopping = true;
+    StopAudioFrames(run);
+    run->audio_timer.cancel();
+    run->audio_state = ScreenShareAudioState::Stopping;
+    SetState(snapshot_.state, snapshot_.error);
+    StartAudioDriver(run);
 }
 
 void ScreenShareSession::SetQuality(ScreenShareQuality quality) {
@@ -282,36 +459,210 @@ void ScreenShareSession::Stop() {
     run->stopping = true;
     StopFrames(run);
     run->timer.cancel();
+    // Reserve the parent driver before starting an audio retry: co_spawn can
+    // complete inline on this strand and otherwise finish run_ reentrantly.
+    const bool start_driver = !run->driving;
+    if (start_driver) run->driving = true;
     SetState(ScreenShareState::Stopping);
-    if (!run->driving) {
-        run->driving = true;
+    if (run->audio_publish_attempted && !run->audio_driving) StartAudioDriver(run);
+    if (start_driver) {
         asio::co_spawn(strand_, Drive(
             shared_from_this(), run, {}, VideoPublishOptions{}), asio::detached);
     }
 }
 
 void ScreenShareSession::Shutdown() {
-    auto capture = TakeCaptureForShutdown();
-    if (capture) capture->Stop();
-}
-
-std::unique_ptr<IDesktopCapture> ScreenShareSession::TakeCaptureForShutdown() {
     closed_ = true;
     observer_ = {};
-    std::unique_ptr<IDesktopCapture> capture;
     if (run_) {
         run_->stopping = true;
+        StopFrames(run_);
+        run_->timer.cancel();
+        run_.reset();
+    }
+    snapshot_ = {};
+}
+
+ScreenShareCaptureResources ScreenShareSession::TakeCapturesForShutdown() {
+    closed_ = true;
+    observer_ = {};
+    ScreenShareCaptureResources capture;
+    if (run_) {
+        run_->stopping = true;
+        run_->audio_stopping = true;
         {
             std::lock_guard lock(run_->delivery);
             run_->accepting = false;
             run_->preview->Deactivate(run_->id);
         }
-        capture = std::move(run_->capture);
+        {
+            std::lock_guard lock(run_->audio_delivery);
+            run_->audio_accepting = false;
+        }
+        capture.desktop = std::move(run_->capture);
+        capture.system_audio = std::move(run_->audio_capture);
+        // Session retirement may already occupy the same cleanup worker while
+        // awaiting this strand barrier. Reclaim an unstarted queued stop so
+        // that retirement can stop capture before destroying Room/SDK owners;
+        // its later queued job simply observes that ownership was transferred.
+        if (!capture.desktop && run_->capture_cleanup)
+            capture.desktop = run_->capture_cleanup->Claim();
+        if (!capture.system_audio && run_->audio_cleanup)
+            capture.system_audio = run_->audio_cleanup->Claim();
         run_->timer.cancel();
+        run_->audio_timer.cancel();
         run_.reset();
     }
     snapshot_ = {};
     return capture;
+}
+
+asio::awaitable<void> ScreenShareSession::DriveAudio(std::shared_ptr<ScreenShareSession> self,
+                                                   std::shared_ptr<Run> run, uint64_t audio_epoch) {
+    auto failure = run->audio_error == ScreenShareAudioError::Unpublish
+        ? ScreenShareAudioError::None : run->audio_error;
+    const auto current = [&] {
+        return !self->closed_ && self->run_ == run && run->audio_epoch == audio_epoch;
+    };
+    const auto notify = [&] {
+        if (current()) self->SetState(self->snapshot_.state, self->snapshot_.error);
+    };
+    try {
+        if (current() && !run->stopping && !run->audio_stopping) {
+            failure = ScreenShareAudioError::Unavailable;
+            if (!self->backend_.audio_available() || !self->backend_.publish_audio ||
+                !self->backend_.unpublish_audio)
+                throw std::runtime_error("share audio unavailable");
+            run->audio_capture = self->backend_.audio_capture();
+            if (!run->audio_capture) throw std::runtime_error("share audio unavailable");
+            failure = ScreenShareAudioError::Capture;
+            run->audio_source = std::make_shared<AudioSource>(48000, 2);
+            run->audio_state = ScreenShareAudioState::Starting;
+            run->audio_error = ScreenShareAudioError::None;
+            {
+                std::lock_guard lock(run->audio_delivery);
+                run->audio_accepting = true;
+            }
+            notify();
+            const std::weak_ptr<Run> weak = run;
+            const bool started = run->audio_capture->Start({run->audio_options.output_id},
+                [weak, audio_epoch](const AudioFrame& frame) {
+                    if (auto run = weak.lock()) {
+                        std::lock_guard lock(run->audio_delivery);
+                        if (!run->audio_accepting || run->audio_epoch != audio_epoch) return;
+                        run->audio_source->captureFrame(frame);
+                        run->audio_first_frame = true;
+                    }
+                }, [weak, audio_epoch](SystemAudioCaptureStatus status) {
+                    if (auto run = weak.lock()) {
+                        std::lock_guard lock(run->audio_delivery);
+                        if (!run->audio_accepting || run->audio_epoch != audio_epoch ||
+                            (run->audio_status && run->audio_status->phase == SystemAudioCapturePhase::Failed)) return;
+                        run->audio_status = status;
+                        if (status.phase == SystemAudioCapturePhase::Failed)
+                            run->audio_accepting = false;
+                    }
+                });
+            if (!started) throw std::runtime_error("share audio startup rejected");
+            const auto deadline = std::chrono::steady_clock::now() + self->backend_.first_frame_timeout;
+            while (current() && !run->stopping && !run->audio_stopping) {
+                std::optional<SystemAudioCaptureStatus> status;
+                bool first = false;
+                {
+                    std::lock_guard lock(run->audio_delivery);
+                    status = run->audio_status;
+                    first = run->audio_first_frame;
+                }
+                if (status && status->phase == SystemAudioCapturePhase::Failed)
+                    throw std::runtime_error("share audio capture failed");
+                if (status && status->phase == SystemAudioCapturePhase::Ready && first) break;
+                if (std::chrono::steady_clock::now() >= deadline)
+                    throw std::runtime_error("share audio first frame unavailable");
+                run->audio_timer.expires_after(20ms);
+                std::error_code error;
+                co_await run->audio_timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+            }
+            if (current() && !run->stopping && !run->audio_stopping) {
+                failure = ScreenShareAudioError::Publish;
+                AudioPublishPolicy policy;
+                policy.max_bitrate_bps = 128000;
+                policy.dtx = false;
+                run->audio_track = LocalAudioTrack::createLocalAudioTrack(
+                    "screen_audio_" + std::to_string(run->id) + "_" + std::to_string(audio_epoch),
+                    run->audio_source, policy);
+                run->audio_track->set_source(TrackSource::ScreenShareAudio);
+                // Resolve this exact track on rollback even if publication
+                // fails after installing a native sender or changes its SID.
+                run->audio_publish_attempted = true;
+                co_await self->backend_.publish_audio(run->audio_track);
+                failure = ScreenShareAudioError::None;
+                if (current() && !run->stopping && !run->audio_stopping) {
+                    run->audio_state = ScreenShareAudioState::Active;
+                    notify();
+                }
+            } else {
+                failure = ScreenShareAudioError::None;
+            }
+            while (current() && !run->stopping && !run->audio_stopping) {
+                {
+                    std::lock_guard lock(run->audio_delivery);
+                    if (run->audio_status && run->audio_status->phase == SystemAudioCapturePhase::Failed)
+                        throw std::runtime_error("share audio capture ended");
+                }
+                run->audio_timer.expires_after(20ms);
+                std::error_code error;
+                co_await run->audio_timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+            }
+        }
+    } catch (...) {
+        if (failure == ScreenShareAudioError::None) failure = ScreenShareAudioError::Capture;
+    }
+    run->audio_stopping = true;
+    self->StopAudioFrames(run);
+    if (!current()) co_return;
+    run->audio_state = ScreenShareAudioState::Stopping;
+    run->audio_error = failure;
+    notify();
+    while (current() && run->audio_cleanup && !run->audio_cleanup->complete.load(std::memory_order_acquire)) {
+        run->audio_timer.expires_after(20ms);
+        std::error_code error;
+        co_await run->audio_timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+    }
+    if (!current()) co_return;
+    if (run->audio_publish_attempted) {
+        while (current() && (!self->transport_ready_ || !self->backend_.connected())) {
+            run->audio_timer.expires_after(50ms);
+            std::error_code error;
+            co_await run->audio_timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+        }
+        if (!current()) co_return;
+        try {
+            co_await self->backend_.unpublish_audio(run->audio_track);
+            run->audio_publish_attempted = false;
+        } catch (...) {
+            if (!current()) co_return;
+            run->audio_driving = false;
+            run->audio_state = ScreenShareAudioState::StopFailed;
+            run->audio_error = ScreenShareAudioError::Unpublish;
+            notify();
+            co_return;
+        }
+    }
+    if (!current()) co_return;
+    run->audio_track.reset();
+    run->audio_source.reset();
+    run->audio_driving = false;
+    run->audio_error = failure;
+    run->audio_state = failure == ScreenShareAudioError::None
+        ? ScreenShareAudioState::Disabled : ScreenShareAudioState::Failed;
+    notify();
+    // A whole-share stop can have removed video while audio rollback failed.
+    // Completing the audio-only retry must also finish that parent transaction
+    // and release run_, so a new share does not require a second global Stop.
+    if (run->stopping && !run->driving) {
+        run->driving = true;
+        asio::co_spawn(self->strand_, Drive(self, run, {}, VideoPublishOptions{}), asio::detached);
+    }
 }
 
 asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSession> self,
@@ -329,10 +680,10 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
                     if (run->accepting) run->delivered = profile;
                 }
             })) throw std::runtime_error("screen quality unsupported");
-            run->capture->Start(std::move(target), [weak](const VideoFrame& frame) {
+            run->capture->StartWithStatus(std::move(target), [weak](const VideoFrame& frame) {
                 if (auto run = weak.lock()) {
                     std::lock_guard lock(run->delivery);
-                    if (!run->accepting) return;
+                    if (!run->accepting || run->capture_phase == DesktopCapturePhase::AwaitingPermission) return;
                     run->source->captureFrame(frame);
                     if (frame.type() == VideoBufferType::I420) {
                         const auto planes = frame.planeInfos();
@@ -346,14 +697,54 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
                     }
                     run->first_frame.store(true, std::memory_order_release);
                 }
-            }, [weak] { if (auto run = weak.lock()) run->ended.store(true); });
-            const auto deadline = std::chrono::steady_clock::now() + self->backend_.first_frame_timeout;
-            auto firstReady = [&] {
-                std::lock_guard lock(run->delivery);
-                return run->first_frame.load(std::memory_order_acquire) && run->delivered.has_value();
-            };
-            while (!self->closed_ && !run->stopping && !firstReady()) {
-                if (run->ended.load() || std::chrono::steady_clock::now() >= deadline)
+            }, [weak] { if (auto run = weak.lock()) run->ended.store(true); },
+            [weak](DesktopCapturePhase phase) {
+                if (auto run = weak.lock()) {
+                    std::lock_guard lock(run->delivery);
+                    if (!run->accepting) return;
+                    if (run->capture_phase == DesktopCapturePhase::Cancelled ||
+                        run->capture_phase == DesktopCapturePhase::Denied ||
+                        run->capture_phase == DesktopCapturePhase::Failed) return;
+                    // Late or duplicate permission notifications must not
+                    // downgrade Ready or extend the first-frame deadline.
+                    if (run->ready_at && (phase == DesktopCapturePhase::AwaitingPermission ||
+                                          phase == DesktopCapturePhase::Ready)) return;
+                    run->capture_phase = phase;
+                    if (phase == DesktopCapturePhase::Ready)
+                        run->ready_at = std::chrono::steady_clock::now();
+                    else if (phase != DesktopCapturePhase::AwaitingPermission) {
+                        run->accepting = false;
+                        run->ended.store(true);
+                    }
+                }
+            });
+            while (!self->closed_ && !run->stopping) {
+                std::optional<DesktopCapturePhase> phase;
+                std::optional<std::chrono::steady_clock::time_point> ready_at;
+                bool first_ready = false;
+                {
+                    std::lock_guard lock(run->delivery);
+                    phase = run->capture_phase;
+                    ready_at = run->ready_at;
+                    first_ready = ready_at && run->first_frame.load(std::memory_order_acquire)
+                        && run->delivered.has_value();
+                }
+                if (phase == DesktopCapturePhase::Cancelled || phase == DesktopCapturePhase::Denied ||
+                    phase == DesktopCapturePhase::Failed) {
+                    failure = phase == DesktopCapturePhase::Cancelled ? ScreenShareError::None
+                        : phase == DesktopCapturePhase::Denied ? ScreenShareError::PermissionDenied
+                        : ScreenShareError::Capture;
+                    run->stopping = true;
+                    break;
+                }
+                if (run->ended.load())
+                    throw std::runtime_error("screen capture first frame unavailable");
+                const auto state = phase == DesktopCapturePhase::AwaitingPermission
+                    ? ScreenShareState::AwaitingPermission : ScreenShareState::Starting;
+                if (self->snapshot_.state != state) self->SetState(state);
+                if (first_ready) break;
+                if (ready_at && std::chrono::steady_clock::now() >=
+                        *ready_at + self->backend_.first_frame_timeout)
                     throw std::runtime_error("screen capture first frame unavailable");
                 run->timer.expires_after(20ms);
                 std::error_code error;
@@ -377,6 +768,8 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
                 failure = ScreenShareError::None;
                 if (!self->closed_ && !run->stopping && !run->ended.load())
                     self->SetState(ScreenShareState::Active);
+                if (!self->closed_ && !run->stopping && !run->ended.load() && run->audio_options.enabled)
+                    self->StartAudio(run->audio_options, run->id, run->audio_epoch);
             }
             auto nextGeometryCheck = std::chrono::steady_clock::now();
             while (!self->closed_ && !run->stopping && !run->ended.load()) {
@@ -431,13 +824,33 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
                 std::error_code error;
                 co_await run->timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
             }
-            if (run->ended.load() && !run->stopping) failure = ScreenShareError::Capture;
+            if (run->ended.load() && !run->stopping) {
+                std::lock_guard lock(run->delivery);
+                failure = run->capture_phase == DesktopCapturePhase::Cancelled ? ScreenShareError::None
+                    : run->capture_phase == DesktopCapturePhase::Denied ? ScreenShareError::PermissionDenied
+                    : ScreenShareError::Capture;
+            }
         }
     } catch (...) {
         if (failure == ScreenShareError::None) failure = ScreenShareError::Capture;
     }
 
     self->StopFrames(run);
+    if (self->closed_) co_return;
+    while (!self->closed_ && run->audio_driving) {
+        run->timer.expires_after(20ms);
+        std::error_code error;
+        co_await run->timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+    }
+    if (self->closed_) co_return;
+    if (run->capture_cleanup && !run->capture_cleanup->complete.load(std::memory_order_acquire)) {
+        self->SetState(ScreenShareState::Stopping);
+        while (!self->closed_ && !run->capture_cleanup->complete.load(std::memory_order_acquire)) {
+            run->timer.expires_after(20ms);
+            std::error_code error;
+            co_await run->timer.async_wait(asio::redirect_error(asio::use_awaitable, error));
+        }
+    }
     if (self->closed_) co_return;
     if (run->published) {
         self->SetState(ScreenShareState::Stopping);
@@ -460,6 +873,11 @@ asio::awaitable<void> ScreenShareSession::Drive(std::shared_ptr<ScreenShareSessi
         }
     }
     if (self->closed_) co_return;
+    if (run->audio_publish_attempted) {
+        run->driving = false;
+        self->SetState(ScreenShareState::StopFailed, ScreenShareError::Unpublish);
+        co_return;
+    }
     self->run_.reset();
     self->SetState(failure == ScreenShareError::None ? ScreenShareState::Idle : ScreenShareState::Failed, failure);
 }

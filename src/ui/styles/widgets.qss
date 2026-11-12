@@ -163,6 +163,12 @@ QDialog[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login
     border: 1px solid @border@;
 }
 
+[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][objectName="loginCard"][linuxWindowFrameSurface="true"],
+[uiStyle="login-dialog-this"] [objectName="loginCard"][linuxWindowFrameSurface="true"] {
+    border: none;
+    border-radius: 0;
+}
+
 QLabel[uiStyle="login-dialog-this"][uiStyle="login-dialog-this"][uiStyle="login-dialog-this"],
 [uiStyle="login-dialog-this"] QLabel {
     color: @text@;
@@ -1996,6 +2002,12 @@ QFrame[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="
     background: @surface@;
     border: 1px solid @border@;
     border-radius: 12px;
+}
+
+QFrame[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][objectName="settingsSurface"][linuxWindowFrameSurface="true"],
+[uiStyle="settings-dialog-this"] QFrame[objectName="settingsSurface"][linuxWindowFrameSurface="true"] {
+    border: none;
+    border-radius: 0;
 }
 
 QWidget[uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"][uiStyle="settings-dialog-this"],

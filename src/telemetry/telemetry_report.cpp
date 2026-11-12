@@ -2998,7 +2998,7 @@ void TelemetryHistoryStore::WorkerContext::FlushPendingReports(bool force) {
         TelemetryCheckpointWork checkpoint_work;
         const auto result = AppendTelemetryCheckpoint(
             root_, it->id, it->records,
-            (std::min)(maximum_bytes_ / 2, 64ull * 1024ull * 1024ull),
+            (std::min)(maximum_bytes_ / 2, std::uint64_t{64} * 1024 * 1024),
             process_run_id_, maximum_bytes_, control_.get(), &checkpoint_work);
         {
             const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(

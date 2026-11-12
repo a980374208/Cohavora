@@ -3,10 +3,12 @@
 #include "render/canvas_render_timing.h"
 #include "render/api/render_backend_module_info.h"
 #include <QtGui/QWindow>
+#include <QtGui/QGuiApplication>
 #include <QtGui/QOpenGLContext>
 #include <QtGui/QOpenGLExtraFunctions>
 #include <QtGui/QMouseEvent>
 #include <QtCore/QCoreApplication>
+#include <QtCore/QPointer>
 #include <QtCore/QThread>
 #include <QtCore/QDebug>
 #include <chrono>
@@ -274,9 +276,33 @@ public:
         format.setRedBufferSize(8); format.setGreenBufferSize(8); format.setBlueBufferSize(8); format.setAlphaBufferSize(8);
         format.setDepthBufferSize(0); format.setStencilBufferSize(0); format.setSamples(0);
         setFormat(format);
+        if (host_->wayland_surface_) observeGeometry();
     }
-    void retire() { host_ = nullptr; hide(); setParent(nullptr); QObject::setParent(nullptr); }
+    void retire() {
+        for (const auto& widget : geometry_observers_) {
+            if (widget) widget->removeEventFilter(this);
+        }
+        geometry_observers_.clear();
+        host_ = nullptr;
+        hide(); setParent(nullptr); QObject::setParent(nullptr);
+    }
 protected:
+    bool eventFilter(QObject*, QEvent* event) override {
+        if (!host_) return false;
+        if (event->type() == QEvent::ParentChange) observeGeometry();
+        switch (event->type()) {
+        case QEvent::Show:
+        case QEvent::Move:
+        case QEvent::Resize:
+        case QEvent::ParentChange:
+        case QEvent::WinIdChange:
+            host_->syncSurfaceGeometry();
+            break;
+        default:
+            break;
+        }
+        return false;
+    }
     void exposeEvent(QExposeEvent*) override { if (host_) host_->requestRender(); }
     void resizeEvent(QResizeEvent*) override { if (host_) QTimer::singleShot(0, host_, [host = host_] { host->requestRender(); }); }
     bool event(QEvent* e) override {
@@ -286,12 +312,26 @@ protected:
         return QWindow::event(e);
     }
 private:
+    void observeGeometry() {
+        for (const auto& widget : geometry_observers_) {
+            if (widget) widget->removeEventFilter(this);
+        }
+        geometry_observers_.clear();
+        for (auto* widget = static_cast<QWidget*>(host_); widget; widget = widget->parentWidget()) {
+            widget->installEventFilter(this);
+            geometry_observers_.emplace_back(widget);
+        }
+    }
     GlVideoCanvas* host_;
+    std::vector<QPointer<QWidget>> geometry_observers_;
 };
 
 GlVideoCanvas::GlVideoCanvas(std::shared_ptr<BackendModule> module, QWidget* parent)
-    : ModuleVideoCanvas(std::move(module), parent) {
-    setAttribute(Qt::WA_NativeWindow);
+    : ModuleVideoCanvas(std::move(module), parent)
+    , wayland_surface_(QGuiApplication::platformName().startsWith(QStringLiteral("wayland"))) {
+    // Qt 5 Wayland shares the top-level backing store; an intermediate native
+    // QWidget has no buffer and would leave its GL subsurface unmapped.
+    if (!wayland_surface_) setAttribute(Qt::WA_NativeWindow);
     setAttribute(Qt::WA_NoSystemBackground);
     surface_ = new Surface(this);
     watchdog_ = new QTimer(this);
@@ -300,6 +340,20 @@ GlVideoCanvas::GlVideoCanvas(std::shared_ptr<BackendModule> module, QWidget* par
     connect(this, &VideoCanvas::rendererUnavailable, this, [this] { failed_ = true; releaseRenderer(); });
 }
 QWindow* GlVideoCanvas::windowSurface() const { return surface_; }
+void GlVideoCanvas::syncSurfaceGeometry() {
+    if (failed_ || !surface_) return;
+    auto* root = window();
+    auto* parent = wayland_surface_ ? root->windowHandle() : windowHandle();
+    if (!parent) return;
+    if (surface_->parent() != parent) {
+        // Reparenting recreates the native surface. Never do that under a live
+        // render owner; its normal retirement keeps the old surface pinned.
+        if (worker_) { fail(RenderGpuFailure::SurfaceLost); return; }
+        surface_->setParent(parent);
+    }
+    surface_->setGeometry(wayland_surface_
+        ? QRect(mapTo(root, QPoint()), size()) : rect());
+}
 GlVideoCanvas::~GlVideoCanvas() { stopRendering(); releaseRenderer(); delete surface_; }
 void GlVideoCanvas::startWorker() {
     if (worker_ || failed_ || !surface_->isExposed()) return;
@@ -355,9 +409,11 @@ void GlVideoCanvas::startWorker() {
 void GlVideoCanvas::showEvent(QShowEvent* e) {
     QWidget::showEvent(e);
     if (failed_ || !surface_) return;
-    winId(); // Create the raster host handle on UI before parenting the GL child.
-    surface_->setParent(windowHandle());
-    surface_->setGeometry(rect()); surface_->show(); requestRender();
+    if (wayland_surface_) window()->winId();
+    else winId(); // Create the raster host handle on UI before parenting the GL child.
+    syncSurfaceGeometry();
+    if (failed_ || !surface_) return;
+    surface_->show(); requestRender();
 }
 void GlVideoCanvas::hideEvent(QHideEvent* e) {
     QWidget::hideEvent(e);
@@ -366,7 +422,7 @@ void GlVideoCanvas::hideEvent(QHideEvent* e) {
 }
 void GlVideoCanvas::resizeEvent(QResizeEvent* e) {
     QWidget::resizeEvent(e);
-    if (!failed_ && surface_) surface_->setGeometry(rect());
+    syncSurfaceGeometry();
     requestRender();
 }
 void GlVideoCanvas::requestRender() {

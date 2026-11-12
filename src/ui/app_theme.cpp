@@ -39,6 +39,10 @@
 #include <utility>
 #include <vector>
 
+#if defined(Q_OS_LINUX)
+#include "src/ui/linux_system_theme.h"
+#endif
+
 #if defined(Q_OS_WIN)
 #include <dwmapi.h>
 #include <windows.h>
@@ -258,6 +262,9 @@ void styleDialogButtons(QDialogButtonBox &buttonBox) {
 
 void configureMessageBox(QMessageBox &box, Tone tone) {
 	box.setProperty(kToneProperty, toneName(tone));
+	// QMessageBox may already have fixed its size. Keep each intermediate
+	// constraint valid, including when restyling an exposed Wayland window.
+	box.setMaximumWidth(std::max(box.maximumWidth(), 460));
 	box.setMinimumWidth(460);
 	if (auto *label = box.findChild<QLabel *>(QStringLiteral("qt_msgbox_label"))) {
 		label->setWordWrap(true);
@@ -414,6 +421,9 @@ protected:
 				QPointer<QMessageBox> guard(box);
 				QTimer::singleShot(0, box, [guard, requestedMinimum] {
 					if (!guard) return;
+					// Qt's showEvent can set a smaller fixed maximum. Sending
+					// min > max disconnects the client from a Wayland compositor.
+					guard->setMaximumSize(guard->maximumSize().expandedTo(requestedMinimum));
 					guard->setMinimumSize(requestedMinimum);
 					guard->resize(guard->size().expandedTo(requestedMinimum));
 					centerOnParentOrScreen(*guard);
@@ -457,6 +467,15 @@ public:
 		const auto saved = QSettings().value(QString::fromLatin1(kThemeSetting), QStringLiteral("system")).toString();
 		selected = themeFromId(saved);
 		if (saved != themeId(selected)) QSettings().setValue(QString::fromLatin1(kThemeSetting), themeId(selected));
+#if defined(Q_OS_LINUX)
+		if (!options_.systemThemeProbe) {
+			linuxSystemTheme_ = new LinuxSystemTheme(this);
+			connect(linuxSystemTheme_, &LinuxSystemTheme::changed, this, [this] {
+				system_ = linuxSystemTheme_->prefersDark().value_or(false) ? Theme::Dark : Theme::Light;
+				if (selected == Theme::System) apply(false);
+			});
+		}
+#endif
 		probeSystem();
 		effective = selected == Theme::System ? system_ : selected;
 		application_.installNativeEventFilter(this);
@@ -549,6 +568,13 @@ private:
 		std::shared_ptr<std::function<void()>> callback;
 	};
 	void probeSystem() {
+#if defined(Q_OS_LINUX)
+		if (linuxSystemTheme_) {
+			system_ = linuxSystemTheme_->prefersDark().value_or(false) ? Theme::Dark : Theme::Light;
+			linuxSystemTheme_->refresh();
+			return;
+		}
+#endif
 		const auto result = options_.systemThemeProbe ? options_.systemThemeProbe() : platformTheme();
 		if (result && (*result == Theme::Light || *result == Theme::Dark)) system_ = *result;
 	}
@@ -566,6 +592,9 @@ private:
 	InstallOptions options_;
 	QString sheet_;
 	Theme system_ = Theme::Light;
+#if defined(Q_OS_LINUX)
+	LinuxSystemTheme *linuxSystemTheme_ = nullptr;
+#endif
 	std::vector<Observer> observers_;
 	quint64 observerId_ = 0;
 	bool probeQueued_ = false, applying_ = false, applyQueued_ = false, pendingNotify_ = false;

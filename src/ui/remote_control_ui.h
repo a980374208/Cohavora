@@ -47,6 +47,7 @@ public:
     void setTileMenuMode(bool enabled) { tileMenuMode_ = enabled; refreshTargets(); }
     bool canRequestTarget(const QString& identity, const QString& track) const;
     bool controlsTarget(const QString& identity, const QString& track) const;
+    QString capabilityHint(bool host = false) const;
     void requestTarget(const QString& identity, const QString& track);
     void stop();
     bool active() const { return projection_.state != livekit::remote_control::State::Idle; }

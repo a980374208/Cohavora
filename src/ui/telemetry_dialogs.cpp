@@ -1,3 +1,4 @@
+#include "src/platform/qt_path.h"
 #include "src/core/session_shutdown_service.h"
 #include "src/ui/telemetry_dialogs.h"
 
@@ -610,7 +611,7 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 			[cancelled] { cancelled->store(true, std::memory_order_release); });
 		const auto dispatcher = OpenMeeting::detail::QtDispatchEndpoint::Create();
 		if (!store->ExportReport(recordId,
-				std::filesystem::path(destination.toStdWString()),
+				cohavora::platform::PathFromQString(destination),
 				[dispatcher, guard, progressGuard](livekit::telemetry::TelemetryExportResult result) {
 					if (dispatcher) dispatcher->Post( [guard, progressGuard, result = std::move(result)] {
 						if (progressGuard) progressGuard->close();
@@ -621,7 +622,7 @@ QDialog *OpenPostMeetingTelemetryDialog(QWidget *parent) {
 						message.setIcon(result.success ? QMessageBox::Information : QMessageBox::Warning);
 						message.setText(result.success
 							? QCoreApplication::translate("MeetingUI", "Report exported to %1")
-								.arg(QString::fromStdWString(result.report_directory.wstring()))
+								.arg(cohavora::platform::QStringFromPath(result.report_directory))
 							: QCoreApplication::translate("MeetingUI", "Export failed: %1")
 								.arg(QString::fromStdString(result.reason)));
 						message.setStandardButtons(QMessageBox::Ok);

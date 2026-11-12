@@ -3,6 +3,8 @@
 #include <asio.hpp>
 #include "desktop_capture.h"
 #include "local_video_track.h"
+#include "local_audio_track.h"
+#include "system_audio_capture.h"
 #include "render/video_render_router.h"
 #include <functional>
 #include <memory>
@@ -11,9 +13,20 @@
 namespace livekit {
 class Room;
 
-enum class ScreenShareState { Idle, Starting, Active, Stopping, Failed, StopFailed };
-enum class ScreenShareError { None, Capture, Publish, Unpublish };
+enum class ScreenShareState { Idle, Starting, Active, Stopping, Failed, StopFailed, AwaitingPermission };
+enum class ScreenShareError { None, Capture, Publish, Unpublish, PermissionDenied };
 enum class ScreenShareQualityStatus { Applied, Pending, Rejected, MetadataPending, Degraded };
+enum class ScreenShareAudioState { Disabled, Starting, Active, Stopping, Failed, StopFailed };
+enum class ScreenShareAudioError { None, Unavailable, Capture, Publish, Unpublish };
+struct ScreenShareAudioOptions {
+    bool enabled = false;
+    std::string output_id;
+    std::string output_name;
+};
+struct ScreenShareCaptureResources {
+    std::unique_ptr<IDesktopCapture> desktop;
+    std::unique_ptr<ISystemAudioCapture> system_audio;
+};
 struct ScreenShareSnapshot {
     ScreenShareState state = ScreenShareState::Idle;
     ScreenShareError error = ScreenShareError::None;
@@ -26,6 +39,14 @@ struct ScreenShareSnapshot {
     DesktopSourceKind source_kind = DesktopSourceKind::Window;
     std::optional<ScreenBinding> annotation_binding;
     std::string track_sid;
+    ScreenShareAudioState audio_state = ScreenShareAudioState::Disabled;
+    ScreenShareAudioError audio_error = ScreenShareAudioError::None;
+    bool audio_muted = false;
+    std::string audio_output_name;
+    std::string audio_track_sid;
+    uint64_t run_id = 0;
+    uint64_t audio_epoch = 0;
+    std::string audio_output_id;
 };
 
 // Mirrors Flutter's serialized setSourceEnabled(screenShareVideo): capture,
@@ -39,6 +60,23 @@ public:
         std::function<bool()> connected;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>)> publish;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>)> unpublish;
+        std::function<bool()> audio_available = [] {
+#if defined(WEBRTC_LINUX)
+            return SystemAudioSharingAvailable();
+#else
+            return false;
+#endif
+        };
+        std::function<std::unique_ptr<ISystemAudioCapture>()> audio_capture = []() -> std::unique_ptr<ISystemAudioCapture> {
+#if defined(WEBRTC_LINUX)
+            return CreateSystemAudioCapture();
+#else
+            return {};
+#endif
+        };
+        std::function<asio::awaitable<void>(std::shared_ptr<LocalAudioTrack>)> publish_audio;
+        std::function<asio::awaitable<void>(std::shared_ptr<LocalAudioTrack>)> unpublish_audio;
+        std::function<void(std::shared_ptr<LocalAudioTrack>, bool)> mute_audio;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>, ScreenShareFrameProfile)> apply_quality;
         std::function<asio::awaitable<void>(std::shared_ptr<LocalVideoTrack>, ScreenShareFrameProfile)> sync_quality;
         std::function<std::optional<ScreenBinding>(
@@ -46,6 +84,12 @@ public:
                 ResolveScreenBinding;
         std::function<ScreenBindingStatus(const ScreenBinding &)> validate_screen_binding =
             CheckScreenBinding;
+        // The application injects its native-cleanup queue so capture stop/join
+        // precedes later Room/SDK retirement. The process-owned Asio executor
+        // is the non-Qt fallback for standalone users.
+        std::function<void(std::function<void()>)> dispatch_cleanup = [](std::function<void()> job) {
+            asio::post(asio::system_executor(), std::move(job));
+        };
         std::chrono::milliseconds first_frame_timeout{5000};
         std::chrono::milliseconds geometry_check_interval{500};
     };
@@ -56,15 +100,25 @@ public:
     ~ScreenShareSession();
     void Start(DesktopSource source,
                VideoPublishOptions options = VideoPublishOptions(),
-               ScreenShareQuality quality = {});
+               ScreenShareQuality quality = {},
+               ScreenShareAudioOptions audio = {});
     void SetQuality(ScreenShareQuality quality);
+    // Explicitly starts/retries audio within an active video share. The former
+    // audio driver, publication and native cleanup must have fully completed.
+    void StartAudio(ScreenShareAudioOptions audio, uint64_t expected_run = 0,
+                    std::optional<uint64_t> expected_audio_epoch = std::nullopt);
+    void SetAudioMuted(bool muted, uint64_t expected_run = 0,
+                       std::optional<uint64_t> expected_audio_epoch = std::nullopt);
+    void StopAudio(uint64_t expected_run = 0,
+                   std::optional<uint64_t> expected_audio_epoch = std::nullopt);
     void Stop();
-    // Revokes capture synchronously on the strand before Room disconnect and
-    // executor teardown. Room disconnect owns the network rollback on leave.
+    // Revokes capture synchronously on the strand and queues native stop/join.
+    // Application cleanup must drain before Room/SDK/executor teardown.
     void Shutdown();
-    // Strand-only revocation. The returned capture must be stopped/released by
-    // the shutdown worker while the strand continues draining its coroutine.
-    std::unique_ptr<IDesktopCapture> TakeCaptureForShutdown();
+    // Strand-only revocation, including reclaiming queued/unstarted captures.
+    // Both returned captures must be stopped/released by the same serialized
+    // cleanup worker while the strand continues draining its coroutine.
+    ScreenShareCaptureResources TakeCapturesForShutdown();
     void SetTransportReady(bool ready);
     ScreenShareSnapshot snapshot() const { return snapshot_; } // strand only
 
@@ -77,8 +131,12 @@ private:
                                        std::shared_ptr<Run> run, DesktopSource source,
                                        VideoPublishOptions options);
     static asio::awaitable<void> ApplyQuality(std::shared_ptr<ScreenShareSession> self, std::shared_ptr<Run> run);
+    static asio::awaitable<void> DriveAudio(std::shared_ptr<ScreenShareSession> self,
+                                           std::shared_ptr<Run> run, uint64_t audio_epoch);
     void SetState(ScreenShareState state, ScreenShareError error = ScreenShareError::None);
     void StopFrames(const std::shared_ptr<Run>& run);
+    void StopAudioFrames(const std::shared_ptr<Run>& run);
+    void StartAudioDriver(const std::shared_ptr<Run>& run);
     asio::any_io_executor strand_;
     Backend backend_;
     Observer observer_;

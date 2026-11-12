@@ -24,6 +24,12 @@ public:
     SourceState state() const override { return kLive; }
     bool remote() const override { return false; }
 
+    // The Linux SDK keeps external PCM senders out of the native ADM fanout.
+    // Native microphone tracks use the factory's AudioSource, not this bridge.
+#if defined(WEBRTC_LINUX)
+    bool is_external_source() const override { return true; }
+#endif
+
     // webrtc::AudioSourceInterface impl
     void AddSink(webrtc::AudioTrackSinkInterface* sink) override;
     void RemoveSink(webrtc::AudioTrackSinkInterface* sink) override;

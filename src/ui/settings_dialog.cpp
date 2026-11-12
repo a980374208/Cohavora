@@ -5,8 +5,12 @@
 #include "src/ui/app_translation.h"
 #include "src/ui/app_icons.h"
 #include "src/ui/settings_dialog.h"
+#ifdef Q_OS_LINUX
+#include "src/ui/linux_window_frame.h"
+#endif
 #include "src/ui/screen_share_quality_controls.h"
 #include "src/update/update_service.h"
+#include <QtWidgets/QFileDialog>
 
 #include "src/core/session_shutdown_service.h"
 #include "src/e2ee/meeting_encryption.h"
@@ -27,6 +31,7 @@
 #include <QtGui/QRegion>
 #include <QtGui/QWheelEvent>
 #include <QtWidgets/QApplication>
+#include <QtWidgets/QAbstractButton>
 #include <QtWidgets/QButtonGroup>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QComboBox>
@@ -56,13 +61,25 @@
 namespace MeetingUI {
 namespace {
 
+#ifdef Q_OS_WIN
+constexpr bool kAudioDeviceTestsSupported = true;
+#else
+constexpr bool kAudioDeviceTestsSupported = false;
+#endif
+
 constexpr auto kDeviceIdRole = Qt::UserRole;
 constexpr auto kDevicePendingRole = Qt::UserRole + 1;
 constexpr auto kWidthRole = Qt::UserRole;
 constexpr auto kHeightRole = Qt::UserRole + 1;
 constexpr auto kFpsRole = Qt::UserRole + 2;
 constexpr auto kSurfaceRadius = 12;
+#ifdef Q_OS_LINUX
+// LinuxWindowFrame paints outside the content surface without changing its
+// geometry. Keep the existing in-buffer shadow only on the other platforms.
+constexpr auto kShadowMargin = 0;
+#else
 constexpr auto kShadowMargin = 18;
+#endif
 constexpr auto kTitleBarHeight = 49;
 
 class RoundedSurface final : public QFrame {
@@ -74,9 +91,11 @@ public:
 protected:
 	void resizeEvent(QResizeEvent *event) override {
 		QFrame::resizeEvent(event);
+#ifndef Q_OS_LINUX
 		QPainterPath path;
 		path.addRoundedRect(QRectF(rect()), kSurfaceRadius, kSurfaceRadius);
 		setMask(QRegion(path.toFillPolygon().toPolygon()));
+#endif
 	}
 };
 
@@ -219,6 +238,24 @@ SettingsDialog::SettingsDialog(
 	resize(760 + kShadowMargin * 2, 640 + kShadowMargin * 2);
 	setMinimumSize(680 + kShadowMargin * 2, 520 + kShadowMargin * 2);
 	buildUi();
+#ifdef Q_OS_LINUX
+	const QPointer<QWidget> titleBar = findChild<QWidget *>(QStringLiteral("titleBar"));
+	LinuxWindowFrameOptions frameOptions;
+	frameOptions.radius = kSurfaceRadius;
+	frameOptions.captionHitTest = [this, titleBar](QPoint point) {
+		if (!titleBar || !titleBar->isVisibleTo(this)) return false;
+		const auto local = titleBar->mapFrom(this, point);
+		if (!titleBar->rect().contains(local)) return false;
+		// The application event filter also receives events aimed at the title
+		// label. Keep interactive title controls, especially Close, independent.
+		for (auto *child = titleBar->childAt(local); child && child != titleBar;
+				child = child->parentWidget()) {
+			if (qobject_cast<QAbstractButton *>(child) || child->focusPolicy() != Qt::NoFocus) return false;
+		}
+		return true;
+	};
+	installLinuxWindowFrame(*this, std::move(frameOptions));
+#endif
 	syncThemeControls();
 	AppTheme::observeChanges(*this, [this] { syncThemeControls(); });
 	connect(_themeCombo, static_cast<void (QComboBox::*)(int)>(&QComboBox::currentIndexChanged),
@@ -359,7 +396,7 @@ void SettingsDialog::buildUi() {
 	// Establish the final scroll/stylesheet ancestry before adding controls.
 	// Moving populated pages through temporary parents repeatedly resolves
 	// inherited QSS fonts and palettes for every descendant.
-	AppTheme::makeDialogAdaptive(*this, QSize(796, 676));
+	AppTheme::makeDialogAdaptive(*this, QSize(760 + kShadowMargin * 2, 640 + kShadowMargin * 2));
 	auto *content = root->parentWidget();
 
 	auto *layers = new QStackedLayout();
@@ -367,6 +404,7 @@ void SettingsDialog::buildUi() {
 	layers->setStackingMode(QStackedLayout::StackAll);
 	root->addLayout(layers);
 
+#ifndef Q_OS_LINUX
 	auto *shadowSurface = new QFrame(content);
 	shadowSurface->setObjectName(QStringLiteral("settingsShadowSurface"));
 	shadowSurface->setAttribute(Qt::WA_TransparentForMouseEvents, true);
@@ -376,9 +414,15 @@ void SettingsDialog::buildUi() {
 	shadow->setColor(QColor(31, 35, 41, 80));
 	shadowSurface->setGraphicsEffect(shadow);
 	layers->addWidget(shadowSurface);
+#endif
 
 	auto *surface = new RoundedSurface(content);
 	surface->setObjectName(QStringLiteral("settingsSurface"));
+#ifdef Q_OS_LINUX
+	// The shared frame clips normal windows and removes its clipping when
+	// maximized/fullscreen. Keep this underlying themed surface rectangular.
+	surface->setProperty("linuxWindowFrameSurface", true);
+#endif
 	auto *surfaceLayout = new QVBoxLayout(surface);
 	surfaceLayout->setContentsMargins(0, 0, 0, 0);
 	surfaceLayout->setSpacing(0);
@@ -759,6 +803,18 @@ QWidget *SettingsDialog::buildAudioPage() {
 	layout->addWidget(_echoCancellation);
 	layout->addWidget(_noiseSuppression);
 	layout->addWidget(_autoGainControl);
+#ifndef Q_OS_WIN
+    auto *processingHint = new QLabel(QCoreApplication::translate("MeetingUI",
+        "Audio processing changes take effect the next time you join a meeting."), content);
+    processingHint->setObjectName(QStringLiteral("hintLabel"));
+    processingHint->setWordWrap(true);
+    layout->addWidget(processingHint);
+    const auto testHint = QCoreApplication::translate("MeetingUI",
+        "Audio device testing is not available on this platform yet.");
+    _microphoneTestButton->setToolTip(testHint);
+    _speakerTestButton->setToolTip(testHint);
+    _microphoneLevel->hide();
+#endif
 	layout->addStretch();
 	return scroll;
 }
@@ -861,6 +917,7 @@ void SettingsDialog::connectDeviceControllers() {
 			_microphoneCombo->addItem(QCoreApplication::translate("MeetingUI", "System Default"), QString());
 			_speakerCombo->addItem(QCoreApplication::translate("MeetingUI", "System Default"), QString());
 			for (const auto &device : microphones) {
+				if (device.id.isEmpty()) continue; // System Default is already listed above.
 				auto name = device.name.trimmed().isEmpty()
 					? QCoreApplication::translate("MeetingUI", "Unnamed Device")
 					: device.name;
@@ -868,6 +925,7 @@ void SettingsDialog::connectDeviceControllers() {
 				_microphoneCombo->addItem(name, device.id);
 			}
 			for (const auto &device : speakers) {
+				if (device.id.isEmpty()) continue; // System Default is already listed above.
 				auto name = device.name.trimmed().isEmpty()
 					? QCoreApplication::translate("MeetingUI", "Unnamed Device")
 					: device.name;
@@ -881,7 +939,7 @@ void SettingsDialog::connectDeviceControllers() {
 				_microphoneTestButton->setEnabled(false);
 			} else {
 				_microphoneCombo->setEnabled(true);
-				_microphoneTestButton->setEnabled(true);
+				_microphoneTestButton->setEnabled(kAudioDeviceTestsSupported);
 				const auto selected = findData(_microphoneCombo, saved.microphoneDeviceId);
 				_microphoneCombo->setCurrentIndex(
 					selected >= 0 ? selected : 0);
@@ -892,7 +950,7 @@ void SettingsDialog::connectDeviceControllers() {
 				_speakerTestButton->setEnabled(false);
 			} else {
 				_speakerCombo->setEnabled(true);
-				_speakerTestButton->setEnabled(true);
+				_speakerTestButton->setEnabled(kAudioDeviceTestsSupported);
 				const auto selected = findData(_speakerCombo, saved.speakerDeviceId);
 				_speakerCombo->setCurrentIndex(
 					selected >= 0 ? selected : 0);
@@ -1021,6 +1079,14 @@ void SettingsDialog::syncSecurityControls() {
 	_quickE2ee->setEnabled(!value.allMeetingsE2ee);
 	_screenShareE2ee->setEnabled(!value.allMeetingsE2ee);
 	_meetingDetailsE2ee->setEnabled(!value.allMeetingsE2ee);
+#ifdef Q_OS_LINUX
+    // Imported requirements stay visible and fail closed. The user may turn
+    // them off explicitly, but this build cannot enable a new E2EE policy.
+    _quickE2ee->setEnabled(!value.allMeetingsE2ee && value.quickMeetingsE2ee);
+    _screenShareE2ee->setEnabled(!value.allMeetingsE2ee && value.screenShareE2ee);
+    _meetingDetailsE2ee->setEnabled(!value.allMeetingsE2ee && value.meetingDetailsE2ee);
+    _allE2ee->setEnabled(value.allMeetingsE2ee);
+#endif
 	updateSecurityKeyControls();
 }
 
@@ -1039,6 +1105,15 @@ void SettingsDialog::commitSecurityPreferences() {
 }
 
 void SettingsDialog::updateSecurityKeyControls() {
+#ifdef Q_OS_LINUX
+    _e2eeKey->setEnabled(false);
+    _e2eeSaveKey->setEnabled(false);
+    _e2eeClearKey->setEnabled(_session.hasMeetingEncryptionKey());
+    _e2eeStatus->setText(QCoreApplication::translate("MeetingUI",
+        "End-to-end encryption is not available on Linux yet. Meetings that require it cannot be joined."));
+    _e2eeStatus->show();
+    return;
+#endif
 	const auto enabled = _quickE2ee->isChecked() || _screenShareE2ee->isChecked() ||
 		_meetingDetailsE2ee->isChecked() || _allE2ee->isChecked();
 	if (enabled) livekit::MarkSensitiveMemoryUsed();
@@ -1158,7 +1233,23 @@ QWidget *SettingsDialog::buildAboutPage() {
 		if (_updateService->state() == State::Available) {
 			_updateService->download();
 		} else if (_updateService->state() == State::Ready) {
+#ifdef Q_OS_LINUX
+            auto* directory = new QFileDialog(this,QCoreApplication::translate("MeetingUI", "Save installation package"));
+            directory->setAttribute(Qt::WA_DeleteOnClose);
+            directory->setOption(QFileDialog::DontUseNativeDialog);
+            directory->setOption(QFileDialog::ShowDirsOnly);
+            directory->setFileMode(QFileDialog::Directory);
+            AppTheme::styleChoiceControls(*directory,
+                AppTheme::effectiveTheme() == AppTheme::Theme::Light
+                    ? AppTheme::Tone::Light : AppTheme::Tone::Dark);
+            connect(directory,&QFileDialog::accepted,this,[this,directory] {
+                const auto selected = directory->selectedFiles();
+                if (selected.size() == 1) _updateService->exportPackage(selected.front());
+            });
+            directory->open();
+#else
 			_updateService->launchInstaller();
+#endif
 		}
 	});
 	connect(_updateService, &Cohavora::Update::UpdateService::changed, this, &SettingsDialog::syncUpdateControls);
@@ -1176,6 +1267,25 @@ QWidget *SettingsDialog::buildAboutPage() {
 }
 
 void SettingsDialog::syncUpdateControls() {
+#if !defined(Q_OS_WIN) && !defined(Q_OS_LINUX)
+    _updateCheck->setEnabled(false);
+    _updateCancel->hide();
+    _updateProgress->hide();
+    _updateAction->hide();
+    _updateNotes->hide();
+    _updateStatus->setText(QCoreApplication::translate("MeetingUI",
+        "Updates are not available on this platform yet."));
+    return;
+#endif
+#ifdef Q_OS_LINUX
+    if (!_updateService->checksConfigured()) {
+        _updateCheck->setEnabled(false);
+        _updateCancel->hide(); _updateProgress->hide(); _updateAction->hide(); _updateNotes->hide();
+        _updateStatus->setText(QCoreApplication::translate("MeetingUI",
+            "No trusted Linux update source is configured for this platform. Use your signed package repository."));
+        return;
+    }
+#endif
 	using State = Cohavora::Update::State;
 	using Error = Cohavora::Update::Error;
 	const auto state = _updateService->state();
@@ -1187,7 +1297,11 @@ void SettingsDialog::syncUpdateControls() {
 	if (state != State::Downloading) _updateProgress->setValue(0);
 	_updateAction->setVisible(state == State::Available || state == State::Ready);
 	_updateAction->setText(state == State::Ready
+#ifdef Q_OS_LINUX
+        ? QCoreApplication::translate("MeetingUI", "Save installation package")
+#else
 		? QCoreApplication::translate("MeetingUI", "Start Installer")
+#endif
 		: QCoreApplication::translate("MeetingUI", "Download Update"));
 	const auto hasRelease = state == State::Available || state == State::Downloading ||
 		state == State::Ready || state == State::Verifying;
@@ -1207,9 +1321,20 @@ void SettingsDialog::syncUpdateControls() {
 	case State::Downloading:
 		message = QCoreApplication::translate("MeetingUI", "Downloading the update..."); break;
 	case State::Ready:
+#ifdef Q_OS_LINUX
+        message = QCoreApplication::translate("MeetingUI", "Package verified. Save it, then leave your meeting and close Cohavora before installing with the system package manager."); break;
+#else
 		message = QCoreApplication::translate("MeetingUI", "Update verified. Start the installer when you are ready to close Cohavora."); break;
+#endif
 	case State::Verifying:
+#ifdef Q_OS_LINUX
+        message = QCoreApplication::translate("MeetingUI", "Verifying and saving the installation package..."); break;
+#else
 		message = QCoreApplication::translate("MeetingUI", "Verifying the installer..."); break;
+#endif
+	case State::Exported:
+        message = QCoreApplication::translate("MeetingUI", "Package saved to %1. Leave your meeting and close Cohavora before installing with the system package manager.")
+            .arg(_updateService->exportedPackagePath()); break;
 	case State::InstallerStarted:
 		message = QCoreApplication::translate("MeetingUI",
 			"Installer started. Finish your meeting and close Cohavora to complete the update."); break;
@@ -1222,9 +1347,17 @@ void SettingsDialog::syncUpdateControls() {
 		case Error::InvalidManifest:
 			message = QCoreApplication::translate("MeetingUI", "The update information could not be verified. Try again later."); break;
 		case Error::Disk:
+#ifdef Q_OS_LINUX
+            message = QCoreApplication::translate("MeetingUI", "The package could not be saved. Choose a personal folder that other users cannot modify and check available disk space."); break;
+#else
 			message = QCoreApplication::translate("MeetingUI", "The update could not be saved. Check available disk space and try again."); break;
+#endif
 		case Error::Integrity:
+#ifdef Q_OS_LINUX
+            message = QCoreApplication::translate("MeetingUI", "The package could not be verified. Check for updates to try again."); break;
+#else
 			message = QCoreApplication::translate("MeetingUI", "The installer could not be verified. Check for updates to try again."); break;
+#endif
 		case Error::Launch:
 			message = QCoreApplication::translate("MeetingUI", "The installer could not be started. Check for updates to try again."); break;
 		default:
@@ -1884,6 +2017,7 @@ void SettingsDialog::setVideoPreviewMessage(const QString &message, bool error) 
 }
 
 void SettingsDialog::mousePressEvent(QMouseEvent *event) {
+#ifndef Q_OS_LINUX
 	const QRect titleBarRect(
 		kShadowMargin,
 		kShadowMargin,
@@ -1899,10 +2033,12 @@ void SettingsDialog::mousePressEvent(QMouseEvent *event) {
 		event->accept();
 		return;
 	}
+#endif
 	QDialog::mousePressEvent(event);
 }
 
 void SettingsDialog::mouseMoveEvent(QMouseEvent *event) {
+#ifndef Q_OS_LINUX
 	if (_dragging && (event->buttons() & Qt::LeftButton)) {
 #if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 		move(event->globalPosition().toPoint() - _dragOffset);
@@ -1912,13 +2048,16 @@ void SettingsDialog::mouseMoveEvent(QMouseEvent *event) {
 		event->accept();
 		return;
 	}
+#endif
 	QDialog::mouseMoveEvent(event);
 }
 
 void SettingsDialog::mouseReleaseEvent(QMouseEvent *event) {
+#ifndef Q_OS_LINUX
 	if (event->button() == Qt::LeftButton) {
 		_dragging = false;
 	}
+#endif
 	QDialog::mouseReleaseEvent(event);
 }
 

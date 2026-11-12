@@ -1,5 +1,5 @@
 #include "camera_source_manager.h"
-#include "dshow_enumerator.h"
+#include "camera_enumerator.h"
 #include "telemetry/diagnostic_pipeline.h"
 #include <algorithm>
 #include <condition_variable>
@@ -84,7 +84,7 @@ std::int64_t PixelCount(const CameraResolution& resolution) {
     return static_cast<std::int64_t>(resolution.width) * resolution.height;
 }
 
-bool SameCaptureConfig(const DShowCaptureConfig& lhs, const DShowCaptureConfig& rhs) {
+bool SameCaptureConfig(const CameraCaptureConfig& lhs, const CameraCaptureConfig& rhs) {
     return lhs.device_path == rhs.device_path &&
         lhs.width == rhs.width &&
         lhs.height == rhs.height &&
@@ -101,6 +101,7 @@ bool SameCaptureConfig(const DShowCaptureConfig& lhs, const DShowCaptureConfig& 
 // DShowCameraCapturer
 // =========================================================================
 
+#ifdef _WIN32
 DShowCameraCapturer::DShowCameraCapturer(std::shared_ptr<DShowVideoCapture> capture)
     : capture_(std::move(capture)) {
     if (!capture_) {
@@ -112,7 +113,7 @@ DShowCameraCapturer::~DShowCameraCapturer() {
     Stop();
 }
 
-bool DShowCameraCapturer::Init(const DShowCaptureConfig& config, std::shared_ptr<VideoSource> video_source) {
+bool DShowCameraCapturer::Init(const CameraCaptureConfig& config, std::shared_ptr<VideoSource> video_source) {
     if (!capture_) return false;
     return capture_->Init(config, std::move(video_source));
 }
@@ -132,13 +133,18 @@ bool DShowCameraCapturer::IsRunning() const noexcept {
     return capture_ ? capture_->IsRunning() : false;
 }
 
-DShowCaptureConfig DShowCameraCapturer::GetConfig() const {
-    return capture_ ? capture_->GetConfig() : DShowCaptureConfig{};
+CameraCaptureConfig DShowCameraCapturer::GetConfig() const {
+    return capture_ ? capture_->GetConfig() : CameraCaptureConfig{};
 }
 
 std::string DShowCameraCapturer::GetDevicePath() const {
     return capture_ ? capture_->GetConfig().device_path : std::string{};
 }
+
+std::shared_ptr<ICameraCapturer> CreatePlatformCameraCapturer() {
+    return std::make_shared<DShowCameraCapturer>();
+}
+#endif
 
 // =========================================================================
 // CameraSourceManager
@@ -154,7 +160,7 @@ CameraSourceManager::CameraSourceManager(std::shared_ptr<VideoSource> output_sou
     : output_source_(std::move(output_source)), factory_(std::move(factory)) {
     if (!factory_) {
         factory_ = []() -> std::shared_ptr<ICameraCapturer> {
-            return std::make_shared<DShowCameraCapturer>();
+            return CreatePlatformCameraCapturer();
         };
     }
 }
@@ -173,12 +179,12 @@ std::shared_ptr<VideoSource> CameraSourceManager::GetOutputSource() const {
     return output_source_;
 }
 
-bool CameraSourceManager::Start(const DShowCaptureConfig& config) {
+bool CameraSourceManager::Start(const CameraCaptureConfig& config) {
     return StartInitialCapture(config, std::nullopt) == CameraStartResult::Ready;
 }
 
 CameraStartResult CameraSourceManager::StartAndWaitForFirstFrame(
-        const DShowCaptureConfig& config, int timeout_ms) {
+        const CameraCaptureConfig& config, int timeout_ms) {
     return StartInitialCapture(config, timeout_ms > 0 ? timeout_ms : 3000);
 }
 
@@ -193,7 +199,7 @@ void CameraSourceManager::RetireInitialCapture(
 }
 
 CameraStartResult CameraSourceManager::StartInitialCapture(
-        const DShowCaptureConfig& config,
+        const CameraCaptureConfig& config,
         std::optional<int> first_frame_timeout_ms) {
     auto attempt = std::make_shared<InitialCaptureAttempt>();
     std::shared_ptr<InitialCaptureAttempt> old_initial;
@@ -390,7 +396,7 @@ std::string CameraSourceManager::GetActiveDevicePath() const {
     return active_device_path_;
 }
 
-DShowCaptureConfig CameraSourceManager::GetActiveConfig() const {
+CameraCaptureConfig CameraSourceManager::GetActiveConfig() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return current_config_;
 }
@@ -402,8 +408,8 @@ CameraSwitchState CameraSourceManager::GetSwitchState() const {
 
 std::vector<CameraResolution> CameraSourceManager::GetSupportedResolutions(
         const std::string& device_path) {
-    const auto devices = DShowEnumerator::EnumerateVideoDevices();
-    const DShowDeviceInfo* selected_device = nullptr;
+    const auto devices = CameraEnumerator::EnumerateVideoDevices();
+    const CameraDeviceInfo* selected_device = nullptr;
     for (const auto& device : devices) {
         if ((!device_path.empty() &&
              (device.path == device_path || device.name == device_path)) ||
@@ -423,7 +429,7 @@ std::vector<CameraResolution> CameraSourceManager::GetSupportedResolutions(
 }
 
 std::vector<CameraResolution> CameraSourceManager::GetSupportedResolutions(
-        const DShowDeviceInfo& device) {
+        const CameraDeviceInfo& device) {
     std::vector<CameraResolution> resolutions;
     for (const auto& capability : device.capabilities) {
         if (capability.width <= 0 || capability.height <= 0) {
@@ -509,7 +515,7 @@ void CameraSourceManager::SwitchDeviceAsync(const std::string& target_device_pat
     ReconfigureAsync(target_config, timeout_ms, std::move(callback));
 }
 
-void CameraSourceManager::ReconfigureAsync(const DShowCaptureConfig& target_config,
+void CameraSourceManager::ReconfigureAsync(const CameraCaptureConfig& target_config,
                                            int timeout_ms,
                                            SwitchCallback callback) {
     std::shared_ptr<InitialCaptureAttempt> initial;
@@ -540,7 +546,7 @@ void CameraSourceManager::ReconfigureAsync(const DShowCaptureConfig& target_conf
     std::shared_ptr<ICameraCapturer> new_probe;
     std::shared_ptr<ICameraCapturer> active_to_pause;
     uint64_t gen = 0;
-    DShowCaptureConfig probe_config;
+    CameraCaptureConfig probe_config;
     bool has_immediate_result = false;
     bool immediate_success = false;
     auto immediate_reason = diagnostic::DeviceSwitchReason::AlreadyActive;
@@ -577,10 +583,15 @@ void CameraSourceManager::ReconfigureAsync(const DShowCaptureConfig& target_conf
                 auto probe_source = std::make_shared<VideoSource>(probe_config.width, probe_config.height);
                 auto first_frame_handled = std::make_shared<std::atomic<bool>>(false);
                 std::weak_ptr<CameraSourceManager> weak_self = shared_from_this();
+                const std::weak_ptr<ICameraCapturer> weak_probe = new_probe;
 
-                probe_source->addSink([weak_self, gen, new_probe, probe_config,
+                probe_source->addSink([weak_self, gen, weak_probe, probe_config,
                                        callback, switch_span, first_frame_handled]
                                       (const VideoFrame& frame, const VideoCaptureOptions& options) {
+                    // The capturer owns this source; a strong capturer capture
+                    // would keep every retired camera and source alive forever.
+                    const auto new_probe = weak_probe.lock();
+                    if (!new_probe) return;
                     if (first_frame_handled->exchange(true)) {
                         if (auto self = weak_self.lock()) {
                             std::shared_ptr<VideoSource> out;
@@ -695,7 +706,7 @@ void CameraSourceManager::ReconfigureAsync(const DShowCaptureConfig& target_conf
 
 void CameraSourceManager::HandleProbeFrameReceived(uint64_t generation,
                                                    std::shared_ptr<ICameraCapturer> probe_capturer,
-                                                   const DShowCaptureConfig& target_config,
+                                                   const CameraCaptureConfig& target_config,
                                                    const VideoFrame& frame,
                                                    const VideoCaptureOptions& options,
                                                    SwitchCallback callback,

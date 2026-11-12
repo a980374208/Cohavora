@@ -1,12 +1,12 @@
 #include "src/ui/camera_device_discovery.h"
 #include "src/core/session_shutdown_service.h"
-#include "src/media/dshow_enumerator.h"
+#include "src/media/camera_enumerator.h"
 #include "src/telemetry/diagnostic_pipeline.h"
 
 namespace MeetingUI {
 
 CameraDeviceDiscovery &CameraDeviceDiscovery::Instance() {
-    static CameraDeviceDiscovery instance(livekit::DShowEnumerator::EnumerateVideoDevices,
+    static CameraDeviceDiscovery instance(livekit::CameraEnumerator::EnumerateVideoDevices,
         [](std::function<void()> job) {
             return OpenMeeting::SessionShutdownService::Instance().Submit(std::move(job));
         });

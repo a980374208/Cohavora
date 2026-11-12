@@ -1,6 +1,7 @@
 #include "src/ui/app_theme.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/action_card_widget.h"
+#include "src/media/desktop_capture.h"
 #include "styles/style_widgets.h"
 #include <QtGui/QMouseEvent>
 #include <QtGui/QFont>
@@ -48,7 +49,19 @@ ActionCardWidget::ActionCardWidget(
 	_accessibleButton->setFlat(true);
 	_accessibleButton->setAttribute(Qt::WA_TransparentForMouseEvents);
 	_accessibleButton->setStyleSheet(QStringLiteral("QPushButton { background: transparent; border: 0; }"));
-	connect(_accessibleButton, &QPushButton::clicked, this, [this] { _clicks.fire_copy(_type); });
+	connect(_accessibleButton, &QPushButton::clicked, this, [this] {
+		if (isEnabled()) _clicks.fire_copy(_type);
+	});
+#if defined(Q_OS_LINUX)
+	if (_type == ActionCardType::ShareScreen && !livekit::DesktopCaptureSupported()) {
+		const auto reason = QCoreApplication::translate("MeetingUI", "Screen sharing is not available on this platform yet.");
+		setToolTip(reason);
+		setAccessibleDescription(reason);
+		_accessibleButton->setToolTip(reason);
+		_accessibleButton->setAccessibleDescription(reason);
+		setEnabled(false);
+	}
+#endif
 
 	// 100% 复用 TDeskTop 内部 Ui::BoxShadow 九宫格高斯模糊烘焙阴影
 	_normalShadow = std::make_unique<Ui::BoxShadow>(style::BoxShadow{
@@ -62,6 +75,15 @@ ActionCardWidget::ActionCardWidget(
 		.offset = QPoint(0, 7),
 		.opacity = 0.42,
 	});
+}
+
+void ActionCardWidget::changeEvent(QEvent *e) {
+	if (e->type() == QEvent::EnabledChange) {
+		_hovered = false;
+		_pressed = false;
+		update();
+	}
+	Ui::RpWidget::changeEvent(e);
 }
 
 void ActionCardWidget::resizeEvent(QResizeEvent *e) {
@@ -89,23 +111,27 @@ void ActionCardWidget::paintEvent(QPaintEvent *e) {
 	p.setRenderHint(QPainter::SmoothPixmapTransform);
 
 	const int w = width();
+	const bool enabled = isEnabled();
 
 	// 按钮卡片区域（上部方形卡片）
 	const int cardSize = std::min(w, kCardSize);
-	const int cardY = (_hovered ? 2 : kCardTop); // 悬浮上浮动效
+	const int cardY = (enabled && _hovered ? 2 : kCardTop); // 悬浮上浮动效
 	_cardRect = QRect((w - cardSize) / 2, cardY, cardSize, cardSize);
 
 	// 1. 调用 TDeskTop 原生 Ui::BoxShadow 进行九宫格抗锯齿阴影贴图
-	if (_hovered && _hoverShadow) {
+	if (enabled && _hovered && _hoverShadow) {
 		_hoverShadow->paint(p, _cardRect, 20);
-	} else if (_normalShadow) {
+	} else if (enabled && _normalShadow) {
 		_normalShadow->paint(p, _cardRect, 20);
 	}
 
 	// 2. 绘制卡片主体（天蓝色流光渐变 + 20px 圆角）
 	p.save();
 	QLinearGradient grad(_cardRect.topLeft(), _cardRect.bottomLeft());
-	if (_pressed) {
+	if (!enabled) {
+		grad.setColorAt(0.0, Theme::color(Theme::ColorRole::SurfaceAlt));
+		grad.setColorAt(1.0, Theme::color(Theme::ColorRole::SurfaceAlt));
+	} else if (_pressed) {
 		grad.setColorAt(0.0, Theme::color(Theme::ColorRole::AccentPressed).darker(105));
 		grad.setColorAt(1.0, Theme::color(Theme::ColorRole::AccentPressed));
 	} else if (_hovered) {
@@ -116,20 +142,28 @@ void ActionCardWidget::paintEvent(QPaintEvent *e) {
 		grad.setColorAt(1.0, Theme::color(Theme::ColorRole::Accent).darker(105));
 	}
 
-	auto border = Theme::color(Theme::ColorRole::OnAccent);
-	border.setAlpha(_hovered ? 90 : 50);
+	auto border = Theme::color(enabled ? Theme::ColorRole::OnAccent : Theme::ColorRole::Border);
+	if (enabled) border.setAlpha(_hovered ? 90 : 50);
 	p.setPen(QPen(border, 1.0));
 	p.setBrush(grad);
 	p.drawRoundedRect(_cardRect, 20, 20);
 
 	// 绘制卡片中央大图标
 	drawCardIcon(p, _cardRect);
+	if (!enabled) {
+		auto font = CardTitleFont();
+		font.setPixelSize(12);
+		p.setFont(font);
+		p.setPen(Theme::color(Theme::ColorRole::TextMuted));
+		p.drawText(_cardRect.adjusted(4, _cardRect.height() * 2 / 3, -4, -8),
+			Qt::AlignCenter | Qt::TextWordWrap, QCoreApplication::translate("MeetingUI", "Not available"));
+	}
 	p.restore();
 
 	// 绘制下方标题文本
 	const QFont font = CardTitleFont();
 	p.setFont(font);
-	p.setPen(Theme::color(Theme::ColorRole::Text));
+	p.setPen(Theme::color(enabled ? Theme::ColorRole::Text : Theme::ColorRole::TextMuted));
 
 	const int textTop = kCardTop + cardSize + kTitleGap;
 	const int titleHeight = std::max(22, height() - textTop - kBottomPadding);
@@ -167,9 +201,10 @@ void ActionCardWidget::drawCardIcon(QPainter &p, const QRect &r) {
 	p.setRenderHint(QPainter::Antialiasing);
 
 	const int cx = r.center().x();
-	const int cy = r.center().y();
+	const int cy = r.center().y() - (isEnabled() ? 0 : 12);
+	const auto iconColor = Theme::color(isEnabled() ? Theme::ColorRole::OnAccent : Theme::ColorRole::TextMuted);
 
-	p.setPen(QPen(Theme::color(Theme::ColorRole::OnAccent), 6.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+	p.setPen(QPen(iconColor, 6.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 	p.setBrush(Qt::NoBrush);
 
 	if (_type == ActionCardType::JoinMeeting) {
@@ -180,7 +215,7 @@ void ActionCardWidget::drawCardIcon(QPainter &p, const QRect &r) {
 	} else if (_type == ActionCardType::QuickMeeting) {
 		// 动感白色闪电 (⚡)
 		p.setPen(Qt::NoPen);
-		p.setBrush(Theme::color(Theme::ColorRole::OnAccent));
+		p.setBrush(iconColor);
 
 		QPainterPath path;
 		path.moveTo(cx + 4, cy - 22);
@@ -193,7 +228,7 @@ void ActionCardWidget::drawCardIcon(QPainter &p, const QRect &r) {
 		p.drawPath(path);
 	} else if (_type == ActionCardType::ScheduleMeeting) {
 		// 圆角盾牌勾选 / 大对勾 (✔)
-		p.setPen(QPen(Theme::color(Theme::ColorRole::OnAccent), 6.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+		p.setPen(QPen(iconColor, 6.5, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 		p.setBrush(Qt::NoBrush);
 
 		QPainterPath path;
@@ -203,7 +238,7 @@ void ActionCardWidget::drawCardIcon(QPainter &p, const QRect &r) {
 		p.drawPath(path);
 	} else if (_type == ActionCardType::ShareScreen) {
 		// 共享屏幕双视窗 (🗔)
-		p.setPen(QPen(Theme::color(Theme::ColorRole::OnAccent), 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+		p.setPen(QPen(iconColor, 4.0, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
 		p.setBrush(Qt::NoBrush);
 
 		// 后层屏幕
@@ -211,7 +246,7 @@ void ActionCardWidget::drawCardIcon(QPainter &p, const QRect &r) {
 		p.drawRoundedRect(backScreen, 3, 3);
 
 		// 前层主屏幕（填充加白边）
-		p.setBrush(Theme::color(Theme::ColorRole::Accent));
+		p.setBrush(Theme::color(isEnabled() ? Theme::ColorRole::Accent : Theme::ColorRole::SurfaceAlt));
 		QRect frontScreen(cx - 6, cy - 6, 22, 18);
 		p.drawRoundedRect(frontScreen, 3, 3);
 
@@ -228,6 +263,7 @@ void ActionCardWidget::mouseMoveEvent(QMouseEvent *e) {
 }
 
 void ActionCardWidget::mousePressEvent(QMouseEvent *e) {
+	if (!isEnabled()) return;
 	if (e->button() == Qt::LeftButton) {
 		_pressed = true;
 		update();
@@ -235,6 +271,7 @@ void ActionCardWidget::mousePressEvent(QMouseEvent *e) {
 }
 
 void ActionCardWidget::mouseReleaseEvent(QMouseEvent *e) {
+	if (!isEnabled()) return;
 	if (_pressed) {
 		_pressed = false;
 		update();
@@ -249,6 +286,7 @@ void ActionCardWidget::mouseReleaseEvent(QMouseEvent *e) {
 }
 
 void ActionCardWidget::enterEventHook(QEnterEvent *e) {
+	if (!isEnabled()) return;
 	_hovered = true;
 	update();
 }

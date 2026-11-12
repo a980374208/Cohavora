@@ -1,4 +1,5 @@
 #include "remote_control_ui.h"
+#include "remote_control_key_mapping.h"
 #include "src/core/meeting_coordinator.h"
 #include "src/ui/app_theme.h"
 #include "src/ui/native_child_geometry.h"
@@ -27,6 +28,7 @@
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QLabel>
 #include <QtWidgets/QMenu>
+#include <QtWidgets/QMessageBox>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QVBoxLayout>
 #include <algorithm>
@@ -160,6 +162,7 @@ RemoteControlUi::RemoteControlUi(QWidget* stage, OpenMeeting::MeetingCoordinator
     : QObject(stage), stage_(stage), coordinator_(coordinator), targets_(std::move(targets)),
       blockAnnotation_(std::move(annotation)), hostStatus_(std::move(hostStatus)) {
     meetingActive_ = coordinator && coordinator->state() == OpenMeeting::MeetingState::InMeeting;
+    if (coordinator) projection_.capabilities = coordinator->remoteControlCapabilities();
 #if COHAVORA_ENABLE_MEDIA_DIAGNOSTICS
     configureProbe();
 #endif
@@ -212,9 +215,28 @@ void RemoteControlUi::refreshTargets() {
         });
     }
     entry_->setVisible(hasRemoteDesktop && !tileMenuMode_);
+    entry_->setEnabled(active() || (coordinator_ && projection_.capabilities.canControl() && coordinator_->remoteControlAvailable()));
+    if (!active() && !capabilityHint().isEmpty()) entry_->setToolTip(capabilityHint());
+}
+QString RemoteControlUi::capabilityHint(bool host) const {
+    const auto& local = projection_.capabilities;
+    const auto status = host ? local.host.status : local.controller.status;
+    switch (status) {
+    case rc::CapabilityStatus::Available: return {};
+    case rc::CapabilityStatus::UnsupportedKeyboardMapping:
+        return tr("当前 X11 键盘物理映射尚未验证，无法发起远程控制；请使用 Wayland 会话。");
+    case rc::CapabilityStatus::HostSafetyUnavailable:
+        return tr("本机暂不接受远程控制：尚未具备本地键鼠优先、可靠释放和后台紧急停止的完整安全保障。");
+    case rc::CapabilityStatus::UnsupportedWindowSystem:
+        return tr("当前窗口系统不支持安全远程控制。");
+    case rc::CapabilityStatus::UnsupportedPlatform:
+        return tr("当前平台不支持安全远程控制。");
+    }
+    return tr("当前平台不支持安全远程控制。");
 }
 bool RemoteControlUi::canRequestTarget(const QString& identity, const QString& track) const {
-    if (!coordinator_ || !meetingActive_ || active()) return false;
+    if (!coordinator_ || !projection_.capabilities.canControl() ||
+        !coordinator_->remoteControlAvailable() || !meetingActive_ || active()) return false;
     for (const auto& person : coordinator_->participants())
         if (person.isLocal && !person.permissions.can_publish_data) return false;
     for (const auto& candidate : targets_())
@@ -355,21 +377,16 @@ void RemoteControlUi::showTargets() {
     int unavailableIndex = 0;
     for (const auto& t : targets_()) {
         auto* action = menu->addAction(tr("申请控制 %1 的共享桌面").arg(t.name));
-        const auto selectable = SelectableTarget(t);
+        const auto selectable = canRequestTarget(t.identity,t.track);
         action->setObjectName(selectable ? QStringLiteral("remoteControlTarget%1").arg(targetIndex++)
             : QStringLiteral("remoteControlUnavailableTarget%1").arg(unavailableIndex++));
         action->setEnabled(selectable);
         connect(action,&QAction::triggered,this,[this,t] {
-            if (!coordinator_) return;
-            if (frontendLease_) frontendLease_->valid = false;
-            frontendLease_ = std::make_shared<rc::Lease>();
-            frontendLease_->current = [] { return true; };
-            frontendLease_->deadline = rc::NowMs() + rc::LeaseMs;
-            projection_.track = t.track.toStdString(); lastFrame_ = recentFrames_[t.track];
-            coordinator_->requestRemoteControl(t.identity,t.track,frontendLease_);
+            requestTarget(t.identity,t.track);
         });
     }
     if (menu->isEmpty()) menu->addAction(tr("当前没有可见的远端屏幕共享"))->setEnabled(false);
+    if (const auto hint = capabilityHint(true); !hint.isEmpty()) menu->addAction(hint)->setEnabled(false);
     menu->popup(entry_->mapToGlobal(QPoint(0,entry_->height())));
 }
 void RemoteControlUi::activate() {
@@ -398,6 +415,8 @@ void RemoteControlUi::pause(bool paused) {
     entry_->setToolTip(paused ? tr("已暂停输入，返回共享画面后自动继续；授权仍有效。") : tr("正在等待对方恢复输入。"));
 }
 void RemoteControlUi::apply(rc::Projection p) {
+    if (p.state == rc::State::Idle && p.reason == rc::Reason::None && coordinator_)
+        p.capabilities = coordinator_->remoteControlCapabilities();
     if (!p.request.empty() && p.request == cancelledRequest_ && p.state != rc::State::Idle) {
         if (coordinator_) coordinator_->stopRemoteControl();
         return;
@@ -419,7 +438,21 @@ void RemoteControlUi::apply(rc::Projection p) {
         activationClick_ = false; localPaused_ = false; focusTarget_.clear();
         if (frontendLease_) frontendLease_->valid = false;
         frontendLease_.reset();
-        entry_->setToolTip(p.reason == rc::Reason::None ? QString() : tr("控制已结束；如需继续，请重新申请授权。"));
+        entry_->setToolTip(p.reason == rc::Reason::Unavailable
+            ? (p.hosting ? capabilityHint(true)
+                : !capabilityHint().isEmpty() ? capabilityHint() : tr("对端当前无法接受远程控制。"))
+            : p.reason == rc::Reason::None ? capabilityHint() : tr("控制已结束；如需继续，请重新申请授权。"));
+        if (p.reason == rc::Reason::Unavailable && !p.hosting && previous != rc::State::Idle && stage_) {
+            // Tile-menu mode hides entry_, so its tooltip alone cannot explain
+            // why a request was rejected. Only show notices for local intent.
+            auto* notice = new QMessageBox(QMessageBox::Information,tr("远程控制"),
+                entry_->toolTip(),QMessageBox::Ok,stage_->window());
+            notice->setObjectName(QStringLiteral("remoteControlUnavailable"));
+            notice->setAttribute(Qt::WA_DeleteOnClose);
+            AppTheme::setTone(*notice,AppTheme::Tone::Dark);
+            notice->button(QMessageBox::Ok)->setObjectName(QStringLiteral("remoteControlUnavailableDismiss"));
+            notice->open();
+        }
         return;
     }
     QString name = QString::fromStdString(p.peer);
@@ -587,11 +620,11 @@ bool RemoteControlUi::eventFilter(QObject* watched,QEvent* event) {
         if (key->isAutoRepeat() && event->type() == QEvent::KeyRelease) return true;
         const auto scan = key->nativeScanCode();
         if ((key->isAutoRepeat() || event->type() == QEvent::KeyRelease) && !heldKeys_.contains(scan)) return true;
-        rc::Input i; i.kind = rc::InputKind::Key; i.code = int(scan & 0xff);
-        i.extended = (scan & 0xff00) != 0; i.down = event->type() == QEvent::KeyPress;
-        motion_.reset(); if (i.valid()) {
-            if (i.down) heldKeys_.insert(scan); else heldKeys_.erase(scan);
-            send(i);
+        const auto input = RemoteControlKey(projection_.capabilities.controllerKeys, scan,
+            event->type() == QEvent::KeyPress);
+        motion_.reset(); if (input) {
+            if (input->down) heldKeys_.insert(scan); else heldKeys_.erase(scan);
+            send(*input);
         }
         return true;
     }

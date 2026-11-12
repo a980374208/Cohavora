@@ -3,6 +3,22 @@ cohavora_group_qt_generated_sources()
 set(LIVEKIT_PROJECT_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../..")
 set(CMAKE_AUTOMOC ON)
 
+if(UNIX AND NOT APPLE AND NOT COHAVORA_LINUX_PRODUCT_UI)
+    qt5_add_resources(cohavora_ui_theme_resources app_theme.qrc)
+    add_library(cohavora_ui_theme OBJECT
+        app_theme.cpp app_theme.h linux_system_theme.cpp linux_system_theme.h
+        ${cohavora_ui_theme_resources})
+    target_include_directories(cohavora_ui_theme PUBLIC "${LIVEKIT_PROJECT_SOURCE_DIR}")
+    target_link_libraries(cohavora_ui_theme PRIVATE Qt5::Core Qt5::Gui Qt5::Widgets Qt5::DBus)
+    qt5_import_plugins(cohavora_ui_theme
+        EXCLUDE_BY_TYPE egldeviceintegrations
+        EXCLUDE_BY_TYPE iconengines
+        EXCLUDE_BY_TYPE imageformats
+        EXCLUDE_BY_TYPE platforms
+        EXCLUDE_BY_TYPE xcbglintegrations)
+    return()
+endif()
+
 add_subdirectory(tdesktop)
 foreach(livekit_desktop_target IN ITEMS
         desktop_lz4
@@ -25,6 +41,23 @@ target_link_libraries(cohavora_ui_theme PRIVATE
     Qt5::Gui
     Qt5::Widgets)
 set_target_properties(cohavora_ui_theme PROPERTIES AUTOMOC OFF FOLDER "resources")
+if(UNIX AND NOT APPLE)
+    # The Linux development sysroot may supply headers without system-wide
+    # -dev packages, as it already does for the screencast dependencies.
+    find_path(COHAVORA_WAYLAND_INCLUDE_DIR wayland-client-core.h
+        HINTS ${COHAVORA_SCREENCAST_INCLUDE_DIRS} REQUIRED)
+    find_package(Qt5XkbCommonSupport ${COHAVORA_QT_VERSION} EXACT CONFIG REQUIRED
+        PATHS "${QT_ROOT}/lib/cmake/Qt5XkbCommonSupport" NO_DEFAULT_PATH)
+    target_sources(cohavora_ui_theme PRIVATE
+        linux_system_theme.cpp linux_system_theme.h
+        linux_window_frame.cpp linux_window_frame.h
+        linux_xcb_window_shadow.cpp linux_xcb_window_shadow.h)
+    target_include_directories(cohavora_ui_theme SYSTEM PRIVATE ${COHAVORA_WAYLAND_INCLUDE_DIR})
+    # The product pins Qt 5.15.18. Qt 5 has no public subsurface stacking API.
+    target_link_libraries(cohavora_ui_theme PRIVATE Qt5::DBus
+        Qt5::GuiPrivate Qt5::WaylandClientPrivate Qt5::XkbCommonSupportPrivate X11::xcb X11::xcb_shape)
+    set_target_properties(cohavora_ui_theme PROPERTIES AUTOMOC ON)
+endif()
 
 include("${LIVEKIT_PROJECT_SOURCE_DIR}/cmake/UiTranslations.cmake")
 livekit_add_ui_translations(cohavora_ui_translations
@@ -54,7 +87,12 @@ add_library(cohavora_whiteboard_ui STATIC
     whiteboard/whiteboard_panel.cpp whiteboard/whiteboard_panel.h
     whiteboard/annotation_overlay_window.cpp whiteboard/annotation_overlay_window.h
     ../media/screen_binding.h
-    ../platform/win/annotation_window_support.cpp ../platform/win/annotation_window_support.h)
+    ../platform/annotation_window_support.h)
+if(WIN32)
+    target_sources(cohavora_whiteboard_ui PRIVATE ../platform/win/annotation_window_support.cpp)
+else()
+    target_sources(cohavora_whiteboard_ui PRIVATE ../platform/linux/annotation_window_support.cpp)
+endif()
 target_include_directories(cohavora_whiteboard_ui PUBLIC "${LIVEKIT_PROJECT_SOURCE_DIR}")
 target_link_libraries(cohavora_whiteboard_ui PUBLIC cohavora_whiteboard_model Qt5::Core Qt5::Gui Qt5::Widgets)
 set_target_properties(cohavora_whiteboard_ui PROPERTIES AUTOMOC ON FOLDER "whiteboard")

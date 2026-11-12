@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Cohavora
+Comment=Video meetings and screen sharing
+Exec=cohavora
+Icon=org.cohavora.Cohavora
+Terminal=false
+Categories=Network;VideoConference;
+StartupNotify=true
+StartupWMClass=org.cohavora.Cohavora

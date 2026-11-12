@@ -54,6 +54,28 @@ if(CMAKE_HOST_WIN32)
             "the x64 WebRTC and Qt dependency set.")
     endif()
     unset(cohavora_requested_architecture)
+elseif(CMAKE_HOST_SYSTEM_NAME STREQUAL "Linux")
+    if(NOT DEFINED VCPKG_TARGET_TRIPLET OR VCPKG_TARGET_TRIPLET STREQUAL "")
+        set(VCPKG_TARGET_TRIPLET "x64-linux"
+            CACHE STRING "vcpkg target triplet")
+    elseif(NOT VCPKG_TARGET_TRIPLET MATCHES "^x64-linux($|-)")
+        message(FATAL_ERROR
+            "VCPKG_TARGET_TRIPLET='${VCPKG_TARGET_TRIPLET}' must target x64 Linux.")
+    endif()
+    if(DEFINED DEPS_DIR AND NOT DEPS_DIR STREQUAL "")
+        get_filename_component(cohavora_linux_deps_dir "${DEPS_DIR}"
+            ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+    else()
+        set(cohavora_linux_deps_dir "${CMAKE_CURRENT_SOURCE_DIR}/deps")
+    endif()
+    if(NOT DEFINED VCPKG_INSTALLED_DIR OR VCPKG_INSTALLED_DIR STREQUAL "")
+        set(VCPKG_INSTALLED_DIR "${cohavora_linux_deps_dir}/vcpkg_installed"
+            CACHE PATH "Linux vcpkg installed dependencies" FORCE)
+    endif()
+    if(NOT DEFINED ENV{VCPKG_DOWNLOADS} OR "$ENV{VCPKG_DOWNLOADS}" STREQUAL "")
+        set(ENV{VCPKG_DOWNLOADS} "${cohavora_linux_deps_dir}/vcpkg_downloads")
+    endif()
+    unset(cohavora_linux_deps_dir)
 endif()
 
 if((NOT DEFINED CMAKE_TOOLCHAIN_FILE OR CMAKE_TOOLCHAIN_FILE STREQUAL "")
@@ -74,11 +96,13 @@ project(Cohavora VERSION 0.0.1
     LANGUAGES C CXX)
 set(COHAVORA_DISPLAY_NAME "Cohavora · 开源音视频会议客户端")
 
-if(CMAKE_HOST_WIN32)
+if(CMAKE_HOST_WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
         message(FATAL_ERROR
             "The selected compiler is not targeting the required 64-bit ABI.")
     endif()
+endif()
+if(CMAKE_HOST_WIN32)
     if(CMAKE_CXX_COMPILER_ARCHITECTURE_ID
             AND NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "^(x64|X64|AMD64)$")
         message(FATAL_ERROR
@@ -102,10 +126,18 @@ function(cohavora_compat_option current legacy description default_value)
     option(${current} "${description}" "${initial_value}")
 endfunction()
 
+if(WIN32)
+    set(cohavora_samples_default ON)
+else()
+    set(cohavora_samples_default OFF)
+endif()
 cohavora_compat_option(COHAVORA_BUILD_SAMPLES LIVEKIT_BUILD_SAMPLES
-    "Build standalone sample applications" ON)
+    "Build standalone sample applications" ${cohavora_samples_default})
 cohavora_compat_option(COHAVORA_BUILD_MEETING_APP LIVEKIT_BUILD_MEETING_APP
     "Build the Qt meeting application" ON)
+
+option(COHAVORA_LINUX_PRODUCT_UI "Build the shared product UI on Linux" OFF)
+option(COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED "Enable Linux shared audio after SDK multi-track isolation validation" OFF)
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -123,16 +155,12 @@ find_package(OpenSSL REQUIRED)
 find_package(WebP CONFIG REQUIRED)
 find_package(nlohmann_json CONFIG REQUIRED)
 
-add_compile_definitions(
-    WIN32
-    _WINDOWS
-    WIN32_LEAN_AND_MEAN
-    _WIN32_WINNT=0x0A00
-    NOMINMAX
-    _WINSOCK_DEPRECATED_NO_WARNINGS
-    CRL_USE_WINAPI
-    ASIO_STANDALONE
-)
+add_compile_definitions(ASIO_STANDALONE)
+if(WIN32)
+    add_compile_definitions(
+        WIN32 _WINDOWS WIN32_LEAN_AND_MEAN _WIN32_WINNT=0x0A00
+        NOMINMAX _WINSOCK_DEPRECATED_NO_WARNINGS CRL_USE_WINAPI)
+endif()
 
 # Protobuf Generation Setup
 set(PROTO_DIR ${CMAKE_CURRENT_SOURCE_DIR}/protos)
@@ -291,6 +319,36 @@ set(LIVEKIT_SOURCES
     src/telemetry/telemetry_report.cpp
 )
 
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(REMOVE_ITEM LIVEKIT_SOURCES
+        src/core/screen_share_session.cpp
+        src/media/media_converters.cpp
+        src/media/wasapi_enumerator.cpp
+        src/media/wasapi_capture.cpp
+        src/media/dshow_enumerator.cpp
+        src/media/dshow_capture.cpp
+        src/media/desktop_capture.cpp
+        src/media/wgc_window_capture.cpp
+        src/media/camera_source_manager.cpp)
+    if(COHAVORA_LINUX_PRODUCT_UI)
+        list(APPEND LIVEKIT_SOURCES
+            src/core/screen_share_session.cpp
+            src/media/camera_source_manager.cpp
+            src/media/linux_camera_capture.cpp
+            src/media/linux_camera_capturer.cpp
+            src/media/linux_microphone_capture.cpp
+            src/media/linux_desktop_capture.cpp
+            src/media/linux/wayland_screencast.cpp
+            src/media/linux/pipewire_capture.cpp
+            src/media/linux/system_audio_capture.cpp)
+    endif()
+endif()
+if(WIN32 OR COHAVORA_LINUX_PRODUCT_UI)
+    list(APPEND LIVEKIT_SOURCES
+        src/media/camera_enumerator.cpp
+        src/media/audio_device_enumerator.cpp)
+endif()
+
 if(MSVC)
     # Room's coroutine-heavy state machine exceeds the default COFF section
     # count once the subscription owner protocol is included.
@@ -401,12 +459,14 @@ add_library(cohavora_core STATIC
 # Local crash dumps are available only in developer configurations.
 target_link_libraries(cohavora_core PUBLIC cohavora_media_diagnostics)
 
-set_property(SOURCE
-    src/telemetry/crash_evidence_provider.cpp
-    APPEND PROPERTY COMPILE_DEFINITIONS
-    "COHAVORA_ENABLE_MINIDUMP=$<IF:$<CONFIG:Debug,RelWithDebInfo>,1,0>")
-target_link_libraries(cohavora_core PRIVATE
-    "$<$<CONFIG:Debug,RelWithDebInfo>:dbghelp>")
+if(WIN32)
+    set_property(SOURCE
+        src/telemetry/crash_evidence_provider.cpp
+        APPEND PROPERTY COMPILE_DEFINITIONS
+        "COHAVORA_ENABLE_MINIDUMP=$<IF:$<CONFIG:Debug,RelWithDebInfo>,1,0>")
+    target_link_libraries(cohavora_core PRIVATE
+        "$<$<CONFIG:Debug,RelWithDebInfo>:dbghelp>")
+endif()
 
 # Project Local Dependencies Directory (./deps)
 if(NOT DEFINED DEPS_DIR)
@@ -437,12 +497,23 @@ target_include_directories(cohavora_core BEFORE PUBLIC
     ${WEBRTC_ROOT}/include/third_party/libyuv/include
 )
 
-set(WEBRTC_DEBUG_LIB "${WEBRTC_ROOT}/lib/Debug/webrtc.lib")
-set(WEBRTC_RELEASE_LIB "${WEBRTC_ROOT}/lib/Release/webrtc.lib")
-set(WEBRTC_DEBUG_PREFIX_DIR "${WEBRTC_ROOT}/include/boringssl-prefix/Debug")
-set(WEBRTC_RELEASE_PREFIX_DIR "${WEBRTC_ROOT}/include/boringssl-prefix/Release")
-set(WEBRTC_DEBUG_GENERATED_DIR "${WEBRTC_ROOT}/include/out-x64-debug/gen")
-set(WEBRTC_RELEASE_GENERATED_DIR "${WEBRTC_ROOT}/include/out-x64-release/gen")
+if(WIN32)
+    set(WEBRTC_DEBUG_LIB "${WEBRTC_ROOT}/lib/Debug/webrtc.lib")
+    set(WEBRTC_RELEASE_LIB "${WEBRTC_ROOT}/lib/Release/webrtc.lib")
+    set(WEBRTC_DEBUG_PREFIX_DIR "${WEBRTC_ROOT}/include/boringssl-prefix/Debug")
+    set(WEBRTC_RELEASE_PREFIX_DIR "${WEBRTC_ROOT}/include/boringssl-prefix/Release")
+    set(WEBRTC_DEBUG_GENERATED_DIR "${WEBRTC_ROOT}/include/out-x64-debug/gen")
+    set(WEBRTC_RELEASE_GENERATED_DIR "${WEBRTC_ROOT}/include/out-x64-release/gen")
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(WEBRTC_DEBUG_LIB "${WEBRTC_ROOT}/lib/Debug/libwebrtc.a")
+    set(WEBRTC_RELEASE_LIB "${WEBRTC_ROOT}/lib/Release/libwebrtc.a")
+    set(WEBRTC_DEBUG_PREFIX_DIR "${WEBRTC_ROOT}/prefix/Debug")
+    set(WEBRTC_RELEASE_PREFIX_DIR "${WEBRTC_ROOT}/prefix/Release")
+    set(WEBRTC_DEBUG_GENERATED_DIR "${WEBRTC_ROOT}/generated/Debug")
+    set(WEBRTC_RELEASE_GENERATED_DIR "${WEBRTC_ROOT}/generated/Release")
+else()
+    message(FATAL_ERROR "No WebRTC SDK integration for ${CMAKE_SYSTEM_NAME}")
+endif()
 
 if(COHAVORA_DEBUG_DEPENDENCY_ABI STREQUAL "Debug")
     set(WEBRTC_SELECTED_DEBUG_LIB "${WEBRTC_DEBUG_LIB}")
@@ -456,13 +527,19 @@ set(WEBRTC_REQUIRED_PATHS
     "${WEBRTC_ROOT}/include/api/peer_connection_interface.h"
     "${WEBRTC_ROOT}/include/api/video/i420_buffer.h"
     "${WEBRTC_ROOT}/include/third_party/libyuv/include/libyuv.h"
-    "${WEBRTC_ROOT}/include/third_party/boringssl/src/include/openssl/ssl.h"
     "${WEBRTC_DEBUG_PREFIX_DIR}/boringssl_prefix_symbols.h"
     "${WEBRTC_RELEASE_PREFIX_DIR}/boringssl_prefix_symbols.h"
     "${WEBRTC_DEBUG_GENERATED_DIR}/build/chromeos_buildflags.h"
     "${WEBRTC_RELEASE_GENERATED_DIR}/build/chromeos_buildflags.h"
     "${WEBRTC_DEBUG_LIB}"
     "${WEBRTC_RELEASE_LIB}")
+if(WIN32)
+    list(APPEND WEBRTC_REQUIRED_PATHS
+        "${WEBRTC_ROOT}/include/third_party/boringssl/src/include/openssl/ssl.h")
+else()
+    list(APPEND WEBRTC_REQUIRED_PATHS
+        "${WEBRTC_ROOT}/include/boringssl/openssl/ssl.h")
+endif()
 set(WEBRTC_MISSING_PATHS)
 foreach(WEBRTC_REQUIRED_PATH IN LISTS WEBRTC_REQUIRED_PATHS)
     if(NOT EXISTS "${WEBRTC_REQUIRED_PATH}")
@@ -484,6 +561,23 @@ message(STATUS
 # An SDK upgrade falls back until its allocation/release contract is re-audited.
 file(SHA256 "${WEBRTC_RELEASE_LIB}" retained_vp8_sdk_hash)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${WEBRTC_RELEASE_LIB}")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED)
+    # Native ADM ownership, codec rebuilding and disabled-source transitions
+    # are verified against this Release archive. Older SDKs can leak audio
+    # between tracks even when the application's source routing is correct.
+    if(NOT retained_vp8_sdk_hash STREQUAL
+            "c97897128ed8735875c149a578af1c33075813e26648aa370ea800f973015105")
+        message(FATAL_ERROR
+            "Linux system audio requires the validated P3 audio-v2 Release SDK. "
+            "Use that SDK or set COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED=OFF.")
+    endif()
+    if(COHAVORA_DEBUG_DEPENDENCY_ABI STREQUAL "Debug"
+            AND (CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_CONFIGURATION_TYPES))
+        message(FATAL_ERROR
+            "Linux system audio has not been behaviorally validated with the Debug SDK. "
+            "Select Release dependency ABI or disable COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED.")
+    endif()
+endif()
 if(retained_vp8_sdk_hash STREQUAL "5f0cf912e593c9a279ee61a7e41400e38d633d0a8921216bed76cfd00d8b9022")
     if(COHAVORA_DEBUG_DEPENDENCY_ABI STREQUAL "Debug")
         set_property(SOURCE src/rtc/retained_vp8_decoder.cpp APPEND PROPERTY COMPILE_DEFINITIONS
@@ -502,6 +596,10 @@ add_library(cohavora_webrtc_sdk INTERFACE)
 set(COHAVORA_E2EE_BACKEND_PACKAGE_DIR "" CACHE PATH "Reviewed native E2EE overlay package directory")
 set(COHAVORA_E2EE_PATCH_DIR "" CACHE PATH "Isolated, fingerprinted E2EE backend repair for validation")
 set(COHAVORA_E2EE_MEDIA_GUARD_DIR "" CACHE PATH "Pinned native required-encryption channel guards")
+if(NOT WIN32 AND (COHAVORA_E2EE_BACKEND_PACKAGE_DIR OR COHAVORA_E2EE_PATCH_DIR
+        OR COHAVORA_E2EE_MEDIA_GUARD_DIR))
+    message(FATAL_ERROR "The native E2EE overlay is validated for Windows WebRTC only")
+endif()
 if(COHAVORA_E2EE_BACKEND_PACKAGE_DIR)
     include(cmake/CohavoraE2eeBackendPackage.cmake)
 endif()
@@ -571,13 +669,35 @@ target_link_libraries(cohavora_webrtc_sdk INTERFACE
     $<$<CONFIG:Debug>:${WEBRTC_SELECTED_DEBUG_LIB}>
     $<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_LIB}>)
 
-add_compile_definitions(
-    WEBRTC_WIN
-    NOMINMAX
-    RTC_DISABLE_CHECK_MSG=1
-    RTC_DISABLE_CHECKING=1
-    RTC_NO_UNIQUE_ADDRESS=
-)
+if(WIN32)
+    add_compile_definitions(
+        WEBRTC_WIN NOMINMAX RTC_DISABLE_CHECK_MSG=1
+        RTC_DISABLE_CHECKING=1 RTC_NO_UNIQUE_ADDRESS=)
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    add_compile_definitions(WEBRTC_POSIX WEBRTC_LINUX)
+    find_package(Threads REQUIRED)
+    find_package(X11 REQUIRED)
+    find_library(COHAVORA_GIO_LIBRARY NAMES gio-2.0 libgio-2.0.so.0 REQUIRED)
+    find_library(COHAVORA_GOBJECT_LIBRARY NAMES gobject-2.0 libgobject-2.0.so.0 REQUIRED)
+    find_library(COHAVORA_GLIB_LIBRARY NAMES glib-2.0 libglib-2.0.so.0 REQUIRED)
+    target_link_libraries(cohavora_webrtc_sdk INTERFACE
+        Threads::Threads ${CMAKE_DL_LIBS} rt X11::X11
+        "${COHAVORA_GIO_LIBRARY}"
+        "${COHAVORA_GOBJECT_LIBRARY}"
+        "${COHAVORA_GLIB_LIBRARY}")
+    if(COHAVORA_LINUX_PRODUCT_UI)
+        find_package(PkgConfig REQUIRED)
+        pkg_check_modules(COHAVORA_SCREENCAST REQUIRED IMPORTED_TARGET
+            gio-unix-2.0 "libpipewire-0.3>=1.0" libspa-0.2)
+        pkg_check_modules(COHAVORA_PULSE REQUIRED IMPORTED_TARGET libpulse)
+        target_link_libraries(cohavora_core PRIVATE PkgConfig::COHAVORA_SCREENCAST)
+        target_link_libraries(cohavora_core PRIVATE PkgConfig::COHAVORA_PULSE)
+        if(COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED)
+            set_property(SOURCE src/media/linux/system_audio_capture.cpp APPEND PROPERTY
+                COMPILE_DEFINITIONS COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED=1)
+        endif()
+    endif()
+endif()
 
 target_link_libraries(cohavora_core PRIVATE
     cohavora_webrtc_sdk)
@@ -588,7 +708,9 @@ target_link_libraries(cohavora_core PUBLIC
     protobuf::libprotobuf
     spdlog::spdlog
     ZLIB::ZLIB
-    nlohmann_json::nlohmann_json
+    nlohmann_json::nlohmann_json)
+if(WIN32)
+target_link_libraries(cohavora_core PUBLIC
     ws2_32
     winmm
     secur32
@@ -610,12 +732,14 @@ target_link_libraries(cohavora_core PUBLIC
     shcore
     shell32
 )
+endif()
 
 if(COHAVORA_BUILD_SAMPLES)
     add_subdirectory(samples)
 endif()
 
 if(COHAVORA_BUILD_MEETING_APP)
+if(WIN32)
 if(NOT DEFINED TDESKTOP_LIBS_DIR)
     if(DEFINED ENV{TDESKTOP_LIBS_DIR})
         set(TDESKTOP_LIBS_DIR "$ENV{TDESKTOP_LIBS_DIR}")
@@ -661,6 +785,67 @@ include(cmake/CohavoraMeetingUiTargets.cmake)
 if(COHAVORA_BUILD_MEETING_APP)
     add_subdirectory(src/app)
 endif()
+elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    if(DEFINED ENV{QT_ROOT} AND NOT "$ENV{QT_ROOT}" STREQUAL "")
+        set(cohavora_linux_qt_default "$ENV{QT_ROOT}")
+    else()
+        set(cohavora_linux_qt_default "${DEPS_DIR}/Libraries/linux64")
+    endif()
+    if(NOT DEFINED QT_ROOT OR QT_ROOT STREQUAL "")
+        set(QT_ROOT "${cohavora_linux_qt_default}" CACHE PATH
+            "Linux Qt 5.15.18 static installation root" FORCE)
+    endif()
+    unset(cohavora_linux_qt_default)
+    if(NOT EXISTS "${QT_ROOT}/lib/cmake/Qt5/Qt5Config.cmake")
+        message(FATAL_ERROR
+            "A Linux Qt 5.15.18 installation is required at '${QT_ROOT}'; "
+            "run python3 build/prepare/prepare.py or set QT_ROOT to an existing install root")
+    endif()
+    set(QT_PATH "${QT_ROOT}")
+    include(cmake/CohavoraQtDependencies.cmake)
+    cohavora_configure_qt_dependencies(QT_ROOT "${QT_ROOT}")
+    if(COHAVORA_LINUX_PRODUCT_UI)
+        include(cmake/CohavoraLinuxJpeg.cmake)
+        cohavora_isolate_linux_jpeg()
+    endif()
+    add_subdirectory(src/ui)
+    if(COHAVORA_LINUX_PRODUCT_UI)
+        cohavora_define_desktop_ui_runtime()
+        include(cmake/CohavoraMeetingTargets.cmake)
+    endif()
+    add_subdirectory(src/render)
+    if(COHAVORA_LINUX_PRODUCT_UI)
+        include(cmake/CohavoraMeetingUiTargets.cmake)
+    endif()
+    add_subdirectory(src/app)
+endif()
+endif()
+
+# Static Qt plugin imports belong to the executable. OBJECT libraries otherwise
+# inject default plugin references while the app links a smaller explicit set.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COHAVORA_LINUX_PRODUCT_UI AND COHAVORA_BUILD_MEETING_APP)
+    set(cohavora_qt_plugin_types)
+    foreach(qt_module IN ITEMS Qt5::Gui Qt5::Network Qt5::WaylandClient)
+        get_target_property(module_plugin_types ${qt_module} INTERFACE_QT_PLUGIN_TYPES)
+        if(module_plugin_types)
+            list(APPEND cohavora_qt_plugin_types ${module_plugin_types})
+        endif()
+    endforeach()
+    list(REMOVE_DUPLICATES cohavora_qt_plugin_types)
+    function(cohavora_executable_owns_qt_plugins directory)
+        get_property(library_targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
+        foreach(library_target IN LISTS library_targets)
+            get_target_property(library_type ${library_target} TYPE)
+            if(library_type STREQUAL "STATIC_LIBRARY" OR library_type STREQUAL "OBJECT_LIBRARY")
+                qt5_import_plugins(${library_target} EXCLUDE_BY_TYPE ${cohavora_qt_plugin_types})
+            endif()
+        endforeach()
+        get_property(child_directories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+        foreach(child_directory IN LISTS child_directories)
+            cohavora_executable_owns_qt_plugins("${child_directory}")
+        endforeach()
+    endfunction()
+    cohavora_executable_owns_qt_plugins("${CMAKE_CURRENT_SOURCE_DIR}")
 endif()
 
 if(TARGET cohavora_app)

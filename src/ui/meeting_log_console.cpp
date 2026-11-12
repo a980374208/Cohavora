@@ -1,3 +1,4 @@
+#include "src/platform/qt_path.h"
 #include <QtCore/QCoreApplication>
 #include "src/ui/meeting_log_console.h"
 #include "src/ui/app_theme.h"
@@ -173,8 +174,8 @@ MeetingLogConsoleWindow::sharedQueue() {
 MeetingLogConsoleWindow::MeetingLogConsoleWindow(QWidget *parent)
 	: QDialog(parent)
 	, _diagnosticRoot(g_consoleStorageRoots ? g_consoleStorageRoots->diagnostics
-		: std::filesystem::path(QDir(QStandardPaths::writableLocation(
-			QStandardPaths::AppLocalDataLocation)).filePath(QStringLiteral("diagnostics")).toStdWString()))
+		: cohavora::platform::PathFromQString(QDir(QStandardPaths::writableLocation(
+			QStandardPaths::AppLocalDataLocation)).filePath(QStringLiteral("diagnostics"))))
 	, _crashRoot(g_consoleStorageRoots ? g_consoleStorageRoots->crashEvidence
 		: livekit::telemetry::CrashEvidenceProvider::DefaultRoot()) {
 	setObjectName(QStringLiteral("meetingLogConsole"));

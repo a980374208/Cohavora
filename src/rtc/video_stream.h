@@ -24,7 +24,8 @@ public:
         VideoBufferType format{VideoBufferType::RGBA};
     };
 
-    static std::shared_ptr<VideoStream> fromTrack(const std::shared_ptr<Track>& track, const Options& options = Options());
+    static std::shared_ptr<VideoStream> fromTrack(const std::shared_ptr<Track>& track);
+    static std::shared_ptr<VideoStream> fromTrack(const std::shared_ptr<Track>& track, const Options& options);
 
     explicit VideoStream(const Options& options);
     virtual ~VideoStream();

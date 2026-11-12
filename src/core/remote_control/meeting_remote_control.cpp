@@ -1,18 +1,24 @@
 #include "src/core/meeting_coordinator.h"
-#include "src/platform/win/remote_input.h"
+#include "src/platform/remote_input.h"
 #include <QtCore/QUuid>
+#include <QtGui/QGuiApplication>
 
 namespace OpenMeeting {
 namespace rc = livekit::remote_control;
+rc::Capabilities MeetingCoordinator::remoteControlCapabilities() {
+    return rc::PlatformRemoteControlCapabilities(QGuiApplication::platformName().toStdString());
+}
 void MeetingCoordinator::configureRemoteControlRuntimeOnUiThread() {
     auto session = _sessionRuntime;
     if (!session || !_room) return;
-    auto input = rc::CreateWindowsInputBackend();
+    auto input = rc::CreatePlatformInputBackend();
+    const auto capabilities = remoteControlCapabilities();
     _remoteInput = input;
-    session->post([session, gate = _sessionUiGate, weakRoom = std::weak_ptr<livekit::Room>(_room), input] {
+    session->post([session, gate = _sessionUiGate, weakRoom = std::weak_ptr<livekit::Room>(_room), input,capabilities] {
         if (!session->acceptsDataOnStrand()) return;
         rc::Runtime::Hooks hooks;
         hooks.input = input;
+        hooks.capabilities = [capabilities] { return capabilities; };
         hooks.newId = [] { return QUuid::createUuid().toString(QUuid::WithoutBraces).toStdString(); };
         hooks.surface = [weak = std::weak_ptr<MeetingSessionRuntime>(session), weakRoom]() -> std::optional<rc::Surface> {
             const auto owner = weak.lock(); const auto room = weakRoom.lock();
@@ -80,6 +86,14 @@ void MeetingCoordinator::enqueueRemoteControlData(const std::shared_ptr<MeetingS
 }
 void MeetingCoordinator::requestRemoteControl(const QString& identity, const QString& trackSid,
         std::shared_ptr<rc::Lease> frontendLease) {
+    const auto capabilities = remoteControlCapabilities();
+    if (!capabilities.canControl()) {
+        rc::Projection unavailable;
+        unavailable.reason = rc::Reason::Unavailable;
+        unavailable.capabilities = capabilities;
+        emit remoteControlChanged(unavailable);
+        return;
+    }
     if (_state != MeetingState::InMeeting || !_sessionRuntime || !frontendLease ||
         !frontendLease->permits(rc::NowMs())) return;
     for (const auto& presentation : participantPresentations()) {

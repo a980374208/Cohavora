@@ -29,11 +29,30 @@ struct Surface {
 enum class State { Idle, Requesting, AwaitingConsent, AwaitingReady, Controlling, Controlled, AwaitingActivation };
 enum class Reason { None, Declined, Cancelled, Timeout, Unavailable, PeerChanged,
                     InputStopped, Transport, Protocol, Busy };
+// Local capabilities are directional. They describe the complete safety
+// contract, not the mere presence of a portal method or an input device.
+enum class CapabilityStatus { Available, UnsupportedPlatform, UnsupportedWindowSystem,
+                              UnsupportedKeyboardMapping, HostSafetyUnavailable };
+enum class NativeKeyEncoding { Unavailable, WindowsSet1, LinuxEvdevOffset8 };
+struct DirectionCapability {
+    CapabilityStatus status = CapabilityStatus::UnsupportedPlatform;
+    bool available() const { return status == CapabilityStatus::Available; }
+    bool operator==(const DirectionCapability&) const = default;
+};
+struct Capabilities {
+    DirectionCapability controller, host;
+    NativeKeyEncoding controllerKeys = NativeKeyEncoding::Unavailable;
+    bool canControl() const {
+        return controller.available() && (controllerKeys == NativeKeyEncoding::WindowsSet1 ||
+            controllerKeys == NativeKeyEncoding::LinuxEvdevOffset8);
+    }
+    bool operator==(const Capabilities&) const = default;
+};
 enum class InputKind { Move, Button, Wheel, Key };
 struct Input {
     InputKind kind = InputKind::Move;
     uint16_t x = 0, y = 0;
-    int code = 0; // button 1..3; signed wheel delta; physical scan code
+    int code = 0; // button 1..3; signed wheel delta; Windows Set1 make code (v2)
     bool down = false, extended = false;
     bool valid() const;
     bool operator==(const Input&) const = default;
@@ -58,6 +77,8 @@ struct Projection {
     int width = 0, height = 0;
     uint64_t inputEpoch = 0;
     bool inputPaused = true, controllerPaused = false;
+    Capabilities capabilities;
+    bool hosting = false;
 };
 struct InputStatus {
     uint64_t epoch = 0;
@@ -96,6 +117,7 @@ public:
         std::function<std::string()> newId;
         std::function<void(Projection)> project;
         std::shared_ptr<InputBackend> input;
+        std::function<Capabilities()> capabilities;
     };
     explicit Runtime(Hooks);
     ~Runtime();
@@ -110,6 +132,7 @@ public:
     void stop(Reason reason = Reason::Cancelled);
 private:
     bool current(uint64_t now);
+    Capabilities capabilities() const;
     bool matches(const Message&, const Peer&) const;
     Message message(Kind) const;
     bool send(Message);

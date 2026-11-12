@@ -11,6 +11,14 @@ target_include_directories(cohavora_qt_video_render PUBLIC
 target_link_libraries(cohavora_qt_video_render PUBLIC
     cohavora_core
     cohavora::qt_gui_runtime)
+if(UNIX AND NOT APPLE)
+    qt5_import_plugins(cohavora_qt_video_render
+        EXCLUDE_BY_TYPE egldeviceintegrations
+        EXCLUDE_BY_TYPE iconengines
+        EXCLUDE_BY_TYPE imageformats
+        EXCLUDE_BY_TYPE platforms
+        EXCLUDE_BY_TYPE xcbglintegrations)
+endif()
 set_target_properties(cohavora_qt_video_render PROPERTIES
     AUTOMOC OFF
     FOLDER "render")

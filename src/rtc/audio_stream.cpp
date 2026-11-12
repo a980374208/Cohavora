@@ -9,6 +9,10 @@ AudioStream::~AudioStream() {
     close();
 }
 
+std::shared_ptr<AudioStream> AudioStream::fromTrack(const std::shared_ptr<Track>& track) {
+    return fromTrack(track, Options{});
+}
+
 std::shared_ptr<AudioStream> AudioStream::fromTrack(const std::shared_ptr<Track>& track, const Options& options) {
     auto stream = std::make_shared<AudioStream>(options);
     if (track) {

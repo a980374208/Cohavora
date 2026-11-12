@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "version": "@PROJECT_VERSION@",
+  "debian_package": "cohavora",
+  "debian_version": "@PROJECT_VERSION@-@CPACK_DEBIAN_PACKAGE_RELEASE@",
+  "platform": "ubuntu-24.04-amd64",
+  "build_configuration": "@CMAKE_BUILD_TYPE@",
+  "configured_utc": "@cohavora_linux_package_configured_utc@",
+  "source_head": "@cohavora_linux_source_head@",
+  "source_head_is_complete_provenance": false,
+  "qt_version": "@COHAVORA_QT_VERSION@",
+  "webrtc_release_sha256": "@retained_vp8_sdk_hash@",
+  "system_audio_sdk_verified": @cohavora_linux_package_audio@,
+  "e2ee_required_supported": false
+}

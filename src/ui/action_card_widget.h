@@ -40,6 +40,7 @@ public:
 	}
 
 protected:
+	void changeEvent(QEvent *e) override;
 	void paintEvent(QPaintEvent *e) override;
 	void resizeEvent(QResizeEvent *e) override;
 	void mouseMoveEvent(QMouseEvent *e) override;

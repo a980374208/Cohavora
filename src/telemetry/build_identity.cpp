@@ -20,12 +20,18 @@ namespace livekit::telemetry {
 namespace {
 
 std::string ComputeBuildId() {
+#if defined(_WIN32) || defined(__linux__)
 #if defined(_WIN32)
     std::array<wchar_t, 32768> path{};
     const auto length = GetModuleFileNameW(nullptr, path.data(),
         static_cast<DWORD>(path.size()));
     if (length == 0 || length >= path.size()) return "unknown";
     std::ifstream input(std::filesystem::path(path.data()), std::ios::binary);
+#else
+    // Open the running inode directly, including after an atomic upgrade has
+    // replaced its pathname. Do not hash a resolved, potentially newer file.
+    std::ifstream input("/proc/self/exe", std::ios::binary);
+#endif
     if (!input) return "unknown";
     using Context = std::unique_ptr<EVP_MD_CTX, decltype(&EVP_MD_CTX_free)>;
     Context digest(EVP_MD_CTX_new(), &EVP_MD_CTX_free);

@@ -34,6 +34,27 @@
         "COHAVORA_BUILD_SAMPLES": "OFF",
         "COHAVORA_REQUIRE_UI_TRANSLATIONS": "ON"
       }
+    },
+    {
+      "name": "ubuntu-ninja-relwithdebinfo",
+      "displayName": "Ubuntu x64 - Basic Meeting",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/ubuntu",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "COHAVORA_BUILD_MEETING_APP": "ON",
+        "COHAVORA_BUILD_SAMPLES": "OFF"
+      }
+    },
+    {
+      "name": "ubuntu-product",
+      "displayName": "Ubuntu x64 - Full Product UI",
+      "inherits": "ubuntu-ninja-relwithdebinfo",
+      "binaryDir": "${sourceDir}/out/build/ubuntu-product",
+      "cacheVariables": {
+        "COHAVORA_LINUX_PRODUCT_UI": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -57,6 +78,27 @@
       "name": "release",
       "configurePreset": "windows-vs2026-release",
       "configuration": "Release",
+      "targets": [
+        "cohavora_app"
+      ]
+    },
+    {
+      "name": "ubuntu-meeting",
+      "configurePreset": "ubuntu-ninja-relwithdebinfo",
+      "targets": [
+        "cohavora_app"
+      ]
+    },
+    {
+      "name": "ubuntu-receiver",
+      "configurePreset": "ubuntu-ninja-relwithdebinfo",
+      "targets": [
+        "cohavora_app"
+      ]
+    },
+    {
+      "name": "ubuntu-product",
+      "configurePreset": "ubuntu-product",
       "targets": [
         "cohavora_app"
       ]

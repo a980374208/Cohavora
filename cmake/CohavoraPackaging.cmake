@@ -1,3 +1,8 @@
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    include(${CMAKE_CURRENT_LIST_DIR}/CohavoraLinuxPackaging.cmake)
+    return()
+endif()
+
 # Qt, the CRT and the application dependencies are linked statically. Render
 # backends are loaded relative to the executable and must keep this layout.
 install(TARGETS cohavora_app RUNTIME DESTINATION .)

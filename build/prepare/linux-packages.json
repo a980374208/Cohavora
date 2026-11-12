@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "qt": {
+    "archive": "cohavora-libraries-ubuntu2404-x64-qt-5.15.18-20261110.zip",
+    "url": "https://github.com/a980374208/Cohavora/releases/download/dependencies-qt-5.15.18-20260925/cohavora-libraries-ubuntu2404-x64-qt-5.15.18-20261110.zip",
+    "size": 1041161646,
+    "sha256": "d5aad7fba9aab052b489635fe9274716e3aa1303c912b97bf82c50a2dfae0396",
+    "archive_prefix": "Libraries/linux64",
+    "file_count": 4150,
+    "required_files": {
+      "bin/qmake": "238d21ca78f004d93397b60a6c93dd37eadc27270ebc1c064d0e7c8bc6824cc0",
+      "lib/cmake/Qt5/Qt5Config.cmake": "ee4bb67d5824ff880ec2f2aa2ce09b3c4860ac0339a4cad6ffd7df87aa1d5dc0",
+      "lib/libQt5Core.a": "9b513afed1dfd1364f24a7a62338d6d7bef86f9cb140711c2e5ac8d87e32e3ef",
+      "lib/libQt5Gui.a": "c12cb2ef1a4b89558a263d1a9a63bec472e77cd0ba57c37e05842b04f0278e4c",
+      "lib/libQt5Widgets.a": "cae4cbd15aec77ea09df45605711590c27b07bd73c64aaa5d4e7aa70918d9068",
+      "lib/libQt5Network.a": "d12ca95e3529c2f8eeae6a3cdc3394192e613b2c3ca13e32bcdef62120e0d121",
+      "lib/libQt5Svg.a": "7719f019bf78b3f775140281d7a17332204e31b3ce1bac774267df1eab9a1b59",
+      "plugins/platforms/libqxcb.a": "7d5f791b434e42509044e2e33baf2a27e4729e652efb8ec898836355a860e195",
+      "licenses/README.md": "ffb1c87e4a2ae8ea95573f2679f78ddabbe3c32561d995ba30f84b31bb395223"
+    }
+  },
+  "webrtc": {
+    "archive": "cohavora-webrtc-ubuntu-x64-aaeeee8-cohavora-bssl-v1.tar.gz",
+    "url": "https://github.com/a980374208/Cohavora/releases/download/webrtc-51ef663-cohavora-bssl-dual-v3/cohavora-webrtc-ubuntu-x64-aaeeee8-cohavora-bssl-v1.tar.gz",
+    "size": 242824939,
+    "sha256": "c46245878a8bb913406c950df72f96977b935c3d21fd3a5b1a2541aeb0741f98",
+    "archive_prefix": "cohavora-webrtc-ubuntu-x64-aaeeee8-cohavora-bssl-v1",
+    "file_count": 36239,
+    "required_files": {
+      "lib/Release/libwebrtc.a": "afe1fd8c22848e039bc447f67c279f7643ca36782c7c7b21a11f799fafd3f324",
+      "lib/Debug/libwebrtc.a": "35728d4bf2a8fd75b3bd4d68bd99caa567112e99181f092fdd1cad77b1bd05cf",
+      "include/api/peer_connection_interface.h": "2ff2178b2a81bf743f6009591b85ee9524eda850d0a9a0c6b6f07cf62d420c47",
+      "include/third_party/libyuv/include/libyuv.h": "7c203717f4d26f9bbd125f15e01b389f59c20b7b4210f5fb6aff0af4b8ed1c36",
+      "generated/Release/build/chromeos_buildflags.h": "0f1341e9b76a160aa991c70969d3686fa1ad2170c8e64cb2f5815683dab62c4a",
+      "generated/Debug/build/chromeos_buildflags.h": "0f1341e9b76a160aa991c70969d3686fa1ad2170c8e64cb2f5815683dab62c4a",
+      "prefix/Release/boringssl_prefix_symbols.h": "964387db9989c2ff1f35472acac18ed63a5dcab6423428d72cd3c9bdb09a0c3a",
+      "prefix/Debug/boringssl_prefix_symbols.h": "7cc32c840d4b110fd5fec4b5a59d8fc70a5119d313209a3f1c15ba453d0fa342",
+      "metadata/checksums.sha256": "b27fe1149d56b25a0f9f7a4fa665b642935e6205c78b552d923c156c2207ac49"
+    }
+  }
+}

@@ -2,6 +2,98 @@ include_guard(GLOBAL)
 
 set(COHAVORA_QT_VERSION "5.15.18")
 
+function(cohavora_define_desktop_ui_runtime)
+    if(TARGET cohavora_desktop_ui_runtime)
+        return()
+    endif()
+    foreach(required_target IN ITEMS
+            cohavora_qt_application_runtime
+            desktop_lib_ui desktop_lib_base desktop_lib_crl desktop_lz4)
+        if(NOT TARGET ${required_target})
+            message(FATAL_ERROR
+                "cohavora_define_desktop_ui_runtime requires ${required_target}")
+        endif()
+    endforeach()
+
+    add_library(cohavora_desktop_ui_runtime INTERFACE)
+    add_library(cohavora::desktop_ui_runtime ALIAS cohavora_desktop_ui_runtime)
+    target_include_directories(cohavora_desktop_ui_runtime BEFORE INTERFACE
+        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/lib_ui
+        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/gen
+        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/gen/styles
+        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/lib_base
+        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/lib_rpl
+        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/lib_crl
+        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/GSL/include
+        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/range-v3/include
+        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/expected/include
+        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/xxHash
+        ${QT_PATH}/include/QtCore/5.15.18
+        ${QT_PATH}/include/QtCore/5.15.18/QtCore
+        ${QT_PATH}/include/QtGui/5.15.18
+        ${QT_PATH}/include/QtGui/5.15.18/QtGui
+        $<$<BOOL:${WIN32}>:${TDESKTOP_LIBS_DIR}/tg_angle/include>
+        $<$<BOOL:${WIN32}>:${TDESKTOP_LIBS_DIR}/zlib/include>)
+    target_link_libraries(cohavora_desktop_ui_runtime INTERFACE
+        cohavora_qt_application_runtime
+        desktop_lib_ui
+        desktop_lib_base
+        desktop_lib_crl
+        desktop_lz4
+        ${CMAKE_DL_LIBS})
+endfunction()
+
+if(UNIX AND NOT APPLE)
+    macro(cohavora_configure_qt_dependencies)
+        cmake_parse_arguments(qt "" "QT_ROOT;LIBRARIES_ROOT" "" ${ARGN})
+        if(NOT qt_QT_ROOT)
+            message(FATAL_ERROR "cohavora_configure_qt_dependencies requires QT_ROOT")
+        endif()
+        set(qt_package_dir "${qt_QT_ROOT}/lib/cmake/Qt5")
+        find_package(Qt5 ${COHAVORA_QT_VERSION} EXACT CONFIG REQUIRED
+            COMPONENTS Core Gui Widgets Svg Network DBus
+            PATHS "${qt_package_dir}"
+            NO_DEFAULT_PATH)
+
+        if(COHAVORA_LINUX_PRODUCT_UI)
+            if(NOT EXISTS "${qt_QT_ROOT}/lib/cmake/Qt5WaylandClient/Qt5WaylandClientConfig.cmake")
+                message(FATAL_ERROR "ubuntu-product requires the matching static Qt 5.15.18 QtWayland SDK; set QT_ROOT to that installation. The basic ubuntu preset remains available with the original SDK.")
+            endif()
+            find_package(Qt5 ${COHAVORA_QT_VERSION} EXACT CONFIG REQUIRED
+                COMPONENTS WaylandClient PATHS "${qt_package_dir}" NO_DEFAULT_PATH)
+        endif()
+
+        add_library(cohavora_qt_core_runtime INTERFACE)
+        add_library(cohavora::qt_core_runtime ALIAS cohavora_qt_core_runtime)
+        target_link_libraries(cohavora_qt_core_runtime INTERFACE Qt5::Core)
+
+        add_library(cohavora_qt_network_runtime INTERFACE)
+        add_library(cohavora::qt_network_runtime ALIAS cohavora_qt_network_runtime)
+        target_link_libraries(cohavora_qt_network_runtime INTERFACE Qt5::Network)
+
+        add_library(cohavora_qt_gui_runtime INTERFACE)
+        add_library(cohavora::qt_gui_runtime ALIAS cohavora_qt_gui_runtime)
+        target_link_libraries(cohavora_qt_gui_runtime INTERFACE Qt5::Gui)
+
+        add_library(cohavora_qt_widgets_runtime INTERFACE)
+        add_library(cohavora::qt_widgets_runtime ALIAS cohavora_qt_widgets_runtime)
+        target_link_libraries(cohavora_qt_widgets_runtime INTERFACE Qt5::Widgets)
+
+        add_library(cohavora_qt_svg_runtime INTERFACE)
+        add_library(cohavora::qt_svg_runtime ALIAS cohavora_qt_svg_runtime)
+        target_link_libraries(cohavora_qt_svg_runtime INTERFACE Qt5::Svg)
+
+        add_library(cohavora_qt_application_runtime INTERFACE)
+        add_library(cohavora::qt_application_runtime ALIAS cohavora_qt_application_runtime)
+        target_link_libraries(cohavora_qt_application_runtime INTERFACE
+            cohavora_qt_widgets_runtime cohavora_qt_network_runtime
+            cohavora_qt_svg_runtime)
+
+        message(STATUS "[Qt] Using Linux static ${COHAVORA_QT_VERSION}: ${qt_QT_ROOT}")
+    endmacro()
+    return()
+endif()
+
 function(cohavora_import_configured_archive target release_location debug_location)
     if(TARGET ${target})
         return()
@@ -304,44 +396,3 @@ macro(cohavora_configure_qt_dependencies)
         "[Qt] Using pinned ${COHAVORA_QT_VERSION} package "
         "(Debug ABI: ${COHAVORA_DEBUG_DEPENDENCY_ABI}): ${qt_QT_ROOT}")
 endmacro()
-
-function(cohavora_define_desktop_ui_runtime)
-    if(TARGET cohavora_desktop_ui_runtime)
-        return()
-    endif()
-    foreach(required_target IN ITEMS
-            cohavora_qt_application_runtime
-            desktop_lib_ui desktop_lib_base desktop_lib_crl desktop_lz4)
-        if(NOT TARGET ${required_target})
-            message(FATAL_ERROR
-                "cohavora_define_desktop_ui_runtime requires ${required_target}")
-        endif()
-    endforeach()
-
-    add_library(cohavora_desktop_ui_runtime INTERFACE)
-    add_library(cohavora::desktop_ui_runtime ALIAS cohavora_desktop_ui_runtime)
-    target_include_directories(cohavora_desktop_ui_runtime BEFORE INTERFACE
-        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/lib_ui
-        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/gen
-        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/gen/styles
-        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/lib_base
-        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/lib_rpl
-        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/lib_crl
-        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/GSL/include
-        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/range-v3/include
-        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/expected/include
-        ${PROJECT_SOURCE_DIR}/src/ui/tdesktop/ThirdParty/xxHash
-        ${QT_PATH}/include/QtCore/5.15.18
-        ${QT_PATH}/include/QtCore/5.15.18/QtCore
-        ${QT_PATH}/include/QtGui/5.15.18
-        ${QT_PATH}/include/QtGui/5.15.18/QtGui
-        ${TDESKTOP_LIBS_DIR}/tg_angle/include
-        ${TDESKTOP_LIBS_DIR}/zlib/include)
-    target_link_libraries(cohavora_desktop_ui_runtime INTERFACE
-        cohavora_qt_application_runtime
-        desktop_lib_ui
-        desktop_lib_base
-        desktop_lib_crl
-        desktop_lz4
-        ${CMAKE_DL_LIBS})
-endfunction()

@@ -11,6 +11,7 @@ namespace Cohavora::Update {
 
 inline constexpr qint64 MaxManifestBytes = 96 * 1024;
 inline constexpr qint64 MaxInstallerBytes = 2LL * 1024 * 1024 * 1024;
+enum class Artifact { WindowsInstaller, Ubuntu2404Amd64Deb };
 
 struct Release {
     QString version;
@@ -20,6 +21,8 @@ struct Release {
     QList<QUrl> urls;
     // Authenticated release metadata only; client enforcement is deferred.
     bool forceUpdate = false;
+    Artifact artifact = Artifact::WindowsInstaller;
+    QString packageVersion;
 };
 
 bool IsSecureUrl(const QUrl &url);
@@ -37,5 +40,7 @@ bool IsNewerVersion(const QString &candidate, const QString &current);
 std::optional<Release> ParseManifest(
     const QByteArray &envelope,
     const QByteArray &publicKey);
+// Separate schema and trust configuration; never accepts a Windows manifest.
+std::optional<Release> ParseLinuxManifest(const QByteArray &envelope, const QByteArray &publicKey);
 
 } // namespace Cohavora::Update
