@@ -156,6 +156,11 @@ struct ResolvedVideoPublishPlan {
     std::string effective_codec;
     std::string fallback_reason;
     std::string error;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    // Frozen for this publication; later preference changes must not relabel it.
+    std::string requested_backend;
+    LinuxEncoderCapabilityReason backend_reason = LinuxEncoderCapabilityReason::None;
+#endif
 
     bool ok() const { return error.empty(); }
     bool used_fallback() const {

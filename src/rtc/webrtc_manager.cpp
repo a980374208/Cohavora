@@ -38,6 +38,10 @@
 #include "modules/video_coding/codecs/av1/libaom_av1_encoder.h"
 #include "modules/video_coding/svc/scalability_mode_util.h"
 #include "media/engine/simulcast_encoder_adapter.h"
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+#include "linux/linux_video_encoder.h"
+#include "linux/linux_encoder_capability_cache.h"
+#endif
 #if defined(COHAVORA_HAS_BACKEND_ENCODERS)
 #include "d3d11_amf_video_encoder.h"
 #include "media/engine/internal_encoder_factory.h"
@@ -49,6 +53,11 @@
 #include "modules/video_coding/codecs/external/qsv_video_encoder.h"
 #include "modules/video_coding/codecs/external/qsv_video_encoder_backend.h"
 #include "modules/video_coding/codecs/external/x265_video_encoder.h"
+#elif defined(COHAVORA_HAS_X265_ENCODER)
+#include "modules/video_coding/codecs/external/backend_video_encoder.h"
+#include "modules/video_coding/codecs/external/x265_video_encoder.h"
+#elif defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+#include "modules/video_coding/codecs/external/backend_video_encoder.h"
 #endif
 #if defined(COHAVORA_HAS_H265_DECODER)
 #include "h265_video_decoder.h"
@@ -82,7 +91,12 @@ int CompareCodecName(const char* left, const char* right) {
 #endif
 }
 
-enum class EncoderPreference { kAuto, kSoftware, kAmf, kNvenc, kQsv };
+enum class EncoderPreference {
+    kAuto, kSoftware, kAmf, kNvenc, kQsv
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    , kVaapi
+#endif
+};
 std::atomic<EncoderPreference> video_encoder_preference{EncoderPreference::kAuto};
 
 enum VideoEncoderCapabilityFlag : unsigned {
@@ -93,10 +107,36 @@ enum VideoEncoderCapabilityFlag : unsigned {
     kNvencH265 = 1u << 4,
     kQsvH264 = 1u << 5,
     kQsvH265 = 1u << 6,
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    kVaapiH264 = 1u << 7,
+#endif
 };
 
+#if !defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
 std::atomic<unsigned> video_encoder_capability_flags{0};
 std::once_flag video_encoder_capability_probe_once;
+#else
+VideoEncoderCapabilities CompiledLinuxEncoderCapabilities(
+        LinuxEncoderCapabilityReason reason = LinuxEncoderCapabilityReason::NotProbed) {
+    VideoEncoderCapabilities result;
+    const auto compiled = [reason](auto& backend) { backend.compiled = true; backend.reason = reason; };
+#if defined(COHAVORA_HAS_LINUX_NVENC)
+    compiled(result.nvenc);
+#endif
+#if defined(COHAVORA_HAS_LINUX_QSV)
+    compiled(result.qsv);
+#endif
+#if defined(COHAVORA_HAS_LINUX_VAAPI)
+    compiled(result.vaapi);
+#endif
+    return result;
+}
+detail::LinuxEncoderCapabilityCache<VideoEncoderCapabilities>& LinuxEncoderCapabilitiesCache() {
+    static auto* cache = new detail::LinuxEncoderCapabilityCache<VideoEncoderCapabilities>(
+        CompiledLinuxEncoderCapabilities(), &PreserveLinuxEncoderDevicePins);
+    return *cache;
+}
+#endif
 
 const char* PreferenceName(EncoderPreference preference) {
     switch (preference) {
@@ -104,6 +144,9 @@ const char* PreferenceName(EncoderPreference preference) {
     case EncoderPreference::kAmf: return "amf";
     case EncoderPreference::kNvenc: return "nvenc";
     case EncoderPreference::kQsv: return "qsv";
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    case EncoderPreference::kVaapi: return "vaapi";
+#endif
     default: return "auto";
     }
 }
@@ -193,11 +236,14 @@ const std::vector<webrtc::SdpVideoFormat>& CachedBackendFormats() {
     }();
     return formats;
 }
+#endif
 
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS) || defined(COHAVORA_HAS_X265_ENCODER) || defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
 const std::vector<webrtc::SdpVideoFormat>& CachedSoftwareFormats() {
     static const auto formats = [] {
         try {
             auto result = webrtc::SupportedH264Codecs(true);
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS) || defined(COHAVORA_HAS_X265_ENCODER)
             // Explicit software intent must not initialize a vendor GPU backend.
             for (const char* level : {"120", "93"}) {
                 webrtc::SdpVideoFormat h265("H265", {{"profile-id", "1"},
@@ -207,6 +253,7 @@ const std::vector<webrtc::SdpVideoFormat>& CachedSoftwareFormats() {
                     break;
                 }
             }
+#endif
             return result;
         } catch (...) {
             return std::vector<webrtc::SdpVideoFormat>{};
@@ -217,8 +264,24 @@ const std::vector<webrtc::SdpVideoFormat>& CachedSoftwareFormats() {
 
 std::vector<webrtc::SdpVideoFormat> BackendFormats(EncoderPreference preference) {
     if (preference == EncoderPreference::kSoftware) return CachedSoftwareFormats();
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
     if (HardwareRetirementFailed()) return {};
     return CachedBackendFormats();
+#elif defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    if (detail::LinuxHardwareEncoderRetirementFailed()) return {};
+    auto formats = CachedSoftwareFormats();
+    if (preference != EncoderPreference::kAuto) {
+        // Linux hardware currently supports H.264 only; keep explicit hardware
+        // intent eligible for same-codec software fallback when no GPU exists.
+        std::erase_if(formats, [](const auto& format) {
+            return !CodecNameEquals(format, "H264");
+        });
+    }
+    return formats;
+#else
+    if (preference == EncoderPreference::kAuto) return CachedSoftwareFormats();
+    return {};
+#endif
 }
 
 bool H265SendingAvailable() {
@@ -259,11 +322,21 @@ void EmitRtcLifecycle(diagnostic::RtcStatus status) noexcept {
 
 class SingleStreamVideoEncoderFactory : public webrtc::VideoEncoderFactory {
 public:
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    SingleStreamVideoEncoderFactory() = default;
+    SingleStreamVideoEncoderFactory(EncoderPreference preference,
+                                   detail::LinuxHardwareEncoderPlan plan)
+        : frozen_preference_(preference), frozen_linux_plan_(std::move(plan)) {}
+#endif
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
         std::vector<webrtc::SdpVideoFormat> formats{
             webrtc::SdpVideoFormat("VP8")};
-#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS) || defined(COHAVORA_HAS_X265_ENCODER) || defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        const auto preference = CurrentPreference();
+#else
         const auto preference = video_encoder_preference.load(std::memory_order_relaxed);
+#endif
         for (auto format : BackendFormats(preference)) {
             if (CodecNameEquals(format, "H264")) {
                 formats.push_back(std::move(format));
@@ -289,7 +362,7 @@ public:
         const webrtc::SdpVideoFormat& format,
         std::optional<std::string> scalability_mode) const override {
         CodecSupport support;
-#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS) || defined(COHAVORA_HAS_X265_ENCODER) || defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
         if (CodecNameEquals(format, "H264") || CodecNameEquals(format, "H265")) {
             if (!format.IsCodecInList(GetSupportedFormats())) return {};
             if (CodecNameEquals(format, "H265")) {
@@ -320,9 +393,13 @@ public:
         if (CompareCodecName(format.name.c_str(), "VP8") == 0) {
             return webrtc::CreateVp8Encoder(env);
         }
-#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS) || defined(COHAVORA_HAS_X265_ENCODER) || defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
         if (CodecNameEquals(format, "H264") || CodecNameEquals(format, "H265")) {
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+            const auto preference = CurrentPreference();
+#else
             const auto preference = video_encoder_preference.load(std::memory_order_relaxed);
+#endif
             if (!format.IsCodecInList(BackendFormats(preference)) ||
                 (CodecNameEquals(format, "H265") &&
                  (!webrtc::IsBackendH265FormatSupported(format) ||
@@ -332,13 +409,27 @@ public:
                     << " effective=unavailable reason=format_or_capability_unavailable";
                 return nullptr;
             }
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
             const auto selected_env = EncoderEnvironment(env, preference);
+#else
+            const auto& selected_env = env;
+#endif
             std::unique_ptr<webrtc::VideoEncoder> encoder;
-            if (CodecNameEquals(format, "H264") &&
-                preference == EncoderPreference::kSoftware) {
+            if (CodecNameEquals(format, "H264")
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
+                && preference == EncoderPreference::kSoftware
+#endif
+            ) {
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+                encoder = detail::CreateLinuxH264VideoEncoder(
+                    selected_env, format, frozen_linux_plan_ ? *frozen_linux_plan_ :
+                        detail::ResolveLinuxHardwareEncoderPlan("software", {}));
+#else
                 encoder = webrtc::CreateH264Encoder(
                     selected_env, webrtc::H264EncoderSettings::Parse(format));
+#endif
             } else {
+#if defined(COHAVORA_HAS_BACKEND_ENCODERS)
                 const auto capabilities = GetVideoEncoderCapabilities();
                 const bool use_d3d11_amf =
                     !HardwareRetirementFailed() &&
@@ -368,6 +459,9 @@ public:
                     // SimulcastEncoderAdapter. SDK policy owns vendor and fallback.
                     encoder = webrtc::InternalEncoderFactory().Create(selected_env, format);
                 }
+#elif defined(COHAVORA_HAS_X265_ENCODER)
+                encoder = webrtc::CreateX265VideoEncoder(selected_env, format);
+#endif
             }
             LogBackendCreation(format, preference, encoder.get());
             if (encoder && CodecNameEquals(format, "H264"))
@@ -389,12 +483,75 @@ public:
         }
         return nullptr;
     }
+
+private:
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    EncoderPreference CurrentPreference() const {
+        if (frozen_preference_) return *frozen_preference_;
+        return EncoderPreference::kSoftware;
+    }
+    std::optional<EncoderPreference> frozen_preference_;
+    std::optional<detail::LinuxHardwareEncoderPlan> frozen_linux_plan_;
+#endif
 };
+
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+// SimulcastEncoderAdapter retains a borrowed factory pointer for later layer
+// reconstruction. Own that immutable per-encoder factory for the adapter's
+// entire lifetime; member order retires the adapter before its factory.
+class LinuxOwnedSimulcastEncoder final : public webrtc::VideoEncoder {
+public:
+    LinuxOwnedSimulcastEncoder(std::unique_ptr<webrtc::VideoEncoderFactory> factory,
+                              std::unique_ptr<webrtc::VideoEncoder> encoder)
+        : factory_(std::move(factory)), encoder_(std::move(encoder)) {}
+
+    int InitEncode(const webrtc::VideoCodec* codec, const Settings& settings) override {
+        return encoder_->InitEncode(codec, settings);
+    }
+    int32_t RegisterEncodeCompleteCallback(webrtc::EncodedImageCallback* callback) override {
+        return encoder_->RegisterEncodeCompleteCallback(callback);
+    }
+    int32_t Release() override { return encoder_->Release(); }
+    int32_t Encode(const webrtc::VideoFrame& frame,
+                   const std::vector<webrtc::VideoFrameType>* types) override {
+        return encoder_->Encode(frame, types);
+    }
+    void SetRates(const RateControlParameters& rates) override { encoder_->SetRates(rates); }
+    void SetFecControllerOverride(webrtc::FecControllerOverride* controller) override {
+        encoder_->SetFecControllerOverride(controller);
+    }
+    void OnPacketLossRateUpdate(float loss) override { encoder_->OnPacketLossRateUpdate(loss); }
+    void OnRttUpdate(int64_t rtt) override { encoder_->OnRttUpdate(rtt); }
+    void OnLossNotification(const LossNotification& loss) override {
+        encoder_->OnLossNotification(loss);
+    }
+    EncoderInfo GetEncoderInfo() const override { return encoder_->GetEncoderInfo(); }
+
+private:
+    std::unique_ptr<webrtc::VideoEncoderFactory> factory_;
+    std::unique_ptr<webrtc::VideoEncoder> encoder_;
+};
+#endif
 
 class CustomVideoEncoderFactory : public webrtc::VideoEncoderFactory {
 public:
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    // The process factory advertises codecs but never opts a sender into a GPU.
+    // Only an immutable publication factory installed before negotiation can
+    // create hardware after first-frame-driven SDK configuration.
+    CustomVideoEncoderFactory()
+        : CustomVideoEncoderFactory(EncoderPreference::kSoftware,
+              detail::ResolveLinuxHardwareEncoderPlan("software", {}), {}) {}
+    CustomVideoEncoderFactory(EncoderPreference preference,
+                             detail::LinuxHardwareEncoderPlan plan,
+                             std::vector<webrtc::SdpVideoFormat> approved)
+        : linux_preference_(preference), linux_plan_(std::move(plan)),
+          linux_approved_h264_(std::move(approved)),
+          simulcast_factory_(std::make_unique<SingleStreamVideoEncoderFactory>(preference, linux_plan_)) {}
+#else
     CustomVideoEncoderFactory()
         : simulcast_factory_(std::make_unique<SingleStreamVideoEncoderFactory>()) {}
+#endif
 
     std::vector<webrtc::SdpVideoFormat> GetSupportedFormats() const override {
         std::vector<webrtc::SdpVideoFormat> formats;
@@ -405,6 +562,17 @@ public:
         const auto legacy_formats = simulcast_factory_->GetSupportedFormats();
         AppendFormatsNamed(formats, legacy_formats, "VP8");
         AppendFormatsNamed(formats, legacy_formats, "H264");
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        if (!linux_plan_.software_only) {
+            std::erase_if(formats, [&](const auto& format) {
+                return CodecNameEquals(format, "H264") &&
+                    std::none_of(linux_approved_h264_.begin(), linux_approved_h264_.end(),
+                        [&](const auto& approved) {
+                            return format.parameters == approved.parameters;
+                        });
+            });
+        }
+#endif
         AppendFormatsNamed(formats, legacy_formats, "H265");
         const auto vp9_formats = webrtc::SupportedVP9Codecs(true);
         formats.insert(formats.end(), vp9_formats.begin(), vp9_formats.end());
@@ -427,6 +595,9 @@ public:
         std::optional<std::string> scalability_mode) const override {
         if (CodecNameEquals(format, "VP8") || CodecNameEquals(format, "H264") ||
             CodecNameEquals(format, "H265")) {
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+            if (CodecNameEquals(format, "H264") && !format.IsCodecInList(GetSupportedFormats())) return {};
+#endif
             return simulcast_factory_->QueryCodecSupport(format, scalability_mode);
         }
         if (CodecNameEquals(format, "VP9")) {
@@ -454,6 +625,23 @@ public:
             // HEVC backend contract is SRST/L1T1. Do not wrap it in simulcast.
             return simulcast_factory_->Create(env, format);
         }
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        if (CodecNameEquals(format, "H264")) {
+            if (!linux_plan_.software_only && (detail::LinuxHardwareEncoderRetirementFailed() ||
+                linux_plan_.generation != GetVideoEncoderCapabilities().generation))
+                return nullptr;
+            if (!linux_plan_.software_only && std::none_of(linux_approved_h264_.begin(), linux_approved_h264_.end(),
+                [&](const auto& approved) { return approved.parameters == format.parameters; })) return nullptr;
+            auto factory = std::make_unique<SingleStreamVideoEncoderFactory>(
+                linux_preference_, linux_plan_);
+            auto adapter = std::make_unique<webrtc::SimulcastEncoderAdapter>(
+                env, factory.get(), nullptr, format);
+            auto encoder = std::make_unique<LinuxOwnedSimulcastEncoder>(
+                std::move(factory), std::move(adapter));
+            EmitEncoderFormat(format, diagnostic::VideoFormatSource::EncoderFactory);
+            return std::make_unique<detail::FinalH264LevelGuard>(std::move(encoder), format);
+        }
+#endif
         if (CodecNameEquals(format, "VP8") || CodecNameEquals(format, "H264")) {
             auto encoder = std::make_unique<webrtc::SimulcastEncoderAdapter>(
                 env, simulcast_factory_.get(), nullptr, format);
@@ -496,6 +684,11 @@ private:
         }
     }
 
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    EncoderPreference linux_preference_;
+    detail::LinuxHardwareEncoderPlan linux_plan_;
+    std::vector<webrtc::SdpVideoFormat> linux_approved_h264_;
+#endif
     std::unique_ptr<webrtc::VideoEncoderFactory> simulcast_factory_;
 };
 
@@ -1012,9 +1205,14 @@ std::optional<std::string> AudioDeviceIdentityAtIndex(
 void SetVideoEncoderPreference(const std::string& preference) {
     auto selected = EncoderPreference::kAuto;
     if (CompareCodecName(preference.c_str(), "software") == 0) selected = EncoderPreference::kSoftware;
+#if !defined(__linux__)
     else if (CompareCodecName(preference.c_str(), "amf") == 0) selected = EncoderPreference::kAmf;
+#endif
     else if (CompareCodecName(preference.c_str(), "nvenc") == 0) selected = EncoderPreference::kNvenc;
     else if (CompareCodecName(preference.c_str(), "qsv") == 0) selected = EncoderPreference::kQsv;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    else if (CompareCodecName(preference.c_str(), "vaapi") == 0) selected = EncoderPreference::kVaapi;
+#endif
     const auto previous = video_encoder_preference.exchange(selected, std::memory_order_relaxed);
     if (previous != selected) {
         RTC_LOG(LS_INFO) << "Product video encoder preference=" << PreferenceName(selected)
@@ -1027,6 +1225,12 @@ std::string GetVideoEncoderPreference() {
 }
 
 VideoEncoderCapabilities GetVideoEncoderCapabilities() {
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    auto& cache = LinuxEncoderCapabilitiesCache();
+    if (detail::LinuxHardwareEncoderRetirementFailed())
+        cache.Seal(CompiledLinuxEncoderCapabilities(LinuxEncoderCapabilityReason::RetirementFailed));
+    return cache.Read();
+#else
     VideoEncoderCapabilities result;
     const auto flags = video_encoder_capability_flags.load(std::memory_order_acquire);
     result.ready = (flags & kCapabilitiesReady) != 0;
@@ -1040,9 +1244,43 @@ VideoEncoderCapabilities GetVideoEncoderCapabilities() {
     result.nvenc = {(flags & kNvencH264) != 0, (flags & kNvencH265) != 0};
     result.qsv = {(flags & kQsvH264) != 0, (flags & kQsvH265) != 0};
     return result;
+#endif
 }
 
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+void InvalidateVideoEncoderCapabilities(LinuxEncoderCapabilityReason reason) {
+    auto& cache = LinuxEncoderCapabilitiesCache();
+    if (detail::LinuxHardwareEncoderRetirementFailed())
+        cache.Seal(CompiledLinuxEncoderCapabilities(LinuxEncoderCapabilityReason::RetirementFailed));
+    else
+        cache.Invalidate(CompiledLinuxEncoderCapabilities(reason));
+}
+#endif
+
 void ProbeVideoEncoderCapabilities() {
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    auto& cache = LinuxEncoderCapabilitiesCache();
+    if (detail::LinuxHardwareEncoderRetirementFailed()) {
+        cache.Seal(CompiledLinuxEncoderCapabilities(LinuxEncoderCapabilityReason::RetirementFailed));
+        return;
+    }
+    const auto ticket = cache.Begin();
+    if (!ticket) return;
+    const auto pinned = cache.Read();
+    if (pinned.generation != ticket->generation || ticket->cancelled->load(std::memory_order_acquire)) return;
+    auto completed = CompiledLinuxEncoderCapabilities(LinuxEncoderCapabilityReason::UnknownUnavailable);
+    try {
+        (void)CachedSoftwareFormats();
+        const auto probed = detail::ProbeLinuxHardwareVideoEncoderCapabilities(pinned, ticket->cancelled);
+        completed.nvenc = probed.nvenc;
+        completed.qsv = probed.qsv;
+        completed.vaapi = probed.vaapi;
+    } catch (...) {}
+    if (detail::LinuxHardwareEncoderRetirementFailed())
+        cache.Seal(CompiledLinuxEncoderCapabilities(LinuxEncoderCapabilityReason::RetirementFailed));
+    else
+        cache.Commit(*ticket, std::move(completed));
+#else
     std::call_once(video_encoder_capability_probe_once, [] {
         unsigned flags = kCapabilitiesReady;
 #if defined(COHAVORA_HAS_BACKEND_ENCODERS)
@@ -1079,11 +1317,15 @@ void ProbeVideoEncoderCapabilities() {
             // Complete pending UI requests even if discovery could not finish.
             flags = kCapabilitiesReady;
         }
+#elif defined(COHAVORA_HAS_X265_ENCODER)
+        // Software discovery must not set any vendor hardware capability bits.
+        (void)CachedSoftwareFormats();
 #endif
         // Publish a complete snapshot. UI readers keep seeing ready=false
         // while initialization or driver cleanup is in progress.
         video_encoder_capability_flags.store(flags, std::memory_order_release);
     });
+#endif
 }
 
 namespace {
@@ -1507,6 +1749,11 @@ VideoEncoderPreflightResult PreflightVideoEncoder(
         result.status = PreflightStatus::Unavailable;
         result.formats.clear();
     }
+#elif defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    auto linux_request = request;
+    if (linux_request.linux_capabilities.generation == 0)
+        linux_request.linux_capabilities = GetVideoEncoderCapabilities();
+    return detail::PreflightLinuxHardwareVideoEncoder(linux_request, std::move(cancelled));
 #endif
     return result;
 }
@@ -1515,9 +1762,27 @@ std::unique_ptr<webrtc::VideoEncoderFactory> CreateVideoEncoderFactory() {
     return std::make_unique<CustomVideoEncoderFactory>();
 }
 
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+std::shared_ptr<webrtc::VideoEncoderFactory> CreateLinuxPublicationVideoEncoderFactory(
+        const std::string& preference, const VideoEncoderCapabilities& capabilities,
+        const std::vector<webrtc::SdpVideoFormat>& approved_hardware_h264_formats) {
+    if (approved_hardware_h264_formats.empty()) return std::make_shared<CustomVideoEncoderFactory>();
+    const auto plan = detail::ResolveLinuxHardwareEncoderPlan(preference, capabilities);
+    if (plan.software_only || plan.backend == detail::LinuxHardwareEncoderBackend::None ||
+        !plan.device.valid || capabilities.generation != GetVideoEncoderCapabilities().generation ||
+        std::any_of(approved_hardware_h264_formats.begin(), approved_hardware_h264_formats.end(),
+            [](const auto& format) { return !detail::IsLinuxHardwareH264FormatSupported(format); })) return {};
+    const auto selected = plan.backend == detail::LinuxHardwareEncoderBackend::Nvenc ? EncoderPreference::kNvenc :
+        (plan.backend == detail::LinuxHardwareEncoderBackend::Qsv ? EncoderPreference::kQsv : EncoderPreference::kVaapi);
+    return std::make_shared<CustomVideoEncoderFactory>(selected, plan, approved_hardware_h264_formats);
+}
+#endif
+
 bool IsHardwareH264FormatSupported(const webrtc::SdpVideoFormat& format) {
 #if defined(COHAVORA_HAS_BACKEND_ENCODERS)
     return webrtc::IsBackendH264FormatSupported(format);
+#elif defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    return detail::IsLinuxHardwareH264FormatSupported(format);
 #else
     return false;
 #endif

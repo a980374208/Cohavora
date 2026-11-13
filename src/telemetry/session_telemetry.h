@@ -300,6 +300,10 @@ struct LocalVideoPublishDescriptor {
     std::string requested_codec;
     std::string effective_codec;
     std::string fallback_reason;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    std::string requested_backend;
+    LinuxEncoderCapabilityReason backend_reason = LinuxEncoderCapabilityReason::None;
+#endif
     std::string source;
     std::string mode;
     std::string resolved_profile;
@@ -438,6 +442,9 @@ struct Snapshot {
 
     // Fixed storage is charged by sizeof(Snapshot); no unbounded retained IDs.
     CodecSenderSnapshot codec_sender;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    LinuxVideoEncoderSnapshot linux_video_encoders;
+#endif
 
     std::uint64_t session_generation = 0;
     std::uint64_t revision = 0;
@@ -1455,6 +1462,9 @@ private:
         std::shared_ptr<LocalVideoActivityProbe> video_probe;
         std::shared_ptr<LocalAudioActivityProbe> audio_probe;
         LocalVideoPublishDescriptor video_publish;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        LinuxVideoEncoderProgress linux_encoder_progress;
+#endif
         LocalVideoPipelineSample pipeline_sample;
         bool device_stall_active = false;
         Clock::time_point device_stall_started_at{};

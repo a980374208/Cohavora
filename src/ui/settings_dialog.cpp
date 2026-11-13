@@ -51,6 +51,9 @@
 #include <QtWidgets/QVBoxLayout>
 #include <QtGui/QStandardItemModel>
 #include "src/rtc/webrtc_manager.h"
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+#include "src/rtc/linux/linux_encoder_capability_controller.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -81,6 +84,30 @@ constexpr auto kShadowMargin = 0;
 constexpr auto kShadowMargin = 18;
 #endif
 constexpr auto kTitleBarHeight = 49;
+
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+QString linuxEncoderCapabilityHint(const livekit::VideoEncoderBackendCapability& capability) {
+	using Reason = livekit::LinuxEncoderCapabilityReason;
+	const char* text = QT_TRANSLATE_NOOP("MeetingUI", "The encoder could not be initialized.");
+	if (capability.probe_ready) text = QT_TRANSLATE_NOOP("MeetingUI", "Initialization succeeded. Encoded output has not been verified.");
+	else switch (capability.reason) {
+	case Reason::NotCompiled: text = QT_TRANSLATE_NOOP("MeetingUI", "This encoder is not included in this build."); break;
+	case Reason::NotProbed: text = QT_TRANSLATE_NOOP("MeetingUI", "This encoder has not been checked yet."); break;
+	case Reason::MissingLibrary: text = QT_TRANSLATE_NOOP("MeetingUI", "The required encoder runtime is missing."); break;
+	case Reason::RuntimeIncompatible: text = QT_TRANSLATE_NOOP("MeetingUI", "The installed encoder runtime is incompatible with this build."); break;
+	case Reason::NoDevice: text = QT_TRANSLATE_NOOP("MeetingUI", "No matching encoding device is accessible."); break;
+	case Reason::PermissionDenied: text = QT_TRANSLATE_NOOP("MeetingUI", "Access to the encoding device was denied."); break;
+	case Reason::UnsupportedProfile:
+	case Reason::UnsupportedConfiguration: text = QT_TRANSLATE_NOOP("MeetingUI", "The encoding configuration is not supported."); break;
+	case Reason::TimedOut: text = QT_TRANSLATE_NOOP("MeetingUI", "Encoder detection timed out. Restart the application before retrying."); break;
+	case Reason::RetirementFailed: text = QT_TRANSLATE_NOOP("MeetingUI", "Encoder cleanup could not be confirmed. Restart the application before retrying."); break;
+	case Reason::DeviceChanged: text = QT_TRANSLATE_NOOP("MeetingUI", "The selected GPU changed. Restart the application to select a different device."); break;
+	case Reason::Cancelled: text = QT_TRANSLATE_NOOP("MeetingUI", "Encoder detection was cancelled."); break;
+	default: break;
+	}
+	return QCoreApplication::translate("MeetingUI", text);
+}
+#endif
 
 class RoundedSurface final : public QFrame {
 public:
@@ -284,14 +311,25 @@ SettingsDialog::SettingsDialog(
 	connectPreferenceControls();
 	connectDeviceControllers();
 	applyVideoEncoderCapabilities(livekit::GetVideoEncoderCapabilities());
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+	livekit::detail::RequestLinuxVideoEncoderCapabilityRefresh();
+	{
+#else
 	if (!_videoEncoderCapabilitiesReady) {
+#endif
 		auto *capabilityTimer = new QTimer(this);
 		capabilityTimer->setInterval(200);
 		connect(capabilityTimer, &QTimer::timeout, this, [this, capabilityTimer] {
 			if (_closed) { capabilityTimer->stop(); return; }
 			const auto capabilities = livekit::GetVideoEncoderCapabilities();
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+			if (!capabilities.ready && !capabilities.probing)
+				livekit::detail::RequestLinuxVideoEncoderCapabilityRefresh();
+			if (_videoEncoderCapabilities && capabilities.revision <= _videoEncoderCapabilities->revision) return;
+#else
 			if (!capabilities.ready) return;
 			capabilityTimer->stop();
+#endif
 			applyVideoEncoderCapabilities(capabilities);
 		});
 		capabilityTimer->start();
@@ -1591,12 +1629,29 @@ void SettingsDialog::connectPreferenceControls() {
 
 void SettingsDialog::applyVideoEncoderCapabilities(
 		const livekit::VideoEncoderCapabilities &capabilities) {
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+	if (_closed || (_videoEncoderCapabilities &&
+		capabilities.revision <= _videoEncoderCapabilities->revision)) return;
+	_videoEncoderCapabilitiesReady = capabilities.ready;
+	_videoEncoderCapabilities = std::make_shared<const livekit::VideoEncoderCapabilities>(capabilities);
+#endif
 	for (auto *combo : {_videoEncoderCombo, _cameraCodecCombo, _screenShareCodecCombo}) {
 		combo->setEnabled(capabilities.ready);
 	}
 	auto *hint = findChild<QLabel *>(QStringLiteral("videoEncoderPreferenceHint"));
-	const auto description = QCoreApplication::translate("MeetingUI",
+	auto description = QCoreApplication::translate("MeetingUI",
 		"Applies to camera and screen sharing when a new encoder is created. Auto prefers available hardware. Software fallback for the same codec depends on the selected encoder and codec; unsupported combinations may fail to start.");
+	const auto preferenceReason = _session.mediaPreferences().videoEncoderPreferenceReason;
+	if (preferenceReason == OpenMeeting::VideoEncoderPreferenceReason::UnsupportedOnPlatform) {
+		description += QLatin1Char('\n') + QCoreApplication::translate("MeetingUI",
+			"The saved encoder is unsupported on this platform. Auto is used; settings for other platforms are preserved.");
+	} else if (preferenceReason == OpenMeeting::VideoEncoderPreferenceReason::InvalidValue) {
+		description += QLatin1Char('\n') + QCoreApplication::translate("MeetingUI", "The saved encoder setting is invalid. Auto is used.");
+	}
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+	description += QLatin1Char('\n') + QCoreApplication::translate("MeetingUI",
+		"Unavailable hardware choices are preserved. Availability confirms initialization only; meeting statistics show whether hardware has produced encoded frames.");
+#endif
 	const auto text = capabilities.ready ? description :
 		QCoreApplication::translate("MeetingUI", "Detecting available video encoders...")
 			+ QLatin1Char('\n') + description;
@@ -1612,17 +1667,67 @@ void SettingsDialog::applyVideoEncoderCapabilities(
 	_videoEncoderCombo->clear();
 	_videoEncoderCombo->addItem(QCoreApplication::translate("MeetingUI", "Auto (prefer hardware)"), QStringLiteral("auto"));
 	_videoEncoderCombo->addItem(QCoreApplication::translate("MeetingUI", "Software"), QStringLiteral("software"));
+#if !defined(Q_OS_LINUX)
 	if (capabilities.amf.h264 || capabilities.amf.h265) {
 		_videoEncoderCombo->addItem(QStringLiteral("AMD AMF"), QStringLiteral("amf"));
 	}
-	if (capabilities.nvenc.h264 || capabilities.nvenc.h265) {
-		_videoEncoderCombo->addItem(QStringLiteral("NVIDIA NVENC"), QStringLiteral("nvenc"));
+#endif
+	if (capabilities.nvenc.h264 || capabilities.nvenc.h265
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+		|| capabilities.nvenc.compiled
+#endif
+	) {
+		auto label = QStringLiteral("NVIDIA NVENC");
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+		if (!capabilities.nvenc.h264 && !capabilities.nvenc.h265) {
+			label += QCoreApplication::translate("MeetingUI", " (unavailable)");
+		}
+#endif
+		_videoEncoderCombo->addItem(label, QStringLiteral("nvenc"));
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+		_videoEncoderCombo->setItemData(_videoEncoderCombo->count() - 1,
+			linuxEncoderCapabilityHint(capabilities.nvenc), Qt::ToolTipRole);
+#endif
 	}
-	if (capabilities.qsv.h264 || capabilities.qsv.h265) {
-		_videoEncoderCombo->addItem(QStringLiteral("Intel QSV"), QStringLiteral("qsv"));
+	if (capabilities.qsv.h264 || capabilities.qsv.h265
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+		|| capabilities.qsv.compiled
+#endif
+	) {
+		auto label = QStringLiteral("Intel QSV");
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+		if (!capabilities.qsv.h264 && !capabilities.qsv.h265) {
+			label += QCoreApplication::translate("MeetingUI", " (unavailable)");
+		}
+#endif
+		_videoEncoderCombo->addItem(label, QStringLiteral("qsv"));
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+		_videoEncoderCombo->setItemData(_videoEncoderCombo->count() - 1,
+			linuxEncoderCapabilityHint(capabilities.qsv), Qt::ToolTipRole);
+#endif
 	}
-	const bool missingBackend = _videoEncoderCombo->findData(
-		OpenMeeting::normalizeVideoEncoderPreference(preferences.videoEncoderPreference)) < 0;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+	if (capabilities.vaapi.compiled || capabilities.vaapi.h264 || capabilities.vaapi.h265) {
+		auto label = QStringLiteral("VAAPI");
+		if (!capabilities.vaapi.h264 && !capabilities.vaapi.h265) {
+			label += QCoreApplication::translate("MeetingUI", " (unavailable)");
+		}
+		_videoEncoderCombo->addItem(label, QStringLiteral("vaapi"));
+		_videoEncoderCombo->setItemData(_videoEncoderCombo->count() - 1,
+			linuxEncoderCapabilityHint(capabilities.vaapi), Qt::ToolTipRole);
+	}
+#endif
+	const auto savedBackend = OpenMeeting::normalizeVideoEncoderPreference(preferences.videoEncoderPreference);
+#if defined(Q_OS_LINUX)
+	// A missing driver/device is transient and must not rewrite saved intent.
+	if (_videoEncoderCombo->findData(savedBackend) < 0) {
+		const auto label = savedBackend == QStringLiteral("qsv") ? QStringLiteral("Intel QSV") :
+				(savedBackend == QStringLiteral("nvenc") ? QStringLiteral("NVIDIA NVENC") :
+					(savedBackend == QStringLiteral("vaapi") ? QStringLiteral("VAAPI") : savedBackend));
+		_videoEncoderCombo->addItem(label + QCoreApplication::translate("MeetingUI", " (unavailable)"), savedBackend);
+	}
+#endif
+	const bool missingBackend = _videoEncoderCombo->findData(savedBackend) < 0;
 	if (missingBackend) preferences.videoEncoderPreference = QStringLiteral("auto");
 	_videoEncoderCapabilitiesReady = true;
 	setPreferences(preferences);
@@ -1645,6 +1750,9 @@ void SettingsDialog::syncVideoCodecChoices(
 	if (preference == QStringLiteral("amf")) hardware = &_videoEncoderCapabilities->amf;
 	else if (preference == QStringLiteral("nvenc")) hardware = &_videoEncoderCapabilities->nvenc;
 	else if (preference == QStringLiteral("qsv")) hardware = &_videoEncoderCapabilities->qsv;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+	else if (preference == QStringLiteral("vaapi")) hardware = &_videoEncoderCapabilities->vaapi;
+#endif
 	const QSignalBlocker cameraBlocker(_cameraCodecCombo);
 	const QSignalBlocker screenShareBlocker(_screenShareCodecCombo);
 	if (_videoCodecChoicesDirty || _videoCodecBackend != preference) {
@@ -1654,7 +1762,17 @@ void SettingsDialog::syncVideoCodecChoices(
 		_videoCodecChoicesDirty = false;
 	}
 	const auto select = [&](QComboBox *combo, const QString &codec) {
-		const auto selected = findData(combo, OpenMeeting::normalizeVideoCodecPreference(codec));
+		const auto requested = OpenMeeting::normalizeVideoCodecPreference(codec);
+		auto selected = findData(combo, requested);
+#if defined(Q_OS_LINUX)
+		if (selected < 0) {
+			combo->addItem(requested.toUpper() + QCoreApplication::translate("MeetingUI", " (unavailable)"), requested);
+			selected = combo->count() - 1;
+			if (auto *model = qobject_cast<QStandardItemModel*>(combo->model())) {
+				if (auto *item = model->item(selected)) item->setEnabled(false);
+			}
+		}
+#endif
 		// Hardware lists are ordered H264, then H265, and contain only probed formats.
 		combo->setCurrentIndex(selected >= 0 ? selected : 0);
 	};
@@ -1818,6 +1936,10 @@ void SettingsDialog::setVideoPreviewWidget(QWidget *previewWidget) {
 
 void SettingsDialog::refreshDevices() {
 	if (_closed) return;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+	livekit::detail::RequestLinuxVideoEncoderCapabilityRefresh(true);
+	applyVideoEncoderCapabilities(livekit::GetVideoEncoderCapabilities());
+#endif
 	if (!_firstPaintReported) {
 		_forceDeviceRefresh = true;
 		return;

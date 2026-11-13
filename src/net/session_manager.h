@@ -1,4 +1,5 @@
 #pragma once
+#include "video_encoder_preferences.h"
 
 #include <QtCore/QObject>
 #include <QtCore/QMetaType>
@@ -74,6 +75,7 @@ struct MediaPreferences {
     QString screenShareVideoCodec = QStringLiteral("auto");
     // Shared by camera and screen share; applies to subsequently created encoders.
     QString videoEncoderPreference = QStringLiteral("auto");
+    VideoEncoderPreferenceReason videoEncoderPreferenceReason = VideoEncoderPreferenceReason::None;
     int screenShareResolution = 0; // Auto=0, 720p=1, 1080p=2, 1440p=3, Native=4, 2160p=5
     int screenShareFps = 20;
     // A zero size means "choose the best device mode around 1080p".

@@ -9,6 +9,9 @@
 #include <span>
 #include <string_view>
 #include <type_traits>
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+#include "../rtc/linux/linux_encoder_capability_types.h"
+#endif
 
 namespace livekit::telemetry {
 
@@ -36,8 +39,53 @@ struct CodecSenderToken {
 
 enum class CodecSenderSource { Unknown, Camera, ScreenShare };
 enum class CodecSenderCodec { Unknown, H264, H265, Vp8, Vp9, Av1, Other };
-enum class CodecSenderEncoder { Unknown, Amf, Nvenc, Qsv, X265, OpenH264, Libvpx, Other };
+enum class CodecSenderEncoder { Unknown, Amf, Nvenc, Qsv, X265, OpenH264, Libvpx, Other
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    , Vaapi
+#endif
+};
 enum class CodecSenderMapping { Missing, Matched, Ambiguous };
+
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+enum class LinuxVideoEncoderBackend { Unknown, Auto, Software, Amf, Nvenc, Qsv, Vaapi };
+enum class LinuxVideoEncoderState {
+    Unknown, AwaitingOutput, HardwareActive, SoftwareActive, SoftwareFallback,
+    BackendMismatch, MixedOutput, PartialOutput
+};
+
+inline LinuxVideoEncoderBackend LinuxVideoEncoderBackendFromText(std::string_view value) noexcept {
+    if (value == "auto") return LinuxVideoEncoderBackend::Auto;
+    if (value == "software") return LinuxVideoEncoderBackend::Software;
+    if (value == "amf") return LinuxVideoEncoderBackend::Amf;
+    if (value == "nvenc") return LinuxVideoEncoderBackend::Nvenc;
+    if (value == "qsv") return LinuxVideoEncoderBackend::Qsv;
+    if (value == "vaapi") return LinuxVideoEncoderBackend::Vaapi;
+    return LinuxVideoEncoderBackend::Unknown;
+}
+inline std::string_view LinuxVideoEncoderBackendText(LinuxVideoEncoderBackend value) noexcept {
+    switch (value) {
+    case LinuxVideoEncoderBackend::Auto: return "auto";
+    case LinuxVideoEncoderBackend::Software: return "software";
+    case LinuxVideoEncoderBackend::Amf: return "amf";
+    case LinuxVideoEncoderBackend::Nvenc: return "nvenc";
+    case LinuxVideoEncoderBackend::Qsv: return "qsv";
+    case LinuxVideoEncoderBackend::Vaapi: return "vaapi";
+    default: return "unknown";
+    }
+}
+inline std::string_view LinuxVideoEncoderStateText(LinuxVideoEncoderState value) noexcept {
+    switch (value) {
+    case LinuxVideoEncoderState::AwaitingOutput: return "awaiting_output";
+    case LinuxVideoEncoderState::HardwareActive: return "hardware_active";
+    case LinuxVideoEncoderState::SoftwareActive: return "software_active";
+    case LinuxVideoEncoderState::SoftwareFallback: return "software_fallback";
+    case LinuxVideoEncoderState::BackendMismatch: return "backend_mismatch";
+    case LinuxVideoEncoderState::MixedOutput: return "mixed_output";
+    case LinuxVideoEncoderState::PartialOutput: return "partial_output";
+    default: return "unknown";
+    }
+}
+#endif
 
 inline std::string_view CodecSenderCodecText(CodecSenderCodec value) noexcept {
     switch (value) {
@@ -59,6 +107,9 @@ inline std::string_view CodecSenderEncoderText(CodecSenderEncoder value) noexcep
     case CodecSenderEncoder::OpenH264: return "openh264";
     case CodecSenderEncoder::Libvpx: return "libvpx";
     case CodecSenderEncoder::Other: return "other";
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    case CodecSenderEncoder::Vaapi: return "vaapi";
+#endif
     default: return {};
     }
 }
@@ -79,6 +130,11 @@ struct CodecSenderImplementation {
     std::string_view name;
 };
 inline CodecSenderImplementation ClassifyCodecSenderImplementation(std::string_view value) noexcept {
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    if (value == "NVENC-CUDA-Linux") return {CodecSenderEncoder::Nvenc, CodecSenderCodec::H264, true, value};
+    if (value == "QSV-VAAPI-Linux") return {CodecSenderEncoder::Qsv, CodecSenderCodec::H264, true, value};
+    if (value == "VAAPI-Linux") return {CodecSenderEncoder::Vaapi, CodecSenderCodec::H264, true, value};
+#endif
     if (value == "AMF H264 / D3D11") return {CodecSenderEncoder::Amf, CodecSenderCodec::H264, true, value};
     if (value == "AMF H265 / D3D11") return {CodecSenderEncoder::Amf, CodecSenderCodec::H265, true, value};
     if (value == "NVENC H264 / D3D11") return {CodecSenderEncoder::Nvenc, CodecSenderCodec::H264, true, value};
@@ -106,6 +162,9 @@ struct CodecSenderRow {
     std::uint32_t pc_index = 0;
     std::uint64_t room_generation = 0;
     std::uint64_t publication_epoch = 0;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    LinuxEncoderCapabilityReason capability_reason = LinuxEncoderCapabilityReason::None;
+#endif
     std::optional<bool> hardware;
     std::optional<bool> fallback;
     std::optional<std::uint64_t> frames_encoded;
@@ -124,6 +183,139 @@ struct CodecSenderSnapshot {
 };
 static_assert(std::is_trivially_copyable_v<CodecSenderSnapshot>);
 
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+struct LinuxVideoEncoderObservation {
+    CodecSenderSource source = CodecSenderSource::Unknown;
+    LinuxVideoEncoderBackend requested_backend = LinuxVideoEncoderBackend::Unknown;
+    CodecSenderEncoder encoder = CodecSenderEncoder::Unknown;
+    LinuxVideoEncoderState state = LinuxVideoEncoderState::AwaitingOutput;
+    std::uint64_t room_generation = 0;
+    std::uint64_t publication_epoch = 0;
+    LinuxEncoderCapabilityReason capability_reason = LinuxEncoderCapabilityReason::None;
+};
+struct LinuxVideoEncoderSnapshot {
+    bool overflow = false;
+    std::size_t row_count = 0;
+    std::array<LinuxVideoEncoderObservation, CodecSenderSnapshot::kCapacity> rows{};
+};
+static_assert(std::is_trivially_copyable_v<LinuxVideoEncoderSnapshot>);
+
+inline LinuxVideoEncoderState ObserveLinuxVideoEncoder(
+        LinuxVideoEncoderBackend requested, const CodecSenderRow& row) noexcept {
+    if (!row.frames_encoded || *row.frames_encoded == 0) return LinuxVideoEncoderState::AwaitingOutput;
+    if (!row.hardware.has_value()) return LinuxVideoEncoderState::Unknown;
+    if (!*row.hardware) {
+        return requested == LinuxVideoEncoderBackend::Software || requested == LinuxVideoEncoderBackend::Unknown
+            ? LinuxVideoEncoderState::SoftwareActive : LinuxVideoEncoderState::SoftwareFallback;
+    }
+    if (row.codec == CodecSenderCodec::Unknown || row.codec == CodecSenderCodec::Other) {
+        return LinuxVideoEncoderState::Unknown;
+    }
+    if (row.implementation_name_length > row.implementation_name.size()) return LinuxVideoEncoderState::Unknown;
+    const auto implementation = ClassifyCodecSenderImplementation(std::string_view(
+        row.implementation_name.data(), row.implementation_name_length));
+    if (implementation.codec != CodecSenderCodec::Unknown && implementation.codec != row.codec) {
+        return LinuxVideoEncoderState::BackendMismatch;
+    }
+    const bool matches = requested == LinuxVideoEncoderBackend::Auto ||
+        (requested == LinuxVideoEncoderBackend::Nvenc && row.encoder == CodecSenderEncoder::Nvenc) ||
+        (requested == LinuxVideoEncoderBackend::Qsv && row.encoder == CodecSenderEncoder::Qsv) ||
+        (requested == LinuxVideoEncoderBackend::Vaapi && row.encoder == CodecSenderEncoder::Vaapi) ||
+        (requested == LinuxVideoEncoderBackend::Amf && row.encoder == CodecSenderEncoder::Amf);
+    return matches ? LinuxVideoEncoderState::HardwareActive : LinuxVideoEncoderState::BackendMismatch;
+}
+
+struct LinuxVideoEncoderProgressRow {
+    CodecSenderToken<96> rtp_id;
+    std::array<char, 64> implementation_name{};
+    std::uint8_t implementation_name_length = 0;
+    std::uint32_t pc_index = 0;
+    CodecSenderCodec codec = CodecSenderCodec::Unknown;
+    std::optional<std::uint64_t> frames_encoded;
+    bool output_observed = false;
+};
+struct LinuxVideoEncoderProgress {
+    CodecSenderToken<96> publication_sid;
+    std::uint64_t sequence = 0;
+    std::uint64_t room_generation = 0;
+    std::uint64_t publication_epoch = 0;
+    std::size_t row_count = 0;
+    std::array<LinuxVideoEncoderProgressRow, CodecSenderSnapshot::kCapacity> rows{};
+    LinuxVideoEncoderObservation observation;
+};
+
+inline LinuxVideoEncoderObservation BuildLinuxVideoEncoderObservation(
+        const CodecSenderSnapshot& sender, std::string_view publication_sid,
+        LinuxVideoEncoderBackend requested, CodecSenderSource source,
+        std::uint64_t generation, std::uint64_t epoch,
+        LinuxVideoEncoderProgress& previous,
+        LinuxEncoderCapabilityReason reason = LinuxEncoderCapabilityReason::None) noexcept {
+    LinuxVideoEncoderObservation result;
+    result.source = source;
+    result.requested_backend = requested;
+    result.room_generation = generation;
+    result.publication_epoch = epoch;
+    result.capability_reason = reason;
+    if (generation == 0 || epoch == 0 || publication_sid.empty() || sender.sequence == 0) return result;
+    if (previous.room_generation != generation || previous.publication_epoch != epoch ||
+        previous.publication_sid.view() != publication_sid ||
+        previous.observation.requested_backend != requested) previous = {};
+    // Snapshot publication is independent of stats completion; never count the
+    // same stats sample twice or infer current output from an old cumulative count.
+    if (previous.sequence >= sender.sequence) return previous.observation;
+    LinuxVideoEncoderProgress current;
+    current.publication_sid.assign(publication_sid);
+    current.sequence = sender.sequence;
+    current.room_generation = generation;
+    current.publication_epoch = epoch;
+    bool has_output = false;
+    bool awaiting_output = false;
+    for (std::size_t index = 0; index < sender.row_count && index < sender.rows.size(); ++index) {
+        const auto& row = sender.rows[index];
+        if (row.mapping != CodecSenderMapping::Matched || row.track_sid.view() != publication_sid ||
+            row.room_generation != generation || row.publication_epoch != epoch ||
+            row.rtp_id.view().empty()) continue;
+        auto& progress = current.rows[current.row_count++];
+        progress.rtp_id = row.rtp_id;
+        progress.pc_index = row.pc_index;
+        progress.codec = row.codec;
+        progress.implementation_name = row.implementation_name;
+        progress.implementation_name_length = row.implementation_name_length;
+        progress.frames_encoded = row.frames_encoded;
+        for (std::size_t old_index = 0; old_index < previous.row_count; ++old_index) {
+            const auto& old = previous.rows[old_index];
+            if (old.pc_index != progress.pc_index || old.codec != progress.codec ||
+                old.rtp_id.view() != progress.rtp_id.view() ||
+                old.implementation_name_length != progress.implementation_name_length ||
+                old.implementation_name != progress.implementation_name) continue;
+            if (progress.frames_encoded && old.frames_encoded && *progress.frames_encoded >= *old.frames_encoded) {
+                progress.output_observed = old.output_observed || *progress.frames_encoded > *old.frames_encoded;
+            }
+            break;
+        }
+        if (!progress.output_observed) {
+            awaiting_output = true;
+            continue;
+        }
+        const auto status = ObserveLinuxVideoEncoder(requested, row);
+        if (!has_output) {
+            result.state = status;
+            result.encoder = row.encoder;
+            has_output = true;
+        } else {
+            if (result.state != status) result.state = LinuxVideoEncoderState::MixedOutput;
+            if (result.encoder != row.encoder) result.encoder = CodecSenderEncoder::Other;
+        }
+    }
+    if (has_output && awaiting_output) result.state = LinuxVideoEncoderState::PartialOutput;
+    if (result.state == LinuxVideoEncoderState::SoftwareFallback && result.capability_reason == LinuxEncoderCapabilityReason::None)
+        result.capability_reason = LinuxEncoderCapabilityReason::UnknownUnavailable;
+    current.observation = result;
+    previous = current;
+    return result;
+}
+#endif
+
 // Views are consumed synchronously on the room strand and never retained.
 struct CodecSenderPublicationView {
     std::string_view track_sid;
@@ -134,6 +326,9 @@ struct CodecSenderPublicationView {
     std::uint64_t publication_epoch = 0;
     std::string_view requested_codec;
     bool reported_codec_fallback = false;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    std::string_view requested_backend;
+#endif
 };
 
 inline CodecSenderSnapshot BuildCodecSenderSnapshot(
@@ -201,13 +396,23 @@ inline CodecSenderSnapshot BuildCodecSenderSnapshot(
                 row.publication_epoch = publication->publication_epoch;
                 const auto observed = CodecSenderCodecText(row.codec);
                 const bool codec_known = row.codec != CodecSenderCodec::Unknown;
+                const bool software_fallback = row.hardware.has_value() && !*row.hardware
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+                    && publication->requested_backend != "software"
+#endif
+                    ;
                 if (publication->reported_codec_fallback ||
-                    (row.hardware.has_value() && !*row.hardware) ||
+                    software_fallback ||
                     (codec_known && !publication->requested_codec.empty() && publication->requested_codec != "auto" &&
                      observed != publication->requested_codec) ||
                     (codec_known && implementation.codec != CodecSenderCodec::Unknown && row.codec != implementation.codec)) {
                     row.fallback = true;
-                } else if (codec_known && row.hardware.has_value() && *row.hardware &&
+                } else if (codec_known && row.hardware.has_value() &&
+                           (*row.hardware
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+                            || publication->requested_backend == "software"
+#endif
+                           ) &&
                            !publication->requested_codec.empty()) {
                     row.fallback = false;
                 }

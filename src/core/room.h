@@ -353,7 +353,11 @@ public:
         uint64_t generation,
         std::optional<VideoPublishOptions> video_publish_options = std::nullopt,
         std::optional<AudioPublishPolicy> audio_publish_policy = std::nullopt,
-        bool require_encryption = false);
+        bool require_encryption = false
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        , std::shared_ptr<webrtc::VideoEncoderFactory> linux_encoder_factory = {}
+#endif
+        );
     asio::awaitable<std::shared_ptr<TrackPublication>> PublishLocalTrackAsync(
         std::shared_ptr<Track> track,
         const proto::SignalRequest& request);
@@ -599,6 +603,9 @@ private:
     struct PreflightedVideoPublishPlan {
         ResolvedVideoPublishPlan plan;
         std::function<void()> validate_current;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        std::shared_ptr<webrtc::VideoEncoderFactory> linux_encoder_factory;
+#endif
     };
     asio::awaitable<PreflightedVideoPublishPlan> PreflightVideoPublishPlanAsync(
         std::shared_ptr<LocalVideoTrack> track,

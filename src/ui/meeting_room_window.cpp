@@ -306,6 +306,49 @@ QString TelemetryDisplayList(const QVariantMap &snapshot, const char *key) {
 	return values.join(QStringLiteral(", "));
 }
 
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+QString LinuxVideoEncoderDisplay(const QVariantMap &snapshot) {
+	QStringList values;
+	const auto backendName = [](const QString &backend) {
+		if (backend == QStringLiteral("nvenc")) return QStringLiteral("NVIDIA NVENC");
+		if (backend == QStringLiteral("qsv")) return QStringLiteral("Intel QSV");
+		if (backend == QStringLiteral("vaapi")) return QStringLiteral("VAAPI");
+		if (backend == QStringLiteral("amf")) return QStringLiteral("AMD AMF");
+		if (backend == QStringLiteral("openh264")) return QStringLiteral("OpenH264");
+		if (backend == QStringLiteral("libvpx")) return QStringLiteral("libvpx");
+		if (backend == QStringLiteral("x265")) return QStringLiteral("x265");
+		if (backend == QStringLiteral("auto")) return QCoreApplication::translate("MeetingUI", "Auto");
+		if (backend == QStringLiteral("software")) return QCoreApplication::translate("MeetingUI", "Software");
+		return QCoreApplication::translate("MeetingUI", "Unverified");
+	};
+	for (const auto &value : snapshot.value(QStringLiteral("linuxVideoEncoders")).toList()) {
+		const auto encoder = value.toMap();
+		const auto state = encoder.value(QStringLiteral("state")).toString();
+		QString status;
+		if (state == QStringLiteral("hardware_active")) status = QCoreApplication::translate("MeetingUI", "Hardware encoding active");
+		else if (state == QStringLiteral("software_active")) status = QCoreApplication::translate("MeetingUI", "Software encoding active");
+		else if (state == QStringLiteral("software_fallback")) status = QCoreApplication::translate("MeetingUI", "Software fallback active");
+		else if (state == QStringLiteral("awaiting_output")) status = QCoreApplication::translate("MeetingUI", "Waiting for encoded output");
+		else if (state == QStringLiteral("backend_mismatch")) status = QCoreApplication::translate("MeetingUI", "Observed encoder differs from selection");
+		else if (state == QStringLiteral("mixed_output")) status = QCoreApplication::translate("MeetingUI", "Encoding streams use different backends");
+		else if (state == QStringLiteral("partial_output")) status = QCoreApplication::translate("MeetingUI", "Some encoding streams are awaiting output");
+		else status = QCoreApplication::translate("MeetingUI", "Encoder output unverified");
+		const auto source_kind = encoder.value(QStringLiteral("source")).toString();
+		const auto source = source_kind == QStringLiteral("camera")
+			? QCoreApplication::translate("MeetingUI", "Camera") :
+			(source_kind == QStringLiteral("screen") ? QCoreApplication::translate("MeetingUI", "Screen sharing") :
+				QCoreApplication::translate("MeetingUI", "Video"));
+		values.push_back(QCoreApplication::translate("MeetingUI", "%1: %2; selected %3; observed %4")
+			.arg(source, status, backendName(encoder.value(QStringLiteral("requestedBackend")).toString()),
+				backendName(encoder.value(QStringLiteral("encoder")).toString())));
+	}
+	if (snapshot.value(QStringLiteral("linuxVideoEncodersOverflow")).toBool()) {
+		values.push_back(QCoreApplication::translate("MeetingUI", "Additional encoder states unavailable"));
+	}
+	return values.isEmpty() ? QStringLiteral("--") : values.join(QStringLiteral("; "));
+}
+#endif
+
 bool IsSafeTelemetryDisplayEntry(const QString &key, const QVariant &value) {
 	const auto normalizedKey = key.toCaseFolded();
 	static const auto sensitiveKeyParts = std::array{
@@ -538,6 +581,11 @@ QDialog *OpenTelemetryDetailsDialog(QWidget *parent, const QVariantMap &snapshot
 			 .arg(TelemetryDisplayList(snapshot, "videoPublishSources"),
 				  TelemetryDisplayList(snapshot, "videoPublishModes"),
 				  TelemetryDisplayList(snapshot, "videoPublishFallbackReasons"))},
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+		{QCoreApplication::translate("MeetingUI", "Linux video encoder"),
+		 LinuxVideoEncoderDisplay(snapshot), QString(),
+		 QCoreApplication::translate("MeetingUI", "Status follows encoded frames from the current publication.")},
+#endif
 		{QCoreApplication::translate("MeetingUI", "Video processing average"),
 		 QCoreApplication::translate("MeetingUI", "decode %1 ms/frame / encode %2 ms/frame")
 			 .arg(TelemetryValue(snapshot, "videoDecodeMsPerFrame"),

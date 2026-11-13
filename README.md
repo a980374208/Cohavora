@@ -277,16 +277,20 @@ cmake --build --preset ubuntu-product --parallel 2
 
 P3 系统音频采用 PulseAudio 播放流 monitor，兼容 pipewire-pulse，输出为独立的 `ScreenShareAudio` 轨道。共享默认关闭；共享设置可选择声音输出，屏幕或窗口的选择不限制声音范围。同一输出内，具有可识别进程身份的其他应用声音参与混音，本进程的播放音和无法识别来源的流被排除。最多同时混合 32 路；设备移除、服务断连或捕获失败会关闭共享音频，视频共享可继续。共享音频静音、停止与麦克风分开控制；可通过共享菜单选择输出并重新开启音频，无需重新选择共享画面。
 
-已发布的 Linux WebRTC SDK 存在跨音轨静音和外部音源重新配置缺陷，因此 `COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED` 默认关闭，普通下载构建保留视频共享。本机 P3 audio-v2 SDK 已完成 Release 双轨隔离、编码器重建及音源切换回归；启用该选项时 CMake 要求 Release 静态库 SHA-256 为 `c97897128ed8735875c149a578af1c33075813e26648aa370ea800f973015105`，不能用旧 SDK 强行开启。Debug SDK 尚未取得相同行为验证。使用匹配的完整 SDK 根目录配置：
+已发布的 Linux WebRTC SDK 存在跨音轨静音和外部音源重新配置缺陷，因此 `COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED` 默认关闭，普通下载构建保留视频共享。本机 P3 audio-v2、m144 v4 及硬编候选 v5 的 Release SDK 已完成双轨隔离、编码器重建及音源切换回归；启用该选项时 CMake 仅接受已测 Release 库的指纹，不能用旧 SDK 强行开启。v4 Release SHA-256 为 `f4c5ebfbf50a609b8f4f3e22e246b911cec9eecea66606a27a94836f0f25e202`，候选 v5 为 `35c7a45caf749d1825ee3b4019e6a2ab1afb4d16fe5b96bb029b7a230280d8a2`；Debug SDK 尚未取得相同音频行为验证。使用匹配的完整 v4 SDK 根目录和 Linux profile 配置：
 
 ```bash
+export WEBRTC_ROOT="/absolute/path/to/cohavora-webrtc-linux-x64-b417823-cohavora-bssl-v4"
 cmake --preset ubuntu-product -DQT_ROOT="$QT_ROOT" \
-  -DWEBRTC_ROOT="/absolute/path/to/cohavora-webrtc-linux-x64-aaeeee8-cohavora-bssl-p3-audio-v2" \
+  -DWEBRTC_ROOT="$WEBRTC_ROOT" \
+  -DCOHAVORA_WEBRTC_PACKAGE_PROFILE="$WEBRTC_ROOT/metadata/package.json" \
   -DCOHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED=ON
 cmake --build --preset ubuntu-product --parallel 2
 ```
 
 此 SDK 尚未替换准备脚本的公开下载包。构建或合成分轨回归不代表物理音质、自动恢复或完整会议验收通过；已记录的 PulseAudio 重初始化缺陷仍独立阻断完整音频重连验收。
+
+v4 的 Linux/Windows 构建边界及 OBS 硬编适配见 [Linux WebRTC 接入说明](build/prepare/WEBRTC-LINUX.md)。独立候选 v5 已实现 Linux NVENC/CUDA、QSV/VAAPI DRM、VAAPI 后端及产品设置接线，产品开关 `COHAVORA_LINUX_HW_ENCODERS` 默认 OFF。候选双配置、产品 ON/OFF 构建、软件 RTP 闭环及无设备状态验证已通过；Linux 真实 GPU、跨机互通和性能仍未验收，不能作为默认发行支持声明。
 
 完整 UI 同时使用 Qt 和 WebRTC 各自的 JPEG ABI。构建会用 Python 3、`nm` 和 `objcopy` 在构建目录生成 WebRTC 副本，隔离 Chromium JPEG 函数前缀遗漏的两个内部数据表，并记录原件与副本指纹；依赖目录的 SDK 保持原样。若更换依赖后出现额外符号冲突，构建会停止，需重新审查 ABI，不能忽略重复符号错误。
 

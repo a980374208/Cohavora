@@ -14,6 +14,9 @@
 #include "api/video_codecs/video_encoder_factory.h"
 #include "rtc_base/thread.h"
 #include "audio_playout_device_selection.h"
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+#include "linux/linux_encoder_capability_types.h"
+#endif
 
 namespace webrtc {
 class VideoDecoderFactory;
@@ -88,6 +91,7 @@ CreateAutoHardwareH264EncoderSelector(bool allow_vp8_fallback);
 void SetVideoEncoderPreference(const std::string& preference);
 std::string GetVideoEncoderPreference();
 
+#if !defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
 struct VideoEncoderBackendCapability {
     bool h264 = false;
     bool h265 = false;
@@ -99,12 +103,27 @@ struct VideoEncoderCapabilities {
     VideoEncoderBackendCapability nvenc;
     VideoEncoderBackendCapability qsv;
 };
+#endif
 
 // Reads the current snapshot without running or waiting for a hardware probe.
 VideoEncoderCapabilities GetVideoEncoderCapabilities();
-// Run once from a background worker; vendor initialization may block.
+// Run from a background worker; vendor initialization may block. Windows uses
+// the original once-only probe; Linux commits one snapshot per invalidation.
 // Availability proves initialization/cleanup, not successful frame encoding.
 void ProbeVideoEncoderCapabilities();
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+// Invalidation is cheap and never touches a driver; refresh runs on a worker.
+// Retirement failure is process-sticky and cannot be cleared by either API.
+void InvalidateVideoEncoderCapabilities(
+    LinuxEncoderCapabilityReason reason = LinuxEncoderCapabilityReason::DeviceChanged);
+// Immutable sender-owned policy. Empty approval always freezes software; a
+// hardware policy requires the exact successful preflight snapshot/formats.
+// Later settings or discovery changes never select a new backend here.
+std::shared_ptr<webrtc::VideoEncoderFactory> CreateLinuxPublicationVideoEncoderFactory(
+    const std::string& preference,
+    const VideoEncoderCapabilities& capabilities,
+    const std::vector<webrtc::SdpVideoFormat>& approved_hardware_h264_formats = {});
+#endif
 
 struct VideoEncoderPreflightLayer {
     int width = 0;
@@ -118,6 +137,9 @@ struct VideoEncoderPreflightRequest {
     std::vector<webrtc::SdpVideoFormat> formats;
     std::string preference;
     bool screenshare = false;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    VideoEncoderCapabilities linux_capabilities;
+#endif
 };
 
 enum class VideoEncoderPreflightStatus {
@@ -135,6 +157,9 @@ struct VideoEncoderPreflightResult {
     int codec_status = 0;
     VideoEncoderPreflightPhase phase = VideoEncoderPreflightPhase::Startup;
     std::uint32_t tested_bitrate_bps = 0;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    VideoEncoderBackendCapability linux_capability;
+#endif
     bool ok() const { return status == VideoEncoderPreflightStatus::Ready; }
 };
 
@@ -142,8 +167,10 @@ struct VideoEncoderPreflightResult {
 // every requested layer, including cleanup; it does not prove encoded output.
 // Check independent groups at the startup floor and publication ceilings;
 // sessions from the first group are retired before creating the second group.
-// Auto checks only the first available backend in the runtime's cached
-// NVENC/QSV/AMF order. Failure leaves codec fallback to the publication plan.
+// Auto checks only the first available backend in the runtime's cached order
+// (Windows NVENC/QSV/AMF; Linux NVENC/QSV/VAAPI). Failure leaves codec fallback
+// to the publication plan. Linux's complete group, cleanup and thread retirement
+// must finish within the four-second budget; unresolved retirement fails closed.
 VideoEncoderPreflightResult PreflightVideoEncoder(
     const VideoEncoderPreflightRequest& request,
     std::shared_ptr<std::atomic<bool>> cancelled = {});

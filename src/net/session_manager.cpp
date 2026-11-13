@@ -28,6 +28,11 @@ constexpr auto kScreenShareE2ee = "security/screenShareE2ee";
 constexpr auto kMeetingDetailsE2ee = "security/meetingDetailsE2ee";
 constexpr auto kAllMeetingsE2ee = "security/allMeetingsE2ee";
 constexpr int kCurrentSettingsMigrationVersion = 1;
+#if defined(__linux__)
+constexpr auto kVideoEncoderPreferencePlatform = VideoEncoderPreferencePlatform::Linux;
+#else
+constexpr auto kVideoEncoderPreferencePlatform = VideoEncoderPreferencePlatform::Windows;
+#endif
 constexpr auto kMigratedSettingsKeys = std::to_array<const char *>({
     "network/serverBaseUrl",
     "media/enableMicrophone",
@@ -45,6 +50,11 @@ constexpr auto kMigratedSettingsKeys = std::to_array<const char *>({
     "media/cameraVideoCodec",
     "media/screenShareVideoCodec",
     "media/videoEncoderPreference",
+#if defined(__linux__)
+    "media/videoEncoders/linux/preference",
+#else
+    "media/videoEncoders/windows/preference",
+#endif
     "media/screenShareResolution",
     "media/screenShareFps",
     "media/receiveResolutionMatch",
@@ -119,12 +129,8 @@ QString normalizeVideoCodecPreference(const QString &codec) {
 }
 
 QString normalizeVideoEncoderPreference(const QString &encoder) {
-    const auto normalized = encoder.trimmed().toLower();
-    static const std::array<QString, 5> supported{
-        QStringLiteral("auto"), QStringLiteral("software"),
-        QStringLiteral("amf"), QStringLiteral("nvenc"), QStringLiteral("qsv")};
-    return std::find(supported.begin(), supported.end(), normalized) != supported.end()
-        ? normalized : QStringLiteral("auto");
+    return QString::fromStdString(NormalizeVideoEncoderPreference(
+        encoder.toStdString(), kVideoEncoderPreferencePlatform).value);
 }
 
 SettingsMigrationSelection migrateCohavoraSettings(
@@ -264,6 +270,9 @@ QString SessionManager::nickname() const {
 }
 
 void SessionManager::setMediaPreferences(const MediaPreferences &prefs) {
+    const auto encoder = NormalizeVideoEncoderPreference(
+        prefs.videoEncoderPreference.toStdString(), kVideoEncoderPreferencePlatform);
+    const auto encoderChanged = QString::fromStdString(encoder.value) != _mediaPrefs.videoEncoderPreference;
     _mediaPrefs = prefs;
     _mediaPrefs.participantNameDisplay = participantNameDisplayFromId(
         participantNameDisplayId(_mediaPrefs.participantNameDisplay));
@@ -273,8 +282,9 @@ void SessionManager::setMediaPreferences(const MediaPreferences &prefs) {
         _mediaPrefs.cameraVideoCodec);
     _mediaPrefs.screenShareVideoCodec = normalizeVideoCodecPreference(
         _mediaPrefs.screenShareVideoCodec);
-    _mediaPrefs.videoEncoderPreference = normalizeVideoEncoderPreference(
-        _mediaPrefs.videoEncoderPreference);
+    _mediaPrefs.videoEncoderPreference = QString::fromStdString(encoder.value);
+    if (encoder.reason != VideoEncoderPreferenceReason::None || encoderChanged)
+        _mediaPrefs.videoEncoderPreferenceReason = encoder.reason;
     livekit::SetVideoEncoderPreference(_mediaPrefs.videoEncoderPreference.toStdString());
     _mediaPrefs.screenShareResolution = std::clamp(_mediaPrefs.screenShareResolution,
         static_cast<int>(livekit::ScreenShareResolution::Auto),
@@ -963,8 +973,16 @@ void SessionManager::loadFromSettings() {
         _settings->value("media/cameraVideoCodec", QStringLiteral("auto")).toString());
     _mediaPrefs.screenShareVideoCodec = normalizeVideoCodecPreference(
         _settings->value("media/screenShareVideoCodec", QStringLiteral("auto")).toString());
-    _mediaPrefs.videoEncoderPreference = normalizeVideoEncoderPreference(
-        _settings->value("media/videoEncoderPreference", QStringLiteral("auto")).toString());
+    const auto encoderKeyText = VideoEncoderPreferenceStorageKey(kVideoEncoderPreferencePlatform);
+    const auto encoderKey = QString::fromLatin1(encoderKeyText.data(), static_cast<int>(encoderKeyText.size()));
+    const auto storedEncoder = [&](const QString& key) -> std::optional<std::string> {
+        return _settings->contains(key) ? std::optional(_settings->value(key).toString().toStdString()) : std::nullopt;
+    };
+    const auto encoder = RestoreVideoEncoderPreference(storedEncoder(encoderKey),
+        storedEncoder(QStringLiteral("media/videoEncoderPreference")), kVideoEncoderPreferencePlatform);
+    _mediaPrefs.videoEncoderPreference = QString::fromStdString(encoder.value);
+    _mediaPrefs.videoEncoderPreferenceReason = encoder.reason;
+    if (encoder.migrate_to_platform) _settings->setValue(encoderKey, _mediaPrefs.videoEncoderPreference);
     livekit::SetVideoEncoderPreference(_mediaPrefs.videoEncoderPreference.toStdString());
     _mediaPrefs.videoCaptureWidth =
         std::max(0, _settings->value("media/videoCaptureWidth", 0).toInt());
@@ -1047,7 +1065,9 @@ void SessionManager::saveToSettings() {
     _settings->setValue("media/speakerDeviceId", _mediaPrefs.speakerDeviceId);
     _settings->setValue("media/cameraVideoCodec", _mediaPrefs.cameraVideoCodec);
     _settings->setValue("media/screenShareVideoCodec", _mediaPrefs.screenShareVideoCodec);
-    _settings->setValue("media/videoEncoderPreference", _mediaPrefs.videoEncoderPreference);
+    const auto encoderKey = VideoEncoderPreferenceStorageKey(kVideoEncoderPreferencePlatform);
+    _settings->setValue(QString::fromLatin1(encoderKey.data(), static_cast<int>(encoderKey.size())),
+        _mediaPrefs.videoEncoderPreference);
     _settings->setValue("media/screenShareResolution", _mediaPrefs.screenShareResolution);
     _settings->setValue("media/screenShareFps", _mediaPrefs.screenShareFps);
     _settings->setValue("media/receiveResolutionMatch",

@@ -8,6 +8,40 @@ set(cohavora_linux_payload "lib/cohavora")
 install(TARGETS cohavora_app RUNTIME DESTINATION "${cohavora_linux_payload}")
 set_target_properties(cohavora_app PROPERTIES
     INSTALL_RPATH "" INSTALL_RPATH_USE_LINK_PATH FALSE)
+if(COHAVORA_WEBRTC_HAS_LINUX_VAAPI)
+    set_property(TARGET cohavora_app PROPERTY INSTALL_RPATH "$ORIGIN")
+    install(FILES "${COHAVORA_WEBRTC_LINUX_VAAPI_RUNTIME}"
+        DESTINATION "${cohavora_linux_payload}")
+    # Keep the delivered source/relink layout identical to the SDK: relink.py
+    # resolves its corresponding source relative to this document root.
+    set(cohavora_vaapi_documents "share/doc/cohavora/third-party/webrtc-vaapi")
+    foreach(material source/vaapi relink/vaapi licenses/vaapi)
+        if(NOT IS_DIRECTORY "${WEBRTC_ROOT}/${material}")
+            message(FATAL_ERROR "Linux VAAPI package lacks corresponding material: ${material}")
+        endif()
+        get_filename_component(parent "${material}" DIRECTORY)
+        install(DIRECTORY "${WEBRTC_ROOT}/${material}"
+            DESTINATION "${cohavora_vaapi_documents}/${parent}")
+    endforeach()
+    foreach(metadata package.json checksums.sha256)
+        if(NOT EXISTS "${WEBRTC_ROOT}/metadata/${metadata}")
+            message(FATAL_ERROR "Linux VAAPI package lacks SDK metadata: ${metadata}")
+        endif()
+        install(FILES "${WEBRTC_ROOT}/metadata/${metadata}"
+            DESTINATION "${cohavora_vaapi_documents}/metadata")
+    endforeach()
+    file(SHA256 "${WEBRTC_ROOT}/metadata/package.json" cohavora_vaapi_profile_sha256)
+    get_filename_component(cohavora_vaapi_runtime_name
+        "${COHAVORA_WEBRTC_LINUX_VAAPI_RUNTIME}" NAME)
+    file(WRITE "${CMAKE_BINARY_DIR}/packaging/linux/vaapi-delivery.json"
+        "{\n  \"schema\": 1,\n  \"sdk_profile_sha256\": \"${cohavora_vaapi_profile_sha256}\",\n  \"runtime_file\": \"${cohavora_vaapi_runtime_name}\",\n  \"hardware_validation\": \"NOT_RUN\"\n}\n")
+    file(WRITE "${CMAKE_BINARY_DIR}/packaging/linux/vaapi-README.md"
+        "# Isolated VAAPI runtime\n\nThe runtime in ../../../../../lib/cohavora/ is paired with the SDK profile in metadata/package.json. Its corresponding FFmpeg archive, exact patch and runtime sources are in source/vaapi/.\n\nLicenses are in licenses/vaapi/. Rebuild/relink instructions and the linkable objects are in relink/vaapi/README.md and relink/vaapi/relink.py. Keep this directory layout when copying those materials. Rebuilding does not validate GPU encoding or resource retirement.\n")
+    install(FILES "${CMAKE_BINARY_DIR}/packaging/linux/vaapi-delivery.json"
+        DESTINATION "${cohavora_vaapi_documents}" RENAME delivery.json)
+    install(FILES "${CMAKE_BINARY_DIR}/packaging/linux/vaapi-README.md"
+        DESTINATION "${cohavora_vaapi_documents}" RENAME README.md)
+endif()
 foreach(backend IN ITEMS dx11 opengl)
     if(TARGET cohavora_render_${backend})
         install(TARGETS cohavora_render_${backend}
@@ -91,6 +125,18 @@ set(CPACK_DEBIAN_PACKAGE_SHLIBDEPS ON)
 set(CPACK_DEBIAN_PACKAGE_DEPENDS "libpipewire-0.3-0t64 (>= 1.0), xdg-desktop-portal")
 set(CPACK_DEBIAN_PACKAGE_RECOMMENDS "xdg-desktop-portal-gnome, gnome-keyring")
 set(CPACK_DEBIAN_DEBUGINFO_PACKAGE ON)
+if(COHAVORA_WEBRTC_HAS_LINUX_VAAPI)
+    # CPackDeb otherwise strips every unstripped ELF and adds a debug link,
+    # including this prebuilt DSO whose original SHA is part of the SDK ABI.
+    # Keep ordinary application/renderer debug splitting unchanged.
+    find_program(cohavora_package_python NAMES python3 REQUIRED)
+    file(SHA256 "${COHAVORA_WEBRTC_LINUX_VAAPI_RUNTIME}" cohavora_vaapi_runtime_sha256)
+    set(cohavora_objcopy_guard "${PROJECT_SOURCE_DIR}/packaging/linux/objcopy_guard.py")
+    file(SHA256 "${cohavora_objcopy_guard}" cohavora_objcopy_guard_sha256)
+    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${cohavora_objcopy_guard}")
+    set(CPACK_OBJCOPY_EXECUTABLE
+        "${cohavora_package_python};${cohavora_objcopy_guard};--objcopy;${CMAKE_OBJCOPY};--runtime-sha256;${cohavora_vaapi_runtime_sha256};--guard-sha256;${cohavora_objcopy_guard_sha256};--")
+endif()
 if(NOT CMAKE_CONFIGURATION_TYPES AND CMAKE_BUILD_TYPE)
     set(CPACK_BUILD_CONFIG "${CMAKE_BUILD_TYPE}")
 endif()

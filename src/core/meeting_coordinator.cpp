@@ -1004,6 +1004,30 @@ QVariantMap ProjectTelemetrySnapshot(
                   QString::fromStdString(snapshot.video_publish_observed_codecs));
     result.insert(QStringLiteral("videoPublishFallbackReasons"),
                   QString::fromStdString(snapshot.video_publish_fallback_reasons));
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    QVariantList linux_encoders;
+    for (std::size_t index = 0; index < snapshot.linux_video_encoders.row_count; ++index) {
+        const auto& observation = snapshot.linux_video_encoders.rows[index];
+        const auto text = [](std::string_view value) {
+            return QString::fromLatin1(value.data(), static_cast<int>(value.size()));
+        };
+        QVariantMap encoder;
+        encoder.insert(QStringLiteral("source"), observation.source == livekit::telemetry::CodecSenderSource::Camera
+            ? QStringLiteral("camera") : (observation.source == livekit::telemetry::CodecSenderSource::ScreenShare
+                ? QStringLiteral("screen") : QStringLiteral("unknown")));
+        encoder.insert(QStringLiteral("requestedBackend"), text(
+            livekit::telemetry::LinuxVideoEncoderBackendText(observation.requested_backend)));
+        encoder.insert(QStringLiteral("encoder"), text(
+            livekit::telemetry::CodecSenderEncoderText(observation.encoder)));
+        encoder.insert(QStringLiteral("state"), text(
+            livekit::telemetry::LinuxVideoEncoderStateText(observation.state)));
+        encoder.insert(QStringLiteral("capabilityReason"), text(
+            livekit::LinuxEncoderCapabilityReasonText(observation.capability_reason)));
+        linux_encoders.push_back(encoder);
+    }
+    result.insert(QStringLiteral("linuxVideoEncoders"), linux_encoders);
+    result.insert(QStringLiteral("linuxVideoEncodersOverflow"), snapshot.linux_video_encoders.overflow);
+#endif
     result.insert(QStringLiteral("videoPublishSources"),
                   QString::fromStdString(snapshot.video_publish_sources));
     result.insert(QStringLiteral("videoPublishDirection"),

@@ -3310,6 +3310,11 @@ void SessionTelemetry::UpdateLocalPublishAvailabilityOnStrand(
 
 void SessionTelemetry::UpdateVideoPublishPlanOnStrand() {
     AssertOnStrand();
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    // Rebuild from active publication ownership, so an old stats completion
+    // cannot keep a retired generation/publication visible as hardware active.
+    LinuxVideoEncoderSnapshot linux_encoders;
+#endif
     std::set<std::string> requested;
     std::set<std::string> effective;
     std::set<std::string> fallback_reasons;
@@ -3320,10 +3325,24 @@ void SessionTelemetry::UpdateVideoPublishPlanOnStrand() {
     std::set<std::string> scalability;
     bool has_video = false;
     bool has_descriptor = false;
-    for (const auto& [_, publication] : local_publications_) {
+    for (auto& [_, publication] : local_publications_) {
         if (!publication.active || publication.media_kind != LocalMediaKind::Video) continue;
         has_video = true;
         const auto& descriptor = publication.video_publish;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        if (linux_encoders.row_count == linux_encoders.rows.size()) {
+            linux_encoders.overflow = true;
+        } else {
+            const auto source = descriptor.source_kind == LocalVideoSourceKind::Camera
+                ? CodecSenderSource::Camera : (descriptor.source_kind == LocalVideoSourceKind::Screen
+                    ? CodecSenderSource::ScreenShare : CodecSenderSource::Unknown);
+            linux_encoders.rows[linux_encoders.row_count++] = BuildLinuxVideoEncoderObservation(
+                state_.codec_sender, descriptor.publication_sid,
+                LinuxVideoEncoderBackendFromText(descriptor.requested_backend), source,
+                publication.room_generation, publication.publication_epoch,
+                publication.linux_encoder_progress, descriptor.backend_reason);
+        }
+#endif
         if (descriptor.requested_codec.empty() || descriptor.effective_codec.empty()) continue;
         has_descriptor = true;
         requested.insert(descriptor.requested_codec);
@@ -3349,6 +3368,9 @@ void SessionTelemetry::UpdateVideoPublishPlanOnStrand() {
     state_.video_publish_modes = JoinValues(modes);
     state_.video_publish_resolved_profiles = JoinValues(profiles);
     state_.video_publish_resolved_scalability = JoinValues(scalability);
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    state_.linux_video_encoders = linux_encoders;
+#endif
     if (!has_video) {
         state_.video_publish_plan_availability = Availability::Unknown;
         state_.video_publish_plan_reason = "no_local_video_publication";
@@ -5435,6 +5457,9 @@ void SessionTelemetry::CompleteStatsOnStrand(
             view.publication_epoch = publication.publication_epoch;
             view.requested_codec = descriptor.requested_codec;
             view.reported_codec_fallback = !descriptor.fallback_reason.empty() && descriptor.fallback_reason != "none";
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+            view.requested_backend = descriptor.requested_backend;
+#endif
         }
         const auto capture_unix_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();

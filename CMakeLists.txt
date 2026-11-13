@@ -138,6 +138,10 @@ cohavora_compat_option(COHAVORA_BUILD_MEETING_APP LIVEKIT_BUILD_MEETING_APP
 
 option(COHAVORA_LINUX_PRODUCT_UI "Build the shared product UI on Linux" OFF)
 option(COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED "Enable Linux shared audio after SDK multi-track isolation validation" OFF)
+option(COHAVORA_LINUX_HW_ENCODERS "Enable reviewed Linux hardware encoder backends" OFF)
+if(COHAVORA_LINUX_HW_ENCODERS AND NOT CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    message(FATAL_ERROR "COHAVORA_LINUX_HW_ENCODERS requires a Linux target")
+endif()
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 set(CMAKE_CXX_STANDARD 20)
@@ -331,6 +335,8 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
         src/media/dshow_enumerator.cpp
         src/media/dshow_capture.cpp
         src/media/desktop_capture.cpp
+        src/media/d3d11_nv12_frame_buffer.cpp
+        src/media/d3d11_nv12_frame_buffer.h
         src/media/wgc_window_capture.cpp
         src/media/camera_source_manager.cpp)
     if(COHAVORA_LINUX_PRODUCT_UI)
@@ -570,9 +576,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED)
     # are verified against this Release archive. Older SDKs can leak audio
     # between tracks even when the application's source routing is correct.
     if(NOT retained_vp8_sdk_hash STREQUAL
-            "c97897128ed8735875c149a578af1c33075813e26648aa370ea800f973015105")
+            "c97897128ed8735875c149a578af1c33075813e26648aa370ea800f973015105"
+       AND NOT retained_vp8_sdk_hash STREQUAL
+            "f4c5ebfbf50a609b8f4f3e22e246b911cec9eecea66606a27a94836f0f25e202"
+       AND NOT retained_vp8_sdk_hash STREQUAL
+            "35c7a45caf749d1825ee3b4019e6a2ab1afb4d16fe5b96bb029b7a230280d8a2")
         message(FATAL_ERROR
-            "Linux system audio requires the validated P3 audio-v2 Release SDK. "
+            "Linux system audio requires a validated audio-isolation Release SDK. "
             "Use that SDK or set COHAVORA_LINUX_SYSTEM_AUDIO_VERIFIED=OFF.")
     endif()
     if(COHAVORA_DEBUG_DEPENDENCY_ABI STREQUAL "Debug"
@@ -603,12 +613,18 @@ add_library(cohavora_webrtc_sdk INTERFACE)
 set(COHAVORA_WEBRTC_PACKAGE_PROFILE "" CACHE FILEPATH
     "Reviewed profile for a separately built WebRTC SDK")
 include(cmake/CohavoraWebRtcPackage.cmake)
-if(COHAVORA_WEBRTC_HAS_BACKEND_ENCODERS)
+if(WIN32 AND COHAVORA_WEBRTC_HAS_BACKEND_ENCODERS)
     # The default SDK has no external encoder API. Add AMF only after the
     # reviewed codec package and its linked archives have been verified.
     target_sources(cohavora_core PRIVATE
         src/rtc/d3d11_amf_video_encoder.cpp
         src/rtc/d3d11_amf_video_encoder.h)
+endif()
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COHAVORA_LINUX_HW_ENCODERS)
+    target_sources(cohavora_core PRIVATE
+        src/rtc/linux/linux_encoder_probe_worker.h
+        src/rtc/linux/linux_video_encoder.cpp
+        src/rtc/linux/linux_video_encoder.h)
 endif()
 include(cmake/CohavoraH265Decoder.cmake)
 set(COHAVORA_E2EE_BACKEND_PACKAGE_DIR "" CACHE PATH "Reviewed native E2EE overlay package directory")
@@ -688,6 +704,17 @@ target_include_directories(cohavora_webrtc_sdk SYSTEM BEFORE INTERFACE
 target_link_libraries(cohavora_webrtc_sdk INTERFACE
     $<$<CONFIG:Debug>:${WEBRTC_SELECTED_DEBUG_LIB}>
     $<$<NOT:$<CONFIG:Debug>>:${WEBRTC_RELEASE_LIB}>)
+if(COHAVORA_WEBRTC_HAS_X265_ENCODER)
+    # GNU archive resolution needs x265 after the WebRTC archive that uses it.
+    foreach(archive IN LISTS cohavora_webrtc_debug_external_archives)
+        target_link_libraries(cohavora_webrtc_sdk INTERFACE
+            "$<$<CONFIG:Debug>:${archive}>")
+    endforeach()
+    foreach(archive IN LISTS cohavora_webrtc_Release_external_archives)
+        target_link_libraries(cohavora_webrtc_sdk INTERFACE
+            "$<$<NOT:$<CONFIG:Debug>>:${archive}>")
+    endforeach()
+endif()
 
 if(WIN32)
     add_compile_definitions(

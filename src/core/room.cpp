@@ -23,6 +23,9 @@
 #include <atomic>
 #include <future>
 #include <cctype>
+#if !defined(_WIN32)
+#include <strings.h>
+#endif
 #include <limits>
 #include <algorithm>
 #include "api/jsep.h"
@@ -70,6 +73,14 @@ private:
 };
 
 namespace {
+
+inline int CompareCodecName(const char* left, const char* right) {
+#if defined(_WIN32)
+    return _stricmp(left, right);
+#else
+    return strcasecmp(left, right);
+#endif
+}
 
 telemetry::OperationOutcome TelemetryOutcome(std::exception_ptr error) {
     if (!error) return telemetry::OperationOutcome::Failure;
@@ -227,7 +238,7 @@ std::vector<webrtc::SdpVideoFormat> LocalHardwareH264Formats() {
     if (!factory) return formats;
     const auto capabilities = factory->GetRtpSenderCapabilities(webrtc::MediaType::VIDEO);
     for (const auto& codec : capabilities.codecs) {
-        if (!codec.IsMediaCodec() || _stricmp(codec.name.c_str(), "h264") != 0) continue;
+        if (!codec.IsMediaCodec() || CompareCodecName(codec.name.c_str(), "h264") != 0) continue;
         webrtc::SdpVideoFormat format(codec.name, codec.parameters);
         if (IsHardwareH264FormatSupported(format)) formats.push_back(std::move(format));
     }
@@ -236,7 +247,7 @@ std::vector<webrtc::SdpVideoFormat> LocalHardwareH264Formats() {
 
 bool ExactH264Format(const webrtc::SdpVideoFormat& left,
                      const webrtc::SdpVideoFormat& right) {
-    return _stricmp(left.name.c_str(), right.name.c_str()) == 0 &&
+    return CompareCodecName(left.name.c_str(), right.name.c_str()) == 0 &&
         left.parameters == right.parameters;
 }
 
@@ -309,17 +320,21 @@ ResolvedVideoPublishPlan ResolveVideoPublishPlan(
     const auto requested = track->requested_publish_options();
     auto sender_codecs = LocalVideoSenderCodecs();
     if (encrypted_auto && (requested.video_codec.empty() ||
-        _stricmp(requested.video_codec.c_str(), "auto") == 0)) {
+        CompareCodecName(requested.video_codec.c_str(), "auto") == 0)) {
         // Preserve the automatic choice until hardware policy is resolved,
         // while retaining the application's VP8/H264 encrypted profile.
         std::erase_if(sender_codecs, [](const std::string& codec) {
-            return _stricmp(codec.c_str(), "vp8") != 0 &&
-                _stricmp(codec.c_str(), "h264") != 0;
+            return CompareCodecName(codec.c_str(), "vp8") != 0 &&
+                CompareCodecName(codec.c_str(), "h264") != 0;
         });
     }
     const auto hardware = GetVideoEncoderCapabilities();
     const bool prefer_hardware_h264 = GetVideoEncoderPreference() == "auto" &&
-        hardware.ready && (hardware.amf.h264 || hardware.nvenc.h264 || hardware.qsv.h264);
+        hardware.ready && (hardware.amf.h264 || hardware.nvenc.h264 || hardware.qsv.h264
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+                           || hardware.vaapi.h264
+#endif
+        );
     return LocalVideoTrack::ResolvePublishPlan(
         width,
         height,
@@ -1781,7 +1796,7 @@ void Room::TracePublisherSenderFormats(
                             if (!selected) continue;
                             int payload = -1;
                             for (const auto& codec : parameters.codecs) {
-                                if (_stricmp(codec.name.c_str(), selected->name.c_str()) == 0 &&
+                                if (CompareCodecName(codec.name.c_str(), selected->name.c_str()) == 0 &&
                                     codec.parameters == selected->parameters) { payload = codec.payload_type; break; }
                             }
                             if (auto row = VideoFormatRow(selected->name, selected->parameters,
@@ -6190,7 +6205,11 @@ Room::AddTrackToPublisherAsync(
     uint64_t generation,
     std::optional<VideoPublishOptions> video_publish_options,
     std::optional<AudioPublishPolicy> audio_publish_policy,
-    bool require_encryption) {
+    bool require_encryption
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    , std::shared_ptr<webrtc::VideoEncoderFactory> linux_encoder_factory
+#endif
+    ) {
     auto operation_admission = AdmitOperation(OperationKind::PublishTrack, "AddTrackToPublisherAsync");
     if (!track) {
         throw OperationError(OperationKind::PublishTrack,
@@ -6295,12 +6314,19 @@ Room::AddTrackToPublisherAsync(
         std::shared_ptr<E2eeManager> encryption;
         std::string encryption_identity;
         bool require_encryption = false;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        std::shared_ptr<webrtc::VideoEncoderFactory> linux_encoder_factory;
+#endif
     };
     auto* params = new AddTrackTaskParams{
         shared_from_this(), completion, pc, rtc_track, stream_id,
         std::move(publish_options), std::move(resolved_audio_policy),
         generation, track->source() == TrackSource::ScreenShareVideo,
-        encryption, encryption_identity, require_encryption};
+        encryption, encryption_identity, require_encryption
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        , std::move(linux_encoder_factory)
+#endif
+        };
     WebRTCManager::Instance().signaling_thread()->PostTask(
         [params]() {
             // Destruction happens in this translation unit rather than in the
@@ -6375,6 +6401,20 @@ Room::AddTrackToPublisherAsync(
                     true)));
                 return;
             }
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+            if (task.rtc_track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind) {
+                auto factory = task.linux_encoder_factory ? task.linux_encoder_factory :
+                    CreateLinuxPublicationVideoEncoderFactory("software", {});
+                const auto installed = sender->SetVideoEncoderFactory(std::move(factory));
+                if (!installed.ok()) {
+                    task.room->RollbackPublishedSenderBundle(task.pc, bundle);
+                    FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                        OperationKind::PublishTrack, OperationErrorCode::TrackPublishRejected,
+                        "install_encoder_policy", "immutable video encoder policy could not be installed")));
+                    return;
+                }
+            }
+#endif
             if (transceiver &&
                 task.rtc_track->kind() == webrtc::MediaStreamTrackInterface::kVideoKind &&
                 !task.publish_options.video_codec.empty()) {
@@ -6558,6 +6598,19 @@ Room::AddTrackToPublisherAsync(
                             backup_spec.codec == "vp9" && backup_spec.scalability_mode.empty() &&
                             backup_spec.layers.size() > 1 ? "L1T1" : backup_spec.scalability_mode);
                         bundle.track_ids.push_back(backup_cid);
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+                        // Backup layers have no independent hardware preflight.
+                        // Never let a delayed backup Create adopt fresh globals.
+                        const auto installed = backup_sender->SetVideoEncoderFactory(
+                            CreateLinuxPublicationVideoEncoderFactory("software", {}));
+                        if (!installed.ok()) {
+                            task.room->RollbackPublishedSenderBundle(task.pc, bundle);
+                            FailAwaitable(task.completion, std::make_exception_ptr(OperationError(
+                                OperationKind::PublishTrack, OperationErrorCode::TrackPublishRejected,
+                                "install_backup_encoder_policy", "immutable backup encoder policy could not be installed")));
+                            return;
+                        }
+#endif
 
                         auto backup_prefs = get_prefs(backup_spec.codec);
                         if (backup_prefs.empty()) {
@@ -6899,9 +6952,9 @@ asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
     VideoPublishOptions options,
     uint64_t generation,
     std::shared_ptr<LocalVideoTrack> track) {
-    const bool may_use_h264 = _stricmp(options.video_codec.c_str(), "h264") == 0 ||
+    const bool may_use_h264 = CompareCodecName(options.video_codec.c_str(), "h264") == 0 ||
         std::any_of(options.simulcast_codecs.begin(), options.simulcast_codecs.end(),
-            [](const auto& spec) { return _stricmp(spec.codec.c_str(), "h264") == 0; });
+            [](const auto& spec) { return CompareCodecName(spec.codec.c_str(), "h264") == 0; });
     if (!may_use_h264) co_return;
     auto admission = AdmitOperation(OperationKind::PublishTrack, "validate_video_level");
     const auto source = track ? track->source() : nullptr;
@@ -6997,7 +7050,7 @@ asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
                 };
                 const bool expects_h264 = task->options.video_codec == "h264" ||
                     std::any_of(task->options.simulcast_codecs.begin(), task->options.simulcast_codecs.end(),
-                        [](const auto& spec) { return _stricmp(spec.codec.c_str(), "h264") == 0; });
+                        [](const auto& spec) { return CompareCodecName(spec.codec.c_str(), "h264") == 0; });
                 if (task->bundle.senders.empty() && expects_h264) reject(0);
                 for (std::size_t sender_index = 0; sender_index < task->bundle.senders.size(); ++sender_index) {
                     const auto& sender = task->bundle.senders[sender_index];
@@ -7006,7 +7059,7 @@ asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
                         ? specs[sender_index].layers : task->options.layers;
                     const auto& expected_codec = sender_index > 0 && sender_index < specs.size()
                         ? specs[sender_index].codec : task->options.video_codec;
-                    const bool expected_h264 = _stricmp(expected_codec.c_str(), "h264") == 0;
+                    const bool expected_h264 = CompareCodecName(expected_codec.c_str(), "h264") == 0;
                     if (!sender) { if (expected_h264) reject(0); else continue; }
                     const auto parameters = sender->GetParameters();
                     if (parameters.encodings.empty()) { if (expected_h264) reject(0); else continue; }
@@ -7015,10 +7068,10 @@ asio::awaitable<void> Room::ValidateFinalVideoSendersAsync(
                         const webrtc::RtpCodec* codec = encoding.codec ? &*encoding.codec :
                             (parameters.codecs.empty() ? nullptr : &parameters.codecs.front());
                         if (!codec) { if (expected_h264) reject(index); else continue; }
-                        if (_stricmp(codec->name.c_str(), "h264") != 0) {
-                            if (expected_h264 && _stricmp(codec->name.c_str(), "vp8") != 0 &&
-                                _stricmp(codec->name.c_str(), "vp9") != 0 && _stricmp(codec->name.c_str(), "av1") != 0 &&
-                                _stricmp(codec->name.c_str(), "h265") != 0) reject(index);
+                        if (CompareCodecName(codec->name.c_str(), "h264") != 0) {
+                            if (expected_h264 && CompareCodecName(codec->name.c_str(), "vp8") != 0 &&
+                                CompareCodecName(codec->name.c_str(), "vp9") != 0 && CompareCodecName(codec->name.c_str(), "av1") != 0 &&
+                                CompareCodecName(codec->name.c_str(), "h265") != 0) reject(index);
                             continue;
                         }
                         const auto format = detail::ProjectH264Format(codec->name, codec->parameters);
@@ -7085,13 +7138,31 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
     std::vector<std::string> enabled_codecs,
     uint64_t generation) {
     const auto preference = GetVideoEncoderPreference();
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    plan.requested_backend = preference;
+#endif
     const auto hardware = GetVideoEncoderCapabilities();
-    const bool explicit_hardware = preference == "amf" || preference == "nvenc" || preference == "qsv";
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    plan.backend_reason = LinuxEncoderRequestReason(preference, hardware);
+#endif
+    const bool explicit_hardware = preference == "amf" || preference == "nvenc" || preference == "qsv"
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        || preference == "vaapi"
+#endif
+        ;
     const bool hardware_available = hardware.ready &&
-        (hardware.amf.h264 || hardware.nvenc.h264 || hardware.qsv.h264);
+        (hardware.amf.h264 || hardware.nvenc.h264 || hardware.qsv.h264
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+         || hardware.vaapi.h264
+#endif
+        );
     if (!plan.ok() || plan.effective_codec != "h264" || preference == "software" ||
         (!plan.effective.auto_hardware_h264 && !explicit_hardware && !hardware_available)) {
-        co_return PreflightedVideoPublishPlan{std::move(plan), {}};
+        co_return PreflightedVideoPublishPlan{std::move(plan), {}
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+            , CreateLinuxPublicationVideoEncoderFactory("software", {})
+#endif
+            };
     }
 
     auto stale = [] {
@@ -7128,6 +7199,9 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
 
     VideoEncoderPreflightRequest request;
     request.preference = preference;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    request.linux_capabilities = hardware;
+#endif
     request.screenshare = source_type == TrackSource::ScreenShareVideo;
     request.formats = LocalHardwareH264Formats();
     for (const auto& layer : plan.effective.layers) {
@@ -7193,6 +7267,10 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
     auto validate_current = [weak_room = weak_from_this(), weak_track = std::weak_ptr(track),
         local, encryption, encrypted, enabled_codecs, revision, source, dimensions, profile,
         source_type, generation, preference, requested = plan.requested,
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        capability_generation = hardware.generation,
+        approved_device = result.linux_capability.device,
+#endif
         approved = result.ok() ? result.formats : std::vector<webrtc::SdpVideoFormat>{},
         approved_backend = result.backend, stale] {
         const auto room = weak_room.lock();
@@ -7214,10 +7292,21 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
             encrypted != (encryption && encryption->enabled())) stale();
         if (!approved.empty()) {
             const auto hardware = GetVideoEncoderCapabilities();
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+            if (hardware.generation != capability_generation) stale();
+            const auto* backend = approved_backend == "nvenc" ? &hardware.nvenc :
+                (approved_backend == "qsv" ? &hardware.qsv :
+                    (approved_backend == "vaapi" ? &hardware.vaapi : nullptr));
+            if (!backend || !SameLinuxEncoderDevice(approved_device, backend->device)) stale();
+#endif
             const bool available = hardware.ready &&
                 ((approved_backend == "amf" && hardware.amf.h264) ||
                  (approved_backend == "nvenc" && hardware.nvenc.h264) ||
-                 (approved_backend == "qsv" && hardware.qsv.h264));
+                 (approved_backend == "qsv" && hardware.qsv.h264)
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+                 || (approved_backend == "vaapi" && hardware.vaapi.h264)
+#endif
+                );
             if (!available) stale();
             const auto formats = LocalHardwareH264Formats();
             for (const auto& format : approved) {
@@ -7228,6 +7317,9 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
     };
     validate_current();
     const auto backend = result.backend == "amf" || result.backend == "nvenc" || result.backend == "qsv"
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        || result.backend == "vaapi"
+#endif
         ? result.backend : std::string("none");
     Log("SIGNAL", "PUBLISH_HW_PREFLIGHT", std::string("status=") + VideoPreflightStatusName(result.status) +
         "; backend=" + backend + "; layer=" + std::to_string(result.failed_layer));
@@ -7268,6 +7360,18 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
         throw OperationError(OperationKind::PublishTrack, OperationErrorCode::Cancelled,
             "hardware_preflight", "video hardware preflight was cancelled");
     }
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    if (result.status == VideoEncoderPreflightStatus::TimedOut ||
+        result.status == VideoEncoderPreflightStatus::RetirementFailed) {
+        // A driver call may still own its resources. Do not hide that state by
+        // starting a software encoder in the same publication transaction.
+        throw OperationError(OperationKind::PublishTrack,
+            result.status == VideoEncoderPreflightStatus::TimedOut
+                ? OperationErrorCode::TrackPublishTimeout
+                : OperationErrorCode::TrackPublishRejected,
+            "hardware_preflight", "video hardware preflight did not retire safely");
+    }
+#endif
     if (result.ok()) {
         try {
             for (const auto& format : result.formats) {
@@ -7287,7 +7391,16 @@ asio::awaitable<Room::PreflightedVideoPublishPlan> Room::PreflightVideoPublishPl
                 "hardware_preflight", plan.error);
         }
     }
-    co_return PreflightedVideoPublishPlan{std::move(plan), std::move(validate_current)};
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    auto encoder_factory = CreateLinuxPublicationVideoEncoderFactory(preference, hardware,
+        plan.effective.preflight_h264_formats);
+    if (!encoder_factory) stale();
+#endif
+    co_return PreflightedVideoPublishPlan{std::move(plan), std::move(validate_current)
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        , std::move(encoder_factory)
+#endif
+        };
 }
 
 asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
@@ -7313,6 +7426,9 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
     std::optional<ResolvedVideoPublishPlan> video_plan;
     std::optional<ResolvedAudioPublishPlan> audio_plan;
     std::function<void()> validate_video_preflight;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    std::shared_ptr<webrtc::VideoEncoderFactory> linux_encoder_factory;
+#endif
     if (auto video = std::dynamic_pointer_cast<LocalVideoTrack>(track)) {
         std::vector<std::string> enabled_codecs;
         std::shared_ptr<LocalParticipant> planning_local;
@@ -7341,6 +7457,9 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             video, std::move(*video_plan), enabled_codecs, generation);
         video_plan = std::move(preflight.plan);
         validate_video_preflight = std::move(preflight.validate_current);
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+        linux_encoder_factory = std::move(preflight.linux_encoder_factory);
+#endif
         effective_request = planning_local->BuildTrackPublishRequest(
             track, &video_plan->effective);
         if (video_plan->used_fallback() || !video_plan->fallback_reason.empty()) {
@@ -7505,7 +7624,11 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
             audio_plan.has_value()
                 ? std::optional<AudioPublishPolicy>{audio_plan->effective}
                 : std::nullopt,
-            effective_request.add_track().encryption() == proto::Encryption::GCM);
+            effective_request.add_track().encryption() == proto::Encryption::GCM
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+            , linux_encoder_factory
+#endif
+            );
         co_await NegotiatePublisherAsync(timeouts.negotiation, generation);
         co_await ApplyPublishedSenderScalabilityModesAsync(
             sender_bundle, generation);
@@ -7552,6 +7675,10 @@ asio::awaitable<std::shared_ptr<TrackPublication>> Room::PublishLocalTrackAsync(
                 video_publish.requested_codec = video_plan->requested_codec;
                 video_publish.effective_codec = video_plan->effective_codec;
                 video_publish.fallback_reason = video_plan->fallback_reason;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+                video_publish.requested_backend = video_plan->requested_backend;
+                video_publish.backend_reason = video_plan->backend_reason;
+#endif
                 video_publish.source = video_publish.source_kind == telemetry::LocalVideoSourceKind::Camera
                     ? "camera" : (video_publish.source_kind == telemetry::LocalVideoSourceKind::Screen
                         ? "screen" : "unknown");
@@ -7641,6 +7768,9 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
     std::vector<std::optional<ResolvedAudioPublishPlan>> audio_plans(
         items.size());
     std::vector<std::function<void()>> validate_video_preflights(items.size());
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    std::vector<std::shared_ptr<webrtc::VideoEncoderFactory>> linux_encoder_factories(items.size());
+#endif
     std::vector<std::string> enabled_codecs;
     std::shared_ptr<LocalParticipant> planning_local;
     std::shared_ptr<E2eeManager> planning_e2ee;
@@ -7679,6 +7809,9 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                 video, std::move(*video_plans[index]), enabled_codecs, generation);
             video_plans[index] = std::move(preflight.plan);
             validate_video_preflights[index] = std::move(preflight.validate_current);
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+            linux_encoder_factories[index] = std::move(preflight.linux_encoder_factory);
+#endif
             eff_req = planning_local->BuildTrackPublishRequest(
                 item.track, &video_plans[index]->effective);
             if (video_plans[index]->used_fallback() || !video_plans[index]->fallback_reason.empty()) {
@@ -7868,7 +8001,11 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                     ? std::optional<AudioPublishPolicy>{
                         audio_plans[index]->effective}
                     : std::nullopt,
-                effective_requests[index].add_track().encryption() == proto::Encryption::GCM));
+                effective_requests[index].add_track().encryption() == proto::Encryption::GCM
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+                , linux_encoder_factories[index]
+#endif
+                ));
         }
 
         // 单次全量 SDP 重协商
@@ -7931,6 +8068,10 @@ asio::awaitable<std::vector<std::shared_ptr<TrackPublication>>> Room::PublishLoc
                     video_publish.requested_codec = plan.requested_codec;
                     video_publish.effective_codec = plan.effective_codec;
                     video_publish.fallback_reason = plan.fallback_reason;
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+                    video_publish.requested_backend = plan.requested_backend;
+                    video_publish.backend_reason = plan.backend_reason;
+#endif
                     video_publish.source = video_publish.source_kind == telemetry::LocalVideoSourceKind::Camera
                         ? "camera" : (video_publish.source_kind == telemetry::LocalVideoSourceKind::Screen
                             ? "screen" : "unknown");

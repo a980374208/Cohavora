@@ -1,5 +1,7 @@
 #include "video_frame.h"
+#if defined(_WIN32)
 #include "../media/d3d11_nv12_frame_buffer.h"
+#endif
 #include "libyuv/planar_functions.h"
 #include "rtc_base/ref_counted_object.h"
 #include <cstring>
@@ -132,6 +134,7 @@ const std::uint8_t* VideoFrame::data() const noexcept {
         return shared_data_->data();
     }
     if (native_buffer_) {
+#if defined(_WIN32)
         if (const auto* d3d_nv12 = D3d11Nv12FrameBuffer::FromVideoFrameBuffer(native_buffer_.get())) {
             auto mapped = d3d_nv12->ToNV12();
             if (mapped) {
@@ -146,6 +149,7 @@ const std::uint8_t* VideoFrame::data() const noexcept {
                 return nv12_buffer_->DataY();
             }
         }
+#endif
         if (native_buffer_->type() == webrtc::VideoFrameBuffer::Type::kNV12) {
             const auto* nv12 = native_buffer_->GetNV12();
             if (nv12) {

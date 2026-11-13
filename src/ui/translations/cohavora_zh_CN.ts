@@ -3,6 +3,87 @@
 <TS version="2.1" language="zh_CN" sourcelanguage="en_US">
 <context>
     <name>MeetingUI</name>
+    <message><source>The encoder could not be initialized.</source><translation>无法初始化此编码器。</translation></message>
+    <message><source>Initialization succeeded. Encoded output has not been verified.</source><translation>初始化成功；尚未验证实际编码输出。</translation></message>
+    <message><source>This encoder is not included in this build.</source><translation>此版本未包含该编码器。</translation></message>
+    <message><source>This encoder has not been checked yet.</source><translation>尚未检测此编码器。</translation></message>
+    <message><source>The required encoder runtime is missing.</source><translation>缺少所需的编码运行库。</translation></message>
+    <message><source>The installed encoder runtime is incompatible with this build.</source><translation>已安装的编码运行库与此版本不兼容。</translation></message>
+    <message><source>No matching encoding device is accessible.</source><translation>没有可访问的匹配编码设备。</translation></message>
+    <message><source>Access to the encoding device was denied.</source><translation>没有访问编码设备的权限。</translation></message>
+    <message><source>The encoding configuration is not supported.</source><translation>不支持此编码配置。</translation></message>
+    <message><source>Encoder detection timed out. Restart the application before retrying.</source><translation>编码器检测超时。请重启应用后重试。</translation></message>
+    <message><source>Encoder cleanup could not be confirmed. Restart the application before retrying.</source><translation>无法确认编码器资源已释放。请重启应用后重试。</translation></message>
+    <message><source>The selected GPU changed. Restart the application to select a different device.</source><translation>所选 GPU 已变更。请重启应用以选择其他设备。</translation></message>
+    <message><source>Encoder detection was cancelled.</source><translation>已取消编码器检测。</translation></message>
+    <message>
+        <source>Unavailable hardware choices are preserved. Availability confirms initialization only; meeting statistics show whether hardware has produced encoded frames.</source>
+        <translation>硬件暂不可用时会保留所选设置。可用状态仅表示初始化成功；会议统计会显示硬件是否已实际输出编码帧。</translation>
+    </message>
+    <message>
+        <source> (unavailable)</source>
+        <translation>（不可用）</translation>
+    </message>
+    <message>
+        <source>Hardware encoding active</source>
+        <translation>硬件编码已生效</translation>
+    </message>
+    <message>
+        <source>Software encoding active</source>
+        <translation>软件编码已生效</translation>
+    </message>
+    <message>
+        <source>Software fallback active</source>
+        <translation>已回退到软件编码</translation>
+    </message>
+    <message>
+        <source>Waiting for encoded output</source>
+        <translation>等待编码帧输出</translation>
+    </message>
+    <message>
+        <source>Observed encoder differs from selection</source>
+        <translation>实际编码器与所选设置不符</translation>
+    </message>
+    <message>
+        <source>Encoding streams use different backends</source>
+        <translation>各编码流使用了不同后端</translation>
+    </message>
+    <message>
+        <source>Some encoding streams are awaiting output</source>
+        <translation>部分编码流仍在等待输出</translation>
+    </message>
+    <message>
+        <source>Encoder output unverified</source>
+        <translation>编码器输出尚未确认</translation>
+    </message>
+    <message>
+        <source>Additional encoder states unavailable</source>
+        <translation>其余编码器状态不可用</translation>
+    </message>
+    <message>
+        <source>Linux video encoder</source>
+        <translation>Linux 视频编码器</translation>
+    </message>
+    <message>
+        <source>Status follows encoded frames from the current publication.</source>
+        <translation>状态依据当前发布轨道实际输出的编码帧。</translation>
+    </message>
+    <message>
+        <source>%1: %2; selected %3; observed %4</source>
+        <translation>%1：%2；所选 %3；实际 %4</translation>
+    </message>
+    <message>
+        <source>Auto</source>
+        <translation>自动</translation>
+    </message>
+    <message>
+        <source>Unverified</source>
+        <translation>尚未确认</translation>
+    </message>
+    <message>
+        <source>Screen sharing</source>
+        <translation>屏幕共享</translation>
+    </message>
     <message>
         <source>Participant names in meetings</source>
         <translation>会议中名称显示</translation>

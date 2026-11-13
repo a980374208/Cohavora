@@ -139,3 +139,16 @@ endif()
 livekit_deploy_renderer(cohavora_app
     GROUP app
     DESTINATION "$<IF:$<BOOL:${CMAKE_CONFIGURATION_TYPES}>,${CMAKE_CURRENT_BINARY_DIR}/$<CONFIG>,${CMAKE_CURRENT_BINARY_DIR}>")
+
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND COHAVORA_WEBRTC_HAS_LINUX_VAAPI)
+    # Only the reviewed private runtime is deployed. Its FFmpeg symbols remain
+    # inside the DSO; the application never links another public libavcodec.
+    set_property(TARGET cohavora_app APPEND PROPERTY BUILD_RPATH "$ORIGIN")
+    set_property(TARGET cohavora_app APPEND PROPERTY LINK_DEPENDS
+        "${COHAVORA_WEBRTC_LINUX_VAAPI_RUNTIME}")
+    add_custom_command(TARGET cohavora_app POST_BUILD
+        COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+            "${COHAVORA_WEBRTC_LINUX_VAAPI_RUNTIME}"
+            "$<TARGET_FILE_DIR:cohavora_app>/libcohavora_vaapi_runtime.so.1"
+        VERBATIM)
+endif()

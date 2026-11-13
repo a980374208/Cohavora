@@ -25,6 +25,9 @@ and reproducible dependency/patch materials.
 CPack produces local packages in `out/build/ubuntu-product/packages`. The DEB
 records dependencies derived from the installed ELF files, plus PipeWire and
 the desktop portal. It also produces a separate debug information package.
+Linux VAAPI packages preserve the reviewed SDK runtime byte for byte. A narrow
+objcopy guard still extracts its available symbols while leaving its SDK hash
+unchanged; application and renderer debug splitting use the normal objcopy path.
 Install a reviewed DEB using the system package manager, for example
 `sudo apt install ./cohavora_<version>_amd64.deb`; start `cohavora` as a normal
 desktop user. Remove it with `sudo apt remove cohavora`. User settings and

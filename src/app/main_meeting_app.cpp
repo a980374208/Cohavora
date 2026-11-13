@@ -29,6 +29,9 @@
 #include "src/net/service_endpoint_policy.h"
 #include "src/net/session_manager.h"
 #include "src/rtc/webrtc_manager.h"
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+#include "src/rtc/linux/linux_encoder_capability_controller.h"
+#endif
 #include "src/platform/system_hardware_info.h"
 #include "src/app/debug_login_options.h"
 #include "src/app/debug_storage_paths.h"
@@ -243,10 +246,14 @@ int main(int argc, char *argv[]) {
 	std::unique_ptr<MeetingApp::PilotDiagnosticsProbe> pilotProbe;
 	auto pilotParticipant = std::make_shared<std::atomic<std::shared_ptr<const std::string>>>();
 	auto& shutdownService = OpenMeeting::SessionShutdownService::Instance();
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+	livekit::detail::RequestLinuxVideoEncoderCapabilityRefresh();
+#endif
 	// Driver discovery can initialize native sessions. Keep it off the UI thread;
 	// settings read the published snapshot without waiting for a driver.
 	shutdownService.Submit([] {
 		livekit::platform::LogSystemHardwareInfo();
+#if !defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
 		livekit::ProbeVideoEncoderCapabilities();
 		const auto capabilities = livekit::GetVideoEncoderCapabilities();
 		using livekit::diagnostic::Event;
@@ -257,6 +264,7 @@ int main(int argc, char *argv[]) {
 			capabilities.nvenc.h264, capabilities.nvenc.h265));
 		EmitBusinessEvent(Event::EncoderCapability(0x8086,
 			capabilities.qsv.h264, capabilities.qsv.h265));
+#endif
 	});
 	const auto pilotPath = qEnvironmentVariable("LIVEKIT_UIA_PILOT_PROBE");
 	const auto pilotRun = qEnvironmentVariable("LIVEKIT_UIA_RUN_ID");

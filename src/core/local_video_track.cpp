@@ -441,6 +441,10 @@ ResolvedVideoPublishPlan LocalVideoTrack::ResolveHardwarePreflightFallback(
     fallback.requested = failed.requested;
     fallback.requested_codec = original_plan.requested_codec;
     fallback.fallback_reason = "hardware H264 preflight failed before publication";
+#if defined(COHAVORA_HAS_LINUX_HW_ENCODERS)
+    fallback.requested_backend = original_plan.requested_backend;
+    fallback.backend_reason = original_plan.backend_reason;
+#endif
     return fallback;
 }
 

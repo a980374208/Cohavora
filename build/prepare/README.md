@@ -8,6 +8,8 @@ Windows Qt/Libraries 的固定源码、工具链和重编步骤见 [Libraries �
 
 默认自动下载的 SDK 由 `webrtc-package.json`（Windows）或 `linux-packages.json`（Ubuntu）固定。`webrtc-codecs-profile.json`、`e2ee-backend-codecs-profile.json` 是供 CMake 显式选择的本地配对包审查配置，不是可下载归档清单。使用对应 SDK 时，分别指定 `WEBRTC_ROOT`、`COHAVORA_WEBRTC_PACKAGE_PROFILE`、`COHAVORA_E2EE_BACKEND_PACKAGE_DIR` 和 `COHAVORA_E2EE_BACKEND_PROFILE`。H.265 解码还需 `COHAVORA_H265_RUNTIME_ROOT`；其默认配置为 `h265-runtime-profile.json`。这些配置不切换默认下载包，也不继承默认 SDK 的验证结论。
 
+Linux 本地构建的 fork/x265 SDK 使用其自身的 `metadata/package.json` 作为 `COHAVORA_WEBRTC_PACKAGE_PROFILE`，不能套用 Windows profile。Linux profile 要求 `platform=linux-x86_64`、公开宏 `RTC_ENABLE_H265`，并逐配置校验 libstdc++ ABI1、RTTI、PIC 及 `libwebrtc.a`、`libx265.a` 的 SHA-256。Windows 继续使用原 CRT/STL 和厂商后端配置；H.265 发送仍受产品解码器可用性检查约束。稳定 v4 仅接入 Linux 软件编码；独立 `hw-bounded-candidate-v5` 通过新增 Linux GN 开关实现 NVENC/CUDA、QSV/VAAPI DRM 和隔离 VAAPI runtime，产品仍须显式 `COHAVORA_LINUX_HW_ENCODERS=ON`。原 Windows `rtc_use_nvenc/qsv/amf` 不能直接用于 Linux。候选接入、回滚与未完成实机范围见 [Linux WebRTC 接入说明](WEBRTC-LINUX.md)。
+
 ## Native E2EE backend overlay
 
 E2EE 使用独立小型源码包与固定基础 SDK 配套；不替换 vendor 文件，不混用 Flutter 自定义音频 ABI。当前默认 profile 为 `e2ee-backend-profile.json`，基础 SDK 为 `webrtc-51ef663-cohavora-bssl-dual-v3`。
